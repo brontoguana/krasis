@@ -335,30 +335,32 @@ impl KrasisEngine {
         // Estimate memory footprint before loading (read config.json first)
         let config_path = path.join("config.json");
         if let Ok(config_str) = std::fs::read_to_string(&config_path) {
-            if let Ok(config) = serde_json::from_str::<serde_json::Value>(&config_str) {
-                let h = config["hidden_size"].as_u64().unwrap_or(0) as f64;
-                let m = config["moe_intermediate_size"].as_u64().unwrap_or(0) as f64;
-                let n_exp = config["n_routed_experts"].as_u64().unwrap_or(0) as f64;
-                let n_layers = config["num_hidden_layers"].as_u64().unwrap_or(0) as f64;
-                let first_dense = config["first_k_dense_replace"].as_u64().unwrap_or(0) as f64;
-                let moe_layers = n_layers - first_dense;
+            if let Ok(raw_json) = serde_json::from_str::<serde_json::Value>(&config_str) {
+                if let Ok(config) = crate::weights::ModelConfig::from_json(&raw_json) {
+                    let h = config.hidden_size as f64;
+                    let m = config.moe_intermediate_size as f64;
+                    let n_exp = config.n_routed_experts as f64;
+                    let moe_layers = (config.num_hidden_layers - config.first_k_dense_replace) as f64;
 
-                // INT4 packed: (h/8)*m*4 + (h/gs)*m*2 per gate/up, similar for down
-                let per_expert_bytes = (m * (h / 8.0) * 4.0 + m * (h / gs as f64) * 2.0) * 2.0
-                    + h * (m / 8.0) * 4.0 + h * (m / gs as f64) * 2.0;
-                let total_gb = moe_layers * n_exp * per_expert_bytes / 1e9;
+                    // INT4 packed: (h/8)*m*4 + (h/gs)*m*2 per gate/up, similar for down
+                    let per_expert_bytes = (m * (h / 8.0) * 4.0 + m * (h / gs as f64) * 2.0) * 2.0
+                        + h * (m / 8.0) * 4.0 + h * (m / gs as f64) * 2.0;
+                    let total_gb = moe_layers * n_exp * per_expert_bytes / 1e9;
 
-                crate::syscheck::run_startup_checks(total_gb);
+                    crate::syscheck::run_startup_checks(total_gb);
+                }
             }
         }
 
         let store = WeightStore::load_from_hf(path, gs)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
 
+        // Use the effective group_size from the loaded store (may differ for pre-quantized models)
+        let effective_gs = store.group_size;
         let scratch = ExpertScratch::new(
             store.config.hidden_size,
             store.config.moe_intermediate_size,
-            gs,
+            effective_gs,
         );
         // Pre-allocate scratch pool for expert-level parallelism
         let top_k = store.config.num_experts_per_tok;
@@ -366,7 +368,7 @@ impl KrasisEngine {
             .map(|_| ExpertScratch::new(
                 store.config.hidden_size,
                 store.config.moe_intermediate_size,
-                gs,
+                effective_gs,
             ))
             .collect();
 

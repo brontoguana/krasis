@@ -56,12 +56,21 @@ def main():
         config = json.load(f)
 
     model_name = os.path.basename(args.model_dir)
-    hidden = config["hidden_size"]
-    intermediate = config["moe_intermediate_size"]
-    n_experts = config["n_routed_experts"]
-    top_k = config["num_experts_per_tok"]
-    n_layers = config["num_hidden_layers"]
-    first_dense = config["first_k_dense_replace"]
+    # Handle VL wrappers (e.g., Kimi K2.5 nests under text_config)
+    cfg = config.get("text_config", config)
+    hidden = cfg["hidden_size"]
+    intermediate = cfg["moe_intermediate_size"]
+    n_experts = cfg.get("n_routed_experts", cfg.get("num_experts"))
+    top_k = cfg["num_experts_per_tok"]
+    n_layers = cfg["num_hidden_layers"]
+    # first_k_dense_replace (DeepSeek/Kimi) or decoder_sparse_step (Qwen3)
+    if "first_k_dense_replace" in cfg:
+        first_dense = cfg["first_k_dense_replace"]
+    elif "decoder_sparse_step" in cfg:
+        step = cfg["decoder_sparse_step"]
+        first_dense = 0 if step <= 1 else step - 1
+    else:
+        first_dense = 0
     moe_layers = n_layers - first_dense
 
     print(f"╔══════════════════════════════════════════════════╗")
