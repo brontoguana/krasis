@@ -138,8 +138,11 @@ pub fn expert_forward_integer(
 ///
 /// Pre-quantizes the BF16 activation to INT16 once, then runs all selected
 /// experts using the integer kernel (_mm256_madd_epi16) for ~2x throughput
-/// over the FMA kernel. While computing expert[i], prefetches expert[i+1]'s
-/// weights into L3 cache using NTA hints.
+/// over the FMA kernel.
+///
+/// When a NUMA expert map is provided, experts are grouped by NUMA node and
+/// processed in node order (all node-0 experts first, then node-1, etc.).
+/// Each group's threads are pinned to the target node for data locality.
 ///
 /// # Arguments
 /// * `store` - Loaded expert weights
@@ -149,7 +152,9 @@ pub fn expert_forward_integer(
 /// * `expert_weights` - Routing weights (softmax scores) for selected experts
 /// * `output` - Output buffer [hidden_size] as f32 (accumulated weighted sum)
 /// * `scratch` - Reusable intermediate buffers (includes INT16 activation buffers)
+/// * `scratch_pool` - Pre-allocated per-expert scratch buffers
 /// * `parallel` - Use multi-threaded matmul
+/// * `numa_map` - Optional NUMA expert map for node-aware dispatch
 pub fn moe_forward(
     store: &WeightStore,
     moe_layer_idx: usize,
@@ -160,6 +165,7 @@ pub fn moe_forward(
     scratch: &mut ExpertScratch,
     scratch_pool: &mut [ExpertScratch],
     parallel: bool,
+    numa_map: Option<&crate::numa::NumaExpertMap>,
 ) {
     assert_eq!(expert_indices.len(), expert_weights.len());
     assert_eq!(activation.len(), store.config.hidden_size);
@@ -184,11 +190,60 @@ pub fn moe_forward(
     let hidden = store.config.hidden_size;
 
     if parallel && n > 1 && scratch_pool.len() >= n {
-        // Expert-level parallelism: run all experts concurrently on rayon threads.
-        // Uses pre-allocated scratch pool (one buffer per expert, no heap allocs).
-        // The pre-quantized activation is shared read-only across all threads.
         use rayon::prelude::*;
 
+        if let Some(nmap) = numa_map {
+            if nmap.num_nodes > 1 {
+                // NUMA-aware dispatch: group experts by node, process each group
+                // with threads pinned to that node for data locality.
+                let groups = nmap.group_by_node(moe_layer_idx, expert_indices);
+                let mut node_order: Vec<usize> = groups.keys().cloned().collect();
+                node_order.sort();
+
+                for node in &node_order {
+                    let expert_group = &groups[node];
+                    // Dispatch this node's experts in parallel, pinned to the node
+                    let pool_slices: Vec<(usize, usize)> = expert_group
+                        .iter()
+                        .map(|&(pos, eidx)| (pos, eidx))
+                        .collect();
+
+                    // Use rayon with thread pinning.
+                    // SAFETY: each pos indexes a unique scratch buffer, so
+                    // concurrent mutable access is safe. We use usize to
+                    // avoid Send/Sync issues with raw pointers.
+                    let pool_base = scratch_pool.as_mut_ptr() as usize;
+                    let target_node = *node;
+                    pool_slices.par_iter().for_each(|&(pos, eidx)| {
+                        crate::numa::pin_thread_to_node(target_node);
+                        let expert = store.get_expert(moe_layer_idx, eidx);
+                        let local_scratch = unsafe {
+                            &mut *(pool_base as *mut ExpertScratch).add(pos)
+                        };
+                        expert_forward_integer(
+                            expert, &act_int16, &act_scales, local_scratch, true,
+                        );
+                        crate::numa::unpin_thread();
+                    });
+                }
+
+                // Weighted sum (sequential)
+                for i in 0..n {
+                    let weight = expert_weights[i];
+                    let expert_out = &scratch_pool[i].expert_out;
+                    for j in 0..hidden {
+                        output[j] += weight * expert_out[j];
+                    }
+                }
+
+                // Restore activation buffers and return early
+                scratch.input_act_int16 = act_int16;
+                scratch.input_act_scales = act_scales;
+                return;
+            }
+        }
+
+        // Non-NUMA parallel path: run all experts concurrently
         let pool = &mut scratch_pool[..n];
         pool.par_iter_mut().enumerate().for_each(|(i, local_scratch)| {
             let eidx = expert_indices[i];
@@ -307,6 +362,8 @@ pub struct KrasisEngine {
     scratch_pool: Vec<ExpertScratch>,
     output_buf: Vec<f32>,
     parallel: bool,
+    /// NUMA expert placement map (None if single-node or NUMA disabled).
+    numa_map: Option<crate::numa::NumaExpertMap>,
 }
 
 #[pymethods]
@@ -327,6 +384,7 @@ impl KrasisEngine {
             scratch_pool: Vec::new(),
             output_buf: Vec::new(),
             parallel,
+            numa_map: None,
         }
     }
 
@@ -359,7 +417,7 @@ impl KrasisEngine {
             }
         }
 
-        let store = WeightStore::load_from_hf(path, gs, max_layers)
+        let mut store = WeightStore::load_from_hf(path, gs, max_layers)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
 
         // Use the effective group_size from the loaded store (may differ for pre-quantized models)
@@ -379,8 +437,28 @@ impl KrasisEngine {
             ))
             .collect();
 
+        // Detect NUMA topology and migrate expert weights if multi-node
+        let topo = crate::numa::NumaTopology::detect();
+        let numa_map = if topo.is_numa() {
+            let num_moe_layers = store.num_moe_layers();
+            let num_experts = store.config.n_routed_experts;
+            let map = crate::numa::NumaExpertMap::round_robin(
+                num_moe_layers, num_experts, topo.num_nodes,
+            );
+            let migrated = store.migrate_numa(&map);
+            log::info!(
+                "NUMA: {} nodes, migrated {}/{} experts",
+                topo.num_nodes, migrated, num_moe_layers * num_experts,
+            );
+            Some(map)
+        } else {
+            log::info!("NUMA: single node, no migration needed");
+            None
+        };
+
         self.output_buf = vec![0.0f32; store.config.hidden_size];
         self.scratch_pool = scratch_pool;
+        self.numa_map = numa_map;
         self.store = Some(store);
         self.scratch = Some(scratch);
         Ok(())
@@ -448,6 +526,7 @@ impl KrasisEngine {
             scratch,
             &mut self.scratch_pool,
             parallel,
+            self.numa_map.as_ref(),
         );
 
         // Return output as f32 bytes
@@ -643,7 +722,7 @@ mod tests {
         let start = std::time::Instant::now();
         moe_forward(
             &store, 0, &activation, &expert_indices, &expert_weights,
-            &mut output, &mut scratch, &mut scratch_pool, true,
+            &mut output, &mut scratch, &mut scratch_pool, true, None,
         );
         let moe_us = start.elapsed().as_micros();
 
@@ -709,7 +788,7 @@ mod tests {
         let start = std::time::Instant::now();
         moe_forward(
             &store, 0, &activation, &expert_indices, &expert_weights,
-            &mut output, &mut scratch, &mut scratch_pool, true,
+            &mut output, &mut scratch, &mut scratch_pool, true, None,
         );
         let moe_us = start.elapsed().as_micros();
 

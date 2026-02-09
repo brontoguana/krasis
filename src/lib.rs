@@ -1,5 +1,6 @@
 pub mod kernel;
 pub mod moe;
+pub mod numa;
 pub mod syscheck;
 pub mod weights;
 
