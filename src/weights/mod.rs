@@ -19,7 +19,12 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Model configuration (subset of config.json relevant to MoE).
-#[derive(Debug, Clone, Deserialize)]
+///
+/// Supports multiple architectures:
+/// - DeepSeek V2/V3: `n_routed_experts`, `first_k_dense_replace` (flat)
+/// - Kimi K2.5: same keys but nested under `text_config`
+/// - Qwen3-MoE: `num_experts`, `decoder_sparse_step` (flat)
+#[derive(Debug, Clone)]
 pub struct ModelConfig {
     pub hidden_size: usize,
     pub moe_intermediate_size: usize,
@@ -27,6 +32,68 @@ pub struct ModelConfig {
     pub num_experts_per_tok: usize,
     pub num_hidden_layers: usize,
     pub first_k_dense_replace: usize,
+}
+
+impl ModelConfig {
+    /// Parse config.json with support for multiple MoE architectures.
+    pub fn from_json(raw: &serde_json::Value) -> Result<Self, String> {
+        // If there's a text_config (VL wrapper like Kimi K2.5), use that
+        let cfg = if let Some(tc) = raw.get("text_config") {
+            log::info!("Found text_config wrapper (VL model), using inner config");
+            tc
+        } else {
+            raw
+        };
+
+        let hidden_size = cfg.get("hidden_size")
+            .and_then(|v| v.as_u64())
+            .ok_or("Missing hidden_size")? as usize;
+
+        let moe_intermediate_size = cfg.get("moe_intermediate_size")
+            .and_then(|v| v.as_u64())
+            .ok_or("Missing moe_intermediate_size")? as usize;
+
+        // n_routed_experts (DeepSeek/Kimi) OR num_experts (Qwen3)
+        let n_routed_experts = cfg.get("n_routed_experts")
+            .or_else(|| cfg.get("num_experts"))
+            .and_then(|v| v.as_u64())
+            .ok_or("Missing n_routed_experts or num_experts")? as usize;
+
+        let num_experts_per_tok = cfg.get("num_experts_per_tok")
+            .and_then(|v| v.as_u64())
+            .ok_or("Missing num_experts_per_tok")? as usize;
+
+        let num_hidden_layers = cfg.get("num_hidden_layers")
+            .and_then(|v| v.as_u64())
+            .ok_or("Missing num_hidden_layers")? as usize;
+
+        // first_k_dense_replace (DeepSeek/Kimi) OR derive from decoder_sparse_step (Qwen3)
+        let first_k_dense_replace = if let Some(v) = cfg.get("first_k_dense_replace") {
+            v.as_u64().ok_or("first_k_dense_replace not a number")? as usize
+        } else if let Some(step) = cfg.get("decoder_sparse_step") {
+            let step = step.as_u64().ok_or("decoder_sparse_step not a number")? as usize;
+            if step <= 1 {
+                // step=1 means every layer is MoE → no dense prefix
+                0
+            } else {
+                // step>1 means interleaved MoE/dense — not yet supported
+                return Err(format!(
+                    "decoder_sparse_step={step} (interleaved MoE) not yet supported"
+                ));
+            }
+        } else {
+            return Err("Missing first_k_dense_replace or decoder_sparse_step".to_string());
+        };
+
+        Ok(ModelConfig {
+            hidden_size,
+            moe_intermediate_size,
+            n_routed_experts,
+            num_experts_per_tok,
+            num_hidden_layers,
+            first_k_dense_replace,
+        })
+    }
 }
 
 /// INT4 quantized weights for a single expert (gate + up + down projections).
@@ -150,12 +217,14 @@ impl WeightStore {
     pub fn load_from_hf(model_dir: &Path, group_size: usize) -> Result<Self, String> {
         let start = std::time::Instant::now();
 
-        // Parse config.json
+        // Parse config.json (supports multiple MoE architectures)
         let config_path = model_dir.join("config.json");
         let config_str = std::fs::read_to_string(&config_path)
             .map_err(|e| format!("Failed to read config.json: {e}"))?;
-        let config: ModelConfig = serde_json::from_str(&config_str)
+        let raw_json: serde_json::Value = serde_json::from_str(&config_str)
             .map_err(|e| format!("Failed to parse config.json: {e}"))?;
+        let config = ModelConfig::from_json(&raw_json)
+            .map_err(|e| format!("Failed to extract MoE config: {e}"))?;
 
         log::info!(
             "Model config: hidden={}, moe_intermediate={}, experts={}, top-{}, layers={}, first_dense={}",
@@ -186,13 +255,14 @@ impl WeightStore {
             }
         }
 
-        // No valid cache — load from safetensors and quantize
-        let experts = Self::load_and_quantize_all(model_dir, &config, group_size, num_moe_layers)?;
+        // No valid cache — load from safetensors and quantize (or load pre-quantized)
+        let (experts, effective_group_size) =
+            Self::load_and_quantize_all(model_dir, &config, group_size, num_moe_layers)?;
 
         let store = WeightStore {
             experts,
             config: config.clone(),
-            group_size,
+            group_size: effective_group_size,
         };
 
         // Save cache for next time
@@ -211,13 +281,14 @@ impl WeightStore {
         Ok(store)
     }
 
-    /// Load from safetensors shards and quantize to INT4.
+    /// Load from safetensors shards and quantize to INT4 (or load pre-quantized).
+    /// Returns (experts, effective_group_size).
     fn load_and_quantize_all(
         model_dir: &Path,
         config: &ModelConfig,
         group_size: usize,
         num_moe_layers: usize,
-    ) -> Result<Vec<Vec<ExpertWeights>>, String> {
+    ) -> Result<(Vec<Vec<ExpertWeights>>, usize), String> {
         // Parse safetensors index
         let index_path = model_dir.join("model.safetensors.index.json");
         let index_str = std::fs::read_to_string(&index_path)
@@ -243,6 +314,25 @@ impl WeightStore {
         let layers_prefix = detect_expert_prefix(&index.weight_map)?;
         log::info!("Detected expert prefix: {layers_prefix}");
 
+        // Detect pre-quantized vs BF16 weights
+        let prequantized = is_prequantized(&index.weight_map);
+        let effective_group_size = if prequantized {
+            let first_moe = config.first_k_dense_replace;
+            let native_gs = detect_prequant_group_size(
+                &index.weight_map, &shards, &layers_prefix, first_moe,
+            )?;
+            if native_gs != group_size {
+                log::info!(
+                    "Pre-quantized model has group_size={native_gs}, overriding requested {group_size}"
+                );
+            }
+            log::info!("Using pre-quantized INT4 weights (group_size={native_gs})");
+            native_gs
+        } else {
+            log::info!("Using BF16 weights → quantizing to INT4 (group_size={group_size})");
+            group_size
+        };
+
         let mut experts: Vec<Vec<ExpertWeights>> = Vec::with_capacity(num_moe_layers);
 
         for moe_idx in 0..num_moe_layers {
@@ -253,22 +343,37 @@ impl WeightStore {
             for eidx in 0..config.n_routed_experts {
                 let prefix = format!("{layers_prefix}.layers.{layer_idx}.mlp.experts.{eidx}");
 
-                let gate = load_and_quantize_weight(
-                    &prefix, "gate_proj", &index.weight_map, &shards, group_size,
-                )?;
-                let up = load_and_quantize_weight(
-                    &prefix, "up_proj", &index.weight_map, &shards, group_size,
-                )?;
-                let down = load_and_quantize_weight(
-                    &prefix, "down_proj", &index.weight_map, &shards, group_size,
-                )?;
+                let (gate, up, down) = if prequantized {
+                    let g = load_prequantized_weight(
+                        &prefix, "gate_proj", &index.weight_map, &shards, effective_group_size,
+                    )?;
+                    let u = load_prequantized_weight(
+                        &prefix, "up_proj", &index.weight_map, &shards, effective_group_size,
+                    )?;
+                    let d = load_prequantized_weight(
+                        &prefix, "down_proj", &index.weight_map, &shards, effective_group_size,
+                    )?;
+                    (g, u, d)
+                } else {
+                    let g = load_and_quantize_weight(
+                        &prefix, "gate_proj", &index.weight_map, &shards, effective_group_size,
+                    )?;
+                    let u = load_and_quantize_weight(
+                        &prefix, "up_proj", &index.weight_map, &shards, effective_group_size,
+                    )?;
+                    let d = load_and_quantize_weight(
+                        &prefix, "down_proj", &index.weight_map, &shards, effective_group_size,
+                    )?;
+                    (g, u, d)
+                };
 
                 layer_experts.push(ExpertWeights { gate, up, down });
             }
 
             let layer_elapsed = layer_start.elapsed();
+            let action = if prequantized { "loaded" } else { "quantized" };
             log::info!(
-                "Layer {layer_idx}: quantized {} experts in {:.1}s",
+                "Layer {layer_idx}: {action} {} experts in {:.1}s",
                 config.n_routed_experts,
                 layer_elapsed.as_secs_f64(),
             );
@@ -283,13 +388,13 @@ impl WeightStore {
         }).sum();
 
         log::info!(
-            "Quantized {} MoE layers × {} experts = {:.1} GB INT4",
+            "Loaded {} MoE layers × {} experts = {:.1} GB INT4 (group_size={effective_group_size})",
             num_moe_layers,
             config.n_routed_experts,
             total_bytes as f64 / 1e9,
         );
 
-        Ok(experts)
+        Ok((experts, effective_group_size))
     }
 
     /// Write INT4 expert weights to a cache file.
@@ -543,6 +648,110 @@ fn detect_expert_prefix(weight_map: &HashMap<String, String>) -> Result<String, 
     Err("Could not detect expert weight prefix from safetensors index".to_string())
 }
 
+/// Detect whether the model uses BF16 weights or pre-quantized compressed-tensors INT4.
+/// Returns true if pre-quantized (weight_packed tensors found).
+fn is_prequantized(weight_map: &HashMap<String, String>) -> bool {
+    weight_map.keys().any(|k| k.ends_with(".weight_packed"))
+}
+
+/// Detect the native group_size from a pre-quantized model's weight_scale dimensions.
+fn detect_prequant_group_size(
+    weight_map: &HashMap<String, String>,
+    shards: &HashMap<String, MmapSafetensors>,
+    layers_prefix: &str,
+    first_moe_layer: usize,
+) -> Result<usize, String> {
+    let scale_name = format!(
+        "{layers_prefix}.layers.{first_moe_layer}.mlp.experts.0.gate_proj.weight_scale"
+    );
+    let shape_name = format!(
+        "{layers_prefix}.layers.{first_moe_layer}.mlp.experts.0.gate_proj.weight_shape"
+    );
+
+    // Read weight_shape to get original cols
+    let shape_shard_name = weight_map.get(&shape_name)
+        .ok_or_else(|| format!("Tensor not found: {shape_name}"))?;
+    let shape_shard = shards.get(shape_shard_name)
+        .ok_or_else(|| format!("Shard not loaded: {shape_shard_name}"))?;
+    let shape_data: &[i32] = shape_shard.tensor_as_slice(&shape_name)
+        .map_err(|e| format!("Failed to read {shape_name}: {e}"))?;
+    let orig_cols = shape_data[1] as usize;
+
+    // Read weight_scale shape to get scale columns
+    let scale_shard_name = weight_map.get(&scale_name)
+        .ok_or_else(|| format!("Tensor not found: {scale_name}"))?;
+    let scale_shard = shards.get(scale_shard_name)
+        .ok_or_else(|| format!("Shard not loaded: {scale_shard_name}"))?;
+    let scale_info = scale_shard.tensor_info(&scale_name)
+        .ok_or_else(|| format!("Tensor not in shard: {scale_name}"))?;
+    let scale_cols = scale_info.shape[1];
+
+    let group_size = orig_cols / scale_cols;
+    log::info!(
+        "Detected pre-quantized INT4: orig_cols={orig_cols}, scale_cols={scale_cols}, group_size={group_size}"
+    );
+    Ok(group_size)
+}
+
+/// Load a pre-quantized INT4 weight directly (compressed-tensors format).
+/// Reads weight_packed (I32), weight_scale (BF16), weight_shape (I32[2]).
+fn load_prequantized_weight(
+    prefix: &str,
+    proj_name: &str,
+    weight_map: &HashMap<String, String>,
+    shards: &HashMap<String, MmapSafetensors>,
+    group_size: usize,
+) -> Result<QuantizedInt4, String> {
+    let packed_name = format!("{prefix}.{proj_name}.weight_packed");
+    let scale_name = format!("{prefix}.{proj_name}.weight_scale");
+    let shape_name = format!("{prefix}.{proj_name}.weight_shape");
+
+    // Read weight_shape to get [rows, cols]
+    let shape_shard_name = weight_map.get(&shape_name)
+        .ok_or_else(|| format!("Tensor not found: {shape_name}"))?;
+    let shape_shard = shards.get(shape_shard_name)
+        .ok_or_else(|| format!("Shard not loaded: {shape_shard_name}"))?;
+    let shape_data: &[i32] = shape_shard.tensor_as_slice(&shape_name)
+        .map_err(|e| format!("Failed to read {shape_name}: {e}"))?;
+    let rows = shape_data[0] as usize;
+    let cols = shape_data[1] as usize;
+
+    // Read weight_packed — I32 [rows, cols/8], directly compatible with our u32 packed format
+    let packed_shard_name = weight_map.get(&packed_name)
+        .ok_or_else(|| format!("Tensor not found: {packed_name}"))?;
+    let packed_shard = shards.get(packed_shard_name)
+        .ok_or_else(|| format!("Shard not loaded: {packed_shard_name}"))?;
+    let packed_data: &[i32] = packed_shard.tensor_as_slice(&packed_name)
+        .map_err(|e| format!("Failed to read {packed_name}: {e}"))?;
+    // Reinterpret i32 as u32 (same bit pattern)
+    let packed: Vec<u32> = packed_data.iter().map(|&v| v as u32).collect();
+
+    // Read weight_scale — BF16 [rows, cols/group_size], directly compatible with our u16 scales
+    let scale_shard_name = weight_map.get(&scale_name)
+        .ok_or_else(|| format!("Tensor not found: {scale_name}"))?;
+    let scale_shard = shards.get(scale_shard_name)
+        .ok_or_else(|| format!("Shard not loaded: {scale_shard_name}"))?;
+    let scales_data: &[u16] = scale_shard.tensor_as_slice(&scale_name)
+        .map_err(|e| format!("Failed to read {scale_name}: {e}"))?;
+    let scales: Vec<u16> = scales_data.to_vec();
+
+    // Validate dimensions
+    assert_eq!(packed.len(), rows * (cols / 8),
+        "Packed size mismatch: expected {}×{}/8={}, got {}",
+        rows, cols, rows * (cols / 8), packed.len());
+    assert_eq!(scales.len(), rows * (cols / group_size),
+        "Scale size mismatch: expected {}×{}/{}={}, got {}",
+        rows, cols, group_size, rows * (cols / group_size), scales.len());
+
+    Ok(QuantizedInt4 {
+        packed,
+        scales,
+        rows,
+        cols,
+        group_size,
+    })
+}
+
 /// Load a BF16 weight tensor and quantize it to INT4.
 fn load_and_quantize_weight(
     prefix: &str,
@@ -654,5 +863,158 @@ mod tests {
         }
 
         eprintln!("Cache bit-exact verified: {:.1} GB", size as f64 / 1e9);
+    }
+
+    #[test]
+    fn test_config_deepseek_v2() {
+        let json: serde_json::Value = serde_json::from_str(r#"{
+            "hidden_size": 2048,
+            "moe_intermediate_size": 1408,
+            "n_routed_experts": 64,
+            "num_experts_per_tok": 6,
+            "num_hidden_layers": 27,
+            "first_k_dense_replace": 1
+        }"#).unwrap();
+        let config = ModelConfig::from_json(&json).unwrap();
+        assert_eq!(config.hidden_size, 2048);
+        assert_eq!(config.moe_intermediate_size, 1408);
+        assert_eq!(config.n_routed_experts, 64);
+        assert_eq!(config.num_experts_per_tok, 6);
+        assert_eq!(config.num_hidden_layers, 27);
+        assert_eq!(config.first_k_dense_replace, 1);
+    }
+
+    #[test]
+    fn test_config_kimi_k25_text_config() {
+        let json: serde_json::Value = serde_json::from_str(r#"{
+            "model_type": "kimi_k25",
+            "text_config": {
+                "hidden_size": 7168,
+                "moe_intermediate_size": 2048,
+                "n_routed_experts": 384,
+                "num_experts_per_tok": 8,
+                "num_hidden_layers": 61,
+                "first_k_dense_replace": 1
+            },
+            "vision_config": {}
+        }"#).unwrap();
+        let config = ModelConfig::from_json(&json).unwrap();
+        assert_eq!(config.hidden_size, 7168);
+        assert_eq!(config.moe_intermediate_size, 2048);
+        assert_eq!(config.n_routed_experts, 384);
+        assert_eq!(config.num_experts_per_tok, 8);
+        assert_eq!(config.num_hidden_layers, 61);
+        assert_eq!(config.first_k_dense_replace, 1);
+    }
+
+    #[test]
+    fn test_config_qwen3_moe() {
+        let json: serde_json::Value = serde_json::from_str(r#"{
+            "hidden_size": 4096,
+            "moe_intermediate_size": 1536,
+            "num_experts": 128,
+            "num_experts_per_tok": 8,
+            "num_hidden_layers": 94,
+            "decoder_sparse_step": 1
+        }"#).unwrap();
+        let config = ModelConfig::from_json(&json).unwrap();
+        assert_eq!(config.hidden_size, 4096);
+        assert_eq!(config.moe_intermediate_size, 1536);
+        assert_eq!(config.n_routed_experts, 128);
+        assert_eq!(config.num_experts_per_tok, 8);
+        assert_eq!(config.num_hidden_layers, 94);
+        // decoder_sparse_step=1 → all layers are MoE → first_k_dense_replace=0
+        assert_eq!(config.first_k_dense_replace, 0);
+    }
+
+    #[test]
+    fn test_load_kimi_k25_single_expert() {
+        let _ = env_logger::try_init();
+        let model_dir = Path::new("/home/main/Documents/Claude/hf-models/Kimi-K2.5");
+        if !model_dir.exists() {
+            eprintln!("Skipping — Kimi K2.5 not downloaded");
+            return;
+        }
+
+        // Parse config
+        let config_str = std::fs::read_to_string(model_dir.join("config.json")).unwrap();
+        let raw_json: serde_json::Value = serde_json::from_str(&config_str).unwrap();
+        let config = ModelConfig::from_json(&raw_json).unwrap();
+        assert_eq!(config.hidden_size, 7168);
+        assert_eq!(config.moe_intermediate_size, 2048);
+        assert_eq!(config.n_routed_experts, 384);
+        assert_eq!(config.first_k_dense_replace, 1);
+
+        // Parse safetensors index and open needed shard
+        let index_str = std::fs::read_to_string(
+            model_dir.join("model.safetensors.index.json")
+        ).unwrap();
+        let index: SafetensorsIndex = serde_json::from_str(&index_str).unwrap();
+
+        // Verify pre-quantized detection
+        assert!(is_prequantized(&index.weight_map));
+
+        let layers_prefix = detect_expert_prefix(&index.weight_map).unwrap();
+        assert_eq!(layers_prefix, "language_model.model");
+
+        // Open only the shards needed for layer 1, expert 0
+        let prefix = format!("{layers_prefix}.layers.1.mlp.experts.0");
+        let mut needed_shards: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for proj in &["gate_proj", "up_proj", "down_proj"] {
+            for suffix in &["weight_packed", "weight_scale", "weight_shape"] {
+                let name = format!("{prefix}.{proj}.{suffix}");
+                if let Some(shard) = index.weight_map.get(&name) {
+                    needed_shards.insert(shard.clone());
+                }
+            }
+        }
+        let mut shards: HashMap<String, MmapSafetensors> = HashMap::new();
+        for name in &needed_shards {
+            let path = model_dir.join(name);
+            let st = MmapSafetensors::open(&path).unwrap();
+            shards.insert(name.clone(), st);
+        }
+
+        // Detect group_size
+        let gs = detect_prequant_group_size(&index.weight_map, &shards, &layers_prefix, 1).unwrap();
+        assert_eq!(gs, 32, "Kimi K2.5 should have group_size=32");
+
+        // Load one expert's weights
+        let gate = load_prequantized_weight(
+            &prefix, "gate_proj", &index.weight_map, &shards, gs,
+        ).unwrap();
+        let up = load_prequantized_weight(
+            &prefix, "up_proj", &index.weight_map, &shards, gs,
+        ).unwrap();
+        let down = load_prequantized_weight(
+            &prefix, "down_proj", &index.weight_map, &shards, gs,
+        ).unwrap();
+
+        // Verify dimensions: gate/up=[2048, 7168], down=[7168, 2048]
+        assert_eq!(gate.rows, 2048);
+        assert_eq!(gate.cols, 7168);
+        assert_eq!(up.rows, 2048);
+        assert_eq!(up.cols, 7168);
+        assert_eq!(down.rows, 7168);
+        assert_eq!(down.cols, 2048);
+        assert_eq!(gate.group_size, 32);
+
+        // Verify packed sizes
+        assert_eq!(gate.packed.len(), 2048 * (7168 / 8));
+        assert_eq!(gate.scales.len(), 2048 * (7168 / 32));
+
+        // Verify non-zero data
+        assert!(gate.packed.iter().any(|&v| v != 0), "gate packed all zeros");
+        assert!(gate.scales.iter().any(|&v| v != 0), "gate scales all zeros");
+
+        // Dequantize and check RMS
+        let deq = marlin::dequantize_int4(&gate);
+        let rms = (deq.iter().map(|&v| (v as f64).powi(2)).sum::<f64>() / deq.len() as f64).sqrt();
+        eprintln!(
+            "Kimi K2.5 layer 1 expert 0 gate_proj: [{}, {}] group_size={}, RMS={rms:.6}",
+            gate.rows, gate.cols, gate.group_size
+        );
+        assert!(rms > 0.001, "Expert weights look empty (RMS={rms})");
+        assert!(rms < 10.0, "Expert weights look corrupted (RMS={rms})");
     }
 }
