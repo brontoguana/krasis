@@ -540,8 +540,8 @@ impl KrasisEngine {
     ///
     /// Reads config.json, opens safetensors shards, quantizes BF16 → INT4.
     /// Runs startup system checks (CPU governor, hugepages, memory budget).
-    #[pyo3(signature = (model_dir, group_size=None, max_layers=None))]
-    pub fn load(&mut self, model_dir: &str, group_size: Option<usize>, max_layers: Option<usize>) -> PyResult<()> {
+    #[pyo3(signature = (model_dir, group_size=None, max_layers=None, start_layer=None))]
+    pub fn load(&mut self, model_dir: &str, group_size: Option<usize>, max_layers: Option<usize>, start_layer: Option<usize>) -> PyResult<()> {
         let gs = group_size.unwrap_or(DEFAULT_GROUP_SIZE);
         let path = Path::new(model_dir);
 
@@ -553,19 +553,22 @@ impl KrasisEngine {
                     let h = config.hidden_size as f64;
                     let m = config.moe_intermediate_size as f64;
                     let n_exp = config.n_routed_experts as f64;
-                    let moe_layers = (config.num_hidden_layers - config.first_k_dense_replace) as f64;
+                    let total_moe = config.num_hidden_layers - config.first_k_dense_replace;
+                    let start_l = start_layer.unwrap_or(0);
+                    let remaining = total_moe.saturating_sub(start_l);
+                    let num_layers = max_layers.map_or(remaining, |n| n.min(remaining));
 
                     // INT4 packed: (h/8)*m*4 + (h/gs)*m*2 per gate/up, similar for down
                     let per_expert_bytes = (m * (h / 8.0) * 4.0 + m * (h / gs as f64) * 2.0) * 2.0
                         + h * (m / 8.0) * 4.0 + h * (m / gs as f64) * 2.0;
-                    let total_gb = moe_layers * n_exp * per_expert_bytes / 1e9;
+                    let total_gb = num_layers as f64 * n_exp * per_expert_bytes / 1e9;
 
                     crate::syscheck::run_startup_checks(total_gb);
                 }
             }
         }
 
-        let mut store = WeightStore::load_from_hf(path, gs, max_layers)
+        let mut store = WeightStore::load_from_hf(path, gs, max_layers, start_layer)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
 
         // Use the effective group_size from the loaded store (may differ for pre-quantized models)
@@ -952,7 +955,7 @@ mod tests {
         }
 
         // Load just enough to test one expert
-        let store = WeightStore::load_from_hf(model_dir, DEFAULT_GROUP_SIZE, None)
+        let store = WeightStore::load_from_hf(model_dir, DEFAULT_GROUP_SIZE, None, None)
             .expect("Failed to load");
 
         let hidden = store.config.hidden_size;
@@ -1008,7 +1011,7 @@ mod tests {
             return;
         }
 
-        let store = WeightStore::load_from_hf(model_dir, DEFAULT_GROUP_SIZE, None)
+        let store = WeightStore::load_from_hf(model_dir, DEFAULT_GROUP_SIZE, None, None)
             .expect("Failed to load");
 
         let hidden = store.config.hidden_size;
@@ -1074,7 +1077,7 @@ mod tests {
         }
 
         // Load just 1 MoE layer (384 experts × 1 layer ≈ 9.5 GB)
-        let store = WeightStore::load_from_hf(model_dir, DEFAULT_GROUP_SIZE, Some(1))
+        let store = WeightStore::load_from_hf(model_dir, DEFAULT_GROUP_SIZE, Some(1), None)
             .expect("Failed to load Kimi K2.5");
 
         assert_eq!(store.num_moe_layers(), 1);
@@ -1140,7 +1143,7 @@ mod tests {
             return;
         }
 
-        let store = WeightStore::load_from_hf(model_dir, DEFAULT_GROUP_SIZE, None)
+        let store = WeightStore::load_from_hf(model_dir, DEFAULT_GROUP_SIZE, None, None)
             .expect("Failed to load");
 
         let hidden = store.config.hidden_size;
@@ -1281,7 +1284,7 @@ mod tests {
             return;
         }
 
-        let store = WeightStore::load_from_hf(model_dir, DEFAULT_GROUP_SIZE, None)
+        let store = WeightStore::load_from_hf(model_dir, DEFAULT_GROUP_SIZE, None, None)
             .expect("Failed to load");
 
         // V2-Lite has 2 shared experts with routed_scaling_factor=1.0

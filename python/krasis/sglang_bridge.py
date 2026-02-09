@@ -56,6 +56,11 @@ class KrasisMoEWrapper:
     _engine_lock = threading.Lock()
     _first_k_dense: Optional[int] = None
 
+    # PP (pipeline parallel) state — set during load_weights / _get_engine
+    _pp_first_layer_idx: Optional[int] = None  # first absolute layer this rank sees
+    pp_start_moe_layer: Optional[int] = None   # first MoE layer index for this rank
+    pp_num_moe_layers: Optional[int] = None    # number of MoE layers on this rank
+
     # Shared GPU prefill manager singleton
     _shared_gpu_prefill = None
     _gpu_prefill_lock = threading.Lock()
@@ -106,23 +111,113 @@ class KrasisMoEWrapper:
 
     @classmethod
     def _get_engine(cls, model_path: str, num_threads: int) -> KrasisEngine:
-        """Get or create the shared KrasisEngine singleton."""
+        """Get or create the shared KrasisEngine singleton.
+
+        For PP (pipeline parallel) setups:
+        - Reads SGLANG_PP_LAYER_PARTITION env var (e.g. "20,21,20")
+        - Uses _pp_first_layer_idx to infer which rank this is
+        - Computes which MoE layers this rank owns
+        - Passes start_layer/max_layers to engine.load() for partial loading
+        """
         with cls._engine_lock:
             if cls._shared_engine is not None:
                 return cls._shared_engine
 
-            logger.info("Loading Krasis engine from %s (%d threads)", model_path, num_threads)
-            engine = KrasisEngine(parallel=True, num_threads=num_threads)
-            engine.load(model_path)
-            cls._shared_engine = engine
-
             # Parse first_k_dense_replace from config
             cls._first_k_dense = cls._read_first_k_dense(model_path)
+            first_k = cls._first_k_dense or 0
+
+            # Determine PP layer range for this rank
+            start_layer = None
+            max_layers = None
+            partition_str = os.environ.get("SGLANG_PP_LAYER_PARTITION", "")
+            if partition_str and cls._pp_first_layer_idx is not None:
+                partitions = [int(x.strip()) for x in partition_str.split(",")]
+                first_layer = cls._pp_first_layer_idx
+
+                # Infer rank from first_layer_idx (range check — first MoE layer
+                # may not be at partition boundary if dense layers exist)
+                cumsum = 0
+                rank = -1
+                for i, count in enumerate(partitions):
+                    if cumsum <= first_layer < cumsum + count:
+                        rank = i
+                        break
+                    cumsum += count
+
+                if rank >= 0:
+                    rank_start = sum(partitions[:rank])
+                    rank_end = rank_start + partitions[rank]
+
+                    # Compute which MoE layers fall in [rank_start, rank_end)
+                    # MoE layers are [first_k .. num_hidden_layers)
+                    moe_start_abs = max(rank_start, first_k)
+                    moe_end_abs = rank_end  # all layers >= first_k in range are MoE
+
+                    if moe_end_abs > first_k and moe_start_abs < rank_end:
+                        start_layer = moe_start_abs - first_k  # 0-based MoE index
+                        max_layers = moe_end_abs - moe_start_abs
+                        cls.pp_start_moe_layer = start_layer
+                        cls.pp_num_moe_layers = max_layers
+                        logger.info(
+                            "PP rank %d: layers [%d..%d), MoE layers [%d..%d) "
+                            "(start_moe=%d, count=%d)",
+                            rank, rank_start, rank_end,
+                            moe_start_abs, moe_end_abs,
+                            start_layer, max_layers,
+                        )
+                    else:
+                        # This rank has no MoE layers (all dense)
+                        cls.pp_start_moe_layer = 0
+                        cls.pp_num_moe_layers = 0
+                        logger.info(
+                            "PP rank %d: layers [%d..%d) — no MoE layers",
+                            rank, rank_start, rank_end,
+                        )
+                else:
+                    logger.warning(
+                        "PP: could not infer rank from first_layer_idx=%d, "
+                        "partition=%s — loading all MoE layers",
+                        first_layer, partition_str,
+                    )
+
+            # Log system RAM before loading
+            try:
+                import psutil
+                mem = psutil.virtual_memory()
+                logger.info(
+                    "System RAM before Krasis load: used=%.1f/%.1f GiB (%.0f%% used), "
+                    "available=%.1f GiB",
+                    mem.used / (1024**3), mem.total / (1024**3),
+                    mem.percent, mem.available / (1024**3))
+            except ImportError:
+                pass
+
+            logger.info("Loading Krasis engine from %s (%d threads)", model_path, num_threads)
+            if start_layer is not None:
+                logger.info(
+                    "  Partial load: start_layer=%d, max_layers=%s",
+                    start_layer, max_layers)
+            engine = KrasisEngine(parallel=True, num_threads=num_threads)
+            engine.load(model_path, start_layer=start_layer, max_layers=max_layers)
+            cls._shared_engine = engine
+
             logger.info(
                 "Krasis engine loaded: %d MoE layers, %d experts, hidden=%d, first_k_dense=%d",
                 engine.num_moe_layers(), engine.num_experts(),
                 engine.hidden_size(), cls._first_k_dense,
             )
+
+            # Log system RAM after loading
+            try:
+                mem = psutil.virtual_memory()
+                logger.info(
+                    "System RAM after Krasis load: used=%.1f/%.1f GiB (%.0f%% used), "
+                    "available=%.1f GiB",
+                    mem.used / (1024**3), mem.total / (1024**3),
+                    mem.percent, mem.available / (1024**3))
+            except ImportError:
+                pass
             return engine
 
     @classmethod
@@ -183,13 +278,42 @@ class KrasisMoEWrapper:
         """Load weights into the shared engine.
 
         Called by SGLang's process_weights_after_loading for each layer.
-        The actual load happens once (singleton).
+        The actual load happens once (singleton). Records the first layer_idx
+        seen for PP rank inference.
 
         Args:
             physical_to_logical_map_cpu: Expert ID remapping (ignored — Krasis
                 uses original expert indices from the model).
         """
+        # Record first layer index for PP rank detection
+        if KrasisMoEWrapper._pp_first_layer_idx is None:
+            KrasisMoEWrapper._pp_first_layer_idx = self.layer_idx
+            logger.info("PP: first layer_idx on this rank = %d", self.layer_idx)
+
+        # Log VRAM before Krasis engine load (which is CPU-only but helps track state)
+        if torch.cuda.is_available():
+            try:
+                dev = torch.cuda.current_device()
+                alloc = torch.cuda.memory_allocated(dev) / (1024**3)
+                free, total = torch.cuda.mem_get_info(dev)
+                logger.info(
+                    "GPU[%d] before Krasis load: allocated=%.2f GiB, free=%.2f/%.2f GiB",
+                    dev, alloc, free / (1024**3), total / (1024**3))
+            except Exception:
+                pass
+
         self._engine = self._get_engine(self._model_path, self._cpuinfer_threads)
+
+        if torch.cuda.is_available():
+            try:
+                dev = torch.cuda.current_device()
+                alloc = torch.cuda.memory_allocated(dev) / (1024**3)
+                free, total = torch.cuda.mem_get_info(dev)
+                logger.info(
+                    "GPU[%d] after Krasis load: allocated=%.2f GiB, free=%.2f/%.2f GiB",
+                    dev, alloc, free / (1024**3), total / (1024**3))
+            except Exception:
+                pass
 
     def submit_forward(
         self,
@@ -254,6 +378,10 @@ class KrasisMoEWrapper:
         first_k = KrasisMoEWrapper._first_k_dense or 0
         moe_layer_idx = self.layer_idx - first_k
 
+        # Remap for PP: subtract this rank's MoE layer offset
+        if KrasisMoEWrapper.pp_start_moe_layer is not None:
+            moe_layer_idx -= KrasisMoEWrapper.pp_start_moe_layer
+
         engine.submit_forward(moe_layer_idx, act_bytes, ids_bytes, wts_bytes, batch_size)
 
     def sync_forward(
@@ -313,5 +441,8 @@ class KrasisMoEWrapper:
         with cls._engine_lock:
             cls._shared_engine = None
             cls._first_k_dense = None
+            cls._pp_first_layer_idx = None
+            cls.pp_start_moe_layer = None
+            cls.pp_num_moe_layers = None
         with cls._gpu_prefill_lock:
             cls._shared_gpu_prefill = None
