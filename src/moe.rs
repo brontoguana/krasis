@@ -180,23 +180,52 @@ pub fn moe_forward(
     output.fill(0.0);
 
     let n = expert_indices.len();
+    let hidden = store.config.hidden_size;
+    let intermediate = store.config.moe_intermediate_size;
+    let group_size = scratch.group_size;
 
-    for i in 0..n {
-        let eidx = expert_indices[i];
-        let weight = expert_weights[i];
-        let expert = store.get_expert(moe_layer_idx, eidx);
+    if parallel && n > 1 {
+        // Expert-level parallelism: run all experts concurrently on rayon threads.
+        // Each expert gets its own scratch buffer and runs serial integer matmul.
+        // The pre-quantized activation is shared read-only across all threads.
+        use rayon::prelude::*;
 
-        // Prefetch next expert's weights into L3 while we compute this one
-        if i + 1 < n {
-            let next_expert = store.get_expert(moe_layer_idx, expert_indices[i + 1]);
-            prefetch_expert_nta(next_expert);
+        let expert_outputs: Vec<Vec<f32>> = (0..n)
+            .into_par_iter()
+            .map(|i| {
+                let eidx = expert_indices[i];
+                let expert = store.get_expert(moe_layer_idx, eidx);
+                let mut local_scratch = ExpertScratch::new(hidden, intermediate, group_size);
+                expert_forward_integer(expert, &act_int16, &act_scales, &mut local_scratch, false);
+                local_scratch.expert_out
+            })
+            .collect();
+
+        for (i, expert_out) in expert_outputs.iter().enumerate() {
+            let weight = expert_weights[i];
+            for j in 0..hidden {
+                output[j] += weight * expert_out[j];
+            }
         }
+    } else {
+        // Sequential: single expert at a time with NTA prefetch
+        for i in 0..n {
+            let eidx = expert_indices[i];
+            let weight = expert_weights[i];
+            let expert = store.get_expert(moe_layer_idx, eidx);
 
-        expert_forward_integer(expert, &act_int16, &act_scales, scratch, parallel);
+            // Prefetch next expert's weights into L3 while we compute this one
+            if i + 1 < n {
+                let next_expert = store.get_expert(moe_layer_idx, expert_indices[i + 1]);
+                prefetch_expert_nta(next_expert);
+            }
 
-        // Accumulate: output += weight * expert_out
-        for j in 0..output.len() {
-            output[j] += weight * scratch.expert_out[j];
+            expert_forward_integer(expert, &act_int16, &act_scales, scratch, false);
+
+            // Accumulate: output += weight * expert_out
+            for j in 0..output.len() {
+                output[j] += weight * scratch.expert_out[j];
+            }
         }
     }
 
