@@ -1,0 +1,9 @@
+/target
+*.so
+*.pyc
+__pycache__/
+*.egg-info/
+.env
+*.gguf
+*.safetensors
+!tests/fixtures/*.safetensors
