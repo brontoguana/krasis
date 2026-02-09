@@ -7,8 +7,8 @@ use pyo3::prelude::*;
 /// Krasis — hybrid LLM MoE runtime
 #[pymodule]
 fn krasis(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    env_logger::init();
-    m.add_class::<moe::MoERunner>()?;
+    let _ = env_logger::try_init();
+    m.add_class::<moe::KrasisEngine>()?;
     m.add_class::<weights::WeightStore>()?;
     Ok(())
 }
