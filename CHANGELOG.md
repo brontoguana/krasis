@@ -4,13 +4,31 @@
 
 | Suite | Count | Status | Last Run |
 |-------|-------|--------|----------|
-| Rust (`cargo test`) | 33 | ALL PASS | 2026-02-09 |
+| Rust (`cargo test`) | 34 | ALL PASS | 2026-02-09 |
 | Python bridge (`test_bridge.py`) | 3 | ALL PASS | 2026-02-09 |
-| **Total** | **36** | **ALL PASS** | |
+| **Total** | **37** | **ALL PASS** | |
 
 Re-run needed after: any change to `src/`, `python/krasis/`, or `test_bridge.py`.
 
 ---
+
+## Shared expert support — 2026-02-09
+
+**Add shared expert loading, forward computation, and routed_scaling_factor**
+
+- `ModelConfig`: added `n_shared_experts` (0/1/2) and `routed_scaling_factor` (1.0/2.827)
+- `WeightStore.shared_experts`: per-MoE-layer shared expert weights (BF16 → INT4 quantized)
+- `load_shared_experts()`: loads from safetensors (always BF16, even for pre-quantized models like Kimi K2.5)
+- `moe_forward()`: now accepts `shared_scratch` parameter; computes `scale * routed_output + shared_output`
+- Async worker: allocates separate scratch buffer for shared expert's larger intermediate size
+- `ExpertScratch` reuses quantized activation from routed path (same hidden_size + group_size)
+- Shared experts loaded after cache too (not in cache format yet)
+- **V2-Lite**: 2 shared experts, intermediate=2816, routed_scaling_factor=1.0
+- **Kimi K2.5**: 1 shared expert, intermediate=2048, routed_scaling_factor=2.827
+- **Qwen3**: 0 shared experts (no-op)
+- `test_shared_expert_v2_lite`: verifies shared expert changes output (max_diff=0.075)
+
+Tests: 34 Rust + 3 Python = **37 PASS**
 
 ## [1456e1f] SGLang bridge — 2026-02-09
 
