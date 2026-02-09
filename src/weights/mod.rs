@@ -578,6 +578,45 @@ impl WeightStore {
         })
     }
 
+    /// Migrate expert weights to NUMA nodes according to the given map.
+    /// Uses mbind(MPOL_MF_MOVE) to move physical pages without changing virtual addresses.
+    /// Returns the number of successfully migrated experts.
+    pub fn migrate_numa(&mut self, map: &crate::numa::NumaExpertMap) -> usize {
+        use crate::numa::migrate_vec_to_node;
+
+        let start = std::time::Instant::now();
+        let mut migrated = 0;
+        let mut failed = 0;
+
+        for (layer_idx, layer) in self.experts.iter_mut().enumerate() {
+            for (expert_idx, expert) in layer.iter_mut().enumerate() {
+                let node = map.node_for(layer_idx, expert_idx);
+
+                // Migrate all 6 buffers (packed + scales for gate, up, down)
+                let ok = migrate_vec_to_node(&mut expert.gate.packed, node)
+                    && migrate_vec_to_node(&mut expert.gate.scales, node)
+                    && migrate_vec_to_node(&mut expert.up.packed, node)
+                    && migrate_vec_to_node(&mut expert.up.scales, node)
+                    && migrate_vec_to_node(&mut expert.down.packed, node)
+                    && migrate_vec_to_node(&mut expert.down.scales, node);
+
+                if ok {
+                    migrated += 1;
+                } else {
+                    failed += 1;
+                }
+            }
+        }
+
+        let elapsed = start.elapsed();
+        log::info!(
+            "NUMA migration: {migrated} experts migrated, {failed} failed, in {:.1}s",
+            elapsed.as_secs_f64(),
+        );
+
+        migrated
+    }
+
     /// Get expert weights for a given MoE layer index and expert index.
     /// moe_layer_idx is 0-based within MoE layers (not absolute layer index).
     pub fn get_expert(&self, moe_layer_idx: usize, expert_idx: usize) -> &ExpertWeights {
