@@ -4,6 +4,7 @@
 __pycache__/
 *.egg-info/
 .env
+.venv/
 *.gguf
 *.safetensors
 !tests/fixtures/*.safetensors

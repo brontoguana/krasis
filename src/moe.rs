@@ -7,9 +7,11 @@
 //!   4. Weighted sum of expert outputs returned to SGLang
 
 use crate::kernel::avx2::{matmul_int4_avx2, matmul_int4_parallel};
-use crate::weights::marlin::f32_to_bf16;
+use crate::weights::marlin::{f32_to_bf16, DEFAULT_GROUP_SIZE};
 use crate::weights::{ExpertWeights, WeightStore};
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
+use std::path::Path;
 
 /// Scratch buffers for expert computation (reused across calls).
 pub struct ExpertScratch {
@@ -116,17 +118,159 @@ fn fast_sigmoid(x: f32) -> f32 {
     1.0 / (1.0 + (-x).exp())
 }
 
-/// Main MoE runner that SGLang calls as a FusedMoE replacement.
+/// Main Krasis MoE engine — drop-in replacement for KTransformers CPU expert dispatch.
+///
+/// Usage from Python:
+/// ```python
+/// engine = KrasisEngine()
+/// engine.load("/path/to/model", group_size=128)
+/// output = engine.moe_forward(0, activation_bf16_bytes, [1, 5, 12], [0.3, 0.5, 0.2])
+/// ```
 #[pyclass]
-pub struct MoERunner {
-    // TODO: weight store reference, thread pool config
+pub struct KrasisEngine {
+    store: Option<WeightStore>,
+    scratch: Option<ExpertScratch>,
+    output_buf: Vec<f32>,
+    parallel: bool,
 }
 
 #[pymethods]
-impl MoERunner {
+impl KrasisEngine {
     #[new]
-    pub fn new() -> Self {
-        MoERunner {}
+    #[pyo3(signature = (parallel=true))]
+    pub fn new(parallel: bool) -> Self {
+        KrasisEngine {
+            store: None,
+            scratch: None,
+            output_buf: Vec::new(),
+            parallel,
+        }
+    }
+
+    /// Load expert weights from a HuggingFace model directory.
+    ///
+    /// Reads config.json, opens safetensors shards, quantizes BF16 → INT4.
+    #[pyo3(signature = (model_dir, group_size=None))]
+    pub fn load(&mut self, model_dir: &str, group_size: Option<usize>) -> PyResult<()> {
+        let gs = group_size.unwrap_or(DEFAULT_GROUP_SIZE);
+        let path = Path::new(model_dir);
+        let store = WeightStore::load_from_hf(path, gs)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+
+        let scratch = ExpertScratch::new(
+            store.config.hidden_size,
+            store.config.moe_intermediate_size,
+        );
+        self.output_buf = vec![0.0f32; store.config.hidden_size];
+        self.store = Some(store);
+        self.scratch = Some(scratch);
+        Ok(())
+    }
+
+    /// Run MoE forward for a single token on one layer.
+    ///
+    /// Args:
+    ///   moe_layer_idx: 0-based MoE layer index (skipping dense layers)
+    ///   activation_bf16: BF16 activation as bytes [hidden_size × 2 bytes]
+    ///   expert_indices: Selected expert indices from router
+    ///   expert_weights: Routing weights (softmax scores) for selected experts
+    ///
+    /// Returns: f32 output as bytes [hidden_size × 4 bytes]
+    pub fn moe_forward<'py>(
+        &mut self,
+        py: Python<'py>,
+        moe_layer_idx: usize,
+        activation_bf16: &[u8],
+        expert_indices: Vec<usize>,
+        expert_weights: Vec<f32>,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let store = self.store.as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(
+                "Model not loaded — call load() first"))?;
+
+        let hidden_size = store.config.hidden_size;
+
+        // Validate activation size
+        if activation_bf16.len() != hidden_size * 2 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                format!("Expected {} bytes (hidden_size={} × 2), got {}",
+                    hidden_size * 2, hidden_size, activation_bf16.len())
+            ));
+        }
+
+        // Validate expert args
+        if expert_indices.len() != expert_weights.len() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                format!("expert_indices len ({}) != expert_weights len ({})",
+                    expert_indices.len(), expert_weights.len())
+            ));
+        }
+
+        // Reinterpret BF16 bytes as &[u16]
+        let activation: &[u16] = unsafe {
+            std::slice::from_raw_parts(
+                activation_bf16.as_ptr() as *const u16,
+                hidden_size,
+            )
+        };
+
+        // Split borrows: store (immutable), scratch + output_buf (mutable)
+        let scratch = self.scratch.as_mut()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Model not loaded"))?;
+        let parallel = self.parallel;
+
+        moe_forward(
+            store,
+            moe_layer_idx,
+            activation,
+            &expert_indices,
+            &expert_weights,
+            &mut self.output_buf,
+            scratch,
+            parallel,
+        );
+
+        // Return output as f32 bytes
+        let output_bytes: &[u8] = unsafe {
+            std::slice::from_raw_parts(
+                self.output_buf.as_ptr() as *const u8,
+                self.output_buf.len() * 4,
+            )
+        };
+        Ok(PyBytes::new(py, output_bytes))
+    }
+
+    /// Number of MoE layers loaded.
+    pub fn num_moe_layers(&self) -> PyResult<usize> {
+        let store = self.store.as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Model not loaded"))?;
+        Ok(store.num_moe_layers())
+    }
+
+    /// Hidden size of the model.
+    pub fn hidden_size(&self) -> PyResult<usize> {
+        let store = self.store.as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Model not loaded"))?;
+        Ok(store.config.hidden_size)
+    }
+
+    /// Total number of routed experts per layer.
+    pub fn num_experts(&self) -> PyResult<usize> {
+        let store = self.store.as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Model not loaded"))?;
+        Ok(store.config.n_routed_experts)
+    }
+
+    /// Number of experts selected per token (top-k).
+    pub fn top_k(&self) -> PyResult<usize> {
+        let store = self.store.as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Model not loaded"))?;
+        Ok(store.config.num_experts_per_tok)
+    }
+
+    /// Whether parallel matmul is enabled.
+    pub fn is_parallel(&self) -> bool {
+        self.parallel
     }
 }
 
