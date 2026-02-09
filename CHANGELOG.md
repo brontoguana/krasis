@@ -13,6 +13,27 @@ Re-run needed after: any change to `src/`, `python/krasis/`, or test files.
 
 ---
 
+## Multi-GPU PP=3 support — 2026-02-09
+
+**Add pipeline-parallel partial loading for multi-GPU setups**
+
+- `WeightStore::load_from_hf()`: new `start_layer` param — loads MoE layers `[start..start+count)` instead of all
+- `KrasisEngine.load()`: new `start_layer` keyword arg, passed through to Rust
+- Memory budget estimate updated to use actual loaded layer count (not total)
+- Disk cache skipped for partial loads (start_layer or max_layers set)
+- `sglang_bridge.py`: PP-aware engine loading
+  - Records `_pp_first_layer_idx` from first `load_weights()` call
+  - Parses `SGLANG_PP_LAYER_PARTITION` env var to infer rank and MoE range
+  - Passes `start_layer`/`max_layers` to `engine.load()` for partial loading
+  - Remaps `moe_layer_idx` in CPU decode path (GPU prefill uses absolute indices)
+- `run_kimi_krasis.sh`: Krasis-based launch script for Kimi K2.5 PP=3
+  - No GGUF download needed (reads HF safetensors directly)
+  - Partition 20,21,20 across 3 GPUs, 21 threads/rank
+  - Each rank loads ~174 GB MoE experts (total ~520 GB fits in 995 GB RAM)
+  - Sets `KRASIS_BACKEND=1`, `KRASIS_MODEL_PATH`, `SGLANG_PP_LAYER_PARTITION`
+
+Tests: config + synthetic + V2-Lite pass, Rust build clean
+
 ## GPU prefill implementation — 2026-02-09
 
 **Add INT4 Marlin GPU prefill for MoE layers**

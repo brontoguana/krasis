@@ -240,11 +240,14 @@ impl WeightStore {
     /// If valid, loads directly from cache (mmap + copy, ~1-2s for V2-Lite).
     /// Otherwise, reads BF16 safetensors, quantizes to INT4, and writes cache.
     ///
-    /// If `max_layers` is Some(n), only load the first n MoE layers (skips cache).
+    /// If `max_layers` is Some(n), only load n MoE layers (skips cache).
+    /// If `start_layer` is Some(s), start loading from MoE layer s (0-based, skips cache).
+    /// Combined: loads MoE layers [start_layer .. start_layer + max_layers).
     pub fn load_from_hf(
         model_dir: &Path,
         group_size: usize,
         max_layers: Option<usize>,
+        start_layer: Option<usize>,
     ) -> Result<Self, String> {
         let start = std::time::Instant::now();
 
@@ -264,20 +267,29 @@ impl WeightStore {
         );
 
         let total_moe_layers = config.num_hidden_layers - config.first_k_dense_replace;
+        let moe_start = start_layer.unwrap_or(0);
+        if moe_start >= total_moe_layers {
+            return Err(format!(
+                "start_layer={moe_start} >= total MoE layers={total_moe_layers}"
+            ));
+        }
+        let remaining = total_moe_layers - moe_start;
         let num_moe_layers = match max_layers {
             Some(n) => {
-                let capped = n.min(total_moe_layers);
-                if capped < total_moe_layers {
-                    log::info!("Partial load: {capped}/{total_moe_layers} MoE layers");
-                }
+                let capped = n.min(remaining);
+                log::info!(
+                    "Partial load: MoE layers [{moe_start}..{}), {capped}/{total_moe_layers} total",
+                    moe_start + capped,
+                );
                 capped
             }
-            None => total_moe_layers,
+            None => remaining,
         };
         let config_hash = fnv1a(config_str.as_bytes());
 
-        // Try loading from cache (only for full model loads)
-        if max_layers.is_none() {
+        // Try loading from cache (only for full model loads — no start_layer or max_layers)
+        let partial = max_layers.is_some() || start_layer.is_some();
+        if !partial {
             let cpath = cache_path(model_dir, group_size);
             if cpath.exists() {
                 match Self::load_cache(&cpath, &config, group_size, num_moe_layers, config_hash) {
@@ -306,7 +318,7 @@ impl WeightStore {
 
         // Load from safetensors and quantize (or load pre-quantized)
         let (experts, shared_experts, effective_group_size) =
-            Self::load_and_quantize_all(model_dir, &config, group_size, num_moe_layers)?;
+            Self::load_and_quantize_all(model_dir, &config, group_size, num_moe_layers, moe_start)?;
 
         let store = WeightStore {
             experts,
@@ -316,7 +328,7 @@ impl WeightStore {
         };
 
         // Save cache for next time (only for full model loads)
-        if max_layers.is_none() {
+        if !partial {
             let cpath = cache_path(model_dir, group_size);
             match store.save_cache(&cpath, config_hash) {
                 Ok(()) => log::info!("Saved INT4 cache to {}", cpath.display()),
@@ -336,11 +348,15 @@ impl WeightStore {
 
     /// Load from safetensors shards and quantize to INT4 (or load pre-quantized).
     /// Returns (routed_experts, shared_experts, effective_group_size).
+    ///
+    /// `start_moe_layer`: 0-based offset into MoE layers (skips first N MoE layers).
+    /// `num_moe_layers`: how many MoE layers to load starting from `start_moe_layer`.
     fn load_and_quantize_all(
         model_dir: &Path,
         config: &ModelConfig,
         group_size: usize,
         num_moe_layers: usize,
+        start_moe_layer: usize,
     ) -> Result<(Vec<Vec<ExpertWeights>>, Vec<ExpertWeights>, usize), String> {
         // Parse safetensors index
         let index_path = model_dir.join("model.safetensors.index.json");
@@ -388,7 +404,7 @@ impl WeightStore {
 
         let mut experts: Vec<Vec<ExpertWeights>> = Vec::with_capacity(num_moe_layers);
 
-        for moe_idx in 0..num_moe_layers {
+        for moe_idx in start_moe_layer..(start_moe_layer + num_moe_layers) {
             let layer_idx = moe_idx + config.first_k_dense_replace;
             let layer_start = std::time::Instant::now();
             let mut layer_experts = Vec::with_capacity(config.n_routed_experts);
@@ -441,7 +457,7 @@ impl WeightStore {
                 config.n_shared_experts, shared_intermediate,
             );
             let mut shared = Vec::with_capacity(num_moe_layers);
-            for moe_idx in 0..num_moe_layers {
+            for moe_idx in start_moe_layer..(start_moe_layer + num_moe_layers) {
                 let layer_idx = moe_idx + config.first_k_dense_replace;
                 let prefix = format!("{layers_prefix}.layers.{layer_idx}.mlp.shared_experts");
                 let gate = load_and_quantize_weight(
@@ -990,7 +1006,7 @@ mod tests {
             return;
         }
 
-        let store = WeightStore::load_from_hf(model_dir, DEFAULT_GROUP_SIZE, None)
+        let store = WeightStore::load_from_hf(model_dir, DEFAULT_GROUP_SIZE, None, None)
             .expect("Failed to load V2-Lite");
 
         // V2-Lite: 27 layers, layer 0 dense, layers 1-26 MoE = 26 MoE layers
@@ -1035,7 +1051,7 @@ mod tests {
         }
 
         // Load (will use cache if available, or quantize + create cache)
-        let store = WeightStore::load_from_hf(model_dir, DEFAULT_GROUP_SIZE, None)
+        let store = WeightStore::load_from_hf(model_dir, DEFAULT_GROUP_SIZE, None, None)
             .expect("Failed to load V2-Lite");
 
         // Verify cache file exists
