@@ -13,6 +13,42 @@ Re-run needed after: any change to `src/`, `python/krasis/`, or test files.
 
 ---
 
+## Kimi K2.5 SGLang Integration Fixes — 2026-02-11
+
+### Bugs Fixed
+
+**1. correction_bias on CPU (CUDA illegal memory access)**
+- `kimi_k2_moe_fused_gate` custom CUDA kernel crashed because `correction_bias` tensor
+  was on CPU while `gating_output` was on GPU. The kernel read a CPU pointer from GPU.
+- Root cause: With Krasis handling MoE weights on CPU, the gate's `e_score_correction_bias`
+  nn.Parameter was never moved to GPU by SGLang's weight loading.
+- Fix: In `select_experts()` (topk.py), detect device mismatch and move correction_bias
+  to the same device as router_logits. Also cache the fix in topk_config.
+- Also added tensor validation (contiguity, dtype) before the kernel call.
+
+**2. Double shared expert computation (garbage output)**
+- SGLang's `forward_normal()` computes shared experts on GPU AND Krasis's `moe_forward()`
+  was also applying shared experts on CPU. Result: shared expert output doubled, routed
+  scaling factor applied twice → garbage output.
+- Fix: Added `skip_shared_experts` flag to `KrasisEngine`. When `True` (SGLang mode),
+  the worker passes `None` for shared_scratch, preventing CPU shared expert computation.
+- SGLang bridge now creates engine with `skip_shared_experts=True`.
+
+### Test Results
+- 41/41 Rust tests pass (standalone mode unaffected, `skip_shared_experts=false`)
+- Kimi K2.5 generates correct, coherent output ("Paris" for capital of France, accurate
+  quantum entanglement explanation, etc.)
+- Decode speed: ~1.0 tok/s with debug flags, ~1.25 tok/s without
+
+### Files Modified
+- `krasis/src/moe.rs` — Added `skip_shared_experts` field, constructor param, worker arg
+- `krasis/python/krasis/sglang_bridge.py` — Pass `skip_shared_experts=True` to engine
+- `sglang/python/sglang/srt/layers/moe/topk.py` — Device fix for correction_bias,
+  `SGLANG_SKIP_KIMI_GATE_KERNEL` bypass option
+- `run_kimi_krasis.sh` — Debug flags (now commented out for production)
+
+---
+
 ## Streaming Unified Cache Conversion — 2026-02-11
 
 ### Problem
