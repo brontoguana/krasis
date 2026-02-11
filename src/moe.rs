@@ -7,10 +7,11 @@
 //!   4. Weighted sum of expert outputs returned to SGLang
 
 use crate::kernel::avx2::{
-    matmul_int4_avx2, matmul_int4_parallel,
     matmul_int4_integer, matmul_int4_integer_parallel,
     matmul_int8_integer, matmul_int8_integer_parallel,
-    matmul_int4_transposed_integer, matmul_int4_transposed_integer_parallel,
+    matmul_int4_marlin, matmul_int4_marlin_parallel,
+    build_marlin_tile_map, build_marlin_scale_map,
+    MarlinTileMap, MarlinScaleMap,
     quantize_activation_int16,
 };
 use crate::weights::marlin::{f32_to_bf16, DEFAULT_GROUP_SIZE};
@@ -18,8 +19,19 @@ use crate::weights::{ExpertWeights, QuantWeight, UnifiedExpertWeights, WeightSto
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use std::path::Path;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::thread::JoinHandle;
+
+/// Lazily-initialized Marlin tile map (computed once, reused for all forward passes).
+static MARLIN_TILE_MAP: OnceLock<MarlinTileMap> = OnceLock::new();
+/// Lazily-initialized Marlin scale map.
+static MARLIN_SCALE_MAP: OnceLock<MarlinScaleMap> = OnceLock::new();
+
+fn get_marlin_maps() -> (&'static MarlinTileMap, &'static MarlinScaleMap) {
+    let tile_map = MARLIN_TILE_MAP.get_or_init(build_marlin_tile_map);
+    let scale_map = MARLIN_SCALE_MAP.get_or_init(build_marlin_scale_map);
+    (tile_map, scale_map)
+}
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
@@ -83,39 +95,6 @@ fn matmul_integer_parallel(weight: &QuantWeight, act_int16: &[i16], act_scales: 
     }
 }
 
-/// Compute a single expert's output using the FMA kernel: SiLU(x @ gate^T) * (x @ up^T) @ down^T
-///
-/// Result is written to `scratch.expert_out`.
-pub fn expert_forward(
-    expert: &ExpertWeights,
-    activation: &[u16],
-    scratch: &mut ExpertScratch,
-    parallel: bool,
-) {
-    // FMA path only supports INT4 weights
-    let gate = expert.gate.as_int4();
-    let up = expert.up.as_int4();
-    let down = expert.down.as_int4();
-    let matmul = if parallel { matmul_int4_parallel } else { matmul_int4_avx2 };
-
-    // gate_out = activation @ gate_proj^T → [intermediate_size]
-    matmul(gate, activation, &mut scratch.gate_out);
-
-    // up_out = activation @ up_proj^T → [intermediate_size]
-    matmul(up, activation, &mut scratch.up_out);
-
-    // hidden = SiLU(gate_out) * up_out → BF16 [intermediate_size]
-    for i in 0..scratch.gate_out.len() {
-        let x = scratch.gate_out[i];
-        let silu = x * fast_sigmoid(x);
-        let hidden = silu * scratch.up_out[i];
-        scratch.hidden_bf16[i] = f32_to_bf16(hidden);
-    }
-
-    // expert_out = hidden @ down_proj^T → [hidden_size]
-    matmul(down, &scratch.hidden_bf16, &mut scratch.expert_out);
-}
-
 /// Compute a single expert's output using the integer kernel (_mm256_madd_epi16).
 ///
 /// Uses pre-quantized INT16 activations for gate/up projections (shared across
@@ -169,7 +148,7 @@ pub fn expert_forward_integer(
 /// AVX2 integer kernel that SIMDs across the N (output) dimension.
 ///
 /// # Arguments
-/// * `expert` - Unified expert weights (w13 + w2 in transposed layout)
+/// * `expert` - Unified expert weights (Marlin-native packed format)
 /// * `act_int16` - Pre-quantized input activation [hidden_size] as INT16
 /// * `act_scales` - Per-group scales for the input activation
 /// * `scratch` - Reusable intermediate buffers (result in scratch.expert_out)
@@ -186,18 +165,19 @@ pub fn expert_forward_unified(
     let two_n = 2 * n;
     let gs = expert.group_size;
 
-    let matmul_fn = if parallel {
-        matmul_int4_transposed_integer_parallel
+    // Marlin-native kernel: reads GPU-native Marlin-packed data directly
+    let (tile_map, scale_map) = get_marlin_maps();
+    let marlin_fn = if parallel {
+        matmul_int4_marlin_parallel
     } else {
-        matmul_int4_transposed_integer
+        matmul_int4_marlin
     };
-
-    // w13 matmul: w13_out[2*N] = act[K] @ w13[K, 2*N] (combined gate+up)
-    matmul_fn(
+    // w13 matmul: w13_out[2*N] = act[K] @ w13_marlin
+    marlin_fn(
         &expert.w13_packed, &expert.w13_scales,
         act_int16, act_scales,
         &mut scratch.w13_out,
-        k, two_n, gs,
+        k, two_n, gs, tile_map, scale_map,
     );
 
     // Split w13_out into gate[N] and up[N], apply SiLU activation
@@ -219,11 +199,11 @@ pub fn expert_forward_unified(
     );
 
     // w2 matmul: expert_out[hidden_size] = hidden[N] @ w2[N, hidden_size]
-    matmul_fn(
+    marlin_fn(
         &expert.w2_packed, &expert.w2_scales,
         &scratch.hidden_int16, &scratch.hidden_scales,
         &mut scratch.expert_out,
-        n, k, gs,
+        n, k, gs, tile_map, scale_map,
     );
 }
 
@@ -901,11 +881,8 @@ impl KrasisEngine {
         log::info!("[DIAG-RUST] Scratch pools allocated, detecting NUMA...");
         crate::syscheck::log_memory_usage("[DIAG-RUST] after scratch alloc");
 
-        // Convert to unified transposed format (INT4 only), drops old format
-        log::info!("[DIAG-RUST] Converting to unified transposed format...");
-        crate::syscheck::log_memory_usage("[DIAG-RUST] before convert_to_unified");
-        store.convert_to_unified();
-        crate::syscheck::log_memory_usage("[DIAG-RUST] after convert_to_unified");
+        // INT4 Marlin: weights already loaded in unified format from cache
+        // INT8: uses separate ExpertWeights (no conversion needed)
 
         // Detect NUMA topology and migrate expert weights if multi-node
         let topo = crate::numa::NumaTopology::detect();
@@ -1089,6 +1066,14 @@ impl KrasisEngine {
     /// Whether parallel matmul is enabled.
     pub fn is_parallel(&self) -> bool {
         self.parallel
+    }
+
+    /// Whether weights are in GPU-native Marlin format (v3 cache).
+    /// When true, GPU prefill can DMA copy weights directly — no repacking needed.
+    pub fn is_marlin_format(&self) -> PyResult<bool> {
+        let store = self.store.as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Model not loaded"))?;
+        Ok(store.marlin_format)
     }
 
     /// Whether unified weights are loaded.
@@ -1444,7 +1429,12 @@ mod tests {
 
         let mut scratch = ExpertScratch::new(hidden, intermediate, group_size);
 
-        expert_forward(&expert, &activation, &mut scratch, false);
+        // Pre-quantize activation for integer kernel
+        let mut act_int16 = vec![0i16; hidden];
+        let mut act_scales = vec![0.0f32; hidden / group_size];
+        quantize_activation_int16(&activation, group_size, &mut act_int16, &mut act_scales);
+
+        expert_forward_integer(&expert, &act_int16, &act_scales, &mut scratch, false);
 
         // Check output is non-zero and reasonable
         let mut sum_sq: f64 = 0.0;
@@ -1462,10 +1452,11 @@ mod tests {
     }
 
     #[test]
-    fn test_unified_forward_matches_original() {
-        // Compare expert_forward_unified vs expert_forward_integer on same weights.
-        let hidden = 256;
-        let intermediate = 128;
+    fn test_marlin_forward_matches_integer() {
+        // Compare expert_forward_unified (Marlin) vs expert_forward_integer on same weights.
+        // Dimensions must satisfy K > group_size for Marlin grouped scale permutation.
+        let hidden = 512;
+        let intermediate = 256;
         let group_size = 128;
 
         let mut gate_bf16 = vec![0u16; intermediate * hidden];
@@ -1486,8 +1477,8 @@ mod tests {
             down: QuantWeight::Int4(quantize_int4(&down_bf16, hidden, intermediate, group_size)),
         };
 
-        // Convert to unified
-        let unified = UnifiedExpertWeights::from_expert_weights(&expert);
+        // Convert to Marlin format
+        let marlin = UnifiedExpertWeights::from_expert_weights_marlin(&expert);
 
         // Synthetic activation
         let mut activation = vec![0u16; hidden];
@@ -1502,29 +1493,86 @@ mod tests {
         quantize_activation_int16(&activation, group_size, &mut act_int16, &mut act_scales);
         expert_forward_integer(&expert, &act_int16, &act_scales, &mut scratch_orig, false);
 
-        // Run unified kernel
-        let mut scratch_unified = ExpertScratch::new(hidden, intermediate, group_size);
-        expert_forward_unified(&unified, &act_int16, &act_scales, &mut scratch_unified, false);
+        // Run Marlin kernel
+        let mut scratch_marlin = ExpertScratch::new(hidden, intermediate, group_size);
+        expert_forward_unified(&marlin, &act_int16, &act_scales, &mut scratch_marlin, false);
 
         // Compare outputs
         let mut max_diff: f32 = 0.0;
         let mut max_rel_err: f64 = 0.0;
         for i in 0..hidden {
             let orig = scratch_orig.expert_out[i];
-            let uni = scratch_unified.expert_out[i];
-            let diff = (orig - uni).abs();
+            let mar = scratch_marlin.expert_out[i];
+            let diff = (orig - mar).abs();
             max_diff = max_diff.max(diff);
             let denom = orig.abs().max(1e-10);
             max_rel_err = max_rel_err.max((diff / denom) as f64);
         }
 
         eprintln!(
-            "Unified vs original: max_diff={max_diff:.6}, max_rel_err={max_rel_err:.6}"
+            "Marlin vs integer: max_diff={max_diff:.6}, max_rel_err={max_rel_err:.6}"
         );
-        // Transposed layout uses different kernel (mullo_epi32 vs madd_epi16),
+        // Different kernel implementations (Marlin tile-permuted vs madd_epi16),
         // so exact match is not expected, but should be very close.
         assert!(max_diff < 0.1, "Max diff too large: {max_diff}");
         assert!(max_rel_err < 0.1, "Max relative error too large: {max_rel_err}");
+    }
+
+    #[test]
+    fn test_marlin_forward_produces_output() {
+        // Verify Marlin-native forward produces reasonable (non-zero) outputs.
+        // Dimensions must satisfy: hidden % 128 == 0, intermediate % 128 == 0,
+        // AND both K dims must be > group_size (Marlin uses 64-element scale_perm for grouped).
+        let hidden = 512;
+        let intermediate = 256; // K_down=256 > group_size=128, 2*intermediate=512 for w13
+        let group_size = 128;
+
+        let mut gate_bf16 = vec![0u16; intermediate * hidden];
+        let mut up_bf16 = vec![0u16; intermediate * hidden];
+        let mut down_bf16 = vec![0u16; hidden * intermediate];
+
+        for i in 0..gate_bf16.len() {
+            gate_bf16[i] = f32_to_bf16((i as f32 / gate_bf16.len() as f32 - 0.5) * 0.1);
+            up_bf16[i] = f32_to_bf16((i as f32 / up_bf16.len() as f32 - 0.3) * 0.1);
+        }
+        for i in 0..down_bf16.len() {
+            down_bf16[i] = f32_to_bf16((i as f32 / down_bf16.len() as f32 - 0.5) * 0.1);
+        }
+
+        let expert = ExpertWeights {
+            gate: QuantWeight::Int4(quantize_int4(&gate_bf16, intermediate, hidden, group_size)),
+            up: QuantWeight::Int4(quantize_int4(&up_bf16, intermediate, hidden, group_size)),
+            down: QuantWeight::Int4(quantize_int4(&down_bf16, hidden, intermediate, group_size)),
+        };
+
+        let marlin = UnifiedExpertWeights::from_expert_weights_marlin(&expert);
+
+        // Synthetic activation
+        let mut activation = vec![0u16; hidden];
+        for i in 0..hidden {
+            activation[i] = f32_to_bf16(((i * 3 + 1) as f32 / hidden as f32 - 0.5) * 0.2);
+        }
+
+        let mut act_int16 = vec![0i16; hidden];
+        let mut act_scales = vec![0.0f32; hidden / group_size];
+        quantize_activation_int16(&activation, group_size, &mut act_int16, &mut act_scales);
+
+        // Run Marlin forward
+        let mut scratch = ExpertScratch::new(hidden, intermediate, group_size);
+        expert_forward_unified(&marlin, &act_int16, &act_scales, &mut scratch, false);
+
+        // Verify output is non-trivial
+        let mut rms: f64 = 0.0;
+        for &v in &scratch.expert_out[..hidden] {
+            rms += (v as f64).powi(2);
+        }
+        rms = (rms / hidden as f64).sqrt();
+
+        eprintln!(
+            "Marlin forward: output RMS={rms:.6}, out[0]={:.6}",
+            scratch.expert_out[0],
+        );
+        assert!(rms > 1e-6, "Output RMS too small: {rms}");
     }
 
     #[test]

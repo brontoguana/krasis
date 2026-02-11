@@ -286,6 +286,9 @@ class KrasisModel:
         else:
             self._estimated_expert_ram_gb = 0.0
 
+        # Start RAM watchdog BEFORE loading — protects during the entire load
+        self._start_ram_watchdog()
+
         # Phase 1: GPU weights
         logger.info("Phase 1: Loading GPU weights (streaming INT8)...")
         loader = WeightLoader(self.cfg, self.quant_cfg)
@@ -323,9 +326,6 @@ class KrasisModel:
         self._loaded = True
         total = time.perf_counter() - start
         logger.info("Model fully loaded in %.1fs", total)
-
-        # Start RAM watchdog thread
-        self._start_ram_watchdog()
 
     def _load_gpu_weights(self, loader: WeightLoader):
         """Stream-load all GPU weights layer by layer."""

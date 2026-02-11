@@ -290,6 +290,7 @@ class KrasisMoEWrapper:
                 n_shared_experts=n_shared,
                 routed_scaling_factor=routed_scale,
                 first_k_dense=first_k,
+                krasis_engine=cls._shared_engine,
             )
             cls._shared_gpu_prefill = manager
             logger.info("GPU prefill manager created (threshold=%d)", cls.gpu_prefill_threshold)

@@ -1197,6 +1197,383 @@ pub fn matmul_int4_transposed_integer_parallel(
     });
 }
 
+// ============================================================================
+// Marlin-native INT4 kernel — reads GPU-native Marlin-packed data directly
+// ============================================================================
+
+/// Precomputed mapping from Marlin packed positions to tile coordinates.
+///
+/// For each of the 1024 positions in a permutation chunk (128 u32 words × 8 INT4 values):
+/// - `k_off[i]`: K-offset within the 16-value tile (0..15)
+/// - `n_off[i]`: N-offset within the 64-value chunk (0..63)
+pub struct MarlinTileMap {
+    pub k_off: [u8; 1024],
+    pub n_off: [u8; 1024],
+}
+
+/// Precomputed inverse scale permutation for reading Marlin-permuted scales.
+pub struct MarlinScaleMap {
+    pub inv_perm: [usize; 64],
+}
+
+/// Build the Marlin tile map from the weight permutation table.
+///
+/// The weight permutation (from `generate_weight_perm_int4()`) maps packed positions
+/// to tile-transposed positions. Each entry `perm[i]` encodes:
+///   - `perm[i] / 256` = which N-tile within the 4-tile chunk (0..3)
+///   - `(perm[i] % 256) / 16` = K-offset within tile (0..15)
+///   - `perm[i] % 16` = N-offset within N-tile (0..15)
+pub fn build_marlin_tile_map() -> MarlinTileMap {
+    use crate::weights::marlin::generate_weight_perm_int4;
+    let perm = generate_weight_perm_int4();
+    let mut map = MarlinTileMap {
+        k_off: [0u8; 1024],
+        n_off: [0u8; 1024],
+    };
+    for i in 0..1024 {
+        let p = perm[i];
+        let nt_local = p / 256;        // which N-tile (0..3)
+        let tk = (p % 256) / 16;       // K-offset in tile (0..15)
+        let tn = p % 16;               // N-offset in N-tile (0..15)
+        map.k_off[i] = tk as u8;
+        map.n_off[i] = (nt_local * 16 + tn) as u8;
+    }
+    map
+}
+
+/// Build the inverse scale permutation for grouped quantization.
+pub fn build_marlin_scale_map() -> MarlinScaleMap {
+    use crate::weights::marlin::generate_scale_perms;
+    let (scale_perm, _) = generate_scale_perms();
+    let mut inv = [0usize; 64];
+    for i in 0..64 {
+        inv[scale_perm[i]] = i;
+    }
+    MarlinScaleMap { inv_perm: inv }
+}
+
+/// Read a single BF16 scale value from Marlin-permuted scale array.
+///
+/// Scales are stored as flat `[K/gs, N]` with 64-element permutation chunks.
+#[inline]
+fn read_marlin_scale(scales: &[u16], group: usize, n_pos: usize, n_total: usize, inv_sperm: &[usize; 64]) -> f32 {
+    let flat = group * n_total + n_pos;
+    let chunk = flat / 64;
+    let local = flat % 64;
+    bf16_to_f32(scales[chunk * 64 + inv_sperm[local]])
+}
+
+/// Scalar Marlin-native INT4 matmul for correctness verification.
+///
+/// Reads Marlin-packed `[K/16, 2*N]` weights and Marlin-permuted `[K/gs, N]` scales.
+/// Computes output[n] = Σ_k weight[k,n] × act[k] with per-group scaling.
+pub fn matmul_int4_marlin_scalar(
+    packed: &[u32],        // [K/16, 2*N] Marlin-packed
+    scales: &[u16],        // [K/gs, N] Marlin-permuted BF16
+    act_int16: &[i16],     // [K] INT16 activations
+    act_scales: &[f32],    // [K/gs] activation scales
+    output: &mut [f32],    // [N]
+    k: usize,
+    n: usize,
+    group_size: usize,
+) {
+    assert_eq!(act_int16.len(), k);
+    assert_eq!(act_scales.len(), k / group_size);
+    assert_eq!(output.len(), n);
+    assert!(k % 16 == 0, "K must be divisible by 16 (Marlin tile)");
+    assert!(n % 64 == 0, "N must be divisible by 64 (Marlin constraint)");
+    assert!(group_size % 16 == 0);
+
+    assert!(group_size < k, "Channelwise (group_size == K) not supported; Marlin uses different scale permutation");
+
+    let tile_map = build_marlin_tile_map();
+    let scale_map = build_marlin_scale_map();
+
+    let out_cols = 2 * n;  // packed row width in u32
+    let n_chunks = n / 64;
+    let tiles_per_group = group_size / 16;
+    let num_groups = k / group_size;
+
+    output.fill(0.0);
+
+    for nc in 0..n_chunks {
+        let n_base = nc * 64;
+
+        for group in 0..num_groups {
+            let mut int_acc = [0i32; 64];
+
+            for tile_in_group in 0..tiles_per_group {
+                let kt = group * tiles_per_group + tile_in_group;
+                let word_base = kt * out_cols + nc * 128;
+
+                for w in 0..128usize {
+                    let word = packed[word_base + w];
+                    for b in 0..8u32 {
+                        let idx = w * 8 + b as usize;
+                        let val = ((word >> (b * 4)) & 0xF) as i32 - 8;
+                        let tk = tile_map.k_off[idx] as usize;
+                        let n_off = tile_map.n_off[idx] as usize;
+                        let k_idx = kt * 16 + tk;
+                        int_acc[n_off] += val * act_int16[k_idx] as i32;
+                    }
+                }
+            }
+
+            // Apply scales: weight_scale * act_scale
+            let a_scale = act_scales[group];
+            for i in 0..64 {
+                let w_scale = read_marlin_scale(scales, group, n_base + i, n, &scale_map.inv_perm);
+                output[n_base + i] += int_acc[i] as f32 * w_scale * a_scale;
+            }
+        }
+    }
+}
+
+/// AVX2 Marlin-native INT4 matmul — production kernel.
+///
+/// Processes Marlin tiles: for each (K-group × N-chunk-of-64), unpacks 1024 INT4 values
+/// from 128 u32 words, applies the inverse permutation to get a clean [16, 64] tile,
+/// then accumulates integer products. Scale applied once per group.
+///
+/// # Arguments
+/// * `packed` - Marlin-packed weights `[K/16, 2*N]` u32
+/// * `scales` - Marlin-permuted scales `[K/gs, N]` BF16
+/// * `act_int16` - INT16-quantized activations `[K]`
+/// * `act_scales` - Per-group activation scales `[K/gs]`
+/// * `output` - Output buffer `[n_out]`
+/// * `k` - Reduction dimension (K)
+/// * `n_stride` - Full N dimension of the weight matrix
+/// * `n_start` - Starting N offset for this chunk
+/// * `n_out` - Number of N outputs to compute
+/// * `group_size` - Quantization group size
+/// * `tile_map` - Precomputed Marlin tile map
+/// * `scale_map` - Precomputed inverse scale permutation
+pub unsafe fn expert_matmul_int4_marlin(
+    packed: *const u32,
+    scales: *const u16,
+    act_int16: *const i16,
+    act_scales: *const f32,
+    output: *mut f32,
+    k: usize,
+    n_stride: usize,
+    n_start: usize,
+    n_out: usize,
+    group_size: usize,
+    tile_map: &MarlinTileMap,
+    scale_map: &MarlinScaleMap,
+) {
+    let out_cols = 2 * n_stride;
+    let tiles_per_group = group_size / 16;
+    let num_groups = k / group_size;
+
+    // Process 64 N-positions at a time (one permutation chunk)
+    let n_full_chunks = n_out / 64;
+    let n_rem = n_out % 64;
+
+    for nc_local in 0..n_full_chunks {
+        let n_base = n_start + nc_local * 64;
+        let nc_in_full = n_base / 64; // chunk index in the full N dimension
+
+        // Float accumulators for this N-chunk (8 × __m256 = 64 f32)
+        let mut float_acc = [_mm256_setzero_ps(); 8];
+
+        for group in 0..num_groups {
+            // Integer accumulators: 8 × __m256i = 64 i32 values
+            let mut int_acc = [_mm256_setzero_si256(); 8];
+
+            for tile_in_group in 0..tiles_per_group {
+                let kt = group * tiles_per_group + tile_in_group;
+                let word_base = kt * out_cols + nc_in_full * 128;
+
+                // Unpack + accumulate: process 128 u32 words for this tile
+                // Each word has 8 INT4 values mapped via tile_map to (k_off, n_off)
+                for w in 0..128usize {
+                    let word = *packed.add(word_base + w);
+                    for b in 0..8u32 {
+                        let idx = w * 8 + b as usize;
+                        let val = ((word >> (b * 4)) & 0xF) as i32 - 8;
+                        let tk = *tile_map.k_off.get_unchecked(idx) as usize;
+                        let n_off = *tile_map.n_off.get_unchecked(idx) as usize;
+                        let k_idx = kt * 16 + tk;
+                        let act_val = *act_int16.add(k_idx) as i32;
+
+                        // Accumulate into the right position in int_acc
+                        let acc_idx = n_off / 8;
+                        let lane = n_off % 8;
+                        // Scalar accumulation into the SIMD accumulator's lane
+                        let acc_arr = &mut int_acc[acc_idx] as *mut __m256i as *mut i32;
+                        *acc_arr.add(lane) += val * act_val;
+                    }
+                }
+            }
+
+            // Apply scales: weight_scale[group, n] * act_scale[group]
+            let a_scale = *act_scales.add(group);
+            let a_scale_vec = _mm256_set1_ps(a_scale);
+
+            for i in 0..8 {
+                let n_pos_base = n_base + i * 8;
+
+                // Load 8 weight scales for this group and N-positions
+                let mut w_scales = [0.0f32; 8];
+                for j in 0..8 {
+                    let n_pos = n_pos_base + j;
+                    let flat = group * n_stride + n_pos;
+                    let chunk = flat / 64;
+                    let local = flat % 64;
+                    let perm_idx = *scale_map.inv_perm.get_unchecked(local);
+                    w_scales[j] = bf16_to_f32(*scales.add(chunk * 64 + perm_idx));
+                }
+                let w_scale_vec = _mm256_loadu_ps(w_scales.as_ptr());
+                let combined = _mm256_mul_ps(w_scale_vec, a_scale_vec);
+
+                // Convert int_acc to f32 and FMA into float_acc
+                let int_f32 = _mm256_cvtepi32_ps(int_acc[i]);
+                float_acc[i] = _mm256_fmadd_ps(int_f32, combined, float_acc[i]);
+            }
+
+            // Reset integer accumulators for next group
+            for i in 0..8 {
+                int_acc[i] = _mm256_setzero_si256();
+            }
+        }
+
+        // Store results
+        for i in 0..8 {
+            _mm256_storeu_ps(output.add(nc_local * 64 + i * 8), float_acc[i]);
+        }
+    }
+
+    // Handle remainder N positions (if N not divisible by 64 — shouldn't happen for Marlin)
+    if n_rem > 0 {
+        let n_base = n_start + n_full_chunks * 64;
+        for i in 0..n_rem {
+            let n_pos = n_base + i;
+            let mut acc = 0.0f32;
+
+            for group in 0..num_groups {
+                // Fall back to looking up individual values via dequantize logic
+                let a_scale = *act_scales.add(group);
+                let flat_scale = group * n_stride + n_pos;
+                let chunk = flat_scale / 64;
+                let local = flat_scale % 64;
+                let perm_idx = scale_map.inv_perm[local];
+                let w_scale = bf16_to_f32(*scales.add(chunk * 64 + perm_idx));
+
+                let mut group_sum = 0i32;
+                for ki in 0..group_size {
+                    let k_abs = group * group_size + ki;
+                    // Need to find this (k_abs, n_pos) in Marlin layout — expensive, only for remainder
+                    // Use dequantize_marlin logic
+                    let kt = k_abs / 16;
+                    let _tk = k_abs % 16;
+                    // This is complex for remainder — but N % 64 == 0 for Marlin, so this never runs
+                    let _ = kt;
+                    group_sum += 0; // placeholder — Marlin requires N % 64 == 0
+                }
+                acc += group_sum as f32 * w_scale * a_scale;
+            }
+            *output.add(n_full_chunks * 64 + i) = acc;
+        }
+    }
+}
+
+/// Safe wrapper for Marlin-native INT4 matmul (sequential).
+pub fn matmul_int4_marlin(
+    packed: &[u32],
+    scales: &[u16],
+    act_int16: &[i16],
+    act_scales: &[f32],
+    output: &mut [f32],
+    k: usize,
+    n: usize,
+    group_size: usize,
+    tile_map: &MarlinTileMap,
+    scale_map: &MarlinScaleMap,
+) {
+    assert_eq!(act_int16.len(), k);
+    assert_eq!(act_scales.len(), k / group_size);
+    assert_eq!(output.len(), n);
+    assert!(k % 16 == 0);
+    assert!(n % 64 == 0);
+    assert!(group_size % 16 == 0);
+
+    if !is_x86_feature_detected!("avx2") || !is_x86_feature_detected!("fma") {
+        panic!("AVX2 + FMA required");
+    }
+
+    unsafe {
+        expert_matmul_int4_marlin(
+            packed.as_ptr(), scales.as_ptr(), act_int16.as_ptr(),
+            act_scales.as_ptr(), output.as_mut_ptr(),
+            k, n, 0, n, group_size, tile_map, scale_map,
+        );
+    }
+}
+
+/// Safe wrapper for Marlin-native INT4 matmul (parallel across N dimension).
+pub fn matmul_int4_marlin_parallel(
+    packed: &[u32],
+    scales: &[u16],
+    act_int16: &[i16],
+    act_scales: &[f32],
+    output: &mut [f32],
+    k: usize,
+    n: usize,
+    group_size: usize,
+    tile_map: &MarlinTileMap,
+    scale_map: &MarlinScaleMap,
+) {
+    use rayon::prelude::*;
+
+    assert_eq!(act_int16.len(), k);
+    assert_eq!(act_scales.len(), k / group_size);
+    assert_eq!(output.len(), n);
+    assert!(k % 16 == 0);
+    assert!(n % 64 == 0);
+    assert!(group_size % 16 == 0);
+
+    if !is_x86_feature_detected!("avx2") || !is_x86_feature_detected!("fma") {
+        panic!("AVX2 + FMA required");
+    }
+
+    if n <= 64 {
+        unsafe {
+            expert_matmul_int4_marlin(
+                packed.as_ptr(), scales.as_ptr(), act_int16.as_ptr(),
+                act_scales.as_ptr(), output.as_mut_ptr(),
+                k, n, 0, n, group_size, tile_map, scale_map,
+            );
+        }
+        return;
+    }
+
+    let chunk_n = 256; // Must be multiple of 64
+    let packed_addr = packed.as_ptr() as usize;
+    let scales_addr = scales.as_ptr() as usize;
+    let act_addr = act_int16.as_ptr() as usize;
+    let act_scales_addr = act_scales.as_ptr() as usize;
+
+    output.par_chunks_mut(chunk_n).enumerate().for_each(|(chunk_idx, chunk)| {
+        let n_start = chunk_idx * chunk_n;
+        let n_count = chunk.len();
+        // n_count should always be multiple of 64 since N % 64 == 0 and chunk_n % 64 == 0
+        assert!(n_count % 64 == 0);
+
+        unsafe {
+            expert_matmul_int4_marlin(
+                packed_addr as *const u32,
+                scales_addr as *const u16,
+                act_addr as *const i16,
+                act_scales_addr as *const f32,
+                chunk.as_mut_ptr(),
+                k, n, n_start, n_count, group_size,
+                tile_map, scale_map,
+            );
+        }
+    });
+}
+
 /// Transpose a QuantizedInt4 from [N, K/8] layout to [K/8, N] layout.
 ///
 /// Used to convert from the original row-major format to the transposed format
@@ -1968,5 +2345,222 @@ mod tests {
             .fold(0.0f32, f32::max);
         eprintln!("Transposed integer parallel vs serial: max_diff={max_diff_int:.8}");
         assert!(max_diff_int == 0.0, "Transposed integer parallel should be bit-identical");
+    }
+
+    #[test]
+    fn test_marlin_kernel_matches_transposed() {
+        use crate::weights::marlin::marlin_repack;
+
+        // N=64 (minimum Marlin), K=256 (two groups — ensures is_grouped=true for Marlin scale_perm)
+        // NOTE: group_size must be < K for grouped quantization (scale_perm_64),
+        // otherwise Marlin uses scale_perm_single_32 which the kernel handles separately.
+        let n = 64;
+        let k = 256;
+        let group_size = 128;
+
+        let mut weight_bf16 = vec![0u16; n * k];
+        for i in 0..weight_bf16.len() {
+            let val = ((i * 37 + 11) as f32 / weight_bf16.len() as f32 - 0.5) * 0.2;
+            weight_bf16[i] = f32_to_bf16(val);
+        }
+
+        let mut activation = vec![0u16; k];
+        for i in 0..k {
+            let val = ((i * 7 + 3) as f32 / k as f32 - 0.5) * 0.3;
+            activation[i] = f32_to_bf16(val);
+        }
+
+        let q = quantize_int4(&weight_bf16, n, k, group_size);
+
+        // Transposed kernel (existing, known-correct)
+        let (t_packed, t_scales) = transpose_int4(&q);
+        let mut act_int16 = vec![0i16; k];
+        let mut act_scales_vec = vec![0.0f32; k / group_size];
+        quantize_activation_int16(&activation, group_size, &mut act_int16, &mut act_scales_vec);
+
+        let mut transposed_out = vec![0.0f32; n];
+        matmul_int4_transposed_integer(
+            &t_packed, &t_scales, &act_int16, &act_scales_vec, &mut transposed_out, k, n, group_size,
+        );
+
+        // Scalar Marlin kernel (simpler, for debugging)
+        let m = marlin_repack(&q);
+
+        let mut scalar_out = vec![0.0f32; n];
+        matmul_int4_marlin_scalar(
+            &m.packed, &m.scales, &act_int16, &act_scales_vec,
+            &mut scalar_out, k, n, group_size,
+        );
+
+        eprintln!("ref[0..5]:    {:?}", &transposed_out[0..5]);
+        eprintln!("scalar[0..5]: {:?}", &scalar_out[0..5]);
+
+        let mut max_diff_scalar: f32 = 0.0;
+        for i in 0..n {
+            let diff = (transposed_out[i] - scalar_out[i]).abs();
+            max_diff_scalar = max_diff_scalar.max(diff);
+        }
+        eprintln!("Marlin SCALAR vs transposed [{n}×{k}]: max_diff={max_diff_scalar:.8}");
+        assert!(max_diff_scalar < 0.001, "Scalar Marlin should match transposed: max_diff={max_diff_scalar}");
+    }
+
+    #[test]
+    fn test_marlin_kernel_scalar_matches_avx2() {
+        use crate::weights::marlin::marlin_repack;
+
+        let n = 64;
+        let k = 256;
+        let group_size = 128;
+
+        let mut weight_bf16 = vec![0u16; n * k];
+        for i in 0..weight_bf16.len() {
+            let val = ((i * 13 + 5) as f32 / weight_bf16.len() as f32 - 0.5) * 0.3;
+            weight_bf16[i] = f32_to_bf16(val);
+        }
+
+        let mut activation = vec![0u16; k];
+        for i in 0..k {
+            let val = ((i * 19 + 7) as f32 / k as f32 - 0.5) * 0.4;
+            activation[i] = f32_to_bf16(val);
+        }
+
+        let q = quantize_int4(&weight_bf16, n, k, group_size);
+        let m = marlin_repack(&q);
+
+        let mut act_int16 = vec![0i16; k];
+        let mut act_scales_vec = vec![0.0f32; k / group_size];
+        quantize_activation_int16(&activation, group_size, &mut act_int16, &mut act_scales_vec);
+
+        let tile_map = build_marlin_tile_map();
+        let scale_map = build_marlin_scale_map();
+
+        // Scalar Marlin
+        let mut scalar_out = vec![0.0f32; n];
+        matmul_int4_marlin_scalar(
+            &m.packed, &m.scales, &act_int16, &act_scales_vec,
+            &mut scalar_out, k, n, group_size,
+        );
+
+        // AVX2 Marlin
+        let mut avx2_out = vec![0.0f32; n];
+        matmul_int4_marlin(
+            &m.packed, &m.scales, &act_int16, &act_scales_vec,
+            &mut avx2_out, k, n, group_size, &tile_map, &scale_map,
+        );
+
+        let mut max_diff: f32 = 0.0;
+        for i in 0..n {
+            let diff = (scalar_out[i] - avx2_out[i]).abs();
+            max_diff = max_diff.max(diff);
+        }
+
+        eprintln!("Marlin scalar vs AVX2 [{n}×{k}]: max_diff={max_diff:.8}");
+        // Precision difference from FMA ordering: scalar does (x * ws) * as,
+        // AVX2 does x * (ws * as) + acc via FMA. ~0.0003 is expected.
+        assert!(max_diff < 0.001, "Marlin AVX2 should match scalar closely: max_diff={max_diff}");
+    }
+
+    #[test]
+    fn test_marlin_kernel_large() {
+        use crate::weights::marlin::marlin_repack;
+
+        // Realistic size: V2-Lite gate_proj dimensions
+        let n = 1408;
+        let k = 2048;
+        let group_size = 128;
+
+        let mut weight_bf16 = vec![0u16; n * k];
+        for i in 0..weight_bf16.len() {
+            let val = ((i * 37 + 11) as f32 / weight_bf16.len() as f32 - 0.5) * 0.1;
+            weight_bf16[i] = f32_to_bf16(val);
+        }
+
+        let mut activation = vec![0u16; k];
+        for i in 0..k {
+            let val = ((i * 7 + 3) as f32 / k as f32 - 0.5) * 0.2;
+            activation[i] = f32_to_bf16(val);
+        }
+
+        let q = quantize_int4(&weight_bf16, n, k, group_size);
+
+        // Transposed kernel (reference)
+        let (t_packed, t_scales) = transpose_int4(&q);
+        let mut act_int16 = vec![0i16; k];
+        let mut act_scales_vec = vec![0.0f32; k / group_size];
+        quantize_activation_int16(&activation, group_size, &mut act_int16, &mut act_scales_vec);
+
+        let mut ref_out = vec![0.0f32; n];
+        matmul_int4_transposed_integer(
+            &t_packed, &t_scales, &act_int16, &act_scales_vec, &mut ref_out, k, n, group_size,
+        );
+
+        // Marlin kernel
+        let m = marlin_repack(&q);
+        let tile_map = build_marlin_tile_map();
+        let scale_map = build_marlin_scale_map();
+
+        let mut marlin_out = vec![0.0f32; n];
+        matmul_int4_marlin(
+            &m.packed, &m.scales, &act_int16, &act_scales_vec,
+            &mut marlin_out, k, n, group_size, &tile_map, &scale_map,
+        );
+
+        let mut max_diff: f32 = 0.0;
+        for i in 0..n {
+            let diff = (ref_out[i] - marlin_out[i]).abs();
+            max_diff = max_diff.max(diff);
+        }
+
+        eprintln!("Marlin kernel large [{n}×{k}]: max_diff={max_diff:.8}");
+        assert!(max_diff == 0.0, "Marlin kernel large should match transposed exactly: max_diff={max_diff}");
+    }
+
+    #[test]
+    fn test_marlin_kernel_parallel() {
+        use crate::weights::marlin::marlin_repack;
+
+        let n = 1408;
+        let k = 2048;
+        let group_size = 128;
+
+        let mut weight_bf16 = vec![0u16; n * k];
+        for i in 0..weight_bf16.len() {
+            let val = ((i * 37 + 11) as f32 / weight_bf16.len() as f32 - 0.5) * 0.1;
+            weight_bf16[i] = f32_to_bf16(val);
+        }
+
+        let mut activation = vec![0u16; k];
+        for i in 0..k {
+            let val = ((i * 7 + 3) as f32 / k as f32 - 0.5) * 0.2;
+            activation[i] = f32_to_bf16(val);
+        }
+
+        let q = quantize_int4(&weight_bf16, n, k, group_size);
+        let m = marlin_repack(&q);
+
+        let mut act_int16 = vec![0i16; k];
+        let mut act_scales_vec = vec![0.0f32; k / group_size];
+        quantize_activation_int16(&activation, group_size, &mut act_int16, &mut act_scales_vec);
+
+        let tile_map = build_marlin_tile_map();
+        let scale_map = build_marlin_scale_map();
+
+        let mut serial_out = vec![0.0f32; n];
+        matmul_int4_marlin(
+            &m.packed, &m.scales, &act_int16, &act_scales_vec,
+            &mut serial_out, k, n, group_size, &tile_map, &scale_map,
+        );
+
+        let mut parallel_out = vec![0.0f32; n];
+        matmul_int4_marlin_parallel(
+            &m.packed, &m.scales, &act_int16, &act_scales_vec,
+            &mut parallel_out, k, n, group_size, &tile_map, &scale_map,
+        );
+
+        let max_diff: f32 = (0..n)
+            .map(|i| (serial_out[i] - parallel_out[i]).abs())
+            .fold(0.0f32, f32::max);
+        eprintln!("Marlin parallel vs serial [{n}×{k}]: max_diff={max_diff:.8}");
+        assert!(max_diff == 0.0, "Marlin parallel should be bit-identical to serial");
     }
 }
