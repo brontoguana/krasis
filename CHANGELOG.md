@@ -13,6 +13,36 @@ Re-run needed after: any change to `src/`, `python/krasis/`, or test files.
 
 ---
 
+## Streaming Unified Cache Conversion — 2026-02-11
+
+### Problem
+First-run conversion (safetensors → unified cache) held ~488 GB in RAM throughout,
+causing `systemd-oomd` kill at 979 GB RSS for Kimi K2.5.
+
+### Fix: Streaming One-Layer-at-a-Time Conversion
+New `streaming_build_unified_cache()` processes one MoE layer at a time:
+- Load expert weights from safetensors (mmap, near-zero base RSS)
+- Convert to unified format via `from_expert_weights()`
+- Write to v2 cache file via BufWriter
+- Drop all layer data immediately
+
+New `streaming_v1_to_unified_cache()` does the same for v1→v2 conversion using mmap'd v1 cache.
+
+Both paths end with `load_cache_unified()` to load the complete v2 cache from disk.
+
+**Peak RAM during conversion:** ~16 GB (one layer) instead of ~488 GB (all layers).
+
+Extracted `write_unified_cache_header()` helper shared by all cache writers.
+
+Modified `load_from_hf()` to use streaming paths for full INT4 loads (Path B: v1→v2, Path C: safetensors→v2).
+Original `load_and_quantize_all()` + `convert_to_unified()` kept for partial loads and INT8.
+
+### Verified
+- V2-Lite streaming build: RSS stayed at ~27 GB (mmap page cache, not allocations)
+- 41/41 Rust tests pass (including delete-cache-and-rebuild)
+
+---
+
 ## On-the-fly GPU Repack + RAM Safety — 2026-02-11
 
 ### OOM Root Cause
