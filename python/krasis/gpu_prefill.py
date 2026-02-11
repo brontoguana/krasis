@@ -202,7 +202,10 @@ class GpuPrefillManager:
         the first forward() call.
         """
         if self._engine is not None:
-            logger.info("Engine path: GPU prefill uses on-the-fly Marlin repack (zero RAM cache)")
+            if self._engine.is_marlin_format:
+                logger.info("Engine path: Marlin-native DMA copy (zero conversion, zero RAM cache)")
+            else:
+                logger.info("Engine path: GPU prefill uses on-the-fly Marlin repack (zero RAM cache)")
             return
 
         first_k = self.first_k_dense
@@ -645,15 +648,14 @@ class GpuPrefillManager:
         chunk_start: int,
         chunk_end: int,
     ):
-        """Get raw INT4 packed data from Rust engine for a chunk of experts,
-        repack to Marlin format on GPU, and load into GPU buffer.
+        """Get expert weight data from Rust engine and load into GPU buffer.
 
-        This is called per-chunk during forward() with ZERO caching.
+        Marlin-native path: DMA copy directly (zero conversion).
+        Legacy path: repack from old transposed format to Marlin on GPU.
+
+        Called per-chunk during forward() with ZERO caching.
         Temporary CPU data is freed immediately after GPU upload.
         """
-        from sglang.srt.layers.quantization.gptq import gptq_marlin_repack
-        from sglang.srt.layers.quantization.marlin_utils import marlin_permute_scales
-
         K = self.hidden_size
         N = self.intermediate_size
         gs = self._engine.group_size()
@@ -665,7 +667,33 @@ class GpuPrefillManager:
         w2_packed_bytes = self._engine.get_expert_w2_packed(moe_layer_idx, chunk_start, chunk_end)
         w2_scales_bytes = self._engine.get_expert_w2_scales(moe_layer_idx, chunk_start, chunk_end)
 
-        # Reshape into CPU tensors
+        nb2 = self.num_bits // 2  # 2 for INT4, 4 for INT8
+
+        if self._engine.is_marlin_format:
+            # Marlin-native: data is already GPU-ready, just DMA copy
+            w13_packed = torch.frombuffer(
+                bytearray(w13_packed_bytes), dtype=torch.int32
+            ).reshape(actual, K // 16, 2 * N * nb2)
+            w13_scales = torch.frombuffer(
+                bytearray(w13_scales_bytes), dtype=torch.bfloat16
+            ).reshape(actual, K // gs, 2 * N)
+            w2_packed = torch.frombuffer(
+                bytearray(w2_packed_bytes), dtype=torch.int32
+            ).reshape(actual, N // 16, K * nb2)
+            w2_scales = torch.frombuffer(
+                bytearray(w2_scales_bytes), dtype=torch.bfloat16
+            ).reshape(actual, N // gs, K)
+
+            self._gpu_w13_packed[:actual].copy_(w13_packed)
+            self._gpu_w13_scale[:actual].copy_(w13_scales)
+            self._gpu_w2_packed[:actual].copy_(w2_packed)
+            self._gpu_w2_scale[:actual].copy_(w2_scales)
+            return
+
+        # Legacy path: old transposed format → repack to Marlin on GPU
+        from sglang.srt.layers.quantization.gptq import gptq_marlin_repack
+        from sglang.srt.layers.quantization.marlin_utils import marlin_permute_scales
+
         w13_packed_cpu = torch.frombuffer(
             bytearray(w13_packed_bytes), dtype=torch.int32
         ).reshape(actual, K // 8, 2 * N)
@@ -708,7 +736,7 @@ class GpuPrefillManager:
         topk_weights: torch.Tensor,
         debug_sync: bool,
     ) -> torch.Tensor:
-        """Forward using on-the-fly Marlin repack from Rust engine. Zero RAM cache."""
+        """Forward using engine weights. Marlin-native: DMA copy. Legacy: on-the-fly repack."""
         from sglang.srt.layers.moe.fused_moe_triton.fused_marlin_moe import (
             fused_marlin_moe,
         )
@@ -908,16 +936,37 @@ class GpuPrefillManager:
         return output
 
     def _repack_shared_expert(self, moe_layer_idx: int):
-        """Repack shared expert from engine to Marlin on GPU. No caching."""
-        from sglang.srt.layers.quantization.gptq import gptq_marlin_repack
-        from sglang.srt.layers.quantization.marlin_utils import marlin_permute_scales
+        """Get shared expert weights from engine and prepare for GPU.
 
+        Marlin-native: reshape and DMA copy directly (zero conversion).
+        Legacy: repack from old transposed format to Marlin on GPU.
+        """
         K = self.hidden_size
-        # Shared expert intermediate = n_shared_experts * intermediate_size
         shared_N = self.n_shared_experts * self.intermediate_size
         gs = self._engine.group_size()
+        nb2 = self.num_bits // 2  # 2 for INT4
 
         w13p_bytes, w13s_bytes, w2p_bytes, w2s_bytes = self._engine.get_shared_expert_weights(moe_layer_idx)
+
+        if self._engine.is_marlin_format:
+            # Marlin-native: data is already GPU-ready
+            w13_packed = torch.frombuffer(
+                bytearray(w13p_bytes), dtype=torch.int32
+            ).reshape(1, K // 16, 2 * shared_N * nb2).to(self.device)
+            w13_scale = torch.frombuffer(
+                bytearray(w13s_bytes), dtype=torch.bfloat16
+            ).reshape(1, K // gs, 2 * shared_N).to(self.device)
+            w2_packed = torch.frombuffer(
+                bytearray(w2p_bytes), dtype=torch.int32
+            ).reshape(1, shared_N // 16, K * nb2).to(self.device)
+            w2_scale = torch.frombuffer(
+                bytearray(w2s_bytes), dtype=torch.bfloat16
+            ).reshape(1, shared_N // gs, K).to(self.device)
+            return w13_packed, w13_scale, w2_packed, w2_scale
+
+        # Legacy path: repack to Marlin on GPU
+        from sglang.srt.layers.quantization.gptq import gptq_marlin_repack
+        from sglang.srt.layers.quantization.marlin_utils import marlin_permute_scales
 
         w13p = torch.frombuffer(bytearray(w13p_bytes), dtype=torch.int32).reshape(K // 8, 2 * shared_N)
         w13s = torch.frombuffer(bytearray(w13s_bytes), dtype=torch.bfloat16).reshape(K // gs, 2 * shared_N)

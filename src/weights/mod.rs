@@ -271,6 +271,52 @@ impl UnifiedExpertWeights {
         }
     }
 
+    /// Convert from separate gate/up/down ExpertWeights to GPU-native Marlin format.
+    ///
+    /// Combines gate+up into w13 [2*N, K], then Marlin-repacks both w13 and w2.
+    /// Result is GPU-native Marlin INT4: same bytes on disk, in RAM, on GPU.
+    pub fn from_expert_weights_marlin(ew: &ExpertWeights) -> Self {
+        use crate::weights::marlin::marlin_repack;
+
+        let gate = ew.gate.as_int4();
+        let up = ew.up.as_int4();
+        let down = ew.down.as_int4();
+
+        let hidden = gate.cols;       // K for w13
+        let intermediate = gate.rows; // N per gate/up
+        let group_size = gate.group_size;
+
+        // Combine gate+up into single QuantizedInt4 [2*N, K]
+        let mut combined_packed = Vec::with_capacity(gate.packed.len() + up.packed.len());
+        combined_packed.extend_from_slice(&gate.packed);
+        combined_packed.extend_from_slice(&up.packed);
+
+        let mut combined_scales = Vec::with_capacity(gate.scales.len() + up.scales.len());
+        combined_scales.extend_from_slice(&gate.scales);
+        combined_scales.extend_from_slice(&up.scales);
+
+        let combined = QuantizedInt4 {
+            packed: combined_packed,
+            scales: combined_scales,
+            rows: 2 * intermediate,
+            cols: hidden,
+            group_size,
+        };
+
+        let w13 = marlin_repack(&combined);
+        let w2 = marlin_repack(down);
+
+        UnifiedExpertWeights {
+            w13_packed: w13.packed,
+            w13_scales: w13.scales,
+            w2_packed: w2.packed,
+            w2_scales: w2.scales,
+            hidden_size: hidden,
+            intermediate_size: intermediate,
+            group_size,
+        }
+    }
+
     /// Total bytes of weight data (packed + scales for w13 + w2).
     pub fn data_bytes(&self) -> usize {
         self.w13_packed.len() * 4 + self.w13_scales.len() * 2
@@ -289,8 +335,8 @@ pub struct WeightStore {
     /// Shared expert is a single concatenated MLP with
     /// intermediate_size = n_shared_experts × moe_intermediate_size.
     pub shared_experts: Vec<ExpertWeights>,
-    /// Unified expert weights (transposed, combined w13 format).
-    /// Primary format for CPU decode. Populated after load via convert_to_unified().
+    /// Unified expert weights (Marlin-native format).
+    /// Primary format for CPU decode. Populated during cache loading.
     pub experts_unified: Vec<Vec<UnifiedExpertWeights>>,
     /// Unified shared expert weights.
     pub shared_experts_unified: Vec<UnifiedExpertWeights>,
@@ -300,6 +346,8 @@ pub struct WeightStore {
     pub group_size: usize,
     /// Quantization bit width (4 or 8).
     pub num_bits: u8,
+    /// Whether weights are in GPU-native Marlin format (v3 cache) vs old transposed format (v2).
+    pub marlin_format: bool,
 }
 
 /// Safetensors shard index: maps tensor names to shard filenames.
@@ -331,7 +379,7 @@ struct SafetensorsIndex {
 
 const CACHE_MAGIC: &[u8; 4] = b"KRAS";
 const CACHE_VERSION: u32 = 1;
-const CACHE_VERSION_UNIFIED: u32 = 2;
+const CACHE_VERSION_MARLIN: u32 = 3;
 const CACHE_HEADER_SIZE: usize = 64;
 
 /// FNV-1a hash for cache invalidation.
@@ -351,11 +399,11 @@ fn cache_path(model_dir: &Path, num_bits: u8, group_size: usize) -> PathBuf {
         .join(format!("experts_int{num_bits}_g{group_size}.bin"))
 }
 
-/// Cache file path for v2 unified format (combined w13, transposed [K/8, N] layout).
-fn cache_path_unified(model_dir: &Path, num_bits: u8, group_size: usize) -> PathBuf {
+/// Cache file path for v3 Marlin format (GPU-native Marlin INT4, THE ONLY FORMAT).
+fn cache_path_marlin(model_dir: &Path, group_size: usize) -> PathBuf {
     model_dir
         .join(".krasis_cache")
-        .join(format!("experts_unified_int{num_bits}_g{group_size}.bin"))
+        .join(format!("experts_marlin_g{group_size}.bin"))
 }
 
 /// Compute per-expert byte sizes for unified format.
@@ -447,6 +495,7 @@ impl WeightStore {
             },
             group_size: DEFAULT_GROUP_SIZE,
             num_bits: 4,
+            marlin_format: false,
         }
     }
 }
@@ -512,71 +561,109 @@ impl WeightStore {
         let cache_gs = effective_gs_hint.unwrap_or(group_size);
         let partial = max_layers.is_some() || start_layer.is_some();
 
-        // ── INT4: try v2 unified cache (supports both full and partial/range loads) ──
+        // ── INT4: try v3 Marlin cache first (GPU-native format, THE ONLY FORMAT) ──
         if num_bits == 4 {
-            let upath = cache_path_unified(model_dir, num_bits, cache_gs);
+            let mpath = cache_path_marlin(model_dir, cache_gs);
 
-            // Ensure cache exists: build or wait if another process is building
-            if !upath.exists() {
-                // Try v1 → v2 streaming conversion first
-                let v1path = cache_path(model_dir, num_bits, cache_gs);
-                if v1path.exists() {
-                    log::info!("Found v1 cache, converting to v2 unified format...");
-                    match Self::streaming_v1_to_unified_cache(
-                        model_dir, &config, cache_gs, total_moe_layers, &v1path, &upath, config_hash,
-                    ) {
-                        Ok(()) => log::info!("v1→v2 conversion complete"),
-                        Err(e) => log::warn!("v1→v2 conversion failed: {e}"),
+            // Try loading v3 Marlin cache
+            if mpath.exists() {
+                match Self::load_marlin_cache(
+                    &mpath, &config, cache_gs, total_moe_layers, config_hash,
+                    moe_start, num_moe_layers,
+                ) {
+                    Ok(store) => {
+                        let elapsed = start.elapsed();
+                        log::info!(
+                            "Loaded from MARLIN cache in {:.1}s: layers [{}-{}), {} experts (+ {} shared)",
+                            elapsed.as_secs_f64(),
+                            moe_start, moe_start + num_moe_layers,
+                            config.n_routed_experts,
+                            store.shared_experts_unified.len(),
+                        );
+                        return Ok(store);
                     }
-                }
-
-                // Still no cache? Build from safetensors (with lock for multi-process safety)
-                if !upath.exists() {
-                    let built_gs = Self::build_unified_cache_locked(
-                        model_dir, &config, group_size, total_moe_layers, &upath, config_hash,
-                    )?;
-                    // Handle effective_group_size mismatch (rename if needed)
-                    if built_gs != cache_gs {
-                        let actual_upath = cache_path_unified(model_dir, num_bits, built_gs);
-                        if actual_upath.exists() && actual_upath != upath {
-                            log::info!(
-                                "Cache built with group_size={built_gs} (detected), loading from {}",
-                                actual_upath.display(),
-                            );
-                        }
-                    }
+                    Err(e) => log::warn!("Marlin cache invalid (gs={}): {e}", cache_gs),
                 }
             }
 
-            // Try loading the range from the v2 cache
-            // Check both cache_gs path and common group sizes in case detection differed
-            for try_gs in &[cache_gs, group_size, 32, 64, 128] {
-                let try_path = cache_path_unified(model_dir, num_bits, *try_gs);
+            // Also check other group sizes for v3 Marlin cache
+            for try_gs in &[group_size, 32, 64, 128] {
+                if *try_gs == cache_gs { continue; }
+                let try_path = cache_path_marlin(model_dir, *try_gs);
                 if try_path.exists() {
-                    match Self::load_cache_unified(
+                    match Self::load_marlin_cache(
                         &try_path, &config, *try_gs, total_moe_layers, config_hash,
                         moe_start, num_moe_layers,
                     ) {
                         Ok(store) => {
                             let elapsed = start.elapsed();
                             log::info!(
-                                "Loaded from unified cache in {:.1}s: layers [{}-{}), {} experts (+ {} shared)",
+                                "Loaded from MARLIN cache in {:.1}s (gs={}): layers [{}-{})",
+                                elapsed.as_secs_f64(), try_gs,
+                                moe_start, moe_start + num_moe_layers,
+                            );
+                            return Ok(store);
+                        }
+                        Err(_) => {}
+                    }
+                }
+            }
+
+            // No v3 Marlin cache — build it from safetensors
+            if !mpath.exists() {
+                log::info!("No v3 Marlin cache found, building from safetensors...");
+                let built_gs = Self::build_marlin_cache_locked(
+                    model_dir, &config, group_size, total_moe_layers, &mpath, config_hash,
+                )?;
+                // Handle effective_group_size mismatch
+                if built_gs != cache_gs {
+                    let actual_mpath = cache_path_marlin(model_dir, built_gs);
+                    if actual_mpath.exists() {
+                        match Self::load_marlin_cache(
+                            &actual_mpath, &config, built_gs, total_moe_layers, config_hash,
+                            moe_start, num_moe_layers,
+                        ) {
+                            Ok(store) => {
+                                let elapsed = start.elapsed();
+                                log::info!(
+                                    "Loaded from MARLIN cache in {:.1}s (built gs={})",
+                                    elapsed.as_secs_f64(), built_gs,
+                                );
+                                return Ok(store);
+                            }
+                            Err(e) => log::warn!("Failed to load built Marlin cache: {e}"),
+                        }
+                    }
+                }
+            }
+
+            // Try loading the v3 cache we just built
+            for try_gs in &[cache_gs, group_size, 32, 64, 128] {
+                let try_path = cache_path_marlin(model_dir, *try_gs);
+                if try_path.exists() {
+                    match Self::load_marlin_cache(
+                        &try_path, &config, *try_gs, total_moe_layers, config_hash,
+                        moe_start, num_moe_layers,
+                    ) {
+                        Ok(store) => {
+                            let elapsed = start.elapsed();
+                            log::info!(
+                                "Loaded from MARLIN cache in {:.1}s: layers [{}-{})",
                                 elapsed.as_secs_f64(),
                                 moe_start, moe_start + num_moe_layers,
-                                config.n_routed_experts,
-                                store.shared_experts_unified.len(),
                             );
                             return Ok(store);
                         }
                         Err(e) => {
                             if *try_gs == cache_gs {
-                                log::warn!("Unified cache invalid (gs={}): {e}", try_gs);
+                                log::warn!("Marlin cache invalid (gs={}): {e}", try_gs);
                             }
                         }
                     }
                 }
             }
-            log::warn!("All unified cache attempts failed, falling back to safetensors");
+
+            log::warn!("All Marlin cache attempts failed, falling back to safetensors");
         }
 
         // ── INT8: use v1 cache path (unified is INT4-only, full loads only) ──
@@ -622,6 +709,7 @@ impl WeightStore {
             config: config.clone(),
             group_size: effective_group_size,
             num_bits,
+            marlin_format: false,
         };
 
         // Save cache for next time (only for full model loads)
@@ -981,245 +1069,7 @@ impl WeightStore {
             config: config.clone(),
             group_size,
             num_bits,
-        })
-    }
-
-    /// Write unified expert weights to a v2 cache file.
-    /// Includes both routed and shared experts.
-    fn save_cache_unified(&self, path: &Path, config_hash: u64) -> Result<(), String> {
-        if self.experts_unified.is_empty() {
-            return Err("No unified weights to save".to_string());
-        }
-
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create cache dir: {e}"))?;
-        }
-
-        let num_moe_layers = self.experts_unified.len();
-
-        // Write to temp file then rename (atomic)
-        let tmp_path = path.with_extension("bin.tmp");
-        let file = std::fs::File::create(&tmp_path)
-            .map_err(|e| format!("Failed to create cache file: {e}"))?;
-        let mut w = std::io::BufWriter::with_capacity(4 * 1024 * 1024, file);
-
-        // Header (64 bytes) — same layout as v1, version=2
-        write_unified_cache_header(&mut w, &self.config, self.group_size, num_moe_layers, config_hash)?;
-
-        let write_start = std::time::Instant::now();
-
-        // Write routed experts: for each (layer, expert): w13_packed, w13_scales, w2_packed, w2_scales
-        for (layer_idx, layer) in self.experts_unified.iter().enumerate() {
-            for expert in layer {
-                write_vec_u32(&mut w, &expert.w13_packed)?;
-                write_vec_u16(&mut w, &expert.w13_scales)?;
-                write_vec_u32(&mut w, &expert.w2_packed)?;
-                write_vec_u16(&mut w, &expert.w2_scales)?;
-            }
-            if (layer_idx + 1) % 10 == 0 {
-                log::info!("  Unified cache write: {}/{} layers", layer_idx + 1, num_moe_layers);
-            }
-        }
-
-        // Write shared experts (one per layer)
-        for shared in &self.shared_experts_unified {
-            write_vec_u32(&mut w, &shared.w13_packed)?;
-            write_vec_u16(&mut w, &shared.w13_scales)?;
-            write_vec_u32(&mut w, &shared.w2_packed)?;
-            write_vec_u16(&mut w, &shared.w2_scales)?;
-        }
-
-        w.flush().map_err(|e| format!("Flush error: {e}"))?;
-        drop(w);
-
-        // Atomic rename
-        std::fs::rename(&tmp_path, path)
-            .map_err(|e| format!("Failed to rename cache file: {e}"))?;
-
-        let elapsed = write_start.elapsed();
-        let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-        log::info!(
-            "Unified cache written: {:.1} GB in {:.1}s ({:.1} GB/s)",
-            size as f64 / 1e9,
-            elapsed.as_secs_f64(),
-            size as f64 / 1e9 / elapsed.as_secs_f64(),
-        );
-
-        Ok(())
-    }
-
-    /// Load unified expert weights from v2 cache file via mmap.
-    /// Returns a WeightStore with experts_unified populated directly (no conversion needed).
-    /// Load unified cache, optionally reading only a range of layers.
-    ///
-    /// `total_moe_layers`: total MoE layers expected in the cache file.
-    /// `start_moe_layer`: first MoE layer to load (0-based, default 0).
-    /// `num_layers_to_load`: how many layers to load (must be <= total - start).
-    fn load_cache_unified(
-        path: &Path,
-        config: &ModelConfig,
-        group_size: usize,
-        total_moe_layers: usize,
-        config_hash: u64,
-        start_moe_layer: usize,
-        num_layers_to_load: usize,
-    ) -> Result<Self, String> {
-        let file = std::fs::File::open(path)
-            .map_err(|e| format!("Failed to open unified cache: {e}"))?;
-        let mmap = unsafe { Mmap::map(&file) }
-            .map_err(|e| format!("Failed to mmap unified cache: {e}"))?;
-
-        // Validate header
-        if mmap.len() < CACHE_HEADER_SIZE {
-            return Err("Unified cache too small for header".to_string());
-        }
-        if &mmap[0..4] != CACHE_MAGIC {
-            return Err("Bad magic in unified cache".to_string());
-        }
-        let version = u32::from_le_bytes(mmap[4..8].try_into().unwrap());
-        if version != CACHE_VERSION_UNIFIED {
-            return Err(format!("Cache version {version}, expected {CACHE_VERSION_UNIFIED}"));
-        }
-
-        let h_hidden = u64::from_le_bytes(mmap[8..16].try_into().unwrap()) as usize;
-        let h_intermediate = u64::from_le_bytes(mmap[16..24].try_into().unwrap()) as usize;
-        let h_n_experts = u64::from_le_bytes(mmap[24..32].try_into().unwrap()) as usize;
-        let h_num_layers = u64::from_le_bytes(mmap[32..40].try_into().unwrap()) as usize;
-        let h_group_size = u64::from_le_bytes(mmap[40..48].try_into().unwrap()) as usize;
-        let h_config_hash = u64::from_le_bytes(mmap[48..56].try_into().unwrap());
-        let h_n_shared = u64::from_le_bytes(mmap[56..64].try_into().unwrap()) as usize;
-
-        if h_hidden != config.hidden_size
-            || h_intermediate != config.moe_intermediate_size
-            || h_n_experts != config.n_routed_experts
-            || h_num_layers != total_moe_layers
-            || h_group_size != group_size
-        {
-            return Err(format!(
-                "Unified cache header mismatch: file has {}h/{}m/{}e/{}L/g{}, expected {}h/{}m/{}e/{}L/g{}",
-                h_hidden, h_intermediate, h_n_experts, h_num_layers, h_group_size,
-                config.hidden_size, config.moe_intermediate_size, config.n_routed_experts,
-                total_moe_layers, group_size,
-            ));
-        }
-        if h_config_hash != config_hash {
-            return Err("Config hash mismatch in unified cache".to_string());
-        }
-        if h_n_shared != config.n_shared_experts {
-            return Err(format!(
-                "Shared expert count mismatch: cache={h_n_shared}, config={}",
-                config.n_shared_experts,
-            ));
-        }
-
-        // Validate range
-        if start_moe_layer + num_layers_to_load > total_moe_layers {
-            return Err(format!(
-                "Range [{}, {}) exceeds total MoE layers {}",
-                start_moe_layer, start_moe_layer + num_layers_to_load, total_moe_layers,
-            ));
-        }
-
-        // Validate total file size
-        let shared_intermediate = config.n_shared_experts * config.moe_intermediate_size;
-        let expected = expected_unified_cache_size(
-            config, group_size, total_moe_layers, config.n_shared_experts, shared_intermediate,
-        );
-        if mmap.len() != expected {
-            return Err(format!(
-                "Unified cache size mismatch: expected {} bytes, got {}",
-                expected, mmap.len(),
-            ));
-        }
-
-        let is_partial = start_moe_layer > 0 || num_layers_to_load < total_moe_layers;
-        if is_partial {
-            log::info!(
-                "Loading unified cache (partial): layers [{}-{}), {} of {} (INT4, {})",
-                start_moe_layer, start_moe_layer + num_layers_to_load,
-                num_layers_to_load, total_moe_layers, path.display(),
-            );
-        } else {
-            log::info!("Loading unified cache: {} (INT4)", path.display());
-        }
-        let load_start = std::time::Instant::now();
-
-        let h = config.hidden_size;
-        let m = config.moe_intermediate_size;
-
-        // Compute per-expert and per-layer byte sizes for seeking
-        let (w13pb, w13sb, w2pb, w2sb) = unified_expert_byte_sizes(config, group_size);
-        let per_routed_expert = w13pb + w13sb + w2pb + w2sb;
-        let per_routed_layer = config.n_routed_experts * per_routed_expert;
-
-        // Compute offset for routed experts: skip first start_moe_layer layers
-        let mut offset = CACHE_HEADER_SIZE + start_moe_layer * per_routed_layer;
-
-        // Read routed experts for the requested range
-        let mut experts_unified: Vec<Vec<UnifiedExpertWeights>> = Vec::with_capacity(num_layers_to_load);
-        for i in 0..num_layers_to_load {
-            let mut layer_experts = Vec::with_capacity(config.n_routed_experts);
-            for _eidx in 0..config.n_routed_experts {
-                let expert = read_unified_expert(&mmap, &mut offset, h, m, group_size);
-                layer_experts.push(expert);
-            }
-            experts_unified.push(layer_experts);
-            if (i + 1) % 10 == 0 {
-                log::info!("  Unified cache read: {}/{} layers", i + 1, num_layers_to_load);
-            }
-        }
-
-        // Read shared experts for the requested range
-        let mut shared_experts_unified = Vec::with_capacity(
-            config.n_shared_experts.min(1) * num_layers_to_load,
-        );
-        if config.n_shared_experts > 0 {
-            // Shared experts are stored after ALL routed experts in the cache file.
-            // Compute the per-shared-expert byte size (may differ from routed due to different intermediate_size).
-            let s_w13p = (h / 8) * (2 * shared_intermediate) * 4;
-            let s_w13s = (h / group_size) * (2 * shared_intermediate) * 2;
-            let s_w2p = (shared_intermediate / 8) * h * 4;
-            let s_w2s = (shared_intermediate / group_size) * h * 2;
-            let per_shared_expert = s_w13p + s_w13s + s_w2p + s_w2s;
-
-            let routed_total = total_moe_layers * per_routed_layer;
-            offset = CACHE_HEADER_SIZE + routed_total + start_moe_layer * per_shared_expert;
-
-            for _i in 0..num_layers_to_load {
-                let shared = read_unified_expert(&mmap, &mut offset, h, shared_intermediate, group_size);
-                shared_experts_unified.push(shared);
-            }
-        }
-
-        let elapsed = load_start.elapsed();
-        let bytes_loaded = num_layers_to_load as f64
-            * (per_routed_layer as f64
-                + if config.n_shared_experts > 0 {
-                    let s_w13p = (h / 8) * (2 * shared_intermediate) * 4;
-                    let s_w13s = (h / group_size) * (2 * shared_intermediate) * 2;
-                    let s_w2p = (shared_intermediate / 8) * h * 4;
-                    let s_w2s = (shared_intermediate / group_size) * h * 2;
-                    (s_w13p + s_w13s + s_w2p + s_w2s) as f64
-                } else {
-                    0.0
-                });
-        log::info!(
-            "Unified cache loaded: {:.1} GB in {:.1}s ({:.1} GB/s){}",
-            bytes_loaded / 1e9,
-            elapsed.as_secs_f64(),
-            bytes_loaded / 1e9 / elapsed.as_secs_f64(),
-            if is_partial { format!(" [layers {}-{})", start_moe_layer, start_moe_layer + num_layers_to_load) } else { String::new() },
-        );
-
-        Ok(WeightStore {
-            experts: Vec::new(),
-            shared_experts: Vec::new(),
-            experts_unified,
-            shared_experts_unified,
-            config: config.clone(),
-            group_size,
-            num_bits: 4,
+            marlin_format: false,
         })
     }
 
@@ -1331,14 +1181,7 @@ impl WeightStore {
         Ok(shared)
     }
 
-    /// Stream-convert from safetensors (or pre-quantized) to a v2 unified cache on disk.
-    ///
-    /// Processes one MoE layer at a time: load expert weights → convert to unified → write
-    /// to disk → drop. Peak RAM is ~16 GB (one layer of routed + shared experts) instead
-    /// of ~488 GB (all layers).
-    ///
-    /// Returns the effective group_size (may differ from requested if model is pre-quantized).
-    fn streaming_build_unified_cache(
+    fn streaming_build_marlin_cache(
         model_dir: &Path,
         config: &ModelConfig,
         group_size: usize,
@@ -1348,10 +1191,10 @@ impl WeightStore {
         config_hash: u64,
     ) -> Result<usize, String> {
         log::info!(
-            "Streaming build unified cache: {} MoE layers from safetensors → {}",
+            "Streaming build MARLIN cache: {} MoE layers from safetensors → {}",
             num_moe_layers, cache_path.display(),
         );
-        crate::syscheck::log_memory_usage("before streaming_build_unified_cache");
+        crate::syscheck::log_memory_usage("before streaming_build_marlin_cache");
 
         // Parse safetensors index
         let index_path = model_dir.join("model.safetensors.index.json");
@@ -1360,7 +1203,7 @@ impl WeightStore {
         let index: SafetensorsIndex = serde_json::from_str(&index_str)
             .map_err(|e| format!("Failed to parse safetensors index: {e}"))?;
 
-        // Determine which shard files we need for our layer range
+        // Determine which shard files we need
         let first_abs_layer = start_moe_layer + config.first_k_dense_replace;
         let last_abs_layer = first_abs_layer + num_moe_layers;
         let mut needed_shards: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1380,7 +1223,7 @@ impl WeightStore {
             index.weight_map.values().collect::<std::collections::HashSet<_>>().len(),
         );
 
-        // Open shards via mmap (near-zero RSS)
+        // Open shards via mmap
         let mut shards: HashMap<String, MmapSafetensors> = HashMap::new();
         for (i, name) in shard_names.iter().enumerate() {
             let path = model_dir.join(name);
@@ -1420,8 +1263,8 @@ impl WeightStore {
             .map_err(|e| format!("Failed to create cache file: {e}"))?;
         let mut w = std::io::BufWriter::with_capacity(4 * 1024 * 1024, file);
 
-        // Write header
-        write_unified_cache_header(&mut w, config, effective_group_size, num_moe_layers, config_hash)?;
+        // Write header (version 3 = Marlin format)
+        write_marlin_cache_header(&mut w, config, effective_group_size, num_moe_layers, config_hash)?;
 
         let overall_start = std::time::Instant::now();
 
@@ -1451,34 +1294,32 @@ impl WeightStore {
                 };
 
                 let ew = ExpertWeights { gate, up, down };
-                let unified = UnifiedExpertWeights::from_expert_weights(&ew);
+                let marlin = UnifiedExpertWeights::from_expert_weights_marlin(&ew);
 
-                // Write unified data to cache
-                write_vec_u32(&mut w, &unified.w13_packed)?;
-                write_vec_u16(&mut w, &unified.w13_scales)?;
-                write_vec_u32(&mut w, &unified.w2_packed)?;
-                write_vec_u16(&mut w, &unified.w2_scales)?;
-
-                // ew + unified dropped here → ~0 persistent RAM per expert
+                // Write Marlin data to cache (same field order as v2 — identical byte sizes)
+                write_vec_u32(&mut w, &marlin.w13_packed)?;
+                write_vec_u16(&mut w, &marlin.w13_scales)?;
+                write_vec_u32(&mut w, &marlin.w2_packed)?;
+                write_vec_u16(&mut w, &marlin.w2_scales)?;
             }
 
             let layers_done = moe_idx - start_moe_layer + 1;
             let layer_elapsed = layer_start.elapsed();
             if layers_done % 5 == 0 || layers_done == num_moe_layers {
                 crate::syscheck::log_memory_usage(&format!(
-                    "streaming convert: {layers_done}/{num_moe_layers} layers ({:.1}s/layer)",
+                    "Marlin cache: {layers_done}/{num_moe_layers} layers ({:.1}s/layer)",
                     layer_elapsed.as_secs_f64(),
                 ));
             } else {
                 log::info!(
-                    "  Layer {layer_idx}: converted {} experts in {:.1}s [{layers_done}/{num_moe_layers}]",
+                    "  Layer {layer_idx}: Marlin-repacked {} experts in {:.1}s [{layers_done}/{num_moe_layers}]",
                     config.n_routed_experts,
                     layer_elapsed.as_secs_f64(),
                 );
             }
         }
 
-        // Stream shared experts (one per MoE layer)
+        // Stream shared experts
         if config.n_shared_experts > 0 {
             log::info!("Streaming shared experts ({} layers)...", num_moe_layers);
             for moe_idx in start_moe_layer..(start_moe_layer + num_moe_layers) {
@@ -1488,12 +1329,12 @@ impl WeightStore {
                     &prefix, &index.weight_map, &shards, effective_group_size, 4,
                 )?;
                 let ew = ExpertWeights { gate, up, down };
-                let unified = UnifiedExpertWeights::from_expert_weights(&ew);
+                let marlin = UnifiedExpertWeights::from_expert_weights_marlin(&ew);
 
-                write_vec_u32(&mut w, &unified.w13_packed)?;
-                write_vec_u16(&mut w, &unified.w13_scales)?;
-                write_vec_u32(&mut w, &unified.w2_packed)?;
-                write_vec_u16(&mut w, &unified.w2_scales)?;
+                write_vec_u32(&mut w, &marlin.w13_packed)?;
+                write_vec_u16(&mut w, &marlin.w13_scales)?;
+                write_vec_u32(&mut w, &marlin.w2_packed)?;
+                write_vec_u16(&mut w, &marlin.w2_scales)?;
             }
         }
 
@@ -1503,29 +1344,24 @@ impl WeightStore {
         std::fs::rename(&tmp_path, cache_path)
             .map_err(|e| format!("Failed to rename cache file: {e}"))?;
 
-        // Return freed pages to OS
         #[cfg(target_os = "linux")]
         unsafe { libc::malloc_trim(0); }
 
         let elapsed = overall_start.elapsed();
         let size = std::fs::metadata(cache_path).map(|m| m.len()).unwrap_or(0);
         log::info!(
-            "Streaming unified cache built: {:.1} GB in {:.1}s ({:.1} GB/s)",
+            "Marlin cache built: {:.1} GB in {:.1}s ({:.1} GB/s)",
             size as f64 / 1e9,
             elapsed.as_secs_f64(),
             size as f64 / 1e9 / elapsed.as_secs_f64(),
         );
-        crate::syscheck::log_memory_usage("after streaming_build_unified_cache");
+        crate::syscheck::log_memory_usage("after streaming_build_marlin_cache");
 
         Ok(effective_group_size)
     }
 
-    /// Build unified cache with a file lock for multi-process safety.
-    ///
-    /// When multiple PP rank processes start simultaneously, only one builds the cache
-    /// while others wait. Uses an exclusive `.bin.lock` file as a mutex.
-    /// Always builds ALL MoE layers so the cache works for any PP partition.
-    fn build_unified_cache_locked(
+    /// Build Marlin cache with a file lock for multi-process safety.
+    fn build_marlin_cache_locked(
         model_dir: &Path,
         config: &ModelConfig,
         group_size: usize,
@@ -1535,49 +1371,41 @@ impl WeightStore {
     ) -> Result<usize, String> {
         use std::fs::OpenOptions;
 
-        // Double-check: another process may have finished between our check and here
         if cache_path.exists() {
-            log::info!("Cache appeared while preparing to build (another rank finished)");
-            // Return group_size as a guess — caller will validate via load_cache_unified
+            log::info!("Marlin cache appeared while preparing to build (another rank finished)");
             return Ok(group_size);
         }
 
         let lock_path = cache_path.with_extension("bin.lock");
 
-        // Try to acquire exclusive lock
         match OpenOptions::new()
             .create_new(true)
             .write(true)
             .open(&lock_path)
         {
             Ok(mut lock_file) => {
-                // We hold the lock — build the full cache
                 log::info!(
-                    "Acquired cache build lock, building {} MoE layers...",
+                    "Acquired Marlin cache build lock, building {} MoE layers...",
                     total_moe_layers,
                 );
-                // Write our PID to the lock file for debugging
                 let _ = write!(lock_file, "{}", std::process::id());
                 drop(lock_file);
 
-                let result = Self::streaming_build_unified_cache(
+                let result = Self::streaming_build_marlin_cache(
                     model_dir, config, group_size, total_moe_layers,
-                    0, // always start from layer 0 for full cache
-                    cache_path, config_hash,
+                    0, cache_path, config_hash,
                 );
 
-                // Release lock (remove file) regardless of result
                 let _ = std::fs::remove_file(&lock_path);
 
                 match result {
                     Ok(effective_gs) => {
-                        // Handle group_size mismatch (rename cache to correct path)
-                        let expected_path = cache_path_unified(model_dir, 4, effective_gs);
+                        let expected_path = cache_path_marlin(model_dir, effective_gs);
                         if expected_path != *cache_path {
                             std::fs::rename(cache_path, &expected_path)
                                 .map_err(|e| format!("Failed to rename cache: {e}"))?;
                             log::info!(
-                                "Renamed cache to {} (effective gs={})",
+                                "Renamed Marlin cache to {} (effective gs={})",
                                 expected_path.display(), effective_gs,
                             );
                         }
@@ -1587,36 +1415,33 @@ impl WeightStore {
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                // Another process is building — wait for the cache to appear
-                log::info!("Another process is building unified cache, waiting...");
+                log::info!("Another process is building Marlin cache, waiting...");
                 let wait_start = std::time::Instant::now();
                 loop {
                     std::thread::sleep(std::time::Duration::from_secs(5));
 
-                    // Check if cache appeared (any group_size variant)
                     for try_gs in &[group_size, 32, 64, 128] {
-                        let try_path = cache_path_unified(model_dir, 4, *try_gs);
+                        let try_path = cache_path_marlin(model_dir, *try_gs);
                         if try_path.exists() {
                             let waited = wait_start.elapsed();
                             log::info!(
-                                "Unified cache ready after {:.0}s wait (gs={})",
+                                "Marlin cache ready after {:.0}s wait (gs={})",
                                 waited.as_secs_f64(), try_gs,
                             );
                             return Ok(*try_gs);
                         }
                     }
 
-                    // Check if lock was released without cache (build failed)
                     if !lock_path.exists() && !cache_path.exists() {
-                        return Err("Cache build by another process failed (lock released, no cache)".to_string());
+                        return Err("Marlin cache build by another process failed".to_string());
                     }
 
                     let waited = wait_start.elapsed();
                     if waited > std::time::Duration::from_secs(7200) {
-                        return Err("Timed out waiting for cache build (2 hours)".to_string());
+                        return Err("Timed out waiting for Marlin cache build (2 hours)".to_string());
                     }
                     if waited.as_secs() % 60 < 5 {
-                        log::info!("Still waiting for cache build ({:.0}s)...", waited.as_secs_f64());
+                        log::info!("Still waiting for Marlin cache build ({:.0}s)...", waited.as_secs_f64());
                     }
                 }
             }
@@ -1626,174 +1451,171 @@ impl WeightStore {
         }
     }
 
-    /// Stream-convert from a v1 cache file to a v2 unified cache on disk.
+    /// Load v3 Marlin cache from disk.
     ///
-    /// The v1 file is mmap'd (zero-copy read), and each layer's experts are read,
-    /// converted to unified format, written to the v2 temp file, then freed.
-    /// Peak RAM is ~16 GB (one layer) instead of loading the entire v1 cache.
-    ///
-    /// Shared experts are NOT stored in v1 cache, so they must be loaded from safetensors.
-    fn streaming_v1_to_unified_cache(
-        model_dir: &Path,
+    /// Same file structure as v2 unified (identical byte counts per expert),
+    /// but data is GPU-native Marlin format (tile-permuted, scale-permuted).
+    fn load_marlin_cache(
+        path: &Path,
         config: &ModelConfig,
         group_size: usize,
-        num_moe_layers: usize,
-        v1_path: &Path,
-        v2_path: &Path,
+        total_moe_layers: usize,
         config_hash: u64,
-    ) -> Result<(), String> {
-        log::info!(
-            "Streaming v1→v2 conversion: {} → {}",
-            v1_path.display(), v2_path.display(),
-        );
-        crate::syscheck::log_memory_usage("before streaming_v1_to_unified_cache");
+        start_moe_layer: usize,
+        num_layers_to_load: usize,
+    ) -> Result<Self, String> {
+        let file = std::fs::File::open(path)
+            .map_err(|e| format!("Failed to open Marlin cache: {e}"))?;
+        let mmap = unsafe { Mmap::map(&file) }
+            .map_err(|e| format!("Failed to mmap Marlin cache: {e}"))?;
 
-        // mmap the v1 cache (zero-copy)
-        let v1_file = std::fs::File::open(v1_path)
-            .map_err(|e| format!("Failed to open v1 cache: {e}"))?;
-        let v1_mmap = unsafe { Mmap::map(&v1_file) }
-            .map_err(|e| format!("Failed to mmap v1 cache: {e}"))?;
+        // Validate header
+        if mmap.len() < CACHE_HEADER_SIZE {
+            return Err("Marlin cache too small for header".to_string());
+        }
+        if &mmap[0..4] != CACHE_MAGIC {
+            return Err("Bad magic in Marlin cache".to_string());
+        }
+        let version = u32::from_le_bytes(mmap[4..8].try_into().unwrap());
+        if version != CACHE_VERSION_MARLIN {
+            return Err(format!("Cache version {version}, expected {CACHE_VERSION_MARLIN} (Marlin)"));
+        }
 
-        // Validate v1 header
-        let expected_v1 = expected_cache_size(config, group_size, 4, num_moe_layers);
-        if v1_mmap.len() != expected_v1 {
+        let h_hidden = u64::from_le_bytes(mmap[8..16].try_into().unwrap()) as usize;
+        let h_intermediate = u64::from_le_bytes(mmap[16..24].try_into().unwrap()) as usize;
+        let h_n_experts = u64::from_le_bytes(mmap[24..32].try_into().unwrap()) as usize;
+        let h_num_layers = u64::from_le_bytes(mmap[32..40].try_into().unwrap()) as usize;
+        let h_group_size = u64::from_le_bytes(mmap[40..48].try_into().unwrap()) as usize;
+        let h_config_hash = u64::from_le_bytes(mmap[48..56].try_into().unwrap());
+        let h_n_shared = u64::from_le_bytes(mmap[56..64].try_into().unwrap()) as usize;
+
+        if h_hidden != config.hidden_size
+            || h_intermediate != config.moe_intermediate_size
+            || h_n_experts != config.n_routed_experts
+            || h_num_layers != total_moe_layers
+            || h_group_size != group_size
+        {
             return Err(format!(
-                "v1 cache size mismatch: expected {expected_v1}, got {}", v1_mmap.len(),
+                "Marlin cache header mismatch: file has {}h/{}m/{}e/{}L/g{}, expected {}h/{}m/{}e/{}L/g{}",
+                h_hidden, h_intermediate, h_n_experts, h_num_layers, h_group_size,
+                config.hidden_size, config.moe_intermediate_size, config.n_routed_experts,
+                total_moe_layers, group_size,
             ));
         }
-        if &v1_mmap[0..4] != CACHE_MAGIC {
-            return Err("Bad magic in v1 cache".to_string());
-        }
-        let version = u32::from_le_bytes(v1_mmap[4..8].try_into().unwrap());
-        if version != CACHE_VERSION {
-            return Err(format!("v1 cache version {version}, expected {CACHE_VERSION}"));
-        }
-        let h_config_hash = u64::from_le_bytes(v1_mmap[48..56].try_into().unwrap());
         if h_config_hash != config_hash {
-            return Err("Config hash mismatch in v1 cache".to_string());
+            return Err("Config hash mismatch in Marlin cache".to_string());
+        }
+        if h_n_shared != config.n_shared_experts {
+            return Err(format!(
+                "Shared expert count mismatch: cache={h_n_shared}, config={}",
+                config.n_shared_experts,
+            ));
         }
 
-        // Create v2 temp file
-        if let Some(parent) = v2_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create cache dir: {e}"))?;
+        if start_moe_layer + num_layers_to_load > total_moe_layers {
+            return Err(format!(
+                "Range [{}, {}) exceeds total MoE layers {}",
+                start_moe_layer, start_moe_layer + num_layers_to_load, total_moe_layers,
+            ));
         }
-        let tmp_path = v2_path.with_extension("bin.tmp");
-        let file = std::fs::File::create(&tmp_path)
-            .map_err(|e| format!("Failed to create v2 cache file: {e}"))?;
-        let mut w = std::io::BufWriter::with_capacity(4 * 1024 * 1024, file);
 
-        // Write v2 header
-        write_unified_cache_header(&mut w, config, group_size, num_moe_layers, config_hash)?;
+        // Validate file size (byte counts identical to v2 unified)
+        let shared_intermediate = config.n_shared_experts * config.moe_intermediate_size;
+        let expected = expected_unified_cache_size(
+            config, group_size, total_moe_layers, config.n_shared_experts, shared_intermediate,
+        );
+        if mmap.len() != expected {
+            return Err(format!(
+                "Marlin cache size mismatch: expected {} bytes, got {}",
+                expected, mmap.len(),
+            ));
+        }
 
-        let overall_start = std::time::Instant::now();
+        let is_partial = start_moe_layer > 0 || num_layers_to_load < total_moe_layers;
+        if is_partial {
+            log::info!(
+                "Loading MARLIN cache (partial): layers [{}-{}), {} of {} ({})",
+                start_moe_layer, start_moe_layer + num_layers_to_load,
+                num_layers_to_load, total_moe_layers, path.display(),
+            );
+        } else {
+            log::info!("Loading MARLIN cache: {} (all {} layers)", path.display(), total_moe_layers);
+        }
+        let load_start = std::time::Instant::now();
+
         let h = config.hidden_size;
         let m = config.moe_intermediate_size;
-        let (gpb, gsb, dpb, dsb) = expert_byte_sizes(config, group_size, 4);
-        let mut v1_offset = CACHE_HEADER_SIZE;
 
-        // Stream layer by layer from v1 mmap
-        for layer_idx in 0..num_moe_layers {
+        // Per-expert byte sizes (identical to v2 unified)
+        let (w13pb, w13sb, w2pb, w2sb) = unified_expert_byte_sizes(config, group_size);
+        let per_routed_expert = w13pb + w13sb + w2pb + w2sb;
+        let per_routed_layer = config.n_routed_experts * per_routed_expert;
+
+        let mut offset = CACHE_HEADER_SIZE + start_moe_layer * per_routed_layer;
+
+        // Load routed experts
+        let mut experts_unified = Vec::with_capacity(num_layers_to_load);
+        for layer_idx in 0..num_layers_to_load {
+            let mut layer_experts = Vec::with_capacity(config.n_routed_experts);
             for _eidx in 0..config.n_routed_experts {
-                // Read old-format expert from v1 mmap
-                let gate = read_quantized(&v1_mmap, &mut v1_offset, m, h, group_size, 4, gpb, gsb);
-                let up = read_quantized(&v1_mmap, &mut v1_offset, m, h, group_size, 4, gpb, gsb);
-                let down = read_quantized(&v1_mmap, &mut v1_offset, h, m, group_size, 4, dpb, dsb);
-                let ew = ExpertWeights { gate, up, down };
-
-                // Convert + write
-                let unified = UnifiedExpertWeights::from_expert_weights(&ew);
-                write_vec_u32(&mut w, &unified.w13_packed)?;
-                write_vec_u16(&mut w, &unified.w13_scales)?;
-                write_vec_u32(&mut w, &unified.w2_packed)?;
-                write_vec_u16(&mut w, &unified.w2_scales)?;
-
-                // ew + unified dropped here
+                layer_experts.push(read_unified_expert(&mmap, &mut offset, h, m, group_size));
             }
+            experts_unified.push(layer_experts);
 
-            let layers_done = layer_idx + 1;
-            if layers_done % 5 == 0 || layers_done == num_moe_layers {
-                crate::syscheck::log_memory_usage(&format!(
-                    "v1→v2 streaming: {layers_done}/{num_moe_layers} layers",
-                ));
+            if (layer_idx + 1) % 10 == 0 || layer_idx + 1 == num_layers_to_load {
+                log::info!(
+                    "  Marlin cache loaded: {}/{} layers ({:.1} GB)",
+                    layer_idx + 1, num_layers_to_load,
+                    offset as f64 / 1e9,
+                );
             }
         }
 
-        // Shared experts: load from safetensors (v1 doesn't store them)
+        // Load shared experts
+        let mut shared_experts_unified = Vec::new();
         if config.n_shared_experts > 0 {
-            log::info!("Loading shared experts from safetensors for v2 cache...");
-            let index_path = model_dir.join("model.safetensors.index.json");
-            let index_str = std::fs::read_to_string(&index_path)
-                .map_err(|e| format!("Failed to read safetensors index: {e}"))?;
-            let index: SafetensorsIndex = serde_json::from_str(&index_str)
-                .map_err(|e| format!("Failed to parse safetensors index: {e}"))?;
-            let layers_prefix = detect_expert_prefix(&index.weight_map)?;
+            let routed_total = total_moe_layers * per_routed_layer;
+            let shared_m = config.n_shared_experts * config.moe_intermediate_size;
+            let (s_w13pb, s_w13sb, s_w2pb, s_w2sb) = (
+                (h / 8) * (2 * shared_m) * 4,
+                (h / group_size) * (2 * shared_m) * 2,
+                (shared_m / 8) * h * 4,
+                (shared_m / group_size) * h * 2,
+            );
+            let per_shared = s_w13pb + s_w13sb + s_w2pb + s_w2sb;
 
-            // Open only needed shards for shared experts
-            let mut shard_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-            for moe_idx in 0..num_moe_layers {
-                let layer_idx = moe_idx + config.first_k_dense_replace;
-                let prefix = format!("{layers_prefix}.layers.{layer_idx}.mlp.shared_experts");
-                for proj in &["gate_proj", "up_proj", "down_proj"] {
-                    let name = format!("{prefix}.{proj}.weight");
-                    if let Some(shard) = index.weight_map.get(&name) {
-                        shard_names.insert(shard.clone());
-                    }
-                }
-            }
-            let mut shards: HashMap<String, MmapSafetensors> = HashMap::new();
-            for name in &shard_names {
-                let path = model_dir.join(name);
-                let st = MmapSafetensors::open(&path)
-                    .map_err(|e| format!("Failed to open {name}: {e}"))?;
-                shards.insert(name.clone(), st);
-            }
+            let shared_base = CACHE_HEADER_SIZE + routed_total + start_moe_layer * per_shared;
+            offset = shared_base;
 
-            for moe_idx in 0..num_moe_layers {
-                let layer_idx = moe_idx + config.first_k_dense_replace;
-                let prefix = format!("{layers_prefix}.layers.{layer_idx}.mlp.shared_experts");
-                let (gate, up, down) = load_and_quantize_expert(
-                    &prefix, &index.weight_map, &shards, group_size, 4,
-                )?;
-                let ew = ExpertWeights { gate, up, down };
-                let unified = UnifiedExpertWeights::from_expert_weights(&ew);
-
-                write_vec_u32(&mut w, &unified.w13_packed)?;
-                write_vec_u16(&mut w, &unified.w13_scales)?;
-                write_vec_u32(&mut w, &unified.w2_packed)?;
-                write_vec_u16(&mut w, &unified.w2_scales)?;
+            for _i in 0..num_layers_to_load {
+                shared_experts_unified.push(
+                    read_unified_expert(&mmap, &mut offset, h, shared_m, group_size),
+                );
             }
+            log::info!("  Loaded {} shared experts (Marlin)", num_layers_to_load);
         }
 
-        // Flush + atomic rename
-        w.flush().map_err(|e| format!("Flush error: {e}"))?;
-        drop(w);
-        std::fs::rename(&tmp_path, v2_path)
-            .map_err(|e| format!("Failed to rename v2 cache file: {e}"))?;
-
-        // Drop v1 mmap, delete v1 file
-        drop(v1_mmap);
-        drop(v1_file);
-        if let Err(e) = std::fs::remove_file(v1_path) {
-            log::warn!("Failed to delete v1 cache: {e}");
-        } else {
-            log::info!("Deleted v1 cache: {}", v1_path.display());
-        }
-
-        // Return freed pages to OS
-        #[cfg(target_os = "linux")]
-        unsafe { libc::malloc_trim(0); }
-
-        let elapsed = overall_start.elapsed();
-        let size = std::fs::metadata(v2_path).map(|m| m.len()).unwrap_or(0);
+        let elapsed = load_start.elapsed();
         log::info!(
-            "v1→v2 streaming conversion done: {:.1} GB in {:.1}s",
-            size as f64 / 1e9, elapsed.as_secs_f64(),
+            "MARLIN cache loaded in {:.1}s: {} layers × {} experts (+ {} shared), {:.1} GB",
+            elapsed.as_secs_f64(),
+            num_layers_to_load, config.n_routed_experts,
+            shared_experts_unified.len(),
+            offset as f64 / 1e9,
         );
-        crate::syscheck::log_memory_usage("after streaming_v1_to_unified_cache");
 
-        Ok(())
+        Ok(WeightStore {
+            experts: Vec::new(),
+            shared_experts: Vec::new(),
+            experts_unified,
+            shared_experts_unified,
+            config: config.clone(),
+            group_size,
+            num_bits: 4,
+            marlin_format: true, // v3 Marlin = GPU-native format
+        })
     }
+
 
     /// Quick check for pre-quantized group_size without loading full weights.
     /// Returns Some(group_size) if model has pre-quantized experts, None otherwise.
@@ -1883,86 +1705,6 @@ impl WeightStore {
 
     /// Convert all experts from separate gate/up/down format to unified w13+w2 transposed format.
     ///
-    /// After conversion, drops the old `experts` and `shared_experts` to free ~50% RAM
-    /// (unified format is same size but replaces old format rather than duplicating).
-    ///
-    /// This is INT4-only. INT8 experts are not converted (unified kernel only supports INT4).
-    pub fn convert_to_unified(&mut self) {
-        if self.num_bits != 4 {
-            log::warn!("convert_to_unified() only supports INT4, skipping (num_bits={})", self.num_bits);
-            return;
-        }
-        if self.has_unified() {
-            log::info!("Already converted to unified format, skipping");
-            return;
-        }
-
-        let start = std::time::Instant::now();
-        let num_layers = self.experts.len();
-        let mut old_bytes: usize = 0;
-        let mut new_bytes: usize = 0;
-
-        // Convert layer by layer, freeing old format after each layer to avoid
-        // holding both copies in RAM simultaneously (~507 GB each for Kimi K2.5).
-        // Peak RAM = old format (remaining layers) + new format (converted layers)
-        // ≈ old format + one layer overhead during conversion.
-        self.experts_unified = Vec::with_capacity(num_layers);
-        for layer_idx in 0..num_layers {
-            // Take ownership of this layer's old weights (replaces with empty Vec)
-            let old_layer = std::mem::take(&mut self.experts[layer_idx]);
-
-            let mut unified_experts = Vec::with_capacity(old_layer.len());
-            for expert in &old_layer {
-                old_bytes += expert.gate.data_bytes() + expert.up.data_bytes() + expert.down.data_bytes();
-                let unified = UnifiedExpertWeights::from_expert_weights(expert);
-                new_bytes += unified.data_bytes();
-                unified_experts.push(unified);
-            }
-            // old_layer dropped here, freeing ~8.3 GB (Kimi K2.5) immediately
-            drop(old_layer);
-            self.experts_unified.push(unified_experts);
-
-            if (layer_idx + 1) % 10 == 0 || layer_idx + 1 == num_layers {
-                log::info!("  Unified conversion: {}/{} layers", layer_idx + 1, num_layers);
-            }
-        }
-        // All old layer data is freed; clear the outer Vec
-        self.experts = Vec::new();
-
-        // Convert shared experts (small, no layer-by-layer needed)
-        self.shared_experts_unified = Vec::with_capacity(self.shared_experts.len());
-        for shared in &self.shared_experts {
-            old_bytes += shared.gate.data_bytes() + shared.up.data_bytes() + shared.down.data_bytes();
-            let unified = UnifiedExpertWeights::from_expert_weights(shared);
-            new_bytes += unified.data_bytes();
-            self.shared_experts_unified.push(unified);
-        }
-        self.shared_experts = Vec::new();
-
-        // Force glibc to return freed pages to OS. Without this, glibc's allocator
-        // retains the ~572 GB of freed old-format memory in its arenas, causing RSS
-        // to be ~850 GB instead of ~572 GB.
-        #[cfg(target_os = "linux")]
-        {
-            let rss_before = crate::syscheck::get_rss_gib();
-            unsafe { libc::malloc_trim(0); }
-            let rss_after = crate::syscheck::get_rss_gib();
-            log::info!(
-                "malloc_trim: RSS {:.1} GiB → {:.1} GiB (reclaimed {:.1} GiB)",
-                rss_before, rss_after, rss_before - rss_after
-            );
-        }
-
-        let elapsed = start.elapsed();
-        log::info!(
-            "Converted to unified format in {:.1}s: old={:.1} GB → new={:.1} GB (freed {:.1} GB)",
-            elapsed.as_secs_f64(),
-            old_bytes as f64 / 1e9,
-            new_bytes as f64 / 1e9,
-            old_bytes as f64 / 1e9,
-        );
-    }
-
     /// Migrate unified expert weights to NUMA nodes.
     /// Returns the number of successfully migrated experts.
     pub fn migrate_numa_unified(&mut self, map: &crate::numa::NumaExpertMap) -> usize {
@@ -1999,8 +1741,8 @@ impl WeightStore {
     }
 }
 
-/// Write the 64-byte unified (v2) cache header.
-fn write_unified_cache_header<W: Write>(
+/// Write v3 Marlin cache header (same layout as v2, version=3).
+fn write_marlin_cache_header<W: Write>(
     w: &mut W,
     config: &ModelConfig,
     group_size: usize,
@@ -2009,7 +1751,7 @@ fn write_unified_cache_header<W: Write>(
 ) -> Result<(), String> {
     w.write_all(CACHE_MAGIC)
         .map_err(|e| format!("Write error: {e}"))?;
-    w.write_all(&CACHE_VERSION_UNIFIED.to_le_bytes())
+    w.write_all(&CACHE_VERSION_MARLIN.to_le_bytes())
         .map_err(|e| format!("Write error: {e}"))?;
     w.write_all(&(config.hidden_size as u64).to_le_bytes())
         .map_err(|e| format!("Write error: {e}"))?;
@@ -2516,17 +2258,17 @@ mod tests {
         let store = WeightStore::load_from_hf(model_dir, DEFAULT_GROUP_SIZE, None, None, 4)
             .expect("Failed to load V2-Lite");
 
-        // Verify unified cache file exists (v2 format)
-        let upath = cache_path_unified(model_dir, 4, DEFAULT_GROUP_SIZE);
-        assert!(upath.exists(), "Unified cache file should exist after load");
+        // Verify Marlin cache file exists (v3 format)
+        let mpath = cache_path_marlin(model_dir, store.group_size);
+        assert!(mpath.exists(), "Marlin cache file should exist after load");
 
-        let size = std::fs::metadata(&upath).unwrap().len();
+        let size = std::fs::metadata(&mpath).unwrap().len();
         let shared_intermediate = store.config.n_shared_experts * store.config.moe_intermediate_size;
         let expected = expected_unified_cache_size(
             &store.config, store.group_size, store.num_moe_layers(),
             store.config.n_shared_experts, shared_intermediate,
         );
-        assert_eq!(size as usize, expected, "Unified cache file size mismatch");
+        assert_eq!(size as usize, expected, "Marlin cache file size mismatch");
 
         // Store should have unified weights
         assert!(store.has_unified(), "Store should have unified format");

@@ -16,9 +16,10 @@ SGLang (Python)
 └── CPU decode: Krasis AVX2 INT4 kernel (token-by-token)
 
 Krasis (Rust + PyO3)
-├── INT4 symmetric quantization (BF16 → INT4, per-group scales)
-├── AVX2 integer kernel (_mm256_madd_epi16, 2x throughput over FMA)
-├── Unified weight format: combined gate+up [K/8, 2*N] transposed
+├── ONE weight format: GPU-native Marlin INT4 (disk = RAM = GPU, no conversion)
+├── First run: BF16 safetensors → INT4 quantize → Marlin repack → disk cache
+├── Every run: load Marlin cache → RAM. GPU DMA copies directly. CPU reads directly.
+├── AVX2 Marlin-native CPU kernel for decode
 ├── Expert-level + intra-expert parallelism (rayon)
 ├── NUMA-aware weight placement + thread pinning
 ├── Zero-allocation scratch pool, NTA prefetch
@@ -75,9 +76,9 @@ See `run_kimi_krasis.sh` for a complete launch script.
 
 ## Key Features
 
-- **Unified INT4 weight format** — combined gate+up matrix eliminates one matmul per expert
-- **Streaming cache conversion** — first-run quantization uses ~16 GB peak RAM (not 488 GB)
-- **INT4 Marlin GPU prefill** — GPU-accelerated MoE for prompts > 300 tokens
+- **GPU-native Marlin INT4 — the ONLY weight format** — same bytes on disk, in RAM, on GPU. No conversion anywhere. CPU and GPU both read the same Marlin-packed data.
+- **Streaming cache build** — first-run quantization streams one expert at a time (~128 MB peak)
+- **Zero-conversion GPU prefill** — DMA copy Marlin weights from RAM to GPU, run fused_marlin_moe instantly
 - **FP8 KV cache** — 2x VRAM savings with negligible precision loss
 - **INT8 non-expert weights** — halves attention VRAM via per-channel quantization
 - **skip_shared_experts** — prevents double computation when host handles shared experts on GPU
