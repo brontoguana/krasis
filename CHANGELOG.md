@@ -13,6 +13,49 @@ Re-run needed after: any change to `src/`, `python/krasis/`, or test files.
 
 ---
 
+## Interactive Launcher + server.py CLI Args — 2026-02-12
+
+**Added `./krasis` executable launcher script and full CLI arg support in `server.py`.**
+
+### New: `./krasis` Launcher (repo root)
+
+Interactive 5-phase launcher script (~550 lines):
+- **Phase 1: Setup** — checks Python, venv, krasis build, torch, deps
+- **Phase 2: Hardware Detection** — GPUs, CPU cores, AVX2/FMA, RAM, NUMA
+- **Phase 3: Model Selection** — scans `~/Documents/Claude/hf-models/`, shows model info
+- **Phase 4: Interactive Config** — each parameter explained with smart defaults
+- **Phase 5: Launch** — summary box, confirm, exec server
+
+Features:
+- `--non-interactive` mode for scripted/automated launches
+- `--skip-setup` to skip venv/build checks
+- All params passable as CLI flags (override interactive/saved)
+- Saves config to `.krasis_config` for quick relaunch
+- GGUF detection (sidecar directories)
+- Expert RAM estimates from model config
+
+### Modified: `server.py`
+
+Added 11 new CLI args wired to `QuantConfig` and `KrasisModel`:
+- `--expert-divisor` (0=chunked, 1=persistent, >=2=layer-grouped)
+- `--gpu-expert-bits` (4 or 8)
+- `--cpu-expert-bits` (4 or 8)
+- `--attention-quant` (bf16 or int8)
+- `--shared-expert-quant`, `--dense-mlp-quant`, `--lm-head-quant`
+- `--gpu-prefill-threshold` (default: 300)
+- `--gguf-path`, `--force-load`
+
+Also updated defaults: `--kv-dtype` now defaults to `fp8_e4m3`, `--krasis-threads` to 48.
+
+### Tests Run
+- `./krasis --help` — shows usage
+- `./krasis --non-interactive --skip-setup --model-path .../DeepSeek-V2-Lite` — all 5 phases complete, config saved, correct args passed to server
+- `./krasis --non-interactive --skip-setup` (relaunch) — loads saved config, skips Phase 4
+- `python -m krasis.server --help` — all new args visible
+- Model scan shows all 5 models with architecture details
+
+---
+
 ## Documentation Consolidation — 2026-02-12
 
 Consolidated 9 markdown files into 3:
