@@ -13,6 +13,27 @@ Re-run needed after: any change to `src/`, `python/krasis/`, or test files.
 
 ---
 
+## GLM-4.7 Support (GQA Enhancements) — 2026-02-12
+
+**Added partial RoPE and attention bias support for GLM-4.7 (glm4_moe) architecture.**
+
+### Changes
+- **`python/krasis/config.py`**: Added `partial_rotary_factor` (default 1.0) and `attention_bias` (default false) fields + `rotary_dim` property.
+- **`python/krasis/attention.py`**: GQA RoPE now supports partial rotation — only first `rotary_dim` dimensions get RoPE, rest pass through. Added Q/K/V/O bias loading and application.
+- **`python/krasis/weight_loader.py`**: GQA attention loader now picks up `*.bias` tensors when present.
+- **No Rust changes** — MoE engine, weight caching, GPU prefill all already generic.
+
+### GLM-4.7 Config
+- 92 layers (3 dense + 89 MoE), 160 experts, top-8, 1 shared
+- GQA: 96 heads / 8 KV heads, head_dim=128, partial_rotary_factor=0.5
+- attention_bias=true, use_qk_norm=true
+- 668 GB BF16 safetensors
+
+### Regression
+- V2-Lite GGUF test: ALL PASS, decode 4.82 tok/s (unchanged)
+
+---
+
 ## GGUF → AVX2 Transposed CPU Cache — 2026-02-12
 
 **New: GGUF files are now dequantized and re-quantized to our fast AVX2 transposed format with disk caching. 2.6× faster decode than raw GGUF-native path.**
