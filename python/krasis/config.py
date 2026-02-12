@@ -62,6 +62,10 @@ class ModelConfig:
     rope_theta: float = 10000.0
     rope_scaling: Dict[str, Any] = field(default_factory=dict)
     max_position_embeddings: int = 262144
+    partial_rotary_factor: float = 1.0  # GLM-4.7 uses 0.5 (only half of head_dim gets RoPE)
+
+    # Attention
+    attention_bias: bool = False       # GLM-4.7 has bias on Q/K/V projections
 
     # Misc
     tie_word_embeddings: bool = False
@@ -118,6 +122,8 @@ class ModelConfig:
             rope_theta=cfg.get("rope_theta", 10000.0),
             rope_scaling=cfg.get("rope_scaling") or {},
             max_position_embeddings=cfg.get("max_position_embeddings", 131072),
+            partial_rotary_factor=cfg.get("partial_rotary_factor", 1.0),
+            attention_bias=cfg.get("attention_bias", False),
             tie_word_embeddings=tie,
             bos_token_id=raw.get("bos_token_id", cfg.get("bos_token_id", 0)),
             eos_token_id=raw.get("eos_token_id", cfg.get("eos_token_id", 0)),
@@ -152,6 +158,13 @@ class ModelConfig:
     def q_head_dim(self) -> int:
         """Total query head dim."""
         return self.head_dim
+
+    @property
+    def rotary_dim(self) -> int:
+        """Number of head dimensions that get RoPE (partial_rotary_factor * head_dim)."""
+        if self.is_mla:
+            return self.qk_rope_head_dim
+        return int(self.gqa_head_dim * self.partial_rotary_factor)
 
     @property
     def kv_compressed_dim(self) -> int:

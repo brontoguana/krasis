@@ -225,9 +225,10 @@ class WeightLoader:
     def _load_gqa_attention(
         self, layer_idx: int, device: torch.device
     ) -> Dict[str, Tuple[torch.Tensor, torch.Tensor] | torch.Tensor]:
-        """Load GQA attention weights for one layer (Qwen3).
+        """Load GQA attention weights for one layer (Qwen3, GLM-4.7).
 
         Loads: q_proj, k_proj, v_proj, o_proj, q_norm, k_norm.
+        Also loads bias tensors when present (GLM-4.7 has attention_bias=true).
         """
         prefix = f"{self.cfg.layers_prefix}.layers.{layer_idx}.self_attn"
         weights = {}
@@ -235,8 +236,12 @@ class WeightLoader:
 
         for proj in ["q_proj", "k_proj", "v_proj", "o_proj"]:
             weights[proj] = load_proj(f"{prefix}.{proj}.weight", device)
+            # Load bias if present (GLM-4.7)
+            bias_name = f"{prefix}.{proj}.bias"
+            if bias_name in self._weight_map:
+                weights[f"{proj}_bias"] = self._load_bf16(bias_name, device)
 
-        # QK-Norm (Qwen3 uses RMSNorm on Q and K)
+        # QK-Norm (Qwen3 and GLM-4.7 use RMSNorm on Q and K)
         q_norm_name = f"{prefix}.q_norm.weight"
         k_norm_name = f"{prefix}.k_norm.weight"
         if q_norm_name in self._weight_map:

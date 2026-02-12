@@ -382,12 +382,19 @@ class GQAAttention:
         self.v_proj = weights["v_proj"]  # [num_kv_heads * head_dim, hidden]
         self.o_proj = weights["o_proj"]  # [hidden, num_heads * head_dim]
 
+        # Attention biases (optional, GLM-4.7 has these)
+        self.q_proj_bias = weights.get("q_proj_bias")  # [num_heads * head_dim]
+        self.k_proj_bias = weights.get("k_proj_bias")  # [num_kv_heads * head_dim]
+        self.v_proj_bias = weights.get("v_proj_bias")  # [num_kv_heads * head_dim]
+        self.o_proj_bias = weights.get("o_proj_bias")  # [hidden]
+
         # QKNorm (per-head RMSNorm, optional)
         self.q_norm = weights.get("q_norm")  # [head_dim]
         self.k_norm = weights.get("k_norm")  # [head_dim]
 
         # RoPE parameters
         self.rope_theta = cfg.rope_theta
+        self.rotary_dim = cfg.rotary_dim  # may be < head_dim (GLM-4.7: 64 of 128)
         self._rope_cos_sin = None
 
         # FlashInfer attention wrapper (shared workspace across layers on same device)
@@ -401,11 +408,11 @@ class GQAAttention:
         if self._rope_cos_sin is not None and self._rope_cos_sin[0].shape[0] >= max_len:
             return self._rope_cos_sin
 
-        dim = self.head_dim
+        dim = self.rotary_dim  # may be < head_dim for partial RoPE
         freqs = 1.0 / (self.rope_theta ** (torch.arange(0, dim, 2, device=self.device).float() / dim))
 
         t = torch.arange(max_len, device=self.device, dtype=torch.float32)
-        freqs = torch.outer(t, freqs)  # [max_len, dim//2]
+        freqs = torch.outer(t, freqs)  # [max_len, rotary_dim//2]
         cos = freqs.cos().to(torch.bfloat16)
         sin = freqs.sin().to(torch.bfloat16)
         self._rope_cos_sin = (cos, sin)
@@ -417,7 +424,10 @@ class GQAAttention:
         k: torch.Tensor,
         positions: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Apply rotary position embeddings to all Q and K heads.
+        """Apply rotary position embeddings to Q and K heads.
+
+        Supports partial RoPE: when rotary_dim < head_dim, only the first
+        rotary_dim dimensions are rotated; the rest pass through unchanged.
 
         Args:
             q: [M, num_heads, head_dim]
@@ -427,16 +437,20 @@ class GQAAttention:
         max_pos = positions.max().item() + 1
         cos, sin = self._get_rope_cos_sin(max_pos)
 
-        pos_cos = cos[positions]  # [M, dim//2]
-        pos_sin = sin[positions]  # [M, dim//2]
+        pos_cos = cos[positions]  # [M, rotary_dim//2]
+        pos_sin = sin[positions]  # [M, rotary_dim//2]
 
         def rotate(x, c, s):
-            d2 = x.shape[-1] // 2
+            d2 = c.shape[-1]  # rotary_dim // 2
             while c.dim() < x.dim():
                 c = c.unsqueeze(1)
                 s = s.unsqueeze(1)
-            x1, x2 = x[..., :d2], x[..., d2:]
-            return torch.cat([x1 * c - x2 * s, x2 * c + x1 * s], dim=-1)
+            x1, x2 = x[..., :d2], x[..., d2:2*d2]
+            rotated = torch.cat([x1 * c - x2 * s, x2 * c + x1 * s], dim=-1)
+            if 2 * d2 < x.shape[-1]:
+                # Partial RoPE: append the non-rotated passthrough dims
+                rotated = torch.cat([rotated, x[..., 2*d2:]], dim=-1)
+            return rotated
 
         q = rotate(q, pos_cos, pos_sin)
         k = rotate(k, pos_cos, pos_sin)
@@ -470,6 +484,14 @@ class GQAAttention:
         q = _linear(hidden, self.q_proj)  # [M, num_heads * head_dim]
         k = _linear(hidden, self.k_proj)  # [M, num_kv_heads * head_dim]
         v = _linear(hidden, self.v_proj)  # [M, num_kv_heads * head_dim]
+
+        # Apply attention biases if present (GLM-4.7)
+        if self.q_proj_bias is not None:
+            q = q + self.q_proj_bias
+        if self.k_proj_bias is not None:
+            k = k + self.k_proj_bias
+        if self.v_proj_bias is not None:
+            v = v + self.v_proj_bias
 
         # Reshape to per-head
         q = q.reshape(M, self.num_heads, self.head_dim)
@@ -553,5 +575,7 @@ class GQAAttention:
         # ── Step 6: O projection ──
         attn_flat = attn_out.reshape(M, self.num_heads * self.head_dim)
         output = _linear(attn_flat, self.o_proj)
+        if self.o_proj_bias is not None:
+            output = output + self.o_proj_bias
 
         return output
