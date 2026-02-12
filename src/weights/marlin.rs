@@ -331,6 +331,7 @@ pub fn marlin_repack(q: &QuantizedInt4) -> MarlinRepacked {
     let n = q.rows; // output dimension
     let k = q.cols; // input dimension (K)
     let group_size = q.group_size;
+    let t0 = std::time::Instant::now();
 
     assert!(k % MARLIN_TILE == 0, "K ({k}) must be divisible by {MARLIN_TILE}");
     assert!(n % 64 == 0, "N ({n}) must be divisible by 64 (Marlin tile constraint)");
@@ -349,18 +350,17 @@ pub fn marlin_repack(q: &QuantizedInt4) -> MarlinRepacked {
         }
     }
 
-    // Step 2: Transpose [N, K] → [K, N]
-    let mut transposed = vec![0u8; k * n]; // [K, N]
-    for row in 0..n {
-        for col in 0..k {
-            transposed[col * n + row] = unpacked[row * k + col];
-        }
-    }
+    let t1 = t0.elapsed();
 
-    // Step 3: marlin_permute_weights
+    // Step 2+3 fused: Skip separate transpose, read unpacked directly with swapped indices.
+    // Previously: transpose [N,K]→[K,N] then tile permute reading transposed[src_k * n + src_n]
+    // Now: read unpacked[src_n * k + src_k] directly (same value, no intermediate buffer)
+    //
     // 3a: Reshape (K, N) → (K/16, 16, N/16, 16) → permute(0,2,1,3) → (K/16, N/16, 16, 16)
     // 3b: Flatten → (K/16, N*16)
     // 3c: Apply perm to chunks of 1024
+
+    let t2 = t1; // no separate transpose step
 
     let k_tiles = k / MARLIN_TILE;
     let n_tiles = n / MARLIN_TILE;
@@ -368,17 +368,16 @@ pub fn marlin_repack(q: &QuantizedInt4) -> MarlinRepacked {
 
     let mut permuted = vec![0u8; k_tiles * row_len]; // [K/16, N*16]
 
-    // 3a+3b: tile transpose — put tiles contiguous
+    // 3a+3b: tile permute — read directly from unpacked [N, K] with transposed indexing
     for kt in 0..k_tiles {
         for nt in 0..n_tiles {
             for tk in 0..MARLIN_TILE {
                 for tn in 0..MARLIN_TILE {
                     let src_k = kt * MARLIN_TILE + tk;
                     let src_n = nt * MARLIN_TILE + tn;
-                    // After permute(0,2,1,3) + flatten:
-                    // dst row = kt, dst col = nt * 16 * 16 + tk * 16 + tn
                     let dst_col = nt * MARLIN_TILE * MARLIN_TILE + tk * MARLIN_TILE + tn;
-                    permuted[kt * row_len + dst_col] = transposed[src_k * n + src_n];
+                    // Fused transpose: read unpacked[src_n, src_k] instead of transposed[src_k, src_n]
+                    permuted[kt * row_len + dst_col] = unpacked[src_n * k + src_k];
                 }
             }
         }
@@ -397,6 +396,8 @@ pub fn marlin_repack(q: &QuantizedInt4) -> MarlinRepacked {
             }
         }
     }
+
+    let t3 = t0.elapsed();
 
     // Step 4: Pack with stride-8 packing (matching vLLM's pack_cols)
     // Output shape: (K/16, N*16/8) = (K/16, 2*N)
@@ -434,6 +435,8 @@ pub fn marlin_repack(q: &QuantizedInt4) -> MarlinRepacked {
         }
     }
 
+    let t4 = t0.elapsed();
+
     // Step 5: Transpose scales [N, K/gs] → [K/gs, N]
     let num_groups_k = k / group_size;
     let mut scales_transposed = vec![0u16; num_groups_k * n];
@@ -458,6 +461,24 @@ pub fn marlin_repack(q: &QuantizedInt4) -> MarlinRepacked {
         for i in 0..perm_len {
             scales_permuted[base + i] = scales_transposed[base + sperm[i]];
         }
+    }
+
+    let t6 = t0.elapsed();
+
+    // Log timing for first expert per thread (to avoid log spam)
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static REPACK_LOG_COUNT: AtomicUsize = AtomicUsize::new(0);
+    let count = REPACK_LOG_COUNT.fetch_add(1, Ordering::Relaxed);
+    if count < 5 || count % 384 == 0 {
+        log::info!(
+            "marlin_repack [{n}×{k}] total={:.1}ms: unpack={:.1} transpose={:.1} tile={:.1} pack={:.1} scales={:.1}ms",
+            t6.as_secs_f64() * 1000.0,
+            t1.as_secs_f64() * 1000.0,
+            (t2 - t1).as_secs_f64() * 1000.0,
+            (t3 - t2).as_secs_f64() * 1000.0,
+            (t4 - t3).as_secs_f64() * 1000.0,
+            (t6 - t4).as_secs_f64() * 1000.0,
+        );
     }
 
     MarlinRepacked {

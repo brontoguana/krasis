@@ -464,11 +464,11 @@ class GpuPrefillManager:
 
             # Quantize on GPU
             w13_gpu = w13.to(self.device)
-            w13_packed, w13_scale = _quantize_and_pack_gpu(w13_gpu, GROUP_SIZE, self.num_bits)
+            w13_packed, w13_scale = _quantize_and_pack_gpu(w13_gpu, self._group_size, self.num_bits)
             del w13, w13_gpu
 
             down_gpu = down.to(self.device)
-            w2_packed, w2_scale = _quantize_and_pack_gpu(down_gpu, GROUP_SIZE, self.num_bits)
+            w2_packed, w2_scale = _quantize_and_pack_gpu(down_gpu, self._group_size, self.num_bits)
             del down, down_gpu
 
             # Marlin repack (per-expert, CUDA kernel)
@@ -478,10 +478,10 @@ class GpuPrefillManager:
 
             # Permute scales for Marlin
             w13_scale_perm = marlin_permute_scales(
-                w13_scale, K, 2 * N, GROUP_SIZE,
+                w13_scale, K, 2 * N, self._group_size,
             )
             w2_scale_perm = marlin_permute_scales(
-                w2_scale, N, K, GROUP_SIZE,
+                w2_scale, N, K, self._group_size,
             )
 
             # Move to CPU for RAM cache
@@ -549,7 +549,7 @@ class GpuPrefillManager:
 
         down_gpu = down.t().contiguous().to(self.device)  # [shared_N, K]
         del down
-        w2_packed, w2_scale = _quantize_and_pack_gpu(down_gpu, GROUP_SIZE, self.num_bits)
+        w2_packed, w2_scale = _quantize_and_pack_gpu(down_gpu, self._group_size, self.num_bits)
         del down_gpu
 
         perm = torch.empty(0, dtype=torch.int32, device=self.device)

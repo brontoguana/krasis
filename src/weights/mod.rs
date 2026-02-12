@@ -17,6 +17,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use rayon::prelude::*;
 
 /// Model configuration (subset of config.json relevant to MoE).
 ///
@@ -1266,16 +1267,52 @@ impl WeightStore {
         // Write header (version 3 = Marlin format)
         write_marlin_cache_header(&mut w, config, effective_group_size, num_moe_layers, config_hash)?;
 
+        // Configure rayon to use physical cores only (hyperthreads hurt on EPYC)
+        let physical_cores = detect_physical_cores();
+        let _ = rayon::ThreadPoolBuilder::new()
+            .num_threads(physical_cores)
+            .build_global();
+        log::info!("Rayon thread pool: {physical_cores} physical cores (cache build)");
+
         let overall_start = std::time::Instant::now();
+
+        // Prefetch first layer's expert data asynchronously
+        {
+            let first_layer_idx = start_moe_layer + config.first_k_dense_replace;
+            let proj_names = if prequantized {
+                vec!["gate_proj.weight_packed", "gate_proj.weight_scale",
+                     "up_proj.weight_packed", "up_proj.weight_scale",
+                     "down_proj.weight_packed", "down_proj.weight_scale"]
+            } else {
+                vec!["gate_proj.weight", "up_proj.weight", "down_proj.weight"]
+            };
+            for eidx in 0..config.n_routed_experts {
+                for proj in &proj_names {
+                    let tensor_name = format!(
+                        "{layers_prefix}.layers.{first_layer_idx}.mlp.experts.{eidx}.{proj}"
+                    );
+                    if let Some(shard_name) = index.weight_map.get(&tensor_name) {
+                        if let Some(shard) = shards.get(shard_name) {
+                            shard.prefetch_tensor(&tensor_name);
+                        }
+                    }
+                }
+            }
+            log::info!("Issued MADV_WILLNEED prefetch for layer {first_layer_idx} experts");
+        }
 
         // Stream routed experts layer by layer
         for moe_idx in start_moe_layer..(start_moe_layer + num_moe_layers) {
             let layer_idx = moe_idx + config.first_k_dense_replace;
             let layer_start = std::time::Instant::now();
 
+            // 2-phase pipeline: sequential I/O then parallel compute.
+            // Phase 1 does sequential mmap reads (optimal for kernel readahead).
+            // Phase 2 does parallel Marlin repack (CPU-bound, scales with cores).
+            let io_start = std::time::Instant::now();
+            let mut expert_data: Vec<ExpertWeights> = Vec::with_capacity(config.n_routed_experts);
             for eidx in 0..config.n_routed_experts {
                 let prefix = format!("{layers_prefix}.layers.{layer_idx}.mlp.experts.{eidx}");
-
                 let (gate, up, down) = if prequantized {
                     let g = QuantWeight::Int4(load_prequantized_weight(
                         &prefix, "gate_proj", &index.weight_map, &shards, effective_group_size,
@@ -1292,29 +1329,68 @@ impl WeightStore {
                         &prefix, &index.weight_map, &shards, effective_group_size, 4,
                     )?
                 };
+                expert_data.push(ExpertWeights { gate, up, down });
+            }
+            let io_elapsed = io_start.elapsed();
 
-                let ew = ExpertWeights { gate, up, down };
-                let marlin = UnifiedExpertWeights::from_expert_weights_marlin(&ew);
+            // Prefetch next layer's data while we do CPU-bound Marlin repack
+            let next_moe_idx = moe_idx + 1;
+            if next_moe_idx < start_moe_layer + num_moe_layers {
+                let next_layer_idx = next_moe_idx + config.first_k_dense_replace;
+                let proj_names: &[&str] = if prequantized {
+                    &["gate_proj.weight_packed", "gate_proj.weight_scale",
+                      "up_proj.weight_packed", "up_proj.weight_scale",
+                      "down_proj.weight_packed", "down_proj.weight_scale"]
+                } else {
+                    &["gate_proj.weight", "up_proj.weight", "down_proj.weight"]
+                };
+                for eidx in 0..config.n_routed_experts {
+                    for proj in proj_names {
+                        let tensor_name = format!(
+                            "{layers_prefix}.layers.{next_layer_idx}.mlp.experts.{eidx}.{proj}"
+                        );
+                        if let Some(shard_name) = index.weight_map.get(&tensor_name) {
+                            if let Some(shard) = shards.get(shard_name) {
+                                shard.prefetch_tensor(&tensor_name);
+                            }
+                        }
+                    }
+                }
+            }
 
-                // Write Marlin data to cache (same field order as v2 — identical byte sizes)
+            // Phase 2: Parallel Marlin repack across all CPU cores
+            let repack_start = std::time::Instant::now();
+            let expert_results: Vec<UnifiedExpertWeights> = expert_data
+                .into_par_iter()
+                .map(|ew| UnifiedExpertWeights::from_expert_weights_marlin(&ew))
+                .collect();
+            let repack_elapsed = repack_start.elapsed();
+
+            // Phase 3: Sequential write (file format requires expert ordering)
+            for marlin in &expert_results {
                 write_vec_u32(&mut w, &marlin.w13_packed)?;
                 write_vec_u16(&mut w, &marlin.w13_scales)?;
                 write_vec_u32(&mut w, &marlin.w2_packed)?;
                 write_vec_u16(&mut w, &marlin.w2_scales)?;
             }
+            drop(expert_results); // Free Marlin results immediately
 
             let layers_done = moe_idx - start_moe_layer + 1;
             let layer_elapsed = layer_start.elapsed();
             if layers_done % 5 == 0 || layers_done == num_moe_layers {
                 crate::syscheck::log_memory_usage(&format!(
-                    "Marlin cache: {layers_done}/{num_moe_layers} layers ({:.1}s/layer)",
+                    "Marlin cache: {layers_done}/{num_moe_layers} layers ({:.1}s/layer, io={:.1}s repack={:.1}s)",
                     layer_elapsed.as_secs_f64(),
+                    io_elapsed.as_secs_f64(),
+                    repack_elapsed.as_secs_f64(),
                 ));
             } else {
                 log::info!(
-                    "  Layer {layer_idx}: Marlin-repacked {} experts in {:.1}s [{layers_done}/{num_moe_layers}]",
+                    "  Layer {layer_idx}: {} experts in {:.1}s (io={:.1}s repack={:.1}s) [{layers_done}/{num_moe_layers}]",
                     config.n_routed_experts,
                     layer_elapsed.as_secs_f64(),
+                    io_elapsed.as_secs_f64(),
+                    repack_elapsed.as_secs_f64(),
                 );
             }
         }
@@ -1344,6 +1420,8 @@ impl WeightStore {
         std::fs::rename(&tmp_path, cache_path)
             .map_err(|e| format!("Failed to rename cache file: {e}"))?;
 
+        // Free all safetensors mmaps and reclaim RAM
+        drop(shards);
         #[cfg(target_os = "linux")]
         unsafe { libc::malloc_trim(0); }
 
@@ -1377,6 +1455,12 @@ impl WeightStore {
         }
 
         let lock_path = cache_path.with_extension("bin.lock");
+
+        // Ensure cache directory exists
+        if let Some(parent) = cache_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create cache directory {}: {e}", parent.display()))?;
+        }
 
         match OpenOptions::new()
             .create_new(true)
@@ -1989,6 +2073,27 @@ fn parse_layer_number(tensor_name: &str) -> Option<usize> {
         }
     }
     None
+}
+
+/// Detect the number of physical CPU cores (excluding hyperthreads).
+fn detect_physical_cores() -> usize {
+    // Try reading thread siblings to determine threads-per-core
+    if let Ok(siblings) = std::fs::read_to_string(
+        "/sys/devices/system/cpu/cpu0/topology/thread_siblings_list"
+    ) {
+        let threads_per_core = siblings.trim().split(',').count();
+        let logical = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(64);
+        let physical = logical / threads_per_core.max(1);
+        if physical > 0 {
+            return physical;
+        }
+    }
+    // Fallback: assume no HT
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(64)
 }
 
 /// Auto-detect the expert weight prefix from the weight map.
