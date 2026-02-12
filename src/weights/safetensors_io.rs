@@ -120,6 +120,9 @@ impl MmapSafetensors {
             tensors.insert(name, info);
         }
 
+        // Advise sequential access for optimal kernel readahead
+        let _ = mmap.advise(memmap2::Advice::Sequential);
+
         log::info!(
             "Opened {} — {} tensors, {:.1} MB data",
             path.display(),
@@ -182,6 +185,16 @@ impl MmapSafetensors {
         let ptr = data.as_ptr() as *const T;
         let len = info.numel();
         Ok(unsafe { std::slice::from_raw_parts(ptr, len) })
+    }
+
+    /// Advise the kernel to prefetch tensor data (MADV_WILLNEED).
+    /// Returns silently if the tensor doesn't exist.
+    pub fn prefetch_tensor(&self, name: &str) {
+        if let Some(info) = self.tensors.get(name) {
+            let start = self.data_start + info.data_offsets[0];
+            let len = info.data_offsets[1] - info.data_offsets[0];
+            let _ = self.mmap.advise_range(memmap2::Advice::WillNeed, start, len);
+        }
     }
 }
 

@@ -553,7 +553,7 @@ class KrasisModel:
                     num_new_tokens=M,
                 )
 
-                if _DIAG_ENABLED and diag and abs_layer_idx in (0, 1, 30, 60):
+                if _DIAG_ENABLED and diag and abs_layer_idx in (0, 1, self.cfg.num_hidden_layers // 2, self.cfg.num_hidden_layers - 1):
                     h = hidden[-1] if hidden.shape[0] > 1 else hidden[0]
                     r = residual[-1] if residual.shape[0] > 1 else residual[0]
                     logger.info("DIAG[%d] L%d: hid std=%.4f max=%.4f | res std=%.4f max=%.4f",
