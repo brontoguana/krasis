@@ -13,7 +13,8 @@ import logging
 import os
 import threading
 import time
-from typing import List, Optional
+from math import ceil
+from typing import List, Optional, Tuple
 
 import torch
 
@@ -217,6 +218,62 @@ def _check_actual_rss(estimated_gb: float):
             )
 
 
+def _compute_layer_groups(
+    rank,
+    cfg,
+    divisor: int,
+) -> List[Tuple[List[int], List[int]]]:
+    """Compute layer groups for layer-grouped prefill.
+
+    Splits a rank's layers into groups where each group has at most
+    ceil(num_moe_layers / divisor) MoE layers. Dense layers (below
+    first_k_dense_replace) are included in the first group.
+
+    Args:
+        rank: PPRankConfig with layer_start, layer_end
+        cfg: ModelConfig with first_k_dense_replace
+        divisor: Number of groups to split MoE layers into
+
+    Returns:
+        List of (abs_layer_indices, moe_layer_indices) tuples.
+        abs_layer_indices: absolute layer indices for self.layers indexing
+        moe_layer_indices: 0-based MoE indices for GpuPrefillManager
+    """
+    first_k = cfg.first_k_dense_replace
+    all_layers = list(range(rank.layer_start, rank.layer_end))
+
+    # Separate dense and MoE layers within this rank
+    dense_layers = [l for l in all_layers if l < first_k]
+    moe_layers = [l for l in all_layers if l >= first_k]
+
+    if not moe_layers:
+        # All dense layers — single group, no experts
+        return [(all_layers, [])]
+
+    # Split MoE layers into groups
+    num_moe = len(moe_layers)
+    moe_per_group = ceil(num_moe / divisor)
+
+    groups = []
+    for g in range(divisor):
+        start = g * moe_per_group
+        end = min(start + moe_per_group, num_moe)
+        if start >= num_moe:
+            break
+        group_moe = moe_layers[start:end]
+        group_moe_indices = [l - first_k for l in group_moe]
+
+        if g == 0:
+            # Dense layers go in the first group
+            group_all = dense_layers + group_moe
+        else:
+            group_all = group_moe
+
+        groups.append((group_all, group_moe_indices))
+
+    return groups
+
+
 class KrasisModel:
     """Full model with pipeline-parallel GPU inference + CPU MoE experts."""
 
@@ -233,6 +290,7 @@ class KrasisModel:
         attention_backend: str = "flashinfer",  # "flashinfer" or "trtllm"
         quant_cfg: QuantConfig = None,
         force_load: bool = False,
+        expert_divisor: int = 1,
     ):
         self.cfg = ModelConfig.from_model_path(model_path)
         self.quant_cfg = quant_cfg or QuantConfig()
@@ -251,6 +309,7 @@ class KrasisModel:
         self.gpu_prefill_threshold = gpu_prefill_threshold
         self.attention_backend = attention_backend
         self.force_load = force_load
+        self.expert_divisor = expert_divisor
 
         logger.info(
             "KrasisModel: %d layers, PP=%s, %d GPUs, attn=%s",
@@ -387,6 +446,7 @@ class KrasisModel:
                 # Pass Krasis engine for unified weight access (eliminates
                 # the ~438 GB Python Marlin RAM cache)
                 engine_ref = getattr(self, 'krasis_engine', None)
+                num_moe_layers = self.cfg.num_hidden_layers - self.cfg.first_k_dense_replace
                 manager = GpuPrefillManager(
                     model_path=self.cfg.model_path,
                     device=dev,
@@ -399,6 +459,8 @@ class KrasisModel:
                     first_k_dense=self.cfg.first_k_dense_replace,
                     num_bits=self.quant_cfg.gpu_expert_bits,
                     krasis_engine=engine_ref,
+                    num_moe_layers=num_moe_layers,
+                    expert_divisor=self.expert_divisor,
                 )
                 self.gpu_prefill_managers[dev_str] = manager
                 logger.info("GPU prefill manager created for %s", dev_str)
@@ -495,6 +557,15 @@ class KrasisModel:
         """
         assert self._loaded, "Model not loaded. Call load() first."
         M = token_ids.shape[0]
+
+        # ── Layer-grouped prefill routing ──
+        if (
+            self.expert_divisor >= 2
+            and M >= self.gpu_prefill_threshold
+            and self.gpu_prefill_enabled
+            and self.cfg.n_routed_experts > 0
+        ):
+            return self.forward_prefill_layer_grouped(token_ids, positions, seq_states)
 
         # ── Embedding (GPU0) ──
         first_dev = torch.device(self.ranks[0].device)
@@ -596,6 +667,141 @@ class KrasisModel:
             logger.info("DIAG[%d] logits: std=%.2f top5=%s",
                         self._diag_count, last_logits.std(),
                         list(zip(tok_strs, [f"{v:.1f}" for v in topk_vals.tolist()])))
+
+        return logits
+
+    def forward_prefill_layer_grouped(
+        self,
+        token_ids: torch.Tensor,
+        positions: torch.Tensor,
+        seq_states: List[SequenceKVState],
+    ) -> torch.Tensor:
+        """GPU prefill with layer-grouped expert loading.
+
+        Instead of loading experts per-layer-per-chunk (O(chunks × layers) DMA),
+        loads experts per-group (O(groups) DMA ≈ O(1 model load)).
+
+        Loop structure:
+            for each group → DMA experts once → for each chunk → for each layer → compute
+
+        Args:
+            token_ids: [M] int64 token IDs
+            positions: [M] int32 position indices
+            seq_states: One SequenceKVState per PP rank
+
+        Returns:
+            logits: [vocab_size] or [1, vocab_size] float32 (last token only)
+        """
+        assert self._loaded, "Model not loaded. Call load() first."
+        M = token_ids.shape[0]
+
+        # ── Embedding (GPU0) ──
+        first_dev = torch.device(self.ranks[0].device)
+        all_hidden = self.embedding[token_ids.to(first_dev)]  # [M, hidden_size]
+
+        # ── Pre-allocate KV pages for all ranks ──
+        for seq_state in seq_states:
+            seq_state.ensure_capacity(M)
+
+        # ── Chunk tokens ──
+        chunk_size = 2048
+        num_chunks = ceil(M / chunk_size)
+
+        chunk_hidden = []
+        chunk_positions = []
+        chunk_residual: List[Optional[torch.Tensor]] = []
+        for i in range(num_chunks):
+            start = i * chunk_size
+            end = min(start + chunk_size, M)
+            chunk_hidden.append(all_hidden[start:end])
+            chunk_positions.append(positions[start:end])
+            chunk_residual.append(None)
+
+        del all_hidden  # Free embedding memory
+
+        # ── Process layer groups per rank ──
+        first_k = self.cfg.first_k_dense_replace
+
+        for rank_idx, rank in enumerate(self.ranks):
+            dev = torch.device(rank.device)
+            kv_cache = self.kv_caches[rank_idx]
+            seq_state = seq_states[rank_idx]
+
+            # GPU prefill manager for this device
+            manager = self.gpu_prefill_managers.get(str(dev))
+
+            # Base index into self.layers for this rank
+            rank_layer_base = sum(r.num_layers for r in self.ranks[:rank_idx])
+
+            # Compute layer groups
+            groups = _compute_layer_groups(rank, self.cfg, self.expert_divisor)
+
+            logger.info(
+                "Layer-grouped prefill: rank %d, %d groups, %d layers, %d chunks of %d tokens",
+                rank_idx, len(groups), rank.num_layers, num_chunks, chunk_size,
+            )
+
+            for group_idx, (group_layers, group_moe_indices) in enumerate(groups):
+                # Load experts for this group
+                if manager and group_moe_indices:
+                    manager.preload_layer_group(group_moe_indices)
+
+                # Reset seq_state for this group (each group's layers start with 0 KV)
+                seq_state.seq_len = 0
+
+                # Process all chunks through this group
+                for c in range(num_chunks):
+                    h = _to_device(chunk_hidden[c], dev)
+                    r = _to_device(chunk_residual[c], dev) if chunk_residual[c] is not None else None
+                    pos = _to_device(chunk_positions[c], dev)
+                    chunk_M = h.shape[0]
+
+                    for abs_layer_idx in group_layers:
+                        layer_offset = abs_layer_idx - rank.layer_start
+                        global_idx = rank_layer_base + layer_offset
+                        layer = self.layers[global_idx]
+
+                        moe_layer_idx = None
+                        if layer.is_moe:
+                            moe_layer_idx = abs_layer_idx - first_k
+
+                        h, r = layer.forward(
+                            h, r, pos,
+                            kv_cache, seq_state,
+                            layer_offset, moe_layer_idx,
+                            num_new_tokens=chunk_M,
+                        )
+
+                    # Save hidden/residual for this chunk
+                    chunk_hidden[c] = h
+                    chunk_residual[c] = r
+
+                    # Advance seq_state: these layers have now seen chunk_M more tokens
+                    seq_state.advance(chunk_M)
+
+                # Free experts for this group
+                if manager and group_moe_indices:
+                    manager.free_layer_group()
+
+            # After all groups, seq_state.seq_len should equal M
+            assert seq_state.seq_len == M, (
+                f"seq_len mismatch after rank {rank_idx}: {seq_state.seq_len} != {M}"
+            )
+
+        # ── Final norm (last chunk only, contains last token) ──
+        last_dev = torch.device(self.ranks[-1].device)
+        last_hidden = _to_device(chunk_hidden[-1], last_dev)
+        last_residual = _to_device(chunk_residual[-1], last_dev)
+
+        import flashinfer
+        flashinfer.norm.fused_add_rmsnorm(
+            last_hidden, last_residual, self.final_norm, self.cfg.rms_norm_eps
+        )
+
+        # ── LM head (last token only) ──
+        hidden = last_hidden[-1:, :]
+        logits = _linear(hidden, self.lm_head_data)
+        logits = logits.float()
 
         return logits
 

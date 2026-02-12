@@ -6,80 +6,101 @@
 
 ## Summary
 
-| Metric | Value |
-|--------|-------|
-| GPU prefill (2K tokens) | **184 tok/s** |
-| GPU prefill (10K tokens) | **173 tok/s** |
-| CPU decode | **5.9 tok/s** (170ms/tok) |
-| Decode variance | Negligible (P90=173ms vs avg=170ms) |
-| Context length impact on decode | Negligible (5.8-6.0 tok/s, 512-8K) |
+| Metric | Chunked (before) | Persistent (after) |
+|--------|:-:|:-:|
+| GPU prefill (512 tokens) | 45.8 tok/s | **3,294 tok/s** (72x) |
+| GPU prefill (2K tokens) | 184 tok/s | **4,074 tok/s** (22x) |
+| GPU prefill (10K tokens) | 173 tok/s | **2,409 tok/s** (14x) |
+| CPU decode | 5.9 tok/s | 5.8 tok/s (unchanged) |
+| VRAM usage | 2,924 + 286 MB buffer | 2,924 + 7,654 MB persistent |
+| KV cache capacity | 212K tokens | 93K tokens |
 
-## GPU Prefill Analysis
+## The Root Cause: Expert DMA Dominates Everything
 
-### The Per-Chunk Fixed Cost Problem
+The fundamental bottleneck was **expert weight transfers**, not compute, not attention, not prompt size. The numbers prove this conclusively:
 
-Each chunk of GPU prefill takes ~11s regardless of token count:
+**Per forward call, the data transferred was:**
+
+| What | Size | Frequency | Total |
+|------|------|-----------|-------|
+| Expert weights (26 MoE layers × 64 experts × 4.5 MB) | **7.3 GB** | Every forward call | 7.3 GB |
+| Hidden states (2048 tokens × 2048 dim × 2 bytes BF16) | **8 MB** | Once at start | 8 MB |
+
+That's a **900:1 ratio**. The expert DMA was three orders of magnitude larger than the prompt data. This is why:
+
+- 512 tokens took 11.17s — because 7.3 GB of expert DMA dominated
+- 2048 tokens took 11.01s — because the same 7.3 GB of expert DMA still dominated
+- Token count was irrelevant to wall time
+
+The Marlin MoE kernel itself, once the weights were on GPU, was fast. We were spending ~10.5s moving data and ~0.5s computing.
+
+## The Fix: Persistent Expert Buffers (`expert_divisor=1`)
+
+Pre-load all 26 layers × 64 experts = 7,654 MB of Marlin-format weights into GPU VRAM once at startup. During forward: zero DMA, just index into the pre-loaded buffers.
+
+### Before vs After
+
+| Tokens | Chunked (DMA/layer) | Persistent (zero DMA) | Speedup |
+|-------:|--------------------:|----------------------:|--------:|
+| 512 | 11.17s (45.8 tok/s) | 0.155s (3,294 tok/s) | **72x** |
+| 1,024 | 10.71s (95.7 tok/s) | 0.250s (4,090 tok/s) | **43x** |
+| 2,031 | 11.01s (184 tok/s) | 0.498s (4,074 tok/s) | **22x** |
+| 4,047 | 22.12s (183 tok/s) | 1.167s (3,468 tok/s) | **19x** |
+| 9,903 | 57.26s (173 tok/s) | 4.110s (2,409 tok/s) | **14x** |
+
+### Why Speedup Varies With Token Count
+
+At small prompts (512 tokens), nearly all the old wall time was DMA — so eliminating it gives 72x. At larger prompts the actual compute (Marlin kernel + attention) becomes a larger fraction of the total, so the speedup converges to ~14x. This is the expected behavior: we removed a fixed cost, so relative improvement is greatest when the fixed cost was dominant.
+
+### 10K Prefill Breakdown (Persistent Mode)
+
+With DMA eliminated, the per-chunk time now scales with token count as expected — attention computation grows with sequence length:
 
 ```
- 512 tokens → 11.17s (1 chunk)
-1024 tokens → 10.71s (1 chunk)
-2048 tokens → 11.01s (1 chunk)
+Chunk 0: pos    0..2048  (2048 tok) = 0.505s = 4,057 tok/s
+Chunk 1: pos 2048..4096  (2048 tok) = 0.682s = 3,005 tok/s
+Chunk 2: pos 4096..6144  (2048 tok) = 0.862s = 2,375 tok/s
+Chunk 3: pos 6144..8192  (2048 tok) = 1.044s = 1,962 tok/s
+Chunk 4: pos 8192..9903  (1711 tok) = 1.016s = 1,684 tok/s
+TOTAL: 9,903 tokens in 4.110s = 2,409 tok/s
 ```
 
-This ~11s fixed cost per chunk is the dominant factor. Breaking it down for V2-Lite:
-- **26 MoE layers × DMA 7.3 GB per layer** — expert weights transferred RAM→GPU per chunk
-- **27 layers × attention forward** — MLA absorption (einsum), RoPE, FlashInfer paged attention
-- **27 layers × norms** — fused_add_rmsnorm
-- **1 dense layer** — INT8 dense MLP
+Each subsequent chunk is slower because attention must attend over a longer KV cache — this is real compute scaling, not a bottleneck we can remove.
 
-The Marlin MoE kernel itself is fast once weights are on GPU. The bottleneck is the per-layer DMA of expert weights from RAM to GPU VRAM, which must happen once per chunk per layer.
+### VRAM Trade-off
 
-### Scaling Behavior
+| Mode | Expert VRAM | KV Cache | Total | Max Context |
+|------|------------|----------|-------|-------------|
+| Chunked (divisor=0) | 286 MB (buffer) | 6,596 MB | ~10.0 GB | 212K tokens |
+| Persistent (divisor=1) | 7,654 MB (all layers) | 2,891 MB | ~13.5 GB | 93K tokens |
 
-Effective throughput scales linearly with tokens per chunk:
+Persistent mode trades KV cache capacity for prefill speed. 93K tokens is still more than sufficient for IDE use cases (typically 10-20K).
 
-```
-Tokens/chunk  →  Effective tok/s
-        512  →   45.8  (wasting GPU compute, overhead dominates)
-      1,024  →   95.7
-      2,048  →  184.4  (near-optimal for single GPU)
-```
+## GPU Prefill Modes
 
-Beyond 2048 tokens, we need multiple chunks (VRAM constraint), so throughput plateaus:
-```
- 4K tokens (2 chunks)  →  183.0 tok/s
- 8K tokens (4 chunks)  →  176.4 tok/s
-10K tokens (5 chunks)  →  173.0 tok/s
-```
+The `expert_divisor` parameter controls the trade-off:
 
-### Optimization Opportunities
-
-1. **Larger chunk size**: Current limit is 2048 due to VRAM for attention intermediates. The MLA absorption einsum `[M, H, nope_dim] × [H, nope_dim, kv_dim]` at M=10K blows 16 GB. Options:
-   - Chunk the einsum itself (split M dimension)
-   - Use INT8 attention weights to free VRAM for larger chunks
-   - Use FP8 KV cache (already implemented) to free VRAM
-
-2. **Persistent expert weights**: Keep Marlin expert weights in GPU VRAM between chunks, eliminating re-DMA. Requires ~285 MB for all 64 experts — feasible on 16 GB.
-
-3. **Overlapped DMA + compute**: Pipeline next layer's DMA while current layer computes. Requires CUDA stream management.
+- **`divisor=0`** (chunked): 286 MB VRAM, DMA 7.3 GB every forward call. Baseline.
+- **`divisor=1`** (persistent): 7,654 MB VRAM, zero DMA. 14-72x faster prefill.
+- **`divisor=2`** (selective): 3,705 MB VRAM, DMA only active experts (~30-40 of 64). Middle ground.
+- OOM fallback: persistent → selective(2) automatically if VRAM is insufficient.
 
 ## CPU Decode Analysis
 
 ### Timing Distribution
 
-100 tokens decoded after 2K prefill:
+100 tokens decoded after 2K prefill (persistent mode):
 
 ```
-Avg:  170.2ms (5.9 tok/s)
-P50:  170.5ms
-P90:  173.5ms
-P99:  175.1ms
-Min:  158.9ms
-Max:  175.1ms
-Spread: 16.2ms (max - min)
+Avg:  172.4ms (5.8 tok/s)
+P50:  172.9ms
+P90:  175.6ms
+P99:  182.3ms
+Min:  146.0ms
+Max:  182.3ms
 ```
 
-Extremely tight distribution. The 16ms spread is likely just OS scheduling jitter.
+Decode is completely unaffected by the prefill mode — expert weights are on CPU for decode regardless.
 
 ### Per-Token Breakdown (estimated from ~170ms total)
 
@@ -91,45 +112,35 @@ Each decode step processes 1 token through 27 layers:
 - **Routed experts** (CPU): ~4ms per MoE layer (6 experts × INT4 AVX2 matmul via Krasis)
 - **GPU-CPU sync**: ~0.1ms per MoE layer
 
-Estimated per-layer: ~6.3ms × 26 MoE layers + ~3ms dense layer 0 = ~167ms. Close to measured 170ms.
+Estimated per-layer: ~6.3ms × 26 MoE layers + ~3ms dense layer 0 = ~167ms. Close to measured 172ms.
 
 ### Context Length Impact
 
 | Context | Avg | Difference |
 |---------|-----|-----------|
-| 512 | 168.8ms | baseline |
-| 2,031 | 167.7ms | -0.6% |
-| 8,079 | 173.1ms | +2.5% |
+| 512 | 170.7ms | baseline |
+| 2,031 | 174.8ms | +2.4% |
+| 8,079 | 166.3ms | -2.6% |
 
 MLA attention's KV cache lookup is O(context × kv_lora_rank), not O(context × heads × head_dim), so context scaling is minimal. This is a major advantage of MLA over standard GQA.
 
-### Optimization Opportunities
+## Real-World Impact
 
-1. **CPU expert computation is already fast**: At ~4ms per layer for routed experts (within GPU's ~1.5ms kernel launch floor), there's limited room for improvement.
+For an IDE use case (e.g., OpenCode with 10K token prompts):
 
-2. **GPU attention is the main bottleneck during decode**: MLA absorption, RoPE, and FlashInfer paged decode dominate. Potential wins:
-   - CUDA graphs to reduce kernel launch overhead
-   - INT8 attention weights (saves VRAM, similar speed)
+| Metric | Chunked | Persistent |
+|--------|---------|------------|
+| 10K prefill | 57s | **4.1s** |
+| First token latency | ~57s | **~4.1s** |
+| Time to 100 generated tokens | ~74s | **~21s** |
 
-## Comparison: GPU Prefill vs CPU-Only
-
-From earlier validation (825-token test):
-- **GPU prefill**: 77.2 tok/s
-- **CPU-only prefill**: 17.7 tok/s
-- **Speedup**: 4.4x
-
-For a 10K token IDE prompt:
-- **GPU prefill**: ~57s (chunked)
-- **CPU-only (estimated)**: ~565s (9.4 minutes)
-- **Speedup**: ~10x wall time
-
-GPU prefill is essential for IDE use cases where prompts are 10K+ tokens.
+The difference between 57s and 4s for first-token latency makes IDE integration practical.
 
 ## Key Takeaways
 
-1. **GPU prefill works and is correct** — verified across multiple prompt sizes
-2. **Chunked prefill is required** for prompts > 2048 tokens on 16 GB VRAM
-3. **Per-chunk DMA overhead (~11s) is the bottleneck** — not the Marlin kernel itself
-4. **CPU decode is stable at 5.9 tok/s** with negligible variance
-5. **Context length barely affects decode** — MLA is efficient
-6. **Next optimization target**: Reduce per-chunk overhead (persistent expert buffers, overlapped DMA)
+1. **Expert DMA was the bottleneck** — 7.3 GB per forward call vs 8 MB of prompt data (900:1 ratio)
+2. **Persistent expert buffers eliminate it** — 14-72x prefill speedup depending on prompt size
+3. **The VRAM trade-off is acceptable** — 93K token KV cache is more than enough for IDE use
+4. **CPU decode is unaffected** — stable at 5.8 tok/s regardless of prefill mode
+5. **Attention compute is now the scaling factor** — longer prompts = more attention work (expected, not a bottleneck)
+6. **GPU prefill is now practical for IDE use** — 10K prompt in 4s instead of 57s
