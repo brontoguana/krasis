@@ -13,6 +13,115 @@ Re-run needed after: any change to `src/`, `python/krasis/`, or test files.
 
 ---
 
+## Layer-Grouped Prefill (expert_divisor >= 2) — 2026-02-12
+
+**Replaces selective mode with layer-grouped prefill: O(groups) DMA instead of O(chunks × layers).**
+
+### Problem
+The old selective mode (divisor >= 2) still DMAs per-layer per-chunk — it only reduces how many
+experts per DMA, not the number of DMA calls. For a 10K prompt (5 chunks × 26 layers = 130 DMA
+calls), this is still slow.
+
+### Solution: Reverse the Loop Nesting
+```
+OLD (chunked):     for each chunk → for each layer → DMA experts → compute
+NEW (layer-grouped): for each group → DMA experts once → for each chunk → for each layer → compute
+```
+
+For `divisor=2`, split MoE layers into 2 groups. Load one group's experts (~3.7 GB for V2-Lite),
+process ALL chunks through those layers, free, repeat. Total DMA = 2 group loads ≈ 1 full model
+load, regardless of prompt length.
+
+### Changes
+- `gpu_prefill.py`: Removed `_forward_selective()`, replaced with `"layer_grouped"` prefill mode
+  - New `preload_layer_group(moe_layer_indices)`: loads expert weights for a group of MoE layers
+  - New `free_layer_group()`: releases GPU VRAM between groups
+  - `_forward_persistent()` reused for layer_grouped (same lookup mechanism)
+  - OOM fallback: persistent → layer_grouped (was: selective)
+- `model.py`: New `forward_prefill_layer_grouped()` method
+  - `_compute_layer_groups(rank, cfg, divisor)` helper: splits rank's layers into groups
+  - `forward()` auto-routes to layer_grouped when `divisor >= 2` and `M >= threshold`
+  - Internal chunking (2048 tokens/chunk) with hidden/residual saved between groups
+  - KV cache correctness: seq_len reset per group, position-based writes, pre-allocated pages
+- `test_v2lite_profile.py`: Updated `--compare` for 3-mode comparison
+  - `profile_prefill_single()`: single forward call for layer_grouped/persistent
+  - `profile_decode()`: single-call prefill before decode
+  - Summary table: Chunked vs Layer-Grouped vs Persistent with speedup columns
+
+### VRAM Budget (V2-Lite, 64 experts, 26 MoE layers)
+| Divisor | Mode | Layers/group | Expert VRAM | KV headroom |
+|---------|------|-------------|-------------|-------------|
+| 1 | persistent | 26 (all) | ~7,654 MB | ~2,891 MB |
+| 2 | layer_grouped | 13 | ~3,827 MB | ~6,718 MB |
+| 3 | layer_grouped | 9 | ~2,551 MB | ~7,994 MB |
+| 0 | chunked | — | ~286 MB | ~10,259 MB |
+
+### Benchmark Results (V2-Lite, `--compare`)
+| Tokens | Chunked (0) | LayerGroup (2) | Persistent (1) | LG/Chunk | Pers/Chunk |
+|--------|------------|----------------|----------------|----------|------------|
+| 512 | 9.3/s | 48.0/s | 3,315/s | 5.2x | 356x |
+| 1024 | 93.9/s | 94.7/s | 4,080/s | 1.0x | 43.5x |
+| 2031 | 180.7/s | 178.6/s | 4,082/s | 1.0x | 22.6x |
+| 4047 | 341.6/s | 340.2/s | 3,554/s | 1.0x | 10.4x |
+
+- **10K prefill (persistent):** 2,494 tok/s
+- **Decode:** 5.8 tok/s avg (172ms ITL), unchanged across modes
+- **Layer-grouped DMA:** ~5.2s per group load (2 groups = ~10.4s fixed overhead)
+- Layer-grouped wins at 512 tokens (5.2x vs chunked) due to fewer DMA calls
+- At 1K+ tokens, layer-grouped ≈ chunked because DMA cost amortized
+- Persistent is 10-356x faster (zero DMA)
+- Layer-grouped's value: large models where persistent can't fit (e.g., Qwen3-235B)
+
+### Tests Run
+- Syntax check: all 3 files PASS
+- Correctness: "2+2" → "4", "Capital of France" → "Paris" (divisor=2) PASS
+- Full 3-mode benchmark: PASS (all modes produce correct output)
+
+---
+
+## Persistent Expert Buffers + Selective Loading — 2026-02-12
+
+**New `expert_divisor` parameter eliminates per-layer DMA overhead during GPU prefill.**
+
+### Changes
+- `GpuPrefillManager`: new `expert_divisor` and `num_moe_layers` parameters
+- **Persistent mode** (`divisor=1`): pre-loads ALL experts for ALL MoE layers into GPU VRAM at startup. Zero DMA during forward — single `fused_marlin_moe` call per layer.
+- **Selective mode** (`divisor>=2`): buffer sized for `num_experts/divisor`. During forward, only DMA active experts via `torch.unique(topk_ids)`, remap IDs, single kernel call.
+- **Chunked mode** (`divisor=0`): unchanged baseline behavior.
+- OOM fallback: persistent → selective (divisor=2) on `torch.cuda.OutOfMemoryError`
+- Shared experts also pre-loaded in persistent mode (zero DMA)
+- `KrasisModel`: new `expert_divisor` parameter (default 1), wired to `GpuPrefillManager`
+- `test_v2lite_profile.py`: `--divisor` and `--compare` flags for benchmarking modes
+
+### V2-Lite VRAM Math (64 experts, 26 MoE layers, ~4.5 MB/expert)
+| Divisor | Experts/layer | VRAM | Mode |
+|---------|--------------|------|------|
+| 1 | 64 | ~7,410 MB | Full persistent |
+| 2 | 32 | ~3,705 MB | Selective |
+| 0 | — | ~285 MB | Chunked (baseline) |
+
+### Benchmark Results (V2-Lite, 1 GPU)
+
+| Tokens | Chunked (tok/s) | Persistent (tok/s) | Speedup |
+|:---:|:---:|:---:|:---:|
+| 512 | 9.2 | **3,294** | **357x** |
+| 1,024 | 93.7 | **4,090** | **44x** |
+| 2,031 | 185.0 | **4,074** | **22x** |
+| 4,047 | 180.5 | **3,468** | **19x** |
+
+**10K prefill**: 9,903 tokens in 4.1s = **2,409 tok/s** (was 57s = 173 tok/s → **14x**)
+
+VRAM: 10,746 MB total (2,924 weights + 7,654 persistent experts)
+KV cache auto-sized to 92.9K tokens (down from 212K in chunked)
+Decode speed unchanged: 5.8 tok/s (172ms avg)
+Correctness: both modes produce identical output
+
+### Tests Run
+- Syntax/import: PASS
+- Benchmark: PASS (`test_v2lite_profile.py --compare`)
+
+---
+
 ## V2-Lite In-Depth Performance Analysis — 2026-02-12
 
 **Full GPU prefill scaling + CPU decode timing analysis.**

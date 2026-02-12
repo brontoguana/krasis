@@ -18,7 +18,7 @@ from krasis.kv_cache import SequenceKVState
 from krasis.sampler import sample
 
 
-def load_model():
+def load_model(expert_divisor=1):
     qcfg = QuantConfig(
         attention="bf16", shared_expert="bf16", dense_mlp="bf16", lm_head="bf16",
         gpu_expert_bits=4, cpu_expert_bits=4,
@@ -27,6 +27,7 @@ def load_model():
         model_path=MODEL_PATH, num_gpus=1,
         gpu_prefill=True, gpu_prefill_threshold=10,
         krasis_threads=16, quant_cfg=qcfg, kv_dtype=torch.bfloat16,
+        expert_divisor=expert_divisor,
     )
     model.load()
     return model
@@ -56,8 +57,28 @@ def build_prompt(model, target_tokens):
     return tokens
 
 
+def profile_prefill_single(model, prompt_tokens):
+    """Profile GPU prefill as a single forward call (for layer_grouped and persistent)."""
+    device = torch.device(model.ranks[0].device)
+    seq_states = [SequenceKVState(c, seq_id=0) for c in model.kv_caches]
+
+    token_ids = torch.tensor(prompt_tokens, dtype=torch.long, device=device)
+    positions = torch.arange(len(prompt_tokens), dtype=torch.int32, device=device)
+
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    logits = model.forward(token_ids, positions, seq_states)
+    torch.cuda.synchronize()
+    elapsed = time.perf_counter() - t0
+
+    for s in seq_states:
+        s.free()
+
+    return elapsed
+
+
 def profile_prefill_chunks(model, prompt_tokens, chunk_size=2048):
-    """Profile GPU prefill with per-chunk timing."""
+    """Profile GPU prefill with per-chunk timing (for chunked mode)."""
     device = torch.device(model.ranks[0].device)
     seq_states = [SequenceKVState(c, seq_id=0) for c in model.kv_caches]
 
@@ -92,19 +113,18 @@ def profile_prefill_chunks(model, prompt_tokens, chunk_size=2048):
     return total_elapsed, chunk_times
 
 
-def profile_decode(model, prompt_tokens, num_tokens=100, chunk_size=2048):
-    """Profile decode with per-token timing after chunked prefill."""
+def profile_decode(model, prompt_tokens, num_tokens=100):
+    """Profile decode with per-token timing after prefill."""
     device = torch.device(model.ranks[0].device)
     seq_states = [SequenceKVState(c, seq_id=0) for c in model.kv_caches]
 
-    # Chunked prefill first
+    # Prefill: single forward call (model.forward routes to layer_grouped if needed)
+    token_ids = torch.tensor(prompt_tokens, dtype=torch.long, device=device)
+    positions = torch.arange(len(prompt_tokens), dtype=torch.int32, device=device)
+
     torch.cuda.synchronize()
     prefill_start = time.perf_counter()
-    for chunk_start in range(0, len(prompt_tokens), chunk_size):
-        chunk_end = min(chunk_start + chunk_size, len(prompt_tokens))
-        chunk_ids = torch.tensor(prompt_tokens[chunk_start:chunk_end], dtype=torch.long, device=device)
-        chunk_pos = torch.arange(chunk_start, chunk_end, dtype=torch.int32, device=device)
-        logits = model.forward(chunk_ids, chunk_pos, seq_states)
+    logits = model.forward(token_ids, positions, seq_states)
     torch.cuda.synchronize()
     prefill_elapsed = time.perf_counter() - prefill_start
 
@@ -138,36 +158,113 @@ def profile_decode(model, prompt_tokens, num_tokens=100, chunk_size=2048):
     return prefill_elapsed, decode_times, text
 
 
+def profile_mode(model, mode_name, sizes=None, use_single_call=False):
+    """Profile prefill scaling for a given model/mode.
+
+    Args:
+        use_single_call: If True, pass all tokens in one forward() call.
+            Required for layer_grouped mode (internal chunking).
+            Also recommended for persistent mode (no per-chunk DMA overhead).
+    """
+    if sizes is None:
+        sizes = [512, 1024, 2048, 4096, 8192]
+
+    results = []
+    for size in sizes:
+        tokens = build_prompt(model, size)
+        actual_size = len(tokens)
+
+        if use_single_call:
+            total_time = profile_prefill_single(model, tokens)
+            num_chunks = 1
+        else:
+            total_time, chunk_times = profile_prefill_chunks(model, tokens)
+            num_chunks = len(chunk_times)
+
+        tps = actual_size / total_time
+        results.append({
+            "tokens": actual_size,
+            "total_time_s": total_time,
+            "tok_per_s": tps,
+            "num_chunks": num_chunks,
+        })
+        print(f"  {actual_size:>5} tokens: {total_time:.3f}s = {tps:.1f} tok/s ({num_chunks} chunks)")
+    return results
+
+
 def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--divisor", type=int, default=1,
+                        help="expert_divisor: 0=chunked, 1=persistent, 2+=layer_grouped")
+    parser.add_argument("--compare", action="store_true",
+                        help="Compare all 3 modes: chunked (0), layer_grouped (2), persistent (1)")
+    args = parser.parse_args()
+
     print("=" * 70)
     print("V2-Lite In-Depth Timing Analysis")
     print("=" * 70)
 
-    model = load_model()
+    if args.compare:
+        # Compare all three modes
+        print("\n=== Mode Comparison: Chunked (0) vs Layer-Grouped (2) vs Persistent (1) ===")
+        sizes = [512, 1024, 2048, 4096]
 
-    # ── Test 1: Prefill scaling across prompt sizes ──
-    print("\n=== GPU Prefill Scaling ===")
-    prefill_results = []
-    for size in [512, 1024, 2048, 4096, 8192]:
-        tokens = build_prompt(model, size)
-        actual_size = len(tokens)
-        total_time, chunk_times = profile_prefill_chunks(model, tokens)
-        tps = actual_size / total_time
-        prefill_results.append({
-            "tokens": actual_size,
-            "total_time_s": total_time,
-            "tok_per_s": tps,
-            "num_chunks": len(chunk_times),
-        })
-        print(f"  {actual_size:>5} tokens: {total_time:.3f}s = {tps:.1f} tok/s ({len(chunk_times)} chunks)")
+        # ── Chunked (divisor=0) ──
+        print("\n--- Chunked (divisor=0) ---")
+        model_chunked = load_model(expert_divisor=0)
+        # Chunked uses single forward call too (fair comparison)
+        chunked_results = profile_mode(model_chunked, "chunked", sizes, use_single_call=True)
+
+        tokens_short = build_prompt(model_chunked, 64)
+        _, _, text_chunked = profile_decode(model_chunked, tokens_short, num_tokens=30)
+        print(f"  Correctness: {text_chunked[:100]}...")
+        del model_chunked
+        torch.cuda.empty_cache()
+
+        # ── Layer-Grouped (divisor=2) ──
+        print("\n--- Layer-Grouped (divisor=2) ---")
+        model_grouped = load_model(expert_divisor=2)
+        grouped_results = profile_mode(model_grouped, "layer_grouped", sizes, use_single_call=True)
+
+        tokens_short = build_prompt(model_grouped, 64)
+        _, _, text_grouped = profile_decode(model_grouped, tokens_short, num_tokens=30)
+        print(f"  Correctness: {text_grouped[:100]}...")
+        del model_grouped
+        torch.cuda.empty_cache()
+
+        # ── Persistent (divisor=1) ──
+        print("\n--- Persistent (divisor=1) ---")
+        model_persistent = load_model(expert_divisor=1)
+        persistent_results = profile_mode(model_persistent, "persistent", sizes, use_single_call=True)
+
+        tokens_short = build_prompt(model_persistent, 64)
+        _, _, text_persistent = profile_decode(model_persistent, tokens_short, num_tokens=30)
+        print(f"  Correctness: {text_persistent[:100]}...")
+
+        # Summary comparison
+        print("\n=== Comparison Summary ===")
+        print(f"  {'Tokens':>6} | {'Chunked':>12} | {'LayerGroup':>12} | {'Persistent':>12} | {'LG/Chunk':>8} | {'Pers/Chunk':>10}")
+        print(f"  {'-'*6}-+-{'-'*12}-+-{'-'*12}-+-{'-'*12}-+-{'-'*8}-+-{'-'*10}")
+        for c, g, p in zip(chunked_results, grouped_results, persistent_results):
+            spd_lg = g["tok_per_s"] / c["tok_per_s"] if c["tok_per_s"] > 0 else 0
+            spd_p = p["tok_per_s"] / c["tok_per_s"] if c["tok_per_s"] > 0 else 0
+            print(f"  {c['tokens']:>6} | {c['tok_per_s']:>9.1f}/s | {g['tok_per_s']:>9.1f}/s | {p['tok_per_s']:>9.1f}/s | {spd_lg:>6.1f}x | {spd_p:>8.1f}x")
+
+        model = model_persistent
+        prefill_results = persistent_results
+    else:
+        model = load_model(expert_divisor=args.divisor)
+
+        # ── Test 1: Prefill scaling across prompt sizes ──
+        print(f"\n=== GPU Prefill Scaling (divisor={args.divisor}) ===")
+        use_single = args.divisor >= 1  # single call for persistent and layer_grouped
+        prefill_results = profile_mode(model, f"divisor={args.divisor}", use_single_call=use_single)
 
     # ── Test 2: Per-chunk breakdown for 10K prompt ──
-    print("\n=== 10K Prefill Per-Chunk Breakdown ===")
+    print("\n=== 10K Prefill ===")
     tokens_10k = build_prompt(model, 10000)
-    total_time, chunk_times = profile_prefill_chunks(model, tokens_10k)
-    for ct in chunk_times:
-        print(f"  Chunk {ct['chunk_idx']}: pos {ct['start_pos']:>5}..{ct['start_pos']+ct['num_tokens']:>5} "
-              f"({ct['num_tokens']:>4} tok) = {ct['time_s']:.3f}s = {ct['tok_per_s']:.1f} tok/s")
+    total_time = profile_prefill_single(model, tokens_10k)
     print(f"  TOTAL: {len(tokens_10k)} tokens in {total_time:.3f}s = {len(tokens_10k)/total_time:.1f} tok/s")
 
     # ── Test 3: Decode token timing distribution ──
@@ -195,7 +292,6 @@ def main():
         print(f"  First 5 tokens: {[f'{t:.1f}ms' for t in times_ms[:5]]}")
         print(f"  Text: {gen_text[:150]}...")
 
-        # Check for warmup effect
         warmup_avg = sum(times_ms[:5]) / 5
         steady_avg = sum(times_ms[5:]) / len(times_ms[5:]) if len(times_ms) > 5 else 0
         print(f"\n  Warmup (first 5): {warmup_avg:.1f}ms avg")
@@ -217,8 +313,12 @@ def main():
     analysis = {
         "date": time.strftime("%Y-%m-%d %H:%M"),
         "model": "DeepSeek-V2-Lite",
-        "prefill_scaling": prefill_results,
-        "chunk_breakdown_10k": chunk_times,
+        "expert_divisor": args.divisor if not args.compare else "compare",
+        "prefill_scaling": prefill_results if not args.compare else {
+            "chunked": chunked_results,
+            "layer_grouped": grouped_results,
+            "persistent": persistent_results,
+        },
         "decode_distribution": {
             "avg_ms": round(avg_ms, 1) if decode_times else 0,
             "p50_ms": round(p50_ms, 1) if decode_times else 0,

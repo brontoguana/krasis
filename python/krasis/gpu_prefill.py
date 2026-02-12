@@ -103,6 +103,8 @@ class GpuPrefillManager:
         chunk_size: Optional[int] = None,
         num_bits: int = 4,
         krasis_engine=None,
+        num_moe_layers: int = 0,
+        expert_divisor: int = 1,
     ):
         self.model_path = model_path
         self.device = device
@@ -115,6 +117,8 @@ class GpuPrefillManager:
         self.first_k_dense = first_k_dense
         self.num_bits = num_bits
         self._engine = krasis_engine
+        self._num_moe_layers = num_moe_layers
+        self._expert_divisor = expert_divisor
 
         # Use engine's group_size if available, else default 128
         if krasis_engine is not None:
@@ -122,6 +126,11 @@ class GpuPrefillManager:
         else:
             self._group_size = GROUP_SIZE
         logger.info("GPU prefill group_size=%d", self._group_size)
+
+        # Persistent/layer-grouped expert buffers
+        self._prefill_mode = "chunked"  # "persistent", "layer_grouped", or "chunked"
+        self._persistent: Optional[dict[int, dict[str, torch.Tensor]]] = None
+        self._persistent_shared: Optional[dict[int, dict[str, torch.Tensor]]] = None
 
         # Chunk size: how many experts fit in one GPU buffer load
         if chunk_size is None:
@@ -150,30 +159,97 @@ class GpuPrefillManager:
         # Shared expert GPU cache (separate from chunked buffer, legacy path only)
         self._shared_cache: dict[int, dict[str, torch.Tensor]] = {}
 
+        # Select prefill mode based on expert_divisor
+        self._select_prefill_mode()
+
         mode = "engine" if self._engine is not None else "safetensors"
         logger.info(
             "GpuPrefillManager(%s): experts=%d, hidden=%d, intermediate=%d, "
-            "chunk_size=%d, num_chunks=%d, shared=%d, scale=%.3f, num_bits=%d",
+            "chunk_size=%d, num_chunks=%d, shared=%d, scale=%.3f, num_bits=%d, "
+            "prefill_mode=%s, expert_divisor=%d",
             mode, num_experts, hidden_size, intermediate_size,
             self.chunk_size, self.num_chunks,
             n_shared_experts, routed_scaling_factor, num_bits,
+            self._prefill_mode, self._expert_divisor,
         )
 
         # Pre-allocate GPU buffer eagerly so KV cache auto-sizer sees the reservation
-        self._allocate_gpu_buffer()
+        # (not needed for persistent/layer_grouped — buffers allocated per-group)
+        if self._prefill_mode == "chunked":
+            self._allocate_gpu_buffer()
 
-    def _auto_chunk_size(self) -> int:
-        """Estimate chunk size that fits in available VRAM."""
-        # Per-expert VRAM for Marlin:
-        # w13: [K//16, 2*N*(num_bits//2)] int32 + [K//gs, 2*N] scale
-        # w2: [N//16, K*(num_bits//2)] int32 + [N//gs, K] scale
+    def _per_expert_vram_bytes(self) -> int:
+        """Calculate per-expert VRAM usage in bytes for Marlin format."""
         K = self.hidden_size
         N = self.intermediate_size
         gs = self._group_size
         nb2 = self.num_bits // 2  # 2 for INT4, 4 for INT8
         w13_bytes = (K // 16) * (2 * N * nb2) * 4 + (K // gs) * (2 * N) * 2
         w2_bytes = (N // 16) * (K * nb2) * 4 + (N // gs) * K * 2
-        per_expert = w13_bytes + w2_bytes
+        return w13_bytes + w2_bytes
+
+    def _select_prefill_mode(self):
+        """Select prefill mode based on expert_divisor setting.
+
+        - divisor=0 or no engine: "chunked" (current DMA-per-layer behavior)
+        - divisor=1: "persistent" (all experts pre-loaded in VRAM, zero DMA)
+        - divisor>=2: "layer_grouped" (load experts per-group-of-layers, O(groups) DMA)
+        """
+        if self._expert_divisor == 0 or self._engine is None:
+            self._prefill_mode = "chunked"
+            return
+
+        per_expert = self._per_expert_vram_bytes()
+        num_moe = self._num_moe_layers
+
+        if self._expert_divisor == 1:
+            # Full persistent: all experts for all MoE layers
+            total_vram = per_expert * self.num_experts * num_moe
+            total_mb = total_vram / 1e6
+
+            try:
+                free_vram = torch.cuda.mem_get_info(self.device)[0]
+                # Need room for kernel intermediates + KV cache
+                budget = free_vram - 500 * 1024 * 1024  # 500 MB headroom
+                if total_vram <= budget:
+                    self._prefill_mode = "persistent"
+                    logger.info(
+                        "Persistent mode selected: %d layers × %d experts = %.1f MB "
+                        "(%.1f MB free, %.1f MB budget)",
+                        num_moe, self.num_experts, total_mb,
+                        free_vram / 1e6, budget / 1e6,
+                    )
+                else:
+                    # OOM fallback: try layer_grouped with divisor=2
+                    logger.warning(
+                        "Persistent mode needs %.1f MB but only %.1f MB budget — "
+                        "falling back to layer_grouped (divisor=2)",
+                        total_mb, budget / 1e6,
+                    )
+                    self._expert_divisor = 2
+                    self._select_prefill_mode()  # recurse once
+                    return
+            except Exception:
+                self._prefill_mode = "persistent"
+                logger.warning("Could not query VRAM — assuming persistent fits")
+        else:
+            # Layer-grouped: experts loaded per-group of layers
+            from math import ceil
+            moe_per_group = ceil(num_moe / self._expert_divisor)
+            num_groups = ceil(num_moe / moe_per_group)
+            group_vram = per_expert * self.num_experts * moe_per_group
+            group_mb = group_vram / 1e6
+            self._prefill_mode = "layer_grouped"
+            logger.info(
+                "Layer-grouped mode: divisor=%d, %d groups of %d MoE layers, "
+                "~%.1f MB per group, %d total MoE layers",
+                self._expert_divisor, num_groups, moe_per_group,
+                group_mb, num_moe,
+            )
+
+    def _auto_chunk_size(self) -> int:
+        """Estimate chunk size that fits in available VRAM."""
+        per_expert = self._per_expert_vram_bytes()
 
         try:
             free_vram = torch.cuda.mem_get_info(self.device)[0]
@@ -195,14 +271,15 @@ class GpuPrefillManager:
     def prepare_all_layers(self):
         """Pre-prepare all MoE layers at startup.
 
-        Engine path: no-op. Weights are read from Rust engine and repacked
-        to Marlin on-the-fly per chunk during forward(). Zero RAM cache.
-
-        Legacy mode: loads from disk cache to avoid lazy quantization during
-        the first forward() call.
+        Persistent mode: pre-load all experts into GPU VRAM.
+        Selective/Chunked engine: no-op (weights read from engine on demand).
+        Legacy mode: loads from disk cache.
         """
         if self._engine is not None:
-            if self._engine.is_marlin_format:
+            if self._prefill_mode == "persistent":
+                self._preload_persistent()
+                return
+            elif self._engine.is_marlin_format:
                 logger.info("Engine path: Marlin-native DMA copy (zero conversion, zero RAM cache)")
             else:
                 logger.info("Engine path: GPU prefill uses on-the-fly Marlin repack (zero RAM cache)")
@@ -379,6 +456,300 @@ class GpuPrefillManager:
             + self._gpu_w2_packed.nbytes + self._gpu_w2_scale.nbytes
         ) / 1e6
         logger.info("GPU buffer allocated: %.1f MB for %d experts", buf_mb, E)
+
+    def _preload_persistent(self):
+        """Pre-load ALL expert weights for ALL MoE layers into GPU VRAM.
+
+        Called once at startup when expert_divisor=1.
+        After this, forward() does zero DMA — just indexes into persistent buffers.
+        """
+        assert self._engine is not None, "Persistent mode requires Krasis engine"
+
+        from sglang.srt.layers.quantization.marlin_utils import (
+            marlin_make_workspace,
+        )
+
+        torch.cuda.set_device(self.device)
+        K = self.hidden_size
+        N = self.intermediate_size
+        gs = self._group_size
+        nb2 = self.num_bits // 2
+        E = self.num_experts
+
+        self._persistent = {}
+        self._persistent_shared = {}
+
+        total_mb = 0
+        load_start = time.perf_counter()
+
+        try:
+            for moe_idx in range(self._num_moe_layers):
+                # Get all expert weights from Rust engine
+                w13_packed_bytes = self._engine.get_expert_w13_packed(moe_idx, 0, E)
+                w13_scales_bytes = self._engine.get_expert_w13_scales(moe_idx, 0, E)
+                w2_packed_bytes = self._engine.get_expert_w2_packed(moe_idx, 0, E)
+                w2_scales_bytes = self._engine.get_expert_w2_scales(moe_idx, 0, E)
+
+                # Reshape and upload to GPU
+                w13_packed = torch.frombuffer(
+                    bytearray(w13_packed_bytes), dtype=torch.int32
+                ).reshape(E, K // 16, 2 * N * nb2).to(self.device, non_blocking=True)
+                w13_scale = torch.frombuffer(
+                    bytearray(w13_scales_bytes), dtype=torch.bfloat16
+                ).reshape(E, K // gs, 2 * N).to(self.device, non_blocking=True)
+                w2_packed = torch.frombuffer(
+                    bytearray(w2_packed_bytes), dtype=torch.int32
+                ).reshape(E, N // 16, K * nb2).to(self.device, non_blocking=True)
+                w2_scale = torch.frombuffer(
+                    bytearray(w2_scales_bytes), dtype=torch.bfloat16
+                ).reshape(E, N // gs, K).to(self.device, non_blocking=True)
+
+                layer_mb = (
+                    w13_packed.nbytes + w13_scale.nbytes
+                    + w2_packed.nbytes + w2_scale.nbytes
+                ) / 1e6
+                total_mb += layer_mb
+
+                self._persistent[moe_idx] = {
+                    "w13_packed": w13_packed,
+                    "w13_scale": w13_scale,
+                    "w2_packed": w2_packed,
+                    "w2_scale": w2_scale,
+                }
+
+                # Free CPU-side byte copies
+                del w13_packed_bytes, w13_scales_bytes, w2_packed_bytes, w2_scales_bytes
+
+                if (moe_idx + 1) % 5 == 0 or moe_idx == self._num_moe_layers - 1:
+                    logger.info(
+                        "  Persistent preload: %d/%d layers (%.1f MB so far)",
+                        moe_idx + 1, self._num_moe_layers, total_mb,
+                    )
+
+            # Pre-load shared experts
+            if self.n_shared_experts > 0:
+                shared_N = self.n_shared_experts * N
+                for moe_idx in range(self._num_moe_layers):
+                    w13p_bytes, w13s_bytes, w2p_bytes, w2s_bytes = (
+                        self._engine.get_shared_expert_weights(moe_idx)
+                    )
+
+                    w13_packed = torch.frombuffer(
+                        bytearray(w13p_bytes), dtype=torch.int32
+                    ).reshape(1, K // 16, 2 * shared_N * nb2).to(self.device, non_blocking=True)
+                    w13_scale = torch.frombuffer(
+                        bytearray(w13s_bytes), dtype=torch.bfloat16
+                    ).reshape(1, K // gs, 2 * shared_N).to(self.device, non_blocking=True)
+                    w2_packed = torch.frombuffer(
+                        bytearray(w2p_bytes), dtype=torch.int32
+                    ).reshape(1, shared_N // 16, K * nb2).to(self.device, non_blocking=True)
+                    w2_scale = torch.frombuffer(
+                        bytearray(w2s_bytes), dtype=torch.bfloat16
+                    ).reshape(1, shared_N // gs, K).to(self.device, non_blocking=True)
+
+                    shared_mb = (
+                        w13_packed.nbytes + w13_scale.nbytes
+                        + w2_packed.nbytes + w2_scale.nbytes
+                    ) / 1e6
+                    total_mb += shared_mb
+
+                    self._persistent_shared[moe_idx] = {
+                        "w13_packed": w13_packed,
+                        "w13_scale": w13_scale,
+                        "w2_packed": w2_packed,
+                        "w2_scale": w2_scale,
+                    }
+
+            # Allocate workspace (single, reused across layers)
+            self._workspace = marlin_make_workspace(self.device, max_blocks_per_sm=4)
+
+            # Allocate g_idx and sort_idx for full expert count
+            self._gpu_g_idx = torch.empty(E, 0, dtype=torch.int32, device=self.device)
+            self._gpu_sort_idx = torch.empty(E, 0, dtype=torch.int32, device=self.device)
+
+            torch.cuda.synchronize(self.device)
+            elapsed = time.perf_counter() - load_start
+            alloc_mb = torch.cuda.memory_allocated(self.device) / 1e6
+            logger.info(
+                "Persistent mode ready: %d MoE layers × %d experts = %.1f MB "
+                "in %.1fs (GPU total: %.1f MB)",
+                self._num_moe_layers, E, total_mb, elapsed, alloc_mb,
+            )
+
+            # Free the chunk-sized GPU buffers (not needed in persistent mode)
+            self._gpu_w13_packed = None
+            self._gpu_w13_scale = None
+            self._gpu_w2_packed = None
+            self._gpu_w2_scale = None
+            torch.cuda.empty_cache()
+
+        except torch.cuda.OutOfMemoryError:
+            logger.warning(
+                "OOM during persistent preload at layer %d — "
+                "falling back to layer_grouped (divisor=2)",
+                len(self._persistent),
+            )
+            # Clean up partial persistent data
+            self._persistent = None
+            self._persistent_shared = None
+            torch.cuda.empty_cache()
+
+            self._expert_divisor = 2
+            self._prefill_mode = "layer_grouped"
+
+    def preload_layer_group(self, moe_layer_indices):
+        """Pre-load expert weights for a group of MoE layers into GPU VRAM.
+
+        Called per-group during layer-grouped prefill. After processing all
+        chunks through this group, call free_layer_group() to release VRAM.
+        """
+        assert self._engine is not None, "Layer-grouped mode requires Krasis engine"
+
+        from sglang.srt.layers.quantization.marlin_utils import (
+            marlin_make_workspace,
+        )
+
+        torch.cuda.set_device(self.device)
+        K = self.hidden_size
+        N = self.intermediate_size
+        gs = self._group_size
+        nb2 = self.num_bits // 2
+        E = self.num_experts
+
+        self._persistent = {}
+        self._persistent_shared = {}
+
+        total_mb = 0
+        load_start = time.perf_counter()
+
+        for moe_idx in moe_layer_indices:
+            w13_packed_bytes = self._engine.get_expert_w13_packed(moe_idx, 0, E)
+            w13_scales_bytes = self._engine.get_expert_w13_scales(moe_idx, 0, E)
+            w2_packed_bytes = self._engine.get_expert_w2_packed(moe_idx, 0, E)
+            w2_scales_bytes = self._engine.get_expert_w2_scales(moe_idx, 0, E)
+
+            w13_packed = torch.frombuffer(
+                bytearray(w13_packed_bytes), dtype=torch.int32
+            ).reshape(E, K // 16, 2 * N * nb2).to(self.device, non_blocking=True)
+            w13_scale = torch.frombuffer(
+                bytearray(w13_scales_bytes), dtype=torch.bfloat16
+            ).reshape(E, K // gs, 2 * N).to(self.device, non_blocking=True)
+            w2_packed = torch.frombuffer(
+                bytearray(w2_packed_bytes), dtype=torch.int32
+            ).reshape(E, N // 16, K * nb2).to(self.device, non_blocking=True)
+            w2_scale = torch.frombuffer(
+                bytearray(w2_scales_bytes), dtype=torch.bfloat16
+            ).reshape(E, N // gs, K).to(self.device, non_blocking=True)
+
+            layer_mb = (
+                w13_packed.nbytes + w13_scale.nbytes
+                + w2_packed.nbytes + w2_scale.nbytes
+            ) / 1e6
+            total_mb += layer_mb
+
+            self._persistent[moe_idx] = {
+                "w13_packed": w13_packed,
+                "w13_scale": w13_scale,
+                "w2_packed": w2_packed,
+                "w2_scale": w2_scale,
+            }
+
+            del w13_packed_bytes, w13_scales_bytes, w2_packed_bytes, w2_scales_bytes
+
+        # Pre-load shared experts
+        if self.n_shared_experts > 0:
+            shared_N = self.n_shared_experts * N
+            for moe_idx in moe_layer_indices:
+                w13p_bytes, w13s_bytes, w2p_bytes, w2s_bytes = (
+                    self._engine.get_shared_expert_weights(moe_idx)
+                )
+
+                w13_packed = torch.frombuffer(
+                    bytearray(w13p_bytes), dtype=torch.int32
+                ).reshape(1, K // 16, 2 * shared_N * nb2).to(self.device, non_blocking=True)
+                w13_scale = torch.frombuffer(
+                    bytearray(w13s_bytes), dtype=torch.bfloat16
+                ).reshape(1, K // gs, 2 * shared_N).to(self.device, non_blocking=True)
+                w2_packed = torch.frombuffer(
+                    bytearray(w2p_bytes), dtype=torch.int32
+                ).reshape(1, shared_N // 16, K * nb2).to(self.device, non_blocking=True)
+                w2_scale = torch.frombuffer(
+                    bytearray(w2s_bytes), dtype=torch.bfloat16
+                ).reshape(1, shared_N // gs, K).to(self.device, non_blocking=True)
+
+                shared_mb = (
+                    w13_packed.nbytes + w13_scale.nbytes
+                    + w2_packed.nbytes + w2_scale.nbytes
+                ) / 1e6
+                total_mb += shared_mb
+
+                self._persistent_shared[moe_idx] = {
+                    "w13_packed": w13_packed,
+                    "w13_scale": w13_scale,
+                    "w2_packed": w2_packed,
+                    "w2_scale": w2_scale,
+                }
+
+        # Allocate workspace and index tensors (once, reused across groups)
+        if self._workspace is None:
+            self._workspace = marlin_make_workspace(self.device, max_blocks_per_sm=4)
+        if self._gpu_g_idx is None:
+            self._gpu_g_idx = torch.empty(E, 0, dtype=torch.int32, device=self.device)
+            self._gpu_sort_idx = torch.empty(E, 0, dtype=torch.int32, device=self.device)
+
+        torch.cuda.synchronize(self.device)
+        elapsed = time.perf_counter() - load_start
+        alloc_mb = torch.cuda.memory_allocated(self.device) / 1e6
+        logger.info(
+            "Layer group loaded: %d MoE layers = %.1f MB in %.2fs (GPU total: %.1f MB)",
+            len(moe_layer_indices), total_mb, elapsed, alloc_mb,
+        )
+
+    def free_layer_group(self):
+        """Free layer group's expert weights from GPU VRAM."""
+        self._persistent = {}
+        self._persistent_shared = {}
+        torch.cuda.empty_cache()
+
+    def _forward_persistent(
+        self,
+        moe_layer_idx: int,
+        x: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        """Forward using pre-loaded persistent expert buffers. Zero DMA."""
+        from sglang.srt.layers.moe.fused_moe_triton.fused_marlin_moe import (
+            fused_marlin_moe,
+        )
+
+        M = x.shape[0]
+        buffers = self._persistent[moe_layer_idx]
+        gating_output = torch.empty(M, self.num_experts, device=self.device)
+
+        self._workspace.zero_()
+
+        output = fused_marlin_moe(
+            hidden_states=x,
+            w1=buffers["w13_packed"],
+            w2=buffers["w2_packed"],
+            w1_scale=buffers["w13_scale"],
+            w2_scale=buffers["w2_scale"],
+            gating_output=gating_output,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            global_num_experts=self.num_experts,
+            expert_map=None,
+            g_idx1=self._gpu_g_idx,
+            g_idx2=self._gpu_g_idx,
+            sort_indices1=self._gpu_sort_idx,
+            sort_indices2=self._gpu_sort_idx,
+            workspace=self._workspace,
+            num_bits=self.num_bits,
+            is_k_full=True,
+        ).to(x.dtype)
+
+        return output
 
     def _disk_cache_path(self, moe_layer_idx: int, kind: str = "routed") -> Path:
         """Path for disk-cached Marlin weights."""
@@ -601,8 +972,6 @@ class GpuPrefillManager:
         # not the tensor's device. Must set device explicitly for multi-GPU.
         torch.cuda.set_device(self.device)
 
-        self._allocate_gpu_buffer()
-
         M = hidden_states.shape[0]
         x = hidden_states
 
@@ -613,15 +982,19 @@ class GpuPrefillManager:
             for name, t in [("hidden", x), ("topk_ids", topk_ids), ("topk_weights", topk_weights)]:
                 if t.device != self.device:
                     logger.error("DEVICE MISMATCH: %s on %s, expected %s", name, t.device, self.device)
-            logger.info("forward() moe_layer=%d M=%d device=%s chunks=%d",
-                        moe_layer_idx, M, self.device, self.num_chunks)
+            logger.info("forward() moe_layer=%d M=%d device=%s mode=%s",
+                        moe_layer_idx, M, self.device, self._prefill_mode)
 
         torch.cuda.synchronize(self.device)
 
-        if self._engine is not None:
+        if self._prefill_mode in ("persistent", "layer_grouped"):
+            output = self._forward_persistent(moe_layer_idx, x, topk_ids, topk_weights)
+        elif self._engine is not None:
+            self._allocate_gpu_buffer()
             output = self._forward_engine(moe_layer_idx, x, topk_ids, topk_weights, debug_sync)
         else:
             # Legacy safetensors path with RAM cache
+            self._allocate_gpu_buffer()
             if moe_layer_idx not in self._cache:
                 self.prepare_layer(moe_layer_idx)
             cache = self._cache[moe_layer_idx]
@@ -892,7 +1265,14 @@ class GpuPrefillManager:
 
         M = hidden_states.shape[0]
 
-        if self._engine is not None:
+        if self._persistent_shared is not None and moe_layer_idx in self._persistent_shared:
+            # Persistent mode: use pre-loaded shared expert buffers (zero DMA)
+            cache = self._persistent_shared[moe_layer_idx]
+            w13_packed = cache["w13_packed"]
+            w13_scale = cache["w13_scale"]
+            w2_packed = cache["w2_packed"]
+            w2_scale = cache["w2_scale"]
+        elif self._engine is not None:
             # On-the-fly repack from engine (single expert, tiny)
             w13_packed, w13_scale, w2_packed, w2_scale = self._repack_shared_expert(moe_layer_idx)
         else:
