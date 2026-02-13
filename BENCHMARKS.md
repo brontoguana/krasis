@@ -74,8 +74,8 @@ For each run:
 - Krasis is configured to quantize the BF16 model into an optimised INT8 GPU model, same precision as the Q8 GGUF
 - Krasis is configured to divide the experts the minimal amount which allows them to fit on the GPU (to run as large a batch as possible)
 - Individual component weights on the GPU which do not largely impact quality are quantised by Krasis to INT8
-- Krasis is given the original BF16 model to build a GPU optimised Marlin based in-memory model
-- Krasis is given the Q8 GGUF model to build an AVX2 CPU optimised in-memory model
+- Krasis is given the original BF16 model to build a GPU optimised Marlin based model on disk before loading into system RAM
+- Krasis is given the Q8 GGUF model to build an AVX2 CPU optimised model on disk before loading into system RAM
 
 Reasoning:
 
