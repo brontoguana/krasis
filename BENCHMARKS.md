@@ -47,6 +47,11 @@ For each run:
 - Krasis is given the original BF16 model to build a GPU optimised Marlin based in-memory model
 - Krasis is given the Q8 GGUF model to build an AVX2 CPU optimised in-memory model
 
+Reasoning:
+
+- Krasis will build optimised models for both the GPU and CPU, trading off system RAM for prefill and decode speed
+- Krasis will DMA the optimised GPU model from system RAM onto the GPU, and process the entire prefill on GPU in an optimal way
+- This will greatly speed up input token handling and result in a much faster response vs other tools with a similar decode generation speed
 
 ## Benchmark Results
 
