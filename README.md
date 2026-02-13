@@ -2,6 +2,8 @@
 
 Rust + PyO3 MoE runtime for large mixture-of-experts LLMs. Runs 350B+ parameter models on commodity hardware with full GPU prefill and efficient CPU decode.
 
+For the TLDR version take a look at the [BENCHMARKS.md](https://github.com/brontoguana/krasis/blob/main/BENCHMARKS.md) file.
+
 Contact: see the Google Forms link on my GitHub profile
 
 ## What It Does
