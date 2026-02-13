@@ -28,12 +28,12 @@ Krasis keeps GPU prefill **always on**. Prompts process at hundreds to thousands
 
 Krasis has to make some tradeoffs to make this happen.
 
-It stores two copies of the model in System RAM, this allows it to maximise GPU prefill speed and CPU speed.    
-   
+It stores two copies of the model in System RAM, this allows it to maximise GPU prefill speed and CPU speed.
+
 Research showed that a unified model was just not performant <1 tok/s decode.  Because of this, and because many large models have prefill that just doesn't fit       
   even on a 16GB GPU, Krasis allows you to selectively quantize differnt components of the model and gives recommendations about the impact of doing so.  You can         
   quantize the GPU weights to fit inside your VRAM budget or give you extra KV cache room (context window).  You can quantize the CPU model separately to maintain         
-  quality or decrease system RAM to get the model to fit.  Krasis always needs to be given the native BF16 HuggingFace model.  
+  quality or decrease system RAM to get the model to fit.  Krasis always needs to be given the native BF16 HuggingFace model.
 
 It uses this to build the GPU-optimised     
    in-memory model and the CPU-optimised in-memory model.  These are cached to disk so you'll typically need 3x the disk space for the model.  If you prefer you can       
