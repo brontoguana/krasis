@@ -119,7 +119,7 @@ OOM fallback: persistent → layer-grouped(2) automatically if VRAM insufficient
 ## Hardware Requirements
 
 - **CPU**: x86-64 with AVX2+FMA (AMD EPYC, Intel Xeon). AVX512 not required.
-- **GPU**: NVIDIA compute 8.0+ (Ampere/Ada). 16GB+ VRAM per GPU.
+- **GPU**: NVIDIA compute 8.0+ (Ampere/Ada). 16GB+ VRAM per GPU. AMD GPUs are not supported (Marlin kernels and FlashInfer are CUDA-only).
 - **RAM**: ~500-600 GB for 350B+ models (expert weights in system RAM).
 
 ## Building
