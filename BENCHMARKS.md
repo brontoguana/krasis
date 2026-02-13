@@ -71,6 +71,7 @@ Reasoning:
 
 For each run:
 
+- Krasis is configured to quantize the BF16 model into an optimised INT8 GPU model, same precision as the Q8 GGUF
 - Krasis is configured to divide the experts the minimal amount which allows them to fit on the GPU (to run as large a batch as possible)
 - Individual component weights on the GPU which do not largely impact quality are quantised by Krasis to INT8
 - Krasis is given the original BF16 model to build a GPU optimised Marlin based in-memory model
@@ -78,7 +79,7 @@ For each run:
 
 Reasoning:
 
-- Krasis will build optimised models for both the GPU and CPU, trading off system RAM for prefill and decode speed
+- Krasis will build optimised models for both the GPU and CPU, trading off system RAM usage (2x the other tools) for prefill and decode speed
 - Krasis will DMA the optimised GPU model from system RAM onto the GPU, and process the entire prefill on GPU in an optimal way
 - This will greatly speed up input token handling and result in a much faster response vs other tools with a similar decode generation speed
 
