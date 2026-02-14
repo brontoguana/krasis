@@ -102,7 +102,7 @@ TTFT (Time to First Token) measured wall-clock from request to first token (KTra
 | llama.cpp | 3 | ngl=14 | 32.9 | 3.8 | ~261 | 13,763+12,939+8,598 | 208 | ngl=16 OOM |
 | KTransformers | 1 | TP=1 INT8 attn | 49.7 | 4.85 | 173.0 | 14,735 | 275 | INT8 attn needed to fit on 1 GPU |
 | KTransformers | 2 | PP=2 | 57.5 | 3.60 | 149.5 | 14,895+13,707 | 275 | |
-| KTransformers | 3 | PP=3 | - | - | - | - | - | pending |
+| KTransformers | 3 | PP=3 | 57.3 | 3.29 | 150.1 | 14,129+14,287+13,132 | 278 | |
 | Krasis | 1 | div=? | - | - | - | - | - | pending |
 | Krasis | 2 | div=? | - | - | - | - | - | pending |
 | Krasis | 3 | div=? | - | - | - | - | - | pending |
