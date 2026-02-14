@@ -103,8 +103,8 @@ TTFT (Time to First Token) measured wall-clock from request to first token (KTra
 | KTransformers | 1 | TP=1 INT8 attn | 49.7 | 4.85 | 173.0 | 14,735 | 275 | INT8 attn needed to fit on 1 GPU |
 | KTransformers | 2 | PP=2 | 57.5 | 3.60 | 149.5 | 14,895+13,707 | 275 | |
 | KTransformers | 3 | PP=3 | 57.3 | 3.29 | 150.1 | 14,129+14,287+13,132 | 278 | |
-| Krasis | 1 | div=? | - | - | - | - | - | pending |
-| Krasis | 2 | div=? | - | - | - | - | - | pending |
+| Krasis | 1 | PP=1 div=32 | 44.7 | 1.34 | 193.5 | 11,447 | 265 | Layer-grouped GPU prefill |
+| Krasis | 2 | PP=2 div=8 | 43.7 | 1.47 | 197.5 | 7,269+7,221 | 264 | Layer-grouped GPU prefill |
 | Krasis | 3 | PP=3 div=4 | 26.3 | 1.45 | 327.3 | 5,435+4,941+5,484 | 264 | Layer-grouped GPU prefill |
 
 ## Conclusions
