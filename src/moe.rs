@@ -21,7 +21,7 @@ use crate::gguf_kernels::{expert_forward_gguf, GgufScratch};
 use crate::weights::marlin::{f32_to_bf16, DEFAULT_GROUP_SIZE};
 use crate::weights::{ExpertWeights, GgufExpertWeights, QuantWeight, UnifiedExpertWeights, WeightStore};
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
+use pyo3::types::{PyByteArray, PyBytes};
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::thread::JoinHandle;
@@ -1542,6 +1542,291 @@ impl KrasisEngine {
             }
             Ok(())
         })?)
+    }
+
+    /// Get weights for a batch of non-contiguous expert IDs in a single call.
+    ///
+    /// Instead of calling get_expert_w13_packed() etc. 4×N times (once per expert
+    /// per weight type), this returns all requested experts' data for one weight
+    /// type in a single PyO3 boundary crossing.
+    ///
+    /// Args:
+    ///   moe_layer_idx: 0-based MoE layer index
+    ///   expert_ids: List of expert indices to fetch
+    ///   weight_type: "w13_packed", "w13_scales", "w2_packed", "w2_scales"
+    ///
+    /// Returns: bytes containing [len(expert_ids), ...] contiguous data
+    #[pyo3(signature = (moe_layer_idx, expert_ids, weight_type))]
+    pub fn get_experts_batch<'py>(
+        &self, py: Python<'py>, moe_layer_idx: usize,
+        expert_ids: Vec<usize>,
+        weight_type: &str,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let store = self.store.as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Model not loaded"))?;
+        if !store.has_gpu_weights() {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "GPU weights not available"));
+        }
+        let layer = &store.experts_gpu[moe_layer_idx];
+        let count = expert_ids.len();
+
+        // Determine per-expert byte size and data accessor based on weight_type
+        match weight_type {
+            "w13_packed" => {
+                let per_expert = layer[0].w13_packed.len() * 4;
+                let total = count * per_expert;
+                Ok(PyBytes::new_with(py, total, |buf| {
+                    for (i, &eid) in expert_ids.iter().enumerate() {
+                        let src: &[u8] = unsafe {
+                            std::slice::from_raw_parts(
+                                layer[eid].w13_packed.as_ptr() as *const u8,
+                                layer[eid].w13_packed.len() * 4,
+                            )
+                        };
+                        buf[i * per_expert..(i + 1) * per_expert].copy_from_slice(src);
+                    }
+                    Ok(())
+                })?)
+            }
+            "w13_scales" => {
+                let per_expert = layer[0].w13_scales.len() * 2;
+                let total = count * per_expert;
+                Ok(PyBytes::new_with(py, total, |buf| {
+                    for (i, &eid) in expert_ids.iter().enumerate() {
+                        let src: &[u8] = unsafe {
+                            std::slice::from_raw_parts(
+                                layer[eid].w13_scales.as_ptr() as *const u8,
+                                layer[eid].w13_scales.len() * 2,
+                            )
+                        };
+                        buf[i * per_expert..(i + 1) * per_expert].copy_from_slice(src);
+                    }
+                    Ok(())
+                })?)
+            }
+            "w2_packed" => {
+                let per_expert = layer[0].w2_packed.len() * 4;
+                let total = count * per_expert;
+                Ok(PyBytes::new_with(py, total, |buf| {
+                    for (i, &eid) in expert_ids.iter().enumerate() {
+                        let src: &[u8] = unsafe {
+                            std::slice::from_raw_parts(
+                                layer[eid].w2_packed.as_ptr() as *const u8,
+                                layer[eid].w2_packed.len() * 4,
+                            )
+                        };
+                        buf[i * per_expert..(i + 1) * per_expert].copy_from_slice(src);
+                    }
+                    Ok(())
+                })?)
+            }
+            "w2_scales" => {
+                let per_expert = layer[0].w2_scales.len() * 2;
+                let total = count * per_expert;
+                Ok(PyBytes::new_with(py, total, |buf| {
+                    for (i, &eid) in expert_ids.iter().enumerate() {
+                        let src: &[u8] = unsafe {
+                            std::slice::from_raw_parts(
+                                layer[eid].w2_scales.as_ptr() as *const u8,
+                                layer[eid].w2_scales.len() * 2,
+                            )
+                        };
+                        buf[i * per_expert..(i + 1) * per_expert].copy_from_slice(src);
+                    }
+                    Ok(())
+                })?)
+            }
+            _ => Err(pyo3::exceptions::PyValueError::new_err(
+                format!("Unknown weight_type: '{}'. Expected one of: w13_packed, w13_scales, w2_packed, w2_scales", weight_type)
+            )),
+        }
+    }
+
+    /// Get all 4 weight types for a batch of experts in a single FFI call.
+    /// Returns (w13_packed, w13_scales, w2_packed, w2_scales) as 4 byte objects.
+    /// Saves 3 FFI round-trips vs calling get_experts_batch 4 times.
+    #[pyo3(signature = (moe_layer_idx, expert_ids))]
+    pub fn get_experts_all_batch<'py>(
+        &self, py: Python<'py>, moe_layer_idx: usize,
+        expert_ids: Vec<usize>,
+    ) -> PyResult<(Bound<'py, PyBytes>, Bound<'py, PyBytes>, Bound<'py, PyBytes>, Bound<'py, PyBytes>)> {
+        let store = self.store.as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Model not loaded"))?;
+        if !store.has_gpu_weights() {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err("GPU weights not available"));
+        }
+        let layer = &store.experts_gpu[moe_layer_idx];
+        let count = expert_ids.len();
+
+        let w13p_per = layer[0].w13_packed.len() * 4;
+        let w13s_per = layer[0].w13_scales.len() * 2;
+        let w2p_per = layer[0].w2_packed.len() * 4;
+        let w2s_per = layer[0].w2_scales.len() * 2;
+
+        let w13p = PyBytes::new_with(py, count * w13p_per, |buf| {
+            for (i, &eid) in expert_ids.iter().enumerate() {
+                let src = unsafe { std::slice::from_raw_parts(layer[eid].w13_packed.as_ptr() as *const u8, w13p_per) };
+                buf[i * w13p_per..(i + 1) * w13p_per].copy_from_slice(src);
+            }
+            Ok(())
+        })?;
+        let w13s = PyBytes::new_with(py, count * w13s_per, |buf| {
+            for (i, &eid) in expert_ids.iter().enumerate() {
+                let src = unsafe { std::slice::from_raw_parts(layer[eid].w13_scales.as_ptr() as *const u8, w13s_per) };
+                buf[i * w13s_per..(i + 1) * w13s_per].copy_from_slice(src);
+            }
+            Ok(())
+        })?;
+        let w2p = PyBytes::new_with(py, count * w2p_per, |buf| {
+            for (i, &eid) in expert_ids.iter().enumerate() {
+                let src = unsafe { std::slice::from_raw_parts(layer[eid].w2_packed.as_ptr() as *const u8, w2p_per) };
+                buf[i * w2p_per..(i + 1) * w2p_per].copy_from_slice(src);
+            }
+            Ok(())
+        })?;
+        let w2s = PyBytes::new_with(py, count * w2s_per, |buf| {
+            for (i, &eid) in expert_ids.iter().enumerate() {
+                let src = unsafe { std::slice::from_raw_parts(layer[eid].w2_scales.as_ptr() as *const u8, w2s_per) };
+                buf[i * w2s_per..(i + 1) * w2s_per].copy_from_slice(src);
+            }
+            Ok(())
+        })?;
+
+        Ok((w13p, w13s, w2p, w2s))
+    }
+
+    /// Write ALL experts' weights for a layer into pre-allocated PyByteArray buffers.
+    ///
+    /// Unlike get_experts_all_batch() which allocates new PyBytes objects (triggering
+    /// page faults on fresh memory), this writes directly into buffers that the caller
+    /// pre-allocated once. Since pages are already mapped, this is a raw memcpy.
+    ///
+    /// Expected speedup: ~1430ms → ~100-150ms per layer (eliminates allocation overhead).
+    #[pyo3(signature = (moe_layer_idx, w13p_buf, w13s_buf, w2p_buf, w2s_buf))]
+    pub fn write_experts_all_into(
+        &self, _py: Python<'_>, moe_layer_idx: usize,
+        w13p_buf: &Bound<'_, PyByteArray>,
+        w13s_buf: &Bound<'_, PyByteArray>,
+        w2p_buf: &Bound<'_, PyByteArray>,
+        w2s_buf: &Bound<'_, PyByteArray>,
+    ) -> PyResult<()> {
+        let store = self.store.as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Model not loaded"))?;
+        if !store.has_gpu_weights() {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err("GPU weights not available"));
+        }
+        let layer = &store.experts_gpu[moe_layer_idx];
+        let num_experts = layer.len();
+
+        let w13p_per = layer[0].w13_packed.len() * 4;
+        let w13s_per = layer[0].w13_scales.len() * 2;
+        let w2p_per = layer[0].w2_packed.len() * 4;
+        let w2s_per = layer[0].w2_scales.len() * 2;
+
+        let w13p_total = num_experts * w13p_per;
+        let w13s_total = num_experts * w13s_per;
+        let w2p_total = num_experts * w2p_per;
+        let w2s_total = num_experts * w2s_per;
+
+        // Verify buffer sizes
+        if w13p_buf.len() < w13p_total {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                format!("w13p_buf too small: {} < {}", w13p_buf.len(), w13p_total)));
+        }
+        if w13s_buf.len() < w13s_total {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                format!("w13s_buf too small: {} < {}", w13s_buf.len(), w13s_total)));
+        }
+        if w2p_buf.len() < w2p_total {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                format!("w2p_buf too small: {} < {}", w2p_buf.len(), w2p_total)));
+        }
+        if w2s_buf.len() < w2s_total {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                format!("w2s_buf too small: {} < {}", w2s_buf.len(), w2s_total)));
+        }
+
+        // Write directly into pre-allocated buffers (raw memcpy, no allocation)
+        // SAFETY: We hold the GIL, no other Python code can resize the bytearrays
+        // while we're writing. The buffer sizes were verified above.
+        unsafe {
+            let w13p_slice = w13p_buf.as_bytes_mut();
+            for (i, expert) in layer.iter().enumerate() {
+                let src = std::slice::from_raw_parts(
+                    expert.w13_packed.as_ptr() as *const u8, w13p_per);
+                w13p_slice[i * w13p_per..(i + 1) * w13p_per].copy_from_slice(src);
+            }
+
+            let w13s_slice = w13s_buf.as_bytes_mut();
+            for (i, expert) in layer.iter().enumerate() {
+                let src = std::slice::from_raw_parts(
+                    expert.w13_scales.as_ptr() as *const u8, w13s_per);
+                w13s_slice[i * w13s_per..(i + 1) * w13s_per].copy_from_slice(src);
+            }
+
+            let w2p_slice = w2p_buf.as_bytes_mut();
+            for (i, expert) in layer.iter().enumerate() {
+                let src = std::slice::from_raw_parts(
+                    expert.w2_packed.as_ptr() as *const u8, w2p_per);
+                w2p_slice[i * w2p_per..(i + 1) * w2p_per].copy_from_slice(src);
+            }
+
+            let w2s_slice = w2s_buf.as_bytes_mut();
+            for (i, expert) in layer.iter().enumerate() {
+                let src = std::slice::from_raw_parts(
+                    expert.w2_scales.as_ptr() as *const u8, w2s_per);
+                w2s_slice[i * w2s_per..(i + 1) * w2s_per].copy_from_slice(src);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Write shared expert weights for a layer into pre-allocated PyByteArray buffers.
+    #[pyo3(signature = (moe_layer_idx, w13p_buf, w13s_buf, w2p_buf, w2s_buf))]
+    pub fn write_shared_expert_into(
+        &self, _py: Python<'_>, moe_layer_idx: usize,
+        w13p_buf: &Bound<'_, PyByteArray>,
+        w13s_buf: &Bound<'_, PyByteArray>,
+        w2p_buf: &Bound<'_, PyByteArray>,
+        w2s_buf: &Bound<'_, PyByteArray>,
+    ) -> PyResult<()> {
+        let store = self.store.as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Model not loaded"))?;
+        if store.shared_experts_gpu.is_empty() {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err("No shared experts"));
+        }
+        let expert = &store.shared_experts_gpu[moe_layer_idx];
+
+        let w13p_bytes = expert.w13_packed.len() * 4;
+        let w13s_bytes = expert.w13_scales.len() * 2;
+        let w2p_bytes = expert.w2_packed.len() * 4;
+        let w2s_bytes = expert.w2_scales.len() * 2;
+
+        unsafe {
+            let dst = w13p_buf.as_bytes_mut();
+            let src = std::slice::from_raw_parts(
+                expert.w13_packed.as_ptr() as *const u8, w13p_bytes);
+            dst[..w13p_bytes].copy_from_slice(src);
+
+            let dst = w13s_buf.as_bytes_mut();
+            let src = std::slice::from_raw_parts(
+                expert.w13_scales.as_ptr() as *const u8, w13s_bytes);
+            dst[..w13s_bytes].copy_from_slice(src);
+
+            let dst = w2p_buf.as_bytes_mut();
+            let src = std::slice::from_raw_parts(
+                expert.w2_packed.as_ptr() as *const u8, w2p_bytes);
+            dst[..w2p_bytes].copy_from_slice(src);
+
+            let dst = w2s_buf.as_bytes_mut();
+            let src = std::slice::from_raw_parts(
+                expert.w2_scales.as_ptr() as *const u8, w2s_bytes);
+            dst[..w2s_bytes].copy_from_slice(src);
+        }
+
+        Ok(())
     }
 
     /// Get shared expert w13 packed + scales + w2 packed + scales for a layer.

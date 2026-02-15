@@ -166,7 +166,14 @@ def main():
     parser.add_argument("--kv-dtype", default="fp8_e4m3",
                         choices=["fp8_e4m3", "bf16"])
     parser.add_argument("--expert-divisor", type=int, default=1,
-                        help="Expert loading: 0=chunked, 1=persistent, >=2=layer-grouped")
+                        help="Expert loading: -3=hot_cached_static, -2=lru, -1=active-only, 0=chunked, 1=persistent, >=2=layer-grouped")
+    parser.add_argument("--cache-strategy", default=None,
+                        choices=["none", "active_only", "static_pin", "weighted_pin", "lru", "hybrid", "hot_cached_static"],
+                        help="Expert caching strategy (overrides expert-divisor for cache modes)")
+    parser.add_argument("--heatmap-path", default=None,
+                        help="Path to expert_heatmap.json for hot_cached_static init")
+    parser.add_argument("--cuda-graphs", action="store_true", default=False,
+                        help="Enable CUDA graph capture for M=1 decode (hot_cached_static only)")
     parser.add_argument("--gpu-expert-bits", type=int, default=4, choices=[4, 8],
                         help="Marlin quantization bits for GPU prefill experts")
     parser.add_argument("--cpu-expert-bits", type=int, default=4, choices=[4, 8],
@@ -181,6 +188,10 @@ def main():
                         help="Quantization for lm_head weights")
     parser.add_argument("--gpu-prefill-threshold", type=int, default=300,
                         help="Min tokens to trigger GPU prefill (default: 300)")
+    parser.add_argument("--gpu-decode", action="store_true", default=None,
+                        help="Route M=1 decode through GPU (default: True for active_only/static_pin)")
+    parser.add_argument("--no-gpu-decode", dest="gpu_decode", action="store_false",
+                        help="Disable GPU decode (use CPU for M=1)")
     parser.add_argument("--gguf-path", default=None,
                         help="Path to GGUF file for CPU experts")
     parser.add_argument("--force-load", action="store_true",
@@ -213,6 +224,32 @@ def main():
 
     _model_name = args.model_path.rstrip("/").split("/")[-1]
 
+    # Map cache-strategy to expert_divisor
+    expert_divisor = args.expert_divisor
+    if args.cache_strategy:
+        strategy_map = {
+            "active_only": -1,
+            "static_pin": -1,  # active_only + static pinning
+            "weighted_pin": -1,  # active_only + weighted pinning
+            "lru": -2,  # LRU cross-layer caching
+            "hybrid": -2,  # LRU + static pinning
+            "hot_cached_static": -3,  # hot on GPU (static), cold on CPU (parallel)
+            "none": expert_divisor,  # Keep existing divisor
+        }
+        expert_divisor = strategy_map.get(args.cache_strategy, expert_divisor)
+        logger.info("Cache strategy '%s' → expert_divisor=%d", args.cache_strategy, expert_divisor)
+
+    # GPU decode: auto-enable for active_only/static_pin, or respect explicit flag
+    gpu_decode = args.gpu_decode
+    if gpu_decode is None:
+        # Auto-enable for cache strategies that use active-only mode
+        gpu_decode = args.cache_strategy in ("active_only", "static_pin", "weighted_pin", "lru", "hybrid", "hot_cached_static")
+
+    gpu_prefill_threshold = args.gpu_prefill_threshold
+    if gpu_decode:
+        gpu_prefill_threshold = 1
+        logger.info("GPU decode enabled: gpu_prefill_threshold=1 (M=1 decode routes through GPU)")
+
     _model = KrasisModel(
         model_path=args.model_path,
         pp_partition=pp_partition,
@@ -220,14 +257,34 @@ def main():
         kv_dtype=kv_dtype,
         krasis_threads=args.krasis_threads,
         quant_cfg=quant_cfg,
-        expert_divisor=args.expert_divisor,
+        expert_divisor=expert_divisor,
         gguf_path=args.gguf_path,
         force_load=args.force_load,
-        gpu_prefill_threshold=args.gpu_prefill_threshold,
+        gpu_prefill_threshold=gpu_prefill_threshold,
     )
 
     logger.info("Loading model...")
     _model.load()
+
+    # Configure expert pinning for static/weighted/hybrid strategies
+    if args.cache_strategy in ("static_pin", "weighted_pin", "hybrid"):
+        strategy = "weighted" if args.cache_strategy == "weighted_pin" else "uniform"
+        for dev_str, manager in _model.gpu_prefill_managers.items():
+            manager.configure_pinning(
+                budget_mb=0,  # auto-detect from free VRAM
+                warmup_requests=1,  # Pin after first request
+                strategy=strategy,
+            )
+        logger.info("Expert pinning configured: strategy=%s", strategy)
+
+    # Initialize hot_cached_static strategy
+    if args.cache_strategy == "hot_cached_static":
+        for dev_str, manager in _model.gpu_prefill_managers.items():
+            manager._init_hot_cached_static(heatmap_path=args.heatmap_path)
+            if args.cuda_graphs:
+                manager._init_cuda_graphs()
+        logger.info("hot_cached_static initialized (cuda_graphs=%s)", args.cuda_graphs)
+
     logger.info("Model loaded, starting server on %s:%d", args.host, args.port)
 
     _scheduler = Scheduler(_model)

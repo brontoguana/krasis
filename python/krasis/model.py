@@ -16,6 +16,13 @@ import time
 from math import ceil
 from typing import List, Optional, Tuple
 
+# Runtime-togglable timing flags (check env var each time for dynamic enable/disable)
+def _decode_timing():
+    return os.environ.get("KRASIS_DECODE_TIMING", "") == "1"
+
+def _prefill_timing():
+    return os.environ.get("KRASIS_PREFILL_TIMING", "") == "1"
+
 import torch
 
 # Gate forward() diagnostics behind env var to avoid GPU sync overhead (.item() calls)
@@ -250,6 +257,11 @@ def _compute_layer_groups(
         # All dense layers — single group, no experts
         return [(all_layers, [])]
 
+    # Active-only or single group: all layers in one group
+    if divisor <= 1:
+        moe_indices = [l - first_k for l in moe_layers]
+        return [(all_layers, moe_indices)]
+
     # Split MoE layers into groups
     num_moe = len(moe_layers)
     moe_per_group = ceil(num_moe / divisor)
@@ -272,6 +284,31 @@ def _compute_layer_groups(
         groups.append((group_all, group_moe_indices))
 
     return groups
+
+
+def _hcs_prefill_divisor(manager, rank, cfg) -> int:
+    """Auto-compute layer group divisor for HCS prefill based on VRAM budget.
+
+    HCS stores hot experts statically for decode, but prefill needs ALL experts
+    loaded per-group via preload_layer_group(). This computes how many groups
+    are needed so each group fits in available VRAM.
+    """
+    first_k = cfg.first_k_dense_replace
+    moe_layers = [l for l in range(rank.layer_start, rank.layer_end) if l >= first_k]
+    if not moe_layers:
+        return 1
+
+    num_moe = len(moe_layers)
+
+    # Always use 1-layer groups for HCS prefill.
+    # Smaller expert groups = more VRAM for activation intermediates = larger token
+    # chunks = more tokens per expert = dramatically better GPU utilization.
+    # The extra DMA cost (2x groups) is small (~5% of total) vs kernel speedup.
+    logger.info(
+        "HCS prefill: %d MoE layers, 1-layer groups (maximize chunk size)",
+        num_moe,
+    )
+    return num_moe
 
 
 class KrasisModel:
@@ -656,10 +693,17 @@ class KrasisModel:
         """
         assert self._loaded, "Model not loaded. Call load() first."
         M = token_ids.shape[0]
+        timing = _decode_timing() and M == 1
 
-        # ── Layer-grouped prefill routing ──
+        if timing:
+            t_fwd_start = time.perf_counter()
+
+        # ── Layer-grouped / active-only / LRU prefill routing ──
+        # Only use grouped path for actual prefill (M > 1). M=1 decode uses
+        # normal forward() — per-layer GPU dispatch in _moe_forward handles it.
         if (
-            self.expert_divisor >= 2
+            M > 1
+            and (self.expert_divisor >= 2 or self.expert_divisor < 0)
             and M >= self.gpu_prefill_threshold
             and self.gpu_prefill_enabled
             and self.cfg.n_routed_experts > 0
@@ -745,6 +789,10 @@ class KrasisModel:
             if seq_state is not None:
                 seq_state.advance(M)
 
+        if timing:
+            torch.cuda.synchronize()
+            t_after_layers = time.perf_counter()
+
         # ── Final norm ──
         last_dev = torch.device(self.ranks[-1].device)
         hidden = _to_device(hidden, last_dev)
@@ -774,6 +822,17 @@ class KrasisModel:
             logger.info("DIAG[%d] logits: std=%.2f top5=%s",
                         self._diag_count, last_logits.std(),
                         list(zip(tok_strs, [f"{v:.1f}" for v in topk_vals.tolist()])))
+
+        if timing:
+            torch.cuda.synchronize()
+            t_fwd_end = time.perf_counter()
+            logger.info(
+                "DECODE-TOKEN: total=%.1fms (layers=%.1fms post=%.1fms, %d layers)",
+                (t_fwd_end - t_fwd_start) * 1000,
+                (t_after_layers - t_fwd_start) * 1000,
+                (t_fwd_end - t_after_layers) * 1000,
+                self.cfg.num_hidden_layers,
+            )
 
         return logits
 
@@ -811,9 +870,63 @@ class KrasisModel:
             if seq_state is not None:
                 seq_state.ensure_capacity(M)
 
-        # ── Chunk tokens ──
-        chunk_size = 2048
+        # ── Token chunking ──
+        # Compute max chunk size based on fused_marlin_moe intermediate allocation.
+        # The kernel allocates per token: topk × (N + max(2N, K)) × dtype_size bytes.
+        # Larger chunks = more tokens per expert = better GPU SM utilization.
+        topk = self.cfg.num_experts_per_tok
+        N_moe = self.cfg.moe_intermediate_size
+        K_moe = self.cfg.hidden_size
+        dtype_size = 2  # BF16
+        intermediate_per_token = topk * (N_moe + max(2 * N_moe, K_moe)) * dtype_size
+
+        # Estimate available VRAM for activation intermediates.
+        # Subtract 1-layer expert group (worst case for HCS) + headroom from free VRAM.
+        try:
+            free_per_dev = {
+                str(torch.device(r.device)): torch.cuda.mem_get_info(torch.device(r.device))[0]
+                for r in self.ranks
+            }
+            min_free = min(free_per_dev.values())
+            first_dev_str = str(torch.device(self.ranks[0].device))
+            first_manager = self.gpu_prefill_managers.get(first_dev_str)
+            if first_manager and intermediate_per_token > 0:
+                per_expert = first_manager._per_expert_vram_bytes()
+                # 1-layer expert group VRAM (including shared experts)
+                expert_group_bytes = self.cfg.num_local_experts * per_expert
+                if self.cfg.n_shared_experts > 0:
+                    expert_group_bytes += per_expert  # ~1 shared expert worth
+                headroom = 512 * 1024 * 1024  # 512 MB for KV cache growth, etc.
+                activation_budget = min_free - expert_group_bytes - headroom
+                if activation_budget > 0:
+                    max_chunk = int(activation_budget / intermediate_per_token)
+                    chunk_size = max(512, min(M, max_chunk))
+                else:
+                    chunk_size = 2048
+                logger.info(
+                    "Chunk calc: free=%s, min_free=%.0f MB, expert_group=%.0f MB, "
+                    "headroom=%.0f MB, budget=%.0f MB, max_chunk=%d → chunk_size=%d",
+                    {k: f"{v/1e6:.0f}MB" for k, v in free_per_dev.items()},
+                    min_free / 1e6, expert_group_bytes / 1e6,
+                    headroom / 1e6, activation_budget / 1e6 if activation_budget > 0 else 0,
+                    max_chunk if activation_budget > 0 else 0, chunk_size,
+                )
+            else:
+                chunk_size = 2048
+                logger.info("Chunk calc: no manager (key=%s, managers=%s), defaulting to %d",
+                            first_dev_str, list(self.gpu_prefill_managers.keys()), chunk_size)
+        except Exception as e:
+            chunk_size = 2048
+            logger.warning("Chunk calc exception: %s, defaulting to %d", e, chunk_size)
+
         num_chunks = ceil(M / chunk_size)
+        logger.info(
+            "Prefill chunking: M=%d, chunk_size=%d (%d chunks), "
+            "intermediate=%.0f KB/tok, %.0f MB peak per chunk",
+            M, chunk_size, num_chunks,
+            intermediate_per_token / 1024,
+            chunk_size * intermediate_per_token / 1e6,
+        )
 
         chunk_hidden = []
         chunk_positions = []
@@ -842,17 +955,42 @@ class KrasisModel:
             rank_layer_base = sum(r.num_layers for r in self.ranks[:rank_idx])
 
             # Compute layer groups
-            groups = _compute_layer_groups(rank, self.cfg, self.expert_divisor)
+            # HCS mode uses layer_grouped prefill — auto-compute divisor from VRAM
+            if manager and manager._prefill_mode == "hot_cached_static":
+                effective_divisor = _hcs_prefill_divisor(manager, rank, self.cfg)
+            else:
+                effective_divisor = self.expert_divisor
+            groups = _compute_layer_groups(rank, self.cfg, effective_divisor)
 
             logger.info(
                 "Layer-grouped prefill: rank %d, %d groups, %d layers, %d chunks of %d tokens",
                 rank_idx, len(groups), rank.num_layers, num_chunks, chunk_size,
             )
 
+            # Active-only/LRU mode: skip group preloading (DMA/dispatch in forward())
+            # HCS uses layer_grouped preloading for prefill (M>1), HCS decode (M=1) separately
+            is_active_only = manager and manager._prefill_mode in ("active_only", "lru")
+            if is_active_only:
+                manager.reset_ao_stats()
+
+            # Track per-rank prefill timing
+            rank_dma_time = 0.0
+            rank_compute_time = 0.0
+
             for group_idx, (group_layers, group_moe_indices) in enumerate(groups):
-                # Load experts for this group
-                if manager and group_moe_indices:
+                # Load experts for this group (skip for active_only — DMA in forward())
+                if _prefill_timing():
+                    torch.cuda.synchronize(dev)
+                    t_dma_start = time.perf_counter()
+
+                if manager and group_moe_indices and not is_active_only:
                     manager.preload_layer_group(group_moe_indices)
+
+                if _prefill_timing():
+                    torch.cuda.synchronize(dev)
+                    dma_elapsed = time.perf_counter() - t_dma_start
+                    rank_dma_time += dma_elapsed
+                    t_compute_start = time.perf_counter()
 
                 # Reset seq_state for this group (each group's layers start with 0 KV)
                 seq_state.seq_len = 0
@@ -896,9 +1034,38 @@ class KrasisModel:
                     if seq_state is not None:
                         seq_state.advance(chunk_M)
 
-                # Free experts for this group
-                if manager and group_moe_indices:
+                if _prefill_timing():
+                    torch.cuda.synchronize(dev)
+                    compute_elapsed = time.perf_counter() - t_compute_start
+                    rank_compute_time += compute_elapsed
+
+                # Free experts for this group (skip for active_only)
+                if manager and group_moe_indices and not is_active_only:
                     manager.free_layer_group()
+
+            if _prefill_timing():
+                total = rank_dma_time + rank_compute_time
+                logger.info(
+                    "PREFILL-RANK %d: DMA=%.2fs (%.0f%%), compute=%.2fs (%.0f%%), total=%.2fs",
+                    rank_idx,
+                    rank_dma_time, (rank_dma_time / total * 100) if total > 0 else 0,
+                    rank_compute_time, (rank_compute_time / total * 100) if total > 0 else 0,
+                    total,
+                )
+
+            # Log active-only stats for this rank
+            if is_active_only:
+                stats = manager.get_ao_stats()
+                logger.info(
+                    "Active-only rank %d: DMA=%.2fs (%.1f MB), "
+                    "misses=%d, hits=%d, pinned=%d",
+                    rank_idx, stats["dma_time"],
+                    stats["dma_bytes"] / 1e6,
+                    stats["cache_misses"], stats["cache_hits"],
+                    stats["pinned_experts"],
+                )
+                # Notify for warmup/pinning
+                manager.notify_request_done()
 
             # After all groups, seq_state.seq_len should equal M
             if seq_state is not None:
@@ -964,6 +1131,8 @@ class KrasisModel:
         device = torch.device(self.ranks[0].device)
         generated = []
 
+        _t_gen_start = time.perf_counter()
+
         try:
             # ── Prefill ──
             prompt_tensor = torch.tensor(prompt_tokens, dtype=torch.long, device=device)
@@ -976,23 +1145,63 @@ class KrasisModel:
             next_token = sample(next_logits, temperature, top_k, top_p).item()
             generated.append(next_token)
 
+            torch.cuda.synchronize()
+            self._last_ttft = time.perf_counter() - _t_gen_start
+
             if next_token in stop_token_ids:
                 return generated
 
             # ── Decode ──
-            for step in range(max_new_tokens - 1):
-                pos = len(prompt_tokens) + step
-                token_tensor = torch.tensor([next_token], dtype=torch.long, device=device)
-                pos_tensor = torch.tensor([pos], dtype=torch.int32, device=device)
+            # Pre-allocate reusable tensors to avoid per-step CUDA allocations
+            _decode_token_buf = torch.empty(1, dtype=torch.long, device=device)
+            _decode_pos_buf = torch.empty(1, dtype=torch.int32, device=device)
+            _t_decode_start = time.perf_counter()
 
-                logits = self.forward(token_tensor, pos_tensor, seq_states_per_rank)
+            for step in range(max_new_tokens - 1):
+                if _decode_timing():
+                    torch.cuda.synchronize()
+                    _t_step_start = time.perf_counter()
+
+                pos = len(prompt_tokens) + step
+                _decode_token_buf[0] = next_token
+                _decode_pos_buf[0] = pos
+
+                if _decode_timing():
+                    _t_prep = time.perf_counter()
+
+                logits = self.forward(_decode_token_buf, _decode_pos_buf, seq_states_per_rank)
+
+                if _decode_timing():
+                    torch.cuda.synchronize()
+                    _t_forward = time.perf_counter()
+
                 next_token = sample(logits, temperature, top_k, top_p).item()
+
+                if _decode_timing():
+                    _t_sample = time.perf_counter()
+                    logger.info(
+                        "DECODE-STEP %d: prep=%.1fms forward=%.1fms sample=%.1fms total=%.1fms",
+                        step,
+                        (_t_prep - _t_step_start) * 1000,
+                        (_t_forward - _t_prep) * 1000,
+                        (_t_sample - _t_forward) * 1000,
+                        (_t_sample - _t_step_start) * 1000,
+                    )
+
                 generated.append(next_token)
 
                 if next_token in stop_token_ids:
                     break
 
         finally:
+            torch.cuda.synchronize()
+            n_decode = len(generated) - 1  # First token is from prefill
+            if n_decode > 0:
+                self._last_decode_time = time.perf_counter() - _t_decode_start
+                self._last_decode_tok_s = n_decode / self._last_decode_time
+            else:
+                self._last_decode_time = 0.0
+                self._last_decode_tok_s = 0.0
             # Free KV cache pages
             for s in seq_states_per_rank:
                 if s is not None:
