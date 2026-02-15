@@ -16,17 +16,9 @@ import time
 from math import ceil
 from typing import List, Optional, Tuple
 
-# Runtime-togglable timing flags (check env var each time for dynamic enable/disable)
-def _decode_timing():
-    return os.environ.get("KRASIS_DECODE_TIMING", "") == "1"
-
-def _prefill_timing():
-    return os.environ.get("KRASIS_PREFILL_TIMING", "") == "1"
-
 import torch
 
-# Gate forward() diagnostics behind env var to avoid GPU sync overhead (.item() calls)
-_DIAG_ENABLED = os.environ.get("KRASIS_DIAG", "") == "1"
+from krasis.timing import TIMING
 
 from krasis.config import ModelConfig, PPRankConfig, QuantConfig, build_pp_ranks, compute_pp_partition
 from krasis.weight_loader import WeightLoader, int8_linear
@@ -693,7 +685,7 @@ class KrasisModel:
         """
         assert self._loaded, "Model not loaded. Call load() first."
         M = token_ids.shape[0]
-        timing = _decode_timing() and M == 1
+        timing = TIMING.decode and M == 1
 
         if timing:
             t_fwd_start = time.perf_counter()
@@ -716,7 +708,7 @@ class KrasisModel:
 
         # Diagnostics: track first N forward calls (gated behind KRASIS_DIAG=1)
         diag = False
-        if _DIAG_ENABLED:
+        if TIMING.diag:
             if not hasattr(self, '_diag_count'):
                 self._diag_count = 0
             self._diag_count += 1
@@ -775,7 +767,7 @@ class KrasisModel:
                         moe_layer_idx, num_new_tokens=M,
                     )
 
-                if _DIAG_ENABLED and diag and abs_layer_idx in (0, 1, self.cfg.num_hidden_layers // 2, self.cfg.num_hidden_layers - 1):
+                if TIMING.diag and diag and abs_layer_idx in (0, 1, self.cfg.num_hidden_layers // 2, self.cfg.num_hidden_layers - 1):
                     h = hidden[-1] if hidden.shape[0] > 1 else hidden[0]
                     r = residual[-1] if residual.shape[0] > 1 else residual[0]
                     logger.info("DIAG[%d] L%d: hid std=%.4f max=%.4f | res std=%.4f max=%.4f",
@@ -812,7 +804,7 @@ class KrasisModel:
         logits = _linear(hidden, self.lm_head_data)
         logits = logits.float()
 
-        if _DIAG_ENABLED and diag:
+        if TIMING.diag and diag:
             last_logits = logits[-1]
             topk_vals, topk_ids = last_logits.topk(5)
             tok_strs = []
@@ -979,14 +971,14 @@ class KrasisModel:
 
             for group_idx, (group_layers, group_moe_indices) in enumerate(groups):
                 # Load experts for this group (skip for active_only — DMA in forward())
-                if _prefill_timing():
+                if TIMING.prefill:
                     torch.cuda.synchronize(dev)
                     t_dma_start = time.perf_counter()
 
                 if manager and group_moe_indices and not is_active_only:
                     manager.preload_layer_group(group_moe_indices)
 
-                if _prefill_timing():
+                if TIMING.prefill:
                     torch.cuda.synchronize(dev)
                     dma_elapsed = time.perf_counter() - t_dma_start
                     rank_dma_time += dma_elapsed
@@ -1034,7 +1026,7 @@ class KrasisModel:
                     if seq_state is not None:
                         seq_state.advance(chunk_M)
 
-                if _prefill_timing():
+                if TIMING.prefill:
                     torch.cuda.synchronize(dev)
                     compute_elapsed = time.perf_counter() - t_compute_start
                     rank_compute_time += compute_elapsed
@@ -1043,7 +1035,7 @@ class KrasisModel:
                 if manager and group_moe_indices and not is_active_only:
                     manager.free_layer_group()
 
-            if _prefill_timing():
+            if TIMING.prefill:
                 total = rank_dma_time + rank_compute_time
                 logger.info(
                     "PREFILL-RANK %d: DMA=%.2fs (%.0f%%), compute=%.2fs (%.0f%%), total=%.2fs",
@@ -1158,7 +1150,7 @@ class KrasisModel:
             _t_decode_start = time.perf_counter()
 
             for step in range(max_new_tokens - 1):
-                if _decode_timing():
+                if TIMING.decode:
                     torch.cuda.synchronize()
                     _t_step_start = time.perf_counter()
 
@@ -1166,18 +1158,18 @@ class KrasisModel:
                 _decode_token_buf[0] = next_token
                 _decode_pos_buf[0] = pos
 
-                if _decode_timing():
+                if TIMING.decode:
                     _t_prep = time.perf_counter()
 
                 logits = self.forward(_decode_token_buf, _decode_pos_buf, seq_states_per_rank)
 
-                if _decode_timing():
+                if TIMING.decode:
                     torch.cuda.synchronize()
                     _t_forward = time.perf_counter()
 
                 next_token = sample(logits, temperature, top_k, top_p).item()
 
-                if _decode_timing():
+                if TIMING.decode:
                     _t_sample = time.perf_counter()
                     logger.info(
                         "DECODE-STEP %d: prep=%.1fms forward=%.1fms sample=%.1fms total=%.1fms",
