@@ -1,5 +1,49 @@
 # Krasis Changelog
 
+## Fix: Page Cache Eviction (MADV_DONTNEED) — 2026-02-15
+
+### Bug
+All cache loading paths (Marlin, CPU, GGUF, legacy) used mmap to read cache files,
+copied all data into owned heap Vecs, then dropped the mmap — but the kernel kept
+all pages in page cache. This doubled effective memory usage for every loaded model
+(e.g. Qwen3-235B: 110 GB Marlin + 215 GB CPU in heap PLUS 325 GB in page cache = 650 GB).
+Multiple benchmark runs stacked page cache to 700+ GB, triggering systemd-oomd kills.
+
+### Fix
+Added `madvise(MADV_DONTNEED)` via `mmap.unchecked_advise(UncheckedAdvice::DontNeed)`
+before dropping mmap handles in all load paths:
+- `load_marlin_cache()` — GPU Marlin format
+- `load_cpu_cache()` — CPU INT4/INT8 format
+- `load_cache()` — legacy v1 format
+- `load_gguf_cpu_cache()` — GGUF→AVX2 format
+- `streaming_build_marlin_cache()` — safetensors shards after build
+- `streaming_build_cpu_cache()` — safetensors shards after build
+- `streaming_build_cpu_cache_from_gguf()` — GGUF file after build
+
+Also added `evict_page_cache()` methods to `MmapSafetensors` and `GgufFile`.
+
+### Impact
+Qwen3-235B loading: ~650 GB → ~325 GB actual RAM usage (no wasted page cache).
+Eliminates OOM kills from systemd-oomd during benchmark runs.
+
+---
+
+## Fix: Launcher WSL/Windows Compatibility — 2026-02-15
+
+### Bug
+`./krasis` launcher failed on WSL/Windows with "No such file or directory" for
+`.venv/bin/activate` because:
+1. `python3.12-venv` not installed → `python3 -m venv` creates partial directory
+2. No detection of incomplete venv → script tries to source non-existent activate
+
+### Fix
+- Added prerequisite `sudo apt install python3.12-venv` to README Quick Start
+- Platform detection (MINGW/MSYS/CYGWIN → `Scripts/`, Unix → `bin/`)
+- Detect incomplete venv (directory exists but activate missing), clean up and recreate
+- Helpful error message showing exact `apt install` command on failure
+
+---
+
 ## Feature: Benchmark Archive + BENCHMARKS.md Summary — 2026-02-15
 
 ### Changes
