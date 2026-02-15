@@ -21,9 +21,13 @@ import time
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import torch
 
 logger = logging.getLogger(__name__)
+
+# Decode timing: set KRASIS_DECODE_TIMING=1 to see per-component breakdown
+_DECODE_TIMING = os.environ.get("KRASIS_DECODE_TIMING", "") == "1"
 
 # Marlin quantization constants
 GROUP_SIZE = 128
@@ -130,9 +134,83 @@ class GpuPrefillManager:
         logger.info("GPU prefill group_size=%d", self._group_size)
 
         # Persistent/layer-grouped expert buffers
-        self._prefill_mode = "chunked"  # "persistent", "layer_grouped", or "chunked"
+        self._prefill_mode = "chunked"  # "persistent", "layer_grouped", "active_only", or "chunked"
         self._persistent: Optional[dict[int, dict[str, torch.Tensor]]] = None
         self._persistent_shared: Optional[dict[int, dict[str, torch.Tensor]]] = None
+
+        # Active-only mode state: per-layer GPU buffer + loaded expert tracking
+        self._ao_gpu_w13: Optional[torch.Tensor] = None
+        self._ao_gpu_w13_scale: Optional[torch.Tensor] = None
+        self._ao_gpu_w2: Optional[torch.Tensor] = None
+        self._ao_gpu_w2_scale: Optional[torch.Tensor] = None
+        self._ao_current_layer: int = -1
+        self._ao_loaded_experts: set = set()
+        self._ao_dma_time: float = 0.0
+        self._ao_dma_bytes: int = 0
+        self._ao_cache_hits: int = 0
+        self._ao_cache_misses: int = 0
+
+        # Expert activation heatmap: {(layer, expert): count} — built during warmup
+        self._heatmap: dict[tuple[int, int], int] = {}
+        self._heatmap_requests: int = 0
+
+        # Static pin state: pinned (layer, expert) → {w13, w13_scale, w2, w2_scale} on GPU
+        self._pinned: dict[tuple[int, int], dict[str, torch.Tensor]] = {}
+        self._pin_budget_mb: float = 0  # Set via configure_pinning()
+        self._warmup_requests: int = 1  # Requests before pinning activates
+
+        # LRU cache state: (layer, expert) → slot_index in _lru_gpu_* buffers
+        self._lru_map: dict[tuple[int, int], int] = {}  # key → slot
+        self._lru_access_time: dict[int, int] = {}  # slot → monotonic counter
+        self._lru_slot_key: dict[int, tuple[int, int]] = {}  # slot → key
+        self._lru_counter: int = 0  # monotonic access counter
+        self._lru_gpu_w13: Optional[torch.Tensor] = None
+        self._lru_gpu_w13_scale: Optional[torch.Tensor] = None
+        self._lru_gpu_w2: Optional[torch.Tensor] = None
+        self._lru_gpu_w2_scale: Optional[torch.Tensor] = None
+        self._lru_cache_size: int = 0
+
+        # Compact per-layer decode buffers (views into AO buffer, zero extra VRAM)
+        # Each MoE layer gets its own small buffer for cross-token expert caching
+        self._compact_initialized: bool = False
+        self._compact_slots_per_layer: int = 21
+        self._compact_next_partition: int = 0
+        self._compact_bufs: dict[int, dict] = {}  # moe_layer_idx → {w13, w13_scale, w2, w2_scale}
+        self._compact_maps: dict[int, dict] = {}  # moe_layer_idx → {global_eid: local_slot}
+        self._compact_reverse: dict[int, dict] = {}  # moe_layer_idx → {local_slot: global_eid}
+        self._compact_lru: dict[int, dict] = {}  # moe_layer_idx → {local_slot: counter}
+        self._compact_next_slot: dict[int, int] = {}  # moe_layer_idx → next empty slot
+        self._compact_counter: int = 0
+        self._compact_g_idx: Optional[torch.Tensor] = None
+        self._compact_sort_idx: Optional[torch.Tensor] = None
+        self._compact_gating_1: Optional[torch.Tensor] = None
+
+        # Pre-allocated DMA staging buffers (zero-copy path)
+        # Allocated once, pages pre-faulted — eliminates page fault overhead
+        self._dma_bufs_initialized: bool = False
+        self._dma_buf_w13p: Optional[bytearray] = None
+        self._dma_buf_w13s: Optional[bytearray] = None
+        self._dma_buf_w2p: Optional[bytearray] = None
+        self._dma_buf_w2s: Optional[bytearray] = None
+        # Shared expert staging buffers (smaller, 1 expert per layer)
+        self._dma_shared_w13p: Optional[bytearray] = None
+        self._dma_shared_w13s: Optional[bytearray] = None
+        self._dma_shared_w2p: Optional[bytearray] = None
+        self._dma_shared_w2s: Optional[bytearray] = None
+        self._dma_shared_initialized: bool = False
+
+        # Hot-cached-static state: static GPU buffers + CPU cold in parallel
+        self._hcs_buffers: dict[int, dict[str, torch.Tensor]] = {}  # layer → {w13, w13_scale, w2, w2_scale}
+        self._hcs_lookup: dict[int, torch.Tensor] = {}  # layer → [num_experts] int32 → local slot or -1
+        self._hcs_num_pinned: dict[int, int] = {}  # layer → count of hot experts
+        self._hcs_g_idx: dict[int, torch.Tensor] = {}  # layer → [n_hot, 0] kernel helper
+        self._hcs_sort_idx: dict[int, torch.Tensor] = {}  # layer → [n_hot, 0] kernel helper
+        self._hcs_gating_1: dict[int, torch.Tensor] = {}  # layer → [1, n_hot] for M=1
+        self._hcs_initialized: bool = False
+        # CUDA graph state (optional acceleration for hot_cached_static)
+        self._hcs_cuda_graphs: dict[int, object] = {}  # layer → CUDAGraph
+        self._hcs_graph_io: dict[int, dict[str, torch.Tensor]] = {}  # layer → fixed I/O tensors
+        self._hcs_cuda_graphs_enabled: bool = False
 
         # Chunk size: how many experts fit in one GPU buffer load
         if chunk_size is None:
@@ -179,6 +257,11 @@ class GpuPrefillManager:
         # (not needed for persistent/layer_grouped — buffers allocated per-group)
         if self._prefill_mode == "chunked":
             self._allocate_gpu_buffer()
+        elif self._prefill_mode == "active_only":
+            self._allocate_ao_buffer()
+        elif self._prefill_mode == "lru":
+            self._allocate_ao_buffer()  # Staging buffer
+            self._allocate_lru_buffer()  # LRU cache buffer
 
     def _per_expert_vram_bytes(self) -> int:
         """Calculate per-expert VRAM usage in bytes for Marlin format."""
@@ -193,10 +276,28 @@ class GpuPrefillManager:
     def _select_prefill_mode(self):
         """Select prefill mode based on expert_divisor setting.
 
+        - divisor=-3: "hot_cached_static" (hot on GPU, cold on CPU, parallel, zero DMA)
+        - divisor=-2: "lru" (cross-layer LRU expert caching)
+        - divisor=-1: "active_only" (per-layer, load only activated experts)
         - divisor=0 or no engine: "chunked" (current DMA-per-layer behavior)
         - divisor=1: "persistent" (all experts pre-loaded in VRAM, zero DMA)
         - divisor>=2: "layer_grouped" (load experts per-group-of-layers, O(groups) DMA)
         """
+        if self._expert_divisor == -3 and self._engine is not None:
+            self._prefill_mode = "hot_cached_static"
+            logger.info("Hot-cached-static mode: hot experts on GPU (static), cold on CPU (parallel)")
+            return
+
+        if self._expert_divisor == -1 and self._engine is not None:
+            self._prefill_mode = "active_only"
+            logger.info("Active-only mode: load only activated experts per-layer (zero preload)")
+            return
+
+        if self._expert_divisor == -2 and self._engine is not None:
+            self._prefill_mode = "lru"
+            logger.info("LRU cache mode: cross-layer expert caching with LRU eviction")
+            return
+
         if self._expert_divisor == 0 or self._engine is None:
             self._prefill_mode = "chunked"
             return
@@ -599,13 +700,85 @@ class GpuPrefillManager:
             self._expert_divisor = 2
             self._prefill_mode = "layer_grouped"
 
+    def _init_dma_buffers(self):
+        """Pre-allocate CPU staging buffers for zero-copy DMA.
+
+        Called once before first preload_layer_group(). Allocates 4 bytearrays
+        sized for ALL experts in one layer, then touches all pages to map them.
+        Subsequent writes from Rust are raw memcpy into pre-faulted memory,
+        eliminating ~1430ms/layer of page fault overhead.
+        """
+        if self._dma_bufs_initialized:
+            return
+
+        E = self.num_experts
+        K = self.hidden_size
+        N = self.intermediate_size
+        gs = self._group_size
+        nb2 = self.num_bits // 2
+
+        # Compute sizes in bytes (matching tensor shapes in preload_layer_group)
+        w13p_size = E * (K // 16) * (2 * N * nb2) * 4  # int32
+        w13s_size = E * (K // gs) * (2 * N) * 2  # bf16
+        w2p_size = E * (N // 16) * (K * nb2) * 4  # int32
+        w2s_size = E * (N // gs) * K * 2  # bf16
+
+        total = w13p_size + w13s_size + w2p_size + w2s_size
+        logger.info(
+            "Pre-allocating DMA buffers: %.1f MB "
+            "(w13p=%.1f, w13s=%.1f, w2p=%.1f, w2s=%.1f)",
+            total / 1e6, w13p_size / 1e6, w13s_size / 1e6,
+            w2p_size / 1e6, w2s_size / 1e6,
+        )
+
+        t0 = time.perf_counter()
+        self._dma_buf_w13p = bytearray(w13p_size)
+        self._dma_buf_w13s = bytearray(w13s_size)
+        self._dma_buf_w2p = bytearray(w2p_size)
+        self._dma_buf_w2s = bytearray(w2s_size)
+
+        # Touch all pages to force mapping (eliminate page faults on first use)
+        for buf in [self._dma_buf_w13p, self._dma_buf_w13s,
+                    self._dma_buf_w2p, self._dma_buf_w2s]:
+            for i in range(0, len(buf), 4096):
+                buf[i] = 0
+
+        elapsed = time.perf_counter() - t0
+        self._dma_bufs_initialized = True
+        logger.info(
+            "DMA buffers pre-faulted: %.1f MB in %.1fs (one-time cost)",
+            total / 1e6, elapsed,
+        )
+
+        # Also allocate shared expert buffers if needed
+        if self.n_shared_experts > 0:
+            shared_N = self.n_shared_experts * N
+            sw13p = 1 * (K // 16) * (2 * shared_N * nb2) * 4
+            sw13s = 1 * (K // gs) * (2 * shared_N) * 2
+            sw2p = 1 * (shared_N // 16) * (K * nb2) * 4
+            sw2s = 1 * (shared_N // gs) * K * 2
+            self._dma_shared_w13p = bytearray(sw13p)
+            self._dma_shared_w13s = bytearray(sw13s)
+            self._dma_shared_w2p = bytearray(sw2p)
+            self._dma_shared_w2s = bytearray(sw2s)
+            for buf in [self._dma_shared_w13p, self._dma_shared_w13s,
+                        self._dma_shared_w2p, self._dma_shared_w2s]:
+                for i in range(0, len(buf), 4096):
+                    buf[i] = 0
+            self._dma_shared_initialized = True
+
     def preload_layer_group(self, moe_layer_indices):
         """Pre-load expert weights for a group of MoE layers into GPU VRAM.
 
         Called per-group during layer-grouped prefill. After processing all
         chunks through this group, call free_layer_group() to release VRAM.
+
+        Uses zero-copy path: Rust writes directly into pre-allocated bytearrays
+        (pages already mapped), then torch.frombuffer creates a zero-copy view,
+        then .to(device) does PCIe DMA. No intermediate allocations.
         """
         assert self._engine is not None, "Layer-grouped mode requires Krasis engine"
+        detailed = os.environ.get("KRASIS_PREFILL_TIMING", "") == "1"
 
         from sglang.srt.layers.quantization.marlin_utils import (
             marlin_make_workspace,
@@ -618,30 +791,64 @@ class GpuPrefillManager:
         nb2 = self.num_bits // 2
         E = self.num_experts
 
+        # Pre-allocate DMA staging buffers (one-time, pages pre-faulted)
+        self._init_dma_buffers()
+
         self._persistent = {}
         self._persistent_shared = {}
 
         total_mb = 0
         load_start = time.perf_counter()
 
-        for moe_idx in moe_layer_indices:
-            w13_packed_bytes = self._engine.get_expert_w13_packed(moe_idx, 0, E)
-            w13_scales_bytes = self._engine.get_expert_w13_scales(moe_idx, 0, E)
-            w2_packed_bytes = self._engine.get_expert_w2_packed(moe_idx, 0, E)
-            w2_scales_bytes = self._engine.get_expert_w2_scales(moe_idx, 0, E)
+        # Accumulators for detailed timing
+        t_rust = 0.0
+        t_frombuf = 0.0
+        t_to_gpu = 0.0
+        t_sync = 0.0
+        t_shared = 0.0
 
-            w13_packed = torch.frombuffer(
-                bytearray(w13_packed_bytes), dtype=torch.int32
-            ).reshape(E, K // 16, 2 * N * nb2).to(self.device, non_blocking=True)
-            w13_scale = torch.frombuffer(
-                bytearray(w13_scales_bytes), dtype=torch.bfloat16
-            ).reshape(E, K // gs, 2 * N).to(self.device, non_blocking=True)
-            w2_packed = torch.frombuffer(
-                bytearray(w2_packed_bytes), dtype=torch.int32
-            ).reshape(E, N // 16, K * nb2).to(self.device, non_blocking=True)
-            w2_scale = torch.frombuffer(
-                bytearray(w2_scales_bytes), dtype=torch.bfloat16
-            ).reshape(E, N // gs, K).to(self.device, non_blocking=True)
+        for moe_idx in moe_layer_indices:
+            if detailed:
+                t0 = time.perf_counter()
+
+            # Zero-copy path: Rust writes directly into pre-allocated buffers
+            # (raw memcpy into pre-faulted pages, no allocation overhead)
+            self._engine.write_experts_all_into(
+                moe_idx,
+                self._dma_buf_w13p,
+                self._dma_buf_w13s,
+                self._dma_buf_w2p,
+                self._dma_buf_w2s,
+            )
+
+            if detailed:
+                t1 = time.perf_counter()
+                t_rust += t1 - t0
+
+            # Zero-copy views into pre-allocated buffers (no data movement)
+            w13_packed = torch.frombuffer(self._dma_buf_w13p, dtype=torch.int32
+                ).reshape(E, K // 16, 2 * N * nb2)
+            w13_scale = torch.frombuffer(self._dma_buf_w13s, dtype=torch.bfloat16
+                ).reshape(E, K // gs, 2 * N)
+            w2_packed = torch.frombuffer(self._dma_buf_w2p, dtype=torch.int32
+                ).reshape(E, N // 16, K * nb2)
+            w2_scale = torch.frombuffer(self._dma_buf_w2s, dtype=torch.bfloat16
+                ).reshape(E, N // gs, K)
+
+            if detailed:
+                t2 = time.perf_counter()
+                t_frombuf += t2 - t1
+
+            # PCIe DMA to GPU — synchronous because we reuse the staging buffers
+            # for the next layer (must complete before overwriting)
+            w13_packed = w13_packed.to(self.device)
+            w13_scale = w13_scale.to(self.device)
+            w2_packed = w2_packed.to(self.device)
+            w2_scale = w2_scale.to(self.device)
+
+            if detailed:
+                t3 = time.perf_counter()
+                t_to_gpu += t3 - t2
 
             layer_mb = (
                 w13_packed.nbytes + w13_scale.nbytes
@@ -656,28 +863,51 @@ class GpuPrefillManager:
                 "w2_scale": w2_scale,
             }
 
-            del w13_packed_bytes, w13_scales_bytes, w2_packed_bytes, w2_scales_bytes
-
         # Pre-load shared experts
         if self.n_shared_experts > 0:
+            if detailed:
+                t_sh0 = time.perf_counter()
+
             shared_N = self.n_shared_experts * N
             for moe_idx in moe_layer_indices:
-                w13p_bytes, w13s_bytes, w2p_bytes, w2s_bytes = (
-                    self._engine.get_shared_expert_weights(moe_idx)
-                )
-
-                w13_packed = torch.frombuffer(
-                    bytearray(w13p_bytes), dtype=torch.int32
-                ).reshape(1, K // 16, 2 * shared_N * nb2).to(self.device, non_blocking=True)
-                w13_scale = torch.frombuffer(
-                    bytearray(w13s_bytes), dtype=torch.bfloat16
-                ).reshape(1, K // gs, 2 * shared_N).to(self.device, non_blocking=True)
-                w2_packed = torch.frombuffer(
-                    bytearray(w2p_bytes), dtype=torch.int32
-                ).reshape(1, shared_N // 16, K * nb2).to(self.device, non_blocking=True)
-                w2_scale = torch.frombuffer(
-                    bytearray(w2s_bytes), dtype=torch.bfloat16
-                ).reshape(1, shared_N // gs, K).to(self.device, non_blocking=True)
+                if self._dma_shared_initialized:
+                    # Zero-copy shared expert path
+                    self._engine.write_shared_expert_into(
+                        moe_idx,
+                        self._dma_shared_w13p,
+                        self._dma_shared_w13s,
+                        self._dma_shared_w2p,
+                        self._dma_shared_w2s,
+                    )
+                    w13_packed = torch.frombuffer(
+                        self._dma_shared_w13p, dtype=torch.int32
+                    ).reshape(1, K // 16, 2 * shared_N * nb2).to(self.device)
+                    w13_scale = torch.frombuffer(
+                        self._dma_shared_w13s, dtype=torch.bfloat16
+                    ).reshape(1, K // gs, 2 * shared_N).to(self.device)
+                    w2_packed = torch.frombuffer(
+                        self._dma_shared_w2p, dtype=torch.int32
+                    ).reshape(1, shared_N // 16, K * nb2).to(self.device)
+                    w2_scale = torch.frombuffer(
+                        self._dma_shared_w2s, dtype=torch.bfloat16
+                    ).reshape(1, shared_N // gs, K).to(self.device)
+                else:
+                    # Fallback: allocating path for shared experts
+                    w13p_bytes, w13s_bytes, w2p_bytes, w2s_bytes = (
+                        self._engine.get_shared_expert_weights(moe_idx)
+                    )
+                    w13_packed = torch.frombuffer(
+                        bytearray(w13p_bytes), dtype=torch.int32
+                    ).reshape(1, K // 16, 2 * shared_N * nb2).to(self.device)
+                    w13_scale = torch.frombuffer(
+                        bytearray(w13s_bytes), dtype=torch.bfloat16
+                    ).reshape(1, K // gs, 2 * shared_N).to(self.device)
+                    w2_packed = torch.frombuffer(
+                        bytearray(w2p_bytes), dtype=torch.int32
+                    ).reshape(1, shared_N // 16, K * nb2).to(self.device)
+                    w2_scale = torch.frombuffer(
+                        bytearray(w2s_bytes), dtype=torch.bfloat16
+                    ).reshape(1, shared_N // gs, K).to(self.device)
 
                 shared_mb = (
                     w13_packed.nbytes + w13_scale.nbytes
@@ -692,6 +922,9 @@ class GpuPrefillManager:
                     "w2_scale": w2_scale,
                 }
 
+            if detailed:
+                t_shared += time.perf_counter() - t_sh0
+
         # Allocate workspace and index tensors (once, reused across groups)
         if self._workspace is None:
             self._workspace = marlin_make_workspace(self.device, max_blocks_per_sm=4)
@@ -699,19 +932,1544 @@ class GpuPrefillManager:
             self._gpu_g_idx = torch.empty(E, 0, dtype=torch.int32, device=self.device)
             self._gpu_sort_idx = torch.empty(E, 0, dtype=torch.int32, device=self.device)
 
+        if detailed:
+            t_sync0 = time.perf_counter()
         torch.cuda.synchronize(self.device)
+        if detailed:
+            t_sync = time.perf_counter() - t_sync0
+
         elapsed = time.perf_counter() - load_start
         alloc_mb = torch.cuda.memory_allocated(self.device) / 1e6
-        logger.info(
-            "Layer group loaded: %d MoE layers = %.1f MB in %.2fs (GPU total: %.1f MB)",
-            len(moe_layer_indices), total_mb, elapsed, alloc_mb,
-        )
+
+        if detailed:
+            logger.info(
+                "DMA-DETAIL L%s: memcpy=%.0fms frombuf=%.0fms "
+                "to_gpu=%.0fms sync=%.0fms shared=%.0fms | total=%.0fms (%.1f MB)",
+                moe_layer_indices,
+                t_rust * 1000, t_frombuf * 1000,
+                t_to_gpu * 1000, t_sync * 1000, t_shared * 1000,
+                elapsed * 1000, total_mb,
+            )
+        else:
+            logger.info(
+                "Layer group loaded: %d MoE layers = %.1f MB in %.2fs (GPU total: %.1f MB)",
+                len(moe_layer_indices), total_mb, elapsed, alloc_mb,
+            )
 
     def free_layer_group(self):
         """Free layer group's expert weights from GPU VRAM."""
+        detailed = os.environ.get("KRASIS_PREFILL_TIMING", "") == "1"
+        if detailed:
+            t0 = time.perf_counter()
+
         self._persistent = {}
         self._persistent_shared = {}
         torch.cuda.empty_cache()
+
+        if detailed:
+            elapsed = (time.perf_counter() - t0) * 1000
+            logger.info("DMA-FREE: %.0fms (dict clear + empty_cache)", elapsed)
+
+    def _allocate_ao_buffer(self):
+        """Allocate GPU buffer for active-only mode (full [E, ...] per layer)."""
+        if self._ao_gpu_w13 is not None:
+            return
+
+        from sglang.srt.layers.quantization.marlin_utils import (
+            marlin_make_workspace,
+        )
+
+        K = self.hidden_size
+        N = self.intermediate_size
+        E = self.num_experts
+        gs = self._group_size
+        nb2 = self.num_bits // 2
+
+        self._ao_gpu_w13 = torch.zeros(
+            E, K // 16, 2 * N * nb2, dtype=torch.int32, device=self.device,
+        )
+        self._ao_gpu_w13_scale = torch.zeros(
+            E, K // gs, 2 * N, dtype=self.params_dtype, device=self.device,
+        )
+        self._ao_gpu_w2 = torch.zeros(
+            E, N // 16, K * nb2, dtype=torch.int32, device=self.device,
+        )
+        self._ao_gpu_w2_scale = torch.zeros(
+            E, N // gs, K, dtype=self.params_dtype, device=self.device,
+        )
+
+        if self._gpu_g_idx is None:
+            self._gpu_g_idx = torch.empty(E, 0, dtype=torch.int32, device=self.device)
+            self._gpu_sort_idx = torch.empty(E, 0, dtype=torch.int32, device=self.device)
+        if self._workspace is None:
+            self._workspace = marlin_make_workspace(self.device, max_blocks_per_sm=4)
+
+        # Pre-allocate decode-sized gating output (M=1) to avoid per-call CUDA alloc
+        self._ao_gating_output_1 = torch.empty(1, E, device=self.device)
+
+        buf_mb = (
+            self._ao_gpu_w13.nbytes + self._ao_gpu_w13_scale.nbytes
+            + self._ao_gpu_w2.nbytes + self._ao_gpu_w2_scale.nbytes
+        ) / 1e6
+        logger.info("Active-only buffer allocated: %.1f MB for %d expert slots", buf_mb, E)
+
+    def _allocate_lru_buffer(self):
+        """Allocate GPU buffer for LRU cache mode.
+
+        Uses available VRAM to create as many expert slots as possible.
+        Each slot stores one expert's weights for one layer.
+        """
+        if self._lru_gpu_w13 is not None:
+            return
+
+        from sglang.srt.layers.quantization.marlin_utils import (
+            marlin_make_workspace,
+        )
+
+        K = self.hidden_size
+        N = self.intermediate_size
+        gs = self._group_size
+        nb2 = self.num_bits // 2
+        per_expert = self._per_expert_vram_bytes()
+
+        try:
+            free_vram = torch.cuda.mem_get_info(self.device)[0]
+            # Reserve VRAM for KV cache + attention intermediates + kernel workspace.
+            # KV cache needs ~100 KB/token/layer; for 10K tokens × 94 layers ≈ 1 GB.
+            # Add 1 GB for intermediates/workspace → 2 GB total headroom.
+            kv_headroom = 2 * 1024 * 1024 * 1024  # 2 GB for KV cache + intermediates
+            budget = free_vram - kv_headroom
+            if budget < per_expert * self.num_experts:
+                # Not enough VRAM for even num_experts LRU slots after KV reservation;
+                # reduce headroom to minimum (still risky for large prompts)
+                budget = free_vram - 500 * 1024 * 1024
+            cache_size = max(self.num_experts, budget // per_expert)
+        except Exception:
+            cache_size = self.num_experts * 2  # Fallback
+
+        self._lru_cache_size = cache_size
+        self._lru_gpu_w13 = torch.zeros(
+            cache_size, K // 16, 2 * N * nb2, dtype=torch.int32, device=self.device,
+        )
+        self._lru_gpu_w13_scale = torch.zeros(
+            cache_size, K // gs, 2 * N, dtype=self.params_dtype, device=self.device,
+        )
+        self._lru_gpu_w2 = torch.zeros(
+            cache_size, N // 16, K * nb2, dtype=torch.int32, device=self.device,
+        )
+        self._lru_gpu_w2_scale = torch.zeros(
+            cache_size, N // gs, K, dtype=self.params_dtype, device=self.device,
+        )
+
+        # Shared index/workspace
+        E = self.num_experts
+        if self._gpu_g_idx is None:
+            self._gpu_g_idx = torch.empty(E, 0, dtype=torch.int32, device=self.device)
+            self._gpu_sort_idx = torch.empty(E, 0, dtype=torch.int32, device=self.device)
+        if self._workspace is None:
+            self._workspace = marlin_make_workspace(self.device, max_blocks_per_sm=4)
+
+        buf_mb = (
+            self._lru_gpu_w13.nbytes + self._lru_gpu_w13_scale.nbytes
+            + self._lru_gpu_w2.nbytes + self._lru_gpu_w2_scale.nbytes
+        ) / 1e6
+        logger.info(
+            "LRU cache buffer allocated: %.1f MB for %d expert slots (%.1f MB/slot)",
+            buf_mb, cache_size, per_expert / 1e6,
+        )
+
+    def _forward_lru(
+        self,
+        moe_layer_idx: int,
+        x: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        """Forward with LRU expert cache: cross-layer, cross-request caching.
+
+        Maintains a fixed pool of GPU expert slots. Each slot caches one
+        (layer, expert) pair's weights. LRU eviction when full.
+
+        The active_only buffer [E, ...] is used as the "staging" buffer
+        that fused_marlin_moe reads from. We copy from LRU cache → staging.
+        """
+        from sglang.srt.layers.moe.fused_moe_triton.fused_marlin_moe import (
+            fused_marlin_moe,
+        )
+
+        self._allocate_ao_buffer()  # Staging buffer
+        self._allocate_lru_buffer()  # LRU cache
+
+        M = x.shape[0]
+        K = self.hidden_size
+        N = self.intermediate_size
+        gs = self._group_size
+        nb2 = self.num_bits // 2
+        E = self.num_experts
+
+        # Zero the staging buffer (needed since we index by expert_id)
+        # For M=1 decode, skip full buffer zeroing (kernel only reads active slots)
+        if moe_layer_idx != self._ao_current_layer:
+            if M > 1:
+                self._ao_gpu_w13.zero_()
+                self._ao_gpu_w13_scale.zero_()
+                self._ao_gpu_w2.zero_()
+                self._ao_gpu_w2_scale.zero_()
+            self._ao_loaded_experts.clear()
+            self._ao_current_layer = moe_layer_idx
+
+        active_experts = torch.unique(topk_ids).tolist()
+
+        # Update heatmap
+        if self._heatmap is not None:
+            for eid in active_experts:
+                key = (moe_layer_idx, eid)
+                self._heatmap[key] = self._heatmap.get(key, 0) + 1
+
+        missing_from_staging = [eid for eid in active_experts if eid not in self._ao_loaded_experts]
+
+        for eid in missing_from_staging:
+            key = (moe_layer_idx, eid)
+            self._lru_counter += 1
+
+            if key in self._lru_map:
+                # LRU hit: copy from LRU slot → staging buffer
+                slot = self._lru_map[key]
+                self._lru_access_time[slot] = self._lru_counter
+                self._ao_gpu_w13[eid:eid+1].copy_(self._lru_gpu_w13[slot:slot+1])
+                self._ao_gpu_w13_scale[eid:eid+1].copy_(self._lru_gpu_w13_scale[slot:slot+1])
+                self._ao_gpu_w2[eid:eid+1].copy_(self._lru_gpu_w2[slot:slot+1])
+                self._ao_gpu_w2_scale[eid:eid+1].copy_(self._lru_gpu_w2_scale[slot:slot+1])
+                self._ao_cache_hits += 1
+            elif key in self._pinned:
+                # Pinned: copy from pin → staging (also treated as hit)
+                pin = self._pinned[key]
+                self._ao_gpu_w13[eid:eid+1].copy_(pin["w13"])
+                self._ao_gpu_w13_scale[eid:eid+1].copy_(pin["w13_scale"])
+                self._ao_gpu_w2[eid:eid+1].copy_(pin["w2"])
+                self._ao_gpu_w2_scale[eid:eid+1].copy_(pin["w2_scale"])
+                self._ao_cache_hits += 1
+            else:
+                # LRU miss: collect for batched DMA
+                if not hasattr(self, '_lru_dma_pending'):
+                    self._lru_dma_pending = []
+                self._lru_dma_pending.append((eid, key))
+
+            self._ao_loaded_experts.add(eid)
+
+        # Batched DMA for all LRU misses
+        if hasattr(self, '_lru_dma_pending') and self._lru_dma_pending:
+            dma_start = time.perf_counter()
+            dma_eids = [eid for eid, _ in self._lru_dma_pending]
+            dma_keys = [key for _, key in self._lru_dma_pending]
+
+            w13_bytes = self._engine.get_experts_batch(moe_layer_idx, dma_eids, "w13_packed")
+            w13s_bytes = self._engine.get_experts_batch(moe_layer_idx, dma_eids, "w13_scales")
+            w2_bytes = self._engine.get_experts_batch(moe_layer_idx, dma_eids, "w2_packed")
+            w2s_bytes = self._engine.get_experts_batch(moe_layer_idx, dma_eids, "w2_scales")
+
+            n_dma = len(dma_eids)
+            w13_all = torch.frombuffer(bytearray(w13_bytes), dtype=torch.int32
+                ).reshape(n_dma, K // 16, 2 * N * nb2)
+            w13s_all = torch.frombuffer(bytearray(w13s_bytes), dtype=torch.bfloat16
+                ).reshape(n_dma, K // gs, 2 * N)
+            w2_all = torch.frombuffer(bytearray(w2_bytes), dtype=torch.int32
+                ).reshape(n_dma, N // 16, K * nb2)
+            w2s_all = torch.frombuffer(bytearray(w2s_bytes), dtype=torch.bfloat16
+                ).reshape(n_dma, N // gs, K)
+
+            for i, (eid, key) in enumerate(self._lru_dma_pending):
+                # Find an LRU slot to evict (or use empty)
+                if len(self._lru_map) < self._lru_cache_size:
+                    slot = len(self._lru_map)
+                else:
+                    evict_slot = min(
+                        (s for s in self._lru_access_time
+                         if self._lru_slot_key.get(s) not in self._pinned),
+                        key=lambda s: self._lru_access_time[s],
+                    )
+                    slot = evict_slot
+                    evict_key = self._lru_slot_key[slot]
+                    del self._lru_map[evict_key]
+                    del self._lru_slot_key[slot]
+
+                # Store in LRU cache
+                self._lru_gpu_w13[slot:slot+1].copy_(w13_all[i:i+1])
+                self._lru_gpu_w13_scale[slot:slot+1].copy_(w13s_all[i:i+1])
+                self._lru_gpu_w2[slot:slot+1].copy_(w2_all[i:i+1])
+                self._lru_gpu_w2_scale[slot:slot+1].copy_(w2s_all[i:i+1])
+                self._lru_map[key] = slot
+                self._lru_slot_key[slot] = key
+                self._lru_access_time[slot] = self._lru_counter
+
+                # Copy to staging buffer
+                self._ao_gpu_w13[eid:eid+1].copy_(self._lru_gpu_w13[slot:slot+1])
+                self._ao_gpu_w13_scale[eid:eid+1].copy_(self._lru_gpu_w13_scale[slot:slot+1])
+                self._ao_gpu_w2[eid:eid+1].copy_(self._lru_gpu_w2[slot:slot+1])
+                self._ao_gpu_w2_scale[eid:eid+1].copy_(self._lru_gpu_w2_scale[slot:slot+1])
+
+            self._ao_dma_time += time.perf_counter() - dma_start
+            self._ao_dma_bytes += n_dma * self._per_expert_vram_bytes()
+            self._ao_cache_misses += n_dma
+            self._lru_dma_pending.clear()
+
+        # Run kernel
+        if M == 1 and self._ao_gating_output_1 is not None:
+            gating_output = self._ao_gating_output_1
+        else:
+            gating_output = torch.empty(M, E, device=self.device)
+        if M > 1:
+            self._workspace.zero_()
+
+        output = fused_marlin_moe(
+            hidden_states=x,
+            w1=self._ao_gpu_w13,
+            w2=self._ao_gpu_w2,
+            w1_scale=self._ao_gpu_w13_scale,
+            w2_scale=self._ao_gpu_w2_scale,
+            gating_output=gating_output,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            global_num_experts=E,
+            expert_map=None,
+            g_idx1=self._gpu_g_idx,
+            g_idx2=self._gpu_g_idx,
+            sort_indices1=self._gpu_sort_idx,
+            sort_indices2=self._gpu_sort_idx,
+            workspace=self._workspace,
+            num_bits=self.num_bits,
+            is_k_full=True,
+        ).to(x.dtype)
+
+        return output
+
+    def _forward_active_only(
+        self,
+        moe_layer_idx: int,
+        x: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        """Forward with active-only DMA: load only activated experts per-layer.
+
+        On layer change: zero the buffer and reset loaded expert tracking.
+        For each call: determine active experts, DMA only missing ones, run kernel.
+        """
+        from sglang.srt.layers.moe.fused_moe_triton.fused_marlin_moe import (
+            fused_marlin_moe,
+        )
+
+        self._allocate_ao_buffer()
+
+        M = x.shape[0]
+        K = self.hidden_size
+        N = self.intermediate_size
+        gs = self._group_size
+        nb2 = self.num_bits // 2
+        E = self.num_experts
+
+        # Layer changed — zero buffer and reset tracking
+        # For M=1 decode, skip full buffer zeroing (kernel only reads active slots)
+        if moe_layer_idx != self._ao_current_layer:
+            if M > 1:
+                self._ao_gpu_w13.zero_()
+                self._ao_gpu_w13_scale.zero_()
+                self._ao_gpu_w2.zero_()
+                self._ao_gpu_w2_scale.zero_()
+            self._ao_loaded_experts.clear()
+            self._ao_current_layer = moe_layer_idx
+
+        # Determine which experts are active in this call
+        # For M=1 decode, avoid GPU torch.unique + sync — use CPU set instead
+        if M == 1:
+            active_experts = list(set(topk_ids[0].tolist()))
+        else:
+            active_experts = torch.unique(topk_ids).tolist()
+
+        # Update heatmap for pinning strategies
+        if self._heatmap is not None:
+            for eid in active_experts:
+                key = (moe_layer_idx, eid)
+                self._heatmap[key] = self._heatmap.get(key, 0) + 1
+
+        missing = [eid for eid in active_experts if eid not in self._ao_loaded_experts]
+
+        # Track per-expert cache hits (experts already loaded)
+        hits = len(active_experts) - len(missing)
+        self._ao_cache_hits += hits
+        self._ao_cache_misses += len(missing)
+
+        if missing:
+            dma_start = time.perf_counter()
+
+            # Separate pinned (GPU→GPU) vs DMA (CPU→GPU) experts
+            pinned_eids = []
+            dma_eids = []
+            for eid in missing:
+                pin_key = (moe_layer_idx, eid)
+                if pin_key in self._pinned:
+                    pinned_eids.append(eid)
+                else:
+                    dma_eids.append(eid)
+
+            # GPU→GPU copy from pinned buffers (batched via index_copy_)
+            if pinned_eids:
+                pin_idx = torch.tensor(pinned_eids, dtype=torch.long, device=self.device)
+                pin_w13 = torch.cat([self._pinned[(moe_layer_idx, e)]["w13"] for e in pinned_eids])
+                pin_w13s = torch.cat([self._pinned[(moe_layer_idx, e)]["w13_scale"] for e in pinned_eids])
+                pin_w2 = torch.cat([self._pinned[(moe_layer_idx, e)]["w2"] for e in pinned_eids])
+                pin_w2s = torch.cat([self._pinned[(moe_layer_idx, e)]["w2_scale"] for e in pinned_eids])
+                self._ao_gpu_w13.index_copy_(0, pin_idx, pin_w13)
+                self._ao_gpu_w13_scale.index_copy_(0, pin_idx, pin_w13s)
+                self._ao_gpu_w2.index_copy_(0, pin_idx, pin_w2)
+                self._ao_gpu_w2_scale.index_copy_(0, pin_idx, pin_w2s)
+                self._ao_loaded_experts.update(pinned_eids)
+                self._ao_cache_hits += len(pinned_eids)
+                self._ao_cache_misses -= len(pinned_eids)
+
+            # Batched CPU→GPU DMA: single Rust FFI call + contiguous upload + scatter
+            if dma_eids:
+                # Single FFI call returns all 4 weight types (saves 3 round-trips)
+                w13_bytes, w13s_bytes, w2_bytes, w2s_bytes = \
+                    self._engine.get_experts_all_batch(moe_layer_idx, dma_eids)
+
+                n_dma = len(dma_eids)
+                # Use bytes directly (no bytearray copy — saves ~15 MB/layer)
+                w13_all = torch.frombuffer(w13_bytes, dtype=torch.int32
+                    ).reshape(n_dma, K // 16, 2 * N * nb2)
+                w13s_all = torch.frombuffer(w13s_bytes, dtype=torch.bfloat16
+                    ).reshape(n_dma, K // gs, 2 * N)
+                w2_all = torch.frombuffer(w2_bytes, dtype=torch.int32
+                    ).reshape(n_dma, N // 16, K * nb2)
+                w2s_all = torch.frombuffer(w2s_bytes, dtype=torch.bfloat16
+                    ).reshape(n_dma, N // gs, K)
+
+                # Contiguous CPU→GPU upload + GPU-side scatter (replaces per-expert copy_)
+                dma_idx = torch.tensor(dma_eids, dtype=torch.long, device=self.device)
+                self._ao_gpu_w13.index_copy_(0, dma_idx, w13_all.to(self.device, non_blocking=True))
+                self._ao_gpu_w13_scale.index_copy_(0, dma_idx, w13s_all.to(self.device, non_blocking=True))
+                self._ao_gpu_w2.index_copy_(0, dma_idx, w2_all.to(self.device, non_blocking=True))
+                self._ao_gpu_w2_scale.index_copy_(0, dma_idx, w2s_all.to(self.device, non_blocking=True))
+                self._ao_loaded_experts.update(dma_eids)
+
+            dma_elapsed = time.perf_counter() - dma_start
+            dma_bytes = len(dma_eids) * self._per_expert_vram_bytes()
+            self._ao_dma_time += dma_elapsed
+            self._ao_dma_bytes += dma_bytes
+
+        # Run fused_marlin_moe with full [E, ...] buffer
+        # Reuse pre-allocated gating_output for M=1 decode to avoid CUDA alloc
+        if M == 1 and self._ao_gating_output_1 is not None:
+            gating_output = self._ao_gating_output_1
+        else:
+            gating_output = torch.empty(M, E, device=self.device)
+        if M > 1:
+            self._workspace.zero_()
+
+        output = fused_marlin_moe(
+            hidden_states=x,
+            w1=self._ao_gpu_w13,
+            w2=self._ao_gpu_w2,
+            w1_scale=self._ao_gpu_w13_scale,
+            w2_scale=self._ao_gpu_w2_scale,
+            gating_output=gating_output,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            global_num_experts=E,
+            expert_map=None,
+            g_idx1=self._gpu_g_idx,
+            g_idx2=self._gpu_g_idx,
+            sort_indices1=self._gpu_sort_idx,
+            sort_indices2=self._gpu_sort_idx,
+            workspace=self._workspace,
+            num_bits=self.num_bits,
+            is_k_full=True,
+        ).to(x.dtype)
+
+        return output
+
+    # ── Compact per-layer decode buffers (cross-token expert caching) ──
+
+    def _init_compact_decode(self):
+        """Initialize compact decode mode by partitioning the AO buffer.
+
+        Each MoE layer gets a small compact buffer (21 slots) carved from the
+        AO buffer [num_experts, ...]. Experts persist across tokens within each
+        layer's buffer, enabling cross-token caching.
+
+        Zero extra VRAM: compact buffers are views into the existing AO buffer.
+        """
+        if self._compact_initialized:
+            return
+
+        self._allocate_ao_buffer()
+
+        slots = self._compact_slots_per_layer
+        self._compact_next_partition = 0
+        self._compact_bufs.clear()
+        self._compact_maps.clear()
+        self._compact_reverse.clear()
+        self._compact_lru.clear()
+        self._compact_next_slot.clear()
+        self._compact_counter = 0
+
+        # Pre-allocate kernel helpers for compact buffer size
+        self._compact_g_idx = torch.empty(
+            slots, 0, dtype=torch.int32, device=self.device,
+        )
+        self._compact_sort_idx = torch.empty(
+            slots, 0, dtype=torch.int32, device=self.device,
+        )
+        self._compact_gating_1 = torch.empty(1, slots, device=self.device)
+
+        self._compact_initialized = True
+        max_layers = self.num_experts // slots
+        logger.info(
+            "Compact decode initialized: %d slots/layer, max %d layers "
+            "(reusing AO buffer, zero extra VRAM)",
+            slots, max_layers,
+        )
+
+    def _get_or_create_compact_buf(self, moe_layer_idx: int):
+        """Get compact buffer for a MoE layer, allocating from AO pool if needed.
+
+        On first creation, pre-populates with pinned experts (GPU→GPU copy)
+        so the first decode token already has warm cache entries.
+        """
+        if moe_layer_idx in self._compact_bufs:
+            return self._compact_bufs[moe_layer_idx]
+
+        slots = self._compact_slots_per_layer
+        start = self._compact_next_partition * slots
+        end = start + slots
+
+        if end > self.num_experts:
+            return None  # No room — caller should fall back to AO path
+
+        buf = {
+            "w13": self._ao_gpu_w13[start:end],
+            "w13_scale": self._ao_gpu_w13_scale[start:end],
+            "w2": self._ao_gpu_w2[start:end],
+            "w2_scale": self._ao_gpu_w2_scale[start:end],
+        }
+        emap = {}
+        rmap = {}
+        lru = {}
+        next_slot = 0
+
+        # Pre-populate from pinned experts (GPU→GPU, instant)
+        if self._pinned:
+            for (layer, eid), pin_data in self._pinned.items():
+                if layer != moe_layer_idx:
+                    continue
+                if next_slot >= slots:
+                    break  # Buffer full
+                buf["w13"][next_slot:next_slot+1].copy_(pin_data["w13"])
+                buf["w13_scale"][next_slot:next_slot+1].copy_(pin_data["w13_scale"])
+                buf["w2"][next_slot:next_slot+1].copy_(pin_data["w2"])
+                buf["w2_scale"][next_slot:next_slot+1].copy_(pin_data["w2_scale"])
+                emap[eid] = next_slot
+                rmap[next_slot] = eid
+                lru[next_slot] = 0  # Low LRU — evicted first if not accessed
+                next_slot += 1
+
+        self._compact_bufs[moe_layer_idx] = buf
+        self._compact_maps[moe_layer_idx] = emap
+        self._compact_reverse[moe_layer_idx] = rmap
+        self._compact_lru[moe_layer_idx] = lru
+        self._compact_next_slot[moe_layer_idx] = next_slot
+        self._compact_next_partition += 1
+
+        if next_slot > 0:
+            logger.debug(
+                "Compact L%d: pre-populated %d pinned experts into %d slots",
+                moe_layer_idx, next_slot, slots,
+            )
+        return buf
+
+    def _invalidate_compact(self):
+        """Invalidate compact decode state (called when AO buffer is used for prefill)."""
+        if not self._compact_initialized:
+            return
+        self._compact_bufs.clear()
+        self._compact_maps.clear()
+        self._compact_reverse.clear()
+        self._compact_lru.clear()
+        self._compact_next_slot.clear()
+        self._compact_next_partition = 0
+        self._compact_initialized = False
+
+    def _forward_compact(
+        self,
+        moe_layer_idx: int,
+        x: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        """Forward with per-layer compact expert buffers for M=1 decode.
+
+        Each MoE layer maintains its own small buffer (~21 slots) carved from
+        the AO buffer. Experts persist across tokens enabling cross-token
+        caching. Only newly activated experts trigger DMA.
+
+        Key advantage over _forward_active_only: the shared AO buffer clears
+        loaded_experts on every layer change, so ALL experts need fresh DMA
+        every token. Compact buffers are per-layer, so cached experts survive
+        layer cycling and only changed experts need DMA.
+        """
+        from sglang.srt.layers.moe.fused_moe_triton.fused_marlin_moe import (
+            fused_marlin_moe,
+        )
+
+        self._init_compact_decode()
+
+        K = self.hidden_size
+        N = self.intermediate_size
+        gs = self._group_size
+        nb2 = self.num_bits // 2
+        slots = self._compact_slots_per_layer
+
+        # Get or create compact buffer for this layer
+        buf = self._get_or_create_compact_buf(moe_layer_idx)
+        if buf is None:
+            # Fallback: use regular active-only path (ran out of AO buffer partitions)
+            return self._forward_active_only(moe_layer_idx, x, topk_ids, topk_weights)
+
+        emap = self._compact_maps[moe_layer_idx]
+        rmap = self._compact_reverse[moe_layer_idx]
+        lru = self._compact_lru[moe_layer_idx]
+
+        # Get active experts (CPU-side, avoids GPU sync)
+        # Save full topk list for remapping later (avoids second .tolist())
+        topk_list = topk_ids[0].tolist()
+        active_experts = list(set(topk_list))
+
+        # Update heatmap
+        if self._heatmap is not None:
+            for eid in active_experts:
+                key = (moe_layer_idx, eid)
+                self._heatmap[key] = self._heatmap.get(key, 0) + 1
+
+        # Find missing experts (not in compact buffer for this layer)
+        missing = [eid for eid in active_experts if eid not in emap]
+        hits = len(active_experts) - len(missing)
+        self._ao_cache_hits += hits
+        self._ao_cache_misses += len(missing)
+
+        # Update LRU counter
+        self._compact_counter += 1
+        counter = self._compact_counter
+
+        if missing:
+            dma_start = time.perf_counter()
+
+            # Assign compact slots for missing experts (evict LRU if full)
+            for eid in missing:
+                next_empty = self._compact_next_slot[moe_layer_idx]
+                if next_empty < slots:
+                    slot = next_empty
+                    self._compact_next_slot[moe_layer_idx] = next_empty + 1
+                else:
+                    # Evict LRU: find slot with oldest access, excluding active experts
+                    active_slots = {emap[e] for e in active_experts if e in emap}
+                    evict_slot = min(
+                        (s for s in range(slots) if s not in active_slots),
+                        key=lambda s: lru.get(s, 0),
+                    )
+                    slot = evict_slot
+                    old_eid = rmap.pop(slot, None)
+                    if old_eid is not None:
+                        del emap[old_eid]
+
+                emap[eid] = slot
+                rmap[slot] = eid
+                lru[slot] = counter
+
+            # Update LRU for hit experts
+            for eid in active_experts:
+                if eid in emap and eid not in missing:
+                    lru[emap[eid]] = counter
+
+            # Separate pinned (GPU→GPU) vs DMA (CPU→GPU)
+            pinned_eids = []
+            dma_eids = []
+            for eid in missing:
+                if (moe_layer_idx, eid) in self._pinned:
+                    pinned_eids.append(eid)
+                else:
+                    dma_eids.append(eid)
+
+            # Copy pinned experts to compact slots (GPU→GPU)
+            if pinned_eids:
+                for eid in pinned_eids:
+                    slot = emap[eid]
+                    pin = self._pinned[(moe_layer_idx, eid)]
+                    buf["w13"][slot:slot+1].copy_(pin["w13"])
+                    buf["w13_scale"][slot:slot+1].copy_(pin["w13_scale"])
+                    buf["w2"][slot:slot+1].copy_(pin["w2"])
+                    buf["w2_scale"][slot:slot+1].copy_(pin["w2_scale"])
+                self._ao_cache_hits += len(pinned_eids)
+                self._ao_cache_misses -= len(pinned_eids)
+
+            # Batched DMA for non-pinned missing experts
+            if dma_eids:
+                w13_bytes, w13s_bytes, w2_bytes, w2s_bytes = \
+                    self._engine.get_experts_all_batch(moe_layer_idx, dma_eids)
+
+                n_dma = len(dma_eids)
+                w13_all = torch.frombuffer(w13_bytes, dtype=torch.int32
+                    ).reshape(n_dma, K // 16, 2 * N * nb2)
+                w13s_all = torch.frombuffer(w13s_bytes, dtype=torch.bfloat16
+                    ).reshape(n_dma, K // gs, 2 * N)
+                w2_all = torch.frombuffer(w2_bytes, dtype=torch.int32
+                    ).reshape(n_dma, N // 16, K * nb2)
+                w2s_all = torch.frombuffer(w2s_bytes, dtype=torch.bfloat16
+                    ).reshape(n_dma, N // gs, K)
+
+                # Build slot indices and scatter into compact buffer
+                dma_slots = torch.tensor(
+                    [emap[eid] for eid in dma_eids],
+                    dtype=torch.long, device=self.device,
+                )
+                buf["w13"].index_copy_(0, dma_slots,
+                    w13_all.to(self.device, non_blocking=True))
+                buf["w13_scale"].index_copy_(0, dma_slots,
+                    w13s_all.to(self.device, non_blocking=True))
+                buf["w2"].index_copy_(0, dma_slots,
+                    w2_all.to(self.device, non_blocking=True))
+                buf["w2_scale"].index_copy_(0, dma_slots,
+                    w2s_all.to(self.device, non_blocking=True))
+
+            dma_elapsed = time.perf_counter() - dma_start
+            self._ao_dma_time += dma_elapsed
+            self._ao_dma_bytes += len(dma_eids) * self._per_expert_vram_bytes()
+        else:
+            # All hits — just update LRU
+            for eid in active_experts:
+                lru[emap[eid]] = counter
+
+        # Remap topk_ids: global expert IDs → local compact slot IDs
+        # Build on CPU from saved topk_list (avoids GPU→CPU transfer)
+        local_ids = torch.tensor(
+            [[emap[eid] for eid in topk_list]],
+            dtype=topk_ids.dtype, device=topk_ids.device,
+        )
+
+        # Run fused_marlin_moe with compact buffer
+        output = fused_marlin_moe(
+            hidden_states=x,
+            w1=buf["w13"],
+            w2=buf["w2"],
+            w1_scale=buf["w13_scale"],
+            w2_scale=buf["w2_scale"],
+            gating_output=self._compact_gating_1,
+            topk_weights=topk_weights,
+            topk_ids=local_ids,
+            global_num_experts=slots,
+            expert_map=None,
+            g_idx1=self._compact_g_idx,
+            g_idx2=self._compact_g_idx,
+            sort_indices1=self._compact_sort_idx,
+            sort_indices2=self._compact_sort_idx,
+            workspace=self._workspace,
+            num_bits=self.num_bits,
+            is_k_full=True,
+        ).to(x.dtype)
+
+        return output
+
+    def reset_ao_stats(self):
+        """Reset active-only statistics for a new request."""
+        self._ao_dma_time = 0.0
+        self._ao_dma_bytes = 0
+        self._ao_cache_hits = 0
+        self._ao_cache_misses = 0
+
+    def get_ao_stats(self) -> dict:
+        """Get active-only DMA statistics."""
+        return {
+            "dma_time": self._ao_dma_time,
+            "dma_bytes": self._ao_dma_bytes,
+            "cache_hits": self._ao_cache_hits,
+            "cache_misses": self._ao_cache_misses,
+            "pinned_experts": len(self._pinned),
+        }
+
+    def configure_pinning(self, budget_mb: float = 0, warmup_requests: int = 1,
+                          strategy: str = "uniform"):
+        """Configure static expert pinning.
+
+        Args:
+            budget_mb: VRAM budget for pinned experts (0 = auto-detect from free VRAM)
+            warmup_requests: Number of requests before pinning activates
+            strategy: "uniform" (equal per layer) or "weighted" (proportional to skew)
+        """
+        if budget_mb <= 0:
+            try:
+                free_vram = torch.cuda.mem_get_info(self.device)[0]
+                budget_mb = (free_vram - 200 * 1024 * 1024) / 1e6  # Leave 200 MB headroom
+            except Exception:
+                budget_mb = 1000  # Fallback
+        self._pin_budget_mb = budget_mb
+        self._warmup_requests = warmup_requests
+        self._pin_strategy = strategy
+        per_expert_mb = self._per_expert_vram_bytes() / 1e6
+        max_slots = int(budget_mb / per_expert_mb)
+        logger.info(
+            "Expert pinning configured: budget=%.1f MB, warmup=%d requests, "
+            "strategy=%s, max_slots=%d (%.1f MB/expert)",
+            budget_mb, warmup_requests, strategy, max_slots, per_expert_mb,
+        )
+
+    def notify_request_done(self):
+        """Called after each request completes. Triggers pinning after warmup."""
+        self._heatmap_requests += 1
+        if self._heatmap_requests == self._warmup_requests and self._pin_budget_mb > 0:
+            self._pin_hot_experts()
+
+    def _pin_hot_experts(self):
+        """Pin the hottest experts based on accumulated heatmap.
+
+        Greedily assigns pinning slots to the (layer, expert) pairs with
+        highest activation counts, respecting the VRAM budget.
+        """
+        if not self._heatmap:
+            logger.warning("No heatmap data — skipping expert pinning")
+            return
+
+        per_expert_bytes = self._per_expert_vram_bytes()
+        budget_bytes = int(self._pin_budget_mb * 1e6)
+        max_slots = budget_bytes // per_expert_bytes
+
+        strategy = getattr(self, '_pin_strategy', 'uniform')
+
+        if strategy == "weighted":
+            # Weighted pinning: allocate more slots to layers with higher skew
+            self._pin_weighted(max_slots)
+        else:
+            # Uniform: just take globally hottest experts
+            self._pin_uniform(max_slots)
+
+    def _pin_uniform(self, max_slots: int):
+        """Pin globally hottest (layer, expert) pairs."""
+        # Sort by activation count descending
+        sorted_experts = sorted(self._heatmap.items(), key=lambda x: x[1], reverse=True)
+
+        K = self.hidden_size
+        N = self.intermediate_size
+        gs = self._group_size
+        nb2 = self.num_bits // 2
+
+        # Free active_only buffer temporarily to make room for pinning
+        had_ao_buffer = self._ao_gpu_w13 is not None
+        if had_ao_buffer:
+            self._ao_gpu_w13 = None
+            self._ao_gpu_w13_scale = None
+            self._ao_gpu_w2 = None
+            self._ao_gpu_w2_scale = None
+            self._ao_loaded_experts.clear()
+            self._ao_current_layer = -1
+            torch.cuda.empty_cache()
+
+        # Recalculate budget from actual free VRAM
+        try:
+            free_vram = torch.cuda.mem_get_info(self.device)[0]
+            per_expert = self._per_expert_vram_bytes()
+            # Leave room for active_only buffer to be re-allocated
+            ao_buffer_bytes = per_expert * self.num_experts if had_ao_buffer else 0
+            # Reserve: AO buffer + 3.5GB for KV cache growth, attention intermediates,
+            # kernel workspace, and PyTorch allocator fragmentation overhead
+            headroom = int(3.5 * 1024 * 1024 * 1024)
+            available = free_vram - ao_buffer_bytes - headroom
+            max_slots = min(max_slots, max(0, available // per_expert))
+            logger.info(
+                "Pin budget recalculated: %.1f MB free, %d slots after reserving AO buffer + 3.5GB headroom",
+                free_vram / 1e6, max_slots,
+            )
+        except Exception:
+            pass
+
+        pin_start = time.perf_counter()
+        pinned = 0
+        total_mb = 0
+
+        for (layer_idx, expert_id), count in sorted_experts:
+            if pinned >= max_slots:
+                break
+
+            try:
+                w13_bytes = self._engine.get_expert_w13_packed(layer_idx, expert_id, expert_id + 1)
+                w13s_bytes = self._engine.get_expert_w13_scales(layer_idx, expert_id, expert_id + 1)
+                w2_bytes = self._engine.get_expert_w2_packed(layer_idx, expert_id, expert_id + 1)
+                w2s_bytes = self._engine.get_expert_w2_scales(layer_idx, expert_id, expert_id + 1)
+
+                w13 = torch.frombuffer(bytearray(w13_bytes), dtype=torch.int32
+                    ).reshape(1, K // 16, 2 * N * nb2).to(self.device)
+                w13s = torch.frombuffer(bytearray(w13s_bytes), dtype=torch.bfloat16
+                    ).reshape(1, K // gs, 2 * N).to(self.device)
+                w2 = torch.frombuffer(bytearray(w2_bytes), dtype=torch.int32
+                    ).reshape(1, N // 16, K * nb2).to(self.device)
+                w2s = torch.frombuffer(bytearray(w2s_bytes), dtype=torch.bfloat16
+                    ).reshape(1, N // gs, K).to(self.device)
+
+                self._pinned[(layer_idx, expert_id)] = {
+                    "w13": w13, "w13_scale": w13s,
+                    "w2": w2, "w2_scale": w2s,
+                }
+                pinned += 1
+                total_mb += self._per_expert_vram_bytes() / 1e6
+            except torch.cuda.OutOfMemoryError:
+                logger.warning("OOM during pinning at slot %d — stopping", pinned)
+                torch.cuda.empty_cache()
+                break
+
+        # Re-allocate the active_only buffer
+        if had_ao_buffer:
+            self._allocate_ao_buffer()
+
+        torch.cuda.synchronize(self.device)
+        elapsed = time.perf_counter() - pin_start
+
+        # Log per-layer distribution
+        layers_with_pins = {}
+        for (layer_idx, _), _ in sorted_experts[:pinned]:
+            layers_with_pins[layer_idx] = layers_with_pins.get(layer_idx, 0) + 1
+
+        logger.info(
+            "Expert pinning complete (uniform): %d experts pinned (%.1f MB) in %.2fs, "
+            "spread across %d layers, top count=%d",
+            pinned, total_mb, elapsed,
+            len(layers_with_pins),
+            sorted_experts[0][1] if sorted_experts else 0,
+        )
+
+    def _pin_weighted(self, max_slots: int):
+        """Pin experts with per-layer budget proportional to activation skew.
+
+        Layers with more skewed distributions (fewer experts activated) get more pins,
+        since pinning has higher relative impact there.
+        """
+        # Compute per-layer stats
+        layer_stats = {}  # layer -> {total_activations, unique_experts, max_count}
+        for (layer_idx, expert_id), count in self._heatmap.items():
+            if layer_idx not in layer_stats:
+                layer_stats[layer_idx] = {"total": 0, "experts": set(), "max": 0}
+            layer_stats[layer_idx]["total"] += count
+            layer_stats[layer_idx]["experts"].add(expert_id)
+            layer_stats[layer_idx]["max"] = max(layer_stats[layer_idx]["max"], count)
+
+        # Skew metric: max_count / (total / n_unique) = concentration ratio
+        layer_skew = {}
+        for layer_idx, stats in layer_stats.items():
+            n_unique = len(stats["experts"])
+            avg = stats["total"] / n_unique if n_unique > 0 else 1
+            layer_skew[layer_idx] = stats["max"] / avg if avg > 0 else 1
+
+        total_skew = sum(layer_skew.values())
+        if total_skew == 0:
+            self._pin_uniform(max_slots)
+            return
+
+        # Allocate per-layer budgets proportional to skew
+        layer_budgets = {}
+        for layer_idx, skew in layer_skew.items():
+            layer_budgets[layer_idx] = max(1, int(max_slots * skew / total_skew))
+
+        # Ensure total doesn't exceed budget
+        total_alloc = sum(layer_budgets.values())
+        if total_alloc > max_slots:
+            scale = max_slots / total_alloc
+            layer_budgets = {l: max(1, int(b * scale)) for l, b in layer_budgets.items()}
+
+        K = self.hidden_size
+        N = self.intermediate_size
+        gs = self._group_size
+        nb2 = self.num_bits // 2
+
+        # Free active_only buffer to make room
+        had_ao_buffer = self._ao_gpu_w13 is not None
+        if had_ao_buffer:
+            self._ao_gpu_w13 = None
+            self._ao_gpu_w13_scale = None
+            self._ao_gpu_w2 = None
+            self._ao_gpu_w2_scale = None
+            self._ao_loaded_experts.clear()
+            self._ao_current_layer = -1
+            torch.cuda.empty_cache()
+
+        # Recalculate slots from actual free VRAM
+        try:
+            free_vram = torch.cuda.mem_get_info(self.device)[0]
+            per_expert = self._per_expert_vram_bytes()
+            ao_buffer_bytes = per_expert * self.num_experts if had_ao_buffer else 0
+            headroom = int(3.5 * 1024 * 1024 * 1024)
+            available = free_vram - ao_buffer_bytes - headroom
+            max_slots = min(max_slots, max(0, available // per_expert))
+        except Exception:
+            pass
+
+        pin_start = time.perf_counter()
+        pinned = 0
+        total_mb = 0
+
+        for layer_idx in sorted(layer_budgets.keys()):
+            budget = layer_budgets[layer_idx]
+            layer_experts = [
+                (eid, count)
+                for (l, eid), count in self._heatmap.items()
+                if l == layer_idx
+            ]
+            layer_experts.sort(key=lambda x: x[1], reverse=True)
+
+            for expert_id, count in layer_experts[:budget]:
+                if pinned >= max_slots:
+                    break
+                try:
+                    w13_bytes = self._engine.get_expert_w13_packed(layer_idx, expert_id, expert_id + 1)
+                    w13s_bytes = self._engine.get_expert_w13_scales(layer_idx, expert_id, expert_id + 1)
+                    w2_bytes = self._engine.get_expert_w2_packed(layer_idx, expert_id, expert_id + 1)
+                    w2s_bytes = self._engine.get_expert_w2_scales(layer_idx, expert_id, expert_id + 1)
+
+                    w13 = torch.frombuffer(bytearray(w13_bytes), dtype=torch.int32
+                        ).reshape(1, K // 16, 2 * N * nb2).to(self.device)
+                    w13s = torch.frombuffer(bytearray(w13s_bytes), dtype=torch.bfloat16
+                        ).reshape(1, K // gs, 2 * N).to(self.device)
+                    w2 = torch.frombuffer(bytearray(w2_bytes), dtype=torch.int32
+                        ).reshape(1, N // 16, K * nb2).to(self.device)
+                    w2s = torch.frombuffer(bytearray(w2s_bytes), dtype=torch.bfloat16
+                        ).reshape(1, N // gs, K).to(self.device)
+
+                    self._pinned[(layer_idx, expert_id)] = {
+                        "w13": w13, "w13_scale": w13s,
+                        "w2": w2, "w2_scale": w2s,
+                    }
+                    pinned += 1
+                    total_mb += self._per_expert_vram_bytes() / 1e6
+                except torch.cuda.OutOfMemoryError:
+                    logger.warning("OOM during weighted pinning at slot %d — stopping", pinned)
+                    torch.cuda.empty_cache()
+                    break
+
+        # Re-allocate active_only buffer
+        if had_ao_buffer:
+            self._allocate_ao_buffer()
+
+        torch.cuda.synchronize(self.device)
+        elapsed = time.perf_counter() - pin_start
+
+        layers_with_pins = {}
+        for (layer_idx, _) in self._pinned:
+            layers_with_pins[layer_idx] = layers_with_pins.get(layer_idx, 0) + 1
+
+        logger.info(
+            "Expert pinning complete (weighted): %d experts pinned (%.1f MB) in %.2fs, "
+            "spread across %d layers, min/max pins per layer: %d/%d",
+            pinned, total_mb, elapsed,
+            len(layers_with_pins),
+            min(layers_with_pins.values()) if layers_with_pins else 0,
+            max(layers_with_pins.values()) if layers_with_pins else 0,
+        )
+
+    # ── Hot-Cached-Static Strategy ──
+
+    def save_heatmap(self, path: str):
+        """Save accumulated expert activation heatmap to JSON file.
+
+        Format: {"layer,expert": count, ...}
+        Can be loaded later via --heatmap-path for hot_cached_static init.
+        """
+        if not self._heatmap:
+            logger.warning("No heatmap data to save")
+            return
+
+        data = {}
+        for (layer, expert), count in sorted(self._heatmap.items()):
+            data[f"{layer},{expert}"] = count
+
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2)
+        logger.info("Heatmap saved: %d entries to %s", len(data), path)
+
+    def _init_hot_cached_static(self, heatmap_path: Optional[str] = None):
+        """Initialize hot_cached_static strategy.
+
+        Loads expert heatmap, selects hot experts that fit in VRAM budget,
+        copies their Marlin weights to static per-layer GPU buffers,
+        and builds lookup tables for GPU/CPU split dispatch.
+
+        Args:
+            heatmap_path: Path to expert_heatmap.json. If None, uses
+                          accumulated warmup heatmap from self._heatmap.
+        """
+        assert self._engine is not None, "hot_cached_static requires Krasis engine"
+
+        from sglang.srt.layers.quantization.marlin_utils import (
+            marlin_make_workspace,
+        )
+
+        # Load heatmap
+        heatmap: dict[tuple[int, int], int] = {}
+        if heatmap_path and os.path.exists(heatmap_path):
+            with open(heatmap_path) as f:
+                raw = json.load(f)
+            for key_str, count in raw.items():
+                parts = key_str.split(",")
+                heatmap[(int(parts[0]), int(parts[1]))] = count
+            logger.info("Loaded heatmap from %s: %d entries", heatmap_path, len(heatmap))
+        elif self._heatmap:
+            heatmap = dict(self._heatmap)
+            logger.info("Using accumulated warmup heatmap: %d entries", len(heatmap))
+        else:
+            logger.warning("No heatmap for hot_cached_static — all experts on CPU")
+
+        # Sort by activation count descending
+        sorted_experts = sorted(heatmap.items(), key=lambda x: x[1], reverse=True)
+
+        # Compute VRAM budget
+        per_expert = self._per_expert_vram_bytes()
+        try:
+            free_vram = torch.cuda.mem_get_info(self.device)[0]
+            # Reserve 3.5 GB for KV cache, attention intermediates, kernel workspace
+            headroom = int(3.5 * 1024 * 1024 * 1024)
+            budget = free_vram - headroom
+            max_experts = max(0, budget // per_expert)
+            logger.info(
+                "HCS VRAM budget: %.1f MB free, %.1f MB headroom, %d max experts (%.1f MB/expert)",
+                free_vram / 1e6, headroom / 1e6, max_experts, per_expert / 1e6,
+            )
+        except Exception:
+            max_experts = 1000
+
+        # Select hot experts (globally hottest, up to budget)
+        hot_experts = []
+        for (layer, expert), count in sorted_experts:
+            if len(hot_experts) >= max_experts:
+                break
+            hot_experts.append((layer, expert))
+
+        if not hot_experts:
+            logger.info("hot_cached_static: no experts pinned (all CPU)")
+            self._hcs_initialized = True
+            return
+
+        # Group by layer
+        layer_experts: dict[int, list[int]] = {}
+        for layer, expert in hot_experts:
+            layer_experts.setdefault(layer, []).append(expert)
+
+        # Allocate per-layer static buffers and copy weights from engine
+        torch.cuda.set_device(self.device)
+        K = self.hidden_size
+        N = self.intermediate_size
+        gs = self._group_size
+        nb2 = self.num_bits // 2
+
+        total_mb = 0.0
+        load_start = time.perf_counter()
+
+        for layer_idx in sorted(layer_experts.keys()):
+            eids = sorted(layer_experts[layer_idx])
+            n = len(eids)
+
+            # Batched weight fetch from Rust engine
+            w13_bytes, w13s_bytes, w2_bytes, w2s_bytes = \
+                self._engine.get_experts_all_batch(layer_idx, eids)
+
+            w13_cpu = torch.frombuffer(
+                bytearray(w13_bytes), dtype=torch.int32
+            ).reshape(n, K // 16, 2 * N * nb2)
+            w13s_cpu = torch.frombuffer(
+                bytearray(w13s_bytes), dtype=torch.bfloat16
+            ).reshape(n, K // gs, 2 * N)
+            w2_cpu = torch.frombuffer(
+                bytearray(w2_bytes), dtype=torch.int32
+            ).reshape(n, N // 16, K * nb2)
+            w2s_cpu = torch.frombuffer(
+                bytearray(w2s_bytes), dtype=torch.bfloat16
+            ).reshape(n, N // gs, K)
+
+            # Upload to GPU
+            w13 = w13_cpu.to(self.device, non_blocking=True)
+            w13s = w13s_cpu.to(self.device, non_blocking=True)
+            w2 = w2_cpu.to(self.device, non_blocking=True)
+            w2s = w2s_cpu.to(self.device, non_blocking=True)
+
+            self._hcs_buffers[layer_idx] = {
+                "w13": w13, "w13_scale": w13s,
+                "w2": w2, "w2_scale": w2s,
+            }
+
+            # Build lookup table: global expert ID → local slot (-1 if cold)
+            lookup = torch.full(
+                (self.num_experts,), -1, dtype=torch.int32, device=self.device,
+            )
+            for local_slot, eid in enumerate(eids):
+                lookup[eid] = local_slot
+            self._hcs_lookup[layer_idx] = lookup
+            self._hcs_num_pinned[layer_idx] = n
+
+            # Kernel helpers per layer
+            self._hcs_g_idx[layer_idx] = torch.empty(
+                n, 0, dtype=torch.int32, device=self.device,
+            )
+            self._hcs_sort_idx[layer_idx] = torch.empty(
+                n, 0, dtype=torch.int32, device=self.device,
+            )
+            self._hcs_gating_1[layer_idx] = torch.empty(
+                1, n, device=self.device,
+            )
+
+            layer_mb = (w13.nbytes + w13s.nbytes + w2.nbytes + w2s.nbytes) / 1e6
+            total_mb += layer_mb
+
+        # Ensure workspace is allocated
+        if self._workspace is None:
+            self._workspace = marlin_make_workspace(self.device, max_blocks_per_sm=4)
+
+        # Populate self._pinned so active_only prefill path skips DMA for hot experts.
+        # Uses views into HCS buffers — zero extra VRAM.
+        for layer_idx in sorted(layer_experts.keys()):
+            eids = sorted(layer_experts[layer_idx])
+            bufs = self._hcs_buffers[layer_idx]
+            for local_slot, eid in enumerate(eids):
+                self._pinned[(layer_idx, eid)] = {
+                    "w13": bufs["w13"][local_slot:local_slot+1],
+                    "w13_scale": bufs["w13_scale"][local_slot:local_slot+1],
+                    "w2": bufs["w2"][local_slot:local_slot+1],
+                    "w2_scale": bufs["w2_scale"][local_slot:local_slot+1],
+                }
+
+        torch.cuda.synchronize(self.device)
+        elapsed = time.perf_counter() - load_start
+
+        # Per-layer summary
+        layers_with_pins = {l: len(e) for l, e in layer_experts.items()}
+        logger.info(
+            "hot_cached_static initialized on %s: %d experts across %d layers "
+            "(%.1f MB) in %.2fs, min/max per layer: %d/%d",
+            self.device, len(hot_experts), len(layer_experts), total_mb, elapsed,
+            min(layers_with_pins.values()), max(layers_with_pins.values()),
+        )
+
+        self._hcs_initialized = True
+
+    def _forward_hot_cached_static(
+        self,
+        moe_layer_idx: int,
+        x: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        """Forward with hot_cached_static: hot experts on GPU, cold on CPU, parallel.
+
+        For each MoE layer:
+          1. Lookup table splits experts into GPU (hot) vs CPU (cold)
+          2. Submit cold experts to CPU engine (async, non-blocking)
+             with hot expert IDs set to -1 (engine skips them)
+          3. Run fused_marlin_moe on static GPU buffer for hot experts
+             with cold expert weights zeroed
+          4. Sync CPU result + combine: output = gpu_output + cpu_output
+
+        For M=1 decode: CPU finishes within GPU's ~1.5ms Marlin kernel window.
+        """
+        from sglang.srt.layers.moe.fused_moe_triton.fused_marlin_moe import (
+            fused_marlin_moe,
+        )
+
+        M = x.shape[0]
+        timing = _DECODE_TIMING and M == 1
+
+        if timing:
+            t_start = time.perf_counter()
+
+        # Get layer's hot expert info
+        bufs = self._hcs_buffers.get(moe_layer_idx)
+        lookup = self._hcs_lookup.get(moe_layer_idx)
+        n_hot = self._hcs_num_pinned.get(moe_layer_idx, 0)
+
+        if n_hot == 0 or bufs is None:
+            # No hot experts for this layer — all on CPU
+            return self._forward_hcs_cpu_only(moe_layer_idx, x, topk_ids, topk_weights)
+
+        # Determine GPU vs CPU split
+        if M == 1:
+            topk_list = topk_ids[0].tolist()
+            local_slots = [int(lookup[eid]) for eid in topk_list]
+            has_cold = any(s < 0 for s in local_slots)
+            all_cold = all(s < 0 for s in local_slots)
+        else:
+            lookup_result = lookup[topk_ids.long()]  # [M, topk]
+            has_cold = (lookup_result < 0).any().item()
+            all_cold = (lookup_result < 0).all().item()
+
+        if all_cold:
+            return self._forward_hcs_cpu_only(moe_layer_idx, x, topk_ids, topk_weights)
+
+        # ── Step 1: Submit cold experts to CPU engine (async) ──
+        if has_cold:
+            if M == 1:
+                cpu_ids_list = [
+                    eid if local_slots[j] < 0 else -1
+                    for j, eid in enumerate(topk_list)
+                ]
+                cpu_ids = torch.tensor([cpu_ids_list], dtype=torch.int32)
+            else:
+                cpu_ids = topk_ids.clone()
+                hot_mask = lookup[topk_ids.long()] >= 0
+                cpu_ids[hot_mask] = -1
+                cpu_ids = cpu_ids.to(torch.int32)
+
+            act_cpu = x.detach().cpu().contiguous()
+            ids_cpu = cpu_ids.cpu().contiguous()
+            wts_cpu = topk_weights.detach().cpu().contiguous()
+
+            act_bytes = act_cpu.view(torch.uint16).numpy().view(np.uint8).tobytes()
+            ids_bytes = ids_cpu.numpy().view(np.uint8).tobytes()
+            wts_bytes = wts_cpu.numpy().view(np.uint8).tobytes()
+
+            self._engine.submit_forward(moe_layer_idx, act_bytes, ids_bytes, wts_bytes, M)
+
+        if timing:
+            t_cpu_submitted = time.perf_counter()
+
+        # ── Step 2: GPU hot expert computation ──
+        if M == 1:
+            # Build local IDs and masked weights
+            gpu_local_ids = []
+            gpu_weights = topk_weights[0].tolist()
+            for j, slot in enumerate(local_slots):
+                if slot >= 0:
+                    gpu_local_ids.append(slot)
+                else:
+                    gpu_local_ids.append(0)  # dummy slot, weight zeroed
+                    gpu_weights[j] = 0.0
+
+            local_ids = torch.tensor(
+                [gpu_local_ids], dtype=topk_ids.dtype, device=self.device,
+            )
+            gpu_topk_weights = torch.tensor(
+                [gpu_weights], dtype=topk_weights.dtype, device=self.device,
+            )
+            gating = self._hcs_gating_1[moe_layer_idx]
+        else:
+            # Batch remap for M > 1
+            lookup_result = lookup[topk_ids.long()]  # [M, topk]
+            cold_mask = lookup_result < 0
+            local_ids = lookup_result.clone().to(topk_ids.dtype)
+            local_ids[cold_mask] = 0  # dummy slot
+            gpu_topk_weights = topk_weights.clone()
+            gpu_topk_weights[cold_mask] = 0.0
+            gating = torch.empty(M, n_hot, device=self.device)
+
+        # Use CUDA graph if available (M=1 only), otherwise standard kernel
+        if (M == 1 and self._hcs_cuda_graphs_enabled
+                and moe_layer_idx in self._hcs_cuda_graphs):
+            gpu_output = self._forward_hcs_graphed(
+                moe_layer_idx, local_ids, gpu_topk_weights, x,
+            )
+        else:
+            g_idx = self._hcs_g_idx[moe_layer_idx]
+            sort_idx = self._hcs_sort_idx[moe_layer_idx]
+
+            if M > 1:
+                self._workspace.zero_()
+
+            gpu_output = fused_marlin_moe(
+                hidden_states=x,
+                w1=bufs["w13"],
+                w2=bufs["w2"],
+                w1_scale=bufs["w13_scale"],
+                w2_scale=bufs["w2_scale"],
+                gating_output=gating,
+                topk_weights=gpu_topk_weights,
+                topk_ids=local_ids,
+                global_num_experts=n_hot,
+                expert_map=None,
+                g_idx1=g_idx,
+                g_idx2=g_idx,
+                sort_indices1=sort_idx,
+                sort_indices2=sort_idx,
+                workspace=self._workspace,
+                num_bits=self.num_bits,
+                is_k_full=True,
+            ).to(x.dtype)
+
+        if timing:
+            torch.cuda.synchronize(self.device)
+            t_gpu_done = time.perf_counter()
+
+        # ── Step 3: Sync CPU result and combine ──
+        if has_cold:
+            cpu_output_bytes = self._engine.sync_forward()
+            cpu_raw = torch.frombuffer(
+                bytearray(cpu_output_bytes), dtype=torch.bfloat16
+            ).reshape(M, self.hidden_size).to(self.device)
+
+            # CPU engine applies routed_scaling_factor — divide it out
+            # so forward() can apply it uniformly to the combined output
+            if self.routed_scaling_factor != 1.0:
+                cpu_raw = cpu_raw / self.routed_scaling_factor
+
+            gpu_output = gpu_output + cpu_raw
+
+        if timing:
+            t_end = time.perf_counter()
+            gpu_ms = (t_gpu_done - (t_cpu_submitted if has_cold else t_start)) * 1000
+            logger.info(
+                "HCS-TIMING L%d: cpu_submit=%.1fms gpu=%.1fms cpu_sync=%.1fms total=%.1fms cold=%s",
+                moe_layer_idx,
+                (t_cpu_submitted - t_start) * 1000 if has_cold else 0,
+                gpu_ms,
+                (t_end - t_gpu_done) * 1000 if has_cold else 0,
+                (t_end - t_start) * 1000,
+                has_cold,
+            )
+
+        # Update heatmap for potential re-pinning
+        if self._heatmap is not None:
+            if M == 1:
+                for eid in topk_list:
+                    key = (moe_layer_idx, eid)
+                    self._heatmap[key] = self._heatmap.get(key, 0) + 1
+            else:
+                for eid in torch.unique(topk_ids).tolist():
+                    key = (moe_layer_idx, eid)
+                    self._heatmap[key] = self._heatmap.get(key, 0) + 1
+
+        return gpu_output
+
+    def _forward_hcs_cpu_only(
+        self,
+        moe_layer_idx: int,
+        x: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        """CPU-only path for hot_cached_static layers with no hot experts.
+
+        All experts are dispatched to the Rust AVX2 engine.
+        """
+        M = x.shape[0]
+        act_cpu = x.detach().cpu().contiguous()
+        ids_cpu = topk_ids.detach().cpu().to(torch.int32).contiguous()
+        wts_cpu = topk_weights.detach().cpu().contiguous()
+
+        act_bytes = act_cpu.view(torch.uint16).numpy().view(np.uint8).tobytes()
+        ids_bytes = ids_cpu.numpy().view(np.uint8).tobytes()
+        wts_bytes = wts_cpu.numpy().view(np.uint8).tobytes()
+
+        self._engine.submit_forward(moe_layer_idx, act_bytes, ids_bytes, wts_bytes, M)
+        output_bytes = self._engine.sync_forward()
+
+        output = torch.frombuffer(
+            bytearray(output_bytes), dtype=torch.bfloat16
+        ).reshape(M, self.hidden_size).to(self.device)
+
+        # CPU engine applies routed_scaling_factor — divide it out
+        if self.routed_scaling_factor != 1.0:
+            output = output / self.routed_scaling_factor
+
+        return output
+
+    # ── CUDA Graph Acceleration for hot_cached_static ──
+
+    def _init_cuda_graphs(self):
+        """Capture CUDA graphs for M=1 decode in hot_cached_static mode.
+
+        Creates one CUDA graph per MoE layer with hot experts.
+        Pre-allocates fixed-address I/O tensors for graph replay.
+        """
+        if not self._hcs_initialized or not self._hcs_buffers:
+            logger.warning("Cannot init CUDA graphs: hot_cached_static not initialized")
+            return
+
+        from sglang.srt.layers.moe.fused_moe_triton.fused_marlin_moe import (
+            fused_marlin_moe,
+        )
+
+        K = self.hidden_size
+        top_k = self._engine.top_k()
+        torch.cuda.set_device(self.device)
+
+        graphs_captured = 0
+        for layer_idx, bufs in self._hcs_buffers.items():
+            n_hot = self._hcs_num_pinned[layer_idx]
+
+            # Pre-allocate fixed-address I/O tensors
+            io = {
+                "x": torch.zeros(1, K, dtype=self.params_dtype, device=self.device),
+                "local_ids": torch.zeros(1, top_k, dtype=torch.int32, device=self.device),
+                "weights": torch.zeros(1, top_k, dtype=torch.float32, device=self.device),
+                "gating": torch.empty(1, n_hot, device=self.device),
+                "output": torch.zeros(1, K, dtype=self.params_dtype, device=self.device),
+            }
+            g_idx = self._hcs_g_idx[layer_idx]
+            sort_idx = self._hcs_sort_idx[layer_idx]
+
+            # Warmup runs (3x) on current stream to trigger Triton compilation
+            for _ in range(3):
+                _ = fused_marlin_moe(
+                    hidden_states=io["x"],
+                    w1=bufs["w13"], w2=bufs["w2"],
+                    w1_scale=bufs["w13_scale"], w2_scale=bufs["w2_scale"],
+                    gating_output=io["gating"],
+                    topk_weights=io["weights"], topk_ids=io["local_ids"],
+                    global_num_experts=n_hot, expert_map=None,
+                    g_idx1=g_idx, g_idx2=g_idx,
+                    sort_indices1=sort_idx, sort_indices2=sort_idx,
+                    workspace=self._workspace,
+                    num_bits=self.num_bits, is_k_full=True,
+                )
+            torch.cuda.synchronize(self.device)
+
+            # Capture graph
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                io["output"] = fused_marlin_moe(
+                    hidden_states=io["x"],
+                    w1=bufs["w13"], w2=bufs["w2"],
+                    w1_scale=bufs["w13_scale"], w2_scale=bufs["w2_scale"],
+                    gating_output=io["gating"],
+                    topk_weights=io["weights"], topk_ids=io["local_ids"],
+                    global_num_experts=n_hot, expert_map=None,
+                    g_idx1=g_idx, g_idx2=g_idx,
+                    sort_indices1=sort_idx, sort_indices2=sort_idx,
+                    workspace=self._workspace,
+                    num_bits=self.num_bits, is_k_full=True,
+                ).to(self.params_dtype)
+
+            self._hcs_cuda_graphs[layer_idx] = graph
+            self._hcs_graph_io[layer_idx] = io
+            graphs_captured += 1
+
+        self._hcs_cuda_graphs_enabled = True
+        logger.info("CUDA graphs captured: %d MoE layers", graphs_captured)
+
+    def _forward_hcs_graphed(
+        self,
+        moe_layer_idx: int,
+        local_ids: torch.Tensor,
+        gpu_topk_weights: torch.Tensor,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
+        """Replay captured CUDA graph for M=1 GPU hot expert computation.
+
+        Copies input data into graph's fixed-address tensors, replays the
+        captured kernel sequence, and returns the output.
+        """
+        io = self._hcs_graph_io[moe_layer_idx]
+        graph = self._hcs_cuda_graphs[moe_layer_idx]
+
+        # Copy inputs into fixed-address buffers
+        io["x"].copy_(x)
+        io["local_ids"].copy_(local_ids)
+        io["weights"].copy_(gpu_topk_weights)
+
+        # Replay captured kernel
+        graph.replay()
+
+        # Return clone (graph tensor is reused next call)
+        return io["output"].clone()
 
     def _forward_persistent(
         self,
@@ -987,9 +2745,33 @@ class GpuPrefillManager:
             logger.info("forward() moe_layer=%d M=%d device=%s mode=%s",
                         moe_layer_idx, M, self.device, self._prefill_mode)
 
-        torch.cuda.synchronize(self.device)
+        if debug_sync:
+            torch.cuda.synchronize(self.device)
 
-        if self._prefill_mode in ("persistent", "layer_grouped") and \
+        if self._prefill_mode == "hot_cached_static" and self._hcs_initialized:
+            if M == 1:
+                # M=1 decode: hot experts on GPU static buffers, cold on CPU (zero DMA)
+                output = self._forward_hot_cached_static(moe_layer_idx, x, topk_ids, topk_weights)
+            elif self._persistent and moe_layer_idx in self._persistent:
+                # M>1 prefill: use layer_grouped preloaded experts (all experts in VRAM)
+                output = self._forward_persistent(moe_layer_idx, x, topk_ids, topk_weights)
+            else:
+                # M>1 prefill fallback: DMA-based active_only
+                self._invalidate_compact()
+                output = self._forward_active_only(moe_layer_idx, x, topk_ids, topk_weights)
+        elif self._prefill_mode in ("active_only", "lru") and self._engine is not None:
+            if M == 1:
+                # Compact per-layer buffers for decode (cross-token expert caching)
+                output = self._forward_compact(moe_layer_idx, x, topk_ids, topk_weights)
+            elif self._prefill_mode == "lru":
+                # Invalidate compact state (AO buffer will be used for prefill)
+                self._invalidate_compact()
+                output = self._forward_lru(moe_layer_idx, x, topk_ids, topk_weights)
+            else:
+                # Invalidate compact state (AO buffer will be used for prefill)
+                self._invalidate_compact()
+                output = self._forward_active_only(moe_layer_idx, x, topk_ids, topk_weights)
+        elif self._prefill_mode in ("persistent", "layer_grouped") and \
                 self._persistent and moe_layer_idx in self._persistent:
             output = self._forward_persistent(moe_layer_idx, x, topk_ids, topk_weights)
         elif self._engine is not None:

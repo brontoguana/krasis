@@ -313,14 +313,25 @@ class MLAAttention:
         # qo_indptr: [0, M] for single sequence
         qo_indptr = torch.tensor([0, M], dtype=torch.int32, device=self.device)
 
-        # FP8 KV cache: upcast to BF16 for FlashInfer kernel (stores FP8, computes BF16)
-        attn_ckv = ckv_layer.to(torch.bfloat16) if ckv_layer.dtype != torch.bfloat16 else ckv_layer
-        attn_kpe = kpe_layer.to(torch.bfloat16) if kpe_layer.dtype != torch.bfloat16 else kpe_layer
+        # FP8 KV cache: MLA kernel requires 16-bit floats. Upcast only the
+        # pages actually in use (via kv_indices) instead of the entire cache.
+        if ckv_layer.dtype != torch.bfloat16:
+            used_pages = kv_indices  # [num_used_pages]
+            attn_ckv = ckv_layer[used_pages].to(torch.bfloat16)
+            attn_kpe = kpe_layer[used_pages].to(torch.bfloat16)
+            # Remap page indices to compact range [0, N)
+            compact_kv_indices = torch.arange(
+                len(used_pages), dtype=torch.int32, device=self.device
+            )
+        else:
+            attn_ckv = ckv_layer
+            attn_kpe = kpe_layer
+            compact_kv_indices = kv_indices
 
         self._attn_wrapper.plan(
             qo_indptr=qo_indptr,
             kv_indptr=kv_indptr,
-            kv_indices=kv_indices,
+            kv_indices=compact_kv_indices,
             kv_len_arr=kv_len_arr,
             num_heads=self.num_heads,
             head_dim_ckv=self.kv_lora_rank,
@@ -561,16 +572,17 @@ class GQAAttention:
         kv_len_arr = torch.tensor([effective_kv_len], dtype=torch.int32, device=self.device)
         qo_indptr = torch.tensor([0, M], dtype=torch.int32, device=self.device)
 
-        # Upcast FP8 KV cache to BF16
-        attn_k = k_layer.to(torch.bfloat16) if k_layer.dtype != torch.bfloat16 else k_layer
-        attn_v = v_layer.to(torch.bfloat16) if v_layer.dtype != torch.bfloat16 else v_layer
-
         # Compute last_page_len from effective seq_len (after append)
         eff_rem = effective_kv_len % kv_cache.page_size
         eff_last_page_len = eff_rem if eff_rem > 0 else kv_cache.page_size
         eff_last_page_len_tensor = torch.tensor(
             [eff_last_page_len], dtype=torch.int32, device=self.device,
         )
+
+        # Pass KV cache directly to FlashInfer — FP8 E4M3 is natively supported
+        # on SM89+ (Ada/Hopper). This avoids upcasting the entire paged cache layer
+        # (hundreds of MB) when only a few pages are accessed.
+        kv_dtype = k_layer.dtype
 
         self._prefill_wrapper.plan(
             qo_indptr=qo_indptr,
@@ -584,13 +596,13 @@ class GQAAttention:
             causal=True,
             sm_scale=self.sm_scale,
             q_data_type=torch.bfloat16,
-            kv_data_type=torch.bfloat16,
+            kv_data_type=kv_dtype,
         )
 
         # attn_out: [M, num_heads, head_dim]
         attn_out = self._prefill_wrapper.run(
             q=q.to(torch.bfloat16),
-            paged_kv_cache=(attn_k, attn_v),
+            paged_kv_cache=(k_layer, v_layer),
         )
 
         # ── Step 6: O projection ──

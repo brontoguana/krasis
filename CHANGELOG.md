@@ -1,5 +1,302 @@
 # Krasis Changelog
 
+## Qwen3-235B HCS Hybrid Benchmark — 2026-02-14
+
+### Benchmark
+Ran Qwen3-235B-A22B with HCS hybrid strategy (layer_grouped prefill + HCS decode)
+on PP=3 (32+31+31) across 3x RTX 2000 Ada 16GB GPUs.
+
+### OOM Fix
+`_compute_layer_groups(divisor=-3)` returned ALL layers in ONE group because
+`divisor <= 1` branch catches negative values. For 235B: 128 experts × 32 layers
+× 9.7 MB = ~39.8 GB → instant OOM on 16 GB GPU. Fixed with `_hcs_prefill_divisor()`
+that auto-computes divisor from available VRAM.
+
+### Results
+- 535 hot experts pinned (145+216+174 across 3 GPUs)
+- TTFT: 187.6s (was 327.3s with div=4, **43% faster**)
+- Prefill: 46.4 tok/s (was 26.3, **1.76x**)
+- Decode: 1.73 avg / 1.80 best tok/s (was 1.45, **19% faster**)
+- VRAM: 12,861 + 12,859 + 12,658 MB
+- Output quality: not coherent (known 235B model execution issue)
+
+### Files Changed
+- `python/krasis/model.py`: Added `_hcs_prefill_divisor()`, HCS prefill dispatch
+- `tests/run_235b_benchmark.py`: New HCS hybrid benchmark for 235B
+- `BENCHMARKS.md`: Added HCS hybrid row and detailed results
+
+---
+
+## HCS Hybrid: DMA Prefill + HCS Decode — 2026-02-14
+
+### Problem
+Pure HCS routed cold experts through CPU for ALL token counts. At M=8K, CPU
+processing took 178s vs 23s with DMA. CUDA graphs also proved useless (CPU sync
+is the bottleneck, not kernel launch overhead).
+
+### Fix
+One-line dispatch change in `gpu_prefill.py forward()`: M>1 routes through
+DMA-based `_forward_active_only`, M=1 routes through `_forward_hot_cached_static`.
+
+### Benchmark Results (Qwen3-Coder-Next PP=2, 8278 token prompt)
+
+| Strategy | Short Decode (tok/s) | 8.6K Total (tok/s) | 8.6K Time |
+|----------|---------------------|---------------------|-----------|
+| static_pin | 5.09 (best 5.19) | 0.48 (best 0.49) | 66.5s |
+| **hcs_hybrid** | **6.03 (best 6.07)** | **0.71 (best 0.72)** | **45.2s** |
+
+HCS hybrid wins: **+18% decode, +48% total throughput, 32% faster 8K**.
+
+### Files Changed
+- `python/krasis/gpu_prefill.py`: HCS dispatch now routes M>1 to active_only DMA
+- `tests/run_hcs_hybrid_bench.py`: New benchmark script
+
+---
+
+## hot_cached_static Strategy — 2026-02-14
+
+### New Strategy: hot_cached_static
+Hybrid GPU/CPU MoE dispatch with zero DMA during inference. Hot experts (selected by
+heatmap) are loaded once into static per-layer GPU buffers at startup. Cold experts are
+computed on CPU via the Rust AVX2 engine. Both run in parallel per MoE layer.
+
+**Architecture:**
+- Per MoE layer: split topk_ids via lookup table into GPU (hot) vs CPU (cold)
+- Submit cold experts to CPU engine async (hot expert IDs set to -1, Rust skips them)
+- Run fused_marlin_moe on static GPU buffer for hot experts (cold weights zeroed)
+- Sync CPU result + combine: output = gpu_output + cpu_output
+- For M=1 decode: CPU finishes within GPU's ~1.5ms Marlin kernel window — CPU work is free
+
+**Features:**
+- `--cache-strategy hot_cached_static` CLI flag
+- `--heatmap-path` to load expert activation heatmap from file
+- `--cuda-graphs` for optional CUDA graph acceleration (eliminates kernel launch overhead)
+- `save_heatmap()` method to export accumulated activation data
+- Per-layer static buffers (different hot expert counts per layer)
+- Auto-enables GPU decode (threshold=1)
+
+### STRATEGIES.md Documentation
+Comprehensive documentation of all 9 MoE expert dispatch strategies:
+cpu_only, chunked, active_only, static_pin, weighted_pin, lru, persistent,
+layer_grouped, and hot_cached_static. Includes architecture diagrams, benchmark
+results, pros/cons, and selection guide.
+
+### Benchmark Results (Qwen3-Coder-Next PP=2, 2x RTX 2000 Ada)
+
+**Short prompt decode (pure decode speed):**
+| Strategy | Avg tok/s | Best tok/s |
+|----------|-----------|------------|
+| static_pin | 4.78 | 4.86 |
+| hot_cached_static | **5.98** | **6.10** |
+| hcs+cuda_graphs | 5.98 | 6.09 |
+
+**8K prompt (total incl prefill):**
+| Strategy | TTFT | Total tok/s |
+|----------|------|-------------|
+| static_pin | ~23s | 1.09 |
+| hot_cached_static | ~178s | 0.17 |
+| hcs+cuda_graphs | ~178s | 0.15 |
+
+**Findings:**
+- HCS decode is **25% faster** than static_pin (zero DMA, ~158ms/tok vs ~184ms/tok)
+- HCS prefill is **7.7x slower** (cold experts routed through CPU at M=8192)
+- CUDA graphs add nothing (~0% improvement) — CPU sync is the bottleneck, not kernel launch
+- **Optimal hybrid**: static_pin for prefill (GPU DMA) → HCS for decode (zero DMA)
+- HCS hot experts: 1817 (GPU0) + 1912 (GPU1) = 3729 experts pinned, ~6 GB total
+
+### Benchmark Script
+`tests/bench_hot_cached_static.py`: Compares static_pin, hot_cached_static, and
+hot_cached_static+CUDA graphs. Includes heatmap generation mode.
+`tests/run_hcs_benchmark.py`: Full automated benchmark for Qwen3-Coder-Next.
+
+### Files Changed
+- `python/krasis/gpu_prefill.py`: _init_hot_cached_static(), _forward_hot_cached_static(),
+  _forward_hcs_cpu_only(), _init_cuda_graphs(), _forward_hcs_graphed(), save_heatmap()
+- `python/krasis/server.py`: --cache-strategy hot_cached_static, --heatmap-path, --cuda-graphs
+- `python/krasis/model.py`: hot_cached_static in is_active_only check
+- `STRATEGIES.md`: New file documenting all strategies
+- `tests/bench_hot_cached_static.py`: New benchmark script
+
+---
+
+## Compact Expert Buffers + Further Decode Optimizations — 2026-02-14
+
+### Compact Per-Layer Expert Buffers (MAJOR OPTIMIZATION)
+The shared AO buffer [512 slots] was cleared on every layer change during decode, causing
+zero cross-token expert caching. Compact buffers partition the same VRAM into per-layer
+views (21 slots each), so experts loaded for layer N at token T survive for token T+1.
+
+**Key insight**: Consecutive decode tokens share ~52% of expert activations per layer. By
+keeping experts in per-layer compact buffers, only ~48% of experts need fresh DMA each token.
+
+- **GPU Decode**: **3.41 → 5.44 tok/s** (+60%, 184ms/tok)
+- **CPU Decode**: **3.04 → 4.92 tok/s** (+62%, 203ms/tok)
+- Zero extra VRAM (views into existing AO buffer)
+- Per-layer LRU eviction when compact slots are full
+- topk_ids remapped global→local before calling fused_marlin_moe
+
+### Additional Optimizations (on top of compact buffers)
+- **Compact slots 16 → 21**: More cache headroom for 10-expert top-k selection
+- **CUDA stream overlap**: Shared expert computation on separate stream, overlapped with routed expert DMA+kernel
+- **Pre-populate from pinned**: On first access, compact buffers pre-filled with pinned experts (GPU→GPU copy, instant cache hits)
+- **index_copy_ batching**: Replace 40 per-expert `copy_()` calls with 4 `index_copy_` ops
+- **Zero-copy bytes**: `torch.frombuffer()` directly on Rust PyBytes (saves ~15 MB/layer)
+- **Combined Rust FFI**: `get_experts_all_batch()` returns all 4 weight types in single call
+- **Fused shared expert**: Concatenate gate+up into single matmul (1.2ms → 0.84ms)
+- **CPU-side unique for M=1**: `list(set(topk_ids[0].tolist()))` avoids GPU kernel launch
+- **Pre-allocated gating_output**: Eliminates per-call CUDA allocation for M=1
+
+### All Changes:
+1. **Compact buffers** (`gpu_prefill.py`): `_forward_compact()`, `_init_compact_decode()`, `_get_or_create_compact_buf()`, `_invalidate_compact()`
+2. **Compact slots 16→21** (`gpu_prefill.py`): `_compact_slots_per_layer = 21`
+3. **Pre-populate from pinned** (`gpu_prefill.py`): `_get_or_create_compact_buf()` copies pinned experts into compact on first access
+4. **CUDA stream overlap** (`layer.py`): Shared expert on `_shared_stream` before dispatch, synced after
+5. **index_copy_ batching** (`gpu_prefill.py`): Contiguous `.to(device)` + `index_copy_` scatter
+6. **Zero-copy bytes** (`gpu_prefill.py`): `torch.frombuffer(rust_bytes)` without `bytearray()` wrapper
+7. **Combined FFI** (`moe.rs`): `get_experts_all_batch()` — single call for all 4 weight types
+8. **Fused shared expert** (`layer.py`): gate_proj + up_proj concatenated at load time
+9. **CPU-side unique** (`gpu_prefill.py`): Avoids GPU `torch.unique()` for M=1
+10. **Pre-allocated tensors** (`gpu_prefill.py` + `model.py`): gating_output, decode token/pos buffers
+
+### Benchmark Results (Qwen3-Coder-Next, PP=2, 32 decode tokens):
+
+**Short prompt (48 tokens, 4 runs):**
+
+| Mode | Decode (tok/s) | ms/tok | Prefill (tok/s) |
+|------|---------------|--------|-----------------|
+| **GPU decode (compact)** | **5.31 avg / 5.43 best** | **184** | 203 (threshold=300) |
+| CPU decode | 4.92 | 203 | 31.8 |
+| **Speedup** | **1.08x** | | |
+
+**8K prompt (8,700 tokens, 3 runs):**
+
+| Metric | Run 1 | Run 2 | Run 3 |
+|--------|-------|-------|-------|
+| TTFT | 112.4s | 95.1s | 95.5s |
+| Prefill | 77.4 tok/s | 91.5 tok/s | 91.1 tok/s |
+| Decode | 5.39 tok/s | 5.44 tok/s | 5.44 tok/s |
+
+Full optimization progression: **2.14 → 2.23 (FP8 fix) → 3.41 (DMA batching) → 5.23 (compact buffers) → 5.44 (slots+overlap+prepopulate)**
+
+---
+
+## FP8 Native KV + GPU Decode — 2026-02-14
+
+### FP8 Native KV Cache (MAJOR FIX)
+**Root cause**: GQA attention was upcasting the ENTIRE paged KV cache layer (~1.1 GB) from FP8 to BF16
+every decode step — even though FlashInfer only accesses the few pages in the active sequence.
+With 12 GQA layers, this was ~13 GB of unnecessary data conversion per token.
+
+**Fix** (`attention.py`): Pass FP8 KV cache directly to FlashInfer with `kv_data_type=torch.float8_e4m3fn`.
+FlashInfer on SM89 (Ada) natively handles FP8 KV, only converting accessed pages internally.
+
+- GQA attention per layer: **24ms → 1.4ms** (17x faster)
+- GPU decode: **1.40 → 2.23 tok/s** (+59%)
+- CPU decode: **1.37 → 1.98 tok/s** (+44%)
+
+### GPU Decode for MoE
+Route M=1 decode through GPU `fused_marlin_moe` kernel instead of CPU Rust engine.
+Eliminates 48× GPU↔CPU hidden state transfers and Python-Rust boundary crossings per token.
+
+### All Changes:
+1. **FP8 native KV for GQA** (`attention.py`): Remove whole-cache `.to(torch.bfloat16)` upcast, pass FP8 directly to FlashInfer
+1b. **FP8 selective upcast for MLA** (`attention.py`): MLA kernel still requires BF16, but now only upcasts USED pages (via kv_indices gather) instead of entire cache
+2. **Core dispatch** (`layer.py`): M=1 decode now uses `_gpu_prefill_forward()` when `gpu_prefill_manager` is available
+3. **Remove unconditional CUDA sync** (`gpu_prefill.py`): `torch.cuda.synchronize()` in `forward()` now debug-only
+4. **Skip buffer zeroing for decode** (`gpu_prefill.py`): Skip zeroing [512, ...] AO buffer and workspace for M=1 (kernel only reads active expert slots)
+5. **Batched expert DMA** (`moe.rs` + `gpu_prefill.py`): New `get_experts_batch()` Rust function fetches non-contiguous expert IDs in one PyO3 call (4 calls/layer instead of 4×N_experts)
+6. **Per-layer timing** (`layer.py` + `model.py`): `KRASIS_DECODE_TIMING=1` env var for attention vs MoE breakdown
+7. **`--gpu-decode` CLI flag** (`server.py`): Auto-enabled for active_only/static_pin strategies, sets `gpu_prefill_threshold=1`
+
+### Benchmark Results (Qwen3-Coder-Next, PP=2, 32 decode tokens):
+
+| Mode | Decode (tok/s) | ms/tok | Notes |
+|------|---------------|--------|-------|
+| **GPU decode** | **2.23** | 448 | threshold=1, static_pin |
+| CPU decode | 1.98 | 504 | threshold=300, static_pin |
+| **Speedup** | **1.12x** | | |
+
+Both paths improved ~50% from FP8 fix alone. MoE is now the dominant bottleneck (73% of decode time).
+
+---
+
+## Qwen3-Coder-Next GPU Prefill Benchmark — 2026-02-14
+
+First GPU prefill benchmark on Qwen3-Coder-Next (48 layers, 512 experts, top-10, PP=2).
+Much smaller experts (1.55 MB each) enable 3x faster prefill than Qwen3-235B.
+
+| Strategy | TTFT (s) | Prefill (tok/s) | Decode (tok/s) | Pinned | GPU VRAM |
+|----------|----------|-----------------|----------------|--------|----------|
+| **Static Pin** | **42.4** | **203.5** | **2.14** | 3,777 | 30.4 GB |
+| Active-Only | 49.8 | 173.4 | 2.11 | 0 | 25.4 GB |
+
+### Old-Mode Baselines (for comparison):
+
+| Mode | TTFT (s) | Prefill (tok/s) | Decode (tok/s) | GPU VRAM |
+|------|----------|-----------------|----------------|----------|
+| Chunked (div=0) | 65.8 | 131.4 | 2.13 | 28.9 GB |
+| Layer-Grouped (div=4) | 65.2 | 132.4 | 2.60 | 16.4 GB |
+
+**Static pin is 35% faster TTFT and 55% higher prefill throughput than old chunked mode.**
+Layer-grouped has best decode (2.60 tok/s) due to lowest VRAM pressure (16.4 GB).
+
+### Bug Fixed:
+- Static pin OOM on Qwen3-Coder-Next: 2GB headroom insufficient for models with many small experts
+  (2,864 pinned × 1.6 MB = 4.6 GB, left only 1 GB for workspace). Increased to 3.5 GB headroom.
+
+---
+
+## Expert Caching Strategies Benchmark — 2026-02-14
+
+Implemented and benchmarked 5 expert caching strategies for GPU prefill DMA optimization
+on Qwen3-235B-A22B (PP=1, 1 GPU, INT4 Marlin experts, INT8 attention, FP8 KV).
+
+### Strategies Implemented (in `gpu_prefill.py`):
+1. **Active-Only DMA** (`--cache-strategy active_only`): Per-layer gate→DMA, skip inactive experts
+2. **Static Frequency Pinning** (`--cache-strategy static_pin`): Pin hottest experts globally after warmup
+3. **Weighted Pinning** (`--cache-strategy weighted_pin`): Pin proportional to per-layer activation skew
+4. **LRU Expert Cache** (`--cache-strategy lru`): Cross-layer VRAM cache with LRU eviction
+5. **Hybrid** (`--cache-strategy hybrid`): LRU + static pinning (combined)
+
+### Benchmark Results (Run 4 / hot cache, 8,700-token prompt):
+
+| Strategy | TTFT (s) | Improvement | DMA (s) | Hit Rate |
+|----------|----------|-------------|---------|----------|
+| Baseline (div=32) | 193.5 | — | ~170 | N/A |
+| Active-Only | 152.1 | -21.4% | 128.1 | N/A |
+| Static Pin | 148.8 | -23.1% | 124.7 | 1.8% |
+| **Weighted Pin** | **142.9** | **-26.1%** | **118.8** | **1.7%** |
+| LRU Cache | 153.6 | -20.6% | 129.6 | 0% |
+| Hybrid | 158.6 | -18.0% | 134.5 | 0% |
+
+### PP=3 Results (3 GPUs, 48 GB total, Run 4 / hot cache):
+
+| Strategy | TTFT (s) | vs AO | Pinned | Total VRAM |
+|----------|----------|-------|--------|------------|
+| **Static Pin** | **128.7** | **-12.2%** | **1,078** | **44.7 GB** |
+| Weighted Pin | 130.4 | -11.0% | 1,078 | 44.7 GB |
+| Active-Only | 146.6 | — | 0 | 34.0 GB |
+| LRU Cache | 158.9 | +8.4% | 0 | 47.2 GB |
+| Hybrid | 164.4 | +12.1% | 0 | 47.0 GB |
+
+### Recommendation:
+- **PP=3**: `--cache-strategy static_pin` — 128.7s TTFT, 14% hit rate
+- **PP=1**: `--cache-strategy weighted_pin` — 142.9s TTFT, 26% faster than baseline
+- LRU/Hybrid: 0% hit rate regardless of GPU count — avoid
+
+### Files Changed:
+- `python/krasis/gpu_prefill.py`: 5 prefill modes, heatmap tracking, pinning, LRU cache
+- `python/krasis/model.py`: Active-only/LRU forward dispatch, stats logging
+- `python/krasis/server.py`: `--cache-strategy` CLI argument
+
+### Bugs Fixed:
+- LRU buffer OOM: only reserved 300 MB for KV cache, increased to 2 GB
+- Pin OOM: 224 experts overcommitted VRAM, added 1 GB headroom for intermediates
+- Stats tracking: hit counter only fired when ALL experts cached, fixed per-expert counting
+- `_compute_layer_groups`: negative divisor caused crash, added early return
+
+---
+
 ## Test Status
 
 | Suite | Count | Status | Last Run |

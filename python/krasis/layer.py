@@ -13,6 +13,7 @@ For MoE layers, shared expert and routed experts overlap on GPU and CPU respecti
 
 import logging
 import os
+import time
 from typing import Dict, Optional, Tuple
 
 import numpy as np
@@ -27,6 +28,13 @@ logger = logging.getLogger(__name__)
 
 # Gate per-MoE-layer diagnostics behind env var to avoid GPU sync overhead
 _DIAG_ENABLED = os.environ.get("KRASIS_DIAG", "") == "1"
+
+# Runtime-togglable timing (check env var dynamically — set/unset without restart)
+def _decode_timing():
+    return os.environ.get("KRASIS_DECODE_TIMING", "") == "1"
+
+def _prefill_timing():
+    return os.environ.get("KRASIS_PREFILL_TIMING", "") == "1"
 
 
 def _linear(x: torch.Tensor, weight_data) -> torch.Tensor:
@@ -83,6 +91,20 @@ class TransformerLayer:
             self.gate_weight = weights["gate"]["weight"]  # [n_experts, hidden]
             self.e_score_correction_bias = weights["gate"].get("e_score_correction_bias")
             self.shared_expert = weights.get("shared_expert")  # {gate_proj, up_proj, down_proj}
+            # Fuse gate_proj + up_proj into single matmul to save kernel launch
+            if self.shared_expert is not None:
+                gp = self.shared_expert["gate_proj"]
+                up = self.shared_expert["up_proj"]
+                if isinstance(gp, tuple):
+                    # INT8: (weight_int8, scale) — concat both along dim 0
+                    self.shared_expert["gate_up_proj"] = (
+                        torch.cat([gp[0], up[0]], dim=0),
+                        torch.cat([gp[1], up[1]], dim=0),
+                    )
+                else:
+                    # BF16: single tensor
+                    self.shared_expert["gate_up_proj"] = torch.cat([gp, up], dim=0)
+                del self.shared_expert["gate_proj"], self.shared_expert["up_proj"]
             # Shared expert sigmoid gate (Qwen3-Next): [1, hidden_size]
             self.shared_expert_gate = (
                 self.shared_expert.get("shared_expert_gate")
@@ -100,6 +122,11 @@ class TransformerLayer:
         # GPU prefill manager for large batches (INT4 Marlin)
         self.gpu_prefill_manager = gpu_prefill_manager
         self.gpu_prefill_threshold = gpu_prefill_threshold
+
+        # CUDA stream for overlapping shared expert with routed expert dispatch
+        self._shared_stream = None
+        if self.is_moe and self.shared_expert_gate is not None:
+            self._shared_stream = torch.cuda.Stream(device=device)
 
     def forward(
         self,
@@ -129,6 +156,11 @@ class TransformerLayer:
             residual is the running residual stream.
         """
         M = hidden.shape[0]
+        layer_timing = (_decode_timing() and M == 1) or (_prefill_timing() and M > 1)
+
+        if layer_timing:
+            torch.cuda.synchronize()
+            t_layer_start = time.perf_counter()
 
         # ── Pre-attention norm ──
         if residual is None:
@@ -142,6 +174,10 @@ class TransformerLayer:
                 hidden, residual, self.input_norm_weight, self.cfg.rms_norm_eps
             )
 
+        if layer_timing:
+            torch.cuda.synchronize()
+            t_after_norm1 = time.perf_counter()
+
         # ── Attention ──
         if self.layer_type == "linear_attention":
             # Linear attention: no KV cache, uses internal recurrent state
@@ -153,6 +189,10 @@ class TransformerLayer:
                 num_new_tokens=num_new_tokens,
             )
 
+        if layer_timing:
+            torch.cuda.synchronize()
+            t_after_attn = time.perf_counter()
+
         # ── Post-attention norm ──
         # fused_add_rmsnorm is IN-PLACE: residual += attn_out, then attn_out = rmsnorm(residual)
         flashinfer.norm.fused_add_rmsnorm(
@@ -160,11 +200,30 @@ class TransformerLayer:
         )
         hidden = attn_out  # now contains normed value
 
+        if layer_timing:
+            torch.cuda.synchronize()
+            t_after_norm2 = time.perf_counter()
+
         # ── MLP ──
         if self.is_moe:
             mlp_out = self._moe_forward(hidden, moe_layer_idx)
         else:
             mlp_out = self._dense_mlp_forward(hidden)
+
+        if layer_timing:
+            torch.cuda.synchronize()
+            t_layer_end = time.perf_counter()
+            abs_idx = moe_layer_idx if moe_layer_idx is not None else "dense"
+            prefix = "PREFILL-TIMING" if M > 1 else "LAYER-TIMING"
+            logger.info(
+                "%s L%s(%s) M=%d: norm1=%.2fms attn=%.2fms norm2=%.2fms mlp=%.2fms total=%.2fms",
+                prefix, abs_idx, self.layer_type[:3], M,
+                (t_after_norm1 - t_layer_start) * 1000,
+                (t_after_attn - t_after_norm1) * 1000,
+                (t_after_norm2 - t_after_attn) * 1000,
+                (t_layer_end - t_after_norm2) * 1000,
+                (t_layer_end - t_layer_start) * 1000,
+            )
 
         return mlp_out, residual
 
@@ -181,12 +240,10 @@ class TransformerLayer:
 
     def _shared_expert_forward(self, hidden: torch.Tensor) -> torch.Tensor:
         """Shared expert MLP on GPU, with optional sigmoid gate (Qwen3-Next)."""
-        gate = _linear(hidden, self.shared_expert["gate_proj"])
-        up = _linear(hidden, self.shared_expert["up_proj"])
-        activated = flashinfer.activation.silu_and_mul(
-            torch.cat([gate, up], dim=-1)
-        )
-        del gate, up
+        # Fused gate+up: single matmul → [M, 2N], then silu_and_mul → [M, N]
+        gate_up = _linear(hidden, self.shared_expert["gate_up_proj"])
+        activated = flashinfer.activation.silu_and_mul(gate_up)
+        del gate_up
         output = _linear(activated, self.shared_expert["down_proj"])
 
         # Apply sigmoid gate if present (Qwen3-Next):
@@ -213,6 +270,10 @@ class TransformerLayer:
         - routed_scaling_factor: 2.827
         """
         M = hidden.shape[0]
+        timing = _decode_timing() and M == 1
+
+        if timing:
+            t_start = time.perf_counter()
 
         # ── Routing ──
         # gate: [M, hidden] @ [n_experts, hidden]^T → [M, n_experts]
@@ -261,22 +322,71 @@ class TransformerLayer:
                     moe_layer_idx, self._moe_call_count,
                     h_rms, ids_list, ",".join(wts_list), wt_sum,
                 )
+            # Log unique expert activation for prefill batches (large M)
+            if diag_moe and moe_layer_idx is not None and M > 1:
+                unique_experts = torch.unique(topk_ids).numel()
+                total_experts = self.cfg.n_routed_experts
+                # Per-expert activation counts
+                flat_ids = topk_ids.reshape(-1)
+                counts = torch.bincount(flat_ids.long(), minlength=total_experts)
+                zero_experts = (counts == 0).sum().item()
+                min_count = counts[counts > 0].min().item() if zero_experts < total_experts else 0
+                max_count = counts.max().item()
+                median_count = counts[counts > 0].float().median().item() if zero_experts < total_experts else 0
+                logger.info(
+                    "MOE-ACTIVATION L%d M=%d: %d/%d experts activated (%.1f%%), "
+                    "%d inactive, counts: min=%d median=%.0f max=%d",
+                    moe_layer_idx, M, unique_experts, total_experts,
+                    100.0 * unique_experts / total_experts,
+                    zero_experts, min_count, median_count, max_count,
+                )
 
-        # ── Dispatch: GPU prefill (large M) vs CPU decode (small M) ──
-        if (
-            M >= self.gpu_prefill_threshold
-            and self.gpu_prefill_manager is not None
+        if timing:
+            t_routing = time.perf_counter()
+
+        # ── Overlap shared expert with routed expert dispatch for M=1 ──
+        # Shared expert only reads `hidden` (no dependency on routing results),
+        # so we launch it on a separate CUDA stream before dispatch.
+        shared_future = None
+        if M == 1 and self._shared_stream is not None and self.shared_expert is not None:
+            # Make shared stream wait for hidden to be ready on default stream
+            self._shared_stream.wait_stream(torch.cuda.current_stream(self.device))
+            with torch.cuda.stream(self._shared_stream):
+                shared_future = self._shared_expert_forward(hidden)
+
+        # ── Dispatch: GPU path (prefill or decode) vs CPU decode ──
+        # GPU path for: (1) prefill above threshold, or (2) M=1 decode (gpu_decode)
+        if self.gpu_prefill_manager is not None and (
+            M >= self.gpu_prefill_threshold or M == 1
         ):
-            # GPU path: INT4 Marlin kernel handles routing + shared expert
+            # GPU path: INT4 Marlin kernel handles routing + expert computation
             output = self._gpu_prefill_forward(hidden, topk_ids, topk_weights, moe_layer_idx)
         else:
             # CPU path: Krasis engine handles routed experts
             output = self._routed_expert_forward(hidden, topk_ids, topk_weights, moe_layer_idx)
 
+        if timing:
+            t_dispatch = time.perf_counter()
+
         # If shared_expert_gate exists, Rust engine skips shared expert —
         # we handle it on GPU with the sigmoid gate
-        if self.shared_expert_gate is not None and self.shared_expert is not None:
+        if shared_future is not None:
+            # Sync shared stream and add result
+            torch.cuda.current_stream(self.device).wait_stream(self._shared_stream)
+            output = output + shared_future
+        elif self.shared_expert_gate is not None and self.shared_expert is not None:
             output = output + self._shared_expert_forward(hidden)
+
+        if timing:
+            t_shared = time.perf_counter()
+            logger.info(
+                "DECODE-TIMING L%s: routing=%.1fms dispatch=%.1fms shared=%.1fms total=%.1fms",
+                moe_layer_idx,
+                (t_routing - t_start) * 1000,
+                (t_dispatch - t_routing) * 1000,
+                (t_shared - t_dispatch) * 1000,
+                (t_shared - t_start) * 1000,
+            )
 
         if _DIAG_ENABLED and diag_moe and moe_layer_idx is not None and M == 1:
             o_rms = output.float().pow(2).mean().sqrt().item()
@@ -322,16 +432,26 @@ class TransformerLayer:
             raise RuntimeError("Krasis engine not set for MoE layer")
 
         M = hidden.shape[0]
+        timing = _decode_timing() and M == 1
+
+        if timing:
+            t0 = time.perf_counter()
 
         # GPU → CPU transfer (implicit sync via .cpu())
         act_cpu = hidden.detach().cpu().contiguous()
         ids_cpu = topk_ids.detach().cpu().contiguous()
         wts_cpu = topk_weights.detach().cpu().contiguous()
 
+        if timing:
+            t1 = time.perf_counter()
+
         # Convert to bytes for Rust engine
         act_bytes = act_cpu.view(torch.uint16).numpy().view(np.uint8).tobytes()
         ids_bytes = ids_cpu.numpy().view(np.uint8).tobytes()
         wts_bytes = wts_cpu.numpy().view(np.uint8).tobytes()
+
+        if timing:
+            t2 = time.perf_counter()
 
         # Submit async
         self.krasis_engine.submit_forward(
@@ -341,6 +461,9 @@ class TransformerLayer:
         # Sync — blocks until CPU experts finish
         output_bytes = self.krasis_engine.sync_forward()
 
+        if timing:
+            t3 = time.perf_counter()
+
         # Convert BF16 output bytes → tensor
         # Rust engine already applied: routed_scaling_factor * routed + shared_expert
         output = torch.frombuffer(
@@ -349,5 +472,17 @@ class TransformerLayer:
 
         # CPU → GPU
         output = output.to(self.device)
+
+        if timing:
+            t4 = time.perf_counter()
+            logger.info(
+                "  CPU-EXPERT L%s: gpu→cpu=%.1fms bytes=%.1fms rust=%.1fms cpu→gpu=%.1fms total=%.1fms",
+                moe_layer_idx,
+                (t1 - t0) * 1000,
+                (t2 - t1) * 1000,
+                (t3 - t2) * 1000,
+                (t4 - t3) * 1000,
+                (t4 - t0) * 1000,
+            )
 
         return output
