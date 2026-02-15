@@ -26,8 +26,7 @@ import torch
 
 logger = logging.getLogger(__name__)
 
-# Decode timing: set KRASIS_DECODE_TIMING=1 to see per-component breakdown
-_DECODE_TIMING = os.environ.get("KRASIS_DECODE_TIMING", "") == "1"
+from krasis.timing import TIMING
 
 # Marlin quantization constants
 GROUP_SIZE = 128
@@ -778,7 +777,7 @@ class GpuPrefillManager:
         then .to(device) does PCIe DMA. No intermediate allocations.
         """
         assert self._engine is not None, "Layer-grouped mode requires Krasis engine"
-        detailed = os.environ.get("KRASIS_PREFILL_TIMING", "") == "1"
+        detailed = TIMING.prefill
 
         from sglang.srt.layers.quantization.marlin_utils import (
             marlin_make_workspace,
@@ -958,7 +957,7 @@ class GpuPrefillManager:
 
     def free_layer_group(self):
         """Free layer group's expert weights from GPU VRAM."""
-        detailed = os.environ.get("KRASIS_PREFILL_TIMING", "") == "1"
+        detailed = TIMING.prefill
         if detailed:
             t0 = time.perf_counter()
 
@@ -2177,7 +2176,7 @@ class GpuPrefillManager:
         )
 
         M = x.shape[0]
-        timing = _DECODE_TIMING and M == 1
+        timing = TIMING.decode and M == 1
 
         if timing:
             t_start = time.perf_counter()

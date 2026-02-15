@@ -103,6 +103,8 @@ TTFT (Time to First Token) measured wall-clock from request to first token (KTra
 | KTransformers | 1 | TP=1 INT8 attn | 49.7 | 4.85 | 173.0 | 14,735 | 275 | INT8 attn needed to fit on 1 GPU |
 | KTransformers | 2 | PP=2 | 57.5 | 3.60 | 149.5 | 14,895+13,707 | 275 | |
 | KTransformers | 3 | PP=3 | 57.3 | 3.29 | 150.1 | 14,129+14,287+13,132 | 278 | |
+| **Krasis** | **2** | **PP=2 HCS hybrid** | **621** | **TBD** | **15.5** | **13,115+13,112** | **125** | **Qwen3-Coder-Next** |
+
 ### Qwen3-Coder-Next (PP=2, HCS Hybrid) — VERIFIED CORRECT
 
 The Qwen3-Coder-Next model (48 layers, 512 experts, top-10) achieves dramatically better results due to:

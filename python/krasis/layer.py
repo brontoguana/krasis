@@ -26,15 +26,7 @@ from krasis.weight_loader import int8_linear
 
 logger = logging.getLogger(__name__)
 
-# Gate per-MoE-layer diagnostics behind env var to avoid GPU sync overhead
-_DIAG_ENABLED = os.environ.get("KRASIS_DIAG", "") == "1"
-
-# Runtime-togglable timing (check env var dynamically — set/unset without restart)
-def _decode_timing():
-    return os.environ.get("KRASIS_DECODE_TIMING", "") == "1"
-
-def _prefill_timing():
-    return os.environ.get("KRASIS_PREFILL_TIMING", "") == "1"
+from krasis.timing import TIMING
 
 
 def _linear(x: torch.Tensor, weight_data) -> torch.Tensor:
@@ -156,7 +148,7 @@ class TransformerLayer:
             residual is the running residual stream.
         """
         M = hidden.shape[0]
-        layer_timing = (_decode_timing() and M == 1) or (_prefill_timing() and M > 1)
+        layer_timing = (TIMING.decode and M == 1) or (TIMING.prefill and M > 1)
 
         if layer_timing:
             torch.cuda.synchronize()
@@ -270,7 +262,7 @@ class TransformerLayer:
         - routed_scaling_factor: 2.827
         """
         M = hidden.shape[0]
-        timing = _decode_timing() and M == 1
+        timing = TIMING.decode and M == 1
 
         if timing:
             t_start = time.perf_counter()
@@ -307,7 +299,7 @@ class TransformerLayer:
 
         # DIAG: per-MoE-layer logging for first N calls (gated behind KRASIS_DIAG=1)
         diag_moe = False
-        if _DIAG_ENABLED:
+        if TIMING.diag:
             if not hasattr(self, '_moe_call_count'):
                 self._moe_call_count = 0
             self._moe_call_count += 1
@@ -388,7 +380,7 @@ class TransformerLayer:
                 (t_shared - t_start) * 1000,
             )
 
-        if _DIAG_ENABLED and diag_moe and moe_layer_idx is not None and M == 1:
+        if TIMING.diag and diag_moe and moe_layer_idx is not None and M == 1:
             o_rms = output.float().pow(2).mean().sqrt().item()
             logger.info(
                 "MOE-DIAG L%d call#%d: out_rms=%.4f",
@@ -432,7 +424,7 @@ class TransformerLayer:
             raise RuntimeError("Krasis engine not set for MoE layer")
 
         M = hidden.shape[0]
-        timing = _decode_timing() and M == 1
+        timing = TIMING.decode and M == 1
 
         if timing:
             t0 = time.perf_counter()
