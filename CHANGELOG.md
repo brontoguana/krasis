@@ -1,5 +1,47 @@
 # Krasis Changelog
 
+## Prefill OOM Recovery — 2026-02-15
+
+### Bug Fix: Prefill OOM crash with HCS + CUDA graphs
+- **Problem**: 10K token prefill on 1 GPU with HCS hot experts (~3 GB) + CUDA graph pools (~1 GB)
+  would OOM and crash — no fallback, no recovery
+- **Root cause**: Chunk size calculator used fixed 512 MB headroom, didn't account for HCS/CUDA graph
+  overhead, and used wrong config attribute (`num_local_experts` → exception → default 2048)
+- **Fix**: Three-layer defense:
+  1. **Better VRAM estimation**: Include PyTorch reserved-but-unallocated pool in free VRAM calc,
+     use `n_routed_experts` (correct attribute), 2x safety factor on per-token memory
+  2. **OOM retry with chunk halving**: Catch `torch.OutOfMemoryError`, halve chunk size, retry
+     (up to 3 attempts). On first retry, free CUDA graphs (~1 GB reclaimed)
+  3. **CUDA graph re-capture**: After successful prefill, re-capture CUDA graphs so decode
+     performance is unaffected
+- **Result**: QCN 1GPU with HCS now works: 580 tok/s prefill (was crash), 10.09 tok/s decode
+- Verified no performance loss vs baseline (573→580 prefill, 10.10→10.09 decode)
+
+## GPT OSS 120B Support — 2026-02-15
+
+### New Model: GPT OSS 120B (MXFP4, 128 experts, top-4)
+- Full MXFP4 dequantization (OCP MX format → BF16 → INT4)
+- Custom activation: `gate * sigmoid(gate * 1.702) * (up + 1)` with clamping
+- Custom routing: topk on raw logits first, then softmax on selected values
+- Expert biases (gate, up, down) support in both Rust and Python
+- Marlin w2 padding (2880→2944) for kernel thread config compatibility
+- Benchmark: 484 tok/s prefill, 21s TTFT, 4.84 tok/s decode (2 GPU, INT4/INT4)
+
+### Bug fixes
+- Fixed `cpu_expert_byte_sizes` INT4 path: was including Marlin padding for CPU cache (only GPU needs it)
+- Fixed `read_unified_expert`: w2 read used unpadded dimension, causing offset misalignment
+- Fixed DMA buffer allocation: w2 buffers sized for unpadded dimension
+- Fixed DMA buffer reshape: w2 tensor reshape used unpadded dimension
+- Fixed Rust GPT OSS routing: inlined MoE forward (was calling nonexistent method)
+- Fixed Rust `gate_bias` → `correction_bias` field name
+
+### Regression tests (no performance loss on existing models)
+- V2-Lite 1GPU: 2201 pp (was 2171), 6.37 dec (was 5.68) — no regression
+- Q235B 2GPU: 195 pp (was 196), 1.47 dec (was 1.37) — no regression
+- QCN 1GPU: 10.12 dec (was 10.10) — no regression
+
+---
+
 ## v0.1.4: Server warmup + chat Ctrl-C fix — 2026-02-15
 
 ### Server warmup
