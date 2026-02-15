@@ -1,5 +1,23 @@
 # Krasis Changelog
 
+## Feature: PyPI Publishing (pip install krasis) — 2026-02-15
+
+### Changes
+- Created GitHub Actions workflow (`.github/workflows/release.yml`) for automated wheel builds
+- Uses maturin-action with manylinux for x86_64 Linux wheel
+- Publishes to PyPI on GitHub release creation
+- Added `before-script-linux: yum install -y numactl-devel` for libnuma dependency
+- Updated `pyproject.toml` with full metadata, dependencies, console script entry point
+- v0.1.0 published: `pip install krasis` now works
+
+### 1-GPU Benchmarks: Qwen3-Coder-Next (INT4/INT4 and INT4/INT8)
+- INT4/INT4: 55.2 tok/s prefill, 181.2s TTFT, 10.00 tok/s decode
+- INT4/INT8: 55.0 tok/s prefill, 181.7s TTFT, 5.99 tok/s decode
+- Auto-optimiser selects HCS prefill + LRU decode for 1-GPU config
+- INT8 CPU experts ~40% slower decode (DMA bandwidth bound at 2x weight size)
+
+---
+
 ## Fix: Page Cache Eviction (MADV_DONTNEED) — 2026-02-15
 
 ### Bug
