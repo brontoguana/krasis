@@ -1,5 +1,31 @@
 # Krasis Changelog
 
+## Auto-Optimiser Integration — 2026-02-15
+
+### Feature
+Integrated the meta-optimiser into Krasis startup flow. On first launch with
+`--strategy auto`, Krasis automatically discovers the optimal prefill + decode
+strategy pair, saves results, and loads them instantly on subsequent launches.
+
+### How It Works
+- **First run (~12-18 min):** builds expert heatmap, benchmarks 6 prefill + 4 decode
+  strategies, saves results to `.krasis_cache/auto_optimise.json`
+- **Subsequent runs (~2s):** validates hardware/model fingerprint, loads cached result,
+  applies winning strategy
+- **Cache invalidation:** automatic when GPU model/count/VRAM changes, model path or
+  PP partition changes, or quantization config changes
+
+### Files Changed
+- `python/krasis/auto_optimise.py`: New module — AutoOptimiser class, cache validation,
+  fingerprinting, `auto_optimise_or_load()` entry point
+- `python/krasis/server.py`: Added `--strategy auto|manual` and `--force-optimize` flags.
+  Auto mode builds with neutral expert_divisor=0, then calls auto_optimise_or_load()
+- `python/krasis/launcher.py`: Added "auto" as first choice for expert_divisor in TUI,
+  passes `--strategy auto` to server.py when selected, default changed to "auto"
+- `CHANGELOG.md`: This entry
+
+---
+
 ## Qwen3-235B PP=2 HCS Hybrid Benchmark — 2026-02-15
 
 ### Benchmark
