@@ -6,6 +6,44 @@ For the TLDR version take a look at the [BENCHMARKS.md](https://github.com/bront
 
 Contact: see the Google Forms link on my GitHub profile
 
+## Quick Start
+
+```bash
+# Clone and run — everything else is automatic
+git clone https://github.com/brontoguana/krasis.git
+cd krasis
+
+# Download a model into models/ (any HuggingFace MoE model with safetensors)
+# e.g. huggingface-cli download Qwen/Qwen3-Coder-Next --local-dir models/Qwen3-Coder-Next
+
+# Launch (interactive TUI — handles venv, build, dependencies, optimization)
+./krasis
+```
+
+On first run, the `./krasis` script:
+1. Creates a Python virtual environment (`.venv/`)
+2. Installs Rust dependencies and builds the Krasis native library
+3. Installs Python dependencies (PyTorch must be pre-installed)
+4. Checks system configuration (CPU governor, hugepages, SIMD)
+5. Opens an interactive TUI for model selection and configuration
+6. Builds optimized weight caches on disk (GPU Marlin + CPU AVX2)
+7. Auto-discovers the best prefill/decode strategy for your hardware
+
+Subsequent runs skip all setup and load cached weights + strategy in seconds.
+
+```bash
+# Non-interactive (use saved config from last launch)
+./krasis --non-interactive
+
+# Override specific settings
+./krasis --model-path /path/to/model --num-gpus 2
+
+# Chat with a running server
+./krasis-chat
+```
+
+The server exposes an OpenAI-compatible API at `http://localhost:8080/v1/chat/completions` with SSE streaming support, compatible with tools like Cursor, OpenCode, and any OpenAI SDK client.
+
 ## What It Does
 
 Krasis runs large language models — the kind with 350 billion+ parameters — on hardware you can actually buy. Three consumer GPUs and a lot of system RAM is all you need. No datacenter, no $100k GPU rental.
@@ -18,7 +56,7 @@ When you type a message to an LLM, two things happen. First, the model reads you
 
 This matters a lot in practice. An IDE like Cursor or OpenCode sends 10,000+ tokens of context with every request. If prefill runs on CPU at 25 tokens/second, you're waiting 7 minutes before the model even starts responding. If prefill runs on GPU at 2,400 tokens/second, that same prompt processes in 4 seconds. That's the difference between a usable tool and a paperweight.
 
-Krasis keeps GPU prefill **always on**. Prompts process at hundreds to thousands of tokens per second on GPU, then CPU handles the slower token-by-token generation. You wait a few seconds for the model to "read" your prompt, then tokens stream out at a steady 2-6 tok/s depending on the model.
+Krasis keeps GPU prefill **always on**. Prompts process at hundreds to thousands of tokens per second on GPU, then CPU handles the slower token-by-token generation. You wait a few seconds for the model to "read" your prompt, then tokens stream out at a steady 2-10+ tok/s depending on the model.
 
 ### How other tools handle GPU offloading
 
@@ -61,17 +99,19 @@ When experts fit entirely in VRAM (small models, or big GPUs), Krasis pre-loads 
 
 Even in the worst case — layer-grouped with only 25% of experts fitting at once — Krasis prefill is 15-20x faster than llama.cpp or KTransformers, because every multiply-accumulate happens on GPU hardware designed for exactly this workload.
 
-For decode (token-by-token generation), all three systems perform similarly at 2-6 tok/s, because the bottleneck shifts to memory bandwidth and only a handful of experts activate per token. This is where Krasis's CPU path with hand-tuned AVX2 INT4 kernels handles the work efficiently.
+For decode (token-by-token generation), all three systems are CPU-bound since only a handful of experts activate per token. llama.cpp and KTransformers typically achieve 2-5 tok/s. Krasis achieves 2-10+ tok/s depending on model architecture, using hand-tuned AVX2 INT4 kernels on CPU combined with CUDA graph optimizations that eliminate GPU kernel launch overhead.
 
 ## Architecture
 
 ```
 Krasis Standalone (single process, replaces SGLang + KTransformers)
-├── GPU: attention (MLA/GQA), norms, routing, shared expert
+├── GPU: attention, norms, routing, shared expert
 │   ├── INT8 or BF16 weights (per-component configurable via QuantConfig)
-│   ├── FlashInfer MLA attention (DeepSeek/Kimi) or GQA (Qwen3/GLM-4.7)
-│   ├── FP8 E4M3 KV cache (2x VRAM savings, upcast to BF16 for kernel)
-│   └── INT4/INT8 Marlin GPU prefill for MoE (fused_marlin_moe kernel)
+│   ├── FlashInfer MLA (DeepSeek) or GQA (Qwen3) attention
+│   ├── GatedDeltaNet linear attention (Qwen3-Coder-Next hybrid models)
+│   ├── FP8 E4M3 KV cache (2x VRAM savings, native FlashInfer support)
+│   ├── INT4/INT8 Marlin GPU prefill for MoE (fused_marlin_moe kernel)
+│   └── CUDA graphs: shared expert + linear attention captured as graphs
 ├── CPU: routed expert MoE (Rust AVX2 kernel)
 │   ├── INT4 or INT8 expert weights (CPU-optimized sequential layout)
 │   ├── Expert-level + intra-expert parallelism (rayon)
@@ -81,7 +121,8 @@ Krasis Standalone (single process, replaces SGLang + KTransformers)
 ├── Dual weight format:
 │   ├── (A) GPU cache: Marlin tile-permuted format → DMA to GPU, zero conversion
 │   └── (B) CPU cache: sequential row-major → AVX2 cache-friendly decode
-└── HTTP: FastAPI /v1/chat/completions (SSE streaming)
+├── Auto-optimiser: discovers best strategy on first run, caches for instant reload
+└── HTTP: FastAPI /v1/chat/completions (SSE streaming, OpenAI-compatible)
 ```
 
 ### Weight Format
@@ -97,23 +138,29 @@ This dual format replaced an earlier single-format (Marlin everywhere) after tes
 
 ### GPU Prefill Modes (`expert_divisor`)
 
-| Mode | VRAM | Prefill Speed | KV Capacity |
-|------|------|:---:|:---:|
-| `divisor=0` (chunked) | 286 MB buffer | 173 tok/s (10K) | 212K tokens |
-| `divisor=1` (persistent) | 7,654 MB all experts | 2,409 tok/s (10K) | 93K tokens |
-| `divisor=2` (layer-grouped) | ~3,827 MB/group | ~400-600 tok/s | 216K tokens |
+The auto-optimiser (`--strategy auto`) discovers the best mode automatically. Manual options:
+
+| Mode | Description | Speed vs Chunked |
+|------|-------------|:---:|
+| `auto` | Auto-discover best mode (recommended) | best available |
+| `divisor=1` (persistent) | All experts pre-loaded in VRAM | 14-72x faster |
+| `divisor=2-32` (layer-grouped) | Expert groups cycled through VRAM | 2-10x faster |
+| `divisor=-1` (active-only) | DMA only activated experts per layer | 1-3x faster |
+| `divisor=0` (chunked) | Legacy per-layer full DMA | baseline |
 
 OOM fallback: persistent → layer-grouped(2) automatically if VRAM insufficient.
+
+Speed depends on model size and VRAM capacity. Smaller models (V2-Lite) can fit all experts persistently for 2,400+ tok/s. Larger models (235B+) use layer-grouped for 200-600 tok/s.
 
 ## Supported Models
 
 | Model | Architecture | Experts | Attention | Status |
 |-------|-------------|---------|-----------|--------|
-| **DeepSeek V2-Lite** | deepseek_v2 | 64 + 2 shared, top-6 | MLA | Working (test model, 5.8 tok/s) |
+| **Qwen3-Coder-Next** | qwen3_next | 512 routed, top-10 | Hybrid (36 linear + 12 GQA) | Primary target (10.5 tok/s decode, 580 tok/s prefill) |
+| **Qwen3-235B-A22B** | qwen3_moe | 128 routed, top-8 | GQA | Working (1.65 tok/s decode, 198 tok/s prefill) |
+| **DeepSeek V2-Lite** | deepseek_v2 | 64 + 2 shared, top-6 | MLA | Working (test model, 5.8 tok/s decode) |
 | **Kimi K2.5** | kimi_k2 | 384 + 1 shared, top-8 | MLA | Retired (too slow on our HW) |
-| **Qwen3-235B-A22B** | qwen3_moe | 128 routed, top-8 | GQA | Working (KTransformers, 4.21 tok/s) |
 | **GLM-4.7** | glm4_moe | 160 + 1 shared, top-8 | GQA (partial RoPE, bias) | Config parses, untested |
-| **Qwen3-Coder-Next** | qwen3_moe | 160 routed, top-8 | GQA | Next target |
 
 ### Input Formats
 
@@ -128,59 +175,86 @@ OOM fallback: persistent → layer-grouped(2) automatically if VRAM insufficient
 
 ## Building
 
-```bash
-# Build Rust library
-cargo build --release
+The `./krasis` launcher handles building automatically on first run. If you prefer manual setup:
 
-# Install Python package
+```bash
+# Create venv and install
+python3 -m venv .venv && source .venv/bin/activate
 pip install -e .
 
-# Or build + install manually (for AMD Zen 2 — NATIVE adds -mfma)
-CPUINFER_CPU_INSTRUCT=NATIVE ./install.sh build --manual
+# PyTorch must be installed separately
+pip install torch --index-url https://download.pytorch.org/whl/cu126
 ```
 
 ## Usage
 
-### Standalone Server
+### Interactive Launcher (recommended)
+
+```bash
+./krasis
+```
+
+The launcher provides a TUI with:
+- Model selection (scans `models/` directory)
+- GPU selection and pipeline parallelism configuration
+- Per-component quantization with live VRAM/RAM budget display
+- CPU expert source selection (build INT4/INT8 from native, or use GGUF)
+- Auto-optimisation (discovers best prefill/decode strategy on first run)
+
+Configuration is saved to `.krasis_config` and reloaded on subsequent launches.
+
+### Non-Interactive Launch
+
+```bash
+# Use saved config
+./krasis --non-interactive
+
+# Override specific settings
+./krasis --non-interactive --model-path /path/to/model --num-gpus 2
+```
+
+### Direct Server (advanced)
+
+For fine-grained control, run the server directly:
 
 ```bash
 python -m krasis.server \
     --model-path /path/to/model \
-    --pp-partition 1 \
+    --pp-partition 24,24 \
+    --strategy auto \
     --gpu-expert-bits 4 \
-    --cpu-expert-bits 4 \
-    --expert-divisor 1
+    --cpu-expert-bits 4
 ```
 
-### With SGLang (legacy)
-
-```bash
-export KRASIS_BACKEND=1
-python -m sglang.launch_server \
-    --model /path/to/model \
-    --pp-size 3 \
-    --quantization w8a8_int8 \
-    --kv-cache-dtype fp8_e4m3 \
-    --disable-cuda-graph
-```
+Key server flags:
+- `--strategy auto` — auto-discover best strategy (recommended)
+- `--strategy manual --expert-divisor 4` — explicit layer-grouped(4)
+- `--gpu-prefill-threshold 300` — GPU for prompts >= 300 tokens, CPU for M=1 decode
+- `--kv-dtype fp8_e4m3` — FP8 KV cache (default, 2x VRAM savings)
+- `--attention-quant int8` — INT8 attention weights (default, halves VRAM)
 
 ## Features
 
+- **Interactive TUI launcher** — model selection, GPU picker, per-component quantization with live VRAM/RAM budget
+- **Auto-optimiser** — discovers best prefill/decode strategy on first run, caches results for instant reload
 - **Dual weight format** — separate GPU (Marlin) and CPU-optimized caches, each independently configurable as INT4 or INT8
 - **Persistent expert buffers** — pre-load all experts in VRAM for 14-72x prefill speedup
 - **Layer-grouped prefill** — cycles expert groups through VRAM when they don't all fit
+- **CUDA graph optimizations** — shared expert + linear attention captured as graphs, eliminating kernel launch overhead
 - **GGUF input** — accepts GGUF files, converts to AVX2 transposed format, disk-caches
-- **FP8 KV cache** — 2x VRAM savings with negligible precision loss
+- **FP8 KV cache** — 2x VRAM savings with negligible precision loss (native FlashInfer FP8 on SM89+)
 - **INT8 non-expert weights** — halves attention VRAM via per-channel quantization
 - **Per-component quantization** — QuantConfig controls BF16/INT8 per weight type
 - **VRAM budget calculator** — auto-sizes KV cache and context length to available VRAM
 - **System checks** — CPU governor, hugepages, NUMA topology, SIMD capability
-- **MLA + GQA attention** — FlashInfer backends with YaRN RoPE, partial RoPE, attention bias
+- **MLA + GQA + linear attention** — FlashInfer MLA/GQA backends, GatedDeltaNet linear attention for hybrid models
 - **Pipeline parallelism** — PP=1/2/3 with CPU bounce for cross-GPU transfer
+- **OpenAI-compatible API** — `/v1/chat/completions` with SSE streaming, works with Cursor, OpenCode, etc.
 
 ## Documentation
 
 - [CHANGELOG.md](CHANGELOG.md) — Detailed change history with test results
+- [BENCHMARKS.md](BENCHMARKS.md) — Performance comparisons vs llama.cpp and KTransformers
 - [RESEARCH.md](RESEARCH.md) — Performance analysis, benchmarks, and research findings
 
 ## License
