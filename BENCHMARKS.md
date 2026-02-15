@@ -167,6 +167,70 @@ Configuration:
 
 **Note**: Prefill comparison uses Qwen3-235B numbers for KTransformers/llama.cpp (different model). Direct comparison pending Qwen3-Coder-Next runs on those tools — but the 10x+ advantage is primarily architectural (Krasis' full GPU prefill vs CPU-bottlenecked prefill in other tools).
 
+### DeepSeek-V2-Lite — Auto-Optimiser Strategy Comparison
+
+The auto-optimiser was run on DeepSeek-V2-Lite (27 MoE layers, 64 experts, top-6, MLA attention) to benchmark all available prefill and decode strategies. Each strategy was tested with 3 runs, 10K token prefill prompt, 64 decode tokens.
+
+**Quantization**: INT4 Marlin GPU experts, INT4 CPU experts, FP8 KV cache, INT8 attention weights.
+
+#### 1 GPU (PP=[27])
+
+**Prefill strategies** (ranked by tok/s):
+
+| Strategy | Avg tok/s | Avg TTFT (s) | VRAM (MB) | Divisor |
+|----------|----------|-------------|-----------|---------|
+| persistent | 1,757.4 | 5.69 | 9,339 | 1 |
+| layer_grouped_2 | 1,746.0 | 5.73 | 9,339 | 2 |
+| layer_grouped_4 | 1,743.5 | 5.74 | 9,339 | 4 |
+| hcs_prefill | 1,722.7 | 5.81 | 12,776 | -3 |
+| chunked | 792.1 | 12.62 | 9,624 | 0 |
+| active_only | 303.2 | 32.98 | 9,624 | -1 |
+
+**Decode strategies** (ranked by tok/s):
+
+| Strategy | Avg tok/s | VRAM (MB) | Divisor |
+|----------|----------|-----------|---------|
+| **pure_cpu** | **6.98** | **9,339** | null |
+| hcs_hybrid | 4.88 | 12,776 | -3 |
+| compact | 3.31 | 9,624 | -1 |
+| lru | 3.31 | 14,376 | -2 |
+
+**Winner**: persistent prefill (1,757 tok/s) + pure_cpu decode (6.98 tok/s)
+
+#### 2 GPUs (PP=[14,13])
+
+**Prefill strategies** (ranked by tok/s):
+
+| Strategy | Avg tok/s | Avg TTFT (s) | VRAM (MB) | Divisor |
+|----------|----------|-------------|-----------|---------|
+| layer_grouped_2 | 1,729.2 | 5.79 | 8,863+8,709 | 2 |
+| layer_grouped_4 | 1,719.9 | 5.82 | 8,863+8,709 | 4 |
+| persistent | 1,709.5 | 5.86 | 8,863+8,709 | 1 |
+| hcs_prefill | 1,706.4 | 5.87 | 12,815+12,823 | -3 |
+| chunked | 790.3 | 12.65 | 9,148+8,995 | 0 |
+| active_only | 302.5 | 33.06 | 9,148+8,995 | -1 |
+
+**Decode strategies** (ranked by tok/s):
+
+| Strategy | Avg tok/s | VRAM (MB) | Divisor |
+|----------|----------|-----------|---------|
+| **pure_cpu** | **6.69** | **8,863+8,709** | null |
+| hcs_hybrid | 4.86 | 12,815+12,823 | -3 |
+| compact | 3.51 | 9,148+8,995 | -1 |
+| lru | 3.49 | 14,391+14,402 | -2 |
+
+**Winner**: layer_grouped_2 prefill (1,729 tok/s) + pure_cpu decode (6.69 tok/s)
+
+#### Key Observations
+
+1. **Top 4 prefill strategies are nearly identical** (~1,700-1,760 tok/s) — V2-Lite's experts are small enough that DMA overhead is minimal regardless of strategy
+2. **pure_cpu decode is fastest** (6.98-6.69 tok/s) — for this small model, CPU Rust engine beats GPU Marlin at M=1 (no GPU kernel launch overhead)
+3. **Chunked is 2.2x slower** than the best for prefill — per-layer DMA is costly even for small experts
+4. **Active-only is 5.8x slower** — individual expert DMA transfers dominate
+5. **Adding a 2nd GPU has negligible effect** — V2-Lite is compute-light enough that 1 GPU handles it easily; the 2nd GPU adds PP overhead without benefit
+6. **HCS uses more VRAM** (12.8 GB vs 9.3 GB) for hot expert pinning, but doesn't help decode on this model
+7. **LRU uses excessive VRAM** (14.4 GB) without any decode benefit over compact
+
 ## Conclusions
 
 TODO

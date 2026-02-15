@@ -1,5 +1,20 @@
 # Krasis Changelog
 
+## V2-Lite Auto-Optimiser Benchmark — 2026-02-15
+
+### Benchmark
+Ran auto-optimiser on DeepSeek-V2-Lite with 1 GPU and 2 GPUs. Tested all 6 prefill
+and 4 decode strategies with 3 runs each (10K prefill, 64 decode tokens).
+
+### Results
+- **1 GPU**: persistent prefill (1,757 tok/s, TTFT 5.69s) + pure_cpu decode (6.98 tok/s)
+- **2 GPU**: layer_grouped_2 prefill (1,729 tok/s, TTFT 5.79s) + pure_cpu decode (6.69 tok/s)
+- Quantization: INT4 Marlin GPU, INT4 CPU, FP8 KV, INT8 attention
+- Results saved to `tests/v2lite_auto_1gpu.json` and `tests/v2lite_auto_2gpu.json`
+- BENCHMARKS.md updated with full strategy comparison tables
+
+---
+
 ## Auto-Optimiser Integration — 2026-02-15
 
 ### Feature
