@@ -718,6 +718,47 @@ def _gpu_selection_screen(
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# Launch mode selection screen
+# ═══════════════════════════════════════════════════════════════════════
+
+def _launch_mode_screen() -> Optional[bool]:
+    """Select launch mode: Launch or Benchmark and Launch.
+
+    Returns True if benchmark should run, False for plain launch, None if cancelled.
+    """
+    options = [
+        ("Launch", "Start the server immediately"),
+        ("Benchmark and Launch", "Run prefill + decode benchmark, then start server"),
+    ]
+    cursor = 0
+
+    while True:
+        _clear_screen()
+        lines = []
+        lines.append(f"  {BOLD}Select launch mode:{NC}\n")
+
+        for i, (label, desc) in enumerate(options):
+            prefix = f"  {CYAN}\u25b8{NC} " if i == cursor else "    "
+            hl = BOLD if i == cursor else ""
+            lines.append(f"{prefix}{hl}{label}{NC}  {DIM}{desc}{NC}")
+
+        lines.append(f"\n  {DIM}[\u2191\u2193] Select  [Enter] Confirm  [q] Quit{NC}")
+
+        sys.stdout.write("\n".join(lines) + "\n")
+        sys.stdout.flush()
+
+        key = _read_key()
+        if key == KEY_UP:
+            cursor = (cursor - 1) % len(options)
+        elif key == KEY_DOWN:
+            cursor = (cursor + 1) % len(options)
+        elif key == KEY_ENTER:
+            return cursor == 1  # True = benchmark, False = plain launch
+        elif key == KEY_QUIT or key == KEY_ESCAPE:
+            return None
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # CPU expert source selection screen
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -1236,7 +1277,7 @@ class Launcher:
             print(f"  CPU experts: {budget['cpu_expert_gb']:.1f} GB / {budget['total_ram_gb']} GB")
         print()
 
-    def launch_server(self) -> None:
+    def launch_server(self, benchmark: bool = False) -> None:
         """Build args and exec the Krasis server."""
         num_gpus = len(self.selected_gpus) if self.selected_gpus else self.hw["gpu_count"]
 
@@ -1269,6 +1310,8 @@ class Launcher:
             cmd_args.extend(["--gguf-path", self.cfg.gguf_path])
         if self.cfg.force_load:
             cmd_args.append("--force-load")
+        if benchmark:
+            cmd_args.append("--benchmark")
 
         # Set CUDA_VISIBLE_DEVICES to selected GPUs
         if self.selected_gpus:
@@ -1328,6 +1371,8 @@ def parse_args() -> argparse.Namespace:
                         help="Min tokens for GPU prefill (default: 300)")
     parser.add_argument("--force-load", action="store_true",
                         help="Force reload cached weights")
+    parser.add_argument("--benchmark", action="store_true",
+                        help="Run standardized benchmark before starting server")
     parser.add_argument("--skip-setup", action="store_true",
                         help="(ignored — handled by bash wrapper)")
     parser.add_argument("--venv", default=None,
@@ -1426,13 +1471,27 @@ def main():
 
         launcher.print_summary()
         _save_config(launcher.config_file, launcher.cfg.to_save_dict())
-        launcher.launch_server()
+        launcher.launch_server(benchmark=args.benchmark)
     else:
         # Interactive TUI
         if launcher.run_interactive():
             _save_config(launcher.config_file, launcher.cfg.to_save_dict())
+
+            # Launch mode selection (skip if --benchmark on CLI)
+            do_benchmark = args.benchmark
+            if not do_benchmark:
+                _hide_cursor()
+                try:
+                    result = _launch_mode_screen()
+                finally:
+                    _show_cursor()
+                if result is None:
+                    print("Aborted.")
+                    sys.exit(0)
+                do_benchmark = result
+
             launcher.print_summary()
-            launcher.launch_server()
+            launcher.launch_server(benchmark=do_benchmark)
         else:
             print("Aborted.")
             sys.exit(0)

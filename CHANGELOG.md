@@ -1,5 +1,22 @@
 # Krasis Changelog
 
+## Feature: Benchmark and Launch — 2026-02-15
+
+### New Feature
+- Standardized benchmark suite (`python/krasis/benchmark.py`) that runs after model load
+- Measures prefill speed (TTFT, tok/s) and decode speed (tok/s, ms/tok) over 3 runs each
+- Collects full system info (CPU, RAM, GPUs, VRAM usage), model config, quant settings, strategy
+- Includes verification data: prompts used and generated output text in the log
+- Results appended to `benchmark_results.log` in human-readable format
+
+### Integration
+- `--benchmark` flag on both `server.py` and `launcher.py`
+- Launcher TUI: new "Launch" vs "Benchmark and Launch" selection screen after config
+- Non-interactive: `./krasis --benchmark --non-interactive` for scripted use
+- Warmup phase (2 short generations) ensures CUDA graphs are captured before timing
+
+---
+
 ## Decode Optimization: CUDA Graph Linear Attention — 2026-02-15
 
 ### Optimization
