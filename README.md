@@ -8,17 +8,19 @@ Contact: see the Google Forms link on my GitHub profile
 
 ## Quick Start
 
-### Option A: pip install (recommended)
+### Option A: pipx install (recommended)
 
 ```bash
-# Create a virtual environment (avoids PEP 668 "externally-managed" errors)
-python3 -m venv ~/.krasis-env
-source ~/.krasis-env/bin/activate
+# Install pipx if you don't have it
+sudo apt install pipx   # Ubuntu/Debian
+# or: pip install --user pipx
 
-pip install krasis
+# Install Krasis (isolated environment, no conflicts)
+pipx install krasis
+pipx ensurepath        # adds ~/.local/bin to PATH (restart terminal or source ~/.bashrc)
 
-# PyTorch with CUDA must be installed separately
-pip install torch --index-url https://download.pytorch.org/whl/cu126
+# PyTorch with CUDA is required — inject into the pipx environment
+pipx inject krasis torch --index-url https://download.pytorch.org/whl/cu126
 
 # Download a model into ~/.krasis/models/
 huggingface-cli download Qwen/Qwen3-Coder-Next \
@@ -28,7 +30,7 @@ huggingface-cli download Qwen/Qwen3-Coder-Next \
 krasis
 ```
 
-> **Note:** On Ubuntu 23.04+ / Debian 12+, bare `pip install` is blocked by PEP 668. The venv approach above avoids this. Alternatively: `pipx install krasis` or `pip install --break-system-packages krasis`.
+> **Alternative:** If you prefer pip, create a venv first: `python3 -m venv ~/.krasis-env && source ~/.krasis-env/bin/activate && pip install krasis torch --index-url https://download.pytorch.org/whl/cu126`
 
 ### Option B: from source
 
