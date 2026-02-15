@@ -201,6 +201,8 @@ def main():
                         help="auto: auto-discover best strategy on first run; manual: use explicit flags")
     parser.add_argument("--force-optimize", action="store_true",
                         help="Force re-run auto-optimiser even if cached results exist (--strategy auto only)")
+    parser.add_argument("--benchmark", action="store_true",
+                        help="Run standardized benchmark before starting server")
     parser.add_argument("--temperature", type=float, default=0.6)
     args = parser.parse_args()
 
@@ -313,6 +315,12 @@ def main():
                 if args.cuda_graphs:
                     manager._init_cuda_graphs()
             logger.info("hot_cached_static initialized (cuda_graphs=%s)", args.cuda_graphs)
+
+    # Run benchmark if requested (after model load + strategy, before serving)
+    if args.benchmark:
+        from krasis.benchmark import KrasisBenchmark
+        bench = KrasisBenchmark(_model)
+        bench.run()
 
     logger.info("Model loaded, starting server on %s:%d", args.host, args.port)
 
