@@ -357,7 +357,7 @@ class LauncherConfig:
         self.lm_head_quant: str = "int8"
         self.krasis_threads: int = 48
         self.host: str = "0.0.0.0"
-        self.port: int = 8080
+        self.port: int = 8012
         self.gpu_prefill_threshold: int = 300
         self.gguf_path: str = ""
         self.force_load: bool = False
@@ -1378,7 +1378,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default=None,
                         help="Server bind address (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=None,
-                        help="Server port (default: 8080)")
+                        help="Server port (default: 8012)")
     parser.add_argument("--gguf-path", default=None,
                         help="Path to GGUF file for CPU experts")
     parser.add_argument("--gpu-prefill-threshold", type=int, default=None,

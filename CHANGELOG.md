@@ -1,5 +1,39 @@
 # Krasis Changelog
 
+## FP8 KV Cache Race Condition Fix — 2026-02-16
+
+### Bug Fix: CUDA illegal memory access on second request with FP8 KV cache
+- **Symptom**: First request works, second request crashes during decode with
+  "CUDA error: an illegal memory access was encountered"
+- **Root cause**: FP8→BF16 upcast creates temporary tensors (`attn_ckv`, `attn_kpe`)
+  via advanced indexing + dtype cast. When `forward()` returns, these temporaries go
+  out of scope and PyTorch's caching allocator recycles the GPU memory while
+  FlashInfer's MLA kernel may still be reading from them asynchronously.
+- **Fix**: Store references on `self._fp8_ckv_ref`/`self._fp8_kpe_ref` to keep tensors
+  alive until the next call to the same layer (zero performance cost)
+- **Diagnosis path**: CUDA_LAUNCH_BLOCKING=1 → all requests succeed (race condition confirmed);
+  BF16 KV cache → all requests succeed (FP8 upcast path confirmed)
+- **Validated**: 95/95 prompts on V2-Lite (FP8 KV), 95/95 prompts on Qwen3-Coder-Next (FP8 KV)
+- File: `attention.py` lines 316-332
+
+## Server Registry + Default Port — 2026-02-15
+
+### Server registry (`~/.krasis/servers/`)
+- Server writes `~/.krasis/servers/{pid}.json` on startup with pid, port, host, model, started time
+- `atexit` handler + signal handler removes registry file on clean shutdown
+- Force-exit (second Ctrl-C) also cleans up registry before `os._exit()`
+
+### Registry-based server discovery (chat.py)
+- `discover_servers()` reads `~/.krasis/servers/*.json` instead of port scanning 8000-8090
+- Validates each entry: checks PID alive (`os.kill(pid, 0)`), removes stale entries
+- Confirms server responsive via `/health` check before listing
+- Removes `--scan-start` / `--scan-end` CLI args; `--port` does direct connect
+- Instant discovery vs previous 91-port scan
+
+### Default port changed: 8080 → 8012
+- Avoids conflicts with common HTTP servers on 8080 and frameworks on 8000
+- Updated in server.py, launcher.py, and chat.py help text
+
 ## Chat Client Improvements — 2026-02-15
 
 ### Channel filter for GPT OSS structured output

@@ -7,13 +7,16 @@ Usage:
 """
 
 import argparse
+import atexit
 import asyncio
 import json
 import logging
 import os
+import signal
 import sys
 import time
 import uuid
+from pathlib import Path
 from typing import List, Optional
 
 import uvicorn
@@ -182,6 +185,38 @@ def _warmup_model(model: KrasisModel):
         # generate() cleans up its own state in its finally block
 
 
+_registry_file: Optional[Path] = None
+
+
+def _write_registry(host: str, port: int, model_name: str) -> None:
+    """Write a server registry entry to ~/.krasis/servers/{pid}.json."""
+    global _registry_file
+    registry_dir = Path.home() / ".krasis" / "servers"
+    registry_dir.mkdir(parents=True, exist_ok=True)
+    _registry_file = registry_dir / f"{os.getpid()}.json"
+    entry = {
+        "pid": os.getpid(),
+        "port": port,
+        "host": host,
+        "model": model_name,
+        "started": int(time.time()),
+    }
+    _registry_file.write_text(json.dumps(entry))
+    logger.info("Registry entry written: %s", _registry_file)
+
+
+def _remove_registry() -> None:
+    """Remove the server registry entry on shutdown."""
+    global _registry_file
+    if _registry_file is not None:
+        try:
+            _registry_file.unlink(missing_ok=True)
+            logger.info("Registry entry removed: %s", _registry_file)
+        except OSError:
+            pass
+        _registry_file = None
+
+
 def main():
     parser = argparse.ArgumentParser(description="Krasis standalone LLM server")
     parser.add_argument("--model-path", required=True, help="Path to HF model")
@@ -190,7 +225,7 @@ def main():
     parser.add_argument("--num-gpus", type=int, default=None,
                         help="Number of GPUs (auto-detected if omitted)")
     parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--port", type=int, default=8012)
     parser.add_argument("--krasis-threads", type=int, default=48,
                         help="CPU threads for expert computation")
     parser.add_argument("--kv-dtype", default="fp8_e4m3",
@@ -361,6 +396,10 @@ def main():
 
     _scheduler = Scheduler(_model)
 
+    # ── Server registry: write entry + register cleanup ──
+    _write_registry(args.host, args.port, _model_name)
+    atexit.register(_remove_registry)
+
     # Use uvicorn.Server directly so we can patch handle_exit.
     # Default uvicorn graceful shutdown waits for active connections,
     # but generation threads block in Rust/CUDA and never finish.
@@ -370,6 +409,7 @@ def main():
     def _handle_exit(sig, frame):
         if server.should_exit:
             # Second Ctrl-C — force kill immediately
+            _remove_registry()
             logger.info("Forcing exit...")
             os._exit(0)
         # First Ctrl-C — tell uvicorn to stop, skip waiting for connections
