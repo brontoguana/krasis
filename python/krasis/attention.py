@@ -319,6 +319,12 @@ class MLAAttention:
             used_pages = kv_indices  # [num_used_pages]
             attn_ckv = ckv_layer[used_pages].to(torch.bfloat16)
             attn_kpe = kpe_layer[used_pages].to(torch.bfloat16)
+            # Keep references alive until next call — FlashInfer's MLA kernel
+            # may still be reading these tensors asynchronously when forward()
+            # returns. Without this, PyTorch's caching allocator can recycle the
+            # GPU memory before the kernel finishes, causing illegal memory access.
+            self._fp8_ckv_ref = attn_ckv
+            self._fp8_kpe_ref = attn_kpe
             # Remap page indices to compact range [0, N)
             compact_kv_indices = torch.arange(
                 len(used_pages), dtype=torch.int32, device=self.device

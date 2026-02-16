@@ -305,43 +305,64 @@ class ChannelFilter:
 
 def discover_servers(
     host: str = "localhost",
-    ports: Optional[range] = None,
 ) -> List[Dict[str, Any]]:
-    """Scan ports for running Krasis servers."""
-    if ports is None:
-        ports = range(8000, 8091)
+    """Discover running Krasis servers via ~/.krasis/servers/ registry.
+
+    Reads registry JSON files, validates PIDs are alive, does a /health check,
+    and removes stale entries.
+    """
+    from pathlib import Path
+
+    registry_dir = Path.home() / ".krasis" / "servers"
+    if not registry_dir.is_dir():
+        return []
 
     servers = []
-    for port in ports:
+    for entry_file in registry_dir.glob("*.json"):
+        try:
+            entry = json.loads(entry_file.read_text())
+        except (json.JSONDecodeError, OSError):
+            # Corrupt entry — remove it
+            try:
+                entry_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+            continue
+
+        pid = entry.get("pid", 0)
+        port = entry.get("port", 0)
+        model = entry.get("model", "unknown")
+
+        # Check PID is alive
+        try:
+            os.kill(pid, 0)
+        except (OSError, ProcessLookupError):
+            # Process dead — stale entry, remove
+            try:
+                entry_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+            continue
+
+        # Quick /health check to confirm server is responsive
         base = f"http://{host}:{port}"
         try:
             req = urllib.request.Request(f"{base}/health")
-            with urllib.request.urlopen(req, timeout=0.5) as resp:
+            with urllib.request.urlopen(req, timeout=1.0) as resp:
                 health = json.loads(resp.read())
             status = health.get("status", "unknown")
-
-            # Get model name
-            model_name = "unknown"
-            try:
-                req = urllib.request.Request(f"{base}/v1/models")
-                with urllib.request.urlopen(req, timeout=0.5) as resp:
-                    data = json.loads(resp.read())
-                    models_data = data.get("data", [])
-                    if models_data:
-                        model_name = models_data[0].get("id", "unknown")
-            except Exception:
-                pass
-
-            servers.append({
-                "host": host,
-                "port": port,
-                "url": base,
-                "model": model_name,
-                "status": status,
-            })
         except (urllib.error.URLError, TimeoutError, OSError,
                 json.JSONDecodeError, ConnectionRefusedError):
+            # PID alive but server not responding — skip (might be starting up)
             continue
+
+        servers.append({
+            "host": host,
+            "port": port,
+            "url": base,
+            "model": model,
+            "status": status,
+        })
 
     return servers
 
@@ -657,19 +678,15 @@ def main():
         description="Krasis Chat \u2014 interactive streaming chat client",
     )
     parser.add_argument("--url", default=None,
-                        help="Server URL (e.g. http://localhost:8080)")
+                        help="Server URL (e.g. http://localhost:8012)")
     parser.add_argument("--port", type=int, default=None,
-                        help="Server port on localhost")
+                        help="Server port on localhost (direct connect)")
     parser.add_argument("--host", default="localhost",
                         help="Server hostname (default: localhost)")
     parser.add_argument("--temperature", type=float, default=0.6)
     parser.add_argument("--max-tokens", type=int, default=4096)
     parser.add_argument("--system", default="",
                         help="Initial system prompt")
-    parser.add_argument("--scan-start", type=int, default=8000,
-                        help="Port scan range start (default: 8000)")
-    parser.add_argument("--scan-end", type=int, default=8090,
-                        help="Port scan range end (default: 8090)")
     args = parser.parse_args()
 
     # ── Direct URL connection ──
@@ -699,18 +716,33 @@ def main():
         chat_loop(server, args.temperature, args.max_tokens, args.system)
         return
 
-    # ── Port scan ──
+    # ── Server discovery ──
     if args.port:
-        ports = range(args.port, args.port + 1)
-    else:
-        ports = range(args.scan_start, args.scan_end + 1)
+        # Direct connect to specific port
+        url = f"http://{args.host}:{args.port}"
+        server = {
+            "host": args.host, "port": args.port, "url": url,
+            "model": "unknown", "status": "ok",
+        }
+        try:
+            req = urllib.request.Request(f"{url}/v1/models")
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                data = json.loads(resp.read())
+                models_data = data.get("data", [])
+                if models_data:
+                    server["model"] = models_data[0].get("id", "unknown")
+        except Exception:
+            pass
+        chat_loop(server, args.temperature, args.max_tokens, args.system)
+        return
 
-    print(f"  {DIM}Scanning for Krasis servers on {args.host}:{args.scan_start}-{args.scan_end}...{NC}")
-    servers = discover_servers(args.host, ports)
+    print(f"  {DIM}Discovering Krasis servers...{NC}")
+    servers = discover_servers(args.host)
 
     if not servers:
-        print(f"\n  {RED}No Krasis servers found.{NC}")
-        print(f"  {DIM}Start one with: ./krasis{NC}")
+        print(f"\n  {RED}No running Krasis servers found.{NC}")
+        print(f"  {DIM}Start one with: ./krasis")
+        print(f"  Or connect directly: krasis-chat --port 8012{NC}")
         sys.exit(1)
 
     if len(servers) == 1:
