@@ -2583,6 +2583,93 @@ class GpuPrefillManager:
 
         self._hcs_initialized = True
 
+    def validate_gpu_allocation(self, model) -> tuple:
+        """Validate that current GPU allocation can run inference efficiently.
+
+        Checks free VRAM, predicted chunk size, CUDA graphs, and runs a test
+        inference. Returns (ok: bool, info: dict) where ok=False means the
+        allocation needs adjustment.
+        """
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        info = {}
+        ok = True
+        reasons = []
+
+        # 1. Measure free VRAM
+        cuda_free = torch.cuda.mem_get_info(self.device)[0]
+        pytorch_pool = (torch.cuda.memory_reserved(self.device)
+                        - torch.cuda.memory_allocated(self.device))
+        available = cuda_free + max(0, pytorch_pool)
+        info["free_vram_mb"] = round(available / 1e6)
+
+        # 2. Calculate chunk size for 10K prefill (mirrors model.py chunk calc)
+        cfg = model.cfg
+        topk = cfg.num_experts_per_tok
+        N = cfg.moe_intermediate_size
+        K = cfg.hidden_size
+        intermediate_per_token = topk * (N + max(2 * N, K)) * 2  # BF16
+        hidden_per_token = K * 2 * 2  # hidden + residual
+        total_per_token = (intermediate_per_token + hidden_per_token) * 2.0  # 2x safety
+
+        if total_per_token > 0 and available > 0:
+            max_chunk = int(available / total_per_token)
+        else:
+            max_chunk = 0
+        chunk_size = max(256, min(10000, max_chunk))
+        info["chunk_size"] = chunk_size
+        info["max_chunk"] = max_chunk
+
+        MIN_GOOD_CHUNK = 5000
+        if max_chunk < MIN_GOOD_CHUNK:
+            ok = False
+            reasons.append(
+                f"chunk_size={chunk_size} (max={max_chunk}, need >={MIN_GOOD_CHUNK})"
+            )
+
+        # 3. Expert count
+        n_experts = sum(self._hcs_num_pinned.values()) if self._hcs_num_pinned else 0
+        info["n_experts"] = n_experts
+
+        # 4. CUDA graphs
+        n_graphs = len(self._hcs_cuda_graphs)
+        info["n_cuda_graphs"] = n_graphs
+
+        # 5. Test inference
+        try:
+            test_tokens = model.tokenizer.apply_chat_template(
+                [{"role": "user", "content": "Explain the theory of " * 60}]
+            )[:500]
+            with torch.inference_mode():
+                model.generate(test_tokens, max_new_tokens=1, temperature=0.6)
+            info["test_passed"] = True
+        except (torch.cuda.OutOfMemoryError, torch.OutOfMemoryError, RuntimeError) as e:
+            err_str = str(e).lower()
+            if ("out of memory" in err_str
+                    or isinstance(e, (torch.cuda.OutOfMemoryError, torch.OutOfMemoryError))):
+                info["test_passed"] = False
+                ok = False
+                reasons.append(f"test inference OOM: {e}")
+                gc.collect()
+                torch.cuda.empty_cache()
+            else:
+                raise
+
+        info["ok"] = ok
+        info["reasons"] = reasons
+
+        logger.info(
+            "GPU validation %s: %d experts, %d MB free, chunk=%d (max=%d), "
+            "graphs=%d, test=%s%s",
+            "PASS" if ok else "FAIL", n_experts, info["free_vram_mb"],
+            chunk_size, max_chunk, n_graphs,
+            info.get("test_passed", "skipped"),
+            f" — {'; '.join(reasons)}" if reasons else "",
+        )
+
+        return ok, info
+
     def _forward_hot_cached_static(
         self,
         moe_layer_idx: int,
