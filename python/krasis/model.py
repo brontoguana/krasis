@@ -305,6 +305,93 @@ def _hcs_prefill_divisor(manager, rank, cfg) -> int:
     return num_moe
 
 
+class CPUHubManager:
+    """Manages multi-GPU token coordination using CPU as a star-hub aggregator.
+
+    Owns pinned CPU buffers for N GPUs. 
+    Workflow: 
+      1. gather(gpu_tensors) -> copies from VRAM to pinned RAM
+      2. reduce()            -> calls Rust engine to sum BF16 buffers
+      3. broadcast(gpu_tensors) -> copies from pinned RAM to all VRAM
+    """
+
+    def __init__(self, num_gpus: int, hidden_size: int, engine):
+        self.num_gpus = num_gpus
+        self.hidden_size = hidden_size
+        self.engine = engine
+        
+        # Max chunk size for prefill buffers (e.g. 5000 tokens)
+        self.max_tokens = 5000
+        self.buffer_elements = self.max_tokens * hidden_size
+        
+        # Pinned input buffers (one per GPU)
+        self.input_bufs = [
+            torch.empty(self.buffer_elements, dtype=torch.bfloat16, pin_memory=True)
+            for _ in range(num_gpus)
+        ]
+        # Pinned output buffer (result)
+        self.output_buf = torch.empty(
+            self.buffer_elements, dtype=torch.bfloat16, pin_memory=True
+        )
+        
+        self.input_ptrs = [buf.data_ptr() for buf in self.input_bufs]
+        self.output_ptr = self.output_buf.data_ptr()
+
+    def reduce_sum(self, num_tokens: int):
+        """Call Rust engine to sum partial results."""
+        num_elements = num_tokens * self.hidden_size
+        if num_elements > self.buffer_elements:
+            raise ValueError(f"Too many tokens for CPU hub: {num_tokens} > {self.max_tokens}")
+            
+        self.engine.reduce_sum_bf16(
+            self.input_ptrs,
+            self.output_ptr,
+            num_elements
+        )
+
+    def gather(self, gpu_tensors: List[torch.Tensor]):
+        """Copy from GPUs to pinned CPU memory (asynchronous)."""
+        assert len(gpu_tensors) == self.num_gpus
+        for i, t in enumerate(gpu_tensors):
+            # Non-blocking copy to pinned memory
+            M = t.shape[0]
+            count = M * self.hidden_size
+            self.input_bufs[i][:count].copy_(t.view(-1), non_blocking=True)
+
+    def broadcast(self, gpu_tensors: List[torch.Tensor]):
+        """Copy from pinned CPU memory to all GPUs (asynchronous)."""
+        # num_tokens is derived from the target tensor shapes
+        for i, t in enumerate(gpu_tensors):
+            M = t.shape[0]
+            count = M * self.hidden_size
+            t.view(-1).copy_(self.output_buf[:count], non_blocking=True)
+
+    def all_gather(self, gpu_slices: List[Optional[torch.Tensor]],
+                   targets: List[torch.Tensor]):
+        """Gather partial hidden states from all GPUs and broadcast full set to all.
+
+        Each GPU owns a slice of tokens. This concatenates all slices via pinned
+        CPU memory and copies the full result to every target tensor.
+
+        Args:
+            gpu_slices: Per-GPU partial hidden states (may contain None for inactive GPUs).
+            targets: Pre-allocated [total_tokens, hidden_size] tensors on each GPU.
+        """
+        # Copy each GPU's slice into contiguous pinned memory
+        offset = 0
+        for t in gpu_slices:
+            if t is None:
+                continue
+            count = t.shape[0] * self.hidden_size
+            self.output_buf[offset:offset + count].copy_(t.view(-1), non_blocking=True)
+            offset += count
+        torch.cuda.synchronize()
+        # Broadcast concatenated result to all target GPUs
+        for target in targets:
+            count = target.shape[0] * self.hidden_size
+            target.view(-1).copy_(self.output_buf[:count], non_blocking=True)
+
+
 class KrasisModel:
     """Full model with pipeline-parallel GPU inference + CPU MoE experts."""
 
@@ -339,6 +426,10 @@ class KrasisModel:
 
         self.pp_partition = pp_partition
         self.ranks = build_pp_ranks(self.cfg, pp_partition, devices)
+        # all_devices = all GPUs for EP replication, not just PP-ranked GPUs
+        effective_num_gpus = num_gpus or len(self.ranks)
+        self._num_gpus = effective_num_gpus
+        self.all_devices = [torch.device(f"cuda:{i}") for i in range(effective_num_gpus)]
         self.kv_dtype = kv_dtype
         self.kv_cache_mb = kv_cache_mb
         self.krasis_threads = krasis_threads
@@ -367,6 +458,14 @@ class KrasisModel:
         self.gpu_prefill_managers: dict = {}  # device -> GpuPrefillManager
         self.tokenizer: Optional[Tokenizer] = None
         self._loaded = False
+
+        # Per-device weight copies for multi-GPU calibration/prefill.
+        # Populated by _load_gpu_weights when all_devices has >1 GPU.
+        # Keys are device strings ("cuda:0", "cuda:1", ...).
+        # Values: {"layers": [...], "embedding": T, "final_norm": T,
+        #          "lm_head_data": T, "ranks": [...], "kv_caches": [...]}
+        self._device_state: dict = {}
+        self._active_device: Optional[str] = None  # current device for use_device()
 
         # For hybrid models: maps absolute layer idx → KV cache layer offset
         # within its rank's cache. Linear attention layers get -1 (no KV).
@@ -439,6 +538,17 @@ class KrasisModel:
         # Allocate KV caches
         self._init_kv_caches()
 
+        # Phase 4: CPU Hub (for multi-GPU prefill coordination)
+        if len(self.all_devices) > 1 and self.krasis_engine is not None:
+            self.cpu_hub = CPUHubManager(
+                num_gpus=len(self.all_devices),
+                hidden_size=self.cfg.hidden_size,
+                engine=self.krasis_engine,
+            )
+            logger.info("CPU Hub initialized for %d GPUs", len(self.all_devices))
+        else:
+            self.cpu_hub = None
+
         # Load tokenizer
         self.tokenizer = Tokenizer(self.cfg.model_path)
 
@@ -446,146 +556,275 @@ class KrasisModel:
         total = time.perf_counter() - start
         logger.info("Model fully loaded in %.1fs", total)
 
-    def warmup_cuda_runtime(self):
-        """Trigger ALL lazy CUDA runtime allocations before HCS expert loading.
-
-        Runs representative kernels at multiple M sizes (including large prefill)
-        to trigger cuBLAS workspace, Triton compilation cache, and any other
-        lazy CUDA allocations.  This ensures _init_hot_cached_static() sees
-        the true available VRAM instead of an inflated number.
-
-        Must be called after model.load() and before HCS expert allocation.
-        """
+    def warmup_cuda_runtime(self, devices: List[torch.device]):
+        """Trigger ALL lazy CUDA runtime allocations on ALL devices before HCS expert loading."""
         import gc
+        from krasis.triton_moe import triton_moe_decode, inverse_marlin_repack, inverse_scale_permute
 
-        device = torch.device(self.ranks[0].device)
-        free_before = torch.cuda.mem_get_info(device)[0]
+        logger.info("Warming up CUDA runtime on all devices: %s", [str(d) for d in devices])
+        free_before = {str(d): torch.cuda.mem_get_info(d)[0] for d in devices}
 
-        # ── 1. cuBLAS workspace: int8 matmuls at representative sizes ──
-        try:
-            max_k, max_n = 0, 0
-            for layer in self.layers:
-                for key in ("gate_up_proj", "down_proj"):
-                    w = layer.shared_expert.get(key) if layer.shared_expert else None
-                    if w is not None:
-                        wt = w[0] if isinstance(w, (tuple, list)) else w
-                        k, n = wt.shape
-                        if k * n > max_k * max_n:
-                            max_k, max_n = k, n
-                if hasattr(layer, 'attention'):
-                    for key in ("q_proj", "o_proj"):
-                        w = getattr(layer.attention, key, None)
-                        if w is not None:
+        for device in devices:
+            torch.cuda.set_device(device)
+            is_primary = device.index == 0
+
+            # ── 1. cuBLAS workspace (for int8 matmuls) ──
+            try:
+                # Find largest non-expert weight to stress cuBLAS
+                max_k, max_n = 0, 0
+                for layer in self.layers:
+                    if layer.device != device: continue
+                    for key in ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"):
+                         w = getattr(layer.attention, key, None) or \
+                             (layer.shared_expert.get(key) if layer.shared_expert else None)
+                         if w is not None:
                             wt = w[0] if isinstance(w, (tuple, list)) else w
-                            k, n = wt.shape
-                            if k * n > max_k * max_n:
-                                max_k, max_n = k, n
+                            k, n = wt.shape if len(wt.shape) == 2 else (wt.shape[1], wt.shape[0])
+                            if k * n > max_k * max_n: max_k, max_n = k, n
 
-            if max_k > 0 and max_n > 0:
-                # Cover M=1 (decode), M=16/32 (small batch), M=512 (prefill chunk)
-                for m in (1, 16, 32, 128, 512):
-                    try:
-                        x = torch.randint(-127, 127, (max(m, 16), max_k),
-                                          dtype=torch.int8, device=device)
-                        w = torch.randint(-127, 127, (max_n, max_k),
-                                          dtype=torch.int8, device=device)
+                if max_k > 0:
+                    for m_size in (1, 16, 512):
+                        x = torch.randint(-127, 127, (m_size, max_k), dtype=torch.int8, device=device)
+                        w = torch.randint(-127, 127, (max_n, max_k), dtype=torch.int8, device=device)
                         _ = torch._int_mm(x, w.t())
-                        del x, w, _
-                    except Exception:
-                        pass
-                torch.cuda.synchronize(device)
-        except Exception as e:
-            logger.warning("CUDA warmup (cuBLAS): %s", e)
+            except Exception as e:
+                logger.warning("CUDA warmup (cuBLAS) on %s failed: %s", device, e)
 
-        # ── 2. Triton/Marlin: fused_marlin_moe at M=1 and M=128 ──
-        try:
-            from sglang.srt.layers.moe.fused_moe_triton.fused_marlin_moe import (
-                fused_marlin_moe,
-            )
-            from sglang.srt.layers.quantization.marlin_utils import (
-                marlin_make_workspace,
-            )
+            # ── 2. Triton/Marlin JIT Compilation ──
+            try:
+                K, N, gs, bits = self.cfg.hidden_size, self.cfg.moe_intermediate_size, 128, 4
+                nb2 = bits // 2
+                n_dummy = 2
 
-            K = self.cfg.hidden_size
-            N = self.cfg.moe_intermediate_size
-            engine = getattr(self, 'krasis_engine', None)
-            gs = engine.group_size() if engine else 128
-            bits = getattr(self.quant_cfg, 'gpu_expert_bits', 4)
-            nb2 = bits // 2
-            n_dummy = 2  # minimal expert count
+                if is_primary:
+                    from sglang.srt.layers.moe.fused_moe_triton.fused_marlin_moe import fused_marlin_moe
+                    from sglang.srt.layers.quantization.marlin_utils import marlin_make_workspace
+                    ws = marlin_make_workspace(device, max_blocks_per_sm=4)
+                    w13 = torch.zeros(n_dummy, K // 16, 2 * N * nb2, dtype=torch.int32, device=device)
+                    w13s = torch.zeros(n_dummy, K // gs, 2 * N, dtype=torch.bfloat16, device=device)
+                    x = torch.zeros(1, K, dtype=torch.bfloat16, device=device)
+                    g = torch.empty(1, n_dummy, device=device)
+                    tw = torch.zeros(1, 1, dtype=torch.float32, device=device)
+                    ti = torch.zeros(1, 1, dtype=torch.int32, device=device)
+                    fused_marlin_moe(x, w13, w13, w13s, w13s, g, tw, ti, n_dummy, None,
+                                     torch.empty(n_dummy,0,dtype=torch.int32,device=device),
+                                     torch.empty(n_dummy,0,dtype=torch.int32,device=device),
+                                     torch.empty(n_dummy,0,dtype=torch.int32,device=device),
+                                     torch.empty(n_dummy,0,dtype=torch.int32,device=device),
+                                     ws, bits, True)
+                else:
+                    # Warm up the Triton kernel with dummy standard-GPTQ data
+                    w13_marlin = torch.zeros(n_dummy, K // 16, 2 * N * nb2, dtype=torch.int32)
+                    w13s_marlin = torch.zeros(n_dummy, K // gs, 2 * N, dtype=torch.bfloat16)
+                    w13_std = inverse_marlin_repack(w13_marlin, K, 2*N, bits).to(device)
+                    w13s_std = inverse_scale_permute(w13s_marlin, K, 2*N, gs).to(device)
+                    lookup = torch.tensor([0, 1], dtype=torch.int32, device=device)
+                    x = torch.zeros(1, K, dtype=torch.bfloat16, device=device)
+                    triton_moe_decode(x, [0,1], [0.5,0.5], w13_std, w13s_std, w13_std, w13s_std, lookup, None, None, self.cfg.swiglu_limit, 1.702, gs)
 
-            ws = marlin_make_workspace(device, max_blocks_per_sm=4)
-            w13 = torch.zeros(n_dummy, K // 16, 2 * N * nb2,
-                              dtype=torch.int32, device=device)
-            w13s = torch.zeros(n_dummy, K // gs, 2 * N,
-                               dtype=torch.bfloat16, device=device)
-            w2 = torch.zeros(n_dummy, N // 16, K * nb2,
-                             dtype=torch.int32, device=device)
-            w2s = torch.zeros(n_dummy, N // gs, K,
-                              dtype=torch.bfloat16, device=device)
-            gi = torch.empty(n_dummy, 0, dtype=torch.int32, device=device)
-            si = torch.empty(n_dummy, 0, dtype=torch.int32, device=device)
-
-            for m in (1, 128):
-                x = torch.zeros(m, K, dtype=torch.bfloat16, device=device)
-                g = torch.empty(m, n_dummy, device=device)
-                tw = torch.zeros(m, 1, dtype=torch.float32, device=device)
-                ti = torch.zeros(m, 1, dtype=torch.int32, device=device)
-                for _ in range(3):  # Triton compiles on first call
-                    _ = fused_marlin_moe(
-                        hidden_states=x, w1=w13, w2=w2,
-                        w1_scale=w13s, w2_scale=w2s,
-                        gating_output=g,
-                        topk_weights=tw, topk_ids=ti,
-                        global_num_experts=n_dummy, expert_map=None,
-                        g_idx1=gi, g_idx2=gi,
-                        sort_indices1=si, sort_indices2=si,
-                        workspace=ws, num_bits=bits, is_k_full=True,
-                    )
-                del x, g, tw, ti
+            except Exception as e:
+                logger.warning("CUDA warmup (Triton/Marlin) on %s failed: %s", device, e)
+            
             torch.cuda.synchronize(device)
-            del w13, w13s, w2, w2s, gi, si, ws
-        except Exception as e:
-            logger.warning("CUDA warmup (Marlin): %s", e)
 
         # ── Clean up and measure ──
         gc.collect()
         torch.cuda.empty_cache()
-        free_after = torch.cuda.mem_get_info(device)[0]
-        consumed = free_before - free_after
-        logger.info(
-            "CUDA runtime warmup complete: %.0f MB consumed "
-            "(%.0f MB free before → %.0f MB free after)",
-            consumed / 1e6, free_before / 1e6, free_after / 1e6,
-        )
+        
+        for device in devices:
+            free_after = torch.cuda.mem_get_info(device)[0]
+            consumed = free_before[str(device)] - free_after
+            logger.info(
+                "CUDA runtime warmup on %s complete: %.0f MB consumed "
+                "(%.0f MB free before → %.0f MB free after)",
+                device, consumed / 1e6, free_before[str(device)] / 1e6, free_after / 1e6,
+            )
+
+    @staticmethod
+    def _move_weight(w, device):
+        """Copy a weight (tensor or INT8 (tensor, scale) tuple) to device."""
+        if w is None:
+            return None
+        if isinstance(w, tuple):
+            return tuple(t.to(device) for t in w)
+        if isinstance(w, torch.Tensor):
+            return w.to(device)
+        return w
+
+    @staticmethod
+    def _extract_layer_weights(layer, src_device) -> dict:
+        """Extract the weights dict from an existing TransformerLayer.
+
+        Reconstructs the dict format that TransformerLayer.__init__ expects,
+        so we can copy it to another device and create a new layer from it.
+        """
+        mv = KrasisModel._move_weight
+        result = {
+            "norms": {
+                "input_layernorm": layer.input_norm_weight,
+                "post_attention_layernorm": layer.post_attn_norm_weight,
+            },
+            "is_moe": layer.is_moe,
+            "layer_type": layer.layer_type,
+        }
+
+        # ── Attention weights ──
+        attn = layer.attention
+        if layer.layer_type == "linear_attention":
+            result["linear_attention"] = {
+                "in_proj_qkvz": attn.in_proj_qkvz,
+                "in_proj_ba": attn.in_proj_ba,
+                "out_proj": attn.out_proj,
+                "conv1d_weight": attn.conv1d_weight,
+                "A_log": attn.A_log,
+                "dt_bias": attn.dt_bias,
+                "norm_weight": attn.norm_weight,
+            }
+        elif hasattr(attn, "kv_a_proj"):
+            # MLA
+            attn_d = {
+                "kv_a_proj_with_mqa": attn.kv_a_proj,
+                "o_proj": attn.o_proj,
+                "kv_a_layernorm": attn.kv_a_norm_weight,
+                "w_kc": attn.w_kc,
+                "w_vc": attn.w_vc,
+            }
+            if attn.has_q_lora:
+                attn_d["q_a_proj"] = attn.q_a_proj
+                attn_d["q_b_proj"] = attn.q_b_proj
+                attn_d["q_a_layernorm"] = attn.q_a_norm_weight
+            else:
+                attn_d["q_proj"] = attn.q_proj
+            result["attention"] = attn_d
+        else:
+            # GQA
+            attn_d = {
+                "q_proj": attn.q_proj,
+                "k_proj": attn.k_proj,
+                "v_proj": attn.v_proj,
+                "o_proj": attn.o_proj,
+            }
+            for name in ("q_proj_bias", "k_proj_bias", "v_proj_bias",
+                         "o_proj_bias", "sinks", "q_norm", "k_norm"):
+                val = getattr(attn, name, None)
+                if val is not None:
+                    attn_d[name] = val
+            result["attention"] = attn_d
+
+        # ── MoE weights ──
+        if layer.is_moe:
+            result["gate"] = {"weight": layer.gate_weight}
+            if layer.gate_bias is not None:
+                result["gate"]["bias"] = layer.gate_bias
+            if layer.e_score_correction_bias is not None:
+                result["gate"]["e_score_correction_bias"] = layer.e_score_correction_bias
+            if layer.shared_expert is not None:
+                # Reconstruct original gate_proj/up_proj from fused gate_up_proj
+                se = {}
+                gate_up = layer.shared_expert["gate_up_proj"]
+                if isinstance(gate_up, tuple):
+                    # INT8: split (weight, scale) along dim 0
+                    mid_w = gate_up[0].shape[0] // 2
+                    mid_s = gate_up[1].shape[0] // 2
+                    se["gate_proj"] = (gate_up[0][:mid_w], gate_up[1][:mid_s])
+                    se["up_proj"] = (gate_up[0][mid_w:], gate_up[1][mid_s:])
+                else:
+                    mid = gate_up.shape[0] // 2
+                    se["gate_proj"] = gate_up[:mid]
+                    se["up_proj"] = gate_up[mid:]
+                se["down_proj"] = layer.shared_expert["down_proj"]
+                if layer.shared_expert_gate is not None:
+                    se["shared_expert_gate"] = layer.shared_expert_gate
+                result["shared_expert"] = se
+        elif layer.dense_mlp is not None:
+            result["dense_mlp"] = dict(layer.dense_mlp)
+
+        return result
+
+    @staticmethod
+    def _copy_weights_dict(weights: dict, device) -> dict:
+        """Deep-copy a layer weights dict, moving all tensors to device."""
+        mv = KrasisModel._move_weight
+        result = {}
+        for k, v in weights.items():
+            if isinstance(v, dict):
+                result[k] = KrasisModel._copy_weights_dict(v, device)
+            elif isinstance(v, (torch.Tensor, tuple)):
+                result[k] = mv(v, device)
+            else:
+                result[k] = v
+        return result
 
     def _load_gpu_weights(self, loader: WeightLoader):
-        """Stream-load all GPU weights layer by layer."""
+        """Stream-load all GPU weights to primary device, then copy to all devices."""
         self.layers = []
+        primary_dev = self.all_devices[0]
+        torch.cuda.set_device(primary_dev)
 
-        for rank in self.ranks:
-            dev = torch.device(rank.device)
+        # ── Load FULL model to primary device (from safetensors) ──
+        logger.info("Loading full base model to primary device %s...", primary_dev)
+        self.embedding = loader.load_embedding(primary_dev)
 
-            # Embedding on first rank
-            if rank.has_embedding:
-                self.embedding = loader.load_embedding(dev)
+        for layer_idx in range(self.cfg.num_hidden_layers):
+            weights = loader.load_layer(layer_idx, primary_dev)
+            layer = TransformerLayer(
+                self.cfg, layer_idx, weights, primary_dev,
+                krasis_engine=None,
+                gpu_prefill_manager=None,
+                gpu_prefill_threshold=self.gpu_prefill_threshold,
+                attention_backend=self.attention_backend,
+            )
+            self.layers.append(layer)
 
-            # Layers
-            for layer_idx in rank.layer_range:
-                weights = loader.load_layer(layer_idx, dev)
-                layer = TransformerLayer(
-                    self.cfg, layer_idx, weights, dev,
-                    krasis_engine=None,  # set after CPU load
-                    gpu_prefill_manager=None,  # set after _init_gpu_prefill
+        self.final_norm = loader.load_final_norm(primary_dev)
+        self.lm_head_data = loader.load_lm_head(primary_dev)
+
+        # Store primary device state
+        self._active_device = str(primary_dev)
+        self._device_state[str(primary_dev)] = {
+            "layers": self.layers,
+            "embedding": self.embedding,
+            "final_norm": self.final_norm,
+            "lm_head_data": self.lm_head_data,
+        }
+
+        # ── Copy to each additional device ──
+        for extra_dev in self.all_devices:
+            if extra_dev == primary_dev:
+                continue
+            t0 = time.perf_counter()
+            logger.info("Copying full base model weights to %s...", extra_dev)
+
+            dev_embedding = self.embedding.to(extra_dev)
+            dev_final_norm = self.final_norm.to(extra_dev)
+            dev_lm_head = self._move_weight(self.lm_head_data, extra_dev)
+
+            dev_layers = []
+            for layer in self.layers:
+                w = self._extract_layer_weights(layer, primary_dev)
+                w_copy = self._copy_weights_dict(w, extra_dev)
+                new_layer = TransformerLayer(
+                    self.cfg, layer.layer_idx, w_copy, extra_dev,
+                    krasis_engine=None,
+                    gpu_prefill_manager=None,
                     gpu_prefill_threshold=self.gpu_prefill_threshold,
                     attention_backend=self.attention_backend,
                 )
-                self.layers.append(layer)
+                dev_layers.append(new_layer)
 
-            # Final norm + LM head on last rank
-            if rank.has_lm_head:
-                self.final_norm = loader.load_final_norm(dev)
-                self.lm_head_data = loader.load_lm_head(dev)
+            self._device_state[str(extra_dev)] = {
+                "layers": dev_layers,
+                "embedding": dev_embedding,
+                "final_norm": dev_final_norm,
+                "lm_head_data": dev_lm_head,
+            }
+
+            alloc_mb = torch.cuda.memory_allocated(extra_dev) / (1024**2)
+            elapsed = time.perf_counter() - t0
+            logger.info(
+                "Full base model copied to %s in %.1fs (%.0f MB allocated)",
+                extra_dev, elapsed, alloc_mb,
+            )
 
     def _load_cpu_experts(self):
         """Load expert weights into Krasis Rust engine."""
@@ -615,18 +854,18 @@ class KrasisModel:
 
         self.krasis_engine = engine
 
-        # Wire engine to all MoE layers + allocate pinned buffers for fused dispatch
+        # Wire engine to MoE layers on ALL devices + allocate pinned buffers
         first_k = self.cfg.first_k_dense_replace
-        for layer in self.layers:
-            if layer.is_moe:
-                layer.krasis_engine = engine
-                # Allocate pinned CPU buffers for zero-alloc M=1 dispatch
-                if layer._cpu_act_buf is None:
-                    layer._cpu_act_buf = torch.empty(1, self.cfg.hidden_size, dtype=torch.bfloat16, pin_memory=True)
-                    layer._cpu_ids_buf = torch.empty(1, self.cfg.num_experts_per_tok, dtype=torch.int32, pin_memory=True)
-                    layer._cpu_wts_buf = torch.empty(1, self.cfg.num_experts_per_tok, dtype=torch.float32, pin_memory=True)
-                    layer._cpu_out_buf = torch.empty(1, self.cfg.hidden_size, dtype=torch.bfloat16, pin_memory=True)
-                    layer._gpu_out_buf = torch.empty(1, self.cfg.hidden_size, dtype=torch.bfloat16, device=layer.device)
+        for dev_str, state in self._device_state.items():
+            for layer in state["layers"]:
+                if layer.is_moe:
+                    layer.krasis_engine = engine
+                    if layer._cpu_act_buf is None:
+                        layer._cpu_act_buf = torch.empty(1, self.cfg.hidden_size, dtype=torch.bfloat16, pin_memory=True)
+                        layer._cpu_ids_buf = torch.empty(1, self.cfg.num_experts_per_tok, dtype=torch.int32, pin_memory=True)
+                        layer._cpu_wts_buf = torch.empty(1, self.cfg.num_experts_per_tok, dtype=torch.float32, pin_memory=True)
+                        layer._cpu_out_buf = torch.empty(1, self.cfg.hidden_size, dtype=torch.bfloat16, pin_memory=True)
+                        layer._gpu_out_buf = torch.empty(1, self.cfg.hidden_size, dtype=torch.bfloat16, device=layer.device)
 
         logger.info(
             "Krasis engine: %d MoE layers, %d experts, hidden=%d",
@@ -661,18 +900,16 @@ class KrasisModel:
         logger.info("Routing weights sent to Rust engine (%d MoE layers)", moe_idx)
 
     def _init_gpu_prefill(self):
-        """Create GpuPrefillManager per device and wire to MoE layers."""
+        """Create GpuPrefillManager per device and wire to MoE layers on ALL devices."""
         from krasis.gpu_prefill import GpuPrefillManager
 
-        for rank in self.ranks:
-            dev = torch.device(rank.device)
+        engine_ref = getattr(self, 'krasis_engine', None)
+        num_moe_layers = self.cfg.num_hidden_layers - self.cfg.first_k_dense_replace
+        num_ranks = len(self.all_devices)
+
+        for i, dev in enumerate(self.all_devices):
             dev_str = str(dev)
             if dev_str not in self.gpu_prefill_managers:
-                # Pass Krasis engine for unified weight access (eliminates
-                # the ~438 GB Python Marlin RAM cache)
-                engine_ref = getattr(self, 'krasis_engine', None)
-                num_moe_layers = self.cfg.num_hidden_layers - self.cfg.first_k_dense_replace
-
                 manager = GpuPrefillManager(
                     model_path=self.cfg.model_path,
                     device=dev,
@@ -689,20 +926,22 @@ class KrasisModel:
                     expert_divisor=self.expert_divisor,
                     skip_shared_experts=self._has_shared_expert_gate,
                     swiglu_limit=self.cfg.swiglu_limit,
+                    rank=i,
+                    num_ranks=num_ranks,
                 )
                 self.gpu_prefill_managers[dev_str] = manager
-                logger.info("GPU prefill manager created for %s", dev_str)
+                logger.info("GPU prefill manager created for %s (rank %d/%d)", dev_str, i, num_ranks)
 
         # Pre-prepare all MoE layers from disk cache at startup
-        # (avoids lazy quantization during forward() which causes VRAM exhaustion)
         for dev_str, manager in self.gpu_prefill_managers.items():
             manager.prepare_all_layers()
 
-        # Wire manager to MoE layers
-        for layer in self.layers:
-            if layer.is_moe:
-                dev_str = str(layer.device)
-                layer.gpu_prefill_manager = self.gpu_prefill_managers.get(dev_str)
+        # Wire manager to MoE layers on ALL devices
+        for state in self._device_state.values():
+            for layer in state["layers"]:
+                if layer.is_moe:
+                    dev_str = str(layer.device)
+                    layer.gpu_prefill_manager = self.gpu_prefill_managers.get(dev_str)
 
         logger.info(
             "GPU prefill: %d managers, threshold=%d tokens",
@@ -742,6 +981,357 @@ class KrasisModel:
         t = threading.Thread(target=_watchdog, daemon=True, name="ram-watchdog")
         t.start()
         logger.info("RAM watchdog started: will exit if < %.1f%% free", floor_pct)
+
+    # ── Multi-GPU calibration: replicate weights + measure inference cost ──
+
+    @staticmethod
+    def _move_weight(w, device):
+        """Move a weight (tensor or INT8 (tensor, scale) tuple) to device."""
+        if w is None:
+            return None
+        if isinstance(w, tuple):
+            return tuple(t.to(device) for t in w)
+        if isinstance(w, torch.Tensor):
+            return w.to(device)
+        return w
+
+    def _replicate_to_device(self, device: torch.device) -> dict:
+        """Copy all model weights to `device`, return saved references.
+
+        Handles top-level weights (embedding, final_norm, lm_head),
+        per-layer norms, attention weights (MLA/GQA/linear), MoE gate
+        + shared expert weights, and dense MLP weights.
+
+        Device-bound caches (RoPE, FlashInfer wrappers, CUDA graphs)
+        are invalidated — they re-create lazily on the new device.
+        """
+        mv = self._move_weight
+        saved = {"layers": []}
+
+        # ── Top-level weights ──
+        saved["embedding"] = self.embedding
+        saved["final_norm"] = self.final_norm
+        saved["lm_head_data"] = self.lm_head_data
+        self.embedding = self.embedding.to(device)
+        self.final_norm = self.final_norm.to(device)
+        self.lm_head_data = mv(self.lm_head_data, device)
+
+        # ── Per-layer weights ──
+        for layer in self.layers:
+            ls = {"device": layer.device}
+
+            # Norms
+            ls["input_norm_weight"] = layer.input_norm_weight
+            ls["post_attn_norm_weight"] = layer.post_attn_norm_weight
+            layer.input_norm_weight = layer.input_norm_weight.to(device)
+            layer.post_attn_norm_weight = layer.post_attn_norm_weight.to(device)
+
+            # GPU output buffer (MoE layers)
+            if layer._gpu_out_buf is not None:
+                ls["_gpu_out_buf"] = layer._gpu_out_buf
+                layer._gpu_out_buf = torch.empty_like(layer._gpu_out_buf, device=device)
+
+            # ── Attention weights ──
+            attn = layer.attention
+            attn_saved = {"device": attn.device}
+
+            if layer.layer_type == "linear_attention":
+                # GatedDeltaNetAttention
+                for name in ("in_proj_qkvz", "in_proj_ba", "out_proj",
+                             "conv1d_weight", "A_log", "dt_bias", "norm_weight"):
+                    attn_saved[name] = getattr(attn, name)
+                    setattr(attn, name, mv(getattr(attn, name), device))
+                # Invalidate linear attention state and CUDA graph
+                attn_saved["_conv_state"] = attn._conv_state
+                attn_saved["_recurrent_state"] = attn._recurrent_state
+                attn_saved["_la_graph"] = attn._la_graph
+                attn_saved["_la_input"] = attn._la_input
+                attn_saved["_la_output"] = attn._la_output
+                attn_saved["_la_stream"] = attn._la_stream
+                attn._conv_state = None
+                attn._recurrent_state = None
+                attn._la_graph = None
+                attn._la_input = None
+                attn._la_output = None
+                attn._la_stream = torch.cuda.Stream(device=device)
+
+            elif hasattr(attn, "kv_a_proj"):
+                # MLAAttention
+                mla_weights = ["kv_a_proj", "o_proj", "kv_a_norm_weight", "w_kc", "w_vc"]
+                if attn.has_q_lora:
+                    mla_weights += ["q_a_proj", "q_b_proj", "q_a_norm_weight"]
+                else:
+                    mla_weights += ["q_proj"]
+                for name in mla_weights:
+                    attn_saved[name] = getattr(attn, name)
+                    setattr(attn, name, mv(getattr(attn, name), device))
+                # Invalidate device-bound caches
+                attn_saved["_rope_cos_sin"] = attn._rope_cos_sin
+                attn_saved["_attn_wrapper"] = attn._attn_wrapper
+                attn._rope_cos_sin = None
+                import flashinfer
+                workspace_buf = torch.empty(
+                    128 * 1024 * 1024, dtype=torch.uint8, device=device
+                )
+                attn._attn_wrapper = flashinfer.mla.BatchMLAPagedAttentionWrapper(
+                    workspace_buf,
+                )
+
+            else:
+                # GQAAttention
+                gqa_weights = ["q_proj", "k_proj", "v_proj", "o_proj"]
+                gqa_optional = ["q_proj_bias", "k_proj_bias", "v_proj_bias",
+                                "o_proj_bias", "sinks", "q_norm", "k_norm"]
+                for name in gqa_weights:
+                    attn_saved[name] = getattr(attn, name)
+                    setattr(attn, name, mv(getattr(attn, name), device))
+                for name in gqa_optional:
+                    val = getattr(attn, name, None)
+                    if val is not None:
+                        attn_saved[name] = val
+                        setattr(attn, name, mv(val, device))
+                # Invalidate device-bound caches
+                attn_saved["_rope_cos_sin"] = attn._rope_cos_sin
+                attn_saved["_prefill_wrapper"] = attn._prefill_wrapper
+                attn._rope_cos_sin = None
+                import flashinfer
+                workspace_buf = torch.empty(
+                    128 * 1024 * 1024, dtype=torch.uint8, device=device
+                )
+                attn._prefill_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
+                    workspace_buf,
+                )
+
+            attn.device = device
+            ls["attention"] = attn_saved
+
+            # ── MoE weights ──
+            if layer.is_moe:
+                moe_saved = {}
+                for name in ("gate_weight", "gate_bias", "e_score_correction_bias"):
+                    val = getattr(layer, name, None)
+                    if val is not None:
+                        moe_saved[name] = val
+                        setattr(layer, name, val.to(device))
+
+                # Shared expert dict
+                if layer.shared_expert is not None:
+                    moe_saved["shared_expert"] = dict(layer.shared_expert)
+                    layer.shared_expert = {
+                        k: mv(v, device) for k, v in layer.shared_expert.items()
+                    }
+                    # shared_expert_gate lives in shared_expert dict AND layer attr
+                    if layer.shared_expert_gate is not None:
+                        moe_saved["shared_expert_gate"] = layer.shared_expert_gate
+                        layer.shared_expert_gate = layer.shared_expert.get("shared_expert_gate")
+
+                # Recompute f32 caches
+                moe_saved["_gate_weight_f32"] = layer._gate_weight_f32
+                moe_saved["_gate_bias_f32"] = layer._gate_bias_f32
+                moe_saved["_e_score_correction_bias_f32"] = layer._e_score_correction_bias_f32
+                layer._gate_weight_f32 = layer.gate_weight.float() if layer.gate_weight is not None else None
+                layer._gate_bias_f32 = layer.gate_bias.float() if layer.gate_bias is not None else None
+                layer._e_score_correction_bias_f32 = (
+                    layer.e_score_correction_bias.float()
+                    if layer.e_score_correction_bias is not None else None
+                )
+
+                # Nullify CUDA graph (device-bound)
+                moe_saved["_se_graph"] = layer._se_graph
+                moe_saved["_se_input"] = layer._se_input
+                moe_saved["_se_output"] = layer._se_output
+                moe_saved["_shared_stream"] = layer._shared_stream
+                layer._se_graph = None
+                layer._se_input = None
+                layer._se_output = None
+                layer._shared_stream = (
+                    torch.cuda.Stream(device=device)
+                    if layer.shared_expert_gate is not None else None
+                )
+
+                ls["moe"] = moe_saved
+
+            elif layer.dense_mlp is not None:
+                ls["dense_mlp"] = dict(layer.dense_mlp)
+                layer.dense_mlp = {
+                    k: mv(v, device) for k, v in layer.dense_mlp.items()
+                }
+
+            layer.device = device
+            saved["layers"].append(ls)
+
+        return saved
+
+    def _restore_from_device(self, saved: dict):
+        """Restore all tensor references from saved state and free copies."""
+        import gc
+
+        # ── Top-level ──
+        self.embedding = saved["embedding"]
+        self.final_norm = saved["final_norm"]
+        self.lm_head_data = saved["lm_head_data"]
+
+        # ── Per-layer ──
+        for layer, ls in zip(self.layers, saved["layers"]):
+            layer.device = ls["device"]
+            layer.input_norm_weight = ls["input_norm_weight"]
+            layer.post_attn_norm_weight = ls["post_attn_norm_weight"]
+
+            if "_gpu_out_buf" in ls:
+                layer._gpu_out_buf = ls["_gpu_out_buf"]
+
+            # Attention
+            attn = layer.attention
+            attn_saved = ls["attention"]
+            attn.device = attn_saved["device"]
+
+            if layer.layer_type == "linear_attention":
+                for name in ("in_proj_qkvz", "in_proj_ba", "out_proj",
+                             "conv1d_weight", "A_log", "dt_bias", "norm_weight"):
+                    setattr(attn, name, attn_saved[name])
+                attn._conv_state = attn_saved["_conv_state"]
+                attn._recurrent_state = attn_saved["_recurrent_state"]
+                attn._la_graph = attn_saved["_la_graph"]
+                attn._la_input = attn_saved["_la_input"]
+                attn._la_output = attn_saved["_la_output"]
+                attn._la_stream = attn_saved["_la_stream"]
+
+            elif hasattr(attn, "kv_a_proj"):
+                # MLA
+                mla_weights = ["kv_a_proj", "o_proj", "kv_a_norm_weight", "w_kc", "w_vc"]
+                if attn.has_q_lora:
+                    mla_weights += ["q_a_proj", "q_b_proj", "q_a_norm_weight"]
+                else:
+                    mla_weights += ["q_proj"]
+                for name in mla_weights:
+                    setattr(attn, name, attn_saved[name])
+                attn._rope_cos_sin = attn_saved["_rope_cos_sin"]
+                attn._attn_wrapper = attn_saved["_attn_wrapper"]
+
+            else:
+                # GQA
+                for name in ("q_proj", "k_proj", "v_proj", "o_proj"):
+                    setattr(attn, name, attn_saved[name])
+                for name in ("q_proj_bias", "k_proj_bias", "v_proj_bias",
+                             "o_proj_bias", "sinks", "q_norm", "k_norm"):
+                    if name in attn_saved:
+                        setattr(attn, name, attn_saved[name])
+                attn._rope_cos_sin = attn_saved["_rope_cos_sin"]
+                attn._prefill_wrapper = attn_saved["_prefill_wrapper"]
+
+            # MoE
+            if "moe" in ls:
+                ms = ls["moe"]
+                for name in ("gate_weight", "gate_bias", "e_score_correction_bias"):
+                    if name in ms:
+                        setattr(layer, name, ms[name])
+                if "shared_expert" in ms:
+                    layer.shared_expert = ms["shared_expert"]
+                if "shared_expert_gate" in ms:
+                    layer.shared_expert_gate = ms["shared_expert_gate"]
+                layer._gate_weight_f32 = ms["_gate_weight_f32"]
+                layer._gate_bias_f32 = ms["_gate_bias_f32"]
+                layer._e_score_correction_bias_f32 = ms["_e_score_correction_bias_f32"]
+                layer._se_graph = ms["_se_graph"]
+                layer._se_input = ms["_se_input"]
+                layer._se_output = ms["_se_output"]
+                layer._shared_stream = ms["_shared_stream"]
+
+            elif "dense_mlp" in ls:
+                layer.dense_mlp = ls["dense_mlp"]
+
+        # Free any remaining copies
+        del saved
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    def calibrate_on_device(self, device: torch.device, test_tokens) -> dict:
+        """Temporarily replicate model to `device`, run inference, measure VRAM cost.
+
+        Disables GPU prefill so we measure only non-expert VRAM
+        (attention, norms, activations, KV cache). Expert VRAM is
+        managed separately by HCS budgets.
+
+        Returns dict with 'inference_cost_bytes'.
+        """
+        import gc
+        from krasis.config import PPRankConfig
+
+        logger.info("Calibrating inference cost on %s...", device)
+
+        # ── Save current state ──
+        saved_gpu_prefill_enabled = self.gpu_prefill_enabled
+        saved_ranks = self.ranks
+        saved_kv_caches = self.kv_caches
+        saved_kv_layer_offsets = self._kv_layer_offsets
+
+        # Save and null out per-layer gpu_prefill_manager
+        saved_layer_managers = []
+        for layer in self.layers:
+            saved_layer_managers.append(layer.gpu_prefill_manager)
+            layer.gpu_prefill_manager = None
+
+        # Disable GPU prefill — forces CPU MoE path
+        self.gpu_prefill_enabled = False
+
+        # ── Replicate weights to target device ──
+        saved_weights = self._replicate_to_device(device)
+
+        # ── Temporary single-rank config ──
+        orig_rank = saved_ranks[0]
+        self.ranks = [PPRankConfig(
+            rank=0,
+            device=str(device),
+            layer_start=orig_rank.layer_start,
+            layer_end=orig_rank.layer_end,
+            num_layers=orig_rank.num_layers,
+            has_embedding=True,
+            has_lm_head=True,
+        )]
+
+        # Re-init KV caches on target device
+        self._init_kv_caches()
+
+        # ── Measure inference cost ──
+        torch.cuda.reset_peak_memory_stats(device)
+        baseline = torch.cuda.memory_allocated(device)
+        inference_cost = 0
+
+        try:
+            self._oom_retry_enabled = False
+            with torch.inference_mode():
+                self.generate(test_tokens, max_new_tokens=1, temperature=0.6)
+
+            peak = torch.cuda.max_memory_allocated(device)
+            inference_cost = peak - baseline
+            logger.info(
+                "Calibration on %s: inference_cost=%d MB "
+                "(peak=%d MB, baseline=%d MB)",
+                device,
+                inference_cost // (1024 * 1024),
+                peak // (1024 * 1024),
+                baseline // (1024 * 1024),
+            )
+        except (torch.cuda.OutOfMemoryError, torch.OutOfMemoryError) as e:
+            logger.error("Calibration OOM on %s: %s", device, e)
+            gc.collect()
+            torch.cuda.empty_cache()
+            raise
+        finally:
+            self._oom_retry_enabled = True
+
+            # ── Restore everything ──
+            self.gpu_prefill_enabled = saved_gpu_prefill_enabled
+            self.ranks = saved_ranks
+            self.kv_caches = saved_kv_caches
+            self._kv_layer_offsets = saved_kv_layer_offsets
+
+            for layer, mgr in zip(self.layers, saved_layer_managers):
+                layer.gpu_prefill_manager = mgr
+
+            self._restore_from_device(saved_weights)
+
+        return {"inference_cost_bytes": inference_cost}
 
     def _init_kv_caches(self):
         """Allocate paged KV caches per GPU.
@@ -1050,117 +1640,30 @@ class KrasisModel:
     ) -> torch.Tensor:
         """GPU prefill with layer-grouped expert loading.
 
-        Instead of loading experts per-layer-per-chunk (O(chunks × layers) DMA),
-        loads experts per-group (O(groups) DMA ≈ O(1 model load)).
-
-        Loop structure:
+        Loop structure (group-outer, chunk-inner):
             for each group → DMA experts once → for each chunk → for each layer → compute
 
-        Args:
-            token_ids: [M] int64 token IDs
-            positions: [M] int32 position indices
-            seq_states: One SequenceKVState per PP rank
-
-        Returns:
-            logits: [vocab_size] or [1, vocab_size] float32 (last token only)
+        For multi-GPU (num_gpus > 1), uses Expert Parallelism: each GPU runs
+        its local expert slice, CPU Hub aggregates partial results.
+        For single GPU, uses standard layer.forward() path.
         """
         assert self._loaded, "Model not loaded. Call load() first."
         M = token_ids.shape[0]
+        num_gpus = len(self.all_devices)
+        first_k = self.cfg.first_k_dense_replace
 
         # ── Embedding (GPU0) ──
-        first_dev = torch.device(self.ranks[0].device)
-        all_hidden = self.embedding[token_ids.to(first_dev)]  # [M, hidden_size]
+        first_dev = self.all_devices[0]
+        all_hidden = self.embedding[token_ids.to(first_dev)]
 
-        # ── Pre-allocate KV pages for all ranks ──
+        # ── Pre-allocate KV pages for all tokens ──
         for seq_state in seq_states:
             if seq_state is not None:
                 seq_state.ensure_capacity(M)
 
         # ── Token chunking ──
-        # Compute max chunk size based on fused_marlin_moe intermediate allocation.
-        # The kernel allocates per token: topk × (N + max(2N, K)) × dtype_size bytes.
-        # Larger chunks = more tokens per expert = better GPU SM utilization.
-        topk = self.cfg.num_experts_per_tok
-        N_moe = self.cfg.moe_intermediate_size
-        K_moe = self.cfg.hidden_size
-        dtype_size = 2  # BF16
-        intermediate_per_token = topk * (N_moe + max(2 * N_moe, K_moe)) * dtype_size
-        # Hidden state + residual per token (carried through layers)
-        hidden_per_token = K_moe * dtype_size * 2  # hidden + residual
-
-        # Estimate available VRAM for activation intermediates.
-        # Include both CUDA driver-level free memory AND PyTorch's reserved-but-unallocated
-        # pool (memory PyTorch pre-reserved from CUDA but hasn't assigned to tensors).
-        # This gives a more accurate picture of what PyTorch can actually allocate.
-        try:
-            free_per_dev = {}
-            for r in self.ranks:
-                dev = torch.device(r.device)
-                cuda_free = torch.cuda.mem_get_info(dev)[0]
-                pytorch_pool = torch.cuda.memory_reserved(dev) - torch.cuda.memory_allocated(dev)
-                free_per_dev[str(dev)] = cuda_free + max(0, pytorch_pool)
-            min_free = min(free_per_dev.values())
-            first_dev_str = str(torch.device(self.ranks[0].device))
-            first_manager = self.gpu_prefill_managers.get(first_dev_str)
-            if first_manager and intermediate_per_token > 0:
-                per_expert = first_manager._per_expert_vram_bytes()
-                # 1-layer expert group VRAM for DMA during prefill
-                # (HCS uses layer-grouped DMA for M>1 prefill, HCS hot/cold for M=1 decode)
-                expert_group_bytes = self.cfg.n_routed_experts * per_expert
-                if first_manager.n_shared_experts > 0:
-                    expert_group_bytes += per_expert  # ~1 shared expert worth
-                # Safety margin: kernel workspace, PyTorch allocator fragmentation,
-                # attention intermediates, hidden states between chunks.
-                # Use 2x safety factor on the per-token estimate to account for
-                # peak memory during kernel execution (multiple concurrent buffers).
-                safety_factor = 2.0
-                total_per_token = (intermediate_per_token + hidden_per_token) * safety_factor
-                activation_budget = min_free - expert_group_bytes
-                if activation_budget > 0:
-                    max_chunk = int(activation_budget / total_per_token)
-                    chunk_size = max(256, min(M, max_chunk))
-                else:
-                    chunk_size = 512
-                logger.info(
-                    "Chunk calc: free=%s, min_free=%.0f MB, expert_group=%.0f MB, "
-                    "per_tok=%.0f KB (%.0f KB intermediate + %.0f KB hidden, %.1fx safety), "
-                    "budget=%.0f MB, max_chunk=%d → chunk_size=%d",
-                    {k: f"{v/1e6:.0f}MB" for k, v in free_per_dev.items()},
-                    min_free / 1e6, expert_group_bytes / 1e6,
-                    total_per_token / 1024, intermediate_per_token / 1024,
-                    hidden_per_token / 1024, safety_factor,
-                    activation_budget / 1e6 if activation_budget > 0 else 0,
-                    max_chunk if activation_budget > 0 else 0, chunk_size,
-                )
-            else:
-                chunk_size = 2048
-                logger.info("Chunk calc: no manager (key=%s, managers=%s), defaulting to %d",
-                            first_dev_str, list(self.gpu_prefill_managers.keys()), chunk_size)
-        except Exception as e:
-            chunk_size = 2048
-            logger.warning("Chunk calc exception: %s, defaulting to %d", e, chunk_size)
-
-        # Default chunk size cap — avoids OOM on first attempt for typical VRAM sizes.
-        # The auto-calculated chunk_size can exceed what actually fits because the
-        # VRAM budget estimate doesn't account for all transient allocations.
-        max_default_chunk = 5000
-        if chunk_size > max_default_chunk:
-            logger.info("Chunk size capped by default limit: %d → %d", chunk_size, max_default_chunk)
-            chunk_size = max_default_chunk
-
-        # Apply OOM retry override (from _forward_prefill_with_oom_retry)
-        if max_chunk_override is not None and max_chunk_override < chunk_size:
-            logger.info("Chunk size capped by OOM retry: %d → %d", chunk_size, max_chunk_override)
-            chunk_size = max_chunk_override
-
+        chunk_size = min(M, max_chunk_override or 5000)
         num_chunks = ceil(M / chunk_size)
-        logger.info(
-            "Prefill chunking: M=%d, chunk_size=%d (%d chunks), "
-            "intermediate=%.0f KB/tok, %.0f MB peak per chunk",
-            M, chunk_size, num_chunks,
-            intermediate_per_token / 1024,
-            chunk_size * intermediate_per_token / 1e6,
-        )
 
         chunk_hidden = []
         chunk_positions = []
@@ -1171,165 +1674,85 @@ class KrasisModel:
             chunk_hidden.append(all_hidden[start:end])
             chunk_positions.append(positions[start:end])
             chunk_residual.append(None)
+        del all_hidden
 
-        del all_hidden  # Free embedding memory
+        # ── Layer group computation ──
+        first_mgr = next(iter(self.gpu_prefill_managers.values()), None)
+        if first_mgr and first_mgr._prefill_mode == "hot_cached_static":
+            effective_divisor = _hcs_prefill_divisor(first_mgr, self.ranks[0], self.cfg)
+        else:
+            effective_divisor = max(1, self.expert_divisor)
 
-        # ── Process layer groups per rank ──
-        first_k = self.cfg.first_k_dense_replace
+        rank = self.ranks[0]
+        dev = torch.device(rank.device)
+        kv_cache = self.kv_caches[0]
+        seq_state = seq_states[0]
+        manager = first_mgr
 
-        for rank_idx, rank in enumerate(self.ranks):
-            dev = torch.device(rank.device)
-            kv_cache = self.kv_caches[rank_idx]
-            seq_state = seq_states[rank_idx]
+        groups = _compute_layer_groups(rank, self.cfg, effective_divisor)
 
-            # GPU prefill manager for this device
-            manager = self.gpu_prefill_managers.get(str(dev))
+        is_active_only = manager and manager._prefill_mode in ("active_only", "lru")
 
-            # Base index into self.layers for this rank
-            rank_layer_base = sum(r.num_layers for r in self.ranks[:rank_idx])
+        for group_idx, (group_layers, group_moe_indices) in enumerate(groups):
+            # 1. DMA experts for this group (once)
+            if manager and group_moe_indices and not is_active_only:
+                manager.preload_layer_group(group_moe_indices)
 
-            # Compute layer groups
-            # HCS mode uses layer_grouped prefill — auto-compute divisor from VRAM
-            if manager and manager._prefill_mode == "hot_cached_static":
-                effective_divisor = _hcs_prefill_divisor(manager, rank, self.cfg)
-            else:
-                effective_divisor = self.expert_divisor
-            groups = _compute_layer_groups(rank, self.cfg, effective_divisor)
-
-            logger.info(
-                "Layer-grouped prefill: rank %d, %d groups, %d layers, %d chunks of %d tokens",
-                rank_idx, len(groups), rank.num_layers, num_chunks, chunk_size,
-            )
-
-            # Active-only/LRU mode: skip group preloading (DMA/dispatch in forward())
-            # HCS uses layer_grouped preloading for prefill (M>1), HCS decode (M=1) separately
-            is_active_only = manager and manager._prefill_mode in ("active_only", "lru")
-            if is_active_only:
-                manager.reset_ao_stats()
-
-            # Track per-rank prefill timing
-            rank_dma_time = 0.0
-            rank_compute_time = 0.0
-
-            for group_idx, (group_layers, group_moe_indices) in enumerate(groups):
-                # Load experts for this group (skip for active_only — DMA in forward())
-                if TIMING.prefill:
-                    torch.cuda.synchronize(dev)
-                    t_dma_start = time.perf_counter()
-
-                if manager and group_moe_indices and not is_active_only:
-                    manager.preload_layer_group(group_moe_indices)
-
-                if TIMING.prefill:
-                    torch.cuda.synchronize(dev)
-                    dma_elapsed = time.perf_counter() - t_dma_start
-                    rank_dma_time += dma_elapsed
-                    t_compute_start = time.perf_counter()
-
-                # Reset seq_state for this group (each group's layers start with 0 KV)
+            # Reset seq_state for this group (each group's layers start with 0 KV)
+            if seq_state is not None:
                 seq_state.seq_len = 0
 
-                # Reset prefill stats for this group
-                if TIMING.prefill and manager:
-                    manager.reset_prefill_stats()
+            # 2. Process all chunks through this group's layers
+            for c in range(num_chunks):
+                h = chunk_hidden[c].to(dev)
+                r = chunk_residual[c]
+                if r is not None:
+                    r = r.to(dev)
+                pos = chunk_positions[c].to(dev)
+                chunk_M = h.shape[0]
 
-                # Process all chunks through this group
-                for c in range(num_chunks):
-                    h = _to_device(chunk_hidden[c], dev)
-                    r = _to_device(chunk_residual[c], dev) if chunk_residual[c] is not None else None
-                    pos = _to_device(chunk_positions[c], dev)
-                    chunk_M = h.shape[0]
+                for abs_layer_idx in group_layers:
+                    layer = self._device_state[str(dev)]["layers"][abs_layer_idx]
+                    moe_layer_idx = abs_layer_idx - first_k if abs_layer_idx >= first_k else None
+                    kv_layer_offset = self._kv_layer_offsets.get(abs_layer_idx, 0)
 
-                    for abs_layer_idx in group_layers:
-                        local_offset = abs_layer_idx - rank.layer_start
-                        global_idx = rank_layer_base + local_offset
-                        layer = self.layers[global_idx]
+                    if kv_layer_offset < 0:
+                        # Linear attention layer: no KV cache
+                        h, r = layer.forward(
+                            h, r, pos,
+                            None, None, -1,
+                            moe_layer_idx, num_new_tokens=chunk_M,
+                        )
+                    else:
+                        h, r = layer.forward(
+                            h, r, pos,
+                            kv_cache, seq_state, kv_layer_offset,
+                            moe_layer_idx, num_new_tokens=chunk_M,
+                        )
 
-                        moe_layer_idx = None
-                        if layer.is_moe:
-                            moe_layer_idx = abs_layer_idx - first_k
+                # Save for next group
+                chunk_hidden[c] = h
+                chunk_residual[c] = r
 
-                        kv_layer_offset = self._kv_layer_offsets.get(abs_layer_idx, local_offset)
+                # Advance seq_state for this chunk
+                if seq_state is not None:
+                    seq_state.advance(chunk_M)
 
-                        if kv_layer_offset < 0:
-                            h, r = layer.forward(
-                                h, r, pos,
-                                None, None, -1,
-                                moe_layer_idx, num_new_tokens=chunk_M,
-                            )
-                        else:
-                            h, r = layer.forward(
-                                h, r, pos,
-                                kv_cache, seq_state, kv_layer_offset,
-                                moe_layer_idx, num_new_tokens=chunk_M,
-                            )
+            # 3. Free experts for this group
+            if manager and group_moe_indices and not is_active_only:
+                manager.free_layer_group()
 
-                    # Save hidden/residual for this chunk
-                    chunk_hidden[c] = h
-                    chunk_residual[c] = r
-
-                    # Advance seq_state: these layers have now seen chunk_M more tokens
-                    if seq_state is not None:
-                        seq_state.advance(chunk_M)
-
-                if TIMING.prefill:
-                    torch.cuda.synchronize(dev)
-                    compute_elapsed = time.perf_counter() - t_compute_start
-                    rank_compute_time += compute_elapsed
-                    # Print HCS summary for this group
-                    if manager:
-                        manager.log_prefill_summary(group_idx)
-
-                # Free experts for this group (skip for active_only)
-                if manager and group_moe_indices and not is_active_only:
-                    manager.free_layer_group()
-
-            if TIMING.prefill:
-                total = rank_dma_time + rank_compute_time
-                logger.info(
-                    "PREFILL-RANK %d: DMA=%.2fs (%.0f%%), compute=%.2fs (%.0f%%), total=%.2fs",
-                    rank_idx,
-                    rank_dma_time, (rank_dma_time / total * 100) if total > 0 else 0,
-                    rank_compute_time, (rank_compute_time / total * 100) if total > 0 else 0,
-                    total,
-                )
-
-            # Log active-only stats for this rank
-            if is_active_only:
-                stats = manager.get_ao_stats()
-                logger.info(
-                    "Active-only rank %d: DMA=%.2fs (%.1f MB), "
-                    "misses=%d, hits=%d, pinned=%d",
-                    rank_idx, stats["dma_time"],
-                    stats["dma_bytes"] / 1e6,
-                    stats["cache_misses"], stats["cache_hits"],
-                    stats["pinned_experts"],
-                )
-                # Notify for warmup/pinning
-                manager.notify_request_done()
-
-            # After all groups, seq_state.seq_len should equal M
-            if seq_state is not None:
-                assert seq_state.seq_len == M, (
-                    f"seq_len mismatch after rank {rank_idx}: {seq_state.seq_len} != {M}"
-                )
-
-        # ── Final norm (last chunk only, contains last token) ──
-        last_dev = torch.device(self.ranks[-1].device)
-        last_hidden = _to_device(chunk_hidden[-1], last_dev)
-        last_residual = _to_device(chunk_residual[-1], last_dev)
-
+        # ── Final result: last token's logits ──
         import flashinfer
+        last_h = chunk_hidden[-1][-1:]
+        last_r = chunk_residual[-1][-1:]
+        state = self._device_state[str(dev)]
         flashinfer.norm.fused_add_rmsnorm(
-            last_hidden, last_residual, self.final_norm, self.cfg.rms_norm_eps
+            last_h, last_r, state["final_norm"], self.cfg.rms_norm_eps
         )
+        final_logits = _linear(last_h, state["lm_head_data"]).float()
 
-        # ── LM head (last token only) ──
-        hidden = last_hidden[-1:, :]
-        logits = _linear(hidden, self.lm_head_data)
-        logits = logits.float()
-
-        return logits
+        return final_logits
 
     @torch.inference_mode()
     def generate(

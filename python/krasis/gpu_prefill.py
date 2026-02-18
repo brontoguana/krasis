@@ -14,6 +14,7 @@ Usage:
     output = manager.forward(moe_layer_idx, hidden_states, topk_ids, topk_weights)
 """
 
+import dataclasses
 import gc
 import json
 import logging
@@ -281,6 +282,24 @@ def _quantize_and_pack_gpu(w: torch.Tensor, group_size: int = GROUP_SIZE, num_bi
     return packed, scale
 
 
+@dataclasses.dataclass
+class HcsDeviceState:
+    """Per-device HCS state for unified multi-GPU decode."""
+    device: torch.device
+    stream: object  # torch.cuda.Stream
+    buffers: dict   # layer_idx -> {w13, w13_scale, w2, w2_scale}
+    lookup: dict    # layer_idx -> tensor[num_experts] -> local_slot or -1
+    num_pinned: dict  # layer_idx -> int
+    biases: dict    # layer_idx -> {gate_up_bias, down_bias}
+
+    # Primary device (rank 0) has some unique resources
+    is_primary: bool = False
+    g_idx: Optional[dict] = None
+    sort_idx: Optional[dict] = None
+    gating_1: Optional[dict] = None
+
+
+
 class GpuPrefillManager:
     """Manages GPU expert buffer and INT4 Marlin weights for prefill.
 
@@ -307,10 +326,28 @@ class GpuPrefillManager:
         expert_divisor: int = 1,
         skip_shared_experts: bool = False,
         swiglu_limit: float = 0.0,
+        rank: int = 0,
+        num_ranks: int = 1,
     ):
         self.model_path = model_path
         self.device = device
         self.num_experts = num_experts
+        self.rank = rank
+        self.num_ranks = num_ranks
+        
+        # Internalize expert slicing for EP prefill
+        self.expert_start = rank * (num_experts // num_ranks)
+        if rank == num_ranks - 1:
+            self.expert_end = num_experts
+        else:
+            self.expert_end = (rank + 1) * (num_experts // num_ranks)
+        self.num_local_experts = self.expert_end - self.expert_start
+        
+        logger.info(
+            "GpuPrefillManager(rank %d/%d): expert_slice=[%d, %d), local_count=%d",
+            rank, num_ranks, self.expert_start, self.expert_end, self.num_local_experts
+        )
+
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
         self.params_dtype = params_dtype
@@ -421,6 +458,9 @@ class GpuPrefillManager:
         self._hcs_cuda_graphs: dict[int, object] = {}  # layer → CUDAGraph
         self._hcs_graph_io: dict[int, dict[str, torch.Tensor]] = {}  # layer → fixed I/O tensors
         self._hcs_cuda_graphs_enabled: bool = False
+        # Unified multi-GPU HCS state
+        self._hcs_devices: list[HcsDeviceState] = []
+        self._hcs_device_lookup: dict[int, torch.Tensor] = {}  # layer → [num_experts] int16 → device_idx (-1=cold)
 
         # Prefill timing accumulators (reset per request via reset_prefill_stats)
         self._pf_cpu_submit_ms: float = 0.0
@@ -1111,14 +1151,14 @@ class GpuPrefillManager:
         """Pre-allocate CPU staging buffers for zero-copy DMA.
 
         Called once before first preload_layer_group(). Allocates 4 bytearrays
-        sized for ALL experts in one layer, then touches all pages to map them.
-        Subsequent writes from Rust are raw memcpy into pre-faulted memory,
-        eliminating ~1430ms/layer of page fault overhead.
+        sized for the LOCAL slice of experts in one layer, then touches all 
+        pages to map them. Subsequent writes from Rust are raw memcpy into 
+        pre-faulted memory, eliminating page fault overhead.
         """
         if self._dma_bufs_initialized:
             return
 
-        E = self.num_experts
+        E_local = self.num_local_experts
         K = self.hidden_size
         K_w2 = self._w2_padded_n  # may be > K if padded for Marlin compat
         N = self.intermediate_size
@@ -1126,10 +1166,10 @@ class GpuPrefillManager:
         nb2 = self.num_bits // 2
 
         # Compute sizes in bytes (matching tensor shapes in preload_layer_group)
-        w13p_size = E * (K // 16) * (2 * N * nb2) * 4  # int32
-        w13s_size = E * (K // gs) * (2 * N) * 2  # bf16
-        w2p_size = E * (N // 16) * (K_w2 * nb2) * 4  # int32 (uses padded K)
-        w2s_size = E * (N // gs) * K_w2 * 2  # bf16 (uses padded K)
+        w13p_size = E_local * (K // 16) * (2 * N * nb2) * 4  # int32
+        w13s_size = E_local * (K // gs) * (2 * N) * 2  # bf16
+        w2p_size = E_local * (N // 16) * (K_w2 * nb2) * 4  # int32 (uses padded K)
+        w2s_size = E_local * (N // gs) * K_w2 * 2  # bf16 (uses padded K)
 
         total = w13p_size + w13s_size + w2p_size + w2s_size
         logger.info(
@@ -1203,7 +1243,7 @@ class GpuPrefillManager:
         N = self.intermediate_size
         gs = self._group_size
         nb2 = self.num_bits // 2
-        E = self.num_experts
+        E_local = self.num_local_experts
 
         # Pre-allocate DMA staging buffers (one-time, pages pre-faulted)
         self._init_dma_buffers()
@@ -1226,9 +1266,11 @@ class GpuPrefillManager:
                 t0 = time.perf_counter()
 
             # Zero-copy path: Rust writes directly into pre-allocated buffers
-            # (raw memcpy into pre-faulted pages, no allocation overhead)
-            self._engine.write_experts_all_into(
+            # Only fetch the slice this manager is responsible for
+            self._engine.write_experts_range_into(
                 moe_idx,
+                self.expert_start,
+                self.expert_end,
                 self._dma_buf_w13p,
                 self._dma_buf_w13s,
                 self._dma_buf_w2p,
@@ -1241,13 +1283,13 @@ class GpuPrefillManager:
 
             # Zero-copy views into pre-allocated buffers (no data movement)
             w13_packed = torch.frombuffer(self._dma_buf_w13p, dtype=torch.int32
-                ).reshape(E, K // 16, 2 * N * nb2)
+                ).reshape(E_local, K // 16, 2 * N * nb2)
             w13_scale = torch.frombuffer(self._dma_buf_w13s, dtype=torch.bfloat16
-                ).reshape(E, K // gs, 2 * N)
+                ).reshape(E_local, K // gs, 2 * N)
             w2_packed = torch.frombuffer(self._dma_buf_w2p, dtype=torch.int32
-                ).reshape(E, N // 16, K_w2 * nb2)
+                ).reshape(E_local, N // 16, K_w2 * nb2)
             w2_scale = torch.frombuffer(self._dma_buf_w2s, dtype=torch.bfloat16
-                ).reshape(E, N // gs, K_w2)
+                ).reshape(E_local, N // gs, K_w2)
 
             if detailed:
                 t2 = time.perf_counter()
@@ -1343,8 +1385,8 @@ class GpuPrefillManager:
         if self._workspace is None:
             self._workspace = marlin_make_workspace(self.device, max_blocks_per_sm=4)
         if self._gpu_g_idx is None:
-            self._gpu_g_idx = torch.empty(E, 0, dtype=torch.int32, device=self.device)
-            self._gpu_sort_idx = torch.empty(E, 0, dtype=torch.int32, device=self.device)
+            self._gpu_g_idx = torch.empty(self.num_experts, 0, dtype=torch.int32, device=self.device)
+            self._gpu_sort_idx = torch.empty(self.num_experts, 0, dtype=torch.int32, device=self.device)
 
         if detailed:
             t_sync0 = time.perf_counter()
@@ -2419,41 +2461,63 @@ class GpuPrefillManager:
         self._hcs_graph_io.clear()
         self._hcs_cuda_graphs_enabled = False
 
-        # Release GPU buffers
+        # Release all device states
+        for hcs_dev in self._hcs_devices:
+            hcs_dev.buffers.clear()
+            hcs_dev.lookup.clear()
+            hcs_dev.num_pinned.clear()
+            hcs_dev.biases.clear()
+            if hcs_dev.is_primary:
+                hcs_dev.g_idx.clear()
+                hcs_dev.sort_idx.clear()
+                hcs_dev.gating_1.clear()
+            torch.cuda.synchronize(hcs_dev.device)
+        self._hcs_devices.clear()
+
+        # Clear shared state
+        self._hcs_device_lookup.clear()
+        self._pinned.clear()
+        self._hcs_num_pinned.clear()
         self._hcs_buffers.clear()
         self._hcs_lookup.clear()
-        self._hcs_num_pinned.clear()
         self._hcs_g_idx.clear()
         self._hcs_sort_idx.clear()
         self._hcs_gating_1.clear()
-        self._hcs_biases.clear()
-        self._pinned.clear()
         self._workspace = None
-
         self._hcs_initialized = False
 
-        # Full CUDA reset — synchronize to clear any pending errors,
-        # then free all cached memory
-        torch.cuda.synchronize(self.device)
+        # Full CUDA reset
         gc.collect()
         torch.cuda.empty_cache()
-        logger.info("HCS state cleared on %s", self.device)
+        logger.info("HCS state cleared.")
 
     def _init_hot_cached_static(self, heatmap_path: Optional[str] = None,
-                                expert_budget_mb: Optional[int] = None):
-        """Initialize hot_cached_static strategy.
+                                expert_budget_mb: Optional[int] = None,
+                                allocation_mode: str = "uniform",
+                                devices: Optional[list] = None,
+                                device_budgets: Optional[dict] = None):
+        """Initialize hot_cached_static strategy with a unified multi-GPU loop.
 
-        Loads expert heatmap, selects hot experts that fit in VRAM budget,
-        copies their Marlin weights to static per-layer GPU buffers,
-        and builds lookup tables for GPU/CPU split dispatch.
+        Loads expert heatmap, selects hot experts that fit in combined VRAM
+        budget across all GPUs, copies their weights to static per-layer GPU
+        buffers, and builds lookup tables for multi-GPU/CPU split dispatch.
 
         Args:
             heatmap_path: Path to expert_heatmap.json. If None, uses
                           accumulated warmup heatmap from self._heatmap.
-            expert_budget_mb: Max MB to spend on expert weights. If None,
-                             uses free VRAM minus 1 GB headroom.
+            expert_budget_mb: Max MB on primary GPU for expert weights.
+                             If None, uses free VRAM minus 1 GB headroom.
+            allocation_mode: "greedy" (globally hottest experts) or
+                            "uniform" (equal experts per layer).
+            devices: List of all torch.device objects to use.
+            device_budgets: Dict of {device: budget_mb} for each device.
         """
         assert self._engine is not None, "hot_cached_static requires Krasis engine"
+
+        if devices is None:
+            devices = [self.device]
+        if device_budgets is None:
+            device_budgets = {}
 
         from sglang.srt.layers.quantization.marlin_utils import (
             marlin_make_workspace,
@@ -2477,43 +2541,87 @@ class GpuPrefillManager:
         # Sort by activation count descending
         sorted_experts = sorted(heatmap.items(), key=lambda x: x[1], reverse=True)
 
-        # Compute VRAM budget for expert loading.
+        # ── Unified VRAM Budget Calculation ──
         per_expert = self._per_expert_vram_bytes()
-        try:
-            free_vram = torch.cuda.mem_get_info(self.device)[0]
-            if expert_budget_mb is not None:
-                usable = min(free_vram, expert_budget_mb * 1024 * 1024)
-            else:
-                usable = max(0, free_vram - 1000 * 1024 * 1024)  # fallback: 1 GB headroom
-            max_experts = max(0, usable // per_expert)
-            logger.info(
-                "HCS VRAM budget: %.1f MB free, %s MB for experts, %d max experts (%.1f MB/expert)",
-                free_vram / 1e6,
-                expert_budget_mb if expert_budget_mb is not None else f"{usable // (1024*1024)} (auto)",
-                max_experts, per_expert / 1e6,
-            )
-        except Exception:
-            max_experts = 1000
+        all_max_experts = []
+        num_moe_layers = len(sorted_experts and {k[0] for k, _ in sorted_experts} or [])
 
-        # Select hot experts (globally hottest, up to budget)
-        hot_experts = []
-        for (layer, expert), count in sorted_experts:
-            if len(hot_experts) >= max_experts:
-                break
-            hot_experts.append((layer, expert))
+        for i, device in enumerate(devices):
+            # The device_budgets passed in from server.py should represent
+            # the memory usable *for experts* on that device.
+            expert_budget_bytes = device_budgets.get(device, 0) * 1024 * 1024
+            all_max_experts.append(max(0, expert_budget_bytes // per_expert))
+        
+        total_max_experts = sum(all_max_experts)
+
+        logger.info(
+            "HCS unified VRAM budget: %d devices, %.1f MB/expert, "
+            "per-device max experts: %s, total max: %d",
+            len(devices), per_expert / 1e6,
+            {str(d): n for d, n in zip(devices, all_max_experts)},
+            total_max_experts,
+        )
+
+        # Select hot experts based on allocation mode
+        if allocation_mode == "uniform":
+            per_layer_heatmap: dict[int, list[tuple[int, int]]] = {}
+            for (layer, expert), count in heatmap.items():
+                per_layer_heatmap.setdefault(layer, []).append((expert, count))
+            for layer in per_layer_heatmap:
+                per_layer_heatmap[layer].sort(key=lambda x: x[1], reverse=True)
+            num_layers_with_experts = len(per_layer_heatmap)
+            per_layer_budget = total_max_experts // max(1, num_layers_with_experts)
+            hot_experts = []
+            for layer in sorted(per_layer_heatmap.keys()):
+                for expert, count in per_layer_heatmap[layer][:per_layer_budget]:
+                    hot_experts.append((layer, expert))
+            logger.info(
+                "HCS uniform allocation: %d experts/layer across %d layers = %d total",
+                per_layer_budget, num_layers_with_experts, len(hot_experts),
+            )
+        else: # "greedy"
+            hot_experts = [he[0] for he in sorted_experts[:total_max_experts]]
 
         if not hot_experts:
             logger.info("hot_cached_static: no experts pinned (all CPU)")
             self._hcs_initialized = True
             return
 
-        # Group by layer
-        layer_experts: dict[int, list[int]] = {}
+        # ── Distribute experts across devices per layer ──
+        # Asymmetric HCS: Primary GPU (dev 0) gets globally hottest experts (L1).
+        # Secondary GPUs get the next hottest experts (L2).
+        
+        # Current hot_experts are already sorted by heat.
+        # Assign them to devices based on device capacities.
+        layer_device_assignment: dict[int, list[tuple[int, list[int]]]] = {}
+        
+        device_remaining_cap = list(all_max_experts)
         for layer, expert in hot_experts:
-            layer_experts.setdefault(layer, []).append(expert)
+            # Find first device with remaining capacity
+            assigned = False
+            for dev_idx in range(len(devices)):
+                if device_remaining_cap[dev_idx] > 0:
+                    device_remaining_cap[dev_idx] -= 1
+                    
+                    if layer not in layer_device_assignment:
+                        layer_device_assignment[layer] = []
+                    
+                    # Add to existing assignment for this device if any
+                    found_dev = False
+                    for d_idx, eids in layer_device_assignment[layer]:
+                        if d_idx == dev_idx:
+                            eids.append(expert)
+                            found_dev = True
+                            break
+                    if not found_dev:
+                        layer_device_assignment[layer].append((dev_idx, [expert]))
+                    
+                    assigned = True
+                    break
+            if not assigned:
+                break # All GPU budgets full
 
-        # Allocate per-layer static buffers and copy weights from engine
-        torch.cuda.set_device(self.device)
+        # ── Unified Loop for Buffer Allocation and Weight Loading ──
         K = self.hidden_size
         N = self.intermediate_size
         gs = self._group_size
@@ -2522,112 +2630,129 @@ class GpuPrefillManager:
         total_mb = 0.0
         load_start = time.perf_counter()
 
-        for layer_idx in sorted(layer_experts.keys()):
-            eids = sorted(layer_experts[layer_idx])
-            n = len(eids)
+        # Create a unified list of device states
+        self._hcs_devices: list[HcsDeviceState] = []
+        for i, device in enumerate(devices):
+            self._hcs_devices.append(HcsDeviceState(
+                device=device,
+                stream=torch.cuda.Stream(device=device),
+                buffers={}, lookup={}, num_pinned={}, biases={},
+                is_primary=(i==0),
+                g_idx={} if i==0 else None,
+                sort_idx={} if i==0 else None,
+                gating_1={} if i==0 else None,
+            ))
 
-            # Batched weight fetch from Rust engine
-            w13_bytes, w13s_bytes, w2_bytes, w2s_bytes = \
-                self._engine.get_experts_all_batch(layer_idx, eids)
+        for layer_idx in sorted(layer_device_assignment.keys()):
+            assignments = layer_device_assignment[layer_idx]
+            device_lookup = torch.full((self.num_experts,), -1, dtype=torch.int16, device=self.device)
 
-            w13_cpu = torch.frombuffer(
-                bytearray(w13_bytes), dtype=torch.int32
-            ).reshape(n, K // 16, 2 * N * nb2)
-            w13s_cpu = torch.frombuffer(
-                bytearray(w13s_bytes), dtype=torch.bfloat16
-            ).reshape(n, K // gs, 2 * N)
-            w2_cpu = torch.frombuffer(
-                bytearray(w2_bytes), dtype=torch.int32
-            ).reshape(n, N // 16, K * nb2)
-            w2s_cpu = torch.frombuffer(
-                bytearray(w2s_bytes), dtype=torch.bfloat16
-            ).reshape(n, N // gs, K)
+            for dev_idx, eids in assignments:
+                hcs_dev = self._hcs_devices[dev_idx]
+                n = len(eids)
 
-            # Upload to GPU
-            w13 = w13_cpu.to(self.device, non_blocking=True)
-            w13s = w13s_cpu.to(self.device, non_blocking=True)
-            w2 = w2_cpu.to(self.device, non_blocking=True)
-            w2s = w2s_cpu.to(self.device, non_blocking=True)
-            torch.cuda.synchronize(self.device)
+                w13_bytes, w13s_bytes, w2_bytes, w2s_bytes = \
+                    self._engine.get_experts_all_batch(layer_idx, eids)
 
-            self._hcs_buffers[layer_idx] = {
-                "w13": w13, "w13_scale": w13s,
-                "w2": w2, "w2_scale": w2s,
-            }
+                w13_cpu = torch.frombuffer(bytearray(w13_bytes), dtype=torch.int32).reshape(n, K // 16, 2 * N * nb2)
+                w13s_cpu = torch.frombuffer(bytearray(w13s_bytes), dtype=torch.bfloat16).reshape(n, K // gs, 2 * N)
+                w2_cpu = torch.frombuffer(bytearray(w2_bytes), dtype=torch.int32).reshape(n, N // 16, K * nb2)
+                w2s_cpu = torch.frombuffer(bytearray(w2s_bytes), dtype=torch.bfloat16).reshape(n, N // gs, K)
 
-            # Build lookup table: global expert ID → local slot (-1 if cold)
-            lookup = torch.full(
-                (self.num_experts,), -1, dtype=torch.int32, device=self.device,
-            )
-            for local_slot, eid in enumerate(eids):
-                lookup[eid] = local_slot
-            self._hcs_lookup[layer_idx] = lookup
-            self._hcs_num_pinned[layer_idx] = n
+                with torch.cuda.stream(hcs_dev.stream):
+                    torch.cuda.set_device(hcs_dev.device)
+                    if hcs_dev.is_primary:
+                        # Primary device: upload Marlin format for sgl_kernel
+                        w13 = w13_cpu.to(hcs_dev.device, non_blocking=True)
+                        w13s = w13s_cpu.to(hcs_dev.device, non_blocking=True)
+                        w2 = w2_cpu.to(hcs_dev.device, non_blocking=True)
+                        w2s = w2s_cpu.to(hcs_dev.device, non_blocking=True)
+                        hcs_dev.g_idx[layer_idx] = torch.empty(n, 0, dtype=torch.int32, device=hcs_dev.device)
+                        hcs_dev.sort_idx[layer_idx] = torch.empty(n, 0, dtype=torch.int32, device=hcs_dev.device)
+                        hcs_dev.gating_1[layer_idx] = torch.empty(1, n, device=hcs_dev.device)
+                    else:
+                        # Non-primary devices: convert to standard GPTQ format for Triton
+                        from krasis.triton_moe import inverse_marlin_repack, inverse_scale_permute
+                        w13_std = inverse_marlin_repack(w13_cpu, K, 2 * N, self.num_bits)
+                        w13s_std = inverse_scale_permute(w13s_cpu, K, 2 * N, self._group_size)
+                        w2_std = inverse_marlin_repack(w2_cpu, N, K, self.num_bits)
+                        w2s_std = inverse_scale_permute(w2s_cpu, N, K, self._group_size)
+                        w13 = w13_std.to(hcs_dev.device, non_blocking=True)
+                        w13s = w13s_std.to(hcs_dev.device, non_blocking=True)
+                        w2 = w2_std.to(hcs_dev.device, non_blocking=True)
+                        w2s = w2s_std.to(hcs_dev.device, non_blocking=True)
+                        del w13_std, w13s_std, w2_std, w2s_std
 
-            # Kernel helpers per layer
-            self._hcs_g_idx[layer_idx] = torch.empty(
-                n, 0, dtype=torch.int32, device=self.device,
-            )
-            self._hcs_sort_idx[layer_idx] = torch.empty(
-                n, 0, dtype=torch.int32, device=self.device,
-            )
-            self._hcs_gating_1[layer_idx] = torch.empty(
-                1, n, device=self.device,
-            )
+                    layer_mb = (w13.nbytes + w13s.nbytes + w2.nbytes + w2s.nbytes) / 1e6
+                    total_mb += layer_mb
 
-            # Remap expert biases for hot experts (GPT OSS)
-            if self.swiglu_limit > 0 and layer_idx in self._expert_biases:
-                full_biases = self._expert_biases[layer_idx]
-                gu_full = full_biases["gate_up_bias"]  # [E, 2N]
-                dn_full = full_biases["down_bias"]     # [E, K]
-                eids_tensor = torch.tensor(eids, dtype=torch.long)
-                self._hcs_biases[layer_idx] = {
-                    "gate_up_bias": gu_full[eids_tensor],  # [n_hot, 2N]
-                    "down_bias": dn_full[eids_tensor],     # [n_hot, K]
-                }
+                    hcs_dev.buffers[layer_idx] = {"w13": w13, "w13_scale": w13s, "w2": w2, "w2_scale": w2s}
+                    local_lookup = torch.full((self.num_experts,), -1, dtype=torch.int32, device=hcs_dev.device)
+                    for local_slot, eid in enumerate(eids):
+                        local_lookup[eid] = local_slot
+                        device_lookup[eid] = dev_idx
+                    hcs_dev.lookup[layer_idx] = local_lookup
+                    hcs_dev.num_pinned[layer_idx] = n
 
-            layer_mb = (w13.nbytes + w13s.nbytes + w2.nbytes + w2s.nbytes) / 1e6
-            total_mb += layer_mb
+                    if self.swiglu_limit > 0 and layer_idx in self._expert_biases:
+                        full_biases = self._expert_biases[layer_idx]
+                        eids_tensor = torch.tensor(eids, dtype=torch.long)
+                        hcs_dev.biases[layer_idx] = {
+                            "gate_up_bias": full_biases["gate_up_bias"][eids_tensor].to(hcs_dev.device),
+                            "down_bias": full_biases["down_bias"][eids_tensor].to(hcs_dev.device),
+                        }
 
-        if not hot_experts:
-            logger.info("hot_cached_static: no experts loaded (all CPU)")
-            self._hcs_initialized = True
-            return
+                del w13_cpu, w13s_cpu, w2_cpu, w2s_cpu
+            self._hcs_device_lookup[layer_idx] = device_lookup
 
-        # Populate self._pinned so active_only prefill path skips DMA for hot experts.
-        # Uses views into HCS buffers — zero extra VRAM.
-        for layer_idx in sorted(layer_experts.keys()):
-            eids = sorted(layer_experts[layer_idx])
-            bufs = self._hcs_buffers[layer_idx]
-            for local_slot, eid in enumerate(eids):
-                self._pinned[(layer_idx, eid)] = {
-                    "w13": bufs["w13"][local_slot:local_slot+1],
-                    "w13_scale": bufs["w13_scale"][local_slot:local_slot+1],
-                    "w2": bufs["w2"][local_slot:local_slot+1],
-                    "w2_scale": bufs["w2_scale"][local_slot:local_slot+1],
-                }
-
-        torch.cuda.synchronize(self.device)
+        # Synchronize all devices and log results
+        for hcs_dev in self._hcs_devices:
+            hcs_dev.stream.synchronize()
         elapsed = time.perf_counter() - load_start
 
-        # Per-layer summary
-        layers_with_pins = {l: len(e) for l, e in layer_experts.items()}
+        # Populate legacy dicts from primary device for backward compat
+        # (validate_gpu_allocation, CUDA graphs, OOM retry all use these)
+        primary_dev_state = self._hcs_devices[0]
+        for layer_idx, bufs in primary_dev_state.buffers.items():
+            lookup = primary_dev_state.lookup[layer_idx]
+            n_pinned = primary_dev_state.num_pinned.get(layer_idx, 0)
+            self._hcs_num_pinned[layer_idx] = n_pinned
+            self._hcs_buffers[layer_idx] = bufs
+            self._hcs_lookup[layer_idx] = lookup
+            if primary_dev_state.g_idx:
+                self._hcs_g_idx[layer_idx] = primary_dev_state.g_idx.get(layer_idx, torch.empty(n_pinned, 0, dtype=torch.int32, device=self.device))
+            if primary_dev_state.sort_idx:
+                self._hcs_sort_idx[layer_idx] = primary_dev_state.sort_idx.get(layer_idx, torch.empty(n_pinned, 0, dtype=torch.int32, device=self.device))
+            if primary_dev_state.gating_1:
+                self._hcs_gating_1[layer_idx] = primary_dev_state.gating_1.get(layer_idx, torch.empty(1, n_pinned, device=self.device))
+            for eid in range(self.num_experts):
+                slot = int(lookup[eid])
+                if slot >= 0:
+                    self._pinned[(layer_idx, eid)] = {
+                        "w13": bufs["w13"][slot:slot+1],
+                        "w13_scale": bufs["w13_scale"][slot:slot+1],
+                        "w2": bufs["w2"][slot:slot+1],
+                        "w2_scale": bufs["w2_scale"][slot:slot+1],
+                    }
+
+        device_counts = {str(d.device): sum(d.num_pinned.values()) for d in self._hcs_devices}
+        total_pinned = sum(device_counts.values())
+
         logger.info(
-            "hot_cached_static initialized on %s: %d experts across %d layers "
-            "(%.1f MB) in %.2fs, min/max per layer: %d/%d",
-            self.device, len(hot_experts), len(layer_experts), total_mb, elapsed,
-            min(layers_with_pins.values()), max(layers_with_pins.values()),
+            "hot_cached_static initialized: %d experts across %d devices, "
+            "%.1f MB in %.2fs. Counts: %s",
+            total_pinned, len(devices), total_mb, elapsed, device_counts
         )
 
-        # Allocate Marlin workspace + capture CUDA graphs
-        from sglang.srt.layers.quantization.marlin_utils import (
-            marlin_make_workspace,
-        )
         if self._workspace is None:
             self._workspace = marlin_make_workspace(self.device, max_blocks_per_sm=4)
-        self._init_cuda_graphs()
 
         self._hcs_initialized = True
+        # CUDA graphs only for single-GPU HCS for now
+        if len(self._hcs_devices) == 1:
+            self._init_cuda_graphs()
+        else:
+            logger.info("Multi-GPU HCS: CUDA graphs disabled (using stream-parallel dispatch)")
 
     def validate_gpu_allocation(self, model, test_tokens) -> tuple:
         """Run 10K-token inference to validate GPU allocation.
@@ -2710,6 +2835,53 @@ class GpuPrefillManager:
             total, self._pf_cold_experts, self._pf_total_experts, cold_pct,
         )
 
+    def _log_timing_summary(self, prefix, moe_layer_idx, M, t_start, t_gpu_done,
+                            t_cpu_submitted, t_cpu_sync_start, t_cpu_sync_done,
+                            t_cpu_to_gpu, has_cold, lookup_result):
+        """Helper to log detailed timing for HCS forward passes."""
+        t_end = time.perf_counter()
+        gpu_ms = (t_gpu_done - (t_cpu_submitted if has_cold else t_start)) * 1000
+
+        if M == 1:
+            n_cold = int((lookup_result < 0).sum().item())
+            n_total = lookup_result.numel()
+        else:
+            n_cold = int((lookup_result < 0).sum().item())
+            n_total = lookup_result.numel()
+
+        submit_ms = (t_cpu_submitted - t_start) * 1000 if has_cold else 0
+        sync_ms = (t_cpu_sync_done - t_cpu_sync_start) * 1000 if has_cold else 0
+        togpu_ms = (t_cpu_to_gpu - t_cpu_sync_done) * 1000 if has_cold else 0
+        combine_ms = (t_end - t_cpu_to_gpu) * 1000 if has_cold else 0
+
+        if has_cold:
+            logger.info(
+                "%s L%d M=%d: cpu_submit=%.1fms gpu=%.1fms cpu_sync=%.1fms cpu_to_gpu=%.1fms "
+                "combine=%.1fms total=%.1fms cold=%d/%d(%.0f%%)",
+                prefix, moe_layer_idx, M,
+                submit_ms, gpu_ms, sync_ms, togpu_ms, combine_ms,
+                (t_end - t_start) * 1000,
+                n_cold, n_total, 100.0 * n_cold / max(n_total, 1),
+            )
+        else:
+            logger.info(
+                "%s L%d M=%d: gpu_only=%.1fms total=%.1fms cold=0/%d",
+                prefix, moe_layer_idx, M, gpu_ms, (t_end - t_start) * 1000, n_total,
+            )
+
+        # Accumulate for summary
+        self._pf_cpu_submit_ms += submit_ms
+        self._pf_gpu_ms += gpu_ms
+        self._pf_cpu_sync_ms += sync_ms
+        self._pf_cpu_to_gpu_ms += togpu_ms
+        self._pf_combine_ms += combine_ms
+        self._pf_layers_total += 1
+        if has_cold:
+            self._pf_layers_cold += 1
+        self._pf_cold_experts += n_cold
+        self._pf_total_experts += n_total
+
+
     def _forward_hot_cached_static(
         self,
         moe_layer_idx: int,
@@ -2717,238 +2889,387 @@ class GpuPrefillManager:
         topk_ids: torch.Tensor,
         topk_weights: torch.Tensor,
     ) -> torch.Tensor:
-        """Forward with hot_cached_static: hot experts on GPU, cold on CPU, parallel.
+        """Forward with hot_cached_static: hot experts across multiple GPUs, cold on CPU.
 
-        For each MoE layer:
-          1. Lookup table splits experts into GPU (hot) vs CPU (cold)
-          2. Submit cold experts to CPU engine (async, non-blocking)
-             with hot expert IDs set to -1 (engine skips them)
-          3. Run fused_marlin_moe on static GPU buffer for hot experts
-             with cold expert weights zeroed
-          4. Sync CPU result + combine: output = gpu_output + cpu_output
-
-        For M=1 decode: CPU finishes within GPU's ~1.5ms Marlin kernel window.
+        For M=1, dispatches to the unified decode function.
+        For M>1, uses the primary GPU and falls back to CPU for cold experts.
         """
-
         M = x.shape[0]
         timing = (TIMING.decode and M == 1) or (TIMING.prefill and M > 1)
 
         if timing:
             t_start = time.perf_counter()
 
-        # Get layer's hot expert info
-        bufs = self._hcs_buffers.get(moe_layer_idx)
-        lookup = self._hcs_lookup.get(moe_layer_idx)
-        n_hot = self._hcs_num_pinned.get(moe_layer_idx, 0)
+        device_lookup = self._hcs_device_lookup.get(moe_layer_idx)
+        if device_lookup is None:
+            return self._forward_hcs_cpu_only(moe_layer_idx, x, topk_ids, topk_weights)
+
+        # Check if any GPU has experts for this layer
+        any_gpu_experts = False
+        for hcs_dev in self._hcs_devices:
+            if hcs_dev.num_pinned.get(moe_layer_idx, 0) > 0:
+                any_gpu_experts = True
+                break
+        if not any_gpu_experts:
+            return self._forward_hcs_cpu_only(moe_layer_idx, x, topk_ids, topk_weights)
+
+        # ── M=1 decode ──
+        if M == 1:
+            # Single-GPU with CUDA graphs: fast graphed path
+            if self._hcs_cuda_graphs_enabled and moe_layer_idx in self._hcs_cuda_graphs:
+                return self._forward_hcs_graphed_decode(
+                    moe_layer_idx, x, topk_ids, topk_weights, timing,
+                    t_start if timing else 0,
+                )
+            # Multi-GPU or no CUDA graphs: unified decode with Sticky L2
+            return self._forward_hcs_unified_decode(
+                moe_layer_idx, x, topk_ids, topk_weights, timing,
+                t_start if timing else 0,
+            )
+
+        # ── M>1 prefill: uses primary GPU + CPU only ──
+        primary_dev_state = self._hcs_devices[0]
+        lookup = primary_dev_state.lookup.get(moe_layer_idx)
+        n_hot = primary_dev_state.num_pinned.get(moe_layer_idx, 0)
+        bufs = primary_dev_state.buffers.get(moe_layer_idx)
 
         if n_hot == 0 or bufs is None:
-            # No hot experts for this layer — all on CPU
             return self._forward_hcs_cpu_only(moe_layer_idx, x, topk_ids, topk_weights)
 
-        # Determine GPU vs CPU split
-        if M == 1:
-            topk_list = topk_ids[0].tolist()
-            local_slots = [int(lookup[eid]) for eid in topk_list]
-            has_cold = any(s < 0 for s in local_slots)
-            all_cold = all(s < 0 for s in local_slots)
-        else:
-            lookup_result = lookup[topk_ids.long()]  # [M, topk]
-            has_cold = (lookup_result < 0).any().item()
-            all_cold = (lookup_result < 0).all().item()
-
-        if all_cold:
+        lookup_result = lookup[topk_ids.long()]
+        has_cold = (lookup_result < 0).any().item()
+        if (lookup_result < 0).all().item():
             return self._forward_hcs_cpu_only(moe_layer_idx, x, topk_ids, topk_weights)
 
-        # ── Step 1: Submit cold experts to CPU engine (async) ──
+        # Submit cold experts to CPU
         if has_cold:
-            if timing:
-                t_serialize_start = time.perf_counter()
-
-            if M == 1:
-                cpu_ids_list = [
-                    eid if local_slots[j] < 0 else -1
-                    for j, eid in enumerate(topk_list)
-                ]
-                cpu_ids = torch.tensor([cpu_ids_list], dtype=torch.int32)
-            else:
-                cpu_ids = topk_ids.clone()
-                hot_mask = lookup[topk_ids.long()] >= 0
-                cpu_ids[hot_mask] = -1
-                cpu_ids = cpu_ids.to(torch.int32)
-
-            if timing:
-                t_ids_ready = time.perf_counter()
-
+            if timing: t_serialize_start = time.perf_counter()
+            cpu_ids = topk_ids.clone()
+            cpu_ids[lookup_result >= 0] = -1
             act_cpu = x.detach().cpu().contiguous()
-            ids_cpu = cpu_ids.cpu().contiguous()
+            ids_cpu = cpu_ids.to(torch.int32).cpu().contiguous()
             wts_cpu = topk_weights.detach().cpu().contiguous()
-
-            if timing:
-                t_cpu_copy = time.perf_counter()
-
             act_bytes = act_cpu.view(torch.uint16).numpy().view(np.uint8).tobytes()
             ids_bytes = ids_cpu.numpy().view(np.uint8).tobytes()
             wts_bytes = wts_cpu.numpy().view(np.uint8).tobytes()
-
-            if timing:
-                t_tobytes = time.perf_counter()
-
+            if timing: t_tobytes = time.perf_counter()
             self._engine.submit_forward(moe_layer_idx, act_bytes, ids_bytes, wts_bytes, M)
 
         if timing:
             t_cpu_submitted = time.perf_counter()
-            if has_cold and M > 1:
-                logger.info(
-                    "HCS-PREFILL-SUBMIT L%d M=%d: ids_prep=%.1fms gpu_to_cpu=%.1fms "
-                    "tobytes=%.1fms submit=%.1fms total=%.1fms",
-                    moe_layer_idx, M,
-                    (t_ids_ready - t_serialize_start) * 1000,
-                    (t_cpu_copy - t_ids_ready) * 1000,
-                    (t_tobytes - t_cpu_copy) * 1000,
-                    (t_cpu_submitted - t_tobytes) * 1000,
-                    (t_cpu_submitted - t_serialize_start) * 1000,
-                )
 
-        # ── Step 2: GPU hot expert computation ──
-        if M == 1:
-            # Build local IDs and masked weights
-            gpu_local_ids = []
-            gpu_weights = topk_weights[0].tolist()
-            for j, slot in enumerate(local_slots):
-                if slot >= 0:
-                    gpu_local_ids.append(slot)
-                else:
-                    gpu_local_ids.append(0)  # dummy slot, weight zeroed
-                    gpu_weights[j] = 0.0
+        # Primary GPU computation for hot experts
+        cold_mask = lookup_result < 0
+        local_ids = lookup_result.clone().to(topk_ids.dtype)
+        local_ids[cold_mask] = 0
+        gpu_topk_weights = topk_weights.clone()
+        gpu_topk_weights[cold_mask] = 0.0
+        gating = torch.empty(M, n_hot, device=self.device)
 
-            local_ids = torch.tensor(
-                [gpu_local_ids], dtype=topk_ids.dtype, device=self.device,
-            )
-            gpu_topk_weights = torch.tensor(
-                [gpu_weights], dtype=topk_weights.dtype, device=self.device,
-            )
-            gating = self._hcs_gating_1[moe_layer_idx]
-        else:
-            # Batch remap for M > 1
-            lookup_result = lookup[topk_ids.long()]  # [M, topk]
-            cold_mask = lookup_result < 0
-            local_ids = lookup_result.clone().to(topk_ids.dtype)
-            local_ids[cold_mask] = 0  # dummy slot
-            gpu_topk_weights = topk_weights.clone()
-            gpu_topk_weights[cold_mask] = 0.0
-            gating = torch.empty(M, n_hot, device=self.device)
-
-        # Use CUDA graph if available (M=1 only), otherwise standard kernel
-        if (M == 1 and self._hcs_cuda_graphs_enabled
-                and moe_layer_idx in self._hcs_cuda_graphs):
-            gpu_output = self._forward_hcs_graphed(
-                moe_layer_idx, local_ids, gpu_topk_weights, x,
-            )
-        else:
-            g_idx = self._hcs_g_idx[moe_layer_idx]
-            sort_idx = self._hcs_sort_idx[moe_layer_idx]
-
-            if M > 1:
-                self._workspace.zero_()
-
-            # Get remapped biases for hot experts (GPT OSS)
-            hcs_bias = self._hcs_biases.get(moe_layer_idx, {})
-            gpu_output = self._call_fused_moe(
-                moe_layer_idx=moe_layer_idx,
-                hidden_states=x,
-                w1=bufs["w13"],
-                w2=bufs["w2"],
-                w1_scale=bufs["w13_scale"],
-                w2_scale=bufs["w2_scale"],
-                gating_output=gating,
-                topk_weights=gpu_topk_weights,
-                topk_ids=local_ids,
-                global_num_experts=n_hot,
-                g_idx1=g_idx,
-                g_idx2=g_idx,
-                sort_indices1=sort_idx,
-                sort_indices2=sort_idx,
-                workspace=self._workspace,
-                bias_gate_up=hcs_bias.get("gate_up_bias"),
-                bias_down=hcs_bias.get("down_bias"),
-            ).to(x.dtype)
+        self._workspace.zero_()
+        hcs_bias = primary_dev_state.biases.get(moe_layer_idx, {})
+        gpu_output = self._call_fused_moe(
+            moe_layer_idx=moe_layer_idx, hidden_states=x,
+            w1=bufs["w13"], w2=bufs["w2"],
+            w1_scale=bufs["w13_scale"], w2_scale=bufs["w2_scale"],
+            gating_output=gating, topk_weights=gpu_topk_weights, topk_ids=local_ids,
+            global_num_experts=n_hot,
+            g_idx1=primary_dev_state.g_idx[moe_layer_idx], g_idx2=primary_dev_state.g_idx[moe_layer_idx],
+            sort_indices1=primary_dev_state.sort_idx[moe_layer_idx], sort_indices2=primary_dev_state.sort_idx[moe_layer_idx],
+            workspace=self._workspace,
+            bias_gate_up=hcs_bias.get("gate_up_bias"), bias_down=hcs_bias.get("down_bias"),
+        ).to(x.dtype)
 
         if timing:
             torch.cuda.synchronize(self.device)
             t_gpu_done = time.perf_counter()
 
-        # ── Step 3: Sync CPU result and combine ──
+        # Combine with CPU result
         if has_cold:
-            if timing:
-                t_cpu_sync_start = time.perf_counter()
+            if timing: t_cpu_sync_start = time.perf_counter()
             cpu_output_bytes = self._engine.sync_forward()
-            if timing:
-                t_cpu_sync_done = time.perf_counter()
-            cpu_raw = torch.frombuffer(
-                bytearray(cpu_output_bytes), dtype=torch.bfloat16
-            ).reshape(M, self.hidden_size).to(self.device)
-            if timing:
-                t_cpu_to_gpu = time.perf_counter()
+            if timing: t_cpu_sync_done = time.perf_counter()
+            cpu_raw = torch.frombuffer(bytearray(cpu_output_bytes), dtype=torch.bfloat16).reshape(M, self.hidden_size).to(self.device)
+            if timing: t_cpu_to_gpu = time.perf_counter()
+            if self.routed_scaling_factor != 1.0:
+                cpu_raw /= self.routed_scaling_factor
+            gpu_output += cpu_raw
 
-            # CPU engine applies routed_scaling_factor — divide it out
-            # so forward() can apply it uniformly to the combined output
+        if timing:
+            self._log_timing_summary(
+                "HCS-PREFILL", moe_layer_idx, M, t_start, t_gpu_done,
+                t_cpu_submitted if has_cold else 0,
+                t_cpu_sync_start if has_cold else 0,
+                t_cpu_sync_done if has_cold else 0,
+                t_cpu_to_gpu if has_cold else 0,
+                has_cold, lookup_result
+            )
+
+        if self._heatmap is not None:
+            for eid in torch.unique(topk_ids).tolist():
+                self._heatmap[(moe_layer_idx, eid)] = self._heatmap.get((moe_layer_idx, eid), 0) + 1
+
+        return gpu_output
+
+    def _forward_hcs_unified_decode(
+        self,
+        moe_layer_idx: int,
+        x: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        timing: bool,
+        t_start: float,
+    ) -> torch.Tensor:
+        """Unified multi-GPU M=1 decode dispatch with Sticky L2 Cache.
+
+        Classifies experts by device. Experts on secondary GPUs are streamed to
+        the primary GPU's Active Buffer (AO buffer) once and kept there ("Sticky").
+        All hot experts (L1 and L2) are then processed in a single Marlin kernel
+        call on GPU 0.
+        """
+        K = self.hidden_size
+        device_lookup = self._hcs_device_lookup[moe_layer_idx]
+        topk_list = topk_ids[0].tolist()
+        weights_list = topk_weights[0].tolist()
+
+        # Classify each expert by its target device index
+        dev_indices = [int(device_lookup[eid]) for eid in topk_list]
+        has_cold = any(d < 0 for d in dev_indices)
+
+        # ── Step 1: Submit cold experts to CPU engine (async) ──
+        if has_cold:
+            cpu_ids_list = [eid if dev_indices[j] < 0 else -1 for j, eid in enumerate(topk_list)]
+            cpu_ids = torch.tensor([cpu_ids_list], dtype=torch.int32)
+            act_cpu = x.detach().cpu().contiguous()
+            ids_cpu = cpu_ids.cpu().contiguous()
+            wts_cpu = topk_weights.detach().cpu().contiguous()
+            act_bytes = act_cpu.view(torch.uint16).numpy().view(np.uint8).tobytes()
+            ids_bytes = ids_cpu.numpy().view(np.uint8).tobytes()
+            wts_bytes = wts_cpu.numpy().view(np.uint8).tobytes()
+            self._engine.submit_forward(moe_layer_idx, act_bytes, ids_bytes, wts_bytes, 1)
+
+        if timing:
+            t_cpu_submitted = time.perf_counter()
+
+        # ── Step 2: Manage Sticky L2 Cache on Primary GPU ──
+        self._allocate_ao_buffer()
+        torch.cuda.set_device(self.device) # Primary device
+        
+        # Track L2 sticky state
+        if not hasattr(self, '_l2_sticky_map'):
+            self._l2_sticky_map = set() # (layer, expert)
+        
+        # Ensure L1 experts for this layer are in AO buffer (one-time copy per layer turn)
+        if moe_layer_idx != self._ao_current_layer:
+            self._ao_gpu_w13.zero_()
+            self._ao_gpu_w13_scale.zero_()
+            self._ao_gpu_w2.zero_()
+            self._ao_gpu_w2_scale.zero_()
+            self._ao_loaded_experts.clear()
+            self._ao_current_layer = moe_layer_idx
+            
+            # Pre-populate with L1 experts from primary device's HCS buffers
+            primary_hcs = self._hcs_devices[0]
+            if moe_layer_idx in primary_hcs.buffers:
+                bufs = primary_hcs.buffers[moe_layer_idx]
+                lookup = primary_hcs.lookup[moe_layer_idx]
+                # Identify which global expert IDs are in local L1 slots
+                l1_eids = []
+                l1_slots = []
+                for eid in range(self.num_experts):
+                    slot = int(lookup[eid])
+                    if slot >= 0:
+                        l1_eids.append(eid)
+                        l1_slots.append(slot)
+                
+                if l1_eids:
+                    dst_idx = torch.tensor(l1_eids, dtype=torch.long, device=self.device)
+                    src_idx = torch.tensor(l1_slots, dtype=torch.long, device=self.device)
+                    self._ao_gpu_w13.index_copy_(0, dst_idx, bufs["w13"].index_select(0, src_idx))
+                    self._ao_gpu_w13_scale.index_copy_(0, dst_idx, bufs["w13_scale"].index_select(0, src_idx))
+                    self._ao_gpu_w2.index_copy_(0, dst_idx, bufs["w2"].index_select(0, src_idx))
+                    self._ao_gpu_w2_scale.index_copy_(0, dst_idx, bufs["w2_scale"].index_select(0, src_idx))
+                    self._ao_loaded_experts.update(l1_eids)
+
+        # Stream missing L2 experts from secondary GPUs
+        for j, dev_idx in enumerate(dev_indices):
+            if dev_idx > 0:
+                eid = topk_list[j]
+                key = (moe_layer_idx, eid)
+                if key not in self._l2_sticky_map or eid not in self._ao_loaded_experts:
+                    # Move from Secondary VRAM -> Primary VRAM
+                    hcs_dev = self._hcs_devices[dev_idx]
+                    slot = int(hcs_dev.lookup[moe_layer_idx][eid])
+                    
+                    # Inter-GPU copy (via P2P if working, else CPU bounce handled by torch)
+                    self._ao_gpu_w13[eid:eid+1].copy_(hcs_dev.buffers[moe_layer_idx]["w13"][slot:slot+1])
+                    self._ao_gpu_w13_scale[eid:eid+1].copy_(hcs_dev.buffers[moe_layer_idx]["w13_scale"][slot:slot+1])
+                    self._ao_gpu_w2[eid:eid+1].copy_(hcs_dev.buffers[moe_layer_idx]["w2"][slot:slot+1])
+                    self._ao_gpu_w2_scale[eid:eid+1].copy_(hcs_dev.buffers[moe_layer_idx]["w2_scale"][slot:slot+1])
+                    
+                    self._l2_sticky_map.add(key)
+                    self._ao_loaded_experts.add(eid)
+
+        # ── Step 3: Run Single Marlin Kernel on Primary GPU ──
+        # Build topk_ids and weights for Marlin call (only includes hot experts)
+        gpu_ids_list = []
+        gpu_weights_list = []
+        for j, dev_idx in enumerate(dev_indices):
+            if dev_idx >= 0: # L1 or L2
+                gpu_ids_list.append(topk_list[j])
+                gpu_weights_list.append(weights_list[j])
+            else: # Cold
+                gpu_ids_list.append(0)
+                gpu_weights_list.append(0.0)
+        
+        gpu_ids = torch.tensor([gpu_ids_list], dtype=topk_ids.dtype, device=self.device)
+        gpu_weights = torch.tensor([gpu_weights_list], dtype=topk_weights.dtype, device=self.device)
+        
+        self._workspace.zero_()
+        # For unified hot path, we use global EIDs as indices into the AO buffer
+        # But Marlin expects indices relative to the provided weight buffers.
+        # Since our weight buffers are [num_experts, ...], global EIDs are correct.
+        
+        # Bias management for sticky cache:
+        # GPT OSS biases are small, we can load them all or just use remapped ones.
+        # For simplicity, we'll let self._call_fused_moe handle standard bias lookup.
+        
+        gpu_output = self._call_fused_moe(
+            moe_layer_idx=moe_layer_idx,
+            hidden_states=x,
+            w1=self._ao_gpu_w13,
+            w2=self._ao_gpu_w2,
+            w1_scale=self._ao_gpu_w13_scale,
+            w2_scale=self._ao_gpu_w2_scale,
+            gating_output=self._ao_gating_output_1,
+            topk_weights=gpu_weights,
+            topk_ids=gpu_ids,
+            global_num_experts=self.num_experts,
+            g_idx1=self._gpu_g_idx,
+            g_idx2=self._gpu_g_idx,
+            sort_indices1=self._gpu_sort_idx,
+            sort_indices2=self._gpu_sort_idx,
+            workspace=self._workspace,
+        ).to(x.dtype)
+
+        if timing:
+            torch.cuda.synchronize(self.device)
+            t_gpu_done = time.perf_counter()
+
+        # ── Step 4: Sync CPU result and combine ──
+        if has_cold:
+            if timing: t_cpu_sync_start = time.perf_counter()
+            cpu_output_bytes = self._engine.sync_forward()
+            if timing: t_cpu_sync_done = time.perf_counter()
+            cpu_raw = torch.frombuffer(bytearray(cpu_output_bytes), dtype=torch.bfloat16).reshape(1, K).to(self.device)
+            if timing: t_cpu_to_gpu = time.perf_counter()
             if self.routed_scaling_factor != 1.0:
                 cpu_raw = cpu_raw / self.routed_scaling_factor
+            gpu_output += cpu_raw
 
+        if timing:
+            t_end = time.perf_counter()
+            n_cold = sum(1 for d in dev_indices if d < 0)
+            n_total = len(dev_indices)
+            gpu_ms = (t_gpu_done - (t_cpu_submitted if has_cold else t_start)) * 1000
+            total_ms = (t_end - t_start) * 1000
+            logger.info(
+                "HCS-STICKY-L2 L%d: gpu=%.1fms total=%.1fms cold=%d/%d devs=%d",
+                moe_layer_idx, gpu_ms, total_ms, n_cold, n_total, len(self._hcs_devices)
+            )
+            self._pf_gpu_ms += gpu_ms
+            if has_cold:
+                self._pf_cpu_submit_ms += (t_cpu_submitted - t_start) * 1000
+                self._pf_cpu_sync_ms += (t_cpu_sync_done - t_cpu_sync_start) * 1000
+                self._pf_cpu_to_gpu_ms += (t_cpu_to_gpu - t_cpu_sync_done) * 1000
+                self._pf_combine_ms += (t_end - t_cpu_to_gpu) * 1000
+            self._pf_layers_total += 1
+            if has_cold: self._pf_layers_cold += 1
+            self._pf_cold_experts += n_cold
+            self._pf_total_experts += n_total
+
+        if self._heatmap is not None:
+            for eid in topk_list:
+                self._heatmap[(moe_layer_idx, eid)] = self._heatmap.get((moe_layer_idx, eid), 0) + 1
+
+        return gpu_output
+
+    def _forward_hcs_graphed_decode(
+        self,
+        moe_layer_idx: int,
+        x: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        timing: bool,
+        t_start: float,
+    ) -> torch.Tensor:
+        """Fast M=1 decode using CUDA graphs for single-GPU HCS.
+
+        Uses the captured CUDA graph (compact N-hot expert buffer) for the GPU
+        hot experts, and falls back to CPU engine for cold experts.
+        """
+        K = self.hidden_size
+        lookup = self._hcs_lookup[moe_layer_idx]
+        topk_list = topk_ids[0].tolist()
+
+        # Remap global expert IDs → local HCS slot IDs
+        lookup_result = lookup[topk_ids.long()]  # [1, top_k]
+        cold_mask = lookup_result < 0
+        has_cold = cold_mask.any().item()
+
+        # Submit cold experts to CPU engine (async)
+        if has_cold:
+            cpu_ids = topk_ids.clone()
+            cpu_ids[~cold_mask] = -1  # Mask out hot experts
+            act_cpu = x.detach().cpu().contiguous()
+            ids_cpu = cpu_ids.to(torch.int32).cpu().contiguous()
+            wts_cpu = topk_weights.detach().cpu().contiguous()
+            act_bytes = act_cpu.view(torch.uint16).numpy().view(np.uint8).tobytes()
+            ids_bytes = ids_cpu.numpy().view(np.uint8).tobytes()
+            wts_bytes = wts_cpu.numpy().view(np.uint8).tobytes()
+            self._engine.submit_forward(moe_layer_idx, act_bytes, ids_bytes, wts_bytes, 1)
+
+        if timing:
+            t_cpu_submitted = time.perf_counter()
+
+        # Prepare local IDs and weights for CUDA graph
+        local_ids = lookup_result.clone().to(topk_ids.dtype)
+        local_ids[cold_mask] = 0
+        gpu_topk_weights = topk_weights.clone()
+        gpu_topk_weights[cold_mask] = 0.0
+
+        # Replay CUDA graph (fast path)
+        gpu_output = self._forward_hcs_graphed(moe_layer_idx, local_ids, gpu_topk_weights, x)
+
+        if timing:
+            torch.cuda.synchronize(self.device)
+            t_gpu_done = time.perf_counter()
+
+        # Sync CPU result and combine
+        if has_cold:
+            if timing: t_cpu_sync_start = time.perf_counter()
+            cpu_output_bytes = self._engine.sync_forward()
+            if timing: t_cpu_sync_done = time.perf_counter()
+            cpu_raw = torch.frombuffer(bytearray(cpu_output_bytes), dtype=torch.bfloat16).reshape(1, K).to(self.device)
+            if timing: t_cpu_to_gpu = time.perf_counter()
+            if self.routed_scaling_factor != 1.0:
+                cpu_raw = cpu_raw / self.routed_scaling_factor
             gpu_output = gpu_output + cpu_raw
 
         if timing:
             t_end = time.perf_counter()
+            n_cold = cold_mask.sum().item()
+            n_total = len(topk_list)
             gpu_ms = (t_gpu_done - (t_cpu_submitted if has_cold else t_start)) * 1000
-            # Count cold vs hot experts for this layer
-            if M == 1:
-                n_cold = sum(1 for s in local_slots if s < 0)
-                n_total = len(local_slots)
-            else:
-                n_cold = int((lookup_result < 0).sum().item())
-                n_total = lookup_result.numel()
-            prefix = "HCS-PREFILL" if M > 1 else "HCS-TIMING"
-            submit_ms = (t_cpu_submitted - t_start) * 1000 if has_cold else 0
-            sync_ms = (t_cpu_sync_done - t_cpu_sync_start) * 1000 if has_cold else 0
-            togpu_ms = (t_cpu_to_gpu - t_cpu_sync_done) * 1000 if has_cold else 0
-            combine_ms = (t_end - t_cpu_to_gpu) * 1000 if has_cold else 0
-            if has_cold:
-                logger.info(
-                    "%s L%d M=%d: cpu_submit=%.1fms gpu=%.1fms cpu_sync=%.1fms cpu_to_gpu=%.1fms "
-                    "combine=%.1fms total=%.1fms cold=%d/%d(%.0f%%)",
-                    prefix, moe_layer_idx, M,
-                    submit_ms, gpu_ms, sync_ms, togpu_ms, combine_ms,
-                    (t_end - t_start) * 1000,
-                    n_cold, n_total, 100.0 * n_cold / max(n_total, 1),
-                )
-            else:
-                logger.info(
-                    "%s L%d M=%d: gpu_only=%.1fms total=%.1fms cold=0/%d",
-                    prefix, moe_layer_idx, M,
-                    gpu_ms, (t_end - t_start) * 1000, n_total,
-                )
-            # Accumulate for summary
-            self._pf_cpu_submit_ms += submit_ms
-            self._pf_gpu_ms += gpu_ms
-            self._pf_cpu_sync_ms += sync_ms
-            self._pf_cpu_to_gpu_ms += togpu_ms
-            self._pf_combine_ms += combine_ms
-            self._pf_layers_total += 1
-            if has_cold:
-                self._pf_layers_cold += 1
-            self._pf_cold_experts += n_cold
-            self._pf_total_experts += n_total
+            total_ms = (t_end - t_start) * 1000
+            logger.info(
+                "HCS-GRAPHED L%d: gpu=%.1fms total=%.1fms cold=%d/%d",
+                moe_layer_idx, gpu_ms, total_ms, n_cold, n_total,
+            )
 
-        # Update heatmap for potential re-pinning
         if self._heatmap is not None:
-            if M == 1:
-                for eid in topk_list:
-                    key = (moe_layer_idx, eid)
-                    self._heatmap[key] = self._heatmap.get(key, 0) + 1
-            else:
-                for eid in torch.unique(topk_ids).tolist():
-                    key = (moe_layer_idx, eid)
-                    self._heatmap[key] = self._heatmap.get(key, 0) + 1
+            for eid in topk_list:
+                self._heatmap[(moe_layer_idx, eid)] = self._heatmap.get((moe_layer_idx, eid), 0) + 1
 
         return gpu_output
 
@@ -3352,6 +3673,7 @@ class GpuPrefillManager:
         hidden_states: torch.Tensor,
         topk_ids: torch.Tensor,
         topk_weights: torch.Tensor,
+        routed_only: bool = False,
     ) -> torch.Tensor:
         """Run GPU MoE forward for one layer using cached INT4 Marlin weights.
 
@@ -3360,6 +3682,8 @@ class GpuPrefillManager:
             hidden_states: [M, K] input on GPU
             topk_ids: [M, top_k] expert indices on GPU
             topk_weights: [M, top_k] routing weights on GPU
+            routed_only: If True, return raw routed output without
+                routed_scaling_factor or shared expert (for EP partial sums).
 
         Returns:
             [M, K] output tensor on GPU
@@ -3415,6 +3739,10 @@ class GpuPrefillManager:
                 self.prepare_layer(moe_layer_idx)
             cache = self._cache[moe_layer_idx]
             output = self._forward_cached(cache, x, topk_ids, topk_weights, debug_sync)
+
+        # EP partial sum: return raw routed output (no scaling, no shared expert)
+        if routed_only:
+            return output
 
         # Apply routed scaling factor and add shared expert
         if self.n_shared_experts > 0:

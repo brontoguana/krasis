@@ -63,6 +63,54 @@ async def toggle_timing(request: Request):
     return result
 
 
+@app.post("/v1/hcs/reload")
+async def reload_hcs(request: Request):
+    """Reload HCS with a different allocation mode. POST with {"mode": "greedy"|"uniform"}."""
+    body = await request.json()
+    mode = body.get("mode", "uniform")
+    if mode not in ("greedy", "uniform"):
+        return {"error": f"Unknown mode: {mode}. Use 'greedy' or 'uniform'."}
+
+    import os as _os
+    import torch
+
+    manager = list(_model.gpu_prefill_managers.values())[0]
+    heatmap_path = _os.path.join(
+        _model.cfg.model_path, ".krasis_cache", "auto_heatmap.json"
+    )
+
+    # Unified budget logic for every GPU
+    devices = [hcs_dev.device for hcs_dev in manager._hcs_devices]
+    device_budgets = {}
+    for hcs_dev in manager._hcs_devices:
+        free = torch.cuda.mem_get_info(hcs_dev.device)[0]
+        # Add back current HCS usage on this device
+        hcs_vram = sum(
+            b["w13"].nbytes + b["w13_scale"].nbytes + b["w2"].nbytes + b["w2_scale"].nbytes
+            for b in hcs_dev.buffers.values()
+        )
+        # Primary needs ~1 GB headroom for inference; others are pure storage
+        headroom = 1000 if hcs_dev.is_primary else 300
+        device_budgets[hcs_dev.device] = max(0, (free + hcs_vram) // (1024 * 1024) - headroom)
+
+    manager.clear_hcs()
+    torch.cuda.empty_cache()
+    manager._init_hot_cached_static(
+        heatmap_path=heatmap_path,
+        allocation_mode=mode,
+        devices=devices,
+        device_budgets=device_budgets,
+    )
+    
+    total_pinned = sum(sum(d.num_pinned.values()) for d in manager._hcs_devices)
+    device_counts = {str(d.device): sum(d.num_pinned.values()) for d in manager._hcs_devices}
+    logger.info(
+        "HCS reloaded: mode=%s, total_experts=%d, counts=%s",
+        mode, total_pinned, device_counts
+    )
+    return {"mode": mode, "total_experts": total_pinned}
+
+
 @app.get("/v1/models")
 async def list_models():
     return {
@@ -307,6 +355,8 @@ def _remove_registry() -> None:
 
 
 def main():
+    import os # Ensure os is in local scope
+    os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True" # Mitigate fragmentation
     parser = argparse.ArgumentParser(description="Krasis standalone LLM server")
     parser.add_argument("--model-path", required=True, help="Path to HF model")
     parser.add_argument("--num-gpus", type=int, default=None,
@@ -405,13 +455,14 @@ def main():
 
     # CUDA runtime warmup — triggers cuBLAS + Triton kernel compilation
     # before the allocation loop so VRAM measurements are accurate.
-    # Full model warmup happens inside the allocation loop's first inference.
-    _model.warmup_cuda_runtime()
+    num_gpus_available = args.num_gpus or torch.cuda.device_count()
+    devices = [torch.device(f"cuda:{i}") for i in range(num_gpus_available)]
+    _model.warmup_cuda_runtime(devices)
 
-    # ── HCS allocation loop: start small, step up until close to max VRAM ──
-    import torch as _torch
+    # ── Unified HCS allocation loop ──
+    logger.info("Unified HCS: initializing with devices: %s", [str(d) for d in devices])
 
-    # Build 10K test prompt once — need enough text to exceed 10K tokens after tokenization
+    # Build 10K test prompt for validation — need enough text to exceed 10K tokens
     _test_content = (
         "Explain distributed consensus algorithms including Paxos, Raft, and PBFT. "
         "Describe database transaction isolation levels and their trade-offs. "
@@ -422,80 +473,85 @@ def main():
     )[:10000]
     logger.info("Test prompt: %d tokens", len(_test_tokens))
 
-    for dev_str, manager in _model.gpu_prefill_managers.items():
-        total_vram = _torch.cuda.get_device_properties(manager.device).total_memory
+    # Step 1: Measure inference cost on EACH device
+    manager = list(_model.gpu_prefill_managers.values())[0]
+    inference_costs = {}
+    free_after_cal = None      # only used for primary
+    initial_budget_mb = None   # only used for primary
+
+    for i, dev in enumerate(devices):
+        # Primary: load calibration experts + validate (existing approach)
+        total_vram = torch.cuda.get_device_properties(dev).total_memory
         initial_budget_mb = max(500, int(total_vram / (1024 * 1024) / 3))
-
-        # Step 1: Load a conservative budget and run 10K inference to measure cost
         manager.clear_hcs()
         manager._init_hot_cached_static(
-            heatmap_path=heatmap_path, expert_budget_mb=initial_budget_mb,
+            heatmap_path=heatmap_path,
+            devices=[dev],
+            device_budgets={dev: initial_budget_mb},
         )
-        n_experts = sum(manager._hcs_num_pinned.values())
-        free_after_load = _torch.cuda.mem_get_info(manager.device)[0]
+        free_after_cal = torch.cuda.mem_get_info(dev)[0]
+        n_cal = sum(manager._hcs_devices[0].num_pinned.values())
         logger.info(
-            "HCS calibration: budget=%d MB, %d experts, %d MB free after load on %s",
-            initial_budget_mb, n_experts, free_after_load // (1024*1024), dev_str,
+            "HCS calibration: %d experts at %d MB, %d MB free on %s",
+            n_cal, initial_budget_mb, free_after_cal // (1024 * 1024), dev,
         )
-
         ok, info = manager.validate_gpu_allocation(_model, _test_tokens)
         if not ok:
-            logger.error(
-                "FATAL: HCS allocation failed on %s — even %d MB of experts OOMs. "
-                "Not enough VRAM for inference. Try: smaller --kv-cache-mb or a smaller model.",
-                dev_str, initial_budget_mb,
-            )
+            logger.error("FATAL: calibration failed on %s.", dev)
             sys.exit(1)
-
-        inference_cost_bytes = info["inference_cost_bytes"]
-        logger.info("Measured inference cost: %d MB", inference_cost_bytes // (1024*1024))
-
-        # Step 2: Calculate max expert budget from measured cost
-        # free_after_load = free VRAM with initial_budget of experts loaded
-        # Adding more experts reduces free VRAM 1:1
-        # We need inference_cost * 1.2 headroom for safe operation
-        headroom_needed = int(inference_cost_bytes * 1.2)
-        extra_available = free_after_load - headroom_needed
-        if extra_available > 0:
-            max_budget_mb = initial_budget_mb + extra_available // (1024 * 1024)
-        else:
-            max_budget_mb = initial_budget_mb
-        logger.info(
-            "HCS calculated max budget: %d MB (%d MB initial + %d MB extra headroom)",
-            max_budget_mb, initial_budget_mb, extra_available // (1024*1024),
-        )
-
-        # Step 3: Reload at max budget and verify with one final inference
+        inference_costs[dev] = info["inference_cost_bytes"]
         manager.clear_hcs()
-        manager._init_hot_cached_static(
-            heatmap_path=heatmap_path, expert_budget_mb=max_budget_mb,
-        )
-        n_experts = sum(manager._hcs_num_pinned.values())
-        free_after_load = _torch.cuda.mem_get_info(manager.device)[0]
-        logger.info(
-            "HCS final load: budget=%d MB, %d experts, %d MB free on %s",
-            max_budget_mb, n_experts, free_after_load // (1024*1024), dev_str,
-        )
-
-        ok, info = manager.validate_gpu_allocation(_model, _test_tokens)
-        if not ok:
-            # Final load OOM'd — fall back to calibration budget
-            logger.warning(
-                "Final load OOM at %d MB — falling back to calibration budget %d MB",
-                max_budget_mb, initial_budget_mb,
-            )
-            manager.clear_hcs()
-            manager._init_hot_cached_static(
-                heatmap_path=heatmap_path, expert_budget_mb=initial_budget_mb,
-            )
-            n_experts = sum(manager._hcs_num_pinned.values())
+        torch.cuda.empty_cache()
 
         logger.info(
-            "HCS allocation complete on %s: %d experts cached",
-            dev_str, n_experts,
+            "Inference cost on %s: %d MB",
+            dev, inference_costs[dev] // (1024 * 1024),
         )
 
-    logger.info("HCS ready")
+    # Step 2: Calculate budget for EVERY GPU using measured costs
+    # Minimum headroom: 1.2x inference cost OR 1 GB, whichever is larger.
+    # Non-primary GPUs have low measured inference cost (no CUDA runtime, no
+    # Marlin workspace) but still need headroom for DMA transfer buffers
+    # (~500 MB), PyTorch allocator fragmentation, and activation intermediates
+    # during HCS decode.
+    MIN_HEADROOM_MB = 1024
+    device_budgets = {}
+    for i, dev in enumerate(devices):
+        free_mb = torch.cuda.mem_get_info(dev)[0] // (1024 * 1024)
+        headroom_mb = max(MIN_HEADROOM_MB, int(inference_costs[dev] * 1.2) // (1024 * 1024))
+
+        if i == 0:
+            # Primary: reclaim calibration budget since we cleared it
+            budget = max(0, (free_after_cal // (1024 * 1024)) + initial_budget_mb - headroom_mb)
+        else:
+            budget = max(0, free_mb - headroom_mb)
+
+        device_budgets[dev] = budget
+        logger.info(
+            "GPU %s: %d MB free, headroom=%d MB (measured, min %d), budget=%d MB",
+            dev, free_mb, headroom_mb, MIN_HEADROOM_MB, budget,
+        )
+
+    # Step 3: Load with full multi-GPU budget
+    manager.clear_hcs()
+    torch.cuda.empty_cache()
+    manager._init_hot_cached_static(
+        heatmap_path=heatmap_path,
+        devices=devices,
+        device_budgets=device_budgets,
+        allocation_mode="greedy",
+    )
+
+
+    # Step 5: Validate with real inference on primary
+    ok, info = manager.validate_gpu_allocation(_model, _test_tokens)
+    if not ok:
+        logger.error("FATAL: HCS validation failed with final budgets: %s", device_budgets)
+        sys.exit(1)
+
+    total_pinned = sum(sum(d.num_pinned.values()) for d in manager._hcs_devices)
+    device_counts = {str(d.device): sum(d.num_pinned.values()) for d in manager._hcs_devices}
+    logger.info("HCS ready: %d experts across %d GPUs. Counts: %s", total_pinned, len(devices), device_counts)
 
     # Run benchmark if requested (after model load + strategy, before serving)
     if args.benchmark:

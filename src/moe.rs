@@ -1869,6 +1869,161 @@ impl KrasisEngine {
         Ok(())
     }
 
+    /// Write a RANGE of experts' weights for a layer into pre-allocated PyByteArray buffers.
+    /// Used for parallel PCIe streaming in EP architecture where each GPU fetches a slice.
+    #[pyo3(signature = (moe_layer_idx, start, end, w13p_buf, w13s_buf, w2p_buf, w2s_buf))]
+    pub fn write_experts_range_into(
+        &self, _py: Python<'_>, moe_layer_idx: usize,
+        start: usize, end: usize,
+        w13p_buf: &Bound<'_, PyByteArray>,
+        w13s_buf: &Bound<'_, PyByteArray>,
+        w2p_buf: &Bound<'_, PyByteArray>,
+        w2s_buf: &Bound<'_, PyByteArray>,
+    ) -> PyResult<()> {
+        let store = self.store.as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Model not loaded"))?;
+        if !store.has_gpu_weights() {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err("GPU weights not available"));
+        }
+        let layer = &store.experts_gpu[moe_layer_idx];
+        if start >= end || end > layer.len() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                format!("Invalid range [{}, {}), layer has {} experts", start, end, layer.len())));
+        }
+        let num_to_write = end - start;
+
+        let w13p_per = layer[0].w13_packed.len() * 4;
+        let w13s_per = layer[0].w13_scales.len() * 2;
+        let w2p_per = layer[0].w2_packed.len() * 4;
+        let w2s_per = layer[0].w2_scales.len() * 2;
+
+        let w13p_total = num_to_write * w13p_per;
+        let w13s_total = num_to_write * w13s_per;
+        let w2p_total = num_to_write * w2p_per;
+        let w2s_total = num_to_write * w2s_per;
+
+        // Verify buffer sizes
+        if w13p_buf.len() < w13p_total {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!("w13p_buf too small")));
+        }
+        if w13s_buf.len() < w13s_total {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!("w13s_buf too small")));
+        }
+        if w2p_buf.len() < w2p_total {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!("w2p_buf too small")));
+        }
+        if w2s_buf.len() < w2s_total {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!("w2s_buf too small")));
+        }
+
+        unsafe {
+            let w13p_slice = w13p_buf.as_bytes_mut();
+            let w13s_slice = w13s_buf.as_bytes_mut();
+            let w2p_slice = w2p_buf.as_bytes_mut();
+            let w2s_slice = w2s_buf.as_bytes_mut();
+
+            for i in 0..num_to_write {
+                let expert = &layer[start + i];
+                
+                let src = std::slice::from_raw_parts(expert.w13_packed.as_ptr() as *const u8, w13p_per);
+                w13p_slice[i * w13p_per..(i + 1) * w13p_per].copy_from_slice(src);
+
+                let src = std::slice::from_raw_parts(expert.w13_scales.as_ptr() as *const u8, w13s_per);
+                w13s_slice[i * w13s_per..(i + 1) * w13s_per].copy_from_slice(src);
+
+                let src = std::slice::from_raw_parts(expert.w2_packed.as_ptr() as *const u8, w2p_per);
+                w2p_slice[i * w2p_per..(i + 1) * w2p_per].copy_from_slice(src);
+
+                let src = std::slice::from_raw_parts(expert.w2_scales.as_ptr() as *const u8, w2s_per);
+                w2s_slice[i * w2s_per..(i + 1) * w2s_per].copy_from_slice(src);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Efficiently sum N partial MoE result buffers (BF16) into a single result buffer (BF16).
+    /// Uses AVX2 for parallel summation. Handles BF16 -> FP32 -> BF16 conversion.
+    ///
+    /// Args:
+    ///   input_ptrs: List of raw pointers to N input buffers [M, hidden_size]
+    ///   output_ptr: Raw pointer to result buffer [M, hidden_size]
+    ///   num_elements: M * hidden_size
+    pub fn reduce_sum_bf16(
+        &self, _py: Python<'_>,
+        input_ptrs: Vec<usize>,
+        output_ptr: usize,
+        num_elements: usize,
+    ) -> PyResult<()> {
+        if input_ptrs.is_empty() {
+            return Ok(());
+        }
+
+        let output = unsafe {
+            std::slice::from_raw_parts_mut(output_ptr as *mut u16, num_elements)
+        };
+
+        if input_ptrs.len() == 1 {
+            let input = unsafe {
+                std::slice::from_raw_parts(input_ptrs[0] as *const u16, num_elements)
+            };
+            output.copy_from_slice(input);
+            return Ok(());
+        }
+
+        // Parallel reduction using AVX2
+        // We process in chunks of 8 elements (128 bits) or 16 elements (256 bits).
+        // Since we convert to f32 for summation, 8 elements = 256 bits.
+        let chunk_size = 8;
+        let num_chunks = num_elements / chunk_size;
+        let remainder = num_elements % chunk_size;
+
+        use rayon::prelude::*;
+
+        let out_ptr = output.as_mut_ptr() as usize;
+
+        (0..num_chunks).into_par_iter().for_each(|c| {
+            let offset = c * chunk_size;
+            unsafe {
+                let mut sum0 = _mm256_setzero_ps();
+
+                for &ptr in &input_ptrs {
+                    let src = (ptr as *const u16).add(offset);
+                    // Load 8 BF16 elements
+                    let raw = _mm_loadu_si128(src as *const __m128i);
+                    // BF16 -> FP32 (unpack and shift)
+                    let expanded = _mm256_cvtepu16_epi32(raw);
+                    let expanded_f32 = _mm256_castsi256_ps(_mm256_slli_epi32(expanded, 16));
+                    sum0 = _mm256_add_ps(sum0, expanded_f32);
+                }
+
+                // FP32 -> BF16
+                let mut results = [0.0f32; 8];
+                _mm256_storeu_ps(results.as_mut_ptr(), sum0);
+                
+                let cur_out_ptr = (out_ptr as *mut u16).add(offset);
+                for i in 0..8 {
+                    *cur_out_ptr.add(i) = f32_to_bf16(results[i]);
+                }
+            }
+        });
+
+        // Remainder
+        if remainder > 0 {
+            let offset = num_chunks * chunk_size;
+            for i in 0..remainder {
+                let mut sum = 0.0f32;
+                for &ptr in &input_ptrs {
+                    let val = unsafe { *(ptr as *const u16).add(offset + i) };
+                    sum += bf16_to_f32(val);
+                }
+                output[offset + i] = f32_to_bf16(sum);
+            }
+        }
+
+        Ok(())
+    }
+
     /// Write shared expert weights for a layer into pre-allocated PyByteArray buffers.
     #[pyo3(signature = (moe_layer_idx, w13p_buf, w13s_buf, w2p_buf, w2s_buf))]
     pub fn write_shared_expert_into(

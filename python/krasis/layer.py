@@ -434,6 +434,42 @@ class TransformerLayer:
 
         return output
 
+    def compute_routing(self, hidden: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute MoE routing without expert dispatch.
+
+        Returns:
+            (topk_ids [M, top_k] int32, topk_weights [M, top_k] float32)
+        """
+        router_logits = torch.matmul(hidden.float(), self.gate_weight.float().t())
+        if self.gate_bias is not None:
+            router_logits = router_logits + self.gate_bias.float()
+
+        topk = self.cfg.num_experts_per_tok
+
+        if self.cfg.swiglu_limit > 0:
+            topk_weights, topk_ids = torch.topk(router_logits, topk, dim=-1)
+            topk_weights = torch.softmax(topk_weights, dim=-1)
+        elif self.cfg.scoring_func == "sigmoid":
+            scores = torch.sigmoid(router_logits)
+            scores_for_selection = scores
+            if self.e_score_correction_bias is not None:
+                scores_for_selection = scores + self.e_score_correction_bias.float()
+            topk_weights, topk_ids = torch.topk(scores_for_selection, topk, dim=-1)
+            topk_weights = scores.gather(1, topk_ids)
+            if self.cfg.norm_topk_prob:
+                topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+        else:
+            scores = torch.softmax(router_logits, dim=-1)
+            scores_for_selection = scores
+            if self.e_score_correction_bias is not None:
+                scores_for_selection = scores + self.e_score_correction_bias.float()
+            topk_weights, topk_ids = torch.topk(scores_for_selection, topk, dim=-1)
+            topk_weights = scores.gather(1, topk_ids)
+            if self.cfg.norm_topk_prob:
+                topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+
+        return topk_ids.to(torch.int32), topk_weights.to(torch.float32)
+
     def _moe_forward(
         self,
         hidden: torch.Tensor,

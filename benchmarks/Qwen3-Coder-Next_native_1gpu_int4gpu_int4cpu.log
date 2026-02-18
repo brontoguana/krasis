@@ -1,5 +1,5 @@
 ================================================================
-Krasis Benchmark — 2026-02-17 12:15:26
+Krasis Benchmark — 2026-02-18 14:12:45
 ================================================================
 Model:            Qwen3-Coder-Next
 Architecture:     qwen3_next, 48 layers, 512 experts, top-10, 12 GQA + 36 linear
@@ -8,7 +8,7 @@ PP Partition:     [48] (1 GPUs)
 Hardware:
   CPU:            AMD EPYC 7742 64-Core Processor (64 cores)
   RAM:            995 GB total, 77.8 GB used by process
-  GPU 0:          NVIDIA RTX 2000 Ada Generation (16380 MB), 11211 MB allocated
+  GPU 0:          NVIDIA RTX 2000 Ada Generation (16380 MB), 11979 MB allocated
   GPU 1:          NVIDIA RTX 2000 Ada Generation (16380 MB), N/A
   GPU 2:          NVIDIA RTX 2000 Ada Generation (16380 MB), N/A
 
@@ -27,16 +27,16 @@ Strategy:
   Mode:           gpu_decode (hot_cached_static)
 
 Prefill (10000 tokens, 3 runs):
-  Run 1:  516.2 tok/s, TTFT=19.37s
-  Run 2:  527.7 tok/s, TTFT=18.95s
-  Run 3:  527.1 tok/s, TTFT=18.97s
-  Average: 523.7 tok/s, TTFT=19.10s
+  Run 1:  526.9 tok/s, TTFT=18.98s
+  Run 2:  527.6 tok/s, TTFT=18.95s
+  Run 3:  527.7 tok/s, TTFT=18.95s
+  Average: 527.4 tok/s, TTFT=18.96s
 
 Decode (64 tokens, 3 runs):
-  Run 1:  7.71 tok/s (129.6ms/tok)
-  Run 2:  7.75 tok/s (129.1ms/tok)
-  Run 3:  7.66 tok/s (130.6ms/tok)
-  Average: 7.71 tok/s (129.8ms/tok)
+  Run 1:  7.86 tok/s (127.2ms/tok)
+  Run 2:  7.86 tok/s (127.2ms/tok)
+  Run 3:  7.89 tok/s (126.8ms/tok)
+  Average: 7.87 tok/s (127.1ms/tok)
 
 Verification:
   Prefill prompt: user
@@ -45,10 +45,10 @@ Explain distributed consensus algorithms including Paxos, Raft, and PBFT. Descri
   Generated output (64 tokens):
     **The Recursive Ladder**  
     
-    A function calls itself—soft and low,  
-    A whisper in the code’s deep flow.  
-    It checks the base: *“Am I done?  
-    If not, I’ll call again, until the run is won.”*  
+    A function calls itself—no error, no fear,  
+    A mirror held up to the code, drawing near.  
+    It peels back the layers like onions in flight,  
+    A spiral of logic, descending in light.  
     
-    A stack of frames, like books upright,
+    *“What is the base?”* the wise coder
 ================================================================
