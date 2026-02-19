@@ -1,0 +1,21 @@
+{
+  "decode": [],
+  "long": [
+    {
+      "run": 1,
+      "prompt_tokens": 8700,
+      "generated_tokens": 10,
+      "ttft_s": 190.94273919798434,
+      "prefill_tok_s": 45.56339788851128,
+      "decode_tok_s": 1.5627357712424208,
+      "decode_time_s": 5.759130984020885
+    }
+  ],
+  "vram": {
+    "0": 12860.750336,
+    "1": 12859.259392,
+    "2": 12658.17856
+  },
+  "decode_avg": 0,
+  "decode_best": 0
+}

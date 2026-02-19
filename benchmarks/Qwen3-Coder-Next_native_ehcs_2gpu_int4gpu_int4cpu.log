@@ -1,5 +1,8 @@
+    *Base case first!* The anchor, clear and plain
 ================================================================
-Krasis Benchmark — 2026-02-19 09:52:00
+
+================================================================
+Krasis Benchmark — 2026-02-18 23:22:18
 ================================================================
 Model:            Qwen3-Coder-Next
 Architecture:     qwen3_next, 48 layers, 512 experts, top-10, 12 GQA + 36 linear
@@ -7,8 +10,8 @@ PP Partition:     [48] (1 GPUs)
 
 Hardware:
   CPU:            AMD EPYC 7742 64-Core Processor (64 cores)
-  RAM:            995 GB total, 78.3 GB used by process
-  GPU 0:          NVIDIA RTX 2000 Ada Generation (16380 MB), 8940 MB allocated
+  RAM:            995 GB total, 78.2 GB used by process
+  GPU 0:          NVIDIA RTX 2000 Ada Generation (16380 MB), 11248 MB allocated
   GPU 1:          NVIDIA RTX 2000 Ada Generation (16380 MB), 3022 MB allocated
   GPU 2:          NVIDIA RTX 2000 Ada Generation (16380 MB), N/A
 
@@ -27,28 +30,31 @@ Strategy:
   Mode:           gpu_decode (hot_cached_static)
 
 Prefill (10000 tokens, 3 runs):
-  Run 1:  811.1 tok/s, TTFT=12.33s
-  Run 2:  812.6 tok/s, TTFT=12.31s
-  Run 3:  812.7 tok/s, TTFT=12.30s
-  Average: 812.1 tok/s, TTFT=12.31s
+  Run 1:  287.8 tok/s, TTFT=34.74s
+  Run 2:  287.9 tok/s, TTFT=34.74s
+  Run 3:  290.1 tok/s, TTFT=34.47s
+  Average: 288.6 tok/s, TTFT=34.65s
 
 Decode (64 tokens, 3 runs):
-  Run 1:  7.81 tok/s (128.0ms/tok)
-  Run 2:  7.81 tok/s (128.0ms/tok)
-  Run 3:  7.84 tok/s (127.5ms/tok)
-  Average: 7.82 tok/s (127.8ms/tok)
+  Run 1:  7.64 tok/s (131.0ms/tok)
+  Run 2:  7.99 tok/s (125.1ms/tok)
+  Run 3:  8.08 tok/s (123.8ms/tok)
+  Average: 7.90 tok/s (126.6ms/tok)
 
 Verification:
   Prefill prompt: user
 Explain distributed consensus algorithms including Paxos, Raft, and PBFT. Describe database transaction isolation levels and their trade-offs. Discuss compiler optimization passes such as dead co... [63136 chars total]
   Decode prompt:  Write a poem about recursion in programming.
   Generated output (64 tokens):
-    **The Recursive Ladder**
+    Here’s a poem that captures the essence—and the pitfalls—of recursion in programming:
     
-    A function calls itself—no error, no fall—  
-    A mirror held up to the mind’s own design.  
-    It winds through the logic, a spiral, a call:  
-    *"If base is not met, then recurse—line by line."*  
+    ---
     
-    It peels like an
+    **"The Recursive Lullaby"**  
+    
+    A function calls itself, soft and low,  
+    A mirror held where logic grows.  
+    *"If base case holds, I’ll cease and rest,"*  
+    It whispers, t
 ================================================================
+

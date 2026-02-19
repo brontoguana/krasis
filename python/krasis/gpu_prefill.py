@@ -298,6 +298,12 @@ class HcsDeviceState:
     sort_idx: Optional[dict] = None
     gating_1: Optional[dict] = None
 
+    # Per-device CUDA graph state for multi-GPU decode
+    cuda_graphs: Optional[dict] = None      # layer_idx -> CUDAGraph
+    graph_io: Optional[dict] = None         # layer_idx -> {x, local_ids, weights, gating, output}
+    workspace: Optional[torch.Tensor] = None
+    lookup_on_primary: Optional[dict] = None  # layer_idx -> lookup tensor on primary device
+
 
 
 class GpuPrefillManager:
@@ -384,6 +390,11 @@ class GpuPrefillManager:
         self._persistent: Optional[dict[int, dict[str, torch.Tensor]]] = None
         self._persistent_shared: Optional[dict[int, dict[str, torch.Tensor]]] = None
 
+        # DMA pipelining: prefetch next group while current group computes
+        self._prefetch_stream: Optional[torch.cuda.Stream] = None
+        self._prefetch_persistent: dict[int, dict[str, torch.Tensor]] = {}
+        self._prefetch_persistent_shared: dict[int, dict[str, torch.Tensor]] = {}
+
         # Active-only mode state: per-layer GPU buffer + loaded expert tracking
         self._ao_gpu_w13: Optional[torch.Tensor] = None
         self._ao_gpu_w13_scale: Optional[torch.Tensor] = None
@@ -431,19 +442,36 @@ class GpuPrefillManager:
         self._compact_sort_idx: Optional[torch.Tensor] = None
         self._compact_gating_1: Optional[torch.Tensor] = None
 
-        # Pre-allocated DMA staging buffers (zero-copy path)
-        # Allocated once, pages pre-faulted — eliminates page fault overhead
+        # Pre-allocated CUDA-pinned DMA staging buffers
+        # Pinned memory enables truly async .to(device, non_blocking=True)
         self._dma_bufs_initialized: bool = False
-        self._dma_buf_w13p: Optional[bytearray] = None
-        self._dma_buf_w13s: Optional[bytearray] = None
-        self._dma_buf_w2p: Optional[bytearray] = None
-        self._dma_buf_w2s: Optional[bytearray] = None
+        self._dma_pinned: bool = False
+        self._dma_buf_w13p: Optional[torch.Tensor] = None
+        self._dma_buf_w13s: Optional[torch.Tensor] = None
+        self._dma_buf_w2p: Optional[torch.Tensor] = None
+        self._dma_buf_w2s: Optional[torch.Tensor] = None
+        self._dma_size_w13p: int = 0
+        self._dma_size_w13s: int = 0
+        self._dma_size_w2p: int = 0
+        self._dma_size_w2s: int = 0
+        self._dma_shape_w13p: tuple = ()
+        self._dma_shape_w13s: tuple = ()
+        self._dma_shape_w2p: tuple = ()
+        self._dma_shape_w2s: tuple = ()
         # Shared expert staging buffers (smaller, 1 expert per layer)
-        self._dma_shared_w13p: Optional[bytearray] = None
-        self._dma_shared_w13s: Optional[bytearray] = None
-        self._dma_shared_w2p: Optional[bytearray] = None
-        self._dma_shared_w2s: Optional[bytearray] = None
+        self._dma_shared_w13p: Optional[torch.Tensor] = None
+        self._dma_shared_w13s: Optional[torch.Tensor] = None
+        self._dma_shared_w2p: Optional[torch.Tensor] = None
+        self._dma_shared_w2s: Optional[torch.Tensor] = None
         self._dma_shared_initialized: bool = False
+        self._dma_shared_size_w13p: int = 0
+        self._dma_shared_size_w13s: int = 0
+        self._dma_shared_size_w2p: int = 0
+        self._dma_shared_size_w2s: int = 0
+        self._dma_shared_shape_w13p: tuple = ()
+        self._dma_shared_shape_w13s: tuple = ()
+        self._dma_shared_shape_w2p: tuple = ()
+        self._dma_shared_shape_w2s: tuple = ()
 
         # Hot-cached-static state: static GPU buffers + CPU cold in parallel
         self._hcs_buffers: dict[int, dict[str, torch.Tensor]] = {}  # layer → {w13, w13_scale, w2, w2_scale}
@@ -1148,12 +1176,16 @@ class GpuPrefillManager:
             self._prefill_mode = "layer_grouped"
 
     def _init_dma_buffers(self):
-        """Pre-allocate CPU staging buffers for zero-copy DMA.
+        """Pre-allocate CUDA-pinned CPU staging buffers for truly async DMA.
 
-        Called once before first preload_layer_group(). Allocates 4 bytearrays
-        sized for the LOCAL slice of experts in one layer, then touches all 
-        pages to map them. Subsequent writes from Rust are raw memcpy into 
-        pre-faulted memory, eliminating page fault overhead.
+        Called once before first preload_layer_group(). Allocates pinned CPU
+        tensors sized for the LOCAL slice of experts in one layer. Pinned
+        memory enables truly async .to(device, non_blocking=True) — the CPU
+        is NOT blocked during the PCIe transfer, unlike pageable memory where
+        CUDA must first stage through an internal pinned buffer synchronously.
+
+        Combined with Rust's allow_threads GIL release during memcpy, this
+        allows DMA to fully overlap with GPU compute.
         """
         if self._dma_bufs_initialized:
             return
@@ -1171,30 +1203,38 @@ class GpuPrefillManager:
         w2p_size = E_local * (N // 16) * (K_w2 * nb2) * 4  # int32 (uses padded K)
         w2s_size = E_local * (N // gs) * K_w2 * 2  # bf16 (uses padded K)
 
+        # Store sizes for pointer-based Rust API
+        self._dma_size_w13p = w13p_size
+        self._dma_size_w13s = w13s_size
+        self._dma_size_w2p = w2p_size
+        self._dma_size_w2s = w2s_size
+
+        # Store tensor shapes for view() calls
+        self._dma_shape_w13p = (E_local, K // 16, 2 * N * nb2)
+        self._dma_shape_w13s = (E_local, K // gs, 2 * N)
+        self._dma_shape_w2p = (E_local, N // 16, K_w2 * nb2)
+        self._dma_shape_w2s = (E_local, N // gs, K_w2)
+
         total = w13p_size + w13s_size + w2p_size + w2s_size
         logger.info(
-            "Pre-allocating DMA buffers: %.1f MB "
+            "Pre-allocating pinned DMA buffers: %.1f MB "
             "(w13p=%.1f, w13s=%.1f, w2p=%.1f, w2s=%.1f)",
             total / 1e6, w13p_size / 1e6, w13s_size / 1e6,
             w2p_size / 1e6, w2s_size / 1e6,
         )
 
         t0 = time.perf_counter()
-        self._dma_buf_w13p = bytearray(w13p_size)
-        self._dma_buf_w13s = bytearray(w13s_size)
-        self._dma_buf_w2p = bytearray(w2p_size)
-        self._dma_buf_w2s = bytearray(w2s_size)
-
-        # Touch all pages to force mapping (eliminate page faults on first use)
-        for buf in [self._dma_buf_w13p, self._dma_buf_w13s,
-                    self._dma_buf_w2p, self._dma_buf_w2s]:
-            for i in range(0, len(buf), 4096):
-                buf[i] = 0
+        # Pinned memory: pre-committed by CUDA, no page faults, truly async DMA
+        self._dma_buf_w13p = torch.empty(w13p_size, dtype=torch.uint8, pin_memory=True)
+        self._dma_buf_w13s = torch.empty(w13s_size, dtype=torch.uint8, pin_memory=True)
+        self._dma_buf_w2p = torch.empty(w2p_size, dtype=torch.uint8, pin_memory=True)
+        self._dma_buf_w2s = torch.empty(w2s_size, dtype=torch.uint8, pin_memory=True)
 
         elapsed = time.perf_counter() - t0
         self._dma_bufs_initialized = True
+        self._dma_pinned = True
         logger.info(
-            "DMA buffers pre-faulted: %.1f MB in %.1fs (one-time cost)",
+            "Pinned DMA buffers allocated: %.1f MB in %.1fs (one-time cost)",
             total / 1e6, elapsed,
         )
 
@@ -1205,14 +1245,18 @@ class GpuPrefillManager:
             sw13s = 1 * (K // gs) * (2 * shared_N) * 2
             sw2p = 1 * (shared_N // 16) * (K * nb2) * 4
             sw2s = 1 * (shared_N // gs) * K * 2
-            self._dma_shared_w13p = bytearray(sw13p)
-            self._dma_shared_w13s = bytearray(sw13s)
-            self._dma_shared_w2p = bytearray(sw2p)
-            self._dma_shared_w2s = bytearray(sw2s)
-            for buf in [self._dma_shared_w13p, self._dma_shared_w13s,
-                        self._dma_shared_w2p, self._dma_shared_w2s]:
-                for i in range(0, len(buf), 4096):
-                    buf[i] = 0
+            self._dma_shared_w13p = torch.empty(sw13p, dtype=torch.uint8, pin_memory=True)
+            self._dma_shared_w13s = torch.empty(sw13s, dtype=torch.uint8, pin_memory=True)
+            self._dma_shared_w2p = torch.empty(sw2p, dtype=torch.uint8, pin_memory=True)
+            self._dma_shared_w2s = torch.empty(sw2s, dtype=torch.uint8, pin_memory=True)
+            self._dma_shared_size_w13p = sw13p
+            self._dma_shared_size_w13s = sw13s
+            self._dma_shared_size_w2p = sw2p
+            self._dma_shared_size_w2s = sw2s
+            self._dma_shared_shape_w13p = (1, K // 16, 2 * shared_N * nb2)
+            self._dma_shared_shape_w13s = (1, K // gs, 2 * shared_N)
+            self._dma_shared_shape_w2p = (1, shared_N // 16, K * nb2)
+            self._dma_shared_shape_w2s = (1, shared_N // gs, K)
             self._dma_shared_initialized = True
 
     def preload_layer_group(self, moe_layer_indices):
@@ -1238,14 +1282,8 @@ class GpuPrefillManager:
         )
 
         torch.cuda.set_device(self.device)
-        K = self.hidden_size
-        K_w2 = self._w2_padded_n  # may be > K if padded for Marlin compat
-        N = self.intermediate_size
-        gs = self._group_size
-        nb2 = self.num_bits // 2
-        E_local = self.num_local_experts
 
-        # Pre-allocate DMA staging buffers (one-time, pages pre-faulted)
+        # Pre-allocate pinned DMA staging buffers (one-time)
         self._init_dma_buffers()
 
         self._persistent = {}
@@ -1265,42 +1303,38 @@ class GpuPrefillManager:
             if detailed:
                 t0 = time.perf_counter()
 
-            # Zero-copy path: Rust writes directly into pre-allocated buffers
-            # Only fetch the slice this manager is responsible for
-            self._engine.write_experts_range_into(
+            # Pinned path: Rust writes into pinned tensor via raw pointer,
+            # releases GIL during memcpy so other threads can run in parallel.
+            self._engine.write_experts_range_into_pinned(
                 moe_idx,
                 self.expert_start,
                 self.expert_end,
-                self._dma_buf_w13p,
-                self._dma_buf_w13s,
-                self._dma_buf_w2p,
-                self._dma_buf_w2s,
+                self._dma_buf_w13p.data_ptr(), self._dma_size_w13p,
+                self._dma_buf_w13s.data_ptr(), self._dma_size_w13s,
+                self._dma_buf_w2p.data_ptr(), self._dma_size_w2p,
+                self._dma_buf_w2s.data_ptr(), self._dma_size_w2s,
             )
 
             if detailed:
                 t1 = time.perf_counter()
                 t_rust += t1 - t0
 
-            # Zero-copy views into pre-allocated buffers (no data movement)
-            w13_packed = torch.frombuffer(self._dma_buf_w13p, dtype=torch.int32
-                ).reshape(E_local, K // 16, 2 * N * nb2)
-            w13_scale = torch.frombuffer(self._dma_buf_w13s, dtype=torch.bfloat16
-                ).reshape(E_local, K // gs, 2 * N)
-            w2_packed = torch.frombuffer(self._dma_buf_w2p, dtype=torch.int32
-                ).reshape(E_local, N // 16, K_w2 * nb2)
-            w2_scale = torch.frombuffer(self._dma_buf_w2s, dtype=torch.bfloat16
-                ).reshape(E_local, N // gs, K_w2)
+            # View pinned tensors as typed+shaped (zero-copy, still pinned)
+            w13_packed = self._dma_buf_w13p.view(torch.int32).reshape(self._dma_shape_w13p)
+            w13_scale = self._dma_buf_w13s.view(torch.bfloat16).reshape(self._dma_shape_w13s)
+            w2_packed = self._dma_buf_w2p.view(torch.int32).reshape(self._dma_shape_w2p)
+            w2_scale = self._dma_buf_w2s.view(torch.bfloat16).reshape(self._dma_shape_w2s)
 
             if detailed:
                 t2 = time.perf_counter()
                 t_frombuf += t2 - t1
 
-            # PCIe DMA to GPU — synchronous because we reuse the staging buffers
-            # for the next layer (must complete before overwriting)
-            w13_packed = w13_packed.to(self.device)
-            w13_scale = w13_scale.to(self.device)
-            w2_packed = w2_packed.to(self.device)
-            w2_scale = w2_scale.to(self.device)
+            # PCIe DMA: truly async from pinned memory — CPU returns immediately,
+            # DMA proceeds in background on the GPU's copy engine.
+            w13_packed = w13_packed.to(self.device, non_blocking=True)
+            w13_scale = w13_scale.to(self.device, non_blocking=True)
+            w2_packed = w2_packed.to(self.device, non_blocking=True)
+            w2_scale = w2_scale.to(self.device, non_blocking=True)
 
             if detailed:
                 t3 = time.perf_counter()
@@ -1324,29 +1358,24 @@ class GpuPrefillManager:
             if detailed:
                 t_sh0 = time.perf_counter()
 
-            shared_N = self.n_shared_experts * N
             for moe_idx in moe_layer_indices:
                 if self._dma_shared_initialized:
-                    # Zero-copy shared expert path
-                    self._engine.write_shared_expert_into(
+                    # Pinned shared expert path
+                    self._engine.write_shared_expert_into_pinned(
                         moe_idx,
-                        self._dma_shared_w13p,
-                        self._dma_shared_w13s,
-                        self._dma_shared_w2p,
-                        self._dma_shared_w2s,
+                        self._dma_shared_w13p.data_ptr(), self._dma_shared_size_w13p,
+                        self._dma_shared_w13s.data_ptr(), self._dma_shared_size_w13s,
+                        self._dma_shared_w2p.data_ptr(), self._dma_shared_size_w2p,
+                        self._dma_shared_w2s.data_ptr(), self._dma_shared_size_w2s,
                     )
-                    w13_packed = torch.frombuffer(
-                        self._dma_shared_w13p, dtype=torch.int32
-                    ).reshape(1, K // 16, 2 * shared_N * nb2).to(self.device)
-                    w13_scale = torch.frombuffer(
-                        self._dma_shared_w13s, dtype=torch.bfloat16
-                    ).reshape(1, K // gs, 2 * shared_N).to(self.device)
-                    w2_packed = torch.frombuffer(
-                        self._dma_shared_w2p, dtype=torch.int32
-                    ).reshape(1, shared_N // 16, K * nb2).to(self.device)
-                    w2_scale = torch.frombuffer(
-                        self._dma_shared_w2s, dtype=torch.bfloat16
-                    ).reshape(1, shared_N // gs, K).to(self.device)
+                    w13_packed = self._dma_shared_w13p.view(torch.int32).reshape(
+                        self._dma_shared_shape_w13p).to(self.device, non_blocking=True)
+                    w13_scale = self._dma_shared_w13s.view(torch.bfloat16).reshape(
+                        self._dma_shared_shape_w13s).to(self.device, non_blocking=True)
+                    w2_packed = self._dma_shared_w2p.view(torch.int32).reshape(
+                        self._dma_shared_shape_w2p).to(self.device, non_blocking=True)
+                    w2_scale = self._dma_shared_w2s.view(torch.bfloat16).reshape(
+                        self._dma_shared_shape_w2s).to(self.device, non_blocking=True)
                 else:
                     # Fallback: allocating path for shared experts
                     w13p_bytes, w13s_bytes, w2p_bytes, w2s_bytes = (
@@ -1354,16 +1383,16 @@ class GpuPrefillManager:
                     )
                     w13_packed = torch.frombuffer(
                         bytearray(w13p_bytes), dtype=torch.int32
-                    ).reshape(1, K // 16, 2 * shared_N * nb2).to(self.device)
+                    ).reshape(self._dma_shared_shape_w13p).to(self.device, non_blocking=True)
                     w13_scale = torch.frombuffer(
                         bytearray(w13s_bytes), dtype=torch.bfloat16
-                    ).reshape(1, K // gs, 2 * shared_N).to(self.device)
+                    ).reshape(self._dma_shared_shape_w13s).to(self.device, non_blocking=True)
                     w2_packed = torch.frombuffer(
                         bytearray(w2p_bytes), dtype=torch.int32
-                    ).reshape(1, shared_N // 16, K * nb2).to(self.device)
+                    ).reshape(self._dma_shared_shape_w2p).to(self.device, non_blocking=True)
                     w2_scale = torch.frombuffer(
                         bytearray(w2s_bytes), dtype=torch.bfloat16
-                    ).reshape(1, shared_N // gs, K).to(self.device)
+                    ).reshape(self._dma_shared_shape_w2s).to(self.device, non_blocking=True)
 
                 shared_mb = (
                     w13_packed.nbytes + w13_scale.nbytes
@@ -1412,19 +1441,165 @@ class GpuPrefillManager:
                 len(moe_layer_indices), total_mb, elapsed, alloc_mb,
             )
 
-    def free_layer_group(self):
-        """Free layer group's expert weights from GPU VRAM."""
+    def free_layer_group(self, clear_cache=True):
+        """Free layer group's expert weights from GPU VRAM.
+
+        Args:
+            clear_cache: If True (default), call torch.cuda.empty_cache().
+                Set False during DMA pipelining to avoid the ~30ms overhead;
+                the allocator reuses freed blocks for the next group naturally.
+        """
         detailed = TIMING.prefill
         if detailed:
             t0 = time.perf_counter()
 
         self._persistent = {}
         self._persistent_shared = {}
-        torch.cuda.empty_cache()
+        if clear_cache:
+            torch.cuda.empty_cache()
 
         if detailed:
             elapsed = (time.perf_counter() - t0) * 1000
-            logger.info("DMA-FREE: %.0fms (dict clear + empty_cache)", elapsed)
+            logger.info("DMA-FREE: %.0fms (dict clear%s)", elapsed,
+                        " + empty_cache" if clear_cache else "")
+
+    # ── DMA pipelining: overlap next group's DMA with current compute ──
+
+    def preload_layer_group_async(self, moe_layer_indices):
+        """Start async DMA loading for next layer group (pipelined prefetch).
+
+        Same as preload_layer_group() but:
+        - DMA transfers are queued on a dedicated prefetch CUDA stream
+        - Results go to _prefetch_persistent / _prefetch_persistent_shared
+        - Does NOT synchronize — call swap_prefetch() when data is needed
+
+        The prefetch stream overlaps with compute on the default stream because
+        PyTorch creates streams with cudaStreamNonBlocking.
+        """
+        assert self._engine is not None, "Async prefetch requires Krasis engine"
+
+        if self._prefetch_stream is None:
+            self._prefetch_stream = torch.cuda.Stream(device=self.device)
+
+        torch.cuda.set_device(self.device)
+        stream = self._prefetch_stream
+
+        self._init_dma_buffers()
+
+        self._prefetch_persistent = {}
+        self._prefetch_persistent_shared = {}
+
+        for moe_idx in moe_layer_indices:
+            # CPU: Rust writes into pinned staging buffers (GIL released during memcpy)
+            self._engine.write_experts_range_into_pinned(
+                moe_idx,
+                self.expert_start,
+                self.expert_end,
+                self._dma_buf_w13p.data_ptr(), self._dma_size_w13p,
+                self._dma_buf_w13s.data_ptr(), self._dma_size_w13s,
+                self._dma_buf_w2p.data_ptr(), self._dma_size_w2p,
+                self._dma_buf_w2s.data_ptr(), self._dma_size_w2s,
+            )
+
+            # View pinned tensors as typed+shaped (zero-copy, still pinned)
+            w13_packed = self._dma_buf_w13p.view(torch.int32).reshape(self._dma_shape_w13p)
+            w13_scale = self._dma_buf_w13s.view(torch.bfloat16).reshape(self._dma_shape_w13s)
+            w2_packed = self._dma_buf_w2p.view(torch.int32).reshape(self._dma_shape_w2p)
+            w2_scale = self._dma_buf_w2s.view(torch.bfloat16).reshape(self._dma_shape_w2s)
+
+            # GPU: Queue truly async PCIe DMA on prefetch stream
+            # (pinned memory → no blocking CPU-side staging copy)
+            with torch.cuda.stream(stream):
+                w13_packed = w13_packed.to(self.device, non_blocking=True)
+                w13_scale = w13_scale.to(self.device, non_blocking=True)
+                w2_packed = w2_packed.to(self.device, non_blocking=True)
+                w2_scale = w2_scale.to(self.device, non_blocking=True)
+
+            self._prefetch_persistent[moe_idx] = {
+                "w13_packed": w13_packed,
+                "w13_scale": w13_scale,
+                "w2_packed": w2_packed,
+                "w2_scale": w2_scale,
+            }
+
+        # Shared experts
+        if self.n_shared_experts > 0:
+            for moe_idx in moe_layer_indices:
+                if self._dma_shared_initialized:
+                    self._engine.write_shared_expert_into_pinned(
+                        moe_idx,
+                        self._dma_shared_w13p.data_ptr(), self._dma_shared_size_w13p,
+                        self._dma_shared_w13s.data_ptr(), self._dma_shared_size_w13s,
+                        self._dma_shared_w2p.data_ptr(), self._dma_shared_size_w2p,
+                        self._dma_shared_w2s.data_ptr(), self._dma_shared_size_w2s,
+                    )
+                    w13_packed = self._dma_shared_w13p.view(torch.int32).reshape(
+                        self._dma_shared_shape_w13p)
+                    w13_scale = self._dma_shared_w13s.view(torch.bfloat16).reshape(
+                        self._dma_shared_shape_w13s)
+                    w2_packed = self._dma_shared_w2p.view(torch.int32).reshape(
+                        self._dma_shared_shape_w2p)
+                    w2_scale = self._dma_shared_w2s.view(torch.bfloat16).reshape(
+                        self._dma_shared_shape_w2s)
+                    with torch.cuda.stream(stream):
+                        w13_packed = w13_packed.to(self.device, non_blocking=True)
+                        w13_scale = w13_scale.to(self.device, non_blocking=True)
+                        w2_packed = w2_packed.to(self.device, non_blocking=True)
+                        w2_scale = w2_scale.to(self.device, non_blocking=True)
+                else:
+                    # Fallback: allocating path for shared experts
+                    w13p_bytes, w13s_bytes, w2p_bytes, w2s_bytes = (
+                        self._engine.get_shared_expert_weights(moe_idx)
+                    )
+                    w13_packed = torch.frombuffer(
+                        bytearray(w13p_bytes), dtype=torch.int32
+                    ).reshape(self._dma_shared_shape_w13p)
+                    w13_scale = torch.frombuffer(
+                        bytearray(w13s_bytes), dtype=torch.bfloat16
+                    ).reshape(self._dma_shared_shape_w13s)
+                    w2_packed = torch.frombuffer(
+                        bytearray(w2p_bytes), dtype=torch.int32
+                    ).reshape(self._dma_shared_shape_w2p)
+                    w2_scale = torch.frombuffer(
+                        bytearray(w2s_bytes), dtype=torch.bfloat16
+                    ).reshape(self._dma_shared_shape_w2s)
+                    with torch.cuda.stream(stream):
+                        w13_packed = w13_packed.to(self.device, non_blocking=True)
+                        w13_scale = w13_scale.to(self.device, non_blocking=True)
+                        w2_packed = w2_packed.to(self.device, non_blocking=True)
+                        w2_scale = w2_scale.to(self.device, non_blocking=True)
+
+                self._prefetch_persistent_shared[moe_idx] = {
+                    "w13_packed": w13_packed,
+                    "w13_scale": w13_scale,
+                    "w2_packed": w2_packed,
+                    "w2_scale": w2_scale,
+                }
+
+        # Workspace and index tensors (idempotent, already allocated after first sync load)
+        if self._workspace is None:
+            from sglang.srt.layers.quantization.marlin_utils import (
+                marlin_make_workspace,
+            )
+            self._workspace = marlin_make_workspace(self.device, max_blocks_per_sm=4)
+        if self._gpu_g_idx is None:
+            self._gpu_g_idx = torch.empty(self.num_experts, 0, dtype=torch.int32, device=self.device)
+            self._gpu_sort_idx = torch.empty(self.num_experts, 0, dtype=torch.int32, device=self.device)
+
+        # NO sync — DMA continues in background on prefetch stream
+
+    def swap_prefetch(self):
+        """Wait for async prefetch to complete and make prefetched data active.
+
+        Synchronizes the prefetch stream, then swaps _prefetch_persistent into
+        _persistent so that forward() can use the prefetched expert weights.
+        """
+        if self._prefetch_stream is not None:
+            self._prefetch_stream.synchronize()
+        self._persistent = self._prefetch_persistent
+        self._persistent_shared = self._prefetch_persistent_shared
+        self._prefetch_persistent = {}
+        self._prefetch_persistent_shared = {}
 
     def _allocate_ao_buffer(self):
         """Allocate GPU buffer for active-only mode (full [E, ...] per layer)."""
@@ -2461,16 +2636,25 @@ class GpuPrefillManager:
         self._hcs_graph_io.clear()
         self._hcs_cuda_graphs_enabled = False
 
-        # Release all device states
+        # Release all device states (including per-device graphs)
         for hcs_dev in self._hcs_devices:
             hcs_dev.buffers.clear()
             hcs_dev.lookup.clear()
             hcs_dev.num_pinned.clear()
             hcs_dev.biases.clear()
-            if hcs_dev.is_primary:
+            if hcs_dev.cuda_graphs:
+                hcs_dev.cuda_graphs.clear()
+            if hcs_dev.graph_io:
+                hcs_dev.graph_io.clear()
+            hcs_dev.workspace = None
+            if hcs_dev.g_idx:
                 hcs_dev.g_idx.clear()
+            if hcs_dev.sort_idx:
                 hcs_dev.sort_idx.clear()
+            if hcs_dev.gating_1:
                 hcs_dev.gating_1.clear()
+            if hcs_dev.lookup_on_primary:
+                hcs_dev.lookup_on_primary.clear()
             torch.cuda.synchronize(hcs_dev.device)
         self._hcs_devices.clear()
 
@@ -2621,6 +2805,15 @@ class GpuPrefillManager:
             if not assigned:
                 break # All GPU budgets full
 
+        # Verify per-device expert counts match budget
+        dev_expert_counts = [0] * len(devices)
+        for layer_idx, assignments in layer_device_assignment.items():
+            for dev_idx, eids in assignments:
+                dev_expert_counts[dev_idx] += len(eids)
+        for i, count in enumerate(dev_expert_counts):
+            logger.info("HCS assignment check: device %d (%s) → %d experts (budget: %d)",
+                        i, devices[i], count, all_max_experts[i])
+
         # ── Unified Loop for Buffer Allocation and Weight Loading ──
         K = self.hidden_size
         N = self.intermediate_size
@@ -2628,7 +2821,15 @@ class GpuPrefillManager:
         nb2 = self.num_bits // 2
 
         total_mb = 0.0
+        dev_loaded_mb = [0.0] * len(devices)
+        dev_loaded_experts = [0] * len(devices)
         load_start = time.perf_counter()
+
+        # Log pre-loading memory state for each device
+        for i, device in enumerate(devices):
+            alloc_mb = torch.cuda.memory_allocated(device) // (1024 * 1024)
+            free_mb = torch.cuda.mem_get_info(device)[0] // (1024 * 1024)
+            logger.info("HCS pre-load: %s allocated=%d MB, free=%d MB", device, alloc_mb, free_mb)
 
         # Create a unified list of device states
         self._hcs_devices: list[HcsDeviceState] = []
@@ -2638,9 +2839,9 @@ class GpuPrefillManager:
                 stream=torch.cuda.Stream(device=device),
                 buffers={}, lookup={}, num_pinned={}, biases={},
                 is_primary=(i==0),
-                g_idx={} if i==0 else None,
-                sort_idx={} if i==0 else None,
-                gating_1={} if i==0 else None,
+                g_idx={},
+                sort_idx={},
+                gating_1={},
             ))
 
         for layer_idx in sorted(layer_device_assignment.keys()):
@@ -2671,20 +2872,20 @@ class GpuPrefillManager:
                         hcs_dev.sort_idx[layer_idx] = torch.empty(n, 0, dtype=torch.int32, device=hcs_dev.device)
                         hcs_dev.gating_1[layer_idx] = torch.empty(1, n, device=hcs_dev.device)
                     else:
-                        # Non-primary devices: convert to standard GPTQ format for Triton
-                        from krasis.triton_moe import inverse_marlin_repack, inverse_scale_permute
-                        w13_std = inverse_marlin_repack(w13_cpu, K, 2 * N, self.num_bits)
-                        w13s_std = inverse_scale_permute(w13s_cpu, K, 2 * N, self._group_size)
-                        w2_std = inverse_marlin_repack(w2_cpu, N, K, self.num_bits)
-                        w2s_std = inverse_scale_permute(w2s_cpu, N, K, self._group_size)
-                        w13 = w13_std.to(hcs_dev.device, non_blocking=True)
-                        w13s = w13s_std.to(hcs_dev.device, non_blocking=True)
-                        w2 = w2_std.to(hcs_dev.device, non_blocking=True)
-                        w2s = w2s_std.to(hcs_dev.device, non_blocking=True)
-                        del w13_std, w13s_std, w2_std, w2s_std
+                        # Non-primary devices: keep Marlin format (same as primary).
+                        # Each device runs its own fused_marlin_moe for per-GPU CUDA graphs.
+                        w13 = w13_cpu.to(hcs_dev.device, non_blocking=True)
+                        w13s = w13s_cpu.to(hcs_dev.device, non_blocking=True)
+                        w2 = w2_cpu.to(hcs_dev.device, non_blocking=True)
+                        w2s = w2s_cpu.to(hcs_dev.device, non_blocking=True)
+                        hcs_dev.g_idx[layer_idx] = torch.empty(n, 0, dtype=torch.int32, device=hcs_dev.device)
+                        hcs_dev.sort_idx[layer_idx] = torch.empty(n, 0, dtype=torch.int32, device=hcs_dev.device)
+                        hcs_dev.gating_1[layer_idx] = torch.empty(1, n, device=hcs_dev.device)
 
                     layer_mb = (w13.nbytes + w13s.nbytes + w2.nbytes + w2s.nbytes) / 1e6
                     total_mb += layer_mb
+                    dev_loaded_mb[dev_idx] += layer_mb
+                    dev_loaded_experts[dev_idx] += n
 
                     hcs_dev.buffers[layer_idx] = {"w13": w13, "w13_scale": w13s, "w2": w2, "w2_scale": w2s}
                     local_lookup = torch.full((self.num_experts,), -1, dtype=torch.int32, device=hcs_dev.device)
@@ -2693,6 +2894,12 @@ class GpuPrefillManager:
                         device_lookup[eid] = dev_idx
                     hcs_dev.lookup[layer_idx] = local_lookup
                     hcs_dev.num_pinned[layer_idx] = n
+
+                    # For secondary devices, copy lookup to primary for fast dispatch
+                    if not hcs_dev.is_primary:
+                        if hcs_dev.lookup_on_primary is None:
+                            hcs_dev.lookup_on_primary = {}
+                        hcs_dev.lookup_on_primary[layer_idx] = local_lookup.to(self._hcs_devices[0].device)
 
                     if self.swiglu_limit > 0 and layer_idx in self._expert_biases:
                         full_biases = self._expert_biases[layer_idx]
@@ -2704,6 +2911,15 @@ class GpuPrefillManager:
 
                 del w13_cpu, w13s_cpu, w2_cpu, w2s_cpu
             self._hcs_device_lookup[layer_idx] = device_lookup
+            # Memory tracking: log every 6 layers to diagnose OOM
+            if layer_idx % 6 == 0 or layer_idx == max(layer_device_assignment.keys()):
+                mem_parts = []
+                for di, device in enumerate(devices):
+                    alloc_mb = torch.cuda.memory_allocated(device) // (1024 * 1024)
+                    free_mb = torch.cuda.mem_get_info(device)[0] // (1024 * 1024)
+                    mem_parts.append(f"dev{di}: alloc={alloc_mb}MB free={free_mb}MB loaded={dev_loaded_mb[di]:.0f}MB({dev_loaded_experts[di]}exp)")
+                logger.info("HCS load L%d: total=%.0f MB | %s",
+                            layer_idx, total_mb, " | ".join(mem_parts))
 
         # Synchronize all devices and log results
         for hcs_dev in self._hcs_devices:
@@ -2747,12 +2963,22 @@ class GpuPrefillManager:
         if self._workspace is None:
             self._workspace = marlin_make_workspace(self.device, max_blocks_per_sm=4)
 
+        # Initialize per-device workspaces and graph state
+        for hcs_dev in self._hcs_devices:
+            hcs_dev.cuda_graphs = {}
+            hcs_dev.graph_io = {}
+            if hcs_dev.workspace is None:
+                hcs_dev.workspace = marlin_make_workspace(hcs_dev.device, max_blocks_per_sm=4)
+
         self._hcs_initialized = True
-        # CUDA graphs only for single-GPU HCS for now
-        if len(self._hcs_devices) == 1:
+        # CUDA graphs: single-GPU uses legacy path, multi-GPU uses per-device graphs
+        if len(self._hcs_devices) == 1 and self._hcs_devices[0].device == self.device:
             self._init_cuda_graphs()
+        elif len(self._hcs_devices) > 1:
+            self._init_cuda_graphs_multi_gpu()
         else:
-            logger.info("Multi-GPU HCS: CUDA graphs disabled (using stream-parallel dispatch)")
+            logger.info("CUDA graphs skipped: manager on %s, HCS device on %s",
+                        self.device, self._hcs_devices[0].device if self._hcs_devices else "none")
 
     def validate_gpu_allocation(self, model, test_tokens) -> tuple:
         """Run 10K-token inference to validate GPU allocation.
@@ -2766,7 +2992,7 @@ class GpuPrefillManager:
         try:
             torch.cuda.reset_peak_memory_stats(self.device)
             with torch.inference_mode():
-                model.generate(test_tokens, max_new_tokens=1, temperature=0.6)
+                model.generate(test_tokens, max_new_tokens=2, temperature=0.6)
 
             peak = torch.cuda.max_memory_allocated(self.device)
             baseline = torch.cuda.memory_allocated(self.device)
@@ -2915,13 +3141,20 @@ class GpuPrefillManager:
 
         # ── M=1 decode ──
         if M == 1:
-            # Single-GPU with CUDA graphs: fast graphed path
-            if self._hcs_cuda_graphs_enabled and moe_layer_idx in self._hcs_cuda_graphs:
-                return self._forward_hcs_graphed_decode(
-                    moe_layer_idx, x, topk_ids, topk_weights, timing,
-                    t_start if timing else 0,
-                )
-            # Multi-GPU or no CUDA graphs: unified decode with Sticky L2
+            if self._hcs_cuda_graphs_enabled:
+                # Single-GPU with CUDA graphs: fast graphed path (legacy dicts)
+                if len(self._hcs_devices) == 1 and moe_layer_idx in self._hcs_cuda_graphs:
+                    return self._forward_hcs_graphed_decode(
+                        moe_layer_idx, x, topk_ids, topk_weights, timing,
+                        t_start if timing else 0,
+                    )
+                # Multi-GPU with per-device CUDA graphs
+                elif len(self._hcs_devices) > 1:
+                    return self._forward_hcs_multigpu_graphed_decode(
+                        moe_layer_idx, x, topk_ids, topk_weights, timing,
+                        t_start if timing else 0,
+                    )
+            # Fallback: unified decode with Sticky L2
             return self._forward_hcs_unified_decode(
                 moe_layer_idx, x, topk_ids, topk_weights, timing,
                 t_start if timing else 0,
@@ -3032,7 +3265,9 @@ class GpuPrefillManager:
         topk_list = topk_ids[0].tolist()
         weights_list = topk_weights[0].tolist()
 
-        # Classify each expert by its target device index
+        # Classify each expert by its target device index.
+        # L2 experts on secondary GPUs now use Marlin format (same as primary),
+        # so they can stream directly into the AO buffer.
         dev_indices = [int(device_lookup[eid]) for eid in topk_list]
         has_cold = any(d < 0 for d in dev_indices)
 
@@ -3273,6 +3508,121 @@ class GpuPrefillManager:
 
         return gpu_output
 
+    def _forward_hcs_multigpu_graphed_decode(
+        self,
+        moe_layer_idx: int,
+        x: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        timing: bool,
+        t_start: float,
+    ) -> torch.Tensor:
+        """Fast M=1 decode using per-GPU CUDA graphs for multi-GPU HCS.
+
+        Each GPU replays its own CUDA graph for its local experts, then
+        partial outputs are summed on the primary GPU.
+        """
+        K = self.hidden_size
+        primary_device = self._hcs_devices[0].device
+        device_lookup = self._hcs_device_lookup[moe_layer_idx]
+        topk_list = topk_ids[0].tolist()
+
+        # Classify experts: which device owns each, which are cold
+        dev_indices = [int(device_lookup[eid]) for eid in topk_list]
+        has_cold = any(d < 0 for d in dev_indices)
+
+        # ── Step 1: Submit cold experts to CPU engine (async) ──
+        if has_cold:
+            cpu_ids = topk_ids.clone()
+            for j, d in enumerate(dev_indices):
+                if d >= 0:
+                    cpu_ids[0, j] = -1
+            act_cpu = x.detach().cpu().contiguous()
+            ids_cpu = cpu_ids.to(torch.int32).cpu().contiguous()
+            wts_cpu = topk_weights.detach().cpu().contiguous()
+            act_bytes = act_cpu.view(torch.uint16).numpy().view(np.uint8).tobytes()
+            ids_bytes = ids_cpu.numpy().view(np.uint8).tobytes()
+            wts_bytes = wts_cpu.numpy().view(np.uint8).tobytes()
+            self._engine.submit_forward(moe_layer_idx, act_bytes, ids_bytes, wts_bytes, 1)
+
+        if timing:
+            t_cpu_submitted = time.perf_counter()
+
+        # ── Step 2: Replay per-device CUDA graphs ──
+        gpu_output = torch.zeros(1, K, dtype=self.params_dtype, device=primary_device)
+
+        for hcs_dev in self._hcs_devices:
+            if moe_layer_idx not in hcs_dev.cuda_graphs:
+                continue
+
+            io = hcs_dev.graph_io[moe_layer_idx]
+            graph = hcs_dev.cuda_graphs[moe_layer_idx]
+
+            # Use lookup_on_primary for secondary devices to avoid cross-device access
+            if hcs_dev.is_primary:
+                lookup = hcs_dev.lookup[moe_layer_idx]
+            else:
+                lookup = hcs_dev.lookup_on_primary[moe_layer_idx]
+
+            # Remap global expert IDs → local slot IDs for this device
+            lookup_result = lookup[topk_ids.long()]  # [1, top_k] — on primary device
+            on_this_dev = lookup_result >= 0
+
+            # Build local_ids and weights for this device
+            local_ids = lookup_result.clone().to(topk_ids.dtype)
+            local_ids[~on_this_dev] = 0
+            dev_weights = topk_weights.clone()
+            dev_weights[~on_this_dev] = 0.0
+
+            # Copy inputs into this device's graph I/O buffers
+            io["x"].copy_(x if hcs_dev.is_primary else x.to(hcs_dev.device))
+            io["local_ids"].copy_(local_ids if hcs_dev.is_primary else local_ids.to(hcs_dev.device))
+            io["weights"].copy_(dev_weights if hcs_dev.is_primary else dev_weights.to(hcs_dev.device))
+
+            # Replay CUDA graph
+            graph.replay()
+
+            # Accumulate output on primary device
+            if hcs_dev.is_primary:
+                gpu_output += io["output"]
+            else:
+                gpu_output += io["output"].to(primary_device)
+
+        if timing:
+            torch.cuda.synchronize(primary_device)
+            for hcs_dev in self._hcs_devices:
+                if not hcs_dev.is_primary:
+                    torch.cuda.synchronize(hcs_dev.device)
+            t_gpu_done = time.perf_counter()
+
+        # ── Step 3: Sync CPU result and combine ──
+        if has_cold:
+            if timing: t_cpu_sync_start = time.perf_counter()
+            cpu_output_bytes = self._engine.sync_forward()
+            if timing: t_cpu_sync_done = time.perf_counter()
+            cpu_raw = torch.frombuffer(bytearray(cpu_output_bytes), dtype=torch.bfloat16).reshape(1, K).to(primary_device)
+            if timing: t_cpu_to_gpu = time.perf_counter()
+            if self.routed_scaling_factor != 1.0:
+                cpu_raw = cpu_raw / self.routed_scaling_factor
+            gpu_output = gpu_output + cpu_raw
+
+        if timing:
+            t_end = time.perf_counter()
+            n_cold = sum(1 for d in dev_indices if d < 0)
+            n_total = len(topk_list)
+            gpu_ms = (t_gpu_done - (t_cpu_submitted if has_cold else t_start)) * 1000
+            total_ms = (t_end - t_start) * 1000
+            logger.info(
+                "HCS-MGPU-GRAPHED L%d: gpu=%.1fms total=%.1fms cold=%d/%d devs=%d",
+                moe_layer_idx, gpu_ms, total_ms, n_cold, n_total, len(self._hcs_devices),
+            )
+
+        if self._heatmap is not None:
+            for eid in topk_list:
+                self._heatmap[(moe_layer_idx, eid)] = self._heatmap.get((moe_layer_idx, eid), 0) + 1
+
+        return gpu_output
+
     def _forward_hcs_cpu_only(
         self,
         moe_layer_idx: int,
@@ -3438,6 +3788,113 @@ class GpuPrefillManager:
         # Return clone (graph tensor is in CUDA graph private pool)
         return io["output"].clone()
 
+    def _init_cuda_graphs_multi_gpu(self):
+        """Capture per-device CUDA graphs for M=1 decode in multi-GPU HCS mode.
+
+        Creates one CUDA graph per (device, layer) pair. Each GPU runs
+        fused_marlin_moe against its own compact N-hot buffer independently.
+        """
+        if not self._hcs_initialized:
+            logger.warning("Cannot init multi-GPU CUDA graphs: HCS not initialized")
+            return
+
+        from sglang.srt.layers.moe.fused_moe_triton.fused_marlin_moe import (
+            fused_marlin_moe,
+        )
+
+        K = self.hidden_size
+        top_k = self._engine.top_k()
+        graphs_captured = 0
+        original_device = torch.cuda.current_device()
+
+        try:
+            for hcs_dev in self._hcs_devices:
+                dev = hcs_dev.device
+                torch.cuda.set_device(dev)
+                # Use explicit stream on this device for graph capture
+                capture_stream = torch.cuda.Stream(device=dev)
+
+                for layer_idx, bufs in hcs_dev.buffers.items():
+                    n_hot = hcs_dev.num_pinned[layer_idx]
+                    if n_hot == 0:
+                        continue
+
+                    g_idx = hcs_dev.g_idx[layer_idx]
+                    sort_idx = hcs_dev.sort_idx[layer_idx]
+
+                    # Pre-allocate fixed-address I/O tensors on this device
+                    with torch.cuda.device(dev):
+                        io = {
+                            "x": torch.zeros(1, K, dtype=self.params_dtype, device=dev),
+                            "local_ids": torch.zeros(1, top_k, dtype=torch.int32, device=dev),
+                            "weights": torch.zeros(1, top_k, dtype=torch.float32, device=dev),
+                            "gating": torch.empty(1, n_hot, device=dev),
+                            "output": torch.zeros(1, K, dtype=self.params_dtype, device=dev),
+                        }
+
+                    # Warmup runs (3x) to trigger Triton compilation
+                    with torch.cuda.device(dev), torch.cuda.stream(capture_stream):
+                        for _ in range(3):
+                            _ = fused_marlin_moe(
+                                hidden_states=io["x"],
+                                w1=bufs["w13"], w2=bufs["w2"],
+                                w1_scale=bufs["w13_scale"], w2_scale=bufs["w2_scale"],
+                                gating_output=io["gating"],
+                                topk_weights=io["weights"], topk_ids=io["local_ids"],
+                                global_num_experts=n_hot, expert_map=None,
+                                g_idx1=g_idx, g_idx2=g_idx,
+                                sort_indices1=sort_idx, sort_indices2=sort_idx,
+                                workspace=hcs_dev.workspace,
+                                num_bits=self.num_bits, is_k_full=True,
+                            )
+                    torch.cuda.synchronize(dev)
+
+                    # Capture graph on this device's stream
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.device(dev), torch.cuda.stream(capture_stream):
+                        with torch.cuda.graph(graph, stream=capture_stream):
+                            io["output"] = fused_marlin_moe(
+                                hidden_states=io["x"],
+                                w1=bufs["w13"], w2=bufs["w2"],
+                                w1_scale=bufs["w13_scale"], w2_scale=bufs["w2_scale"],
+                                gating_output=io["gating"],
+                                topk_weights=io["weights"], topk_ids=io["local_ids"],
+                                global_num_experts=n_hot, expert_map=None,
+                                g_idx1=g_idx, g_idx2=g_idx,
+                                sort_indices1=sort_idx, sort_indices2=sort_idx,
+                                workspace=hcs_dev.workspace,
+                                num_bits=self.num_bits, is_k_full=True,
+                            ).to(self.params_dtype)
+
+                    hcs_dev.cuda_graphs[layer_idx] = graph
+                    hcs_dev.graph_io[layer_idx] = io
+                    graphs_captured += 1
+
+                logger.info("Multi-GPU CUDA graphs: %s captured %d layers",
+                            dev, len(hcs_dev.cuda_graphs))
+
+            self._hcs_cuda_graphs_enabled = True
+            logger.info("Multi-GPU CUDA graphs captured: %d total across %d devices",
+                        graphs_captured, len(self._hcs_devices))
+
+        except (torch.cuda.OutOfMemoryError, torch.OutOfMemoryError, RuntimeError) as e:
+            err_str = str(e).lower()
+            if "out of memory" in err_str or isinstance(e, (torch.cuda.OutOfMemoryError, torch.OutOfMemoryError)):
+                logger.warning("Multi-GPU CUDA graph capture OOM on %s, falling back to unified decode: %s",
+                               torch.cuda.current_device(), e)
+                # Clear any partially captured graphs
+                for hcs_dev in self._hcs_devices:
+                    if hcs_dev.cuda_graphs:
+                        hcs_dev.cuda_graphs.clear()
+                    if hcs_dev.graph_io:
+                        hcs_dev.graph_io.clear()
+                gc.collect()
+                torch.cuda.empty_cache()
+            else:
+                raise
+        finally:
+            torch.cuda.set_device(original_device)
+
     def _forward_persistent(
         self,
         moe_layer_idx: int,
@@ -3448,9 +3905,26 @@ class GpuPrefillManager:
         """Forward using pre-loaded persistent expert buffers. Zero DMA."""
         M = x.shape[0]
         buffers = self._persistent[moe_layer_idx]
-        gating_output = torch.empty(M, self.num_experts, device=self.device)
+        E_local = self.num_local_experts
+
+        # EP remapping: when this manager owns only a slice of experts,
+        # remap global IDs to local indices and zero non-local weights.
+        # Same pattern as _forward_engine chunking (lines 3908-3910).
+        if E_local < self.num_experts:
+            local_mask = (topk_ids >= self.expert_start) & (topk_ids < self.expert_end)
+            topk_ids = torch.where(local_mask, topk_ids - self.expert_start, torch.zeros_like(topk_ids))
+            topk_weights = torch.where(local_mask, topk_weights, torch.zeros_like(topk_weights))
+            num_experts_for_kernel = E_local
+        else:
+            num_experts_for_kernel = self.num_experts
+
+        gating_output = torch.empty(M, num_experts_for_kernel, device=self.device)
 
         self._workspace.zero_()
+
+        # Slice g_idx/sort_idx to match local expert count
+        g_idx = self._gpu_g_idx[:num_experts_for_kernel] if self._gpu_g_idx is not None else None
+        sort_idx = self._gpu_sort_idx[:num_experts_for_kernel] if self._gpu_sort_idx is not None else None
 
         output = self._call_fused_moe(
             moe_layer_idx=moe_layer_idx,
@@ -3462,11 +3936,11 @@ class GpuPrefillManager:
             gating_output=gating_output,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            global_num_experts=self.num_experts,
-            g_idx1=self._gpu_g_idx,
-            g_idx2=self._gpu_g_idx,
-            sort_indices1=self._gpu_sort_idx,
-            sort_indices2=self._gpu_sort_idx,
+            global_num_experts=num_experts_for_kernel,
+            g_idx1=g_idx,
+            g_idx2=g_idx,
+            sort_indices1=sort_idx,
+            sort_indices2=sort_idx,
             workspace=self._workspace,
         ).to(x.dtype)
 

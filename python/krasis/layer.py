@@ -149,6 +149,96 @@ class TransformerLayer:
         self._se_input = None
         self._se_output = None
 
+    def pre_attn_norm(
+        self,
+        hidden: torch.Tensor,
+        residual: Optional[torch.Tensor],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Pre-attention RMSNorm. Returns (h_normed, residual).
+
+        Used by split-attention EP dispatch where attention is handled externally.
+        """
+        if residual is None:
+            residual = hidden
+            hidden = flashinfer.norm.rmsnorm(
+                hidden, self.input_norm_weight, self.cfg.rms_norm_eps
+            )
+        else:
+            flashinfer.norm.fused_add_rmsnorm(
+                hidden, residual, self.input_norm_weight, self.cfg.rms_norm_eps
+            )
+        return hidden, residual
+
+    def post_attn_norm(
+        self,
+        attn_out: torch.Tensor,
+        residual: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Post-attention RMSNorm. Returns (h_normed, residual).
+
+        Used by split-attention EP dispatch where attention is handled externally.
+        """
+        flashinfer.norm.fused_add_rmsnorm(
+            attn_out, residual, self.post_attn_norm_weight, self.cfg.rms_norm_eps
+        )
+        return attn_out, residual
+
+    def apply_attn_o_proj(self, attn_concat: torch.Tensor) -> torch.Tensor:
+        """Apply o_proj/out_proj to concatenated attention output from split heads.
+
+        Works for both GQA (o_proj) and linear attention (out_proj).
+        """
+        if self.layer_type == "linear_attention":
+            return _linear(attn_concat, self.attention.out_proj)
+        else:
+            output = _linear(attn_concat, self.attention.o_proj)
+            if hasattr(self.attention, 'o_proj_bias') and self.attention.o_proj_bias is not None:
+                output = output + self.attention.o_proj_bias
+            return output
+
+    def forward_attn(
+        self,
+        hidden: torch.Tensor,
+        residual: Optional[torch.Tensor],
+        positions: torch.Tensor,
+        kv_cache: Optional[PagedKVCache],
+        seq_state: Optional[SequenceKVState],
+        layer_offset: int,
+        num_new_tokens: int = 0,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Attention-only forward: pre-norm → attention → post-norm.
+
+        Returns (hidden, residual) ready for MoE input. Used by multi-GPU EP
+        prefill where routing + expert dispatch is handled externally.
+        """
+        M = hidden.shape[0]
+
+        # ── Pre-attention norm ──
+        if residual is None:
+            residual = hidden
+            hidden = flashinfer.norm.rmsnorm(
+                hidden, self.input_norm_weight, self.cfg.rms_norm_eps
+            )
+        else:
+            flashinfer.norm.fused_add_rmsnorm(
+                hidden, residual, self.input_norm_weight, self.cfg.rms_norm_eps
+            )
+
+        # ── Attention ──
+        if self.layer_type == "linear_attention":
+            attn_out = self.attention.forward(hidden, is_decode=(M == 1))
+        else:
+            attn_out = self.attention.forward(
+                hidden, positions, kv_cache, seq_state, layer_offset,
+                num_new_tokens=num_new_tokens,
+            )
+
+        # ── Post-attention norm ──
+        flashinfer.norm.fused_add_rmsnorm(
+            attn_out, residual, self.post_attn_norm_weight, self.cfg.rms_norm_eps
+        )
+        return attn_out, residual
+
     def forward(
         self,
         hidden: torch.Tensor,

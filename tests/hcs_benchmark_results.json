@@ -1,0 +1,116 @@
+{
+  "static_pin": {
+    "short": [
+      {
+        "run": 1,
+        "generated": 64,
+        "total_s": 13.167392825998832,
+        "decode_tok_s": 4.860491431047223
+      },
+      {
+        "run": 2,
+        "generated": 64,
+        "total_s": 13.306773954012897,
+        "decode_tok_s": 4.809580460386467
+      },
+      {
+        "run": 3,
+        "generated": 64,
+        "total_s": 13.739966485998593,
+        "decode_tok_s": 4.657944403664869
+      }
+    ],
+    "long": [
+      {
+        "run": 1,
+        "prompt_tokens": 7610,
+        "generated": 32,
+        "total_s": 29.1519703239901,
+        "tok_s": 1.097695958261393
+      },
+      {
+        "run": 2,
+        "prompt_tokens": 7610,
+        "generated": 32,
+        "total_s": 29.530034104012884,
+        "tok_s": 1.083642500624524
+      }
+    ]
+  },
+  "hot_cached_static": {
+    "short": [
+      {
+        "run": 1,
+        "generated": 64,
+        "total_s": 10.765187064011116,
+        "decode_tok_s": 5.945089446142291
+      },
+      {
+        "run": 2,
+        "generated": 64,
+        "total_s": 10.483358767000027,
+        "decode_tok_s": 6.104913646708533
+      },
+      {
+        "run": 3,
+        "generated": 64,
+        "total_s": 10.890465586970095,
+        "decode_tok_s": 5.876700081268596
+      }
+    ],
+    "long": [
+      {
+        "run": 1,
+        "prompt_tokens": 7610,
+        "generated": 32,
+        "total_s": 182.94685539603233,
+        "tok_s": 0.17491418439922526
+      },
+      {
+        "run": 2,
+        "prompt_tokens": 7610,
+        "generated": 32,
+        "total_s": 204.69281732296804,
+        "tok_s": 0.156331816712014
+      }
+    ]
+  },
+  "hcs+graphs": {
+    "short": [
+      {
+        "run": 1,
+        "generated": 64,
+        "total_s": 10.946487086999696,
+        "decode_tok_s": 5.846624537291777
+      },
+      {
+        "run": 2,
+        "generated": 64,
+        "total_s": 10.689637972041965,
+        "decode_tok_s": 5.987106407849146
+      },
+      {
+        "run": 3,
+        "generated": 64,
+        "total_s": 10.505902896053158,
+        "decode_tok_s": 6.091813396071215
+      }
+    ],
+    "long": [
+      {
+        "run": 1,
+        "prompt_tokens": 7610,
+        "generated": 32,
+        "total_s": 214.20770101604285,
+        "tok_s": 0.14938771971416376
+      },
+      {
+        "run": 2,
+        "prompt_tokens": 7610,
+        "generated": 32,
+        "total_s": 214.85374842700548,
+        "tok_s": 0.14893852322465623
+      }
+    ]
+  }
+}

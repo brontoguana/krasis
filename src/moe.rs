@@ -1791,7 +1791,7 @@ impl KrasisEngine {
     /// Expected speedup: ~1430ms → ~100-150ms per layer (eliminates allocation overhead).
     #[pyo3(signature = (moe_layer_idx, w13p_buf, w13s_buf, w2p_buf, w2s_buf))]
     pub fn write_experts_all_into(
-        &self, _py: Python<'_>, moe_layer_idx: usize,
+        &self, py: Python<'_>, moe_layer_idx: usize,
         w13p_buf: &Bound<'_, PyByteArray>,
         w13s_buf: &Bound<'_, PyByteArray>,
         w2p_buf: &Bound<'_, PyByteArray>,
@@ -1833,38 +1833,43 @@ impl KrasisEngine {
                 format!("w2s_buf too small: {} < {}", w2s_buf.len(), w2s_total)));
         }
 
-        // Write directly into pre-allocated buffers (raw memcpy, no allocation)
-        // SAFETY: We hold the GIL, no other Python code can resize the bytearrays
-        // while we're writing. The buffer sizes were verified above.
-        unsafe {
-            let w13p_slice = w13p_buf.as_bytes_mut();
-            for (i, expert) in layer.iter().enumerate() {
-                let src = std::slice::from_raw_parts(
-                    expert.w13_packed.as_ptr() as *const u8, w13p_per);
-                w13p_slice[i * w13p_per..(i + 1) * w13p_per].copy_from_slice(src);
-            }
+        // Extract raw pointers as usize while GIL is held (usize is Send+Sync
+        // for allow_threads). SAFETY: The PyByteArray buffers are owned by our
+        // Python code and won't be resized by other threads.
+        let (w13p_dst, w13s_dst, w2p_dst, w2s_dst) = unsafe {
+            (
+                w13p_buf.as_bytes_mut().as_mut_ptr() as usize,
+                w13s_buf.as_bytes_mut().as_mut_ptr() as usize,
+                w2p_buf.as_bytes_mut().as_mut_ptr() as usize,
+                w2s_buf.as_bytes_mut().as_mut_ptr() as usize,
+            )
+        };
 
-            let w13s_slice = w13s_buf.as_bytes_mut();
-            for (i, expert) in layer.iter().enumerate() {
-                let src = std::slice::from_raw_parts(
-                    expert.w13_scales.as_ptr() as *const u8, w13s_per);
-                w13s_slice[i * w13s_per..(i + 1) * w13s_per].copy_from_slice(src);
-            }
+        // Collect expert source pointers as usize (immutable store data)
+        let expert_srcs: Vec<_> = layer.iter().map(|e| {
+            (
+                e.w13_packed.as_ptr() as usize,
+                e.w13_scales.as_ptr() as usize,
+                e.w2_packed.as_ptr() as usize,
+                e.w2_scales.as_ptr() as usize,
+            )
+        }).collect();
 
-            let w2p_slice = w2p_buf.as_bytes_mut();
-            for (i, expert) in layer.iter().enumerate() {
-                let src = std::slice::from_raw_parts(
-                    expert.w2_packed.as_ptr() as *const u8, w2p_per);
-                w2p_slice[i * w2p_per..(i + 1) * w2p_per].copy_from_slice(src);
+        // Release GIL during the heavy memcpy loop
+        py.allow_threads(|| {
+            unsafe {
+                for (i, (w13p_src, w13s_src, w2p_src, w2s_src)) in expert_srcs.iter().enumerate() {
+                    std::ptr::copy_nonoverlapping(
+                        *w13p_src as *const u8, (w13p_dst as *mut u8).add(i * w13p_per), w13p_per);
+                    std::ptr::copy_nonoverlapping(
+                        *w13s_src as *const u8, (w13s_dst as *mut u8).add(i * w13s_per), w13s_per);
+                    std::ptr::copy_nonoverlapping(
+                        *w2p_src as *const u8, (w2p_dst as *mut u8).add(i * w2p_per), w2p_per);
+                    std::ptr::copy_nonoverlapping(
+                        *w2s_src as *const u8, (w2s_dst as *mut u8).add(i * w2s_per), w2s_per);
+                }
             }
-
-            let w2s_slice = w2s_buf.as_bytes_mut();
-            for (i, expert) in layer.iter().enumerate() {
-                let src = std::slice::from_raw_parts(
-                    expert.w2_scales.as_ptr() as *const u8, w2s_per);
-                w2s_slice[i * w2s_per..(i + 1) * w2s_per].copy_from_slice(src);
-            }
-        }
+        });
 
         Ok(())
     }
@@ -1873,7 +1878,7 @@ impl KrasisEngine {
     /// Used for parallel PCIe streaming in EP architecture where each GPU fetches a slice.
     #[pyo3(signature = (moe_layer_idx, start, end, w13p_buf, w13s_buf, w2p_buf, w2s_buf))]
     pub fn write_experts_range_into(
-        &self, _py: Python<'_>, moe_layer_idx: usize,
+        &self, py: Python<'_>, moe_layer_idx: usize,
         start: usize, end: usize,
         w13p_buf: &Bound<'_, PyByteArray>,
         w13s_buf: &Bound<'_, PyByteArray>,
@@ -1916,28 +1921,110 @@ impl KrasisEngine {
             return Err(pyo3::exceptions::PyValueError::new_err(format!("w2s_buf too small")));
         }
 
-        unsafe {
-            let w13p_slice = w13p_buf.as_bytes_mut();
-            let w13s_slice = w13s_buf.as_bytes_mut();
-            let w2p_slice = w2p_buf.as_bytes_mut();
-            let w2s_slice = w2s_buf.as_bytes_mut();
+        // Extract raw pointers as usize (Send+Sync for allow_threads)
+        let (w13p_dst, w13s_dst, w2p_dst, w2s_dst) = unsafe {
+            (
+                w13p_buf.as_bytes_mut().as_mut_ptr() as usize,
+                w13s_buf.as_bytes_mut().as_mut_ptr() as usize,
+                w2p_buf.as_bytes_mut().as_mut_ptr() as usize,
+                w2s_buf.as_bytes_mut().as_mut_ptr() as usize,
+            )
+        };
 
-            for i in 0..num_to_write {
-                let expert = &layer[start + i];
-                
-                let src = std::slice::from_raw_parts(expert.w13_packed.as_ptr() as *const u8, w13p_per);
-                w13p_slice[i * w13p_per..(i + 1) * w13p_per].copy_from_slice(src);
+        let expert_srcs: Vec<_> = layer[start..end].iter().map(|e| {
+            (
+                e.w13_packed.as_ptr() as usize,
+                e.w13_scales.as_ptr() as usize,
+                e.w2_packed.as_ptr() as usize,
+                e.w2_scales.as_ptr() as usize,
+            )
+        }).collect();
 
-                let src = std::slice::from_raw_parts(expert.w13_scales.as_ptr() as *const u8, w13s_per);
-                w13s_slice[i * w13s_per..(i + 1) * w13s_per].copy_from_slice(src);
-
-                let src = std::slice::from_raw_parts(expert.w2_packed.as_ptr() as *const u8, w2p_per);
-                w2p_slice[i * w2p_per..(i + 1) * w2p_per].copy_from_slice(src);
-
-                let src = std::slice::from_raw_parts(expert.w2_scales.as_ptr() as *const u8, w2s_per);
-                w2s_slice[i * w2s_per..(i + 1) * w2s_per].copy_from_slice(src);
+        // Release GIL during the heavy memcpy loop
+        py.allow_threads(|| {
+            unsafe {
+                for (i, (w13p_src, w13s_src, w2p_src, w2s_src)) in expert_srcs.iter().enumerate() {
+                    std::ptr::copy_nonoverlapping(
+                        *w13p_src as *const u8, (w13p_dst as *mut u8).add(i * w13p_per), w13p_per);
+                    std::ptr::copy_nonoverlapping(
+                        *w13s_src as *const u8, (w13s_dst as *mut u8).add(i * w13s_per), w13s_per);
+                    std::ptr::copy_nonoverlapping(
+                        *w2p_src as *const u8, (w2p_dst as *mut u8).add(i * w2p_per), w2p_per);
+                    std::ptr::copy_nonoverlapping(
+                        *w2s_src as *const u8, (w2s_dst as *mut u8).add(i * w2s_per), w2s_per);
+                }
             }
+        });
+
+        Ok(())
+    }
+
+    /// Write a RANGE of experts' weights into pinned memory via raw pointers.
+    /// Used with CUDA pinned staging buffers for truly async PCIe DMA.
+    /// Releases the GIL during the memcpy so other threads can run in parallel.
+    #[pyo3(signature = (moe_layer_idx, start, end, w13p_ptr, w13p_len, w13s_ptr, w13s_len, w2p_ptr, w2p_len, w2s_ptr, w2s_len))]
+    pub fn write_experts_range_into_pinned(
+        &self, py: Python<'_>, moe_layer_idx: usize,
+        start: usize, end: usize,
+        w13p_ptr: usize, w13p_len: usize,
+        w13s_ptr: usize, w13s_len: usize,
+        w2p_ptr: usize, w2p_len: usize,
+        w2s_ptr: usize, w2s_len: usize,
+    ) -> PyResult<()> {
+        let store = self.store.as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Model not loaded"))?;
+        if !store.has_gpu_weights() {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err("GPU weights not available"));
         }
+        let layer = &store.experts_gpu[moe_layer_idx];
+        if start >= end || end > layer.len() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                format!("Invalid range [{}, {}), layer has {} experts", start, end, layer.len())));
+        }
+        let num_to_write = end - start;
+
+        let w13p_per = layer[0].w13_packed.len() * 4;
+        let w13s_per = layer[0].w13_scales.len() * 2;
+        let w2p_per = layer[0].w2_packed.len() * 4;
+        let w2s_per = layer[0].w2_scales.len() * 2;
+
+        if w13p_len < num_to_write * w13p_per {
+            return Err(pyo3::exceptions::PyValueError::new_err("w13p buffer too small"));
+        }
+        if w13s_len < num_to_write * w13s_per {
+            return Err(pyo3::exceptions::PyValueError::new_err("w13s buffer too small"));
+        }
+        if w2p_len < num_to_write * w2p_per {
+            return Err(pyo3::exceptions::PyValueError::new_err("w2p buffer too small"));
+        }
+        if w2s_len < num_to_write * w2s_per {
+            return Err(pyo3::exceptions::PyValueError::new_err("w2s buffer too small"));
+        }
+
+        // All pointers already usize (from function args) — Send+Sync safe
+        let expert_srcs: Vec<_> = layer[start..end].iter().map(|e| {
+            (
+                e.w13_packed.as_ptr() as usize,
+                e.w13_scales.as_ptr() as usize,
+                e.w2_packed.as_ptr() as usize,
+                e.w2_scales.as_ptr() as usize,
+            )
+        }).collect();
+
+        py.allow_threads(|| {
+            unsafe {
+                for (i, (w13p_src, w13s_src, w2p_src, w2s_src)) in expert_srcs.iter().enumerate() {
+                    std::ptr::copy_nonoverlapping(
+                        *w13p_src as *const u8, (w13p_ptr as *mut u8).add(i * w13p_per), w13p_per);
+                    std::ptr::copy_nonoverlapping(
+                        *w13s_src as *const u8, (w13s_ptr as *mut u8).add(i * w13s_per), w13s_per);
+                    std::ptr::copy_nonoverlapping(
+                        *w2p_src as *const u8, (w2p_ptr as *mut u8).add(i * w2p_per), w2p_per);
+                    std::ptr::copy_nonoverlapping(
+                        *w2s_src as *const u8, (w2s_ptr as *mut u8).add(i * w2s_per), w2s_per);
+                }
+            }
+        });
 
         Ok(())
     }
@@ -2027,7 +2114,7 @@ impl KrasisEngine {
     /// Write shared expert weights for a layer into pre-allocated PyByteArray buffers.
     #[pyo3(signature = (moe_layer_idx, w13p_buf, w13s_buf, w2p_buf, w2s_buf))]
     pub fn write_shared_expert_into(
-        &self, _py: Python<'_>, moe_layer_idx: usize,
+        &self, py: Python<'_>, moe_layer_idx: usize,
         w13p_buf: &Bound<'_, PyByteArray>,
         w13s_buf: &Bound<'_, PyByteArray>,
         w2p_buf: &Bound<'_, PyByteArray>,
@@ -2045,27 +2132,74 @@ impl KrasisEngine {
         let w2p_bytes = expert.w2_packed.len() * 4;
         let w2s_bytes = expert.w2_scales.len() * 2;
 
-        unsafe {
-            let dst = w13p_buf.as_bytes_mut();
-            let src = std::slice::from_raw_parts(
-                expert.w13_packed.as_ptr() as *const u8, w13p_bytes);
-            dst[..w13p_bytes].copy_from_slice(src);
+        // Extract pointers as usize (Send+Sync for allow_threads)
+        let (w13p_d, w13s_d, w2p_d, w2s_d) = unsafe {
+            (
+                w13p_buf.as_bytes_mut().as_mut_ptr() as usize,
+                w13s_buf.as_bytes_mut().as_mut_ptr() as usize,
+                w2p_buf.as_bytes_mut().as_mut_ptr() as usize,
+                w2s_buf.as_bytes_mut().as_mut_ptr() as usize,
+            )
+        };
+        let w13p_s = expert.w13_packed.as_ptr() as usize;
+        let w13s_s = expert.w13_scales.as_ptr() as usize;
+        let w2p_s = expert.w2_packed.as_ptr() as usize;
+        let w2s_s = expert.w2_scales.as_ptr() as usize;
 
-            let dst = w13s_buf.as_bytes_mut();
-            let src = std::slice::from_raw_parts(
-                expert.w13_scales.as_ptr() as *const u8, w13s_bytes);
-            dst[..w13s_bytes].copy_from_slice(src);
+        // Release GIL during memcpy
+        py.allow_threads(|| {
+            unsafe {
+                std::ptr::copy_nonoverlapping(w13p_s as *const u8, w13p_d as *mut u8, w13p_bytes);
+                std::ptr::copy_nonoverlapping(w13s_s as *const u8, w13s_d as *mut u8, w13s_bytes);
+                std::ptr::copy_nonoverlapping(w2p_s as *const u8, w2p_d as *mut u8, w2p_bytes);
+                std::ptr::copy_nonoverlapping(w2s_s as *const u8, w2s_d as *mut u8, w2s_bytes);
+            }
+        });
 
-            let dst = w2p_buf.as_bytes_mut();
-            let src = std::slice::from_raw_parts(
-                expert.w2_packed.as_ptr() as *const u8, w2p_bytes);
-            dst[..w2p_bytes].copy_from_slice(src);
+        Ok(())
+    }
 
-            let dst = w2s_buf.as_bytes_mut();
-            let src = std::slice::from_raw_parts(
-                expert.w2_scales.as_ptr() as *const u8, w2s_bytes);
-            dst[..w2s_bytes].copy_from_slice(src);
+    /// Write shared expert weights into pinned memory via raw pointers.
+    /// Releases the GIL during memcpy for true parallel DMA.
+    #[pyo3(signature = (moe_layer_idx, w13p_ptr, w13p_len, w13s_ptr, w13s_len, w2p_ptr, w2p_len, w2s_ptr, w2s_len))]
+    pub fn write_shared_expert_into_pinned(
+        &self, py: Python<'_>, moe_layer_idx: usize,
+        w13p_ptr: usize, w13p_len: usize,
+        w13s_ptr: usize, w13s_len: usize,
+        w2p_ptr: usize, w2p_len: usize,
+        w2s_ptr: usize, w2s_len: usize,
+    ) -> PyResult<()> {
+        let store = self.store.as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Model not loaded"))?;
+        if store.shared_experts_gpu.is_empty() {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err("No shared experts"));
         }
+        let expert = &store.shared_experts_gpu[moe_layer_idx];
+
+        let w13p_bytes = expert.w13_packed.len() * 4;
+        let w13s_bytes = expert.w13_scales.len() * 2;
+        let w2p_bytes = expert.w2_packed.len() * 4;
+        let w2s_bytes = expert.w2_scales.len() * 2;
+
+        if w13p_len < w13p_bytes || w13s_len < w13s_bytes
+            || w2p_len < w2p_bytes || w2s_len < w2s_bytes {
+            return Err(pyo3::exceptions::PyValueError::new_err("Shared expert buffer too small"));
+        }
+
+        // Use usize for all pointers (Send+Sync for allow_threads)
+        let w13p_s = expert.w13_packed.as_ptr() as usize;
+        let w13s_s = expert.w13_scales.as_ptr() as usize;
+        let w2p_s = expert.w2_packed.as_ptr() as usize;
+        let w2s_s = expert.w2_scales.as_ptr() as usize;
+
+        py.allow_threads(|| {
+            unsafe {
+                std::ptr::copy_nonoverlapping(w13p_s as *const u8, w13p_ptr as *mut u8, w13p_bytes);
+                std::ptr::copy_nonoverlapping(w13s_s as *const u8, w13s_ptr as *mut u8, w13s_bytes);
+                std::ptr::copy_nonoverlapping(w2p_s as *const u8, w2p_ptr as *mut u8, w2p_bytes);
+                std::ptr::copy_nonoverlapping(w2s_s as *const u8, w2s_ptr as *mut u8, w2s_bytes);
+            }
+        });
 
         Ok(())
     }

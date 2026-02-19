@@ -1,0 +1,78 @@
+{
+  "static_pin": {
+    "short": [
+      {
+        "run": 1,
+        "generated": 64,
+        "total_s": 12.921307921002153,
+        "decode_tok_s": 4.953058962086578
+      },
+      {
+        "run": 2,
+        "generated": 64,
+        "total_s": 12.337889789021574,
+        "decode_tok_s": 5.187272790923136
+      },
+      {
+        "run": 3,
+        "generated": 64,
+        "total_s": 12.454745094000828,
+        "decode_tok_s": 5.13860376241882
+      }
+    ],
+    "long": [
+      {
+        "run": 1,
+        "prompt_tokens": 8278,
+        "generated": 32,
+        "total_s": 65.97801844298374,
+        "tok_s": 0.4850100193241399
+      },
+      {
+        "run": 2,
+        "prompt_tokens": 8278,
+        "generated": 32,
+        "total_s": 67.04925120802363,
+        "tok_s": 0.47726110916165804
+      }
+    ]
+  },
+  "hcs_hybrid": {
+    "short": [
+      {
+        "run": 1,
+        "generated": 64,
+        "total_s": 10.720494146982674,
+        "decode_tok_s": 5.969874067606582
+      },
+      {
+        "run": 2,
+        "generated": 64,
+        "total_s": 10.547833704971708,
+        "decode_tok_s": 6.067596607048675
+      },
+      {
+        "run": 3,
+        "generated": 64,
+        "total_s": 10.572194579988718,
+        "decode_tok_s": 6.053615407451979
+      }
+    ],
+    "long": [
+      {
+        "run": 1,
+        "prompt_tokens": 8278,
+        "generated": 32,
+        "total_s": 44.559440417040605,
+        "tok_s": 0.7181418729792313
+      },
+      {
+        "run": 2,
+        "prompt_tokens": 8278,
+        "generated": 32,
+        "total_s": 45.87396763602737,
+        "tok_s": 0.697563381783193
+      }
+    ]
+  }
+}
