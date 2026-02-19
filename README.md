@@ -138,6 +138,40 @@ krasis --non-interactive
 krasis --non-interactive --model-path /path/to/model --num-gpus 2 --benchmark
 ```
 
+### Benchmark Suite
+
+Run all model × config combinations automatically from a single config file. Edit `benchmarks/benchmark_suite.toml` to define which models and hardware configurations to test:
+
+```toml
+[[config]]
+num_gpus = 1
+gpu_expert_bits = 4
+cpu_expert_bits = 4
+
+[[config]]
+num_gpus = 2
+gpu_expert_bits = 4
+cpu_expert_bits = 4
+
+[[model]]
+name = "DeepSeek-V2-Lite"
+
+[[model]]
+name = "Qwen3-235B-A22B"
+gguf_name = "Qwen3-235B-A22B-GGUF"   # searched in ~/.krasis/models/ subdirs
+```
+
+Model `name` is the directory name under `~/.krasis/models/`. Use `gguf_name` to pair a native model with a GGUF for CPU experts (filename searched in models dir), or `gguf_path` for an absolute path. Config fields include `num_gpus`, `gpu_expert_bits`, `cpu_expert_bits`, `attention_quant`, `kv_dtype`, and more — see the config file comments for the full list.
+
+Run the suite:
+
+```bash
+krasis --benchmark-suite                           # uses benchmarks/benchmark_suite.toml
+krasis --benchmark-suite /path/to/custom.toml      # custom config
+```
+
+Each combination runs as an isolated subprocess. Per-combo logs are saved to `benchmarks/suite_logs/` and a markdown summary table is generated at the end.
+
 For launcher flags, per-component quantization options, and direct server usage, see [ADVANCED.md](ADVANCED.md).
 
 ### Chat Client

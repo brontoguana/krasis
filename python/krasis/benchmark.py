@@ -23,19 +23,25 @@ from krasis.timing import TIMING
 
 logger = logging.getLogger("krasis.benchmark")
 
+# ANSI formatting
+BOLD = "\033[1m"
+CYAN = "\033[36m"
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+DIM = "\033[2m"
+NC = "\033[0m"
+
+
+def _section(label: str) -> str:
+    """Format a highlighted section header."""
+    return f"\n{BOLD}{CYAN}▸ {label}{NC}"
+
 
 class KrasisBenchmark:
     """Standardized benchmark suite for a loaded KrasisModel."""
 
-    def __init__(self, model, log_path: Optional[str] = None):
+    def __init__(self, model):
         self.model = model
-        if log_path is None:
-            # Default: krasis repo root
-            repo_root = os.path.dirname(os.path.dirname(os.path.dirname(
-                os.path.abspath(__file__)
-            )))
-            log_path = os.path.join(repo_root, "benchmark_results.log")
-        self.log_path = log_path
 
         self.decode_tokens = 64
         self.n_runs = 3
@@ -417,8 +423,11 @@ class KrasisBenchmark:
     # Benchmark archive
     # ──────────────────────────────────────────────────────────
 
-    def _archive_benchmark(self, model_info: Dict, report: str):
-        """Write benchmark report to benchmarks/<name>.log for archival."""
+    def _archive_benchmark(self, model_info: Dict, report: str) -> Optional[str]:
+        """Write benchmark report to benchmarks/<name>.log for archival.
+
+        Returns the relative path (benchmarks/<filename>) or None on failure.
+        """
         repo_root = os.path.dirname(os.path.dirname(os.path.dirname(
             os.path.abspath(__file__)
         )))
@@ -435,15 +444,17 @@ class KrasisBenchmark:
         gpu_quant = f"int{model_info['gpu_expert_bits']}gpu"
         cpu_quant = f"int{model_info['cpu_expert_bits']}cpu"
         filename = f"{model_name}_{gguf_name}_{num_gpus}gpu_{gpu_quant}_{cpu_quant}.log"
+        rel_path = f"benchmarks/{filename}"
 
         try:
             os.makedirs(benchmarks_dir, exist_ok=True)
             archive_path = os.path.join(benchmarks_dir, filename)
             with open(archive_path, "w") as f:
                 f.write(report + "\n")
-            print(f"Benchmark archived to benchmarks/{filename}")
+            return rel_path
         except OSError as e:
-            print(f"Warning: could not archive benchmark: {e}")
+            logger.warning("Could not archive benchmark: %s", e)
+            return None
 
     # ──────────────────────────────────────────────────────────
     # Main entry point
@@ -451,69 +462,78 @@ class KrasisBenchmark:
 
     def run(self) -> Dict:
         """Run the full benchmark suite. Returns results dict."""
-        print("\n" + "=" * 64)
-        print("KRASIS BENCHMARK")
-        print("=" * 64)
+        print(f"\n{BOLD}{'═' * 48}")
+        print(f"  KRASIS BENCHMARK")
+        print(f"{'═' * 48}{NC}")
 
         # 1. Collect info
-        print("\nCollecting system info...")
+        print(_section("Collecting system info"))
         sys_info = self._collect_system_info()
         model_info = self._collect_model_info()
         vram_usage = self._collect_vram_usage()
 
-        print(f"  Model: {model_info['model_name']}")
-        print(f"  GPUs: {len(sys_info['gpus'])}, CPU: {sys_info['cpu_model']}")
+        print(f"  Model:    {BOLD}{model_info['model_name']}{NC}")
+        print(f"  GPUs:     {len(sys_info['gpus'])}x {sys_info['gpus'][0]['name'] if sys_info['gpus'] else 'none'}")
         print(f"  Strategy: {model_info['decode_mode']}")
 
         # 2. Build prompts
-        print("\nBuilding test prompts...")
+        print(_section("Loading benchmark prompts"))
         large_tokens = self._make_prompt()
         short_tokens = self._make_short_prompt()
-        print(f"  Prefill prompt: {len(large_tokens)} tokens")
-        print(f"  Decode prompt: {len(short_tokens)} tokens")
+        print(f"  Prefill: {len(large_tokens):,} tokens")
+        print(f"  Decode:  {len(short_tokens):,} tokens")
 
         # 3. Warmup
-        print("\nWarmup phase...")
+        print(_section("Warmup (2 short generations)"))
         self._warmup()
 
         # 4. Prefill benchmark
-        print(f"\nPrefill benchmark ({len(large_tokens)} tokens, {self.n_runs} runs)...")
+        print(_section(f"Running prefill benchmark ({len(large_tokens):,} tokens, {self.n_runs} runs)"))
         prefill_result = self._benchmark_prefill(large_tokens)
-        print(f"  Average: {prefill_result['avg_tok_s']:.1f} tok/s, TTFT={prefill_result['avg_ttft']:.2f}s")
+        for i, run in enumerate(prefill_result["runs"]):
+            print(f"  Run {i+1}: {run['tok_s']:.1f} tok/s, TTFT={run['ttft']:.2f}s")
+        print(f"  {BOLD}Average: {prefill_result['avg_tok_s']:.1f} tok/s, TTFT={prefill_result['avg_ttft']:.2f}s{NC}")
 
         # 5. Decode benchmark
-        print(f"\nDecode benchmark ({self.decode_tokens} tokens, {self.n_runs} runs)...")
+        print(_section(f"Running decode benchmark ({self.decode_tokens} tokens, {self.n_runs} runs)"))
         decode_result = self._benchmark_decode(short_tokens)
-        print(f"  Average: {decode_result['avg_tok_s']:.2f} tok/s ({decode_result['avg_ms_per_tok']:.1f}ms/tok)")
+        for i, run in enumerate(decode_result["runs"]):
+            print(f"  Run {i+1}: {run['tok_s']:.2f} tok/s ({run['ms_per_tok']:.1f}ms/tok)")
+        print(f"  {BOLD}Average: {decode_result['avg_tok_s']:.2f} tok/s ({decode_result['avg_ms_per_tok']:.1f}ms/tok){NC}")
 
         # 6. Decode prompt text for the log
         try:
             prefill_prompt_text = self.model.tokenizer.decode(large_tokens)
         except Exception:
             prefill_prompt_text = f"[{len(large_tokens)} tokens]"
-        decode_prompt_text = "Write a poem about recursion in programming."
+        try:
+            decode_prompt_text = self._load_prompt_file("decode_prompt")
+        except OSError:
+            decode_prompt_text = "[decode prompt]"
 
-        # 7. Format and print results
+        # 7. Format and write report
+        print(_section("Writing results"))
         report = self._format_results(
             sys_info, model_info, vram_usage,
             prefill_result, decode_result,
             prefill_prompt=prefill_prompt_text,
             decode_prompt=decode_prompt_text,
         )
-        print("\n" + report)
 
-        # 8. Append to log file
-        try:
-            with open(self.log_path, "a") as f:
-                f.write(report + "\n\n")
-            print(f"\nResults appended to {self.log_path}")
-        except OSError as e:
-            print(f"\nWarning: could not write to {self.log_path}: {e}")
+        # 8. Archive to benchmarks/ directory
+        archive_path = self._archive_benchmark(model_info, report)
 
-        # 9. Archive to benchmarks/ directory
-        self._archive_benchmark(model_info, report)
+        # 10. Final summary
+        print(f"\n{BOLD}{'─' * 48}")
+        print(f"  BENCHMARK COMPLETE")
+        print(f"{'─' * 48}{NC}")
+        print(f"  Prefill: {GREEN}{BOLD}{prefill_result['avg_tok_s']:.1f} tok/s{NC}  TTFT={prefill_result['avg_ttft']:.2f}s")
+        print(f"  Decode:  {GREEN}{BOLD}{decode_result['avg_tok_s']:.2f} tok/s{NC}  ({decode_result['avg_ms_per_tok']:.1f}ms/tok)")
+        if archive_path:
+            print(f"  Log:     {DIM}{archive_path}{NC}")
+        print()
 
-        # 10. Return structured results
+        # 11. Return structured results
         return {
             "system": sys_info,
             "model": model_info,

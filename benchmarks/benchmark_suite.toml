@@ -1,0 +1,72 @@
+# Krasis Benchmark Suite Configuration
+#
+# Each [[config]] × [[model]] combination will be benchmarked.
+# Results are collected into benchmarks/suite_logs/ and a summary .md file.
+#
+# Run with:
+#   python -m krasis.suite                              # uses this default config
+#   python -m krasis.suite --config path/to/custom.toml # custom config
+#   python -m krasis.launcher --benchmark-suite         # via launcher TUI
+#
+# Model fields:
+#   name      — directory name under ~/.krasis/models/ (required)
+#   path      — absolute path override (optional, overrides name-based lookup)
+#   gguf_name — GGUF filename to find in ~/.krasis/models/ subdirs (optional)
+#   gguf_path — absolute path to GGUF file (optional, use gguf_name instead for convenience)
+#
+# Config fields:
+#   num_gpus           — number of GPUs to use (required)
+#   gpu_expert_bits    — Marlin GPU expert bits: 4 or 8 (default: 4)
+#   cpu_expert_bits    — CPU expert bits: 4 or 8 (default: 4)
+#   attention_quant    — "int8" or "bf16" (default: "int8")
+#   shared_expert_quant — "int8" or "bf16" (default: "int8")
+#   dense_mlp_quant    — "int8" or "bf16" (default: "int8")
+#   lm_head_quant      — "int8" or "bf16" (default: "int8")
+#   kv_dtype           — "fp8_e4m3" or "bf16" (default: "fp8_e4m3")
+#   krasis_threads     — CPU threads (default: 48)
+
+# ── Configurations ──────────────────────────────────────────────────
+
+# [[config]]
+# num_gpus = 1
+# gpu_expert_bits = 4
+# cpu_expert_bits = 4
+
+[[config]]
+num_gpus = 1
+gpu_expert_bits = 8
+cpu_expert_bits = 8
+
+[[config]]
+num_gpus = 2
+gpu_expert_bits = 4
+cpu_expert_bits = 4
+
+# ── Models ──────────────────────────────────────────────────────────
+
+[[model]]
+name = "DeepSeek-V2-Lite"
+gguf_name = "DeepSeek-V2-Lite-GGUF"
+
+[[model]]
+name = "Qwen3-Coder-Next"
+
+[[model]]
+name = "Qwen3-235B-A22B"
+gguf_name = "Qwen3-235B-A22B-GGUF"
+
+[[model]]
+name = "gpt-oss-120b"
+
+[[model]]
+name = "GLM-4.7"
+
+# Native model with GGUF for CPU experts (searches ~/.krasis/models/ subdirs):
+# [[model]]
+# name = "Qwen3-235B-A22B"
+# gguf_name = "Qwen3-235B-A22B-Q4_K_M.gguf"
+
+# Custom path override:
+# [[model]]
+# name = "Qwen3-Coder-480B-A35B"
+# path = "/custom/path/to/model"

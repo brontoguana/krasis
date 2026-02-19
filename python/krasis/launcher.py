@@ -244,6 +244,15 @@ def scan_models(search_dir: str, native_only: bool = False) -> List[Dict[str, An
             if experts and hidden and inter:
                 ram_gb = (3 * hidden * inter * 2 * experts * (layers - cfg.get("first_k_dense_replace", 0))) / (1024**3)
 
+            # Determine number of dense (non-MoE) layers
+            if "first_k_dense_replace" in cfg:
+                first_k_dense = cfg["first_k_dense_replace"]
+            elif "decoder_sparse_step" in cfg:
+                step = cfg["decoder_sparse_step"]
+                first_k_dense = 0 if step <= 1 else step
+            else:
+                first_k_dense = 0
+
             models.append({
                 "name": name,
                 "path": model_dir,
@@ -251,6 +260,7 @@ def scan_models(search_dir: str, native_only: bool = False) -> List[Dict[str, An
                 "layers": layers,
                 "experts": experts,
                 "shared_experts": shared,
+                "dense_layers": first_k_dense,
                 "native_dtype": raw.get("torch_dtype", "bfloat16"),
                 "ram_gb": ram_gb,
             })
@@ -478,12 +488,10 @@ class ConfigOption:
         self.max_val = max_val
 
 
-# The 13 config options
+# Config options shown in TUI
+# Expert divisor is always "auto" and prefill threshold is always 300 (not user-facing).
 OPTIONS = [
     ConfigOption("PP partition", "pp_partition", opt_type="text", affects_budget=True),
-    ConfigOption("Expert divisor", "expert_divisor",
-                 choices=["auto", 1, 2, 3, 4, 8, 16, 32, 0], affects_budget=True,
-                 suffix=" ({desc})"),
     ConfigOption("KV dtype", "kv_dtype",
                  choices=["fp8_e4m3", "bf16"], affects_budget=True),
     ConfigOption("GPU expert bits", "gpu_expert_bits",
@@ -502,30 +510,20 @@ OPTIONS = [
                  opt_type="number", min_val=1, max_val=256),
     ConfigOption("Host", "host", opt_type="text"),
     ConfigOption("Port", "port", opt_type="number", min_val=1, max_val=65535),
-    ConfigOption("Prefill threshold", "gpu_prefill_threshold",
-                 opt_type="number", min_val=0, max_val=100000),
 ]
-
-DIVISOR_DESCRIPTIONS = {
-    "auto": "auto-optimise",
-    0: "chunked",
-    1: "persistent",
-    2: "grouped(2)",
-    3: "grouped(3)",
-    4: "grouped(4)",
-    8: "grouped(8)",
-    16: "grouped(16)",
-    32: "grouped(32)",
-}
-
 
 def _format_value(opt: ConfigOption, val: Any) -> str:
     """Format a config value for display."""
-    s = str(val)
-    if opt.key == "expert_divisor":
-        desc = DIVISOR_DESCRIPTIONS.get(val, f"grouped({val})")
-        return f"{val} ({desc})"
-    return s
+    return str(val)
+
+
+def _is_option_visible(opt: ConfigOption, model_info: Optional[Dict]) -> bool:
+    """Check if an option should be shown for the current model."""
+    if opt.key == "dense_mlp_quant":
+        # Only show if model has dense (non-MoE) layers
+        if model_info and model_info.get("dense_layers", 0) == 0:
+            return False
+    return True
 
 
 # Maps config key → short label for the native dtype display
@@ -721,14 +719,15 @@ def _gpu_selection_screen(
 # Launch mode selection screen
 # ═══════════════════════════════════════════════════════════════════════
 
-def _launch_mode_screen() -> Optional[bool]:
-    """Select launch mode: Launch or Benchmark and Launch.
+def _launch_mode_screen() -> Optional[str]:
+    """Select launch mode: Launch, Benchmark, or Benchmark Suite.
 
-    Returns True if benchmark should run, False for plain launch, None if cancelled.
+    Returns "launch", "benchmark", "suite", or None if cancelled.
     """
     options = [
-        ("Launch", "Start the server immediately"),
-        ("Benchmark and Launch", "Run prefill + decode benchmark, then start server"),
+        ("Launch", "Start the server immediately", "launch"),
+        ("Benchmark and Launch", "Run prefill + decode benchmark, then start server", "benchmark"),
+        ("Benchmark Suite", "Run all model \u00d7 config combos from suite config", "suite"),
     ]
     cursor = 0
 
@@ -737,7 +736,7 @@ def _launch_mode_screen() -> Optional[bool]:
         lines = []
         lines.append(f"  {BOLD}Select launch mode:{NC}\n")
 
-        for i, (label, desc) in enumerate(options):
+        for i, (label, desc, _mode) in enumerate(options):
             prefix = f"  {CYAN}\u25b8{NC} " if i == cursor else "    "
             hl = BOLD if i == cursor else ""
             lines.append(f"{prefix}{hl}{label}{NC}  {DIM}{desc}{NC}")
@@ -753,7 +752,7 @@ def _launch_mode_screen() -> Optional[bool]:
         elif key == KEY_DOWN:
             cursor = (cursor + 1) % len(options)
         elif key == KEY_ENTER:
-            return cursor == 1  # True = benchmark, False = plain launch
+            return options[cursor][2]
         elif key == KEY_QUIT or key == KEY_ESCAPE:
             return None
 
@@ -1002,10 +1001,11 @@ class Launcher:
             )
         lines.append("")
 
-        # Config options
+        # Config options (filter to visible ones for current model)
         native_dtype = (self.model_info or {}).get("native_dtype", "bfloat16")
+        visible_options = [opt for opt in OPTIONS if _is_option_visible(opt, self.model_info)]
         lines.append(f"  {DIM}\u2500\u2500\u2500 Configuration \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500{NC}")
-        for i, opt in enumerate(OPTIONS):
+        for i, opt in enumerate(visible_options):
             val = getattr(self.cfg, opt.key)
             display = _format_value(opt, val)
 
@@ -1034,18 +1034,7 @@ class Launcher:
             gpu_vram = b["gpu_vram_mb"]
 
             lines.append(f"  {DIM}\u2500\u2500\u2500 VRAM Budget (worst: rank {wr}) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500{NC}")
-            lines.append(f"    Attention weights:  {rank['attention_mb']:>8,.0f} MB  ({self.cfg.attention_quant})")
-            if rank["shared_expert_mb"] > 0:
-                lines.append(f"    Shared experts:    {rank['shared_expert_mb']:>8,.0f} MB  ({self.cfg.shared_expert_quant})")
-            if rank["dense_mlp_mb"] > 0:
-                lines.append(f"    Dense MLP:         {rank['dense_mlp_mb']:>8,.0f} MB  ({self.cfg.dense_mlp_quant})")
-            lines.append(f"    Expert buffers:    {rank['expert_buffer_mb']:>8,.0f} MB  (int{self.cfg.gpu_expert_bits}, {rank['expert_mode']})")
-            lines.append(f"    Embedding/LM head: {rank['embed_lmhead_mb']:>8,.0f} MB")
-            lines.append(f"    Other (norms/gates):{rank['norms_gates_mb']:>7,.0f} MB")
-            lines.append(f"    CUDA overhead:     {rank['cuda_overhead_mb']:>8,} MB")
-            lines.append(f"    {DIM}{'─' * 40}{NC}")
             lines.append(f"    Total:             {rank['total_mb']:>8,.0f} MB  / {gpu_vram:,} MB")
-
             if rank["free_mb"] > 0:
                 kv_label = "fp8" if self.cfg.kv_dtype == "fp8_e4m3" else "bf16"
                 lines.append(
@@ -1156,10 +1145,19 @@ class Launcher:
         if not self.selected_gpus:
             self._resolve_selected_gpus()
 
-        # Set/recompute PP partition based on selected GPUs
+        # Set/recompute PP partition based on selected GPUs and model layer count
         ngpus = len(self.selected_gpus) if self.selected_gpus else 1
         pp_parts = [x.strip() for x in self.cfg.pp_partition.split(",") if x.strip()] if self.cfg.pp_partition else []
-        if (not pp_parts or len(pp_parts) != ngpus) and self.model_info:
+        needs_recompute = not pp_parts or len(pp_parts) != ngpus
+        if not needs_recompute and self.model_info:
+            # Also recompute if sum doesn't match model's actual layer count
+            try:
+                pp_sum = sum(int(p) for p in pp_parts)
+                if pp_sum != self.model_info["layers"]:
+                    needs_recompute = True
+            except ValueError:
+                needs_recompute = True
+        if needs_recompute and self.model_info:
             self.cfg.pp_partition = self._compute_default_pp(self.model_info["layers"])
         if self.hw["cpu_cores"] > 0:
             self.cfg.krasis_threads = min(self.hw["cpu_cores"], 16)
@@ -1171,6 +1169,9 @@ class Launcher:
         _hide_cursor()
         try:
             while True:
+                visible_options = [opt for opt in OPTIONS if _is_option_visible(opt, self.model_info)]
+                n_visible = len(visible_options)
+
                 _clear_screen()
                 screen = self._render_config_screen(cursor)
                 sys.stdout.write(screen + "\n")
@@ -1179,47 +1180,25 @@ class Launcher:
                 key = _read_key()
 
                 if key == KEY_UP:
-                    cursor = (cursor - 1) % len(OPTIONS)
+                    cursor = (cursor - 1) % n_visible
                 elif key == KEY_DOWN:
-                    cursor = (cursor + 1) % len(OPTIONS)
-                elif key == KEY_LEFT:
-                    opt = OPTIONS[cursor]
+                    cursor = (cursor + 1) % n_visible
+                elif key in (KEY_LEFT, KEY_RIGHT):
+                    opt = visible_options[cursor]
+                    direction = -1 if key == KEY_LEFT else 1
                     if opt.opt_type == "cycle":
-                        self._cycle_value(opt, -1)
+                        self._cycle_value(opt, direction)
                     elif opt.opt_type == "number":
-                        self._cycle_value(opt, -1)
-                    if opt.affects_budget:
-                        self.budget = self._compute_budget()
-                elif key == KEY_RIGHT:
-                    opt = OPTIONS[cursor]
-                    if opt.opt_type == "cycle":
-                        self._cycle_value(opt, 1)
-                    elif opt.opt_type == "number":
-                        self._cycle_value(opt, 1)
-                    if opt.affects_budget:
-                        self.budget = self._compute_budget()
-                elif key == "e" or (key == KEY_ENTER and OPTIONS[cursor].opt_type in ("text", "number")):
-                    opt = OPTIONS[cursor]
-                    if opt.opt_type in ("text", "number"):
+                        self._cycle_value(opt, direction)
+                    elif opt.opt_type == "text":
+                        # Open inline editor for text fields on left/right
                         _show_cursor()
                         current = str(getattr(self.cfg, opt.key))
-                        new_val = _edit_value(
-                            opt.label, current,
-                            is_number=(opt.opt_type == "number"),
-                        )
+                        new_val = _edit_value(opt.label, current)
                         _hide_cursor()
-                        if opt.opt_type == "number":
-                            try:
-                                setattr(self.cfg, opt.key, int(new_val))
-                            except ValueError:
-                                pass
-                        else:
-                            setattr(self.cfg, opt.key, new_val)
-                        if opt.affects_budget:
-                            self.budget = self._compute_budget()
-                    elif key == KEY_ENTER:
-                        # Enter on non-text option = launch
-                        return True
+                        setattr(self.cfg, opt.key, new_val)
+                    if opt.affects_budget:
+                        self.budget = self._compute_budget()
                 elif key == KEY_ENTER:
                     return True
                 elif key == KEY_QUIT or key == KEY_ESCAPE:
@@ -1236,6 +1215,15 @@ class Launcher:
             with open(config_path) as f:
                 raw = json.load(f)
             cfg = raw.get("text_config", raw)
+            # Determine number of dense (non-MoE) layers
+            if "first_k_dense_replace" in cfg:
+                first_k_dense = cfg["first_k_dense_replace"]
+            elif "decoder_sparse_step" in cfg:
+                step = cfg["decoder_sparse_step"]
+                first_k_dense = 0 if step <= 1 else step
+            else:
+                first_k_dense = 0
+
             self.model_info = {
                 "name": os.path.basename(self.cfg.model_path),
                 "path": self.cfg.model_path,
@@ -1243,6 +1231,7 @@ class Launcher:
                 "layers": cfg.get("num_hidden_layers", 0),
                 "experts": cfg.get("n_routed_experts", cfg.get("num_experts", 0)),
                 "shared_experts": cfg.get("n_shared_experts", 0),
+                "dense_layers": first_k_dense,
                 "native_dtype": raw.get("torch_dtype", "bfloat16"),
                 "ram_gb": 0,
             }
@@ -1261,13 +1250,14 @@ class Launcher:
         else:
             print(f"  CPU experts:     Build INT{self.cfg.cpu_expert_bits} from native")
         print(f"  PP partition:    {self.cfg.pp_partition}")
-        print(f"  Expert divisor:  {self.cfg.expert_divisor}")
         print(f"  KV dtype:        {self.cfg.kv_dtype}")
         print(f"  GPU expert bits: {self.cfg.gpu_expert_bits}")
         print(f"  CPU expert bits: {self.cfg.cpu_expert_bits}")
         print(f"  Attention quant: {self.cfg.attention_quant}")
         print(f"  Shared expert:   {self.cfg.shared_expert_quant}")
-        print(f"  Dense MLP quant: {self.cfg.dense_mlp_quant}")
+        dense_layers = (self.model_info or {}).get("dense_layers", 0)
+        if dense_layers > 0:
+            print(f"  Dense MLP quant: {self.cfg.dense_mlp_quant}")
         print(f"  LM head quant:   {self.cfg.lm_head_quant}")
         print(f"  CPU threads:     {self.cfg.krasis_threads}")
         print(f"  Server:          {self.cfg.host}:{self.cfg.port}")
@@ -1295,12 +1285,9 @@ class Launcher:
         """Build args and exec the Krasis server."""
         num_gpus = len(self.selected_gpus) if self.selected_gpus else self.hw["gpu_count"]
 
-        is_auto = self.cfg.expert_divisor == "auto"
-
         cmd_args = [
             sys.executable, "-m", "krasis.server",
             "--model-path", self.cfg.model_path,
-            "--pp-partition", self.cfg.pp_partition,
             "--num-gpus", str(num_gpus),
             "--kv-dtype", self.cfg.kv_dtype,
             "--gpu-expert-bits", str(self.cfg.gpu_expert_bits),
@@ -1312,13 +1299,7 @@ class Launcher:
             "--krasis-threads", str(self.cfg.krasis_threads),
             "--host", self.cfg.host,
             "--port", str(self.cfg.port),
-            "--gpu-prefill-threshold", str(self.cfg.gpu_prefill_threshold),
         ]
-
-        if is_auto:
-            cmd_args.extend(["--strategy", "auto"])
-        else:
-            cmd_args.extend(["--expert-divisor", str(self.cfg.expert_divisor)])
 
         if self.cfg.gguf_path:
             cmd_args.extend(["--gguf-path", self.cfg.gguf_path])
@@ -1387,6 +1368,8 @@ def parse_args() -> argparse.Namespace:
                         help="Force reload cached weights")
     parser.add_argument("--benchmark", action="store_true",
                         help="Run standardized benchmark before starting server")
+    parser.add_argument("--benchmark-suite", nargs="?", const="", default=None,
+                        help="Run benchmark suite (optional: path to TOML config)")
     parser.add_argument("--skip-setup", action="store_true",
                         help="(ignored — handled by bash wrapper)")
     parser.add_argument("--venv", default=None,
@@ -1446,6 +1429,28 @@ def _apply_cli_overrides(cfg: LauncherConfig, args: argparse.Namespace) -> None:
 def main():
     args = parse_args()
 
+    # Handle --benchmark-suite early (no hardware detection or config needed)
+    if args.benchmark_suite is not None:
+        from krasis.suite import SuiteRunner
+        script_dir = os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__)
+        )))
+        config_path = args.benchmark_suite if args.benchmark_suite else None
+        if config_path is None:
+            config_path = os.path.join(script_dir, "benchmarks", "benchmark_suite.toml")
+        if not os.path.isfile(config_path):
+            print(f"Error: suite config not found: {config_path}", file=sys.stderr)
+            sys.exit(1)
+        runner = SuiteRunner(config_path)
+        results = runner.run_all()
+        if results:
+            summary_path = runner.write_summary(results)
+            passed = sum(1 for r in results if r.success)
+            failed = len(results) - passed
+            print(f"\n{BOLD}Suite complete: {passed} passed, {failed} failed{NC}")
+            print(f"  Summary: {summary_path}")
+        sys.exit(0)
+
     launcher = Launcher(args)
 
     # Load saved config (check new location, fall back to legacy repo-root location)
@@ -1481,10 +1486,18 @@ def main():
         launcher._read_model_info()
         launcher._resolve_selected_gpus()
 
-        # Set/recompute PP if not specified or GPU count mismatch
+        # Set/recompute PP if not specified, GPU count mismatch, or layer sum mismatch
         ngpus = len(launcher.selected_gpus) if launcher.selected_gpus else 1
         pp_parts = [x.strip() for x in launcher.cfg.pp_partition.split(",") if x.strip()] if launcher.cfg.pp_partition else []
-        if (not pp_parts or len(pp_parts) != ngpus) and launcher.model_info:
+        needs_recompute = not pp_parts or len(pp_parts) != ngpus
+        if not needs_recompute and launcher.model_info:
+            try:
+                pp_sum = sum(int(p) for p in pp_parts)
+                if pp_sum != launcher.model_info["layers"]:
+                    needs_recompute = True
+            except ValueError:
+                needs_recompute = True
+        if needs_recompute and launcher.model_info:
             launcher.cfg.pp_partition = launcher._compute_default_pp(
                 launcher.model_info["layers"]
             )
@@ -1498,20 +1511,36 @@ def main():
             _save_config(launcher.config_file, launcher.cfg.to_save_dict())
 
             # Launch mode selection (skip if --benchmark on CLI)
-            do_benchmark = args.benchmark
-            if not do_benchmark:
+            if args.benchmark:
+                launch_mode = "benchmark"
+            else:
                 _hide_cursor()
                 try:
-                    result = _launch_mode_screen()
+                    launch_mode = _launch_mode_screen()
                 finally:
                     _show_cursor()
-                if result is None:
+                if launch_mode is None:
                     print("Aborted.")
                     sys.exit(0)
-                do_benchmark = result
+
+            if launch_mode == "suite":
+                from krasis.suite import SuiteRunner
+                config_path = os.path.join(launcher.script_dir, "benchmarks", "benchmark_suite.toml")
+                if not os.path.isfile(config_path):
+                    print(f"Error: suite config not found: {config_path}", file=sys.stderr)
+                    sys.exit(1)
+                runner = SuiteRunner(config_path)
+                results = runner.run_all()
+                if results:
+                    summary_path = runner.write_summary(results)
+                    passed = sum(1 for r in results if r.success)
+                    failed = len(results) - passed
+                    print(f"\n{BOLD}Suite complete: {passed} passed, {failed} failed{NC}")
+                    print(f"  Summary: {summary_path}")
+                sys.exit(0)
 
             launcher.print_summary()
-            launcher.launch_server(benchmark=do_benchmark)
+            launcher.launch_server(benchmark=(launch_mode == "benchmark"))
         else:
             print("Aborted.")
             sys.exit(0)
