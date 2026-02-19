@@ -1,5 +1,5 @@
 ================================================================
-Krasis Benchmark — 2026-02-19 12:37:49
+Krasis Benchmark — 2026-02-19 12:48:26
 ================================================================
 Model:            Qwen3-Coder-Next
 Architecture:     qwen3_next, 48 layers, 512 experts, top-10, 12 GQA + 36 linear
@@ -7,10 +7,10 @@ PP Partition:     [48] (1 GPUs)
 
 Hardware:
   CPU:            AMD EPYC 7742 64-Core Processor (64 cores)
-  RAM:            995 GB total, 79.1 GB used by process
-  GPU 0:          NVIDIA RTX 2000 Ada Generation (16380 MB), 9553 MB allocated
+  RAM:            995 GB total, 78.4 GB used by process
+  GPU 0:          NVIDIA RTX 2000 Ada Generation (16380 MB), 9593 MB allocated
   GPU 1:          NVIDIA RTX 2000 Ada Generation (16380 MB), 3022 MB allocated
-  GPU 2:          NVIDIA RTX 2000 Ada Generation (16380 MB), 3022 MB allocated
+  GPU 2:          NVIDIA RTX 2000 Ada Generation (16380 MB), 0 MB allocated
 
 Quantization:
   GPU experts:    INT4 (Marlin)
@@ -27,16 +27,16 @@ Strategy:
   Mode:           gpu_decode (hot_cached_static)
 
 Prefill (10000 tokens, 3 runs):
-  Run 1:  857.2 tok/s, TTFT=11.67s
-  Run 2:  856.2 tok/s, TTFT=11.68s
-  Run 3:  857.0 tok/s, TTFT=11.67s
-  Average: 856.8 tok/s, TTFT=11.67s
+  Run 1:  848.2 tok/s, TTFT=11.79s
+  Run 2:  848.7 tok/s, TTFT=11.78s
+  Run 3:  849.4 tok/s, TTFT=11.77s
+  Average: 848.8 tok/s, TTFT=11.78s
 
 Decode (64 tokens, 3 runs):
-  Run 1:  7.81 tok/s (128.1ms/tok)
-  Run 2:  7.89 tok/s (126.7ms/tok)
-  Run 3:  7.94 tok/s (125.9ms/tok)
-  Average: 7.88 tok/s (126.9ms/tok)
+  Run 1:  7.73 tok/s (129.4ms/tok)
+  Run 2:  7.91 tok/s (126.4ms/tok)
+  Run 3:  7.85 tok/s (127.3ms/tok)
+  Average: 7.83 tok/s (127.7ms/tok)
 
 Verification:
   Prefill prompt: user
@@ -45,10 +45,10 @@ Explain distributed consensus algorithms including Paxos, Raft, and PBFT. Descri
   Generated output (64 tokens):
     **The Labyrinth of Self-Reference**  
     
-    A function stands, both bold and small,  
-    It calls itself—yet answers all.  
-    No loop of `for`, no `while` to spin—  
-    Just *itself*, again, again within.  
+    A function stands, both small and keen,  
+    To solve a task it’s tasked to mean—  
+    But lo! It finds the task is *same*,  
+    Yet scaled down—nearer to the flame.  
     
-    *"Base case,"* whispers the first decree:
+    > *"Call me again,"* it softly cries
 ================================================================
