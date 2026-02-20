@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import time
+import traceback
 from pathlib import Path
 from typing import Optional
 
@@ -3026,10 +3027,22 @@ class GpuPrefillManager:
             if ("out of memory" in err_str
                     or isinstance(e, (torch.cuda.OutOfMemoryError,
                                       torch.OutOfMemoryError))):
+                # Log per-GPU VRAM to identify which device OOMed
+                for i in range(torch.cuda.device_count()):
+                    free, total = torch.cuda.mem_get_info(i)
+                    alloc = torch.cuda.memory_allocated(i)
+                    reserved = torch.cuda.memory_reserved(i)
+                    logger.warning(
+                        "GPU validation OOM diag: cuda:%d — free=%d MB, alloc=%d MB, "
+                        "reserved=%d MB, total=%d MB",
+                        i, free // (1024*1024), alloc // (1024*1024),
+                        reserved // (1024*1024), total // (1024*1024),
+                    )
                 logger.warning(
-                    "GPU validation FAIL: %d experts, %d MB free after load — OOM",
-                    n_experts, free_after_load // (1024*1024),
+                    "GPU validation FAIL: %d experts, %d MB free after load — OOM: %s",
+                    n_experts, free_after_load // (1024*1024), e,
                 )
+                logger.warning("OOM traceback:\n%s", traceback.format_exc())
                 gc.collect()
                 torch.cuda.empty_cache()
                 return False, {"n_experts": n_experts}

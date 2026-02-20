@@ -188,6 +188,10 @@ class KrasisBenchmark:
         # KV dtype
         kv_dtype_str = "FP8 E4M3" if self.model.kv_dtype == torch.float8_e4m3fn else "BF16"
 
+        # Actual GPU count: may differ from PP partition length (e.g. HCS uses
+        # extra GPUs for pinned experts without splitting layers across them).
+        num_gpus_used = getattr(self.model, '_num_gpus', len(self.model.pp_partition))
+
         return {
             "model_name": os.path.basename(cfg.model_path),
             "model_type": model_type,
@@ -198,6 +202,7 @@ class KrasisBenchmark:
             "is_hybrid": cfg.is_hybrid,
             "num_full_attention_layers": cfg.num_full_attention_layers if cfg.is_hybrid else cfg.num_hidden_layers,
             "pp_partition": self.model.pp_partition,
+            "num_gpus": num_gpus_used,
             "gpu_expert_bits": qcfg.gpu_expert_bits,
             "cpu_expert_bits": qcfg.cpu_expert_bits,
             "attention_quant": qcfg.attention,
@@ -351,7 +356,7 @@ class KrasisBenchmark:
 
         lines.append(f"Model:            {model_info['model_name']}")
         lines.append(f"Architecture:     {', '.join(arch_parts)}")
-        lines.append(f"PP Partition:     {model_info['pp_partition']} ({len(model_info['pp_partition'])} GPUs)")
+        lines.append(f"PP Partition:     {model_info['pp_partition']} ({model_info['num_gpus']} GPUs)")
 
         # Hardware
         lines.append("")
@@ -441,7 +446,7 @@ class KrasisBenchmark:
             gguf_name = os.path.splitext(os.path.basename(gguf_path))[0]
         else:
             gguf_name = "native"
-        num_gpus = len(model_info["pp_partition"])
+        num_gpus = model_info["num_gpus"]
         gpu_quant = f"int{model_info['gpu_expert_bits']}gpu"
         cpu_quant = f"int{model_info['cpu_expert_bits']}cpu"
         filename = f"{model_name}_{gguf_name}_{num_gpus}gpu_{gpu_quant}_{cpu_quant}.log"

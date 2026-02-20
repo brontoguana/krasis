@@ -87,7 +87,11 @@ async def reload_hcs(request: Request):
     import os as _os
     import torch
 
-    manager = list(_model.gpu_prefill_managers.values())[0]
+    # Use the HCS device's manager (may not be GPU0)
+    hcs_dev = _model._hcs_device or torch.device("cuda:0")
+    manager = _model.gpu_prefill_managers.get(str(hcs_dev))
+    if manager is None:
+        manager = list(_model.gpu_prefill_managers.values())[0]
     heatmap_path = _os.path.join(
         _model.cfg.model_path, ".krasis_cache", "auto_heatmap.json"
     )
@@ -367,9 +371,28 @@ def _remove_registry() -> None:
         _registry_file = None
 
 
+def _cleanup_cuda():
+    """Release all CUDA contexts to prevent zombie GPU memory."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            for i in range(torch.cuda.device_count()):
+                torch.cuda.synchronize(i)
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
 def main():
     import os # Ensure os is in local scope
     os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True" # Mitigate fragmentation
+
+    # Register cleanup early to prevent CUDA zombie processes
+    atexit.register(_cleanup_cuda)
+    def _force_exit_handler(sig, frame):
+        _cleanup_cuda()
+        os._exit(1)
+    signal.signal(signal.SIGTERM, _force_exit_handler)
     parser = argparse.ArgumentParser(description="Krasis standalone LLM server")
     parser.add_argument("--model-path", required=True, help="Path to HF model")
     parser.add_argument("--num-gpus", type=int, default=None,
@@ -503,52 +526,90 @@ def main():
     )[:10000]
     logger.info("Test prompt: %d tokens", len(_test_tokens))
 
+    # ── Find the richest GPU for HCS ──
+    # With split-attention, GPU0 has embedding+lm_head overhead, GPU1+ have more
+    # free VRAM. HCS experts go on the GPU with the most free VRAM.
+    primary_dev = devices[0]
+    if len(devices) > 1:
+        hcs_dev = max(devices, key=lambda d: torch.cuda.mem_get_info(d)[0])
+    else:
+        hcs_dev = primary_dev
+    logger.info(
+        "HCS target device: %s (free: %s)",
+        hcs_dev,
+        ", ".join(f"{d}: {torch.cuda.mem_get_info(d)[0] // (1024*1024)} MB" for d in devices),
+    )
+
+    # Get the manager for the HCS device
+    hcs_manager = _model.gpu_prefill_managers.get(str(hcs_dev))
+    if hcs_manager is None:
+        logger.error("No GPU prefill manager for HCS device %s", hcs_dev)
+        sys.exit(1)
+
     # Step 1: Calibration — measure per-expert total cost and inference cost.
-    # Load a moderate number of experts (1/3 of VRAM), run a real forward pass,
-    # and measure: (a) VRAM consumed per expert including CUDA graph + workspace
-    # overhead, (b) transient inference cost (DMA buffer + activations).
-    manager = list(_model.gpu_prefill_managers.values())[0]
+    # Load a moderate number of experts, run a real forward pass, and measure:
+    # (a) VRAM consumed per expert including CUDA graph + workspace overhead,
+    # (b) transient inference cost (DMA buffer + activations).
+    # Start with 1/3 of FREE VRAM (not total — attention + KV may already be on
+    # this device). If validation OOMs, halve the budget and retry.
     inference_costs = {}
 
-    primary_dev = devices[0]
-    total_vram = torch.cuda.get_device_properties(primary_dev).total_memory
-    initial_budget_mb = max(500, int(total_vram / (1024 * 1024) / 3))
-    if len(devices) > 1:
-        initial_budget_mb = max(500, initial_budget_mb - 1024)
-
-    manager.clear_hcs()
+    hcs_manager.clear_hcs()
     torch.cuda.empty_cache()
-    free_before_hcs = torch.cuda.mem_get_info(primary_dev)[0]
+    free_before_hcs = torch.cuda.mem_get_info(hcs_dev)[0]
+    initial_budget_mb = max(500, int(free_before_hcs / (1024 * 1024) / 3))
 
-    manager._init_hot_cached_static(
-        heatmap_path=heatmap_path,
-        devices=[primary_dev],
-        device_budgets={primary_dev: initial_budget_mb},
-    )
-    n_cal = sum(manager._hcs_devices[0].num_pinned.values())
-    free_after_hcs = torch.cuda.mem_get_info(primary_dev)[0]
+    # Set HCS device on model so decode forward uses cross-device MoE
+    _model._hcs_device = hcs_dev
 
-    logger.info(
-        "HCS calibration: %d experts, %d MB consumed (free: %d → %d MB)",
-        n_cal, (free_before_hcs - free_after_hcs) // (1024 * 1024),
-        free_before_hcs // (1024 * 1024), free_after_hcs // (1024 * 1024),
-    )
+    MAX_CAL_RETRIES = 4
+    for cal_attempt in range(MAX_CAL_RETRIES):
+        hcs_manager.clear_hcs()
+        torch.cuda.empty_cache()
+        free_before_hcs = torch.cuda.mem_get_info(hcs_dev)[0]
 
-    ok, info = manager.validate_gpu_allocation(_model, _test_tokens)
-    if not ok:
-        logger.error("FATAL: calibration failed on %s.", primary_dev)
+        hcs_manager._init_hot_cached_static(
+            heatmap_path=heatmap_path,
+            devices=[hcs_dev],
+            device_budgets={hcs_dev: initial_budget_mb},
+        )
+        n_cal = sum(hcs_manager._hcs_devices[0].num_pinned.values())
+        free_after_hcs = torch.cuda.mem_get_info(hcs_dev)[0]
+
+        logger.info(
+            "HCS calibration attempt %d on %s: %d experts, budget=%d MB, "
+            "%d MB consumed (free: %d → %d MB)",
+            cal_attempt + 1, hcs_dev, n_cal, initial_budget_mb,
+            (free_before_hcs - free_after_hcs) // (1024 * 1024),
+            free_before_hcs // (1024 * 1024), free_after_hcs // (1024 * 1024),
+        )
+
+        if n_cal == 0:
+            logger.error("FATAL: calibration loaded 0 experts on %s.", hcs_dev)
+            sys.exit(1)
+
+        ok, info = hcs_manager.validate_gpu_allocation(_model, _test_tokens)
+        if ok:
+            break
+        # Validation OOMed — halve budget and retry
+        initial_budget_mb = max(500, initial_budget_mb // 2)
+        logger.warning(
+            "Calibration validation OOM, retrying with budget=%d MB", initial_budget_mb,
+        )
+    else:
+        logger.error("FATAL: calibration failed after %d attempts on %s.", MAX_CAL_RETRIES, hcs_dev)
         sys.exit(1)
-    inference_costs[primary_dev] = info["inference_cost_bytes"]
+    inference_costs[hcs_dev] = info["inference_cost_bytes"]
     logger.info(
         "Inference cost on %s: %d MB (transient)",
-        primary_dev, inference_costs[primary_dev] // (1024 * 1024),
+        hcs_dev, inference_costs[hcs_dev] // (1024 * 1024),
     )
 
     # Compute per-expert TOTAL cost: expert data + proportional share of
     # CUDA graphs, workspace, g_idx/sort_idx buffers, and other HCS overhead.
     hcs_total_consumed = free_before_hcs - free_after_hcs
     per_expert_total_bytes = hcs_total_consumed // max(1, n_cal)
-    per_expert_data_bytes = manager._per_expert_vram_bytes()
+    per_expert_data_bytes = hcs_manager._per_expert_vram_bytes()
     hcs_overhead_mb = (hcs_total_consumed - n_cal * per_expert_data_bytes) // (1024 * 1024)
     logger.info(
         "Per-expert cost: %d bytes total (%d data + %d overhead), "
@@ -557,74 +618,50 @@ def main():
         per_expert_total_bytes - per_expert_data_bytes, hcs_overhead_mb,
     )
 
-    manager.clear_hcs()
+    hcs_manager.clear_hcs()
     torch.cuda.empty_cache()
 
-    # Secondary GPUs: inference cost is just base model VRAM (no compute overhead)
-    for dev in devices[1:]:
-        alloc = torch.cuda.memory_allocated(dev)
-        inference_costs[dev] = alloc
-        logger.info(
-            "Inference cost on %s: %d MB (base model only, no compute)",
-            dev, alloc // (1024 * 1024),
-        )
-
-    # Step 2: Calculate budget for EVERY GPU.
-    # Primary GPU budget accounts for:
+    # Step 2: Calculate HCS budget for the target GPU.
+    # Budget accounts for:
     #   - Transient inference cost (peak - baseline from validation forward pass)
-    #   - Fragmentation margin (PyTorch allocator fragmentation is also handled
-    #     by empty_cache() before prefill DMA in model.py)
+    #   - Fragmentation margin (PyTorch allocator fragmentation)
     # The per_expert_total_bytes includes proportional HCS overhead
     # (workspace, g_idx/sort_idx) from the calibration measurement.
     FRAG_MARGIN_MB = 512  # Safety margin for prompt-length variation
-    device_budgets = {}
-    for i, dev in enumerate(devices):
-        free_mb = torch.cuda.mem_get_info(dev)[0] // (1024 * 1024)
-        if i == 0:
-            inference_cost_mb = inference_costs[dev] // (1024 * 1024)
-            reserved_mb = inference_cost_mb + FRAG_MARGIN_MB
-            available_for_experts = max(0, free_mb - reserved_mb)
-            # Convert from available VRAM to expert DATA budget.
-            # available_for_experts covers both expert data AND HCS overhead,
-            # so we use per_expert_total to find max experts, then budget in data MB.
-            max_experts = available_for_experts * (1024 * 1024) // max(1, per_expert_total_bytes)
-            budget = max_experts * per_expert_data_bytes // (1024 * 1024)
-            logger.info(
-                "GPU %s: %d MB free, reserved=%d MB "
-                "(inference=%d + margin=%d), "
-                "budget=%d MB (%d max experts)",
-                dev, free_mb, reserved_mb,
-                inference_cost_mb, FRAG_MARGIN_MB,
-                budget, max_experts,
-            )
-        else:
-            budget = max(0, free_mb - FRAG_MARGIN_MB)
-            logger.info(
-                "GPU %s: %d MB free, budget=%d MB (%d max experts)",
-                dev, free_mb, budget,
-                budget * (1024 * 1024) // max(1, per_expert_data_bytes),
-            )
+    free_mb = torch.cuda.mem_get_info(hcs_dev)[0] // (1024 * 1024)
+    inference_cost_mb = inference_costs[hcs_dev] // (1024 * 1024)
+    reserved_mb = inference_cost_mb + FRAG_MARGIN_MB
+    available_for_experts = max(0, free_mb - reserved_mb)
+    # Convert from available VRAM to expert DATA budget.
+    max_experts = available_for_experts * (1024 * 1024) // max(1, per_expert_total_bytes)
+    hcs_budget = max_experts * per_expert_data_bytes // (1024 * 1024)
+    logger.info(
+        "HCS GPU %s: %d MB free, reserved=%d MB "
+        "(inference=%d + margin=%d), "
+        "budget=%d MB (%d max experts)",
+        hcs_dev, free_mb, reserved_mb,
+        inference_cost_mb, FRAG_MARGIN_MB,
+        hcs_budget, max_experts,
+    )
 
-        device_budgets[dev] = budget
-
-    # Step 3: Load HCS on primary GPU only
-    manager.clear_hcs()
+    # Step 3: Load HCS on the richest GPU
+    hcs_manager.clear_hcs()
     torch.cuda.empty_cache()
-    manager._init_hot_cached_static(
+    hcs_manager._init_hot_cached_static(
         heatmap_path=heatmap_path,
-        devices=[primary_dev],
-        device_budgets={primary_dev: device_budgets[primary_dev]},
+        devices=[hcs_dev],
+        device_budgets={hcs_dev: hcs_budget},
         allocation_mode="greedy",
     )
 
-    # Step 4: Validate with real inference on primary
-    ok, info = manager.validate_gpu_allocation(_model, _test_tokens)
+    # Step 4: Validate with real inference
+    ok, info = hcs_manager.validate_gpu_allocation(_model, _test_tokens)
     if not ok:
-        total_pinned = sum(sum(d.num_pinned.values()) for d in manager._hcs_devices)
+        total_pinned = sum(sum(d.num_pinned.values()) for d in hcs_manager._hcs_devices)
         logger.error(
             "FATAL: HCS validation OOM with %d experts (budget %d MB). "
             "Reduce expert count or use more GPUs.",
-            total_pinned, device_budgets[primary_dev],
+            total_pinned, hcs_budget,
         )
         sys.exit(1)
 
@@ -632,11 +669,11 @@ def main():
     free_after = info["free_after_load_mb"]
     cost_mb = info["inference_cost_bytes"] // (1024 * 1024)
     margin = free_after - cost_mb
-    total_pinned = sum(sum(d.num_pinned.values()) for d in manager._hcs_devices)
-    device_counts = {str(d.device): sum(d.num_pinned.values()) for d in manager._hcs_devices}
+    total_pinned = sum(sum(d.num_pinned.values()) for d in hcs_manager._hcs_devices)
+    device_counts = {str(d.device): sum(d.num_pinned.values()) for d in hcs_manager._hcs_devices}
     logger.info(
-        "HCS ready: %d experts across %d GPUs, margin=%d MB (free=%d, cost=%d). Counts: %s",
-        total_pinned, len(devices), margin, free_after, cost_mb, device_counts,
+        "HCS ready on %s: %d experts, margin=%d MB (free=%d, cost=%d). Counts: %s",
+        hcs_dev, total_pinned, margin, free_after, cost_mb, device_counts,
     )
 
     # Run benchmark if requested (after model load + strategy, before serving)
