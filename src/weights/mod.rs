@@ -2175,6 +2175,11 @@ impl WeightStore {
                 .map_err(|e| format!("Failed to create cache directory {}: {e}", parent.display()))?;
         }
 
+        log::info!(
+            "Acquiring Marlin INT{} cache build lock: {}",
+            gpu_bits, lock_path.display(),
+        );
+
         match OpenOptions::new()
             .create_new(true)
             .write(true)
@@ -2182,8 +2187,8 @@ impl WeightStore {
         {
             Ok(mut lock_file) => {
                 log::info!(
-                    "Acquired Marlin cache build lock, building {} MoE layers...",
-                    total_moe_layers,
+                    "Acquired Marlin INT{} cache build lock (PID {}), building {} MoE layers...",
+                    gpu_bits, std::process::id(), total_moe_layers,
                 );
                 let _ = write!(lock_file, "{}", std::process::id());
                 drop(lock_file);
@@ -2193,6 +2198,7 @@ impl WeightStore {
                     0, cache_path, config_hash, gpu_bits,
                 );
 
+                log::info!("Releasing Marlin cache build lock: {}", lock_path.display());
                 let _ = std::fs::remove_file(&lock_path);
 
                 match result {
@@ -2212,7 +2218,34 @@ impl WeightStore {
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                log::info!("Another process is building Marlin cache, waiting...");
+                // Check if the lock holder is still alive (detect stale locks from killed processes)
+                if let Ok(pid_str) = std::fs::read_to_string(&lock_path) {
+                    if let Ok(pid) = pid_str.trim().parse::<u32>() {
+                        let proc_path = format!("/proc/{pid}");
+                        if !std::path::Path::new(&proc_path).exists() {
+                            log::warn!(
+                                "Stale Marlin cache lock detected (PID {pid} is dead), cleaning up..."
+                            );
+                            let _ = std::fs::remove_file(&lock_path);
+                            let tmp_path = cache_path.with_extension("bin.tmp");
+                            let _ = std::fs::remove_file(&tmp_path);
+                            // Retry — we'll acquire the lock on the next call
+                            return Self::build_marlin_cache_locked(
+                                model_dir, config, group_size, total_moe_layers, cache_path, config_hash, gpu_bits,
+                            );
+                        }
+                    }
+                }
+
+                let holder_pid = std::fs::read_to_string(&lock_path)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                log::info!(
+                    "Another process (PID {}) is building Marlin INT{} cache, waiting... Lock: {}",
+                    if holder_pid.is_empty() { "unknown".to_string() } else { holder_pid },
+                    gpu_bits, lock_path.display(),
+                );
                 let wait_start = std::time::Instant::now();
                 loop {
                     std::thread::sleep(std::time::Duration::from_secs(5));
@@ -2226,6 +2259,26 @@ impl WeightStore {
                                 waited.as_secs_f64(), try_gs,
                             );
                             return Ok(*try_gs);
+                        }
+                    }
+
+                    // Check for stale lock (process died while we were waiting)
+                    if lock_path.exists() {
+                        if let Ok(pid_str) = std::fs::read_to_string(&lock_path) {
+                            if let Ok(pid) = pid_str.trim().parse::<u32>() {
+                                let proc_path = format!("/proc/{pid}");
+                                if !std::path::Path::new(&proc_path).exists() {
+                                    log::warn!(
+                                        "Lock holder PID {pid} died during build, cleaning up and retrying..."
+                                    );
+                                    let _ = std::fs::remove_file(&lock_path);
+                                    let tmp_path = cache_path.with_extension("bin.tmp");
+                                    let _ = std::fs::remove_file(&tmp_path);
+                                    return Self::build_marlin_cache_locked(
+                                        model_dir, config, group_size, total_moe_layers, cache_path, config_hash, gpu_bits,
+                                    );
+                                }
+                            }
                         }
                     }
 

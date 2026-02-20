@@ -1859,6 +1859,11 @@ class KrasisModel:
         max_retries = 0 if not getattr(self, '_oom_retry_enabled', True) else 3
         freed_graphs = False
 
+        # Defragment the PyTorch allocator before prefill.  Decode leaves many
+        # small cached-but-free blocks that prevent contiguous DMA allocations.
+        # This reclaims those blocks so layer group DMA can allocate freely.
+        torch.cuda.empty_cache()
+
         for attempt in range(max_retries + 1):
             try:
                 result = self.forward_prefill_layer_grouped(

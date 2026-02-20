@@ -12,6 +12,7 @@ Usage:
 import argparse
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -29,6 +30,12 @@ GREEN = "\033[0;32m"
 YELLOW = "\033[1;33m"
 CYAN = "\033[0;36m"
 NC = "\033[0m"
+
+
+def _print(*args, **kwargs):
+    """Print with flush=True by default so output appears immediately when piped."""
+    kwargs.setdefault("flush", True)
+    print(*args, **kwargs)
 
 
 @dataclass
@@ -151,8 +158,8 @@ class SuiteRunner:
                 model_path = os.path.join(self.models_dir, model_name)
 
             if not os.path.isdir(model_path):
-                print(f"{YELLOW}Warning: model path not found: {model_path}, skipping{NC}",
-                      file=sys.stderr)
+                _print(f"{YELLOW}Warning: model path not found: {model_path}, skipping{NC}",
+                       file=sys.stderr)
                 continue
 
             gguf_path = model.get("gguf_path", "")
@@ -160,8 +167,8 @@ class SuiteRunner:
             if not gguf_path and gguf_name:
                 gguf_path = self._find_gguf(gguf_name)
                 if not gguf_path:
-                    print(f"{YELLOW}Warning: GGUF '{gguf_name}' not found in {self.models_dir}, skipping{NC}",
-                          file=sys.stderr)
+                    _print(f"{YELLOW}Warning: GGUF '{gguf_name}' not found in {self.models_dir}, skipping{NC}",
+                           file=sys.stderr)
                     continue
 
             for cfg in configs:
@@ -212,28 +219,42 @@ class SuiteRunner:
         env.pop("KRASIS_DECODE_TIMING", None)
         return env
 
+    @staticmethod
+    def _strip_ansi(text: str) -> str:
+        """Remove ANSI escape codes from text."""
+        return re.sub(r"\x1b\[[0-9;]*m", "", text)
+
     def _parse_results(self, output: str) -> Dict[str, float]:
         """Parse benchmark output for prefill and decode averages.
 
-        Expected formats:
-          Prefill section:  Average: 1434.1 tok/s, TTFT=14.40s
-          Decode section:   Average: 6.40 tok/s (156.1ms/tok)
+        Expected formats (from benchmark.py):
+          ▸ Running prefill benchmark (20,644 tokens, 3 runs)
+            Run 1: 1349.2 tok/s, TTFT=15.30s
+            Average: 1345.1 tok/s, TTFT=15.35s
+
+          ▸ Running decode benchmark (64 tokens, 3 runs)
+            Run 1: 3.19 tok/s (313.5ms/tok)
+            Average: 3.17 tok/s (315.1ms/tok)
         """
+        # Strip ANSI codes so regex matching works cleanly
+        clean = self._strip_ansi(output)
         results: Dict[str, float] = {}
 
-        # Find prefill average: after "Prefill (" section header
+        # Find prefill average: "Average: X tok/s, TTFT=Ys" after prefill section
         prefill_match = re.search(
-            r"Prefill\s+\([^)]+\):\s*\n(?:.*\n)*?\s+Average:\s+([\d.]+)\s+tok/s,\s+TTFT=([\d.]+)s",
-            output,
+            r"prefill benchmark.*?\n.*?Average:\s+([\d.]+)\s+tok/s,\s+TTFT=([\d.]+)s",
+            clean,
+            re.IGNORECASE | re.DOTALL,
         )
         if prefill_match:
             results["prefill_tok_s"] = float(prefill_match.group(1))
             results["prefill_ttft"] = float(prefill_match.group(2))
 
-        # Find decode average: after "Decode (" section header
+        # Find decode average: "Average: X tok/s (Yms/tok)" after decode section
         decode_match = re.search(
-            r"Decode\s+\([^)]+\):\s*\n(?:.*\n)*?\s+Average:\s+([\d.]+)\s+tok/s\s+\(([\d.]+)ms/tok\)",
-            output,
+            r"decode benchmark.*?\n.*?Average:\s+([\d.]+)\s+tok/s\s+\(([\d.]+)ms/tok\)",
+            clean,
+            re.IGNORECASE | re.DOTALL,
         )
         if decode_match:
             results["decode_tok_s"] = float(decode_match.group(1))
@@ -241,8 +262,12 @@ class SuiteRunner:
 
         return results
 
-    def run_one(self, combo: SuiteCombo) -> SuiteResult:
-        """Run a single benchmark combo as a subprocess."""
+    def run_one(self, combo: SuiteCombo, tag: str = "") -> SuiteResult:
+        """Run a single benchmark combo as a subprocess.
+
+        Uses Popen so we can propagate Ctrl-C (SIGINT/SIGTERM) to the child
+        process, ensuring the server is killed cleanly when the user interrupts.
+        """
         result = SuiteResult(combo=combo)
 
         os.makedirs(self.output_dir, exist_ok=True)
@@ -252,24 +277,27 @@ class SuiteRunner:
         cmd = self._build_cmd(combo)
         env = self._build_env(combo)
 
-        print(f"  {DIM}$ CUDA_VISIBLE_DEVICES={env['CUDA_VISIBLE_DEVICES']} "
-              f"{' '.join(cmd[1:])}{NC}")
+        _print(f"  {DIM}$ CUDA_VISIBLE_DEVICES={env['CUDA_VISIBLE_DEVICES']} "
+               f"{' '.join(cmd[1:])}{NC}")
+        _print(f"  {CYAN}▸ Launching subprocess...{NC}")
 
         t0 = time.time()
+        proc = None
         try:
-            proc = subprocess.run(
+            proc = subprocess.Popen(
                 cmd,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=self.TIMEOUT_S,
                 env=env,
             )
+            stdout, stderr = proc.communicate(timeout=self.TIMEOUT_S)
             result.elapsed_s = time.time() - t0
 
             # Combine stdout + stderr for full log
-            full_output = proc.stdout
-            if proc.stderr:
-                full_output += "\n\n--- STDERR ---\n" + proc.stderr
+            full_output = stdout or ""
+            if stderr:
+                full_output += "\n\n--- STDERR ---\n" + stderr
 
             # Write log
             with open(log_path, "w") as f:
@@ -278,13 +306,14 @@ class SuiteRunner:
             if proc.returncode != 0:
                 result.error = f"Exit code {proc.returncode}"
                 # Try to extract a useful error from the last few lines
-                lines = proc.stderr.strip().split("\n") if proc.stderr else []
+                lines = stderr.strip().split("\n") if stderr else []
                 if lines:
                     result.error += f": {lines[-1][:200]}"
                 return result
 
             # Parse results from stdout
-            parsed = self._parse_results(proc.stdout)
+            _print(f"  {CYAN}▸ Parsing results...{NC}")
+            parsed = self._parse_results(stdout)
             if parsed:
                 result.prefill_tok_s = parsed.get("prefill_tok_s", 0.0)
                 result.prefill_ttft = parsed.get("prefill_ttft", 0.0)
@@ -297,11 +326,27 @@ class SuiteRunner:
         except subprocess.TimeoutExpired:
             result.elapsed_s = time.time() - t0
             result.error = f"Timeout after {self.TIMEOUT_S}s"
+            if proc:
+                proc.kill()
+                proc.wait()
             with open(log_path, "w") as f:
                 f.write(f"TIMEOUT after {self.TIMEOUT_S}s\n")
+        except KeyboardInterrupt:
+            _print(f"\n  {YELLOW}▸ Ctrl-C received, killing server...{NC}")
+            if proc:
+                proc.send_signal(signal.SIGTERM)
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+            raise  # Re-raise to exit the suite
         except Exception as e:
             result.elapsed_s = time.time() - t0
             result.error = str(e)
+            if proc and proc.poll() is None:
+                proc.kill()
+                proc.wait()
             with open(log_path, "w") as f:
                 f.write(f"ERROR: {e}\n")
 
@@ -325,44 +370,109 @@ class SuiteRunner:
                     pass
         return count
 
+    def reparse_logs(self) -> List[SuiteResult]:
+        """Re-parse existing log files and regenerate results without re-running.
+
+        Matches log files to combos from the current config and re-parses
+        benchmark output from the captured logs.
+        """
+        combos = self.load_config()
+        if not combos:
+            _print(f"{RED}No valid model × config combinations found.{NC}")
+            return []
+
+        _print(f"\n{BOLD}{'═' * 56}")
+        _print(f"  Re-parsing existing logs")
+        _print(f"{'═' * 56}{NC}")
+        _print(f"  Config:  {self.config_path}")
+        _print(f"  Logs:    {self.output_dir}")
+        _print()
+
+        results = []
+        for combo in combos:
+            log_path = os.path.join(self.output_dir, combo.log_filename)
+            result = SuiteResult(combo=combo, log_path=log_path)
+
+            if not os.path.isfile(log_path):
+                result.error = "Log file not found"
+                _print(f"  {YELLOW}SKIP{NC}  {combo.model_name} / {combo.label} — no log file")
+                results.append(result)
+                continue
+
+            with open(log_path) as f:
+                content = f.read()
+
+            parsed = self._parse_results(content)
+            if parsed:
+                result.prefill_tok_s = parsed.get("prefill_tok_s", 0.0)
+                result.prefill_ttft = parsed.get("prefill_ttft", 0.0)
+                result.decode_tok_s = parsed.get("decode_tok_s", 0.0)
+                result.decode_ms_per_tok = parsed.get("decode_ms_per_tok", 0.0)
+                result.success = True
+                _print(f"  {GREEN}OK{NC}    {combo.model_name} / {combo.label}"
+                       f" — {result.prefill_tok_s:.1f} pp, {result.decode_tok_s:.2f} dec")
+            else:
+                result.error = "Could not parse benchmark results from log"
+                _print(f"  {RED}FAIL{NC}  {combo.model_name} / {combo.label} — parse failed")
+
+            results.append(result)
+
+        return results
+
     def run_all(self) -> List[SuiteResult]:
         """Run all combos sequentially, skipping on failure."""
         combos = self.load_config()
         if not combos:
-            print(f"{RED}No valid model × config combinations found.{NC}")
+            _print(f"{RED}No valid model × config combinations found.{NC}")
             return []
 
         # Clean old logs before starting
         cleaned = self._clean_old_logs()
         if cleaned:
-            print(f"{DIM}Cleaned {cleaned} old log/summary files from {self.output_dir}{NC}")
+            _print(f"{DIM}Cleaned {cleaned} old log/summary files from {self.output_dir}{NC}")
 
         total = len(combos)
-        print(f"\n{BOLD}Krasis Benchmark Suite{NC}")
-        print(f"  Config:  {self.config_path}")
-        print(f"  Combos:  {total}")
-        print(f"  Logs:    {self.output_dir}")
-        print()
+        _print(f"\n{BOLD}{'═' * 56}")
+        _print(f"  Krasis Benchmark Suite")
+        _print(f"{'═' * 56}{NC}")
+        _print(f"  Config:  {self.config_path}")
+        _print(f"  Combos:  {total}")
+        _print(f"  Logs:    {self.output_dir}")
+        _print(f"  Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        _print()
 
         results = []
-        for i, combo in enumerate(combos):
-            tag = f"[{i + 1}/{total}]"
-            print(f"{BOLD}{tag} {combo.model_name} / {combo.label}{NC}")
+        suite_t0 = time.time()
+        try:
+            for i, combo in enumerate(combos):
+                tag = f"[{i + 1}/{total}]"
+                _print(f"{BOLD}{'─' * 56}")
+                _print(f"  {tag} {combo.model_name} / {combo.label}")
+                _print(f"{'─' * 56}{NC}")
+                _print(f"  Model:   {combo.model_path}")
+                _print(f"  GPUs:    {combo.num_gpus}  |  GPU bits: {combo.gpu_expert_bits}  |  CPU bits: {combo.cpu_expert_bits}")
+                _print(f"  Attn:    {combo.attention_quant}  |  KV: {combo.kv_dtype}")
+                if combo.gguf_path:
+                    _print(f"  GGUF:    {os.path.basename(combo.gguf_path)}")
 
-            result = self.run_one(combo)
-            results.append(result)
+                result = self.run_one(combo, tag=tag)
+                results.append(result)
 
-            if result.success:
-                print(f"  {GREEN}Prefill: {result.prefill_tok_s:.1f} tok/s, "
-                      f"TTFT={result.prefill_ttft:.2f}s{NC}")
-                print(f"  {GREEN}Decode:  {result.decode_tok_s:.2f} tok/s "
-                      f"({result.decode_ms_per_tok:.1f}ms/tok){NC}")
-            else:
-                print(f"  {RED}FAILED: {result.error}{NC}")
+                if result.success:
+                    _print(f"  {GREEN}Prefill: {result.prefill_tok_s:.1f} tok/s, "
+                           f"TTFT={result.prefill_ttft:.2f}s{NC}")
+                    _print(f"  {GREEN}Decode:  {result.decode_tok_s:.2f} tok/s "
+                           f"({result.decode_ms_per_tok:.1f}ms/tok){NC}")
+                else:
+                    _print(f"  {RED}FAILED: {result.error}{NC}")
 
-            print(f"  {DIM}Elapsed: {result.elapsed_s:.0f}s | Log: {result.log_path}{NC}")
-            print()
+                _print(f"  {DIM}Elapsed: {result.elapsed_s:.0f}s | Log: {result.log_path}{NC}")
+                _print()
+        except KeyboardInterrupt:
+            _print(f"\n{YELLOW}Suite interrupted by user (Ctrl-C). {len(results)}/{total} combos completed.{NC}")
 
+        suite_elapsed = time.time() - suite_t0
+        _print(f"{DIM}Total suite time: {suite_elapsed:.0f}s{NC}")
         return results
 
     def write_summary(self, results: List[SuiteResult]) -> str:
@@ -430,6 +540,10 @@ def main():
         "--output-dir", default="",
         help="Directory for logs and summary (default: benchmarks/suite_logs/)",
     )
+    parser.add_argument(
+        "--reparse", action="store_true",
+        help="Re-parse existing log files and regenerate summary (no benchmarks run)",
+    )
     args = parser.parse_args()
 
     # Resolve default config path
@@ -441,21 +555,25 @@ def main():
         config_path = os.path.join(repo_root, "benchmarks", "benchmark_suite.toml")
 
     if not os.path.isfile(config_path):
-        print(f"{RED}Config not found: {config_path}{NC}", file=sys.stderr)
+        _print(f"{RED}Config not found: {config_path}{NC}", file=sys.stderr)
         sys.exit(1)
 
     runner = SuiteRunner(config_path, output_dir=args.output_dir)
-    results = runner.run_all()
+
+    if args.reparse:
+        results = runner.reparse_logs()
+    else:
+        results = runner.run_all()
 
     if results:
         summary_path = runner.write_summary(results)
         passed = sum(1 for r in results if r.success)
         failed = len(results) - passed
-        print(f"{BOLD}{'═' * 48}")
-        print(f"  SUITE COMPLETE: {passed} passed, {failed} failed")
-        print(f"{'═' * 48}{NC}")
-        print(f"  Summary: {summary_path}")
-        print()
+        _print(f"{BOLD}{'═' * 56}")
+        _print(f"  SUITE COMPLETE: {passed} passed, {failed} failed")
+        _print(f"{'═' * 56}{NC}")
+        _print(f"  Summary: {summary_path}")
+        _print()
 
 
 if __name__ == "__main__":

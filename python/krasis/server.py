@@ -503,50 +503,62 @@ def main():
     )[:10000]
     logger.info("Test prompt: %d tokens", len(_test_tokens))
 
-    # Step 1: Measure inference cost on PRIMARY device only.
-    # Secondary GPUs only need base model VRAM — inference runs on primary.
+    # Step 1: Calibration — measure per-expert total cost and inference cost.
+    # Load a moderate number of experts (1/3 of VRAM), run a real forward pass,
+    # and measure: (a) VRAM consumed per expert including CUDA graph + workspace
+    # overhead, (b) transient inference cost (DMA buffer + activations).
     manager = list(_model.gpu_prefill_managers.values())[0]
     inference_costs = {}
-    free_after_cal = None
-    initial_budget_mb = None
 
     primary_dev = devices[0]
     total_vram = torch.cuda.get_device_properties(primary_dev).total_memory
     initial_budget_mb = max(500, int(total_vram / (1024 * 1024) / 3))
-    # With EP, validation runs forward_prefill_layer_grouped which allocates
-    # DMA buffers (~415 MB) + workspace + activations on primary GPU.
-    # Reduce calibration budget to leave room for these.
     if len(devices) > 1:
         initial_budget_mb = max(500, initial_budget_mb - 1024)
+
     manager.clear_hcs()
+    torch.cuda.empty_cache()
+    free_before_hcs = torch.cuda.mem_get_info(primary_dev)[0]
+
     manager._init_hot_cached_static(
         heatmap_path=heatmap_path,
         devices=[primary_dev],
         device_budgets={primary_dev: initial_budget_mb},
     )
     n_cal = sum(manager._hcs_devices[0].num_pinned.values())
-    free_before_val = torch.cuda.mem_get_info(primary_dev)[0]
+    free_after_hcs = torch.cuda.mem_get_info(primary_dev)[0]
+
     logger.info(
-        "HCS calibration: %d experts at %d MB, %d MB free on %s",
-        n_cal, initial_budget_mb, free_before_val // (1024 * 1024), primary_dev,
+        "HCS calibration: %d experts, %d MB consumed (free: %d → %d MB)",
+        n_cal, (free_before_hcs - free_after_hcs) // (1024 * 1024),
+        free_before_hcs // (1024 * 1024), free_after_hcs // (1024 * 1024),
     )
+
     ok, info = manager.validate_gpu_allocation(_model, _test_tokens)
     if not ok:
         logger.error("FATAL: calibration failed on %s.", primary_dev)
         sys.exit(1)
     inference_costs[primary_dev] = info["inference_cost_bytes"]
-    # Measure free AFTER validation so AO buffer + decode allocations are captured
-    free_after_cal = torch.cuda.mem_get_info(primary_dev)[0]
     logger.info(
-        "Post-validation free on %s: %d MB (decode buffers allocated)",
-        primary_dev, free_after_cal // (1024 * 1024),
-    )
-    manager.clear_hcs()
-    torch.cuda.empty_cache()
-    logger.info(
-        "Inference cost on %s: %d MB",
+        "Inference cost on %s: %d MB (transient)",
         primary_dev, inference_costs[primary_dev] // (1024 * 1024),
     )
+
+    # Compute per-expert TOTAL cost: expert data + proportional share of
+    # CUDA graphs, workspace, g_idx/sort_idx buffers, and other HCS overhead.
+    hcs_total_consumed = free_before_hcs - free_after_hcs
+    per_expert_total_bytes = hcs_total_consumed // max(1, n_cal)
+    per_expert_data_bytes = manager._per_expert_vram_bytes()
+    hcs_overhead_mb = (hcs_total_consumed - n_cal * per_expert_data_bytes) // (1024 * 1024)
+    logger.info(
+        "Per-expert cost: %d bytes total (%d data + %d overhead), "
+        "HCS overhead: %d MB (workspace + g_idx/sort_idx)",
+        per_expert_total_bytes, per_expert_data_bytes,
+        per_expert_total_bytes - per_expert_data_bytes, hcs_overhead_mb,
+    )
+
+    manager.clear_hcs()
+    torch.cuda.empty_cache()
 
     # Secondary GPUs: inference cost is just base model VRAM (no compute overhead)
     for dev in devices[1:]:
@@ -557,38 +569,45 @@ def main():
             dev, alloc // (1024 * 1024),
         )
 
-    # Step 2: Calculate budget for EVERY GPU using measured costs
-    # Minimum headroom: 1.2x inference cost OR 1 GB, whichever is larger.
-    # Non-primary GPUs have low measured inference cost (no CUDA runtime, no
-    # Marlin workspace) but still need headroom for DMA transfer buffers
-    # (~500 MB), PyTorch allocator fragmentation, and activation intermediates
-    # during HCS decode.
-    MIN_HEADROOM_MB = 1024
-    # EP adds DMA buffers (~500 MB) + activation copies on primary GPU during prefill
-    EP_OVERHEAD_MB = 1024 if len(devices) > 1 else 0
+    # Step 2: Calculate budget for EVERY GPU.
+    # Primary GPU budget accounts for:
+    #   - Transient inference cost (peak - baseline from validation forward pass)
+    #   - Fragmentation margin (PyTorch allocator fragmentation is also handled
+    #     by empty_cache() before prefill DMA in model.py)
+    # The per_expert_total_bytes includes proportional HCS overhead
+    # (workspace, g_idx/sort_idx) from the calibration measurement.
+    FRAG_MARGIN_MB = 512  # Safety margin for prompt-length variation
     device_budgets = {}
     for i, dev in enumerate(devices):
         free_mb = torch.cuda.mem_get_info(dev)[0] // (1024 * 1024)
         if i == 0:
-            headroom_mb = max(MIN_HEADROOM_MB, int(inference_costs[dev] * 1.2) // (1024 * 1024)) + EP_OVERHEAD_MB
+            inference_cost_mb = inference_costs[dev] // (1024 * 1024)
+            reserved_mb = inference_cost_mb + FRAG_MARGIN_MB
+            available_for_experts = max(0, free_mb - reserved_mb)
+            # Convert from available VRAM to expert DATA budget.
+            # available_for_experts covers both expert data AND HCS overhead,
+            # so we use per_expert_total to find max experts, then budget in data MB.
+            max_experts = available_for_experts * (1024 * 1024) // max(1, per_expert_total_bytes)
+            budget = max_experts * per_expert_data_bytes // (1024 * 1024)
+            logger.info(
+                "GPU %s: %d MB free, reserved=%d MB "
+                "(inference=%d + margin=%d), "
+                "budget=%d MB (%d max experts)",
+                dev, free_mb, reserved_mb,
+                inference_cost_mb, FRAG_MARGIN_MB,
+                budget, max_experts,
+            )
         else:
-            # Secondary: no decode (HCS is GPU-0-only), only need DMA buffer headroom
-            headroom_mb = MIN_HEADROOM_MB
-
-        if i == 0:
-            # Primary: reclaim calibration budget since we cleared it
-            budget = max(0, (free_after_cal // (1024 * 1024)) + initial_budget_mb - headroom_mb)
-        else:
-            budget = max(0, free_mb - headroom_mb)
+            budget = max(0, free_mb - FRAG_MARGIN_MB)
+            logger.info(
+                "GPU %s: %d MB free, budget=%d MB (%d max experts)",
+                dev, free_mb, budget,
+                budget * (1024 * 1024) // max(1, per_expert_data_bytes),
+            )
 
         device_budgets[dev] = budget
-        logger.info(
-            "GPU %s: %d MB free, headroom=%d MB (measured, min %d), budget=%d MB",
-            dev, free_mb, headroom_mb, MIN_HEADROOM_MB, budget,
-        )
 
-    # Step 3: Load HCS on primary GPU only (multi-GPU HCS decode is unstable;
-    # both GPUs still used for EP prefill via gpu_prefill_managers)
+    # Step 3: Load HCS on primary GPU only
     manager.clear_hcs()
     torch.cuda.empty_cache()
     manager._init_hot_cached_static(
@@ -598,16 +617,27 @@ def main():
         allocation_mode="greedy",
     )
 
-
-    # Step 5: Validate with real inference on primary
+    # Step 4: Validate with real inference on primary
     ok, info = manager.validate_gpu_allocation(_model, _test_tokens)
     if not ok:
-        logger.error("FATAL: HCS validation failed with final budgets: %s", device_budgets)
+        total_pinned = sum(sum(d.num_pinned.values()) for d in manager._hcs_devices)
+        logger.error(
+            "FATAL: HCS validation OOM with %d experts (budget %d MB). "
+            "Reduce expert count or use more GPUs.",
+            total_pinned, device_budgets[primary_dev],
+        )
         sys.exit(1)
 
+    # Log margin for observability
+    free_after = info["free_after_load_mb"]
+    cost_mb = info["inference_cost_bytes"] // (1024 * 1024)
+    margin = free_after - cost_mb
     total_pinned = sum(sum(d.num_pinned.values()) for d in manager._hcs_devices)
     device_counts = {str(d.device): sum(d.num_pinned.values()) for d in manager._hcs_devices}
-    logger.info("HCS ready: %d experts across %d GPUs. Counts: %s", total_pinned, len(devices), device_counts)
+    logger.info(
+        "HCS ready: %d experts across %d GPUs, margin=%d MB (free=%d, cost=%d). Counts: %s",
+        total_pinned, len(devices), margin, free_after, cost_mb, device_counts,
+    )
 
     # Run benchmark if requested (after model load + strategy, before serving)
     if args.benchmark:

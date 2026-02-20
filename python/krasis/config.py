@@ -313,17 +313,13 @@ def compute_pp_partition(
     num_layers: int,
     num_gpus: int,
 ) -> List[int]:
-    """Compute a balanced PP partition.
+    """Compute PP partition — always PP=1 (all layers on primary GPU).
 
-    Distributes layers as evenly as possible, with earlier ranks getting
-    extra layers (they also hold embedding).
+    Multi-GPU uses Expert Parallelism (EP) instead of Pipeline Parallelism.
+    PP>1 (splitting layers across GPUs) is not supported as it provides
+    zero parallelism (sequential pipeline with idle GPUs).
     """
-    base = num_layers // num_gpus
-    remainder = num_layers % num_gpus
-    partition = []
-    for i in range(num_gpus):
-        partition.append(base + (1 if i < remainder else 0))
-    return partition
+    return [num_layers]
 
 
 @dataclass

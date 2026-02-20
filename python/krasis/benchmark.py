@@ -225,10 +225,11 @@ class KrasisBenchmark:
             return f.read().strip()
 
     def _make_prompt(self) -> List[int]:
-        """Load prefill prompt from file and tokenize."""
+        """Load prefill prompt from file and tokenize to ~10K tokens."""
         content = self._load_prompt_file("prefill_prompt_20k")
         messages = [{"role": "user", "content": content}]
-        return self.model.tokenizer.apply_chat_template(messages)
+        tokens = self.model.tokenizer.apply_chat_template(messages)
+        return tokens[:10000]
 
     def _make_short_prompt(self) -> List[int]:
         """Load decode prompt from file and tokenize."""

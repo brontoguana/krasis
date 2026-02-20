@@ -54,12 +54,12 @@ name = "Qwen3-Coder-Next"
 [[model]]
 name = "gpt-oss-120b"
 
-[[model]]
-name = "GLM-4.7"
+#[[model]]
+#name = "GLM-4.7"
 
 [[model]]
 name = "Qwen3-235B-A22B"
-gguf_name = "Qwen3-235B-A22B-GGUF"
+# gguf_name removed: sharded GGUF loading not supported, uses safetensors instead
 
 # Native model with GGUF for CPU experts (searches ~/.krasis/models/ subdirs):
 # [[model]]

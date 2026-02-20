@@ -906,16 +906,11 @@ class Launcher:
         self.selected_gpus: List[Dict[str, Any]] = []  # subset of hw["gpus"]
 
     def _compute_default_pp(self, num_layers: int) -> str:
-        """Compute balanced PP partition string based on selected GPUs."""
-        ngpus = len(self.selected_gpus) if self.selected_gpus else self.hw["gpu_count"]
-        if ngpus <= 0:
-            return str(num_layers)
-        base = num_layers // ngpus
-        remainder = num_layers % ngpus
-        parts = []
-        for i in range(ngpus):
-            parts.append(base + (1 if i < remainder else 0))
-        return ",".join(str(p) for p in parts)
+        """Compute PP partition — always PP=1 (all layers on primary GPU).
+
+        Multi-GPU uses Expert Parallelism (EP), not Pipeline Parallelism.
+        """
+        return str(num_layers)
 
     def _resolve_selected_gpus(self) -> None:
         """Resolve selected GPU indices to GPU dicts from hardware info."""

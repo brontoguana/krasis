@@ -994,6 +994,7 @@ class GpuPrefillManager:
         )
 
         K = self.hidden_size
+        K_w2 = self._w2_padded_n  # padded K for w2 output dim (Marlin compat)
         N = self.intermediate_size
         E = self.chunk_size
         gs = self._group_size
@@ -1009,14 +1010,14 @@ class GpuPrefillManager:
             E, K // gs, 2 * N,
             dtype=self.params_dtype, device=self.device,
         )
-        # w2 (down): [E, N//16, K*nb2]
+        # w2 (down): [E, N//16, K_w2*nb2] (K_w2 may be padded for Marlin compat)
         self._gpu_w2_packed = torch.zeros(
-            E, N // 16, K * nb2,
+            E, N // 16, K_w2 * nb2,
             dtype=torch.int32, device=self.device,
         )
-        # w2 scale: [E, N//gs, K]
+        # w2 scale: [E, N//gs, K_w2]
         self._gpu_w2_scale = torch.zeros(
-            E, N // gs, K,
+            E, N // gs, K_w2,
             dtype=self.params_dtype, device=self.device,
         )
         # Empty g_idx and sort_indices (no activation ordering)
@@ -1049,6 +1050,7 @@ class GpuPrefillManager:
 
         torch.cuda.set_device(self.device)
         K = self.hidden_size
+        K_w2 = self._w2_padded_n  # padded K for w2 output dim (Marlin compat)
         N = self.intermediate_size
         gs = self._group_size
         nb2 = self.num_bits // 2
@@ -1077,10 +1079,10 @@ class GpuPrefillManager:
                 ).reshape(E, K // gs, 2 * N).to(self.device, non_blocking=True)
                 w2_packed = torch.frombuffer(
                     bytearray(w2_packed_bytes), dtype=torch.int32
-                ).reshape(E, N // 16, K * nb2).to(self.device, non_blocking=True)
+                ).reshape(E, N // 16, K_w2 * nb2).to(self.device, non_blocking=True)
                 w2_scale = torch.frombuffer(
                     bytearray(w2_scales_bytes), dtype=torch.bfloat16
-                ).reshape(E, N // gs, K).to(self.device, non_blocking=True)
+                ).reshape(E, N // gs, K_w2).to(self.device, non_blocking=True)
 
                 layer_mb = (
                     w13_packed.nbytes + w13_scale.nbytes
@@ -1120,10 +1122,10 @@ class GpuPrefillManager:
                     ).reshape(1, K // gs, 2 * shared_N).to(self.device, non_blocking=True)
                     w2_packed = torch.frombuffer(
                         bytearray(w2p_bytes), dtype=torch.int32
-                    ).reshape(1, shared_N // 16, K * nb2).to(self.device, non_blocking=True)
+                    ).reshape(1, shared_N // 16, K_w2 * nb2).to(self.device, non_blocking=True)
                     w2_scale = torch.frombuffer(
                         bytearray(w2s_bytes), dtype=torch.bfloat16
-                    ).reshape(1, shared_N // gs, K).to(self.device, non_blocking=True)
+                    ).reshape(1, shared_N // gs, K_w2).to(self.device, non_blocking=True)
 
                     shared_mb = (
                         w13_packed.nbytes + w13_scale.nbytes
@@ -1243,8 +1245,8 @@ class GpuPrefillManager:
             shared_N = self.n_shared_experts * N
             sw13p = 1 * (K // 16) * (2 * shared_N * nb2) * 4
             sw13s = 1 * (K // gs) * (2 * shared_N) * 2
-            sw2p = 1 * (shared_N // 16) * (K * nb2) * 4
-            sw2s = 1 * (shared_N // gs) * K * 2
+            sw2p = 1 * (shared_N // 16) * (K_w2 * nb2) * 4
+            sw2s = 1 * (shared_N // gs) * K_w2 * 2
             self._dma_shared_w13p = torch.empty(sw13p, dtype=torch.uint8, pin_memory=True)
             self._dma_shared_w13s = torch.empty(sw13s, dtype=torch.uint8, pin_memory=True)
             self._dma_shared_w2p = torch.empty(sw2p, dtype=torch.uint8, pin_memory=True)
@@ -1255,8 +1257,8 @@ class GpuPrefillManager:
             self._dma_shared_size_w2s = sw2s
             self._dma_shared_shape_w13p = (1, K // 16, 2 * shared_N * nb2)
             self._dma_shared_shape_w13s = (1, K // gs, 2 * shared_N)
-            self._dma_shared_shape_w2p = (1, shared_N // 16, K * nb2)
-            self._dma_shared_shape_w2s = (1, shared_N // gs, K)
+            self._dma_shared_shape_w2p = (1, shared_N // 16, K_w2 * nb2)
+            self._dma_shared_shape_w2s = (1, shared_N // gs, K_w2)
             self._dma_shared_initialized = True
 
     def preload_layer_group(self, moe_layer_indices):
@@ -1611,6 +1613,7 @@ class GpuPrefillManager:
         )
 
         K = self.hidden_size
+        K_w2 = self._w2_padded_n  # padded K for w2 output dim (Marlin compat)
         N = self.intermediate_size
         E = self.num_experts
         gs = self._group_size
@@ -1623,10 +1626,10 @@ class GpuPrefillManager:
             E, K // gs, 2 * N, dtype=self.params_dtype, device=self.device,
         )
         self._ao_gpu_w2 = torch.zeros(
-            E, N // 16, K * nb2, dtype=torch.int32, device=self.device,
+            E, N // 16, K_w2 * nb2, dtype=torch.int32, device=self.device,
         )
         self._ao_gpu_w2_scale = torch.zeros(
-            E, N // gs, K, dtype=self.params_dtype, device=self.device,
+            E, N // gs, K_w2, dtype=self.params_dtype, device=self.device,
         )
 
         if self._gpu_g_idx is None:
@@ -1658,6 +1661,7 @@ class GpuPrefillManager:
         )
 
         K = self.hidden_size
+        K_w2 = self._w2_padded_n  # padded K for w2 output dim (Marlin compat)
         N = self.intermediate_size
         gs = self._group_size
         nb2 = self.num_bits // 2
@@ -1686,10 +1690,10 @@ class GpuPrefillManager:
             cache_size, K // gs, 2 * N, dtype=self.params_dtype, device=self.device,
         )
         self._lru_gpu_w2 = torch.zeros(
-            cache_size, N // 16, K * nb2, dtype=torch.int32, device=self.device,
+            cache_size, N // 16, K_w2 * nb2, dtype=torch.int32, device=self.device,
         )
         self._lru_gpu_w2_scale = torch.zeros(
-            cache_size, N // gs, K, dtype=self.params_dtype, device=self.device,
+            cache_size, N // gs, K_w2, dtype=self.params_dtype, device=self.device,
         )
 
         # Shared index/workspace
@@ -1733,6 +1737,7 @@ class GpuPrefillManager:
 
         M = x.shape[0]
         K = self.hidden_size
+        K_w2 = self._w2_padded_n  # padded K for w2 output dim (Marlin compat)
         N = self.intermediate_size
         gs = self._group_size
         nb2 = self.num_bits // 2
@@ -1805,9 +1810,9 @@ class GpuPrefillManager:
             w13s_all = torch.frombuffer(bytearray(w13s_bytes), dtype=torch.bfloat16
                 ).reshape(n_dma, K // gs, 2 * N)
             w2_all = torch.frombuffer(bytearray(w2_bytes), dtype=torch.int32
-                ).reshape(n_dma, N // 16, K * nb2)
+                ).reshape(n_dma, N // 16, K_w2 * nb2)
             w2s_all = torch.frombuffer(bytearray(w2s_bytes), dtype=torch.bfloat16
-                ).reshape(n_dma, N // gs, K)
+                ).reshape(n_dma, N // gs, K_w2)
 
             for i, (eid, key) in enumerate(self._lru_dma_pending):
                 # Find an LRU slot to evict (or use empty)
@@ -1892,6 +1897,7 @@ class GpuPrefillManager:
 
         M = x.shape[0]
         K = self.hidden_size
+        K_w2 = self._w2_padded_n  # padded K for w2 output dim (Marlin compat)
         N = self.intermediate_size
         gs = self._group_size
         nb2 = self.num_bits // 2
@@ -1969,9 +1975,9 @@ class GpuPrefillManager:
                 w13s_all = torch.frombuffer(w13s_bytes, dtype=torch.bfloat16
                     ).reshape(n_dma, K // gs, 2 * N)
                 w2_all = torch.frombuffer(w2_bytes, dtype=torch.int32
-                    ).reshape(n_dma, N // 16, K * nb2)
+                    ).reshape(n_dma, N // 16, K_w2 * nb2)
                 w2s_all = torch.frombuffer(w2s_bytes, dtype=torch.bfloat16
-                    ).reshape(n_dma, N // gs, K)
+                    ).reshape(n_dma, N // gs, K_w2)
 
                 # Contiguous CPU→GPU upload + GPU-side scatter (replaces per-expert copy_)
                 dma_idx = torch.tensor(dma_eids, dtype=torch.long, device=self.device)
@@ -2151,6 +2157,7 @@ class GpuPrefillManager:
         self._init_compact_decode()
 
         K = self.hidden_size
+        K_w2 = self._w2_padded_n  # padded K for w2 output dim (Marlin compat)
         N = self.intermediate_size
         gs = self._group_size
         nb2 = self.num_bits // 2
@@ -2249,9 +2256,9 @@ class GpuPrefillManager:
                 w13s_all = torch.frombuffer(w13s_bytes, dtype=torch.bfloat16
                     ).reshape(n_dma, K // gs, 2 * N)
                 w2_all = torch.frombuffer(w2_bytes, dtype=torch.int32
-                    ).reshape(n_dma, N // 16, K * nb2)
+                    ).reshape(n_dma, N // 16, K_w2 * nb2)
                 w2s_all = torch.frombuffer(w2s_bytes, dtype=torch.bfloat16
-                    ).reshape(n_dma, N // gs, K)
+                    ).reshape(n_dma, N // gs, K_w2)
 
                 # Build slot indices and scatter into compact buffer
                 dma_slots = torch.tensor(
@@ -2395,6 +2402,7 @@ class GpuPrefillManager:
         sorted_experts = sorted(self._heatmap.items(), key=lambda x: x[1], reverse=True)
 
         K = self.hidden_size
+        K_w2 = self._w2_padded_n  # padded K for w2 output dim (Marlin compat)
         N = self.intermediate_size
         gs = self._group_size
         nb2 = self.num_bits // 2
@@ -2447,9 +2455,9 @@ class GpuPrefillManager:
                 w13s = torch.frombuffer(bytearray(w13s_bytes), dtype=torch.bfloat16
                     ).reshape(1, K // gs, 2 * N).to(self.device)
                 w2 = torch.frombuffer(bytearray(w2_bytes), dtype=torch.int32
-                    ).reshape(1, N // 16, K * nb2).to(self.device)
+                    ).reshape(1, N // 16, K_w2 * nb2).to(self.device)
                 w2s = torch.frombuffer(bytearray(w2s_bytes), dtype=torch.bfloat16
-                    ).reshape(1, N // gs, K).to(self.device)
+                    ).reshape(1, N // gs, K_w2).to(self.device)
 
                 self._pinned[(layer_idx, expert_id)] = {
                     "w13": w13, "w13_scale": w13s,
@@ -2521,6 +2529,7 @@ class GpuPrefillManager:
             layer_budgets = {l: max(1, int(b * scale)) for l, b in layer_budgets.items()}
 
         K = self.hidden_size
+        K_w2 = self._w2_padded_n  # padded K for w2 output dim (Marlin compat)
         N = self.intermediate_size
         gs = self._group_size
         nb2 = self.num_bits // 2
@@ -2574,9 +2583,9 @@ class GpuPrefillManager:
                     w13s = torch.frombuffer(bytearray(w13s_bytes), dtype=torch.bfloat16
                         ).reshape(1, K // gs, 2 * N).to(self.device)
                     w2 = torch.frombuffer(bytearray(w2_bytes), dtype=torch.int32
-                        ).reshape(1, N // 16, K * nb2).to(self.device)
+                        ).reshape(1, N // 16, K_w2 * nb2).to(self.device)
                     w2s = torch.frombuffer(bytearray(w2s_bytes), dtype=torch.bfloat16
-                        ).reshape(1, N // gs, K).to(self.device)
+                        ).reshape(1, N // gs, K_w2).to(self.device)
 
                     self._pinned[(layer_idx, expert_id)] = {
                         "w13": w13, "w13_scale": w13s,
@@ -2816,6 +2825,7 @@ class GpuPrefillManager:
 
         # ── Unified Loop for Buffer Allocation and Weight Loading ──
         K = self.hidden_size
+        K_w2 = self._w2_padded_n  # padded K for w2 output dim (Marlin compat)
         N = self.intermediate_size
         gs = self._group_size
         nb2 = self.num_bits // 2
@@ -2857,8 +2867,8 @@ class GpuPrefillManager:
 
                 w13_cpu = torch.frombuffer(bytearray(w13_bytes), dtype=torch.int32).reshape(n, K // 16, 2 * N * nb2)
                 w13s_cpu = torch.frombuffer(bytearray(w13s_bytes), dtype=torch.bfloat16).reshape(n, K // gs, 2 * N)
-                w2_cpu = torch.frombuffer(bytearray(w2_bytes), dtype=torch.int32).reshape(n, N // 16, K * nb2)
-                w2s_cpu = torch.frombuffer(bytearray(w2s_bytes), dtype=torch.bfloat16).reshape(n, N // gs, K)
+                w2_cpu = torch.frombuffer(bytearray(w2_bytes), dtype=torch.int32).reshape(n, N // 16, K_w2 * nb2)
+                w2s_cpu = torch.frombuffer(bytearray(w2s_bytes), dtype=torch.bfloat16).reshape(n, N // gs, K_w2)
 
                 with torch.cuda.stream(hcs_dev.stream):
                     torch.cuda.set_device(hcs_dev.device)
@@ -3709,10 +3719,6 @@ class GpuPrefillManager:
             logger.warning("Cannot init CUDA graphs: hot_cached_static not initialized")
             return
 
-        from sglang.srt.layers.moe.fused_moe_triton.fused_marlin_moe import (
-            fused_marlin_moe,
-        )
-
         K = self.hidden_size
         top_k = self._engine.top_k()
         torch.cuda.set_device(self.device)
@@ -3733,13 +3739,15 @@ class GpuPrefillManager:
             sort_idx = self._hcs_sort_idx[layer_idx]
 
             # Warmup runs (3x) on current stream to trigger Triton compilation
+            # Use _call_fused_marlin_moe dispatch to handle w2 padding + gpt_oss activation
             for _ in range(3):
-                _ = fused_marlin_moe(
+                _ = self._call_fused_moe(
                     hidden_states=io["x"],
                     w1=bufs["w13"], w2=bufs["w2"],
                     w1_scale=bufs["w13_scale"], w2_scale=bufs["w2_scale"],
                     gating_output=io["gating"],
                     topk_weights=io["weights"], topk_ids=io["local_ids"],
+                    moe_layer_idx=layer_idx,
                     global_num_experts=n_hot, expert_map=None,
                     g_idx1=g_idx, g_idx2=g_idx,
                     sort_indices1=sort_idx, sort_indices2=sort_idx,
@@ -3751,12 +3759,13 @@ class GpuPrefillManager:
             # Capture graph
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
-                io["output"] = fused_marlin_moe(
+                io["output"] = self._call_fused_moe(
                     hidden_states=io["x"],
                     w1=bufs["w13"], w2=bufs["w2"],
                     w1_scale=bufs["w13_scale"], w2_scale=bufs["w2_scale"],
                     gating_output=io["gating"],
                     topk_weights=io["weights"], topk_ids=io["local_ids"],
+                    moe_layer_idx=layer_idx,
                     global_num_experts=n_hot, expert_map=None,
                     g_idx1=g_idx, g_idx2=g_idx,
                     sort_indices1=sort_idx, sort_indices2=sort_idx,
@@ -4257,6 +4266,7 @@ class GpuPrefillManager:
         Temporary CPU data is freed immediately after GPU upload.
         """
         K = self.hidden_size
+        K_w2 = self._w2_padded_n  # padded K for w2 output dim (Marlin compat)
         N = self.intermediate_size
         gs = self._engine.group_size()
         actual = chunk_end - chunk_start
@@ -4279,10 +4289,10 @@ class GpuPrefillManager:
             ).reshape(actual, K // gs, 2 * N)
             w2_packed = torch.frombuffer(
                 bytearray(w2_packed_bytes), dtype=torch.int32
-            ).reshape(actual, N // 16, K * nb2)
+            ).reshape(actual, N // 16, K_w2 * nb2)
             w2_scales = torch.frombuffer(
                 bytearray(w2_scales_bytes), dtype=torch.bfloat16
-            ).reshape(actual, N // gs, K)
+            ).reshape(actual, N // gs, K_w2)
 
             self._gpu_w13_packed[:actual].copy_(w13_packed)
             self._gpu_w13_scale[:actual].copy_(w13_scales)
@@ -4549,6 +4559,7 @@ class GpuPrefillManager:
         Legacy: repack from old transposed format to Marlin on GPU.
         """
         K = self.hidden_size
+        K_w2 = self._w2_padded_n  # padded K for w2 output dim (Marlin compat)
         shared_N = self.n_shared_experts * self.intermediate_size
         gs = self._engine.group_size()
         nb2 = self.num_bits // 2  # 2 for INT4
@@ -4565,10 +4576,10 @@ class GpuPrefillManager:
             ).reshape(1, K // gs, 2 * shared_N).to(self.device)
             w2_packed = torch.frombuffer(
                 bytearray(w2p_bytes), dtype=torch.int32
-            ).reshape(1, shared_N // 16, K * nb2).to(self.device)
+            ).reshape(1, shared_N // 16, K_w2 * nb2).to(self.device)
             w2_scale = torch.frombuffer(
                 bytearray(w2s_bytes), dtype=torch.bfloat16
-            ).reshape(1, shared_N // gs, K).to(self.device)
+            ).reshape(1, shared_N // gs, K_w2).to(self.device)
             return w13_packed, w13_scale, w2_packed, w2_scale
 
         # Legacy path: repack to Marlin on GPU
