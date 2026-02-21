@@ -357,7 +357,7 @@ class LauncherConfig:
         self.model_path: str = ""
         self.selected_gpu_indices: List[int] = []  # empty = all GPUs
         self.pp_partition: str = ""
-        self.expert_divisor = "auto"  # str "auto" or int
+        self.layer_group_size = "auto"  # str "auto" or int
         self.kv_dtype: str = "fp8_e4m3"
         self.gpu_expert_bits: int = 4
         self.cpu_expert_bits: int = 4
@@ -386,13 +386,23 @@ class LauncherConfig:
                 pass
         if "CFG_PP_PARTITION" in saved:
             self.pp_partition = saved["CFG_PP_PARTITION"]
-        if "CFG_EXPERT_DIVISOR" in saved:
-            val = saved["CFG_EXPERT_DIVISOR"]
+        if "CFG_LAYER_GROUP_SIZE" in saved:
+            val = saved["CFG_LAYER_GROUP_SIZE"]
             if val == "auto":
-                self.expert_divisor = "auto"
+                self.layer_group_size = "auto"
             else:
                 try:
-                    self.expert_divisor = int(val)
+                    self.layer_group_size = int(val)
+                except ValueError:
+                    pass
+        # Legacy compat
+        elif "CFG_EXPERT_DIVISOR" in saved:
+            val = saved["CFG_EXPERT_DIVISOR"]
+            if val == "auto":
+                self.layer_group_size = "auto"
+            else:
+                try:
+                    self.layer_group_size = int(val)
                 except ValueError:
                     pass
         if "CFG_KV_DTYPE" in saved:
@@ -443,7 +453,7 @@ class LauncherConfig:
             "MODEL_PATH": self.model_path,
             "CFG_SELECTED_GPUS": ",".join(str(i) for i in self.selected_gpu_indices),
             "CFG_PP_PARTITION": self.pp_partition,
-            "CFG_EXPERT_DIVISOR": str(self.expert_divisor),
+            "CFG_LAYER_GROUP_SIZE": str(self.layer_group_size),
             "CFG_KV_DTYPE": self.kv_dtype,
             "CFG_GPU_EXPERT_BITS": str(self.gpu_expert_bits),
             "CFG_CPU_EXPERT_BITS": str(self.cpu_expert_bits),
@@ -489,7 +499,7 @@ class ConfigOption:
 
 
 # Config options shown in TUI
-# Expert divisor is always "auto" and prefill threshold is always 300 (not user-facing).
+# Layer group size is always "auto" and prefill threshold is always 300 (not user-facing).
 OPTIONS = [
     ConfigOption("PP partition", "pp_partition", opt_type="text", affects_budget=True),
     ConfigOption("KV dtype", "kv_dtype",
@@ -941,11 +951,11 @@ class Launcher:
                 gpu_vram = min(g["vram_mb"] for g in self.selected_gpus)
             from krasis.vram_budget import compute_launcher_budget
             # For "auto", use chunked (0) for budget estimate
-            divisor = self.cfg.expert_divisor if isinstance(self.cfg.expert_divisor, int) else 0
+            lgs = self.cfg.layer_group_size if isinstance(self.cfg.layer_group_size, int) else 1
             return compute_launcher_budget(
                 model_path=self.cfg.model_path,
                 pp_partition=pp,
-                expert_divisor=divisor,
+                expert_divisor=lgs,
                 kv_dtype=self.cfg.kv_dtype,
                 gpu_expert_bits=self.cfg.gpu_expert_bits,
                 cpu_expert_bits=self.cfg.cpu_expert_bits,
@@ -1333,8 +1343,8 @@ def parse_args() -> argparse.Namespace:
                         help="Number of GPUs to use")
     parser.add_argument("--selected-gpus", default=None,
                         help="Comma-separated GPU indices to use (e.g. '0,2')")
-    parser.add_argument("--expert-divisor", default=None,
-                        help="Expert loading: auto, 0=chunked, 1=persistent, >=2=layer-grouped")
+    parser.add_argument("--layer-group-size", default=None,
+                        help="Layers to load at once: auto, 0=persistent (all), >=1=N layers/group")
     parser.add_argument("--kv-dtype", default=None,
                         help="KV cache dtype: fp8_e4m3 or bf16")
     parser.add_argument("--gpu-expert-bits", type=int, default=None,
@@ -1385,12 +1395,12 @@ def _apply_cli_overrides(cfg: LauncherConfig, args: argparse.Namespace) -> None:
             pass
     if args.pp_partition is not None:
         cfg.pp_partition = args.pp_partition
-    if args.expert_divisor is not None:
-        if args.expert_divisor == "auto":
-            cfg.expert_divisor = "auto"
+    if args.layer_group_size is not None:
+        if args.layer_group_size == "auto":
+            cfg.layer_group_size = "auto"
         else:
             try:
-                cfg.expert_divisor = int(args.expert_divisor)
+                cfg.layer_group_size = int(args.layer_group_size)
             except ValueError:
                 pass
     if args.kv_dtype is not None:

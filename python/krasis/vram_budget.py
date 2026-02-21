@@ -412,20 +412,22 @@ def compute_launcher_budget(
         gate_bytes = hidden * n_experts * 2 * mn  # always BF16 (routing weights)
 
         # Expert buffers (GPU side) - these fit into the remaining space
+        # expert_divisor here is actually layer_group_size:
+        #   0 = persistent (all layers), >=1 = N layers at a time
         if mn > 0 and n_experts > 0:
-            if expert_divisor == 1:
+            if expert_divisor == 0:
                 # Persistent: all experts for all MoE layers in rank
                 ebuf_bytes = expert_buf_bytes * n_experts * mn
                 emode = "persistent"
-            elif expert_divisor >= 2:
+            elif expert_divisor >= 1:
                 # Layer-grouped: only one group at a time
-                group_size = math.ceil(mn / expert_divisor)
+                group_size = min(expert_divisor, mn)
                 ebuf_bytes = expert_buf_bytes * n_experts * group_size
                 emode = f"grouped({expert_divisor})"
             else:
-                # Chunked (divisor=0): one layer at a time
+                # Fallback: one layer at a time
                 ebuf_bytes = expert_buf_bytes * n_experts
-                emode = "chunked"
+                emode = "grouped(1)"
         else:
             ebuf_bytes = 0
             emode = "n/a"

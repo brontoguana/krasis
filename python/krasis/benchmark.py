@@ -44,7 +44,7 @@ class KrasisBenchmark:
         self.model = model
 
         self.decode_tokens = 64
-        self.n_runs = 3
+        self.n_runs = int(os.environ.get("KRASIS_BENCH_RUNS", "3"))
 
         # Ensure instrumentation is OFF for benchmarking
         TIMING.decode = False
@@ -162,21 +162,19 @@ class KrasisBenchmark:
             pass
 
         # Determine strategy description
-        ed = self.model.expert_divisor
-        if ed == 0:
-            expert_mode = "chunked"
-        elif ed == 1:
+        lgs = self.model.layer_group_size
+        if lgs == 0:
             expert_mode = "persistent"
-        elif ed == -1:
-            expert_mode = "active_only"
-        elif ed == -2:
-            expert_mode = "lru"
-        elif ed == -3:
-            expert_mode = "hot_cached_static"
-        elif ed >= 2:
-            expert_mode = f"layer_grouped({ed})"
         else:
-            expert_mode = str(ed)
+            expert_mode = f"layer_grouped({lgs})"
+        # Check if HCS is active
+        first_mgr = next(iter(self.model.gpu_prefill_managers.values()), None)
+        if first_mgr and getattr(first_mgr, '_hcs_initialized', False):
+            expert_mode = f"hcs + {expert_mode}"
+
+        # Streaming attention
+        if getattr(self.model, '_stream_attn_enabled', False):
+            expert_mode += " + stream_attn"
 
         # Decode mode
         gpu_threshold = getattr(self.model, 'gpu_prefill_threshold', 300)
@@ -210,7 +208,7 @@ class KrasisBenchmark:
             "dense_mlp_quant": qcfg.dense_mlp,
             "lm_head_quant": qcfg.lm_head,
             "kv_dtype": kv_dtype_str,
-            "expert_divisor": ed,
+            "layer_group_size": lgs,
             "expert_mode": expert_mode,
             "gpu_prefill_threshold": gpu_threshold,
             "decode_mode": decode_mode,
@@ -385,7 +383,7 @@ class KrasisBenchmark:
         # Strategy
         lines.append("")
         lines.append("Strategy:")
-        lines.append(f"  Expert divisor: {model_info['expert_divisor']} ({model_info['expert_mode']})")
+        lines.append(f"  Layer group size: {model_info['layer_group_size']} ({model_info['expert_mode']})")
         lines.append(f"  Prefill threshold: {model_info['gpu_prefill_threshold']}")
         lines.append(f"  Mode:           {model_info['decode_mode']}")
 
@@ -449,7 +447,12 @@ class KrasisBenchmark:
         num_gpus = model_info["num_gpus"]
         gpu_quant = f"int{model_info['gpu_expert_bits']}gpu"
         cpu_quant = f"int{model_info['cpu_expert_bits']}cpu"
-        filename = f"{model_name}_{gguf_name}_{num_gpus}gpu_{gpu_quant}_{cpu_quant}.log"
+        # Add stream_attn and layer_group_size to filename for differentiation
+        suffix = ""
+        if getattr(self.model, '_stream_attn_enabled', False):
+            lgs = getattr(self.model, 'layer_group_size', 0)
+            suffix = f"_stream_lgs{lgs}"
+        filename = f"{model_name}_{gguf_name}_{num_gpus}gpu_{gpu_quant}_{cpu_quant}{suffix}.log"
         rel_path = f"benchmarks/{filename}"
 
         try:

@@ -1,5 +1,5 @@
 ================================================================
-Krasis Benchmark — 2026-02-21 10:58:40
+Krasis Benchmark — 2026-02-21 13:25:00
 ================================================================
 Model:            Qwen3-Coder-Next
 Architecture:     qwen3_next, 48 layers, 512 experts, top-10, 12 GQA + 36 linear
@@ -8,8 +8,8 @@ PP Partition:     [48] (2 GPUs)
 Hardware:
   CPU:            AMD EPYC 7742 64-Core Processor (64 cores)
   RAM:            995 GB total, 81.6 GB used by process
-  GPU 0:          NVIDIA RTX 2000 Ada Generation (16380 MB), 4007 MB allocated
-  GPU 1:          NVIDIA RTX 2000 Ada Generation (16380 MB), 0 MB allocated
+  GPU 0:          NVIDIA RTX 2000 Ada Generation (16380 MB), 4009 MB allocated
+  GPU 1:          NVIDIA RTX 2000 Ada Generation (16380 MB), 11037 MB allocated
   GPU 2:          NVIDIA RTX 2000 Ada Generation (16380 MB), 0 MB allocated
 
 Quantization:
@@ -22,21 +22,21 @@ Quantization:
   KV cache:       FP8 E4M3
 
 Strategy:
-  Layer group size: 2 (hcs + layer_grouped(2) + stream_attn)
+  Layer group size: 4 (layer_grouped(4) + stream_attn)
   Prefill threshold: 1
-  Mode:           gpu_decode (hcs + layer_grouped(2) + stream_attn)
+  Mode:           gpu_decode (layer_grouped(4) + stream_attn)
 
 Prefill (10000 tokens, 3 runs):
-  Run 1:  833.8 tok/s, TTFT=11.99s
-  Run 2:  834.0 tok/s, TTFT=11.99s
-  Run 3:  832.2 tok/s, TTFT=12.02s
-  Average: 833.3 tok/s, TTFT=12.00s
+  Run 1:  847.9 tok/s, TTFT=11.79s
+  Run 2:  843.5 tok/s, TTFT=11.86s
+  Run 3:  844.1 tok/s, TTFT=11.85s
+  Average: 845.2 tok/s, TTFT=11.83s
 
 Decode (64 tokens, 3 runs):
-  Run 1:  7.10 tok/s (140.8ms/tok)
-  Run 2:  7.08 tok/s (141.2ms/tok)
-  Run 3:  7.09 tok/s (141.1ms/tok)
-  Average: 7.09 tok/s (141.0ms/tok)
+  Run 1:  7.21 tok/s (138.8ms/tok)
+  Run 2:  7.21 tok/s (138.7ms/tok)
+  Run 3:  7.22 tok/s (138.5ms/tok)
+  Average: 7.21 tok/s (138.7ms/tok)
 
 Verification:
   Prefill prompt: user
@@ -44,11 +44,12 @@ Distributed consensus algorithms form the backbone of modern fault-tolerant syst
   Decode prompt:  Write a poem about recursion in programming at least 100 words long.
   Generated output (64 tokens):
     **Ode to Recursion**  
+    *(a poem of 102 words)*  
     
-    A function calls itself—not flaw, but grace—  
-    A spiral stair that finds its own embrace.  
-    No loop of `for` or `while` to bind the pace,  
-    Just self-invocation, time and space.  
+    In loops of thought, where functions dare,  
+    A voice whispers: *“Call me—yet not there.”*  
+    A function calls itself with grace,  
+    A mirror held to time and space.  
     
-    It asks: *“Shall I proceed
+    Base case stands
 ================================================================

@@ -31,6 +31,14 @@ logger = logging.getLogger(__name__)
 
 from krasis.timing import TIMING
 
+
+def _gpu_to_device(tensor: torch.Tensor, target) -> torch.Tensor:
+    """Transfer tensor between GPUs using CPU bounce (P2P is broken on this system)."""
+    target = torch.device(target)
+    if tensor.device == target:
+        return tensor
+    return tensor.cpu().to(target)
+
 # Marlin quantization constants
 GROUP_SIZE = 128
 
@@ -330,7 +338,7 @@ class GpuPrefillManager:
         num_bits: int = 4,
         krasis_engine=None,
         num_moe_layers: int = 0,
-        expert_divisor: int = 1,
+        layer_group_size: int = 1,
         skip_shared_experts: bool = False,
         swiglu_limit: float = 0.0,
         rank: int = 0,
@@ -365,7 +373,7 @@ class GpuPrefillManager:
         self.num_bits = num_bits
         self._engine = krasis_engine
         self._num_moe_layers = num_moe_layers
-        self._expert_divisor = expert_divisor
+        self._layer_group_size = layer_group_size
         self.swiglu_limit = swiglu_limit
         self.activation_alpha = 1.702 if swiglu_limit > 0 else 0.0
         # Per-layer expert biases for GPT OSS: {moe_layer_idx: {gate_up_bias, down_bias}}
@@ -387,7 +395,7 @@ class GpuPrefillManager:
             logger.info("Marlin w2 padded N: %d → %d (kernel compat)", hidden_size, self._w2_padded_n)
 
         # Persistent/layer-grouped expert buffers
-        self._prefill_mode = "chunked"  # "persistent", "layer_grouped", "active_only", or "chunked"
+        self._prefill_mode = "chunked"  # "persistent", "layer_grouped", or "chunked"
         self._persistent: Optional[dict[int, dict[str, torch.Tensor]]] = None
         self._persistent_shared: Optional[dict[int, dict[str, torch.Tensor]]] = None
 
@@ -531,18 +539,18 @@ class GpuPrefillManager:
         # Shared expert GPU cache (separate from chunked buffer, legacy path only)
         self._shared_cache: dict[int, dict[str, torch.Tensor]] = {}
 
-        # Select prefill mode based on expert_divisor
+        # Select prefill mode based on layer_group_size
         self._select_prefill_mode()
 
         mode = "engine" if self._engine is not None else "safetensors"
         logger.info(
             "GpuPrefillManager(%s): experts=%d, hidden=%d, intermediate=%d, "
             "chunk_size=%d, num_chunks=%d, shared=%d, scale=%.3f, num_bits=%d, "
-            "prefill_mode=%s, expert_divisor=%d",
+            "prefill_mode=%s, layer_group_size=%d",
             mode, num_experts, hidden_size, intermediate_size,
             self.chunk_size, self.num_chunks,
             n_shared_experts, routed_scaling_factor, num_bits,
-            self._prefill_mode, self._expert_divisor,
+            self._prefill_mode, self._layer_group_size,
         )
 
         # Pre-allocate GPU buffer eagerly so KV cache auto-sizer sees the reservation
@@ -659,45 +667,29 @@ class GpuPrefillManager:
         return w13_bytes + w2_bytes
 
     def _select_prefill_mode(self):
-        """Select prefill mode based on expert_divisor setting.
+        """Select prefill mode based on layer_group_size setting.
 
-        - divisor=-3: "hot_cached_static" (hot on GPU, cold on CPU, parallel, zero DMA)
-        - divisor=-2: "lru" (cross-layer LRU expert caching)
-        - divisor=-1: "active_only" (per-layer, load only activated experts)
-        - divisor=0 or no engine: "chunked" (current DMA-per-layer behavior)
-        - divisor=1: "persistent" (all experts pre-loaded in VRAM, zero DMA)
-        - divisor>=2: "layer_grouped" (load experts per-group-of-layers, O(groups) DMA)
+        layer_group_size controls how many MoE layers' experts to load at once:
+        - 0: "persistent" — all experts pre-loaded in VRAM (zero DMA)
+        - >=1: "layer_grouped" — load N layers' experts at a time
+
+        HCS (hot_cached_static) is orthogonal — enabled via _init_hot_cached_static(),
+        checked at dispatch time via _hcs_initialized.
         """
-        if self._expert_divisor == -3 and self._engine is not None:
-            self._prefill_mode = "hot_cached_static"
-            logger.info("Hot-cached-static mode: hot experts on GPU (static), cold on CPU (parallel)")
-            return
-
-        if self._expert_divisor == -1 and self._engine is not None:
-            self._prefill_mode = "active_only"
-            logger.info("Active-only mode: load only activated experts per-layer (zero preload)")
-            return
-
-        if self._expert_divisor == -2 and self._engine is not None:
-            self._prefill_mode = "lru"
-            logger.info("LRU cache mode: cross-layer expert caching with LRU eviction")
-            return
-
-        if self._expert_divisor == 0 or self._engine is None:
+        if self._engine is None:
             self._prefill_mode = "chunked"
             return
 
         per_expert = self._per_expert_vram_bytes()
         num_moe = self._num_moe_layers
 
-        if self._expert_divisor == 1:
+        if self._layer_group_size == 0:
             # Full persistent: all experts for all MoE layers
             total_vram = per_expert * self.num_experts * num_moe
             total_mb = total_vram / 1e6
 
             try:
                 free_vram = torch.cuda.mem_get_info(self.device)[0]
-                # Need room for kernel intermediates + KV cache
                 budget = free_vram - 500 * 1024 * 1024  # 500 MB headroom
                 if total_vram <= budget:
                     self._prefill_mode = "persistent"
@@ -708,31 +700,29 @@ class GpuPrefillManager:
                         free_vram / 1e6, budget / 1e6,
                     )
                 else:
-                    # OOM fallback: try layer_grouped with divisor=2
                     logger.warning(
                         "Persistent mode needs %.1f MB but only %.1f MB budget — "
-                        "falling back to layer_grouped (divisor=2)",
+                        "falling back to layer_grouped (group_size=1)",
                         total_mb, budget / 1e6,
                     )
-                    self._expert_divisor = 2
+                    self._layer_group_size = 1
                     self._select_prefill_mode()  # recurse once
                     return
             except Exception:
                 self._prefill_mode = "persistent"
                 logger.warning("Could not query VRAM — assuming persistent fits")
         else:
-            # Layer-grouped: experts loaded per-group of layers
+            # Layer-grouped: load layer_group_size layers' experts at a time
             from math import ceil
-            moe_per_group = ceil(num_moe / self._expert_divisor)
+            moe_per_group = min(self._layer_group_size, num_moe)
             num_groups = ceil(num_moe / moe_per_group)
             group_vram = per_expert * self.num_experts * moe_per_group
             group_mb = group_vram / 1e6
             self._prefill_mode = "layer_grouped"
             logger.info(
-                "Layer-grouped mode: divisor=%d, %d groups of %d MoE layers, "
+                "Layer-grouped mode: %d layers/group, %d groups, "
                 "~%.1f MB per group, %d total MoE layers",
-                self._expert_divisor, num_groups, moe_per_group,
-                group_mb, num_moe,
+                moe_per_group, num_groups, group_mb, num_moe,
             )
 
     def _auto_chunk_size(self) -> int:
@@ -1040,7 +1030,7 @@ class GpuPrefillManager:
     def _preload_persistent(self):
         """Pre-load ALL expert weights for ALL MoE layers into GPU VRAM.
 
-        Called once at startup when expert_divisor=1.
+        Called once at startup when layer_group_size=0 (persistent mode).
         After this, forward() does zero DMA — just indexes into persistent buffers.
         """
         assert self._engine is not None, "Persistent mode requires Krasis engine"
@@ -1175,7 +1165,7 @@ class GpuPrefillManager:
             self._persistent_shared = None
             torch.cuda.empty_cache()
 
-            self._expert_divisor = 2
+            self._layer_group_size = 1
             self._prefill_mode = "layer_grouped"
 
     def _init_dma_buffers(self):
@@ -1757,12 +1747,6 @@ class GpuPrefillManager:
 
         active_experts = torch.unique(topk_ids).tolist()
 
-        # Update heatmap
-        if self._heatmap is not None:
-            for eid in active_experts:
-                key = (moe_layer_idx, eid)
-                self._heatmap[key] = self._heatmap.get(key, 0) + 1
-
         missing_from_staging = [eid for eid in active_experts if eid not in self._ao_loaded_experts]
 
         for eid in missing_from_staging:
@@ -1922,11 +1906,6 @@ class GpuPrefillManager:
         else:
             active_experts = torch.unique(topk_ids).tolist()
 
-        # Update heatmap for pinning strategies
-        if self._heatmap is not None:
-            for eid in active_experts:
-                key = (moe_layer_idx, eid)
-                self._heatmap[key] = self._heatmap.get(key, 0) + 1
 
         missing = [eid for eid in active_experts if eid not in self._ao_loaded_experts]
 
@@ -2179,11 +2158,7 @@ class GpuPrefillManager:
         topk_list = topk_ids[0].tolist()
         active_experts = list(set(topk_list))
 
-        # Update heatmap
-        if self._heatmap is not None:
-            for eid in active_experts:
-                key = (moe_layer_idx, eid)
-                self._heatmap[key] = self._heatmap.get(key, 0) + 1
+
 
         # Find missing experts (not in compact buffer for this layer)
         missing = [eid for eid in active_experts if eid not in emap]
@@ -2907,10 +2882,11 @@ class GpuPrefillManager:
                     hcs_dev.num_pinned[layer_idx] = n
 
                     # For secondary devices, copy lookup to primary for fast dispatch
+                    # Must use CPU bounce — no P2P between GPUs on this system.
                     if not hcs_dev.is_primary:
                         if hcs_dev.lookup_on_primary is None:
                             hcs_dev.lookup_on_primary = {}
-                        hcs_dev.lookup_on_primary[layer_idx] = local_lookup.to(self._hcs_devices[0].device)
+                        hcs_dev.lookup_on_primary[layer_idx] = _gpu_to_device(local_lookup, self._hcs_devices[0].device)
 
                     if self.swiglu_limit > 0 and layer_idx in self._expert_biases:
                         full_biases = self._expert_biases[layer_idx]
@@ -3583,22 +3559,29 @@ class GpuPrefillManager:
         if timing:
             t_cpu_submitted = time.perf_counter()
 
-        # ── Step 2: Replay per-device CUDA graphs ──
+        # ── Step 2: Replay per-device CUDA graphs (parallel) ──
+        # Phase 1: Setup inputs + replay all graphs WITHOUT accumulating.
+        # This allows GPU0 and GPU1 graphs to execute truly in parallel.
+        # Phase 2: Sync all devices, then accumulate outputs on primary.
         gpu_output = torch.zeros(1, K, dtype=self.params_dtype, device=primary_device)
 
-        if timing:
-            # Per-device timing: wall-clock start/end for parallelism verification
-            _dev_timings = []  # (device_str, n_experts, setup_ms, replay_wall_start, replay_wall_end, accum_ms)
+        no_graphs = os.environ.get("KRASIS_NO_MULTIGPU_GRAPHS", "") == "1"
 
+        if timing:
+            _dev_timings = []  # (device_str, n_experts, setup_ms, replay_wall_start, replay_wall_end)
+
+        diag = os.environ.get("KRASIS_DIAG_MULTIGPU") == "1"
+
+        active_devs = []  # (hcs_dev, io_or_output) pairs
         for hcs_dev in self._hcs_devices:
-            if moe_layer_idx not in hcs_dev.cuda_graphs:
+            if moe_layer_idx not in hcs_dev.buffers:
+                if diag and moe_layer_idx < 2:
+                    logger.info("DIAG multigpu layer=%d dev=%s: NO BUFFERS, skipping",
+                                moe_layer_idx, hcs_dev.device)
                 continue
 
             if timing:
                 _t_dev_start = time.perf_counter()
-
-            io = hcs_dev.graph_io[moe_layer_idx]
-            graph = hcs_dev.cuda_graphs[moe_layer_idx]
 
             # Use lookup_on_primary for secondary devices to avoid cross-device access
             if hcs_dev.is_primary:
@@ -3617,43 +3600,119 @@ class GpuPrefillManager:
             dev_weights = topk_weights.clone()
             dev_weights[~on_this_dev] = 0.0
 
-            # Copy inputs into this device's graph I/O buffers
-            io["x"].copy_(x if hcs_dev.is_primary else x.to(hcs_dev.device))
-            io["local_ids"].copy_(local_ids if hcs_dev.is_primary else local_ids.to(hcs_dev.device))
-            io["weights"].copy_(dev_weights if hcs_dev.is_primary else dev_weights.to(hcs_dev.device))
+            if diag and moe_layer_idx < 2:
+                logger.info(
+                    "DIAG multigpu layer=%d dev=%s: n_on_dev=%d/%d, "
+                    "topk_ids=%s, lookup_result=%s, local_ids=%s, "
+                    "dev_weights_nonzero=%d, n_hot=%d, x_norm=%.4f",
+                    moe_layer_idx, hcs_dev.device, n_on_dev, len(topk_list),
+                    topk_ids[0].tolist()[:5],
+                    lookup_result[0].tolist()[:5],
+                    local_ids[0].tolist()[:5],
+                    (dev_weights != 0).sum().item(),
+                    hcs_dev.num_pinned.get(moe_layer_idx, 0),
+                    x.float().norm().item(),
+                )
 
-            if timing:
-                _t_setup_done = time.perf_counter()
+            if no_graphs:
+                # Direct fused_marlin_moe call (diagnostic: bypass CUDA graphs)
+                from sglang.srt.layers.moe.fused_moe_triton.fused_marlin_moe import (
+                    fused_marlin_moe,
+                )
+                dev = hcs_dev.device
+                n_hot = hcs_dev.num_pinned[moe_layer_idx]
+                bufs = hcs_dev.buffers[moe_layer_idx]
+                g_idx = hcs_dev.g_idx[moe_layer_idx]
+                sort_idx = hcs_dev.sort_idx[moe_layer_idx]
 
-            # Replay CUDA graph
-            graph.replay()
+                dev_x = x if hcs_dev.is_primary else _gpu_to_device(x, dev)
+                dev_ids = local_ids if hcs_dev.is_primary else _gpu_to_device(local_ids, dev)
+                dev_wts = dev_weights if hcs_dev.is_primary else _gpu_to_device(dev_weights, dev)
+                dev_gating = torch.empty(1, n_hot, device=dev)
+
+                torch.cuda.set_device(dev)
+                hcs_dev.workspace.zero_()
+                dev_output = fused_marlin_moe(
+                    hidden_states=dev_x,
+                    w1=bufs["w13"], w2=bufs["w2"],
+                    w1_scale=bufs["w13_scale"], w2_scale=bufs["w2_scale"],
+                    gating_output=dev_gating,
+                    topk_weights=dev_wts, topk_ids=dev_ids,
+                    global_num_experts=n_hot, expert_map=None,
+                    g_idx1=g_idx, g_idx2=g_idx,
+                    sort_indices1=sort_idx, sort_indices2=sort_idx,
+                    workspace=hcs_dev.workspace,
+                    num_bits=self.num_bits, is_k_full=True,
+                ).to(self.params_dtype)
+
+                if diag and moe_layer_idx < 2:
+                    torch.cuda.synchronize(dev)
+                    logger.info(
+                        "DIAG multigpu layer=%d dev=%s: output_norm=%.6f, "
+                        "output_max=%.6f, w13_shape=%s, dev_x_norm=%.4f",
+                        moe_layer_idx, hcs_dev.device,
+                        dev_output.float().norm().item(),
+                        dev_output.float().abs().max().item(),
+                        bufs["w13"].shape,
+                        dev_x.float().norm().item(),
+                    )
+
+                active_devs.append((hcs_dev, dev_output))
+            else:
+                # CUDA graph path
+                io = hcs_dev.graph_io[moe_layer_idx]
+                graph = hcs_dev.cuda_graphs[moe_layer_idx]
+
+                # Copy inputs into this device's graph I/O buffers
+                # Must use CPU bounce for cross-GPU transfers (no P2P).
+                io["x"].copy_(x if hcs_dev.is_primary else _gpu_to_device(x, hcs_dev.device))
+                io["local_ids"].copy_(local_ids if hcs_dev.is_primary else _gpu_to_device(local_ids, hcs_dev.device))
+                io["weights"].copy_(dev_weights if hcs_dev.is_primary else _gpu_to_device(dev_weights, hcs_dev.device))
+
+                if timing:
+                    _t_setup_done = time.perf_counter()
+
+                # Replay CUDA graph — returns immediately, GPU executes asynchronously
+                graph.replay()
+
+                active_devs.append((hcs_dev, io))
 
             if timing:
                 _t_replay_done = time.perf_counter()
-
-            # Accumulate output on primary device
-            if hcs_dev.is_primary:
-                gpu_output += io["output"]
-            else:
-                gpu_output += io["output"].to(primary_device)
-
-            if timing:
-                _t_accum_done = time.perf_counter()
+                _t_setup_done = _t_setup_done if not no_graphs else _t_dev_start
                 _dev_timings.append((
                     str(hcs_dev.device), n_on_dev,
                     (_t_setup_done - _t_dev_start) * 1000,  # setup_ms
                     _t_setup_done,  # replay wall start (absolute)
                     _t_replay_done,  # replay wall end (absolute)
-                    (_t_accum_done - _t_replay_done) * 1000,  # accum_ms
                 ))
 
+        # Phase 2: Sync all devices and accumulate outputs
+        for hcs_dev, _ in active_devs:
+            torch.cuda.synchronize(hcs_dev.device)
+
         if timing:
-            # Sync all devices to measure true GPU completion
-            torch.cuda.synchronize(primary_device)
-            for hcs_dev in self._hcs_devices:
-                if not hcs_dev.is_primary:
-                    torch.cuda.synchronize(hcs_dev.device)
             t_gpu_done = time.perf_counter()
+
+        for hcs_dev, io_or_output in active_devs:
+            if no_graphs:
+                dev_output = io_or_output
+                if hcs_dev.is_primary:
+                    gpu_output += dev_output
+                else:
+                    gpu_output += _gpu_to_device(dev_output, primary_device)
+            else:
+                io = io_or_output
+                if hcs_dev.is_primary:
+                    gpu_output += io["output"]
+                else:
+                    gpu_output += _gpu_to_device(io["output"], primary_device)
+
+        if diag and moe_layer_idx < 2:
+            logger.info(
+                "DIAG multigpu layer=%d: gpu_output_norm=%.6f after accumulate, has_cold=%s",
+                moe_layer_idx, gpu_output.float().norm().item(), has_cold,
+            )
 
         # ── Step 3: Sync CPU result and combine ──
         if has_cold:
@@ -3677,16 +3736,16 @@ class GpuPrefillManager:
 
             # Per-device details
             dev_details = []
-            for dev_str, n_exp, setup_ms, ws, we, accum_ms in _dev_timings:
+            for dev_str, n_exp, setup_ms, ws, we in _dev_timings:
                 replay_wall_ms = (we - ws) * 1000
-                dev_details.append(f"{dev_str}({n_exp}exp setup={setup_ms:.2f} replay={replay_wall_ms:.2f} accum={accum_ms:.2f})")
+                dev_details.append(f"{dev_str}({n_exp}exp setup={setup_ms:.2f} replay={replay_wall_ms:.2f})")
 
             # Parallelism check: did GPU replays overlap?
             parallel_note = ""
             if len(_dev_timings) >= 2:
                 # Check if second device's replay started before first device's replay ended
-                _, _, _, ws0, we0, _ = _dev_timings[0]
-                _, _, _, ws1, we1, _ = _dev_timings[1]
+                _, _, _, ws0, we0 = _dev_timings[0]
+                _, _, _, ws1, we1 = _dev_timings[1]
                 overlap_start = max(ws0, ws1)
                 overlap_end = min(we0, we1)
                 if overlap_end > overlap_start:
@@ -3879,6 +3938,7 @@ class GpuPrefillManager:
         # Return clone (graph tensor is in CUDA graph private pool)
         return io["output"].clone()
 
+    @torch.inference_mode()
     def _init_cuda_graphs_multi_gpu(self):
         """Capture per-device CUDA graphs for M=1 decode in multi-GPU HCS mode.
 
@@ -4280,7 +4340,7 @@ class GpuPrefillManager:
         # Layer-grouped DMA data takes priority (M>1 prefill uses GPU for all experts)
         if self._persistent and moe_layer_idx in self._persistent:
             output = self._forward_persistent(moe_layer_idx, x, topk_ids, topk_weights)
-        elif self._prefill_mode == "hot_cached_static" and self._hcs_initialized:
+        elif self._hcs_initialized:
             output = self._forward_hot_cached_static(moe_layer_idx, x, topk_ids, topk_weights)
         elif self._prefill_mode in ("active_only", "lru") and self._engine is not None:
             if M == 1:
@@ -4304,6 +4364,12 @@ class GpuPrefillManager:
                 self.prepare_layer(moe_layer_idx)
             cache = self._cache[moe_layer_idx]
             output = self._forward_cached(cache, x, topk_ids, topk_weights, debug_sync)
+
+        # Record heatmap (used during heatmap building for HCS init)
+        if self._heatmap is not None:
+            for eid in torch.unique(topk_ids).tolist():
+                key = (moe_layer_idx, eid)
+                self._heatmap[key] = self._heatmap.get(key, 0) + 1
 
         # EP partial sum: return raw routed output (no scaling, no shared expert)
         if routed_only:
@@ -4435,9 +4501,15 @@ class GpuPrefillManager:
             # Repack this chunk from engine → GPU buffer (on-the-fly, no caching)
             self._repack_chunk_from_engine(moe_layer_idx, start, end)
 
-            # Remap expert IDs for this chunk
-            chunk_mask = (topk_ids >= start) & (topk_ids < end)
-            chunk_ids = torch.where(chunk_mask, topk_ids - start, torch.zeros_like(topk_ids))
+            # Remap expert IDs for this chunk.
+            # topk_ids use GLOBAL expert indices (0..total_experts).
+            # This manager handles experts [expert_start..expert_end).
+            # The chunk covers LOCAL indices [start..end) within this manager,
+            # corresponding to GLOBAL indices [expert_start+start..expert_start+end).
+            global_start = self.expert_start + start
+            global_end = self.expert_start + end
+            chunk_mask = (topk_ids >= global_start) & (topk_ids < global_end)
+            chunk_ids = torch.where(chunk_mask, topk_ids - global_start, torch.zeros_like(topk_ids))
             chunk_weights = torch.where(chunk_mask, topk_weights, torch.zeros_like(topk_weights))
 
             self._workspace.zero_()
@@ -4489,6 +4561,8 @@ class GpuPrefillManager:
         )
         M = x.shape[0]
 
+        # topk_ids use GLOBAL expert indices. This manager handles
+        # experts [expert_start..expert_end). Convert to local indices.
         if self.num_chunks == 1:
             self._gpu_w13_packed.copy_(cache["w13_packed"])
             self._gpu_w13_scale.copy_(cache["w13_scale"])
@@ -4497,6 +4571,11 @@ class GpuPrefillManager:
 
             gating_output = torch.empty(M, self.num_experts, device=self.device)
 
+            # Remap global → local expert indices for this EP range
+            local_mask = (topk_ids >= self.expert_start) & (topk_ids < self.expert_end)
+            local_ids = torch.where(local_mask, topk_ids - self.expert_start, torch.zeros_like(topk_ids))
+            local_weights = torch.where(local_mask, topk_weights, torch.zeros_like(topk_weights))
+
             output = fused_marlin_moe(
                 hidden_states=x,
                 w1=self._gpu_w13_packed,
@@ -4504,8 +4583,8 @@ class GpuPrefillManager:
                 w1_scale=self._gpu_w13_scale,
                 w2_scale=self._gpu_w2_scale,
                 gating_output=gating_output,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
+                topk_weights=local_weights,
+                topk_ids=local_ids,
                 global_num_experts=self.num_experts,
                 expert_map=None,
                 g_idx1=self._gpu_g_idx,
@@ -4530,8 +4609,11 @@ class GpuPrefillManager:
                 self._gpu_w2_packed[:actual].copy_(cache["w2_packed"][start:end])
                 self._gpu_w2_scale[:actual].copy_(cache["w2_scale"][start:end])
 
-                chunk_mask = (topk_ids >= start) & (topk_ids < end)
-                chunk_ids = torch.where(chunk_mask, topk_ids - start, torch.zeros_like(topk_ids))
+                # Remap: global chunk range → local [0..actual)
+                global_start = self.expert_start + start
+                global_end = self.expert_start + end
+                chunk_mask = (topk_ids >= global_start) & (topk_ids < global_end)
+                chunk_ids = torch.where(chunk_mask, topk_ids - global_start, torch.zeros_like(topk_ids))
                 chunk_weights = torch.where(chunk_mask, topk_weights, torch.zeros_like(topk_weights))
 
                 self._workspace.zero_()
