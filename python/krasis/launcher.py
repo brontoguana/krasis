@@ -1497,13 +1497,16 @@ def _check_gpu_deps():
     if not shutil.which("nvidia-smi"):
         return  # no NVIDIA GPU — nothing to check
 
+    # Ensure CUDA bin is on PATH (krasis-setup adds to bashrc but
+    # current session may not have it yet)
+    cuda_bin = "/usr/local/cuda/bin"
+    if os.path.isdir(cuda_bin) and cuda_bin not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = cuda_bin + ":" + os.environ.get("PATH", "")
+
     problems = []
 
     # Check nvcc
-    has_nvcc = (
-        shutil.which("nvcc") is not None
-        or os.path.isfile("/usr/local/cuda/bin/nvcc")
-    )
+    has_nvcc = shutil.which("nvcc") is not None
     if not has_nvcc:
         problems.append("CUDA toolkit (nvcc)")
 

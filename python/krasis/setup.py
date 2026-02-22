@@ -247,8 +247,20 @@ def _install_system_deps():
         if os.path.isdir(cuda_bin) and cuda_bin not in os.environ.get("PATH", ""):
             os.environ["PATH"] = cuda_bin + ":" + os.environ.get("PATH", "")
             print(f"  Added {cuda_bin} to PATH for this session.")
-            # Suggest adding to bashrc
-            print(f"  {DIM}Add to ~/.bashrc: export PATH={cuda_bin}:$PATH{NC}")
+            # Add to bashrc so it persists
+            bashrc = os.path.expanduser("~/.bashrc")
+            export_line = f'export PATH={cuda_bin}:$PATH'
+            try:
+                existing = ""
+                if os.path.isfile(bashrc):
+                    with open(bashrc) as f:
+                        existing = f.read()
+                if export_line not in existing:
+                    with open(bashrc, "a") as f:
+                        f.write(f"\n# Added by krasis-setup\n{export_line}\n")
+                    print(f"  Added to ~/.bashrc (will persist across sessions).")
+            except OSError:
+                print(f"  {DIM}Add to ~/.bashrc manually: {export_line}{NC}")
 
     elif need_nvcc and distro == "rhel":
         cuda_pkg = f"cuda-toolkit-{required_ver[0]}-{required_ver[1]}"
