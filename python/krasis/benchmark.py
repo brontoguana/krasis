@@ -500,24 +500,25 @@ class KrasisBenchmark:
         print(f"  Prefill: {len(large_tokens):,} tokens")
         print(f"  Decode:  {len(short_tokens):,} tokens")
 
-        # 3. Warmup (short decode + full prefill to trigger FlashInfer JIT)
-        print(_section("Warmup"))
+        # 3. Warmup pass — full prefill + decode to compile all GPU kernels
+        print(_section("Warmup (full benchmark pass to compile GPU kernels)"))
         self._warmup()
-        print("  Warmup prefills (compiles GPU kernels, may take a minute)...")
         t0 = time.perf_counter()
-        for i in range(3):
-            self.model.generate(large_tokens, max_new_tokens=1, temperature=0.6)
+        print(f"  Prefill warmup ({self.n_runs} runs)...")
+        self._benchmark_prefill(large_tokens)
+        print(f"  Decode warmup ({self.n_runs} runs)...")
+        self._benchmark_decode(short_tokens)
         warmup_s = time.perf_counter() - t0
-        print(f"  Warmup complete ({warmup_s:.1f}s).")
+        print(f"  Warmup complete ({warmup_s:.1f}s). All kernels compiled.")
 
-        # 4. Prefill benchmark
+        # 4. Prefill benchmark (timed)
         print(_section(f"Running prefill benchmark ({len(large_tokens):,} tokens, {self.n_runs} runs)"))
         prefill_result = self._benchmark_prefill(large_tokens)
         for i, run in enumerate(prefill_result["runs"]):
             print(f"  Run {i+1}: {run['tok_s']:.1f} tok/s, TTFT={run['ttft']:.2f}s")
         print(f"  {BOLD}Average: {prefill_result['avg_tok_s']:.1f} tok/s, TTFT={prefill_result['avg_ttft']:.2f}s{NC}")
 
-        # 5. Decode benchmark
+        # 5. Decode benchmark (timed)
         print(_section(f"Running decode benchmark ({self.decode_tokens} tokens, {self.n_runs} runs)"))
         decode_result = self._benchmark_decode(short_tokens)
         for i, run in enumerate(decode_result["runs"]):
