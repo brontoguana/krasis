@@ -1522,8 +1522,26 @@ def _check_gpu_deps():
         if cuda_bin not in os.environ.get("PATH", ""):
             os.environ["PATH"] = cuda_bin + ":" + os.environ.get("PATH", "")
         # Set CUDA_HOME so PyTorch/FlashInfer JIT find the right toolkit
-        if "CUDA_HOME" not in os.environ:
-            os.environ["CUDA_HOME"] = cuda_home
+        os.environ["CUDA_HOME"] = cuda_home
+
+        # Clear stale FlashInfer JIT cache if it references a missing nvcc.
+        # FlashInfer caches ninja build files with absolute nvcc paths —
+        # if nvcc moved (e.g. old /usr/bin/nvcc removed), the cache is broken.
+        import glob
+        fi_cache = os.path.expanduser("~/.cache/flashinfer")
+        if os.path.isdir(fi_cache):
+            for build_ninja in glob.glob(os.path.join(fi_cache, "**/build.ninja"), recursive=True):
+                try:
+                    with open(build_ninja) as f:
+                        content = f.read()
+                    # Check if the cached nvcc path still exists
+                    if "/usr/bin/nvcc" in content and not os.path.isfile("/usr/bin/nvcc"):
+                        # Stale cache — remove the containing directory
+                        cache_dir = os.path.dirname(build_ninja)
+                        import shutil as _shutil
+                        _shutil.rmtree(cache_dir, ignore_errors=True)
+                except OSError:
+                    pass
 
     problems = []
 

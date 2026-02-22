@@ -71,7 +71,15 @@ def _get_nvcc_version():
     """Get nvcc major.minor version, or None if not found."""
     nvcc = shutil.which("nvcc")
     if not nvcc:
-        for path in ["/usr/local/cuda/bin/nvcc", "/usr/bin/nvcc"]:
+        for path in [
+            "/usr/local/cuda/bin/nvcc",
+            "/usr/local/cuda-12.8/bin/nvcc",
+            "/usr/local/cuda-12.6/bin/nvcc",
+            "/usr/local/cuda-12.4/bin/nvcc",
+            "/usr/local/cuda-12.1/bin/nvcc",
+            "/usr/local/cuda-11.8/bin/nvcc",
+            "/usr/bin/nvcc",
+        ]:
             if os.path.isfile(path):
                 nvcc = path
                 break
@@ -97,19 +105,26 @@ def _has_nvcc():
 
 
 def _detect_distro():
-    """Detect Linux distro for package manager selection."""
+    """Detect Linux distro for package manager selection.
+
+    Returns (family, version_id) e.g. ("debian", "24.04") or ("rhel", "39").
+    """
     try:
         with open("/etc/os-release") as f:
             lines = f.read()
+        version_id = ""
+        for line in lines.split("\n"):
+            if line.startswith("VERSION_ID="):
+                version_id = line.split("=", 1)[1].strip('"')
         if "Ubuntu" in lines or "Debian" in lines:
-            return "debian"
+            return "debian", version_id
         elif "Fedora" in lines or "Red Hat" in lines or "CentOS" in lines:
-            return "rhel"
+            return "rhel", version_id
         elif "Arch" in lines:
-            return "arch"
+            return "arch", version_id
     except FileNotFoundError:
         pass
-    return "unknown"
+    return "unknown", ""
 
 
 def _is_wsl():
@@ -178,7 +193,7 @@ def _install_system_deps():
     print(f"  {YELLOW}{'Need upgrade' if nvcc_too_old else 'Missing'}: {', '.join(missing)}{NC}")
     print(f"  Installing (will ask for your password)...\n")
 
-    distro = _detect_distro()
+    distro, distro_ver = _detect_distro()
     is_wsl = _is_wsl()
     sudo = [] if os.geteuid() == 0 else ["sudo"]
 
@@ -197,7 +212,12 @@ def _install_system_deps():
     # Install CUDA toolkit from NVIDIA repo (not the ancient distro package)
     if need_nvcc and distro == "debian":
         cuda_pkg = f"cuda-toolkit-{required_ver[0]}-{required_ver[1]}"
-        repo = "wsl-ubuntu" if is_wsl else "ubuntu2204"
+        if is_wsl:
+            repo = "wsl-ubuntu"
+        elif distro_ver.startswith("24."):
+            repo = "ubuntu2404"
+        else:
+            repo = "ubuntu2204"  # works for 22.04 and most Debian
         keyring_url = (
             f"https://developer.download.nvidia.com/compute/cuda/repos/"
             f"{repo}/x86_64/cuda-keyring_1.1-1_all.deb"
@@ -280,6 +300,38 @@ def _install_system_deps():
         if ret.returncode != 0:
             print(f"  {RED}Failed. Try manually: sudo dnf install {cuda_pkg}{NC}")
             return False
+
+        # Add to PATH and set CUDA_HOME (same as debian path)
+        cuda_bin = f"/usr/local/cuda-{required_ver[0]}.{required_ver[1]}/bin"
+        if not os.path.isdir(cuda_bin):
+            cuda_bin = "/usr/local/cuda/bin"
+        if os.path.isdir(cuda_bin) and cuda_bin not in os.environ.get("PATH", ""):
+            os.environ["PATH"] = cuda_bin + ":" + os.environ.get("PATH", "")
+            print(f"  Added {cuda_bin} to PATH for this session.")
+        cuda_home = os.path.dirname(cuda_bin)
+        if os.path.isdir(cuda_home):
+            os.environ["CUDA_HOME"] = cuda_home
+            bashrc = os.path.expanduser("~/.bashrc")
+            export_line = f'export PATH={cuda_bin}:$PATH'
+            export_cuda_home = f'export CUDA_HOME={cuda_home}'
+            try:
+                existing = ""
+                if os.path.isfile(bashrc):
+                    with open(bashrc) as f:
+                        existing = f.read()
+                lines_to_add = []
+                if export_line not in existing:
+                    lines_to_add.append(export_line)
+                if export_cuda_home not in existing:
+                    lines_to_add.append(export_cuda_home)
+                if lines_to_add:
+                    with open(bashrc, "a") as f:
+                        f.write(f"\n# Added by krasis-setup\n")
+                        for line in lines_to_add:
+                            f.write(f"{line}\n")
+                    print(f"  Added to ~/.bashrc (will persist across sessions).")
+            except OSError:
+                print(f"  {DIM}Add to ~/.bashrc manually: {export_line}{NC}")
     elif need_nvcc:
         print(f"  {RED}Unknown distro. Install CUDA toolkit {required_ver[0]}.{required_ver[1]}+ manually.{NC}")
         return False
@@ -308,6 +360,7 @@ def _install_cuda_torch():
     """Install CUDA-enabled PyTorch."""
     print(f"\n{BOLD}Step 2: CUDA PyTorch{NC}")
 
+    need_reinstall = False
     try:
         import torch
         if torch.cuda.is_available():
@@ -315,6 +368,7 @@ def _install_cuda_torch():
             return True
         else:
             print(f"  torch {torch.__version__} installed but CUDA not available.")
+            need_reinstall = True
     except ImportError:
         print(f"  torch not installed.")
 
@@ -322,11 +376,14 @@ def _install_cuda_torch():
     index_url = f"https://download.pytorch.org/whl/{cu_tag}"
     print(f"  Installing CUDA torch ({cu_tag})...")
 
-    ret = _run([
+    pip_cmd = [
         sys.executable, "-m", "pip", "install",
         "torch", "--index-url", index_url,
         "--quiet", "--no-warn-conflicts",
-    ], check=False)
+    ]
+    if need_reinstall:
+        pip_cmd.append("--force-reinstall")
+    ret = _run(pip_cmd, check=False)
 
     if ret.returncode != 0:
         print(f"  {RED}Failed. Install manually:{NC}")
