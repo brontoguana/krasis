@@ -306,11 +306,12 @@ def scan_gguf_files(search_dir: str) -> List[Dict[str, Any]]:
 # ═══════════════════════════════════════════════════════════════════════
 
 CONFIG_KEYS = [
-    "MODEL_PATH", "CFG_SELECTED_GPUS", "CFG_PP_PARTITION", "CFG_EXPERT_DIVISOR",
+    "MODEL_PATH", "CFG_SELECTED_GPUS", "CFG_PP_PARTITION", "CFG_LAYER_GROUP_SIZE",
     "CFG_KV_DTYPE", "CFG_GPU_EXPERT_BITS", "CFG_CPU_EXPERT_BITS",
     "CFG_ATTENTION_QUANT", "CFG_SHARED_EXPERT_QUANT", "CFG_DENSE_MLP_QUANT",
     "CFG_LM_HEAD_QUANT", "CFG_KRASIS_THREADS", "CFG_HOST", "CFG_PORT",
     "CFG_GPU_PREFILL_THRESHOLD", "CFG_GGUF_PATH", "CFG_FORCE_LOAD",
+    "CFG_HCS", "CFG_MULTI_GPU_HCS",
 ]
 
 
@@ -357,7 +358,7 @@ class LauncherConfig:
         self.model_path: str = ""
         self.selected_gpu_indices: List[int] = []  # empty = all GPUs
         self.pp_partition: str = ""
-        self.layer_group_size = "auto"  # str "auto" or int
+        self.layer_group_size: int = 2  # layers per group (must be even, min 2 for double buffering)
         self.kv_dtype: str = "fp8_e4m3"
         self.gpu_expert_bits: int = 4
         self.cpu_expert_bits: int = 4
@@ -371,6 +372,8 @@ class LauncherConfig:
         self.gpu_prefill_threshold: int = 300
         self.gguf_path: str = ""
         self.force_load: bool = False
+        self.hcs: bool = False  # HCS expert caching on GPU (off = pure CPU decode)
+        self.multi_gpu_hcs: bool = False  # pin HCS experts on all GPUs
 
     def apply_saved(self, saved: Dict[str, str]) -> None:
         """Apply loaded config values."""
@@ -388,23 +391,21 @@ class LauncherConfig:
             self.pp_partition = saved["CFG_PP_PARTITION"]
         if "CFG_LAYER_GROUP_SIZE" in saved:
             val = saved["CFG_LAYER_GROUP_SIZE"]
-            if val == "auto":
-                self.layer_group_size = "auto"
-            else:
-                try:
-                    self.layer_group_size = int(val)
-                except ValueError:
-                    pass
+            try:
+                v = int(val)
+                if v >= 2:
+                    self.layer_group_size = v
+            except ValueError:
+                pass
         # Legacy compat
         elif "CFG_EXPERT_DIVISOR" in saved:
             val = saved["CFG_EXPERT_DIVISOR"]
-            if val == "auto":
-                self.layer_group_size = "auto"
-            else:
-                try:
-                    self.layer_group_size = int(val)
-                except ValueError:
-                    pass
+            try:
+                v = int(val)
+                if v >= 2:
+                    self.layer_group_size = v
+            except ValueError:
+                pass
         if "CFG_KV_DTYPE" in saved:
             self.kv_dtype = saved["CFG_KV_DTYPE"]
         if "CFG_GPU_EXPERT_BITS" in saved:
@@ -446,6 +447,10 @@ class LauncherConfig:
             self.gguf_path = saved["CFG_GGUF_PATH"]
         if "CFG_FORCE_LOAD" in saved and saved["CFG_FORCE_LOAD"]:
             self.force_load = saved["CFG_FORCE_LOAD"] == "1"
+        if "CFG_HCS" in saved and saved["CFG_HCS"]:
+            self.hcs = saved["CFG_HCS"] == "1"
+        if "CFG_MULTI_GPU_HCS" in saved and saved["CFG_MULTI_GPU_HCS"]:
+            self.multi_gpu_hcs = saved["CFG_MULTI_GPU_HCS"] == "1"
 
     def to_save_dict(self) -> Dict[str, Any]:
         """Convert to dict for saving."""
@@ -467,6 +472,8 @@ class LauncherConfig:
             "CFG_GPU_PREFILL_THRESHOLD": str(self.gpu_prefill_threshold),
             "CFG_GGUF_PATH": self.gguf_path,
             "CFG_FORCE_LOAD": "1" if self.force_load else "",
+            "CFG_HCS": "1" if self.hcs else "",
+            "CFG_MULTI_GPU_HCS": "1" if self.multi_gpu_hcs else "",
         }
 
 
@@ -499,9 +506,14 @@ class ConfigOption:
 
 
 # Config options shown in TUI
-# Layer group size is always "auto" and prefill threshold is always 300 (not user-facing).
 OPTIONS = [
     ConfigOption("PP partition", "pp_partition", opt_type="text", affects_budget=True),
+    ConfigOption("Layer group size", "layer_group_size",
+                 choices=[2, 4, 6, 8, 10, 12], affects_budget=True),
+    ConfigOption("HCS expert cache", "hcs",
+                 choices=[False, True]),
+    ConfigOption("Multi-GPU HCS", "multi_gpu_hcs",
+                 choices=[False, True]),
     ConfigOption("KV dtype", "kv_dtype",
                  choices=["fp8_e4m3", "bf16"], affects_budget=True),
     ConfigOption("GPU expert bits", "gpu_expert_bits",
@@ -524,14 +536,22 @@ OPTIONS = [
 
 def _format_value(opt: ConfigOption, val: Any) -> str:
     """Format a config value for display."""
+    if isinstance(val, bool):
+        return f"{GREEN}ON{NC}" if val else f"{DIM}OFF{NC}"
+    if opt.key == "layer_group_size":
+        return f"{val} layers (double-buffered)"
     return str(val)
 
 
-def _is_option_visible(opt: ConfigOption, model_info: Optional[Dict]) -> bool:
+def _is_option_visible(opt: ConfigOption, model_info: Optional[Dict], cfg: Optional["LauncherConfig"] = None) -> bool:
     """Check if an option should be shown for the current model."""
     if opt.key == "dense_mlp_quant":
         # Only show if model has dense (non-MoE) layers
         if model_info and model_info.get("dense_layers", 0) == 0:
+            return False
+    if opt.key == "multi_gpu_hcs":
+        # Only show when HCS is enabled
+        if cfg and not cfg.hcs:
             return False
     return True
 
@@ -950,8 +970,7 @@ class Launcher:
             if self.selected_gpus:
                 gpu_vram = min(g["vram_mb"] for g in self.selected_gpus)
             from krasis.vram_budget import compute_launcher_budget
-            # For "auto", use chunked (0) for budget estimate
-            lgs = self.cfg.layer_group_size if isinstance(self.cfg.layer_group_size, int) else 1
+            lgs = self.cfg.layer_group_size
             return compute_launcher_budget(
                 model_path=self.cfg.model_path,
                 pp_partition=pp,
@@ -1008,7 +1027,7 @@ class Launcher:
 
         # Config options (filter to visible ones for current model)
         native_dtype = (self.model_info or {}).get("native_dtype", "bfloat16")
-        visible_options = [opt for opt in OPTIONS if _is_option_visible(opt, self.model_info)]
+        visible_options = [opt for opt in OPTIONS if _is_option_visible(opt, self.model_info, self.cfg)]
         lines.append(f"  {DIM}\u2500\u2500\u2500 Configuration \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500{NC}")
         for i, opt in enumerate(visible_options):
             val = getattr(self.cfg, opt.key)
@@ -1174,7 +1193,7 @@ class Launcher:
         _hide_cursor()
         try:
             while True:
-                visible_options = [opt for opt in OPTIONS if _is_option_visible(opt, self.model_info)]
+                visible_options = [opt for opt in OPTIONS if _is_option_visible(opt, self.model_info, self.cfg)]
                 n_visible = len(visible_options)
 
                 _clear_screen()
@@ -1255,6 +1274,11 @@ class Launcher:
         else:
             print(f"  CPU experts:     Build INT{self.cfg.cpu_expert_bits} from native")
         print(f"  PP partition:    {self.cfg.pp_partition}")
+        print(f"  Layer group:     {self.cfg.layer_group_size} layers (double-buffered)")
+        hcs_str = "ON" if self.cfg.hcs else "OFF (pure CPU decode)"
+        if self.cfg.hcs and self.cfg.multi_gpu_hcs:
+            hcs_str += " (multi-GPU)"
+        print(f"  HCS:             {hcs_str}")
         print(f"  KV dtype:        {self.cfg.kv_dtype}")
         print(f"  GPU expert bits: {self.cfg.gpu_expert_bits}")
         print(f"  CPU expert bits: {self.cfg.cpu_expert_bits}")
@@ -1294,6 +1318,7 @@ class Launcher:
             sys.executable, "-m", "krasis.server",
             "--model-path", self.cfg.model_path,
             "--num-gpus", str(num_gpus),
+            "--layer-group-size", str(self.cfg.layer_group_size),
             "--kv-dtype", self.cfg.kv_dtype,
             "--gpu-expert-bits", str(self.cfg.gpu_expert_bits),
             "--cpu-expert-bits", str(self.cfg.cpu_expert_bits),
@@ -1306,6 +1331,10 @@ class Launcher:
             "--port", str(self.cfg.port),
         ]
 
+        if self.cfg.hcs:
+            cmd_args.append("--hcs")
+        if self.cfg.multi_gpu_hcs:
+            cmd_args.append("--multi-gpu-hcs")
         if self.cfg.gguf_path:
             cmd_args.extend(["--gguf-path", self.cfg.gguf_path])
         if self.cfg.force_load:
@@ -1343,8 +1372,8 @@ def parse_args() -> argparse.Namespace:
                         help="Number of GPUs to use")
     parser.add_argument("--selected-gpus", default=None,
                         help="Comma-separated GPU indices to use (e.g. '0,2')")
-    parser.add_argument("--layer-group-size", default=None,
-                        help="Layers to load at once: auto, 0=persistent (all), >=1=N layers/group")
+    parser.add_argument("--layer-group-size", type=int, default=None,
+                        help="Layers per streaming group (even number, min 2 for double buffering)")
     parser.add_argument("--kv-dtype", default=None,
                         help="KV cache dtype: fp8_e4m3 or bf16")
     parser.add_argument("--gpu-expert-bits", type=int, default=None,
@@ -1365,6 +1394,10 @@ def parse_args() -> argparse.Namespace:
                         help="Server bind address (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=None,
                         help="Server port (default: 8012)")
+    parser.add_argument("--hcs", action="store_true", default=None,
+                        help="Enable HCS expert caching on GPU for decode")
+    parser.add_argument("--multi-gpu-hcs", action="store_true", default=None,
+                        help="Pin HCS experts on ALL GPUs")
     parser.add_argument("--gguf-path", default=None,
                         help="Path to GGUF file for CPU experts")
     parser.add_argument("--gpu-prefill-threshold", type=int, default=None,
@@ -1396,13 +1429,7 @@ def _apply_cli_overrides(cfg: LauncherConfig, args: argparse.Namespace) -> None:
     if args.pp_partition is not None:
         cfg.pp_partition = args.pp_partition
     if args.layer_group_size is not None:
-        if args.layer_group_size == "auto":
-            cfg.layer_group_size = "auto"
-        else:
-            try:
-                cfg.layer_group_size = int(args.layer_group_size)
-            except ValueError:
-                pass
+        cfg.layer_group_size = max(2, args.layer_group_size)
     if args.kv_dtype is not None:
         cfg.kv_dtype = args.kv_dtype
     if args.gpu_expert_bits is not None:
@@ -1429,6 +1456,10 @@ def _apply_cli_overrides(cfg: LauncherConfig, args: argparse.Namespace) -> None:
         cfg.gguf_path = args.gguf_path
     if args.force_load:
         cfg.force_load = True
+    if args.hcs is not None and args.hcs:
+        cfg.hcs = True
+    if args.multi_gpu_hcs is not None and args.multi_gpu_hcs:
+        cfg.multi_gpu_hcs = True
 
 
 def main():

@@ -1,14 +1,14 @@
 ================================================================
-Krasis Benchmark — 2026-02-22 08:45:58
+Krasis Benchmark — 2026-02-22 09:27:29
 ================================================================
-Model:            Qwen3-Coder-Next
-Architecture:     qwen3_next, 48 layers, 512 experts, top-10, 12 GQA + 36 linear
-PP Partition:     [48] (2 GPUs)
+Model:            Qwen3-235B-A22B
+Architecture:     qwen3_moe, 94 layers, 128 experts, top-8
+PP Partition:     [94] (1 GPUs)
 
 Hardware:
   CPU:            AMD EPYC 7742 64-Core Processor (64 cores)
-  RAM:            995 GB total, 76.6 GB used by process
-  GPU 0:          NVIDIA RTX 2000 Ada Generation (16380 MB), 5030 MB allocated
+  RAM:            995 GB total, 233.3 GB used by process
+  GPU 0:          NVIDIA RTX 2000 Ada Generation (16380 MB), 5102 MB allocated
   GPU 1:          NVIDIA RTX 2000 Ada Generation (16380 MB), 0 MB allocated
   GPU 2:          NVIDIA RTX 2000 Ada Generation (16380 MB), 0 MB allocated
 
@@ -22,34 +22,29 @@ Quantization:
   KV cache:       FP8 E4M3
 
 Strategy:
-  Layer group size: 2 (layer_grouped(2))
+  Layer group size: 2 (layer_grouped(2) + stream_attn)
   Prefill threshold: 300
-  Mode:           pure_cpu decode, layer_grouped(2) prefill
+  Mode:           pure_cpu decode, layer_grouped(2) + stream_attn prefill
 
 Prefill (10000 tokens, 3 runs):
-  Run 1:  798.9 tok/s, TTFT=12.52s
-  Run 2:  854.6 tok/s, TTFT=11.70s
-  Run 3:  847.6 tok/s, TTFT=11.80s
-  Average: 833.7 tok/s, TTFT=12.01s
+  Run 1:  359.9 tok/s, TTFT=27.78s
+  Run 2:  375.9 tok/s, TTFT=26.60s
+  Run 3:  373.4 tok/s, TTFT=26.78s
+  Average: 369.7 tok/s, TTFT=27.05s
 
 Decode (64 tokens, 3 runs):
-  Run 1:  10.66 tok/s (93.8ms/tok)
-  Run 2:  10.59 tok/s (94.4ms/tok)
-  Run 3:  10.54 tok/s (94.9ms/tok)
-  Average: 10.60 tok/s (94.4ms/tok)
+  Run 1:  1.57 tok/s (636.0ms/tok)
+  Run 2:  1.60 tok/s (625.8ms/tok)
+  Run 3:  1.58 tok/s (634.6ms/tok)
+  Average: 1.58 tok/s (632.1ms/tok)
 
 Verification:
   Prefill prompt: user
 Distributed consensus algorithms form the backbone of modern fault-tolerant systems. The Paxos algorithm, proposed by Leslie Lamport, achieves consensus among a group of processes even when some ... [52428 chars total]
   Decode prompt:  Write a poem about recursion in programming at least 100 words long.
   Generated output (64 tokens):
-    **The Recursive Ladder**
+    <think>
+    Okay, the user wants a poem about recursion in programming, at least 100 words. Let me start by understanding what recursion is. It's a programming concept where a function calls itself. So I need to incorporate that idea into the poem.
     
-    A function calls itself—no error, no dread,  
-    A mirror reflecting its own inner thread.  
-    Like a dream within a dream, deep and profound,  
-    It spirals inward on common ground.  
-    
-    *"Base case first!"* whispers the sage in the night—  
-    A guard
+    First, think of metaphors or images that represent recursion
 ================================================================

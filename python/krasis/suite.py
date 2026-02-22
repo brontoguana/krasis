@@ -53,16 +53,24 @@ class SuiteCombo:
     kv_dtype: str = "fp8_e4m3"
     krasis_threads: int = 48
     gguf_path: str = ""
+    layer_group_size: int = 2
+    hcs: bool = False
 
     @property
     def label(self) -> str:
-        """Auto-generated label: {num_gpus}gpu_int{gpu}gpu_int{cpu}cpu."""
-        return f"{self.num_gpus}gpu_int{self.gpu_expert_bits}gpu_int{self.cpu_expert_bits}cpu"
+        """Auto-generated label including GPU/CPU bits, lgs, and HCS."""
+        parts = [f"{self.num_gpus}gpu_int{self.gpu_expert_bits}gpu_int{self.cpu_expert_bits}cpu"]
+        parts.append(f"lgs{self.layer_group_size}")
+        if self.hcs:
+            parts.append("hcs")
+        else:
+            parts.append("nohcs")
+        return "_".join(parts)
 
     @property
     def log_filename(self) -> str:
-        """Filename for the log: {model}_{label}.log."""
-        return f"{self.model_name}_{self.label}.log"
+        """Filename for the log: {model}_native_{label}.log."""
+        return f"{self.model_name}_native_{self.label}.log"
 
 
 @dataclass
@@ -185,6 +193,8 @@ class SuiteRunner:
                     kv_dtype=cfg.get("kv_dtype", "fp8_e4m3"),
                     krasis_threads=cfg.get("krasis_threads", 48),
                     gguf_path=gguf_path,
+                    layer_group_size=cfg.get("layer_group_size", 2),
+                    hcs=cfg.get("hcs", False),
                 )
                 combos.append(combo)
 
@@ -197,6 +207,7 @@ class SuiteRunner:
             "--model-path", combo.model_path,
             "--num-gpus", str(combo.num_gpus),
             "--benchmark",
+            "--layer-group-size", str(combo.layer_group_size),
             "--kv-dtype", combo.kv_dtype,
             "--gpu-expert-bits", str(combo.gpu_expert_bits),
             "--cpu-expert-bits", str(combo.cpu_expert_bits),
@@ -206,6 +217,8 @@ class SuiteRunner:
             "--lm-head-quant", combo.lm_head_quant,
             "--krasis-threads", str(combo.krasis_threads),
         ]
+        if combo.hcs:
+            cmd.append("--hcs")
         if combo.gguf_path:
             cmd.extend(["--gguf-path", combo.gguf_path])
         return cmd
@@ -488,8 +501,8 @@ class SuiteRunner:
         lines.append("")
 
         # Summary table
-        lines.append("| Model | Config | Prefill (tok/s) | TTFT (s) | Decode (tok/s) | ms/tok | Status | Log |")
-        lines.append("|-------|--------|----------------:|----------:|---------------:|-------:|--------|-----|")
+        lines.append("| Model | Config | LGS | HCS | Prefill (tok/s) | TTFT (s) | Decode (tok/s) | ms/tok | Status | Log |")
+        lines.append("|-------|--------|----:|-----|----------------:|----------:|---------------:|-------:|--------|-----|")
 
         for r in results:
             c = r.combo
@@ -506,9 +519,11 @@ class SuiteRunner:
                 decode = "-"
                 ms_tok = "-"
 
+            lgs = str(c.layer_group_size)
+            hcs = "ON" if c.hcs else "OFF"
             log_rel = os.path.basename(r.log_path)
             lines.append(
-                f"| {c.model_name} | {c.label} | {prefill} | {ttft} | {decode} | {ms_tok} | {status} | [{log_rel}]({log_rel}) |"
+                f"| {c.model_name} | {c.label} | {lgs} | {hcs} | {prefill} | {ttft} | {decode} | {ms_tok} | {status} | [{log_rel}]({log_rel}) |"
             )
 
         # Failures section

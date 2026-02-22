@@ -435,9 +435,9 @@ def main():
                         help="Force reload of cached weights")
     parser.add_argument("--multi-gpu-hcs", action="store_true",
                         help="Pin HCS experts on ALL GPUs (slower on no-P2P systems)")
-    parser.add_argument("--stream-attention", action="store_true",
-                        help="Stream attention weights layer-by-layer during decode "
-                             "(frees VRAM for more HCS experts, enables large models on 1 GPU)")
+    parser.add_argument("--no-stream-attention", action="store_true",
+                        help="Disable streaming attention (load all layers persistently on GPU). "
+                             "Only use if all layers fit in VRAM.")
     parser.add_argument("--layer-group-size", type=int, default=2,
                         help="Number of MoE layers to load per group during prefill (default: 2)")
     parser.add_argument("--benchmark", action="store_true",
@@ -505,7 +505,7 @@ def main():
         force_load=args.force_load,
         gpu_prefill_threshold=1 if args.hcs else 300,  # GPU decode with HCS, CPU decode default
         kv_cache_mb=args.kv_cache_mb,
-        stream_attention=args.stream_attention,
+        stream_attention=not args.no_stream_attention,
     )
 
     _status("Loading model weights")

@@ -399,7 +399,7 @@ class KrasisModel:
         gguf_path: Optional[str] = None,
         gguf_native: bool = False,
         kv_cache_mb: int = 2000,
-        stream_attention: bool = False,
+        stream_attention: bool = True,
     ):
         self.cfg = ModelConfig.from_model_path(model_path)
         self.quant_cfg = quant_cfg or QuantConfig()
@@ -2141,7 +2141,8 @@ class KrasisModel:
             _t_unified_layers = 0  # count of unified (same-device) layers
 
         # Streaming attention: double-buffered (ping-pong) DMA
-        _stream_attn = self._stream_attn_enabled and M == 1
+        # Enable for ANY forward pass where attention weights are offloaded to CPU
+        _stream_attn = self._stream_attn_enabled
         _prefetch_started = False  # whether an async prefetch is in flight
         _prefetch_buf_idx = -1     # which buffer the prefetch targets
 
