@@ -541,13 +541,29 @@ class KrasisModel:
             print(f"\n\033[1m\033[36m▸ Offloading attention for streaming decode\033[0m", flush=True)
             self._init_stream_attention()
 
-        # Phase 2: CPU expert weights
+        # Phase 2: CPU + GPU expert weights (Rust engine)
         cpu_start = time.perf_counter()
-        print(f"\n\033[1m\033[36m▸ Loading CPU expert weights\033[0m", flush=True)
-        logger.info("Phase 2: Loading CPU expert weights (Krasis INT4)...")
+        cpu_bits = self.quant_cfg.cpu_expert_bits
+        gpu_bits = self.quant_cfg.gpu_expert_bits
+        cache_dir = os.path.join(self.cfg.model_path, ".krasis_cache")
+        has_gpu_cache = os.path.isfile(os.path.join(cache_dir, f"experts_marlin_g128.bin"))
+        has_cpu_cache = os.path.isfile(os.path.join(cache_dir, f"experts_cpu_{cpu_bits}_g128.bin"))
+        if has_gpu_cache and has_cpu_cache:
+            print(f"\n\033[1m\033[36m▸ Loading expert weights from cache\033[0m", flush=True)
+        else:
+            building = []
+            if not has_gpu_cache:
+                building.append(f"GPU INT{gpu_bits} Marlin")
+            if not has_cpu_cache:
+                building.append(f"CPU INT{cpu_bits}")
+            print(f"\n\033[1m\033[36m▸ Building {' + '.join(building)} expert cache (one-time, may take several minutes)\033[0m", flush=True)
+            print(f"  \033[2mCache will be saved to {cache_dir} for instant loading next time.\033[0m", flush=True)
+        logger.info("Phase 2: Loading expert weights (CPU INT%d + GPU INT%d)...", cpu_bits, gpu_bits)
         self._load_cpu_experts()
         cpu_elapsed = time.perf_counter() - cpu_start
-        logger.info("CPU experts loaded in %.1fs", cpu_elapsed)
+        logger.info("Expert weights loaded in %.1fs", cpu_elapsed)
+        if not (has_gpu_cache and has_cpu_cache):
+            print(f"  \033[0;32mExpert cache built in {cpu_elapsed:.0f}s — next launch will be much faster.\033[0m", flush=True)
 
         # Post-load RSS check: verify RAM estimate accuracy
         if self._estimated_expert_ram_gb > 0:
