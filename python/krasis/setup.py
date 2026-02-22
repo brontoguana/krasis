@@ -247,17 +247,29 @@ def _install_system_deps():
         if os.path.isdir(cuda_bin) and cuda_bin not in os.environ.get("PATH", ""):
             os.environ["PATH"] = cuda_bin + ":" + os.environ.get("PATH", "")
             print(f"  Added {cuda_bin} to PATH for this session.")
+        # Set CUDA_HOME so FlashInfer/PyTorch JIT find the right toolkit
+        cuda_home = os.path.dirname(cuda_bin)
+        if os.path.isdir(cuda_home):
+            os.environ["CUDA_HOME"] = cuda_home
             # Add to bashrc so it persists
             bashrc = os.path.expanduser("~/.bashrc")
             export_line = f'export PATH={cuda_bin}:$PATH'
+            export_cuda_home = f'export CUDA_HOME={cuda_home}'
             try:
                 existing = ""
                 if os.path.isfile(bashrc):
                     with open(bashrc) as f:
                         existing = f.read()
+                lines_to_add = []
                 if export_line not in existing:
+                    lines_to_add.append(export_line)
+                if export_cuda_home not in existing:
+                    lines_to_add.append(export_cuda_home)
+                if lines_to_add:
                     with open(bashrc, "a") as f:
-                        f.write(f"\n# Added by krasis-setup\n{export_line}\n")
+                        f.write(f"\n# Added by krasis-setup\n")
+                        for line in lines_to_add:
+                            f.write(f"{line}\n")
                     print(f"  Added to ~/.bashrc (will persist across sessions).")
             except OSError:
                 print(f"  {DIM}Add to ~/.bashrc manually: {export_line}{NC}")

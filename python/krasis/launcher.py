@@ -1497,16 +1497,38 @@ def _check_gpu_deps():
     if not shutil.which("nvidia-smi"):
         return  # no NVIDIA GPU — nothing to check
 
-    # Ensure CUDA bin is on PATH (krasis-setup adds to bashrc but
-    # current session may not have it yet)
-    cuda_bin = "/usr/local/cuda/bin"
-    if os.path.isdir(cuda_bin) and cuda_bin not in os.environ.get("PATH", ""):
-        os.environ["PATH"] = cuda_bin + ":" + os.environ.get("PATH", "")
+    # Find nvcc: try multiple common locations so it works even if
+    # the user's PATH doesn't include the CUDA toolkit yet.
+    _cuda_search_dirs = [
+        "/usr/local/cuda/bin",
+        "/usr/local/cuda-12.8/bin",
+        "/usr/local/cuda-12.6/bin",
+        "/usr/local/cuda-12.4/bin",
+        "/usr/local/cuda-12.1/bin",
+        "/usr/local/cuda-11.8/bin",
+        "/usr/bin",
+    ]
+    nvcc_path = shutil.which("nvcc")
+    if not nvcc_path:
+        for d in _cuda_search_dirs:
+            candidate = os.path.join(d, "nvcc")
+            if os.path.isfile(candidate):
+                nvcc_path = candidate
+                break
+    if nvcc_path:
+        cuda_bin = os.path.dirname(nvcc_path)
+        cuda_home = os.path.dirname(cuda_bin)  # e.g. /usr/local/cuda-12.8
+        # Add to PATH so subprocess/ninja can find nvcc
+        if cuda_bin not in os.environ.get("PATH", ""):
+            os.environ["PATH"] = cuda_bin + ":" + os.environ.get("PATH", "")
+        # Set CUDA_HOME so PyTorch/FlashInfer JIT find the right toolkit
+        if "CUDA_HOME" not in os.environ:
+            os.environ["CUDA_HOME"] = cuda_home
 
     problems = []
 
     # Check nvcc
-    has_nvcc = shutil.which("nvcc") is not None
+    has_nvcc = nvcc_path is not None
     if not has_nvcc:
         problems.append("CUDA toolkit (nvcc)")
 
