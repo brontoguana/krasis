@@ -164,6 +164,25 @@ PROMPTS = [
     # ── Edge case: very long single word ──
     "Supercalifragilisticexpialidocious " * 20,
 
+    # ── Very long input (~60K words / ~80K tokens) ──
+    # Tests numerical stability of linear attention recurrent state,
+    # KV cache capacity, and RoPE at extreme context lengths.
+    "Analyze the following comprehensive technical document and provide a brief summary. " +
+    " ".join(
+        f"Chapter {ch}: Section {s}. "
+        f"In this section we examine the theoretical foundations of distributed system design "
+        f"with particular focus on consensus protocol {ch}.{s}. "
+        f"The key insight from experiment {ch * 100 + s} is that latency scales logarithmically "
+        f"with the number of replicas when using optimistic concurrency control. "
+        f"Furthermore, the throughput measurements from benchmark run {ch * 1000 + s} "
+        f"demonstrate that the proposed algorithm achieves {90 + (ch * s) % 10}% "
+        f"efficiency compared to the theoretical maximum under realistic network conditions. "
+        f"The statistical analysis with p-value {0.001 + (ch + s) * 0.0001:.4f} confirms "
+        f"the significance of these results across all tested configurations."
+        for ch in range(1, 101)
+        for s in range(1, 8)
+    ),
+
     # ── Whitespace variations ──
     "   spaces before and after   ",
     "\tTab\tseparated\twords",
@@ -234,6 +253,9 @@ class StressTest:
             result["error"] = str(e)
             return result
 
+        # Scale timeout for very long prompts (prefill alone can take minutes)
+        effective_timeout = max(self.timeout, len(tokens) / 50.0)
+
         if len(tokens) == 0:
             result["status"] = "SKIP_EMPTY"
             return result
@@ -280,9 +302,9 @@ class StressTest:
                 for step in range(self.max_new_tokens - 1):
                     if next_token in stop_ids:
                         break
-                    if time.perf_counter() - t0 > self.timeout:
+                    if time.perf_counter() - t0 > effective_timeout:
                         result["status"] = "FAIL_TIMEOUT"
-                        result["error"] = f"Exceeded {self.timeout}s timeout at step {step}"
+                        result["error"] = f"Exceeded {effective_timeout:.0f}s timeout at step {step}"
                         break
 
                     pos = len(tokens) + step
