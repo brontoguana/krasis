@@ -1,15 +1,15 @@
 ================================================================
-Krasis Benchmark — 2026-02-22 10:12:09
+Krasis Benchmark — 2026-02-22 10:09:36
 ================================================================
 Model:            Qwen3-Coder-Next
 Architecture:     qwen3_next, 48 layers, 512 experts, top-10, 12 GQA + 36 linear
-PP Partition:     [48] (2 GPUs)
+PP Partition:     [48] (1 GPUs)
 
 Hardware:
   CPU:            AMD EPYC 7742 64-Core Processor (64 cores)
-  RAM:            995 GB total, 80.0 GB used by process
+  RAM:            995 GB total, 79.8 GB used by process
   GPU 0:          NVIDIA RTX 2000 Ada Generation (16380 MB), 3674 MB allocated
-  GPU 1:          NVIDIA RTX 2000 Ada Generation (16380 MB), 0 MB allocated
+  GPU 1:          NVIDIA RTX 2000 Ada Generation (16380 MB), N/A
   GPU 2:          NVIDIA RTX 2000 Ada Generation (16380 MB), N/A
 
 Quantization:
@@ -27,16 +27,16 @@ Strategy:
   Mode:           pure_cpu decode, layer_grouped(2) + stream_attn prefill
 
 Prefill (10000 tokens, 3 runs):
-  Run 1:  822.7 tok/s, TTFT=12.16s
-  Run 2:  884.4 tok/s, TTFT=11.31s
-  Run 3:  882.0 tok/s, TTFT=11.34s
-  Average: 863.0 tok/s, TTFT=11.60s
+  Run 1:  966.4 tok/s, TTFT=10.35s
+  Run 2:  1048.8 tok/s, TTFT=9.53s
+  Run 3:  1047.2 tok/s, TTFT=9.55s
+  Average: 1020.8 tok/s, TTFT=9.81s
 
 Decode (64 tokens, 3 runs):
-  Run 1:  7.83 tok/s (127.6ms/tok)
-  Run 2:  7.80 tok/s (128.2ms/tok)
-  Run 3:  7.79 tok/s (128.3ms/tok)
-  Average: 7.81 tok/s (128.0ms/tok)
+  Run 1:  7.87 tok/s (127.0ms/tok)
+  Run 2:  7.81 tok/s (128.0ms/tok)
+  Run 3:  7.86 tok/s (127.3ms/tok)
+  Average: 7.85 tok/s (127.4ms/tok)
 
 Verification:
   Prefill prompt: user
@@ -45,10 +45,10 @@ Distributed consensus algorithms form the backbone of modern fault-tolerant syst
   Generated output (64 tokens):
     **The Recursive Ladder**
     
-    A function calls itself—not magic, but art,  
-    A mirror held up to the logic of the heart.  
-    It peels back the layers like an onion’s dense skin,  
-    Each call a new voice whispering, “Let’s begin.”  
+    A function calls itself—no error, no dread—  
+    A spiral of logic, a thought in its head:  
+    *"If base is not met, I must try once again,  
+    With smaller input, a path to descend."*  
     
-    *Base case first!*—the
+    Like stairs built of thought, each step leans
 ================================================================

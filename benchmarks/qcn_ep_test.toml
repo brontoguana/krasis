@@ -1,0 +1,14 @@
+# Quick QCN 1-GPU vs 2-GPU test for EP async fix
+
+[[config]]
+num_gpus = 1
+gpu_expert_bits = 4
+cpu_expert_bits = 4
+
+[[config]]
+num_gpus = 2
+gpu_expert_bits = 4
+cpu_expert_bits = 4
+
+[[model]]
+name = "Qwen3-Coder-Next"

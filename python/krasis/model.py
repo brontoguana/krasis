@@ -2698,6 +2698,22 @@ class KrasisModel:
             for mgr in all_managers:
                 ep_streams[mgr.device] = torch.cuda.Stream(device=mgr.device)
 
+        # ── Async EP transfer: pinned CPU bounce buffers + copy stream ──
+        # When P2P is broken, cross-GPU transfers go through CPU.  Without
+        # pinned buffers + a dedicated copy stream, h.cpu() blocks the host
+        # thread until GPU0's default stream drains (serializing GPU0 forward
+        # and GPU1 forward).  The copy stream runs D2H in parallel with GPU0's
+        # forward, and event-based sync eliminates host-blocking synchronize().
+        _ep_copy_stream = None
+        _ep_pinned_h = None
+        _ep_pinned_ids = None
+        _ep_pinned_wts = None
+        _ep_pinned_outs = {}       # device -> pinned output buffer
+        _ep_input_read_event = None  # GPU1 done reading pinned input
+        _ep_has_secondary = use_ep and any(m.device != dev for m in all_managers)
+        if _ep_has_secondary and not _check_p2p():
+            _ep_copy_stream = torch.cuda.Stream(device=dev)
+
         # ── Lightweight per-group timing (DMA vs compute breakdown) ──
         _layer_timing = use_ep and os.environ.get("KRASIS_LAYER_TIMING") == "1"
         if _layer_timing:
@@ -2954,6 +2970,36 @@ class KrasisModel:
                     if ep_timing:
                         _gpu_events = {}  # gpu_idx -> (start_event, end_event, device)
 
+                    # ── Async pinned bounce: start D2H on copy stream ──
+                    # The copy stream runs D2H in parallel with GPU0's forward
+                    # on the default stream.  Without this, h.cpu() blocks the
+                    # host until GPU0's default stream drains (serializing the
+                    # two GPU forwards).
+                    _ep_copy_done = None
+                    if _ep_copy_stream is not None:
+                        # Lazy-allocate pinned buffers on first use
+                        _M = h.shape[0]
+                        if _ep_pinned_h is None or _ep_pinned_h.shape[0] < _M:
+                            _ep_pinned_h = torch.empty(
+                                _M, h.shape[1], dtype=h.dtype,
+                                device='cpu', pin_memory=True)
+                            _ep_pinned_ids = torch.empty(
+                                _M, topk_ids.shape[1], dtype=topk_ids.dtype,
+                                device='cpu', pin_memory=True)
+                            _ep_pinned_wts = torch.empty(
+                                _M, topk_weights.shape[1], dtype=topk_weights.dtype,
+                                device='cpu', pin_memory=True)
+                        # Wait for any previous GPU1 H2D reads to finish
+                        # before overwriting the pinned buffer.
+                        if _ep_input_read_event is not None:
+                            _ep_copy_stream.wait_event(_ep_input_read_event)
+                        _ep_copy_stream.wait_event(h_ready)
+                        with torch.cuda.stream(_ep_copy_stream):
+                            _ep_pinned_h[:_M].copy_(h, non_blocking=True)
+                            _ep_pinned_ids[:_M].copy_(topk_ids, non_blocking=True)
+                            _ep_pinned_wts[:_M].copy_(topk_weights, non_blocking=True)
+                        _ep_copy_done = _ep_copy_stream.record_event()
+
                     partial_outputs = []
                     for _gi, mgr in enumerate(all_managers):
                         if mgr.device == dev:
@@ -2967,7 +3013,29 @@ class KrasisModel:
                                 _ev_end.record()
                                 _gpu_events[_gi] = (_ev_start, _ev_end, dev)
                             partial_outputs.append((mgr.device, out))
+                        elif _ep_copy_stream is not None:
+                            # ── Async path: copy from pinned buffer ──
+                            stream = ep_streams[mgr.device]
+                            stream.wait_event(_ep_copy_done)
+                            with torch.cuda.stream(stream):
+                                if ep_timing:
+                                    _ev_start = torch.cuda.Event(enable_timing=True)
+                                    _ev_end = torch.cuda.Event(enable_timing=True)
+                                    _ev_start.record(stream)
+                                _M = h.shape[0]
+                                h_dev = _ep_pinned_h[:_M].to(mgr.device, non_blocking=True)
+                                ids_dev = _ep_pinned_ids[:_M].to(mgr.device, non_blocking=True)
+                                wts_dev = _ep_pinned_wts[:_M].to(mgr.device, non_blocking=True)
+                                # Mark pinned input buffer as consumed
+                                _ep_input_read_event = stream.record_event()
+                                out = mgr.forward(moe_layer_idx, h_dev, ids_dev, wts_dev,
+                                                  routed_only=True)
+                                if ep_timing:
+                                    _ev_end.record(stream)
+                                    _gpu_events[_gi] = (_ev_start, _ev_end, mgr.device)
+                                partial_outputs.append((mgr.device, out))
                         else:
+                            # ── Fallback: synchronous _to_device (P2P works) ──
                             stream = ep_streams[mgr.device]
                             stream.wait_event(h_ready)
                             with torch.cuda.stream(stream):
@@ -2995,6 +3063,25 @@ class KrasisModel:
                     for po_device, po_out in partial_outputs:
                         if po_device == dev:
                             routed_output = po_out
+                        elif _ep_copy_stream is not None:
+                            # ── Async output gather via pinned buffer ──
+                            _M = po_out.shape[0]
+                            if po_device not in _ep_pinned_outs or _ep_pinned_outs[po_device].shape[0] < _M:
+                                _ep_pinned_outs[po_device] = torch.empty(
+                                    _M, po_out.shape[1], dtype=po_out.dtype,
+                                    device='cpu', pin_memory=True)
+                            po_pinned = _ep_pinned_outs[po_device]
+                            # D2H on secondary GPU's ep_stream (sequenced after forward)
+                            with torch.cuda.stream(ep_streams[po_device]):
+                                po_pinned[:_M].copy_(po_out, non_blocking=True)
+                            out_ready = ep_streams[po_device].record_event()
+                            # H2D on GPU0's default stream (wait for D2H via event)
+                            torch.cuda.current_stream(dev).wait_event(out_ready)
+                            out_on_primary = po_pinned[:_M].to(dev, non_blocking=True)
+                            if routed_output is None:
+                                routed_output = out_on_primary
+                            else:
+                                routed_output = routed_output + out_on_primary
                         else:
                             ep_streams[po_device].synchronize()
                             out_on_primary = _to_device(po_out, dev)
