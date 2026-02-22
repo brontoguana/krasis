@@ -67,15 +67,33 @@ def _get_cuda_version_from_driver():
     return "cu126", "12.6"  # default
 
 
+def _get_nvcc_version():
+    """Get nvcc major.minor version, or None if not found."""
+    nvcc = shutil.which("nvcc")
+    if not nvcc:
+        for path in ["/usr/local/cuda/bin/nvcc", "/usr/bin/nvcc"]:
+            if os.path.isfile(path):
+                nvcc = path
+                break
+    if not nvcc:
+        return None
+    try:
+        out = subprocess.check_output([nvcc, "--version"], text=True, timeout=5)
+        # Parse "release 12.8, V12.8.89" or similar
+        for line in out.split("\n"):
+            if "release" in line:
+                # e.g. "Cuda compilation tools, release 12.8, V12.8.89"
+                parts = line.split("release")[-1].strip().split(",")[0].strip()
+                major, minor = parts.split(".")[:2]
+                return (int(major), int(minor))
+    except Exception:
+        pass
+    return (0, 0)  # found but can't parse version
+
+
 def _has_nvcc():
     """Check if nvcc is available (needed for FlashInfer JIT)."""
-    if shutil.which("nvcc"):
-        return True
-    # Check common CUDA install locations
-    for path in ["/usr/local/cuda/bin/nvcc", "/usr/bin/nvcc"]:
-        if os.path.isfile(path):
-            return True
-    return False
+    return _get_nvcc_version() is not None
 
 
 def _detect_distro():
@@ -103,64 +121,157 @@ def _is_wsl():
         return False
 
 
+def _get_required_cuda_version():
+    """Determine minimum CUDA toolkit version needed for this GPU.
+
+    Returns (major, minor) tuple, e.g. (12, 8) for Blackwell.
+    """
+    try:
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=compute_cap",
+             "--format=csv,noheader,nounits"],
+            text=True, timeout=10,
+        ).strip().split("\n")[0]
+        major, minor = out.split(".")
+        sm = (int(major), int(minor))
+        # SM 12.0 (Blackwell) needs CUDA 12.8+
+        if sm >= (12, 0):
+            return (12, 8)
+        # SM 10.0 needs CUDA 12.6+
+        if sm >= (10, 0):
+            return (12, 6)
+        # SM 8.9 (Ada) needs CUDA 11.8+
+        if sm >= (8, 9):
+            return (11, 8)
+        return (11, 8)
+    except Exception:
+        return (12, 6)  # safe default
+
+
 def _install_system_deps():
     """Install system packages: CUDA toolkit (nvcc) and ninja build tool."""
     print(f"\n{BOLD}Step 1: System Packages (nvcc, ninja){NC}")
 
-    need_nvcc = not _has_nvcc()
     need_ninja = not shutil.which("ninja") and not shutil.which("ninja-build")
 
+    # Check nvcc: either missing or too old for this GPU
+    nvcc_ver = _get_nvcc_version()
+    required_ver = _get_required_cuda_version()
+    need_nvcc = nvcc_ver is None
+    nvcc_too_old = False
+    if nvcc_ver is not None and nvcc_ver < required_ver:
+        nvcc_too_old = True
+        need_nvcc = True
+
     if not need_nvcc and not need_ninja:
-        print(f"  {GREEN}nvcc and ninja already installed.{NC}")
+        print(f"  {GREEN}nvcc {nvcc_ver[0]}.{nvcc_ver[1]} and ninja already installed.{NC}")
         return True
 
     missing = []
     if need_nvcc:
-        missing.append("nvcc")
+        if nvcc_too_old:
+            missing.append(f"nvcc (have {nvcc_ver[0]}.{nvcc_ver[1]}, need {required_ver[0]}.{required_ver[1]}+)")
+        else:
+            missing.append("nvcc")
     if need_ninja:
         missing.append("ninja")
-    print(f"  {YELLOW}Missing: {', '.join(missing)} — needed for FlashInfer JIT.{NC}")
+    print(f"  {YELLOW}{'Need upgrade' if nvcc_too_old else 'Missing'}: {', '.join(missing)}{NC}")
     print(f"  Installing (will ask for your password)...\n")
 
     distro = _detect_distro()
+    is_wsl = _is_wsl()
     sudo = [] if os.geteuid() == 0 else ["sudo"]
 
-    if distro == "debian":
-        packages = []
-        if need_nvcc:
-            packages.append("nvidia-cuda-toolkit")
-        if need_ninja:
-            packages.append("ninja-build")
+    # Install ninja first (simple apt/dnf package)
+    if need_ninja:
+        if distro == "debian":
+            _run(sudo + ["apt-get", "update", "-qq"], check=False)
+            ret = _run(sudo + ["apt-get", "install", "-y", "ninja-build"], check=False)
+        elif distro == "rhel":
+            ret = _run(sudo + ["dnf", "install", "-y", "ninja-build"], check=False)
+        else:
+            ret = type("R", (), {"returncode": 1})()
+        if ret.returncode != 0:
+            print(f"  {RED}Failed to install ninja.{NC}")
+
+    # Install CUDA toolkit from NVIDIA repo (not the ancient distro package)
+    if need_nvcc and distro == "debian":
+        cuda_pkg = f"cuda-toolkit-{required_ver[0]}-{required_ver[1]}"
+        repo = "wsl-ubuntu" if is_wsl else "ubuntu2204"
+        keyring_url = (
+            f"https://developer.download.nvidia.com/compute/cuda/repos/"
+            f"{repo}/x86_64/cuda-keyring_1.1-1_all.deb"
+        )
+        print(f"  Adding NVIDIA CUDA {required_ver[0]}.{required_ver[1]} repository...")
+
+        # Remove old distro nvcc if present
+        if nvcc_too_old:
+            _run(sudo + ["apt-get", "remove", "-y", "nvidia-cuda-toolkit"], check=False)
+
+        # Download and install keyring
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".deb", delete=False) as tmp:
+            keyring_path = tmp.name
+        ret = _run(["wget", "-q", "-O", keyring_path, keyring_url], check=False)
+        if ret.returncode != 0:
+            # Try curl as fallback
+            ret = _run(["curl", "-sL", "-o", keyring_path, keyring_url], check=False)
+        if ret.returncode != 0:
+            print(f"  {RED}Failed to download CUDA keyring. Install manually:{NC}")
+            print(f"    wget {keyring_url}")
+            print(f"    sudo dpkg -i cuda-keyring_1.1-1_all.deb")
+            print(f"    sudo apt install {cuda_pkg}")
+            return False
+
         cmds = [
+            sudo + ["dpkg", "-i", keyring_path],
             sudo + ["apt-get", "update", "-qq"],
-            sudo + ["apt-get", "install", "-y"] + packages,
+            sudo + ["apt-get", "install", "-y", cuda_pkg],
         ]
         for cmd in cmds:
             ret = _run(cmd, check=False)
             if ret.returncode != 0:
-                print(f"  {RED}Failed. Try manually: sudo apt install {' '.join(packages)}{NC}")
+                print(f"  {RED}Failed. Try manually: sudo apt install {cuda_pkg}{NC}")
                 return False
-    elif distro == "rhel":
-        packages = []
-        if need_nvcc:
-            packages.append("cuda-toolkit")
-        if need_ninja:
-            packages.append("ninja-build")
-        ret = _run(sudo + ["dnf", "install", "-y"] + packages, check=False)
+
+        # Clean up
+        try:
+            os.unlink(keyring_path)
+        except OSError:
+            pass
+
+        # Add to PATH if needed
+        cuda_bin = f"/usr/local/cuda-{required_ver[0]}.{required_ver[1]}/bin"
+        if not os.path.isdir(cuda_bin):
+            cuda_bin = "/usr/local/cuda/bin"
+        if os.path.isdir(cuda_bin) and cuda_bin not in os.environ.get("PATH", ""):
+            os.environ["PATH"] = cuda_bin + ":" + os.environ.get("PATH", "")
+            print(f"  Added {cuda_bin} to PATH for this session.")
+            # Suggest adding to bashrc
+            print(f"  {DIM}Add to ~/.bashrc: export PATH={cuda_bin}:$PATH{NC}")
+
+    elif need_nvcc and distro == "rhel":
+        cuda_pkg = f"cuda-toolkit-{required_ver[0]}-{required_ver[1]}"
+        ret = _run(sudo + ["dnf", "install", "-y", cuda_pkg], check=False)
         if ret.returncode != 0:
-            print(f"  {RED}Failed. Try manually: sudo dnf install {' '.join(packages)}{NC}")
+            print(f"  {RED}Failed. Try manually: sudo dnf install {cuda_pkg}{NC}")
             return False
-    else:
-        print(f"  {RED}Unknown distro. Install manually:{NC}")
-        print(f"    sudo apt install nvidia-cuda-toolkit ninja-build  (Debian/Ubuntu)")
-        print(f"    sudo dnf install cuda-toolkit ninja-build          (Fedora/RHEL)")
+    elif need_nvcc:
+        print(f"  {RED}Unknown distro. Install CUDA toolkit {required_ver[0]}.{required_ver[1]}+ manually.{NC}")
         return False
 
+    # Verify
     ok = True
-    if need_nvcc and not _has_nvcc():
-        print(f"  {YELLOW}nvcc still not found on PATH.{NC}")
+    new_nvcc = _get_nvcc_version()
+    if need_nvcc and (new_nvcc is None or new_nvcc < required_ver):
+        if new_nvcc:
+            print(f"  {YELLOW}nvcc {new_nvcc[0]}.{new_nvcc[1]} still too old (need {required_ver[0]}.{required_ver[1]}+).{NC}")
+        else:
+            print(f"  {YELLOW}nvcc still not found on PATH.{NC}")
         print(f"  Try: export PATH=/usr/local/cuda/bin:$PATH")
         ok = False
+    elif need_nvcc and new_nvcc:
+        print(f"  {GREEN}nvcc {new_nvcc[0]}.{new_nvcc[1]} installed.{NC}")
     if need_ninja and not shutil.which("ninja") and not shutil.which("ninja-build"):
         print(f"  {YELLOW}ninja still not found on PATH.{NC}")
         ok = False
