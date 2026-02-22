@@ -1482,17 +1482,29 @@ def _ensure_gpu_deps():
     if not shutil.which("nvidia-smi"):
         return  # no NVIDIA GPU — nothing to do
 
-    # Step 2: Is torch already CUDA-enabled?
+    # Step 2: Check for nvcc (needed for FlashInfer JIT)
+    has_nvcc = (
+        shutil.which("nvcc") is not None
+        or os.path.isfile("/usr/local/cuda/bin/nvcc")
+    )
+    if not has_nvcc:
+        print(f"{YELLOW}CUDA toolkit (nvcc) not found — needed for FlashInfer.{NC}")
+        print(f"Run: {BOLD}sudo krasis-setup{NC}")
+        print()
+
+    # Step 3: Is torch already CUDA-enabled?
     try:
         import torch
         if torch.cuda.is_available():
             # CUDA torch is fine — check optional GPU packages
             _ensure_gpu_packages()
+            if not has_nvcc:
+                return  # warn but don't block
             return
     except ImportError:
         pass  # torch not installed at all
 
-    # Step 3: Detect CUDA version from nvidia-smi
+    # Step 4: Detect CUDA version from nvidia-smi
     cuda_ver = None
     try:
         out = subprocess.check_output(
