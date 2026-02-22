@@ -36,11 +36,15 @@ class Tokenizer:
         add_generation_prompt: bool = True,
     ) -> List[int]:
         """Format messages using the model's chat template and tokenize."""
-        return self.tokenizer.apply_chat_template(
+        result = self.tokenizer.apply_chat_template(
             messages,
             add_generation_prompt=add_generation_prompt,
             tokenize=True,
         )
+        # Some transformers versions return a string even with tokenize=True
+        if isinstance(result, str):
+            result = self.tokenizer.encode(result, add_special_tokens=False)
+        return result
 
     def encode(self, text: str, add_special_tokens: bool = True) -> List[int]:
         return self.tokenizer.encode(text, add_special_tokens=add_special_tokens)
