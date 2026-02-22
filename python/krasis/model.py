@@ -2080,6 +2080,7 @@ class KrasisModel:
         token_ids: torch.Tensor,
         positions: torch.Tensor,
         seq_states: List[SequenceKVState],
+        return_all_logits: bool = False,
     ) -> torch.Tensor:
         """Full forward pass with streaming attention architecture.
 
@@ -2092,9 +2093,11 @@ class KrasisModel:
             token_ids: [M] int64 token IDs
             positions: [M] int32 position indices
             seq_states: One SequenceKVState per GPU split group
+            return_all_logits: If True, return logits for ALL positions [M, V]
+                instead of just the last token [1, V]. Used for perplexity measurement.
 
         Returns:
-            logits: [M, vocab_size] float32
+            logits: [M, vocab_size] or [1, vocab_size] float32
         """
         assert self._loaded, "Model not loaded. Call load() first."
         M = token_ids.shape[0]
@@ -2111,7 +2114,8 @@ class KrasisModel:
             and self.gpu_prefill_enabled
             and self.cfg.n_routed_experts > 0
         ):
-            return self._forward_prefill_with_oom_retry(token_ids, positions, seq_states)
+            return self._forward_prefill_with_oom_retry(
+                token_ids, positions, seq_states, return_all_logits=return_all_logits)
 
         # ── Embedding (GPU0) ──
         first_dev = self.all_devices[0]
@@ -2458,7 +2462,7 @@ class KrasisModel:
             hidden, residual, self.final_norm, self.cfg.rms_norm_eps
         )
 
-        if M > 1:
+        if M > 1 and not return_all_logits:
             hidden = hidden[-1:, :]
         logits = _linear(hidden, self.lm_head_data)
         logits = logits.float()
@@ -2522,6 +2526,7 @@ class KrasisModel:
         token_ids: torch.Tensor,
         positions: torch.Tensor,
         seq_states: List[SequenceKVState],
+        return_all_logits: bool = False,
     ) -> torch.Tensor:
         """Wrapper around forward_prefill_layer_grouped with OOM recovery.
 
@@ -2545,6 +2550,7 @@ class KrasisModel:
                 result = self.forward_prefill_layer_grouped(
                     token_ids, positions, seq_states,
                     max_chunk_override=max_chunk_override,
+                    return_all_logits=return_all_logits,
                 )
 
                 # Re-capture CUDA graphs if we freed them during OOM recovery.
@@ -2627,6 +2633,7 @@ class KrasisModel:
         positions: torch.Tensor,
         seq_states: List[SequenceKVState],
         max_chunk_override: int = None,
+        return_all_logits: bool = False,
     ) -> torch.Tensor:
         """GPU prefill with layer-grouped expert loading.
 
@@ -3277,18 +3284,31 @@ class KrasisModel:
             logger.info("  Compute per chunk: %.2f ms", per_chunk)
             logger.info("=" * 70)
 
-        # ── Final result: last token's logits ──
+        # ── Final result: logits ──
         # final_norm and lm_head are always on GPU0 (first device)
         import flashinfer
-        last_h = chunk_hidden[-1][-1:]
-        last_r = chunk_residual[-1][-1:]
         first_dev = self.all_devices[0]
-        last_h = _to_device(last_h, first_dev)
-        last_r = _to_device(last_r, first_dev)
-        flashinfer.norm.fused_add_rmsnorm(
-            last_h, last_r, self.final_norm, self.cfg.rms_norm_eps
-        )
-        final_logits = _linear(last_h, self.lm_head_data).float()
+
+        if return_all_logits:
+            # Concatenate ALL chunk hidden/residual states for perplexity measurement
+            all_h = torch.cat(chunk_hidden, dim=0)      # [M, hidden_size]
+            all_r = torch.cat(chunk_residual, dim=0)     # [M, hidden_size]
+            all_h = _to_device(all_h, first_dev)
+            all_r = _to_device(all_r, first_dev)
+            flashinfer.norm.fused_add_rmsnorm(
+                all_h, all_r, self.final_norm, self.cfg.rms_norm_eps
+            )
+            final_logits = _linear(all_h, self.lm_head_data).float()
+        else:
+            # Standard path: only last token's logits (for generation)
+            last_h = chunk_hidden[-1][-1:]
+            last_r = chunk_residual[-1][-1:]
+            last_h = _to_device(last_h, first_dev)
+            last_r = _to_device(last_r, first_dev)
+            flashinfer.norm.fused_add_rmsnorm(
+                last_h, last_r, self.final_norm, self.cfg.rms_norm_eps
+            )
+            final_logits = _linear(last_h, self.lm_head_data).float()
 
         return final_logits
 
