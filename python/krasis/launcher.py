@@ -120,32 +120,46 @@ def detect_hardware() -> Dict[str, Any]:
         "gpu_count": 0,
         "gpu_model": "unknown",
         "gpu_vram_mb": 0,
+        "gpu_sm": (0, 0),     # compute capability of first GPU, e.g. (8, 9)
+        "has_fp8": False,      # SM >= 8.9 supports FP8
         "cpu_model": "unknown",
         "cpu_cores": 0,
         "has_avx2": False,
         "total_ram_gb": 0,
     }
 
-    # GPUs via nvidia-smi — per-GPU info
+    # GPUs via nvidia-smi — per-GPU info + compute capability
     try:
         result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=index,name,memory.total",
+            ["nvidia-smi", "--query-gpu=index,name,memory.total,compute_cap",
              "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=5,
         )
         if result.returncode == 0 and result.stdout.strip():
             for line in result.stdout.strip().split("\n"):
                 parts = [p.strip() for p in line.split(",")]
-                if len(parts) >= 3:
+                if len(parts) >= 4:
+                    sm_parts = parts[3].split(".")
+                    sm = (int(sm_parts[0]), int(sm_parts[1])) if len(sm_parts) >= 2 else (0, 0)
                     hw["gpus"].append({
                         "index": int(parts[0]),
                         "name": parts[1],
                         "vram_mb": int(parts[2]),
+                        "sm": sm,
+                    })
+                elif len(parts) >= 3:
+                    hw["gpus"].append({
+                        "index": int(parts[0]),
+                        "name": parts[1],
+                        "vram_mb": int(parts[2]),
+                        "sm": (0, 0),
                     })
             hw["gpu_count"] = len(hw["gpus"])
             if hw["gpus"]:
                 hw["gpu_model"] = hw["gpus"][0]["name"]
                 hw["gpu_vram_mb"] = hw["gpus"][0]["vram_mb"]
+                hw["gpu_sm"] = hw["gpus"][0]["sm"]
+                hw["has_fp8"] = hw["gpu_sm"] >= (8, 9)
     except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
         pass
 
@@ -933,6 +947,9 @@ class Launcher:
         os.makedirs(self.models_dir, exist_ok=True)
         self.hw = detect_hardware()
         self.cfg = LauncherConfig()
+        # Auto-downgrade KV dtype if GPU lacks FP8 support (needs SM >= 8.9)
+        if not self.hw["has_fp8"]:
+            self.cfg.kv_dtype = "bf16"
         self.model_info: Optional[Dict[str, Any]] = None
         self.budget: Optional[Dict[str, Any]] = None
         self.selected_gpus: List[Dict[str, Any]] = []  # subset of hw["gpus"]
@@ -1091,12 +1108,16 @@ class Launcher:
         val = getattr(self.cfg, opt.key)
 
         if opt.opt_type == "cycle" and opt.choices:
+            choices = opt.choices
+            # Hide FP8 option if GPU doesn't support it
+            if opt.key == "kv_dtype" and not self.hw.get("has_fp8", False):
+                choices = [c for c in choices if c != "fp8_e4m3"]
             try:
-                idx = opt.choices.index(val)
+                idx = choices.index(val)
             except ValueError:
                 idx = 0
-            idx = (idx + direction) % len(opt.choices)
-            setattr(self.cfg, opt.key, opt.choices[idx])
+            idx = (idx + direction) % len(choices)
+            setattr(self.cfg, opt.key, choices[idx])
         elif opt.opt_type == "number":
             new_val = int(val) + direction
             new_val = max(opt.min_val, min(opt.max_val, new_val))
@@ -1550,6 +1571,10 @@ def main():
             saved = _load_config(legacy_config)
     if saved:
         launcher.cfg.apply_saved(saved)
+
+    # Force BF16 KV if GPU doesn't support FP8
+    if not launcher.hw["has_fp8"] and launcher.cfg.kv_dtype == "fp8_e4m3":
+        launcher.cfg.kv_dtype = "bf16"
 
     # Apply CLI overrides (take priority over saved config)
     _apply_cli_overrides(launcher.cfg, args)
