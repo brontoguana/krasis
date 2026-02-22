@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "krasis"
-version = "0.1.25"
+version = "0.1.26"
 description = "Hybrid LLM runtime — minimal VRAM, always-on GPU prefill, optimised CPU inference"
 license = {text = "AGPL-3.0-only"}
 requires-python = ">=3.10"
@@ -29,7 +29,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-gpu = ["flashinfer>=0.1", "sgl-kernel>=0.0.1"]
+gpu = ["flashinfer>=0.1", "sgl-kernel>=0.0.1", "sglang>=0.4"]
 
 [project.urls]
 Homepage = "https://github.com/brontoguana/krasis"

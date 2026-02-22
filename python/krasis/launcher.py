@@ -1557,6 +1557,7 @@ def _check_gpu_deps():
     # Check CUDA torch
     try:
         import torch
+        torch.set_float32_matmul_precision('high')
         if not torch.cuda.is_available():
             problems.append("CUDA-enabled PyTorch")
     except ImportError:
@@ -1564,7 +1565,8 @@ def _check_gpu_deps():
 
     # Check GPU packages
     for pkg, import_name in [("flashinfer", "flashinfer"),
-                              ("sgl-kernel", "sgl_kernel")]:
+                              ("sgl-kernel", "sgl_kernel"),
+                              ("sglang", "sglang")]:
         try:
             __import__(import_name)
         except ImportError:

@@ -395,12 +395,13 @@ def _install_cuda_torch():
 
 
 def _install_gpu_packages():
-    """Install FlashInfer and sgl-kernel."""
-    print(f"\n{BOLD}Step 3: GPU Packages (FlashInfer, sgl-kernel){NC}")
+    """Install FlashInfer, sgl-kernel, and sglang."""
+    print(f"\n{BOLD}Step 3: GPU Packages (FlashInfer, sgl-kernel, sglang){NC}")
 
     packages = [
         ("flashinfer-python", "flashinfer"),
         ("sgl-kernel", "sgl_kernel"),
+        ("sglang", "sglang"),
     ]
 
     missing = []
