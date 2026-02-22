@@ -1347,6 +1347,13 @@ class GpuPrefillManager:
                 "w2_scale": w2_scale,
             }
 
+            # Sync before next iteration: the pinned DMA buffer is reused for
+            # each layer. The non_blocking .to() DMA reads from the pinned buffer
+            # asynchronously — we must wait for it to complete before the next
+            # write_experts_range_into_pinned() overwrites the buffer.
+            if len(moe_layer_indices) > 1:
+                torch.cuda.synchronize(self.device)
+
         # Pre-load shared experts
         if self.n_shared_experts > 0:
             if detailed:
@@ -1400,6 +1407,10 @@ class GpuPrefillManager:
                     "w2_packed": w2_packed,
                     "w2_scale": w2_scale,
                 }
+
+                # Sync: shared expert pinned buffer reused per layer (same race as routed)
+                if len(moe_layer_indices) > 1:
+                    torch.cuda.synchronize(self.device)
 
             if detailed:
                 t_shared += time.perf_counter() - t_sh0
@@ -1516,6 +1527,13 @@ class GpuPrefillManager:
                 "w2_scale": w2_scale,
             }
 
+            # Sync prefetch stream: pinned DMA buffer is reused for each layer.
+            # The non_blocking .to() on the prefetch stream reads from the pinned
+            # buffer asynchronously — must complete before the next iteration's
+            # write_experts_range_into_pinned() overwrites it.
+            if len(moe_layer_indices) > 1:
+                stream.synchronize()
+
         # Shared experts
         if self.n_shared_experts > 0:
             for moe_idx in moe_layer_indices:
@@ -1569,6 +1587,10 @@ class GpuPrefillManager:
                     "w2_packed": w2_packed,
                     "w2_scale": w2_scale,
                 }
+
+                # Sync: shared expert pinned buffer reused per layer
+                if len(moe_layer_indices) > 1:
+                    stream.synchronize()
 
         # Workspace and index tensors (idempotent, already allocated after first sync load)
         if self._workspace is None:
