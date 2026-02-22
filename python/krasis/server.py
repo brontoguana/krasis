@@ -442,6 +442,8 @@ def main():
                         help="Number of MoE layers to load per group during prefill (default: 2)")
     parser.add_argument("--benchmark", action="store_true",
                         help="Run standardized benchmark before starting server")
+    parser.add_argument("--benchmark-only", action="store_true",
+                        help="Run benchmark and exit (don't start server)")
     parser.add_argument("--hcs", action="store_true",
                         help="Enable HCS expert cache — pin hot experts on GPU for decode")
     parser.add_argument("--temperature", type=float, default=0.6)
@@ -771,7 +773,8 @@ def main():
         from krasis.benchmark import KrasisBenchmark
         bench = KrasisBenchmark(_model)
         bench.run()
-        sys.exit(0)
+        if args.benchmark_only:
+            sys.exit(0)
 
     _status(f"Server ready on {args.host}:{args.port}")
     logger.info("Model loaded, starting server on %s:%d", args.host, args.port)

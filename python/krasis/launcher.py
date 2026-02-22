@@ -757,6 +757,7 @@ def _launch_mode_screen() -> Optional[str]:
     options = [
         ("Launch", "Start the server immediately", "launch"),
         ("Benchmark and Launch", "Run prefill + decode benchmark, then start server", "benchmark"),
+        ("Benchmark Only", "Run benchmark and exit", "benchmark_only"),
         ("Benchmark Suite", "Run all model \u00d7 config combos from suite config", "suite"),
     ]
     cursor = 0
@@ -1310,7 +1311,7 @@ class Launcher:
             print(f"  CPU experts: {budget['cpu_expert_gb']:.1f} GB / {budget['total_ram_gb']} GB")
         print()
 
-    def launch_server(self, benchmark: bool = False) -> None:
+    def launch_server(self, benchmark: bool = False, benchmark_only: bool = False) -> None:
         """Build args and exec the Krasis server."""
         num_gpus = len(self.selected_gpus) if self.selected_gpus else self.hw["gpu_count"]
 
@@ -1339,8 +1340,10 @@ class Launcher:
             cmd_args.extend(["--gguf-path", self.cfg.gguf_path])
         if self.cfg.force_load:
             cmd_args.append("--force-load")
-        if benchmark:
+        if benchmark or benchmark_only:
             cmd_args.append("--benchmark")
+        if benchmark_only:
+            cmd_args.append("--benchmark-only")
 
         # Set CUDA_VISIBLE_DEVICES to selected GPUs
         if self.selected_gpus:
@@ -1672,7 +1675,10 @@ def main():
                 sys.exit(0)
 
             launcher.print_summary()
-            launcher.launch_server(benchmark=(launch_mode == "benchmark"))
+            launcher.launch_server(
+                benchmark=(launch_mode in ("benchmark", "benchmark_only")),
+                benchmark_only=(launch_mode == "benchmark_only"),
+            )
         else:
             print("Aborted.")
             sys.exit(0)
