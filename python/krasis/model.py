@@ -3290,6 +3290,10 @@ class KrasisModel:
         if stop_token_ids is None:
             stop_token_ids = [self.cfg.eos_token_id]
 
+        # Guard: if prompt_tokens is a string, tokenize it
+        if isinstance(prompt_tokens, str):
+            prompt_tokens = self.tokenizer.encode(prompt_tokens)
+
         # Create per-GPU-split sequence states (one per KV cache / GPU)
         seq_states_per_rank = [
             SequenceKVState(c, seq_id=0) if c is not None else None
