@@ -361,6 +361,13 @@ class StressTest:
         print(f"  Timeout:        {self.timeout}s per prompt")
         print()
 
+        # Warmup: run a short generation to trigger CUDA graph capture, JIT, etc.
+        print(f"  {DIM}Warming up (2 short generations)...{NC}", end="", flush=True)
+        for _ in range(2):
+            warmup_result = self._run_one("Hello", -1)
+        print(f"\r  {DIM}Warmup complete.{' ' * 30}{NC}")
+        print()
+
         results = []
         passed = 0
         failed = 0
@@ -436,10 +443,16 @@ def main():
     parser.add_argument("--krasis-threads", type=int, default=12)
     args = parser.parse_args()
 
-    from krasis.config import ModelConfig, QuantConfig
+    from krasis.config import QuantConfig
     from krasis.model import KrasisModel
 
-    cfg = ModelConfig.from_path(args.model_path)
+    kv_dtype_map = {
+        "fp8_e4m3": torch.float8_e4m3fn,
+        "bf16": torch.bfloat16,
+        "bfloat16": torch.bfloat16,
+    }
+    kv_dtype = kv_dtype_map.get(args.kv_dtype, torch.float8_e4m3fn)
+
     quant_cfg = QuantConfig(
         attention=args.attention_quant,
         shared_expert=args.shared_expert_quant,
@@ -448,14 +461,14 @@ def main():
     )
 
     model = KrasisModel(
-        cfg, quant_cfg,
+        model_path=args.model_path,
         num_gpus=args.num_gpus,
         layer_group_size=args.layer_group_size,
-        kv_dtype=args.kv_dtype,
-        gpu_expert_bits=args.gpu_expert_bits,
-        cpu_expert_bits=args.cpu_expert_bits,
+        kv_dtype=kv_dtype,
+        quant_cfg=quant_cfg,
         krasis_threads=args.krasis_threads,
     )
+    model.load()
 
     st = StressTest(
         model,
