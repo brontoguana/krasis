@@ -503,11 +503,12 @@ class KrasisBenchmark:
         # 3. Warmup (short decode + full prefill to trigger FlashInfer JIT)
         print(_section("Warmup"))
         self._warmup()
-        print("  Warmup prefill (first run compiles GPU kernels, may take a minute)...")
+        print("  Warmup prefills (compiles GPU kernels, may take a minute)...")
         t0 = time.perf_counter()
-        self.model.generate(large_tokens, max_new_tokens=1, temperature=0.6)
+        for i in range(3):
+            self.model.generate(large_tokens, max_new_tokens=1, temperature=0.6)
         warmup_s = time.perf_counter() - t0
-        print(f"  Warmup prefill complete ({warmup_s:.1f}s).")
+        print(f"  Warmup complete ({warmup_s:.1f}s).")
 
         # 4. Prefill benchmark
         print(_section(f"Running prefill benchmark ({len(large_tokens):,} tokens, {self.n_runs} runs)"))
