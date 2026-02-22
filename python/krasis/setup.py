@@ -103,49 +103,70 @@ def _is_wsl():
         return False
 
 
-def _install_cuda_toolkit():
-    """Install CUDA toolkit (nvcc) for FlashInfer JIT compilation."""
-    print(f"\n{BOLD}Step 1: CUDA Toolkit (nvcc){NC}")
+def _install_system_deps():
+    """Install system packages: CUDA toolkit (nvcc) and ninja build tool."""
+    print(f"\n{BOLD}Step 1: System Packages (nvcc, ninja){NC}")
 
-    if _has_nvcc():
-        print(f"  {GREEN}nvcc already installed.{NC}")
+    need_nvcc = not _has_nvcc()
+    need_ninja = not shutil.which("ninja") and not shutil.which("ninja-build")
+
+    if not need_nvcc and not need_ninja:
+        print(f"  {GREEN}nvcc and ninja already installed.{NC}")
         return True
 
-    print(f"  {YELLOW}nvcc not found — needed for FlashInfer JIT compilation.{NC}")
-    print(f"  Installing CUDA toolkit (will ask for your password)...\n")
+    missing = []
+    if need_nvcc:
+        missing.append("nvcc")
+    if need_ninja:
+        missing.append("ninja")
+    print(f"  {YELLOW}Missing: {', '.join(missing)} — needed for FlashInfer JIT.{NC}")
+    print(f"  Installing (will ask for your password)...\n")
 
     distro = _detect_distro()
-    # Use sudo in the commands — it will prompt for password if needed
     sudo = [] if os.geteuid() == 0 else ["sudo"]
 
     if distro == "debian":
+        packages = []
+        if need_nvcc:
+            packages.append("nvidia-cuda-toolkit")
+        if need_ninja:
+            packages.append("ninja-build")
         cmds = [
             sudo + ["apt-get", "update", "-qq"],
-            sudo + ["apt-get", "install", "-y", "nvidia-cuda-toolkit"],
+            sudo + ["apt-get", "install", "-y"] + packages,
         ]
         for cmd in cmds:
             ret = _run(cmd, check=False)
             if ret.returncode != 0:
-                print(f"  {RED}Failed. Try manually: sudo apt install nvidia-cuda-toolkit{NC}")
+                print(f"  {RED}Failed. Try manually: sudo apt install {' '.join(packages)}{NC}")
                 return False
     elif distro == "rhel":
-        ret = _run(sudo + ["dnf", "install", "-y", "cuda-toolkit"], check=False)
+        packages = []
+        if need_nvcc:
+            packages.append("cuda-toolkit")
+        if need_ninja:
+            packages.append("ninja-build")
+        ret = _run(sudo + ["dnf", "install", "-y"] + packages, check=False)
         if ret.returncode != 0:
-            print(f"  {RED}Failed. Try manually: sudo dnf install cuda-toolkit{NC}")
+            print(f"  {RED}Failed. Try manually: sudo dnf install {' '.join(packages)}{NC}")
             return False
     else:
-        print(f"  {RED}Unknown distro. Install CUDA toolkit manually:{NC}")
-        print(f"    sudo apt install nvidia-cuda-toolkit  (Debian/Ubuntu)")
-        print(f"    sudo dnf install cuda-toolkit          (Fedora/RHEL)")
+        print(f"  {RED}Unknown distro. Install manually:{NC}")
+        print(f"    sudo apt install nvidia-cuda-toolkit ninja-build  (Debian/Ubuntu)")
+        print(f"    sudo dnf install cuda-toolkit ninja-build          (Fedora/RHEL)")
         return False
 
-    if _has_nvcc():
-        print(f"  {GREEN}CUDA toolkit installed successfully.{NC}")
-        return True
-    else:
-        print(f"  {YELLOW}Package installed but nvcc not found on PATH.{NC}")
+    ok = True
+    if need_nvcc and not _has_nvcc():
+        print(f"  {YELLOW}nvcc still not found on PATH.{NC}")
         print(f"  Try: export PATH=/usr/local/cuda/bin:$PATH")
-        return False
+        ok = False
+    if need_ninja and not shutil.which("ninja") and not shutil.which("ninja-build"):
+        print(f"  {YELLOW}ninja still not found on PATH.{NC}")
+        ok = False
+    if ok:
+        print(f"  {GREEN}System packages installed successfully.{NC}")
+    return ok
 
 
 def _install_cuda_torch():
@@ -235,7 +256,7 @@ def main():
     results = {}
 
     # Step 1: CUDA toolkit
-    results["nvcc"] = _install_cuda_toolkit()
+    results["system"] = _install_system_deps()
 
     # Step 2: CUDA torch
     results["torch"] = _install_cuda_torch()
