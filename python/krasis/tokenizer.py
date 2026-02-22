@@ -41,10 +41,21 @@ class Tokenizer:
             add_generation_prompt=add_generation_prompt,
             tokenize=True,
         )
-        # Some transformers versions return a string even with tokenize=True
+        return self._ensure_int_list(result)
+
+    def _ensure_int_list(self, result) -> List[int]:
+        """Force result to List[int] regardless of what transformers returned."""
         if isinstance(result, str):
-            result = self.tokenizer.encode(result, add_special_tokens=False)
-        return result
+            return self.tokenizer.encode(result, add_special_tokens=False)
+        if isinstance(result, list):
+            if result and isinstance(result[0], str):
+                # Tokenizer returned list of string tokens — re-encode
+                return self.tokenizer.encode(
+                    "".join(result), add_special_tokens=False
+                )
+            return [int(t) for t in result]
+        # numpy array or tensor
+        return [int(t) for t in result]
 
     def encode(self, text: str, add_special_tokens: bool = True) -> List[int]:
         return self.tokenizer.encode(text, add_special_tokens=add_special_tokens)
