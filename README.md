@@ -58,63 +58,83 @@ Speeds reported in the following models are benchmarked on the following hardwar
 
 ## Quick Start
 
-### Option A: pipx install (recommended)
+### Install
 
 ```bash
 # Install pipx if you don't have it
 sudo apt install pipx   # Ubuntu/Debian
 # or: pip install --user pipx
 
-# Install Krasis (isolated environment, no conflicts)
+# Install Krasis
 pipx install krasis
 pipx ensurepath        # adds ~/.local/bin to PATH (restart terminal or source ~/.bashrc)
 
-# PyTorch with CUDA is required — inject into the pipx environment
-pipx inject krasis torch --index-url https://download.pytorch.org/whl/cu126
+# Run setup — installs CUDA toolkit, PyTorch, FlashInfer, ninja
+# (will prompt for your password when installing system packages)
+krasis-setup
+```
+
+### Download a model
+
+```bash
+# Install huggingface-cli if you don't have it
+pip install huggingface-hub
 
 # Download a model into ~/.krasis/models/
 huggingface-cli download Qwen/Qwen3-Coder-Next \
     --local-dir ~/.krasis/models/Qwen3-Coder-Next
+```
 
-# Launch
+### Run
+
+```bash
 krasis
 ```
 
-> **Alternative:** If you prefer pip, create a venv first: `python3 -m venv ~/.krasis-env && source ~/.krasis-env/bin/activate && pip install krasis torch --index-url https://download.pytorch.org/whl/cu126`
+That's it. The launcher walks you through model selection and configuration. First run takes longer as Krasis builds optimised weight caches.
 
-### Option B: from source
+### WSL (Windows Subsystem for Linux)
 
-```bash
-# Prerequisites (Ubuntu/Debian)
-sudo apt update && sudo apt install python3.12-venv
+Krasis works on WSL2. By default WSL only uses 50% of your system RAM, which is usually not enough for large models. Create or edit `C:\Users\<YourUsername>\.wslconfig`:
 
-# Clone and run — everything else is automatic
-git clone https://github.com/brontoguana/krasis.git
-cd krasis
-./krasis
+```ini
+[wsl2]
+memory=120GB
 ```
 
-## Building from Source
+Adjust the value to leave ~8 GB for Windows. Then restart WSL from PowerShell:
 
-The `./krasis` launcher handles building automatically on first run. For manual/development setup:
+```powershell
+wsl --shutdown
+```
+
+Then follow the install steps above inside WSL.
+
+### Alternative: pip in a venv
+
+```bash
+python3 -m venv ~/.krasis-env && source ~/.krasis-env/bin/activate
+pip install krasis
+krasis-setup
+```
+
+### Alternative: from source
 
 ```bash
 git clone https://github.com/brontoguana/krasis.git
 cd krasis
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e .
-
-# PyTorch must be installed separately
-pip install torch --index-url https://download.pytorch.org/whl/cu126
+krasis-setup
+./krasis
 ```
 
 ## Usage
 
-### Interactive Launcher (recommended)
+### Interactive Launcher
 
 ```bash
-krasis        # pip install
-./krasis      # from source
+krasis
 ```
 
 The launcher walks you through a TUI with four screens:
