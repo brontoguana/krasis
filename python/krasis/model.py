@@ -2132,8 +2132,11 @@ class KrasisModel:
             _t_moe_total = 0.0   # total MoE time (cross-device or unified)
             _t_xfer_total = 0.0  # total cross-device hidden transfers
             _t_dma_total = 0.0   # total attention DMA time (streaming only)
+            _t_lin_attn_total = 0.0  # linear attention time
+            _t_gqa_attn_total = 0.0  # GQA attention time
             _t_lin_attn_layers = 0  # count of linear attention layers
             _t_gqa_layers = 0      # count of GQA attention layers
+            _t_moe_total_gpu = 0.0  # GPU hot expert time within MoE
             _t_moe_layers = 0      # count of MoE layers
             _t_unified_layers = 0  # count of unified (same-device) layers
 
@@ -2254,10 +2257,13 @@ class KrasisModel:
                 if timing:
                     torch.cuda.synchronize(layer_dev)
                     _t_la_done = time.perf_counter()
-                    _t_attn_total += _t_la_done - _t_la
+                    _dt = _t_la_done - _t_la
+                    _t_attn_total += _dt
                     if layer.layer_type == "linear_attention":
+                        _t_lin_attn_total += _dt
                         _t_lin_attn_layers += 1
                     else:
+                        _t_gqa_attn_total += _dt
                         _t_gqa_layers += 1
 
                 # Routing on layer_dev (tiny gate matmul)
@@ -2338,10 +2344,13 @@ class KrasisModel:
                 if timing:
                     torch.cuda.synchronize(layer_dev)
                     _t_la_done = time.perf_counter()
-                    _t_attn_total += _t_la_done - _t_la
+                    _dt = _t_la_done - _t_la
+                    _t_attn_total += _dt
                     if layer.layer_type == "linear_attention":
+                        _t_lin_attn_total += _dt
                         _t_lin_attn_layers += 1
                     else:
+                        _t_gqa_attn_total += _dt
                         _t_gqa_layers += 1
 
                 if _DEBUG_DECODE:
@@ -2460,17 +2469,26 @@ class KrasisModel:
                 "DECODE-TOKEN: total=%.1fms (layers=%.1fms post=%.1fms)",
                 total_ms, layers_ms, post_ms,
             )
+            la_ms = _t_lin_attn_total * 1000
+            gqa_ms = _t_gqa_attn_total * 1000
             dma_str = f" attn_dma=%.1fms" % dma_ms if dma_ms > 0 else ""
+            la_per = la_ms / _t_lin_attn_layers if _t_lin_attn_layers else 0
+            gqa_per = gqa_ms / _t_gqa_layers if _t_gqa_layers else 0
+            moe_per = moe_ms / _t_moe_layers if _t_moe_layers else 0
             logger.info(
-                "  BREAKDOWN: attn=%.1fms (%d lin + %d gqa) moe=%.1fms (%d layers) xfer=%.1fms unified=%d%s",
-                attn_ms, _t_lin_attn_layers, _t_gqa_layers,
-                moe_ms, _t_moe_layers, xfer_ms, _t_unified_layers, dma_str,
+                "  BREAKDOWN: attn=%.1fms [LA=%.1fms (%d×%.1f) GQA=%.1fms (%d×%.1f)] "
+                "moe=%.1fms (%d×%.1f) xfer=%.1fms unified=%d%s",
+                attn_ms, la_ms, _t_lin_attn_layers, la_per,
+                gqa_ms, _t_gqa_layers, gqa_per,
+                moe_ms, _t_moe_layers, moe_per,
+                xfer_ms, _t_unified_layers, dma_str,
             )
             if layers_ms > 0:
                 dma_pct = f" dma=%.0f%%" % (dma_ms / total_ms * 100) if dma_ms > 0 else ""
                 logger.info(
-                    "  PERCENT: attn=%.0f%% moe=%.0f%% xfer=%.0f%% post=%.0f%%%s unaccounted=%.0f%%",
-                    attn_ms / total_ms * 100,
+                    "  PERCENT: LA=%.0f%% GQA=%.0f%% moe=%.0f%% xfer=%.0f%% post=%.0f%%%s unaccounted=%.0f%%",
+                    la_ms / total_ms * 100,
+                    gqa_ms / total_ms * 100,
                     moe_ms / total_ms * 100,
                     xfer_ms / total_ms * 100,
                     post_ms / total_ms * 100,
