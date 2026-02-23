@@ -1228,7 +1228,7 @@ class GpuPrefillManager:
         self._dma_bufs_initialized = True
         self._dma_pinned = True
         logger.info(
-            "Pinned DMA buffers allocated: %.1f MB in %.1fs (one-time cost)",
+            "Pinned DMA buffers allocated: %.1f MB in %.1fs",
             total / 1e6, elapsed,
         )
 
@@ -1495,7 +1495,6 @@ class GpuPrefillManager:
         self._prefetch_persistent_shared = {}
 
         for moe_idx in moe_layer_indices:
-            # CPU: Rust writes into pinned staging buffers (GIL released during memcpy)
             self._engine.write_experts_range_into_pinned(
                 moe_idx,
                 self.expert_start,
@@ -1512,7 +1511,7 @@ class GpuPrefillManager:
             w2_packed = self._dma_buf_w2p.view(torch.int32).reshape(self._dma_shape_w2p)
             w2_scale = self._dma_buf_w2s.view(torch.bfloat16).reshape(self._dma_shape_w2s)
 
-            # GPU: Queue truly async PCIe DMA on prefetch stream
+            # GPU: Queue PCIe DMA
             # (pinned memory → no blocking CPU-side staging copy)
             with torch.cuda.stream(stream):
                 w13_packed = w13_packed.to(self.device, non_blocking=True)
@@ -1527,10 +1526,9 @@ class GpuPrefillManager:
                 "w2_scale": w2_scale,
             }
 
-            # Sync prefetch stream: pinned DMA buffer is reused for each layer.
-            # The non_blocking .to() on the prefetch stream reads from the pinned
-            # buffer asynchronously — must complete before the next iteration's
-            # write_experts_range_into_pinned() overwrites it.
+            # Sync: pinned DMA buffer is reused for each layer.
+            # The non_blocking .to() reads from the pinned buffer asynchronously —
+            # must complete before the next write_experts_range_into_pinned() overwrites it.
             if len(moe_layer_indices) > 1:
                 stream.synchronize()
 
@@ -4395,8 +4393,22 @@ class GpuPrefillManager:
             torch.cuda.synchronize(self.device)
 
         # Layer-grouped DMA data takes priority (M>1 prefill uses GPU for all experts)
-        if self._persistent and moe_layer_idx in self._persistent:
+        _skip_persistent = os.environ.get("KRASIS_SKIP_PERSISTENT", "") == "1"
+        _debug_persistent = os.environ.get("KRASIS_DEBUG_PERSISTENT", "") == "1"
+        if self._persistent and moe_layer_idx in self._persistent and not _skip_persistent:
             output = self._forward_persistent(moe_layer_idx, x, topk_ids, topk_weights)
+            if _debug_persistent and self._engine is not None:
+                self._allocate_gpu_buffer()
+                ref = self._forward_engine(moe_layer_idx, x, topk_ids, topk_weights, False)
+                cos_sim = torch.nn.functional.cosine_similarity(
+                    output.float().reshape(1, -1), ref.float().reshape(1, -1)
+                ).item()
+                maxdiff = (output.float() - ref.float()).abs().max().item()
+                logger.warning(
+                    "DEBUG-PERSIST L%d M=%d: cos=%.6f maxdiff=%.6f out_mean=%.6f ref_mean=%.6f",
+                    moe_layer_idx, M, cos_sim, maxdiff,
+                    output.float().mean().item(), ref.float().mean().item(),
+                )
         elif self._hcs_initialized:
             output = self._forward_hot_cached_static(moe_layer_idx, x, topk_ids, topk_weights)
         elif self._prefill_mode in ("active_only", "lru") and self._engine is not None:

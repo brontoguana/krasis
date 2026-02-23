@@ -609,18 +609,15 @@ class KrasisBenchmark:
             print(f"  Run {i+1}: {run['tok_s']:.2f} tok/s ({run['ms_per_tok']:.1f}ms/tok)")
         print(f"  {BOLD}Average: {decode_result['avg_tok_s']:.2f} tok/s ({decode_result['avg_ms_per_tok']:.1f}ms/tok){NC}")
 
-        # 6. Decode prompt text for the log
+        # 6. Decode prompt text for the log (use last timed prompt, matching generated output)
         try:
             prefill_prompt_text = self.model.tokenizer.decode(timed_prefill[0])
         except Exception:
             prefill_prompt_text = f"[{len(timed_prefill[0])} tokens]"
         try:
-            decode_prompt_text = self._load_prompt_file("decode_prompt_1")
-        except OSError:
-            try:
-                decode_prompt_text = self._load_prompt_file("decode_prompt")
-            except OSError:
-                decode_prompt_text = "[decode prompts]"
+            decode_prompt_text = self.model.tokenizer.decode(timed_decode[-1])
+        except Exception:
+            decode_prompt_text = "[decode prompt]"
 
         # 7. Format and write report
         print(_section("Writing results"))

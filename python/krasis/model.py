@@ -2774,7 +2774,8 @@ class KrasisModel:
         # Disabled during active_only mode and validation sync.
         # EP timing now uses CUDA events (no sync overhead), so pipelining stays enabled.
         _validation = getattr(self, '_validation_sync', False)
-        _pipeline_enabled = bool(_dma_managers) and not is_active_only and not _validation
+        _no_pipeline = os.environ.get("KRASIS_NO_PIPELINE", "") == "1"
+        _pipeline_enabled = bool(_dma_managers) and not is_active_only and not _validation and not _no_pipeline
         _has_prefetch = False
         _prefetch_futures = []
         if _pipeline_enabled:
@@ -3170,7 +3171,9 @@ class KrasisModel:
             if need_load:
                 # Skip empty_cache during pipelining: allocator reuses freed blocks
                 # naturally, saving ~30ms/group. Only clear cache on the last group.
-                _clear_cache = not _has_prefetch
+                # ALWAYS clear cache: without empty_cache(), the allocator reuses
+                # freed blocks that kernels on the default stream may still be reading.
+                _clear_cache = True
 
                 # Sync default stream before freeing: CUDA kernels from forward()
                 # may still be reading expert weight tensors asynchronously.
