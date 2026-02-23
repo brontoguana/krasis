@@ -1451,8 +1451,8 @@ class GpuPrefillManager:
 
         Args:
             clear_cache: If True (default), call torch.cuda.empty_cache().
-                Set False during DMA pipelining to avoid the ~30ms overhead;
-                the allocator reuses freed blocks for the next group naturally.
+                This is required for correctness: without it, the caching
+                allocator reuses freed blocks that kernels may still read.
         """
         detailed = TIMING.prefill
         if detailed:

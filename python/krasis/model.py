@@ -3169,18 +3169,9 @@ class KrasisModel:
                 _lt_free0 = time.perf_counter()
 
             if need_load:
-                # Skip empty_cache during pipelining: allocator reuses freed blocks
-                # naturally, saving ~30ms/group. Only clear cache on the last group.
-                # ALWAYS clear cache: without empty_cache(), the allocator reuses
-                # freed blocks that kernels on the default stream may still be reading.
                 _clear_cache = True
 
-                # Sync default stream before freeing: CUDA kernels from forward()
-                # may still be reading expert weight tensors asynchronously.
-                # Without this, free_layer_group() drops the last Python references,
-                # allowing PyTorch's allocator to reuse the memory while kernels
-                # are still executing. This race is more visible on models with
-                # smaller experts (V2-Lite) where Python returns before GPU finishes.
+                # Sync default stream before freeing when pipelining enabled.
                 if _pipeline_enabled:
                     torch.cuda.synchronize(dev)
 
