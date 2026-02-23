@@ -458,7 +458,8 @@ def main():
     parser.add_argument("--kv-dtype", default="fp8_e4m3")
     parser.add_argument("--gpu-expert-bits", type=int, default=4)
     parser.add_argument("--cpu-expert-bits", type=int, default=4)
-    parser.add_argument("--attention-quant", default="bf16")
+    parser.add_argument("--attention-quant", default="bf16", choices=["bf16"],
+                        help="Attention quant (INT8 disabled — causes garbage output)")
     parser.add_argument("--shared-expert-quant", default="int8")
     parser.add_argument("--dense-mlp-quant", default="int8")
     parser.add_argument("--lm-head-quant", default="int8")

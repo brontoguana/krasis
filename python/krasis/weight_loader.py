@@ -110,6 +110,11 @@ class WeightLoader:
     def __init__(self, cfg: ModelConfig, quant_cfg: QuantConfig = None):
         self.cfg = cfg
         self.quant_cfg = quant_cfg or QuantConfig()
+        # INT8 attention is disabled — causes catastrophic PPL (~5600 vs ~10).
+        # Override silently in case old config files still have int8.
+        if self.quant_cfg.attention == "int8":
+            logger.warning("INT8 attention is disabled (causes garbage output). Forcing bf16.")
+            self.quant_cfg.attention = "bf16"
         self.model_path = cfg.model_path
 
         # Load safetensors index

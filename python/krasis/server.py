@@ -425,8 +425,8 @@ def main():
                         help="Marlin quantization bits for GPU prefill experts")
     parser.add_argument("--cpu-expert-bits", type=int, default=4, choices=[4, 8],
                         help="Quantization bits for CPU decode experts")
-    parser.add_argument("--attention-quant", default="bf16", choices=["bf16", "int8"],
-                        help="Quantization for attention weights (bf16 recommended)")
+    parser.add_argument("--attention-quant", default="bf16", choices=["bf16"],
+                        help="Quantization for attention weights (INT8 disabled — causes garbage output)")
     parser.add_argument("--shared-expert-quant", default="int8", choices=["bf16", "int8"],
                         help="Quantization for shared expert weights")
     parser.add_argument("--dense-mlp-quant", default="int8", choices=["bf16", "int8"],

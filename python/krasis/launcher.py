@@ -433,7 +433,11 @@ class LauncherConfig:
             except ValueError:
                 pass
         if "CFG_ATTENTION_QUANT" in saved:
-            self.attention_quant = saved["CFG_ATTENTION_QUANT"]
+            val = saved["CFG_ATTENTION_QUANT"]
+            if val == "int8":
+                print("  [!] Ignoring saved CFG_ATTENTION_QUANT=int8 (disabled — causes garbage output). Using bf16.")
+                val = "bf16"
+            self.attention_quant = val
         if "CFG_SHARED_EXPERT_QUANT" in saved:
             self.shared_expert_quant = saved["CFG_SHARED_EXPERT_QUANT"]
         if "CFG_DENSE_MLP_QUANT" in saved:
@@ -535,7 +539,7 @@ OPTIONS = [
     ConfigOption("CPU expert bits", "cpu_expert_bits",
                  choices=[4, 8], affects_budget=True),
     ConfigOption("Attention quant", "attention_quant",
-                 choices=["int8", "bf16"], affects_budget=True),
+                 choices=["bf16"], affects_budget=True),
     ConfigOption("Shared expert", "shared_expert_quant",
                  choices=["int8", "bf16"], affects_budget=True),
     ConfigOption("Dense MLP quant", "dense_mlp_quant",
@@ -1465,7 +1469,11 @@ def _apply_cli_overrides(cfg: LauncherConfig, args: argparse.Namespace) -> None:
     if args.cpu_expert_bits is not None:
         cfg.cpu_expert_bits = args.cpu_expert_bits
     if args.attention_quant is not None:
-        cfg.attention_quant = args.attention_quant
+        if args.attention_quant == "int8":
+            print("[!] --attention-quant int8 is disabled (causes garbage output). Using bf16.")
+            cfg.attention_quant = "bf16"
+        else:
+            cfg.attention_quant = args.attention_quant
     if args.shared_expert_quant is not None:
         cfg.shared_expert_quant = args.shared_expert_quant
     if args.dense_mlp_quant is not None:
