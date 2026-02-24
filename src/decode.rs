@@ -1442,6 +1442,116 @@ fn bf16_to_f32(x: u16) -> f32 {
     f32::from_bits((x as u32) << 16)
 }
 
+/// AVX2 fast SiLU: output[i] = x[i] * sigmoid(x[i]) for n elements.
+///
+/// Uses polynomial sigmoid approximation (same as silu_quantize_int16_avx2).
+/// Replaces scalar exp() which costs ~50ns each.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn fast_silu_avx2(input: &mut [f32], n: usize) {
+    use std::arch::x86_64::*;
+
+    // Fast exp AVX2 (copy from kernel/avx2.rs inline)
+    #[inline(always)]
+    unsafe fn fast_exp_avx2_inline(x: __m256) -> __m256 {
+        let log2e = _mm256_set1_ps(1.4426950408889634);
+        let t = _mm256_mul_ps(x, log2e);
+        let n = _mm256_floor_ps(t);
+        let ni = _mm256_cvtps_epi32(n);
+        let f = _mm256_sub_ps(t, n);
+        let c5 = _mm256_set1_ps(0.0013333558);
+        let c4 = _mm256_set1_ps(0.009618129);
+        let c3 = _mm256_set1_ps(0.0555041);
+        let c2 = _mm256_set1_ps(0.2402265);
+        let c1 = _mm256_set1_ps(0.6931472);
+        let one = _mm256_set1_ps(1.0);
+        let poly = _mm256_fmadd_ps(c5, f, c4);
+        let poly = _mm256_fmadd_ps(poly, f, c3);
+        let poly = _mm256_fmadd_ps(poly, f, c2);
+        let poly = _mm256_fmadd_ps(poly, f, c1);
+        let poly = _mm256_fmadd_ps(poly, f, one);
+        let pow2n = _mm256_castsi256_ps(_mm256_slli_epi32(
+            _mm256_add_epi32(ni, _mm256_set1_epi32(127)), 23));
+        _mm256_mul_ps(poly, pow2n)
+    }
+
+    let n8 = n / 8;
+    let ptr = input.as_mut_ptr();
+    for i in 0..n8 {
+        let x = _mm256_loadu_ps(ptr.add(i * 8));
+        let neg_x = _mm256_sub_ps(_mm256_setzero_ps(), x);
+        let clamped = _mm256_max_ps(
+            _mm256_min_ps(neg_x, _mm256_set1_ps(20.0)),
+            _mm256_set1_ps(-20.0));
+        let exp_neg_x = fast_exp_avx2_inline(clamped);
+        let denom = _mm256_add_ps(_mm256_set1_ps(1.0), exp_neg_x);
+        let rcp = _mm256_rcp_ps(denom);
+        let two = _mm256_set1_ps(2.0);
+        let sigmoid = _mm256_mul_ps(rcp, _mm256_fnmadd_ps(denom, rcp, two));
+        let silu = _mm256_mul_ps(x, sigmoid);
+        _mm256_storeu_ps(ptr.add(i * 8), silu);
+    }
+    // Scalar remainder
+    for i in (n8 * 8)..n {
+        let x = input[i];
+        let s = 1.0 / (1.0 + (-x).exp());
+        input[i] = x * s;
+    }
+}
+
+/// AVX2 fast SiLU + multiply: output[i] = SiLU(gate[i]) * up[i].
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn fast_silu_mul_avx2(gate: &[f32], up: &[f32], output: &mut [f32], n: usize) {
+    use std::arch::x86_64::*;
+
+    #[inline(always)]
+    unsafe fn fast_exp_avx2_inline(x: __m256) -> __m256 {
+        let log2e = _mm256_set1_ps(1.4426950408889634);
+        let t = _mm256_mul_ps(x, log2e);
+        let n = _mm256_floor_ps(t);
+        let ni = _mm256_cvtps_epi32(n);
+        let f = _mm256_sub_ps(t, n);
+        let c5 = _mm256_set1_ps(0.0013333558);
+        let c4 = _mm256_set1_ps(0.009618129);
+        let c3 = _mm256_set1_ps(0.0555041);
+        let c2 = _mm256_set1_ps(0.2402265);
+        let c1 = _mm256_set1_ps(0.6931472);
+        let one = _mm256_set1_ps(1.0);
+        let poly = _mm256_fmadd_ps(c5, f, c4);
+        let poly = _mm256_fmadd_ps(poly, f, c3);
+        let poly = _mm256_fmadd_ps(poly, f, c2);
+        let poly = _mm256_fmadd_ps(poly, f, c1);
+        let poly = _mm256_fmadd_ps(poly, f, one);
+        let pow2n = _mm256_castsi256_ps(_mm256_slli_epi32(
+            _mm256_add_epi32(ni, _mm256_set1_epi32(127)), 23));
+        _mm256_mul_ps(poly, pow2n)
+    }
+
+    let n8 = n / 8;
+    for i in 0..n8 {
+        let g = _mm256_loadu_ps(gate.as_ptr().add(i * 8));
+        let u = _mm256_loadu_ps(up.as_ptr().add(i * 8));
+        let neg_g = _mm256_sub_ps(_mm256_setzero_ps(), g);
+        let clamped = _mm256_max_ps(
+            _mm256_min_ps(neg_g, _mm256_set1_ps(20.0)),
+            _mm256_set1_ps(-20.0));
+        let exp_neg_g = fast_exp_avx2_inline(clamped);
+        let denom = _mm256_add_ps(_mm256_set1_ps(1.0), exp_neg_g);
+        let rcp = _mm256_rcp_ps(denom);
+        let two = _mm256_set1_ps(2.0);
+        let sigmoid = _mm256_mul_ps(rcp, _mm256_fnmadd_ps(denom, rcp, two));
+        let silu = _mm256_mul_ps(g, sigmoid);
+        let result = _mm256_mul_ps(silu, u);
+        _mm256_storeu_ps(output.as_mut_ptr().add(i * 8), result);
+    }
+    for i in (n8 * 8)..n {
+        let x = gate[i];
+        let s = 1.0 / (1.0 + (-x).exp());
+        output[i] = x * s * up[i];
+    }
+}
+
 /// Per-layer attention configuration.
 enum DecodeAttnConfig {
     LinearAttention {
@@ -2367,10 +2477,13 @@ impl CpuDecodeStore {
                             &graph.act_int16[..k_in],
                             &graph.act_scales[..k_in / graph.group_size],
                             &mut graph.mlp_gate_up[..n_gu], parallel);
-                        for i in 0..intermediate {
-                            let x = graph.mlp_gate_up[i];
-                            let sigmoid = 1.0 / (1.0 + (-x).exp());
-                            graph.mlp_hidden_buf[i] = x * sigmoid * graph.mlp_gate_up[intermediate + i];
+                        // AVX2 fused SiLU(gate) * up
+                        unsafe {
+                            fast_silu_mul_avx2(
+                                &graph.mlp_gate_up[..intermediate],
+                                &graph.mlp_gate_up[intermediate..n_gu],
+                                &mut graph.mlp_hidden_buf[..intermediate],
+                                intermediate);
                         }
                         let dn_w = &weights[dn_wid];
                         let k_dn = dn_w.cols;
@@ -2427,10 +2540,13 @@ impl CpuDecodeStore {
                         &graph.act_int16[..k_in],
                         &graph.act_scales[..k_in / graph.group_size],
                         &mut graph.mlp_gate_up[intermediate..2*intermediate], parallel);
-                    for i in 0..intermediate {
-                        let x = graph.mlp_gate_up[i];
-                        let sigmoid = 1.0 / (1.0 + (-x).exp());
-                        graph.mlp_hidden_buf[i] = x * sigmoid * graph.mlp_gate_up[intermediate + i];
+                    // AVX2 fused SiLU(gate) * up
+                    unsafe {
+                        fast_silu_mul_avx2(
+                            &graph.mlp_gate_up[..intermediate],
+                            &graph.mlp_gate_up[intermediate..2*intermediate],
+                            &mut graph.mlp_hidden_buf[..intermediate],
+                            intermediate);
                     }
                     let k_dn = dw.cols;
                     quantize_activation_int16_f32(
@@ -2558,7 +2674,7 @@ fn decode_la_conv(
         }
     }
 
-    // Conv state update + depthwise conv + SiLU
+    // Conv state update + depthwise conv (dot product only, defer SiLU)
     let mut conv_out = vec![0.0f32; conv_dim];
     for ch in 0..conv_dim {
         let base = ch * kernel_dim;
@@ -2570,9 +2686,10 @@ fn decode_la_conv(
         for t in 0..kernel_dim {
             dot += conv_state[base + t] * conv_weight[base + t];
         }
-        let sigmoid = 1.0 / (1.0 + (-dot).exp());
-        conv_out[ch] = dot * sigmoid;
+        conv_out[ch] = dot;
     }
+    // Apply SiLU in bulk using AVX2 (replaces conv_dim scalar exp() calls)
+    unsafe { fast_silu_avx2(&mut conv_out, conv_dim); }
 
     // Expand + L2 normalize q
     for vh in 0..nv {
