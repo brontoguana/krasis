@@ -13,6 +13,7 @@ use crate::kernel::avx2::{
     matmul_int4_marlin, matmul_int4_marlin_parallel,
     matmul_int4_transposed_integer, matmul_int4_transposed_integer_parallel,
     matmul_int8_transposed_integer, matmul_int8_transposed_integer_parallel,
+    expert_matmul_int4_transposed_integer, expert_matmul_int8_transposed_integer,
     build_marlin_tile_map, build_marlin_scale_map,
     MarlinTileMap, MarlinScaleMap,
     quantize_activation_int16,
@@ -650,6 +651,223 @@ pub fn moe_forward_unified(
 
             ss.input_act_int16 = ss_act_int16;
             ss.input_act_scales = ss_act_scales;
+        }
+    }
+
+    scratch.input_act_int16 = act_int16;
+    scratch.input_act_scales = act_scales;
+}
+
+/// Flattened MoE forward — eliminates nested rayon parallelism.
+///
+/// Instead of 10 parallel expert forwards (each with internal parallel matmuls,
+/// creating 960+ rayon barriers per token), this uses 3 flat parallel phases:
+///   Phase 1: All w13 (gate+up) matmul chunks across all experts (1 barrier)
+///   Phase 2: All SiLU+quantize across experts (1 barrier)
+///   Phase 3: All w2 (down) matmul chunks across all experts (1 barrier)
+///
+/// 3 barriers per layer instead of 20+. Each phase has 40-80 work items
+/// that distribute evenly across 64 cores.
+pub fn moe_forward_flattened(
+    store: &WeightStore,
+    moe_layer_idx: usize,
+    activation: &[u16],
+    expert_indices: &[usize],
+    expert_weights: &[f32],
+    output: &mut [f32],
+    scratch: &mut ExpertScratch,
+    scratch_pool: &mut [ExpertScratch],
+) {
+    use rayon::prelude::*;
+
+    assert_eq!(expert_indices.len(), expert_weights.len());
+    assert_eq!(activation.len(), store.config.hidden_size);
+    assert_eq!(output.len(), store.config.hidden_size);
+
+    // Pre-quantize input activation to INT16 (shared across all experts).
+    let mut act_int16 = std::mem::take(&mut scratch.input_act_int16);
+    let mut act_scales = std::mem::take(&mut scratch.input_act_scales);
+    quantize_activation_int16(
+        activation, scratch.group_size, &mut act_int16, &mut act_scales);
+
+    output.fill(0.0);
+
+    let n_exp = expert_indices.len();
+    let hidden = store.config.hidden_size;
+
+    if n_exp == 0 {
+        scratch.input_act_int16 = act_int16;
+        scratch.input_act_scales = act_scales;
+        return;
+    }
+
+    // Fallback to sequential if pool too small
+    if scratch_pool.len() < n_exp {
+        for i in 0..n_exp {
+            let eidx = expert_indices[i];
+            let weight = expert_weights[i];
+            let expert = store.get_expert_unified(moe_layer_idx, eidx);
+            expert_forward_unified(expert, &act_int16, &act_scales, scratch, false,
+                store.config.swiglu_limit, store.config.activation_alpha);
+            for j in 0..hidden {
+                output[j] += weight * scratch.expert_out[j];
+            }
+        }
+        scratch.input_act_int16 = act_int16;
+        scratch.input_act_scales = act_scales;
+        return;
+    }
+
+    let swiglu_limit = store.config.swiglu_limit;
+    let activation_alpha = store.config.activation_alpha;
+
+    // Gather expert refs
+    let experts: Vec<&UnifiedExpertWeights> = expert_indices.iter()
+        .map(|&eidx| store.get_expert_unified(moe_layer_idx, eidx))
+        .collect();
+
+    let intermediate = experts[0].intermediate_size;
+    let two_n = 2 * intermediate;
+    let gs = experts[0].group_size;
+    let chunk_n = 256usize;
+
+    // Extract pointers as usize for Send+Sync in rayon closures.
+    // Safety: each expert's scratch buffers are non-overlapping, and within an expert,
+    // Phase 1/3 chunks write to non-overlapping output ranges.
+    let w13_addrs: Vec<usize> = (0..n_exp).map(|i| scratch_pool[i].w13_out.as_mut_ptr() as usize).collect();
+    let h_int16_addrs: Vec<usize> = (0..n_exp).map(|i| scratch_pool[i].hidden_int16.as_mut_ptr() as usize).collect();
+    let h_scales_addrs: Vec<usize> = (0..n_exp).map(|i| scratch_pool[i].hidden_scales.as_mut_ptr() as usize).collect();
+    let expert_out_addrs: Vec<usize> = (0..n_exp).map(|i| scratch_pool[i].expert_out.as_mut_ptr() as usize).collect();
+
+    let act_addr = act_int16.as_ptr() as usize;
+    let act_sc_addr = act_scales.as_ptr() as usize;
+
+    // ── Phase 1: All w13 matmul chunks in one flat parallel dispatch ──
+    let w13_chunks_per = (two_n + chunk_n - 1) / chunk_n;
+    let total_w13 = n_exp * w13_chunks_per;
+
+    (0..total_w13).into_par_iter().for_each(|item| {
+        let ei = item / w13_chunks_per;
+        let ci = item % w13_chunks_per;
+        let n_start = ci * chunk_n;
+        let n_count = (two_n - n_start).min(chunk_n);
+        let expert = experts[ei];
+
+        unsafe {
+            let out = (w13_addrs[ei] as *mut f32).add(n_start);
+            match expert.num_bits {
+                4 => expert_matmul_int4_transposed_integer(
+                    expert.w13_packed.as_ptr(),
+                    expert.w13_scales.as_ptr(),
+                    act_addr as *const i16, act_sc_addr as *const f32,
+                    out, hidden, two_n, n_start, n_count, gs),
+                8 => expert_matmul_int8_transposed_integer(
+                    expert.w13_packed.as_ptr() as *const i8,
+                    expert.w13_scales.as_ptr(),
+                    act_addr as *const i16, act_sc_addr as *const f32,
+                    out, hidden, two_n, n_start, n_count, gs),
+                _ => {}
+            }
+        }
+    });
+
+    // ── Phase 2: SiLU + quantize for all experts in parallel ──
+    (0..n_exp).into_par_iter().for_each(|i| {
+        let expert = experts[i];
+        let n = intermediate;
+
+        unsafe {
+            let w13 = w13_addrs[i] as *mut f32;
+            let h16 = h_int16_addrs[i] as *mut i16;
+            let hsc = h_scales_addrs[i] as *mut f32;
+
+            // Apply biases if present
+            if let Some(ref gb) = expert.gate_bias {
+                for j in 0..n { *w13.add(j) += gb[j]; }
+            }
+            if let Some(ref ub) = expert.up_bias {
+                for j in 0..n { *w13.add(n + j) += ub[j]; }
+            }
+
+            if swiglu_limit > 0.0 {
+                let alpha = activation_alpha;
+                for j in 0..n {
+                    let mut gate = *w13.add(j);
+                    let mut up = *w13.add(n + j);
+                    if gate > swiglu_limit { gate = swiglu_limit; }
+                    if up > swiglu_limit { up = swiglu_limit; }
+                    if up < -swiglu_limit { up = -swiglu_limit; }
+                    let glu = gate * fast_sigmoid(gate * alpha);
+                    *w13.add(j) = (up + 1.0) * glu;
+                }
+                quantize_activation_int16_f32(
+                    std::slice::from_raw_parts(w13, n), gs,
+                    std::slice::from_raw_parts_mut(h16, n),
+                    std::slice::from_raw_parts_mut(hsc, n / gs));
+            } else if n % 8 == 0 && gs % 8 == 0 {
+                silu_quantize_int16_avx2(
+                    w13, w13.add(n) as *const f32,
+                    h16, hsc, n, gs);
+            } else {
+                for j in 0..n {
+                    let gate = *w13.add(j);
+                    let up = *w13.add(n + j);
+                    *w13.add(j) = gate * fast_sigmoid(gate) * up;
+                }
+                quantize_activation_int16_f32(
+                    std::slice::from_raw_parts(w13, n), gs,
+                    std::slice::from_raw_parts_mut(h16, n),
+                    std::slice::from_raw_parts_mut(hsc, n / gs));
+            }
+        }
+    });
+
+    // ── Phase 3: All w2 matmul chunks in one flat parallel dispatch ──
+    let k_down = intermediate;
+    let w2_n = hidden;
+    let w2_chunks_per = (w2_n + chunk_n - 1) / chunk_n;
+    let total_w2 = n_exp * w2_chunks_per;
+
+    (0..total_w2).into_par_iter().for_each(|item| {
+        let ei = item / w2_chunks_per;
+        let ci = item % w2_chunks_per;
+        let n_start = ci * chunk_n;
+        let n_count = (w2_n - n_start).min(chunk_n);
+        let expert = experts[ei];
+
+        unsafe {
+            let h16 = h_int16_addrs[ei] as *const i16;
+            let hsc = h_scales_addrs[ei] as *const f32;
+            let out = (expert_out_addrs[ei] as *mut f32).add(n_start);
+
+            match expert.w2_bits {
+                4 => expert_matmul_int4_transposed_integer(
+                    expert.w2_packed.as_ptr(),
+                    expert.w2_scales.as_ptr(),
+                    h16, hsc, out,
+                    k_down, w2_n, n_start, n_count, gs),
+                8 => expert_matmul_int8_transposed_integer(
+                    expert.w2_packed.as_ptr() as *const i8,
+                    expert.w2_scales.as_ptr(),
+                    h16, hsc, out,
+                    k_down, w2_n, n_start, n_count, gs),
+                _ => {}
+            }
+        }
+    });
+
+    // ── Weighted sum (sequential, tiny) ──
+    for i in 0..n_exp {
+        let weight = expert_weights[i];
+        if let Some(ref db) = experts[i].down_bias {
+            for j in 0..hidden {
+                output[j] += weight * (scratch_pool[i].expert_out[j] + db[j]);
+            }
+        } else {
+            let expert_out = &scratch_pool[i].expert_out;
+            for j in 0..hidden {
+                output[j] += weight * expert_out[j];
+            }
         }
     }
 
