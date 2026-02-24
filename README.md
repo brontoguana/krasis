@@ -70,6 +70,9 @@ Measured with INT4 GPU + INT4 CPU experts, BF16 attention, INT8 shared/MLP/lm_he
 ### Install
 
 ```bash
+# Update APT
+sudo apt update   # Ubuntu/Debian
+
 # Install pipx if you don't have it
 sudo apt install pipx   # Ubuntu/Debian
 # or: pip install --user pipx
