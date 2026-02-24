@@ -51,7 +51,7 @@ class SuiteCombo:
     dense_mlp_quant: str = "int8"
     lm_head_quant: str = "int8"
     kv_dtype: str = "fp8_e4m3"
-    krasis_threads: int = 48
+    krasis_threads: int = 20
     gguf_path: str = ""
     layer_group_size: int = 2
     hcs: bool = False
@@ -191,7 +191,7 @@ class SuiteRunner:
                     dense_mlp_quant=cfg.get("dense_mlp_quant", "int8"),
                     lm_head_quant=cfg.get("lm_head_quant", "int8"),
                     kv_dtype=cfg.get("kv_dtype", "fp8_e4m3"),
-                    krasis_threads=cfg.get("krasis_threads", 48),
+                    krasis_threads=cfg.get("krasis_threads", 20),
                     gguf_path=gguf_path,
                     layer_group_size=cfg.get("layer_group_size", 2),
                     hcs=cfg.get("hcs", False),

@@ -389,7 +389,7 @@ class KrasisModel:
         num_gpus: Optional[int] = None,
         devices: Optional[List[str]] = None,
         kv_dtype: torch.dtype = torch.float8_e4m3fn,
-        krasis_threads: int = 48,
+        krasis_threads: int = 20,
         gpu_prefill: bool = True,
         gpu_prefill_threshold: int = 300,
         attention_backend: str = "flashinfer",  # "flashinfer" or "trtllm"

@@ -501,7 +501,7 @@ def main():
                         help="Number of GPUs (auto-detected if omitted)")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8012)
-    parser.add_argument("--krasis-threads", type=int, default=48,
+    parser.add_argument("--krasis-threads", type=int, default=20,
                         help="CPU threads for expert computation")
     parser.add_argument("--kv-dtype", default="fp8_e4m3",
                         choices=["fp8_e4m3", "bf16"])

@@ -2974,7 +2974,7 @@ fn fake_transposed_weight(rows: usize, cols: usize, group_size: usize, num_bits:
 ///   timing: Enable per-component timing (KRASIS_CPU_DECODE_TIMING)
 ///   num_bits: Weight quantization (4 or 8)
 #[pyfunction]
-#[pyo3(signature = (config_path, num_steps=100, warmup=5, timing=false, num_bits=4, max_experts=0, num_threads=48))]
+#[pyo3(signature = (config_path, num_steps=100, warmup=5, timing=false, num_bits=4, max_experts=0, num_threads=20))]
 pub fn bench_decode_synthetic(
     config_path: &str,
     num_steps: usize,
