@@ -11,9 +11,9 @@ Krasis can run MoE language models that are much too large to fit in a consumer 
 
 **Crucially, it runs these models at a speed that is usable.**
 
-## Qwen3-Coder-Next / 856 tok/s prefill / 10.5 tok/s decode##
+## Qwen3-Coder-Next / 1,060 tok/s prefill / 14.8 tok/s decode
 
-For example, running Qwen3-Coder-Next (80B params, 146GB BF16) on a single-cpu Epyc server (7742) with 2x Ada 2000 16GB, Krasis achieves **856 tokens/sec prefill** and **10.5 tokens/sec decode**
+For example, running Qwen3-Coder-Next (80B params, 148 GB BF16) on a single-socket EPYC 7742 with 1x RTX 2000 Ada 16 GB, Krasis achieves **1,060 tokens/sec prefill** and **14.8 tokens/sec decode**.
 
 ## How LLMs work
 
@@ -40,21 +40,31 @@ In order to achieve these speeds, Krasis has a few requirements.
 - Krasis **may take some time on the first run** as it is doing a lot of pre-run work to optimise everything, major parts of this are cached for later runs though so they are generally much shorter startup times.
 - Krasis optimises models and caches them in .krasis, these can be large so you may need the original model **x3 space** or if you provide a GGUF in addition to the BF16 you may need **4x the space**.
 
-## Known Supported Models and Benchmark Speeds
+## Supported Models
 
-Speeds reported in the following models are benchmarked on the following hardware:
+| Model | Params | BF16 Size | Experts | Attention |
+|-------|:------:|:---------:|---------|-----------|
+| **Qwen3-Coder-Next** | 80B | 148 GB | 512 routed, top-10 | Hybrid (36 linear + 12 GQA) |
+| **Qwen3-235B-A22B** | 235B | 438 GB | 128 routed, top-8 | GQA |
+| **DeepSeek V2-Lite** | 16B | 29 GB | 64 + 2 shared, top-6 | MLA |
+| **GLM-4.7** | 358B | 667 GB | 160 + 1 shared, top-8 | GQA (partial RoPE, bias) |
 
-- Epyc 7742
-- DDR4 2666 RAM (8x channels)
-- 2x RTX Ada 2000
+## Benchmark: EPYC 7742 + 1x RTX 2000 Ada 16 GB
 
-| Model | Params | BF16 Size | Experts | Attention | Prefill | Decode |
-|-------|:------:|:---------:|---------|-----------|:-------:|:------:|
-| **Qwen3-Coder-Next** | 80B | 148 GB | 512 routed, top-10 | Hybrid (36 linear + 12 GQA) | 812 tok/s | 10.5 tok/s |
-| **Qwen3-235B-A22B** | 235B | 438 GB | 128 routed, top-8 | GQA | 198 tok/s | 1.65 tok/s |
-| **DeepSeek V2-Lite** | 16B | 29 GB | 64 + 2 shared, top-6 | MLA | 2,400 tok/s | 5.8 tok/s |
-| **GLM-4.7** | 358B | 667 GB | 160 + 1 shared, top-8 | GQA (partial RoPE, bias) | untested | untested |
+**Hardware:** AMD EPYC 7742 (64 cores, 4 NUMA nodes), DDR4-2666 8-channel, 1x NVIDIA RTX 2000 Ada 16 GB, PCIe 4.0 x8.
 
+**Config:** BF16 attention, FP8 KV cache, INT8 shared/MLP/lm_head, LGS=2, 40 CPU threads, NUMA-aware thread pinning + interleaved allocation.
+
+Benchmark uses 10K–50K token prompts (prefill) and 64-token generation runs (decode). Prefill speed is best of 20K/35K/50K. Decode is average of 3 runs with different prompts.
+
+| Model | Expert Quant | Prefill (tok/s) | TTFT @ 20K | Decode (tok/s) | ms/tok |
+|-------|:------------:|:---------------:|:----------:|:--------------:|:------:|
+| **Qwen3-Coder-Next** | INT4 GPU + INT4 CPU | 1,060 | 18.9s | 14.84 | 67.6 |
+| **Qwen3-Coder-Next** | INT8 GPU + INT8 CPU | 873 | 40.1s | 12.41 | 80.6 |
+| **DeepSeek V2-Lite** | INT4 GPU + INT4 CPU | 1,477 | 13.6s | 20.18 | 49.7 |
+| **DeepSeek V2-Lite** | INT8 GPU + INT8 CPU | 1,317 | 15.2s | 17.84 | 56.2 |
+
+INT4 experts give ~20% faster decode and ~20% faster prefill than INT8 due to halved memory bandwidth requirements. INT4 quantization quality is validated in the perplexity table below.
 
 ## Perplexity (Quantization Quality)
 

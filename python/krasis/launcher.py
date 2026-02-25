@@ -379,7 +379,7 @@ class LauncherConfig:
         self.shared_expert_quant: str = "int8"
         self.dense_mlp_quant: str = "int8"
         self.lm_head_quant: str = "int8"
-        self.krasis_threads: int = 20
+        self.krasis_threads: int = 40
         self.host: str = "0.0.0.0"
         self.port: int = 8012
         self.gpu_prefill_threshold: int = 300
@@ -1265,7 +1265,7 @@ class Launcher:
         if needs_recompute and self.model_info:
             self.cfg.pp_partition = self._compute_default_pp(self.model_info["layers"])
         if self.hw["cpu_cores"] > 0:
-            self.cfg.krasis_threads = min(self.hw["cpu_cores"], 20)
+            self.cfg.krasis_threads = min(self.hw["cpu_cores"], 40)
 
         # Compute initial budget
         self.budget = self._compute_budget()

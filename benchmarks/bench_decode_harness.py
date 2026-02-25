@@ -25,8 +25,8 @@ def main():
     parser.add_argument("--bits", type=int, default=4, choices=[4, 8], help="Weight quantization bits")
     parser.add_argument("--max-experts", type=int, default=0,
                         help="Cap number of experts per layer (0=full, reduces allocation time)")
-    parser.add_argument("--threads", type=int, default=20,
-                        help="Rayon thread count (default 20, must match real model)")
+    parser.add_argument("--threads", type=int, default=40,
+                        help="Rayon thread count (default 40, capped at physical core count)")
     args = parser.parse_args()
 
     config_path = os.path.join(args.model, "config.json")

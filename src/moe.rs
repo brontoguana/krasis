@@ -1493,12 +1493,10 @@ impl KrasisEngine {
             }
         }
 
-        // Configure rayon thread pool (once, globally)
+        // Configure NUMA-aware rayon thread pool (once, globally)
         if let Some(n) = num_threads {
-            let _ = rayon::ThreadPoolBuilder::new()
-                .num_threads(n)
-                .build_global();
-            log::info!("Rayon thread pool: {n} threads");
+            let topo = crate::numa::build_numa_thread_pool(n);
+            log::info!("Rayon thread pool: {n} threads, {} NUMA nodes", topo.num_nodes);
         }
         if skip_shared_experts {
             log::info!("Shared expert computation disabled (handled by host framework)");
