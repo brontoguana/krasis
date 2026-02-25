@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+"""Comprehensive CPU decode timing for QCN INT4/INT4."""
+
+import sys
+import time
+import logging
+import os
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+logger = logging.getLogger("decode_timing")
+
+# Enable timing with frequent reports
+os.environ["KRASIS_CPU_DECODE_TIMING"] = "1"
+os.environ["KRASIS_TIMING_INTERVAL"] = "20"
+
+from krasis.config import ModelConfig, QuantConfig
+from krasis.model import KrasisModel
+
+MODEL_PATH = os.path.expanduser("~/.krasis/models/Qwen3-Coder-Next")
+
+def main():
+    qcfg = QuantConfig(
+        gpu_expert_bits=4,
+        cpu_expert_bits=4,
+        attention="bf16",
+        lm_head="int8",
+        shared_expert="int8",
+        dense_mlp="int8",
+    )
+
+    logger.info("Loading QCN model...")
+    model = KrasisModel(
+        model_path=MODEL_PATH,
+        num_gpus=1,
+        layer_group_size=2,
+        quant_cfg=qcfg,
+    )
+    model.load()
+    logger.info("Model loaded")
+
+    tokenizer = model.tokenizer
+
+    # Warmup: short generation to get caches warm
+    logger.info("=== WARMUP ===")
+    warmup_ids = tokenizer.encode("Hello")
+    model.generate(warmup_ids, max_new_tokens=10, temperature=0.1)
+
+    # Test 1: Short prompt, long generation (pure decode timing)
+    logger.info("=== TEST 1: Short prompt, 150 decode tokens ===")
+    prompt1 = "Explain the concept of recursion in programming. Give examples and discuss base cases, stack frames, and tail recursion optimization. Be thorough."
+    p1_ids = tokenizer.encode(prompt1)
+    logger.info("Prompt tokens: %d", len(p1_ids))
+    t0 = time.perf_counter()
+    gen1 = model.generate(p1_ids, max_new_tokens=150, temperature=0.3)
+    t1 = time.perf_counter()
+    text1 = tokenizer.decode(gen1)
+    decode_tokens = len(gen1) - 1  # first token from prefill
+    decode_time = t1 - t0
+    logger.info("Generated %d tokens in %.2fs (%.2f tok/s overall)", len(gen1), decode_time, len(gen1)/decode_time)
+    logger.info("Output preview: %s", text1[:200])
+
+    # Test 2: Medium prompt (~2K tokens), 100 decode tokens
+    logger.info("=== TEST 2: ~2K prompt, 100 decode tokens ===")
+    # Build a 2K token prompt
+    base = "The following is a detailed technical discussion about computer architecture, memory hierarchies, and CPU design principles. "
+    prompt2 = base * 40 + "\n\nBased on the above discussion, summarize the key points about memory hierarchy design:"
+    p2_ids = tokenizer.encode(prompt2)
+    logger.info("Prompt tokens: %d", len(p2_ids))
+    t0 = time.perf_counter()
+    gen2 = model.generate(p2_ids, max_new_tokens=100, temperature=0.3)
+    t1 = time.perf_counter()
+    text2 = tokenizer.decode(gen2)
+    logger.info("Generated %d tokens in %.2fs", len(gen2), t1 - t0)
+    logger.info("Output preview: %s", text2[:200])
+
+    logger.info("=== DONE ===")
+
+if __name__ == "__main__":
+    main()

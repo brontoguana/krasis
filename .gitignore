@@ -10,3 +10,8 @@ __pycache__/
 !tests/fixtures/*.safetensors
 models/
 .krasis_config
+.DS_Store
+._*
+krasis.log
+server_init.log
+perplexity/datasets/

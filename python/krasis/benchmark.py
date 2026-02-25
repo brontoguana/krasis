@@ -222,20 +222,15 @@ class KrasisBenchmark:
     # ──────────────────────────────────────────────────────────
 
     def _load_prompt_file(self, filename: str) -> str:
-        """Load a prompt from benchmark_data/<filename> inside the package."""
+        """Load a prompt from benchmarks/<filename> in the repo."""
         pkg_dir = os.path.dirname(os.path.abspath(__file__))
-        prompt_path = os.path.join(pkg_dir, "benchmark_data", filename)
-        if os.path.isfile(prompt_path):
-            with open(prompt_path) as f:
-                return f.read().strip()
-        # Fallback: repo layout (benchmarks/ at repo root)
         repo_dir = os.path.dirname(os.path.dirname(pkg_dir))
         prompt_path = os.path.join(repo_dir, "benchmarks", filename)
         if os.path.isfile(prompt_path):
             with open(prompt_path) as f:
                 return f.read().strip()
         raise FileNotFoundError(
-            f"Benchmark prompt file '{filename}' not found in package or repo"
+            f"Benchmark prompt file '{filename}' not found at {prompt_path}"
         )
 
     def _make_prompt(self) -> List[int]:
@@ -305,12 +300,15 @@ class KrasisBenchmark:
             prompts.append(tokens)
         return prompts
 
-    def _make_prefill_prompts_at_lengths(self, lengths: List[int]) -> List[List[int]]:
+    def _make_prefill_prompts_at_lengths(self, lengths: List[int], file_offset: int = 0) -> List[List[int]]:
         """Build one prefill prompt per target length from different files.
 
         Each prompt uses a different file and is truncated to exactly the
         target token count.  Falls back gracefully if a file doesn't have
         enough tokens (uses what's available).
+
+        file_offset: start from this index into the discovered files list,
+        so timed runs can use different files from warmup runs.
         """
         kv_limit = self._kv_cache_max_tokens() - 200
         files = self._discover_prefill_files()
@@ -324,7 +322,7 @@ class KrasisBenchmark:
 
         prompts = []
         for i, target in enumerate(lengths):
-            content = self._load_prompt_file(files[i % len(files)])
+            content = self._load_prompt_file(files[(i + file_offset) % len(files)])
             # Truncate raw text to ~5 chars/tok as a rough upper bound before tokenizing
             # to avoid tokenizing huge texts when we only need a fraction
             char_limit = target * 6
@@ -623,7 +621,7 @@ class KrasisBenchmark:
         print(_section(f"Loading benchmark prompts (warmup + timed at {lengths_str})"))
 
         warmup_prefill = self._make_prefill_prompts(self.n_runs, max_tokens_override=25000)
-        timed_prefill = self._make_prefill_prompts_at_lengths(self.PREFILL_LENGTHS)
+        timed_prefill = self._make_prefill_prompts_at_lengths(self.PREFILL_LENGTHS, file_offset=self.n_runs)
         decode_prompts = self._make_decode_prompts(self.n_runs * 2)
 
         print(f"  Warmup prefill:  {self.n_runs} prompts, ~{len(warmup_prefill[0]):,} tokens each")
