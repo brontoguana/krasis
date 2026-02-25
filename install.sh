@@ -263,14 +263,24 @@ fi
 # ── Verify ───────────────────────────────────────────────────────────
 if command -v krasis &>/dev/null; then
     ok "Krasis $(krasis --version 2>/dev/null || echo "${VERSION#v}") is ready!"
+    echo ""
+    info "Next steps:"
+    echo -e "  1. Run ${BOLD}krasis-setup${NC}   — installs CUDA toolkit, PyTorch, FlashInfer"
+    echo -e "  2. Run ${BOLD}krasis${NC}         — launch the interactive TUI"
+    echo ""
 else
-    ok "Installed, but PATH update needs a new terminal."
+    ok "Installed Krasis ${VERSION#v}."
+    echo ""
+    info "To start using it in this terminal, run:"
+    echo ""
+    echo -e "  ${BOLD}export PATH=\"\$HOME/.local/bin:\$PATH\"${NC}"
+    echo ""
+    info "Then:"
+    echo -e "  1. Run ${BOLD}krasis-setup${NC}   — installs CUDA toolkit, PyTorch, FlashInfer"
+    echo -e "  2. Run ${BOLD}krasis${NC}         — launch the interactive TUI"
+    echo ""
+    info "(New terminals will pick up the PATH automatically.)"
+    echo ""
 fi
-
-echo ""
-info "Next steps:"
-echo -e "  1. Run ${BOLD}krasis-setup${NC}   — installs CUDA toolkit, PyTorch, FlashInfer"
-echo -e "  2. Run ${BOLD}krasis${NC}         — launch the interactive TUI"
-echo ""
 echo -e "${DIM}Upgrade:    curl -sSf https://raw.githubusercontent.com/brontoguana/krasis/main/install.sh | bash${NC}"
 echo -e "${DIM}Uninstall:  curl -sSf https://raw.githubusercontent.com/brontoguana/krasis/main/install.sh | bash -s -- --uninstall${NC}"
