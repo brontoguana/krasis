@@ -3088,20 +3088,13 @@ impl CpuDecodeStore {
                         }
                     }
 
-                    // ── Step 4: Absorb w_kc into query ──
+                    // ── Step 4: Absorb w_kc into query (AVX2 vectorized) ──
                     // For each head: q_absorbed[h, :klr] = q_nope[h, :qk_nd] @ w_kc[h, :qk_nd, :klr]
-                    // w_kc layout: [num_heads, qk_nope_dim, kv_lora_rank]
-                    for h in 0..nh {
-                        let q_base = h * head_dim; // q_nope starts here
-                        let wkc_base = h * qk_nd * klr;
-                        let out_base = h * klr;
-                        for j in 0..klr {
-                            let mut acc = 0.0f32;
-                            for i in 0..qk_nd {
-                                acc += graph.mla_q_full[q_base + i] * w_kc[wkc_base + i * klr + j];
-                            }
-                            graph.mla_q_absorbed[out_base + j] = acc;
-                        }
+                    #[cfg(target_arch = "x86_64")]
+                    unsafe {
+                        mla_absorb_wkc_avx2(
+                            &graph.mla_q_full, w_kc, &mut graph.mla_q_absorbed,
+                            nh, qk_nd, klr, head_dim);
                     }
                     if timing { graph.t_mla_rope += t0.elapsed().as_secs_f64(); }
 
@@ -3126,27 +3119,27 @@ impl CpuDecodeStore {
                     kpe_cache[kpe_offset..kpe_offset + qk_rd]
                         .copy_from_slice(&graph.mla_kv_out[klr..klr + qk_rd]);
 
-                    // Attention: per head
+                    // Attention: per head (AVX2 vectorized)
                     // score[h,t] = dot(q_absorbed[h], ckv[t]) + dot(q_pe[h], kpe[t])
                     let seq_len = position + 1;
+                    #[cfg(target_arch = "x86_64")]
                     for h in 0..nh {
                         let qa_base = h * klr;
-                        let qpe_base = h * head_dim + qk_nd; // q_pe in mla_q_full after RoPE
+                        let qpe_base = h * head_dim + qk_nd;
                         let score_base = h * seq_len;
                         let mut max_score = f32::NEG_INFINITY;
 
                         for t in 0..seq_len {
-                            let mut s = 0.0f32;
-                            // dot(q_absorbed, ckv)
-                            let ckv_t = t * klr;
-                            for i in 0..klr {
-                                s += graph.mla_q_absorbed[qa_base + i] * ckv_cache[ckv_t + i];
-                            }
-                            // dot(q_pe, kpe)
-                            let kpe_t = t * qk_rd;
-                            for i in 0..qk_rd {
-                                s += graph.mla_q_full[qpe_base + i] * kpe_cache[kpe_t + i];
-                            }
+                            let mut s = unsafe {
+                                mla_attn_dot_avx2(
+                                    &graph.mla_q_absorbed[qa_base..qa_base + klr],
+                                    &ckv_cache[t * klr..], klr)
+                            };
+                            s += unsafe {
+                                mla_attn_dot_avx2(
+                                    &graph.mla_q_full[qpe_base..qpe_base + qk_rd],
+                                    &kpe_cache[t * qk_rd..], qk_rd)
+                            };
                             s *= sm_scale;
                             graph.mla_attn_scores[score_base + t] = s;
                             if s > max_score { max_score = s; }
@@ -3166,13 +3159,11 @@ impl CpuDecodeStore {
 
                         // Weighted sum: attn_out[h] = sum_t(weight[t] * ckv[t])
                         let out_base = h * klr;
-                        for j in 0..klr {
-                            let mut acc = 0.0f32;
-                            for t in 0..seq_len {
-                                acc += graph.mla_attn_scores[score_base + t]
-                                    * ckv_cache[t * klr + j];
-                            }
-                            graph.mla_attn_out[out_base + j] = acc;
+                        unsafe {
+                            mla_weighted_sum_avx2(
+                                &graph.mla_attn_scores[score_base..score_base + seq_len],
+                                ckv_cache, &mut graph.mla_attn_out[out_base..out_base + klr],
+                                seq_len, klr);
                         }
                     }
                     if timing { graph.t_mla_attn += t0.elapsed().as_secs_f64(); }
@@ -3180,20 +3171,13 @@ impl CpuDecodeStore {
                     // ── Step 6: w_vc projection + o_proj ──
                     let t0 = if timing { Instant::now() } else { t_step_start };
 
-                    // For each head: v_projected[h] = w_vc[h] @ attn_out[h]
+                    // For each head: v_projected[h] = w_vc[h] @ attn_out[h] (AVX2 vectorized)
                     // w_vc: [num_heads, v_head_dim, kv_lora_rank]
-                    for h in 0..nh {
-                        let wvc_base = h * vhd * klr;
-                        let ao_base = h * klr;
-                        let vp_base = h * vhd;
-                        for o in 0..vhd {
-                            let mut acc = 0.0f32;
-                            for d in 0..klr {
-                                acc += w_vc[wvc_base + o * klr + d]
-                                    * graph.mla_attn_out[ao_base + d];
-                            }
-                            graph.mla_v_projected[vp_base + o] = acc;
-                        }
+                    #[cfg(target_arch = "x86_64")]
+                    unsafe {
+                        mla_project_wvc_avx2(
+                            w_vc, &graph.mla_attn_out, &mut graph.mla_v_projected,
+                            nh, vhd, klr);
                     }
 
                     // o_proj: [num_heads * v_head_dim] → [hidden_size]
@@ -4263,6 +4247,187 @@ fn fake_transposed_weight(rows: usize, cols: usize, group_size: usize, num_bits:
     TransposedWeight { packed, scales, rows, cols, group_size, num_bits, tiled: false }
 }
 
+// ── AVX2 MLA kernels ──
+
+/// AVX2 w_kc absorption: q_absorbed[h,:klr] = q_nope[h,:qk_nd] @ w_kc[h,:qk_nd,:klr]
+///
+/// Key optimization: loop reorder. Original scalar code iterates output columns
+/// in the inner loop (stride-klr access on w_kc). Reordered version iterates input
+/// dimension outer (sequential access on w_kc rows), broadcasting q_nope[i] across
+/// the output vector. This transforms strided DRAM access into sequential L2 reads.
+///
+/// Parallelized across heads with rayon — each head reads 256 KB from L2 independently.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn mla_absorb_wkc_avx2(
+    q_nope: &[f32],    // [nh * head_dim] — q_nope starts at offset h*head_dim
+    w_kc: &[f32],      // [nh, qk_nd, klr]
+    out: &mut [f32],    // [nh * klr]
+    nh: usize, qk_nd: usize, klr: usize, head_dim: usize,
+) {
+    use std::arch::x86_64::*;
+    use rayon::prelude::*;
+    let klr8 = klr / 8;
+
+    // Parallel across heads
+    let q_ptr = q_nope.as_ptr() as usize;
+    let w_ptr = w_kc.as_ptr() as usize;
+    let o_ptr = out.as_mut_ptr() as usize;
+    (0..nh).into_par_iter().for_each(|h| {
+        let q_nope = q_ptr as *const f32;
+        let w_kc = w_ptr as *const f32;
+        let out = o_ptr as *mut f32;
+        let q_base = h * head_dim;
+        let wkc_base = h * qk_nd * klr;
+        let out_base = h * klr;
+
+        // Zero output
+        let zero = _mm256_setzero_ps();
+        for j in 0..klr8 {
+            _mm256_storeu_ps(out.add(out_base + j * 8), zero);
+        }
+
+        // Accumulate: broadcast q[i] across output vector
+        for i in 0..qk_nd {
+            let q_val = _mm256_set1_ps(*q_nope.add(q_base + i));
+            let w_row = wkc_base + i * klr;
+            for j in 0..klr8 {
+                let w = _mm256_loadu_ps(w_kc.add(w_row + j * 8));
+                let o = _mm256_loadu_ps(out.add(out_base + j * 8) as *const f32);
+                _mm256_storeu_ps(out.add(out_base + j * 8),
+                    _mm256_fmadd_ps(q_val, w, o));
+            }
+        }
+    });
+}
+
+/// AVX2 w_vc projection: v_projected[h,:vhd] = w_vc[h,:vhd,:klr] @ attn_out[h,:klr]
+///
+/// Parallelized across heads — each head reads 256 KB of w_vc independently.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn mla_project_wvc_avx2(
+    w_vc: &[f32],       // [nh, vhd, klr]
+    attn_out: &[f32],   // [nh * klr]
+    v_projected: &mut [f32], // [nh * vhd]
+    nh: usize, vhd: usize, klr: usize,
+) {
+    use std::arch::x86_64::*;
+    use rayon::prelude::*;
+    let klr8 = klr / 8;
+
+    let wvc_ptr = w_vc.as_ptr() as usize;
+    let ao_ptr = attn_out.as_ptr() as usize;
+    let vp_ptr = v_projected.as_mut_ptr() as usize;
+    (0..nh).into_par_iter().for_each(|h| {
+        let w_vc = wvc_ptr as *const f32;
+        let attn_out = ao_ptr as *const f32;
+        let v_projected = vp_ptr as *mut f32;
+        let wvc_base = h * vhd * klr;
+        let ao_base = h * klr;
+        let vp_base = h * vhd;
+        for o in 0..vhd {
+            let w_row = wvc_base + o * klr;
+            let mut acc0 = _mm256_setzero_ps();
+            let mut acc1 = _mm256_setzero_ps();
+            let chunks = klr8 / 2;
+            let mut j = 0usize;
+            for _ in 0..chunks {
+                let w0 = _mm256_loadu_ps(w_vc.add(w_row + j * 8));
+                let a0 = _mm256_loadu_ps(attn_out.add(ao_base + j * 8));
+                acc0 = _mm256_fmadd_ps(w0, a0, acc0);
+                let w1 = _mm256_loadu_ps(w_vc.add(w_row + (j + 1) * 8));
+                let a1 = _mm256_loadu_ps(attn_out.add(ao_base + (j + 1) * 8));
+                acc1 = _mm256_fmadd_ps(w1, a1, acc1);
+                j += 2;
+            }
+            if klr8 % 2 != 0 {
+                let w0 = _mm256_loadu_ps(w_vc.add(w_row + j * 8));
+                let a0 = _mm256_loadu_ps(attn_out.add(ao_base + j * 8));
+                acc0 = _mm256_fmadd_ps(w0, a0, acc0);
+            }
+            let sum8 = _mm256_add_ps(acc0, acc1);
+            let hi = _mm256_extractf128_ps(sum8, 1);
+            let lo = _mm256_castps256_ps128(sum8);
+            let s4 = _mm_add_ps(lo, hi);
+            let s2 = _mm_add_ps(s4, _mm_movehdup_ps(s4));
+            let s1 = _mm_add_ss(s2, _mm_movehl_ps(s2, s2));
+            *v_projected.add(vp_base + o) = _mm_cvtss_f32(s1);
+        }
+    });
+}
+
+/// AVX2 MLA attention score: score = dot(q_absorbed, ckv_t) + dot(q_pe, kpe_t)
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn mla_attn_dot_avx2(
+    q: &[f32], cache: &[f32], dim: usize,
+) -> f32 {
+    use std::arch::x86_64::*;
+    let n8 = dim / 8;
+    let mut acc0 = _mm256_setzero_ps();
+    let mut acc1 = _mm256_setzero_ps();
+    let chunks = n8 / 2;
+    let mut i = 0usize;
+    for _ in 0..chunks {
+        let q0 = _mm256_loadu_ps(q.as_ptr().add(i * 8));
+        let c0 = _mm256_loadu_ps(cache.as_ptr().add(i * 8));
+        acc0 = _mm256_fmadd_ps(q0, c0, acc0);
+        let q1 = _mm256_loadu_ps(q.as_ptr().add((i + 1) * 8));
+        let c1 = _mm256_loadu_ps(cache.as_ptr().add((i + 1) * 8));
+        acc1 = _mm256_fmadd_ps(q1, c1, acc1);
+        i += 2;
+    }
+    if n8 % 2 != 0 {
+        let q0 = _mm256_loadu_ps(q.as_ptr().add(i * 8));
+        let c0 = _mm256_loadu_ps(cache.as_ptr().add(i * 8));
+        acc0 = _mm256_fmadd_ps(q0, c0, acc0);
+    }
+    let sum8 = _mm256_add_ps(acc0, acc1);
+    let hi = _mm256_extractf128_ps(sum8, 1);
+    let lo = _mm256_castps256_ps128(sum8);
+    let s4 = _mm_add_ps(lo, hi);
+    let s2 = _mm_add_ps(s4, _mm_movehdup_ps(s4));
+    let s1 = _mm_add_ss(s2, _mm_movehl_ps(s2, s2));
+    // Handle remainder (dim not multiple of 8)
+    let mut result = _mm_cvtss_f32(s1);
+    for r in (n8 * 8)..dim {
+        result += *q.get_unchecked(r) * *cache.get_unchecked(r);
+    }
+    result
+}
+
+/// AVX2 MLA weighted sum: out[j] = sum_t(weight[t] * cache[t * stride + j])
+/// Uses loop reorder: outer over t (broadcast weight), inner over j (sequential cache access)
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn mla_weighted_sum_avx2(
+    weights: &[f32],    // [seq_len] attention weights
+    cache: &[f32],      // [max_seq * dim] cache data
+    out: &mut [f32],    // [dim] output
+    seq_len: usize,
+    dim: usize,
+) {
+    use std::arch::x86_64::*;
+    let dim8 = dim / 8;
+    // Zero output
+    let zero = _mm256_setzero_ps();
+    for j in 0..dim8 {
+        _mm256_storeu_ps(out.as_mut_ptr().add(j * 8), zero);
+    }
+    // Accumulate
+    for t in 0..seq_len {
+        let w = _mm256_set1_ps(*weights.get_unchecked(t));
+        let cache_t = t * dim;
+        for j in 0..dim8 {
+            let c = _mm256_loadu_ps(cache.as_ptr().add(cache_t + j * 8));
+            let o = _mm256_loadu_ps(out.as_ptr().add(j * 8));
+            _mm256_storeu_ps(out.as_mut_ptr().add(j * 8),
+                _mm256_fmadd_ps(w, c, o));
+        }
+    }
+}
+
 /// Synthetic decode benchmark — measures decode_step speed without loading a real model.
 ///
 /// Reads config.json to get model dimensions, allocates fake weights matching the
@@ -4342,7 +4507,9 @@ pub fn bench_decode_synthetic(
     let num_experts = cfg.get("num_experts").and_then(|v| v.as_u64()).unwrap_or(512) as usize;
     let topk = cfg.get("num_experts_per_tok").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
     let moe_intermediate = cfg.get("moe_intermediate_size").and_then(|v| v.as_u64()).unwrap_or(512) as usize;
-    let shared_intermediate = cfg.get("shared_expert_intermediate_size").and_then(|v| v.as_u64()).unwrap_or(moe_intermediate as u64) as usize;
+    let n_shared_experts = cfg.get("n_shared_experts").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
+    let shared_intermediate = cfg.get("shared_expert_intermediate_size").and_then(|v| v.as_u64())
+        .unwrap_or(moe_intermediate as u64 * n_shared_experts as u64) as usize;
     let norm_topk_prob = cfg.get("norm_topk_prob").and_then(|v| v.as_bool()).unwrap_or(true);
 
     // Detect gated attention
@@ -4353,7 +4520,28 @@ pub fn bench_decode_synthetic(
     let model_type = cfg.get("model_type").and_then(|v| v.as_str()).unwrap_or("");
     let norm_bias_one = model_type.contains("qwen3_next");
 
+    // MLA model detection (DeepSeek V2-style)
+    let is_mla = cfg.get("kv_lora_rank").and_then(|v| v.as_u64()).is_some();
+    let mla_kv_lora_rank = cfg.get("kv_lora_rank").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let mla_qk_nope_dim = cfg.get("qk_nope_head_dim").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let mla_qk_rope_dim = cfg.get("qk_rope_head_dim").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let mla_v_head_dim = cfg.get("v_head_dim").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let mla_q_lora_rank = cfg.get("q_lora_rank").and_then(|v| v.as_u64()).map(|v| v as usize);
+    let mla_num_heads = cfg.get("num_attention_heads").and_then(|v| v.as_u64()).unwrap_or(16) as usize;
+    let first_k_dense_replace = cfg.get("first_k_dense_replace").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let dense_intermediate = cfg.get("intermediate_size").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let mla_head_dim = mla_qk_nope_dim + mla_qk_rope_dim;
+    let mla_q_dim = mla_num_heads * mla_head_dim;
+
+    // scoring_func: 0=sigmoid, 1=softmax, 2=swiglu
+    let scoring_func_str = cfg.get("scoring_func").and_then(|v| v.as_str()).unwrap_or("sigmoid");
+    let swiglu_limit = cfg.get("swiglu_limit").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let scoring_func: u8 = if swiglu_limit > 0.0 { 2 }
+        else if scoring_func_str == "sigmoid" { 0 }
+        else { 1 }; // softmax
+
     let group_size = 128usize;
+    let pad_gs = |x: usize| -> usize { (x + group_size - 1) / group_size * group_size };
     let scale = 1.0 / (dk as f32).sqrt();
 
     // Derived LA dimensions
@@ -4371,11 +4559,26 @@ pub fn bench_decode_synthetic(
         num_experts
     };
 
-    eprintln!("Model: hidden={}, layers={}, vocab={}", hidden_size, num_layers, vocab_size);
-    eprintln!("LA: nk={}, nv={}, dk={}, dv={}, hr={}, conv_dim={}, qkvz_dim={}", nk, nv, dk, dv, hr, conv_dim, qkvz_dim);
-    eprintln!("GQA: heads={}, kv_heads={}, head_dim={}, gated={}", gqa_num_heads, gqa_num_kv_heads, gqa_head_dim, gqa_gated);
+    eprintln!("Model: hidden={}, layers={}, vocab={}, type={}", hidden_size, num_layers, vocab_size,
+        if is_mla { "MLA" } else { "QCN" });
+    if is_mla {
+        eprintln!("MLA: heads={}, kv_lora_rank={}, qk_nope={}, qk_rope={}, v_head={}",
+            mla_num_heads, mla_kv_lora_rank, mla_qk_nope_dim, mla_qk_rope_dim, mla_v_head_dim);
+        if let Some(qlr) = mla_q_lora_rank {
+            eprintln!("MLA Q path: LoRA (rank={})", qlr);
+        } else {
+            eprintln!("MLA Q path: direct (dim={})", mla_q_dim);
+        }
+        eprintln!("Dense layers: 0..{}, MoE layers: {}..{}", first_k_dense_replace, first_k_dense_replace, num_layers);
+        if first_k_dense_replace > 0 {
+            eprintln!("Dense MLP: intermediate={} (padded={})", dense_intermediate, pad_gs(dense_intermediate));
+        }
+    } else {
+        eprintln!("LA: nk={}, nv={}, dk={}, dv={}, hr={}, conv_dim={}, qkvz_dim={}", nk, nv, dk, dv, hr, conv_dim, qkvz_dim);
+        eprintln!("GQA: heads={}, kv_heads={}, head_dim={}, gated={}", gqa_num_heads, gqa_num_kv_heads, gqa_head_dim, gqa_gated);
+    }
     eprintln!("MoE: experts={}, topk={}, intermediate={}, shared={} (alloc={})", num_experts, topk, moe_intermediate, shared_intermediate, alloc_experts);
-    eprintln!("Quantization: INT{}, group_size={}", num_bits, group_size);
+    eprintln!("Quantization: INT{}, group_size={}, scoring_func={}", num_bits, group_size, scoring_func);
 
     // ── 2. Allocate ALL weights in contiguous mmap (matches real model's mmap'd layout) ──
     let gen_start = Instant::now();
@@ -4395,34 +4598,70 @@ pub fn bench_decode_synthetic(
     total_scales_u16 += scales_count_for(vocab_size, hidden_size);
     // Per-layer projection weights
     for layer_idx in 0..num_layers {
-        let is_gqa = full_attn_interval > 0 && (layer_idx + 1) % full_attn_interval == 0;
-        if is_gqa {
-            let q_out = if gqa_gated { gqa_num_heads * gqa_head_dim * 2 } else { gqa_num_heads * gqa_head_dim };
-            let kv_out = gqa_num_kv_heads * gqa_head_dim;
-            for &(r, c) in &[(q_out, hidden_size), (kv_out, hidden_size), (kv_out, hidden_size),
-                             (hidden_size, gqa_num_heads * gqa_head_dim),
-                             (q_out + kv_out + kv_out, hidden_size)] { // fused QKV
+        if is_mla {
+            // MLA attention weights: kv_a_proj, o_proj, q_proj (or q_a+q_b)
+            let kv_a_rows = mla_kv_lora_rank + mla_qk_rope_dim;
+            total_packed_u32 += packed_count_for(kv_a_rows, hidden_size);
+            total_scales_u16 += scales_count_for(kv_a_rows, hidden_size);
+            total_packed_u32 += packed_count_for(hidden_size, mla_num_heads * mla_v_head_dim);
+            total_scales_u16 += scales_count_for(hidden_size, mla_num_heads * mla_v_head_dim);
+            if let Some(qlr) = mla_q_lora_rank {
+                total_packed_u32 += packed_count_for(qlr, hidden_size);
+                total_scales_u16 += scales_count_for(qlr, hidden_size);
+                total_packed_u32 += packed_count_for(mla_q_dim, pad_gs(qlr));
+                total_scales_u16 += scales_count_for(mla_q_dim, pad_gs(qlr));
+            } else {
+                total_packed_u32 += packed_count_for(mla_q_dim, hidden_size);
+                total_scales_u16 += scales_count_for(mla_q_dim, hidden_size);
+            }
+        } else {
+            let is_gqa = full_attn_interval > 0 && (layer_idx + 1) % full_attn_interval == 0;
+            if is_gqa {
+                let q_out = if gqa_gated { gqa_num_heads * gqa_head_dim * 2 } else { gqa_num_heads * gqa_head_dim };
+                let kv_out = gqa_num_kv_heads * gqa_head_dim;
+                for &(r, c) in &[(q_out, hidden_size), (kv_out, hidden_size), (kv_out, hidden_size),
+                                 (hidden_size, gqa_num_heads * gqa_head_dim),
+                                 (q_out + kv_out + kv_out, hidden_size)] { // fused QKV
+                    total_packed_u32 += packed_count_for(r, c);
+                    total_scales_u16 += scales_count_for(r, c);
+                }
+            } else {
+                for &(r, c) in &[(qkvz_dim, hidden_size), (ba_dim, hidden_size), (hidden_size, nv * dv)] {
+                    total_packed_u32 += packed_count_for(r, c);
+                    total_scales_u16 += scales_count_for(r, c);
+                }
+            }
+        }
+        // MLP weights
+        if is_mla && layer_idx < first_k_dense_replace {
+            // Dense MLP: gate_proj, up_proj, down_proj
+            let padded_inter = pad_gs(dense_intermediate);
+            for &(r, c) in &[(dense_intermediate, hidden_size), (dense_intermediate, hidden_size),
+                             (hidden_size, padded_inter)] {
                 total_packed_u32 += packed_count_for(r, c);
                 total_scales_u16 += scales_count_for(r, c);
             }
         } else {
-            for &(r, c) in &[(qkvz_dim, hidden_size), (ba_dim, hidden_size), (hidden_size, nv * dv)] {
-                total_packed_u32 += packed_count_for(r, c);
-                total_scales_u16 += scales_count_for(r, c);
+            // MoE: shared gate_up, shared down
+            total_packed_u32 += packed_count_for(2 * shared_intermediate, hidden_size);
+            total_scales_u16 += scales_count_for(2 * shared_intermediate, hidden_size);
+            total_packed_u32 += packed_count_for(hidden_size, shared_intermediate);
+            total_scales_u16 += scales_count_for(hidden_size, shared_intermediate);
+            if !is_mla {
+                // shared_expert_gate (QCN only)
+                total_packed_u32 += packed_count_for(1, hidden_size);
+                total_scales_u16 += scales_count_for(1, hidden_size);
             }
         }
-        for &(r, c) in &[(2 * shared_intermediate, hidden_size), (hidden_size, shared_intermediate), (1, hidden_size)] {
-            total_packed_u32 += packed_count_for(r, c);
-            total_scales_u16 += scales_count_for(r, c);
-        }
     }
-    // Expert weights
+    // Expert weights (only for MoE layers, not dense)
+    let moe_layer_count = if is_mla { num_layers - first_k_dense_replace } else { num_layers };
     let w13_packed_per = packed_count_for(2 * moe_intermediate, hidden_size);
     let w13_scales_per = scales_count_for(2 * moe_intermediate, hidden_size);
     let w2_packed_per = packed_count_for(hidden_size, moe_intermediate);
     let w2_scales_per = scales_count_for(hidden_size, moe_intermediate);
-    total_packed_u32 += num_layers * alloc_experts * (w13_packed_per + w2_packed_per);
-    total_scales_u16 += num_layers * alloc_experts * (w13_scales_per + w2_scales_per);
+    total_packed_u32 += moe_layer_count * alloc_experts * (w13_packed_per + w2_packed_per);
+    total_scales_u16 += moe_layer_count * alloc_experts * (w13_scales_per + w2_scales_per);
 
     // Allocate two contiguous mmap regions (like real model's mmap'd safetensors)
     let packed_mmap_bytes = total_packed_u32 * 4;
@@ -4517,7 +4756,7 @@ pub fn bench_decode_synthetic(
         lm_head_wid,
         vocab_size,
         routed_scaling_factor: 1.0,
-        scoring_func: 0,
+        scoring_func,
         topk,
         norm_topk_prob,
         parallel: true,
@@ -4587,120 +4826,192 @@ pub fn bench_decode_synthetic(
     }));
 
     // ── 4. Add layers ──
+    let kv_max_seq = 256usize; // small for bench
+    let mut n_mla = 0usize;
+    let mut n_dense = 0usize;
+
     for layer_idx in 0..num_layers {
         let input_norm_id = norm_ids[layer_idx * 2];
         let post_attn_norm_id = norm_ids[layer_idx * 2 + 1];
-        let is_gqa = full_attn_interval > 0 && (layer_idx + 1) % full_attn_interval == 0;
 
-        if is_gqa {
-            // GQA layer
-            let q_out = if gqa_gated { gqa_num_heads * gqa_head_dim * 2 } else { gqa_num_heads * gqa_head_dim };
-            let kv_out = gqa_num_kv_heads * gqa_head_dim;
-            let q_proj_wid = mmap_weight(q_out, hidden_size);
-            let k_proj_wid = mmap_weight(kv_out, hidden_size);
-            let v_proj_wid = mmap_weight(kv_out, hidden_size);
-            let o_proj_wid = mmap_weight(hidden_size, gqa_num_heads * gqa_head_dim);
-            // Fused Q+K+V weight: one big [q_out+kv_out+kv_out, hidden_size] matrix
-            let fused_qkv_wid = mmap_weight(q_out + kv_out + kv_out, hidden_size);
-            let sm_scale = 1.0 / (gqa_head_dim as f32).sqrt();
+        if is_mla {
+            // MLA attention layer
+            let kv_a_rows = mla_kv_lora_rank + mla_qk_rope_dim;
+            let kv_a_proj_wid = mmap_weight(kv_a_rows, hidden_size);
+            let o_proj_wid = mmap_weight(hidden_size, mla_num_heads * mla_v_head_dim);
 
-            // Random norm weights around 1.0
-            let mut qn = vec![0.0f32; gqa_num_heads * gqa_head_dim];
-            for v in qn.iter_mut() { *v = 1.0 + rng.next_f32(0.02); }
-            let mut kn = vec![0.0f32; gqa_num_kv_heads * gqa_head_dim];
-            for v in kn.iter_mut() { *v = 1.0 + rng.next_f32(0.02); }
+            let (q_proj_wid, q_a_proj_wid, q_b_proj_wid) = if let Some(qlr) = mla_q_lora_rank {
+                let qa = mmap_weight(qlr, hidden_size);
+                let qb = mmap_weight(mla_q_dim, pad_gs(qlr));
+                (None, Some(qa), Some(qb))
+            } else {
+                let qw = mmap_weight(mla_q_dim, hidden_size);
+                (Some(qw), None, None)
+            };
 
+            // w_kc: [num_heads, qk_nope_dim, kv_lora_rank] as f32
+            let wkc_len = mla_num_heads * mla_qk_nope_dim * mla_kv_lora_rank;
+            let mut w_kc = vec![0.0f32; wkc_len];
+            fill_random_f32(&mut w_kc, &mut rng, 0.05);
+            // w_vc: [num_heads, v_head_dim, kv_lora_rank] as f32
+            let wvc_len = mla_num_heads * mla_v_head_dim * mla_kv_lora_rank;
+            let mut w_vc = vec![0.0f32; wvc_len];
+            fill_random_f32(&mut w_vc, &mut rng, 0.05);
+            // kv_a_norm
+            let mut kv_a_norm = vec![0.0f32; mla_kv_lora_rank];
+            for v in kv_a_norm.iter_mut() { *v = 1.0 + rng.next_f32(0.02); }
+            // q_a_norm (only if LoRA)
+            let q_a_norm = mla_q_lora_rank.map(|qlr| {
+                let mut n = vec![0.0f32; qlr];
+                for v in n.iter_mut() { *v = 1.0 + rng.next_f32(0.02); }
+                n
+            });
+            // YaRN RoPE tables (standard RoPE values — bench only cares about access patterns)
+            let rope_half = mla_qk_rope_dim / 2;
+            let mla_rope_max_seq = kv_max_seq;
+            let mut mla_rope_cos = vec![0.0f32; mla_rope_max_seq * rope_half];
+            let mut mla_rope_sin = vec![0.0f32; mla_rope_max_seq * rope_half];
+            for pos in 0..mla_rope_max_seq {
+                for d in 0..rope_half {
+                    let freq = 1.0 / (10000.0f32.powf(2.0 * d as f32 / mla_qk_rope_dim as f32));
+                    let angle = pos as f32 * freq;
+                    mla_rope_cos[pos * rope_half + d] = angle.cos();
+                    mla_rope_sin[pos * rope_half + d] = angle.sin();
+                }
+            }
+
+            let sm_scale = 1.0 / (mla_head_dim as f32).sqrt();
             let g = store.decode_graph.as_mut().unwrap();
             g.layers.push(DecodeLayer {
                 input_norm_id,
                 post_attn_norm_id,
-                attn: DecodeAttnConfig::GQA {
-                    q_proj_wid,
-                    k_proj_wid,
-                    v_proj_wid,
-                    o_proj_wid,
-                    q_norm: Some(qn),
-                    k_norm: Some(kn),
-                    gated: gqa_gated,
-                    num_heads: gqa_num_heads,
-                    num_kv_heads: gqa_num_kv_heads,
-                    head_dim: gqa_head_dim,
-                    sm_scale,
-                    fused_qkv_wid: Some(fused_qkv_wid),
+                attn: DecodeAttnConfig::MLA {
+                    kv_a_proj_wid, o_proj_wid,
+                    q_proj_wid, q_a_proj_wid, q_b_proj_wid,
+                    w_kc, w_vc, kv_a_norm, q_a_norm,
+                    rope_cos: mla_rope_cos, rope_sin: mla_rope_sin,
+                    num_heads: mla_num_heads, kv_lora_rank: mla_kv_lora_rank,
+                    qk_nope_dim: mla_qk_nope_dim, qk_rope_dim: mla_qk_rope_dim,
+                    v_head_dim: mla_v_head_dim, sm_scale,
                 },
                 mlp: DecodeMlpConfig::None, // set below
             });
-            n_gqa += 1;
+            n_mla += 1;
         } else {
-            // Linear attention layer
-            let in_proj_qkvz_wid = mmap_weight(qkvz_dim, hidden_size);
-            let in_proj_ba_wid = mmap_weight(ba_dim, hidden_size);
-            let out_proj_wid = mmap_weight(hidden_size, nv * dv);
+            let is_gqa = full_attn_interval > 0 && (layer_idx + 1) % full_attn_interval == 0;
+            if is_gqa {
+                // GQA layer
+                let q_out = if gqa_gated { gqa_num_heads * gqa_head_dim * 2 } else { gqa_num_heads * gqa_head_dim };
+                let kv_out = gqa_num_kv_heads * gqa_head_dim;
+                let q_proj_wid = mmap_weight(q_out, hidden_size);
+                let k_proj_wid = mmap_weight(kv_out, hidden_size);
+                let v_proj_wid = mmap_weight(kv_out, hidden_size);
+                let o_proj_wid = mmap_weight(hidden_size, gqa_num_heads * gqa_head_dim);
+                let fused_qkv_wid = mmap_weight(q_out + kv_out + kv_out, hidden_size);
+                let sm_scale = 1.0 / (gqa_head_dim as f32).sqrt();
 
-            // Random conv/attention parameters
-            let mut cw = vec![0.0f32; conv_dim * kernel_dim];
-            fill_random_f32(&mut cw, &mut rng, 0.05);
-            let mut al = vec![0.0f32; nv];
-            for v in al.iter_mut() { *v = -8.0 + rng.next_f32(0.5); }
-            let mut db = vec![0.0f32; nv];
-            for v in db.iter_mut() { *v = 0.1 + rng.next_f32(0.02); }
-            let mut nw = vec![0.0f32; nv * dv];
-            for v in nw.iter_mut() { *v = 1.0 + rng.next_f32(0.02); }
+                let mut qn = vec![0.0f32; gqa_num_heads * gqa_head_dim];
+                for v in qn.iter_mut() { *v = 1.0 + rng.next_f32(0.02); }
+                let mut kn = vec![0.0f32; gqa_num_kv_heads * gqa_head_dim];
+                for v in kn.iter_mut() { *v = 1.0 + rng.next_f32(0.02); }
 
-            let g = store.decode_graph.as_mut().unwrap();
-            g.layers.push(DecodeLayer {
-                input_norm_id,
-                post_attn_norm_id,
-                attn: DecodeAttnConfig::LinearAttention {
-                    in_proj_qkvz_wid,
-                    in_proj_ba_wid,
-                    out_proj_wid,
-                    conv_weight: cw,
-                    a_log: al,
-                    dt_bias: db,
-                    norm_weight: nw,
-                    nk, nv, dk, dv, hr, kernel_dim, conv_dim, scale,
-                },
-                mlp: DecodeMlpConfig::None, // set below
-            });
-            n_la += 1;
+                let g = store.decode_graph.as_mut().unwrap();
+                g.layers.push(DecodeLayer {
+                    input_norm_id,
+                    post_attn_norm_id,
+                    attn: DecodeAttnConfig::GQA {
+                        q_proj_wid, k_proj_wid, v_proj_wid, o_proj_wid,
+                        q_norm: Some(qn), k_norm: Some(kn),
+                        gated: gqa_gated,
+                        num_heads: gqa_num_heads, num_kv_heads: gqa_num_kv_heads,
+                        head_dim: gqa_head_dim, sm_scale,
+                        fused_qkv_wid: Some(fused_qkv_wid),
+                    },
+                    mlp: DecodeMlpConfig::None,
+                });
+                n_gqa += 1;
+            } else {
+                // Linear attention layer
+                let in_proj_qkvz_wid = mmap_weight(qkvz_dim, hidden_size);
+                let in_proj_ba_wid = mmap_weight(ba_dim, hidden_size);
+                let out_proj_wid = mmap_weight(hidden_size, nv * dv);
+
+                let mut cw = vec![0.0f32; conv_dim * kernel_dim];
+                fill_random_f32(&mut cw, &mut rng, 0.05);
+                let mut al = vec![0.0f32; nv];
+                for v in al.iter_mut() { *v = -8.0 + rng.next_f32(0.5); }
+                let mut db = vec![0.0f32; nv];
+                for v in db.iter_mut() { *v = 0.1 + rng.next_f32(0.02); }
+                let mut nw = vec![0.0f32; nv * dv];
+                for v in nw.iter_mut() { *v = 1.0 + rng.next_f32(0.02); }
+
+                let g = store.decode_graph.as_mut().unwrap();
+                g.layers.push(DecodeLayer {
+                    input_norm_id,
+                    post_attn_norm_id,
+                    attn: DecodeAttnConfig::LinearAttention {
+                        in_proj_qkvz_wid, in_proj_ba_wid, out_proj_wid,
+                        conv_weight: cw, a_log: al, dt_bias: db, norm_weight: nw,
+                        nk, nv, dk, dv, hr, kernel_dim, conv_dim, scale,
+                    },
+                    mlp: DecodeMlpConfig::None,
+                });
+                n_la += 1;
+            }
         }
 
-        // MoE on every layer (decoder_sparse_step=1 for QCN)
-        let route_id = store.route_weights.len();
-        // Route weight covers alloc_experts (not num_experts) so selected IDs stay in bounds
-        let mut route_data = vec![0.0f32; alloc_experts * hidden_size];
-        fill_random_f32(&mut route_data, &mut rng, 0.02);
-        store.route_weights.push(RouteWeight {
-            data: route_data,
-            bias: None,
-            e_score_corr: None,
-            num_experts: alloc_experts,
-            hidden_dim: hidden_size,
-        });
+        // MLP config
+        if is_mla && layer_idx < first_k_dense_replace {
+            // Dense MLP
+            let padded_inter = pad_gs(dense_intermediate);
+            let gate_proj_wid = mmap_weight(dense_intermediate, hidden_size);
+            let up_proj_wid = mmap_weight(dense_intermediate, hidden_size);
+            let down_proj_wid = mmap_weight(hidden_size, padded_inter);
+            let g = store.decode_graph.as_mut().unwrap();
+            g.layers[layer_idx].mlp = DecodeMlpConfig::Dense {
+                gate_proj_wid, up_proj_wid, down_proj_wid,
+            };
+            n_dense += 1;
+        } else {
+            // MoE
+            let route_id = store.route_weights.len();
+            let mut route_data = vec![0.0f32; alloc_experts * hidden_size];
+            fill_random_f32(&mut route_data, &mut rng, 0.02);
+            store.route_weights.push(RouteWeight {
+                data: route_data,
+                bias: None,
+                e_score_corr: None,
+                num_experts: alloc_experts,
+                hidden_dim: hidden_size,
+            });
 
-        let sgu_wid = mmap_weight(2 * shared_intermediate, hidden_size);
-        let sd_wid = mmap_weight(hidden_size, shared_intermediate);
-        let sg_wid = mmap_weight(1, hidden_size);
+            let sgu_wid = mmap_weight(2 * shared_intermediate, hidden_size);
+            let sd_wid = mmap_weight(hidden_size, shared_intermediate);
+            let sg_wid = if !is_mla { Some(mmap_weight(1, hidden_size)) } else { None };
 
-        let g = store.decode_graph.as_mut().unwrap();
-        g.layers[layer_idx].mlp = DecodeMlpConfig::MoE {
-            route_id,
-            moe_layer_idx: layer_idx,
-            shared_gate_up_wid: Some(sgu_wid),
-            shared_down_wid: Some(sd_wid),
-            shared_gate_wid: Some(sg_wid),
-        };
+            let g = store.decode_graph.as_mut().unwrap();
+            g.layers[layer_idx].mlp = DecodeMlpConfig::MoE {
+                route_id,
+                moe_layer_idx: layer_idx,
+                shared_gate_up_wid: Some(sgu_wid),
+                shared_down_wid: Some(sd_wid),
+                shared_gate_wid: sg_wid,
+            };
+        }
     }
 
     // Release mmap_weight closure so p_off/s_off are available for expert allocation
     drop(mmap_weight);
 
-    eprintln!("Layers: {} LA + {} GQA = {} total", n_la, n_gqa, num_layers);
+    if is_mla {
+        eprintln!("Layers: {} MLA ({} dense + {} MoE) = {} total", n_mla, n_dense, n_mla - n_dense, num_layers);
+    } else {
+        eprintln!("Layers: {} LA + {} GQA = {} total", n_la, n_gqa, num_layers);
+    }
 
     // ── 5. Create fake MoE weight store ──
-    eprintln!("Allocating {} expert weights ({} experts x {} layers)...",
-        alloc_experts * num_layers, alloc_experts, num_layers);
+    eprintln!("Allocating {} expert weights ({} experts x {} MoE layers)...",
+        alloc_experts * moe_layer_count, alloc_experts, moe_layer_count);
     let alloc_start = Instant::now();
 
     let mut moe_store = WeightStore::new();
@@ -4710,8 +5021,8 @@ pub fn bench_decode_synthetic(
         n_routed_experts: alloc_experts,
         num_experts_per_tok: topk,
         num_hidden_layers: num_layers,
-        first_k_dense_replace: 0,
-        n_shared_experts: 1,
+        first_k_dense_replace,
+        n_shared_experts,
         routed_scaling_factor: 1.0,
         swiglu_limit: 0.0,
         activation_alpha: 0.0,
@@ -4721,7 +5032,12 @@ pub fn bench_decode_synthetic(
 
     // Build expert Vecs directly from mmap regions (zero-copy, contiguous layout)
     // SAFETY: All expert Vecs MUST be defused before munmap.
-    for _layer in 0..num_layers {
+    for layer_idx in 0..num_layers {
+        // Dense layers get empty expert list
+        if is_mla && layer_idx < first_k_dense_replace {
+            moe_store.experts_cpu.push(Vec::new());
+            continue;
+        }
         let mut layer_experts = Vec::with_capacity(alloc_experts);
         for _e in 0..alloc_experts {
             let w13_packed = unsafe { Vec::from_raw_parts((packed_base as *mut u32).add(p_off), w13_packed_per, w13_packed_per) };
@@ -4846,43 +5162,65 @@ pub fn bench_decode_synthetic(
     // Recurrent state: [nv * dk * dv] per LA layer
     let mut recur_states: Vec<Vec<f32>> = Vec::new();
     // KV cache: for GQA layers
-    let kv_max_seq = 256usize; // small for bench
     let kv_stride = gqa_num_kv_heads * gqa_head_dim;
     let mut kv_k_caches: Vec<Vec<f32>> = Vec::new();
     let mut kv_v_caches: Vec<Vec<f32>> = Vec::new();
-    // RoPE tables — realistic cos/sin values
-    let rope_half_dim = gqa_head_dim / 2;
-    let mut rope_cos = vec![0.0f32; kv_max_seq * rope_half_dim];
-    let mut rope_sin = vec![0.0f32; kv_max_seq * rope_half_dim];
-    for pos in 0..kv_max_seq {
-        for d in 0..rope_half_dim {
-            let freq = 1.0 / (10000.0f32.powf(2.0 * d as f32 / gqa_head_dim as f32));
-            let angle = pos as f32 * freq;
-            rope_cos[pos * rope_half_dim + d] = angle.cos();
-            rope_sin[pos * rope_half_dim + d] = angle.sin();
+    // MLA KV caches: compressed KV + rope key per MLA layer
+    let mut mla_ckv_caches: Vec<Vec<f32>> = Vec::new();
+    let mut mla_kpe_caches: Vec<Vec<f32>> = Vec::new();
+
+    // RoPE tables for GQA (only if not MLA-only model)
+    let rope_half_dim = if is_mla { 0 } else { gqa_head_dim / 2 };
+    let mut rope_cos = vec![0.0f32; kv_max_seq * rope_half_dim.max(1)];
+    let mut rope_sin = vec![0.0f32; kv_max_seq * rope_half_dim.max(1)];
+    if !is_mla {
+        for pos in 0..kv_max_seq {
+            for d in 0..rope_half_dim {
+                let freq = 1.0 / (10000.0f32.powf(2.0 * d as f32 / gqa_head_dim as f32));
+                let angle = pos as f32 * freq;
+                rope_cos[pos * rope_half_dim + d] = angle.cos();
+                rope_sin[pos * rope_half_dim + d] = angle.sin();
+            }
         }
     }
 
     for layer_idx in 0..num_layers {
-        let is_gqa = full_attn_interval > 0 && (layer_idx + 1) % full_attn_interval == 0;
-        if is_gqa {
+        if is_mla {
+            // MLA layer: allocate compressed KV and rope key caches
+            let mut ckv = vec![0.0f32; kv_max_seq * mla_kv_lora_rank];
+            fill_random_f32(&mut ckv, &mut rng, 0.1);
+            let mut kpe = vec![0.0f32; kv_max_seq * mla_qk_rope_dim];
+            fill_random_f32(&mut kpe, &mut rng, 0.1);
+            mla_ckv_caches.push(ckv);
+            mla_kpe_caches.push(kpe);
+            // Empty QCN-specific state
             conv_states.push(Vec::new());
             recur_states.push(Vec::new());
-            let mut kk = vec![0.0f32; kv_max_seq * kv_stride];
-            fill_random_f32(&mut kk, &mut rng, 0.1);
-            let mut kv = vec![0.0f32; kv_max_seq * kv_stride];
-            fill_random_f32(&mut kv, &mut rng, 0.1);
-            kv_k_caches.push(kk);
-            kv_v_caches.push(kv);
-        } else {
-            let mut cs = vec![0.0f32; conv_dim * kernel_dim];
-            fill_random_f32(&mut cs, &mut rng, 0.1);
-            let mut rs = vec![0.0f32; nv * dk * dv];
-            fill_random_f32(&mut rs, &mut rng, 0.01);
-            conv_states.push(cs);
-            recur_states.push(rs);
             kv_k_caches.push(Vec::new());
             kv_v_caches.push(Vec::new());
+        } else {
+            let is_gqa = full_attn_interval > 0 && (layer_idx + 1) % full_attn_interval == 0;
+            if is_gqa {
+                conv_states.push(Vec::new());
+                recur_states.push(Vec::new());
+                let mut kk = vec![0.0f32; kv_max_seq * kv_stride];
+                fill_random_f32(&mut kk, &mut rng, 0.1);
+                let mut kv = vec![0.0f32; kv_max_seq * kv_stride];
+                fill_random_f32(&mut kv, &mut rng, 0.1);
+                kv_k_caches.push(kk);
+                kv_v_caches.push(kv);
+            } else {
+                let mut cs = vec![0.0f32; conv_dim * kernel_dim];
+                fill_random_f32(&mut cs, &mut rng, 0.1);
+                let mut rs = vec![0.0f32; nv * dk * dv];
+                fill_random_f32(&mut rs, &mut rng, 0.01);
+                conv_states.push(cs);
+                recur_states.push(rs);
+                kv_k_caches.push(Vec::new());
+                kv_v_caches.push(Vec::new());
+            }
+            mla_ckv_caches.push(Vec::new());
+            mla_kpe_caches.push(Vec::new());
         }
     }
 
@@ -4899,25 +5237,31 @@ pub fn bench_decode_synthetic(
         g.embedding_ptr = embedding_ptr;
         g.rope_cos_ptr = rope_cos.as_ptr() as usize;
         g.rope_sin_ptr = rope_sin.as_ptr() as usize;
-        g.rope_half_dim = rope_half_dim;
+        g.rope_half_dim = rope_half_dim.max(1);
         g.max_rope_seq = kv_max_seq;
         g.seq_len = 10; // simulate position 10
         g.kv_max_seq = kv_max_seq;
 
         for layer_idx in 0..num_layers {
-            let is_gqa = full_attn_interval > 0 && (layer_idx + 1) % full_attn_interval == 0;
-            if is_gqa {
-                g.kv_k_ptrs[layer_idx] = kv_k_caches[layer_idx].as_ptr() as usize;
-                g.kv_v_ptrs[layer_idx] = kv_v_caches[layer_idx].as_ptr() as usize;
+            if is_mla {
+                g.mla_ckv_ptrs[layer_idx] = mla_ckv_caches[layer_idx].as_ptr() as usize;
+                g.mla_kpe_ptrs[layer_idx] = mla_kpe_caches[layer_idx].as_ptr() as usize;
             } else {
-                g.conv_state_ptrs[layer_idx] = conv_states[layer_idx].as_ptr() as usize;
-                g.recur_state_ptrs[layer_idx] = recur_states[layer_idx].as_ptr() as usize;
+                let is_gqa = full_attn_interval > 0 && (layer_idx + 1) % full_attn_interval == 0;
+                if is_gqa {
+                    g.kv_k_ptrs[layer_idx] = kv_k_caches[layer_idx].as_ptr() as usize;
+                    g.kv_v_ptrs[layer_idx] = kv_v_caches[layer_idx].as_ptr() as usize;
+                } else {
+                    g.conv_state_ptrs[layer_idx] = conv_states[layer_idx].as_ptr() as usize;
+                    g.recur_state_ptrs[layer_idx] = recur_states[layer_idx].as_ptr() as usize;
+                }
             }
         }
 
-        // Resize GQA scores buffer
-        let max_heads = gqa_num_heads;
+        // Resize scores buffers
+        let max_heads = if is_mla { mla_num_heads } else { gqa_num_heads };
         g.gqa_scores = vec![0.0f32; max_heads * kv_max_seq];
+        g.mla_attn_scores = vec![0.0f32; max_heads * kv_max_seq];
     }
 
     // Output buffer for logits
@@ -5053,6 +5397,8 @@ pub fn bench_decode_synthetic(
     drop(recur_states);
     drop(kv_k_caches);
     drop(kv_v_caches);
+    drop(mla_ckv_caches);
+    drop(mla_kpe_caches);
     drop(rope_cos);
     drop(rope_sin);
 

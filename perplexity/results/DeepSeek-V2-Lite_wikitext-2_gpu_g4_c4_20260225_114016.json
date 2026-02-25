@@ -1,0 +1,31 @@
+{
+  "config": {
+    "model_path": "/home/main/.krasis/models/DeepSeek-V2-Lite",
+    "num_gpus": 1,
+    "cpu_only": false,
+    "gpu_expert_bits": 4,
+    "cpu_expert_bits": 4,
+    "attention_quant": "bf16",
+    "lm_head_quant": "int8",
+    "layer_group_size": 2,
+    "krasis_threads": 16,
+    "kv_cache_mb": 2000,
+    "dataset": "wikitext-2",
+    "window_size": 2048,
+    "stride": 1024,
+    "max_tokens": null
+  },
+  "results": {
+    "perplexity": 6.030641400735495,
+    "bits_per_char": 2.5923114509562217,
+    "mean_loss": 1.796853373363566,
+    "total_nll": 551215.3187866211,
+    "num_tokens_scored": 306767,
+    "num_tokens_total": 306768,
+    "num_windows": 300,
+    "window_size": 2048,
+    "stride": 1024,
+    "elapsed_s": 516.8994652460096,
+    "dataset": "wikitext-2"
+  }
+}

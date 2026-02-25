@@ -2,57 +2,22 @@
 
 Handles one-time weight initialization (GPU→CPU copy + quantization into Rust store)
 and per-request preparation (KV cache copy, recurrent state reset). All actual decode
-compute happens in the Rust engine via decode_step() or generate_loop().
+compute happens in the Rust engine via generate_loop() or generate_batch().
 
 GPU prefill is completely untouched by this module.
 """
 
-import collections
 import logging
 import os
 import time
 from typing import List, Optional, Tuple
 
 import torch
-import torch.nn.functional as F
 
 from krasis import CpuDecodeStore
 from krasis.config import ModelConfig
 
 logger = logging.getLogger(__name__)
-
-_CPU_DECODE_TIMING = os.environ.get("KRASIS_CPU_DECODE_TIMING", "0") == "1"
-_TIMING_REPORT_INTERVAL = int(os.environ.get("KRASIS_TIMING_INTERVAL", "20"))
-
-
-def sample_cpu(logits: torch.Tensor, temperature: float = 0.6,
-               top_k: int = 50, top_p: float = 0.95) -> int:
-    """Sample next token on CPU. Returns token ID as int."""
-    logits = logits.float().squeeze(0)  # [vocab_size]
-
-    if temperature == 0:
-        return logits.argmax().item()
-
-    logits = logits / temperature
-
-    # Top-k filtering
-    if top_k > 0 and top_k < logits.shape[0]:
-        topk_vals, topk_idx = torch.topk(logits, top_k)
-        logits = torch.full_like(logits, float('-inf'))
-        logits.scatter_(0, topk_idx, topk_vals)
-
-    # Top-p (nucleus) filtering
-    if top_p < 1.0:
-        sorted_logits, sorted_idx = torch.sort(logits, descending=True)
-        cum_probs = torch.cumsum(F.softmax(sorted_logits, dim=0), dim=0)
-        # Remove tokens with cumulative probability above threshold
-        remove_mask = cum_probs - F.softmax(sorted_logits, dim=0) >= top_p
-        sorted_logits[remove_mask] = float('-inf')
-        logits.scatter_(0, sorted_idx, sorted_logits)
-
-    probs = F.softmax(logits, dim=0)
-    return torch.multinomial(probs, 1).item()
-
 
 class CpuDecoder:
     """Decode setup and orchestration engine.
@@ -62,7 +27,8 @@ class CpuDecoder:
         decoder.init_weights()   # Once at model load time
         # ... later, per request:
         decoder.prepare(seq_states)
-        decoder._store.generate_loop(...)  # Entire decode loop in Rust
+        decoder._store.generate_batch(...)  # Batch decode (zero Python per token)
+        decoder._store.generate_loop(...)   # Streaming decode (callback per token)
     """
 
     def __init__(self, model):
@@ -86,7 +52,7 @@ class CpuDecoder:
         self._embedding = None        # [vocab_size, hidden] float32
         self._final_norm = None       # [hidden] float32
         self._lm_head_wid = None      # weight ID in store
-        self._lm_head_buf = None      # pre-allocated output buffer
+
         self._layers = []             # per-layer CPU weight dicts
         self._weights_initialized = False
 
@@ -128,15 +94,7 @@ class CpuDecoder:
         self._seq_len = 0
         self._max_seq = 0
         self._prepared = False
-        self._step_count = 0
         self._decode_graph_tensors = []  # prevent GC of tensors passed to Rust
-
-        # Timing instrumentation (enabled via KRASIS_CPU_DECODE_TIMING=1)
-        self._timing = _CPU_DECODE_TIMING
-        if self._timing:
-            self._timings = collections.defaultdict(float)
-            self._timing_counts = collections.defaultdict(int)
-            logger.info("CPU decode timing ENABLED (report every %d steps)", _TIMING_REPORT_INTERVAL)
 
     # ──────────────────────────────────────────────────────
     # Weight copying helpers
@@ -174,7 +132,6 @@ class CpuDecoder:
         self._lm_head_wid = self._store.store_weight_f32(
             _lm_head_f32.data_ptr(), _lm_head_f32.shape[0], _lm_head_f32.shape[1],
             self._decode_bits)
-        self._lm_head_buf = torch.empty(_lm_head_f32.shape[0], dtype=torch.float32)
         del _lm_head_f32
 
         # When streaming attention is enabled, the layer objects' attention
@@ -311,12 +268,6 @@ class CpuDecoder:
 
         # ── Update Rust decode state pointers ──
         self._set_decode_state()
-
-        # Reset step counter and timing
-        self._step_count = 0
-        if self._timing:
-            self._timings = collections.defaultdict(float)
-            self._timing_counts = collections.defaultdict(int)
 
         self._prepared = True
         elapsed = time.perf_counter() - t0
@@ -1053,42 +1004,3 @@ class CpuDecoder:
             conv_state_ptrs, recur_state_ptrs,
             mla_ckv_ptrs, mla_kpe_ptrs)
 
-    def _step_rust(self, token_id: int, position: int) -> torch.Tensor:
-        """Rust single-call decode step."""
-        _t = self._timing
-        if _t:
-            _t0 = time.perf_counter()
-
-        self._store.decode_step(token_id, position, self._lm_head_buf.data_ptr())
-        logits = self._lm_head_buf.unsqueeze(0)
-
-        self._step_count += 1
-
-        if _t:
-            total_step = time.perf_counter() - _t0
-            self._timings['total'] += total_step
-            self._timing_counts['steps'] += 1
-            if self._timing_counts['steps'] % _TIMING_REPORT_INTERVAL == 0:
-                n = self._timing_counts['steps']
-                avg = self._timings['total'] / n * 1000
-                logger.info("=== CPU DECODE (Rust, %d steps, avg %.1f ms/tok, %.2f tok/s) ===",
-                            n, avg, 1000.0 / avg if avg > 0 else 0)
-
-        return logits
-
-    # ──────────────────────────────────────────────────────
-    # Core decode step
-    # ──────────────────────────────────────────────────────
-
-    def step(self, token_id: int, position: int) -> torch.Tensor:
-        """One full decode step on CPU.
-
-        Args:
-            token_id: Token ID to decode
-            position: Position in the sequence
-
-        Returns:
-            logits: [1, vocab_size] float32 CPU tensor
-        """
-        assert self._prepared, "Call prepare() first"
-        return self._step_rust(token_id, position)
