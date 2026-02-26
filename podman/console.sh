@@ -4,7 +4,7 @@ set -euo pipefail
 CONTAINER="krasis-test"
 
 if ! podman container exists "$CONTAINER" 2>/dev/null; then
-    echo "Container '$CONTAINER' does not exist. Run ./podman-startup.sh first."
+    echo "Container '$CONTAINER' does not exist. Run ./startup.sh first."
     exit 1
 fi
 
