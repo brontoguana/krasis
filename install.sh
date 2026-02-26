@@ -8,6 +8,12 @@
 # Uninstall:
 #   curl -sSf https://raw.githubusercontent.com/brontoguana/krasis/main/install.sh | bash -s -- --uninstall
 set -euo pipefail
+
+# Wrap everything in a function so bash reads the entire script from the pipe
+# before executing anything. Without this, subprocesses can consume stdin
+# (which IS the pipe) and steal the rest of the script, causing silent exit.
+do_install() {
+
 trap 'echo -e "\n\033[0;31m\033[1mInstall failed\033[0m at line $LINENO. Run with \"bash -x\" for details." >&2' ERR
 
 REPO="brontoguana/krasis"
@@ -388,3 +394,7 @@ else
 fi
 echo -e "${DIM}Upgrade:    curl -sSf https://raw.githubusercontent.com/brontoguana/krasis/main/install.sh | bash${NC}"
 echo -e "${DIM}Uninstall:  curl -sSf https://raw.githubusercontent.com/brontoguana/krasis/main/install.sh | bash -s -- --uninstall${NC}"
+
+} # end do_install
+
+do_install "$@"

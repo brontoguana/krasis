@@ -136,11 +136,41 @@ def _is_wsl():
         return False
 
 
-def _get_required_cuda_version():
-    """Determine minimum CUDA toolkit version needed for this GPU.
+def _get_driver_cuda_version():
+    """Get the CUDA version supported by the installed driver.
 
-    Returns (major, minor) tuple, e.g. (12, 8) for Blackwell.
+    Returns (major, minor) tuple from nvidia-smi, e.g. (12, 8).
+    Returns None if it can't be determined.
     """
+    try:
+        out = subprocess.check_output(
+            ["nvidia-smi"], text=True, timeout=10, stderr=subprocess.DEVNULL,
+        )
+        # Parse "CUDA Version: 12.8" from nvidia-smi header
+        for line in out.split("\n"):
+            if "CUDA Version:" in line:
+                ver_str = line.split("CUDA Version:")[1].strip().split()[0]
+                major, minor = ver_str.split(".")[:2]
+                return (int(major), int(minor))
+    except Exception:
+        pass
+    return None
+
+
+def _get_required_cuda_version():
+    """Determine which CUDA toolkit version to install.
+
+    Prefers the driver's supported version (most likely to be in repos),
+    falling back to the minimum required for this GPU's compute capability.
+    Returns (major, minor) tuple, e.g. (12, 8).
+    """
+    # Prefer the driver's CUDA version — it's the most compatible and
+    # most likely to exist in the NVIDIA package repos
+    driver_ver = _get_driver_cuda_version()
+    if driver_ver is not None:
+        return driver_ver
+
+    # Fallback: minimum version based on compute capability
     try:
         out = subprocess.check_output(
             ["nvidia-smi", "--query-gpu=compute_cap",
@@ -149,16 +179,11 @@ def _get_required_cuda_version():
         ).strip().split("\n")[0]
         major, minor = out.split(".")
         sm = (int(major), int(minor))
-        # SM 12.0 (Blackwell) needs CUDA 12.8+
         if sm >= (12, 0):
             return (12, 8)
-        # SM 10.0 needs CUDA 12.6+
         if sm >= (10, 0):
             return (12, 6)
-        # SM 8.9 (Ada) needs CUDA 11.8+
-        if sm >= (8, 9):
-            return (11, 8)
-        return (11, 8)
+        return (12, 6)  # modern default
     except Exception:
         return (12, 6)  # safe default
 
@@ -258,29 +283,38 @@ def _install_system_deps():
         if ret.returncode != 0:
             # Try curl as fallback
             ret = _run(["curl", "-sL", "-o", keyring_path, keyring_url], check=False)
+        cuda_installed = False
         if ret.returncode != 0:
-            print(f"  {RED}Failed to download CUDA keyring. Install manually:{NC}")
-            print(f"    wget {keyring_url}")
-            print(f"    sudo dpkg -i cuda-keyring_1.1-1_all.deb")
-            print(f"    sudo apt install {cuda_pkg}")
-            return False
+            print(f"  {YELLOW}Could not download CUDA keyring, checking if nvcc is already available...{NC}")
+        else:
+            cmds = [
+                sudo + ["dpkg", "-i", keyring_path],
+                sudo + ["apt-get", "update", "-qq"],
+            ]
+            repo_ok = True
+            for cmd in cmds:
+                ret = _run(cmd, check=False)
+                if ret.returncode != 0:
+                    repo_ok = False
+                    break
 
-        cmds = [
-            sudo + ["dpkg", "-i", keyring_path],
-            sudo + ["apt-get", "update", "-qq"],
-            sudo + ["apt-get", "install", "-y", cuda_pkg],
-        ]
-        for cmd in cmds:
-            ret = _run(cmd, check=False)
-            if ret.returncode != 0:
-                print(f"  {RED}Failed. Try manually: sudo apt install {cuda_pkg}{NC}")
-                return False
+            if repo_ok:
+                # Try exact version first, fall back to major meta-package
+                ret = _run(sudo + ["apt-get", "install", "-y", cuda_pkg], check=False)
+                if ret.returncode != 0:
+                    fallback_pkg = f"cuda-toolkit-{required_ver[0]}"
+                    print(f"  {YELLOW}{cuda_pkg} not found, trying {fallback_pkg}...{NC}")
+                    ret = _run(sudo + ["apt-get", "install", "-y", fallback_pkg], check=False)
+                if ret.returncode == 0:
+                    cuda_installed = True
+            else:
+                print(f"  {YELLOW}Could not set up CUDA repo, checking if nvcc is already available...{NC}")
 
-        # Clean up
-        try:
-            os.unlink(keyring_path)
-        except OSError:
-            pass
+            # Clean up keyring
+            try:
+                os.unlink(keyring_path)
+            except OSError:
+                pass
 
         # Add to PATH if needed
         cuda_bin = f"/usr/local/cuda-{required_ver[0]}.{required_ver[1]}/bin"
@@ -320,8 +354,11 @@ def _install_system_deps():
         cuda_pkg = f"cuda-toolkit-{required_ver[0]}-{required_ver[1]}"
         ret = _run(sudo + ["dnf", "install", "-y", cuda_pkg], check=False)
         if ret.returncode != 0:
-            print(f"  {RED}Failed. Try manually: sudo dnf install {cuda_pkg}{NC}")
-            return False
+            fallback_pkg = f"cuda-toolkit-{required_ver[0]}"
+            print(f"  {YELLOW}{cuda_pkg} not found, trying {fallback_pkg}...{NC}")
+            ret = _run(sudo + ["dnf", "install", "-y", fallback_pkg], check=False)
+            if ret.returncode != 0:
+                print(f"  {YELLOW}Could not install {cuda_pkg} via dnf, checking if nvcc is already available...{NC}")
 
         # Add to PATH and set CUDA_HOME (same as debian path)
         cuda_bin = f"/usr/local/cuda-{required_ver[0]}.{required_ver[1]}/bin"
@@ -355,8 +392,7 @@ def _install_system_deps():
             except OSError:
                 print(f"  {DIM}Add to ~/.bashrc manually: {export_line}{NC}")
     elif need_nvcc:
-        print(f"  {RED}Unknown distro. Install CUDA toolkit {required_ver[0]}.{required_ver[1]}+ manually.{NC}")
-        return False
+        print(f"  {YELLOW}Unknown distro, checking if nvcc is already available...{NC}")
 
     # Verify
     ok = True

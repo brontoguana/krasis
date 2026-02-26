@@ -23,6 +23,7 @@ echo "Creating $IMAGE container '$CONTAINER'..."
 podman create \
     --name "$CONTAINER" \
     --hostname "$CONTAINER" \
+    --device nvidia.com/gpu=all \
     -it \
     "$IMAGE" \
     bash
