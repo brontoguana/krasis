@@ -2,7 +2,7 @@
 
 Rust + PyO3 MoE runtime for large mixture-of-experts LLMs. Runs 350B+ parameter models on commodity hardware with full GPU prefill and efficient CPU decode.
 
-You can [contact me here](https://forms.gle/ue4nvyvNNHtUZ7MQ7) but please don't ask for help getting Krasis working.  If a model doesn't work or a particular hardware config then you can try to narrow it down and then report an issue.
+You can [contact me here](https://forms.gle/ue4nvyvNNHtUZ7MQ7) but for bugs, difficulties, suggestions or requests for support for other models please report an issue instead.
 
 
 ## Krasis runs MoE LLMs fast on consumer level hardware
@@ -19,7 +19,7 @@ At Q4 Qwen3-Coder-Next is around 37GB, too much to fit on even the largest consu
 
 Krasis is able to run Qwen3-Coder-Next (Q4 quantised) with **one 16GB GPU** at the following speeds:
 
-- 5900X, 3200 DDR4, 1x 5080 16GB (PCIE4.0x16) : **3589 tok/sec prefill, 14.5 tok/sec decode**
+- 5900X, 3200 DDR4, 1x 5080 16GB (PCIE4.0x16) : **3595 tok/sec prefill, 14.7 tok/sec decode**
 - Epyc 7742, 2666 DDR4, 1x RTX Ada 2000 16GB (PCIE4.0x8) : **1060 tok/sec prefill, 18.9 tok/sec decode**
 
 Krasis can likely run QCN at speed with even more VRAM limited GPUs than these (further testing is planned).
@@ -68,12 +68,12 @@ In order to achieve these speeds, Krasis has a few requirements.
 
 ## Perplexity (Quantization Quality)
 
-Measured with INT4 GPU + INT4 CPU experts, BF16 attention, INT8 shared/MLP/lm_head, FP8 KV cache. Sliding window (2048 tokens, stride 1024).
+Measured with INT4 GPU + INT4 CPU experts (Q4), BF16 attention, INT8 shared/MLP/lm_head, FP8 KV cache. Sliding window (2048 tokens, stride 1024).
 
 | Model | Dataset | Tokens | PPL | BPC | Throughput |
 |-------|---------|:------:|:---:|:---:|:----------:|
 | **Qwen3-Coder-Next** | WikiText-2 | 299K | 7.23 | 2.85 | 128 tok/s |
-| **Qwen3-Coder-Next** | C4 validation | 500K | 12.44 | 3.64 | 123 tok/s |
+| **Qwen3-Coder-Next** | C4 validation | 1M | - | - | - tok/s |
 | **DeepSeek V2-Lite** | WikiText-2 | 307K | 6.03 | 2.59 | 593 tok/s |
 | **DeepSeek V2-Lite** | C4 validation | 500K | 9.22 | 3.20 | 573 tok/s |
 
@@ -92,7 +92,7 @@ Benchmark uses 10K–50K token prompts (prefill) and 64-token generation runs (d
 ## Benchmark: EPYC 7742 + 1x RTX 2000 Ada 16 GB
 
 - **Hardware:** AMD EPYC 7742 (64 cores, 4 NUMA nodes), DDR4-2666 8-channel, 1x NVIDIA RTX 2000 Ada 16 GB, PCIe 4.0 x8.
-- **Config:** BF16 attention, FP8 KV cache, INT8 shared/MLP/lm_head, LGS=2, 40 CPU threads, NUMA-aware thread pinning + interleaved allocation.
+- **Config:** BF16 attention, FP8 KV cache, INT8 shared/MLP/lm_head, LGS=2, 40 CPU threads, NUMA-aware thread pinning (required NPS4) + interleaved allocation.
 
 Benchmark uses 10K–50K token prompts (prefill) and 64-token generation runs (decode). Prefill speed is best of 20K/35K/50K. Decode is average of 3 runs with different prompts.
 
