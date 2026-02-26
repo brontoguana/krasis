@@ -284,5 +284,7 @@ Additional endpoints:
 
 SSPL-1.0
 
-Krasis is free to use, modify and distribute.  If you want to offer Krasis as part of a commercial product or a hosted/managed service, please [get in touch](https://forms.gle/ue4nvyvNNHtUZ7MQ7).
+Krasis is free to use, modify and distribute.  
+
+If you want to support the project or offer Krasis as part of a commercial product or a hosted/managed service, please [get in touch](https://forms.gle/ue4nvyvNNHtUZ7MQ7).
 
