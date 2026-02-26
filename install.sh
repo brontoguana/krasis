@@ -8,6 +8,7 @@
 # Uninstall:
 #   curl -sSf https://raw.githubusercontent.com/brontoguana/krasis/main/install.sh | bash -s -- --uninstall
 set -euo pipefail
+trap 'echo -e "\n\033[0;31m\033[1mInstall failed\033[0m at line $LINENO. Run with \"bash -x\" for details." >&2' ERR
 
 REPO="brontoguana/krasis"
 VENV_DIR="$HOME/.krasis/venv"
@@ -66,20 +67,20 @@ for candidate in python3.13 python3.12 python3.11 python3.10 python3; do
     PY_BINS[$N_PY]="$candidate"
     PY_VERS[$N_PY]="$pyver"
     PY_DOTS[$N_PY]="$ver"
-    ((N_PY++)) || true
+    N_PY=$((N_PY + 1))
 done
 
 if [[ $N_PY -eq 0 ]]; then
     warn "Python 3.10+ not found."
     if command -v apt-get &>/dev/null; then
         echo -en "  Install Python 3 now? [Y/n] "
-        read -r answer < /dev/tty 2>/dev/null || answer="n"
+        read -r answer < /dev/tty 2>/dev/null || answer="y"
         if [[ "${answer,,}" =~ ^(y|yes|)$ ]]; then
             SUDO=()
             [[ "$(id -u)" -ne 0 ]] && SUDO=(sudo)
             info "Installing Python 3..."
-            "${SUDO[@]}" apt-get update -qq 2>/dev/null
-            "${SUDO[@]}" apt-get install -y python3 python3-venv \
+            "${SUDO[@]}" apt-get update -qq </dev/null 2>/dev/null
+            "${SUDO[@]}" apt-get install -y python3 python3-venv </dev/null \
                 || err "Failed to install Python 3.\n  Try manually: sudo apt install python3 python3-venv"
             # Re-scan for Python
             for candidate in python3.13 python3.12 python3.11 python3.10 python3; do
@@ -93,7 +94,7 @@ if [[ $N_PY -eq 0 ]]; then
                 PY_BINS[$N_PY]="$candidate"
                 PY_VERS[$N_PY]="$pyver"
                 PY_DOTS[$N_PY]="$ver"
-                ((N_PY++)) || true
+                N_PY=$((N_PY + 1))
             done
             [[ $N_PY -eq 0 ]] && err "Python 3.10+ still not found after install."
         else
@@ -101,12 +102,12 @@ if [[ $N_PY -eq 0 ]]; then
         fi
     elif command -v dnf &>/dev/null; then
         echo -en "  Install Python 3 now? [Y/n] "
-        read -r answer < /dev/tty 2>/dev/null || answer="n"
+        read -r answer < /dev/tty 2>/dev/null || answer="y"
         if [[ "${answer,,}" =~ ^(y|yes|)$ ]]; then
             SUDO=()
             [[ "$(id -u)" -ne 0 ]] && SUDO=(sudo)
             info "Installing Python 3..."
-            "${SUDO[@]}" dnf install -y python3 \
+            "${SUDO[@]}" dnf install -y python3 </dev/null \
                 || err "Failed to install Python 3.\n  Try manually: sudo dnf install python3"
             for candidate in python3.13 python3.12 python3.11 python3.10 python3; do
                 command -v "$candidate" &>/dev/null || continue
@@ -119,7 +120,7 @@ if [[ $N_PY -eq 0 ]]; then
                 PY_BINS[$N_PY]="$candidate"
                 PY_VERS[$N_PY]="$pyver"
                 PY_DOTS[$N_PY]="$ver"
-                ((N_PY++)) || true
+                N_PY=$((N_PY + 1))
             done
             [[ $N_PY -eq 0 ]] && err "Python 3.10+ still not found after install."
         else
@@ -239,13 +240,13 @@ if ! "$PYTHON" -c "import venv; import ensurepip" &>/dev/null; then
     if command -v apt-get &>/dev/null; then
         SUDO=()
         [[ "$(id -u)" -ne 0 ]] && SUDO=(sudo)
-        "${SUDO[@]}" apt-get update -qq 2>/dev/null
-        "${SUDO[@]}" apt-get install -y "python${PY_VER_DOT}-venv" \
+        "${SUDO[@]}" apt-get update -qq </dev/null 2>/dev/null
+        "${SUDO[@]}" apt-get install -y "python${PY_VER_DOT}-venv" </dev/null \
             || err "Failed to install python${PY_VER_DOT}-venv.\n  Try manually: sudo apt install python${PY_VER_DOT}-venv"
     elif command -v dnf &>/dev/null; then
         SUDO=()
         [[ "$(id -u)" -ne 0 ]] && SUDO=(sudo)
-        "${SUDO[@]}" dnf install -y "python3-libs" 2>/dev/null \
+        "${SUDO[@]}" dnf install -y "python3-libs" </dev/null 2>/dev/null \
             || err "Failed to install python venv. Try: sudo dnf install python3-libs"
     else
         err "Python venv module not found.\n  Install it for your distro (e.g. sudo apt install python${PY_VER_DOT}-venv)"
@@ -284,13 +285,13 @@ if [[ "$NEED_VENV" == true ]]; then
         if command -v apt-get &>/dev/null; then
             SUDO=()
             [[ "$(id -u)" -ne 0 ]] && SUDO=(sudo)
-            "${SUDO[@]}" apt-get update -qq 2>/dev/null
-            "${SUDO[@]}" apt-get install -y "python${PY_VER_DOT}-venv" \
+            "${SUDO[@]}" apt-get update -qq </dev/null 2>/dev/null
+            "${SUDO[@]}" apt-get install -y "python${PY_VER_DOT}-venv" </dev/null \
                 || err "Failed to install python${PY_VER_DOT}-venv.\n  Try: sudo apt install python${PY_VER_DOT}-venv"
         elif command -v dnf &>/dev/null; then
             SUDO=()
             [[ "$(id -u)" -ne 0 ]] && SUDO=(sudo)
-            "${SUDO[@]}" dnf install -y "python3-libs" 2>/dev/null \
+            "${SUDO[@]}" dnf install -y "python3-libs" </dev/null 2>/dev/null \
                 || err "Failed to install python venv. Try: sudo dnf install python3-libs"
         else
             err "venv creation failed.\n  Install: sudo apt install python${PY_VER_DOT}-venv"
@@ -300,7 +301,8 @@ if [[ "$NEED_VENV" == true ]]; then
         "$PYTHON" -m venv "$VENV_DIR" \
             || err "venv creation still failing after installing python${PY_VER_DOT}-venv."
     }
-    "$VENV_DIR/bin/pip" install --upgrade pip -q 2>&1 | tail -1
+    "$VENV_DIR/bin/pip" install --upgrade pip -q \
+        || warn "pip upgrade failed (non-fatal, continuing...)"
 fi
 
 # ── Create models directory ──────────────────────────────────────────
@@ -316,7 +318,8 @@ curl -sSfL -o "$TMPDIR/$FILENAME" "$DOWNLOAD_URL" \
     || err "Download failed. Check your internet connection."
 
 info "Installing Krasis ${VERSION#v}..."
-"$VENV_DIR/bin/pip" install "$TMPDIR/$FILENAME" 2>&1 | tail -3
+"$VENV_DIR/bin/pip" install "$TMPDIR/$FILENAME" \
+    || err "pip install failed. Check the output above for details."
 
 # ── Symlink commands ─────────────────────────────────────────────────
 mkdir -p "$BIN_DIR"
