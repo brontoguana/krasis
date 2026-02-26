@@ -581,6 +581,198 @@ class KrasisBenchmark:
             return None
 
     # ──────────────────────────────────────────────────────────
+    # Network benchmark (same prompts through HTTP)
+    # ──────────────────────────────────────────────────────────
+
+    def _start_temp_server(self, host: str = "127.0.0.1", port: int = 18199) -> "RustServer":
+        """Start a temporary Rust HTTP server for network benchmarking."""
+        import threading
+        from krasis import RustServer
+
+        tokenizer_path = os.path.join(self.model.cfg.model_path, "tokenizer.json")
+        max_ctx = self.model.get_max_context_tokens()
+        model_name = os.path.basename(self.model.cfg.model_path)
+
+        server = RustServer(
+            self.model, host, port, model_name, tokenizer_path, max_ctx,
+        )
+
+        t = threading.Thread(target=server.run, daemon=True)
+        t.start()
+
+        # Wait for server to be ready
+        import urllib.request
+        for _ in range(50):
+            time.sleep(0.1)
+            try:
+                req = urllib.request.Request(f"http://{host}:{port}/health")
+                with urllib.request.urlopen(req, timeout=1) as resp:
+                    if resp.status == 200:
+                        break
+            except Exception:
+                pass
+        else:
+            raise RuntimeError("Temp server failed to start")
+
+        return server
+
+    def _network_request(
+        self, host: str, port: int, prompt_tokens: List[int],
+        max_new_tokens: int, temperature: float = 0.6,
+    ) -> Dict:
+        """Send a prompt over HTTP and measure TTFT + decode speed.
+
+        Returns dict with ttft, decode_tok_s, total_time, num_generated, num_prompt.
+        """
+        import http.client
+        import json as _json
+
+        # Convert tokens back to text for the HTTP request
+        prompt_text = self.model.tokenizer.decode(prompt_tokens)
+        body = _json.dumps({
+            "messages": [{"role": "user", "content": prompt_text}],
+            "max_tokens": max_new_tokens,
+            "temperature": temperature,
+            "stream": True,
+        }).encode()
+
+        conn = http.client.HTTPConnection(host, port, timeout=600)
+        conn.request("POST", "/v1/chat/completions", body=body,
+                      headers={"Content-Type": "application/json"})
+        resp = conn.getresponse()
+
+        t_start = time.perf_counter()
+        t_first = None
+        n_tokens = 0
+        buf = b""
+
+        while True:
+            chunk = resp.read(4096)
+            if not chunk:
+                break
+            buf += chunk
+            while b"\n\n" in buf:
+                line, buf = buf.split(b"\n\n", 1)
+                line = line.strip()
+                if not line or line == b"data: [DONE]":
+                    continue
+                if line.startswith(b"data: "):
+                    if t_first is None:
+                        t_first = time.perf_counter()
+                    try:
+                        data = _json.loads(line[6:])
+                        delta = data.get("choices", [{}])[0].get("delta", {})
+                        if "content" in delta:
+                            n_tokens += 1
+                    except _json.JSONDecodeError:
+                        pass
+
+        conn.close()
+        t_end = time.perf_counter()
+
+        ttft = (t_first - t_start) if t_first else (t_end - t_start)
+        total = t_end - t_start
+        decode_time = total - ttft
+        decode_tok_s = (n_tokens - 1) / decode_time if decode_time > 0 and n_tokens > 1 else 0
+
+        return {
+            "ttft": round(ttft, 2),
+            "tok_s": round(len(prompt_tokens) / ttft, 1) if ttft > 0 else 0,
+            "decode_tok_s": round(decode_tok_s, 2),
+            "decode_ms_per_tok": round(1000 / decode_tok_s, 1) if decode_tok_s > 0 else 0,
+            "num_tokens": len(prompt_tokens),
+            "num_generated": n_tokens,
+            "total_time": round(total, 2),
+        }
+
+    def _benchmark_network_prefill(
+        self, prompts: List[List[int]], host: str, port: int,
+    ) -> Dict:
+        """Measure prefill speed over HTTP (SSE streaming, 1 decode token)."""
+        runs = []
+        for tokens in prompts:
+            r = self._network_request(host, port, tokens, max_new_tokens=1)
+            runs.append(r)
+
+        best_run = max(runs, key=lambda r: r["tok_s"])
+        return {
+            "best_tok_s": best_run["tok_s"],
+            "best_ttft": best_run["ttft"],
+            "best_num_tokens": best_run["num_tokens"],
+            "runs": runs,
+        }
+
+    def _benchmark_network_decode(
+        self, prompts: List[List[int]], host: str, port: int,
+    ) -> Dict:
+        """Measure decode speed over HTTP."""
+        runs = []
+        for tokens in prompts:
+            r = self._network_request(host, port, tokens,
+                                       max_new_tokens=self.decode_tokens)
+            runs.append({
+                "tok_s": r["decode_tok_s"],
+                "ms_per_tok": r["decode_ms_per_tok"],
+                "n_gen": r["num_generated"],
+            })
+
+        avg_tok_s = sum(r["tok_s"] for r in runs) / len(runs) if runs else 0
+        avg_ms = sum(r["ms_per_tok"] for r in runs) / len(runs) if runs else 0
+
+        return {
+            "num_tokens": self.decode_tokens,
+            "avg_tok_s": round(avg_tok_s, 2),
+            "avg_ms_per_tok": round(avg_ms, 1),
+            "runs": runs,
+        }
+
+    def _format_comparison(
+        self, engine_prefill, engine_decode, network_prefill, network_decode,
+    ) -> str:
+        """Format engine vs network results side by side."""
+        lines = []
+        lines.append("")
+        lines.append(f"{'─' * 64}")
+        lines.append(f"  ENGINE vs NETWORK COMPARISON")
+        lines.append(f"{'─' * 64}")
+        lines.append(f"  {'':30s} {'Engine':>14s} {'Network':>14s} {'Overhead':>10s}")
+        lines.append(f"  {'─'*30} {'─'*14} {'─'*14} {'─'*10}")
+
+        # Prefill comparison
+        e_pf = engine_prefill["best_tok_s"]
+        n_pf = network_prefill["best_tok_s"]
+        pf_pct = ((n_pf / e_pf - 1) * 100) if e_pf > 0 else 0
+        lines.append(f"  {'Prefill (best tok/s)':30s} {e_pf:>12.1f}   {n_pf:>12.1f}   {pf_pct:>+8.1f}%")
+
+        e_ttft = engine_prefill["best_ttft"]
+        n_ttft = network_prefill["best_ttft"]
+        ttft_diff = (n_ttft - e_ttft) * 1000  # ms
+        lines.append(f"  {'TTFT (s)':30s} {e_ttft:>12.2f}   {n_ttft:>12.2f}   {ttft_diff:>+7.0f}ms")
+
+        # Per-length prefill
+        for i, (er, nr) in enumerate(zip(engine_prefill["runs"], network_prefill["runs"])):
+            e_t = er["tok_s"]
+            n_t = nr["tok_s"]
+            pct = ((n_t / e_t - 1) * 100) if e_t > 0 else 0
+            lines.append(f"  {'  ' + f'{er[\"num_tokens\"]:,} tokens':30s} {e_t:>12.1f}   {n_t:>12.1f}   {pct:>+8.1f}%")
+
+        lines.append("")
+
+        # Decode comparison
+        e_dec = engine_decode["avg_tok_s"]
+        n_dec = network_decode["avg_tok_s"]
+        dec_pct = ((n_dec / e_dec - 1) * 100) if e_dec > 0 else 0
+        lines.append(f"  {'Decode (avg tok/s)':30s} {e_dec:>12.2f}   {n_dec:>12.2f}   {dec_pct:>+8.1f}%")
+
+        e_ms = engine_decode["avg_ms_per_tok"]
+        n_ms = network_decode["avg_ms_per_tok"]
+        ms_diff = n_ms - e_ms
+        lines.append(f"  {'Decode (ms/tok)':30s} {e_ms:>12.1f}   {n_ms:>12.1f}   {ms_diff:>+7.1f}ms")
+
+        lines.append(f"{'─' * 64}")
+        return "\n".join(lines)
+
+    # ──────────────────────────────────────────────────────────
     # Main entry point
     # ──────────────────────────────────────────────────────────
 
@@ -645,7 +837,47 @@ class KrasisBenchmark:
             print(f"  Run {i+1}: {run['tok_s']:.2f} tok/s ({run['ms_per_tok']:.1f}ms/tok)")
         print(f"  {BOLD}Average: {decode_result['avg_tok_s']:.2f} tok/s ({decode_result['avg_ms_per_tok']:.1f}ms/tok){NC}")
 
-        # 6. Decode prompt text for the log (use last timed prompt, matching generated output)
+        # 6. Network benchmark — same prompts through HTTP
+        net_prefill_result = None
+        net_decode_result = None
+        comparison_text = ""
+        try:
+            print(_section("Starting Rust HTTP server for network benchmark"))
+            bench_host = "127.0.0.1"
+            bench_port = 18199
+            temp_server = self._start_temp_server(bench_host, bench_port)
+            print(f"  Server running on {bench_host}:{bench_port}")
+
+            # Network prefill (same lengths as engine)
+            print(_section(f"Network prefill benchmark ({lengths_str} tokens)"))
+            net_prefill_result = self._benchmark_network_prefill(
+                timed_prefill, bench_host, bench_port)
+            for i, run in enumerate(net_prefill_result["runs"]):
+                print(f"  Run {i+1}: {run['tok_s']:.1f} tok/s, TTFT={run['ttft']:.2f}s ({run['num_tokens']:,} tokens)")
+            print(f"  {BOLD}Best: {net_prefill_result['best_tok_s']:.1f} tok/s, TTFT={net_prefill_result['best_ttft']:.2f}s{NC}")
+
+            # Network decode (same prompts as engine)
+            print(_section(f"Network decode benchmark ({self.decode_tokens} tokens, {self.n_runs} runs)"))
+            net_decode_result = self._benchmark_network_decode(
+                timed_decode, bench_host, bench_port)
+            for i, run in enumerate(net_decode_result["runs"]):
+                print(f"  Run {i+1}: {run['tok_s']:.2f} tok/s ({run['ms_per_tok']:.1f}ms/tok)")
+            print(f"  {BOLD}Average: {net_decode_result['avg_tok_s']:.2f} tok/s ({net_decode_result['avg_ms_per_tok']:.1f}ms/tok){NC}")
+
+            # Comparison
+            comparison_text = self._format_comparison(
+                prefill_result, decode_result,
+                net_prefill_result, net_decode_result,
+            )
+            print(comparison_text)
+
+            temp_server.stop()
+            time.sleep(0.2)
+        except Exception as e:
+            logger.warning("Network benchmark failed (non-fatal): %s", e, exc_info=True)
+            print(f"  {YELLOW}Network benchmark skipped: {e}{NC}")
+
+        # 7. Decode prompt text for the log (use last timed prompt, matching generated output)
         try:
             prefill_prompt_text = self.model.tokenizer.decode(timed_prefill[0])
         except Exception:
@@ -655,7 +887,7 @@ class KrasisBenchmark:
         except Exception:
             decode_prompt_text = "[decode prompt]"
 
-        # 7. Format and write report
+        # 8. Format and write report
         print(_section("Writing results"))
         report = self._format_results(
             sys_info, model_info, vram_usage,
@@ -663,25 +895,37 @@ class KrasisBenchmark:
             prefill_prompt=prefill_prompt_text,
             decode_prompt=decode_prompt_text,
         )
+        if comparison_text:
+            report += "\n" + comparison_text
 
-        # 8. Archive to benchmarks/ directory
+        # 9. Archive to benchmarks/ directory
         archive_path = self._archive_benchmark(model_info, report)
 
         # 10. Final summary
         print(f"\n{BOLD}{'─' * 48}")
         print(f"  BENCHMARK COMPLETE")
         print(f"{'─' * 48}{NC}")
-        print(f"  Prefill: {GREEN}{BOLD}{prefill_result['best_tok_s']:.1f} tok/s{NC}  TTFT={prefill_result['best_ttft']:.2f}s  (best of {lengths_str})")
-        print(f"  Decode:  {GREEN}{BOLD}{decode_result['avg_tok_s']:.2f} tok/s{NC}  ({decode_result['avg_ms_per_tok']:.1f}ms/tok)")
+        print(f"  {BOLD}Engine:{NC}")
+        print(f"    Prefill: {GREEN}{BOLD}{prefill_result['best_tok_s']:.1f} tok/s{NC}  TTFT={prefill_result['best_ttft']:.2f}s  (best of {lengths_str})")
+        print(f"    Decode:  {GREEN}{BOLD}{decode_result['avg_tok_s']:.2f} tok/s{NC}  ({decode_result['avg_ms_per_tok']:.1f}ms/tok)")
+        if net_prefill_result and net_decode_result:
+            print(f"  {BOLD}Network:{NC}")
+            print(f"    Prefill: {GREEN}{BOLD}{net_prefill_result['best_tok_s']:.1f} tok/s{NC}  TTFT={net_prefill_result['best_ttft']:.2f}s")
+            print(f"    Decode:  {GREEN}{BOLD}{net_decode_result['avg_tok_s']:.2f} tok/s{NC}  ({net_decode_result['avg_ms_per_tok']:.1f}ms/tok)")
         if archive_path:
             print(f"  Log:     {DIM}{archive_path}{NC}")
         print()
 
         # 11. Return structured results
-        return {
+        result = {
             "system": sys_info,
             "model": model_info,
             "vram": vram_usage,
             "prefill": prefill_result,
             "decode": decode_result,
         }
+        if net_prefill_result:
+            result["network_prefill"] = net_prefill_result
+        if net_decode_result:
+            result["network_decode"] = net_decode_result
+        return result

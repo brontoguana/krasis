@@ -255,6 +255,12 @@ impl CpuDecodeStore {
         self.cancel_flag.store(false, Ordering::Release);
     }
 
+    /// Return the raw address of this CpuDecodeStore for GIL-free access.
+    /// Safety: caller must ensure exclusive access (single-request guarantee).
+    pub fn self_addr(&mut self) -> usize {
+        self as *mut CpuDecodeStore as usize
+    }
+
     /// Store a weight matrix from f32 data. Returns weight ID.
     ///
     /// Args:
@@ -3566,40 +3572,54 @@ impl CpuDecodeStore {
         let mut seen_tokens: std::collections::HashSet<usize> = std::collections::HashSet::new();
         seen_tokens.insert(first_token);
 
+        // Encode self pointer as usize to cross the GIL boundary.
+        // Safety: single-request guarantee (scheduler lock), exclusive access.
+        let store_addr = self as *mut CpuDecodeStore as usize;
+        let cancel_flag = self.cancel_flag.clone();
+
         for step in 0..max_tokens {
             // Check cancellation before each decode step (~100ms each)
-            if self.cancel_flag.load(Ordering::Acquire) {
+            if cancel_flag.load(Ordering::Acquire) {
                 log::info!("generate_loop: cancelled after {} tokens", generated);
-                // Emit a final callback with finish_reason="cancelled"
                 let _ = callback.call1(py, (next_token, "", Some("cancelled")));
                 break;
             }
 
             let pos = start_position + step;
 
-            // decode_step: all Rust compute, no Python involvement (~133ms)
-            self.decode_step(next_token, pos, output_ptr)?;
+            // Release GIL for decode_step + sample + tokenize (all pure Rust).
+            // This lets the asyncio event loop drain SSE chunks while we compute.
+            let decode_result: Result<(usize, String), String> = py.allow_threads(|| {
+                let store = unsafe { &mut *(store_addr as *mut CpuDecodeStore) };
+                store.decode_step(next_token, pos, output_ptr)
+                    .map_err(|e| format!("{}", e))?;
 
-            // Apply presence penalty to already-seen tokens
-            if presence_penalty != 0.0 {
-                for &tok in &seen_tokens {
-                    if tok < vocab_size {
-                        logits[tok] -= presence_penalty;
+                // Apply presence penalty
+                if presence_penalty != 0.0 {
+                    for &tok in &seen_tokens {
+                        if tok < vocab_size {
+                            logits[tok] -= presence_penalty;
+                        }
                     }
                 }
-            }
 
-            // Sample next token (pure Rust, ~0.1ms on 152K vocab)
-            next_token = sample_from_logits(
-                &mut logits, vocab_size, temperature, top_k, top_p, &mut rng_next);
+                let sampled = sample_from_logits(
+                    &mut logits, vocab_size, temperature, top_k, top_p, &mut rng_next);
+                let text = tokenizer.decode(&[sampled as u32], true)
+                    .unwrap_or_default();
+                Ok((sampled, text))
+            });
+
+            // GIL reacquired — process result and callback to Python
+            let (sampled, text) = match decode_result {
+                Ok(v) => v,
+                Err(e) => return Err(pyo3::exceptions::PyRuntimeError::new_err(e)),
+            };
+
+            next_token = sampled;
             seen_tokens.insert(next_token);
             generated += 1;
 
-            // Decode token to text (pure Rust tokenizer)
-            let text = tokenizer.decode(&[next_token as u32], true)
-                .unwrap_or_default();
-
-            // Check stop conditions
             let finish_reason = if stop_set.contains(&next_token) {
                 Some("stop")
             } else if generated >= max_tokens {
@@ -3608,7 +3628,6 @@ impl CpuDecodeStore {
                 None
             };
 
-            // Callback to Python (GIL already held here)
             let finished = finish_reason.is_some();
             callback.call1(py, (next_token, &text, finish_reason))?;
 
@@ -3705,6 +3724,116 @@ impl CpuDecodeStore {
         }
 
         Ok(result)
+    }
+}
+
+// ── Pure-Rust methods (no PyO3, used by Rust HTTP server) ──
+
+impl CpuDecodeStore {
+    /// Generate tokens in a pure Rust loop, calling `on_token` per token.
+    /// No Python, no GIL. Used by the Rust HTTP server.
+    ///
+    /// `on_token(token_id, text, finish_reason)` → return false to cancel.
+    pub fn generate_stream<F>(
+        &mut self,
+        first_token: usize,
+        start_position: usize,
+        max_tokens: usize,
+        temperature: f32,
+        top_k: usize,
+        top_p: f32,
+        stop_ids: &[usize],
+        tokenizer: &tokenizers::Tokenizer,
+        presence_penalty: f32,
+        mut on_token: F,
+    ) -> usize
+    where
+        F: FnMut(usize, &str, Option<&str>) -> bool,
+    {
+        use std::time::Instant;
+
+        let graph = match self.decode_graph.as_ref() {
+            Some(g) => g,
+            None => { log::error!("generate_stream: decode_graph not configured"); return 0; }
+        };
+        let vocab_size = graph.vocab_size;
+
+        let mut logits = vec![0.0f32; vocab_size];
+        let output_ptr = logits.as_mut_ptr() as usize;
+
+        let stop_set: std::collections::HashSet<usize> = stop_ids.iter().copied().collect();
+
+        // RNG
+        let mut rng_state: u64 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        if rng_state == 0 { rng_state = 0xDEADBEEF; }
+        let mut rng_next = move || -> u64 {
+            rng_state ^= rng_state << 13;
+            rng_state ^= rng_state >> 7;
+            rng_state ^= rng_state << 17;
+            rng_state
+        };
+
+        let decode_start = Instant::now();
+        let mut next_token = first_token;
+        let mut generated = 0usize;
+        let mut seen_tokens: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        seen_tokens.insert(first_token);
+
+        for step in 0..max_tokens {
+            if self.cancel_flag.load(Ordering::Acquire) {
+                log::info!("generate_stream: cancelled after {} tokens", generated);
+                on_token(next_token, "", Some("cancelled"));
+                break;
+            }
+
+            let pos = start_position + step;
+            if let Err(e) = self.decode_step(next_token, pos, output_ptr) {
+                log::error!("generate_stream: decode_step error: {}", e);
+                break;
+            }
+
+            if presence_penalty != 0.0 {
+                for &tok in &seen_tokens {
+                    if tok < vocab_size {
+                        logits[tok] -= presence_penalty;
+                    }
+                }
+            }
+
+            next_token = sample_from_logits(
+                &mut logits, vocab_size, temperature, top_k, top_p, &mut rng_next);
+            seen_tokens.insert(next_token);
+            generated += 1;
+
+            let text = tokenizer.decode(&[next_token as u32], true)
+                .unwrap_or_default();
+
+            let finish_reason = if stop_set.contains(&next_token) {
+                Some("stop")
+            } else if generated >= max_tokens {
+                Some("length")
+            } else {
+                None
+            };
+
+            let finished = finish_reason.is_some();
+            let cont = on_token(next_token, &text, finish_reason);
+            if finished || !cont {
+                break;
+            }
+        }
+
+        let elapsed = decode_start.elapsed().as_secs_f64();
+        if generated > 0 {
+            let tps = generated as f64 / elapsed;
+            log::info!("generate_stream: {} tokens in {:.2}s ({:.1} tok/s)",
+                generated, elapsed, tps);
+        }
+
+        generated
     }
 }
 

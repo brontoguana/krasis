@@ -3530,3 +3530,100 @@ class KrasisModel:
             prompt_tokens, max_new_tokens, temperature, top_k, top_p,
         )
         return self.tokenizer.decode(generated)
+
+    # ──────────────────────────────────────────────────────
+    # Rust server interface
+    # ──────────────────────────────────────────────────────
+
+    @torch.inference_mode()
+    def server_prefill(
+        self,
+        messages_json: str,
+        max_new_tokens: int,
+        temperature: float,
+        top_k: int,
+        top_p: float,
+        presence_penalty: float,
+        enable_thinking: bool,
+        extra_stop_tokens: List[str],
+    ):
+        """GPU prefill for Rust server. Returns result object with first_token, etc.
+
+        Called by the Rust HTTP server (with GIL) before decode.
+        Stores seq_states on self for cleanup via server_cleanup().
+        """
+        import json
+
+        messages = json.loads(messages_json)
+        prompt_tokens = self.tokenizer.apply_chat_template(
+            messages, enable_thinking=enable_thinking
+        )
+
+        stop_ids = [self.cfg.eos_token_id] + list(self.cfg.extra_stop_token_ids)
+        for s in extra_stop_tokens:
+            ids = self.tokenizer.encode(s, add_special_tokens=False)
+            stop_ids.extend(ids)
+
+        # Create KV states
+        seq_states = [
+            SequenceKVState(c, seq_id=0) if c is not None else None
+            for c in self.kv_caches
+        ]
+        self._server_seq_states = seq_states
+
+        # Reset linear attention states
+        if self.cfg.is_hybrid:
+            for layer in self.layers:
+                if layer.layer_type == "linear_attention":
+                    layer.attention.reset_state()
+
+        device = torch.device(self.ranks[0].device)
+
+        # Prefill
+        prompt_tensor = torch.tensor(prompt_tokens, dtype=torch.long, device=device)
+        positions = torch.arange(len(prompt_tokens), dtype=torch.int32, device=device)
+
+        t0 = time.perf_counter()
+        logits = self.forward(prompt_tensor, positions, seq_states)
+        next_logits = logits[-1:, :]
+        torch.cuda.synchronize()
+        prefill_time = time.perf_counter() - t0
+
+        # Sample first token
+        first_token = sample(
+            next_logits, temperature, top_k, top_p,
+            presence_penalty=presence_penalty,
+        ).item()
+
+        logger.info(
+            "server_prefill: %d tokens in %.2fs (%.0f tok/s)",
+            len(prompt_tokens), prefill_time,
+            len(prompt_tokens) / prefill_time if prefill_time > 0 else 0,
+        )
+
+        # Prepare CPU decode
+        cpu_decoder = self._cpu_decoder
+        cpu_decoder._store.reset_cancel()
+        cpu_decoder.prepare(seq_states, max_new_tokens)
+
+        # Get raw address of CpuDecodeStore for GIL-free Rust decode.
+        # self_addr() returns `self as *mut CpuDecodeStore as usize` in Rust.
+        store_addr = cpu_decoder._store.self_addr()
+
+        class _Result:
+            pass
+        r = _Result()
+        r.first_token = first_token
+        r.prompt_len = len(prompt_tokens)
+        r.stop_ids = stop_ids
+        r.store_addr = store_addr
+        return r
+
+    def server_cleanup(self):
+        """Free server request state (KV cache pages, etc.)."""
+        states = getattr(self, '_server_seq_states', None)
+        if states:
+            for s in states:
+                if s is not None:
+                    s.free()
+            self._server_seq_states = None

@@ -597,6 +597,8 @@ def main():
     parser.add_argument("--perplexity", action="store_true",
                         help="Run perplexity evaluation and exit")
     parser.add_argument("--temperature", type=float, default=0.6)
+    parser.add_argument("--python-server", action="store_true",
+                        help="Use legacy Python FastAPI/uvicorn server instead of Rust server")
 
     # Apply config file defaults, then parse CLI (CLI wins over config file)
     if config_defaults:
@@ -1022,62 +1024,99 @@ def main():
         args.host, args.port, max_ctx,
     )
 
-    _scheduler = Scheduler(_model)
-
     # ── Server registry: write entry + register cleanup ──
     _write_registry(args.host, args.port, _model_name)
     atexit.register(_remove_registry)
 
-    # Use uvicorn.Server directly so we can patch handle_exit.
-    # Default uvicorn graceful shutdown waits for active connections,
-    # but generation threads block in Rust/CUDA and never finish.
-    _shutting_down = False
-    config = uvicorn.Config(app, host=args.host, port=args.port, log_level="info")
-    server = uvicorn.Server(config)
+    if args.python_server:
+        # ── Legacy Python server (FastAPI/uvicorn) ──
+        _scheduler = Scheduler(_model)
 
-    def _handle_exit(sig, frame):
-        nonlocal _shutting_down
-        if _shutting_down:
-            # Second Ctrl-C — force kill immediately (no logging in signal handler)
-            _remove_registry()
-            os._exit(0)
-        # First Ctrl-C — tell uvicorn to stop, skip waiting for connections.
-        _shutting_down = True
-        server.should_exit = True
-        server.force_exit = True
-        # Suppress all output during teardown to avoid "reentrant call
-        # inside buffered writer" and noisy asyncio/uvicorn exceptions.
-        # We'll print a clean message via os.write() which is signal-safe.
-        try:
-            sys.stderr = open(os.devnull, "w")
-            sys.stdout = open(os.devnull, "w")
-            logging.disable(logging.CRITICAL)
-        except Exception:
-            pass
-        # os.write is async-signal-safe (no buffered writer involved)
-        os.write(1, f"\n{_BOLD}{_GREEN}Server stopped.{_NC}\n".encode())
+        _shutting_down = False
+        config = uvicorn.Config(app, host=args.host, port=args.port, log_level="info")
+        server = uvicorn.Server(config)
 
-    server.handle_exit = _handle_exit
-    signal.signal(signal.SIGINT, _handle_exit)
-    signal.signal(signal.SIGTERM, _handle_exit)
+        def _handle_exit(sig, frame):
+            nonlocal _shutting_down
+            if _shutting_down:
+                _remove_registry()
+                os._exit(0)
+            _shutting_down = True
+            server.should_exit = True
+            server.force_exit = True
+            try:
+                sys.stderr = open(os.devnull, "w")
+                sys.stdout = open(os.devnull, "w")
+                logging.disable(logging.CRITICAL)
+            except Exception:
+                pass
+            os.write(1, f"\n{_BOLD}{_GREEN}Server stopped.{_NC}\n".encode())
 
-    # Background thread: press Q to quit
-    def _stdin_listener():
-        try:
-            while not server.should_exit:
-                # Use select to avoid blocking forever (check every 0.5s)
-                if select.select([sys.stdin], [], [], 0.5)[0]:
-                    ch = sys.stdin.read(1)
-                    if ch in ("q", "Q"):
-                        _handle_exit(None, None)
-                        break
-        except (OSError, ValueError):
-            pass  # stdin closed or not a tty
-    if sys.stdin.isatty():
-        t = threading.Thread(target=_stdin_listener, daemon=True)
-        t.start()
+        server.handle_exit = _handle_exit
+        signal.signal(signal.SIGINT, _handle_exit)
+        signal.signal(signal.SIGTERM, _handle_exit)
 
-    server.run()
+        def _stdin_listener():
+            try:
+                while not server.should_exit:
+                    if select.select([sys.stdin], [], [], 0.5)[0]:
+                        ch = sys.stdin.read(1)
+                        if ch in ("q", "Q"):
+                            _handle_exit(None, None)
+                            break
+            except (OSError, ValueError):
+                pass
+        if sys.stdin.isatty():
+            t = threading.Thread(target=_stdin_listener, daemon=True)
+            t.start()
+
+        server.run()
+    else:
+        # ── Rust HTTP server (default) — Python only for GPU prefill ──
+        from krasis import RustServer
+
+        tokenizer_path = os.path.join(args.model_path, "tokenizer.json")
+        rust_server = RustServer(
+            _model,
+            args.host,
+            args.port,
+            _model_name,
+            tokenizer_path,
+            max_ctx,
+        )
+
+        print(f"  {_DIM}Using Rust HTTP server (Python only for GPU prefill){_NC}", flush=True)
+
+        def _handle_exit(sig, frame):
+            rust_server.stop()
+            try:
+                sys.stderr = open(os.devnull, "w")
+                sys.stdout = open(os.devnull, "w")
+                logging.disable(logging.CRITICAL)
+            except Exception:
+                pass
+            os.write(1, f"\n{_BOLD}{_GREEN}Server stopped.{_NC}\n".encode())
+
+        signal.signal(signal.SIGINT, _handle_exit)
+        signal.signal(signal.SIGTERM, _handle_exit)
+
+        # Q to quit (background thread)
+        def _stdin_listener():
+            try:
+                while rust_server.is_running():
+                    if select.select([sys.stdin], [], [], 0.5)[0]:
+                        ch = sys.stdin.read(1)
+                        if ch in ("q", "Q"):
+                            _handle_exit(None, None)
+                            break
+            except (OSError, ValueError):
+                pass
+        if sys.stdin.isatty():
+            t = threading.Thread(target=_stdin_listener, daemon=True)
+            t.start()
+
+        # run() releases the GIL and blocks until stop() is called
+        rust_server.run()
 
     # ── Clean exit before Python teardown triggers cascading errors ──
     _remove_registry()
