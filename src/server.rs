@@ -473,11 +473,12 @@ fn handle_chat_completion(
         } else {
             0.0
         };
-        let timing_json = format!(
-            r#"{{"krasis_timing":{{"decode_tokens":{},"decode_time_ms":{:.1},"decode_tok_s":{:.2},"total_generated":{},"prompt_tokens":{}}}}}"#,
+        let timing_chunk = format!(
+            r#"{{"id":"{}","object":"chat.completion.chunk","created":{},"model":"{}","choices":[],"krasis_timing":{{"decode_tokens":{},"decode_time_ms":{:.1},"decode_tok_s":{:.2},"total_generated":{},"prompt_tokens":{}}}}}"#,
+            request_id, created, state.model_name,
             decode_token_count, elapsed * 1000.0, decode_tok_s, total_gen, prompt_len
         );
-        let _ = tx.send(format!("data: {}\n\n", timing_json));
+        let _ = tx.send(format!("data: {}\n\n", timing_chunk));
         let _ = tx.send("data: [DONE]\n\n".to_string());
 
         // Drop sender to signal writer thread to flush and exit

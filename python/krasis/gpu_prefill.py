@@ -1270,9 +1270,9 @@ class GpuPrefillManager:
         chunks through this group, call free_layer_group() to release VRAM.
 
         Uses double-buffered pinned DMA: while GPU DMA reads from buffer A,
-        CPU writes the next layer into buffer B. CUDA events (not
-        cuda.synchronize) protect buffer reuse — only waits for the specific
-        DMA transfer, not all GPU work.
+        CPU writes the next layer into buffer B. torch.cuda.synchronize()
+        protects buffer reuse and flushes PyTorch's CUDA memory allocator,
+        ensuring freed blocks are reclaimed (critical on VRAM-constrained GPUs).
         """
         assert self._engine is not None, "Layer-grouped mode requires Krasis engine"
         detailed = TIMING.prefill
@@ -1306,12 +1306,10 @@ class GpuPrefillManager:
             if detailed:
                 t0 = time.perf_counter()
 
-            # Wait for this buffer's previous DMA to finish before overwriting.
-            # Uses CUDA event (narrow wait on one DMA) instead of
-            # cuda.synchronize (broad wait on ALL GPU work).
-            if self._dma_events[buf_idx] is not None:
-                self._dma_events[buf_idx].synchronize()
-                self._dma_events[buf_idx] = None
+            # Wait for all GPU work (including previous DMA from this buffer)
+            # before CPU overwrites the pinned buffer. Also flushes PyTorch's
+            # CUDA memory allocator so freed blocks are properly reclaimed.
+            torch.cuda.synchronize(self.device)
 
             # Pinned path: Rust writes into pinned tensor via raw pointer,
             # releases GIL during memcpy so other threads can run in parallel.
@@ -1346,10 +1344,8 @@ class GpuPrefillManager:
             w2_packed = w2_packed.to(self.device, non_blocking=True)
             w2_scale = w2_scale.to(self.device, non_blocking=True)
 
-            # Record event: tracks when THIS buffer's DMA completes.
-            # Next iteration using the same buffer will wait on this event
-            # before CPU overwrites the pinned buffer.
-            self._dma_events[buf_idx] = torch.cuda.current_stream(self.device).record_event()
+            # No event recording needed — torch.cuda.synchronize() at the
+            # top of the next iteration ensures all DMA is complete.
 
             if detailed:
                 t3 = time.perf_counter()
@@ -1378,11 +1374,8 @@ class GpuPrefillManager:
                 shared_buf = self._dma_shared_bufs[buf_idx]
 
                 if shared_buf is not None:
-                    # Wait for this shared buffer's previous DMA event
-                    shared_evt_key = f"shared_{buf_idx}"
-                    evt = getattr(self, '_dma_shared_events', {}).get(shared_evt_key)
-                    if evt is not None:
-                        evt.synchronize()
+                    # Wait for all GPU work before overwriting shared pinned buffer
+                    torch.cuda.synchronize(self.device)
 
                     self._engine.write_shared_expert_into_pinned(
                         moe_idx,
@@ -1399,11 +1392,6 @@ class GpuPrefillManager:
                         self._dma_shared_shape_w2p).to(self.device, non_blocking=True)
                     w2_scale = shared_buf["w2s"].view(torch.bfloat16).reshape(
                         self._dma_shared_shape_w2s).to(self.device, non_blocking=True)
-                    # Record event for this shared buffer
-                    if not hasattr(self, '_dma_shared_events'):
-                        self._dma_shared_events = {}
-                    self._dma_shared_events[shared_evt_key] = torch.cuda.current_stream(
-                        self.device).record_event()
                 else:
                     # Fallback: allocating path for shared experts
                     w13p_bytes, w13s_bytes, w2p_bytes, w2s_bytes = (
@@ -1446,11 +1434,9 @@ class GpuPrefillManager:
             self._gpu_sort_idx = torch.empty(self.num_experts, 0, dtype=torch.int32, device=self.device)
 
         # Final sync: ensure ALL DMA is complete before compute reads the data.
-        # All DMA was on the default stream, so a single event sync suffices.
         if detailed:
             t_sync0 = time.perf_counter()
-        event = torch.cuda.current_stream(self.device).record_event()
-        event.synchronize()
+        torch.cuda.synchronize(self.device)
         if detailed:
             t_sync = time.perf_counter() - t_sync0
 
