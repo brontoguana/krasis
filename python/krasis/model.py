@@ -2629,18 +2629,40 @@ class KrasisModel:
         max_retries = 0 if not getattr(self, '_oom_retry_enabled', True) else 3
         freed_graphs = False
 
+        # Identify caller for instrumentation
+        import traceback as _tb
+        _caller = "unknown"
+        for _frame in _tb.extract_stack():
+            if "server_prefill" in _frame.name:
+                _caller = "server_prefill"
+                break
+            if "generate" in _frame.name:
+                _caller = "generate"
+                break
+
         # Defragment the PyTorch allocator before prefill.  Decode leaves many
         # small cached-but-free blocks that prevent contiguous DMA allocations.
         # This reclaims those blocks so layer group DMA can allocate freely.
+        torch.cuda.synchronize()
+        _t_ec = time.perf_counter()
         torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        _ec_ms = (time.perf_counter() - _t_ec) * 1000
+        logger.info("[prefill_instr] caller=%s empty_cache=%.1fms M=%d", _caller, _ec_ms, token_ids.shape[0])
 
         for attempt in range(max_retries + 1):
             try:
+                _t_fwd = time.perf_counter()
                 result = self.forward_prefill_layer_grouped(
                     token_ids, positions, seq_states,
                     max_chunk_override=max_chunk_override,
                     return_all_logits=return_all_logits,
                 )
+                torch.cuda.synchronize()
+                _fwd_ms = (time.perf_counter() - _t_fwd) * 1000
+                logger.info("[prefill_instr] caller=%s forward_grouped=%.1fms M=%d (%.0f tok/s)",
+                            _caller, _fwd_ms, token_ids.shape[0],
+                            token_ids.shape[0] / (_fwd_ms / 1000) if _fwd_ms > 0 else 0)
 
                 # Re-capture CUDA graphs if we freed them during OOM recovery.
                 # Prefill is done so the activation VRAM is free again.
@@ -3554,9 +3576,9 @@ class KrasisModel:
         """
         import json
 
-        messages = json.loads(messages_json)
+        parsed = json.loads(messages_json)
         prompt_tokens = self.tokenizer.apply_chat_template(
-            messages, enable_thinking=enable_thinking
+            parsed, enable_thinking=enable_thinking
         )
 
         stop_ids = [self.cfg.eos_token_id] + list(self.cfg.extra_stop_token_ids)
@@ -3583,6 +3605,8 @@ class KrasisModel:
         prompt_tensor = torch.tensor(prompt_tokens, dtype=torch.long, device=device)
         positions = torch.arange(len(prompt_tokens), dtype=torch.int32, device=device)
 
+        # Drain any pending CUDA ops from previous request so timing is accurate
+        torch.cuda.synchronize()
         t0 = time.perf_counter()
         logits = self.forward(prompt_tensor, positions, seq_states)
         next_logits = logits[-1:, :]

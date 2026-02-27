@@ -2,16 +2,16 @@
 
 ## Prerequisites
 
-- Python 3.10+ virtualenv at `krasis/.venv`
+- Dev environment: see `DEV.md` for full setup details
+- Conda env: `/home/main/miniconda3/envs/krasis/` (Python 3.11)
 - Rust toolchain (maturin builds the PyO3 extension)
 - Models stored in `~/.krasis/models/<ModelName>/` (safetensors + config.json)
 - 3x NVIDIA RTX 2000 Ada (16 GB each), AMD EPYC 7742 (AVX2, 64 cores, 995 GB RAM)
 
-Build the Rust extension into the venv:
+Build the Rust extension:
 
 ```
-cd krasis
-maturin develop --release
+./dev build
 ```
 
 ## Running Krasis

@@ -230,6 +230,7 @@ def main():
             "CFG_HCS": None,           # HCS disabled — ignore from config files
             "CFG_MULTI_GPU_HCS": None,  # HCS disabled — ignore from config files
             "CFG_KV_CACHE_MB": "kv_cache_mb",
+            "CFG_ENABLE_THINKING": "enable_thinking",
         }
         with open(config_path) as f:
             for line in f:
@@ -253,7 +254,7 @@ def main():
                         if gpu_list:
                             config_defaults["num_gpus"] = len(gpu_list)
                         continue
-                    if key in ("CFG_FORCE_LOAD",):
+                    if key in ("CFG_FORCE_LOAD", "CFG_ENABLE_THINKING"):
                         # CFG_ format uses "1"/"" for booleans
                         config_defaults[dest] = val == "1"
                         continue
@@ -325,6 +326,9 @@ def main():
     parser.add_argument("--perplexity", action="store_true",
                         help="Run perplexity evaluation and exit")
     parser.add_argument("--temperature", type=float, default=0.6)
+    parser.add_argument("--enable-thinking", action=argparse.BooleanOptionalAction,
+                        default=True,
+                        help="Enable thinking/reasoning mode (default: on)")
     # Apply config file defaults, then parse CLI (CLI wins over config file)
     if config_defaults:
         parser.set_defaults(**config_defaults)
@@ -660,6 +664,11 @@ def main():
             total_pinned, len(hcs_devices), margin, free_after, cost_mb, device_counts,
         )
 
+    # Full end-to-end warmup: pay all cold-start costs (torch.compile, first DMA,
+    # KV cache allocation, CUDA graph capture, etc.) before any benchmarks or serving.
+    _status("Warming up model (first generation)")
+    _warmup_model(_model)
+
     # Run benchmark if requested (after model load + strategy, before serving)
     if args.benchmark or args.benchmark_only:
         from krasis.benchmark import KrasisBenchmark
@@ -741,6 +750,7 @@ def main():
         sys.exit(0)
 
     max_ctx = _model.get_max_context_tokens()
+
     _status(f"Server ready on {args.host}:{args.port}")
     print(f"  {_DIM}KV cache: {args.kv_cache_mb:,} MB → {max_ctx:,} max context tokens{_NC}", flush=True)
     print(f"  {_DIM}Press Q or Ctrl-C to stop{_NC}", flush=True)
@@ -764,6 +774,7 @@ def main():
         _model_name,
         tokenizer_path,
         max_ctx,
+        args.enable_thinking,
     )
 
     def _handle_exit(sig, frame):

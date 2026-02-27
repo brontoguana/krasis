@@ -333,6 +333,7 @@ CONFIG_KEYS = [
     "CFG_ATTENTION_QUANT", "CFG_SHARED_EXPERT_QUANT", "CFG_DENSE_MLP_QUANT",
     "CFG_LM_HEAD_QUANT", "CFG_KRASIS_THREADS", "CFG_HOST", "CFG_PORT",
     "CFG_GPU_PREFILL_THRESHOLD", "CFG_GGUF_PATH", "CFG_FORCE_LOAD",
+    "CFG_ENABLE_THINKING",
 ]
 
 
@@ -394,6 +395,7 @@ class LauncherConfig:
         self.gpu_prefill_threshold: int = 300
         self.gguf_path: str = ""
         self.force_load: bool = False
+        self.enable_thinking: bool = True
 
     def apply_saved(self, saved: Dict[str, str]) -> None:
         """Apply loaded config values."""
@@ -476,6 +478,8 @@ class LauncherConfig:
             self.gguf_path = saved["CFG_GGUF_PATH"]
         if "CFG_FORCE_LOAD" in saved and saved["CFG_FORCE_LOAD"]:
             self.force_load = saved["CFG_FORCE_LOAD"] == "1"
+        if "CFG_ENABLE_THINKING" in saved:
+            self.enable_thinking = saved["CFG_ENABLE_THINKING"] != "0"
 
     def to_save_dict(self) -> Dict[str, Any]:
         """Convert to dict for saving."""
@@ -498,6 +502,7 @@ class LauncherConfig:
             "CFG_GPU_PREFILL_THRESHOLD": str(self.gpu_prefill_threshold),
             "CFG_GGUF_PATH": self.gguf_path,
             "CFG_FORCE_LOAD": "1" if self.force_load else "",
+            "CFG_ENABLE_THINKING": "1" if self.enable_thinking else "0",
         }
 
 
@@ -554,6 +559,8 @@ OPTIONS = [
     ConfigOption("CPU threads", "krasis_threads",
                  opt_type="number", min_val=1, max_val=256),
     ConfigOption("Host/Port", "host", opt_type="text"),
+    ConfigOption("Enable thinking", "enable_thinking",
+                 choices=[True, False]),
 ]
 
 def _format_value(opt: ConfigOption, val: Any) -> str:
@@ -1585,6 +1592,8 @@ class Launcher:
             cmd_args.extend(["--gguf-path", self.cfg.gguf_path])
         if self.cfg.force_load:
             cmd_args.append("--force-load")
+        if not self.cfg.enable_thinking:
+            cmd_args.append("--no-enable-thinking")
         if benchmark or benchmark_only:
             cmd_args.append("--benchmark")
         if benchmark_only:

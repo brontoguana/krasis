@@ -236,7 +236,7 @@ class KrasisBenchmark:
         """Build decode prompt from file."""
         content = self._load_prompt_file("decode_prompt")
         messages = [{"role": "user", "content": content}]
-        return self.model.tokenizer.apply_chat_template(messages)
+        return self.model.tokenizer.apply_chat_template(messages, enable_thinking=False)
 
     def _kv_cache_max_tokens(self) -> int:
         """Return the maximum number of tokens the KV cache can hold."""
@@ -256,7 +256,7 @@ class KrasisBenchmark:
                 break
         return files
 
-    def _make_prefill_prompts(self, n: int, max_tokens_override: int = 0) -> List[List[int]]:
+    def _make_prefill_prompts(self, n: int, max_tokens_override: int = 0) -> tuple:
         """Build n different prefill prompts from separate numbered files.
 
         Loads prefill_prompt_1 through prefill_prompt_N — each file
@@ -266,6 +266,8 @@ class KrasisBenchmark:
 
         If max_tokens_override > 0, truncate to that instead of KV cache limit.
         Cycles through files if n > number of files available.
+
+        Returns (token_lists, content_texts).
         """
         # Leave room for decode tokens after prefill
         kv_limit = self._kv_cache_max_tokens() - 200
@@ -280,16 +282,23 @@ class KrasisBenchmark:
             )
 
         prompts = []
+        content_texts = []
         for i in range(n):
             content = self._load_prompt_file(files[i % len(files)])
             messages = [{"role": "user", "content": content}]
-            tokens = self.model.tokenizer.apply_chat_template(messages)
+            tokens = self.model.tokenizer.apply_chat_template(messages, enable_thinking=False)
             if len(tokens) > cap:
+                orig_len = len(tokens)
                 tokens = tokens[:cap]
+                ratio = cap / orig_len
+                content = content[:int(len(content) * ratio)]
             prompts.append(tokens)
-        return prompts
+            content_texts.append(content)
+        return prompts, content_texts
 
-    def _make_prefill_prompts_at_lengths(self, lengths: List[int], file_offset: int = 0) -> List[List[int]]:
+    def _make_prefill_prompts_at_lengths(
+        self, lengths: List[int], file_offset: int = 0,
+    ) -> tuple:
         """Build one prefill prompt per target length from different files.
 
         Each prompt uses a different file and is truncated to exactly the
@@ -298,6 +307,9 @@ class KrasisBenchmark:
 
         file_offset: start from this index into the discovered files list,
         so timed runs can use different files from warmup runs.
+
+        Returns (token_lists, content_texts) — content_texts are the raw
+        prompt strings (pre-chat-template) for network benchmark use.
         """
         kv_limit = self._kv_cache_max_tokens() - 200
         files = self._discover_prefill_files()
@@ -308,6 +320,7 @@ class KrasisBenchmark:
             )
 
         prompts = []
+        content_texts = []
         for i, target in enumerate(lengths):
             content = self._load_prompt_file(files[(i + file_offset) % len(files)])
             # Truncate raw text to ~5 chars/tok as a rough upper bound before tokenizing
@@ -316,20 +329,27 @@ class KrasisBenchmark:
             if len(content) > char_limit:
                 content = content[:char_limit]
             messages = [{"role": "user", "content": content}]
-            tokens = self.model.tokenizer.apply_chat_template(messages)
+            tokens = self.model.tokenizer.apply_chat_template(messages, enable_thinking=False)
             cap = min(target, kv_limit)
             if len(tokens) > cap:
+                orig_len = len(tokens)
                 tokens = tokens[:cap]
+                # Truncate content text proportionally to match token truncation
+                ratio = cap / orig_len
+                content = content[:int(len(content) * ratio)]
             prompts.append(tokens)
-        return prompts
+            content_texts.append(content)
+        return prompts, content_texts
 
-    def _make_decode_prompts(self, n: int) -> List[List[int]]:
+    def _make_decode_prompts(self, n: int) -> tuple:
         """Build n different decode prompts from separate numbered files.
 
         Loads decode_prompt_1 through decode_prompt_N — each file has a
         different topic to ensure varied expert activation.
 
         Cycles through files if n > number of files available.
+
+        Returns (token_lists, content_texts).
         """
         # Discover available decode prompt files
         files = []
@@ -345,11 +365,13 @@ class KrasisBenchmark:
             files = ["decode_prompt"]
 
         prompts = []
+        content_texts = []
         for i in range(n):
             content = self._load_prompt_file(files[i % len(files)])
             messages = [{"role": "user", "content": content}]
-            prompts.append(self.model.tokenizer.apply_chat_template(messages))
-        return prompts
+            prompts.append(self.model.tokenizer.apply_chat_template(messages, enable_thinking=False))
+            content_texts.append(content)
+        return prompts, content_texts
 
     # ──────────────────────────────────────────────────────────
     # Benchmark phases
@@ -404,12 +426,12 @@ class KrasisBenchmark:
             t1 = time.perf_counter()
 
             n_gen = len(generated)
-            total_s = t1 - t0
-            ttft = getattr(self.model, '_last_ttft', 0)
-            decode_s = total_s - ttft
-            if decode_s > 0 and n_gen > 0:
-                tok_s = n_gen / decode_s
-                ms_per_tok = (decode_s / n_gen) * 1000
+            # Use internal decode timing (excludes prepare() and cleanup overhead)
+            decode_s = getattr(self.model, '_last_decode_time', 0)
+            n_decode = n_gen - 1  # First token is from prefill
+            if decode_s > 0 and n_decode > 0:
+                tok_s = n_decode / decode_s
+                ms_per_tok = (decode_s / n_decode) * 1000
             else:
                 tok_s = 0
                 ms_per_tok = 0
@@ -617,33 +639,38 @@ class KrasisBenchmark:
         return server
 
     def _network_request(
-        self, host: str, port: int, prompt_tokens: List[int],
-        max_new_tokens: int, temperature: float = 0.6,
+        self, host: str, port: int, content_text: str,
+        expected_tokens: int, max_new_tokens: int, temperature: float = 0.6,
     ) -> Dict:
         """Send a prompt over HTTP and measure TTFT + decode speed.
+
+        Args:
+            content_text: Raw prompt content (sent as user message, server applies chat template).
+            expected_tokens: Engine's token count for this prompt (for fair tok/s comparison)
 
         Returns dict with ttft, decode_tok_s, total_time, num_generated, num_prompt.
         """
         import http.client
         import json as _json
 
-        # Convert tokens back to text for the HTTP request
-        prompt_text = self.model.tokenizer.decode(prompt_tokens)
-        body = _json.dumps({
-            "messages": [{"role": "user", "content": prompt_text}],
+        req_body = {
+            "messages": [{"role": "user", "content": content_text}],
             "max_tokens": max_new_tokens,
             "temperature": temperature,
             "stream": True,
-        }).encode()
+            "enable_thinking": False,
+        }
+        body = _json.dumps(req_body).encode()
 
         conn = http.client.HTTPConnection(host, port, timeout=600)
+        t_start = time.perf_counter()
         conn.request("POST", "/v1/chat/completions", body=body,
                       headers={"Content-Type": "application/json"})
         resp = conn.getresponse()
 
-        t_start = time.perf_counter()
         t_first = None
         n_tokens = 0
+        server_timing = None
         buf = b""
 
         while True:
@@ -657,41 +684,67 @@ class KrasisBenchmark:
                 if not line or line == b"data: [DONE]":
                     continue
                 if line.startswith(b"data: "):
-                    if t_first is None:
-                        t_first = time.perf_counter()
                     try:
                         data = _json.loads(line[6:])
+                        # Check for server-side timing event
+                        if "krasis_timing" in data:
+                            server_timing = data["krasis_timing"]
+                            continue
                         delta = data.get("choices", [{}])[0].get("delta", {})
                         if "content" in delta:
+                            now = time.perf_counter()
+                            if t_first is None:
+                                t_first = now
                             n_tokens += 1
                     except _json.JSONDecodeError:
                         pass
 
         conn.close()
-        t_end = time.perf_counter()
 
-        ttft = (t_first - t_start) if t_first else (t_end - t_start)
-        total = t_end - t_start
-        decode_time = total - ttft
-        decode_tok_s = (n_tokens - 1) / decode_time if decode_time > 0 and n_tokens > 1 else 0
+        ttft = (t_first - t_start) if t_first else 0
+
+        # Use server-side timing for decode (immune to TCP buffering)
+        if server_timing:
+            decode_tok_s = server_timing.get("decode_tok_s", 0)
+            decode_ms = server_timing.get("decode_time_ms", 0)
+            decode_ms_per_tok = (decode_ms / server_timing["decode_tokens"]
+                                 if server_timing.get("decode_tokens", 0) > 0 else 0)
+            n_tokens = server_timing.get("total_generated", n_tokens)
+            server_prompt_tokens = server_timing.get("prompt_tokens", 0)
+        else:
+            decode_tok_s = 0
+            decode_ms_per_tok = 0
+            server_prompt_tokens = 0
 
         return {
             "ttft": round(ttft, 2),
-            "tok_s": round(len(prompt_tokens) / ttft, 1) if ttft > 0 else 0,
+            "tok_s": round(expected_tokens / ttft, 1) if ttft > 0 else 0,
             "decode_tok_s": round(decode_tok_s, 2),
-            "decode_ms_per_tok": round(1000 / decode_tok_s, 1) if decode_tok_s > 0 else 0,
-            "num_tokens": len(prompt_tokens),
+            "decode_ms_per_tok": round(decode_ms_per_tok, 1),
+            "num_tokens": expected_tokens,
+            "server_prompt_tokens": server_prompt_tokens,
             "num_generated": n_tokens,
-            "total_time": round(total, 2),
+            "total_time": round(time.perf_counter() - t_start, 2),
         }
 
     def _benchmark_network_prefill(
-        self, prompts: List[List[int]], host: str, port: int,
+        self, prompt_tokens: List[List[int]], prompt_texts: List[str],
+        host: str, port: int,
     ) -> Dict:
-        """Measure prefill speed over HTTP (SSE streaming, 1 decode token)."""
+        """Measure prefill speed over HTTP (SSE streaming, 1 decode token).
+
+        Sends text to the server (same as a real client). Both engine and
+        server use enable_thinking=False so token counts should match.
+        """
         runs = []
-        for tokens in prompts:
-            r = self._network_request(host, port, tokens, max_new_tokens=1)
+        for tokens, text in zip(prompt_tokens, prompt_texts):
+            n_tokens = len(tokens)
+            r = self._network_request(host, port, text, n_tokens,
+                                       max_new_tokens=1)
+            # Log token count comparison for debugging
+            srv_toks = r.get("server_prompt_tokens", 0)
+            if srv_toks and abs(srv_toks - n_tokens) > n_tokens * 0.05:
+                print(f"  {YELLOW}WARNING: token mismatch — engine {n_tokens:,} vs server {srv_toks:,} ({(srv_toks/n_tokens-1)*100:+.1f}%){NC}")
             runs.append(r)
 
         best_run = max(runs, key=lambda r: r["tok_s"])
@@ -703,12 +756,14 @@ class KrasisBenchmark:
         }
 
     def _benchmark_network_decode(
-        self, prompts: List[List[int]], host: str, port: int,
+        self, prompt_tokens: List[List[int]], prompt_texts: List[str],
+        host: str, port: int,
     ) -> Dict:
-        """Measure decode speed over HTTP."""
+        """Measure decode speed over HTTP. Sends text like a real client."""
         runs = []
-        for tokens in prompts:
-            r = self._network_request(host, port, tokens,
+        for tokens, text in zip(prompt_tokens, prompt_texts):
+            n_tokens = len(tokens)
+            r = self._network_request(host, port, text, n_tokens,
                                        max_new_tokens=self.decode_tokens)
             runs.append({
                 "tok_s": r["decode_tok_s"],
@@ -754,7 +809,8 @@ class KrasisBenchmark:
             e_t = er["tok_s"]
             n_t = nr["tok_s"]
             pct = ((n_t / e_t - 1) * 100) if e_t > 0 else 0
-            lines.append(f"  {'  ' + f'{er[\"num_tokens\"]:,} tokens':30s} {e_t:>12.1f}   {n_t:>12.1f}   {pct:>+8.1f}%")
+            label = f"  {er['num_tokens']:,} tokens"
+            lines.append(f"  {label:30s} {e_t:>12.1f}   {n_t:>12.1f}   {pct:>+8.1f}%")
 
         lines.append("")
 
@@ -799,9 +855,10 @@ class KrasisBenchmark:
         lengths_str = "/".join(f"{l//1000}K" for l in self.PREFILL_LENGTHS)
         print(_section(f"Loading benchmark prompts (warmup + timed at {lengths_str})"))
 
-        warmup_prefill = self._make_prefill_prompts(self.n_runs, max_tokens_override=25000)
-        timed_prefill = self._make_prefill_prompts_at_lengths(self.PREFILL_LENGTHS, file_offset=self.n_runs)
-        decode_prompts = self._make_decode_prompts(self.n_runs * 2)
+        warmup_prefill, warmup_prefill_texts = self._make_prefill_prompts(self.n_runs, max_tokens_override=25000)
+        timed_prefill, timed_prefill_texts = self._make_prefill_prompts_at_lengths(
+            self.PREFILL_LENGTHS, file_offset=self.n_runs)
+        decode_prompts, decode_texts = self._make_decode_prompts(self.n_runs * 2)
 
         print(f"  Warmup prefill:  {self.n_runs} prompts, ~{len(warmup_prefill[0]):,} tokens each")
         print(f"  Timed prefill:   {n_timed_prefill} prompts at {lengths_str} tokens")
@@ -810,7 +867,9 @@ class KrasisBenchmark:
         print(f"  Decode:          {len(decode_prompts)} prompts")
 
         warmup_decode = decode_prompts[:self.n_runs]
+        warmup_decode_texts = decode_texts[:self.n_runs]
         timed_decode = decode_prompts[self.n_runs:]
+        timed_decode_texts = decode_texts[self.n_runs:]
 
         # 3. Warmup — compile kernels + warm caches with DIFFERENT prompts than timed runs
         print(_section(f"Warmup ({self.n_runs} prefill + {self.n_runs} decode, all different prompts)"))
@@ -848,18 +907,33 @@ class KrasisBenchmark:
             temp_server = self._start_temp_server(bench_host, bench_port)
             print(f"  Server running on {bench_host}:{bench_port}")
 
-            # Network prefill (same lengths as engine)
+            # Network warmup — send text through HTTP (same as real client)
+            n_prefill_warmup = len(warmup_prefill)
+            print(_section(f"Network warmup ({n_prefill_warmup} prefill + {self.n_runs} decode requests)"))
+            for i, (tokens, text) in enumerate(zip(warmup_prefill, warmup_prefill_texts)):
+                self._network_request(bench_host, bench_port, text, len(tokens),
+                                      max_new_tokens=1)
+                print(f"  Prefill warmup {i+1}/{n_prefill_warmup} complete ({len(tokens):,} tokens)")
+            for i, (tokens, text) in enumerate(zip(warmup_decode, warmup_decode_texts)):
+                self._network_request(bench_host, bench_port, text, len(tokens),
+                                      max_new_tokens=8)
+                print(f"  Decode warmup {i+1}/{self.n_runs} complete")
+            print(f"  Network warmup complete.")
+
+            # Network prefill (text through HTTP, same enable_thinking=False as engine)
             print(_section(f"Network prefill benchmark ({lengths_str} tokens)"))
             net_prefill_result = self._benchmark_network_prefill(
-                timed_prefill, bench_host, bench_port)
+                timed_prefill, timed_prefill_texts,
+                bench_host, bench_port)
             for i, run in enumerate(net_prefill_result["runs"]):
                 print(f"  Run {i+1}: {run['tok_s']:.1f} tok/s, TTFT={run['ttft']:.2f}s ({run['num_tokens']:,} tokens)")
             print(f"  {BOLD}Best: {net_prefill_result['best_tok_s']:.1f} tok/s, TTFT={net_prefill_result['best_ttft']:.2f}s{NC}")
 
-            # Network decode (same prompts as engine)
+            # Network decode (text through HTTP, same enable_thinking=False as engine)
             print(_section(f"Network decode benchmark ({self.decode_tokens} tokens, {self.n_runs} runs)"))
             net_decode_result = self._benchmark_network_decode(
-                timed_decode, bench_host, bench_port)
+                timed_decode, timed_decode_texts,
+                bench_host, bench_port)
             for i, run in enumerate(net_decode_result["runs"]):
                 print(f"  Run {i+1}: {run['tok_s']:.2f} tok/s ({run['ms_per_tok']:.1f}ms/tok)")
             print(f"  {BOLD}Average: {net_decode_result['avg_tok_s']:.2f} tok/s ({net_decode_result['avg_ms_per_tok']:.1f}ms/tok){NC}")
@@ -877,15 +951,9 @@ class KrasisBenchmark:
             logger.warning("Network benchmark failed (non-fatal): %s", e, exc_info=True)
             print(f"  {YELLOW}Network benchmark skipped: {e}{NC}")
 
-        # 7. Decode prompt text for the log (use last timed prompt, matching generated output)
-        try:
-            prefill_prompt_text = self.model.tokenizer.decode(timed_prefill[0])
-        except Exception:
-            prefill_prompt_text = f"[{len(timed_prefill[0])} tokens]"
-        try:
-            decode_prompt_text = self.model.tokenizer.decode(timed_decode[-1])
-        except Exception:
-            decode_prompt_text = "[decode prompt]"
+        # 7. Decode prompt text for the log (use saved content texts)
+        prefill_prompt_text = timed_prefill_texts[0] if timed_prefill_texts else ""
+        decode_prompt_text = timed_decode_texts[-1] if timed_decode_texts else ""
 
         # 8. Format and write report
         print(_section("Writing results"))

@@ -671,9 +671,14 @@ class GatedDeltaNetAttention:
         step_fn = _get_chunk_step()
 
         for i in range(num_chunks):
+            # .contiguous() ensures canonical strides regardless of prompt length,
+            # so torch.compile sees identical (shape, stride, dtype) every time
+            # and reuses a single cached kernel instead of recompiling per prompt.
             output, recurrent_state = step_fn(
-                q_c[:, :, i], k_c[:, :, i], value_corrected[:, :, i],
-                g_cum[:, :, i], k_cumdecay[:, :, i], decay_mask[:, :, i],
+                q_c[:, :, i].contiguous(), k_c[:, :, i].contiguous(),
+                value_corrected[:, :, i].contiguous(),
+                g_cum[:, :, i].contiguous(), k_cumdecay[:, :, i].contiguous(),
+                decay_mask[:, :, i].contiguous(),
                 mask_strict_upper, recurrent_state)
             core_attn_out[:, :, i] = output
 

@@ -13,14 +13,15 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
+use std::sync::mpsc;
 
 /// Server state shared across request handling.
 struct ServerState {
     py_model: Py<PyAny>,
     model_name: String,
-    tokenizer_path: String,
+    tokenizer: tokenizers::Tokenizer,
     max_context_tokens: usize,
-    running: Arc<AtomicBool>,
+    default_enable_thinking: bool,
 }
 
 /// Parsed HTTP request.
@@ -247,7 +248,7 @@ fn handle_chat_completion(
     let top_k = req.get("top_k").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
     let top_p = req.get("top_p").and_then(|v| v.as_f64()).unwrap_or(0.95) as f32;
     let presence_penalty = req.get("presence_penalty").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-    let enable_thinking = req.get("enable_thinking").and_then(|v| v.as_bool()).unwrap_or(true);
+    let enable_thinking = req.get("enable_thinking").and_then(|v| v.as_bool()).unwrap_or(state.default_enable_thinking);
 
     let request_id = format!("chatcmpl-{:016x}", {
         let mut s = std::time::SystemTime::now()
@@ -342,18 +343,7 @@ fn handle_chat_completion(
         request_id, prompt_len, max_tokens, is_stream
     );
 
-    // ── Load tokenizer for decode (pure Rust, ~10ms one-time) ──
-    let tokenizer = match tokenizers::Tokenizer::from_file(&state.tokenizer_path) {
-        Ok(t) => t,
-        Err(e) => {
-            log::error!("Failed to load tokenizer: {}", e);
-            let _ = send_json(stream, 500, r#"{"error":"Tokenizer load failed"}"#);
-            Python::with_gil(|py| {
-                let _ = state.py_model.call_method0(py, "server_cleanup");
-            });
-            return;
-        }
-    };
+    let tokenizer = &state.tokenizer;
 
     // ── Decode (GIL-free!) ──
     // Safety: single-request guarantee. store_addr is a valid *mut CpuDecodeStore
@@ -361,7 +351,10 @@ fn handle_chat_completion(
     let store = unsafe { &mut *(store_addr as *mut CpuDecodeStore) };
 
     if is_stream {
-        // ── Streaming SSE ──
+        // ── Streaming SSE with decoupled IO ──
+        // Decode loop pushes pre-formatted SSE chunks to a channel.
+        // A writer thread drains the channel and flushes every 100ms or on completion.
+        // This ensures decode is never blocked on socket IO.
         if let Err(e) = begin_sse(stream) {
             log::error!("Failed to send SSE headers: {}", e);
             Python::with_gil(|py| {
@@ -370,12 +363,80 @@ fn handle_chat_completion(
             return;
         }
 
-        // Emit first token
+        // Emit first token immediately (prefill latency already paid)
         let first_text = tokenizer.decode(&[first_token as u32], true).unwrap_or_default();
         let chunk = format_sse_token(&request_id, &state.model_name, &first_text, None, created);
         let _ = send_sse_chunk(stream, &chunk);
 
+        // Channel for decode → writer thread communication
+        let (tx, rx) = mpsc::channel::<String>();
+        let writer_disconnected = Arc::new(AtomicBool::new(false));
+        let writer_disc_clone = writer_disconnected.clone();
+
+        // Clone the TCP stream for the writer thread
+        let mut writer_stream = match stream.try_clone() {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!("Failed to clone stream for writer: {}", e);
+                Python::with_gil(|py| {
+                    let _ = state.py_model.call_method0(py, "server_cleanup");
+                });
+                return;
+            }
+        };
+
+        // Writer thread: pulls chunks off channel, buffers, flushes every 100ms or on close.
+        // First chunk is flushed immediately so client-measured TTFT is accurate.
+        let writer_handle = std::thread::spawn(move || {
+            let flush_interval = std::time::Duration::from_millis(100);
+            let mut buf = String::new();
+            let mut last_flush = Instant::now();
+            let mut is_first = true;
+
+            loop {
+                match rx.recv_timeout(flush_interval) {
+                    Ok(chunk) => {
+                        buf.push_str(&chunk);
+                        // Flush immediately on first chunk, then every 100ms or 8KB
+                        if is_first || last_flush.elapsed() >= flush_interval || buf.len() > 8192 {
+                            if writer_stream.write_all(buf.as_bytes()).is_err()
+                                || writer_stream.flush().is_err()
+                            {
+                                writer_disc_clone.store(true, Ordering::Release);
+                                return;
+                            }
+                            buf.clear();
+                            last_flush = Instant::now();
+                            is_first = false;
+                        }
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        // Flush whatever we have
+                        if !buf.is_empty() {
+                            if writer_stream.write_all(buf.as_bytes()).is_err()
+                                || writer_stream.flush().is_err()
+                            {
+                                writer_disc_clone.store(true, Ordering::Release);
+                                return;
+                            }
+                            buf.clear();
+                            last_flush = Instant::now();
+                        }
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        // Channel closed — flush remaining and exit
+                        if !buf.is_empty() {
+                            let _ = writer_stream.write_all(buf.as_bytes());
+                            let _ = writer_stream.flush();
+                        }
+                        return;
+                    }
+                }
+            }
+        });
+
         let decode_start = Instant::now();
+        let mut decode_token_count = 0usize;
 
         store.generate_stream(
             first_token,
@@ -385,9 +446,10 @@ fn handle_chat_completion(
             top_k,
             top_p,
             &stop_ids,
-            &tokenizer,
+            tokenizer,
             presence_penalty,
             |_token_id, text, finish_reason| {
+                decode_token_count += 1;
                 let chunk = format_sse_token(
                     &request_id,
                     &state.model_name,
@@ -395,17 +457,35 @@ fn handle_chat_completion(
                     finish_reason,
                     created,
                 );
-                if send_sse_chunk(stream, &chunk).is_err() {
-                    return false; // Client disconnected
+                let formatted = format!("data: {}\n\n", chunk);
+                if tx.send(formatted).is_err() || writer_disconnected.load(Ordering::Acquire) {
+                    return false; // Writer thread died / client disconnected
                 }
                 true
             },
         );
 
-        let _ = send_sse_chunk(stream, "[DONE]");
-
+        // Emit server-side timing before [DONE]
         let elapsed = decode_start.elapsed().as_secs_f64();
-        log::info!("Request {} streaming complete ({:.2}s)", request_id, elapsed);
+        let total_gen = decode_token_count + 1;
+        let decode_tok_s = if elapsed > 0.0 && decode_token_count > 0 {
+            decode_token_count as f64 / elapsed
+        } else {
+            0.0
+        };
+        let timing_json = format!(
+            r#"{{"krasis_timing":{{"decode_tokens":{},"decode_time_ms":{:.1},"decode_tok_s":{:.2},"total_generated":{},"prompt_tokens":{}}}}}"#,
+            decode_token_count, elapsed * 1000.0, decode_tok_s, total_gen, prompt_len
+        );
+        let _ = tx.send(format!("data: {}\n\n", timing_json));
+        let _ = tx.send("data: [DONE]\n\n".to_string());
+
+        // Drop sender to signal writer thread to flush and exit
+        drop(tx);
+        let _ = writer_handle.join();
+
+        log::info!("Request {} streaming complete ({:.2}s, {} tokens, {:.2} tok/s)",
+            request_id, elapsed, total_gen, decode_tok_s);
     } else {
         // ── Non-streaming ──
         let mut all_text = String::new();
@@ -422,7 +502,7 @@ fn handle_chat_completion(
             top_k,
             top_p,
             &stop_ids,
-            &tokenizer,
+            tokenizer,
             presence_penalty,
             |_token_id, text, finish_reason| {
                 all_text.push_str(text);
@@ -460,6 +540,7 @@ pub struct RustServer {
     model_name: String,
     tokenizer_path: String,
     max_context_tokens: usize,
+    default_enable_thinking: bool,
     py_model: Py<PyAny>,
     running: Arc<AtomicBool>,
 }
@@ -467,7 +548,7 @@ pub struct RustServer {
 #[pymethods]
 impl RustServer {
     #[new]
-    #[pyo3(signature = (py_model, host, port, model_name, tokenizer_path, max_context_tokens))]
+    #[pyo3(signature = (py_model, host, port, model_name, tokenizer_path, max_context_tokens, enable_thinking=true))]
     fn new(
         py_model: PyObject,
         host: String,
@@ -475,6 +556,7 @@ impl RustServer {
         model_name: String,
         tokenizer_path: String,
         max_context_tokens: usize,
+        enable_thinking: bool,
     ) -> Self {
         Self {
             host,
@@ -482,6 +564,7 @@ impl RustServer {
             model_name,
             tokenizer_path,
             max_context_tokens,
+            default_enable_thinking: enable_thinking,
             py_model: py_model.into(),
             running: Arc::new(AtomicBool::new(false)),
         }
@@ -497,11 +580,21 @@ impl RustServer {
         let model_name = self.model_name.clone();
         let tokenizer_path = self.tokenizer_path.clone();
         let max_context_tokens = self.max_context_tokens;
+        let default_enable_thinking = self.default_enable_thinking;
         let running = self.running.clone();
 
         // Release GIL — server loop runs without it.
         // GIL is reacquired inside handle_request only for Python prefill/cleanup.
         py.allow_threads(move || {
+            // Load tokenizer once at startup (not per-request)
+            let tokenizer = match tokenizers::Tokenizer::from_file(&tokenizer_path) {
+                Ok(t) => t,
+                Err(e) => {
+                    log::error!("Failed to load tokenizer: {}", e);
+                    return;
+                }
+            };
+
             let listener = match TcpListener::bind(&addr) {
                 Ok(l) => l,
                 Err(e) => {
@@ -520,9 +613,9 @@ impl RustServer {
             let state = ServerState {
                 py_model,
                 model_name,
-                tokenizer_path,
+                tokenizer,
                 max_context_tokens,
-                running: running.clone(),
+                default_enable_thinking,
             };
 
             while running.load(Ordering::Acquire) {
@@ -530,6 +623,8 @@ impl RustServer {
                     Ok((stream, _addr)) => {
                         // Set blocking for the actual request handling
                         stream.set_nonblocking(false).ok();
+                        // Disable Nagle's algorithm for immediate SSE chunk delivery
+                        stream.set_nodelay(true).ok();
                         // Set read timeout to prevent hanging on malformed requests
                         stream
                             .set_read_timeout(Some(std::time::Duration::from_secs(30)))

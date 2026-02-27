@@ -8,11 +8,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VENV="$SCRIPT_DIR/.venv"
-PYTHON="$VENV/bin/python"
+PYTHON="/home/main/miniconda3/envs/krasis/bin/python"
 
 if [[ ! -f "$PYTHON" ]]; then
-    echo "ERROR: venv not found at $VENV"
+    echo "ERROR: Python not found at $PYTHON"
+    echo "See DEV.md for environment setup."
     exit 1
 fi
 

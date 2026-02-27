@@ -1,0 +1,309 @@
+#!/usr/bin/env bash
+#
+# Krasis dev helper — single entry point for build, run, test, benchmark.
+#
+# Usage:
+#   ./dev build                     Rebuild Rust extension into the dev env
+#   ./dev run <config>              Launch server from a test config
+#   ./dev run <config> --benchmark  Launch with benchmark, then serve
+#   ./dev test <config>             Run short model test (benchmark + network tests)
+#   ./dev test <config> --thorough  Run thorough model test (stress + benchmark + network + large)
+#   ./dev network <port>            Run network tests against a running server
+#   ./dev network <port> --large    Include large-prompt tests
+#   ./dev shell                     Drop into a Python shell with the dev env
+#   ./dev python <args...>          Run arbitrary Python with the dev env
+#
+# Configs are short names that map to testconfigs/*.conf:
+#   qcn         -> testconfigs/qcn-4-4.conf
+#   v2lite      -> testconfigs/v2lite-4-4.conf
+#   deepseek-vl -> testconfigs/deepseek-vl2-4-4.conf
+#   qwen35      -> testconfigs/qwen35-4-4.conf
+#
+set -euo pipefail
+
+# ── Environment ──────────────────────────────────────────────────────
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON="/home/main/miniconda3/envs/ktransformers/bin/python"
+PIP="/home/main/miniconda3/envs/ktransformers/bin/pip"
+MATURIN="/home/main/.local/bin/maturin"
+SO_FILE="$SCRIPT_DIR/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so"
+
+RED="\033[0;31m"
+GREEN="\033[0;32m"
+YELLOW="\033[1;33m"
+CYAN="\033[0;36m"
+BOLD="\033[1m"
+NC="\033[0m"
+
+info()  { echo -e "${CYAN}${BOLD}=>${NC} $*"; }
+ok()    { echo -e "${GREEN}${BOLD}OK${NC} $*"; }
+warn()  { echo -e "${YELLOW}${BOLD}!!${NC} $*"; }
+err()   { echo -e "${RED}${BOLD}ERROR${NC} $*" >&2; exit 1; }
+
+# ── Sanity checks ────────────────────────────────────────────────────
+[[ -f "$PYTHON" ]] || err "Python not found at $PYTHON
+  See DEV.md for environment setup instructions."
+
+[[ -f "$MATURIN" ]] || err "maturin not found at $MATURIN
+  Install: pip install maturin"
+
+# ── Config resolver ──────────────────────────────────────────────────
+resolve_config() {
+    local name="$1"
+    case "$name" in
+        qcn|QCN)            echo "$SCRIPT_DIR/testconfigs/qcn-4-4.conf" ;;
+        v2lite|V2-Lite)     echo "$SCRIPT_DIR/testconfigs/v2lite-4-4.conf" ;;
+        deepseek-vl|vl2)    echo "$SCRIPT_DIR/testconfigs/deepseek-vl2-4-4.conf" ;;
+        qwen35|Qwen3.5)     echo "$SCRIPT_DIR/testconfigs/qwen35-4-4.conf" ;;
+        *)
+            # Try as a direct path
+            if [[ -f "$name" ]]; then
+                echo "$name"
+            elif [[ -f "$SCRIPT_DIR/testconfigs/$name" ]]; then
+                echo "$SCRIPT_DIR/testconfigs/$name"
+            else
+                err "Unknown config: $name
+  Available: qcn, v2lite, deepseek-vl, qwen35
+  Or pass a path to a .conf file."
+            fi
+            ;;
+    esac
+}
+
+# Parse a .conf file into server.py CLI args
+conf_to_args() {
+    local conf="$1"
+    local args=""
+    while IFS='=' read -r key value; do
+        # Skip comments and empty lines
+        [[ "$key" =~ ^#.*$ || -z "$key" ]] && continue
+        # Strip quotes from value
+        value="${value%\"}"
+        value="${value#\"}"
+        # Skip empty values
+        [[ -z "$value" ]] && continue
+
+        case "$key" in
+            MODEL_PATH)             args="$args --model-path $value" ;;
+            CFG_SELECTED_GPUS)      args="$args --selected-gpus $value" ;;
+            CFG_PP_PARTITION)       args="$args --pp-partition $value" ;;
+            CFG_LAYER_GROUP_SIZE)   args="$args --layer-group-size $value" ;;
+            CFG_KV_DTYPE)           args="$args --kv-dtype $value" ;;
+            CFG_GPU_EXPERT_BITS)    args="$args --gpu-expert-bits $value" ;;
+            CFG_CPU_EXPERT_BITS)    args="$args --cpu-expert-bits $value" ;;
+            CFG_ATTENTION_QUANT)    args="$args --attention-quant $value" ;;
+            CFG_SHARED_EXPERT_QUANT) args="$args --shared-expert-quant $value" ;;
+            CFG_DENSE_MLP_QUANT)    args="$args --dense-mlp-quant $value" ;;
+            CFG_LM_HEAD_QUANT)      args="$args --lm-head-quant $value" ;;
+            CFG_KRASIS_THREADS)     args="$args --krasis-threads $value" ;;
+            CFG_HOST)               args="$args --host $value" ;;
+            CFG_PORT)               args="$args --port $value" ;;
+            CFG_GPU_PREFILL_THRESHOLD) args="$args --gpu-prefill-threshold $value" ;;
+            CFG_GGUF_PATH)          [[ -n "$value" ]] && args="$args --gguf-path $value" ;;
+            CFG_FORCE_LOAD)         [[ -n "$value" ]] && args="$args --force-load" ;;
+            CFG_ENABLE_THINKING)    [[ "$value" == "true" ]] && args="$args --enable-thinking" || args="$args --no-enable-thinking" ;;
+        esac
+    done < "$conf"
+    echo "$args"
+}
+
+# Extract port from a .conf file
+conf_port() {
+    local conf="$1"
+    grep '^CFG_PORT=' "$conf" | head -1 | cut -d'"' -f2
+}
+
+# ── Auto-rebuild check ──────────────────────────────────────────────
+needs_rebuild() {
+    # If .so doesn't exist, definitely need to build
+    [[ ! -f "$SO_FILE" ]] && return 0
+
+    local so_mtime
+    so_mtime=$(stat --format="%Y" "$SO_FILE" 2>/dev/null) || return 0
+
+    # Check if any Rust source or Cargo files are newer than the .so
+    while IFS= read -r -d '' f; do
+        local f_mtime
+        f_mtime=$(stat --format="%Y" "$f" 2>/dev/null) || continue
+        if [[ "$f_mtime" -gt "$so_mtime" ]]; then
+            return 0
+        fi
+    done < <(find "$SCRIPT_DIR/src" -name "*.rs" -print0 2>/dev/null)
+
+    # Check Cargo.toml and build.rs
+    for f in "$SCRIPT_DIR/Cargo.toml" "$SCRIPT_DIR/build.rs"; do
+        if [[ -f "$f" ]]; then
+            local f_mtime
+            f_mtime=$(stat --format="%Y" "$f" 2>/dev/null) || continue
+            if [[ "$f_mtime" -gt "$so_mtime" ]]; then
+                return 0
+            fi
+        fi
+    done
+
+    return 1
+}
+
+auto_rebuild() {
+    if needs_rebuild; then
+        warn "Rust source is newer than compiled extension. Rebuilding..."
+        do_build
+    fi
+}
+
+# ── Commands ─────────────────────────────────────────────────────────
+
+do_build() {
+    info "Building Rust extension (maturin develop --release)..."
+    cd "$SCRIPT_DIR"
+    "$MATURIN" develop --release -i "$PYTHON" 2>&1
+    ok "Build complete. Extension at: $SO_FILE"
+}
+
+do_run() {
+    [[ $# -lt 1 ]] && err "Usage: ./dev run <config> [--benchmark] [extra args...]"
+    local conf
+    conf=$(resolve_config "$1")
+    shift
+    auto_rebuild
+    local args
+    args=$(conf_to_args "$conf")
+    info "Launching from: $conf"
+    info "Args: $args $*"
+    exec "$PYTHON" -m krasis.server $args "$@"
+}
+
+do_test() {
+    [[ $# -lt 1 ]] && err "Usage: ./dev test <config> [--thorough]"
+    local conf
+    conf=$(resolve_config "$1")
+    local thorough=false
+    [[ "${2:-}" == "--thorough" ]] && thorough=true
+    auto_rebuild
+
+    local port
+    port=$(conf_port "$conf")
+    [[ -z "$port" ]] && port=8012
+
+    local args
+    args=$(conf_to_args "$conf")
+
+    info "=== Short Model Test ==="
+    info "Config: $conf"
+    info "Port: $port"
+
+    # Step 1: Launch server with benchmark
+    info "Step 1: Launching server with --benchmark..."
+    local logfile
+    logfile=$(mktemp /tmp/krasis_test_XXXXXX.log)
+    info "Log: $logfile"
+
+    "$PYTHON" -m krasis.server $args --benchmark > >(tee "$logfile") 2>&1 &
+    local pid=$!
+
+    # Wait for server to be ready (benchmark completes, server starts)
+    local ready=false
+    local timeout=600  # 10 minutes for model load + benchmark
+    local elapsed=0
+    while kill -0 "$pid" 2>/dev/null && [[ $elapsed -lt $timeout ]]; do
+        if grep -q "starting server on\|Server ready" "$logfile" 2>/dev/null; then
+            ready=true
+            break
+        fi
+        sleep 2
+        elapsed=$((elapsed + 2))
+    done
+
+    if ! $ready; then
+        if kill -0 "$pid" 2>/dev/null; then
+            warn "Timed out waiting for server (${timeout}s). Killing..."
+            kill -TERM "$pid" 2>/dev/null || true
+            sleep 2
+            kill -9 "$pid" 2>/dev/null || true
+        fi
+        err "Server did not start. Check log: $logfile"
+    fi
+
+    ok "Server is ready. Benchmark results are in the log."
+
+    # Step 2: Run network multi-prompt tests
+    info "Step 2: Running network multi-prompt tests..."
+    if $thorough; then
+        "$PYTHON" "$SCRIPT_DIR/tests/test_network.py" --port "$port" --large 2>&1 | tee -a "$logfile"
+    else
+        "$PYTHON" "$SCRIPT_DIR/tests/test_network.py" --port "$port" 2>&1 | tee -a "$logfile"
+    fi
+
+    local net_result=$?
+
+    # Cleanup: kill the server
+    info "Stopping server..."
+    kill -TERM "$pid" 2>/dev/null || true
+    sleep 2
+    kill -9 "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+
+    echo ""
+    if [[ $net_result -eq 0 ]]; then
+        ok "=== All tests PASSED ==="
+    else
+        err "Network tests FAILED (exit code $net_result)"
+    fi
+    info "Full log: $logfile"
+}
+
+do_network() {
+    [[ $# -lt 1 ]] && err "Usage: ./dev network <port> [--large] [--quick]"
+    local port="$1"
+    shift
+    exec "$PYTHON" "$SCRIPT_DIR/tests/test_network.py" --port "$port" "$@"
+}
+
+do_shell() {
+    exec "$PYTHON" "$@"
+}
+
+do_python() {
+    exec "$PYTHON" "$@"
+}
+
+# ── Dispatch ─────────────────────────────────────────────────────────
+cmd="${1:-help}"
+shift || true
+
+case "$cmd" in
+    build)      do_build ;;
+    run)        do_run "$@" ;;
+    test)       do_test "$@" ;;
+    network)    do_network "$@" ;;
+    shell)      do_shell "$@" ;;
+    python)     do_python "$@" ;;
+    help|-h|--help)
+        echo "Krasis dev helper"
+        echo ""
+        echo "Usage: ./dev <command> [args...]"
+        echo ""
+        echo "Commands:"
+        echo "  build                     Rebuild Rust extension"
+        echo "  run <config> [flags]      Launch server (add --benchmark for benchmarks)"
+        echo "  test <config>             Short model test (benchmark + network tests)"
+        echo "  test <config> --thorough  Thorough test (+ stress + large prompts)"
+        echo "  network <port> [flags]    Run network tests against running server"
+        echo "  shell                     Python shell with dev env"
+        echo "  python <args>             Run Python with dev env"
+        echo ""
+        echo "Configs: qcn, v2lite, deepseek-vl, qwen35 (or path to .conf file)"
+        echo ""
+        echo "Examples:"
+        echo "  ./dev build"
+        echo "  ./dev run qcn"
+        echo "  ./dev run qcn --benchmark"
+        echo "  ./dev test qcn"
+        echo "  ./dev network 8012"
+        echo "  ./dev python -m krasis.launcher"
+        ;;
+    *)
+        err "Unknown command: $cmd
+  Run ./dev help for usage."
+        ;;
+esac
