@@ -1,5 +1,5 @@
 ================================================================
-Krasis Benchmark — 2026-02-26 15:54:58
+Krasis Benchmark — 2026-02-27 11:53:33
 ================================================================
 Model:            Qwen3.5-35B-A3B
 Architecture:     qwen3_5_moe_text, 40 layers, 256 experts, top-8, 10 GQA + 30 linear
@@ -7,8 +7,8 @@ PP Partition:     [40] (1 GPUs)
 
 Hardware:
   CPU:            AMD EPYC 7742 64-Core Processor (64 cores)
-  RAM:            1007 GB total, 42.5 GB used by process
-  GPU 0:          NVIDIA RTX 2000 Ada Generation (16380 MB), 5209 MB allocated
+  RAM:            1007 GB total, 41.9 GB used by process
+  GPU 0:          NVIDIA RTX 2000 Ada Generation (16380 MB), 4209 MB allocated
 
 Quantization:
   GPU experts:    INT4 (Marlin)
@@ -21,24 +21,23 @@ Quantization:
 
 Strategy:
   Layer group size: 2 (layer_grouped(2) + stream_attn)
-  Prefill threshold: 500
+  Prefill threshold: 300
   Mode:           pure_cpu decode, layer_grouped(2) + stream_attn prefill
 
 Prefill (3 runs at different lengths):
-  Run 1:  1374.1 tok/s, TTFT=14.56s (20,000 tokens)
-  Run 2:  1175.1 tok/s, TTFT=29.78s (35,000 tokens)
-  Run 3:  1033.3 tok/s, TTFT=48.39s (50,000 tokens)
-  Best:    1374.1 tok/s, TTFT=14.56s (20,000 tokens)
+  Run 1:  1320.7 tok/s, TTFT=15.52s (20,491 tokens)
+  Run 2:  1055.8 tok/s, TTFT=33.19s (35,045 tokens)
+  Run 3:  1015.2 tok/s, TTFT=49.13s (49,882 tokens)
+  Best:    1320.7 tok/s, TTFT=15.52s (20,491 tokens)
 
 Decode (64 tokens, 3 runs, different prompts):
-  Run 1:  14.61 tok/s (68.4ms/tok)
-  Run 2:  15.93 tok/s (62.8ms/tok)
-  Run 3:  14.59 tok/s (68.5ms/tok)
-  Average: 15.04 tok/s (66.6ms/tok)
+  Run 1:  13.27 tok/s (75.4ms/tok)
+  Run 2:  18.37 tok/s (54.4ms/tok)
+  Run 3:  15.75 tok/s (63.5ms/tok)
+  Average: 15.80 tok/s (64.4ms/tok)
 
 Verification:
-  Prefill prompt: user
-Summarise the following in one paragraph: THE COUNT OF MONTE CRISTO
+  Prefill prompt: Summarise the following in one paragraph: THE COUNT OF MONTE CRISTO
 
 by Alexandre Dumas [père]
 
@@ -51,17 +50,23 @@ Contents
  VOLUME ONE
 Chapter 1. Marseilles—The Arrival
 Chapter 2. Father and Son
-Chapter 3. Th... [74063 chars total]
-  Decode prompt:  user
-Explain how public key cryptography works, including the RSA algorithm and why it is considered secure.
-assistant
-<think>
-
+Chapter 3. The Cat... [75971 chars total]
+  Decode prompt:  Explain how public key cryptography works, including the RSA algorithm and why it is considered secure.
   Generated output (64 tokens):
-    Here's a thinking process that leads to the suggested explanation of public key cryptography:
-    
-    1.  **Deconstruct the Request:**
-        *   **Topic:** Public Key Cryptography (Public Key Infrastructure - PKI).
-        *   **Specific Requirement:** Explain the RSA algorithm specifically.
-        *   **
+    Public key cryptography, also known as **asymmetric cryptography**, is a fundamental pillar of modern digital security. Unlike symmetric encryption, which uses a single shared secret key for both encryption and decryption, public key cryptography uses a **pair** of mathematically linked keys: a **Public Key** and a **Private Key**.
 ================================================================
+
+────────────────────────────────────────────────────────────────
+  ENGINE vs NETWORK COMPARISON
+────────────────────────────────────────────────────────────────
+                                         Engine        Network   Overhead
+  ────────────────────────────── ────────────── ────────────── ──────────
+  Prefill (best tok/s)                 1320.7         1210.0       -8.4%
+  TTFT (s)                              15.52          16.53     +1010ms
+    20,491 tokens                      1320.7         1210.0       -8.4%
+    35,045 tokens                      1055.8         1019.4       -3.4%
+    49,882 tokens                      1015.2          974.2       -4.0%
+
+  Decode (avg tok/s)                    15.80          17.21       +8.9%
+  Decode (ms/tok)                        64.4           58.7      -5.7ms
+────────────────────────────────────────────────────────────────

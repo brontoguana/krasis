@@ -105,8 +105,11 @@ class CpuDecoder:
         """Convert GPU weight (BF16 tensor or INT8 tuple) to CPU float32."""
         if isinstance(weight_data, tuple):
             # INT8: (weight_int8 [N, K], scale [N])
+            # Move to CPU first to avoid GPU OOM during float32 dequant
             w, s = weight_data
-            return (w.float() * s.unsqueeze(1)).cpu()
+            w_cpu = w.cpu().float()
+            s_cpu = s.cpu().float()
+            return w_cpu * s_cpu.unsqueeze(1)
         else:
             return weight_data.float().cpu()
 

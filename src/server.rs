@@ -243,7 +243,7 @@ fn handle_chat_completion(
     };
 
     let is_stream = req.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
-    let max_tokens = req.get("max_tokens").and_then(|v| v.as_u64()).unwrap_or(256) as usize;
+    let max_tokens = req.get("max_tokens").and_then(|v| v.as_u64()).unwrap_or(2048) as usize;
     let temperature = req.get("temperature").and_then(|v| v.as_f64()).unwrap_or(0.6) as f32;
     let top_k = req.get("top_k").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
     let top_p = req.get("top_p").and_then(|v| v.as_f64()).unwrap_or(0.95) as f32;

@@ -262,19 +262,19 @@ def run_multi_prompt_tests(base_url: str) -> List[TestResult]:
     results.append(r)
     print(f"  {_pass(r.detail) if r.passed else _fail(r.detail)} [{r.name}]")
 
-    # 3. Code generation
+    # 3. Code generation (512 tokens: thinking models need room for CoT + answer)
     r = test_known_answer(base_url, "code_gen",
                           "Write a Python function called fibonacci that returns the nth fibonacci number. Only output the code.",
-                          "def", max_tokens=256)
+                          "def", max_tokens=512)
     results.append(r)
     print(f"  {_pass(r.detail) if r.passed else _fail(r.detail)} [{r.name}]")
 
-    # 4. Multi-turn conversation
+    # 4. Multi-turn conversation (512 tokens: thinking models need room for CoT + answer)
     r = test_coherent_response(base_url, "multi_turn", [
         {"role": "user", "content": "My name is Alice."},
         {"role": "assistant", "content": "Hello Alice! Nice to meet you."},
         {"role": "user", "content": "What is my name?"},
-    ], max_tokens=32)
+    ], max_tokens=512)
     results.append(r)
     if r.passed and "alice" not in r.response_text.lower():
         r.passed = False
@@ -295,10 +295,10 @@ def run_multi_prompt_tests(base_url: str) -> List[TestResult]:
     results.append(r)
     print(f"  {_pass(r.detail) if r.passed else _fail(r.detail)} [{r.name}]")
 
-    # 7. Streaming mode - code
+    # 7. Streaming mode - code (512 tokens: thinking models need room for CoT + answer)
     r = test_known_answer(base_url, "streaming_code",
                           "Write a Python hello world one-liner.",
-                          "print", stream=True, max_tokens=64)
+                          "print", stream=True, max_tokens=512)
     results.append(r)
     print(f"  {_pass(r.detail) if r.passed else _fail(r.detail)} [{r.name}]")
 
@@ -309,10 +309,10 @@ def run_multi_prompt_tests(base_url: str) -> List[TestResult]:
     results.append(r)
     print(f"  {_pass(r.detail) if r.passed else _fail(r.detail)} [{r.name}]")
 
-    # 9. Non-streaming blocking mode
+    # 9. Non-streaming blocking mode (512 tokens: thinking models need room for CoT + answer)
     r = test_known_answer(base_url, "blocking_math",
                           "What is 15 + 27? Answer with just the number.",
-                          "42", stream=False)
+                          "42", stream=False, max_tokens=512)
     results.append(r)
     print(f"  {_pass(r.detail) if r.passed else _fail(r.detail)} [{r.name}]")
 
@@ -500,7 +500,7 @@ def run_multi_turn_tests(base_url: str) -> List[TestResult]:
     print(f"  Turn 2: recalling dog's name...", end="", flush=True)
     t0 = time.time()
     status, body = send_chat_request(
-        base_url, messages, max_tokens=32, temperature=0.1,
+        base_url, messages, max_tokens=256, temperature=0.1,
         stream=False, timeout=120,
     )
     elapsed = time.time() - t0
@@ -526,7 +526,7 @@ def run_multi_turn_tests(base_url: str) -> List[TestResult]:
     print(f"  Turn 3: recalling city...", end="", flush=True)
     t0 = time.time()
     status, body = send_chat_request(
-        base_url, messages, max_tokens=32, temperature=0.1,
+        base_url, messages, max_tokens=256, temperature=0.1,
         stream=False, timeout=120,
     )
     elapsed = time.time() - t0
@@ -552,7 +552,7 @@ def run_multi_turn_tests(base_url: str) -> List[TestResult]:
     print(f"  Turn 4: recalling number (streaming)...", end="", flush=True)
     t0 = time.time()
     status, body = send_chat_request(
-        base_url, messages, max_tokens=32, temperature=0.1,
+        base_url, messages, max_tokens=256, temperature=0.1,
         stream=True, timeout=120,
     )
     elapsed = time.time() - t0

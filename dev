@@ -117,6 +117,88 @@ auto_rebuild() {
     fi
 }
 
+# ── GPU cleanup ─────────────────────────────────────────────────────
+# Kill any existing krasis processes and wait for GPUs to be fully clear.
+# Called before every run/test to prevent OOMs from stale processes.
+
+cleanup_gpu() {
+    # Find all krasis server/stress/benchmark Python processes (but not this script)
+    local pids
+    pids=$(pgrep -f 'python.*krasis\.' 2>/dev/null || true)
+
+    if [[ -n "$pids" ]]; then
+        warn "Found existing krasis processes — killing them:"
+        for p in $pids; do
+            local cmdline
+            cmdline=$(ps -p "$p" -o args= 2>/dev/null || echo "unknown")
+            warn "  PID $p: $cmdline"
+        done
+
+        # SIGTERM first
+        for p in $pids; do
+            kill -TERM "$p" 2>/dev/null || true
+        done
+
+        # Wait up to 10s for graceful exit
+        local waited=0
+        while [[ $waited -lt 10 ]]; do
+            local still_alive=false
+            for p in $pids; do
+                if kill -0 "$p" 2>/dev/null; then
+                    still_alive=true
+                    break
+                fi
+            done
+            $still_alive || break
+            sleep 1
+            waited=$((waited + 1))
+        done
+
+        # SIGKILL any survivors
+        for p in $pids; do
+            if kill -0 "$p" 2>/dev/null; then
+                warn "  PID $p still alive after SIGTERM, sending SIGKILL"
+                kill -9 "$p" 2>/dev/null || true
+            fi
+        done
+
+        # Wait for SIGKILL to take effect
+        sleep 2
+        for p in $pids; do
+            wait "$p" 2>/dev/null || true
+        done
+    fi
+
+    # Now wait for GPU memory to actually be released.
+    # CUDA memory isn't freed until the process fully exits.
+    info "Waiting for GPU memory to clear..."
+    local gpu_timeout=30
+    local gpu_waited=0
+    while [[ $gpu_waited -lt $gpu_timeout ]]; do
+        local all_clear=true
+        while IFS=', ' read -r idx used total; do
+            # Baseline is ~200-300 MiB (desktop compositor). 500 MiB threshold.
+            if [[ "$used" -gt 500 ]]; then
+                all_clear=false
+                break
+            fi
+        done < <(nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null)
+
+        if $all_clear; then
+            ok "All GPUs clear."
+            return 0
+        fi
+
+        sleep 1
+        gpu_waited=$((gpu_waited + 1))
+    done
+
+    # If we get here, GPUs didn't clear. Show what's using them.
+    warn "GPUs still not clear after ${gpu_timeout}s:"
+    nvidia-smi 2>/dev/null || true
+    err "Cannot proceed — GPU memory not released. Check for non-krasis processes using the GPU."
+}
+
 # ── Commands ─────────────────────────────────────────────────────────
 
 do_build() {
@@ -132,6 +214,7 @@ do_run() {
     local conf
     conf=$(resolve_config "$1")
     shift
+    cleanup_gpu
     auto_rebuild
     info "Launching from: $conf"
     exec "$PYTHON" -m krasis.server --config "$conf" "$@"
@@ -143,6 +226,7 @@ do_test() {
     conf=$(resolve_config "$1")
     local thorough=false
     [[ "${2:-}" == "--thorough" ]] && thorough=true
+    cleanup_gpu
     auto_rebuild
 
     local port

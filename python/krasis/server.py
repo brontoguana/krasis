@@ -355,7 +355,7 @@ def main():
 
     # Also log to krasis.log file (captures all logger output + uncaught exceptions)
     _log_file = os.path.join(os.getcwd(), "krasis.log")
-    _file_handler = logging.FileHandler(_log_file, mode="a")
+    _file_handler = logging.FileHandler(_log_file, mode="w")
     _file_handler.setLevel(logging.DEBUG)
     _file_handler.setFormatter(logging.Formatter(log_format))
     logging.getLogger().addHandler(_file_handler)
