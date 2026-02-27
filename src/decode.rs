@@ -2942,29 +2942,31 @@ impl CpuDecodeStore {
                     }
                     if timing { graph.t_gqa_rope += t0.elapsed().as_secs_f64(); }
 
-                    // KV cache write (FP8) + Attention compute
+                    // KV cache write (FP16) + Attention compute
                     let t0 = if timing { Instant::now() } else { t_step_start };
                     let kv_stride = nkv * hd;
-                    let k_cache: &mut [u8] = unsafe {
+                    let k_cache: &mut [u16] = unsafe {
                         std::slice::from_raw_parts_mut(
-                            graph.kv_k_ptrs[layer_idx] as *mut u8,
+                            graph.kv_k_ptrs[layer_idx] as *mut u16,
                             graph.kv_max_seq * kv_stride)
                     };
-                    let v_cache: &mut [u8] = unsafe {
+                    let v_cache: &mut [u16] = unsafe {
                         std::slice::from_raw_parts_mut(
-                            graph.kv_v_ptrs[layer_idx] as *mut u8,
+                            graph.kv_v_ptrs[layer_idx] as *mut u16,
                             graph.kv_max_seq * kv_stride)
                     };
                     let write_offset = position * kv_stride;
-                    f32_slice_to_fp8(
-                        &graph.gqa_k_buf[..kv_stride],
-                        &mut k_cache[write_offset..write_offset + kv_stride]);
-                    f32_slice_to_fp8(
-                        &graph.gqa_v_buf[..kv_stride],
-                        &mut v_cache[write_offset..write_offset + kv_stride]);
+                    unsafe {
+                        f32_slice_to_fp16(
+                            &graph.gqa_k_buf[..kv_stride],
+                            &mut k_cache[write_offset..write_offset + kv_stride]);
+                        f32_slice_to_fp16(
+                            &graph.gqa_v_buf[..kv_stride],
+                            &mut v_cache[write_offset..write_offset + kv_stride]);
+                    }
                     let seq_len = position + 1;
                     unsafe {
-                        gqa_attention_compute_fp8_avx2(
+                        gqa_attention_compute_fp16_avx2(
                             &graph.gqa_q_buf, k_cache, v_cache,
                             &mut graph.gqa_scores, &mut graph.gqa_attn_out,
                             nh, nkv, hd, graph.kv_max_seq, seq_len, *sm_scale,
@@ -3146,30 +3148,34 @@ impl CpuDecodeStore {
                     }
                     if timing { graph.t_mla_rope += t0.elapsed().as_secs_f64(); }
 
-                    // ── Step 5: KV cache write (FP8) + Attention ──
+                    // ── Step 5: KV cache write (FP16) + Attention ──
                     let t0 = if timing { Instant::now() } else { t_step_start };
 
-                    // Write compressed KV to FP8 cache
-                    let ckv_cache: &mut [u8] = unsafe {
+                    // Write compressed KV to FP16 cache
+                    let ckv_cache: &mut [u16] = unsafe {
                         std::slice::from_raw_parts_mut(
-                            graph.mla_ckv_ptrs[layer_idx] as *mut u8,
+                            graph.mla_ckv_ptrs[layer_idx] as *mut u16,
                             graph.kv_max_seq * klr)
                     };
-                    let kpe_cache: &mut [u8] = unsafe {
+                    let kpe_cache: &mut [u16] = unsafe {
                         std::slice::from_raw_parts_mut(
-                            graph.mla_kpe_ptrs[layer_idx] as *mut u8,
+                            graph.mla_kpe_ptrs[layer_idx] as *mut u16,
                             graph.kv_max_seq * qk_rd)
                     };
                     let ckv_offset = position * klr;
-                    f32_slice_to_fp8(
-                        &graph.mla_kv_compressed[..klr],
-                        &mut ckv_cache[ckv_offset..ckv_offset + klr]);
+                    unsafe {
+                        f32_slice_to_fp16(
+                            &graph.mla_kv_compressed[..klr],
+                            &mut ckv_cache[ckv_offset..ckv_offset + klr]);
+                    }
                     let kpe_offset = position * qk_rd;
-                    f32_slice_to_fp8(
-                        &graph.mla_kv_out[klr..klr + qk_rd],
-                        &mut kpe_cache[kpe_offset..kpe_offset + qk_rd]);
+                    unsafe {
+                        f32_slice_to_fp16(
+                            &graph.mla_kv_out[klr..klr + qk_rd],
+                            &mut kpe_cache[kpe_offset..kpe_offset + qk_rd]);
+                    }
 
-                    // Attention: per head (AVX2 vectorized, FP8 cache)
+                    // Attention: per head (AVX2+F16C vectorized, FP16 cache)
                     // score[h,t] = dot(q_absorbed[h], ckv[t]) + dot(q_pe[h], kpe[t])
                     let seq_len = position + 1;
                     #[cfg(target_arch = "x86_64")]
@@ -3181,12 +3187,12 @@ impl CpuDecodeStore {
 
                         for t in 0..seq_len {
                             let mut s = unsafe {
-                                mla_attn_dot_fp8_avx2(
+                                mla_attn_dot_fp16_avx2(
                                     &graph.mla_q_absorbed[qa_base..qa_base + klr],
                                     &ckv_cache[t * klr..], klr)
                             };
                             s += unsafe {
-                                mla_attn_dot_fp8_avx2(
+                                mla_attn_dot_fp16_avx2(
                                     &graph.mla_q_full[qpe_base..qpe_base + qk_rd],
                                     &kpe_cache[t * qk_rd..], qk_rd)
                             };
@@ -3210,7 +3216,7 @@ impl CpuDecodeStore {
                         // Weighted sum: attn_out[h] = sum_t(weight[t] * ckv[t])
                         let out_base = h * klr;
                         unsafe {
-                            mla_weighted_sum_fp8_avx2(
+                            mla_weighted_sum_fp16_avx2(
                                 &graph.mla_attn_scores[score_base..score_base + seq_len],
                                 ckv_cache, &mut graph.mla_attn_out[out_base..out_base + klr],
                                 seq_len, klr);
@@ -4140,17 +4146,16 @@ fn moe_route_score_topk(
     }
 }
 
-/// AVX2 GQA attention with FP8 E4M3 KV cache (M=1 decode).
+/// AVX2+F16C GQA attention with FP16 KV cache (M=1 decode).
 ///
-/// Same algorithm as gqa_attention_compute_avx2 but reads KV from u8 FP8 cache,
-/// converting to f32 on the fly via gather from the static LUT. The 1 KB LUT
-/// stays in L1 cache; gather adds ~2 cycles per 8 elements vs direct f32 load.
+/// Reads KV from u16 FP16 cache, converting to f32 on the fly via F16C
+/// VCVTPH2PS (~3 cycles per 8 elements, much faster than FP8 LUT gather).
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2,fma")]
-unsafe fn gqa_attention_compute_fp8_avx2(
+#[target_feature(enable = "avx2,fma,f16c")]
+unsafe fn gqa_attention_compute_fp16_avx2(
     q: &[f32],              // [num_heads * head_dim]
-    k_cache: &[u8],         // [max_seq * kv_heads * head_dim] FP8
-    v_cache: &[u8],         // [max_seq * kv_heads * head_dim] FP8
+    k_cache: &[u16],        // [max_seq * kv_heads * head_dim] FP16
+    v_cache: &[u16],        // [max_seq * kv_heads * head_dim] FP16
     scores: &mut [f32],     // scratch [num_heads * seq_len]
     attn_out: &mut [f32],   // output [num_heads * head_dim * (2 if gated)]
     num_heads: usize,
@@ -4185,7 +4190,7 @@ unsafe fn gqa_attention_compute_fp8_avx2(
             let mut acc = _mm256_setzero_ps();
             for b in 0..hd8 {
                 let qv = _mm256_loadu_ps(q.as_ptr().add(q_base + b * 8));
-                let kv = fp8x8_to_f32x8(k_cache.as_ptr().add(k_offset + b * 8));
+                let kv = fp16x8_to_f32x8(k_cache.as_ptr().add(k_offset + b * 8));
                 acc = _mm256_fmadd_ps(qv, kv, acc);
             }
             let hi = _mm256_extractf128_ps(acc, 1);
@@ -4217,7 +4222,7 @@ unsafe fn gqa_attention_compute_fp8_avx2(
             let w = _mm256_set1_ps(scores[s_base + s]);
             let v_offset = s * kv_stride + kv_h * head_dim;
             for b in 0..hd8 {
-                let vv = fp8x8_to_f32x8(v_cache.as_ptr().add(v_offset + b * 8));
+                let vv = fp16x8_to_f32x8(v_cache.as_ptr().add(v_offset + b * 8));
                 let out_p = attn_out.as_mut_ptr().add(o_base + b * 8);
                 let cur = _mm256_loadu_ps(out_p);
                 _mm256_storeu_ps(out_p, _mm256_fmadd_ps(w, vv, cur));
@@ -4236,11 +4241,11 @@ unsafe fn gqa_attention_compute_fp8_avx2(
     }
 }
 
-/// AVX2 MLA dot product with FP8 cache: dot(q[f32], cache[FP8], dim).
+/// AVX2+F16C MLA dot product with FP16 cache: dot(q[f32], cache[FP16], dim).
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2,fma")]
-unsafe fn mla_attn_dot_fp8_avx2(
-    q: &[f32], cache: &[u8], dim: usize,
+#[target_feature(enable = "avx2,fma,f16c")]
+unsafe fn mla_attn_dot_fp16_avx2(
+    q: &[f32], cache: &[u16], dim: usize,
 ) -> f32 {
     use std::arch::x86_64::*;
     let n8 = dim / 8;
@@ -4250,16 +4255,16 @@ unsafe fn mla_attn_dot_fp8_avx2(
     let mut i = 0usize;
     for _ in 0..chunks {
         let q0 = _mm256_loadu_ps(q.as_ptr().add(i * 8));
-        let c0 = fp8x8_to_f32x8(cache.as_ptr().add(i * 8));
+        let c0 = fp16x8_to_f32x8(cache.as_ptr().add(i * 8));
         acc0 = _mm256_fmadd_ps(q0, c0, acc0);
         let q1 = _mm256_loadu_ps(q.as_ptr().add((i + 1) * 8));
-        let c1 = fp8x8_to_f32x8(cache.as_ptr().add((i + 1) * 8));
+        let c1 = fp16x8_to_f32x8(cache.as_ptr().add((i + 1) * 8));
         acc1 = _mm256_fmadd_ps(q1, c1, acc1);
         i += 2;
     }
     if n8 % 2 != 0 {
         let q0 = _mm256_loadu_ps(q.as_ptr().add(i * 8));
-        let c0 = fp8x8_to_f32x8(cache.as_ptr().add(i * 8));
+        let c0 = fp16x8_to_f32x8(cache.as_ptr().add(i * 8));
         acc0 = _mm256_fmadd_ps(q0, c0, acc0);
     }
     let sum8 = _mm256_add_ps(acc0, acc1);
@@ -4271,17 +4276,17 @@ unsafe fn mla_attn_dot_fp8_avx2(
     let mut result = _mm_cvtss_f32(s1);
     // Handle remainder (dim not multiple of 8)
     for r in (n8 * 8)..dim {
-        result += *q.get_unchecked(r) * FP8_E4M3_LUT[*cache.get_unchecked(r) as usize];
+        result += *q.get_unchecked(r) * fp16_to_f32(*cache.get_unchecked(r));
     }
     result
 }
 
-/// AVX2 MLA weighted sum with FP8 cache: out[j] = sum_t(weight[t] * cache[t*dim + j])
+/// AVX2+F16C MLA weighted sum with FP16 cache: out[j] = sum_t(weight[t] * cache[t*dim + j])
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2,fma")]
-unsafe fn mla_weighted_sum_fp8_avx2(
+#[target_feature(enable = "avx2,fma,f16c")]
+unsafe fn mla_weighted_sum_fp16_avx2(
     weights: &[f32],    // [seq_len] attention weights
-    cache: &[u8],       // [max_seq * dim] FP8 cache data
+    cache: &[u16],      // [max_seq * dim] FP16 cache data
     out: &mut [f32],    // [dim] output
     seq_len: usize,
     dim: usize,
@@ -4293,12 +4298,12 @@ unsafe fn mla_weighted_sum_fp8_avx2(
     for j in 0..dim8 {
         _mm256_storeu_ps(out.as_mut_ptr().add(j * 8), zero);
     }
-    // Accumulate: broadcast weight, gather-convert cache values, FMA
+    // Accumulate: broadcast weight, F16C-convert cache values, FMA
     for t in 0..seq_len {
         let w = _mm256_set1_ps(*weights.get_unchecked(t));
         let cache_t = t * dim;
         for j in 0..dim8 {
-            let c = fp8x8_to_f32x8(cache.as_ptr().add(cache_t + j * 8));
+            let c = fp16x8_to_f32x8(cache.as_ptr().add(cache_t + j * 8));
             let o = _mm256_loadu_ps(out.as_ptr().add(j * 8));
             _mm256_storeu_ps(out.as_mut_ptr().add(j * 8),
                 _mm256_fmadd_ps(w, c, o));
@@ -4354,10 +4359,16 @@ fn fill_random_f32(v: &mut [f32], rng: &mut Xorshift64, scale: f32) {
     }
 }
 
-/// Fill u8 slice with random bytes (for FP8 KV cache benchmark data).
-fn fill_random_u8(v: &mut [u8], rng: &mut Xorshift64) {
+/// Fill u16 slice with random FP16 bit patterns (for FP16 KV cache benchmark data).
+fn fill_random_u16(v: &mut [u16], rng: &mut Xorshift64) {
     for val in v.iter_mut() {
-        *val = (rng.next_u64() & 0xFF) as u8;
+        // Generate random small-magnitude FP16 values (for realistic KV cache data)
+        // FP16: sign(1) exp(5) mant(10), keep exp in reasonable range [8..22] -> values ~0.001..64
+        let bits = rng.next_u64();
+        let sign = ((bits >> 15) & 1) as u16;
+        let exp = (((bits >> 5) & 0xF) + 8) as u16;  // exp 8-23
+        let mant = (bits & 0x3FF) as u16;
+        *val = (sign << 15) | (exp << 10) | mant;
     }
 }
 
@@ -4370,125 +4381,60 @@ fn hint_hugepages<T>(v: &mut [T]) {
     unsafe { libc::madvise(ptr, len, libc::MADV_HUGEPAGE); }
 }
 
-// ── FP8 E4M3 KV Cache Support ──
+// ── FP16 CPU KV Cache Support ──
 //
-// CPU KV cache stores FP8 E4M3 bytes (matching GPU KV dtype), eliminating the
-// 4x memory overhead of F32 and enabling zero-conversion GPU→CPU KV transfer.
-// Read path uses AVX2 gather from a 256-entry LUT (2 instructions: extend + gather).
-// Write path uses scalar bit manipulation (1 row per token, negligible cost).
+// CPU KV cache stores IEEE FP16 (2 bytes per element), converted to/from F32
+// via the F16C instruction set (VCVTPH2PS / VCVTPS2PH). F16C is available on
+// all CPUs that support AVX2, so no additional hardware requirement.
+//
+// Read path: _mm256_cvtph_ps — single instruction, ~3 cycles for 8 elements.
+// Write path: _mm256_cvtps_ph — single instruction, vectorized.
+//
+// Compared to FP8 E4M3 (which required a 256-entry LUT + slow gather instruction
+// at ~10-12 cycles on Zen 2), FP16 is ~3-4x faster for the read conversion while
+// providing 10 bits of mantissa (vs 3 for FP8), essentially lossless for KV cache.
+// Memory cost: 2x FP8 (2 bytes vs 1), but still half of F32. Negligible on systems
+// with hundreds of GB of RAM.
 
-/// Convert FP8 E4M3 byte to F32 bit pattern (const, no float ops).
-const fn fp8_e4m3_to_f32_bits(byte: u8) -> u32 {
-    let sign = ((byte >> 7) & 1) as u32;
-    let exp = ((byte >> 3) & 0xF) as u32;
-    let mant = (byte & 0x7) as u32;
-
-    if exp == 0 && mant == 0 {
-        return sign << 31; // ±0
-    }
-    if exp == 0 {
-        // Subnormal: value = mant * 2^(-9)
-        // Normalize to 1.xxx * 2^e for F32 representation
-        let (msb, rem_mant, rem_bits) = if mant >= 4 {
-            (2u32, mant & 3, 2u32)
-        } else if mant >= 2 {
-            (1u32, mant & 1, 1u32)
-        } else {
-            (0u32, 0u32, 0u32)
-        };
-        let f32_exp = 118 + msb; // (-9 + msb) + 127
-        let f32_mant = rem_mant << (23 - rem_bits);
-        (sign << 31) | (f32_exp << 23) | f32_mant
-    } else {
-        // Normal: (1 + mant/8) * 2^(exp-7)
-        let f32_exp = exp + 120; // (exp-7) + 127
-        let f32_mant = mant << 20; // 3 bits -> top of 23-bit mantissa
-        (sign << 31) | (f32_exp << 23) | f32_mant
-    }
-}
-
-/// Build compile-time FP8 E4M3 -> F32 lookup table (256 entries, 1 KB).
-const fn build_fp8_e4m3_lut() -> [f32; 256] {
-    let mut lut = [0.0f32; 256];
-    let mut i = 0u32;
-    while i < 256 {
-        lut[i as usize] = f32::from_bits(fp8_e4m3_to_f32_bits(i as u8));
-        i += 1;
-    }
-    lut
-}
-
-/// Static LUT: FP8 E4M3 byte -> F32 value. 1 KB, lives in L1 cache.
-static FP8_E4M3_LUT: [f32; 256] = build_fp8_e4m3_lut();
-
-/// Convert F32 to FP8 E4M3 (truncation rounding, scalar).
-/// Used for KV cache writes (once per token per layer, not hot path).
-#[inline]
-fn f32_to_fp8_e4m3(val: f32) -> u8 {
-    let bits = val.to_bits();
-    let sign = ((bits >> 31) & 1) as u8;
-    let f32_exp = ((bits >> 23) & 0xFF) as i32;
-    let f32_mant = bits & 0x7FFFFF;
-
-    if f32_exp == 0 {
-        return sign << 7; // F32 zero/subnormal -> FP8 zero
-    }
-    if f32_exp == 255 {
-        return (sign << 7) | 0x7F; // inf/nan -> max magnitude
-    }
-
-    let unbiased = f32_exp - 127;
-
-    if unbiased > 8 {
-        return (sign << 7) | 0x7F; // overflow -> max
-    }
-    if unbiased < -9 {
-        return sign << 7; // underflow -> zero
-    }
-
-    let e4m3_biased = unbiased + 7;
-
-    if e4m3_biased >= 1 {
-        // Normal E4M3
-        let mant3 = (f32_mant >> 20) as u8; // truncate to top 3 bits
-        (sign << 7) | ((e4m3_biased as u8) << 3) | mant3
-    } else {
-        // Subnormal E4M3: e4m3_biased is 0 or negative
-        // shift right to denormalize
-        let shift = (1 - e4m3_biased) as u32;
-        let full = (1u32 << 23) | f32_mant; // add implicit 1
-        let mant3 = (full >> (21 + shift)) as u8;
-        if mant3 == 0 { return sign << 7; }
-        (sign << 7) | mant3
-    }
-}
-
-/// AVX2: load 8 FP8 E4M3 bytes and convert to 8×f32 via LUT gather.
-/// Cost: ~3 instructions (load, zero-extend, gather).
+/// AVX2+F16C: load 8 FP16 values (16 bytes) and convert to 8×f32.
+/// Cost: 1 load + 1 VCVTPH2PS (~3-5 cycles total on Zen 2).
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
+#[target_feature(enable = "avx2,f16c")]
 #[inline]
-unsafe fn fp8x8_to_f32x8(src: *const u8) -> std::arch::x86_64::__m256 {
+unsafe fn fp16x8_to_f32x8(src: *const u16) -> std::arch::x86_64::__m256 {
     use std::arch::x86_64::*;
-    let bytes = _mm_loadl_epi64(src as *const __m128i);
-    let indices = _mm256_cvtepu8_epi32(bytes);
-    _mm256_i32gather_ps(FP8_E4M3_LUT.as_ptr(), indices, 4)
+    let half8 = _mm_loadu_si128(src as *const __m128i);
+    _mm256_cvtph_ps(half8)
 }
 
-/// Scalar fallback: convert slice of FP8 bytes to f32 via LUT.
-#[allow(dead_code)]
+/// F16C scalar: convert a single FP16 u16 to f32.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "f16c")]
 #[inline]
-fn fp8_slice_to_f32(src: &[u8], dst: &mut [f32]) {
-    for (d, &b) in dst.iter_mut().zip(src.iter()) {
-        *d = FP8_E4M3_LUT[b as usize];
+unsafe fn fp16_to_f32(bits: u16) -> f32 {
+    use std::arch::x86_64::*;
+    let v = _mm_set1_epi16(bits as i16);
+    let f = _mm_cvtph_ps(v);
+    _mm_cvtss_f32(f)
+}
+
+/// Convert f32 slice to FP16 u16 slice (for KV cache writes).
+/// Uses AVX2+F16C vectorized conversion, with scalar fallback for remainder.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,f16c")]
+unsafe fn f32_slice_to_fp16(src: &[f32], dst: &mut [u16]) {
+    use std::arch::x86_64::*;
+    let n8 = src.len() / 8;
+    for i in 0..n8 {
+        let v = _mm256_loadu_ps(src.as_ptr().add(i * 8));
+        let h = _mm256_cvtps_ph::<{_MM_FROUND_TO_NEAREST_INT}>(v);
+        _mm_storeu_si128(dst.as_mut_ptr().add(i * 8) as *mut __m128i, h);
     }
-}
-
-/// Convert f32 slice to FP8 E4M3 bytes (for KV cache writes).
-#[inline]
-fn f32_slice_to_fp8(src: &[f32], dst: &mut [u8]) {
-    for (d, &v) in dst.iter_mut().zip(src.iter()) {
-        *d = f32_to_fp8_e4m3(v);
+    // Scalar remainder
+    for i in (n8 * 8)..src.len() {
+        let v = _mm256_set1_ps(*src.get_unchecked(i));
+        let h = _mm256_cvtps_ph::<{_MM_FROUND_TO_NEAREST_INT}>(v);
+        *dst.get_unchecked_mut(i) = _mm_extract_epi16(h, 0) as u16;
     }
 }
 
@@ -5384,13 +5330,13 @@ pub fn bench_decode_synthetic(
     let mut conv_states: Vec<Vec<f32>> = Vec::new();
     // Recurrent state: [nv * dk * dv] per LA layer
     let mut recur_states: Vec<Vec<f32>> = Vec::new();
-    // KV cache: FP8 E4M3 (1 byte per element, matching GPU KV dtype)
+    // KV cache: FP16 (2 bytes per element, F16C hardware conversion)
     let kv_stride = gqa_num_kv_heads * gqa_head_dim;
-    let mut kv_k_caches: Vec<Vec<u8>> = Vec::new();
-    let mut kv_v_caches: Vec<Vec<u8>> = Vec::new();
-    // MLA KV caches: FP8 compressed KV + rope key per MLA layer
-    let mut mla_ckv_caches: Vec<Vec<u8>> = Vec::new();
-    let mut mla_kpe_caches: Vec<Vec<u8>> = Vec::new();
+    let mut kv_k_caches: Vec<Vec<u16>> = Vec::new();
+    let mut kv_v_caches: Vec<Vec<u16>> = Vec::new();
+    // MLA KV caches: FP16 compressed KV + rope key per MLA layer
+    let mut mla_ckv_caches: Vec<Vec<u16>> = Vec::new();
+    let mut mla_kpe_caches: Vec<Vec<u16>> = Vec::new();
 
     // RoPE tables for GQA (only if not MLA-only model)
     let rope_half_dim = if is_mla { 0 } else { gqa_head_dim / 2 };
@@ -5409,11 +5355,11 @@ pub fn bench_decode_synthetic(
 
     for layer_idx in 0..num_layers {
         if is_mla {
-            // MLA layer: FP8 compressed KV and rope key caches
-            let mut ckv = vec![0u8; kv_max_seq * mla_kv_lora_rank];
-            fill_random_u8(&mut ckv, &mut rng);
-            let mut kpe = vec![0u8; kv_max_seq * mla_qk_rope_dim];
-            fill_random_u8(&mut kpe, &mut rng);
+            // MLA layer: FP16 compressed KV and rope key caches
+            let mut ckv = vec![0u16; kv_max_seq * mla_kv_lora_rank];
+            fill_random_u16(&mut ckv, &mut rng);
+            let mut kpe = vec![0u16; kv_max_seq * mla_qk_rope_dim];
+            fill_random_u16(&mut kpe, &mut rng);
             mla_ckv_caches.push(ckv);
             mla_kpe_caches.push(kpe);
             // Empty QCN-specific state
@@ -5426,10 +5372,10 @@ pub fn bench_decode_synthetic(
             if is_gqa {
                 conv_states.push(Vec::new());
                 recur_states.push(Vec::new());
-                let mut kk = vec![0u8; kv_max_seq * kv_stride];
-                fill_random_u8(&mut kk, &mut rng);
-                let mut kv = vec![0u8; kv_max_seq * kv_stride];
-                fill_random_u8(&mut kv, &mut rng);
+                let mut kk = vec![0u16; kv_max_seq * kv_stride];
+                fill_random_u16(&mut kk, &mut rng);
+                let mut kv = vec![0u16; kv_max_seq * kv_stride];
+                fill_random_u16(&mut kv, &mut rng);
                 kv_k_caches.push(kk);
                 kv_v_caches.push(kv);
             } else {

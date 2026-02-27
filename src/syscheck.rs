@@ -205,18 +205,19 @@ fn check_numa() {
 fn check_cpu_features() {
     let has_avx2 = is_x86_feature_detected!("avx2");
     let has_fma = is_x86_feature_detected!("fma");
+    let has_f16c = is_x86_feature_detected!("f16c");
     let has_avx512f = is_x86_feature_detected!("avx512f");
 
-    if has_avx2 && has_fma {
+    if has_avx2 && has_fma && has_f16c {
         if has_avx512f {
-            log::info!("CPU features: AVX2 + FMA + AVX-512 ✓");
+            log::info!("CPU features: AVX2 + FMA + F16C + AVX-512 ✓");
         } else {
-            log::info!("CPU features: AVX2 + FMA ✓ (no AVX-512, using AVX2 kernel)");
+            log::info!("CPU features: AVX2 + FMA + F16C ✓ (no AVX-512, using AVX2 kernel)");
         }
     } else {
         log::warn!(
-            "CPU features: AVX2={}, FMA={} — both required for INT4 matmul!",
-            has_avx2, has_fma,
+            "CPU features: AVX2={}, FMA={}, F16C={} — all required for decode!",
+            has_avx2, has_fma, has_f16c,
         );
     }
 }

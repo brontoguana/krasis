@@ -586,15 +586,15 @@ def compute_launcher_budget(
                               ram_decode_lmhead_bytes + ram_decode_norms_bytes +
                               ram_decode_routing_bytes + ram_decode_shared_bytes)
 
-    # ── CPU KV cache: preallocated for decode (FP8, default 32K tokens) ──
-    # CPU KV cache matches GPU FP8 E4M3 format — 1 byte per element, zero-conversion transfer
+    # ── CPU KV cache: preallocated for decode (FP16, default 32K tokens) ──
+    # CPU KV cache uses FP16 (2 bytes per element), converted from GPU FP8 via F16C
     kv_preallocate_tokens = 32768
     if is_mla:
-        cpu_kv_per_token = (cfg["kv_lora_rank"] + cfg["qk_rope_head_dim"]) * 1  # FP8
+        cpu_kv_per_token = (cfg["kv_lora_rank"] + cfg["qk_rope_head_dim"]) * 2  # FP16
     else:
         n_kv_h = cfg.get("num_key_value_heads", cfg["num_attention_heads"])
         h_dim = cfg.get("head_dim", cfg["hidden_size"] // cfg["num_attention_heads"])
-        cpu_kv_per_token = 2 * n_kv_h * h_dim * 1  # K+V, FP8
+        cpu_kv_per_token = 2 * n_kv_h * h_dim * 2  # K+V, FP16
     ram_cpu_kv_bytes = cpu_kv_per_token * kv_preallocate_tokens * _total_full_attn
 
     ram_layer_weights_mb = (ram_attn_bytes + ram_shared_bytes + ram_dense_bytes +

@@ -1,5 +1,5 @@
 ================================================================
-Krasis Benchmark — 2026-02-27 10:30:46
+Krasis Benchmark — 2026-02-27 13:39:55
 ================================================================
 Model:            Qwen3-Coder-Next
 Architecture:     qwen3_next, 48 layers, 512 experts, top-10, 12 GQA + 36 linear
@@ -7,7 +7,7 @@ PP Partition:     [48] (1 GPUs)
 
 Hardware:
   CPU:            AMD EPYC 7742 64-Core Processor (64 cores)
-  RAM:            1007 GB total, 86.1 GB used by process
+  RAM:            1007 GB total, 86.5 GB used by process
   GPU 0:          NVIDIA RTX 2000 Ada Generation (16380 MB), 3865 MB allocated
 
 Quantization:
@@ -25,16 +25,16 @@ Strategy:
   Mode:           pure_cpu decode, layer_grouped(2) + stream_attn prefill
 
 Prefill (3 runs at different lengths):
-  Run 1:  1015.9 tok/s, TTFT=20.11s (20,434 tokens)
-  Run 2:  755.1 tok/s, TTFT=46.53s (35,139 tokens)
-  Run 3:  804.5 tok/s, TTFT=61.98s (49,863 tokens)
-  Best:    1015.9 tok/s, TTFT=20.11s (20,434 tokens)
+  Run 1:  1037.2 tok/s, TTFT=19.70s (20,434 tokens)
+  Run 2:  753.7 tok/s, TTFT=46.62s (35,139 tokens)
+  Run 3:  809.1 tok/s, TTFT=61.62s (49,863 tokens)
+  Best:    1037.2 tok/s, TTFT=19.70s (20,434 tokens)
 
 Decode (64 tokens, 3 runs, different prompts):
-  Run 1:  12.89 tok/s (77.6ms/tok)
-  Run 2:  12.50 tok/s (80.0ms/tok)
-  Run 3:  12.72 tok/s (78.6ms/tok)
-  Average: 12.70 tok/s (78.7ms/tok)
+  Run 1:  13.38 tok/s (74.7ms/tok)
+  Run 2:  14.16 tok/s (70.6ms/tok)
+  Run 3:  15.82 tok/s (63.2ms/tok)
+  Average: 14.45 tok/s (69.5ms/tok)
 
 Verification:
   Prefill prompt: Summarise the following in one paragraph: THE COUNT OF MONTE CRISTO
@@ -53,7 +53,7 @@ Chapter 2. Father and Son
 Chapter 3. The Cat... [77314 chars total]
   Decode prompt:  Explain how public key cryptography works, including the RSA algorithm and why it is considered secure.
   Generated output (64 tokens):
-    Public key cryptography (also called **asymmetric cryptography**) is a cryptographic system that uses a pair of mathematically linked keys: a **public key** (shared openly) and a **private key** (kept secret). Unlike symmetric-key cryptography (where the same key encrypts and decrypts), here, what one
+    Public key cryptography (also called **asymmetric cryptography**) is a cryptographic system that uses a pair of mathematically linked keys: a **public key** (shared openly) and a **private key** (kept secret). Unlike symmetric-key cryptography (where the same key encrypts and decrypts), here, encryption with
 ================================================================
 
 ────────────────────────────────────────────────────────────────
@@ -61,12 +61,12 @@ Chapter 3. The Cat... [77314 chars total]
 ────────────────────────────────────────────────────────────────
                                          Engine        Network   Overhead
   ────────────────────────────── ────────────── ────────────── ──────────
-  Prefill (best tok/s)                 1015.9          959.9       -5.5%
-  TTFT (s)                              20.11          20.84      +730ms
-    20,434 tokens                      1015.9          959.9       -5.5%
-    35,139 tokens                       755.1          731.8       -3.1%
-    49,863 tokens                       804.5          777.9       -3.3%
+  Prefill (best tok/s)                 1037.2          930.9      -10.2%
+  TTFT (s)                              19.70          21.49     +1790ms
+    20,434 tokens                      1037.2          930.9      -10.2%
+    35,139 tokens                       753.7          716.9       -4.9%
+    49,863 tokens                       809.1          763.2       -5.7%
 
-  Decode (avg tok/s)                    12.70          13.75       +8.3%
-  Decode (ms/tok)                        78.7           72.8      -5.9ms
+  Decode (avg tok/s)                    14.45          15.84       +9.6%
+  Decode (ms/tok)                        69.5           63.2      -6.3ms
 ────────────────────────────────────────────────────────────────
