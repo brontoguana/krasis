@@ -24,6 +24,7 @@ set -euo pipefail
 # ── Environment ──────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON="/home/main/miniconda3/envs/ktransformers/bin/python"
+export PYTHONUNBUFFERED=1
 PIP="/home/main/miniconda3/envs/ktransformers/bin/pip"
 MATURIN="/home/main/.local/bin/maturin"
 SO_FILE="$SCRIPT_DIR/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so"
@@ -163,7 +164,7 @@ do_test() {
 
     # Wait for server to be ready (benchmark completes, server starts)
     local ready=false
-    local timeout=600  # 10 minutes for model load + benchmark
+    local timeout=1200  # 20 minutes for model load + benchmark
     local elapsed=0
     while kill -0 "$pid" 2>/dev/null && [[ $elapsed -lt $timeout ]]; do
         if grep -q "starting server on\|Server ready" "$logfile" 2>/dev/null; then
