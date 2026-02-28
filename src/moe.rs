@@ -581,6 +581,7 @@ pub fn moe_forward_unified(
     shared_scratch: &mut Option<ExpertScratch>,
     parallel: bool,
     numa_map: Option<&crate::numa::NumaExpertMap>,
+    pfl_prefetch: Option<&PflPrefetch<'_>>,
 ) {
     assert_eq!(expert_indices.len(), expert_weights.len());
     assert_eq!(activation.len(), store.config.hidden_size);
@@ -630,6 +631,16 @@ pub fn moe_forward_unified(
                             expert, &act_int16, &act_scales, local_scratch, true,
                             store.config.swiglu_limit, store.config.activation_alpha,
                         );
+                        // Inline PFL: read predicted next-layer experts into local L3
+                        if let Some(pfl) = pfl_prefetch {
+                            loop {
+                                let idx = pfl.claim.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                if idx >= pfl.predicted.len() { break; }
+                                let pred_expert = store.get_expert_unified(
+                                    pfl.next_moe_layer, pfl.predicted[idx] as usize);
+                                prefetch_expert_configurable(pred_expert, pfl.stride, pfl.hint);
+                            }
+                        }
                         crate::numa::unpin_thread();
                     });
                 }
@@ -656,6 +667,16 @@ pub fn moe_forward_unified(
             let expert = store.get_expert_unified(moe_layer_idx, eidx);
             expert_forward_unified(expert, &act_int16, &act_scales, local_scratch, true,
                 store.config.swiglu_limit, store.config.activation_alpha);
+            // Inline PFL: non-blocking prefetch predicted next-layer experts into local L3
+            if let Some(pfl) = pfl_prefetch {
+                loop {
+                    let idx = pfl.claim.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if idx >= pfl.predicted.len() { break; }
+                    let pred_expert = store.get_expert_unified(
+                        pfl.next_moe_layer, pfl.predicted[idx] as usize);
+                    prefetch_expert_configurable(pred_expert, pfl.stride, pfl.hint);
+                }
+            }
         });
 
         for i in 0..n {
@@ -682,6 +703,14 @@ pub fn moe_forward_unified(
 
             for j in 0..output.len() {
                 output[j] += weight * scratch.expert_out[j];
+            }
+        }
+        // Sequential PFL: non-blocking prefetch predicted next-layer experts
+        if let Some(pfl) = pfl_prefetch {
+            for &eid in pfl.predicted {
+                let pred_expert = store.get_expert_unified(
+                    pfl.next_moe_layer, eid as usize);
+                prefetch_expert_configurable(pred_expert, pfl.stride, pfl.hint);
             }
         }
     }
@@ -1133,30 +1162,122 @@ fn prefetch_gguf_expert_nta(expert: &GgufExpertWeights) {
 #[cfg(not(target_arch = "x86_64"))]
 fn prefetch_gguf_expert_nta(_expert: &GgufExpertWeights) {}
 
-/// Prefetch unified expert weights into L3 cache using NTA hints.
+/// Prefetch unified expert weights into L3 cache using NTA hints (default stride 512).
 #[cfg(target_arch = "x86_64")]
 fn prefetch_expert_unified_nta(expert: &UnifiedExpertWeights) {
-    const STRIDE: usize = 512;
-
-    unsafe fn prefetch_buf<T>(ptr: *const T, bytes: usize) {
-        let ptr = ptr as *const i8;
-        let mut off = 0;
-        while off < bytes {
-            _mm_prefetch(ptr.add(off), _MM_HINT_NTA);
-            off += STRIDE;
-        }
-    }
-
-    unsafe {
-        prefetch_buf(expert.w13_packed.as_ptr(), expert.w13_packed.len() * 4);
-        prefetch_buf(expert.w13_scales.as_ptr(), expert.w13_scales.len() * 2);
-        prefetch_buf(expert.w2_packed.as_ptr(), expert.w2_packed.len() * 4);
-        prefetch_buf(expert.w2_scales.as_ptr(), expert.w2_scales.len() * 2);
-    }
+    prefetch_expert_configurable(expert, 512, 0);
 }
 
 #[cfg(not(target_arch = "x86_64"))]
 fn prefetch_expert_unified_nta(_expert: &UnifiedExpertWeights) {}
+
+/// Prefetch unified expert weights into L3 cache using T0 hints.
+#[cfg(target_arch = "x86_64")]
+pub fn prefetch_expert_unified_t0(expert: &UnifiedExpertWeights) {
+    prefetch_expert_configurable(expert, 512, 2);
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+pub fn prefetch_expert_unified_t0(_expert: &UnifiedExpertWeights) {}
+
+/// Configurable prefetch: stride (bytes between prefetch instructions) and hint (0=NTA, 1=T1, 2=T0).
+#[cfg(target_arch = "x86_64")]
+pub fn prefetch_expert_configurable(expert: &UnifiedExpertWeights, stride: usize, hint: u8) {
+    let stride = stride.max(64);
+    match hint {
+        1 => prefetch_expert_bufs_t1(expert, stride),
+        2 => prefetch_expert_bufs_t0(expert, stride),
+        _ => prefetch_expert_bufs_nta(expert, stride),
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn prefetch_expert_bufs_nta(expert: &UnifiedExpertWeights, stride: usize) {
+    use std::arch::x86_64::{_mm_prefetch, _MM_HINT_NTA};
+    unsafe {
+        for &(ptr, len) in &[
+            (expert.w13_packed.as_ptr() as *const i8, expert.w13_packed.len() * 4),
+            (expert.w13_scales.as_ptr() as *const i8, expert.w13_scales.len() * 2),
+            (expert.w2_packed.as_ptr() as *const i8, expert.w2_packed.len() * 4),
+            (expert.w2_scales.as_ptr() as *const i8, expert.w2_scales.len() * 2),
+        ] {
+            let mut off = 0;
+            while off < len { _mm_prefetch(ptr.add(off), _MM_HINT_NTA); off += stride; }
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn prefetch_expert_bufs_t1(expert: &UnifiedExpertWeights, stride: usize) {
+    use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T1};
+    unsafe {
+        for &(ptr, len) in &[
+            (expert.w13_packed.as_ptr() as *const i8, expert.w13_packed.len() * 4),
+            (expert.w13_scales.as_ptr() as *const i8, expert.w13_scales.len() * 2),
+            (expert.w2_packed.as_ptr() as *const i8, expert.w2_packed.len() * 4),
+            (expert.w2_scales.as_ptr() as *const i8, expert.w2_scales.len() * 2),
+        ] {
+            let mut off = 0;
+            while off < len { _mm_prefetch(ptr.add(off), _MM_HINT_T1); off += stride; }
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn prefetch_expert_bufs_t0(expert: &UnifiedExpertWeights, stride: usize) {
+    use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+    unsafe {
+        for &(ptr, len) in &[
+            (expert.w13_packed.as_ptr() as *const i8, expert.w13_packed.len() * 4),
+            (expert.w13_scales.as_ptr() as *const i8, expert.w13_scales.len() * 2),
+            (expert.w2_packed.as_ptr() as *const i8, expert.w2_packed.len() * 4),
+            (expert.w2_scales.as_ptr() as *const i8, expert.w2_scales.len() * 2),
+        ] {
+            let mut off = 0;
+            while off < len { _mm_prefetch(ptr.add(off), _MM_HINT_T0); off += stride; }
+        }
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+pub fn prefetch_expert_configurable(_expert: &UnifiedExpertWeights, _stride: usize, _hint: u8) {}
+
+/// Context for inline PFL prefetch during MoE forward.
+/// Rayon threads claim predicted next-layer experts via atomic index
+/// and prefetch them into local L3 cache after finishing their own expert compute.
+pub struct PflPrefetch<'a> {
+    pub next_moe_layer: usize,
+    pub predicted: &'a [u16],
+    pub claim: &'a std::sync::atomic::AtomicUsize,
+    /// Prefetch stride in bytes (default 512).
+    pub stride: usize,
+    /// Cache hint: 0=NTA, 1=T1, 2=T0.
+    pub hint: u8,
+}
+
+/// Read an expert's weight data into the calling thread's local L3 cache.
+/// Uses actual memory reads (not software prefetch) to guarantee cache population.
+/// Each cache line (64 bytes) is touched exactly once via volatile read.
+#[inline(never)]
+pub fn read_expert_into_cache(expert: &UnifiedExpertWeights) {
+    let mut sink: u64 = 0;
+    unsafe {
+        let bufs: [(*const u8, usize); 4] = [
+            (expert.w13_packed.as_ptr() as *const u8, expert.w13_packed.len() * 4),
+            (expert.w13_scales.as_ptr() as *const u8, expert.w13_scales.len() * 2),
+            (expert.w2_packed.as_ptr() as *const u8, expert.w2_packed.len() * 4),
+            (expert.w2_scales.as_ptr() as *const u8, expert.w2_scales.len() * 2),
+        ];
+        for &(ptr, len) in &bufs {
+            let mut off = 0;
+            while off < len {
+                sink = sink.wrapping_add(std::ptr::read_volatile(ptr.add(off)) as u64);
+                off += 64;
+            }
+        }
+    }
+    std::hint::black_box(sink);
+}
 
 /// Prefetch an expert's weight data into L3 cache using NTA (non-temporal) hints.
 ///
@@ -1323,7 +1444,7 @@ fn moe_worker(
                     &expert_indices, &expert_weights,
                     &mut output_f32, &mut scratch, &mut scratch_pool,
                     &mut shared_scratch,
-                    parallel, numa_map.as_ref(),
+                    parallel, numa_map.as_ref(), None,
                 );
             } else {
                 moe_forward(
@@ -1847,7 +1968,7 @@ impl KrasisEngine {
                     &expert_indices, &expert_weights,
                     &mut self.output_buf, scratch,
                     &mut self.scratch_pool, shared_scratch_ref,
-                    parallel, self.numa_map.as_ref(),
+                    parallel, self.numa_map.as_ref(), None,
                 );
             } else {
                 moe_forward(
@@ -2932,7 +3053,7 @@ impl KrasisEngine {
                     ei, ew,
                     output_f32, scratch, scratch_pool,
                     shared_scratch,
-                    parallel, numa_map,
+                    parallel, numa_map, None,
                 );
             } else {
                 moe_forward(
@@ -3169,7 +3290,7 @@ impl KrasisEngine {
                     &top_indices, &top_weights,
                     output_f32, scratch, scratch_pool,
                     shared_scratch,
-                    parallel, numa_map,
+                    parallel, numa_map, None,
                 );
             } else {
                 moe_forward(
@@ -3274,7 +3395,7 @@ impl KrasisEngine {
                 &top_indices, &top_weights,
                 output_f32, scratch, scratch_pool,
                 shared_scratch,
-                parallel, numa_map,
+                parallel, numa_map, None,
             );
         } else {
             moe_forward(
@@ -3589,12 +3710,12 @@ mod tests {
         if store.has_unified() {
             moe_forward_unified(
                 &store, 0, &activation, &expert_indices, &expert_weights,
-                &mut output, &mut scratch, &mut scratch_pool, &mut shared_scratch, true, None,
+                &mut output, &mut scratch, &mut scratch_pool, &mut shared_scratch, true, None, None, None,
             );
         } else {
             moe_forward(
                 &store, 0, &activation, &expert_indices, &expert_weights,
-                &mut output, &mut scratch, &mut scratch_pool, &mut shared_scratch, true, None,
+                &mut output, &mut scratch, &mut scratch_pool, &mut shared_scratch, true, None, None, None,
             );
         }
         let moe_us = start.elapsed().as_micros();
@@ -3662,7 +3783,7 @@ mod tests {
         moe_forward_unified(
             &store, 0, &activation, &expert_indices, &expert_weights,
             &mut output1, &mut scratch1, &mut pool1, &mut shared1,
-            true, None,
+            true, None, None,
         );
 
         // Forward pass 2 (should be identical with same inputs)
@@ -3679,7 +3800,7 @@ mod tests {
         moe_forward_unified(
             &store, 0, &activation, &expert_indices, &expert_weights,
             &mut output2, &mut scratch2, &mut pool2, &mut shared2,
-            true, None,
+            true, None, None,
         );
 
         // Compare: two identical forward passes should match exactly
@@ -3749,12 +3870,12 @@ mod tests {
         if store.has_unified() {
             moe_forward_unified(
                 &store, 0, &activation, &expert_indices, &expert_weights,
-                &mut output, &mut scratch, &mut scratch_pool, &mut shared_scratch, true, None,
+                &mut output, &mut scratch, &mut scratch_pool, &mut shared_scratch, true, None, None, None,
             );
         } else {
             moe_forward(
                 &store, 0, &activation, &expert_indices, &expert_weights,
-                &mut output, &mut scratch, &mut scratch_pool, &mut shared_scratch, true, None,
+                &mut output, &mut scratch, &mut scratch_pool, &mut shared_scratch, true, None, None, None,
             );
         }
         let moe_us = start.elapsed().as_micros();
@@ -3811,12 +3932,12 @@ mod tests {
         if store.has_unified() {
             moe_forward_unified(
                 &store, 0, &activation, &expert_indices, &expert_weights,
-                &mut ref_output, &mut scratch, &mut scratch_pool, &mut shared_scratch, true, None,
+                &mut ref_output, &mut scratch, &mut scratch_pool, &mut shared_scratch, true, None, None, None,
             );
         } else {
             moe_forward(
                 &store, 0, &activation, &expert_indices, &expert_weights,
-                &mut ref_output, &mut scratch, &mut scratch_pool, &mut shared_scratch, true, None,
+                &mut ref_output, &mut scratch, &mut scratch_pool, &mut shared_scratch, true, None, None, None,
             );
         }
 
@@ -3978,13 +4099,13 @@ mod tests {
             moe_forward_unified(
                 &store, 0, &activation, &expert_indices, &expert_weights,
                 &mut output_no_shared, &mut scratch, &mut scratch_pool,
-                &mut no_shared, true, None,
+                &mut no_shared, true, None, None,
             );
         } else {
             moe_forward(
                 &store, 0, &activation, &expert_indices, &expert_weights,
                 &mut output_no_shared, &mut scratch, &mut scratch_pool,
-                &mut no_shared, true, None,
+                &mut no_shared, true, None, None,
             );
         }
 
@@ -3995,13 +4116,13 @@ mod tests {
             moe_forward_unified(
                 &store, 0, &activation, &expert_indices, &expert_weights,
                 &mut output_with_shared, &mut scratch, &mut scratch_pool,
-                &mut shared_scratch, true, None,
+                &mut shared_scratch, true, None, None,
             );
         } else {
             moe_forward(
                 &store, 0, &activation, &expert_indices, &expert_weights,
                 &mut output_with_shared, &mut scratch, &mut scratch_pool,
-                &mut shared_scratch, true, None,
+                &mut shared_scratch, true, None, None,
             );
         }
 

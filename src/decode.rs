@@ -12,7 +12,7 @@ use crate::kernel::avx2::{
     repack_tiled_int4_packed, repack_tiled_int8_packed, repack_tiled_scales,
     quantize_activation_int16_f32,
 };
-use crate::moe::{ExpertScratch, moe_forward_unified, moe_forward_flattened};
+use crate::moe::{ExpertScratch, moe_forward_unified, moe_forward_flattened, PflPrefetch};
 use crate::weights::marlin::f32_to_bf16;
 use crate::weights::WeightStore;
 use pyo3::prelude::*;
@@ -187,6 +187,360 @@ struct RouteWeight {
     e_score_corr: Option<Vec<f32>>,
     num_experts: usize,
     hidden_dim: usize,
+}
+
+// ── Preferred Friends List (PFL) — speculative expert prefetch ──────
+//
+// For each expert E at MoE layer L, tracks which experts at layer L+1
+// co-activate most frequently (conditional probability). Used to predict
+// which experts to prefetch into L3 while current layer's MoE computes.
+//
+// Zero-downside: hit = 15x faster read (L3 vs DRAM), miss = baseline DRAM read.
+// Uses spare DRAM bandwidth (22 of ~150 GB/s) so doesn't starve current work.
+
+/// Max friends tracked per expert (compile-time array size).
+const PFL_MAX_FRIENDS: usize = 32;
+/// Minimum tokens before PFL predictions are used (warm-up period).
+const PFL_WARMUP_TOKENS: u64 = 32;
+
+/// Runtime PFL configuration, read from env vars at init.
+/// Prefetch count auto-adapts to L3 cache size and expert size when not overridden.
+struct PflConfig {
+    /// Number of friends to track per expert (up to PFL_MAX_FRIENDS).
+    num_friends: usize,
+    /// Number of experts to prefetch per layer.
+    prefetch_count: usize,
+    /// Whether to use two-layer prediction (layer L-1 + layer L -> layer L+1).
+    two_layer: bool,
+    /// Prefetch stride in bytes (default 512).
+    stride: usize,
+    /// Cache hint: 0=NTA, 1=T1, 2=T0.
+    hint: u8,
+}
+
+/// Detect L3 cache size per CCD/LLC instance in bytes.
+/// Reads from sysfs index3 entries. Returns (per_instance_bytes, num_instances).
+/// Falls back to (32 MB, 1) if detection fails.
+fn detect_l3_cache() -> (usize, usize) {
+    // Each index3 directory under /sys/devices/system/cpu/cpu0/cache/ represents an L3 instance.
+    // On multi-CCD AMD chips, different CPUs see different L3 instances.
+    // We want the size of one L3 instance (per-CCD) and how many exist.
+    let mut l3_size: usize = 0;
+    let mut l3_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Scan cpu0's cache indices for level 3
+    for idx in 0..10 {
+        let level_path = format!("/sys/devices/system/cpu/cpu0/cache/index{}/level", idx);
+        let size_path = format!("/sys/devices/system/cpu/cpu0/cache/index{}/size", idx);
+        let id_path = format!("/sys/devices/system/cpu/cpu0/cache/index{}/id", idx);
+        if let Ok(level) = std::fs::read_to_string(&level_path) {
+            if level.trim() == "3" {
+                if let Ok(size_str) = std::fs::read_to_string(&size_path) {
+                    let s = size_str.trim();
+                    if let Some(kb) = s.strip_suffix('K') {
+                        l3_size = kb.parse::<usize>().unwrap_or(0) * 1024;
+                    } else if let Some(mb) = s.strip_suffix('M') {
+                        l3_size = mb.parse::<usize>().unwrap_or(0) * 1024 * 1024;
+                    }
+                }
+                // Read the L3 id for cpu0
+                if let Ok(id) = std::fs::read_to_string(&id_path) {
+                    l3_ids.insert(id.trim().to_string());
+                }
+            }
+        }
+    }
+
+    if l3_size == 0 {
+        log::info!("PFL: L3 cache detection failed, using 32 MB fallback");
+        return (32 * 1024 * 1024, 1);
+    }
+
+    // Count total L3 instances by scanning all CPUs for unique L3 ids
+    let num_cpus = std::fs::read_dir("/sys/devices/system/cpu/")
+        .map(|entries| {
+            entries.filter_map(|e| e.ok())
+                .filter(|e| {
+                    let name = e.file_name();
+                    let s = name.to_string_lossy();
+                    s.starts_with("cpu") && s[3..].chars().all(|c| c.is_ascii_digit())
+                })
+                .count()
+        })
+        .unwrap_or(1);
+
+    for cpu in 0..num_cpus {
+        for idx in 0..10 {
+            let level_path = format!("/sys/devices/system/cpu/cpu{}/cache/index{}/level", cpu, idx);
+            let id_path = format!("/sys/devices/system/cpu/cpu{}/cache/index{}/id", cpu, idx);
+            if let Ok(level) = std::fs::read_to_string(&level_path) {
+                if level.trim() == "3" {
+                    if let Ok(id) = std::fs::read_to_string(&id_path) {
+                        l3_ids.insert(id.trim().to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    let num_instances = l3_ids.len().max(1);
+    (l3_size, num_instances)
+}
+
+/// Calculate expert size in bytes from model dimensions and quantization.
+/// expert_size = w13_packed + w13_scales + w2_packed + w2_scales
+fn compute_expert_size_bytes(hidden: usize, intermediate: usize, group_size: usize, num_bits: u8) -> usize {
+    let two_m = 2 * intermediate;
+    // w13: K=hidden, N=2*intermediate
+    let w13_packed = if num_bits == 4 { (hidden / 8) * two_m * 4 } else { hidden * two_m * 4 };
+    let w13_scales = (hidden / group_size) * two_m * 2;
+    // w2: K=intermediate, N=hidden
+    let w2_packed = if num_bits == 4 { (intermediate / 8) * hidden * 4 } else { intermediate * hidden * 4 };
+    let w2_scales = (intermediate / group_size) * hidden * 2;
+    w13_packed + w13_scales + w2_packed + w2_scales
+}
+
+impl PflConfig {
+    /// Create PFL config. Expert size is used to auto-compute prefetch count
+    /// based on detected L3 cache size when KRASIS_PFL_PREFETCH is not set.
+    fn from_env_with_expert_size(expert_size_bytes: usize) -> Self {
+        let num_friends = std::env::var("KRASIS_PFL_FRIENDS")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(24usize).min(PFL_MAX_FRIENDS);
+
+        let prefetch_count = if let Ok(v) = std::env::var("KRASIS_PFL_PREFETCH") {
+            v.parse().unwrap_or(32usize)
+        } else {
+            // Auto-compute from L3 cache size and expert size.
+            // Rayon threads spread across CCDs during MoE compute, so prefetched
+            // experts distribute across L3 instances. Each thread prefetches 1-3
+            // experts into its own CCD's L3. We budget so that per-CCD prefetch
+            // load stays under 60% of per-instance L3.
+            //
+            // Assume threads use up to min(num_instances, 10) CCDs.
+            // Per-CCD load ≈ prefetch_count / active_ccds.
+            // Constraint: per_ccd_load * expert_size <= 0.6 * l3_per_instance.
+            // So: prefetch_count <= active_ccds * 0.6 * l3_per_instance / expert_size.
+            let (l3_per_instance, num_instances) = detect_l3_cache();
+            let active_ccds = num_instances.min(10); // MoE topk rarely exceeds 10
+
+            let auto_count = if expert_size_bytes > 0 {
+                let per_ccd_budget = (l3_per_instance * 60) / 100;
+                let max_per_ccd = per_ccd_budget / expert_size_bytes;
+                let total = (max_per_ccd * active_ccds).max(8).min(48);
+                total
+            } else {
+                32 // fallback if expert size unknown
+            };
+
+            log::info!("PFL auto-tune: L3 {}MB × {} instances = {}MB total, {} active CCDs",
+                l3_per_instance / (1024 * 1024), num_instances,
+                (l3_per_instance * num_instances) / (1024 * 1024), active_ccds);
+            log::info!("PFL auto-tune: expert {}KB, per-CCD budget {}MB → prefetch {} experts (~{} per CCD)",
+                expert_size_bytes / 1024, (l3_per_instance * 60 / 100) / (1024 * 1024),
+                auto_count, (auto_count + active_ccds - 1) / active_ccds);
+
+            auto_count
+        };
+
+        let two_layer = std::env::var("KRASIS_PFL_TWO_LAYER")
+            .map(|v| v == "1").unwrap_or(false);
+        let stride = std::env::var("KRASIS_PFL_STRIDE")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(512usize);
+        let hint = match std::env::var("KRASIS_PFL_HINT").as_deref() {
+            Ok("t1") => 1,
+            Ok("t0") => 2,
+            _ => 0, // NTA default
+        };
+        PflConfig { num_friends, prefetch_count, two_layer, stride, hint }
+    }
+}
+
+/// Preferred Friends List for speculative expert prefetch.
+struct Pfl {
+    /// For each (moe_layer, expert), the top PFL_MAX_FRIENDS friend expert IDs
+    /// at the NEXT moe_layer. Indexed as [moe_layer * num_experts + expert][friend_slot].
+    friends: Vec<[u16; PFL_MAX_FRIENDS]>,
+    /// Co-activation counts corresponding to friends entries.
+    counts: Vec<[u32; PFL_MAX_FRIENDS]>,
+    /// Number of MoE layers.
+    num_moe_layers: usize,
+    /// Number of experts per layer.
+    num_experts: usize,
+    /// Selected expert IDs from previous layer (for update on next layer).
+    prev_layer_experts: Vec<u16>,
+    /// Previous layer's moe_layer_idx (for cross-layer update).
+    prev_moe_layer_idx: usize,
+    /// Two-layer prediction: experts from layer L-2 (if two_layer enabled).
+    prev2_layer_experts: Vec<u16>,
+    /// Two-layer prediction: moe_layer_idx from layer L-2.
+    prev2_moe_layer_idx: usize,
+    /// Total tokens processed (for warm-up tracking).
+    tokens_seen: u64,
+    /// Runtime config.
+    config: PflConfig,
+}
+
+impl Pfl {
+    fn new(num_moe_layers: usize, num_experts: usize, expert_size_bytes: usize) -> Self {
+        let total = num_moe_layers * num_experts;
+        let config = PflConfig::from_env_with_expert_size(expert_size_bytes);
+        Pfl {
+            friends: vec![[u16::MAX; PFL_MAX_FRIENDS]; total],
+            counts: vec![[0u32; PFL_MAX_FRIENDS]; total],
+            num_moe_layers,
+            num_experts,
+            prev_layer_experts: Vec::with_capacity(32),
+            prev_moe_layer_idx: usize::MAX,
+            prev2_layer_experts: Vec::with_capacity(32),
+            prev2_moe_layer_idx: usize::MAX,
+            tokens_seen: 0,
+            config,
+        }
+    }
+
+    /// Check if PFL has enough data to make predictions.
+    #[inline]
+    fn is_warm(&self) -> bool {
+        self.tokens_seen >= PFL_WARMUP_TOKENS
+    }
+
+    /// Update PFL: for each expert selected at prev_moe_layer, increment counts
+    /// for each expert selected at current moe_layer.
+    fn update(&mut self, prev_moe_layer: usize, prev_experts: &[u16],
+              curr_moe_layer: usize, curr_experts: &[u16]) {
+        if prev_moe_layer >= self.num_moe_layers || curr_moe_layer >= self.num_moe_layers {
+            return;
+        }
+        let nf = self.config.num_friends;
+        for &prev_eid in prev_experts {
+            let idx = prev_moe_layer * self.num_experts + prev_eid as usize;
+            if idx >= self.friends.len() { continue; }
+            let friends = &mut self.friends[idx];
+            let counts = &mut self.counts[idx];
+
+            for &curr_eid in curr_experts {
+                let mut found = false;
+                for slot in 0..nf {
+                    if friends[slot] == curr_eid {
+                        counts[slot] = counts[slot].saturating_add(1);
+                        let mut s = slot;
+                        while s > 0 && counts[s] > counts[s - 1] {
+                            friends.swap(s, s - 1);
+                            counts.swap(s, s - 1);
+                            s -= 1;
+                        }
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    let last = nf - 1;
+                    if friends[last] == u16::MAX || counts[last] == 0 {
+                        friends[last] = curr_eid;
+                        counts[last] = 1;
+                        let mut s = last;
+                        while s > 0 && counts[s] > counts[s - 1] {
+                            friends.swap(s, s - 1);
+                            counts.swap(s, s - 1);
+                            s -= 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Get predicted expert IDs for next_moe_layer based on selected experts.
+    /// When two_layer is enabled, also uses prev2 layer's experts for richer predictions.
+    fn predict(&self, curr_moe_layer: usize, selected_experts: &[u16],
+               out: &mut Vec<u16>) {
+        out.clear();
+        if curr_moe_layer >= self.num_moe_layers.saturating_sub(1) {
+            return;
+        }
+
+        let mut candidates: [(u16, u32); 512] = [(u16::MAX, 0); 512];
+        let mut n_candidates = 0usize;
+        let nf = self.config.num_friends;
+
+        // Primary: layer L experts -> layer L+1 predictions
+        for &eid in selected_experts {
+            let idx = curr_moe_layer * self.num_experts + eid as usize;
+            if idx >= self.friends.len() { continue; }
+            let friends = &self.friends[idx];
+            let counts = &self.counts[idx];
+
+            for slot in 0..nf {
+                if friends[slot] == u16::MAX { break; }
+                let fid = friends[slot];
+                let cnt = counts[slot];
+                let mut found = false;
+                for c in candidates[..n_candidates].iter_mut() {
+                    if c.0 == fid {
+                        c.1 += cnt;
+                        found = true;
+                        break;
+                    }
+                }
+                if !found && n_candidates < 512 {
+                    candidates[n_candidates] = (fid, cnt);
+                    n_candidates += 1;
+                }
+            }
+        }
+
+        // Two-layer: also use layer L-1 experts -> layer L+1 predictions (skip-layer)
+        // This requires a skip-1 table which we approximate by chaining:
+        // L-1 -> L friends, then L -> L+1 friends for those predicted L experts.
+        if self.config.two_layer && self.prev2_moe_layer_idx < usize::MAX
+            && self.prev2_moe_layer_idx + 2 == curr_moe_layer + 1
+        {
+            // Get what L-2's friends predict for L-1 (which is curr layer)
+            // Then use curr layer's actual experts (already used above).
+            // Instead, use L-2's friends to boost scores of candidates already seen.
+            // L-2 experts -> L-1 friends (what L-2 predicted for L-1 = curr layer).
+            // If any of curr layer's actual experts match those predictions, boost
+            // the candidates they contribute.
+            let prev2_layer = self.prev2_moe_layer_idx;
+            for &prev2_eid in &self.prev2_layer_experts {
+                let idx = prev2_layer * self.num_experts + prev2_eid as usize;
+                if idx >= self.friends.len() { continue; }
+                let friends = &self.friends[idx];
+                let counts = &self.counts[idx];
+                // Check which of prev2's friends are actually in current layer's selection
+                for slot in 0..nf {
+                    if friends[slot] == u16::MAX { break; }
+                    let predicted_curr = friends[slot];
+                    // If this expert WAS selected at current layer, its predictions
+                    // are more trustworthy — boost its candidates
+                    if selected_experts.contains(&predicted_curr) {
+                        let boost = counts[slot] / 2; // Half-weight boost
+                        // Boost all candidates that came from this expert
+                        let cidx = curr_moe_layer * self.num_experts + predicted_curr as usize;
+                        if cidx >= self.friends.len() { continue; }
+                        let cfriends = &self.friends[cidx];
+                        let ccounts = &self.counts[cidx];
+                        for cs in 0..nf {
+                            if cfriends[cs] == u16::MAX { break; }
+                            let cfid = cfriends[cs];
+                            for c in candidates[..n_candidates].iter_mut() {
+                                if c.0 == cfid {
+                                    c.1 += boost.min(ccounts[cs]);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        candidates[..n_candidates].sort_unstable_by(|a, b| b.1.cmp(&a.1));
+        let take = n_candidates.min(self.config.prefetch_count);
+        for i in 0..take {
+            out.push(candidates[i].0);
+        }
+    }
 }
 
 /// CPU decode weight store — holds quantized non-MoE weights for fast matmul.
@@ -1920,6 +2274,21 @@ struct DecodeGraph {
     act_scales: Vec<f32>,
     group_size: usize,
 
+    // PFL (Preferred Friends List) — speculative expert prefetch
+    pfl: Option<Pfl>,
+    /// Whether PFL is enabled (auto-detected from model having MoE layers).
+    pfl_enabled: bool,
+    /// Scratch buffer for PFL predictions (avoid heap alloc per layer).
+    pfl_predicted: Vec<u16>,
+    /// Last layer's PFL predictions (for hit rate counting at next layer).
+    pfl_last_predicted: Vec<u16>,
+    /// Current layer's selected expert IDs as u16 (for PFL update).
+    pfl_current_experts: Vec<u16>,
+    /// PFL hit counter for timing reports.
+    pfl_hits: u64,
+    /// PFL total predictions made.
+    pfl_predictions: u64,
+
     // Timing (enabled by KRASIS_DECODE_TIMING=1)
     timing_enabled: bool,
     timing_step_count: u64,
@@ -2015,6 +2384,14 @@ impl CpuDecodeStore {
             route_logits: Vec::new(), route_scores: Vec::new(), route_corrected: Vec::new(),
             act_int16: Vec::new(), act_scales: Vec::new(),
             group_size: gs,
+            // PFL — initialized properly in finalize_decode once we know num_experts
+            pfl: None,
+            pfl_enabled: false,
+            pfl_predicted: Vec::with_capacity(64),
+            pfl_last_predicted: Vec::with_capacity(64),
+            pfl_current_experts: Vec::with_capacity(32),
+            pfl_hits: 0,
+            pfl_predictions: 0,
             timing_enabled: std::env::var("KRASIS_CPU_DECODE_TIMING").map(|v| v == "1").unwrap_or(false),
             timing_step_count: 0,
             timing_report_interval: std::env::var("KRASIS_TIMING_INTERVAL")
@@ -2631,6 +3008,53 @@ impl CpuDecodeStore {
         g.route_logits = vec![0.0f32; max_ne.max(1)];
         g.route_scores = vec![0.0f32; max_ne.max(1)];
         g.route_corrected = vec![0.0f32; max_ne.max(1)];
+
+        // PFL initialization — count MoE layers and init if model has MoE
+        if max_ne > 0 {
+            let mut num_moe_layers = 0usize;
+            for layer in &g.layers {
+                if let DecodeMlpConfig::MoE { .. } = &layer.mlp {
+                    num_moe_layers += 1;
+                }
+            }
+            if num_moe_layers >= 2 {
+                let pfl_disabled = std::env::var("KRASIS_PFL_DISABLE").map(|v| v == "1").unwrap_or(false);
+                if !pfl_disabled {
+                    // Compute expert size from model config for auto-tuning prefetch count
+                    let expert_size_bytes = if let Some(ref store) = g.moe_store {
+                        let cfg = &store.config;
+                        compute_expert_size_bytes(
+                            cfg.hidden_size, cfg.moe_intermediate_size,
+                            store.group_size, store.cpu_num_bits)
+                    } else {
+                        0 // will use fallback default
+                    };
+                    let pfl = Pfl::new(num_moe_layers, max_ne, expert_size_bytes);
+                    let pfl_bytes = num_moe_layers * max_ne *
+                        (PFL_MAX_FRIENDS * (std::mem::size_of::<u16>() + std::mem::size_of::<u32>()));
+                    let hint_name = match pfl.config.hint { 1 => "T1", 2 => "T0", _ => "NTA" };
+                    log::info!("PFL enabled: {} MoE layers × {} experts, {} friends, prefetch {}, stride {}, hint {}, two_layer {}",
+                        num_moe_layers, max_ne, pfl.config.num_friends, pfl.config.prefetch_count,
+                        pfl.config.stride, hint_name, pfl.config.two_layer);
+                    log::info!("PFL table: {:.1} MB, expert size: {} KB",
+                        pfl_bytes as f64 / 1024.0 / 1024.0, expert_size_bytes / 1024);
+                    g.pfl = Some(pfl);
+                    g.pfl_enabled = true;
+                } else {
+                    log::info!("PFL disabled by KRASIS_PFL_DISABLE=1");
+                }
+            }
+        }
+
+        // PFL: verify MoE store is available when PFL is enabled
+        if g.pfl_enabled {
+            if g.moe_store.is_none() {
+                log::warn!("PFL enabled but no MoE store set — prefetch disabled");
+                g.pfl_enabled = false;
+            } else {
+                log::info!("PFL inline prefetch enabled (rayon threads read predicted experts into local L3)");
+            }
+        }
 
         log::info!("DecodeGraph finalized: {} layers, max_k={}, scratch allocated", g.layers.len(), max_k);
         Ok(())
@@ -3298,11 +3722,88 @@ impl CpuDecodeStore {
                         &mut graph.moe_topk_ids, &mut graph.moe_topk_weights);
                     if timing { graph.t_moe_route += t0.elapsed().as_secs_f64(); }
 
+                    // ── PFL: update + speculative prefetch ──
+                    // 1. Record current layer's selected experts
+                    // 2. Update PFL from previous layer → current layer
+                    // 3. Launch background prefetch for next layer's predicted experts
+                    if graph.pfl_enabled {
+                        // Collect current layer's selected expert IDs
+                        graph.pfl_current_experts.clear();
+                        for i in 0..topk {
+                            if graph.moe_topk_ids[i] >= 0 {
+                                graph.pfl_current_experts.push(graph.moe_topk_ids[i] as u16);
+                            }
+                        }
+
+                        // Count PFL hits: how many actual experts were in last prediction?
+                        if !graph.pfl_last_predicted.is_empty() {
+                            let mut hits = 0u64;
+                            for &eid in &graph.pfl_current_experts {
+                                if graph.pfl_last_predicted.contains(&eid) {
+                                    hits += 1;
+                                }
+                            }
+                            graph.pfl_hits += hits;
+                            graph.pfl_predictions += graph.pfl_current_experts.len() as u64;
+                        }
+                        graph.pfl_last_predicted.clear();
+
+                        if let Some(ref mut pfl) = graph.pfl {
+                            // Update PFL from previous layer's experts → this layer's experts
+                            if pfl.prev_moe_layer_idx < usize::MAX
+                                && pfl.prev_moe_layer_idx + 1 == moe_layer_idx
+                            {
+                                let prev = pfl.prev_layer_experts.clone();
+                                pfl.update(
+                                    pfl.prev_moe_layer_idx, &prev,
+                                    moe_layer_idx, &graph.pfl_current_experts,
+                                );
+                            }
+
+                            // Shift prev -> prev2 for two-layer prediction
+                            std::mem::swap(&mut pfl.prev2_layer_experts, &mut pfl.prev_layer_experts);
+                            pfl.prev2_moe_layer_idx = pfl.prev_moe_layer_idx;
+
+                            // Save current as "previous" for next layer
+                            pfl.prev_layer_experts.clear();
+                            pfl.prev_layer_experts.extend_from_slice(&graph.pfl_current_experts);
+                            pfl.prev_moe_layer_idx = moe_layer_idx;
+
+                            // Speculative prefetch for next layer (if warm enough)
+                            if pfl.is_warm() {
+                                pfl.predict(moe_layer_idx, &graph.pfl_current_experts,
+                                            &mut graph.pfl_predicted);
+                                let next_moe_layer = moe_layer_idx + 1;
+                                if !graph.pfl_predicted.is_empty()
+                                    && next_moe_layer < pfl.num_moe_layers
+                                {
+                                    // Save predictions for hit counting at next layer
+                                    graph.pfl_last_predicted.clear();
+                                    graph.pfl_last_predicted.extend_from_slice(&graph.pfl_predicted);
+                                    // Inline prefetch happens inside moe_forward_unified via PflPrefetch
+                                }
+                            }
+                        }
+                    }
+
                     // Routed + shared experts overlapped via rayon::join.
                     // Shared expert runs on current thread while routed experts use pool.
                     let t0 = if timing { Instant::now() } else { t_step_start };
                     let has_shared = sgu_wid.is_some() && sd_wid.is_some();
                     let moe_store_arc = graph.moe_store.clone();
+
+                    // PFL inline prefetch: prepare predictions for moe_forward_unified
+                    let pfl_predictions = if graph.pfl_enabled && !graph.pfl_predicted.is_empty() {
+                        graph.pfl_predicted.clone()
+                    } else {
+                        Vec::new()
+                    };
+                    let pfl_next_layer = moe_layer_idx + 1;
+                    let pfl_num_moe = graph.pfl.as_ref().map(|p| p.num_moe_layers).unwrap_or(0);
+                    let pfl_active = !pfl_predictions.is_empty() && pfl_next_layer < pfl_num_moe;
+                    let pfl_stride = graph.pfl.as_ref().map(|p| p.config.stride).unwrap_or(512);
+                    let pfl_hint = graph.pfl.as_ref().map(|p| p.config.hint).unwrap_or(0);
+
                     if let Some(moe_store) = moe_store_arc {
                         for j in 0..hs {
                             graph.moe_act_bf16[j] = f32_to_bf16(graph.hidden[j]);
@@ -3320,6 +3821,7 @@ impl CpuDecodeStore {
                         // SAFETY: rayon::join closures access disjoint graph fields.
                         // Routed: moe_output(w), moe_scratch(w), moe_scratch_pool(w), moe_act_bf16(r)
                         // Shared: act_int16(w), act_scales(w), mlp_gate_up(w), mlp_hidden_buf(w), shared_out(w), hidden(r)
+                        // PFL predictions are cloned above so no graph borrow conflict.
                         let gp = &mut **graph as *mut DecodeGraph as usize;
                         let moe_par = graph.moe_parallel;
                         let gs = graph.group_size;
@@ -3327,6 +3829,19 @@ impl CpuDecodeStore {
                             move || unsafe {
                                 let g = &mut *(gp as *mut DecodeGraph);
                                 g.moe_output.fill(0.0);
+                                // Construct PflPrefetch inside closure (borrows moved-in data)
+                                let claim = std::sync::atomic::AtomicUsize::new(0);
+                                let pfl_ctx = if pfl_active {
+                                    Some(PflPrefetch {
+                                        next_moe_layer: pfl_next_layer,
+                                        predicted: &pfl_predictions,
+                                        claim: &claim,
+                                        stride: pfl_stride,
+                                        hint: pfl_hint,
+                                    })
+                                } else {
+                                    None
+                                };
                                 if n_exp > 0 {
                                     let scratch = g.moe_scratch.as_mut().unwrap();
                                     let pool = &mut g.moe_scratch_pool;
@@ -3338,7 +3853,7 @@ impl CpuDecodeStore {
                                         &expert_weights_arr[..n_exp],
                                         &mut g.moe_output,
                                         scratch, pool, &mut no_shared,
-                                        moe_par, None);
+                                        moe_par, None, pfl_ctx.as_ref());
                                 }
                                 if rsf != 1.0 {
                                     for j in 0..hs { g.moe_output[j] *= rsf; }
@@ -3402,6 +3917,9 @@ impl CpuDecodeStore {
                         }
                     }
                     if timing { graph.t_moe_experts += t0.elapsed().as_secs_f64(); }
+
+                    // PFL: inline prefetch happened inside moe_forward_unified.
+                    // Rayon threads read predicted next-layer experts into local L3.
                 }
 
                 DecodeMlpConfig::Dense { gate_proj_wid, up_proj_wid, down_proj_wid } => {
@@ -3444,6 +3962,15 @@ impl CpuDecodeStore {
                 }
 
                 DecodeMlpConfig::None => {}
+            }
+        }
+
+        // Increment PFL token counter (end of all layers for this token)
+        if graph.pfl_enabled {
+            if let Some(ref mut pfl) = graph.pfl {
+                pfl.tokens_seen += 1;
+                // Reset previous layer state for next token
+                pfl.prev_moe_layer_idx = usize::MAX;
             }
         }
 
@@ -3513,6 +4040,18 @@ impl CpuDecodeStore {
                     + graph.t_moe_shared + graph.t_dense_mlp + graph.t_lm_head;
                 let overhead = graph.t_total - accounted;
                 log::info!("  overhead:     {:6.1} ms ({:4.1}%)", overhead / nf * 1000.0, overhead / graph.t_total * 100.0);
+                if graph.pfl_enabled {
+                    if let Some(ref pfl) = graph.pfl {
+                        let hit_rate = if graph.pfl_predictions > 0 {
+                            graph.pfl_hits as f64 / graph.pfl_predictions as f64 * 100.0
+                        } else {
+                            0.0
+                        };
+                        log::info!("  PFL: {} tokens seen, warm={}, hits={}/{} ({:.1}%)",
+                            pfl.tokens_seen, pfl.is_warm(),
+                            graph.pfl_hits, graph.pfl_predictions, hit_rate);
+                    }
+                }
             }
         }
 
@@ -5016,6 +5555,13 @@ pub fn bench_decode_synthetic(
         act_int16: Vec::new(),
         act_scales: Vec::new(),
         group_size,
+        pfl: None,
+        pfl_enabled: false,
+        pfl_predicted: Vec::with_capacity(64),
+        pfl_last_predicted: Vec::with_capacity(64),
+        pfl_current_experts: Vec::with_capacity(32),
+        pfl_hits: 0,
+        pfl_predictions: 0,
         timing_enabled: timing,
         timing_step_count: 0,
         timing_report_interval: 20,
