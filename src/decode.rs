@@ -3286,7 +3286,9 @@ impl CpuDecodeStore {
                     let logits_buf = &mut graph.route_logits[..ne];
                     let scores_buf = &mut graph.route_scores[..ne];
                     let corrected_buf = &mut graph.route_corrected[..ne];
-                    unsafe { moe_route_matmul_avx2_parallel(&rw.data, &graph.hidden[..hd], logits_buf, ne, hd) };
+                    // Serial routing: gate data fits in L3, parallel dispatch overhead
+                    // (thread wake-up ~30us * 11 threads * 40 layers) dominates for small ne.
+                    unsafe { moe_route_matmul_avx2(&rw.data, &graph.hidden[..hd], logits_buf, ne, hd) };
                     if let Some(ref bias) = rw.bias {
                         for e in 0..ne { logits_buf[e] += bias[e]; }
                     }
@@ -4097,7 +4099,44 @@ fn moe_route_score_topk(
     let ne = logits.len();
     match scoring_func {
         0 => {
-            // sigmoid
+            // sigmoid — AVX2 vectorized with fast exp for 8 elements at a time
+            #[cfg(target_arch = "x86_64")]
+            {
+                use std::arch::x86_64::*;
+                let ne8 = ne / 8;
+                let one = unsafe { _mm256_set1_ps(1.0) };
+                for i in 0..ne8 {
+                    unsafe {
+                        let x = _mm256_loadu_ps(logits.as_ptr().add(i * 8));
+                        let neg_x = _mm256_sub_ps(_mm256_setzero_ps(), x);
+                        // Fast exp approximation via integer trick
+                        let log2e = _mm256_set1_ps(1.4426950408889634);
+                        let t = _mm256_mul_ps(neg_x, log2e);
+                        let n = _mm256_floor_ps(t);
+                        let ni = _mm256_cvtps_epi32(n);
+                        let f = _mm256_sub_ps(t, n);
+                        // 4th order polynomial for 2^f on [0,1]
+                        let c0 = _mm256_set1_ps(1.0);
+                        let c1 = _mm256_set1_ps(0.6931472);
+                        let c2 = _mm256_set1_ps(0.2402265);
+                        let c3 = _mm256_set1_ps(0.0558011);
+                        let c4 = _mm256_set1_ps(0.009518);
+                        let poly = _mm256_fmadd_ps(
+                            _mm256_fmadd_ps(
+                                _mm256_fmadd_ps(
+                                    _mm256_fmadd_ps(c4, f, c3), f, c2), f, c1), f, c0);
+                        let pow2n = _mm256_castsi256_ps(_mm256_slli_epi32(
+                            _mm256_add_epi32(ni, _mm256_set1_epi32(127)), 23));
+                        let exp_neg = _mm256_mul_ps(poly, pow2n);
+                        let sigmoid = _mm256_div_ps(one, _mm256_add_ps(one, exp_neg));
+                        _mm256_storeu_ps(scores.as_mut_ptr().add(i * 8), sigmoid);
+                    }
+                }
+                for e in (ne8 * 8)..ne {
+                    scores[e] = 1.0 / (1.0 + (-logits[e]).exp());
+                }
+            }
+            #[cfg(not(target_arch = "x86_64"))]
             for e in 0..ne { scores[e] = 1.0 / (1.0 + (-logits[e]).exp()); }
             if let Some(ref esc) = e_score_corr {
                 for e in 0..ne { corrected[e] = scores[e] + esc[e]; }
