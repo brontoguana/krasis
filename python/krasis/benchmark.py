@@ -377,36 +377,57 @@ class KrasisBenchmark:
     ) -> Dict:
         """Run a request through the exact same path as the Rust HTTP server.
 
-        Calls server_prefill() → generate_batch() → server_cleanup().
+        Uses server_prefill() → decode → server_cleanup().
+        Respects model.decode_mode: "gpu" uses model.forward() per token,
+        "cpu" uses CpuDecodeStore.generate_batch() in Rust.
         The ONLY difference vs the network path is no HTTP/SSE transport.
-        Timing uses Rust's Instant clock (same as the server).
         """
+        import time as _time
+
         messages = [{"role": "user", "content": content_text}]
         messages_json = json.dumps(messages)
 
+        decode_mode = getattr(self.model, 'decode_mode', 'cpu')
         result = self.model.server_prefill(
             messages_json, max_new_tokens, temperature, top_k,
             top_p=0.95, presence_penalty=0.0,
             enable_thinking=False, extra_stop_tokens=[],
+            decode_mode=decode_mode,
         )
 
         generated = [result.first_token]
         decode_time = 0.0
 
         if max_new_tokens > 1 and result.first_token not in result.stop_ids:
-            store = self.model._cpu_decoder._store
-            decode_tokens = store.generate_batch(
-                first_token=result.first_token,
-                start_position=result.prompt_len,
-                max_tokens=max_new_tokens - 1,
-                temperature=temperature,
-                top_k=top_k,
-                top_p=0.95,
-                stop_ids=result.stop_ids,
-                presence_penalty=0.0,
-            )
-            generated.extend(decode_tokens)
-            decode_time = store.last_decode_elapsed_s
+            if decode_mode == "gpu":
+                # GPU decode: per-token model.forward() — same as server GPU path
+                import torch
+                stop_set = set(result.stop_ids)
+                t_decode = _time.perf_counter()
+                next_token = result.first_token
+                for step in range(max_new_tokens - 1):
+                    pos = result.prompt_len + step
+                    next_token = self.model.server_gpu_decode_step(next_token, pos)
+                    generated.append(next_token)
+                    if next_token in stop_set:
+                        break
+                torch.cuda.synchronize()
+                decode_time = _time.perf_counter() - t_decode
+            else:
+                # CPU decode: Rust generate_batch — same as server CPU path
+                store = self.model._cpu_decoder._store
+                decode_tokens = store.generate_batch(
+                    first_token=result.first_token,
+                    start_position=result.prompt_len,
+                    max_tokens=max_new_tokens - 1,
+                    temperature=temperature,
+                    top_k=top_k,
+                    top_p=0.95,
+                    stop_ids=result.stop_ids,
+                    presence_penalty=0.0,
+                )
+                generated.extend(decode_tokens)
+                decode_time = store.last_decode_elapsed_s
 
         prefill_time = result.prefill_time
         prompt_len = result.prompt_len

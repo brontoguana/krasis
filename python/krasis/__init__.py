@@ -12,6 +12,10 @@ try:
         from krasis.krasis import GpuDecodeStore
     except ImportError:
         pass  # Built without CUDA feature
+    try:
+        from krasis.krasis import VramMonitor
+    except ImportError:
+        pass  # Built without CUDA feature
 except ImportError:
     # Native module not built yet
     pass

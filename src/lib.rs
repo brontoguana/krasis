@@ -7,6 +7,7 @@ pub mod moe;
 pub mod numa;
 pub mod server;
 pub mod syscheck;
+pub mod vram_monitor;
 pub mod weights;
 
 use pyo3::prelude::*;
@@ -20,6 +21,7 @@ fn krasis(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<decode::CpuDecodeStore>()?;
     m.add_class::<server::RustServer>()?;
     m.add_class::<gpu_decode::GpuDecodeStore>()?;
+    m.add_class::<vram_monitor::VramMonitor>()?;
     m.add_function(wrap_pyfunction!(syscheck::system_check, m)?)?;
     m.add_function(wrap_pyfunction!(decode::bench_decode_synthetic, m)?)?;
     Ok(())

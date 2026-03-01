@@ -48,6 +48,10 @@ const KERNEL_NAMES: &[&str] = &[
     "fp32_to_bf16",
     "marlin_gemv_int4",
     "marlin_gemv_int4_fused_silu_accum",
+    "marlin_gemv_int4_v2",
+    "reduce_ksplits_bf16",
+    "marlin_gemv_int4_fused_silu_accum_v2",
+    "reduce_ksplits_weighted_accum_bf16",
 ];
 
 const MODULE_NAME: &str = "decode_kernels";
@@ -455,6 +459,11 @@ struct CachedKernels {
     embedding_lookup: cudarc::driver::CudaFunction,
     marlin_gemv_int4: cudarc::driver::CudaFunction,
     fused_silu_accum: cudarc::driver::CudaFunction,
+    // v2 kernels with K-splitting for better SM occupancy
+    marlin_gemv_int4_v2: cudarc::driver::CudaFunction,
+    reduce_ksplits_bf16: cudarc::driver::CudaFunction,
+    fused_silu_accum_v2: cudarc::driver::CudaFunction,
+    reduce_ksplits_weighted_accum_bf16: cudarc::driver::CudaFunction,
 }
 
 // ── Main GPU decode graph ──────────────────────────────────────────────
@@ -538,6 +547,11 @@ struct GpuDecodeGraph {
     // Marlin GEMV inverse permutation tables (on GPU)
     d_inv_weight_perm: cudarc::driver::CudaSlice<i32>,
     d_inv_scale_perm: cudarc::driver::CudaSlice<i32>,
+
+    // v2 K-split partial sum buffer: [max_k_splits * max_N] FP32
+    // max_N = max(2*intermediate_size, hidden_size), max_k_splits = 8
+    d_v2_partial: cudarc::driver::CudaSlice<f32>,
+    num_sms: usize,
 
     // GQA scratch (FP32 for Q, K, V, attention output)
     d_gqa_q: cudarc::driver::CudaSlice<f32>,
@@ -744,6 +758,26 @@ impl GpuDecodeStore {
         let d_expert_scratch = self.device.alloc_zeros::<u16>(intermediate)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
 
+        // v2 K-split partial sum buffer: max_k_splits=8, max_N = max(2*intermediate, hidden_size)
+        let max_n_v2 = (intermediate * 2).max(hidden_size);
+        let max_k_splits = 8;
+        let d_v2_partial = self.device.alloc_zeros::<f32>(max_k_splits * max_n_v2)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
+
+        // Query SM count for auto K-split calculation
+        let num_sms = unsafe {
+            let mut dev: i32 = 0;
+            cuda_sys::lib().cuCtxGetDevice(&mut dev);
+            let mut count: i32 = 0;
+            cuda_sys::lib().cuDeviceGetAttribute(
+                &mut count,
+                cuda_sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
+                dev,
+            );
+            count.max(1) as usize
+        };
+        log::info!("GpuDecodeStore: GPU has {} SMs", num_sms);
+
         // Compute and upload inverse Marlin permutation tables
         let (d_inv_weight_perm, d_inv_scale_perm) = Self::upload_marlin_perm_tables(&self.device)?;
 
@@ -809,6 +843,8 @@ impl GpuDecodeStore {
             d_expert_scratch,
             d_inv_weight_perm,
             d_inv_scale_perm,
+            d_v2_partial,
+            num_sms,
             d_gqa_q,
             d_gqa_k,
             d_gqa_v,
@@ -858,9 +894,13 @@ impl GpuDecodeStore {
                 embedding_lookup: get("embedding_lookup")?,
                 marlin_gemv_int4: get("marlin_gemv_int4")?,
                 fused_silu_accum: get("marlin_gemv_int4_fused_silu_accum")?,
+                marlin_gemv_int4_v2: get("marlin_gemv_int4_v2")?,
+                reduce_ksplits_bf16: get("reduce_ksplits_bf16")?,
+                fused_silu_accum_v2: get("marlin_gemv_int4_fused_silu_accum_v2")?,
+                reduce_ksplits_weighted_accum_bf16: get("reduce_ksplits_weighted_accum_bf16")?,
             };
             self.graph.as_mut().unwrap().kernels = Some(kernels);
-            log::info!("GpuDecodeStore: cached 14 kernel function handles");
+            log::info!("GpuDecodeStore: cached 18 kernel function handles");
         }
 
         // Pre-allocate CUDA events (reuse across MoE forward calls)
@@ -1688,6 +1728,14 @@ impl GpuDecodeStore {
     fn bench_shared_expert_residency(&mut self, model_dir: &str, num_tokens: usize) -> PyResult<String> {
         self.bench_shared_expert_residency_internal(model_dir, num_tokens)
     }
+
+    /// Benchmark raw PCIe DMA bandwidth + pure HCS compute speed.
+    /// Tests: (1) H2D DMA at various transfer sizes, (2) pure GEMV compute
+    /// on VRAM-resident experts, (3) full MoE forward breakdown.
+    #[pyo3(signature = (model_dir, num_tokens=10))]
+    fn bench_pcie_and_compute(&mut self, model_dir: &str, num_tokens: usize) -> PyResult<String> {
+        self.bench_pcie_and_compute_internal(model_dir, num_tokens)
+    }
 }
 
 // ── Marlin perm table computation + GPU decode internals ──────────────
@@ -1978,6 +2026,165 @@ impl GpuDecodeStore {
         Ok(())
     }
 
+    /// Calculate optimal K_SPLITS for v2 kernels based on problem size and GPU SM count.
+    fn calc_k_splits(&self, k: usize, n: usize) -> usize {
+        let graph = match self.graph.as_ref() {
+            Some(g) => g,
+            None => return 1,
+        };
+        let num_sms = graph.num_sms;
+        let k_tiles = k / 16;
+        // Maximum K_SPLITS: each k_slice (16 per block) needs at least 1 tile
+        let max_ksplits = k_tiles / 16;
+        if max_ksplits <= 1 { return 1; }
+
+        let n_tiles = (n + 15) / 16;
+        // Target: 4 blocks per SM for good occupancy
+        let target_blocks = num_sms * 4;
+        let desired = (target_blocks + n_tiles - 1) / n_tiles;
+        desired.clamp(1, max_ksplits.min(8))
+    }
+
+    /// Launch Marlin GEMV v2 with K-splitting.
+    /// Output goes to d_v2_partial as FP32 [k_splits, N].
+    /// Caller must then launch reduce_ksplits_bf16 to get final BF16 output.
+    fn launch_marlin_gemv_v2(
+        &self,
+        packed_ptr: u64,
+        scales_ptr: u64,
+        input_ptr: u64,
+        partial_out_ptr: u64,
+        inv_weight_perm_ptr: u64,
+        inv_scale_perm_ptr: u64,
+        k: usize,
+        n: usize,
+        group_size: usize,
+        k_splits: usize,
+        kernels: &CachedKernels,
+    ) -> PyResult<()> {
+        let n_tiles = (n + 15) / 16;
+        // Shared mem: input BF16 [K*2] + inv_wperm [1024*4] + inv_sperm [64*4] + reduce [16*16*4]
+        let smem_bytes = (k * 2 + 1024 * 4 + 64 * 4 + 16 * 16 * 4) as u32;
+        let cfg = LaunchConfig {
+            grid_dim: (n_tiles as u32, k_splits as u32, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: smem_bytes,
+        };
+
+        unsafe {
+            kernels.marlin_gemv_int4_v2.clone().launch(cfg, (
+                packed_ptr,
+                scales_ptr,
+                input_ptr,
+                partial_out_ptr,
+                inv_weight_perm_ptr,
+                inv_scale_perm_ptr,
+                k as i32,
+                n as i32,
+                group_size as i32,
+                k_splits as i32,
+            )).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
+                format!("marlin_gemv_int4_v2 launch: {:?}", e)))?;
+        }
+        Ok(())
+    }
+
+    /// Launch reduce kernel to sum K-split partial sums to BF16 output.
+    fn launch_reduce_ksplits_bf16(
+        &self,
+        output_ptr: u64,
+        partial_ptr: u64,
+        n: usize,
+        k_splits: usize,
+        kernels: &CachedKernels,
+    ) -> PyResult<()> {
+        let cfg = LaunchConfig {
+            grid_dim: (((n + 255) / 256) as u32, 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        unsafe {
+            kernels.reduce_ksplits_bf16.clone().launch(cfg, (
+                output_ptr,
+                partial_ptr,
+                n as i32,
+                k_splits as i32,
+            )).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
+                format!("reduce_ksplits_bf16 launch: {:?}", e)))?;
+        }
+        Ok(())
+    }
+
+    /// Launch fused silu+w2+accum v2 with K-splitting.
+    /// Outputs FP32 partial sums to d_v2_partial.
+    fn launch_fused_silu_accum_v2(
+        &self,
+        w2_packed_ptr: u64,
+        w2_scales_ptr: u64,
+        gate_up_ptr: u64,
+        partial_out_ptr: u64,
+        inv_weight_perm_ptr: u64,
+        inv_scale_perm_ptr: u64,
+        k: usize,
+        n: usize,
+        group_size: usize,
+        k_splits: usize,
+        kernels: &CachedKernels,
+    ) -> PyResult<()> {
+        let n_tiles = (n + 15) / 16;
+        let smem_bytes = (k * 2 + 1024 * 4 + 64 * 4 + 16 * 16 * 4) as u32;
+        let cfg = LaunchConfig {
+            grid_dim: (n_tiles as u32, k_splits as u32, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: smem_bytes,
+        };
+
+        unsafe {
+            kernels.fused_silu_accum_v2.clone().launch(cfg, (
+                w2_packed_ptr,
+                w2_scales_ptr,
+                gate_up_ptr,
+                partial_out_ptr,
+                inv_weight_perm_ptr,
+                inv_scale_perm_ptr,
+                k as i32,
+                n as i32,
+                group_size as i32,
+                k_splits as i32,
+            )).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
+                format!("fused_silu_accum_v2 launch: {:?}", e)))?;
+        }
+        Ok(())
+    }
+
+    /// Launch reduce kernel with weighted accumulation to BF16 accum buffer.
+    fn launch_reduce_ksplits_weighted_accum(
+        &self,
+        accum_ptr: u64,
+        partial_ptr: u64,
+        n: usize,
+        k_splits: usize,
+        weight: f32,
+        kernels: &CachedKernels,
+    ) -> PyResult<()> {
+        let cfg = LaunchConfig {
+            grid_dim: (((n + 255) / 256) as u32, 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        unsafe {
+            kernels.reduce_ksplits_weighted_accum_bf16.clone().launch(cfg, (
+                accum_ptr,
+                partial_ptr,
+                n as i32,
+                k_splits as i32,
+                weight,
+            )).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
+                format!("reduce_ksplits_weighted_accum launch: {:?}", e)))?;
+        }
+        Ok(())
+    }
+
     /// DMA one expert's w13 (packed + scales) to GPU buffer, sync, run Marlin GEMV.
     /// Then DMA w2, sync, run Marlin GEMV.
     /// Result: expert_out = w2 @ silu(gate) * up, where gate_up = w13 @ hidden.
@@ -2158,6 +2365,21 @@ impl GpuDecodeStore {
         let e_score_corr_ptr = moe.e_score_corr_ptr;
         let inv_wp = *graph.d_inv_weight_perm.device_ptr();
         let inv_sp = *graph.d_inv_scale_perm.device_ptr();
+
+        // v2 K-split config for w13 GEMV (only use v2 if k_splits > 1)
+        let w13_n = 2 * intermediate;
+        let w13_k_tiles = hs / 16;
+        let w13_max_ksplits = w13_k_tiles / 16;
+        let w13_ksplits = if w13_max_ksplits > 1 {
+            let n_tiles = (w13_n + 15) / 16;
+            let target = graph.num_sms * 4;
+            let desired = (target + n_tiles - 1) / n_tiles;
+            desired.clamp(1, w13_max_ksplits.min(8))
+        } else {
+            1
+        };
+        let use_v2_w13 = w13_ksplits > 1;
+        let partial_ptr = *graph.d_v2_partial.device_ptr();
 
         let t_start = Instant::now();
 
@@ -2568,14 +2790,28 @@ impl GpuDecodeStore {
                 // ── HCS HIT: zero DMA, VRAM-resident at full bandwidth ──
                 hcs_hits += 1;
 
-                // w13 GEMV: hidden -> gate_up
-                self.launch_marlin_gemv_raw(
-                    w13p, w13s,
-                    *graph.d_hidden.device_ptr(),
-                    *graph.d_expert_gate_up.device_ptr(),
-                    inv_wp, inv_sp,
-                    hs, 2 * intermediate, gs,
-                )?;
+                // w13 GEMV: hidden -> gate_up (use v2 K-split if beneficial)
+                if use_v2_w13 {
+                    self.launch_marlin_gemv_v2(
+                        w13p, w13s,
+                        *graph.d_hidden.device_ptr(),
+                        partial_ptr, inv_wp, inv_sp,
+                        hs, w13_n, gs, w13_ksplits, k,
+                    )?;
+                    self.launch_reduce_ksplits_bf16(
+                        *graph.d_expert_gate_up.device_ptr(),
+                        partial_ptr,
+                        w13_n, w13_ksplits, k,
+                    )?;
+                } else {
+                    self.launch_marlin_gemv_raw(
+                        w13p, w13s,
+                        *graph.d_hidden.device_ptr(),
+                        *graph.d_expert_gate_up.device_ptr(),
+                        inv_wp, inv_sp,
+                        hs, w13_n, gs,
+                    )?;
+                }
 
                 // Fused: silu_mul + w2 GEMV + weighted_add (3 launches -> 1)
                 self.launch_fused_silu_accum(
@@ -2644,14 +2880,28 @@ impl GpuDecodeStore {
 
                 // Compute from buf[slot]
                 let base = buf_base[slot];
-                // w13 GEMV: hidden -> gate_up
-                self.launch_marlin_gemv_raw(
-                    base + w13p_off as u64, base + w13s_off as u64,
-                    *graph.d_hidden.device_ptr(),
-                    *graph.d_expert_gate_up.device_ptr(),
-                    inv_wp, inv_sp,
-                    hs, 2 * intermediate, gs,
-                )?;
+                // w13 GEMV: hidden -> gate_up (v2 K-split if beneficial)
+                if use_v2_w13 {
+                    self.launch_marlin_gemv_v2(
+                        base + w13p_off as u64, base + w13s_off as u64,
+                        *graph.d_hidden.device_ptr(),
+                        partial_ptr, inv_wp, inv_sp,
+                        hs, w13_n, gs, w13_ksplits, k,
+                    )?;
+                    self.launch_reduce_ksplits_bf16(
+                        *graph.d_expert_gate_up.device_ptr(),
+                        partial_ptr,
+                        w13_n, w13_ksplits, k,
+                    )?;
+                } else {
+                    self.launch_marlin_gemv_raw(
+                        base + w13p_off as u64, base + w13s_off as u64,
+                        *graph.d_hidden.device_ptr(),
+                        *graph.d_expert_gate_up.device_ptr(),
+                        inv_wp, inv_sp,
+                        hs, w13_n, gs,
+                    )?;
+                }
 
                 // Fused: silu_mul + w2 GEMV + weighted_add (3 launches -> 1)
                 self.launch_fused_silu_accum(
@@ -2694,14 +2944,28 @@ impl GpuDecodeStore {
                     cuda_sys::lib().cuStreamWaitEvent(default_stream, ev_dma_w13, 0);
                 }
 
-                // w13 GEMV: hidden -> gate_up
-                self.launch_marlin_gemv_raw(
-                    buf_w13_packed, buf_w13_scales,
-                    *graph.d_hidden.device_ptr(),
-                    *graph.d_expert_gate_up.device_ptr(),
-                    inv_wp, inv_sp,
-                    hs, 2 * intermediate, gs,
-                )?;
+                // w13 GEMV: hidden -> gate_up (v2 K-split if beneficial)
+                if use_v2_w13 {
+                    self.launch_marlin_gemv_v2(
+                        buf_w13_packed, buf_w13_scales,
+                        *graph.d_hidden.device_ptr(),
+                        partial_ptr, inv_wp, inv_sp,
+                        hs, w13_n, gs, w13_ksplits, k,
+                    )?;
+                    self.launch_reduce_ksplits_bf16(
+                        *graph.d_expert_gate_up.device_ptr(),
+                        partial_ptr,
+                        w13_n, w13_ksplits, k,
+                    )?;
+                } else {
+                    self.launch_marlin_gemv_raw(
+                        buf_w13_packed, buf_w13_scales,
+                        *graph.d_hidden.device_ptr(),
+                        *graph.d_expert_gate_up.device_ptr(),
+                        inv_wp, inv_sp,
+                        hs, w13_n, gs,
+                    )?;
+                }
 
                 // DMA w2 weights while w13 GEMV runs
                 unsafe {
@@ -3173,7 +3437,7 @@ impl GpuDecodeStore {
         // Step 1: Load model weights (GPU Marlin format only, cpu_bits=4 gpu_bits=4)
         let t0 = Instant::now();
         let store = WeightStore::load_from_hf(
-            Path::new(model_dir), 128, None, None, 4, 4,
+            Path::new(model_dir), 128, None, None, 4, 4, false,
         ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
             format!("Failed to load model: {}", e)))?;
 
@@ -3365,7 +3629,7 @@ impl GpuDecodeStore {
         // Load model
         let t0 = Instant::now();
         let store = crate::weights::WeightStore::load_from_hf(
-            Path::new(model_dir), 128, None, None, 4, 4,
+            Path::new(model_dir), 128, None, None, 4, 4, false,
         ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
             format!("Failed to load model: {}", e)))?;
 
@@ -3865,7 +4129,7 @@ impl GpuDecodeStore {
         // Step 1: Load model weights
         let t0 = Instant::now();
         let store = crate::weights::WeightStore::load_from_hf(
-            Path::new(model_dir), 128, None, None, 4, 4,
+            Path::new(model_dir), 128, None, None, 4, 4, false,
         ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
             format!("Failed to load model: {}", e)))?;
 
@@ -4083,7 +4347,7 @@ impl GpuDecodeStore {
         // Step 1: Load model
         let t0 = Instant::now();
         let store = crate::weights::WeightStore::load_from_hf(
-            Path::new(model_dir), 128, None, None, 4, 4,
+            Path::new(model_dir), 128, None, None, 4, 4, false,
         ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
             format!("Failed to load model: {}", e)))?;
 
@@ -4271,6 +4535,822 @@ impl GpuDecodeStore {
 
         let total_elapsed = t_start.elapsed().as_secs_f64();
         results.push(format!("Total bench time: {:.1}s", total_elapsed));
+
+        std::mem::forget(store);
+        Ok(results.join("\n"))
+    }
+
+    /// Benchmark PCIe DMA bandwidth and pure HCS compute speed.
+    fn bench_pcie_and_compute_internal(
+        &mut self,
+        model_dir: &str,
+        num_tokens: usize,
+    ) -> PyResult<String> {
+        use std::path::Path;
+        use std::time::Instant;
+
+        let mut results = Vec::new();
+        let t_start = Instant::now();
+
+        // ═══════════════════════════════════════════════════════════════════
+        // PART 1: Raw PCIe DMA bandwidth test (no model needed)
+        // ═══════════════════════════════════════════════════════════════════
+        results.push("=== PART 1: Raw PCIe H2D DMA Bandwidth ===".to_string());
+
+        // Test various transfer sizes from 1 KB to 64 MB
+        let test_sizes: Vec<(usize, &str)> = vec![
+            (1024, "1 KB"),
+            (4 * 1024, "4 KB"),
+            (16 * 1024, "16 KB"),
+            (64 * 1024, "64 KB"),
+            (256 * 1024, "256 KB"),
+            (512 * 1024, "512 KB"),
+            (1024 * 1024, "1 MB"),
+            (2 * 1024 * 1024, "2 MB"),
+            (4 * 1024 * 1024, "4 MB"),
+            (8 * 1024 * 1024, "8 MB"),
+            (16 * 1024 * 1024, "16 MB"),
+            (32 * 1024 * 1024, "32 MB"),
+            (64 * 1024 * 1024, "64 MB"),
+        ];
+
+        for &(size, label) in &test_sizes {
+            // Allocate pinned host memory + device memory
+            let mut h_buf: Vec<u8> = vec![0xABu8; size];
+            let d_buf = self.device.alloc_zeros::<u8>(size)
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
+
+            // Pin host memory for async DMA
+            unsafe {
+                cuda_sys::lib().cuMemHostRegister_v2(
+                    h_buf.as_mut_ptr() as *mut std::ffi::c_void,
+                    size,
+                    0, // CU_MEMHOSTREGISTER_DEFAULT
+                );
+            }
+
+            let copy_stream = self.copy_stream.0;
+
+            // Warmup: 3 transfers
+            for _ in 0..3 {
+                unsafe {
+                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                        *d_buf.device_ptr(),
+                        h_buf.as_ptr() as *const std::ffi::c_void,
+                        size,
+                        copy_stream,
+                    );
+                }
+            }
+            unsafe {
+                cuda_sys::lib().cuStreamSynchronize(copy_stream);
+            }
+
+            // Timed: N iterations (more for small sizes to get stable timing)
+            let iters = if size < 64 * 1024 { 200 } else if size < 1024 * 1024 { 100 } else { 50 };
+
+            let t0 = Instant::now();
+            for _ in 0..iters {
+                unsafe {
+                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                        *d_buf.device_ptr(),
+                        h_buf.as_ptr() as *const std::ffi::c_void,
+                        size,
+                        copy_stream,
+                    );
+                }
+            }
+            unsafe {
+                cuda_sys::lib().cuStreamSynchronize(copy_stream);
+            }
+            let elapsed = t0.elapsed().as_secs_f64();
+            let total_bytes = size as f64 * iters as f64;
+            let bw_gbs = total_bytes / elapsed / 1e9;
+            let per_xfer_us = elapsed * 1e6 / iters as f64;
+
+            results.push(format!(
+                "  {:>6}: {:.2} GB/s  ({:.1} us/xfer, {} iters)",
+                label, bw_gbs, per_xfer_us, iters,
+            ));
+
+            // Unpin
+            unsafe {
+                cuda_sys::lib().cuMemHostUnregister(h_buf.as_mut_ptr() as *mut std::ffi::c_void);
+            }
+        }
+
+        // Also test unpinned (pageable) DMA for comparison at a few sizes
+        results.push("".to_string());
+        results.push("  -- Unpinned (pageable) for comparison --".to_string());
+        for &(size, label) in &[(1024 * 1024, "1 MB"), (16 * 1024 * 1024, "16 MB")] {
+            let h_buf: Vec<u8> = vec![0xABu8; size];
+            let d_buf = self.device.alloc_zeros::<u8>(size)
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
+
+            // Warmup
+            for _ in 0..3 {
+                unsafe {
+                    cuda_sys::lib().cuMemcpyHtoD_v2(
+                        *d_buf.device_ptr(),
+                        h_buf.as_ptr() as *const std::ffi::c_void,
+                        size,
+                    );
+                }
+            }
+
+            let iters = 30;
+            let t0 = Instant::now();
+            for _ in 0..iters {
+                unsafe {
+                    cuda_sys::lib().cuMemcpyHtoD_v2(
+                        *d_buf.device_ptr(),
+                        h_buf.as_ptr() as *const std::ffi::c_void,
+                        size,
+                    );
+                }
+            }
+            let elapsed = t0.elapsed().as_secs_f64();
+            let bw_gbs = (size as f64 * iters as f64) / elapsed / 1e9;
+            let per_xfer_us = elapsed * 1e6 / iters as f64;
+            results.push(format!(
+                "  {:>6}: {:.2} GB/s  ({:.1} us/xfer, {} iters) [pageable]",
+                label, bw_gbs, per_xfer_us, iters,
+            ));
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        // PART 2: Load model and measure expert sizes
+        // ═══════════════════════════════════════════════════════════════════
+        results.push("".to_string());
+        results.push("=== PART 2: Model Expert Sizes ===".to_string());
+
+        let t0 = Instant::now();
+        let store = crate::weights::WeightStore::load_from_hf(
+            Path::new(model_dir), 128, None, None, 4, 4, false,
+        ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
+            format!("Failed to load model: {}", e)))?;
+
+        let config = &store.config;
+        let hidden_size = config.hidden_size;
+        let intermediate_size = config.moe_intermediate_size;
+        let n_experts = config.n_routed_experts;
+        let topk = config.num_experts_per_tok;
+        let group_size = store.group_size;
+        let num_moe_layers = store.experts_gpu.len();
+
+        results.push(format!(
+            "Loaded in {:.1}s: {} MoE layers, {} experts, topk={}, hidden={}, intermediate={}",
+            t0.elapsed().as_secs_f64(), num_moe_layers, n_experts, topk,
+            hidden_size, intermediate_size,
+        ));
+
+        // Measure actual expert sizes
+        if !store.experts_gpu.is_empty() && !store.experts_gpu[0].is_empty() {
+            let e0 = &store.experts_gpu[0][0];
+            let w13p = e0.w13_packed.len() * 4;
+            let w13s = e0.w13_scales.len() * 2;
+            let w2p = e0.w2_packed.len() * 4;
+            let w2s = e0.w2_scales.len() * 2;
+            let total = w13p + w13s + w2p + w2s;
+            results.push(format!(
+                "Expert size: w13_packed={} B, w13_scales={} B, w2_packed={} B, w2_scales={} B, total={} B ({:.1} KB)",
+                w13p, w13s, w2p, w2s, total, total as f64 / 1024.0,
+            ));
+            results.push(format!(
+                "Per-layer DMA (topk={}): {} experts x {} B = {} B ({:.1} KB, {:.2} MB)",
+                topk, topk, total, topk * total, (topk * total) as f64 / 1024.0,
+                (topk * total) as f64 / (1024.0 * 1024.0),
+            ));
+            results.push(format!(
+                "Per-token DMA (all layers): {} layers x {:.2} MB = {:.1} MB",
+                num_moe_layers,
+                (topk * total) as f64 / (1024.0 * 1024.0),
+                (num_moe_layers * topk * total) as f64 / (1024.0 * 1024.0),
+            ));
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        // PART 3: Configure GPU and register layers
+        // ═══════════════════════════════════════════════════════════════════
+        self.configure(
+            hidden_size, config.num_hidden_layers, 1, 1e-6,
+            topk, intermediate_size, hidden_size * 3, group_size,
+        )?;
+
+        let mut max_expert_bytes = 0usize;
+        for moe_idx in 0..num_moe_layers {
+            let gate_fp32: Vec<f32> = (0..n_experts * hidden_size)
+                .map(|i| ((i as f32 * 0.0001 + moe_idx as f32 * 0.1) - 0.05).sin() * 0.01)
+                .collect();
+            let d_gate = self.device.htod_copy(gate_fp32)
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
+
+            let gate_wid = {
+                let graph = self.graph.as_mut().unwrap();
+                let wid = graph.weights.len();
+                graph.weights.push(GpuWeight {
+                    ptr: *d_gate.device_ptr(),
+                    rows: n_experts, cols: hidden_size, dtype: 1,
+                });
+                std::mem::forget(d_gate);
+                wid
+            };
+
+            let gpu_experts = &store.experts_gpu[moe_idx];
+            let mut expert_ptrs = Vec::with_capacity(gpu_experts.len());
+            for expert in gpu_experts.iter() {
+                let w13p_bytes = expert.w13_packed.len() * 4;
+                let w2p_bytes = expert.w2_packed.len() * 4;
+                let max_single = w13p_bytes.max(w2p_bytes);
+                if max_single > max_expert_bytes { max_expert_bytes = max_single; }
+                expert_ptrs.push((
+                    expert.w13_packed.as_ptr() as usize, w13p_bytes,
+                    expert.w13_scales.as_ptr() as usize, expert.w13_scales.len() * 2,
+                    expert.w2_packed.as_ptr() as usize, w2p_bytes,
+                    expert.w2_scales.as_ptr() as usize, expert.w2_scales.len() * 2,
+                ));
+            }
+
+            let shared_ptrs = if moe_idx < store.shared_experts_gpu.len() {
+                let se = &store.shared_experts_gpu[moe_idx];
+                if se.w13_packed.is_empty() { None }
+                else {
+                    let w13p_bytes = se.w13_packed.len() * 4;
+                    let w2p_bytes = se.w2_packed.len() * 4;
+                    let max_single = w13p_bytes.max(w2p_bytes);
+                    if max_single > max_expert_bytes { max_expert_bytes = max_single; }
+                    Some((
+                        se.w13_packed.as_ptr() as usize, w13p_bytes,
+                        se.w13_scales.as_ptr() as usize, se.w13_scales.len() * 2,
+                        se.w2_packed.as_ptr() as usize, w2p_bytes,
+                        se.w2_scales.as_ptr() as usize, se.w2_scales.len() * 2,
+                    ))
+                }
+            } else {
+                None
+            };
+
+            self.register_moe_layer(
+                moe_idx, expert_ptrs, shared_ptrs, n_experts, topk,
+                0, false, config.routed_scaling_factor, gate_wid, 0, 0, None,
+            )?;
+        }
+
+        let buf_size = ((max_expert_bytes as f64) * 1.2) as usize;
+        self.resize_expert_buffers(buf_size.max(1024))?;
+
+        // ═══════════════════════════════════════════════════════════════════
+        // PART 4: Pure DMA test with REAL expert weights
+        // ═══════════════════════════════════════════════════════════════════
+        results.push("".to_string());
+        results.push("=== PART 3: DMA with Real Expert Weights ===".to_string());
+        {
+            let graph = self.graph.as_ref().unwrap();
+            let moe = graph.moe_layers[0].as_ref().unwrap();
+            let expert = &moe.experts[0];
+            let total_bytes = expert.w13_packed_bytes + expert.w13_scales_bytes
+                + expert.w2_packed_bytes + expert.w2_scales_bytes;
+
+            // Single expert DMA (4 separate calls, as current code does)
+            let copy_stream = self.copy_stream.0;
+            let buf_base = *graph.d_expert_buf[0].device_ptr();
+            let w13p_off = graph.expert_buf_w13p_offset;
+            let w13s_off = graph.expert_buf_w13s_offset;
+            let w2p_off = graph.expert_buf_w2p_offset;
+            let w2s_off = graph.expert_buf_w2s_offset;
+
+            // Warmup
+            for _ in 0..5 {
+                unsafe {
+                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                        buf_base + w13p_off as u64, expert.w13_packed_ptr as *const std::ffi::c_void,
+                        expert.w13_packed_bytes, copy_stream);
+                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                        buf_base + w13s_off as u64, expert.w13_scales_ptr as *const std::ffi::c_void,
+                        expert.w13_scales_bytes, copy_stream);
+                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                        buf_base + w2p_off as u64, expert.w2_packed_ptr as *const std::ffi::c_void,
+                        expert.w2_packed_bytes, copy_stream);
+                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                        buf_base + w2s_off as u64, expert.w2_scales_ptr as *const std::ffi::c_void,
+                        expert.w2_scales_bytes, copy_stream);
+                }
+            }
+            unsafe { cuda_sys::lib().cuStreamSynchronize(copy_stream); }
+
+            // Time single expert DMA (4 calls)
+            let iters = 200;
+            let t0 = Instant::now();
+            for _ in 0..iters {
+                unsafe {
+                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                        buf_base + w13p_off as u64, expert.w13_packed_ptr as *const std::ffi::c_void,
+                        expert.w13_packed_bytes, copy_stream);
+                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                        buf_base + w13s_off as u64, expert.w13_scales_ptr as *const std::ffi::c_void,
+                        expert.w13_scales_bytes, copy_stream);
+                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                        buf_base + w2p_off as u64, expert.w2_packed_ptr as *const std::ffi::c_void,
+                        expert.w2_packed_bytes, copy_stream);
+                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                        buf_base + w2s_off as u64, expert.w2_scales_ptr as *const std::ffi::c_void,
+                        expert.w2_scales_bytes, copy_stream);
+                }
+            }
+            unsafe { cuda_sys::lib().cuStreamSynchronize(copy_stream); }
+            let elapsed = t0.elapsed().as_secs_f64();
+            let per_xfer_us = elapsed * 1e6 / iters as f64;
+            let bw = total_bytes as f64 * iters as f64 / elapsed / 1e9;
+
+            results.push(format!(
+                "  Single expert (4 calls, {} B): {:.1} us/expert, {:.2} GB/s effective",
+                total_bytes, per_xfer_us, bw,
+            ));
+
+            // Time 10-expert sequence (simulates one layer's DMA)
+            let t0 = Instant::now();
+            let layer_iters = 100;
+            for _ in 0..layer_iters {
+                for eid in 0..topk.min(n_experts) {
+                    let exp = &moe.experts[eid];
+                    unsafe {
+                        cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                            buf_base + w13p_off as u64, exp.w13_packed_ptr as *const std::ffi::c_void,
+                            exp.w13_packed_bytes, copy_stream);
+                        cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                            buf_base + w13s_off as u64, exp.w13_scales_ptr as *const std::ffi::c_void,
+                            exp.w13_scales_bytes, copy_stream);
+                        cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                            buf_base + w2p_off as u64, exp.w2_packed_ptr as *const std::ffi::c_void,
+                            exp.w2_packed_bytes, copy_stream);
+                        cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                            buf_base + w2s_off as u64, exp.w2_scales_ptr as *const std::ffi::c_void,
+                            exp.w2_scales_bytes, copy_stream);
+                    }
+                }
+            }
+            unsafe { cuda_sys::lib().cuStreamSynchronize(copy_stream); }
+            let elapsed = t0.elapsed().as_secs_f64();
+            let per_layer_us = elapsed * 1e6 / layer_iters as f64;
+            let layer_bytes = total_bytes * topk.min(n_experts);
+            let bw = layer_bytes as f64 * layer_iters as f64 / elapsed / 1e9;
+
+            results.push(format!(
+                "  Full layer ({} experts, {} B): {:.1} us/layer, {:.2} GB/s effective",
+                topk.min(n_experts), layer_bytes, per_layer_us, bw,
+            ));
+            results.push(format!(
+                "  Projected per-token DMA ({} layers): {:.1} ms",
+                num_moe_layers, per_layer_us * num_moe_layers as f64 / 1000.0,
+            ));
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        // PART 5: Pure HCS compute (VRAM-resident, zero DMA)
+        // ═══════════════════════════════════════════════════════════════════
+        results.push("".to_string());
+        results.push("=== PART 4: Pure HCS Compute (zero DMA) ===".to_string());
+
+        // Pin all experts for full HCS
+        let msg = self.init_hcs_internal(0, 500)?;
+        results.push(format!("  {}", msg));
+        let msg = self.hcs_pin_all_internal()?;
+        results.push(format!("  {}", msg));
+
+        let graph = self.graph.as_ref().unwrap();
+        let hcs = graph.hcs.as_ref().unwrap();
+        results.push(format!(
+            "  HCS cache: {} experts, {:.1} MB",
+            hcs.num_cached, hcs.vram_bytes as f64 / (1024.0 * 1024.0),
+        ));
+
+        // Test A: Single expert GEMV (w13 + fused silu+w2+accum) — pure compute, no routing
+        results.push("".to_string());
+        results.push("  -- Single Expert Compute (w13 GEMV + fused silu+w2+accum) --".to_string());
+        {
+            let graph = self.graph.as_ref().unwrap();
+            let inv_wp = *graph.d_inv_weight_perm.device_ptr();
+            let inv_sp = *graph.d_inv_scale_perm.device_ptr();
+            let hs = graph.hidden_size;
+            let intermediate = graph.intermediate_size;
+            let gs = graph.group_size;
+            let k = graph.kernels.as_ref().unwrap();
+
+            // Pick first HCS expert
+            let hcs = graph.hcs.as_ref().unwrap();
+            let first_key = hcs.cache.keys().next().unwrap();
+            let entry = hcs.cache.get(first_key).unwrap();
+            let (w13p, w13s, w2p, w2s) = (
+                entry.w13_packed_ptr(), entry.w13_scales_ptr(),
+                entry.w2_packed_ptr(), entry.w2_scales_ptr(),
+            );
+
+            // Warmup
+            for _ in 0..10 {
+                self.launch_marlin_gemv_raw(
+                    w13p, w13s,
+                    *graph.d_hidden.device_ptr(),
+                    *graph.d_expert_gate_up.device_ptr(),
+                    inv_wp, inv_sp, hs, 2 * intermediate, gs,
+                )?;
+                self.launch_fused_silu_accum(
+                    w2p, w2s,
+                    *graph.d_expert_gate_up.device_ptr(),
+                    *graph.d_moe_out.device_ptr(),
+                    inv_wp, inv_sp,
+                    intermediate, hs, gs, 0.1f32, k,
+                )?;
+            }
+            self.device.synchronize()
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
+
+            // Benchmark single expert compute
+            let iters = 500;
+            let t0 = Instant::now();
+            for _ in 0..iters {
+                self.launch_marlin_gemv_raw(
+                    w13p, w13s,
+                    *graph.d_hidden.device_ptr(),
+                    *graph.d_expert_gate_up.device_ptr(),
+                    inv_wp, inv_sp, hs, 2 * intermediate, gs,
+                )?;
+                self.launch_fused_silu_accum(
+                    w2p, w2s,
+                    *graph.d_expert_gate_up.device_ptr(),
+                    *graph.d_moe_out.device_ptr(),
+                    inv_wp, inv_sp,
+                    intermediate, hs, gs, 0.1f32, k,
+                )?;
+            }
+            self.device.synchronize()
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
+            let elapsed = t0.elapsed().as_secs_f64();
+            let per_expert_us = elapsed * 1e6 / iters as f64;
+
+            results.push(format!(
+                "  Per expert compute: {:.1} us ({} iters)",
+                per_expert_us, iters,
+            ));
+
+            // Benchmark w13 GEMV alone
+            let t0 = Instant::now();
+            for _ in 0..iters {
+                self.launch_marlin_gemv_raw(
+                    w13p, w13s,
+                    *graph.d_hidden.device_ptr(),
+                    *graph.d_expert_gate_up.device_ptr(),
+                    inv_wp, inv_sp, hs, 2 * intermediate, gs,
+                )?;
+            }
+            self.device.synchronize()
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
+            let w13_us = t0.elapsed().as_secs_f64() * 1e6 / iters as f64;
+
+            // Benchmark fused silu+w2+accum alone
+            let t0 = Instant::now();
+            for _ in 0..iters {
+                self.launch_fused_silu_accum(
+                    w2p, w2s,
+                    *graph.d_expert_gate_up.device_ptr(),
+                    *graph.d_moe_out.device_ptr(),
+                    inv_wp, inv_sp,
+                    intermediate, hs, gs, 0.1f32, k,
+                )?;
+            }
+            self.device.synchronize()
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
+            let fused_us = t0.elapsed().as_secs_f64() * 1e6 / iters as f64;
+
+            results.push(format!(
+                "    w13 GEMV [{},{}]: {:.1} us",
+                hs, 2 * intermediate, w13_us,
+            ));
+            results.push(format!(
+                "    fused silu+w2+accum [{},{}]: {:.1} us",
+                intermediate, hs, fused_us,
+            ));
+
+            // ── v2 K-split benchmark ──
+            let w13_ksplits = self.calc_k_splits(hs, 2 * intermediate);
+            let w2_ksplits = self.calc_k_splits(intermediate, hs);
+            results.push(format!(
+                "  -- v2 K-split: w13 k_splits={}, w2 k_splits={}, {} SMs --",
+                w13_ksplits, w2_ksplits, graph.num_sms,
+            ));
+
+            // v2 w13 GEMV + reduce
+            let partial_ptr = *graph.d_v2_partial.device_ptr();
+            // Warmup
+            for _ in 0..10 {
+                self.launch_marlin_gemv_v2(
+                    w13p, w13s,
+                    *graph.d_hidden.device_ptr(),
+                    partial_ptr, inv_wp, inv_sp,
+                    hs, 2 * intermediate, gs, w13_ksplits, k,
+                )?;
+                self.launch_reduce_ksplits_bf16(
+                    *graph.d_expert_gate_up.device_ptr(),
+                    partial_ptr,
+                    2 * intermediate, w13_ksplits, k,
+                )?;
+            }
+            self.device.synchronize()
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
+
+            let t0 = Instant::now();
+            for _ in 0..iters {
+                self.launch_marlin_gemv_v2(
+                    w13p, w13s,
+                    *graph.d_hidden.device_ptr(),
+                    partial_ptr, inv_wp, inv_sp,
+                    hs, 2 * intermediate, gs, w13_ksplits, k,
+                )?;
+                self.launch_reduce_ksplits_bf16(
+                    *graph.d_expert_gate_up.device_ptr(),
+                    partial_ptr,
+                    2 * intermediate, w13_ksplits, k,
+                )?;
+            }
+            self.device.synchronize()
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
+            let w13_v2_us = t0.elapsed().as_secs_f64() * 1e6 / iters as f64;
+
+            // v2 fused silu+w2+accum + reduce (only if k_splits > 1)
+            let fused_v2_us = if w2_ksplits > 1 {
+                for _ in 0..10 {
+                    self.launch_fused_silu_accum_v2(
+                        w2p, w2s,
+                        *graph.d_expert_gate_up.device_ptr(),
+                        partial_ptr, inv_wp, inv_sp,
+                        intermediate, hs, gs, w2_ksplits, k,
+                    )?;
+                    self.launch_reduce_ksplits_weighted_accum(
+                        *graph.d_moe_out.device_ptr(),
+                        partial_ptr,
+                        hs, w2_ksplits, 0.1f32, k,
+                    )?;
+                }
+                self.device.synchronize()
+                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
+
+                let t0 = Instant::now();
+                for _ in 0..iters {
+                    self.launch_fused_silu_accum_v2(
+                        w2p, w2s,
+                        *graph.d_expert_gate_up.device_ptr(),
+                        partial_ptr, inv_wp, inv_sp,
+                        intermediate, hs, gs, w2_ksplits, k,
+                    )?;
+                    self.launch_reduce_ksplits_weighted_accum(
+                        *graph.d_moe_out.device_ptr(),
+                        partial_ptr,
+                        hs, w2_ksplits, 0.1f32, k,
+                    )?;
+                }
+                self.device.synchronize()
+                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
+                t0.elapsed().as_secs_f64() * 1e6 / iters as f64
+            } else {
+                fused_us // v1 is better for k_splits=1
+            };
+
+            // Best combo: v2 w13 + v1 fused (when fused v2 is slower)
+            let best_fused = if fused_v2_us < fused_us { fused_v2_us } else { fused_us };
+            let best_fused_label = if fused_v2_us < fused_us { "v2" } else { "v1" };
+            let per_expert_best = w13_v2_us + best_fused;
+
+            results.push(format!(
+                "    v2 w13 [{},{}]: {:.1} us (v1: {:.1} us, {:.1}x)",
+                hs, 2 * intermediate, w13_v2_us, w13_us, w13_us / w13_v2_us,
+            ));
+            results.push(format!(
+                "    v2 fused [{},{}]: {:.1} us (v1: {:.1} us, {:.1}x)",
+                intermediate, hs, fused_v2_us, fused_us, fused_us / fused_v2_us,
+            ));
+            results.push(format!(
+                "    BEST combo: v2 w13 + {} fused = {:.1} us/expert (v1: {:.1} us, {:.1}x)",
+                best_fused_label, per_expert_best, per_expert_us, per_expert_us / per_expert_best,
+            ));
+            results.push(format!(
+                "    BEST per token ({} layers x {} experts): {:.1} ms = {:.1} tok/s",
+                num_moe_layers, topk,
+                per_expert_best * topk as f64 * num_moe_layers as f64 / 1000.0,
+                1000.0 / (per_expert_best * topk as f64 * num_moe_layers as f64 / 1000.0),
+            ));
+        }
+
+        // Test B: Full layer compute — 10 experts sequential, all HCS (zero DMA)
+        // Uses v2 w13 + v1 fused (best combo from above)
+        results.push("".to_string());
+        results.push(format!("  -- Full Layer Compute ({} experts, all HCS, v2 w13) --", topk));
+        {
+            let graph = self.graph.as_ref().unwrap();
+            let inv_wp = *graph.d_inv_weight_perm.device_ptr();
+            let inv_sp = *graph.d_inv_scale_perm.device_ptr();
+            let hs = graph.hidden_size;
+            let intermediate = graph.intermediate_size;
+            let gs = graph.group_size;
+            let k = graph.kernels.as_ref().unwrap();
+            let hcs = graph.hcs.as_ref().unwrap();
+            let partial_ptr = *graph.d_v2_partial.device_ptr();
+
+            // Calculate w13 K-splits for v2
+            let w13_n = 2 * intermediate;
+            let w13_k_tiles = hs / 16;
+            let w13_max_ksplits = w13_k_tiles / 16;
+            let w13_ksplits = if w13_max_ksplits > 1 {
+                let n_tiles = (w13_n + 15) / 16;
+                let target = graph.num_sms * 4;
+                let desired = (target + n_tiles - 1) / n_tiles;
+                desired.clamp(1, w13_max_ksplits.min(8))
+            } else {
+                1
+            };
+
+            // Collect first topk HCS entries from layer 0
+            let mut entries: Vec<(u64, u64, u64, u64)> = Vec::new();
+            for eid in 0..topk.min(n_experts) {
+                if let Some(entry) = hcs.get(0, eid) {
+                    entries.push((
+                        entry.w13_packed_ptr(), entry.w13_scales_ptr(),
+                        entry.w2_packed_ptr(), entry.w2_scales_ptr(),
+                    ));
+                }
+            }
+            let num_cached = entries.len();
+
+            if num_cached > 0 {
+                // Warmup
+                for _ in 0..5 {
+                    for (w13p, w13s, w2p, w2s) in &entries {
+                        self.launch_marlin_gemv_v2(
+                            *w13p, *w13s,
+                            *graph.d_hidden.device_ptr(),
+                            partial_ptr, inv_wp, inv_sp,
+                            hs, 2 * intermediate, gs, w13_ksplits, k,
+                        )?;
+                        self.launch_reduce_ksplits_bf16(
+                            *graph.d_expert_gate_up.device_ptr(),
+                            partial_ptr,
+                            2 * intermediate, w13_ksplits, k,
+                        )?;
+                        self.launch_fused_silu_accum(
+                            *w2p, *w2s,
+                            *graph.d_expert_gate_up.device_ptr(),
+                            *graph.d_moe_out.device_ptr(),
+                            inv_wp, inv_sp,
+                            intermediate, hs, gs, 0.1f32, k,
+                        )?;
+                    }
+                }
+                self.device.synchronize()
+                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
+
+                let iters = 200;
+                let t0 = Instant::now();
+                for _ in 0..iters {
+                    for (w13p, w13s, w2p, w2s) in &entries {
+                        self.launch_marlin_gemv_v2(
+                            *w13p, *w13s,
+                            *graph.d_hidden.device_ptr(),
+                            partial_ptr, inv_wp, inv_sp,
+                            hs, 2 * intermediate, gs, w13_ksplits, k,
+                        )?;
+                        self.launch_reduce_ksplits_bf16(
+                            *graph.d_expert_gate_up.device_ptr(),
+                            partial_ptr,
+                            2 * intermediate, w13_ksplits, k,
+                        )?;
+                        self.launch_fused_silu_accum(
+                            *w2p, *w2s,
+                            *graph.d_expert_gate_up.device_ptr(),
+                            *graph.d_moe_out.device_ptr(),
+                            inv_wp, inv_sp,
+                            intermediate, hs, gs, 0.1f32, k,
+                        )?;
+                    }
+                }
+                self.device.synchronize()
+                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
+                let elapsed = t0.elapsed().as_secs_f64();
+                let per_layer_us = elapsed * 1e6 / iters as f64;
+                let per_layer_ms = per_layer_us / 1000.0;
+
+                results.push(format!(
+                    "  Per layer ({} experts): {:.1} us ({:.3} ms)",
+                    num_cached, per_layer_us, per_layer_ms,
+                ));
+                results.push(format!(
+                    "  Per token ({} layers): {:.1} ms = {:.1} tok/s (MoE compute only)",
+                    num_moe_layers,
+                    per_layer_ms * num_moe_layers as f64,
+                    1000.0 / (per_layer_ms * num_moe_layers as f64),
+                ));
+            } else {
+                results.push("  No HCS entries for layer 0!".to_string());
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        // PART 6: Full MoE forward comparison (baseline vs HCS)
+        // ═══════════════════════════════════════════════════════════════════
+        results.push("".to_string());
+        results.push("=== PART 5: Full MoE Forward (routing + compute + DMA) ===".to_string());
+
+        // Baseline (no HCS)
+        {
+            let hcs_state = self.graph.as_mut().unwrap().hcs.take();
+
+            let mut times = Vec::new();
+            for tok in 0..num_tokens.min(5) {
+                let hidden: Vec<u16> = (0..hidden_size)
+                    .map(|i| half::bf16::from_f32(
+                        ((i as f32 * 0.001 + tok as f32 * 0.1) - 0.5).sin() * 0.01
+                    ).to_bits())
+                    .collect();
+                self.upload_hidden_bf16(hidden)?;
+
+                let mut layer_times = Vec::new();
+                for layer_idx in 0..num_moe_layers {
+                    if self.graph.as_ref().unwrap().moe_layers[layer_idx].is_none() { continue; }
+                    let (_, _, _, total_ms) = self.moe_forward_internal(layer_idx)?;
+                    layer_times.push(total_ms);
+                }
+                let tok_total: f64 = layer_times.iter().sum();
+                times.push(tok_total);
+            }
+
+            // Use last 3 for avg (skip warmup)
+            let skip = times.len().saturating_sub(3);
+            let avg: f64 = times[skip..].iter().sum::<f64>() / times[skip..].len() as f64;
+            results.push(format!(
+                "  Baseline (no HCS): {:.1} ms avg = {:.1} tok/s",
+                avg, 1000.0 / avg,
+            ));
+
+            self.graph.as_mut().unwrap().hcs = hcs_state;
+        }
+
+        // With HCS
+        {
+            let hcs = self.graph.as_mut().unwrap().hcs.as_mut().unwrap();
+            hcs.total_hits = 0;
+            hcs.total_misses = 0;
+        }
+
+        let mut hcs_times = Vec::new();
+        for tok in 0..num_tokens {
+            let hidden: Vec<u16> = (0..hidden_size)
+                .map(|i| half::bf16::from_f32(
+                    ((i as f32 * 0.001 + tok as f32 * 0.1) - 0.5).sin() * 0.01
+                ).to_bits())
+                .collect();
+            self.upload_hidden_bf16(hidden)?;
+
+            let mut layer_times = Vec::new();
+            for layer_idx in 0..num_moe_layers {
+                if self.graph.as_ref().unwrap().moe_layers[layer_idx].is_none() { continue; }
+                let (_, _, _, total_ms) = self.moe_forward_internal(layer_idx)?;
+                layer_times.push(total_ms);
+            }
+            let tok_total: f64 = layer_times.iter().sum();
+            hcs_times.push(tok_total);
+        }
+
+        let skip = hcs_times.len().saturating_sub(5);
+        let avg_hcs: f64 = hcs_times[skip..].iter().sum::<f64>() / hcs_times[skip..].len() as f64;
+        let hcs = self.graph.as_ref().unwrap().hcs.as_ref().unwrap();
+        results.push(format!(
+            "  With HCS ({} cached, {:.0}% hit): {:.1} ms avg = {:.1} tok/s",
+            hcs.num_cached,
+            hcs.hit_rate() * 100.0,
+            avg_hcs, 1000.0 / avg_hcs,
+        ));
+
+        // ═══════════════════════════════════════════════════════════════════
+        // PART 7: Summary projections
+        // ═══════════════════════════════════════════════════════════════════
+        results.push("".to_string());
+        results.push("=== PART 6: Summary & Projections ===".to_string());
+
+        if !store.experts_gpu.is_empty() && !store.experts_gpu[0].is_empty() {
+            let e0 = &store.experts_gpu[0][0];
+            let expert_bytes = e0.w13_packed.len() * 4 + e0.w13_scales.len() * 2
+                + e0.w2_packed.len() * 4 + e0.w2_scales.len() * 2;
+
+            // Use measured DMA and compute from parts 3 and 4
+            results.push(format!("  Expert size: {} B ({:.1} KB)", expert_bytes, expert_bytes as f64 / 1024.0));
+            results.push(format!("  topk={}, {} MoE layers, {} total experts/layer",
+                topk, num_moe_layers, n_experts));
+            results.push(format!("  HCS cached: {}/{} ({:.0}%)",
+                hcs.num_cached,
+                num_moe_layers * n_experts,
+                hcs.num_cached as f64 / (num_moe_layers * n_experts) as f64 * 100.0,
+            ));
+        }
+
+        let total_elapsed = t_start.elapsed().as_secs_f64();
+        results.push(format!("\nTotal bench time: {:.1}s", total_elapsed));
 
         std::mem::forget(store);
         Ok(results.join("\n"))

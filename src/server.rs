@@ -41,6 +41,7 @@ struct ServerState {
     tokenizer: tokenizers::Tokenizer,
     max_context_tokens: usize,
     default_enable_thinking: bool,
+    gpu_decode: bool,
 }
 
 /// Parsed HTTP request.
@@ -301,6 +302,7 @@ fn handle_chat_completion(
     };
 
     // ── Call Python for prefill (GIL required) ──
+    let decode_mode = if state.gpu_decode { "gpu" } else { "cpu" };
     let prefill_result = Python::with_gil(|py| -> PyResult<(usize, usize, Vec<usize>, usize)> {
         let result = state.py_model.call_method(
             py,
@@ -314,6 +316,7 @@ fn handle_chat_completion(
                 presence_penalty,
                 enable_thinking,
                 stop_tokens.clone(),
+                decode_mode,
             ),
             None,
         )?;
@@ -358,65 +361,89 @@ fn handle_chat_completion(
     }
 
     log::info!(
-        "Request {}: {} prompt tokens, max_new={}, stream={}",
-        request_id, prompt_len, max_tokens, is_stream
+        "Request {}: {} prompt tokens, max_new={}, stream={}, decode={}",
+        request_id, prompt_len, max_tokens, is_stream, decode_mode
     );
 
     let tokenizer = &state.tokenizer;
 
-    // ── Decode (GIL-free!) ──
-    // Safety: single-request guarantee. store_addr is a valid *mut CpuDecodeStore
-    // obtained from Python during prefill. No other code touches it until cleanup.
-    let store = unsafe { &mut *(store_addr as *mut CpuDecodeStore) };
+    if state.gpu_decode {
+        // ── GPU decode: per-token Python calls (GIL per step) ──
+        // GPU compute is ~30ms/tok, GIL overhead is <0.1ms. Negligible.
+        handle_gpu_decode(
+            stream, is_stream, state, tokenizer,
+            first_token, prompt_len, max_tokens, &stop_ids,
+            &request_id, &state.model_name, created,
+        );
+    } else {
+        // ── CPU decode (GIL-free!) ──
+        // Safety: single-request guarantee. store_addr is a valid *mut CpuDecodeStore.
+        let store = unsafe { &mut *(store_addr as *mut CpuDecodeStore) };
+        handle_cpu_decode(
+            stream, is_stream, state, store, tokenizer,
+            first_token, prompt_len, max_tokens, temperature,
+            top_k, top_p, presence_penalty, &stop_ids,
+            &request_id, &state.model_name, created,
+        );
+    }
+
+    // ── Cleanup (GIL required) ──
+    Python::with_gil(|py| {
+        let _ = state.py_model.call_method0(py, "server_cleanup");
+    });
+}
+
+/// GPU decode: call Python model.server_gpu_decode_step() per token.
+/// Each call runs model.forward() (single token) + sampling on GPU.
+#[allow(clippy::too_many_arguments)]
+fn handle_gpu_decode(
+    stream: &mut TcpStream,
+    is_stream: bool,
+    state: &ServerState,
+    tokenizer: &tokenizers::Tokenizer,
+    first_token: usize,
+    prompt_len: usize,
+    max_tokens: usize,
+    stop_ids: &[usize],
+    request_id: &str,
+    model_name: &str,
+    created: u64,
+) {
+    let stop_set: std::collections::HashSet<usize> = stop_ids.iter().copied().collect();
 
     if is_stream {
-        // ── Streaming SSE with decoupled IO ──
-        // Decode loop pushes pre-formatted SSE chunks to a channel.
-        // A writer thread drains the channel and flushes every 100ms or on completion.
-        // This ensures decode is never blocked on socket IO.
         if let Err(e) = begin_sse(stream) {
             log::error!("Failed to send SSE headers: {}", e);
-            Python::with_gil(|py| {
-                let _ = state.py_model.call_method0(py, "server_cleanup");
-            });
             return;
         }
 
-        // Emit first token immediately (prefill latency already paid)
+        // Emit first token immediately
         let first_text = tokenizer.decode(&[first_token as u32], true).unwrap_or_default();
-        let chunk = format_sse_token(&request_id, &state.model_name, &first_text, None, created);
+        let chunk = format_sse_token(request_id, model_name, &first_text, None, created);
         let _ = send_sse_chunk(stream, &chunk);
 
-        // Channel for decode → writer thread communication
+        // Channel for decode → writer thread
         let (tx, rx) = mpsc::channel::<String>();
         let writer_disconnected = Arc::new(AtomicBool::new(false));
         let writer_disc_clone = writer_disconnected.clone();
 
-        // Clone the TCP stream for the writer thread
         let mut writer_stream = match stream.try_clone() {
             Ok(s) => s,
             Err(e) => {
                 log::error!("Failed to clone stream for writer: {}", e);
-                Python::with_gil(|py| {
-                    let _ = state.py_model.call_method0(py, "server_cleanup");
-                });
                 return;
             }
         };
 
-        // Writer thread: pulls chunks off channel, buffers, flushes every 100ms or on close.
-        // First chunk is flushed immediately so client-measured TTFT is accurate.
         let writer_handle = std::thread::spawn(move || {
             let flush_interval = std::time::Duration::from_millis(100);
             let mut buf = String::new();
             let mut last_flush = Instant::now();
             let mut is_first = true;
-
             loop {
                 match rx.recv_timeout(flush_interval) {
                     Ok(chunk) => {
                         buf.push_str(&chunk);
-                        // Flush immediately on first chunk, then every 100ms or 8KB
                         if is_first || last_flush.elapsed() >= flush_interval || buf.len() > 8192 {
                             if writer_stream.write_all(buf.as_bytes()).is_err()
                                 || writer_stream.flush().is_err()
@@ -430,7 +457,6 @@ fn handle_chat_completion(
                         }
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => {
-                        // Flush whatever we have
                         if !buf.is_empty() {
                             if writer_stream.write_all(buf.as_bytes()).is_err()
                                 || writer_stream.flush().is_err()
@@ -443,7 +469,212 @@ fn handle_chat_completion(
                         }
                     }
                     Err(mpsc::RecvTimeoutError::Disconnected) => {
-                        // Channel closed — flush remaining and exit
+                        if !buf.is_empty() {
+                            let _ = writer_stream.write_all(buf.as_bytes());
+                            let _ = writer_stream.flush();
+                        }
+                        return;
+                    }
+                }
+            }
+        });
+
+        let decode_start = Instant::now();
+        let mut decode_token_count = 0usize;
+        let mut next_token = first_token;
+
+        for step in 0..max_tokens.saturating_sub(1) {
+            if writer_disconnected.load(Ordering::Acquire) {
+                break;
+            }
+
+            let pos = prompt_len + step;
+
+            // Call Python for one GPU decode step
+            let token_result = Python::with_gil(|py| -> PyResult<usize> {
+                let result = state.py_model.call_method1(
+                    py,
+                    "server_gpu_decode_step",
+                    (next_token as i64, pos as i64),
+                )?;
+                result.extract(py)
+            });
+
+            let token_id = match token_result {
+                Ok(t) => t,
+                Err(e) => {
+                    log::error!("GPU decode step failed: {}", e);
+                    break;
+                }
+            };
+
+            next_token = token_id;
+            decode_token_count += 1;
+
+            let text = tokenizer.decode(&[token_id as u32], true).unwrap_or_default();
+            let finish_reason = if stop_set.contains(&token_id) {
+                Some("stop")
+            } else if step + 1 >= max_tokens.saturating_sub(1) {
+                Some("length")
+            } else {
+                None
+            };
+
+            let chunk = format_sse_token(request_id, model_name, &text, finish_reason, created);
+            let formatted = format!("data: {}\n\n", chunk);
+            if tx.send(formatted).is_err() {
+                break;
+            }
+
+            if finish_reason.is_some() {
+                break;
+            }
+        }
+
+        // Emit timing + [DONE]
+        let elapsed = decode_start.elapsed().as_secs_f64();
+        let total_gen = decode_token_count + 1;
+        let decode_tok_s = if elapsed > 0.0 && decode_token_count > 0 {
+            decode_token_count as f64 / elapsed
+        } else {
+            0.0
+        };
+        let timing_chunk = format!(
+            r#"{{"id":"{}","object":"chat.completion.chunk","created":{},"model":"{}","choices":[],"krasis_timing":{{"decode_tokens":{},"decode_time_ms":{:.1},"decode_tok_s":{:.2},"total_generated":{},"prompt_tokens":{}}}}}"#,
+            request_id, created, model_name,
+            decode_token_count, elapsed * 1000.0, decode_tok_s, total_gen, prompt_len
+        );
+        let _ = tx.send(format!("data: {}\n\n", timing_chunk));
+        let _ = tx.send("data: [DONE]\n\n".to_string());
+        drop(tx);
+        let _ = writer_handle.join();
+
+        log::info!("Request {} GPU streaming complete ({:.2}s, {} tokens, {:.2} tok/s)",
+            request_id, elapsed, total_gen, decode_tok_s);
+    } else {
+        // ── Non-streaming GPU decode ──
+        let mut all_text = String::new();
+        let first_text = tokenizer.decode(&[first_token as u32], true).unwrap_or_default();
+        all_text.push_str(&first_text);
+        let mut total_tokens = 1usize;
+        let mut finish = "length".to_string();
+        let mut next_token = first_token;
+
+        for step in 0..max_tokens.saturating_sub(1) {
+            let pos = prompt_len + step;
+
+            let token_result = Python::with_gil(|py| -> PyResult<usize> {
+                let result = state.py_model.call_method1(
+                    py,
+                    "server_gpu_decode_step",
+                    (next_token as i64, pos as i64),
+                )?;
+                result.extract(py)
+            });
+
+            let token_id = match token_result {
+                Ok(t) => t,
+                Err(e) => {
+                    log::error!("GPU decode step failed: {}", e);
+                    break;
+                }
+            };
+
+            next_token = token_id;
+            total_tokens += 1;
+            let text = tokenizer.decode(&[token_id as u32], true).unwrap_or_default();
+            all_text.push_str(&text);
+
+            if stop_set.contains(&token_id) {
+                finish = "stop".to_string();
+                break;
+            }
+        }
+
+        let response = format_completion(
+            request_id, model_name, &all_text, prompt_len,
+            total_tokens, &finish, created,
+        );
+        let _ = send_json(stream, 200, &response);
+    }
+}
+
+/// CPU decode: GIL-free Rust decode loop via CpuDecodeStore.
+#[allow(clippy::too_many_arguments)]
+fn handle_cpu_decode(
+    stream: &mut TcpStream,
+    is_stream: bool,
+    state: &ServerState,
+    store: &mut CpuDecodeStore,
+    tokenizer: &tokenizers::Tokenizer,
+    first_token: usize,
+    prompt_len: usize,
+    max_tokens: usize,
+    temperature: f32,
+    top_k: usize,
+    top_p: f32,
+    presence_penalty: f32,
+    stop_ids: &[usize],
+    request_id: &str,
+    model_name: &str,
+    created: u64,
+) {
+    if is_stream {
+        if let Err(e) = begin_sse(stream) {
+            log::error!("Failed to send SSE headers: {}", e);
+            return;
+        }
+
+        let first_text = tokenizer.decode(&[first_token as u32], true).unwrap_or_default();
+        let chunk = format_sse_token(request_id, model_name, &first_text, None, created);
+        let _ = send_sse_chunk(stream, &chunk);
+
+        let (tx, rx) = mpsc::channel::<String>();
+        let writer_disconnected = Arc::new(AtomicBool::new(false));
+        let writer_disc_clone = writer_disconnected.clone();
+
+        let mut writer_stream = match stream.try_clone() {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!("Failed to clone stream for writer: {}", e);
+                return;
+            }
+        };
+
+        let writer_handle = std::thread::spawn(move || {
+            let flush_interval = std::time::Duration::from_millis(100);
+            let mut buf = String::new();
+            let mut last_flush = Instant::now();
+            let mut is_first = true;
+            loop {
+                match rx.recv_timeout(flush_interval) {
+                    Ok(chunk) => {
+                        buf.push_str(&chunk);
+                        if is_first || last_flush.elapsed() >= flush_interval || buf.len() > 8192 {
+                            if writer_stream.write_all(buf.as_bytes()).is_err()
+                                || writer_stream.flush().is_err()
+                            {
+                                writer_disc_clone.store(true, Ordering::Release);
+                                return;
+                            }
+                            buf.clear();
+                            last_flush = Instant::now();
+                            is_first = false;
+                        }
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        if !buf.is_empty() {
+                            if writer_stream.write_all(buf.as_bytes()).is_err()
+                                || writer_stream.flush().is_err()
+                            {
+                                writer_disc_clone.store(true, Ordering::Release);
+                                return;
+                            }
+                            buf.clear();
+                            last_flush = Instant::now();
+                        }
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
                         if !buf.is_empty() {
                             let _ = writer_stream.write_all(buf.as_bytes());
                             let _ = writer_stream.flush();
@@ -464,27 +695,20 @@ fn handle_chat_completion(
             temperature,
             top_k,
             top_p,
-            &stop_ids,
+            stop_ids,
             tokenizer,
             presence_penalty,
             |_token_id, text, finish_reason| {
                 decode_token_count += 1;
-                let chunk = format_sse_token(
-                    &request_id,
-                    &state.model_name,
-                    text,
-                    finish_reason,
-                    created,
-                );
+                let chunk = format_sse_token(request_id, model_name, text, finish_reason, created);
                 let formatted = format!("data: {}\n\n", chunk);
                 if tx.send(formatted).is_err() || writer_disconnected.load(Ordering::Acquire) {
-                    return false; // Writer thread died / client disconnected
+                    return false;
                 }
                 true
             },
         );
 
-        // Emit server-side timing before [DONE]
         let elapsed = decode_start.elapsed().as_secs_f64();
         let total_gen = decode_token_count + 1;
         let decode_tok_s = if elapsed > 0.0 && decode_token_count > 0 {
@@ -494,20 +718,17 @@ fn handle_chat_completion(
         };
         let timing_chunk = format!(
             r#"{{"id":"{}","object":"chat.completion.chunk","created":{},"model":"{}","choices":[],"krasis_timing":{{"decode_tokens":{},"decode_time_ms":{:.1},"decode_tok_s":{:.2},"total_generated":{},"prompt_tokens":{}}}}}"#,
-            request_id, created, state.model_name,
+            request_id, created, model_name,
             decode_token_count, elapsed * 1000.0, decode_tok_s, total_gen, prompt_len
         );
         let _ = tx.send(format!("data: {}\n\n", timing_chunk));
         let _ = tx.send("data: [DONE]\n\n".to_string());
-
-        // Drop sender to signal writer thread to flush and exit
         drop(tx);
         let _ = writer_handle.join();
 
-        log::info!("Request {} streaming complete ({:.2}s, {} tokens, {:.2} tok/s)",
+        log::info!("Request {} CPU streaming complete ({:.2}s, {} tokens, {:.2} tok/s)",
             request_id, elapsed, total_gen, decode_tok_s);
     } else {
-        // ── Non-streaming ──
         let mut all_text = String::new();
         let first_text = tokenizer.decode(&[first_token as u32], true).unwrap_or_default();
         all_text.push_str(&first_text);
@@ -521,7 +742,7 @@ fn handle_chat_completion(
             temperature,
             top_k,
             top_p,
-            &stop_ids,
+            stop_ids,
             tokenizer,
             presence_penalty,
             |_token_id, text, finish_reason| {
@@ -535,21 +756,11 @@ fn handle_chat_completion(
         );
 
         let response = format_completion(
-            &request_id,
-            &state.model_name,
-            &all_text,
-            prompt_len,
-            total_tokens,
-            &finish,
-            created,
+            request_id, model_name, &all_text, prompt_len,
+            total_tokens, &finish, created,
         );
         let _ = send_json(stream, 200, &response);
     }
-
-    // ── Cleanup (GIL required) ──
-    Python::with_gil(|py| {
-        let _ = state.py_model.call_method0(py, "server_cleanup");
-    });
 }
 
 /// The Rust HTTP server, exposed to Python via PyO3.
@@ -561,6 +772,7 @@ pub struct RustServer {
     tokenizer_path: String,
     max_context_tokens: usize,
     default_enable_thinking: bool,
+    gpu_decode: bool,
     py_model: Py<PyAny>,
     running: Arc<AtomicBool>,
 }
@@ -568,7 +780,7 @@ pub struct RustServer {
 #[pymethods]
 impl RustServer {
     #[new]
-    #[pyo3(signature = (py_model, host, port, model_name, tokenizer_path, max_context_tokens, enable_thinking=true))]
+    #[pyo3(signature = (py_model, host, port, model_name, tokenizer_path, max_context_tokens, enable_thinking=true, gpu_decode=true))]
     fn new(
         py_model: PyObject,
         host: String,
@@ -577,6 +789,7 @@ impl RustServer {
         tokenizer_path: String,
         max_context_tokens: usize,
         enable_thinking: bool,
+        gpu_decode: bool,
     ) -> Self {
         Self {
             host,
@@ -585,6 +798,7 @@ impl RustServer {
             tokenizer_path,
             max_context_tokens,
             default_enable_thinking: enable_thinking,
+            gpu_decode,
             py_model: py_model.into(),
             running: Arc::new(AtomicBool::new(false)),
         }
@@ -601,6 +815,7 @@ impl RustServer {
         let tokenizer_path = self.tokenizer_path.clone();
         let max_context_tokens = self.max_context_tokens;
         let default_enable_thinking = self.default_enable_thinking;
+        let gpu_decode = self.gpu_decode;
         let running = self.running.clone();
 
         // Install raw SIGINT handler BEFORE releasing the GIL.
@@ -656,6 +871,7 @@ impl RustServer {
                 tokenizer,
                 max_context_tokens,
                 default_enable_thinking,
+                gpu_decode,
             };
 
             while running.load(Ordering::Acquire) {

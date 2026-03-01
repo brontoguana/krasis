@@ -27,6 +27,8 @@ logger = logging.getLogger("krasis.server")
 _BOLD = "\033[1m"
 _CYAN = "\033[36m"
 _GREEN = "\033[32m"
+_YELLOW = "\033[33m"
+_RED = "\033[31m"
 _DIM = "\033[2m"
 _NC = "\033[0m"
 
@@ -35,6 +37,21 @@ def _status(label: str) -> None:
     """Print a highlighted status section header (also logged)."""
     print(f"\n{_BOLD}{_CYAN}▸ {label}{_NC}", flush=True)
     logger.info("── %s ──", label)
+
+
+def _detail(text: str) -> None:
+    """Print a detail line under a status header (green, indented)."""
+    print(f"  {_GREEN}{text}{_NC}", flush=True)
+
+
+def _dim(text: str) -> None:
+    """Print a dim info line (secondary details)."""
+    print(f"  {_DIM}{text}{_NC}", flush=True)
+
+
+def _warn(text: str) -> None:
+    """Print a warning line (yellow, indented)."""
+    print(f"  {_YELLOW}{text}{_NC}", flush=True)
 
 _model: Optional[KrasisModel] = None
 _model_name: str = "unknown"
@@ -112,42 +129,111 @@ def _build_heatmap(model: KrasisModel, save_path: str) -> str:
     return save_path
 
 
-def _warmup_model(model: KrasisModel):
-    """Run a short generation to warm up GPU kernels, expert DMA, and CUDA caches.
+def _vram_snap(label: str):
+    """Quick VRAM snapshot for server diagnostics."""
+    import torch
+    for i in range(torch.cuda.device_count()):
+        dev = torch.device(f"cuda:{i}")
+        alloc = torch.cuda.memory_allocated(dev) >> 20
+        reserved = torch.cuda.memory_reserved(dev) >> 20
+        free, total = torch.cuda.mem_get_info(dev)
+        free_mb, total_mb = free >> 20, total >> 20
+        used_mb = total_mb - free_mb
+        print(
+            f"  \033[33m[VRAM {label}]\033[0m cuda:{i}: "
+            f"alloc={alloc} MB, reserved={reserved} MB, "
+            f"used={used_mb} MB, free={free_mb} MB",
+            flush=True,
+        )
+        logger.info(
+            "VRAM_SNAP [%s] cuda:%d: alloc=%d MB, reserved=%d MB, used=%d MB, free=%d MB, total=%d MB",
+            label, i, alloc, reserved, used_mb, free_mb, total_mb,
+        )
 
-    Uses server_prefill + generate_batch + server_cleanup — the same path
-    as real HTTP requests, so all kernels get compiled for the production path.
+
+def _warmup_prefill(model: KrasisModel):
+    """Run a short prefill to warm up GPU kernels, CUDA caches, and lazy allocations.
+
+    Prefill-only: does NOT run decode steps. This is called BEFORE HCS allocation
+    to measure the VRAM baseline. Decode warmup happens after HCS is loaded.
     """
     import json as _json
 
-    logger.info("Warming up model (short generation)...")
+    _vram_snap("before-prefill-warmup")
+    logger.info("Warming up prefill (GPU kernels + CUDA caches)...")
     t0 = time.time()
 
     try:
+        # Use GPU decode mode for prefill so it doesn't try to set up CPU decoder
         messages_json = _json.dumps([{"role": "user", "content": "Hi"}])
         result = model.server_prefill(
             messages_json, max_new_tokens=5, temperature=0.6, top_k=50,
             top_p=0.95, presence_penalty=0.0,
             enable_thinking=False, extra_stop_tokens=[],
+            decode_mode="gpu",
         )
-        if result.first_token not in result.stop_ids:
-            model._cpu_decoder._store.generate_batch(
-                first_token=result.first_token,
-                start_position=result.prompt_len,
-                max_tokens=4,
-                temperature=0.6,
-                top_k=50,
-                top_p=0.95,
-                stop_ids=result.stop_ids,
-                presence_penalty=0.0,
-            )
+        _vram_snap("after-prefill-warmup-before-cleanup")
         model.server_cleanup()
+        _vram_snap("after-prefill-warmup-after-cleanup")
 
         elapsed = time.time() - t0
-        logger.info("Warmup complete (%.1fs) — server ready at full speed", elapsed)
+        logger.info("Prefill warmup complete (%.1fs)", elapsed)
     except Exception as e:
-        logger.warning("Warmup failed (non-fatal): %s", e)
-        # Try to cleanup even on failure
+        logger.warning("Prefill warmup failed (non-fatal): %s", e)
+        try:
+            model.server_cleanup()
+        except Exception:
+            pass
+
+
+def _warmup_decode(model: KrasisModel, num_steps: int = 4):
+    """Run a short GPU decode warmup after HCS is loaded.
+
+    Validates that GPU decode with HCS works correctly.
+    """
+    import json as _json
+
+    decode_mode = getattr(model, 'decode_mode', 'gpu')
+    logger.info("Warming up %s decode (%d steps)...", decode_mode.upper(), num_steps)
+    _vram_snap("before-decode-warmup")
+    t0 = time.time()
+
+    try:
+        messages_json = _json.dumps([{"role": "user", "content": "Hi"}])
+        result = model.server_prefill(
+            messages_json, max_new_tokens=num_steps + 1, temperature=0.6, top_k=50,
+            top_p=0.95, presence_penalty=0.0,
+            enable_thinking=False, extra_stop_tokens=[],
+            decode_mode=decode_mode,
+        )
+        _vram_snap("decode-warmup-after-prefill")
+        if result.first_token not in result.stop_ids:
+            if decode_mode == "gpu":
+                next_token = result.first_token
+                for step in range(num_steps):
+                    pos = result.prompt_len + step
+                    next_token = model.server_gpu_decode_step(next_token, pos)
+                    if next_token in result.stop_ids:
+                        break
+                _vram_snap("decode-warmup-after-gpu-decode")
+            elif model._cpu_decoder is not None:
+                model._cpu_decoder._store.generate_batch(
+                    first_token=result.first_token,
+                    start_position=result.prompt_len,
+                    max_tokens=num_steps,
+                    temperature=0.6,
+                    top_k=50,
+                    top_p=0.95,
+                    stop_ids=result.stop_ids,
+                    presence_penalty=0.0,
+                )
+        model.server_cleanup()
+        _vram_snap("decode-warmup-after-cleanup")
+
+        elapsed = time.time() - t0
+        logger.info("Decode warmup complete (%.1fs)", elapsed)
+    except Exception as e:
+        logger.warning("Decode warmup failed (non-fatal): %s", e)
         try:
             model.server_cleanup()
         except Exception:
@@ -239,10 +325,11 @@ def main():
             "CFG_GPU_PREFILL_THRESHOLD": "gpu_prefill_threshold",
             "CFG_GGUF_PATH": "gguf_path",
             "CFG_FORCE_LOAD": "force_load",
-            "CFG_HCS": None,           # HCS disabled — ignore from config files
-            "CFG_MULTI_GPU_HCS": None,  # HCS disabled — ignore from config files
+            "CFG_HCS": "hcs",
+            "CFG_MULTI_GPU_HCS": "multi_gpu_hcs",
             "CFG_KV_CACHE_MB": "kv_cache_mb",
             "CFG_ENABLE_THINKING": "enable_thinking",
+            "CFG_CPU_DECODE": "cpu_decode",
         }
         with open(config_path) as f:
             for line in f:
@@ -266,7 +353,7 @@ def main():
                         if gpu_list:
                             config_defaults["num_gpus"] = len(gpu_list)
                         continue
-                    if key in ("CFG_FORCE_LOAD", "CFG_ENABLE_THINKING"):
+                    if key in ("CFG_FORCE_LOAD", "CFG_ENABLE_THINKING", "CFG_HCS", "CFG_MULTI_GPU_HCS", "CFG_CPU_DECODE"):
                         # CFG_ format uses "1"/"" for booleans
                         config_defaults[dest] = val == "1"
                         continue
@@ -324,6 +411,12 @@ def main():
                         help="Path to GGUF file for CPU experts")
     parser.add_argument("--force-load", action="store_true",
                         help="Force reload of cached weights")
+    parser.add_argument("--hcs", action=argparse.BooleanOptionalAction, default=True,
+                        help="Enable Hot Cache Strategy (default: on for GPU decode, use --no-hcs to disable)")
+    parser.add_argument("--multi-gpu-hcs", action="store_true", default=False,
+                        help="Pin HCS experts across ALL GPUs (more capacity, but cross-device transfer)")
+    parser.add_argument("--hcs-headroom-mb", type=int, default=1024,
+                        help="VRAM headroom to reserve after warmup before HCS allocation (default: 1024 MB)")
     parser.add_argument("--stream-attention", action="store_true",
                         help="Stream attention weights from CPU instead of keeping resident on GPU. "
                              "Use when attention weights don't fit in VRAM (e.g. very large models).")
@@ -331,6 +424,10 @@ def main():
                         help="(deprecated, now the default) Attention is resident on GPU by default.")
     parser.add_argument("--layer-group-size", type=int, default=2,
                         help="Number of MoE layers to load per group during prefill (default: 2)")
+    parser.add_argument("--gpu-decode", action="store_true", default=True,
+                        help="Use GPU for decode (default). Runs model.forward() per token on GPU.")
+    parser.add_argument("--cpu-decode", action="store_true", default=False,
+                        help="Use CPU for decode. GIL-free Rust decode loop.")
     parser.add_argument("--benchmark", action="store_true",
                         help="Run standardized benchmark before starting server")
     parser.add_argument("--benchmark-only", action="store_true",
@@ -349,10 +446,6 @@ def main():
     if config_defaults:
         parser.set_defaults(**config_defaults)
     args = parser.parse_args(remaining_argv)
-
-    # HCS is disabled — force off regardless of config file contents
-    args.hcs = False
-    args.multi_gpu_hcs = False
 
     log_format = "%(asctime)s %(name)s %(levelname)s %(message)s"
     logging.basicConfig(level=logging.INFO, format=log_format)
@@ -432,6 +525,18 @@ def main():
     num_layers = cfg.num_hidden_layers
     num_gpus_available = args.num_gpus or torch.cuda.device_count()
 
+    # Determine decode mode early — needed for gpu_only loading
+    gpu_decode = not args.cpu_decode
+    gpu_only = gpu_decode  # GPU decode = skip CPU expert weights + CPU decoder
+
+    # ── Configuration summary ──
+    _status(f"Krasis — {_model_name}")
+    _detail(f"Decode: {'GPU' if gpu_decode else 'CPU'}  |  HCS: {'on' if args.hcs else 'off'}  |  GPUs: {num_gpus_available}")
+    _detail(f"Experts: GPU INT{args.gpu_expert_bits}" + (f" + CPU INT{args.cpu_expert_bits}" if not gpu_only else "") + f"  |  Attention: {args.attention_quant}  |  KV: {args.kv_dtype}")
+    _detail(f"Layer groups: {args.layer_group_size}  |  KV cache: {args.kv_cache_mb} MB  |  Threads: {args.krasis_threads}")
+    if gpu_only:
+        _dim("GPU-only mode: CPU expert weights and CPU decoder will be skipped")
+
     pp_partition = [num_layers]  # PP=1: all layers on primary GPU
     logger.info("HCS strategy: PP=1, %d GPUs available", num_gpus_available)
 
@@ -451,7 +556,7 @@ def main():
     )
 
     _status("Loading model weights")
-    _model.load()
+    _model.load(gpu_only=gpu_only)
 
     # Resolve heatmap: cached > build
     cache_dir = cache_dir_for_model(args.model_path)
@@ -459,259 +564,180 @@ def main():
     if not heatmap_path:
         heatmap_path = os.path.join(cache_dir, "auto_heatmap.json")
 
-    if args.hcs:
-        if not os.path.exists(heatmap_path):
-            _status("Building expert heatmap (calibration)")
-            heatmap_path = _build_heatmap(_model, heatmap_path)
-        else:
-            _status("Loading cached heatmap")
-            logger.info("Using cached heatmap: %s", heatmap_path)
-
     # CUDA runtime warmup — triggers cuBLAS + Triton kernel compilation
-    # before the allocation loop so VRAM measurements are accurate.
+    # before any VRAM measurements.
     num_gpus_available = args.num_gpus or torch.cuda.device_count()
     devices = [torch.device(f"cuda:{i}") for i in range(num_gpus_available)]
-    _status("Warming up CUDA runtime")
+    device_indices = list(range(num_gpus_available))
+    _status("CUDA runtime warmup")
     _model.warmup_cuda_runtime(devices)
+    _detail("cuBLAS + Triton kernel compilation done")
 
-    # ── Unified HCS allocation loop ──
+    # ── Set decode mode early (needed for warmup) ──
+    _model.decode_mode = "gpu" if gpu_decode else "cpu"
+
+    # ── Start VRAM monitor (before warmup, warnings off) ──
+    from krasis import VramMonitor
+    SAFETY_MARGIN_MB = 3000
+    vram_monitor = VramMonitor(device_indices, poll_interval_ms=50, safety_margin_mb=SAFETY_MARGIN_MB)
+    vram_monitor.start()
+
+    _status("VRAM monitor started")
+    _detail(f"Polling every 50ms, safety margin: {SAFETY_MARGIN_MB:,} MB")
+    for idx in device_indices:
+        total = vram_monitor.total_mb(idx)
+        _dim(f"cuda:{idx}: {total:,} MB total")
+    logger.info("VRAM monitor started: devices=%s, safety_margin=%d MB", device_indices, SAFETY_MARGIN_MB)
+
+    # ── Full warmup: prefill + decode (before HCS) ──
+    # Run BOTH prefill and decode to trigger ALL lazy CUDA allocations
+    # (torch.compile, KV cache, FlashInfer, cuBLAS, decode workspace, expert buffers).
+    # The VRAM monitor captures the true peak across both phases.
+    # Decode without HCS streams all experts via DMA (slow), but we only run 1 step
+    # to trigger the allocations — the actual expert DMA doesn't consume VRAM.
+    _model._hcs_device = None
+    _model._multi_gpu_hcs = False
+    _status("Warmup (prefill + decode, no HCS)")
+    _dim("VRAM monitor tracking peak usage across both phases")
+    t_warmup = time.time()
+    _warmup_prefill(_model)
+    _warmup_decode(_model, num_steps=1)
+    warmup_elapsed = time.time() - t_warmup
+    _detail(f"Warmup complete in {warmup_elapsed:.1f}s")
+
+    # Read measured VRAM from monitor (accounts for ALL lazy allocations)
+    gc.collect()
+    torch.cuda.empty_cache()
+    # Brief pause to let monitor capture post-cleanup state
+    time.sleep(0.1)
+
+    _status("VRAM measured (from monitor)")
+    for idx in device_indices:
+        min_free = vram_monitor.min_free_mb(idx)
+        peak_used = vram_monitor.peak_used_mb(idx)
+        total = vram_monitor.total_mb(idx)
+        _detail(f"cuda:{idx}:  peak {peak_used:,} MB used / {total:,} MB total  (min free: {min_free:,} MB)")
+        logger.info(
+            "VRAM monitor cuda:%d: peak_used=%d MB, min_free=%d MB, total=%d MB",
+            idx, peak_used, min_free, total,
+        )
+
     if not args.hcs:
-        _status("Pure CPU MoE decode")
-        logger.info("CPU decode: M=1 via Rust engine")
-        _model._hcs_device = None
-        _model._multi_gpu_hcs = False
+        if gpu_decode:
+            _status("GPU decode (no HCS)")
+            _warn("All experts streamed via DMA per token (slow for decode)")
+        else:
+            _status("CPU decode")
+            _detail("M=1 via Rust engine, GIL-free")
     else:
-        _status("Allocating HCS expert cache")
-        logger.info("Unified HCS: initializing with devices: %s", [str(d) for d in devices])
+        _status("Calculating HCS budget")
 
-        # Build 10K test prompt for validation — need enough text to exceed 10K tokens
-        _test_content = (
-            "Explain distributed consensus algorithms including Paxos, Raft, and PBFT. "
-            "Describe database transaction isolation levels and their trade-offs. "
-            "Discuss compiler optimization passes such as dead code elimination. "
-        ) * 300
-        _test_tokens = _model.tokenizer.apply_chat_template(
-            [{"role": "user", "content": _test_content}]
-        )[:10000]
-        logger.info("Test prompt: %d tokens", len(_test_tokens))
-
-        # ── HCS allocation ──
-        # Default: single-GPU HCS on the GPU with most free VRAM (typically GPU1).
-        # --multi-gpu-hcs: pin experts on ALL GPUs (more experts, but CPU bounce hurts decode).
+        # ── Device selection ──
         primary_dev = devices[0]
         use_multi_gpu_hcs = args.multi_gpu_hcs and len(devices) > 1
         if use_multi_gpu_hcs:
             hcs_devices = devices
-            cal_dev = max(devices, key=lambda d: torch.cuda.mem_get_info(d)[0])
         else:
-            # Single-GPU HCS: pick the GPU with most free VRAM
-            hcs_dev = max(devices, key=lambda d: torch.cuda.mem_get_info(d)[0]) if len(devices) > 1 else primary_dev
+            # Pick device with most measured free VRAM
+            hcs_dev = max(devices, key=lambda d: vram_monitor.min_free_mb(d.index)) if len(devices) > 1 else primary_dev
             hcs_devices = [hcs_dev]
-            cal_dev = hcs_dev
-        logger.info(
-            "HCS %s: %d device(s) %s, calibration on %s (free: %s)",
-            "multi-GPU" if use_multi_gpu_hcs else "single-GPU",
-            len(hcs_devices), [str(d) for d in hcs_devices], cal_dev,
-            ", ".join(f"{d}: {torch.cuda.mem_get_info(d)[0] // (1024*1024)} MB" for d in devices),
-        )
 
-        # Use the GPU0 (primary) manager to own HCS state — decode routing
-        # happens on GPU0 so it needs the HCS device lookup tables.
+        # ── Manager selection ──
         primary_manager = _model.gpu_prefill_managers.get(str(primary_dev))
         if primary_manager is None:
             logger.error("No GPU prefill manager for primary device %s", primary_dev)
             sys.exit(1)
 
-        # For calibration, use the cal_dev manager (GPU1) so that _cross_device_moe
-        # can correctly route to it during the validation forward pass.
-        cal_manager = _model.gpu_prefill_managers.get(str(cal_dev)) if cal_dev != primary_dev else primary_manager
-        if cal_manager is None:
-            logger.error("No GPU prefill manager for calibration device %s", cal_dev)
-            sys.exit(1)
-
-        # Step 1: Calibration — measure per-expert total cost and inference cost.
-        # Load a moderate number of experts on the calibration GPU, run a real
-        # forward pass, and measure per-expert VRAM overhead.
-        inference_costs = {}
-
-        cal_manager.clear_hcs()
-        torch.cuda.empty_cache()
-        free_before_hcs = torch.cuda.mem_get_info(cal_dev)[0]
-        initial_budget_mb = max(500, int(free_before_hcs / (1024 * 1024) / 3))
-
-        # For calibration, set single-device HCS so decode forward uses cross-device MoE
-        _model._hcs_device = cal_dev
-        _model._multi_gpu_hcs = False
-
-        MAX_CAL_RETRIES = 4
-        for cal_attempt in range(MAX_CAL_RETRIES):
-            cal_manager.clear_hcs()
-            torch.cuda.empty_cache()
-            free_before_hcs = torch.cuda.mem_get_info(cal_dev)[0]
-
-            cal_manager._init_hot_cached_static(
-                heatmap_path=heatmap_path,
-                devices=[cal_dev],
-                device_budgets={cal_dev: initial_budget_mb},
-            )
-            n_cal = sum(cal_manager._hcs_devices[0].num_pinned.values())
-            free_after_hcs = torch.cuda.mem_get_info(cal_dev)[0]
-
-            logger.info(
-                "HCS calibration attempt %d on %s: %d experts, budget=%d MB, "
-                "%d MB consumed (free: %d → %d MB)",
-                cal_attempt + 1, cal_dev, n_cal, initial_budget_mb,
-                (free_before_hcs - free_after_hcs) // (1024 * 1024),
-                free_before_hcs // (1024 * 1024), free_after_hcs // (1024 * 1024),
-            )
-
-            if n_cal == 0:
-                logger.error("FATAL: calibration loaded 0 experts on %s.", cal_dev)
-                sys.exit(1)
-
-            ok, info = cal_manager.validate_gpu_allocation(_model, _test_tokens)
-            if ok:
-                break
-            # Validation OOMed — halve budget and retry
-            initial_budget_mb = max(500, initial_budget_mb // 2)
-            logger.warning(
-                "Calibration validation OOM, retrying with budget=%d MB", initial_budget_mb,
-            )
-        else:
-            logger.error("FATAL: calibration failed after %d attempts on %s.", MAX_CAL_RETRIES, cal_dev)
-            sys.exit(1)
-        inference_costs[cal_dev] = info["inference_cost_bytes"]
-        logger.info(
-            "Inference cost on %s: %d MB (transient)",
-            cal_dev, inference_costs[cal_dev] // (1024 * 1024),
-        )
-
-        # Compute per-expert TOTAL cost: expert data + proportional share of
-        # CUDA graphs, workspace, g_idx/sort_idx buffers, and other HCS overhead.
-        hcs_total_consumed = free_before_hcs - free_after_hcs
-        per_expert_total_bytes = hcs_total_consumed // max(1, n_cal)
-        per_expert_data_bytes = cal_manager._per_expert_vram_bytes()
-        hcs_overhead_mb = (hcs_total_consumed - n_cal * per_expert_data_bytes) // (1024 * 1024)
-        logger.info(
-            "Per-expert cost: %d bytes total (%d data + %d overhead), "
-            "HCS overhead: %d MB (workspace + g_idx/sort_idx)",
-            per_expert_total_bytes, per_expert_data_bytes,
-            per_expert_total_bytes - per_expert_data_bytes, hcs_overhead_mb,
-        )
-
-        cal_manager.clear_hcs()
-        torch.cuda.empty_cache()
-
-        # Step 2: Calculate per-device HCS budgets.
-        # Use per_expert_total_bytes (includes proportional graph/workspace overhead).
-        #
-        # Inference cost multiplier for GPU0 (primary):
-        # - Without streaming: GPU0 holds ALL attention weights + KV + activations,
-        #   so its transient peak is ~3x the calibration (GPU1) cost.
-        # - With streaming: attention weights are streamed 2 layers at a time (~116 MB),
-        #   so GPU0's transient cost is similar to GPU1 (just adds KV cache + small norms).
-        #   Use 1.5x as a conservative safety factor.
-        FRAG_MARGIN_MB = 512     # Base safety margin for prompt-length variation
-        is_streaming = _model._stream_attn_enabled
-        device_budgets = {}
-        for dev in hcs_devices:
-            free_mb = torch.cuda.mem_get_info(dev)[0] // (1024 * 1024)
-            is_primary = (dev == primary_dev)
-            inf_cost_mb = inference_costs[cal_dev] // (1024 * 1024)
-            if is_primary:
-                # Streaming: attention is 2 layers at a time, not all layers resident
-                dev_inf_cost_mb = int(inf_cost_mb * 1.5) if is_streaming else inf_cost_mb * 3
-            else:
-                dev_inf_cost_mb = inf_cost_mb
-            reserved_mb = dev_inf_cost_mb + FRAG_MARGIN_MB
-            available_mb = max(0, free_mb - reserved_mb)
-            # per_expert_total_bytes includes proportional CUDA graph + workspace overhead
-            max_experts = available_mb * (1024 * 1024) // max(1, per_expert_total_bytes)
-            budget_mb = max_experts * per_expert_data_bytes // (1024 * 1024)
-            device_budgets[dev] = budget_mb
-            logger.info(
-                "HCS GPU %s: %d MB free, reserved=%d MB "
-                "(inference=%d (%.1fx) + margin=%d), stream_attn=%s, "
-                "budget=%d MB (%d max experts)",
-                dev, free_mb, reserved_mb,
-                dev_inf_cost_mb,
-                1.5 if (is_primary and is_streaming) else (3.0 if is_primary else 1.0),
-                FRAG_MARGIN_MB, is_streaming,
-                budget_mb, max_experts,
-            )
-
-        # Step 3: Load HCS on selected GPUs, validate, retry with reduced budget on OOM
-        #
-        # For single-GPU cross-device mode (attention on GPU0, MoE on GPU1):
-        #   Use the HCS device's own manager so _cross_device_moe finds it via
-        #   gpu_prefill_managers[hcs_dev], and CUDA graphs can be captured (device match).
-        # For multi-GPU mode: primary manager dispatches to all devices.
         if use_multi_gpu_hcs:
             hcs_load_manager = primary_manager
         else:
-            hcs_load_manager = cal_manager  # Device-local manager (e.g. cuda:1)
+            dev_manager = _model.gpu_prefill_managers.get(str(hcs_devices[0]))
+            hcs_load_manager = dev_manager if dev_manager is not None else primary_manager
 
-        MAX_LOAD_RETRIES = 3
-        for load_attempt in range(MAX_LOAD_RETRIES):
-            hcs_load_manager.clear_hcs()
-            torch.cuda.empty_cache()
-            hcs_load_manager._init_hot_cached_static(
-                heatmap_path=heatmap_path,
-                devices=hcs_devices,
-                device_budgets=device_budgets,
-                allocation_mode="greedy",
+        # ── Calculate HCS budgets from VRAM monitor measurements ──
+        # Budget = min_free_during_warmup - safety_margin
+        # No estimation, no headroom heuristics — purely measured.
+        per_expert_bytes = hcs_load_manager._per_expert_vram_bytes()
+        per_expert_mb = per_expert_bytes / (1024 * 1024)
+        total_experts = cfg.n_routed_experts * cfg.num_moe_layers
+        device_budgets = {}
+        for dev in hcs_devices:
+            dev_idx = dev.index
+            measured_min_free_mb = vram_monitor.min_free_mb(dev_idx)
+            available_mb = max(0, int(measured_min_free_mb) - SAFETY_MARGIN_MB)
+            max_experts = available_mb * (1024 * 1024) // max(1, per_expert_bytes)
+            budget_mb = max_experts * per_expert_bytes // (1024 * 1024)
+            device_budgets[dev] = budget_mb
+            logger.info(
+                "HCS budget cuda:%d: measured_min_free=%d MB - safety=%d MB = %d MB available -> %d experts (%d bytes/expert)",
+                dev_idx, measured_min_free_mb, SAFETY_MARGIN_MB, available_mb, max_experts, per_expert_bytes,
             )
+            _detail(f"cuda:{dev_idx}:  {measured_min_free_mb:,} MB free - {SAFETY_MARGIN_MB:,} MB safety = {budget_mb:,} MB for HCS")
+            _dim(f"         {max_experts:,} experts x {per_expert_mb:.2f} MB/expert")
 
-            # Set model flags for decode routing
-            if use_multi_gpu_hcs:
-                _model._hcs_device = None  # No single HCS device — multi-GPU mode
-                _model._multi_gpu_hcs = True
-            else:
-                _model._hcs_device = hcs_devices[0]
-                _model._multi_gpu_hcs = False
-
-            ok, info = hcs_load_manager.validate_gpu_allocation(_model, _test_tokens)
-            if ok:
-                break
-
-            # Validation OOMed — reduce the richest HCS GPU budget by 25% and retry.
-            # Must fully clear HCS + graphs + CUDA cache to reset GPU state,
-            # as OOM during graph-captured operations can corrupt GPU state.
-            reduce_dev = max(hcs_devices, key=lambda d: device_budgets.get(d, 0))
-            old_budget = device_budgets[reduce_dev]
-            device_budgets[reduce_dev] = max(0, int(old_budget * 0.75))
-            logger.warning(
-                "HCS validation OOM (attempt %d/%d), reducing %s budget: %d → %d MB",
-                load_attempt + 1, MAX_LOAD_RETRIES, reduce_dev,
-                old_budget, device_budgets[reduce_dev],
-            )
-            hcs_load_manager.clear_hcs()
-            gc.collect()
-            torch.cuda.empty_cache()
+        # ── Load heatmap ──
+        if not os.path.exists(heatmap_path):
+            _status("Building expert heatmap (calibration)")
+            heatmap_path = _build_heatmap(_model, heatmap_path)
         else:
-            total_pinned = sum(sum(d.num_pinned.values()) for d in hcs_load_manager._hcs_devices)
-            logger.error(
-                "FATAL: HCS validation OOM after %d attempts with %d experts (budget %s). "
-                "Reduce expert count or use more GPUs.",
-                MAX_LOAD_RETRIES, total_pinned, {str(d): b for d, b in device_budgets.items()},
-            )
-            sys.exit(1)
+            _dim(f"Using cached heatmap: {os.path.basename(heatmap_path)}")
 
-        # Log margin for observability
-        free_after = info["free_after_load_mb"]
-        cost_mb = info["inference_cost_bytes"] // (1024 * 1024)
-        margin = free_after - cost_mb
+        # ── Load HCS experts ──
+        _status("Loading HCS experts into VRAM")
+        hcs_load_manager.clear_hcs()
+        torch.cuda.empty_cache()
+        t_hcs = time.time()
+        hcs_load_manager._init_hot_cached_static(
+            heatmap_path=heatmap_path,
+            devices=hcs_devices,
+            device_budgets=device_budgets,
+            allocation_mode="greedy",
+        )
+        hcs_elapsed = time.time() - t_hcs
+
+        # Set model flags for decode routing
+        if use_multi_gpu_hcs:
+            _model._hcs_device = None
+            _model._multi_gpu_hcs = True
+        else:
+            _model._hcs_device = hcs_devices[0]
+            _model._multi_gpu_hcs = False
+
+        # ── Display HCS summary ──
         total_pinned = sum(sum(d.num_pinned.values()) for d in hcs_load_manager._hcs_devices)
-        device_counts = {str(d.device): sum(d.num_pinned.values()) for d in hcs_load_manager._hcs_devices}
+        pct_cached = (total_pinned / total_experts * 100) if total_experts > 0 else 0.0
+
+        _status("HCS loaded")
+        for dev in hcs_devices:
+            free_mb = torch.cuda.mem_get_info(dev)[0] // (1024 * 1024)
+            total_mb_dev = torch.cuda.mem_get_info(dev)[1] // (1024 * 1024)
+            used_mb = total_mb_dev - free_mb
+            dev_pinned = sum(sum(d.num_pinned.values()) for d in hcs_load_manager._hcs_devices if d.device == dev)
+            _detail(f"cuda:{dev.index}:  {used_mb:,} MB used / {total_mb_dev:,} MB total  ({free_mb:,} MB free)  --  {dev_pinned:,} experts")
+        _detail(f"Total: {total_pinned:,} / {total_experts:,} experts in VRAM ({pct_cached:.1f}%)")
+        _dim(f"Loaded in {hcs_elapsed:.1f}s")
+
         logger.info(
-            "HCS ready: %d experts across %d GPU(s), margin=%d MB (free=%d, cost=%d). Counts: %s",
-            total_pinned, len(hcs_devices), margin, free_after, cost_mb, device_counts,
+            "HCS ready: %d/%d experts (%.1f%%) across %d GPU(s) in %.1fs",
+            total_pinned, total_experts, pct_cached, len(hcs_devices), hcs_elapsed,
         )
 
-    # Full end-to-end warmup: pay all cold-start costs (torch.compile, first DMA,
-    # KV cache allocation, CUDA graph capture, etc.) before any benchmarks or serving.
-    _status("Warming up model (first generation)")
-    _warmup_model(_model)
+    # ── Decode validation (after HCS) ──
+    # CUDA decode allocations already happened in pre-HCS warmup.
+    # This validates HCS + decode works and gives the monitor a realistic sample.
+    _status("Validating decode" + (" with HCS" if args.hcs else ""))
+    _warmup_decode(_model, num_steps=4)
+    _detail("Decode validation passed")
+
+    # ── Enable VRAM monitor runtime warnings ──
+    # enable_warnings() resets min-free tracking so the first poll captures
+    # the post-HCS state. If free VRAM is already below the safety margin
+    # (i.e. HCS was too aggressive), we get an immediate warning.
+    # During runtime, every new low below the margin triggers another warning.
+    _status("VRAM monitor: runtime warnings enabled")
+    _detail(f"Safety margin: {SAFETY_MARGIN_MB:,} MB — warnings on every new low below this")
+    vram_monitor.enable_warnings()
+    logger.info("VRAM monitor: runtime warnings enabled (safety margin: %d MB)", SAFETY_MARGIN_MB)
 
     # Run benchmark if requested (after model load + strategy, before serving)
     if args.benchmark or args.benchmark_only:
@@ -793,21 +819,25 @@ def main():
 
         sys.exit(0)
 
+    # ── Decode mode (already set earlier, just derive label) ──
+    _decode_label = "GPU" if gpu_decode else "CPU"
+
     max_ctx = _model.get_max_context_tokens()
 
     _status(f"Server ready on {args.host}:{args.port}")
-    print(f"  {_DIM}KV cache: {args.kv_cache_mb:,} MB → {max_ctx:,} max context tokens{_NC}", flush=True)
-    print(f"  {_DIM}Press Q or Ctrl-C to stop{_NC}", flush=True)
+    _detail(f"Decode: {_decode_label}  |  HCS: {'on' if args.hcs else 'off'}  |  Max context: {max_ctx:,} tokens")
+    _dim(f"KV cache: {args.kv_cache_mb:,} MB")
+    _dim("Press Q or Ctrl-C to stop")
     logger.info(
-        "Model loaded, starting server on %s:%d (max context: %d tokens)",
-        args.host, args.port, max_ctx,
+        "Model loaded, starting server on %s:%d (max context: %d, decode: %s)",
+        args.host, args.port, max_ctx, _decode_label,
     )
 
     # ── Server registry: write entry + register cleanup ──
     _write_registry(args.host, args.port, _model_name)
     atexit.register(_remove_registry)
 
-    # ── Rust HTTP server — Python only for GPU prefill ──
+    # ── Rust HTTP server ──
     from krasis import RustServer
 
     tokenizer_path = os.path.join(args.model_path, "tokenizer.json")
@@ -819,6 +849,7 @@ def main():
         tokenizer_path,
         max_ctx,
         args.enable_thinking,
+        gpu_decode,
     )
 
     def _handle_exit(sig, frame):
@@ -853,6 +884,7 @@ def main():
     rust_server.run()
 
     # ── Clean exit before Python teardown triggers cascading errors ──
+    vram_monitor.stop()
     _remove_registry()
     _cleanup_cuda()
     os._exit(0)

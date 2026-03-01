@@ -50,11 +50,11 @@ class MLAAttention:
 
     @classmethod
     def _get_workspace(cls, device: torch.device) -> torch.Tensor:
-        """Get or create a shared 128MB FlashInfer workspace for this device."""
+        """Get or create a shared 256MB FlashInfer workspace for this device."""
         key = str(device)
         if key not in cls._workspace_bufs:
             cls._workspace_bufs[key] = torch.empty(
-                128 * 1024 * 1024, dtype=torch.uint8, device=device
+                256 * 1024 * 1024, dtype=torch.uint8, device=device
             )
         return cls._workspace_bufs[key]
 

@@ -87,6 +87,28 @@ def _read_meminfo():
     return result
 
 
+def _vram_checkpoint(label: str, devices=None):
+    """Print VRAM usage at a checkpoint for diagnostics."""
+    import torch
+    if devices is None:
+        devices = [torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())]
+    for dev in devices:
+        alloc = torch.cuda.memory_allocated(dev)
+        reserved = torch.cuda.memory_reserved(dev)
+        free, total = torch.cuda.mem_get_info(dev)
+        used = total - free
+        print(
+            f"  \033[33m[VRAM {label}]\033[0m {dev}: "
+            f"alloc={alloc // (1024*1024)} MB, reserved={reserved // (1024*1024)} MB, "
+            f"used={used // (1024*1024)} MB, free={free // (1024*1024)} MB, total={total // (1024*1024)} MB",
+            flush=True,
+        )
+        logger.info(
+            "VRAM_CHECKPOINT [%s] %s: alloc=%d MB, reserved=%d MB, driver_used=%d MB, free=%d MB, total=%d MB",
+            label, dev, alloc >> 20, reserved >> 20, used >> 20, free >> 20, total >> 20,
+        )
+
+
 def _read_vmrss_kb() -> int:
     """Read VmRSS from /proc/self/status in KB."""
     try:
@@ -474,6 +496,11 @@ class KrasisModel:
         # When True, _hcs_device is None and decode calls GPU0 manager directly.
         self._multi_gpu_hcs: bool = False
 
+        # Decode mode: "gpu" (default) or "cpu".
+        # GPU decode runs model.forward() per token on GPU.
+        # CPU decode uses CpuDecodeStore in Rust (GIL-free).
+        self.decode_mode: str = "gpu"
+
         # Streaming attention decode: weights on CPU pinned memory, DMA'd per-layer.
         # When enabled, attention weights are NOT permanently on GPU.
         self._stream_attn_enabled = False  # set True after offload
@@ -502,12 +529,20 @@ class KrasisModel:
         except (OSError, KeyError):
             return False
 
-    def load(self):
-        """Load all weights: GPU (streaming INT8) + CPU (Krasis INT4 experts)."""
+    def load(self, gpu_only: bool = False):
+        """Load all weights: GPU (streaming INT8) + CPU (Krasis INT4 experts).
+
+        Args:
+            gpu_only: If True, skip CPU expert cache and CPU decode weights.
+                Saves ~40 GB RAM and ~60s load time. Only GPU prefill and
+                GPU decode (with HCS) will work. CPU decode will not be available.
+        """
         start = time.perf_counter()
 
-        # Phase 0: System RAM budget check
-        if self.cfg.n_routed_experts > 0:
+        _vram_checkpoint("before-load")
+
+        # Phase 0: System RAM budget check (skip in gpu_only — no CPU experts loaded)
+        if self.cfg.n_routed_experts > 0 and not gpu_only:
             _check_system_ram(
                 self.cfg,
                 cpu_expert_bits=self.quant_cfg.cpu_expert_bits,
@@ -535,6 +570,7 @@ class KrasisModel:
             alloc_mb = torch.cuda.memory_allocated(dev) / (1024**2)
             logger.info("GPU%d: %.0f MB allocated", i, alloc_mb)
         logger.info("GPU weights loaded in %.1fs", gpu_elapsed)
+        _vram_checkpoint("after-phase1-gpu-weights")
 
         # Phase 1b: Streaming attention offload (if enabled) or resident check
         if self.stream_attention:
@@ -548,31 +584,40 @@ class KrasisModel:
             logger.info("Attention resident on GPU: %d MB, GPU free: %d MB", attn_mb, free_mb)
             print(f"  \033[0;32mAttention resident on GPU ({attn_mb} MB), {free_mb} MB free\033[0m", flush=True)
 
-        # Phase 2: CPU + GPU expert weights (Rust engine)
+        # Phase 2: Expert weights (Rust engine)
         cpu_start = time.perf_counter()
         cpu_bits = self.quant_cfg.cpu_expert_bits
         gpu_bits = self.quant_cfg.gpu_expert_bits
         cache_dir = cache_dir_for_model(self.cfg.model_path)
         has_gpu_cache = os.path.isfile(os.path.join(cache_dir, f"experts_marlin_int{gpu_bits}_g128.bin"))
         has_cpu_cache = os.path.isfile(os.path.join(cache_dir, f"experts_cpu_int{cpu_bits}_g128.bin"))
-        if has_gpu_cache and has_cpu_cache:
-            print(f"\n\033[1m\033[36m▸ Loading expert weights from cache (this loads the full model into RAM, may take a minute)\033[0m", flush=True)
+        if gpu_only:
+            if has_gpu_cache:
+                print(f"\n\033[1m\033[36m▸ Loading GPU expert weights from cache (GPU-only mode, no CPU experts)\033[0m", flush=True)
+            else:
+                print(f"\n\033[1m\033[36m▸ Building GPU INT{gpu_bits} Marlin expert cache (one-time)\033[0m", flush=True)
+            logger.info("Phase 2: Loading GPU expert weights only (GPU INT%d, skipping CPU)...", gpu_bits)
         else:
-            building = []
-            if not has_gpu_cache:
-                building.append(f"GPU INT{gpu_bits} Marlin")
-            if not has_cpu_cache:
-                building.append(f"CPU INT{cpu_bits}")
-            print(f"\n\033[1m\033[36m▸ Building {' + '.join(building)} expert cache (one-time, may take several minutes)\033[0m", flush=True)
-            print(f"  \033[2mCache will be saved to {cache_dir} for instant loading next time.\033[0m", flush=True)
-        logger.info("Phase 2: Loading expert weights (CPU INT%d + GPU INT%d)...", cpu_bits, gpu_bits)
-        self._load_cpu_experts()
+            if has_gpu_cache and has_cpu_cache:
+                print(f"\n\033[1m\033[36m▸ Loading expert weights from cache (this loads the full model into RAM, may take a minute)\033[0m", flush=True)
+            else:
+                building = []
+                if not has_gpu_cache:
+                    building.append(f"GPU INT{gpu_bits} Marlin")
+                if not has_cpu_cache:
+                    building.append(f"CPU INT{cpu_bits}")
+                print(f"\n\033[1m\033[36m▸ Building {' + '.join(building)} expert cache (one-time, may take several minutes)\033[0m", flush=True)
+                print(f"  \033[2mCache will be saved to {cache_dir} for instant loading next time.\033[0m", flush=True)
+            logger.info("Phase 2: Loading expert weights (CPU INT%d + GPU INT%d)...", cpu_bits, gpu_bits)
+        self._load_cpu_experts(gpu_only=gpu_only)
         cpu_elapsed = time.perf_counter() - cpu_start
         logger.info("Expert weights loaded in %.1fs", cpu_elapsed)
         if has_gpu_cache and has_cpu_cache:
             print(f"  \033[0;32mExpert weights loaded in {cpu_elapsed:.0f}s.\033[0m", flush=True)
         else:
             print(f"  \033[0;32mExpert cache built in {cpu_elapsed:.0f}s — next launch will be much faster.\033[0m", flush=True)
+
+        _vram_checkpoint("after-phase2-expert-weights")
 
         # Post-load RSS check: verify RAM estimate accuracy
         if self._estimated_expert_ram_gb > 0:
@@ -583,8 +628,11 @@ class KrasisModel:
             print(f"\n\033[1m\033[36m▸ Initializing GPU prefill managers\033[0m", flush=True)
             self._init_gpu_prefill()
 
+        _vram_checkpoint("after-phase3-prefill-managers")
+
         # Allocate KV caches
         self._init_kv_caches()
+        _vram_checkpoint("after-kv-cache-init")
 
         # Phase 4: CPU Hub (for multi-GPU prefill coordination)
         if len(self.all_devices) > 1 and self.krasis_engine is not None:
@@ -607,14 +655,20 @@ class KrasisModel:
             self.cfg.eos_token_id = self.tokenizer.eos_token_id
 
         # Phase 5: Initialize CPU decode weights (one-time, immutable)
-        print(f"\n\033[1m\033[36m▸ Initializing CPU decode weights\033[0m", flush=True)
-        from krasis.decode_setup import CpuDecoder
-        cpu_decoder = CpuDecoder(self)
-        cpu_decoder.init_weights()
-        self._cpu_decoder = cpu_decoder
+        # Skip entirely in GPU-only mode — CPU decode not available.
+        if gpu_only:
+            self._cpu_decoder = None
+            logger.info("GPU-only mode: skipping CPU decode weight initialization")
+        else:
+            print(f"\n\033[1m\033[36m▸ Initializing CPU decode weights\033[0m", flush=True)
+            from krasis.decode_setup import CpuDecoder
+            cpu_decoder = CpuDecoder(self)
+            cpu_decoder.init_weights()
+            self._cpu_decoder = cpu_decoder
 
         self._loaded = True
         total = time.perf_counter() - start
+        _vram_checkpoint("after-full-load")
         logger.info("Model fully loaded in %.1fs", total)
 
     def warmup_cuda_runtime(self, devices: List[torch.device]):
@@ -1424,8 +1478,14 @@ class KrasisModel:
             layer.shared_expert = None
             layer.shared_expert_gate = None
 
-    def _load_cpu_experts(self):
-        """Load expert weights into Krasis Rust engine."""
+    def _load_cpu_experts(self, gpu_only: bool = False):
+        """Load expert weights into Krasis Rust engine.
+
+        Args:
+            gpu_only: If True, skip CPU expert cache loading (saves ~40 GB RAM
+                and ~45s load time). GPU Marlin experts are still loaded for
+                prefill and HCS decode. CPU decode will not work in this mode.
+        """
         from krasis import KrasisEngine
 
         cpu_bits = self.quant_cfg.cpu_expert_bits
@@ -1448,16 +1508,17 @@ class KrasisModel:
                 gguf_native=self.gguf_native,
             )
         else:
-            engine.load(self.cfg.model_path, cpu_num_bits=cpu_bits, gpu_num_bits=gpu_bits)
+            engine.load(self.cfg.model_path, cpu_num_bits=cpu_bits, gpu_num_bits=gpu_bits, gpu_only=gpu_only)
 
         self.krasis_engine = engine
 
         # Wire engine to MoE layers on ALL devices + allocate pinned buffers
+        # (CPU MoE buffers only needed when NOT gpu_only — they're for CPU decode path)
         first_k = self.cfg.first_k_dense_replace
         for layer in self.layers:
             if layer.is_moe:
                 layer.krasis_engine = engine
-                if layer._cpu_act_buf is None:
+                if not gpu_only and layer._cpu_act_buf is None:
                     layer._cpu_act_buf = torch.empty(1, self.cfg.hidden_size, dtype=torch.bfloat16, pin_memory=True)
                     layer._cpu_ids_buf = torch.empty(1, self.cfg.num_experts_per_tok, dtype=torch.int32, pin_memory=True)
                     layer._cpu_wts_buf = torch.empty(1, self.cfg.num_experts_per_tok, dtype=torch.float32, pin_memory=True)
@@ -3491,28 +3552,53 @@ class KrasisModel:
             if next_token in stop_token_ids:
                 return generated
 
-            # ── Decode (CPU) — entire loop in Rust, zero Python per token ──
-            cpu_decoder = self._cpu_decoder
-            cpu_decoder.prepare(seq_states_per_rank, max_new_tokens)
+            if self.decode_mode == "gpu":
+                # ── Decode (GPU) — per-token model.forward() on GPU ──
+                _t_decode_start = time.perf_counter()
+                stop_set = set(stop_token_ids)
+                for step in range(max_new_tokens - 1):
+                    pos = len(prompt_tokens) + step
+                    token_tensor = torch.tensor([next_token], dtype=torch.long, device=device)
+                    pos_tensor = torch.tensor([pos], dtype=torch.int32, device=device)
+                    logits = self.forward(token_tensor, pos_tensor, seq_states_per_rank)
+                    next_token = sample(
+                        logits[-1:], temperature, top_k, top_p,
+                        presence_penalty=presence_penalty,
+                        generated_tokens=generated_set,
+                    ).item()
+                    generated_set.add(next_token)
+                    generated.append(next_token)
+                    if next_token in stop_set:
+                        break
+                torch.cuda.synchronize()
+                self._last_decode_time = time.perf_counter() - _t_decode_start
+            else:
+                # ── Decode (CPU) — entire loop in Rust, zero Python per token ──
+                cpu_decoder = self._cpu_decoder
+                if cpu_decoder is None:
+                    raise RuntimeError("CPU decode requested but CPU decoder not loaded (gpu_only mode?)")
+                cpu_decoder.prepare(seq_states_per_rank, max_new_tokens)
 
-            decode_tokens = cpu_decoder._store.generate_batch(
-                first_token=next_token,
-                start_position=len(prompt_tokens),
-                max_tokens=max_new_tokens - 1,
-                temperature=temperature,
-                top_k=top_k,
-                top_p=top_p,
-                stop_ids=list(stop_token_ids),
-                presence_penalty=presence_penalty,
-            )
-            generated.extend(decode_tokens)
+                decode_tokens = cpu_decoder._store.generate_batch(
+                    first_token=next_token,
+                    start_position=len(prompt_tokens),
+                    max_tokens=max_new_tokens - 1,
+                    temperature=temperature,
+                    top_k=top_k,
+                    top_p=top_p,
+                    stop_ids=list(stop_token_ids),
+                    presence_penalty=presence_penalty,
+                )
+                generated.extend(decode_tokens)
 
         finally:
-            # Use Rust-internal timing (same Instant timer as network path)
             n_decode = len(generated) - 1  # First token is from prefill
             if n_decode > 0:
-                self._last_decode_time = cpu_decoder._store.last_decode_elapsed_s
-                self._last_decode_tok_s = n_decode / self._last_decode_time
+                if self.decode_mode == "gpu":
+                    self._last_decode_tok_s = n_decode / self._last_decode_time if self._last_decode_time > 0 else 0.0
+                elif self._cpu_decoder is not None:
+                    self._last_decode_time = self._cpu_decoder._store.last_decode_elapsed_s
+                    self._last_decode_tok_s = n_decode / self._last_decode_time
             else:
                 self._last_decode_time = 0.0
                 self._last_decode_tok_s = 0.0
@@ -3555,11 +3641,17 @@ class KrasisModel:
         presence_penalty: float,
         enable_thinking: bool,
         extra_stop_tokens: List[str],
+        decode_mode: str = "gpu",
     ):
         """GPU prefill for Rust server. Returns result object with first_token, etc.
 
         Called by the Rust HTTP server (with GIL) before decode.
         Stores seq_states on self for cleanup via server_cleanup().
+
+        Args:
+            decode_mode: "gpu" (default) or "cpu". GPU decode calls
+                server_gpu_decode_step() per token. CPU decode uses
+                CpuDecodeStore.generate_stream() in Rust (GIL-free).
         """
         import json
 
@@ -3607,19 +3699,29 @@ class KrasisModel:
         ).item()
 
         logger.info(
-            "server_prefill: %d tokens in %.2fs (%.0f tok/s)",
+            "server_prefill: %d tokens in %.2fs (%.0f tok/s), decode_mode=%s",
             len(prompt_tokens), prefill_time,
             len(prompt_tokens) / prefill_time if prefill_time > 0 else 0,
+            decode_mode,
         )
 
-        # Prepare CPU decode
-        cpu_decoder = self._cpu_decoder
-        cpu_decoder._store.reset_cancel()
-        cpu_decoder.prepare(seq_states, max_new_tokens)
-
-        # Get raw address of CpuDecodeStore for GIL-free Rust decode.
-        # self_addr() returns `self as *mut CpuDecodeStore as usize` in Rust.
-        store_addr = cpu_decoder._store.self_addr()
+        store_addr = 0
+        if decode_mode == "cpu":
+            # Prepare CPU decode
+            cpu_decoder = self._cpu_decoder
+            if cpu_decoder is None:
+                raise RuntimeError("CPU decode requested but CPU decoder not loaded (gpu_only mode?)")
+            cpu_decoder._store.reset_cancel()
+            cpu_decoder.prepare(seq_states, max_new_tokens)
+            store_addr = cpu_decoder._store.self_addr()
+        else:
+            # Store sampling params for GPU decode steps
+            self._gpu_decode_device = device
+            self._gpu_decode_temperature = temperature
+            self._gpu_decode_top_k = top_k
+            self._gpu_decode_top_p = top_p
+            self._gpu_decode_presence_penalty = presence_penalty
+            self._gpu_decode_seen_tokens = {first_token}
 
         class _Result:
             pass
@@ -3629,7 +3731,33 @@ class KrasisModel:
         r.prefill_time = prefill_time
         r.stop_ids = stop_ids
         r.store_addr = store_addr
+        r.decode_mode = decode_mode
         return r
+
+    @torch.inference_mode()
+    def server_gpu_decode_step(self, token_id: int, position: int) -> int:
+        """One GPU decode step: forward pass + sampling. Returns next token ID.
+
+        Uses the same model.forward() path as prefill (M=1), with HCS for MoE.
+        Sampling params were stored during server_prefill().
+        Called by the Rust HTTP server per token (with GIL).
+        """
+        device = self._gpu_decode_device
+        token = torch.tensor([token_id], dtype=torch.long, device=device)
+        pos = torch.tensor([position], dtype=torch.int32, device=device)
+
+        logits = self.forward(token, pos, self._server_seq_states)
+
+        next_token = sample(
+            logits[-1:],
+            self._gpu_decode_temperature,
+            self._gpu_decode_top_k,
+            self._gpu_decode_top_p,
+            presence_penalty=self._gpu_decode_presence_penalty,
+            generated_tokens=self._gpu_decode_seen_tokens,
+        ).item()
+        self._gpu_decode_seen_tokens.add(next_token)
+        return next_token
 
     def server_cleanup(self):
         """Free server request state (KV cache pages, etc.)."""

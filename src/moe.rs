@@ -1683,8 +1683,8 @@ impl KrasisEngine {
     ///              building from safetensors. GPU Marlin cache still from safetensors.
     /// `gguf_native`: If true, use raw GGUF blocks for CPU decode (slower but no conversion).
     ///                 Default false: dequant GGUF → re-quantize to fast AVX2 transposed format.
-    #[pyo3(signature = (model_dir, group_size=None, max_layers=None, start_layer=None, num_bits=None, cpu_num_bits=None, gpu_num_bits=None, gguf_path=None, gguf_native=false))]
-    pub fn load(&mut self, model_dir: &str, group_size: Option<usize>, max_layers: Option<usize>, start_layer: Option<usize>, num_bits: Option<u8>, cpu_num_bits: Option<u8>, gpu_num_bits: Option<u8>, gguf_path: Option<&str>, gguf_native: bool) -> PyResult<()> {
+    #[pyo3(signature = (model_dir, group_size=None, max_layers=None, start_layer=None, num_bits=None, cpu_num_bits=None, gpu_num_bits=None, gguf_path=None, gguf_native=false, gpu_only=None))]
+    pub fn load(&mut self, model_dir: &str, group_size: Option<usize>, max_layers: Option<usize>, start_layer: Option<usize>, num_bits: Option<u8>, cpu_num_bits: Option<u8>, gpu_num_bits: Option<u8>, gguf_path: Option<&str>, gguf_native: bool, gpu_only: Option<bool>) -> PyResult<()> {
         let cpu_bits = cpu_num_bits.or(num_bits).unwrap_or(4);
         let gpu_bits = gpu_num_bits.unwrap_or(4);
         if cpu_bits != 4 && cpu_bits != 8 {
@@ -1747,9 +1747,10 @@ impl KrasisEngine {
             crate::syscheck::log_memory_usage("[DIAG-RUST] after load_from_gguf");
             s
         } else {
-            log::info!("[DIAG-RUST] Calling WeightStore::load_from_hf (cpu_bits={}, gpu_bits={})...", cpu_bits, gpu_bits);
+            let skip_cpu = gpu_only.unwrap_or(false);
+            log::info!("[DIAG-RUST] Calling WeightStore::load_from_hf (cpu_bits={}, gpu_bits={}, gpu_only={})...", cpu_bits, gpu_bits, skip_cpu);
             crate::syscheck::log_memory_usage("[DIAG-RUST] before load_from_hf");
-            let s = WeightStore::load_from_hf(path, gs, max_layers, start_layer, cpu_bits, gpu_bits)
+            let s = WeightStore::load_from_hf(path, gs, max_layers, start_layer, cpu_bits, gpu_bits, skip_cpu)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
             log::info!("[DIAG-RUST] WeightStore::load_from_hf completed OK");
             crate::syscheck::log_memory_usage("[DIAG-RUST] after load_from_hf");
@@ -3638,7 +3639,7 @@ mod tests {
         }
 
         // Load just enough to test one expert
-        let store = WeightStore::load_from_hf(model_dir, DEFAULT_GROUP_SIZE, None, None, 4, 4)
+        let store = WeightStore::load_from_hf(model_dir, DEFAULT_GROUP_SIZE, None, None, 4, 4, false)
             .expect("Failed to load");
 
         let hidden = store.config.hidden_size;
@@ -3701,7 +3702,7 @@ mod tests {
             return;
         }
 
-        let store = WeightStore::load_from_hf(model_dir, DEFAULT_GROUP_SIZE, None, None, 4, 4)
+        let store = WeightStore::load_from_hf(model_dir, DEFAULT_GROUP_SIZE, None, None, 4, 4, false)
             .expect("Failed to load");
 
         let hidden = store.config.hidden_size;
@@ -3777,7 +3778,7 @@ mod tests {
             return;
         }
 
-        let store = WeightStore::load_from_hf(model_dir, DEFAULT_GROUP_SIZE, None, None, 4, 4)
+        let store = WeightStore::load_from_hf(model_dir, DEFAULT_GROUP_SIZE, None, None, 4, 4, false)
             .expect("Failed to load");
 
         assert!(store.has_unified(), "Store should have unified format");
@@ -3856,7 +3857,7 @@ mod tests {
         }
 
         // Load just 1 MoE layer (384 experts × 1 layer ≈ 9.5 GB)
-        let store = WeightStore::load_from_hf(model_dir, DEFAULT_GROUP_SIZE, Some(1), None, 4, 4)
+        let store = WeightStore::load_from_hf(model_dir, DEFAULT_GROUP_SIZE, Some(1), None, 4, 4, false)
             .expect("Failed to load Kimi K2.5");
 
         assert_eq!(store.num_moe_layers(), 1);
@@ -3930,7 +3931,7 @@ mod tests {
             return;
         }
 
-        let store = WeightStore::load_from_hf(model_dir, DEFAULT_GROUP_SIZE, None, None, 4, 4)
+        let store = WeightStore::load_from_hf(model_dir, DEFAULT_GROUP_SIZE, None, None, 4, 4, false)
             .expect("Failed to load");
 
         let hidden = store.config.hidden_size;
@@ -4078,7 +4079,7 @@ mod tests {
             return;
         }
 
-        let store = WeightStore::load_from_hf(model_dir, DEFAULT_GROUP_SIZE, None, None, 4, 4)
+        let store = WeightStore::load_from_hf(model_dir, DEFAULT_GROUP_SIZE, None, None, 4, 4, false)
             .expect("Failed to load");
 
         // V2-Lite has 2 shared experts with routed_scaling_factor=1.0

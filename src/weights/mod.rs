@@ -1185,6 +1185,7 @@ impl WeightStore {
         start_layer: Option<usize>,
         cpu_num_bits: u8,
         gpu_num_bits: u8,
+        gpu_only: bool,
     ) -> Result<Self, String> {
         let start = std::time::Instant::now();
 
@@ -1313,67 +1314,71 @@ impl WeightStore {
         let mut shared_experts_cpu: Vec<UnifiedExpertWeights> = Vec::new();
         let mut cpu_loaded = false;
 
-        // Try loading existing CPU cache
-        let cpu_path = cache_path_cpu(model_dir, cpu_num_bits, effective_gs);
-        if cpu_path.exists() {
-            match Self::load_cpu_cache(
-                &cpu_path, &config, effective_gs, total_moe_layers, config_hash,
-                moe_start, num_moe_layers, cpu_num_bits,
-            ) {
-                Ok((cpu_exp, cpu_shared)) => {
-                    log::info!(
-                        "Loaded CPU INT{} cache in {:.1}s: {} layers, {} experts (+ {} shared)",
-                        cpu_num_bits, start.elapsed().as_secs_f64(),
-                        num_moe_layers, config.n_routed_experts, cpu_shared.len(),
-                    );
-                    experts_cpu = cpu_exp;
-                    shared_experts_cpu = cpu_shared;
-                    cpu_loaded = true;
-                }
-                Err(e) => log::warn!("CPU cache invalid: {e}"),
-            }
-        }
-
-        // Build CPU cache if not found
-        if !cpu_loaded {
-            log::info!("No CPU INT{} cache found, building from safetensors...", cpu_num_bits);
-            let built_gs = Self::streaming_build_cpu_cache(
-                model_dir, &config, group_size, total_moe_layers,
-                0, &cpu_path, config_hash, cpu_num_bits,
-            )?;
-
-            // effective_gs may have been updated by the CPU build
-            let actual_cpu_path = cache_path_cpu(model_dir, cpu_num_bits, built_gs);
-            if built_gs != effective_gs && cpu_path != actual_cpu_path {
-                // CPU build detected a different group_size — rename cache
-                if cpu_path.exists() {
-                    let _ = std::fs::rename(&cpu_path, &actual_cpu_path);
+        if gpu_only {
+            log::info!("GPU-only mode: skipping CPU expert cache (saves RAM + load time)");
+        } else {
+            // Try loading existing CPU cache
+            let cpu_path = cache_path_cpu(model_dir, cpu_num_bits, effective_gs);
+            if cpu_path.exists() {
+                match Self::load_cpu_cache(
+                    &cpu_path, &config, effective_gs, total_moe_layers, config_hash,
+                    moe_start, num_moe_layers, cpu_num_bits,
+                ) {
+                    Ok((cpu_exp, cpu_shared)) => {
+                        log::info!(
+                            "Loaded CPU INT{} cache in {:.1}s: {} layers, {} experts (+ {} shared)",
+                            cpu_num_bits, start.elapsed().as_secs_f64(),
+                            num_moe_layers, config.n_routed_experts, cpu_shared.len(),
+                        );
+                        experts_cpu = cpu_exp;
+                        shared_experts_cpu = cpu_shared;
+                        cpu_loaded = true;
+                    }
+                    Err(e) => log::warn!("CPU cache invalid: {e}"),
                 }
             }
-            let load_path = if actual_cpu_path.exists() { &actual_cpu_path } else { &cpu_path };
 
-            match Self::load_cpu_cache(
-                load_path, &config, built_gs, total_moe_layers, config_hash,
-                moe_start, num_moe_layers, cpu_num_bits,
-            ) {
-                Ok((cpu_exp, cpu_shared)) => {
-                    log::info!(
-                        "Loaded CPU INT{} cache after build in {:.1}s",
-                        cpu_num_bits, start.elapsed().as_secs_f64(),
-                    );
-                    experts_cpu = cpu_exp;
-                    shared_experts_cpu = cpu_shared;
-                    cpu_loaded = true;
-                    if built_gs != effective_gs {
-                        effective_gs = built_gs;
+            // Build CPU cache if not found
+            if !cpu_loaded {
+                log::info!("No CPU INT{} cache found, building from safetensors...", cpu_num_bits);
+                let built_gs = Self::streaming_build_cpu_cache(
+                    model_dir, &config, group_size, total_moe_layers,
+                    0, &cpu_path, config_hash, cpu_num_bits,
+                )?;
+
+                // effective_gs may have been updated by the CPU build
+                let actual_cpu_path = cache_path_cpu(model_dir, cpu_num_bits, built_gs);
+                if built_gs != effective_gs && cpu_path != actual_cpu_path {
+                    // CPU build detected a different group_size — rename cache
+                    if cpu_path.exists() {
+                        let _ = std::fs::rename(&cpu_path, &actual_cpu_path);
                     }
                 }
-                Err(e) => log::warn!("Failed to load built CPU cache: {e}"),
-            }
-        }
+                let load_path = if actual_cpu_path.exists() { &actual_cpu_path } else { &cpu_path };
 
-        if !cpu_loaded {
-            log::warn!("CPU cache not loaded — CPU decode will use legacy path if available");
+                match Self::load_cpu_cache(
+                    load_path, &config, built_gs, total_moe_layers, config_hash,
+                    moe_start, num_moe_layers, cpu_num_bits,
+                ) {
+                    Ok((cpu_exp, cpu_shared)) => {
+                        log::info!(
+                            "Loaded CPU INT{} cache after build in {:.1}s",
+                            cpu_num_bits, start.elapsed().as_secs_f64(),
+                        );
+                        experts_cpu = cpu_exp;
+                        shared_experts_cpu = cpu_shared;
+                        cpu_loaded = true;
+                        if built_gs != effective_gs {
+                            effective_gs = built_gs;
+                        }
+                    }
+                    Err(e) => log::warn!("Failed to load built CPU cache: {e}"),
+                }
+            }
+
+            if !cpu_loaded {
+                log::warn!("CPU cache not loaded — CPU decode will use legacy path if available");
+            }
         }
 
         // ── Build final WeightStore ──
@@ -5180,7 +5185,7 @@ mod tests {
             return;
         }
 
-        let store = WeightStore::load_from_hf(model_dir, DEFAULT_GROUP_SIZE, None, None, 4, 4)
+        let store = WeightStore::load_from_hf(model_dir, DEFAULT_GROUP_SIZE, None, None, 4, 4, false)
             .expect("Failed to load V2-Lite");
 
         // V2-Lite: 27 layers, layer 0 dense, layers 1-26 MoE = 26 MoE layers
@@ -5245,7 +5250,7 @@ mod tests {
         }
 
         // Load (will use v2 unified cache if available, or v1→convert, or quantize)
-        let store = WeightStore::load_from_hf(model_dir, DEFAULT_GROUP_SIZE, None, None, 4, 4)
+        let store = WeightStore::load_from_hf(model_dir, DEFAULT_GROUP_SIZE, None, None, 4, 4, false)
             .expect("Failed to load V2-Lite");
 
         // Verify Marlin cache file exists (v3 format)

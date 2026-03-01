@@ -930,3 +930,259 @@ extern "C" __global__ void marlin_gemv_int4_fused_silu_accum(
         accum[n] = *reinterpret_cast<unsigned short*>(&result);
     }
 }
+
+// ── Marlin INT4 GEMV v2: K-split + coalesced thread mapping ───────────
+//
+// Splits K dimension across gridDim.y blocks for better SM utilization
+// on large GPUs (e.g., 5090 with 170 SMs vs 64 blocks for QCN w13).
+//
+// Key differences from v1:
+//   1. Thread mapping swapped: tn = tid & 15, k_slice = tid >> 4
+//      → consecutive threads in a half-warp share same k_slice (same row)
+//      → better memory coalescing for weight and scale reads
+//   2. gridDim.y = k_splits: K tiles distributed across grid blocks
+//   3. Output is FP32 partial sums [k_splits, N] (reduced by separate kernel)
+//   4. Shared memory reduction replaces warp shuffle width=16
+//
+// Grid: (n_tiles, k_splits, 1),  Block: (256, 1, 1)
+// Shared memory: K*2 + 4096 + 256 + 1024 bytes
+
+extern "C" __global__ void marlin_gemv_int4_v2(
+    const unsigned int* __restrict__ packed,   // [K/16, 2*N] Marlin tile-permuted INT4
+    const unsigned short* __restrict__ scales, // [K/gs, N] Marlin scale-permuted BF16
+    const unsigned short* __restrict__ input,  // [K] BF16
+    float* __restrict__ partial_out,           // [k_splits * N] FP32 partial sums
+    const int* __restrict__ inv_weight_perm,   // [1024]
+    const int* __restrict__ inv_scale_perm,    // [64]
+    int K, int N, int group_size, int k_splits
+) {
+    extern __shared__ char smem_raw[];
+    unsigned short* s_input = (unsigned short*)smem_raw;
+    int* s_inv_wperm = (int*)(smem_raw + K * 2);
+    int* s_inv_sperm = (int*)(smem_raw + K * 2 + 1024 * 4);
+    float* s_reduce = (float*)(smem_raw + K * 2 + 1024 * 4 + 64 * 4);
+
+    int tid = threadIdx.x;
+
+    // ── Cooperative preload ──
+    for (int i = tid; i < K; i += 256) {
+        s_input[i] = input[i];
+    }
+    for (int i = tid; i < 1024; i += 256) {
+        s_inv_wperm[i] = inv_weight_perm[i];
+    }
+    if (tid < 64) {
+        s_inv_sperm[tid] = inv_scale_perm[tid];
+    }
+    __syncthreads();
+
+    // Swapped thread mapping: consecutive threads → consecutive N positions
+    int tn = tid & 15;       // output element within tile
+    int k_slice = tid >> 4;  // K-parallelism (16 slices per block)
+    int n_tile = blockIdx.x;
+    int ksplit = blockIdx.y;
+    int n = n_tile * 16 + tn;
+
+    if (n >= N) return;
+
+    int k_tiles_total = K >> 4;
+    int out_cols = N << 1;
+
+    // K-split range for this grid block
+    int tiles_per_split = k_tiles_total / k_splits;
+    int split_start = ksplit * tiles_per_split;
+    int split_end = (ksplit == k_splits - 1) ? k_tiles_total : split_start + tiles_per_split;
+
+    // Within this split, distribute among 16 k_slices
+    int split_tiles = split_end - split_start;
+    int tiles_per_slice = split_tiles / 16;
+    int kt_start = split_start + k_slice * tiles_per_slice;
+    int kt_end = (k_slice == 15) ? split_end : kt_start + tiles_per_slice;
+
+    float acc = 0.0f;
+    int cur_scale_group = -1;
+    float cached_scale = 0.0f;
+
+    for (int kt = kt_start; kt < kt_end; kt++) {
+        for (int tk = 0; tk < 16; tk++) {
+            int k = (kt << 4) + tk;
+
+            int sg = k / group_size;
+            if (sg != cur_scale_group) {
+                cur_scale_group = sg;
+                int scale_flat = sg * N + n;
+                int schunk = scale_flat >> 6;
+                int slocal = scale_flat & 63;
+                int sperm_pos = (schunk << 6) + s_inv_sperm[slocal];
+                unsigned short scale_bits = scales[sperm_pos];
+                cached_scale = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&scale_bits));
+            }
+
+            int tile_pos = (n_tile << 8) + (tk << 4) + tn;
+            int chunk = tile_pos >> 10;
+            int local_idx = tile_pos & 1023;
+            int perm_pos = (chunk << 10) + s_inv_wperm[local_idx];
+
+            int u32_col = perm_pos >> 3;
+            int nibble = perm_pos & 7;
+            unsigned int word = packed[kt * out_cols + u32_col];
+            int raw = (word >> (nibble << 2)) & 0xF;
+            float w_val = (float)(raw - 8);
+
+            float x = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&s_input[k]));
+            acc += w_val * cached_scale * x;
+        }
+    }
+
+    // Shared memory reduction across 16 k_slices
+    s_reduce[k_slice * 16 + tn] = acc;
+    __syncthreads();
+
+    if (k_slice == 0) {
+        float sum = 0.0f;
+        for (int ks = 0; ks < 16; ks++) {
+            sum += s_reduce[ks * 16 + tn];
+        }
+        partial_out[ksplit * N + n] = sum;
+    }
+}
+
+// Reduce K-split partial sums to BF16 output
+extern "C" __global__ void reduce_ksplits_bf16(
+    unsigned short* __restrict__ output,  // [N] BF16
+    const float* __restrict__ partial,    // [k_splits * N] FP32
+    int N, int k_splits
+) {
+    int n = blockIdx.x * blockDim.x + threadIdx.x;
+    if (n >= N) return;
+    float sum = 0.0f;
+    for (int ks = 0; ks < k_splits; ks++) {
+        sum += partial[ks * N + n];
+    }
+    __nv_bfloat16 result = __float2bfloat16(sum);
+    output[n] = *reinterpret_cast<unsigned short*>(&result);
+}
+
+// ── Fused silu_mul + w2 GEMV + weighted_add v2 (K-split) ─────────────
+//
+// Same fusion as v1 but with K-splitting for better GPU occupancy.
+// Outputs FP32 partial sums; caller reduces and accumulates.
+//
+// Grid: (n_tiles, k_splits, 1),  Block: (256, 1, 1)
+
+extern "C" __global__ void marlin_gemv_int4_fused_silu_accum_v2(
+    const unsigned int* __restrict__ packed,    // [K/16, 2*N] w2 Marlin-packed INT4
+    const unsigned short* __restrict__ w2_scales, // [K/gs, N] w2 scales BF16
+    const unsigned short* __restrict__ gate_up, // [2*K] BF16 (gate_up output from w13)
+    float* __restrict__ partial_out,            // [k_splits * N] FP32
+    const int* __restrict__ inv_weight_perm,    // [1024]
+    const int* __restrict__ inv_scale_perm,     // [64]
+    int K, int N, int group_size, int k_splits
+) {
+    extern __shared__ char smem_raw[];
+    unsigned short* s_input = (unsigned short*)smem_raw;
+    int* s_inv_wperm = (int*)(smem_raw + K * 2);
+    int* s_inv_sperm = (int*)(smem_raw + K * 2 + 1024 * 4);
+    float* s_reduce = (float*)(smem_raw + K * 2 + 1024 * 4 + 64 * 4);
+
+    int tid = threadIdx.x;
+
+    // Preload with silu_mul applied
+    for (int i = tid; i < K; i += 256) {
+        float g = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[i]));
+        float u = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[K + i]));
+        float silu_g = g / (1.0f + expf(-g));
+        __nv_bfloat16 val = __float2bfloat16(silu_g * u);
+        s_input[i] = *reinterpret_cast<unsigned short*>(&val);
+    }
+    for (int i = tid; i < 1024; i += 256) {
+        s_inv_wperm[i] = inv_weight_perm[i];
+    }
+    if (tid < 64) {
+        s_inv_sperm[tid] = inv_scale_perm[tid];
+    }
+    __syncthreads();
+
+    int tn = tid & 15;
+    int k_slice = tid >> 4;
+    int n_tile = blockIdx.x;
+    int ksplit = blockIdx.y;
+    int n = n_tile * 16 + tn;
+
+    if (n >= N) return;
+
+    int k_tiles_total = K >> 4;
+    int out_cols = N << 1;
+
+    int tiles_per_split = k_tiles_total / k_splits;
+    int split_start = ksplit * tiles_per_split;
+    int split_end = (ksplit == k_splits - 1) ? k_tiles_total : split_start + tiles_per_split;
+
+    int split_tiles = split_end - split_start;
+    int tiles_per_slice = split_tiles / 16;
+    int kt_start = split_start + k_slice * tiles_per_slice;
+    int kt_end = (k_slice == 15) ? split_end : kt_start + tiles_per_slice;
+
+    float acc = 0.0f;
+    int cur_scale_group = -1;
+    float cached_scale = 0.0f;
+
+    for (int kt = kt_start; kt < kt_end; kt++) {
+        for (int tk = 0; tk < 16; tk++) {
+            int k = (kt << 4) + tk;
+
+            int sg = k / group_size;
+            if (sg != cur_scale_group) {
+                cur_scale_group = sg;
+                int scale_flat = sg * N + n;
+                int schunk = scale_flat >> 6;
+                int slocal = scale_flat & 63;
+                int sperm_pos = (schunk << 6) + s_inv_sperm[slocal];
+                unsigned short scale_bits = w2_scales[sperm_pos];
+                cached_scale = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&scale_bits));
+            }
+
+            int tile_pos = (n_tile << 8) + (tk << 4) + tn;
+            int chunk = tile_pos >> 10;
+            int local_idx = tile_pos & 1023;
+            int perm_pos = (chunk << 10) + s_inv_wperm[local_idx];
+
+            int u32_col = perm_pos >> 3;
+            int nibble = perm_pos & 7;
+            unsigned int word = packed[kt * out_cols + u32_col];
+            int raw = (word >> (nibble << 2)) & 0xF;
+            float w_val = (float)(raw - 8);
+
+            float x = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&s_input[k]));
+            acc += w_val * cached_scale * x;
+        }
+    }
+
+    s_reduce[k_slice * 16 + tn] = acc;
+    __syncthreads();
+
+    if (k_slice == 0) {
+        float sum = 0.0f;
+        for (int ks = 0; ks < 16; ks++) {
+            sum += s_reduce[ks * 16 + tn];
+        }
+        partial_out[ksplit * N + n] = sum;
+    }
+}
+
+// Reduce K-split partial sums with weighted accumulation to BF16
+extern "C" __global__ void reduce_ksplits_weighted_accum_bf16(
+    unsigned short* __restrict__ accum,   // [N] BF16 read-modify-write
+    const float* __restrict__ partial,    // [k_splits * N] FP32
+    int N, int k_splits, float weight
+) {
+    int n = blockIdx.x * blockDim.x + threadIdx.x;
+    if (n >= N) return;
+    float sum = 0.0f;
+    for (int ks = 0; ks < k_splits; ks++) {
+        sum += partial[ks * N + n];
+    }
+    float existing = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&accum[n]));
+    __nv_bfloat16 result = __float2bfloat16(existing + weight * sum);
+    accum[n] = *reinterpret_cast<unsigned short*>(&result);
+}
