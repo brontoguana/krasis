@@ -702,10 +702,19 @@ extern "C" __global__ void fp32_to_bf16(
 //
 // Each block computes TILE_N=16 output elements.
 // Within a block, K_SLICES=16 thread groups each handle K/(16*K_SLICES)
-// k-tiles, then reduce via shared memory.
+// k-tiles, then reduce via warp shuffle.
+//
+// Optimizations (Pass 4):
+//   1. Input vector preloaded into shared memory (one read per block)
+//   2. Inv perm tables preloaded into shared memory (no global reads in hot loop)
+//   3. Scale cached per group (recomputed only at group_size boundaries)
+//   4. Warp shuffle reduction (width=16, eliminates shared memory reduce array)
+//
+// Shared memory layout (dynamic, passed at launch):
+//   [0 .. K*2)                 : input BF16 (K unsigned shorts)
+//   [K*2 .. K*2 + 4096)       : inv_weight_perm (1024 ints)
+//   [K*2 + 4096 .. K*2 + 4352): inv_scale_perm (64 ints)
 
-// Marlin INT4 GEMV kernel.
-// Inverse perm tables are passed as arguments (uploaded from Rust).
 extern "C" __global__ void marlin_gemv_int4(
     const unsigned int* __restrict__ packed,   // [K/16, 2*N] Marlin tile-permuted INT4
     const unsigned short* __restrict__ scales, // [K/gs, N] Marlin scale-permuted BF16
@@ -715,11 +724,30 @@ extern "C" __global__ void marlin_gemv_int4(
     const int* __restrict__ inv_scale_perm,    // [64] inverse scale perm
     int K, int N, int group_size
 ) {
+    extern __shared__ char smem_raw[];
+    unsigned short* s_input = (unsigned short*)smem_raw;
+    int* s_inv_wperm = (int*)(smem_raw + K * 2);
+    int* s_inv_sperm = (int*)(smem_raw + K * 2 + 1024 * 4);
+
+    int tid = threadIdx.x;
+
+    // ── Cooperative preload: input, inv_weight_perm, inv_scale_perm ──
+    for (int i = tid; i < K; i += 256) {
+        s_input[i] = input[i];
+    }
+    for (int i = tid; i < 1024; i += 256) {
+        s_inv_wperm[i] = inv_weight_perm[i];
+    }
+    if (tid < 64) {
+        s_inv_sperm[tid] = inv_scale_perm[tid];
+    }
+    __syncthreads();
+
     // Thread mapping: 256 threads per block
-    // k_slice = threadIdx.x & 15  (0..15, which slice of K tiles)
-    // tn = threadIdx.x >> 4       (0..15, which output in this tile)
-    int k_slice = threadIdx.x & 15;
-    int tn = threadIdx.x >> 4;
+    // k_slice = tid & 15  (0..15, which slice of K tiles)
+    // tn = tid >> 4       (0..15, which output in this tile)
+    int k_slice = tid & 15;
+    int tn = tid >> 4;
     int n_tile = blockIdx.x;
     int n = n_tile * 16 + tn;
 
@@ -727,71 +755,178 @@ extern "C" __global__ void marlin_gemv_int4(
 
     int k_tiles_total = K >> 4;    // K / 16
     int out_cols = N << 1;         // 2 * N (u32 columns in packed)
-    int row_len = N << 4;          // N * 16 (INT4 values per k-tile row)
 
     // Distribute k_tiles across 16 slices
     int tiles_per_slice = k_tiles_total >> 4;  // k_tiles_total / 16
     int kt_start = k_slice * tiles_per_slice;
     int kt_end = (k_slice == 15) ? k_tiles_total : (kt_start + tiles_per_slice);
 
-    // Load input values for our k range into registers
-    // (input is small enough that L2 handles repeated access well)
-
     float acc = 0.0f;
+
+    // ── Scale caching: recompute only at group boundaries ──
+    int cur_scale_group = -1;
+    float cached_scale = 0.0f;
 
     for (int kt = kt_start; kt < kt_end; kt++) {
         // Process 16 k positions within this tile
         for (int tk = 0; tk < 16; tk++) {
             int k = (kt << 4) + tk;
 
+            // Check if scale group changed (every group_size K elements)
+            int sg = k / group_size;
+            if (sg != cur_scale_group) {
+                cur_scale_group = sg;
+                int scale_flat = sg * N + n;
+                int schunk = scale_flat >> 6;
+                int slocal = scale_flat & 63;
+                int sperm_pos = (schunk << 6) + s_inv_sperm[slocal];
+                unsigned short scale_bits = scales[sperm_pos];
+                cached_scale = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&scale_bits));
+            }
+
             // --- Find weight value W[n, k] in Marlin packed format ---
-            // Step 1: tile position in pre-perm array
-            int tile_pos = (n_tile << 8) + (tk << 4) + tn;  // n_tile*256 + tk*16 + tn
+            int tile_pos = (n_tile << 8) + (tk << 4) + tn;
 
-            // Step 2: apply inverse weight perm (within 1024-element chunk)
-            int chunk = tile_pos >> 10;        // tile_pos / 1024
-            int local = tile_pos & 1023;       // tile_pos % 1024
-            int perm_pos = (chunk << 10) + inv_weight_perm[local];
+            // Apply inverse weight perm (within 1024-element chunk)
+            int chunk = tile_pos >> 10;
+            int local_idx = tile_pos & 1023;
+            int perm_pos = (chunk << 10) + s_inv_wperm[local_idx];
 
-            // Step 3: extract INT4 from packed u32
-            int u32_col = perm_pos >> 3;       // perm_pos / 8
-            int nibble = perm_pos & 7;         // perm_pos % 8
+            // Extract INT4 from packed u32
+            int u32_col = perm_pos >> 3;
+            int nibble = perm_pos & 7;
             unsigned int word = packed[kt * out_cols + u32_col];
             int raw = (word >> (nibble << 2)) & 0xF;
-            float w_val = (float)(raw - 8);    // symmetric INT4: [0,15] → [-8, 7]
+            float w_val = (float)(raw - 8);
 
-            // --- Find scale for this (n, k) position ---
-            int sg = k / group_size;           // scale group index
-            int scale_flat = sg * N + n;       // position in [K/gs, N] array
-            int schunk = scale_flat >> 6;      // / 64
-            int slocal = scale_flat & 63;      // % 64
-            int sperm_pos = (schunk << 6) + inv_scale_perm[slocal];
+            // Input from shared memory (no global read)
+            float x = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&s_input[k]));
 
-            // Read BF16 scale, convert to FP32
-            unsigned short scale_bits = scales[sperm_pos];
-            float scale = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&scale_bits));
-
-            // Read BF16 input, convert to FP32
-            unsigned short x_bits = input[k];
-            float x = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&x_bits));
-
-            acc += w_val * scale * x;
+            acc += w_val * cached_scale * x;
         }
     }
 
-    // --- Reduce across 16 k_slices for this output element ---
-    __shared__ float reduce[256];
-    reduce[threadIdx.x] = acc;
+    // ── Warp shuffle reduction across 16 k_slices ──
+    // Thread layout: k_slice = tid & 15, tn = tid >> 4
+    // Within each warp (32 threads), lower 16 = one tn, upper 16 = next tn.
+    // __shfl_down_sync with width=16 reduces independently within each 16-lane group.
+    for (int offset = 8; offset > 0; offset >>= 1) {
+        acc += __shfl_down_sync(0xFFFFFFFF, acc, offset, 16);
+    }
+
+    // k_slice == 0 (lane 0 of each 16-lane group) has the final sum
+    if (k_slice == 0) {
+        __nv_bfloat16 result = __float2bfloat16(acc);
+        output[n] = *reinterpret_cast<unsigned short*>(&result);
+    }
+}
+
+// ── Fused silu_mul + w2 GEMV + weighted_add (Pass 5) ─────────────────
+//
+// Replaces 3 separate kernel launches per expert with 1:
+//   1. Reads gate_up[2*K] (output of w13 GEMV)
+//   2. Applies silu_mul during shared memory preload: scratch[i] = silu(gate[i]) * up[i]
+//   3. Runs w2 Marlin GEMV: output = w2 @ scratch
+//   4. Weighted accumulation: accum[n] += weight * output[n]
+//
+// Launch: grid=(N/16, 1, 1), block=(256, 1, 1)
+// where K = intermediate_size, N = hidden_size
+// Shared memory: K*2 + 1024*4 + 64*4 bytes (same layout as standard GEMV)
+
+extern "C" __global__ void marlin_gemv_int4_fused_silu_accum(
+    const unsigned int* __restrict__ packed,    // [K/16, 2*N] w2 Marlin-packed INT4
+    const unsigned short* __restrict__ w2_scales, // [K/gs, N] w2 scales BF16
+    const unsigned short* __restrict__ gate_up, // [2*K] BF16 (gate_up output from w13)
+    unsigned short* __restrict__ accum,         // [N] BF16 (moe_out accumulator, read-modify-write)
+    const int* __restrict__ inv_weight_perm,    // [1024]
+    const int* __restrict__ inv_scale_perm,     // [64]
+    int K,              // intermediate_size
+    int N,              // hidden_size
+    int group_size,
+    float weight        // routing weight for this expert
+) {
+    extern __shared__ char smem_raw[];
+    unsigned short* s_input = (unsigned short*)smem_raw;
+    int* s_inv_wperm = (int*)(smem_raw + K * 2);
+    int* s_inv_sperm = (int*)(smem_raw + K * 2 + 1024 * 4);
+
+    int tid = threadIdx.x;
+
+    // ── Cooperative preload: apply silu_mul while loading gate_up into shared mem ──
+    for (int i = tid; i < K; i += 256) {
+        float g = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[i]));
+        float u = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[K + i]));
+        float silu_g = g / (1.0f + expf(-g));
+        __nv_bfloat16 val = __float2bfloat16(silu_g * u);
+        s_input[i] = *reinterpret_cast<unsigned short*>(&val);
+    }
+    for (int i = tid; i < 1024; i += 256) {
+        s_inv_wperm[i] = inv_weight_perm[i];
+    }
+    if (tid < 64) {
+        s_inv_sperm[tid] = inv_scale_perm[tid];
+    }
     __syncthreads();
 
-    if (k_slice == 0) {
-        float sum = acc;  // Already have our own contribution
-        int base = tn << 4;  // tn * 16
-        for (int s = 1; s < 16; s++) {
-            sum += reduce[base + s];
+    // ── Standard Marlin GEMV with cached optimizations ──
+    int k_slice = tid & 15;
+    int tn = tid >> 4;
+    int n_tile = blockIdx.x;
+    int n = n_tile * 16 + tn;
+
+    if (n >= N) return;
+
+    int k_tiles_total = K >> 4;
+    int out_cols = N << 1;
+
+    int tiles_per_slice = k_tiles_total >> 4;
+    int kt_start = k_slice * tiles_per_slice;
+    int kt_end = (k_slice == 15) ? k_tiles_total : (kt_start + tiles_per_slice);
+
+    float acc = 0.0f;
+    int cur_scale_group = -1;
+    float cached_scale = 0.0f;
+
+    for (int kt = kt_start; kt < kt_end; kt++) {
+        for (int tk = 0; tk < 16; tk++) {
+            int k = (kt << 4) + tk;
+
+            int sg = k / group_size;
+            if (sg != cur_scale_group) {
+                cur_scale_group = sg;
+                int scale_flat = sg * N + n;
+                int schunk = scale_flat >> 6;
+                int slocal = scale_flat & 63;
+                int sperm_pos = (schunk << 6) + s_inv_sperm[slocal];
+                unsigned short scale_bits = w2_scales[sperm_pos];
+                cached_scale = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&scale_bits));
+            }
+
+            int tile_pos = (n_tile << 8) + (tk << 4) + tn;
+            int chunk = tile_pos >> 10;
+            int local_idx = tile_pos & 1023;
+            int perm_pos = (chunk << 10) + s_inv_wperm[local_idx];
+
+            int u32_col = perm_pos >> 3;
+            int nibble = perm_pos & 7;
+            unsigned int word = packed[kt * out_cols + u32_col];
+            int raw = (word >> (nibble << 2)) & 0xF;
+            float w_val = (float)(raw - 8);
+
+            float x = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&s_input[k]));
+            acc += w_val * cached_scale * x;
         }
-        // Write BF16 output
-        __nv_bfloat16 result = __float2bfloat16(sum);
-        output[n] = *reinterpret_cast<unsigned short*>(&result);
+    }
+
+    // Warp shuffle reduction
+    for (int offset = 8; offset > 0; offset >>= 1) {
+        acc += __shfl_down_sync(0xFFFFFFFF, acc, offset, 16);
+    }
+
+    // Weighted accumulate: accum[n] += weight * gemv_result
+    if (k_slice == 0) {
+        float existing = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&accum[n]));
+        __nv_bfloat16 result = __float2bfloat16(existing + weight * acc);
+        accum[n] = *reinterpret_cast<unsigned short*>(&result);
     }
 }

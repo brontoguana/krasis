@@ -47,6 +47,7 @@ const KERNEL_NAMES: &[&str] = &[
     "bf16_to_fp32",
     "fp32_to_bf16",
     "marlin_gemv_int4",
+    "marlin_gemv_int4_fused_silu_accum",
 ];
 
 const MODULE_NAME: &str = "decode_kernels";
@@ -436,6 +437,26 @@ enum GpuMlpConfig {
     None,
 }
 
+// ── Cached kernel function handles ─────────────────────────────────────
+// Avoids HashMap lookup per kernel call (23+ lookups per MoE forward).
+
+struct CachedKernels {
+    bf16_to_fp32: cudarc::driver::CudaFunction,
+    fp32_to_bf16: cudarc::driver::CudaFunction,
+    rmsnorm: cudarc::driver::CudaFunction,
+    fused_add_rmsnorm: cudarc::driver::CudaFunction,
+    silu_mul: cudarc::driver::CudaFunction,
+    sigmoid_topk: cudarc::driver::CudaFunction,
+    softmax_topk: cudarc::driver::CudaFunction,
+    zero_bf16: cudarc::driver::CudaFunction,
+    add_bf16: cudarc::driver::CudaFunction,
+    weighted_add_bf16: cudarc::driver::CudaFunction,
+    scale_bf16: cudarc::driver::CudaFunction,
+    embedding_lookup: cudarc::driver::CudaFunction,
+    marlin_gemv_int4: cudarc::driver::CudaFunction,
+    fused_silu_accum: cudarc::driver::CudaFunction,
+}
+
 // ── Main GPU decode graph ──────────────────────────────────────────────
 
 struct GpuDecodeGraph {
@@ -459,6 +480,10 @@ struct GpuDecodeGraph {
     // MoE layer data (expert RAM pointers, routing config)
     moe_layers: Vec<Option<MoeLayerData>>,
 
+    // Shared expert weights permanently resident in VRAM (one per MoE layer).
+    // Indexed by MoE layer index. None = no shared expert or not yet pinned.
+    shared_expert_vram: Vec<Option<HcsCacheEntry>>,
+
     // Adaptive Prefetch Layer state
     apfl: Option<ApflState>,
 
@@ -473,9 +498,20 @@ struct GpuDecodeGraph {
     // FP32 scratch for intermediate computations (routing, attention)
     d_fp32_scratch: cudarc::driver::CudaSlice<f32>,
 
-    // Expert DMA buffers: two pairs for ping-pong overlap.
-    // Pair 0 (a0/b0): packed data / scales for current operation
-    // Pair 1 (a1/b1): packed data / scales for next operation (DMA while computing on pair 0)
+    // Expert DMA double-buffer: two contiguous buffers for ping-pong overlap.
+    // While expert N computes from buf[N%2], expert N+1 DMAs into buf[(N+1)%2].
+    // Each buffer holds one full expert: w13_packed | w13_scales | w2_packed | w2_scales.
+    d_expert_buf: [cudarc::driver::CudaSlice<u8>; 2],
+    /// Size of each contiguous expert buffer (bytes).
+    expert_buf_total_size: usize,
+    /// Offsets within each contiguous buffer for the 4 weight components.
+    expert_buf_w13p_offset: usize,
+    expert_buf_w13s_offset: usize,
+    expert_buf_w2p_offset: usize,
+    expert_buf_w2s_offset: usize,
+
+    // Legacy fields kept for compatibility with existing resize_expert_buffers callers.
+    // TODO: remove once all callers updated.
     d_expert_buf_a0: cudarc::driver::CudaSlice<u8>,
     d_expert_buf_b0: cudarc::driver::CudaSlice<u8>,
     d_expert_buf_a1: cudarc::driver::CudaSlice<u8>,
@@ -520,6 +556,13 @@ struct GpuDecodeGraph {
     h_topk_ids: Vec<i32>,
     h_topk_weights: Vec<f32>,
     h_logits: Vec<f32>,
+
+    // Cached kernel function handles (populated after configure)
+    kernels: Option<CachedKernels>,
+
+    // Pre-allocated CUDA events for MoE forward (avoid create/destroy per layer)
+    // [0..1] for DMA done, [2..3] for compute done on double-buffer slots
+    pre_events: Option<[CudaEvent; 4]>,
 
     // Timing
     timing_enabled: bool,
@@ -682,6 +725,12 @@ impl GpuDecodeStore {
         let d_expert_buf_b1 = self.device.alloc_zeros::<u8>(1)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
 
+        // Double-buffer for ping-pong expert DMA (initialized to 1 byte, resized later)
+        let d_expert_buf_0 = self.device.alloc_zeros::<u8>(1)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
+        let d_expert_buf_1 = self.device.alloc_zeros::<u8>(1)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
+
         let d_topk_indices = self.device.alloc_zeros::<i32>(max_experts_per_tok)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
         let d_topk_weights = self.device.alloc_zeros::<f32>(max_experts_per_tok)
@@ -733,6 +782,7 @@ impl GpuDecodeStore {
             final_norm_ptr: 0,
             final_norm_size: 0,
             moe_layers: Vec::new(),
+            shared_expert_vram: Vec::new(),
             apfl: None,
             hcs: None,
             d_hidden,
@@ -740,6 +790,12 @@ impl GpuDecodeStore {
             d_scratch,
             d_logits,
             d_fp32_scratch,
+            d_expert_buf: [d_expert_buf_0, d_expert_buf_1],
+            expert_buf_total_size: 0,
+            expert_buf_w13p_offset: 0,
+            expert_buf_w13s_offset: 0,
+            expert_buf_w2p_offset: 0,
+            expert_buf_w2s_offset: 0,
             d_expert_buf_a0,
             d_expert_buf_b0,
             d_expert_buf_a1,
@@ -765,6 +821,8 @@ impl GpuDecodeStore {
             h_topk_ids: vec![0i32; max_experts_per_tok],
             h_topk_weights: vec![0.0f32; max_experts_per_tok],
             h_logits: vec![0.0f32; vocab_size],
+            kernels: None,
+            pre_events: None,
             timing_enabled: false,
             timing_step_count: 0,
             t_total: 0.0,
@@ -777,6 +835,55 @@ impl GpuDecodeStore {
             t_dense_mlp: 0.0,
             t_lm_head: 0.0,
         }));
+
+        // Cache kernel function handles (avoid HashMap lookup per call)
+        if self.kernels_loaded {
+            let get = |name: &str| -> PyResult<cudarc::driver::CudaFunction> {
+                self.device.get_func(MODULE_NAME, name)
+                    .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(
+                        format!("Kernel '{}' not found", name)))
+            };
+            let kernels = CachedKernels {
+                bf16_to_fp32: get("bf16_to_fp32")?,
+                fp32_to_bf16: get("fp32_to_bf16")?,
+                rmsnorm: get("rmsnorm")?,
+                fused_add_rmsnorm: get("fused_add_rmsnorm")?,
+                silu_mul: get("silu_mul")?,
+                sigmoid_topk: get("sigmoid_topk")?,
+                softmax_topk: get("softmax_topk")?,
+                zero_bf16: get("zero_bf16")?,
+                add_bf16: get("add_bf16")?,
+                weighted_add_bf16: get("weighted_add_bf16")?,
+                scale_bf16: get("scale_bf16")?,
+                embedding_lookup: get("embedding_lookup")?,
+                marlin_gemv_int4: get("marlin_gemv_int4")?,
+                fused_silu_accum: get("marlin_gemv_int4_fused_silu_accum")?,
+            };
+            self.graph.as_mut().unwrap().kernels = Some(kernels);
+            log::info!("GpuDecodeStore: cached 14 kernel function handles");
+        }
+
+        // Pre-allocate CUDA events (reuse across MoE forward calls)
+        {
+            let mut raw_events = [std::ptr::null_mut(); 4];
+            unsafe {
+                let flags = cuda_sys::CUevent_flags::CU_EVENT_DISABLE_TIMING as u32;
+                for e in raw_events.iter_mut() {
+                    let err = cuda_sys::lib().cuEventCreate(e, flags);
+                    if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                            format!("cuEventCreate: {:?}", err)));
+                    }
+                }
+            }
+            self.graph.as_mut().unwrap().pre_events = Some([
+                CudaEvent(raw_events[0]),
+                CudaEvent(raw_events[1]),
+                CudaEvent(raw_events[2]),
+                CudaEvent(raw_events[3]),
+            ]);
+            log::info!("GpuDecodeStore: pre-allocated 4 CUDA events");
+        }
 
         log::info!("GpuDecodeStore: configured hidden={}, layers={}, vocab={}, intermediate={}, qkv={}, gs={}",
                    hidden_size, num_layers, vocab_size, intermediate, qkv_size, group_size);
@@ -914,6 +1021,7 @@ impl GpuDecodeStore {
     fn resize_expert_buffers(&mut self, expert_size_bytes: usize) -> PyResult<()> {
         let graph = self.graph.as_mut()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
+        // Legacy 4-buffer allocation (kept for compatibility)
         graph.d_expert_buf_a0 = self.device.alloc_zeros::<u8>(expert_size_bytes)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
         graph.d_expert_buf_b0 = self.device.alloc_zeros::<u8>(expert_size_bytes)
@@ -923,6 +1031,38 @@ impl GpuDecodeStore {
         graph.d_expert_buf_b1 = self.device.alloc_zeros::<u8>(expert_size_bytes)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
         graph.expert_buf_size = expert_size_bytes;
+
+        // Compute proper double-buffer layout from the first registered MoE layer's expert sizes.
+        // All experts in a model have identical weight dimensions.
+        if let Some(first_moe) = graph.moe_layers.iter().find_map(|m| m.as_ref()) {
+            let e = &first_moe.experts[0];
+            let align = 256usize; // CUDA DMA alignment
+            let w13p_aligned = (e.w13_packed_bytes + align - 1) & !(align - 1);
+            let w13s_aligned = (e.w13_scales_bytes + align - 1) & !(align - 1);
+            let w2p_aligned = (e.w2_packed_bytes + align - 1) & !(align - 1);
+            let w2s_aligned = (e.w2_scales_bytes + align - 1) & !(align - 1);
+            let total = w13p_aligned + w13s_aligned + w2p_aligned + w2s_aligned;
+
+            graph.expert_buf_w13p_offset = 0;
+            graph.expert_buf_w13s_offset = w13p_aligned;
+            graph.expert_buf_w2p_offset = w13p_aligned + w13s_aligned;
+            graph.expert_buf_w2s_offset = w13p_aligned + w13s_aligned + w2p_aligned;
+            graph.expert_buf_total_size = total;
+
+            graph.d_expert_buf[0] = self.device.alloc_zeros::<u8>(total)
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
+            graph.d_expert_buf[1] = self.device.alloc_zeros::<u8>(total)
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
+
+            log::info!(
+                "GpuDecodeStore: double-buffer 2x {:.1} KB = {:.1} MB (w13p={}, w13s={}, w2p={}, w2s={})",
+                total as f64 / 1024.0,
+                total as f64 * 2.0 / (1024.0 * 1024.0),
+                e.w13_packed_bytes, e.w13_scales_bytes,
+                e.w2_packed_bytes, e.w2_scales_bytes,
+            );
+        }
+
         log::info!("GpuDecodeStore: expert buffers 4x {} bytes ({:.1} MB total)",
                    expert_size_bytes, expert_size_bytes as f64 * 4.0 / (1024.0 * 1024.0));
         Ok(())
@@ -1541,6 +1681,13 @@ impl GpuDecodeStore {
     fn test_hcs_e2e(&mut self, model_dir: &str, num_tokens: usize) -> PyResult<String> {
         self.test_hcs_e2e_internal(model_dir, num_tokens)
     }
+
+    /// Optimization pass benchmark: measures MoE forward with shared experts.
+    /// Runs with and without shared expert VRAM residency to measure delta.
+    #[pyo3(signature = (model_dir, num_tokens=5))]
+    fn bench_shared_expert_residency(&mut self, model_dir: &str, num_tokens: usize) -> PyResult<String> {
+        self.bench_shared_expert_residency_internal(model_dir, num_tokens)
+    }
 }
 
 // ── Marlin perm table computation + GPU decode internals ──────────────
@@ -1652,6 +1799,62 @@ impl GpuDecodeStore {
             shared_gate_wid,
         });
 
+        // Pin shared expert in VRAM if present (Certainty Rule: always accessed, zero DMA at runtime)
+        while graph.shared_expert_vram.len() <= layer_idx {
+            graph.shared_expert_vram.push(None);
+        }
+        if let Some(ref se) = graph.moe_layers[layer_idx].as_ref().unwrap().shared {
+            let total_bytes_se = se.w13_packed_bytes + se.w13_scales_bytes
+                + se.w2_packed_bytes + se.w2_scales_bytes;
+            let align = 512usize;
+            let alloc_bytes = (total_bytes_se + align - 1) & !(align - 1);
+
+            let d_buf = self.device.alloc_zeros::<u8>(alloc_bytes)
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
+                    format!("Shared expert VRAM alloc ({} bytes): {:?}", alloc_bytes, e)))?;
+
+            let w13_packed_offset = 0;
+            let w13_scales_offset = se.w13_packed_bytes;
+            let w2_packed_offset = w13_scales_offset + se.w13_scales_bytes;
+            let w2_scales_offset = w2_packed_offset + se.w2_packed_bytes;
+
+            // Synchronous H2D copy (one-time setup)
+            let dst_base = *d_buf.device_ptr();
+            unsafe {
+                let copy = |offset: usize, src_ptr: usize, bytes: usize| -> PyResult<()> {
+                    let err = cuda_sys::lib().cuMemcpyHtoD_v2(
+                        dst_base + offset as u64,
+                        src_ptr as *const std::ffi::c_void,
+                        bytes,
+                    );
+                    if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                            format!("Shared expert H2D: {:?}", err)));
+                    }
+                    Ok(())
+                };
+                copy(w13_packed_offset, se.w13_packed_ptr, se.w13_packed_bytes)?;
+                copy(w13_scales_offset, se.w13_scales_ptr, se.w13_scales_bytes)?;
+                copy(w2_packed_offset, se.w2_packed_ptr, se.w2_packed_bytes)?;
+                copy(w2_scales_offset, se.w2_scales_ptr, se.w2_scales_bytes)?;
+            }
+
+            log::info!("Shared expert layer {} pinned in VRAM: {:.1} KB",
+                layer_idx, alloc_bytes as f64 / 1024.0);
+
+            graph.shared_expert_vram[layer_idx] = Some(HcsCacheEntry {
+                d_buf,
+                w13_packed_offset,
+                w13_packed_size: se.w13_packed_bytes,
+                w13_scales_offset,
+                w13_scales_size: se.w13_scales_bytes,
+                w2_packed_offset,
+                w2_packed_size: se.w2_packed_bytes,
+                w2_scales_offset,
+                w2_scales_size: se.w2_scales_bytes,
+            });
+        }
+
         log::info!("GpuDecodeStore: registered MoE layer {} ({} experts, topk={}, {:.1} MB/expert)",
             layer_idx, num_experts, topk,
             total_bytes as f64 / num_experts as f64 / (1024.0 * 1024.0));
@@ -1704,10 +1907,12 @@ impl GpuDecodeStore {
                 "marlin_gemv_int4 kernel not found"))?;
 
         let n_tiles = (n + 15) / 16;
+        // Shared memory: input BF16 [K*2] + inv_weight_perm [1024*4] + inv_scale_perm [64*4]
+        let smem_bytes = (k * 2 + 1024 * 4 + 64 * 4) as u32;
         let cfg = LaunchConfig {
             grid_dim: (n_tiles as u32, 1, 1),
             block_dim: (256, 1, 1),
-            shared_mem_bytes: 256 * 4,
+            shared_mem_bytes: smem_bytes,
         };
 
         unsafe {
@@ -1723,6 +1928,51 @@ impl GpuDecodeStore {
                 group_size as i32,
             )).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
                 format!("marlin_gemv_int4 launch: {:?}", e)))?;
+        }
+
+        Ok(())
+    }
+
+    /// Launch fused silu_mul + w2 GEMV + weighted_add.
+    /// Replaces 3 separate kernel launches (silu_mul, w2 GEMV, weighted_add) with 1.
+    /// gate_up_ptr: [2*K] BF16 output from w13 GEMV
+    /// accum_ptr: [N] BF16 moe_out accumulator (read-modify-write)
+    fn launch_fused_silu_accum(
+        &self,
+        w2_packed_ptr: u64,
+        w2_scales_ptr: u64,
+        gate_up_ptr: u64,
+        accum_ptr: u64,
+        inv_weight_perm_ptr: u64,
+        inv_scale_perm_ptr: u64,
+        k: usize,       // intermediate_size
+        n: usize,        // hidden_size
+        group_size: usize,
+        weight: f32,
+        kernels: &CachedKernels,
+    ) -> PyResult<()> {
+        let n_tiles = (n + 15) / 16;
+        let smem_bytes = (k * 2 + 1024 * 4 + 64 * 4) as u32;
+        let cfg = LaunchConfig {
+            grid_dim: (n_tiles as u32, 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: smem_bytes,
+        };
+
+        unsafe {
+            kernels.fused_silu_accum.clone().launch(cfg, (
+                w2_packed_ptr,
+                w2_scales_ptr,
+                gate_up_ptr,
+                accum_ptr,
+                inv_weight_perm_ptr,
+                inv_scale_perm_ptr,
+                k as i32,
+                n as i32,
+                group_size as i32,
+                weight,
+            )).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
+                format!("fused_silu_accum launch: {:?}", e)))?;
         }
 
         Ok(())
@@ -1911,12 +2161,17 @@ impl GpuDecodeStore {
 
         let t_start = Instant::now();
 
+        // Get cached kernel handles (avoids HashMap lookup per call)
+        let k = graph.kernels.as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Kernels not cached"))?;
+
+        // Use pre-allocated events if available, otherwise create on demand
+        let pre_ev = &graph.pre_events;
+
         // ── Step 1: BF16 → FP32 conversion of d_hidden ──
         {
-            let f = device.get_func(MODULE_NAME, "bf16_to_fp32")
-                .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("bf16_to_fp32 not found"))?;
             unsafe {
-                f.launch(
+                k.bf16_to_fp32.clone().launch(
                     LaunchConfig::for_num_elems(hs as u32),
                     (
                         *graph.d_fp32_scratch.device_ptr(),
@@ -1969,12 +2224,10 @@ impl GpuDecodeStore {
             };
 
             if sf == 1 {
-                let f = device.get_func(MODULE_NAME, "sigmoid_topk")
-                    .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("sigmoid_topk not found"))?;
                 let bias_ptr = if gate_bias_ptr != 0 { gate_bias_ptr } else { 0u64 };
                 let corr_ptr = if e_score_corr_ptr != 0 { e_score_corr_ptr } else { 0u64 };
                 unsafe {
-                    f.launch(cfg, (
+                    k.sigmoid_topk.clone().launch(cfg, (
                         logits_ptr,
                         bias_ptr,
                         corr_ptr,
@@ -1986,10 +2239,8 @@ impl GpuDecodeStore {
                         format!("sigmoid_topk: {:?}", e)))?;
                 }
             } else {
-                let f = device.get_func(MODULE_NAME, "softmax_topk")
-                    .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("softmax_topk not found"))?;
                 unsafe {
-                    f.launch(cfg, (
+                    k.softmax_topk.clone().launch(cfg, (
                         logits_ptr,
                         *graph.d_topk_indices.device_ptr(),
                         *graph.d_topk_weights.device_ptr(),
@@ -2227,10 +2478,8 @@ impl GpuDecodeStore {
 
         // ── Step 5: Zero d_moe_out accumulator ──
         {
-            let f = device.get_func(MODULE_NAME, "zero_bf16")
-                .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("zero_bf16 not found"))?;
             unsafe {
-                f.launch(
+                k.zero_bf16.clone().launch(
                     LaunchConfig::for_num_elems(hs as u32),
                     (*graph.d_moe_out.device_ptr(), hs as i32),
                 ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
@@ -2238,12 +2487,11 @@ impl GpuDecodeStore {
             }
         }
 
-        // ── Step 6: For each selected expert: APFL-aware pipelined DMA + compute ──
+        // ── Step 6: Double-buffered expert loop with DMA/compute overlap ──
         //
-        // Options 1+2 changes:
-        //   - HIT path waits on prefetch_stream events (not copy_stream)
-        //   - Prefetch DMAs already in flight on prefetch_stream since Step 4.5
-        //   - On-demand DMAs still use copy_stream (no contention with prefetch)
+        // True ping-pong: expert N computes from buf[N%2] while expert N+1
+        // DMAs into buf[(N+1)%2]. The DMA engine and compute SMs run in
+        // parallel on separate hardware. HCS and APFL experts skip DMA entirely.
 
         let t_expert_start = Instant::now();
         let mut dma_total = 0.0f64;
@@ -2252,27 +2500,46 @@ impl GpuDecodeStore {
         let mut apfl_misses = 0u32;
         let mut hcs_hits = 0u32;
 
+        let default_stream: cuda_sys::CUstream = std::ptr::null_mut();
+
+        // Extract raw event pointers from pre-allocated CudaEvent wrappers
+        let ev_dma: [cuda_sys::CUevent; 2];
+        let ev_compute: [cuda_sys::CUevent; 2];
+        if let Some(ref pe) = pre_ev {
+            ev_dma = [pe[0].0, pe[1].0];
+            ev_compute = [pe[2].0, pe[3].0];
+        } else {
+            // Fallback: create on demand
+            unsafe {
+                let flags = cuda_sys::CUevent_flags::CU_EVENT_DISABLE_TIMING as u32;
+                let mut events = [std::ptr::null_mut(); 4];
+                for e in events.iter_mut() {
+                    cuda_sys::lib().cuEventCreate(e, flags);
+                }
+                ev_dma = [events[0], events[1]];
+                ev_compute = [events[2], events[3]];
+            }
+        }
+
+        // Double-buffer base pointers and offsets
+        let use_double_buf = graph.expert_buf_total_size > 0;
+        let buf_base = [
+            *graph.d_expert_buf[0].device_ptr(),
+            *graph.d_expert_buf[1].device_ptr(),
+        ];
+        let w13p_off = graph.expert_buf_w13p_offset;
+        let w13s_off = graph.expert_buf_w13s_offset;
+        let w2p_off = graph.expert_buf_w2p_offset;
+        let w2s_off = graph.expert_buf_w2s_offset;
+
+        // Legacy single-buffer pointers (fallback if double-buffer not sized)
         let buf_w13_packed = *graph.d_expert_buf_a0.device_ptr();
         let buf_w13_scales = *graph.d_expert_buf_b0.device_ptr();
         let buf_w2_packed = *graph.d_expert_buf_a1.device_ptr();
         let buf_w2_scales = *graph.d_expert_buf_b1.device_ptr();
 
-        let ev_dma_w13: cuda_sys::CUevent;
-        let ev_dma_w2: cuda_sys::CUevent;
-        let ev_compute_w13: cuda_sys::CUevent;
-        let default_stream: cuda_sys::CUstream = std::ptr::null_mut();
-        unsafe {
-            let mut e1: cuda_sys::CUevent = std::ptr::null_mut();
-            let mut e2: cuda_sys::CUevent = std::ptr::null_mut();
-            let mut e3: cuda_sys::CUevent = std::ptr::null_mut();
-            let flags = cuda_sys::CUevent_flags::CU_EVENT_DISABLE_TIMING as u32;
-            cuda_sys::lib().cuEventCreate(&mut e1, flags);
-            cuda_sys::lib().cuEventCreate(&mut e2, flags);
-            cuda_sys::lib().cuEventCreate(&mut e3, flags);
-            ev_dma_w13 = e1;
-            ev_dma_w2 = e2;
-            ev_compute_w13 = e3;
-        }
+        // Track which ping-pong slot was last used for DMA (for compute/DMA overlap)
+        let mut dma_expert_count = 0u32;
 
         for i in 0..topk {
             let eid = graph.h_topk_ids[i];
@@ -2301,7 +2568,7 @@ impl GpuDecodeStore {
                 // ── HCS HIT: zero DMA, VRAM-resident at full bandwidth ──
                 hcs_hits += 1;
 
-                // w13 GEMV from VRAM
+                // w13 GEMV: hidden -> gate_up
                 self.launch_marlin_gemv_raw(
                     w13p, w13s,
                     *graph.d_hidden.device_ptr(),
@@ -2310,92 +2577,101 @@ impl GpuDecodeStore {
                     hs, 2 * intermediate, gs,
                 )?;
 
-                // SiLU * mul
-                {
-                    let f = device.get_func(MODULE_NAME, "silu_mul")
-                        .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("silu_mul not found"))?;
-                    unsafe {
-                        f.launch(
-                            LaunchConfig::for_num_elems(intermediate as u32),
-                            (
-                                *graph.d_expert_scratch.device_ptr(),
-                                *graph.d_expert_gate_up.device_ptr(),
-                                intermediate as i32,
-                            ),
-                        ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
-                            format!("silu_mul[{}]: {:?}", eid, e)))?;
-                    }
-                }
-
-                // w2 GEMV from VRAM
-                self.launch_marlin_gemv_raw(
+                // Fused: silu_mul + w2 GEMV + weighted_add (3 launches -> 1)
+                self.launch_fused_silu_accum(
                     w2p, w2s,
-                    *graph.d_expert_scratch.device_ptr(),
-                    *graph.d_expert_out.device_ptr(),
+                    *graph.d_expert_gate_up.device_ptr(),
+                    *graph.d_moe_out.device_ptr(),
                     inv_wp, inv_sp,
                     intermediate, hs, gs,
+                    weight,
+                    k,
                 )?;
-            } else {
-            // ── Priority 2: APFL prefetch cache ──
-            let prefetch_slot_idx = if let Some(ref apfl) = graph.apfl {
-                if apfl.enabled {
-                    apfl.find_slot(layer_idx, eid)
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
+            } else if use_double_buf {
+                // ── Priority 3: Double-buffered DMA with ping-pong overlap ──
+                //
+                // Expert N DMAs to buf[slot], expert N-1 computes from buf[prev_slot].
+                // The copy engine and compute SMs run concurrently on different buffers.
+                apfl_misses += 1;
 
-            if let Some(slot_idx) = prefetch_slot_idx {
-                // ── PREFETCH HIT: expert already in VRAM (or arriving via prefetch_stream) ──
-                apfl_hits += 1;
+                let slot = (dma_expert_count % 2) as usize;
 
-                let slot = &graph.apfl.as_ref().unwrap().slots[slot_idx];
-
-                // Wait for slot's DMA event (on prefetch_stream) to complete
-                if slot.dma_queued {
+                // Wait for this buffer's previous compute to finish (free the buffer)
+                if dma_expert_count >= 2 {
                     unsafe {
-                        cuda_sys::lib().cuStreamWaitEvent(default_stream, slot.dma_event.0, 0);
+                        cuda_sys::lib().cuStreamWaitEvent(copy_stream, ev_compute[slot], 0);
                     }
                 }
 
-                // w13 GEMV directly from prefetch slot
+                // DMA all 4 weight arrays to contiguous buffer[slot]
+                unsafe {
+                    let base = buf_base[slot];
+                    let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                        base + w13p_off as u64, expert.w13_packed_ptr as *const std::ffi::c_void,
+                        expert.w13_packed_bytes, copy_stream);
+                    if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                            format!("DMA w13p[{}]: {:?}", eid, err)));
+                    }
+                    let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                        base + w13s_off as u64, expert.w13_scales_ptr as *const std::ffi::c_void,
+                        expert.w13_scales_bytes, copy_stream);
+                    if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                            format!("DMA w13s[{}]: {:?}", eid, err)));
+                    }
+                    let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                        base + w2p_off as u64, expert.w2_packed_ptr as *const std::ffi::c_void,
+                        expert.w2_packed_bytes, copy_stream);
+                    if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                            format!("DMA w2p[{}]: {:?}", eid, err)));
+                    }
+                    let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                        base + w2s_off as u64, expert.w2_scales_ptr as *const std::ffi::c_void,
+                        expert.w2_scales_bytes, copy_stream);
+                    if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                            format!("DMA w2s[{}]: {:?}", eid, err)));
+                    }
+                    cuda_sys::lib().cuEventRecord(ev_dma[slot], copy_stream);
+                }
+
+                // Wait for THIS expert's DMA to complete before computing
+                unsafe {
+                    cuda_sys::lib().cuStreamWaitEvent(default_stream, ev_dma[slot], 0);
+                }
+
+                // Compute from buf[slot]
+                let base = buf_base[slot];
+                // w13 GEMV: hidden -> gate_up
                 self.launch_marlin_gemv_raw(
-                    slot.w13_packed_ptr(), slot.w13_scales_ptr(),
+                    base + w13p_off as u64, base + w13s_off as u64,
                     *graph.d_hidden.device_ptr(),
                     *graph.d_expert_gate_up.device_ptr(),
                     inv_wp, inv_sp,
                     hs, 2 * intermediate, gs,
                 )?;
 
-                // SiLU * mul
-                {
-                    let f = device.get_func(MODULE_NAME, "silu_mul")
-                        .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("silu_mul not found"))?;
-                    unsafe {
-                        f.launch(
-                            LaunchConfig::for_num_elems(intermediate as u32),
-                            (
-                                *graph.d_expert_scratch.device_ptr(),
-                                *graph.d_expert_gate_up.device_ptr(),
-                                intermediate as i32,
-                            ),
-                        ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
-                            format!("silu_mul[{}]: {:?}", eid, e)))?;
-                    }
-                }
-
-                // w2 GEMV directly from prefetch slot
-                self.launch_marlin_gemv_raw(
-                    slot.w2_packed_ptr(), slot.w2_scales_ptr(),
-                    *graph.d_expert_scratch.device_ptr(),
-                    *graph.d_expert_out.device_ptr(),
+                // Fused: silu_mul + w2 GEMV + weighted_add (3 launches -> 1)
+                self.launch_fused_silu_accum(
+                    base + w2p_off as u64, base + w2s_off as u64,
+                    *graph.d_expert_gate_up.device_ptr(),
+                    *graph.d_moe_out.device_ptr(),
                     inv_wp, inv_sp,
                     intermediate, hs, gs,
+                    weight,
+                    k,
                 )?;
+
+                // Signal: compute done on this buffer (copy_stream can reuse it)
+                unsafe {
+                    cuda_sys::lib().cuEventRecord(ev_compute[slot], default_stream);
+                }
+
+                dma_expert_count += 1;
             } else {
-                // ── Priority 3: DMA on demand via copy_stream ──
+                // ── Fallback: legacy single-buffer DMA (no ping-pong) ──
                 apfl_misses += 1;
 
                 unsafe {
@@ -2413,14 +2689,12 @@ impl GpuDecodeStore {
                         return Err(pyo3::exceptions::PyRuntimeError::new_err(
                             format!("DMA w13s[{}]: {:?}", eid, err)));
                     }
+                    let ev_dma_w13 = ev_dma[0];
                     cuda_sys::lib().cuEventRecord(ev_dma_w13, copy_stream);
-                }
-
-                unsafe {
                     cuda_sys::lib().cuStreamWaitEvent(default_stream, ev_dma_w13, 0);
                 }
 
-                // w13 GEMV
+                // w13 GEMV: hidden -> gate_up
                 self.launch_marlin_gemv_raw(
                     buf_w13_packed, buf_w13_scales,
                     *graph.d_hidden.device_ptr(),
@@ -2429,29 +2703,7 @@ impl GpuDecodeStore {
                     hs, 2 * intermediate, gs,
                 )?;
 
-                // SiLU * mul
-                {
-                    let f = device.get_func(MODULE_NAME, "silu_mul")
-                        .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("silu_mul not found"))?;
-                    unsafe {
-                        f.launch(
-                            LaunchConfig::for_num_elems(intermediate as u32),
-                            (
-                                *graph.d_expert_scratch.device_ptr(),
-                                *graph.d_expert_gate_up.device_ptr(),
-                                intermediate as i32,
-                            ),
-                        ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
-                            format!("silu_mul[{}]: {:?}", eid, e)))?;
-                    }
-                }
-
-                // Signal: w13 compute done (buffers can be reused)
-                unsafe {
-                    cuda_sys::lib().cuEventRecord(ev_compute_w13, default_stream);
-                }
-
-                // DMA w2 (overlaps with w13 SiLU)
+                // DMA w2 weights while w13 GEMV runs
                 unsafe {
                     let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
                         buf_w2_packed, expert.w2_packed_ptr as *const std::ffi::c_void,
@@ -2467,49 +2719,21 @@ impl GpuDecodeStore {
                         return Err(pyo3::exceptions::PyRuntimeError::new_err(
                             format!("DMA w2s[{}]: {:?}", eid, err)));
                     }
+                    let ev_dma_w2 = ev_dma[1];
                     cuda_sys::lib().cuEventRecord(ev_dma_w2, copy_stream);
-                }
-
-                unsafe {
                     cuda_sys::lib().cuStreamWaitEvent(default_stream, ev_dma_w2, 0);
                 }
 
-                // w2 GEMV
-                self.launch_marlin_gemv_raw(
+                // Fused: silu_mul + w2 GEMV + weighted_add (3 launches -> 1)
+                self.launch_fused_silu_accum(
                     buf_w2_packed, buf_w2_scales,
-                    *graph.d_expert_scratch.device_ptr(),
-                    *graph.d_expert_out.device_ptr(),
+                    *graph.d_expert_gate_up.device_ptr(),
+                    *graph.d_moe_out.device_ptr(),
                     inv_wp, inv_sp,
                     intermediate, hs, gs,
+                    weight,
+                    k,
                 )?;
-            }
-            } // close HCS else
-
-            // Weighted add: d_moe_out += weight * d_expert_out
-            {
-                let f = device.get_func(MODULE_NAME, "weighted_add_bf16")
-                    .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("weighted_add not found"))?;
-                unsafe {
-                    f.launch(
-                        LaunchConfig::for_num_elems(hs as u32),
-                        (
-                            *graph.d_moe_out.device_ptr(),
-                            *graph.d_expert_out.device_ptr(),
-                            weight,
-                            hs as i32,
-                        ),
-                    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
-                        format!("weighted_add[{}]: {:?}", eid, e)))?;
-                }
-            }
-
-            // copy_stream: wait for w13 buffer reuse (only needed when DMA was used)
-            let used_dma = hcs_entry_ptrs.is_none()
-                && !graph.apfl.as_ref().map_or(false, |a| a.enabled && a.find_slot(layer_idx, eid).is_some());
-            if used_dma {
-                unsafe {
-                    cuda_sys::lib().cuStreamWaitEvent(copy_stream, ev_compute_w13, 0);
-                }
             }
         }
 
@@ -2522,104 +2746,87 @@ impl GpuDecodeStore {
         compute_total = expert_elapsed * 0.10;
 
         // ── Step 7: Shared expert (if any) ──
-        if let Some(ref shared) = moe.shared {
-            unsafe {
-                let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                    buf_w13_packed, shared.w13_packed_ptr as *const std::ffi::c_void,
-                    shared.w13_packed_bytes, copy_stream);
-                if err != cuda_sys::CUresult::CUDA_SUCCESS {
-                    return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                        format!("DMA shared w13p: {:?}", err)));
-                }
-                let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                    buf_w13_scales, shared.w13_scales_ptr as *const std::ffi::c_void,
-                    shared.w13_scales_bytes, copy_stream);
-                if err != cuda_sys::CUresult::CUDA_SUCCESS {
-                    return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                        format!("DMA shared w13s: {:?}", err)));
-                }
-                cuda_sys::lib().cuEventRecord(ev_dma_w13, copy_stream);
-                cuda_sys::lib().cuStreamWaitEvent(default_stream, ev_dma_w13, 0);
-            }
+        // Priority: VRAM-resident (pinned at registration) > DMA fallback
+        if moe.shared.is_some() {
+            let se_vram = graph.shared_expert_vram.get(layer_idx).and_then(|e| e.as_ref());
 
+            let (w13p, w13s, w2p, w2s) = if let Some(entry) = se_vram {
+                // VRAM-resident: zero DMA, full bandwidth
+                (entry.w13_packed_ptr(), entry.w13_scales_ptr(),
+                 entry.w2_packed_ptr(), entry.w2_scales_ptr())
+            } else {
+                // Fallback: DMA from system RAM (should not happen if registration worked)
+                let shared = moe.shared.as_ref().unwrap();
+                unsafe {
+                    let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                        buf_w13_packed, shared.w13_packed_ptr as *const std::ffi::c_void,
+                        shared.w13_packed_bytes, copy_stream);
+                    if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                            format!("DMA shared w13p: {:?}", err)));
+                    }
+                    let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                        buf_w13_scales, shared.w13_scales_ptr as *const std::ffi::c_void,
+                        shared.w13_scales_bytes, copy_stream);
+                    if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                            format!("DMA shared w13s: {:?}", err)));
+                    }
+                    cuda_sys::lib().cuEventRecord(ev_dma[0], copy_stream);
+                    cuda_sys::lib().cuStreamWaitEvent(default_stream, ev_dma[0], 0);
+                }
+                (buf_w13_packed, buf_w13_scales, buf_w2_packed, buf_w2_scales)
+            };
+
+            // w13 GEMV: hidden -> gate_up
             self.launch_marlin_gemv_raw(
-                buf_w13_packed, buf_w13_scales,
+                w13p, w13s,
                 *graph.d_hidden.device_ptr(),
                 *graph.d_expert_gate_up.device_ptr(),
                 inv_wp, inv_sp,
                 hs, 2 * intermediate, gs,
             )?;
 
-            {
-                let f = device.get_func(MODULE_NAME, "silu_mul")
-                    .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("silu_mul not found"))?;
+            // w2: DMA fallback path needs separate DMA for w2
+            if se_vram.is_none() {
+                let shared = moe.shared.as_ref().unwrap();
                 unsafe {
-                    f.launch(
-                        LaunchConfig::for_num_elems(intermediate as u32),
-                        (
-                            *graph.d_expert_scratch.device_ptr(),
-                            *graph.d_expert_gate_up.device_ptr(),
-                            intermediate as i32,
-                        ),
-                    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
-                        format!("silu_mul shared: {:?}", e)))?;
+                    let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                        buf_w2_packed, shared.w2_packed_ptr as *const std::ffi::c_void,
+                        shared.w2_packed_bytes, copy_stream);
+                    if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                            format!("DMA shared w2p: {:?}", err)));
+                    }
+                    let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                        buf_w2_scales, shared.w2_scales_ptr as *const std::ffi::c_void,
+                        shared.w2_scales_bytes, copy_stream);
+                    if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                            format!("DMA shared w2s: {:?}", err)));
+                    }
+                    cuda_sys::lib().cuEventRecord(ev_dma[1], copy_stream);
+                    cuda_sys::lib().cuStreamWaitEvent(default_stream, ev_dma[1], 0);
                 }
             }
 
-            unsafe {
-                let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                    buf_w2_packed, shared.w2_packed_ptr as *const std::ffi::c_void,
-                    shared.w2_packed_bytes, copy_stream);
-                if err != cuda_sys::CUresult::CUDA_SUCCESS {
-                    return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                        format!("DMA shared w2p: {:?}", err)));
-                }
-                let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                    buf_w2_scales, shared.w2_scales_ptr as *const std::ffi::c_void,
-                    shared.w2_scales_bytes, copy_stream);
-                if err != cuda_sys::CUresult::CUDA_SUCCESS {
-                    return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                        format!("DMA shared w2s: {:?}", err)));
-                }
-                cuda_sys::lib().cuEventRecord(ev_dma_w2, copy_stream);
-                cuda_sys::lib().cuStreamWaitEvent(default_stream, ev_dma_w2, 0);
-            }
-
-            self.launch_marlin_gemv_raw(
-                buf_w2_packed, buf_w2_scales,
-                *graph.d_expert_scratch.device_ptr(),
-                *graph.d_expert_out.device_ptr(),
+            // Fused: silu_mul + w2 GEMV + add to accumulator (weight=1.0 for shared expert)
+            self.launch_fused_silu_accum(
+                w2p, w2s,
+                *graph.d_expert_gate_up.device_ptr(),
+                *graph.d_moe_out.device_ptr(),
                 inv_wp, inv_sp,
                 intermediate, hs, gs,
+                1.0f32,
+                k,
             )?;
-
-            {
-                let f = device.get_func(MODULE_NAME, "add_bf16")
-                    .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("add_bf16 not found"))?;
-                unsafe {
-                    f.launch(
-                        LaunchConfig::for_num_elems(hs as u32),
-                        (
-                            *graph.d_moe_out.device_ptr(),
-                            *graph.d_moe_out.device_ptr(),
-                            *graph.d_expert_out.device_ptr(),
-                            hs as i32,
-                        ),
-                    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
-                        format!("add_bf16 shared: {:?}", e)))?;
-                }
-            }
-
-            device.synchronize()
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
+            // No separate sync -- combined with Step 8 below
         }
 
         // ── Step 8: Scale by routed_scaling_factor ──
         if rsf != 1.0 {
-            let f = device.get_func(MODULE_NAME, "scale_bf16")
-                .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("scale_bf16 not found"))?;
             unsafe {
-                f.launch(
+                k.scale_bf16.clone().launch(
                     LaunchConfig::for_num_elems(hs as u32),
                     (
                         *graph.d_moe_out.device_ptr(),
@@ -2630,9 +2837,12 @@ impl GpuDecodeStore {
                 ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
                     format!("scale_bf16: {:?}", e)))?;
             }
-            device.synchronize()
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
+            // No separate sync -- combined sync at end
         }
+
+        // ── Final sync: ensure shared expert + scale complete ──
+        device.synchronize()
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
 
         // ── HCS stats update ──
         if let Some(ref mut hcs) = graph.hcs {
@@ -2660,12 +2870,7 @@ impl GpuDecodeStore {
             }
         }
 
-        // Cleanup CUDA events
-        unsafe {
-            cuda_sys::lib().cuEventDestroy_v2(ev_dma_w13);
-            cuda_sys::lib().cuEventDestroy_v2(ev_dma_w2);
-            cuda_sys::lib().cuEventDestroy_v2(ev_compute_w13);
-        }
+        // Events are pre-allocated and reused across calls (no cleanup needed)
 
         let total = t_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -2738,10 +2943,12 @@ impl GpuDecodeStore {
         let f = self.device.get_func(MODULE_NAME, "marlin_gemv_int4")
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("kernel not found"))?;
         let n_tiles = (n + 15) / 16;
+        // Shared memory: input BF16 [K*2] + inv_weight_perm [1024*4] + inv_scale_perm [64*4]
+        let smem_bytes = (k * 2 + 1024 * 4 + 64 * 4) as u32;
         let cfg = LaunchConfig {
             grid_dim: (n_tiles as u32, 1, 1),
             block_dim: (256, 1, 1),
-            shared_mem_bytes: 256 * 4,
+            shared_mem_bytes: smem_bytes,
         };
         unsafe {
             f.launch(cfg, (
@@ -3725,8 +3932,29 @@ impl GpuDecodeStore {
                 ));
             }
 
+            // Shared expert pointers (if available)
+            let shared_ptrs = if moe_idx < store.shared_experts_gpu.len() {
+                let se = &store.shared_experts_gpu[moe_idx];
+                if se.w13_packed.is_empty() {
+                    None
+                } else {
+                    let w13p_bytes = se.w13_packed.len() * 4;
+                    let w2p_bytes = se.w2_packed.len() * 4;
+                    let max_single = w13p_bytes.max(w2p_bytes);
+                    if max_single > max_expert_bytes { max_expert_bytes = max_single; }
+                    Some((
+                        se.w13_packed.as_ptr() as usize, w13p_bytes,
+                        se.w13_scales.as_ptr() as usize, se.w13_scales.len() * 2,
+                        se.w2_packed.as_ptr() as usize, w2p_bytes,
+                        se.w2_scales.as_ptr() as usize, se.w2_scales.len() * 2,
+                    ))
+                }
+            } else {
+                None
+            };
+
             self.register_moe_layer(
-                moe_idx, expert_ptrs, None, n_experts, topk,
+                moe_idx, expert_ptrs, shared_ptrs, n_experts, topk,
                 0, false,  // softmax, no norm_topk_prob (test only)
                 config.routed_scaling_factor, gate_wid, 0, 0, None,
             )?;
@@ -3837,10 +4065,232 @@ impl GpuDecodeStore {
 
         Ok(results.join("\n"))
     }
+
+    /// Benchmark: shared expert VRAM residency vs DMA.
+    /// Loads QCN, registers ALL MoE layers WITH shared experts, runs multi-layer
+    /// forward twice: once with shared experts DMA'd (baseline), once with VRAM-resident.
+    fn bench_shared_expert_residency_internal(
+        &mut self,
+        model_dir: &str,
+        num_tokens: usize,
+    ) -> PyResult<String> {
+        use std::path::Path;
+        use std::time::Instant;
+
+        let mut results = Vec::new();
+        let t_start = Instant::now();
+
+        // Step 1: Load model
+        let t0 = Instant::now();
+        let store = crate::weights::WeightStore::load_from_hf(
+            Path::new(model_dir), 128, None, None, 4, 4,
+        ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
+            format!("Failed to load model: {}", e)))?;
+
+        let config = &store.config;
+        let hidden_size = config.hidden_size;
+        let intermediate_size = config.moe_intermediate_size;
+        let n_experts = config.n_routed_experts;
+        let topk = config.num_experts_per_tok;
+        let group_size = store.group_size;
+        let num_moe_layers = store.experts_gpu.len();
+
+        results.push(format!(
+            "Loaded in {:.1}s: {} MoE layers, {} experts, topk={}, hidden={}, intermediate={}",
+            t0.elapsed().as_secs_f64(), num_moe_layers, n_experts, topk,
+            hidden_size, intermediate_size,
+        ));
+
+        // Count shared experts
+        let num_shared = store.shared_experts_gpu.iter()
+            .filter(|se| !se.w13_packed.is_empty())
+            .count();
+        results.push(format!("Shared experts available: {}/{}", num_shared, num_moe_layers));
+
+        // Step 2: Configure and register WITH shared experts pinned in VRAM
+        self.configure(
+            hidden_size, config.num_hidden_layers, 1, 1e-6,
+            topk, intermediate_size, hidden_size * 3, group_size,
+        )?;
+
+        let mut max_expert_bytes = 0usize;
+        for moe_idx in 0..num_moe_layers {
+            let gate_fp32: Vec<f32> = (0..n_experts * hidden_size)
+                .map(|i| ((i as f32 * 0.0001 + moe_idx as f32 * 0.1) - 0.05).sin() * 0.01)
+                .collect();
+            let d_gate = self.device.htod_copy(gate_fp32)
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
+            let gate_wid = {
+                let graph = self.graph.as_mut().unwrap();
+                let wid = graph.weights.len();
+                graph.weights.push(GpuWeight {
+                    ptr: *d_gate.device_ptr(),
+                    rows: n_experts, cols: hidden_size, dtype: 1,
+                });
+                std::mem::forget(d_gate);
+                wid
+            };
+
+            let gpu_experts = &store.experts_gpu[moe_idx];
+            let mut expert_ptrs = Vec::with_capacity(gpu_experts.len());
+            for expert in gpu_experts.iter() {
+                let w13p_bytes = expert.w13_packed.len() * 4;
+                let w2p_bytes = expert.w2_packed.len() * 4;
+                let max_single = w13p_bytes.max(w2p_bytes);
+                if max_single > max_expert_bytes { max_expert_bytes = max_single; }
+                expert_ptrs.push((
+                    expert.w13_packed.as_ptr() as usize, w13p_bytes,
+                    expert.w13_scales.as_ptr() as usize, expert.w13_scales.len() * 2,
+                    expert.w2_packed.as_ptr() as usize, w2p_bytes,
+                    expert.w2_scales.as_ptr() as usize, expert.w2_scales.len() * 2,
+                ));
+            }
+
+            let shared_ptrs = if moe_idx < store.shared_experts_gpu.len() {
+                let se = &store.shared_experts_gpu[moe_idx];
+                if se.w13_packed.is_empty() { None }
+                else {
+                    let w13p_bytes = se.w13_packed.len() * 4;
+                    let w2p_bytes = se.w2_packed.len() * 4;
+                    let max_single = w13p_bytes.max(w2p_bytes);
+                    if max_single > max_expert_bytes { max_expert_bytes = max_single; }
+                    Some((
+                        se.w13_packed.as_ptr() as usize, w13p_bytes,
+                        se.w13_scales.as_ptr() as usize, se.w13_scales.len() * 2,
+                        se.w2_packed.as_ptr() as usize, w2p_bytes,
+                        se.w2_scales.as_ptr() as usize, se.w2_scales.len() * 2,
+                    ))
+                }
+            } else { None };
+
+            self.register_moe_layer_data(
+                moe_idx, expert_ptrs, shared_ptrs, n_experts, topk,
+                0, false, config.routed_scaling_factor, gate_wid, 0, 0, None,
+            )?;
+        }
+
+        let buf_size = ((max_expert_bytes as f64) * 1.2) as usize;
+        self.resize_expert_buffers(buf_size.max(1024))?;
+
+        // Check how many shared experts got pinned
+        let pinned_count = self.graph.as_ref().unwrap().shared_expert_vram.iter()
+            .filter(|e| e.is_some()).count();
+        let pinned_bytes: usize = self.graph.as_ref().unwrap().shared_expert_vram.iter()
+            .filter_map(|e| e.as_ref())
+            .map(|e| e.w13_packed_size + e.w13_scales_size + e.w2_packed_size + e.w2_scales_size)
+            .sum();
+        results.push(format!(
+            "Shared experts pinned in VRAM: {}, total {:.1} MB",
+            pinned_count, pinned_bytes as f64 / (1024.0 * 1024.0),
+        ));
+
+        // ── Run WITH shared expert VRAM residency ──
+        results.push("\n--- With shared expert VRAM residency ---".to_string());
+        let mut resident_times = Vec::new();
+        for tok in 0..num_tokens {
+            let hidden: Vec<u16> = (0..hidden_size)
+                .map(|i| half::bf16::from_f32(
+                    ((i as f32 * 0.001 + tok as f32 * 0.1) - 0.5).sin() * 0.01
+                ).to_bits())
+                .collect();
+            self.upload_hidden_bf16(hidden)?;
+
+            let mut layer_times = Vec::new();
+            for layer_idx in 0..num_moe_layers {
+                if self.graph.as_ref().unwrap().moe_layers[layer_idx].is_none() { continue; }
+                let (_, _, _, total_ms) = self.moe_forward_internal(layer_idx)?;
+                layer_times.push(total_ms);
+            }
+
+            let tok_total: f64 = layer_times.iter().sum();
+            resident_times.push(tok_total);
+            results.push(format!(
+                "  Token {}: {:.1}ms MoE, {:.1} tok/s",
+                tok, tok_total, 1000.0 / tok_total,
+            ));
+        }
+        let avg_resident = resident_times.iter().sum::<f64>() / resident_times.len() as f64;
+        results.push(format!("  Resident avg: {:.1}ms, {:.1} tok/s", avg_resident, 1000.0 / avg_resident));
+
+        // ── Run WITHOUT shared expert VRAM residency (DMA fallback) ──
+        results.push("\n--- Without shared expert VRAM residency (DMA) ---".to_string());
+        {
+            // Temporarily remove shared expert VRAM entries
+            let saved_vram = std::mem::take(&mut self.graph.as_mut().unwrap().shared_expert_vram);
+
+            let mut dma_times = Vec::new();
+            for tok in 0..num_tokens {
+                let hidden: Vec<u16> = (0..hidden_size)
+                    .map(|i| half::bf16::from_f32(
+                        ((i as f32 * 0.001 + tok as f32 * 0.1) - 0.5).sin() * 0.01
+                    ).to_bits())
+                    .collect();
+                self.upload_hidden_bf16(hidden)?;
+
+                let mut layer_times = Vec::new();
+                for layer_idx in 0..num_moe_layers {
+                    if self.graph.as_ref().unwrap().moe_layers[layer_idx].is_none() { continue; }
+                    let (_, _, _, total_ms) = self.moe_forward_internal(layer_idx)?;
+                    layer_times.push(total_ms);
+                }
+
+                let tok_total: f64 = layer_times.iter().sum();
+                dma_times.push(tok_total);
+                results.push(format!(
+                    "  Token {}: {:.1}ms MoE, {:.1} tok/s",
+                    tok, tok_total, 1000.0 / tok_total,
+                ));
+            }
+            let avg_dma = dma_times.iter().sum::<f64>() / dma_times.len() as f64;
+            results.push(format!("  DMA avg: {:.1}ms, {:.1} tok/s", avg_dma, 1000.0 / avg_dma));
+
+            // Restore
+            self.graph.as_mut().unwrap().shared_expert_vram = saved_vram;
+
+            // Summary
+            results.push("\n--- Pass 1 Summary: Shared Expert Residency ---".to_string());
+            let delta = avg_dma - avg_resident;
+            let pct = delta / avg_dma * 100.0;
+            results.push(format!(
+                "VRAM resident: {:.1}ms ({:.1} tok/s)",
+                avg_resident, 1000.0 / avg_resident,
+            ));
+            results.push(format!(
+                "DMA fallback:  {:.1}ms ({:.1} tok/s)",
+                avg_dma, 1000.0 / avg_dma,
+            ));
+            results.push(format!(
+                "Delta: {:.1}ms saved ({:.1}% improvement)",
+                delta, pct,
+            ));
+            results.push(format!(
+                "VRAM cost: {:.1} MB for {} shared experts",
+                pinned_bytes as f64 / (1024.0 * 1024.0), pinned_count,
+            ));
+        }
+
+        let total_elapsed = t_start.elapsed().as_secs_f64();
+        results.push(format!("Total bench time: {:.1}s", total_elapsed));
+
+        std::mem::forget(store);
+        Ok(results.join("\n"))
+    }
 }
 
 impl Drop for GpuDecodeStore {
     fn drop(&mut self) {
+        // Destroy pre-allocated events
+        if let Some(ref graph) = self.graph {
+            if let Some(ref events) = graph.pre_events {
+                unsafe {
+                    for e in events.iter() {
+                        if !e.0.is_null() {
+                            let _ = cuda_sys::lib().cuEventDestroy_v2(e.0);
+                        }
+                    }
+                }
+            }
+        }
         unsafe {
             if !self.compute_stream.0.is_null() {
                 let _ = cuda_sys::lib().cuStreamDestroy_v2(self.compute_stream.0);
