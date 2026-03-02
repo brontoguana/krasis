@@ -644,7 +644,6 @@ struct GpuDecodeGraph {
     dma_call_count: u64,     // number of cuMemcpyHtoDAsync calls
     dma_cold_experts: u64,   // number of cold (DMA'd) experts
     dma_hcs_experts: u64,    // number of HCS-hit experts
-    dma_wait_ms: f64,        // CPU wall time spent in cuStreamWaitEvent for DMA
 }
 
 // ── Thread-safe CUDA wrappers ──────────────────────────────────────────
@@ -956,7 +955,6 @@ impl GpuDecodeStore {
             dma_call_count: 0,
             dma_cold_experts: 0,
             dma_hcs_experts: 0,
-            dma_wait_ms: 0.0,
         }));
 
         // Cache kernel function handles (avoid HashMap lookup per call)
@@ -1218,7 +1216,6 @@ impl GpuDecodeStore {
                 graph.dma_call_count = 0;
                 graph.dma_cold_experts = 0;
                 graph.dma_hcs_experts = 0;
-                graph.dma_wait_ms = 0.0;
             }
         }
         Ok(())
@@ -2470,6 +2467,12 @@ impl GpuDecodeStore {
     fn last_decode_elapsed_s(&self) -> f64 {
         self.last_decode_elapsed
     }
+
+    /// Get max sequence length of the KV cache.
+    #[getter]
+    fn kv_max_seq(&self) -> usize {
+        self.graph.as_ref().map_or(0, |g| g.kv_max_seq)
+    }
 }
 
 // ── Pure-Rust methods for GPU decode (no PyO3, used by Rust HTTP server) ──
@@ -3567,19 +3570,29 @@ impl GpuDecodeStore {
                 let avg_dma_calls = graph.dma_call_count as f64 / n;
                 let avg_cold = graph.dma_cold_experts as f64 / n;
                 let avg_hcs = graph.dma_hcs_experts as f64 / n;
-                let avg_dma_wait = graph.dma_wait_ms / n;
                 let dma_mb = avg_dma_bytes / (1024.0 * 1024.0);
-                let actual_bw = if avg_dma_wait > 0.001 { dma_mb / (avg_dma_wait / 1000.0) / 1024.0 } else { 0.0 };
+                // PCIe bandwidth: bytes DMA'd / expert loop wall time
+                // This is a lower bound (expert loop includes compute too)
+                let min_pcie_bw = if avg_expert_loop > 0.001 {
+                    dma_mb / (avg_expert_loop / 1000.0) / 1024.0
+                } else { 0.0 };
+                // Upper bound: assume cold expert time is purely DMA-bound
+                // cold_expert_fraction * expert_loop_time = DMA time
+                let cold_frac = avg_cold / (avg_cold + avg_hcs).max(1.0);
+                let est_dma_time_ms = avg_expert_loop * cold_frac;
+                let est_pcie_bw = if est_dma_time_ms > 0.001 {
+                    dma_mb / (est_dma_time_ms / 1000.0) / 1024.0
+                } else { 0.0 };
                 log::info!("├─────────────────────────────────────────────────┤");
-                log::info!("│  PCIe DMA (measured):                           │");
-                log::info!("│    Cold experts/tok: {:.1} ({:.0} calls)          │", avg_cold, avg_dma_calls);
+                log::info!("│  PCIe DMA (non-serialized):                     │");
+                log::info!("│    Cold experts/tok: {:.1} ({:.0} DMA calls)      │", avg_cold, avg_dma_calls);
                 log::info!("│    HCS experts/tok:  {:.1} ({} cached)            │", avg_hcs, hcs_cached);
                 log::info!("│    DMA bytes/tok:    {:.2} MB                     │", dma_mb);
-                log::info!("│    DMA wait/tok:     {:.2} ms                     │", avg_dma_wait);
-                log::info!("│    Actual PCIe BW:   {:.1} GB/s (of 27 peak)     │", actual_bw);
                 log::info!("│    HCS hit/miss:     {}/{}                        │", hcs_hits, hcs_misses);
                 let bytes_per_call = if avg_dma_calls > 0.0 { avg_dma_bytes / avg_dma_calls } else { 0.0 };
                 log::info!("│    Avg DMA call size: {:.1} KB                   │", bytes_per_call / 1024.0);
+                log::info!("│    Min PCIe BW:      {:.1} GB/s (bytes/loop_time)│", min_pcie_bw);
+                log::info!("│    Est PCIe BW:      {:.1} GB/s (cold fraction)  │", est_pcie_bw);
                 log::info!("└─────────────────────────────────────────────────┘");
             }
         }
@@ -4836,17 +4849,10 @@ impl GpuDecodeStore {
                 }
 
                 // Wait for THIS expert's DMA to complete before computing
-                let t_dma_wait = if timing { Instant::now() } else { Instant::now() };
+                // GPU-side only: default_stream waits for copy_stream's DMA event.
+                // No host sync here -- that would serialize DMA and compute, destroying overlap.
                 unsafe {
-                    // Sync default_stream to wait for DMA on copy_stream
                     cuda_sys::lib().cuStreamWaitEvent(default_stream, ev_dma[slot], 0);
-                    // Also sync host to measure actual DMA latency (only when timing)
-                    if timing {
-                        cuda_sys::lib().cuStreamSynchronize(copy_stream);
-                    }
-                }
-                if timing {
-                    graph.dma_wait_ms += t_dma_wait.elapsed().as_secs_f64() * 1000.0;
                 }
 
                 // Compute from buf[slot]

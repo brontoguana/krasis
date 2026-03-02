@@ -3697,6 +3697,9 @@ class KrasisModel:
         r.stop_ids = stop_ids
         r.store_addr = store_addr
         r.decode_mode = decode_mode
+        # Flag: if prompt exceeded Rust KV capacity, skip decode
+        rust_max_seq = getattr(gpu_store, 'kv_max_seq', 0)
+        r.kv_overflow = (rust_max_seq > 0 and len(prompt_tokens) > rust_max_seq)
         return r
 
     def setup_gpu_decode_store(self) -> "GpuDecodeStore":
@@ -4007,6 +4010,15 @@ class KrasisModel:
 
                 kv_data.append((layer_idx, k_cont.data_ptr(), v_cont.data_ptr(), kv_stride))
                 self._rust_kv_refs.extend([k_cont, v_cont])
+
+        # Guard: don't overflow Rust KV buffer (benchmark warmup may use > max_seq tokens)
+        rust_max_seq = getattr(store, 'kv_max_seq', 0)
+        if rust_max_seq > 0 and prompt_len > rust_max_seq:
+            import logging
+            logging.getLogger("krasis.model").warning(
+                f"Prompt length {prompt_len} exceeds Rust KV cache ({rust_max_seq}), "
+                f"skipping KV export (decode will not run for this request)")
+            return
 
         store.import_kv_cache(kv_data, prompt_len)
 

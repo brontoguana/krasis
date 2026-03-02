@@ -308,7 +308,7 @@ fn handle_chat_completion(
 
     // ── Call Python for prefill (GIL required) ──
     let t_prefill_gil = Instant::now();
-    let prefill_result = Python::with_gil(|py| -> PyResult<(usize, usize, Vec<usize>)> {
+    let prefill_result = Python::with_gil(|py| -> PyResult<(usize, usize, Vec<usize>, bool)> {
         let result = state.py_model.call_method(
             py,
             "server_prefill",
@@ -328,11 +328,14 @@ fn handle_chat_completion(
         let first_token: usize = result.getattr(py, "first_token")?.extract(py)?;
         let prompt_len: usize = result.getattr(py, "prompt_len")?.extract(py)?;
         let stop_ids: Vec<usize> = result.getattr(py, "stop_ids")?.extract(py)?;
-        Ok((first_token, prompt_len, stop_ids))
+        let kv_overflow: bool = result.getattr(py, "kv_overflow")
+            .and_then(|v| v.extract(py))
+            .unwrap_or(false);
+        Ok((first_token, prompt_len, stop_ids, kv_overflow))
     });
     let prefill_gil_ms = t_prefill_gil.elapsed().as_secs_f64() * 1000.0;
 
-    let (first_token, prompt_len, stop_ids) = match prefill_result {
+    let (first_token, prompt_len, stop_ids, kv_overflow) = match prefill_result {
         Ok(v) => v,
         Err(e) => {
             log::error!("Prefill failed: {}", e);
@@ -348,6 +351,27 @@ fn handle_chat_completion(
             return;
         }
     };
+
+    // If prompt exceeded Rust KV cache, skip decode (return first token only)
+    if kv_overflow {
+        log::warn!("Request {}: prompt {} tokens exceeds Rust KV cache, returning first token only",
+            request_id, prompt_len);
+        let text = state.tokenizer.decode(&[first_token as u32], true).unwrap_or_default();
+        let _ = send_json(
+            stream,
+            200,
+            &format!(
+                r#"{{"id":"chatcmpl-{}","object":"chat.completion","created":{},"model":"{}","choices":[{{"index":0,"message":{{"role":"assistant","content":"{}"}},"finish_reason":"length"}}],"usage":{{"prompt_tokens":{},"completion_tokens":1,"total_tokens":{}}}}}"#,
+                request_id, created, &state.model_name,
+                text.replace('\\', "\\\\").replace('"', "\\\""),
+                prompt_len, prompt_len + 1,
+            ),
+        );
+        Python::with_gil(|py| {
+            let _ = state.py_model.call_method0(py, "server_cleanup");
+        });
+        return;
+    }
 
     // Check context length
     if prompt_len >= state.max_context_tokens {
