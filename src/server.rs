@@ -372,8 +372,7 @@ fn handle_chat_completion(
     let tokenizer = &state.tokenizer;
 
     if state.gpu_decode {
-        // ── GPU decode: pure Rust via GpuDecodeStore (zero Python, zero GIL) ──
-        // Safety: single-request guarantee. gpu_store_addr is a valid *mut GpuDecodeStore.
+        // ── GPU decode: GIL-free Rust decode via GpuDecodeStore ──
         let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
         handle_gpu_decode(
             stream, is_stream, state, store, tokenizer,

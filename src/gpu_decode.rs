@@ -38,12 +38,19 @@ const KERNEL_NAMES: &[&str] = &[
     "sigmoid_gate_bf16",
     "scale_bf16",
     "la_conv1d",
+    "uninterleave_qkvz",
+    "compute_gate_beta",
+    "repeat_interleave_heads",
+    "l2norm_scale_per_head",
+    "gated_delta_net_step",
     "la_recurrence",
     "gated_rmsnorm_silu",
     "per_head_rmsnorm",
     "apply_rope",
     "kv_cache_write",
     "gqa_attention",
+    "split_gated_q",
+    "apply_gated_attn",
     "bf16_to_fp32",
     "fp32_to_bf16",
     "marlin_gemv_int4",
@@ -1827,6 +1834,8 @@ impl GpuDecodeStore {
             conv_state_ptr: conv_state_ptr as u64,
             recur_state_ptr: recur_state_ptr as u64,
         };
+        log::info!("GpuDecodeStore: registered LA layer {} (conv_dim={}, nk={}, nv={}), total_layers={}",
+            layer_idx, conv_dim, nk, nv, graph.layers.len());
         Ok(())
     }
 
@@ -1883,6 +1892,8 @@ impl GpuDecodeStore {
             k_norm_ptr: k_norm_ptr as u64,
             gated,
         };
+        log::info!("GpuDecodeStore: registered GQA layer {} (heads={}, kv_heads={}, hd={}), total_layers={}",
+            layer_idx, num_heads, num_kv_heads, head_dim, graph.layers.len());
         Ok(())
     }
 
@@ -2097,7 +2108,32 @@ impl GpuDecodeStore {
             .ok_or_else(|| "Kernels not cached".to_string())?
             .clone();
 
+        // Debug: read first 4 BF16 values from a GPU buffer
+        let debug_peek_bf16 = |label: &str, ptr: u64, n: usize| {
+            let mut buf = vec![0u16; n];
+            unsafe {
+                let _ = cuda_sys::lib().cuMemcpyDtoH_v2(
+                    buf.as_mut_ptr() as *mut std::ffi::c_void,
+                    ptr, n * 2);
+            }
+            let vals: Vec<f32> = buf.iter().map(|&b| {
+                let bits = (b as u32) << 16;
+                f32::from_bits(bits)
+            }).collect();
+            log::info!("DBG {} [{:.4}, {:.4}, {:.4}, {:.4}]", label, vals[0], vals[1], vals[2], vals[3]);
+        };
+        let debug_peek_f32 = |label: &str, ptr: u64, n: usize| {
+            let mut buf = vec![0f32; n];
+            unsafe {
+                let _ = cuda_sys::lib().cuMemcpyDtoH_v2(
+                    buf.as_mut_ptr() as *mut std::ffi::c_void,
+                    ptr, n * 4);
+            }
+            log::info!("DBG {} [{:.4}, {:.4}, {:.4}, {:.4}]", label, buf[0], buf[1], buf[2], buf[3]);
+        };
+
         // ── 1. Embedding lookup ──
+        log::info!("gpu_decode_step: token={}, pos={}", token_id, position);
         {
             let threads = 256u32;
             let blocks = ((hs as u32) + threads - 1) / threads;
@@ -2115,6 +2151,9 @@ impl GpuDecodeStore {
                 )).map_err(|e| format!("embedding_lookup: {:?}", e))?;
             }
         }
+
+        self.device.synchronize().map_err(|e| format!("sync after emb: {:?}", e))?;
+        debug_peek_bf16("after_embedding d_hidden", *graph.d_hidden.device_ptr(), 4);
 
         let mut first_residual = true;
         let num_layers = graph.layers.len();
@@ -2150,14 +2189,17 @@ impl GpuDecodeStore {
             match &layer.attn {
                 GpuAttnConfig::LinearAttention {
                     in_proj_qkvz, in_proj_ba, out_proj,
-                    conv_weight_ptr, a_log_ptr: _, dt_bias_ptr: _, norm_weight_ptr,
-                    nk, nv, dk, dv, hr: _, kernel_dim, conv_dim, scale: _,
+                    conv_weight_ptr, a_log_ptr, dt_bias_ptr, norm_weight_ptr,
+                    nk, nv, dk, dv, hr, kernel_dim, conv_dim, scale,
                     conv_state_ptr, recur_state_ptr,
                 } => {
-                    // ── LA: projection via cuBLAS GEMV ──
+                    let nk_ = *nk; let nv_ = *nv; let dk_ = *dk; let dv_ = *dv;
+                    let hr_ = *hr; let cd = *conv_dim; let kd = *kernel_dim;
+                    let key_dim = nk_ * dk_;
+
+                    // ── LA Step 1: Projections (cuBLAS GEMV) ──
                     let qkvz_w = &graph.weights[*in_proj_qkvz];
                     let ba_w = &graph.weights[*in_proj_ba];
-                    // d_hidden (BF16) → d_la_qkvz (FP32) via cuBLAS
                     self.gemv_bf16_to_f32(
                         qkvz_w, *graph.d_hidden.device_ptr(),
                         *graph.d_la_qkvz.device_ptr())?;
@@ -2165,145 +2207,209 @@ impl GpuDecodeStore {
                         ba_w, *graph.d_hidden.device_ptr(),
                         *graph.d_la_ba.device_ptr())?;
 
-                    // ── LA: conv1d ──
-                    let cd = *conv_dim;
-                    let kd = *kernel_dim;
+                    // ── LA Step 2: Un-interleave QKVZ ──
+                    // Interleaved: [h0_q(dk), h0_k(dk), h0_v(hr*dv), h0_z(hr*dv), h1_q, ...]
+                    // → conv_input [q_flat(key_dim), k_flat(key_dim), v_flat(nv*dv)] in d_la_conv_out
+                    // → z[nv*dv] in d_la_recur_out (temp, will be overwritten after recurrence)
+                    {
+                        let group_dim = 2 * dk_ + 2 * hr_ * dv_;
+                        let total = nk_ * group_dim;
+                        let threads = 256u32;
+                        let blocks = ((total as u32) + threads - 1) / threads;
+                        unsafe {
+                            let unint_fn = self.device.get_func(MODULE_NAME, "uninterleave_qkvz")
+                                .ok_or_else(|| "uninterleave_qkvz not found".to_string())?;
+                            unint_fn.launch(
+                                LaunchConfig { grid_dim: (blocks, 1, 1), block_dim: (threads, 1, 1), shared_mem_bytes: 0 },
+                                (
+                                    *graph.d_la_conv_out.device_ptr(),  // conv_input output
+                                    *graph.d_la_recur_out.device_ptr(), // z output (temp)
+                                    *graph.d_la_qkvz.device_ptr(),     // interleaved input
+                                    nk_ as i32, dk_ as i32, hr_ as i32, dv_ as i32,
+                                ),
+                            ).map_err(|e| format!("uninterleave_qkvz[{}]: {:?}", layer_idx, e))?;
+                        }
+                    }
+
+                    // Save z values from d_la_recur_out to d_la_gated_out before recurrence overwrites it
+                    {
+                        let z_size = nv_ * dv_;
+                        unsafe {
+                            let err = cuda_sys::lib().cuMemcpyDtoD_v2(
+                                *graph.d_la_gated_out.device_ptr(),
+                                *graph.d_la_recur_out.device_ptr(),
+                                z_size * 4);
+                            if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                                return Err(format!("D2D z save[{}]: {:?}", layer_idx, err));
+                            }
+                        }
+                    }
+
+                    // ── LA Step 3: Conv1d (with SiLU) ──
+                    // Input: d_la_conv_out [conv_dim] = [q_flat, k_flat, v_flat]
+                    // This reads from d_la_conv_out and writes to d_la_qkvz (reuse as conv output buffer)
                     {
                         let threads = 256u32;
                         let blocks = ((cd as u32) + threads - 1) / threads;
-                        let cfg = LaunchConfig {
-                            grid_dim: (blocks, 1, 1),
-                            block_dim: (threads, 1, 1),
-                            shared_mem_bytes: 0,
-                        };
-                        // conv input is the first conv_dim elements of qkvz
                         unsafe {
                             let la_conv1d_fn = self.device.get_func(MODULE_NAME, "la_conv1d")
                                 .ok_or_else(|| "la_conv1d kernel not found".to_string())?;
-                            la_conv1d_fn.launch(cfg, (
-                                *conv_state_ptr,
-                                *graph.d_la_qkvz.device_ptr(),
-                                *graph.d_la_conv_out.device_ptr(),
-                                *conv_weight_ptr,
-                                cd as i32,
-                                kd as i32,
-                            )).map_err(|e| format!("la_conv1d[{}]: {:?}", layer_idx, e))?;
+                            la_conv1d_fn.launch(
+                                LaunchConfig { grid_dim: (blocks, 1, 1), block_dim: (threads, 1, 1), shared_mem_bytes: 0 },
+                                (
+                                    *conv_state_ptr,
+                                    *graph.d_la_conv_out.device_ptr(), // un-interleaved conv input
+                                    *graph.d_la_qkvz.device_ptr(),    // reuse as conv output (SiLU applied)
+                                    *conv_weight_ptr,
+                                    cd as i32,
+                                    kd as i32,
+                                ),
+                            ).map_err(|e| format!("la_conv1d[{}]: {:?}", layer_idx, e))?;
                         }
                     }
+                    // Now d_la_qkvz has conv output [q(key_dim), k(key_dim), v(nv*dv)] with SiLU
 
-                    // ── LA: recurrence ──
+                    // ── LA Step 4: Compute gate and beta from BA ──
+                    // BA is interleaved: [h0_b(ratio), h0_a(ratio), h1_b(ratio), h1_a(ratio), ...]
+                    // beta = sigmoid(b), gate = exp(-exp(A_log) * softplus(a + dt_bias))
+                    // Store in d_la_conv_out (reuse: [gate(nv), beta(nv)] at start)
+                    let gate_ptr_local: u64;
+                    let beta_ptr_local: u64;
                     {
                         let threads = 256u32;
-                        let cfg = LaunchConfig {
-                            grid_dim: (*nv as u32, 1, 1),
-                            block_dim: (threads, 1, 1),
-                            shared_mem_bytes: 0,
-                        };
-                        // The recurrence kernel expects q,k,v,gate,beta as separate FP32 arrays.
-                        // These are extracted from the conv output and ba output.
-                        // For QCN: qkvz output = [q(nk*dk), k(nk*dk), v(nv*dv), z(nv*dv)]
-                        // ba output = [beta(nv), a_gates(nv)]
-                        // conv_out = conv1d applied to the first conv_dim of qkvz
-                        //
-                        // The actual layout depends on the model's LA implementation.
-                        // For simplicity, we pass the raw pointers and let the kernel sort it out.
-                        // The kernel signature: (state, q, k, v, gate, beta, output, nv, dk, dv)
-                        //
-                        // q = conv_out[0 .. nv*dk] (conv output = q after conv)
-                        // k = conv_out[nv*dk .. nv*dk + nv*dk] ... actually this is more complex
-                        //
-                        // For the recurrence, we need:
-                        // - q[nv*dk], k[nv*dk], v[nv*dv] from the conv output
-                        // - gate[nv], beta[nv] from the ba projection
-                        //
-                        // The conv_out has conv_dim elements. For QCN:
-                        //   conv_dim = nk*dk + nk*dk = 2*nk*dk (q and k interleaved)
-                        //   Then v comes from qkvz[2*nk*dk .. 2*nk*dk + nv*dv]
-                        //   And z comes from qkvz[2*nk*dk + nv*dv ..]
-                        //
-                        // Actually: the exact slicing depends on the model. Let me use offset arithmetic.
-                        // For QCN's HGRN2 attention:
-                        //   qkvz projection: output is [q_conv_part, k_conv_part, v, z]
-                        //   ba projection: output is [beta, gate_a]
-                        //   conv operates on the q_conv_part
-                        //   Recurrence: state * gate + beta * outer(k, v)
-                        //   Output: q @ state
-                        //
-                        // The kernel accepts: state, q, k, v, gate, beta, output, nv, dk, dv
-                        // where q[nv*dk], k[nv*dk], v[nv*dv], gate[nv], beta[nv]
-                        //
-                        // From conv_out: first nk*dk elements are q (after conv), next nk*dk are k (after conv)
-                        // From qkvz: elements at offset 2*nk*dk are v[nv*dv]
-                        // From ba: first nv are beta, next nv are gate_a (need exp(-softplus(a_log)) = gate)
-                        //
-                        // This is getting complex. The gate computation (exp(-softplus(a_log + dt_bias)))
-                        // should have been done by the Python prefill code and stored in the ba_out.
-                        //
-                        // Actually, for the Rust decode path, the recurrence kernel takes
-                        // pre-computed gate and beta values. The Python prefill computes the
-                        // initial state. During decode, we re-derive gate/beta each step from
-                        // the projections. The la_recurrence kernel in decode_kernels.cu just
-                        // takes gate[nv] and beta[nv] directly.
-                        //
-                        // For now, pass the offsets from the FP32 scratch buffers.
-                        let nk_ = *nk; let nv_ = *nv; let dk_ = *dk; let dv_ = *dv;
-                        let q_ptr = *graph.d_la_conv_out.device_ptr(); // [nv*dk] (q after conv)
-                        let k_offset = nk_ * dk_; // k starts after q in conv_out
-                        let k_ptr = unsafe { (*graph.d_la_conv_out.device_ptr() as *const f32).add(k_offset) as u64 };
-                        let v_offset = 2 * nk_ * dk_; // v from qkvz
-                        let v_ptr = unsafe { (*graph.d_la_qkvz.device_ptr() as *const f32).add(v_offset) as u64 };
-                        let gate_ptr = unsafe { (*graph.d_la_ba.device_ptr() as *const f32).add(nv_) as u64 }; // gate from ba[nv..]
-                        let beta_ptr = *graph.d_la_ba.device_ptr(); // beta from ba[0..nv]
-
+                        let blocks = ((nv_ as u32) + threads - 1) / threads;
+                        gate_ptr_local = *graph.d_la_conv_out.device_ptr();
+                        beta_ptr_local = unsafe { (*graph.d_la_conv_out.device_ptr() as *const f32).add(nv_) as u64 };
                         unsafe {
-                            let la_recurrence_fn = self.device.get_func(MODULE_NAME, "la_recurrence")
-                                .ok_or_else(|| "la_recurrence kernel not found".to_string())?;
-                            la_recurrence_fn.launch(cfg, (
-                                *recur_state_ptr,
-                                q_ptr,
-                                k_ptr,
-                                v_ptr,
-                                gate_ptr,
-                                beta_ptr,
-                                *graph.d_la_recur_out.device_ptr(),
-                                nv_ as i32, dk_ as i32, dv_ as i32,
-                            )).map_err(|e| format!("la_recurrence[{}]: {:?}", layer_idx, e))?;
+                            let gb_fn = self.device.get_func(MODULE_NAME, "compute_gate_beta")
+                                .ok_or_else(|| "compute_gate_beta not found".to_string())?;
+                            gb_fn.launch(
+                                LaunchConfig { grid_dim: (blocks, 1, 1), block_dim: (threads, 1, 1), shared_mem_bytes: 0 },
+                                (
+                                    gate_ptr_local,
+                                    beta_ptr_local,
+                                    *graph.d_la_ba.device_ptr(),
+                                    *a_log_ptr,
+                                    *dt_bias_ptr,
+                                    nv_ as i32,
+                                    hr_ as i32,
+                                ),
+                            ).map_err(|e| format!("compute_gate_beta[{}]: {:?}", layer_idx, e))?;
                         }
                     }
 
-                    // ── LA: gated RMSNorm + SiLU ──
-                    {
-                        let nv_ = *nv; let dv_ = *dv;
-                        let z_offset = 2 * nk * dk + nv_ * dv_;
-                        let z_ptr = unsafe {
-                            (*graph.d_la_qkvz.device_ptr() as *const f32).add(z_offset) as u64
-                        };
+                    // ── LA Step 5: Head repeat-interleave (if hr > 1) ──
+                    // q and k are [nk, dk]. Need to expand to [nv, dk] for the recurrence.
+                    // Conv output in d_la_qkvz: [q(key_dim), k(key_dim), v(nv*dv)]
+                    // After repeat-interleave: q[nv*dk], k[nv*dk] in d_la_recur_out (temp)
+                    let q_ptr_for_recur: u64;
+                    let k_ptr_for_recur: u64;
+                    if hr_ > 1 {
+                        // q: d_la_qkvz[0..key_dim] → d_la_recur_out[0..nv*dk]
+                        let total_q = (nv_ * dk_) as u32;
                         let threads = 256u32;
-                        let smem = (dv_ as u32 + 32) * 4; // shared mem for RMSNorm
-                        let cfg = LaunchConfig {
-                            grid_dim: (nv_ as u32, 1, 1),
-                            block_dim: (threads, 1, 1),
-                            shared_mem_bytes: smem,
-                        };
+                        let blocks = (total_q + threads - 1) / threads;
+                        unsafe {
+                            let ri_fn = self.device.get_func(MODULE_NAME, "repeat_interleave_heads")
+                                .ok_or_else(|| "repeat_interleave_heads not found".to_string())?;
+                            // Q
+                            ri_fn.clone().launch(
+                                LaunchConfig { grid_dim: (blocks, 1, 1), block_dim: (threads, 1, 1), shared_mem_bytes: 0 },
+                                (
+                                    *graph.d_la_recur_out.device_ptr(),  // output [nv*dk]
+                                    *graph.d_la_qkvz.device_ptr(),      // input q [nk*dk]
+                                    nk_ as i32, dk_ as i32, hr_ as i32,
+                                ),
+                            ).map_err(|e| format!("repeat_interleave q[{}]: {:?}", layer_idx, e))?;
+                            // K: input at offset key_dim, output at offset nv*dk
+                            let k_in = (*graph.d_la_qkvz.device_ptr() as *const f32).add(key_dim) as u64;
+                            let k_out = (*graph.d_la_recur_out.device_ptr() as *const f32).add(nv_ * dk_) as u64;
+                            ri_fn.launch(
+                                LaunchConfig { grid_dim: (blocks, 1, 1), block_dim: (threads, 1, 1), shared_mem_bytes: 0 },
+                                (
+                                    k_out, k_in,
+                                    nk_ as i32, dk_ as i32, hr_ as i32,
+                                ),
+                            ).map_err(|e| format!("repeat_interleave k[{}]: {:?}", layer_idx, e))?;
+                        }
+                        q_ptr_for_recur = *graph.d_la_recur_out.device_ptr();
+                        k_ptr_for_recur = unsafe { (*graph.d_la_recur_out.device_ptr() as *const f32).add(nv_ * dk_) as u64 };
+                    } else {
+                        q_ptr_for_recur = *graph.d_la_qkvz.device_ptr();
+                        k_ptr_for_recur = unsafe { (*graph.d_la_qkvz.device_ptr() as *const f32).add(key_dim) as u64 };
+                    }
+
+                    // ── LA Step 6: L2 normalize + scale Q and K ──
+                    {
+                        let threads = 256u32;
+                        unsafe {
+                            let l2_fn = self.device.get_func(MODULE_NAME, "l2norm_scale_per_head")
+                                .ok_or_else(|| "l2norm_scale_per_head not found".to_string())?;
+                            // Q: normalize with scale
+                            l2_fn.clone().launch(
+                                LaunchConfig { grid_dim: (nv_ as u32, 1, 1), block_dim: (threads, 1, 1), shared_mem_bytes: 0 },
+                                (q_ptr_for_recur, *scale, nv_ as i32, dk_ as i32),
+                            ).map_err(|e| format!("l2norm q[{}]: {:?}", layer_idx, e))?;
+                            // K: normalize without scale (scale=1.0)
+                            l2_fn.launch(
+                                LaunchConfig { grid_dim: (nv_ as u32, 1, 1), block_dim: (threads, 1, 1), shared_mem_bytes: 0 },
+                                (k_ptr_for_recur, 1.0f32, nv_ as i32, dk_ as i32),
+                            ).map_err(|e| format!("l2norm k[{}]: {:?}", layer_idx, e))?;
+                        }
+                    }
+
+                    // ── LA Step 7: Gated delta net recurrence ──
+                    // v is at offset 2*key_dim in d_la_qkvz (conv output)
+                    // Output to d_la_ba (free after step 4) to avoid overlap with q/k in d_la_recur_out
+                    let v_ptr = unsafe { (*graph.d_la_qkvz.device_ptr() as *const f32).add(2 * key_dim) as u64 };
+                    {
+                        let threads = 256u32;
+                        unsafe {
+                            let delta_fn = self.device.get_func(MODULE_NAME, "gated_delta_net_step")
+                                .ok_or_else(|| "gated_delta_net_step not found".to_string())?;
+                            delta_fn.launch(
+                                LaunchConfig { grid_dim: (nv_ as u32, 1, 1), block_dim: (threads, 1, 1), shared_mem_bytes: 0 },
+                                (
+                                    *recur_state_ptr,
+                                    q_ptr_for_recur,
+                                    k_ptr_for_recur,
+                                    v_ptr,
+                                    gate_ptr_local,
+                                    beta_ptr_local,
+                                    *graph.d_la_ba.device_ptr(),  // output: use d_la_ba (free after step 4)
+                                    nv_ as i32, dk_ as i32, dv_ as i32,
+                                ),
+                            ).map_err(|e| format!("gated_delta_net_step[{}]: {:?}", layer_idx, e))?;
+                        }
+                    }
+
+                    // ── LA Step 8: Gated RMSNorm + SiLU ──
+                    // z was saved in d_la_gated_out earlier
+                    // recurrence output is in d_la_ba
+                    {
+                        let threads = 256u32;
+                        let smem = (dv_ as u32 + 32) * 4;
                         unsafe {
                             let gated_rmsnorm_fn = self.device.get_func(MODULE_NAME, "gated_rmsnorm_silu")
                                 .ok_or_else(|| "gated_rmsnorm_silu not found".to_string())?;
-                            gated_rmsnorm_fn.launch(cfg, (
-                                *graph.d_la_gated_out.device_ptr(),
-                                *graph.d_la_recur_out.device_ptr(),
-                                z_ptr,
-                                *norm_weight_ptr,
-                                eps,
-                                nv_ as i32, dv_ as i32,
-                            )).map_err(|e| format!("gated_rmsnorm_silu[{}]: {:?}", layer_idx, e))?;
+                            gated_rmsnorm_fn.launch(
+                                LaunchConfig { grid_dim: (nv_ as u32, 1, 1), block_dim: (threads, 1, 1), shared_mem_bytes: smem },
+                                (
+                                    *graph.d_la_conv_out.device_ptr(),  // output (reuse buffer)
+                                    *graph.d_la_ba.device_ptr(),        // recurrence output (from step 7)
+                                    *graph.d_la_gated_out.device_ptr(), // z (saved earlier)
+                                    *norm_weight_ptr,
+                                    eps,
+                                    nv_ as i32, dv_ as i32,
+                                ),
+                            ).map_err(|e| format!("gated_rmsnorm_silu[{}]: {:?}", layer_idx, e))?;
                         }
                     }
 
-                    // ── LA: output projection ──
+                    // ── LA Step 9: Output projection ──
                     let out_w = &graph.weights[*out_proj];
-                    // d_la_gated_out (FP32 nv*dv) → convert to BF16 → GEMV → d_hidden (BF16)
-                    // Use d_scratch as BF16 intermediate
-                    let gated_size = nv * dv;
+                    // d_la_conv_out (FP32 nv*dv, gated rmsnorm output) → BF16 → GEMV → d_hidden
+                    let gated_size = nv_ * dv_;
                     {
                         unsafe {
                             let fp32_to_bf16_fn = self.device.get_func(MODULE_NAME, "fp32_to_bf16")
@@ -2312,7 +2418,7 @@ impl GpuDecodeStore {
                                 LaunchConfig::for_num_elems(gated_size as u32),
                                 (
                                     *graph.d_scratch.device_ptr(),
-                                    *graph.d_la_gated_out.device_ptr(),
+                                    *graph.d_la_conv_out.device_ptr(),
                                     gated_size as i32,
                                 ),
                             ).map_err(|e| format!("fp32_to_bf16 la out[{}]: {:?}", layer_idx, e))?;
@@ -2341,15 +2447,9 @@ impl GpuDecodeStore {
                         let fw = &graph.weights[*fid];
                         self.gemv_bf16_to_f32(fw, *graph.d_hidden.device_ptr(),
                             *graph.d_gqa_q.device_ptr())?;
-                        // Split fused output: Q = [0..nh*hd], K = [nh*hd..nh*hd+nkv*hd], V = rest
-                        // Actually the fused output goes into d_gqa_q, and we need to split
-                        // The output is contiguous: [Q, K, V]
-                        // K starts at offset nh*hd, V at nh*hd + nkv*hd
-                        // For gated attention, Q is 2x wider: nh*hd*2
                         let q_size = if *gated { nh * hd * 2 } else { nh * hd };
                         let k_offset = q_size;
                         let v_offset = k_offset + kv_stride;
-                        // d_gqa_q already has the full output. We need K and V in separate buffers.
                         unsafe {
                             let err = cuda_sys::lib().cuMemcpyDtoD_v2(
                                 *graph.d_gqa_k.device_ptr(),
@@ -2378,16 +2478,37 @@ impl GpuDecodeStore {
                             *graph.d_gqa_v.device_ptr())?;
                     }
 
-                    // ── GQA: Gated attention rearrange ──
-                    // For gated attention, Q output is [nh, 2*hd] and needs splitting
-                    // into Q[nh, hd] and gate[nh, hd]
-                    // We handle this by rearranging on GPU (the gate is used after attention)
-                    // For now we skip the gate rearrange and handle gated in the attention kernel
-                    // TODO: add gated attention support if needed
+                    // ── GQA: Split gated Q into Q[nh*hd] and gate[nh*hd] ──
+                    // Q proj output for gated attn is [nh, 2*hd] = [head0_q(hd), head0_gate(hd), ...]
+                    // Must split before QK norm/RoPE which expect [nh, hd] layout.
+                    // Gate stored in d_la_qkvz (unused during GQA layers).
+                    if *gated {
+                        let total = (nh * hd) as u32;
+                        let threads = 256u32;
+                        let blocks = (total + threads - 1) / threads;
+                        unsafe {
+                            let split_fn = self.device.get_func(MODULE_NAME, "split_gated_q")
+                                .ok_or_else(|| "split_gated_q not found".to_string())?;
+                            split_fn.launch(
+                                LaunchConfig {
+                                    grid_dim: (blocks, 1, 1),
+                                    block_dim: (threads, 1, 1),
+                                    shared_mem_bytes: 0,
+                                },
+                                (
+                                    *graph.d_gqa_q.device_ptr(),      // q_out (in-place safe)
+                                    *graph.d_la_qkvz.device_ptr(),    // gate_out
+                                    *graph.d_gqa_q.device_ptr(),      // qg_in
+                                    nh as i32,
+                                    hd as i32,
+                                ),
+                            ).map_err(|e| format!("split_gated_q[{}]: {:?}", layer_idx, e))?;
+                        }
+                    }
 
                     // ── GQA: QK norm (if enabled) ──
+                    // q_norm/k_norm are [head_dim] shared across all heads (weight_per_head=0)
                     if *q_norm_ptr != 0 {
-                        let weight_per_head = 1i32; // QCN uses per-head norm weights
                         let threads = 256u32;
                         let cfg = LaunchConfig {
                             grid_dim: (nh as u32, 1, 1),
@@ -2403,12 +2524,11 @@ impl GpuDecodeStore {
                                 eps,
                                 nh as i32,
                                 hd as i32,
-                                weight_per_head,
+                                0i32, // weight shared across heads
                             )).map_err(|e| format!("per_head_rmsnorm Q[{}]: {:?}", layer_idx, e))?;
                         }
                     }
                     if *k_norm_ptr != 0 {
-                        let weight_per_head = 1i32;
                         let threads = 256u32;
                         let cfg = LaunchConfig {
                             grid_dim: (nkv as u32, 1, 1),
@@ -2424,7 +2544,7 @@ impl GpuDecodeStore {
                                 eps,
                                 nkv as i32,
                                 hd as i32,
-                                weight_per_head,
+                                0i32, // weight shared across heads
                             )).map_err(|e| format!("per_head_rmsnorm K[{}]: {:?}", layer_idx, e))?;
                         }
                     }
@@ -2511,6 +2631,30 @@ impl GpuDecodeStore {
                         }
                     }
 
+                    // ── GQA: Apply gated attention ──
+                    // d_gqa_out *= sigmoid(gate) where gate is in d_la_qkvz
+                    if *gated {
+                        let total = (nh * hd) as u32;
+                        let threads = 256u32;
+                        let blocks = (total + threads - 1) / threads;
+                        unsafe {
+                            let gate_fn = self.device.get_func(MODULE_NAME, "apply_gated_attn")
+                                .ok_or_else(|| "apply_gated_attn not found".to_string())?;
+                            gate_fn.launch(
+                                LaunchConfig {
+                                    grid_dim: (blocks, 1, 1),
+                                    block_dim: (threads, 1, 1),
+                                    shared_mem_bytes: 0,
+                                },
+                                (
+                                    *graph.d_gqa_out.device_ptr(),
+                                    *graph.d_la_qkvz.device_ptr(),
+                                    (nh * hd) as i32,
+                                ),
+                            ).map_err(|e| format!("apply_gated_attn[{}]: {:?}", layer_idx, e))?;
+                        }
+                    }
+
                     // ── GQA: O projection ──
                     // d_gqa_out is FP32 [nh * hd]. Convert to BF16, then GEMV.
                     let o_size = nh * hd;
@@ -2568,6 +2712,23 @@ impl GpuDecodeStore {
             // Check if this layer has MoE data registered
             let has_moe = layer_idx < graph.moe_layers.len()
                 && graph.moe_layers[layer_idx].is_some();
+            // Sync before MoE to catch attention errors
+            self.device.synchronize().map_err(|e| format!("sync before mlp[{}]: {:?}", layer_idx, e))?;
+            {
+                self.device.synchronize().map_err(|e| format!("sync norm dbg: {:?}", e))?;
+                let mut buf = vec![0u16; 4];
+                unsafe {
+                    let _ = cuda_sys::lib().cuMemcpyDtoH_v2(
+                        buf.as_mut_ptr() as *mut std::ffi::c_void,
+                        *graph.d_hidden.device_ptr(), 8);
+                }
+                let v0 = f32::from_bits((buf[0] as u32) << 16);
+                if v0.is_nan() || position < 12 {
+                    debug_peek_bf16(&format!("L{} post_attn_norm d_hidden", layer_idx),
+                        *graph.d_hidden.device_ptr(), 4);
+                }
+            }
+            log::trace!("gpu_decode_step: layer {} mlp/moe (has_moe={})", layer_idx, has_moe);
             if has_moe {
                 // Use the fast Rust MoE forward path (HCS + double-buffered DMA)
                 // d_hidden → MoE → d_moe_out, then add d_moe_out to d_hidden
@@ -2583,6 +2744,20 @@ impl GpuDecodeStore {
                         hs * 2); // BF16
                     if err != cuda_sys::CUresult::CUDA_SUCCESS {
                         return Err(format!("D2D moe_out->hidden[{}]: {:?}", layer_idx, err));
+                    }
+                }
+                {
+                    self.device.synchronize().map_err(|e| format!("sync moe dbg: {:?}", e))?;
+                    let mut buf = vec![0u16; 4];
+                    unsafe {
+                        let _ = cuda_sys::lib().cuMemcpyDtoH_v2(
+                            buf.as_mut_ptr() as *mut std::ffi::c_void,
+                            *graph.d_hidden.device_ptr(), 8);
+                    }
+                    let v0 = f32::from_bits((buf[0] as u32) << 16);
+                    if v0.is_nan() || position < 12 {
+                        debug_peek_bf16(&format!("L{} after_moe d_hidden", layer_idx),
+                            *graph.d_hidden.device_ptr(), 4);
                     }
                 }
             } else if let GpuMlpConfig::Dense { gate_proj, up_proj, down_proj } = &layer.mlp {
@@ -2623,6 +2798,8 @@ impl GpuDecodeStore {
         }
 
         // ── 3. Final norm ──
+        self.device.synchronize().map_err(|e| format!("sync after all layers: {:?}", e))?;
+        debug_peek_bf16("before_final_norm d_hidden", *graph.d_hidden.device_ptr(), 4);
         {
             let smem = (hs as u32) * 4;
             let threads = 256u32.min(hs as u32);
@@ -2656,6 +2833,8 @@ impl GpuDecodeStore {
         self.device.synchronize()
             .map_err(|e| format!("sync: {:?}", e))?;
 
+        debug_peek_f32("logits[0..4]", *graph.d_logits.device_ptr(), 4);
+
         unsafe {
             let err = cuda_sys::lib().cuMemcpyDtoH_v2(
                 graph.h_logits.as_mut_ptr() as *mut std::ffi::c_void,
@@ -2664,6 +2843,15 @@ impl GpuDecodeStore {
             if err != cuda_sys::CUresult::CUDA_SUCCESS {
                 return Err(format!("D2H logits: {:?}", err));
             }
+        }
+
+        // Debug: print top-3 logit values
+        {
+            let mut top3: Vec<(usize, f32)> = graph.h_logits.iter().enumerate()
+                .map(|(i, &v)| (i, v)).collect();
+            top3.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            log::info!("DBG logits top3: [{}: {:.2}, {}: {:.2}, {}: {:.2}]",
+                top3[0].0, top3[0].1, top3[1].0, top3[1].1, top3[2].0, top3[2].1);
         }
 
         Ok(())
@@ -4366,11 +4554,13 @@ impl GpuDecodeStore {
             hidden_size, intermediate_size, n_experts, topk, scoring_str, num_layers, group_size,
         );
 
-        // Step 1: configure buffers
-        self.configure(
-            hidden_size, num_layers, vocab_size, 1e-6,
-            topk, intermediate_size, hidden_size * 3, group_size,
-        )?;
+        // Step 1: configure buffers (only if not already configured by Python setup)
+        if self.graph.is_none() {
+            self.configure(
+                hidden_size, num_layers, vocab_size, 1e-6,
+                topk, intermediate_size, hidden_size * 3, group_size,
+            )?;
+        }
 
         // Step 2: for each MoE layer, upload gate weights to VRAM and register expert pointers
         let num_routing = engine.num_routing_layers();

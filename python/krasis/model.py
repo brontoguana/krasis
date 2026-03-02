@@ -3728,7 +3728,15 @@ class KrasisModel:
             cpu_decoder.prepare(seq_states, max_new_tokens)
             store_addr = cpu_decoder._store.self_addr()
         else:
-            # GPU decode: export KV cache + LA state to Rust GpuDecodeStore
+            # GPU decode: set up for Python decode step (benchmark engine path)
+            self._gpu_decode_device = device
+            self._gpu_decode_temperature = temperature
+            self._gpu_decode_top_k = top_k
+            self._gpu_decode_top_p = top_p
+            self._gpu_decode_presence_penalty = presence_penalty
+            self._gpu_decode_seen_tokens = set()
+
+            # Export KV cache + LA state to Rust GpuDecodeStore (server path)
             gpu_store = getattr(self, '_gpu_decode_store', None)
             if gpu_store is not None:
                 self._export_kv_to_rust(seq_states, len(prompt_tokens))
@@ -3783,6 +3791,20 @@ class KrasisModel:
         gpu_idx = device.index or 0
 
         store = GpuDecodeStore(gpu_idx)
+        # Compute max QKV buffer size across all layer types
+        max_qkv = self.cfg.hidden_size * 3  # default for standard GQA
+        for layer in self.layers:
+            if layer.layer_type == "linear_attention":
+                attn = layer.attention
+                # in_proj_qkvz output = nk*dk + nk*dk + nv*dv + nv*dv
+                qkvz_out = attn.in_proj_qkvz.shape[0]
+                max_qkv = max(max_qkv, qkvz_out)
+            elif hasattr(layer.attention, 'num_heads'):
+                ga = layer.attention
+                q_sz = ga.num_heads * ga.head_dim * (2 if ga.gated_attention else 1)
+                kv_sz = ga.num_kv_heads * ga.head_dim
+                max_qkv = max(max_qkv, q_sz + kv_sz * 2)
+
         store.configure(
             hidden_size=self.cfg.hidden_size,
             num_layers=len(self.layers),
@@ -3790,6 +3812,7 @@ class KrasisModel:
             eps=self.cfg.rms_norm_eps,
             max_experts_per_tok=self.cfg.num_experts_per_tok,
             max_intermediate_size=self.cfg.moe_intermediate_size,
+            max_qkv_size=max_qkv,
             group_size=128,
         )
 
@@ -3800,11 +3823,11 @@ class KrasisModel:
         store.set_final_norm(self.final_norm.data_ptr(), self.cfg.hidden_size)
 
         # Register LM head (always as BF16 for cuBLAS GEMV compatibility)
-        lm_head_w = self.lm_head
+        lm_head_w = self.lm_head_data
         if isinstance(lm_head_w, tuple):
             # INT8 (weight, scale) — dequantize to BF16 for Rust decode
             w_int8, scale = lm_head_w
-            lm_head_bf16 = (w_int8.float() * scale).to(torch.bfloat16).contiguous()
+            lm_head_bf16 = (w_int8.float() * scale.unsqueeze(1)).to(torch.bfloat16).contiguous()
             self._rust_lm_head = lm_head_bf16  # prevent GC
             lm_head_ptr = lm_head_bf16.data_ptr()
             lm_head_rows = lm_head_bf16.shape[0]
@@ -3842,10 +3865,20 @@ class KrasisModel:
                 self._la_wids[layer_idx] = (qkvz_wid, ba_wid, out_wid)
 
                 # Conv weight: [conv_dim, 1, kernel_dim] -> [conv_dim, kernel_dim]
-                conv_w = attn.conv1d_weight.squeeze(1).contiguous()
+                # Rust LA kernels work in FP32, so create FP32 copies of BF16 tensors
+                conv_w = attn.conv1d_weight.squeeze(1).contiguous().float()
                 attn._rust_conv_weight = conv_w
 
                 attn._init_state(batch_size=1)
+                # conv_state is BF16 from _init_state, Rust kernel needs FP32
+                attn._rust_conv_state = attn._conv_state.squeeze(0).float().contiguous()
+                # norm_weight is BF16, Rust gated_rmsnorm_silu kernel needs FP32
+                attn._rust_norm_weight = attn.norm_weight.float().contiguous()
+                # recurrent_state may need FP32 conversion for Rust kernel
+                attn._rust_recur_state = attn._recurrent_state.squeeze(0).float().contiguous()
+                # A_log and dt_bias are BF16 from weight loader, Rust kernel needs FP32
+                attn._rust_a_log = attn.A_log.float().contiguous()
+                attn._rust_dt_bias = attn.dt_bias.float().contiguous()
 
                 store.register_la_layer(
                     layer_idx=layer_idx,
@@ -3853,11 +3886,11 @@ class KrasisModel:
                     post_attn_norm_ptr=post_norm.data_ptr(), post_attn_norm_size=post_norm.numel(),
                     in_proj_qkvz_wid=qkvz_wid, in_proj_ba_wid=ba_wid, out_proj_wid=out_wid,
                     conv_weight_ptr=conv_w.data_ptr(),
-                    a_log_ptr=attn.A_log.data_ptr(),
-                    dt_bias_ptr=attn.dt_bias.data_ptr(),
-                    norm_weight_ptr=attn.norm_weight.data_ptr(),
-                    conv_state_ptr=attn._conv_state.data_ptr(),
-                    recur_state_ptr=attn._recurrent_state.data_ptr(),
+                    a_log_ptr=attn._rust_a_log.data_ptr(),
+                    dt_bias_ptr=attn._rust_dt_bias.data_ptr(),
+                    norm_weight_ptr=attn._rust_norm_weight.data_ptr(),
+                    conv_state_ptr=attn._rust_conv_state.data_ptr(),
+                    recur_state_ptr=attn._rust_recur_state.data_ptr(),
                     nk=attn.num_k_heads, nv=attn.num_v_heads,
                     dk=attn.k_head_dim, dv=attn.v_head_dim,
                     hr=attn.head_ratio,
@@ -3875,8 +3908,17 @@ class KrasisModel:
                 o_wid = store.register_weight(
                     attn.o_proj.data_ptr(), attn.o_proj.shape[0], attn.o_proj.shape[1], 0)
 
-                q_norm_ptr = attn.q_norm.data_ptr() if attn.q_norm is not None else 0
-                k_norm_ptr = attn.k_norm.data_ptr() if attn.k_norm is not None else 0
+                # QK norm weights are BF16, Rust per_head_rmsnorm kernel needs FP32
+                if attn.q_norm is not None:
+                    attn._rust_q_norm = attn.q_norm.float().contiguous()
+                    q_norm_ptr = attn._rust_q_norm.data_ptr()
+                else:
+                    q_norm_ptr = 0
+                if attn.k_norm is not None:
+                    attn._rust_k_norm = attn.k_norm.float().contiguous()
+                    k_norm_ptr = attn._rust_k_norm.data_ptr()
+                else:
+                    k_norm_ptr = 0
 
                 store.register_gqa_layer(
                     layer_idx=layer_idx,
@@ -3923,12 +3965,16 @@ class KrasisModel:
                 store.register_mlp(layer_idx, "none")
 
         # Register MoE expert data from engine (all MoE layers at once)
-        if self.engine is not None:
-            store.setup_from_engine(self.engine)
+        if self.krasis_engine is not None:
+            store.setup_from_engine(self.krasis_engine)
 
-        # Allocate KV cache
-        max_seq = max(c.max_context_tokens for c in self.kv_caches if c is not None)
-        store.allocate_kv_cache(max_seq)
+        # Allocate KV cache for Rust decode (only need current context, not full capacity)
+        # We use 8K as default max sequence for the Rust KV cache -- enough for typical decode
+        # after prefill. The FlashInfer KV cache handles the full capacity.
+        rust_kv_max_seq = 8192
+        logger.info("Allocating Rust KV cache: max_seq=%d", rust_kv_max_seq)
+        store.allocate_kv_cache(rust_kv_max_seq)
+        logger.info("Rust KV cache allocated")
 
         self._gpu_decode_store = store
         logger.info("GPU decode store configured: %d layers, store_addr=%d",
@@ -3950,6 +3996,7 @@ class KrasisModel:
         self._rust_kv_refs = []
         pages = seq_state.pages
         page_size = cache.page_size
+        gqa_cache_idx = 0  # KV cache is indexed by GQA layer count, not absolute layer
 
         for layer_idx, layer in enumerate(self.layers):
             if layer.layer_type != "linear_attention":
@@ -3958,9 +4005,10 @@ class KrasisModel:
                 hd = attn.head_dim
                 kv_stride = nkv * hd
 
-                # k_cache: [num_layers, max_pages, page_size, num_kv_heads, head_dim]
-                k_pages = cache.k_cache[layer_idx, pages]
-                v_pages = cache.v_cache[layer_idx, pages]
+                # k_cache: [num_gqa_layers, max_pages, page_size, num_kv_heads, head_dim]
+                k_pages = cache.k_cache[gqa_cache_idx, pages]
+                v_pages = cache.v_cache[gqa_cache_idx, pages]
+                gqa_cache_idx += 1
 
                 # Reshape to [n_pages * page_size, nkv * hd], trim to seq_len
                 k_cont = k_pages.reshape(-1, nkv * hd)[:prompt_len].contiguous()
@@ -3977,7 +4025,9 @@ class KrasisModel:
         store.import_kv_cache(kv_data, prompt_len)
 
     def _update_la_state_ptrs(self):
-        """Re-register LA state pointers after prefill (states may have been reallocated)."""
+        """Re-register LA state pointers after prefill (states may have been reallocated).
+        Prefill may reassign _conv_state and _recurrent_state tensors, so we
+        need to create fresh FP32 copies and re-register the new pointers."""
         store = self._gpu_decode_store
         for layer_idx, layer in enumerate(self.layers):
             if layer.layer_type == "linear_attention":
@@ -3991,17 +4041,21 @@ class KrasisModel:
                 post_norm = layer.post_attn_norm_weight
                 conv_w = attn._rust_conv_weight
 
+                # Prefill may have updated conv_state and recurrent_state (BF16) -- convert to FP32 for Rust
+                attn._rust_conv_state = attn._conv_state.squeeze(0).float().contiguous()
+                attn._rust_recur_state = attn._recurrent_state.squeeze(0).float().contiguous()
+
                 store.register_la_layer(
                     layer_idx=layer_idx,
                     input_norm_ptr=inp_norm.data_ptr(), input_norm_size=inp_norm.numel(),
                     post_attn_norm_ptr=post_norm.data_ptr(), post_attn_norm_size=post_norm.numel(),
                     in_proj_qkvz_wid=wids[0], in_proj_ba_wid=wids[1], out_proj_wid=wids[2],
                     conv_weight_ptr=conv_w.data_ptr(),
-                    a_log_ptr=attn.A_log.data_ptr(),
-                    dt_bias_ptr=attn.dt_bias.data_ptr(),
-                    norm_weight_ptr=attn.norm_weight.data_ptr(),
-                    conv_state_ptr=attn._conv_state.data_ptr(),
-                    recur_state_ptr=attn._recurrent_state.data_ptr(),
+                    a_log_ptr=attn._rust_a_log.data_ptr(),
+                    dt_bias_ptr=attn._rust_dt_bias.data_ptr(),
+                    norm_weight_ptr=attn._rust_norm_weight.data_ptr(),
+                    conv_state_ptr=attn._rust_conv_state.data_ptr(),
+                    recur_state_ptr=attn._rust_recur_state.data_ptr(),
                     nk=attn.num_k_heads, nv=attn.num_v_heads,
                     dk=attn.k_head_dim, dv=attn.v_head_dim,
                     hr=attn.head_ratio,

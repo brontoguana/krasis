@@ -326,6 +326,8 @@ extern "C" __global__ void scale_bf16(
 // 1D causal convolution for linear attention (Mamba-style).
 // Shifts conv_state, inserts new input, computes conv output.
 // conv_state: [conv_dim, kernel_dim] (each of conv_dim channels has kernel_dim history)
+// Conv1d with SiLU activation for linear attention decode.
+// Input is UN-INTERLEAVED [q_flat, k_flat, v_flat] = [conv_dim].
 extern "C" __global__ void la_conv1d(
     float* __restrict__ conv_state,          // [conv_dim, kernel_dim]
     const float* __restrict__ input,          // [conv_dim] (new input from projection)
@@ -348,7 +350,213 @@ extern "C" __global__ void la_conv1d(
         for (int k = 0; k < kernel_dim; k++) {
             out += conv_state[c * kernel_dim + k] * conv_weight[c * kernel_dim + k];
         }
-        output[c] = out;
+        // Apply SiLU activation
+        output[c] = out / (1.0f + expf(-out));
+    }
+}
+
+// ── Linear Attention Helper Kernels ────────────────────────────────────
+
+// Un-interleave QKVZ projection output.
+// Input layout (interleaved per key-head group):
+//   [h0_q(dk), h0_k(dk), h0_v(ratio*dv), h0_z(ratio*dv), h1_q(dk), h1_k(dk), ...]
+// Output: separate contiguous arrays for conv_input [q_flat, k_flat, v_flat] and z_flat.
+// conv_input: [q(nk*dk), k(nk*dk), v(nv*dv)] = [conv_dim]
+// z_out: [nv*dv]
+extern "C" __global__ void uninterleave_qkvz(
+    float* __restrict__ conv_input,   // [conv_dim] = [q_flat, k_flat, v_flat]
+    float* __restrict__ z_out,        // [nv * dv]
+    const float* __restrict__ qkvz,   // [nk * group_dim] interleaved
+    int nk,       // num key heads
+    int dk,       // key head dim
+    int ratio,    // head_ratio = nv / nk
+    int dv        // value head dim
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int group_dim = 2 * dk + 2 * ratio * dv;
+    int key_dim = nk * dk;
+    int val_dim = nk * ratio * dv;  // = nv * dv
+    int total = nk * group_dim;
+    if (idx >= total) return;
+
+    int head = idx / group_dim;
+    int offset = idx % group_dim;
+
+    if (offset < dk) {
+        // Q element
+        conv_input[head * dk + offset] = qkvz[idx];
+    } else if (offset < 2 * dk) {
+        // K element
+        int k_elem = offset - dk;
+        conv_input[key_dim + head * dk + k_elem] = qkvz[idx];
+    } else if (offset < 2 * dk + ratio * dv) {
+        // V element
+        int v_elem = offset - 2 * dk;
+        conv_input[2 * key_dim + head * ratio * dv + v_elem] = qkvz[idx];
+    } else {
+        // Z element
+        int z_elem = offset - (2 * dk + ratio * dv);
+        z_out[head * ratio * dv + z_elem] = qkvz[idx];
+    }
+}
+
+// Compute gate and beta for gated delta net from BA projection output.
+// beta = sigmoid(b), gate = exp(-A_log.exp() * softplus(a + dt_bias))
+extern "C" __global__ void compute_gate_beta(
+    float* __restrict__ gate_out,     // [nv]
+    float* __restrict__ beta_out,     // [nv]
+    const float* __restrict__ ba,     // [nk * 2 * ratio] interleaved: [h0_b(ratio), h0_a(ratio), h1_b(ratio), ...]
+    const float* __restrict__ A_log,  // [nv]
+    const float* __restrict__ dt_bias, // [nv]
+    int nv,
+    int ratio                         // head_ratio = nv / nk
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < nv) {
+        // Un-interleave BA: group = i / ratio, pos = i % ratio, group_dim = 2 * ratio
+        int group = i / ratio;
+        int pos = i % ratio;
+        int group_dim = 2 * ratio;
+        float b = ba[group * group_dim + pos];
+        float a = ba[group * group_dim + ratio + pos];
+        beta_out[i] = 1.0f / (1.0f + expf(-b));  // sigmoid(b)
+        float al = A_log[i];
+        float sp = logf(1.0f + expf(a + dt_bias[i]));  // softplus(a + dt_bias)
+        gate_out[i] = expf(-expf(al) * sp);  // exp(-exp(A_log) * softplus(a + dt_bias))
+    }
+}
+
+// Repeat-interleave heads: expand [nk, dim] to [nv, dim] where nv = nk * ratio.
+// Each key head is repeated 'ratio' times consecutively.
+extern "C" __global__ void repeat_interleave_heads(
+    float* __restrict__ output,   // [nv * dim]
+    const float* __restrict__ input,   // [nk * dim]
+    int nk,
+    int dim,
+    int ratio
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int nv = nk * ratio;
+    int total = nv * dim;
+    if (idx < total) {
+        int out_head = idx / dim;
+        int elem = idx % dim;
+        int in_head = out_head / ratio;
+        output[idx] = input[in_head * dim + elem];
+    }
+}
+
+// L2 normalize per head, with optional scale factor.
+// data[head * dim .. head * dim + dim] is normalized in-place.
+extern "C" __global__ void l2norm_scale_per_head(
+    float* __restrict__ data,   // [num_heads * dim]
+    float scale,
+    int num_heads,
+    int dim
+) {
+    int head = blockIdx.x;
+    if (head >= num_heads) return;
+
+    int tid = threadIdx.x;
+    int num_threads = blockDim.x;
+    float* h = data + head * dim;
+
+    float sum_sq = 0.0f;
+    for (int i = tid; i < dim; i += num_threads) {
+        sum_sq += h[i] * h[i];
+    }
+
+    // Warp reduction
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+        sum_sq += __shfl_down_sync(0xffffffff, sum_sq, offset);
+    }
+    __shared__ float warp_sums[32];
+    int warp_id = tid / warpSize;
+    int lane_id = tid % warpSize;
+    if (lane_id == 0) warp_sums[warp_id] = sum_sq;
+    __syncthreads();
+
+    if (tid == 0) {
+        float total = 0.0f;
+        int num_warps = (num_threads + warpSize - 1) / warpSize;
+        for (int w = 0; w < num_warps; w++) total += warp_sums[w];
+        float inv_norm = rsqrtf(total + 1e-12f);
+        warp_sums[0] = inv_norm * scale;
+    }
+    __syncthreads();
+    float norm_scale = warp_sums[0];
+
+    for (int i = tid; i < dim; i += num_threads) {
+        h[i] = h[i] * norm_scale;
+    }
+}
+
+// Gated delta net recurrence step (one token).
+// Implements the full delta rule used by Qwen3-Coder-Next's linear attention:
+//   state *= gate  (per-head decay)
+//   kv_mem = (state * k.unsqueeze(-1)).sum(-2)  (memory recall)
+//   delta = (v - kv_mem) * beta  (error-correcting delta)
+//   state += k.unsqueeze(-1) * delta.unsqueeze(-2)  (update)
+//   output = (state * q.unsqueeze(-1)).sum(-2)  (readout)
+//
+// One block per head. state is [nv, dk, dv].
+extern "C" __global__ void gated_delta_net_step(
+    float* __restrict__ state,   // [nv, dk, dv] in/out
+    const float* __restrict__ q, // [nv * dk]
+    const float* __restrict__ k, // [nv * dk]
+    const float* __restrict__ v, // [nv * dv]
+    const float* __restrict__ gate, // [nv]
+    const float* __restrict__ beta, // [nv]
+    float* __restrict__ output,  // [nv * dv]
+    int nv, int dk, int dv
+) {
+    int head = blockIdx.x;
+    if (head >= nv) return;
+
+    int tid = threadIdx.x;
+    int num_threads = blockDim.x;
+
+    float g = gate[head];
+    float b = beta[head];
+    int mat_size = dk * dv;
+
+    float* S = state + head * mat_size;
+    const float* q_h = q + head * dk;
+    const float* k_h = k + head * dk;
+    const float* v_h = v + head * dv;
+    float* out_h = output + head * dv;
+
+    // Step 1: Decay state: S *= gate
+    for (int idx = tid; idx < mat_size; idx += num_threads) {
+        S[idx] *= g;
+    }
+    __syncthreads();
+
+    // Step 2: Memory recall: kv_mem[j] = sum_i(S[i,j] * k[i])
+    // Step 3: Delta: delta[j] = (v[j] - kv_mem[j]) * beta
+    // Step 4: State update: S[i,j] += k[i] * delta[j]
+    // These are fused to avoid extra shared memory.
+    for (int j = tid; j < dv; j += num_threads) {
+        // kv_mem[j]
+        float kv_mem = 0.0f;
+        for (int i = 0; i < dk; i++) {
+            kv_mem += S[i * dv + j] * k_h[i];
+        }
+        float delta = (v_h[j] - kv_mem) * b;
+        // Update state column j
+        for (int i = 0; i < dk; i++) {
+            S[i * dv + j] += k_h[i] * delta;
+        }
+    }
+    __syncthreads();
+
+    // Step 5: Output: out[j] = sum_i(q[i] * S[i,j])
+    for (int j = tid; j < dv; j += num_threads) {
+        float acc = 0.0f;
+        for (int i = 0; i < dk; i++) {
+            acc += q_h[i] * S[i * dv + j];
+        }
+        out_h[j] = acc;
     }
 }
 
@@ -660,6 +868,47 @@ extern "C" __global__ void gqa_attention(
             acc += smem[pos] * bf16_to_f32(v_cache[pos * kv_stride + kv_head * head_dim + d]);
         }
         out_head[d] = acc;
+    }
+}
+
+// ── Gated Attention Helpers ────────────────────────────────────────────
+
+// Split gated Q projection output into Q and gate.
+// Input: qg_in[nh * hd * 2] with layout [head0_q(hd), head0_gate(hd), head1_q(hd), ...]
+// Output: q_out[nh * hd] with layout [head0_q(hd), head1_q(hd), ...]
+//         gate_out[nh * hd] with layout [head0_gate(hd), head1_gate(hd), ...]
+// Safe to have q_out == qg_in (in-place for Q part) since each output idx <= input idx.
+extern "C" __global__ void split_gated_q(
+    float* __restrict__ q_out,
+    float* __restrict__ gate_out,
+    const float* __restrict__ qg_in,
+    int nh,
+    int hd
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = nh * hd;
+    if (idx < total) {
+        int head = idx / hd;
+        int elem = idx % hd;
+        int src_base = head * (hd * 2);
+        // Gate must be read BEFORE Q is written (in-place safety)
+        float gate_val = qg_in[src_base + hd + elem];
+        float q_val = qg_in[src_base + elem];
+        q_out[idx] = q_val;
+        gate_out[idx] = gate_val;
+    }
+}
+
+// Apply sigmoid gate to attention output: out[i] *= sigmoid(gate[i])
+extern "C" __global__ void apply_gated_attn(
+    float* __restrict__ attn_out,
+    const float* __restrict__ gate,
+    int n
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float g = 1.0f / (1.0f + expf(-gate[idx]));
+        attn_out[idx] *= g;
     }
 }
 
