@@ -59,6 +59,7 @@ const KERNEL_NAMES: &[&str] = &[
     "reduce_ksplits_bf16",
     "marlin_gemv_int4_fused_silu_accum_v2",
     "reduce_ksplits_weighted_accum_bf16",
+    "sigmoid_gate_inplace_bf16",
 ];
 
 const MODULE_NAME: &str = "decode_kernels";
@@ -646,6 +647,12 @@ pub struct GpuDecodeStore {
     graph: Option<Box<GpuDecodeGraph>>,
     kernels_loaded: bool,
     last_decode_elapsed: f64,
+    /// Debug: stop after this many layers (0 = run all layers). For testing.
+    debug_stop_layer: usize,
+    /// Debug: when true, capture d_hidden after each layer during gpu_decode_step.
+    debug_capture_layers: bool,
+    /// Debug: captured per-layer d_hidden states (BF16 u16 vecs).
+    debug_layer_captures: Vec<Vec<u16>>,
 }
 
 #[pymethods]
@@ -730,6 +737,9 @@ impl GpuDecodeStore {
             graph: None,
             kernels_loaded,
             last_decode_elapsed: 0.0,
+            debug_stop_layer: 0,
+            debug_capture_layers: false,
+            debug_layer_captures: Vec::new(),
         })
     }
 
@@ -1326,6 +1336,20 @@ impl GpuDecodeStore {
         )
     }
 
+    /// Set the shared expert gate weight ID for a MoE layer.
+    /// Called from Python after setup_from_engine to wire in the sigmoid gate.
+    fn set_moe_shared_gate_wid(&mut self, layer_idx: usize, wid: usize) -> PyResult<()> {
+        let graph = self.graph.as_mut()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
+        let moe = graph.moe_layers.get_mut(layer_idx)
+            .and_then(|m| m.as_mut())
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(
+                format!("MoE layer {} not registered", layer_idx)))?;
+        moe.shared_gate_wid = Some(wid);
+        log::info!("Set shared_gate_wid={} for MoE layer {}", wid, layer_idx);
+        Ok(())
+    }
+
     /// Test the Marlin GEMV kernel correctness.
     fn test_marlin_gemv_kernel(&self) -> PyResult<String> {
         self.test_marlin_gemv()
@@ -1596,6 +1620,39 @@ impl GpuDecodeStore {
         Ok(results.join("\n"))
     }
 
+    /// Set debug: stop after N layers (0 = run all). For comparing against Python per-layer.
+    fn set_debug_stop_layer(&mut self, n: usize) {
+        self.debug_stop_layer = n;
+    }
+
+    /// Enable/disable per-layer hidden state capture during gpu_decode_step.
+    fn set_debug_capture_layers(&mut self, enable: bool) {
+        self.debug_capture_layers = enable;
+        self.debug_layer_captures.clear();
+    }
+
+    /// Download captured per-layer hidden states. Returns list of BF16 u16 vecs.
+    fn download_layer_captures(&self) -> PyResult<Vec<Vec<u16>>> {
+        Ok(self.debug_layer_captures.clone())
+    }
+
+    /// Download BF16 residual state from GPU d_residual buffer (for testing).
+    fn download_residual_bf16(&self) -> PyResult<Vec<u16>> {
+        let graph = self.graph.as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
+        let mut out = vec![0u16; graph.hidden_size];
+        unsafe {
+            let err = cuda_sys::lib().cuMemcpyDtoH_v2(
+                out.as_mut_ptr() as *mut std::ffi::c_void,
+                *graph.d_residual.device_ptr(),
+                out.len() * 2);
+            if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!("D2H residual: {:?}", err)));
+            }
+        }
+        Ok(out)
+    }
+
     /// Upload BF16 hidden state to GPU d_hidden buffer (for testing).
     fn upload_hidden_bf16(&self, data: Vec<u16>) -> PyResult<()> {
         let graph = self.graph.as_ref()
@@ -1657,6 +1714,147 @@ impl GpuDecodeStore {
     #[pyo3(signature = (layer_idx))]
     fn moe_forward_gpu(&mut self, layer_idx: usize) -> PyResult<(f64, f64, f64, f64)> {
         self.moe_forward_internal(layer_idx)
+    }
+
+    /// Debug: Run a single expert's w13 GEMV and return gate_up as BF16 u16 list.
+    /// Does NOT do routing/accumulation — just DMA one expert and run w13 GEMV.
+    /// Returns: Vec<u16> of length 2*intermediate_size (gate_up BF16).
+    #[pyo3(signature = (layer_idx, expert_id))]
+    fn test_single_expert_w13(&mut self, layer_idx: usize, expert_id: usize) -> PyResult<Vec<u16>> {
+        let graph = self.graph.take()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
+
+        let result = self.test_single_expert_w13_impl(&graph, layer_idx, expert_id);
+
+        self.graph = Some(graph);
+        result
+    }
+
+    /// Debug: CPU reference dequant + matmul for a single expert's w13.
+    /// Reads the Marlin-packed weights from system RAM, dequantizes with inverse
+    /// perm + scales, and does FP32 matmul against d_hidden.
+    /// Returns: Vec<f32> of length 2*intermediate_size.
+    #[pyo3(signature = (layer_idx, expert_id))]
+    fn test_cpu_reference_w13(&self, layer_idx: usize, expert_id: usize) -> PyResult<Vec<f32>> {
+        let graph = self.graph.as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
+
+        let moe = graph.moe_layers.get(layer_idx)
+            .and_then(|m| m.as_ref())
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(
+                format!("MoE layer {} not registered", layer_idx)))?;
+
+        let expert = &moe.experts[expert_id];
+        let hs = graph.hidden_size;
+        let intermediate = graph.intermediate_size;
+        let gs = graph.group_size;
+        let n = 2 * intermediate;  // w13 output dim
+        let k = hs;                // w13 input dim
+
+        // Download current d_hidden to CPU
+        let mut hidden_bf16 = vec![0u16; hs];
+        unsafe {
+            let err = cuda_sys::lib().cuMemcpyDtoH_v2(
+                hidden_bf16.as_mut_ptr() as *mut std::ffi::c_void,
+                *graph.d_hidden.device_ptr(),
+                hs * 2);
+            if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    format!("D2H hidden: {:?}", err)));
+            }
+        }
+        let hidden_f32: Vec<f32> = hidden_bf16.iter().map(|&bits| {
+            let full = (bits as u32) << 16;
+            f32::from_bits(full)
+        }).collect();
+
+        // Get w13 weight pointers from expert data (system RAM)
+        let w13_packed_ptr = expert.w13_packed_ptr as *const u32;
+        let w13_scales_ptr = expert.w13_scales_ptr as *const u16;
+        let k_tiles = k / 16;
+        let out_cols = 2 * n;  // u32 cols in packed
+        let num_groups_k = k / gs;
+
+        // Read packed weights and scales from system RAM
+        let packed_len = k_tiles * out_cols;
+        let scales_len = num_groups_k * n;
+        let packed: Vec<u32> = unsafe {
+            std::slice::from_raw_parts(w13_packed_ptr, packed_len).to_vec()
+        };
+        let scales_raw: Vec<u16> = unsafe {
+            std::slice::from_raw_parts(w13_scales_ptr, scales_len).to_vec()
+        };
+
+        // Generate inverse perm tables
+        let fwd_perm = crate::weights::marlin::generate_weight_perm_int4();
+        let (fwd_scale, _) = crate::weights::marlin::generate_scale_perms();
+        let mut inv_wperm = [0usize; 1024];
+        for (i, &src) in fwd_perm.iter().enumerate() {
+            inv_wperm[src] = i;
+        }
+        let mut inv_sperm = [0usize; 64];
+        for (i, &src) in fwd_scale.iter().enumerate() {
+            inv_sperm[src] = i;
+        }
+
+        // CPU GEMV: for each output n, accumulate over k
+        let mut output = vec![0.0f32; n];
+        let row_len = n * 16;
+
+        for out_n in 0..n {
+            let n_tile = out_n / 16;
+            let tn = out_n % 16;
+            let mut acc = 0.0f32;
+
+            for kt in 0..k_tiles {
+                for tk in 0..16 {
+                    let kk = kt * 16 + tk;
+
+                    // Scale lookup (same logic as kernel)
+                    let sg = kk / gs;
+                    let scale_flat = sg * n + out_n;
+                    let schunk = scale_flat / 64;
+                    let slocal = scale_flat % 64;
+                    let sperm_pos = schunk * 64 + inv_sperm[slocal];
+                    let scale_bits = scales_raw[sperm_pos];
+                    let scale = f32::from_bits((scale_bits as u32) << 16);
+
+                    // Weight lookup (same logic as kernel)
+                    let tile_pos = n_tile * 256 + tk * 16 + tn;
+                    let chunk = tile_pos / 1024;
+                    let local_idx = tile_pos % 1024;
+                    let perm_pos = chunk * 1024 + inv_wperm[local_idx];
+                    let u32_col = perm_pos / 8;
+                    let nibble = perm_pos % 8;
+                    let word = packed[kt * out_cols + u32_col];
+                    let raw = ((word >> (nibble * 4)) & 0xF) as i32;
+                    let w_val = (raw - 8) as f32;
+
+                    acc += w_val * scale * hidden_f32[kk];
+                }
+            }
+            output[out_n] = acc;
+        }
+
+        Ok(output)
+    }
+
+    /// Download d_expert_gate_up buffer as BF16 u16 values.
+    fn download_gate_up_bf16(&self) -> PyResult<Vec<u16>> {
+        let graph = self.graph.as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
+        let size = graph.intermediate_size * 2;
+        let mut out = vec![0u16; size];
+        unsafe {
+            let err = cuda_sys::lib().cuMemcpyDtoH_v2(
+                out.as_mut_ptr() as *mut std::ffi::c_void,
+                *graph.d_expert_gate_up.device_ptr(),
+                size * 2);
+            if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!("D2H: {:?}", err)));
+            }
+        }
+        Ok(out)
     }
 
     /// One-time setup: configure GPU decode from a loaded KrasisEngine.
@@ -2068,6 +2266,12 @@ impl GpuDecodeStore {
         self as *const GpuDecodeStore as usize
     }
 
+    /// Run a single GPU decode step (for testing). Fills d_hidden and h_logits.
+    fn py_gpu_decode_step(&mut self, token_id: usize, position: usize) -> PyResult<()> {
+        self.gpu_decode_step(token_id, position)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
+    }
+
     /// Batch GPU decode: generate tokens without streaming. Returns list of token IDs.
     /// Used by benchmark engine path and decode warmup.
     #[pyo3(signature = (first_token, start_position, max_tokens, temperature, top_k, top_p, stop_ids, presence_penalty=0.0))]
@@ -2177,7 +2381,7 @@ impl GpuDecodeStore {
     }
 
     fn gpu_decode_step_with_graph(
-        &self,
+        &mut self,
         graph: &mut GpuDecodeGraph,
         token_id: usize,
         position: usize,
@@ -2807,7 +3011,7 @@ impl GpuDecodeStore {
                         *graph.d_hidden.device_ptr(), 8);
                 }
                 let v0 = f32::from_bits((buf[0] as u32) << 16);
-                if v0.is_nan() || position < 12 {
+                if v0.is_nan() || position < 30 {
                     debug_peek_bf16(&format!("L{} post_attn_norm d_hidden", layer_idx),
                         *graph.d_hidden.device_ptr(), 4);
                 }
@@ -2839,7 +3043,7 @@ impl GpuDecodeStore {
                             *graph.d_hidden.device_ptr(), 8);
                     }
                     let v0 = f32::from_bits((buf[0] as u32) << 16);
-                    if v0.is_nan() || position < 12 {
+                    if v0.is_nan() || position < 30 {
                         debug_peek_bf16(&format!("L{} after_moe d_hidden", layer_idx),
                             *graph.d_hidden.device_ptr(), 4);
                     }
@@ -2879,6 +3083,29 @@ impl GpuDecodeStore {
                     *graph.d_hidden.device_ptr())?;
             }
             // GpuMlpConfig::None → skip (layer 0 in QCN is dense but registered separately)
+
+            // Debug: capture d_hidden after this layer
+            if self.debug_capture_layers {
+                self.device.synchronize().map_err(|e| format!("sync capture: {:?}", e))?;
+                let mut buf = vec![0u16; hs];
+                unsafe {
+                    let err = cuda_sys::lib().cuMemcpyDtoH_v2(
+                        buf.as_mut_ptr() as *mut std::ffi::c_void,
+                        *graph.d_hidden.device_ptr(),
+                        hs * 2);
+                    if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                        return Err(format!("capture D2H layer {}: {:?}", layer_idx, err));
+                    }
+                }
+                self.debug_layer_captures.push(buf);
+            }
+
+            // Debug: stop after N layers for comparison testing
+            if self.debug_stop_layer > 0 && layer_idx + 1 >= self.debug_stop_layer {
+                self.device.synchronize().map_err(|e| format!("sync debug_stop: {:?}", e))?;
+                log::warn!("DEBUG: stopped after layer {} (debug_stop_layer={})", layer_idx, self.debug_stop_layer);
+                return Ok(());
+            }
         }
 
         // ── 3. Final norm ──
@@ -3037,6 +3264,9 @@ impl GpuDecodeStore {
         let mut seen_tokens: std::collections::HashSet<usize> = std::collections::HashSet::new();
         seen_tokens.insert(first_token);
 
+        let debug_logits = std::env::var("KRASIS_DEBUG_LOGITS").ok()
+            .map(|v| v.parse::<usize>().unwrap_or(0)).unwrap_or(0);
+
         for step in 0..max_tokens {
             let pos = start_position + step;
             if let Err(e) = self.gpu_decode_step(next_token, pos) {
@@ -3046,6 +3276,20 @@ impl GpuDecodeStore {
 
             // Logits are now in graph.h_logits (host-side)
             let logits = &mut self.graph.as_mut().unwrap().h_logits;
+
+            // Debug: print top-5 logits for first N tokens
+            if debug_logits > 0 && step < debug_logits {
+                let mut indexed: Vec<(usize, f32)> = logits.iter().copied()
+                    .enumerate().take(vocab_size).collect();
+                indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                let top5: Vec<String> = indexed[..5.min(indexed.len())].iter()
+                    .map(|(idx, val)| {
+                        let tok_str = tokenizer.decode(&[*idx as u32], true).unwrap_or_default();
+                        format!("{}({:.3})\"{}\"", idx, val, tok_str.replace('\n', "\\n"))
+                    }).collect();
+                log::warn!("LOGITS step={} pos={} input_tok={} top5=[{}]",
+                    step, pos, next_token, top5.join(", "));
+            }
 
             if presence_penalty != 0.0 {
                 for &tok in &seen_tokens {
@@ -3663,6 +3907,88 @@ impl GpuDecodeStore {
     /// Flow:
     /// 1. BF16→FP32 convert d_hidden
     /// 2. FP32 GEMV: gate @ hidden → route logits
+    /// Debug: run single expert w13 GEMV, return gate_up BF16.
+    fn test_single_expert_w13_impl(
+        &self,
+        graph: &GpuDecodeGraph,
+        layer_idx: usize,
+        expert_id: usize,
+    ) -> PyResult<Vec<u16>> {
+        let moe = graph.moe_layers.get(layer_idx)
+            .and_then(|m| m.as_ref())
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(
+                format!("MoE layer {} not registered", layer_idx)))?;
+
+        let expert = &moe.experts[expert_id];
+        let hs = graph.hidden_size;
+        let intermediate = graph.intermediate_size;
+        let gs = graph.group_size;
+        let w13_n = 2 * intermediate;
+        let inv_wp = *graph.d_inv_weight_perm.device_ptr();
+        let inv_sp = *graph.d_inv_scale_perm.device_ptr();
+        let copy_stream = self.copy_stream.0;
+        let default_stream: cuda_sys::CUstream = std::ptr::null_mut();
+
+        // Check HCS first
+        let hcs_ptrs = if let Some(ref hcs) = graph.hcs {
+            hcs.get(layer_idx, expert_id).map(|entry| (
+                entry.w13_packed_ptr(), entry.w13_scales_ptr(),
+            ))
+        } else {
+            None
+        };
+
+        let (w13p, w13s) = if let Some((p, s)) = hcs_ptrs {
+            (p, s)
+        } else {
+            // DMA from system RAM to buf[0]
+            let base = *graph.d_expert_buf[0].device_ptr();
+            let w13p_off = graph.expert_buf_w13p_offset;
+            let w13s_off = graph.expert_buf_w13s_offset;
+            unsafe {
+                cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                    base + w13p_off as u64, expert.w13_packed_ptr as *const std::ffi::c_void,
+                    expert.w13_packed_bytes, copy_stream);
+                cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                    base + w13s_off as u64, expert.w13_scales_ptr as *const std::ffi::c_void,
+                    expert.w13_scales_bytes, copy_stream);
+                let mut ev: cuda_sys::CUevent = std::ptr::null_mut();
+                cuda_sys::lib().cuEventCreate(&mut ev,
+                    cuda_sys::CUevent_flags::CU_EVENT_DISABLE_TIMING as u32);
+                cuda_sys::lib().cuEventRecord(ev, copy_stream);
+                cuda_sys::lib().cuStreamWaitEvent(default_stream, ev, 0);
+                cuda_sys::lib().cuEventDestroy_v2(ev);
+            }
+            (base + w13p_off as u64, base + w13s_off as u64)
+        };
+
+        // Always use v1 kernel for debug (simpler, no K-split)
+        self.launch_marlin_gemv_raw(
+            w13p, w13s,
+            *graph.d_hidden.device_ptr(),
+            *graph.d_expert_gate_up.device_ptr(),
+            inv_wp, inv_sp,
+            hs, w13_n, gs,
+        )?;
+        self.device.synchronize()
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
+
+        // Download gate_up
+        let size = w13_n;
+        let mut out = vec![0u16; size];
+        unsafe {
+            let err = cuda_sys::lib().cuMemcpyDtoH_v2(
+                out.as_mut_ptr() as *mut std::ffi::c_void,
+                *graph.d_expert_gate_up.device_ptr(),
+                size * 2);
+            if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    format!("D2H gate_up: {:?}", err)));
+            }
+        }
+        Ok(out)
+    }
+
     /// 3. sigmoid/softmax topk → top-k indices + weights
     /// 4. D2H copy topk results
     /// 5. For each expert: DMA + Marlin GEMV + SiLU*mul + DMA + GEMV
@@ -4114,6 +4440,14 @@ impl GpuDecodeStore {
         // Track which ping-pong slot was last used for DMA (for compute/DMA overlap)
         let mut dma_expert_count = 0u32;
 
+        // Debug: log routing for layer 0
+        if layer_idx == 0 {
+            let weight_sum: f32 = (0..topk).map(|j| graph.h_topk_weights[j]).sum();
+            log::info!("DBG MoE L{} routing: weight_sum={:.4}, ids={:?}, weights={:?}",
+                layer_idx, weight_sum,
+                &graph.h_topk_ids[..topk], &graph.h_topk_weights[..topk]);
+        }
+
         for i in 0..topk {
             let eid = graph.h_topk_ids[i];
             if eid < 0 { continue; }
@@ -4254,6 +4588,20 @@ impl GpuDecodeStore {
                     )?;
                 }
 
+                // Debug: dump gate_up after w13 GEMV for layer 0, first expert
+                if layer_idx == 0 && i == 0 {
+                    device.synchronize().map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
+                    let mut gu = vec![0u16; 4];
+                    unsafe {
+                        let _ = cuda_sys::lib().cuMemcpyDtoH_v2(
+                            gu.as_mut_ptr() as *mut std::ffi::c_void,
+                            *graph.d_expert_gate_up.device_ptr(), 8);
+                    }
+                    let vals: Vec<f32> = gu.iter().map(|&b| f32::from_bits((b as u32) << 16)).collect();
+                    log::info!("DBG MoE L0 expert[{}] gate_up[0..4] = [{:.4}, {:.4}, {:.4}, {:.4}], w={:.4}",
+                        eid, vals[0], vals[1], vals[2], vals[3], weight);
+                }
+
                 // Fused: silu_mul + w2 GEMV + weighted_add (3 launches -> 1)
                 self.launch_fused_silu_accum(
                     base + w2p_off as u64, base + w2s_off as u64,
@@ -4264,6 +4612,20 @@ impl GpuDecodeStore {
                     weight,
                     k,
                 )?;
+
+                // Debug: dump moe_out after first expert for layer 0
+                if layer_idx == 0 && i == 0 {
+                    device.synchronize().map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
+                    let mut mo = vec![0u16; 4];
+                    unsafe {
+                        let _ = cuda_sys::lib().cuMemcpyDtoH_v2(
+                            mo.as_mut_ptr() as *mut std::ffi::c_void,
+                            *graph.d_moe_out.device_ptr(), 8);
+                    }
+                    let vals: Vec<f32> = mo.iter().map(|&b| f32::from_bits((b as u32) << 16)).collect();
+                    log::info!("DBG MoE L0 moe_out[0..4] after expert[{}] = [{:.6}, {:.6}, {:.6}, {:.6}]",
+                        eid, vals[0], vals[1], vals[2], vals[3]);
+                }
 
                 // Signal: compute done on this buffer (copy_stream can reuse it)
                 unsafe {
@@ -4435,7 +4797,34 @@ impl GpuDecodeStore {
                 1.0f32,
                 k,
             )?;
-            // No separate sync -- combined with Step 8 below
+            // Apply sigmoid gate if shared_expert_gate weight exists
+            // gate_logit = hidden @ gate_weight.T  (BF16 GEMV, [1,hs] x [hs,1] -> [1])
+            // moe_out *= sigmoid(gate_logit)
+            if let Some(sg_wid) = moe.shared_gate_wid {
+                let sg_w = &graph.weights[sg_wid];
+                // GEMV: gate_weight[1, hs] @ d_hidden[hs] -> d_expert_gate_up[0] (1 BF16 scalar)
+                self.gemv_bf16_internal(
+                    sg_w,
+                    *graph.d_hidden.device_ptr(),
+                    *graph.d_expert_gate_up.device_ptr(),
+                ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
+                    format!("shared gate GEMV: {}", e)))?;
+                // sigmoid_gate_inplace: d_moe_out[i] *= sigmoid(d_expert_gate_up[0])
+                unsafe {
+                    let gate_fn = self.device.get_func(MODULE_NAME, "sigmoid_gate_inplace_bf16")
+                        .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(
+                            "sigmoid_gate_inplace_bf16 not found"))?;
+                    gate_fn.launch(
+                        LaunchConfig::for_num_elems(hs as u32),
+                        (
+                            *graph.d_moe_out.device_ptr(),
+                            *graph.d_expert_gate_up.device_ptr(),
+                            hs as i32,
+                        ),
+                    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
+                        format!("sigmoid_gate_inplace_bf16: {:?}", e)))?;
+                }
+            }
         }
 
         // ── Step 8: Scale by routed_scaling_factor ──
@@ -4657,8 +5046,13 @@ impl GpuDecodeStore {
         );
 
         let mut max_expert_bytes = 0usize;
+        let first_k_dense = config.first_k_dense_replace;
 
         for moe_idx in 0..n_moe_layers {
+            // Map MoE layer index to absolute layer index
+            // (e.g. QCN has first_k_dense_replace=1, so moe_idx 0 = abs layer 1)
+            let abs_layer_idx = moe_idx + first_k_dense;
+
             // Upload gate weight as FP32 to VRAM
             let (gate_bf16, correction_bias) = engine.get_routing_weights(moe_idx)
                 .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(
@@ -4730,6 +5124,9 @@ impl GpuDecodeStore {
             // Shared expert pointers
             let shared_ptrs = if moe_idx < store.shared_experts_gpu.len() {
                 let se = &store.shared_experts_gpu[moe_idx];
+                log::info!("MoE layer {} shared expert: w13p={} w13s={} w2p={} w2s={}",
+                    abs_layer_idx, se.w13_packed.len(), se.w13_scales.len(),
+                    se.w2_packed.len(), se.w2_scales.len());
                 if se.w13_packed.is_empty() {
                     None
                 } else {
@@ -4751,7 +5148,7 @@ impl GpuDecodeStore {
             };
 
             self.register_moe_layer_data(
-                moe_idx, expert_ptrs, shared_ptrs,
+                abs_layer_idx, expert_ptrs, shared_ptrs,
                 n_experts, topk, scoring_func, norm_topk_prob,
                 config.routed_scaling_factor, gate_wid, gate_bias_ptr as usize,
                 0, // e_score_corr_ptr - TODO

@@ -3888,6 +3888,18 @@ class KrasisModel:
         if self.krasis_engine is not None:
             store.setup_from_engine(self.krasis_engine)
 
+        # Register shared_expert_gate weights (sigmoid gate for shared expert output)
+        # These are BF16 tensors loaded by Python, not in the Rust engine cache
+        self._rust_shared_gate_refs = []
+        for layer_idx, layer in enumerate(self.layers):
+            if layer.is_moe and layer.shared_expert_gate is not None:
+                sg = layer.shared_expert_gate
+                sg_wid = store.register_weight(sg.data_ptr(), sg.shape[0], sg.shape[1], 0)
+                store.set_moe_shared_gate_wid(layer_idx, sg_wid)
+                self._rust_shared_gate_refs.append(sg)  # prevent GC
+                logger.info("Registered shared_expert_gate for layer %d: wid=%d shape=%s",
+                            layer_idx, sg_wid, sg.shape)
+
         # Allocate KV cache for Rust decode (only need current context, not full capacity)
         # We use 8K as default max sequence for the Rust KV cache -- enough for typical decode
         # after prefill. The FlashInfer KV cache handles the full capacity.

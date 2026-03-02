@@ -147,10 +147,18 @@ impl ModelConfig {
             0
         };
 
-        // Shared experts (optional — Qwen3 has none)
-        let n_shared_experts = cfg.get("n_shared_experts")
+        // Shared experts: n_shared_experts, or infer from shared_expert_intermediate_size > 0
+        let mut n_shared_experts = cfg.get("n_shared_experts")
             .and_then(|v| v.as_u64())
             .unwrap_or(0) as usize;
+        if n_shared_experts == 0 {
+            let shared_inter = cfg.get("shared_expert_intermediate_size")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
+            if shared_inter > 0 {
+                n_shared_experts = 1;
+            }
+        }
 
         let routed_scaling_factor = cfg.get("routed_scaling_factor")
             .and_then(|v| v.as_f64())
@@ -1549,14 +1557,15 @@ impl WeightStore {
         // Load shared experts (always BF16, quantized to INT4/INT8 like routed)
         let shared_experts = if config.n_shared_experts > 0 {
             let shared_intermediate = config.n_shared_experts * config.moe_intermediate_size;
+            let shared_name = detect_shared_expert_name(&index.weight_map);
             log::info!(
-                "Loading shared experts: n_shared={}, intermediate_size={}",
-                config.n_shared_experts, shared_intermediate,
+                "Loading shared experts: n_shared={}, intermediate_size={}, naming='{}'",
+                config.n_shared_experts, shared_intermediate, shared_name,
             );
             let mut shared = Vec::with_capacity(num_moe_layers);
             for moe_idx in start_moe_layer..(start_moe_layer + num_moe_layers) {
                 let layer_idx = moe_idx + config.first_k_dense_replace;
-                let prefix = format!("{layers_prefix}.layers.{layer_idx}.mlp.shared_experts");
+                let prefix = format!("{layers_prefix}.layers.{layer_idx}.mlp.{shared_name}");
                 let (gate, up, down) = load_and_quantize_expert(
                     &prefix, &index.weight_map, &shards, effective_group_size, num_bits,
                 )?;
@@ -1830,12 +1839,13 @@ impl WeightStore {
         let index: SafetensorsIndex = serde_json::from_str(&index_str)
             .map_err(|e| format!("Failed to parse safetensors index: {e}"))?;
         let layers_prefix = detect_expert_prefix(&index.weight_map)?;
+        let shared_name = detect_shared_expert_name(&index.weight_map);
 
         // Collect shard names needed for shared experts
         let mut shard_names: std::collections::HashSet<String> = std::collections::HashSet::new();
         for moe_idx in 0..num_moe_layers {
             let layer_idx = moe_idx + config.first_k_dense_replace;
-            let prefix = format!("{layers_prefix}.layers.{layer_idx}.mlp.shared_experts");
+            let prefix = format!("{layers_prefix}.layers.{layer_idx}.mlp.{shared_name}");
             for proj in &["gate_proj", "up_proj", "down_proj"] {
                 let name = format!("{prefix}.{proj}.weight");
                 if let Some(shard) = index.weight_map.get(&name) {
@@ -1854,15 +1864,15 @@ impl WeightStore {
 
         let shared_intermediate = config.n_shared_experts * config.moe_intermediate_size;
         log::info!(
-            "Loading shared experts: n_shared={}, intermediate_size={}, {} layers",
-            config.n_shared_experts, shared_intermediate, num_moe_layers,
+            "Loading shared experts: n_shared={}, intermediate_size={}, {} layers, naming='{}'",
+            config.n_shared_experts, shared_intermediate, num_moe_layers, shared_name,
         );
 
         let start = std::time::Instant::now();
         let mut shared = Vec::with_capacity(num_moe_layers);
         for moe_idx in 0..num_moe_layers {
             let layer_idx = moe_idx + config.first_k_dense_replace;
-            let prefix = format!("{layers_prefix}.layers.{layer_idx}.mlp.shared_experts");
+            let prefix = format!("{layers_prefix}.layers.{layer_idx}.mlp.{shared_name}");
             let (gate, up, down) = load_and_quantize_expert(
                 &prefix, &index.weight_map, &shards, group_size, num_bits,
             )?;
@@ -2170,10 +2180,11 @@ impl WeightStore {
 
         // Stream shared experts
         if config.n_shared_experts > 0 {
-            log::info!("Streaming shared experts ({} layers)...", num_moe_layers);
+            let shared_name = detect_shared_expert_name(&index.weight_map);
+            log::info!("Streaming shared experts ({} layers, naming='{}')...", num_moe_layers, shared_name);
             for moe_idx in start_moe_layer..(start_moe_layer + num_moe_layers) {
                 let layer_idx = moe_idx + config.first_k_dense_replace;
-                let prefix = format!("{layers_prefix}.layers.{layer_idx}.mlp.shared_experts");
+                let prefix = format!("{layers_prefix}.layers.{layer_idx}.mlp.{shared_name}");
                 let (gate, up, down) = load_and_quantize_expert(
                     &prefix, &index.weight_map, &shards, effective_group_size, gpu_bits,
                 )?;
@@ -2746,10 +2757,11 @@ impl WeightStore {
 
         // Stream shared experts
         if config.n_shared_experts > 0 {
-            log::info!("Streaming shared experts for CPU cache ({} layers)...", num_moe_layers);
+            let shared_name = detect_shared_expert_name(&index.weight_map);
+            log::info!("Streaming shared experts for CPU cache ({} layers, naming='{}')...", num_moe_layers, shared_name);
             for moe_idx in start_moe_layer..(start_moe_layer + num_moe_layers) {
                 let layer_idx = moe_idx + config.first_k_dense_replace;
-                let prefix = format!("{layers_prefix}.layers.{layer_idx}.mlp.shared_experts");
+                let prefix = format!("{layers_prefix}.layers.{layer_idx}.mlp.{shared_name}");
                 let (gate, up, down) = load_and_quantize_expert(
                     &prefix, &index.weight_map, &shards, effective_group_size, cpu_num_bits,
                 )?;
@@ -4664,6 +4676,20 @@ fn detect_expert_prefix(weight_map: &HashMap<String, String>) -> Result<String, 
         }
     }
     Err("Could not detect expert weight prefix from safetensors index".to_string())
+}
+
+/// Detect shared expert naming: "shared_experts" (DeepSeek) vs "shared_expert" (QCN).
+/// Returns the substring to use in weight name construction.
+fn detect_shared_expert_name(weight_map: &HashMap<String, String>) -> &'static str {
+    for key in weight_map.keys() {
+        if key.contains(".mlp.shared_experts.") {
+            return "shared_experts";
+        }
+        if key.contains(".mlp.shared_expert.") {
+            return "shared_expert";
+        }
+    }
+    "shared_experts" // default to plural (DeepSeek convention)
 }
 
 /// Detect whether the model uses BF16 weights or pre-quantized compressed-tensors INT4.

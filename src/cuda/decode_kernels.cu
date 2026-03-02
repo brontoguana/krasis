@@ -251,6 +251,18 @@ extern "C" __global__ void softmax_topk(
         topk_weights[t] = best_val;
         scores[best_idx] = -1e30f;
     }
+
+    // Normalize top-K weights to sum to 1.0 (norm_topk_prob)
+    float topk_sum = 0.0f;
+    for (int t = 0; t < topk; t++) {
+        topk_sum += topk_weights[t];
+    }
+    if (topk_sum > 0.0f) {
+        float inv_sum = 1.0f / topk_sum;
+        for (int t = 0; t < topk; t++) {
+            topk_weights[t] *= inv_sum;
+        }
+    }
 }
 
 // ── Vector Operations ──────────────────────────────────────────────────
@@ -305,6 +317,21 @@ extern "C" __global__ void sigmoid_gate_bf16(
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < size) {
         output[i] = f32_to_bf16(bf16_to_f32(input[i]) * gate_value);
+    }
+}
+
+// In-place sigmoid gate using BF16 gate logit from device memory (e.g. cuBLAS GEMV output).
+// Reads one BF16 value from gate_logit_ptr, applies sigmoid, scales output in-place.
+// Used after shared expert GEMV when gate_weight is registered as a BF16 weight.
+extern "C" __global__ void sigmoid_gate_inplace_bf16(
+    __nv_bfloat16* __restrict__ data,              // [size], modified in-place
+    const __nv_bfloat16* __restrict__ gate_logit_ptr, // [1], single BF16 on device
+    int size
+) {
+    float gate_value = 1.0f / (1.0f + expf(-bf16_to_f32(gate_logit_ptr[0])));
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < size) {
+        data[i] = f32_to_bf16(bf16_to_f32(data[i]) * gate_value);
     }
 }
 

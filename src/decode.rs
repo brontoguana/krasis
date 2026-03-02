@@ -5237,9 +5237,17 @@ pub fn bench_decode_synthetic(
     let num_experts = cfg.get("num_experts").and_then(|v| v.as_u64()).unwrap_or(512) as usize;
     let topk = cfg.get("num_experts_per_tok").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
     let moe_intermediate = cfg.get("moe_intermediate_size").and_then(|v| v.as_u64()).unwrap_or(512) as usize;
-    let n_shared_experts = cfg.get("n_shared_experts").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
+    let mut n_shared_experts = cfg.get("n_shared_experts").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
     let shared_intermediate = cfg.get("shared_expert_intermediate_size").and_then(|v| v.as_u64())
-        .unwrap_or(moe_intermediate as u64 * n_shared_experts as u64) as usize;
+        .unwrap_or(0) as usize;
+    if n_shared_experts == 0 && shared_intermediate > 0 {
+        n_shared_experts = 1; // infer from shared_expert_intermediate_size
+    }
+    let shared_intermediate = if shared_intermediate > 0 {
+        shared_intermediate
+    } else {
+        moe_intermediate * n_shared_experts
+    };
     let norm_topk_prob = cfg.get("norm_topk_prob").and_then(|v| v.as_bool()).unwrap_or(true);
 
     // Detect gated attention — check rope_parameters fallback (Qwen3.5 nests these)
