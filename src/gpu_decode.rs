@@ -3022,13 +3022,25 @@ impl GpuDecodeStore {
                     }
 
                     // ── GQA: Attention compute ──
-                    // 2-pass kernel: O(1) shared memory, works for any seq length.
+                    // Hybrid kernel: uses shared memory for scores when seq_len
+                    // fits in 48KB (up to ~11K tokens), falls back to 2-pass
+                    // recomputation for longer sequences.
                     {
                         let threads = 256u32;
+                        let seq_len = (position + 1) as u32;
+                        // 48KB default shared memory limit, minus 128 bytes for
+                        // warp reduction scratch (32 floats)
+                        let smem_threshold = (48 * 1024 - 128) / 4; // ~12256 positions
+                        let use_smem = seq_len <= smem_threshold;
+                        let shared_mem_bytes = if use_smem {
+                            (seq_len as u32) * 4 + 128 // scores + warp scratch
+                        } else {
+                            128 // just warp scratch for 2-pass fallback
+                        };
                         let cfg = LaunchConfig {
                             grid_dim: (nh as u32, 1, 1),
                             block_dim: (threads, 1, 1),
-                            shared_mem_bytes: 0,
+                            shared_mem_bytes,
                         };
                         unsafe {
                             let attn_fn = self.device.get_func(MODULE_NAME, "gqa_attention")
@@ -3042,8 +3054,9 @@ impl GpuDecodeStore {
                                 nh as i32,
                                 nkv as i32,
                                 hd as i32,
-                                (position + 1) as i32,
+                                seq_len as i32,
                                 graph.kv_max_seq as i32,
+                                if use_smem { 1i32 } else { 0i32 },
                             )).map_err(|e| format!("gqa_attention[{}]: {:?}", layer_idx, e))?;
                         }
                     }

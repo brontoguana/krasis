@@ -1,5 +1,5 @@
 ================================================================
-Krasis Benchmark — 2026-03-02 02:07:54
+Krasis Benchmark — 2026-03-03 15:19:41
 ================================================================
 Model:            Qwen3-Coder-Next
 Architecture:     qwen3_next, 48 layers, 512 experts, top-10, 12 GQA + 36 linear
@@ -7,8 +7,8 @@ PP Partition:     [48] (1 GPUs)
 
 Hardware:
   CPU:            AMD EPYC 7742 64-Core Processor (64 cores)
-  RAM:            1007 GB total, 42.0 GB used by process
-  GPU 0:          NVIDIA GeForce RTX 5090 (32607 MB), 24291 MB allocated
+  RAM:            1007 GB total, 79.9 GB used by process
+  GPU 0:          NVIDIA GeForce RTX 5090 (32607 MB), 22932 MB allocated
   GPU 1:          NVIDIA RTX 2000 Ada Generation (16380 MB), 0 MB allocated
 
 Quantization:
@@ -25,17 +25,20 @@ Strategy:
   Prefill threshold: 1
   Mode:           gpu_decode (hcs + layer_grouped(2))
 
-Prefill (3 runs at different lengths):
-  Run 1:  2376.2 tok/s, TTFT=8.60s (20,434 tokens)
-  Run 2:  3563.4 tok/s, TTFT=9.86s (35,139 tokens)
-  Run 3:  3543.6 tok/s, TTFT=14.07s (49,863 tokens)
-  Best:    3563.4 tok/s, TTFT=9.86s (35,139 tokens)
+Prefill (6 runs at different lengths):
+  Run 1:  692.2 tok/s, TTFT=1.59s (1,101 tokens)
+  Run 2:  2330.9 tok/s, TTFT=2.32s (5,407 tokens)
+  Run 3:  2991.6 tok/s, TTFT=3.33s (9,961 tokens)
+  Run 4:  3360.0 tok/s, TTFT=6.04s (20,309 tokens)
+  Run 5:  3588.1 tok/s, TTFT=9.79s (35,122 tokens)
+  Run 6:  3482.4 tok/s, TTFT=14.48s (50,418 tokens)
+  Best:    3588.1 tok/s, TTFT=9.79s (35,122 tokens)
 
 Decode (64 tokens, 3 runs, different prompts):
-  Run 1:  5.68 tok/s (176.0ms/tok)
-  Run 2:  6.29 tok/s (159.1ms/tok)
-  Run 3:  6.95 tok/s (143.8ms/tok)
-  Average: 6.31 tok/s (159.6ms/tok)
+  Run 1:  33.09 tok/s (30.2ms/tok)
+  Run 2:  33.53 tok/s (29.8ms/tok)
+  Run 3:  33.21 tok/s (30.1ms/tok)
+  Average: 33.28 tok/s (30.0ms/tok)
 
 Verification:
   Prefill prompt: Summarise the following in one paragraph: THE COUNT OF MONTE CRISTO
@@ -51,10 +54,14 @@ Contents
  VOLUME ONE
 Chapter 1. Marseilles—The Arrival
 Chapter 2. Father and Son
-Chapter 3. The Cat... [77314 chars total]
+Chapter 3. The Cat... [3252 chars total]
   Decode prompt:  Explain how public key cryptography works, including the RSA algorithm and why it is considered secure.
   Generated output (64 tokens):
-    Public key cryptography (also known as * public key cryptography?) – is a fundamental concept in modern cryptography where two * different keys (one public, one private) are used— one key is public, the other is kept secret. In symmetric key cryptography, both parties share the same key— for encryption and decryption.
+    Public key cryptography (also called **asymmetric cryptography**) is a cryptographic system that uses a pair of mathematically linked keys—**a public key** and **a private key**—to enable secure communication without requiring the parties to share a secret key beforehand.
+    
+    ### Core Concepts
+    
+    | Key Type | Who Has It
 ================================================================
 
 ────────────────────────────────────────────────────────────────
@@ -62,12 +69,15 @@ Chapter 3. The Cat... [77314 chars total]
 ────────────────────────────────────────────────────────────────
                                          Engine        Network   Overhead
   ────────────────────────────── ────────────── ────────────── ──────────
-  Prefill (best tok/s)                 3563.4         3525.1       -1.1%
-  TTFT (s)                               9.86          14.18     +4320ms
-    20,434 tokens                      2376.2         3159.8      +33.0%
-    35,139 tokens                      3563.4         3480.0       -2.3%
-    49,863 tokens                      3543.6         3525.1       -0.5%
+  Prefill (best tok/s)                 3588.1         3583.4       -0.1%
+  TTFT (s)                               9.79           9.77       -20ms
+    1,101 tokens                        692.2          624.2       -9.8%
+    5,407 tokens                       2330.9         2171.6       -6.8%
+    9,961 tokens                       2991.6         3041.8       +1.7%
+    20,309 tokens                      3360.0         3396.0       +1.1%
+    35,122 tokens                      3588.1         3583.4       -0.1%
+    50,418 tokens                      3482.4         3425.1       -1.6%
 
-  Decode (avg tok/s)                     6.31           0.00     -100.0%
-  Decode (ms/tok)                       159.6            0.0    -159.6ms
+  Decode (avg tok/s)                    33.28          33.46       +0.5%
+  Decode (ms/tok)                        30.0           29.9      -0.1ms
 ────────────────────────────────────────────────────────────────

@@ -665,11 +665,12 @@ class KrasisBenchmark:
         max_ctx = self.model.get_max_context_tokens()
         model_name = os.path.basename(self.model.cfg.model_path)
 
-        gpu_decode = getattr(self.model, 'decode_mode', 'cpu') == 'gpu'
+        gpu_store = getattr(self.model, '_gpu_decode_store', None)
+        gpu_store_addr = gpu_store.gpu_store_addr() if gpu_store is not None else 0
         server = RustServer(
             self.model, host, port, model_name, tokenizer_path, max_ctx,
             False,  # enable_thinking
-            gpu_decode,
+            gpu_store_addr,
         )
 
         t = threading.Thread(target=server.run, daemon=True)
