@@ -1585,6 +1585,12 @@ class KrasisModel:
         for dev_str, manager in self.gpu_prefill_managers.items():
             manager.prepare_all_layers()
 
+        # Build per-layer pinned buffers for zero-copy prefill DMA.
+        # Eliminates per-request CPU memcpy during layer streaming.
+        for dev_str, manager in self.gpu_prefill_managers.items():
+            logger.info("Building prefill pinned buffers for %s...", dev_str)
+            manager.build_prefill_pinned_bufs()
+
         # Wire manager to MoE layers (each layer gets its own device's manager)
         for layer in self.layers:
             if layer.is_moe:

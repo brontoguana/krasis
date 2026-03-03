@@ -482,6 +482,13 @@ class GpuPrefillManager:
         self._dma_stream: Optional[torch.cuda.Stream] = None
         self._dma_events: list = [None, None]  # CUDA events for buf A and B
 
+        # Pre-built per-layer pinned buffers for zero-copy prefill DMA.
+        # Built once at startup; eliminates per-request CPU memcpy entirely.
+        # Dict: moe_layer_idx → {w13p, w13s, w2p, w2s} as pinned torch tensors
+        self._prefill_pinned: dict[int, dict[str, torch.Tensor]] = {}
+        self._prefill_pinned_shared: dict[int, dict[str, torch.Tensor]] = {}
+        self._prefill_pinned_built: bool = False
+
         # Hot-cached-static state: static GPU buffers + CPU cold in parallel
         self._hcs_buffers: dict[int, dict[str, torch.Tensor]] = {}  # layer → {w13, w13_scale, w2, w2_scale}
         self._hcs_lookup: dict[int, torch.Tensor] = {}  # layer → [num_experts] int32 → local slot or -1
@@ -1263,6 +1270,81 @@ class GpuPrefillManager:
             self._dma_shared_shape_w2s = (1, shared_N // gs, K_w2)
             self._dma_shared_initialized = True
 
+    def build_prefill_pinned_bufs(self):
+        """Build per-layer pinned buffers for zero-copy prefill DMA.
+
+        Allocates one set of pinned buffers per MoE layer and fills them
+        from the Rust expert store. Called once at startup. Eliminates the
+        per-request CPU memcpy in preload_layer_group() — prefill just
+        kicks async DMA directly from these pre-built buffers.
+
+        Total pinned RAM cost: num_moe_layers * per_layer_bytes
+        (e.g. 48 * 792 MB = 38 GB for QCN). Acceptable on high-RAM systems.
+        """
+        if self._prefill_pinned_built:
+            return
+        if self._engine is None:
+            return
+
+        # Ensure DMA buffer sizes/shapes are computed
+        self._init_dma_buffers()
+
+        t0 = time.perf_counter()
+        total_bytes = 0
+
+        for moe_idx in range(self._num_moe_layers):
+            buf = {
+                "w13p": torch.empty(self._dma_size_w13p, dtype=torch.uint8, pin_memory=True),
+                "w13s": torch.empty(self._dma_size_w13s, dtype=torch.uint8, pin_memory=True),
+                "w2p": torch.empty(self._dma_size_w2p, dtype=torch.uint8, pin_memory=True),
+                "w2s": torch.empty(self._dma_size_w2s, dtype=torch.uint8, pin_memory=True),
+            }
+            self._engine.write_experts_range_into_pinned(
+                moe_idx,
+                self.expert_start,
+                self.expert_end,
+                buf["w13p"].data_ptr(), self._dma_size_w13p,
+                buf["w13s"].data_ptr(), self._dma_size_w13s,
+                buf["w2p"].data_ptr(), self._dma_size_w2p,
+                buf["w2s"].data_ptr(), self._dma_size_w2s,
+            )
+            self._prefill_pinned[moe_idx] = buf
+            total_bytes += self._dma_size_w13p + self._dma_size_w13s + self._dma_size_w2p + self._dma_size_w2s
+
+            if (moe_idx + 1) % 10 == 0 or moe_idx == self._num_moe_layers - 1:
+                logger.info(
+                    "  Prefill pinned bufs: %d/%d layers (%.1f GB)",
+                    moe_idx + 1, self._num_moe_layers, total_bytes / 1e9,
+                )
+
+        # Also build shared expert pinned buffers
+        if self.n_shared_experts > 0 and self._dma_shared_initialized:
+            for moe_idx in range(self._num_moe_layers):
+                shared_buf = {
+                    "w13p": torch.empty(self._dma_shared_size_w13p, dtype=torch.uint8, pin_memory=True),
+                    "w13s": torch.empty(self._dma_shared_size_w13s, dtype=torch.uint8, pin_memory=True),
+                    "w2p": torch.empty(self._dma_shared_size_w2p, dtype=torch.uint8, pin_memory=True),
+                    "w2s": torch.empty(self._dma_shared_size_w2s, dtype=torch.uint8, pin_memory=True),
+                }
+                self._engine.write_shared_expert_into_pinned(
+                    moe_idx,
+                    shared_buf["w13p"].data_ptr(), self._dma_shared_size_w13p,
+                    shared_buf["w13s"].data_ptr(), self._dma_shared_size_w13s,
+                    shared_buf["w2p"].data_ptr(), self._dma_shared_size_w2p,
+                    shared_buf["w2s"].data_ptr(), self._dma_shared_size_w2s,
+                )
+                self._prefill_pinned_shared[moe_idx] = shared_buf
+                total_bytes += (self._dma_shared_size_w13p + self._dma_shared_size_w13s
+                                + self._dma_shared_size_w2p + self._dma_shared_size_w2s)
+
+        elapsed = time.perf_counter() - t0
+        self._prefill_pinned_built = True
+        logger.info(
+            "Prefill pinned buffers built: %d layers, %.1f GB pinned RAM, %.1fs (%.1f GB/s)",
+            self._num_moe_layers, total_bytes / 1e9, elapsed,
+            total_bytes / 1e9 / max(elapsed, 0.001),
+        )
+
     def preload_layer_group(self, moe_layer_indices):
         """Pre-load expert weights for a group of MoE layers into GPU VRAM.
 
@@ -1299,29 +1381,31 @@ class GpuPrefillManager:
         t_sync = 0.0
         t_shared = 0.0
 
-        for i, moe_idx in enumerate(moe_layer_indices):
-            buf_idx = i % 2  # ping-pong: 0, 1, 0, 1, ...
-            buf = self._dma_bufs[buf_idx]
+        use_prebuilt = self._prefill_pinned_built
 
+        for i, moe_idx in enumerate(moe_layer_indices):
             if detailed:
                 t0 = time.perf_counter()
 
-            # Wait for all GPU work (including previous DMA from this buffer)
-            # before CPU overwrites the pinned buffer. Also flushes PyTorch's
-            # CUDA memory allocator so freed blocks are properly reclaimed.
-            torch.cuda.synchronize(self.device)
-
-            # Pinned path: Rust writes into pinned tensor via raw pointer,
-            # releases GIL during memcpy so other threads can run in parallel.
-            self._engine.write_experts_range_into_pinned(
-                moe_idx,
-                self.expert_start,
-                self.expert_end,
-                buf["w13p"].data_ptr(), self._dma_size_w13p,
-                buf["w13s"].data_ptr(), self._dma_size_w13s,
-                buf["w2p"].data_ptr(), self._dma_size_w2p,
-                buf["w2s"].data_ptr(), self._dma_size_w2s,
-            )
+            if use_prebuilt:
+                # Zero-copy path: data already in pinned buffers, just DMA.
+                # Still need sync to flush CUDA allocator for freed blocks.
+                torch.cuda.synchronize(self.device)
+                buf = self._prefill_pinned[moe_idx]
+            else:
+                # Legacy path: CPU memcpy from Rust Vecs into ping-pong pinned buffers.
+                buf_idx = i % 2
+                buf = self._dma_bufs[buf_idx]
+                torch.cuda.synchronize(self.device)
+                self._engine.write_experts_range_into_pinned(
+                    moe_idx,
+                    self.expert_start,
+                    self.expert_end,
+                    buf["w13p"].data_ptr(), self._dma_size_w13p,
+                    buf["w13s"].data_ptr(), self._dma_size_w13s,
+                    buf["w2p"].data_ptr(), self._dma_size_w2p,
+                    buf["w2s"].data_ptr(), self._dma_size_w2s,
+                )
 
             if detailed:
                 t1 = time.perf_counter()
@@ -1338,14 +1422,11 @@ class GpuPrefillManager:
                 t_frombuf += t2 - t1
 
             # PCIe DMA on default stream: non_blocking returns immediately,
-            # DMA proceeds asynchronously while CPU writes next layer into other buffer.
+            # DMA proceeds asynchronously while CPU prepares next layer.
             w13_packed = w13_packed.to(self.device, non_blocking=True)
             w13_scale = w13_scale.to(self.device, non_blocking=True)
             w2_packed = w2_packed.to(self.device, non_blocking=True)
             w2_scale = w2_scale.to(self.device, non_blocking=True)
-
-            # No event recording needed — torch.cuda.synchronize() at the
-            # top of the next iteration ensures all DMA is complete.
 
             if detailed:
                 t3 = time.perf_counter()
@@ -1364,26 +1445,16 @@ class GpuPrefillManager:
                 "w2_scale": w2_scale,
             }
 
-        # Pre-load shared experts (double-buffered)
+        # Pre-load shared experts
         if self.n_shared_experts > 0:
             if detailed:
                 t_sh0 = time.perf_counter()
 
             for i, moe_idx in enumerate(moe_layer_indices):
-                buf_idx = i % 2
-                shared_buf = self._dma_shared_bufs[buf_idx]
-
-                if shared_buf is not None:
-                    # Wait for all GPU work before overwriting shared pinned buffer
+                if use_prebuilt and moe_idx in self._prefill_pinned_shared:
+                    # Zero-copy path for shared experts
                     torch.cuda.synchronize(self.device)
-
-                    self._engine.write_shared_expert_into_pinned(
-                        moe_idx,
-                        shared_buf["w13p"].data_ptr(), self._dma_shared_size_w13p,
-                        shared_buf["w13s"].data_ptr(), self._dma_shared_size_w13s,
-                        shared_buf["w2p"].data_ptr(), self._dma_shared_size_w2p,
-                        shared_buf["w2s"].data_ptr(), self._dma_shared_size_w2s,
-                    )
+                    shared_buf = self._prefill_pinned_shared[moe_idx]
                     w13_packed = shared_buf["w13p"].view(torch.int32).reshape(
                         self._dma_shared_shape_w13p).to(self.device, non_blocking=True)
                     w13_scale = shared_buf["w13s"].view(torch.bfloat16).reshape(
@@ -1393,22 +1464,42 @@ class GpuPrefillManager:
                     w2_scale = shared_buf["w2s"].view(torch.bfloat16).reshape(
                         self._dma_shared_shape_w2s).to(self.device, non_blocking=True)
                 else:
-                    # Fallback: allocating path for shared experts
-                    w13p_bytes, w13s_bytes, w2p_bytes, w2s_bytes = (
-                        self._engine.get_shared_expert_weights(moe_idx)
-                    )
-                    w13_packed = torch.frombuffer(
-                        bytearray(w13p_bytes), dtype=torch.int32
-                    ).reshape(self._dma_shared_shape_w13p).to(self.device, non_blocking=True)
-                    w13_scale = torch.frombuffer(
-                        bytearray(w13s_bytes), dtype=torch.bfloat16
-                    ).reshape(self._dma_shared_shape_w13s).to(self.device, non_blocking=True)
-                    w2_packed = torch.frombuffer(
-                        bytearray(w2p_bytes), dtype=torch.int32
-                    ).reshape(self._dma_shared_shape_w2p).to(self.device, non_blocking=True)
-                    w2_scale = torch.frombuffer(
-                        bytearray(w2s_bytes), dtype=torch.bfloat16
-                    ).reshape(self._dma_shared_shape_w2s).to(self.device, non_blocking=True)
+                    buf_idx = i % 2
+                    shared_buf = self._dma_shared_bufs[buf_idx]
+
+                    if shared_buf is not None:
+                        torch.cuda.synchronize(self.device)
+                        self._engine.write_shared_expert_into_pinned(
+                            moe_idx,
+                            shared_buf["w13p"].data_ptr(), self._dma_shared_size_w13p,
+                            shared_buf["w13s"].data_ptr(), self._dma_shared_size_w13s,
+                            shared_buf["w2p"].data_ptr(), self._dma_shared_size_w2p,
+                            shared_buf["w2s"].data_ptr(), self._dma_shared_size_w2s,
+                        )
+                        w13_packed = shared_buf["w13p"].view(torch.int32).reshape(
+                            self._dma_shared_shape_w13p).to(self.device, non_blocking=True)
+                        w13_scale = shared_buf["w13s"].view(torch.bfloat16).reshape(
+                            self._dma_shared_shape_w13s).to(self.device, non_blocking=True)
+                        w2_packed = shared_buf["w2p"].view(torch.int32).reshape(
+                            self._dma_shared_shape_w2p).to(self.device, non_blocking=True)
+                        w2_scale = shared_buf["w2s"].view(torch.bfloat16).reshape(
+                            self._dma_shared_shape_w2s).to(self.device, non_blocking=True)
+                    else:
+                        w13p_bytes, w13s_bytes, w2p_bytes, w2s_bytes = (
+                            self._engine.get_shared_expert_weights(moe_idx)
+                        )
+                        w13_packed = torch.frombuffer(
+                            bytearray(w13p_bytes), dtype=torch.int32
+                        ).reshape(self._dma_shared_shape_w13p).to(self.device, non_blocking=True)
+                        w13_scale = torch.frombuffer(
+                            bytearray(w13s_bytes), dtype=torch.bfloat16
+                        ).reshape(self._dma_shared_shape_w13s).to(self.device, non_blocking=True)
+                        w2_packed = torch.frombuffer(
+                            bytearray(w2p_bytes), dtype=torch.int32
+                        ).reshape(self._dma_shared_shape_w2p).to(self.device, non_blocking=True)
+                        w2_scale = torch.frombuffer(
+                            bytearray(w2s_bytes), dtype=torch.bfloat16
+                        ).reshape(self._dma_shared_shape_w2s).to(self.device, non_blocking=True)
 
                 shared_mb = (
                     w13_packed.nbytes + w13_scale.nbytes
@@ -1508,24 +1599,29 @@ class GpuPrefillManager:
         self._prefetch_persistent = {}
         self._prefetch_persistent_shared = {}
 
+        use_prebuilt = self._prefill_pinned_built
+
         for i, moe_idx in enumerate(moe_layer_indices):
-            buf_idx = i % 2
-            buf = self._dma_bufs[buf_idx]
+            if use_prebuilt:
+                buf = self._prefill_pinned[moe_idx]
+            else:
+                buf_idx = i % 2
+                buf = self._dma_bufs[buf_idx]
 
-            # Wait for this buffer's previous DMA before CPU overwrites it.
-            if self._dma_events[buf_idx] is not None:
-                self._dma_events[buf_idx].synchronize()
-                self._dma_events[buf_idx] = None
+                # Wait for this buffer's previous DMA before CPU overwrites it.
+                if self._dma_events[buf_idx] is not None:
+                    self._dma_events[buf_idx].synchronize()
+                    self._dma_events[buf_idx] = None
 
-            self._engine.write_experts_range_into_pinned(
-                moe_idx,
-                self.expert_start,
-                self.expert_end,
-                buf["w13p"].data_ptr(), self._dma_size_w13p,
-                buf["w13s"].data_ptr(), self._dma_size_w13s,
-                buf["w2p"].data_ptr(), self._dma_size_w2p,
-                buf["w2s"].data_ptr(), self._dma_size_w2s,
-            )
+                self._engine.write_experts_range_into_pinned(
+                    moe_idx,
+                    self.expert_start,
+                    self.expert_end,
+                    buf["w13p"].data_ptr(), self._dma_size_w13p,
+                    buf["w13s"].data_ptr(), self._dma_size_w13s,
+                    buf["w2p"].data_ptr(), self._dma_size_w2p,
+                    buf["w2s"].data_ptr(), self._dma_size_w2s,
+                )
 
             # View pinned tensors as typed+shaped (zero-copy, still pinned)
             w13_packed = buf["w13p"].view(torch.int32).reshape(self._dma_shape_w13p)
@@ -1546,7 +1642,8 @@ class GpuPrefillManager:
                 w2_scale = w2_scale.to(self.device, non_blocking=True)
 
             # Record event: tracks when THIS buffer's DMA completes.
-            self._dma_events[buf_idx] = stream.record_event()
+            if not use_prebuilt:
+                self._dma_events[buf_idx] = stream.record_event()
 
             self._prefetch_persistent[moe_idx] = {
                 "w13_packed": w13_packed,
@@ -1555,29 +1652,14 @@ class GpuPrefillManager:
                 "w2_scale": w2_scale,
             }
 
-        # Shared experts (double-buffered)
+        # Shared experts
         if self.n_shared_experts > 0:
             if not hasattr(self, '_dma_shared_events'):
                 self._dma_shared_events = {}
 
             for i, moe_idx in enumerate(moe_layer_indices):
-                buf_idx = i % 2
-                shared_buf = self._dma_shared_bufs[buf_idx]
-
-                if shared_buf is not None:
-                    # Wait for this shared buffer's previous DMA event
-                    shared_evt_key = f"shared_{buf_idx}"
-                    evt = self._dma_shared_events.get(shared_evt_key)
-                    if evt is not None:
-                        evt.synchronize()
-
-                    self._engine.write_shared_expert_into_pinned(
-                        moe_idx,
-                        shared_buf["w13p"].data_ptr(), self._dma_shared_size_w13p,
-                        shared_buf["w13s"].data_ptr(), self._dma_shared_size_w13s,
-                        shared_buf["w2p"].data_ptr(), self._dma_shared_size_w2p,
-                        shared_buf["w2s"].data_ptr(), self._dma_shared_size_w2s,
-                    )
+                if use_prebuilt and moe_idx in self._prefill_pinned_shared:
+                    shared_buf = self._prefill_pinned_shared[moe_idx]
                     with torch.cuda.stream(stream):
                         w13_packed = shared_buf["w13p"].view(torch.int32).reshape(
                             self._dma_shared_shape_w13p).to(self.device, non_blocking=True)
@@ -1587,25 +1669,50 @@ class GpuPrefillManager:
                             self._dma_shared_shape_w2p).to(self.device, non_blocking=True)
                         w2_scale = shared_buf["w2s"].view(torch.bfloat16).reshape(
                             self._dma_shared_shape_w2s).to(self.device, non_blocking=True)
-                    self._dma_shared_events[shared_evt_key] = stream.record_event()
                 else:
-                    # Fallback: allocating path for shared experts
-                    w13p_bytes, w13s_bytes, w2p_bytes, w2s_bytes = (
-                        self._engine.get_shared_expert_weights(moe_idx)
-                    )
-                    with torch.cuda.stream(stream):
-                        w13_packed = torch.frombuffer(
-                            bytearray(w13p_bytes), dtype=torch.int32
-                        ).reshape(self._dma_shared_shape_w13p).to(self.device, non_blocking=True)
-                        w13_scale = torch.frombuffer(
-                            bytearray(w13s_bytes), dtype=torch.bfloat16
-                        ).reshape(self._dma_shared_shape_w13s).to(self.device, non_blocking=True)
-                        w2_packed = torch.frombuffer(
-                            bytearray(w2p_bytes), dtype=torch.int32
-                        ).reshape(self._dma_shared_shape_w2p).to(self.device, non_blocking=True)
-                        w2_scale = torch.frombuffer(
-                            bytearray(w2s_bytes), dtype=torch.bfloat16
-                        ).reshape(self._dma_shared_shape_w2s).to(self.device, non_blocking=True)
+                    buf_idx = i % 2
+                    shared_buf = self._dma_shared_bufs[buf_idx]
+
+                    if shared_buf is not None:
+                        shared_evt_key = f"shared_{buf_idx}"
+                        evt = self._dma_shared_events.get(shared_evt_key)
+                        if evt is not None:
+                            evt.synchronize()
+
+                        self._engine.write_shared_expert_into_pinned(
+                            moe_idx,
+                            shared_buf["w13p"].data_ptr(), self._dma_shared_size_w13p,
+                            shared_buf["w13s"].data_ptr(), self._dma_shared_size_w13s,
+                            shared_buf["w2p"].data_ptr(), self._dma_shared_size_w2p,
+                            shared_buf["w2s"].data_ptr(), self._dma_shared_size_w2s,
+                        )
+                        with torch.cuda.stream(stream):
+                            w13_packed = shared_buf["w13p"].view(torch.int32).reshape(
+                                self._dma_shared_shape_w13p).to(self.device, non_blocking=True)
+                            w13_scale = shared_buf["w13s"].view(torch.bfloat16).reshape(
+                                self._dma_shared_shape_w13s).to(self.device, non_blocking=True)
+                            w2_packed = shared_buf["w2p"].view(torch.int32).reshape(
+                                self._dma_shared_shape_w2p).to(self.device, non_blocking=True)
+                            w2_scale = shared_buf["w2s"].view(torch.bfloat16).reshape(
+                                self._dma_shared_shape_w2s).to(self.device, non_blocking=True)
+                        self._dma_shared_events[shared_evt_key] = stream.record_event()
+                    else:
+                        w13p_bytes, w13s_bytes, w2p_bytes, w2s_bytes = (
+                            self._engine.get_shared_expert_weights(moe_idx)
+                        )
+                        with torch.cuda.stream(stream):
+                            w13_packed = torch.frombuffer(
+                                bytearray(w13p_bytes), dtype=torch.int32
+                            ).reshape(self._dma_shared_shape_w13p).to(self.device, non_blocking=True)
+                            w13_scale = torch.frombuffer(
+                                bytearray(w13s_bytes), dtype=torch.bfloat16
+                            ).reshape(self._dma_shared_shape_w13s).to(self.device, non_blocking=True)
+                            w2_packed = torch.frombuffer(
+                                bytearray(w2p_bytes), dtype=torch.int32
+                            ).reshape(self._dma_shared_shape_w2p).to(self.device, non_blocking=True)
+                            w2_scale = torch.frombuffer(
+                                bytearray(w2s_bytes), dtype=torch.bfloat16
+                            ).reshape(self._dma_shared_shape_w2s).to(self.device, non_blocking=True)
 
                 self._prefetch_persistent_shared[moe_idx] = {
                     "w13_packed": w13_packed,

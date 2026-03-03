@@ -2627,8 +2627,12 @@ impl KrasisEngine {
         }).collect();
 
         py.allow_threads(|| {
-            unsafe {
-                for (i, (w13p_src, w13s_src, w2p_src, w2s_src)) in expert_srcs.iter().enumerate() {
+            use rayon::prelude::*;
+            // Parallel memcpy: each expert writes to a unique offset in each buffer,
+            // so there are no data races. Rayon spreads across NUMA nodes for
+            // aggregate memory bandwidth >> single-core (~40 GB/s vs ~9 GB/s).
+            expert_srcs.par_iter().enumerate().for_each(|(i, (w13p_src, w13s_src, w2p_src, w2s_src))| {
+                unsafe {
                     std::ptr::copy_nonoverlapping(
                         *w13p_src as *const u8, (w13p_ptr as *mut u8).add(i * w13p_per), w13p_per);
                     std::ptr::copy_nonoverlapping(
@@ -2638,7 +2642,7 @@ impl KrasisEngine {
                     std::ptr::copy_nonoverlapping(
                         *w2s_src as *const u8, (w2s_ptr as *mut u8).add(i * w2s_per), w2s_per);
                 }
-            }
+            });
         });
 
         Ok(())
