@@ -913,7 +913,10 @@ extern "C" __global__ void kv_cache_write(
 }
 
 // Single-query GQA attention: scores over all cached K, softmax, weighted V sum.
-// One block per Q head. Uses shared memory for attention scores.
+// One block per Q head. Two-pass approach with O(1) shared memory:
+//   Pass 1: Online softmax over K (single pass for max + sum_exp)
+//   Pass 2: Weighted V sum with recomputed weights
+// Works for any sequence length without shared memory limits.
 // KV cache is FP8 E4M3 — dequantized to FP32 on the fly.
 extern "C" __global__ void gqa_attention(
     float* __restrict__ output,          // [num_q_heads * head_dim]
@@ -938,10 +941,15 @@ extern "C" __global__ void gqa_attention(
     int kv_stride = num_kv_heads * head_dim;
 
     const float* q_head = q + qh * head_dim;
+    __shared__ float warp_vals[32];
+    __shared__ float warp_sums[32];
+    int warp_id = tid / warpSize;
+    int lane_id = tid % warpSize;
+    int num_warps = (num_threads + warpSize - 1) / warpSize;
 
-    // Step 1: Compute attention scores (Q @ K^T) for all positions
-    extern __shared__ float smem[];  // [seq_len] for scores
-    float max_score = -1e30f;
+    // ── Pass 1: Online softmax — find max and sum_exp in a single pass over K ──
+    float local_max = -1e30f;
+    float local_sum = 0.0f;
     for (int pos = tid; pos < seq_len; pos += num_threads) {
         float score = 0.0f;
         const __nv_fp8_e4m3* k_vec = k_cache + pos * kv_stride + kv_head * head_dim;
@@ -949,65 +957,57 @@ extern "C" __global__ void gqa_attention(
             score += q_head[d] * fp8e4m3_to_f32(k_vec[d]);
         }
         score *= sm_scale;
-        smem[pos] = score;
-        if (score > max_score) max_score = score;
-    }
-
-    // Block-wide max reduction
-    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
-        float other = __shfl_down_sync(0xffffffff, max_score, offset);
-        if (other > max_score) max_score = other;
-    }
-    __shared__ float warp_maxes[32];
-    int warp_id = tid / warpSize;
-    int lane_id = tid % warpSize;
-    if (lane_id == 0) warp_maxes[warp_id] = max_score;
-    __syncthreads();
-    if (tid == 0) {
-        float gmax = warp_maxes[0];
-        int num_warps = (num_threads + warpSize - 1) / warpSize;
-        for (int w = 1; w < num_warps; w++) {
-            if (warp_maxes[w] > gmax) gmax = warp_maxes[w];
+        if (score > local_max) {
+            local_sum *= expf(local_max - score);
+            local_max = score;
         }
-        warp_maxes[0] = gmax;
-    }
-    __syncthreads();
-    max_score = warp_maxes[0];
-
-    // Step 2: Softmax (exp and normalize)
-    float sum_exp = 0.0f;
-    for (int pos = tid; pos < seq_len; pos += num_threads) {
-        float val = expf(smem[pos] - max_score);
-        smem[pos] = val;
-        sum_exp += val;
+        local_sum += expf(score - local_max);
     }
 
-    // Block-wide sum reduction
+    // Warp-level reduction: combine (max, sum) pairs
     for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
-        sum_exp += __shfl_down_sync(0xffffffff, sum_exp, offset);
+        float other_max = __shfl_down_sync(0xffffffff, local_max, offset);
+        float other_sum = __shfl_down_sync(0xffffffff, local_sum, offset);
+        float new_max = fmaxf(local_max, other_max);
+        local_sum = local_sum * expf(local_max - new_max) + other_sum * expf(other_max - new_max);
+        local_max = new_max;
     }
-    if (lane_id == 0) warp_maxes[warp_id] = sum_exp;
+    if (lane_id == 0) {
+        warp_vals[warp_id] = local_max;
+        warp_sums[warp_id] = local_sum;
+    }
     __syncthreads();
+
+    // Final reduction across warps (thread 0)
     if (tid == 0) {
-        float total = 0.0f;
-        int num_warps = (num_threads + warpSize - 1) / warpSize;
-        for (int w = 0; w < num_warps; w++) total += warp_maxes[w];
-        warp_maxes[0] = total;
+        float gmax = warp_vals[0];
+        float gsum = warp_sums[0];
+        for (int w = 1; w < num_warps; w++) {
+            float wm = warp_vals[w];
+            float ws = warp_sums[w];
+            float new_max = fmaxf(gmax, wm);
+            gsum = gsum * expf(gmax - new_max) + ws * expf(wm - new_max);
+            gmax = new_max;
+        }
+        warp_vals[0] = gmax;
+        warp_sums[0] = gsum;
     }
     __syncthreads();
-    float inv_sum = 1.0f / warp_maxes[0];
+    float global_max = warp_vals[0];
+    float inv_sum = 1.0f / warp_sums[0];
 
-    for (int pos = tid; pos < seq_len; pos += num_threads) {
-        smem[pos] *= inv_sum;
-    }
-    __syncthreads();
-
-    // Step 3: Weighted sum of V vectors
+    // ── Pass 2: Weighted V sum (each thread handles a subset of output dims) ──
     float* out_head = output + qh * head_dim;
     for (int d = tid; d < head_dim; d += num_threads) {
         float acc = 0.0f;
         for (int pos = 0; pos < seq_len; pos++) {
-            acc += smem[pos] * fp8e4m3_to_f32(v_cache[pos * kv_stride + kv_head * head_dim + d]);
+            float score = 0.0f;
+            const __nv_fp8_e4m3* k_vec = k_cache + pos * kv_stride + kv_head * head_dim;
+            for (int dd = 0; dd < head_dim; dd++) {
+                score += q_head[dd] * fp8e4m3_to_f32(k_vec[dd]);
+            }
+            float weight = expf(score * sm_scale - global_max) * inv_sum;
+            acc += weight * fp8e4m3_to_f32(v_cache[pos * kv_stride + kv_head * head_dim + d]);
         }
         out_head[d] = acc;
     }

@@ -672,12 +672,6 @@ pub struct GpuDecodeStore {
     graph: Option<Box<GpuDecodeGraph>>,
     kernels_loaded: bool,
     last_decode_elapsed: f64,
-    /// Raw CUfunction handle for gqa_attention with extended shared memory.
-    /// Loaded from a separate module to bypass cudarc's pub(crate) restrictions.
-    /// Wrapped in usize for Send/Sync (raw CUDA handles are thread-safe after bind_to_thread).
-    gqa_attention_func: usize,
-    /// Max dynamic shared memory available per block (bytes).
-    max_smem_per_block: i32,
     #[cfg(feature = "gpu-debug")]
     debug_stop_layer: usize,
     #[cfg(feature = "gpu-debug")]
@@ -739,9 +733,6 @@ impl GpuDecodeStore {
         };
 
         // Load CUDA decode kernels from embedded PTX
-        let mut gqa_func_addr: usize = 0;
-        let mut max_smem: i32 = 0;
-
         #[cfg(has_decode_kernels)]
         {
             use cudarc::nvrtc::Ptx;
@@ -752,45 +743,6 @@ impl GpuDecodeStore {
             ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
                 format!("Failed to load decode kernels PTX: {:?}", e)))?;
             log::info!("GpuDecodeStore: loaded {} CUDA decode kernels", KERNEL_NAMES.len());
-
-            // Set max dynamic shared memory for gqa_attention kernel.
-            // Required for long sequences (>12K tokens) where shared memory
-            // exceeds the 48KB default limit. RTX 5090 supports up to 228KB.
-            // Load a separate JIT module to get a raw CUfunction handle we can
-            // call cuFuncSetAttribute on (cudarc's handles are pub(crate)).
-            unsafe {
-                let mut dev: i32 = 0;
-                cuda_sys::lib().cuCtxGetDevice(&mut dev);
-                cuda_sys::lib().cuDeviceGetAttribute(
-                    &mut max_smem,
-                    cuda_sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN,
-                    dev,
-                );
-                if max_smem > 0 {
-                    let ptx_cstr = std::ffi::CString::new(DECODE_KERNELS_PTX).unwrap();
-                    let mut jit_module: cuda_sys::CUmodule = std::ptr::null_mut();
-                    let r = cuda_sys::lib().cuModuleLoadData(&mut jit_module, ptx_cstr.as_ptr() as *const _);
-                    if r == cuda_sys::CUresult::CUDA_SUCCESS && !jit_module.is_null() {
-                        let name = std::ffi::CString::new("gqa_attention").unwrap();
-                        let mut func: cuda_sys::CUfunction = std::ptr::null_mut();
-                        let r2 = cuda_sys::lib().cuModuleGetFunction(&mut func, jit_module, name.as_ptr());
-                        if r2 == cuda_sys::CUresult::CUDA_SUCCESS && !func.is_null() {
-                            let r3 = cuda_sys::lib().cuFuncSetAttribute(
-                                func,
-                                cuda_sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-                                max_smem,
-                            );
-                            gqa_func_addr = func as usize;
-                            log::info!("GpuDecodeStore: gqa_attention max shared mem = {} KB (result={:?})",
-                                max_smem / 1024, r3);
-                        } else {
-                            log::warn!("GpuDecodeStore: cuModuleGetFunction(gqa_attention) failed: {:?}", r2);
-                        }
-                    } else {
-                        log::warn!("GpuDecodeStore: cuModuleLoadData for gqa failed: {:?}", r);
-                    }
-                }
-            }
         }
 
         #[cfg(not(has_decode_kernels))]
@@ -810,8 +762,6 @@ impl GpuDecodeStore {
             graph: None,
             kernels_loaded,
             last_decode_elapsed: 0.0,
-            gqa_attention_func: gqa_func_addr,
-            max_smem_per_block: max_smem,
             #[cfg(feature = "gpu-debug")]
             debug_stop_layer: 0,
             #[cfg(feature = "gpu-debug")]
@@ -3072,56 +3022,29 @@ impl GpuDecodeStore {
                     }
 
                     // ── GQA: Attention compute ──
-                    // Uses raw CUfunction handle with extended shared memory
-                    // (cuFuncSetAttribute applied at init time).
+                    // 2-pass kernel: O(1) shared memory, works for any seq length.
                     {
-                        let seq_len = position + 1;
                         let threads = 256u32;
-                        let smem_bytes = (seq_len as u32) * 4; // FP32 scores per position
-                        if self.gqa_attention_func == 0 {
-                            return Err(format!("gqa_attention[{}]: raw function handle is null", layer_idx));
-                        }
-                        let gqa_cu_func = self.gqa_attention_func as cuda_sys::CUfunction;
-                        if (smem_bytes as i32) > self.max_smem_per_block {
-                            return Err(format!(
-                                "gqa_attention[{}]: seq_len {} needs {} KB shared mem, GPU max {} KB",
-                                layer_idx, seq_len, smem_bytes / 1024, self.max_smem_per_block / 1024));
-                        }
-                        let out_ptr = *graph.d_gqa_out.device_ptr();
-                        let q_ptr = *graph.d_gqa_q.device_ptr();
-                        let k_ptr = graph.kv_k_ptrs[layer_idx];
-                        let v_ptr = graph.kv_v_ptrs[layer_idx];
-                        let scale = *sm_scale;
-                        let nh_i = nh as i32;
-                        let nkv_i = nkv as i32;
-                        let hd_i = hd as i32;
-                        let sl_i = seq_len as i32;
-                        let ms_i = graph.kv_max_seq as i32;
-                        let mut args: [*mut std::ffi::c_void; 10] = [
-                            &out_ptr as *const _ as *mut _,
-                            &q_ptr as *const _ as *mut _,
-                            &k_ptr as *const _ as *mut _,
-                            &v_ptr as *const _ as *mut _,
-                            &scale as *const _ as *mut _,
-                            &nh_i as *const _ as *mut _,
-                            &nkv_i as *const _ as *mut _,
-                            &hd_i as *const _ as *mut _,
-                            &sl_i as *const _ as *mut _,
-                            &ms_i as *const _ as *mut _,
-                        ];
+                        let cfg = LaunchConfig {
+                            grid_dim: (nh as u32, 1, 1),
+                            block_dim: (threads, 1, 1),
+                            shared_mem_bytes: 0,
+                        };
                         unsafe {
-                            let r = cuda_sys::lib().cuLaunchKernel(
-                                gqa_cu_func,
-                                nh as u32, 1, 1,      // grid
-                                threads, 1, 1,         // block
-                                smem_bytes,            // shared mem
-                                std::ptr::null_mut(),  // default stream
-                                args.as_mut_ptr(),
-                                std::ptr::null_mut(),  // extra
-                            );
-                            if r != cuda_sys::CUresult::CUDA_SUCCESS {
-                                return Err(format!("gqa_attention[{}]: cuLaunchKernel failed: {:?}", layer_idx, r));
-                            }
+                            let attn_fn = self.device.get_func(MODULE_NAME, "gqa_attention")
+                                .ok_or_else(|| "gqa_attention not found".to_string())?;
+                            attn_fn.launch(cfg, (
+                                *graph.d_gqa_out.device_ptr(),
+                                *graph.d_gqa_q.device_ptr(),
+                                graph.kv_k_ptrs[layer_idx],
+                                graph.kv_v_ptrs[layer_idx],
+                                *sm_scale,
+                                nh as i32,
+                                nkv as i32,
+                                hd as i32,
+                                (position + 1) as i32,
+                                graph.kv_max_seq as i32,
+                            )).map_err(|e| format!("gqa_attention[{}]: {:?}", layer_idx, e))?;
                         }
                     }
 
