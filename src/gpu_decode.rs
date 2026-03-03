@@ -700,6 +700,10 @@ struct GpuDecodeGraph {
     /// Stored as BF16 scratch for gated Q rearrangement.
     d_gqa_gate_buf: Option<cudarc::driver::CudaSlice<f32>>,
 
+    /// Max dynamic shared memory per block (bytes) for GQA attention.
+    /// Default 48KB, can be increased to ~99KB via opt-in on Blackwell+.
+    gqa_max_smem_bytes: u32,
+
     // Timing
     timing_enabled: bool,
     timing_step_count: u64,
@@ -747,6 +751,8 @@ pub struct GpuDecodeStore {
     prefetch_stream: CudaStream,
     graph: Option<Box<GpuDecodeGraph>>,
     kernels_loaded: bool,
+    /// Max opt-in shared memory for GQA attention (bytes). Set during PTX load.
+    gqa_max_smem_bytes: u32,
     last_decode_elapsed: f64,
     #[cfg(feature = "gpu-debug")]
     debug_stop_layer: usize,
@@ -808,6 +814,8 @@ impl GpuDecodeStore {
             stream
         };
 
+        let mut gqa_smem_limit: u32 = 48 * 1024; // default
+
         // Load CUDA decode kernels from embedded PTX
         #[cfg(has_decode_kernels)]
         {
@@ -819,6 +827,65 @@ impl GpuDecodeStore {
             ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
                 format!("Failed to load decode kernels PTX: {:?}", e)))?;
             log::info!("GpuDecodeStore: loaded {} CUDA decode kernels", KERNEL_NAMES.len());
+
+            // Opt-in to extended shared memory for gqa_attention kernel.
+            // RTX 5090 supports 99KB opt-in (vs 48KB default), allowing the fast
+            // shared-memory attention path for up to ~25K tokens instead of ~12K.
+            if let Some(attn_func) = device.get_func(MODULE_NAME, "gqa_attention") {
+                // Extract the raw CUfunction handle from cudarc's CudaFunction.
+                // CudaFunction is { cu_function: *mut CUfunc_st, device: Arc<CudaDevice> }
+                // Both fields are pointer-sized (8 bytes on x86_64).
+                // Since #[repr(Rust)] doesn't guarantee field order, we try both offsets
+                // and validate by calling cuFuncGetAttribute on each candidate.
+                let struct_ptr = &attn_func as *const _ as *const u8;
+                let word0: cuda_sys::CUfunction = unsafe {
+                    std::ptr::read(struct_ptr as *const cuda_sys::CUfunction)
+                };
+                let word1: cuda_sys::CUfunction = unsafe {
+                    std::ptr::read(struct_ptr.add(8) as *const cuda_sys::CUfunction)
+                };
+                // Validate: cuFuncGetAttribute succeeds only on a real CUfunction
+                let mut dummy = 0i32;
+                let w0_valid = unsafe {
+                    cuda_sys::lib().cuFuncGetAttribute(
+                        &mut dummy,
+                        cuda_sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_NUM_REGS,
+                        word0,
+                    ) == cuda_sys::CUresult::CUDA_SUCCESS
+                };
+                let raw_fn = if w0_valid { word0 } else { word1 };
+                log::info!("GQA attention: CUfunction at offset {} (w0_valid={})",
+                           if w0_valid { 0 } else { 8 }, w0_valid);
+                // Query device max opt-in shared memory
+                let mut max_smem_i32 = 0i32;
+                unsafe {
+                    let _ = cuda_sys::lib().cuDeviceGetAttribute(
+                        &mut max_smem_i32,
+                        cuda_sys::CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN,
+                        device_ordinal as i32,
+                    );
+                }
+                if max_smem_i32 > 49152 {
+                    let result = unsafe {
+                        cuda_sys::lib().cuFuncSetAttribute(
+                            raw_fn,
+                            cuda_sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                            max_smem_i32,
+                        )
+                    };
+                    if result == cuda_sys::CUresult::CUDA_SUCCESS {
+                        gqa_smem_limit = max_smem_i32 as u32;
+                        let max_tokens = (gqa_smem_limit - 128) / 4;
+                        log::info!("GQA attention: opt-in shared memory = {} KB, fast path up to {} tokens",
+                                   gqa_smem_limit / 1024, max_tokens);
+                    } else {
+                        log::warn!("GQA attention: failed to set extended shared memory ({} bytes), result={:?}",
+                                   max_smem_i32, result);
+                    }
+                } else {
+                    log::info!("GQA attention: device max shared memory = {} KB (no opt-in needed)", max_smem_i32 / 1024);
+                }
+            }
         }
 
         #[cfg(not(has_decode_kernels))]
@@ -837,6 +904,7 @@ impl GpuDecodeStore {
             prefetch_stream: CudaStream(prefetch_stream),
             graph: None,
             kernels_loaded,
+            gqa_max_smem_bytes: gqa_smem_limit,
             last_decode_elapsed: 0.0,
             #[cfg(feature = "gpu-debug")]
             debug_stop_layer: 0,
@@ -1014,6 +1082,7 @@ impl GpuDecodeStore {
             d_rope_sin: None,
             rope_half_dim: 0,
             d_gqa_gate_buf: None,
+            gqa_max_smem_bytes: self.gqa_max_smem_bytes,
             timing_enabled: false,
             timing_step_count: 0,
             t_total: 0.0,
@@ -3140,14 +3209,13 @@ impl GpuDecodeStore {
 
                     // ── GQA: Attention compute ──
                     // Hybrid kernel: uses shared memory for scores when seq_len
-                    // fits in 48KB (up to ~11K tokens), falls back to 2-pass
-                    // recomputation for longer sequences.
+                    // fits in available shared memory (48KB default, up to 99KB with
+                    // opt-in on Blackwell+), falls back to 2-pass for longer sequences.
                     {
                         let threads = 256u32;
                         let seq_len = (position + 1) as u32;
-                        // 48KB default shared memory limit, minus 128 bytes for
-                        // warp reduction scratch (32 floats)
-                        let smem_threshold = (48 * 1024 - 128) / 4; // ~12256 positions
+                        // Use the opt-in max shared memory (set during PTX load)
+                        let smem_threshold = (graph.gqa_max_smem_bytes - 128) / 4;
                         let use_smem = seq_len <= smem_threshold;
                         let shared_mem_bytes = if use_smem {
                             (seq_len as u32) * 4 + 128 // scores + warp scratch
