@@ -642,46 +642,7 @@ def main():
 
         # ── Device selection ──
         primary_dev = devices[0]
-        use_multi_gpu_hcs = args.multi_gpu_hcs and len(devices) > 1
-        if use_multi_gpu_hcs:
-            hcs_devices = devices
-        else:
-            # Pick device with most measured free VRAM
-            hcs_dev = max(devices, key=lambda d: vram_monitor.min_free_mb(d.index)) if len(devices) > 1 else primary_dev
-            hcs_devices = [hcs_dev]
-
-        # ── Manager selection ──
-        primary_manager = _model.gpu_prefill_managers.get(str(primary_dev))
-        if primary_manager is None:
-            logger.error("No GPU prefill manager for primary device %s", primary_dev)
-            sys.exit(1)
-
-        if use_multi_gpu_hcs:
-            hcs_load_manager = primary_manager
-        else:
-            dev_manager = _model.gpu_prefill_managers.get(str(hcs_devices[0]))
-            hcs_load_manager = dev_manager if dev_manager is not None else primary_manager
-
-        # ── Calculate HCS budgets from VRAM monitor measurements ──
-        # Budget = min_free_during_warmup - safety_margin
-        # No estimation, no headroom heuristics — purely measured.
-        per_expert_bytes = hcs_load_manager._per_expert_vram_bytes()
-        per_expert_mb = per_expert_bytes / (1024 * 1024)
         total_experts = cfg.n_routed_experts * cfg.num_moe_layers
-        device_budgets = {}
-        for dev in hcs_devices:
-            dev_idx = dev.index
-            measured_min_free_mb = vram_monitor.min_free_mb(dev_idx)
-            available_mb = max(0, int(measured_min_free_mb) - SAFETY_MARGIN_MB)
-            max_experts = available_mb * (1024 * 1024) // max(1, per_expert_bytes)
-            budget_mb = max_experts * per_expert_bytes // (1024 * 1024)
-            device_budgets[dev] = budget_mb
-            logger.info(
-                "HCS budget cuda:%d: measured_min_free=%d MB - safety=%d MB = %d MB available -> %d experts (%d bytes/expert)",
-                dev_idx, measured_min_free_mb, SAFETY_MARGIN_MB, available_mb, max_experts, per_expert_bytes,
-            )
-            _detail(f"cuda:{dev_idx}:  {measured_min_free_mb:,} MB free - {SAFETY_MARGIN_MB:,} MB safety = {budget_mb:,} MB for HCS")
-            _dim(f"         {max_experts:,} experts x {per_expert_mb:.2f} MB/expert")
 
         # ── Load heatmap ──
         if not os.path.exists(heatmap_path):
@@ -690,80 +651,40 @@ def main():
         else:
             _dim(f"Using cached heatmap: {os.path.basename(heatmap_path)}")
 
-        # ── Load HCS experts ──
-        _status("Loading HCS experts into VRAM")
-        hcs_load_manager.clear_hcs()
-        torch.cuda.empty_cache()
-        t_hcs = time.time()
-        hcs_load_manager._init_hot_cached_static(
-            heatmap_path=heatmap_path,
-            devices=hcs_devices,
-            device_budgets=device_budgets,
-            allocation_mode="greedy",
-        )
-        hcs_elapsed = time.time() - t_hcs
+        # ── Load heatmap and build sorted ranking ──
+        with open(heatmap_path) as f:
+            raw_heatmap = json.load(f)
+        sorted_ranking = sorted(raw_heatmap.items(), key=lambda x: x[1], reverse=True)
+        ranking = [(int(k.split(",")[0]), int(k.split(",")[1])) for k, _ in sorted_ranking]
+        _detail(f"Heatmap: {len(ranking):,} experts ranked from {len(raw_heatmap):,} entries")
 
-        # Set model flags for decode routing
-        if use_multi_gpu_hcs:
-            _model._hcs_device = None
-            _model._multi_gpu_hcs = True
-        else:
-            _model._hcs_device = hcs_devices[0]
-            _model._multi_gpu_hcs = False
+        # ── Calculate budget from measured VRAM ──
+        dev_idx = primary_dev.index
+        measured_min_free_mb = vram_monitor.min_free_mb(dev_idx)
+        budget_mb = max(0, int(measured_min_free_mb) - SAFETY_MARGIN_MB)
+        _detail(f"cuda:{dev_idx}:  {measured_min_free_mb:,} MB free - {SAFETY_MARGIN_MB:,} MB safety = {budget_mb:,} MB for HCS pool")
 
-        # ── Display HCS summary ──
-        total_pinned = sum(sum(d.num_pinned.values()) for d in hcs_load_manager._hcs_devices)
-        pct_cached = (total_pinned / total_experts * 100) if total_experts > 0 else 0.0
+        # ── Initialize Rust pool-based HCS with dynamic eviction ──
+        if hasattr(_model, '_gpu_decode_store'):
+            store = _model._gpu_decode_store
+            t_hcs = time.time()
+            _status("Loading HCS pool (Rust, dynamic eviction)")
 
-        _status("HCS loaded")
-        for dev in hcs_devices:
-            free_mb = torch.cuda.mem_get_info(dev)[0] // (1024 * 1024)
-            total_mb_dev = torch.cuda.mem_get_info(dev)[1] // (1024 * 1024)
-            used_mb = total_mb_dev - free_mb
-            dev_pinned = sum(sum(d.num_pinned.values()) for d in hcs_load_manager._hcs_devices if d.device == dev)
-            _detail(f"cuda:{dev.index}:  {used_mb:,} MB used / {total_mb_dev:,} MB total  ({free_mb:,} MB free)  --  {dev_pinned:,} experts")
-        _detail(f"Total: {total_pinned:,} / {total_experts:,} experts in VRAM ({pct_cached:.1f}%)")
-        _dim(f"Loaded in {hcs_elapsed:.1f}s")
+            # hcs_pool_init: allocates VRAM pool, loads experts from mmap via H2D DMA,
+            # enables sliding-window activation tracking for between-prompt rebalancing.
+            result = store.hcs_pool_init(
+                ranking,
+                budget_mb,
+                headroom_mb=500,
+                window_size=10,
+                replacement_pct=25,
+            )
+            hcs_elapsed = time.time() - t_hcs
 
-        logger.info(
-            "HCS ready: %d/%d experts (%.1f%%) across %d GPU(s) in %.1fs",
-            total_pinned, total_experts, pct_cached, len(hcs_devices), hcs_elapsed,
-        )
-
-    # ── Bridge HCS to Rust GpuDecodeStore ──
-    # The Python HCS loaded experts into PyTorch tensors. The Rust decode path has its
-    # own HCS (HashMap-based) that needs the same (layer, expert) pairs pinned in VRAM.
-    # We init the Rust HCS with auto-budget (from free VRAM) and pin the same experts.
-    if args.hcs and hasattr(_model, '_gpu_decode_store'):
-        store = _model._gpu_decode_store
-        t_rust_hcs = time.time()
-        store.init_hcs(0, 500)  # auto-budget (unused for external), 500 MB headroom
-        rust_pinned = 0
-        for hcs_dev in hcs_load_manager._hcs_devices:
-            for layer_idx, lookup_tensor in hcs_dev.lookup.items():
-                bufs = hcs_dev.buffers[layer_idx]
-                w13_t = bufs["w13"]        # [n_hot, K/16, N*16/8] packed
-                w13s_t = bufs["w13_scale"]  # [n_hot, ...]
-                w2_t = bufs["w2"]
-                w2s_t = bufs["w2_scale"]
-                lookup_cpu = lookup_tensor.cpu()
-                for eid in range(len(lookup_cpu)):
-                    slot = lookup_cpu[eid].item()
-                    if slot < 0:
-                        continue
-                    # Get VRAM pointers for this expert's data within the HCS buffer
-                    w13p = w13_t[slot].data_ptr()
-                    w13s = w13s_t[slot].data_ptr()
-                    w2p = w2_t[slot].data_ptr()
-                    w2s = w2s_t[slot].data_ptr()
-                    try:
-                        if store.hcs_register_external(layer_idx, eid, w13p, w13s, w2p, w2s):
-                            rust_pinned += 1
-                    except Exception:
-                        break
-        rust_hcs_elapsed = time.time() - t_rust_hcs
-        logger.info("Rust HCS: %d experts registered (shared VRAM) in %.1fs", rust_pinned, rust_hcs_elapsed)
-        _detail(f"Rust HCS: {rust_pinned:,} experts registered (shared VRAM) in {rust_hcs_elapsed:.1f}s")
+            _status("HCS pool loaded")
+            _detail(result)
+            _dim(f"Loaded in {hcs_elapsed:.1f}s")
+            logger.info("HCS pool: %s (%.1fs)", result, hcs_elapsed)
 
     # ── Decode validation (after HCS) ──
     # CUDA decode allocations already happened in pre-HCS warmup.

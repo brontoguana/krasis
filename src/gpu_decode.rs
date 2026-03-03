@@ -233,7 +233,7 @@ impl ApflState {
 
 /// One expert's Marlin-format weights resident in VRAM.
 struct HcsCacheEntry {
-    d_buf: Option<cudarc::driver::CudaSlice<u8>>,  // owned buffer (None for external)
+    d_buf: Option<cudarc::driver::CudaSlice<u8>>,  // owned buffer (None for external/pool)
     w13_packed_offset: usize,
     w13_packed_size: usize,
     w13_scales_offset: usize,
@@ -242,11 +242,13 @@ struct HcsCacheEntry {
     w2_packed_size: usize,
     w2_scales_offset: usize,
     w2_scales_size: usize,
-    // Raw pointers for externally-owned VRAM (Python HCS buffers)
+    // Raw pointers for externally-owned VRAM (Python HCS buffers) or pool entries
     ext_w13_packed: u64,
     ext_w13_scales: u64,
     ext_w2_packed: u64,
     ext_w2_scales: u64,
+    /// Pool slot index (Some = pool entry, can be evicted/reused; None = external or individual alloc)
+    pool_slot: Option<usize>,
 }
 
 impl HcsCacheEntry {
@@ -272,7 +274,7 @@ impl HcsCacheEntry {
     }
 }
 
-/// HCS state: resident expert cache + activation heatmap.
+/// HCS state: resident expert cache + activation heatmap + dynamic eviction.
 struct HcsState {
     /// (layer_idx, expert_idx) → cache entry.
     cache: std::collections::HashMap<(usize, usize), HcsCacheEntry>,
@@ -289,6 +291,36 @@ struct HcsState {
     collecting: bool,
     /// Per-expert VRAM size (bytes, same for all experts in a model).
     expert_vram_bytes: usize,
+
+    // ── Pool-based VRAM for dynamic eviction ──
+    /// One contiguous VRAM allocation divided into equal-sized expert slots.
+    pool_buf: Option<cudarc::driver::CudaSlice<u8>>,
+    /// Bytes per slot (aligned).
+    pool_slot_size: usize,
+    /// Total number of slots in the pool.
+    pool_num_slots: usize,
+    /// Stack of available slot indices (pop to allocate, push to free).
+    pool_free_slots: Vec<usize>,
+    /// Reverse mapping: slot index → (layer, expert) currently occupying it.
+    pool_slot_to_expert: Vec<Option<(usize, usize)>>,
+
+    // ── Dynamic eviction: sliding window activation tracking ──
+    /// Bitset for current prompt: 1 bit per (layer_idx * num_experts + expert_idx).
+    current_activations: Vec<u64>,
+    /// Max experts per layer (stride for bit indexing).
+    num_experts_per_layer: usize,
+    /// Sliding window of recent prompt activation bitsets.
+    prompt_history: std::collections::VecDeque<Vec<u64>>,
+    /// Window size (number of prompts to keep).
+    window_size: usize,
+    /// Fraction of pool experts to consider replacing per rebalance (0.0-1.0).
+    replacement_pct: f32,
+    /// Whether dynamic rebalancing is enabled.
+    rebalance_enabled: bool,
+    /// Cumulative stats.
+    total_evictions: u64,
+    total_promotions: u64,
+    total_rebalances: u64,
 }
 
 impl HcsState {
@@ -302,6 +334,20 @@ impl HcsState {
             total_misses: 0,
             collecting: false,
             expert_vram_bytes: 0,
+            pool_buf: None,
+            pool_slot_size: 0,
+            pool_num_slots: 0,
+            pool_free_slots: Vec::new(),
+            pool_slot_to_expert: Vec::new(),
+            current_activations: Vec::new(),
+            num_experts_per_layer: 0,
+            prompt_history: std::collections::VecDeque::new(),
+            window_size: 10,
+            replacement_pct: 0.25,
+            rebalance_enabled: false,
+            total_evictions: 0,
+            total_promotions: 0,
+            total_rebalances: 0,
         }
     }
 
@@ -310,10 +356,40 @@ impl HcsState {
         self.cache.get(&(layer, expert))
     }
 
-    /// Record an expert activation in the heatmap.
+    /// Record an expert activation in the heatmap and dynamic eviction bitset.
     fn record_activation(&mut self, layer: usize, expert: usize) {
         if self.collecting {
             *self.heatmap.entry((layer, expert)).or_insert(0) += 1;
+        }
+        // Set bit in current prompt activation bitset
+        if self.rebalance_enabled && self.num_experts_per_layer > 0 {
+            let bit_idx = layer * self.num_experts_per_layer + expert;
+            let word = bit_idx / 64;
+            let bit = bit_idx % 64;
+            if word < self.current_activations.len() {
+                self.current_activations[word] |= 1u64 << bit;
+            }
+        }
+    }
+
+    /// Clear current prompt activation bitset (call at start of each prompt).
+    fn begin_prompt(&mut self) {
+        if self.rebalance_enabled {
+            for w in self.current_activations.iter_mut() {
+                *w = 0;
+            }
+        }
+    }
+
+    /// Push current prompt's activations into the sliding window.
+    fn finish_prompt(&mut self) {
+        if !self.rebalance_enabled || self.current_activations.is_empty() {
+            return;
+        }
+        let snapshot = self.current_activations.clone();
+        self.prompt_history.push_back(snapshot);
+        while self.prompt_history.len() > self.window_size {
+            self.prompt_history.pop_front();
         }
     }
 
@@ -2046,6 +2122,7 @@ impl GpuDecodeStore {
             w2_scales_offset: 0, w2_scales_size: 0,
             ext_w13_packed: w13p, ext_w13_scales: w13s,
             ext_w2_packed: w2p, ext_w2_scales: w2s,
+            pool_slot: None,
         };
         hcs.num_cached += 1;
         hcs.cache.insert((layer_idx, expert_idx), entry);
@@ -2068,6 +2145,46 @@ impl GpuDecodeStore {
             "HCS: {} experts cached, {:.1} MB VRAM, hits={}, misses={}, hit_rate={:.1}%",
             hcs.num_cached, hcs.vram_bytes as f64 / (1024.0 * 1024.0),
             hcs.total_hits, hcs.total_misses, hcs.hit_rate() * 100.0,
+        ))
+    }
+
+    /// Initialize pool-based HCS with dynamic eviction.
+    ///
+    /// Allocates a contiguous VRAM pool and fills it with the hottest experts
+    /// from the provided ranking (list of (layer_idx, expert_idx) pairs, sorted
+    /// hottest-first). Enables sliding-window activation tracking for between-prompt
+    /// rebalancing.
+    ///
+    /// Args:
+    ///   ranking: list of (layer_idx, expert_idx) tuples, hottest first
+    ///   budget_mb: VRAM budget for pool (0 = auto from free VRAM)
+    ///   headroom_mb: VRAM to keep free (only used when budget_mb=0)
+    ///   window_size: number of recent prompts to track (default 10)
+    ///   replacement_pct: fraction of pool to consider replacing per rebalance (default 25)
+    #[pyo3(signature = (ranking, budget_mb=0, headroom_mb=500, window_size=10, replacement_pct=25))]
+    fn hcs_pool_init(
+        &mut self,
+        ranking: Vec<(usize, usize)>,
+        budget_mb: usize,
+        headroom_mb: usize,
+        window_size: usize,
+        replacement_pct: usize,
+    ) -> PyResult<String> {
+        self.hcs_pool_init_internal(ranking, budget_mb, headroom_mb, window_size, replacement_pct)
+    }
+
+    /// Get dynamic HCS eviction statistics.
+    fn hcs_dynamic_stats(&self) -> PyResult<String> {
+        let graph = self.graph.as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
+        let hcs = graph.hcs.as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call init_hcs first"))?;
+        Ok(format!(
+            "HCS dynamic: pool={}/{} slots, window={}/{} prompts, rebalances={}, evictions={}, promotions={}, hit_rate={:.1}%",
+            hcs.pool_num_slots - hcs.pool_free_slots.len(), hcs.pool_num_slots,
+            hcs.prompt_history.len(), hcs.window_size,
+            hcs.total_rebalances, hcs.total_evictions, hcs.total_promotions,
+            hcs.hit_rate() * 100.0,
         ))
     }
 
@@ -3455,6 +3572,11 @@ impl GpuDecodeStore {
             rng_state
         };
 
+        // Begin activation tracking for this prompt's decode
+        if let Some(ref mut hcs) = self.graph.as_mut().unwrap().hcs {
+            hcs.begin_prompt();
+        }
+
         let decode_start = Instant::now();
         let mut next_token = first_token;
         let mut generated = 0usize;
@@ -3594,6 +3716,17 @@ impl GpuDecodeStore {
                 log::info!("│    Min PCIe BW:      {:.1} GB/s (bytes/loop_time)│", min_pcie_bw);
                 log::info!("│    Est PCIe BW:      {:.1} GB/s (cold fraction)  │", est_pcie_bw);
                 log::info!("└─────────────────────────────────────────────────┘");
+            }
+        }
+
+        // Finish activation tracking and run dynamic rebalance
+        if let Some(ref mut hcs) = self.graph.as_mut().unwrap().hcs {
+            hcs.finish_prompt();
+        }
+        if generated > 0 {
+            let (swapped, rebalance_ms) = self.hcs_rebalance_internal();
+            if swapped > 0 {
+                log::info!("HCS rebalance after decode: {} experts swapped in {:.1}ms", swapped, rebalance_ms);
             }
         }
 
@@ -3764,6 +3897,7 @@ impl GpuDecodeStore {
                 w2_scales_offset,
                 w2_scales_size: se.w2_scales_bytes,
                 ext_w13_packed: 0, ext_w13_scales: 0, ext_w2_packed: 0, ext_w2_scales: 0,
+                pool_slot: None,
             });
         }
 
@@ -6064,6 +6198,351 @@ impl GpuDecodeStore {
         Ok(msg)
     }
 
+    /// Initialize pool-based HCS with dynamic eviction support.
+    fn hcs_pool_init_internal(
+        &mut self,
+        ranking: Vec<(usize, usize)>,
+        budget_mb: usize,
+        headroom_mb: usize,
+        window_size: usize,
+        replacement_pct: usize,
+    ) -> PyResult<String> {
+        let graph = self.graph.as_mut()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
+
+        if graph.moe_layers.is_empty() {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "No MoE layers registered. Call setup_from_engine first."));
+        }
+
+        // Calculate per-expert VRAM size
+        let first_moe = graph.moe_layers.iter()
+            .find_map(|m| m.as_ref())
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No MoE layers found"))?;
+        let first_expert = &first_moe.experts[0];
+        let expert_bytes = first_expert.w13_packed_bytes + first_expert.w13_scales_bytes
+            + first_expert.w2_packed_bytes + first_expert.w2_scales_bytes;
+        let align = 512usize;
+        let slot_size = (expert_bytes + align - 1) & !(align - 1);
+
+        // Determine budget
+        let budget_bytes = if budget_mb > 0 {
+            budget_mb * 1024 * 1024
+        } else {
+            let (free, _total) = cudarc::driver::result::mem_get_info()
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
+                    format!("mem_get_info: {:?}", e)))?;
+            let headroom_bytes = headroom_mb * 1024 * 1024;
+            if free > headroom_bytes {
+                free - headroom_bytes
+            } else {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    format!("Not enough VRAM: {} MB free, {} MB headroom",
+                        free / (1024 * 1024), headroom_mb)));
+            }
+        };
+
+        let num_slots = budget_bytes / slot_size;
+        if num_slots == 0 {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                format!("Budget too small for even one expert ({} bytes need {} bytes)",
+                    budget_bytes, slot_size)));
+        }
+
+        let pool_alloc_bytes = num_slots * slot_size;
+
+        // Determine max experts per layer for bitset indexing
+        let num_experts_per_layer = graph.moe_layers.iter()
+            .filter_map(|m| m.as_ref())
+            .map(|m| m.num_experts)
+            .max()
+            .unwrap_or(0);
+        let num_layers = graph.moe_layers.len();
+        let total_bits = num_layers * num_experts_per_layer;
+        let bitset_words = (total_bits + 63) / 64;
+
+        // Total unique experts
+        let total_experts: usize = graph.moe_layers.iter()
+            .filter_map(|m| m.as_ref())
+            .map(|m| m.num_experts)
+            .sum();
+
+        log::info!("HCS pool: allocating {:.1} MB ({} slots x {:.1} KB/slot)",
+            pool_alloc_bytes as f64 / (1024.0 * 1024.0),
+            num_slots, slot_size as f64 / 1024.0);
+
+        // Allocate the pool
+        let pool_buf = self.device.alloc_zeros::<u8>(pool_alloc_bytes)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
+                format!("HCS pool alloc ({} MB): {:?}", pool_alloc_bytes / (1024 * 1024), e)))?;
+        let pool_base = *pool_buf.device_ptr();
+
+        // Build free slot stack (all slots initially free)
+        let mut free_slots: Vec<usize> = (0..num_slots).rev().collect();
+        let mut slot_to_expert: Vec<Option<(usize, usize)>> = vec![None; num_slots];
+
+        // Fill slots from ranking via H2D DMA
+        let t0 = std::time::Instant::now();
+        let mut loaded = 0usize;
+        let mut cache = std::collections::HashMap::new();
+
+        for &(layer_idx, expert_idx) in &ranking {
+            if free_slots.is_empty() {
+                break;
+            }
+            // Validate the (layer, expert) pair
+            let moe = match graph.moe_layers.get(layer_idx).and_then(|m| m.as_ref()) {
+                Some(m) => m,
+                None => continue,
+            };
+            if expert_idx >= moe.experts.len() {
+                continue;
+            }
+
+            let slot = free_slots.pop().unwrap();
+            let expert = &moe.experts[expert_idx];
+            let dst = pool_base + (slot as u64 * slot_size as u64);
+
+            // Contiguous layout: w13p | w13s | w2p | w2s
+            let w13p_off = 0u64;
+            let w13s_off = expert.w13_packed_bytes as u64;
+            let w2p_off = w13s_off + expert.w13_scales_bytes as u64;
+            let w2s_off = w2p_off + expert.w2_packed_bytes as u64;
+
+            unsafe {
+                let mut ok = true;
+                for &(off, src_ptr, bytes) in &[
+                    (w13p_off, expert.w13_packed_ptr, expert.w13_packed_bytes),
+                    (w13s_off, expert.w13_scales_ptr, expert.w13_scales_bytes),
+                    (w2p_off, expert.w2_packed_ptr, expert.w2_packed_bytes),
+                    (w2s_off, expert.w2_scales_ptr, expert.w2_scales_bytes),
+                ] {
+                    let err = cuda_sys::lib().cuMemcpyHtoD_v2(
+                        dst + off,
+                        src_ptr as *const std::ffi::c_void,
+                        bytes,
+                    );
+                    if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                        log::warn!("HCS pool H2D copy failed for L{}E{}: {:?}", layer_idx, expert_idx, err);
+                        ok = false;
+                        break;
+                    }
+                }
+                if !ok {
+                    free_slots.push(slot);
+                    continue;
+                }
+            }
+
+            let entry = HcsCacheEntry {
+                d_buf: None,
+                w13_packed_offset: 0, w13_packed_size: 0,
+                w13_scales_offset: 0, w13_scales_size: 0,
+                w2_packed_offset: 0, w2_packed_size: 0,
+                w2_scales_offset: 0, w2_scales_size: 0,
+                ext_w13_packed: dst + w13p_off,
+                ext_w13_scales: dst + w13s_off,
+                ext_w2_packed: dst + w2p_off,
+                ext_w2_scales: dst + w2s_off,
+                pool_slot: Some(slot),
+            };
+            cache.insert((layer_idx, expert_idx), entry);
+            slot_to_expert[slot] = Some((layer_idx, expert_idx));
+            loaded += 1;
+        }
+
+        let load_elapsed = t0.elapsed().as_secs_f64();
+        let pct = if total_experts > 0 { loaded as f64 / total_experts as f64 * 100.0 } else { 0.0 };
+
+        // Create HCS state with pool
+        let mut hcs = HcsState::new();
+        hcs.cache = cache;
+        hcs.expert_vram_bytes = slot_size;
+        hcs.vram_bytes = pool_alloc_bytes;
+        hcs.num_cached = loaded;
+        hcs.pool_buf = Some(pool_buf);
+        hcs.pool_slot_size = slot_size;
+        hcs.pool_num_slots = num_slots;
+        hcs.pool_free_slots = free_slots;
+        hcs.pool_slot_to_expert = slot_to_expert;
+        hcs.current_activations = vec![0u64; bitset_words];
+        hcs.num_experts_per_layer = num_experts_per_layer;
+        hcs.window_size = window_size;
+        hcs.replacement_pct = replacement_pct as f32 / 100.0;
+        hcs.rebalance_enabled = true;
+
+        graph.hcs = Some(hcs);
+
+        let msg = format!(
+            "HCS pool: {}/{} experts loaded in {:.2}s ({:.1}% coverage), {:.1} MB VRAM, \
+             {} free slots, window={}, replace={:.0}%",
+            loaded, total_experts, load_elapsed, pct,
+            pool_alloc_bytes as f64 / (1024.0 * 1024.0),
+            num_slots - loaded, window_size, replacement_pct,
+        );
+        log::info!("{}", msg);
+        Ok(msg)
+    }
+
+    /// Rebalance HCS pool based on sliding window activation scores.
+    /// Evicts low-scoring pool entries and promotes high-scoring cold experts.
+    /// Called automatically after each prompt's decode completes.
+    fn hcs_rebalance_internal(&mut self) -> (usize, f64) {
+        // Take HCS out of graph to avoid borrow conflicts with moe_layers
+        let graph = match self.graph.as_mut() {
+            Some(g) => g,
+            None => return (0, 0.0),
+        };
+        let mut hcs = match graph.hcs.take() {
+            Some(h) => h,
+            None => return (0, 0.0),
+        };
+
+        if !hcs.rebalance_enabled || hcs.prompt_history.len() < 2 || hcs.pool_buf.is_none() {
+            graph.hcs = Some(hcs);
+            return (0, 0.0);
+        }
+
+        let t0 = std::time::Instant::now();
+        let num_experts = hcs.num_experts_per_layer;
+        let window = &hcs.prompt_history;
+
+        // Score all experts: count prompts in window where expert was active
+        let mut scored_cached: Vec<(usize, usize, u32)> = Vec::new();
+        let mut scored_cold: Vec<(usize, usize, u32)> = Vec::new();
+
+        for (layer_idx, moe_opt) in graph.moe_layers.iter().enumerate() {
+            if let Some(moe) = moe_opt {
+                for eid in 0..moe.num_experts {
+                    let bit_idx = layer_idx * num_experts + eid;
+                    let word = bit_idx / 64;
+                    let bit = bit_idx % 64;
+
+                    let score: u32 = window.iter()
+                        .map(|bits| {
+                            if word < bits.len() { ((bits[word] >> bit) & 1) as u32 } else { 0 }
+                        })
+                        .sum();
+
+                    if let Some(entry) = hcs.cache.get(&(layer_idx, eid)) {
+                        if entry.pool_slot.is_some() {
+                            scored_cached.push((layer_idx, eid, score));
+                        }
+                        // External entries are never evicted
+                    } else {
+                        scored_cold.push((layer_idx, eid, score));
+                    }
+                }
+            }
+        }
+
+        // Sort: cached worst-first, cold best-first
+        scored_cached.sort_by_key(|x| x.2);
+        scored_cold.sort_by(|a, b| b.2.cmp(&a.2));
+
+        let max_replace = ((hcs.pool_num_slots as f32 * hcs.replacement_pct) as usize)
+            .min(scored_cached.len())
+            .min(scored_cold.len());
+
+        // Only replace where cold expert has strictly higher score
+        let mut actual = 0usize;
+        for i in 0..max_replace {
+            if scored_cold[i].2 > scored_cached[i].2 {
+                actual += 1;
+            } else {
+                break;
+            }
+        }
+
+        if actual == 0 {
+            hcs.total_rebalances += 1;
+            graph.hcs = Some(hcs);
+            let elapsed = t0.elapsed().as_secs_f64() * 1000.0;
+            return (0, elapsed);
+        }
+
+        // Perform swaps
+        let pool_base = *hcs.pool_buf.as_ref().unwrap().device_ptr();
+        let slot_size = hcs.pool_slot_size;
+
+        for i in 0..actual {
+            let (ev_layer, ev_eid, _ev_score) = scored_cached[i];
+            let (pr_layer, pr_eid, _pr_score) = scored_cold[i];
+
+            // Evict: remove from cache, reclaim slot
+            let evicted = hcs.cache.remove(&(ev_layer, ev_eid)).unwrap();
+            let slot = evicted.pool_slot.unwrap();
+            hcs.pool_slot_to_expert[slot] = None;
+            hcs.num_cached -= 1;
+
+            // Promote: DMA new expert into the freed slot
+            let moe = graph.moe_layers[pr_layer].as_ref().unwrap();
+            let expert = &moe.experts[pr_eid];
+            let dst = pool_base + (slot as u64 * slot_size as u64);
+
+            let w13p_off = 0u64;
+            let w13s_off = expert.w13_packed_bytes as u64;
+            let w2p_off = w13s_off + expert.w13_scales_bytes as u64;
+            let w2s_off = w2p_off + expert.w2_packed_bytes as u64;
+
+            let mut dma_ok = true;
+            unsafe {
+                for &(off, src_ptr, bytes) in &[
+                    (w13p_off, expert.w13_packed_ptr, expert.w13_packed_bytes),
+                    (w13s_off, expert.w13_scales_ptr, expert.w13_scales_bytes),
+                    (w2p_off, expert.w2_packed_ptr, expert.w2_packed_bytes),
+                    (w2s_off, expert.w2_scales_ptr, expert.w2_scales_bytes),
+                ] {
+                    let err = cuda_sys::lib().cuMemcpyHtoD_v2(
+                        dst + off,
+                        src_ptr as *const std::ffi::c_void,
+                        bytes,
+                    );
+                    if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                        log::warn!("HCS rebalance H2D failed for L{}E{}: {:?}", pr_layer, pr_eid, err);
+                        dma_ok = false;
+                        break;
+                    }
+                }
+            }
+
+            if dma_ok {
+                let entry = HcsCacheEntry {
+                    d_buf: None,
+                    w13_packed_offset: 0, w13_packed_size: 0,
+                    w13_scales_offset: 0, w13_scales_size: 0,
+                    w2_packed_offset: 0, w2_packed_size: 0,
+                    w2_scales_offset: 0, w2_scales_size: 0,
+                    ext_w13_packed: dst + w13p_off,
+                    ext_w13_scales: dst + w13s_off,
+                    ext_w2_packed: dst + w2p_off,
+                    ext_w2_scales: dst + w2s_off,
+                    pool_slot: Some(slot),
+                };
+                hcs.cache.insert((pr_layer, pr_eid), entry);
+                hcs.pool_slot_to_expert[slot] = Some((pr_layer, pr_eid));
+                hcs.num_cached += 1;
+            } else {
+                // DMA failed: return slot to free list
+                hcs.pool_free_slots.push(slot);
+            }
+        }
+
+        hcs.total_evictions += actual as u64;
+        hcs.total_promotions += actual as u64;
+        hcs.total_rebalances += 1;
+
+        let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        log::info!(
+            "HCS rebalance #{}: swapped {}/{} experts in {:.1}ms (window={} prompts, {} cached)",
+            hcs.total_rebalances, actual, max_replace, elapsed_ms,
+            hcs.prompt_history.len(), hcs.num_cached,
+        );
+
+        graph.hcs = Some(hcs);
+        (actual, elapsed_ms)
+    }
+
     fn hcs_pin_expert_internal(&mut self, layer_idx: usize, expert_idx: usize) -> PyResult<bool> {
         let graph = self.graph.as_mut()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
@@ -6135,6 +6614,7 @@ impl GpuDecodeStore {
             w2_scales_offset,
             w2_scales_size: expert.w2_scales_bytes,
             ext_w13_packed: 0, ext_w13_scales: 0, ext_w2_packed: 0, ext_w2_scales: 0,
+            pool_slot: None,
         };
 
         hcs.vram_bytes += alloc_bytes;
