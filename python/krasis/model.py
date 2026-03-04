@@ -420,7 +420,7 @@ class KrasisModel:
         layer_group_size: int = 1,
         gguf_path: Optional[str] = None,
         gguf_native: bool = False,
-        kv_cache_mb: int = 2000,  # MB for KV cache
+        kv_cache_mb: int = 1000,  # MB for KV cache
         stream_attention: bool = False,
     ):
         self.cfg = ModelConfig.from_model_path(model_path)

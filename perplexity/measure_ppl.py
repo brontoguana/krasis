@@ -378,7 +378,7 @@ def parse_args():
     # Paths
     p.add_argument("--cpu-only", action="store_true", help="Disable GPU prefill — measure through CPU-only path")
     p.add_argument("--layer-group-size", type=int, default=2, help="Layers per group for prefill DMA (default: 2)")
-    p.add_argument("--kv-cache-mb", type=int, default=2000, help="KV cache size in MB (default: 2000)")
+    p.add_argument("--kv-cache-mb", type=int, default=1000, help="KV cache size in MB (default: 1000)")
     p.add_argument("--krasis-threads", type=int, default=48, help="CPU threads for Rust engine (default: 48)")
 
     return p.parse_args()

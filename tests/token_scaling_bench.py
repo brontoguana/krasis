@@ -60,7 +60,7 @@ def main():
     model = KrasisModel(
         model_path=MODEL_PATH, num_gpus=1, layer_group_size=2,
         kv_dtype=torch.float8_e4m3fn, quant_cfg=quant_cfg,
-        krasis_threads=48, gpu_prefill_threshold=300, kv_cache_mb=2000,
+        krasis_threads=48, gpu_prefill_threshold=300, kv_cache_mb=1000,
         stream_attention=True,
     )
     model.load()

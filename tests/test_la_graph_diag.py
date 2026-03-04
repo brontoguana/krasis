@@ -39,7 +39,7 @@ model = KrasisModel(
     layer_group_size=2,
     stream_attention=True,
     gpu_prefill_threshold=1,  # GPU decode (triggers streaming weight loading)
-    kv_cache_mb=2000,
+    kv_cache_mb=1000,
 )
 model.load()
 

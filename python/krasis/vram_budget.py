@@ -275,14 +275,13 @@ def compute_launcher_budget(
     expert_divisor: int = 1,
     kv_dtype: str = "fp8_e4m3",
     gpu_expert_bits: int = 4,
-    cpu_expert_bits: int = 4,
     attention_quant: str = "bf16",
     shared_expert_quant: str = "int8",
     dense_mlp_quant: str = "int8",
     lm_head_quant: str = "int8",
     gpu_vram_mb: int = 0,
     total_ram_gb: int = 0,
-    kv_cache_mb: int = 2000,
+    kv_cache_mb: int = 1000,
 ) -> Dict[str, Any]:
     """Compute VRAM + RAM budget for the launcher TUI.
 
@@ -528,84 +527,16 @@ def compute_launcher_budget(
     worst = max(ranks, key=lambda r: r["total_mb"])
     over_budget = worst["total_mb"] > gpu_vram_mb
 
-    # CPU expert RAM
-    cpu_expert_bytes_each = _cpu_expert_bytes_per_expert(cfg, cpu_expert_bits) if n_experts > 0 else 0
     total_moe_layers = total_layers - first_k_dense
-    cpu_expert_gb = (cpu_expert_bytes_each * n_experts * total_moe_layers) / (1024 ** 3)
-
-    # RAM estimates (full model in system RAM for streaming to GPU)
-    # Count full/linear attention layers across entire model
-    if hybrid:
-        _total_full_attn = sum(1 for i in range(total_layers) if (i + 1) % full_attn_interval == 0)
-        _total_linear_attn = total_layers - _total_full_attn
-    else:
-        _total_full_attn = total_layers
-        _total_linear_attn = 0
-
     MB = 1024 * 1024
 
-    # ── GPU-side weights held in system RAM (for streaming to GPU) ──
-    ram_attn_bytes = (
-        _component_weight_bytes(attn_params_per_layer, attention_quant) * _total_full_attn +
-        linear_attn_bpl * _total_linear_attn
-    )
-    ram_shared_bytes = (
-        _component_weight_bytes(shared_params_per_moe, shared_expert_quant) * total_moe_layers
-        if shared_params_per_moe else 0
-    )
-    ram_dense_bytes = _component_weight_bytes(dense_mlp_params_per_layer, dense_mlp_quant) * first_k_dense
-    ram_norms_gates_bytes = (
-        2 * hidden * 2 * total_layers +           # norms BF16
-        hidden * n_experts * 2 * total_moe_layers  # gates BF16
-    )
-    ram_embed_bytes = base_embed_bytes
-    ram_lmhead_bytes = base_lmhead_bytes
+    # ── System RAM: only the mmap'd GPU Marlin expert cache ──
+    # Decode is 100% GPU (gpu_only=True). No CPU decode store, no CPU KV cache,
+    # no separate CPU expert format. Non-expert weights (attention, norms, etc.)
+    # are loaded directly into VRAM and don't persist in system RAM.
     ram_gpu_experts_bytes = expert_buf_bytes * n_experts * total_moe_layers if n_experts > 0 else 0
-    ram_cpu_experts_bytes = cpu_expert_bytes_each * n_experts * total_moe_layers
-
-    # ── CpuDecodeStore: duplicate weights for CPU decode (re-quantized INT4) ──
-    # Attention is re-quantized from BF16 → INT4 for CPU decode matmuls.
-    # This is a SEPARATE copy from the GPU-side BF16 attention weights.
-    _decode_attn_params = attn_params_per_layer * _total_full_attn
-    ram_decode_attn_bytes = _decode_attn_params // 2 + (_decode_attn_params // 128) * 2  # INT4
-    # Embedding stored as F32 for CPU decode (separate from BF16 GPU copy)
-    ram_decode_embed_bytes = cfg["vocab_size"] * hidden * 4  # F32
-    # LM head re-quantized INT4
-    _lm_head_params = cfg["vocab_size"] * hidden
-    ram_decode_lmhead_bytes = _lm_head_params // 2 + (_lm_head_params // 128) * 2
-    # Norms as F32 (separate from BF16 copies)
-    ram_decode_norms_bytes = 2 * hidden * 4 * total_layers  # 2 norms × F32
-    # Gate routing weights as F32 (separate from BF16/F32 GPU copies)
-    ram_decode_routing_bytes = hidden * n_experts * 4 * total_moe_layers if n_experts > 0 else 0
-    # Shared expert re-quantized for decode
-    ram_decode_shared_bytes = 0
-    if shared_params_per_moe:
-        ram_decode_shared_bytes = shared_params_per_moe * total_moe_layers // 2  # INT4 approx
-
-    ram_decode_total_bytes = (ram_decode_attn_bytes + ram_decode_embed_bytes +
-                              ram_decode_lmhead_bytes + ram_decode_norms_bytes +
-                              ram_decode_routing_bytes + ram_decode_shared_bytes)
-
-    # ── CPU KV cache: preallocated for decode (FP16, matches GPU KV allocation) ──
-    # CPU KV cache uses FP16 (2 bytes per element), converted from GPU FP8 via F16C
-    # Token count matches the GPU KV cache capacity (bottleneck rank)
-    kv_preallocate_tokens = min(r["kv_alloc_tokens"] for r in ranks) if ranks else 0
-    if is_mla:
-        cpu_kv_per_token = (cfg["kv_lora_rank"] + cfg["qk_rope_head_dim"]) * 2  # FP16
-    else:
-        n_kv_h = cfg.get("num_key_value_heads", cfg["num_attention_heads"])
-        h_dim = cfg.get("head_dim", cfg["hidden_size"] // cfg["num_attention_heads"])
-        cpu_kv_per_token = 2 * n_kv_h * h_dim * 2  # K+V, FP16
-    ram_cpu_kv_bytes = cpu_kv_per_token * kv_preallocate_tokens * _total_full_attn
-
-    ram_layer_weights_mb = (ram_attn_bytes + ram_shared_bytes + ram_dense_bytes +
-                            ram_norms_gates_bytes + ram_embed_bytes + ram_lmhead_bytes) / MB
     ram_gpu_experts_mb = ram_gpu_experts_bytes / MB
-    ram_cpu_experts_mb = ram_cpu_experts_bytes / MB
-    ram_decode_mb = ram_decode_total_bytes / MB
-    ram_cpu_kv_mb = ram_cpu_kv_bytes / MB
-    ram_total_mb = (ram_layer_weights_mb + ram_gpu_experts_mb + ram_cpu_experts_mb +
-                    ram_decode_mb + ram_cpu_kv_mb)
+    ram_total_mb = ram_gpu_experts_mb
 
     arch = "MLA" if is_mla else "GQA"
     if hybrid:
@@ -623,21 +554,10 @@ def compute_launcher_budget(
         "ranks": ranks,
         "worst_rank": worst["rank"],
         "over_budget": over_budget,
-        "cpu_expert_gb": cpu_expert_gb,
         "kv_dtype": kv_dtype,
         "hybrid": hybrid,
         "num_full_attention_layers": _num_full_attention_layers(cfg) if hybrid else total_layers,
-        "ram_attention_mb": ram_attn_bytes / MB,
-        "ram_shared_expert_mb": ram_shared_bytes / MB,
-        "ram_dense_mlp_mb": ram_dense_bytes / MB,
-        "ram_norms_gates_mb": ram_norms_gates_bytes / MB,
-        "ram_embedding_mb": ram_embed_bytes / MB,
-        "ram_lm_head_mb": ram_lmhead_bytes / MB,
         "ram_gpu_experts_mb": ram_gpu_experts_mb,
-        "ram_cpu_experts_mb": ram_cpu_experts_mb,
-        "ram_decode_mb": ram_decode_mb,
-        "ram_cpu_kv_mb": ram_cpu_kv_mb,
-        "ram_layer_weights_mb": ram_layer_weights_mb,
         "ram_total_mb": ram_total_mb,
     }
 

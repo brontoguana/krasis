@@ -43,7 +43,7 @@ def test_pp2():
         gpu_prefill_threshold=300,
         quant_cfg=quant,
         expert_divisor=4,  # layer_grouped
-        kv_cache_mb=2000,
+        kv_cache_mb=1000,
     )
     model.load()
     load_time = time.time() - t0

@@ -334,6 +334,7 @@ def main():
             "CFG_HCS": "hcs",
             "CFG_MULTI_GPU_HCS": "multi_gpu_hcs",
             "CFG_KV_CACHE_MB": "kv_cache_mb",
+            "CFG_VRAM_SAFETY_MARGIN": "vram_safety_margin",
             "CFG_ENABLE_THINKING": "enable_thinking",
             "CFG_CPU_DECODE": None,  # CPU decode removed, ignore config key
         }
@@ -397,8 +398,8 @@ def main():
                         help="CPU threads for expert computation")
     parser.add_argument("--kv-dtype", default="fp8_e4m3",
                         choices=["fp8_e4m3", "bf16"])
-    parser.add_argument("--kv-cache-mb", type=int, default=2000,
-                        help="KV cache size in MB (default: 2000)")
+    parser.add_argument("--kv-cache-mb", type=int, default=1000,
+                        help="KV cache size in MB (default: 1000)")
     parser.add_argument("--heatmap-path", default=None,
                         help="Path to expert_heatmap.json for HCS init")
     parser.add_argument("--gpu-expert-bits", type=int, default=4, choices=[4, 8],
@@ -423,6 +424,8 @@ def main():
                         help="Pin HCS experts across ALL GPUs (more capacity, but cross-device transfer)")
     parser.add_argument("--hcs-headroom-mb", type=int, default=1024,
                         help="VRAM headroom to reserve after warmup before HCS allocation (default: 1024 MB)")
+    parser.add_argument("--vram-safety-margin", type=int, default=1500,
+                        help="VRAM safety margin in MB — reserved free VRAM below which warnings fire (default: 1500)")
     parser.add_argument("--stream-attention", action="store_true",
                         help="Stream attention weights from CPU instead of keeping resident on GPU. "
                              "Use when attention weights don't fit in VRAM (e.g. very large models).")
@@ -588,42 +591,64 @@ def main():
     gpu_store_addr = gpu_store.gpu_store_addr()
     _detail(f"GPU decode store ready (addr={gpu_store_addr:#x})")
 
-    # ── Start VRAM monitor (before warmup, warnings off) ──
+    # ── Start VRAM monitor before warmup for visibility ──
     from krasis import VramMonitor
-    SAFETY_MARGIN_MB = 3000
+    SAFETY_MARGIN_MB = args.vram_safety_margin
     vram_monitor = VramMonitor(device_indices, poll_interval_ms=50, safety_margin_mb=SAFETY_MARGIN_MB)
     vram_monitor.start()
-
-    _status("VRAM monitor started")
-    _detail(f"Polling every 50ms, safety margin: {SAFETY_MARGIN_MB:,} MB")
+    _dim("VRAM monitor started (tracking warmup)")
     for idx in device_indices:
         total = vram_monitor.total_mb(idx)
         _dim(f"cuda:{idx}: {total:,} MB total")
-    logger.info("VRAM monitor started: devices=%s, safety_margin=%d MB", device_indices, SAFETY_MARGIN_MB)
 
-    # ── Full warmup: prefill + decode (before HCS) ──
-    # Run BOTH prefill and decode to trigger ALL lazy CUDA allocations
-    # (torch.compile, KV cache, FlashInfer, cuBLAS, decode workspace, expert buffers).
-    # The VRAM monitor captures the true peak across both phases.
-    # Decode without HCS streams all experts via DMA (slow), but we only run 1 step
-    # to trigger the allocations — the actual expert DMA doesn't consume VRAM.
+    # ── Phase 1: Warmup (trigger all lazy CUDA allocations) ──
+    # torch.compile, KV cache, FlashInfer workspace, cuBLAS handles, decode buffers.
+    # These cause a transient VRAM spike that is freed afterwards. The monitor
+    # captures the spike for visibility but is reset before HCS budget measurement.
     _model._hcs_device = None
     _model._multi_gpu_hcs = False
     _status("Warmup (prefill + decode, no HCS)")
-    _dim("VRAM monitor tracking peak usage across both phases")
+    _dim("Triggering lazy CUDA allocations (torch.compile, FlashInfer, cuBLAS)")
     t_warmup = time.time()
     _warmup_prefill(_model)
     _warmup_decode(_model, num_steps=1)
     warmup_elapsed = time.time() - t_warmup
     _detail(f"Warmup complete in {warmup_elapsed:.1f}s")
 
-    # Read measured VRAM from monitor (accounts for ALL lazy allocations)
+    # Log warmup VRAM impact before resetting
+    for idx in device_indices:
+        warmup_min_free = vram_monitor.min_free_mb(idx)
+        warmup_peak_used = vram_monitor.peak_used_mb(idx)
+        total = vram_monitor.total_mb(idx)
+        _dim(f"cuda:{idx} warmup:  peak {warmup_peak_used:,} MB used / {total:,} MB total  (min free: {warmup_min_free:,} MB)")
+        logger.info(
+            "VRAM warmup cuda:%d: peak_used=%d MB, min_free=%d MB, total=%d MB",
+            idx, warmup_peak_used, warmup_min_free, total,
+        )
+
+    # Free transient warmup allocations before measuring
     gc.collect()
     torch.cuda.empty_cache()
-    # Brief pause to let monitor capture post-cleanup state
+
+    # ── Phase 2: VRAM capture (measure actual runtime VRAM, no warmup spike) ──
+    # Reset the monitor so min_free reflects only the capture phase.
+    vram_monitor.reset_min_free()
+
+    _status("VRAM capture (measuring runtime VRAM)")
+    _detail(f"Polling every 50ms, safety margin: {SAFETY_MARGIN_MB:,} MB")
+    logger.info("VRAM monitor reset for capture: devices=%s, safety_margin=%d MB", device_indices, SAFETY_MARGIN_MB)
+
+    # Run a realistic prefill + decode to capture actual runtime VRAM usage
+    _dim("Running VRAM capture: 1x large prefill + 1x decode")
+    _warmup_prefill(_model)
+    _warmup_decode(_model, num_steps=4)
+
+    # Let monitor capture post-capture state
+    gc.collect()
+    torch.cuda.empty_cache()
     time.sleep(0.1)
 
-    _status("VRAM measured (from monitor)")
+    _status("VRAM measured (post-warmup, runtime only)")
     for idx in device_indices:
         min_free = vram_monitor.min_free_mb(idx)
         peak_used = vram_monitor.peak_used_mb(idx)

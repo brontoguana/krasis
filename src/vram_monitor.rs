@@ -287,6 +287,17 @@ impl VramMonitor {
         }
     }
 
+    /// Get current free VRAM on a device (in MB) — live reading, not tracked min.
+    fn current_free_mb(&self, device_index: i32) -> u64 {
+        let Some((set_device, mem_get_info)) = load_cuda_fns() else {
+            return 0;
+        };
+        match query_free_bytes(set_device, mem_get_info, device_index) {
+            Some(free) => (free as u64) / (1024 * 1024),
+            None => 0,
+        }
+    }
+
     /// Enable runtime warnings when free VRAM drops below safety margin.
     /// Resets min-free tracking so the next poll immediately captures current state
     /// and warns if already below the margin (e.g. right after HCS allocation).

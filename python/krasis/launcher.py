@@ -332,8 +332,8 @@ CONFIG_KEYS = [
     "CFG_KV_CACHE_MB", "CFG_KV_DTYPE", "CFG_GPU_EXPERT_BITS", "CFG_CPU_EXPERT_BITS",
     "CFG_ATTENTION_QUANT", "CFG_SHARED_EXPERT_QUANT", "CFG_DENSE_MLP_QUANT",
     "CFG_LM_HEAD_QUANT", "CFG_KRASIS_THREADS", "CFG_HOST", "CFG_PORT",
-    "CFG_GPU_PREFILL_THRESHOLD", "CFG_GGUF_PATH", "CFG_FORCE_LOAD",
-    "CFG_ENABLE_THINKING",
+    "CFG_GPU_PREFILL_THRESHOLD", "CFG_GGUF_PATH", "CFG_VRAM_SAFETY_MARGIN",
+    "CFG_FORCE_LOAD", "CFG_ENABLE_THINKING",
 ]
 
 
@@ -381,7 +381,7 @@ class LauncherConfig:
         self.selected_gpu_indices: List[int] = []  # empty = all GPUs
         self.pp_partition: str = ""
         self.layer_group_size: int = 2  # layers per group (must be even, min 2 for double buffering)
-        self.kv_cache_mb: int = 2000
+        self.kv_cache_mb: int = 1000
         self.kv_dtype: str = "fp8_e4m3"
         self.gpu_expert_bits: int = 4
         self.cpu_expert_bits: int = 4
@@ -394,6 +394,7 @@ class LauncherConfig:
         self.port: int = 8012
         self.gpu_prefill_threshold: int = 300
         self.gguf_path: str = ""
+        self.vram_safety_margin: int = 1500
         self.force_load: bool = False
         self.enable_thinking: bool = True
 
@@ -476,6 +477,11 @@ class LauncherConfig:
                 pass
         if "CFG_GGUF_PATH" in saved:
             self.gguf_path = saved["CFG_GGUF_PATH"]
+        if "CFG_VRAM_SAFETY_MARGIN" in saved:
+            try:
+                self.vram_safety_margin = int(saved["CFG_VRAM_SAFETY_MARGIN"])
+            except (ValueError, TypeError):
+                pass
         if "CFG_FORCE_LOAD" in saved and saved["CFG_FORCE_LOAD"]:
             self.force_load = saved["CFG_FORCE_LOAD"] == "1"
         if "CFG_ENABLE_THINKING" in saved:
@@ -501,6 +507,7 @@ class LauncherConfig:
             "CFG_PORT": str(self.port),
             "CFG_GPU_PREFILL_THRESHOLD": str(self.gpu_prefill_threshold),
             "CFG_GGUF_PATH": self.gguf_path,
+            "CFG_VRAM_SAFETY_MARGIN": str(self.vram_safety_margin),
             "CFG_FORCE_LOAD": "1" if self.force_load else "",
             "CFG_ENABLE_THINKING": "1" if self.enable_thinking else "0",
         }
@@ -546,8 +553,6 @@ OPTIONS = [
                  choices=["fp8_e4m3", "bf16"], affects_budget=True),
     ConfigOption("GPU expert bits", "gpu_expert_bits",
                  choices=[4, 8], affects_budget=True),
-    ConfigOption("CPU expert bits", "cpu_expert_bits",
-                 choices=[4, 8], affects_budget=True),
     ConfigOption("Attention quant", "attention_quant",
                  choices=["bf16"], affects_budget=True),
     ConfigOption("Shared expert", "shared_expert_quant",
@@ -556,6 +561,8 @@ OPTIONS = [
                  choices=["int8", "bf16"], affects_budget=True),
     ConfigOption("LM head quant", "lm_head_quant",
                  choices=["int8", "bf16"], affects_budget=True),
+    ConfigOption("VRAM safety margin (MB)", "vram_safety_margin",
+                 opt_type="number", min_val=500, max_val=8000, step=100),
     ConfigOption("CPU threads", "krasis_threads",
                  opt_type="number", min_val=1, max_val=256),
     ConfigOption("Host/Port", "host", opt_type="text"),
@@ -570,6 +577,8 @@ def _format_value(opt: ConfigOption, val: Any) -> str:
     if opt.key == "layer_group_size":
         return f"{val} layers (double-buffered)"
     if opt.key == "kv_cache_mb":
+        return f"{val:,} MB"
+    if opt.key == "vram_safety_margin":
         return f"{val:,} MB"
     return str(val)
 
@@ -610,16 +619,6 @@ def _quality_annotation(native_dtype: str, config_key: str, current_val: Any) ->
         return f"{DIM}{native_label} \u2192 {current}{NC}"
 
     elif config_key == "gpu_expert_bits":
-        bits = int(current_val)
-        if bits == 16:
-            return f"{DIM}{native_label} \u2192 {native_label} \u2014 lossless{NC}"
-        elif bits == 8:
-            return f"{DIM}{native_label} \u2192 int8 \u2014 ~lossless{NC}"
-        elif bits == 4:
-            return f"{DIM}{native_label} \u2192 int4 \u2014 {YELLOW}slight loss{NC}{DIM}{NC}"
-        return f"{DIM}{native_label} \u2192 int{bits}{NC}"
-
-    elif config_key == "cpu_expert_bits":
         bits = int(current_val)
         if bits == 16:
             return f"{DIM}{native_label} \u2192 {native_label} \u2014 lossless{NC}"
@@ -1009,7 +1008,6 @@ class Launcher:
                 expert_divisor=lgs,
                 kv_dtype=self.cfg.kv_dtype,
                 gpu_expert_bits=self.cfg.gpu_expert_bits,
-                cpu_expert_bits=self.cfg.cpu_expert_bits,
                 attention_quant=self.cfg.attention_quant,
                 shared_expert_quant=self.cfg.shared_expert_quant,
                 dense_mlp_quant=self.cfg.dense_mlp_quant,
@@ -1112,18 +1110,12 @@ class Launcher:
                 }
                 _ram_map = {
                     "gpu_expert_bits": "ram_gpu_experts_mb",
-                    "cpu_expert_bits": "ram_cpu_experts_mb",
-                    "attention_quant": "ram_attention_mb",
-                    "shared_expert_quant": "ram_shared_expert_mb",
-                    "dense_mlp_quant": "ram_dense_mlp_mb",
-                    "lm_head_quant": "ram_lm_head_mb",
                 }
                 vkey = _vram_map.get(opt.key)
                 if vkey:
                     vram_mb = rank.get(vkey, 0)
                 elif opt.key == "kv_cache_mb":
                     vram_mb = self.cfg.kv_cache_mb
-                    ram_mb = b.get("ram_cpu_kv_mb", 0)
                 rkey = _ram_map.get(opt.key)
                 if rkey:
                     ram_mb = b.get(rkey, 0)
@@ -1170,9 +1162,7 @@ class Launcher:
             kv_alloc_tokens = rank.get("kv_alloc_tokens", rank["kv_tokens"])
             kv_label = "fp8" if self.cfg.kv_dtype == "fp8_e4m3" else "bf16"
 
-            ram_lw_gb = b.get('ram_layer_weights_mb', 0) / 1024
-            ram_dec_gb = b.get('ram_decode_mb', 0) / 1024
-            ram_kv_gb = b.get('ram_cpu_kv_mb', 0) / 1024
+            ram_experts_gb = b.get('ram_gpu_experts_mb', 0) / 1024
             ram_tot_gb = b.get('ram_total_mb', 0) / 1024
             sys_ram_gb = b['total_ram_gb']
 
@@ -1193,14 +1183,14 @@ class Launcher:
                 f"  {DIM}\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500{NC}",
                 f"  Total: {CYAN}{total_with_kv:>8,}{NC} / {int(gpu_vram):,} MB",
             ]
-            # Right column (RAM) — pad top to align sep + total with left
+            # Right column (RAM) — expert cache is the only significant RAM consumer
             right = [
-                f"{DIM}\u2500\u2500 System RAM (fixed costs) \u2500\u2500\u2500\u2500\u2500\u2500{NC}",
+                f"{DIM}\u2500\u2500 System RAM \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500{NC}",
                 "",
                 "",
-                f"  Layer weights:   {GREEN}{ram_lw_gb:>7.1f} GB{NC}",
-                f"  CPU decode:      {GREEN}{ram_dec_gb:>7.1f} GB{NC}",
-                f"  CPU KV cache:    {GREEN}{ram_kv_gb:>7.1f} GB{NC}",
+                f"  Expert cache:    {GREEN}{ram_experts_gb:>7.1f} GB{NC}",
+                "",
+                "",
                 f"  {DIM}\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500{NC}",
                 f"  Total:   {GREEN}{ram_tot_gb:>7.1f}{NC} / {sys_ram_gb:.0f} GB",
             ]
@@ -1339,27 +1329,7 @@ class Launcher:
         self.cfg.model_path = selected["path"]
         self.model_info = selected
 
-        # Step 2: CPU expert source selection (build INT4/INT8 or use GGUF)
-        gguf_files = scan_gguf_files(self.models_dir)
-        _hide_cursor()
-        try:
-            cpu_choice = _cpu_expert_selection_screen(
-                gguf_files,
-                preselected_gguf=self.cfg.gguf_path,
-                preselected_bits=self.cfg.cpu_expert_bits,
-            )
-        finally:
-            _show_cursor()
-
-        if cpu_choice is None:
-            return False
-        if cpu_choice.source == "build":
-            self.cfg.cpu_expert_bits = cpu_choice.bits
-            self.cfg.gguf_path = ""
-        else:
-            self.cfg.gguf_path = cpu_choice.gguf_path
-
-        # Step 3: GPU selection (always shown, pre-selects saved GPUs)
+        # Step 2: GPU selection (always shown, pre-selects saved GPUs)
         if self.hw["gpus"]:
             if self.args.selected_gpus is not None and self.selected_gpus:
                 # CLI override — skip interactive GPU selection
@@ -1528,22 +1498,18 @@ class Launcher:
         print(f"  Krasis home:     {self.krasis_home}")
         print(f"  Models dir:      {self.models_dir}")
         print(f"  Model:           {model_name}")
-        if self.cfg.gguf_path:
-            print(f"  CPU experts:     GGUF ({os.path.basename(self.cfg.gguf_path)})")
-        else:
-            print(f"  CPU experts:     Build INT{self.cfg.cpu_expert_bits} from native")
         print(f"  PP partition:    {self.cfg.pp_partition}")
         print(f"  Layer group:     {self.cfg.layer_group_size} layers (double-buffered)")
         print(f"  KV cache:        {self.cfg.kv_cache_mb:,} MB")
         print(f"  KV dtype:        {self.cfg.kv_dtype}")
         print(f"  GPU expert bits: {self.cfg.gpu_expert_bits}")
-        print(f"  CPU expert bits: {self.cfg.cpu_expert_bits}")
         print(f"  Attention quant: {self.cfg.attention_quant}")
         print(f"  Shared expert:   {self.cfg.shared_expert_quant}")
         dense_layers = (self.model_info or {}).get("dense_layers", 0)
         if dense_layers > 0:
             print(f"  Dense MLP quant: {self.cfg.dense_mlp_quant}")
         print(f"  LM head quant:   {self.cfg.lm_head_quant}")
+        print(f"  VRAM safety:     {self.cfg.vram_safety_margin:,} MB")
         print(f"  CPU threads:     {self.cfg.krasis_threads}")
         print(f"  Server:          {self.cfg.host}:{self.cfg.port}")
         if self.selected_gpus:
@@ -1563,7 +1529,8 @@ class Launcher:
                 print(f"  KV capacity: ~{_format_tokens(rank['kv_tokens'])} tokens ({kv_label})")
             else:
                 print(f"  {RED}WARNING: OVER BUDGET by {-rank['free_mb']:,.0f} MB{NC}")
-            print(f"  CPU experts: {budget['cpu_expert_gb']:.1f} GB / {budget['total_ram_gb']} GB")
+            ram_gb = budget.get('ram_total_mb', 0) / 1024
+            print(f"  Expert cache: {ram_gb:.1f} GB / {budget['total_ram_gb']} GB RAM")
         print()
 
     def launch_server(self, benchmark: bool = False, benchmark_only: bool = False,
@@ -1587,6 +1554,7 @@ class Launcher:
             "--krasis-threads", str(self.cfg.krasis_threads),
             "--host", self.cfg.host,
             "--port", str(self.cfg.port),
+            "--vram-safety-margin", str(self.cfg.vram_safety_margin),
         ]
 
         if self.cfg.gguf_path:
@@ -1640,7 +1608,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--layer-group-size", type=int, default=None,
                         help="Layers per streaming group (even number, min 2 for double buffering)")
     parser.add_argument("--kv-cache-mb", type=int, default=None,
-                        help="KV cache size in MB (default: 2000)")
+                        help="KV cache size in MB (default: 1000)")
+    parser.add_argument("--vram-safety-margin", type=int, default=None,
+                        help="VRAM safety margin in MB (default: 1500)")
     parser.add_argument("--kv-dtype", default=None,
                         help="KV cache dtype: fp8_e4m3 or bf16")
     parser.add_argument("--gpu-expert-bits", type=int, default=None,
@@ -1695,6 +1665,8 @@ def _apply_cli_overrides(cfg: LauncherConfig, args: argparse.Namespace) -> None:
         cfg.layer_group_size = max(2, args.layer_group_size)
     if args.kv_cache_mb is not None:
         cfg.kv_cache_mb = max(200, args.kv_cache_mb)
+    if args.vram_safety_margin is not None:
+        cfg.vram_safety_margin = max(500, args.vram_safety_margin)
     if args.kv_dtype is not None:
         cfg.kv_dtype = args.kv_dtype
     if args.gpu_expert_bits is not None:

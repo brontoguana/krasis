@@ -41,7 +41,7 @@ def test():
         gpu_prefill_threshold=300,
         quant_cfg=quant,
         expert_divisor=4,
-        kv_cache_mb=2000,
+        kv_cache_mb=1000,
     )
     model.load()
     print(f"Loaded in {time.time()-t0:.1f}s")
