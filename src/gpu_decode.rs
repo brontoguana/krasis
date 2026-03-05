@@ -339,9 +339,16 @@ impl VramCalibration {
 
 /// HCS state: resident expert cache + activation heatmap + dynamic eviction.
 struct HcsState {
-    /// (layer_idx, expert_idx) → cache entry.
+    /// (layer_idx, expert_idx) → cache entry (for management operations).
     cache: std::collections::HashMap<(usize, usize), HcsCacheEntry>,
-    /// Activation heatmap: (layer_idx, expert_idx) → count.
+    /// Fast flat lookup: [num_layers * num_experts_per_layer] x 4 pointers.
+    /// Each entry: [w13_packed, w13_scales, w2_packed, w2_scales]. All zero = not cached.
+    cache_fast: Vec<[u64; 4]>,
+    /// Number of layers for flat indexing.
+    cache_fast_num_layers: usize,
+    /// Activation heatmap: flat [num_layers * num_experts_per_layer] → count.
+    heatmap_flat: Vec<u64>,
+    /// Legacy heatmap for populate_from_heatmap (only used during collection).
     heatmap: std::collections::HashMap<(usize, usize), u64>,
     /// Total VRAM bytes allocated for HCS.
     vram_bytes: usize,
@@ -407,6 +414,9 @@ impl HcsState {
     fn new() -> Self {
         Self {
             cache: std::collections::HashMap::new(),
+            cache_fast: Vec::new(),
+            cache_fast_num_layers: 0,
+            heatmap_flat: Vec::new(),
             heatmap: std::collections::HashMap::new(),
             vram_bytes: 0,
             num_cached: 0,
@@ -439,14 +449,64 @@ impl HcsState {
     }
 
     /// Check if a specific (layer, expert) is cached in VRAM.
+    /// Returns the 4 pointers directly, avoiding HashMap lookup.
+    #[inline(always)]
+    fn get_fast(&self, layer: usize, expert: usize) -> Option<(u64, u64, u64, u64)> {
+        if self.num_experts_per_layer == 0 { return None; }
+        let idx = layer * self.num_experts_per_layer + expert;
+        if idx < self.cache_fast.len() {
+            let ptrs = unsafe { *self.cache_fast.get_unchecked(idx) };
+            if ptrs[0] != 0 {
+                Some((ptrs[0], ptrs[1], ptrs[2], ptrs[3]))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Legacy get for management operations (returns full entry).
     fn get(&self, layer: usize, expert: usize) -> Option<&HcsCacheEntry> {
         self.cache.get(&(layer, expert))
+    }
+
+    /// Initialize the flat cache array. Must be called after num_experts_per_layer is set.
+    fn init_cache_fast(&mut self, num_layers: usize) {
+        self.cache_fast_num_layers = num_layers;
+        let total = num_layers * self.num_experts_per_layer;
+        self.cache_fast = vec![[0u64; 4]; total];
+        self.heatmap_flat = vec![0u64; total];
+    }
+
+    /// Update flat cache when an entry is inserted.
+    fn cache_fast_set(&mut self, layer: usize, expert: usize, entry: &HcsCacheEntry) {
+        if self.num_experts_per_layer == 0 { return; }
+        let idx = layer * self.num_experts_per_layer + expert;
+        if idx < self.cache_fast.len() {
+            self.cache_fast[idx] = [
+                entry.w13_packed_ptr(), entry.w13_scales_ptr(),
+                entry.w2_packed_ptr(), entry.w2_scales_ptr(),
+            ];
+        }
+    }
+
+    /// Clear flat cache when an entry is removed.
+    fn cache_fast_clear(&mut self, layer: usize, expert: usize) {
+        if self.num_experts_per_layer == 0 { return; }
+        let idx = layer * self.num_experts_per_layer + expert;
+        if idx < self.cache_fast.len() {
+            self.cache_fast[idx] = [0u64; 4];
+        }
     }
 
     /// Record an expert activation in the heatmap and dynamic eviction bitset.
     fn record_activation(&mut self, layer: usize, expert: usize) {
         if self.collecting {
-            *self.heatmap.entry((layer, expert)).or_insert(0) += 1;
+            let idx = layer * self.num_experts_per_layer + expert;
+            if idx < self.heatmap_flat.len() {
+                self.heatmap_flat[idx] += 1;
+            }
         }
         // Set bit in current prompt activation bitset
         if self.rebalance_enabled && self.num_experts_per_layer > 0 {
@@ -825,6 +885,11 @@ struct GpuDecodeGraph {
     h_batch_w2_scales_ptrs: Vec<u64>,
     h_batch_weights: Vec<f32>,
     max_experts_per_tok: usize,
+    // Contiguous upload buffer (1 H2D instead of 5): [4*max*8 + max*4] bytes
+    d_batch_upload: cudarc::driver::CudaSlice<u8>,
+    h_batch_upload: Vec<u8>,
+    batch_upload_ptrs_bytes: usize, // 4 * max * 8
+    batch_upload_total_bytes: usize, // 4 * max * 8 + max * 4
 
     // GQA scratch (FP32 for Q, K, V, attention output)
     d_gqa_q: cudarc::driver::CudaSlice<f32>,
@@ -1277,6 +1342,12 @@ impl GpuDecodeStore {
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
         let d_batch_weights = self.device.alloc_zeros::<f32>(max_ept)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
+        // Contiguous upload buffer: [4*max_ept*8 + max_ept*4] bytes → single H2D copy per layer
+        let batch_upload_ptrs_bytes = 4 * max_ept * 8; // 4 pointer arrays x max_ept x 8 bytes
+        let batch_upload_total_bytes = batch_upload_ptrs_bytes + max_ept * 4; // + weights (f32)
+        let d_batch_upload = self.device.alloc_zeros::<u8>(batch_upload_total_bytes)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
+        let h_batch_upload = vec![0u8; batch_upload_total_bytes];
         log::info!("GpuDecodeStore: batched expert buffers allocated ({:.1} KB gate_ups + {:.1} KB partials + {:.1} KB outs)",
             (max_ept * intermediate * 2 * 2) as f64 / 1024.0,
             (max_ept * max_k_splits * max_n_v2 * 4) as f64 / 1024.0,
@@ -1377,6 +1448,10 @@ impl GpuDecodeStore {
             h_batch_w2_scales_ptrs: vec![0u64; max_ept],
             h_batch_weights: vec![0.0f32; max_ept],
             max_experts_per_tok: max_ept,
+            d_batch_upload,
+            h_batch_upload,
+            batch_upload_ptrs_bytes,
+            batch_upload_total_bytes,
             d_gqa_q,
             d_gqa_k,
             d_gqa_v,
@@ -2548,6 +2623,8 @@ impl GpuDecodeStore {
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call init_hcs first"))?;
         hcs.collecting = true;
         hcs.heatmap.clear();
+        // Clear flat heatmap too
+        for v in hcs.heatmap_flat.iter_mut() { *v = 0; }
         Ok(())
     }
 
@@ -2808,6 +2885,7 @@ impl GpuDecodeStore {
                 ext_w2_scales: dst + w2s_off,
                 pool_slot: None, // Not in hard pool
             };
+            hcs.cache_fast_set(layer_idx, expert_idx, &entry);
             hcs.cache.insert((layer_idx, expert_idx), entry);
             soft_slot_to_expert[soft_slot] = Some((layer_idx, expert_idx));
             soft_ranking.push((layer_idx, expert_idx));
@@ -5824,12 +5902,9 @@ impl GpuDecodeStore {
         for (&eid, token_list) in &expert_tokens {
             let expert = &moe.experts[eid];
 
-            // Check HCS first
+            // Check HCS first (fast flat lookup)
             let hcs_ptrs = if let Some(ref hcs) = graph.hcs {
-                hcs.get(layer_idx, eid).map(|entry| (
-                    entry.w13_packed_ptr(), entry.w13_scales_ptr(),
-                    entry.w2_packed_ptr(), entry.w2_scales_ptr(),
-                ))
+                hcs.get_fast(layer_idx, eid)
             } else { None };
 
             let (w13p, w13s, w2p, w2s) = if let Some(ptrs) = hcs_ptrs {
@@ -6166,7 +6241,15 @@ impl GpuDecodeStore {
 
         // Remove all soft-tier entries from cache
         let evicted = hcs.soft_num_cached;
+        let nep = hcs.num_experts_per_layer;
         for &(layer_idx, expert_idx) in &hcs.soft_ranking {
+            // Inline cache_fast_clear to avoid borrow conflict
+            if nep > 0 {
+                let idx = layer_idx * nep + expert_idx;
+                if idx < hcs.cache_fast.len() {
+                    hcs.cache_fast[idx] = [0u64; 4];
+                }
+            }
             hcs.cache.remove(&(layer_idx, expert_idx));
         }
         hcs.num_cached -= evicted;
@@ -6285,6 +6368,7 @@ impl GpuDecodeStore {
                 ext_w2_scales: dst + w2s_off,
                 pool_slot: None,
             };
+            hcs.cache_fast_set(layer_idx, expert_idx, &entry);
             hcs.cache.insert((layer_idx, expert_idx), entry);
             slot_to_expert[slot] = Some((layer_idx, expert_idx));
             slot += 1;
@@ -7548,11 +7632,9 @@ impl GpuDecodeStore {
         let copy_stream = self.copy_stream.0;
         let default_stream: cuda_sys::CUstream = std::ptr::null_mut();
 
-        // Check HCS first
+        // Check HCS first (fast flat lookup)
         let hcs_ptrs = if let Some(ref hcs) = graph.hcs {
-            hcs.get(layer_idx, expert_id).map(|entry| (
-                entry.w13_packed_ptr(), entry.w13_scales_ptr(),
-            ))
+            hcs.get_fast(layer_idx, expert_id).map(|(w13p, w13s, _w2p, _w2s)| (w13p, w13s))
         } else {
             None
         };
@@ -8111,12 +8193,9 @@ impl GpuDecodeStore {
                 hcs.record_activation(layer_idx, eid);
             }
 
-            // Check HCS cache
+            // Check HCS cache (fast flat array lookup)
             let hcs_ptrs = if let Some(ref hcs) = graph.hcs {
-                hcs.get(layer_idx, eid).map(|entry| (
-                    entry.w13_packed_ptr(), entry.w13_scales_ptr(),
-                    entry.w2_packed_ptr(), entry.w2_scales_ptr(),
-                ))
+                hcs.get_fast(layer_idx, eid)
             } else {
                 None
             };
@@ -8145,29 +8224,38 @@ impl GpuDecodeStore {
         if hcs_batch_count > 0 && use_v2_w13 && hcs_batch_count >= 2 {
             let t_w13 = Instant::now();
 
-            // Upload pointer arrays to GPU
+            // Pack all pointer arrays + weights into contiguous host buffer, then single H2D
+            let max_ept = graph.max_experts_per_tok;
+            let ptr_stride = max_ept * 8; // bytes per pointer array section
             unsafe {
+                let h = graph.h_batch_upload.as_mut_ptr();
+                // Layout: [w13_packed_ptrs | w13_scales_ptrs | w2_packed_ptrs | w2_scales_ptrs | weights]
+                std::ptr::copy_nonoverlapping(
+                    graph.h_batch_w13_packed_ptrs.as_ptr() as *const u8, h, hcs_batch_count * 8);
+                std::ptr::copy_nonoverlapping(
+                    graph.h_batch_w13_scales_ptrs.as_ptr() as *const u8, h.add(ptr_stride), hcs_batch_count * 8);
+                std::ptr::copy_nonoverlapping(
+                    graph.h_batch_w2_packed_ptrs.as_ptr() as *const u8, h.add(ptr_stride * 2), hcs_batch_count * 8);
+                std::ptr::copy_nonoverlapping(
+                    graph.h_batch_w2_scales_ptrs.as_ptr() as *const u8, h.add(ptr_stride * 3), hcs_batch_count * 8);
+                std::ptr::copy_nonoverlapping(
+                    graph.h_batch_weights.as_ptr() as *const u8, h.add(ptr_stride * 4), hcs_batch_count * 4);
+
+                // Single H2D copy
+                let upload_bytes = ptr_stride * 4 + max_ept * 4;
                 cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                    *graph.d_batch_w13_packed_ptrs.device_ptr(),
-                    graph.h_batch_w13_packed_ptrs.as_ptr() as *const std::ffi::c_void,
-                    hcs_batch_count * 8, std::ptr::null_mut());
-                cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                    *graph.d_batch_w13_scales_ptrs.device_ptr(),
-                    graph.h_batch_w13_scales_ptrs.as_ptr() as *const std::ffi::c_void,
-                    hcs_batch_count * 8, std::ptr::null_mut());
-                cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                    *graph.d_batch_w2_packed_ptrs.device_ptr(),
-                    graph.h_batch_w2_packed_ptrs.as_ptr() as *const std::ffi::c_void,
-                    hcs_batch_count * 8, std::ptr::null_mut());
-                cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                    *graph.d_batch_w2_scales_ptrs.device_ptr(),
-                    graph.h_batch_w2_scales_ptrs.as_ptr() as *const std::ffi::c_void,
-                    hcs_batch_count * 8, std::ptr::null_mut());
-                cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                    *graph.d_batch_weights.device_ptr(),
-                    graph.h_batch_weights.as_ptr() as *const std::ffi::c_void,
-                    hcs_batch_count * 4, std::ptr::null_mut());
+                    *graph.d_batch_upload.device_ptr(),
+                    h as *const std::ffi::c_void,
+                    upload_bytes, std::ptr::null_mut());
             }
+
+            // Device pointers into the contiguous upload buffer
+            let d_upload_base = *graph.d_batch_upload.device_ptr();
+            let d_w13p = d_upload_base;
+            let d_w13s = d_upload_base + ptr_stride as u64;
+            let d_w2p = d_upload_base + (ptr_stride * 2) as u64;
+            let d_w2s = d_upload_base + (ptr_stride * 3) as u64;
+            let d_wts = d_upload_base + (ptr_stride * 4) as u64;
 
             // Batched w13 GEMV v2: all HCS experts in one launch
             let w13_n_tiles = (w13_n + 15) / 16;
@@ -8180,8 +8268,8 @@ impl GpuDecodeStore {
                         shared_mem_bytes: w13_smem,
                     },
                     (
-                        *graph.d_batch_w13_packed_ptrs.device_ptr(),
-                        *graph.d_batch_w13_scales_ptrs.device_ptr(),
+                        d_w13p,
+                        d_w13s,
                         *graph.d_hidden.device_ptr(),
                         *graph.d_batch_partials.device_ptr(),
                         inv_wp, inv_sp,
@@ -8225,8 +8313,8 @@ impl GpuDecodeStore {
                         shared_mem_bytes: w2_smem,
                     },
                     (
-                        *graph.d_batch_w2_packed_ptrs.device_ptr(),
-                        *graph.d_batch_w2_scales_ptrs.device_ptr(),
+                        d_w2p,
+                        d_w2s,
                         *graph.d_batch_gate_ups.device_ptr(),
                         *graph.d_batch_expert_outs.device_ptr(),
                         inv_wp, inv_sp,
@@ -8247,7 +8335,7 @@ impl GpuDecodeStore {
                     (
                         *graph.d_moe_out.device_ptr(),
                         *graph.d_batch_expert_outs.device_ptr(),
-                        *graph.d_batch_weights.device_ptr(),
+                        d_wts,
                         hs as i32, hcs_batch_count as i32,
                     ),
                 ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
@@ -9757,6 +9845,12 @@ impl GpuDecodeStore {
 
         // Create HCS state with pool
         let mut hcs = HcsState::new();
+        hcs.num_experts_per_layer = num_experts_per_layer;
+        hcs.init_cache_fast(num_layers);
+        // Populate flat cache from loaded entries
+        for (&(layer_idx, expert_idx), entry) in &cache {
+            hcs.cache_fast_set(layer_idx, expert_idx, entry);
+        }
         hcs.cache = cache;
         hcs.expert_vram_bytes = slot_size;
         hcs.vram_bytes = pool_alloc_bytes;
@@ -9767,7 +9861,6 @@ impl GpuDecodeStore {
         hcs.pool_free_slots = free_slots;
         hcs.pool_slot_to_expert = slot_to_expert;
         hcs.current_activations = vec![0u64; bitset_words];
-        hcs.num_experts_per_layer = num_experts_per_layer;
         hcs.window_size = window_size;
         hcs.replacement_pct = replacement_pct as f32 / 100.0;
         hcs.rebalance_enabled = true;
@@ -9871,6 +9964,7 @@ impl GpuDecodeStore {
             let (pr_layer, pr_eid, _pr_score) = scored_cold[i];
 
             // Evict: remove from cache, reclaim slot
+            hcs.cache_fast_clear(ev_layer, ev_eid);
             let evicted = hcs.cache.remove(&(ev_layer, ev_eid)).unwrap();
             let slot = evicted.pool_slot.unwrap();
             hcs.pool_slot_to_expert[slot] = None;
@@ -9920,6 +10014,7 @@ impl GpuDecodeStore {
                     ext_w2_scales: dst + w2s_off,
                     pool_slot: Some(slot),
                 };
+                hcs.cache_fast_set(pr_layer, pr_eid, &entry);
                 hcs.cache.insert((pr_layer, pr_eid), entry);
                 hcs.pool_slot_to_expert[slot] = Some((pr_layer, pr_eid));
                 hcs.num_cached += 1;
@@ -10020,6 +10115,7 @@ impl GpuDecodeStore {
 
         hcs.vram_bytes += alloc_bytes;
         hcs.num_cached += 1;
+        hcs.cache_fast_set(layer_idx, expert_idx, &entry);
         hcs.cache.insert((layer_idx, expert_idx), entry);
 
         Ok(true)
@@ -10079,15 +10175,25 @@ impl GpuDecodeStore {
         let hcs = graph.hcs.as_ref()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call init_hcs first"))?;
 
-        if hcs.heatmap.is_empty() {
+        // Build sorted list from flat heatmap
+        let nep = hcs.num_experts_per_layer;
+        let has_data = nep > 0 && hcs.heatmap_flat.iter().any(|&v| v > 0);
+        if !has_data && hcs.heatmap.is_empty() {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "Heatmap is empty. Call hcs_start_collecting and run some tokens first."));
         }
 
         // Sort by activation count descending
-        let mut sorted: Vec<((usize, usize), u64)> = hcs.heatmap.iter()
-            .map(|(&k, &v)| (k, v))
-            .collect();
+        let mut sorted: Vec<((usize, usize), u64)> = if has_data {
+            // Use flat heatmap
+            hcs.heatmap_flat.iter().enumerate()
+                .filter(|(_, &v)| v > 0)
+                .map(|(idx, &v)| ((idx / nep, idx % nep), v))
+                .collect()
+        } else {
+            // Fallback to HashMap
+            hcs.heatmap.iter().map(|(&k, &v)| (k, v)).collect()
+        };
         sorted.sort_by(|a, b| b.1.cmp(&a.1));
 
         // Pin in order of hotness
