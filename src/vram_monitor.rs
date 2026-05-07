@@ -14,6 +14,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+const VRAM_HARD_EXIT_FLOOR_MB: u64 = 125;
+const VRAM_HARD_EXIT_CODE: i32 = 137;
+
 // CUDA runtime function signatures (resolved via dlsym)
 type CudaSetDeviceFn = unsafe extern "C" fn(i32) -> i32;
 type CudaMemGetInfoFn = unsafe extern "C" fn(*mut usize, *mut usize) -> i32;
@@ -329,6 +332,23 @@ impl VramMonitor {
 
                             if free_u64 < prev_min {
                                 dev.min_free_bytes.store(free_u64, Ordering::Relaxed);
+
+                                if free_u64 < VRAM_HARD_EXIT_FLOOR_MB * 1024 * 1024 {
+                                    let free_mb = free_u64 / (1024 * 1024);
+                                    log::error!(
+                                        "VRAM MONITOR: cuda:{} free VRAM dropped to {} MB, below hard exit floor {} MB. Exiting to prevent CUDA OOM/illegal-address state.",
+                                        dev.device_id,
+                                        free_mb,
+                                        VRAM_HARD_EXIT_FLOOR_MB,
+                                    );
+                                    eprintln!(
+                                        "\x1b[1;31mVRAM MONITOR: cuda:{} free VRAM dropped to {} MB, below hard exit floor {} MB. Exiting.\x1b[0m",
+                                        dev.device_id,
+                                        free_mb,
+                                        VRAM_HARD_EXIT_FLOOR_MB,
+                                    );
+                                    std::process::exit(VRAM_HARD_EXIT_CODE);
+                                }
 
                                 // Warn on new lows below safety margin (when enabled)
                                 if warn_enabled.load(Ordering::Relaxed) {

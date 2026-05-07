@@ -360,8 +360,14 @@ def compute_launcher_budget(
     # Pre-compute hybrid layer types
     full_attn_interval = cfg.get("full_attention_interval", 0)
 
-    # Linear attention weight bytes per layer (hybrid only)
-    linear_attn_bpl = _linear_attention_bytes_per_layer(cfg, attention_quant) if hybrid else 0
+    # Linear attention estimates are only used when attention bytes are computed
+    # from model dimensions. HQQ bytes must come from validated per-layer
+    # artifacts, loaded below, so do not estimate HQQ linear-attention layers.
+    linear_attn_bpl = (
+        _linear_attention_bytes_per_layer(cfg, attention_quant)
+        if hybrid and not attention_quant.startswith("hqq")
+        else 0
+    )
 
     # Attention params per layer
     if is_mla:
@@ -609,13 +615,21 @@ def compute_launcher_budget(
     total_moe_layers = total_layers - first_k_dense
     MB = 1024 * 1024
 
-    # ── System RAM: only the mmap'd GPU Marlin expert cache ──
+    # ── System RAM: mmap'd GPU Marlin expert cache plus HQQ host staging ──
     # Decode is 100% GPU (gpu_only=True). No CPU decode store, no CPU KV cache,
     # no separate CPU expert format. Non-expert weights (attention, norms, etc.)
-    # are loaded directly into VRAM and don't persist in system RAM.
+    # are loaded directly into VRAM and don't persist in system RAM. HQQ runtime
+    # keeps prefill and decode host formats staged so VMM slots can be refreshed
+    # without re-reading safetensors.
     ram_gpu_experts_bytes = expert_buf_bytes * n_experts * total_moe_layers if n_experts > 0 else 0
+    hqq_host_staging_bytes = 0
+    if hqq_layer_bytes is not None:
+        hqq_host_staging_bytes = sum(hqq_layer_bytes.values()) * 2
     ram_gpu_experts_mb = ram_gpu_experts_bytes / MB
-    ram_total_mb = ram_gpu_experts_mb
+    ram_hqq_host_staging_mb = hqq_host_staging_bytes / MB
+    ram_total_mb = ram_gpu_experts_mb + ram_hqq_host_staging_mb
+
+    peak_vram_mb = max(r["total_with_kv_mb"] for r in ranks) if ranks else 0
 
     arch = "MLA" if is_mla else "GQA"
     if hybrid:
@@ -637,7 +651,10 @@ def compute_launcher_budget(
         "hybrid": hybrid,
         "num_full_attention_layers": _num_full_attention_layers(cfg) if hybrid else total_layers,
         "ram_gpu_experts_mb": ram_gpu_experts_mb,
+        "ram_hqq_host_staging_mb": ram_hqq_host_staging_mb,
         "ram_total_mb": ram_total_mb,
+        "peak_vram_mb": peak_vram_mb,
+        "peak_system_ram_mb": ram_total_mb,
     }
 
 

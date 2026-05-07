@@ -9682,7 +9682,7 @@ impl GpuDecodeStore {
     #[pyo3(signature = (max_context_tokens))]
     fn allocate_prefill_engine(&mut self, max_context_tokens: usize) -> PyResult<()> {
         if self.has_hqq_runtime_slots() {
-            self.prepare_runtime_for_prefill_rust()
+            self.prepare_runtime_for_prefill_rust(max_context_tokens)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
                     format!("Failed to prepare HQQ runtime for prefill engine creation: {}", e)
                 ))?;
@@ -9735,7 +9735,7 @@ impl GpuDecodeStore {
             (cache_fast.to_vec(), ne)
         };
         let has_hqq_runtime_slots = self
-            .prepare_runtime_for_prefill_rust()
+            .prepare_runtime_for_prefill_rust(prompt_len)
             .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
         if has_hqq_runtime_slots {
             let patches = self
@@ -16060,22 +16060,25 @@ impl GpuDecodeStore {
         self.swap_hqq_runtime_stage_rust("decode")
     }
 
-    pub fn prepare_runtime_for_prefill_rust(&mut self) -> Result<bool, String> {
+    pub fn prepare_runtime_for_prefill_rust(&mut self, prompt_tokens: usize) -> Result<bool, String> {
         self.swap_to_marlin_rust()?;
         let has_hqq_runtime_slots = self.has_hqq_runtime_slots();
+        let prompt_tokens = prompt_tokens.max(1);
         if std::env::var("KRASIS_HCS_EVICT_DEBUG").is_ok() {
             eprintln!(
-                "[KRASIS-HCS-EVICT-DEBUG] prepare_runtime_for_prefill has_hqq={} slots={}",
+                "[KRASIS-HCS-EVICT-DEBUG] prepare_runtime_for_prefill has_hqq={} slots={} prompt_tokens={}",
                 has_hqq_runtime_slots,
                 self.hqq_runtime_slots.len(),
+                prompt_tokens,
             );
         }
         if has_hqq_runtime_slots {
             let hqq_growth_bytes = self.hqq_runtime_prefill_growth_bytes();
-            let (evicted, freed_mb) = self.hcs_evict_for_prefill(128);
+            let (evicted, freed_mb) = self.hcs_evict_for_prefill(prompt_tokens);
             if std::env::var("KRASIS_HCS_EVICT_DEBUG").is_ok() {
                 eprintln!(
-                    "[KRASIS-HCS-EVICT-DEBUG] prepare_runtime_for_prefill evict_result evicted={} freed_mb={:.1} hqq_growth_mb={:.0}",
+                    "[KRASIS-HCS-EVICT-DEBUG] prepare_runtime_for_prefill evict_result prompt_tokens={} evicted={} freed_mb={:.1} hqq_growth_mb={:.0}",
+                    prompt_tokens,
                     evicted,
                     freed_mb,
                     hqq_growth_bytes as f64 / (1024.0 * 1024.0),
@@ -16083,7 +16086,8 @@ impl GpuDecodeStore {
             }
             if evicted > 0 || freed_mb > 0.0 {
                 log::info!(
-                    "HQQ prefill stage guard evicted HCS soft experts: evicted={} freed_mb={:.1} hqq_growth_mb={:.0}",
+                    "HQQ prefill stage guard evicted HCS soft experts: prompt_tokens={} evicted={} freed_mb={:.1} hqq_growth_mb={:.0}",
+                    prompt_tokens,
                     evicted,
                     freed_mb,
                     hqq_growth_bytes as f64 / (1024.0 * 1024.0),

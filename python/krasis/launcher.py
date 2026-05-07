@@ -1437,8 +1437,11 @@ class Launcher:
 
             # RAM
             ram_experts_gb = b.get('ram_gpu_experts_mb', 0) / 1024
+            ram_hqq_gb = b.get('ram_hqq_host_staging_mb', 0) / 1024
             ram_tot_gb = b.get('ram_total_mb', 0) / 1024
             sys_ram_gb = b['total_ram_gb']
+            peak_vram_mb = int(b.get("peak_vram_mb", rank.get("total_with_kv_mb", total_used)))
+            peak_ram_gb = b.get("peak_system_ram_mb", b.get("ram_total_mb", 0)) / 1024
 
             COL_W = 36  # visible width per column
 
@@ -1461,7 +1464,7 @@ class Launcher:
             right = [
                 f"{DIM}\u2500\u2500 System RAM \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500{NC}",
                 f"  Expert cache:    {GREEN}{ram_experts_gb:>7.1f} GB{NC}",
-                "",
+                f"  HQQ staging:     {GREEN}{ram_hqq_gb:>7.1f} GB{NC}",
                 "",
                 "",
                 f"  {DIM}\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500{NC}",
@@ -1472,6 +1475,10 @@ class Launcher:
                 lines.append(f"  {_pad_col(l_line)}  {r_line}")
 
             # Token estimate + over-budget warning below tables
+            lines.append(
+                f"    Estimated peak: VRAM {CYAN}{peak_vram_mb:,} MB{NC} / {int(gpu_vram):,} MB, "
+                f"System RAM {GREEN}{peak_ram_gb:.1f} GB{NC} / {sys_ram_gb:.0f} GB"
+            )
             lines.append(f"    {DIM}~{_format_tokens(kv_alloc_tokens)} tokens {kv_label} KV{NC}")
             free_after_kv = rank.get("free_after_kv_mb", rank["free_mb"])
             if free_after_kv < 0:
@@ -1889,6 +1896,11 @@ class Launcher:
                 print(f"  {RED}WARNING: OVER BUDGET by {-rank['free_mb']:,.0f} MB{NC}")
             ram_gb = budget.get('ram_total_mb', 0) / 1024
             print(f"  Expert cache: {ram_gb:.1f} GB / {budget['total_ram_gb']} GB RAM")
+            peak_vram_mb = int(budget.get("peak_vram_mb", rank.get("total_with_kv_mb", rank["total_mb"])))
+            peak_ram_gb = budget.get("peak_system_ram_mb", budget.get("ram_total_mb", 0)) / 1024
+            print(
+                f"  Estimated peak: {peak_vram_mb:,} MB VRAM / {peak_ram_gb:.1f} GB system RAM"
+            )
         print()
 
     def launch_server(self, benchmark: bool = False, benchmark_only: bool = False,
