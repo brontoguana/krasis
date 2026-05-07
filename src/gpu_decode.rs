@@ -7109,7 +7109,7 @@ impl HqqRuntimeVmmBuffer {
         access.location.type_ = cuda_sys::CUmemLocationType_enum::CU_MEM_LOCATION_TYPE_DEVICE;
         access.location.id = self.device_ordinal;
         access.flags = cuda_sys::CUmemAccess_flags_enum::CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
-        let access_err = unsafe {
+        let mut access_err = unsafe {
             cu_mem_set_access(
                 self.ptr,
                 mapped_bytes,
@@ -7117,6 +7117,34 @@ impl HqqRuntimeVmmBuffer {
                 1,
             )
         };
+        if access_err == cuda_sys::CUresult::CUDA_ERROR_NOT_READY {
+            let sync_err = unsafe { cuda_sys::lib().cuCtxSynchronize() };
+            if sync_err != cuda_sys::CUresult::CUDA_SUCCESS {
+                unsafe {
+                    let _ = cu_mem_unmap(self.ptr, mapped_bytes);
+                    let _ = cu_mem_release(handle);
+                }
+                return Err(format!(
+                    "HQQ VMM set access returned NOT_READY and context sync failed ptr={:#x} bytes={} access_err={:?} sync_err={:?}",
+                    self.ptr, mapped_bytes, access_err, sync_err
+                ));
+            }
+            access_err = unsafe {
+                cu_mem_set_access(
+                    self.ptr,
+                    mapped_bytes,
+                    &access as *const cuda_sys::CUmemAccessDesc,
+                    1,
+                )
+            };
+            if access_err == cuda_sys::CUresult::CUDA_SUCCESS {
+                log::warn!(
+                    "HQQ VMM set access recovered after context sync ptr={:#x} bytes={}",
+                    self.ptr,
+                    mapped_bytes
+                );
+            }
+        }
         if access_err != cuda_sys::CUresult::CUDA_SUCCESS {
             unsafe {
                 let _ = cu_mem_unmap(self.ptr, mapped_bytes);

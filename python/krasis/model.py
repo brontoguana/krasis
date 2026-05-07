@@ -2509,6 +2509,86 @@ class KrasisModel:
         keepalive.append(tensor)
         return tensor
 
+    def _release_hqq_bf16_attention_residency(self) -> None:
+        """Drop BF16 attention projection tensors replaced by HQQ runtime descriptors."""
+        released_bytes = 0
+        released_tensors = 0
+
+        def _release_attr(obj, attr_name: str) -> None:
+            nonlocal released_bytes, released_tensors
+            if obj is None or not hasattr(obj, attr_name):
+                return
+            value = getattr(obj, attr_name)
+            if isinstance(value, torch.Tensor):
+                if value.is_cuda:
+                    released_bytes += value.numel() * value.element_size()
+                released_tensors += 1
+                setattr(obj, attr_name, None)
+
+        def _release_dict_tensor(dct, key: str) -> None:
+            nonlocal released_bytes, released_tensors
+            if not isinstance(dct, dict) or key not in dct:
+                return
+            value = dct.get(key)
+            if isinstance(value, torch.Tensor):
+                if value.is_cuda:
+                    released_bytes += value.numel() * value.element_size()
+                released_tensors += 1
+                dct[key] = None
+
+        free_before_mb = None
+        if torch.cuda.is_available():
+            try:
+                free_before_mb = torch.cuda.mem_get_info()[0] / (1024.0 * 1024.0)
+            except Exception:
+                free_before_mb = None
+
+        for hqq_layer in self.layers:
+            attn_obj = hqq_layer.attention
+            if attn_obj is None:
+                continue
+            if hqq_layer.layer_type == "linear_attention":
+                for name in ("in_proj_qkvz", "in_proj_ba", "out_proj"):
+                    _release_attr(attn_obj, name)
+            elif hasattr(attn_obj, "kv_a_proj"):
+                for name in (
+                    "q_proj", "q_a_proj", "q_b_proj",
+                    "kv_a_proj", "kv_a_proj_with_mqa", "kv_b_proj",
+                    "o_proj",
+                ):
+                    _release_attr(attn_obj, name)
+            else:
+                gqa_w = getattr(hqq_layer, "gqa_weights", None)
+                for name in ("q_proj", "k_proj", "v_proj", "o_proj", "fused_qkv"):
+                    _release_dict_tensor(gqa_w, name)
+                    _release_attr(attn_obj, name)
+
+        if released_tensors:
+            import gc
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            free_after_mb = None
+            if torch.cuda.is_available():
+                try:
+                    free_after_mb = torch.cuda.mem_get_info()[0] / (1024.0 * 1024.0)
+                except Exception:
+                    free_after_mb = None
+            if free_before_mb is not None and free_after_mb is not None:
+                logger.info(
+                    "HQQ BF16 attention projection residency released before VMM registration: tensors=%d cuda_mb=%.2f free_before=%.0f MB free_after=%.0f MB",
+                    released_tensors,
+                    released_bytes / (1024.0 * 1024.0),
+                    free_before_mb,
+                    free_after_mb,
+                )
+            else:
+                logger.info(
+                    "HQQ BF16 attention projection residency released before VMM registration: tensors=%d cuda_mb=%.2f",
+                    released_tensors,
+                    released_bytes / (1024.0 * 1024.0),
+                )
+
     def _hqq_layer_meta(
         self,
         layer_idx: int,
@@ -2800,6 +2880,7 @@ class KrasisModel:
                     "HQQ attention runtime scoping removed %d staged tensors outside the active decode segment on this store.",
                     removed,
                 )
+            self._release_hqq_bf16_attention_residency()
             store.register_hqq_runtime_slots()
             store.swap_hqq_runtime_to_prefill()
             store.swap_hqq_runtime_to_decode()
@@ -6056,64 +6137,6 @@ class KrasisModel:
         else:
             self._aux_bf16_stash = None  # streaming has its own CPU copies
 
-        def _release_hqq_bf16_attention_residency() -> None:
-            """Drop BF16 attention projection tensors replaced by HQQ runtime descriptors."""
-            released_bytes = 0
-            released_tensors = 0
-
-            def _release_attr(obj, attr_name: str) -> None:
-                nonlocal released_bytes, released_tensors
-                if obj is None or not hasattr(obj, attr_name):
-                    return
-                value = getattr(obj, attr_name)
-                if isinstance(value, torch.Tensor):
-                    if value.is_cuda:
-                        released_bytes += value.numel() * value.element_size()
-                    released_tensors += 1
-                    setattr(obj, attr_name, None)
-
-            def _release_dict_tensor(dct, key: str) -> None:
-                nonlocal released_bytes, released_tensors
-                if not isinstance(dct, dict) or key not in dct:
-                    return
-                value = dct.get(key)
-                if isinstance(value, torch.Tensor):
-                    if value.is_cuda:
-                        released_bytes += value.numel() * value.element_size()
-                    released_tensors += 1
-                    dct[key] = None
-
-            for hqq_layer in self.layers:
-                attn_obj = hqq_layer.attention
-                if attn_obj is None:
-                    continue
-                if hqq_layer.layer_type == "linear_attention":
-                    for name in ("in_proj_qkvz", "in_proj_ba", "out_proj"):
-                        _release_attr(attn_obj, name)
-                elif hasattr(attn_obj, "kv_a_proj"):
-                    for name in (
-                        "q_proj", "q_a_proj", "q_b_proj",
-                        "kv_a_proj", "kv_a_proj_with_mqa", "kv_b_proj",
-                        "o_proj",
-                    ):
-                        _release_attr(attn_obj, name)
-                else:
-                    gqa_w = getattr(hqq_layer, "gqa_weights", None)
-                    for name in ("q_proj", "k_proj", "v_proj", "o_proj", "fused_qkv"):
-                        _release_dict_tensor(gqa_w, name)
-                        _release_attr(attn_obj, name)
-
-            if released_tensors:
-                import gc
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                logger.info(
-                    "HQQ BF16 attention projection residency released: tensors=%d cuda_mb=%.2f",
-                    released_tensors,
-                    released_bytes / (1024.0 * 1024.0),
-                )
-
         hqq_registered_layers = 0
         hqq_cache_bytes = 0
         if hqq_active:
@@ -6133,7 +6156,6 @@ class KrasisModel:
                 hqq_cache_bytes >> 20,
                 self._hqq_attention_loaded_tensors,
             )
-            _release_hqq_bf16_attention_residency()
 
         for layer_idx, layer in enumerate(self.layers):
             attn = layer.attention
