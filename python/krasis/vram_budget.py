@@ -36,8 +36,21 @@ import sys
 from typing import Any, Dict, List, Optional
 
 from krasis.attention_backend import (
+    HQQ_ATTENTION_CACHE_VERSION,
+    HQQ_CACHE_PROFILE_BASELINE,
+    HQQ_DEFAULT_GROUP_SIZE,
+    attention_quant_cache_nbits,
+    cache_dir_for_model,
+    hqq46_tensor_nbits,
     hqq_attention_cache_layer_bytes,
     hqq_attention_cache_dir,
+    hqq_auto_budget_bytes_from_pct,
+    hqq_auto_candidate_from_records,
+    hqq_auto_direct_edge_nbits,
+    hqq_auto_promotion_policy,
+    is_hqq_auto_attention,
+    load_hqq_attention_manifest,
+    select_hqq_auto_promotions,
 )
 
 logger = logging.getLogger(__name__)
@@ -49,6 +62,9 @@ logger = logging.getLogger(__name__)
 # Can be overridden via compute_launcher_budget(cuda_overhead_mb=...) or
 # compute_vram_budget(overhead_mb=...).
 DEFAULT_CUDA_OVERHEAD_MB = 2000
+
+
+HQQ_ATTENTION_QUANTS = ("hqq4", "hqq46", "hqq46_auto", "hqq6", "hqq68_auto", "hqq8")
 
 
 def _read_model_config(model_path: str) -> Dict[str, Any]:
@@ -287,6 +303,219 @@ def _component_weight_bytes(params: int, quant: str, group_size: int = 128) -> i
     return params * 2  # BF16
 
 
+def _manifest_records_by_key(manifest: Dict[str, Any]) -> Dict[tuple[int, str], Dict[str, Any]]:
+    records: Dict[tuple[int, str], Dict[str, Any]] = {}
+    for record in manifest.get("tensors", []):
+        key = (int(record["layer_idx"]), str(record["tensor_name"]))
+        if key in records:
+            raise RuntimeError(f"HQQ manifest has duplicate tensor record for layer {key[0]} {key[1]}")
+        records[key] = record
+    return records
+
+
+def _legacy_hqq_cache_dir(
+    model_path: str,
+    cache_profile: str,
+    nbits: int,
+    group_size: int,
+) -> Optional[str]:
+    legacy_names = {
+        4: f"attention_hqq_v{HQQ_ATTENTION_CACHE_VERSION}",
+        46: f"attention_hqq46_v{HQQ_ATTENTION_CACHE_VERSION}",
+        460: f"attention_hqq46_auto_v{HQQ_ATTENTION_CACHE_VERSION}",
+    }
+    dirname = legacy_names.get(int(nbits))
+    if dirname is None:
+        return None
+    if cache_profile != HQQ_CACHE_PROFILE_BASELINE:
+        dirname = f"{dirname}_calib_selfcal_v1"
+    if int(group_size) != HQQ_DEFAULT_GROUP_SIZE:
+        dirname = f"{dirname}_g{int(group_size)}"
+    return os.path.join(cache_dir_for_model(model_path), dirname)
+
+
+def _layer_bytes_from_manifest_dir(cache_dir: Optional[str]) -> tuple[Optional[Dict[str, Any]], Optional[Dict[int, int]]]:
+    if not cache_dir:
+        return None, None
+    manifest_path = os.path.join(cache_dir, "manifest.json")
+    if not os.path.isfile(manifest_path):
+        return None, None
+    with open(manifest_path) as f:
+        manifest = json.load(f)
+    if not manifest.get("complete", False):
+        return None, None
+    per_layer: Dict[int, int] = {}
+    for entry in manifest.get("tensors", []):
+        file_name = entry.get("file")
+        if not file_name or not os.path.isfile(os.path.join(cache_dir, file_name)):
+            return None, None
+        layer_idx = int(entry["layer_idx"])
+        per_layer[layer_idx] = per_layer.get(layer_idx, 0) + int(entry["tensor_bytes"])
+    return manifest, per_layer
+
+
+def _hqq_cache_manifest_and_layer_bytes(
+    model_path: str,
+    cache_profile: str,
+    nbits: int,
+    group_size: int,
+) -> tuple[Optional[Dict[str, Any]], Optional[Dict[int, int]]]:
+    manifest = load_hqq_attention_manifest(model_path, cache_profile, nbits, group_size)
+    layer_bytes = hqq_attention_cache_layer_bytes(model_path, cache_profile, nbits=nbits, group_size=group_size)
+    if manifest is not None and layer_bytes is not None:
+        return manifest, layer_bytes
+    legacy_manifest, legacy_bytes = _layer_bytes_from_manifest_dir(
+        _legacy_hqq_cache_dir(model_path, cache_profile, nbits, group_size)
+    )
+    if legacy_manifest is not None and legacy_bytes is not None:
+        return legacy_manifest, legacy_bytes
+    return manifest, layer_bytes
+
+
+def _derive_hqq46_layer_bytes_from_edges(
+    model_path: str,
+    cache_profile: str,
+    group_size: int,
+) -> Optional[Dict[int, int]]:
+    base_manifest, _ = _hqq_cache_manifest_and_layer_bytes(model_path, cache_profile, 4, group_size)
+    promoted_manifest, _ = _hqq_cache_manifest_and_layer_bytes(model_path, cache_profile, 6, group_size)
+    if base_manifest is None or promoted_manifest is None:
+        return None
+
+    promoted_by_key = _manifest_records_by_key(promoted_manifest)
+    per_layer: Dict[int, int] = {}
+    for base_record in base_manifest.get("tensors", []):
+        key = (int(base_record["layer_idx"]), str(base_record["tensor_name"]))
+        selected_record = promoted_by_key.get(key) if hqq46_tensor_nbits(key[1]) == 6 else base_record
+        if selected_record is None:
+            return None
+        per_layer[key[0]] = per_layer.get(key[0], 0) + int(selected_record["tensor_bytes"])
+    return per_layer
+
+
+def _derive_hqq_auto_layer_bytes_from_edges(
+    model_path: str,
+    cache_profile: str,
+    attention_quant: str,
+    group_size: int,
+    budget_pct: Optional[float],
+) -> Optional[Dict[int, int]]:
+    direct_nbits = hqq_auto_direct_edge_nbits(attention_quant, budget_pct)
+    if direct_nbits is not None:
+        _manifest, layer_bytes = _hqq_cache_manifest_and_layer_bytes(
+            model_path,
+            cache_profile,
+            direct_nbits,
+            group_size,
+        )
+        return layer_bytes
+
+    policy = hqq_auto_promotion_policy(attention_quant)
+    base_nbits = int(policy["base_nbits"])
+    promoted_nbits = int(policy["promoted_nbits"])
+    base_manifest, _ = _hqq_cache_manifest_and_layer_bytes(model_path, cache_profile, base_nbits, group_size)
+    promoted_manifest, _ = _hqq_cache_manifest_and_layer_bytes(model_path, cache_profile, promoted_nbits, group_size)
+    if base_manifest is None or promoted_manifest is None:
+        return None
+
+    promoted_by_key = _manifest_records_by_key(promoted_manifest)
+    ordered_candidates = []
+    base_records = []
+    for base_record in base_manifest.get("tensors", []):
+        key = (int(base_record["layer_idx"]), str(base_record["tensor_name"]))
+        promoted_record = promoted_by_key.get(key)
+        if promoted_record is None:
+            return None
+        ordered_candidates.append(hqq_auto_candidate_from_records(base_record, promoted_record))
+        base_records.append(base_record)
+
+    promotion_span_bytes = sum(int(candidate["extra_bytes"]) for candidate in ordered_candidates)
+    budget_bytes = hqq_auto_budget_bytes_from_pct(
+        float(budget_pct),
+        promotion_span_bytes,
+        attention_quant,
+    )
+    selected_keys, _summary = select_hqq_auto_promotions(ordered_candidates, budget_bytes)
+    selected_extra_bytes = sum(
+        int(candidate["extra_bytes"])
+        for candidate in ordered_candidates
+        if (int(candidate["layer_idx"]), str(candidate["tensor_name"])) in selected_keys
+    )
+    if selected_extra_bytes < budget_bytes:
+        for candidate in sorted(ordered_candidates, key=lambda item: int(item["extra_bytes"])):
+            key = (int(candidate["layer_idx"]), str(candidate["tensor_name"]))
+            if key in selected_keys:
+                continue
+            extra_bytes = int(candidate["extra_bytes"])
+            if selected_extra_bytes + extra_bytes > budget_bytes:
+                continue
+            selected_keys.add(key)
+            selected_extra_bytes += extra_bytes
+            if selected_extra_bytes >= budget_bytes:
+                break
+
+    per_layer: Dict[int, int] = {}
+    for base_record in base_records:
+        key = (int(base_record["layer_idx"]), str(base_record["tensor_name"]))
+        selected_record = promoted_by_key[key] if key in selected_keys else base_record
+        per_layer[key[0]] = per_layer.get(key[0], 0) + int(selected_record["tensor_bytes"])
+    return per_layer
+
+
+def _hqq_attention_layer_bytes_for_budget(
+    model_path: str,
+    cache_profile: str,
+    attention_quant: str,
+    group_size: int,
+    budget_pct: Optional[float],
+) -> tuple[Dict[int, int], str]:
+    hqq_nbits = attention_quant_cache_nbits(attention_quant)
+    if hqq_nbits is None:
+        raise RuntimeError(f"attention_quant={attention_quant} is not an HQQ attention mode")
+
+    exact_bytes = hqq_attention_cache_layer_bytes(
+        model_path,
+        cache_profile,
+        nbits=hqq_nbits,
+        group_size=group_size,
+    )
+    if exact_bytes is not None:
+        return exact_bytes, hqq_attention_cache_dir(model_path, cache_profile, nbits=hqq_nbits, group_size=group_size)
+
+    legacy_manifest, legacy_bytes = _layer_bytes_from_manifest_dir(
+        _legacy_hqq_cache_dir(model_path, cache_profile, hqq_nbits, group_size)
+    )
+    if legacy_manifest is not None and legacy_bytes is not None:
+        source = _legacy_hqq_cache_dir(model_path, cache_profile, hqq_nbits, group_size)
+        return legacy_bytes, f"legacy artifact-size estimate from {source}"
+
+    derived_bytes = None
+    if attention_quant == "hqq46":
+        derived_bytes = _derive_hqq46_layer_bytes_from_edges(model_path, cache_profile, group_size)
+    elif is_hqq_auto_attention(attention_quant):
+        derived_bytes = _derive_hqq_auto_layer_bytes_from_edges(
+            model_path,
+            cache_profile,
+            attention_quant,
+            group_size,
+            budget_pct,
+        )
+    if derived_bytes is not None:
+        if is_hqq_auto_attention(attention_quant):
+            policy = hqq_auto_promotion_policy(attention_quant)
+            source = f"derived from validated HQQ{policy['base_nbits']} + HQQ{policy['promoted_nbits']} artifacts"
+        else:
+            source = "derived from validated HQQ4 + HQQ6 artifacts"
+        return derived_bytes, source
+
+    expected_dir = hqq_attention_cache_dir(model_path, cache_profile, nbits=hqq_nbits, group_size=group_size)
+    raise RuntimeError(
+        f"attention_quant={attention_quant} requires a complete validated HQQ artifact set. "
+        "No HQQ VRAM estimate is allowed before "
+        f"{expected_dir} is complete, unless the mode can be derived from complete validated edge caches."
+    )
+
+
 def _cpu_expert_bytes_per_expert(cfg: Dict[str, Any], bits: int = 4, group_size: int = 128) -> int:
     """CPU expert size (INT4 or INT8 with group scales)."""
     hidden = cfg["hidden_size"]
@@ -321,6 +550,7 @@ def compute_launcher_budget(
     attention_quant: str = "bf16",
     hqq_cache_profile: str = "baseline",
     hqq_group_size: int = 128,
+    hqq_auto_budget_pct: Optional[float] = None,
     shared_expert_quant: str = "int8",
     dense_mlp_quant: str = "int8",
     lm_head_quant: str = "int8",
@@ -398,22 +628,15 @@ def compute_launcher_budget(
         )
 
     hqq_layer_bytes = None
-    if attention_quant in ("hqq4", "hqq46", "hqq46_auto", "hqq6", "hqq68_auto", "hqq8"):
-        from krasis.attention_backend import attention_quant_cache_nbits
-
-        hqq_nbits = attention_quant_cache_nbits(attention_quant)
-        hqq_layer_bytes = hqq_attention_cache_layer_bytes(
+    hqq_budget_source = None
+    if attention_quant in HQQ_ATTENTION_QUANTS:
+        hqq_layer_bytes, hqq_budget_source = _hqq_attention_layer_bytes_for_budget(
             model_path,
             hqq_cache_profile,
-            nbits=hqq_nbits or 4,
-            group_size=hqq_group_size,
+            attention_quant,
+            hqq_group_size,
+            hqq_auto_budget_pct,
         )
-        if hqq_layer_bytes is None:
-            raise RuntimeError(
-                f"attention_quant={attention_quant} requires a complete validated HQQ artifact set. "
-                "No HQQ VRAM estimate is allowed before "
-                f"{hqq_attention_cache_dir(model_path, hqq_cache_profile, nbits=hqq_nbits or 4, group_size=hqq_group_size)} is complete."
-            )
 
     # Expert buffer bytes per expert (GPU Marlin format)
     expert_buf_bytes = _expert_bytes_per_expert(
@@ -655,6 +878,7 @@ def compute_launcher_budget(
         "ram_total_mb": ram_total_mb,
         "peak_vram_mb": peak_vram_mb,
         "peak_system_ram_mb": ram_total_mb,
+        "hqq_budget_source": hqq_budget_source,
     }
 
 

@@ -1128,6 +1128,7 @@ class Launcher:
         self.cfg = LauncherConfig()
         self.model_info: Optional[Dict[str, Any]] = None
         self.budget: Optional[Dict[str, Any]] = None
+        self.budget_error: Optional[str] = None
         self.selected_gpus: List[Dict[str, Any]] = []  # subset of hw["gpus"]
 
     def _compute_default_pp(self, num_layers: int) -> str:
@@ -1258,6 +1259,7 @@ class Launcher:
 
     def _compute_budget(self) -> Optional[Dict[str, Any]]:
         """Compute VRAM/RAM budget from current config."""
+        self.budget_error = None
         if not self.cfg.model_path:
             return None
         try:
@@ -1280,6 +1282,11 @@ class Launcher:
                 attention_quant=self.cfg.attention_quant,
                 hqq_cache_profile=self.cfg.hqq_cache_profile,
                 hqq_group_size=self.cfg.hqq_group_size,
+                hqq_auto_budget_pct=(
+                    self.cfg.hqq_auto_budget_pct
+                    if self.cfg.attention_quant in ("hqq46_auto", "hqq68_auto")
+                    else None
+                ),
                 shared_expert_quant=self.cfg.shared_expert_quant,
                 dense_mlp_quant=self.cfg.dense_mlp_quant,
                 lm_head_quant=self.cfg.lm_head_quant,
@@ -1287,7 +1294,8 @@ class Launcher:
                 total_ram_gb=self.hw["total_ram_gb"],
                 kv_cache_mb=self.cfg.kv_cache_mb,
             )
-        except Exception:
+        except Exception as exc:
+            self.budget_error = str(exc)
             return None
 
     def _visible_config_options(self, show_advanced: bool = False) -> List[ConfigOption]:
@@ -1479,6 +1487,9 @@ class Launcher:
                 f"    Estimated peak: VRAM {CYAN}{peak_vram_mb:,} MB{NC} / {int(gpu_vram):,} MB, "
                 f"System RAM {GREEN}{peak_ram_gb:.1f} GB{NC} / {sys_ram_gb:.0f} GB"
             )
+            hqq_source = b.get("hqq_budget_source")
+            if isinstance(hqq_source, str) and hqq_source.startswith(("derived ", "legacy ")):
+                lines.append(f"    {DIM}Attention budget: {hqq_source.split(' from ', 1)[0]}{NC}")
             lines.append(f"    {DIM}~{_format_tokens(kv_alloc_tokens)} tokens {kv_label} KV{NC}")
             free_after_kv = rank.get("free_after_kv_mb", rank["free_mb"])
             if free_after_kv < 0:
@@ -1486,6 +1497,11 @@ class Launcher:
                 lines.append(f"    {RED}\u26a0 OVER BUDGET by {over:,} MB!{NC}")
         else:
             lines.append(f"  {DIM}(budget unavailable){NC}")
+            if self.budget_error:
+                msg = self.budget_error.splitlines()[0]
+                if len(msg) > 110:
+                    msg = msg[:107] + "..."
+                lines.append(f"  {DIM}{msg}{NC}")
 
         lines.append("")
         advanced_state = "ON" if show_advanced else "off"
@@ -1901,6 +1917,11 @@ class Launcher:
             print(
                 f"  Estimated peak: {peak_vram_mb:,} MB VRAM / {peak_ram_gb:.1f} GB system RAM"
             )
+            hqq_source = budget.get("hqq_budget_source")
+            if isinstance(hqq_source, str) and hqq_source.startswith(("derived ", "legacy ")):
+                print(f"  Attention budget: {hqq_source.split(' from ', 1)[0]}")
+        elif self.budget_error:
+            print(f"\n  Budget unavailable: {self.budget_error.splitlines()[0]}")
         print()
 
     def launch_server(self, benchmark: bool = False, benchmark_only: bool = False,

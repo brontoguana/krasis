@@ -34,6 +34,7 @@ from krasis.config import (
 _hqq4_init_group_ptr = None
 _hqq4_rmse_group_ptr = None
 _hqq4_solve_group_ptr = None
+_hqq4_quantize_tensor_ptr = None
 
 
 def _require_torch():
@@ -64,16 +65,23 @@ def _save_safetensors_file(tensors: dict, path: str, *, metadata: dict) -> None:
 
 
 def _require_hqq4_rust_symbols() -> tuple:
-    global _hqq4_init_group_ptr, _hqq4_rmse_group_ptr, _hqq4_solve_group_ptr
+    global _hqq4_init_group_ptr, _hqq4_rmse_group_ptr, _hqq4_solve_group_ptr, _hqq4_quantize_tensor_ptr
     if (
         _hqq4_init_group_ptr is not None
         and _hqq4_rmse_group_ptr is not None
         and _hqq4_solve_group_ptr is not None
+        and _hqq4_quantize_tensor_ptr is not None
     ):
-        return _hqq4_init_group_ptr, _hqq4_rmse_group_ptr, _hqq4_solve_group_ptr
+        return (
+            _hqq4_init_group_ptr,
+            _hqq4_rmse_group_ptr,
+            _hqq4_solve_group_ptr,
+            _hqq4_quantize_tensor_ptr,
+        )
     try:
         from krasis.krasis import (
             hqq4_init_group_ptr,
+            hqq4_quantize_tensor_ptr,
             hqq4_rmse_group_ptr,
             hqq4_solve_group_ptr,
         )
@@ -85,7 +93,13 @@ def _require_hqq4_rust_symbols() -> tuple:
     _hqq4_init_group_ptr = hqq4_init_group_ptr
     _hqq4_rmse_group_ptr = hqq4_rmse_group_ptr
     _hqq4_solve_group_ptr = hqq4_solve_group_ptr
-    return _hqq4_init_group_ptr, _hqq4_rmse_group_ptr, _hqq4_solve_group_ptr
+    _hqq4_quantize_tensor_ptr = hqq4_quantize_tensor_ptr
+    return (
+        _hqq4_init_group_ptr,
+        _hqq4_rmse_group_ptr,
+        _hqq4_solve_group_ptr,
+        _hqq4_quantize_tensor_ptr,
+    )
 
 
 HQQ_ATTENTION_CACHE_VERSION = 5
@@ -1356,7 +1370,7 @@ def _quantize_hqq4_group_current(chunk: torch.Tensor, qmax: float) -> tuple[torc
 def quantize_hqq4_group_current_rust(chunk: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Rust shadow init path for one HQQ4 group chunk."""
     _require_torch()
-    hqq4_init_group_ptr, _, _ = _require_hqq4_rust_symbols()
+    hqq4_init_group_ptr, _, _, _ = _require_hqq4_rust_symbols()
     if chunk.ndim != 2:
         raise ValueError(f"HQQ group init expects 2D chunk, got shape {tuple(chunk.shape)}")
 
@@ -1383,7 +1397,7 @@ def solve_hqq4_fixed_zero_rust(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Rust shadow fixed-zero solve path for one HQQ4 group chunk."""
     _require_torch()
-    _, _, hqq4_solve_group_ptr = _require_hqq4_rust_symbols()
+    _, _, hqq4_solve_group_ptr, _ = _require_hqq4_rust_symbols()
     if chunk.ndim != 2:
         raise ValueError(f"HQQ group solve expects 2D chunk, got shape {tuple(chunk.shape)}")
     rows, cols = chunk.shape
@@ -1412,7 +1426,7 @@ def compute_hqq4_rmse_rust(
 ) -> torch.Tensor:
     """Rust shadow RMSE path for one HQQ4 group chunk."""
     _require_torch()
-    _, hqq4_rmse_group_ptr, _ = _require_hqq4_rust_symbols()
+    _, hqq4_rmse_group_ptr, _, _ = _require_hqq4_rust_symbols()
     if chunk.ndim != 2:
         raise ValueError(f"HQQ group RMSE expects 2D chunk, got shape {tuple(chunk.shape)}")
     rows, cols = chunk.shape
@@ -1677,6 +1691,7 @@ def quantize_hqq4_tensor_rust(
 ) -> Dict[str, torch.Tensor]:
     """Experimental Rust shadow implementation for HQQ4 tensor quantization."""
     _require_torch()
+    _, _, _, hqq4_quantize_tensor_ptr = _require_hqq4_rust_symbols()
     if weight.ndim != 2:
         raise ValueError(f"HQQ attention expects 2D weights, got shape {tuple(weight.shape)}")
     if group_size <= 0:

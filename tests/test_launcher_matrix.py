@@ -8,6 +8,9 @@ import sys
 import tempfile
 import unittest
 
+import torch
+
+from krasis.attention_backend import quantize_hqq4_tensor_rust
 from krasis import launcher as launcher_mod
 from krasis.launcher import Launcher, LauncherConfig
 
@@ -138,6 +141,13 @@ def _run_server_start_smoke(config_path: Path, scenario: str, expected_fragments
 
 class LauncherMatrixTest(unittest.TestCase):
     maxDiff = None
+
+    def test_hqq4_interactive_preset_quantizer_symbol_available(self) -> None:
+        weight = torch.linspace(-1.0, 1.0, steps=32, dtype=torch.float32).reshape(4, 8)
+        tensors = quantize_hqq4_tensor_rust(weight, group_size=8, inner_threads=1)
+        self.assertEqual(tuple(tensors["packed"].shape), (4, 4))
+        self.assertEqual(tuple(tensors["scales"].shape), (4, 1))
+        self.assertEqual(tuple(tensors["zeros"].shape), (4, 1))
 
     def test_save_config_round_trip_keeps_advanced_fields(self) -> None:
         cfg = _base_config()
