@@ -1,5 +1,38 @@
 # Krasis Benchmark Results
 
+## Standard Benchmarks - 2026-05-09 (Peak VRAM safe reductions QCN speed gate)
+
+Hardware: EPYC 7742, 1007 GB RAM, RTX 5090 32 GB selected for the run.
+
+This run validates the safe peak-VRAM reductions after the Qwen3.5 and QCN
+llama-witness accuracy gates. The standard repeatable QCN benchmark was used
+with timing instrumentation disabled.
+
+| Model / run | Command | Attention | KV | Prefill (tok/s) | Decode (tok/s) | Round trip (tok/s) | HCS | Min free VRAM | Log |
+|-------------|---------|-----------|----|----------------:|---------------:|-------------------:|-----|--------------:|-----|
+| Qwen3-Coder-Next peak-VRAM reductions | `./dev speed-test` | HQQ8 | k4v4 | 6324.1 | 88.79 | 146.00 | 15552/24576 (63.3%) | 732 MB | [log](20260509_qcn_peak_vram_safe_reductions_speedtest.log) |
+
+Validation:
+- Qwen3.5-35B HQQ4/k4v4 witness comparison passed against
+  `llama_witness_qwen35_expanded_thinking_off`: `10 PASS, 0 WARN, 0 FAIL`,
+  prefill argmax `10/10`, first-token `10/10`, average decode top-k `100.0%`.
+- Qwen3-Coder-Next HQQ8/k4v4 witness comparison passed against
+  `llama_witness_stage3_qcn_expanded`: `8 PASS, 0 WARN, 0 FAIL`, prefill
+  argmax `8/8`, first-token `8/8`, average decode top-k `100.0%`.
+
+Notes:
+- The first standard speed-test attempt exposed an unsafe prefill pinning
+  budget: long startup calibration hit the 125 MB hard VRAM floor. Pinning now
+  reserves both configured safety and the hard floor before using spare VRAM.
+- The debug speed-test also showed 50K timed prefill reserved scratch for
+  `40218` tokens while runtime chunking used two `25000` token chunks. Scratch
+  allocation is now capped to the clean runtime chunk size; this preserves
+  the chunking policy while avoiding unused scratch residency.
+- The final standard speed-test completed successfully and kept timed decode
+  minimum free VRAM at `732 MB`.
+
+---
+
 ## Experimental Runs - 2026-05-04 (Phase 2HA Q122B heatmap prefix + recency tail)
 
 Hardware: EPYC 7742, 1007 GB RAM, 1x RTX 5090 32 GB selected for the runs.

@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const VRAM_HARD_EXIT_FLOOR_MB: u64 = 125;
+pub const VRAM_HARD_EXIT_FLOOR_MB: u64 = 125;
 const VRAM_HARD_EXIT_CODE: i32 = 137;
 
 // CUDA runtime function signatures (resolved via dlsym)

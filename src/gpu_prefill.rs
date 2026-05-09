@@ -8091,6 +8091,7 @@ impl PrefillEngine {
             }
             scratch_tokens = scratch_tokens.min(diag_cap);
         }
+        scratch_tokens = clean_runtime_chunk_tokens(prompt_tokens, scratch_tokens);
         if debug_prefill {
             eprintln!(
                 "[PREFILL-DEBUG] prepare prompt_tokens={} free_mb={} total_mb={} safety_mb={} fixed_mb={:.1} per_tok_kb={:.1} usable_mb={:.1} target={} max_by_vram={} initial_scratch={}",
@@ -28551,6 +28552,8 @@ impl PrefillEngine {
             .safety_margin_mb
             .max(PREFILL_SAFETY_MARGIN_MB)
             .saturating_mul(1024 * 1024);
+        let hard_floor =
+            (crate::vram_monitor::VRAM_HARD_EXIT_FLOOR_MB as usize).saturating_mul(1024 * 1024);
         let mut max_active_for_cold = 0usize;
         for layer_chunks in &self.prescan_active_experts {
             for active in layer_chunks {
@@ -28567,7 +28570,10 @@ impl PrefillEngine {
         let cold_reserve = max_active_for_cold
             .min(n_experts)
             .saturating_mul(expert_bytes);
-        let pool_budget = free.saturating_sub(safety).saturating_sub(cold_reserve);
+        let pool_budget = free
+            .saturating_sub(safety)
+            .saturating_sub(hard_floor)
+            .saturating_sub(cold_reserve);
 
         // Total pinnable experts across all layers
         let max_total_experts = pool_budget / expert_bytes;
@@ -28575,8 +28581,8 @@ impl PrefillEngine {
 
         if experts_per_layer == 0 {
             if stderr_debug_enabled() {
-                eprintln!("[PREFILL] Pinning pool: insufficient VRAM ({:.0} MB free, {:.1} MB safety, {:.1} MB cold reserve), skipping",
-                    free as f64 / 1e6, safety as f64 / 1e6, cold_reserve as f64 / 1e6);
+                eprintln!("[PREFILL] Pinning pool: insufficient VRAM ({:.0} MB free, {:.1} MB safety, {:.1} MB hard floor, {:.1} MB cold reserve), skipping",
+                    free as f64 / 1e6, safety as f64 / 1e6, hard_floor as f64 / 1e6, cold_reserve as f64 / 1e6);
             }
             return Ok(0);
         }
@@ -28600,8 +28606,8 @@ impl PrefillEngine {
 
         if stderr_debug_enabled() {
             let avg_pinned = total_pinned as f64 / num_moe_layers as f64;
-            eprintln!("[PREFILL] Pinning pool: {:.0} MB free, {:.0} MB cold reserve, cap {}/{} experts/layer, pinning {} total ({:.1} avg/layer, {:.0} MB)",
-                free as f64 / 1e6, cold_reserve as f64 / 1e6, experts_per_layer, n_experts, total_pinned, avg_pinned, pool_bytes as f64 / 1e6);
+            eprintln!("[PREFILL] Pinning pool: {:.0} MB free, {:.0} MB safety, {:.0} MB hard floor, {:.0} MB cold reserve, cap {}/{} experts/layer, pinning {} total ({:.1} avg/layer, {:.0} MB)",
+                free as f64 / 1e6, safety as f64 / 1e6, hard_floor as f64 / 1e6, cold_reserve as f64 / 1e6, experts_per_layer, n_experts, total_pinned, avg_pinned, pool_bytes as f64 / 1e6);
         }
 
         // Allocate the pool using raw CUDA driver API
@@ -29941,6 +29947,15 @@ impl PrefillKernels {
 /// allocator fragmentation, cuBLAS workspace, and FLA Triton kernel temporaries.
 /// Used by both `prepare_for_prefill` and `hcs_evict_for_prefill` to ensure consistency.
 pub const PREFILL_SAFETY_MARGIN_MB: usize = 600;
+
+fn clean_runtime_chunk_tokens(prompt_tokens: usize, max_chunk_tokens: usize) -> usize {
+    let max_chunk = max_chunk_tokens.max(128);
+    if prompt_tokens <= max_chunk {
+        return prompt_tokens.max(128);
+    }
+    let num_chunks = prompt_tokens.div_ceil(max_chunk);
+    prompt_tokens.div_ceil(num_chunks).max(128)
+}
 
 pub fn hqq_prefill_materialize_bf16_enabled() -> bool {
     std::env::var("KRASIS_HQQ_PREFILL_MATERIALIZE_BF16")
