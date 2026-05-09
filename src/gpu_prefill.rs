@@ -6128,6 +6128,47 @@ impl PrefillEngine {
         self.ptr_prefetch_total_count = 0;
     }
 
+    fn ensure_cold_staging_capacity(&mut self, slots: usize) -> Result<(), String> {
+        if slots == 0 {
+            return Ok(());
+        }
+        if self.d_cold_staging.is_some() && self.max_cold_experts >= slots {
+            return Ok(());
+        }
+        if self.cold_expert_bytes == 0 {
+            return Err("prefill cold staging requested with zero expert byte size".to_string());
+        }
+
+        // forward_moe_fused already synchronized the main stream before reading
+        // expert counts. Freeing the previous buffer here is therefore ordered
+        // after its last use and avoids old+new allocation overlap.
+        self.d_cold_staging = None;
+        self.max_cold_experts = 0;
+
+        let total_cold = slots.saturating_mul(self.cold_expert_bytes);
+        let buf = self
+            .device
+            .alloc_zeros::<u8>(total_cold)
+            .map_err(|e| format!("alloc cold_staging slots={slots}: {e}"))?;
+        self.d_cold_staging = Some(buf);
+        self.max_cold_experts = slots;
+
+        if prefill_debug_enabled() || stderr_debug_enabled() {
+            let all_slots = self.config.n_routed_experts;
+            let all_bytes = all_slots.saturating_mul(self.cold_expert_bytes);
+            let saved_mb = all_bytes.saturating_sub(total_cold) as f64 / (1024.0 * 1024.0);
+            eprintln!(
+                "[PREFILL-DEBUG] cold staging resize slots={} all_slots={} mb={:.1} saved_vs_all_mb={:.1}",
+                slots,
+                all_slots,
+                total_cold as f64 / (1024.0 * 1024.0),
+                saved_mb,
+            );
+        }
+
+        Ok(())
+    }
+
     fn should_prefetch_dense_ptr_table(
         &self,
         moe_layer_idx: usize,
@@ -6206,10 +6247,7 @@ impl PrefillEngine {
         };
         let cold_staging_base = self.d_cold_staging.as_ref().map_or(0, |s| *s.device_ptr());
         if cold_staging_base == 0 || self.max_cold_experts < n_experts {
-            return Err(format!(
-                "dense pointer-table prefetch requires cold staging for all experts: max_cold={} n_experts={}",
-                self.max_cold_experts, n_experts
-            ));
+            return Ok(());
         }
 
         let ptrs_bytes = n_experts * std::mem::size_of::<u64>();
@@ -8077,23 +8115,8 @@ impl PrefillEngine {
         loop {
             attempt += 1;
 
-            let n_routed = self.config.n_routed_experts;
-            if n_routed > 0 {
-                let total_cold = n_routed * self.cold_expert_bytes;
-                let buf = self
-                    .device
-                    .alloc_zeros::<u8>(total_cold)
-                    .map_err(|e| format!("alloc cold_staging: {e}"))?;
-                if stderr_debug_enabled() && attempt == 1 {
-                    eprintln!(
-                        "[PREFILL] Cold staging: {} MB ({} experts)",
-                        total_cold / (1024 * 1024),
-                        n_routed
-                    );
-                }
-                self.d_cold_staging = Some(buf);
-                self.max_cold_experts = n_routed;
-            }
+            self.d_cold_staging = None;
+            self.max_cold_experts = 0;
 
             if self.fla.is_some() && self.config.layer_types.iter().any(|&t| t == 3) {
                 let nv = self.config.la_num_v_heads;
@@ -8190,7 +8213,7 @@ impl PrefillEngine {
                 );
             }
 
-            match allocate_scratch_for_prompt(&self.device, &self.config, scratch_tokens, target) {
+            match allocate_scratch_for_prompt(&self.device, &self.config, scratch_tokens, prompt_tokens) {
                 Ok(scratch) => {
                     self.scratch = scratch;
                 }
@@ -8255,15 +8278,28 @@ impl PrefillEngine {
                 cuda_sys::lib().cuMemGetInfo_v2(&mut post_alloc_free_bytes, &mut total_bytes);
             }
             if debug_prefill {
+                let fp32_floats =
+                    prefill_fp32_scratch_floats(&self.config, scratch_tokens, prompt_tokens);
+                let full_prompt_fp32_floats =
+                    prefill_chunk_local_fp32_scratch_floats(&self.config, prompt_tokens);
+                let kv_cross_floats =
+                    prefill_cross_chunk_kv_staging_floats(&self.config, prompt_tokens);
+                let saved_fp32_mb = full_prompt_fp32_floats
+                    .saturating_sub(fp32_floats)
+                    .saturating_mul(std::mem::size_of::<f32>()) as f64
+                    / (1024.0 * 1024.0);
                 eprintln!(
-                    "[PREFILL-DEBUG] alloc attempt={} scratch_tokens={} post_alloc_free_mb={} safety_mb={} cold_staging_mb={} shared_bf16_mb={:.1} shared_fp32_mb={:.1}",
+                    "[PREFILL-DEBUG] alloc attempt={} scratch_tokens={} post_alloc_free_mb={} safety_mb={} cold_staging_mb={} shared_bf16_mb={:.1} shared_fp32_mb={:.1} fp32_scratch_mb={:.1} kv_cross_floor_mb={:.1} saved_vs_full_prompt_fp32_mb={:.1}",
                     attempt,
                     scratch_tokens,
                     post_alloc_free_bytes / (1024 * 1024),
                     safety_margin_mb,
-                    (n_routed * self.cold_expert_bytes) / (1024 * 1024),
+                    0,
                     (shared_scratch_elems * 2 * std::mem::size_of::<u16>()) as f64 / (1024.0 * 1024.0),
                     (shared_scratch_elems * std::mem::size_of::<f32>()) as f64 / (1024.0 * 1024.0),
+                    fp32_floats as f64 * std::mem::size_of::<f32>() as f64 / (1024.0 * 1024.0),
+                    kv_cross_floats as f64 * std::mem::size_of::<f32>() as f64 / (1024.0 * 1024.0),
+                    saved_fp32_mb,
                 );
             }
             trace_emit_prefill_global_mark(
@@ -21714,13 +21750,45 @@ impl PrefillEngine {
             );
         }
 
+        let active: Vec<usize> = h_expert_counts
+            .iter()
+            .enumerate()
+            .filter_map(|(eid, &cnt)| if cnt > 0 { Some(eid) } else { None })
+            .collect();
+        let mi = moe_layer_idx.unwrap_or(0);
+        let mut cold_slots_needed = 0usize;
+        if self.d_expert_w1_ptrs.is_some() && !prefill_disable_ptr_table() {
+            let has_moe_data = moe_layer_idx
+                .and_then(|moe_idx| self.moe_layers.get(moe_idx))
+                .and_then(|o| o.as_ref())
+                .is_some();
+            if has_moe_data {
+                for &eid in &active {
+                    if self.expert_lookup(mi, eid).is_some() {
+                        continue;
+                    }
+                    let pin_offset = if self.pinning_active
+                        && mi < self.pinned_expert_offsets.len()
+                        && eid < self.pinned_expert_offsets[mi].len()
+                    {
+                        self.pinned_expert_offsets[mi][eid]
+                    } else {
+                        None
+                    };
+                    if pin_offset.is_none() {
+                        cold_slots_needed += 1;
+                    }
+                }
+            }
+            self.ensure_cold_staging_capacity(cold_slots_needed)?;
+        }
+
         // 4. Build expert pointer tables (zero-copy for HCS, H2D staging for cold).
         //    Instead of copying ALL experts into a contiguous fused buffer, we build
         //    a per-expert pointer table. HCS-resident experts are referenced in-place
-        //    (zero copy), cold experts are H2D'd to a small staging buffer.
-        let use_ptr_table = self.d_expert_w1_ptrs.is_some()
-            && self.d_cold_staging.is_some()
-            && !prefill_disable_ptr_table();
+        //    (zero copy), cold experts are H2D'd to a dynamic staging buffer sized
+        //    from the routed experts for this layer/chunk.
+        let use_ptr_table = self.d_expert_w1_ptrs.is_some() && !prefill_disable_ptr_table();
         let cold_staging_base = self.d_cold_staging.as_ref().map_or(0, |s| *s.device_ptr());
         let trace_step = if self.config.prefill_chunk_size > 0 {
             0
@@ -21778,15 +21846,6 @@ impl PrefillEngine {
 
         let ptrs_bytes = n_experts * 8;
         let ptr_prefetched = use_ptr_table && self.ptr_prefetch_layer == Some(layer_idx);
-        let active: Vec<usize> = if use_ptr_table {
-            h_expert_counts
-                .iter()
-                .enumerate()
-                .filter_map(|(eid, &cnt)| if cnt > 0 { Some(eid) } else { None })
-                .collect()
-        } else {
-            Vec::new()
-        };
         let mut w1_ptrs_gpu = 0u64;
         let mut w1s_ptrs_gpu = 0u64;
         let mut w2_ptrs_gpu = 0u64;
@@ -21846,7 +21905,6 @@ impl PrefillEngine {
             let mt_ptr_build = if mt { Some(Instant::now()) } else { None };
             let mut cold_h2d_ms = 0.0f64;
 
-            let mi = moe_layer_idx.unwrap_or(0);
             let mut hcs_count = 0usize;
             let mut pinned_count = 0usize;
             let mut cold_count = 0usize;
@@ -21901,10 +21959,10 @@ impl PrefillEngine {
                 }
 
                 if let Some(md) = moe_data {
-                    // Cold expert: H2D to staging slot.
-                    // If cold staging is full, fall back to the contiguous fused buffer.
+                    // Cold expert: H2D to staging slot. If cold staging is
+                    // unexpectedly full, fall back to the contiguous fused
+                    // buffer only when that legacy buffer exists.
                     if eid < md.experts.len() && cold_slot >= self.max_cold_experts {
-                        // Overflow: DMA to contiguous fused buffer slot (if available)
                         let (w1_buf, w1s_buf, w2_buf, w2s_buf) = if self.fused_expert_buf_cur == 0 {
                             (
                                 self.d_fused_expert_w1_a.as_ref(),
@@ -21963,6 +22021,15 @@ impl PrefillEngine {
                             self.h_expert_w2_ptrs[eid] = *w2b.device_ptr() + w2_off as u64;
                             self.h_expert_w2s_ptrs[eid] = *w2sb.device_ptr() + w2s_off as u64;
                             cold_count += 1;
+                        } else {
+                            return Err(format!(
+                                "prefill cold staging overflow without legacy fused buffer: layer={} active={} cold_slot={} max_cold={} requested_cold_slots={}",
+                                layer_idx,
+                                active.len(),
+                                cold_slot,
+                                self.max_cold_experts,
+                                cold_slots_needed,
+                            ));
                         }
                     } else if eid < md.experts.len() && cold_slot < self.max_cold_experts {
                         let e = &md.experts[eid];
@@ -28480,9 +28547,27 @@ impl PrefillEngine {
             (f, t)
         };
 
-        // Reserve safety margin (proportional to GPU size, min 512 MB)
-        let safety = std::cmp::max(512 * 1024 * 1024, free / 8);
-        let pool_budget = if free > safety { free - safety } else { 0 };
+        let safety = self
+            .safety_margin_mb
+            .max(PREFILL_SAFETY_MARGIN_MB)
+            .saturating_mul(1024 * 1024);
+        let mut max_active_for_cold = 0usize;
+        for layer_chunks in &self.prescan_active_experts {
+            for active in layer_chunks {
+                max_active_for_cold = max_active_for_cold.max(active.len());
+            }
+        }
+        if max_active_for_cold == 0 {
+            max_active_for_cold = prescan_counts
+                .iter()
+                .map(|layer| layer.iter().filter(|&&cnt| cnt > 0).count())
+                .max()
+                .unwrap_or(0);
+        }
+        let cold_reserve = max_active_for_cold
+            .min(n_experts)
+            .saturating_mul(expert_bytes);
+        let pool_budget = free.saturating_sub(safety).saturating_sub(cold_reserve);
 
         // Total pinnable experts across all layers
         let max_total_experts = pool_budget / expert_bytes;
@@ -28490,8 +28575,8 @@ impl PrefillEngine {
 
         if experts_per_layer == 0 {
             if stderr_debug_enabled() {
-                eprintln!("[PREFILL] Pinning pool: insufficient VRAM ({:.0} MB free, {:.1} MB safety), skipping",
-                    free as f64 / 1e6, safety as f64 / 1e6);
+                eprintln!("[PREFILL] Pinning pool: insufficient VRAM ({:.0} MB free, {:.1} MB safety, {:.1} MB cold reserve), skipping",
+                    free as f64 / 1e6, safety as f64 / 1e6, cold_reserve as f64 / 1e6);
             }
             return Ok(0);
         }
@@ -28515,8 +28600,8 @@ impl PrefillEngine {
 
         if stderr_debug_enabled() {
             let avg_pinned = total_pinned as f64 / num_moe_layers as f64;
-            eprintln!("[PREFILL] Pinning pool: {:.0} MB free, cap {}/{} experts/layer, pinning {} total ({:.1} avg/layer, {:.0} MB)",
-                free as f64 / 1e6, experts_per_layer, n_experts, total_pinned, avg_pinned, pool_bytes as f64 / 1e6);
+            eprintln!("[PREFILL] Pinning pool: {:.0} MB free, {:.0} MB cold reserve, cap {}/{} experts/layer, pinning {} total ({:.1} avg/layer, {:.0} MB)",
+                free as f64 / 1e6, cold_reserve as f64 / 1e6, experts_per_layer, n_experts, total_pinned, avg_pinned, pool_bytes as f64 / 1e6);
         }
 
         // Allocate the pool using raw CUDA driver API
@@ -29897,6 +29982,86 @@ fn hqq_prefill_materialize_weight_elems(config: &PrefillModelConfig) -> usize {
     max_elems
 }
 
+fn prefill_cross_chunk_kv_staging_floats(
+    config: &PrefillModelConfig,
+    prompt_tokens: usize,
+) -> usize {
+    if prompt_tokens == 0 || config.num_kv_heads == 0 || config.head_dim == 0 {
+        return 0;
+    }
+    // Cross-chunk GQA fallback stages K and V as BF16 in d_fp32_scratch:
+    // required bytes = prompt_tokens * (num_kv_heads * head_dim) * 2 tensors * 2 bytes.
+    // d_fp32_scratch is counted in f32 elements, so the required f32 element floor is
+    // prompt_tokens * (num_kv_heads * head_dim).
+    prompt_tokens * config.num_kv_heads * config.head_dim
+}
+
+fn prefill_chunk_local_fp32_scratch_floats(
+    config: &PrefillModelConfig,
+    max_tokens: usize,
+) -> usize {
+    let h = config.hidden_size;
+    let inter = config.intermediate_size;
+    let has_la = config.layer_types.iter().any(|&t| t == 3);
+
+    let mut max_gemm_n = std::cmp::max(h, inter * 2);
+    let gqa_q_n = config.num_q_heads * config.head_dim * 2;
+    if gqa_q_n > max_gemm_n {
+        max_gemm_n = gqa_q_n;
+    }
+    if has_la {
+        let nk = config.la_num_k_heads;
+        let dk = config.la_k_head_dim;
+        let dv = config.la_v_head_dim;
+        let hr = config.la_head_ratio.max(1);
+        let group_dim = 2 * dk + 2 * hr * dv;
+        let qkvz_n = nk * group_dim;
+        if qkvz_n > max_gemm_n {
+            max_gemm_n = qkvz_n;
+        }
+    }
+
+    let max_hqq_input_cols = h
+        .max(config.num_q_heads * config.head_dim)
+        .max(config.num_kv_heads * config.head_dim)
+        .max(config.la_num_v_heads * config.la_v_head_dim);
+    let max_hqq_groups = max_hqq_input_cols.div_ceil(config.group_size.max(1));
+    let marlin_ctmp = max_tokens * max_gemm_n;
+    let hqq_correction = max_tokens * (max_gemm_n + max_hqq_groups);
+    let la_size = if has_la {
+        let nv = config.la_num_v_heads;
+        let dk = config.la_k_head_dim;
+        let dv = config.la_v_head_dim;
+        let cs = config.la_chunk_size;
+        let conv_dim = config.la_conv_dim;
+        let fp32_la_max_len = max_tokens + config.la_chunk_size;
+        let output_buf = nv * fp32_la_max_len * dv;
+        let chunk_temps = nv * cs * (2 * dk + dv) + nv * cs;
+        let conv_transpose = fp32_la_max_len * conv_dim;
+        std::cmp::max(output_buf + chunk_temps, conv_transpose)
+    } else {
+        0
+    };
+    let fused_moe_ctmp_floor = config
+        .fused_moe_w1_ctmp_floats
+        .max(config.fused_moe_w2_ctmp_floats);
+
+    std::cmp::max(
+        std::cmp::max(std::cmp::max(marlin_ctmp, hqq_correction), la_size),
+        fused_moe_ctmp_floor,
+    )
+}
+
+fn prefill_fp32_scratch_floats(
+    config: &PrefillModelConfig,
+    max_tokens: usize,
+    prompt_tokens: usize,
+) -> usize {
+    prefill_chunk_local_fp32_scratch_floats(config, max_tokens).max(
+        prefill_cross_chunk_kv_staging_floats(config, prompt_tokens),
+    )
+}
+
 /// Compute total VRAM bytes needed for prefill buffers as a function of max_tokens.
 /// Returns (fixed_bytes, per_token_bytes) including both scratch AND fused MoE buffers.
 /// This is used to dynamically compute the largest chunk size that fits in available VRAM.
@@ -30118,11 +30283,8 @@ pub fn compute_scratch_vram(config: &PrefillModelConfig) -> (usize, usize) {
         // and num_tokens_post: 4 bytes. Small, just add a rough estimate.
         fixed += (n_routed + 1024) * 4 + 4;
 
-        // Cold staging buffer: 1 full set of all expert weights (worst case: no HCS hits).
-        // In pointer-table mode, cold staging is the primary expert DMA target.
-        // Fused expert weight buffers (A/B sets) are allocated opportunistically AFTER
-        // cold staging only if spare VRAM exists — they are NOT budgeted here.
-        fixed += n_routed * expert_bytes;
+        // Cold staging is allocated dynamically from actual routed experts after
+        // gating, so it is not a fixed prefill allocation.
 
         // Pointer table buffers: 4 arrays of n_routed * u64
         fixed += 4 * n_routed * 8;
@@ -30161,14 +30323,13 @@ pub fn allocate_scratch_for_prompt(
     _device: &Arc<CudaDevice>,
     config: &PrefillModelConfig,
     max_tokens: usize,
-    fp32_scratch_tokens: usize,
+    prompt_tokens: usize,
 ) -> Result<PrefillScratch, String> {
     let h = config.hidden_size;
     let inter = config.intermediate_size; // max of dense + moe for general scratch
     let moe_inter = config.moe_intermediate_size; // actual MoE expert intermediate
     let shared_inter = config.shared_expert_intermediate_size.max(moe_inter);
     let topk = config.num_experts_per_tok.max(1);
-    let fp32_tokens = fp32_scratch_tokens.max(max_tokens);
 
     // Fused sorted count: max_tokens * topk + n_routed * block_size (block padding for Marlin).
     // When max_tokens=0 (init/release), use fsc=1 to avoid allocating ~608 MB of block-padding
@@ -30243,52 +30404,14 @@ pub fn allocate_scratch_for_prompt(
             // 3. LA chunk loop: nv * max_tokens * dv (output buf)
             //    + nv * chunk_size * (2*dk + dv) + nv * chunk_size (temp buffers)
             // 4. Fused MoE Marlin C_tmp floor for w1 / w2 fp32_reduce kernels.
-            let mut max_gemm_n = std::cmp::max(h, inter * 2);
-            // GQA q_proj (gated = 2x)
-            let gqa_q_n = config.num_q_heads * config.head_dim * 2;
-            if gqa_q_n > max_gemm_n {
-                max_gemm_n = gqa_q_n;
-            }
-            if has_la {
-                let nk = config.la_num_k_heads;
-                let dk = config.la_k_head_dim;
-                let dv = config.la_v_head_dim;
-                let hr = config.la_head_ratio.max(1);
-                let group_dim = 2 * dk + 2 * hr * dv;
-                let qkvz_n = nk * group_dim;
-                if qkvz_n > max_gemm_n {
-                    max_gemm_n = qkvz_n;
-                }
-            }
-            let max_hqq_input_cols = h
-                .max(config.num_q_heads * config.head_dim)
-                .max(config.num_kv_heads * config.head_dim)
-                .max(config.la_num_v_heads * config.la_v_head_dim);
-            let max_hqq_groups = max_hqq_input_cols.div_ceil(config.group_size.max(1));
-            let marlin_ctmp = fp32_tokens * max_gemm_n;
-            let hqq_correction = fp32_tokens * (max_gemm_n + max_hqq_groups);
-            let la_size = if has_la {
-                let nv = config.la_num_v_heads;
-                let dk = config.la_k_head_dim;
-                let dv = config.la_v_head_dim;
-                let cs = config.la_chunk_size;
-                let conv_dim = config.la_conv_dim;
-                let fp32_la_max_len = fp32_tokens + config.la_chunk_size;
-                let output_buf = nv * fp32_la_max_len * dv;
-                let chunk_temps = nv * cs * (2 * dk + dv) + nv * cs;
-                let conv_transpose = fp32_la_max_len * conv_dim;
-                std::cmp::max(output_buf + chunk_temps, conv_transpose)
-            } else {
-                0
-            };
-            let fused_moe_ctmp_floor = config
-                .fused_moe_w1_ctmp_floats
-                .max(config.fused_moe_w2_ctmp_floats);
+            // 5. Full-prompt BF16 K/V staging for cross-chunk GQA fallback.
+            //
+            // The first four uses are chunk-local because normal prefill processes
+            // chunks through the layer stack. Only cross-chunk K/V staging scales with
+            // the prompt prefix length. Keeping those separate avoids allocating LA
+            // qkvz / Marlin C_tmp scratch for the entire prompt.
             alloc_f32(
-                std::cmp::max(
-                    std::cmp::max(std::cmp::max(marlin_ctmp, hqq_correction), la_size),
-                    fused_moe_ctmp_floor,
-                ),
+                prefill_fp32_scratch_floats(config, max_tokens, prompt_tokens),
                 "fp32_scratch",
             )?
         },

@@ -11667,16 +11667,6 @@ impl GpuDecodeStore {
     fn resize_expert_buffers(&mut self, expert_size_bytes: usize) -> PyResult<()> {
         let graph = self.graph.as_mut()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
-        // Legacy 4-buffer allocation (kept for compatibility)
-        graph.d_expert_buf_a0 = self.device.alloc_zeros::<u8>(expert_size_bytes)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
-        graph.d_expert_buf_b0 = self.device.alloc_zeros::<u8>(expert_size_bytes)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
-        graph.d_expert_buf_a1 = self.device.alloc_zeros::<u8>(expert_size_bytes)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
-        graph.d_expert_buf_b1 = self.device.alloc_zeros::<u8>(expert_size_bytes)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
-        graph.expert_buf_size = expert_size_bytes;
 
         // Compute proper double-buffer layout from the first registered MoE layer's expert sizes.
         // All experts in a model have identical weight dimensions.
@@ -11708,20 +11698,43 @@ impl GpuDecodeStore {
                         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?
                 );
             }
+            // Runtime decode uses the contiguous ping-pong buffers above. Keep the
+            // legacy per-component fields initialized as 1-byte placeholders so they
+            // do not permanently consume decode VRAM after the contiguous path exists.
+            graph.d_expert_buf_a0 = self.device.alloc_zeros::<u8>(1)
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
+            graph.d_expert_buf_b0 = self.device.alloc_zeros::<u8>(1)
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
+            graph.d_expert_buf_a1 = self.device.alloc_zeros::<u8>(1)
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
+            graph.d_expert_buf_b1 = self.device.alloc_zeros::<u8>(1)
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
+            graph.expert_buf_size = 1;
 
             log::info!(
-                "GpuDecodeStore: double-buffer 2x {:.1} KB = {:.1} MB, graph replay cold buffers {}x = {:.1} MB (w13p={}, w13s={}, w2p={}, w2s={})",
+                "GpuDecodeStore: double-buffer 2x {:.1} KB = {:.1} MB, graph replay cold buffers {}x = {:.1} MB, legacy component buffers released (saved {:.1} MB) (w13p={}, w13s={}, w2p={}, w2s={})",
                 total as f64 / 1024.0,
                 total as f64 * 2.0 / (1024.0 * 1024.0),
                 graph.d_graph_expert_bufs.len(),
                 total as f64 * graph.d_graph_expert_bufs.len() as f64 / (1024.0 * 1024.0),
+                expert_size_bytes as f64 * 4.0 / (1024.0 * 1024.0),
                 e.w13_packed_bytes, e.w13_scales_bytes,
                 e.w2_packed_bytes, e.w2_scales_bytes,
             );
+        } else {
+            // No registered MoE layer yet: keep the legacy fallback buffers valid.
+            graph.d_expert_buf_a0 = self.device.alloc_zeros::<u8>(expert_size_bytes)
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
+            graph.d_expert_buf_b0 = self.device.alloc_zeros::<u8>(expert_size_bytes)
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
+            graph.d_expert_buf_a1 = self.device.alloc_zeros::<u8>(expert_size_bytes)
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
+            graph.d_expert_buf_b1 = self.device.alloc_zeros::<u8>(expert_size_bytes)
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
+            graph.expert_buf_size = expert_size_bytes;
+            log::info!("GpuDecodeStore: legacy expert buffers 4x {} bytes ({:.1} MB total)",
+                       expert_size_bytes, expert_size_bytes as f64 * 4.0 / (1024.0 * 1024.0));
         }
-
-        log::info!("GpuDecodeStore: expert buffers 4x {} bytes ({:.1} MB total)",
-                   expert_size_bytes, expert_size_bytes as f64 * 4.0 / (1024.0 * 1024.0));
         Ok(())
     }
 
@@ -30989,17 +31002,42 @@ impl GpuDecodeStore {
         let graph = self.graph.as_ref()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
 
-        // We use expert_buf_a0 for packed data, expert_buf_b0 for scales.
-        // Both w13 and w2 reuse the same buffers sequentially.
-
+        // Prefer the runtime contiguous expert buffer when available. The old
+        // per-component buffers may be 1-byte placeholders to avoid idle VRAM use.
         let buf_a_ptr = *graph.d_expert_buf_a0.device_ptr();
         let buf_b_ptr = *graph.d_expert_buf_b0.device_ptr();
+        let use_contiguous_buf = graph.expert_buf_total_size > 0;
+        let contiguous_base = if use_contiguous_buf {
+            *graph.d_expert_buf[0].device_ptr()
+        } else {
+            0
+        };
+        let w13_packed_dst = if use_contiguous_buf {
+            contiguous_base + graph.expert_buf_w13p_offset as u64
+        } else {
+            buf_a_ptr
+        };
+        let w13_scales_dst = if use_contiguous_buf {
+            contiguous_base + graph.expert_buf_w13s_offset as u64
+        } else {
+            buf_b_ptr
+        };
+        let w2_packed_dst = if use_contiguous_buf {
+            contiguous_base + graph.expert_buf_w2p_offset as u64
+        } else {
+            buf_a_ptr
+        };
+        let w2_scales_dst = if use_contiguous_buf {
+            contiguous_base + graph.expert_buf_w2s_offset as u64
+        } else {
+            buf_b_ptr
+        };
 
         // ── Step 1: DMA w13 packed + scales, run gate_up = w13 @ hidden ──
         unsafe {
             // DMA w13 packed to buf_a
             let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                buf_a_ptr,
+                w13_packed_dst,
                 expert.w13_packed_ptr as *const std::ffi::c_void,
                 expert.w13_packed_bytes,
                 self.copy_stream.0,
@@ -31010,7 +31048,7 @@ impl GpuDecodeStore {
             }
             // DMA w13 scales to buf_b
             let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                buf_b_ptr,
+                w13_scales_dst,
                 expert.w13_scales_ptr as *const std::ffi::c_void,
                 expert.w13_scales_bytes,
                 self.copy_stream.0,
@@ -31030,7 +31068,7 @@ impl GpuDecodeStore {
         // w13 GEMV: gate_up[2*intermediate] = w13[2*intermediate, hidden] @ hidden[hidden]
         // K = hidden_size, N = 2*intermediate_size
         self.launch_marlin_gemv(
-            buf_a_ptr, buf_b_ptr,
+            w13_packed_dst, w13_scales_dst,
             *graph.d_hidden.device_ptr(),
             *graph.d_expert_gate_up.device_ptr(),
             hidden_size,
@@ -31058,7 +31096,7 @@ impl GpuDecodeStore {
         // ── Step 3: DMA w2 packed + scales, run expert_out = w2 @ intermediate ──
         unsafe {
             let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                buf_a_ptr,
+                w2_packed_dst,
                 expert.w2_packed_ptr as *const std::ffi::c_void,
                 expert.w2_packed_bytes,
                 self.copy_stream.0,
@@ -31068,7 +31106,7 @@ impl GpuDecodeStore {
                     format!("DMA w2_packed: {:?}", err)));
             }
             let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                buf_b_ptr,
+                w2_scales_dst,
                 expert.w2_scales_ptr as *const std::ffi::c_void,
                 expert.w2_scales_bytes,
                 self.copy_stream.0,
@@ -31087,7 +31125,7 @@ impl GpuDecodeStore {
         // w2 GEMV: expert_out[hidden] = w2[hidden, intermediate] @ intermediate[intermediate]
         // K = intermediate_size, N = hidden_size
         self.launch_marlin_gemv(
-            buf_a_ptr, buf_b_ptr,
+            w2_packed_dst, w2_scales_dst,
             *graph.d_expert_scratch.device_ptr(),
             *graph.d_expert_out.device_ptr(),
             intermediate_size,
