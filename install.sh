@@ -23,6 +23,13 @@ REPO="brontoguana/krasis"
 VENV_DIR="$HOME/.krasis/venv"
 BIN_DIR="$HOME/.local/bin"
 COMMANDS="krasis krasis-chat krasis-setup"
+OBSOLETE_VENV_PACKAGES=(
+    # Stale from the old SGLang/KTransformers path; Krasis no longer uses it.
+    sglang
+    # Not a current Krasis install dependency. Old copies constrain fsspec and
+    # create unrelated pip resolver warnings during Krasis upgrades.
+    datasets
+)
 
 BOLD="\033[1m"
 DIM="\033[2m"
@@ -36,6 +43,25 @@ info()  { echo -e "${CYAN}${BOLD}=>${NC} $1"; }
 ok()    { echo -e "${GREEN}${BOLD}OK${NC} $1"; }
 warn()  { echo -e "${YELLOW}${BOLD}!!${NC} $1"; }
 err()   { echo -e "${RED}${BOLD}ERROR${NC} $1"; exit 1; }
+
+cleanup_obsolete_venv_packages() {
+    [[ -x "$VENV_DIR/bin/python" ]] || return 0
+    [[ ${#OBSOLETE_VENV_PACKAGES[@]} -gt 0 ]] || return 0
+
+    local stale=()
+    local package
+    for package in "${OBSOLETE_VENV_PACKAGES[@]}"; do
+        if "$VENV_DIR/bin/python" -m pip show "$package" &>/dev/null; then
+            stale+=("$package")
+        fi
+    done
+
+    if [[ ${#stale[@]} -gt 0 ]]; then
+        info "Removing obsolete packages from Krasis-managed venv: ${stale[*]}"
+        "$VENV_DIR/bin/python" -m pip uninstall -y "${stale[@]}" >/dev/null \
+            || err "Failed to remove obsolete packages from $VENV_DIR."
+    fi
+}
 
 # ── Channel (stable / prerelease) ────────────────────────────────────
 CHANNEL="stable"
@@ -341,6 +367,8 @@ if [[ "$NEED_VENV" == true ]]; then
     "$VENV_DIR/bin/pip" install --upgrade pip -q \
         || warn "pip upgrade failed (non-fatal, continuing...)"
 fi
+
+cleanup_obsolete_venv_packages
 
 # ── Create models directory ──────────────────────────────────────────
 mkdir -p "$HOME/.krasis/models"

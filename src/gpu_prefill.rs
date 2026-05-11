@@ -3250,6 +3250,7 @@ pub struct PrefillEngine {
     pub prefill_pinning_disabled: bool,
     pub optional_pinning_budget_mb: Option<usize>,
     pub last_prepare_post_alloc_free_mb: usize,
+    pub measured_scratch_alloc_overhead_bytes: usize,
     // Pre-scan routing data: per-layer list of predicted active expert IDs per chunk
     pub prescan_active_experts: Vec<Vec<Vec<usize>>>, // [moe_layer_idx][chunk_idx] -> Vec<expert_id>
     pub prescan_token_count: usize,
@@ -8083,19 +8084,19 @@ impl PrefillEngine {
         let safety_margin_mb = self.safety_margin_mb.max(PREFILL_SAFETY_MARGIN_MB);
         let safety_bytes: usize = safety_margin_mb * 1024 * 1024;
 
-        let usable = free_bytes
-            .saturating_sub(safety_bytes)
-            .saturating_sub(fixed_bytes);
-        let max_by_vram = if per_token_bytes > 0 {
-            usable / per_token_bytes
-        } else {
-            50000
-        };
-
         // Size for this prompt: cap at prompt_tokens (no point allocating more).
         // Minimum 128: fused MoE Marlin kernels use block_size_m=64, need enough
         // tokens for stable sorted dispatch. 128 adds ~57 MB scratch overhead.
         let target = prompt_tokens.min(50000);
+        let scratch_budget_bytes = free_bytes
+            .saturating_sub(safety_bytes)
+            .saturating_sub(self.measured_scratch_alloc_overhead_bytes);
+        let max_by_vram = exact_scratch_token_cap(
+            &self.config,
+            target,
+            prompt_tokens,
+            scratch_budget_bytes,
+        );
         let mut scratch_tokens = max_by_vram.min(target).max(128);
         let debug_prefill = prefill_debug_enabled();
         if let Ok(raw) = std::env::var("KRASIS_PREFILL_DIAG_MAX_CHUNK_TOKENS") {
@@ -8112,14 +8113,15 @@ impl PrefillEngine {
         scratch_tokens = clean_runtime_chunk_tokens(prompt_tokens, scratch_tokens);
         if debug_prefill {
             eprintln!(
-                "[PREFILL-DEBUG] prepare prompt_tokens={} free_mb={} total_mb={} safety_mb={} fixed_mb={:.1} per_tok_kb={:.1} usable_mb={:.1} target={} max_by_vram={} initial_scratch={}",
+                "[PREFILL-DEBUG] prepare prompt_tokens={} free_mb={} total_mb={} safety_mb={} fixed_mb={:.1} per_tok_kb={:.1} measured_alloc_overhead_mb={:.1} scratch_budget_mb={:.1} target={} max_by_vram={} initial_scratch={}",
                 prompt_tokens,
                 free_bytes / (1024 * 1024),
                 total_bytes / (1024 * 1024),
                 safety_margin_mb,
                 fixed_bytes as f64 / (1024.0 * 1024.0),
                 per_token_bytes as f64 / 1024.0,
-                usable as f64 / (1024.0 * 1024.0),
+                self.measured_scratch_alloc_overhead_bytes as f64 / (1024.0 * 1024.0),
+                scratch_budget_bytes as f64 / (1024.0 * 1024.0),
                 target,
                 max_by_vram,
                 scratch_tokens,
@@ -8297,6 +8299,13 @@ impl PrefillEngine {
                 cuda_sys::lib().cuMemGetInfo_v2(&mut post_alloc_free_bytes, &mut total_bytes);
             }
             self.last_prepare_post_alloc_free_mb = post_alloc_free_bytes / (1024 * 1024);
+            let estimated_scratch_bytes =
+                estimate_scratch_vram_for_prompt(&self.config, scratch_tokens, prompt_tokens);
+            let actual_alloc_bytes = free_bytes.saturating_sub(post_alloc_free_bytes);
+            let observed_overhead = actual_alloc_bytes.saturating_sub(estimated_scratch_bytes);
+            if observed_overhead > self.measured_scratch_alloc_overhead_bytes {
+                self.measured_scratch_alloc_overhead_bytes = observed_overhead;
+            }
             if debug_prefill {
                 let fp32_floats =
                     prefill_fp32_scratch_floats(&self.config, scratch_tokens, prompt_tokens);
@@ -8397,8 +8406,12 @@ impl PrefillEngine {
             scratch_tokens = next_tokens;
         }
 
-        let scratch_mb =
-            (fixed_bytes + per_token_bytes * scratch_tokens) as f64 / (1024.0 * 1024.0);
+        let scratch_mb = estimate_scratch_vram_for_prompt(
+            &self.config,
+            scratch_tokens,
+            prompt_tokens,
+        ) as f64
+            / (1024.0 * 1024.0);
         if debug_prefill {
             eprintln!(
                 "[PREFILL-DEBUG] ready scratch_tokens={} scratch_mb={:.1} prompt_tokens={} post_alloc_free_mb={} safety_mb={}",
@@ -30351,6 +30364,242 @@ pub fn compute_scratch_vram(config: &PrefillModelConfig) -> (usize, usize) {
     }
 
     (fixed, per_token)
+}
+
+fn estimate_scratch_vram_for_prompt(
+    config: &PrefillModelConfig,
+    max_tokens: usize,
+    prompt_tokens: usize,
+) -> usize {
+    let h = config.hidden_size;
+    let inter = config.intermediate_size;
+    let moe_inter = config.moe_intermediate_size;
+    let shared_inter = config.shared_expert_intermediate_size.max(moe_inter);
+    let topk = config.num_experts_per_tok.max(1);
+    let block_size_moe: usize = 64;
+    let n_routed = config.n_routed_experts;
+    let fsc = if max_tokens > 0 {
+        max_tokens.saturating_mul(topk)
+            .saturating_add(n_routed.saturating_mul(block_size_moe))
+    } else {
+        1
+    };
+    let has_mamba2 = config.layer_types.iter().any(|&t| t == 1);
+    let has_la = config.layer_types.iter().any(|&t| t == 3);
+    let la_max_len = if has_la {
+        max_tokens.saturating_add(config.la_chunk_size)
+    } else {
+        max_tokens
+    };
+
+    let mut bytes = 0usize;
+    let mut add = |elems: usize, elem_bytes: usize| {
+        bytes = bytes.saturating_add(elems.saturating_mul(elem_bytes));
+    };
+
+    add(max_tokens.saturating_mul(h), 2); // hidden
+    add(max_tokens.saturating_mul(h), 2); // residual
+
+    if max_tokens > 0 && config.n_routed_experts > 0 {
+        let shared_w13_n = if config.moe_gated {
+            2usize.saturating_mul(shared_inter)
+        } else {
+            shared_inter
+        };
+        let shared_scratch_n = h.max(shared_w13_n);
+        let shared_scratch_elems = max_tokens.saturating_mul(shared_scratch_n);
+        add(shared_scratch_elems, 2); // d_shared_bf16_scratch1
+        add(shared_scratch_elems, 2); // d_shared_bf16_scratch2
+        add(shared_scratch_elems, 4); // d_shared_fp32_scratch
+        add(config.sms.saturating_mul(MARLIN_MAX_LOCK_SLOTS_PER_SM), 4); // d_shared_workspace
+    }
+
+    if has_la {
+        let nv = config.la_num_v_heads;
+        let dk = config.la_k_head_dim;
+        let dv = config.la_v_head_dim;
+        let fla_bt = 64usize;
+        let fla_total = ((max_tokens + fla_bt - 1) / fla_bt).saturating_mul(fla_bt);
+        let fla_nt = fla_total / fla_bt;
+        add(fla_total.saturating_mul(nv), 4); // d_fla_g_cumsum
+        add(fla_total.saturating_mul(nv).saturating_mul(fla_bt), 4); // d_fla_a
+        add(fla_total.saturating_mul(nv).saturating_mul(fla_bt), 2); // d_fla_ai
+        add(fla_total.saturating_mul(nv).saturating_mul(dk), 2); // d_fla_w
+        add(fla_total.saturating_mul(nv).saturating_mul(dv), 2); // d_fla_u
+        add(fla_nt.saturating_mul(nv).saturating_mul(dk).saturating_mul(dv), 2); // d_fla_h
+        add(nv.saturating_mul(dk).saturating_mul(dv), 2); // d_fla_h0
+        add(nv.saturating_mul(dk).saturating_mul(dv), 4); // d_fla_final_state
+        add(fla_total.saturating_mul(nv).saturating_mul(dv), 2); // d_fla_v_new
+        add(fla_total.saturating_mul(nv).saturating_mul(dv), 2); // d_fla_o
+    }
+
+    let mut max_inter = std::cmp::max(
+        max_tokens.saturating_mul(inter.max(shared_inter)).saturating_mul(2),
+        max_tokens
+            .saturating_mul(config.num_q_heads)
+            .saturating_mul(config.head_dim)
+            .saturating_mul(2),
+    );
+    if has_la {
+        let fla_req = la_max_len
+            .saturating_mul(config.la_num_v_heads)
+            .saturating_mul(config.la_k_head_dim);
+        max_inter = max_inter.max(fla_req);
+    }
+    add(max_inter, 2); // scratch1
+    add(max_inter, 2); // scratch2
+
+    if hqq_prefill_materialize_bf16_enabled() && max_tokens > 0 {
+        add(hqq_prefill_materialize_weight_elems(config), 2);
+    }
+    add(prefill_fp32_scratch_floats(config, max_tokens, prompt_tokens), 4);
+    add(config.sms.saturating_mul(MARLIN_MAX_LOCK_SLOTS_PER_SM), 4); // workspace
+    add(max_tokens.saturating_mul(topk), 4); // topk_weights
+    add(max_tokens.saturating_mul(topk), 4); // topk_ids
+    add(max_tokens, 4); // token_ids
+    add(max_tokens, 4); // positions
+
+    let attn_dim = h
+        .max(config.num_q_heads.saturating_mul(config.head_dim))
+        .max(config.la_num_v_heads.saturating_mul(config.la_v_head_dim));
+    add(max_tokens.saturating_mul(attn_dim), 2); // attn_out
+    add(
+        max_tokens
+            .saturating_mul(config.num_q_heads)
+            .saturating_mul(config.head_dim),
+        2,
+    ); // q
+    add(
+        max_tokens
+            .saturating_mul(config.num_kv_heads)
+            .saturating_mul(config.head_dim),
+        2,
+    ); // k
+    add(
+        max_tokens
+            .saturating_mul(config.num_kv_heads)
+            .saturating_mul(config.head_dim),
+        2,
+    ); // v
+    add(config.vocab_size, 4); // logits
+
+    if has_mamba2 {
+        add(
+            config
+                .mamba_conv_dim
+                .saturating_mul(config.mamba_conv_kernel.max(2).saturating_sub(1)),
+            4,
+        );
+        add(
+            config
+                .mamba_num_heads
+                .saturating_mul(config.mamba_head_dim)
+                .saturating_mul(config.mamba_d_state),
+            4,
+        );
+        let dim = 2usize
+            .saturating_mul(config.mamba_d_inner)
+            .saturating_add(2usize.saturating_mul(config.mamba_n_groups).saturating_mul(config.mamba_d_state))
+            .saturating_add(config.mamba_num_heads);
+        add(max_tokens.saturating_mul(dim), 2);
+        add(max_tokens.saturating_mul(config.mamba_d_inner), 2);
+    }
+
+    let w1_n = if config.moe_gated {
+        2usize.saturating_mul(moe_inter)
+    } else {
+        moe_inter
+    };
+    add(max_tokens.saturating_mul(config.n_routed_experts.max(1)), 4); // gate_out
+    add(fsc.saturating_mul(w1_n.max(h)), 4); // moe_accum
+    add(fsc.saturating_mul(h), 2); // moe_gathered
+    add(fsc.saturating_mul(h), 2); // moe_expert_out
+    add(fsc.saturating_mul(w1_n), 2); // moe_gate_up
+    add(fsc.saturating_mul(moe_inter), 2); // moe_inter
+    add(fsc, 4); // gather_src_map
+    add(max_tokens.saturating_mul(topk), 4); // gather_weight_map
+    add(fsc / block_size_moe + n_routed, 4); // fused_expert_ids
+    add(1, 4); // num_tokens_post
+    add(config.n_routed_experts.max(1), 4); // expert_counts
+    add(config.n_routed_experts.max(1).saturating_add(1), 4); // expert_offsets
+    add(config.n_routed_experts.max(1), 4); // write_offsets
+
+    if config.n_routed_experts > 0 {
+        let bits = config.expert_bits as usize;
+        let gs = config.group_size.max(1);
+        let w13_bytes = h.saturating_mul(w1_n).saturating_mul(bits) / 8;
+        let w13_scales = (h / gs).saturating_mul(w1_n).saturating_mul(2);
+        let w2_bytes = moe_inter.saturating_mul(h).saturating_mul(bits) / 8;
+        let w2_scales = (moe_inter / gs).saturating_mul(h).saturating_mul(2);
+        add(w13_bytes, 2);
+        add(w13_scales, 2);
+        add(w2_bytes, 2);
+        add(w2_scales, 2);
+    } else {
+        add(8, 1);
+    }
+
+    if has_la {
+        let nv = config.la_num_v_heads;
+        let dk = config.la_k_head_dim;
+        let dv = config.la_v_head_dim;
+        let cs = config.la_chunk_size;
+        add(la_max_len.saturating_mul(nv).saturating_mul(dk), 4); // la_q
+        add(la_max_len.saturating_mul(nv).saturating_mul(dk), 4); // la_k
+        add(la_max_len.saturating_mul(nv).saturating_mul(dv), 4); // la_v
+        add(la_max_len.saturating_mul(nv).saturating_mul(dv), 2); // la_z
+        add(la_max_len.saturating_mul(nv), 2); // la_b
+        add(la_max_len.saturating_mul(nv), 2); // la_a
+        add(la_max_len.saturating_mul(nv), 4); // la_beta
+        add(la_max_len.saturating_mul(nv), 4); // la_gate
+        add(config.la_conv_dim.saturating_mul(la_max_len), 4); // la_conv_out
+        add(la_max_len.saturating_mul(nv).saturating_mul(dv), 4); // la_v_beta
+        add(la_max_len.saturating_mul(nv).saturating_mul(dk), 4); // la_k_beta
+        add(nv.saturating_mul(cs).saturating_mul(dv), 4); // la_v_new
+        let num_chunks = (la_max_len + cs - 1) / cs;
+        add(nv.saturating_mul(num_chunks).saturating_mul(cs), 4); // la_g_cum
+        add(
+            nv.saturating_mul(num_chunks)
+                .saturating_mul(cs)
+                .saturating_mul(cs),
+            4,
+        ); // la_attn
+        add(nv.saturating_mul(dk).saturating_mul(dv), 4); // la_state
+        add(nv.saturating_mul(cs).saturating_mul(dv), 4); // la_chunk_out
+        add(nv.saturating_mul(cs).saturating_mul(dk), 4); // la_q_contig
+        let group_dim =
+            2usize.saturating_mul(dk).saturating_add(2usize.saturating_mul(config.la_head_ratio).saturating_mul(dv));
+        let qkvz_dim = config.la_num_k_heads.saturating_mul(group_dim);
+        add(max_tokens.saturating_mul(qkvz_dim), 2); // la_proj_buf
+    }
+    if config.num_q_heads > 0 {
+        add(config.num_q_heads.saturating_mul(max_tokens), 4); // fa2_lse
+    }
+
+    bytes
+}
+
+fn exact_scratch_token_cap(
+    config: &PrefillModelConfig,
+    target_tokens: usize,
+    prompt_tokens: usize,
+    scratch_budget_bytes: usize,
+) -> usize {
+    let target = target_tokens.max(128);
+    if estimate_scratch_vram_for_prompt(config, 128, prompt_tokens) > scratch_budget_bytes {
+        return 128;
+    }
+    let mut lo = 128usize;
+    let mut hi = target;
+    while lo < hi {
+        let mid = lo + (hi - lo + 1) / 2;
+        if estimate_scratch_vram_for_prompt(config, mid, prompt_tokens) <= scratch_budget_bytes {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    lo
 }
 
 pub fn allocate_scratch(

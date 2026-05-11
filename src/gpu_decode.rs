@@ -3014,9 +3014,17 @@ impl VramCalibration {
     }
 
     /// Optional prefill pinning budget from measured no-pinning surplus.
-    fn optional_pinning_budget_mb(&self, tokens: usize, post_alloc_free_mb: u64) -> Option<u64> {
+    fn optional_pinning_budget_mb(
+        &self,
+        tokens: usize,
+        post_alloc_free_mb: u64,
+        resident_hcs_reserve_mb: u64,
+    ) -> Option<u64> {
         let required = self.required_post_scratch_free_mb(tokens)?;
-        Some(post_alloc_free_mb.saturating_sub(required))
+        Some(
+            post_alloc_free_mb
+                .saturating_sub(required.saturating_add(resident_hcs_reserve_mb)),
+        )
     }
 
     /// Max HCS budget for prefill of N tokens (what survives prefill).
@@ -3041,6 +3049,20 @@ impl VramCalibration {
     fn required_idle_free_mb(&self, tokens: usize) -> u64 {
         self.baseline_free_mb
             .saturating_sub(self.decode_hcs_budget_mb(tokens))
+    }
+
+    /// Resident HCS must preserve both the decode floor for the current prompt
+    /// and the measured short-prefill floor needed by the next request.  The
+    /// short-prefill floor is runtime-measured during startup, so this remains
+    /// model/config/hardware specific without a fixed extra reserve.
+    fn resident_hcs_idle_floor_mb(&self, tokens: usize) -> u64 {
+        self.required_idle_free_mb(tokens)
+            .max(self.required_prefill_idle_free_mb(self.short_tokens))
+    }
+
+    fn resident_hcs_budget_mb(&self, tokens: usize) -> u64 {
+        self.baseline_free_mb
+            .saturating_sub(self.resident_hcs_idle_floor_mb(tokens))
     }
 
     /// Decode VRAM consumption per token in KB (linear rate).
@@ -9440,6 +9462,24 @@ impl GpuDecodeStore {
         );
         Ok(())
     }
+
+    fn prefill_pinning_resident_hcs_reserve_mb(
+        &self,
+        cal: &VramCalibration,
+        prompt_tokens: usize,
+    ) -> u64 {
+        let Some(graph) = self.graph.as_ref() else {
+            return 0;
+        };
+        let Some(hcs) = graph.hcs.as_ref() else {
+            return 0;
+        };
+        let max_hcs_mb = hcs.hard_budget_mb.saturating_add(hcs.soft_max_mb) as u64;
+        if max_hcs_mb == 0 {
+            return 0;
+        }
+        cal.resident_hcs_budget_mb(prompt_tokens).min(max_hcs_mb)
+    }
 }
 
 #[pymethods]
@@ -9456,7 +9496,13 @@ impl GpuDecodeStore {
     ) -> Option<usize> {
         self.vram_calibration
             .and_then(|cal| {
-                cal.optional_pinning_budget_mb(prompt_tokens, post_alloc_free_mb as u64)
+                let resident_hcs_reserve_mb =
+                    self.prefill_pinning_resident_hcs_reserve_mb(&cal, prompt_tokens);
+                cal.optional_pinning_budget_mb(
+                    prompt_tokens,
+                    post_alloc_free_mb as u64,
+                    resident_hcs_reserve_mb,
+                )
             })
             .map(|mb| mb as usize)
     }
@@ -9788,6 +9834,10 @@ impl GpuDecodeStore {
     ) -> PyResult<(usize, usize, bool)> {
         let prompt_len = token_ids.len();
         let vram_calibration = self.vram_calibration;
+        let resident_hcs_pinning_reserve_mb = vram_calibration
+            .as_ref()
+            .map(|cal| self.prefill_pinning_resident_hcs_reserve_mb(cal, prompt_len))
+            .unwrap_or(0);
         self.refresh_trace_config();
         let trace_cfg = self.active_trace_owned();
         let (cache_fast_snapshot, ne) = {
@@ -9839,6 +9889,7 @@ impl GpuDecodeStore {
                         cal.optional_pinning_budget_mb(
                             prompt_len,
                             engine.last_prepare_post_alloc_free_mb() as u64,
+                            resident_hcs_pinning_reserve_mb,
                         )
                     })
                     .map(|mb| mb as usize)
@@ -12979,16 +13030,19 @@ impl GpuDecodeStore {
         let long_decode_budget = cal.decode_hcs_budget_mb(long_tokens);
         let short_prefill_idle_floor = cal.required_prefill_idle_free_mb(short_tokens);
         let short_idle_floor = cal.required_idle_free_mb(short_tokens);
+        let resident_idle_floor = cal.resident_hcs_idle_floor_mb(short_tokens);
+        let resident_hcs_budget = cal.resident_hcs_budget_mb(short_tokens);
 
         let msg = format!(
             "VRAM calibration: baseline {} MB | prefill {:.1} KB/tok, decode {:.1} KB/tok | \
              HCS allowance prefill: short {} MB, long {} MB | decode: short {} MB, long {} MB | \
-             idle floors prefill={} MB decode={} MB",
+             idle floors prefill={} MB decode={} MB resident={} MB | resident HCS budget={} MB",
             baseline_free_mb,
             prefill_kb_per_tok, decode_kb_per_tok,
             short_prefill_budget, long_prefill_budget,
             short_decode_budget, long_decode_budget,
-            short_prefill_idle_floor, short_idle_floor,
+            short_prefill_idle_floor, short_idle_floor, resident_idle_floor,
+            resident_hcs_budget,
         );
         log::info!("{}", msg);
         log::info!("  prefill: short={}tok/{}MB, long={}tok/{}MB",
@@ -13142,7 +13196,7 @@ impl GpuDecodeStore {
         let mut soft_chunks: Vec<AlignedGpuBuffer> = Vec::with_capacity(planned_num_chunks);
         let mut soft_host_chunks: Vec<PinnedHostChunk> = Vec::with_capacity(planned_num_chunks);
         let startup_idle_floor_mb = self.vram_calibration
-            .map(|cal| cal.required_idle_free_mb(cal.short_tokens) as usize)
+            .map(|cal| cal.resident_hcs_idle_floor_mb(cal.short_tokens) as usize)
             .unwrap_or(safety_margin_mb);
         let mut actual_soft_slots = 0usize;
         for c in 0..planned_num_chunks {
@@ -17813,6 +17867,7 @@ impl GpuDecodeStore {
             prefill_pinning_disabled: false,
             optional_pinning_budget_mb: None,
             last_prepare_post_alloc_free_mb: 0,
+            measured_scratch_alloc_overhead_bytes: 0,
             prescan_active_experts: Vec::new(),
             prescan_token_count: 0,
             // Expert pointer table for zero-copy MoE
@@ -27971,9 +28026,9 @@ impl GpuDecodeStore {
         }
 
         let spc = hcs.soft_slots_per_chunk;
-        let decode_budget_mb = cal.map(|cal| cal.decode_hcs_budget_mb(actual_tokens) as usize)
+        let decode_budget_mb = cal.map(|cal| cal.resident_hcs_budget_mb(actual_tokens) as usize)
             .unwrap_or(hcs.hard_budget_mb + hcs.soft_max_mb);
-        let idle_floor_mb = cal.map(|cal| cal.required_idle_free_mb(actual_tokens) as usize)
+        let idle_floor_mb = cal.map(|cal| cal.resident_hcs_idle_floor_mb(actual_tokens) as usize)
             .unwrap_or(hcs.safety_margin_mb);
         let target_soft_mb = decode_budget_mb
             .saturating_sub(hcs.hard_budget_mb)

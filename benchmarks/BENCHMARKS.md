@@ -1,5 +1,33 @@
 # Krasis Benchmark Results
 
+## Standard Benchmarks - 2026-05-11 (Typhon resident-HCS and scratch budget rc17 candidate)
+
+Hardware: Ryzen 9 5900X, 117 GB RAM, RTX 5080 16 GB under WSL.
+
+This run validates the resident-HCS, optional prefill pinning, and prefill
+scratch budget fixes after public rc16 failed this Typhon profile during
+benchmark warmup/timed prefill. Timing instrumentation was disabled for the
+final clean run.
+
+| Model / run | Command | Attention | KV | Prefill (tok/s) | Decode (tok/s) | Round trip (tok/s) | HCS | Min free VRAM | Logs |
+|-------------|---------|-----------|----|----------------:|---------------:|-------------------:|-----|--------------:|------|
+| Qwen3.5-35B-A3B Typhon HQQ46 budget fix | installed `krasis run /tmp/krasis-aql0_caf.conf --benchmark` | HQQ46_AUTO | k4v4 | 4537.7 | 60.14 | 119.01 | 4510/10240 (44.0%) | 1307 MB | [report](20260511_typhon_q35_hqq46_resident_hcs_budget_report.log), [server log](20260511_typhon_q35_hqq46_resident_hcs_budget_krasis.log) |
+
+Calibration:
+- Short probe: `500` prompt tokens, baseline `9531 MB`, prefill post-alloc
+  `8943 MB`, prefill min `8591 MB`, decode min `9497 MB`.
+- Long probe: `39920` prompt tokens, baseline `9497 MB`, prefill post-alloc
+  `1557 MB`, prefill min `1173 MB`, decode min `9495 MB`.
+- Resident HCS budget: `7955 MB`, derived from the stricter measured
+  request-start floor instead of short decode alone.
+
+Notes:
+- The benchmark completed warmup, 1K/5K/10K/20K/35K/50K prefill, internal
+  decode, and HTTP round-trip rows with no hard-floor exit.
+- The 50K timed prefill row completed at `4279.0 tok/s`.
+
+---
+
 ## Standard Benchmarks - 2026-05-11 (Measured prefill pinning budget rc15)
 
 Hardware: EPYC 7742, 1007 GB RAM, RTX 5090 32 GB selected for the run.

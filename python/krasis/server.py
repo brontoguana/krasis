@@ -1625,10 +1625,12 @@ def main():
     decode_short_free = max(0, post_calibration_free_mb - short_decode_delta)
     decode_long_free = max(0, post_calibration_free_mb - long_decode_delta)
 
-    # GPU0 HCS is fully reclaimable. Load as much as measured short-prompt decode
-    # can hold above the safety margin; longer prompts are handled by measured
-    # per-request soft reload limits in Rust.
-    reclaimable_hcs_budget = max(0, decode_short_free - SAFETY_MARGIN_MB)
+    # GPU0 HCS is fully reclaimable. Load only what the measured runtime can
+    # hold while preserving both the short decode floor and the short prefill
+    # floor. Decode-only capacity can be optimistic for the server-ready idle
+    # state because the next request still needs room for prompt setup/prefill
+    # before per-request eviction can make progress.
+    reclaimable_hcs_budget = max(0, min(decode_short_free, prefill_short_free) - SAFETY_MARGIN_MB)
 
     vram_monitor.report_event("calibration_end")
     _status("VRAM calibration complete")
