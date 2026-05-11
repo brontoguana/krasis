@@ -672,6 +672,7 @@ def _build_heatmap(model: KrasisModel, save_path: str, args) -> str:
         first_token, prompt_len, kv_overflow = gpu_store.rust_prefill_tokens(
             tokens,
             temperature=decode_params["temperature"],
+            disable_pinning=True,
         )
         if not kv_overflow and first_token not in stop_ids:
             generated = gpu_store.gpu_generate_batch(
@@ -2207,7 +2208,7 @@ def main():
             prompt_tokens = _chat_prompt_tokens(_model, "Hi")
             stop_ids = _default_stop_ids(_model)
             first_token, prompt_len, _kv_overflow = gpu_store.rust_prefill_tokens(
-                prompt_tokens, temperature=0.6
+                prompt_tokens, temperature=0.6, disable_pinning=True
             )
 
             # Copy KV cache and LA state to each aux store
