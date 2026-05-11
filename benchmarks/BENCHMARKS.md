@@ -1,17 +1,18 @@
 # Krasis Benchmark Results
 
-## Standard Benchmarks - 2026-05-11 (Typhon resident-HCS and scratch budget rc17 candidate)
+## Standard Benchmarks - 2026-05-11 (Typhon resident-HCS and scratch budget rc17)
 
 Hardware: Ryzen 9 5900X, 117 GB RAM, RTX 5080 16 GB under WSL.
 
-This run validates the resident-HCS, optional prefill pinning, and prefill
+These runs validate the resident-HCS, optional prefill pinning, and prefill
 scratch budget fixes after public rc16 failed this Typhon profile during
 benchmark warmup/timed prefill. Timing instrumentation was disabled for the
-final clean run.
+clean benchmark runs.
 
 | Model / run | Command | Attention | KV | Prefill (tok/s) | Decode (tok/s) | Round trip (tok/s) | HCS | Min free VRAM | Logs |
 |-------------|---------|-----------|----|----------------:|---------------:|-------------------:|-----|--------------:|------|
-| Qwen3.5-35B-A3B Typhon HQQ46 budget fix | installed `krasis run /tmp/krasis-aql0_caf.conf --benchmark` | HQQ46_AUTO | k4v4 | 4537.7 | 60.14 | 119.01 | 4510/10240 (44.0%) | 1307 MB | [report](20260511_typhon_q35_hqq46_resident_hcs_budget_report.log), [server log](20260511_typhon_q35_hqq46_resident_hcs_budget_krasis.log) |
+| Qwen3.5-35B-A3B Typhon HQQ46 public rc17 | installed `krasis --config /tmp/krasis-aql0_caf.conf --benchmark` from public `v0.1.66-rc17` cp312 wheel | HQQ46_AUTO | k4v4 | 4666.1 | 59.54 | 131.22 | 4510/10240 (44.0%) | 1307 MB | [full log](20260511_typhon_q35_hqq46_rc17_public_benchmark.log), [report](20260511_typhon_q35_hqq46_rc17_public_benchmark_report.log), [server log](20260511_typhon_q35_hqq46_rc17_public_krasis.log) |
+| Qwen3.5-35B-A3B Typhon HQQ46 local rc17 candidate | installed local cp312 wheel, `krasis --config /tmp/krasis-aql0_caf.conf --benchmark` | HQQ46_AUTO | k4v4 | 4537.7 | 60.14 | 119.01 | 4510/10240 (44.0%) | 1307 MB | [report](20260511_typhon_q35_hqq46_resident_hcs_budget_report.log), [server log](20260511_typhon_q35_hqq46_resident_hcs_budget_krasis.log) |
 
 Calibration:
 - Short probe: `500` prompt tokens, baseline `9531 MB`, prefill post-alloc
@@ -22,9 +23,11 @@ Calibration:
   request-start floor instead of short decode alone.
 
 Notes:
-- The benchmark completed warmup, 1K/5K/10K/20K/35K/50K prefill, internal
+- The public rc17 benchmark completed warmup, 1K/5K/10K/20K/35K/50K prefill,
+  internal decode, and HTTP round-trip rows with no hard-floor exit.
+- The local candidate benchmark completed warmup, 1K/5K/10K/20K/35K/50K prefill, internal
   decode, and HTTP round-trip rows with no hard-floor exit.
-- The 50K timed prefill row completed at `4279.0 tok/s`.
+- The public rc17 50K timed prefill row completed at `4666.1 tok/s`.
 
 ---
 
