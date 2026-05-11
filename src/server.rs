@@ -748,7 +748,17 @@ fn handle_chat_completion(
 
     // Extract messages JSON for Python
     let messages_json = match req.get("messages") {
-        Some(m) => m.to_string(),
+        Some(m) => {
+            if let Err(e) = crate::text_only_messages::validate_text_only_messages(m) {
+                let _ = send_json(
+                    stream,
+                    400,
+                    &format!(r#"{{"error":"{}"}}"#, json_escape(&e)),
+                );
+                return;
+            }
+            m.to_string()
+        }
         None => {
             let _ = send_json(stream, 400, r#"{"error":"Missing messages"}"#);
             return;
@@ -875,11 +885,20 @@ fn handle_chat_completion(
         // Dynamically allocate scratch sized for this prompt
         if let Err(e) = engine.prepare_for_prefill(token_ids.len()) {
             engine.clear_prefill_hcs_guard_store_addr();
+            engine.set_optional_pinning_budget_mb(None);
             let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
             let _ = store.prepare_runtime_for_decode_rust();
             let _ = send_json(stream, 500, &format!(r#"{{"error":"Scratch alloc failed: {}"}}"#, e));
             return;
         }
+        let pinning_budget_mb = {
+            let store = unsafe { &*(state.gpu_store_addr as *const GpuDecodeStore) };
+            store.prefill_optional_pinning_budget_mb(
+                token_ids.len(),
+                engine.last_prepare_post_alloc_free_mb(),
+            )
+        };
+        engine.set_optional_pinning_budget_mb(pinning_budget_mb);
 
         let suppress_tokens = {
             let store = unsafe { &*(state.gpu_store_addr as *const GpuDecodeStore) };
@@ -904,6 +923,7 @@ fn handle_chat_completion(
             log::error!("Failed to release scratch: {}", e);
         }
         engine.clear_prefill_hcs_guard_store_addr();
+        engine.set_optional_pinning_budget_mb(None);
 
         // Convert stop token strings to IDs, and always include model's EOS tokens
         let mut stop_ids: Vec<usize> = state.eos_stop_ids.clone();
@@ -1139,6 +1159,14 @@ fn handle_prefill_logits(
     let token_ids: Vec<u32> = if let Some(serde_json::Value::Array(arr)) = req.get("input_token_ids") {
         arr.iter().filter_map(|v| v.as_u64().map(|x| x as u32)).collect()
     } else if let Some(messages) = req.get("messages") {
+        if let Err(e) = crate::text_only_messages::validate_text_only_messages(messages) {
+            let _ = send_json(
+                stream,
+                400,
+                &format!(r#"{{"error":"{}"}}"#, json_escape(&e)),
+            );
+            return;
+        }
         let messages_json = messages.to_string();
         let enable_thinking = req.get("enable_thinking").and_then(|v| v.as_bool()).unwrap_or(false);
         let rendered = match state.chat_template.apply(&messages_json, true, enable_thinking) {
@@ -1358,11 +1386,20 @@ fn handle_reference_test(
 
     // Dynamically allocate scratch for this prompt
     if let Err(e) = engine.prepare_for_prefill(input_token_ids.len()) {
+        engine.set_optional_pinning_budget_mb(None);
         let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
         let _ = store.prepare_runtime_for_decode_rust();
         let _ = send_json(stream, 500, &format!(r#"{{"error":"Scratch alloc failed: {}"}}"#, e));
         return;
     }
+    let pinning_budget_mb = {
+        let store = unsafe { &*(state.gpu_store_addr as *const GpuDecodeStore) };
+        store.prefill_optional_pinning_budget_mb(
+            input_token_ids.len(),
+            engine.last_prepare_post_alloc_free_mb(),
+        )
+    };
+    engine.set_optional_pinning_budget_mb(pinning_budget_mb);
     let scratch_tokens_after_prepare = engine.scratch.max_tokens;
     let prefill_chunk_size_after_prepare = engine.config.prefill_chunk_size;
 
@@ -1408,6 +1445,7 @@ fn handle_reference_test(
         },
         Err(e) => {
             let _ = engine.release_scratch();
+            engine.set_optional_pinning_budget_mb(None);
             let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
             let _ = store.prepare_runtime_for_decode_rust();
             let _ = send_json(stream, 500, &format!(r#"{{"error":"Prefill failed: {}"}}"#, e));
@@ -1422,6 +1460,7 @@ fn handle_reference_test(
     if let Err(e) = engine.release_scratch() {
         log::error!("reference_test: Failed to release scratch: {}", e);
     }
+    engine.set_optional_pinning_budget_mb(None);
 
     let prompt_hcs_snapshot = engine.prompt_hcs_shadow_snapshot();
 
@@ -2489,6 +2528,12 @@ impl RustServer {
         ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
             format!("Failed to load chat template: {}", e)))?;
 
+        let messages_value: serde_json::Value = serde_json::from_str(&messages_json)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
+                format!("Invalid messages JSON: {}", e)))?;
+        crate::text_only_messages::validate_text_only_messages(&messages_value)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+
         // Estimate tokens by applying the same chat template mode the request will use.
         let estimated_tokens = {
             let rendered = chat_template.apply(&messages_json, true, enable_thinking)
@@ -2547,10 +2592,16 @@ impl RustServer {
         // Dynamically allocate scratch for this prompt
         if let Err(e) = engine.prepare_for_prefill(token_ids.len()) {
             engine.clear_prefill_hcs_guard_store_addr();
+            engine.set_optional_pinning_budget_mb(None);
             let _ = store.prepare_runtime_for_decode_rust();
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
                 format!("Scratch alloc failed: {}", e)));
         }
+        let pinning_budget_mb = store.prefill_optional_pinning_budget_mb(
+            token_ids.len(),
+            engine.last_prepare_post_alloc_free_mb(),
+        );
+        engine.set_optional_pinning_budget_mb(pinning_budget_mb);
 
         let suppress_tokens = store.suppress_tokens_clone();
         let prefill_result = match engine.run_prefill(
@@ -2565,6 +2616,7 @@ impl RustServer {
             Err(e) => Err(e),
         }.map_err(|e| {
             engine.clear_prefill_hcs_guard_store_addr();
+            engine.set_optional_pinning_budget_mb(None);
             let _ = engine.release_scratch();
             let _ = store.prepare_runtime_for_decode_rust();
             pyo3::exceptions::PyRuntimeError::new_err(
@@ -2578,6 +2630,7 @@ impl RustServer {
             log::error!("Failed to release scratch: {}", e);
         }
         engine.clear_prefill_hcs_guard_store_addr();
+        engine.set_optional_pinning_budget_mb(None);
 
         let first_token = prefill_result.first_token as usize;
         let prompt_len = prefill_result.prompt_len;

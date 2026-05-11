@@ -2946,6 +2946,10 @@ struct VramCalibration {
     prefill_short_free_mb: u64,
     /// min_free VRAM (MB) during long prompt prefill (no HCS loaded)
     prefill_long_free_mb: u64,
+    /// Free VRAM (MB) immediately after short-prompt prefill scratch allocation.
+    prefill_short_post_alloc_free_mb: u64,
+    /// Free VRAM (MB) immediately after long-prompt prefill scratch allocation.
+    prefill_long_post_alloc_free_mb: u64,
     /// min_free VRAM (MB) during short prompt decode (no HCS loaded)
     decode_short_free_mb: u64,
     /// min_free VRAM (MB) during long prompt decode (no HCS loaded)
@@ -2978,6 +2982,41 @@ impl VramCalibration {
         let free = self.decode_short_free_mb as f64
             - t * (self.decode_short_free_mb as f64 - self.decode_long_free_mb as f64);
         (free.max(0.0)) as u64
+    }
+
+    /// Interpolate the measured remaining prefill transient after scratch allocation.
+    fn remaining_prefill_after_scratch_mb(&self, tokens: usize) -> Option<u64> {
+        if self.prefill_short_post_alloc_free_mb == 0 || self.prefill_long_post_alloc_free_mb == 0 {
+            return None;
+        }
+        let short_delta = self
+            .prefill_short_post_alloc_free_mb
+            .saturating_sub(self.prefill_short_free_mb);
+        let long_delta = self
+            .prefill_long_post_alloc_free_mb
+            .saturating_sub(self.prefill_long_free_mb);
+        if self.long_tokens <= self.short_tokens {
+            return Some(long_delta);
+        }
+        let t = (tokens.saturating_sub(self.short_tokens) as f64)
+            / (self.long_tokens - self.short_tokens) as f64;
+        let t = t.clamp(0.0, 1.5);
+        let delta = short_delta as f64
+            + t * (long_delta as f64 - short_delta as f64);
+        Some((delta.max(0.0)) as u64)
+    }
+
+    /// Required free VRAM after scratch allocation so the remaining measured
+    /// no-pinning prefill transient still leaves the configured safety margin.
+    fn required_post_scratch_free_mb(&self, tokens: usize) -> Option<u64> {
+        let remaining_transient = self.remaining_prefill_after_scratch_mb(tokens)?;
+        Some(remaining_transient.saturating_add(self.safety_margin_mb))
+    }
+
+    /// Optional prefill pinning budget from measured no-pinning surplus.
+    fn optional_pinning_budget_mb(&self, tokens: usize, post_alloc_free_mb: u64) -> Option<u64> {
+        let required = self.required_post_scratch_free_mb(tokens)?;
+        Some(post_alloc_free_mb.saturating_sub(required))
     }
 
     /// Max HCS budget for prefill of N tokens (what survives prefill).
@@ -9410,6 +9449,25 @@ impl GpuDecodeStore {
             .map(|cal| cal.max_safe_prefill_tokens(free_mb, prompt_tokens))
     }
 
+    pub fn prefill_optional_pinning_budget_mb(
+        &self,
+        prompt_tokens: usize,
+        post_alloc_free_mb: usize,
+    ) -> Option<usize> {
+        self.vram_calibration
+            .and_then(|cal| {
+                cal.optional_pinning_budget_mb(prompt_tokens, post_alloc_free_mb as u64)
+            })
+            .map(|mb| mb as usize)
+    }
+
+    fn get_last_prefill_post_alloc_free_mb(&self) -> PyResult<usize> {
+        let engine = self.prefill_engine_slot.as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(
+                "Prefill engine not allocated yet"))?;
+        Ok(engine.last_prepare_post_alloc_free_mb())
+    }
+
     #[new]
     #[pyo3(signature = (device_ordinal=0))]
     fn new(device_ordinal: usize) -> PyResult<Self> {
@@ -9721,13 +9779,15 @@ impl GpuDecodeStore {
 
     /// Run Rust prefill directly from token IDs and prepare the decode store
     /// to continue generation from the returned first token.
-    #[pyo3(signature = (token_ids, temperature=0.6))]
+    #[pyo3(signature = (token_ids, temperature=0.6, disable_pinning=false))]
     fn rust_prefill_tokens(
         &mut self,
         token_ids: Vec<u32>,
         temperature: f32,
+        disable_pinning: bool,
     ) -> PyResult<(usize, usize, bool)> {
         let prompt_len = token_ids.len();
+        let vram_calibration = self.vram_calibration;
         self.refresh_trace_config();
         let trace_cfg = self.active_trace_owned();
         let (cache_fast_snapshot, ne) = {
@@ -9760,18 +9820,37 @@ impl GpuDecodeStore {
             })?;
 
             let kv_overflow = prompt_len > engine.kv_max_seq;
-                engine.update_hcs_snapshot(&cache_fast_snapshot, ne);
-                engine.set_prefill_hcs_guard_store_addr(prefill_hcs_guard_store_addr);
-                if let Err(e) = engine.prepare_for_prefill(prompt_len) {
-                    engine.clear_prefill_hcs_guard_store_addr();
-                    let _ = self.prepare_runtime_for_decode_rust();
-                    return Err(pyo3::exceptions::PyRuntimeError::new_err(e));
-                }
+            engine.update_hcs_snapshot(&cache_fast_snapshot, ne);
+            engine.set_prefill_hcs_guard_store_addr(prefill_hcs_guard_store_addr);
+            engine.set_prefill_pinning_disabled(disable_pinning);
+            if let Err(e) = engine.prepare_for_prefill(prompt_len) {
+                engine.clear_prefill_hcs_guard_store_addr();
+                engine.set_prefill_pinning_disabled(false);
+                engine.set_optional_pinning_budget_mb(None);
+                let _ = self.prepare_runtime_for_decode_rust();
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(e));
+            }
+
+            let pinning_budget = if disable_pinning {
+                Some(0)
+            } else {
+                vram_calibration
+                    .and_then(|cal| {
+                        cal.optional_pinning_budget_mb(
+                            prompt_len,
+                            engine.last_prepare_post_alloc_free_mb() as u64,
+                        )
+                    })
+                    .map(|mb| mb as usize)
+            };
+            engine.set_optional_pinning_budget_mb(pinning_budget);
 
             let prefill_result = match engine.run_prefill(&token_ids, temperature, &[]) {
                 Ok(r) => {
                     if let Err(e) = engine.finalize_stage_exact_prefill_kv(r.prompt_len) {
                         engine.clear_prefill_hcs_guard_store_addr();
+                        engine.set_prefill_pinning_disabled(false);
+                        engine.set_optional_pinning_budget_mb(None);
                         let _ = engine.release_scratch();
                         let _ = self.prepare_runtime_for_decode_rust();
                         return Err(pyo3::exceptions::PyRuntimeError::new_err(
@@ -9782,6 +9861,8 @@ impl GpuDecodeStore {
                 }
                 Err(e) => {
                     engine.clear_prefill_hcs_guard_store_addr();
+                    engine.set_prefill_pinning_disabled(false);
+                    engine.set_optional_pinning_budget_mb(None);
                     let _ = engine.release_scratch();
                     let _ = self.prepare_runtime_for_decode_rust();
                     return Err(pyo3::exceptions::PyRuntimeError::new_err(e));
@@ -9803,6 +9884,8 @@ impl GpuDecodeStore {
                 log::error!("rust_prefill_tokens: failed to release scratch: {}", e);
             }
             engine.clear_prefill_hcs_guard_store_addr();
+            engine.set_prefill_pinning_disabled(false);
+            engine.set_optional_pinning_budget_mb(None);
 
             (
                 prefill_result.first_token as usize,
@@ -12853,7 +12936,9 @@ impl GpuDecodeStore {
                         prefill_short_free_mb, prefill_long_free_mb,
                         decode_short_free_mb, decode_long_free_mb,
                         baseline_free_mb,
-                        safety_margin_mb))]
+                        safety_margin_mb,
+                        prefill_short_post_alloc_free_mb=0,
+                        prefill_long_post_alloc_free_mb=0))]
     fn set_vram_calibration(
         &mut self,
         short_tokens: usize,
@@ -12864,6 +12949,8 @@ impl GpuDecodeStore {
         decode_long_free_mb: u64,
         baseline_free_mb: u64,
         safety_margin_mb: u64,
+        prefill_short_post_alloc_free_mb: u64,
+        prefill_long_post_alloc_free_mb: u64,
     ) -> PyResult<String> {
         let cal = VramCalibration {
             short_tokens,
@@ -12871,6 +12958,8 @@ impl GpuDecodeStore {
             baseline_free_mb,
             prefill_short_free_mb,
             prefill_long_free_mb,
+            prefill_short_post_alloc_free_mb,
+            prefill_long_post_alloc_free_mb,
             decode_short_free_mb,
             decode_long_free_mb,
             safety_margin_mb,
@@ -12912,6 +13001,18 @@ impl GpuDecodeStore {
             short_decode_budget, long_decode_budget);
         log::info!("  baseline idle free: {}MB, safety margin: {}MB",
             baseline_free_mb, safety_margin_mb);
+        if let (Some(short_floor), Some(long_floor)) = (
+            cal.required_post_scratch_free_mb(short_tokens),
+            cal.required_post_scratch_free_mb(long_tokens),
+        ) {
+            log::info!(
+                "  prefill pinning post-scratch floors: short={}MB, long={}MB (post_alloc short={}MB, long={}MB)",
+                short_floor,
+                long_floor,
+                prefill_short_post_alloc_free_mb,
+                prefill_long_post_alloc_free_mb,
+            );
+        }
 
         if let Some(engine) = self.prefill_engine_slot.as_mut() {
             engine.set_safety_margin_mb(safety_margin_mb as usize);
@@ -17709,6 +17810,9 @@ impl GpuDecodeStore {
             pinned_expert_offsets: Vec::new(),
             pinning_pool_expert_bytes: 0,
             pinning_active: false,
+            prefill_pinning_disabled: false,
+            optional_pinning_budget_mb: None,
+            last_prepare_post_alloc_free_mb: 0,
             prescan_active_experts: Vec::new(),
             prescan_token_count: 0,
             // Expert pointer table for zero-copy MoE

@@ -11,6 +11,7 @@ pub mod moe;
 pub mod numa;
 pub mod server;
 pub mod syscheck;
+pub mod text_only_messages;
 pub mod vram_monitor;
 pub mod weights;
 

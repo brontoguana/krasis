@@ -1,0 +1,1294 @@
+[0;36m[1m=>[0m Standard speed benchmark config: /home/main/Documents/Claude/krasis/tests/qcn-k4v4-hqq8-int4-benchmark.conf
+[0;36m[1m=>[0m Waiting for selected GPUs (0) to clear...
+[0;32m[1mOK[0m Selected GPUs (0) clear.
+[1;33m[1m!![0m Rust source is newer than compiled extension. Rebuilding...
+[0;36m[1m=>[0m Building Rust extension (repo-local maturin build --release)...
+[0;32m[1mOK[0m FLA kernels up to date (skipping)
+📦 Including license file `LICENSE`
+🍹 Building a mixed python/rust project
+🔗 Found pyo3 bindings
+🐍 Found CPython 3.11 at /home/main/miniconda3/envs/ktransformers/bin/python3
+📡 Using build options features from pyproject.toml
+warning: krasis@0.1.66-rc15: Compiled GPU decode kernels to PTX (/home/main/Documents/Claude/krasis/target/release/build/krasis-7f74810effe4212d/out/decode_kernels.ptx)
+warning: krasis@0.1.66-rc15: Compiled GPU prefill kernels to PTX (/home/main/Documents/Claude/krasis/target/release/build/krasis-7f74810effe4212d/out/prefill_kernels.ptx)
+warning: krasis@0.1.66-rc15: Compiled HQQ CUDA search kernels to PTX (/home/main/Documents/Claude/krasis/target/release/build/krasis-7f74810effe4212d/out/hqq_search_kernels.ptx)
+warning: krasis@0.1.66-rc15: Compiled vendored Marlin kernels to /home/main/Documents/Claude/krasis/target/release/build/krasis-7f74810effe4212d/out/libkrasis_marlin.so
+warning: krasis@0.1.66-rc15: Vendored sidecar copied to /home/main/Documents/Claude/krasis/python/krasis/libkrasis_marlin.so
+warning: krasis@0.1.66-rc15: Compiled vendored FlashAttention-2 kernels to /home/main/Documents/Claude/krasis/target/release/build/krasis-7f74810effe4212d/out/libkrasis_flash_attn.so
+warning: krasis@0.1.66-rc15: Vendored sidecar copied to /home/main/Documents/Claude/krasis/python/krasis/libkrasis_flash_attn.so
+   Compiling krasis v0.1.66-rc15 (/home/main/Documents/Claude/krasis)
+warning: unused imports: `repack_tiled_int4_packed`, `repack_tiled_int8_packed`, and `repack_tiled_scales`
+  --> src/decode.rs:12:5
+   |
+12 |     repack_tiled_int4_packed, repack_tiled_int8_packed, repack_tiled_scales,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `std::time::Instant`
+     --> src/gpu_decode.rs:31340:13
+      |
+31340 |         use std::time::Instant;
+      |             ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::weights::marlin::bf16_to_f32`
+     --> src/gpu_decode.rs:33039:13
+      |
+33039 |         use crate::weights::marlin::bf16_to_f32;
+      |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `UnifiedExpertWeights`
+     --> src/gpu_decode.rs:33402:43
+      |
+33402 |         use crate::weights::{WeightStore, UnifiedExpertWeights};
+      |                                           ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::weights::marlin::bf16_to_f32`
+     --> src/gpu_decode.rs:33403:13
+      |
+33403 |         use crate::weights::marlin::bf16_to_f32;
+      |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::weights::marlin::bf16_to_f32`
+     --> src/gpu_decode.rs:33599:13
+      |
+33599 |         use crate::weights::marlin::bf16_to_f32;
+      |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `rope_len`
+    --> src/decode.rs:2528:9
+     |
+2528 |         rope_len: usize, rope_max_seq: usize,
+     |         ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_rope_len`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `hs`
+    --> src/decode.rs:2857:13
+     |
+2857 |         let hs = g.hidden_size;
+     |             ^^ help: if this is intentional, prefix it with an underscore: `_hs`
+
+warning: unused variable: `kv_lora_rank`
+    --> src/decode.rs:2906:32
+     |
+2906 | ...s, kv_lora_rank, qk_nope_dim, qk_rope_dim, v_head_dim, .. } => {
+     |       ^^^^^^^^^^^^ help: try ignoring the field: `kv_lora_rank: _`
+
+warning: unused variable: `qk_nope_dim`
+    --> src/decode.rs:2906:46
+     |
+2906 | ...nk, qk_nope_dim, qk_rope_dim, v_head_dim, .. } => {
+     |        ^^^^^^^^^^^ help: try ignoring the field: `qk_nope_dim: _`
+
+warning: unused variable: `qk_rope_dim`
+    --> src/decode.rs:2906:59
+     |
+2906 | ...im, qk_rope_dim, v_head_dim, .. } => {
+     |        ^^^^^^^^^^^ help: try ignoring the field: `qk_rope_dim: _`
+
+warning: unused variable: `max_seq`
+    --> src/decode.rs:4764:5
+     |
+4764 |     max_seq: usize,
+     |     ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_max_seq`
+
+warning: unused variable: `entry`
+    --> src/gpu_decode.rs:3685:64
+     |
+3685 | ...r: usize, expert: usize, entry: &HcsCacheEntry) {
+     |                             ^^^^^ help: if this is intentional, prefix it with an underscore: `_entry`
+
+warning: unused variable: `f`
+     --> src/gpu_decode.rs:12339:17
+      |
+12339 |             let f = self.device.get_func(MODULE_NAME, "rmsnorm")
+      |                 ^ help: if this is intentional, prefix it with an underscore: `_f`
+
+warning: unused variable: `row_len`
+     --> src/gpu_decode.rs:12584:13
+      |
+12584 |         let row_len = n * 16;
+      |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_row_len`
+
+warning: variable does not need to be mutable
+     --> src/gpu_decode.rs:17715:13
+      |
+17715 |         let mut engine = PrefillEngine {
+      |             ----^^^^^^
+      |             |
+      |             help: remove this `mut`
+      |
+      = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `total_w1_packed`
+     --> src/gpu_decode.rs:17688:13
+      |
+17688 |         let total_w1_packed = n_routed * w1_packed_per_expert;
+      |             ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_total_w1_packed`
+
+warning: unused variable: `total_w1_scales`
+     --> src/gpu_decode.rs:17689:13
+      |
+17689 |         let total_w1_scales = n_routed * w1_scales_per_expert;
+      |             ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_total_w1_scales`
+
+warning: unused variable: `total_w2_packed`
+     --> src/gpu_decode.rs:17690:13
+      |
+17690 |         let total_w2_packed = n_routed * w2_packed_per_expert;
+      |             ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_total_w2_packed`
+
+warning: unused variable: `total_w2_scales`
+     --> src/gpu_decode.rs:17691:13
+      |
+17691 |         let total_w2_scales = n_routed * w2_scales_per_expert;
+      |             ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_total_w2_scales`
+
+warning: unused variable: `conv_state_ptr`
+     --> src/gpu_decode.rs:18265:17
+      |
+18265 |                 conv_state_ptr, recur_state_ptr,
+      |                 ^^^^^^^^^^^^^^ help: try ignoring the field: `conv_state_ptr: _`
+
+warning: unused variable: `recur_state_ptr`
+     --> src/gpu_decode.rs:18265:33
+      |
+18265 |                 conv_state_ptr, recur_state_ptr,
+      |                                 ^^^^^^^^^^^^^^^ help: try ignoring the field: `recur_state_ptr: _`
+
+warning: unused variable: `positions`
+     --> src/gpu_decode.rs:18477:9
+      |
+18477 |         positions: &[usize],
+      |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_positions`
+
+warning: unused variable: `eps`
+     --> src/gpu_decode.rs:18480:13
+      |
+18480 |         let eps = graph.eps;
+      |             ^^^ help: if this is intentional, prefix it with an underscore: `_eps`
+
+warning: unused variable: `k`
+     --> src/gpu_decode.rs:18484:13
+      |
+18484 |         let k = graph.kernels.as_ref().ok_or("kernels not cached")?.c...
+      |             ^ help: if this is intentional, prefix it with an underscore: `_k`
+
+warning: unused variable: `graph_idx`
+     --> src/gpu_decode.rs:19450:9
+      |
+19450 |         graph_idx: usize,
+      |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_graph_idx`
+
+warning: unused variable: `w13_ksplits_batched`
+     --> src/gpu_decode.rs:19491:13
+      |
+19491 |         let w13_ksplits_batched = if w13_max_ksplits > 1 {
+      |             ^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_w13_ksplits_batched`
+
+warning: variable `gqa_cache_idx` is assigned to, but never used
+     --> src/gpu_decode.rs:19730:13
+      |
+19730 |         let mut gqa_cache_idx = seg_gqa_offset;
+      |             ^^^^^^^^^^^^^^^^^
+      |
+      = note: consider using `_gqa_cache_idx` instead
+
+warning: value assigned to `gqa_cache_idx` is never read
+     --> src/gpu_decode.rs:19734:13
+      |
+19734 |             gqa_cache_idx = seg_gqa_offset;
+      |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      |
+      = help: maybe it is overwritten before being read?
+      = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `gqa_cache_idx` is never read
+     --> src/gpu_decode.rs:19737:21
+      |
+19737 |                     gqa_cache_idx += 1;
+      |                     ^^^^^^^^^^^^^^^^^^
+      |
+      = help: maybe it is overwritten before being read?
+
+warning: value assigned to `gqa_cache_idx` is never read
+     --> src/gpu_decode.rs:20774:25
+      |
+20774 |                         gqa_cache_idx += 1;
+      |                         ^^^^^^^^^^^^^^^^^^
+      |
+      = help: maybe it is overwritten before being read?
+
+warning: unused variable: `hs`
+     --> src/gpu_decode.rs:21488:13
+      |
+21488 |         let hs = graph.hidden_size;
+      |             ^^ help: if this is intentional, prefix it with an underscore: `_hs`
+
+warning: unnecessary `unsafe` block
+     --> src/gpu_decode.rs:22709:49
+      |
+22698 | ...                   unsafe {
+      |                       ------ because it's nested under this `unsafe` block
+...
+22709 | ...                       let k_out = unsafe {
+      |                                       ^^^^^^ unnecessary `unsafe` block
+      |
+      = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+     --> src/gpu_decode.rs:22429:13
+      |
+22429 |         let mut tt_norm = 0.0f64;
+      |             ----^^^^^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> src/gpu_decode.rs:22430:13
+      |
+22430 |         let mut tt_shared = 0.0f64;
+      |             ----^^^^^^^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable `gqa_cache_idx` is assigned to, but never used
+     --> src/gpu_decode.rs:22424:13
+      |
+22424 | ...   let mut gqa_cache_idx = seg_gqa_offset; // Start at offset for ...
+      |           ^^^^^^^^^^^^^^^^^
+      |
+      = note: consider using `_gqa_cache_idx` instead
+
+warning: unused variable: `tt_norm`
+     --> src/gpu_decode.rs:22429:13
+      |
+22429 |         let mut tt_norm = 0.0f64;
+      |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_tt_norm`
+
+warning: unused variable: `num_blocks`
+     --> src/gpu_decode.rs:23502:29
+      |
+23502 |                         let num_blocks = graph.kv_num_blocks;
+      |                             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_blocks`
+
+warning: unused variable: `c_ptr`
+     --> src/gpu_decode.rs:24229:25
+      |
+24229 |                     let c_ptr = b_ptr + (n_groups * state_size * 4) a...
+      |                         ^^^^^ help: if this is intentional, prefix it with an underscore: `_c_ptr`
+
+warning: value assigned to `gqa_cache_idx` is never read
+     --> src/gpu_decode.rs:23926:21
+      |
+23926 |                     gqa_cache_idx += 1;
+      |                     ^^^^^^^^^^^^^^^^^^
+      |
+      = help: maybe it is overwritten before being read?
+
+warning: value assigned to `step_ok` is never read
+     --> src/gpu_decode.rs:25803:41
+      |
+25803 | ...                   step_ok = false; break;
+      |                       ^^^^^^^^^^^^^^^
+      |
+      = help: maybe it is overwritten before being read?
+
+warning: variable does not need to be mutable
+     --> src/gpu_decode.rs:26077:13
+      |
+26077 |         let mut tt_proj: f64 = 0.0;
+      |             ----^^^^^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: unused variable: `tt_proj`
+     --> src/gpu_decode.rs:26077:13
+      |
+26077 |         let mut tt_proj: f64 = 0.0;
+      |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_tt_proj`
+
+warning: unused variable: `nep`
+     --> src/gpu_decode.rs:27842:13
+      |
+27842 |         let nep = hcs.num_experts_per_layer;
+      |             ^^^ help: if this is intentional, prefix it with an underscore: `_nep`
+
+warning: unused variable: `draft_context_window`
+     --> src/gpu_decode.rs:29023:13
+      |
+29023 |         let draft_context_window = self.draft_context_window;
+      |             ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_draft_context_window`
+
+warning: unused variable: `used_mb`
+     --> src/gpu_decode.rs:29751:17
+      |
+29751 |             let used_mb = total_mb - free_mb;
+      |                 ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_used_mb`
+
+warning: unused variable: `t_moe`
+     --> src/gpu_decode.rs:33538:13
+      |
+33538 |         let t_moe = Instant::now();
+      |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_t_moe`
+
+warning: variable does not need to be mutable
+    --> src/gpu_prefill.rs:8867:13
+     |
+8867 |         let mut t_other_ms = 0.0f64;
+     |             ----^^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `diag_moe_detail`
+    --> src/gpu_prefill.rs:8543:13
+     |
+8543 |         let diag_moe_detail = std::env::var("KRASIS_PREFILL_DIAG_MOE_D...
+     |             ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_diag_moe_detail`
+
+warning: value assigned to `attn_path` is never read
+     --> src/gpu_prefill.rs:13289:29
+      |
+13289 |         let mut attn_path = "custom_tiled";
+      |                             ^^^^^^^^^^^^^^
+      |
+      = help: maybe it is overwritten before being read?
+
+warning: value assigned to `attn_path` is never read
+     --> src/gpu_prefill.rs:14397:17
+      |
+14397 |                 attn_path = "fa2_cross_chunk";
+      |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      |
+      = help: maybe it is overwritten before being read?
+
+warning: unused variable: `la_chunk_out`
+     --> src/gpu_prefill.rs:15536:13
+      |
+15536 |         let la_chunk_out = *self
+      |             ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_la_chunk_out`
+
+warning: value assigned to `d_temp_vendor_accum` is never read
+     --> src/gpu_prefill.rs:24505:33
+      |
+24505 | ...                   d_temp_vendor_accum = 0;
+      |                       ^^^^^^^^^^^^^^^^^^^^^^^
+      |
+      = help: maybe it is overwritten before being read?
+
+warning: value assigned to `d_temp_vendor_src` is never read
+     --> src/gpu_prefill.rs:24509:33
+      |
+24509 | ...                   d_temp_vendor_src = 0;
+      |                       ^^^^^^^^^^^^^^^^^^^^^
+      |
+      = help: maybe it is overwritten before being read?
+
+warning: value assigned to `d_temp_vendor_topk_weights` is never read
+     --> src/gpu_prefill.rs:24513:33
+      |
+24513 | ...                   d_temp_vendor_topk_weights = 0;
+      |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      |
+      = help: maybe it is overwritten before being read?
+
+warning: unused variable: `total_active`
+     --> src/gpu_prefill.rs:26319:13
+      |
+26319 |         let total_active = m * topk; // upper bound
+      |             ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_total_active`
+
+warning: unused variable: `shared_ws_len`
+     --> src/gpu_prefill.rs:28928:13
+      |
+28928 |         let shared_ws_len = self.config.sms * MARLIN_MAX_LOCK_SLOTS_P...
+      |             ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_shared_ws_len`
+
+warning: unused variable: `dv`
+     --> src/gpu_prefill.rs:30337:13
+      |
+30337 |         let dv = config.la_v_head_dim;
+      |             ^^ help: if this is intentional, prefix it with an underscore: `_dv`
+
+warning: unused variable: `evicted`
+   --> src/server.rs:837:10
+    |
+837 |     let (evicted, _freed_mb) = store_for_evict.hcs_evict_for_prefill(es...
+    |          ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_evicted`
+
+warning: value assigned to `prompt_hcs_snapshot` is never read
+   --> src/server.rs:849:76
+    |
+849 | ...c<u64>, usize, usize, usize)> = None;
+    |                                    ^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: variable does not need to be mutable
+    --> src/server.rs:1537:13
+     |
+1537 | ...   let mut on_token = |token_id: usize, text: &str, fr: Option<&str...
+     |           ----^^^^^^^^
+     |           |
+     |           help: remove this `mut`
+
+warning: unused variable: `evicted`
+    --> src/server.rs:2551:14
+     |
+2551 |         let (evicted, _) = store.hcs_evict_for_prefill(estimated_tokens);
+     |              ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_evicted`
+
+warning: unused variable: `w13_n`
+   --> src/weights/mod.rs:748:13
+    |
+748 |         let w13_n = if ungated { intermediate } else { 2 * intermediate };
+    |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_w13_n`
+
+warning: value assigned to `effective_gs` is never read
+    --> src/weights/mod.rs:2030:13
+     |
+2030 |             effective_gs = 0;
+     |             ^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: unused variable: `total_moe_layers`
+    --> src/weights/mod.rs:2761:9
+     |
+2761 |         total_moe_layers: usize,
+     |         ^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_total_moe_layers`
+
+warning: type `PrefillTraceConfig` is more private than the item `gpu_prefill::PrefillEngine::trace`
+    --> src/gpu_prefill.rs:3140:5
+     |
+3140 |     pub trace: Option<PrefillTraceConfig>,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `gpu_prefill::PrefillEngine::trace` is reachable at visibility `pub`
+     |
+note: but type `PrefillTraceConfig` is only usable at visibility `pub(crate)`
+    --> src/gpu_prefill.rs:74:1
+     |
+  74 | pub(crate) struct PrefillTraceConfig {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     = note: `#[warn(private_interfaces)]` on by default
+
+warning: function `prefetch_weight_nta` is never used
+    --> src/decode.rs:1962:4
+     |
+1962 | fn prefetch_weight_nta(w: &TransposedWeight) {
+     |    ^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `bf16_to_f32` is never used
+    --> src/decode.rs:1989:4
+     |
+1989 | fn bf16_to_f32(x: u16) -> f32 {
+     |    ^^^^^^^^^^^
+
+warning: struct `Xorshift64` is never constructed
+    --> src/decode.rs:4917:8
+     |
+4917 | struct Xorshift64(u64);
+     |        ^^^^^^^^^^
+
+warning: associated items `new`, `next_u64`, `next_u32`, and `next_f32` are never used
+    --> src/decode.rs:4920:8
+     |
+4919 | impl Xorshift64 {
+     | --------------- associated items in this implementation
+4920 |     fn new(seed: u64) -> Self { Self(if seed == 0 { 0xDEADBEEF } else ...
+     |        ^^^
+4921 |     #[inline]
+4922 |     fn next_u64(&mut self) -> u64 {
+     |        ^^^^^^^^
+...
+4929 |     fn next_u32(&mut self) -> u32 { self.next_u64() as u32 }
+     |        ^^^^^^^^
+...
+4932 |     fn next_f32(&mut self, scale: f32) -> f32 {
+     |        ^^^^^^^^
+
+warning: function `fill_random_u32` is never used
+    --> src/decode.rs:4940:4
+     |
+4940 | fn fill_random_u32(v: &mut [u32], rng: &mut Xorshift64) {
+     |    ^^^^^^^^^^^^^^^
+
+warning: function `fill_random_scales_u16` is never used
+    --> src/decode.rs:4947:4
+     |
+4947 | fn fill_random_scales_u16(v: &mut [u16], rng: &mut Xorshift64) {
+     |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `fill_random_f32` is never used
+    --> src/decode.rs:4956:4
+     |
+4956 | fn fill_random_f32(v: &mut [f32], rng: &mut Xorshift64, scale: f32) {
+     |    ^^^^^^^^^^^^^^^
+
+warning: function `fill_random_u16` is never used
+    --> src/decode.rs:4963:4
+     |
+4963 | fn fill_random_u16(v: &mut [u16], rng: &mut Xorshift64) {
+     |    ^^^^^^^^^^^^^^^
+
+warning: function `hint_hugepages` is never used
+    --> src/decode.rs:4977:4
+     |
+4977 | fn hint_hugepages<T>(v: &mut [T]) {
+     |    ^^^^^^^^^^^^^^
+
+warning: function `fake_transposed_weight` is never used
+    --> src/decode.rs:5041:4
+     |
+5041 | fn fake_transposed_weight(rows: usize, cols: usize, group_size: usize,...
+     |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `buf_size` is never read
+    --> src/gpu_decode.rs:2886:5
+     |
+2882 | struct PrefetchSlot {
+     |        ------------ field in this struct
+...
+2886 |     buf_size: usize,
+     |     ^^^^^^^^
+
+warning: method `decode_kb_per_tok` is never used
+    --> src/gpu_decode.rs:3047:8
+     |
+2960 | impl VramCalibration {
+     | -------------------- method in this implementation
+...
+3047 |     fn decode_kb_per_tok(&self) -> f64 {
+     |        ^^^^^^^^^^^^^^^^^
+
+warning: field `pool_slot` is never read
+    --> src/gpu_decode.rs:3178:5
+     |
+3162 | struct HcsCacheEntry {
+     |        ------------- field in this struct
+...
+3178 |     pool_slot: Option<usize>,
+     |     ^^^^^^^^^
+
+warning: method `is_marlin` is never used
+    --> src/gpu_decode.rs:4439:8
+     |
+4398 | impl GpuWeight {
+     | -------------- method in this implementation
+...
+4439 |     fn is_marlin(&self) -> bool {
+     |        ^^^^^^^^^
+
+warning: multiple fields are never read
+    --> src/gpu_decode.rs:4474:5
+     |
+4469 | struct HqqPrefillSidecarRegistration {
+     |        ----------------------------- fields in this struct
+...
+4474 |     correction_bytes: usize,
+     |     ^^^^^^^^^^^^^^^^
+4475 |     scales_ptr: u64,
+4476 |     scales_bytes: usize,
+     |     ^^^^^^^^^^^^
+4477 |     base_f32_ptr: u64,
+4478 |     base_f32_bytes: usize,
+     |     ^^^^^^^^^^^^^^
+4479 |     output_rows_ptr: u64,
+4480 |     output_rows_bytes: usize,
+     |     ^^^^^^^^^^^^^^^^^
+4481 |     groups_ptr: u64,
+     |     ^^^^^^^^^^
+4482 |     groups_bytes: usize,
+     |     ^^^^^^^^^^^^
+4483 |     start_cols_ptr: u64,
+4484 |     start_cols_bytes: usize,
+     |     ^^^^^^^^^^^^^^^^
+4485 |     widths_ptr: u64,
+4486 |     widths_bytes: usize,
+     |     ^^^^^^^^^^^^
+     |
+     = note: `HqqPrefillSidecarRegistration` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: function `validate_hqq4_tensor_desc` is never used
+    --> src/gpu_decode.rs:5110:4
+     |
+5110 | fn validate_hqq4_tensor_desc(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `build_hqq_tensors` is never used
+    --> src/gpu_decode.rs:5229:4
+     |
+5229 | fn build_hqq_tensors(
+     |    ^^^^^^^^^^^^^^^^^
+
+warning: field `size` is never read
+    --> src/gpu_decode.rs:6031:5
+     |
+6028 | struct PinnedMapped {
+     |        ------------ field in this struct
+...
+6031 |     size: usize,
+     |     ^^^^
+
+warning: multiple fields are never read
+    --> src/gpu_decode.rs:6076:5
+     |
+6073 | struct CachedKernels {
+     |        ------------- fields in this struct
+...
+6076 |     rmsnorm: cudarc::driver::CudaFunction,
+     |     ^^^^^^^
+...
+6082 |     add_bf16: cudarc::driver::CudaFunction,
+     |     ^^^^^^^^
+6083 |     weighted_add_bf16: cudarc::driver::CudaFunction,
+     |     ^^^^^^^^^^^^^^^^^
+...
+6086 |     marlin_gemv_int4: cudarc::driver::CudaFunction,
+     |     ^^^^^^^^^^^^^^^^
+...
+6128 |     apply_gated_attn: cudarc::driver::CudaFunction,
+     |     ^^^^^^^^^^^^^^^^
+6129 |     // Fused v2 kernels with inline atomic reduction (no sepa...
+6130 |     marlin_gemv_int4_v2_fused_f32: cudarc::driver::CudaFunction,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+6131 |     marlin_gemv_int8_v2: cudarc::driver::CudaFunction,
+6132 |     marlin_gemv_int8_v2_fused_f32: cudarc::driver::CudaFunction,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+6152 |     gqa_attention_g: cudarc::driver::CudaFunction,
+     |     ^^^^^^^^^^^^^^^
+...
+6155 |     gqa_attention_g_bf16: cudarc::driver::CudaFunction,
+     |     ^^^^^^^^^^^^^^^^^^^^
+...
+6161 |     gqa_attention_k4v4_tiled_g: cudarc::driver::CudaFunction,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+6187 |     gqa_attention_polar4_g: cudarc::driver::CudaFunction,
+     |     ^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `CachedKernels` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: multiple fields are never read
+    --> src/gpu_decode.rs:6313:5
+     |
+6202 | struct GpuDecodeGraph {
+     |        -------------- fields in this struct
+...
+6313 |     d_batch_w13_packed_ptrs: cudarc::driver::CudaSlice<u64>,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^
+6314 |     d_batch_w13_scales_ptrs: cudarc::driver::CudaSlice<u64>,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^
+6315 |     d_batch_w2_packed_ptrs: cudarc::driver::CudaSlice<u64>,
+     |     ^^^^^^^^^^^^^^^^^^^^^^
+6316 |     d_batch_w2_scales_ptrs: cudarc::driver::CudaSlice<u64>,
+     |     ^^^^^^^^^^^^^^^^^^^^^^
+6317 |     // Device array for batched routing weights: [max_expe...
+6318 |     d_batch_weights: cudarc::driver::CudaSlice<f32>,
+     |     ^^^^^^^^^^^^^^^
+...
+6329 |     batch_upload_ptrs_bytes: usize, // 4 * max * 8
+     |     ^^^^^^^^^^^^^^^^^^^^^^^
+6330 |     batch_upload_total_bytes: usize, // 4 * max * 8 + max * 4
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+6433 |     d_gqa_gate_buf: Option<cudarc::driver::CudaSlice<f32>>,
+     |     ^^^^^^^^^^^^^^
+
+warning: field `hqq_bf16_weight_bufs` is never read
+    --> src/gpu_decode.rs:7465:5
+     |
+7368 | pub struct GpuDecodeStore {
+     |            -------------- field in this struct
+...
+7465 |     hqq_bf16_weight_bufs: Vec<CudaSlice<u16>>,
+     |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `hqq4_dequant_to_bf16` and `materialize_hqq_gqa_decode_weights` are never used
+    --> src/gpu_decode.rs:8837:8
+     |
+7478 | impl GpuDecodeStore {
+     | ------------------- methods in this implementation
+...
+8837 |     fn hqq4_dequant_to_bf16(
+     |        ^^^^^^^^^^^^^^^^^^^^
+...
+9365 |     fn materialize_hqq_gqa_decode_weights(&mut self, layer_idx: usize)...
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `diag_compute_moe_accum_last_cpu_from_sorted_rows` is never used
+    --> src/gpu_prefill.rs:1572:4
+     |
+1572 | fn diag_compute_moe_accum_last_cpu_from_sorted_rows(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `MARLIN_MAX_BLOCKS_PER_SM` is never used
+    --> src/gpu_prefill.rs:2000:7
+     |
+2000 | const MARLIN_MAX_BLOCKS_PER_SM: usize = 4;
+     |       ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: multiple fields are never read
+    --> src/gpu_prefill.rs:2391:5
+     |
+2367 | pub struct PrefillKernels {
+     |            -------------- fields in this struct
+...
+2391 |     moe_sum_reduce: RawCuFunc,
+     |     ^^^^^^^^^^^^^^
+2392 |     gqa_prefill: RawCuFunc,
+     |     ^^^^^^^^^^^
+...
+2414 |     causal_conv1d: RawCuFunc,
+     |     ^^^^^^^^^^^^^
+...
+2423 |     fp32_to_bf16_batch: RawCuFunc,
+     |     ^^^^^^^^^^^^^^^^^^
+...
+2436 |     la_compute_v_new: RawCuFunc,
+     |     ^^^^^^^^^^^^^^^^
+2437 |     la_chunk_output: RawCuFunc,
+     |     ^^^^^^^^^^^^^^^
+2438 |     la_state_update: RawCuFunc,
+     |     ^^^^^^^^^^^^^^^
+...
+2442 |     la_fp32_to_bf16: RawCuFunc,
+     |     ^^^^^^^^^^^^^^^
+...
+2447 |     transpose_3d_021_bf16: RawCuFunc, // [A,B,C] -> [B,A,C] BF16
+     |     ^^^^^^^^^^^^^^^^^^^^^
+...
+2470 |     moe_gather_sorted: RawCuFunc,
+     |     ^^^^^^^^^^^^^^^^^
+2471 |     moe_replicate_hidden: RawCuFunc,
+2472 |     moe_scatter_fused: RawCuFunc,
+     |     ^^^^^^^^^^^^^^^^^
+
+warning: methods `diag_compute_la_gated_rmsnorm_last_cpu`, `diag_compute_fla_g_cumsum_last_cpu_from_gate_f32`, `upload_tokens`, and `forward_gqa` are never used
+     --> src/gpu_prefill.rs:7071:8
+      |
+ 3435 | impl PrefillEngine {
+      | ------------------ methods in this implementation
+...
+ 7071 |     fn diag_compute_la_gated_rmsnorm_last_cpu(
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 7577 |     fn diag_compute_fla_g_cumsum_last_cpu_from_gate_f32(
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+11337 |     fn upload_tokens(&self, token_ids: &[u32]) -> Result<(), String> {
+      |        ^^^^^^^^^^^^^
+...
+13253 |     fn forward_gqa(&self, layer_idx: usize, m: usize) -> Result<(), S...
+      |        ^^^^^^^^^^^
+
+warning: field `gil_timing` is never read
+  --> src/server.rs:99:5
+   |
+85 | struct ServerState {
+   |        ----------- field in this struct
+...
+99 |     gil_timing: bool,
+   |     ^^^^^^^^^^
+
+warning: function `cpu_expert_byte_sizes_mixed` is never used
+    --> src/weights/mod.rs:1632:4
+     |
+1632 | fn cpu_expert_byte_sizes_mixed(h: usize, m: usize, group_size: usize, ...
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `read_marlin_expert` is never used
+    --> src/weights/mod.rs:5576:4
+     |
+5576 | fn read_marlin_expert(
+     |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `read_unified_expert_cpu` is never used
+    --> src/weights/mod.rs:5697:4
+     |
+5697 | fn read_unified_expert_cpu(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `read_unified_expert_cpu_mixed` is never used
+    --> src/weights/mod.rs:5800:4
+     |
+5800 | fn read_unified_expert_cpu_mixed(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: structure field `mamba2_A` should have a snake case name
+    --> src/gpu_prefill.rs:2969:9
+     |
+2969 |     pub mamba2_A: u64,
+     |         ^^^^^^^^ help: convert the identifier to snake case: `mamba2_a`
+     |
+     = note: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: structure field `mamba2_D` should have a snake case name
+    --> src/gpu_prefill.rs:2971:9
+     |
+2971 |     pub mamba2_D: u64,
+     |         ^^^^^^^^ help: convert the identifier to snake case: `mamba2_d`
+
+warning: `krasis` (lib) generated 99 warnings (run `cargo fix --lib -p krasis` to apply 50 suggestions)
+    Finished `release` profile [optimized] target(s) in 1m 50s
+📦 Including files matching "python/krasis/prompts/*"
+📦 Including files matching "python/krasis/libkrasis*.so"
+📦 Built wheel for CPython 3.11 to /home/main/Documents/Claude/krasis/target/dev-wheels/krasis-0.1.66rc15-cp311-cp311-linux_x86_64.whl
+/home/main/Documents/Claude/krasis/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+/home/main/Documents/Claude/krasis/python/krasis/libkrasis_fla.so
+/home/main/Documents/Claude/krasis/python/krasis/libkrasis_fla_sm120.so
+/home/main/Documents/Claude/krasis/python/krasis/libkrasis_fla_sm80.so
+/home/main/Documents/Claude/krasis/python/krasis/libkrasis_fla_sm89.so
+/home/main/Documents/Claude/krasis/python/krasis/libkrasis_fla_sm90.so
+/home/main/Documents/Claude/krasis/python/krasis/libkrasis_flash_attn.so
+/home/main/Documents/Claude/krasis/python/krasis/libkrasis_marlin.so
+[0;32m[1mOK[0m Build complete. Extension at: /home/main/Documents/Claude/krasis/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+[0;36m[1m=>[0m Import origin check:
+krasis: /home/main/Documents/Claude/krasis/python/krasis/__init__.py
+krasis.krasis: /home/main/Documents/Claude/krasis/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+[0;36m[1m=>[0m Running standard benchmark: /home/main/Documents/Claude/krasis/tests/qcn-k4v4-hqq8-int4-benchmark.conf
+[0;36m[1m=>[0m Run dir: /home/main/Documents/Claude/krasis/logs/dev-benchmark_20260511_145953
+[0;36m[1m=>[0m Log: /home/main/Documents/Claude/krasis/logs/dev-benchmark_20260511_145953/benchmark_stdout.log
+[0;36m[1m=>[0m Import origin check:
+krasis: /home/main/Documents/Claude/krasis/python/krasis/__init__.py
+krasis.krasis: /home/main/Documents/Claude/krasis/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+Pre-scan: set CUDA_VISIBLE_DEVICES=0
+Loaded config from /home/main/Documents/Claude/krasis/tests/qcn-k4v4-hqq8-int4-benchmark.conf: {'model_path': '/home/main/.krasis/models/Qwen3-Coder-Next', 'selected_gpus': '0', 'num_gpus': 1, 'layer_group_size': 2, 'kv_dtype': 'k4v4', 'gpu_expert_bits': 4, 'cpu_expert_bits': 4, 'attention_quant': 'hqq8', 'shared_expert_quant': 'int8', 'dense_mlp_quant': 'int8', 'lm_head_quant': 'int8', 'krasis_threads': 16, 'host': '0.0.0.0', 'port': 18146, 'enable_thinking': False, 'gpu_prefill_threshold': 300, 'force_load': False}
+2026-05-11 15:00:00,696 krasis.server INFO Logging to /home/main/Documents/Claude/krasis/logs/dev-benchmark_20260511_145953/krasis.log
+2026-05-11 15:00:00,696 krasis.server INFO === Config file: /home/main/Documents/Claude/krasis/tests/qcn-k4v4-hqq8-int4-benchmark.conf ===
+2026-05-11 15:00:00,696 krasis.server INFO   # QCN benchmark config - k4v4 KV cache + HQQ8 attention + INT4 experts
+2026-05-11 15:00:00,696 krasis.server INFO   MODEL_PATH="/home/main/.krasis/models/Qwen3-Coder-Next"
+2026-05-11 15:00:00,696 krasis.server INFO   CFG_SELECTED_GPUS="0"
+2026-05-11 15:00:00,697 krasis.server INFO   CFG_PP_PARTITION="48"
+2026-05-11 15:00:00,697 krasis.server INFO   CFG_LAYER_GROUP_SIZE="2"
+2026-05-11 15:00:00,697 krasis.server INFO   CFG_KV_DTYPE="k4v4"
+2026-05-11 15:00:00,697 krasis.server INFO   CFG_GPU_EXPERT_BITS="4"
+2026-05-11 15:00:00,697 krasis.server INFO   CFG_CPU_EXPERT_BITS="4"
+2026-05-11 15:00:00,697 krasis.server INFO   CFG_ATTENTION_QUANT="hqq8"
+2026-05-11 15:00:00,697 krasis.server INFO   CFG_SHARED_EXPERT_QUANT="int8"
+2026-05-11 15:00:00,697 krasis.server INFO   CFG_DENSE_MLP_QUANT="int8"
+2026-05-11 15:00:00,697 krasis.server INFO   CFG_LM_HEAD_QUANT="int8"
+2026-05-11 15:00:00,697 krasis.server INFO   CFG_KRASIS_THREADS="16"
+2026-05-11 15:00:00,697 krasis.server INFO   CFG_HOST="0.0.0.0"
+2026-05-11 15:00:00,697 krasis.server INFO   CFG_PORT="18146"
+2026-05-11 15:00:00,697 krasis.server INFO   CFG_ENABLE_THINKING="0"
+2026-05-11 15:00:00,697 krasis.server INFO   CFG_GPU_PREFILL_THRESHOLD="300"
+2026-05-11 15:00:00,697 krasis.server INFO   CFG_GGUF_PATH=""
+2026-05-11 15:00:00,697 krasis.server INFO   CFG_FORCE_LOAD=""
+2026-05-11 15:00:00,697 krasis.server INFO === Resolved arguments ===
+2026-05-11 15:00:00,697 krasis.server INFO   attention_quant = 'hqq8'
+2026-05-11 15:00:00,697 krasis.server INFO   benchmark = False
+2026-05-11 15:00:00,697 krasis.server INFO   benchmark_only = True
+2026-05-11 15:00:00,697 krasis.server INFO   build_cache = False
+2026-05-11 15:00:00,697 krasis.server INFO   config = None
+2026-05-11 15:00:00,697 krasis.server INFO   cpu_expert_bits = 4
+2026-05-11 15:00:00,697 krasis.server INFO   dense_mlp_quant = 'int8'
+2026-05-11 15:00:00,698 krasis.server INFO   draft_context = 512
+2026-05-11 15:00:00,698 krasis.server INFO   draft_k = 3
+2026-05-11 15:00:00,698 krasis.server INFO   draft_model = None
+2026-05-11 15:00:00,698 krasis.server INFO   dynamic_hcs = True
+2026-05-11 15:00:00,698 krasis.server INFO   dynamic_hcs_tail_blocks = 2
+2026-05-11 15:00:00,698 krasis.server INFO   enable_thinking = False
+2026-05-11 15:00:00,698 krasis.server INFO   expert_group_size = 128
+2026-05-11 15:00:00,698 krasis.server INFO   force_load = False
+2026-05-11 15:00:00,698 krasis.server INFO   force_rebuild_cache = False
+2026-05-11 15:00:00,698 krasis.server INFO   force_rebuild_hqq_cache = False
+2026-05-11 15:00:00,698 krasis.server INFO   gguf_path = None
+2026-05-11 15:00:00,698 krasis.server INFO   gpu_decode = True
+2026-05-11 15:00:00,698 krasis.server INFO   gpu_expert_bits = 4
+2026-05-11 15:00:00,698 krasis.server INFO   gpu_expert_int4_calib = 'amax'
+2026-05-11 15:00:00,698 krasis.server INFO   gpu_prefill_threshold = 300
+2026-05-11 15:00:00,698 krasis.server INFO   hcs = True
+2026-05-11 15:00:00,698 krasis.server INFO   heatmap_path = None
+2026-05-11 15:00:00,698 krasis.server INFO   host = '0.0.0.0'
+2026-05-11 15:00:00,698 krasis.server INFO   hqq46_auto_budget_mib = None
+2026-05-11 15:00:00,698 krasis.server INFO   hqq_auto_budget_pct = None
+2026-05-11 15:00:00,698 krasis.server INFO   hqq_cache_profile = 'baseline'
+2026-05-11 15:00:00,698 krasis.server INFO   hqq_group_size = 128
+2026-05-11 15:00:00,698 krasis.server INFO   hqq_sidecar_manifest = None
+2026-05-11 15:00:00,698 krasis.server INFO   krasis_threads = 16
+2026-05-11 15:00:00,698 krasis.server INFO   kv_cache_mb = 1000
+2026-05-11 15:00:00,698 krasis.server INFO   kv_dtype = 'k4v4'
+2026-05-11 15:00:00,698 krasis.server INFO   layer_group_size = 2
+2026-05-11 15:00:00,698 krasis.server INFO   lm_head_quant = 'int8'
+2026-05-11 15:00:00,699 krasis.server INFO   model_path = '/home/main/.krasis/models/Qwen3-Coder-Next'
+2026-05-11 15:00:00,699 krasis.server INFO   multi_gpu_hcs = False
+2026-05-11 15:00:00,699 krasis.server INFO   no_stream_attention = False
+2026-05-11 15:00:00,699 krasis.server INFO   note = None
+2026-05-11 15:00:00,699 krasis.server INFO   num_gpus = 1
+2026-05-11 15:00:00,699 krasis.server INFO   perplexity = False
+2026-05-11 15:00:00,699 krasis.server INFO   port = 18146
+2026-05-11 15:00:00,699 krasis.server INFO   selected_gpus = '0'
+2026-05-11 15:00:00,699 krasis.server INFO   selected_gpus_source = 'config'
+2026-05-11 15:00:00,699 krasis.server INFO   session_enabled = False
+2026-05-11 15:00:00,699 krasis.server INFO   shared_expert_quant = 'int8'
+2026-05-11 15:00:00,699 krasis.server INFO   stream_attention = False
+2026-05-11 15:00:00,699 krasis.server INFO   stress_test = False
+2026-05-11 15:00:00,699 krasis.server INFO   temperature = 0.6
+2026-05-11 15:00:00,699 krasis.server INFO   test_endpoints = False
+2026-05-11 15:00:00,699 krasis.server INFO   timing = False
+2026-05-11 15:00:00,699 krasis.server INFO   vram_report = False
+2026-05-11 15:00:00,699 krasis.server INFO   vram_safety_margin = 600
+2026-05-11 15:00:00,699 krasis.server INFO Effective selected GPUs: 0 (source=config, CUDA_VISIBLE_DEVICES=0)
+
+[1m[36m▸ Krasis — Qwen3-Coder-Next[0m
+2026-05-11 15:00:00,781 krasis.server INFO ── Krasis — Qwen3-Coder-Next ──
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 1[0m
+  [32mSelected physical GPUs: 0 (config; CUDA_VISIBLE_DEVICES=0)[0m
+  [32mExperts: GPU INT4 g128 (amax)  |  Attention: hqq8  |  KV: k4v4[0m
+  [32mLayer groups: 2  |  KV cache: 1000 MB  |  Threads: 16[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+2026-05-11 15:00:00,781 krasis.server INFO HCS strategy: PP=1, 1 GPUs available
+2026-05-11 15:00:00,861 krasis.model INFO KrasisModel: 48 layers, PP=[48], 1 GPUs, attn=rust, hybrid=12 full + 36 linear
+
+[1m[36m▸ Loading model weights[0m
+2026-05-11 15:00:00,900 krasis.server INFO ── Loading model weights ──
+  [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=505 MB, free=31614 MB, total=32119 MB
+2026-05-11 15:00:01,206 krasis.model INFO VRAM_CHECKPOINT [before-load] cuda:0: alloc=0 MB, reserved=0 MB, driver_used=505 MB, free=31614 MB, total=32119 MB
+2026-05-11 15:00:01,206 krasis.model INFO RAM watchdog started: will exit if < 5.0% free
+
+[1m[36m▸ Loading GPU weights[0m
+2026-05-11 15:00:01,206 krasis.model INFO Phase 1: Loading GPU weights (streaming INT8)...
+2026-05-11 15:00:01,241 krasis.model INFO Resident attention: all 48 layers permanently on GPU0, 1 GPUs for EP
+2026-05-11 15:00:01,242 krasis.model INFO Loading full base model to cuda:0...
+2026-05-11 15:00:01,242 krasis.weight_loader INFO Loading embedding: model.embed_tokens.weight
+2026-05-11 15:00:01,388 krasis.weight_loader INFO Layer 0 loaded in 0.0s (GPU alloc: 663 MB, moe=True, type=linear_attention)
+2026-05-11 15:00:01,441 krasis.weight_loader INFO Layer 1 loaded in 0.0s (GPU alloc: 737 MB, moe=True, type=linear_attention)
+2026-05-11 15:00:01,471 krasis.weight_loader INFO Layer 2 loaded in 0.0s (GPU alloc: 810 MB, moe=True, type=linear_attention)
+2026-05-11 15:00:01,489 krasis.weight_loader INFO Layer 3 loaded in 0.0s (GPU alloc: 819 MB, moe=True, type=full_attention)
+2026-05-11 15:00:01,519 krasis.weight_loader INFO Layer 4 loaded in 0.0s (GPU alloc: 892 MB, moe=True, type=linear_attention)
+2026-05-11 15:00:01,548 krasis.weight_loader INFO Layer 5 loaded in 0.0s (GPU alloc: 966 MB, moe=True, type=linear_attention)
+2026-05-11 15:00:01,578 krasis.weight_loader INFO Layer 6 loaded in 0.0s (GPU alloc: 1039 MB, moe=True, type=linear_attention)
+2026-05-11 15:00:01,594 krasis.weight_loader INFO Layer 7 loaded in 0.0s (GPU alloc: 1048 MB, moe=True, type=full_attention)
+2026-05-11 15:00:01,624 krasis.weight_loader INFO Layer 8 loaded in 0.0s (GPU alloc: 1121 MB, moe=True, type=linear_attention)
+2026-05-11 15:00:01,655 krasis.weight_loader INFO Layer 9 loaded in 0.0s (GPU alloc: 1195 MB, moe=True, type=linear_attention)
+2026-05-11 15:00:01,685 krasis.weight_loader INFO Layer 10 loaded in 0.0s (GPU alloc: 1268 MB, moe=True, type=linear_attention)
+2026-05-11 15:00:01,703 krasis.weight_loader INFO Layer 11 loaded in 0.0s (GPU alloc: 1277 MB, moe=True, type=full_attention)
+2026-05-11 15:00:01,733 krasis.weight_loader INFO Layer 12 loaded in 0.0s (GPU alloc: 1350 MB, moe=True, type=linear_attention)
+2026-05-11 15:00:01,761 krasis.weight_loader INFO Layer 13 loaded in 0.0s (GPU alloc: 1424 MB, moe=True, type=linear_attention)
+2026-05-11 15:00:01,791 krasis.weight_loader INFO Layer 14 loaded in 0.0s (GPU alloc: 1497 MB, moe=True, type=linear_attention)
+2026-05-11 15:00:01,810 krasis.weight_loader INFO Layer 15 loaded in 0.0s (GPU alloc: 1506 MB, moe=True, type=full_attention)
+2026-05-11 15:00:01,840 krasis.weight_loader INFO Layer 16 loaded in 0.0s (GPU alloc: 1579 MB, moe=True, type=linear_attention)
+2026-05-11 15:00:01,870 krasis.weight_loader INFO Layer 17 loaded in 0.0s (GPU alloc: 1653 MB, moe=True, type=linear_attention)
+2026-05-11 15:00:01,898 krasis.weight_loader INFO Layer 18 loaded in 0.0s (GPU alloc: 1726 MB, moe=True, type=linear_attention)
+2026-05-11 15:00:01,916 krasis.weight_loader INFO Layer 19 loaded in 0.0s (GPU alloc: 1735 MB, moe=True, type=full_attention)
+2026-05-11 15:00:01,946 krasis.weight_loader INFO Layer 20 loaded in 0.0s (GPU alloc: 1808 MB, moe=True, type=linear_attention)
+2026-05-11 15:00:01,976 krasis.weight_loader INFO Layer 21 loaded in 0.0s (GPU alloc: 1882 MB, moe=True, type=linear_attention)
+2026-05-11 15:00:02,006 krasis.weight_loader INFO Layer 22 loaded in 0.0s (GPU alloc: 1955 MB, moe=True, type=linear_attention)
+2026-05-11 15:00:02,024 krasis.weight_loader INFO Layer 23 loaded in 0.0s (GPU alloc: 1964 MB, moe=True, type=full_attention)
+2026-05-11 15:00:02,053 krasis.weight_loader INFO Layer 24 loaded in 0.0s (GPU alloc: 2037 MB, moe=True, type=linear_attention)
+2026-05-11 15:00:02,084 krasis.weight_loader INFO Layer 25 loaded in 0.0s (GPU alloc: 2111 MB, moe=True, type=linear_attention)
+2026-05-11 15:00:02,114 krasis.weight_loader INFO Layer 26 loaded in 0.0s (GPU alloc: 2184 MB, moe=True, type=linear_attention)
+2026-05-11 15:00:02,132 krasis.weight_loader INFO Layer 27 loaded in 0.0s (GPU alloc: 2193 MB, moe=True, type=full_attention)
+2026-05-11 15:00:02,162 krasis.weight_loader INFO Layer 28 loaded in 0.0s (GPU alloc: 2266 MB, moe=True, type=linear_attention)
+2026-05-11 15:00:02,192 krasis.weight_loader INFO Layer 29 loaded in 0.0s (GPU alloc: 2340 MB, moe=True, type=linear_attention)
+2026-05-11 15:00:02,220 krasis.weight_loader INFO Layer 30 loaded in 0.0s (GPU alloc: 2413 MB, moe=True, type=linear_attention)
+2026-05-11 15:00:02,239 krasis.weight_loader INFO Layer 31 loaded in 0.0s (GPU alloc: 2422 MB, moe=True, type=full_attention)
+2026-05-11 15:00:02,269 krasis.weight_loader INFO Layer 32 loaded in 0.0s (GPU alloc: 2495 MB, moe=True, type=linear_attention)
+2026-05-11 15:00:02,299 krasis.weight_loader INFO Layer 33 loaded in 0.0s (GPU alloc: 2569 MB, moe=True, type=linear_attention)
+2026-05-11 15:00:02,329 krasis.weight_loader INFO Layer 34 loaded in 0.0s (GPU alloc: 2642 MB, moe=True, type=linear_attention)
+2026-05-11 15:00:02,345 krasis.weight_loader INFO Layer 35 loaded in 0.0s (GPU alloc: 2651 MB, moe=True, type=full_attention)
+2026-05-11 15:00:02,376 krasis.weight_loader INFO Layer 36 loaded in 0.0s (GPU alloc: 2724 MB, moe=True, type=linear_attention)
+2026-05-11 15:00:02,406 krasis.weight_loader INFO Layer 37 loaded in 0.0s (GPU alloc: 2798 MB, moe=True, type=linear_attention)
+2026-05-11 15:00:02,437 krasis.weight_loader INFO Layer 38 loaded in 0.0s (GPU alloc: 2871 MB, moe=True, type=linear_attention)
+2026-05-11 15:00:02,456 krasis.weight_loader INFO Layer 39 loaded in 0.0s (GPU alloc: 2880 MB, moe=True, type=full_attention)
+2026-05-11 15:00:02,486 krasis.weight_loader INFO Layer 40 loaded in 0.0s (GPU alloc: 2953 MB, moe=True, type=linear_attention)
+2026-05-11 15:00:02,513 krasis.weight_loader INFO Layer 41 loaded in 0.0s (GPU alloc: 3027 MB, moe=True, type=linear_attention)
+2026-05-11 15:00:02,543 krasis.weight_loader INFO Layer 42 loaded in 0.0s (GPU alloc: 3100 MB, moe=True, type=linear_attention)
+2026-05-11 15:00:02,560 krasis.weight_loader INFO Layer 43 loaded in 0.0s (GPU alloc: 3109 MB, moe=True, type=full_attention)
+2026-05-11 15:00:02,589 krasis.weight_loader INFO Layer 44 loaded in 0.0s (GPU alloc: 3182 MB, moe=True, type=linear_attention)
+2026-05-11 15:00:02,618 krasis.weight_loader INFO Layer 45 loaded in 0.0s (GPU alloc: 3256 MB, moe=True, type=linear_attention)
+2026-05-11 15:00:02,648 krasis.weight_loader INFO Layer 46 loaded in 0.0s (GPU alloc: 3329 MB, moe=True, type=linear_attention)
+2026-05-11 15:00:02,663 krasis.weight_loader INFO Layer 47 loaded in 0.0s (GPU alloc: 3338 MB, moe=True, type=full_attention)
+2026-05-11 15:00:02,830 krasis.weight_loader INFO Loading final norm: model.norm.weight
+2026-05-11 15:00:02,832 krasis.weight_loader INFO Loading LM head: lm_head.weight (precision=int8)
+2026-05-11 15:00:04,091 krasis.model INFO VRAM[after-layers-loaded] GPU0: free=27786 MB, alloc=3639 MB, reserved=3660 MB, non-pytorch=673 MB
+2026-05-11 15:00:04,278 krasis.model INFO GPU0: 3639 MB allocated
+2026-05-11 15:00:04,279 krasis.model INFO GPU weights loaded in 3.4s
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:0: alloc=3639 MB, reserved=3660 MB, used=4333 MB, free=27786 MB, total=32119 MB
+2026-05-11 15:00:04,279 krasis.model INFO VRAM_CHECKPOINT [after-phase1-gpu-weights] cuda:0: alloc=3639 MB, reserved=3660 MB, driver_used=4333 MB, free=27786 MB, total=32119 MB
+2026-05-11 15:00:04,280 krasis.model INFO HQQ attention artifacts validated from cache: 1789 MB, GPU free: 27786 MB (runtime descriptors will be restored during decode-store setup)
+  [0;32mHQQ attention artifacts validated (1789 MB cached), 27786 MB free[0m
+
+[1m[36m▸ Loading GPU expert weights from cache[0m
+2026-05-11 15:00:04,280 krasis.model INFO Phase 2: Loading GPU expert weights (INT4)...
+2026-05-11 15:00:04,280 krasis.model INFO shared_expert_gate detected — Rust engine will skip shared experts (handled on GPU)
+    Loading GPU Marlin cache: 48 layers...
+    GPU Marlin cache loaded: 39.9 GB in 25s
+2026-05-11 15:00:29,622 krasis.model INFO Krasis engine: 48 MoE layers, 512 experts, hidden=2048
+2026-05-11 15:00:29,703 krasis.model INFO Routing weights sent to Rust engine (48 MoE layers)
+2026-05-11 15:00:29,703 krasis.model INFO Expert weights loaded in 25.4s
+  [0;32mExpert weights loaded in 25s.[0m
+  [33m[VRAM after-phase2-expert-weights][0m cuda:0: alloc=3639 MB, reserved=3660 MB, used=4333 MB, free=27786 MB, total=32119 MB
+2026-05-11 15:00:29,704 krasis.model INFO VRAM_CHECKPOINT [after-phase2-expert-weights] cuda:0: alloc=3639 MB, reserved=3660 MB, driver_used=4333 MB, free=27786 MB, total=32119 MB
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:0: alloc=3639 MB, reserved=3660 MB, used=4333 MB, free=27786 MB, total=32119 MB
+2026-05-11 15:00:29,704 krasis.model INFO VRAM_CHECKPOINT [after-phase3-prefill-managers] cuda:0: alloc=3639 MB, reserved=3660 MB, driver_used=4333 MB, free=27786 MB, total=32119 MB
+2026-05-11 15:00:29,704 krasis.kv_cache INFO KV cache: 1000 MB → 8533 pages (136.5K tokens)
+2026-05-11 15:00:29,708 krasis.kv_cache INFO KV cache allocated: 12 layers × 8533 pages × 16 tokens = 1000 MB (gqa, gqa-k4v4)
+2026-05-11 15:00:29,708 krasis.model INFO Hybrid model: 12 full attention layers (KV cache), 36 linear attention layers
+  [33m[VRAM after-kv-cache-init][0m cuda:0: alloc=4639 MB, reserved=4660 MB, used=5333 MB, free=26786 MB, total=32119 MB
+2026-05-11 15:00:29,709 krasis.model INFO VRAM_CHECKPOINT [after-kv-cache-init] cuda:0: alloc=4639 MB, reserved=4660 MB, driver_used=5333 MB, free=26786 MB, total=32119 MB
+2026-05-11 15:00:29,973 krasis.tokenizer INFO Tokenizer loaded: vocab=151643, eos=151645, bos=-1
+  [33m[VRAM after-full-load][0m cuda:0: alloc=4639 MB, reserved=4660 MB, used=5333 MB, free=26786 MB, total=32119 MB
+2026-05-11 15:00:29,974 krasis.model INFO VRAM_CHECKPOINT [after-full-load] cuda:0: alloc=4639 MB, reserved=4660 MB, driver_used=5333 MB, free=26786 MB, total=32119 MB
+2026-05-11 15:00:29,974 krasis.model INFO Model fully loaded in 29.1s
+
+[1m[36m▸ CUDA runtime warmup[0m
+2026-05-11 15:00:29,977 krasis.server INFO ── CUDA runtime warmup ──
+2026-05-11 15:00:29,979 krasis.model INFO Warming up CUDA runtime on all devices: ['cuda:0']
+2026-05-11 15:00:30,006 krasis.marlin_utils INFO Loaded vendored Marlin GEMM from /home/main/Documents/Claude/krasis/python/krasis/libkrasis_marlin.so
+2026-05-11 15:00:31,372 krasis.linear_attention INFO Compiled linear attention chunk step (default/Inductor mode)
+2026-05-11 15:00:32,061 krasis.linear_attention INFO Linear attention torch.compile warmup complete on cuda:0
+2026-05-11 15:00:32,215 krasis.model INFO CUDA runtime warmup on cuda:0 complete: 13 MB consumed (28087 MB free before → 28075 MB free after)
+  [32mcuBLAS + Triton kernel compilation done[0m
+
+[1m[36m▸ Setting up GPU decode store[0m
+2026-05-11 15:00:32,215 krasis.server INFO ── Setting up GPU decode store ──
+2026-05-11 15:00:41,501 krasis.model INFO HQQ BF16 attention projection residency released before VMM registration: tensors=108 cuda_mb=2313.00 free_before=26042 MB free_after=28266 MB
+2026-05-11 15:00:42,028 krasis.model INFO HQQ runtime staging prepared: tensors=168 host_mb=3553.24 prefill_mb=1763.46 decode_mb=1789.78 slot_mb=(packed 1684.50, scales 52.64, zeros 52.64) build_ms=7280.979 reg_ms=42.841 device_mb=1789.78 decode_swap_ms=244.654 decode_swap_mb=1789.78
+2026-05-11 15:00:42,049 krasis.model INFO HQQ attention registration completed on cuda:0: 48 layers, 1789 MB validated cache, 168 tensors loaded. Runtime execution descriptors are active on the decode store.
+2026-05-11 15:00:46,966 krasis.model INFO Registered shared_expert_gate for layer 0: wid=49 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,966 krasis.model INFO Registered shared_expert_gate for layer 1: wid=50 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,966 krasis.model INFO Registered shared_expert_gate for layer 2: wid=51 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,966 krasis.model INFO Registered shared_expert_gate for layer 3: wid=52 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,966 krasis.model INFO Registered shared_expert_gate for layer 4: wid=53 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,966 krasis.model INFO Registered shared_expert_gate for layer 5: wid=54 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,966 krasis.model INFO Registered shared_expert_gate for layer 6: wid=55 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,966 krasis.model INFO Registered shared_expert_gate for layer 7: wid=56 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,966 krasis.model INFO Registered shared_expert_gate for layer 8: wid=57 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,966 krasis.model INFO Registered shared_expert_gate for layer 9: wid=58 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,967 krasis.model INFO Registered shared_expert_gate for layer 10: wid=59 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,967 krasis.model INFO Registered shared_expert_gate for layer 11: wid=60 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,967 krasis.model INFO Registered shared_expert_gate for layer 12: wid=61 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,967 krasis.model INFO Registered shared_expert_gate for layer 13: wid=62 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,967 krasis.model INFO Registered shared_expert_gate for layer 14: wid=63 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,967 krasis.model INFO Registered shared_expert_gate for layer 15: wid=64 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,967 krasis.model INFO Registered shared_expert_gate for layer 16: wid=65 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,967 krasis.model INFO Registered shared_expert_gate for layer 17: wid=66 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,967 krasis.model INFO Registered shared_expert_gate for layer 18: wid=67 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,967 krasis.model INFO Registered shared_expert_gate for layer 19: wid=68 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,967 krasis.model INFO Registered shared_expert_gate for layer 20: wid=69 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,967 krasis.model INFO Registered shared_expert_gate for layer 21: wid=70 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,967 krasis.model INFO Registered shared_expert_gate for layer 22: wid=71 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,967 krasis.model INFO Registered shared_expert_gate for layer 23: wid=72 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,967 krasis.model INFO Registered shared_expert_gate for layer 24: wid=73 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,967 krasis.model INFO Registered shared_expert_gate for layer 25: wid=74 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,967 krasis.model INFO Registered shared_expert_gate for layer 26: wid=75 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,967 krasis.model INFO Registered shared_expert_gate for layer 27: wid=76 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,967 krasis.model INFO Registered shared_expert_gate for layer 28: wid=77 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,967 krasis.model INFO Registered shared_expert_gate for layer 29: wid=78 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,968 krasis.model INFO Registered shared_expert_gate for layer 30: wid=79 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,968 krasis.model INFO Registered shared_expert_gate for layer 31: wid=80 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,968 krasis.model INFO Registered shared_expert_gate for layer 32: wid=81 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,968 krasis.model INFO Registered shared_expert_gate for layer 33: wid=82 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,968 krasis.model INFO Registered shared_expert_gate for layer 34: wid=83 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,968 krasis.model INFO Registered shared_expert_gate for layer 35: wid=84 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,968 krasis.model INFO Registered shared_expert_gate for layer 36: wid=85 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,968 krasis.model INFO Registered shared_expert_gate for layer 37: wid=86 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,968 krasis.model INFO Registered shared_expert_gate for layer 38: wid=87 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,968 krasis.model INFO Registered shared_expert_gate for layer 39: wid=88 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,968 krasis.model INFO Registered shared_expert_gate for layer 40: wid=89 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,968 krasis.model INFO Registered shared_expert_gate for layer 41: wid=90 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,968 krasis.model INFO Registered shared_expert_gate for layer 42: wid=91 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,968 krasis.model INFO Registered shared_expert_gate for layer 43: wid=92 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,968 krasis.model INFO Registered shared_expert_gate for layer 44: wid=93 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,968 krasis.model INFO Registered shared_expert_gate for layer 45: wid=94 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,968 krasis.model INFO Registered shared_expert_gate for layer 46: wid=95 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,968 krasis.model INFO Registered shared_expert_gate for layer 47: wid=96 shape=torch.Size([1, 2048])
+2026-05-11 15:00:46,969 krasis.model INFO Shared k4v4 KV cache: 12 GQA layers, max_seq=136528 (8533 pages × 16), 32 blocks
+2026-05-11 15:00:46,979 krasis.model INFO HQQ attention RoPE tables registered: max_seq=136528 rope_half=32
+2026-05-11 15:00:46,979 krasis.model INFO HQQ attention execution descriptors retained after shared decode setup on cuda:0: 48 layers registered, 1789 MB validated cache, 168 tensors loaded.
+2026-05-11 15:00:46,979 krasis.model INFO GPU decode store configured: 48 layers, store_addr=1711510320
+  [32mGPU decode store ready (addr=0x66039330)[0m
+  [2mVRAM monitor started (tracking warmup)[0m
+  [2mcuda:0: 0 MB total[0m
+
+[1m[36m▸ Pre-allocating Rust prefill engine[0m
+2026-05-11 15:00:46,979 krasis.server INFO ── Pre-allocating Rust prefill engine ──
+[FLA] Loading kernels for H=32 from /home/main/Documents/Claude/krasis/python/krasis/libkrasis_fla_sm120.so
+[FLA] loaded krasis_fla_chunk_local_cumsum_scalar_kernel (H=32)
+[FLA] loaded krasis_fla_chunk_scaled_dot_kkt_fwd_kernel (H=32)
+[FLA] loaded krasis_fla_merge_16x16_to_64x64_inverse_kernel (H=32)
+[FLA] loaded krasis_fla_recompute_w_u_fwd_kernel (H=32)
+[FLA] loaded krasis_fla_chunk_gated_delta_rule_fwd_kernel_h_blockdim64 (H=32)
+[FLA] loaded krasis_fla_chunk_fwd_kernel_o (H=32)
+  [32mPrefill engine scratch buffers allocated[0m
+
+[1m[36m▸ Warmup (Rust prefill engine)[0m
+2026-05-11 15:00:47,455 krasis.server INFO ── Warmup (Rust prefill engine) ──
+  [32mRust prefill warmed with 300 tokens before HCS budgeting[0m
+  [32mWarmup complete in 4.4s[0m
+  [2mcuda:0 warmup:  peak 7,955 MB used / 32,119 MB total  (min free: 24,164 MB)[0m
+2026-05-11 15:00:51,823 krasis.server INFO VRAM warmup cuda:0: peak_used=7955 MB, min_free=24164 MB, total=32119 MB
+
+[1m[36m▸ VRAM calibration[0m
+2026-05-11 15:00:51,823 krasis.server INFO ── VRAM calibration ──
+  [32mSafety margin: 600 MB[0m
+  [32mFree VRAM after startup: 25,188 MB / 32,119 MB[0m
+2026-05-11 15:00:51,982 krasis.server INFO VRAM calibration baseline: free=25188 MB, total=32119 MB
+  [32mShort calibration: probing 500 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 1.44s (22.2 tok/s)  VRAM: 25138 MB free now, 25138 MB min free during decode[0m
+  [32mShort calibration: baseline=25,188 MB, prefill post-alloc=24,338 MB, prefill min=23,730 MB, decode min=25,138 MB, post-cleanup=25,138 MB[0m
+  [32mLong calibration: probing 39,920 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 5.57s (5.7 tok/s)  VRAM: 25136 MB free now, 25136 MB min free during decode[0m
+  [32mLong calibration: baseline=25,138 MB, prefill post-alloc=3,516 MB, prefill min=2,044 MB, decode min=25,136 MB, post-cleanup=25,136 MB[0m
+  [32mScratch reservation: max=25,951 MB (at 50,000 tokens)[0m
+
+[1m[36m▸ VRAM calibration complete[0m
+2026-05-11 15:01:09,956 krasis.server INFO ── VRAM calibration complete ──
+  [32mPost-calibration free VRAM: 25,136 MB[0m
+  [32mTransient deltas: short prefill=1,458 MB, long prefill=23,094 MB, short decode=50 MB, long decode=2 MB[0m
+  [32mGPU0 reclaimable HCS budget: 24,486 MB[0m
+  [32mWorst-case prefill scratch reservation: 25,951 MB at 50,000 tokens[0m
+2026-05-11 15:01:09,957 krasis.server INFO VRAM calibration: post_free=25136 MB, short=500tok, long=39920tok, gpu0_reclaimable=24486 MB, max_scratch=25951 MB
+
+[1m[36m▸ Calculating HCS budget[0m
+2026-05-11 15:01:09,957 krasis.server INFO ── Calculating HCS budget ──
+
+[1m[36m▸ Building expert heatmap (decode-weighted calibration)[0m
+2026-05-11 15:01:09,967 krasis.server INFO ── Building expert heatmap (decode-weighted calibration) ──
+2026-05-11 15:01:09,975 krasis.server INFO Building heatmap from 6 held-out prompts (256 decode tokens each, temperature=0.000 top_k=50 top_p=0.950 enable_thinking=False mode=benchmark)...
+2026-05-11 15:01:09,976 krasis.server INFO   Heatmap prompt 1/6: 31 prefill tokens + 256 decode tokens
+2026-05-11 15:01:22,463 krasis.server INFO   Heatmap prompt 2/6: 39 prefill tokens + 256 decode tokens
+2026-05-11 15:01:38,221 krasis.server INFO   Heatmap prompt 3/6: 31 prefill tokens + 256 decode tokens
+2026-05-11 15:01:51,816 krasis.server INFO   Heatmap prompt 4/6: 25 prefill tokens + 256 decode tokens
+2026-05-11 15:02:05,400 krasis.server INFO   Heatmap prompt 5/6: 37 prefill tokens + 256 decode tokens
+2026-05-11 15:02:19,118 krasis.server INFO   Heatmap prompt 6/6: 42 prefill tokens + 256 decode tokens
+2026-05-11 15:02:32,864 krasis.server INFO Heatmap collection complete: 1542 decode tokens across 6 prompts
+2026-05-11 15:02:32,887 krasis.server INFO Heatmap saved to /home/main/.krasis/cache/Qwen3-Coder-Next/auto_heatmap.json (20988 entries)
+  [32mHeatmap: 20,987 experts ranked from 20,987 entries[0m
+  [2mVRAM calibration: baseline 25136 MB | prefill 562.0 KB/tok, decode -1.2 KB/tok | HCS allowance prefill: short 23078 MB, long 1442 MB | decode: short 24486 MB, long 24534 MB | idle floors prefill=2058 MB decode=650 MB[0m
+  [2mGPU0 HCS: 24576 experts (20987 ranked + 3589 unranked), reclaimable: 24,486 MB[0m
+
+[1m[36m▸ Loading GPU0 HCS pool (fully reclaimable)[0m
+2026-05-11 15:02:32,913 krasis.server INFO ── Loading GPU0 HCS pool (fully reclaimable) ──
+
+[1m[36m▸ HCS pool loaded[0m
+2026-05-11 15:02:51,316 krasis.server INFO ── HCS pool loaded ──
+  [32mHCS pool: 0/24576 experts loaded in 0.00s (0.0% coverage), 0.0 MB VRAM, 0 free slots, gpu_route_sync=false, mapped_reads=false | soft: 15633 experts in 4.01s (24485.5 MB) | total: 15633/24576 (63.6%) coverage[0m
+  [2mLoaded in 18.4s[0m
+2026-05-11 15:02:51,316 krasis.server INFO HCS pool: HCS pool: 0/24576 experts loaded in 0.00s (0.0% coverage), 0.0 MB VRAM, 0 free slots, gpu_route_sync=false, mapped_reads=false | soft: 15633 experts in 4.01s (24485.5 MB) | total: 15633/24576 (63.6%) coverage (18.4s)
+
+[1m[36m▸ Decode validation[0m
+2026-05-11 15:02:51,316 krasis.server INFO ── Decode validation ──
+  [32mSkipped: Rust prefill already warmed before HCS budgeting[0m
+
+[1m[36m▸ VRAM monitor: runtime warnings enabled[0m
+2026-05-11 15:02:51,317 krasis.server INFO ── VRAM monitor: runtime warnings enabled ──
+  [32mSafety margin: 600 MB — warnings on every new low below this[0m
+2026-05-11 15:02:51,317 krasis.server INFO VRAM monitor: runtime warnings enabled (safety margin: 600 MB)
+2026-05-11 15:02:51,318 krasis.server INFO Registry entry written: /home/main/.krasis/servers/2035082.json
+2026-05-11 15:02:51,318 krasis.server INFO Model template does not support enable_thinking — thinking budget disabled
+2026-05-11 15:02:51,319 krasis.server INFO Suppress tokens: {151644: '<|im_start|>'}
+2026-05-11 15:02:51,319 krasis.server INFO Model loaded, starting server on 0.0.0.0:18146 (max context: 136528, decode: GPU)
+
+  [1m[32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+  [1m[32m  KRASIS SERVER READY[0m
+  [1m[32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+  [32mModel:[0m    [1mQwen3-Coder-Next[0m
+  [32mAddress:[0m  [1m0.0.0.0:18146[0m
+  [32mContext:[0m  136,528 tokens  |  KV cache: 1,000 MB
+  [32mDecode:[0m   GPU  |  HCS: on  |  Think: off
+  [1m[32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+  [2mPress Q or Ctrl-C to stop[0m
+
+
+[1m════════════════════════════════════════════════
+  KRASIS BENCHMARK
+════════════════════════════════════════════════[0m
+
+[1m[36m▸ Collecting system info[0m
+  Model:    [1mQwen3-Coder-Next[0m
+  GPUs:     2x NVIDIA GeForce RTX 5090
+  Strategy: gpu_decode (layer_grouped(2))
+
+[1m[36m▸ Loading benchmark prompts (warmup + timed at 1K/5K/10K/20K/35K/50K)[0m
+  Warmup prefill:  3 prompts, ~25,000 tokens each
+  Timed prefill:   6 prompts at 1K/5K/10K/20K/35K/50K tokens
+    [1] 1,000 tokens
+    [2] 5,000 tokens
+    [3] 10,000 tokens
+    [4] 20,000 tokens
+    [5] 35,000 tokens
+    [6] 50,000 tokens
+  Decode:          6 prompts (50/100/250 tokens, warmup + timed)
+
+[1m[36m▸ Warmup (3 prefill + 3 decode via engine)[0m
+  Warmup: 2 short engine requests...
+  [32mdecode: 7 tokens in 0.09s (81.6 tok/s)  VRAM: 766 MB free now, 702 MB min free during decode[0m
+  [36mDynamic HCS: hit=97.11% tail=960/480 protected=14673 promotions=97 evictions=97 request_promotions=97/960 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [32mdecode: 7 tokens in 0.11s (65.9 tok/s)  VRAM: 766 MB free now, 702 MB min free during decode[0m
+  [36mDynamic HCS: hit=92.05% tail=960/480 protected=14673 promotions=364 evictions=364 request_promotions=267/960 budget_skips=0 no_slot=0 copy_failures=0[0m
+  Warmup complete.
+  Prefill warmup (3 runs, ~25K tokens each)...
+    [1/3] 25,000 tokens
+    [2/3] 25,000 tokens
+    [3/3] 25,000 tokens
+  Decode warmup (50/100/250 tokens, 3 separate prompts)...
+  [32mdecode: 49 tokens in 0.56s (87.8 tok/s)  VRAM: 892 MB free now, 732 MB min free during decode[0m
+  [36mDynamic HCS: hit=99.15% tail=960/480 protected=14592 promotions=564 evictions=564 request_promotions=200/960 budget_skips=0 no_slot=0 copy_failures=0[0m
+    50 tokens done
+  [32mdecode: 99 tokens in 1.15s (86.0 tok/s)  VRAM: 766 MB free now, 702 MB min free during decode[0m
+  [36mDynamic HCS: hit=98.80% tail=960/480 protected=14673 promotions=1135 evictions=1135 request_promotions=571/960 budget_skips=0 no_slot=0 copy_failures=0[0m
+    100 tokens done
+  [32mdecode: 249 tokens in 2.88s (86.6 tok/s)  VRAM: 766 MB free now, 702 MB min free during decode[0m
+  [36mDynamic HCS: hit=98.84% tail=960/480 protected=14673 promotions=2095 evictions=2095 request_promotions=960/960 budget_skips=421 no_slot=0 copy_failures=0[0m
+    250 tokens done
+  Warmup complete (27.3s). All kernels compiled.
+
+[1m[36m▸ Prefill (internal) — 1K/5K/10K/20K/35K/50K tokens, 6 runs[0m
+  Run 1: 1,107.9 tok/s (1,000 tokens in 902.6ms)
+  Run 2: 3,245.2 tok/s (5,000 tokens in 1540.7ms)
+  Run 3: 4,481.9 tok/s (10,000 tokens in 2231.2ms)
+  Run 4: 5,236.6 tok/s (20,000 tokens in 3819.3ms)
+  Run 5: 6,007.7 tok/s (35,000 tokens in 5825.8ms)
+  Run 6: 5,374.3 tok/s (50,000 tokens in 9303.5ms)
+  [1mBest: 6,007.7 tok/s (35,000 tokens)[0m
+
+[1m[36m▸ Decode (internal) — 50/100/250 tokens, 3 separate prompts[0m
+  [32mdecode: 49 tokens in 0.55s (89.6 tok/s)  VRAM: 892 MB free now, 732 MB min free during decode[0m
+  [36mDynamic HCS: hit=99.20% tail=960/480 protected=14592 promotions=2284 evictions=2284 request_promotions=189/960 budget_skips=421 no_slot=0 copy_failures=0[0m
+  [32mdecode: 99 tokens in 1.12s (88.7 tok/s)  VRAM: 892 MB free now, 764 MB min free during decode[0m
+  [36mDynamic HCS: hit=99.14% tail=960/480 protected=14592 promotions=2694 evictions=2694 request_promotions=410/960 budget_skips=421 no_slot=0 copy_failures=0[0m
+  [32mdecode: 249 tokens in 2.97s (83.9 tok/s)  VRAM: 766 MB free now, 670 MB min free during decode[0m
+  [36mDynamic HCS: hit=98.40% tail=960/480 protected=14673 promotions=3654 evictions=3654 request_promotions=960/960 budget_skips=1369 no_slot=0 copy_failures=0[0m
+   50 tokens: 89.53 tok/s (11.2ms/tok)
+  100 tokens: 88.72 tok/s (11.3ms/tok)
+  250 tokens: 83.94 tok/s (11.9ms/tok)
+  [1mBest: 89.53 tok/s[0m
+  HCS:  15633/24576 experts loaded (63.6%)
+  VRAM: 670 MB min free during decode (safety margin: 600 MB)
+
+[1m[36m▸ Round trip (network) — 50/100/250 tokens via HTTP[0m
+  [32mdecode: 7 tokens in 0.08s (84.3 tok/s)  VRAM: 766 MB free now, 702 MB min free during decode[0m
+  [36mDynamic HCS: hit=97.26% tail=960/480 protected=14673 promotions=3746 evictions=3746 request_promotions=92/960 budget_skips=1369 no_slot=0 copy_failures=0[0m
+  [32mdecode: 49 tokens in 0.55s (88.5 tok/s)  VRAM: 766 MB free now, 670 MB min free during decode[0m
+  [36mDynamic HCS: hit=99.21% tail=960/480 protected=14673 promotions=3931 evictions=3931 request_promotions=185/960 budget_skips=1369 no_slot=0 copy_failures=0[0m
+  [32mdecode: 99 tokens in 1.13s (87.9 tok/s)  VRAM: 892 MB free now, 764 MB min free during decode[0m
+  [36mDynamic HCS: hit=99.18% tail=960/480 protected=14592 promotions=4322 evictions=4322 request_promotions=391/960 budget_skips=1369 no_slot=0 copy_failures=0[0m
+  [32mdecode: 249 tokens in 2.98s (83.5 tok/s)  VRAM: 766 MB free now, 702 MB min free during decode[0m
+  [36mDynamic HCS: hit=98.45% tail=960/480 protected=14673 promotions=5282 evictions=5282 request_promotions=960/960 budget_skips=2265 no_slot=0 copy_failures=0[0m
+   50 tokens: 220.18 tok/s (1.99s total)
+  100 tokens: 109.60 tok/s (2.57s total)
+  250 tokens: 90.94 tok/s (4.30s total)
+  [1mBest: 220.18 tok/s[0m
+
+[1m[36m▸ Writing results[0m
+
+[1m────────────────────────────────────────────────
+  BENCHMARK COMPLETE
+────────────────────────────────────────────────[0m
+  Model:                 [1mQwen3-Coder-Next[0m
+  Config:                INT4/4 HQQ8 KV=k4v4 1 GPU
+  Prefill (internal):    [32m[1m6,007.7 tok/s[0m  (best of 1K/5K/10K/20K/35K/50K)
+  Decode (internal):     [32m[1m89.53 tok/s[0m  (best of 50/100/250)
+  Round trip (network):  [32m[1m220.18 tok/s[0m  (best of 50/100/250)
+  HCS coverage:          15633/24576 (63.6%)
+  Min free VRAM:         670 MB
+  Log:     [2mlogs/dev-benchmark_20260511_145953/benchmark_report.log[0m
+
+[0;36m[1m=>[0m Benchmark log saved: /home/main/Documents/Claude/krasis/logs/dev-benchmark_20260511_145953/benchmark_stdout.log
+SPEED_RC15_2_EXIT:0

@@ -347,7 +347,12 @@ impl VramMonitor {
                                         free_mb,
                                         VRAM_HARD_EXIT_FLOOR_MB,
                                     );
-                                    std::process::exit(VRAM_HARD_EXIT_CODE);
+                                    // The hard floor means CUDA is already in an unsafe
+                                    // low-memory state. Avoid libc/Python/CUDA atexit
+                                    // cleanup here; on WSL this has crashed in cuBLASLt.
+                                    unsafe {
+                                        libc::_exit(VRAM_HARD_EXIT_CODE);
+                                    }
                                 }
 
                                 // Warn on new lows below safety margin (when enabled)

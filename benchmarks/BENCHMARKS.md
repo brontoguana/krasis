@@ -1,5 +1,32 @@
 # Krasis Benchmark Results
 
+## Standard Benchmarks - 2026-05-11 (Measured prefill pinning budget rc15)
+
+Hardware: EPYC 7742, 1007 GB RAM, RTX 5090 32 GB selected for the run.
+
+This run validates the rc15 prefill-pinning budget change. Startup short/long
+VRAM calibration ran with optional prefill pinning disabled, recorded
+post-scratch and low-water VRAM, and runtime prefill pinning was capped from
+the measured post-scratch transient requirement. Timing instrumentation was
+disabled.
+
+| Model / run | Command | Attention | KV | Prefill (tok/s) | Decode (tok/s) | Round trip (tok/s) | HCS | Min free VRAM | Log |
+|-------------|---------|-----------|----|----------------:|---------------:|-------------------:|-----|--------------:|-----|
+| Qwen3-Coder-Next measured pinning budget | `./dev speed-test` | HQQ8 | k4v4 | 6007.7 | 89.53 | 220.18 | 15633/24576 (63.6%) | 670 MB | [log](20260511_qcn_rc15_measured_prefill_pinning_speedtest.log) |
+
+Calibration:
+- Short probe: `500` prompt tokens, baseline `25188 MB`, prefill post-alloc
+  `24338 MB`, prefill min `23730 MB`, decode min `25138 MB`.
+- Long probe: `39920` prompt tokens, baseline `25138 MB`, prefill post-alloc
+  `3516 MB`, prefill min `2044 MB`, decode min `25136 MB`.
+
+Notes:
+- The run completed with `SPEED_RC15_2_EXIT:0`.
+- No hard-floor VRAM monitor warning occurred in the archived speed log.
+- The 50K timed prefill row completed at `5374.3 tok/s`.
+
+---
+
 ## Standard Benchmarks - 2026-05-09 (Peak VRAM safe reductions QCN speed gate)
 
 Hardware: EPYC 7742, 1007 GB RAM, RTX 5090 32 GB selected for the run.

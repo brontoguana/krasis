@@ -1445,7 +1445,11 @@ def main():
                 "unset" if prefill_timing_enabled is None else int(prefill_timing_enabled),
                 "unset" if exit_after_calibration is None else int(exit_after_calibration),
             )
-        gpu_store.rust_prefill_tokens([warmup_token] * warmup_len, 0.0)
+        gpu_store.rust_prefill_tokens(
+            [warmup_token] * warmup_len,
+            0.0,
+            disable_pinning=True,
+        )
         _model.server_cleanup()
         _detail(f"Rust prefill warmed with {warmup_len:,} tokens before HCS budgeting")
     except Exception as e:
@@ -1519,7 +1523,7 @@ def main():
     calibration_prompts = _make_startup_calibration_prompts(_model, [short_target, long_target])
     calibration_stop_ids: list[int] = []
 
-    def _measure_vram_probe(label: str, prompt_tokens: list[int]) -> tuple[int, int, int, int]:
+    def _measure_vram_probe(label: str, prompt_tokens: list[int]) -> tuple[int, int, int, int, int]:
         _detail(f"{label}: probing {len(prompt_tokens):,} prompt tokens + {STARTUP_CALIBRATION_DECODE_TOKENS} decode tokens")
         torch.cuda.synchronize()
         gc.collect()
@@ -1531,11 +1535,16 @@ def main():
 
         vram_monitor.reset_min_free()
         t_prefill = time.time()
-        first_token, prompt_len, kv_overflow = gpu_store.rust_prefill_tokens(prompt_tokens, temperature=0.0)
+        first_token, prompt_len, kv_overflow = gpu_store.rust_prefill_tokens(
+            prompt_tokens,
+            temperature=0.0,
+            disable_pinning=True,
+        )
         torch.cuda.synchronize()
         time.sleep(0.1)
         prefill_elapsed = time.time() - t_prefill
         prefill_min_free = int(vram_monitor.min_free_mb(dev_idx))
+        prefill_post_alloc_free = int(gpu_store.get_last_prefill_post_alloc_free_mb())
         if kv_overflow:
             _model.server_cleanup()
             raise RuntimeError(f"{label} VRAM calibration overflowed KV cache at {prompt_len:,} tokens")
@@ -1565,6 +1574,7 @@ def main():
 
         _detail(
             f"{label}: baseline={baseline_free:,} MB, "
+            f"prefill post-alloc={prefill_post_alloc_free:,} MB, "
             f"prefill min={prefill_min_free:,} MB, decode min={decode_min_free:,} MB, "
             f"post-cleanup={post_cleanup_free:,} MB"
         )
@@ -1576,18 +1586,18 @@ def main():
                 f"decode {decode_elapsed:.2f}s ({decode_tps:.1f} tok/s)"
             )
             logger.info(
-                "Startup diag probe %s: prompt_len=%d baseline_free=%d prefill_min=%d "
+                "Startup diag probe %s: prompt_len=%d baseline_free=%d prefill_post_alloc=%d prefill_min=%d "
                 "decode_min=%d post_cleanup=%d prefill_s=%.3f prefill_tps=%.2f "
                 "decode_s=%.3f decode_tps=%.2f",
-                label, prompt_len, baseline_free, prefill_min_free, decode_min_free,
+                label, prompt_len, baseline_free, prefill_post_alloc_free, prefill_min_free, decode_min_free,
                 post_cleanup_free, prefill_elapsed, prefill_tps, decode_elapsed, decode_tps,
             )
-        return prompt_len, baseline_free, prefill_min_free, decode_min_free
+        return prompt_len, baseline_free, prefill_post_alloc_free, prefill_min_free, decode_min_free
 
-    short_tokens, short_baseline_free, short_prefill_min, short_decode_min = _measure_vram_probe(
+    short_tokens, short_baseline_free, short_prefill_post_alloc, short_prefill_min, short_decode_min = _measure_vram_probe(
         "Short calibration", calibration_prompts[0]
     )
-    long_tokens, long_baseline_free, long_prefill_min, long_decode_min = _measure_vram_probe(
+    long_tokens, long_baseline_free, long_prefill_post_alloc, long_prefill_min, long_decode_min = _measure_vram_probe(
         "Long calibration", calibration_prompts[1]
     )
 
@@ -1913,6 +1923,8 @@ def main():
                 decode_short_free, decode_long_free,
                 post_calibration_free_mb,
                 SAFETY_MARGIN_MB,
+                short_prefill_post_alloc,
+                long_prefill_post_alloc,
             )
             _dim(cal_msg)
 

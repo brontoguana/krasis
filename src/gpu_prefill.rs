@@ -3247,6 +3247,9 @@ pub struct PrefillEngine {
     pub pinned_expert_offsets: Vec<Vec<Option<usize>>>, // [moe_layer_idx][expert_id] -> byte offset in pool (None = not pinned)
     pub pinning_pool_expert_bytes: usize, // total bytes per expert in pool (w1p + w1s + w2p + w2s)
     pub pinning_active: bool,
+    pub prefill_pinning_disabled: bool,
+    pub optional_pinning_budget_mb: Option<usize>,
+    pub last_prepare_post_alloc_free_mb: usize,
     // Pre-scan routing data: per-layer list of predicted active expert IDs per chunk
     pub prescan_active_experts: Vec<Vec<Vec<usize>>>, // [moe_layer_idx][chunk_idx] -> Vec<expert_id>
     pub prescan_token_count: usize,
@@ -6049,6 +6052,21 @@ impl PrefillEngine {
         self.hcs_num_experts_per_layer = num_experts_per_layer;
     }
 
+    pub fn set_prefill_pinning_disabled(&mut self, disabled: bool) {
+        self.prefill_pinning_disabled = disabled;
+        if disabled {
+            self.optional_pinning_budget_mb = Some(0);
+        }
+    }
+
+    pub fn set_optional_pinning_budget_mb(&mut self, budget_mb: Option<usize>) {
+        self.optional_pinning_budget_mb = budget_mb;
+    }
+
+    pub fn last_prepare_post_alloc_free_mb(&self) -> usize {
+        self.last_prepare_post_alloc_free_mb
+    }
+
     fn hcs_cached_expert_count(&self) -> usize {
         self.hcs_cache_fast
             .iter()
@@ -8278,6 +8296,7 @@ impl PrefillEngine {
             unsafe {
                 cuda_sys::lib().cuMemGetInfo_v2(&mut post_alloc_free_bytes, &mut total_bytes);
             }
+            self.last_prepare_post_alloc_free_mb = post_alloc_free_bytes / (1024 * 1024);
             if debug_prefill {
                 let fp32_floats =
                     prefill_fp32_scratch_floats(&self.config, scratch_tokens, prompt_tokens);
@@ -8627,14 +8646,17 @@ impl PrefillEngine {
         // This eliminates most PCIe DMA for repeatedly-used experts.
         let pinning_enabled = use_fused
             && self.config.n_routed_experts > 0
+            && !self.prefill_pinning_disabled
             && std::env::var("KRASIS_NO_PINNING").is_err();
         if debug_prefill {
             let hcs_cached_experts = self.hcs_cached_expert_count();
             eprintln!(
-                "[PREFILL-DEBUG] moe setup fused={} pointer_table={} pinning_enabled={} pinning_active={} pinning_pool_mb={:.1} prescan_layers={} hcs_cached_experts={} hcs_stride={}",
+                "[PREFILL-DEBUG] moe setup fused={} pointer_table={} pinning_enabled={} pinning_disabled={} pinning_budget_mb={:?} pinning_active={} pinning_pool_mb={:.1} prescan_layers={} hcs_cached_experts={} hcs_stride={}",
                 use_fused,
                 self.d_expert_w1_ptrs.is_some(),
                 pinning_enabled,
+                self.prefill_pinning_disabled,
+                self.optional_pinning_budget_mb,
                 self.pinning_active,
                 self.pinning_pool_bytes as f64 / (1024.0 * 1024.0),
                 self.prescan_active_experts.len(),
@@ -28574,6 +28596,11 @@ impl PrefillEngine {
             .saturating_sub(safety)
             .saturating_sub(hard_floor)
             .saturating_sub(cold_reserve);
+        let measured_budget = self
+            .optional_pinning_budget_mb
+            .map(|mb| mb.saturating_mul(1024 * 1024))
+            .unwrap_or(usize::MAX);
+        let pool_budget = pool_budget.min(measured_budget);
 
         // Total pinnable experts across all layers
         let max_total_experts = pool_budget / expert_bytes;
@@ -28581,8 +28608,8 @@ impl PrefillEngine {
 
         if experts_per_layer == 0 {
             if stderr_debug_enabled() {
-                eprintln!("[PREFILL] Pinning pool: insufficient VRAM ({:.0} MB free, {:.1} MB safety, {:.1} MB hard floor, {:.1} MB cold reserve), skipping",
-                    free as f64 / 1e6, safety as f64 / 1e6, hard_floor as f64 / 1e6, cold_reserve as f64 / 1e6);
+                eprintln!("[PREFILL] Pinning pool: insufficient measured surplus ({:.0} MB free, {:.1} MB safety, {:.1} MB hard floor, {:.1} MB cold reserve, budget {:?} MB), skipping",
+                    free as f64 / 1e6, safety as f64 / 1e6, hard_floor as f64 / 1e6, cold_reserve as f64 / 1e6, self.optional_pinning_budget_mb);
             }
             return Ok(0);
         }
@@ -28606,8 +28633,8 @@ impl PrefillEngine {
 
         if stderr_debug_enabled() {
             let avg_pinned = total_pinned as f64 / num_moe_layers as f64;
-            eprintln!("[PREFILL] Pinning pool: {:.0} MB free, {:.0} MB safety, {:.0} MB hard floor, {:.0} MB cold reserve, cap {}/{} experts/layer, pinning {} total ({:.1} avg/layer, {:.0} MB)",
-                free as f64 / 1e6, safety as f64 / 1e6, hard_floor as f64 / 1e6, cold_reserve as f64 / 1e6, experts_per_layer, n_experts, total_pinned, avg_pinned, pool_bytes as f64 / 1e6);
+            eprintln!("[PREFILL] Pinning pool: {:.0} MB free, {:.0} MB safety, {:.0} MB hard floor, {:.0} MB cold reserve, measured budget {:?} MB, cap {}/{} experts/layer, pinning {} total ({:.1} avg/layer, {:.0} MB)",
+                free as f64 / 1e6, safety as f64 / 1e6, hard_floor as f64 / 1e6, cold_reserve as f64 / 1e6, self.optional_pinning_budget_mb, experts_per_layer, n_experts, total_pinned, avg_pinned, pool_bytes as f64 / 1e6);
         }
 
         // Allocate the pool using raw CUDA driver API

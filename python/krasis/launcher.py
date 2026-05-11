@@ -13,6 +13,7 @@ import argparse
 import json
 import math
 import os
+import shutil
 import subprocess
 import sys
 from typing import Any, Dict, List, Optional, Tuple
@@ -66,6 +67,31 @@ INTERACTIVE_HQQ_AUTO_BUDGET_PCT = 10.0
 def _visible_len(s: str) -> int:
     """Length of string with ANSI escape codes stripped."""
     return len(_ANSI_RE.sub("", s))
+
+
+def _center_ansi(text: str, width: int) -> str:
+    """Center text within a visible width while preserving ANSI color codes."""
+    visible = _visible_len(text)
+    if visible > width:
+        plain = _ANSI_RE.sub("", text)
+        return plain[:width]
+    left = (width - visible) // 2
+    right = width - visible - left
+    return " " * left + text + " " * right
+
+
+def _launcher_header_lines(version: str, width: Optional[int] = None) -> List[str]:
+    """Render a terminal-width launcher header."""
+    if width is None:
+        width = shutil.get_terminal_size((80, 24)).columns
+    width = max(20, int(width))
+    inner_width = width - 2
+    title = f"{CYAN}Krasis{NC}{BOLD} MoE Server {DIM}v{version}{NC}{BOLD}"
+    return [
+        f"{BOLD}\u2554{'═' * inner_width}\u2557{NC}",
+        f"{BOLD}\u2551{_center_ansi(title, inner_width)}\u2551{NC}",
+        f"{BOLD}\u255a{'═' * inner_width}\u255d{NC}",
+    ]
 
 
 def _clear_screen():
@@ -1311,9 +1337,8 @@ class Launcher:
         lines = []
 
         # Header
-        lines.append(f"{BOLD}\u2554{'═' * 71}\u2557{NC}")
-        lines.append(f"{BOLD}\u2551{'':>27}{CYAN}Krasis{NC}{BOLD} MoE Server{'':>27}\u2551{NC}")
-        lines.append(f"{BOLD}\u255a{'═' * 71}\u255d{NC}")
+        from krasis import __version__
+        lines.extend(_launcher_header_lines(__version__))
         lines.append("")
 
         # Model info

@@ -221,16 +221,27 @@ def _detect_layers_prefix(model_path: str) -> str:
     if os.path.exists(index_path):
         with open(index_path) as f:
             index = json.load(f)
+        def is_auxiliary_prefix(prefix: str) -> bool:
+            return (
+                prefix == "mtp"
+                or prefix.endswith(".mtp")
+                or prefix == "model.visual"
+                or ".visual" in prefix
+            )
         # Prefer keys with self_attn to disambiguate from projector/vision layers
         for key in index.get("weight_map", {}):
             pos = key.find(".layers.")
             if pos > 0 and "self_attn" in key:
-                return key[:pos]
+                prefix = key[:pos]
+                if not is_auxiliary_prefix(prefix):
+                    return prefix
         # Fallback: any .layers. key
         for key in index.get("weight_map", {}):
             pos = key.find(".layers.")
             if pos > 0:
-                return key[:pos]
+                prefix = key[:pos]
+                if not is_auxiliary_prefix(prefix):
+                    return prefix
     # Fallback: check for text_config in config.json
     config_path = os.path.join(model_path, "config.json")
     if os.path.exists(config_path):

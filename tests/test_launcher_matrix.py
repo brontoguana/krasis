@@ -142,6 +142,13 @@ def _run_server_start_smoke(config_path: Path, scenario: str, expected_fragments
 class LauncherMatrixTest(unittest.TestCase):
     maxDiff = None
 
+    def test_launcher_header_fills_terminal_width_and_shows_version(self) -> None:
+        lines = launcher_mod._launcher_header_lines("9.8.7-test", width=96)
+        self.assertEqual(len(lines), 3)
+        for line in lines:
+            self.assertEqual(launcher_mod._visible_len(line), 96)
+        self.assertIn("Krasis MoE Server v9.8.7-test", launcher_mod._ANSI_RE.sub("", lines[1]))
+
     def test_hqq4_interactive_preset_quantizer_symbol_available(self) -> None:
         weight = torch.linspace(-1.0, 1.0, steps=32, dtype=torch.float32).reshape(4, 8)
         tensors = quantize_hqq4_tensor_rust(weight, group_size=8, inner_threads=1)

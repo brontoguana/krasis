@@ -121,11 +121,15 @@ impl ChatTemplateEngine {
                 .unwrap_or(serde_json::Value::Array(vec![]))
         };
 
-        // Pre-process: convert string tool_call arguments to objects.
+        // Pre-process messages before rendering. Keep plain string content unchanged.
+        // OpenAI text content parts are flattened to the string content expected by
+        // current text-only HF templates; non-text parts fail instead of rendering
+        // an array/object into the prompt.
         // OpenAI format sends arguments as a JSON string, but Jinja templates
         // use `arguments|items` which requires a dict/mapping.
         if let Some(msgs) = messages.as_array_mut() {
             for msg in msgs.iter_mut() {
+                normalize_text_content_parts(msg)?;
                 if let Some(tool_calls) = msg.get_mut("tool_calls").and_then(|v| v.as_array_mut()) {
                     for tc in tool_calls.iter_mut() {
                         // Determine which object holds arguments: tc.function or tc itself
@@ -243,6 +247,7 @@ impl ChatTemplateEngine {
             eos_token => &self.eos_token,
             add_generation_prompt => add_generation_prompt,
             enable_thinking => enable_thinking,
+            preserve_thinking => false,
         };
 
         tmpl.render(ctx)
@@ -260,6 +265,33 @@ fn extract_token(config: &serde_json::Value, key: &str) -> Option<String> {
         }
         _ => None,
     }
+}
+
+fn normalize_text_content_parts(message: &mut serde_json::Value) -> Result<(), String> {
+    let Some(content) = message.get_mut("content") else {
+        return Ok(());
+    };
+    let serde_json::Value::Array(parts) = content else {
+        return Ok(());
+    };
+
+    let mut text = String::new();
+    for (idx, part) in parts.iter().enumerate() {
+        let obj = part.as_object().ok_or_else(|| {
+            format!("structured content part {} must be an object", idx)
+        })?;
+        let part_type = obj.get("type").and_then(|v| v.as_str());
+        if part_type == Some("text") || obj.contains_key("text") {
+            let part_text = obj.get("text")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| format!("structured content part {} text must be a string", idx))?;
+            text.push_str(part_text);
+            continue;
+        }
+        return Err(format!("unsupported non-text structured content part {}", idx));
+    }
+    *content = serde_json::Value::String(text);
+    Ok(())
 }
 
 /// raise_exception function for Jinja2 templates.
@@ -339,4 +371,85 @@ fn days_to_ymd(days: i64) -> (i64, u32, u32) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ChatTemplateEngine;
+    use std::fs;
+
+    fn write_tokenizer_config(template: &str) -> String {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "krasis_chat_template_test_{}_{}",
+            std::process::id(),
+            nonce
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tokenizer_config.json");
+        let data = serde_json::json!({
+            "chat_template": template,
+            "bos_token": "<s>",
+            "eos_token": "</s>"
+        });
+        fs::write(&path, serde_json::to_string(&data).unwrap()).unwrap();
+        path.to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn preserve_thinking_defaults_false() {
+        let template = concat!(
+            "{% for message in messages %}",
+            "{% if message.role == 'assistant' %}",
+            "{% if preserve_thinking is defined and preserve_thinking is true %}",
+            "KEEP:{{ message.content }}",
+            "{% else %}",
+            "DROP:{{ message.content }}",
+            "{% endif %}",
+            "{% endif %}",
+            "{% endfor %}"
+        );
+        let config_path = write_tokenizer_config(template);
+        let engine = ChatTemplateEngine::from_config(&config_path).unwrap();
+        let messages = r#"[{"role":"assistant","content":"old reasoning"}]"#;
+        let rendered = engine.apply(messages, false, false).unwrap();
+        assert_eq!(rendered, "DROP:old reasoning");
+    }
+
+    #[test]
+    fn enable_thinking_is_still_passed() {
+        let template = concat!(
+            "{% if add_generation_prompt %}",
+            "{% if enable_thinking is defined and enable_thinking is false %}",
+            "<think>\n\n</think>\n\n",
+            "{% else %}",
+            "<think>\n",
+            "{% endif %}",
+            "{% endif %}"
+        );
+        let config_path = write_tokenizer_config(template);
+        let engine = ChatTemplateEngine::from_config(&config_path).unwrap();
+        assert_eq!(
+            engine.apply(r#"[{"role":"user","content":"hi"}]"#, true, false).unwrap(),
+            "<think>\n\n</think>\n\n"
+        );
+        assert_eq!(
+            engine.apply(r#"[{"role":"user","content":"hi"}]"#, true, true).unwrap(),
+            "<think>\n"
+        );
+    }
+
+    #[test]
+    fn text_content_parts_are_flattened_before_render() {
+        let template = "{% for message in messages %}{{ message.content }}{% endfor %}";
+        let config_path = write_tokenizer_config(template);
+        let engine = ChatTemplateEngine::from_config(&config_path).unwrap();
+        let messages = r#"[{"role":"user","content":[{"type":"text","text":"Hello"},{"text":" world"}]}]"#;
+        let rendered = engine.apply(messages, false, false).unwrap();
+        assert_eq!(rendered, "Hello world");
+    }
 }
