@@ -1,4 +1,5 @@
 fn main() {
+    let total_timer = BuildTimer::start("build.rs total");
     println!("cargo::rustc-check-cfg=cfg(no_numa)");
     println!("cargo::rustc-check-cfg=cfg(has_decode_kernels)");
     println!("cargo::rustc-check-cfg=cfg(has_prefill_kernels)");
@@ -19,7 +20,7 @@ fn main() {
     //
     // When libnuma is NOT found (e.g. CI manylinux containers), we set
     // cfg(no_numa) so numa.rs can stub out the FFI calls.
-    let has_numa = probe_lib("numa");
+    let has_numa = timed_value("probe libnuma", || probe_lib("numa"));
     if has_numa {
         println!("cargo:rustc-link-lib=numa");
     } else {
@@ -29,20 +30,68 @@ fn main() {
 
     // Compile CUDA decode kernels to PTX if nvcc is available.
     // The PTX is embedded as a string constant via include_str!.
-    compile_cuda_kernels();
+    timed_phase("decode PTX", compile_cuda_kernels);
 
     // Compile CUDA prefill kernels to PTX (Rust prefill path).
-    compile_prefill_kernels();
+    timed_phase("prefill PTX", compile_prefill_kernels);
 
     // Compile diagnostic HQQ search kernels to PTX.
-    compile_hqq_search_kernels();
+    timed_phase("HQQ search PTX", compile_hqq_search_kernels);
 
     // Compile vendored Marlin GEMM kernels into libkrasis_marlin.so
-    compile_marlin_kernels();
+    timed_phase("Marlin sidecar", compile_marlin_kernels);
 
     // Compile vendored FlashAttention-2 kernels into libkrasis_flash_attn.so
-    compile_flash_attn_kernels();
+    timed_phase("FlashAttention sidecar", compile_flash_attn_kernels);
 
+    total_timer.finish();
+}
+
+struct BuildTimer {
+    label: &'static str,
+    start: std::time::Instant,
+}
+
+impl BuildTimer {
+    fn start(label: &'static str) -> Self {
+        Self {
+            label,
+            start: std::time::Instant::now(),
+        }
+    }
+
+    fn finish(self) {
+        log_build_timing(self.label, self.start.elapsed());
+    }
+}
+
+fn timed_phase<F>(label: &'static str, f: F)
+where
+    F: FnOnce(),
+{
+    let timer = BuildTimer::start(label);
+    f();
+    timer.finish();
+}
+
+fn timed_value<T, F>(label: &'static str, f: F) -> T
+where
+    F: FnOnce() -> T,
+{
+    let timer = BuildTimer::start(label);
+    let value = f();
+    timer.finish();
+    value
+}
+
+fn log_build_timing(label: &str, elapsed: std::time::Duration) {
+    let safe_label = label.replace('"', "'");
+    println!(
+        "cargo:warning=KRASIS_BUILD_TIMING phase=\"{}\" duration_ms={} duration_s={:.3}",
+        safe_label,
+        elapsed.as_millis(),
+        elapsed.as_secs_f64()
+    );
 }
 
 fn is_output_fresh(inputs: &[&str], outputs: &[&str]) -> bool {
@@ -77,7 +126,9 @@ fn run_command_with_failure_output(
     mut cmd: std::process::Command,
     label: &str,
 ) -> Result<std::process::ExitStatus, std::io::Error> {
+    let start = std::time::Instant::now();
     let output = cmd.output()?;
+    log_build_timing(label, start.elapsed());
     if !output.status.success() {
         if !output.stdout.is_empty() {
             println!(
@@ -93,6 +144,16 @@ fn run_command_with_failure_output(
         }
     }
     Ok(output.status)
+}
+
+fn run_status_timed(
+    mut cmd: std::process::Command,
+    label: &str,
+) -> Result<std::process::ExitStatus, std::io::Error> {
+    let start = std::time::Instant::now();
+    let status = cmd.status();
+    log_build_timing(label, start.elapsed());
+    status
 }
 
 fn nvcc_host_compiler_args() -> Vec<String> {
@@ -207,7 +268,7 @@ fn compile_cuda_kernels() {
         cu_src,
     ])
     .args(nvcc_host_compiler_args());
-    let status = cmd.status();
+    let status = run_status_timed(cmd, "nvcc decode PTX compile");
 
     match status {
         Ok(s) if s.success() => {
@@ -260,7 +321,7 @@ fn compile_prefill_kernels() {
         cu_src,
     ])
     .args(nvcc_host_compiler_args());
-    let status = cmd.status();
+    let status = run_status_timed(cmd, "nvcc prefill PTX compile");
 
     match status {
         Ok(s) if s.success() => {
@@ -311,7 +372,7 @@ fn compile_hqq_search_kernels() {
         cu_src,
     ])
     .args(nvcc_host_compiler_args());
-    let status = cmd.status();
+    let status = run_status_timed(cmd, "nvcc HQQ search PTX compile");
 
     match status {
         Ok(s) if s.success() => {
@@ -432,14 +493,14 @@ fn compile_marlin_kernels() {
     }
 
     // Link into shared library
-    let status = std::process::Command::new(&nvcc)
-        .arg("-shared")
+    let mut cmd = std::process::Command::new(&nvcc);
+    cmd.arg("-shared")
         .arg("-o")
         .arg(&so_path)
         .arg(&obj_regular)
         .arg(&obj_moe)
-        .arg("-Wno-deprecated-gpu-targets")
-        .status();
+        .arg("-Wno-deprecated-gpu-targets");
+    let status = run_status_timed(cmd, "nvcc Marlin link");
 
     match status {
         Ok(s) if s.success() => {
@@ -621,7 +682,7 @@ fn compile_flash_attn_kernels() {
     }
     link_cmd.arg("-Wno-deprecated-gpu-targets");
 
-    let status = link_cmd.status();
+    let status = run_status_timed(link_cmd, "nvcc FlashAttention link");
 
     match status {
         Ok(s) if s.success() => {

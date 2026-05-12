@@ -142,6 +142,19 @@ ok()    { echo -e "${GREEN}${BOLD}OK${NC} $*"; }
 warn()  { echo -e "${YELLOW}${BOLD}!!${NC} $*"; }
 err()   { echo -e "${RED}${BOLD}ERROR${NC} $*" >&2; exit 1; }
 
+build_timer_start() {
+    date +%s
+}
+
+build_timer_end() {
+    local label="$1"
+    local start="$2"
+    local status="${3:-0}"
+    local end
+    end=$(date +%s)
+    echo "KRASIS_BUILD_TIMING phase=\"$label\" status=$status duration_s=$((end - start))"
+}
+
 require_archived_hf_reference_override() {
     local command="$1"
     if [[ "${KRASIS_ALLOW_ARCHIVED_HF_REFERENCE:-}" != "1" ]]; then
@@ -558,6 +571,8 @@ extract_selected_gpus_arg() {
 # ── Commands ─────────────────────────────────────────────────────────
 
 do_build_fla() {
+    local phase_start
+    phase_start=$(build_timer_start)
     # Cross-compile FLA (Flash Linear Attention) Triton kernels for all
     # target GPU architectures.  The resulting .so files are placed in
     # python/krasis/ so maturin can include them in the wheel.
@@ -592,14 +607,20 @@ do_build_fla() {
 
     if ! $needs_rebuild; then
         ok "FLA kernels up to date (skipping)"
+        build_timer_end "dev FLA kernels" "$phase_start" 0
         return
     fi
 
     info "Compiling FLA kernels for GPU architectures: ${archs[*]/#/sm_}..."
     local fla_output="/tmp/fla_build"
 
+    set +e
     KRASIS_DEV_SCRIPT=1 "$PYTHON" "$fla_script" --output-dir "$fla_output" \
-        --arch "${archs[@]}" || err "FLA kernel compilation failed"
+        --arch "${archs[@]}"
+    local status=$?
+    set -e
+    build_timer_end "dev FLA kernels" "$phase_start" "$status"
+    [[ "$status" -eq 0 ]] || err "FLA kernel compilation failed"
 
     mkdir -p "$dest"
     local count=0
@@ -612,6 +633,8 @@ do_build_fla() {
 }
 
 do_build() {
+    local build_start
+    build_start=$(build_timer_start)
     info "Building Rust extension (repo-local maturin build --release)..."
     export LD_LIBRARY_PATH
     LD_LIBRARY_PATH="$(build_base_ld_library_path)"
@@ -622,8 +645,15 @@ do_build() {
     cd "$SCRIPT_DIR"
     mkdir -p "$WHEEL_DIR"
     rm -f "$WHEEL_DIR"/krasis-*.whl
+    local maturin_start
+    maturin_start=$(build_timer_start)
+    set +e
     PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
         "$MATURIN" build --release --skip-auditwheel --out "$WHEEL_DIR" 2>&1
+    local maturin_status=$?
+    set -e
+    build_timer_end "dev maturin build" "$maturin_start" "$maturin_status"
+    [[ "$maturin_status" -eq 0 ]] || return "$maturin_status"
     local wheel
     wheel=$(ls -t "$WHEEL_DIR"/krasis-*.whl 2>/dev/null | head -1)
     [[ -n "$wheel" ]] || err "Build succeeded but no wheel was produced in $WHEEL_DIR"
@@ -668,6 +698,7 @@ with zipfile.ZipFile(wheel) as zf:
 PY
     ok "Build complete. Extension at: $SO_FILE"
     verify_repo_imports
+    build_timer_end "dev build total" "$build_start" 0
 }
 
 do_run() {

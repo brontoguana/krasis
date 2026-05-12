@@ -3251,6 +3251,7 @@ pub struct PrefillEngine {
     pub optional_pinning_budget_mb: Option<usize>,
     pub last_prepare_post_alloc_free_mb: usize,
     pub measured_scratch_alloc_overhead_bytes: usize,
+    pub measured_prefill_runtime_overhead_bytes: usize,
     // Pre-scan routing data: per-layer list of predicted active expert IDs per chunk
     pub prescan_active_experts: Vec<Vec<Vec<usize>>>, // [moe_layer_idx][chunk_idx] -> Vec<expert_id>
     pub prescan_token_count: usize,
@@ -6068,6 +6069,27 @@ impl PrefillEngine {
         self.last_prepare_post_alloc_free_mb
     }
 
+    pub fn update_measured_prefill_runtime_overhead_mb(
+        &mut self,
+        post_alloc_free_mb: usize,
+        min_free_mb: usize,
+    ) {
+        let observed_mb = post_alloc_free_mb.saturating_sub(min_free_mb);
+        let observed_bytes = observed_mb.saturating_mul(1024 * 1024);
+        if observed_bytes > self.measured_prefill_runtime_overhead_bytes {
+            self.measured_prefill_runtime_overhead_bytes = observed_bytes;
+        }
+    }
+
+    fn max_cold_staging_reserve_bytes(&self) -> usize {
+        if self.cold_expert_bytes == 0 || self.config.n_routed_experts == 0 {
+            return 0;
+        }
+        self.config
+            .n_routed_experts
+            .saturating_mul(self.cold_expert_bytes)
+    }
+
     fn hcs_cached_expert_count(&self) -> usize {
         self.hcs_cache_fast
             .iter()
@@ -8090,7 +8112,9 @@ impl PrefillEngine {
         let target = prompt_tokens.min(50000);
         let scratch_budget_bytes = free_bytes
             .saturating_sub(safety_bytes)
-            .saturating_sub(self.measured_scratch_alloc_overhead_bytes);
+            .saturating_sub(self.measured_scratch_alloc_overhead_bytes)
+            .saturating_sub(self.measured_prefill_runtime_overhead_bytes)
+            .saturating_sub(self.max_cold_staging_reserve_bytes());
         let max_by_vram = exact_scratch_token_cap(
             &self.config,
             target,
@@ -8113,7 +8137,7 @@ impl PrefillEngine {
         scratch_tokens = clean_runtime_chunk_tokens(prompt_tokens, scratch_tokens);
         if debug_prefill {
             eprintln!(
-                "[PREFILL-DEBUG] prepare prompt_tokens={} free_mb={} total_mb={} safety_mb={} fixed_mb={:.1} per_tok_kb={:.1} measured_alloc_overhead_mb={:.1} scratch_budget_mb={:.1} target={} max_by_vram={} initial_scratch={}",
+                "[PREFILL-DEBUG] prepare prompt_tokens={} free_mb={} total_mb={} safety_mb={} fixed_mb={:.1} per_tok_kb={:.1} measured_alloc_overhead_mb={:.1} measured_runtime_overhead_mb={:.1} cold_staging_reserve_mb={:.1} scratch_budget_mb={:.1} target={} max_by_vram={} initial_scratch={}",
                 prompt_tokens,
                 free_bytes / (1024 * 1024),
                 total_bytes / (1024 * 1024),
@@ -8121,6 +8145,8 @@ impl PrefillEngine {
                 fixed_bytes as f64 / (1024.0 * 1024.0),
                 per_token_bytes as f64 / 1024.0,
                 self.measured_scratch_alloc_overhead_bytes as f64 / (1024.0 * 1024.0),
+                self.measured_prefill_runtime_overhead_bytes as f64 / (1024.0 * 1024.0),
+                self.max_cold_staging_reserve_bytes() as f64 / (1024.0 * 1024.0),
                 scratch_budget_bytes as f64 / (1024.0 * 1024.0),
                 target,
                 max_by_vram,

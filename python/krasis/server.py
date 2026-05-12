@@ -1546,6 +1546,9 @@ def main():
         prefill_elapsed = time.time() - t_prefill
         prefill_min_free = int(vram_monitor.min_free_mb(dev_idx))
         prefill_post_alloc_free = int(gpu_store.get_last_prefill_post_alloc_free_mb())
+        gpu_store.update_measured_prefill_runtime_overhead_mb(
+            prefill_post_alloc_free, prefill_min_free
+        )
         if kv_overflow:
             _model.server_cleanup()
             raise RuntimeError(f"{label} VRAM calibration overflowed KV cache at {prompt_len:,} tokens")

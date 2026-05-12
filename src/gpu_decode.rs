@@ -9514,6 +9514,18 @@ impl GpuDecodeStore {
         Ok(engine.last_prepare_post_alloc_free_mb())
     }
 
+    fn update_measured_prefill_runtime_overhead_mb(
+        &mut self,
+        post_alloc_free_mb: usize,
+        min_free_mb: usize,
+    ) -> PyResult<()> {
+        let engine = self.prefill_engine_slot.as_mut()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(
+                "Prefill engine not allocated yet"))?;
+        engine.update_measured_prefill_runtime_overhead_mb(post_alloc_free_mb, min_free_mb);
+        Ok(())
+    }
+
     #[new]
     #[pyo3(signature = (device_ordinal=0))]
     fn new(device_ordinal: usize) -> PyResult<Self> {
@@ -17868,6 +17880,7 @@ impl GpuDecodeStore {
             optional_pinning_budget_mb: None,
             last_prepare_post_alloc_free_mb: 0,
             measured_scratch_alloc_overhead_bytes: 0,
+            measured_prefill_runtime_overhead_bytes: 0,
             prescan_active_experts: Vec::new(),
             prescan_token_count: 0,
             // Expert pointer table for zero-copy MoE
