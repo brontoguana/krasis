@@ -356,7 +356,7 @@ def discover_servers(
         base = f"http://{host}:{port}"
         try:
             req = urllib.request.Request(f"{base}/health")
-            with urllib.request.urlopen(req, timeout=1.0) as resp:
+            with urllib.request.urlopen(req, timeout=4.0) as resp:
                 health = json.loads(resp.read())
             status = health.get("status", "unknown")
         except (urllib.error.URLError, TimeoutError, OSError,
@@ -588,7 +588,7 @@ def _query_max_context(url: str) -> int:
     """Query the server's max context token capacity. Returns 0 if unknown."""
     try:
         req = urllib.request.Request(f"{url}/health")
-        with urllib.request.urlopen(req, timeout=3) as resp:
+        with urllib.request.urlopen(req, timeout=4) as resp:
             data = json.loads(resp.read())
             return data.get("max_context_tokens", 0)
     except Exception:
@@ -1227,7 +1227,7 @@ def main():
         # Try to fetch model name
         try:
             req = urllib.request.Request(f"{url}/v1/models")
-            with urllib.request.urlopen(req, timeout=2) as resp:
+            with urllib.request.urlopen(req, timeout=4) as resp:
                 data = json.loads(resp.read())
                 models_data = data.get("data", [])
                 if models_data:
@@ -1254,7 +1254,7 @@ def main():
         }
         try:
             req = urllib.request.Request(f"{url}/v1/models")
-            with urllib.request.urlopen(req, timeout=2) as resp:
+            with urllib.request.urlopen(req, timeout=4) as resp:
                 data = json.loads(resp.read())
                 models_data = data.get("data", [])
                 if models_data:

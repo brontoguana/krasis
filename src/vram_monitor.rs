@@ -9,10 +9,11 @@
 //! on libcudart. PyTorch always loads it, so it's available.
 
 use pyo3::prelude::*;
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const VRAM_HARD_EXIT_FLOOR_MB: u64 = 125;
 const VRAM_HARD_EXIT_CODE: i32 = 137;
@@ -93,6 +94,158 @@ struct VramReportState {
 
 static REPORT: Mutex<Option<VramReportState>> = Mutex::new(None);
 
+#[derive(Clone)]
+struct ActiveRequestVram {
+    context: String,
+    lows_mb: Vec<(i32, u64)>,
+}
+
+static CURRENT_EVENT: Mutex<String> = Mutex::new(String::new());
+static ACTIVE_REQUEST_VRAM: Mutex<Option<ActiveRequestVram>> = Mutex::new(None);
+
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn now_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+fn current_event() -> String {
+    CURRENT_EVENT.lock().unwrap().clone()
+}
+
+fn current_request_context() -> String {
+    ACTIVE_REQUEST_VRAM
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|ctx| ctx.context.clone())
+        .unwrap_or_default()
+}
+
+fn update_active_request_low(device_id: i32, free_mb: u64) {
+    let mut active = ACTIVE_REQUEST_VRAM.lock().unwrap();
+    let Some(ref mut ctx) = *active else {
+        return;
+    };
+    if let Some((_, existing)) = ctx
+        .lows_mb
+        .iter_mut()
+        .find(|(existing_device, _)| *existing_device == device_id)
+    {
+        if free_mb < *existing {
+            *existing = free_mb;
+        }
+    } else {
+        ctx.lows_mb.push((device_id, free_mb));
+    }
+}
+
+fn append_safety_limit_dump(
+    kind: &str,
+    device_id: i32,
+    free_mb: u64,
+    safety_margin_mb: u64,
+    deficit_mb: u64,
+) {
+    let Ok(run_dir) = std::env::var("KRASIS_RUN_DIR") else {
+        return;
+    };
+    let path = std::path::Path::new(&run_dir).join("below-vram-safety-limit.log");
+    let event = current_event();
+    let request_context = current_request_context();
+    let line = format!(
+        "{{\"timestamp_ms\":{},\"kind\":\"{}\",\"pid\":{},\"device\":{},\"free_mb\":{},\"safety_margin_mb\":{},\"deficit_mb\":{},\"hard_exit_floor_mb\":{},\"current_event\":\"{}\",\"request_context\":\"{}\"}}\n",
+        now_millis(),
+        json_escape(kind),
+        std::process::id(),
+        device_id,
+        free_mb,
+        safety_margin_mb,
+        deficit_mb,
+        VRAM_HARD_EXIT_FLOOR_MB,
+        json_escape(&event),
+        json_escape(&request_context),
+    );
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = f.write_all(line.as_bytes());
+        let _ = f.flush();
+    }
+}
+
+pub fn begin_request_context(context: &str) {
+    let mut active = ACTIVE_REQUEST_VRAM.lock().unwrap();
+    *active = Some(ActiveRequestVram {
+        context: context.to_string(),
+        lows_mb: Vec::new(),
+    });
+}
+
+pub fn update_request_context(context: &str) {
+    let mut active = ACTIVE_REQUEST_VRAM.lock().unwrap();
+    if let Some(ref mut ctx) = *active {
+        ctx.context = context.to_string();
+    }
+}
+
+pub fn end_request_context() -> Option<(String, Vec<(i32, u64)>)> {
+    ACTIVE_REQUEST_VRAM
+        .lock()
+        .unwrap()
+        .take()
+        .map(|ctx| (ctx.context, ctx.lows_mb))
+}
+
+pub fn record_request_lows_below_safety(
+    context: &str,
+    lows_mb: &[(i32, u64)],
+    safety_margin_mb: u64,
+) {
+    if safety_margin_mb == 0 {
+        return;
+    }
+    for (device_id, free_mb) in lows_mb {
+        if *free_mb < safety_margin_mb {
+            {
+                let mut active = ACTIVE_REQUEST_VRAM.lock().unwrap();
+                *active = Some(ActiveRequestVram {
+                    context: context.to_string(),
+                    lows_mb: lows_mb.to_vec(),
+                });
+            }
+            append_safety_limit_dump(
+                "request_low_water_below_safety",
+                *device_id,
+                *free_mb,
+                safety_margin_mb,
+                safety_margin_mb.saturating_sub(*free_mb),
+            );
+            let mut active = ACTIVE_REQUEST_VRAM.lock().unwrap();
+            *active = None;
+        }
+    }
+}
+
 /// Enable VRAM reporting. Called once at startup.
 pub fn report_enable(device_ids: Vec<i32>) {
     let mut report = REPORT.lock().unwrap();
@@ -139,6 +292,10 @@ fn query_all_free_mb(device_ids: &[i32]) -> Vec<u64> {
 /// Record a named event with current VRAM snapshot.
 /// No-op if reporting is not enabled.
 pub fn report_event(event: &str) {
+    if let Ok(mut current) = CURRENT_EVENT.lock() {
+        *current = event.to_string();
+    }
+
     // Peek at device_ids without holding lock during CUDA query
     let device_ids = {
         let report = REPORT.lock().unwrap();
@@ -326,7 +483,9 @@ impl VramMonitor {
                         if let Some(free) = query_free_bytes(set_device, mem_get_info, dev.device_id)
                         {
                             let free_u64 = free as u64;
-                            readings.push(free_u64 / (1024 * 1024));
+                            let free_mb = free_u64 / (1024 * 1024);
+                            readings.push(free_mb);
+                            update_active_request_low(dev.device_id, free_mb);
 
                             let prev_min = dev.min_free_bytes.load(Ordering::Relaxed);
 
@@ -334,7 +493,15 @@ impl VramMonitor {
                                 dev.min_free_bytes.store(free_u64, Ordering::Relaxed);
 
                                 if free_u64 < VRAM_HARD_EXIT_FLOOR_MB * 1024 * 1024 {
-                                    let free_mb = free_u64 / (1024 * 1024);
+                                    let margin_mb =
+                                        safety_margin.load(Ordering::Relaxed) / (1024 * 1024);
+                                    append_safety_limit_dump(
+                                        "hard_exit_floor",
+                                        dev.device_id,
+                                        free_mb,
+                                        margin_mb,
+                                        margin_mb.saturating_sub(free_mb),
+                                    );
                                     log::error!(
                                         "VRAM MONITOR: cuda:{} free VRAM dropped to {} MB, below hard exit floor {} MB. Exiting to prevent CUDA OOM/illegal-address state.",
                                         dev.device_id,
@@ -359,9 +526,15 @@ impl VramMonitor {
                                 if warn_enabled.load(Ordering::Relaxed) {
                                     let margin = safety_margin.load(Ordering::Relaxed);
                                     if free_u64 < margin {
-                                        let free_mb = free_u64 / (1024 * 1024);
                                         let margin_mb = margin / (1024 * 1024);
                                         let deficit_mb = margin_mb.saturating_sub(free_mb);
+                                        append_safety_limit_dump(
+                                            "below_safety_margin",
+                                            dev.device_id,
+                                            free_mb,
+                                            margin_mb,
+                                            deficit_mb,
+                                        );
                                         log::warn!(
                                             "VRAM MONITOR: new low on cuda:{} — {} MB free \
                                              (safety margin: {} MB, deficit: {} MB)",

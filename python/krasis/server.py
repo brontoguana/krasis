@@ -1102,22 +1102,29 @@ def main():
                         exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
     threading.excepthook = _log_threading_excepthook
 
-    # Redirect stderr to log file so any stray prints/errors are captured
-    class _StderrLogger:
+    # Tee stdout/stderr through logging so the run log captures the same
+    # operator-visible lines that appear on screen.
+    class _StreamLogger:
         def __init__(self, original, log):
             self._original = original
             self._log = log
         def write(self, msg):
             if msg and msg.strip():
-                self._log.error("[stderr] %s", msg.rstrip())
+                self._log("%s", msg.rstrip())
             if self._original:
                 self._original.write(msg)
         def flush(self):
             if self._original:
                 self._original.flush()
         def fileno(self):
-            return self._original.fileno() if self._original else 2
-    sys.stderr = _StderrLogger(sys.stderr, logger)
+            return self._original.fileno() if self._original else -1
+        def isatty(self):
+            return self._original.isatty() if self._original else False
+        def __getattr__(self, name):
+            return getattr(self._original, name)
+
+    sys.stdout = _StreamLogger(sys.stdout, logger.info)
+    sys.stderr = _StreamLogger(sys.stderr, logger.error)
 
     logger.info("Logging to %s", _log_file)
 

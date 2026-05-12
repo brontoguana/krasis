@@ -94,9 +94,6 @@ struct ServerState {
     /// Raw pointer to a GpuDecodeStore instance (set from Python during server init).
     /// Safety: single-request guarantee means no concurrent access.
     gpu_store_addr: usize,
-    /// When true, log wall-clock time for each Python GIL acquisition.
-    /// Enabled by KRASIS_GIL_TIMING=1. Zero cost when off (branch only).
-    gil_timing: bool,
     /// When set, write full request JSON to this directory for debugging IDE clients.
     /// Enabled by KRASIS_LOG_REQUESTS=1 (writes to logs/requests/).
     log_requests_dir: Option<String>,
@@ -109,13 +106,58 @@ struct ServerState {
     /// Shared Rust prefill engine — Arc+Mutex shared with benchmark path.
     /// When engine is available inside the Mutex, prefill runs entirely in Rust.
     rust_prefill: Arc<std::sync::Mutex<Option<crate::gpu_prefill::PrefillEngine>>>,
-    /// When true, enable test-only endpoints (e.g. /v1/internal/prefill_logits).
-    test_endpoints: bool,
     /// Model's EOS token IDs (from generation_config.json).
     /// These are always included in stop_ids for decode, matching the main branch behavior.
     eos_stop_ids: Vec<usize>,
     /// Monotonic order for /v1/internal/reference_test requests.
     reference_test_request_order: u64,
+}
+
+#[derive(Clone)]
+struct ServerInfo {
+    model_name: String,
+    max_context_tokens: usize,
+}
+
+enum ModelRequest {
+    Chat {
+        stream: TcpStream,
+        body: String,
+    },
+    PrefillLogits {
+        stream: TcpStream,
+        body: String,
+    },
+    ReferenceTest {
+        stream: TcpStream,
+        body: String,
+    },
+}
+
+struct VramRequestContextGuard {
+    safety_margin_mb: u64,
+}
+
+impl Drop for VramRequestContextGuard {
+    fn drop(&mut self) {
+        if let Some((context, lows)) = crate::vram_monitor::end_request_context() {
+            if lows.is_empty() {
+                log::info!("Request VRAM low-water: {} lows=none", context);
+            } else {
+                crate::vram_monitor::record_request_lows_below_safety(
+                    &context,
+                    &lows,
+                    self.safety_margin_mb,
+                );
+                let lows_text = lows
+                    .iter()
+                    .map(|(device, mb)| format!("cuda{}={}MB", device, mb))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                log::info!("Request VRAM low-water: {} lows={}", context, lows_text);
+            }
+        }
+    }
 }
 
 /// Parsed HTTP request.
@@ -233,6 +275,110 @@ fn send_json(stream: &mut TcpStream, status: u16, body: &str) -> std::io::Result
         body
     )?;
     stream.flush()
+}
+
+fn handle_front_connection(
+    mut tcp_stream: TcpStream,
+    server_info: ServerInfo,
+    model_tx: mpsc::Sender<ModelRequest>,
+    test_endpoints: bool,
+) {
+    let cloned = match tcp_stream.try_clone() {
+        Ok(c) => c,
+        Err(e) => {
+            log::error!("Failed to clone TCP stream: {}", e);
+            return;
+        }
+    };
+    let mut reader = BufReader::new(cloned);
+
+    let request = match parse_request(&mut reader) {
+        Ok(r) => r,
+        Err(e) => {
+            log::error!("Failed to parse request: {}", e);
+            let _ = send_json(&mut tcp_stream, 400, r#"{"error":"Bad request"}"#);
+            return;
+        }
+    };
+
+    if request.method == "OPTIONS" {
+        let _ = write!(
+            tcp_stream,
+            "HTTP/1.1 204 No Content\r\n\
+             Access-Control-Allow-Origin: *\r\n\
+             Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\
+             Access-Control-Allow-Headers: Content-Type, Authorization\r\n\
+             Connection: close\r\n\r\n"
+        );
+        let _ = tcp_stream.flush();
+        return;
+    }
+
+    match (request.method.as_str(), request.path.as_str()) {
+        ("GET", "/health") => {
+            let body = format!(
+                r#"{{"status":"ok","max_context_tokens":{}}}"#,
+                server_info.max_context_tokens
+            );
+            let _ = send_json(&mut tcp_stream, 200, &body);
+        }
+
+        ("GET", "/v1/models") => {
+            let body = format!(
+                r#"{{"object":"list","data":[{{"id":"{}","object":"model","owned_by":"krasis","max_context_tokens":{}}}]}}"#,
+                server_info.model_name, server_info.max_context_tokens
+            );
+            let _ = send_json(&mut tcp_stream, 200, &body);
+        }
+
+        ("POST", "/v1/chat/completions") => {
+            if model_tx
+                .send(ModelRequest::Chat {
+                    stream: tcp_stream,
+                    body: request.body,
+                })
+                .is_err()
+            {
+                log::error!("Model worker is not available for /v1/chat/completions");
+            }
+        }
+
+        ("POST", "/v1/internal/prefill_logits") => {
+            if test_endpoints {
+                if model_tx
+                    .send(ModelRequest::PrefillLogits {
+                        stream: tcp_stream,
+                        body: request.body,
+                    })
+                    .is_err()
+                {
+                    log::error!("Model worker is not available for /v1/internal/prefill_logits");
+                }
+            } else {
+                let _ = send_json(&mut tcp_stream, 404, r#"{"error":"Test endpoints not enabled. Start server with --test-endpoints"}"#);
+            }
+        }
+
+        ("POST", "/v1/internal/reference_test") => {
+            if test_endpoints {
+                if model_tx
+                    .send(ModelRequest::ReferenceTest {
+                        stream: tcp_stream,
+                        body: request.body,
+                    })
+                    .is_err()
+                {
+                    log::error!("Model worker is not available for /v1/internal/reference_test");
+                }
+            } else {
+                let _ = send_json(&mut tcp_stream, 404, r#"{"error":"Test endpoints not enabled. Start server with --test-endpoints"}"#);
+            }
+        }
+
+        _ => {
+            let _ = send_json(&mut tcp_stream, 404, r#"{"error":"Not found"}"#);
+        }
+    }
 }
 
 fn fnv1a_token_hash(token_ids: &[u32]) -> u64 {
@@ -600,85 +746,6 @@ fn format_completion_with_tool_calls(
     )
 }
 
-/// Handle a single HTTP request.
-fn handle_request(
-    mut tcp_stream: TcpStream,
-    state: &mut ServerState,
-) {
-    let cloned = match tcp_stream.try_clone() {
-        Ok(c) => c,
-        Err(e) => {
-            log::error!("Failed to clone TCP stream: {}", e);
-            return;
-        }
-    };
-    let mut reader = BufReader::new(cloned);
-
-    let request = match parse_request(&mut reader) {
-        Ok(r) => r,
-        Err(e) => {
-            log::error!("Failed to parse request: {}", e);
-            let _ = send_json(&mut tcp_stream, 400, r#"{"error":"Bad request"}"#);
-            return;
-        }
-    };
-
-    // Handle CORS preflight
-    if request.method == "OPTIONS" {
-        let _ = write!(
-            tcp_stream,
-            "HTTP/1.1 204 No Content\r\n\
-             Access-Control-Allow-Origin: *\r\n\
-             Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\
-             Access-Control-Allow-Headers: Content-Type, Authorization\r\n\
-             Connection: close\r\n\r\n"
-        );
-        return;
-    }
-
-    match (request.method.as_str(), request.path.as_str()) {
-        ("GET", "/health") => {
-            let body = format!(
-                r#"{{"status":"ok","max_context_tokens":{}}}"#,
-                state.max_context_tokens
-            );
-            let _ = send_json(&mut tcp_stream, 200, &body);
-        }
-
-        ("GET", "/v1/models") => {
-            let body = format!(
-                r#"{{"object":"list","data":[{{"id":"{}","object":"model","owned_by":"krasis","max_context_tokens":{}}}]}}"#,
-                state.model_name, state.max_context_tokens
-            );
-            let _ = send_json(&mut tcp_stream, 200, &body);
-        }
-
-        ("POST", "/v1/chat/completions") => {
-            handle_chat_completion(&mut tcp_stream, &request.body, state);
-        }
-
-        ("POST", "/v1/internal/prefill_logits") => {
-            if state.test_endpoints {
-                handle_prefill_logits(&mut tcp_stream, &request.body, state);
-            } else {
-                let _ = send_json(&mut tcp_stream, 404, r#"{"error":"Test endpoints not enabled. Start server with --test-endpoints"}"#);
-            }
-        }
-
-        ("POST", "/v1/internal/reference_test") => {
-            if state.test_endpoints {
-                handle_reference_test(&mut tcp_stream, &request.body, state);
-            } else {
-                let _ = send_json(&mut tcp_stream, 404, r#"{"error":"Test endpoints not enabled. Start server with --test-endpoints"}"#);
-            }
-        }
-
-        _ => {
-            let _ = send_json(&mut tcp_stream, 404, r#"{"error":"Not found"}"#);
-        }
-    }
-}
-
 /// Overhead timings collected during request setup (before decode).
 struct RequestOverhead {
     parse_ms: f64,           // HTTP parse + JSON parse + tokenization
@@ -741,6 +808,16 @@ fn handle_chat_completion(
         s ^= s << 13; s ^= s >> 7; s ^= s << 17;
         s
     });
+    crate::vram_monitor::begin_request_context(&format!(
+        "route=/v1/chat/completions request_id={} model={} max_new={} stream={} phase=parse",
+        request_id, state.model_name, max_tokens, is_stream,
+    ));
+    let _vram_context_guard = {
+        let store = unsafe { &*(state.gpu_store_addr as *const GpuDecodeStore) };
+        VramRequestContextGuard {
+            safety_margin_mb: store.hcs_safety_margin_mb() as u64,
+        }
+    };
     let created = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -826,6 +903,10 @@ fn handle_chat_completion(
             }
         };
         log::info!("Soft HCS: estimated {} tokens (rendered_len={})", token_count, rendered.len());
+        crate::vram_monitor::update_request_context(&format!(
+            "route=/v1/chat/completions request_id={} model={} estimated_prompt_tokens={} rendered_len={} max_new={} stream={} phase=prefill_setup",
+            request_id, state.model_name, token_count, rendered.len(), max_tokens, is_stream,
+        ));
         token_count
     };
     let parse_ms = t_request.elapsed().as_secs_f64() * 1000.0;
@@ -1017,6 +1098,10 @@ fn handle_chat_completion(
         "Request {}: {} prompt tokens, max_new={}, stream={}, decode=gpu",
         request_id, prompt_len, max_tokens, is_stream
     );
+    crate::vram_monitor::update_request_context(&format!(
+        "route=/v1/chat/completions request_id={} model={} prompt_tokens={} max_new={} stream={} phase=decode_setup",
+        request_id, state.model_name, prompt_len, max_tokens, is_stream,
+    ));
 
     let tokenizer = &state.tokenizer;
 
@@ -1081,6 +1166,22 @@ fn handle_chat_completion(
         log::info!("Request {}: KV+LA state copied to {} aux GPUs in {:.1}ms", request_id, num_aux, kvcopy_ms);
     }
     let reload_ms = t_reload.elapsed().as_secs_f64() * 1000.0;
+    {
+        let (min_free_vram_mb, hcs_loaded, hcs_total, hcs_pct) = store.benchmark_stats();
+        crate::vram_monitor::update_request_context(&format!(
+            "route=/v1/chat/completions request_id={} model={} prompt_tokens={} max_new={} stream={} phase=decode hcs_loaded={}/{} hcs_pct={:.1} hcs_min_free_mb={} safety_margin_mb={}",
+            request_id,
+            state.model_name,
+            prompt_len,
+            max_tokens,
+            is_stream,
+            hcs_loaded,
+            hcs_total,
+            hcs_pct,
+            min_free_vram_mb,
+            store.hcs_safety_margin_mb(),
+        ));
+    }
 
     let overhead = RequestOverhead {
         parse_ms,
@@ -2310,7 +2411,8 @@ impl RustServer {
         }
 
         // Release GIL — server loop runs without it.
-        // GIL is reacquired inside handle_request only for Python prefill/cleanup.
+        // GIL is reacquired inside model-worker request handlers only for
+        // Python cleanup calls.
         py.allow_threads(move || {
             // Load tokenizer once at startup (not per-request)
             let tokenizer = match tokenizers::Tokenizer::from_file(&tokenizer_path) {
@@ -2444,7 +2546,7 @@ impl RustServer {
                 }
             };
 
-            let mut state = ServerState {
+            let state = ServerState {
                 py_model,
                 model_name,
                 tokenizer,
@@ -2453,15 +2555,63 @@ impl RustServer {
                 default_enable_thinking,
                 thinking_end_token,
                 gpu_store_addr,
-                gil_timing,
                 log_requests_dir,
                 aux_gpu_store_addrs,
                 multi_gpu_split_layers,
                 multi_gpu_gqa_offsets,
                 rust_prefill,
-                test_endpoints,
                 eos_stop_ids,
                 reference_test_request_order: 0,
+            };
+
+            let server_info = ServerInfo {
+                model_name: state.model_name.clone(),
+                max_context_tokens: state.max_context_tokens,
+            };
+            let (model_tx, model_rx) = mpsc::channel::<ModelRequest>();
+            let worker_running = running.clone();
+            let worker_handle = std::thread::Builder::new()
+                .name("krasis-model-worker".to_string())
+                .spawn(move || {
+                    let mut state = state;
+                    while worker_running.load(Ordering::Acquire) {
+                        match model_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                            Ok(ModelRequest::Chat { mut stream, body }) => {
+                                handle_chat_completion(&mut stream, &body, &mut state);
+                            }
+                            Ok(ModelRequest::PrefillLogits { mut stream, body }) => {
+                                handle_prefill_logits(&mut stream, &body, &mut state);
+                            }
+                            Ok(ModelRequest::ReferenceTest { mut stream, body }) => {
+                                handle_reference_test(&mut stream, &body, &mut state);
+                            }
+                            Err(mpsc::RecvTimeoutError::Timeout) => {}
+                            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        }
+                    }
+
+                    while let Ok(req) = model_rx.try_recv() {
+                        match req {
+                            ModelRequest::Chat { mut stream, body } => {
+                                handle_chat_completion(&mut stream, &body, &mut state);
+                            }
+                            ModelRequest::PrefillLogits { mut stream, body } => {
+                                handle_prefill_logits(&mut stream, &body, &mut state);
+                            }
+                            ModelRequest::ReferenceTest { mut stream, body } => {
+                                handle_reference_test(&mut stream, &body, &mut state);
+                            }
+                        }
+                    }
+
+                    log::info!("Rust HTTP model worker stopped");
+                });
+            let worker_handle = match worker_handle {
+                Ok(handle) => handle,
+                Err(e) => {
+                    log::error!("Failed to start model worker: {}", e);
+                    return;
+                }
             };
 
             while running.load(Ordering::Acquire) {
@@ -2475,7 +2625,17 @@ impl RustServer {
                         stream
                             .set_read_timeout(Some(std::time::Duration::from_secs(30)))
                             .ok();
-                        handle_request(stream, &mut state);
+                        let info = server_info.clone();
+                        let tx = model_tx.clone();
+                        let endpoints_enabled = test_endpoints;
+                        if let Err(e) = std::thread::Builder::new()
+                            .name("krasis-http-connection".to_string())
+                            .spawn(move || {
+                                handle_front_connection(stream, info, tx, endpoints_enabled);
+                            })
+                        {
+                            log::error!("Failed to spawn connection handler: {}", e);
+                        }
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         // No connection ready, sleep briefly and retry
@@ -2488,6 +2648,8 @@ impl RustServer {
                 }
             }
 
+            drop(model_tx);
+            let _ = worker_handle.join();
             log::info!("Rust HTTP server stopped");
         });
 
