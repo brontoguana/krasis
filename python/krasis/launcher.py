@@ -128,6 +128,8 @@ KEY_BACKSPACE = "BACKSPACE"
 
 def _read_key() -> str:
     """Read a single keypress in raw mode. Returns key constant or char."""
+    import select
+
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
     try:
@@ -136,8 +138,14 @@ def _read_key() -> str:
 
         if ch == "\x1b":
             # Escape sequence
+            readable, _writable, _error = select.select([sys.stdin], [], [], 0.02)
+            if not readable:
+                return KEY_ESCAPE
             ch2 = sys.stdin.read(1)
             if ch2 == "[":
+                readable, _writable, _error = select.select([sys.stdin], [], [], 0.02)
+                if not readable:
+                    return KEY_ESCAPE
                 ch3 = sys.stdin.read(1)
                 if ch3 == "A":
                     return KEY_UP

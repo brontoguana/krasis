@@ -3,9 +3,11 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 
+import krasis.hf_downloader as hf_downloader
 from krasis.hf_downloader import (
     candidate_from_info,
     destination_for_repo,
+    hf_login,
     parse_hf_repo_id,
     selected_download_files,
     validate_local_model,
@@ -33,7 +35,7 @@ class HFDownloaderTests(unittest.TestCase):
     def test_candidate_estimates_int4_payload_from_safetensors_metadata(self):
         info = SimpleNamespace(
             id="Qwen/Test",
-            pipeline_tag="text-generation",
+            pipeline_tag="image-text-to-text",
             tags=["transformers", "safetensors", "qwen3_moe"],
             gated=False,
             private=False,
@@ -105,6 +107,9 @@ class HFDownloaderTests(unittest.TestCase):
             ("Org/Model-FP8", ["transformers", "safetensors", "fp8"]),
             ("Org/Model-LoRA", ["transformers", "safetensors", "lora"]),
             ("Org/Model-AWQ", ["transformers", "safetensors", "base_model:quantized:Org/Base"]),
+            ("z-lab/Qwen3.6-35B-A3B-DFlash", ["transformers", "safetensors", "dflash", "draft-model"]),
+            ("deepseek-ai/DeepSeek-OCR", ["transformers", "safetensors", "vision-language", "ocr"]),
+            ("tiny-random/minimax-m2.5", ["transformers", "safetensors"]),
         ):
             candidate = candidate_from_info(
                 SimpleNamespace(
@@ -146,6 +151,71 @@ class HFDownloaderTests(unittest.TestCase):
             self.assertIn("missing config.json", issues)
             self.assertIn("missing .safetensors weights", issues)
             self.assertIn("missing tokenizer files", issues)
+
+    def test_hf_login_supports_older_hub_signature_without_new_session(self):
+        calls = []
+
+        class FakeApi:
+            def whoami(self, token):
+                calls.append(("whoami", token))
+                return {"name": "tester"}
+
+        class FakeHfFolder:
+            @staticmethod
+            def save_token(token):
+                calls.append(("save_token", token))
+
+        def get_token():
+            return "hf_test"
+
+        def old_login(token=None, *, add_to_git_credential=False):
+            calls.append(("login", token, add_to_git_credential))
+
+        original = hf_downloader._require_hf
+        hf_downloader._require_hf = lambda: (FakeApi, FakeHfFolder, get_token, old_login, None, None, None, None)
+        try:
+            result = hf_login(" hf_test ")
+        finally:
+            hf_downloader._require_hf = original
+
+        self.assertEqual(result, {"logged_in": True, "user": "tester"})
+        self.assertEqual(calls, [("whoami", "hf_test"), ("login", "hf_test", False)])
+
+    def test_hf_login_saves_token_when_cache_is_empty(self):
+        calls = []
+
+        class FakeApi:
+            def whoami(self, token):
+                calls.append(("whoami", token))
+                return {"name": "tester"}
+
+        class FakeHfFolder:
+            @staticmethod
+            def save_token(token):
+                calls.append(("save_token", token))
+
+        def get_token():
+            return None
+
+        def new_login(token=None, *, add_to_git_credential=False, new_session=True):
+            calls.append(("login", token, add_to_git_credential, new_session))
+
+        original = hf_downloader._require_hf
+        hf_downloader._require_hf = lambda: (FakeApi, FakeHfFolder, get_token, new_login, None, None, None, None)
+        try:
+            result = hf_login(" hf_saved ")
+        finally:
+            hf_downloader._require_hf = original
+
+        self.assertEqual(result, {"logged_in": True, "user": "tester"})
+        self.assertEqual(
+            calls,
+            [
+                ("whoami", "hf_saved"),
+                ("login", "hf_saved", False, True),
+                ("save_token", "hf_saved"),
+            ],
+        )
 
 
 if __name__ == "__main__":

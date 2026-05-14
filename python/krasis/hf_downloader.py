@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fnmatch
+import inspect
 import os
 import re
 from dataclasses import dataclass
@@ -64,6 +65,18 @@ UNSUPPORTED_REPO_TAGS = {
     "peft",
     "adapter",
     "adapter-transformers",
+    "dflash",
+    "draft-model",
+    "speculative-decoding",
+    "mtp",
+    "vision-language",
+    "ocr",
+    "image-to-text",
+    "visual-question-answering",
+    "text-to-speech",
+    "automatic-speech-recognition",
+    "audio",
+    "video",
 }
 
 UNSUPPORTED_REPO_NAME_MARKERS = (
@@ -77,7 +90,22 @@ UNSUPPORTED_REPO_NAME_MARKERS = (
     "nvfp4",
     "modelopt",
     "compressed-tensors",
+    "dflash",
+    "ocr",
+    "-vl",
+    "_vl",
+    "vision",
+    "tiny-random",
 )
+
+ALLOWED_PIPELINE_TAGS = {
+    "",
+    "text-generation",
+    "conversational",
+    # HF tags some Qwen text/MoE repos this way even when the downloadable
+    # payload is a native Transformers safetensors model Krasis can inspect.
+    "image-text-to-text",
+}
 
 
 @dataclass
@@ -126,7 +154,7 @@ class HFModelCandidate:
         repo_lower = self.repo_id.lower()
         if any(marker in repo_lower for marker in UNSUPPORTED_REPO_NAME_MARKERS):
             return "unsupported: non-native or quantized repo"
-        if self.pipeline_tag and self.pipeline_tag not in ("text-generation", "conversational"):
+        if self.pipeline_tag not in ALLOWED_PIPELINE_TAGS:
             return "unknown task"
         return "likely"
 
@@ -137,14 +165,14 @@ class HFModelCandidate:
 
 def _require_hf():
     try:
-        from huggingface_hub import HfApi, get_token, login, snapshot_download
+        from huggingface_hub import HfApi, HfFolder, get_token, login, snapshot_download
         from huggingface_hub.errors import GatedRepoError, HfHubHTTPError, RepositoryNotFoundError
     except ImportError as exc:
         raise RuntimeError(
             "huggingface_hub is required for the model downloader. "
             "Install a current Krasis wheel or run ./dev build."
         ) from exc
-    return HfApi, get_token, login, snapshot_download, GatedRepoError, HfHubHTTPError, RepositoryNotFoundError
+    return HfApi, HfFolder, get_token, login, snapshot_download, GatedRepoError, HfHubHTTPError, RepositoryNotFoundError
 
 
 def parse_hf_repo_id(value: str) -> str:
@@ -182,12 +210,12 @@ def parse_hf_repo_id(value: str) -> str:
 
 
 def _token_arg() -> Optional[bool]:
-    _HfApi, get_token, _login, _snapshot_download, *_ = _require_hf()
+    _HfApi, _HfFolder, get_token, _login, _snapshot_download, *_ = _require_hf()
     return True if get_token() else None
 
 
 def hf_auth_status() -> Dict[str, Any]:
-    HfApi, get_token, _login, _snapshot_download, *_ = _require_hf()
+    HfApi, _HfFolder, get_token, _login, _snapshot_download, *_ = _require_hf()
     token = get_token()
     if not token:
         return {"logged_in": False, "user": ""}
@@ -199,9 +227,19 @@ def hf_auth_status() -> Dict[str, Any]:
 
 
 def hf_login(token: str) -> Dict[str, Any]:
-    HfApi, _get_token, login, _snapshot_download, *_ = _require_hf()
-    login(token=token.strip(), add_to_git_credential=False, new_session=True)
-    info = HfApi().whoami(token=True)
+    HfApi, HfFolder, get_token, login, _snapshot_download, *_ = _require_hf()
+    clean_token = token.strip()
+    info = HfApi().whoami(token=clean_token)
+    kwargs: Dict[str, Any] = {"token": clean_token, "add_to_git_credential": False}
+    try:
+        params = inspect.signature(login).parameters
+    except (TypeError, ValueError):
+        params = {}
+    if "new_session" in params:
+        kwargs["new_session"] = True
+    login(**kwargs)
+    if get_token() != clean_token:
+        HfFolder.save_token(clean_token)
     return {"logged_in": True, "user": str(info.get("name") or info.get("email") or "authenticated")}
 
 
@@ -306,11 +344,26 @@ def candidate_from_info(info: Any, *, include_files: bool = False) -> HFModelCan
 def search_models(query: str, *, limit: int = 20) -> List[HFModelCandidate]:
     HfApi, *_ = _require_hf()
     api = HfApi()
+    token = _token_arg()
+    search_text = query.strip()
+    direct_candidate: Optional[HFModelCandidate] = None
+    try:
+        direct_repo_id = parse_hf_repo_id(search_text)
+    except ValueError:
+        direct_repo_id = ""
+    if direct_repo_id:
+        search_text = direct_repo_id.split("/", 1)[1]
+        try:
+            direct_info = api.model_info(direct_repo_id, token=token)
+            direct_candidate = candidate_from_info(direct_info, include_files=False)
+        except Exception:
+            direct_candidate = None
+
+    raw_limit = max(limit * 5, 100)
     models = list(api.list_models(
-        search=query,
+        search=search_text,
         filter="safetensors",
-        pipeline_tag="text-generation",
-        limit=limit,
+        limit=raw_limit,
         expand=[
             "downloads",
             "gated",
@@ -321,15 +374,22 @@ def search_models(query: str, *, limit: int = 20) -> List[HFModelCandidate]:
             "safetensors",
             "tags",
         ],
-        token=_token_arg(),
+        token=token,
     ))
-    candidates = [
-        candidate
-        for info in models
-        if (candidate := candidate_from_info(info, include_files=False)).is_krasis_candidate
-    ]
+    direct_candidates = []
+    candidates = []
+    seen = set()
+    if direct_candidate and direct_candidate.is_krasis_candidate:
+        direct_candidates.append(direct_candidate)
+        seen.add(direct_candidate.repo_id)
+    for info in models:
+        candidate = candidate_from_info(info, include_files=False)
+        if candidate.repo_id in seen or not candidate.is_krasis_candidate:
+            continue
+        candidates.append(candidate)
+        seen.add(candidate.repo_id)
     candidates.sort(key=lambda c: (-c.downloads, c.repo_id.lower()))
-    return candidates
+    return (direct_candidates + candidates)[:limit]
 
 
 def get_model_details(repo_or_url: str) -> HFModelCandidate:
@@ -360,7 +420,7 @@ def format_bytes(num_bytes: int) -> str:
 
 
 def download_model(repo_id: str, local_dir: str, *, max_workers: int = 8) -> str:
-    _HfApi, _get_token, _login, snapshot_download, *_ = _require_hf()
+    _HfApi, _HfFolder, _get_token, _login, snapshot_download, *_ = _require_hf()
     try:
         from huggingface_hub.utils import disable_progress_bars
 
