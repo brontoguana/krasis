@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "krasis"
-version = "0.1.66-rc20"
+version = "0.1.66-rc21"
 description = "Hybrid LLM runtime — minimal VRAM, always-on GPU prefill, optimised CPU inference"
 license = {text = "SSPL-1.0"}
 requires-python = ">=3.10"
@@ -46,4 +46,5 @@ module-name = "krasis.krasis"
 include = [
     {path = "python/krasis/prompts/*", format = "wheel"},
     {path = "python/krasis/libkrasis*.so", format = "wheel"},
+    {path = "python/krasis/sidecar_manifest.json", format = "wheel"},
 ]

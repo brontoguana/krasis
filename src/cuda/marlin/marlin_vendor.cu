@@ -13,6 +13,16 @@
 // Include the actual kernel template implementation
 #include "marlin_template.h"
 
+#include <stdint.h>
+
+#ifndef KRASIS_SIDECAR_BUILD_ID
+#define KRASIS_SIDECAR_BUILD_ID "unknown"
+#endif
+
+#ifndef KRASIS_SIDECAR_ABI_VERSION
+#define KRASIS_SIDECAR_ABI_VERSION 1
+#endif
+
 // ── Dispatch logic (adapted from gptq_marlin.cuh) ──────────────────────────
 
 namespace device {
@@ -379,4 +389,12 @@ extern "C" void krasis_marlin_mm_bf16(
 // Version info
 extern "C" const char* krasis_marlin_version() {
     return "vendored-from-sglang-0.4.0";
+}
+
+extern "C" uint32_t krasis_sidecar_abi_version() {
+    return KRASIS_SIDECAR_ABI_VERSION;
+}
+
+extern "C" const char* krasis_sidecar_build_id() {
+    return KRASIS_SIDECAR_BUILD_ID;
 }

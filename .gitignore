@@ -3,6 +3,7 @@
 *.so.bak
 *.so.ours
 *.so.rej
+python/krasis/sidecar_manifest.json
 *.pyc
 __pycache__/
 *.egg-info/

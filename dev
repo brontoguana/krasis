@@ -4,6 +4,8 @@
 #
 # Usage:
 #   ./dev build                     Rebuild Rust extension into this repo only
+#   ./dev build-sidecars            Build Marlin/FlashAttention package sidecars
+#   ./dev verify-sidecars           Verify package sidecar manifest and hashes
 #   ./dev run <config>              Launch server from a test config
 #   ./dev run <config> --benchmark  Launch with benchmark, then serve
 #   ./dev test <config>             Run short model test (benchmark + network tests)
@@ -632,6 +634,34 @@ do_build_fla() {
     ok "FLA kernels: $count architectures compiled"
 }
 
+do_build_sidecars() {
+    local phase_start
+    phase_start=$(build_timer_start)
+    info "Building Marlin/FlashAttention sidecars..."
+    local args=(build)
+    if [[ "${1:-}" == "--force" ]]; then
+        args+=(--force)
+    fi
+    set +e
+    KRASIS_DEV_SCRIPT=1 "$PYTHON" "$SCRIPT_DIR/scripts/build_sidecars.py" "${args[@]}"
+    local status=$?
+    set -e
+    build_timer_end "dev Marlin/FlashAttention sidecars" "$phase_start" "$status"
+    [[ "$status" -eq 0 ]] || err "Marlin/FlashAttention sidecar build failed"
+}
+
+do_verify_sidecars() {
+    local phase_start
+    phase_start=$(build_timer_start)
+    info "Verifying Marlin/FlashAttention sidecars..."
+    set +e
+    KRASIS_DEV_SCRIPT=1 "$PYTHON" "$SCRIPT_DIR/scripts/build_sidecars.py" verify
+    local status=$?
+    set -e
+    build_timer_end "dev sidecar verification" "$phase_start" "$status"
+    [[ "$status" -eq 0 ]] || err "Marlin/FlashAttention sidecar verification failed"
+}
+
 do_build() {
     local build_start
     build_start=$(build_timer_start)
@@ -641,6 +671,8 @@ do_build() {
 
     # Compile FLA kernels first so they're in python/krasis/ for maturin
     do_build_fla
+    do_build_sidecars
+    do_verify_sidecars
 
     cd "$SCRIPT_DIR"
     mkdir -p "$WHEEL_DIR"
@@ -2673,6 +2705,8 @@ shift || true
 
 case "$cmd" in
     build)          do_build ;;
+    build-sidecars) do_build_sidecars "$@" ;;
+    verify-sidecars) do_verify_sidecars ;;
     run)            do_run "$@" ;;
     test)           do_test "$@" ;;
     benchmark)      do_benchmark "$@" ;;
@@ -2714,6 +2748,8 @@ case "$cmd" in
         echo ""
         echo "Core commands:"
         echo "  build                          Rebuild Rust extension into this repo only"
+        echo "  build-sidecars [--force]       Build Marlin/FlashAttention package sidecars"
+        echo "  verify-sidecars                Verify sidecar manifest, hashes, and symbols"
         echo "  run <config> [flags]           Launch server (add --benchmark or --selected-gpus GPU[,GPU...] as needed)"
         echo "  benchmark <config>             Run standard benchmark and exit"
         echo "  speed-test                     Run the fixed standard speed benchmark"
@@ -2868,6 +2904,8 @@ case "$cmd" in
         echo ""
         echo "Examples:"
         echo "  ./dev build"
+        echo "  ./dev build-sidecars"
+        echo "  ./dev verify-sidecars"
         echo "  ./dev run qcn"
         echo "  ./dev run qcn --benchmark"
         echo "  ./dev speed-test"

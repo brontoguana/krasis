@@ -17,6 +17,15 @@
 #include <cutlass/numeric_types.h>
 #include <cmath>
 #include <cstring>
+#include <stdint.h>
+
+#ifndef KRASIS_SIDECAR_BUILD_ID
+#define KRASIS_SIDECAR_BUILD_ID "unknown"
+#endif
+
+#ifndef KRASIS_SIDECAR_ABI_VERSION
+#define KRASIS_SIDECAR_ABI_VERSION 1
+#endif
 
 // These are instantiated in the separate flash_fwd_hdim*_bf16_*.cu files.
 // We declare them here so the linker resolves them.
@@ -159,6 +168,14 @@ static void set_params_from_raw(
 // ============================================================================
 // Extern "C" entry points for Rust FFI (dlopen + dlsym)
 // ============================================================================
+
+extern "C" uint32_t krasis_sidecar_abi_version() {
+    return KRASIS_SIDECAR_ABI_VERSION;
+}
+
+extern "C" const char* krasis_sidecar_build_id() {
+    return KRASIS_SIDECAR_BUILD_ID;
+}
 
 // Forward pass: BF16, all head dimensions, causal and non-causal.
 // The head_dim selects which template instantiation to dispatch to.

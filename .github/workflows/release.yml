@@ -82,13 +82,15 @@ jobs:
             cp /tmp/fla_build/libkrasis_fla_sm*.so python/krasis/
             ls -la python/krasis/libkrasis_fla_sm*.so
             krasis_phase_end 0
-            krasis_phase_start "release cargo sidecar prebuild"
-            # build.rs generates Marlin and FlashAttention sidecars late in
-            # the cargo build, after maturin has already collected Python
-            # package data. Prebuild once here so they are present before
-            # maturin packages each wheel.
-            PATH="/usr/local/cuda-12.6/bin:$PATH" KRASIS_NVCC_CCBIN="$KRASIS_NVCC_CCBIN" cargo build --release --features pyo3/extension-module,cuda
-            ls -la python/krasis/libkrasis_marlin.so python/krasis/libkrasis_flash_attn.so
+            krasis_phase_start "release Marlin/FlashAttention sidecars"
+            # Marlin and FlashAttention are dlopened package sidecars, not Rust
+            # compile inputs. Build them once into python/krasis/ before maturin
+            # so every Python wheel packages the same manifest-verified files.
+            PATH="/usr/local/cuda-12.6/bin:$PATH" KRASIS_DEV_SCRIPT=1 KRASIS_NVCC_CCBIN="$KRASIS_NVCC_CCBIN" \
+              /opt/python/cp312-cp312/bin/python scripts/build_sidecars.py build
+            PATH="/usr/local/cuda-12.6/bin:$PATH" KRASIS_DEV_SCRIPT=1 KRASIS_NVCC_CCBIN="$KRASIS_NVCC_CCBIN" \
+              /opt/python/cp312-cp312/bin/python scripts/build_sidecars.py verify
+            ls -la python/krasis/libkrasis_marlin.so python/krasis/libkrasis_flash_attn.so python/krasis/sidecar_manifest.json
             krasis_phase_end 0
 
       - name: Inject vendored sidecars into wheels
@@ -98,6 +100,7 @@ jobs:
           python3 <<'PY'
           from pathlib import Path
           import subprocess
+          import os
           import zipfile
 
           wheel_dir = Path("dist")
@@ -108,6 +111,7 @@ jobs:
           required = {
               "krasis/libkrasis_marlin.so",
               "krasis/libkrasis_flash_attn.so",
+              "krasis/sidecar_manifest.json",
           }
           # FLA .so files are expected for each target architecture. Release
           # prebuild requires all of these, so missing entries indicate a
@@ -129,51 +133,62 @@ jobs:
 
           if not missing:
               print("All wheels already contain vendored sidecars; skipping injection.")
-              raise SystemExit(0)
+          else:
+              def find_sidecar(name: str) -> Path | None:
+                  for path in Path(".").rglob(name):
+                      path_str = path.as_posix()
+                      if path_str.startswith("dist/") or "/dist/" in path_str:
+                          continue
+                      return path
+                  return None
 
-          def find_sidecar(name: str) -> Path | None:
-              for path in Path(".").rglob(name):
-                  path_str = path.as_posix()
-                  if path_str.startswith("dist/") or "/dist/" in path_str:
-                      continue
-                  return path
-              return None
+              marlin = find_sidecar("libkrasis_marlin.so")
+              flash_attn = find_sidecar("libkrasis_flash_attn.so")
+              manifest = find_sidecar("sidecar_manifest.json")
+              if marlin is None or flash_attn is None or manifest is None:
+                  missing_names = []
+                  if marlin is None:
+                      missing_names.append("libkrasis_marlin.so")
+                  if flash_attn is None:
+                      missing_names.append("libkrasis_flash_attn.so")
+                  if manifest is None:
+                      missing_names.append("sidecar_manifest.json")
+                  raise SystemExit(
+                      "wheel sidecars missing and local copies not found: "
+                      + ", ".join(missing_names)
+                  )
 
-          marlin = find_sidecar("libkrasis_marlin.so")
-          flash_attn = find_sidecar("libkrasis_flash_attn.so")
-          if marlin is None or flash_attn is None:
-              missing_names = []
-              if marlin is None:
-                  missing_names.append("libkrasis_marlin.so")
-              if flash_attn is None:
-                  missing_names.append("libkrasis_flash_attn.so")
-              raise SystemExit(
-                  "wheel sidecars missing and local copies not found: "
-                  + ", ".join(missing_names)
-              )
+              # Find FLA .so directory (required — FLA must be compiled in before-script-linux)
+              fla_so = find_sidecar("libkrasis_fla_sm80.so")
+              if fla_so is None:
+                  raise SystemExit(
+                      "FLA .so files not found — FLA compilation in before-script-linux failed"
+                  )
+              fla_dir = str(fla_so.parent)
 
-          # Find FLA .so directory (required — FLA must be compiled in before-script-linux)
-          fla_so = find_sidecar("libkrasis_fla_sm80.so")
-          if fla_so is None:
-              raise SystemExit(
-                  "FLA .so files not found — FLA compilation in before-script-linux failed"
-              )
-          fla_dir = str(fla_so.parent)
+              cmd = [
+                  "python3",
+                  "scripts/inject_wheel_sidecars.py",
+                  "--wheel-dir",
+                  str(wheel_dir),
+                  "--marlin",
+                  str(marlin),
+                  "--flash-attn",
+                  str(flash_attn),
+                  "--manifest",
+                  str(manifest),
+                  "--fla-dir",
+                  fla_dir,
+              ]
 
-          cmd = [
+              subprocess.run(cmd, check=True)
+          subprocess.run([
               "python3",
-              "scripts/inject_wheel_sidecars.py",
+              "scripts/build_sidecars.py",
+              "verify-wheel",
               "--wheel-dir",
               str(wheel_dir),
-              "--marlin",
-              str(marlin),
-              "--flash-attn",
-              str(flash_attn),
-              "--fla-dir",
-              fla_dir,
-          ]
-
-          subprocess.run(cmd, check=True)
+          ], check=True, env={**dict(os.environ), "KRASIS_DEV_SCRIPT": "1"})
           PY
           status=$?
           set -e

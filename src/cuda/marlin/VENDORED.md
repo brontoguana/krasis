@@ -16,8 +16,9 @@ Vendored date: 2026-03-23
 ## Why vendored
 
 Eliminates sgl_kernel as a pip runtime dependency. The kernels are compiled
-into libkrasis_marlin.so during our build (via build.rs) and loaded at runtime
-via dlopen from Rust and ctypes from Python (AWQ calibration only).
+into libkrasis_marlin.so by `./dev build-sidecars` / `scripts/build_sidecars.py`
+before wheel build and loaded at runtime via dlopen from Rust and ctypes from
+Python (AWQ calibration only).
 
 This gives us zero pip dependencies in the execution path. Python is only
 needed for startup (config parsing, weight loading, cache build).
@@ -31,6 +32,7 @@ Minimal modifications to make the files compile standalone without torch/ATen:
 - Fixed include paths for standalone directory structure (../marlin/ references)
 - Added #pragma once to dequant.h (missing in upstream)
 - Added extern "C" entry points (marlin_vendor.cu, marlin_moe_vendor.cu)
+- Added sidecar ABI/build-id entry points used by manifest verification
 - Created marlin_vendor_common.h with shared stubs replacing torch/ATen
 
 All upstream kernel logic (marlin_template.h, dequant.h, dispatch in
@@ -63,9 +65,10 @@ Ours:
 1. Pull updated files from sgl-project/sglang (paths listed above)
 2. Re-apply the KRASIS_MARLIN_VENDOR include guards (grep for it in current files)
 3. Re-apply #pragma once to dequant.h if missing
-4. Verify build: ./dev build
-5. Run kernel tests: ./dev test-kernels
-6. Run model benchmark: ./dev benchmark qcn
+4. Rebuild and verify sidecars: ./dev build-sidecars --force && ./dev verify-sidecars
+5. Verify build: ./dev build
+6. Run kernel tests: ./dev test-kernels
+7. Run model benchmark: ./dev benchmark qcn
 
 ## Contributing back
 

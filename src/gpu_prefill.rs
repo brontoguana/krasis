@@ -29853,12 +29853,17 @@ impl PrefillKernels {
             Ok(extract_cu_func(&f))
         };
 
-        let marlin_mm = load_marlin_mm();
-        if marlin_mm.is_some() {
-            log::info!("Prefill: loaded Marlin GEMM from vendored libkrasis_marlin.so");
-        } else {
-            log::warn!("Prefill: Marlin GEMM not available");
-        }
+        let marlin_mm = load_marlin_mm()
+            .ok_or_else(|| "Required Marlin sidecar unavailable or failed validation".to_string())?;
+        let fused_moe_fn = load_fused_moe()
+            .ok_or_else(|| "Required fused MoE sidecar symbol unavailable or failed validation".to_string())?;
+        let fused_moe_scatter_fn = load_fused_moe_scatter()
+            .ok_or_else(|| "Required fused MoE scatter sidecar symbol unavailable or failed validation".to_string())?;
+        let flash_attn_fwd = load_flash_attn()
+            .ok_or_else(|| "Required FlashAttention sidecar unavailable or failed validation".to_string())?;
+        let flash_attn_fwd_fp8kv = load_flash_attn_fp8kv()
+            .ok_or_else(|| "Required FlashAttention FP8-KV sidecar symbol unavailable or failed validation".to_string())?;
+        log::info!("Prefill: verified required Marlin and FlashAttention sidecars");
 
         // Opt-in to extended shared memory for flash attention kernel.
         // Models with head_dim > ~176 need > 48KB smem per block.
@@ -29991,11 +29996,11 @@ impl PrefillKernels {
             moe_replicate_hidden: get("moe_replicate_hidden_kernel")?,
             moe_scatter_fused: get("moe_scatter_fused_kernel")?,
             moe_scatter_weighted: get("moe_scatter_weighted_kernel")?,
-            marlin_mm,
-            fused_moe_fn: load_fused_moe(),
-            fused_moe_scatter_fn: load_fused_moe_scatter(),
-            flash_attn_fwd: load_flash_attn(),
-            flash_attn_fwd_fp8kv: load_flash_attn_fp8kv(),
+            marlin_mm: Some(marlin_mm),
+            fused_moe_fn: Some(fused_moe_fn),
+            fused_moe_scatter_fn: Some(fused_moe_scatter_fn),
+            flash_attn_fwd: Some(flash_attn_fwd),
+            flash_attn_fwd_fp8kv: Some(flash_attn_fwd_fp8kv),
         })
     }
 
@@ -31050,6 +31055,145 @@ pub fn allocate_scratch_for_prompt(
 //  Vendored Marlin GEMM dlopen
 // ════════════════════════════════════════════════════════════════════════
 
+type SidecarAbiVersionFn = unsafe extern "C" fn() -> u32;
+type SidecarBuildIdFn = unsafe extern "C" fn() -> *const libc::c_char;
+
+fn expected_sidecar_abi_version() -> u32 {
+    env!("KRASIS_SIDECAR_ABI_VERSION")
+        .parse::<u32>()
+        .expect("KRASIS_SIDECAR_ABI_VERSION must be a u32")
+}
+
+fn sidecar_manifest_candidates(path: &str) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(manifest) = std::env::var("KRASIS_SIDECAR_MANIFEST") {
+        candidates.push(PathBuf::from(manifest));
+    }
+    let sidecar_path = PathBuf::from(path);
+    if let Some(parent) = sidecar_path.parent() {
+        candidates.push(parent.join("sidecar_manifest.json"));
+        if let Some(site_parent) = parent.parent() {
+            candidates.push(site_parent.join("krasis").join("sidecar_manifest.json"));
+        }
+    }
+    candidates
+}
+
+fn manifest_build_id_for_sidecar(path: &str, manifest_key: &str) -> Result<String, String> {
+    let candidates = sidecar_manifest_candidates(path);
+    let manifest_path = candidates
+        .iter()
+        .find(|p| p.is_file())
+        .ok_or_else(|| {
+            format!(
+                "sidecar manifest not found for {} (checked: {})",
+                path,
+                candidates
+                    .iter()
+                    .map(|p| p.to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?;
+    let raw = std::fs::read_to_string(manifest_path)
+        .map_err(|e| format!("failed to read {}: {e}", manifest_path.display()))?;
+    let manifest: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| format!("failed to parse {}: {e}", manifest_path.display()))?;
+    let manifest_abi = manifest
+        .get("sidecar_abi")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| format!("{} missing sidecar_abi", manifest_path.display()))?;
+    let expected_abi = expected_sidecar_abi_version() as u64;
+    if manifest_abi != expected_abi {
+        return Err(format!(
+            "{} sidecar_abi mismatch: expected={} actual={}",
+            manifest_path.display(),
+            expected_abi,
+            manifest_abi
+        ));
+    }
+    manifest
+        .get("sidecars")
+        .and_then(|v| v.get(manifest_key))
+        .and_then(|v| v.get("build_id"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| {
+            format!(
+                "{} missing sidecars.{}.build_id",
+                manifest_path.display(),
+                manifest_key
+            )
+        })
+}
+
+unsafe fn verify_sidecar_abi(
+    lib: *mut libc::c_void,
+    path: &str,
+    label: &str,
+    manifest_key: &str,
+) -> bool {
+    let abi_sym = libc::dlsym(
+        lib,
+        b"krasis_sidecar_abi_version\0".as_ptr() as *const libc::c_char,
+    );
+    if abi_sym.is_null() {
+        log::error!("{label} sidecar missing krasis_sidecar_abi_version: {path}");
+        return false;
+    }
+    let abi_fn: SidecarAbiVersionFn = std::mem::transmute(abi_sym);
+    let abi = abi_fn();
+    let expected_abi = expected_sidecar_abi_version();
+    if abi != expected_abi {
+        log::error!(
+            "{label} sidecar ABI mismatch: path={} expected={} actual={}",
+            path,
+            expected_abi,
+            abi
+        );
+        return false;
+    }
+
+    let build_sym = libc::dlsym(
+        lib,
+        b"krasis_sidecar_build_id\0".as_ptr() as *const libc::c_char,
+    );
+    if build_sym.is_null() {
+        log::error!("{label} sidecar missing krasis_sidecar_build_id: {path}");
+        return false;
+    }
+    let build_fn: SidecarBuildIdFn = std::mem::transmute(build_sym);
+    let build_id_ptr = build_fn();
+    let build_id = if build_id_ptr.is_null() {
+        "<null>".into()
+    } else {
+        std::ffi::CStr::from_ptr(build_id_ptr).to_string_lossy().into_owned()
+    };
+    match manifest_build_id_for_sidecar(path, manifest_key) {
+        Ok(expected_build_id) if expected_build_id == build_id => {}
+        Ok(expected_build_id) => {
+            log::error!(
+                "{label} sidecar build_id mismatch: path={} manifest={} actual={}",
+                path,
+                expected_build_id,
+                build_id
+            );
+            return false;
+        }
+        Err(e) => {
+            log::error!("{label} sidecar manifest check failed for {}: {}", path, e);
+            return false;
+        }
+    }
+    log::info!(
+        "Loaded {label} sidecar ABI {} build_id={} from {}",
+        abi,
+        build_id,
+        path
+    );
+    true
+}
+
 fn load_marlin_mm() -> Option<MarlinMmFn> {
     let path = find_marlin_so()?;
     unsafe {
@@ -31065,6 +31209,9 @@ fn load_marlin_mm() -> Option<MarlinMmFn> {
                     std::ffi::CStr::from_ptr(err).to_string_lossy()
                 );
             }
+            return None;
+        }
+        if !verify_sidecar_abi(lib, &path, "Marlin", "marlin") {
             return None;
         }
 
@@ -31095,6 +31242,9 @@ fn load_fused_moe() -> Option<FusedMoeFn> {
             log::warn!("Fused MoE dlopen({}) failed", path);
             return None;
         }
+        if !verify_sidecar_abi(lib, &path, "Marlin", "marlin") {
+            return None;
+        }
 
         let sym = libc::dlsym(lib, b"krasis_marlin_moe_mm_bf16\0".as_ptr() as *const _);
         if !sym.is_null() {
@@ -31115,6 +31265,9 @@ fn load_fused_moe_scatter() -> Option<FusedMoeScatterFn> {
         );
         if lib.is_null() {
             log::warn!("Fused MoE scatter dlopen({}) failed", path);
+            return None;
+        }
+        if !verify_sidecar_abi(lib, &path, "Marlin", "marlin") {
             return None;
         }
 
@@ -31160,6 +31313,9 @@ fn load_flash_attn() -> Option<FlashAttnFwdFn> {
             }
             return None;
         }
+        if !verify_sidecar_abi(lib, &path, "FlashAttention", "flash_attn") {
+            return None;
+        }
 
         let sym = libc::dlsym(lib, b"krasis_flash_attn_fwd_bf16\0".as_ptr() as *const _);
         if !sym.is_null() {
@@ -31183,6 +31339,9 @@ fn load_flash_attn_fp8kv() -> Option<FlashAttnFwdFn> {
         if lib.is_null() {
             return None;
         }
+        if !verify_sidecar_abi(lib, &path, "FlashAttention", "flash_attn") {
+            return None;
+        }
 
         let sym = libc::dlsym(
             lib,
@@ -31200,8 +31359,8 @@ fn load_flash_attn_fp8kv() -> Option<FlashAttnFwdFn> {
     None
 }
 
-/// Find a vendored .so file built by build.rs.
-/// Searches: 1) env var, 2) next to executable, 3) Cargo build output.
+/// Find a vendored .so file built by the sidecar build step.
+/// Searches: 1) env var, 2) installed package, 3) next to executable.
 fn find_vendor_so(name: &str) -> Option<String> {
     // 1. Look in env var (uppercase, dots/hyphens → underscore)
     let env_name = name.replace('.', "_").replace('-', "_").to_uppercase();
@@ -31222,25 +31381,6 @@ fn find_vendor_so(name: &str) -> Option<String> {
             let p = dir.join(name);
             if p.exists() {
                 return Some(p.to_string_lossy().to_string());
-            }
-        }
-    }
-
-    // 3. Search Cargo build output directories
-    let home = std::env::var("HOME").unwrap_or_default();
-    for repo in &["krasis", "krasisx"] {
-        for profile in &["release", "debug"] {
-            let build_dir = format!(
-                "{}/Documents/Claude/{}/target/{}/build",
-                home, repo, profile
-            );
-            if let Ok(entries) = std::fs::read_dir(&build_dir) {
-                for e in entries.flatten() {
-                    let p = e.path().join(format!("out/{}", name));
-                    if p.exists() {
-                        return Some(p.to_string_lossy().to_string());
-                    }
-                }
             }
         }
     }
@@ -36322,10 +36462,10 @@ mod kernel_tests {
     }
 }
 
-/// Find the vendored libkrasis_marlin.so built by build.rs.
-/// Searches: 1) next to the Rust extension .so, 2) Cargo OUT_DIR, 3) common build paths.
+/// Find the vendored libkrasis_marlin.so built by the sidecar build step.
+/// Searches: 1) env var, 2) installed package, 3) next to executable.
 fn find_marlin_so() -> Option<String> {
-    // 1. Look in KRASIS_MARLIN_SO env var (set by build.rs or wrapper script)
+    // 1. Look in KRASIS_MARLIN_SO env var.
     if let Ok(p) = std::env::var("KRASIS_MARLIN_SO") {
         if std::path::Path::new(&p).exists() {
             return Some(p);
@@ -36342,25 +36482,6 @@ fn find_marlin_so() -> Option<String> {
             let p = dir.join("libkrasis_marlin.so");
             if p.exists() {
                 return Some(p.to_string_lossy().to_string());
-            }
-        }
-    }
-
-    // 3. Search Cargo build output directories for krasis (and krasisx for compat)
-    let home = std::env::var("HOME").unwrap_or_default();
-    for repo in &["krasis", "krasisx"] {
-        for profile in &["release", "debug"] {
-            let build_dir = format!(
-                "{}/Documents/Claude/{}/target/{}/build",
-                home, repo, profile
-            );
-            if let Ok(entries) = std::fs::read_dir(&build_dir) {
-                for e in entries.flatten() {
-                    let p = e.path().join("out/libkrasis_marlin.so");
-                    if p.exists() {
-                        return Some(p.to_string_lossy().to_string());
-                    }
-                }
             }
         }
     }

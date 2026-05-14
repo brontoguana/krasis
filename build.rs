@@ -1,17 +1,22 @@
 fn main() {
     let total_timer = BuildTimer::start("build.rs total");
+    let sidecar_abi = std::fs::read_to_string("sidecar_abi_version.txt")
+        .expect("sidecar_abi_version.txt is required")
+        .trim()
+        .to_string();
+    sidecar_abi
+        .parse::<u32>()
+        .expect("sidecar_abi_version.txt must contain a u32 ABI version");
+    println!("cargo:rerun-if-changed=sidecar_abi_version.txt");
+    println!("cargo:rustc-env=KRASIS_SIDECAR_ABI_VERSION={sidecar_abi}");
     println!("cargo::rustc-check-cfg=cfg(no_numa)");
     println!("cargo::rustc-check-cfg=cfg(has_decode_kernels)");
     println!("cargo::rustc-check-cfg=cfg(has_prefill_kernels)");
     println!("cargo::rustc-check-cfg=cfg(has_hqq_search_kernels)");
-    println!("cargo::rustc-check-cfg=cfg(has_marlin_kernels)");
-    println!("cargo::rustc-check-cfg=cfg(has_flash_attn_kernels)");
 
     // Force rerun when env changes (e.g. CUDA_HOME)
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
-    println!("cargo:rerun-if-env-changed=KRASIS_FA2_HDIM128_EXTRA_ARCHES");
-    println!("cargo:rerun-if-env-changed=KRASIS_FA2_ALL_ARCHES");
 
     // Probe for libnuma — link only if the library is found.
     // The runtime code (numa.rs) checks numa_available() and falls back
@@ -37,12 +42,6 @@ fn main() {
 
     // Compile diagnostic HQQ search kernels to PTX.
     timed_phase("HQQ search PTX", compile_hqq_search_kernels);
-
-    // Compile vendored Marlin GEMM kernels into libkrasis_marlin.so
-    timed_phase("Marlin sidecar", compile_marlin_kernels);
-
-    // Compile vendored FlashAttention-2 kernels into libkrasis_flash_attn.so
-    timed_phase("FlashAttention sidecar", compile_flash_attn_kernels);
 
     total_timer.finish();
 }
@@ -122,30 +121,6 @@ fn file_mtime(path: &str) -> Option<std::time::SystemTime> {
     std::fs::metadata(path).ok()?.modified().ok()
 }
 
-fn run_command_with_failure_output(
-    mut cmd: std::process::Command,
-    label: &str,
-) -> Result<std::process::ExitStatus, std::io::Error> {
-    let start = std::time::Instant::now();
-    let output = cmd.output()?;
-    log_build_timing(label, start.elapsed());
-    if !output.status.success() {
-        if !output.stdout.is_empty() {
-            println!(
-                "cargo:warning={label} stdout:\n{}",
-                String::from_utf8_lossy(&output.stdout)
-            );
-        }
-        if !output.stderr.is_empty() {
-            println!(
-                "cargo:warning={label} stderr:\n{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-    }
-    Ok(output.status)
-}
-
 fn run_status_timed(
     mut cmd: std::process::Command,
     label: &str,
@@ -162,72 +137,6 @@ fn nvcc_host_compiler_args() -> Vec<String> {
             vec!["-ccbin".to_string(), path]
         }
         _ => Vec::new(),
-    }
-}
-
-fn vendor_python_sidecar(so_path: &str) {
-    let src = std::path::Path::new(so_path);
-    if !src.exists() {
-        return;
-    }
-
-    let Some(name) = src.file_name() else {
-        println!("cargo:warning=Skipping vendored sidecar copy for invalid path {so_path}");
-        return;
-    };
-
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
-    let dst = std::path::Path::new(&manifest_dir)
-        .join("python")
-        .join("krasis")
-        .join(name);
-    if let Some(parent) = dst.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            println!(
-                "cargo:warning=Failed to create vendored sidecar directory {}: {}",
-                parent.display(),
-                e
-            );
-            return;
-        }
-    }
-
-    let should_copy = match (std::fs::metadata(src), std::fs::metadata(&dst)) {
-        (Ok(src_meta), Ok(dst_meta)) => {
-            let src_len = src_meta.len();
-            let dst_len = dst_meta.len();
-            let src_mtime = src_meta.modified().ok();
-            let dst_mtime = dst_meta.modified().ok();
-            src_len != dst_len
-                || match (src_mtime, dst_mtime) {
-                    (Some(src_time), Some(dst_time)) => dst_time < src_time,
-                    _ => true,
-                }
-        }
-        (Ok(_), Err(_)) => true,
-        _ => false,
-    };
-
-    if !should_copy {
-        println!(
-            "cargo:warning=Vendored sidecar already current at {}",
-            dst.display()
-        );
-        return;
-    }
-
-    match std::fs::copy(src, &dst) {
-        Ok(_) => {
-            println!("cargo:warning=Vendored sidecar copied to {}", dst.display());
-        }
-        Err(e) => {
-            println!(
-                "cargo:warning=Failed to copy vendored sidecar {} -> {}: {}",
-                src.display(),
-                dst.display(),
-                e
-            );
-        }
     }
 }
 
@@ -388,344 +297,6 @@ fn compile_hqq_search_kernels() {
     }
 }
 
-fn compile_marlin_kernels() {
-    let marlin_dir = "src/cuda/marlin";
-    let src_regular = format!("{marlin_dir}/marlin_vendor.cu");
-    let src_moe = format!("{marlin_dir}/marlin_moe_vendor.cu");
-    let tracked_inputs = [
-        src_regular.as_str(),
-        src_moe.as_str(),
-        "src/cuda/marlin/marlin_vendor_common.h",
-        "src/cuda/marlin/kernel.h",
-        "src/cuda/marlin/marlin_template.h",
-        "src/cuda/marlin/marlin_dtypes.cuh",
-        "src/cuda/marlin/dequant.h",
-        "src/cuda/marlin/scalar_type.hpp",
-        "src/cuda/marlin/moe/kernel.h",
-        "src/cuda/marlin/moe/marlin_template.h",
-    ];
-
-    // Track all Marlin source files for incremental rebuilds
-    for f in tracked_inputs {
-        println!("cargo:rerun-if-changed={f}");
-    }
-
-    if !std::path::Path::new(&src_regular).exists() {
-        println!("cargo:warning=Marlin vendor sources not found — Marlin kernels disabled");
-        return;
-    }
-
-    let nvcc = find_nvcc();
-    let Some(nvcc) = nvcc else {
-        println!("cargo:warning=nvcc not found — Marlin kernels disabled");
-        return;
-    };
-
-    let out_dir = std::env::var("OUT_DIR").unwrap();
-    let obj_regular = format!("{out_dir}/marlin_vendor.o");
-    let obj_moe = format!("{out_dir}/marlin_moe_vendor.o");
-    let so_path = format!("{out_dir}/libkrasis_marlin.so");
-
-    if is_output_fresh(
-        tracked_inputs.as_slice(),
-        &[&obj_regular, &obj_moe, &so_path],
-    ) {
-        println!("cargo:rustc-cfg=has_marlin_kernels");
-        println!("cargo:warning=Reusing cached vendored Marlin kernels at {so_path}");
-        vendor_python_sidecar(&so_path);
-        return;
-    }
-
-    let common_args = [
-        "--expt-relaxed-constexpr",
-        "-allow-unsupported-compiler",
-        "-Xcompiler",
-        "-fPIC",
-        "-arch=sm_80",
-        "-O3",
-        "--use_fast_math",
-        "-I",
-        marlin_dir,
-    ];
-
-    // Compile regular Marlin
-    let mut cmd = std::process::Command::new(&nvcc);
-    cmd.arg("-c")
-        .arg("-o")
-        .arg(&obj_regular)
-        .args(&common_args)
-        .args(nvcc_host_compiler_args())
-        .arg(&src_regular);
-    let status = run_command_with_failure_output(cmd, "nvcc regular Marlin compile");
-
-    match status {
-        Ok(s) if s.success() => {}
-        Ok(s) => {
-            println!("cargo:warning=nvcc failed compiling regular Marlin with status {s}");
-            return;
-        }
-        Err(e) => {
-            println!("cargo:warning=nvcc error compiling regular Marlin: {e}");
-            return;
-        }
-    }
-
-    // Compile MoE Marlin
-    let mut cmd = std::process::Command::new(&nvcc);
-    cmd.arg("-c")
-        .arg("-o")
-        .arg(&obj_moe)
-        .args(&common_args)
-        .args(nvcc_host_compiler_args())
-        .arg(&src_moe);
-    let status = run_command_with_failure_output(cmd, "nvcc MoE Marlin compile");
-
-    match status {
-        Ok(s) if s.success() => {}
-        Ok(s) => {
-            println!("cargo:warning=nvcc failed compiling MoE Marlin with status {s}");
-            return;
-        }
-        Err(e) => {
-            println!("cargo:warning=nvcc error compiling MoE Marlin: {e}");
-            return;
-        }
-    }
-
-    // Link into shared library
-    let mut cmd = std::process::Command::new(&nvcc);
-    cmd.arg("-shared")
-        .arg("-o")
-        .arg(&so_path)
-        .arg(&obj_regular)
-        .arg(&obj_moe)
-        .arg("-Wno-deprecated-gpu-targets");
-    let status = run_status_timed(cmd, "nvcc Marlin link");
-
-    match status {
-        Ok(s) if s.success() => {
-            println!("cargo:rustc-cfg=has_marlin_kernels");
-            println!("cargo:warning=Compiled vendored Marlin kernels to {so_path}");
-            vendor_python_sidecar(&so_path);
-        }
-        Ok(s) => {
-            println!("cargo:warning=nvcc failed linking Marlin .so with status {s}");
-        }
-        Err(e) => {
-            println!("cargo:warning=nvcc link error for Marlin .so: {e}");
-        }
-    }
-}
-
-fn compile_flash_attn_kernels() {
-    let fa_dir = "src/cuda/flash_attn/fa2";
-    let cutlass_dir = "src/cuda/flash_attn/cutlass";
-    let vendor_src = format!("{fa_dir}/flash_attn_vendor.cu");
-    let tracked_inputs = [
-        vendor_src.as_str(),
-        "src/cuda/flash_attn/fa2/flash_attn_vendor.h",
-        "src/cuda/flash_attn/fa2/flash.h",
-        "src/cuda/flash_attn/fa2/flash_fwd_kernel.h",
-        "src/cuda/flash_attn/fa2/flash_fwd_launch_template.h",
-        "src/cuda/flash_attn/fa2/kernel_traits.h",
-        "src/cuda/flash_attn/fa2/softmax.h",
-        "src/cuda/flash_attn/fa2/mask.h",
-        "src/cuda/flash_attn/fa2/utils.h",
-    ];
-
-    // Track key source files for incremental rebuilds
-    for f in tracked_inputs {
-        println!("cargo:rerun-if-changed={f}");
-    }
-
-    if !std::path::Path::new(&vendor_src).exists() {
-        println!("cargo:warning=FlashAttention vendor sources not found — FA kernels disabled");
-        return;
-    }
-
-    let nvcc = find_nvcc();
-    let Some(nvcc) = nvcc else {
-        println!("cargo:warning=nvcc not found — FlashAttention kernels disabled");
-        return;
-    };
-
-    let out_dir = std::env::var("OUT_DIR").unwrap();
-    let so_path = format!("{out_dir}/libkrasis_flash_attn.so");
-
-    // Skip if .so is newer than all FA2 header sources.
-    // The .cu template instantiation files are generated and never edited,
-    // so we only need to check the headers that contain the actual kernel logic.
-    let fa_sources_owned: Vec<String> = vec![
-        "build.rs".to_string(),
-        vendor_src.clone(),
-        format!("{fa_dir}/flash_attn_vendor.h"),
-        format!("{fa_dir}/flash.h"),
-        format!("{fa_dir}/flash_fwd_kernel.h"),
-        format!("{fa_dir}/flash_fwd_launch_template.h"),
-        format!("{fa_dir}/kernel_traits.h"),
-        format!("{fa_dir}/softmax.h"),
-        format!("{fa_dir}/mask.h"),
-        format!("{fa_dir}/utils.h"),
-    ];
-    let fa_sources: Vec<&str> = fa_sources_owned.iter().map(|s| s.as_str()).collect();
-    if is_output_fresh(&fa_sources, &[&so_path]) {
-        println!("cargo:rustc-cfg=has_flash_attn_kernels");
-        println!("cargo:warning=Reusing cached FlashAttention kernels at {so_path}");
-        return;
-    }
-
-    // Include paths: FA2 source dir + vendored CUTLASS headers
-    let common_args = vec![
-        "--expt-relaxed-constexpr".to_string(),
-        "--expt-extended-lambda".to_string(),
-        "-allow-unsupported-compiler".to_string(),
-        "-Xcompiler".to_string(),
-        "-fPIC".to_string(),
-        "-O3".to_string(),
-        "--use_fast_math".to_string(),
-        "-DKRASIS_FA_VENDOR".to_string(),
-        "-DFLASHATTENTION_DISABLE_DROPOUT".to_string(),
-        "-DFLASHATTENTION_DISABLE_ALIBI".to_string(),
-        "-DFLASHATTENTION_DISABLE_SOFTCAP".to_string(),
-        "-DFLASHATTENTION_DISABLE_LOCAL".to_string(),
-        format!("-I{fa_dir}"),
-        format!("-I{cutlass_dir}"),
-    ];
-    // Template instantiations to compile. The vendor wrapper exports both
-    // BF16-KV and FP8-KV entrypoints; omitting FP8-KV objects leaves unresolved
-    // symbols and disables the whole FA2 sidecar at dlopen time.
-    let cu_files = [
-        "flash_attn_vendor.cu",
-        "flash_fwd_hdim64_bf16_causal_sm80.cu",
-        "flash_fwd_hdim64_bf16_sm80.cu",
-        "flash_fwd_hdim64_bf16q_fp8kv_causal_sm80.cu",
-        "flash_fwd_hdim64_bf16q_fp8kv_sm80.cu",
-        "flash_fwd_hdim96_bf16_causal_sm80.cu",
-        "flash_fwd_hdim96_bf16_sm80.cu",
-        "flash_fwd_hdim96_bf16q_fp8kv_causal_sm80.cu",
-        "flash_fwd_hdim96_bf16q_fp8kv_sm80.cu",
-        "flash_fwd_hdim128_bf16_causal_sm80.cu",
-        "flash_fwd_hdim128_bf16_sm80.cu",
-        "flash_fwd_hdim128_bf16q_fp8kv_causal_sm80.cu",
-        "flash_fwd_hdim128_bf16q_fp8kv_sm80.cu",
-        "flash_fwd_hdim192_bf16_causal_sm80.cu",
-        "flash_fwd_hdim192_bf16_sm80.cu",
-        "flash_fwd_hdim192_bf16q_fp8kv_causal_sm80.cu",
-        "flash_fwd_hdim192_bf16q_fp8kv_sm80.cu",
-        "flash_fwd_hdim256_bf16_causal_sm80.cu",
-        "flash_fwd_hdim256_bf16_sm80.cu",
-        "flash_fwd_hdim256_bf16q_fp8kv_causal_sm80.cu",
-        "flash_fwd_hdim256_bf16q_fp8kv_sm80.cu",
-    ];
-
-    let source_paths: Vec<String> = cu_files
-        .iter()
-        .map(|cu_file| format!("{fa_dir}/{cu_file}"))
-        .collect();
-    let mut freshness_inputs: Vec<&str> = tracked_inputs.to_vec();
-    freshness_inputs.push("build.rs");
-    freshness_inputs.extend(source_paths.iter().map(|s| s.as_str()));
-    let obj_paths: Vec<String> = cu_files
-        .iter()
-        .map(|cu_file| format!("{out_dir}/fa2_{}", cu_file.replace(".cu", ".o")))
-        .collect();
-    let mut freshness_outputs: Vec<&str> = obj_paths.iter().map(|s| s.as_str()).collect();
-    freshness_outputs.push(so_path.as_str());
-
-    if is_output_fresh(freshness_inputs.as_slice(), freshness_outputs.as_slice()) {
-        println!("cargo:rustc-cfg=has_flash_attn_kernels");
-        println!("cargo:warning=Reusing cached vendored FlashAttention-2 kernels at {so_path}");
-        vendor_python_sidecar(&so_path);
-        return;
-    }
-
-    // Compile each .cu to .o
-    let mut obj_files = Vec::new();
-    for cu_file in &cu_files {
-        let src_path = format!("{fa_dir}/{cu_file}");
-        let obj_name = cu_file.replace(".cu", ".o");
-        let obj_path = format!("{out_dir}/fa2_{obj_name}");
-
-        println!("cargo:rerun-if-changed={src_path}");
-
-        let mut cmd = std::process::Command::new(&nvcc);
-        cmd.arg("-c")
-            .arg("-o")
-            .arg(&obj_path)
-            .args(&common_args)
-            .args(fa2_arch_args(cu_file))
-            .args(nvcc_host_compiler_args())
-            .arg(&src_path);
-        let status =
-            run_command_with_failure_output(cmd, &format!("nvcc FlashAttention compile {cu_file}"));
-
-        match status {
-            Ok(s) if s.success() => {
-                obj_files.push(obj_path);
-            }
-            Ok(s) => {
-                println!("cargo:warning=nvcc failed compiling {cu_file} with status {s}");
-                return;
-            }
-            Err(e) => {
-                println!("cargo:warning=nvcc error compiling {cu_file}: {e}");
-                return;
-            }
-        }
-    }
-
-    // Link all .o files into shared library
-    let mut link_cmd = std::process::Command::new(&nvcc);
-    link_cmd.arg("-shared").arg("-o").arg(&so_path);
-    for obj in &obj_files {
-        link_cmd.arg(obj);
-    }
-    link_cmd.arg("-Wno-deprecated-gpu-targets");
-
-    let status = run_status_timed(link_cmd, "nvcc FlashAttention link");
-
-    match status {
-        Ok(s) if s.success() => {
-            println!("cargo:rustc-cfg=has_flash_attn_kernels");
-            println!("cargo:warning=Compiled vendored FlashAttention-2 kernels to {so_path}");
-            vendor_python_sidecar(&so_path);
-        }
-        Ok(s) => {
-            println!("cargo:warning=nvcc failed linking FlashAttention .so with status {s}");
-        }
-        Err(e) => {
-            println!("cargo:warning=nvcc link error for FlashAttention .so: {e}");
-        }
-    }
-}
-
-fn fa2_arch_args(cu_file: &str) -> Vec<String> {
-    let hdim128_extra_arches =
-        std::env::var("KRASIS_FA2_HDIM128_EXTRA_ARCHES").ok().as_deref() == Some("1");
-    let all_arches = std::env::var("KRASIS_FA2_ALL_ARCHES").ok().as_deref() == Some("1");
-    if !all_arches && !(hdim128_extra_arches && cu_file.contains("hdim128")) {
-        return vec!["-arch=sm_80".to_string()];
-    }
-
-    let mut archs = vec![80];
-    if all_arches || (hdim128_extra_arches && cu_file.contains("hdim128")) {
-        archs.extend([89, 90, 120]);
-    }
-
-    let mut args = Vec::with_capacity(archs.len() * 2);
-    for arch in archs {
-        args.push("-gencode".to_string());
-        if arch == 120 {
-            args.push("arch=compute_120,code=[sm_120,compute_120]".to_string());
-        } else {
-            args.push(format!("arch=compute_{arch},code=sm_{arch}"));
-        }
-    }
-    args
-}
-
-/// Returns true if `output` exists and is newer than every file in `sources`.
-/// Used to skip expensive CUDA recompilation when only unrelated sources changed.
 fn find_nvcc() -> Option<String> {
     // Check CUDA_HOME / CUDA_PATH
     for var in ["CUDA_HOME", "CUDA_PATH"] {
