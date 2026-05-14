@@ -39,7 +39,7 @@ jobs:
             # CUDA toolkit for nvcc (decode kernels compiled to PTX at build time)
             # and libcuda.so stubs (FLA sidecars link against the CUDA driver API,
             # but release CI has no real GPU driver installed).
-            # build.rs checks /usr/local/cuda-12.6/bin/nvcc directly
+            # build.rs and the sidecar builder need nvcc available on PATH.
             if [ ! -f /usr/local/cuda-12.6/bin/nvcc ]; then
               yum install -y yum-utils 2>/dev/null || true
               yum-config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo 2>/dev/null || \
@@ -48,10 +48,24 @@ jobs:
                 dnf install -y --nogpgcheck cuda-nvcc-12-6 cuda-cudart-devel-12-6 cuda-driver-devel-12-6 2>/dev/null || true
               ls -la /usr/local/cuda-12.6/bin/nvcc 2>/dev/null && echo "nvcc installed OK" || echo "WARNING: nvcc install failed"
             fi
-            yum install -y gcc-toolset-13-gcc-c++ 2>/dev/null || dnf install -y gcc-toolset-13-gcc-c++ 2>/dev/null || true
-            export KRASIS_NVCC_CCBIN="/opt/rh/gcc-toolset-13/root/usr/bin/g++"
-            if [ ! -x "$KRASIS_NVCC_CCBIN" ]; then
-              echo "ERROR: required release NVCC host compiler not found: $KRASIS_NVCC_CCBIN" >&2
+            if [ ! -x /usr/local/cuda-12.6/bin/nvcc ]; then
+              echo "ERROR: required release nvcc not found at /usr/local/cuda-12.6/bin/nvcc" >&2
+              find /usr/local -path '*/bin/nvcc' -print 2>/dev/null || true
+              exit 1
+            fi
+            yum install -y gcc-toolset-14-gcc-c++ gcc-toolset-13-gcc-c++ 2>/dev/null || \
+              dnf install -y gcc-toolset-14-gcc-c++ gcc-toolset-13-gcc-c++ 2>/dev/null || true
+            for candidate in \
+              /opt/rh/gcc-toolset-14/root/usr/bin/g++ \
+              /opt/rh/gcc-toolset-13/root/usr/bin/g++ \
+              /usr/bin/g++; do
+              if [ -x "$candidate" ]; then
+                export KRASIS_NVCC_CCBIN="$candidate"
+                break
+              fi
+            done
+            if [ -z "${KRASIS_NVCC_CCBIN:-}" ]; then
+              echo "ERROR: required release NVCC host compiler not found" >&2
               find /opt/rh -path '*/bin/g++' -print 2>/dev/null || true
               exit 1
             fi
