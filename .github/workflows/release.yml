@@ -17,9 +17,7 @@ jobs:
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         env:
-          GH_TOKEN: ${{ github.token }}
           KRASIS_GITHUB_REPOSITORY: ${{ github.repository }}
-          KRASIS_GITHUB_UPLOAD_RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || '' }}
         with:
           target: x86_64
           args: --release --out dist -i python3.10 python3.11 python3.12 python3.13
@@ -118,12 +116,9 @@ jobs:
                 /opt/python/cp312-cp312/bin/python scripts/build_sidecars.py build
               PATH="/usr/local/cuda-12.6/bin:$PATH" KRASIS_DEV_SCRIPT=1 KRASIS_NVCC_CCBIN="$KRASIS_NVCC_CCBIN" \
                 /opt/python/cp312-cp312/bin/python scripts/build_sidecars.py pack-bundle
-              if [ -n "${KRASIS_GITHUB_UPLOAD_RELEASE_TAG:-}" ]; then
-                PATH="/usr/local/cuda-12.6/bin:$PATH" KRASIS_DEV_SCRIPT=1 KRASIS_NVCC_CCBIN="$KRASIS_NVCC_CCBIN" \
-                  /opt/python/cp312-cp312/bin/python scripts/build_sidecars.py upload-bundle
-              else
-                echo "No release tag in this workflow context; skipping sidecar bundle upload."
-              fi
+              mkdir -p target/sidecars
+              PATH="/usr/local/cuda-12.6/bin:$PATH" KRASIS_DEV_SCRIPT=1 KRASIS_NVCC_CCBIN="$KRASIS_NVCC_CCBIN" \
+                /opt/python/cp312-cp312/bin/python scripts/build_sidecars.py bundle-key > target/sidecars/upload_bundle_required
             else
               echo "ERROR: sidecar bundle restore failed with status $restore_status" >&2
               exit "$restore_status"
@@ -132,6 +127,24 @@ jobs:
               /opt/python/cp312-cp312/bin/python scripts/build_sidecars.py verify
             ls -la python/krasis/libkrasis_marlin.so python/krasis/libkrasis_flash_attn.so python/krasis/sidecar_manifest.json
             krasis_phase_end 0
+
+      - name: Upload sidecar bundle cache asset
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ ! -f target/sidecars/upload_bundle_required ]; then
+            echo "No new sidecar bundle was compiled; skipping sidecar bundle upload."
+            exit 0
+          fi
+          bundle_name=$(cat target/sidecars/upload_bundle_required)
+          bundle_path="target/sidecars/bundles/${bundle_name}"
+          if [ ! -f "$bundle_path" ]; then
+            echo "ERROR: expected sidecar bundle not found: $bundle_path" >&2
+            find target/sidecars -maxdepth 3 -type f -print 2>/dev/null || true
+            exit 1
+          fi
+          gh release upload "$GITHUB_REF_NAME" "$bundle_path" --clobber
 
       - name: Inject vendored sidecars into wheels
         run: |

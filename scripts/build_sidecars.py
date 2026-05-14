@@ -491,7 +491,11 @@ def create_bundle(path: Path) -> None:
     tmp_path.replace(path)
 
 
-def github_token() -> str:
+def github_token_optional() -> str | None:
+    return os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+
+
+def github_token_required() -> str:
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
     if not token:
         raise SystemExit("ERROR: GH_TOKEN/GITHUB_TOKEN required for GitHub sidecar bundle access")
@@ -508,16 +512,17 @@ def github_repo() -> str:
 def github_request(
     method: str,
     url: str,
-    token: str,
+    token: str | None,
     data: bytes | None = None,
     content_type: str = "application/json",
     accept: str = "application/vnd.github+json",
 ) -> tuple[int, bytes]:
     headers = {
         "Accept": accept,
-        "Authorization": f"Bearer {token}",
         "X-GitHub-Api-Version": "2022-11-28",
     }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     if data is not None:
         headers["Content-Type"] = content_type
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
@@ -530,7 +535,7 @@ def github_request(
         return 0, str(exc).encode("utf-8")
 
 
-def github_release_by_tag(token: str, repo: str, tag: str) -> dict[str, object] | None:
+def github_release_by_tag(token: str | None, repo: str, tag: str) -> dict[str, object] | None:
     api = f"https://api.github.com/repos/{repo}/releases/tags/{urllib.parse.quote(tag)}"
     status, body = github_request("GET", api, token)
     if status == 200:
@@ -540,7 +545,7 @@ def github_release_by_tag(token: str, repo: str, tag: str) -> dict[str, object] 
     raise SystemExit(f"ERROR: failed to read GitHub release {tag}: HTTP {status}: {body.decode('utf-8', 'replace')}")
 
 
-def github_releases(token: str, repo: str) -> list[dict[str, object]]:
+def github_releases(token: str | None, repo: str) -> list[dict[str, object]]:
     all_releases: list[dict[str, object]] = []
     page = 1
     while len(all_releases) < GITHUB_RELEASE_SEARCH_LIMIT:
@@ -558,7 +563,7 @@ def github_releases(token: str, repo: str) -> list[dict[str, object]]:
     return all_releases[:GITHUB_RELEASE_SEARCH_LIMIT]
 
 
-def github_release_assets(token: str, release: dict[str, object]) -> list[dict[str, object]]:
+def github_release_assets(token: str | None, release: dict[str, object]) -> list[dict[str, object]]:
     assets = release.get("assets")
     if isinstance(assets, list):
         return [asset for asset in assets if isinstance(asset, dict)]
@@ -582,7 +587,7 @@ def github_release_assets(token: str, release: dict[str, object]) -> list[dict[s
     return all_assets
 
 
-def github_asset(token: str, release: dict[str, object], name: str) -> dict[str, object] | None:
+def github_asset(token: str | None, release: dict[str, object], name: str) -> dict[str, object] | None:
     for asset in github_release_assets(token, release):
         if asset.get("name") == name:
             return asset
@@ -590,7 +595,7 @@ def github_asset(token: str, release: dict[str, object], name: str) -> dict[str,
 
 
 def download_github_bundle(name: str, dst: Path) -> bool:
-    token = github_token()
+    token = github_token_optional()
     repo = github_repo()
     asset = None
     for release in github_releases(token, repo):
@@ -615,7 +620,7 @@ def download_github_bundle(name: str, dst: Path) -> bool:
 
 
 def upload_github_bundle(path: Path) -> None:
-    token = github_token()
+    token = github_token_required()
     repo = github_repo()
     tag = os.environ.get("KRASIS_GITHUB_UPLOAD_RELEASE_TAG") or os.environ.get("GITHUB_REF_NAME")
     if not tag:
