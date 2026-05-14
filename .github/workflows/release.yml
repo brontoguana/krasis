@@ -56,8 +56,8 @@ jobs:
             yum install -y gcc-toolset-14-gcc-c++ gcc-toolset-13-gcc-c++ 2>/dev/null || \
               dnf install -y gcc-toolset-14-gcc-c++ gcc-toolset-13-gcc-c++ 2>/dev/null || true
             for candidate in \
-              /opt/rh/gcc-toolset-14/root/usr/bin/g++ \
               /opt/rh/gcc-toolset-13/root/usr/bin/g++ \
+              /opt/rh/gcc-toolset-14/root/usr/bin/g++ \
               /usr/bin/g++; do
               if [ -x "$candidate" ]; then
                 export KRASIS_NVCC_CCBIN="$candidate"
