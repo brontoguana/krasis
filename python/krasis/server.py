@@ -128,6 +128,13 @@ def _warn(text: str) -> None:
     """Print a warning line (yellow, indented)."""
     print(f"  {_YELLOW}{text}{_NC}", flush=True)
 
+
+def _headline(text: str, color: str = _CYAN) -> None:
+    """Print a compact headline that stays readable when stdout is log-prefixed."""
+    print(flush=True)
+    print(f"{_BOLD}{color}{text}{_NC}", flush=True)
+
+
 _model: Optional[KrasisModel] = None
 _model_name: str = "unknown"
 
@@ -2109,20 +2116,14 @@ def main():
 
         # Print summary table if multiple datasets
         if len(all_results) > 1:
-            print()
-            bar = "\u2550" * 56
-            print(bar)
-            print("  PERPLEXITY SUMMARY")
-            print(bar)
+            _headline("PERPLEXITY SUMMARY")
             print(f"  {'Dataset':20s} {'PPL':>10s} {'BPC':>8s} {'Tokens':>12s} {'Time':>8s}")
-            print(f"  {'-' * 20} {'-' * 10} {'-' * 8} {'-' * 12} {'-' * 8}")
             for r in all_results:
                 tok_s = r["num_tokens_scored"] / r["elapsed_s"] if r["elapsed_s"] > 0 else 0
                 print(
                     f"  {r['dataset']:20s} {r['perplexity']:10.2f} {r['bits_per_char']:8.2f} "
                     f"{r['num_tokens_scored']:>12,} {r['elapsed_s']:7.1f}s"
                 )
-            print(bar)
 
         sys.exit(0)
 
@@ -2429,22 +2430,18 @@ def main():
     signal.signal(signal.SIGINT, _handle_exit)
     signal.signal(signal.SIGTERM, _handle_exit)
 
-    # ── Final ready banner (after all setup is done) ──
-    # Brief pause so any async log output settles before the banner
+    # Final ready summary after all setup is done. Keep lines compact because
+    # stdout is also written through the timestamped krasis.server logger.
     time.sleep(1.0)
     _decode_mode = f"{len(all_aux_gpu_store_addrs)+1}-GPU" if all_aux_gpu_store_addrs else "GPU"
     _hcs_str = "on" if args.hcs else "off"
     _think_str = "on" if think_end_id else "off"
-    print(flush=True)
-    print(f"  {_BOLD}{_GREEN}{'━' * 54}{_NC}", flush=True)
     vram_monitor.report_event("server_ready")
-    print(f"  {_BOLD}{_GREEN}  KRASIS SERVER READY{_NC}", flush=True)
-    print(f"  {_BOLD}{_GREEN}{'━' * 54}{_NC}", flush=True)
+    _headline("KRASIS SERVER READY", _GREEN)
     print(f"  {_GREEN}Model:{_NC}    {_BOLD}{_model_name}{_NC}", flush=True)
     print(f"  {_GREEN}Address:{_NC}  {_BOLD}{args.host}:{args.port}{_NC}", flush=True)
     print(f"  {_GREEN}Context:{_NC}  {max_ctx:,} tokens  |  KV cache: {args.kv_cache_mb:,} MB", flush=True)
     print(f"  {_GREEN}Decode:{_NC}   {_decode_mode}  |  HCS: {_hcs_str}  |  Think: {_think_str}", flush=True)
-    print(f"  {_BOLD}{_GREEN}{'━' * 54}{_NC}", flush=True)
     print(f"  {_DIM}Press Q or Ctrl-C to stop{_NC}", flush=True)
     print(flush=True)
 
@@ -2477,11 +2474,8 @@ def main():
             if _benchmark_only:
                 rust_server.stop()
             else:
-                # Re-show ready banner after benchmark output
-                print(flush=True)
-                print(f"  {_BOLD}{_GREEN}{'═' * 50}{_NC}", flush=True)
-                print(f"  {_BOLD}{_GREEN}  SERVER READY — {args.host}:{args.port}{_NC}", flush=True)
-                print(f"  {_BOLD}{_GREEN}{'═' * 50}{_NC}", flush=True)
+                # Re-show readiness after benchmark output.
+                _headline(f"SERVER READY: {args.host}:{args.port}", _GREEN)
                 # Show Session ID again so it's visible after benchmark output
                 if getattr(args, 'session_enabled', False):
                     sid_path = Path.home() / ".krasis" / "session_id"
@@ -2507,20 +2501,16 @@ def main():
             # Print summary of key events
             summary = vram_monitor.report_summary()
             if summary:
-                print(flush=True)
-                print(f"  {_BOLD}VRAM Report Summary{_NC}", flush=True)
-                print(f"  {'─' * 60}", flush=True)
+                _headline("VRAM REPORT SUMMARY")
                 _hdr = f"  {'Event':<30s} {'Time':>8s}"
                 for i in device_indices:
                     _hdr += f"  {'GPU' + str(i):>8s}"
                 print(_hdr, flush=True)
-                print(f"  {'─' * 60}", flush=True)
                 for event, ts_ms, gpu_free in summary:
                     _line = f"  {event:<30s} {ts_ms/1000:>7.1f}s"
                     for mb in gpu_free:
                         _line += f"  {mb:>6d}MB"
                     print(_line, flush=True)
-                print(f"  {'─' * 60}", flush=True)
                 print(f"  {_DIM}Full report: {_report_path}{_NC}", flush=True)
         except Exception as e:
             logger.warning("Failed to write VRAM report: %s", e)

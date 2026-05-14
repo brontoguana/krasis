@@ -5527,10 +5527,8 @@ class KrasisModel:
         if ep_timing:
             _total_measured = sum(v for k, v in _ep_times.items()
                                  if k not in ("layer_total", "attention_gqa", "attention_linear"))
-            logger.info("=" * 70)
             logger.info("EP TIMING BREAKDOWN (%d MoE layers, %d dense layers, %d chunks)",
                         _ep_layer_count, _ep_dense_count, num_chunks)
-            logger.info("-" * 70)
             _skip_phases = {"layer_total", "attention_gqa", "attention_linear"}
             # Also skip per-device attn_* keys (shown separately below)
             _skip_phases.update(k for k in _ep_times if k.startswith("attn_"))
@@ -5541,7 +5539,6 @@ class KrasisModel:
                 pct = (t / _ep_times["layer_total"] * 100) if _ep_times["layer_total"] > 0 else 0
                 logger.info("  %-20s %8.1f ms total  %6.2f ms/layer  %5.1f%%",
                             phase, t * 1000, per_layer, pct)
-            logger.info("-" * 70)
             # Per-layer-type attention averages (multiply by num_chunks for layer-chunks)
             num_gqa_chunks = (self.cfg.num_full_attention_layers if self.cfg.is_hybrid else _ep_layer_count) * num_chunks
             num_linear_chunks = _ep_layer_count - num_gqa_chunks
@@ -5561,7 +5558,6 @@ class KrasisModel:
                                 _ep_times[dk] / _ep_times[ck] * 1000,
                                 int(_ep_times[ck]),
                                 _ep_times[dk] * 1000)
-            logger.info("-" * 70)
             logger.info("  %-20s %8.1f ms total  %6.2f ms/layer",
                         "LAYER TOTAL", _ep_times["layer_total"] * 1000,
                         _ep_times["layer_total"] / _ep_layer_count * 1000 if _ep_layer_count else 0)
@@ -5570,14 +5566,11 @@ class KrasisModel:
                         _ep_dense_time / _ep_dense_count * 1000 if _ep_dense_count else 0)
             logger.info("  %-20s %8.1f ms total",
                         "SUM (measured)", _total_measured * 1000)
-            logger.info("=" * 70)
 
         # ── Layer timing summary (DMA vs compute vs free) ──
         if _layer_timing and _lt_count > 0:
             _lt_total = _lt_dma_total + _lt_compute_total + _lt_free_total
-            logger.info("=" * 70)
             logger.info("LAYER TIMING (%d groups, %d chunks)", _lt_count, num_chunks)
-            logger.info("-" * 70)
             logger.info("  DMA load:  %8.1f ms total  %6.2f ms/group  %5.1f%%",
                         _lt_dma_total * 1000, _lt_dma_total / _lt_count * 1000,
                         _lt_dma_total / _lt_total * 100 if _lt_total > 0 else 0)
@@ -5590,7 +5583,6 @@ class KrasisModel:
             logger.info("  TOTAL:     %8.1f ms", _lt_total * 1000)
             per_chunk = _lt_compute_total / (_lt_count * num_chunks) * 1000
             logger.info("  Compute per chunk: %.2f ms", per_chunk)
-            logger.info("=" * 70)
 
         # ── Final result: logits ──
         # final_norm and lm_head are always on GPU0 (first device)

@@ -39,6 +39,11 @@ def _section(label: str) -> str:
     return f"\n{BOLD}{CYAN}▸ {label}{NC}"
 
 
+def _headline(label: str, color: str = CYAN) -> str:
+    """Format a compact headline for server-prefixed benchmark output."""
+    return f"{BOLD}{color}{label}{NC}"
+
+
 class KrasisBenchmark:
     """Standardized benchmark suite — Prefill (internal), Decode (internal), Round trip (network)."""
 
@@ -776,9 +781,8 @@ class KrasisBenchmark:
 
     def run(self) -> Dict:
         """Run the full benchmark suite. Returns results dict."""
-        print(f"\n{BOLD}{'═' * 48}")
-        print(f"  KRASIS BENCHMARK")
-        print(f"{'═' * 48}{NC}")
+        print()
+        print(_headline("KRASIS BENCHMARK"))
 
         # 1. Collect info
         print(_section("Collecting system info"))
@@ -887,9 +891,8 @@ class KrasisBenchmark:
             f"{attn_label} KV={model_info['kv_dtype']} {gpu_label}"
         )
 
-        print(f"\n{BOLD}{'─' * 48}")
-        print(f"  BENCHMARK COMPLETE")
-        print(f"{'─' * 48}{NC}")
+        print()
+        print(_headline("BENCHMARK COMPLETE", GREEN))
         print(f"  Model:                 {BOLD}{model_info['model_name']}{NC}")
         print(f"  Config:                {config_label}")
         print(f"  Prefill (internal):    {GREEN}{BOLD}{prefill_result['best_tok_s']:,.1f} tok/s{NC}  (best of {lengths_str})")
