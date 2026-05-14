@@ -375,11 +375,11 @@ struct DeviceState {
 /// Background VRAM monitor that polls cudaMemGetInfo and tracks peak usage.
 ///
 /// Usage:
-///   monitor = VramMonitor([0, 1], poll_interval_ms=50, safety_margin_mb=3000)
+///   monitor = VramMonitor([0, 1], poll_interval_ms=50, safety_margin_mb=600)
 ///   monitor.start()
 ///   # ... run prefill + decode warmup ...
 ///   min_free = monitor.min_free_mb(0)  # measured min free during warmup
-///   hcs_budget = min_free - 3000
+///   hcs_budget = min_free - 600
 ///   # ... load HCS experts ...
 ///   monitor.enable_warnings()          # warns on each new low below margin
 ///   # ... run server (monitor stays on, no reset needed) ...
@@ -397,7 +397,7 @@ pub struct VramMonitor {
 #[pymethods]
 impl VramMonitor {
     #[new]
-    #[pyo3(signature = (device_indices, poll_interval_ms=50, safety_margin_mb=3000))]
+    #[pyo3(signature = (device_indices, poll_interval_ms=50, safety_margin_mb=600))]
     fn new(
         device_indices: Vec<i32>,
         poll_interval_ms: u64,
