@@ -6,6 +6,10 @@
 #   ./dev build                     Rebuild Rust extension into this repo only
 #   ./dev build-sidecars            Build Marlin/FlashAttention package sidecars
 #   ./dev verify-sidecars           Verify package sidecar manifest and hashes
+#   ./dev sidecar-key               Print Marlin/FlashAttention sidecar bundle key
+#   ./dev pack-sidecar-bundle       Pack verified sidecars into target/sidecars/bundles
+#   ./dev restore-sidecar-bundle    Restore sidecars from local/GitHub bundle cache
+#   ./dev upload-sidecar-bundle     Upload verified sidecar bundle to configured release
 #   ./dev run <config>              Launch server from a test config
 #   ./dev run <config> --benchmark  Launch with benchmark, then serve
 #   ./dev test <config>             Run short model test (benchmark + network tests)
@@ -660,6 +664,50 @@ do_verify_sidecars() {
     set -e
     build_timer_end "dev sidecar verification" "$phase_start" "$status"
     [[ "$status" -eq 0 ]] || err "Marlin/FlashAttention sidecar verification failed"
+}
+
+do_sidecar_key() {
+    KRASIS_DEV_SCRIPT=1 "$PYTHON" "$SCRIPT_DIR/scripts/build_sidecars.py" bundle-key "$@"
+}
+
+do_pack_sidecar_bundle() {
+    local phase_start
+    phase_start=$(build_timer_start)
+    info "Packing Marlin/FlashAttention sidecar bundle..."
+    set +e
+    KRASIS_DEV_SCRIPT=1 "$PYTHON" "$SCRIPT_DIR/scripts/build_sidecars.py" pack-bundle
+    local status=$?
+    set -e
+    build_timer_end "dev sidecar bundle pack" "$phase_start" "$status"
+    [[ "$status" -eq 0 ]] || err "Marlin/FlashAttention sidecar bundle pack failed"
+}
+
+do_restore_sidecar_bundle() {
+    local phase_start
+    phase_start=$(build_timer_start)
+    info "Restoring Marlin/FlashAttention sidecar bundle..."
+    local args=(restore-bundle)
+    if [[ "${1:-}" == "--github" ]]; then
+        args+=(--github)
+    fi
+    set +e
+    KRASIS_DEV_SCRIPT=1 "$PYTHON" "$SCRIPT_DIR/scripts/build_sidecars.py" "${args[@]}"
+    local status=$?
+    set -e
+    build_timer_end "dev sidecar bundle restore" "$phase_start" "$status"
+    [[ "$status" -eq 0 ]] || return "$status"
+}
+
+do_upload_sidecar_bundle() {
+    local phase_start
+    phase_start=$(build_timer_start)
+    info "Uploading Marlin/FlashAttention sidecar bundle..."
+    set +e
+    KRASIS_DEV_SCRIPT=1 "$PYTHON" "$SCRIPT_DIR/scripts/build_sidecars.py" upload-bundle
+    local status=$?
+    set -e
+    build_timer_end "dev sidecar bundle upload" "$phase_start" "$status"
+    [[ "$status" -eq 0 ]] || err "Marlin/FlashAttention sidecar bundle upload failed"
 }
 
 do_build() {
@@ -2707,6 +2755,10 @@ case "$cmd" in
     build)          do_build ;;
     build-sidecars) do_build_sidecars "$@" ;;
     verify-sidecars) do_verify_sidecars ;;
+    sidecar-key)    do_sidecar_key "$@" ;;
+    pack-sidecar-bundle) do_pack_sidecar_bundle ;;
+    restore-sidecar-bundle) do_restore_sidecar_bundle "$@" ;;
+    upload-sidecar-bundle) do_upload_sidecar_bundle ;;
     run)            do_run "$@" ;;
     test)           do_test "$@" ;;
     benchmark)      do_benchmark "$@" ;;
@@ -2750,6 +2802,10 @@ case "$cmd" in
         echo "  build                          Rebuild Rust extension into this repo only"
         echo "  build-sidecars [--force]       Build Marlin/FlashAttention package sidecars"
         echo "  verify-sidecars                Verify sidecar manifest, hashes, and symbols"
+        echo "  sidecar-key [--json]           Print sidecar bundle cache key"
+        echo "  pack-sidecar-bundle            Pack verified sidecars into a local bundle"
+        echo "  restore-sidecar-bundle [--github] Restore sidecars from bundle cache"
+        echo "  upload-sidecar-bundle          Upload bundle to configured GitHub release"
         echo "  run <config> [flags]           Launch server (add --benchmark or --selected-gpus GPU[,GPU...] as needed)"
         echo "  benchmark <config>             Run standard benchmark and exit"
         echo "  speed-test                     Run the fixed standard speed benchmark"
@@ -2906,6 +2962,7 @@ case "$cmd" in
         echo "  ./dev build"
         echo "  ./dev build-sidecars"
         echo "  ./dev verify-sidecars"
+        echo "  ./dev sidecar-key --json"
         echo "  ./dev run qcn"
         echo "  ./dev run qcn --benchmark"
         echo "  ./dev speed-test"

@@ -19,8 +19,12 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import zipfile
 
 
@@ -32,6 +36,7 @@ if os.environ.get("KRASIS_DEV_SCRIPT") != "1":
 REPO = Path(__file__).resolve().parents[1]
 PACKAGE_DIR = REPO / "python" / "krasis"
 BUILD_ROOT = REPO / "target" / "sidecars"
+BUNDLE_DIR = BUILD_ROOT / "bundles"
 MANIFEST_PATH = PACKAGE_DIR / "sidecar_manifest.json"
 
 
@@ -61,6 +66,10 @@ FLASH_ATTN_SYMBOLS = [
     "krasis_flash_attn_fwd_bf16",
     "krasis_flash_attn_fwd_bf16q_fp8kv",
 ]
+
+BUNDLE_PLATFORM = os.environ.get("KRASIS_SIDECAR_PLATFORM", "linux-x86_64-cuda126")
+GITHUB_TIMEOUT_SECONDS = int(os.environ.get("KRASIS_GITHUB_TIMEOUT_SECONDS", "15"))
+GITHUB_RELEASE_SEARCH_LIMIT = int(os.environ.get("KRASIS_SIDECAR_RELEASE_SEARCH_LIMIT", "25"))
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -356,6 +365,24 @@ def verify_symbols(path: Path, required: list[str]) -> list[str]:
     return [sym for sym in required if sym not in symbols]
 
 
+def verify_loaded_sidecar(path: Path, expected_build_id: str) -> str | None:
+    try:
+        lib = ctypes.CDLL(str(path))
+        abi_fn = lib.krasis_sidecar_abi_version
+        abi_fn.restype = ctypes.c_uint32
+        actual_abi = int(abi_fn())
+        if actual_abi != SIDECAR_ABI_VERSION:
+            return f"ABI mismatch: expected {SIDECAR_ABI_VERSION}, got {actual_abi}"
+        build_id_fn = lib.krasis_sidecar_build_id
+        build_id_fn.restype = ctypes.c_char_p
+        actual_build_id = build_id_fn().decode("utf-8")
+        if actual_build_id != expected_build_id:
+            return f"build_id mismatch: expected {expected_build_id}, got {actual_build_id}"
+    except Exception as exc:
+        return f"load/build-id check failed: {exc}"
+    return None
+
+
 def copy_to_package(path: Path) -> Path:
     PACKAGE_DIR.mkdir(parents=True, exist_ok=True)
     dst = PACKAGE_DIR / path.name
@@ -380,10 +407,233 @@ def manifest_matches(manifest: dict[str, object], contracts: dict[str, dict[str,
             return False
         if entry.get("sha256") != sha256_file(output):
             return False
+        build_id = entry.get("build_id")
+        if not isinstance(build_id, str):
+            return False
         missing = verify_symbols(output, list(contract["symbols"]))  # type: ignore[arg-type]
         if missing:
             return False
+        if verify_loaded_sidecar(output, build_id) is not None:
+            return False
     return True
+
+
+def sidecar_key(contracts: dict[str, dict[str, object]]) -> tuple[str, dict[str, str]]:
+    hashes = {name: input_hash(contract) for name, contract in sorted(contracts.items())}
+    payload = {
+        "schema_version": 1,
+        "platform": BUNDLE_PLATFORM,
+        "sidecar_abi": SIDECAR_ABI_VERSION,
+        "sidecars": hashes,
+    }
+    digest = sha256_bytes(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    return digest, hashes
+
+
+def bundle_filename(bundle_hash: str) -> str:
+    return f"krasis-sidecars-{BUNDLE_PLATFORM}-abi{SIDECAR_ABI_VERSION}-{bundle_hash}.tar.gz"
+
+
+def bundle_path(contracts: dict[str, dict[str, object]]) -> Path:
+    digest, _ = sidecar_key(contracts)
+    return BUNDLE_DIR / bundle_filename(digest)
+
+
+def extract_bundle(path: Path, contracts: dict[str, dict[str, object]]) -> None:
+    expected_names = {
+        f"krasis/{MARLIN_SO}",
+        f"krasis/{FLASH_ATTN_SO}",
+        "krasis/sidecar_manifest.json",
+    }
+    with tempfile.TemporaryDirectory(dir=path.parent) as tmpdir:
+        tmp = Path(tmpdir)
+        try:
+            with tarfile.open(path, "r:gz") as tf:
+                members = tf.getmembers()
+                names = {member.name for member in members}
+                missing = sorted(expected_names - names)
+                if missing:
+                    raise SystemExit(f"ERROR: sidecar bundle {path.name} missing {', '.join(missing)}")
+                for member in members:
+                    if member.name not in expected_names:
+                        raise SystemExit(f"ERROR: sidecar bundle {path.name} contains unexpected entry {member.name}")
+                    if not member.isfile():
+                        raise SystemExit(f"ERROR: sidecar bundle {path.name} contains non-file entry {member.name}")
+                tf.extractall(tmp)
+        except tarfile.TarError as exc:
+            raise SystemExit(f"ERROR: sidecar bundle {path.name} is not a valid tar.gz archive: {exc}") from exc
+
+        PACKAGE_DIR.mkdir(parents=True, exist_ok=True)
+        for name in expected_names:
+            src = tmp / name
+            dst = PACKAGE_DIR / Path(name).name
+            shutil.copy2(src, dst)
+
+    manifest = read_manifest()
+    if manifest is None or not manifest_matches(manifest, contracts):
+        raise SystemExit(f"ERROR: extracted sidecar bundle {path.name} failed manifest verification")
+
+
+def create_bundle(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    if tmp_path.exists():
+        tmp_path.unlink()
+    with tarfile.open(tmp_path, "w:gz") as tf:
+        for src, arcname in (
+            (PACKAGE_DIR / MARLIN_SO, f"krasis/{MARLIN_SO}"),
+            (PACKAGE_DIR / FLASH_ATTN_SO, f"krasis/{FLASH_ATTN_SO}"),
+            (MANIFEST_PATH, "krasis/sidecar_manifest.json"),
+        ):
+            if not src.exists():
+                raise SystemExit(f"ERROR: cannot bundle missing sidecar artifact {src}")
+            tf.add(src, arcname=arcname)
+    tmp_path.replace(path)
+
+
+def github_token() -> str:
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if not token:
+        raise SystemExit("ERROR: GH_TOKEN/GITHUB_TOKEN required for GitHub sidecar bundle access")
+    return token
+
+
+def github_repo() -> str:
+    repo = os.environ.get("KRASIS_GITHUB_REPOSITORY") or os.environ.get("GITHUB_REPOSITORY")
+    if not repo:
+        raise SystemExit("ERROR: KRASIS_GITHUB_REPOSITORY/GITHUB_REPOSITORY required for GitHub sidecar bundle access")
+    return repo
+
+
+def github_request(
+    method: str,
+    url: str,
+    token: str,
+    data: bytes | None = None,
+    content_type: str = "application/json",
+    accept: str = "application/vnd.github+json",
+) -> tuple[int, bytes]:
+    headers = {
+        "Accept": accept,
+        "Authorization": f"Bearer {token}",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if data is not None:
+        headers["Content-Type"] = content_type
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=GITHUB_TIMEOUT_SECONDS) as resp:
+            return int(resp.status), resp.read()
+    except urllib.error.HTTPError as exc:
+        return int(exc.code), exc.read()
+    except urllib.error.URLError as exc:
+        return 0, str(exc).encode("utf-8")
+
+
+def github_release_by_tag(token: str, repo: str, tag: str) -> dict[str, object] | None:
+    api = f"https://api.github.com/repos/{repo}/releases/tags/{urllib.parse.quote(tag)}"
+    status, body = github_request("GET", api, token)
+    if status == 200:
+        return json.loads(body.decode("utf-8"))
+    if status == 404:
+        return None
+    raise SystemExit(f"ERROR: failed to read GitHub release {tag}: HTTP {status}: {body.decode('utf-8', 'replace')}")
+
+
+def github_releases(token: str, repo: str) -> list[dict[str, object]]:
+    all_releases: list[dict[str, object]] = []
+    page = 1
+    while len(all_releases) < GITHUB_RELEASE_SEARCH_LIMIT:
+        url = f"https://api.github.com/repos/{repo}/releases?" + urllib.parse.urlencode({"per_page": 100, "page": page})
+        status, body = github_request("GET", url, token)
+        if status != 200:
+            raise SystemExit(f"ERROR: failed to list GitHub releases: HTTP {status}: {body.decode('utf-8', 'replace')}")
+        batch = json.loads(body.decode("utf-8"))
+        if not isinstance(batch, list) or not batch:
+            break
+        all_releases.extend(release for release in batch if isinstance(release, dict))
+        if len(batch) < 100:
+            break
+        page += 1
+    return all_releases[:GITHUB_RELEASE_SEARCH_LIMIT]
+
+
+def github_release_assets(token: str, release: dict[str, object]) -> list[dict[str, object]]:
+    assets = release.get("assets")
+    if isinstance(assets, list):
+        return [asset for asset in assets if isinstance(asset, dict)]
+    assets_url = release.get("assets_url")
+    if not isinstance(assets_url, str):
+        return []
+    all_assets: list[dict[str, object]] = []
+    page = 1
+    while True:
+        url = assets_url + "?" + urllib.parse.urlencode({"per_page": 100, "page": page})
+        status, body = github_request("GET", url, token)
+        if status != 200:
+            raise SystemExit(f"ERROR: failed to list sidecar bundle assets: HTTP {status}: {body.decode('utf-8', 'replace')}")
+        batch = json.loads(body.decode("utf-8"))
+        if not isinstance(batch, list) or not batch:
+            break
+        all_assets.extend(asset for asset in batch if isinstance(asset, dict))
+        if len(batch) < 100:
+            break
+        page += 1
+    return all_assets
+
+
+def github_asset(token: str, release: dict[str, object], name: str) -> dict[str, object] | None:
+    for asset in github_release_assets(token, release):
+        if asset.get("name") == name:
+            return asset
+    return None
+
+
+def download_github_bundle(name: str, dst: Path) -> bool:
+    token = github_token()
+    repo = github_repo()
+    asset = None
+    for release in github_releases(token, repo):
+        asset = github_asset(token, release, name)
+        if asset is not None:
+            tag = release.get("tag_name", "<unknown>")
+            print(f"[sidecars] found GitHub sidecar bundle {name} on release {tag}")
+            break
+    if asset is None:
+        print(f"[sidecars] GitHub sidecar bundle miss: {name}")
+        return False
+    url = asset.get("url")
+    if not isinstance(url, str):
+        raise SystemExit(f"ERROR: GitHub sidecar asset {name} has no API URL")
+    status, body = github_request("GET", url, token, accept="application/octet-stream")
+    if status != 200:
+        raise SystemExit(f"ERROR: failed to download GitHub sidecar bundle {name}: HTTP {status}: {body.decode('utf-8', 'replace')}")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_bytes(body)
+    print(f"[sidecars] downloaded GitHub sidecar bundle {name}")
+    return True
+
+
+def upload_github_bundle(path: Path) -> None:
+    token = github_token()
+    repo = github_repo()
+    tag = os.environ.get("KRASIS_GITHUB_UPLOAD_RELEASE_TAG") or os.environ.get("GITHUB_REF_NAME")
+    if not tag:
+        raise SystemExit("ERROR: KRASIS_GITHUB_UPLOAD_RELEASE_TAG/GITHUB_REF_NAME required to upload sidecar bundle")
+    release = github_release_by_tag(token, repo, tag)
+    if release is None:
+        raise SystemExit(f"ERROR: upload release {tag} not found; publish the release before uploading sidecar bundles")
+    if github_asset(token, release, path.name) is not None:
+        print(f"[sidecars] GitHub sidecar bundle already exists on {tag}: {path.name}")
+        return
+    upload_url = release.get("upload_url")
+    if not isinstance(upload_url, str):
+        raise SystemExit("ERROR: sidecar bundle release has no upload_url")
+    upload_url = upload_url.split("{", 1)[0] + "?" + urllib.parse.urlencode({"name": path.name})
+    status, body = github_request("POST", upload_url, token, path.read_bytes(), content_type="application/gzip")
+    if status not in (200, 201):
+        raise SystemExit(f"ERROR: failed to upload GitHub sidecar bundle {path.name}: HTTP {status}: {body.decode('utf-8', 'replace')}")
+    print(f"[sidecars] uploaded GitHub sidecar bundle {path.name}")
 
 
 def build(args: argparse.Namespace) -> None:
@@ -393,6 +643,12 @@ def build(args: argparse.Namespace) -> None:
     if not args.force and manifest is not None and manifest_matches(manifest, contracts):
         print("[sidecars] Marlin/FlashAttention sidecars are current")
         return
+    if not args.force:
+        cached_bundle = bundle_path(contracts)
+        if cached_bundle.exists():
+            extract_bundle(cached_bundle, contracts)
+            print(f"[sidecars] restored local sidecar bundle {cached_bundle.name}")
+            return
 
     start = time.monotonic()
     entries: dict[str, dict[str, object]] = {}
@@ -428,9 +684,15 @@ def build(args: argparse.Namespace) -> None:
         "sidecars": entries,
     }
     MANIFEST_PATH.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    current_manifest = read_manifest()
+    if current_manifest is None or not manifest_matches(current_manifest, contracts):
+        raise SystemExit("ERROR: built sidecars failed post-build manifest verification")
+    local_bundle = bundle_path(contracts)
+    create_bundle(local_bundle)
     elapsed = time.monotonic() - start
     print(f"KRASIS_BUILD_TIMING phase=\"sidecar build total\" duration_s={elapsed:.3f}")
     print(f"[sidecars] wrote {rel(MANIFEST_PATH)}")
+    print(f"[sidecars] packed {local_bundle}")
 
 
 def verify(args: argparse.Namespace) -> None:
@@ -509,6 +771,65 @@ def verify_wheel(args: argparse.Namespace) -> None:
         print(f"[sidecars] verified wheel {wheel.name}")
 
 
+def print_bundle_key(args: argparse.Namespace) -> None:
+    nvcc = find_nvcc()
+    contracts = sidecar_inputs(nvcc)
+    digest, hashes = sidecar_key(contracts)
+    payload = {
+        "bundle_hash": digest,
+        "bundle_name": bundle_filename(digest),
+        "bundle_path": str(bundle_path(contracts)),
+        "platform": BUNDLE_PLATFORM,
+        "sidecar_abi": SIDECAR_ABI_VERSION,
+        "sidecars": hashes,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(payload["bundle_name"])
+
+
+def restore_bundle(args: argparse.Namespace) -> None:
+    nvcc = find_nvcc()
+    contracts = sidecar_inputs(nvcc)
+    manifest = read_manifest()
+    if manifest is not None and manifest_matches(manifest, contracts):
+        print("[sidecars] package sidecars already match current bundle key")
+        return
+
+    path = bundle_path(contracts)
+    if not path.exists() and args.github:
+        download_github_bundle(path.name, path)
+    if not path.exists():
+        print(f"[sidecars] sidecar bundle miss: {path.name}")
+        raise SystemExit(2)
+
+    extract_bundle(path, contracts)
+    print(f"[sidecars] restored sidecar bundle {path.name}")
+
+
+def pack_bundle(args: argparse.Namespace) -> None:
+    nvcc = find_nvcc()
+    contracts = sidecar_inputs(nvcc)
+    manifest = read_manifest()
+    if manifest is None or not manifest_matches(manifest, contracts):
+        raise SystemExit("ERROR: sidecars are missing or stale; run ./dev build-sidecars before packing a bundle")
+    path = bundle_path(contracts)
+    create_bundle(path)
+    print(f"[sidecars] packed sidecar bundle {path}")
+
+
+def upload_bundle(args: argparse.Namespace) -> None:
+    nvcc = find_nvcc()
+    contracts = sidecar_inputs(nvcc)
+    manifest = read_manifest()
+    if manifest is None or not manifest_matches(manifest, contracts):
+        raise SystemExit("ERROR: sidecars are missing or stale; run ./dev build-sidecars before uploading a bundle")
+    path = bundle_path(contracts)
+    create_bundle(path)
+    upload_github_bundle(path)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -520,6 +841,16 @@ def main() -> None:
     p_wheel = sub.add_parser("verify-wheel")
     p_wheel.add_argument("--wheel-dir", required=True)
     p_wheel.set_defaults(func=verify_wheel)
+    p_key = sub.add_parser("bundle-key")
+    p_key.add_argument("--json", action="store_true")
+    p_key.set_defaults(func=print_bundle_key)
+    p_restore = sub.add_parser("restore-bundle")
+    p_restore.add_argument("--github", action="store_true")
+    p_restore.set_defaults(func=restore_bundle)
+    p_pack = sub.add_parser("pack-bundle")
+    p_pack.set_defaults(func=pack_bundle)
+    p_upload = sub.add_parser("upload-bundle")
+    p_upload.set_defaults(func=upload_bundle)
     args = parser.parse_args()
     args.func(args)
 

@@ -16,6 +16,10 @@ jobs:
 
       - name: Build wheels
         uses: PyO3/maturin-action@v1
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KRASIS_GITHUB_REPOSITORY: ${{ github.repository }}
+          KRASIS_GITHUB_UPLOAD_RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || '' }}
         with:
           target: x86_64
           args: --release --out dist -i python3.10 python3.11 python3.12 python3.13
@@ -98,10 +102,32 @@ jobs:
             krasis_phase_end 0
             krasis_phase_start "release Marlin/FlashAttention sidecars"
             # Marlin and FlashAttention are dlopened package sidecars, not Rust
-            # compile inputs. Build them once into python/krasis/ before maturin
-            # so every Python wheel packages the same manifest-verified files.
+            # compile inputs. Restore a content-addressed bundle when the
+            # sidecar source/toolchain hash matches a prior release; otherwise
+            # compile once and upload the verified bundle for future releases.
+            set +e
             PATH="/usr/local/cuda-12.6/bin:$PATH" KRASIS_DEV_SCRIPT=1 KRASIS_NVCC_CCBIN="$KRASIS_NVCC_CCBIN" \
-              /opt/python/cp312-cp312/bin/python scripts/build_sidecars.py build
+              /opt/python/cp312-cp312/bin/python scripts/build_sidecars.py restore-bundle --github
+            restore_status=$?
+            set -e
+            if [ "$restore_status" -eq 0 ]; then
+              echo "Restored verified Marlin/FlashAttention sidecar bundle."
+            elif [ "$restore_status" -eq 2 ]; then
+              echo "No matching sidecar bundle found; compiling Marlin/FlashAttention."
+              PATH="/usr/local/cuda-12.6/bin:$PATH" KRASIS_DEV_SCRIPT=1 KRASIS_NVCC_CCBIN="$KRASIS_NVCC_CCBIN" \
+                /opt/python/cp312-cp312/bin/python scripts/build_sidecars.py build
+              PATH="/usr/local/cuda-12.6/bin:$PATH" KRASIS_DEV_SCRIPT=1 KRASIS_NVCC_CCBIN="$KRASIS_NVCC_CCBIN" \
+                /opt/python/cp312-cp312/bin/python scripts/build_sidecars.py pack-bundle
+              if [ -n "${KRASIS_GITHUB_UPLOAD_RELEASE_TAG:-}" ]; then
+                PATH="/usr/local/cuda-12.6/bin:$PATH" KRASIS_DEV_SCRIPT=1 KRASIS_NVCC_CCBIN="$KRASIS_NVCC_CCBIN" \
+                  /opt/python/cp312-cp312/bin/python scripts/build_sidecars.py upload-bundle
+              else
+                echo "No release tag in this workflow context; skipping sidecar bundle upload."
+              fi
+            else
+              echo "ERROR: sidecar bundle restore failed with status $restore_status" >&2
+              exit "$restore_status"
+            fi
             PATH="/usr/local/cuda-12.6/bin:$PATH" KRASIS_DEV_SCRIPT=1 KRASIS_NVCC_CCBIN="$KRASIS_NVCC_CCBIN" \
               /opt/python/cp312-cp312/bin/python scripts/build_sidecars.py verify
             ls -la python/krasis/libkrasis_marlin.so python/krasis/libkrasis_flash_attn.so python/krasis/sidecar_manifest.json

@@ -16,6 +16,8 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from krasis.attention_backend import (
@@ -154,6 +156,46 @@ def _read_key() -> str:
             return KEY_ESCAPE
         else:
             return ch
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+
+def _read_key_timeout(timeout: float) -> Optional[str]:
+    """Read one keypress if available before timeout, otherwise return None."""
+    if not _HAS_TERMIOS:
+        return None
+    import select
+
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        readable, _writable, _error = select.select([sys.stdin], [], [], timeout)
+        if not readable:
+            return None
+        ch = sys.stdin.read(1)
+        if ch == "\x1b":
+            readable, _writable, _error = select.select([sys.stdin], [], [], 0.02)
+            if readable and sys.stdin.read(1) == "[":
+                readable, _writable, _error = select.select([sys.stdin], [], [], 0.02)
+                if readable:
+                    ch3 = sys.stdin.read(1)
+                    if ch3 == "A":
+                        return KEY_UP
+                    if ch3 == "B":
+                        return KEY_DOWN
+                    if ch3 == "C":
+                        return KEY_RIGHT
+                    if ch3 == "D":
+                        return KEY_LEFT
+            return KEY_ESCAPE
+        if ch in ("\r", "\n"):
+            return KEY_ENTER
+        if ch == "\x7f" or ch == "\x08":
+            return KEY_BACKSPACE
+        if ch == "\x03":
+            return KEY_ESCAPE
+        return ch
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
@@ -936,9 +978,6 @@ def _model_selection_screen(
 
     If preselected_path is given, the cursor starts on that model.
     """
-    if not models:
-        return None
-
     cursor = 0
     if preselected_path:
         for i, m in enumerate(models):
@@ -949,11 +988,19 @@ def _model_selection_screen(
     while True:
         _clear_screen()
         lines = []
-        lines.append(f"  {BOLD}Select a model:{NC}\n")
+        lines.append(f"  {BOLD}Models{NC}\n")
 
-        for i, m in enumerate(models):
+        rows: List[Dict[str, Any]] = [{"action": "download"}] + models
+        cursor = min(cursor, len(rows) - 1)
+
+        for i, row in enumerate(rows):
             prefix = f"  {CYAN}\u25b8{NC} " if i == cursor else "    "
             hl = BOLD if i == cursor else ""
+            if row.get("action") == "download":
+                lines.append(f"{prefix}{hl}Download model from Hugging Face{NC}")
+                lines.append(f"       {DIM}Search, paste a repo URL, login, then download to ~/.krasis/models{NC}")
+                continue
+            m = row
 
             expert_str = ""
             if m["experts"]:
@@ -968,18 +1015,18 @@ def _model_selection_screen(
             lines.append(f"{prefix}{hl}{m['name']}{NC}")
             lines.append(f"       {DIM}{m['arch']} | {m['layers']} layers | {expert_str}{ram_str}{NC}")
 
-        lines.append(f"\n  {DIM}[\u2191\u2193] Select  [Enter] Confirm  [q] Quit{NC}")
+        lines.append(f"\n  {DIM}[\u2191\u2193] Select  [Enter] Confirm  [Esc] Quit{NC}")
 
         sys.stdout.write("\n".join(lines) + "\n")
         sys.stdout.flush()
 
         key = _read_key()
         if key == KEY_UP:
-            cursor = (cursor - 1) % len(models)
+            cursor = (cursor - 1) % len(rows)
         elif key == KEY_DOWN:
-            cursor = (cursor + 1) % len(models)
+            cursor = (cursor + 1) % len(rows)
         elif key == KEY_ENTER:
-            return models[cursor]
+            return rows[cursor]
         elif key == KEY_QUIT or key == KEY_ESCAPE:
             return None
 
@@ -1097,7 +1144,7 @@ def _launch_mode_screen() -> Optional[str]:
 # Text/number editing overlay
 # ═══════════════════════════════════════════════════════════════════════
 
-def _edit_value(label: str, current: str, is_number: bool = False) -> str:
+def _edit_value(label: str, current: str, is_number: bool = False, secret: bool = False) -> str:
     """Inline edit: shows current value, user types new one."""
     buf = ""
 
@@ -1106,7 +1153,7 @@ def _edit_value(label: str, current: str, is_number: bool = False) -> str:
         lines = [
             f"  {BOLD}Edit: {label}{NC}\n",
             f"  Current: {DIM}{current}{NC}",
-            f"  New:     {buf}\u2588\n",
+            f"  New:     {('*' * len(buf)) if secret else buf}\u2588\n",
             f"  {DIM}[Enter] Confirm  [Esc] Cancel{NC}",
         ]
         sys.stdout.write("\n".join(lines) + "\n")
@@ -1611,6 +1658,307 @@ class Launcher:
         sys.stdout.flush()
         _read_key()
 
+    def _message_screen(self, title: str, lines: List[str], *, wait: bool = True) -> None:
+        _clear_screen()
+        out = [f"  {BOLD}{title}{NC}", ""]
+        out.extend(f"  {line}" for line in lines)
+        if wait:
+            out.extend(["", f"  {DIM}[Any key] Back{NC}"])
+        sys.stdout.write("\n".join(out) + "\n")
+        sys.stdout.flush()
+        if wait:
+            _read_key()
+
+    def _hf_auth_label(self) -> str:
+        from krasis.hf_downloader import hf_auth_status
+
+        try:
+            status = hf_auth_status()
+        except Exception:
+            return f"{YELLOW}HF auth unknown{NC}"
+        if not status.get("logged_in"):
+            return f"{DIM}not logged in{NC}"
+        user = status.get("user") or "authenticated"
+        if status.get("error"):
+            return f"{YELLOW}token present, verification failed{NC}"
+        return f"{GREEN}{user}{NC}"
+
+    def _hf_login_screen(self) -> None:
+        from krasis.hf_downloader import hf_login, hf_auth_status
+
+        try:
+            status = hf_auth_status()
+        except Exception as exc:
+            self._message_screen("Hugging Face login", [f"{RED}{exc}{NC}"])
+            return
+        current = "not logged in"
+        if status.get("logged_in"):
+            current = status.get("user") or "token present"
+        _show_cursor()
+        token = _edit_value("HF token", current, secret=True)
+        _hide_cursor()
+        if not token or token == current:
+            return
+        try:
+            logged_in = hf_login(token)
+        except Exception as exc:
+            self._message_screen("Hugging Face login", [f"{RED}Login failed: {exc}{NC}"])
+            return
+        self._message_screen(
+            "Hugging Face login",
+            [f"{GREEN}Logged in as {logged_in.get('user', 'authenticated')}{NC}"],
+        )
+
+    def _format_hf_candidate(self, candidate: Any) -> Tuple[str, str]:
+        from krasis.hf_downloader import format_bytes
+
+        status = []
+        if candidate.gated:
+            status.append("gated")
+        if candidate.private:
+            status.append("private")
+        if candidate.has_safetensors:
+            status.append("safetensors")
+        else:
+            status.append("no safetensors")
+        int4 = format_bytes(candidate.int4_payload_bytes)
+        size = format_bytes(candidate.selected_bytes or candidate.safetensors_total_bytes * 2)
+        meta = f"{candidate.pipeline_tag or 'model'} | {', '.join(status)}"
+        stats = f"{candidate.downloads:,} downloads | {candidate.likes:,} likes | updated {candidate.last_modified}"
+        line1 = f"{candidate.repo_id}"
+        line2 = f"{meta} | download {size} | INT4 RAM ~{int4} + metadata | {stats}"
+        return line1, line2
+
+    def _hf_results_screen(self, candidates: List[Any]) -> Optional[Any]:
+        if not candidates:
+            self._message_screen("Hugging Face search", [f"{YELLOW}No matching models found.{NC}"])
+            return None
+        cursor = 0
+        top = 0
+        while True:
+            _clear_screen()
+            height = shutil.get_terminal_size((100, 32)).lines
+            visible_count = max(4, min(10, (height - 8) // 3))
+            if cursor < top:
+                top = cursor
+            elif cursor >= top + visible_count:
+                top = cursor - visible_count + 1
+            visible = candidates[top:top + visible_count]
+            lines = [f"  {BOLD}Hugging Face results{NC}  {DIM}({len(candidates)} shown){NC}", ""]
+            for offset, candidate in enumerate(visible):
+                i = top + offset
+                prefix = f"  {CYAN}\u25b8{NC} " if i == cursor else "    "
+                hl = BOLD if i == cursor else ""
+                line1, line2 = self._format_hf_candidate(candidate)
+                lines.append(f"{prefix}{hl}{line1}{NC}")
+                lines.append(f"       {DIM}{candidate.summary}{NC}")
+                lines.append(f"       {DIM}{line2}{NC}")
+            lines.append("")
+            lines.append(f"  {DIM}[\u2191\u2193] Select  [Enter] Details  [Esc] Back{NC}")
+            sys.stdout.write("\n".join(lines) + "\n")
+            sys.stdout.flush()
+            key = _read_key()
+            if key == KEY_UP:
+                cursor = (cursor - 1) % len(candidates)
+            elif key == KEY_DOWN:
+                cursor = (cursor + 1) % len(candidates)
+            elif key == KEY_ENTER:
+                return candidates[cursor]
+            elif key in (KEY_ESCAPE, KEY_QUIT):
+                return None
+
+    def _hf_detail_screen(self, candidate: Any) -> bool:
+        from krasis.hf_downloader import destination_for_repo, format_bytes
+
+        cursor = 0
+        options = ["Download", "Back"]
+        dest = destination_for_repo(self.models_dir, candidate.repo_id)
+        while True:
+            _clear_screen()
+            line1, line2 = self._format_hf_candidate(candidate)
+            lines = [
+                f"  {BOLD}{candidate.repo_id}{NC}",
+                "",
+                f"  {DIM}{candidate.summary}{NC}",
+                f"  {line2}",
+                f"  Compatibility: {candidate.compatibility}",
+                f"  Files selected: {candidate.selected_file_count} "
+                f"({candidate.safetensors_file_count} safetensors)",
+                f"  Destination: {dest}",
+                "",
+                f"  {DIM}Krasis downloads safetensors/config/tokenizer files and skips GGUF/bin/checkpoints by default.{NC}",
+                f"  {DIM}INT4 RAM is estimated from remote safetensors metadata and excludes runtime headroom.{NC}",
+                "",
+            ]
+            if candidate.gated:
+                lines.append(f"  {YELLOW}This repo is gated; login is required and HF license access must already be accepted.{NC}")
+                lines.append("")
+            if not candidate.has_safetensors:
+                lines.append(f"  {RED}This repo does not expose safetensors metadata; Krasis cannot use it directly.{NC}")
+                lines.append("")
+            for i, label in enumerate(options):
+                prefix = f"  {CYAN}\u25b8{NC} " if i == cursor else "    "
+                hl = BOLD if i == cursor else ""
+                disabled = label == "Download" and not candidate.is_krasis_candidate
+                text = f"{DIM}{label}{NC}" if disabled else f"{hl}{label}{NC}"
+                lines.append(f"{prefix}{text}")
+            lines.append("")
+            lines.append(f"  {DIM}[\u2191\u2193] Select  [Enter] Confirm  [Esc] Back{NC}")
+            sys.stdout.write("\n".join(lines) + "\n")
+            sys.stdout.flush()
+            key = _read_key()
+            if key == KEY_UP:
+                cursor = (cursor - 1) % len(options)
+            elif key == KEY_DOWN:
+                cursor = (cursor + 1) % len(options)
+            elif key == KEY_ENTER:
+                if options[cursor] == "Back":
+                    return False
+                if candidate.is_krasis_candidate:
+                    return self._hf_download_progress(candidate, dest)
+                self._message_screen("Unsupported model", [candidate.compatibility])
+            elif key in (KEY_ESCAPE, KEY_QUIT):
+                return False
+
+    def _hf_download_progress(self, candidate: Any, dest: str) -> bool:
+        from krasis.hf_downloader import (
+            count_selected_local_bytes,
+            download_model,
+            format_bytes,
+            validate_local_model,
+        )
+
+        result: Dict[str, Any] = {"done": False, "error": None, "path": None}
+        selected = list(candidate.selected_files)
+        total = int(candidate.selected_bytes or 0)
+        start = time.time()
+
+        def worker() -> None:
+            try:
+                result["path"] = download_model(candidate.repo_id, dest)
+            except Exception as exc:
+                result["error"] = exc
+            finally:
+                result["done"] = True
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+        while not result["done"]:
+            done = count_selected_local_bytes(dest, selected)
+            elapsed = max(0.001, time.time() - start)
+            speed = done / elapsed
+            pct = min(1.0, done / total) if total > 0 else 0.0
+            bar_w = 34
+            filled = int(bar_w * pct)
+            bar = f"{GREEN}{'#' * filled}{NC}{DIM}{'-' * (bar_w - filled)}{NC}"
+            _clear_screen()
+            lines = [
+                f"  {BOLD}Downloading {candidate.repo_id}{NC}",
+                "",
+                f"  [{bar}] {pct * 100:5.1f}%" if total > 0 else "  Preparing download...",
+                f"  {format_bytes(done)} / {format_bytes(total)}  {DIM}{format_bytes(int(speed))}/s{NC}",
+                f"  Destination: {dest}",
+                "",
+                f"  {DIM}Downloads resume automatically if interrupted. Ctrl-C cancels the launcher process.{NC}",
+            ]
+            sys.stdout.write("\n".join(lines) + "\n")
+            sys.stdout.flush()
+            _read_key_timeout(0.5)
+
+        thread.join(timeout=0.1)
+        if result["error"]:
+            self._message_screen("Download failed", [f"{RED}{result['error']}{NC}"])
+            return False
+        issues = validate_local_model(dest)
+        if issues:
+            self._message_screen(
+                "Download completed with warnings",
+                [f"{YELLOW}{issue}{NC}" for issue in issues] + [f"Path: {dest}"],
+            )
+        else:
+            self._message_screen("Download complete", [f"{GREEN}Model saved to {dest}{NC}"])
+        return True
+
+    def _hf_downloader_screen(self) -> bool:
+        from krasis.hf_downloader import get_model_details, search_models
+
+        cursor = 0
+        options = [
+            ("Search Hugging Face", "Search public text-generation models"),
+            ("Paste HF URL / repo id", "Open a specific model page or repo id"),
+            ("HF login token", "Required for gated/private models and cleaner rate limits"),
+            ("Back", "Return to installed models"),
+        ]
+        while True:
+            _clear_screen()
+            lines = [
+                f"  {BOLD}Model downloader{NC}",
+                f"  Hugging Face: {self._hf_auth_label()}",
+                f"  Destination root: {self.models_dir}",
+                "",
+            ]
+            for i, (label, desc) in enumerate(options):
+                prefix = f"  {CYAN}\u25b8{NC} " if i == cursor else "    "
+                hl = BOLD if i == cursor else ""
+                lines.append(f"{prefix}{hl}{label}{NC}  {DIM}{desc}{NC}")
+            lines.append("")
+            lines.append(f"  {DIM}[\u2191\u2193] Select  [Enter] Confirm  [Esc] Back{NC}")
+            sys.stdout.write("\n".join(lines) + "\n")
+            sys.stdout.flush()
+            key = _read_key()
+            if key == KEY_UP:
+                cursor = (cursor - 1) % len(options)
+            elif key == KEY_DOWN:
+                cursor = (cursor + 1) % len(options)
+            elif key in (KEY_ESCAPE, KEY_QUIT):
+                return False
+            elif key == KEY_ENTER:
+                label = options[cursor][0]
+                if label == "Back":
+                    return False
+                if label == "HF login token":
+                    _show_cursor()
+                    self._hf_login_screen()
+                    _hide_cursor()
+                    continue
+                if label == "Search Hugging Face":
+                    _show_cursor()
+                    query = _edit_value("Search Hugging Face", "")
+                    _hide_cursor()
+                    if not query:
+                        continue
+                    self._message_screen("Hugging Face search", [f"Searching for {query!r}..."], wait=False)
+                    try:
+                        candidates = search_models(query, limit=20)
+                    except Exception as exc:
+                        self._message_screen("Hugging Face search", [f"{RED}{exc}{NC}"])
+                        continue
+                    selected = self._hf_results_screen(candidates)
+                    if not selected:
+                        continue
+                    self._message_screen("Hugging Face model", [f"Reading file metadata for {selected.repo_id}..."], wait=False)
+                    try:
+                        details = get_model_details(selected.repo_id)
+                    except Exception as exc:
+                        self._message_screen("Hugging Face model", [f"{RED}{exc}{NC}"])
+                        continue
+                    if self._hf_detail_screen(details):
+                        return True
+                elif label == "Paste HF URL / repo id":
+                    _show_cursor()
+                    repo = _edit_value("HF URL or repo id", "")
+                    _hide_cursor()
+                    if not repo:
+                        continue
+                    self._message_screen("Hugging Face model", [f"Reading file metadata for {repo}..."], wait=False)
+                    try:
+                        details = get_model_details(repo)
+                    except Exception as exc:
+                        self._message_screen("Hugging Face model", [f"{RED}{exc}{NC}"])
+                        continue
+                    if self._hf_detail_screen(details):
+                        return True
+
     def _cycle_value(self, opt: ConfigOption, direction: int) -> None:
         """Cycle a config value left/right."""
         val = getattr(self.cfg, opt.key)
@@ -1659,21 +2007,20 @@ class Launcher:
             self._read_model_info()
             print(f"Model: {self.cfg.model_path} (from --model-path)")
         else:
-            models = scan_models(self.models_dir, native_only=True)
-            if not models:
-                print(f"No native models found in {self.models_dir}", file=sys.stderr)
-                print(f"Download a model with: huggingface-cli download <model> --local-dir {self.models_dir}/<name>",
-                      file=sys.stderr)
-                return False
-
             _hide_cursor()
             try:
-                selected = _model_selection_screen(models, self.cfg.model_path)
+                while True:
+                    models = scan_models(self.models_dir, native_only=True)
+                    selected = _model_selection_screen(models, self.cfg.model_path)
+                    if selected is None:
+                        return False
+                    if selected.get("action") == "download":
+                        self._hf_downloader_screen()
+                        continue
+                    break
             finally:
                 _show_cursor()
 
-            if selected is None:
-                return False
             self.cfg.model_path = selected["path"]
             self.model_info = selected
 
@@ -2455,7 +2802,7 @@ def main():
             else:
                 print(f"Error: no --model-path given and no models in {launcher.models_dir}",
                       file=sys.stderr)
-                print(f"Download a model with: huggingface-cli download <model> --local-dir {launcher.models_dir}/<name>",
+                print("Run `krasis` interactively and choose Download model from Hugging Face.",
                       file=sys.stderr)
                 sys.exit(1)
 
