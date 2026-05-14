@@ -292,7 +292,7 @@ def _component_weight_bytes(params: int, quant: str, group_size: int = 128) -> i
     """Weight bytes for per-component quant ("int4", "int8", "awq", or "bf16")."""
     if quant.startswith("hqq"):
         raise ValueError(
-            f"HQQ attention bytes must come from validated artifacts, not estimates ({quant})."
+            f"HQQ attention bytes must use the dedicated HQQ layout estimator ({quant})."
         )
     if quant in ("int4", "awq"):
         # Marlin INT4 / AWQ estimate.
@@ -370,6 +370,150 @@ def _hqq_cache_manifest_and_layer_bytes(
     if legacy_manifest is not None and legacy_bytes is not None:
         return legacy_manifest, legacy_bytes
     return manifest, layer_bytes
+
+
+def _hqq_payload_bytes_for_shape(rows: int, cols: int, nbits: int, group_size: int) -> int:
+    rows = int(rows)
+    cols = int(cols)
+    nbits = int(nbits)
+    group_size = int(group_size)
+    groups = (cols + group_size - 1) // group_size
+    padded_cols = groups * group_size
+    if nbits == 4:
+        packed_cols = (padded_cols + 1) // 2
+    elif nbits == 6:
+        packed_cols = ((padded_cols + 3) // 4) * 3
+    elif nbits == 8:
+        packed_cols = padded_cols
+    else:
+        raise RuntimeError(f"Unsupported HQQ estimate nbits={nbits}")
+
+    packed = rows * packed_cols
+    scales = rows * groups * 4
+    zeros = rows * groups * 4
+    metadata = 5 * 4  # orig_shape[2], group_size, axis, nbits: all int32 tensors
+    return packed + scales + zeros + metadata
+
+
+def _hqq_attention_tensor_shapes_for_layer(cfg: Dict[str, Any], layer_type: str) -> list[tuple[str, int, int]]:
+    hidden = int(cfg["hidden_size"])
+    if layer_type == "linear_attention":
+        nk = int(cfg.get("linear_num_key_heads", 16))
+        nv = int(cfg.get("linear_num_value_heads", 32))
+        dk = int(cfg.get("linear_key_head_dim", 128))
+        dv = int(cfg.get("linear_value_head_dim", 128))
+        q_dim = nk * dk
+        k_dim = nk * dk
+        v_dim = nv * dv
+        z_dim = nv * dv
+        return [
+            ("in_proj_qkvz", q_dim + k_dim + v_dim + z_dim, hidden),
+            ("in_proj_ba", nv + nv, hidden),
+            ("out_proj", hidden, v_dim),
+        ]
+
+    if layer_type not in ("full_attention", "sliding_attention"):
+        return []
+
+    if _is_mla(cfg):
+        n_heads = int(cfg["num_attention_heads"])
+        q_lora = int(cfg.get("q_lora_rank", 0))
+        kv_lora = int(cfg["kv_lora_rank"])
+        qk_nope = int(cfg["qk_nope_head_dim"])
+        qk_rope = int(cfg["qk_rope_head_dim"])
+        v_head = int(cfg["v_head_dim"])
+        q_rows = n_heads * (qk_nope + qk_rope)
+        shapes: list[tuple[str, int, int]] = []
+        if q_lora:
+            shapes.append(("q_a_proj", q_lora, hidden))
+            shapes.append(("q_b_proj", q_rows, q_lora))
+        else:
+            shapes.append(("q_proj", q_rows, hidden))
+        shapes.append(("kv_a_proj_with_mqa", kv_lora + qk_rope, hidden))
+        shapes.append(("o_proj", hidden, n_heads * v_head))
+        return shapes
+
+    n_heads = int(cfg["num_attention_heads"])
+    n_kv_heads = int(cfg.get("num_key_value_heads", n_heads))
+    head_dim = int(cfg.get("head_dim", hidden // n_heads))
+    gated_attention = bool(
+        cfg.get(
+            "attn_output_gate",
+            cfg.get("model_type") in ("qwen3_next", "qwen3_5_moe_text"),
+        )
+    )
+    q_rows = n_heads * head_dim * (2 if gated_attention else 1)
+    kv_rows = n_kv_heads * head_dim
+    o_cols = n_heads * head_dim
+    return [
+        ("q_proj", q_rows, hidden),
+        ("k_proj", kv_rows, hidden),
+        ("v_proj", kv_rows, hidden),
+        ("o_proj", hidden, o_cols),
+        ("fused_qkv", q_rows + kv_rows + kv_rows, hidden),
+    ]
+
+
+def _layer_type_for_hqq_budget(cfg: Dict[str, Any], layer_idx: int) -> str:
+    layer_types = cfg.get("layer_types")
+    if isinstance(layer_types, list) and layer_idx < len(layer_types):
+        layer_type = str(layer_types[layer_idx])
+        if layer_type in ("full_attention", "sliding_attention", "linear_attention", "mamba2", "moe"):
+            return layer_type
+        if layer_type == "attention":
+            return "full_attention"
+
+    interval = int(cfg.get("full_attention_interval", 0) or 0)
+    if interval > 0:
+        return "full_attention" if (layer_idx + 1) % interval == 0 else "linear_attention"
+    return "full_attention"
+
+
+def _estimate_hqq_attention_layer_bytes(
+    cfg: Dict[str, Any],
+    attention_quant: str,
+    group_size: int,
+    budget_pct: Optional[float],
+) -> tuple[Dict[int, int], str]:
+    hqq_nbits = attention_quant_cache_nbits(attention_quant)
+    if hqq_nbits is None:
+        raise RuntimeError(f"attention_quant={attention_quant} is not an HQQ attention mode")
+
+    def tensor_bytes(shapes: list[tuple[str, int, int]], nbits_for_name) -> int:
+        total = 0
+        for tensor_name, rows, cols in shapes:
+            total += _hqq_payload_bytes_for_shape(rows, cols, int(nbits_for_name(tensor_name)), group_size)
+        return total
+
+    per_layer: Dict[int, int] = {}
+    num_layers = int(cfg["num_hidden_layers"])
+    for layer_idx in range(num_layers):
+        shapes = _hqq_attention_tensor_shapes_for_layer(
+            cfg,
+            _layer_type_for_hqq_budget(cfg, layer_idx),
+        )
+        if not shapes:
+            per_layer[layer_idx] = 0
+            continue
+
+        if attention_quant == "hqq46":
+            per_layer[layer_idx] = tensor_bytes(shapes, hqq46_tensor_nbits)
+        elif is_hqq_auto_attention(attention_quant):
+            direct_nbits = hqq_auto_direct_edge_nbits(attention_quant, budget_pct)
+            if direct_nbits is not None:
+                per_layer[layer_idx] = tensor_bytes(shapes, lambda _name: direct_nbits)
+            else:
+                policy = hqq_auto_promotion_policy(attention_quant)
+                base_nbits = int(policy["base_nbits"])
+                promoted_nbits = int(policy["promoted_nbits"])
+                base_bytes = tensor_bytes(shapes, lambda _name: base_nbits)
+                promoted_bytes = tensor_bytes(shapes, lambda _name: promoted_nbits)
+                pct = float(budget_pct if budget_pct is not None else 0.0) / 100.0
+                per_layer[layer_idx] = base_bytes + int((promoted_bytes - base_bytes) * pct)
+        else:
+            per_layer[layer_idx] = tensor_bytes(shapes, lambda _name: hqq_nbits)
+
+    return per_layer, f"estimated from model dimensions ({attention_quant}, group_size={int(group_size)})"
 
 
 def _derive_hqq46_layer_bytes_from_edges(
@@ -508,11 +652,12 @@ def _hqq_attention_layer_bytes_for_budget(
             source = "derived from validated HQQ4 + HQQ6 artifacts"
         return derived_bytes, source
 
-    expected_dir = hqq_attention_cache_dir(model_path, cache_profile, nbits=hqq_nbits, group_size=group_size)
-    raise RuntimeError(
-        f"attention_quant={attention_quant} requires a complete validated HQQ artifact set. "
-        "No HQQ VRAM estimate is allowed before "
-        f"{expected_dir} is complete, unless the mode can be derived from complete validated edge caches."
+    cfg = _read_model_config(model_path)
+    return _estimate_hqq_attention_layer_bytes(
+        cfg,
+        attention_quant,
+        group_size,
+        budget_pct,
     )
 
 
@@ -590,9 +735,9 @@ def compute_launcher_budget(
     # Pre-compute hybrid layer types
     full_attn_interval = cfg.get("full_attention_interval", 0)
 
-    # Linear attention estimates are only used when attention bytes are computed
-    # from model dimensions. HQQ bytes must come from validated per-layer
-    # artifacts, loaded below, so do not estimate HQQ linear-attention layers.
+    # Linear attention estimates are only used by non-HQQ component estimates.
+    # HQQ uses the dedicated artifact-layout estimator below so packed payload
+    # and scale/zero metadata are counted correctly.
     linear_attn_bpl = (
         _linear_attention_bytes_per_layer(cfg, attention_quant)
         if hybrid and not attention_quant.startswith("hqq")

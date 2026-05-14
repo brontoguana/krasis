@@ -1,5 +1,58 @@
 # Krasis Benchmark Results
 
+## Standard Benchmarks - 2026-05-13 (Local RTX A4500)
+
+Hardware: EPYC 7742, 1007 GB RAM, selected physical GPU1 RTX A4500 20 GB
+(Ampere, compute capability 8.6, PCIe Gen4 x16 max). Timing instrumentation was
+disabled. The benchmark process ran with `CFG_SELECTED_GPUS="1"`, so process
+`cuda:0` maps to the physical A4500. The 600 MB row includes the benchmark
+report GPU-label fix and reports `GPU 0 (physical 1): NVIDIA RTX A4500`.
+
+| Model / run | Command | Attention | KV | Prefill (tok/s) | Decode (tok/s) | Round trip (tok/s) | HCS | Min free VRAM | Logs |
+|-------------|---------|-----------|----|----------------:|---------------:|-------------------:|-----|--------------:|------|
+| Qwen3-Coder-Next local RTX A4500 HQQ6 stage-split HCS safety 600 | `./dev benchmark tests/qcn-a4500-hqq6-benchmark.conf` after decode/prefill HCS budget split | HQQ6 | k4v4 | 1569.5 | 34.69 | 60.47 | 8100/24576 (33.0%) | 664 MB | [full log](20260513_qcn_a4500_hqq6_stage_split_benchmark.log), [report](20260513_qcn_a4500_hqq6_stage_split_benchmark_report.log), [server log](20260513_qcn_a4500_hqq6_stage_split_krasis.log) |
+| Qwen3.5-35B-A3B local RTX A4500 HQQ6 stage-split HCS safety 600 | `./dev benchmark tests/q35b-a4500-hqq6-benchmark.conf` after decode/prefill HCS budget split | HQQ6 | fp8 | 2252.7 | 49.98 | 101.84 | 8100/10240 (79.1%) | 702 MB | [full log](20260513_q35_a4500_hqq6_stage_split_benchmark.log), [report](20260513_q35_a4500_hqq6_stage_split_benchmark_report.log), [server log](20260513_q35_a4500_hqq6_stage_split_krasis.log) |
+| Qwen3.5-35B-A3B local RTX A4500 HQQ6 safety 600 pre-stage-split | `./dev benchmark tests/q35b-a4500-hqq6-benchmark.conf` | HQQ6 | fp8 | 2264.5 | 49.33 | 95.36 | 7150/10240 (69.8%) | 1996 MB | [full log](20260513_q35_a4500_hqq6_safety600_benchmark.log), [report](20260513_q35_a4500_hqq6_safety600_benchmark_report.log), [server log](20260513_q35_a4500_hqq6_safety600_krasis.log) |
+| Qwen3.5-35B-A3B local RTX A4500 HQQ6 safety 3000 | `./dev benchmark tests/q35b-a4500-hqq6-benchmark.conf` at safety `3000` | HQQ6 | fp8 | 2417.7 | 47.07 | 84.25 | 5600/10240 (54.7%) | 4418 MB | [full log](20260513_q35_a4500_hqq6_benchmark.log), [report](20260513_q35_a4500_hqq6_benchmark_report.log), [server log](20260513_q35_a4500_hqq6_krasis.log) |
+
+Qwen3.5 calibration:
+- Short probe: `500` prompt tokens, baseline `13510 MB`, prefill post-alloc
+  `12604 MB`, prefill min `11900 MB`, decode min `13438 MB`.
+- Long probe: `39920` prompt tokens, baseline `13438 MB`, prefill post-alloc
+  `3286 MB`, prefill min `2902 MB`, decode min `13428 MB`.
+
+Notes:
+- The QCN run used an active HQQ6/k4v4 benchmark profile bound to physical GPU1
+  with `CFG_VRAM_SAFETY_MARGIN="600"`. Startup loaded `8250/24576` soft
+  experts (`33.6%`) and the benchmark ended at `8100/24576` (`33.0%`) with a
+  `664 MB` decode low-water. No `below-vram-safety-limit.log` was produced and
+  no `VRAM MONITOR` warning was found in the archived logs.
+- QCN calibration: short probe baseline `13670 MB`, prefill post/min
+  `12402/11794 MB`, decode min `13620 MB`; long probe baseline `13620 MB`,
+  prefill post/min `5274/3834 MB`, decode min `13618 MB`. Stage-split budgets:
+  decode HCS `12968 MB`, prefill short/long `11142/3232 MB`.
+- Reducing the safety margin from `3000 MB` to the default `600 MB` increased
+  resident HCS from `5600/10240` (`54.7%`) to `7150/10240` (`69.8%`) and
+  improved internal decode from `47.07` to `49.33 tok/s`. No
+  `below-vram-safety-limit.log` was produced and no `VRAM MONITOR` warning was
+  found in the archived 600 MB logs.
+- Splitting decode-resident HCS from prefill HCS budgets raised resident HCS to
+  `8100/10240` (`79.1%`) and lowered decode low-water to `702 MB`, close to the
+  configured `600 MB` safety margin. The run produced no
+  `below-vram-safety-limit.log` and no `VRAM MONITOR` warning.
+- The run completed startup calibration, heatmap, warmup, 1K/5K/10K/20K/35K/50K
+  prefill, internal decode, and HTTP round-trip rows with no VRAM hard-floor
+  exit.
+- The safety 3000 benchmark used the conservative margin from the initial test.
+  Long calibration low-water was just under that target (`2902 MB`), but the
+  decode benchmark low-water stayed higher at `4418 MB`.
+- Timed prefill peaked at the 20K row (`2417.7 tok/s`); the 50K row completed
+  at `2208.5 tok/s`.
+- With safety 600, timed prefill peaked at the 35K row (`2264.5 tok/s`); the
+  50K row completed at `2191.8 tok/s`.
+
+---
+
 ## Standard Benchmarks - 2026-05-11 (Typhon resident-HCS and scratch budget rc17)
 
 Hardware: Ryzen 9 5900X, 117 GB RAM, RTX 5080 16 GB under WSL.

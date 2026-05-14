@@ -1635,12 +1635,13 @@ def main():
     decode_short_free = max(0, post_calibration_free_mb - short_decode_delta)
     decode_long_free = max(0, post_calibration_free_mb - long_decode_delta)
 
-    # GPU0 HCS is fully reclaimable. Load only what the measured runtime can
-    # hold while preserving both the short decode floor and the short prefill
-    # floor. Decode-only capacity can be optimistic for the server-ready idle
-    # state because the next request still needs room for prompt setup/prefill
-    # before per-request eviction can make progress.
-    reclaimable_hcs_budget = max(0, min(decode_short_free, prefill_short_free) - SAFETY_MARGIN_MB)
+    # GPU0 HCS is fully reclaimable. Prefill and decode are separate runtime
+    # stages: the decode-resident HCS pool is sized from measured decode VRAM,
+    # while the prefill path evicts soft HCS back to the measured prefill floor
+    # before allocating scratch for each request.
+    decode_hcs_budget = max(0, decode_short_free - SAFETY_MARGIN_MB)
+    prefill_short_hcs_budget = max(0, prefill_short_free - SAFETY_MARGIN_MB)
+    prefill_long_hcs_budget = max(0, prefill_long_free - SAFETY_MARGIN_MB)
 
     vram_monitor.report_event("calibration_end")
     _status("VRAM calibration complete")
@@ -1650,11 +1651,16 @@ def main():
         f"long prefill={long_prefill_delta:,} MB, short decode={short_decode_delta:,} MB, "
         f"long decode={long_decode_delta:,} MB"
     )
-    _detail(f"GPU0 reclaimable HCS budget: {reclaimable_hcs_budget:,} MB")
+    _detail(f"GPU0 decode HCS budget: {decode_hcs_budget:,} MB")
+    _detail(
+        f"Prefill HCS budgets: short={prefill_short_hcs_budget:,} MB, "
+        f"long={prefill_long_hcs_budget:,} MB"
+    )
     _detail(f"Worst-case prefill scratch reservation: {max_scratch_mb:,} MB at {max_scratch_tokens:,} tokens")
     logger.info(
-        "VRAM calibration: post_free=%d MB, short=%dtok, long=%dtok, gpu0_reclaimable=%d MB, max_scratch=%d MB",
-        post_calibration_free_mb, short_tokens, long_tokens, reclaimable_hcs_budget, max_scratch_mb,
+        "VRAM calibration: post_free=%d MB, short=%dtok, long=%dtok, gpu0_decode_hcs=%d MB, prefill_short_hcs=%d MB, prefill_long_hcs=%d MB, max_scratch=%d MB",
+        post_calibration_free_mb, short_tokens, long_tokens, decode_hcs_budget,
+        prefill_short_hcs_budget, prefill_long_hcs_budget, max_scratch_mb,
     )
     if startup_diag and _env_flag("KRASIS_STARTUP_EXIT_AFTER_CALIBRATION"):
         _status("Startup diagnostic exit")
@@ -1745,11 +1751,12 @@ def main():
         last_gpu_base_overhead = last_gpu_base_overhead_bytes / (1024 * 1024)
 
         # Compute HCS budget for each GPU.
-        # GPU0: total reclaimable resident HCS budget.
+        # GPU0: decode-resident HCS budget. Soft HCS is evicted per request
+        # to satisfy measured prefill requirements.
         # Aux GPUs: total VRAM - attention cost - overhead - safety margin.
         # We iterate to find self-consistent splits where each GPU's layer assignment
         # matches its available HCS budget proportionally.
-        gpu0_hcs_total = reclaimable_hcs_budget
+        gpu0_hcs_total = decode_hcs_budget
         num_aux = num_gpus_available - 1
         aux_totals = [vram_monitor.total_mb(device_indices[i + 1]) for i in range(num_aux)]
 
@@ -1959,7 +1966,7 @@ def main():
             # and include unranked experts to fill remaining VRAM (better than empty slots).
             gpu0_ranking = ranking
             gpu0_hard = 0
-            gpu0_soft = reclaimable_hcs_budget
+            gpu0_soft = decode_hcs_budget
             if _multi_gpu_split > 0:
                 gpu0_ranking = (
                     _heuristic_ranking_for_layers(0, _multi_gpu_split)

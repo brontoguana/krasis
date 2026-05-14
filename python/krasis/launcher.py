@@ -1513,8 +1513,9 @@ class Launcher:
                 f"System RAM {GREEN}{peak_ram_gb:.1f} GB{NC} / {sys_ram_gb:.0f} GB"
             )
             hqq_source = b.get("hqq_budget_source")
-            if isinstance(hqq_source, str) and hqq_source.startswith(("derived ", "legacy ")):
-                lines.append(f"    {DIM}Attention budget: {hqq_source.split(' from ', 1)[0]}{NC}")
+            if isinstance(hqq_source, str) and hqq_source.startswith(("derived ", "legacy ", "estimated ")):
+                source_label = hqq_source if hqq_source.startswith("estimated ") else hqq_source.split(" from ", 1)[0]
+                lines.append(f"    {DIM}Attention budget: {source_label}{NC}")
             lines.append(f"    {DIM}~{_format_tokens(kv_alloc_tokens)} tokens {kv_label} KV{NC}")
             free_after_kv = rank.get("free_after_kv_mb", rank["free_mb"])
             if free_after_kv < 0:
@@ -1943,8 +1944,9 @@ class Launcher:
                 f"  Estimated peak: {peak_vram_mb:,} MB VRAM / {peak_ram_gb:.1f} GB system RAM"
             )
             hqq_source = budget.get("hqq_budget_source")
-            if isinstance(hqq_source, str) and hqq_source.startswith(("derived ", "legacy ")):
-                print(f"  Attention budget: {hqq_source.split(' from ', 1)[0]}")
+            if isinstance(hqq_source, str) and hqq_source.startswith(("derived ", "legacy ", "estimated ")):
+                source_label = hqq_source if hqq_source.startswith("estimated ") else hqq_source.split(" from ", 1)[0]
+                print(f"  Attention budget: {source_label}")
         elif self.budget_error:
             print(f"\n  Budget unavailable: {self.budget_error.splitlines()[0]}")
         print()

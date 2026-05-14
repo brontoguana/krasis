@@ -125,19 +125,46 @@ class KrasisBenchmark:
 
         try:
             result = subprocess.run(
-                ["nvidia-smi", "--query-gpu=index,name,memory.total",
+                ["nvidia-smi", "--query-gpu=index,name,memory.total,uuid",
                  "--format=csv,noheader,nounits"],
                 capture_output=True, text=True, timeout=5,
             )
+            physical_gpus = []
             if result.returncode == 0 and result.stdout.strip():
                 for line in result.stdout.strip().split("\n"):
                     parts = [p.strip() for p in line.split(",")]
-                    if len(parts) >= 3:
-                        info["gpus"].append({
-                            "index": int(parts[0]),
+                    if len(parts) >= 4:
+                        physical_gpus.append({
+                            "physical_index": int(parts[0]),
                             "name": parts[1],
                             "vram_mb": int(parts[2]),
+                            "uuid": parts[3],
                         })
+
+            visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+            if visible:
+                by_index = {str(g["physical_index"]): g for g in physical_gpus}
+                by_uuid = {g["uuid"]: g for g in physical_gpus}
+                for local_index, token in enumerate(
+                    t.strip() for t in visible.split(",") if t.strip()
+                ):
+                    physical = by_index.get(token) or by_uuid.get(token)
+                    if physical is None:
+                        continue
+                    info["gpus"].append({
+                        "index": local_index,
+                        "physical_index": physical["physical_index"],
+                        "name": physical["name"],
+                        "vram_mb": physical["vram_mb"],
+                    })
+            else:
+                for physical in physical_gpus:
+                    info["gpus"].append({
+                        "index": physical["physical_index"],
+                        "physical_index": physical["physical_index"],
+                        "name": physical["name"],
+                        "vram_mb": physical["vram_mb"],
+                    })
         except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
             pass
 
@@ -660,7 +687,12 @@ class KrasisBenchmark:
                 if vu["index"] == gpu["index"]:
                     alloc = f"{vu['allocated_mb']} MB allocated"
                     break
-            lines.append(f"  GPU {gpu['index']}:          {gpu['name']} ({gpu['vram_mb']} MB), {alloc}")
+            physical_index = gpu.get("physical_index", gpu["index"])
+            if physical_index != gpu["index"]:
+                gpu_label = f"GPU {gpu['index']} (physical {physical_index})"
+            else:
+                gpu_label = f"GPU {gpu['index']}"
+            lines.append(f"  {gpu_label + ':':<16s} {gpu['name']} ({gpu['vram_mb']} MB), {alloc}")
 
         # Quantization
         lines.append("")

@@ -416,7 +416,7 @@ dependencies = [
 
 [[package]]
 name = "krasis"
-version = "0.1.66-rc19"
+version = "0.1.66-rc20"
 dependencies = [
  "cc",
  "cudarc",
