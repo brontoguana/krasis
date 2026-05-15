@@ -166,12 +166,22 @@ class HFModelCandidate:
 def _require_hf():
     try:
         from huggingface_hub import HfApi, HfFolder, get_token, login, snapshot_download
-        from huggingface_hub.errors import GatedRepoError, HfHubHTTPError, RepositoryNotFoundError
     except ImportError as exc:
         raise RuntimeError(
             "huggingface_hub is required for the model downloader. "
             "Install a current Krasis wheel or run ./dev build."
         ) from exc
+    try:
+        from huggingface_hub.errors import GatedRepoError, HfHubHTTPError, RepositoryNotFoundError
+    except ImportError:
+        try:
+            from huggingface_hub.utils import HfHubHTTPError
+            from huggingface_hub.utils import GatedRepoError, RepositoryNotFoundError
+        except ImportError as exc:
+            raise RuntimeError(
+                "The installed huggingface_hub package is too old for the model downloader. "
+                "Upgrade Hugging Face Hub in the Krasis environment."
+            ) from exc
     return HfApi, HfFolder, get_token, login, snapshot_download, GatedRepoError, HfHubHTTPError, RepositoryNotFoundError
 
 

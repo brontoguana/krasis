@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "krasis"
-version = "0.1.66-rc27"
+version = "0.1.66-rc28"
 description = "Hybrid LLM runtime — minimal VRAM, always-on GPU prefill, optimised CPU inference"
 license = {text = "SSPL-1.0"}
 requires-python = ">=3.10"
@@ -25,7 +25,7 @@ dependencies = [
     "safetensors>=0.4",
     "numpy>=1.24",
     "transformers>=4.40",
-    "huggingface_hub>=0.24",
+    "huggingface-hub>=0.24",
 ]
 
 [project.optional-dependencies]

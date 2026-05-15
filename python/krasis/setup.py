@@ -537,84 +537,6 @@ def _install_gpu_packages():
     print(f"  {GREEN}Marlin GEMM kernels are vendored in libkrasis_marlin.so (no pip install needed).{NC}")
     return True
 
-    print(f"  {GREEN}GPU packages installed.{NC}")
-    return True
-
-
-def _install_session_deps():
-    """Optionally install Node.js and Bun for Session messenger integration."""
-    print(f"\n{BOLD}Step 4: Session Messenger (optional){NC}")
-
-    # Ask user
-    print(f"  Session messenger lets you chat with your Krasis server")
-    print(f"  from the Session app on any device.")
-    print(f"  Requires Node.js and Bun (will be installed if missing).\n")
-    try:
-        answer = input(f"  Set up Session messenger support? [y/N] ").strip()
-    except (EOFError, KeyboardInterrupt):
-        answer = ""
-    if not answer.lower().startswith("y"):
-        print(f"  {DIM}Skipped. You can re-run krasis-setup later to add it.{NC}")
-        return None  # skipped
-
-    sudo = [] if os.geteuid() == 0 else ["sudo"]
-    distro, _ = _detect_distro()
-    ok = True
-
-    # Install Node.js if missing
-    if not shutil.which("node"):
-        print(f"  {YELLOW}Node.js not found. Installing...{NC}")
-        if distro == "debian":
-            _run(sudo + ["apt-get", "update", "-qq"], check=False)
-            ret = _run(sudo + ["apt-get", "install"] + _pkg_flag() + ["nodejs", "npm"], check=False)
-        elif distro == "rhel":
-            ret = _run(sudo + ["dnf", "install"] + _pkg_flag() + ["nodejs", "npm"], check=False)
-        else:
-            ret = type("R", (), {"returncode": 1})()
-        if ret.returncode != 0:
-            print(f"  {RED}Failed to install Node.js. Install manually: https://nodejs.org{NC}")
-            ok = False
-        elif shutil.which("node"):
-            print(f"  {GREEN}Node.js installed.{NC}")
-        else:
-            print(f"  {YELLOW}Node.js still not found on PATH.{NC}")
-            ok = False
-    else:
-        print(f"  {GREEN}Node.js already installed.{NC}")
-
-    # Install Bun if missing
-    if not shutil.which("bun"):
-        print(f"  Installing Bun...")
-        # Bun's installer requires unzip — install it if missing (common on fresh WSL2)
-        if not shutil.which("unzip"):
-            if distro == "debian":
-                _run(sudo + ["apt-get", "install"] + _pkg_flag() + ["unzip"], check=False)
-            elif distro == "rhel":
-                _run(sudo + ["dnf", "install"] + _pkg_flag() + ["unzip"], check=False)
-        # Bun's official installer doesn't need sudo — installs to ~/.bun
-        ret = _run(["bash", "-c", "curl -fsSL https://bun.sh/install | bash"], check=False)
-        if ret.returncode != 0:
-            print(f"  {RED}Failed to install Bun. Install manually: https://bun.sh{NC}")
-            ok = False
-        else:
-            # Add bun to PATH for this session
-            bun_bin = os.path.expanduser("~/.bun/bin")
-            if os.path.isdir(bun_bin) and bun_bin not in os.environ.get("PATH", ""):
-                os.environ["PATH"] = bun_bin + ":" + os.environ.get("PATH", "")
-            if shutil.which("bun"):
-                print(f"  {GREEN}Bun installed.{NC}")
-            else:
-                print(f"  {YELLOW}Bun installed but not on PATH. Restart your terminal.{NC}")
-                ok = False
-    else:
-        print(f"  {GREEN}Bun already installed.{NC}")
-
-    if ok:
-        print(f"  {GREEN}Session messenger dependencies ready.{NC}")
-        print(f"  Enable it in the Krasis TUI (Options > Session messenger)")
-        print(f"  or with --session-enabled on the command line.")
-    return ok
-
 
 def main():
     global _auto_approve
@@ -683,9 +605,6 @@ def main():
     # Step 3: GPU packages
     results["packages"] = _install_gpu_packages()
 
-    # Step 4: Session messenger (optional)
-    results["session"] = _install_session_deps()
-
     # Summary
     print(f"\n{DIM}{'─' * 50}{NC}")
     print(f"{BOLD}Summary:{NC}")
@@ -697,8 +616,7 @@ def main():
         else:
             print(f"  {DIM}–{NC} {name} (skipped)")
 
-    required = {k: v for k, v in results.items() if k != "session"}
-    if all(v is True for v in required.values()):
+    if all(v is True for v in results.values()):
         print(f"\n{GREEN}{BOLD}Setup complete! Run 'krasis' to start.{NC}\n")
     else:
         print(f"\n{YELLOW}Some steps failed. See above for details.{NC}\n")

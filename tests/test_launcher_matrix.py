@@ -171,6 +171,7 @@ class LauncherMatrixTest(unittest.TestCase):
             self.assertEqual(values.get("CFG_FORCE_REBUILD_CACHE"), "1")
             self.assertEqual(values.get("CFG_FORCE_REBUILD_HQQ_CACHE"), "1")
             self.assertEqual(values.get("CFG_BUILD_CACHE"), "1")
+            self.assertEqual(values.get("CFG_SSH_TUNNEL"), "")
 
             loaded = LauncherConfig()
             loaded.apply_saved(launcher_mod._load_config(str(path)))
@@ -178,6 +179,7 @@ class LauncherMatrixTest(unittest.TestCase):
             self.assertTrue(loaded.force_rebuild_cache)
             self.assertTrue(loaded.force_rebuild_hqq_cache)
             self.assertTrue(loaded.build_cache)
+            self.assertEqual(loaded.ssh_tunnel, "")
         finally:
             path.unlink(missing_ok=True)
 
@@ -254,7 +256,6 @@ class LauncherMatrixTest(unittest.TestCase):
         cfg.dynamic_hcs = False
         cfg.dynamic_hcs_tail_blocks = 5
         cfg.enable_thinking = False
-        cfg.session_enabled = True
         cfg.force_load = True
         cfg.force_rebuild_cache = True
         cfg.force_rebuild_hqq_cache = True
@@ -267,7 +268,6 @@ class LauncherMatrixTest(unittest.TestCase):
                 "CFG_DYNAMIC_HCS": "0",
                 "CFG_DYNAMIC_HCS_TAIL_BLOCKS": "5",
                 "CFG_ENABLE_THINKING": "0",
-                "CFG_SESSION_ENABLED": "1",
                 "CFG_FORCE_LOAD": "1",
                 "CFG_FORCE_REBUILD_CACHE": "1",
                 "CFG_FORCE_REBUILD_HQQ_CACHE": "1",
@@ -277,7 +277,6 @@ class LauncherMatrixTest(unittest.TestCase):
                 "attention_quant = 'bf16'",
                 "dynamic_hcs = False",
                 "enable_thinking = False",
-                "session_enabled = True",
             ],
             {"CFG_HQQ_AUTO_BUDGET_PCT", "CFG_HQQ46_AUTO_BUDGET_MB", "CFG_HQQ_SIDECAR_MANIFEST"},
         ))
@@ -289,6 +288,7 @@ class LauncherMatrixTest(unittest.TestCase):
         cfg.expert_group_size = 64
         cfg.vram_safety_margin = 900
         cfg.port = 65_502
+        cfg.ssh_tunnel = "alice@example.com:2222"
         scenarios.append((
             "hqq8_two_gpu_shape",
             cfg,
@@ -300,12 +300,14 @@ class LauncherMatrixTest(unittest.TestCase):
                 "CFG_EXPERT_GROUP_SIZE": "64",
                 "CFG_VRAM_SAFETY_MARGIN": "900",
                 "CFG_PORT": "65502",
+                "CFG_SSH_TUNNEL": "alice@example.com:2222",
             },
             [
                 "attention_quant = 'hqq8'",
                 "num_gpus = 2",
                 "selected_gpus = '0,1'",
                 "expert_group_size = 64",
+                "ssh_tunnel = 'alice@example.com:2222'",
             ],
             {"CFG_HQQ_AUTO_BUDGET_PCT", "CFG_HQQ46_AUTO_BUDGET_MB", "CFG_HQQ_SIDECAR_MANIFEST"},
         ))

@@ -906,7 +906,6 @@ do_release_test() {
 }
 
 do_release_test_all() {
-    local SESSION_WS="Release Test"
     local release_target="${1:-}"
     local MODELS=(
         "Qwen3-Coder-Next"
@@ -944,7 +943,6 @@ do_release_test_all() {
 
             if [[ $skipped -eq $total ]]; then
                 ok "All models already passed for release target '$release_target'. Nothing to do."
-                session-send "$SESSION_WS" "release-test-all '$release_target': all $total models already passed. Nothing to do." 2>/dev/null || true
                 return 0
             fi
 
@@ -979,15 +977,12 @@ do_release_test_all() {
     launcher_run_dir=$(create_run_dir "release-test-all-launcher-matrix")
     run_launcher_matrix_test "$launcher_run_dir" "release-test-all-launcher-matrix"
 
-    # Session start message
     if $resuming; then
-        session-send "$SESSION_WS" "Resuming release-test-all '$release_target': $skipped/$total already passed, $(( total - skipped )) remaining.
-Models: $(printf '%s, ' "${MODELS[@]}" | sed 's/, $//')" 2>/dev/null || warn "Could not send Session message"
+        info "Resuming release-test-all '$release_target': $skipped/$total already passed, $(( total - skipped )) remaining."
     else
         local target_info=""
         [[ -n "$release_target" ]] && target_info=" ($release_target)"
-        session-send "$SESSION_WS" "Starting release-test-all${target_info}: $total models to test.
-Models: $(printf '%s, ' "${MODELS[@]}" | sed 's/, $//')" 2>/dev/null || warn "Could not send Session message"
+        info "Starting release-test-all${target_info}: $total models to test."
     fi
 
     for model in "${MODELS[@]}"; do
@@ -1003,7 +998,6 @@ Models: $(printf '%s, ' "${MODELS[@]}" | sed 's/, $//')" 2>/dev/null || warn "Co
 
         local idx=$((completed + 1))
         info "=== [$idx/$total] Starting: $model ==="
-        session-send "$SESSION_WS" "[$idx/$total] Starting release test: $model" 2>/dev/null || true
 
         local model_start
         model_start=$(date +%s)
@@ -1015,7 +1009,6 @@ Models: $(printf '%s, ' "${MODELS[@]}" | sed 's/, $//')" 2>/dev/null || warn "Co
             local model_mins=$((model_elapsed / 60))
             local model_secs=$((model_elapsed % 60))
             ok "[$completed/$total] PASSED: $model (${model_mins}m ${model_secs}s)"
-            session-send "$SESSION_WS" "[$completed/$total] PASSED: $model (${model_mins}m ${model_secs}s)" 2>/dev/null || true
 
             # Update state file
             if [[ -n "$state_file" ]]; then
@@ -1028,7 +1021,6 @@ Models: $(printf '%s, ' "${MODELS[@]}" | sed 's/, $//')" 2>/dev/null || warn "Co
             local model_secs=$((model_elapsed % 60))
             local msg="FAILED: $model (${model_mins}m ${model_secs}s). Stopping. $completed/$total models completed."
             warn "$msg"
-            session-send "$SESSION_WS" "$msg" 2>/dev/null || true
 
             # Update state file
             if [[ -n "$state_file" ]]; then
@@ -1046,11 +1038,9 @@ Models: $(printf '%s, ' "${MODELS[@]}" | sed 's/, $//')" 2>/dev/null || warn "Co
     [[ -n "$release_target" ]] && target_suffix=" ($release_target)"
     local configs_msg="All configs passed: $completed/$total models in ${configs_mins}m ${configs_secs}s. Starting perplexity phase.${target_suffix}"
     ok "$configs_msg"
-    session-send "$SESSION_WS" "$configs_msg" 2>/dev/null || true
 
     # ── Perplexity phase: one INT4/HQQ8/k6v6 pass per model ──────────────
     info "=== Perplexity Phase: INT4/HQQ8/k6v6 for all models ==="
-    session-send "$SESSION_WS" "Starting perplexity phase: INT4/HQQ8/k6v6 for $total models" 2>/dev/null || true
 
     local ppl_passed=0
     local ppl_failed=0
@@ -1064,7 +1054,6 @@ Models: $(printf '%s, ' "${MODELS[@]}" | sed 's/, $//')" 2>/dev/null || warn "Co
         if [[ ! -f "$config_json" ]]; then
             warn "No config.json for $model — skipping perplexity"
             ppl_failed=$((ppl_failed + 1))
-            session-send "$SESSION_WS" "[PPL] SKIP: $model (no config.json)" 2>/dev/null || true
             continue
         fi
 
@@ -1080,7 +1069,6 @@ print(tc.get('num_hidden_layers', 0))
         if [[ "$num_layers" -eq 0 ]]; then
             warn "Could not detect num_layers for $model — skipping perplexity"
             ppl_failed=$((ppl_failed + 1))
-            session-send "$SESSION_WS" "[PPL] SKIP: $model (unknown layers)" 2>/dev/null || true
             continue
         fi
 
@@ -1103,7 +1091,6 @@ CFG_LM_HEAD_QUANT="int8"
 PPLCONF
 
         info "=== [PPL] $model (INT4/HQQ8/k6v6) ==="
-        session-send "$SESSION_WS" "[PPL] Starting: $model" 2>/dev/null || true
         local ppl_start
         ppl_start=$(date +%s)
 
@@ -1113,14 +1100,12 @@ PPLCONF
             local ppl_secs=$((ppl_elapsed % 60))
             ppl_passed=$((ppl_passed + 1))
             ok "[PPL] PASSED: $model (${ppl_mins}m ${ppl_secs}s)"
-            session-send "$SESSION_WS" "[PPL] PASSED: $model (${ppl_mins}m ${ppl_secs}s)" 2>/dev/null || true
         else
             local ppl_elapsed=$(( $(date +%s) - ppl_start ))
             local ppl_mins=$((ppl_elapsed / 60))
             local ppl_secs=$((ppl_elapsed % 60))
             ppl_failed=$((ppl_failed + 1))
             warn "[PPL] FAILED: $model (${ppl_mins}m ${ppl_secs}s)"
-            session-send "$SESSION_WS" "[PPL] FAILED: $model (${ppl_mins}m ${ppl_secs}s)" 2>/dev/null || true
         fi
 
         rm -f "$ppl_conf"
@@ -1132,7 +1117,6 @@ PPLCONF
     local total_secs=$((total_elapsed % 60))
     local final_msg="COMPLETE: $completed/$total models passed, perplexity $ppl_passed/$total passed, total ${total_mins}m ${total_secs}s.${target_suffix}"
     ok "$final_msg"
-    session-send "$SESSION_WS" "$final_msg" 2>/dev/null || true
 
     # Clean up state file on full success
     if [[ -n "$state_file" ]]; then

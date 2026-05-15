@@ -65,6 +65,7 @@ Config files use `KEY=VALUE` format. CLI flags override config file values.
 | `--pp-partition STR` | auto | Layer partition across GPUs (e.g. `24,24`) |
 | `--host ADDR` | 0.0.0.0 | Server bind address |
 | `--port PORT` | 8012 | Server port |
+| `--ssh-tunnel TARGET` | off | Reverse SSH tunnel target (`user@host` or `user@host:ssh_port`). Remote `127.0.0.1:<server port>` forwards to local Krasis over SSH with key-only batch mode. |
 
 ### Quantization
 
@@ -130,7 +131,6 @@ reserves two activated-expert blocks for recency promotion; use
 |------|---------|-------------|
 | `--temperature F` | 0.6 | Sampling temperature |
 | `--enable-thinking` / `--no-enable-thinking` | on | Enable thinking/reasoning mode |
-| `--session-enabled` / `--no-session-enabled` | off | Enable Session messenger bridge |
 
 ### Benchmarking & Testing
 

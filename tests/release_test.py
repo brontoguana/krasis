@@ -98,20 +98,6 @@ def strip_ansi(text: str) -> str:
     return ANSI_ESCAPE.sub('', text)
 
 
-SESSION_WS = "Release Test"
-
-
-def session_notify(msg: str):
-    """Send a notification to Session messenger (best-effort, never fails)."""
-    try:
-        subprocess.run(
-            ["session-send", SESSION_WS, msg],
-            timeout=10, capture_output=True,
-        )
-    except Exception:
-        pass
-
-
 # ═══════════════════════════════════════════════════════════════════
 # GPU Detection
 # ═══════════════════════════════════════════════════════════════════
@@ -2426,9 +2412,6 @@ def main():
         if variant.get("multi_gpu") and len(all_gpus) <= 1:
             result["error"] = "Multi-GPU skipped — only 1 GPU available"
             warn("Skipping (need 2+ GPUs for multi-GPU test)")
-            session_notify(
-                f"[{model_name}] Config {i+1}/{len(CONFIG_VARIANTS)} "
-                f"SKIP: {variant['name']} (need 2+ GPUs)")
             config_results.append(result)
             continue
 
@@ -2436,9 +2419,6 @@ def main():
         if skip_int8 and variant["bits"] == 8:
             result["error"] = f"INT8 skipped — model is ~{total_params_b:.0f}B params (>200B)"
             warn("Skipping (INT8 too large for >200B model)")
-            session_notify(
-                f"[{model_name}] Config {i+1}/{len(CONFIG_VARIANTS)} "
-                f"SKIP: {variant['name']} (INT8 too large)")
             config_results.append(result)
             continue
 
@@ -2446,9 +2426,6 @@ def main():
         if variant["attention"] == "awq" and needs_awq and not awq_ok:
             result["error"] = "AWQ template not available — skipped"
             warn("Skipping (no AWQ template)")
-            session_notify(
-                f"[{model_name}] Config {i+1}/{len(CONFIG_VARIANTS)} "
-                f"SKIP: {variant['name']} (no AWQ template)")
             config_results.append(result)
             continue
 
@@ -2605,45 +2582,6 @@ def main():
             # Clean up temp config
             if config_path and os.path.isfile(config_path):
                 os.unlink(config_path)
-
-        # Notify per-config status via Session
-        if result.get("error"):
-            session_notify(
-                f"[{model_name}] Config {i+1}/{len(CONFIG_VARIANTS)} "
-                f"FAIL: {variant['name']}")
-        else:
-            # Build a summary line with key benchmark numbers
-            parts = []
-            if result.get("benchmark_output"):
-                nums = _extract_benchmark_numbers(result["benchmark_output"])
-                if nums.get("decode"):
-                    parts.append(f"{nums['decode']} tok/s decode")
-                if nums.get("hcs"):
-                    parts.append(f"{nums['hcs']}% HCS")
-            # Include sanity validation summary
-            sf = result.get("sanity_fail_count", 0)
-            sw = result.get("sanity_warn_count", 0)
-            sp = result.get("sanity_pass_count", 0)
-            if sf:
-                parts.append(f"sanity {sp}P/{sw}W/{sf}F")
-            elif sw:
-                parts.append(f"sanity {sp}P/{sw}W")
-            validation = result.get("reference_validation")
-            if validation:
-                vf = validation.get("fail_count", 0)
-                vw = validation.get("warn_count", 0)
-                vm = validation.get("match_count", 0)
-                if vf:
-                    parts.append(f"ref {vm}M/{vw}W/{vf}F")
-                elif vw:
-                    parts.append(f"ref {vm}M/{vw}W")
-                else:
-                    parts.append(f"ref {vm}M")
-            config_status = "FAIL" if sf or (validation and validation.get("fail_count", 0) > 0) else "PASS"
-            detail = f" ({', '.join(parts)})" if parts else ""
-            session_notify(
-                f"[{model_name}] Config {i+1}/{len(CONFIG_VARIANTS)} "
-                f"{config_status}: {variant['name']}{detail}")
 
         config_results.append(result)
 

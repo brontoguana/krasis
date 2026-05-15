@@ -14,7 +14,6 @@ import os
 import select
 import signal
 import shutil
-import subprocess
 import sys
 import threading
 import time
@@ -163,121 +162,6 @@ def _env_flag(name: str) -> Optional[bool]:
     if raw is None:
         return None
     return raw.strip() not in ("", "0", "false", "False")
-
-def _start_session_bridge(host: str, port: int) -> Optional[subprocess.Popen]:
-    """Start the Session messenger bridge as a subprocess.
-
-    Returns the Popen object, or None if startup fails.
-    """
-    import shutil
-
-    krasis_dir = Path(__file__).resolve().parent.parent.parent  # krasis repo root
-    bridge_script = krasis_dir / "session-bridge.mjs"
-
-    if not bridge_script.is_file():
-        _warn(f"Session bridge script not found: {bridge_script}")
-        return None
-
-    # Find bun or node (prefer bun, fall back to node)
-    runtime_bin = shutil.which("bun")
-    # Also check ~/.bun/bin which the installer uses
-    if not runtime_bin:
-        bun_home = Path.home() / ".bun" / "bin" / "bun"
-        if bun_home.is_file():
-            runtime_bin = str(bun_home)
-    if not runtime_bin:
-        runtime_bin = shutil.which("node")
-    if not runtime_bin:
-        _warn("Session bridge: neither bun nor node found in PATH.")
-        _warn("Run 'krasis-setup' to install Session messenger dependencies.")
-        return None
-
-    # Check if @session.js/client is installed, auto-install if not
-    node_modules = krasis_dir / "node_modules" / "@session.js" / "client"
-    if not node_modules.is_dir():
-        pkg_json = krasis_dir / "package.json"
-        if not pkg_json.is_file():
-            _warn("Session bridge: package.json not found, cannot install dependencies.")
-            return None
-        # Pick installer: prefer bun install, fall back to npm install
-        installer = None
-        if "bun" in str(runtime_bin):
-            installer = [runtime_bin, "install"]
-        else:
-            npm_bin = shutil.which("npm")
-            if npm_bin:
-                installer = [npm_bin, "install"]
-        if not installer:
-            _warn("Session bridge: npm not found, cannot install dependencies.")
-            _warn("Run 'krasis-setup' to install Session messenger dependencies.")
-            return None
-        _detail("Installing Session messenger dependencies...")
-        try:
-            ret = subprocess.run(
-                installer, cwd=str(krasis_dir),
-                capture_output=True, timeout=120,
-            )
-            if ret.returncode != 0:
-                stderr = ret.stderr.decode("utf-8", errors="replace")[:500]
-                _warn(f"Session dependency install failed: {stderr}")
-                return None
-            _detail("Session dependencies installed.")
-        except subprocess.TimeoutExpired:
-            _warn("Session dependency install timed out.")
-            return None
-        except Exception as e:
-            _warn(f"Session dependency install error: {e}")
-            return None
-
-    identity_path = Path.home() / ".krasis" / "session_identity"
-    session_id_path = Path.home() / ".krasis" / "session_id"
-
-    env = os.environ.copy()
-    env["KRASIS_HOST"] = "127.0.0.1"  # bridge always connects locally
-    env["KRASIS_PORT"] = str(port)
-
-    try:
-        run_args = [runtime_bin, "run", str(bridge_script)] if "bun" in str(runtime_bin) else [runtime_bin, str(bridge_script)]
-        proc = subprocess.Popen(
-            run_args + ["--host", "127.0.0.1", "--port", str(port)],
-            cwd=str(krasis_dir),
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-        )
-
-        # Wait briefly for identity to be created and Session ID written
-        for _ in range(30):  # up to 3 seconds
-            time.sleep(0.1)
-            if session_id_path.is_file():
-                sid = session_id_path.read_text().strip()
-                if sid:
-                    _detail(f"Session messenger: ON")
-                    print(f"  {_BOLD}Session ID: {sid}{_NC}", flush=True)
-                    logger.info("Session bridge started, ID: %s", sid)
-                    break
-        else:
-            _detail("Session messenger: starting (ID pending...)")
-
-        # Log bridge output in background
-        def _log_session_output():
-            try:
-                for line in proc.stdout:
-                    decoded = line.decode("utf-8", errors="replace").rstrip()
-                    if decoded:
-                        logger.info("[session-bridge] %s", decoded)
-            except Exception:
-                pass
-        t = threading.Thread(target=_log_session_output, daemon=True)
-        t.start()
-
-        atexit.register(lambda: proc.terminate())
-        return proc
-
-    except Exception as e:
-        _warn(f"Session bridge failed to start: {e}")
-        return None
-
 
 def _sha256_file(path: str) -> Optional[str]:
     if not os.path.isfile(path):
@@ -816,6 +700,7 @@ def main():
             "CFG_KRASIS_THREADS": "krasis_threads",
             "CFG_HOST": "host",
             "CFG_PORT": "port",
+            "CFG_SSH_TUNNEL": "ssh_tunnel",
             "CFG_GPU_PREFILL_THRESHOLD": "gpu_prefill_threshold",
             "CFG_GGUF_PATH": "gguf_path",
             "CFG_FORCE_LOAD": "force_load",
@@ -829,7 +714,7 @@ def main():
             "CFG_DYNAMIC_HCS": "dynamic_hcs",
             "CFG_DYNAMIC_HCS_TAIL_BLOCKS": "dynamic_hcs_tail_blocks",
             "CFG_ENABLE_THINKING": "enable_thinking",
-            "CFG_SESSION_ENABLED": "session_enabled",
+            "CFG_SESSION_ENABLED": None,  # Session messenger integration removed; ignore old saved configs
             "CFG_NUM_GPUS": "num_gpus",
             "CFG_CPU_DECODE": None,  # CPU decode removed, ignore config key
             "CFG_ATTN_SKIP_AFTER": "attn_skip_after",
@@ -840,7 +725,6 @@ def main():
             "CFG_FORCE_REBUILD_HQQ_CACHE",
             "CFG_BUILD_CACHE",
             "CFG_ENABLE_THINKING",
-            "CFG_SESSION_ENABLED",
             "CFG_HCS",
             "CFG_MULTI_GPU_HCS",
             "CFG_DYNAMIC_HCS",
@@ -930,6 +814,9 @@ def main():
                         help="Number of GPUs (auto-detected if omitted)")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8012)
+    parser.add_argument("--ssh-tunnel", default="",
+                        help="Reverse SSH tunnel target: user@host or user@host:port. "
+                             "Remote 127.0.0.1:<server port> forwards to local Krasis.")
     parser.add_argument("--krasis-threads", type=int, default=40,
                         help="CPU threads for expert computation")
     parser.add_argument("--kv-dtype", default="k6v6",
@@ -1022,9 +909,6 @@ def main():
     parser.add_argument("--enable-thinking", action=argparse.BooleanOptionalAction,
                         default=True,
                         help="Enable thinking/reasoning mode (default: on)")
-    parser.add_argument("--session-enabled", action=argparse.BooleanOptionalAction,
-                        default=False,
-                        help="Enable Session messenger bridge (default: off)")
     parser.add_argument("--test-endpoints", action="store_true", default=False,
                         help="Enable test-only endpoints (/v1/internal/prefill_logits)")
     # Apply config file defaults, then parse CLI (CLI wins over config file)
@@ -1037,6 +921,13 @@ def main():
         parser.error("--dynamic-hcs-tail-blocks must be an integer in 1..5")
     if args.dynamic_hcs_tail_blocks < 1 or args.dynamic_hcs_tail_blocks > 5:
         parser.error("--dynamic-hcs-tail-blocks must be in 1..5")
+    if str(getattr(args, "ssh_tunnel", "") or "").strip():
+        from krasis.ssh_tunnel import parse_ssh_tunnel_target
+
+        try:
+            parse_ssh_tunnel_target(args.ssh_tunnel)
+        except ValueError as exc:
+            parser.error(f"--ssh-tunnel: {exc}")
     if args.hcs and args.dynamic_hcs:
         os.environ["KRASIS_DYNAMIC_HCS"] = "1"
         if (
@@ -2394,11 +2285,6 @@ def main():
         f"s ({len(all_aux_gpu_store_addrs)+1}-GPU)" if all_aux_gpu_store_addrs else "",
     )
 
-    # ── Session messenger bridge ──
-    _session_proc = None
-    if getattr(args, 'session_enabled', False):
-        _session_proc = _start_session_bridge(args.host, args.port)
-
     rust_server = RustServer(
         _model,
         args.host,
@@ -2414,10 +2300,30 @@ def main():
         all_multi_gpu_gqa_offsets,
         test_endpoints=getattr(args, 'test_endpoints', False),
     )
+    ssh_tunnel = None
+    if str(getattr(args, "ssh_tunnel", "") or "").strip():
+        from krasis.ssh_tunnel import SshReverseTunnel
+
+        try:
+            _status("Starting SSH reverse tunnel")
+            ssh_tunnel = SshReverseTunnel(
+                args.ssh_tunnel,
+                local_port=args.port,
+                logger=logger,
+            )
+            ssh_tunnel.start()
+            _detail(
+                f"remote 127.0.0.1:{args.port} -> local 127.0.0.1:{args.port} "
+                f"via {args.ssh_tunnel}"
+            )
+        except Exception as exc:
+            logger.error("SSH tunnel failed: %s", exc)
+            rust_server.stop()
+            raise SystemExit(f"SSH tunnel failed: {exc}") from exc
 
     def _handle_exit(sig, frame):
-        if _session_proc and _session_proc.poll() is None:
-            _session_proc.terminate()
+        if ssh_tunnel is not None:
+            ssh_tunnel.stop()
         rust_server.stop()
         try:
             sys.stderr = open(os.devnull, "w")
@@ -2440,6 +2346,12 @@ def main():
     _headline("KRASIS SERVER READY", _GREEN)
     print(f"  {_GREEN}Model:{_NC}    {_BOLD}{_model_name}{_NC}", flush=True)
     print(f"  {_GREEN}Address:{_NC}  {_BOLD}{args.host}:{args.port}{_NC}", flush=True)
+    if ssh_tunnel is not None:
+        print(
+            f"  {_GREEN}Tunnel:{_NC}   {_BOLD}{args.ssh_tunnel}{_NC} "
+            f"{_DIM}remote 127.0.0.1:{args.port}{_NC}",
+            flush=True,
+        )
     print(f"  {_GREEN}Context:{_NC}  {max_ctx:,} tokens  |  KV cache: {args.kv_cache_mb:,} MB", flush=True)
     print(f"  {_GREEN}Decode:{_NC}   {_decode_mode}  |  HCS: {_hcs_str}  |  Think: {_think_str}", flush=True)
     print(f"  {_DIM}Press Q or Ctrl-C to stop{_NC}", flush=True)
@@ -2476,13 +2388,8 @@ def main():
             else:
                 # Re-show readiness after benchmark output.
                 _headline(f"SERVER READY: {args.host}:{args.port}", _GREEN)
-                # Show Session ID again so it's visible after benchmark output
-                if getattr(args, 'session_enabled', False):
-                    sid_path = Path.home() / ".krasis" / "session_id"
-                    if sid_path.is_file():
-                        sid = sid_path.read_text().strip()
-                        if sid:
-                            print(f"  {_BOLD}Session ID: {sid}{_NC}", flush=True)
+                if ssh_tunnel is not None:
+                    _dim(f"SSH tunnel: {args.ssh_tunnel} remote 127.0.0.1:{args.port}")
                 _dim("Press Q or Ctrl-C to stop")
 
         bench_thread = threading.Thread(target=_run_benchmark, daemon=True)
@@ -2517,6 +2424,8 @@ def main():
 
     # ── Clean exit before Python teardown triggers cascading errors ──
     vram_monitor.stop()
+    if ssh_tunnel is not None:
+        ssh_tunnel.stop()
     _remove_registry()
     _cleanup_cuda()
     os._exit(0)

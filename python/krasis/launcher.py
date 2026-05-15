@@ -124,6 +124,29 @@ KEY_ESCAPE = "ESC"
 KEY_QUIT = "q"
 KEY_SPACE = " "
 KEY_BACKSPACE = "BACKSPACE"
+_ESC_SEQUENCE_TIMEOUT = 0.12
+
+
+def _read_escape_sequence(read_char, wait_readable) -> str:
+    """Parse a terminal escape sequence after the initial ESC byte."""
+    if not wait_readable(_ESC_SEQUENCE_TIMEOUT):
+        return KEY_ESCAPE
+    ch2 = read_char()
+    if ch2 not in ("[", "O"):
+        return KEY_ESCAPE
+
+    if not wait_readable(_ESC_SEQUENCE_TIMEOUT):
+        return KEY_ESCAPE
+    ch3 = read_char()
+    if ch3 == "A":
+        return KEY_UP
+    if ch3 == "B":
+        return KEY_DOWN
+    if ch3 == "C":
+        return KEY_RIGHT
+    if ch3 == "D":
+        return KEY_LEFT
+    return KEY_ESCAPE
 
 
 def _read_key() -> str:
@@ -131,31 +154,17 @@ def _read_key() -> str:
     import select
 
     fd = sys.stdin.fileno()
+    read_char = lambda: os.read(fd, 1).decode("latin1")
     old_settings = termios.tcgetattr(fd)
     try:
         tty.setraw(fd)
-        ch = sys.stdin.read(1)
+        ch = read_char()
 
         if ch == "\x1b":
-            # Escape sequence
-            readable, _writable, _error = select.select([sys.stdin], [], [], 0.02)
-            if not readable:
-                return KEY_ESCAPE
-            ch2 = sys.stdin.read(1)
-            if ch2 == "[":
-                readable, _writable, _error = select.select([sys.stdin], [], [], 0.02)
-                if not readable:
-                    return KEY_ESCAPE
-                ch3 = sys.stdin.read(1)
-                if ch3 == "A":
-                    return KEY_UP
-                elif ch3 == "B":
-                    return KEY_DOWN
-                elif ch3 == "C":
-                    return KEY_RIGHT
-                elif ch3 == "D":
-                    return KEY_LEFT
-            return KEY_ESCAPE
+            return _read_escape_sequence(
+                read_char,
+                lambda timeout: bool(select.select([fd], [], [], timeout)[0]),
+            )
         elif ch in ("\r", "\n"):
             return KEY_ENTER
         elif ch == "\x7f" or ch == "\x08":
@@ -175,28 +184,19 @@ def _read_key_timeout(timeout: float) -> Optional[str]:
     import select
 
     fd = sys.stdin.fileno()
+    read_char = lambda: os.read(fd, 1).decode("latin1")
     old_settings = termios.tcgetattr(fd)
     try:
         tty.setraw(fd)
-        readable, _writable, _error = select.select([sys.stdin], [], [], timeout)
+        readable, _writable, _error = select.select([fd], [], [], timeout)
         if not readable:
             return None
-        ch = sys.stdin.read(1)
+        ch = read_char()
         if ch == "\x1b":
-            readable, _writable, _error = select.select([sys.stdin], [], [], 0.02)
-            if readable and sys.stdin.read(1) == "[":
-                readable, _writable, _error = select.select([sys.stdin], [], [], 0.02)
-                if readable:
-                    ch3 = sys.stdin.read(1)
-                    if ch3 == "A":
-                        return KEY_UP
-                    if ch3 == "B":
-                        return KEY_DOWN
-                    if ch3 == "C":
-                        return KEY_RIGHT
-                    if ch3 == "D":
-                        return KEY_LEFT
-            return KEY_ESCAPE
+            return _read_escape_sequence(
+                read_char,
+                lambda wait: bool(select.select([fd], [], [], wait)[0]),
+            )
         if ch in ("\r", "\n"):
             return KEY_ENTER
         if ch == "\x7f" or ch == "\x08":
@@ -476,10 +476,11 @@ CONFIG_KEYS = [
     "CFG_ATTENTION_QUANT", "CFG_HQQ_CACHE_PROFILE", "CFG_HQQ_GROUP_SIZE", "CFG_HQQ_AUTO_BUDGET_PCT", "CFG_HQQ46_AUTO_BUDGET_MB", "CFG_HQQ_SIDECAR_MANIFEST",
     "CFG_SHARED_EXPERT_QUANT", "CFG_DENSE_MLP_QUANT",
     "CFG_LM_HEAD_QUANT", "CFG_KRASIS_THREADS", "CFG_HOST", "CFG_PORT",
+    "CFG_SSH_TUNNEL",
     "CFG_GPU_PREFILL_THRESHOLD", "CFG_GGUF_PATH", "CFG_VRAM_SAFETY_MARGIN",
     "CFG_DYNAMIC_HCS", "CFG_DYNAMIC_HCS_TAIL_BLOCKS",
     "CFG_FORCE_LOAD", "CFG_FORCE_REBUILD_CACHE", "CFG_FORCE_REBUILD_HQQ_CACHE",
-    "CFG_BUILD_CACHE", "CFG_ENABLE_THINKING", "CFG_SESSION_ENABLED",
+    "CFG_BUILD_CACHE", "CFG_ENABLE_THINKING",
 ]
 
 
@@ -547,6 +548,7 @@ class LauncherConfig:
         self.krasis_threads: int = 40
         self.host: str = "0.0.0.0"
         self.port: int = 8012
+        self.ssh_tunnel: str = ""
         self.gpu_prefill_threshold: int = 300
         self.gguf_path: str = ""
         self.vram_safety_margin: int = 600
@@ -557,7 +559,6 @@ class LauncherConfig:
         self.force_rebuild_hqq_cache: bool = False
         self.build_cache: bool = False
         self.enable_thinking: bool = True
-        self.session_enabled: bool = False
 
     def apply_saved(self, saved: Dict[str, str]) -> None:
         """Apply loaded config values."""
@@ -700,6 +701,8 @@ class LauncherConfig:
                 self.port = int(saved["CFG_PORT"])
             except ValueError:
                 pass
+        if "CFG_SSH_TUNNEL" in saved:
+            self.ssh_tunnel = saved["CFG_SSH_TUNNEL"].strip()
         if "CFG_GPU_PREFILL_THRESHOLD" in saved:
             try:
                 self.gpu_prefill_threshold = int(saved["CFG_GPU_PREFILL_THRESHOLD"])
@@ -731,8 +734,6 @@ class LauncherConfig:
             self.build_cache = saved["CFG_BUILD_CACHE"] == "1"
         if "CFG_ENABLE_THINKING" in saved:
             self.enable_thinking = saved["CFG_ENABLE_THINKING"] != "0"
-        if "CFG_SESSION_ENABLED" in saved:
-            self.session_enabled = saved["CFG_SESSION_ENABLED"] == "1"
 
     def to_save_dict(self) -> Dict[str, Any]:
         """Convert to dict for saving or launch config serialization."""
@@ -756,6 +757,7 @@ class LauncherConfig:
             "CFG_KRASIS_THREADS": str(self.krasis_threads),
             "CFG_HOST": self.host,
             "CFG_PORT": str(self.port),
+            "CFG_SSH_TUNNEL": self.ssh_tunnel,
             "CFG_GPU_PREFILL_THRESHOLD": str(self.gpu_prefill_threshold),
             "CFG_GGUF_PATH": self.gguf_path,
             "CFG_VRAM_SAFETY_MARGIN": str(self.vram_safety_margin),
@@ -766,7 +768,6 @@ class LauncherConfig:
             "CFG_FORCE_REBUILD_HQQ_CACHE": "1" if self.force_rebuild_hqq_cache else "",
             "CFG_BUILD_CACHE": "1" if self.build_cache else "",
             "CFG_ENABLE_THINKING": "1" if self.enable_thinking else "0",
-            "CFG_SESSION_ENABLED": "1" if self.session_enabled else "0",
         }
         if self.attention_quant in ("hqq46_auto", "hqq68_auto"):
             values["CFG_HQQ_AUTO_BUDGET_PCT"] = str(self.hqq_auto_budget_pct)
@@ -828,9 +829,8 @@ OPTIONS = [
     ConfigOption("VRAM safety margin", "vram_safety_margin",
                  opt_type="number", min_val=500, max_val=8000, step=100),
     ConfigOption("Host/Port", "host", opt_type="text"),
+    ConfigOption("SSH Tunnel", "ssh_tunnel", opt_type="text"),
     ConfigOption("Enable thinking", "enable_thinking",
-                 choices=[True, False]),
-    ConfigOption("Session messenger", "session_enabled",
                  choices=[True, False]),
     ConfigOption("Dynamic HCS", "dynamic_hcs",
                  choices=[True, False], advanced=True),
@@ -867,6 +867,8 @@ def _format_value(opt: ConfigOption, val: Any) -> str:
         return f"{val} {suffix}"
     if opt.key == "attention_quant":
         return _format_attention_quant_value(str(val))
+    if opt.key == "ssh_tunnel":
+        return str(val) if val else f"{DIM}off{NC}"
     if opt.key == "gpu_expert_int4_calib":
         return str(val)
     return str(val)
@@ -2127,6 +2129,15 @@ class Launcher:
                         else:
                             current = str(getattr(self.cfg, opt.key))
                             new_val = _edit_value(opt.label, current)
+                            if opt.key == "ssh_tunnel" and new_val.strip():
+                                try:
+                                    from krasis.ssh_tunnel import parse_ssh_tunnel_target
+                                    parse_ssh_tunnel_target(new_val)
+                                except ValueError as exc:
+                                    _hide_cursor()
+                                    self._message_screen("SSH Tunnel", [f"{RED}{exc}{NC}"])
+                                    _show_cursor()
+                                    continue
                             setattr(self.cfg, opt.key, new_val)
                         _hide_cursor()
                     if opt.affects_budget:
@@ -2244,6 +2255,8 @@ class Launcher:
         print(f"  LM head quant:   {self.cfg.lm_head_quant}")
         print(f"  VRAM safety:     {self.cfg.vram_safety_margin:,} MB")
         print(f"  Server:          {self.cfg.host}:{self.cfg.port}")
+        if self.cfg.ssh_tunnel:
+            print(f"  SSH tunnel:      {self.cfg.ssh_tunnel} remote 127.0.0.1:{self.cfg.port}")
         if self.selected_gpus:
             idx_str = ",".join(str(g["index"]) for g in self.selected_gpus)
             print(f"  GPUs:            {len(self.selected_gpus)}x [{idx_str}]")
@@ -2451,6 +2464,9 @@ def parse_args() -> argparse.Namespace:
                         help="Server bind address (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=None,
                         help="Server port (default: 8012)")
+    parser.add_argument("--ssh-tunnel", default=None,
+                        help="Reverse SSH tunnel target: user@host or user@host:port. "
+                             "Remote 127.0.0.1:<server port> forwards to local Krasis.")
     parser.add_argument("--gguf-path", default=None,
                         help="Path to GGUF file for CPU experts")
     parser.add_argument("--gpu-prefill-threshold", type=int, default=None,
@@ -2469,8 +2485,6 @@ def parse_args() -> argparse.Namespace:
                         help="Delete the selected HQQ attention cache and rebuild from safetensors")
     parser.add_argument("--build-cache", action="store_true",
                         help="Build expert caches (if missing) and exit without starting server")
-    parser.add_argument("--session-enabled", action="store_true",
-                        help="Enable Session messenger bridge")
     parser.add_argument("--benchmark", action="store_true",
                         help="Run standardized benchmark before starting server")
     parser.add_argument("--benchmark-suite", nargs="?", const="", default=None,
@@ -2565,6 +2579,8 @@ def _apply_cli_overrides(cfg: LauncherConfig, args: argparse.Namespace) -> None:
         cfg.host = args.host
     if args.port is not None:
         cfg.port = args.port
+    if args.ssh_tunnel is not None:
+        cfg.ssh_tunnel = args.ssh_tunnel.strip()
     if args.gpu_prefill_threshold is not None:
         cfg.gpu_prefill_threshold = args.gpu_prefill_threshold
     if args.dynamic_hcs is not None:
@@ -2581,8 +2597,6 @@ def _apply_cli_overrides(cfg: LauncherConfig, args: argparse.Namespace) -> None:
         cfg.force_rebuild_hqq_cache = True
     if getattr(args, 'build_cache', False):
         cfg.build_cache = True
-    if getattr(args, 'session_enabled', False):
-        cfg.session_enabled = True
 
 
 def _check_gpu_deps():
