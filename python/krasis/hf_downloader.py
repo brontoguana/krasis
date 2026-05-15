@@ -5,6 +5,7 @@ from __future__ import annotations
 import fnmatch
 import inspect
 import os
+from pathlib import Path
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -165,7 +166,7 @@ class HFModelCandidate:
 
 def _require_hf():
     try:
-        from huggingface_hub import HfApi, HfFolder, get_token, login, snapshot_download
+        from huggingface_hub import HfApi, get_token, login, snapshot_download
     except ImportError as exc:
         raise RuntimeError(
             "huggingface_hub is required for the model downloader. "
@@ -182,7 +183,36 @@ def _require_hf():
                 "The installed huggingface_hub package is too old for the model downloader. "
                 "Upgrade Hugging Face Hub in the Krasis environment."
             ) from exc
-    return HfApi, HfFolder, get_token, login, snapshot_download, GatedRepoError, HfHubHTTPError, RepositoryNotFoundError
+    return HfApi, get_token, login, snapshot_download, GatedRepoError, HfHubHTTPError, RepositoryNotFoundError
+
+
+def _save_hf_token(token: str) -> None:
+    try:
+        from huggingface_hub import HfFolder
+
+        HfFolder.save_token(token)
+        return
+    except (ImportError, AttributeError):
+        pass
+
+    try:
+        from huggingface_hub._login import _save_token, _set_active_token
+
+        token_name = "krasis"
+        _save_token(token=token, token_name=token_name)
+        _set_active_token(token_name=token_name, add_to_git_credential=False)
+        return
+    except Exception:
+        pass
+
+    try:
+        from huggingface_hub.constants import HF_TOKEN_PATH
+
+        token_path = Path(HF_TOKEN_PATH)
+        token_path.parent.mkdir(parents=True, exist_ok=True)
+        token_path.write_text(token, encoding="utf-8")
+    except Exception as exc:
+        raise RuntimeError("Hugging Face token was validated but could not be saved.") from exc
 
 
 def parse_hf_repo_id(value: str) -> str:
@@ -220,12 +250,12 @@ def parse_hf_repo_id(value: str) -> str:
 
 
 def _token_arg() -> Optional[bool]:
-    _HfApi, _HfFolder, get_token, _login, _snapshot_download, *_ = _require_hf()
+    _HfApi, get_token, _login, _snapshot_download, *_ = _require_hf()
     return True if get_token() else None
 
 
 def hf_auth_status() -> Dict[str, Any]:
-    HfApi, _HfFolder, get_token, _login, _snapshot_download, *_ = _require_hf()
+    HfApi, get_token, _login, _snapshot_download, *_ = _require_hf()
     token = get_token()
     if not token:
         return {"logged_in": False, "user": ""}
@@ -237,7 +267,7 @@ def hf_auth_status() -> Dict[str, Any]:
 
 
 def hf_login(token: str) -> Dict[str, Any]:
-    HfApi, HfFolder, get_token, login, _snapshot_download, *_ = _require_hf()
+    HfApi, get_token, login, _snapshot_download, *_ = _require_hf()
     clean_token = token.strip()
     info = HfApi().whoami(token=clean_token)
     kwargs: Dict[str, Any] = {"token": clean_token, "add_to_git_credential": False}
@@ -249,7 +279,7 @@ def hf_login(token: str) -> Dict[str, Any]:
         kwargs["new_session"] = True
     login(**kwargs)
     if get_token() != clean_token:
-        HfFolder.save_token(clean_token)
+        _save_hf_token(clean_token)
     return {"logged_in": True, "user": str(info.get("name") or info.get("email") or "authenticated")}
 
 
@@ -430,7 +460,7 @@ def format_bytes(num_bytes: int) -> str:
 
 
 def download_model(repo_id: str, local_dir: str, *, max_workers: int = 8) -> str:
-    _HfApi, _HfFolder, _get_token, _login, snapshot_download, *_ = _require_hf()
+    _HfApi, _get_token, _login, snapshot_download, *_ = _require_hf()
     try:
         from huggingface_hub.utils import disable_progress_bars
 

@@ -1,6 +1,8 @@
 import os
+import sys
 import tempfile
 import unittest
+from types import ModuleType
 from types import SimpleNamespace
 
 import krasis.hf_downloader as hf_downloader
@@ -152,6 +154,37 @@ class HFDownloaderTests(unittest.TestCase):
             self.assertIn("missing .safetensors weights", issues)
             self.assertIn("missing tokenizer files", issues)
 
+    def test_require_hf_does_not_require_removed_hffolder_symbol(self):
+        fake_hub = ModuleType("huggingface_hub")
+        fake_hub.__path__ = []
+        fake_hub.HfApi = object
+        fake_hub.get_token = lambda: None
+        fake_hub.login = lambda **_kwargs: None
+        fake_hub.snapshot_download = lambda **_kwargs: None
+
+        fake_errors = ModuleType("huggingface_hub.errors")
+        fake_errors.GatedRepoError = type("GatedRepoError", (Exception,), {})
+        fake_errors.HfHubHTTPError = type("HfHubHTTPError", (Exception,), {})
+        fake_errors.RepositoryNotFoundError = type("RepositoryNotFoundError", (Exception,), {})
+
+        names = ("huggingface_hub", "huggingface_hub.errors")
+        original = {name: sys.modules.get(name) for name in names}
+        sys.modules["huggingface_hub"] = fake_hub
+        sys.modules["huggingface_hub.errors"] = fake_errors
+        try:
+            result = hf_downloader._require_hf()
+        finally:
+            for name, module in original.items():
+                if module is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = module
+
+        self.assertIs(result[0], object)
+        self.assertIs(result[1], fake_hub.get_token)
+        self.assertIs(result[2], fake_hub.login)
+        self.assertIs(result[3], fake_hub.snapshot_download)
+
     def test_hf_login_supports_older_hub_signature_without_new_session(self):
         calls = []
 
@@ -160,11 +193,6 @@ class HFDownloaderTests(unittest.TestCase):
                 calls.append(("whoami", token))
                 return {"name": "tester"}
 
-        class FakeHfFolder:
-            @staticmethod
-            def save_token(token):
-                calls.append(("save_token", token))
-
         def get_token():
             return "hf_test"
 
@@ -172,7 +200,7 @@ class HFDownloaderTests(unittest.TestCase):
             calls.append(("login", token, add_to_git_credential))
 
         original = hf_downloader._require_hf
-        hf_downloader._require_hf = lambda: (FakeApi, FakeHfFolder, get_token, old_login, None, None, None, None)
+        hf_downloader._require_hf = lambda: (FakeApi, get_token, old_login, None, None, None, None)
         try:
             result = hf_login(" hf_test ")
         finally:
@@ -189,11 +217,6 @@ class HFDownloaderTests(unittest.TestCase):
                 calls.append(("whoami", token))
                 return {"name": "tester"}
 
-        class FakeHfFolder:
-            @staticmethod
-            def save_token(token):
-                calls.append(("save_token", token))
-
         def get_token():
             return None
 
@@ -201,11 +224,14 @@ class HFDownloaderTests(unittest.TestCase):
             calls.append(("login", token, add_to_git_credential, new_session))
 
         original = hf_downloader._require_hf
-        hf_downloader._require_hf = lambda: (FakeApi, FakeHfFolder, get_token, new_login, None, None, None, None)
+        original_save = hf_downloader._save_hf_token
+        hf_downloader._require_hf = lambda: (FakeApi, get_token, new_login, None, None, None, None)
+        hf_downloader._save_hf_token = lambda token: calls.append(("save_token", token))
         try:
             result = hf_login(" hf_saved ")
         finally:
             hf_downloader._require_hf = original
+            hf_downloader._save_hf_token = original_save
 
         self.assertEqual(result, {"logged_in": True, "user": "tester"})
         self.assertEqual(

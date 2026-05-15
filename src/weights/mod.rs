@@ -2695,11 +2695,11 @@ impl WeightStore {
         let layers_prefix = detect_expert_prefix(&index.weight_map)?;
         let shared_name = detect_shared_expert_name(&index.weight_map);
         let expert_sublayer = detect_expert_sublayer(&index.weight_map);
-        let experts_gated = has_gate_proj_experts(&index.weight_map);
+        let shared_gated = has_shared_gate_proj(&index.weight_map, shared_name);
 
         // Collect shard names needed for shared experts
         let mut shard_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let shared_projs: &[&str] = if experts_gated {
+        let shared_projs: &[&str] = if shared_gated {
             &["gate_proj", "up_proj", "down_proj"]
         } else {
             &["up_proj", "down_proj"]
@@ -2726,7 +2726,7 @@ impl WeightStore {
         let shared_intermediate = config.shared_expert_intermediate_size;
         log::info!(
             "Loading shared experts: n_shared={}, intermediate_size={}, {} layers, naming='{}', gated={}",
-            config.n_shared_experts, shared_intermediate, num_moe_layers, shared_name, experts_gated,
+            config.n_shared_experts, shared_intermediate, num_moe_layers, shared_name, shared_gated,
         );
 
         let start = std::time::Instant::now();
@@ -2734,7 +2734,7 @@ impl WeightStore {
         for moe_idx in 0..num_moe_layers {
             let layer_idx = config.moe_abs_layer(moe_idx);
             let prefix = format!("{layers_prefix}.layers.{layer_idx}.{expert_sublayer}.{shared_name}");
-            let (gate, up, down) = if experts_gated {
+            let (gate, up, down) = if shared_gated {
                 load_and_quantize_expert(
                     layer_idx, 0, &prefix, &index.weight_map, &shards, group_size, num_bits,
                     ExpertInt4CalibMode::Amax, None,
@@ -2804,6 +2804,7 @@ impl WeightStore {
         let experts_gated = has_gate_proj_experts(&index.weight_map);
         let expert_sublayer = detect_expert_sublayer(&index.weight_map);
         let shared_name = detect_shared_expert_name(&index.weight_map);
+        let shared_gated = has_shared_gate_proj(&index.weight_map, shared_name);
 
         let overall_start = std::time::Instant::now();
         let mut experts_gpu: Vec<Vec<UnifiedExpertWeights>> = Vec::new();
@@ -2849,7 +2850,7 @@ impl WeightStore {
             for moe_idx in moe_start..(moe_start + num_moe_layers) {
                 let layer_idx = config.moe_abs_layer(moe_idx);
                 let prefix = format!("{layers_prefix}.layers.{layer_idx}.{expert_sublayer}.{shared_name}");
-                let (gate, up, down) = if experts_gated {
+                let (gate, up, down) = if shared_gated {
                     load_and_quantize_expert(
                         layer_idx, 0, &prefix, &index.weight_map, &shards, 0, 16,
                         ExpertInt4CalibMode::Amax, None,
@@ -3216,13 +3217,14 @@ impl WeightStore {
         // Stream shared experts
         if config.n_shared_experts > 0 {
             let shared_name = detect_shared_expert_name(&index.weight_map);
+            let shared_gated = has_shared_gate_proj(&index.weight_map, shared_name);
             eprintln!("    GPU Marlin: writing shared experts...");
-            log::info!("Streaming shared experts ({} layers, naming='{}', gated={})...", num_moe_layers, shared_name, experts_gated);
+            log::info!("Streaming shared experts ({} layers, naming='{}', gated={})...", num_moe_layers, shared_name, shared_gated);
             for moe_idx in start_moe_layer..(start_moe_layer + num_moe_layers) {
                 let layer_idx = config.moe_abs_layer(moe_idx);
                 let prefix = format!("{layers_prefix}.layers.{layer_idx}.{expert_sublayer}.{shared_name}");
                 let shared_io_start = std::time::Instant::now();
-                let (gate, up, down) = if experts_gated {
+                let (gate, up, down) = if shared_gated {
                     load_and_quantize_expert(
                         layer_idx, 0, &prefix, &index.weight_map, &shards, effective_group_size, gpu_bits,
                         ExpertInt4CalibMode::Amax, None,
@@ -3904,12 +3906,13 @@ impl WeightStore {
         // Stream shared experts
         if config.n_shared_experts > 0 {
             let shared_name = detect_shared_expert_name(&index.weight_map);
+            let shared_gated = has_shared_gate_proj(&index.weight_map, shared_name);
             eprintln!("    CPU INT{}: writing shared experts...", cpu_num_bits);
-            log::info!("Streaming shared experts for CPU cache ({} layers, naming='{}', gated={})...", num_moe_layers, shared_name, experts_gated);
+            log::info!("Streaming shared experts for CPU cache ({} layers, naming='{}', gated={})...", num_moe_layers, shared_name, shared_gated);
             for moe_idx in start_moe_layer..(start_moe_layer + num_moe_layers) {
                 let layer_idx = config.moe_abs_layer(moe_idx);
                 let prefix = format!("{layers_prefix}.layers.{layer_idx}.{expert_sublayer}.{shared_name}");
-                let (gate, up, down) = if experts_gated {
+                let (gate, up, down) = if shared_gated {
                     load_and_quantize_expert(
                         layer_idx, 0, &prefix, &index.weight_map, &shards, effective_group_size, cpu_num_bits,
                         ExpertInt4CalibMode::Amax, None,
@@ -6104,6 +6107,19 @@ fn has_gate_proj_experts(weight_map: &HashMap<String, String>) -> bool {
     false
 }
 
+/// Check whether shared experts include a gate projection.
+///
+/// Stacked routed experts use `experts.gate_up_proj`, so routed gate detection
+/// cannot be reused for shared experts. Qwen3.6 has stacked routed experts but
+/// separate gated shared experts (`shared_expert.gate_proj.weight`).
+fn has_shared_gate_proj(weight_map: &HashMap<String, String>, shared_name: &str) -> bool {
+    let mlp_gate = format!(".mlp.{shared_name}.gate_proj");
+    let mixer_gate = format!(".mixer.{shared_name}.gate_proj");
+    weight_map
+        .keys()
+        .any(|key| key.contains(&mlp_gate) || key.contains(&mixer_gate))
+}
+
 /// Detect shared expert naming: "shared_experts" (DeepSeek) vs "shared_expert" (QCN).
 /// Returns the substring to use in weight name construction.
 fn detect_shared_expert_name(weight_map: &HashMap<String, String>) -> &'static str {
@@ -7135,6 +7151,52 @@ fn load_stacked_layer_experts(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_stacked_routed_detection_does_not_hide_gated_shared_experts() {
+        let mut weight_map = HashMap::new();
+        weight_map.insert(
+            "model.language_model.layers.0.mlp.experts.gate_up_proj".to_string(),
+            "model-00001-of-00001.safetensors".to_string(),
+        );
+        weight_map.insert(
+            "model.language_model.layers.0.mlp.experts.down_proj".to_string(),
+            "model-00001-of-00001.safetensors".to_string(),
+        );
+        weight_map.insert(
+            "model.language_model.layers.0.mlp.shared_expert.gate_proj.weight".to_string(),
+            "model-00001-of-00001.safetensors".to_string(),
+        );
+        weight_map.insert(
+            "model.language_model.layers.0.mlp.shared_expert.up_proj.weight".to_string(),
+            "model-00001-of-00001.safetensors".to_string(),
+        );
+        weight_map.insert(
+            "model.language_model.layers.0.mlp.shared_expert.down_proj.weight".to_string(),
+            "model-00001-of-00001.safetensors".to_string(),
+        );
+
+        assert!(!has_gate_proj_experts(&weight_map));
+        assert_eq!(detect_shared_expert_name(&weight_map), "shared_expert");
+        assert!(has_shared_gate_proj(&weight_map, "shared_expert"));
+    }
+
+    #[test]
+    fn test_ungated_shared_expert_detection() {
+        let mut weight_map = HashMap::new();
+        weight_map.insert(
+            "model.layers.0.mlp.shared_expert.up_proj.weight".to_string(),
+            "model-00001-of-00001.safetensors".to_string(),
+        );
+        weight_map.insert(
+            "model.layers.0.mlp.shared_expert.down_proj.weight".to_string(),
+            "model-00001-of-00001.safetensors".to_string(),
+        );
+
+        assert_eq!(detect_shared_expert_name(&weight_map), "shared_expert");
+        assert!(!has_shared_gate_proj(&weight_map, "shared_expert"));
+    }
 
     #[test]
     fn test_load_v2_lite() {
