@@ -1165,6 +1165,17 @@ fn handle_chat_completion(
         let kvcopy_ms = t_kvcopy.elapsed().as_secs_f64() * 1000.0;
         log::info!("Request {}: KV+LA state copied to {} aux GPUs in {:.1}ms", request_id, num_aux, kvcopy_ms);
     }
+    let (pressure_evicted, pressure_freed_mb, pressure_final_free_mb) =
+        store.hcs_drain_vram_pressure("request_before_decode", true);
+    if pressure_evicted > 0 {
+        log::warn!(
+            "Request {}: VRAM pressure eviction before decode evicted {} soft experts, freed {:.1} MB, final_free={} MB",
+            request_id,
+            pressure_evicted,
+            pressure_freed_mb,
+            pressure_final_free_mb,
+        );
+    }
     let reload_ms = t_reload.elapsed().as_secs_f64() * 1000.0;
     {
         let (min_free_vram_mb, hcs_loaded, hcs_total, hcs_pct) = store.benchmark_stats();
@@ -2936,6 +2947,16 @@ impl RustServer {
                     log::error!("benchmark_request: LA state copy to aux GPU{} failed: {}", i + 1, e);
                 }
             }
+        }
+        let (pressure_evicted, pressure_freed_mb, pressure_final_free_mb) =
+            store.hcs_drain_vram_pressure("benchmark_before_decode", true);
+        if pressure_evicted > 0 {
+            log::warn!(
+                "Benchmark: VRAM pressure eviction before decode evicted {} soft experts, freed {:.1} MB, final_free={} MB",
+                pressure_evicted,
+                pressure_freed_mb,
+                pressure_final_free_mb,
+            );
         }
 
         // Decode (pure Rust, GIL held but unused by decode loop)

@@ -1,5 +1,35 @@
 # Krasis Benchmark Results
 
+## Standard Benchmarks - 2026-05-16 (rc30 VRAM pressure guardrails)
+
+Hardware: EPYC 7742, 1007 GB RAM, RTX 5090 32 GB selected for the run.
+Timing instrumentation was disabled. The run used the repeatable
+`./dev speed-test` entry point and the fixed
+`tests/qcn-k4v4-hqq8-int4-benchmark.conf` config.
+
+| Model / run | Command | Attention | KV | Prefill (tok/s) | Decode (tok/s) | Round trip (tok/s) | HCS | Min free VRAM | Logs |
+|-------------|---------|-----------|----|----------------:|---------------:|-------------------:|-----|--------------:|------|
+| Qwen3-Coder-Next rc30 VRAM pressure guardrails | `./dev speed-test` | HQQ8 | k4v4 | 6111.2 | 88.59 | 157.00 | 15633/24576 (63.6%) | 656 MB | [full log](20260516_qcn_k4v4_hqq8_int4_rc30_pressure_speedtest.log), [report](20260516_qcn_k4v4_hqq8_int4_rc30_pressure_speedtest_report.log), [server log](20260516_qcn_k4v4_hqq8_int4_rc30_pressure_speedtest_krasis.log) |
+
+Calibration:
+- Short probe: `500` prompt tokens, baseline `25174 MB`, prefill post-alloc
+  `24324 MB`, prefill min `23716 MB`, decode min `25124 MB`.
+- Long probe: `39920` prompt tokens, baseline `25124 MB`, prefill post-alloc
+  `3502 MB`, prefill min `2062 MB`, decode min `25122 MB`.
+- Decode HCS budget: `24472 MB`; prefill HCS budgets: short `23064 MB`, long
+  `1460 MB`.
+
+Notes:
+- The run validated the rc30 runtime pressure-eviction changes on a clean
+  no-pressure speed path. No `VRAM MONITOR` warning appeared, so pressure
+  eviction did not trigger during the benchmark.
+- Decode low-water was `656 MB`, close to but above the configured `600 MB`
+  safety margin.
+- Startup HCS loaded `15633/24576` soft experts (`63.6%`) for `24182.3 MB`.
+- The 50K timed prefill row completed at `5616.3 tok/s`.
+
+---
+
 ## Standard Benchmarks - 2026-05-13 (Local RTX A4500)
 
 Hardware: EPYC 7742, 1007 GB RAM, selected physical GPU1 RTX A4500 20 GB

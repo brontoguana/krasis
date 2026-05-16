@@ -82,6 +82,35 @@ def _center_ansi(text: str, width: int) -> str:
     return " " * left + text + " " * right
 
 
+def _truncate_ansi(text: str, width: int) -> str:
+    """Truncate text to a visible width while preserving ANSI color codes."""
+    width = max(0, int(width))
+    if _visible_len(text) <= width:
+        return text
+    if width <= 3:
+        return "." * width
+
+    limit = width - 3
+    out: List[str] = []
+    visible = 0
+    i = 0
+    saw_ansi = False
+    while i < len(text) and visible < limit:
+        match = _ANSI_RE.match(text, i)
+        if match:
+            out.append(match.group(0))
+            saw_ansi = True
+            i = match.end()
+            continue
+        out.append(text[i])
+        visible += 1
+        i += 1
+    out.append("...")
+    if saw_ansi:
+        out.append(NC)
+    return "".join(out)
+
+
 def _launcher_header_lines(version: str, width: Optional[int] = None) -> List[str]:
     """Render a terminal-width launcher header."""
     if width is None:
@@ -1747,25 +1776,34 @@ class Launcher:
         top = 0
         while True:
             _clear_screen()
-            height = shutil.get_terminal_size((100, 32)).lines
-            visible_count = max(4, min(10, (height - 8) // 3))
+            term_size = shutil.get_terminal_size((100, 32))
+            height = max(8, term_size.lines)
+            width = max(20, term_size.columns)
+            # Each candidate uses three terminal rows. Keep the full render
+            # inside the viewport so small terminals do not scroll/clip the top
+            # result as soon as the screen is drawn.
+            visible_count = max(1, min(10, (height - 5) // 3))
             if cursor < top:
                 top = cursor
             elif cursor >= top + visible_count:
                 top = cursor - visible_count + 1
             visible = candidates[top:top + visible_count]
-            lines = [f"  {BOLD}Hugging Face results{NC}  {DIM}({len(candidates)} shown){NC}", ""]
+            end = top + len(visible)
+            window = ""
+            if len(candidates) > visible_count:
+                window = f" {DIM}[{top + 1}-{end}/{len(candidates)}]{NC}"
+            lines = ["", f"  {BOLD}Hugging Face results{NC}  {DIM}({len(candidates)} shown){NC}{window}", ""]
             for offset, candidate in enumerate(visible):
                 i = top + offset
                 prefix = f"  {CYAN}\u25b8{NC} " if i == cursor else "    "
                 hl = BOLD if i == cursor else ""
                 line1, line2 = self._format_hf_candidate(candidate)
-                lines.append(f"{prefix}{hl}{line1}{NC}")
-                lines.append(f"       {DIM}{candidate.summary}{NC}")
-                lines.append(f"       {DIM}{line2}{NC}")
+                lines.append(_truncate_ansi(f"{prefix}{hl}{line1}{NC}", width))
+                lines.append(_truncate_ansi(f"       {DIM}{candidate.summary}{NC}", width))
+                lines.append(_truncate_ansi(f"       {DIM}{line2}{NC}", width))
             lines.append("")
             lines.append(f"  {DIM}[\u2191\u2193] Select  [Enter] Details  [Esc] Back{NC}")
-            sys.stdout.write("\n".join(lines) + "\n")
+            sys.stdout.write("\n".join(_truncate_ansi(line, width) for line in lines))
             sys.stdout.flush()
             key = _read_key()
             if key == KEY_UP:

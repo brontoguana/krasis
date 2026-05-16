@@ -17,6 +17,62 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const VRAM_HARD_EXIT_FLOOR_MB: u64 = 125;
 const VRAM_HARD_EXIT_CODE: i32 = 137;
+const PRESSURE_DEVICE_SLOTS: usize = u64::BITS as usize;
+
+#[derive(Clone, Copy, Debug)]
+pub struct VramPressure {
+    pub device_id: i32,
+    pub free_mb: u64,
+    pub safety_margin_mb: u64,
+    pub deficit_mb: u64,
+}
+
+static PRESSURE_PENDING_MASK: AtomicU64 = AtomicU64::new(0);
+static PRESSURE_FREE_MB: [AtomicU64; PRESSURE_DEVICE_SLOTS] =
+    [const { AtomicU64::new(u64::MAX) }; PRESSURE_DEVICE_SLOTS];
+static PRESSURE_MARGIN_MB: [AtomicU64; PRESSURE_DEVICE_SLOTS] =
+    [const { AtomicU64::new(0) }; PRESSURE_DEVICE_SLOTS];
+static PRESSURE_DEFICIT_MB: [AtomicU64; PRESSURE_DEVICE_SLOTS] =
+    [const { AtomicU64::new(0) }; PRESSURE_DEVICE_SLOTS];
+
+fn pressure_slot(device_id: i32) -> Option<usize> {
+    if device_id >= 0 && (device_id as usize) < PRESSURE_DEVICE_SLOTS {
+        Some(device_id as usize)
+    } else {
+        None
+    }
+}
+
+pub fn mark_pressure(device_id: i32, free_mb: u64, safety_margin_mb: u64) {
+    let Some(slot) = pressure_slot(device_id) else {
+        return;
+    };
+    PRESSURE_FREE_MB[slot].store(free_mb, Ordering::Relaxed);
+    PRESSURE_MARGIN_MB[slot].store(safety_margin_mb, Ordering::Relaxed);
+    PRESSURE_DEFICIT_MB[slot].store(safety_margin_mb.saturating_sub(free_mb), Ordering::Relaxed);
+    PRESSURE_PENDING_MASK.fetch_or(1u64 << slot, Ordering::Release);
+}
+
+pub fn clear_pressure(device_id: i32) {
+    let Some(slot) = pressure_slot(device_id) else {
+        return;
+    };
+    PRESSURE_PENDING_MASK.fetch_and(!(1u64 << slot), Ordering::AcqRel);
+}
+
+pub fn pressure_pending(device_id: i32) -> Option<VramPressure> {
+    let slot = pressure_slot(device_id)?;
+    let mask = PRESSURE_PENDING_MASK.load(Ordering::Acquire);
+    if mask & (1u64 << slot) == 0 {
+        return None;
+    }
+    Some(VramPressure {
+        device_id,
+        free_mb: PRESSURE_FREE_MB[slot].load(Ordering::Relaxed),
+        safety_margin_mb: PRESSURE_MARGIN_MB[slot].load(Ordering::Relaxed),
+        deficit_mb: PRESSURE_DEFICIT_MB[slot].load(Ordering::Relaxed),
+    })
+}
 
 // CUDA runtime function signatures (resolved via dlsym)
 type CudaSetDeviceFn = unsafe extern "C" fn(i32) -> i32;
@@ -487,6 +543,15 @@ impl VramMonitor {
                             readings.push(free_mb);
                             update_active_request_low(dev.device_id, free_mb);
 
+                            if warn_enabled.load(Ordering::Relaxed) {
+                                let margin = safety_margin.load(Ordering::Relaxed);
+                                if free_u64 < margin {
+                                    mark_pressure(dev.device_id, free_mb, margin / (1024 * 1024));
+                                } else {
+                                    clear_pressure(dev.device_id);
+                                }
+                            }
+
                             let prev_min = dev.min_free_bytes.load(Ordering::Relaxed);
 
                             if free_u64 < prev_min {
@@ -522,7 +587,9 @@ impl VramMonitor {
                                     }
                                 }
 
-                                // Warn on new lows below safety margin (when enabled)
+                                // Warn on new lows below safety margin (when enabled).
+                                // Pressure state is updated every poll above; warning output
+                                // remains new-low only to avoid log spam.
                                 if warn_enabled.load(Ordering::Relaxed) {
                                     let margin = safety_margin.load(Ordering::Relaxed);
                                     if free_u64 < margin {

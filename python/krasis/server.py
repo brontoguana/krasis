@@ -1944,6 +1944,13 @@ def main():
     _detail(f"Safety margin: {SAFETY_MARGIN_MB:,} MB — warnings on every new low below this")
     vram_monitor.enable_warnings()
     logger.info("VRAM monitor: runtime warnings enabled (safety margin: %d MB)", SAFETY_MARGIN_MB)
+    if args.hcs:
+        evicted, freed_mb, final_free_mb = gpu_store.py_hcs_drain_vram_pressure("startup_ready", True)
+        if evicted > 0:
+            _warn(
+                f"VRAM pressure eviction at startup: evicted {evicted} soft HCS experts, "
+                f"freed {freed_mb:.1f} MB, final free {final_free_mb:,} MB"
+            )
 
     # Benchmark runs AFTER server starts (same HTTP path as production).
     # We set up the benchmark thread here; it launches after rust_server.run().

@@ -149,6 +149,51 @@ class LauncherMatrixTest(unittest.TestCase):
             self.assertEqual(launcher_mod._visible_len(line), 96)
         self.assertIn("Krasis MoE Server v9.8.7-test", launcher_mod._ANSI_RE.sub("", lines[1]))
 
+    def test_hf_results_screen_fits_short_terminal_without_wrapping(self) -> None:
+        long_summary = " ".join(["very-long-summary"] * 20)
+        candidates = [
+            argparse.Namespace(
+                repo_id=f"Example/Model-{idx}-with-a-very-long-repository-name",
+                summary=long_summary,
+                gated=False,
+                private=False,
+                has_safetensors=True,
+                int4_payload_bytes=12_345_678_901,
+                selected_bytes=98_765_432_109,
+                safetensors_total_bytes=98_765_432_109,
+                pipeline_tag="text-generation",
+                downloads=123_456,
+                likes=789,
+                last_modified="2026-05-16",
+            )
+            for idx in range(8)
+        ]
+        launcher = Launcher.__new__(Launcher)
+        old_clear = launcher_mod._clear_screen
+        old_read_key = launcher_mod._read_key
+        old_get_terminal_size = launcher_mod.shutil.get_terminal_size
+        try:
+            launcher_mod._clear_screen = lambda: None
+            launcher_mod._read_key = lambda: launcher_mod.KEY_ESCAPE
+            launcher_mod.shutil.get_terminal_size = lambda fallback: os.terminal_size((60, 14))
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                selected = launcher._hf_results_screen(candidates)
+        finally:
+            launcher_mod._clear_screen = old_clear
+            launcher_mod._read_key = old_read_key
+            launcher_mod.shutil.get_terminal_size = old_get_terminal_size
+
+        self.assertIsNone(selected)
+        rendered = out.getvalue()
+        lines = rendered.splitlines()
+        self.assertLessEqual(len(lines), 14)
+        self.assertEqual(lines[0], "")
+        self.assertIn("Hugging Face results", launcher_mod._ANSI_RE.sub("", lines[1]))
+        self.assertIn("Example/Model-0", launcher_mod._ANSI_RE.sub("", rendered))
+        for line in lines:
+            self.assertLessEqual(launcher_mod._visible_len(line), 60)
+
     def test_hqq4_interactive_preset_quantizer_symbol_available(self) -> None:
         weight = torch.linspace(-1.0, 1.0, steps=32, dtype=torch.float32).reshape(4, 8)
         tensors = quantize_hqq4_tensor_rust(weight, group_size=8, inner_threads=1)

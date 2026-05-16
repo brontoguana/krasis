@@ -74,6 +74,17 @@ fn env_f64(name: &str, default: f64) -> f64 {
         .unwrap_or(default)
 }
 
+fn current_cuda_free_mb() -> Option<usize> {
+    let mut free: usize = 0;
+    let mut total: usize = 0;
+    let err = unsafe { cuda_sys::lib().cuMemGetInfo_v2(&mut free, &mut total) };
+    if err == cuda_sys::CUresult::CUDA_SUCCESS {
+        Some(free / (1024 * 1024))
+    } else {
+        None
+    }
+}
+
 fn env_f64_list(name: &str, default: &[f64]) -> Vec<f64> {
     match std::env::var(name) {
         Ok(raw) => {
@@ -3257,15 +3268,46 @@ impl PinnedHostChunk {
 
     fn as_ptr(&self) -> *const u8 { self.data.as_ptr() }
     fn as_mut_ptr(&mut self) -> *mut u8 { self.data.as_mut_ptr() }
-}
 
-impl Drop for PinnedHostChunk {
-    fn drop(&mut self) {
+    fn register(&mut self) -> bool {
+        if self.registered {
+            return false;
+        }
+        let registered = unsafe {
+            let err = cuda_sys::lib().cuMemHostRegister_v2(
+                self.data.as_ptr() as *mut std::ffi::c_void,
+                self.data.len(),
+                0,
+            );
+            err == cuda_sys::CUresult::CUDA_SUCCESS
+        };
+        if registered {
+            self.registered = true;
+            true
+        } else {
+            log::warn!(
+                "PinnedHostChunk: cuMemHostRegister failed during reload for {} MB, using unpinned host buffer",
+                self.data.len() / (1024 * 1024),
+            );
+            false
+        }
+    }
+
+    fn unregister(&mut self) -> bool {
         if self.registered {
             unsafe {
                 cuda_sys::lib().cuMemHostUnregister(self.data.as_ptr() as *mut std::ffi::c_void);
             }
+            self.registered = false;
+            return true;
         }
+        false
+    }
+}
+
+impl Drop for PinnedHostChunk {
+    fn drop(&mut self) {
+        self.unregister();
     }
 }
 
@@ -3401,6 +3443,9 @@ struct HcsState {
     soft_total_chunks: usize,
     /// Number of chunks currently loaded (always a prefix: chunks 0..loaded-1).
     soft_chunks_loaded: usize,
+    /// Runtime pressure cap from measured below-safety evictions. Reload will
+    /// not exceed this cap until the process is restarted/recalibrated.
+    soft_pressure_cap_chunks: Option<usize>,
     /// Number of slots in the soft pool.
     soft_num_slots: usize,
     /// Bytes per soft slot (same as pool_slot_size).
@@ -3507,6 +3552,7 @@ impl HcsState {
             soft_slots_per_chunk: 0,
             soft_total_chunks: 0,
             soft_chunks_loaded: 0,
+            soft_pressure_cap_chunks: None,
             soft_num_slots: 0,
             soft_slot_size: 0,
             soft_slot_to_expert: Vec::new(),
@@ -3597,6 +3643,11 @@ impl HcsState {
                     }
                 }
             }
+            if let Some(host_chunk) = self.soft_host_chunks.get_mut(drop_idx) {
+                if host_chunk.unregister() {
+                    log::info!("HCS soft trim: unpinned host chunk {}", drop_idx);
+                }
+            }
         }
 
         if let Some(device) = route_sync_device {
@@ -3612,6 +3663,20 @@ impl HcsState {
         self.rebuild_dynamic_layer_slots();
 
         (evicted, freed_bytes)
+    }
+
+    fn apply_pressure_cap(&mut self, target_chunks: usize) {
+        self.soft_pressure_cap_chunks = Some(
+            self.soft_pressure_cap_chunks
+                .map(|cap| cap.min(target_chunks))
+                .unwrap_or(target_chunks),
+        );
+    }
+
+    fn pressure_capped_target_chunks(&self, target_chunks: usize) -> usize {
+        self.soft_pressure_cap_chunks
+            .map(|cap| target_chunks.min(cap))
+            .unwrap_or(target_chunks)
     }
 
     /// Check if a specific (layer, expert) is cached in VRAM.
@@ -13230,8 +13295,21 @@ impl GpuDecodeStore {
                     break;
                 }
             }
+            let host_chunk = PinnedHostChunk::new(chunk_bytes);
+            if let Ok((actual_free, _)) = cudarc::driver::result::mem_get_info() {
+                let actual_free_mb = actual_free / (1024 * 1024);
+                if actual_free_mb < startup_idle_floor_mb {
+                    log::warn!(
+                        "HCS soft tier: dropping chunk {} after host pin — free={} MB below idle floor={} MB",
+                        c, actual_free_mb, startup_idle_floor_mb,
+                    );
+                    drop(host_chunk);
+                    drop(chunk_buf);
+                    break;
+                }
+            }
             soft_chunks.push(chunk_buf);
-            soft_host_chunks.push(PinnedHostChunk::new(chunk_bytes));
+            soft_host_chunks.push(host_chunk);
             actual_soft_slots += slots_this_chunk;
         }
         soft_num_slots = actual_soft_slots;
@@ -13399,11 +13477,51 @@ impl GpuDecodeStore {
             sync_hcs_route_pointer_updates(&route_sync_device, "initial soft tier load", soft_loaded);
         }
 
+        if let Ok((actual_free, _)) = cudarc::driver::result::mem_get_info() {
+            let mut actual_free_mb = actual_free / (1024 * 1024);
+            if actual_free_mb < startup_idle_floor_mb {
+                let before_chunks = hcs.soft_chunks_loaded;
+                let mut target_chunks = hcs.soft_chunks_loaded;
+                while actual_free_mb < startup_idle_floor_mb && target_chunks > 0 {
+                    target_chunks -= 1;
+                    let (_evicted, _freed_bytes) =
+                        hcs.trim_soft_chunks_to(
+                            target_chunks,
+                            sync_route_ptrs.then_some(&route_sync_device),
+                        );
+                    if let Ok((free_after, _)) = cudarc::driver::result::mem_get_info() {
+                        actual_free_mb = free_after / (1024 * 1024);
+                    } else {
+                        break;
+                    }
+                }
+                if before_chunks != hcs.soft_chunks_loaded {
+                    hcs.apply_pressure_cap(hcs.soft_chunks_loaded);
+                    log::warn!(
+                        "HCS soft tier: post-load guard trimmed {} chunks to restore idle floor (free={} MB, floor={} MB)",
+                        before_chunks - hcs.soft_chunks_loaded,
+                        actual_free_mb,
+                        startup_idle_floor_mb,
+                    );
+                }
+            }
+        }
+
         let total_experts: usize = graph.moe_layers.iter()
             .filter_map(|m| m.as_ref())
             .map(|m| m.num_experts)
             .sum();
         let total_cached = hcs.num_cached;
+        let soft_cached = hcs.soft_num_cached;
+        let soft_loaded_slots = if hcs.soft_chunks_loaded >= hcs.soft_total_chunks {
+            hcs.soft_num_slots
+        } else {
+            hcs.soft_chunks_loaded
+                .saturating_mul(hcs.soft_slots_per_chunk)
+                .min(hcs.soft_num_slots)
+        };
+        let soft_loaded_mb = soft_loaded_slots.saturating_mul(hcs.soft_slot_size) as f64
+            / (1024.0 * 1024.0);
         let total_pct = if total_experts > 0 {
             total_cached as f64 / total_experts as f64 * 100.0
         } else { 0.0 };
@@ -13411,8 +13529,8 @@ impl GpuDecodeStore {
         let msg = format!(
             "{} | soft: {} experts in {:.2}s ({:.1} MB) | \
              total: {}/{} ({:.1}%) coverage",
-            result, soft_loaded, load_elapsed,
-            actual_soft_alloc_bytes as f64 / (1024.0 * 1024.0),
+            result, soft_cached, load_elapsed,
+            soft_loaded_mb,
             total_cached, total_experts, total_pct,
         );
         log::info!("{}", msg);
@@ -15887,6 +16005,13 @@ impl GpuDecodeStore {
     #[pyo3(signature = (actual_tokens=0))]
     fn py_hcs_reload_after_prefill(&mut self, actual_tokens: usize) -> (usize, f64) {
         self.hcs_reload_after_prefill(actual_tokens)
+    }
+
+    /// Drain below-safety VRAM pressure by evicting soft HCS chunks.
+    /// Returns (evicted_count, freed_mb, final_free_mb).
+    #[pyo3(signature = (reason="python_safe_point", force_measure=true))]
+    fn py_hcs_drain_vram_pressure(&mut self, reason: &str, force_measure: bool) -> (usize, f64, usize) {
+        self.hcs_drain_vram_pressure(reason, force_measure)
     }
 
     /// Copy KV cache from this store to an aux store (PyO3 wrapper for validation).
@@ -25629,6 +25754,42 @@ impl GpuDecodeStore {
 
         for step in 0..max_tokens {
             let pos = start_position + step;
+            if crate::vram_monitor::pressure_pending(self.device.ordinal() as i32).is_some() {
+                let (pressure_evicted, pressure_freed_mb, pressure_final_free_mb) =
+                    self.hcs_drain_vram_pressure("multi_decode_step_gpu0", false);
+                if pressure_evicted > 0 {
+                    trace_emit_global_mark(
+                        trace_config.as_ref(),
+                        "hcs",
+                        &format!(
+                            "phase=vram_pressure_eviction gpu=0 evicted={} freed_mb={:.1} final_free_mb={}",
+                            pressure_evicted,
+                            pressure_freed_mb,
+                            pressure_final_free_mb,
+                        ),
+                    );
+                }
+            }
+            for (i, &addr) in aux_store_addrs.iter().enumerate() {
+                let aux = unsafe { &mut *(addr as *mut GpuDecodeStore) };
+                if crate::vram_monitor::pressure_pending(aux.device.ordinal() as i32).is_some() {
+                    let (pressure_evicted, pressure_freed_mb, pressure_final_free_mb) =
+                        aux.hcs_drain_vram_pressure("multi_decode_step_aux", false);
+                    if pressure_evicted > 0 {
+                        trace_emit_global_mark(
+                            trace_config.as_ref(),
+                            "hcs",
+                            &format!(
+                                "phase=vram_pressure_eviction gpu={} evicted={} freed_mb={:.1} final_free_mb={}",
+                                i + 1,
+                                pressure_evicted,
+                                pressure_freed_mb,
+                                pressure_final_free_mb,
+                            ),
+                        );
+                    }
+                }
+            }
 
             // Check if per-layer graphs are available on ALL GPUs
             let mut use_graphs = self.graph.as_ref()
@@ -27930,6 +28091,11 @@ impl GpuDecodeStore {
                     evicted += 1;
                 }
             }
+            if let Some(host_chunk) = hcs.soft_host_chunks.get_mut(drop_idx) {
+                if host_chunk.unregister() {
+                    log::info!("HCS soft evict: unpinned host chunk {}", drop_idx);
+                }
+            }
 
             freed_bytes += chunk_bytes;
             chunks_to_drop += 1;
@@ -27992,6 +28158,144 @@ impl GpuDecodeStore {
         (evicted, freed_mb)
     }
 
+    pub fn hcs_drain_vram_pressure(&mut self, reason: &str, force_measure: bool) -> (usize, f64, usize) {
+        let device_id = self.device.ordinal() as i32;
+        let pending = crate::vram_monitor::pressure_pending(device_id);
+        if pending.is_none() && !force_measure {
+            return (0, 0.0, 0);
+        }
+
+        if let Err(e) = self.device.bind_to_thread() {
+            log::warn!(
+                "VRAM pressure eviction skipped: failed to bind cuda:{} for reason={} ({:?})",
+                device_id,
+                reason,
+                e,
+            );
+            return (0, 0.0, 0);
+        }
+
+        let observed_free_mb = current_cuda_free_mb().unwrap_or(0);
+        let store_safety_mb = self.hcs_safety_margin_mb();
+        let pending_safety_mb = pending
+            .map(|p| p.safety_margin_mb as usize)
+            .unwrap_or(0);
+        let safety_mb = store_safety_mb.max(pending_safety_mb);
+        if safety_mb == 0 {
+            crate::vram_monitor::clear_pressure(device_id);
+            return (0, 0.0, observed_free_mb);
+        }
+        if observed_free_mb >= safety_mb {
+            crate::vram_monitor::clear_pressure(device_id);
+            return (0, 0.0, observed_free_mb);
+        }
+
+        let route_sync_device = self.device.clone();
+        let graph = match self.graph.as_mut() {
+            Some(g) => g,
+            None => {
+                crate::vram_monitor::clear_pressure(device_id);
+                log::warn!(
+                    "VRAM pressure eviction skipped: graph unavailable for cuda:{} reason={} free={} MB safety={} MB",
+                    device_id,
+                    reason,
+                    observed_free_mb,
+                    safety_mb,
+                );
+                return (0, 0.0, observed_free_mb);
+            }
+        };
+        let sync_route_ptrs = graph.gpu_route_sync;
+        let hcs = match graph.hcs.as_mut() {
+            Some(h) => h,
+            None => {
+                crate::vram_monitor::clear_pressure(device_id);
+                log::warn!(
+                    "VRAM pressure eviction skipped: HCS unavailable for cuda:{} reason={} free={} MB safety={} MB",
+                    device_id,
+                    reason,
+                    observed_free_mb,
+                    safety_mb,
+                );
+                return (0, 0.0, observed_free_mb);
+            }
+        };
+
+        if hcs.soft_reload_pending {
+            log::warn!(
+                "VRAM pressure eviction skipped: soft reload pending on cuda:{} reason={} free={} MB safety={} MB",
+                device_id,
+                reason,
+                observed_free_mb,
+                safety_mb,
+            );
+            return (0, 0.0, observed_free_mb);
+        }
+
+        let before_chunks = hcs.soft_chunks_loaded;
+        let before_cached = hcs.soft_num_cached;
+        let mut final_free_mb = observed_free_mb;
+        let mut evicted = 0usize;
+        let mut freed_bytes = 0usize;
+
+        while final_free_mb < safety_mb && hcs.soft_chunks_loaded > 0 {
+            let target_chunks = hcs.soft_chunks_loaded - 1;
+            let (chunk_evicted, chunk_freed) = hcs.trim_soft_chunks_to(
+                target_chunks,
+                sync_route_ptrs.then_some(&route_sync_device),
+            );
+            evicted += chunk_evicted;
+            freed_bytes += chunk_freed;
+            final_free_mb = current_cuda_free_mb().unwrap_or(final_free_mb);
+            if chunk_evicted == 0 && chunk_freed == 0 {
+                break;
+            }
+        }
+
+        hcs.apply_pressure_cap(hcs.soft_chunks_loaded);
+        if final_free_mb >= safety_mb {
+            crate::vram_monitor::clear_pressure(device_id);
+        } else {
+            crate::vram_monitor::mark_pressure(device_id, final_free_mb as u64, safety_mb as u64);
+        }
+
+        let freed_mb = freed_bytes as f64 / (1024.0 * 1024.0);
+        if evicted > 0 || before_chunks != hcs.soft_chunks_loaded {
+            log::warn!(
+                "VRAM pressure eviction: cuda:{} reason={} observed_free={} MB safety={} MB evicted={} soft experts / {} chunks freed={:.1} MB final_free={} MB pressure_cap_chunks={}/{}",
+                device_id,
+                reason,
+                observed_free_mb,
+                safety_mb,
+                evicted,
+                before_chunks.saturating_sub(hcs.soft_chunks_loaded),
+                freed_mb,
+                final_free_mb,
+                hcs.soft_chunks_loaded,
+                hcs.soft_total_chunks,
+            );
+            eprintln!(
+                "VRAM pressure: evicted {} soft HCS experts / {} chunks; free={} MB after eviction (safety={} MB)",
+                evicted,
+                before_chunks.saturating_sub(hcs.soft_chunks_loaded),
+                final_free_mb,
+                safety_mb,
+            );
+        } else {
+            log::warn!(
+                "VRAM pressure unresolved: cuda:{} reason={} free={} MB safety={} MB no reclaimable soft chunks (soft_cached={} before_cached={})",
+                device_id,
+                reason,
+                final_free_mb,
+                safety_mb,
+                hcs.soft_num_cached,
+                before_cached,
+            );
+        }
+
+        (evicted, freed_mb, final_free_mb)
+    }
+
     /// Reload soft-tier HCS experts after prefill completes.
     /// Uses pre-packed host chunk buffers for batch DMA: one cuMemcpyHtoD per chunk
     /// instead of 4 calls per expert (e.g. 22 calls instead of 55,000).
@@ -28033,11 +28337,21 @@ impl GpuDecodeStore {
             .min(hcs.soft_max_mb);
         let target_soft_bytes = target_soft_mb.saturating_mul(1024 * 1024);
         let target_soft_slots = (target_soft_bytes / slot_size).min(hcs.soft_num_slots);
-        let target_chunks = if target_soft_slots == 0 {
+        let mut target_chunks = if target_soft_slots == 0 {
             0
         } else {
             ((target_soft_slots + spc - 1) / spc).min(hcs.soft_total_chunks)
         };
+        let uncapped_target_chunks = target_chunks;
+        target_chunks = hcs.pressure_capped_target_chunks(target_chunks);
+        if target_chunks < uncapped_target_chunks {
+            log::info!(
+                "HCS soft reload: pressure cap limits reload to {}/{} chunks (computed target={} chunks)",
+                target_chunks,
+                hcs.soft_total_chunks,
+                uncapped_target_chunks,
+            );
+        }
 
         if hcs.soft_chunks_loaded > target_chunks {
             let (evicted, freed_bytes) =
@@ -28154,6 +28468,20 @@ impl GpuDecodeStore {
 
             // Batch DMA: one call per chunk from pre-packed host buffer
             if c < hcs.soft_host_chunks.len() {
+                if hcs.soft_host_chunks[c].register() {
+                    if let Ok((actual_free, _)) = cudarc::driver::result::mem_get_info() {
+                        let actual_free_mb = actual_free / (1024 * 1024);
+                        if actual_free_mb < idle_floor_mb {
+                            log::warn!(
+                                "HCS soft reload: dropping chunk {} after host re-pin — free={} MB below idle floor={} MB",
+                                c, actual_free_mb, idle_floor_mb,
+                            );
+                            hcs.soft_host_chunks[c].unregister();
+                            drop(chunk_buf);
+                            break;
+                        }
+                    }
+                }
                 unsafe {
                     let err = cuda_sys::lib().cuMemcpyHtoD_v2(
                         chunk_base,
@@ -28365,11 +28693,21 @@ impl GpuDecodeStore {
             .min(hcs.soft_max_mb);
         let target_soft_bytes = target_soft_mb.saturating_mul(1024 * 1024);
         let target_soft_slots = (target_soft_bytes / slot_size).min(hcs.soft_num_slots);
-        let target_chunks = if target_soft_slots == 0 {
+        let mut target_chunks = if target_soft_slots == 0 {
             0
         } else {
             ((target_soft_slots + spc - 1) / spc).min(hcs.soft_total_chunks)
         };
+        let uncapped_target_chunks = target_chunks;
+        target_chunks = hcs.pressure_capped_target_chunks(target_chunks);
+        if target_chunks < uncapped_target_chunks {
+            log::info!(
+                "HCS soft async reload: pressure cap limits reload to {}/{} chunks (computed target={} chunks)",
+                target_chunks,
+                hcs.soft_total_chunks,
+                uncapped_target_chunks,
+            );
+        }
 
         if hcs.soft_chunks_loaded > target_chunks {
             let (evicted, freed_bytes) =
@@ -28516,6 +28854,20 @@ impl GpuDecodeStore {
 
             // Batch async DMA: one call per chunk from pre-packed host buffer
             if c < hcs.soft_host_chunks.len() {
+                if hcs.soft_host_chunks[c].register() {
+                    if let Ok((actual_free, _)) = cudarc::driver::result::mem_get_info() {
+                        let actual_free_mb = actual_free / (1024 * 1024);
+                        if actual_free_mb < idle_floor_mb {
+                            log::warn!(
+                                "HCS soft async reload: dropping chunk {} after host re-pin — free={} MB below idle floor={} MB",
+                                c, actual_free_mb, idle_floor_mb,
+                            );
+                            hcs.soft_host_chunks[c].unregister();
+                            drop(chunk_buf);
+                            break;
+                        }
+                    }
+                }
                 unsafe {
                     let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
                         chunk_base,
@@ -29156,6 +29508,26 @@ impl GpuDecodeStore {
 
             // Check if async soft-tier reload has completed
             self.hcs_check_soft_reload_complete();
+            if crate::vram_monitor::pressure_pending(self.device.ordinal() as i32).is_some() {
+                let (pressure_evicted, pressure_freed_mb, pressure_final_free_mb) =
+                    self.hcs_drain_vram_pressure("decode_step", false);
+                if pressure_evicted > 0 {
+                    trace_emit_mark(
+                        trace_config.as_ref(),
+                        step,
+                        pos,
+                        next_token,
+                        None,
+                        "hcs",
+                        &format!(
+                            "phase=vram_pressure_eviction evicted={} freed_mb={:.1} final_free_mb={}",
+                            pressure_evicted,
+                            pressure_freed_mb,
+                            pressure_final_free_mb,
+                        ),
+                    );
+                }
+            }
 
             if use_speculative {
                 // ── Phase 2: Batched Speculative Decode ──
