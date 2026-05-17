@@ -149,6 +149,44 @@ class LauncherMatrixTest(unittest.TestCase):
             self.assertEqual(launcher_mod._visible_len(line), 96)
         self.assertIn("Krasis MoE Server v9.8.7-test", launcher_mod._ANSI_RE.sub("", lines[1]))
 
+    def test_self_update_channels_use_installer_contract(self) -> None:
+        self.assertEqual(launcher_mod._self_update_bash_args("stable"), ["bash", "-s", "--"])
+        self.assertEqual(
+            launcher_mod._self_update_bash_args("prerelease"),
+            ["bash", "-s", "--", "prerelease"],
+        )
+
+        old_fetch = launcher_mod._fetch_installer_script
+        old_run = launcher_mod.subprocess.run
+        calls: list[tuple[list[str], bytes, bool]] = []
+
+        def fake_run(args, *, input=None, check=False, **_kwargs):
+            calls.append((list(args), input, check))
+            return subprocess.CompletedProcess(args, 0)
+
+        try:
+            launcher_mod._fetch_installer_script = lambda: b"#!/bin/bash\necho installer\n"
+            launcher_mod.subprocess.run = fake_run
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(SystemExit) as stable_exit:
+                    launcher_mod._do_self_update("stable")
+            self.assertEqual(stable_exit.exception.code, 0)
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(SystemExit) as prerelease_exit:
+                    launcher_mod._do_self_update("prerelease")
+            self.assertEqual(prerelease_exit.exception.code, 0)
+        finally:
+            launcher_mod._fetch_installer_script = old_fetch
+            launcher_mod.subprocess.run = old_run
+
+        self.assertEqual(calls[0], (["bash", "-s", "--"], b"#!/bin/bash\necho installer\n", False))
+        self.assertEqual(
+            calls[1],
+            (["bash", "-s", "--", "prerelease"], b"#!/bin/bash\necho installer\n", False),
+        )
+
     def test_hf_results_screen_fits_short_terminal_without_wrapping(self) -> None:
         long_summary = " ".join(["very-long-summary"] * 20)
         candidates = [

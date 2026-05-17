@@ -19,6 +19,7 @@ import sys
 import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
+import urllib.request
 
 from krasis.attention_backend import (
     ATTENTION_QUANT_CHOICES,
@@ -64,6 +65,7 @@ _ANSI_RE = re.compile(r"\033\[[0-9;]*m")
 
 INTERACTIVE_ATTENTION_QUANT_CHOICES = ("hqq4", "hqq46_auto", "hqq6", "hqq68_auto")
 INTERACTIVE_HQQ_AUTO_BUDGET_PCT = 10.0
+INSTALLER_URL = "https://raw.githubusercontent.com/brontoguana/krasis/main/install.sh"
 
 
 def _visible_len(s: str) -> int:
@@ -2427,6 +2429,8 @@ def parse_args() -> argparse.Namespace:
             "  krasis chat [args]      Chat client (connect to running server)\n"
             "  krasis sanity           Run sanity test prompts against running server\n"
             "  krasis kill             Terminate all running krasis instances\n"
+            "  krasis update           Update to the latest stable GitHub release\n"
+            "  krasis prerelease       Update to the latest GitHub pre-release\n"
             "\n"
             "chat options:\n"
             "  krasis chat                         Interactive chat (default)\n"
@@ -2446,6 +2450,8 @@ def parse_args() -> argparse.Namespace:
             "  krasis chat --file test.txt         # run prompts from file\n"
             "  krasis sanity                       # run sanity test prompts\n"
             "  krasis kill                         # stop all krasis processes\n"
+            "  krasis update                       # update to latest stable release\n"
+            "  krasis prerelease                   # update to latest pre-release\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -2785,6 +2791,43 @@ def _do_kill():
                 pass
 
 
+def _self_update_bash_args(channel: str) -> List[str]:
+    if channel not in ("stable", "prerelease"):
+        raise ValueError(f"unsupported update channel: {channel}")
+    args = ["bash", "-s", "--"]
+    if channel == "prerelease":
+        args.append("prerelease")
+    return args
+
+
+def _fetch_installer_script(url: str = INSTALLER_URL) -> bytes:
+    with urllib.request.urlopen(url, timeout=30) as response:
+        data = response.read()
+    if not data.startswith(b"#!/bin/bash"):
+        raise RuntimeError(f"Downloaded installer from {url} did not look like a bash script")
+    return data
+
+
+def _do_self_update(channel: str) -> None:
+    label = "latest pre-release" if channel == "prerelease" else "latest stable release"
+    print(f"Updating Krasis to the {label} from GitHub...")
+    try:
+        installer = _fetch_installer_script()
+    except Exception as exc:
+        print(f"Error: failed to download Krasis installer: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    proc = subprocess.run(_self_update_bash_args(channel), input=installer, check=False)
+    sys.exit(proc.returncode)
+
+
+def _reject_extra_subcommand_args(command: str) -> None:
+    if len(sys.argv) <= 2:
+        return
+    print(f"Usage: krasis {command}", file=sys.stderr)
+    sys.exit(2)
+
+
 def main():
     # Handle subcommands early — before argparse, no GPU detection needed
     if len(sys.argv) > 1 and sys.argv[1] == "chat":
@@ -2801,6 +2844,16 @@ def main():
 
     if len(sys.argv) > 1 and sys.argv[1] == "kill":
         _do_kill()
+        return
+
+    if len(sys.argv) > 1 and sys.argv[1] == "update":
+        _reject_extra_subcommand_args("update")
+        _do_self_update("stable")
+        return
+
+    if len(sys.argv) > 1 and sys.argv[1] == "prerelease":
+        _reject_extra_subcommand_args("prerelease")
+        _do_self_update("prerelease")
         return
 
     args = parse_args()

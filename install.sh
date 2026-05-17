@@ -4,9 +4,11 @@
 #
 # Install / upgrade (latest stable):
 #   curl -sSf https://raw.githubusercontent.com/brontoguana/krasis/main/install.sh | bash
+#   krasis update
 #
 # Install latest pre-release:
 #   curl -sSf https://raw.githubusercontent.com/brontoguana/krasis/main/install.sh | bash -s -- prerelease
+#   krasis prerelease
 #
 # Uninstall:
 #   curl -sSf https://raw.githubusercontent.com/brontoguana/krasis/main/install.sh | bash -s -- --uninstall
@@ -455,8 +457,8 @@ else
     echo -e "  3. Run ${BOLD}krasis${NC}         — launch the interactive TUI"
     echo ""
 fi
-echo -e "${DIM}Upgrade:    curl -sSf https://raw.githubusercontent.com/brontoguana/krasis/main/install.sh | bash${NC}"
-echo -e "${DIM}Pre-release: curl -sSf https://raw.githubusercontent.com/brontoguana/krasis/main/install.sh | bash -s -- prerelease${NC}"
+echo -e "${DIM}Upgrade:    krasis update${NC}"
+echo -e "${DIM}Pre-release: krasis prerelease${NC}"
 echo -e "${DIM}Uninstall:  curl -sSf https://raw.githubusercontent.com/brontoguana/krasis/main/install.sh | bash -s -- --uninstall${NC}"
 
 } # end do_install

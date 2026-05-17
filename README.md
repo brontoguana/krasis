@@ -125,7 +125,10 @@ The launcher walks you through model selection and configuration via a TUI. Firs
 
 ```bash
 # Upgrade
-curl -sSf https://raw.githubusercontent.com/brontoguana/krasis/main/install.sh | bash
+krasis update
+
+# Upgrade to latest pre-release
+krasis prerelease
 
 # Uninstall (keeps model files)
 curl -sSf https://raw.githubusercontent.com/brontoguana/krasis/main/install.sh | bash -s -- --uninstall
