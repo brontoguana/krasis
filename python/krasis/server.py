@@ -967,25 +967,30 @@ def main():
     _run_dir = get_run_dir(_default_run_type)
 
     log_format = "%(asctime)s %(name)s %(levelname)s %(message)s"
-    logging.basicConfig(level=logging.INFO, format=log_format)
+    _root_logger = logging.getLogger()
+    _root_logger.setLevel(logging.INFO)
+    for _handler in list(_root_logger.handlers):
+        _root_logger.removeHandler(_handler)
+        _handler.close()
 
     _log_file = os.path.join(_run_dir, "krasis.log")
 
     _file_handler = logging.FileHandler(_log_file, mode="w")
     _file_handler.setLevel(logging.DEBUG)
     _file_handler.setFormatter(logging.Formatter(log_format))
-    logging.getLogger().addHandler(_file_handler)
+    _root_logger.addHandler(_file_handler)
 
     # Write run note to top of log file if provided
     if args.note:
         with open(_log_file, "w") as _nf:
             _nf.write(f"=== RUN NOTE: {args.note} ===\n\n")
         # Re-open handler in append mode so logging doesn't overwrite the note
-        logging.getLogger().removeHandler(_file_handler)
+        _root_logger.removeHandler(_file_handler)
+        _file_handler.close()
         _file_handler = logging.FileHandler(_log_file, mode="a")
         _file_handler.setLevel(logging.DEBUG)
         _file_handler.setFormatter(logging.Formatter(log_format))
-        logging.getLogger().addHandler(_file_handler)
+        _root_logger.addHandler(_file_handler)
 
     # Capture uncaught exceptions to the log file (main thread)
     _original_excepthook = sys.excepthook
@@ -1000,8 +1005,10 @@ def main():
                         exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
     threading.excepthook = _log_threading_excepthook
 
-    # Tee stdout/stderr through logging so the run log captures the same
-    # operator-visible lines that appear on screen.
+    # Tee stdout/stderr to the file logger while preserving clean terminal
+    # output. The root logger intentionally has no console handler here: log
+    # records get prefixed in krasis.log, while operator-visible print/eprintln
+    # lines remain unprefixed in the terminal.
     class _StreamLogger:
         def __init__(self, original, log):
             self._original = original

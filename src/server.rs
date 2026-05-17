@@ -119,6 +119,51 @@ struct ServerInfo {
     max_context_tokens: usize,
 }
 
+fn drain_vram_pressure_for_state(
+    state: &mut ServerState,
+    reason: &str,
+    force_measure: bool,
+) -> usize {
+    let mut total_evicted = 0usize;
+    if state.gpu_store_addr != 0 {
+        let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
+        let (evicted, freed_mb, final_free_mb) =
+            store.hcs_drain_vram_pressure(reason, force_measure);
+        if evicted > 0 {
+            log::warn!(
+                "VRAM pressure drain {} primary: evicted {} soft experts, freed {:.1} MB, final_free={} MB",
+                reason,
+                evicted,
+                freed_mb,
+                final_free_mb,
+            );
+            total_evicted += evicted;
+        }
+    }
+
+    for (idx, &addr) in state.aux_gpu_store_addrs.iter().enumerate() {
+        if addr == 0 {
+            continue;
+        }
+        let aux_reason = format!("{}_aux{}", reason, idx + 1);
+        let store = unsafe { &mut *(addr as *mut GpuDecodeStore) };
+        let (evicted, freed_mb, final_free_mb) =
+            store.hcs_drain_vram_pressure(&aux_reason, force_measure);
+        if evicted > 0 {
+            log::warn!(
+                "VRAM pressure drain {}: evicted {} soft experts, freed {:.1} MB, final_free={} MB",
+                aux_reason,
+                evicted,
+                freed_mb,
+                final_free_mb,
+            );
+            total_evicted += evicted;
+        }
+    }
+
+    total_evicted
+}
+
 enum ModelRequest {
     Chat {
         stream: TcpStream,
@@ -2596,7 +2641,9 @@ impl RustServer {
                             Ok(ModelRequest::ReferenceTest { mut stream, body }) => {
                                 handle_reference_test(&mut stream, &body, &mut state);
                             }
-                            Err(mpsc::RecvTimeoutError::Timeout) => {}
+                            Err(mpsc::RecvTimeoutError::Timeout) => {
+                                drain_vram_pressure_for_state(&mut state, "idle", false);
+                            }
                             Err(mpsc::RecvTimeoutError::Disconnected) => break,
                         }
                     }

@@ -567,12 +567,6 @@ impl VramMonitor {
                                         margin_mb,
                                         margin_mb.saturating_sub(free_mb),
                                     );
-                                    log::error!(
-                                        "VRAM MONITOR: cuda:{} free VRAM dropped to {} MB, below hard exit floor {} MB. Exiting to prevent CUDA OOM/illegal-address state.",
-                                        dev.device_id,
-                                        free_mb,
-                                        VRAM_HARD_EXIT_FLOOR_MB,
-                                    );
                                     eprintln!(
                                         "\x1b[1;31mVRAM MONITOR: cuda:{} free VRAM dropped to {} MB, below hard exit floor {} MB. Exiting.\x1b[0m",
                                         dev.device_id,
@@ -597,14 +591,6 @@ impl VramMonitor {
                                         let deficit_mb = margin_mb.saturating_sub(free_mb);
                                         append_safety_limit_dump(
                                             "below_safety_margin",
-                                            dev.device_id,
-                                            free_mb,
-                                            margin_mb,
-                                            deficit_mb,
-                                        );
-                                        log::warn!(
-                                            "VRAM MONITOR: new low on cuda:{} — {} MB free \
-                                             (safety margin: {} MB, deficit: {} MB)",
                                             dev.device_id,
                                             free_mb,
                                             margin_mb,

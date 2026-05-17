@@ -149,6 +149,21 @@ class LauncherMatrixTest(unittest.TestCase):
             self.assertEqual(launcher_mod._visible_len(line), 96)
         self.assertIn("Krasis MoE Server v9.8.7-test", launcher_mod._ANSI_RE.sub("", lines[1]))
 
+    def test_launcher_on_off_labels_are_consistent(self) -> None:
+        bool_opt = launcher_mod.ConfigOption("Test bool", "test_bool")
+        ssh_opt = launcher_mod.ConfigOption("SSH Tunnel", "ssh_tunnel", opt_type="text")
+
+        enabled = launcher_mod._format_value(bool_opt, True)
+        disabled = launcher_mod._format_value(bool_opt, False)
+        ssh_disabled = launcher_mod._format_value(ssh_opt, "")
+
+        self.assertEqual(launcher_mod._ANSI_RE.sub("", enabled), "On")
+        self.assertEqual(launcher_mod._ANSI_RE.sub("", disabled), "Off")
+        self.assertEqual(launcher_mod._ANSI_RE.sub("", ssh_disabled), "Off")
+        self.assertIn(launcher_mod.GREEN, enabled)
+        self.assertIn(launcher_mod.DIM, disabled)
+        self.assertIn(launcher_mod.DIM, ssh_disabled)
+
     def test_self_update_channels_use_installer_contract(self) -> None:
         self.assertEqual(launcher_mod._self_update_bash_args("stable"), ["bash", "-s", "--"])
         self.assertEqual(

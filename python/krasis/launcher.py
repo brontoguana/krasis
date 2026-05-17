@@ -883,10 +883,14 @@ def _format_attention_quant_value(attention_quant: str, hqq_auto_budget_pct: Opt
     return attention_quant_label(attention_quant)
 
 
+def _format_on_off(enabled: bool) -> str:
+    return f"{GREEN}On{NC}" if enabled else f"{DIM}Off{NC}"
+
+
 def _format_value(opt: ConfigOption, val: Any) -> str:
     """Format a config value for display."""
     if isinstance(val, bool):
-        return f"{GREEN}ON{NC}" if val else f"{DIM}OFF{NC}"
+        return _format_on_off(val)
     if opt.key == "layer_group_size":
         return f"{val} layers (double-buffered)"
     if opt.key == "kv_cache_mb":
@@ -899,7 +903,7 @@ def _format_value(opt: ConfigOption, val: Any) -> str:
     if opt.key == "attention_quant":
         return _format_attention_quant_value(str(val))
     if opt.key == "ssh_tunnel":
-        return str(val) if val else f"{DIM}off{NC}"
+        return str(val) if val else _format_on_off(False)
     if opt.key == "gpu_expert_int4_calib":
         return str(val)
     return str(val)
@@ -1618,10 +1622,10 @@ class Launcher:
                 lines.append(f"  {DIM}{msg}{NC}")
 
         lines.append("")
-        advanced_state = "ON" if show_advanced else "off"
+        advanced_state = _format_on_off(show_advanced)
         lines.append(
             f"  {DIM}[\u2191\u2193] Navigate  [\u2190\u2192] Change  [Enter] Launch  "
-            f"[A] Advanced:{advanced_state}  [L] Load  [S] Save  [q] Quit{NC}"
+            f"[A] Advanced:{NC}{advanced_state}{DIM}  [L] Load  [S] Save  [q] Quit{NC}"
         )
 
         return "\n".join(lines)
