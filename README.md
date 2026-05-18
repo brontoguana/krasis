@@ -1,80 +1,109 @@
 # Krasis
 
-Python-orchestrated Rust LLM runtime. Runs 200B+ parameter models on commodity hardware with full GPU prefill and decode.
+Krasis is an LLM runtime for running large MoE models on NVIDIA consumer GPUs.
+It is built around fast GPU prompt processing, GPU-executed decode, and HCS
+expert residency management so models much larger than VRAM can still run
+locally.
 
-You can [contact me here](https://forms.gle/ue4nvyvNNHtUZ7MQ7) but for bugs, difficulties, suggestions or requests for support for other models please report an issue instead.
+The current runtime is no longer the early Python-hot-path prototype. The
+serving path is Rust/CUDA focused: Python is used for launcher/setup/model
+loading work, while the performance-sensitive runtime path uses Rust/CUDA
+orchestration, CUDA kernels, cached quantized weights, and measured VRAM
+budgeting.
 
-If you want to easily monitor Krasis during runs, [check out ktop](https://github.com/brontoguana/ktop).
+You can [contact me here](https://forms.gle/ue4nvyvNNHtUZ7MQ7), but for bugs,
+setup problems, model requests, or feature requests please open a GitHub issue.
+
+If you want to monitor Krasis during runs, [check out ktop](https://github.com/brontoguana/ktop).
 
 ![Krasis Server](krasis_server_3.png)
 
-## Krasis runs LLMs fast on consumer grade hardware (single GPU)
+## What Krasis Does
 
-Krasis can run large language models that are much too large to fit in a consumer GPU (multi-hundred gigabyte model with 80- 500+ billion parameters) on consumer or accessible server hardware that doesn't require the huge cost to host the entire model in VRAM. 
+- Runs multi-hundred-billion-parameter MoE models from BF16 safetensors on
+  commodity NVIDIA GPU systems.
+- Uses full GPU prefill for fast prompt processing.
+- Uses GPU-executed decode with HCS managing hot/cold expert residency between
+  VRAM and CPU RAM.
+- Builds cached INT4/INT8 expert formats and HQQ attention caches under
+  `~/.krasis`.
+- Supports compact KV cache modes including `k6v6` Quality and `k4v4` Ultra
+  Compact.
+- Provides an interactive launcher, OpenAI-compatible API, chat client,
+  reproducible benchmarks, and GitHub-release based installation.
 
-## Latest News
+## Major Changes Since The Previous Stable Release
 
-* [Krasis subreddit is now available](https://www.reddit.com/r/krasis/) for anyone that wants to follow Krasis news and updates more closely.
-* Multi-GPU pre-release now available via the latest release.  This won't improve prefill speed but could improve decode speed on multi GPU systems with similar GPUs.
-* Fix for higher system RAM usage than expected.
+The current release line is a major change from `v0.1.64`, the previous stable
+Krasis release. Highlights:
+
+- Runtime hot-path work moved out of Python and into Rust/CUDA for serving,
+  decode orchestration, timing, HCS operations, and benchmark-critical paths.
+- Added HQQ attention support, including HQQ4, HQQ6, HQQ8, auto mixed profiles,
+  cache build/rebuild support, and HQQ benchmark/validation lanes.
+- Added compact KV cache formats, including `k6v6` and `k4v4`, with `k6v6`
+  as the quality-oriented launcher default and `k4v4` for tighter VRAM budgets.
+- Added and hardened HCS expert residency management: measured startup
+  calibration, prompt-conditioned reload, dynamic recency tail, per-stage
+  budgets, soft-tier reload caps, and safe eviction/reload paths.
+- Added runtime VRAM safety systems: short/long prefill/decode calibration,
+  measured scratch budgets, pressure detection, idle pressure drain, and hard
+  exit protection before CUDA enters an unsafe OOM state.
+- Added full GitHub release wheel packaging for Python 3.10, 3.11, 3.12, and
+  3.13, with vendored CUDA sidecars injected into wheels.
+- Added `krasis update` and `krasis prerelease` maintenance commands.
+- Added an interactive Hugging Face downloader/search flow in the launcher.
+- Added reverse SSH tunnel support for exposing a local Krasis server to a
+  remote machine through SSH without opening public ports.
+- Added repeatable benchmark and release-test commands, benchmark log archival,
+  llama-witness based correctness validation, and richer diagnostics.
+- Removed Session messenger integration and other stale prototype-era surfaces.
+- Cleaned terminal/log output so human console lines are clean while prefixed
+  records go to log files.
+- Deprecated AWQ and Polar4 for new production runs. Current production
+  surfaces use HQQ attention plus `k6v6`, `k4v4`, or BF16 KV depending on the
+  memory/quality target.
 
 ## Benchmarks
 
-### 1x RTX 5090 32GB (PCIE 4.0)
+Current reproducible benchmark summaries live in
+[benchmarks/BENCHMARKS.md](benchmarks/BENCHMARKS.md). Timing instrumentation is
+disabled for speed numbers.
 
-- 1x Epyc 7742, 8-channel DDR4
-- 1x RTX 5090 on PCIE 4.0 (bottlenecked to 32GB/sec since the 5090 supports PCIE 5.0 at 64GB/sec)
-- **Most models (Qwen-3.5-35B at Q4 being the exception) are unable to entirely fit in GPU VRAM.** Krasis **streams through VRAM** as necessary using algorithms optimised for the prefill stage and then the decode stage.
-- Q4 model (BF16 attention, AWQ also supported for more limited VRAM cards)
+Recent standard Qwen3-Coder-Next speed test:
 
-| Model                 | Params | BF16 Size / INT4 Size | Prefill (pp) | Decode (tg)   | Release |
-| :-------------------- | :----: | :-------------------: | ------------ | ------------- | ------- |
-| **Qwen3.5-35B-A3B**   |  35B   |     67 GB / 16GB      | 4475 tok/sec | 109.1 tok/sec | v0.1.63 |
-| **Qwen3-Coder-Next**  |  80B   |     159 GB / 38GB     | 3560 tok/sec | 70.3 tok/sec  | v0.1.63 |
-| **Qwen3.5-122B-A10B** |  122B  |     234 GB / 56GB     | 2897 tok/sec | 27.7 tok/sec  | v0.1.63 |
-| **Qwen3-235B-A22B**   |  235B  |    438 GB / 110GB     | 2124 tok/sec | 9.3 tok/sec   | v0.1.63 |
+| Hardware | Model | Attention | KV | Prefill | Decode | HTTP round trip | HCS | Min free VRAM |
+|----------|-------|-----------|----|--------:|-------:|----------------:|-----|--------------:|
+| RTX 5090 32 GB | Qwen3-Coder-Next | HQQ8 | k4v4 | 6111.2 tok/s | 88.59 tok/s | 157.00 tok/s | 15633/24576 | 656 MB |
 
-### 1x RTX 5080 16GB (PCIE 4.0)
+Additional recent benchmark rows include Qwen3.5-35B-A3B, Qwen3.5-122B-A10B,
+Qwen3-235B-A22B, RTX A4500, and RTX 5080 WSL runs. See the benchmark log index
+for exact commands, configs, logs, HCS coverage, and VRAM low-water marks.
 
-| Model                | Params | BF16 Size / INT4 Size | Prefill (pp) | Decode (tg)  | Release |
-| -------------------- | :----: | :-------------------: | ------------ | ------------ | ------- |
-| **Qwen3-Coder-Next** |  80B   |     159 GB / 38GB     | 1801 tok/sec | 26.8 tok/sec | v0.1.63 |
+## Tradeoffs And Requirements
 
-## Krasis tradeoffs
+- Krasis currently targets NVIDIA GPUs with CUDA.
+- Input models should be BF16 safetensors from Hugging Face or another local
+  safetensors source.
+- First run is slower because Krasis builds optimized local caches. Later runs
+  reuse those caches.
+- Disk usage must cover the source model plus Krasis cache artifacts under
+  `~/.krasis`.
+- System RAM should be sized for the selected quantized cache and HCS backing
+  store. Larger models need substantial RAM even when GPU VRAM is limited.
+- Production runs should use quantized INT4/INT8 expert caches and HQQ
+  attention. BF16-heavy modes are validation/debug modes, not normal deployment
+  targets.
 
-In order to achieve these speeds, Krasis has a few requirements.
-
-- Krasis currently only works with **NVidia GPUs**
-- Krasis must be given the **BF16 safetensors model** downloaded from [HuggingFace](https://huggingface.co/)
-- **Krasis uses comparable system RAM to other runtimes**.  Krasis will auto-quantize to INT4 or INT8 from the safetensors model provided and build a cache on disk, then load that into system RAM.
-- Krasis **will take some time to load on the first run** as it is doing a lot of pre-run work to optimise everything for runtime, much of this is cached for later runs though so subsequent runs will be quicker.
-- Krasis optimises models and caches them in <home folder>/.krasis, these can be large so you may need disk space for the original model BF16 model plus the quantised model size.
-- **Krasis is optimised to run models at Q4 and Q8**, which are generally very good trade-offs vs either running the full precision weights or heavily quantised models much lowered quality.
-
-## Perplexity (Quantization Quality)
-
-Measured with INT4 GPU + INT4 CPU experts (Q4), BF16 attention, INT8 shared/MLP/lm_head, FP8 KV cache. Sliding window (2048 tokens, stride 1024).
-
-| Model | Dataset | Tokens | PPL | BPC |
-|-------|---------|:------:|:---:|:---:|
-| **Qwen3-Coder-Next** | WikiText-2 | 299K | 7.23 | 2.85 |
-| **Qwen3-Coder-Next** | C4 validation | 1M | 12.52 | 3.65 |
-| **DeepSeek V2-Lite** | WikiText-2 | 307K | 6.03 | 2.59 |
-| **DeepSeek V2-Lite** | C4 validation | 500K | 9.22 | 3.20 |
-| **Qwen3.5-35B-A3B** | WikiText-2 | 297K | 6.41 | 2.68 |
-
-## Running Krasis - Quick Start
+## Quick Start
 
 ### Requirements
 
-- **Linux** (Ubuntu 24.04+, or WSL2 on Windows)
-- **Python 3.10+**
-- **NVIDIA GPU** with CUDA drivers installed
-- **System RAM**: roughly 2x the quantised model size
-    - e.g. if BF16 is 100GB, Q8 is 50GB, Q4 is 25GB
-        - to run at Q8 required 2x50GB = 100GB system RAM
-        - to run at Q4 requires 2x25GB = 50GB system RAM
-- **Disk space**: roughly the BF16 model size plus 2x the quantised model size (see system ram)
+- Linux, including Ubuntu 24.04+ or WSL2 on Windows
+- Python 3.10+
+- NVIDIA GPU with CUDA drivers installed
+- Rust is only needed for source builds, not normal wheel installs
+- Enough disk/RAM for the source model and generated Krasis caches
 
 ### 1. Install Krasis
 
@@ -82,35 +111,35 @@ Measured with INT4 GPU + INT4 CPU experts (Q4), BF16 attention, INT8 shared/MLP/
 curl -sSf https://raw.githubusercontent.com/brontoguana/krasis/main/install.sh | bash
 ```
 
-This creates a Python environment at `~/.krasis/venv`, installs Krasis, symlinks the commands into `~/.local/bin`, and adds that directory to your PATH. No sudo required. Works immediately in the current terminal session.
+This creates a managed environment at `~/.krasis/venv`, installs Krasis,
+symlinks commands into `~/.local/bin`, and updates PATH for the current shell.
+No sudo is required for the Krasis install itself.
 
-### 2. Install CUDA dependencies
+### 2. Install CUDA Dependencies
 
 ```bash
 krasis-setup
 ```
 
-This installs the CUDA toolkit (if needed), PyTorch, and sgl-kernel. May need sudo for the CUDA toolkit. Only required once.
+This installs runtime CUDA/PyTorch dependencies when needed. It is usually only
+required once per machine.
 
-### 3. Download a model
+### 3. Download A Model
+
+Run:
 
 ```bash
-pip install huggingface-hub   # if you don't have it
-
-huggingface-cli download deepseek-ai/DeepSeek-V2-Lite \
-    --local-dir ~/.krasis/models/DeepSeek-V2-Lite
+krasis
 ```
 
-Krasis needs the BF16 safetensors model from HuggingFace. Put it under `~/.krasis/models/`. Some other models you can download:
+Then use the interactive launcher to search/download supported Hugging Face
+models, or put BF16 safetensors manually under `~/.krasis/models/`.
+
+Manual download example:
 
 ```bash
-# Qwen3-Coder-Next (80B params, ~148 GB)
 huggingface-cli download Qwen/Qwen3-Coder-Next \
     --local-dir ~/.krasis/models/Qwen3-Coder-Next
-
-# Qwen3-235B (235B params, ~438 GB)
-huggingface-cli download Qwen/Qwen3-235B-A22B \
-    --local-dir ~/.krasis/models/Qwen3-235B-A22B
 ```
 
 ### 4. Run
@@ -119,43 +148,42 @@ huggingface-cli download Qwen/Qwen3-235B-A22B \
 krasis
 ```
 
-The launcher walks you through model selection and configuration via a TUI. First run takes longer as Krasis builds optimised weight caches (these are saved to disk for subsequent runs).
+The launcher walks through model selection, GPU selection, quantization/runtime
+options, and server startup. Settings are saved under `~/.krasis/config`.
 
-### Upgrade / Uninstall
+## Updating
 
 ```bash
-# Upgrade
+# Latest stable release
 krasis update
 
-# Upgrade to latest pre-release
+# Latest pre-release
 krasis prerelease
 
-# Uninstall (keeps model files)
+# Uninstall Krasis, keeping model files
 curl -sSf https://raw.githubusercontent.com/brontoguana/krasis/main/install.sh | bash -s -- --uninstall
 ```
 
-### WSL2 (Windows)
+## WSL2
 
-Krasis works on WSL2. By default WSL only uses 50% of your system RAM, which is usually not enough for large models. Create or edit `C:\Users\<YourUsername>\.wslconfig`:
+Krasis works on WSL2. By default WSL often limits available memory, which is
+usually too small for large MoE models. Create or edit:
+
+```text
+C:\Users\<YourUsername>\.wslconfig
+```
+
+Example:
 
 ```ini
 [wsl2]
 memory=120GB
 ```
 
-Adjust the value to leave ~8 GB for Windows. Restart WSL from PowerShell with `wsl --shutdown`, then follow the install steps above inside WSL.
+Adjust the value to leave memory for Windows, then restart WSL from PowerShell:
 
-### Install from source
-
-Requires a Rust toolchain (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`):
-
-```bash
-git clone https://github.com/brontoguana/krasis.git
-cd krasis
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e .
-krasis-setup
-krasis
+```powershell
+wsl --shutdown
 ```
 
 ## Usage
@@ -166,93 +194,120 @@ krasis
 krasis
 ```
 
-The launcher walks you through a TUI with four screens:
+The launcher provides:
 
-1. **Model selection** — scans `~/.krasis/models/` for safetensors models, shows architecture, layer count, expert count, and estimated RAM
-2. **CPU expert source** — build INT4 or INT8 from the native model, or select an existing GGUF file
-3. **GPU selection** — multi-select your GPUs (Space to toggle, Enter to confirm)
-4. **Configuration editor** — tune all quantization and runtime options with a live VRAM budget display showing per-GPU memory usage and estimated context length
-
-All settings are saved to `~/.krasis/config` and reloaded on subsequent launches.
-
-On the final screen you can choose to launch immediately or run a benchmark first.
+- model selection from local models
+- Hugging Face model search and download
+- GPU selection, including selected GPU indices
+- quantization, HQQ attention, KV cache, HCS, and VRAM safety settings
+- optional reverse SSH tunnel target
+- benchmark/run choices
 
 ### Non-Interactive Launch
 
 ```bash
-# Use saved config from last TUI session
+# Use saved config
 krasis --non-interactive
 
-# Override specific settings
-krasis --non-interactive --model-path /path/to/model --num-gpus 2 --benchmark
+# Use a config file
+krasis --config tests/qcn-k4v4-hqq8-int4-benchmark.conf
+
+# Override selected values
+krasis --non-interactive --model-path /path/to/model --selected-gpus 0,2 --benchmark
 ```
 
-### Benchmark Suite
+Common options:
 
-Run all model × config combinations automatically from a single config file. Edit `benchmarks/benchmark_suite.toml` to define which models and hardware configurations to test:
+- `--attention-quant hqq6` or `hqq8`
+- `--kv-dtype k6v6`, `k4v4`, or `bf16`
+- `--gpu-expert-bits 4` or `8`
+- `--vram-safety-margin 600`
+- `--dynamic-hcs` / `--no-dynamic-hcs`
+- `--ssh-tunnel user@host`
 
-```toml
-[[config]]
-num_gpus = 1
-gpu_expert_bits = 4
-cpu_expert_bits = 4
-
-[[config]]
-num_gpus = 2
-gpu_expert_bits = 4
-cpu_expert_bits = 4
-
-[[model]]
-name = "DeepSeek-V2-Lite"
-
-[[model]]
-name = "Qwen3-235B-A22B"
-gguf_name = "Qwen3-235B-A22B-GGUF"   # searched in ~/.krasis/models/ subdirs
-```
-
-Model `name` is the directory name under `~/.krasis/models/`. Use `gguf_name` to pair a native model with a GGUF for CPU experts (filename searched in models dir), or `gguf_path` for an absolute path. Config fields include `num_gpus`, `gpu_expert_bits`, `cpu_expert_bits`, `attention_quant`, `kv_dtype`, and more. Default KV is `k6v6` Quality; use `k4v4` Ultra Compact for lower memory or `bf16` Full Precision for maximum accuracy.
-
-Run the suite:
+For the full option surface, run:
 
 ```bash
-krasis --benchmark-suite                           # uses benchmarks/benchmark_suite.toml
-krasis --benchmark-suite /path/to/custom.toml      # custom config
+krasis --help
 ```
-
-Each combination runs as an isolated subprocess. Per-combo logs are saved to `benchmarks/suite_logs/` and a markdown summary table is generated at the end.
-
-For launcher flags, per-component quantization options, and direct server usage, see [ADVANCED.md](ADVANCED.md).
-
-Validation-only BF16 policy:
-
-- BF16-heavy configs are for correctness validation and debugging, not production use.
-- Production runs must use the normal Rust serving path and quantized configs.
-- In particular, `gpu_expert_bits = 16` is a validation mode for proving correctness, not a deployment target.
 
 ### Chat Client
 
 ```bash
-krasis-chat                          # auto-discovers running servers
-krasis-chat --port 8012              # connect to specific port
-krasis-chat --url http://host:8012   # connect to remote server
-krasis-chat --temperature 0.3        # override sampling temperature
+krasis chat
+krasis chat --prompt "Explain HCS in one paragraph"
+krasis chat --file prompts.txt
+krasis chat --port 8013
+krasis chat --url http://host:8012
 ```
 
-The chat client auto-discovers running Krasis servers via `~/.krasis/servers/`. Commands: `/new` (clear history), `/system PROMPT` (change system prompt), `/exit`.
+The standalone command also remains available:
+
+```bash
+krasis-chat
+```
 
 ### API
 
-The server exposes an OpenAI-compatible API at `http://localhost:8012/v1/chat/completions` with SSE streaming, compatible with Cursor, OpenCode, and any OpenAI SDK client.
+Krasis exposes an OpenAI-compatible chat endpoint:
 
-Additional endpoints:
-- `GET /health` — server status
-- `GET /v1/models` — list loaded models
-- `POST /v1/timing` — toggle instrumentation at runtime
+```text
+http://localhost:8012/v1/chat/completions
+```
+
+Useful endpoints:
+
+- `GET /health`
+- `GET /v1/models`
+- `POST /v1/timing`
+
+### Benchmarks
+
+Use the fixed speed-regression entry point for repeatable Qwen3-Coder-Next
+speed checks:
+
+```bash
+./dev speed-test
+```
+
+Run a standard benchmark for a config:
+
+```bash
+./dev benchmark tests/qcn-k4v4-hqq8-int4-benchmark.conf
+```
+
+Run a benchmark from the installed command:
+
+```bash
+krasis --config tests/qcn-k4v4-hqq8-int4-benchmark.conf --benchmark
+```
+
+Benchmark logs and summaries are stored under `benchmarks/`.
+
+### Source Build
+
+For development builds:
+
+```bash
+git clone https://github.com/brontoguana/krasis.git
+cd krasis
+./dev build
+./dev run qcn
+```
+
+The `./dev` entry point handles environment setup and is preferred for local
+development commands.
+
+## Advanced Documentation
+
+See [ADVANCED.md](ADVANCED.md) for detailed config options, quantization modes,
+HQQ cache controls, HCS controls, benchmarking commands, and API details.
 
 ## License
 
 SSPL-1.0
 
-Krasis is free to use, modify and distribute.  
+Krasis is free to use, modify, and distribute.
 
-If you want to support the project or offer Krasis as part of a commercial product or a hosted/managed service, please [get in touch](https://forms.gle/ue4nvyvNNHtUZ7MQ7).
+If you want to support the project or offer Krasis as part of a commercial
+product or a hosted/managed service, please [get in touch](https://forms.gle/ue4nvyvNNHtUZ7MQ7).
