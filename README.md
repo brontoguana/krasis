@@ -80,7 +80,6 @@ measurement; `HTTP round trip` includes local client/server HTTP overhead.
 | RTX 5090 32 GB | Qwen3-Coder-Next | 80B | HQQ8 | k4v4 | 6111.2 tok/s | 88.59 tok/s | 157.00 tok/s |
 | RTX 5090 32 GB | Qwen3.5-122B-A10B | 122B | HQQ6 | k4v4 | 4880.4 tok/s | 25.29 tok/s | 44.95 tok/s |
 | RTX 5090 32 GB | Qwen3-235B-A22B | 235B | HQQ6 | k4v4 | 1459.1 tok/s | 3.54 tok/s | 6.17 tok/s |
-| RTX A4500 20 GB | Qwen3.5-35B-A3B | 35B | HQQ6 | fp8 | 2252.7 tok/s | 49.98 tok/s | 101.84 tok/s |
 | RTX A4500 20 GB | Qwen3.6-35B-A3B | 35B | HQQ6 | k6v6 | 2235.2 tok/s | 50.98 tok/s | 103.98 tok/s |
 | RTX A4500 20 GB | Qwen3-Coder-Next | 80B | HQQ6 | k4v4 | 1569.5 tok/s | 34.69 tok/s | 60.47 tok/s |
 
