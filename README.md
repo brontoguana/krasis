@@ -43,6 +43,11 @@ Krasis release. Highlights:
   cache build/rebuild support, and HQQ benchmark/validation lanes.
 - Added compact KV cache formats, including `k6v6` and `k4v4`, with `k6v6`
   as the quality-oriented launcher default and `k4v4` for tighter VRAM budgets.
+- Added full Ampere support for the current production path. HQQ attention and
+  compact KV cache modes were built with Ampere compatibility in mind and do
+  not require FP8-capable hardware.
+- Added Qwen3.6-35B-A3B support, including HQQ6/`k6v6` benchmark coverage on
+  Ampere hardware.
 - Added and hardened HCS expert residency management: measured startup
   calibration, prompt-conditioned reload, dynamic recency tail, per-stage
   budgets, soft-tier reload caps, and safe eviction/reload paths.
@@ -70,19 +75,24 @@ Current reproducible benchmark summaries live in
 [benchmarks/BENCHMARKS.md](benchmarks/BENCHMARKS.md). Timing instrumentation is
 disabled for speed numbers.
 
-Recent standard Qwen3-Coder-Next speed test:
+Selected recent timing-disabled runs:
 
 | Hardware | Model | Attention | KV | Prefill | Decode | HTTP round trip | HCS | Min free VRAM |
 |----------|-------|-----------|----|--------:|-------:|----------------:|-----|--------------:|
 | RTX 5090 32 GB | Qwen3-Coder-Next | HQQ8 | k4v4 | 6111.2 tok/s | 88.59 tok/s | 157.00 tok/s | 15633/24576 | 656 MB |
+| RTX 5090 32 GB | Qwen3.5-35B-A3B | HQQ6 | fp8 | 11074.0 tok/s | 113.32 tok/s | 230.62 tok/s | 10240/10240 | 8990 MB |
+| RTX 5090 32 GB | Qwen3.5-122B-A10B | HQQ6 | k4v4 | 4880.4 tok/s | 25.29 tok/s | 44.95 tok/s | 3780/12288 | 662 MB |
+| RTX A4500 20 GB | Qwen3.6-35B-A3B | HQQ6 | k6v6 | 2235.2 tok/s | 50.98 tok/s | 103.98 tok/s | 8150/10240 | 720 MB |
 
-Additional recent benchmark rows include Qwen3.5-35B-A3B, Qwen3.5-122B-A10B,
-Qwen3-235B-A22B, RTX A4500, and RTX 5080 WSL runs. See the benchmark log index
-for exact commands, configs, logs, HCS coverage, and VRAM low-water marks.
+Additional benchmark rows include Qwen3-235B-A22B, RTX 5080 WSL runs, older
+controls, and regression comparisons. See the benchmark log index for exact
+commands, configs, logs, HCS coverage, and VRAM low-water marks.
 
 ## Tradeoffs And Requirements
 
-- Krasis currently targets NVIDIA GPUs with CUDA.
+- Krasis currently targets NVIDIA GPUs with CUDA, including Ampere and newer
+  architectures. The production HQQ attention and compact KV cache modes do not
+  require FP8 support.
 - Input models should be BF16 safetensors from Hugging Face or another local
   safetensors source.
 - First run is slower because Krasis builds optimized local caches. Later runs

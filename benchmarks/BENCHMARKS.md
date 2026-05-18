@@ -1,5 +1,26 @@
 # Krasis Benchmark Results
 
+## Standard Benchmarks - 2026-05-18 (Qwen3.6 Ampere validation)
+
+Hardware: EPYC 7742, 1007 GB RAM, selected physical GPU1 RTX A4500 20 GB.
+Timing instrumentation was disabled. The benchmark process reported
+`GPU 0 (physical 1): NVIDIA RTX A4500`, so process `cuda:0` maps to the
+physical A4500.
+
+| Model / run | Command | Attention | KV | Prefill (tok/s) | Decode (tok/s) | Round trip (tok/s) | HCS | Min free VRAM | Logs |
+|-------------|---------|-----------|----|----------------:|---------------:|-------------------:|-----|--------------:|------|
+| Qwen3.6-35B-A3B local RTX A4500 HQQ6 k6v6 | server benchmark run from `logs/server-run-benchmark_20260518_001918` | HQQ6 | k6v6 | 2235.2 | 50.98 | 103.98 | 8150/10240 (79.6%) | 720 MB | [report](20260518_qwen36_a4500_hqq6_k6v6_benchmark_report.log), [server log](20260518_qwen36_a4500_hqq6_k6v6_krasis.log) |
+
+Notes:
+- The run validates the current Qwen3.6-35B-A3B HQQ6 + `k6v6` path on Ampere
+  hardware without requiring FP8 KV cache support.
+- Timed prefill peaked at the 35K row (`2235.2 tok/s`); the 50K row completed
+  at `2064.8 tok/s`.
+- Internal decode was stable across the 50/100/250 token rows
+  (`50.98`, `50.88`, `50.58 tok/s`).
+
+---
+
 ## Standard Benchmarks - 2026-05-16 (rc30 VRAM pressure guardrails)
 
 Hardware: EPYC 7742, 1007 GB RAM, RTX 5090 32 GB selected for the run.
