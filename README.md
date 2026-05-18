@@ -46,8 +46,8 @@ Krasis release. Highlights:
 - Added full Ampere support for the current production path. HQQ attention and
   compact KV cache modes were built with Ampere compatibility in mind and do
   not require FP8-capable hardware.
-- Added Qwen3.6-35B-A3B support, including HQQ6/`k6v6` benchmark coverage on
-  Ampere hardware.
+- Added Qwen3.6-35B-A3B support, including HQQ4/`k4v4` RTX 5090 benchmark
+  coverage and HQQ6/`k6v6` RTX A4500 Ampere coverage.
 - Added and hardened HCS expert residency management: measured startup
   calibration, prompt-conditioned reload, dynamic recency tail, per-stage
   budgets, soft-tier reload caps, and safe eviction/reload paths.
@@ -71,22 +71,18 @@ Krasis release. Highlights:
 
 ## Benchmarks
 
-Current reproducible benchmark summaries live in
-[benchmarks/BENCHMARKS.md](benchmarks/BENCHMARKS.md). Timing instrumentation is
-disabled for speed numbers.
+Selected current timing-disabled results. `Decode` is the internal engine
+measurement; `HTTP round trip` includes local client/server HTTP overhead.
 
-Selected recent timing-disabled runs:
-
-| Hardware | Model | Attention | KV | Prefill | Decode | HTTP round trip | HCS | Min free VRAM |
-|----------|-------|-----------|----|--------:|-------:|----------------:|-----|--------------:|
-| RTX 5090 32 GB | Qwen3-Coder-Next | HQQ8 | k4v4 | 6111.2 tok/s | 88.59 tok/s | 157.00 tok/s | 15633/24576 | 656 MB |
-| RTX 5090 32 GB | Qwen3.5-35B-A3B | HQQ6 | fp8 | 11074.0 tok/s | 113.32 tok/s | 230.62 tok/s | 10240/10240 | 8990 MB |
-| RTX 5090 32 GB | Qwen3.5-122B-A10B | HQQ6 | k4v4 | 4880.4 tok/s | 25.29 tok/s | 44.95 tok/s | 3780/12288 | 662 MB |
-| RTX A4500 20 GB | Qwen3.6-35B-A3B | HQQ6 | k6v6 | 2235.2 tok/s | 50.98 tok/s | 103.98 tok/s | 8150/10240 | 720 MB |
-
-Additional benchmark rows include Qwen3-235B-A22B, RTX 5080 WSL runs, older
-controls, and regression comparisons. See the benchmark log index for exact
-commands, configs, logs, HCS coverage, and VRAM low-water marks.
+| Hardware | Model | Params | Attention | KV | Prefill | Decode | HTTP round trip |
+|----------|-------|-------:|-----------|----|--------:|-------:|----------------:|
+| RTX 5090 32 GB | Qwen3.6-35B-A3B | 35B | HQQ4 | k4v4 | 10030.3 tok/s | 124.88 tok/s | 267.00 tok/s |
+| RTX 5090 32 GB | Qwen3-Coder-Next | 80B | HQQ8 | k4v4 | 6111.2 tok/s | 88.59 tok/s | 157.00 tok/s |
+| RTX 5090 32 GB | Qwen3.5-122B-A10B | 122B | HQQ6 | k4v4 | 4880.4 tok/s | 25.29 tok/s | 44.95 tok/s |
+| RTX 5090 32 GB | Qwen3-235B-A22B | 235B | HQQ6 | k4v4 | 1459.1 tok/s | 3.54 tok/s | 6.17 tok/s |
+| RTX A4500 20 GB | Qwen3.5-35B-A3B | 35B | HQQ6 | fp8 | 2252.7 tok/s | 49.98 tok/s | 101.84 tok/s |
+| RTX A4500 20 GB | Qwen3.6-35B-A3B | 35B | HQQ6 | k6v6 | 2235.2 tok/s | 50.98 tok/s | 103.98 tok/s |
+| RTX A4500 20 GB | Qwen3-Coder-Next | 80B | HQQ6 | k4v4 | 1569.5 tok/s | 34.69 tok/s | 60.47 tok/s |
 
 ## Tradeoffs And Requirements
 
@@ -291,8 +287,6 @@ Run a benchmark from the installed command:
 ```bash
 krasis --config tests/qcn-k4v4-hqq8-int4-benchmark.conf --benchmark
 ```
-
-Benchmark logs and summaries are stored under `benchmarks/`.
 
 ### Source Build
 

@@ -1,0 +1,49 @@
+================================================================
+Krasis Benchmark — 2026-05-18 23:13:59
+================================================================
+Model:            Qwen3.6-35B-A3B
+Architecture:     qwen3_5_moe_text, 40 layers, 256 experts, top-8, 10 GQA + 30 linear
+PP Partition:     [40] (1 GPUs)
+
+Hardware:
+  CPU:            AMD EPYC 7742 64-Core Processor (64 cores)
+  RAM:            1007 GB total, 38.9 GB used by process
+  GPU 0:           NVIDIA GeForce RTX 5090 (32607 MB), 3774 MB allocated
+
+Quantization:
+  GPU experts:    INT4 (Marlin)
+  CPU experts:    INT4
+  Attention:      HQQ8
+  Shared expert:  INT8
+  Dense MLP:      INT8
+  LM head:        INT8
+  KV cache:       k6v6
+
+Strategy:
+  Layer group size: 2 (layer_grouped(2))
+  Prefill threshold: 1
+  Mode:           gpu_decode (layer_grouped(2))
+
+Prefill (internal) — 6 runs at different lengths:
+  Run 1:  1,281.3 tok/s (1,000 tokens in 780.5ms)
+  Run 2:  6,070.6 tok/s (5,000 tokens in 823.6ms)
+  Run 3:  7,107.8 tok/s (10,000 tokens in 1406.9ms)
+  Run 4:  6,867.6 tok/s (20,000 tokens in 2912.2ms)
+  Run 5:  9,300.3 tok/s (35,000 tokens in 3763.3ms)
+  Run 6:  7,988.7 tok/s (50,000 tokens in 6258.8ms)
+  Best:   9,300.3 tok/s (35,000 tokens)
+
+Decode (internal) — 50/100/250 tokens, 3 separate prompts:
+   50 tokens: 125.61 tok/s (8.0ms/tok)
+  100 tokens: 117.85 tok/s (8.5ms/tok)
+  250 tokens: 121.95 tok/s (8.2ms/tok)
+  Best:    125.61 tok/s
+  HCS:     10240/10240 experts (100.0%)
+  Min free VRAM: 8868 MB
+
+Round trip (network) — 50/100/250 tokens via HTTP:
+   50 tokens: 268.16 tok/s (1.65s total)
+  100 tokens: 166.36 tok/s (2.18s total)
+  250 tokens: 130.29 tok/s (3.52s total)
+  Best:    268.16 tok/s
+================================================================

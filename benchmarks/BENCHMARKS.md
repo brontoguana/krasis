@@ -1,5 +1,35 @@
 # Krasis Benchmark Results
 
+## Standard Benchmarks - 2026-05-18 (Qwen3.6 RTX 5090 HQQ/KV sweep)
+
+Hardware: EPYC 7742, 1007 GB RAM, selected physical GPU0 RTX 5090 32 GB.
+Timing instrumentation was disabled. All rows used
+`./dev benchmark <config>`, Qwen3.6-35B-A3B, INT4 GPU/CPU experts, INT8
+shared/dense/lm-head, layer group size 2, 1000 MB KV cache, and the default
+600 MB VRAM safety margin.
+
+| Model / run | Command | Attention | KV | Prefill (tok/s) | Decode (tok/s) | Round trip (tok/s) | HCS | Min free VRAM | Logs |
+|-------------|---------|-----------|----|----------------:|---------------:|-------------------:|-----|--------------:|------|
+| Qwen3.6-35B-A3B local RTX 5090 HQQ4 k4v4 | `./dev benchmark qwen36-35b-5090-hqq4-k4v4-benchmark.conf` | HQQ4 | k4v4 | 10030.3 | 124.88 | 267.00 | 10240/10240 (100.0%) | 9576 MB | [full log](20260518_qwen36_5090_hqq4_k4v4_benchmark.log), [report](20260518_qwen36_5090_hqq4_k4v4_benchmark_report.log), [server log](20260518_qwen36_5090_hqq4_k4v4_krasis.log) |
+| Qwen3.6-35B-A3B local RTX 5090 HQQ4 k6v6 | `./dev benchmark qwen36-35b-5090-hqq4-k6v6-benchmark.conf` | HQQ4 | k6v6 | 10004.2 | 120.71 | 254.31 | 10240/10240 (100.0%) | 9580 MB | [full log](20260518_qwen36_5090_hqq4_k6v6_benchmark.log), [report](20260518_qwen36_5090_hqq4_k6v6_benchmark_report.log), [server log](20260518_qwen36_5090_hqq4_k6v6_krasis.log) |
+| Qwen3.6-35B-A3B local RTX 5090 HQQ6 k4v4 | `./dev benchmark qwen36-35b-5090-hqq6-k4v4-benchmark.conf` | HQQ6 | k4v4 | 9532.5 | 116.82 | 237.82 | 10240/10240 (100.0%) | 9172 MB | [full log](20260518_qwen36_5090_hqq6_k4v4_benchmark.log), [report](20260518_qwen36_5090_hqq6_k4v4_benchmark_report.log), [server log](20260518_qwen36_5090_hqq6_k4v4_krasis.log) |
+| Qwen3.6-35B-A3B local RTX 5090 HQQ6 k6v6 | `./dev benchmark qwen36-35b-5090-hqq6-k6v6-benchmark.conf` | HQQ6 | k6v6 | 9588.8 | 116.11 | 237.34 | 10240/10240 (100.0%) | 9208 MB | [full log](20260518_qwen36_5090_hqq6_k6v6_benchmark.log), [report](20260518_qwen36_5090_hqq6_k6v6_benchmark_report.log), [server log](20260518_qwen36_5090_hqq6_k6v6_krasis.log) |
+| Qwen3.6-35B-A3B local RTX 5090 HQQ8 k4v4 | `./dev benchmark qwen36-35b-5090-hqq8-k4v4-benchmark.conf` | HQQ8 | k4v4 | 8682.7 | 125.70 | 268.55 | 10240/10240 (100.0%) | 8832 MB | [full log](20260518_qwen36_5090_hqq8_k4v4_benchmark.log), [report](20260518_qwen36_5090_hqq8_k4v4_benchmark_report.log), [server log](20260518_qwen36_5090_hqq8_k4v4_krasis.log) |
+| Qwen3.6-35B-A3B local RTX 5090 HQQ8 k6v6 | `./dev benchmark qwen36-35b-5090-hqq8-k6v6-benchmark.conf` | HQQ8 | k6v6 | 9300.3 | 125.61 | 268.16 | 10240/10240 (100.0%) | 8868 MB | [full log](20260518_qwen36_5090_hqq8_k6v6_benchmark.log), [report](20260518_qwen36_5090_hqq8_k6v6_benchmark_report.log), [server log](20260518_qwen36_5090_hqq8_k6v6_krasis.log) |
+
+Notes:
+- HQQ4 + `k4v4` was the fastest prefill row (`10030.3 tok/s`) and remained
+  close to the end-to-end winner.
+- HQQ8 + `k4v4` was the fastest internal decode (`125.70 tok/s`) and fastest
+  HTTP round trip (`268.55 tok/s`), but by a small margin over HQQ4 + `k4v4`.
+  The public README table uses HQQ4 + `k4v4` because it is the only five-figure
+  prefill row while remaining effectively tied on decode and HTTP.
+- All rows retained the full 10240/10240 HCS pool. Decode minimum free VRAM was
+  far above the 600 MB safety margin; calibration long-prefill lows were around
+  4.9-5.6 GB free depending on the HQQ cache size.
+
+---
+
 ## Standard Benchmarks - 2026-05-18 (Qwen3.6 Ampere validation)
 
 Hardware: EPYC 7742, 1007 GB RAM, selected physical GPU1 RTX A4500 20 GB.
