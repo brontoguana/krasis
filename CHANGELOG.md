@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.1 - 2026-05-19
+
+- Fixed setup compatibility for mixed Ampere and Blackwell systems. `krasis-setup`
+  now selects the PyTorch CUDA wheel index from all visible GPU compute
+  capabilities plus the installed driver runtime, so systems with RTX 50-series
+  GPUs install CUDA 12.8 PyTorch wheels instead of CUDA 12.6 wheels that lack
+  `sm_120` support.
+- Added post-install validation for CUDA torch architecture support. If an
+  existing CUDA torch build is visible but does not support one of the installed
+  GPUs, setup reinstalls the correct wheel and the launcher reports the same
+  unsupported-architecture condition clearly.
+
 ## 1.0.0 - 2026-05-19
 
 - First stable Krasis release after the 0.1.x prerelease line.
