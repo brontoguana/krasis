@@ -115,7 +115,9 @@ def _run_server_start_smoke(config_path: Path, scenario: str, expected_fragments
             timeout=20,
             check=False,
         )
-    output = proc.stdout
+        log_path = Path(run_dir) / "krasis.log"
+        log_output = log_path.read_text() if log_path.exists() else ""
+    output = proc.stdout + "\n" + log_output
     if proc.returncode == 0:
         raise AssertionError(f"{scenario}: expected nonexistent model failure, got success\n{output}")
     forbidden = [
@@ -256,30 +258,184 @@ class LauncherMatrixTest(unittest.TestCase):
 
     def test_save_config_round_trip_keeps_advanced_fields(self) -> None:
         cfg = _base_config()
+        cfg.selected_gpu_indices = [0, 1]
+        cfg.pp_partition = "20,20"
+        cfg.layer_group_size = 6
+        cfg.kv_cache_mb = 1800
+        cfg.kv_dtype = "k4v4"
+        cfg.gpu_expert_bits = 8
         cfg.expert_group_size = 64
+        cfg.gpu_expert_int4_calib = "search_rmse"
+        cfg.cpu_expert_bits = 8
+        cfg.attention_quant = "hqq68_auto"
+        cfg.hqq_cache_profile = "selfcal_v1"
+        cfg.hqq_group_size = 64
+        cfg.hqq_auto_budget_pct = 25.0
+        cfg.hqq46_auto_budget_mib = 384
+        cfg.hqq_sidecar_manifest = ""
+        cfg.shared_expert_quant = "bf16"
+        cfg.dense_mlp_quant = "bf16"
+        cfg.lm_head_quant = "bf16"
+        cfg.krasis_threads = 12
+        cfg.host = "127.0.0.1"
+        cfg.port = 18012
+        cfg.ssh_tunnel = "alice@example.com:2222"
+        cfg.gpu_prefill_threshold = 512
+        cfg.gguf_path = "~/models/cpu-experts.gguf"
+        cfg.heatmap_path = "~/heatmaps/qcn.json"
+        cfg.vram_safety_margin = 900
+        cfg.hcs = False
+        cfg.multi_gpu_hcs = True
+        cfg.dynamic_hcs = False
+        cfg.dynamic_hcs_tail_blocks = 5
+        cfg.stream_attention = True
+        cfg.draft_model = "~/models/draft"
+        cfg.draft_k = 5
+        cfg.draft_context = 1024
+        cfg.temperature = 0.25
+        cfg.force_load = True
         cfg.force_rebuild_cache = True
         cfg.force_rebuild_hqq_cache = True
         cfg.build_cache = True
+        cfg.enable_thinking = False
         with tempfile.NamedTemporaryFile("w", suffix=".conf", prefix="krasis-save-roundtrip-", delete=False) as f:
             path = Path(f.name)
         try:
             launcher_mod._save_config(str(path), cfg.to_save_dict())
             values = _parse_key_value_config(path)
+            self.assertEqual(set(values), set(launcher_mod.CONFIG_KEYS))
+            self.assertEqual(values.get("MODEL_PATH"), NONEXISTENT_MODEL)
+            self.assertEqual(values.get("CFG_SELECTED_GPUS"), "0,1")
+            self.assertEqual(values.get("CFG_PP_PARTITION"), "20,20")
+            self.assertEqual(values.get("CFG_LAYER_GROUP_SIZE"), "6")
+            self.assertEqual(values.get("CFG_KV_CACHE_MB"), "1800")
+            self.assertEqual(values.get("CFG_KV_DTYPE"), "k4v4")
+            self.assertEqual(values.get("CFG_GPU_EXPERT_BITS"), "8")
             self.assertEqual(values.get("CFG_EXPERT_GROUP_SIZE"), "64")
+            self.assertEqual(values.get("CFG_GPU_EXPERT_INT4_CALIB"), "search_rmse")
+            self.assertEqual(values.get("CFG_CPU_EXPERT_BITS"), "8")
+            self.assertEqual(values.get("CFG_ATTENTION_QUANT"), "hqq68_auto")
+            self.assertEqual(values.get("CFG_HQQ_CACHE_PROFILE"), "selfcal_v1")
+            self.assertEqual(values.get("CFG_HQQ_GROUP_SIZE"), "64")
+            self.assertEqual(values.get("CFG_HQQ_AUTO_BUDGET_PCT"), "25.0")
+            self.assertEqual(values.get("CFG_HQQ46_AUTO_BUDGET_MB"), "")
+            self.assertEqual(values.get("CFG_HQQ_SIDECAR_MANIFEST"), "")
+            self.assertEqual(values.get("CFG_SHARED_EXPERT_QUANT"), "bf16")
+            self.assertEqual(values.get("CFG_DENSE_MLP_QUANT"), "bf16")
+            self.assertEqual(values.get("CFG_LM_HEAD_QUANT"), "bf16")
+            self.assertEqual(values.get("CFG_KRASIS_THREADS"), "12")
+            self.assertEqual(values.get("CFG_HOST"), "127.0.0.1")
+            self.assertEqual(values.get("CFG_PORT"), "18012")
+            self.assertEqual(values.get("CFG_SSH_TUNNEL"), "alice@example.com:2222")
+            self.assertEqual(values.get("CFG_GPU_PREFILL_THRESHOLD"), "512")
+            self.assertEqual(values.get("CFG_GGUF_PATH"), "~/models/cpu-experts.gguf")
+            self.assertEqual(values.get("CFG_HEATMAP_PATH"), "~/heatmaps/qcn.json")
+            self.assertEqual(values.get("CFG_VRAM_SAFETY_MARGIN"), "900")
+            self.assertEqual(values.get("CFG_HCS"), "0")
+            self.assertEqual(values.get("CFG_MULTI_GPU_HCS"), "1")
+            self.assertEqual(values.get("CFG_DYNAMIC_HCS"), "0")
+            self.assertEqual(values.get("CFG_DYNAMIC_HCS_TAIL_BLOCKS"), "5")
+            self.assertEqual(values.get("CFG_STREAM_ATTENTION"), "1")
+            self.assertEqual(values.get("CFG_DRAFT_MODEL"), "~/models/draft")
+            self.assertEqual(values.get("CFG_DRAFT_K"), "5")
+            self.assertEqual(values.get("CFG_DRAFT_CONTEXT"), "1024")
+            self.assertEqual(values.get("CFG_TEMPERATURE"), "0.25")
+            self.assertEqual(values.get("CFG_FORCE_LOAD"), "1")
             self.assertEqual(values.get("CFG_FORCE_REBUILD_CACHE"), "1")
             self.assertEqual(values.get("CFG_FORCE_REBUILD_HQQ_CACHE"), "1")
             self.assertEqual(values.get("CFG_BUILD_CACHE"), "1")
-            self.assertEqual(values.get("CFG_SSH_TUNNEL"), "")
+            self.assertEqual(values.get("CFG_ENABLE_THINKING"), "0")
 
             loaded = LauncherConfig()
             loaded.apply_saved(launcher_mod._load_config(str(path)))
+            self.assertEqual(loaded.model_path, NONEXISTENT_MODEL)
+            self.assertEqual(loaded.selected_gpu_indices, [0, 1])
+            self.assertEqual(loaded.pp_partition, "20,20")
+            self.assertEqual(loaded.layer_group_size, 6)
+            self.assertEqual(loaded.kv_cache_mb, 1800)
+            self.assertEqual(loaded.kv_dtype, "k4v4")
+            self.assertEqual(loaded.gpu_expert_bits, 8)
             self.assertEqual(loaded.expert_group_size, 64)
+            self.assertEqual(loaded.gpu_expert_int4_calib, "search_rmse")
+            self.assertEqual(loaded.cpu_expert_bits, 8)
+            self.assertEqual(loaded.attention_quant, "hqq68_auto")
+            self.assertEqual(loaded.hqq_cache_profile, "selfcal_v1")
+            self.assertEqual(loaded.hqq_group_size, 64)
+            self.assertEqual(loaded.hqq_auto_budget_pct, 25.0)
+            self.assertEqual(loaded.shared_expert_quant, "bf16")
+            self.assertEqual(loaded.dense_mlp_quant, "bf16")
+            self.assertEqual(loaded.lm_head_quant, "bf16")
+            self.assertEqual(loaded.krasis_threads, 12)
+            self.assertEqual(loaded.host, "127.0.0.1")
+            self.assertEqual(loaded.port, 18012)
+            self.assertEqual(loaded.ssh_tunnel, "alice@example.com:2222")
+            self.assertEqual(loaded.gpu_prefill_threshold, 512)
+            self.assertEqual(loaded.gguf_path, "~/models/cpu-experts.gguf")
+            self.assertEqual(loaded.heatmap_path, os.path.expanduser("~/heatmaps/qcn.json"))
+            self.assertEqual(loaded.vram_safety_margin, 900)
+            self.assertFalse(loaded.hcs)
+            self.assertTrue(loaded.multi_gpu_hcs)
+            self.assertFalse(loaded.dynamic_hcs)
+            self.assertEqual(loaded.dynamic_hcs_tail_blocks, 5)
+            self.assertTrue(loaded.stream_attention)
+            self.assertEqual(loaded.draft_model, os.path.expanduser("~/models/draft"))
+            self.assertEqual(loaded.draft_k, 5)
+            self.assertEqual(loaded.draft_context, 1024)
+            self.assertEqual(loaded.temperature, 0.25)
+            self.assertTrue(loaded.force_load)
             self.assertTrue(loaded.force_rebuild_cache)
             self.assertTrue(loaded.force_rebuild_hqq_cache)
             self.assertTrue(loaded.build_cache)
-            self.assertEqual(loaded.ssh_tunnel, "")
+            self.assertFalse(loaded.enable_thinking)
         finally:
             path.unlink(missing_ok=True)
+
+    def test_interactive_load_config_preserves_saved_kv_attention_safety_and_ssh(self) -> None:
+        launcher = Launcher.__new__(Launcher)
+        launcher.cfg = LauncherConfig()
+        launcher.hw = {
+            "gpu_count": 1,
+            "gpus": [{"index": 0, "name": "Test GPU 0", "vram_mb": 24_000}],
+        }
+        launcher.selected_gpus = []
+        launcher.model_info = None
+        launcher.budget = None
+        launcher.budget_error = None
+        launcher._compute_budget = lambda: None
+        launcher._read_model_info = lambda: None
+
+        old_clear = launcher_mod._clear_screen
+        old_read_key = launcher_mod._read_key
+        old_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory(prefix="krasis-load-screen-") as tmp:
+            path = Path(tmp) / "saved.conf"
+            path.write_text(
+                "\n".join([
+                    'CFG_SELECTED_GPUS="0"',
+                    'CFG_KV_DTYPE="k4v4"',
+                    'CFG_ATTENTION_QUANT="hqq4"',
+                    'CFG_VRAM_SAFETY_MARGIN="900"',
+                    'CFG_SSH_TUNNEL="alice@example.com:2222"',
+                    'CFG_ENABLE_THINKING="0"',
+                    "",
+                ])
+            )
+            os.chdir(tmp)
+            try:
+                launcher_mod._clear_screen = lambda: None
+                launcher_mod._read_key = lambda: launcher_mod.KEY_ENTER
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertTrue(launcher._load_config_screen())
+            finally:
+                launcher_mod._clear_screen = old_clear
+                launcher_mod._read_key = old_read_key
+                os.chdir(old_cwd)
+
+        self.assertEqual(launcher.cfg.kv_dtype, "k4v4")
+        self.assertEqual(launcher.cfg.attention_quant, "hqq4")
+        self.assertEqual(launcher.cfg.vram_safety_margin, 900)
+        self.assertEqual(launcher.cfg.ssh_tunnel, "alice@example.com:2222")
+        self.assertFalse(launcher.cfg.enable_thinking)
 
     def test_launcher_generated_configs_start_server_parse_path(self) -> None:
         scenarios = []
@@ -387,6 +543,14 @@ class LauncherMatrixTest(unittest.TestCase):
         cfg.vram_safety_margin = 900
         cfg.port = 65_502
         cfg.ssh_tunnel = "alice@example.com:2222"
+        cfg.hcs = False
+        cfg.multi_gpu_hcs = True
+        cfg.heatmap_path = "~/heatmaps/qwen36.json"
+        cfg.stream_attention = True
+        cfg.draft_model = "~/models/draft"
+        cfg.draft_k = 5
+        cfg.draft_context = 1024
+        cfg.temperature = 0.25
         scenarios.append((
             "hqq8_two_gpu_shape",
             cfg,
@@ -399,6 +563,14 @@ class LauncherMatrixTest(unittest.TestCase):
                 "CFG_VRAM_SAFETY_MARGIN": "900",
                 "CFG_PORT": "65502",
                 "CFG_SSH_TUNNEL": "alice@example.com:2222",
+                "CFG_HCS": "0",
+                "CFG_MULTI_GPU_HCS": "1",
+                "CFG_HEATMAP_PATH": "~/heatmaps/qwen36.json",
+                "CFG_STREAM_ATTENTION": "1",
+                "CFG_DRAFT_MODEL": "~/models/draft",
+                "CFG_DRAFT_K": "5",
+                "CFG_DRAFT_CONTEXT": "1024",
+                "CFG_TEMPERATURE": "0.25",
             },
             [
                 "attention_quant = 'hqq8'",
@@ -406,6 +578,14 @@ class LauncherMatrixTest(unittest.TestCase):
                 "selected_gpus = '0,1'",
                 "expert_group_size = 64",
                 "ssh_tunnel = 'alice@example.com:2222'",
+                "hcs = False",
+                "multi_gpu_hcs = True",
+                f"heatmap_path = '{os.path.expanduser('~/heatmaps/qwen36.json')}'",
+                "stream_attention = True",
+                f"draft_model = '{os.path.expanduser('~/models/draft')}'",
+                "draft_k = 5",
+                "draft_context = 1024",
+                "temperature = 0.25",
             ],
             {"CFG_HQQ_AUTO_BUDGET_PCT", "CFG_HQQ46_AUTO_BUDGET_MB", "CFG_HQQ_SIDECAR_MANIFEST"},
         ))

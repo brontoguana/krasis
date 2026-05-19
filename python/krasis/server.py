@@ -703,6 +703,7 @@ def main():
             "CFG_SSH_TUNNEL": "ssh_tunnel",
             "CFG_GPU_PREFILL_THRESHOLD": "gpu_prefill_threshold",
             "CFG_GGUF_PATH": "gguf_path",
+            "CFG_HEATMAP_PATH": "heatmap_path",
             "CFG_FORCE_LOAD": "force_load",
             "CFG_FORCE_REBUILD_CACHE": "force_rebuild_cache",
             "CFG_FORCE_REBUILD_HQQ_CACHE": "force_rebuild_hqq_cache",
@@ -713,6 +714,11 @@ def main():
             "CFG_VRAM_SAFETY_MARGIN": "vram_safety_margin",
             "CFG_DYNAMIC_HCS": "dynamic_hcs",
             "CFG_DYNAMIC_HCS_TAIL_BLOCKS": "dynamic_hcs_tail_blocks",
+            "CFG_STREAM_ATTENTION": "stream_attention",
+            "CFG_DRAFT_MODEL": "draft_model",
+            "CFG_DRAFT_K": "draft_k",
+            "CFG_DRAFT_CONTEXT": "draft_context",
+            "CFG_TEMPERATURE": "temperature",
             "CFG_ENABLE_THINKING": "enable_thinking",
             "CFG_SESSION_ENABLED": None,  # Session messenger integration removed; ignore old saved configs
             "CFG_NUM_GPUS": "num_gpus",
@@ -728,6 +734,7 @@ def main():
             "CFG_HCS",
             "CFG_MULTI_GPU_HCS",
             "CFG_DYNAMIC_HCS",
+            "CFG_STREAM_ATTENTION",
             "CFG_CPU_DECODE",
         }
         with open(config_path) as f:
@@ -797,6 +804,10 @@ def main():
         # Expand ~ in model_path
         if "model_path" in config_defaults and isinstance(config_defaults["model_path"], str):
             config_defaults["model_path"] = os.path.expanduser(config_defaults["model_path"])
+        if "heatmap_path" in config_defaults and isinstance(config_defaults["heatmap_path"], str):
+            config_defaults["heatmap_path"] = os.path.expanduser(config_defaults["heatmap_path"])
+        if "draft_model" in config_defaults and isinstance(config_defaults["draft_model"], str):
+            config_defaults["draft_model"] = os.path.expanduser(config_defaults["draft_model"])
         if explicit_selected_gpus is not None:
             config_defaults["selected_gpus"] = explicit_selected_gpus
             config_defaults["num_gpus"] = len(explicit_selected_gpus.split(","))

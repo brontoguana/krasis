@@ -508,8 +508,11 @@ CONFIG_KEYS = [
     "CFG_SHARED_EXPERT_QUANT", "CFG_DENSE_MLP_QUANT",
     "CFG_LM_HEAD_QUANT", "CFG_KRASIS_THREADS", "CFG_HOST", "CFG_PORT",
     "CFG_SSH_TUNNEL",
-    "CFG_GPU_PREFILL_THRESHOLD", "CFG_GGUF_PATH", "CFG_VRAM_SAFETY_MARGIN",
-    "CFG_DYNAMIC_HCS", "CFG_DYNAMIC_HCS_TAIL_BLOCKS",
+    "CFG_GPU_PREFILL_THRESHOLD", "CFG_GGUF_PATH", "CFG_HEATMAP_PATH",
+    "CFG_VRAM_SAFETY_MARGIN",
+    "CFG_HCS", "CFG_MULTI_GPU_HCS", "CFG_DYNAMIC_HCS", "CFG_DYNAMIC_HCS_TAIL_BLOCKS",
+    "CFG_STREAM_ATTENTION", "CFG_DRAFT_MODEL", "CFG_DRAFT_K", "CFG_DRAFT_CONTEXT",
+    "CFG_TEMPERATURE",
     "CFG_FORCE_LOAD", "CFG_FORCE_REBUILD_CACHE", "CFG_FORCE_REBUILD_HQQ_CACHE",
     "CFG_BUILD_CACHE", "CFG_ENABLE_THINKING",
 ]
@@ -582,9 +585,17 @@ class LauncherConfig:
         self.ssh_tunnel: str = ""
         self.gpu_prefill_threshold: int = 300
         self.gguf_path: str = ""
+        self.heatmap_path: str = ""
         self.vram_safety_margin: int = 600
+        self.hcs: bool = True
+        self.multi_gpu_hcs: bool = False
         self.dynamic_hcs: bool = True
         self.dynamic_hcs_tail_blocks: int = 2
+        self.stream_attention: bool = False
+        self.draft_model: str = ""
+        self.draft_k: int = 3
+        self.draft_context: int = 512
+        self.temperature: float = 0.6
         self.force_load: bool = False
         self.force_rebuild_cache: bool = False
         self.force_rebuild_hqq_cache: bool = False
@@ -741,11 +752,17 @@ class LauncherConfig:
                 pass
         if "CFG_GGUF_PATH" in saved:
             self.gguf_path = saved["CFG_GGUF_PATH"]
+        if "CFG_HEATMAP_PATH" in saved and saved["CFG_HEATMAP_PATH"]:
+            self.heatmap_path = os.path.expanduser(saved["CFG_HEATMAP_PATH"])
         if "CFG_VRAM_SAFETY_MARGIN" in saved:
             try:
                 self.vram_safety_margin = int(saved["CFG_VRAM_SAFETY_MARGIN"])
             except (ValueError, TypeError):
                 pass
+        if "CFG_HCS" in saved:
+            self.hcs = saved["CFG_HCS"] != "0"
+        if "CFG_MULTI_GPU_HCS" in saved:
+            self.multi_gpu_hcs = saved["CFG_MULTI_GPU_HCS"] == "1"
         if "CFG_DYNAMIC_HCS" in saved:
             self.dynamic_hcs = saved["CFG_DYNAMIC_HCS"] != "0"
         if "CFG_DYNAMIC_HCS_TAIL_BLOCKS" in saved and saved["CFG_DYNAMIC_HCS_TAIL_BLOCKS"]:
@@ -753,6 +770,25 @@ class LauncherConfig:
                 val = int(saved["CFG_DYNAMIC_HCS_TAIL_BLOCKS"])
                 if 1 <= val <= 5:
                     self.dynamic_hcs_tail_blocks = val
+            except (ValueError, TypeError):
+                pass
+        if "CFG_STREAM_ATTENTION" in saved:
+            self.stream_attention = saved["CFG_STREAM_ATTENTION"] == "1"
+        if "CFG_DRAFT_MODEL" in saved and saved["CFG_DRAFT_MODEL"]:
+            self.draft_model = os.path.expanduser(saved["CFG_DRAFT_MODEL"])
+        if "CFG_DRAFT_K" in saved and saved["CFG_DRAFT_K"]:
+            try:
+                self.draft_k = int(saved["CFG_DRAFT_K"])
+            except (ValueError, TypeError):
+                pass
+        if "CFG_DRAFT_CONTEXT" in saved and saved["CFG_DRAFT_CONTEXT"]:
+            try:
+                self.draft_context = int(saved["CFG_DRAFT_CONTEXT"])
+            except (ValueError, TypeError):
+                pass
+        if "CFG_TEMPERATURE" in saved and saved["CFG_TEMPERATURE"]:
+            try:
+                self.temperature = float(saved["CFG_TEMPERATURE"])
             except (ValueError, TypeError):
                 pass
         if "CFG_FORCE_LOAD" in saved and saved["CFG_FORCE_LOAD"]:
@@ -791,9 +827,17 @@ class LauncherConfig:
             "CFG_SSH_TUNNEL": self.ssh_tunnel,
             "CFG_GPU_PREFILL_THRESHOLD": str(self.gpu_prefill_threshold),
             "CFG_GGUF_PATH": self.gguf_path,
+            "CFG_HEATMAP_PATH": self.heatmap_path,
             "CFG_VRAM_SAFETY_MARGIN": str(self.vram_safety_margin),
+            "CFG_HCS": "1" if self.hcs else "0",
+            "CFG_MULTI_GPU_HCS": "1" if self.multi_gpu_hcs else "0",
             "CFG_DYNAMIC_HCS": "1" if self.dynamic_hcs else "0",
             "CFG_DYNAMIC_HCS_TAIL_BLOCKS": str(self.dynamic_hcs_tail_blocks),
+            "CFG_STREAM_ATTENTION": "1" if self.stream_attention else "0",
+            "CFG_DRAFT_MODEL": self.draft_model,
+            "CFG_DRAFT_K": str(self.draft_k),
+            "CFG_DRAFT_CONTEXT": str(self.draft_context),
+            "CFG_TEMPERATURE": str(self.temperature),
             "CFG_FORCE_LOAD": "1" if self.force_load else "",
             "CFG_FORCE_REBUILD_CACHE": "1" if self.force_rebuild_cache else "",
             "CFG_FORCE_REBUILD_HQQ_CACHE": "1" if self.force_rebuild_hqq_cache else "",
@@ -1667,9 +1711,6 @@ class Launcher:
                 saved = _load_config(path)
                 if saved:
                     self.cfg.apply_saved(saved)
-                    # Interactive TUI keeps KV on the supported default even if
-                    # an older config file was saved with an internal mode.
-                    self.cfg.kv_dtype = "k6v6"
                     # Re-resolve GPUs and PP after loading
                     self._resolve_selected_gpus()
                     if self.model_info:
@@ -2121,7 +2162,6 @@ class Launcher:
         # Keep expert quantization aligned; KV defaults to Quality and can be
         # cycled among the supported public KV modes in the TUI.
         self.cfg.cpu_expert_bits = self.cfg.gpu_expert_bits
-        self.cfg.kv_dtype = "k6v6"
 
         # Compute initial budget
         self.budget = self._compute_budget()
