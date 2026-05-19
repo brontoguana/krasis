@@ -2748,6 +2748,24 @@ def _check_gpu_deps():
         torch.set_float32_matmul_precision('high')
         if not torch.cuda.is_available():
             problems.append("CUDA-enabled PyTorch")
+        else:
+            arch_list = (
+                set(torch.cuda.get_arch_list())
+                if hasattr(torch.cuda, "get_arch_list")
+                else set()
+            )
+            unsupported = []
+            if arch_list:
+                for i in range(torch.cuda.device_count()):
+                    major, minor = torch.cuda.get_device_capability(i)
+                    token = f"sm_{major}{minor}"
+                    if token not in arch_list:
+                        name = torch.cuda.get_device_properties(i).name
+                        unsupported.append(f"GPU {i} {name} ({token})")
+            if unsupported:
+                problems.append(
+                    "PyTorch build lacking " + ", ".join(unsupported)
+                )
     except ImportError:
         problems.append("PyTorch")
 

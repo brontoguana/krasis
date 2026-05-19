@@ -18,6 +18,7 @@ import platform
 import shutil
 import subprocess
 import sys
+from typing import Dict, List, Optional, Tuple
 
 BOLD = "\033[1m"
 DIM = "\033[2m"
@@ -80,7 +81,13 @@ def _ensure_wsl_cuda_env():
 
 
 def _get_cuda_version_from_driver():
-    """Detect CUDA toolkit version from nvidia-smi driver version."""
+    """Detect PyTorch CUDA wheel tag from the NVIDIA driver version.
+
+    This is retained for compatibility with callers/tests that expect the old
+    helper, but setup now uses _select_torch_cuda() so GPU architecture is part
+    of the decision. Driver version alone is not enough: a modern driver can run
+    both cu126 and cu128 wheels, but RTX 50-series GPUs need cu128+ binaries.
+    """
     try:
         nvidia_smi = _find_nvidia_smi() or "nvidia-smi"
         out = subprocess.check_output(
@@ -100,6 +107,94 @@ def _get_cuda_version_from_driver():
     except Exception:
         pass
     return "cu126", "12.6"  # default
+
+
+def _parse_version_tuple(value: str) -> Optional[Tuple[int, int]]:
+    try:
+        major, minor = value.strip().split(".")[:2]
+        return int(major), int(minor)
+    except Exception:
+        return None
+
+
+def _cuda_tag(version: Tuple[int, int]) -> str:
+    return f"cu{version[0]}{version[1]}"
+
+
+def _cuda_version_string(version: Tuple[int, int]) -> str:
+    return f"{version[0]}.{version[1]}"
+
+
+def _get_visible_gpu_compute_caps() -> List[Dict[str, object]]:
+    """Return visible NVIDIA GPUs with compute capability from nvidia-smi."""
+    try:
+        nvidia_smi = _find_nvidia_smi() or "nvidia-smi"
+        out = subprocess.check_output(
+            [nvidia_smi, "--query-gpu=index,name,compute_cap",
+             "--format=csv,noheader,nounits"],
+            text=True, timeout=10,
+        ).strip()
+    except Exception:
+        return []
+
+    gpus: List[Dict[str, object]] = []
+    for line in out.splitlines():
+        parts = [p.strip() for p in line.split(",", 2)]
+        if len(parts) != 3:
+            continue
+        cap = _parse_version_tuple(parts[2])
+        if cap is None:
+            continue
+        try:
+            index = int(parts[0])
+        except ValueError:
+            index = len(gpus)
+        gpus.append({"index": index, "name": parts[1], "capability": cap})
+    return gpus
+
+
+def _required_cuda_for_compute_cap(sm: Tuple[int, int]) -> Tuple[int, int]:
+    """Minimum CUDA runtime/toolkit family required for a GPU architecture."""
+    if sm >= (13, 0):
+        return (13, 0)
+    if sm >= (12, 0):
+        return (12, 8)
+    if sm >= (10, 0):
+        return (12, 6)
+    return (12, 6)
+
+
+def _select_torch_cuda() -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Select the PyTorch CUDA wheel index for the visible GPUs.
+
+    Returns (tag, version, error). The selected wheel is the minimum official
+    PyTorch CUDA wheel that satisfies the newest visible GPU architecture and
+    does not exceed the driver CUDA runtime reported by nvidia-smi.
+    """
+    required = _get_required_cuda_version()
+    driver = _get_driver_cuda_version()
+    if driver is None:
+        driver = required
+    if driver < required:
+        return (
+            None,
+            None,
+            f"driver exposes CUDA {_cuda_version_string(driver)}, but visible GPUs "
+            f"need CUDA {_cuda_version_string(required)}+",
+        )
+
+    candidates = [(11, 8), (12, 1), (12, 4), (12, 6), (12, 8), (13, 0)]
+    for candidate in candidates:
+        if candidate >= required and candidate <= driver:
+            return _cuda_tag(candidate), _cuda_version_string(candidate), None
+
+    return (
+        None,
+        None,
+        f"no supported PyTorch CUDA wheel satisfies required "
+        f"CUDA {_cuda_version_string(required)} with driver CUDA "
+        f"{_cuda_version_string(driver)}",
+    )
 
 
 def _get_nvcc_version():
@@ -203,22 +298,16 @@ def _get_required_cuda_version():
     toolkit repo provides.
     Returns (major, minor) tuple, e.g. (12, 8).
     """
-    try:
-        nvidia_smi = _find_nvidia_smi() or "nvidia-smi"
-        out = subprocess.check_output(
-            [nvidia_smi, "--query-gpu=compute_cap",
-             "--format=csv,noheader,nounits"],
-            text=True, timeout=10,
-        ).strip().split("\n")[0]
-        major, minor = out.split(".")
-        sm = (int(major), int(minor))
-        if sm >= (12, 0):
-            return (12, 8)
-        if sm >= (10, 0):
-            return (12, 6)
-        return (12, 6)  # modern default
-    except Exception:
-        return (12, 6)  # safe default
+    gpus = _get_visible_gpu_compute_caps()
+    if gpus:
+        required = (12, 6)
+        for gpu in gpus:
+            required = max(
+                required,
+                _required_cuda_for_compute_cap(gpu["capability"]),
+            )
+        return required
+    return (12, 6)  # safe default
 
 
 def _need_python_dev():
@@ -228,6 +317,74 @@ def _need_python_dev():
     if inc and os.path.isfile(os.path.join(inc, "Python.h")):
         return False
     return True
+
+
+def _torch_arch_token(capability: str) -> str:
+    major, minor = capability.split(".")[:2]
+    return f"sm_{major}{minor}"
+
+
+def _probe_torch_cuda() -> Dict[str, object]:
+    """Probe torch in a subprocess so reinstall checks see the actual package."""
+    code = r"""
+import json
+result = {"installed": False, "cuda_available": False, "devices": [], "arch_list": []}
+try:
+    import torch
+    result["installed"] = True
+    result["version"] = torch.__version__
+    result["cuda_version"] = getattr(torch.version, "cuda", None)
+    result["cuda_available"] = bool(torch.cuda.is_available())
+    if hasattr(torch.cuda, "get_arch_list"):
+        result["arch_list"] = list(torch.cuda.get_arch_list())
+    if result["cuda_available"]:
+        for i in range(torch.cuda.device_count()):
+            cap = torch.cuda.get_device_capability(i)
+            props = torch.cuda.get_device_properties(i)
+            result["devices"].append({
+                "index": i,
+                "name": props.name,
+                "capability": f"{cap[0]}.{cap[1]}",
+            })
+except Exception as exc:
+    result["error"] = str(exc)
+print(json.dumps(result))
+"""
+    try:
+        out = subprocess.check_output(
+            [sys.executable, "-c", code],
+            text=True,
+            timeout=30,
+            stderr=subprocess.DEVNULL,
+        )
+        import json
+        return json.loads(out)
+    except Exception as exc:
+        return {"installed": False, "cuda_available": False, "error": str(exc)}
+
+
+def _unsupported_torch_devices(torch_probe: Dict[str, object]) -> List[str]:
+    """Return visible devices whose SM arch is missing from installed torch."""
+    if not torch_probe.get("installed") or not torch_probe.get("cuda_available"):
+        return []
+    arch_list = set(torch_probe.get("arch_list") or [])
+    devices = torch_probe.get("devices") or []
+    if not arch_list or not isinstance(devices, list):
+        return []
+
+    unsupported = []
+    for device in devices:
+        if not isinstance(device, dict):
+            continue
+        capability = str(device.get("capability") or "")
+        if "." not in capability:
+            continue
+        token = _torch_arch_token(capability)
+        if token not in arch_list:
+            unsupported.append(
+                f"GPU {device.get('index')} {device.get('name')} ({token})"
+            )
+    return unsupported
 
 
 def _show_required_packages():
@@ -258,14 +415,17 @@ def _show_required_packages():
             print(f"  • python{py_ver_dot}-dev")
 
     # Check Python packages
-    try:
-        import torch
-        has_torch = torch.cuda.is_available()
-    except ImportError:
-        has_torch = False
-    if not has_torch:
-        _, cu_ver = _get_cuda_version_from_driver()
-        print(f"  • torch (CUDA {cu_ver}) — pip install torch --index-url https://download.pytorch.org/whl/cu{''.join(cu_ver.split('.'))}")
+    torch_probe = _probe_torch_cuda()
+    has_torch = bool(torch_probe.get("installed") and torch_probe.get("cuda_available"))
+    unsupported = _unsupported_torch_devices(torch_probe)
+    if not has_torch or unsupported:
+        cu_tag, cu_ver, error = _select_torch_cuda()
+        if error:
+            print(f"  • torch — {error}")
+        else:
+            print(f"  • torch (CUDA {cu_ver}) — pip install torch --index-url https://download.pytorch.org/whl/{cu_tag}")
+        for item in unsupported:
+            print(f"    unsupported by installed torch: {item}")
 
     # sgl-kernel is no longer needed — Marlin GEMM kernels are vendored in libkrasis_marlin.so
 
@@ -498,18 +658,28 @@ def _install_cuda_torch():
     print(f"\n{BOLD}Step 2: CUDA PyTorch{NC}")
 
     need_reinstall = False
-    try:
-        import torch
-        if torch.cuda.is_available():
-            print(f"  {GREEN}CUDA torch already installed (v{torch.__version__}).{NC}")
-            return True
-        else:
-            print(f"  torch {torch.__version__} installed but CUDA not available.")
-            need_reinstall = True
-    except ImportError:
+    torch_probe = _probe_torch_cuda()
+    unsupported = _unsupported_torch_devices(torch_probe)
+
+    if torch_probe.get("installed") and torch_probe.get("cuda_available") and not unsupported:
+        print(f"  {GREEN}CUDA torch already installed (v{torch_probe.get('version')}).{NC}")
+        return True
+    if torch_probe.get("installed") and not torch_probe.get("cuda_available"):
+        print(f"  torch {torch_probe.get('version')} installed but CUDA not available.")
+        need_reinstall = True
+    elif unsupported:
+        print(f"  {YELLOW}Installed torch does not support all visible GPUs.{NC}")
+        for item in unsupported:
+            print(f"    {item}")
+        need_reinstall = True
+    else:
         print(f"  torch not installed.")
 
-    cu_tag, cu_ver = _get_cuda_version_from_driver()
+    cu_tag, cu_ver, error = _select_torch_cuda()
+    if error:
+        print(f"  {RED}Cannot select a supported CUDA torch wheel: {error}.{NC}")
+        print(f"  Update the NVIDIA driver or hide unsupported GPUs with CUDA_VISIBLE_DEVICES.")
+        return False
     index_url = f"https://download.pytorch.org/whl/{cu_tag}"
     print(f"  Installing CUDA torch ({cu_tag})...")
 
@@ -525,6 +695,19 @@ def _install_cuda_torch():
     if ret.returncode != 0:
         print(f"  {RED}Failed. Install manually:{NC}")
         print(f"    pip install torch --index-url {index_url}")
+        return False
+
+    torch_probe = _probe_torch_cuda()
+    unsupported = _unsupported_torch_devices(torch_probe)
+    if not torch_probe.get("installed") or not torch_probe.get("cuda_available"):
+        print(f"  {RED}Installed torch, but CUDA is still not available.{NC}")
+        if torch_probe.get("error"):
+            print(f"    {torch_probe.get('error')}")
+        return False
+    if unsupported:
+        print(f"  {RED}Installed torch, but it still lacks support for visible GPUs:{NC}")
+        for item in unsupported:
+            print(f"    {item}")
         return False
 
     print(f"  {GREEN}CUDA torch installed.{NC}")
