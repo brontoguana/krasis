@@ -1,8 +1,8 @@
 [package]
 name = "krasis"
-version = "0.1.66-rc32"
+version = "1.0.0"
 edition = "2021"
-description = "Hybrid LLM runtime — minimal VRAM, always-on GPU prefill, optimised CPU inference"
+description = "LLM runtime for large MoE models with GPU prefill, GPU decode, and measured VRAM management"
 license = "SSPL-1.0"
 
 [lib]

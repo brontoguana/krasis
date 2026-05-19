@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.0 - 2026-05-19
+
+- First stable Krasis release after the 0.1.x prerelease line.
+- Moves the performance-sensitive runtime path to Rust/CUDA-focused execution,
+  with full GPU prefill and GPU-executed decode.
+- Adds HQQ attention cache support, compact KV cache modes, HCS expert
+  residency management, measured VRAM budgeting, release wheels with sidecar
+  assets, launcher model/download/tunnel workflows, and expanded benchmark and
+  release validation.
+- Current public benchmark coverage includes Qwen3-Coder-Next, Qwen3.6-35B,
+  Qwen3.5-122B, and Qwen3-235B runs across the RTX 5090 and RTX A4500.
+
 ## 2026-02-28 — Decode optimisation: serial route matmul + AVX2 sigmoid
 
 Baseline: 152.7 ms/tok (6.55 tok/s) at 12 threads on 5900X (WSL2, DDR4 dual-channel)

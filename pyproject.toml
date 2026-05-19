@@ -4,14 +4,14 @@ build-backend = "maturin"
 
 [project]
 name = "krasis"
-version = "0.1.66-rc32"
-description = "Hybrid LLM runtime — minimal VRAM, always-on GPU prefill, optimised CPU inference"
+version = "1.0.0"
+description = "LLM runtime for large MoE models with GPU prefill, GPU decode, and measured VRAM management"
 license = {text = "SSPL-1.0"}
 requires-python = ">=3.10"
 readme = "README.md"
 keywords = ["llm", "inference", "moe", "gpu", "cpu"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 5 - Production/Stable",
     "License :: Other/Proprietary License",
     "Programming Language :: Rust",
     "Programming Language :: Python :: 3",
