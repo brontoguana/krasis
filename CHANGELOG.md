@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Fixed VRAM pressure handling after runtime below-safety lows. The monitor now
+  latches below-safety pressure events until HCS has reacted, and the HCS drain
+  path preserves the measured low-water deficit as extra idle headroom instead
+  of clearing the event when idle VRAM has merely recovered above the nominal
+  safety margin.
+
 ## 1.0.1 - 2026-05-19
 
 - Fixed setup compatibility for mixed Ampere and Blackwell systems. `krasis-setup`

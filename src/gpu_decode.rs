@@ -28185,7 +28185,19 @@ impl GpuDecodeStore {
             crate::vram_monitor::clear_pressure(device_id);
             return (0, 0.0, observed_free_mb);
         }
-        if observed_free_mb >= safety_mb {
+
+        // If the monitor observed a transient below-safety low, recovering
+        // above the nominal safety margin is not enough.  Preserve the
+        // measured deficit as extra idle headroom so a similar next decode
+        // step remains above the configured safety margin.
+        let target_floor_mb = pending
+            .map(|p| {
+                observed_free_mb
+                    .saturating_add(p.deficit_mb as usize)
+                    .max(safety_mb)
+            })
+            .unwrap_or(safety_mb);
+        if observed_free_mb >= target_floor_mb {
             crate::vram_monitor::clear_pressure(device_id);
             return (0, 0.0, observed_free_mb);
         }
@@ -28238,7 +28250,7 @@ impl GpuDecodeStore {
         let mut evicted = 0usize;
         let mut freed_bytes = 0usize;
 
-        while final_free_mb < safety_mb && hcs.soft_chunks_loaded > 0 {
+        while final_free_mb < target_floor_mb && hcs.soft_chunks_loaded > 0 {
             let target_chunks = hcs.soft_chunks_loaded - 1;
             let (chunk_evicted, chunk_freed) = hcs.trim_soft_chunks_to(
                 target_chunks,
@@ -28253,7 +28265,7 @@ impl GpuDecodeStore {
         }
 
         hcs.apply_pressure_cap(hcs.soft_chunks_loaded);
-        if final_free_mb >= safety_mb {
+        if final_free_mb >= target_floor_mb {
             crate::vram_monitor::clear_pressure(device_id);
         } else {
             crate::vram_monitor::mark_pressure(device_id, final_free_mb as u64, safety_mb as u64);
@@ -28262,11 +28274,12 @@ impl GpuDecodeStore {
         let freed_mb = freed_bytes as f64 / (1024.0 * 1024.0);
         if evicted > 0 || before_chunks != hcs.soft_chunks_loaded {
             log::warn!(
-                "VRAM pressure eviction: cuda:{} reason={} observed_free={} MB safety={} MB evicted={} soft experts / {} chunks freed={:.1} MB final_free={} MB pressure_cap_chunks={}/{}",
+                "VRAM pressure eviction: cuda:{} reason={} observed_free={} MB safety={} MB target_floor={} MB evicted={} soft experts / {} chunks freed={:.1} MB final_free={} MB pressure_cap_chunks={}/{}",
                 device_id,
                 reason,
                 observed_free_mb,
                 safety_mb,
+                target_floor_mb,
                 evicted,
                 before_chunks.saturating_sub(hcs.soft_chunks_loaded),
                 freed_mb,
@@ -28275,19 +28288,21 @@ impl GpuDecodeStore {
                 hcs.soft_total_chunks,
             );
             eprintln!(
-                "VRAM pressure: evicted {} soft HCS experts / {} chunks; free={} MB after eviction (safety={} MB)",
+                "VRAM pressure: evicted {} soft HCS experts / {} chunks; free={} MB after eviction (safety={} MB, target={} MB)",
                 evicted,
                 before_chunks.saturating_sub(hcs.soft_chunks_loaded),
                 final_free_mb,
                 safety_mb,
+                target_floor_mb,
             );
         } else {
             log::warn!(
-                "VRAM pressure unresolved: cuda:{} reason={} free={} MB safety={} MB no reclaimable soft chunks (soft_cached={} before_cached={})",
+                "VRAM pressure unresolved: cuda:{} reason={} free={} MB safety={} MB target_floor={} MB no reclaimable soft chunks (soft_cached={} before_cached={})",
                 device_id,
                 reason,
                 final_free_mb,
                 safety_mb,
+                target_floor_mb,
                 hcs.soft_num_cached,
                 before_cached,
             );

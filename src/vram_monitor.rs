@@ -547,9 +547,11 @@ impl VramMonitor {
                                 let margin = safety_margin.load(Ordering::Relaxed);
                                 if free_u64 < margin {
                                     mark_pressure(dev.device_id, free_mb, margin / (1024 * 1024));
-                                } else {
-                                    clear_pressure(dev.device_id);
                                 }
+                                // Do not clear pressure just because idle free recovered.
+                                // A transient below-safety low is evidence that the next
+                                // decode step needs more idle headroom; the HCS drain path
+                                // clears this after it has reacted to the recorded deficit.
                             }
 
                             let prev_min = dev.min_free_bytes.load(Ordering::Relaxed);
