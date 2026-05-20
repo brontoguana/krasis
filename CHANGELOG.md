@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.2 - 2026-05-20
 
 - Fixed VRAM pressure handling after runtime below-safety lows. The monitor now
   latches below-safety pressure events until HCS has reacted, and the HCS drain
