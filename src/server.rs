@@ -970,6 +970,7 @@ fn handle_chat_completion(
 
     // ── Prefill: Rust path (zero GIL) or Python fallback ──
     crate::vram_monitor::report_event("prefill_start");
+    crate::vram_monitor::reset_request_lows();
     let t_prefill_gil = Instant::now();
 
     let mut prompt_hcs_snapshot: Option<(Vec<u64>, usize, usize, usize)> = None;
@@ -1121,6 +1122,40 @@ fn handle_chat_completion(
             let _ = state.py_model.call_method0(py, "server_cleanup");
         });
         return;
+    }
+
+    {
+        let store = unsafe { &*(state.gpu_store_addr as *const GpuDecodeStore) };
+        let free_now_mb = store.query_vram_free_mb();
+        let primary_device = store.device_ordinal();
+        let prefill_min_free_mb = crate::vram_monitor::current_request_lows()
+            .into_iter()
+            .find(|(device, _)| *device == primary_device)
+            .map(|(_, free_mb)| free_mb as usize)
+            .unwrap_or(free_now_mb);
+        let prefill_secs = prefill_gil_ms / 1000.0;
+        let prefill_tok_s = if prefill_secs > 0.0 && prompt_len > 0 {
+            prompt_len as f64 / prefill_secs
+        } else {
+            0.0
+        };
+        eprintln!(
+            "  \x1b[32mprefill: {} tokens in {:.2}s ({:.1} tok/s)  VRAM: {} MB free now, {} MB min free during prefill\x1b[0m",
+            prompt_len,
+            prefill_secs,
+            prefill_tok_s,
+            free_now_mb,
+            prefill_min_free_mb,
+        );
+        log::info!(
+            "Request {} prefill: {} tokens in {:.2}s ({:.1} tok/s), free_now={} MB, min_free_prefill={} MB",
+            request_id,
+            prompt_len,
+            prefill_secs,
+            prefill_tok_s,
+            free_now_mb,
+            prefill_min_free_mb,
+        );
     }
 
     // Check context length

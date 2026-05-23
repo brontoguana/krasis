@@ -264,6 +264,22 @@ pub fn update_request_context(context: &str) {
     }
 }
 
+pub fn reset_request_lows() {
+    let mut active = ACTIVE_REQUEST_VRAM.lock().unwrap();
+    if let Some(ref mut ctx) = *active {
+        ctx.lows_mb.clear();
+    }
+}
+
+pub fn current_request_lows() -> Vec<(i32, u64)> {
+    ACTIVE_REQUEST_VRAM
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|ctx| ctx.lows_mb.clone())
+        .unwrap_or_default()
+}
+
 pub fn end_request_context() -> Option<(String, Vec<(i32, u64)>)> {
     ACTIVE_REQUEST_VRAM
         .lock()

@@ -18179,6 +18179,11 @@ impl GpuDecodeStore {
         free / (1024 * 1024)
     }
 
+    /// CUDA device ordinal for Rust-side request telemetry.
+    pub fn device_ordinal(&self) -> i32 {
+        self.device.ordinal() as i32
+    }
+
     /// Return benchmark stats: (min_free_vram_mb, hcs_loaded, hcs_total, hcs_pct)
     /// Only counts MoE experts within this store's decode segment [decode_layer_start..decode_layer_end).
     pub fn benchmark_stats(&self) -> (usize, usize, usize, f64) {

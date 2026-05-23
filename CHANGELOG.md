@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Added request prefill progress output alongside the existing decode progress
+  lines. Chat requests now print real prefill token count, elapsed time, tok/s,
+  current VRAM, and min-free VRAM during prefill before decode starts.
+
 ## 1.0.4 - 2026-05-23
 
 - Improved startup long VRAM calibration probe selection. The adaptive chooser
