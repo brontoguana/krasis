@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.3 - 2026-05-23
 
 - Made startup long VRAM calibration adaptive. Krasis now measures the short
   startup prefill first, then ramps the long calibration probe upward from
