@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.0.5 - 2026-05-23
+
 - Added request prefill progress output alongside the existing decode progress
   lines. Chat requests now print real prefill token count, elapsed time, tok/s,
   current VRAM, and min-free VRAM during prefill before decode starts.
