@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Improved startup long VRAM calibration probe selection. The adaptive chooser
+  now combines Rust prefill scratch growth with compact-KV stage-exact staging
+  cost from the loaded model dimensions, then jumps directly to a predicted
+  safe long probe with a validation reserve instead of stepping upward through
+  small probes.
+
 ## 1.0.3 - 2026-05-23
 
 - Made startup long VRAM calibration adaptive. Krasis now measures the short

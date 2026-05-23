@@ -495,12 +495,89 @@ def _startup_calibration_long_floor_mb(safety_margin_mb: int) -> int:
     return max(1, safety_margin_mb * 2)
 
 
+def _startup_stage_exact_kv_mb_per_token(model: KrasisModel, kv_dtype: str) -> float:
+    """Return compact-KV stage-exact prefill temp growth in MB/token."""
+    if kv_dtype not in ("k6v6", "k4v4"):
+        return 0.0
+    cfg = model.cfg
+    if not getattr(cfg, "is_gqa", False):
+        return 0.0
+
+    active_layers = int(getattr(cfg, "num_full_attention_layers", cfg.num_hidden_layers))
+    num_kv_heads = int(getattr(cfg, "num_key_value_heads", 0))
+    head_dim = int(getattr(cfg, "gqa_head_dim", None) or getattr(cfg, "head_dim", 0) or 0)
+    if active_layers <= 0 or num_kv_heads <= 0 or head_dim <= 0:
+        return 0.0
+
+    bytes_per_token = 2 * active_layers * num_kv_heads * head_dim
+    return bytes_per_token / (1024.0 * 1024.0)
+
+
+def _startup_calibration_estimated_prefill_mb_per_token(
+    model: KrasisModel,
+    gpu_store,
+    kv_dtype: str,
+    short_tokens: int,
+    long_tokens: int,
+) -> float:
+    """Estimate long-prefill preparation growth from runtime model dimensions."""
+    scratch_mb_per_token = 0.0
+    if long_tokens > short_tokens and hasattr(gpu_store, "prefill_scratch_reservation_mb"):
+        short_scratch_mb = int(gpu_store.prefill_scratch_reservation_mb(short_tokens))
+        long_scratch_mb = int(gpu_store.prefill_scratch_reservation_mb(long_tokens))
+        if long_scratch_mb > short_scratch_mb:
+            scratch_mb_per_token = (long_scratch_mb - short_scratch_mb) / (long_tokens - short_tokens)
+
+    return scratch_mb_per_token + _startup_stage_exact_kv_mb_per_token(model, kv_dtype)
+
+
+def _project_startup_calibration_probe_target(
+    *,
+    current_tokens: int,
+    current_min_free_mb: int,
+    short_tokens: int,
+    default_long_tokens: int,
+    target_floor_mb: int,
+    mb_per_token: float,
+) -> tuple[Optional[int], str]:
+    """Project a safe next calibration probe using a measured or model-derived slope."""
+    if mb_per_token <= 0.0:
+        return None, "no usable MB/token estimate"
+
+    # Aim the next probe at one full calibration floor above the stop floor.
+    # If the estimate is right, the probe validates useful long-context behavior
+    # without running near the hard-exit floor during startup when HCS cannot evict.
+    validation_floor_mb = target_floor_mb * 2
+    if current_min_free_mb <= validation_floor_mb:
+        return None, (
+            f"current low-water {current_min_free_mb} MB leaves no validation reserve "
+            f"above {validation_floor_mb} MB"
+        )
+
+    projected_extra_tokens = int((current_min_free_mb - validation_floor_mb) / mb_per_token)
+    min_useful_extra = max(1, short_tokens // 2)
+    if projected_extra_tokens <= min_useful_extra:
+        return None, (
+            f"projected next span {projected_extra_tokens} tokens is too close to "
+            f"validation floor {validation_floor_mb} MB"
+        )
+
+    candidate = min(default_long_tokens, current_tokens + projected_extra_tokens)
+    if candidate <= current_tokens:
+        return None, "projected candidate would not grow"
+    return candidate, (
+        f"projected {mb_per_token:.4f} MB/token, "
+        f"validation floor {validation_floor_mb} MB"
+    )
+
+
 def _next_startup_calibration_probe_target(
     *,
     short_tokens: int,
     default_long_tokens: int,
     observed_prefill_mins: list[tuple[int, int]],
     target_floor_mb: int,
+    estimated_prefill_mb_per_token: float = 0.0,
 ) -> tuple[Optional[int], str]:
     """Choose the next startup long-calibration probe from observed low-water data."""
     if not observed_prefill_mins:
@@ -521,6 +598,19 @@ def _next_startup_calibration_probe_target(
     )
     raw_candidate = min(default_long_tokens, max(current_tokens * 2, first_long))
     if len(observed_prefill_mins) < 2:
+        projected, reason = _project_startup_calibration_probe_target(
+            current_tokens=current_tokens,
+            current_min_free_mb=current_min_free_mb,
+            short_tokens=short_tokens,
+            default_long_tokens=default_long_tokens,
+            target_floor_mb=target_floor_mb,
+            mb_per_token=estimated_prefill_mb_per_token,
+        )
+        if projected is not None:
+            return projected, f"model-estimated initial probe ({reason})"
+        if estimated_prefill_mb_per_token > 0.0:
+            return None, reason
+
         initial_headroom_mb = current_min_free_mb - target_floor_mb
         if initial_headroom_mb <= max(1, target_floor_mb // 2):
             return None, (
@@ -529,7 +619,7 @@ def _next_startup_calibration_probe_target(
             )
         if raw_candidate <= current_tokens:
             return None, "no longer candidate above current probe"
-        return raw_candidate, "initial adaptive long probe"
+        return raw_candidate, f"initial adaptive long probe ({reason})"
 
     worst_slope_mb_per_token = 0.0
     for (left_tokens, left_min), (right_tokens, right_min) in zip(
@@ -544,28 +634,25 @@ def _next_startup_calibration_probe_target(
                 min_drop_mb / token_span,
             )
 
-    if worst_slope_mb_per_token <= 0.0:
+    slope_mb_per_token = max(worst_slope_mb_per_token, estimated_prefill_mb_per_token)
+    if slope_mb_per_token <= 0.0:
         if raw_candidate <= current_tokens:
             return None, "no longer candidate above current probe"
         return raw_candidate, "no observed low-water decline yet"
 
-    safe_extra_tokens = int((current_min_free_mb - target_floor_mb) / worst_slope_mb_per_token)
-    min_useful_extra = max(1, short_tokens // 2)
-    if safe_extra_tokens <= min_useful_extra:
-        return None, (
-            f"predicted next span {safe_extra_tokens} tokens is too close to "
-            f"adaptive floor {target_floor_mb} MB"
-        )
-
-    slope_limited_candidate = current_tokens + max(1, safe_extra_tokens // 2)
-    candidate = min(raw_candidate, slope_limited_candidate, default_long_tokens)
-    if candidate <= current_tokens:
-        return None, (
-            f"predicted next candidate would cross adaptive floor {target_floor_mb} MB"
-        )
+    candidate, reason = _project_startup_calibration_probe_target(
+        current_tokens=current_tokens,
+        current_min_free_mb=current_min_free_mb,
+        short_tokens=short_tokens,
+        default_long_tokens=min(raw_candidate, default_long_tokens),
+        target_floor_mb=target_floor_mb,
+        mb_per_token=slope_mb_per_token,
+    )
+    if candidate is None:
+        return None, reason
     return candidate, (
         f"worst observed slope {worst_slope_mb_per_token:.4f} MB/token, "
-        f"floor {target_floor_mb} MB"
+        f"model estimate {estimated_prefill_mb_per_token:.4f} MB/token, {reason}"
     )
 
 
@@ -1615,6 +1702,13 @@ def main():
     )
 
     adaptive_floor_mb = _startup_calibration_long_floor_mb(SAFETY_MARGIN_MB)
+    estimated_prefill_mb_per_token = _startup_calibration_estimated_prefill_mb_per_token(
+        _model,
+        gpu_store,
+        args.kv_dtype,
+        short_tokens,
+        long_target,
+    )
     observed_prefill_mins: list[tuple[int, int]] = [(short_tokens, short_prefill_min)]
     long_tokens = short_tokens
     long_baseline_free = short_baseline_free
@@ -1630,11 +1724,12 @@ def main():
     else:
         _detail(
             f"Adaptive long calibration: default target={long_target:,} tokens, "
-            f"target low-water floor={adaptive_floor_mb:,} MB"
+            f"target low-water floor={adaptive_floor_mb:,} MB, "
+            f"estimated prefill growth={estimated_prefill_mb_per_token:.4f} MB/token"
         )
         logger.info(
-            "Adaptive startup calibration: default_long=%d target_floor=%d MB",
-            long_target, adaptive_floor_mb,
+            "Adaptive startup calibration: default_long=%d target_floor=%d MB estimated_prefill_mb_per_token=%.6f",
+            long_target, adaptive_floor_mb, estimated_prefill_mb_per_token,
         )
         while True:
             next_target, reason = _next_startup_calibration_probe_target(
@@ -1642,6 +1737,7 @@ def main():
                 default_long_tokens=long_target,
                 observed_prefill_mins=observed_prefill_mins,
                 target_floor_mb=adaptive_floor_mb,
+                estimated_prefill_mb_per_token=estimated_prefill_mb_per_token,
             )
             if next_target is None:
                 _detail(
