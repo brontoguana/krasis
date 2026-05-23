@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "krasis"
-version = "1.0.3"
+version = "1.0.4"
 description = "LLM runtime for large MoE models with GPU prefill, GPU decode, and measured VRAM management"
 license = {text = "SSPL-1.0"}
 requires-python = ">=3.10"

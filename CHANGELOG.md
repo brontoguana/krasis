@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.0.4 - 2026-05-23
+
 - Improved startup long VRAM calibration probe selection. The adaptive chooser
   now combines Rust prefill scratch growth with compact-KV stage-exact staging
   cost from the loaded model dimensions, then jumps directly to a predicted
