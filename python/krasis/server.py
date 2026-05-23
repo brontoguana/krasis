@@ -140,6 +140,10 @@ _model_name: str = "unknown"
 STARTUP_CALIBRATION_SHORT_TOKENS = int(os.environ.get("KRASIS_STARTUP_CALIBRATION_SHORT_TOKENS", "500"))
 STARTUP_CALIBRATION_DECODE_TOKENS = int(os.environ.get("KRASIS_STARTUP_CALIBRATION_DECODE_TOKENS", "32"))
 STARTUP_CALIBRATION_LONG_TOKENS_CAP = int(os.environ.get("KRASIS_STARTUP_CALIBRATION_LONG_TOKENS_CAP", "50000"))
+STARTUP_CALIBRATION_LONG_INITIAL_MULTIPLIER = int(os.environ.get(
+    "KRASIS_STARTUP_CALIBRATION_LONG_INITIAL_MULTIPLIER",
+    "8",
+))
 
 
 def _env_int(name: str, default: int, minimum: int = 1) -> int:
@@ -481,6 +485,88 @@ def _make_startup_calibration_prompts(model: KrasisModel, lengths: list[int]) ->
             raise RuntimeError(f"Startup calibration prompt {files[i % len(files)]} produced no tokens")
         prompts.append(tokens)
     return prompts
+
+
+def _startup_calibration_long_floor_mb(safety_margin_mb: int) -> int:
+    # Startup calibration runs before HCS is loaded, so there is nothing to evict
+    # if a long prefill transient underestimates VRAM. Keep an extra measured
+    # safety margin during calibration; runtime HCS budgets still use the
+    # configured margin after calibration completes.
+    return max(1, safety_margin_mb * 2)
+
+
+def _next_startup_calibration_probe_target(
+    *,
+    short_tokens: int,
+    default_long_tokens: int,
+    observed_prefill_mins: list[tuple[int, int]],
+    target_floor_mb: int,
+) -> tuple[Optional[int], str]:
+    """Choose the next startup long-calibration probe from observed low-water data."""
+    if not observed_prefill_mins:
+        return None, "no completed probes"
+
+    current_tokens, current_min_free_mb = observed_prefill_mins[-1]
+    if current_tokens >= default_long_tokens:
+        return None, "default long target reached"
+    if current_min_free_mb <= target_floor_mb:
+        return None, (
+            f"current low-water {current_min_free_mb} MB is at/below "
+            f"adaptive floor {target_floor_mb} MB"
+        )
+
+    first_long = max(
+        current_tokens + 1,
+        short_tokens * max(1, STARTUP_CALIBRATION_LONG_INITIAL_MULTIPLIER),
+    )
+    raw_candidate = min(default_long_tokens, max(current_tokens * 2, first_long))
+    if len(observed_prefill_mins) < 2:
+        initial_headroom_mb = current_min_free_mb - target_floor_mb
+        if initial_headroom_mb <= max(1, target_floor_mb // 2):
+            return None, (
+                f"short-probe headroom {initial_headroom_mb} MB is too close to "
+                f"adaptive floor {target_floor_mb} MB"
+            )
+        if raw_candidate <= current_tokens:
+            return None, "no longer candidate above current probe"
+        return raw_candidate, "initial adaptive long probe"
+
+    worst_slope_mb_per_token = 0.0
+    for (left_tokens, left_min), (right_tokens, right_min) in zip(
+        observed_prefill_mins,
+        observed_prefill_mins[1:],
+    ):
+        token_span = right_tokens - left_tokens
+        min_drop_mb = left_min - right_min
+        if token_span > 0 and min_drop_mb > 0:
+            worst_slope_mb_per_token = max(
+                worst_slope_mb_per_token,
+                min_drop_mb / token_span,
+            )
+
+    if worst_slope_mb_per_token <= 0.0:
+        if raw_candidate <= current_tokens:
+            return None, "no longer candidate above current probe"
+        return raw_candidate, "no observed low-water decline yet"
+
+    safe_extra_tokens = int((current_min_free_mb - target_floor_mb) / worst_slope_mb_per_token)
+    min_useful_extra = max(1, short_tokens // 2)
+    if safe_extra_tokens <= min_useful_extra:
+        return None, (
+            f"predicted next span {safe_extra_tokens} tokens is too close to "
+            f"adaptive floor {target_floor_mb} MB"
+        )
+
+    slope_limited_candidate = current_tokens + max(1, safe_extra_tokens // 2)
+    candidate = min(raw_candidate, slope_limited_candidate, default_long_tokens)
+    if candidate <= current_tokens:
+        return None, (
+            f"predicted next candidate would cross adaptive floor {target_floor_mb} MB"
+        )
+    return candidate, (
+        f"worst observed slope {worst_slope_mb_per_token:.4f} MB/token, "
+        f"floor {target_floor_mb} MB"
+    )
 
 
 # Decode tokens per heatmap prompt.  This is deliberately high relative to the
@@ -1423,28 +1509,30 @@ def main():
     startup_diag = _startup_diag_enabled()
     short_target = short_target_default
     long_target = long_target_default
+    forced_long_target = False
     if startup_diag:
         short_target = min(max_calibration_tokens, _env_int(
             "KRASIS_STARTUP_CAL_SHORT_TOKENS", short_target_default, minimum=1
         ))
-        long_target = min(max_calibration_tokens, _env_int(
-            "KRASIS_STARTUP_CAL_LONG_TOKENS", long_target_default, minimum=1
-        ))
+        if os.environ.get("KRASIS_STARTUP_CAL_LONG_TOKENS", "").strip():
+            forced_long_target = True
+            long_target = min(max_calibration_tokens, _env_int(
+                "KRASIS_STARTUP_CAL_LONG_TOKENS", long_target_default, minimum=1
+            ))
     long_target = max(short_target, long_target)
     if startup_diag:
         _detail(
             "Startup diag: calibration tokens "
             f"short={short_target:,} (default {short_target_default:,}), "
             f"long={long_target:,} (default {long_target_default:,}), "
-            f"cap={max_calibration_tokens:,}"
+            f"cap={max_calibration_tokens:,}, forced_long={forced_long_target}"
         )
         logger.info(
             "Startup diag calibration: short_tokens=%d default_short=%d long_tokens=%d "
-            "default_long=%d cap=%d decode_tokens=%d",
+            "default_long=%d cap=%d decode_tokens=%d forced_long=%s",
             short_target, short_target_default, long_target, long_target_default,
-            max_calibration_tokens, STARTUP_CALIBRATION_DECODE_TOKENS,
+            max_calibration_tokens, STARTUP_CALIBRATION_DECODE_TOKENS, forced_long_target,
         )
-    calibration_prompts = _make_startup_calibration_prompts(_model, [short_target, long_target])
     calibration_stop_ids: list[int] = []
 
     def _measure_vram_probe(label: str, prompt_tokens: list[int]) -> tuple[int, int, int, int, int]:
@@ -1521,12 +1609,88 @@ def main():
             )
         return prompt_len, baseline_free, prefill_post_alloc_free, prefill_min_free, decode_min_free
 
+    short_prompt = _make_startup_calibration_prompts(_model, [short_target])[0]
     short_tokens, short_baseline_free, short_prefill_post_alloc, short_prefill_min, short_decode_min = _measure_vram_probe(
-        "Short calibration", calibration_prompts[0]
+        "Short calibration", short_prompt
     )
-    long_tokens, long_baseline_free, long_prefill_post_alloc, long_prefill_min, long_decode_min = _measure_vram_probe(
-        "Long calibration", calibration_prompts[1]
-    )
+
+    adaptive_floor_mb = _startup_calibration_long_floor_mb(SAFETY_MARGIN_MB)
+    observed_prefill_mins: list[tuple[int, int]] = [(short_tokens, short_prefill_min)]
+    long_tokens = short_tokens
+    long_baseline_free = short_baseline_free
+    long_prefill_post_alloc = short_prefill_post_alloc
+    long_prefill_min = short_prefill_min
+    long_decode_min = short_decode_min
+
+    if forced_long_target:
+        long_prompt = _make_startup_calibration_prompts(_model, [long_target])[0]
+        long_tokens, long_baseline_free, long_prefill_post_alloc, long_prefill_min, long_decode_min = _measure_vram_probe(
+            "Long calibration", long_prompt
+        )
+    else:
+        _detail(
+            f"Adaptive long calibration: default target={long_target:,} tokens, "
+            f"target low-water floor={adaptive_floor_mb:,} MB"
+        )
+        logger.info(
+            "Adaptive startup calibration: default_long=%d target_floor=%d MB",
+            long_target, adaptive_floor_mb,
+        )
+        while True:
+            next_target, reason = _next_startup_calibration_probe_target(
+                short_tokens=short_tokens,
+                default_long_tokens=long_target,
+                observed_prefill_mins=observed_prefill_mins,
+                target_floor_mb=adaptive_floor_mb,
+            )
+            if next_target is None:
+                _detail(
+                    f"Adaptive long calibration: using {long_tokens:,} tokens "
+                    f"({reason})"
+                )
+                logger.info(
+                    "Adaptive startup calibration stopped: long_tokens=%d reason=%s",
+                    long_tokens, reason,
+                )
+                break
+
+            _detail(
+                f"Adaptive long calibration: next probe {next_target:,} tokens "
+                f"({reason})"
+            )
+            logger.info(
+                "Adaptive startup calibration probe: next_tokens=%d reason=%s",
+                next_target, reason,
+            )
+            long_prompt = _make_startup_calibration_prompts(_model, [next_target])[0]
+            previous_long_tokens = long_tokens
+            long_tokens, long_baseline_free, long_prefill_post_alloc, long_prefill_min, long_decode_min = _measure_vram_probe(
+                "Long calibration", long_prompt
+            )
+            observed_prefill_mins.append((long_tokens, long_prefill_min))
+
+            if long_tokens <= previous_long_tokens:
+                _detail(
+                    f"Adaptive long calibration: prompt source stopped growing at "
+                    f"{long_tokens:,} tokens"
+                )
+                logger.info(
+                    "Adaptive startup calibration prompt source stopped growing: requested=%d actual=%d previous=%d",
+                    next_target, long_tokens, previous_long_tokens,
+                )
+                break
+            if long_tokens >= long_target:
+                break
+            if long_prefill_min <= adaptive_floor_mb:
+                _detail(
+                    f"Adaptive long calibration: reached low-water floor at "
+                    f"{long_prefill_min:,} MB; using {long_tokens:,} tokens"
+                )
+                logger.info(
+                    "Adaptive startup calibration reached floor: tokens=%d min_free=%d floor=%d",
+                    long_tokens, long_prefill_min, adaptive_floor_mb,
+                )
+                break
 
     # Compute max scratch: worst case prompt (50K tokens).
     # This determines how much VRAM prefill can claim via soft eviction.

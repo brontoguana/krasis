@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Made startup long VRAM calibration adaptive. Krasis now measures the short
+  startup prefill first, then ramps the long calibration probe upward from
+  observed low-water VRAM instead of immediately probing 80% of the context/KV
+  cap. This avoids startup OOMs on WSL/shared-GPU systems where Windows
+  processes reduce live free VRAM before Krasis starts.
+
 ## 1.0.2 - 2026-05-20
 
 - Fixed VRAM pressure handling after runtime below-safety lows. The monitor now
