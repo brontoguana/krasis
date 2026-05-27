@@ -46,8 +46,8 @@ Krasis release. Highlights:
 - Added full Ampere support for the current production path. HQQ attention and
   compact KV cache modes were built with Ampere compatibility in mind and do
   not require FP8-capable hardware.
-- Added Qwen3.6-35B-A3B support, including HQQ4/`k4v4` RTX 5090 benchmark
-  coverage and HQQ6/`k6v6` RTX A4500 Ampere coverage.
+- Added Qwen3.6-35B-A3B support, including HQQ4/`k4v4` RTX 5090/5080
+  benchmark coverage and HQQ6/`k6v6` RTX A4500 Ampere coverage.
 - Added and hardened HCS expert residency management: measured startup
   calibration, prompt-conditioned reload, dynamic recency tail, per-stage
   budgets, soft-tier reload caps, and safe eviction/reload paths.
@@ -82,6 +82,7 @@ measurement; `HTTP round trip` includes local client/server HTTP overhead.
 | RTX 5090 32 GB | Qwen3-235B-A22B | 235B | HQQ6 | k4v4 | 1459.1 tok/s | 3.54 tok/s | 6.17 tok/s |
 | RTX A4500 20 GB | Qwen3.6-35B-A3B | 35B | HQQ6 | k6v6 | 2235.2 tok/s | 50.98 tok/s | 103.98 tok/s |
 | RTX A4500 20 GB | Qwen3-Coder-Next | 80B | HQQ6 | k4v4 | 1569.5 tok/s | 34.69 tok/s | 60.47 tok/s |
+| RTX 5080 16 GB | Qwen3.6-35B-A3B | 35B | HQQ4 | k4v4 | 3743.5 tok/s | 60.04 tok/s | 128.55 tok/s |
 | RTX 3070 Laptop 8 GB | Qwen3.5-35B-A3B | 35B | HQQ4 | k4v4 | 222.1 tok/s | 12.48 tok/s | 22.00 tok/s |
 
 ## Tradeoffs And Requirements

@@ -1,5 +1,27 @@
 # Krasis Benchmark Results
 
+## Standard Benchmarks - 2026-05-27 (Typhon RTX 5080)
+
+Hardware: Typhon, AMD Ryzen 9 5900X, 117 GB RAM, 1x NVIDIA GeForce RTX 5080
+16 GB. Timing instrumentation was disabled. The run used the published
+`v1.0.7` installed command path and the Typhon Qwen3.6-35B-A3B HQQ4/`k4v4`
+benchmark config `/tmp/krasis-j0rq33l2.conf`.
+
+| Model / run | Command | Attention | KV | Prefill (tok/s) | Decode (tok/s) | Round trip (tok/s) | HCS | Min free VRAM | Logs |
+|-------------|---------|-----------|----|----------------:|---------------:|-------------------:|-----|--------------:|------|
+| Qwen3.6-35B-A3B Typhon RTX 5080 HQQ4 k4v4 | installed `krasis` benchmark run from `server-run-benchmark_20260527_160458` | HQQ4 | k4v4 | 3743.5 | 60.04 | 128.55 | 5289/10240 (51.7%) | 963 MB | [report](20260527_typhon_qwen36_5080_hqq4_k4v4_benchmark_report.log), [server log](20260527_typhon_qwen36_5080_hqq4_k4v4_krasis.log) |
+
+Notes:
+- This is the post-`v1.0.7` installed-release rerun after the prefill pinning
+  VRAM-floor fix. It completed with no hard-floor exit.
+- Timed prefill increased with prompt length and peaked at the 50K row:
+  `1K 252.7`, `5K 1558.6`, `10K 2810.5`, `20K 3471.8`, `35K 3668.9`,
+  `50K 3743.5 tok/s`.
+- Decode retained `5289/10240` HCS experts with `963 MB` minimum free VRAM
+  against the configured `600 MB` safety margin.
+
+---
+
 ## Standard Benchmarks - 2026-05-27 (Zephyrus RTX 3070 Laptop)
 
 Hardware: Zephyrus, AMD Ryzen 7 5800HS, 31 GB RAM, 1x NVIDIA GeForce RTX
