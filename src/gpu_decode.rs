@@ -39,6 +39,13 @@ fn env_truthy(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+macro_rules! vram_ledger_log {
+    ($($arg:tt)*) => {{
+        log::info!($($arg)*);
+        eprintln!($($arg)*);
+    }};
+}
+
 fn env_enabled_default(name: &str, default: bool) -> bool {
     std::env::var(name)
         .map(|v| match v.trim().to_ascii_lowercase().as_str() {
@@ -9545,17 +9552,35 @@ impl GpuDecodeStore {
         prompt_tokens: usize,
         post_alloc_free_mb: usize,
     ) -> Option<usize> {
-        self.vram_calibration
-            .and_then(|cal| {
-                let prefill_hcs_reserve_mb =
-                    self.prefill_pinning_hcs_reserve_mb(&cal, prompt_tokens);
-                cal.optional_pinning_budget_mb(
+        let Some(cal) = self.vram_calibration else {
+            if env_truthy("KRASIS_VRAM_LEDGER") {
+                vram_ledger_log!(
+                    "VRAM LEDGER prefill_pinning_budget prompt_tokens={} post_alloc_free_mb={} calibration_present=false result_mb=None",
                     prompt_tokens,
-                    post_alloc_free_mb as u64,
-                    prefill_hcs_reserve_mb,
-                )
-            })
-            .map(|mb| mb as usize)
+                    post_alloc_free_mb,
+                );
+            }
+            return None;
+        };
+        let prefill_hcs_reserve_mb =
+            self.prefill_pinning_hcs_reserve_mb(&cal, prompt_tokens);
+        let required_post_scratch_mb = cal.required_post_scratch_free_mb(prompt_tokens);
+        let result = cal.optional_pinning_budget_mb(
+            prompt_tokens,
+            post_alloc_free_mb as u64,
+            prefill_hcs_reserve_mb,
+        );
+        if env_truthy("KRASIS_VRAM_LEDGER") {
+            vram_ledger_log!(
+                "VRAM LEDGER prefill_pinning_budget prompt_tokens={} post_alloc_free_mb={} required_post_scratch_mb={:?} prefill_hcs_reserve_mb={} result_mb={:?}",
+                prompt_tokens,
+                post_alloc_free_mb,
+                required_post_scratch_mb,
+                prefill_hcs_reserve_mb,
+                result,
+            );
+        }
+        result.map(|mb| mb as usize)
     }
 
     fn get_last_prefill_post_alloc_free_mb(&self) -> PyResult<usize> {
@@ -28028,6 +28053,25 @@ impl GpuDecodeStore {
             usize::MAX
         };
         let needed_bytes = base_needed_bytes.saturating_add(hqq_prefill_growth_bytes);
+        if env_truthy("KRASIS_VRAM_LEDGER") {
+            vram_ledger_log!(
+                "VRAM LEDGER hcs_evict_prefill prompt_tokens={} capped_tokens={} free_mb={:.0} base_needed_mb={:.0} hqq_prefill_growth_mb={:.0} needed_mb={:.0} soft_cached={} soft_slots={} soft_slot_mb={:.3} soft_chunks_loaded={} soft_total_chunks={} hard_budget_mb={} soft_max_mb={} safety_mb={}",
+                estimated_tokens,
+                capped_tokens,
+                free_bytes as f64 / (1024.0 * 1024.0),
+                base_needed_bytes as f64 / (1024.0 * 1024.0),
+                hqq_prefill_growth_bytes as f64 / (1024.0 * 1024.0),
+                needed_bytes as f64 / (1024.0 * 1024.0),
+                hcs.soft_num_cached,
+                hcs.soft_num_slots,
+                hcs.soft_slot_size as f64 / (1024.0 * 1024.0),
+                hcs.soft_chunks_loaded,
+                hcs.soft_total_chunks,
+                hcs.hard_budget_mb,
+                hcs.soft_max_mb,
+                hcs.safety_margin_mb,
+            );
+        }
 
         if free_bytes >= needed_bytes {
             trace_emit_global_mark(
@@ -28057,8 +28101,17 @@ impl GpuDecodeStore {
         // until we have enough free VRAM for scratch + safety.
         let t0 = std::time::Instant::now();
         let deficit = needed_bytes - free_bytes;
+        if env_truthy("KRASIS_VRAM_LEDGER") {
+            vram_ledger_log!(
+                "VRAM LEDGER hcs_evict_prefill_deficit prompt_tokens={} deficit_mb={:.1} soft_chunks_loaded={} soft_slots_per_chunk={} soft_slot_mb={:.3}",
+                estimated_tokens,
+                deficit as f64 / (1024.0 * 1024.0),
+                hcs.soft_chunks_loaded,
+                hcs.soft_slots_per_chunk,
+                hcs.soft_slot_size as f64 / (1024.0 * 1024.0),
+            );
+        }
         let spc = hcs.soft_slots_per_chunk;
-        let nep = hcs.num_experts_per_layer;
 
         let mut chunks_to_drop = 0usize;
         let mut freed_bytes = 0usize;
@@ -28159,6 +28212,29 @@ impl GpuDecodeStore {
             estimated_tokens,
             base_needed_bytes as f64 / (1024.0 * 1024.0),
             hqq_prefill_growth_bytes as f64 / (1024.0 * 1024.0));
+        if env_truthy("KRASIS_VRAM_LEDGER") {
+            let free_after_bytes = unsafe {
+                let mut free: usize = 0;
+                let mut total: usize = 0;
+                let err = cuda_sys::lib().cuMemGetInfo_v2(
+                    &mut free as *mut usize,
+                    &mut total as *mut usize,
+                );
+                if err == cuda_sys::CUresult::CUDA_SUCCESS { free } else { 0 }
+            };
+            vram_ledger_log!(
+                "VRAM LEDGER hcs_evict_prefill_result prompt_tokens={} evicted={} freed_mb={:.1} chunks_dropped={} total_chunks={} elapsed_ms={:.1} free_after_mb={:.0} soft_cached_after={} soft_chunks_loaded_after={}",
+                estimated_tokens,
+                evicted,
+                freed_mb,
+                chunks_to_drop,
+                total_chunks,
+                elapsed_ms,
+                free_after_bytes as f64 / (1024.0 * 1024.0),
+                hcs.soft_num_cached,
+                hcs.soft_chunks_loaded,
+            );
+        }
 
         (evicted, freed_mb)
     }

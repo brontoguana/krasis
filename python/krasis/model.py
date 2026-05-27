@@ -197,6 +197,10 @@ def _vram_checkpoint(label: str, devices=None):
         )
 
 
+def _vram_ledger_enabled() -> bool:
+    return os.environ.get("KRASIS_VRAM_LEDGER", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _read_vmrss_kb() -> int:
     """Read VmRSS from /proc/self/status in KB."""
     try:
@@ -764,6 +768,7 @@ class KrasisModel:
             logger.info("GPU%d: %.0f MB allocated", i, alloc_mb)
         logger.info("GPU weights loaded in %.1fs", gpu_elapsed)
         _vram_checkpoint("after-phase1-gpu-weights")
+        self.log_vram_ledger_residency("after-phase1-gpu-weights")
 
         # Phase 1b: Streaming attention offload (if enabled) or resident check
         if self.stream_attention:
@@ -850,6 +855,7 @@ class KrasisModel:
             print(f"  \033[0;32mExpert cache built in {cpu_elapsed:.0f}s — next launch will be much faster.\033[0m", flush=True)
 
         _vram_checkpoint("after-phase2-expert-weights")
+        self.log_vram_ledger_residency("after-phase2-expert-weights")
 
         # Post-load RSS check: verify RAM estimate accuracy
         if self._estimated_expert_ram_gb > 0:
@@ -861,10 +867,12 @@ class KrasisModel:
             self._init_gpu_prefill()
 
         _vram_checkpoint("after-phase3-prefill-managers")
+        self.log_vram_ledger_residency("after-phase3-prefill-managers")
 
         # Allocate KV caches
         self._init_kv_caches()
         _vram_checkpoint("after-kv-cache-init")
+        self.log_vram_ledger_residency("after-kv-cache-init")
 
         # Phase 4: CPU Hub — disabled.  Multi-GPU uses layer-split decode,
         # not Expert Parallelism.  Prefill runs on primary GPU only.
@@ -885,6 +893,7 @@ class KrasisModel:
         self._loaded = True
         total = time.perf_counter() - start
         _vram_checkpoint("after-full-load")
+        self.log_vram_ledger_residency("after-full-load")
         logger.info("Model fully loaded in %.1fs", total)
 
     def warmup_cuda_runtime(self, devices: List[torch.device]):
@@ -3218,6 +3227,236 @@ class KrasisModel:
                                 total += t.nelement() * t.element_size()
 
         return total
+
+    def log_vram_ledger_residency(self, label: str) -> None:
+        """Log opt-in categorized CUDA tensor residency for startup VRAM diagnosis."""
+        if not _vram_ledger_enabled() or not torch.cuda.is_available():
+            return
+
+        categories_by_device: dict[int, dict[str, int]] = {}
+        seen: set[tuple[int, int]] = set()
+        duplicate_refs = 0
+        duplicate_bytes = 0
+
+        def _category(device_idx: int, category: str) -> None:
+            categories_by_device.setdefault(device_idx, {}).setdefault(category, 0)
+
+        def _storage_key_and_bytes(tensor: torch.Tensor) -> tuple[tuple[int, int], int] | None:
+            if not isinstance(tensor, torch.Tensor) or tensor.device.type != "cuda":
+                return None
+            device_idx = tensor.device.index if tensor.device.index is not None else torch.cuda.current_device()
+            try:
+                storage = tensor.untyped_storage()
+                ptr = int(storage.data_ptr())
+                nbytes = int(storage.nbytes())
+            except Exception:
+                ptr = int(tensor.data_ptr())
+                nbytes = int(tensor.nelement() * tensor.element_size())
+            if ptr == 0 or nbytes <= 0:
+                return None
+            return (int(device_idx), ptr), nbytes
+
+        def _add_tensor(category: str, tensor: torch.Tensor) -> None:
+            nonlocal duplicate_refs, duplicate_bytes
+            info = _storage_key_and_bytes(tensor)
+            if info is None:
+                return
+            key, nbytes = info
+            device_idx, _ = key
+            _category(device_idx, category)
+            if key in seen:
+                duplicate_refs += 1
+                duplicate_bytes += nbytes
+                return
+            seen.add(key)
+            categories_by_device[device_idx][category] += nbytes
+
+        def _add_any(category: str, value) -> None:
+            if value is None:
+                return
+            if isinstance(value, torch.Tensor):
+                _add_tensor(category, value)
+                return
+            if hasattr(value, "packed") and hasattr(value, "scales"):
+                _add_any(category, getattr(value, "packed", None))
+                _add_any(category, getattr(value, "scales", None))
+                _add_any("marlin_workspace", getattr(value, "workspace", None))
+                return
+            if isinstance(value, dict):
+                for item in value.values():
+                    _add_any(category, item)
+                return
+            if isinstance(value, (list, tuple)):
+                for item in value:
+                    _add_any(category, item)
+
+        _add_any("top_embedding", self.embedding)
+        _add_any("top_final_norm", self.final_norm)
+        _add_any("top_lm_head", self.lm_head_data)
+        _add_any("rust_lm_head_bf16", getattr(self, "_rust_lm_head", None))
+
+        for cache in getattr(self, "kv_caches", []) or []:
+            if cache is None:
+                continue
+            for name in (
+                "k_cache", "v_cache", "k_radius_cache", "v_radius_cache",
+                "k_angles_cache", "v_angles_cache", "ckv_cache", "kpe_cache", "kv_cache",
+            ):
+                _add_any("kv_cache", getattr(cache, name, None))
+
+        _add_any("marlin_attention_weights", getattr(self, "_marlin_attn_weights", None))
+        _add_any("rust_decode_keepalive", getattr(self, "_rust_decode_weights", None))
+        _add_any("rust_rope_tables", getattr(self, "_rust_rope_cos", None))
+        _add_any("rust_rope_tables", getattr(self, "_rust_rope_sin", None))
+        _add_any("rust_tq4_signs", getattr(self, "_tq4_sign_refs", None))
+        _add_any("rust_shared_gate_refs", getattr(self, "_rust_shared_gate_refs", None))
+        _add_any("aux_decode_keepalive", getattr(self, "_aux_decode_weights", None))
+
+        for layer in getattr(self, "layers", []) or []:
+            _add_any("layer_norms", getattr(layer, "input_norm_weight", None))
+            _add_any("layer_norms", getattr(layer, "post_attn_norm_weight", None))
+            _add_any("router_weights", getattr(layer, "gate_weight", None))
+            _add_any("router_weights", getattr(layer, "gate_bias", None))
+            _add_any("router_weights", getattr(layer, "e_score_correction_bias", None))
+            _add_any("router_fp32_mirrors", getattr(layer, "_gate_weight_f32", None))
+            _add_any("router_fp32_mirrors", getattr(layer, "_gate_bias_f32", None))
+            _add_any("router_fp32_mirrors", getattr(layer, "_e_score_correction_bias_f32", None))
+            _add_any("shared_expert", getattr(layer, "shared_expert", None))
+            _add_any("shared_expert_gate", getattr(layer, "shared_expert_gate", None))
+            _add_any("dense_mlp", getattr(layer, "dense_mlp", None))
+            _add_any("latent_proj", getattr(layer, "latent_proj", None))
+            _add_any("gqa_weight_refs", getattr(layer, "gqa_weights", None))
+            _add_any("mamba2_weight_refs", getattr(layer, "mamba2_weights", None))
+            attn = getattr(layer, "attention", None)
+            if attn is not None:
+                try:
+                    attn_items = vars(attn).items()
+                except TypeError:
+                    attn_items = (
+                        (name, getattr(attn, name, None))
+                        for name in dir(attn)
+                        if not name.startswith("__")
+                    )
+                for attr_name, attr_value in attn_items:
+                    if attr_name.startswith("_hqq_"):
+                        _add_any("hqq_attention_meta", attr_value)
+                    elif attr_name.startswith("_rust_"):
+                        _add_any("rust_attention_meta", attr_value)
+                    elif isinstance(attr_value, (torch.Tensor, tuple, list, dict)) or (
+                        hasattr(attr_value, "packed") and hasattr(attr_value, "scales")
+                    ):
+                        _add_any("attention_weight_refs", attr_value)
+
+        for device_idx in range(torch.cuda.device_count()):
+            free, total = torch.cuda.mem_get_info(device_idx)
+            allocated = torch.cuda.memory_allocated(device_idx)
+            reserved = torch.cuda.memory_reserved(device_idx)
+            driver_used = total - free
+            categories = categories_by_device.get(device_idx, {})
+            inventoried = sum(categories.values())
+            category_parts = " ".join(
+                f"{name}_mb={bytes_ / (1024 * 1024):.1f}"
+                for name, bytes_ in sorted(categories.items())
+                if bytes_ > 0
+            )
+            logger.info(
+                "VRAM LEDGER residency label=%s device=%d free_mb=%d total_mb=%d "
+                "driver_used_mb=%d torch_allocated_mb=%d torch_reserved_mb=%d "
+                "inventoried_cuda_mb=%.1f untracked_driver_mb=%.1f "
+                "untracked_reserved_mb=%.1f duplicate_refs=%d duplicate_storage_mb=%.1f %s",
+                label,
+                device_idx,
+                free >> 20,
+                total >> 20,
+                driver_used >> 20,
+                allocated >> 20,
+                reserved >> 20,
+                inventoried / (1024 * 1024),
+                (driver_used - inventoried) / (1024 * 1024),
+                (reserved - inventoried) / (1024 * 1024),
+                duplicate_refs,
+                duplicate_bytes / (1024 * 1024),
+                category_parts,
+            )
+
+    def release_redundant_gpu_execution_tensors(self) -> int:
+        """Move GPU tensors no longer needed after Rust execution setup back to CPU.
+
+        The Rust decode store needs a BF16 lm_head pointer for GEMV. When the
+        configured lm_head is INT8, setup_gpu_decode_store creates an independent
+        BF16 GPU copy in self._rust_lm_head. The original INT8 tuple is then only
+        needed as source data for possible aux-store setup, so it can live on CPU.
+        """
+        if len(getattr(self, "all_devices", []) or []) != 1:
+            return 0
+        if self.cfg.tie_word_embeddings:
+            return 0
+        if getattr(self, "_rust_lm_head", None) is None:
+            return 0
+
+        released_bytes = 0
+
+        def _cuda_bytes(value) -> int:
+            if isinstance(value, torch.Tensor) and value.device.type == "cuda":
+                return int(value.nelement() * value.element_size())
+            if isinstance(value, dict):
+                return sum(_cuda_bytes(item) for item in value.values())
+            if isinstance(value, (list, tuple)):
+                return sum(_cuda_bytes(item) for item in value)
+            return 0
+
+        def _to_cpu(value):
+            if isinstance(value, torch.Tensor):
+                return value.cpu() if value.device.type == "cuda" else value
+            if isinstance(value, tuple):
+                return tuple(_to_cpu(item) for item in value)
+            if isinstance(value, list):
+                return [_to_cpu(item) for item in value]
+            if isinstance(value, dict):
+                return {key: _to_cpu(item) for key, item in value.items()}
+            return value
+
+        released_bytes += _cuda_bytes(self.lm_head_data)
+        if released_bytes <= 0:
+            return 0
+
+        free_before = None
+        if torch.cuda.is_available():
+            try:
+                free_before = torch.cuda.mem_get_info(self.all_devices[0])[0] >> 20
+            except Exception:
+                free_before = None
+
+        self.lm_head_data = _to_cpu(self.lm_head_data)
+        for state in getattr(self, "_device_state", {}).values():
+            if isinstance(state, dict) and state.get("lm_head_data") is not None:
+                state["lm_head_data"] = self.lm_head_data
+
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        free_after = None
+        if torch.cuda.is_available():
+            try:
+                free_after = torch.cuda.mem_get_info(self.all_devices[0])[0] >> 20
+            except Exception:
+                free_after = None
+
+        released_mb = released_bytes >> 20
+        if free_before is not None and free_after is not None:
+            logger.info(
+                "Released redundant GPU lm_head source after Rust setup: %d MB, free_before=%d MB, free_after=%d MB",
+                released_mb,
+                free_before,
+                free_after,
+            )
+        else:
+            logger.info(
+                "Released redundant GPU lm_head source after Rust setup: %d MB",
+                released_mb,
+            )
+        return released_mb
 
     def _should_stream_attention(self, headroom_mb: int = 2000) -> bool:
         """Check if attention weights should be streamed (offloaded) during prefill.

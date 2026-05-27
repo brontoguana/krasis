@@ -48,6 +48,24 @@ fn prefill_debug_enabled() -> bool {
         .unwrap_or(false)
 }
 
+fn vram_ledger_enabled() -> bool {
+    std::env::var("KRASIS_VRAM_LEDGER")
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+macro_rules! vram_ledger_log {
+    ($($arg:tt)*) => {{
+        log::info!($($arg)*);
+        eprintln!($($arg)*);
+    }};
+}
+
 fn prefill_disable_ptr_table() -> bool {
     std::env::var("KRASIS_DISABLE_PREFILL_PTR_TABLE")
         .map(|v| v == "1")
@@ -8123,6 +8141,7 @@ impl PrefillEngine {
         );
         let mut scratch_tokens = max_by_vram.min(target).max(128);
         let debug_prefill = prefill_debug_enabled();
+        let ledger_enabled = vram_ledger_enabled();
         if let Ok(raw) = std::env::var("KRASIS_PREFILL_DIAG_MAX_CHUNK_TOKENS") {
             let diag_cap = raw.parse::<usize>().map_err(|e| {
                 format!("KRASIS_PREFILL_DIAG_MAX_CHUNK_TOKENS must be an integer: {e}")
@@ -8151,6 +8170,27 @@ impl PrefillEngine {
                 target,
                 max_by_vram,
                 scratch_tokens,
+            );
+        }
+        if ledger_enabled {
+            vram_ledger_log!(
+                "VRAM LEDGER prefill_prepare_budget prompt_tokens={} free_mb={} total_mb={} safety_mb={} fixed_scratch_mb={:.1} per_tok_kb={:.1} measured_alloc_overhead_mb={:.1} measured_runtime_overhead_mb={:.1} cold_staging_reserve_mb={:.1} scratch_budget_mb={:.1} target_tokens={} max_by_vram={} chosen_scratch_tokens={} hcs_cached_experts={} hcs_stride={} old_scratch_tokens={}",
+                prompt_tokens,
+                free_bytes / (1024 * 1024),
+                total_bytes / (1024 * 1024),
+                safety_margin_mb,
+                fixed_bytes as f64 / (1024.0 * 1024.0),
+                per_token_bytes as f64 / 1024.0,
+                self.measured_scratch_alloc_overhead_bytes as f64 / (1024.0 * 1024.0),
+                self.measured_prefill_runtime_overhead_bytes as f64 / (1024.0 * 1024.0),
+                self.max_cold_staging_reserve_bytes() as f64 / (1024.0 * 1024.0),
+                scratch_budget_bytes as f64 / (1024.0 * 1024.0),
+                target,
+                max_by_vram,
+                scratch_tokens,
+                self.hcs_cached_expert_count(),
+                self.hcs_num_experts_per_layer,
+                old_tokens,
             );
         }
 
@@ -8332,6 +8372,28 @@ impl PrefillEngine {
             if observed_overhead > self.measured_scratch_alloc_overhead_bytes {
                 self.measured_scratch_alloc_overhead_bytes = observed_overhead;
             }
+            if ledger_enabled {
+                let fp32_floats =
+                    prefill_fp32_scratch_floats(&self.config, scratch_tokens, prompt_tokens);
+                let kv_cross_floats =
+                    prefill_cross_chunk_kv_staging_floats(&self.config, prompt_tokens);
+                vram_ledger_log!(
+                    "VRAM LEDGER prefill_alloc attempt={} scratch_tokens={} prompt_tokens={} pre_alloc_free_mb={} post_alloc_free_mb={} actual_alloc_mb={:.1} estimated_scratch_mb={:.1} observed_alloc_overhead_mb={:.1} safety_mb={} shared_bf16_mb={:.1} shared_fp32_mb={:.1} fp32_scratch_mb={:.1} kv_cross_floor_mb={:.1}",
+                    attempt,
+                    scratch_tokens,
+                    prompt_tokens,
+                    free_bytes / (1024 * 1024),
+                    post_alloc_free_bytes / (1024 * 1024),
+                    actual_alloc_bytes as f64 / (1024.0 * 1024.0),
+                    estimated_scratch_bytes as f64 / (1024.0 * 1024.0),
+                    observed_overhead as f64 / (1024.0 * 1024.0),
+                    safety_margin_mb,
+                    (shared_scratch_elems * 2 * std::mem::size_of::<u16>()) as f64 / (1024.0 * 1024.0),
+                    (shared_scratch_elems * std::mem::size_of::<f32>()) as f64 / (1024.0 * 1024.0),
+                    fp32_floats as f64 * std::mem::size_of::<f32>() as f64 / (1024.0 * 1024.0),
+                    kv_cross_floats as f64 * std::mem::size_of::<f32>() as f64 / (1024.0 * 1024.0),
+                );
+            }
             if debug_prefill {
                 let fp32_floats =
                     prefill_fp32_scratch_floats(&self.config, scratch_tokens, prompt_tokens);
@@ -8383,6 +8445,20 @@ impl PrefillEngine {
                 .saturating_mul(2)
                 .max((scratch_tokens / 8).max(64));
             let next_tokens = scratch_tokens.saturating_sub(shrink_tokens).max(128);
+
+            if ledger_enabled {
+                vram_ledger_log!(
+                    "VRAM LEDGER prefill_alloc_shrink attempt={} scratch_tokens={} post_alloc_free_mb={} safety_mb={} deficit_mb={:.1} deficit_tokens={} shrink_tokens={} next_tokens={}",
+                    attempt,
+                    scratch_tokens,
+                    post_alloc_free_bytes / (1024 * 1024),
+                    safety_margin_mb,
+                    deficit_bytes as f64 / (1024.0 * 1024.0),
+                    deficit_tokens,
+                    shrink_tokens,
+                    next_tokens,
+                );
+            }
 
             if stderr_debug_enabled() {
                 eprintln!(
@@ -8446,6 +8522,19 @@ impl PrefillEngine {
                 prompt_tokens,
                 post_alloc_free_bytes / (1024 * 1024),
                 safety_margin_mb,
+            );
+        }
+        if ledger_enabled {
+            vram_ledger_log!(
+                "VRAM LEDGER prefill_ready prompt_tokens={} scratch_tokens={} scratch_mb={:.1} post_alloc_free_mb={} safety_mb={} optional_pinning_budget_mb={:?} pinning_active={} pinning_pool_mb={:.1}",
+                prompt_tokens,
+                scratch_tokens,
+                scratch_mb,
+                post_alloc_free_bytes / (1024 * 1024),
+                safety_margin_mb,
+                self.optional_pinning_budget_mb,
+                self.pinning_active,
+                self.pinning_pool_bytes as f64 / (1024.0 * 1024.0),
             );
         }
         if scratch_tokens != old_tokens {
@@ -8703,6 +8792,24 @@ impl PrefillEngine {
                 self.hcs_num_experts_per_layer,
             );
         }
+        if vram_ledger_enabled() {
+            vram_ledger_log!(
+                "VRAM LEDGER prefill_moe_setup fused={} pointer_table={} pinning_enabled={} pinning_disabled={} optional_pinning_budget_mb={:?} pinning_active={} pinning_pool_mb={:.1} prescan_layers={} hcs_cached_experts={} hcs_stride={} scratch_tokens={} chunk_size={} num_chunks={}",
+                use_fused,
+                self.d_expert_w1_ptrs.is_some(),
+                pinning_enabled,
+                self.prefill_pinning_disabled,
+                self.optional_pinning_budget_mb,
+                self.pinning_active,
+                self.pinning_pool_bytes as f64 / (1024.0 * 1024.0),
+                self.prescan_active_experts.len(),
+                self.hcs_cached_expert_count(),
+                self.hcs_num_experts_per_layer,
+                self.scratch.max_tokens,
+                chunk_size,
+                num_chunks,
+            );
+        }
 
         if pinning_enabled {
             // Embed the full prompt (or chunk-by-chunk for pre-scan)
@@ -8736,6 +8843,27 @@ impl PrefillEngine {
                         };
                         eprintln!(
                             "[PREFILL-DEBUG] prescan tokens={} active_layers={} avg_active_experts_per_layer={:.1} pinned_per_layer={} pinning_active={} pinning_pool_mb={:.1}",
+                            prescan_m,
+                            active_layers,
+                            avg_active,
+                            pinned_per_layer,
+                            self.pinning_active,
+                            self.pinning_pool_bytes as f64 / (1024.0 * 1024.0),
+                        );
+                    }
+                    if vram_ledger_enabled() {
+                        let active_layers = prescan_counts.len();
+                        let total_active: usize = prescan_counts
+                            .iter()
+                            .map(|layer| layer.iter().filter(|&&cnt| cnt > 0).count())
+                            .sum();
+                        let avg_active = if active_layers > 0 {
+                            total_active as f64 / active_layers as f64
+                        } else {
+                            0.0
+                        };
+                        vram_ledger_log!(
+                            "VRAM LEDGER prefill_prescan tokens={} active_layers={} avg_active_experts_per_layer={:.1} pinned_per_layer={} pinning_active={} pinning_pool_mb={:.1}",
                             prescan_m,
                             active_layers,
                             avg_active,

@@ -161,6 +161,10 @@ def _startup_diag_enabled() -> bool:
     return os.environ.get("KRASIS_STARTUP_DIAG", "") == "1"
 
 
+def _vram_ledger_enabled() -> bool:
+    return os.environ.get("KRASIS_VRAM_LEDGER", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _env_flag(name: str) -> Optional[bool]:
     raw = os.environ.get(name)
     if raw is None:
@@ -1447,6 +1451,21 @@ def main():
     gpu_store = _model.setup_gpu_decode_store()
     gpu_store_addr = gpu_store.gpu_store_addr()
     _detail(f"GPU decode store ready (addr={gpu_store_addr:#x})")
+    if _vram_ledger_enabled():
+        _model.log_vram_ledger_residency("after-decode-store-setup-before-release")
+    release_gpu_sources = not (args.stress_test or args.perplexity)
+    if release_gpu_sources:
+        released_mb = _model.release_redundant_gpu_execution_tensors()
+        if released_mb > 0:
+            _detail(f"Released redundant GPU execution source tensors ({released_mb:,} MB)")
+    elif _vram_ledger_enabled():
+        logger.info(
+            "VRAM LEDGER gpu_source_release_skipped stress_test=%s perplexity=%s",
+            args.stress_test,
+            args.perplexity,
+        )
+    if _vram_ledger_enabled():
+        _model.log_vram_ledger_residency("after-decode-store-setup")
 
     # ── Load draft model BEFORE warmup/VRAM capture so HCS budget accounts for it ──
     if args.draft_model:
@@ -1493,6 +1512,8 @@ def main():
     try:
         gpu_store.allocate_prefill_engine(_model.cfg.max_position_embeddings)
         _detail("Prefill engine scratch buffers allocated")
+        if _vram_ledger_enabled():
+            _model.log_vram_ledger_residency("after-prefill-engine-allocate")
     except Exception as e:
         logger.error("Failed to pre-allocate prefill engine: %s", e)
         raise
@@ -1555,6 +1576,8 @@ def main():
     warmup_elapsed = time.time() - t_warmup
     _detail(f"Warmup complete in {warmup_elapsed:.1f}s")
     vram_monitor.report_event("warmup_end")
+    if _vram_ledger_enabled():
+        _model.log_vram_ledger_residency("after-rust-prefill-warmup")
 
     # Log warmup VRAM impact before resetting
     for idx in device_indices:
@@ -1585,6 +1608,20 @@ def main():
     _total_mb = torch.cuda.mem_get_info(dev_idx)[1] // (1024 * 1024)
     _detail(f"Free VRAM after startup: {_free_mb:,} MB / {_total_mb:,} MB")
     logger.info("VRAM calibration baseline: free=%d MB, total=%d MB", _free_mb, _total_mb)
+    vram_ledger = _vram_ledger_enabled()
+    if vram_ledger:
+        _model.log_vram_ledger_residency("calibration-baseline")
+        logger.info(
+            "VRAM LEDGER startup_baseline device=%d free_mb=%d total_mb=%d torch_allocated_mb=%d torch_reserved_mb=%d safety_mb=%d kv_max_tokens=%d max_position_embeddings=%d",
+            dev_idx,
+            _free_mb,
+            _total_mb,
+            torch.cuda.memory_allocated(dev_idx) // (1024 * 1024),
+            torch.cuda.memory_reserved(dev_idx) // (1024 * 1024),
+            SAFETY_MARGIN_MB,
+            _kv_cache_max_tokens(_model),
+            _model.cfg.max_position_embeddings,
+        )
 
     max_calibration_tokens = max(1, min(
         _kv_cache_max_tokens(_model),
@@ -1694,6 +1731,22 @@ def main():
                 label, prompt_len, baseline_free, prefill_post_alloc_free, prefill_min_free, decode_min_free,
                 post_cleanup_free, prefill_elapsed, prefill_tps, decode_elapsed, decode_tps,
             )
+        if vram_ledger:
+            logger.info(
+                "VRAM LEDGER calibration_probe label=%s prompt_len=%d baseline_free_mb=%d prefill_post_alloc_mb=%d prefill_min_mb=%d decode_min_mb=%d post_cleanup_mb=%d prefill_delta_mb=%d remaining_after_scratch_mb=%d decode_delta_mb=%d prefill_s=%.3f decode_s=%.3f",
+                label,
+                prompt_len,
+                baseline_free,
+                prefill_post_alloc_free,
+                prefill_min_free,
+                decode_min_free,
+                post_cleanup_free,
+                max(0, baseline_free - prefill_min_free),
+                max(0, prefill_post_alloc_free - prefill_min_free),
+                max(0, baseline_free - decode_min_free),
+                prefill_elapsed,
+                decode_elapsed,
+            )
         return prompt_len, baseline_free, prefill_post_alloc_free, prefill_min_free, decode_min_free
 
     short_prompt = _make_startup_calibration_prompts(_model, [short_target])[0]
@@ -1793,6 +1846,14 @@ def main():
     max_scratch_tokens = min(50000, _model.cfg.max_position_embeddings)
     max_scratch_mb = gpu_store.prefill_scratch_reservation_mb(max_scratch_tokens)
     _detail(f"Scratch reservation: max={max_scratch_mb:,} MB (at {max_scratch_tokens:,} tokens)")
+    if vram_ledger:
+        logger.info(
+            "VRAM LEDGER scratch_reservation max_scratch_tokens=%d max_scratch_mb=%d short_tokens=%d long_tokens=%d",
+            max_scratch_tokens,
+            max_scratch_mb,
+            short_tokens,
+            long_tokens,
+        )
 
     torch.cuda.synchronize()
     gc.collect()
@@ -1838,6 +1899,26 @@ def main():
         post_calibration_free_mb, short_tokens, long_tokens, decode_hcs_budget,
         prefill_short_hcs_budget, prefill_long_hcs_budget, max_scratch_mb,
     )
+    if vram_ledger:
+        logger.info(
+            "VRAM LEDGER calibration_summary post_free_mb=%d short_tokens=%d long_tokens=%d short_prefill_delta_mb=%d long_prefill_delta_mb=%d short_decode_delta_mb=%d long_decode_delta_mb=%d prefill_short_free_mb=%d prefill_long_free_mb=%d decode_short_free_mb=%d decode_long_free_mb=%d decode_hcs_budget_mb=%d prefill_short_hcs_budget_mb=%d prefill_long_hcs_budget_mb=%d safety_mb=%d max_scratch_mb=%d",
+            post_calibration_free_mb,
+            short_tokens,
+            long_tokens,
+            short_prefill_delta,
+            long_prefill_delta,
+            short_decode_delta,
+            long_decode_delta,
+            prefill_short_free,
+            prefill_long_free,
+            decode_short_free,
+            decode_long_free,
+            decode_hcs_budget,
+            prefill_short_hcs_budget,
+            prefill_long_hcs_budget,
+            SAFETY_MARGIN_MB,
+            max_scratch_mb,
+        )
     if startup_diag and _env_flag("KRASIS_STARTUP_EXIT_AFTER_CALIBRATION"):
         _status("Startup diagnostic exit")
         _detail("Exiting after VRAM calibration by request")
@@ -2168,6 +2249,15 @@ def main():
             t_hcs = time.time()
             vram_monitor.report_event("hcs_init_start")
             _status("Loading GPU0 HCS pool (fully reclaimable)")
+            if vram_ledger:
+                logger.info(
+                    "VRAM LEDGER hcs_init_request hard_budget_mb=%d soft_budget_mb=%d safety_mb=%d ranking_entries=%d free_before_mb=%d",
+                    gpu0_hard,
+                    gpu0_soft,
+                    SAFETY_MARGIN_MB,
+                    len(gpu0_ranking),
+                    int(vram_monitor.current_free_mb(dev_idx)),
+                )
 
             result = store.hcs_pool_init_tiered(
                 gpu0_ranking,
@@ -2205,6 +2295,14 @@ def main():
             _detail(result)
             _dim(f"Loaded in {hcs_elapsed:.1f}s")
             logger.info("HCS pool: %s (%.1fs)", result, hcs_elapsed)
+            if vram_ledger:
+                logger.info(
+                    "VRAM LEDGER hcs_init_result elapsed_s=%.3f free_after_mb=%d result=%s",
+                    hcs_elapsed,
+                    int(vram_monitor.current_free_mb(dev_idx)),
+                    result,
+                )
+                _model.log_vram_ledger_residency("after-hcs-init")
 
     # ── Decode validation ──
     # Rust prefill warmup already ran before HCS budgeting.
