@@ -510,7 +510,7 @@ CONFIG_KEYS = [
     "CFG_SSH_TUNNEL",
     "CFG_GPU_PREFILL_THRESHOLD", "CFG_GGUF_PATH", "CFG_HEATMAP_PATH",
     "CFG_VRAM_SAFETY_MARGIN",
-    "CFG_HCS", "CFG_MULTI_GPU_HCS", "CFG_DYNAMIC_HCS", "CFG_DYNAMIC_HCS_TAIL_BLOCKS",
+    "CFG_HCS", "CFG_MULTI_GPU_HCS", "CFG_HCS_HOST_CACHE_MODE", "CFG_DYNAMIC_HCS", "CFG_DYNAMIC_HCS_TAIL_BLOCKS",
     "CFG_STREAM_ATTENTION", "CFG_DRAFT_MODEL", "CFG_DRAFT_K", "CFG_DRAFT_CONTEXT",
     "CFG_TEMPERATURE",
     "CFG_FORCE_LOAD", "CFG_FORCE_REBUILD_CACHE", "CFG_FORCE_REBUILD_HQQ_CACHE",
@@ -589,6 +589,7 @@ class LauncherConfig:
         self.vram_safety_margin: int = 600
         self.hcs: bool = True
         self.multi_gpu_hcs: bool = False
+        self.hcs_host_cache_mode: str = "source"
         self.dynamic_hcs: bool = True
         self.dynamic_hcs_tail_blocks: int = 2
         self.stream_attention: bool = False
@@ -763,6 +764,24 @@ class LauncherConfig:
             self.hcs = saved["CFG_HCS"] != "0"
         if "CFG_MULTI_GPU_HCS" in saved:
             self.multi_gpu_hcs = saved["CFG_MULTI_GPU_HCS"] == "1"
+        if "CFG_HCS_HOST_CACHE_MODE" in saved and saved["CFG_HCS_HOST_CACHE_MODE"]:
+            val = saved["CFG_HCS_HOST_CACHE_MODE"].strip().lower()
+            aliases = {
+                "1": "source",
+                "true": "source",
+                "yes": "source",
+                "on": "source",
+                "0": "mirror",
+                "false": "mirror",
+                "no": "mirror",
+                "off": "mirror",
+                "low_ram": "source",
+                "low-ram": "source",
+                "fast": "mirror",
+            }
+            val = aliases.get(val, val)
+            if val in ("auto", "mirror", "source"):
+                self.hcs_host_cache_mode = val
         if "CFG_DYNAMIC_HCS" in saved:
             self.dynamic_hcs = saved["CFG_DYNAMIC_HCS"] != "0"
         if "CFG_DYNAMIC_HCS_TAIL_BLOCKS" in saved and saved["CFG_DYNAMIC_HCS_TAIL_BLOCKS"]:
@@ -831,6 +850,7 @@ class LauncherConfig:
             "CFG_VRAM_SAFETY_MARGIN": str(self.vram_safety_margin),
             "CFG_HCS": "1" if self.hcs else "0",
             "CFG_MULTI_GPU_HCS": "1" if self.multi_gpu_hcs else "0",
+            "CFG_HCS_HOST_CACHE_MODE": self.hcs_host_cache_mode,
             "CFG_DYNAMIC_HCS": "1" if self.dynamic_hcs else "0",
             "CFG_DYNAMIC_HCS_TAIL_BLOCKS": str(self.dynamic_hcs_tail_blocks),
             "CFG_STREAM_ATTENTION": "1" if self.stream_attention else "0",
@@ -907,6 +927,8 @@ OPTIONS = [
     ConfigOption("SSH Tunnel", "ssh_tunnel", opt_type="text"),
     ConfigOption("Enable thinking", "enable_thinking",
                  choices=[True, False]),
+    ConfigOption("HCS RAM saver", "hcs_host_cache_mode",
+                 choices=["source", "mirror", "auto"]),
     ConfigOption("Dynamic HCS", "dynamic_hcs",
                  choices=[True, False], advanced=True),
     ConfigOption("HCS tail blocks", "dynamic_hcs_tail_blocks",
@@ -944,6 +966,13 @@ def _format_value(opt: ConfigOption, val: Any) -> str:
     if opt.key == "dynamic_hcs_tail_blocks":
         suffix = "block" if int(val) == 1 else "blocks"
         return f"{val} {suffix}"
+    if opt.key == "hcs_host_cache_mode":
+        labels = {
+            "auto": f"{GREEN}Auto{NC}",
+            "source": f"{GREEN}On{NC} {DIM}(lower RAM){NC}",
+            "mirror": f"{DIM}Off{NC} {DIM}(fast reload){NC}",
+        }
+        return labels.get(str(val), str(val))
     if opt.key == "attention_quant":
         return _format_attention_quant_value(str(val))
     if opt.key == "ssh_tunnel":
@@ -2338,6 +2367,7 @@ class Launcher:
             print(f"  Dense MLP quant: {self.cfg.dense_mlp_quant}")
         print(f"  LM head quant:   {self.cfg.lm_head_quant}")
         print(f"  VRAM safety:     {self.cfg.vram_safety_margin:,} MB")
+        print(f"  HCS RAM saver:   {_ANSI_RE.sub('', _format_value(ConfigOption('', 'hcs_host_cache_mode'), self.cfg.hcs_host_cache_mode))}")
         print(f"  Server:          {self.cfg.host}:{self.cfg.port}")
         if self.cfg.ssh_tunnel:
             print(f"  SSH tunnel:      {self.cfg.ssh_tunnel} remote 127.0.0.1:{self.cfg.port}")
@@ -2565,6 +2595,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dynamic-hcs-tail-blocks", type=int, default=None,
                         choices=[1, 2, 3, 4, 5],
                         help="Advanced: recency tail size in activated-expert blocks (1-5, default: 2)")
+    parser.add_argument("--hcs-host-cache-mode", default=None,
+                        choices=["auto", "mirror", "source"],
+                        help="Soft HCS host storage: source/lower-system-RAM, mirror/fast, or auto")
     parser.add_argument("--force-load", action="store_true",
                         help="Override RAM safety checks and load anyway")
     parser.add_argument("--force-rebuild-cache", action="store_true",
@@ -2675,6 +2708,8 @@ def _apply_cli_overrides(cfg: LauncherConfig, args: argparse.Namespace) -> None:
         cfg.dynamic_hcs = bool(args.dynamic_hcs)
     if args.dynamic_hcs_tail_blocks is not None:
         cfg.dynamic_hcs_tail_blocks = int(args.dynamic_hcs_tail_blocks)
+    if args.hcs_host_cache_mode is not None:
+        cfg.hcs_host_cache_mode = args.hcs_host_cache_mode
     if args.gguf_path is not None:
         cfg.gguf_path = args.gguf_path
     if args.force_load:

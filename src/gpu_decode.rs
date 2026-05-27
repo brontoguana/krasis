@@ -30,6 +30,21 @@ const ROUTE_LOCALITY_LFU_DECAY: f32 = 0.97;
 const ROUTE_LOCALITY_ADAPTIVE_DECAY: f64 = 0.90;
 const ROUTE_LOCALITY_ADAPTIVE_SPLITS: &[f64] = &[50.0, 25.0, 75.0, 0.0, 100.0];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HcsSoftHostMode {
+    Mirror,
+    Source,
+}
+
+impl HcsSoftHostMode {
+    fn label(self) -> &'static str {
+        match self {
+            HcsSoftHostMode::Mirror => "mirror",
+            HcsSoftHostMode::Source => "source",
+        }
+    }
+}
+
 fn env_truthy(name: &str) -> bool {
     std::env::var(name)
         .map(|v| matches!(
@@ -61,6 +76,85 @@ fn env_usize(name: &str, default: usize) -> usize {
         .ok()
         .and_then(|v| v.trim().parse::<usize>().ok())
         .unwrap_or(default)
+}
+
+fn proc_status_bytes(field: &str) -> Option<usize> {
+    let contents = std::fs::read_to_string("/proc/self/status").ok()?;
+    for line in contents.lines() {
+        if let Some(rest) = line.strip_prefix(field) {
+            let kb = rest
+                .split_whitespace()
+                .next()
+                .and_then(|v| v.parse::<usize>().ok())?;
+            return Some(kb.saturating_mul(1024));
+        }
+    }
+    None
+}
+
+fn proc_meminfo_bytes(field: &str) -> Option<usize> {
+    let contents = std::fs::read_to_string("/proc/meminfo").ok()?;
+    for line in contents.lines() {
+        if let Some(rest) = line.strip_prefix(field) {
+            let kb = rest
+                .split_whitespace()
+                .next()
+                .and_then(|v| v.parse::<usize>().ok())?;
+            return Some(kb.saturating_mul(1024));
+        }
+    }
+    None
+}
+
+fn resolve_hcs_soft_host_mode(soft_bytes: usize) -> HcsSoftHostMode {
+    let raw = std::env::var("KRASIS_HCS_HOST_CACHE_MODE")
+        .unwrap_or_else(|_| "source".to_string());
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "mirror" | "mirrored" | "fast" | "off" | "0" | "false" | "no" => {
+            log::info!("HCS soft host mode: mirror (explicit)");
+            HcsSoftHostMode::Mirror
+        }
+        "source" | "marlin" | "low_ram" | "low-ram" | "on" | "1" | "true" | "yes" => {
+            log::info!("HCS soft host mode: source (explicit; no duplicated soft host mirror)");
+            HcsSoftHostMode::Source
+        }
+        "auto" | "" => {
+            let available = proc_meminfo_bytes("MemAvailable:");
+            let total = proc_meminfo_bytes("MemTotal:");
+            let rss = proc_status_bytes("VmRSS:").unwrap_or(0);
+            if let Some(available_bytes) = available {
+                let reserve = rss / 4;
+                let required = soft_bytes.saturating_add(reserve);
+                let mode = if available_bytes < required {
+                    HcsSoftHostMode::Source
+                } else {
+                    HcsSoftHostMode::Mirror
+                };
+                log::info!(
+                    "HCS soft host mode auto: mode={} soft_mb={:.1} mem_available_mb={:.1} rss_mb={:.1} reserve_mb={:.1} mem_total_mb={:.1}",
+                    mode.label(),
+                    soft_bytes as f64 / (1024.0 * 1024.0),
+                    available_bytes as f64 / (1024.0 * 1024.0),
+                    rss as f64 / (1024.0 * 1024.0),
+                    reserve as f64 / (1024.0 * 1024.0),
+                    total.unwrap_or(0) as f64 / (1024.0 * 1024.0),
+                );
+                mode
+            } else {
+                log::warn!(
+                    "HCS soft host mode auto: could not read /proc/meminfo; using source mode"
+                );
+                HcsSoftHostMode::Source
+            }
+        }
+        other => {
+            log::warn!(
+                "Unknown KRASIS_HCS_HOST_CACHE_MODE={:?}; using source mode",
+                other
+            );
+            HcsSoftHostMode::Source
+        }
+    }
 }
 
 fn prompt_hcs_log_enabled() -> bool {
@@ -2019,10 +2113,10 @@ fn apply_prompt_hcs_reload_blend(
         || counts.is_empty()
         || hcs.soft_num_slots == 0
         || hcs.soft_slots_per_chunk == 0
-        || hcs.soft_host_chunks.is_empty()
     {
         return 0;
     }
+    let use_host_mirror = hcs.soft_host_mode == HcsSoftHostMode::Mirror;
     let retain_pct = prompt_hcs_reload_retain_pct();
     let spc = hcs.soft_slots_per_chunk;
     let requested_retain_slots =
@@ -2085,7 +2179,9 @@ fn apply_prompt_hcs_reload_blend(
             continue;
         }
         changed_slots += 1;
-        if pack_soft_host_slot(hcs, moe_layers, slot, desired.0, desired.1) {
+        if !use_host_mirror {
+            repacked_slots += 1;
+        } else if pack_soft_host_slot(hcs, moe_layers, slot, desired.0, desired.1) {
             repacked_slots += 1;
         } else {
             panic!(
@@ -2109,7 +2205,7 @@ fn apply_prompt_hcs_reload_blend(
     }
 
     log::info!(
-        "PROMPT HCS RELOAD applied: retain_pct={} effective_heatmap_slots={} prompt_tokens={} target_chunks={} loaded_chunks={} changed_slots={} repacked_slots={} heatmap_retained={} prompt_ranked={} backfilled={} prompt_candidates={} heatmap_candidates={}",
+        "PROMPT HCS RELOAD applied: retain_pct={} effective_heatmap_slots={} prompt_tokens={} target_chunks={} loaded_chunks={} changed_slots={} repacked_slots={} host_mode={} heatmap_retained={} prompt_ranked={} backfilled={} prompt_candidates={} heatmap_candidates={}",
         retain_pct,
         min_heatmap_slots,
         prompt_tokens,
@@ -2117,6 +2213,7 @@ fn apply_prompt_hcs_reload_blend(
         hcs.soft_chunks_loaded,
         changed_slots,
         repacked_slots,
+        hcs.soft_host_mode.label(),
         plan.heatmap_retained,
         plan.prompt_ranked,
         plan.backfilled,
@@ -3485,6 +3582,9 @@ struct HcsState {
     /// expert data packed as [w13_packed|w13_scales|w2_packed|w2_scales] per slot.
     /// One cuMemcpyHtoDAsync per chunk instead of 4 calls per expert.
     soft_host_chunks: Vec<PinnedHostChunk>,
+    /// Host source strategy for soft-tier reloads. Mirror is fastest and uses a
+    /// second host copy; source reloads from the Marlin host cache to save RAM.
+    soft_host_mode: HcsSoftHostMode,
     /// Safety margin in MB — minimum free VRAM to maintain.
     safety_margin_mb: usize,
     /// Hard tier budget in MB (set at init, survives worst-case prefill).
@@ -3573,6 +3673,7 @@ impl HcsState {
             soft_reload_stream: None, // CudaStream
             soft_reload_entries: Vec::new(),
             soft_host_chunks: Vec::<PinnedHostChunk>::new(),
+            soft_host_mode: HcsSoftHostMode::Mirror,
             safety_margin_mb: 600,
             hard_budget_mb: 0,
             soft_max_mb: 0,
@@ -4392,6 +4493,32 @@ struct ExpertDataPtr {
     mapped_w13_scales_dptr: u64,
     mapped_w2_packed_dptr: u64,
     mapped_w2_scales_dptr: u64,
+}
+
+fn copy_expert_to_hcs_slot_sync(dst: u64, expert: &ExpertDataPtr) -> bool {
+    let w13p_off = 0u64;
+    let w13s_off = expert.w13_packed_bytes as u64;
+    let w2p_off = w13s_off + expert.w13_scales_bytes as u64;
+    let w2s_off = w2p_off + expert.w2_packed_bytes as u64;
+    for &(off, src_ptr, bytes, label) in &[
+        (w13p_off, expert.w13_packed_ptr, expert.w13_packed_bytes, "w13_packed"),
+        (w13s_off, expert.w13_scales_ptr, expert.w13_scales_bytes, "w13_scales"),
+        (w2p_off, expert.w2_packed_ptr, expert.w2_packed_bytes, "w2_packed"),
+        (w2s_off, expert.w2_scales_ptr, expert.w2_scales_bytes, "w2_scales"),
+    ] {
+        let err = unsafe {
+            cuda_sys::lib().cuMemcpyHtoD_v2(
+                dst + off,
+                src_ptr as *const std::ffi::c_void,
+                bytes,
+            )
+        };
+        if err != cuda_sys::CUresult::CUDA_SUCCESS {
+            log::warn!("HCS source-copy reload failed for {}: {:?}", label, err);
+            return false;
+        }
+    }
+    true
 }
 
 /// Per-layer expert data for DMA.
@@ -13273,14 +13400,17 @@ impl GpuDecodeStore {
         let planned_num_chunks = (soft_num_slots + slots_per_chunk - 1) / slots_per_chunk;
 
         let soft_alloc_bytes = soft_num_slots * slot_size;
-        log::info!("HCS soft tier: allocating {:.1} MB in {} chunks of {:.0} MB ({} slots/chunk, {} slots for {} available experts)",
+        let soft_host_mode = resolve_hcs_soft_host_mode(soft_alloc_bytes);
+        let use_host_mirror = soft_host_mode == HcsSoftHostMode::Mirror;
+        log::info!("HCS soft tier: allocating {:.1} MB in {} chunks of {:.0} MB ({} slots/chunk, {} slots for {} available experts, host_mode={})",
             soft_alloc_bytes as f64 / (1024.0 * 1024.0), planned_num_chunks,
             (slots_per_chunk * slot_size) as f64 / (1024.0 * 1024.0),
-            slots_per_chunk, soft_num_slots, soft_experts_available);
+            slots_per_chunk, soft_num_slots, soft_experts_available, soft_host_mode.label());
 
-        // Allocate GPU chunks + pinned host mirrors for batch DMA reload
+        // Allocate GPU chunks and, in fast mode, pinned host mirrors for batch DMA reload.
         let mut soft_chunks: Vec<AlignedGpuBuffer> = Vec::with_capacity(planned_num_chunks);
-        let mut soft_host_chunks: Vec<PinnedHostChunk> = Vec::with_capacity(planned_num_chunks);
+        let mut soft_host_chunks: Vec<PinnedHostChunk> =
+            if use_host_mirror { Vec::with_capacity(planned_num_chunks) } else { Vec::new() };
         let startup_idle_floor_mb = self.vram_calibration
             .map(|cal| cal.required_idle_free_mb(cal.short_tokens) as usize)
             .unwrap_or(safety_margin_mb);
@@ -13320,21 +13450,23 @@ impl GpuDecodeStore {
                     break;
                 }
             }
-            let host_chunk = PinnedHostChunk::new(chunk_bytes);
-            if let Ok((actual_free, _)) = cudarc::driver::result::mem_get_info() {
-                let actual_free_mb = actual_free / (1024 * 1024);
-                if actual_free_mb < startup_idle_floor_mb {
-                    log::warn!(
-                        "HCS soft tier: dropping chunk {} after host pin — free={} MB below idle floor={} MB",
-                        c, actual_free_mb, startup_idle_floor_mb,
-                    );
-                    drop(host_chunk);
-                    drop(chunk_buf);
-                    break;
+            if use_host_mirror {
+                let host_chunk = PinnedHostChunk::new(chunk_bytes);
+                if let Ok((actual_free, _)) = cudarc::driver::result::mem_get_info() {
+                    let actual_free_mb = actual_free / (1024 * 1024);
+                    if actual_free_mb < startup_idle_floor_mb {
+                        log::warn!(
+                            "HCS soft tier: dropping chunk {} after host pin — free={} MB below idle floor={} MB",
+                            c, actual_free_mb, startup_idle_floor_mb,
+                        );
+                        drop(host_chunk);
+                        drop(chunk_buf);
+                        break;
+                    }
                 }
+                soft_host_chunks.push(host_chunk);
             }
             soft_chunks.push(chunk_buf);
-            soft_host_chunks.push(host_chunk);
             actual_soft_slots += slots_this_chunk;
         }
         soft_num_slots = actual_soft_slots;
@@ -13348,18 +13480,26 @@ impl GpuDecodeStore {
             hcs.soft_max_mb = 0;
             return Ok(format!("{} | soft: 0 experts (decode guardrail stopped load)", result));
         }
-        let pinned_count = soft_host_chunks.iter().filter(|c| c.registered).count();
-        log::info!("HCS soft tier: {}/{} host chunks pinned (page-locked for async DMA)",
-            pinned_count, num_chunks);
+        if use_host_mirror {
+            let pinned_count = soft_host_chunks.iter().filter(|c| c.registered).count();
+            log::info!("HCS soft tier: {}/{} host chunks pinned (page-locked for async DMA)",
+                pinned_count, num_chunks);
+        } else {
+            log::info!(
+                "HCS soft tier: host mirror disabled; reloads will copy from Marlin host cache sources"
+            );
+        }
 
         let mut soft_slot_to_expert: Vec<Option<(usize, usize)>> = vec![None; soft_num_slots];
         let mut soft_ranking: Vec<(usize, usize)> = Vec::new();
         let mut soft_loaded = 0usize;
         let mut soft_slot = 0usize;
 
-        // Fill soft slots: pack into host chunks, then batch DMA per chunk
+        // Fill soft slots. Mirror mode packs into host chunks then batch-DMAs
+        // each chunk. Source mode skips the duplicated host copy and copies
+        // each expert directly from the Marlin host cache into its GPU slot.
         let t0 = std::time::Instant::now();
-        // First pass: pack all expert data into host chunk buffers
+        let mut dma_ok = true;
         let mut experts_per_slot: Vec<Option<(usize, usize, u64, u64, u64, u64)>> = vec![None; soft_num_slots];
         for &(layer_idx, expert_idx) in &ranking {
             if soft_slot >= soft_num_slots {
@@ -13386,21 +13526,29 @@ impl GpuDecodeStore {
             let w2p_off = w13s_off + expert.w13_scales_bytes;
             let w2s_off = w2p_off + expert.w2_packed_bytes;
 
-            // Pack into pinned host chunk buffer
-            unsafe {
-                let dst = soft_host_chunks[chunk_idx].as_mut_ptr().add(host_offset);
-                std::ptr::copy_nonoverlapping(
-                    expert.w13_packed_ptr as *const u8, dst.add(w13p_off),
-                    expert.w13_packed_bytes);
-                std::ptr::copy_nonoverlapping(
-                    expert.w13_scales_ptr as *const u8, dst.add(w13s_off),
-                    expert.w13_scales_bytes);
-                std::ptr::copy_nonoverlapping(
-                    expert.w2_packed_ptr as *const u8, dst.add(w2p_off),
-                    expert.w2_packed_bytes);
-                std::ptr::copy_nonoverlapping(
-                    expert.w2_scales_ptr as *const u8, dst.add(w2s_off),
-                    expert.w2_scales_bytes);
+            if use_host_mirror {
+                unsafe {
+                    let dst = soft_host_chunks[chunk_idx].as_mut_ptr().add(host_offset);
+                    std::ptr::copy_nonoverlapping(
+                        expert.w13_packed_ptr as *const u8, dst.add(w13p_off),
+                        expert.w13_packed_bytes);
+                    std::ptr::copy_nonoverlapping(
+                        expert.w13_scales_ptr as *const u8, dst.add(w13s_off),
+                        expert.w13_scales_bytes);
+                    std::ptr::copy_nonoverlapping(
+                        expert.w2_packed_ptr as *const u8, dst.add(w2p_off),
+                        expert.w2_packed_bytes);
+                    std::ptr::copy_nonoverlapping(
+                        expert.w2_scales_ptr as *const u8, dst.add(w2s_off),
+                        expert.w2_scales_bytes);
+                }
+            } else {
+                let dst = soft_chunks[chunk_idx].device_ptr()
+                    + (offset_in_chunk as u64 * slot_size as u64);
+                if !copy_expert_to_hcs_slot_sync(dst, expert) {
+                    dma_ok = false;
+                    break;
+                }
             }
 
             experts_per_slot[soft_slot] = Some((
@@ -13413,61 +13561,68 @@ impl GpuDecodeStore {
             soft_loaded += 1;
         }
 
-        // Second pass: batch DMA each host chunk to GPU in one call
-        let mut dma_ok = true;
-        for c in 0..num_chunks {
-            let slots_this_chunk = if c == num_chunks - 1 {
-                soft_num_slots - c * slots_per_chunk
-            } else {
-                slots_per_chunk
-            };
-            let chunk_bytes = slots_this_chunk * slot_size;
-            unsafe {
-                let err = cuda_sys::lib().cuMemcpyHtoD_v2(
-                    *soft_chunks[c].device_ptr(),
-                    soft_host_chunks[c].as_ptr() as *const std::ffi::c_void,
-                    chunk_bytes,
-                );
-                if err != cuda_sys::CUresult::CUDA_SUCCESS {
-                    log::warn!("HCS soft build: chunk {} batch DMA failed: {:?}", c, err);
-                    dma_ok = false;
-                    break;
+        // Second pass: mirror mode batch-DMAs each host chunk to GPU in one call.
+        if use_host_mirror {
+            for c in 0..num_chunks {
+                let slots_this_chunk = if c == num_chunks - 1 {
+                    soft_num_slots - c * slots_per_chunk
+                } else {
+                    slots_per_chunk
+                };
+                let chunk_bytes = slots_this_chunk * slot_size;
+                unsafe {
+                    let err = cuda_sys::lib().cuMemcpyHtoD_v2(
+                        *soft_chunks[c].device_ptr(),
+                        soft_host_chunks[c].as_ptr() as *const std::ffi::c_void,
+                        chunk_bytes,
+                    );
+                    if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                        log::warn!("HCS soft build: chunk {} batch DMA failed: {:?}", c, err);
+                        dma_ok = false;
+                        break;
+                    }
                 }
             }
         }
 
+        if !dma_ok {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "HCS soft tier initial load failed in {} host mode",
+                soft_host_mode.label()
+            )));
+        }
+
         // Build cache entries from GPU pointers
-        if dma_ok {
-            if sync_route_ptrs {
-                bind_hcs_route_pointer_device(&route_sync_device, "initial soft tier pointer sets");
-            }
-            for slot in 0..soft_slot {
-                if let Some((layer_idx, expert_idx, w13p_off, w13s_off, w2p_off, w2s_off)) = experts_per_slot[slot] {
-                    let chunk_idx = slot / slots_per_chunk;
-                    let offset_in_chunk = slot % slots_per_chunk;
-                    let dst = soft_chunks[chunk_idx].device_ptr()
-                        + (offset_in_chunk as u64 * slot_size as u64);
-                    let entry = HcsCacheEntry {
-                        d_buf: None,
-                        w13_packed_offset: 0, w13_packed_size: 0,
-                        w13_scales_offset: 0, w13_scales_size: 0,
-                        w2_packed_offset: 0, w2_packed_size: 0,
-                        w2_scales_offset: 0, w2_scales_size: 0,
-                        ext_w13_packed: dst + w13p_off,
-                        ext_w13_scales: dst + w13s_off,
-                        ext_w2_packed: dst + w2p_off,
-                        ext_w2_scales: dst + w2s_off,
-                        pool_slot: None,
-                    };
-                    hcs.cache_fast_set(layer_idx, expert_idx, &entry);
-                    hcs.cache.insert((layer_idx, expert_idx), entry);
-                }
+        if sync_route_ptrs {
+            bind_hcs_route_pointer_device(&route_sync_device, "initial soft tier pointer sets");
+        }
+        for slot in 0..soft_slot {
+            if let Some((layer_idx, expert_idx, w13p_off, w13s_off, w2p_off, w2s_off)) = experts_per_slot[slot] {
+                let chunk_idx = slot / slots_per_chunk;
+                let offset_in_chunk = slot % slots_per_chunk;
+                let dst = soft_chunks[chunk_idx].device_ptr()
+                    + (offset_in_chunk as u64 * slot_size as u64);
+                let entry = HcsCacheEntry {
+                    d_buf: None,
+                    w13_packed_offset: 0, w13_packed_size: 0,
+                    w13_scales_offset: 0, w13_scales_size: 0,
+                    w2_packed_offset: 0, w2_packed_size: 0,
+                    w2_scales_offset: 0, w2_scales_size: 0,
+                    ext_w13_packed: dst + w13p_off,
+                    ext_w13_scales: dst + w13s_off,
+                    ext_w2_packed: dst + w2p_off,
+                    ext_w2_scales: dst + w2s_off,
+                    pool_slot: None,
+                };
+                hcs.cache_fast_set(layer_idx, expert_idx, &entry);
+                hcs.cache.insert((layer_idx, expert_idx), entry);
             }
         }
         let load_elapsed = t0.elapsed().as_secs_f64();
 
         hcs.soft_chunks = soft_chunks;
         hcs.soft_host_chunks = soft_host_chunks;
+        hcs.soft_host_mode = soft_host_mode;
         hcs.soft_slots_per_chunk = slots_per_chunk;
         hcs.soft_total_chunks = num_chunks;
         hcs.soft_chunks_loaded = num_chunks;
@@ -13552,10 +13707,11 @@ impl GpuDecodeStore {
         } else { 0.0 };
 
         let msg = format!(
-            "{} | soft: {} experts in {:.2}s ({:.1} MB) | \
+            "{} | soft: {} experts in {:.2}s ({:.1} MB, host_mode={}) | \
              total: {}/{} ({:.1}%) coverage",
             result, soft_cached, load_elapsed,
             soft_loaded_mb,
+            hcs.soft_host_mode.label(),
             total_cached, total_experts, total_pct,
         );
         log::info!("{}", msg);
@@ -28513,6 +28669,7 @@ impl GpuDecodeStore {
         let t0 = std::time::Instant::now();
         let mut loaded = 0usize;
         let mut alloc_bytes = 0usize;
+        let use_host_mirror = hcs.soft_host_mode == HcsSoftHostMode::Mirror;
         if sync_route_ptrs {
             bind_hcs_route_pointer_device(
                 &route_sync_device,
@@ -28563,8 +28720,18 @@ impl GpuDecodeStore {
             }
             let chunk_base = *chunk_buf.device_ptr();
 
-            // Batch DMA: one call per chunk from pre-packed host buffer
-            if c < hcs.soft_host_chunks.len() {
+            // Mirror mode uses one batch DMA call per pre-packed host chunk.
+            // Source mode copies individual experts from the Marlin host cache
+            // and avoids the duplicated soft host mirror.
+            if use_host_mirror {
+                if c >= hcs.soft_host_chunks.len() {
+                    log::warn!(
+                        "HCS soft reload: missing host mirror chunk {} in mirror mode",
+                        c
+                    );
+                    drop(chunk_buf);
+                    break;
+                }
                 if hcs.soft_host_chunks[c].register() {
                     if let Ok((actual_free, _)) = cudarc::driver::result::mem_get_info() {
                         let actual_free_mb = actual_free / (1024 * 1024);
@@ -28595,6 +28762,8 @@ impl GpuDecodeStore {
             // Rebuild cache entries from GPU pointers
             let slot_start = c * spc;
             let slot_end = slot_start + slots_this_chunk;
+            let mut chunk_ok = true;
+            let mut chunk_loaded = 0usize;
             for slot in slot_start..slot_end {
                 if slot >= hcs.soft_ranking.len() {
                     break;
@@ -28617,6 +28786,17 @@ impl GpuDecodeStore {
                 let w2p_off = w13s_off + expert.w13_scales_bytes as u64;
                 let w2s_off = w2p_off + expert.w2_packed_bytes as u64;
 
+                if !use_host_mirror && !copy_expert_to_hcs_slot_sync(dst, expert) {
+                    log::warn!(
+                        "HCS soft reload: source copy failed for L{}E{} in chunk {}",
+                        layer_idx,
+                        expert_idx,
+                        c,
+                    );
+                    chunk_ok = false;
+                    break;
+                }
+
                 let entry = HcsCacheEntry {
                     d_buf: None,
                     w13_packed_offset: 0, w13_packed_size: 0,
@@ -28632,9 +28812,20 @@ impl GpuDecodeStore {
                 hcs.cache_fast_set(layer_idx, expert_idx, &entry);
                 hcs.cache.insert((layer_idx, expert_idx), entry);
                 hcs.soft_slot_to_expert[slot] = Some((layer_idx, expert_idx));
-                loaded += 1;
+                chunk_loaded += 1;
+            }
+            if !chunk_ok {
+                for slot in slot_start..slot_start + chunk_loaded {
+                    if let Some((layer_idx, expert_idx)) = hcs.soft_slot_to_expert[slot].take() {
+                        hcs.cache_fast_clear(layer_idx, expert_idx);
+                        hcs.cache.remove(&(layer_idx, expert_idx));
+                    }
+                }
+                drop(chunk_buf);
+                break;
             }
 
+            loaded += chunk_loaded;
             alloc_bytes += chunk_bytes;
             hcs.soft_chunks.push(chunk_buf);
             hcs.soft_chunks_loaded += 1;
@@ -28667,8 +28858,8 @@ impl GpuDecodeStore {
                 loaded, alloc_mb, chunks_reloaded, target_chunks, elapsed_ms
             ),
         );
-        log::info!("HCS soft: reloaded {} experts ({:.1} MB, {}/{} chunks, batch DMA) in {:.1}ms",
-            loaded, alloc_mb, chunks_reloaded, target_chunks, elapsed_ms);
+        log::info!("HCS soft: reloaded {} experts ({:.1} MB, {}/{} chunks, host_mode={}) in {:.1}ms",
+            loaded, alloc_mb, chunks_reloaded, target_chunks, hcs.soft_host_mode.label(), elapsed_ms);
 
         hcs.log_hcs_post_reload(trace_cfg.as_ref());
 
@@ -28754,6 +28945,17 @@ impl GpuDecodeStore {
     }
 
     pub fn hcs_reload_after_prefill_async(&mut self, actual_tokens: usize) -> (usize, f64) {
+        if self.graph
+            .as_ref()
+            .and_then(|g| g.hcs.as_ref())
+            .map(|h| h.soft_host_mode == HcsSoftHostMode::Source)
+            .unwrap_or(false)
+        {
+            log::info!(
+                "HCS soft async reload requested in source host mode; using bounded synchronous source reload"
+            );
+            return self.hcs_reload_after_prefill(actual_tokens);
+        }
         let cal = self.vram_calibration;
         let trace_cfg = self.active_trace_owned();
         let route_sync_device = self.device.clone();
@@ -28950,32 +29152,38 @@ impl GpuDecodeStore {
             let chunk_base = *chunk_buf.device_ptr();
 
             // Batch async DMA: one call per chunk from pre-packed host buffer
-            if c < hcs.soft_host_chunks.len() {
-                if hcs.soft_host_chunks[c].register() {
-                    if let Ok((actual_free, _)) = cudarc::driver::result::mem_get_info() {
-                        let actual_free_mb = actual_free / (1024 * 1024);
-                        if actual_free_mb < idle_floor_mb {
-                            log::warn!(
-                                "HCS soft async reload: dropping chunk {} after host re-pin — free={} MB below idle floor={} MB",
-                                c, actual_free_mb, idle_floor_mb,
-                            );
-                            hcs.soft_host_chunks[c].unregister();
-                            drop(chunk_buf);
-                            break;
-                        }
-                    }
-                }
-                unsafe {
-                    let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
-                        chunk_base,
-                        hcs.soft_host_chunks[c].as_ptr() as *const std::ffi::c_void,
-                        chunk_bytes,
-                        reload_stream,
-                    );
-                    if err != cuda_sys::CUresult::CUDA_SUCCESS {
-                        log::warn!("HCS soft async reload: chunk {} batch DMA failed: {:?}", c, err);
+            if c >= hcs.soft_host_chunks.len() {
+                log::warn!(
+                    "HCS soft async reload: missing host mirror chunk {} in mirror mode",
+                    c
+                );
+                drop(chunk_buf);
+                break;
+            }
+            if hcs.soft_host_chunks[c].register() {
+                if let Ok((actual_free, _)) = cudarc::driver::result::mem_get_info() {
+                    let actual_free_mb = actual_free / (1024 * 1024);
+                    if actual_free_mb < idle_floor_mb {
+                        log::warn!(
+                            "HCS soft async reload: dropping chunk {} after host re-pin — free={} MB below idle floor={} MB",
+                            c, actual_free_mb, idle_floor_mb,
+                        );
+                        hcs.soft_host_chunks[c].unregister();
+                        drop(chunk_buf);
                         break;
                     }
+                }
+            }
+            unsafe {
+                let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                    chunk_base,
+                    hcs.soft_host_chunks[c].as_ptr() as *const std::ffi::c_void,
+                    chunk_bytes,
+                    reload_stream,
+                );
+                if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                    log::warn!("HCS soft async reload: chunk {} batch DMA failed: {:?}", c, err);
+                    break;
                 }
             }
 

@@ -1,5 +1,33 @@
 # Krasis Benchmark Results
 
+## Standard Benchmarks - 2026-05-27 (QCN HQQ4 speed-test policy)
+
+Hardware: EPYC 7742, 1007 GB RAM, RTX 5090 32 GB selected for the run.
+Timing instrumentation was disabled. The run used the repeatable
+`./dev speed-test` entry point after updating the fixed speed-test surface to
+`tests/qcn-k4v4-hqq4-int4-benchmark.conf`: Qwen3-Coder-Next, INT4 experts,
+HQQ4 attention, `k4v4` KV, thinking off, and HCS RAM saver off
+(`host_mode=mirror`).
+
+| Model / run | Command | Attention | KV | Prefill (tok/s) | Decode (tok/s) | Round trip (tok/s) | HCS | Min free VRAM | Logs |
+|-------------|---------|-----------|----|----------------:|---------------:|-------------------:|-----|--------------:|------|
+| Qwen3-Coder-Next HQQ4 k4v4 INT4 mirror speed-test | `./dev speed-test` | HQQ4 | k4v4 | 5752.6 | 90.65 | 162.16 | 16362/24576 (66.6%) | 734 MB | [full log](20260527_qcn_hqq4_k4v4_int4_mirror_speedtest.log), [report](20260527_qcn_hqq4_k4v4_int4_mirror_speedtest_report.log), [server log](20260527_qcn_hqq4_k4v4_int4_mirror_speedtest_krasis.log) |
+
+Notes:
+- Config confirmation: `attention_quant='hqq4'`, `kv_dtype='k4v4'`,
+  `gpu_expert_bits=4`, `cpu_expert_bits=4`, `enable_thinking=False`, and
+  `hcs_host_cache_mode='mirror'`.
+- Startup built/validated HQQ4 attention artifacts (`947 MB` cache) and loaded
+  soft HCS in mirror mode: `16443/24576` startup soft experts
+  (`25435.3 MB`, `host_mode=mirror`).
+- VRAM calibration used a 39,920-token long probe. Long prefill low-water was
+  `3244 MB`; timed benchmark decode minimum free VRAM was `734 MB`, above the
+  `600 MB` safety margin.
+- Health scan found no hard exit, no VRAM monitor warning, no copy failures, and
+  no warning/error lines in the benchmark logs.
+
+---
+
 ## Standard Benchmarks - 2026-05-27 (Typhon RTX 5080)
 
 Hardware: Typhon, AMD Ryzen 9 5900X, 117 GB RAM, 1x NVIDIA GeForce RTX 5080
@@ -99,9 +127,11 @@ Notes:
 ## Standard Benchmarks - 2026-05-16 (rc30 VRAM pressure guardrails)
 
 Hardware: EPYC 7742, 1007 GB RAM, RTX 5090 32 GB selected for the run.
-Timing instrumentation was disabled. The run used the repeatable
-`./dev speed-test` entry point and the fixed
-`tests/qcn-k4v4-hqq8-int4-benchmark.conf` config.
+Timing instrumentation was disabled. At the time, the run used the repeatable
+`./dev speed-test` entry point and the then-fixed
+`tests/qcn-k4v4-hqq8-int4-benchmark.conf` config. The current fixed
+speed-test surface is QCN INT4 with HQQ4 attention, `k4v4` KV, thinking off,
+and HCS RAM saver off via `tests/qcn-k4v4-hqq4-int4-benchmark.conf`.
 
 | Model / run | Command | Attention | KV | Prefill (tok/s) | Decode (tok/s) | Round trip (tok/s) | HCS | Min free VRAM | Logs |
 |-------------|---------|-----------|----|----------------:|---------------:|-------------------:|-----|--------------:|------|

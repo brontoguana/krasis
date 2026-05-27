@@ -87,7 +87,7 @@ from krasis.config import (
     cache_dir_for_model,
     marlin_cache_basename,
 )
-from krasis.model import KrasisModel
+from krasis.model import KrasisModel, log_ram_ledger
 
 logger = logging.getLogger("krasis.server")
 
@@ -888,6 +888,7 @@ def main():
             "CFG_BUILD_CACHE": "build_cache",
             "CFG_HCS": "hcs",
             "CFG_MULTI_GPU_HCS": "multi_gpu_hcs",
+            "CFG_HCS_HOST_CACHE_MODE": "hcs_host_cache_mode",
             "CFG_KV_CACHE_MB": "kv_cache_mb",
             "CFG_VRAM_SAFETY_MARGIN": "vram_safety_margin",
             "CFG_DYNAMIC_HCS": "dynamic_hcs",
@@ -1055,6 +1056,10 @@ def main():
                         help="Enable Hot Cache Strategy (default: on for GPU decode, use --no-hcs to disable)")
     parser.add_argument("--multi-gpu-hcs", action="store_true", default=False,
                         help="Pin HCS experts across ALL GPUs (more capacity, but cross-device transfer)")
+    parser.add_argument("--hcs-host-cache-mode", default="source", choices=["auto", "mirror", "source"],
+                        help="Soft HCS host storage: source/lower-system-RAM is the default, "
+                             "mirror keeps the fast duplicated host chunks, auto chooses "
+                             "source only when system RAM is tight")
     parser.add_argument("--dynamic-hcs", action=argparse.BooleanOptionalAction, default=True,
                         help="Enable dynamic HCS heatmap-prefix + recency-tail cache (default: on)")
     parser.add_argument("--dynamic-hcs-tail-blocks", type=int, default=2, choices=range(1, 6),
@@ -1110,6 +1115,25 @@ def main():
         parser.error("--dynamic-hcs-tail-blocks must be an integer in 1..5")
     if args.dynamic_hcs_tail_blocks < 1 or args.dynamic_hcs_tail_blocks > 5:
         parser.error("--dynamic-hcs-tail-blocks must be in 1..5")
+    _hcs_host_aliases = {
+        "1": "source",
+        "true": "source",
+        "yes": "source",
+        "on": "source",
+        "low_ram": "source",
+        "low-ram": "source",
+        "0": "mirror",
+        "false": "mirror",
+        "no": "mirror",
+        "off": "mirror",
+        "fast": "mirror",
+    }
+    args.hcs_host_cache_mode = _hcs_host_aliases.get(
+        str(args.hcs_host_cache_mode or "source").strip().lower(),
+        str(args.hcs_host_cache_mode or "source").strip().lower(),
+    )
+    if args.hcs_host_cache_mode not in ("auto", "mirror", "source"):
+        parser.error("--hcs-host-cache-mode must be one of: auto, mirror, source")
     if str(getattr(args, "ssh_tunnel", "") or "").strip():
         from krasis.ssh_tunnel import parse_ssh_tunnel_target
 
@@ -1127,6 +1151,7 @@ def main():
             os.environ["KRASIS_DYNAMIC_HCS_TAIL_BLOCKS"] = str(args.dynamic_hcs_tail_blocks)
     else:
         os.environ["KRASIS_DYNAMIC_HCS"] = "0"
+    os.environ["KRASIS_HCS_HOST_CACHE_MODE"] = str(args.hcs_host_cache_mode or "source").strip().lower()
     if explicit_selected_gpus is not None:
         selected_count = len(explicit_selected_gpus.split(","))
         if explicit_num_gpus and args.num_gpus is not None and args.num_gpus != selected_count:
@@ -1295,6 +1320,8 @@ def main():
     # ── Configuration summary ──
     _status(f"Krasis — {_model_name}")
     _detail(f"Decode: GPU  |  HCS: {'on' if args.hcs else 'off'}  |  GPUs: {num_gpus_available}")
+    if args.hcs:
+        _detail(f"HCS host cache: {args.hcs_host_cache_mode}")
     if args.selected_gpus:
         _detail(
             f"Selected physical GPUs: {args.selected_gpus} "
@@ -1390,6 +1417,7 @@ def main():
         kv_cache_mb=args.kv_cache_mb,
         stream_attention=args.stream_attention,
     )
+    log_ram_ledger("after-model-object")
 
     # Set attention skip layer if configured
     attn_skip = getattr(args, 'attn_skip_after', None)
@@ -1403,6 +1431,7 @@ def main():
         # --build-cache: build GPU Marlin expert cache then exit (CPU cache no longer used)
         _detail("Build-cache mode: building/verifying GPU Marlin expert cache")
         _model.load(gpu_only=True)
+        log_ram_ledger("after-build-cache-load")
         import glob as _glob
         _cache_dir = cache_dir_for_model(args.model_path)
         gpu_bits = args.gpu_expert_bits
@@ -1419,6 +1448,7 @@ def main():
         print("BUILD CACHE COMPLETE", flush=True)
         return
     _model.load(gpu_only=gpu_only)
+    log_ram_ledger("after-model-load-return")
 
     _hf_tok = _model.tokenizer.tokenizer  # unwrap Tokenizer -> HF AutoTokenizer
     _template = getattr(_hf_tok, "chat_template", "") or ""
@@ -1443,15 +1473,18 @@ def main():
     _status("CUDA runtime warmup")
     _model.warmup_cuda_runtime(devices)
     _detail("cuBLAS + Triton kernel compilation done")
+    log_ram_ledger("after-cuda-runtime-warmup")
 
     # ── Set decode mode (GPU only) ──
     _model.decode_mode = "gpu"
 
     # ── GPU decode store setup (before warmup so decode warmup can use it) ──
     _status("Setting up GPU decode store")
+    log_ram_ledger("before-decode-store-setup")
     gpu_store = _model.setup_gpu_decode_store()
     gpu_store_addr = gpu_store.gpu_store_addr()
     _detail(f"GPU decode store ready (addr={gpu_store_addr:#x})")
+    log_ram_ledger("after-decode-store-setup-before-release")
     if _vram_ledger_enabled():
         _model.log_vram_ledger_residency("after-decode-store-setup-before-release")
     release_gpu_sources = not (args.stress_test or args.perplexity)
@@ -1463,6 +1496,7 @@ def main():
         )
         if released_mb > 0:
             _detail(f"Released redundant GPU execution source tensors ({released_mb:,} MB)")
+            log_ram_ledger("after-redundant-gpu-source-release")
     elif _vram_ledger_enabled():
         logger.info(
             "VRAM LEDGER gpu_source_release_skipped stress_test=%s perplexity=%s",
@@ -1517,6 +1551,7 @@ def main():
     try:
         gpu_store.allocate_prefill_engine(_model.cfg.max_position_embeddings)
         _detail("Prefill engine scratch buffers allocated")
+        log_ram_ledger("after-prefill-engine-allocate")
         if _vram_ledger_enabled():
             _model.log_vram_ledger_residency("after-prefill-engine-allocate")
     except Exception as e:
@@ -1888,6 +1923,7 @@ def main():
     vram_monitor.report_event("calibration_end")
     _status("VRAM calibration complete")
     _detail(f"Post-calibration free VRAM: {post_calibration_free_mb:,} MB")
+    log_ram_ledger("after-vram-calibration")
     _detail(
         f"Transient deltas: short prefill={short_prefill_delta:,} MB, "
         f"long prefill={long_prefill_delta:,} MB, short decode={short_decode_delta:,} MB, "
@@ -2254,6 +2290,7 @@ def main():
             t_hcs = time.time()
             vram_monitor.report_event("hcs_init_start")
             _status("Loading GPU0 HCS pool (fully reclaimable)")
+            log_ram_ledger("before-hcs-init")
             if vram_ledger:
                 logger.info(
                     "VRAM LEDGER hcs_init_request hard_budget_mb=%d soft_budget_mb=%d safety_mb=%d ranking_entries=%d free_before_mb=%d",
@@ -2300,6 +2337,7 @@ def main():
             _detail(result)
             _dim(f"Loaded in {hcs_elapsed:.1f}s")
             logger.info("HCS pool: %s (%.1fs)", result, hcs_elapsed)
+            log_ram_ledger("after-hcs-init")
             if vram_ledger:
                 logger.info(
                     "VRAM LEDGER hcs_init_result elapsed_s=%.3f free_after_mb=%d result=%s",
@@ -2731,6 +2769,7 @@ def main():
     _hcs_str = "on" if args.hcs else "off"
     _think_str = "on" if think_end_id else "off"
     vram_monitor.report_event("server_ready")
+    log_ram_ledger("server-ready")
     _headline("KRASIS SERVER READY", _GREEN)
     print(f"  {_GREEN}Model:{_NC}    {_BOLD}{_model_name}{_NC}", flush=True)
     print(f"  {_GREEN}Address:{_NC}  {_BOLD}{args.host}:{args.port}{_NC}", flush=True)

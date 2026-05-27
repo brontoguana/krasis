@@ -84,6 +84,7 @@ logger = logging.getLogger(__name__)
 
 _TQ4_SEED = 42
 _TQ4_LAYER_SEED_STRIDE = 1337
+_RAM_LEDGER_LAST_RSS_KB: Optional[int] = None
 
 
 def _tq4_wht_signs(layer_idx: int, head_dim: int, device: torch.device) -> torch.Tensor:
@@ -201,6 +202,10 @@ def _vram_ledger_enabled() -> bool:
     return os.environ.get("KRASIS_VRAM_LEDGER", "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def _ram_ledger_enabled() -> bool:
+    return os.environ.get("KRASIS_RAM_LEDGER", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _read_vmrss_kb() -> int:
     """Read VmRSS from /proc/self/status in KB."""
     try:
@@ -211,6 +216,92 @@ def _read_vmrss_kb() -> int:
     except (OSError, ValueError):
         pass
     return 0
+
+
+def _read_proc_status_kb() -> dict[str, int]:
+    result: dict[str, int] = {}
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 2 and parts[0].endswith(":"):
+                    key = parts[0].rstrip(":")
+                    if key.startswith("Vm") or key in ("RssAnon", "RssFile", "RssShmem"):
+                        try:
+                            result[key] = int(parts[1])
+                        except ValueError:
+                            pass
+    except OSError:
+        pass
+    return result
+
+
+def _read_smaps_rollup_kb() -> dict[str, int]:
+    result: dict[str, int] = {}
+    try:
+        with open("/proc/self/smaps_rollup") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 2 and parts[0].endswith(":"):
+                    try:
+                        result[parts[0].rstrip(":")] = int(parts[1])
+                    except ValueError:
+                        pass
+    except OSError:
+        pass
+    return result
+
+
+def log_ram_ledger(label: str, component_bytes: Optional[dict[str, int]] = None) -> None:
+    """Log opt-in process/system RAM checkpoints for startup residency diagnosis."""
+    if not _ram_ledger_enabled():
+        return
+
+    global _RAM_LEDGER_LAST_RSS_KB
+
+    status = _read_proc_status_kb()
+    smaps = _read_smaps_rollup_kb()
+    meminfo = _read_meminfo()
+
+    rss_kb = smaps.get("Rss", status.get("VmRSS", 0))
+    pss_kb = smaps.get("Pss", 0)
+    anon_kb = smaps.get("Anonymous", status.get("RssAnon", 0))
+    shmem_kb = smaps.get("Shmem", status.get("RssShmem", 0))
+    rss_file_kb = status.get("RssFile", 0)
+    file_backed_kb = rss_file_kb if rss_file_kb else max(0, rss_kb - anon_kb - shmem_kb)
+    private_kb = smaps.get("Private_Clean", 0) + smaps.get("Private_Dirty", 0)
+    shared_kb = smaps.get("Shared_Clean", 0) + smaps.get("Shared_Dirty", 0)
+    delta_kb = 0 if _RAM_LEDGER_LAST_RSS_KB is None else rss_kb - _RAM_LEDGER_LAST_RSS_KB
+    _RAM_LEDGER_LAST_RSS_KB = rss_kb
+
+    components = ""
+    if component_bytes:
+        components = " " + " ".join(
+            f"{name}_mb={bytes_ / (1024 * 1024):.1f}"
+            for name, bytes_ in sorted(component_bytes.items())
+            if bytes_ > 0
+        )
+
+    logger.info(
+        "RAM LEDGER label=%s rss_mb=%.1f delta_mb=%+.1f pss_mb=%.1f anon_mb=%.1f "
+        "file_mb=%.1f shmem_mb=%.1f private_mb=%.1f shared_mb=%.1f vm_size_mb=%.1f "
+        "vm_data_mb=%.1f vm_swap_mb=%.1f system_available_mb=%.1f system_cached_mb=%.1f%s",
+        label,
+        rss_kb / 1024.0,
+        delta_kb / 1024.0,
+        pss_kb / 1024.0,
+        anon_kb / 1024.0,
+        file_backed_kb / 1024.0,
+        shmem_kb / 1024.0,
+        private_kb / 1024.0,
+        shared_kb / 1024.0,
+        status.get("VmSize", 0) / 1024.0,
+        status.get("VmData", 0) / 1024.0,
+        status.get("VmSwap", 0) / 1024.0,
+        meminfo.get("MemAvailable", 0) / 1024.0,
+        meminfo.get("Cached", 0) / 1024.0,
+        components,
+    )
 
 
 def _estimate_expert_ram_gb(cfg, cpu_expert_bits: int = 4, group_size: int = 128) -> float:
@@ -720,6 +811,7 @@ class KrasisModel:
         """
         start = time.perf_counter()
 
+        log_ram_ledger("before-load")
         _vram_checkpoint("before-load")
 
         # Phase 0a: GPU VRAM sanity check — abort early if GPU is occupied
@@ -767,6 +859,12 @@ class KrasisModel:
             alloc_mb = torch.cuda.memory_allocated(dev) / (1024**2)
             logger.info("GPU%d: %.0f MB allocated", i, alloc_mb)
         logger.info("GPU weights loaded in %.1fs", gpu_elapsed)
+        log_ram_ledger(
+            "after-phase1-gpu-weights",
+            {
+                "hqq_attention_cache_validated": int(getattr(self, "_hqq_attention_cache_bytes", 0)),
+            },
+        )
         _vram_checkpoint("after-phase1-gpu-weights")
         self.log_vram_ledger_residency("after-phase1-gpu-weights")
 
@@ -811,6 +909,7 @@ class KrasisModel:
         gpu_bits = self.quant_cfg.gpu_expert_bits
         cache_dir = cache_dir_for_model(self.cfg.model_path)
         has_gpu_cache = False
+        marlin_cache_bytes = 0
         if gpu_bits == 16:
             print(
                 f"\n\033[1m\033[36m▸ Loading BF16 expert weights from safetensors "
@@ -834,6 +933,19 @@ class KrasisModel:
                     ),
                 )
             )
+            marlin_cache_path = os.path.join(
+                cache_dir,
+                marlin_cache_basename(
+                    gpu_bits,
+                    self.quant_cfg.expert_group_size,
+                    self.quant_cfg.gpu_expert_int4_calib,
+                ),
+            )
+            if os.path.isfile(marlin_cache_path):
+                try:
+                    marlin_cache_bytes = os.path.getsize(marlin_cache_path)
+                except OSError:
+                    marlin_cache_bytes = 0
             if has_gpu_cache:
                 print(f"\n\033[1m\033[36m▸ Loading GPU expert weights from cache\033[0m", flush=True)
             else:
@@ -854,6 +966,13 @@ class KrasisModel:
         else:
             print(f"  \033[0;32mExpert cache built in {cpu_elapsed:.0f}s — next launch will be much faster.\033[0m", flush=True)
 
+        log_ram_ledger(
+            "after-phase2-expert-weights",
+            {
+                "marlin_cache_file": marlin_cache_bytes,
+                "hqq_attention_runtime": int(getattr(self, "_hqq_attention_cache_bytes", 0)),
+            },
+        )
         _vram_checkpoint("after-phase2-expert-weights")
         self.log_vram_ledger_residency("after-phase2-expert-weights")
 
@@ -866,11 +985,13 @@ class KrasisModel:
             print(f"\n\033[1m\033[36m▸ Initializing GPU prefill managers\033[0m", flush=True)
             self._init_gpu_prefill()
 
+        log_ram_ledger("after-phase3-prefill-managers")
         _vram_checkpoint("after-phase3-prefill-managers")
         self.log_vram_ledger_residency("after-phase3-prefill-managers")
 
         # Allocate KV caches
         self._init_kv_caches()
+        log_ram_ledger("after-kv-cache-init")
         _vram_checkpoint("after-kv-cache-init")
         self.log_vram_ledger_residency("after-kv-cache-init")
 
@@ -892,6 +1013,7 @@ class KrasisModel:
 
         self._loaded = True
         total = time.perf_counter() - start
+        log_ram_ledger("after-full-load")
         _vram_checkpoint("after-full-load")
         self.log_vram_ledger_residency("after-full-load")
         logger.info("Model fully loaded in %.1fs", total)
