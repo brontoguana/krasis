@@ -3379,22 +3379,30 @@ class KrasisModel:
                 category_parts,
             )
 
-    def release_redundant_gpu_execution_tensors(self) -> int:
+    def release_redundant_gpu_execution_tensors(
+        self,
+        *,
+        release_lm_head_source: bool = True,
+        allow_multi_gpu_lm_head: bool = False,
+        release_router_fp32_mirrors: bool = False,
+    ) -> int:
         """Move GPU tensors no longer needed after Rust execution setup back to CPU.
 
         The Rust decode store needs a BF16 lm_head pointer for GEMV. When the
         configured lm_head is INT8, setup_gpu_decode_store creates an independent
-        BF16 GPU copy in self._rust_lm_head. The original INT8 tuple is then only
-        needed as source data for possible aux-store setup, so it can live on CPU.
+        BF16 GPU copy in self._rust_lm_head. The original INT8 tuple can live on
+        CPU after all stores that need source data have been configured.
+
+        Router FP32 mirrors are Python-forward caches. Rust serving and
+        benchmarking use Rust-registered routing weights, so those mirrors can be
+        dropped only on Rust-only paths.
         """
-        if len(getattr(self, "all_devices", []) or []) != 1:
-            return 0
-        if self.cfg.tie_word_embeddings:
-            return 0
-        if getattr(self, "_rust_lm_head", None) is None:
+        if not release_lm_head_source and not release_router_fp32_mirrors:
             return 0
 
         released_bytes = 0
+        released_lm_head_bytes = 0
+        released_router_bytes = 0
 
         def _cuda_bytes(value) -> int:
             if isinstance(value, torch.Tensor) and value.device.type == "cuda":
@@ -3416,7 +3424,33 @@ class KrasisModel:
                 return {key: _to_cpu(item) for key, item in value.items()}
             return value
 
-        released_bytes += _cuda_bytes(self.lm_head_data)
+        can_release_lm_head = (
+            release_lm_head_source
+            and (allow_multi_gpu_lm_head or len(getattr(self, "all_devices", []) or []) == 1)
+            and not self.cfg.tie_word_embeddings
+            and getattr(self, "_rust_lm_head", None) is not None
+        )
+        if can_release_lm_head:
+            released_lm_head_bytes = _cuda_bytes(self.lm_head_data)
+            released_bytes += released_lm_head_bytes
+
+        router_mirrors = []
+        if release_router_fp32_mirrors:
+            for layer in self.layers:
+                if not getattr(layer, "is_moe", False):
+                    continue
+                for attr in (
+                    "_gate_weight_f32",
+                    "_gate_bias_f32",
+                    "_e_score_correction_bias_f32",
+                ):
+                    value = getattr(layer, attr, None)
+                    bytes_ = _cuda_bytes(value)
+                    if bytes_ > 0:
+                        router_mirrors.append((layer, attr))
+                        released_router_bytes += bytes_
+            released_bytes += released_router_bytes
+
         if released_bytes <= 0:
             return 0
 
@@ -3427,10 +3461,13 @@ class KrasisModel:
             except Exception:
                 free_before = None
 
-        self.lm_head_data = _to_cpu(self.lm_head_data)
-        for state in getattr(self, "_device_state", {}).values():
-            if isinstance(state, dict) and state.get("lm_head_data") is not None:
-                state["lm_head_data"] = self.lm_head_data
+        if released_lm_head_bytes > 0:
+            self.lm_head_data = _to_cpu(self.lm_head_data)
+            for state in getattr(self, "_device_state", {}).values():
+                if isinstance(state, dict) and state.get("lm_head_data") is not None:
+                    state["lm_head_data"] = self.lm_head_data
+        for layer, attr in router_mirrors:
+            setattr(layer, attr, None)
 
         gc.collect()
         if torch.cuda.is_available():
@@ -3446,15 +3483,19 @@ class KrasisModel:
         released_mb = released_bytes >> 20
         if free_before is not None and free_after is not None:
             logger.info(
-                "Released redundant GPU lm_head source after Rust setup: %d MB, free_before=%d MB, free_after=%d MB",
+                "Released redundant GPU execution tensors after Rust setup: total=%d MB, lm_head_source=%d MB, router_fp32_mirrors=%d MB, free_before=%d MB, free_after=%d MB",
                 released_mb,
+                released_lm_head_bytes >> 20,
+                released_router_bytes >> 20,
                 free_before,
                 free_after,
             )
         else:
             logger.info(
-                "Released redundant GPU lm_head source after Rust setup: %d MB",
+                "Released redundant GPU execution tensors after Rust setup: total=%d MB, lm_head_source=%d MB, router_fp32_mirrors=%d MB",
                 released_mb,
+                released_lm_head_bytes >> 20,
+                released_router_bytes >> 20,
             )
         return released_mb
 
@@ -7267,13 +7308,11 @@ class KrasisModel:
             lm_head_wid = store.register_weight(lm_head_bf16.data_ptr(), lm_head_bf16.shape[0], lm_head_bf16.shape[1], 0)
             store.set_lm_head(lm_head_wid)
         else:
-            # Intermediate segment — register primary GPU's pointers as placeholders (never accessed)
+            # Intermediate segment — placeholder is never accessed because the
+            # decode segment skips final logits here. Use a dummy instead of
+            # retaining or registering the primary GPU lm-head source.
             store.set_final_norm(self.final_norm.data_ptr(), self.cfg.hidden_size)
-            lm_head_w = self.lm_head_data
-            if isinstance(lm_head_w, tuple):
-                lm_head_wid = store.register_weight(lm_head_w[0].data_ptr(), lm_head_w[0].shape[0], lm_head_w[0].shape[1], 0)
-            else:
-                lm_head_wid = store.register_weight(lm_head_w.data_ptr(), lm_head_w.shape[0], lm_head_w.shape[1], 0)
+            lm_head_wid = store.register_weight(0, 1, 1, 0)
             store.set_lm_head(lm_head_wid)
 
         store.set_norm_bias_one(getattr(self.cfg, 'norm_bias_one', False))

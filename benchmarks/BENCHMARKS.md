@@ -1,5 +1,28 @@
 # Krasis Benchmark Results
 
+## Standard Benchmarks - 2026-05-27 (Zephyrus RTX 3070 Laptop)
+
+Hardware: Zephyrus, AMD Ryzen 7 5800HS, 31 GB RAM, 1x NVIDIA GeForce RTX
+3070 Laptop GPU 8 GB. Timing instrumentation was disabled. The run used the
+current local fixed-residency cleanup build from `/home/main/krasis-ledger` and
+the Zephyrus Qwen3.5-35B-A3B HQQ4/`k4v4` launch config
+`/tmp/krasis-tbaflolx.conf`.
+
+| Model / run | Command | Attention | KV | Prefill (tok/s) | Decode (tok/s) | Round trip (tok/s) | HCS | Min free VRAM | Logs |
+|-------------|---------|-----------|----|----------------:|---------------:|-------------------:|-----|--------------:|------|
+| Qwen3.5-35B-A3B Zephyrus RTX 3070 Laptop HQQ4 k4v4 | `./dev benchmark /tmp/krasis-tbaflolx.conf` | HQQ4 | k4v4 | 222.1 | 12.48 | 22.00 | 779/10240 (7.6%) | 536 MB | [full log](20260527_zephyrus_q35_hqq4_k4v4_benchmark.log), [report](20260527_zephyrus_q35_hqq4_k4v4_benchmark_report.log), [server log](20260527_zephyrus_q35_hqq4_k4v4_krasis.log) |
+
+Notes:
+- Startup released `565 MB` of redundant GPU execution source tensors before
+  calibration (`485 MB` lm-head source + `80 MB` router FP32 mirrors).
+- HCS loaded no hard experts and `984/10240` soft experts at startup; the
+  benchmark ended with `779/10240` experts loaded and a `536 MB` decode
+  low-water against the configured `500 MB` safety margin.
+- Prefill peaked at the 5K row (`222.1 tok/s`). Longer prompts still fell back
+  sharply: `20K 152.3 tok/s`, `35K 74.3 tok/s`, `50K 74.5 tok/s`.
+
+---
+
 ## Standard Benchmarks - 2026-05-18 (Qwen3.6 RTX 5090 HQQ/KV sweep)
 
 Hardware: EPYC 7742, 1007 GB RAM, selected physical GPU0 RTX 5090 32 GB.

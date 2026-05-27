@@ -171,6 +171,7 @@ def _env_flag(name: str) -> Optional[bool]:
         return None
     return raw.strip() not in ("", "0", "false", "False")
 
+
 def _sha256_file(path: str) -> Optional[str]:
     if not os.path.isfile(path):
         return None
@@ -1455,7 +1456,11 @@ def main():
         _model.log_vram_ledger_residency("after-decode-store-setup-before-release")
     release_gpu_sources = not (args.stress_test or args.perplexity)
     if release_gpu_sources:
-        released_mb = _model.release_redundant_gpu_execution_tensors()
+        released_mb = _model.release_redundant_gpu_execution_tensors(
+            release_lm_head_source=True,
+            allow_multi_gpu_lm_head=True,
+            release_router_fp32_mirrors=True,
+        )
         if released_mb > 0:
             _detail(f"Released redundant GPU execution source tensors ({released_mb:,} MB)")
     elif _vram_ledger_enabled():
