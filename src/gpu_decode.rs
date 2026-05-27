@@ -16367,6 +16367,10 @@ impl GpuDecodeStore {
         !self.hqq_runtime_slots.is_empty()
     }
 
+    pub fn last_soft_reload_alloc_mb(&self) -> f64 {
+        self.last_soft_reload_alloc_mb
+    }
+
     pub fn swap_hqq_runtime_to_prefill_rust(&mut self) -> Result<(), String> {
         self.swap_hqq_runtime_stage_rust("prefill")
     }

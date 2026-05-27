@@ -1204,19 +1204,13 @@ fn handle_chat_completion(
         log::warn!("Request {}: prompt-HCS snapshot missing before reload", request_id);
         store.clear_prompt_hcs_counts();
     }
-    {
-        let (queued, _alloc_mb) = store.hcs_reload_after_prefill_async(prompt_len);
-        if queued > 0 {
-            log::info!("Request {}: HCS soft async reload queued {} experts ({} tokens)",
-                request_id, queued, prompt_len);
-        }
-    }
-    // Always sync: wait for reload DMA to complete before decode starts.
-    // Decode must never begin with an incomplete HCS — with dynamic chunking
-    // the entire soft tier is evicted for prefill and must be fully restored.
-    let (activated, real_reload_ms) = store.hcs_sync_soft_reload();
+    // Decode must never begin with an incomplete HCS.  Use the bounded
+    // synchronous reload here: async queue+sync can still create CUDA/DMA
+    // transients after the pre-allocation free checks and before pressure
+    // drain gets a chance to run.
+    let (activated, real_reload_ms) = store.hcs_reload_after_prefill(prompt_len);
     if activated > 0 {
-        log::info!("Request {}: HCS reload complete: {} experts, {:.1}ms DMA",
+        log::info!("Request {}: HCS reload complete: {} experts, {:.1}ms",
             request_id, activated, real_reload_ms);
     }
     if let Some((counts, layers, experts, prompt_tokens)) = prompt_hcs_snapshot.as_ref() {
@@ -1433,8 +1427,7 @@ fn handle_prefill_logits(
             let _ = engine.release_scratch();
             let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
             let _ = store.prepare_runtime_for_decode_rust();
-            let _ = store.hcs_reload_after_prefill_async(token_ids.len());
-            let _ = store.hcs_sync_soft_reload();
+            let _ = store.hcs_reload_after_prefill(token_ids.len());
             store.invalidate_cuda_graph();
             log::info!("prefill_logits: invalidated CUDA graphs after failed diagnostic prefill restore");
             Python::with_gil(|py| {
@@ -1454,8 +1447,7 @@ fn handle_prefill_logits(
     // from the normal steady-state cache residency.
     let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
     let _ = store.prepare_runtime_for_decode_rust();
-    let _ = store.hcs_reload_after_prefill_async(token_ids.len());
-    let _ = store.hcs_sync_soft_reload();
+    let _ = store.hcs_reload_after_prefill(token_ids.len());
     log::info!("prefill_logits: restored decode runtime after diagnostic prefill");
 
     // Match the normal reference/inference cleanup path so diagnostic prefill
@@ -1680,17 +1672,11 @@ fn handle_reference_test(
         log::warn!("reference_test: prompt-HCS snapshot missing before reload");
         store.clear_prompt_hcs_counts();
     }
-    let (queued, alloc_mb) = {
-        let (queued, alloc_mb) = store.hcs_reload_after_prefill_async(prompt_len);
-        if queued > 0 {
-            log::info!("reference_test: HCS soft reload queued {} experts", queued);
-        }
-        (queued, alloc_mb)
-    };
-    // Always sync: decode must not start with incomplete HCS
-    let (activated, dma_ms) = store.hcs_sync_soft_reload();
+    let (activated, dma_ms) = store.hcs_reload_after_prefill(prompt_len);
+    let queued = activated;
+    let alloc_mb = store.last_soft_reload_alloc_mb();
     if activated > 0 {
-        log::info!("reference_test: HCS reload complete: {} experts, {:.1}ms DMA", activated, dma_ms);
+        log::info!("reference_test: HCS reload complete: {} experts, {:.1}ms", activated, dma_ms);
     }
     if let Some((counts, layers, experts, prompt_tokens)) = prompt_hcs_snapshot.as_ref() {
         store.install_prompt_hcs_shadow(counts.clone(), *layers, *experts, *prompt_tokens);
@@ -2934,20 +2920,13 @@ impl RustServer {
                 log::warn!("Benchmark prefill-only: prompt-HCS snapshot missing before reload");
                 store.clear_prompt_hcs_counts();
             }
-            let (queued, _alloc_mb) = store.hcs_reload_after_prefill_async(prompt_len);
-            if queued > 0 {
-                log::info!(
-                    "Benchmark prefill-only: HCS soft async reload queued {} experts ({} tokens)",
-                    queued,
-                    prompt_len,
-                );
-            }
-            let (activated, real_reload_dma_ms) = store.hcs_sync_soft_reload();
+            let (activated, real_reload_dma_ms) = store.hcs_reload_after_prefill(prompt_len);
             if activated > 0 {
                 log::info!(
-                    "Benchmark prefill-only: HCS reload complete: {} experts, {:.1}ms DMA",
+                    "Benchmark prefill-only: HCS reload complete: {} experts, {:.1}ms ({} tokens)",
                     activated,
                     real_reload_dma_ms,
+                    prompt_len,
                 );
             }
             if let Some((counts, layers, experts, prompt_tokens)) = prompt_hcs_snapshot.as_ref() {
@@ -3027,15 +3006,9 @@ impl RustServer {
             log::warn!("Benchmark: prompt-HCS snapshot missing before reload");
             store.clear_prompt_hcs_counts();
         }
-        let (queued, _alloc_mb) = store.hcs_reload_after_prefill_async(prompt_len);
-        if queued > 0 {
-            log::info!("Benchmark: HCS soft async reload queued {} experts ({} tokens)",
-                queued, prompt_len);
-        }
-        // Always sync: decode must not start with incomplete HCS
-        let (activated, real_reload_dma_ms) = store.hcs_sync_soft_reload();
+        let (activated, real_reload_dma_ms) = store.hcs_reload_after_prefill(prompt_len);
         if activated > 0 {
-            log::info!("Benchmark: HCS reload complete: {} experts, {:.1}ms DMA",
+            log::info!("Benchmark: HCS reload complete: {} experts, {:.1}ms",
                 activated, real_reload_dma_ms);
         }
         if let Some((counts, layers, experts, prompt_tokens)) = prompt_hcs_snapshot.as_ref() {
