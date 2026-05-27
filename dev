@@ -118,12 +118,12 @@ else
     REFERENCE_CAPTURE_ROOT="${HOME}/.krasis"
 fi
 
-PYTHON="/home/main/miniconda3/envs/ktransformers/bin/python"
+PYTHON="${KRASIS_DEV_PYTHON:-/home/main/miniconda3/envs/ktransformers/bin/python}"
 export PYTHONUNBUFFERED=1
 # WSL2: add CUDA driver path so Rust cudarc can find libcuda.so
 [[ -d /usr/lib/wsl/lib ]] && export LD_LIBRARY_PATH="/usr/lib/wsl/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-PIP="/home/main/miniconda3/envs/ktransformers/bin/pip"
-MATURIN="/home/main/.local/bin/maturin"
+PIP="${KRASIS_DEV_PIP:-/home/main/miniconda3/envs/ktransformers/bin/pip}"
+MATURIN="${KRASIS_DEV_MATURIN:-/home/main/.local/bin/maturin}"
 SO_FILE="$SCRIPT_DIR/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so"
 WHEEL_DIR="$SCRIPT_DIR/target/dev-wheels"
 REPO_PYTHONPATH="$SCRIPT_DIR/python"

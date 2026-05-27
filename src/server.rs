@@ -2920,6 +2920,54 @@ impl RustServer {
         crate::vram_monitor::report_event("prefill_end");
 
         if kv_overflow || max_new_tokens <= 1 {
+            crate::vram_monitor::report_event("hcs_soft_load_start");
+            let t_reload = Instant::now();
+            if let Some((counts, layers, experts, prompt_tokens)) = prompt_hcs_snapshot.as_ref() {
+                log::info!(
+                    "Benchmark prefill-only: prompt-HCS snapshot ready: prompt_tokens={} layers={} experts={}",
+                    prompt_tokens,
+                    layers,
+                    experts,
+                );
+                store.install_prompt_hcs_counts(counts.clone(), *layers, *experts, *prompt_tokens);
+            } else {
+                log::warn!("Benchmark prefill-only: prompt-HCS snapshot missing before reload");
+                store.clear_prompt_hcs_counts();
+            }
+            let (queued, _alloc_mb) = store.hcs_reload_after_prefill_async(prompt_len);
+            if queued > 0 {
+                log::info!(
+                    "Benchmark prefill-only: HCS soft async reload queued {} experts ({} tokens)",
+                    queued,
+                    prompt_len,
+                );
+            }
+            let (activated, real_reload_dma_ms) = store.hcs_sync_soft_reload();
+            if activated > 0 {
+                log::info!(
+                    "Benchmark prefill-only: HCS reload complete: {} experts, {:.1}ms DMA",
+                    activated,
+                    real_reload_dma_ms,
+                );
+            }
+            if let Some((counts, layers, experts, prompt_tokens)) = prompt_hcs_snapshot.as_ref() {
+                store.install_prompt_hcs_shadow(counts.clone(), *layers, *experts, *prompt_tokens);
+            } else {
+                store.clear_prompt_hcs_shadow();
+            }
+            let (pressure_evicted, pressure_freed_mb, pressure_final_free_mb) =
+                store.hcs_drain_vram_pressure("benchmark_prefill_only_after_reload", true);
+            if pressure_evicted > 0 {
+                log::warn!(
+                    "Benchmark prefill-only: VRAM pressure eviction after reload evicted {} soft experts, freed {:.1} MB, final_free={} MB",
+                    pressure_evicted,
+                    pressure_freed_mb,
+                    pressure_final_free_mb,
+                );
+            }
+            let reload_ms = t_reload.elapsed().as_secs_f64() * 1000.0;
+            crate::vram_monitor::report_event("hcs_soft_load_end");
+
             self.py_model.call_method0(py, "server_cleanup")?;
 
             let prefill_tok_s = if prefill_ms > 0.0 {
@@ -2952,8 +3000,8 @@ impl RustServer {
                 "decode_tok_s": 0.0,
                 "decode_tokens": 1,
                 "evict_ms": evict_ms,
-                "reload_ms": 0.0,
-                "real_reload_dma_ms": 0.0,
+                "reload_ms": reload_ms,
+                "real_reload_dma_ms": real_reload_dma_ms,
                 "min_free_vram_mb": min_free_vram_mb,
                 "hcs_loaded": hcs_loaded,
                 "hcs_total": hcs_total,

@@ -27906,6 +27906,14 @@ impl GpuDecodeStore {
         let trace_cfg = self.active_trace_owned();
         let hqq_prefill_growth_bytes = self.hqq_runtime_prefill_growth_bytes();
         let route_sync_device = self.device.clone();
+        if let Err(e) = self.device.bind_to_thread() {
+            log::warn!(
+                "HCS soft evict skipped: failed to bind CUDA device before memory query (estimated_tokens={}): {:?}",
+                estimated_tokens,
+                e,
+            );
+            return (0, 0.0);
+        }
         if std::env::var("KRASIS_HCS_EVICT_DEBUG").is_ok() {
             eprintln!(
                 "[KRASIS-HCS-EVICT-DEBUG] hcs_evict_for_prefill enter estimated_tokens={} has_graph={} hqq_growth_mb={:.0}",
@@ -28020,14 +28028,9 @@ impl GpuDecodeStore {
         let capped_tokens = estimated_tokens.max(128).min(50000);
 
         // Measure actual free VRAM.
-        let free_bytes = unsafe {
-            let mut free: usize = 0;
-            let mut total: usize = 0;
-            let err = cuda_sys::lib().cuMemGetInfo_v2(
-                &mut free as *mut usize,
-                &mut total as *mut usize);
-            if err == cuda_sys::CUresult::CUDA_SUCCESS { free } else { 0 }
-        };
+        let free_bytes = current_cuda_free_mb()
+            .map(|mb| mb.saturating_mul(1024 * 1024))
+            .unwrap_or(0);
         if std::env::var("KRASIS_HCS_EVICT_DEBUG").is_ok() {
             eprintln!(
                 "[KRASIS-HCS-EVICT-DEBUG] hcs_evict free_mb={:.0} capped_tokens={} cal_present={} scratch_present={}",
@@ -28213,15 +28216,9 @@ impl GpuDecodeStore {
             base_needed_bytes as f64 / (1024.0 * 1024.0),
             hqq_prefill_growth_bytes as f64 / (1024.0 * 1024.0));
         if env_truthy("KRASIS_VRAM_LEDGER") {
-            let free_after_bytes = unsafe {
-                let mut free: usize = 0;
-                let mut total: usize = 0;
-                let err = cuda_sys::lib().cuMemGetInfo_v2(
-                    &mut free as *mut usize,
-                    &mut total as *mut usize,
-                );
-                if err == cuda_sys::CUresult::CUDA_SUCCESS { free } else { 0 }
-            };
+            let free_after_bytes = current_cuda_free_mb()
+                .map(|mb| mb.saturating_mul(1024 * 1024))
+                .unwrap_or(0);
             vram_ledger_log!(
                 "VRAM LEDGER hcs_evict_prefill_result prompt_tokens={} evicted={} freed_mb={:.1} chunks_dropped={} total_chunks={} elapsed_ms={:.1} free_after_mb={:.0} soft_cached_after={} soft_chunks_loaded_after={}",
                 estimated_tokens,

@@ -28762,7 +28762,8 @@ impl PrefillEngine {
         let pool_budget = free
             .saturating_sub(safety)
             .saturating_sub(hard_floor)
-            .saturating_sub(cold_reserve);
+            .saturating_sub(cold_reserve)
+            .saturating_sub(self.measured_scratch_alloc_overhead_bytes);
         let measured_budget = self
             .optional_pinning_budget_mb
             .map(|mb| mb.saturating_mul(1024 * 1024))
@@ -28800,8 +28801,18 @@ impl PrefillEngine {
 
         if stderr_debug_enabled() {
             let avg_pinned = total_pinned as f64 / num_moe_layers as f64;
-            eprintln!("[PREFILL] Pinning pool: {:.0} MB free, {:.0} MB safety, {:.0} MB hard floor, {:.0} MB cold reserve, measured budget {:?} MB, cap {}/{} experts/layer, pinning {} total ({:.1} avg/layer, {:.0} MB)",
-                free as f64 / 1e6, safety as f64 / 1e6, hard_floor as f64 / 1e6, cold_reserve as f64 / 1e6, self.optional_pinning_budget_mb, experts_per_layer, n_experts, total_pinned, avg_pinned, pool_bytes as f64 / 1e6);
+            eprintln!("[PREFILL] Pinning pool: {:.0} MB free, {:.0} MB safety, {:.0} MB hard floor, {:.0} MB cold reserve, {:.0} MB measured alloc overhead, measured budget {:?} MB, cap {}/{} experts/layer, pinning {} total ({:.1} avg/layer, {:.0} MB)",
+                free as f64 / 1e6,
+                safety as f64 / 1e6,
+                hard_floor as f64 / 1e6,
+                cold_reserve as f64 / 1e6,
+                self.measured_scratch_alloc_overhead_bytes as f64 / 1e6,
+                self.optional_pinning_budget_mb,
+                experts_per_layer,
+                n_experts,
+                total_pinned,
+                avg_pinned,
+                pool_bytes as f64 / 1e6);
         }
 
         // Allocate the pool using raw CUDA driver API
@@ -28817,6 +28828,35 @@ impl PrefillEngine {
             cuda_sys::lib().cuMemsetD8Async(dptr, 0, pool_bytes, self.stream);
             dptr
         };
+        unsafe {
+            cuda_sys::lib().cuCtxSynchronize();
+        }
+        let (post_pin_free, _) = unsafe {
+            let mut f = 0usize;
+            let mut t = 0usize;
+            cuda_sys::lib().cuMemGetInfo_v2(&mut f as *mut _, &mut t as *mut _);
+            (f, t)
+        };
+        let required_after_pin = safety
+            .saturating_add(hard_floor)
+            .saturating_add(cold_reserve);
+        if post_pin_free < required_after_pin {
+            unsafe {
+                cuda_sys::lib().cuMemFree_v2(pool_base);
+            }
+            if stderr_debug_enabled() || prefill_debug_enabled() {
+                eprintln!(
+                    "[PREFILL] Pinning pool skipped after allocation: free {:.0} MB below required {:.0} MB (safety {:.0} + hard {:.0} + cold {:.0}); pool {:.0} MB",
+                    post_pin_free as f64 / 1e6,
+                    required_after_pin as f64 / 1e6,
+                    safety as f64 / 1e6,
+                    hard_floor as f64 / 1e6,
+                    cold_reserve as f64 / 1e6,
+                    pool_bytes as f64 / 1e6,
+                );
+            }
+            return Ok(0);
+        }
 
         // For each MoE layer, sort experts by activation count and pin the top N
         let mut offsets: Vec<Vec<Option<usize>>> = vec![vec![None; n_experts]; num_moe_layers];
