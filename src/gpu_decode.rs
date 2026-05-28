@@ -6854,6 +6854,9 @@ struct GpuDecodeGraph {
     /// Event used to order graph replay after cold-expert H2D DMA without blocking
     /// the CPU on copy_stream.
     graph_replay_dma_event: Option<CudaEvent>,
+    /// Event used to keep dynamic-HCS D2D promotion copies ordered before the
+    /// cold staging buffers they read from are reused on copy_stream.
+    graph_dynamic_promotion_event: Option<CudaEvent>,
 }
 
 /// Backup storage for one LA layer's mutable state.
@@ -10579,6 +10582,7 @@ impl GpuDecodeStore {
             per_layer_moe_indices: Vec::new(),
             d_cublas_workspace: None,
             graph_replay_dma_event: None,
+            graph_dynamic_promotion_event: None,
         }));
 
         // Cache kernel function handles (avoid HashMap lookup per call)
@@ -10750,6 +10754,21 @@ impl GpuDecodeStore {
             }
             self.graph.as_mut().unwrap().graph_replay_dma_event = Some(CudaEvent(ev));
             log::info!("GpuDecodeStore: pre-allocated graph replay DMA event");
+        }
+
+        {
+            let mut ev: cuda_sys::CUevent = std::ptr::null_mut();
+            unsafe {
+                let flags = cuda_sys::CUevent_flags::CU_EVENT_DISABLE_TIMING as u32;
+                let err = cuda_sys::lib().cuEventCreate(&mut ev, flags);
+                if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                        format!("cuEventCreate graph dynamic promotion event: {:?}", err),
+                    ));
+                }
+            }
+            self.graph.as_mut().unwrap().graph_dynamic_promotion_event = Some(CudaEvent(ev));
+            log::info!("GpuDecodeStore: pre-allocated graph dynamic promotion event");
         }
 
         // Cache v2 partial buffer pointer on self for attention Marlin GEMV v2
@@ -16536,6 +16555,21 @@ impl GpuDecodeStore {
     }
 
     pub fn prepare_runtime_for_prefill_rust(&mut self, prompt_tokens: usize) -> Result<bool, String> {
+        let needs_source_hcs_boundary_sync = self
+            .graph
+            .as_ref()
+            .and_then(|g| g.hcs.as_ref())
+            .map(|hcs| hcs.soft_host_mode == HcsSoftHostMode::Source && hcs.dynamic_enabled)
+            .unwrap_or(false);
+        if needs_source_hcs_boundary_sync {
+            let err = unsafe { cuda_sys::lib().cuCtxSynchronize() };
+            if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!(
+                    "source-mode dynamic HCS decode/prefill boundary sync failed: {:?}",
+                    err
+                ));
+            }
+        }
         self.swap_to_marlin_rust()?;
         let has_hqq_runtime_slots = self.has_hqq_runtime_slots();
         let prompt_tokens = prompt_tokens.max(1);
@@ -21871,6 +21905,11 @@ impl GpuDecodeStore {
             .as_ref()
             .map(|ev| ev.0)
             .ok_or_else(|| "Graph replay DMA event was not initialized".to_string())?;
+        let graph_dynamic_promotion_event = graph
+            .graph_dynamic_promotion_event
+            .as_ref()
+            .map(|ev| ev.0)
+            .ok_or_else(|| "Graph dynamic promotion event was not initialized".to_string())?;
 
         // GPU-side route sync state
         let gpu_rs = graph.gpu_route_sync;
@@ -22003,6 +22042,7 @@ impl GpuDecodeStore {
         }
 
         // ═══ LEGACY PATH (non-mapped reads) ═══
+        let mut dynamic_promotion_event_pending = false;
         for graph_idx in 0..num_graphs {
             let mut wait_for_cold_dma = false;
             let mut dynamic_promotions: Vec<DynamicHcsPromotion> = Vec::new();
@@ -22085,6 +22125,22 @@ impl GpuDecodeStore {
                     // All DMAs are queued on copy_stream without per-expert sync, then a single
                     // event wait ensures all transfers complete before batch pointer updates.
                     if cold_count > 0 {
+                        if dynamic_promotion_event_pending {
+                            let err = unsafe {
+                                cuda_sys::lib().cuStreamWaitEvent(
+                                    copy_stream,
+                                    graph_dynamic_promotion_event,
+                                    0,
+                                )
+                            };
+                            if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                                return Err(format!(
+                                    "graph replay wait for dynamic promotion before mapped cold DMA layer={}: {:?}",
+                                    moe_layer_idx, err
+                                ));
+                            }
+                            dynamic_promotion_event_pending = false;
+                        }
                         graph.dma_cold_experts += cold_count as u64;
                         let moe_data = graph.moe_layers[moe_layer_idx].as_ref().unwrap();
 
@@ -22353,6 +22409,22 @@ impl GpuDecodeStore {
                     // buffers inside the captured batched expert graph: all top-k
                     // pointers are consumed in one launch.
                     let mut cold_ptrs_list: Vec<(u64, u64, u64, u64)> = Vec::with_capacity(cold_experts.len());
+                    if !cold_experts.is_empty() && dynamic_promotion_event_pending {
+                        let err = unsafe {
+                            cuda_sys::lib().cuStreamWaitEvent(
+                                copy_stream,
+                                graph_dynamic_promotion_event,
+                                0,
+                            )
+                        };
+                        if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                            return Err(format!(
+                                "graph replay wait for dynamic promotion before cold DMA layer={}: {:?}",
+                                moe_layer_idx, err
+                            ));
+                        }
+                        dynamic_promotion_event_pending = false;
+                    }
                     for (ci, &(_topk_pos, eid, _weight)) in cold_experts.iter().enumerate() {
                         let expert = &moe_data.experts[eid];
 
@@ -22541,6 +22613,21 @@ impl GpuDecodeStore {
                         promoted,
                         dynamic_promotions.len(),
                     );
+                }
+                if promoted > 0 {
+                    let err = unsafe {
+                        cuda_sys::lib().cuEventRecord(
+                            graph_dynamic_promotion_event,
+                            replay_stream,
+                        )
+                    };
+                    if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                        return Err(format!(
+                            "graph replay dynamic promotion event record graph_idx={}: {:?}",
+                            graph_idx, err
+                        ));
+                    }
+                    dynamic_promotion_event_pending = true;
                 }
             }
             // Optional crash narrowing under trace: require explicit graph_sync so
@@ -28105,6 +28192,19 @@ impl GpuDecodeStore {
                 return (0, 0.0);
             }
         };
+        if hcs.soft_host_mode == HcsSoftHostMode::Source && hcs.dynamic_enabled {
+            // Source-mode dynamic promotions can leave graph work in flight after
+            // decode returns. Eviction may free soft chunks, so the boundary must
+            // complete before any chunk is dropped or pointer table entry cleared.
+            let err = unsafe { cuda_sys::lib().cuCtxSynchronize() };
+            if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                log::error!(
+                    "HCS soft evict: source-mode decode/prefill boundary sync failed before eviction: {:?}",
+                    err
+                );
+                return (0, 0.0);
+            }
+        }
         if std::env::var("KRASIS_HCS_EVICT_DEBUG").is_ok() {
             eprintln!(
                 "[KRASIS-HCS-EVICT-DEBUG] hcs_state soft_chunks={} soft_loaded={} soft_num_cached={} soft_chunks_loaded={} soft_slot_mb={:.3}",

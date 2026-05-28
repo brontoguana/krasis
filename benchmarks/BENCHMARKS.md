@@ -11,9 +11,14 @@ HQQ4 attention, `k4v4` KV, thinking off, and HCS RAM saver off
 
 | Model / run | Command | Attention | KV | Prefill (tok/s) | Decode (tok/s) | Round trip (tok/s) | HCS | Min free VRAM | Logs |
 |-------------|---------|-----------|----|----------------:|---------------:|-------------------:|-----|--------------:|------|
+| Qwen3-Coder-Next HQQ4 k4v4 INT4 mirror speed-test release-fix gate | `./dev speed-test` | HQQ4 | k4v4 | 5748.5 | 91.92 | 150.09 | 16362/24576 (66.6%) | 734 MB | [full log](20260528_qcn_hqq4_k4v4_int4_mirror_speedtest_fixgate.log), [report](20260528_qcn_hqq4_k4v4_int4_mirror_speedtest_fixgate_report.log), [server log](20260528_qcn_hqq4_k4v4_int4_mirror_speedtest_fixgate_krasis.log) |
 | Qwen3-Coder-Next HQQ4 k4v4 INT4 mirror speed-test | `./dev speed-test` | HQQ4 | k4v4 | 5752.6 | 90.65 | 162.16 | 16362/24576 (66.6%) | 734 MB | [full log](20260527_qcn_hqq4_k4v4_int4_mirror_speedtest.log), [report](20260527_qcn_hqq4_k4v4_int4_mirror_speedtest_report.log), [server log](20260527_qcn_hqq4_k4v4_int4_mirror_speedtest_krasis.log) |
 
 Notes:
+- Release-fix gate comparison against the previous speed-test row: internal
+  prefill `-0.1%`, internal decode `+1.4%`, HTTP `-7.4%`. The core engine
+  speed and decode VRAM floor are within normal run noise; timing
+  instrumentation was disabled.
 - Config confirmation: `attention_quant='hqq4'`, `kv_dtype='k4v4'`,
   `gpu_expert_bits=4`, `cpu_expert_bits=4`, `enable_thinking=False`, and
   `hcs_host_cache_mode='mirror'`.
