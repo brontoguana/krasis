@@ -28621,6 +28621,22 @@ impl GpuDecodeStore {
             return (0, 0.0, observed_free_mb);
         }
 
+        if hcs.soft_host_mode == HcsSoftHostMode::Source && hcs.dynamic_enabled {
+            let err = unsafe { cuda_sys::lib().cuCtxSynchronize() };
+            if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                log::error!(
+                    "VRAM pressure eviction skipped: source-mode dynamic HCS sync failed on cuda:{} reason={} free={} MB safety={} MB target_floor={} MB: {:?}",
+                    device_id,
+                    reason,
+                    observed_free_mb,
+                    safety_mb,
+                    target_floor_mb,
+                    err,
+                );
+                return (0, 0.0, observed_free_mb);
+            }
+        }
+
         let before_chunks = hcs.soft_chunks_loaded;
         let before_cached = hcs.soft_num_cached;
         let mut final_free_mb = observed_free_mb;

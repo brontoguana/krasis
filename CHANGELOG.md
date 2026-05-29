@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+## 1.0.13-rc.1 - 2026-05-29
+
+- Fixed source-mode dynamic HCS VRAM-pressure eviction synchronization. When
+  Krasis trims soft HCS chunks after a below-safety VRAM event, it now
+  synchronizes the CUDA context before freeing source-backed dynamic HCS chunks,
+  matching the decode/prefill boundary safety used by normal prefill eviction.
+  This prevents latent async illegal-address failures from surfacing on the
+  next request after pressure eviction.
+
 ## 1.0.12 - 2026-05-29
 
 - Improved OpenAI-compatible model discovery for clients such as Witsy. The
