@@ -2855,6 +2855,10 @@ def main():
     _decode_mode = f"{len(all_aux_gpu_store_addrs)+1}-GPU" if all_aux_gpu_store_addrs else "GPU"
     _hcs_str = "on" if args.hcs else "off"
     _think_str = "on" if think_end_id else "off"
+    _client_host = "127.0.0.1" if str(args.host).strip() in ("0.0.0.0", "::", "") else str(args.host).strip()
+    _client_base_url = f"http://{_client_host}:{args.port}/v1"
+    _client_chat_url = f"{_client_base_url}/chat/completions"
+    _client_models_url = f"{_client_base_url}/models"
     vram_monitor.report_event("server_ready")
     log_ram_ledger("server-ready")
     _headline("KRASIS SERVER READY", _GREEN)
@@ -2868,6 +2872,12 @@ def main():
         )
     print(f"  {_GREEN}Context:{_NC}  {max_ctx:,} tokens  |  KV cache: {args.kv_cache_mb:,} MB", flush=True)
     print(f"  {_GREEN}Decode:{_NC}   {_decode_mode}  |  HCS: {_hcs_str}  |  Think: {_think_str}", flush=True)
+    print(f"  {_GREEN}Client setup:{_NC}", flush=True)
+    print(f"    Base URL:      {_BOLD}{_client_base_url}{_NC}", flush=True)
+    print(f"    Chat endpoint: {_client_chat_url}", flush=True)
+    print(f"    Models:        {_client_models_url}", flush=True)
+    print(f"    API key:       {_BOLD}X{_NC} {_DIM}(any value){_NC}", flush=True)
+    print(f"    Model name:    {_BOLD}{_model_name}{_NC}", flush=True)
     print(f"  {_DIM}Press Q or Ctrl-C to stop{_NC}", flush=True)
     print(flush=True)
 

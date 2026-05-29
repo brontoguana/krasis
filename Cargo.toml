@@ -1,6 +1,6 @@
 [package]
 name = "krasis"
-version = "1.0.11"
+version = "1.0.12"
 edition = "2021"
 description = "LLM runtime for large MoE models with GPU prefill, GPU decode, and measured VRAM management"
 license = "SSPL-1.0"

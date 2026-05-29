@@ -323,6 +323,18 @@ fn send_json(stream: &mut TcpStream, status: u16, body: &str) -> std::io::Result
     stream.flush()
 }
 
+fn is_models_endpoint(path: &str) -> bool {
+    let path_no_query = path.split('?').next().unwrap_or(path);
+    let normalized = path_no_query.trim_end_matches('/');
+    normalized == "/v1/models" || normalized == "/models"
+}
+
+fn is_chat_completions_endpoint(path: &str) -> bool {
+    let path_no_query = path.split('?').next().unwrap_or(path);
+    let normalized = path_no_query.trim_end_matches('/');
+    normalized == "/v1/chat/completions" || normalized == "/chat/completions"
+}
+
 fn handle_front_connection(
     mut tcp_stream: TcpStream,
     server_info: ServerInfo,
@@ -369,15 +381,15 @@ fn handle_front_connection(
             let _ = send_json(&mut tcp_stream, 200, &body);
         }
 
-        ("GET", "/v1/models") => {
+        ("GET", path) if is_models_endpoint(path) => {
             let body = format!(
-                r#"{{"object":"list","data":[{{"id":"{}","object":"model","owned_by":"krasis","max_context_tokens":{}}}]}}"#,
+                r#"{{"object":"list","data":[{{"id":"{}","object":"model","created":0,"owned_by":"krasis","max_context_tokens":{}}}]}}"#,
                 server_info.model_name, server_info.max_context_tokens
             );
             let _ = send_json(&mut tcp_stream, 200, &body);
         }
 
-        ("POST", "/v1/chat/completions") => {
+        ("POST", path) if is_chat_completions_endpoint(path) => {
             if model_tx
                 .send(ModelRequest::Chat {
                     stream: tcp_stream,
@@ -3397,5 +3409,34 @@ impl RustServer {
     /// Check if server is running.
     fn is_running(&self) -> bool {
         self.running.load(Ordering::Acquire)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_chat_completions_endpoint, is_models_endpoint};
+
+    #[test]
+    fn models_endpoint_accepts_openai_base_url_variants() {
+        assert!(is_models_endpoint("/v1/models"));
+        assert!(is_models_endpoint("/v1/models/"));
+        assert!(is_models_endpoint("/v1/models?refresh=1"));
+        assert!(is_models_endpoint("/models"));
+        assert!(is_models_endpoint("/models/"));
+        assert!(is_models_endpoint("/models?refresh=1"));
+        assert!(!is_models_endpoint("/v1/chat/completions"));
+        assert!(!is_models_endpoint("/foo/models"));
+    }
+
+    #[test]
+    fn chat_endpoint_accepts_openai_base_url_variants() {
+        assert!(is_chat_completions_endpoint("/v1/chat/completions"));
+        assert!(is_chat_completions_endpoint("/v1/chat/completions/"));
+        assert!(is_chat_completions_endpoint("/v1/chat/completions?x=1"));
+        assert!(is_chat_completions_endpoint("/chat/completions"));
+        assert!(is_chat_completions_endpoint("/chat/completions/"));
+        assert!(is_chat_completions_endpoint("/chat/completions?x=1"));
+        assert!(!is_chat_completions_endpoint("/v1/models"));
+        assert!(!is_chat_completions_endpoint("/foo/chat/completions"));
     }
 }

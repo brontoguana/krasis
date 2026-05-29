@@ -1,6 +1,16 @@
 # Changelog
 
-## Unreleased
+## 1.0.12 - 2026-05-29
+
+- Improved OpenAI-compatible model discovery for clients such as Witsy. The
+  model-list endpoint now accepts `/models` as well as `/v1/models`, tolerates
+  trailing slashes/query strings, and includes the standard `created` field in
+  the returned model object.
+- Also accepts root-base OpenAI chat paths (`/chat/completions`) in addition to
+  `/v1/chat/completions`, so clients work whether their base URL is configured
+  as `http://host:port` or `http://host:port/v1`.
+- The server-ready banner now prints client setup details for OpenAI-compatible
+  apps: base URL, chat endpoint, models endpoint, API key value, and model name.
 
 ## 1.0.11 - 2026-05-29
 
