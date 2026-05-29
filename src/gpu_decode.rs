@@ -6634,6 +6634,9 @@ struct GpuDecodeGraph {
     d_rope_cos: Option<cudarc::driver::CudaSlice<f32>>,
     d_rope_sin: Option<cudarc::driver::CudaSlice<f32>>,
     rope_half_dim: usize,
+    /// Request-scoped RoPE continuation delta for Qwen VL MRoPE prompts.
+    /// KV cache positions remain unshifted; only RoPE lookup positions use this.
+    rope_position_delta: i32,
 
     /// Gated attention flag per GQA layer (QCN has gated GQA).
     /// Stored as BF16 scratch for gated Q rearrangement.
@@ -6799,6 +6802,8 @@ struct GpuDecodeGraph {
     d_graph_token_id: Option<cudarc::driver::CudaSlice<i32>>,
     /// GPU-side decode position for graphable attention kernels (1 element).
     d_graph_pos: Option<cudarc::driver::CudaSlice<i32>>,
+    /// GPU-side RoPE position for graphable attention kernels (1 element).
+    d_graph_rope_pos: Option<cudarc::driver::CudaSlice<i32>>,
     /// GPU-side sequence length (pos+1) for graphable GQA attention (1 element).
     d_graph_seq_len: Option<cudarc::driver::CudaSlice<i32>>,
     /// Dummy expert buffer (zeros) for cold experts during CUDA graph replay.
@@ -10449,6 +10454,7 @@ impl GpuDecodeStore {
             d_rope_cos: None,
             d_rope_sin: None,
             rope_half_dim: 0,
+            rope_position_delta: 0,
             d_gqa_gate_buf: None,
             gqa_max_smem_bytes: self.gqa_max_smem_bytes,
             timing_enabled: false,
@@ -10563,6 +10569,7 @@ impl GpuDecodeStore {
             // CUDA graph state
             d_graph_token_id: None,
             d_graph_pos: None,
+            d_graph_rope_pos: None,
             d_graph_seq_len: None,
             d_dummy_expert: None,
             d_dummy_ptrs: None,
@@ -15092,6 +15099,12 @@ impl GpuDecodeStore {
         Ok(())
     }
 
+    pub fn set_rope_position_delta(&mut self, delta: i32) {
+        if let Some(ref mut graph) = self.graph {
+            graph.rope_position_delta = delta;
+        }
+    }
+
     /// Register shared FP8 KV cache pointers from Python's PagedKVCache.
     /// Python owns the memory (FP8 E4M3 contiguous tensors). Both Rust
     /// prefill and Rust decode read/write the same buffers — no export copy.
@@ -18132,6 +18145,10 @@ impl GpuDecodeStore {
             },
             rope_cos_ptr: graph.d_rope_cos.as_ref().map_or(0, |c| *c.device_ptr()),
             rope_sin_ptr: graph.d_rope_sin.as_ref().map_or(0, |c| *c.device_ptr()),
+            external_prefill_embeddings_ptr: 0,
+            external_mrope_cos_ptr: 0,
+            external_mrope_sin_ptr: 0,
+            external_mrope_half_dim: 0,
             kv_k_ptrs: graph.kv_k_ptrs.clone(),
             kv_v_ptrs: graph.kv_v_ptrs.clone(),
             kv_max_seq: graph.kv_max_seq,
@@ -19097,6 +19114,8 @@ impl GpuDecodeStore {
             .map_err(|e| format!("alloc d_graph_token_id: {:?}", e))?);
         graph.d_graph_pos = Some(self.device.alloc_zeros::<i32>(1)
             .map_err(|e| format!("alloc d_graph_pos: {:?}", e))?);
+        graph.d_graph_rope_pos = Some(self.device.alloc_zeros::<i32>(1)
+            .map_err(|e| format!("alloc d_graph_rope_pos: {:?}", e))?);
         graph.d_graph_seq_len = Some(self.device.alloc_zeros::<i32>(1)
             .map_err(|e| format!("alloc d_graph_seq_len: {:?}", e))?);
         // Allocate dummy expert buffer (all zeros, used for padded expert slots during
@@ -19876,6 +19895,7 @@ impl GpuDecodeStore {
         let is_int8 = graph.expert_bits == 8;
 
         let d_pos_ptr = *graph.d_graph_pos.as_ref().unwrap().device_ptr();
+        let d_rope_pos_ptr = *graph.d_graph_rope_pos.as_ref().unwrap().device_ptr();
         let d_seq_len_ptr = *graph.d_graph_seq_len.as_ref().unwrap().device_ptr();
 
         // v2 K-split config
@@ -20565,7 +20585,7 @@ impl GpuDecodeStore {
                                         *graph.d_gqa_k.device_ptr(),
                                         *d_cos.device_ptr(),
                                         *graph.d_rope_sin.as_ref().unwrap().device_ptr(),
-                                        d_pos_ptr,
+                                        d_rope_pos_ptr,
                                         nh as i32, nkv as i32, hd as i32, half_dim as i32,
                                     ),
                                 ).map_err(|e| format!("apply_rope_g[{}]: {:?}", layer_idx, e))?;
@@ -21311,7 +21331,7 @@ impl GpuDecodeStore {
                                             k_pe_ptr,
                                             *d_cos.device_ptr(),
                                             *d_sin.device_ptr(),
-                                            d_pos_ptr,
+                                            d_rope_pos_ptr,
                                             nh as i32, 1i32, rope as i32, half_dim as i32,
                                         ),
                                     ).map_err(|e| format!("mla apply_rope_g[{}]: {:?}", layer_idx, e))?;
@@ -21864,6 +21884,9 @@ impl GpuDecodeStore {
         {
             let token_id_i32 = token_id as i32;
             let pos_i32 = position as i32;
+            let rope_pos_i32 = (position as i64 + graph.rope_position_delta as i64)
+                .max(0)
+                .min(i32::MAX as i64) as i32;
             let seq_len_i32 = (position + 1) as i32;
             unsafe {
                 if let Some(ref buf) = graph.d_graph_token_id {
@@ -21876,6 +21899,12 @@ impl GpuDecodeStore {
                     cuda_sys::lib().cuMemcpyHtoDAsync_v2(
                         *buf.device_ptr(),
                         &pos_i32 as *const i32 as *const std::ffi::c_void,
+                        4, replay_stream);
+                }
+                if let Some(ref buf) = graph.d_graph_rope_pos {
+                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                        *buf.device_ptr(),
+                        &rope_pos_i32 as *const i32 as *const std::ffi::c_void,
                         4, replay_stream);
                 }
                 if let Some(ref buf) = graph.d_graph_seq_len {
@@ -23734,7 +23763,9 @@ impl GpuDecodeStore {
                                     *graph.d_gqa_k.device_ptr(),
                                     *d_cos.device_ptr(),
                                     *d_sin.device_ptr(),
-                                    position as i32,
+                                    (position as i64 + graph.rope_position_delta as i64)
+                                        .max(0)
+                                        .min(i32::MAX as i64) as i32,
                                     nh as i32,
                                     nkv as i32,
                                     hd as i32,
@@ -24538,7 +24569,9 @@ impl GpuDecodeStore {
                                         k_pe_ptr,                     // k_pe [rope]
                                         *d_cos.device_ptr(),
                                         *d_sin.device_ptr(),
-                                        position as i32,
+                                        (position as i64 + graph.rope_position_delta as i64)
+                                            .max(0)
+                                            .min(i32::MAX as i64) as i32,
                                         nh as i32, 1i32, rope as i32, half_dim as i32,
                                     ),
                                 ).map_err(|e| format!("mla apply_rope[{}]: {:?}", layer_idx, e))?;
@@ -27032,7 +27065,10 @@ impl GpuDecodeStore {
                                         LaunchConfig { grid_dim: (blocks, 1, 1), block_dim: (threads, 1, 1), shared_mem_bytes: 0 },
                                         (*graph.d_gqa_q.device_ptr(), *graph.d_gqa_k.device_ptr(),
                                          *d_cos.device_ptr(), *graph.d_rope_sin.as_ref().unwrap().device_ptr(),
-                                         position as i32, nh as i32, nkv as i32, hd as i32, half_dim as i32),
+                                         (position as i64 + graph.rope_position_delta as i64)
+                                             .max(0)
+                                             .min(i32::MAX as i64) as i32,
+                                         nh as i32, nkv as i32, hd as i32, half_dim as i32),
                                     ).map_err(|e| format!("batch rope[{}][{}]: {:?}", layer_idx, t, e))?;
                                 }
                             }
@@ -27241,7 +27277,10 @@ impl GpuDecodeStore {
                                         LaunchConfig { grid_dim: (blocks, 1, 1), block_dim: (threads, 1, 1), shared_mem_bytes: 0 },
                                         (*graph.d_gqa_q.device_ptr(), *graph.d_gqa_k.device_ptr(),
                                          *d_cos.device_ptr(), *graph.d_rope_sin.as_ref().unwrap().device_ptr(),
-                                         position as i32, nh as i32, nkv as i32, hd as i32, half_dim as i32),
+                                         (position as i64 + graph.rope_position_delta as i64)
+                                             .max(0)
+                                             .min(i32::MAX as i64) as i32,
+                                         nh as i32, nkv as i32, hd as i32, half_dim as i32),
                                     ).map_err(|e| format!("batch rope[{}][{}]: {:?}", layer_idx, t, e))?;
                                 }
                             }
@@ -34740,6 +34779,20 @@ impl GpuDecodeStore {
         let trace_cfg = self.active_trace_owned();
         let graph = self.graph.as_mut()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
+
+        if graph.per_layer_graphs_valid || !graph.per_layer_graphs.is_empty() {
+            let n = graph.per_layer_graphs.len();
+            for exec in graph.per_layer_graphs.drain(..) {
+                unsafe { cuda_sys::lib().cuGraphExecDestroy(exec.0); }
+            }
+            graph.per_layer_graphs_valid = false;
+            graph.captured_gpu_route_sync = false;
+            graph.captured_route_sync_classifies = 0;
+            log::info!(
+                "HCS pool init invalidated {} pre-HCS CUDA graph segments; next decode will recapture with HCS pointers",
+                n,
+            );
+        }
 
         if graph.moe_layers.is_empty() {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(

@@ -17,6 +17,8 @@ import json
 import shutil
 import threading
 import time
+import base64
+from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
 from math import ceil
 from typing import List, Optional, Tuple
@@ -81,6 +83,11 @@ from krasis.sampler import sample
 from krasis.tokenizer import Tokenizer
 
 logger = logging.getLogger(__name__)
+
+
+class KrasisVisionVramError(RuntimeError):
+    """Raised when a Qwen image request cannot fit transient vision VRAM."""
+
 
 _TQ4_SEED = 42
 _TQ4_LAYER_SEED_STRIDE = 1337
@@ -787,6 +794,10 @@ class KrasisModel:
         self._hqq_attention_runtime = {}
         self._hqq_attention_runtime_nbits: Optional[int] = None
         self._hqq_attention_loaded_tensors = 0
+        self._qwen_vision_processor = None
+        self._qwen_vision_model = None
+        self._qwen_vision_config = None
+        self._last_multimodal_prefill_tensors = None
 
     def _detect_shared_expert_gate(self) -> bool:
         """Check if model has shared_expert_gate weights (Qwen3-Next sigmoid gate)."""
@@ -800,6 +811,344 @@ class KrasisModel:
             return gate_key in weight_map
         except (OSError, KeyError):
             return False
+
+    def _extract_openai_images(self, messages_json: str):
+        messages = json.loads(messages_json)
+        images = []
+        for msg in messages:
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                ptype = part.get("type")
+                if ptype in ("video", "input_video") or "video" in part:
+                    raise ValueError("Qwen vision support is image-only; video inputs are not supported")
+                if not (ptype in ("image", "image_url", "input_image") or "image" in part or "image_url" in part):
+                    continue
+                source = part.get("image") or part.get("image_url")
+                if isinstance(source, dict):
+                    source = source.get("url")
+                if not isinstance(source, str) or not source:
+                    raise ValueError("image content part must provide an image URL, data URL, or local path")
+                images.append(self._load_openai_image_source(source))
+        if not images:
+            raise ValueError("multimodal request contained no image content parts")
+        return images
+
+    def _load_openai_image_source(self, source: str):
+        from PIL import Image
+        if source.startswith("data:"):
+            _, _, data = source.partition(",")
+            if not data:
+                raise ValueError("invalid image data URL")
+            raw = base64.b64decode(data)
+            return Image.open(BytesIO(raw)).convert("RGB")
+        if source.startswith("file://") or source.startswith("/") or source.startswith("./") or source.startswith("../"):
+            if os.environ.get("KRASIS_ALLOW_LOCAL_IMAGE_PATHS") != "1":
+                raise ValueError("local image paths are disabled; use a data URL or http(s) URL")
+            path = source[7:] if source.startswith("file://") else source
+            return Image.open(path).convert("RGB")
+        if source.startswith("http://") or source.startswith("https://"):
+            from urllib.request import urlopen
+            with urlopen(source, timeout=20) as resp:
+                raw = resp.read()
+            return Image.open(BytesIO(raw)).convert("RGB")
+        raise ValueError(f"unsupported image source: {source[:80]}")
+
+    def _ensure_qwen_vision_model(self):
+        if self._qwen_vision_processor is None:
+            from transformers import AutoProcessor
+            self._qwen_vision_processor = AutoProcessor.from_pretrained(
+                self.cfg.model_path,
+                trust_remote_code=True,
+            )
+        if self._qwen_vision_model is not None:
+            return self._qwen_vision_model
+
+        from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLConfig
+        from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionModel
+
+        qwen_cfg = Qwen3VLConfig.from_pretrained(self.cfg.model_path)
+        log_ram_ledger("before-qwen-vision-load")
+        vision = Qwen3VLVisionModel(qwen_cfg.vision_config)
+        vision.to(dtype=torch.bfloat16)
+        state = {}
+        index_path = os.path.join(self.cfg.model_path, "model.safetensors.index.json")
+        if not os.path.exists(index_path):
+            raise RuntimeError("Qwen vision loading requires model.safetensors.index.json")
+        with open(index_path, "r") as f:
+            weight_map = json.load(f)["weight_map"]
+        shard_to_keys = {}
+        for key, shard in weight_map.items():
+            if key.startswith("model.visual."):
+                shard_to_keys.setdefault(shard, []).append(key)
+        if not shard_to_keys:
+            raise RuntimeError("No model.visual.* tensors found in safetensors index")
+        for shard, keys in shard_to_keys.items():
+            shard_path = os.path.join(self.cfg.model_path, shard)
+            with safe_open(shard_path, framework="pt", device="cpu") as f:
+                for key in keys:
+                    state[key.removeprefix("model.visual.")] = f.get_tensor(key)
+        state_bytes = sum(t.numel() * t.element_size() for t in state.values())
+        state_dtypes = sorted({str(t.dtype) for t in state.values()})
+        log_ram_ledger("after-qwen-vision-state-load", {"vision_state": state_bytes})
+        missing, unexpected = vision.load_state_dict(state, strict=False)
+        if missing or unexpected:
+            raise RuntimeError(
+                f"Qwen vision state mismatch: missing={list(missing)[:8]} unexpected={list(unexpected)[:8]}"
+            )
+        del state
+        gc.collect()
+        vision.eval()
+        vision.requires_grad_(False)
+        self._qwen_vision_model = vision
+        self._qwen_vision_config = qwen_cfg
+        param_bytes = sum(p.numel() * p.element_size() for p in vision.parameters())
+        param_dtypes = sorted({str(p.dtype) for p in vision.parameters()})
+        buffer_bytes = sum(b.numel() * b.element_size() for b in vision.buffers())
+        buffer_dtypes = sorted({str(b.dtype) for b in vision.buffers()})
+        log_ram_ledger(
+            "after-qwen-vision-load",
+            {
+                "vision_params": param_bytes,
+                "vision_buffers": buffer_bytes,
+            },
+        )
+        logger.info(
+            "Loaded Qwen vision tower on CPU: params_mb=%.1f buffers_mb=%.1f "
+            "state_mb=%.1f param_dtypes=%s buffer_dtypes=%s state_dtypes=%s",
+            param_bytes / (1024 * 1024),
+            buffer_bytes / (1024 * 1024),
+            state_bytes / (1024 * 1024),
+            param_dtypes,
+            buffer_dtypes,
+            state_dtypes,
+        )
+        return vision
+
+    def _release_qwen_vision_gpu(self, vision, device, label: str = "after-qwen-vision-release"):
+        if getattr(device, "type", None) != "cuda":
+            return
+        try:
+            vision.to("cpu")
+        finally:
+            torch.cuda.empty_cache()
+            log_ram_ledger(label)
+            if _vram_ledger_enabled():
+                _vram_checkpoint(label, [device])
+
+    def _qwen_vl_position_ids_and_delta(self, input_ids: torch.Tensor, mm_token_type_ids: torch.Tensor, image_grid_thw: torch.Tensor):
+        spatial_merge_size = int(self._qwen_vision_config.vision_config.spatial_merge_size)
+        grid_iter = iter(image_grid_thw.tolist())
+        groups = []
+        types = mm_token_type_ids.tolist()
+        if not types:
+            raise ValueError("empty mm_token_type_ids")
+        start = 0
+        cur = types[0]
+        for idx, val in enumerate(types[1:], 1):
+            if val != cur:
+                groups.append((cur, start, idx))
+                start = idx
+                cur = val
+        groups.append((cur, start, len(types)))
+
+        current_pos = 0
+        chunks = []
+        device = input_ids.device
+        for modality, start_idx, end_idx in groups:
+            if modality == 0:
+                text_len = end_idx - start_idx
+                pos = torch.arange(text_len, device=device, dtype=torch.long).view(1, -1).expand(3, -1) + current_pos
+                chunks.append(pos)
+                current_pos += text_len
+            elif modality == 1:
+                t, h, w = next(grid_iter)
+                llm_t = int(t)
+                llm_h = int(h) // spatial_merge_size
+                llm_w = int(w) // spatial_merge_size
+                pos_t = torch.arange(llm_t, device=device, dtype=torch.long).repeat_interleave(llm_h * llm_w) + current_pos
+                pos_h = torch.arange(llm_h, device=device, dtype=torch.long).repeat_interleave(llm_w).repeat(llm_t) + current_pos
+                pos_w = torch.arange(llm_w, device=device, dtype=torch.long).repeat(llm_h * llm_t) + current_pos
+                chunks.append(torch.stack([pos_t, pos_h, pos_w], dim=0))
+                current_pos += max(int(h), int(w)) // spatial_merge_size
+            else:
+                raise ValueError("video token type ids are not supported")
+        position_ids = torch.cat(chunks, dim=1)
+        rope_delta = int(position_ids.max().item() + 1 - int(input_ids.numel()))
+        return position_ids, rope_delta
+
+    def _qwen_vl_mrope_cos_sin(self, position_ids: torch.Tensor):
+        rope_half = self.cfg.rotary_dim // 2
+        rope_dim = rope_half * 2
+        theta = float(self.cfg.rope_theta)
+        inv_freq = 1.0 / (theta ** (torch.arange(0, rope_dim, 2, device=position_ids.device, dtype=torch.float32) / rope_dim))
+        freqs = position_ids.to(torch.float32)[:, :, None] * inv_freq[None, None, :]
+        freqs_t = freqs[0].clone()
+        rope_params = getattr(self.cfg, "rope_scaling", {}) or {}
+        sections = rope_params.get("mrope_section") or [rope_half // 3, rope_half // 3, rope_half - 2 * (rope_half // 3)]
+        for dim, offset in ((1, 1), (2, 2)):
+            length = int(sections[dim]) * 3
+            freqs_t[:, offset:length:3] = freqs[dim, :, offset:length:3]
+        return freqs_t.cos().contiguous(), freqs_t.sin().contiguous()
+
+    def build_multimodal_prefill_inputs(self, messages_json: str, rendered_prompt: str):
+        """Build GPU inputs_embeds for Qwen image prompts.
+
+        This method is intentionally called only from the image request path.
+        Text-only requests keep using Rust token-id prefill directly.
+        """
+        if self.embedding is None:
+            raise RuntimeError("Model embedding is not loaded")
+        images = self._extract_openai_images(messages_json)
+        vision = self._ensure_qwen_vision_model()
+        processor = self._qwen_vision_processor
+        device = self.embedding.device
+        dtype = torch.bfloat16
+
+        batch = processor(
+            text=[rendered_prompt],
+            images=images,
+            return_tensors="pt",
+            return_mm_token_type_ids=True,
+        )
+        if "mm_token_type_ids" not in batch:
+            if not hasattr(processor, "create_mm_token_type_ids"):
+                raise ValueError("Qwen processor did not return mm_token_type_ids")
+            batch["mm_token_type_ids"] = processor.create_mm_token_type_ids(batch["input_ids"])
+        merge_size = int(getattr(vision, "spatial_merge_size", 2))
+        expected_image_tokens = int((batch["image_grid_thw"].prod(-1) // (merge_size * merge_size)).sum().item())
+        vision_param_bytes = sum(p.numel() * p.element_size() for p in vision.parameters())
+        vision_buffer_bytes = sum(b.numel() * b.element_size() for b in vision.buffers())
+
+        try:
+            if getattr(device, "type", None) == "cuda":
+                free_before, total = torch.cuda.mem_get_info(device)
+                logger.info(
+                    "Qwen image request staging: images=%d image_tokens=%d free_vram_mb=%d total_vram_mb=%d vision_params_mb=%.1f vision_buffers_mb=%.1f",
+                    len(images),
+                    expected_image_tokens,
+                    int(free_before // (1024 * 1024)),
+                    int(total // (1024 * 1024)),
+                    vision_param_bytes / (1024 * 1024),
+                    vision_buffer_bytes / (1024 * 1024),
+                )
+            input_ids = batch["input_ids"][0].to(device=device, dtype=torch.long)
+            mm_token_type_ids = batch["mm_token_type_ids"][0].to(device=device, dtype=torch.long)
+            image_grid_thw = batch["image_grid_thw"].to(device=device, dtype=torch.long)
+            pixel_values = batch["pixel_values"].to(device=device, dtype=dtype)
+
+            log_ram_ledger("before-qwen-vision-to-gpu")
+            if _vram_ledger_enabled():
+                _vram_checkpoint("before-qwen-vision-to-gpu", [device])
+            vision = vision.to(device=device, dtype=dtype)
+            if _vram_ledger_enabled():
+                _vram_checkpoint("after-qwen-vision-to-gpu", [device])
+            with torch.inference_mode():
+                vision_output = vision(pixel_values, grid_thw=image_grid_thw, return_dict=True)
+                candidates: List[torch.Tensor] = []
+                if hasattr(vision_output, "pooler_output"):
+                    pooler = vision_output.pooler_output
+                    if isinstance(pooler, torch.Tensor):
+                        candidates.append(pooler)
+                    elif isinstance(pooler, (list, tuple)):
+                        candidates.extend(t for t in pooler if isinstance(t, torch.Tensor))
+                if isinstance(vision_output, (list, tuple)):
+                    candidates.extend(t for t in vision_output if isinstance(t, torch.Tensor))
+                    for item in vision_output:
+                        if isinstance(item, (list, tuple)):
+                            candidates.extend(t for t in item if isinstance(t, torch.Tensor))
+                text_hidden = int(self.embedding.shape[1])
+                image_embeds = next(
+                    (
+                        t for t in candidates
+                        if t.ndim == 2 and int(t.shape[0]) == expected_image_tokens and int(t.shape[1]) == text_hidden
+                    ),
+                    None,
+                )
+                if image_embeds is None:
+                    shapes = [tuple(t.shape) for t in candidates]
+                    raise RuntimeError(
+                        f"could not find Qwen vision pooled embeddings; expected "
+                        f"({expected_image_tokens}, {text_hidden}), candidates={shapes}"
+                    )
+                image_embeds = image_embeds.to(device=device, dtype=self.embedding.dtype)
+                inputs_embeds = self.embedding[input_ids].clone()
+                image_mask = input_ids == int(self._qwen_vision_config.image_token_id)
+                if int(image_mask.sum().item()) != int(image_embeds.shape[0]):
+                    raise RuntimeError(
+                        f"Image feature/token mismatch: tokens={int(image_mask.sum().item())} features={int(image_embeds.shape[0])}"
+                    )
+                inputs_embeds[image_mask] = image_embeds
+                position_ids, rope_delta = self._qwen_vl_position_ids_and_delta(
+                    input_ids,
+                    mm_token_type_ids,
+                    image_grid_thw,
+                )
+                mrope_cos, mrope_sin = self._qwen_vl_mrope_cos_sin(position_ids)
+                if getattr(device, "type", None) == "cuda":
+                    # Rust prefill consumes these CUDA pointers on its own stream.
+                    # Make the PyTorch-produced tensors visible before handoff.
+                    torch.cuda.synchronize(device)
+        except (torch.cuda.OutOfMemoryError, torch.OutOfMemoryError) as e:
+            self._last_multimodal_prefill_tensors = None
+            self._release_qwen_vision_gpu(vision, device, "after-qwen-vision-oom-release")
+            free_mb = -1
+            total_mb = -1
+            if getattr(device, "type", None) == "cuda":
+                try:
+                    free_after, total = torch.cuda.mem_get_info(device)
+                    free_mb = int(free_after // (1024 * 1024))
+                    total_mb = int(total // (1024 * 1024))
+                except Exception:
+                    pass
+            raise KrasisVisionVramError(
+                "VRAM is too constrained for this Qwen image request. "
+                f"Transient BF16 vision staging needs about {vision_param_bytes / (1024 * 1024):.1f} MB "
+                f"for vision parameters plus image activations and multimodal prefill scratch; "
+                f"free_vram_mb_after_cleanup={free_mb}, total_vram_mb={total_mb}, "
+                f"images={len(images)}, image_tokens={expected_image_tokens}. "
+                "Use a smaller/fewer images or run this model on a GPU with more free VRAM."
+            ) from e
+        except RuntimeError as e:
+            if "out of memory" in str(e).lower():
+                self._last_multimodal_prefill_tensors = None
+                self._release_qwen_vision_gpu(vision, device, "after-qwen-vision-oom-release")
+                raise KrasisVisionVramError(
+                    "VRAM is too constrained for this Qwen image request. "
+                    f"Transient BF16 vision staging needs about {vision_param_bytes / (1024 * 1024):.1f} MB "
+                    f"for vision parameters plus image activations and multimodal prefill scratch; "
+                    f"images={len(images)}, image_tokens={expected_image_tokens}. "
+                    "Use a smaller/fewer images or run this model on a GPU with more free VRAM."
+                ) from e
+            self._release_qwen_vision_gpu(vision, device)
+            raise
+        except Exception:
+            self._release_qwen_vision_gpu(vision, device)
+            raise
+
+        self._release_qwen_vision_gpu(vision, device)
+
+        self._last_multimodal_prefill_tensors = (inputs_embeds, mrope_cos, mrope_sin)
+        return {
+            "token_ids": [int(x) for x in input_ids.detach().cpu().tolist()],
+            "prompt_tokens": int(input_ids.numel()),
+            "hidden_size": int(inputs_embeds.shape[-1]),
+            "inputs_embeds_ptr": int(inputs_embeds.data_ptr()),
+            "mrope_cos_ptr": int(mrope_cos.data_ptr()),
+            "mrope_sin_ptr": int(mrope_sin.data_ptr()),
+            "mrope_half_dim": int(mrope_cos.shape[-1]),
+            "rope_delta": int(rope_delta),
+            "image_count": int(len(images)),
+            "image_tokens": int((input_ids == int(self._qwen_vision_config.image_token_id)).sum().item()),
+        }
+
+    def clear_multimodal_prefill_inputs(self):
+        self._last_multimodal_prefill_tensors = None
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def load(self, gpu_only: bool = True):
         """Load all weights: GPU (streaming INT8) + CPU (Krasis INT4 experts).
@@ -6298,7 +6647,6 @@ class KrasisModel:
             moe_intermediate_size=self.cfg.moe_intermediate_size,
             shared_expert_intermediate_size=self.cfg.effective_shared_expert_intermediate,
         )
-
         # Register embedding
         store.set_embedding(self.embedding.data_ptr())
 
@@ -7397,6 +7745,7 @@ class KrasisModel:
             moe_intermediate_size=self.cfg.moe_intermediate_size,
             shared_expert_intermediate_size=self.cfg.effective_shared_expert_intermediate,
         )
+        store.set_decode_segment(split_layer, layer_end)
 
         hqq_active = is_hqq_attention(self.quant_cfg.attention)
         if hqq_active:
@@ -7534,7 +7883,73 @@ class KrasisModel:
             # Determine if this layer is in this aux GPU's segment
             in_segment = split_layer <= layer_idx < layer_end
 
-            if layer.layer_type == "linear_attention":
+            if hqq_active:
+                # Native HQQ attention is registered after shared MLP/KV setup using
+                # the aux store's decode segment. Do not try to recover BF16
+                # projection sources here; primary HQQ setup has already released
+                # redundant BF16 residency by design.
+                dummy_wid = store.register_weight(0, 1, 1, 0)
+                if layer.layer_type == "linear_attention":
+                    store.register_la_layer(
+                        layer_idx=layer_idx,
+                        input_norm_ptr=inp_norm.data_ptr(), input_norm_size=inp_norm.numel(),
+                        post_attn_norm_ptr=post_norm.data_ptr(), post_attn_norm_size=post_norm.numel(),
+                        in_proj_qkvz_wid=dummy_wid, in_proj_ba_wid=dummy_wid,
+                        out_proj_wid=dummy_wid,
+                        conv_weight_ptr=0, a_log_ptr=0, dt_bias_ptr=0,
+                        norm_weight_ptr=0, conv_state_ptr=0, recur_state_ptr=0,
+                        nk=attn.num_k_heads, nv=attn.num_v_heads,
+                        dk=attn.k_head_dim, dv=attn.v_head_dim,
+                        hr=attn.head_ratio,
+                        kernel_dim=attn.kernel_dim, conv_dim=attn.conv_dim,
+                        scale=attn.scale,
+                    )
+                elif hasattr(attn, 'kv_a_proj'):
+                    cache = self.kv_caches[0]
+                    if not hasattr(self, '_aux_mla_cache_offset'):
+                        self._aux_mla_cache_offset = 0
+                    mla_offset = self._aux_mla_cache_offset
+                    self._aux_mla_cache_offset += 1
+                    max_seq = cache.max_pages * cache.page_size
+                    store.register_mla_layer(
+                        layer_idx=layer_idx,
+                        input_norm_ptr=inp_norm.data_ptr(),
+                        input_norm_size=inp_norm.numel(),
+                        post_attn_norm_ptr=post_norm.data_ptr(),
+                        post_attn_norm_size=post_norm.numel(),
+                        kv_a_proj_wid=dummy_wid, o_proj_wid=dummy_wid,
+                        kv_a_norm_ptr=0, w_kc_ptr=0, w_vc_ptr=0,
+                        num_heads=attn.num_heads,
+                        kv_lora_rank=attn.kv_lora_rank,
+                        qk_nope_dim=attn.qk_nope_dim,
+                        qk_rope_dim=attn.qk_rope_dim,
+                        v_head_dim=attn.v_head_dim,
+                        sm_scale=attn.sm_scale,
+                        rope_interleave=getattr(self.cfg, 'rope_interleave', True),
+                        ckv_cache_ptr=cache.ckv_cache[mla_offset].data_ptr(),
+                        kpe_cache_ptr=cache.kpe_cache[mla_offset].data_ptr(),
+                        q_a_proj_wid=None, q_b_proj_wid=None, q_a_norm_ptr=0,
+                        q_proj_wid=None, q_lora_rank=0,
+                        ckv_cache_dim=attn.ckv_dim,
+                    )
+                else:
+                    _gqa_head_dim = self.cfg.gqa_head_dim or self.cfg.head_dim
+                    _gqa_sm_scale = 1.0 / (_gqa_head_dim ** 0.5)
+                    _gqa_gated = hasattr(self.cfg, 'gated_attention') and self.cfg.gated_attention
+                    store.register_gqa_layer(
+                        layer_idx=layer_idx,
+                        input_norm_ptr=inp_norm.data_ptr(), input_norm_size=inp_norm.numel(),
+                        post_attn_norm_ptr=post_norm.data_ptr(), post_attn_norm_size=post_norm.numel(),
+                        q_proj_wid=dummy_wid, k_proj_wid=dummy_wid,
+                        v_proj_wid=dummy_wid, o_proj_wid=dummy_wid,
+                        fused_qkv_wid=None,
+                        num_heads=self.cfg.num_attention_heads,
+                        num_kv_heads=self.cfg.num_key_value_heads,
+                        head_dim=_gqa_head_dim, sm_scale=_gqa_sm_scale,
+                        q_norm_ptr=0, k_norm_ptr=0,
+                        gated=_gqa_gated,
+                    )
+            elif layer.layer_type == "linear_attention":
                 if in_segment:
                     # Get BF16 source weights (may have been replaced by MarlinWeight on primary)
                     qkvz_src = _get_bf16_source(attn, "in_proj_qkvz", layer_idx)

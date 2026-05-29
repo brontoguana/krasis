@@ -2399,6 +2399,7 @@ pub struct PrefillKernels {
     hqq_prefill_int8_exception_delta_bf16: RawCuFunc,
     hqq_apply_sidecar_bf16: RawCuFunc,
     rope: RawCuFunc,
+    rope_mrope: RawCuFunc,
     silu_mul: RawCuFunc,
     relu2: RawCuFunc,
     sigmoid_mul: RawCuFunc, // gated GQA: out = attn * sigmoid(gate)
@@ -3168,6 +3169,10 @@ pub struct PrefillEngine {
     pub lm_head_bf16_cols: usize, // hidden_size
     pub rope_cos_ptr: u64,
     pub rope_sin_ptr: u64,
+    pub external_prefill_embeddings_ptr: u64,
+    pub external_mrope_cos_ptr: u64,
+    pub external_mrope_sin_ptr: u64,
+    pub external_mrope_half_dim: usize,
     pub kv_k_ptrs: Vec<u64>, // per-layer K cache pointers (FP8)
     pub kv_v_ptrs: Vec<u64>, // per-layer V cache pointers (FP8)
     pub kv_max_seq: usize,
@@ -6081,6 +6086,26 @@ impl PrefillEngine {
 
     pub fn set_optional_pinning_budget_mb(&mut self, budget_mb: Option<usize>) {
         self.optional_pinning_budget_mb = budget_mb;
+    }
+
+    pub fn set_external_prefill_inputs(
+        &mut self,
+        embeddings_ptr: u64,
+        mrope_cos_ptr: u64,
+        mrope_sin_ptr: u64,
+        mrope_half_dim: usize,
+    ) {
+        self.external_prefill_embeddings_ptr = embeddings_ptr;
+        self.external_mrope_cos_ptr = mrope_cos_ptr;
+        self.external_mrope_sin_ptr = mrope_sin_ptr;
+        self.external_mrope_half_dim = mrope_half_dim;
+    }
+
+    pub fn clear_external_prefill_inputs(&mut self) {
+        self.external_prefill_embeddings_ptr = 0;
+        self.external_mrope_cos_ptr = 0;
+        self.external_mrope_sin_ptr = 0;
+        self.external_mrope_half_dim = 0;
     }
 
     pub fn last_prepare_post_alloc_free_mb(&self) -> usize {
@@ -9073,9 +9098,26 @@ impl PrefillEngine {
             self.upload_tokens_with_offset(chunk_tokens, chunk_start)
                 .map_err(|e| format!("upload_tokens chunk {}: {}", chunk_idx, e))?;
 
-            // 2. Embedding lookup
-            self.launch_embedding(m)
-                .map_err(|e| format!("embedding chunk {} m={}: {}", chunk_idx, m, e))?;
+            // 2. Embedding lookup. Image requests provide already-scattered
+            // BF16 prompt embeddings; text-only requests use token IDs.
+            if self.external_prefill_embeddings_ptr != 0 {
+                let src = self.external_prefill_embeddings_ptr
+                    + (chunk_start * h * std::mem::size_of::<u16>()) as u64;
+                let dst = *self.scratch.d_hidden.device_ptr();
+                let bytes = (m * h * std::mem::size_of::<u16>()) as usize;
+                unsafe {
+                    let err = cuda_sys::lib().cuMemcpyDtoDAsync_v2(dst, src, bytes, self.stream);
+                    if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                        return Err(format!(
+                            "external embeddings D2D chunk {} m={}: {:?}",
+                            chunk_idx, m, err
+                        ));
+                    }
+                }
+            } else {
+                self.launch_embedding(m)
+                    .map_err(|e| format!("embedding chunk {} m={}: {}", chunk_idx, m, e))?;
+            }
             self.push_reference_stage_snapshot(
                 "embedding_hidden_last",
                 None,
@@ -13845,7 +13887,45 @@ impl PrefillEngine {
 
         // RoPE (uses rope_half_dim for partial rotary support)
         let gt2 = Instant::now();
-        if self.rope_cos_ptr != 0 {
+        if self.external_mrope_cos_ptr != 0 || self.external_mrope_sin_ptr != 0 {
+            if self.external_mrope_cos_ptr == 0
+                || self.external_mrope_sin_ptr == 0
+                || self.external_mrope_half_dim == 0
+            {
+                return Err("Incomplete external MRoPE inputs for multimodal prefill".to_string());
+            }
+            let half = self.external_mrope_half_dim;
+            let rt = std::cmp::max(32, ((std::cmp::min(512, half) + 31) / 32) * 32) as u32;
+            let mut r0 = q;
+            let mut r1 = k;
+            let mut r2 = self.external_mrope_cos_ptr
+                + (start_pos * half * std::mem::size_of::<f32>()) as u64;
+            let mut r3 = self.external_mrope_sin_ptr
+                + (start_pos * half * std::mem::size_of::<f32>()) as u64;
+            let mut r4 = cfg.num_q_heads as i32;
+            let mut r5 = cfg.num_kv_heads as i32;
+            let mut r6 = cfg.head_dim as i32;
+            let mut r7 = half as i32;
+            unsafe {
+                launch(
+                    self.kernels.rope_mrope,
+                    (m as u32, 1, 1),
+                    (rt, 1, 1),
+                    0,
+                    self.stream,
+                    &mut [
+                        &mut r0 as *mut _ as *mut std::ffi::c_void,
+                        &mut r1 as *mut _ as *mut std::ffi::c_void,
+                        &mut r2 as *mut _ as *mut std::ffi::c_void,
+                        &mut r3 as *mut _ as *mut std::ffi::c_void,
+                        &mut r4 as *mut _ as *mut std::ffi::c_void,
+                        &mut r5 as *mut _ as *mut std::ffi::c_void,
+                        &mut r6 as *mut _ as *mut std::ffi::c_void,
+                        &mut r7 as *mut _ as *mut std::ffi::c_void,
+                    ],
+                )?;
+            }
+        } else if self.rope_cos_ptr != 0 {
             let half = if cfg.rope_half_dim > 0 {
                 cfg.rope_half_dim
             } else {
@@ -29923,6 +30003,7 @@ impl PrefillKernels {
                     "hqq_prefill_int8_exception_delta_bf16_kernel",
                     "hqq_apply_sidecar_bf16_kernel",
                     "rope_batched_kernel",
+                    "rope_batched_mrope_kernel",
                     "silu_mul_batched_kernel",
                     "relu2_batched_kernel",
                     "sigmoid_mul_kernel",
@@ -30082,6 +30163,7 @@ impl PrefillKernels {
             hqq_prefill_int8_exception_delta_bf16: get("hqq_prefill_int8_exception_delta_bf16_kernel")?,
             hqq_apply_sidecar_bf16: get("hqq_apply_sidecar_bf16_kernel")?,
             rope: get("rope_batched_kernel")?,
+            rope_mrope: get("rope_batched_mrope_kernel")?,
             silu_mul: get("silu_mul_batched_kernel")?,
             relu2: get("relu2_batched_kernel")?,
             sigmoid_mul: get("sigmoid_mul_kernel")?,
@@ -31892,6 +31974,7 @@ mod kernel_tests {
                     "rmsnorm_batched_kernel",
                     "fused_add_rmsnorm_batched_kernel",
                     "rope_batched_kernel",
+                    "rope_batched_mrope_kernel",
                     "silu_mul_batched_kernel",
                     "relu2_batched_kernel",
                     "sigmoid_mul_kernel",

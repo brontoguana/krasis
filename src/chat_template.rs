@@ -112,6 +112,40 @@ impl ChatTemplateEngine {
         add_generation_prompt: bool,
         enable_thinking: bool,
     ) -> Result<String, String> {
+        self.apply_with_tools_inner(
+            messages_json,
+            tools_json,
+            add_generation_prompt,
+            enable_thinking,
+            false,
+        )
+    }
+
+    /// Apply a multimodal-capable chat template without flattening image parts.
+    pub fn apply_multimodal_with_tools(
+        &self,
+        messages_json: &str,
+        tools_json: &str,
+        add_generation_prompt: bool,
+        enable_thinking: bool,
+    ) -> Result<String, String> {
+        self.apply_with_tools_inner(
+            messages_json,
+            tools_json,
+            add_generation_prompt,
+            enable_thinking,
+            true,
+        )
+    }
+
+    fn apply_with_tools_inner(
+        &self,
+        messages_json: &str,
+        tools_json: &str,
+        add_generation_prompt: bool,
+        enable_thinking: bool,
+        preserve_multimodal_content: bool,
+    ) -> Result<String, String> {
         let mut messages: serde_json::Value = serde_json::from_str(messages_json)
             .map_err(|e| format!("Failed to parse messages JSON: {}", e))?;
         let tools: serde_json::Value = if tools_json.is_empty() {
@@ -129,7 +163,9 @@ impl ChatTemplateEngine {
         // use `arguments|items` which requires a dict/mapping.
         if let Some(msgs) = messages.as_array_mut() {
             for msg in msgs.iter_mut() {
-                normalize_text_content_parts(msg)?;
+                if !preserve_multimodal_content {
+                    normalize_text_content_parts(msg)?;
+                }
                 if let Some(tool_calls) = msg.get_mut("tool_calls").and_then(|v| v.as_array_mut()) {
                     for tc in tool_calls.iter_mut() {
                         // Determine which object holds arguments: tc.function or tc itself

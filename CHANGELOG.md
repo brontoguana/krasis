@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## 1.0.11 - 2026-05-29
+
+- Added experimental Qwen image support. Image chat requests now lazily run the
+  Qwen3VL BF16 vision tower for image-prefill setup, scatter visual embeddings
+  into `<|image_pad|>` positions, use MRoPE rows during prefill, and preserve
+  the existing text-only Rust/CUDA path for normal requests.
+- Vision staging is transient: the BF16 tower is moved to GPU for image setup
+  and released back to CPU before decode. Constrained image requests now return
+  an explicit insufficient-VRAM response instead of a generic server failure.
+- Added image request validation for OpenAI-style content parts. Video remains
+  unsupported, and local image file paths are disabled unless explicitly enabled
+  for local testing.
+- Recorded final QCN speed-test gates and 35B/122B image smoke validation in
+  the benchmark archive.
+- Updated the QCN release-test reference path to use the llama-witness artifact
+  instead of the archived HF reference.
+- Fixed reference validation for first-token witness artifacts so release tests
+  validate the captured prefix contract instead of requiring uncaptured tokens.
+
 ## 1.0.5 - 2026-05-23
 
 - Added request prefill progress output alongside the existing decode progress

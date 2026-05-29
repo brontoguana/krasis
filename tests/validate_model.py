@@ -873,6 +873,7 @@ def validate_model(config_path: str, no_server: bool = False, port: Optional[int
 
                 # Layer 1: Compare tokens (pass per_token_data for top-k divergence analysis)
                 cmp = compare_tokens(ref_token_ids, krasis_token_ids, per_token_data)
+                required_match = min(min_match, max(1, cmp["total_ref"]))
 
                 # Layer 2: Logprobs summary
                 logprobs_summary = ""
@@ -916,6 +917,16 @@ def validate_model(config_path: str, no_server: bool = False, port: Optional[int
                     pass_count += 1
                     print(f"    {GREEN}L1 tokens: MATCH {cmp['match_count']}/{cmp['total_ref']} identical{NC}"
                           f"{logprobs_summary}")
+                elif cmp["total_ref"] > 0 and cmp["match_count"] >= cmp["total_ref"]:
+                    # Some authoritative witness artifacts intentionally record
+                    # only the first generated token plus top-k diagnostics. In
+                    # that case the reference contract is prefix validation, not
+                    # a demand for additional tokens that were never captured.
+                    status = "MATCH"
+                    pass_count += 1
+                    print(f"    {GREEN}L1 tokens: MATCH reference prefix "
+                          f"{cmp['match_count']}/{cmp['total_ref']} identical{NC}"
+                          f"{logprobs_summary}")
                 elif is_quant and cmp["divergence_in_top_k"] is True:
                     # Quantized model: divergent token is in reference top-k = expected drift
                     status = "WARN"
@@ -928,7 +939,7 @@ def validate_model(config_path: str, no_server: bool = False, port: Optional[int
                     print(f"    {YELLOW}First {cmp['match_count']} tokens match — "
                           f"divergent token in reference top-k (expected INT4 drift){NC}"
                           f"{diverge_detail}{logprobs_summary}")
-                elif cmp["first_divergence"] is not None and cmp["first_divergence"] >= min_match:
+                elif cmp["first_divergence"] is not None and cmp["first_divergence"] >= required_match:
                     # Non-quantized or divergent token NOT in top-k but enough tokens matched
                     status = "WARN"
                     warn_count += 1
@@ -937,14 +948,14 @@ def validate_model(config_path: str, no_server: bool = False, port: Optional[int
                     print(f"    {YELLOW}L1 tokens: DIVERGE at token {cmp['first_divergence']}: "
                           f"ref={ref_tok_at} vs krasis={kra_tok_at}{NC}")
                     print(f"    {YELLOW}First {cmp['match_count']} tokens match "
-                          f"(threshold: {min_match}) — within tolerance{NC}"
+                          f"(threshold: {required_match}) — within tolerance{NC}"
                           f"{diverge_detail}{logprobs_summary}")
                 else:
                     status = "FAIL"
                     fail_count += 1
                     diverge_at = cmp["first_divergence"] if cmp["first_divergence"] is not None else 0
                     print(f"    {RED}L1 tokens: FAIL diverges at token {diverge_at} "
-                          f"(need {min_match}+ matching){NC}"
+                          f"(need {required_match}+ matching){NC}"
                           f"{diverge_detail}{logprobs_summary}")
                     # Show what went wrong
                     ref_preview = ref_text[:80].replace("\n", " ")

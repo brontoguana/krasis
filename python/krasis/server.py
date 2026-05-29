@@ -2501,6 +2501,79 @@ def main():
             total_mb = vram_monitor.total_mb(idx)
             _dim(f"  cuda:{idx} after aux store setup: {post_free:,.0f} MB free / {total_mb:,} MB total")
 
+        # Measure auxiliary decode runtime overhead before filling aux HCS. Aux GPUs
+        # do not run prefill, but decode still has transient graph/kernel/runtime
+        # allocations. Budget HCS against the measured low-water rather than
+        # assuming all current free memory minus the safety margin is usable.
+        aux_decode_overhead_mb = [0] * num_aux
+        if num_aux > 0:
+            _status("Calibrating multi-GPU aux decode overhead")
+            vram_monitor.reset_min_free()
+            aux_baseline_free = [
+                int(vram_monitor.current_free_mb(device_indices[i + 1]))
+                for i in range(num_aux)
+            ]
+            try:
+                gpu_store = _model._gpu_decode_store
+                evicted0, _freed0 = gpu_store.py_hcs_evict_for_prefill(500)
+                if evicted0 > 0:
+                    _dim(f"  Evicted {evicted0} soft experts for aux overhead prefill")
+
+                prompt_tokens = _chat_prompt_tokens(_model, "Hi")
+                stop_ids = _default_stop_ids(_model)
+                first_token, prompt_len, _kv_overflow = gpu_store.rust_prefill_tokens(
+                    prompt_tokens, temperature=0.6, disable_pinning=True
+                )
+
+                for i in range(num_aux):
+                    seg_start = boundaries[i + 1]
+                    seg_end = boundaries[i + 2]
+                    gpu_store.py_copy_kv_to_aux(
+                        all_aux_gpu_store_addrs[i], seg_start, seg_end,
+                        _multi_gpu_gqa_offsets[i], prompt_len)
+                    gpu_store.py_copy_la_states_to_aux(
+                        all_aux_gpu_store_addrs[i], seg_start, seg_end)
+
+                r0, _ = gpu_store.py_hcs_reload_after_prefill(prompt_len)
+                if r0 > 0:
+                    _dim(f"  Reloaded {r0} soft experts after aux overhead prefill")
+
+                if first_token not in stop_ids:
+                    tokens = gpu_store.gpu_generate_batch_multi(
+                        aux_store_addrs=all_aux_gpu_store_addrs,
+                        split_layers=all_multi_gpu_split_layers,
+                        gqa_cache_offsets=all_multi_gpu_gqa_offsets,
+                        first_token=first_token,
+                        start_position=prompt_len,
+                        max_tokens=32,
+                        temperature=0.6,
+                        top_k=50,
+                        top_p=0.95,
+                        stop_ids=stop_ids,
+                        presence_penalty=0.0,
+                    )
+                    _detail(f"Aux decode overhead calibration: {len(tokens)} tokens generated OK")
+                else:
+                    _detail("Aux decode overhead calibration: prefill hit stop token (OK)")
+
+                torch.cuda.synchronize()
+                time.sleep(0.1)
+                for i in range(num_aux):
+                    gpu_idx = device_indices[i + 1]
+                    aux_min = int(vram_monitor.min_free_mb(gpu_idx))
+                    aux_current = int(vram_monitor.current_free_mb(gpu_idx))
+                    measured = max(0, aux_baseline_free[i] - aux_min)
+                    aux_decode_overhead_mb[i] = measured
+                    _dim(
+                        f"  GPU{i+1} decode transient: baseline={aux_baseline_free[i]:,} MB, "
+                        f"min={aux_min:,} MB, current={aux_current:,} MB, overhead={measured:,} MB"
+                    )
+            except Exception as e:
+                raise RuntimeError(
+                    f"Multi-GPU aux decode overhead calibration failed: {e}\n"
+                    "Cannot size aux HCS safely. Fix the underlying issue or disable multi-GPU."
+                ) from e
+
         # Initialize HCS on each aux store if requested.
         if args.hcs and 'ranking' in locals():
             for i, aux_store in enumerate(aux_stores):
@@ -2516,13 +2589,25 @@ def main():
                 num_aux_ranked = sum(1 for l, e in aux_ranking if (l, e) in set(ranking))
                 _dim(f"  GPU{i+1} HCS: {len(aux_ranking)} experts for layers [{seg_start}..{seg_end}) "
                      f"({num_aux_ranked} ranked + {len(aux_ranking) - num_aux_ranked} unranked)")
-                # Measure aux GPU free VRAM for HCS budget
+                # Measure aux GPU free VRAM for HCS budget. Aux HCS is hard
+                # resident and cannot be evicted for later decode/runtime
+                # allocations, so reserve both the final safety floor and a
+                # runtime transient band sized from measurement but never
+                # smaller than the configured safety margin.
                 aux_free_mb = vram_monitor.current_free_mb(gpu_idx)
-                aux_hcs_budget = max(0, int(aux_free_mb) - SAFETY_MARGIN_MB)
+                aux_runtime_reserve_mb = max(aux_decode_overhead_mb[i], SAFETY_MARGIN_MB)
+                aux_hcs_budget = max(
+                    0,
+                    int(aux_free_mb) - SAFETY_MARGIN_MB - aux_runtime_reserve_mb,
+                )
                 # 100% hard tier — aux GPUs never do prefill so never need to evict
                 aux_hard = aux_hcs_budget
                 aux_soft = 0
-                _detail(f"  GPU{i+1} HCS budget: {aux_hard:,} MB hard (aux_free={aux_free_mb:,.0f} MB)")
+                _detail(
+                    f"  GPU{i+1} HCS budget: {aux_hard:,} MB hard "
+                    f"(aux_free={aux_free_mb:,.0f} MB, decode_transient={aux_decode_overhead_mb[i]:,} MB, "
+                    f"runtime_reserve={aux_runtime_reserve_mb:,} MB)"
+                )
 
                 if aux_ranking:
                     result = aux_store.hcs_pool_init_tiered(
@@ -2571,7 +2656,7 @@ def main():
                     gqa_cache_offsets=all_multi_gpu_gqa_offsets,
                     first_token=first_token,
                     start_position=prompt_len,
-                    max_tokens=4,
+                    max_tokens=32,
                     temperature=0.6,
                     top_k=50,
                     top_p=0.95,
@@ -2594,14 +2679,16 @@ def main():
 
             # ── Validate aux GPU VRAM safety during decode ──
             # Aux GPUs never run prefill, so decode transients are the only VRAM pressure.
-            # Check that min_free stayed above 0 (budget was safe).
+            # The HCS budget must preserve the configured safety margin.
             for i in range(num_aux):
                 gpu_idx = device_indices[i + 1]
                 aux_min_free = vram_monitor.min_free_mb(gpu_idx)
                 aux_current = vram_monitor.current_free_mb(gpu_idx)
-                if aux_min_free < 50:
-                    _warn(f"  GPU{i+1} (cuda:{gpu_idx}): min_free={aux_min_free} MB during decode — "
-                          f"dangerously close to OOM, HCS budget may be too aggressive")
+                if aux_min_free < SAFETY_MARGIN_MB:
+                    raise RuntimeError(
+                        f"GPU{i+1} (cuda:{gpu_idx}) min_free={aux_min_free} MB during decode, "
+                        f"below safety margin {SAFETY_MARGIN_MB} MB. Aux HCS budget is too aggressive."
+                    )
                 else:
                     _dim(f"  GPU{i+1} (cuda:{gpu_idx}): min_free={aux_min_free} MB during decode, "
                          f"current_free={aux_current:.0f} MB (budget safe)")

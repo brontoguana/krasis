@@ -700,6 +700,53 @@ extern "C" __global__ void rope_batched_kernel(
     }
 }
 
+/* Apply RoPE using per-token precomputed MRoPE rows.
+ * Layout is identical to rope_batched_kernel, but cos/sin rows are already
+ * expanded to [M, half_dim] for the current prompt chunk.
+ */
+extern "C" __global__ void rope_batched_mrope_kernel(
+    __nv_bfloat16* __restrict__ q,
+    __nv_bfloat16* __restrict__ k,
+    const float* __restrict__ cos_rows,
+    const float* __restrict__ sin_rows,
+    int num_q_heads,
+    int num_kv_heads,
+    int head_dim,
+    int half_dim)
+{
+    int token = blockIdx.x;
+    const float* cos_row = cos_rows + (int64_t)token * half_dim;
+    const float* sin_row = sin_rows + (int64_t)token * half_dim;
+
+    int q_stride = num_q_heads * head_dim;
+    __nv_bfloat16* q_row = q + (int64_t)token * q_stride;
+    for (int h = 0; h < num_q_heads; h++) {
+        __nv_bfloat16* qh = q_row + h * head_dim;
+        for (int i = threadIdx.x; i < half_dim; i += blockDim.x) {
+            float q0 = bf16_to_float(qh[i]);
+            float q1 = bf16_to_float(qh[i + half_dim]);
+            float c = cos_row[i];
+            float s = sin_row[i];
+            qh[i] = float_to_bf16(q0 * c - q1 * s);
+            qh[i + half_dim] = float_to_bf16(q1 * c + q0 * s);
+        }
+    }
+
+    int k_stride = num_kv_heads * head_dim;
+    __nv_bfloat16* k_row = k + (int64_t)token * k_stride;
+    for (int h = 0; h < num_kv_heads; h++) {
+        __nv_bfloat16* kh = k_row + h * head_dim;
+        for (int i = threadIdx.x; i < half_dim; i += blockDim.x) {
+            float k0 = bf16_to_float(kh[i]);
+            float k1 = bf16_to_float(kh[i + half_dim]);
+            float c = cos_row[i];
+            float s = sin_row[i];
+            kh[i] = float_to_bf16(k0 * c - k1 * s);
+            kh[i + half_dim] = float_to_bf16(k1 * c + k0 * s);
+        }
+    }
+}
+
 extern "C" void krasis_rope_batched(
     void* q, void* k, const void* positions,
     const void* cos_cache, const void* sin_cache,

@@ -307,6 +307,7 @@ fn send_json(stream: &mut TcpStream, status: u16, body: &str) -> std::io::Result
         413 => "Payload Too Large",
         500 => "Internal Server Error",
         503 => "Service Unavailable",
+        507 => "Insufficient Storage",
         _ => "Unknown",
     };
     write!(
@@ -731,6 +732,20 @@ fn json_escape(s: &str) -> String {
         .replace('\t', "\\t")
 }
 
+fn qwen_image_vram_error_body(err: &str) -> Option<String> {
+    let marker = "VRAM is too constrained";
+    let start = err.find(marker)?;
+    let message = err[start..]
+        .lines()
+        .next()
+        .unwrap_or(&err[start..])
+        .trim();
+    Some(format!(
+        r#"{{"error":{{"message":"{}","type":"insufficient_resources","code":"insufficient_vram"}}}}"#,
+        json_escape(message)
+    ))
+}
+
 /// Format SSE chunk: tool call start (name + empty args).
 fn format_sse_tool_call_start(
     request_id: &str,
@@ -798,6 +813,17 @@ struct RequestOverhead {
     prefill_ms: f64,         // GIL acquire + Python prefill
     reload_ms: f64,          // HCS soft-tier reload (wall-clock, includes sync if enabled)
     real_reload_dma_ms: f64, // Actual DMA time when sync is on (0.0 if async)
+}
+
+struct MultimodalPrefillInputs {
+    token_ids: Vec<u32>,
+    inputs_embeds_ptr: u64,
+    mrope_cos_ptr: u64,
+    mrope_sin_ptr: u64,
+    mrope_half_dim: usize,
+    rope_delta: i32,
+    image_count: usize,
+    image_tokens: usize,
 }
 
 /// Handle /v1/chat/completions request.
@@ -869,9 +895,15 @@ fn handle_chat_completion(
         .as_secs();
 
     // Extract messages JSON for Python
-    let messages_json = match req.get("messages") {
+    let (messages_json, has_images) = match req.get("messages") {
         Some(m) => {
-            if let Err(e) = crate::text_only_messages::validate_text_only_messages(m) {
+            let has_images = crate::text_only_messages::messages_have_image_parts(m);
+            let validation = if has_images {
+                crate::text_only_messages::validate_image_only_messages(m)
+            } else {
+                crate::text_only_messages::validate_text_only_messages(m)
+            };
+            if let Err(e) = validation {
                 let _ = send_json(
                     stream,
                     400,
@@ -879,7 +911,7 @@ fn handle_chat_completion(
                 );
                 return;
             }
-            m.to_string()
+            (m.to_string(), has_images)
         }
         None => {
             let _ = send_json(stream, 400, r#"{"error":"Missing messages"}"#);
@@ -917,12 +949,22 @@ fn handle_chat_completion(
     let has_tools = !tools_json.is_empty();
 
     // ── Render chat template (reused for both token estimation and Rust prefill) ──
-    let rendered = match state.chat_template.apply_with_tools(
-        &messages_json,
-        &tools_json,
-        true,
-        enable_thinking,
-    ) {
+    let rendered_result = if has_images {
+        state.chat_template.apply_multimodal_with_tools(
+            &messages_json,
+            &tools_json,
+            true,
+            enable_thinking,
+        )
+    } else {
+        state.chat_template.apply_with_tools(
+            &messages_json,
+            &tools_json,
+            true,
+            enable_thinking,
+        )
+    };
+    let rendered = match rendered_result {
         Ok(r) => r,
         Err(e) => {
             log::error!("Chat template failed: {}", e);
@@ -934,7 +976,18 @@ fn handle_chat_completion(
             return;
         }
     };
-    let estimated_tokens = {
+    let estimated_tokens = if has_images {
+        log::info!(
+            "Soft HCS: image request pre-evicting for configured context window {} (rendered_len={})",
+            state.max_context_tokens,
+            rendered.len()
+        );
+        crate::vram_monitor::update_request_context(&format!(
+            "route=/v1/chat/completions request_id={} model={} estimated_prompt_tokens={} rendered_len={} max_new={} stream={} phase=prefill_setup multimodal=image",
+            request_id, state.model_name, state.max_context_tokens, rendered.len(), max_tokens, is_stream,
+        ));
+        state.max_context_tokens
+    } else {
         let token_count = match state.tokenizer.encode(rendered.as_str(), false) {
             Ok(e) => e.len(),
             Err(e) => {
@@ -960,7 +1013,7 @@ fn handle_chat_completion(
     crate::vram_monitor::report_event("evict_start");
     let t_evict = Instant::now();
     let store_for_evict = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
-    let (evicted, _freed_mb) = store_for_evict.hcs_evict_for_prefill(estimated_tokens);
+    let (_evicted, _freed_mb) = store_for_evict.hcs_evict_for_prefill(estimated_tokens);
     // NOTE: aux GPU never does prefill, so no eviction needed there
     let evict_ms = t_evict.elapsed().as_secs_f64() * 1000.0;
     crate::vram_monitor::report_event("evict_end");
@@ -968,19 +1021,97 @@ fn handle_chat_completion(
     // ── Snapshot VRAM before prefill ──
     log::info!("VRAM before prefill: {} MB free", store_for_evict.query_vram_free_mb());
 
-    // ── Prefill: Rust path (zero GIL) or Python fallback ──
+    // ── Prefill: Rust path (text-only token IDs, or image embeddings handoff) ──
     crate::vram_monitor::report_event("prefill_start");
     crate::vram_monitor::reset_request_lows();
     let t_prefill_gil = Instant::now();
 
     let mut prompt_hcs_snapshot: Option<(Vec<u64>, usize, usize, usize)> = None;
     let prefill_result: Result<(usize, usize, Vec<usize>, bool), String> = {
-        // ── Rust prefill: zero GIL, zero Python ──
-        let token_ids: Vec<u32> = match state.tokenizer.encode(rendered.as_str(), true) {
-            Ok(e) => e.get_ids().to_vec(),
-            Err(e) => {
-                let _ = send_json(stream, 500, &format!(r#"{{"error":"Tokenize: {}"}}"#, e));
-                return;
+        // ── Rust prefill: text requests stay token-id only; image requests
+        // build BF16 inputs_embeds once before the Rust prefill run.
+        let mut multimodal_inputs: Option<MultimodalPrefillInputs> = None;
+        let token_ids: Vec<u32> = if has_images {
+            let built = Python::with_gil(|py| -> Result<MultimodalPrefillInputs, String> {
+                let obj = state.py_model.call_method1(
+                    py,
+                    "build_multimodal_prefill_inputs",
+                    (messages_json.as_str(), rendered.as_str()),
+                ).map_err(|e| format!("Qwen vision prefill setup failed: {}", e))?;
+                let mm = obj.bind(py);
+                let token_ids: Vec<u32> = mm.get_item("token_ids")
+                    .map_err(|e| format!("Qwen vision token_ids read failed: {}", e))?
+                    .extract()
+                    .map_err(|e| format!("Qwen vision token_ids extract failed: {}", e))?;
+                let inputs_embeds_ptr: u64 = mm.get_item("inputs_embeds_ptr")
+                    .map_err(|e| format!("Qwen vision inputs_embeds_ptr read failed: {}", e))?
+                    .extract()
+                    .map_err(|e| format!("Qwen vision inputs_embeds_ptr extract failed: {}", e))?;
+                let mrope_cos_ptr: u64 = mm.get_item("mrope_cos_ptr")
+                    .map_err(|e| format!("Qwen vision mrope_cos_ptr read failed: {}", e))?
+                    .extract()
+                    .map_err(|e| format!("Qwen vision mrope_cos_ptr extract failed: {}", e))?;
+                let mrope_sin_ptr: u64 = mm.get_item("mrope_sin_ptr")
+                    .map_err(|e| format!("Qwen vision mrope_sin_ptr read failed: {}", e))?
+                    .extract()
+                    .map_err(|e| format!("Qwen vision mrope_sin_ptr extract failed: {}", e))?;
+                let mrope_half_dim: usize = mm.get_item("mrope_half_dim")
+                    .map_err(|e| format!("Qwen vision mrope_half_dim read failed: {}", e))?
+                    .extract()
+                    .map_err(|e| format!("Qwen vision mrope_half_dim extract failed: {}", e))?;
+                let rope_delta: i32 = mm.get_item("rope_delta")
+                    .map_err(|e| format!("Qwen vision rope_delta read failed: {}", e))?
+                    .extract()
+                    .map_err(|e| format!("Qwen vision rope_delta extract failed: {}", e))?;
+                let image_count: usize = mm.get_item("image_count")
+                    .map_err(|e| format!("Qwen vision image_count read failed: {}", e))?
+                    .extract()
+                    .map_err(|e| format!("Qwen vision image_count extract failed: {}", e))?;
+                let image_tokens: usize = mm.get_item("image_tokens")
+                    .map_err(|e| format!("Qwen vision image_tokens read failed: {}", e))?
+                    .extract()
+                    .map_err(|e| format!("Qwen vision image_tokens extract failed: {}", e))?;
+                Ok(MultimodalPrefillInputs {
+                    token_ids,
+                    inputs_embeds_ptr,
+                    mrope_cos_ptr,
+                    mrope_sin_ptr,
+                    mrope_half_dim,
+                    rope_delta,
+                    image_count,
+                    image_tokens,
+                })
+            });
+            match built {
+                Ok(mm) => {
+                    log::info!(
+                        "Request {}: Qwen image prefill inputs ready: images={} image_tokens={} prompt_tokens={} rope_delta={}",
+                        request_id,
+                        mm.image_count,
+                        mm.image_tokens,
+                        mm.token_ids.len(),
+                        mm.rope_delta,
+                    );
+                    let ids = mm.token_ids.clone();
+                    multimodal_inputs = Some(mm);
+                    ids
+                }
+                Err(e) => {
+                    if let Some(body) = qwen_image_vram_error_body(&e) {
+                        let _ = send_json(stream, 507, &body);
+                    } else {
+                        let _ = send_json(stream, 500, &format!(r#"{{"error":"{}"}}"#, json_escape(&e)));
+                    }
+                    return;
+                }
+            }
+        } else {
+            match state.tokenizer.encode(rendered.as_str(), true) {
+                Ok(e) => e.get_ids().to_vec(),
+                Err(e) => {
+                    let _ = send_json(stream, 500, &format!(r#"{{"error":"Tokenize: {}"}}"#, e));
+                    return;
+                }
             }
         };
         let mut engine_guard = state.rust_prefill.lock().unwrap();
@@ -1001,6 +1132,12 @@ fn handle_chat_completion(
             match prepare_store_for_rust_prefill(store, engine, token_ids.len()) {
                 Ok(has_hqq) => has_hqq,
                 Err(e) => {
+                    engine.clear_external_prefill_inputs();
+                    if has_images {
+                        Python::with_gil(|py| {
+                            let _ = state.py_model.call_method0(py, "clear_multimodal_prefill_inputs");
+                        });
+                    }
                     let _ = send_json(stream, 500, &format!(r#"{{"error":"Prefill prepare failed: {}"}}"#, e));
                     return;
                 }
@@ -1011,10 +1148,24 @@ fn handle_chat_completion(
 
         // Dynamically allocate scratch sized for this prompt
         if let Err(e) = engine.prepare_for_prefill(token_ids.len()) {
+            engine.clear_external_prefill_inputs();
             engine.clear_prefill_hcs_guard_store_addr();
             engine.set_optional_pinning_budget_mb(None);
             let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
             let _ = store.prepare_runtime_for_decode_rust();
+            if has_images {
+                Python::with_gil(|py| {
+                    let _ = state.py_model.call_method0(py, "clear_multimodal_prefill_inputs");
+                });
+            }
+            if has_images {
+                let body = format!(
+                    r#"{{"error":{{"message":"VRAM is too constrained for this Qwen image request. Multimodal prefill scratch allocation failed: {}","type":"insufficient_resources","code":"insufficient_vram"}}}}"#,
+                    json_escape(&e)
+                );
+                let _ = send_json(stream, 507, &body);
+                return;
+            }
             let _ = send_json(stream, 500, &format!(r#"{{"error":"Scratch alloc failed: {}"}}"#, e));
             return;
         }
@@ -1031,6 +1182,16 @@ fn handle_chat_completion(
             let store = unsafe { &*(state.gpu_store_addr as *const GpuDecodeStore) };
             store.suppress_tokens_clone()
         };
+        if let Some(mm) = multimodal_inputs.as_ref() {
+            engine.set_external_prefill_inputs(
+                mm.inputs_embeds_ptr,
+                mm.mrope_cos_ptr,
+                mm.mrope_sin_ptr,
+                mm.mrope_half_dim,
+            );
+        } else {
+            engine.clear_external_prefill_inputs();
+        }
         let result = match engine.run_prefill(
             &token_ids,
             temperature,
@@ -1049,8 +1210,14 @@ fn handle_chat_completion(
         if let Err(e) = engine.release_scratch() {
             log::error!("Failed to release scratch: {}", e);
         }
+        engine.clear_external_prefill_inputs();
         engine.clear_prefill_hcs_guard_store_addr();
         engine.set_optional_pinning_budget_mb(None);
+        if has_images {
+            Python::with_gil(|py| {
+                let _ = state.py_model.call_method0(py, "clear_multimodal_prefill_inputs");
+            });
+        }
 
         // Convert stop token strings to IDs, and always include model's EOS tokens
         let mut stop_ids: Vec<usize> = state.eos_stop_ids.clone();
@@ -1070,10 +1237,20 @@ fn handle_chat_completion(
                 if let Err(e) = restore_store_after_rust_prefill(store, r.prompt_len) {
                     log::error!("Failed to restore decode runtime after prefill: {}", e);
                 }
+                store.set_rope_position_delta(
+                    multimodal_inputs.as_ref().map(|mm| mm.rope_delta).unwrap_or(0),
+                );
                 Ok((r.first_token as usize, r.prompt_len, stop_ids, kv_overflow))
             }
             Err(e) => {
+                engine.clear_external_prefill_inputs();
+                if has_images {
+                    Python::with_gil(|py| {
+                        let _ = state.py_model.call_method0(py, "clear_multimodal_prefill_inputs");
+                    });
+                }
                 let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
+                store.set_rope_position_delta(0);
                 let _ = store.prepare_runtime_for_decode_rust();
                 Err(e)
             }
@@ -1094,6 +1271,17 @@ fn handle_chat_completion(
                     r#"{{"error":{{"message":"Context length exceeds KV cache capacity ({} tokens max). Reduce context or start a new conversation.","type":"invalid_request_error","code":"context_length_exceeded","max_context_tokens":{}}}}}"#,
                     state.max_context_tokens, state.max_context_tokens
                 ))
+            } else if has_images {
+                if let Some(body) = qwen_image_vram_error_body(&err_str) {
+                    (507, body)
+                } else if err_str.to_ascii_lowercase().contains("out of memory") {
+                    (507, format!(
+                        r#"{{"error":{{"message":"VRAM is too constrained for this Qwen image request. Multimodal prefill failed: {}","type":"insufficient_resources","code":"insufficient_vram"}}}}"#,
+                        json_escape(&err_str)
+                    ))
+                } else {
+                    (500, format!(r#"{{"error":{{"message":"Prefill failed: {}","type":"server_error"}}}}"#, err_str))
+                }
             } else {
                 (500, format!(r#"{{"error":{{"message":"Prefill failed: {}","type":"server_error"}}}}"#, err_str))
             };
@@ -1654,6 +1842,7 @@ fn handle_reference_test(
         if let Err(e) = restore_store_after_rust_prefill(store, prompt_len) {
             log::error!("reference_test: Failed to restore decode runtime: {}", e);
         }
+        store.set_rope_position_delta(0);
     }
 
     let prefill_ms = t_start.elapsed().as_secs_f64() * 1000.0;
@@ -2901,6 +3090,7 @@ impl RustServer {
         if let Err(e) = restore_store_after_rust_prefill(store, prompt_len) {
             log::error!("Failed to restore decode runtime after prefill: {}", e);
         }
+        store.set_rope_position_delta(0);
 
         let prefill_ms = t_prefill.elapsed().as_secs_f64() * 1000.0;
         crate::vram_monitor::report_event("prefill_end");

@@ -1317,7 +1317,7 @@ witness_model_paths() {
     case "$model" in
         qcn|qwen3-coder-next)
             echo "$HOME/.krasis/models/Qwen3-Coder-Next"
-            echo "$SCRIPT_DIR/../krasis-internal/reference-outputs/output/Qwen3-Coder-Next/greedy_reference.json"
+            echo "$SCRIPT_DIR/../krasis-internal/reference-outputs/output/Qwen3-Coder-Next/llama_witness_stage3_qcn_expanded.json"
             echo "$HOME/.krasis/witness-gguf/Qwen3-Coder-Next-bf16.gguf"
             ;;
         qwen35|q35b|qwen3.5-35b-a3b)

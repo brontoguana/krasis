@@ -11,10 +11,27 @@ HQQ4 attention, `k4v4` KV, thinking off, and HCS RAM saver off
 
 | Model / run | Command | Attention | KV | Prefill (tok/s) | Decode (tok/s) | Round trip (tok/s) | HCS | Min free VRAM | Logs |
 |-------------|---------|-----------|----|----------------:|---------------:|-------------------:|-----|--------------:|------|
+| Qwen3-Coder-Next HQQ4 k4v4 INT4 mirror speed-test v1.0.11 release gate | `./dev speed-test` | HQQ4 | k4v4 | 5925.2 | 91.09 | 150.62 | 16362/24576 (66.6%) | 734 MB | [full log](20260529_qcn_hqq4_k4v4_int4_mirror_speedtest_v1011_release_gate.log), [report](20260529_qcn_hqq4_k4v4_int4_mirror_speedtest_v1011_release_gate_report.log), [server log](20260529_qcn_hqq4_k4v4_int4_mirror_speedtest_v1011_release_gate_krasis.log) |
+| Qwen3-Coder-Next HQQ4 k4v4 INT4 mirror speed-test vision final gate | `./dev speed-test` | HQQ4 | k4v4 | 5783.7 | 89.57 | 144.14 | 16362/24576 (66.6%) | 734 MB | [full log](20260529_qcn_hqq4_k4v4_int4_mirror_speedtest_vision_final_gate.log), [report](20260529_qcn_hqq4_k4v4_int4_mirror_speedtest_vision_final_gate_report.log), [server log](20260529_qcn_hqq4_k4v4_int4_mirror_speedtest_vision_final_gate_krasis.log) |
+| Qwen3-Coder-Next HQQ4 k4v4 INT4 mirror speed-test vision branch gate | `./dev speed-test` | HQQ4 | k4v4 | 5754.8 | 90.10 | 151.29 | 16362/24576 (66.6%) | 734 MB | [full log](20260529_qcn_hqq4_k4v4_int4_mirror_speedtest_vision_gate.log), [report](20260529_qcn_hqq4_k4v4_int4_mirror_speedtest_vision_gate_report.log), [server log](20260529_qcn_hqq4_k4v4_int4_mirror_speedtest_vision_gate_krasis.log) |
 | Qwen3-Coder-Next HQQ4 k4v4 INT4 mirror speed-test release-fix gate | `./dev speed-test` | HQQ4 | k4v4 | 5748.5 | 91.92 | 150.09 | 16362/24576 (66.6%) | 734 MB | [full log](20260528_qcn_hqq4_k4v4_int4_mirror_speedtest_fixgate.log), [report](20260528_qcn_hqq4_k4v4_int4_mirror_speedtest_fixgate_report.log), [server log](20260528_qcn_hqq4_k4v4_int4_mirror_speedtest_fixgate_krasis.log) |
 | Qwen3-Coder-Next HQQ4 k4v4 INT4 mirror speed-test | `./dev speed-test` | HQQ4 | k4v4 | 5752.6 | 90.65 | 162.16 | 16362/24576 (66.6%) | 734 MB | [full log](20260527_qcn_hqq4_k4v4_int4_mirror_speedtest.log), [report](20260527_qcn_hqq4_k4v4_int4_mirror_speedtest_report.log), [server log](20260527_qcn_hqq4_k4v4_int4_mirror_speedtest_krasis.log) |
 
 Notes:
+- v1.0.11 release gate comparison against the final vision gate:
+  internal prefill `+2.4%`, internal decode `+1.7%`, HTTP `+4.5%`.
+  Text-only QCN speed remains within normal variance; timing instrumentation
+  was disabled, and no vision request path was loaded during this run. Health
+  scan found no runtime errors, VRAM monitor warnings, or HCS copy failures.
+- Final vision gate comparison against the earlier same-branch vision gate:
+  internal prefill `+0.5%`, internal decode `-0.6%`, HTTP `-4.7%`.
+  Core text-only engine speed remains within normal variance; timing
+  instrumentation was disabled and no vision request path was loaded during
+  this run.
+- Vision branch gate comparison against the `v1.0.10` release-fix speed-test
+  row: internal prefill `+0.1%`, internal decode `-2.0%`, HTTP `+0.8%`. The
+  text-only QCN path remains within normal variance; timing instrumentation was
+  disabled and no vision request path was loaded during this run.
 - Release-fix gate comparison against the previous speed-test row: internal
   prefill `-0.1%`, internal decode `+1.4%`, HTTP `-7.4%`. The core engine
   speed and decode VRAM floor are within normal run noise; timing
@@ -30,6 +47,34 @@ Notes:
   `600 MB` safety margin.
 - Health scan found no hard exit, no VRAM monitor warning, no copy failures, and
   no warning/error lines in the benchmark logs.
+
+---
+
+## Standard Benchmarks - 2026-05-28 (Zephyrus RTX 3070 Laptop, v1.0.10 RAM saver)
+
+Hardware: Zephyrus, AMD Ryzen 7 5800HS, 31 GB RAM, 1x NVIDIA GeForce RTX
+3070 Laptop GPU 8 GB. Timing instrumentation was disabled. The run used the
+installed `krasis 1.0.10` command path after `krasis update`, a temporary
+thinking-off copy of `/home/main/krasis-ledger/tests/q35b-4-4-hqq4.conf`, and
+forced HCS RAM saver/source mode with `--hcs-host-cache-mode source`.
+
+| Model / run | Command | Attention | KV | Prefill (tok/s) | Decode (tok/s) | Round trip (tok/s) | HCS | Min free VRAM | Logs |
+|-------------|---------|-----------|----|----------------:|---------------:|-------------------:|-----|--------------:|------|
+| Qwen3.5-35B-A3B Zephyrus RTX 3070 Laptop HQQ4 source | installed `krasis --config /tmp/krasis-zephyrus-q35b-hqq4-thinkingoff-benchmark.conf --benchmark --hcs-host-cache-mode source` | HQQ4 | fp8 | 76.4 | 10.71 | 17.66 | 369/10240 (3.6%) | 676 MB | [full log](20260528_zephyrus_qwen35_hqq4_kvfp8_int4_source_benchmark_stdout.log), [report](20260528_zephyrus_qwen35_hqq4_kvfp8_int4_source_benchmark_report.log), [server log](20260528_zephyrus_qwen35_hqq4_kvfp8_int4_source_benchmark_krasis.log) |
+
+Notes:
+- RAM saver/source mode was confirmed in the log: `HCS host cache: source` and
+  startup soft HCS `533` experts (`824.5 MB` logical, `host_mode=source`).
+- The 8 GB card is extremely constrained: startup calibration stopped long
+  calibration at `500` tokens because the short prefill low-water was already
+  `696 MB` against the configured `600 MB` safety margin.
+- Full benchmark completed without CUDA errors, illegal-address failures, VRAM
+  monitor warnings, or HCS source copy failures. Decode low-water was `676 MB`.
+- The timed prefill section took about 24.5 minutes for the 1K/5K/10K/20K/35K/50K
+  runs; throughput was stable in the `73.0-76.4 tok/s` range.
+- Config loaded with `enable_thinking=False`, but the server-ready banner still
+  printed `Think: on`; this appears to be a display/reporting issue, consistent
+  with the earlier Zephyrus prompt validation.
 
 ---
 

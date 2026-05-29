@@ -63,6 +63,9 @@ CONFIG_VARIANTS = [
 ]
 
 REFERENCE_VALIDATE_MAX_PROMPTS = 4
+REFERENCE_PROFILE_BY_MODEL = {
+    "Qwen3-Coder-Next": "llama_witness_stage3_qcn_expanded",
+}
 
 # ANSI codes (for terminal output only — stripped from report)
 BOLD = "\033[1m"
@@ -1050,6 +1053,16 @@ def run_reference_validation(config_path: str, port: int = DEFAULT_PORT) -> Dict
     """Run a short reference-output validation pass against the live server."""
     from validate_model import validate_model
 
+    model_name = None
+    with open(config_path) as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith("MODEL_PATH="):
+                model_path = line.split("=", 1)[1].strip().strip('"').strip("'")
+                model_name = os.path.basename(model_path)
+                break
+    profile_id = REFERENCE_PROFILE_BY_MODEL.get(model_name or "")
+
     return validate_model(
         config_path,
         no_server=True,
@@ -1057,6 +1070,7 @@ def run_reference_validation(config_path: str, port: int = DEFAULT_PORT) -> Dict
         enable_logprobs=False,
         enable_prefill=False,
         max_prompts=REFERENCE_VALIDATE_MAX_PROMPTS,
+        profile_id=profile_id,
         return_summary=True,
     )
 
