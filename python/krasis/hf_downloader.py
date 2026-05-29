@@ -18,6 +18,8 @@ KRASIS_HF_ALLOW_PATTERNS = [
     "*.safetensors.index.json",
     "config.json",
     "generation_config.json",
+    "preprocessor_config.json",
+    "processor_config.json",
     "tokenizer.json",
     "tokenizer_config.json",
     "special_tokens_map.json",

@@ -117,6 +117,7 @@ struct ServerState {
 struct ServerInfo {
     model_name: String,
     max_context_tokens: usize,
+    supports_vision: bool,
 }
 
 fn drain_vram_pressure_for_state(
@@ -353,6 +354,13 @@ fn handle_front_connection(
     let request = match parse_request(&mut reader) {
         Ok(r) => r,
         Err(e) => {
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) {
+                log::debug!("Ignoring incomplete HTTP request: {}", e);
+                return;
+            }
             log::error!("Failed to parse request: {}", e);
             let _ = send_json(&mut tcp_stream, 400, r#"{"error":"Bad request"}"#);
             return;
@@ -382,10 +390,20 @@ fn handle_front_connection(
         }
 
         ("GET", path) if is_models_endpoint(path) => {
-            let body = format!(
-                r#"{{"object":"list","data":[{{"id":"{}","object":"model","created":0,"owned_by":"krasis","max_context_tokens":{}}}]}}"#,
-                server_info.model_name, server_info.max_context_tokens
-            );
+            let data = if server_info.supports_vision {
+                let vision_id = json_escape(&format!("{}-vision", server_info.model_name));
+                format!(
+                    r#"{{"id":"{}","object":"model","created":0,"owned_by":"krasis","max_context_tokens":{},"capabilities":{{"vision":true}},"input_modalities":["text","image"]}}"#,
+                    vision_id, server_info.max_context_tokens
+                )
+            } else {
+                let model_id = json_escape(&server_info.model_name);
+                format!(
+                    r#"{{"id":"{}","object":"model","created":0,"owned_by":"krasis","max_context_tokens":{},"capabilities":{{"vision":false}}}}"#,
+                    model_id, server_info.max_context_tokens
+                )
+            };
+            let body = format!(r#"{{"object":"list","data":[{}]}}"#, data);
             let _ = send_json(&mut tcp_stream, 200, &body);
         }
 
@@ -873,7 +891,11 @@ fn handle_chat_completion(
     }
 
     let is_stream = req.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
-    let max_tokens = req.get("max_tokens").and_then(|v| v.as_u64()).unwrap_or(8192) as usize;
+    let max_tokens = req
+        .get("max_tokens")
+        .or_else(|| req.get("max_completion_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(8192) as usize;
     let temperature = req.get("temperature").and_then(|v| v.as_f64()).unwrap_or(0.6) as f32;
     let top_k = req.get("top_k").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
     let top_p = req.get("top_p").and_then(|v| v.as_f64()).unwrap_or(0.95) as f32;
@@ -2565,6 +2587,7 @@ pub struct RustServer {
     aux_gpu_store_addrs: Vec<usize>,
     multi_gpu_split_layers: Vec<usize>,
     multi_gpu_gqa_offsets: Vec<usize>,
+    supports_vision: bool,
     /// Shared Rust prefill engine — used by both serve_forever (HTTP requests)
     /// and benchmark_request (engine benchmarks). Arc+Mutex allows both paths
     /// to share the single pre-allocated engine without moving it.
@@ -2576,7 +2599,7 @@ pub struct RustServer {
 #[pymethods]
 impl RustServer {
     #[new]
-    #[pyo3(signature = (py_model, host, port, model_name, tokenizer_path, max_context_tokens, enable_thinking=true, thinking_end_token_id=0, gpu_store_addr=0, aux_gpu_store_addrs=Vec::new(), multi_gpu_split_layers=Vec::new(), multi_gpu_gqa_offsets=Vec::new(), test_endpoints=false))]
+    #[pyo3(signature = (py_model, host, port, model_name, tokenizer_path, max_context_tokens, enable_thinking=true, thinking_end_token_id=0, gpu_store_addr=0, aux_gpu_store_addrs=Vec::new(), multi_gpu_split_layers=Vec::new(), multi_gpu_gqa_offsets=Vec::new(), supports_vision=false, test_endpoints=false))]
     fn new(
         py_model: PyObject,
         host: String,
@@ -2590,6 +2613,7 @@ impl RustServer {
         aux_gpu_store_addrs: Vec<usize>,
         multi_gpu_split_layers: Vec<usize>,
         multi_gpu_gqa_offsets: Vec<usize>,
+        supports_vision: bool,
         test_endpoints: bool,
     ) -> Self {
         // Take the pre-allocated Rust prefill engine from the decode store.
@@ -2635,6 +2659,7 @@ impl RustServer {
             aux_gpu_store_addrs,
             multi_gpu_split_layers,
             multi_gpu_gqa_offsets,
+            supports_vision,
             prefill_engine: Arc::new(std::sync::Mutex::new(prefill_engine)),
             test_endpoints,
         }
@@ -2845,6 +2870,7 @@ impl RustServer {
             let server_info = ServerInfo {
                 model_name: state.model_name.clone(),
                 max_context_tokens: state.max_context_tokens,
+                supports_vision: self.supports_vision,
             };
             let (model_tx, model_rx) = mpsc::channel::<ModelRequest>();
             let worker_running = running.clone();

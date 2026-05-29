@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+## 1.0.13-rc.2 - 2026-05-29
+
+- When a loaded model supports Qwen image inputs, `/models` now advertises only
+  the Witsy/OpenAI-compatible `-vision` model id instead of listing separate
+  text and vision entries. Use the same `-vision` id for both text and image
+  requests; text-only requests still follow the normal text path.
+- Chat completions now accept OpenAI's `max_completion_tokens` field as an
+  alias for `max_tokens`, matching current OpenAI SDK clients such as Witsy.
+- The Hugging Face downloader now includes `preprocessor_config.json` and
+  `processor_config.json`, which are required for Qwen image preprocessing.
+- Pillow is now declared as a package dependency because the Qwen image
+  preprocessing path requires `PIL` in clean installs and containers.
+- Quieted transient socket read timeouts / `EAGAIN` (`os error 11`) during HTTP
+  request parsing; incomplete probe connections are ignored without printing a
+  scary error, while malformed requests still return `400`.
+- Fixed dynamic HCS promotion ordering during graph decode. Promoted expert
+  slot contents and the GPU expert pointer table are now updated on the same
+  CUDA replay stream, preventing later graph/prefill work from seeing stale or
+  incompletely ordered promoted pointers after image-heavy requests on tight
+  VRAM systems.
+
 ## 1.0.13-rc.1 - 2026-05-29
 
 - Fixed source-mode dynamic HCS VRAM-pressure eviction synchronization. When

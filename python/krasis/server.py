@@ -2797,6 +2797,8 @@ def main():
         args.host, args.port, max_ctx,
         f"s ({len(all_aux_gpu_store_addrs)+1}-GPU)" if all_aux_gpu_store_addrs else "",
     )
+    _vision_supported = bool(getattr(_model, "supports_qwen_image_inputs", lambda: False)())
+    _vision_model_name = f"{_model_name}-vision" if _vision_supported else ""
 
     rust_server = RustServer(
         _model,
@@ -2811,6 +2813,7 @@ def main():
         all_aux_gpu_store_addrs,
         all_multi_gpu_split_layers,
         all_multi_gpu_gqa_offsets,
+        _vision_supported,
         test_endpoints=getattr(args, 'test_endpoints', False),
     )
     ssh_tunnel = None
@@ -2859,6 +2862,7 @@ def main():
     _client_base_url = f"http://{_client_host}:{args.port}/v1"
     _client_chat_url = f"{_client_base_url}/chat/completions"
     _client_models_url = f"{_client_base_url}/models"
+    _client_model_name = _vision_model_name or _model_name
     vram_monitor.report_event("server_ready")
     log_ram_ledger("server-ready")
     _headline("KRASIS SERVER READY", _GREEN)
@@ -2877,7 +2881,9 @@ def main():
     print(f"    Chat endpoint: {_client_chat_url}", flush=True)
     print(f"    Models:        {_client_models_url}", flush=True)
     print(f"    API key:       {_BOLD}X{_NC} {_DIM}(any value){_NC}", flush=True)
-    print(f"    Model name:    {_BOLD}{_model_name}{_NC}", flush=True)
+    print(f"    Model name:    {_BOLD}{_client_model_name}{_NC}", flush=True)
+    if _vision_model_name:
+        print(f"                   {_DIM}vision-capable; use this same model for text and images{_NC}", flush=True)
     print(f"  {_DIM}Press Q or Ctrl-C to stop{_NC}", flush=True)
     print(flush=True)
 

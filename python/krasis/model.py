@@ -799,6 +799,24 @@ class KrasisModel:
         self._qwen_vision_config = None
         self._last_multimodal_prefill_tensors = None
 
+    def supports_qwen_image_inputs(self) -> bool:
+        """Return True when the loaded model directory contains Qwen image assets."""
+        config_path = os.path.join(self.cfg.model_path, "config.json")
+        index_path = os.path.join(self.cfg.model_path, "model.safetensors.index.json")
+        processor_path = os.path.join(self.cfg.model_path, "preprocessor_config.json")
+        if not (os.path.exists(config_path) and os.path.exists(index_path) and os.path.exists(processor_path)):
+            return False
+        try:
+            with open(config_path) as f:
+                raw = json.load(f)
+            if not isinstance(raw.get("vision_config"), dict) or not isinstance(raw.get("image_token_id"), int):
+                return False
+            with open(index_path) as f:
+                weight_map = json.load(f).get("weight_map", {})
+            return any(key.startswith("model.visual.") for key in weight_map)
+        except Exception:
+            return False
+
     def _detect_shared_expert_gate(self) -> bool:
         """Check if model has shared_expert_gate weights (Qwen3-Next sigmoid gate)."""
         import json

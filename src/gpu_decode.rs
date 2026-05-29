@@ -3821,6 +3821,16 @@ impl HcsState {
     /// Update flat cache when an entry is inserted.
     /// Also updates the GPU-side expert pointer table if initialized.
     fn cache_fast_set(&mut self, layer: usize, expert: usize, entry: &HcsCacheEntry) {
+        self.cache_fast_set_on_stream(layer, expert, entry, std::ptr::null_mut());
+    }
+
+    fn cache_fast_set_on_stream(
+        &mut self,
+        layer: usize,
+        expert: usize,
+        entry: &HcsCacheEntry,
+        stream: cuda_sys::CUstream,
+    ) {
         if self.num_experts_per_layer == 0 { return; }
         let idx = layer * self.num_experts_per_layer + expert;
         if idx < self.cache_fast.len() {
@@ -3829,18 +3839,27 @@ impl HcsState {
                 entry.w2_packed_ptr(), entry.w2_scales_ptr(),
             ];
         }
-        self.gpu_expert_ptrs_set(layer, expert, entry);
+        self.gpu_expert_ptrs_set_on_stream(layer, expert, stream);
     }
 
     /// Clear flat cache when an entry is removed.
     /// Also clears the GPU-side expert pointer table if initialized.
     fn cache_fast_clear(&mut self, layer: usize, expert: usize) {
+        self.cache_fast_clear_on_stream(layer, expert, std::ptr::null_mut());
+    }
+
+    fn cache_fast_clear_on_stream(
+        &mut self,
+        layer: usize,
+        expert: usize,
+        stream: cuda_sys::CUstream,
+    ) {
         if self.num_experts_per_layer == 0 { return; }
         let idx = layer * self.num_experts_per_layer + expert;
         if idx < self.cache_fast.len() {
             self.cache_fast[idx] = [0u64; 4];
         }
-        self.gpu_expert_ptrs_clear(layer, expert);
+        self.gpu_expert_ptrs_clear_on_stream(layer, expert, stream);
     }
 
     /// Initialize the GPU-side expert pointer table.
@@ -3863,7 +3882,12 @@ impl HcsState {
     }
 
     /// Update the GPU-side expert pointer table when an expert is loaded.
-    fn gpu_expert_ptrs_set(&self, layer: usize, expert: usize, entry: &HcsCacheEntry) {
+    fn gpu_expert_ptrs_set_on_stream(
+        &self,
+        layer: usize,
+        expert: usize,
+        stream: cuda_sys::CUstream,
+    ) {
         if let Some(ref buf) = self.d_expert_ptrs {
             let idx = (layer * self.d_expert_ptrs_ne + expert) * 4;
             unsafe {
@@ -3886,7 +3910,7 @@ impl HcsState {
                     dst,
                     src,
                     32, // 4 * u64
-                    std::ptr::null_mut(),
+                    stream,
                 );
                 if err != cuda_sys::CUresult::CUDA_SUCCESS {
                     log::warn!("gpu_expert_ptrs_set[{},{}]: {:?}", layer, expert, err);
@@ -3898,7 +3922,12 @@ impl HcsState {
     /// Clear the GPU-side expert pointer table when an expert is evicted.
     /// If mapped fallback is available, writes mapped host device pointers instead of zeros
     /// so the GPU can still read this expert directly over PCIe.
-    fn gpu_expert_ptrs_clear(&self, layer: usize, expert: usize) {
+    fn gpu_expert_ptrs_clear_on_stream(
+        &self,
+        layer: usize,
+        expert: usize,
+        stream: cuda_sys::CUstream,
+    ) {
         if let Some(ref buf) = self.d_expert_ptrs {
             let idx = (layer * self.d_expert_ptrs_ne + expert) * 4;
             unsafe {
@@ -3921,7 +3950,7 @@ impl HcsState {
                     dst,
                     src,
                     32,
-                    std::ptr::null_mut(),
+                    stream,
                 );
                 if err != cuda_sys::CUresult::CUDA_SUCCESS {
                     log::warn!("gpu_expert_ptrs_clear[{},{}]: {:?}", layer, expert, err);
@@ -4251,7 +4280,7 @@ impl HcsState {
         }
 
         if let Some((victim_layer, victim_expert)) = self.soft_slot_to_expert[slot] {
-            self.cache_fast_clear(victim_layer, victim_expert);
+            self.cache_fast_clear_on_stream(victim_layer, victim_expert, stream);
             self.cache.remove(&(victim_layer, victim_expert));
             let victim_idx = self.dynamic_flat_idx(victim_layer, victim_expert);
             if victim_idx < self.dynamic_last_used.len() {
@@ -4332,7 +4361,7 @@ impl HcsState {
         if slot < self.soft_ranking.len() {
             self.soft_ranking[slot] = (promo.layer_idx, promo.expert_idx);
         }
-        self.cache_fast_set(promo.layer_idx, promo.expert_idx, &entry);
+        self.cache_fast_set_on_stream(promo.layer_idx, promo.expert_idx, &entry, stream);
         self.cache.insert((promo.layer_idx, promo.expert_idx), entry);
         self.dynamic_request_promotions += 1;
         self.dynamic_promotions += 1;

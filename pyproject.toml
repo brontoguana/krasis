@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "krasis"
-version = "1.0.13-rc.1"
+version = "1.0.13-rc.2"
 description = "LLM runtime for large MoE models with GPU prefill, GPU decode, and measured VRAM management"
 license = {text = "SSPL-1.0"}
 requires-python = ">=3.10"
@@ -24,6 +24,7 @@ classifiers = [
 dependencies = [
     "safetensors>=0.4",
     "numpy>=1.24",
+    "Pillow>=10",
     "transformers>=4.40",
     "huggingface-hub>=0.24",
 ]
