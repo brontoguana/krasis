@@ -879,6 +879,7 @@ def main():
             "CFG_HOST": "host",
             "CFG_PORT": "port",
             "CFG_SSH_TUNNEL": "ssh_tunnel",
+            "CFG_SSH_KEY_PATH": "ssh_key_path",
             "CFG_GPU_PREFILL_THRESHOLD": "gpu_prefill_threshold",
             "CFG_GGUF_PATH": "gguf_path",
             "CFG_HEATMAP_PATH": "heatmap_path",
@@ -985,6 +986,8 @@ def main():
             config_defaults["model_path"] = os.path.expanduser(config_defaults["model_path"])
         if "heatmap_path" in config_defaults and isinstance(config_defaults["heatmap_path"], str):
             config_defaults["heatmap_path"] = os.path.expanduser(config_defaults["heatmap_path"])
+        if "ssh_key_path" in config_defaults and isinstance(config_defaults["ssh_key_path"], str):
+            config_defaults["ssh_key_path"] = os.path.expanduser(config_defaults["ssh_key_path"])
         if "draft_model" in config_defaults and isinstance(config_defaults["draft_model"], str):
             config_defaults["draft_model"] = os.path.expanduser(config_defaults["draft_model"])
         if explicit_selected_gpus is not None:
@@ -1007,11 +1010,13 @@ def main():
     parser.add_argument("--ssh-tunnel", default="",
                         help="Reverse SSH tunnel target: user@host or user@host:port. "
                              "Remote 127.0.0.1:<server port> forwards to local Krasis.")
+    parser.add_argument("--ssh-key-path", default="",
+                        help="Optional SSH identity file for --ssh-tunnel; uses IdentitiesOnly=yes.")
     parser.add_argument("--krasis-threads", type=int, default=40,
                         help="CPU threads for expert computation")
     parser.add_argument("--kv-dtype", default="k6v6",
-                        choices=list(KV_CACHE_FORMAT_CHOICES),
-                        help="KV cache format: k6v6 Quality default, k4v4 Ultra Compact, bf16 Full Precision, or explicit internal formats")
+                        choices=list(KV_CACHE_FORMAT_CHOICES + DEPRECATED_KV_CACHE_FORMAT_CHOICES),
+                        help="KV cache format: k6v6 Quality default, k4v4 Ultra Compact, bf16 Full Precision, or explicit internal formats; fp8/fp8_e4m3 are deprecated and disabled")
     parser.add_argument("--kv-cache-mb", type=int, default=1000,
                         help="KV cache size in MB (default: 1000)")
     parser.add_argument("--heatmap-path", default=None,
@@ -1134,6 +1139,8 @@ def main():
     )
     if args.hcs_host_cache_mode not in ("auto", "mirror", "source"):
         parser.error("--hcs-host-cache-mode must be one of: auto, mirror, source")
+    if str(getattr(args, "ssh_key_path", "") or "").strip():
+        args.ssh_key_path = os.path.expanduser(args.ssh_key_path.strip())
     if str(getattr(args, "ssh_tunnel", "") or "").strip():
         from krasis.ssh_tunnel import parse_ssh_tunnel_target
 
@@ -1271,10 +1278,14 @@ def main():
     global _model, _model_name
     import torch
 
-    kv_format_str = args.kv_dtype  # "fp8", "fp8_e4m3", "bf16", "k8v4", "k8v6", "k7v4", "k6v6", "k6v4", "k4v4", or "tq4"
-    if args.kv_dtype in ("fp8", "fp8_e4m3"):
-        kv_dtype = torch.float8_e4m3fn
-    elif args.kv_dtype in ("k8v4", "k8v6", "k7v4", "k6v6", "k6v4", "k4v4", "tq4"):
+    if args.kv_dtype in DEPRECATED_KV_CACHE_FORMAT_CHOICES:
+        raise ValueError(
+            f"kv_dtype={args.kv_dtype} is deprecated and disabled. "
+            "Use 'k6v6' for quality, 'k4v4' for compact KV, or 'bf16' for full precision."
+        )
+
+    kv_format_str = args.kv_dtype  # "bf16", "k8v4", "k8v6", "k7v4", "k6v6", "k6v4", "k4v4", or "tq4"
+    if args.kv_dtype in ("k8v4", "k8v6", "k7v4", "k6v6", "k6v4", "k4v4", "tq4"):
         kv_dtype = torch.float8_e4m3fn  # base dtype for size calc; custom formats allocate their own tensors
     else:
         kv_dtype = torch.bfloat16
@@ -2825,6 +2836,7 @@ def main():
             ssh_tunnel = SshReverseTunnel(
                 args.ssh_tunnel,
                 local_port=args.port,
+                key_path=args.ssh_key_path,
                 logger=logger,
             )
             ssh_tunnel.start()

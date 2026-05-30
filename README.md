@@ -231,6 +231,7 @@ Common options:
 - `--vram-safety-margin 600`
 - `--dynamic-hcs` / `--no-dynamic-hcs`
 - `--ssh-tunnel user@host`
+- `--ssh-key-path ~/.ssh/id_ed25519`
 
 For the full option surface, run:
 

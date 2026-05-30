@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Deprecated and disabled direct FP8 KV cache modes (`fp8`, `fp8_e4m3`).
+  Configs or CLI args that request them now fail explicitly; use `k6v6`,
+  `k4v4`, or `bf16` instead.
+- Added `--ssh-key-path` / `CFG_SSH_KEY_PATH` for reverse SSH tunnel sharing,
+  so managed tunnels can force a specific identity file with `IdentitiesOnly`.
+
 ## 1.0.13 - 2026-05-30
 
 - Stable release of the Witsy/Qwen vision compatibility and dynamic HCS safety

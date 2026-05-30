@@ -5,6 +5,7 @@ from __future__ import annotations
 import atexit
 from dataclasses import dataclass
 import logging
+import os
 import shutil
 import subprocess
 import threading
@@ -52,6 +53,7 @@ def build_ssh_tunnel_command(
     remote_port: Optional[int] = None,
     remote_bind: str = "127.0.0.1",
     local_bind: str = "127.0.0.1",
+    key_path: Optional[str] = None,
 ) -> list[str]:
     """Build the ssh command for a reverse tunnel without invoking a shell."""
     if local_port < 1 or local_port > 65535:
@@ -73,6 +75,12 @@ def build_ssh_tunnel_command(
         "-o", "ConnectTimeout=10",
         "-R", f"{remote_bind}:{remote_port}:{local_bind}:{local_port}",
     ]
+    key_path = (key_path or "").strip()
+    if key_path:
+        if any(ch.isspace() for ch in key_path):
+            raise ValueError("SSH key path must not contain whitespace")
+        key_path = os.path.expanduser(key_path)
+        cmd.extend(["-i", key_path, "-o", "IdentitiesOnly=yes"])
     if parsed.ssh_port is not None:
         cmd.extend(["-p", str(parsed.ssh_port)])
     cmd.append(parsed.destination)
@@ -88,16 +96,19 @@ class SshReverseTunnel:
         *,
         local_port: int,
         remote_port: Optional[int] = None,
+        key_path: Optional[str] = None,
         logger: Optional[logging.Logger] = None,
     ):
         self.target = target
         self.local_port = int(local_port)
         self.remote_port = int(remote_port) if remote_port is not None else int(local_port)
+        self.key_path = (key_path or "").strip()
         self.logger = logger or logging.getLogger(__name__)
         self.command = build_ssh_tunnel_command(
             target,
             local_port=self.local_port,
             remote_port=self.remote_port,
+            key_path=self.key_path,
         )
         self.process: Optional[subprocess.Popen[str]] = None
         self._log_thread: Optional[threading.Thread] = None

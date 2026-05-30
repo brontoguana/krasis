@@ -66,6 +66,7 @@ Config files use `KEY=VALUE` format. CLI flags override config file values.
 | `--host ADDR` | 0.0.0.0 | Server bind address |
 | `--port PORT` | 8012 | Server port |
 | `--ssh-tunnel TARGET` | off | Reverse SSH tunnel target (`user@host` or `user@host:ssh_port`). Remote `127.0.0.1:<server port>` forwards to local Krasis over SSH with key-only batch mode. |
+| `--ssh-key-path PATH` | off | Optional identity file for `--ssh-tunnel`; passed to `ssh -i` with `IdentitiesOnly=yes`. |
 
 ### Quantization
 

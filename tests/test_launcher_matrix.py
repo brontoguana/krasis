@@ -280,6 +280,7 @@ class LauncherMatrixTest(unittest.TestCase):
         cfg.host = "127.0.0.1"
         cfg.port = 18012
         cfg.ssh_tunnel = "alice@example.com:2222"
+        cfg.ssh_key_path = "~/.ssh/id_ed25519"
         cfg.gpu_prefill_threshold = 512
         cfg.gguf_path = "~/models/cpu-experts.gguf"
         cfg.heatmap_path = "~/heatmaps/qcn.json"
@@ -327,6 +328,7 @@ class LauncherMatrixTest(unittest.TestCase):
             self.assertEqual(values.get("CFG_HOST"), "127.0.0.1")
             self.assertEqual(values.get("CFG_PORT"), "18012")
             self.assertEqual(values.get("CFG_SSH_TUNNEL"), "alice@example.com:2222")
+            self.assertEqual(values.get("CFG_SSH_KEY_PATH"), "~/.ssh/id_ed25519")
             self.assertEqual(values.get("CFG_GPU_PREFILL_THRESHOLD"), "512")
             self.assertEqual(values.get("CFG_GGUF_PATH"), "~/models/cpu-experts.gguf")
             self.assertEqual(values.get("CFG_HEATMAP_PATH"), "~/heatmaps/qcn.json")
@@ -369,6 +371,7 @@ class LauncherMatrixTest(unittest.TestCase):
             self.assertEqual(loaded.host, "127.0.0.1")
             self.assertEqual(loaded.port, 18012)
             self.assertEqual(loaded.ssh_tunnel, "alice@example.com:2222")
+            self.assertEqual(loaded.ssh_key_path, os.path.expanduser("~/.ssh/id_ed25519"))
             self.assertEqual(loaded.gpu_prefill_threshold, 512)
             self.assertEqual(loaded.gguf_path, "~/models/cpu-experts.gguf")
             self.assertEqual(loaded.heatmap_path, os.path.expanduser("~/heatmaps/qcn.json"))
@@ -416,6 +419,7 @@ class LauncherMatrixTest(unittest.TestCase):
                     'CFG_ATTENTION_QUANT="hqq4"',
                     'CFG_VRAM_SAFETY_MARGIN="900"',
                     'CFG_SSH_TUNNEL="alice@example.com:2222"',
+                    'CFG_SSH_KEY_PATH="~/.ssh/id_ed25519"',
                     'CFG_ENABLE_THINKING="0"',
                     "",
                 ])
@@ -435,6 +439,7 @@ class LauncherMatrixTest(unittest.TestCase):
         self.assertEqual(launcher.cfg.attention_quant, "hqq4")
         self.assertEqual(launcher.cfg.vram_safety_margin, 900)
         self.assertEqual(launcher.cfg.ssh_tunnel, "alice@example.com:2222")
+        self.assertEqual(launcher.cfg.ssh_key_path, os.path.expanduser("~/.ssh/id_ed25519"))
         self.assertFalse(launcher.cfg.enable_thinking)
 
     def test_launcher_generated_configs_start_server_parse_path(self) -> None:
@@ -543,6 +548,7 @@ class LauncherMatrixTest(unittest.TestCase):
         cfg.vram_safety_margin = 900
         cfg.port = 65_502
         cfg.ssh_tunnel = "alice@example.com:2222"
+        cfg.ssh_key_path = "~/.ssh/id_ed25519"
         cfg.hcs = False
         cfg.multi_gpu_hcs = True
         cfg.heatmap_path = "~/heatmaps/qwen36.json"
@@ -563,6 +569,7 @@ class LauncherMatrixTest(unittest.TestCase):
                 "CFG_VRAM_SAFETY_MARGIN": "900",
                 "CFG_PORT": "65502",
                 "CFG_SSH_TUNNEL": "alice@example.com:2222",
+                "CFG_SSH_KEY_PATH": "~/.ssh/id_ed25519",
                 "CFG_HCS": "0",
                 "CFG_MULTI_GPU_HCS": "1",
                 "CFG_HEATMAP_PATH": "~/heatmaps/qwen36.json",
@@ -578,6 +585,7 @@ class LauncherMatrixTest(unittest.TestCase):
                 "selected_gpus = '0,1'",
                 "expert_group_size = 64",
                 "ssh_tunnel = 'alice@example.com:2222'",
+                f"ssh_key_path = '{os.path.expanduser('~/.ssh/id_ed25519')}'",
                 "hcs = False",
                 "multi_gpu_hcs = True",
                 f"heatmap_path = '{os.path.expanduser('~/heatmaps/qwen36.json')}'",

@@ -507,7 +507,7 @@ CONFIG_KEYS = [
     "CFG_ATTENTION_QUANT", "CFG_HQQ_CACHE_PROFILE", "CFG_HQQ_GROUP_SIZE", "CFG_HQQ_AUTO_BUDGET_PCT", "CFG_HQQ46_AUTO_BUDGET_MB", "CFG_HQQ_SIDECAR_MANIFEST",
     "CFG_SHARED_EXPERT_QUANT", "CFG_DENSE_MLP_QUANT",
     "CFG_LM_HEAD_QUANT", "CFG_KRASIS_THREADS", "CFG_HOST", "CFG_PORT",
-    "CFG_SSH_TUNNEL",
+    "CFG_SSH_TUNNEL", "CFG_SSH_KEY_PATH",
     "CFG_GPU_PREFILL_THRESHOLD", "CFG_GGUF_PATH", "CFG_HEATMAP_PATH",
     "CFG_VRAM_SAFETY_MARGIN",
     "CFG_HCS", "CFG_MULTI_GPU_HCS", "CFG_HCS_HOST_CACHE_MODE", "CFG_DYNAMIC_HCS", "CFG_DYNAMIC_HCS_TAIL_BLOCKS",
@@ -583,6 +583,7 @@ class LauncherConfig:
         self.host: str = "0.0.0.0"
         self.port: int = 8012
         self.ssh_tunnel: str = ""
+        self.ssh_key_path: str = ""
         self.gpu_prefill_threshold: int = 300
         self.gguf_path: str = ""
         self.heatmap_path: str = ""
@@ -746,6 +747,8 @@ class LauncherConfig:
                 pass
         if "CFG_SSH_TUNNEL" in saved:
             self.ssh_tunnel = saved["CFG_SSH_TUNNEL"].strip()
+        if "CFG_SSH_KEY_PATH" in saved:
+            self.ssh_key_path = os.path.expanduser(saved["CFG_SSH_KEY_PATH"].strip())
         if "CFG_GPU_PREFILL_THRESHOLD" in saved:
             try:
                 self.gpu_prefill_threshold = int(saved["CFG_GPU_PREFILL_THRESHOLD"])
@@ -844,6 +847,7 @@ class LauncherConfig:
             "CFG_HOST": self.host,
             "CFG_PORT": str(self.port),
             "CFG_SSH_TUNNEL": self.ssh_tunnel,
+            "CFG_SSH_KEY_PATH": self.ssh_key_path,
             "CFG_GPU_PREFILL_THRESHOLD": str(self.gpu_prefill_threshold),
             "CFG_GGUF_PATH": self.gguf_path,
             "CFG_HEATMAP_PATH": self.heatmap_path,
@@ -925,6 +929,7 @@ OPTIONS = [
                  opt_type="number", min_val=500, max_val=8000, step=100),
     ConfigOption("Host/Port", "host", opt_type="text"),
     ConfigOption("SSH Tunnel", "ssh_tunnel", opt_type="text"),
+    ConfigOption("SSH Key Path", "ssh_key_path", opt_type="text", advanced=True),
     ConfigOption("Enable thinking", "enable_thinking",
                  choices=[True, False]),
     ConfigOption("HCS RAM saver", "hcs_host_cache_mode",
@@ -1052,9 +1057,7 @@ def _quality_annotation(native_dtype: str, config_key: str, current_val: Any) ->
 
     elif config_key == "kv_dtype":
         current = str(current_val)
-        if current == "fp8_e4m3":
-            return f"{DIM}{native_label} \u2192 fp8 \u2014 legacy FP8 KV{NC}"
-        elif current == "k8v4":
+        if current == "k8v4":
             return f"{DIM}{native_label} \u2192 k8v4 \u2014 FP8 K + 4-bit V{NC}"
         elif current == "k8v6":
             return f"{DIM}{native_label} \u2192 k8v6 \u2014 INT8 K + INT6 V{NC}"
@@ -2585,6 +2588,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ssh-tunnel", default=None,
                         help="Reverse SSH tunnel target: user@host or user@host:port. "
                              "Remote 127.0.0.1:<server port> forwards to local Krasis.")
+    parser.add_argument("--ssh-key-path", default=None,
+                        help="Optional SSH identity file for --ssh-tunnel; uses IdentitiesOnly=yes.")
     parser.add_argument("--gguf-path", default=None,
                         help="Path to GGUF file for CPU experts")
     parser.add_argument("--gpu-prefill-threshold", type=int, default=None,
@@ -2641,7 +2646,7 @@ def _apply_cli_overrides(cfg: LauncherConfig, args: argparse.Namespace) -> None:
     if args.kv_dtype is not None:
         if args.kv_dtype in DEPRECATED_KV_CACHE_FORMAT_CHOICES:
             raise ValueError(
-                f"Unsupported --kv-dtype {args.kv_dtype}: Polar4 is deprecated and disabled. "
+                f"Unsupported --kv-dtype {args.kv_dtype}: this KV cache format is deprecated and disabled. "
                 "Use k6v6, k4v4, or bf16."
             )
         cfg.kv_dtype = args.kv_dtype
@@ -2702,6 +2707,8 @@ def _apply_cli_overrides(cfg: LauncherConfig, args: argparse.Namespace) -> None:
         cfg.port = args.port
     if args.ssh_tunnel is not None:
         cfg.ssh_tunnel = args.ssh_tunnel.strip()
+    if args.ssh_key_path is not None:
+        cfg.ssh_key_path = os.path.expanduser(args.ssh_key_path.strip())
     if args.gpu_prefill_threshold is not None:
         cfg.gpu_prefill_threshold = args.gpu_prefill_threshold
     if args.dynamic_hcs is not None:

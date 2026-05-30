@@ -23,13 +23,17 @@ class SshTunnelTests(unittest.TestCase):
         cmd = build_ssh_tunnel_command(
             "alice@example.com:2222",
             local_port=8012,
+            key_path="~/.ssh/id_ed25519",
         )
         self.assertEqual(cmd[0], "ssh")
         self.assertIn("BatchMode=yes", cmd)
+        self.assertIn("IdentitiesOnly=yes", cmd)
         self.assertIn("ExitOnForwardFailure=yes", cmd)
         self.assertIn("ServerAliveInterval=30", cmd)
         self.assertIn("ServerAliveCountMax=3", cmd)
         self.assertIn("127.0.0.1:8012:127.0.0.1:8012", cmd)
+        self.assertIn("-i", cmd)
+        self.assertIn("/.ssh/id_ed25519", cmd[cmd.index("-i") + 1])
         self.assertIn("-p", cmd)
         self.assertIn("2222", cmd)
         self.assertEqual(cmd[-1], "alice@example.com")
