@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Scoped `./dev benchmark` GPU cleanup to `CFG_SELECTED_GPUS` so benchmarks on one GPU do not stop unrelated Krasis services on other GPUs.
+
 - Deprecated and disabled direct FP8 KV cache modes (`fp8`, `fp8_e4m3`).
   Configs or CLI args that request them now fail explicitly; use `k6v6`,
   `k4v4`, or `bf16` instead.

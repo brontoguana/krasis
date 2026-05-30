@@ -459,9 +459,44 @@ cleanup_gpu() {
         selected_gpus=$(grep '^CFG_SELECTED_GPUS=' "$conf" 2>/dev/null | head -1 | cut -d'"' -f2 || true)
     fi
 
-    # Find all krasis server/stress/benchmark Python processes (but not this script)
+    # Find krasis server/stress/benchmark Python processes (but not this script).
+    # When a config selects specific GPUs, only kill krasis processes currently
+    # using those GPUs so a separate Krasis runtime on another GPU can stay up.
     local pids
     pids=$(pgrep -f 'python.*krasis\.' 2>/dev/null || true)
+    if [[ -n "$pids" && -n "$selected_gpus" ]]; then
+        local selected_uuids=""
+        local gpu_idx gpu_uuid
+        while IFS=',' read -r gpu_idx gpu_uuid; do
+            gpu_idx="${gpu_idx//[[:space:]]/}"
+            gpu_uuid="${gpu_uuid//[[:space:]]/}"
+            for sg in $(echo "$selected_gpus" | tr ',' ' '); do
+                if [[ "$gpu_idx" == "$sg" ]]; then
+                    selected_uuids+="${gpu_uuid}"$'\n'
+                fi
+            done
+        done < <(nvidia-smi --query-gpu=index,uuid --format=csv,noheader,nounits 2>/dev/null || true)
+
+        local selected_gpu_pids=""
+        local app_pid app_uuid
+        while IFS=',' read -r app_pid app_uuid; do
+            app_pid="${app_pid//[[:space:]]/}"
+            app_uuid="${app_uuid//[[:space:]]/}"
+            [[ -z "$app_pid" || -z "$app_uuid" ]] && continue
+            if grep -qxF "$app_uuid" <<< "$selected_uuids"; then
+                selected_gpu_pids+="${app_pid}"$'\n'
+            fi
+        done < <(nvidia-smi --query-compute-apps=pid,gpu_uuid --format=csv,noheader,nounits 2>/dev/null || true)
+
+        local filtered_pids=""
+        local p
+        for p in $pids; do
+            if grep -qxF "$p" <<< "$selected_gpu_pids"; then
+                filtered_pids+="${p}"$'\n'
+            fi
+        done
+        pids="$filtered_pids"
+    fi
 
     if [[ -n "$pids" ]]; then
         warn "Found existing krasis processes — killing them:"
