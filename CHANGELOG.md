@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- Improved Q122B HQQ6+k4v4 prefill planning without weakening the VRAM safety
+  margin. Runtime prefill now builds an explicit chunk plan, preserves the
+  fewest measured-safe passes, and smooths pathological tiny tails across the
+  same pass count. Gate pre-scan and dense pointer-table prefetch now consume
+  actual chunk boundaries.
+- Added dense-active optional-pinning policy for prefill. When pre-scan shows a
+  chunk is near-all-experts, Krasis skips the temporary optional pinning pool
+  and uses the dense pointer-table/cold path instead of paying pinning overhead
+  for experts that are effectively all active anyway.
+- Tightened post-scratch prefill allocation acceptance: scratch is accepted
+  only when actual post-allocation free VRAM still covers the measured runtime
+  transient floor plus cold-staging reserve, not just the raw safety margin.
+- Fixed HCS soft-reload safety after prefill. Reload now sizes chunks by the
+  physical soft-tier chunk boundary and leaves one measured soft-HCS chunk of
+  headroom above the idle floor, preventing reload from grazing below the
+  `600 MB` safety margin before pressure eviction reacts.
+- Fixed a test-only Polar4 kernel smoke compile error exposed by
+  `./dev test-kernels`, where the append-kernel parameter list referenced an
+  undeclared `norm_correction_i32`.
+- Validation: `./dev build` passed. Clean timing-off Q122B HQQ6/k4v4 benchmark
+  produced `3238.3 tok/s` internal prefill, `27.21 tok/s` internal decode, and
+  `47.04 tok/s` HTTP round trip with `4050/12288` HCS, `804 MB` minimum free
+  VRAM, and clean CUDA/VRAM/HCS health scan. `PATH="$HOME/.cargo/bin:$PATH"
+  ./dev test-kernels polar4_kv_roundtrip_smoke` passed.
 - Restored the prefill-pass planner fixes from the shelved Q122B investigation:
   Krasis now evicts additional soft HCS when measured VRAM says that can avoid
   an extra prefill pass, uses post-scratch HCS eviction at chunk boundaries,

@@ -3769,6 +3769,21 @@ impl HcsState {
         (evicted, freed_bytes)
     }
 
+    #[inline]
+    fn soft_slots_in_chunk(&self, chunk_idx: usize) -> usize {
+        if chunk_idx == self.soft_total_chunks.saturating_sub(1) {
+            self.soft_num_slots
+                .saturating_sub(chunk_idx.saturating_mul(self.soft_slots_per_chunk))
+        } else {
+            self.soft_slots_per_chunk
+        }
+    }
+
+    #[inline]
+    fn soft_full_chunk_bytes(&self) -> usize {
+        self.soft_slots_per_chunk.saturating_mul(self.soft_slot_size)
+    }
+
     fn apply_pressure_cap(&mut self, target_chunks: usize) {
         self.soft_pressure_cap_chunks = Some(
             self.soft_pressure_cap_chunks
@@ -28996,6 +29011,11 @@ impl GpuDecodeStore {
             .unwrap_or(hcs.hard_budget_mb + hcs.soft_max_mb);
         let idle_floor_mb = cal.map(|cal| cal.required_idle_free_mb(actual_tokens) as usize)
             .unwrap_or(hcs.safety_margin_mb);
+        let reload_guard_bytes = hcs.soft_full_chunk_bytes();
+        let reload_floor_bytes = idle_floor_mb
+            .saturating_mul(1024 * 1024)
+            .saturating_add(reload_guard_bytes);
+        let reload_floor_mb = (reload_floor_bytes + (1024 * 1024) - 1) / (1024 * 1024);
         let target_soft_mb = decode_budget_mb
             .saturating_sub(hcs.hard_budget_mb)
             .min(hcs.soft_max_mb);
@@ -29090,21 +29110,17 @@ impl GpuDecodeStore {
 
         // Reallocate and batch-DMA only the missing chunks
         for c in already_loaded..target_chunks {
-            let slots_this_chunk = if c == target_chunks - 1 {
-                hcs.soft_num_slots - c * spc
-            } else {
-                spc
-            };
+            let slots_this_chunk = hcs.soft_slots_in_chunk(c);
             let chunk_bytes = slots_this_chunk * slot_size;
             if let Ok((actual_free, _)) = cudarc::driver::result::mem_get_info() {
                 let actual_free_mb = actual_free / (1024 * 1024);
                 let chunk_mb = (chunk_bytes + (1024 * 1024) - 1) / (1024 * 1024);
-                if actual_free_mb <= idle_floor_mb
-                    || actual_free_mb.saturating_sub(chunk_mb) < idle_floor_mb
+                if actual_free <= reload_floor_bytes
+                    || actual_free.saturating_sub(chunk_bytes) < reload_floor_bytes
                 {
                     log::warn!(
-                        "HCS soft reload: stopping at chunk {} — free={} MB, chunk={} MB, idle floor={} MB",
-                        c, actual_free_mb, chunk_mb, idle_floor_mb,
+                        "HCS soft reload: stopping at chunk {} — free={} MB, chunk={} MB, idle floor={} MB, reload floor={} MB",
+                        c, actual_free_mb, chunk_mb, idle_floor_mb, reload_floor_mb,
                     );
                     break;
                 }
@@ -29120,10 +29136,10 @@ impl GpuDecodeStore {
             };
             if let Ok((actual_free, _)) = cudarc::driver::result::mem_get_info() {
                 let actual_free_mb = actual_free / (1024 * 1024);
-                if actual_free_mb < idle_floor_mb {
+                if actual_free < reload_floor_bytes {
                     log::warn!(
-                        "HCS soft reload: dropping chunk {} after alloc — free={} MB below idle floor={} MB",
-                        c, actual_free_mb, idle_floor_mb,
+                        "HCS soft reload: dropping chunk {} after alloc — free={} MB below reload floor={} MB (idle floor={} MB)",
+                        c, actual_free_mb, reload_floor_mb, idle_floor_mb,
                     );
                     drop(chunk_buf);
                     break;
@@ -29146,10 +29162,10 @@ impl GpuDecodeStore {
                 if hcs.soft_host_chunks[c].register() {
                     if let Ok((actual_free, _)) = cudarc::driver::result::mem_get_info() {
                         let actual_free_mb = actual_free / (1024 * 1024);
-                        if actual_free_mb < idle_floor_mb {
+                        if actual_free < reload_floor_bytes {
                             log::warn!(
-                                "HCS soft reload: dropping chunk {} after host re-pin — free={} MB below idle floor={} MB",
-                                c, actual_free_mb, idle_floor_mb,
+                                "HCS soft reload: dropping chunk {} after host re-pin — free={} MB below reload floor={} MB (idle floor={} MB)",
+                                c, actual_free_mb, reload_floor_mb, idle_floor_mb,
                             );
                             hcs.soft_host_chunks[c].unregister();
                             drop(chunk_buf);
@@ -29402,6 +29418,11 @@ impl GpuDecodeStore {
             .unwrap_or(hcs.hard_budget_mb + hcs.soft_max_mb);
         let idle_floor_mb = cal.map(|cal| cal.required_idle_free_mb(actual_tokens) as usize)
             .unwrap_or(hcs.safety_margin_mb);
+        let reload_guard_bytes = hcs.soft_full_chunk_bytes();
+        let reload_floor_bytes = idle_floor_mb
+            .saturating_mul(1024 * 1024)
+            .saturating_add(reload_guard_bytes);
+        let reload_floor_mb = (reload_floor_bytes + (1024 * 1024) - 1) / (1024 * 1024);
         let target_soft_mb = decode_budget_mb
             .saturating_sub(hcs.hard_budget_mb)
             .min(hcs.soft_max_mb);
@@ -29525,21 +29546,17 @@ impl GpuDecodeStore {
         let mut pending_entries: Vec<(usize, usize, HcsCacheEntry)> = Vec::new();
 
         for c in already_loaded..target_chunks {
-            let slots_this_chunk = if c == target_chunks - 1 {
-                hcs.soft_num_slots - c * spc
-            } else {
-                spc
-            };
+            let slots_this_chunk = hcs.soft_slots_in_chunk(c);
             let chunk_bytes = slots_this_chunk * slot_size;
             if let Ok((actual_free, _)) = cudarc::driver::result::mem_get_info() {
                 let actual_free_mb = actual_free / (1024 * 1024);
                 let chunk_mb = (chunk_bytes + (1024 * 1024) - 1) / (1024 * 1024);
-                if actual_free_mb <= idle_floor_mb
-                    || actual_free_mb.saturating_sub(chunk_mb) < idle_floor_mb
+                if actual_free <= reload_floor_bytes
+                    || actual_free.saturating_sub(chunk_bytes) < reload_floor_bytes
                 {
                     log::warn!(
-                        "HCS soft async reload: stopping at chunk {} — free={} MB, chunk={} MB, idle floor={} MB",
-                        c, actual_free_mb, chunk_mb, idle_floor_mb,
+                        "HCS soft async reload: stopping at chunk {} — free={} MB, chunk={} MB, idle floor={} MB, reload floor={} MB",
+                        c, actual_free_mb, chunk_mb, idle_floor_mb, reload_floor_mb,
                     );
                     break;
                 }
@@ -29555,10 +29572,10 @@ impl GpuDecodeStore {
             };
             if let Ok((actual_free, _)) = cudarc::driver::result::mem_get_info() {
                 let actual_free_mb = actual_free / (1024 * 1024);
-                if actual_free_mb < idle_floor_mb {
+                if actual_free < reload_floor_bytes {
                     log::warn!(
-                        "HCS soft async reload: dropping chunk {} after alloc — free={} MB below idle floor={} MB",
-                        c, actual_free_mb, idle_floor_mb,
+                        "HCS soft async reload: dropping chunk {} after alloc — free={} MB below reload floor={} MB (idle floor={} MB)",
+                        c, actual_free_mb, reload_floor_mb, idle_floor_mb,
                     );
                     drop(chunk_buf);
                     break;
@@ -29578,10 +29595,10 @@ impl GpuDecodeStore {
             if hcs.soft_host_chunks[c].register() {
                 if let Ok((actual_free, _)) = cudarc::driver::result::mem_get_info() {
                     let actual_free_mb = actual_free / (1024 * 1024);
-                    if actual_free_mb < idle_floor_mb {
+                    if actual_free < reload_floor_bytes {
                         log::warn!(
-                            "HCS soft async reload: dropping chunk {} after host re-pin — free={} MB below idle floor={} MB",
-                            c, actual_free_mb, idle_floor_mb,
+                            "HCS soft async reload: dropping chunk {} after host re-pin — free={} MB below reload floor={} MB (idle floor={} MB)",
+                            c, actual_free_mb, reload_floor_mb, idle_floor_mb,
                         );
                         hcs.soft_host_chunks[c].unregister();
                         drop(chunk_buf);

@@ -1,5 +1,62 @@
 # Krasis Benchmark Results
 
+## Diagnostic Benchmarks - 2026-06-04 (Q122B HQQ6+k4v4 prefill recovery)
+
+Hardware: EPYC 7742, 1007 GB RAM, RTX 5090 32 GB selected for the run.
+These were instrumented diagnostics on `main` at `4a40cca`, using
+`./dev benchmark tests/q122b-k4v4-hqq6-int4-benchmark.conf` with
+`KRASIS_VRAM_LEDGER=1`, `KRASIS_PREFILL_DEBUG=1`, and
+`KRASIS_PREFILL_TIMING=1`. They are not clean speed benchmarks.
+
+| Run | Pinning | Prefill | Decode | HTTP | HCS | Min free | Health | Logs |
+|-----|---------|--------:|-------:|-----:|-----|---------:|--------|------|
+| Q122B current-main component timing | on | 2272.0 | 27.76 | 50.89 | 4077/12288 (33.2%) | 682 MB | clean | [full log](20260604_q122b_hqq6_k4v4_current_main_prefill_component_timing.log), [report](20260604_q122b_hqq6_k4v4_current_main_prefill_component_timing_report.log), [server log](20260604_q122b_hqq6_k4v4_current_main_prefill_component_timing_krasis.log) |
+| Q122B current-main component timing, `KRASIS_NO_PINNING=1` | off | 3032.4 | 27.91 | 50.34 | 4077/12288 (33.2%) | 646 MB | one warning: 598 MB free during warmup | [full log](20260604_q122b_hqq6_k4v4_current_main_no_pinning_component_timing.log), [report](20260604_q122b_hqq6_k4v4_current_main_no_pinning_component_timing_report.log), [server log](20260604_q122b_hqq6_k4v4_current_main_no_pinning_component_timing_krasis.log) |
+| Q122B tail smoothing + dense-active pinning skip + post-scratch floor | adaptive | 2992.1 | 28.27 | 49.45 | 4077/12288 (33.2%) | 678 MB | clean | [full log](20260604_2015_q122b_hqq6_k4v4_tail_dense_floor_component_timing.log), [report](20260604_q122b_hqq6_k4v4_tail_dense_floor_component_timing_report.log), [server log](20260604_q122b_hqq6_k4v4_tail_dense_floor_component_timing_krasis.log) |
+
+Findings:
+- The no-HCS long calibration chunk still reaches the old speed class:
+  `17138` tokens at `4693-4701 tok/s`.
+- With pinning on, timed `20K` was `2461 tok/s` and `50K` was `2662 tok/s`;
+  MoE DMA dominated (`4026.8 ms` at 20K, `7396.8 ms` at 50K).
+- With pinning off, first large chunks returned to `~4.75K-4.79K tok/s`, but
+  tail chunks stayed slow (`2947` tail at `1198 tok/s`, `80` tail at
+  `34.8 tok/s`), and the run briefly crossed the 600 MB floor (`598 MB`).
+- Cross-chunk KV staging was effectively zero-time in these timing rows; the
+  remaining regression surface is the dense pointer-table/cold-staging MoE DMA
+  policy plus the chunk/tail shape, not basic attention kernel throughput.
+- Tail smoothing changed the long prompt plans from pathological tiny tails to
+  balanced same-pass-count plans where measured VRAM required it: `35K` became
+  `11667 + 11667 + 11666`, and `50K` became `12500 x 4`.
+- Dense-active optional pinning skip restored large-chunk prefill to the
+  old-speed class for dense Q122B chunks, while the post-scratch floor guard
+  kept the instrumented diagnostic above the 600 MB safety floor.
+
+---
+
+## Standard Benchmarks - 2026-06-04 (Q122B tail smoothing and dense-active pinning policy)
+
+Hardware: EPYC 7742, 1007 GB RAM, RTX 5090 32 GB selected for the run.
+Timing instrumentation was disabled. Both rows used
+`./dev benchmark tests/q122b-k4v4-hqq6-int4-benchmark.conf`.
+
+| Run | Prefill (tok/s) | Decode (tok/s) | Round trip (tok/s) | HCS | Min free VRAM | Health | Logs |
+|-----|----------------:|---------------:|-------------------:|-----|--------------:|--------|------|
+| Q122B tail smoothing + dense-active pinning skip, before reload guard | 3106.2 | 28.62 | 48.78 | 4077/12288 (33.2%) | 648 MB | one warning: 598 MB free during warmup | [full log](20260604_2055_q122b_hqq6_k4v4_tail_dense_floor_clean_benchmark.log), [report](20260604_q122b_hqq6_k4v4_tail_dense_floor_clean_benchmark_report.log), [server log](20260604_q122b_hqq6_k4v4_tail_dense_floor_clean_benchmark_krasis.log) |
+| Q122B tail smoothing + dense-active pinning skip + reload guard | 3238.3 | 27.21 | 47.04 | 4050/12288 (33.0%) | 804 MB | clean | [full log](20260604_2004_q122b_hqq6_k4v4_tail_dense_reload_guard_clean_benchmark.log), [report](20260604_q122b_hqq6_k4v4_tail_dense_reload_guard_clean_benchmark_report.log), [server log](20260604_q122b_hqq6_k4v4_tail_dense_reload_guard_clean_benchmark_krasis.log) |
+
+Notes:
+- The first timing-off run improved prefill but still dipped to `598 MB`, below
+  the `600 MB` safety margin. The final row adds a measured HCS reload guard:
+  reload stops with one soft-HCS chunk of headroom instead of loading exactly
+  to the idle floor.
+- The reload guard reduced HCS by one measured soft chunk (`27` experts) versus
+  the prior effective post-pressure coverage, and raised minimum free VRAM to
+  `804 MB`. Health scan found no CUDA errors, no VRAM monitor warnings, no
+  hard-floor exits, and no HCS copy failures.
+
+---
+
 ## Standard Benchmarks - 2026-06-04 (QCN after Typhon pressure-drain and prefill planner fixes)
 
 Hardware: EPYC 7742, 1007 GB RAM, RTX 5090 32 GB selected for the run.

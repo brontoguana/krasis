@@ -6257,7 +6257,7 @@ impl PrefillEngine {
         &self,
         moe_layer_idx: usize,
         chunk_idx: usize,
-        chunk_size: usize,
+        chunk_start: usize,
         m: usize,
         topk: usize,
         n_experts: usize,
@@ -6269,7 +6269,6 @@ impl PrefillEngine {
             return true;
         }
         let fallback_active = || (m.saturating_mul(topk)).min(n_experts);
-        let chunk_start = chunk_idx.saturating_mul(chunk_size);
         let chunk_end = chunk_start.saturating_add(m);
         let chunk_fully_prescanned = self.prescan_token_count >= chunk_end;
         let measured_active = self
@@ -6294,7 +6293,7 @@ impl PrefillEngine {
         &mut self,
         layer_idx: usize,
         chunk_idx: usize,
-        chunk_size: usize,
+        chunk_start: usize,
         m: usize,
     ) -> Result<(), String> {
         if self.layer_weights[layer_idx].moe_gate_ptr == 0
@@ -6312,7 +6311,7 @@ impl PrefillEngine {
         if !self.should_prefetch_dense_ptr_table(
             moe_layer_idx,
             chunk_idx,
-            chunk_size,
+            chunk_start,
             m,
             topk,
             n_experts,
@@ -8533,28 +8532,36 @@ impl PrefillEngine {
                     safety_margin_mb,
                 ),
             );
-            if post_alloc_free_bytes >= safety_bytes || scratch_tokens <= 128 {
+            let post_alloc_required_bytes = safety_bytes
+                .saturating_add(self.measured_prefill_runtime_overhead_bytes)
+                .saturating_add(self.max_cold_staging_reserve_bytes());
+            if post_alloc_free_bytes >= post_alloc_required_bytes || scratch_tokens <= 128 {
                 self.config.prefill_chunk_size = scratch_tokens;
                 break;
             }
 
-            let deficit_bytes = safety_bytes - post_alloc_free_bytes;
+            let deficit_bytes = post_alloc_required_bytes - post_alloc_free_bytes;
             let deficit_tokens = if per_token_bytes > 0 {
                 (deficit_bytes + per_token_bytes - 1) / per_token_bytes
             } else {
                 0
             };
-            let shrink_tokens = deficit_tokens
-                .saturating_mul(2)
-                .max((scratch_tokens / 8).max(64));
+            let shrink_tokens = if post_alloc_free_bytes < safety_bytes {
+                deficit_tokens
+                    .saturating_mul(2)
+                    .max((scratch_tokens / 8).max(64))
+            } else {
+                deficit_tokens.saturating_mul(2).max(64)
+            };
             let next_tokens = scratch_tokens.saturating_sub(shrink_tokens).max(128);
 
             if ledger_enabled {
                 vram_ledger_log!(
-                    "VRAM LEDGER prefill_alloc_shrink attempt={} scratch_tokens={} post_alloc_free_mb={} safety_mb={} deficit_mb={:.1} deficit_tokens={} shrink_tokens={} next_tokens={}",
+                    "VRAM LEDGER prefill_alloc_shrink attempt={} scratch_tokens={} post_alloc_free_mb={} required_post_alloc_mb={} safety_mb={} deficit_mb={:.1} deficit_tokens={} shrink_tokens={} next_tokens={}",
                     attempt,
                     scratch_tokens,
                     post_alloc_free_bytes / (1024 * 1024),
+                    post_alloc_required_bytes / (1024 * 1024),
                     safety_margin_mb,
                     deficit_bytes as f64 / (1024.0 * 1024.0),
                     deficit_tokens,
@@ -8565,10 +8572,11 @@ impl PrefillEngine {
 
             if stderr_debug_enabled() {
                 eprintln!(
-                    "[PREFILL] Retry chunk size {} -> {} after post-alloc free {} MB fell below {} MB floor (attempt {})",
+                    "[PREFILL] Retry chunk size {} -> {} after post-alloc free {} MB fell below measured {} MB floor ({} MB safety, attempt {})",
                     scratch_tokens,
                     next_tokens,
                     post_alloc_free_bytes / (1024 * 1024),
+                    post_alloc_required_bytes / (1024 * 1024),
                     safety_margin_mb,
                     attempt,
                 );
@@ -8774,26 +8782,22 @@ impl PrefillEngine {
         let diag_moe_detail = std::env::var("KRASIS_PREFILL_DIAG_MOE_DETAIL").is_ok();
         let debug_prefill = prefill_debug_enabled();
 
-        // Dynamic chunk sizing: use max-safe chunks plus a short tail. Prefill
-        // passes are expensive, so keep each pass as large as the measured
-        // scratch budget safely allows instead of equalizing chunks.
+        // Dynamic chunk sizing: use the fewest measured-safe chunks, but avoid
+        // pathological tiny tails that pay a full prefill pass for almost no
+        // tokens.
         let max_chunk = if self.config.prefill_chunk_size > 0 {
             self.config.prefill_chunk_size.min(self.scratch.max_tokens)
         } else {
             self.scratch.max_tokens
         };
-        let (chunk_size, num_chunks) = if total_m <= max_chunk {
-            // Single chunk — best case, zero redundant DMA
-            (total_m, 1)
-        } else {
-            let n = total_m.div_ceil(max_chunk);
-            (max_chunk, n)
-        };
+        let chunk_plan = build_prefill_chunk_plan(total_m, max_chunk);
+        let num_chunks = chunk_plan.len();
+        let chunk_size = chunk_plan.iter().copied().max().unwrap_or(0);
         if num_chunks > 1 {
             if stderr_debug_enabled() {
                 eprintln!(
-                    "[PREFILL] Dynamic chunking: {} tokens -> {} chunks of {} (max_chunk={})",
-                    total_m, num_chunks, chunk_size, max_chunk
+                    "[PREFILL] Dynamic chunking: {} tokens -> {} chunks {:?} (max_chunk={})",
+                    total_m, num_chunks, chunk_plan, max_chunk
                 );
             }
         }
@@ -8803,12 +8807,13 @@ impl PrefillEngine {
                 || self.config.layer_types.iter().any(|&t| t == 3);
             let has_mamba = self.config.layer_types.iter().any(|&t| t == 1);
             eprintln!(
-                "[PREFILL-DEBUG] run total_tokens={} scratch_max_tokens={} max_chunk={} chunk_size={} num_chunks={} marlin={} fused_moe={} flash_attn={} flash_attn_fp8kv={} linear_attn={} mamba={} gqa_heads={} kv_heads={}",
+                "[PREFILL-DEBUG] run total_tokens={} scratch_max_tokens={} max_chunk={} chunk_size={} num_chunks={} chunk_plan={:?} marlin={} fused_moe={} flash_attn={} flash_attn_fp8kv={} linear_attn={} mamba={} gqa_heads={} kv_heads={}",
                 total_m,
                 self.scratch.max_tokens,
                 max_chunk,
                 chunk_size,
                 num_chunks,
+                chunk_plan,
                 self.kernels.marlin_mm.is_some(),
                 self.kernels.fused_moe_fn.is_some(),
                 self.kernels.flash_attn_fwd.is_some(),
@@ -8896,7 +8901,7 @@ impl PrefillEngine {
         }
         if vram_ledger_enabled() {
             vram_ledger_log!(
-                "VRAM LEDGER prefill_moe_setup fused={} pointer_table={} pinning_enabled={} pinning_disabled={} optional_pinning_budget_mb={:?} pinning_active={} pinning_pool_mb={:.1} prescan_layers={} hcs_cached_experts={} hcs_stride={} scratch_tokens={} chunk_size={} num_chunks={}",
+                "VRAM LEDGER prefill_moe_setup fused={} pointer_table={} pinning_enabled={} pinning_disabled={} optional_pinning_budget_mb={:?} pinning_active={} pinning_pool_mb={:.1} prescan_layers={} hcs_cached_experts={} hcs_stride={} scratch_tokens={} chunk_size={} num_chunks={} chunk_plan={:?}",
                 use_fused,
                 self.d_expert_w1_ptrs.is_some(),
                 pinning_enabled,
@@ -8910,6 +8915,7 @@ impl PrefillEngine {
                 self.scratch.max_tokens,
                 chunk_size,
                 num_chunks,
+                chunk_plan,
             );
         }
 
@@ -8926,49 +8932,58 @@ impl PrefillEngine {
                 .map_err(|e| format!("prescan embedding: {}", e))?;
 
             // Run gate pre-scan on embedded tokens (routing info used by pointer table DMA)
-            match self.gate_prescan(prescan_m, chunk_size, num_chunks) {
+            match self.gate_prescan(prescan_m, &chunk_plan) {
                 Ok(prescan_counts) => {
                     self.prescan_token_count = prescan_m;
-                    let pinned_per_layer = self
-                        .allocate_pinning_pool(&prescan_counts)
-                        .map_err(|e| format!("pinning pool allocation: {}", e))?;
+                    let active_layers = prescan_counts.len();
+                    let total_active: usize = prescan_counts
+                        .iter()
+                        .map(|layer| layer.iter().filter(|&&cnt| cnt > 0).count())
+                        .sum();
+                    let avg_active = if active_layers > 0 {
+                        total_active as f64 / active_layers as f64
+                    } else {
+                        0.0
+                    };
+                    let dense_active = self.d_expert_w1_ptrs.is_some()
+                        && self.config.n_routed_experts > 0
+                        && active_layers > 0
+                        && total_active.saturating_mul(4)
+                            >= active_layers
+                                .saturating_mul(self.config.n_routed_experts)
+                                .saturating_mul(3);
+                    let pinned_per_layer = if dense_active {
+                        if stderr_debug_enabled() || debug_prefill {
+                            eprintln!(
+                                "[PREFILL] Skipping optional pinning: pre-scan is dense ({:.1}/{} active experts/layer)",
+                                avg_active,
+                                self.config.n_routed_experts,
+                            );
+                        }
+                        0
+                    } else {
+                        self.allocate_pinning_pool(&prescan_counts)
+                            .map_err(|e| format!("pinning pool allocation: {}", e))?
+                    };
                     if debug_prefill {
-                        let active_layers = prescan_counts.len();
-                        let total_active: usize = prescan_counts
-                            .iter()
-                            .map(|layer| layer.iter().filter(|&&cnt| cnt > 0).count())
-                            .sum();
-                        let avg_active = if active_layers > 0 {
-                            total_active as f64 / active_layers as f64
-                        } else {
-                            0.0
-                        };
                         eprintln!(
-                            "[PREFILL-DEBUG] prescan tokens={} active_layers={} avg_active_experts_per_layer={:.1} pinned_per_layer={} pinning_active={} pinning_pool_mb={:.1}",
+                            "[PREFILL-DEBUG] prescan tokens={} active_layers={} avg_active_experts_per_layer={:.1} dense_active={} pinned_per_layer={} pinning_active={} pinning_pool_mb={:.1}",
                             prescan_m,
                             active_layers,
                             avg_active,
+                            dense_active,
                             pinned_per_layer,
                             self.pinning_active,
                             self.pinning_pool_bytes as f64 / (1024.0 * 1024.0),
                         );
                     }
                     if vram_ledger_enabled() {
-                        let active_layers = prescan_counts.len();
-                        let total_active: usize = prescan_counts
-                            .iter()
-                            .map(|layer| layer.iter().filter(|&&cnt| cnt > 0).count())
-                            .sum();
-                        let avg_active = if active_layers > 0 {
-                            total_active as f64 / active_layers as f64
-                        } else {
-                            0.0
-                        };
                         vram_ledger_log!(
-                            "VRAM LEDGER prefill_prescan tokens={} active_layers={} avg_active_experts_per_layer={:.1} pinned_per_layer={} pinning_active={} pinning_pool_mb={:.1}",
+                            "VRAM LEDGER prefill_prescan tokens={} active_layers={} avg_active_experts_per_layer={:.1} dense_active={} pinned_per_layer={} pinning_active={} pinning_pool_mb={:.1}",
                             prescan_m,
                             active_layers,
                             avg_active,
+                            dense_active,
                             pinned_per_layer,
                             self.pinning_active,
                             self.pinning_pool_bytes as f64 / (1024.0 * 1024.0),
@@ -9135,10 +9150,10 @@ impl PrefillEngine {
         let mut t_embed_ms = 0.0f64;
         let mut t_other_ms = 0.0f64;
 
-        for chunk_idx in 0..num_chunks {
-            let chunk_start = chunk_idx * chunk_size;
-            let chunk_end = std::cmp::min(chunk_start + chunk_size, total_m);
-            let m = chunk_end - chunk_start;
+        let mut chunk_start = 0usize;
+        for (chunk_idx, &planned_chunk_tokens) in chunk_plan.iter().enumerate() {
+            let chunk_end = std::cmp::min(chunk_start + planned_chunk_tokens, total_m);
+            let m = chunk_end.saturating_sub(chunk_start);
             let chunk_tokens = &token_ids[chunk_start..chunk_end];
             let chunk_tok0 = chunk_tokens.first().copied().unwrap_or(0) as usize;
             let chunk_last_pos = chunk_end.saturating_sub(1);
@@ -9885,7 +9900,12 @@ impl PrefillEngine {
                 }
 
                 if self.layer_weights[layer_idx].moe_gate_ptr != 0 {
-                    self.prefetch_dense_pointer_table_for_layer(layer_idx, chunk_idx, chunk_size, m)?;
+                    self.prefetch_dense_pointer_table_for_layer(
+                        layer_idx,
+                        chunk_idx,
+                        chunk_start,
+                        m,
+                    )?;
                 }
 
                 // Mixer
@@ -10520,10 +10540,11 @@ impl PrefillEngine {
                 "prefill_chunk",
                 &format!("phase=chunk_end chunk_tokens={}", m),
             );
+            chunk_start = chunk_end;
         }
 
         // Use last chunk's m for final processing
-        let m = total_m - (num_chunks - 1) * chunk_size.min(total_m);
+        let m = chunk_plan.last().copied().unwrap_or(total_m);
         let trace_prefill_final = self.trace.as_ref().map_or(false, |t| {
             t.should_emit(num_chunks.saturating_sub(1), None, "prefill")
         });
@@ -11444,7 +11465,7 @@ impl PrefillEngine {
             }
 
             if self.layer_weights[layer_idx].moe_gate_ptr != 0 {
-                self.prefetch_dense_pointer_table_for_layer(layer_idx, 0, m, m)?;
+                self.prefetch_dense_pointer_table_for_layer(layer_idx, 0, 0, m)?;
             }
 
             match layer_type {
@@ -28708,8 +28729,7 @@ impl PrefillEngine {
     fn gate_prescan(
         &mut self,
         total_m: usize,
-        chunk_size: usize,
-        num_chunks: usize,
+        chunk_plan: &[usize],
     ) -> Result<Vec<Vec<u32>>, String> {
         let h = self.config.hidden_size;
         let n_experts = self.config.n_routed_experts;
@@ -28731,6 +28751,7 @@ impl PrefillEngine {
         // Activation counts: [moe_layer][expert] -> total token count
         let mut counts: Vec<Vec<u32>> = vec![vec![0u32; n_experts]; num_moe_layers];
         // Per-chunk active experts: [moe_layer][chunk] -> Vec<expert_id>
+        let num_chunks = chunk_plan.len().max(1);
         let mut per_chunk: Vec<Vec<Vec<usize>>> =
             vec![vec![Vec::new(); num_chunks]; num_moe_layers];
 
@@ -28830,21 +28851,24 @@ impl PrefillEngine {
 
             // Count activations per expert, and per-chunk active sets
             let mut layer_counts = vec![0u32; n_experts];
-            for chunk_idx in 0..num_chunks {
-                let cstart = chunk_idx * chunk_size;
-                let cend = std::cmp::min(cstart + chunk_size, total_m);
+            let mut cstart = 0usize;
+            for (chunk_idx, &planned_chunk_tokens) in chunk_plan.iter().enumerate() {
+                let cend = std::cmp::min(cstart + planned_chunk_tokens, total_m);
                 let mut chunk_active = vec![false; n_experts];
-                for tok in cstart..cend {
-                    for k in 0..topk {
-                        let eid = self.h_topk_ids[tok * topk + k] as usize;
-                        if eid < n_experts {
-                            layer_counts[eid] += 1;
-                            chunk_active[eid] = true;
+                if cstart < total_m {
+                    for tok in cstart..cend {
+                        for k in 0..topk {
+                            let eid = self.h_topk_ids[tok * topk + k] as usize;
+                            if eid < n_experts {
+                                layer_counts[eid] += 1;
+                                chunk_active[eid] = true;
+                            }
                         }
                     }
                 }
                 let active_list: Vec<usize> = (0..n_experts).filter(|&e| chunk_active[e]).collect();
                 per_chunk[mi][chunk_idx] = active_list;
+                cstart = cend;
             }
             counts[mi] = layer_counts;
         }
@@ -30352,6 +30376,42 @@ fn clean_runtime_chunk_tokens(prompt_tokens: usize, max_chunk_tokens: usize) -> 
         return prompt_tokens.max(128);
     }
     max_chunk
+}
+
+fn build_prefill_chunk_plan(total_tokens: usize, max_chunk_tokens: usize) -> Vec<usize> {
+    if total_tokens == 0 {
+        return Vec::new();
+    }
+    let max_chunk = max_chunk_tokens.max(128);
+    if total_tokens <= max_chunk {
+        return vec![total_tokens];
+    }
+
+    let num_chunks = total_tokens.div_ceil(max_chunk);
+    let tail = total_tokens % max_chunk;
+    if tail == 0 {
+        return vec![max_chunk; num_chunks];
+    }
+
+    // A tiny final remainder is disproportionately expensive because it pays
+    // the fixed routing/DMA/kernel-launch costs of a full prefill pass. The
+    // floor scales with the calibrated max chunk so the policy adapts across
+    // hardware, models, and prompt sizes.
+    let min_tail = (max_chunk / 8).max(128);
+    if tail >= min_tail {
+        let mut plan = vec![max_chunk; num_chunks - 1];
+        plan.push(tail);
+        return plan;
+    }
+
+    let base = total_tokens / num_chunks;
+    let extra = total_tokens % num_chunks;
+    let mut plan = Vec::with_capacity(num_chunks);
+    for idx in 0..num_chunks {
+        plan.push(base + usize::from(idx < extra));
+    }
+    debug_assert!(plan.iter().all(|&chunk| chunk <= max_chunk));
+    plan
 }
 
 pub fn hqq_prefill_materialize_bf16_enabled() -> bool {
@@ -31964,6 +32024,32 @@ Set KRASIS_NO_FLA=1 only if you explicitly want the slower custom LA path."
 // See feature-unit-test.md for architecture and rationale.
 //
 #[cfg(test)]
+mod chunk_plan_tests {
+    use super::build_prefill_chunk_plan;
+
+    #[test]
+    fn uses_single_chunk_when_prompt_fits() {
+        assert_eq!(build_prefill_chunk_plan(5_000, 16_000), vec![5_000]);
+    }
+
+    #[test]
+    fn keeps_normal_tail_as_max_safe_plus_remainder() {
+        assert_eq!(
+            build_prefill_chunk_plan(20_000, 17_053),
+            vec![17_053, 2_947]
+        );
+    }
+
+    #[test]
+    fn smooths_pathological_tiny_tail_without_adding_passes() {
+        let plan = build_prefill_chunk_plan(50_000, 16_640);
+        assert_eq!(plan, vec![12_500, 12_500, 12_500, 12_500]);
+        assert_eq!(plan.iter().sum::<usize>(), 50_000);
+        assert!(plan.iter().all(|&chunk| chunk <= 16_640));
+    }
+}
+
+#[cfg(test)]
 #[cfg(has_prefill_kernels)]
 mod kernel_tests {
     use super::*;
@@ -33369,6 +33455,7 @@ mod kernel_tests {
         let mut d_i32 = d as i32;
         let mut max_seq_i32 = max_seq as i32;
         let mut start_pos_i32: i32 = 0;
+        let mut norm_correction_i32: i32 = 0;
 
         unsafe {
             let threads = polar4_threads(num_blocks);
