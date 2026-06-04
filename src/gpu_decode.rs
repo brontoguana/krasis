@@ -3133,13 +3133,9 @@ impl VramCalibration {
         &self,
         tokens: usize,
         post_alloc_free_mb: u64,
-        prefill_hcs_reserve_mb: u64,
     ) -> Option<u64> {
         let required = self.required_post_scratch_free_mb(tokens)?;
-        Some(
-            post_alloc_free_mb
-                .saturating_sub(required.saturating_add(prefill_hcs_reserve_mb)),
-        )
+        Some(post_alloc_free_mb.saturating_sub(required))
     }
 
     /// Max HCS budget for prefill of N tokens (what survives prefill).
@@ -3779,6 +3775,10 @@ impl HcsState {
                 .map(|cap| cap.min(target_chunks))
                 .unwrap_or(target_chunks),
         );
+    }
+
+    fn clear_pressure_cap(&mut self) {
+        self.soft_pressure_cap_chunks = None;
     }
 
     fn pressure_capped_target_chunks(&self, target_chunks: usize) -> usize {
@@ -9685,23 +9685,6 @@ impl GpuDecodeStore {
         Ok(())
     }
 
-    fn prefill_pinning_hcs_reserve_mb(
-        &self,
-        cal: &VramCalibration,
-        prompt_tokens: usize,
-    ) -> u64 {
-        let Some(graph) = self.graph.as_ref() else {
-            return 0;
-        };
-        let Some(hcs) = graph.hcs.as_ref() else {
-            return 0;
-        };
-        let max_hcs_mb = hcs.hard_budget_mb.saturating_add(hcs.soft_max_mb) as u64;
-        if max_hcs_mb == 0 {
-            return 0;
-        }
-        cal.prefill_hcs_budget_mb(prompt_tokens).min(max_hcs_mb)
-    }
 }
 
 #[pymethods]
@@ -9726,21 +9709,14 @@ impl GpuDecodeStore {
             }
             return None;
         };
-        let prefill_hcs_reserve_mb =
-            self.prefill_pinning_hcs_reserve_mb(&cal, prompt_tokens);
         let required_post_scratch_mb = cal.required_post_scratch_free_mb(prompt_tokens);
-        let result = cal.optional_pinning_budget_mb(
-            prompt_tokens,
-            post_alloc_free_mb as u64,
-            prefill_hcs_reserve_mb,
-        );
+        let result = cal.optional_pinning_budget_mb(prompt_tokens, post_alloc_free_mb as u64);
         if env_truthy("KRASIS_VRAM_LEDGER") {
             vram_ledger_log!(
-                "VRAM LEDGER prefill_pinning_budget prompt_tokens={} post_alloc_free_mb={} required_post_scratch_mb={:?} prefill_hcs_reserve_mb={} result_mb={:?}",
+                "VRAM LEDGER prefill_pinning_budget prompt_tokens={} post_alloc_free_mb={} required_post_scratch_mb={:?} result_mb={:?}",
                 prompt_tokens,
                 post_alloc_free_mb,
                 required_post_scratch_mb,
-                prefill_hcs_reserve_mb,
                 result,
             );
         }
@@ -10086,10 +10062,6 @@ impl GpuDecodeStore {
     ) -> PyResult<(usize, usize, bool)> {
         let prompt_len = token_ids.len();
         let vram_calibration = self.vram_calibration;
-        let prefill_hcs_pinning_reserve_mb = vram_calibration
-            .as_ref()
-            .map(|cal| self.prefill_pinning_hcs_reserve_mb(cal, prompt_len))
-            .unwrap_or(0);
         self.refresh_trace_config();
         let trace_cfg = self.active_trace_owned();
         let (cache_fast_snapshot, ne) = {
@@ -10141,7 +10113,6 @@ impl GpuDecodeStore {
                         cal.optional_pinning_budget_mb(
                             prompt_len,
                             engine.last_prepare_post_alloc_free_mb() as u64,
-                            prefill_hcs_pinning_reserve_mb,
                         )
                     })
                     .map(|mb| mb as usize)
@@ -28564,6 +28535,258 @@ impl GpuDecodeStore {
         (evicted, freed_mb)
     }
 
+    /// Evict additional cold soft-tier HCS chunks for measured prefill VRAM
+    /// deficits. The caller supplies a byte deficit from the active scratch or
+    /// pinning budget model; this method only frees existing soft HCS chunks
+    /// and does not weaken calibration or safety floors.
+    pub fn hcs_evict_additional_for_prefill(
+        &mut self,
+        additional_needed_bytes: usize,
+        prompt_tokens: usize,
+    ) -> (usize, f64) {
+        if additional_needed_bytes == 0 {
+            return (0, 0.0);
+        }
+        let trace_cfg = self.active_trace_owned();
+        let route_sync_device = self.device.clone();
+        if let Err(e) = self.device.bind_to_thread() {
+            log::warn!(
+                "HCS extra prefill eviction skipped: failed to bind CUDA device (prompt_tokens={} deficit_mb={:.1}): {:?}",
+                prompt_tokens,
+                additional_needed_bytes as f64 / (1024.0 * 1024.0),
+                e,
+            );
+            return (0, 0.0);
+        }
+        let graph = match self.graph.as_mut() {
+            Some(g) => g,
+            None => {
+                log::warn!(
+                    "HCS extra prefill eviction skipped: decode graph is not configured (prompt_tokens={} deficit_mb={:.1})",
+                    prompt_tokens,
+                    additional_needed_bytes as f64 / (1024.0 * 1024.0),
+                );
+                return (0, 0.0);
+            }
+        };
+        let sync_route_ptrs = graph.gpu_route_sync;
+        let hcs = match graph.hcs.as_mut() {
+            Some(h) => h,
+            None => {
+                log::warn!(
+                    "HCS extra prefill eviction skipped: HCS state is not attached (prompt_tokens={} deficit_mb={:.1})",
+                    prompt_tokens,
+                    additional_needed_bytes as f64 / (1024.0 * 1024.0),
+                );
+                return (0, 0.0);
+            }
+        };
+
+        if hcs.soft_host_mode == HcsSoftHostMode::Source && hcs.dynamic_enabled {
+            let err = unsafe { cuda_sys::lib().cuCtxSynchronize() };
+            if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                log::error!(
+                    "HCS extra prefill eviction: source-mode boundary sync failed: {:?}",
+                    err
+                );
+                return (0, 0.0);
+            }
+        }
+        if let Some(ref stream) = hcs.soft_reload_stream {
+            unsafe {
+                let err = cuda_sys::lib().cuStreamSynchronize(stream.0);
+                if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                    log::warn!(
+                        "HCS extra prefill eviction: reload stream sync failed: {:?}",
+                        err
+                    );
+                }
+            }
+        }
+
+        if hcs.soft_reload_pending {
+            let unactivated = hcs.soft_reload_entries.len();
+            if unactivated > 0 {
+                hcs.soft_num_cached = hcs.soft_num_cached.saturating_sub(unactivated);
+            }
+            hcs.soft_reload_pending = false;
+            hcs.soft_reload_entries.clear();
+            if !hcs.soft_chunks.is_empty() {
+                let extra_chunks = hcs.soft_chunks.len().saturating_sub(hcs.soft_chunks_loaded);
+                if extra_chunks > 0 {
+                    let freed_bytes =
+                        extra_chunks * hcs.soft_slots_per_chunk * hcs.soft_slot_size;
+                    hcs.soft_chunks.truncate(hcs.soft_chunks_loaded);
+                    hcs.vram_bytes = hcs.vram_bytes.saturating_sub(freed_bytes);
+                    trace_emit_global_mark(
+                        trace_cfg.as_ref(),
+                        "hcs",
+                        &format!(
+                            "phase=soft_cancel_pending_extra_prefill unactivated={} freed_mb={:.1}",
+                            unactivated,
+                            freed_bytes as f64 / (1024.0 * 1024.0),
+                        ),
+                    );
+                }
+            }
+        }
+
+        if hcs.soft_chunks.is_empty() || hcs.soft_num_cached == 0 {
+            return (0, 0.0);
+        }
+
+        let t0 = std::time::Instant::now();
+        let spc = hcs.soft_slots_per_chunk;
+        let total_chunks = hcs.soft_chunks_loaded;
+        let mut chunks_to_drop = 0usize;
+        let mut freed_bytes = 0usize;
+        let mut evicted = 0usize;
+
+        if sync_route_ptrs {
+            bind_hcs_route_pointer_device(
+                &route_sync_device,
+                "extra prefill eviction pointer clears",
+            );
+        }
+
+        for drop_idx in (0..total_chunks).rev() {
+            if freed_bytes >= additional_needed_bytes {
+                break;
+            }
+            let slots_this = if drop_idx == hcs.soft_total_chunks - 1 {
+                hcs.soft_num_slots - drop_idx * spc
+            } else {
+                spc
+            };
+            let chunk_bytes = slots_this * hcs.soft_slot_size;
+            let slot_start = drop_idx * spc;
+            let slot_end = std::cmp::min(slot_start + spc, hcs.soft_num_slots);
+            for slot in slot_start..slot_end {
+                if let Some((layer_idx, expert_idx)) = hcs.soft_slot_to_expert[slot] {
+                    hcs.cache_fast_clear(layer_idx, expert_idx);
+                    hcs.cache.remove(&(layer_idx, expert_idx));
+                    evicted += 1;
+                }
+            }
+            if let Some(host_chunk) = hcs.soft_host_chunks.get_mut(drop_idx) {
+                if host_chunk.unregister() {
+                    log::info!("HCS extra prefill eviction: unpinned host chunk {}", drop_idx);
+                }
+            }
+            freed_bytes += chunk_bytes;
+            chunks_to_drop += 1;
+        }
+
+        if chunks_to_drop == 0 {
+            return (0, 0.0);
+        }
+
+        let new_loaded = total_chunks - chunks_to_drop;
+        if sync_route_ptrs && evicted > 0 {
+            sync_hcs_route_pointer_updates(
+                &route_sync_device,
+                "extra prefill eviction before soft chunk free",
+                evicted,
+            );
+        }
+        hcs.soft_chunks.truncate(new_loaded);
+        hcs.soft_chunks_loaded = new_loaded;
+        hcs.num_cached = hcs.num_cached.saturating_sub(evicted);
+        hcs.soft_num_cached = hcs.soft_num_cached.saturating_sub(evicted);
+        hcs.vram_bytes = hcs.vram_bytes.saturating_sub(freed_bytes);
+        hcs.soft_loaded = false;
+
+        let freed_mb = freed_bytes as f64 / (1024.0 * 1024.0);
+        self.last_soft_evict_experts = self.last_soft_evict_experts.saturating_add(evicted);
+        self.last_soft_evict_freed_mb += freed_mb;
+        let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        trace_emit_global_mark(
+            trace_cfg.as_ref(),
+            "hcs",
+            &format!(
+                "phase=soft_extra_prefill_evict experts={} freed_mb={:.1} requested_mb={:.1} chunks_dropped={} total_chunks={} elapsed_ms={:.1} prompt_tokens={}",
+                evicted,
+                freed_mb,
+                additional_needed_bytes as f64 / (1024.0 * 1024.0),
+                chunks_to_drop,
+                total_chunks,
+                elapsed_ms,
+                prompt_tokens,
+            ),
+        );
+        log::info!(
+            "HCS soft: extra prefill eviction removed {} experts ({:.1} MB, {} of {} chunks) in {:.1}ms for {}-token prefill budget (requested {:.1} MB)",
+            evicted,
+            freed_mb,
+            chunks_to_drop,
+            total_chunks,
+            elapsed_ms,
+            prompt_tokens,
+            additional_needed_bytes as f64 / (1024.0 * 1024.0),
+        );
+        if env_truthy("KRASIS_VRAM_LEDGER") {
+            let free_after_bytes = current_cuda_free_mb()
+                .map(|mb| mb.saturating_mul(1024 * 1024))
+                .unwrap_or(0);
+            vram_ledger_log!(
+                "VRAM LEDGER hcs_extra_prefill_evict prompt_tokens={} requested_mb={:.1} evicted={} freed_mb={:.1} chunks_dropped={} total_chunks={} elapsed_ms={:.1} free_after_mb={:.0} soft_cached_after={} soft_chunks_loaded_after={}",
+                prompt_tokens,
+                additional_needed_bytes as f64 / (1024.0 * 1024.0),
+                evicted,
+                freed_mb,
+                chunks_to_drop,
+                total_chunks,
+                elapsed_ms,
+                free_after_bytes as f64 / (1024.0 * 1024.0),
+                hcs.soft_num_cached,
+                hcs.soft_chunks_loaded,
+            );
+        }
+
+        (evicted, freed_mb)
+    }
+
+    /// Evict soft HCS at the post-scratch prefill boundary.
+    ///
+    /// `hcs_evict_for_prefill()` is used before scratch allocation and therefore
+    /// needs the full idle-floor requirement. Once scratch is already allocated,
+    /// the only remaining requirement is the measured runtime transient plus the
+    /// safety margin. Reusing the pre-scratch floor here over-evicts HCS and
+    /// forces prefill to fetch every active expert from host memory.
+    pub fn hcs_evict_for_prefill_post_scratch(&mut self, prompt_tokens: usize) -> (usize, f64) {
+        let Some(cal) = self.vram_calibration else {
+            return self.hcs_evict_for_prefill(prompt_tokens);
+        };
+        let Some(required_mb) = cal.required_post_scratch_free_mb(prompt_tokens) else {
+            return self.hcs_evict_for_prefill(prompt_tokens);
+        };
+        let Some(free_mb) = current_cuda_free_mb() else {
+            return self.hcs_evict_for_prefill(prompt_tokens);
+        };
+        if free_mb >= required_mb as usize {
+            if env_truthy("KRASIS_VRAM_LEDGER") {
+                vram_ledger_log!(
+                    "VRAM LEDGER hcs_evict_prefill_post_scratch prompt_tokens={} free_mb={} required_mb={} deficit_mb=0",
+                    prompt_tokens,
+                    free_mb,
+                    required_mb,
+                );
+            }
+            return (0, 0.0);
+        }
+        let deficit_mb = (required_mb as usize).saturating_sub(free_mb);
+        if env_truthy("KRASIS_VRAM_LEDGER") {
+            vram_ledger_log!(
+                "VRAM LEDGER hcs_evict_prefill_post_scratch prompt_tokens={} free_mb={} required_mb={} deficit_mb={}",
+                prompt_tokens,
+                free_mb,
+                required_mb,
+                deficit_mb,
+            );
+        }
+        self.hcs_evict_additional_for_prefill(deficit_mb.saturating_mul(1024 * 1024), prompt_tokens)
+    }
+
     pub fn hcs_drain_vram_pressure(&mut self, reason: &str, force_measure: bool) -> (usize, f64, usize) {
         let device_id = self.device.ordinal() as i32;
         let pending = crate::vram_monitor::pressure_pending(device_id);
@@ -28739,6 +28962,7 @@ impl GpuDecodeStore {
     /// Returns (loaded_count, reload_ms).
     pub fn hcs_reload_after_prefill(&mut self, actual_tokens: usize) -> (usize, f64) {
         let cal = self.vram_calibration;
+        let device_id = self.device.ordinal() as i32;
         let trace_cfg = self.active_trace_owned();
         let route_sync_device = self.device.clone();
         let graph = match self.graph.as_mut() {
@@ -28765,6 +28989,9 @@ impl GpuDecodeStore {
         }
 
         let spc = hcs.soft_slots_per_chunk;
+        if crate::vram_monitor::pressure_pending(device_id).is_none() {
+            hcs.clear_pressure_cap();
+        }
         let decode_budget_mb = cal.map(|cal| cal.decode_hcs_budget_mb(actual_tokens) as usize)
             .unwrap_or(hcs.hard_budget_mb + hcs.soft_max_mb);
         let idle_floor_mb = cal.map(|cal| cal.required_idle_free_mb(actual_tokens) as usize)
@@ -29141,6 +29368,7 @@ impl GpuDecodeStore {
             return self.hcs_reload_after_prefill(actual_tokens);
         }
         let cal = self.vram_calibration;
+        let device_id = self.device.ordinal() as i32;
         let trace_cfg = self.active_trace_owned();
         let route_sync_device = self.device.clone();
         let graph = match self.graph.as_mut() {
@@ -29167,6 +29395,9 @@ impl GpuDecodeStore {
         }
 
         let spc = hcs.soft_slots_per_chunk;
+        if crate::vram_monitor::pressure_pending(device_id).is_none() {
+            hcs.clear_pressure_cap();
+        }
         let decode_budget_mb = cal.map(|cal| cal.decode_hcs_budget_mb(actual_tokens) as usize)
             .unwrap_or(hcs.hard_budget_mb + hcs.soft_max_mb);
         let idle_floor_mb = cal.map(|cal| cal.required_idle_free_mb(actual_tokens) as usize)

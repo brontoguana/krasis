@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Restored the prefill-pass planner fixes from the shelved Q122B investigation:
+  Krasis now evicts additional soft HCS when measured VRAM says that can avoid
+  an extra prefill pass, uses post-scratch HCS eviction at chunk boundaries,
+  chunks as max-safe plus tail instead of equalizing chunks, and removes a
+  double-counted HCS reserve from optional prefill pinning budget calculation.
+- Validation: `./dev build` passed, and `./dev speed-test` on QCN HQQ4/k4v4
+  produced `5054.2 tok/s` internal prefill, `85.34 tok/s` internal decode, and
+  `117.52 tok/s` HTTP round trip with `16443/24576` HCS, `672 MB` minimum free
+  VRAM, and clean CUDA/VRAM/HCS health scan.
+
 ## 1.0.14 - 2026-06-04
 
 - Fixed VRAM pressure handling after a Typhon Qwen3.6-35B dynamic-HCS failure

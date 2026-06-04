@@ -6541,7 +6541,7 @@ impl PrefillEngine {
         let (evicted, freed_mb, cache_fast_snapshot, num_experts_per_layer) = unsafe {
             let store =
                 &mut *(self.prefill_hcs_store_addr as *mut crate::gpu_decode::GpuDecodeStore);
-            let (evicted, freed_mb) = store.hcs_evict_for_prefill(chunk_tokens);
+            let (evicted, freed_mb) = store.hcs_evict_for_prefill_post_scratch(chunk_tokens);
             let (cache_fast, ne) = store.export_hcs_snapshot();
             (evicted, freed_mb, cache_fast.to_vec(), ne)
         };
@@ -8153,21 +8153,20 @@ impl PrefillEngine {
         // Minimum 128: fused MoE Marlin kernels use block_size_m=64, need enough
         // tokens for stable sorted dispatch. 128 adds ~57 MB scratch overhead.
         let target = prompt_tokens.min(50000);
-        let scratch_budget_bytes = free_bytes
+        let mut scratch_budget_bytes = free_bytes
             .saturating_sub(safety_bytes)
             .saturating_sub(self.measured_scratch_alloc_overhead_bytes)
             .saturating_sub(self.measured_prefill_runtime_overhead_bytes)
             .saturating_sub(self.max_cold_staging_reserve_bytes());
-        let max_by_vram = exact_scratch_token_cap(
+        let mut max_by_vram = exact_scratch_token_cap(
             &self.config,
             target,
             prompt_tokens,
             scratch_budget_bytes,
         );
-        let mut scratch_tokens = max_by_vram.min(target).max(128);
         let debug_prefill = prefill_debug_enabled();
         let ledger_enabled = vram_ledger_enabled();
-        if let Ok(raw) = std::env::var("KRASIS_PREFILL_DIAG_MAX_CHUNK_TOKENS") {
+        let diag_cap = if let Ok(raw) = std::env::var("KRASIS_PREFILL_DIAG_MAX_CHUNK_TOKENS") {
             let diag_cap = raw.parse::<usize>().map_err(|e| {
                 format!("KRASIS_PREFILL_DIAG_MAX_CHUNK_TOKENS must be an integer: {e}")
             })?;
@@ -8176,6 +8175,85 @@ impl PrefillEngine {
                     "KRASIS_PREFILL_DIAG_MAX_CHUNK_TOKENS must be at least 128".to_string(),
                 );
             }
+            Some(diag_cap)
+        } else {
+            None
+        };
+
+        let disable_extra_hcs_evict =
+            std::env::var("KRASIS_PREFILL_DISABLE_EXTRA_HCS_EVICT").is_ok();
+        if diag_cap.is_none()
+            && !disable_extra_hcs_evict
+            && prompt_tokens <= target
+            && max_by_vram < prompt_tokens
+            && self.prefill_hcs_store_addr != 0
+            && self.hcs_cached_expert_count() > 0
+        {
+            let single_chunk_scratch_bytes =
+                estimate_scratch_vram_for_prompt(&self.config, target, prompt_tokens);
+            let deficit_bytes = single_chunk_scratch_bytes.saturating_sub(scratch_budget_bytes);
+            if deficit_bytes > 0 {
+                let (evicted, freed_mb, cache_fast_snapshot, num_experts_per_layer) = unsafe {
+                    let store =
+                        &mut *(self.prefill_hcs_store_addr as *mut crate::gpu_decode::GpuDecodeStore);
+                    let (evicted, freed_mb) =
+                        store.hcs_evict_additional_for_prefill(deficit_bytes, prompt_tokens);
+                    let (cache_fast, ne) = store.export_hcs_snapshot();
+                    (evicted, freed_mb, cache_fast.to_vec(), ne)
+                };
+                if evicted > 0 {
+                    self.update_hcs_snapshot(&cache_fast_snapshot, num_experts_per_layer);
+                    unsafe {
+                        cuda_sys::lib().cuCtxSynchronize();
+                        cuda_sys::lib().cuMemGetInfo_v2(&mut free_bytes, &mut total_bytes);
+                    }
+                    scratch_budget_bytes = free_bytes
+                        .saturating_sub(safety_bytes)
+                        .saturating_sub(self.measured_scratch_alloc_overhead_bytes)
+                        .saturating_sub(self.measured_prefill_runtime_overhead_bytes)
+                        .saturating_sub(self.max_cold_staging_reserve_bytes());
+                    max_by_vram = exact_scratch_token_cap(
+                        &self.config,
+                        target,
+                        prompt_tokens,
+                        scratch_budget_bytes,
+                    );
+                    if ledger_enabled {
+                        vram_ledger_log!(
+                            "VRAM LEDGER prefill_extra_hcs_evict_for_single_chunk prompt_tokens={} requested_deficit_mb={:.1} evicted={} freed_mb={:.1} free_after_mb={} scratch_budget_after_mb={:.1} max_by_vram_after={} hcs_cached_after={}",
+                            prompt_tokens,
+                            deficit_bytes as f64 / (1024.0 * 1024.0),
+                            evicted,
+                            freed_mb,
+                            free_bytes / (1024 * 1024),
+                            scratch_budget_bytes as f64 / (1024.0 * 1024.0),
+                            max_by_vram,
+                            self.hcs_cached_expert_count(),
+                        );
+                    }
+                    if debug_prefill {
+                        eprintln!(
+                            "[PREFILL-DEBUG] extra HCS eviction for single chunk: prompt_tokens={} deficit_mb={:.1} evicted={} freed_mb={:.1} max_by_vram_after={}",
+                            prompt_tokens,
+                            deficit_bytes as f64 / (1024.0 * 1024.0),
+                            evicted,
+                            freed_mb,
+                            max_by_vram,
+                        );
+                    }
+                } else if ledger_enabled {
+                    vram_ledger_log!(
+                        "VRAM LEDGER prefill_extra_hcs_evict_for_single_chunk prompt_tokens={} requested_deficit_mb={:.1} evicted=0 freed_mb=0 max_by_vram={}",
+                        prompt_tokens,
+                        deficit_bytes as f64 / (1024.0 * 1024.0),
+                        max_by_vram,
+                    );
+                }
+            }
+        }
+
+        let mut scratch_tokens = max_by_vram.min(target).max(128);
+        if let Some(diag_cap) = diag_cap {
             scratch_tokens = scratch_tokens.min(diag_cap);
         }
         scratch_tokens = clean_runtime_chunk_tokens(prompt_tokens, scratch_tokens);
@@ -8696,8 +8774,9 @@ impl PrefillEngine {
         let diag_moe_detail = std::env::var("KRASIS_PREFILL_DIAG_MOE_DETAIL").is_ok();
         let debug_prefill = prefill_debug_enabled();
 
-        // Dynamic chunk sizing: use largest clean divisor that fits in scratch buffers.
-        // This minimises the number of chunk passes (and therefore MoE DMA repetitions).
+        // Dynamic chunk sizing: use max-safe chunks plus a short tail. Prefill
+        // passes are expensive, so keep each pass as large as the measured
+        // scratch budget safely allows instead of equalizing chunks.
         let max_chunk = if self.config.prefill_chunk_size > 0 {
             self.config.prefill_chunk_size.min(self.scratch.max_tokens)
         } else {
@@ -8707,10 +8786,8 @@ impl PrefillEngine {
             // Single chunk — best case, zero redundant DMA
             (total_m, 1)
         } else {
-            // Clean divisor: N equal-sized chunks, no runt
-            let n = (total_m + max_chunk - 1) / max_chunk;
-            let cs = (total_m + n - 1) / n;
-            (cs, n)
+            let n = total_m.div_ceil(max_chunk);
+            (max_chunk, n)
         };
         if num_chunks > 1 {
             if stderr_debug_enabled() {
@@ -30274,8 +30351,7 @@ fn clean_runtime_chunk_tokens(prompt_tokens: usize, max_chunk_tokens: usize) -> 
     if prompt_tokens <= max_chunk {
         return prompt_tokens.max(128);
     }
-    let num_chunks = prompt_tokens.div_ceil(max_chunk);
-    prompt_tokens.div_ceil(num_chunks).max(128)
+    max_chunk
 }
 
 pub fn hqq_prefill_materialize_bf16_enabled() -> bool {
