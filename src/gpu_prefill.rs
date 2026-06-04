@@ -6133,6 +6133,14 @@ impl PrefillEngine {
             .saturating_mul(self.cold_expert_bytes)
     }
 
+    fn measured_post_scratch_runtime_reserve_bytes(&self) -> usize {
+        if self.measured_prefill_runtime_overhead_bytes > 0 {
+            self.measured_prefill_runtime_overhead_bytes
+        } else {
+            self.max_cold_staging_reserve_bytes()
+        }
+    }
+
     fn hcs_cached_expert_count(&self) -> usize {
         self.hcs_cache_fast
             .iter()
@@ -8152,11 +8160,12 @@ impl PrefillEngine {
         // Minimum 128: fused MoE Marlin kernels use block_size_m=64, need enough
         // tokens for stable sorted dispatch. 128 adds ~57 MB scratch overhead.
         let target = prompt_tokens.min(50000);
+        let post_scratch_runtime_reserve_bytes =
+            self.measured_post_scratch_runtime_reserve_bytes();
         let mut scratch_budget_bytes = free_bytes
             .saturating_sub(safety_bytes)
             .saturating_sub(self.measured_scratch_alloc_overhead_bytes)
-            .saturating_sub(self.measured_prefill_runtime_overhead_bytes)
-            .saturating_sub(self.max_cold_staging_reserve_bytes());
+            .saturating_sub(post_scratch_runtime_reserve_bytes);
         let mut max_by_vram = exact_scratch_token_cap(
             &self.config,
             target,
@@ -8209,8 +8218,7 @@ impl PrefillEngine {
                     scratch_budget_bytes = free_bytes
                         .saturating_sub(safety_bytes)
                         .saturating_sub(self.measured_scratch_alloc_overhead_bytes)
-                        .saturating_sub(self.measured_prefill_runtime_overhead_bytes)
-                        .saturating_sub(self.max_cold_staging_reserve_bytes());
+                        .saturating_sub(post_scratch_runtime_reserve_bytes);
                     max_by_vram = exact_scratch_token_cap(
                         &self.config,
                         target,
@@ -8258,7 +8266,7 @@ impl PrefillEngine {
         scratch_tokens = clean_runtime_chunk_tokens(prompt_tokens, scratch_tokens);
         if debug_prefill {
             eprintln!(
-                "[PREFILL-DEBUG] prepare prompt_tokens={} free_mb={} total_mb={} safety_mb={} fixed_mb={:.1} per_tok_kb={:.1} measured_alloc_overhead_mb={:.1} measured_runtime_overhead_mb={:.1} cold_staging_reserve_mb={:.1} scratch_budget_mb={:.1} target={} max_by_vram={} initial_scratch={}",
+                "[PREFILL-DEBUG] prepare prompt_tokens={} free_mb={} total_mb={} safety_mb={} fixed_mb={:.1} per_tok_kb={:.1} measured_alloc_overhead_mb={:.1} measured_runtime_overhead_mb={:.1} cold_staging_reserve_mb={:.1} post_scratch_runtime_reserve_mb={:.1} scratch_budget_mb={:.1} target={} max_by_vram={} initial_scratch={}",
                 prompt_tokens,
                 free_bytes / (1024 * 1024),
                 total_bytes / (1024 * 1024),
@@ -8268,6 +8276,7 @@ impl PrefillEngine {
                 self.measured_scratch_alloc_overhead_bytes as f64 / (1024.0 * 1024.0),
                 self.measured_prefill_runtime_overhead_bytes as f64 / (1024.0 * 1024.0),
                 self.max_cold_staging_reserve_bytes() as f64 / (1024.0 * 1024.0),
+                post_scratch_runtime_reserve_bytes as f64 / (1024.0 * 1024.0),
                 scratch_budget_bytes as f64 / (1024.0 * 1024.0),
                 target,
                 max_by_vram,
@@ -8276,7 +8285,7 @@ impl PrefillEngine {
         }
         if ledger_enabled {
             vram_ledger_log!(
-                "VRAM LEDGER prefill_prepare_budget prompt_tokens={} free_mb={} total_mb={} safety_mb={} fixed_scratch_mb={:.1} per_tok_kb={:.1} measured_alloc_overhead_mb={:.1} measured_runtime_overhead_mb={:.1} cold_staging_reserve_mb={:.1} scratch_budget_mb={:.1} target_tokens={} max_by_vram={} chosen_scratch_tokens={} hcs_cached_experts={} hcs_stride={} old_scratch_tokens={}",
+                "VRAM LEDGER prefill_prepare_budget prompt_tokens={} free_mb={} total_mb={} safety_mb={} fixed_scratch_mb={:.1} per_tok_kb={:.1} measured_alloc_overhead_mb={:.1} measured_runtime_overhead_mb={:.1} cold_staging_reserve_mb={:.1} post_scratch_runtime_reserve_mb={:.1} scratch_budget_mb={:.1} target_tokens={} max_by_vram={} chosen_scratch_tokens={} hcs_cached_experts={} hcs_stride={} old_scratch_tokens={}",
                 prompt_tokens,
                 free_bytes / (1024 * 1024),
                 total_bytes / (1024 * 1024),
@@ -8286,6 +8295,7 @@ impl PrefillEngine {
                 self.measured_scratch_alloc_overhead_bytes as f64 / (1024.0 * 1024.0),
                 self.measured_prefill_runtime_overhead_bytes as f64 / (1024.0 * 1024.0),
                 self.max_cold_staging_reserve_bytes() as f64 / (1024.0 * 1024.0),
+                post_scratch_runtime_reserve_bytes as f64 / (1024.0 * 1024.0),
                 scratch_budget_bytes as f64 / (1024.0 * 1024.0),
                 target,
                 max_by_vram,
@@ -8532,9 +8542,8 @@ impl PrefillEngine {
                     safety_margin_mb,
                 ),
             );
-            let post_alloc_required_bytes = safety_bytes
-                .saturating_add(self.measured_prefill_runtime_overhead_bytes)
-                .saturating_add(self.max_cold_staging_reserve_bytes());
+            let post_alloc_required_bytes =
+                safety_bytes.saturating_add(post_scratch_runtime_reserve_bytes);
             if post_alloc_free_bytes >= post_alloc_required_bytes || scratch_tokens <= 128 {
                 self.config.prefill_chunk_size = scratch_tokens;
                 break;

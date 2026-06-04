@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Improved measured-safe Q122B prefill chunk sizing. After startup calibration
+  measures the post-scratch runtime low-water delta, prefill scratch planning
+  now uses that measured reserve directly instead of adding a second full
+  cold-staging reserve on top of it. Before calibration has measured runtime
+  overhead, Krasis still falls back to the full cold-staging reserve. This keeps
+  the `600 MB` safety margin and automatic HCS pressure behavior intact while
+  allowing larger measured-safe chunks.
+- Validation: `./dev build` passed. Instrumented Q122B HQQ6/k4v4 diagnostic
+  produced `3401.7 tok/s` internal prefill, `28.31 tok/s` internal decode, and
+  `48.47 tok/s` HTTP with `776 MB` minimum free VRAM and a clean health scan.
+  Clean timing-off `./dev benchmark tests/q122b-k4v4-hqq6-int4-benchmark.conf`
+  produced `3608.7 tok/s` internal prefill, `27.76 tok/s` internal decode, and
+  `47.99 tok/s` HTTP with `4050/12288` HCS, `806 MB` minimum free VRAM, and no
+  CUDA errors, VRAM monitor warnings, hard-floor exits, or HCS copy failures.
 - Improved Q122B HQQ6+k4v4 prefill planning without weakening the VRAM safety
   margin. Runtime prefill now builds an explicit chunk plan, preserves the
   fewest measured-safe passes, and smooths pathological tiny tails across the

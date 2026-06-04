@@ -13,6 +13,7 @@ These were instrumented diagnostics on `main` at `4a40cca`, using
 | Q122B current-main component timing | on | 2272.0 | 27.76 | 50.89 | 4077/12288 (33.2%) | 682 MB | clean | [full log](20260604_q122b_hqq6_k4v4_current_main_prefill_component_timing.log), [report](20260604_q122b_hqq6_k4v4_current_main_prefill_component_timing_report.log), [server log](20260604_q122b_hqq6_k4v4_current_main_prefill_component_timing_krasis.log) |
 | Q122B current-main component timing, `KRASIS_NO_PINNING=1` | off | 3032.4 | 27.91 | 50.34 | 4077/12288 (33.2%) | 646 MB | one warning: 598 MB free during warmup | [full log](20260604_q122b_hqq6_k4v4_current_main_no_pinning_component_timing.log), [report](20260604_q122b_hqq6_k4v4_current_main_no_pinning_component_timing_report.log), [server log](20260604_q122b_hqq6_k4v4_current_main_no_pinning_component_timing_krasis.log) |
 | Q122B tail smoothing + dense-active pinning skip + post-scratch floor | adaptive | 2992.1 | 28.27 | 49.45 | 4077/12288 (33.2%) | 678 MB | clean | [full log](20260604_2015_q122b_hqq6_k4v4_tail_dense_floor_component_timing.log), [report](20260604_q122b_hqq6_k4v4_tail_dense_floor_component_timing_report.log), [server log](20260604_q122b_hqq6_k4v4_tail_dense_floor_component_timing_krasis.log) |
+| Q122B measured post-scratch reserve | adaptive | 3401.7 | 28.31 | 48.47 | 4050/12288 (33.0%) | 776 MB | clean | [full log](20260604_q122b_hqq6_k4v4_post_scratch_reserve_diag.log) |
 
 Findings:
 - The no-HCS long calibration chunk still reaches the old speed class:
@@ -31,6 +32,12 @@ Findings:
 - Dense-active optional pinning skip restored large-chunk prefill to the
   old-speed class for dense Q122B chunks, while the post-scratch floor guard
   kept the instrumented diagnostic above the 600 MB safety floor.
+- The measured post-scratch reserve row removed a double count in scratch
+  planning: calibration measures `post_alloc_free - min_free`, which already
+  includes runtime cold-staging low-water effects, so the allocator now uses
+  that measured reserve instead of adding a second full cold-staging reserve
+  after calibration. In the diagnostic, `35K` improved to `18245 + 16755`
+  chunks and `50K` improved to `18054 + 18054 + 13892`, with no safety warning.
 
 ---
 
@@ -44,6 +51,7 @@ Timing instrumentation was disabled. Both rows used
 |-----|----------------:|---------------:|-------------------:|-----|--------------:|--------|------|
 | Q122B tail smoothing + dense-active pinning skip, before reload guard | 3106.2 | 28.62 | 48.78 | 4077/12288 (33.2%) | 648 MB | one warning: 598 MB free during warmup | [full log](20260604_2055_q122b_hqq6_k4v4_tail_dense_floor_clean_benchmark.log), [report](20260604_q122b_hqq6_k4v4_tail_dense_floor_clean_benchmark_report.log), [server log](20260604_q122b_hqq6_k4v4_tail_dense_floor_clean_benchmark_krasis.log) |
 | Q122B tail smoothing + dense-active pinning skip + reload guard | 3238.3 | 27.21 | 47.04 | 4050/12288 (33.0%) | 804 MB | clean | [full log](20260604_2004_q122b_hqq6_k4v4_tail_dense_reload_guard_clean_benchmark.log), [report](20260604_q122b_hqq6_k4v4_tail_dense_reload_guard_clean_benchmark_report.log), [server log](20260604_q122b_hqq6_k4v4_tail_dense_reload_guard_clean_benchmark_krasis.log) |
+| Q122B measured post-scratch runtime reserve | 3608.7 | 27.76 | 47.99 | 4050/12288 (33.0%) | 806 MB | clean | [full log](20260604_q122b_hqq6_k4v4_post_scratch_reserve_clean.log), [report](20260604_q122b_hqq6_k4v4_post_scratch_reserve_clean_report.log), [server log](20260604_q122b_hqq6_k4v4_post_scratch_reserve_clean_krasis.log) |
 
 Notes:
 - The first timing-off run improved prefill but still dipped to `598 MB`, below
@@ -54,6 +62,11 @@ Notes:
   the prior effective post-pressure coverage, and raised minimum free VRAM to
   `804 MB`. Health scan found no CUDA errors, no VRAM monitor warnings, no
   hard-floor exits, and no HCS copy failures.
+- The measured post-scratch runtime-reserve row keeps the same HCS coverage and
+  safety behavior while raising best clean prefill from `3238.3` to
+  `3608.7 tok/s` (`+11.4%`). It remains below the old May 3 Q122B anchor
+  (`4880.4 tok/s`) because `20K` still cannot run as one measured-safe chunk
+  and dense multi-pass prefill still pays repeated all-expert cold-staging work.
 
 ---
 
