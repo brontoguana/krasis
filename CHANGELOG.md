@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.14 - 2026-06-04
 
 - Fixed VRAM pressure handling after a Typhon Qwen3.6-35B dynamic-HCS failure
   where cleanup-time lows reached `322 MB` free against a `600 MB` safety
@@ -8,6 +8,9 @@
   retains the worst observed low until HCS drain reacts, chat requests drain
   HCS pressure at cleanup end, and startup force-drains again immediately
   before publishing server-ready.
+- Fixed `./dev release-test` model alias resolution so documented aliases such
+  as `QCN` resolve to the real model directory before invoking the guarded
+  release-test runner.
 
 - Scoped `./dev benchmark` GPU cleanup to `CFG_SELECTED_GPUS` so benchmarks on one GPU do not stop unrelated Krasis services on other GPUs.
 

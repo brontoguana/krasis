@@ -236,6 +236,16 @@ resolve_config() {
     esac
 }
 
+resolve_model_name() {
+    case "$1" in
+        qcn|QCN|qwen3-coder-next|Qwen3-Coder-Next) echo "Qwen3-Coder-Next" ;;
+        qwen35|QWEN35|q35b|Q35B|Qwen3.5-35B-A3B) echo "Qwen3.5-35B-A3B" ;;
+        q122b|Q122B|Qwen3.5-122B-A10B) echo "Qwen3.5-122B-A10B" ;;
+        q235|Q235|Qwen3-235B-A22B) echo "Qwen3-235B-A22B" ;;
+        *) echo "$1" ;;
+    esac
+}
+
 # No need for conf_to_args — server.py has native --config support
 
 # Extract port from a .conf file
@@ -926,7 +936,8 @@ do_release_test() {
     [[ $# -lt 1 ]] && err "Usage: ./dev release-test <model> [--force-rebuild-cache]
   model = directory name under ~/.krasis/models/
   Example: ./dev release-test Qwen3-Coder-Next"
-    local model="$1"
+    local model
+    model=$(resolve_model_name "$1")
     shift
     cleanup_gpu
     local run_dir
