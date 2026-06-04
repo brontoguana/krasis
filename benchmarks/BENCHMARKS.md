@@ -1,5 +1,35 @@
 # Krasis Benchmark Results
 
+## Standard Benchmarks - 2026-06-04 (QCN after Typhon pressure-drain fix)
+
+Hardware: EPYC 7742, 1007 GB RAM, RTX 5090 32 GB selected for the run.
+Timing instrumentation was disabled. The run used the repeatable
+`./dev speed-test` entry point on `main` at
+`0ceb770 Fix VRAM pressure drain after cleanup lows`.
+
+| Model / run | Command | Attention | KV | Prefill (tok/s) | Decode (tok/s) | Round trip (tok/s) | HCS | Min free VRAM | Logs |
+|-------------|---------|-----------|----|----------------:|---------------:|-------------------:|-----|--------------:|------|
+| Qwen3-Coder-Next HQQ4 k4v4 INT4 mirror speed-test after Typhon pressure fix | `./dev speed-test` | HQQ4 | k4v4 | 4789.0 | 83.27 | 128.29 | 16362/24576 (66.6%) | 734 MB | [full log](20260604_qcn_hqq4_k4v4_int4_mirror_speedtest_typhon_pressure_fix.log), [report](20260604_qcn_hqq4_k4v4_int4_mirror_speedtest_typhon_pressure_fix_report.log), [server log](20260604_qcn_hqq4_k4v4_int4_mirror_speedtest_typhon_pressure_fix_krasis.log) |
+
+Notes:
+- Config confirmation: `attention_quant='hqq4'`, `kv_dtype='k4v4'`,
+  `gpu_expert_bits=4`, `cpu_expert_bits=4`, `enable_thinking=False`, and
+  `hcs_host_cache_mode='mirror'`.
+- Startup built/validated HQQ4 attention artifacts (`947 MB` cache) and loaded
+  soft HCS in mirror mode: `16443/24576` startup soft experts
+  (`25435.3 MB`, `host_mode=mirror`).
+- VRAM calibration used the full `39,920`-token long probe. Long prefill
+  low-water was `3244 MB`; timed benchmark decode minimum free VRAM was
+  `734 MB`, above the `600 MB` safety margin.
+- Health scan found no CUDA errors, no VRAM monitor warnings, no HCS copy
+  failures, and no hard-floor exit in the benchmark logs.
+- Compared with the latest indexed QCN speed-test gate
+  (`20260529_qcn_hqq4_k4v4_int4_mirror_speedtest_v1011_release_gate`:
+  `5925.2` prefill, `91.09` decode, `150.62` HTTP), this run was lower:
+  internal prefill `-19.2%`, internal decode `-8.9%`, HTTP `-14.7%`.
+
+---
+
 ## Standard Benchmarks - 2026-05-27 (QCN HQQ4 speed-test policy)
 
 Hardware: EPYC 7742, 1007 GB RAM, RTX 5090 32 GB selected for the run.
