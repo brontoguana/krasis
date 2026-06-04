@@ -1536,6 +1536,17 @@ fn handle_chat_completion(
     });
     let cleanup_gil_ms = t_cleanup_gil.elapsed().as_secs_f64() * 1000.0;
     crate::vram_monitor::report_event("cleanup_end");
+    let (cleanup_pressure_evicted, cleanup_pressure_freed_mb, cleanup_pressure_final_free_mb) =
+        store.hcs_drain_vram_pressure("request_cleanup_end", true);
+    if cleanup_pressure_evicted > 0 {
+        log::warn!(
+            "Request {}: VRAM pressure eviction after cleanup evicted {} soft experts, freed {:.1} MB, final_free={} MB",
+            request_id,
+            cleanup_pressure_evicted,
+            cleanup_pressure_freed_mb,
+            cleanup_pressure_final_free_mb,
+        );
+    }
 
     let total_ms = t_request.elapsed().as_secs_f64() * 1000.0;
     log::info!(

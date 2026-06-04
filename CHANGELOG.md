@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Fixed VRAM pressure handling after a Typhon Qwen3.6-35B dynamic-HCS failure
+  where cleanup-time lows reached `322 MB` free against a `600 MB` safety
+  margin before CUDA later reported `ILLEGAL_ADDRESS`. Pending pressure now
+  retains the worst observed low until HCS drain reacts, chat requests drain
+  HCS pressure at cleanup end, and startup force-drains again immediately
+  before publishing server-ready.
+
 - Scoped `./dev benchmark` GPU cleanup to `CFG_SELECTED_GPUS` so benchmarks on one GPU do not stop unrelated Krasis services on other GPUs.
 
 - Deprecated and disabled direct FP8 KV cache modes (`fp8`, `fp8_e4m3`).

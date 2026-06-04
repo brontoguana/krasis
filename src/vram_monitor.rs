@@ -47,9 +47,16 @@ pub fn mark_pressure(device_id: i32, free_mb: u64, safety_margin_mb: u64) {
     let Some(slot) = pressure_slot(device_id) else {
         return;
     };
-    PRESSURE_FREE_MB[slot].store(free_mb, Ordering::Relaxed);
-    PRESSURE_MARGIN_MB[slot].store(safety_margin_mb, Ordering::Relaxed);
-    PRESSURE_DEFICIT_MB[slot].store(safety_margin_mb.saturating_sub(free_mb), Ordering::Relaxed);
+    let worst_free_mb = PRESSURE_FREE_MB[slot]
+        .fetch_min(free_mb, Ordering::Relaxed)
+        .min(free_mb);
+    let max_margin_mb = PRESSURE_MARGIN_MB[slot]
+        .fetch_max(safety_margin_mb, Ordering::Relaxed)
+        .max(safety_margin_mb);
+    PRESSURE_DEFICIT_MB[slot].store(
+        max_margin_mb.saturating_sub(worst_free_mb),
+        Ordering::Relaxed,
+    );
     PRESSURE_PENDING_MASK.fetch_or(1u64 << slot, Ordering::Release);
 }
 
@@ -58,6 +65,9 @@ pub fn clear_pressure(device_id: i32) {
         return;
     };
     PRESSURE_PENDING_MASK.fetch_and(!(1u64 << slot), Ordering::AcqRel);
+    PRESSURE_FREE_MB[slot].store(u64::MAX, Ordering::Relaxed);
+    PRESSURE_MARGIN_MB[slot].store(0, Ordering::Relaxed);
+    PRESSURE_DEFICIT_MB[slot].store(0, Ordering::Relaxed);
 }
 
 pub fn pressure_pending(device_id: i32) -> Option<VramPressure> {

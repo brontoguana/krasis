@@ -2867,6 +2867,13 @@ def main():
     # Final ready summary after all setup is done. Keep lines compact because
     # stdout is also written through the timestamped krasis.server logger.
     time.sleep(1.0)
+    if args.hcs:
+        evicted, freed_mb, final_free_mb = gpu_store.py_hcs_drain_vram_pressure("server_ready", True)
+        if evicted > 0:
+            _warn(
+                f"VRAM pressure eviction before server ready: evicted {evicted} soft HCS experts, "
+                f"freed {freed_mb:.1f} MB, final free {final_free_mb:,} MB"
+            )
     _decode_mode = f"{len(all_aux_gpu_store_addrs)+1}-GPU" if all_aux_gpu_store_addrs else "GPU"
     _hcs_str = "on" if args.hcs else "off"
     _think_str = "on" if think_end_id else "off"
