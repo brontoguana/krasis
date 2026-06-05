@@ -2,8 +2,10 @@
 
 ## Unreleased
 
-- Hardened Typhon/16GB startup and CUDA-fault safety. HCS startup now keeps one
-  measured soft-tier chunk of headroom above the calibrated decode idle floor,
+## 1.0.15 - 2026-06-05
+
+- Hardened Typhon/16GB startup and CUDA-fault safety. HCS startup now keeps two
+  measured soft-tier chunks of headroom above the calibrated decode idle floor,
   and server startup gates `KRASIS SERVER READY` on bounded measured
   drain-and-resample checks after VRAM monitor warnings are enabled. If the
   configured safety floor cannot be restored, startup fails visibly instead of
@@ -27,6 +29,35 @@
   `copy_failures=0` on an `800 MB` safety margin. A post-pressure small prompt
   completed with decode `54.5 tok/s`, decode min free `918 MB`, and
   `copy_failures=0`.
+- Fixed post-scratch reserve planning to use the measured runtime transient for
+  the actual prompt length. This preserves the safety-floor check while avoiding
+  a false release-test failure where a tiny QCN warmup request inherited the
+  long-prompt post-scratch reserve and refused to run despite enough measured
+  headroom for that request size.
+- Fixed HCS pressure-drain targets to recover to `safety + measured_deficit`
+  after a below-safety low, and to keep two physical soft-HCS chunks of
+  headroom during forced readiness/decode drains. This was exposed by the QCN
+  INT8 multi-GPU release-test path, where GPU0 published ready with only
+  `744 MB` free against a `600 MB` margin and later dipped below the floor
+  before the next prefill.
+- Added a configured-safety-margin entry guard to HCS prefill eviction. Runtime
+  prefill starts from a decode-resident HCS state rather than the no-HCS
+  calibration state, so the eviction floor now preserves the measured prefill
+  requirement plus HQQ stage growth plus two additional configured safety
+  margins before scratch allocation.
+- Tightened optional prefill pinning so it cannot consume the last measured
+  post-scratch safety band. Pinning now only uses surplus above the calibrated
+  post-scratch runtime floor plus one configured safety margin, preserving the
+  optimization while preventing short HCS-loaded prefill prompts from launching
+  with only a tiny margin above the floor.
+- Release validation: `./dev release-test QCN` passed all three Qwen3-Coder-Next
+  release configs with llama-witness `4/4` validation on each config. Final
+  release-test health scan was clean: no CUDA errors, VRAM monitor warnings,
+  hard-floor exits, or nonzero HCS copy failures. Release-test speeds were
+  INT4 k4v4 HQQ4 `6433.2 tok/s` prefill, `90.36 tok/s` decode,
+  `158.41 tok/s` HTTP; INT4 k6v6 HQQ6+8 `6377.3 tok/s` prefill,
+  `88.96 tok/s` decode, `144.13 tok/s` HTTP; INT8 k6v6 HQQ6+8 multi-GPU
+  `5000.9 tok/s` prefill, `40.30 tok/s` decode, `68.01 tok/s` HTTP.
 - Reduced Q122B prefill scratch for fused MoE by sizing the routed/shared
   accumulator as `[tokens, hidden]` FP32 instead of routing-width scratch.
   The fused Marlin reduction scratch is already provided by `d_fp32_scratch`,

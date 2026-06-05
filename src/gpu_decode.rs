@@ -9725,13 +9725,22 @@ impl GpuDecodeStore {
             return None;
         };
         let required_post_scratch_mb = cal.required_post_scratch_free_mb(prompt_tokens);
-        let result = cal.optional_pinning_budget_mb(prompt_tokens, post_alloc_free_mb as u64);
+        let result = required_post_scratch_mb.map(|required| {
+            // Optional pinning is a speed optimization, not part of the
+            // measured correctness/safety budget. Keep one configured safety
+            // margin above the measured post-scratch floor so pinning cannot
+            // consume the final runtime guard band before kernel launch.
+            let guarded_required = required.saturating_add(cal.safety_margin_mb);
+            (post_alloc_free_mb as u64)
+                .saturating_sub(guarded_required)
+        });
         if env_truthy("KRASIS_VRAM_LEDGER") {
             vram_ledger_log!(
-                "VRAM LEDGER prefill_pinning_budget prompt_tokens={} post_alloc_free_mb={} required_post_scratch_mb={:?} result_mb={:?}",
+                "VRAM LEDGER prefill_pinning_budget prompt_tokens={} post_alloc_free_mb={} required_post_scratch_mb={:?} pinning_guard_mb={} result_mb={:?}",
                 prompt_tokens,
                 post_alloc_free_mb,
                 required_post_scratch_mb,
+                cal.safety_margin_mb,
                 result,
             );
         }
@@ -13324,6 +13333,18 @@ impl GpuDecodeStore {
 
         if let Some(engine) = self.prefill_engine_slot.as_mut() {
             engine.set_safety_margin_mb(safety_margin_mb as usize);
+            if prefill_short_post_alloc_free_mb > 0 && prefill_long_post_alloc_free_mb > 0 {
+                let short_reserve_mb = prefill_short_post_alloc_free_mb
+                    .saturating_sub(prefill_short_free_mb) as usize;
+                let long_reserve_mb = prefill_long_post_alloc_free_mb
+                    .saturating_sub(prefill_long_free_mb) as usize;
+                engine.set_prefill_runtime_reserve_calibration(
+                    short_tokens,
+                    long_tokens,
+                    short_reserve_mb,
+                    long_reserve_mb,
+                );
+            }
         }
         self.vram_calibration = Some(cal);
         Ok(msg)
@@ -18316,6 +18337,7 @@ impl GpuDecodeStore {
             last_prepare_post_alloc_free_mb: 0,
             measured_scratch_alloc_overhead_bytes: 0,
             measured_prefill_runtime_overhead_bytes: 0,
+            prefill_runtime_reserve_calibration: None,
             prescan_active_experts: Vec::new(),
             prescan_token_count: 0,
             // Expert pointer table for zero-copy MoE
@@ -28443,15 +28465,26 @@ impl GpuDecodeStore {
         } else {
             usize::MAX
         };
-        let needed_bytes = base_needed_bytes.saturating_add(hqq_prefill_growth_bytes);
+        // Startup calibration measures no-HCS prefill lows. Runtime prefill
+        // starts from a decode-resident HCS state and may have just gone
+        // through reload/aux decode safe points, so preserve two additional
+        // configured safety margins as entry headroom instead of targeting the
+        // measured no-HCS floor exactly. The first covers reload/aux-runtime
+        // jitter; the second covers launch-time transients before the next
+        // pressure safe point.
+        let prefill_entry_guard_bytes = hcs.safety_margin_mb.saturating_mul(2 * 1024 * 1024);
+        let needed_bytes = base_needed_bytes
+            .saturating_add(hqq_prefill_growth_bytes)
+            .saturating_add(prefill_entry_guard_bytes);
         if env_truthy("KRASIS_VRAM_LEDGER") {
             vram_ledger_log!(
-                "VRAM LEDGER hcs_evict_prefill prompt_tokens={} eviction_tokens={} free_mb={:.0} base_needed_mb={:.0} hqq_prefill_growth_mb={:.0} needed_mb={:.0} soft_cached={} soft_slots={} soft_slot_mb={:.3} soft_chunks_loaded={} soft_total_chunks={} hard_budget_mb={} soft_max_mb={} safety_mb={}",
+                "VRAM LEDGER hcs_evict_prefill prompt_tokens={} eviction_tokens={} free_mb={:.0} base_needed_mb={:.0} hqq_prefill_growth_mb={:.0} entry_guard_mb={:.0} needed_mb={:.0} soft_cached={} soft_slots={} soft_slot_mb={:.3} soft_chunks_loaded={} soft_total_chunks={} hard_budget_mb={} soft_max_mb={} safety_mb={}",
                 estimated_tokens,
                 eviction_tokens,
                 free_bytes as f64 / (1024.0 * 1024.0),
                 base_needed_bytes as f64 / (1024.0 * 1024.0),
                 hqq_prefill_growth_bytes as f64 / (1024.0 * 1024.0),
+                prefill_entry_guard_bytes as f64 / (1024.0 * 1024.0),
                 needed_bytes as f64 / (1024.0 * 1024.0),
                 hcs.soft_num_cached,
                 hcs.soft_num_slots,
@@ -28469,21 +28502,22 @@ impl GpuDecodeStore {
                 trace_cfg.as_ref(),
                 "hcs",
                 &format!(
-                    "phase=soft_skip_eviction free_mb={:.0} needed_mb={:.0} base_needed_mb={:.0} hqq_prefill_growth_mb={:.0} estimated_tokens={}",
-                    free_bytes as f64 / (1024.0 * 1024.0),
-                    needed_bytes as f64 / (1024.0 * 1024.0),
-                    base_needed_bytes as f64 / (1024.0 * 1024.0),
-                    hqq_prefill_growth_bytes as f64 / (1024.0 * 1024.0),
-                    eviction_tokens,
-                ),
-            );
-            log::info!(
-                "HCS soft: skip eviction — {:.0} MB free >= {:.0} MB prefill floor for ~{} tokens (base={:.0} MB, hqq_stage_growth={:.0} MB)",
+                "phase=soft_skip_eviction free_mb={:.0} needed_mb={:.0} base_needed_mb={:.0} hqq_prefill_growth_mb={:.0} estimated_tokens={}",
                 free_bytes as f64 / (1024.0 * 1024.0),
                 needed_bytes as f64 / (1024.0 * 1024.0),
                 base_needed_bytes as f64 / (1024.0 * 1024.0),
                 hqq_prefill_growth_bytes as f64 / (1024.0 * 1024.0),
+                    eviction_tokens,
+                ),
+            );
+            log::info!(
+                "HCS soft: skip eviction — {:.0} MB free >= {:.0} MB prefill floor for ~{} tokens (base={:.0} MB, hqq_stage_growth={:.0} MB, entry_guard={:.0} MB)",
+                free_bytes as f64 / (1024.0 * 1024.0),
+                needed_bytes as f64 / (1024.0 * 1024.0),
                 eviction_tokens,
+                base_needed_bytes as f64 / (1024.0 * 1024.0),
+                hqq_prefill_growth_bytes as f64 / (1024.0 * 1024.0),
+                prefill_entry_guard_bytes as f64 / (1024.0 * 1024.0),
             );
             return (0, 0.0);
         }
@@ -28583,7 +28617,7 @@ impl GpuDecodeStore {
             trace_cfg.as_ref(),
             "hcs",
             &format!(
-                "phase=soft_evict experts={} freed_mb={:.1} chunks_dropped={} total_chunks={} elapsed_ms={:.1} estimated_tokens={} base_needed_mb={:.0} hqq_prefill_growth_mb={:.0}",
+                "phase=soft_evict experts={} freed_mb={:.1} chunks_dropped={} total_chunks={} elapsed_ms={:.1} estimated_tokens={} base_needed_mb={:.0} hqq_prefill_growth_mb={:.0} entry_guard_mb={:.0}",
                 evicted,
                 freed_mb,
                 chunks_to_drop,
@@ -28591,10 +28625,11 @@ impl GpuDecodeStore {
                 elapsed_ms,
                 estimated_tokens,
                 base_needed_bytes as f64 / (1024.0 * 1024.0),
-                hqq_prefill_growth_bytes as f64 / (1024.0 * 1024.0)
+                hqq_prefill_growth_bytes as f64 / (1024.0 * 1024.0),
+                prefill_entry_guard_bytes as f64 / (1024.0 * 1024.0)
             ),
         );
-        log::info!("HCS soft: evicted {} experts ({:.1} MB, {} of {} chunks dropped) in {:.1}ms for prefill (~{} tokens, base={:.0} MB, hqq_stage_growth={:.0} MB)",
+        log::info!("HCS soft: evicted {} experts ({:.1} MB, {} of {} chunks dropped) in {:.1}ms for prefill (~{} tokens, base={:.0} MB, hqq_stage_growth={:.0} MB, entry_guard={:.0} MB)",
             evicted,
             freed_mb,
             chunks_to_drop,
@@ -28602,7 +28637,8 @@ impl GpuDecodeStore {
             elapsed_ms,
             estimated_tokens,
             base_needed_bytes as f64 / (1024.0 * 1024.0),
-            hqq_prefill_growth_bytes as f64 / (1024.0 * 1024.0));
+            hqq_prefill_growth_bytes as f64 / (1024.0 * 1024.0),
+            prefill_entry_guard_bytes as f64 / (1024.0 * 1024.0));
         if env_truthy("KRASIS_VRAM_LEDGER") {
             let free_after_bytes = current_cuda_free_mb()
                 .map(|mb| mb.saturating_mul(1024 * 1024))
@@ -28904,22 +28940,6 @@ impl GpuDecodeStore {
             return (0, 0.0, observed_free_mb);
         }
 
-        // If the monitor observed a transient below-safety low, recovering
-        // above the nominal safety margin is not enough.  Preserve the
-        // measured deficit as extra idle headroom so a similar next decode
-        // step remains above the configured safety margin.
-        let target_floor_mb = pending
-            .map(|p| {
-                observed_free_mb
-                    .saturating_add(p.deficit_mb as usize)
-                    .max(safety_mb)
-            })
-            .unwrap_or(safety_mb);
-        if observed_free_mb >= target_floor_mb {
-            crate::vram_monitor::clear_pressure(device_id);
-            return (0, 0.0, observed_free_mb);
-        }
-
         let route_sync_device = self.device.clone();
         let graph = match self.graph.as_mut() {
             Some(g) => g,
@@ -28950,6 +28970,31 @@ impl GpuDecodeStore {
                 return (0, 0.0, observed_free_mb);
             }
         };
+
+        // If the monitor observed a transient below-safety low, recovering
+        // above the nominal safety margin is not enough. Preserve the measured
+        // deficit as extra idle headroom. HCS can only reclaim VRAM in physical
+        // soft chunks, so safe points keep measured chunk-sized headroom rather
+        // than a fixed MB constant. Forced readiness/decode drains keep two
+        // chunks: one for the next runtime transient and one still reclaimable
+        // if the monitor sees pressure before the next safe point.
+        let pressure_floor_mb = pending
+            .map(|p| safety_mb.saturating_add(p.deficit_mb as usize))
+            .unwrap_or(safety_mb);
+        let soft_chunk_guard_mb = if hcs.soft_chunks_loaded > 0 && (force_measure || pending.is_some()) {
+            let chunk_bytes = hcs.soft_full_chunk_bytes();
+            let chunk_mb = (chunk_bytes + (1024 * 1024) - 1) / (1024 * 1024);
+            let chunks = if force_measure { 2usize } else { 1usize };
+            chunk_mb.saturating_mul(chunks)
+        } else {
+            0
+        };
+        let target_floor_mb = pressure_floor_mb
+            .max(safety_mb.saturating_add(soft_chunk_guard_mb));
+        if observed_free_mb >= target_floor_mb {
+            crate::vram_monitor::clear_pressure(device_id);
+            return (0, 0.0, observed_free_mb);
+        }
 
         if hcs.soft_reload_pending {
             log::warn!(

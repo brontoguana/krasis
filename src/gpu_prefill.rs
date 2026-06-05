@@ -3275,6 +3275,7 @@ pub struct PrefillEngine {
     pub last_prepare_post_alloc_free_mb: usize,
     pub measured_scratch_alloc_overhead_bytes: usize,
     pub measured_prefill_runtime_overhead_bytes: usize,
+    pub prefill_runtime_reserve_calibration: Option<(usize, usize, usize, usize)>,
     // Pre-scan routing data: per-layer list of predicted active expert IDs per chunk
     pub prescan_active_experts: Vec<Vec<Vec<usize>>>, // [moe_layer_idx][chunk_idx] -> Vec<expert_id>
     pub prescan_token_count: usize,
@@ -3567,6 +3568,27 @@ impl PrefillEngine {
 
     pub fn set_safety_margin_mb(&mut self, margin_mb: usize) {
         self.safety_margin_mb = margin_mb.max(PREFILL_SAFETY_MARGIN_MB);
+    }
+
+    pub fn set_prefill_runtime_reserve_calibration(
+        &mut self,
+        short_tokens: usize,
+        long_tokens: usize,
+        short_reserve_mb: usize,
+        long_reserve_mb: usize,
+    ) {
+        let short_reserve_bytes = short_reserve_mb.saturating_mul(1024 * 1024);
+        let long_reserve_bytes = long_reserve_mb.saturating_mul(1024 * 1024);
+        self.prefill_runtime_reserve_calibration = Some((
+            short_tokens,
+            long_tokens,
+            short_reserve_bytes,
+            long_reserve_bytes,
+        ));
+        self.measured_prefill_runtime_overhead_bytes = self
+            .measured_prefill_runtime_overhead_bytes
+            .max(short_reserve_bytes)
+            .max(long_reserve_bytes);
     }
 
     pub fn set_reference_debug_trace_enabled(&mut self, enabled: bool) {
@@ -6133,8 +6155,18 @@ impl PrefillEngine {
             .saturating_mul(self.cold_expert_bytes)
     }
 
-    fn measured_post_scratch_runtime_reserve_bytes(&self) -> usize {
-        if self.measured_prefill_runtime_overhead_bytes > 0 {
+    fn measured_post_scratch_runtime_reserve_bytes(&self, tokens: usize) -> usize {
+        if let Some((short_tokens, long_tokens, short_bytes, long_bytes)) =
+            self.prefill_runtime_reserve_calibration
+        {
+            if long_tokens <= short_tokens {
+                return short_bytes.max(long_bytes);
+            }
+            let t = (tokens.saturating_sub(short_tokens) as f64)
+                / (long_tokens - short_tokens) as f64;
+            let reserve = short_bytes as f64 + t * (long_bytes as f64 - short_bytes as f64);
+            reserve.max(0.0) as usize
+        } else if self.measured_prefill_runtime_overhead_bytes > 0 {
             self.measured_prefill_runtime_overhead_bytes
         } else {
             self.max_cold_staging_reserve_bytes()
@@ -8161,7 +8193,7 @@ impl PrefillEngine {
         // tokens for stable sorted dispatch. 128 adds ~57 MB scratch overhead.
         let target = prompt_tokens.min(50000);
         let post_scratch_runtime_reserve_bytes =
-            self.measured_post_scratch_runtime_reserve_bytes();
+            self.measured_post_scratch_runtime_reserve_bytes(prompt_tokens);
         let mut scratch_budget_bytes = free_bytes
             .saturating_sub(safety_bytes)
             .saturating_sub(self.measured_scratch_alloc_overhead_bytes)
