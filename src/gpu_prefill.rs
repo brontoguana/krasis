@@ -3085,10 +3085,10 @@ pub struct PrefillScratch {
     pub d_mamba2_ssd_out: Option<GpuBuf<u16>>,
     // MoE scratch buffers
     pub d_gate_out: GpuBuf<f32>, // [max_tokens, max_experts] FP32
-    // Shared MoE buffers: sized for fused_sorted_count (= max_tokens * topk + n_routed * block_size).
+    // Shared MoE buffers. Accumulator is per token; routed work buffers are
+    // sized for fused_sorted_count (= max_tokens * topk + n_routed * block_size).
     // Used by BOTH sequential and fused MoE paths (never simultaneously).
-    // Sequential uses [max_tokens * topk] entries; fused uses [fused_sorted_count].
-    pub d_moe_accum: GpuBuf<f32>, // [fused_sorted_count, max(w1_n, h)] FP32 -- routed accumulator / sequential MoE scratch
+    pub d_moe_accum: GpuBuf<f32>, // [max_tokens, hidden] FP32 -- routed/shared accumulator
     pub d_moe_gathered: GpuBuf<u16>, // [fused_sorted_count, hidden] BF16 -- fused_input or gathered
     pub d_moe_expert_out: GpuBuf<u16>, // [fused_sorted_count, hidden] BF16 -- fused_output or expert_out
     pub d_moe_gate_up: GpuBuf<u16>, // [fused_sorted_count, w1_n] BF16 -- fused_inter_cache or gate_up
@@ -8544,9 +8544,37 @@ impl PrefillEngine {
             );
             let post_alloc_required_bytes =
                 safety_bytes.saturating_add(post_scratch_runtime_reserve_bytes);
-            if post_alloc_free_bytes >= post_alloc_required_bytes || scratch_tokens <= 128 {
+            if post_alloc_free_bytes >= post_alloc_required_bytes {
                 self.config.prefill_chunk_size = scratch_tokens;
                 break;
+            }
+            if scratch_tokens <= 128 {
+                let free_mb = post_alloc_free_bytes / (1024 * 1024);
+                let required_mb = post_alloc_required_bytes / (1024 * 1024);
+                self.scratch = allocate_scratch(&self.device, &self.config, 0)
+                    .map_err(|e| format!("alloc empty scratch after unsafe prefill floor: {e}"))?;
+                self.d_cold_staging = None;
+                self.d_shared_bf16_scratch1 = None;
+                self.d_shared_bf16_scratch2 = None;
+                self.d_shared_fp32_scratch = None;
+                self.d_shared_workspace = None;
+                self.d_fla_g_cumsum = None;
+                self.d_fla_a = None;
+                self.d_fla_ai = None;
+                self.d_fla_w = None;
+                self.d_fla_u = None;
+                self.d_fla_h = None;
+                self.d_fla_h0 = None;
+                self.d_fla_final_state = None;
+                self.d_fla_v_new = None;
+                self.d_fla_o = None;
+                self.release_prefill_kv_temp();
+                return Err(format!(
+                    "prefill VRAM safety floor unavailable: {} MB free after minimum scratch, {} MB required ({} MB safety margin)",
+                    free_mb,
+                    required_mb,
+                    safety_margin_mb,
+                ));
             }
 
             let deficit_bytes = post_alloc_required_bytes - post_alloc_free_bytes;
@@ -30632,9 +30660,9 @@ pub fn compute_scratch_vram(config: &PrefillModelConfig) -> (usize, usize) {
     let block_size_moe: usize = 64; // MarlinDefault block_size_m
                                     // d_gate_out: max_tokens * n_routed_experts * 4
     per_token += config.n_routed_experts.max(1) * 4;
-    // d_moe_accum: fused_sorted_count * max(w1_n, h) * 4 (serves as Marlin C_tmp for fused,
-    // or [m, h] FP32 scatter accumulator for sequential -- fused size dominates)
-    per_token += topk * std::cmp::max(w1_n, h) * 4;
+    // d_moe_accum: max_tokens * hidden * 4. Marlin C_tmp for fused MoE uses
+    // d_fp32_scratch; this buffer only holds the final per-token accumulator.
+    per_token += h * 4;
     // d_moe_gathered: fused_sorted_count * h * 2 (fused_input or gathered)
     per_token += topk * h * 2;
     // d_moe_expert_out: fused_sorted_count * h * 2 (fused_output or expert_out)
@@ -30731,7 +30759,6 @@ pub fn compute_scratch_vram(config: &PrefillModelConfig) -> (usize, usize) {
         } else {
             moe_inter
         };
-        let max_moe_n = std::cmp::max(w13_n, h);
         let expert_bytes = h * w13_n * bits / 8  // w13 packed
             + (h / gs) * w13_n * 2               // w13 scales
             + moe_inter * h * bits / 8           // w2 packed
@@ -30741,24 +30768,9 @@ pub fn compute_scratch_vram(config: &PrefillModelConfig) -> (usize, usize) {
         // Fused MoE: block padding on shared sorted buffers.
         // fused_sorted_count = max_tokens * topk + n_routed * block_size.
         // The per-token part is accounted for above. The n_routed * block_size padding is fixed.
-        let per_sorted_entry = std::cmp::max(w1_n, h) * 4  // d_moe_accum (FP32)
-            + h * 2 + h * 2 + w1_n * 2 + moe_inter * 2    // gathered + expert_out + gate_up + inter (BF16)
+        let per_sorted_entry = h * 2 + h * 2 + w1_n * 2 + moe_inter * 2    // gathered + expert_out + gate_up + inter (BF16)
             + 4; // d_gather_src_map (i32)
         fixed += n_routed * block_size_moe * per_sorted_entry;
-
-        let reduce_floor = fused_moe_fp32_reduce_floats(
-            block_size_moe,
-            max_moe_n,
-            h,
-            bits,
-            gs,
-            config.sms,
-            usize::MAX,
-        );
-        let base_fixed_moe_accum = n_routed * block_size_moe * max_moe_n;
-        if reduce_floor > base_fixed_moe_accum {
-            fixed += (reduce_floor - base_fixed_moe_accum) * 4;
-        }
 
         // Fused expert_ids buffer: fused_blocks * 4 (approx n_routed + padding)
         // and num_tokens_post: 4 bytes. Small, just add a rough estimate.
@@ -30937,7 +30949,7 @@ fn estimate_scratch_vram_for_prompt(
         moe_inter
     };
     add(max_tokens.saturating_mul(config.n_routed_experts.max(1)), 4); // gate_out
-    add(fsc.saturating_mul(w1_n.max(h)), 4); // moe_accum
+    add(max_tokens.saturating_mul(h), 4); // moe_accum
     add(fsc.saturating_mul(h), 2); // moe_gathered
     add(fsc.saturating_mul(h), 2); // moe_expert_out
     add(fsc.saturating_mul(w1_n), 2); // moe_gate_up
@@ -31183,15 +31195,7 @@ pub fn allocate_scratch_for_prompt(
         // MoE buffers: sized for fsc (fused_sorted_count) computed above.
         // When max_tokens=0 (init/release), fsc=1 to avoid wasting ~608 MB on block padding.
         d_gate_out: alloc_f32(max_tokens * config.n_routed_experts.max(1), "gate_out")?,
-        d_moe_accum: {
-            let w1_n = if config.moe_gated {
-                2 * moe_inter
-            } else {
-                moe_inter
-            };
-            let max_moe_n = std::cmp::max(w1_n, h);
-            alloc_f32(fsc * max_moe_n, "moe_accum")?
-        },
+        d_moe_accum: alloc_f32(max_tokens.max(1) * h, "moe_accum")?,
         d_moe_gathered: alloc_u16(fsc * h, "moe_gathered")?,
         d_moe_expert_out: alloc_u16(fsc * h, "moe_expert_out")?,
         d_moe_gate_up: {

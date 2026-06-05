@@ -59,6 +59,14 @@ use std::sync::Arc;
 use std::time::Instant;
 use std::sync::mpsc;
 
+fn abort_if_cuda_context_poisoned(context: &str, err: &str) {
+    if err.contains("CUDA_ERROR_ILLEGAL_ADDRESS")
+        || err.to_ascii_lowercase().contains("illegal address")
+    {
+        crate::vram_monitor::fatal_cuda_context_error(context, err);
+    }
+}
+
 /// Global pointer to the server's `running` flag so the raw signal handler
 /// can set it to `false` without going through Python's signal mechanism.
 /// This is only written once (before the accept loop) and read from the
@@ -923,6 +931,7 @@ fn handle_chat_completion(
             safety_margin_mb: store.hcs_safety_margin_mb() as u64,
         }
     };
+    drain_vram_pressure_for_state(state, "chat_request_entry", false);
     let created = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -1243,6 +1252,7 @@ fn handle_chat_completion(
         // Release scratch to free VRAM for decode/HCS
         if let Err(e) = engine.release_scratch() {
             log::error!("Failed to release scratch: {}", e);
+            abort_if_cuda_context_poisoned("chat release_scratch", &e);
         }
         engine.clear_external_prefill_inputs();
         engine.clear_prefill_hcs_guard_store_addr();
@@ -1299,6 +1309,7 @@ fn handle_chat_completion(
         Err(e) => {
             let err_str = e.to_string();
             log::error!("Prefill failed: {}", err_str);
+            abort_if_cuda_context_poisoned("chat prefill", &err_str);
             // Return 413 with structured error for KV cache exhaustion
             let (status, body) = if err_str.contains("KV cache exhausted") {
                 (413, format!(
@@ -1674,6 +1685,7 @@ fn handle_prefill_logits(
     // Release scratch after logits extraction
     if let Err(e) = engine.release_scratch() {
         log::error!("Failed to release scratch after prefill_logits: {}", e);
+        abort_if_cuda_context_poisoned("prefill_logits release_scratch", &e);
     }
 
     // Restore evicted soft HCS so the next decode/reference request starts
@@ -1861,6 +1873,7 @@ fn handle_reference_test(
             (first_token, r.prompt_len, first_token_top_k, debug_prefill_logits)
         },
         Err(e) => {
+            abort_if_cuda_context_poisoned("reference_test prefill", &e);
             let _ = engine.release_scratch();
             engine.set_optional_pinning_budget_mb(None);
             let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
@@ -1876,6 +1889,7 @@ fn handle_reference_test(
     // Release scratch to free VRAM for decode/HCS
     if let Err(e) = engine.release_scratch() {
         log::error!("reference_test: Failed to release scratch: {}", e);
+        abort_if_cuda_context_poisoned("reference_test release_scratch", &e);
     }
     engine.set_optional_pinning_budget_mb(None);
 
@@ -2994,6 +3008,9 @@ impl RustServer {
         temperature: f32,
         enable_thinking: bool,
     ) -> PyResult<String> {
+        let benchmark_prefill_breakdown =
+            std::env::var("KRASIS_BENCHMARK_PREFILL_BREAKDOWN").is_ok();
+
         // Load tokenizer and chat template (same as server path)
         let tokenizer = tokenizers::Tokenizer::from_file(&self.tokenizer_path)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
@@ -3034,41 +3051,60 @@ impl RustServer {
         // Prefill (Rust, zero GIL)
         crate::vram_monitor::report_event("prefill_start");
         let t_prefill = Instant::now();
+        let mut prefill_lock_ms = 0.0f64;
+        let mut prefill_hcs_snapshot_ms = 0.0f64;
+        let mut prefill_tokenize_ms = 0.0f64;
+        let mut prefill_prepare_runtime_ms = 0.0f64;
+        let mut prefill_scratch_ms = 0.0f64;
+        let mut prefill_run_ms = 0.0f64;
+        let mut prefill_shadow_ms = 0.0f64;
+        let mut prefill_release_ms = 0.0f64;
+        let mut prefill_stop_ids_ms = 0.0f64;
+        let mut prefill_restore_ms = 0.0f64;
 
+        let t_phase = Instant::now();
         let mut engine_guard = self.prefill_engine.lock().map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("Prefill engine lock poisoned: {}", e))
         })?;
         let engine = engine_guard.as_mut().ok_or_else(|| {
             pyo3::exceptions::PyRuntimeError::new_err("Rust prefill engine not available for benchmark")
         })?;
+        prefill_lock_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
 
         // Update HCS snapshot
+        let t_phase = Instant::now();
         {
             let store_ref = unsafe { &*(self.gpu_store_addr as *const GpuDecodeStore) };
             let (cache_fast, ne) = store_ref.export_hcs_snapshot();
             engine.update_hcs_snapshot(cache_fast, ne);
         }
+        prefill_hcs_snapshot_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
 
         // Tokenize using Rust tokenizer (always with generation prompt)
+        let t_phase = Instant::now();
         let token_ids: Vec<u32> = {
             let rendered = chat_template.apply(&messages_json, true, enable_thinking)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
                     format!("Chat template failed: {}", e)))?;
             let encoding = tokenizer.encode(rendered.as_str(), true)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
-                    format!("Tokenizer failed: {}", e)))?;
+                format!("Tokenizer failed: {}", e)))?;
             encoding.get_ids().to_vec()
         };
+        prefill_tokenize_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
 
         let kv_overflow = token_ids.len() > engine.kv_max_seq;
 
+        let t_phase = Instant::now();
         let _has_hqq_runtime_slots = prepare_store_for_rust_prefill(store, engine, token_ids.len())
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
                 format!("Failed to prepare runtime for prefill: {}", e)))?;
+        prefill_prepare_runtime_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
 
         engine.set_prefill_hcs_guard_store_addr(self.gpu_store_addr);
 
         // Dynamically allocate scratch for this prompt
+        let t_phase = Instant::now();
         if let Err(e) = engine.prepare_for_prefill(token_ids.len()) {
             engine.clear_prefill_hcs_guard_store_addr();
             engine.set_optional_pinning_budget_mb(None);
@@ -3076,6 +3112,7 @@ impl RustServer {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
                 format!("Scratch alloc failed: {}", e)));
         }
+        prefill_scratch_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
         let pinning_budget_mb = store.prefill_optional_pinning_budget_mb(
             token_ids.len(),
             engine.last_prepare_post_alloc_free_mb(),
@@ -3083,6 +3120,7 @@ impl RustServer {
         engine.set_optional_pinning_budget_mb(pinning_budget_mb);
 
         let suppress_tokens = store.suppress_tokens_clone();
+        let t_phase = Instant::now();
         let prefill_result = match engine.run_prefill(
             &token_ids,
             temperature,
@@ -3094,6 +3132,7 @@ impl RustServer {
             },
             Err(e) => Err(e),
         }.map_err(|e| {
+            abort_if_cuda_context_poisoned("benchmark prefill", &e);
             engine.clear_prefill_hcs_guard_store_addr();
             engine.set_optional_pinning_budget_mb(None);
             let _ = engine.release_scratch();
@@ -3101,19 +3140,26 @@ impl RustServer {
             pyo3::exceptions::PyRuntimeError::new_err(
                 format!("Rust prefill failed: {}", e))
         })?;
+        prefill_run_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
 
+        let t_phase = Instant::now();
         let prompt_hcs_snapshot = engine.prompt_hcs_shadow_snapshot();
+        prefill_shadow_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
 
         // Release scratch to free VRAM for decode/HCS
+        let t_phase = Instant::now();
         if let Err(e) = engine.release_scratch() {
             log::error!("Failed to release scratch: {}", e);
+            abort_if_cuda_context_poisoned("benchmark release_scratch", &e);
         }
         engine.clear_prefill_hcs_guard_store_addr();
         engine.set_optional_pinning_budget_mb(None);
+        prefill_release_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
 
         let first_token = prefill_result.first_token as usize;
         let prompt_len = prefill_result.prompt_len;
         // Load EOS tokens for benchmark path (same logic as serve_forever)
+        let t_phase = Instant::now();
         let stop_ids: Vec<usize> = {
             let p = std::path::Path::new(&self.tokenizer_path);
             let gen_cfg_path = p.parent().unwrap_or(p).join("generation_config.json");
@@ -3135,14 +3181,60 @@ impl RustServer {
             }
             ids
         };
+        prefill_stop_ids_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
 
+        let t_phase = Instant::now();
         if let Err(e) = restore_store_after_rust_prefill(store, prompt_len) {
             log::error!("Failed to restore decode runtime after prefill: {}", e);
         }
         store.set_rope_position_delta(0);
+        prefill_restore_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
 
         let prefill_ms = t_prefill.elapsed().as_secs_f64() * 1000.0;
         crate::vram_monitor::report_event("prefill_end");
+        let prefill_accounted_ms = prefill_lock_ms
+            + prefill_hcs_snapshot_ms
+            + prefill_tokenize_ms
+            + prefill_prepare_runtime_ms
+            + prefill_scratch_ms
+            + prefill_run_ms
+            + prefill_shadow_ms
+            + prefill_release_ms
+            + prefill_stop_ids_ms
+            + prefill_restore_ms;
+        let prefill_unaccounted_ms = (prefill_ms - prefill_accounted_ms).max(0.0);
+        let prefill_breakdown = serde_json::json!({
+            "total_ms": prefill_ms,
+            "lock_ms": prefill_lock_ms,
+            "hcs_snapshot_ms": prefill_hcs_snapshot_ms,
+            "tokenize_ms": prefill_tokenize_ms,
+            "prepare_runtime_ms": prefill_prepare_runtime_ms,
+            "scratch_ms": prefill_scratch_ms,
+            "run_finalize_ms": prefill_run_ms,
+            "prompt_hcs_shadow_ms": prefill_shadow_ms,
+            "release_scratch_ms": prefill_release_ms,
+            "stop_ids_ms": prefill_stop_ids_ms,
+            "restore_runtime_ms": prefill_restore_ms,
+            "unaccounted_ms": prefill_unaccounted_ms,
+        });
+        if benchmark_prefill_breakdown {
+            log::info!(
+                "BENCH_PREFILL_BREAKDOWN tokens={} total_ms={:.1} lock_ms={:.1} hcs_snapshot_ms={:.1} tokenize_ms={:.1} prepare_runtime_ms={:.1} scratch_ms={:.1} run_finalize_ms={:.1} prompt_hcs_shadow_ms={:.1} release_scratch_ms={:.1} stop_ids_ms={:.1} restore_runtime_ms={:.1} unaccounted_ms={:.1}",
+                prompt_len,
+                prefill_ms,
+                prefill_lock_ms,
+                prefill_hcs_snapshot_ms,
+                prefill_tokenize_ms,
+                prefill_prepare_runtime_ms,
+                prefill_scratch_ms,
+                prefill_run_ms,
+                prefill_shadow_ms,
+                prefill_release_ms,
+                prefill_stop_ids_ms,
+                prefill_restore_ms,
+                prefill_unaccounted_ms,
+            );
+        }
 
         if kv_overflow || max_new_tokens <= 1 {
             crate::vram_monitor::report_event("hcs_soft_load_start");
@@ -3210,7 +3302,7 @@ impl RustServer {
             }
             let hcs_pct = if hcs_total > 0 { hcs_loaded as f64 / hcs_total as f64 * 100.0 } else { 0.0 };
 
-            let result = serde_json::json!({
+            let mut result = serde_json::json!({
                 "prefill_ms": prefill_ms,
                 "prefill_tok_s": prefill_tok_s,
                 "prompt_tokens": prompt_len,
@@ -3226,6 +3318,9 @@ impl RustServer {
                 "hcs_pct": hcs_pct,
                 "safety_margin_mb": safety_margin_mb,
             });
+            if benchmark_prefill_breakdown {
+                result["prefill_breakdown"] = prefill_breakdown.clone();
+            }
 
             return Ok(result.to_string());
         }
@@ -3431,6 +3526,9 @@ impl RustServer {
             "hcs_pct": hcs_pct,
             "safety_margin_mb": safety_margin_mb,
         });
+        if benchmark_prefill_breakdown {
+            result["prefill_breakdown"] = prefill_breakdown;
+        }
         if let Some(v) = state_validation {
             result["state_validation"] = v;
         }

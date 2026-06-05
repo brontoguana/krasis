@@ -1,0 +1,289 @@
+[0;36m[1m=>[0m Waiting for selected GPUs (0) to clear...
+[0;32m[1mOK[0m Selected GPUs (0) clear.
+[0;36m[1m=>[0m Running standard benchmark: tests/q122b-k4v4-hqq6-int4-benchmark.conf
+[0;36m[1m=>[0m Run dir: /home/main/Documents/Claude/krasis/logs/dev-benchmark_20260605_000032
+[0;36m[1m=>[0m Log: /home/main/Documents/Claude/krasis/logs/dev-benchmark_20260605_000032/benchmark_stdout.log
+[0;36m[1m=>[0m Import origin check:
+krasis: /home/main/Documents/Claude/krasis/python/krasis/__init__.py
+krasis.krasis: /home/main/Documents/Claude/krasis/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+Pre-scan: set CUDA_VISIBLE_DEVICES=0
+Loaded config from tests/q122b-k4v4-hqq6-int4-benchmark.conf: {'model_path': '/home/main/.krasis/models/Qwen3.5-122B-A10B', 'selected_gpus': '0', 'num_gpus': 1, 'layer_group_size': 2, 'kv_cache_mb': 2000, 'kv_dtype': 'k4v4', 'gpu_expert_bits': 4, 'cpu_expert_bits': 4, 'attention_quant': 'hqq6', 'shared_expert_quant': 'int8', 'dense_mlp_quant': 'int8', 'lm_head_quant': 'int8', 'krasis_threads': 40, 'host': '0.0.0.0', 'port': 18012, 'gpu_prefill_threshold': 300, 'vram_safety_margin': 600, 'force_load': False, 'enable_thinking': False}
+
+[1m[36m▸ Krasis — Qwen3.5-122B-A10B[0m
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 1[0m
+  [32mHCS host cache: source[0m
+  [32mSelected physical GPUs: 0 (config; CUDA_VISIBLE_DEVICES=0)[0m
+  [32mExperts: GPU INT4 g128 (amax)  |  Attention: hqq6  |  KV: k4v4[0m
+  [32mLayer groups: 2  |  KV cache: 2000 MB  |  Threads: 40[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+
+[1m[36m▸ Loading model weights[0m
+  [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=518 MB, free=31600 MB, total=32119 MB
+
+[1m[36m▸ Loading GPU weights[0m
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:0: alloc=8912 MB, reserved=9062 MB, used=9748 MB, free=22370 MB, total=32119 MB
+  [0;32mHQQ attention artifacts validated (3696 MB cached), 22370 MB free[0m
+
+[1m[36m▸ Loading GPU expert weights from cache[0m
+    Loading GPU Marlin cache: 48 layers...
+    GPU Marlin cache loaded: 60.0 GB in 37s
+  [0;32mExpert weights loaded in 37s.[0m
+  [33m[VRAM after-phase2-expert-weights][0m cuda:0: alloc=8912 MB, reserved=9062 MB, used=9748 MB, free=22370 MB, total=32119 MB
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:0: alloc=8912 MB, reserved=9062 MB, used=9748 MB, free=22370 MB, total=32119 MB
+  [33m[VRAM after-kv-cache-init][0m cuda:0: alloc=10912 MB, reserved=11062 MB, used=11748 MB, free=20370 MB, total=32119 MB
+  [33m[VRAM after-full-load][0m cuda:0: alloc=10912 MB, reserved=11062 MB, used=11748 MB, free=20370 MB, total=32119 MB
+
+[1m[36m▸ CUDA runtime warmup[0m
+  [32mcuBLAS + Triton kernel compilation done[0m
+
+[1m[36m▸ Setting up GPU decode store[0m
+  [32mGPU decode store ready (addr=0x8bddbbe0)[0m
+  [32mReleased redundant GPU execution source tensors (871 MB)[0m
+  [2mVRAM monitor started (tracking warmup)[0m
+  [2mcuda:0: 0 MB total[0m
+
+[1m[36m▸ Pre-allocating Rust prefill engine[0m
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=262144 total_ms=577.5 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=577.5 has_hqq=true hqq_growth_mb=1208.5 evicted=0 freed_mb=0.0
+[FLA] Loading kernels for H=64 from /home/main/Documents/Claude/krasis/python/krasis/libkrasis_fla_sm120.so
+[FLA] loaded krasis_fla_chunk_local_cumsum_scalar_kernel (H=64)
+[FLA] loaded krasis_fla_chunk_scaled_dot_kkt_fwd_kernel (H=64)
+[FLA] loaded krasis_fla_merge_16x16_to_64x64_inverse_kernel (H=64)
+[FLA] loaded krasis_fla_recompute_w_u_fwd_kernel (H=64)
+[FLA] loaded krasis_fla_chunk_gated_delta_rule_fwd_kernel_h_blockdim64 (H=64)
+[FLA] loaded krasis_fla_chunk_fwd_kernel_o (H=64)
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=446.4 hqq_swap_ms=446.1 hqq_refresh_ms=0.3 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+  [32mPrefill engine scratch buffers allocated[0m
+
+[1m[36m▸ Warmup (Rust prefill engine)[0m
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=300 total_ms=575.5 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=575.5 has_hqq=true hqq_growth_mb=1208.5 evicted=0 freed_mb=0.0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=446.0 hqq_swap_ms=445.7 hqq_refresh_ms=0.3 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+  [32mRust prefill warmed with 300 tokens before HCS budgeting[0m
+  [32mWarmup complete in 1.6s[0m
+  [2mcuda:0 warmup:  peak 13,770 MB used / 32,119 MB total  (min free: 18,348 MB)[0m
+
+[1m[36m▸ VRAM calibration[0m
+  [32mSafety margin: 600 MB[0m
+  [32mFree VRAM after startup: 20,424 MB / 32,119 MB[0m
+  [32mShort calibration: probing 500 prompt tokens + 32 decode tokens[0m
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=500 total_ms=577.0 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=576.9 has_hqq=true hqq_growth_mb=1208.5 evicted=0 freed_mb=0.0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=446.1 hqq_swap_ms=445.7 hqq_refresh_ms=0.4 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+  [32mdecode: 32 tokens in 2.95s (10.8 tok/s)  VRAM: 20380 MB free now, 20380 MB min free during decode[0m
+  [32mShort calibration: baseline=20,424 MB, prefill post-alloc=18,598 MB, prefill min=16,486 MB, decode min=20,380 MB, post-cleanup=20,380 MB[0m
+  [32mAdaptive long calibration: default target=39,920 tokens, target low-water floor=1,200 MB, estimated prefill growth=0.7505 MB/token[0m
+  [32mAdaptive long calibration: next probe 19,268 tokens (model-estimated initial probe (projected 0.7505 MB/token, validation floor 2400 MB))[0m
+  [32mLong calibration: probing 19,268 prompt tokens + 32 decode tokens[0m
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=19268 total_ms=556.9 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=556.9 has_hqq=true hqq_growth_mb=1208.5 evicted=0 freed_mb=0.0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=451.1 hqq_swap_ms=450.7 hqq_refresh_ms=0.4 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+  [32mdecode: 32 tokens in 4.90s (6.5 tok/s)  VRAM: 20378 MB free now, 20378 MB min free during decode[0m
+  [32mLong calibration: baseline=20,380 MB, prefill post-alloc=4,126 MB, prefill min=1,758 MB, decode min=20,378 MB, post-cleanup=20,378 MB[0m
+  [32mAdaptive long calibration: using 19,268 tokens (current low-water 1758 MB leaves no validation reserve above 2400 MB)[0m
+  [32mScratch reservation: max=37,247 MB (at 50,000 tokens)[0m
+
+[1m[36m▸ VRAM calibration complete[0m
+  [32mPost-calibration free VRAM: 20,378 MB[0m
+  [32mTransient deltas: short prefill=3,938 MB, long prefill=18,622 MB, short decode=44 MB, long decode=2 MB[0m
+  [32mGPU0 decode HCS budget: 19,734 MB[0m
+  [32mPrefill HCS budgets: short=15,840 MB, long=1,156 MB[0m
+  [32mWorst-case prefill scratch reservation: 37,247 MB at 50,000 tokens[0m
+
+[1m[36m▸ Calculating HCS budget[0m
+
+[1m[36m▸ Building expert heatmap (decode-weighted calibration)[0m
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=35 total_ms=566.9 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=566.9 has_hqq=true hqq_growth_mb=1208.5 evicted=0 freed_mb=0.0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=450.1 hqq_swap_ms=449.7 hqq_refresh_ms=0.4 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=43 total_ms=1598.3 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=1598.2 has_hqq=true hqq_growth_mb=1208.5 evicted=0 freed_mb=0.0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=1264.9 hqq_swap_ms=1264.1 hqq_refresh_ms=0.8 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=35 total_ms=2115.3 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=2115.2 has_hqq=true hqq_growth_mb=1208.5 evicted=0 freed_mb=0.0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=1624.4 hqq_swap_ms=1623.6 hqq_refresh_ms=0.9 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=29 total_ms=1326.2 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=1326.1 has_hqq=true hqq_growth_mb=1208.5 evicted=0 freed_mb=0.0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=1178.0 hqq_swap_ms=1177.5 hqq_refresh_ms=0.5 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=41 total_ms=2097.8 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=2097.7 has_hqq=true hqq_growth_mb=1208.5 evicted=0 freed_mb=0.0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=1623.0 hqq_swap_ms=1622.1 hqq_refresh_ms=0.9 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=46 total_ms=1325.3 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=1325.3 has_hqq=true hqq_growth_mb=1208.5 evicted=0 freed_mb=0.0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=1179.5 hqq_swap_ms=1179.1 hqq_refresh_ms=0.4 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+  [32mHeatmap: 11,553 experts ranked from 11,553 entries[0m
+  [2mVRAM calibration: baseline 20378 MB | prefill 801.2 KB/tok, decode -2.3 KB/tok | HCS allowance prefill: short 15840 MB, long 1156 MB | decode: short 19734 MB, long 19776 MB | idle floors prefill=4538 MB decode=644 MB | decode-resident HCS budget=19734 MB[0m
+  [2mGPU0 HCS: 12288 experts (11553 ranked + 735 unranked), reclaimable: 19,734 MB[0m
+
+[1m[36m▸ Loading GPU0 HCS pool (fully reclaimable)[0m
+
+[1m[36m▸ HCS pool loaded[0m
+  [32mHCS pool: 0/12288 experts loaded in 0.00s (0.0% coverage), 0.0 MB VRAM, 0 free slots, gpu_route_sync=false, mapped_reads=false | soft: 4212 experts in 0.90s (19546.3 MB, host_mode=source) | total: 4212/12288 (34.3%) coverage[0m
+  [2mLoaded in 0.9s[0m
+
+[1m[36m▸ Decode validation[0m
+  [32mSkipped: Rust prefill already warmed before HCS budgeting[0m
+
+[1m[36m▸ VRAM monitor: runtime warnings enabled[0m
+  [32mSafety margin: 600 MB — warnings on every new low below this[0m
+
+[1m[32mKRASIS SERVER READY[0m
+  [32mModel:[0m    [1mQwen3.5-122B-A10B[0m
+  [32mAddress:[0m  [1m0.0.0.0:18012[0m
+  [32mContext:[0m  273,056 tokens  |  KV cache: 2,000 MB
+  [32mDecode:[0m   GPU  |  HCS: on  |  Think: on
+  [32mClient setup:[0m
+    Base URL:      [1mhttp://127.0.0.1:18012/v1[0m
+    Chat endpoint: http://127.0.0.1:18012/v1/chat/completions
+    Models:        http://127.0.0.1:18012/v1/models
+    API key:       [1mX[0m [2m(any value)[0m
+    Model name:    [1mQwen3.5-122B-A10B-vision[0m
+                   [2mvision-capable; use this same model for text and images[0m
+  [2mPress Q or Ctrl-C to stop[0m
+
+
+[1m[36mKRASIS BENCHMARK[0m
+
+[1m[36m▸ Collecting system info[0m
+  Model:    [1mQwen3.5-122B-A10B[0m
+  GPUs:     1x NVIDIA GeForce RTX 5090
+  Strategy: gpu_decode (layer_grouped(2))
+
+[1m[36m▸ Loading benchmark prompts (warmup + timed at 1K/5K/10K/20K/35K/50K)[0m
+  Warmup prefill:  3 prompts, ~25,000 tokens each
+  Timed prefill:   6 prompts at 1K/5K/10K/20K/35K/50K tokens
+    [1] 1,000 tokens
+    [2] 5,000 tokens
+    [3] 10,000 tokens
+    [4] 20,000 tokens
+    [5] 35,000 tokens
+    [6] 50,000 tokens
+  Decode:          6 prompts (50/100/250 tokens, warmup + timed)
+
+[1m[36m▸ Warmup (3 prefill + 3 decode via engine)[0m
+  Warmup: 2 short engine requests...
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=18 total_ms=2102.5 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=2102.5 has_hqq=true hqq_growth_mb=1208.5 evicted=0 freed_mb=0.0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=1617.0 hqq_swap_ms=1616.4 hqq_refresh_ms=0.6 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+  [32mdecode: 7 tokens in 0.25s (28.1 tok/s)  VRAM: 1102 MB free now, 846 MB min free during decode[0m
+  [36mDynamic HCS: hit=77.53% tail=768/384 protected=3363 promotions=604 evictions=604 request_promotions=604/768 budget_skips=0 no_slot=0 copy_failures=0[0m
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.055843000000000004, "lock_ms": 0.000471, "prepare_runtime_ms": 2102.675601, "prompt_hcs_shadow_ms": 0.009828, "prompt_tokens": 18, "release_scratch_ms": 6.711817, "restore_runtime_ms": 1617.041237, "run_finalize_ms": 423.709219, "scratch_ms": 7.5245049999999996, "stop_ids_ms": 0.044963, "tokenize_ms": 0.287473, "total_ms": 4158.063064, "unaccounted_ms": 0.0021070000002509914}
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=19 total_ms=561.3 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=561.2 has_hqq=true hqq_growth_mb=1208.5 evicted=0 freed_mb=0.0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=470.0 hqq_swap_ms=469.6 hqq_refresh_ms=0.4 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+  [32mdecode: 7 tokens in 0.32s (21.8 tok/s)  VRAM: 1098 MB free now, 810 MB min free during decode[0m
+  [36mDynamic HCS: hit=63.13% tail=768/384 protected=3363 promotions=1372 evictions=1372 request_promotions=768/768 budget_skips=223 no_slot=0 copy_failures=0[0m
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.060502, "lock_ms": 0.000561, "prepare_runtime_ms": 561.3303010000001, "prompt_hcs_shadow_ms": 0.010148, "prompt_tokens": 19, "release_scratch_ms": 8.005348000000001, "restore_runtime_ms": 470.023346, "run_finalize_ms": 476.87299, "scratch_ms": 7.160359, "stop_ids_ms": 0.034675000000000004, "tokenize_ms": 0.312089, "total_ms": 1523.813056, "unaccounted_ms": 0.0027369999997972627}
+  Warmup complete.
+  Prefill warmup (3 runs, ~25K tokens each)...
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=25000 total_ms=579.9 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=579.8 has_hqq=true hqq_growth_mb=1208.5 evicted=0 freed_mb=0.0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=451.4 hqq_swap_ms=451.0 hqq_refresh_ms=0.4 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.540563, "lock_ms": 0.000551, "prepare_runtime_ms": 579.930152, "prompt_hcs_shadow_ms": 0.010178, "prompt_tokens": 25000, "release_scratch_ms": 38.462695, "restore_runtime_ms": 451.429544, "run_finalize_ms": 6821.754489, "scratch_ms": 19.809146, "stop_ids_ms": 0.040856, "tokenize_ms": 41.074293, "total_ms": 7953.054764, "unaccounted_ms": 0.002297000000908156}
+    [1/3] 25,000 tokens
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=25000 total_ms=560.4 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=560.3 has_hqq=true hqq_growth_mb=1208.5 evicted=0 freed_mb=0.0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=450.8 hqq_swap_ms=450.4 hqq_refresh_ms=0.4 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.56585, "lock_ms": 0.000551, "prepare_runtime_ms": 560.508773, "prompt_hcs_shadow_ms": 0.016249999999999997, "prompt_tokens": 25000, "release_scratch_ms": 37.242902, "restore_runtime_ms": 450.87417200000004, "run_finalize_ms": 6844.071838999999, "scratch_ms": 19.880017, "stop_ids_ms": 0.046696999999999995, "tokenize_ms": 41.69765, "total_ms": 7954.9072049999995, "unaccounted_ms": 0.0025040000009539654}
+    [2/3] 25,000 tokens
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=25000 total_ms=561.6 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=561.5 has_hqq=true hqq_growth_mb=1208.5 evicted=0 freed_mb=0.0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=596.8 hqq_swap_ms=596.4 hqq_refresh_ms=0.4 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.5888329999999999, "lock_ms": 0.000561, "prepare_runtime_ms": 561.648245, "prompt_hcs_shadow_ms": 0.009377, "prompt_tokens": 25000, "release_scratch_ms": 39.183524, "restore_runtime_ms": 596.8174670000001, "run_finalize_ms": 6828.392929, "scratch_ms": 19.621737, "stop_ids_ms": 0.042038, "tokenize_ms": 39.653646, "total_ms": 8085.961383000001, "unaccounted_ms": 0.0030260000012276578}
+    [3/3] 25,000 tokens
+  Decode warmup (50/100/250 tokens, 3 separate prompts)...
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=59 total_ms=815.2 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=815.2 has_hqq=true hqq_growth_mb=1208.5 evicted=0 freed_mb=0.0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=561.2 hqq_swap_ms=560.8 hqq_refresh_ms=0.4 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+  [32mdecode: 49 tokens in 1.75s (28.0 tok/s)  VRAM: 1352 MB free now, 808 MB min free during decode[0m
+  [36mDynamic HCS: hit=75.46% tail=768/384 protected=3309 promotions=2140 evictions=2140 request_promotions=768/768 budget_skips=4072 no_slot=0 copy_failures=0[0m
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.101127, "lock_ms": 0.000551, "prepare_runtime_ms": 815.325591, "prompt_hcs_shadow_ms": 0.011862, "prompt_tokens": 59, "release_scratch_ms": 8.980498, "restore_runtime_ms": 561.211232, "run_finalize_ms": 764.71548, "scratch_ms": 7.191656999999999, "stop_ids_ms": 0.045343999999999995, "tokenize_ms": 0.411383, "total_ms": 2157.9968900000003, "unaccounted_ms": 0.002165000000331929}
+    50 tokens done
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=65 total_ms=740.7 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=740.6 has_hqq=true hqq_growth_mb=1208.5 evicted=0 freed_mb=0.0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=553.7 hqq_swap_ms=553.3 hqq_refresh_ms=0.4 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+  [32mdecode: 99 tokens in 3.78s (26.2 tok/s)  VRAM: 1354 MB free now, 778 MB min free during decode[0m
+  [36mDynamic HCS: hit=71.68% tail=768/384 protected=3309 promotions=2908 evictions=2908 request_promotions=768/768 budget_skips=14072 no_slot=0 copy_failures=0[0m
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.070861, "lock_ms": 0.000551, "prepare_runtime_ms": 740.772631, "prompt_hcs_shadow_ms": 0.011590999999999999, "prompt_tokens": 65, "release_scratch_ms": 9.034578999999999, "restore_runtime_ms": 553.681195, "run_finalize_ms": 824.757234, "scratch_ms": 7.165729, "stop_ids_ms": 0.045444, "tokenize_ms": 0.41071199999999997, "total_ms": 2135.952761, "unaccounted_ms": 0.002234000000044034}
+    100 tokens done
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=63 total_ms=795.4 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=795.4 has_hqq=true hqq_growth_mb=1208.5 evicted=0 freed_mb=0.0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=631.2 hqq_swap_ms=630.8 hqq_refresh_ms=0.4 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+  [32mdecode: 249 tokens in 10.02s (24.9 tok/s)  VRAM: 1352 MB free now, 776 MB min free during decode[0m
+  [36mDynamic HCS: hit=69.00% tail=768/384 protected=3309 promotions=3676 evictions=3676 request_promotions=768/768 budget_skips=42943 no_slot=0 copy_failures=0[0m
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.070461, "lock_ms": 0.000551, "prepare_runtime_ms": 795.49934, "prompt_hcs_shadow_ms": 0.011551, "prompt_tokens": 63, "release_scratch_ms": 9.142437999999999, "restore_runtime_ms": 631.193554, "run_finalize_ms": 790.941751, "scratch_ms": 6.950559999999999, "stop_ids_ms": 0.03812, "tokenize_ms": 0.408578, "total_ms": 2234.2592990000003, "unaccounted_ms": 0.002395000000433356}
+    250 tokens done
+  Warmup complete (52.1s). All kernels compiled.
+
+[1m[36m▸ Prefill (internal) — 1K/5K/10K/20K/35K/50K tokens, 6 runs[0m
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=1000 total_ms=954.4 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=954.4 has_hqq=true hqq_growth_mb=1208.5 evicted=0 freed_mb=0.0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=716.8 hqq_swap_ms=716.5 hqq_refresh_ms=0.4 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.100286, "lock_ms": 0.000541, "prepare_runtime_ms": 954.50879, "prompt_hcs_shadow_ms": 0.009097, "prompt_tokens": 1000, "release_scratch_ms": 8.725484, "restore_runtime_ms": 716.843291, "run_finalize_ms": 1578.725521, "scratch_ms": 7.617247, "stop_ids_ms": 0.03773, "tokenize_ms": 1.4875610000000001, "total_ms": 3268.0577030000004, "unaccounted_ms": 0.002155000000129803}
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=5000 total_ms=561.2 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.1 hqq_swap_ms=561.1 has_hqq=true hqq_growth_mb=1208.5 evicted=0 freed_mb=0.0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=449.5 hqq_swap_ms=449.1 hqq_refresh_ms=0.4 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.146472, "lock_ms": 0.000562, "prepare_runtime_ms": 561.282006, "prompt_hcs_shadow_ms": 0.008865999999999999, "prompt_tokens": 5000, "release_scratch_ms": 17.049944, "restore_runtime_ms": 449.481829, "run_finalize_ms": 2624.6913059999997, "scratch_ms": 9.81139, "stop_ids_ms": 0.038582, "tokenize_ms": 5.638044, "total_ms": 3668.1510319999998, "unaccounted_ms": 0.0020309999999881256}
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=10000 total_ms=560.3 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.1 hqq_swap_ms=560.2 has_hqq=true hqq_growth_mb=1208.5 evicted=0 freed_mb=0.0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=449.9 hqq_swap_ms=449.5 hqq_refresh_ms=0.4 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.277756, "lock_ms": 0.000591, "prepare_runtime_ms": 560.4228009999999, "prompt_hcs_shadow_ms": 0.007764999999999999, "prompt_tokens": 10000, "release_scratch_ms": 25.886613999999998, "restore_runtime_ms": 449.941682, "run_finalize_ms": 3760.585268, "scratch_ms": 12.172903, "stop_ids_ms": 0.041807000000000004, "tokenize_ms": 14.916424, "total_ms": 4824.256064, "unaccounted_ms": 0.002453000000969041}
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=20000 total_ms=561.2 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=561.1 has_hqq=true hqq_growth_mb=1208.5 evicted=0 freed_mb=0.0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=663.3 hqq_swap_ms=662.4 hqq_refresh_ms=0.9 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.540753, "lock_ms": 0.000551, "prepare_runtime_ms": 561.261535, "prompt_hcs_shadow_ms": 0.01076, "prompt_tokens": 20000, "release_scratch_ms": 42.27476, "restore_runtime_ms": 663.3301289999999, "run_finalize_ms": 4156.518400999999, "scratch_ms": 19.222396, "stop_ids_ms": 0.040244999999999996, "tokenize_ms": 30.834627, "total_ms": 5474.037325, "unaccounted_ms": 0.003168000000187021}
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=35000 total_ms=1063.5 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=1063.4 has_hqq=true hqq_growth_mb=1208.5 evicted=0 freed_mb=0.0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=1200.5 hqq_swap_ms=1199.9 hqq_refresh_ms=0.6 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.796749, "lock_ms": 0.000561, "prepare_runtime_ms": 1063.8153189999998, "prompt_hcs_shadow_ms": 0.014798, "prompt_tokens": 35000, "release_scratch_ms": 38.301546, "restore_runtime_ms": 1200.481469, "run_finalize_ms": 7869.7939129999995, "scratch_ms": 23.107196, "stop_ids_ms": 0.045204, "tokenize_ms": 59.237732, "total_ms": 10255.599996, "unaccounted_ms": 0.0055090000005293405}
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=50000 total_ms=1602.3 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=1602.2 has_hqq=true hqq_growth_mb=1208.5 evicted=0 freed_mb=0.0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=1609.9 hqq_swap_ms=1608.7 hqq_refresh_ms=1.2 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 1.081718, "lock_ms": 0.000561, "prepare_runtime_ms": 1602.366946, "prompt_hcs_shadow_ms": 0.042359, "prompt_tokens": 50000, "release_scratch_ms": 37.872529, "restore_runtime_ms": 1609.880761, "run_finalize_ms": 12390.481962999998, "scratch_ms": 20.839637, "stop_ids_ms": 0.047739, "tokenize_ms": 85.630766, "total_ms": 15748.253144, "unaccounted_ms": 0.008165000002918532}
+  Run 1: 306.0 tok/s (1,000 tokens in 3268.1ms)
+  Run 2: 1,363.1 tok/s (5,000 tokens in 3668.2ms)
+  Run 3: 2,072.9 tok/s (10,000 tokens in 4824.3ms)
+  Run 4: 3,653.6 tok/s (20,000 tokens in 5474.0ms)
+  Run 5: 3,412.8 tok/s (35,000 tokens in 10255.6ms)
+  Run 6: 3,175.0 tok/s (50,000 tokens in 15748.3ms)
+  [1mBest: 3,653.6 tok/s (20,000 tokens)[0m
+
+[1m[36m▸ Decode (internal) — 50/100/250 tokens, 3 separate prompts[0m
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=61 total_ms=2017.0 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=2017.0 has_hqq=true hqq_growth_mb=1208.5 evicted=0 freed_mb=0.0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=738.9 hqq_swap_ms=738.0 hqq_refresh_ms=0.9 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+  [32mdecode: 49 tokens in 1.77s (27.8 tok/s)  VRAM: 1474 MB free now, 866 MB min free during decode[0m
+  [36mDynamic HCS: hit=75.83% tail=768/384 protected=3282 promotions=4444 evictions=4444 request_promotions=768/768 budget_skips=46723 no_slot=0 copy_failures=0[0m
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.181477, "lock_ms": 0.000541, "prepare_runtime_ms": 2017.1276850000002, "prompt_hcs_shadow_ms": 0.016511, "prompt_tokens": 61, "release_scratch_ms": 8.974446, "restore_runtime_ms": 738.921261, "run_finalize_ms": 803.6777659999999, "scratch_ms": 6.979684, "stop_ids_ms": 0.042379, "tokenize_ms": 0.42031, "total_ms": 3576.349874, "unaccounted_ms": 0.007814000000053056}
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=66 total_ms=1105.1 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=1105.0 has_hqq=true hqq_growth_mb=1208.5 evicted=0 freed_mb=0.0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=838.1 hqq_swap_ms=837.3 hqq_refresh_ms=0.8 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+  [32mdecode: 99 tokens in 3.75s (26.4 tok/s)  VRAM: 1480 MB free now, 840 MB min free during decode[0m
+  [36mDynamic HCS: hit=73.34% tail=768/384 protected=3282 promotions=5212 evictions=5212 request_promotions=768/768 budget_skips=56089 no_slot=0 copy_failures=0[0m
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.074379, "lock_ms": 0.000541, "prepare_runtime_ms": 1105.2209500000001, "prompt_hcs_shadow_ms": 0.012694, "prompt_tokens": 66, "release_scratch_ms": 9.229539, "restore_runtime_ms": 838.112773, "run_finalize_ms": 828.642948, "scratch_ms": 7.017314, "stop_ids_ms": 0.043581, "tokenize_ms": 0.407656, "total_ms": 2788.764248, "unaccounted_ms": 0.0018730000001596636}
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=61 total_ms=1181.5 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=1181.4 has_hqq=true hqq_growth_mb=1208.5 evicted=0 freed_mb=0.0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=992.5 hqq_swap_ms=992.1 hqq_refresh_ms=0.4 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+  [32mdecode: 249 tokens in 9.74s (25.6 tok/s)  VRAM: 1478 MB free now, 806 MB min free during decode[0m
+  [36mDynamic HCS: hit=71.33% tail=768/384 protected=3282 promotions=5980 evictions=5980 request_promotions=768/768 budget_skips=82735 no_slot=0 copy_failures=0[0m
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.07566, "lock_ms": 0.000541, "prepare_runtime_ms": 1181.54045, "prompt_hcs_shadow_ms": 0.012493, "prompt_tokens": 61, "release_scratch_ms": 8.947887, "restore_runtime_ms": 992.527774, "run_finalize_ms": 830.6856769999999, "scratch_ms": 7.358927, "stop_ids_ms": 0.039634, "tokenize_ms": 0.405903, "total_ms": 3021.5973520000002, "unaccounted_ms": 0.0024060000005192705}
+   50 tokens: 27.75 tok/s (36.0ms/tok)
+  100 tokens: 26.42 tok/s (37.8ms/tok)
+  250 tokens: 25.57 tok/s (39.1ms/tok)
+  [1mBest: 27.75 tok/s[0m
+  HCS:  4050/12288 experts loaded (33.0%)
+  VRAM: 806 MB min free during decode (safety margin: 600 MB)
+
+[1m[36m▸ Round trip (network) — 50/100/250 tokens via HTTP[0m
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=14 total_ms=1591.8 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.1 hqq_swap_ms=1591.7 has_hqq=true hqq_growth_mb=1208.5 evicted=0 freed_mb=0.0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=1080.4 hqq_swap_ms=1079.6 hqq_refresh_ms=0.8 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+  [32mprefill: 14 tokens in 3.07s (4.6 tok/s)  VRAM: 5666 MB free now, 2608 MB min free during prefill[0m
+  [32mdecode: 7 tokens in 0.24s (28.6 tok/s)  VRAM: 1102 MB free now, 878 MB min free during decode[0m
+  [36mDynamic HCS: hit=77.94% tail=768/384 protected=3363 promotions=6573 evictions=6573 request_promotions=593/768 budget_skips=82735 no_slot=0 copy_failures=0[0m
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=61 total_ms=769.3 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=769.2 has_hqq=true hqq_growth_mb=1208.5 evicted=0 freed_mb=0.0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=446.0 hqq_swap_ms=445.7 hqq_refresh_ms=0.3 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+  [32mprefill: 61 tokens in 2.03s (30.1 tok/s)  VRAM: 5246 MB free now, 1844 MB min free during prefill[0m
+  [32mdecode: 49 tokens in 1.74s (28.2 tok/s)  VRAM: 1476 MB free now, 836 MB min free during decode[0m
+  [36mDynamic HCS: hit=75.66% tail=768/384 protected=3282 promotions=7341 evictions=7341 request_promotions=768/768 budget_skips=86546 no_slot=0 copy_failures=0[0m
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=66 total_ms=556.8 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=556.8 has_hqq=true hqq_growth_mb=1208.5 evicted=0 freed_mb=0.0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=446.5 hqq_swap_ms=446.1 hqq_refresh_ms=0.3 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+  [32mprefill: 66 tokens in 1.85s (35.7 tok/s)  VRAM: 5250 MB free now, 1728 MB min free during prefill[0m
+  [32mdecode: 99 tokens in 3.67s (27.0 tok/s)  VRAM: 1480 MB free now, 840 MB min free during decode[0m
+  [36mDynamic HCS: hit=73.31% tail=768/384 protected=3282 promotions=8109 evictions=8109 request_promotions=768/768 budget_skips=95925 no_slot=0 copy_failures=0[0m
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=61 total_ms=561.9 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=561.8 has_hqq=true hqq_growth_mb=1208.5 evicted=0 freed_mb=0.0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=495.0 hqq_swap_ms=494.3 hqq_refresh_ms=0.8 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+  [32mprefill: 61 tokens in 1.90s (32.1 tok/s)  VRAM: 5212 MB free now, 1844 MB min free during prefill[0m
+  [32mdecode: 249 tokens in 9.67s (25.7 tok/s)  VRAM: 1474 MB free now, 802 MB min free during decode[0m
+  [36mDynamic HCS: hit=71.54% tail=768/384 protected=3282 promotions=8877 evictions=8877 request_promotions=768/768 budget_skips=122374 no_slot=0 copy_failures=0[0m
+   50 tokens: 49.34 tok/s (3.99s total)
+  100 tokens: 33.71 tok/s (5.75s total)
+  250 tokens: 27.88 tok/s (11.80s total)
+  [1mBest: 49.34 tok/s[0m
+
+[1m[36m▸ Writing results[0m
+
+[1m[32mBENCHMARK COMPLETE[0m
+  Model:                 [1mQwen3.5-122B-A10B[0m
+  Config:                INT4/4 HQQ6 KV=k4v4 1 GPU
+  Prefill (internal):    [32m[1m3,653.6 tok/s[0m  (best of 1K/5K/10K/20K/35K/50K)
+  Decode (internal):     [32m[1m27.75 tok/s[0m  (best of 50/100/250)
+  Round trip (network):  [32m[1m49.34 tok/s[0m  (best of 50/100/250)
+  HCS coverage:          4050/12288 (33.0%)
+  Min free VRAM:         806 MB
+  Log:     [2mlogs/dev-benchmark_20260605_000032/benchmark_report.log[0m
+
+[0;36m[1m=>[0m Benchmark log saved: /home/main/Documents/Claude/krasis/logs/dev-benchmark_20260605_000032/benchmark_stdout.log
+KRASIS_RUNTIME_STAGE_BREAKDOWN_EXIT=0

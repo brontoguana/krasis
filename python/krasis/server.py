@@ -2374,13 +2374,36 @@ def main():
     _detail(f"Safety margin: {SAFETY_MARGIN_MB:,} MB — warnings on every new low below this")
     vram_monitor.enable_warnings()
     logger.info("VRAM monitor: runtime warnings enabled (safety margin: %d MB)", SAFETY_MARGIN_MB)
-    if args.hcs:
-        evicted, freed_mb, final_free_mb = gpu_store.py_hcs_drain_vram_pressure("startup_ready", True)
-        if evicted > 0:
-            _warn(
-                f"VRAM pressure eviction at startup: evicted {evicted} soft HCS experts, "
-                f"freed {freed_mb:.1f} MB, final free {final_free_mb:,} MB"
+
+    def _verify_hcs_vram_floor(reason: str) -> int:
+        """Gate readiness on measured free VRAM, not just planned HCS budget."""
+        if not args.hcs:
+            return 0
+        final_free_mb = 0
+        # The monitor polls every ~50ms. Use bounded rechecks so delayed CUDA
+        # allocator/runtime lows are observed and drained before we publish ready.
+        for attempt in range(4):
+            evicted, freed_mb, final_free_mb = gpu_store.py_hcs_drain_vram_pressure(
+                f"{reason}_check{attempt + 1}",
+                True,
             )
+            if evicted > 0:
+                _warn(
+                    f"VRAM pressure eviction at {reason}: evicted {evicted} soft HCS experts, "
+                    f"freed {freed_mb:.1f} MB, final free {final_free_mb:,} MB"
+                )
+            if attempt >= 1 and final_free_mb >= SAFETY_MARGIN_MB:
+                return final_free_mb
+            time.sleep(0.12)
+        if final_free_mb < SAFETY_MARGIN_MB:
+            raise SystemExit(
+                f"VRAM safety floor not restored at {reason}: "
+                f"{final_free_mb} MB free, safety margin {SAFETY_MARGIN_MB} MB"
+            )
+        return final_free_mb
+
+    if args.hcs:
+        _verify_hcs_vram_floor("startup_ready")
 
     # Benchmark runs AFTER server starts (same HTTP path as production).
     # We set up the benchmark thread here; it launches after rust_server.run().
@@ -2868,12 +2891,7 @@ def main():
     # stdout is also written through the timestamped krasis.server logger.
     time.sleep(1.0)
     if args.hcs:
-        evicted, freed_mb, final_free_mb = gpu_store.py_hcs_drain_vram_pressure("server_ready", True)
-        if evicted > 0:
-            _warn(
-                f"VRAM pressure eviction before server ready: evicted {evicted} soft HCS experts, "
-                f"freed {freed_mb:.1f} MB, final free {final_free_mb:,} MB"
-            )
+        _verify_hcs_vram_floor("server_ready")
     _decode_mode = f"{len(all_aux_gpu_store_addrs)+1}-GPU" if all_aux_gpu_store_addrs else "GPU"
     _hcs_str = "on" if args.hcs else "off"
     _think_str = "on" if think_end_id else "off"

@@ -3080,7 +3080,7 @@ impl VramCalibration {
         }
         let t = (tokens.saturating_sub(self.short_tokens) as f64)
             / (self.long_tokens - self.short_tokens) as f64;
-        let t = t.clamp(0.0, 1.5); // allow slight extrapolation
+        let t = t.max(0.0);
         let free = self.prefill_short_free_mb as f64
             - t * (self.prefill_short_free_mb as f64 - self.prefill_long_free_mb as f64);
         (free.max(0.0)) as u64
@@ -3093,7 +3093,7 @@ impl VramCalibration {
         }
         let t = (tokens.saturating_sub(self.short_tokens) as f64)
             / (self.long_tokens - self.short_tokens) as f64;
-        let t = t.clamp(0.0, 1.5);
+        let t = t.max(0.0);
         let free = self.decode_short_free_mb as f64
             - t * (self.decode_short_free_mb as f64 - self.decode_long_free_mb as f64);
         (free.max(0.0)) as u64
@@ -3115,7 +3115,7 @@ impl VramCalibration {
         }
         let t = (tokens.saturating_sub(self.short_tokens) as f64)
             / (self.long_tokens - self.short_tokens) as f64;
-        let t = t.clamp(0.0, 1.5);
+        let t = t.max(0.0);
         let delta = short_delta as f64
             + t * (long_delta as f64 - short_delta as f64);
         Some((delta.max(0.0)) as u64)
@@ -3175,7 +3175,7 @@ impl VramCalibration {
     /// Largest prefill chunk length whose measured idle-floor requirement fits
     /// within the currently available idle free VRAM.
     fn max_safe_prefill_tokens(&self, free_mb: u64, prompt_tokens: usize) -> usize {
-        let max_tokens = prompt_tokens.clamp(128, 50_000);
+        let max_tokens = prompt_tokens.max(128);
         let fits = |tokens: usize| {
             self.required_prefill_idle_free_mb(tokens) <= free_mb
                 && self.prefill_free_mb(tokens) >= self.safety_margin_mb
@@ -13452,9 +13452,19 @@ impl GpuDecodeStore {
         let mut soft_chunks: Vec<AlignedGpuBuffer> = Vec::with_capacity(planned_num_chunks);
         let mut soft_host_chunks: Vec<PinnedHostChunk> =
             if use_host_mirror { Vec::with_capacity(planned_num_chunks) } else { Vec::new() };
-        let startup_idle_floor_mb = self.vram_calibration
+        let startup_base_idle_floor_mb = self.vram_calibration
             .map(|cal| cal.required_idle_free_mb(cal.short_tokens) as usize)
             .unwrap_or(safety_margin_mb);
+        let startup_reload_guard_mb =
+            ((slots_per_chunk.saturating_mul(slot_size)) + (1024 * 1024) - 1) / (1024 * 1024);
+        let startup_idle_floor_mb =
+            startup_base_idle_floor_mb.saturating_add(startup_reload_guard_mb);
+        log::info!(
+            "HCS soft tier startup floor: base_idle={} MB, chunk_guard={} MB, floor={} MB",
+            startup_base_idle_floor_mb,
+            startup_reload_guard_mb,
+            startup_idle_floor_mb,
+        );
         let mut actual_soft_slots = 0usize;
         for c in 0..planned_num_chunks {
             let slots_this_chunk = if c == planned_num_chunks - 1 {
@@ -16583,6 +16593,12 @@ impl GpuDecodeStore {
     }
 
     pub fn prepare_runtime_for_prefill_rust(&mut self, prompt_tokens: usize) -> Result<bool, String> {
+        let runtime_stage_breakdown = std::env::var("KRASIS_RUNTIME_STAGE_BREAKDOWN").is_ok();
+        let t_total = std::time::Instant::now();
+        let mut boundary_sync_ms = 0.0f64;
+        let mut marlin_swap_ms = 0.0f64;
+        let mut hcs_evict_ms = 0.0f64;
+        let mut hqq_swap_ms = 0.0f64;
         let needs_source_hcs_boundary_sync = self
             .graph
             .as_ref()
@@ -16590,15 +16606,25 @@ impl GpuDecodeStore {
             .map(|hcs| hcs.soft_host_mode == HcsSoftHostMode::Source && hcs.dynamic_enabled)
             .unwrap_or(false);
         if needs_source_hcs_boundary_sync {
+            let t = std::time::Instant::now();
             let err = unsafe { cuda_sys::lib().cuCtxSynchronize() };
+            boundary_sync_ms = t.elapsed().as_secs_f64() * 1000.0;
             if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                if err == cuda_sys::CUresult::CUDA_ERROR_ILLEGAL_ADDRESS {
+                    crate::vram_monitor::fatal_cuda_context_error(
+                        "decode/prefill boundary sync",
+                        &format!("{:?}", err),
+                    );
+                }
                 return Err(format!(
                     "source-mode dynamic HCS decode/prefill boundary sync failed: {:?}",
                     err
                 ));
             }
         }
+        let t = std::time::Instant::now();
         self.swap_to_marlin_rust()?;
+        marlin_swap_ms = t.elapsed().as_secs_f64() * 1000.0;
         let has_hqq_runtime_slots = self.has_hqq_runtime_slots();
         let prompt_tokens = prompt_tokens.max(1);
         if std::env::var("KRASIS_HCS_EVICT_DEBUG").is_ok() {
@@ -16610,7 +16636,9 @@ impl GpuDecodeStore {
             );
         }
         let hqq_growth_bytes = self.hqq_runtime_prefill_growth_bytes();
+        let t = std::time::Instant::now();
         let (evicted, freed_mb) = self.hcs_evict_for_prefill(prompt_tokens);
+        hcs_evict_ms = t.elapsed().as_secs_f64() * 1000.0;
         if std::env::var("KRASIS_HCS_EVICT_DEBUG").is_ok() {
             eprintln!(
                 "[KRASIS-HCS-EVICT-DEBUG] prepare_runtime_for_prefill evict_result prompt_tokens={} evicted={} freed_mb={:.1} hqq_growth_mb={:.0}",
@@ -16630,22 +16658,68 @@ impl GpuDecodeStore {
             );
         }
         if has_hqq_runtime_slots {
+            let t = std::time::Instant::now();
             self.swap_hqq_runtime_to_prefill_rust()?;
+            hqq_swap_ms = t.elapsed().as_secs_f64() * 1000.0;
+        }
+        if runtime_stage_breakdown {
+            eprintln!(
+                "RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens={} total_ms={:.1} boundary_sync_ms={:.1} marlin_swap_ms={:.1} hcs_evict_ms={:.1} hqq_swap_ms={:.1} has_hqq={} hqq_growth_mb={:.1} evicted={} freed_mb={:.1}",
+                prompt_tokens,
+                t_total.elapsed().as_secs_f64() * 1000.0,
+                boundary_sync_ms,
+                marlin_swap_ms,
+                hcs_evict_ms,
+                hqq_swap_ms,
+                has_hqq_runtime_slots,
+                hqq_growth_bytes as f64 / 1024.0 / 1024.0,
+                evicted,
+                freed_mb,
+            );
         }
         Ok(has_hqq_runtime_slots)
     }
 
     pub fn prepare_runtime_for_decode_rust(&mut self) -> Result<(), String> {
+        let runtime_stage_breakdown = std::env::var("KRASIS_RUNTIME_STAGE_BREAKDOWN").is_ok();
+        let t_total = std::time::Instant::now();
+        let mut hqq_swap_ms = 0.0f64;
+        let mut hqq_refresh_ms = 0.0f64;
+        let mut graph_invalidate_ms = 0.0f64;
+        let mut simple_swap_ms = 0.0f64;
+        let mut pointers_changed = false;
         if self.has_hqq_runtime_slots() {
+            let t = std::time::Instant::now();
             self.swap_hqq_runtime_to_decode_rust()?;
-            if self.refresh_hqq_decode_exec_pointers_from_slots()? {
+            hqq_swap_ms = t.elapsed().as_secs_f64() * 1000.0;
+            let t = std::time::Instant::now();
+            pointers_changed = self.refresh_hqq_decode_exec_pointers_from_slots()?;
+            hqq_refresh_ms = t.elapsed().as_secs_f64() * 1000.0;
+            if pointers_changed {
+                let t = std::time::Instant::now();
                 self.invalidate_cuda_graph();
+                graph_invalidate_ms = t.elapsed().as_secs_f64() * 1000.0;
                 log::info!(
                     "HQQ runtime decode pointers changed; invalidated CUDA graphs for recapture"
                 );
             }
         }
-        self.swap_to_simple_int4_rust()
+        let t = std::time::Instant::now();
+        let result = self.swap_to_simple_int4_rust();
+        simple_swap_ms = t.elapsed().as_secs_f64() * 1000.0;
+        if runtime_stage_breakdown {
+            eprintln!(
+                "RUNTIME_STAGE_BREAKDOWN phase=decode total_ms={:.1} hqq_swap_ms={:.1} hqq_refresh_ms={:.1} graph_invalidate_ms={:.1} simple_swap_ms={:.1} has_hqq={} pointers_changed={}",
+                t_total.elapsed().as_secs_f64() * 1000.0,
+                hqq_swap_ms,
+                hqq_refresh_ms,
+                graph_invalidate_ms,
+                simple_swap_ms,
+                self.has_hqq_runtime_slots(),
+                pointers_changed,
+            );
+        }
+        result
     }
 
     fn hqq_runtime_stage_active_bytes_for_slot(slot: &HqqRuntimeSlotEntry, stage: &str) -> Result<usize, String> {
@@ -28339,7 +28413,7 @@ impl GpuDecodeStore {
             return (0, 0.0);
         }
 
-        let capped_tokens = estimated_tokens.max(128).min(50000);
+        let eviction_tokens = estimated_tokens.max(128);
 
         // Measure actual free VRAM.
         let free_bytes = current_cuda_free_mb()
@@ -28347,9 +28421,9 @@ impl GpuDecodeStore {
             .unwrap_or(0);
         if std::env::var("KRASIS_HCS_EVICT_DEBUG").is_ok() {
             eprintln!(
-                "[KRASIS-HCS-EVICT-DEBUG] hcs_evict free_mb={:.0} capped_tokens={} cal_present={} scratch_present={}",
+                "[KRASIS-HCS-EVICT-DEBUG] hcs_evict free_mb={:.0} tokens={} cal_present={} scratch_present={}",
                 free_bytes as f64 / (1024.0 * 1024.0),
-                capped_tokens,
+                eviction_tokens,
                 cal.is_some(),
                 self.prefill_scratch_info.is_some(),
             );
@@ -28361,9 +28435,9 @@ impl GpuDecodeStore {
         //
         // Fallback: if calibration is unavailable, use the older scratch estimate.
         let base_needed_bytes = if let Some(cal) = cal {
-            cal.required_prefill_idle_free_mb(capped_tokens) as usize * 1024 * 1024
+            cal.required_prefill_idle_free_mb(eviction_tokens) as usize * 1024 * 1024
         } else if let Some((fixed_bytes, per_token_bytes)) = self.prefill_scratch_info {
-            let scratch = fixed_bytes + per_token_bytes * capped_tokens;
+            let scratch = fixed_bytes + per_token_bytes * eviction_tokens;
             let safety_mb = hcs.safety_margin_mb.max(crate::gpu_prefill::PREFILL_SAFETY_MARGIN_MB);
             scratch + safety_mb * 1024 * 1024
         } else {
@@ -28372,9 +28446,9 @@ impl GpuDecodeStore {
         let needed_bytes = base_needed_bytes.saturating_add(hqq_prefill_growth_bytes);
         if env_truthy("KRASIS_VRAM_LEDGER") {
             vram_ledger_log!(
-                "VRAM LEDGER hcs_evict_prefill prompt_tokens={} capped_tokens={} free_mb={:.0} base_needed_mb={:.0} hqq_prefill_growth_mb={:.0} needed_mb={:.0} soft_cached={} soft_slots={} soft_slot_mb={:.3} soft_chunks_loaded={} soft_total_chunks={} hard_budget_mb={} soft_max_mb={} safety_mb={}",
+                "VRAM LEDGER hcs_evict_prefill prompt_tokens={} eviction_tokens={} free_mb={:.0} base_needed_mb={:.0} hqq_prefill_growth_mb={:.0} needed_mb={:.0} soft_cached={} soft_slots={} soft_slot_mb={:.3} soft_chunks_loaded={} soft_total_chunks={} hard_budget_mb={} soft_max_mb={} safety_mb={}",
                 estimated_tokens,
-                capped_tokens,
+                eviction_tokens,
                 free_bytes as f64 / (1024.0 * 1024.0),
                 base_needed_bytes as f64 / (1024.0 * 1024.0),
                 hqq_prefill_growth_bytes as f64 / (1024.0 * 1024.0),
@@ -28400,7 +28474,7 @@ impl GpuDecodeStore {
                     needed_bytes as f64 / (1024.0 * 1024.0),
                     base_needed_bytes as f64 / (1024.0 * 1024.0),
                     hqq_prefill_growth_bytes as f64 / (1024.0 * 1024.0),
-                    capped_tokens,
+                    eviction_tokens,
                 ),
             );
             log::info!(
@@ -28409,7 +28483,7 @@ impl GpuDecodeStore {
                 needed_bytes as f64 / (1024.0 * 1024.0),
                 base_needed_bytes as f64 / (1024.0 * 1024.0),
                 hqq_prefill_growth_bytes as f64 / (1024.0 * 1024.0),
-                capped_tokens,
+                eviction_tokens,
             );
             return (0, 0.0);
         }
@@ -28900,6 +28974,12 @@ impl GpuDecodeStore {
                     target_floor_mb,
                     err,
                 );
+                if err == cuda_sys::CUresult::CUDA_ERROR_ILLEGAL_ADDRESS {
+                    crate::vram_monitor::fatal_cuda_context_error(
+                        "HCS pressure eviction sync",
+                        &format!("{:?}", err),
+                    );
+                }
                 return (0, 0.0, observed_free_mb);
             }
         }

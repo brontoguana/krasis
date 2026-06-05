@@ -1,0 +1,561 @@
+[0;36m[1m=>[0m Waiting for selected GPUs (0) to clear...
+[0;32m[1mOK[0m Selected GPUs (0) clear.
+[0;36m[1m=>[0m Running standard benchmark: tests/q122b-k4v4-hqq6-int4-benchmark.conf
+[0;36m[1m=>[0m Run dir: /home/main/Documents/Claude/krasis/logs/dev-benchmark_20260605_001459
+[0;36m[1m=>[0m Log: /home/main/Documents/Claude/krasis/logs/dev-benchmark_20260605_001459/benchmark_stdout.log
+[0;36m[1m=>[0m Import origin check:
+krasis: /home/main/Documents/Claude/krasis/python/krasis/__init__.py
+krasis.krasis: /home/main/Documents/Claude/krasis/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+Pre-scan: set CUDA_VISIBLE_DEVICES=0
+Loaded config from tests/q122b-k4v4-hqq6-int4-benchmark.conf: {'model_path': '/home/main/.krasis/models/Qwen3.5-122B-A10B', 'selected_gpus': '0', 'num_gpus': 1, 'layer_group_size': 2, 'kv_cache_mb': 2000, 'kv_dtype': 'k4v4', 'gpu_expert_bits': 4, 'cpu_expert_bits': 4, 'attention_quant': 'hqq6', 'shared_expert_quant': 'int8', 'dense_mlp_quant': 'int8', 'lm_head_quant': 'int8', 'krasis_threads': 40, 'host': '0.0.0.0', 'port': 18012, 'gpu_prefill_threshold': 300, 'vram_safety_margin': 600, 'force_load': False, 'enable_thinking': False}
+
+[1m[36m▸ Krasis — Qwen3.5-122B-A10B[0m
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 1[0m
+  [32mHCS host cache: source[0m
+  [32mSelected physical GPUs: 0 (config; CUDA_VISIBLE_DEVICES=0)[0m
+  [32mExperts: GPU INT4 g128 (amax)  |  Attention: hqq6  |  KV: k4v4[0m
+  [32mLayer groups: 2  |  KV cache: 2000 MB  |  Threads: 40[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+
+[1m[36m▸ Loading model weights[0m
+  [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=518 MB, free=31600 MB, total=32119 MB
+
+[1m[36m▸ Loading GPU weights[0m
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:0: alloc=8912 MB, reserved=9062 MB, used=9748 MB, free=22370 MB, total=32119 MB
+  [0;32mHQQ attention artifacts validated (3696 MB cached), 22370 MB free[0m
+
+[1m[36m▸ Loading GPU expert weights from cache[0m
+    Loading GPU Marlin cache: 48 layers...
+    GPU Marlin cache loaded: 60.0 GB in 38s
+  [0;32mExpert weights loaded in 38s.[0m
+  [33m[VRAM after-phase2-expert-weights][0m cuda:0: alloc=8912 MB, reserved=9062 MB, used=9748 MB, free=22370 MB, total=32119 MB
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:0: alloc=8912 MB, reserved=9062 MB, used=9748 MB, free=22370 MB, total=32119 MB
+  [33m[VRAM after-kv-cache-init][0m cuda:0: alloc=10912 MB, reserved=11062 MB, used=11748 MB, free=20370 MB, total=32119 MB
+  [33m[VRAM after-full-load][0m cuda:0: alloc=10912 MB, reserved=11062 MB, used=11748 MB, free=20370 MB, total=32119 MB
+
+[1m[36m▸ CUDA runtime warmup[0m
+  [32mcuBLAS + Triton kernel compilation done[0m
+
+[1m[36m▸ Setting up GPU decode store[0m
+  [32mGPU decode store ready (addr=0x8dbf29c0)[0m
+  [32mReleased redundant GPU execution source tensors (871 MB)[0m
+  [2mVRAM monitor started (tracking warmup)[0m
+  [2mcuda:0: 0 MB total[0m
+
+[1m[36m▸ Pre-allocating Rust prefill engine[0m
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=262144 total_ms=4913.1 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=0.0 has_hqq=true hqq_growth_mb=4904.9 evicted=0 freed_mb=0.0
+[FLA] Loading kernels for H=64 from /home/main/Documents/Claude/krasis/python/krasis/libkrasis_fla_sm120.so
+[FLA] loaded krasis_fla_chunk_local_cumsum_scalar_kernel (H=64)
+[FLA] loaded krasis_fla_chunk_scaled_dot_kkt_fwd_kernel (H=64)
+[FLA] loaded krasis_fla_merge_16x16_to_64x64_inverse_kernel (H=64)
+[FLA] loaded krasis_fla_recompute_w_u_fwd_kernel (H=64)
+[FLA] loaded krasis_fla_chunk_gated_delta_rule_fwd_kernel_h_blockdim64 (H=64)
+[FLA] loaded krasis_fla_chunk_fwd_kernel_o (H=64)
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=0.3 hqq_swap_ms=0.0 hqq_refresh_ms=0.2 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=true
+  [32mPrefill engine scratch buffers allocated[0m
+
+[1m[36m▸ Warmup (Rust prefill engine)[0m
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=300 total_ms=0.0 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=0.0 has_hqq=true hqq_growth_mb=0.0 evicted=0 freed_mb=0.0
+VRAM LEDGER prefill_prepare_budget prompt_tokens=300 free_mb=15210 total_mb=32119 safety_mb=600 fixed_scratch_mb=308.3 per_tok_kb=756.5 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=0.0 cold_staging_reserve_mb=1188.0 post_scratch_runtime_reserve_mb=1188.0 scratch_budget_mb=13422.6 target_tokens=300 max_by_vram=300 chosen_scratch_tokens=300 hcs_cached_experts=0 hcs_stride=0 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=300 prompt_tokens=300 pre_alloc_free_mb=15210 post_alloc_free_mb=14716 actual_alloc_mb=494.0 estimated_scratch_mb=577.4 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=3.5 shared_fp32_mb=3.5 fp32_scratch_mb=42.5 kv_cross_floor_mb=0.6
+VRAM LEDGER prefill_ready prompt_tokens=300 scratch_tokens=300 scratch_mb=577.4 post_alloc_free_mb=14716 safety_mb=600 optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=false pinning_disabled=true optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0 prescan_layers=0 hcs_cached_experts=0 hcs_stride=0 scratch_tokens=300 chunk_size=300 num_chunks=1 chunk_plan=[300]
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=0.3 hqq_swap_ms=0.0 hqq_refresh_ms=0.2 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+  [32mRust prefill warmed with 300 tokens before HCS budgeting[0m
+  [32mWarmup complete in 0.6s[0m
+  [2mcuda:0 warmup:  peak 17,994 MB used / 32,119 MB total  (min free: 14,124 MB)[0m
+
+[1m[36m▸ VRAM calibration[0m
+  [32mSafety margin: 600 MB[0m
+  [32mFree VRAM after startup: 15,000 MB / 32,119 MB[0m
+  [32mShort calibration: probing 500 prompt tokens + 32 decode tokens[0m
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=500 total_ms=0.1 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=0.0 has_hqq=true hqq_growth_mb=0.0 evicted=0 freed_mb=0.0
+VRAM LEDGER prefill_prepare_budget prompt_tokens=500 free_mb=15002 total_mb=32119 safety_mb=600 fixed_scratch_mb=308.3 per_tok_kb=756.5 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=0.0 cold_staging_reserve_mb=1188.0 post_scratch_runtime_reserve_mb=1188.0 scratch_budget_mb=13214.6 target_tokens=500 max_by_vram=500 chosen_scratch_tokens=500 hcs_cached_experts=0 hcs_stride=0 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=500 prompt_tokens=500 pre_alloc_free_mb=15002 post_alloc_free_mb=14374 actual_alloc_mb=628.0 estimated_scratch_mb=711.6 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=5.9 shared_fp32_mb=5.9 fp32_scratch_mb=42.5 kv_cross_floor_mb=1.0
+VRAM LEDGER prefill_ready prompt_tokens=500 scratch_tokens=500 scratch_mb=711.6 post_alloc_free_mb=14374 safety_mb=600 optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=false pinning_disabled=true optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0 prescan_layers=0 hcs_cached_experts=0 hcs_stride=0 scratch_tokens=500 chunk_size=500 num_chunks=1 chunk_plan=[500]
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=0.4 hqq_swap_ms=0.0 hqq_refresh_ms=0.4 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+  [32mdecode: 32 tokens in 2.96s (10.8 tok/s)  VRAM: 14956 MB free now, 14956 MB min free during decode[0m
+  [32mShort calibration: baseline=15,000 MB, prefill post-alloc=14,374 MB, prefill min=12,262 MB, decode min=14,956 MB, post-cleanup=14,956 MB[0m
+  [32mAdaptive long calibration: default target=39,920 tokens, target low-water floor=1,200 MB, estimated prefill growth=0.7505 MB/token[0m
+  [32mAdaptive long calibration: next probe 13,640 tokens (model-estimated initial probe (projected 0.7505 MB/token, validation floor 2400 MB))[0m
+  [32mLong calibration: probing 13,639 prompt tokens + 32 decode tokens[0m
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=13639 total_ms=0.1 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=0.1 has_hqq=true hqq_growth_mb=0.0 evicted=0 freed_mb=0.0
+VRAM LEDGER prefill_prepare_budget prompt_tokens=13639 free_mb=14792 total_mb=32119 safety_mb=600 fixed_scratch_mb=308.3 per_tok_kb=756.5 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=2112.0 cold_staging_reserve_mb=1188.0 post_scratch_runtime_reserve_mb=2112.0 scratch_budget_mb=12080.6 target_tokens=13639 max_by_vram=13639 chosen_scratch_tokens=13639 hcs_cached_experts=0 hcs_stride=0 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=13639 prompt_tokens=13639 pre_alloc_free_mb=14792 post_alloc_free_mb=4228 actual_alloc_mb=10564.0 estimated_scratch_mb=10629.6 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=159.8 shared_fp32_mb=159.8 fp32_scratch_mb=1068.9 kv_cross_floor_mb=26.6
+VRAM LEDGER prefill_ready prompt_tokens=13639 scratch_tokens=13639 scratch_mb=10629.6 post_alloc_free_mb=4228 safety_mb=600 optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=false pinning_disabled=true optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0 prescan_layers=0 hcs_cached_experts=0 hcs_stride=0 scratch_tokens=13639 chunk_size=13639 num_chunks=1 chunk_plan=[13639]
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=0.4 hqq_swap_ms=0.0 hqq_refresh_ms=0.3 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+  [32mdecode: 32 tokens in 4.31s (7.4 tok/s)  VRAM: 14954 MB free now, 14954 MB min free during decode[0m
+  [32mLong calibration: baseline=14,956 MB, prefill post-alloc=4,228 MB, prefill min=1,860 MB, decode min=14,954 MB, post-cleanup=14,954 MB[0m
+  [32mAdaptive long calibration: using 13,639 tokens (current low-water 1860 MB leaves no validation reserve above 2400 MB)[0m
+  [32mScratch reservation: max=37,247 MB (at 50,000 tokens)[0m
+
+[1m[36m▸ VRAM calibration complete[0m
+  [32mPost-calibration free VRAM: 14,954 MB[0m
+  [32mTransient deltas: short prefill=2,738 MB, long prefill=13,096 MB, short decode=44 MB, long decode=2 MB[0m
+  [32mGPU0 decode HCS budget: 14,310 MB[0m
+  [32mPrefill HCS budgets: short=11,616 MB, long=1,258 MB[0m
+  [32mWorst-case prefill scratch reservation: 37,247 MB at 50,000 tokens[0m
+
+[1m[36m▸ Calculating HCS budget[0m
+
+[1m[36m▸ Building expert heatmap (decode-weighted calibration)[0m
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=35 total_ms=0.1 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=0.0 has_hqq=true hqq_growth_mb=0.0 evicted=0 freed_mb=0.0
+VRAM LEDGER prefill_prepare_budget prompt_tokens=35 free_mb=14952 total_mb=32119 safety_mb=600 fixed_scratch_mb=308.3 per_tok_kb=756.5 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=2368.0 cold_staging_reserve_mb=1188.0 post_scratch_runtime_reserve_mb=2368.0 scratch_budget_mb=11984.6 target_tokens=35 max_by_vram=128 chosen_scratch_tokens=128 hcs_cached_experts=0 hcs_stride=256 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=128 prompt_tokens=35 pre_alloc_free_mb=14952 post_alloc_free_mb=14566 actual_alloc_mb=386.0 estimated_scratch_mb=458.4 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=1.5 shared_fp32_mb=1.5 fp32_scratch_mb=42.5 kv_cross_floor_mb=0.1
+VRAM LEDGER prefill_ready prompt_tokens=35 scratch_tokens=128 scratch_mb=458.4 post_alloc_free_mb=14566 safety_mb=600 optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=false pinning_disabled=true optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0 prescan_layers=0 hcs_cached_experts=0 hcs_stride=256 scratch_tokens=128 chunk_size=35 num_chunks=1 chunk_plan=[35]
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=0.4 hqq_swap_ms=0.0 hqq_refresh_ms=0.3 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=43 total_ms=0.0 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=0.0 has_hqq=true hqq_growth_mb=0.0 evicted=0 freed_mb=0.0
+VRAM LEDGER prefill_prepare_budget prompt_tokens=43 free_mb=14954 total_mb=32119 safety_mb=600 fixed_scratch_mb=308.3 per_tok_kb=756.5 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=2368.0 cold_staging_reserve_mb=1188.0 post_scratch_runtime_reserve_mb=2368.0 scratch_budget_mb=11986.6 target_tokens=43 max_by_vram=128 chosen_scratch_tokens=128 hcs_cached_experts=0 hcs_stride=256 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=128 prompt_tokens=43 pre_alloc_free_mb=14954 post_alloc_free_mb=14564 actual_alloc_mb=390.0 estimated_scratch_mb=458.4 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=1.5 shared_fp32_mb=1.5 fp32_scratch_mb=42.5 kv_cross_floor_mb=0.1
+VRAM LEDGER prefill_ready prompt_tokens=43 scratch_tokens=128 scratch_mb=458.4 post_alloc_free_mb=14564 safety_mb=600 optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=false pinning_disabled=true optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0 prescan_layers=0 hcs_cached_experts=0 hcs_stride=256 scratch_tokens=128 chunk_size=43 num_chunks=1 chunk_plan=[43]
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=0.4 hqq_swap_ms=0.1 hqq_refresh_ms=0.4 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=35 total_ms=0.3 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=0.2 has_hqq=true hqq_growth_mb=0.0 evicted=0 freed_mb=0.0
+VRAM LEDGER prefill_prepare_budget prompt_tokens=35 free_mb=14954 total_mb=32119 safety_mb=600 fixed_scratch_mb=308.3 per_tok_kb=756.5 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=2368.0 cold_staging_reserve_mb=1188.0 post_scratch_runtime_reserve_mb=2368.0 scratch_budget_mb=11986.6 target_tokens=35 max_by_vram=128 chosen_scratch_tokens=128 hcs_cached_experts=0 hcs_stride=256 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=128 prompt_tokens=35 pre_alloc_free_mb=14954 post_alloc_free_mb=14566 actual_alloc_mb=388.0 estimated_scratch_mb=458.4 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=1.5 shared_fp32_mb=1.5 fp32_scratch_mb=42.5 kv_cross_floor_mb=0.1
+VRAM LEDGER prefill_ready prompt_tokens=35 scratch_tokens=128 scratch_mb=458.4 post_alloc_free_mb=14566 safety_mb=600 optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=false pinning_disabled=true optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0 prescan_layers=0 hcs_cached_experts=0 hcs_stride=256 scratch_tokens=128 chunk_size=35 num_chunks=1 chunk_plan=[35]
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=0.8 hqq_swap_ms=0.0 hqq_refresh_ms=0.8 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=29 total_ms=0.3 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=0.2 has_hqq=true hqq_growth_mb=0.0 evicted=0 freed_mb=0.0
+VRAM LEDGER prefill_prepare_budget prompt_tokens=29 free_mb=14952 total_mb=32119 safety_mb=600 fixed_scratch_mb=308.3 per_tok_kb=756.5 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=2368.0 cold_staging_reserve_mb=1188.0 post_scratch_runtime_reserve_mb=2368.0 scratch_budget_mb=11984.6 target_tokens=29 max_by_vram=128 chosen_scratch_tokens=128 hcs_cached_experts=0 hcs_stride=256 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=128 prompt_tokens=29 pre_alloc_free_mb=14952 post_alloc_free_mb=14566 actual_alloc_mb=386.0 estimated_scratch_mb=458.4 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=1.5 shared_fp32_mb=1.5 fp32_scratch_mb=42.5 kv_cross_floor_mb=0.1
+VRAM LEDGER prefill_ready prompt_tokens=29 scratch_tokens=128 scratch_mb=458.4 post_alloc_free_mb=14566 safety_mb=600 optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=false pinning_disabled=true optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0 prescan_layers=0 hcs_cached_experts=0 hcs_stride=256 scratch_tokens=128 chunk_size=29 num_chunks=1 chunk_plan=[29]
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=0.8 hqq_swap_ms=0.0 hqq_refresh_ms=0.8 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=41 total_ms=0.3 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=0.2 has_hqq=true hqq_growth_mb=0.0 evicted=0 freed_mb=0.0
+VRAM LEDGER prefill_prepare_budget prompt_tokens=41 free_mb=14956 total_mb=32119 safety_mb=600 fixed_scratch_mb=308.3 per_tok_kb=756.5 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=2368.0 cold_staging_reserve_mb=1188.0 post_scratch_runtime_reserve_mb=2368.0 scratch_budget_mb=11988.6 target_tokens=41 max_by_vram=128 chosen_scratch_tokens=128 hcs_cached_experts=0 hcs_stride=256 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=128 prompt_tokens=41 pre_alloc_free_mb=14956 post_alloc_free_mb=14564 actual_alloc_mb=392.0 estimated_scratch_mb=458.4 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=1.5 shared_fp32_mb=1.5 fp32_scratch_mb=42.5 kv_cross_floor_mb=0.1
+VRAM LEDGER prefill_ready prompt_tokens=41 scratch_tokens=128 scratch_mb=458.4 post_alloc_free_mb=14564 safety_mb=600 optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=false pinning_disabled=true optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0 prescan_layers=0 hcs_cached_experts=0 hcs_stride=256 scratch_tokens=128 chunk_size=41 num_chunks=1 chunk_plan=[41]
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=0.8 hqq_swap_ms=0.0 hqq_refresh_ms=0.8 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=46 total_ms=0.3 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=0.2 has_hqq=true hqq_growth_mb=0.0 evicted=0 freed_mb=0.0
+VRAM LEDGER prefill_prepare_budget prompt_tokens=46 free_mb=14954 total_mb=32119 safety_mb=600 fixed_scratch_mb=308.3 per_tok_kb=756.5 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=2368.0 cold_staging_reserve_mb=1188.0 post_scratch_runtime_reserve_mb=2368.0 scratch_budget_mb=11986.6 target_tokens=46 max_by_vram=128 chosen_scratch_tokens=128 hcs_cached_experts=0 hcs_stride=256 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=128 prompt_tokens=46 pre_alloc_free_mb=14954 post_alloc_free_mb=14566 actual_alloc_mb=388.0 estimated_scratch_mb=458.4 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=1.5 shared_fp32_mb=1.5 fp32_scratch_mb=42.5 kv_cross_floor_mb=0.1
+VRAM LEDGER prefill_ready prompt_tokens=46 scratch_tokens=128 scratch_mb=458.4 post_alloc_free_mb=14566 safety_mb=600 optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=false pinning_disabled=true optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0 prescan_layers=0 hcs_cached_experts=0 hcs_stride=256 scratch_tokens=128 chunk_size=46 num_chunks=1 chunk_plan=[46]
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=0.8 hqq_swap_ms=0.0 hqq_refresh_ms=0.7 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+  [32mHeatmap: 11,563 experts ranked from 11,563 entries[0m
+  [2mVRAM calibration: baseline 14954 MB | prefill 807.3 KB/tok, decode -3.3 KB/tok | HCS allowance prefill: short 11616 MB, long 1258 MB | decode: short 14310 MB, long 14352 MB | idle floors prefill=3338 MB decode=644 MB | decode-resident HCS budget=14310 MB[0m
+  [2mGPU0 HCS: 12288 experts (11563 ranked + 725 unranked), reclaimable: 14,310 MB[0m
+
+[1m[36m▸ Loading GPU0 HCS pool (fully reclaimable)[0m
+
+[1m[36m▸ HCS pool loaded[0m
+  [32mHCS pool: 0/12288 experts loaded in 0.00s (0.0% coverage), 0.0 MB VRAM, 0 free slots, gpu_route_sync=false, mapped_reads=false | soft: 3051 experts in 0.64s (14158.5 MB, host_mode=source) | total: 3051/12288 (24.8%) coverage[0m
+  [2mLoaded in 0.7s[0m
+
+[1m[36m▸ Decode validation[0m
+  [32mSkipped: Rust prefill already warmed before HCS budgeting[0m
+
+[1m[36m▸ VRAM monitor: runtime warnings enabled[0m
+  [32mSafety margin: 600 MB — warnings on every new low below this[0m
+
+[1m[32mKRASIS SERVER READY[0m
+  [32mModel:[0m    [1mQwen3.5-122B-A10B[0m
+  [32mAddress:[0m  [1m0.0.0.0:18012[0m
+  [32mContext:[0m  273,056 tokens  |  KV cache: 2,000 MB
+  [32mDecode:[0m   GPU  |  HCS: on  |  Think: on
+  [32mClient setup:[0m
+    Base URL:      [1mhttp://127.0.0.1:18012/v1[0m
+    Chat endpoint: http://127.0.0.1:18012/v1/chat/completions
+    Models:        http://127.0.0.1:18012/v1/models
+    API key:       [1mX[0m [2m(any value)[0m
+    Model name:    [1mQwen3.5-122B-A10B-vision[0m
+                   [2mvision-capable; use this same model for text and images[0m
+  [2mPress Q or Ctrl-C to stop[0m
+
+
+[1m[36mKRASIS BENCHMARK[0m
+
+[1m[36m▸ Collecting system info[0m
+  Model:    [1mQwen3.5-122B-A10B[0m
+  GPUs:     1x NVIDIA GeForce RTX 5090
+  Strategy: gpu_decode (layer_grouped(2))
+
+[1m[36m▸ Loading benchmark prompts (warmup + timed at 1K/5K/10K/20K/35K/50K)[0m
+  Warmup prefill:  3 prompts, ~25,000 tokens each
+  Timed prefill:   6 prompts at 1K/5K/10K/20K/35K/50K tokens
+    [1] 1,000 tokens
+    [2] 5,000 tokens
+    [3] 10,000 tokens
+    [4] 20,000 tokens
+    [5] 35,000 tokens
+    [6] 50,000 tokens
+  Decode:          6 prompts (50/100/250 tokens, warmup + timed)
+
+[1m[36m▸ Warmup (3 prefill + 3 decode via engine)[0m
+  Warmup: 2 short engine requests...
+VRAM LEDGER hcs_evict_prefill prompt_tokens=18 capped_tokens=128 free_mb=716 base_needed_mb=3338 hqq_prefill_growth_mb=0 needed_mb=3338 soft_cached=3051 soft_slots=3051 soft_slot_mb=4.641 soft_chunks_loaded=113 soft_total_chunks=113 hard_budget_mb=0 soft_max_mb=14158 safety_mb=600
+VRAM LEDGER hcs_evict_prefill_deficit prompt_tokens=18 deficit_mb=2622.0 soft_chunks_loaded=113 soft_slots_per_chunk=27 soft_slot_mb=4.641
+VRAM LEDGER hcs_evict_prefill_result prompt_tokens=18 evicted=567 freed_mb=2631.2 chunks_dropped=21 total_chunks=113 elapsed_ms=10.9 free_after_mb=3362 soft_cached_after=2484 soft_chunks_loaded_after=92
+VRAM LEDGER hcs_evict_prefill prompt_tokens=18 capped_tokens=128 free_mb=3362 base_needed_mb=3338 hqq_prefill_growth_mb=0 needed_mb=3338 soft_cached=2484 soft_slots=3051 soft_slot_mb=4.641 soft_chunks_loaded=92 soft_total_chunks=113 hard_budget_mb=0 soft_max_mb=14158 safety_mb=600
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=18 total_ms=0.2 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=0.2 has_hqq=true hqq_growth_mb=0.0 evicted=0 freed_mb=0.0
+VRAM LEDGER prefill_prepare_budget prompt_tokens=18 free_mb=3364 total_mb=32119 safety_mb=600 fixed_scratch_mb=308.3 per_tok_kb=756.5 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=2368.0 cold_staging_reserve_mb=1188.0 post_scratch_runtime_reserve_mb=2368.0 scratch_budget_mb=396.6 target_tokens=18 max_by_vram=128 chosen_scratch_tokens=128 hcs_cached_experts=2484 hcs_stride=256 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=128 prompt_tokens=18 pre_alloc_free_mb=3364 post_alloc_free_mb=2974 actual_alloc_mb=390.0 estimated_scratch_mb=458.4 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=1.5 shared_fp32_mb=1.5 fp32_scratch_mb=42.5 kv_cross_floor_mb=0.0
+VRAM LEDGER prefill_ready prompt_tokens=18 scratch_tokens=128 scratch_mb=458.4 post_alloc_free_mb=2974 safety_mb=600 optional_pinning_budget_mb=None pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_pinning_budget prompt_tokens=18 post_alloc_free_mb=2974 required_post_scratch_mb=Some(2758) result_mb=Some(216)
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=true pinning_disabled=false optional_pinning_budget_mb=Some(216) pinning_active=false pinning_pool_mb=0.0 prescan_layers=0 hcs_cached_experts=2484 hcs_stride=256 scratch_tokens=128 chunk_size=18 num_chunks=1 chunk_plan=[18]
+VRAM LEDGER prefill_prescan tokens=18 active_layers=48 avg_active_experts_per_layer=76.8 dense_active=false pinned_per_layer=0 pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER hcs_evict_prefill_post_scratch prompt_tokens=18 free_mb=2974 required_mb=2758 deficit_mb=0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=0.4 hqq_swap_ms=0.0 hqq_refresh_ms=0.3 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+  [32mdecode: 7 tokens in 0.31s (22.8 tok/s)  VRAM: 1220 MB free now, 868 MB min free during decode[0m
+  [36mDynamic HCS: hit=66.63% tail=768/384 protected=2175 promotions=768 evictions=768 request_promotions=768/768 budget_skips=129 no_slot=0 copy_failures=0[0m
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.049671, "lock_ms": 0.000792, "prepare_runtime_ms": 0.33932599999999996, "prompt_hcs_shadow_ms": 0.008596000000000001, "prompt_tokens": 18, "release_scratch_ms": 4.492278, "restore_runtime_ms": 0.392204, "run_finalize_ms": 414.11412199999995, "scratch_ms": 7.719682000000001, "stop_ids_ms": 0.037759999999999995, "tokenize_ms": 0.283934, "total_ms": 427.44894300000004, "unaccounted_ms": 0.010578000000066368}
+VRAM LEDGER hcs_evict_prefill prompt_tokens=19 capped_tokens=128 free_mb=1220 base_needed_mb=3338 hqq_prefill_growth_mb=0 needed_mb=3338 soft_cached=2943 soft_slots=3051 soft_slot_mb=4.641 soft_chunks_loaded=109 soft_total_chunks=113 hard_budget_mb=0 soft_max_mb=14158 safety_mb=600
+VRAM LEDGER hcs_evict_prefill_deficit prompt_tokens=19 deficit_mb=2118.0 soft_chunks_loaded=109 soft_slots_per_chunk=27 soft_slot_mb=4.641
+VRAM LEDGER hcs_evict_prefill_result prompt_tokens=19 evicted=459 freed_mb=2130.0 chunks_dropped=17 total_chunks=109 elapsed_ms=8.1 free_after_mb=3362 soft_cached_after=2484 soft_chunks_loaded_after=92
+VRAM LEDGER hcs_evict_prefill prompt_tokens=19 capped_tokens=128 free_mb=3362 base_needed_mb=3338 hqq_prefill_growth_mb=0 needed_mb=3338 soft_cached=2484 soft_slots=3051 soft_slot_mb=4.641 soft_chunks_loaded=92 soft_total_chunks=113 hard_budget_mb=0 soft_max_mb=14158 safety_mb=600
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=19 total_ms=0.1 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=0.0 has_hqq=true hqq_growth_mb=0.0 evicted=0 freed_mb=0.0
+VRAM LEDGER prefill_prepare_budget prompt_tokens=19 free_mb=3362 total_mb=32119 safety_mb=600 fixed_scratch_mb=308.3 per_tok_kb=756.5 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=2368.0 cold_staging_reserve_mb=1188.0 post_scratch_runtime_reserve_mb=2368.0 scratch_budget_mb=394.6 target_tokens=19 max_by_vram=128 chosen_scratch_tokens=128 hcs_cached_experts=2484 hcs_stride=256 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=128 prompt_tokens=19 pre_alloc_free_mb=3362 post_alloc_free_mb=2972 actual_alloc_mb=390.0 estimated_scratch_mb=458.4 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=1.5 shared_fp32_mb=1.5 fp32_scratch_mb=42.5 kv_cross_floor_mb=0.0
+VRAM LEDGER prefill_ready prompt_tokens=19 scratch_tokens=128 scratch_mb=458.4 post_alloc_free_mb=2972 safety_mb=600 optional_pinning_budget_mb=None pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_pinning_budget prompt_tokens=19 post_alloc_free_mb=2972 required_post_scratch_mb=Some(2758) result_mb=Some(214)
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=true pinning_disabled=false optional_pinning_budget_mb=Some(214) pinning_active=false pinning_pool_mb=0.0 prescan_layers=48 hcs_cached_experts=2484 hcs_stride=256 scratch_tokens=128 chunk_size=19 num_chunks=1 chunk_plan=[19]
+VRAM LEDGER prefill_prescan tokens=19 active_layers=48 avg_active_experts_per_layer=76.4 dense_active=false pinned_per_layer=0 pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER hcs_evict_prefill_post_scratch prompt_tokens=19 free_mb=2972 required_mb=2758 deficit_mb=0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=0.3 hqq_swap_ms=0.0 hqq_refresh_ms=0.3 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+  [32mdecode: 7 tokens in 0.38s (18.3 tok/s)  VRAM: 1222 MB free now, 838 MB min free during decode[0m
+  [36mDynamic HCS: hit=50.89% tail=768/384 protected=2175 promotions=1536 evictions=1536 request_promotions=768/768 budget_skips=681 no_slot=0 copy_failures=0[0m
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.054972, "lock_ms": 0.0006519999999999999, "prepare_runtime_ms": 0.14957600000000001, "prompt_hcs_shadow_ms": 0.008245, "prompt_tokens": 19, "release_scratch_ms": 5.138019, "restore_runtime_ms": 0.30325, "run_finalize_ms": 460.144208, "scratch_ms": 7.04667, "stop_ids_ms": 0.035255, "tokenize_ms": 0.315783, "total_ms": 473.20779899999997, "unaccounted_ms": 0.011168999999995322}
+  Warmup complete.
+  Prefill warmup (3 runs, ~25K tokens each)...
+VRAM LEDGER hcs_evict_prefill prompt_tokens=25000 capped_tokens=25000 free_mb=1222 base_needed_mb=14954 hqq_prefill_growth_mb=0 needed_mb=14954 soft_cached=2943 soft_slots=3051 soft_slot_mb=4.641 soft_chunks_loaded=109 soft_total_chunks=113 hard_budget_mb=0 soft_max_mb=14158 safety_mb=600
+VRAM LEDGER hcs_evict_prefill_deficit prompt_tokens=25000 deficit_mb=13732.0 soft_chunks_loaded=109 soft_slots_per_chunk=27 soft_slot_mb=4.641
+VRAM LEDGER hcs_evict_prefill_result prompt_tokens=25000 evicted=2943 freed_mb=13657.4 chunks_dropped=109 total_chunks=109 elapsed_ms=52.0 free_after_mb=14956 soft_cached_after=0 soft_chunks_loaded_after=0
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=25000 total_ms=0.1 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=0.1 has_hqq=true hqq_growth_mb=0.0 evicted=0 freed_mb=0.0
+VRAM LEDGER prefill_prepare_budget prompt_tokens=25000 free_mb=14668 total_mb=32119 safety_mb=600 fixed_scratch_mb=308.3 per_tok_kb=756.5 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=2368.0 cold_staging_reserve_mb=1188.0 post_scratch_runtime_reserve_mb=2368.0 scratch_budget_mb=11700.6 target_tokens=25000 max_by_vram=15060 chosen_scratch_tokens=15060 hcs_cached_experts=0 hcs_stride=256 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=15060 prompt_tokens=25000 pre_alloc_free_mb=14668 post_alloc_free_mb=3004 actual_alloc_mb=11664.0 estimated_scratch_mb=11700.2 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=176.5 shared_fp32_mb=176.5 fp32_scratch_mb=1180.2 kv_cross_floor_mb=48.8
+VRAM LEDGER prefill_ready prompt_tokens=25000 scratch_tokens=15060 scratch_mb=11700.2 post_alloc_free_mb=3004 safety_mb=600 optional_pinning_budget_mb=None pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_pinning_budget prompt_tokens=25000 post_alloc_free_mb=3004 required_post_scratch_mb=Some(3076) result_mb=Some(0)
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=true pinning_disabled=false optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0 prescan_layers=48 hcs_cached_experts=0 hcs_stride=256 scratch_tokens=15060 chunk_size=15060 num_chunks=2 chunk_plan=[15060, 9940]
+VRAM LEDGER prefill_prescan tokens=15060 active_layers=48 avg_active_experts_per_layer=255.2 dense_active=true pinned_per_layer=0 pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER hcs_evict_prefill_post_scratch prompt_tokens=15060 free_mb=3004 required_mb=2992 deficit_mb=0
+VRAM LEDGER hcs_evict_prefill_post_scratch prompt_tokens=9940 free_mb=636 required_mb=2910 deficit_mb=2274
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=1.0 hqq_swap_ms=0.3 hqq_refresh_ms=0.7 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.454028, "lock_ms": 0.00048100000000000004, "prepare_runtime_ms": 0.35958399999999996, "prompt_hcs_shadow_ms": 0.018844, "prompt_tokens": 25000, "release_scratch_ms": 30.318127, "restore_runtime_ms": 0.9998139999999999, "run_finalize_ms": 6098.727506, "scratch_ms": 16.63523, "stop_ids_ms": 0.041847, "tokenize_ms": 39.28183, "total_ms": 6186.848863, "unaccounted_ms": 0.011572000000342086}
+    [1/3] 25,000 tokens
+VRAM LEDGER hcs_evict_prefill prompt_tokens=25000 capped_tokens=25000 free_mb=4494 base_needed_mb=14954 hqq_prefill_growth_mb=0 needed_mb=14954 soft_cached=2241 soft_slots=3051 soft_slot_mb=4.641 soft_chunks_loaded=83 soft_total_chunks=113 hard_budget_mb=0 soft_max_mb=14158 safety_mb=600
+VRAM LEDGER hcs_evict_prefill_deficit prompt_tokens=25000 deficit_mb=10460.0 soft_chunks_loaded=83 soft_slots_per_chunk=27 soft_slot_mb=4.641
+VRAM LEDGER hcs_evict_prefill_result prompt_tokens=25000 evicted=2241 freed_mb=10399.6 chunks_dropped=83 total_chunks=83 elapsed_ms=39.6 free_after_mb=14952 soft_cached_after=0 soft_chunks_loaded_after=0
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=25000 total_ms=0.1 boundary_sync_ms=0.1 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=0.1 has_hqq=true hqq_growth_mb=0.0 evicted=0 freed_mb=0.0
+VRAM LEDGER prefill_prepare_budget prompt_tokens=25000 free_mb=14666 total_mb=32119 safety_mb=600 fixed_scratch_mb=308.3 per_tok_kb=756.5 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=2368.0 cold_staging_reserve_mb=1188.0 post_scratch_runtime_reserve_mb=2368.0 scratch_budget_mb=11698.6 target_tokens=25000 max_by_vram=15057 chosen_scratch_tokens=15057 hcs_cached_experts=0 hcs_stride=256 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=15057 prompt_tokens=25000 pre_alloc_free_mb=14666 post_alloc_free_mb=3004 actual_alloc_mb=11662.0 estimated_scratch_mb=11698.3 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=176.4 shared_fp32_mb=176.4 fp32_scratch_mb=1180.0 kv_cross_floor_mb=48.8
+VRAM LEDGER prefill_ready prompt_tokens=25000 scratch_tokens=15057 scratch_mb=11698.3 post_alloc_free_mb=3004 safety_mb=600 optional_pinning_budget_mb=None pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_pinning_budget prompt_tokens=25000 post_alloc_free_mb=3004 required_post_scratch_mb=Some(3076) result_mb=Some(0)
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=true pinning_disabled=false optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0 prescan_layers=48 hcs_cached_experts=0 hcs_stride=256 scratch_tokens=15057 chunk_size=15057 num_chunks=2 chunk_plan=[15057, 9943]
+VRAM LEDGER prefill_prescan tokens=15057 active_layers=48 avg_active_experts_per_layer=255.0 dense_active=true pinned_per_layer=0 pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER hcs_evict_prefill_post_scratch prompt_tokens=15057 free_mb=3004 required_mb=2992 deficit_mb=0
+VRAM LEDGER hcs_evict_prefill_post_scratch prompt_tokens=9943 free_mb=668 required_mb=2910 deficit_mb=2242
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=1.9 hqq_swap_ms=0.3 hqq_refresh_ms=1.6 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.55296, "lock_ms": 0.000642, "prepare_runtime_ms": 0.381083, "prompt_hcs_shadow_ms": 0.044132, "prompt_tokens": 25000, "release_scratch_ms": 30.399149, "restore_runtime_ms": 1.9072390000000001, "run_finalize_ms": 6106.178019, "scratch_ms": 16.378778999999998, "stop_ids_ms": 0.037329, "tokenize_ms": 41.104046999999994, "total_ms": 6196.998296000001, "unaccounted_ms": 0.01491700000133278}
+    [2/3] 25,000 tokens
+VRAM LEDGER hcs_evict_prefill prompt_tokens=25000 capped_tokens=25000 free_mb=4366 base_needed_mb=14954 hqq_prefill_growth_mb=0 needed_mb=14954 soft_cached=2268 soft_slots=3051 soft_slot_mb=4.641 soft_chunks_loaded=84 soft_total_chunks=113 hard_budget_mb=0 soft_max_mb=14158 safety_mb=600
+VRAM LEDGER hcs_evict_prefill_deficit prompt_tokens=25000 deficit_mb=10588.0 soft_chunks_loaded=84 soft_slots_per_chunk=27 soft_slot_mb=4.641
+VRAM LEDGER hcs_evict_prefill_result prompt_tokens=25000 evicted=2268 freed_mb=10524.9 chunks_dropped=84 total_chunks=84 elapsed_ms=40.1 free_after_mb=14950 soft_cached_after=0 soft_chunks_loaded_after=0
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=25000 total_ms=0.1 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=0.1 has_hqq=true hqq_growth_mb=0.0 evicted=0 freed_mb=0.0
+VRAM LEDGER prefill_prepare_budget prompt_tokens=25000 free_mb=14664 total_mb=32119 safety_mb=600 fixed_scratch_mb=308.3 per_tok_kb=756.5 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=2368.0 cold_staging_reserve_mb=1188.0 post_scratch_runtime_reserve_mb=2368.0 scratch_budget_mb=11696.6 target_tokens=25000 max_by_vram=15054 chosen_scratch_tokens=15054 hcs_cached_experts=0 hcs_stride=256 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=15054 prompt_tokens=25000 pre_alloc_free_mb=14664 post_alloc_free_mb=3008 actual_alloc_mb=11656.0 estimated_scratch_mb=11696.5 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=176.4 shared_fp32_mb=176.4 fp32_scratch_mb=1179.8 kv_cross_floor_mb=48.8
+VRAM LEDGER prefill_ready prompt_tokens=25000 scratch_tokens=15054 scratch_mb=11696.5 post_alloc_free_mb=3008 safety_mb=600 optional_pinning_budget_mb=None pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_pinning_budget prompt_tokens=25000 post_alloc_free_mb=3008 required_post_scratch_mb=Some(3076) result_mb=Some(0)
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=true pinning_disabled=false optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0 prescan_layers=48 hcs_cached_experts=0 hcs_stride=256 scratch_tokens=15054 chunk_size=15054 num_chunks=2 chunk_plan=[15054, 9946]
+VRAM LEDGER prefill_prescan tokens=15054 active_layers=48 avg_active_experts_per_layer=255.2 dense_active=true pinned_per_layer=0 pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER hcs_evict_prefill_post_scratch prompt_tokens=15054 free_mb=3008 required_mb=2992 deficit_mb=0
+VRAM LEDGER hcs_evict_prefill_post_scratch prompt_tokens=9946 free_mb=640 required_mb=2910 deficit_mb=2270
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=1.9 hqq_swap_ms=0.3 hqq_refresh_ms=1.6 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.5077769999999999, "lock_ms": 0.00063, "prepare_runtime_ms": 0.347852, "prompt_hcs_shadow_ms": 0.043981, "prompt_tokens": 25000, "release_scratch_ms": 30.837329999999998, "restore_runtime_ms": 1.953495, "run_finalize_ms": 6113.443325, "scratch_ms": 16.462184, "stop_ids_ms": 0.045353, "tokenize_ms": 38.349739, "total_ms": 6202.0055950000005, "unaccounted_ms": 0.013928999999734515}
+    [3/3] 25,000 tokens
+  Decode warmup (50/100/250 tokens, 3 separate prompts)...
+VRAM LEDGER hcs_evict_prefill prompt_tokens=59 capped_tokens=128 free_mb=4366 base_needed_mb=3338 hqq_prefill_growth_mb=0 needed_mb=3338 soft_cached=2268 soft_slots=3051 soft_slot_mb=4.641 soft_chunks_loaded=84 soft_total_chunks=113 hard_budget_mb=0 soft_max_mb=14158 safety_mb=600
+VRAM LEDGER hcs_evict_prefill prompt_tokens=59 capped_tokens=128 free_mb=4366 base_needed_mb=3338 hqq_prefill_growth_mb=0 needed_mb=3338 soft_cached=2268 soft_slots=3051 soft_slot_mb=4.641 soft_chunks_loaded=84 soft_total_chunks=113 hard_budget_mb=0 soft_max_mb=14158 safety_mb=600
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=59 total_ms=0.2 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=0.1 has_hqq=true hqq_growth_mb=0.0 evicted=0 freed_mb=0.0
+VRAM LEDGER prefill_prepare_budget prompt_tokens=59 free_mb=4370 total_mb=32119 safety_mb=600 fixed_scratch_mb=308.3 per_tok_kb=756.5 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=2368.0 cold_staging_reserve_mb=1188.0 post_scratch_runtime_reserve_mb=2368.0 scratch_budget_mb=1402.6 target_tokens=59 max_by_vram=128 chosen_scratch_tokens=128 hcs_cached_experts=2268 hcs_stride=256 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=128 prompt_tokens=59 pre_alloc_free_mb=4370 post_alloc_free_mb=3980 actual_alloc_mb=390.0 estimated_scratch_mb=458.4 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=1.5 shared_fp32_mb=1.5 fp32_scratch_mb=42.5 kv_cross_floor_mb=0.1
+VRAM LEDGER prefill_ready prompt_tokens=59 scratch_tokens=128 scratch_mb=458.4 post_alloc_free_mb=3980 safety_mb=600 optional_pinning_budget_mb=None pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_pinning_budget prompt_tokens=59 post_alloc_free_mb=3980 required_post_scratch_mb=Some(2758) result_mb=Some(1222)
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=true pinning_disabled=false optional_pinning_budget_mb=Some(1222) pinning_active=false pinning_pool_mb=0.0 prescan_layers=48 hcs_cached_experts=2268 hcs_stride=256 scratch_tokens=128 chunk_size=59 num_chunks=1 chunk_plan=[59]
+VRAM LEDGER prefill_prescan tokens=59 active_layers=48 avg_active_experts_per_layer=161.9 dense_active=false pinned_per_layer=5 pinning_active=true pinning_pool_mb=1113.8
+VRAM LEDGER hcs_evict_prefill_post_scratch prompt_tokens=59 free_mb=2866 required_mb=2758 deficit_mb=0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=0.6 hqq_swap_ms=0.2 hqq_refresh_ms=0.4 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+  [32mdecode: 49 tokens in 2.13s (23.0 tok/s)  VRAM: 1472 MB free now, 800 MB min free during decode[0m
+  [36mDynamic HCS: hit=64.84% tail=768/384 protected=2121 promotions=2304 evictions=2304 request_promotions=768/768 budget_skips=6528 no_slot=0 copy_failures=0[0m
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.10802, "lock_ms": 0.000441, "prepare_runtime_ms": 0.296387, "prompt_hcs_shadow_ms": 0.016971, "prompt_tokens": 59, "release_scratch_ms": 6.214978, "restore_runtime_ms": 0.5760430000000001, "run_finalize_ms": 857.650454, "scratch_ms": 7.120769, "stop_ids_ms": 0.040605, "tokenize_ms": 0.394838, "total_ms": 872.432721, "unaccounted_ms": 0.013215000000059263}
+    50 tokens done
+VRAM LEDGER hcs_evict_prefill prompt_tokens=65 capped_tokens=128 free_mb=1472 base_needed_mb=3338 hqq_prefill_growth_mb=0 needed_mb=3338 soft_cached=2889 soft_slots=3051 soft_slot_mb=4.641 soft_chunks_loaded=107 soft_total_chunks=113 hard_budget_mb=0 soft_max_mb=14158 safety_mb=600
+VRAM LEDGER hcs_evict_prefill_deficit prompt_tokens=65 deficit_mb=1866.0 soft_chunks_loaded=107 soft_slots_per_chunk=27 soft_slot_mb=4.641
+VRAM LEDGER hcs_evict_prefill_result prompt_tokens=65 evicted=405 freed_mb=1879.5 chunks_dropped=15 total_chunks=107 elapsed_ms=7.5 free_after_mb=3362 soft_cached_after=2484 soft_chunks_loaded_after=92
+VRAM LEDGER hcs_evict_prefill prompt_tokens=65 capped_tokens=128 free_mb=3362 base_needed_mb=3338 hqq_prefill_growth_mb=0 needed_mb=3338 soft_cached=2484 soft_slots=3051 soft_slot_mb=4.641 soft_chunks_loaded=92 soft_total_chunks=113 hard_budget_mb=0 soft_max_mb=14158 safety_mb=600
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=65 total_ms=0.2 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=0.1 has_hqq=true hqq_growth_mb=0.0 evicted=0 freed_mb=0.0
+VRAM LEDGER prefill_prepare_budget prompt_tokens=65 free_mb=3360 total_mb=32119 safety_mb=600 fixed_scratch_mb=308.3 per_tok_kb=756.5 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=2368.0 cold_staging_reserve_mb=1188.0 post_scratch_runtime_reserve_mb=2368.0 scratch_budget_mb=392.6 target_tokens=65 max_by_vram=128 chosen_scratch_tokens=128 hcs_cached_experts=2484 hcs_stride=256 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=128 prompt_tokens=65 pre_alloc_free_mb=3360 post_alloc_free_mb=2974 actual_alloc_mb=386.0 estimated_scratch_mb=458.4 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=1.5 shared_fp32_mb=1.5 fp32_scratch_mb=42.5 kv_cross_floor_mb=0.1
+VRAM LEDGER prefill_ready prompt_tokens=65 scratch_tokens=128 scratch_mb=458.4 post_alloc_free_mb=2974 safety_mb=600 optional_pinning_budget_mb=None pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_pinning_budget prompt_tokens=65 post_alloc_free_mb=2974 required_post_scratch_mb=Some(2758) result_mb=Some(216)
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=true pinning_disabled=false optional_pinning_budget_mb=Some(216) pinning_active=false pinning_pool_mb=0.0 prescan_layers=0 hcs_cached_experts=2484 hcs_stride=256 scratch_tokens=128 chunk_size=65 num_chunks=1 chunk_plan=[65]
+VRAM LEDGER prefill_prescan tokens=65 active_layers=48 avg_active_experts_per_layer=167.8 dense_active=false pinned_per_layer=0 pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER hcs_evict_prefill_post_scratch prompt_tokens=65 free_mb=2974 required_mb=2758 deficit_mb=0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=0.7 hqq_swap_ms=0.1 hqq_refresh_ms=0.6 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+  [32mdecode: 99 tokens in 4.60s (21.5 tok/s)  VRAM: 1472 MB free now, 800 MB min free during decode[0m
+  [36mDynamic HCS: hit=60.50% tail=768/384 protected=2121 promotions=3072 evictions=3072 request_promotions=768/768 budget_skips=20778 no_slot=0 copy_failures=0[0m
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.058298, "lock_ms": 0.00046, "prepare_runtime_ms": 0.267974, "prompt_hcs_shadow_ms": 0.009698, "prompt_tokens": 65, "release_scratch_ms": 4.508069, "restore_runtime_ms": 0.671178, "run_finalize_ms": 854.984196, "scratch_ms": 7.358207999999999, "stop_ids_ms": 0.042208, "tokenize_ms": 0.387996, "total_ms": 868.298786, "unaccounted_ms": 0.010500999999976557}
+    100 tokens done
+VRAM LEDGER hcs_evict_prefill prompt_tokens=63 capped_tokens=128 free_mb=1472 base_needed_mb=3338 hqq_prefill_growth_mb=0 needed_mb=3338 soft_cached=2889 soft_slots=3051 soft_slot_mb=4.641 soft_chunks_loaded=107 soft_total_chunks=113 hard_budget_mb=0 soft_max_mb=14158 safety_mb=600
+VRAM LEDGER hcs_evict_prefill_deficit prompt_tokens=63 deficit_mb=1866.0 soft_chunks_loaded=107 soft_slots_per_chunk=27 soft_slot_mb=4.641
+VRAM LEDGER hcs_evict_prefill_result prompt_tokens=63 evicted=405 freed_mb=1879.5 chunks_dropped=15 total_chunks=107 elapsed_ms=7.5 free_after_mb=3362 soft_cached_after=2484 soft_chunks_loaded_after=92
+VRAM LEDGER hcs_evict_prefill prompt_tokens=63 capped_tokens=128 free_mb=3362 base_needed_mb=3338 hqq_prefill_growth_mb=0 needed_mb=3338 soft_cached=2484 soft_slots=3051 soft_slot_mb=4.641 soft_chunks_loaded=92 soft_total_chunks=113 hard_budget_mb=0 soft_max_mb=14158 safety_mb=600
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=63 total_ms=0.3 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=0.2 has_hqq=true hqq_growth_mb=0.0 evicted=0 freed_mb=0.0
+VRAM LEDGER prefill_prepare_budget prompt_tokens=63 free_mb=3364 total_mb=32119 safety_mb=600 fixed_scratch_mb=308.3 per_tok_kb=756.5 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=2368.0 cold_staging_reserve_mb=1188.0 post_scratch_runtime_reserve_mb=2368.0 scratch_budget_mb=396.6 target_tokens=63 max_by_vram=128 chosen_scratch_tokens=128 hcs_cached_experts=2481 hcs_stride=256 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=128 prompt_tokens=63 pre_alloc_free_mb=3364 post_alloc_free_mb=2972 actual_alloc_mb=392.0 estimated_scratch_mb=458.4 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=1.5 shared_fp32_mb=1.5 fp32_scratch_mb=42.5 kv_cross_floor_mb=0.1
+VRAM LEDGER prefill_ready prompt_tokens=63 scratch_tokens=128 scratch_mb=458.4 post_alloc_free_mb=2972 safety_mb=600 optional_pinning_budget_mb=None pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_pinning_budget prompt_tokens=63 post_alloc_free_mb=2972 required_post_scratch_mb=Some(2758) result_mb=Some(214)
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=true pinning_disabled=false optional_pinning_budget_mb=Some(214) pinning_active=false pinning_pool_mb=0.0 prescan_layers=48 hcs_cached_experts=2481 hcs_stride=256 scratch_tokens=128 chunk_size=63 num_chunks=1 chunk_plan=[63]
+VRAM LEDGER prefill_prescan tokens=63 active_layers=48 avg_active_experts_per_layer=160.9 dense_active=false pinned_per_layer=0 pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER hcs_evict_prefill_post_scratch prompt_tokens=63 free_mb=2972 required_mb=2758 deficit_mb=0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=0.7 hqq_swap_ms=0.1 hqq_refresh_ms=0.6 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+  [32mdecode: 249 tokens in 12.25s (20.3 tok/s)  VRAM: 1474 MB free now, 802 MB min free during decode[0m
+  [36mDynamic HCS: hit=57.41% tail=768/384 protected=2121 promotions=3840 evictions=3840 request_promotions=768/768 budget_skips=60731 no_slot=0 copy_failures=0[0m
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.062275, "lock_ms": 0.00043099999999999996, "prepare_runtime_ms": 0.472843, "prompt_hcs_shadow_ms": 0.01097, "prompt_tokens": 63, "release_scratch_ms": 4.556468, "restore_runtime_ms": 0.706854, "run_finalize_ms": 816.0783710000001, "scratch_ms": 7.420253, "stop_ids_ms": 0.053809, "tokenize_ms": 0.390731, "total_ms": 829.763665, "unaccounted_ms": 0.010659999999802494}
+    250 tokens done
+  Warmup complete (45.2s). All kernels compiled.
+
+[1m[36m▸ Prefill (internal) — 1K/5K/10K/20K/35K/50K tokens, 6 runs[0m
+VRAM LEDGER hcs_evict_prefill prompt_tokens=1000 capped_tokens=1000 free_mb=1474 base_needed_mb=3733 hqq_prefill_growth_mb=0 needed_mb=3733 soft_cached=2889 soft_slots=3051 soft_slot_mb=4.641 soft_chunks_loaded=107 soft_total_chunks=113 hard_budget_mb=0 soft_max_mb=14158 safety_mb=600
+VRAM LEDGER hcs_evict_prefill_deficit prompt_tokens=1000 deficit_mb=2259.0 soft_chunks_loaded=107 soft_slots_per_chunk=27 soft_slot_mb=4.641
+VRAM LEDGER hcs_evict_prefill_result prompt_tokens=1000 evicted=513 freed_mb=2380.6 chunks_dropped=19 total_chunks=107 elapsed_ms=9.4 free_after_mb=3868 soft_cached_after=2376 soft_chunks_loaded_after=88
+VRAM LEDGER hcs_evict_prefill prompt_tokens=1000 capped_tokens=1000 free_mb=3868 base_needed_mb=3733 hqq_prefill_growth_mb=0 needed_mb=3733 soft_cached=2376 soft_slots=3051 soft_slot_mb=4.641 soft_chunks_loaded=88 soft_total_chunks=113 hard_budget_mb=0 soft_max_mb=14158 safety_mb=600
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=1000 total_ms=0.3 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=0.2 has_hqq=true hqq_growth_mb=0.0 evicted=0 freed_mb=0.0
+VRAM LEDGER hcs_extra_prefill_evict prompt_tokens=1000 requested_mb=188.6 evicted=54 freed_mb=250.6 chunks_dropped=2 total_chunks=88 elapsed_ms=0.7 free_after_mb=4118 soft_cached_after=2322 soft_chunks_loaded_after=86
+VRAM LEDGER prefill_extra_hcs_evict_for_single_chunk prompt_tokens=1000 requested_deficit_mb=188.6 evicted=54 freed_mb=250.6 free_after_mb=4118 scratch_budget_after_mb=1150.6 max_by_vram_after=1000 hcs_cached_after=2319
+VRAM LEDGER prefill_prepare_budget prompt_tokens=1000 free_mb=4118 total_mb=32119 safety_mb=600 fixed_scratch_mb=308.3 per_tok_kb=756.5 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=2368.0 cold_staging_reserve_mb=1188.0 post_scratch_runtime_reserve_mb=2368.0 scratch_budget_mb=1150.6 target_tokens=1000 max_by_vram=1000 chosen_scratch_tokens=1000 hcs_cached_experts=2319 hcs_stride=256 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=1000 prompt_tokens=1000 pre_alloc_free_mb=4118 post_alloc_free_mb=3086 actual_alloc_mb=1032.0 estimated_scratch_mb=1087.2 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=11.7 shared_fp32_mb=11.7 fp32_scratch_mb=78.4 kv_cross_floor_mb=2.0
+VRAM LEDGER prefill_ready prompt_tokens=1000 scratch_tokens=1000 scratch_mb=1087.2 post_alloc_free_mb=3086 safety_mb=600 optional_pinning_budget_mb=None pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_pinning_budget prompt_tokens=1000 post_alloc_free_mb=3086 required_post_scratch_mb=Some(2766) result_mb=Some(320)
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=true pinning_disabled=false optional_pinning_budget_mb=Some(320) pinning_active=false pinning_pool_mb=0.0 prescan_layers=48 hcs_cached_experts=2319 hcs_stride=256 scratch_tokens=1000 chunk_size=1000 num_chunks=1 chunk_plan=[1000]
+VRAM LEDGER prefill_prescan tokens=1000 active_layers=48 avg_active_experts_per_layer=247.6 dense_active=true pinned_per_layer=0 pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER hcs_evict_prefill_post_scratch prompt_tokens=1000 free_mb=3086 required_mb=2766 deficit_mb=0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=0.6 hqq_swap_ms=0.0 hqq_refresh_ms=0.6 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.061262, "lock_ms": 0.000441, "prepare_runtime_ms": 0.479194, "prompt_hcs_shadow_ms": 0.035706, "prompt_tokens": 1000, "release_scratch_ms": 9.697477, "restore_runtime_ms": 0.6585160000000001, "run_finalize_ms": 1700.727595, "scratch_ms": 9.202574, "stop_ids_ms": 0.046887, "tokenize_ms": 1.408709, "total_ms": 1722.3292909999998, "unaccounted_ms": 0.010929999999916618}
+VRAM LEDGER hcs_evict_prefill prompt_tokens=5000 capped_tokens=5000 free_mb=1974 base_needed_mb=6886 hqq_prefill_growth_mb=0 needed_mb=6886 soft_cached=2781 soft_slots=3051 soft_slot_mb=4.641 soft_chunks_loaded=103 soft_total_chunks=113 hard_budget_mb=0 soft_max_mb=14158 safety_mb=600
+VRAM LEDGER hcs_evict_prefill_deficit prompt_tokens=5000 deficit_mb=4912.0 soft_chunks_loaded=103 soft_slots_per_chunk=27 soft_slot_mb=4.641
+VRAM LEDGER hcs_evict_prefill_result prompt_tokens=5000 evicted=1080 freed_mb=5011.9 chunks_dropped=40 total_chunks=103 elapsed_ms=19.0 free_after_mb=7014 soft_cached_after=1701 soft_chunks_loaded_after=63
+VRAM LEDGER hcs_evict_prefill prompt_tokens=5000 capped_tokens=5000 free_mb=7014 base_needed_mb=6886 hqq_prefill_growth_mb=0 needed_mb=6886 soft_cached=1701 soft_slots=3051 soft_slot_mb=4.641 soft_chunks_loaded=63 soft_total_chunks=113 hard_budget_mb=0 soft_max_mb=14158 safety_mb=600
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=5000 total_ms=0.1 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=0.0 has_hqq=true hqq_growth_mb=0.0 evicted=0 freed_mb=0.0
+VRAM LEDGER hcs_extra_prefill_evict prompt_tokens=5000 requested_mb=127.5 evicted=54 freed_mb=250.6 chunks_dropped=2 total_chunks=63 elapsed_ms=0.7 free_after_mb=7202 soft_cached_after=1647 soft_chunks_loaded_after=61
+VRAM LEDGER prefill_extra_hcs_evict_for_single_chunk prompt_tokens=5000 requested_deficit_mb=127.5 evicted=54 freed_mb=250.6 free_after_mb=7202 scratch_budget_after_mb=4234.6 max_by_vram_after=5000 hcs_cached_after=1647
+VRAM LEDGER prefill_prepare_budget prompt_tokens=5000 free_mb=7202 total_mb=32119 safety_mb=600 fixed_scratch_mb=308.3 per_tok_kb=756.5 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=2368.0 cold_staging_reserve_mb=1188.0 post_scratch_runtime_reserve_mb=2368.0 scratch_budget_mb=4234.6 target_tokens=5000 max_by_vram=5000 chosen_scratch_tokens=5000 hcs_cached_experts=1647 hcs_stride=256 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=5000 prompt_tokens=5000 pre_alloc_free_mb=7202 post_alloc_free_mb=3154 actual_alloc_mb=4048.0 estimated_scratch_mb=4110.1 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=58.6 shared_fp32_mb=58.6 fp32_scratch_mb=391.8 kv_cross_floor_mb=9.8
+VRAM LEDGER prefill_ready prompt_tokens=5000 scratch_tokens=5000 scratch_mb=4110.1 post_alloc_free_mb=3154 safety_mb=600 optional_pinning_budget_mb=None pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_pinning_budget prompt_tokens=5000 post_alloc_free_mb=3154 required_post_scratch_mb=Some(2830) result_mb=Some(324)
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=true pinning_disabled=false optional_pinning_budget_mb=Some(324) pinning_active=false pinning_pool_mb=0.0 prescan_layers=48 hcs_cached_experts=1647 hcs_stride=256 scratch_tokens=5000 chunk_size=5000 num_chunks=1 chunk_plan=[5000]
+VRAM LEDGER prefill_prescan tokens=5000 active_layers=48 avg_active_experts_per_layer=253.0 dense_active=true pinned_per_layer=0 pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER hcs_evict_prefill_post_scratch prompt_tokens=5000 free_mb=3154 required_mb=2830 deficit_mb=0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=0.4 hqq_swap_ms=0.0 hqq_refresh_ms=0.3 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.114361, "lock_ms": 0.00044, "prepare_runtime_ms": 0.193377, "prompt_hcs_shadow_ms": 0.013094, "prompt_tokens": 5000, "release_scratch_ms": 17.49582, "restore_runtime_ms": 0.392815, "run_finalize_ms": 2773.855814, "scratch_ms": 10.711719, "stop_ids_ms": 0.045092999999999994, "tokenize_ms": 5.362476, "total_ms": 2808.1958010000003, "unaccounted_ms": 0.01079200000003766}
+VRAM LEDGER hcs_evict_prefill prompt_tokens=10000 capped_tokens=10000 free_mb=2732 base_needed_mb=10828 hqq_prefill_growth_mb=0 needed_mb=10828 soft_cached=2619 soft_slots=3051 soft_slot_mb=4.641 soft_chunks_loaded=97 soft_total_chunks=113 hard_budget_mb=0 soft_max_mb=14158 safety_mb=600
+VRAM LEDGER hcs_evict_prefill_deficit prompt_tokens=10000 deficit_mb=8096.0 soft_chunks_loaded=97 soft_slots_per_chunk=27 soft_slot_mb=4.641
+VRAM LEDGER hcs_evict_prefill_result prompt_tokens=10000 evicted=1755 freed_mb=8144.3 chunks_dropped=65 total_chunks=97 elapsed_ms=30.9 free_after_mb=10922 soft_cached_after=864 soft_chunks_loaded_after=32
+VRAM LEDGER hcs_evict_prefill prompt_tokens=10000 capped_tokens=10000 free_mb=10922 base_needed_mb=10828 hqq_prefill_growth_mb=0 needed_mb=10828 soft_cached=864 soft_slots=3051 soft_slot_mb=4.641 soft_chunks_loaded=32 soft_total_chunks=113 hard_budget_mb=0 soft_max_mb=14158 safety_mb=600
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=10000 total_ms=0.2 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.1 hqq_swap_ms=0.0 has_hqq=true hqq_growth_mb=0.0 evicted=0 freed_mb=0.0
+VRAM LEDGER hcs_extra_prefill_evict prompt_tokens=10000 requested_mb=57.7 evicted=27 freed_mb=125.3 chunks_dropped=1 total_chunks=32 elapsed_ms=0.3 free_after_mb=10918 soft_cached_after=837 soft_chunks_loaded_after=31
+VRAM LEDGER prefill_extra_hcs_evict_for_single_chunk prompt_tokens=10000 requested_deficit_mb=57.7 evicted=27 freed_mb=125.3 free_after_mb=10918 scratch_budget_after_mb=7950.6 max_by_vram_after=10000 hcs_cached_after=837
+VRAM LEDGER prefill_prepare_budget prompt_tokens=10000 free_mb=10918 total_mb=32119 safety_mb=600 fixed_scratch_mb=308.3 per_tok_kb=756.5 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=2368.0 cold_staging_reserve_mb=1188.0 post_scratch_runtime_reserve_mb=2368.0 scratch_budget_mb=7950.6 target_tokens=10000 max_by_vram=10000 chosen_scratch_tokens=10000 hcs_cached_experts=837 hcs_stride=256 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=10000 prompt_tokens=10000 pre_alloc_free_mb=10918 post_alloc_free_mb=3098 actual_alloc_mb=7820.0 estimated_scratch_mb=7882.2 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=117.2 shared_fp32_mb=117.2 fp32_scratch_mb=783.7 kv_cross_floor_mb=19.5
+VRAM LEDGER prefill_ready prompt_tokens=10000 scratch_tokens=10000 scratch_mb=7882.2 post_alloc_free_mb=3098 safety_mb=600 optional_pinning_budget_mb=None pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_pinning_budget prompt_tokens=10000 post_alloc_free_mb=3098 required_post_scratch_mb=Some(2911) result_mb=Some(187)
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=true pinning_disabled=false optional_pinning_budget_mb=Some(187) pinning_active=false pinning_pool_mb=0.0 prescan_layers=48 hcs_cached_experts=837 hcs_stride=256 scratch_tokens=10000 chunk_size=10000 num_chunks=1 chunk_plan=[10000]
+VRAM LEDGER prefill_prescan tokens=10000 active_layers=48 avg_active_experts_per_layer=254.8 dense_active=true pinned_per_layer=0 pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER hcs_evict_prefill_post_scratch prompt_tokens=10000 free_mb=3098 required_mb=2911 deficit_mb=0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=0.4 hqq_swap_ms=0.0 hqq_refresh_ms=0.3 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.239642, "lock_ms": 0.0006309999999999999, "prepare_runtime_ms": 0.293882, "prompt_hcs_shadow_ms": 0.010449, "prompt_tokens": 10000, "release_scratch_ms": 26.279271, "restore_runtime_ms": 0.401521, "run_finalize_ms": 3896.669367, "scratch_ms": 12.709095999999999, "stop_ids_ms": 0.046807, "tokenize_ms": 14.529635, "total_ms": 3951.1908820000003, "unaccounted_ms": 0.010581000000456697}
+VRAM LEDGER hcs_evict_prefill prompt_tokens=20000 capped_tokens=20000 free_mb=3614 base_needed_mb=14954 hqq_prefill_growth_mb=0 needed_mb=14954 soft_cached=2430 soft_slots=3051 soft_slot_mb=4.641 soft_chunks_loaded=90 soft_total_chunks=113 hard_budget_mb=0 soft_max_mb=14158 safety_mb=600
+VRAM LEDGER hcs_evict_prefill_deficit prompt_tokens=20000 deficit_mb=11340.0 soft_chunks_loaded=90 soft_slots_per_chunk=27 soft_slot_mb=4.641
+VRAM LEDGER hcs_evict_prefill_result prompt_tokens=20000 evicted=2430 freed_mb=11276.7 chunks_dropped=90 total_chunks=90 elapsed_ms=42.9 free_after_mb=14954 soft_cached_after=0 soft_chunks_loaded_after=0
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=20000 total_ms=0.1 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=0.1 has_hqq=true hqq_growth_mb=0.0 evicted=0 freed_mb=0.0
+VRAM LEDGER prefill_prepare_budget prompt_tokens=20000 free_mb=14730 total_mb=32119 safety_mb=600 fixed_scratch_mb=308.3 per_tok_kb=756.5 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=2368.0 cold_staging_reserve_mb=1188.0 post_scratch_runtime_reserve_mb=2368.0 scratch_budget_mb=11762.6 target_tokens=20000 max_by_vram=15146 chosen_scratch_tokens=15146 hcs_cached_experts=0 hcs_stride=256 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=15146 prompt_tokens=20000 pre_alloc_free_mb=14730 post_alloc_free_mb=3028 actual_alloc_mb=11702.0 estimated_scratch_mb=11762.2 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=177.5 shared_fp32_mb=177.5 fp32_scratch_mb=1187.0 kv_cross_floor_mb=39.1
+VRAM LEDGER prefill_ready prompt_tokens=20000 scratch_tokens=15146 scratch_mb=11762.2 post_alloc_free_mb=3028 safety_mb=600 optional_pinning_budget_mb=None pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_pinning_budget prompt_tokens=20000 post_alloc_free_mb=3028 required_post_scratch_mb=Some(3072) result_mb=Some(0)
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=true pinning_disabled=false optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0 prescan_layers=48 hcs_cached_experts=0 hcs_stride=256 scratch_tokens=15146 chunk_size=15146 num_chunks=2 chunk_plan=[15146, 4854]
+VRAM LEDGER prefill_prescan tokens=15146 active_layers=48 avg_active_experts_per_layer=255.2 dense_active=true pinned_per_layer=0 pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER hcs_evict_prefill_post_scratch prompt_tokens=15146 free_mb=3028 required_mb=2994 deficit_mb=0
+VRAM LEDGER hcs_evict_prefill_post_scratch prompt_tokens=4854 free_mb=660 required_mb=2828 deficit_mb=2168
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=0.4 hqq_swap_ms=0.0 hqq_refresh_ms=0.4 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.454088, "lock_ms": 0.000561, "prepare_runtime_ms": 0.288292, "prompt_hcs_shadow_ms": 0.011862, "prompt_tokens": 20000, "release_scratch_ms": 29.504936999999998, "restore_runtime_ms": 0.429192, "run_finalize_ms": 5828.477654, "scratch_ms": 16.406480000000002, "stop_ids_ms": 0.049060999999999994, "tokenize_ms": 30.035975999999998, "total_ms": 5905.669675, "unaccounted_ms": 0.011572000000342086}
+VRAM LEDGER hcs_evict_prefill prompt_tokens=35000 capped_tokens=35000 free_mb=4368 base_needed_mb=14954 hqq_prefill_growth_mb=0 needed_mb=14954 soft_cached=2268 soft_slots=3051 soft_slot_mb=4.641 soft_chunks_loaded=84 soft_total_chunks=113 hard_budget_mb=0 soft_max_mb=14158 safety_mb=600
+VRAM LEDGER hcs_evict_prefill_deficit prompt_tokens=35000 deficit_mb=10586.0 soft_chunks_loaded=84 soft_slots_per_chunk=27 soft_slot_mb=4.641
+VRAM LEDGER hcs_evict_prefill_result prompt_tokens=35000 evicted=2268 freed_mb=10524.9 chunks_dropped=84 total_chunks=84 elapsed_ms=40.1 free_after_mb=14952 soft_cached_after=0 soft_chunks_loaded_after=0
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=35000 total_ms=0.1 boundary_sync_ms=0.1 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=0.1 has_hqq=true hqq_growth_mb=0.0 evicted=0 freed_mb=0.0
+VRAM LEDGER prefill_prepare_budget prompt_tokens=35000 free_mb=14536 total_mb=32119 safety_mb=600 fixed_scratch_mb=308.3 per_tok_kb=756.5 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=2368.0 cold_staging_reserve_mb=1188.0 post_scratch_runtime_reserve_mb=2368.0 scratch_budget_mb=11568.6 target_tokens=35000 max_by_vram=14889 chosen_scratch_tokens=14889 hcs_cached_experts=0 hcs_stride=256 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=14889 prompt_tokens=35000 pre_alloc_free_mb=14536 post_alloc_free_mb=3054 actual_alloc_mb=11482.0 estimated_scratch_mb=11568.4 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=174.5 shared_fp32_mb=174.5 fp32_scratch_mb=1166.8 kv_cross_floor_mb=68.4
+VRAM LEDGER prefill_ready prompt_tokens=35000 scratch_tokens=14889 scratch_mb=11568.4 post_alloc_free_mb=3054 safety_mb=600 optional_pinning_budget_mb=None pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_pinning_budget prompt_tokens=35000 post_alloc_free_mb=3054 required_post_scratch_mb=Some(3076) result_mb=Some(0)
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=true pinning_disabled=false optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0 prescan_layers=48 hcs_cached_experts=0 hcs_stride=256 scratch_tokens=14889 chunk_size=14889 num_chunks=3 chunk_plan=[14889, 14889, 5222]
+VRAM LEDGER prefill_prescan tokens=14889 active_layers=48 avg_active_experts_per_layer=255.0 dense_active=true pinned_per_layer=0 pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER hcs_evict_prefill_post_scratch prompt_tokens=14889 free_mb=3054 required_mb=2990 deficit_mb=0
+VRAM LEDGER hcs_evict_prefill_post_scratch prompt_tokens=14889 free_mb=686 required_mb=2990 deficit_mb=2304
+VRAM LEDGER hcs_evict_prefill_post_scratch prompt_tokens=5222 free_mb=1838 required_mb=2834 deficit_mb=996
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=1.2 hqq_swap_ms=0.3 hqq_refresh_ms=1.0 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.576074, "lock_ms": 0.000581, "prepare_runtime_ms": 0.431156, "prompt_hcs_shadow_ms": 0.009037, "prompt_tokens": 35000, "release_scratch_ms": 29.538933999999998, "restore_runtime_ms": 1.259294, "run_finalize_ms": 9283.485081, "scratch_ms": 16.283595000000002, "stop_ids_ms": 0.04301000000000001, "tokenize_ms": 57.269804, "total_ms": 9388.907936000001, "unaccounted_ms": 0.011370000001988956}
+VRAM LEDGER hcs_evict_prefill prompt_tokens=50000 capped_tokens=50000 free_mb=4492 base_needed_mb=14954 hqq_prefill_growth_mb=0 needed_mb=14954 soft_cached=2241 soft_slots=3051 soft_slot_mb=4.641 soft_chunks_loaded=83 soft_total_chunks=113 hard_budget_mb=0 soft_max_mb=14158 safety_mb=600
+VRAM LEDGER hcs_evict_prefill_deficit prompt_tokens=50000 deficit_mb=10462.0 soft_chunks_loaded=83 soft_slots_per_chunk=27 soft_slot_mb=4.641
+VRAM LEDGER hcs_evict_prefill_result prompt_tokens=50000 evicted=2241 freed_mb=10399.6 chunks_dropped=83 total_chunks=83 elapsed_ms=39.5 free_after_mb=14950 soft_cached_after=0 soft_chunks_loaded_after=0
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=50000 total_ms=0.1 boundary_sync_ms=0.1 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=0.1 has_hqq=true hqq_growth_mb=0.0 evicted=0 freed_mb=0.0
+VRAM LEDGER prefill_prepare_budget prompt_tokens=50000 free_mb=14376 total_mb=32119 safety_mb=600 fixed_scratch_mb=308.3 per_tok_kb=756.5 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=2368.0 cold_staging_reserve_mb=1188.0 post_scratch_runtime_reserve_mb=2368.0 scratch_budget_mb=11408.6 target_tokens=50000 max_by_vram=14673 chosen_scratch_tokens=14673 hcs_cached_experts=0 hcs_stride=256 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=14673 prompt_tokens=50000 pre_alloc_free_mb=14376 post_alloc_free_mb=3022 actual_alloc_mb=11354.0 estimated_scratch_mb=11408.6 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=171.9 shared_fp32_mb=171.9 fp32_scratch_mb=1149.9 kv_cross_floor_mb=97.7
+VRAM LEDGER prefill_ready prompt_tokens=50000 scratch_tokens=14673 scratch_mb=11408.6 post_alloc_free_mb=3022 safety_mb=600 optional_pinning_budget_mb=None pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_pinning_budget prompt_tokens=50000 post_alloc_free_mb=3022 required_post_scratch_mb=Some(3076) result_mb=Some(0)
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=true pinning_disabled=false optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0 prescan_layers=48 hcs_cached_experts=0 hcs_stride=256 scratch_tokens=14673 chunk_size=14673 num_chunks=4 chunk_plan=[14673, 14673, 14673, 5981]
+VRAM LEDGER prefill_prescan tokens=14673 active_layers=48 avg_active_experts_per_layer=255.2 dense_active=true pinned_per_layer=0 pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER hcs_evict_prefill_post_scratch prompt_tokens=14673 free_mb=3022 required_mb=2986 deficit_mb=0
+VRAM LEDGER hcs_evict_prefill_post_scratch prompt_tokens=14673 free_mb=654 required_mb=2986 deficit_mb=2332
+VRAM LEDGER hcs_evict_prefill_post_scratch prompt_tokens=14673 free_mb=1806 required_mb=2986 deficit_mb=1180
+VRAM LEDGER hcs_evict_prefill_post_scratch prompt_tokens=5981 free_mb=1806 required_mb=2846 deficit_mb=1040
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=1.2 hqq_swap_ms=0.3 hqq_refresh_ms=0.9 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.6871079999999999, "lock_ms": 0.000572, "prepare_runtime_ms": 0.46112200000000003, "prompt_hcs_shadow_ms": 0.011051, "prompt_tokens": 50000, "release_scratch_ms": 29.147306, "restore_runtime_ms": 1.185439, "run_finalize_ms": 13292.939167, "scratch_ms": 16.799668999999998, "stop_ids_ms": 0.050853999999999996, "tokenize_ms": 83.119788, "total_ms": 13424.416799999999, "unaccounted_ms": 0.014723999998750514}
+  Run 1: 580.6 tok/s (1,000 tokens in 1722.3ms)
+  Run 2: 1,780.5 tok/s (5,000 tokens in 2808.2ms)
+  Run 3: 2,530.9 tok/s (10,000 tokens in 3951.2ms)
+  Run 4: 3,386.6 tok/s (20,000 tokens in 5905.7ms)
+  Run 5: 3,727.8 tok/s (35,000 tokens in 9388.9ms)
+  Run 6: 3,724.6 tok/s (50,000 tokens in 13424.4ms)
+  [1mBest: 3,727.8 tok/s (35,000 tokens)[0m
+
+[1m[36m▸ Decode (internal) — 50/100/250 tokens, 3 separate prompts[0m
+VRAM LEDGER hcs_evict_prefill prompt_tokens=61 capped_tokens=128 free_mb=4618 base_needed_mb=3338 hqq_prefill_growth_mb=0 needed_mb=3338 soft_cached=2214 soft_slots=3051 soft_slot_mb=4.641 soft_chunks_loaded=82 soft_total_chunks=113 hard_budget_mb=0 soft_max_mb=14158 safety_mb=600
+VRAM LEDGER hcs_evict_prefill prompt_tokens=61 capped_tokens=128 free_mb=4618 base_needed_mb=3338 hqq_prefill_growth_mb=0 needed_mb=3338 soft_cached=2214 soft_slots=3051 soft_slot_mb=4.641 soft_chunks_loaded=82 soft_total_chunks=113 hard_budget_mb=0 soft_max_mb=14158 safety_mb=600
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=61 total_ms=0.1 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=0.0 has_hqq=true hqq_growth_mb=0.0 evicted=0 freed_mb=0.0
+VRAM LEDGER prefill_prepare_budget prompt_tokens=61 free_mb=4618 total_mb=32119 safety_mb=600 fixed_scratch_mb=308.3 per_tok_kb=756.5 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=2368.0 cold_staging_reserve_mb=1188.0 post_scratch_runtime_reserve_mb=2368.0 scratch_budget_mb=1650.6 target_tokens=61 max_by_vram=128 chosen_scratch_tokens=128 hcs_cached_experts=2214 hcs_stride=256 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=128 prompt_tokens=61 pre_alloc_free_mb=4618 post_alloc_free_mb=4234 actual_alloc_mb=384.0 estimated_scratch_mb=458.4 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=1.5 shared_fp32_mb=1.5 fp32_scratch_mb=42.5 kv_cross_floor_mb=0.1
+VRAM LEDGER prefill_ready prompt_tokens=61 scratch_tokens=128 scratch_mb=458.4 post_alloc_free_mb=4234 safety_mb=600 optional_pinning_budget_mb=None pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_pinning_budget prompt_tokens=61 post_alloc_free_mb=4234 required_post_scratch_mb=Some(2758) result_mb=Some(1476)
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=true pinning_disabled=false optional_pinning_budget_mb=Some(1476) pinning_active=false pinning_pool_mb=0.0 prescan_layers=48 hcs_cached_experts=2214 hcs_stride=256 scratch_tokens=128 chunk_size=61 num_chunks=1 chunk_plan=[61]
+VRAM LEDGER prefill_prescan tokens=61 active_layers=48 avg_active_experts_per_layer=164.0 dense_active=false pinned_per_layer=6 pinning_active=true pinning_pool_mb=1336.5
+VRAM LEDGER hcs_evict_prefill_post_scratch prompt_tokens=61 free_mb=2896 required_mb=2758 deficit_mb=0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=0.4 hqq_swap_ms=0.0 hqq_refresh_ms=0.3 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+  [32mdecode: 49 tokens in 2.20s (22.3 tok/s)  VRAM: 1598 MB free now, 894 MB min free during decode[0m
+  [36mDynamic HCS: hit=64.25% tail=768/384 protected=2094 promotions=4608 evictions=4608 request_promotions=768/768 budget_skips=66689 no_slot=0 copy_failures=0[0m
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.099273, "lock_ms": 0.00042100000000000004, "prepare_runtime_ms": 0.14460699999999999, "prompt_hcs_shadow_ms": 0.012874, "prompt_tokens": 61, "release_scratch_ms": 6.714916, "restore_runtime_ms": 0.397444, "run_finalize_ms": 895.130019, "scratch_ms": 6.8328240000000005, "stop_ids_ms": 0.045804, "tokenize_ms": 0.40077999999999997, "total_ms": 909.791806, "unaccounted_ms": 0.012844000000086453}
+VRAM LEDGER hcs_evict_prefill prompt_tokens=66 capped_tokens=128 free_mb=1598 base_needed_mb=3338 hqq_prefill_growth_mb=0 needed_mb=3338 soft_cached=2862 soft_slots=3051 soft_slot_mb=4.641 soft_chunks_loaded=106 soft_total_chunks=113 hard_budget_mb=0 soft_max_mb=14158 safety_mb=600
+VRAM LEDGER hcs_evict_prefill_deficit prompt_tokens=66 deficit_mb=1740.0 soft_chunks_loaded=106 soft_slots_per_chunk=27 soft_slot_mb=4.641
+VRAM LEDGER hcs_evict_prefill_result prompt_tokens=66 evicted=378 freed_mb=1754.2 chunks_dropped=14 total_chunks=106 elapsed_ms=6.7 free_after_mb=3362 soft_cached_after=2484 soft_chunks_loaded_after=92
+VRAM LEDGER hcs_evict_prefill prompt_tokens=66 capped_tokens=128 free_mb=3362 base_needed_mb=3338 hqq_prefill_growth_mb=0 needed_mb=3338 soft_cached=2484 soft_slots=3051 soft_slot_mb=4.641 soft_chunks_loaded=92 soft_total_chunks=113 hard_budget_mb=0 soft_max_mb=14158 safety_mb=600
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=66 total_ms=0.1 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=0.0 has_hqq=true hqq_growth_mb=0.0 evicted=0 freed_mb=0.0
+VRAM LEDGER prefill_prepare_budget prompt_tokens=66 free_mb=3362 total_mb=32119 safety_mb=600 fixed_scratch_mb=308.3 per_tok_kb=756.5 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=2368.0 cold_staging_reserve_mb=1188.0 post_scratch_runtime_reserve_mb=2368.0 scratch_budget_mb=394.6 target_tokens=66 max_by_vram=128 chosen_scratch_tokens=128 hcs_cached_experts=2484 hcs_stride=256 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=128 prompt_tokens=66 pre_alloc_free_mb=3362 post_alloc_free_mb=2974 actual_alloc_mb=388.0 estimated_scratch_mb=458.4 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=1.5 shared_fp32_mb=1.5 fp32_scratch_mb=42.5 kv_cross_floor_mb=0.1
+VRAM LEDGER prefill_ready prompt_tokens=66 scratch_tokens=128 scratch_mb=458.4 post_alloc_free_mb=2974 safety_mb=600 optional_pinning_budget_mb=None pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_pinning_budget prompt_tokens=66 post_alloc_free_mb=2974 required_post_scratch_mb=Some(2758) result_mb=Some(216)
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=true pinning_disabled=false optional_pinning_budget_mb=Some(216) pinning_active=false pinning_pool_mb=0.0 prescan_layers=0 hcs_cached_experts=2484 hcs_stride=256 scratch_tokens=128 chunk_size=66 num_chunks=1 chunk_plan=[66]
+VRAM LEDGER prefill_prescan tokens=66 active_layers=48 avg_active_experts_per_layer=171.3 dense_active=false pinned_per_layer=0 pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER hcs_evict_prefill_post_scratch prompt_tokens=66 free_mb=2974 required_mb=2758 deficit_mb=0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=0.4 hqq_swap_ms=0.0 hqq_refresh_ms=0.3 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+  [32mdecode: 99 tokens in 4.45s (22.2 tok/s)  VRAM: 1598 MB free now, 862 MB min free during decode[0m
+  [36mDynamic HCS: hit=63.30% tail=768/384 protected=2094 promotions=5376 evictions=5376 request_promotions=768/768 budget_skips=79872 no_slot=0 copy_failures=0[0m
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.055482000000000004, "lock_ms": 0.000441, "prepare_runtime_ms": 0.14619000000000001, "prompt_hcs_shadow_ms": 0.01089, "prompt_tokens": 66, "release_scratch_ms": 4.543248, "restore_runtime_ms": 0.37450100000000003, "run_finalize_ms": 872.453005, "scratch_ms": 7.281923, "stop_ids_ms": 0.056675, "tokenize_ms": 0.38416999999999996, "total_ms": 885.317083, "unaccounted_ms": 0.01055800000006002}
+VRAM LEDGER hcs_evict_prefill prompt_tokens=61 capped_tokens=128 free_mb=1598 base_needed_mb=3338 hqq_prefill_growth_mb=0 needed_mb=3338 soft_cached=2862 soft_slots=3051 soft_slot_mb=4.641 soft_chunks_loaded=106 soft_total_chunks=113 hard_budget_mb=0 soft_max_mb=14158 safety_mb=600
+VRAM LEDGER hcs_evict_prefill_deficit prompt_tokens=61 deficit_mb=1740.0 soft_chunks_loaded=106 soft_slots_per_chunk=27 soft_slot_mb=4.641
+VRAM LEDGER hcs_evict_prefill_result prompt_tokens=61 evicted=378 freed_mb=1754.2 chunks_dropped=14 total_chunks=106 elapsed_ms=6.7 free_after_mb=3362 soft_cached_after=2484 soft_chunks_loaded_after=92
+VRAM LEDGER hcs_evict_prefill prompt_tokens=61 capped_tokens=128 free_mb=3362 base_needed_mb=3338 hqq_prefill_growth_mb=0 needed_mb=3338 soft_cached=2484 soft_slots=3051 soft_slot_mb=4.641 soft_chunks_loaded=92 soft_total_chunks=113 hard_budget_mb=0 soft_max_mb=14158 safety_mb=600
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=61 total_ms=0.1 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=0.0 has_hqq=true hqq_growth_mb=0.0 evicted=0 freed_mb=0.0
+VRAM LEDGER prefill_prepare_budget prompt_tokens=61 free_mb=3362 total_mb=32119 safety_mb=600 fixed_scratch_mb=308.3 per_tok_kb=756.5 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=2368.0 cold_staging_reserve_mb=1188.0 post_scratch_runtime_reserve_mb=2368.0 scratch_budget_mb=394.6 target_tokens=61 max_by_vram=128 chosen_scratch_tokens=128 hcs_cached_experts=2480 hcs_stride=256 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=128 prompt_tokens=61 pre_alloc_free_mb=3362 post_alloc_free_mb=2974 actual_alloc_mb=388.0 estimated_scratch_mb=458.4 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=1.5 shared_fp32_mb=1.5 fp32_scratch_mb=42.5 kv_cross_floor_mb=0.1
+VRAM LEDGER prefill_ready prompt_tokens=61 scratch_tokens=128 scratch_mb=458.4 post_alloc_free_mb=2974 safety_mb=600 optional_pinning_budget_mb=None pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_pinning_budget prompt_tokens=61 post_alloc_free_mb=2974 required_post_scratch_mb=Some(2758) result_mb=Some(216)
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=true pinning_disabled=false optional_pinning_budget_mb=Some(216) pinning_active=false pinning_pool_mb=0.0 prescan_layers=48 hcs_cached_experts=2480 hcs_stride=256 scratch_tokens=128 chunk_size=61 num_chunks=1 chunk_plan=[61]
+VRAM LEDGER prefill_prescan tokens=61 active_layers=48 avg_active_experts_per_layer=166.3 dense_active=false pinned_per_layer=0 pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER hcs_evict_prefill_post_scratch prompt_tokens=61 free_mb=2974 required_mb=2758 deficit_mb=0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=0.4 hqq_swap_ms=0.0 hqq_refresh_ms=0.3 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+  [32mdecode: 249 tokens in 12.49s (19.9 tok/s)  VRAM: 1598 MB free now, 830 MB min free during decode[0m
+  [36mDynamic HCS: hit=56.19% tail=768/384 protected=2094 promotions=6144 evictions=6144 request_promotions=768/768 budget_skips=120998 no_slot=0 copy_failures=0[0m
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.052948, "lock_ms": 0.000521, "prepare_runtime_ms": 0.14621, "prompt_hcs_shadow_ms": 0.009677999999999999, "prompt_tokens": 61, "release_scratch_ms": 7.06904, "restore_runtime_ms": 0.37912, "run_finalize_ms": 851.647626, "scratch_ms": 7.228315, "stop_ids_ms": 0.050494000000000004, "tokenize_ms": 0.38725499999999996, "total_ms": 866.9816139999999, "unaccounted_ms": 0.010407000000100197}
+   50 tokens: 22.31 tok/s (44.8ms/tok)
+  100 tokens: 22.23 tok/s (45.0ms/tok)
+  250 tokens: 19.93 tok/s (50.2ms/tok)
+  [1mBest: 22.31 tok/s[0m
+  HCS:  2862/12288 experts loaded (23.3%)
+  VRAM: 830 MB min free during decode (safety margin: 600 MB)
+
+[1m[36m▸ Round trip (network) — 50/100/250 tokens via HTTP[0m
+VRAM LEDGER hcs_evict_prefill prompt_tokens=14 capped_tokens=128 free_mb=1598 base_needed_mb=3338 hqq_prefill_growth_mb=0 needed_mb=3338 soft_cached=2862 soft_slots=3051 soft_slot_mb=4.641 soft_chunks_loaded=106 soft_total_chunks=113 hard_budget_mb=0 soft_max_mb=14158 safety_mb=600
+VRAM LEDGER hcs_evict_prefill_deficit prompt_tokens=14 deficit_mb=1740.0 soft_chunks_loaded=106 soft_slots_per_chunk=27 soft_slot_mb=4.641
+VRAM LEDGER hcs_evict_prefill_result prompt_tokens=14 evicted=378 freed_mb=1754.2 chunks_dropped=14 total_chunks=106 elapsed_ms=11.2 free_after_mb=3362 soft_cached_after=2484 soft_chunks_loaded_after=92
+VRAM LEDGER hcs_evict_prefill prompt_tokens=14 capped_tokens=128 free_mb=3362 base_needed_mb=3338 hqq_prefill_growth_mb=0 needed_mb=3338 soft_cached=2484 soft_slots=3051 soft_slot_mb=4.641 soft_chunks_loaded=92 soft_total_chunks=113 hard_budget_mb=0 soft_max_mb=14158 safety_mb=600
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=14 total_ms=0.5 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.1 hqq_swap_ms=0.4 has_hqq=true hqq_growth_mb=0.0 evicted=0 freed_mb=0.0
+VRAM LEDGER prefill_prepare_budget prompt_tokens=14 free_mb=3362 total_mb=32119 safety_mb=600 fixed_scratch_mb=308.3 per_tok_kb=756.5 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=2368.0 cold_staging_reserve_mb=1188.0 post_scratch_runtime_reserve_mb=2368.0 scratch_budget_mb=394.6 target_tokens=14 max_by_vram=128 chosen_scratch_tokens=128 hcs_cached_experts=2477 hcs_stride=256 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=128 prompt_tokens=14 pre_alloc_free_mb=3362 post_alloc_free_mb=2974 actual_alloc_mb=388.0 estimated_scratch_mb=458.4 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=1.5 shared_fp32_mb=1.5 fp32_scratch_mb=42.5 kv_cross_floor_mb=0.0
+VRAM LEDGER prefill_ready prompt_tokens=14 scratch_tokens=128 scratch_mb=458.4 post_alloc_free_mb=2974 safety_mb=600 optional_pinning_budget_mb=None pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_pinning_budget prompt_tokens=14 post_alloc_free_mb=2974 required_post_scratch_mb=Some(2758) result_mb=Some(216)
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=true pinning_disabled=false optional_pinning_budget_mb=Some(216) pinning_active=false pinning_pool_mb=0.0 prescan_layers=48 hcs_cached_experts=2477 hcs_stride=256 scratch_tokens=128 chunk_size=14 num_chunks=1 chunk_plan=[14]
+VRAM LEDGER prefill_prescan tokens=14 active_layers=48 avg_active_experts_per_layer=58.5 dense_active=false pinned_per_layer=0 pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER hcs_evict_prefill_post_scratch prompt_tokens=14 free_mb=2974 required_mb=2758 deficit_mb=0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=0.6 hqq_swap_ms=0.0 hqq_refresh_ms=0.5 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+  [32mprefill: 14 tokens in 0.41s (33.9 tok/s)  VRAM: 3138 MB free now, 2782 MB min free during prefill[0m
+  [32mdecode: 7 tokens in 0.30s (23.3 tok/s)  VRAM: 1094 MB free now, 870 MB min free during decode[0m
+  [36mDynamic HCS: hit=67.41% tail=768/384 protected=2202 promotions=6912 evictions=6912 request_promotions=768/768 budget_skips=121106 no_slot=0 copy_failures=0[0m
+VRAM LEDGER hcs_evict_prefill prompt_tokens=61 capped_tokens=128 free_mb=1094 base_needed_mb=3338 hqq_prefill_growth_mb=0 needed_mb=3338 soft_cached=2970 soft_slots=3051 soft_slot_mb=4.641 soft_chunks_loaded=110 soft_total_chunks=113 hard_budget_mb=0 soft_max_mb=14158 safety_mb=600
+VRAM LEDGER hcs_evict_prefill_deficit prompt_tokens=61 deficit_mb=2244.0 soft_chunks_loaded=110 soft_slots_per_chunk=27 soft_slot_mb=4.641
+VRAM LEDGER hcs_evict_prefill_result prompt_tokens=61 evicted=486 freed_mb=2255.3 chunks_dropped=18 total_chunks=110 elapsed_ms=8.2 free_after_mb=3362 soft_cached_after=2484 soft_chunks_loaded_after=92
+VRAM LEDGER hcs_evict_prefill prompt_tokens=61 capped_tokens=128 free_mb=3362 base_needed_mb=3338 hqq_prefill_growth_mb=0 needed_mb=3338 soft_cached=2484 soft_slots=3051 soft_slot_mb=4.641 soft_chunks_loaded=92 soft_total_chunks=113 hard_budget_mb=0 soft_max_mb=14158 safety_mb=600
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=61 total_ms=0.1 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=0.0 has_hqq=true hqq_growth_mb=0.0 evicted=0 freed_mb=0.0
+VRAM LEDGER prefill_prepare_budget prompt_tokens=61 free_mb=3364 total_mb=32119 safety_mb=600 fixed_scratch_mb=308.3 per_tok_kb=756.5 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=2368.0 cold_staging_reserve_mb=1188.0 post_scratch_runtime_reserve_mb=2368.0 scratch_budget_mb=396.6 target_tokens=61 max_by_vram=128 chosen_scratch_tokens=128 hcs_cached_experts=2468 hcs_stride=256 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=128 prompt_tokens=61 pre_alloc_free_mb=3364 post_alloc_free_mb=2972 actual_alloc_mb=392.0 estimated_scratch_mb=458.4 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=1.5 shared_fp32_mb=1.5 fp32_scratch_mb=42.5 kv_cross_floor_mb=0.1
+VRAM LEDGER prefill_ready prompt_tokens=61 scratch_tokens=128 scratch_mb=458.4 post_alloc_free_mb=2972 safety_mb=600 optional_pinning_budget_mb=None pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_pinning_budget prompt_tokens=61 post_alloc_free_mb=2972 required_post_scratch_mb=Some(2758) result_mb=Some(214)
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=true pinning_disabled=false optional_pinning_budget_mb=Some(214) pinning_active=false pinning_pool_mb=0.0 prescan_layers=48 hcs_cached_experts=2468 hcs_stride=256 scratch_tokens=128 chunk_size=61 num_chunks=1 chunk_plan=[61]
+VRAM LEDGER prefill_prescan tokens=61 active_layers=48 avg_active_experts_per_layer=164.0 dense_active=false pinned_per_layer=0 pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER hcs_evict_prefill_post_scratch prompt_tokens=61 free_mb=2972 required_mb=2758 deficit_mb=0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=0.3 hqq_swap_ms=0.0 hqq_refresh_ms=0.2 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+  [32mprefill: 61 tokens in 0.84s (72.3 tok/s)  VRAM: 2660 MB free now, 2300 MB min free during prefill[0m
+  [32mdecode: 49 tokens in 2.18s (22.5 tok/s)  VRAM: 1474 MB free now, 770 MB min free during decode[0m
+  [36mDynamic HCS: hit=64.25% tail=768/384 protected=2121 promotions=7680 evictions=7680 request_promotions=768/768 budget_skips=127064 no_slot=0 copy_failures=0[0m
+VRAM LEDGER hcs_evict_prefill prompt_tokens=66 capped_tokens=128 free_mb=1474 base_needed_mb=3338 hqq_prefill_growth_mb=0 needed_mb=3338 soft_cached=2889 soft_slots=3051 soft_slot_mb=4.641 soft_chunks_loaded=107 soft_total_chunks=113 hard_budget_mb=0 soft_max_mb=14158 safety_mb=600
+VRAM LEDGER hcs_evict_prefill_deficit prompt_tokens=66 deficit_mb=1864.0 soft_chunks_loaded=107 soft_slots_per_chunk=27 soft_slot_mb=4.641
+VRAM LEDGER hcs_evict_prefill_result prompt_tokens=66 evicted=405 freed_mb=1879.5 chunks_dropped=15 total_chunks=107 elapsed_ms=6.9 free_after_mb=3364 soft_cached_after=2484 soft_chunks_loaded_after=92
+VRAM LEDGER hcs_evict_prefill prompt_tokens=66 capped_tokens=128 free_mb=3364 base_needed_mb=3338 hqq_prefill_growth_mb=0 needed_mb=3338 soft_cached=2484 soft_slots=3051 soft_slot_mb=4.641 soft_chunks_loaded=92 soft_total_chunks=113 hard_budget_mb=0 soft_max_mb=14158 safety_mb=600
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=66 total_ms=0.1 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=0.0 has_hqq=true hqq_growth_mb=0.0 evicted=0 freed_mb=0.0
+VRAM LEDGER prefill_prepare_budget prompt_tokens=66 free_mb=3364 total_mb=32119 safety_mb=600 fixed_scratch_mb=308.3 per_tok_kb=756.5 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=2368.0 cold_staging_reserve_mb=1188.0 post_scratch_runtime_reserve_mb=2368.0 scratch_budget_mb=396.6 target_tokens=66 max_by_vram=128 chosen_scratch_tokens=128 hcs_cached_experts=2473 hcs_stride=256 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=128 prompt_tokens=66 pre_alloc_free_mb=3364 post_alloc_free_mb=2972 actual_alloc_mb=392.0 estimated_scratch_mb=458.4 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=1.5 shared_fp32_mb=1.5 fp32_scratch_mb=42.5 kv_cross_floor_mb=0.1
+VRAM LEDGER prefill_ready prompt_tokens=66 scratch_tokens=128 scratch_mb=458.4 post_alloc_free_mb=2972 safety_mb=600 optional_pinning_budget_mb=None pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_pinning_budget prompt_tokens=66 post_alloc_free_mb=2972 required_post_scratch_mb=Some(2758) result_mb=Some(214)
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=true pinning_disabled=false optional_pinning_budget_mb=Some(214) pinning_active=false pinning_pool_mb=0.0 prescan_layers=48 hcs_cached_experts=2473 hcs_stride=256 scratch_tokens=128 chunk_size=66 num_chunks=1 chunk_plan=[66]
+VRAM LEDGER prefill_prescan tokens=66 active_layers=48 avg_active_experts_per_layer=171.3 dense_active=false pinned_per_layer=0 pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER hcs_evict_prefill_post_scratch prompt_tokens=66 free_mb=2972 required_mb=2758 deficit_mb=0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=0.3 hqq_swap_ms=0.0 hqq_refresh_ms=0.2 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+  [32mprefill: 66 tokens in 0.89s (74.3 tok/s)  VRAM: 2628 MB free now, 2268 MB min free during prefill[0m
+  [32mdecode: 99 tokens in 4.55s (21.7 tok/s)  VRAM: 1600 MB free now, 864 MB min free during decode[0m
+  [36mDynamic HCS: hit=62.55% tail=768/384 protected=2094 promotions=8448 evictions=8448 request_promotions=768/768 budget_skips=140534 no_slot=0 copy_failures=0[0m
+VRAM LEDGER hcs_evict_prefill prompt_tokens=61 capped_tokens=128 free_mb=1600 base_needed_mb=3338 hqq_prefill_growth_mb=0 needed_mb=3338 soft_cached=2862 soft_slots=3051 soft_slot_mb=4.641 soft_chunks_loaded=106 soft_total_chunks=113 hard_budget_mb=0 soft_max_mb=14158 safety_mb=600
+VRAM LEDGER hcs_evict_prefill_deficit prompt_tokens=61 deficit_mb=1738.0 soft_chunks_loaded=106 soft_slots_per_chunk=27 soft_slot_mb=4.641
+VRAM LEDGER hcs_evict_prefill_result prompt_tokens=61 evicted=378 freed_mb=1754.2 chunks_dropped=14 total_chunks=106 elapsed_ms=6.4 free_after_mb=3364 soft_cached_after=2484 soft_chunks_loaded_after=92
+VRAM LEDGER hcs_evict_prefill prompt_tokens=61 capped_tokens=128 free_mb=3364 base_needed_mb=3338 hqq_prefill_growth_mb=0 needed_mb=3338 soft_cached=2484 soft_slots=3051 soft_slot_mb=4.641 soft_chunks_loaded=92 soft_total_chunks=113 hard_budget_mb=0 soft_max_mb=14158 safety_mb=600
+RUNTIME_STAGE_BREAKDOWN phase=prefill prompt_tokens=61 total_ms=0.1 boundary_sync_ms=0.0 marlin_swap_ms=0.0 hcs_evict_ms=0.0 hqq_swap_ms=0.0 has_hqq=true hqq_growth_mb=0.0 evicted=0 freed_mb=0.0
+VRAM LEDGER prefill_prepare_budget prompt_tokens=61 free_mb=3360 total_mb=32119 safety_mb=600 fixed_scratch_mb=308.3 per_tok_kb=756.5 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=2368.0 cold_staging_reserve_mb=1188.0 post_scratch_runtime_reserve_mb=2368.0 scratch_budget_mb=392.6 target_tokens=61 max_by_vram=128 chosen_scratch_tokens=128 hcs_cached_experts=2474 hcs_stride=256 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=128 prompt_tokens=61 pre_alloc_free_mb=3360 post_alloc_free_mb=2976 actual_alloc_mb=384.0 estimated_scratch_mb=458.4 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=1.5 shared_fp32_mb=1.5 fp32_scratch_mb=42.5 kv_cross_floor_mb=0.1
+VRAM LEDGER prefill_ready prompt_tokens=61 scratch_tokens=128 scratch_mb=458.4 post_alloc_free_mb=2976 safety_mb=600 optional_pinning_budget_mb=None pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_pinning_budget prompt_tokens=61 post_alloc_free_mb=2976 required_post_scratch_mb=Some(2758) result_mb=Some(218)
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=true pinning_disabled=false optional_pinning_budget_mb=Some(218) pinning_active=false pinning_pool_mb=0.0 prescan_layers=48 hcs_cached_experts=2474 hcs_stride=256 scratch_tokens=128 chunk_size=61 num_chunks=1 chunk_plan=[61]
+VRAM LEDGER prefill_prescan tokens=61 active_layers=48 avg_active_experts_per_layer=166.3 dense_active=false pinned_per_layer=0 pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER hcs_evict_prefill_post_scratch prompt_tokens=61 free_mb=2976 required_mb=2758 deficit_mb=0
+RUNTIME_STAGE_BREAKDOWN phase=decode total_ms=0.3 hqq_swap_ms=0.0 hqq_refresh_ms=0.2 graph_invalidate_ms=0.0 simple_swap_ms=0.0 has_hqq=true pointers_changed=false
+  [32mprefill: 61 tokens in 0.88s (69.1 tok/s)  VRAM: 2594 MB free now, 1632 MB min free during prefill[0m
+  [32mdecode: 249 tokens in 12.49s (19.9 tok/s)  VRAM: 1598 MB free now, 830 MB min free during decode[0m
+  [36mDynamic HCS: hit=56.14% tail=768/384 protected=2094 promotions=9216 evictions=9216 request_promotions=768/768 budget_skips=181699 no_slot=0 copy_failures=0[0m
+   50 tokens: 40.26 tok/s (3.14s total)
+  100 tokens: 27.73 tok/s (5.54s total)
+  250 tokens: 21.56 tok/s (13.48s total)
+  [1mBest: 40.26 tok/s[0m
+
+[1m[36m▸ Writing results[0m
+
+[1m[32mBENCHMARK COMPLETE[0m
+  Model:                 [1mQwen3.5-122B-A10B[0m
+  Config:                INT4/4 HQQ6 KV=k4v4 1 GPU
+  Prefill (internal):    [32m[1m3,727.8 tok/s[0m  (best of 1K/5K/10K/20K/35K/50K)
+  Decode (internal):     [32m[1m22.31 tok/s[0m  (best of 50/100/250)
+  Round trip (network):  [32m[1m40.26 tok/s[0m  (best of 50/100/250)
+  HCS coverage:          2862/12288 (23.3%)
+  Min free VRAM:         830 MB
+  Log:     [2mlogs/dev-benchmark_20260605_001459/benchmark_report.log[0m
+
+[0;36m[1m=>[0m Benchmark log saved: /home/main/Documents/Claude/krasis/logs/dev-benchmark_20260605_001459/benchmark_stdout.log
+KRASIS_HQQ_DUAL_STAGE_DIAG_EXIT=0

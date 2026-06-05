@@ -2,6 +2,56 @@
 
 ## Unreleased
 
+- Hardened Typhon/16GB startup and CUDA-fault safety. HCS startup now keeps one
+  measured soft-tier chunk of headroom above the calibrated decode idle floor,
+  and server startup gates `KRASIS SERVER READY` on bounded measured
+  drain-and-resample checks after VRAM monitor warnings are enabled. If the
+  configured safety floor cannot be restored, startup fails visibly instead of
+  publishing an unsafe server. CUDA `ILLEGAL_ADDRESS` in prefill/scratch
+  release or source-mode HCS boundary sync now exits the process immediately,
+  because the CUDA context is poisoned and cannot be recovered by further HCS
+  evictions. Validation: `./dev build` passed.
+- Hardened request-time VRAM pressure recovery for external VRAM consumers on
+  Typhon. Calibration extrapolation now continues the measured slope for prompts
+  beyond the long probe instead of clamping at 1.5x, HCS prefill eviction uses
+  the actual request token count instead of a 50K cap, minimum-chunk scratch
+  allocation fails visibly if the measured post-allocation floor still cannot
+  be met, and chat request entry drains pending HCS pressure before tokenization
+  or prefill work. The VRAM monitor now records below-critical-floor pressure
+  as an immediate drain event rather than exiting solely because an external
+  process temporarily consumed VRAM; CUDA illegal-address errors remain fatal.
+  Validation: `./dev build` passed with CPython 3.12 packaging for Typhon.
+  Typhon stress with a separate CUDA process holding `768 MB` during a
+  `64,125`-token prompt completed with HTTP 200, prefill `3610.4 tok/s`, decode
+  `29.7 tok/s`, prefill min free `1902 MB`, decode min free `2646 MB`, and
+  `copy_failures=0` on an `800 MB` safety margin. A post-pressure small prompt
+  completed with decode `54.5 tok/s`, decode min free `918 MB`, and
+  `copy_failures=0`.
+- Reduced Q122B prefill scratch for fused MoE by sizing the routed/shared
+  accumulator as `[tokens, hidden]` FP32 instead of routing-width scratch.
+  The fused Marlin reduction scratch is already provided by `d_fp32_scratch`,
+  so `d_moe_accum` only needs to hold the final per-token accumulator. The
+  exact estimator, coarse startup budget, and actual scratch allocator were
+  updated together.
+- Validation: `./dev build` passed. Instrumented Q122B HQQ6/k4v4 diagnostic
+  completed with a clean health scan, raised the measured-safe long calibration
+  probe to `19268` tokens, and made the `20K` diagnostic row one chunk at
+  `4737 tok/s`. Clean timing-off
+  `./dev benchmark tests/q122b-k4v4-hqq6-int4-benchmark.conf` produced
+  `3900.5 tok/s` internal prefill, `27.78 tok/s` internal decode, and
+  `45.98 tok/s` HTTP with `4050/12288` HCS, `806 MB` minimum free VRAM, and no
+  CUDA errors, VRAM monitor warnings, hard-floor exits, or HCS copy failures.
+- Added env-gated request/runtime-stage prefill breakdown diagnostics. The
+  diagnostic showed `20K` Q122B core prefill was already close to the old fast
+  path (`4156 ms` body time), while the broader request window still paid
+  about `1.2 s` in HQQ prefill/decode stage copies. Tested and rejected two
+  HQQ-stage optimizations: dual-stage residency removed the copy but consumed
+  about `4.9 GB` extra VRAM, reduced HCS to `2862/12288`, and regressed
+  decode/HTTP; async copy-stream scheduling did not improve stage-copy time.
+  After removing those rejected paths, a clean timing-off Q122B benchmark
+  produced `3796.8 tok/s` internal prefill, `28.98 tok/s` internal decode, and
+  `46.71 tok/s` HTTP with `4050/12288` HCS, `772 MB` minimum free VRAM, and a
+  clean CUDA/VRAM/HCS health scan.
 - Improved measured-safe Q122B prefill chunk sizing. After startup calibration
   measures the post-scratch runtime low-water delta, prefill scratch planning
   now uses that measured reserve directly instead of adding a second full

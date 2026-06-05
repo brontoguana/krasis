@@ -405,7 +405,17 @@ class KrasisBenchmark:
         messages_json = json.dumps(messages)
         result_json = self.rust_server.benchmark_request(
             messages_json, max_new_tokens, temperature, False)
-        return json.loads(result_json)
+        result = json.loads(result_json)
+        if os.environ.get("KRASIS_BENCHMARK_PREFILL_BREAKDOWN"):
+            breakdown = result.get("prefill_breakdown")
+            if breakdown is not None:
+                print("BENCH_PREFILL_BREAKDOWN_JSON " + json.dumps({
+                    "prompt_tokens": result.get("prompt_tokens"),
+                    **breakdown,
+                }, sort_keys=True))
+            else:
+                print("BENCH_PREFILL_BREAKDOWN_MISSING")
+        return result
 
     # ──────────────────────────────────────────────────────────
     # Round trip (network) measurement

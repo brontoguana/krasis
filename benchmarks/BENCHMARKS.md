@@ -14,6 +14,9 @@ These were instrumented diagnostics on `main` at `4a40cca`, using
 | Q122B current-main component timing, `KRASIS_NO_PINNING=1` | off | 3032.4 | 27.91 | 50.34 | 4077/12288 (33.2%) | 646 MB | one warning: 598 MB free during warmup | [full log](20260604_q122b_hqq6_k4v4_current_main_no_pinning_component_timing.log), [report](20260604_q122b_hqq6_k4v4_current_main_no_pinning_component_timing_report.log), [server log](20260604_q122b_hqq6_k4v4_current_main_no_pinning_component_timing_krasis.log) |
 | Q122B tail smoothing + dense-active pinning skip + post-scratch floor | adaptive | 2992.1 | 28.27 | 49.45 | 4077/12288 (33.2%) | 678 MB | clean | [full log](20260604_2015_q122b_hqq6_k4v4_tail_dense_floor_component_timing.log), [report](20260604_q122b_hqq6_k4v4_tail_dense_floor_component_timing_report.log), [server log](20260604_q122b_hqq6_k4v4_tail_dense_floor_component_timing_krasis.log) |
 | Q122B measured post-scratch reserve | adaptive | 3401.7 | 28.31 | 48.47 | 4050/12288 (33.0%) | 776 MB | clean | [full log](20260604_q122b_hqq6_k4v4_post_scratch_reserve_diag.log) |
+| Q122B MoE accumulator scratch shrink | adaptive | 3304.1 | 27.60 | 49.84 | 4050/12288 (33.0%) | 772 MB | clean | [full log](20260604_q122b_hqq6_k4v4_moe_accum_shrink_diag.log) |
+| Q122B HQQ runtime-stage breakdown | adaptive | 3653.6 | 27.75 | 49.34 | 4050/12288 (33.0%) | 806 MB | clean | [full log](20260604_q122b_hqq6_k4v4_runtime_stage_breakdown_diag.log), [report](20260604_q122b_hqq6_k4v4_runtime_stage_breakdown_diag_report.log), [server log](20260604_q122b_hqq6_k4v4_runtime_stage_breakdown_diag_krasis.log) |
+| Q122B HQQ dual-stage residency experiment | adaptive | 3727.8 | 22.31 | 40.26 | 2862/12288 (23.3%) | 830 MB | clean; rejected | [full log](20260605_q122b_hqq6_k4v4_hqq_dual_stage_diag.log), [report](20260605_q122b_hqq6_k4v4_hqq_dual_stage_diag_report.log), [server log](20260605_q122b_hqq6_k4v4_hqq_dual_stage_diag_krasis.log) |
 
 Findings:
 - The no-HCS long calibration chunk still reaches the old speed class:
@@ -38,6 +41,21 @@ Findings:
   that measured reserve instead of adding a second full cold-staging reserve
   after calibration. In the diagnostic, `35K` improved to `18245 + 16755`
   chunks and `50K` improved to `18054 + 18054 + 13892`, with no safety warning.
+- The MoE accumulator scratch shrink row sized the routed/shared output
+  accumulator as `[tokens, hidden]` FP32 instead of routing-width scratch.
+  The fused Marlin reduction scratch is already covered by `d_fp32_scratch`.
+  This raised the measured-safe calibration probe to `19268` tokens and made
+  the `20K` diagnostic row one chunk at `4737 tok/s`, but 35K/50K still paid
+  multi-chunk MoE/DMA overhead.
+- The HQQ runtime-stage breakdown showed the remaining request-boundary cost:
+  `20K` spent `561 ms` preparing prefill and `663 ms` restoring decode, almost
+  entirely HQQ stage copies. The core `20K` prefill body was `4156 ms`, close
+  to the old May 3 fast path, but the broader request window was `5474 ms`.
+- The HQQ dual-stage residency experiment removed those HQQ boundary copies
+  after initial installation, but required about `4.9 GB` persistent extra HQQ
+  residency, reduced HCS from `4050` to `2862` experts, and regressed decode
+  and HTTP. It is rejected as a default optimization because it spends too much
+  VRAM and weakens the HCS/safety tradeoff.
 
 ---
 
@@ -52,6 +70,8 @@ Timing instrumentation was disabled. Both rows used
 | Q122B tail smoothing + dense-active pinning skip, before reload guard | 3106.2 | 28.62 | 48.78 | 4077/12288 (33.2%) | 648 MB | one warning: 598 MB free during warmup | [full log](20260604_2055_q122b_hqq6_k4v4_tail_dense_floor_clean_benchmark.log), [report](20260604_q122b_hqq6_k4v4_tail_dense_floor_clean_benchmark_report.log), [server log](20260604_q122b_hqq6_k4v4_tail_dense_floor_clean_benchmark_krasis.log) |
 | Q122B tail smoothing + dense-active pinning skip + reload guard | 3238.3 | 27.21 | 47.04 | 4050/12288 (33.0%) | 804 MB | clean | [full log](20260604_2004_q122b_hqq6_k4v4_tail_dense_reload_guard_clean_benchmark.log), [report](20260604_q122b_hqq6_k4v4_tail_dense_reload_guard_clean_benchmark_report.log), [server log](20260604_q122b_hqq6_k4v4_tail_dense_reload_guard_clean_benchmark_krasis.log) |
 | Q122B measured post-scratch runtime reserve | 3608.7 | 27.76 | 47.99 | 4050/12288 (33.0%) | 806 MB | clean | [full log](20260604_q122b_hqq6_k4v4_post_scratch_reserve_clean.log), [report](20260604_q122b_hqq6_k4v4_post_scratch_reserve_clean_report.log), [server log](20260604_q122b_hqq6_k4v4_post_scratch_reserve_clean_krasis.log) |
+| Q122B MoE accumulator scratch shrink | 3900.5 | 27.78 | 45.98 | 4050/12288 (33.0%) | 806 MB | clean | [full log](20260604_q122b_hqq6_k4v4_moe_accum_shrink_clean.log), [stdout](20260604_q122b_hqq6_k4v4_moe_accum_shrink_clean_stdout.log), [report](20260604_q122b_hqq6_k4v4_moe_accum_shrink_clean_report.log), [server log](20260604_q122b_hqq6_k4v4_moe_accum_shrink_clean_krasis.log) |
+| Q122B post rejected HQQ-stage experiments | 3796.8 | 28.98 | 46.71 | 4050/12288 (33.0%) | 772 MB | clean | [full log](20260605_q122b_hqq6_k4v4_post_reject_clean.log), [stdout](20260605_q122b_hqq6_k4v4_post_reject_clean_stdout.log), [report](20260605_q122b_hqq6_k4v4_post_reject_clean_report.log), [server log](20260605_q122b_hqq6_k4v4_post_reject_clean_krasis.log) |
 
 Notes:
 - The first timing-off run improved prefill but still dipped to `598 MB`, below
@@ -67,6 +87,18 @@ Notes:
   `3608.7 tok/s` (`+11.4%`). It remains below the old May 3 Q122B anchor
   (`4880.4 tok/s`) because `20K` still cannot run as one measured-safe chunk
   and dense multi-pass prefill still pays repeated all-expert cold-staging work.
+- The MoE accumulator scratch shrink keeps the same HCS coverage and minimum
+  free VRAM while raising best clean prefill from `3608.7` to `3900.5 tok/s`
+  (`+8.1%`). The `20K` row improved from `2601.9` to `3801.7 tok/s`, showing
+  the single-chunk path is restored safely for that size. The remaining gap to
+  the May 3 anchor is mostly long-prompt multi-chunk MoE/DMA overhead and
+  per-request fixed overhead on 1K/5K/10K rows.
+- The post-rejection clean row confirms the tree after removing the HQQ
+  dual-residency and async-copy experiments still preserves the accepted
+  scratch improvements and safety behavior. It is slightly below the first
+  MoE accumulator clean row on prefill, but remains above the measured
+  post-scratch-reserve row and kept `772 MB` minimum free VRAM with a clean
+  health scan.
 
 ---
 

@@ -16,7 +16,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const VRAM_HARD_EXIT_FLOOR_MB: u64 = 125;
-const VRAM_HARD_EXIT_CODE: i32 = 137;
+pub const CUDA_CONTEXT_POISONED_EXIT_CODE: i32 = 138;
 const PRESSURE_DEVICE_SLOTS: usize = u64::BITS as usize;
 
 #[derive(Clone, Copy, Debug)]
@@ -82,6 +82,22 @@ pub fn pressure_pending(device_id: i32) -> Option<VramPressure> {
         safety_margin_mb: PRESSURE_MARGIN_MB[slot].load(Ordering::Relaxed),
         deficit_mb: PRESSURE_DEFICIT_MB[slot].load(Ordering::Relaxed),
     })
+}
+
+pub fn fatal_cuda_context_error(context: &str, err: &str) -> ! {
+    log::error!(
+        "Fatal CUDA context error in {}: {}. Exiting because the CUDA context is unsafe to continue.",
+        context,
+        err,
+    );
+    eprintln!(
+        "\x1b[1;31mKRASIS FATAL: CUDA context error in {}: {}. Exiting; restart Krasis to recover.\x1b[0m",
+        context,
+        err,
+    );
+    unsafe {
+        libc::_exit(CUDA_CONTEXT_POISONED_EXIT_CODE);
+    }
 }
 
 // CUDA runtime function signatures (resolved via dlsym)
@@ -589,24 +605,18 @@ impl VramMonitor {
                                     let margin_mb =
                                         safety_margin.load(Ordering::Relaxed) / (1024 * 1024);
                                     append_safety_limit_dump(
-                                        "hard_exit_floor",
+                                        "critical_low_floor",
                                         dev.device_id,
                                         free_mb,
                                         margin_mb,
                                         margin_mb.saturating_sub(free_mb),
                                     );
                                     eprintln!(
-                                        "\x1b[1;31mVRAM MONITOR: cuda:{} free VRAM dropped to {} MB, below hard exit floor {} MB. Exiting.\x1b[0m",
+                                        "\x1b[1;31mVRAM MONITOR: cuda:{} free VRAM dropped to {} MB, below critical floor {} MB. Marking pressure for immediate HCS drain.\x1b[0m",
                                         dev.device_id,
                                         free_mb,
                                         VRAM_HARD_EXIT_FLOOR_MB,
                                     );
-                                    // The hard floor means CUDA is already in an unsafe
-                                    // low-memory state. Avoid libc/Python/CUDA atexit
-                                    // cleanup here; on WSL this has crashed in cuBLASLt.
-                                    unsafe {
-                                        libc::_exit(VRAM_HARD_EXIT_CODE);
-                                    }
                                 }
 
                                 // Warn on new lows below safety margin (when enabled).
