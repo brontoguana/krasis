@@ -174,13 +174,110 @@ extern "C" void krasis_fused_add_rmsnorm_batched(
         (const __nv_bfloat16*)x, (const __nv_bfloat16*)weight, D, eps);
 }
 
+extern "C" __global__ void add_bf16_batched_kernel(
+    __nv_bfloat16* __restrict__ out,
+    const __nv_bfloat16* __restrict__ a,
+    const __nv_bfloat16* __restrict__ b,
+    int D)
+{
+    int token = blockIdx.x;
+    const __nv_bfloat16* a_row = a + (int64_t)token * D;
+    const __nv_bfloat16* b_row = b + (int64_t)token * D;
+    __nv_bfloat16* o_row = out + (int64_t)token * D;
+    for (int i = threadIdx.x; i < D; i += blockDim.x) {
+        o_row[i] = float_to_bf16(bf16_to_float(a_row[i]) + bf16_to_float(b_row[i]));
+    }
+}
+
+extern "C" __global__ void scale_bf16_batched_kernel(
+    __nv_bfloat16* __restrict__ out,
+    const __nv_bfloat16* __restrict__ x,
+    float scale,
+    int D)
+{
+    int token = blockIdx.x;
+    const __nv_bfloat16* x_row = x + (int64_t)token * D;
+    __nv_bfloat16* o_row = out + (int64_t)token * D;
+    for (int i = threadIdx.x; i < D; i += blockDim.x) {
+        o_row[i] = float_to_bf16(bf16_to_float(x_row[i]) * scale);
+    }
+}
+
+extern "C" __global__ void scale_bf16_by_ptr_batched_kernel(
+    __nv_bfloat16* __restrict__ out,
+    const __nv_bfloat16* __restrict__ x,
+    const __nv_bfloat16* __restrict__ scale_ptr,
+    int D)
+{
+    int token = blockIdx.x;
+    const float scale = scale_ptr ? bf16_to_float(scale_ptr[0]) : 1.0f;
+    const __nv_bfloat16* x_row = x + (int64_t)token * D;
+    __nv_bfloat16* o_row = out + (int64_t)token * D;
+    for (int i = threadIdx.x; i < D; i += blockDim.x) {
+        o_row[i] = float_to_bf16(bf16_to_float(x_row[i]) * scale);
+    }
+}
+
+extern "C" __global__ void apply_topk_per_expert_scale_kernel(
+    float* __restrict__ topk_weights,
+    const int* __restrict__ topk_ids,
+    const __nv_bfloat16* __restrict__ per_expert_scale,
+    int total)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= total || per_expert_scale == nullptr) return;
+    int eid = topk_ids[i];
+    if (eid >= 0) {
+        topk_weights[i] *= bf16_to_float(per_expert_scale[eid]);
+    }
+}
+
+extern "C" __global__ void rmsnorm_scale_batched_kernel(
+    __nv_bfloat16* __restrict__ out,
+    const __nv_bfloat16* __restrict__ x,
+    const __nv_bfloat16* __restrict__ scale_weight,
+    float scale,
+    int D,
+    float eps)
+{
+    int token = blockIdx.x;
+    const __nv_bfloat16* x_row = x + (int64_t)token * D;
+    __nv_bfloat16* o_row = out + (int64_t)token * D;
+
+    extern __shared__ float smem[];
+
+    float local_ss = 0.0f;
+    for (int i = threadIdx.x; i < D; i += blockDim.x) {
+        float v = bf16_to_float(x_row[i]);
+        local_ss += v * v;
+    }
+    smem[threadIdx.x] = local_ss;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) smem[threadIdx.x] += smem[threadIdx.x + s];
+        __syncthreads();
+    }
+
+    float rms_inv = rsqrtf(smem[0] / (float)D + eps);
+
+    for (int i = threadIdx.x; i < D; i += blockDim.x) {
+        float v = bf16_to_float(x_row[i]) * rms_inv * scale;
+        if (scale_weight != nullptr) {
+            v *= bf16_to_float(scale_weight[i]);
+        }
+        o_row[i] = float_to_bf16(v);
+    }
+}
+
 /* ── Embedding Lookup ──────────────────────────────────────────────────── */
 
 extern "C" __global__ void embedding_batched_kernel(
     __nv_bfloat16* __restrict__ out,
     const __nv_bfloat16* __restrict__ table,
     const int* __restrict__ token_ids,
-    int D)
+    int D,
+    float scale)
 {
     int token = blockIdx.x;
     int tid = token_ids[token];
@@ -188,20 +285,20 @@ extern "C" __global__ void embedding_batched_kernel(
     __nv_bfloat16* dst = out + (int64_t)token * D;
 
     for (int i = threadIdx.x; i < D; i += blockDim.x) {
-        dst[i] = src[i];
+        dst[i] = float_to_bf16(bf16_to_float(src[i]) * scale);
     }
 }
 
 extern "C" void krasis_embedding_batched(
     void* out, const void* table, const void* token_ids,
-    int M, int D, void* stream)
+    int M, int D, float scale, void* stream)
 {
     if (M == 0) return;
     int threads = min(1024, D);
     threads = ((threads + 31) / 32) * 32;
     embedding_batched_kernel<<<M, threads, 0, (cudaStream_t)stream>>>(
         (__nv_bfloat16*)out, (const __nv_bfloat16*)table,
-        (const int*)token_ids, D);
+        (const int*)token_ids, D, scale);
 }
 
 /* ── HQQ4 Dequant ─────────────────────────────────────────────────────── */
@@ -700,6 +797,61 @@ extern "C" __global__ void rope_batched_kernel(
     }
 }
 
+/* Apply RoPE with the HuggingFace rotate_half layout:
+ * rotate_half([x0..xH-1, y0..yH-1]) = [-y0..-yH-1, x0..xH-1].
+ * Gemma4 uses this layout for text RoPE. The existing rope_batched_kernel is
+ * kept for models using pairwise rotary layout.
+ */
+extern "C" __global__ void rope_batched_half_split_kernel(
+    __nv_bfloat16* __restrict__ q,
+    __nv_bfloat16* __restrict__ k,
+    const int* __restrict__ positions,
+    const float* __restrict__ cos_cache,
+    const float* __restrict__ sin_cache,
+    int num_q_heads,
+    int num_kv_heads,
+    int head_dim,
+    int half_dim)
+{
+    int token = blockIdx.x;
+    int pos = positions[token];
+
+    const float* cos_row = cos_cache + (int64_t)pos * half_dim;
+    const float* sin_row = sin_cache + (int64_t)pos * half_dim;
+
+    int q_stride = num_q_heads * head_dim;
+    __nv_bfloat16* q_row = q + (int64_t)token * q_stride;
+    for (int h = 0; h < num_q_heads; h++) {
+        __nv_bfloat16* qh = q_row + h * head_dim;
+        for (int i = threadIdx.x; i < head_dim; i += blockDim.x) {
+            int src = i < half_dim ? i + half_dim : i - half_dim;
+            float x = bf16_to_float(qh[i]);
+            float r = bf16_to_float(qh[src]);
+            if (i < half_dim) r = -r;
+            int ci = i < half_dim ? i : i - half_dim;
+            float c = cos_row[ci];
+            float s = sin_row[ci];
+            qh[i] = float_to_bf16(x * c + r * s);
+        }
+    }
+
+    int k_stride = num_kv_heads * head_dim;
+    __nv_bfloat16* k_row = k + (int64_t)token * k_stride;
+    for (int h = 0; h < num_kv_heads; h++) {
+        __nv_bfloat16* kh = k_row + h * head_dim;
+        for (int i = threadIdx.x; i < head_dim; i += blockDim.x) {
+            int src = i < half_dim ? i + half_dim : i - half_dim;
+            float x = bf16_to_float(kh[i]);
+            float r = bf16_to_float(kh[src]);
+            if (i < half_dim) r = -r;
+            int ci = i < half_dim ? i : i - half_dim;
+            float c = cos_row[ci];
+            float s = sin_row[ci];
+            kh[i] = float_to_bf16(x * c + r * s);
+        }
+    }
+}
+
 /* Apply RoPE using per-token precomputed MRoPE rows.
  * Layout is identical to rope_batched_kernel, but cos/sin rows are already
  * expanded to [M, half_dim] for the current prompt chunk.
@@ -828,6 +980,84 @@ extern "C" void krasis_relu2_batched(
     threads = ((threads + 31) / 32) * 32;
     relu2_batched_kernel<<<M, threads, 0, (cudaStream_t)stream>>>(
         (__nv_bfloat16*)out, (const __nv_bfloat16*)x, N);
+}
+
+/* ── GELU(tanh approximation) + Mul ───────────────────────────────────── */
+
+extern "C" __global__ void gelu_tanh_mul_batched_kernel(
+    __nv_bfloat16* __restrict__ out,
+    const __nv_bfloat16* __restrict__ gate_up,
+    int N)
+{
+    int token = blockIdx.x;
+    int two_N = 2 * N;
+    const __nv_bfloat16* gu = gate_up + (int64_t)token * two_N;
+    __nv_bfloat16* o = out + (int64_t)token * N;
+
+    const float c = 0.7978845608028654f;
+    const float k = 0.044715f;
+    for (int i = threadIdx.x; i < N; i += blockDim.x) {
+        float gate = bf16_to_float(gu[i]);
+        float up = bf16_to_float(gu[N + i]);
+        float gelu = 0.5f * gate * (1.0f + tanhf(c * (gate + k * gate * gate * gate)));
+        o[i] = float_to_bf16(gelu * up);
+    }
+}
+
+extern "C" void krasis_gelu_tanh_mul_batched(
+    void* out, const void* gate_up,
+    int M, int N, void* stream)
+{
+    if (M == 0) return;
+    int threads = min(1024, N);
+    threads = ((threads + 31) / 32) * 32;
+    gelu_tanh_mul_batched_kernel<<<M, threads, 0, (cudaStream_t)stream>>>(
+        (__nv_bfloat16*)out, (const __nv_bfloat16*)gate_up, N);
+}
+
+extern "C" __global__ void gated_activation_split_batched_kernel(
+    __nv_bfloat16* __restrict__ out,
+    const __nv_bfloat16* __restrict__ gate,
+    const __nv_bfloat16* __restrict__ up,
+    int activation,
+    int N)
+{
+    int token = blockIdx.x;
+    const __nv_bfloat16* g_row = gate + (int64_t)token * N;
+    const __nv_bfloat16* u_row = up + (int64_t)token * N;
+    __nv_bfloat16* o_row = out + (int64_t)token * N;
+
+    const float c = 0.7978845608028654f;
+    const float k = 0.044715f;
+    for (int i = threadIdx.x; i < N; i += blockDim.x) {
+        float g = bf16_to_float(g_row[i]);
+        float u = bf16_to_float(u_row[i]);
+        float a;
+        if (activation == 2) {
+            a = 0.5f * g * (1.0f + tanhf(c * (g + k * g * g * g)));
+        } else if (activation == 1) {
+            float r = fmaxf(g, 0.0f);
+            a = r * r;
+        } else {
+            a = g / (1.0f + __expf(-g));
+        }
+        o_row[i] = float_to_bf16(a * u);
+    }
+}
+
+extern "C" void krasis_gated_activation_split_batched(
+    void* out, const void* gate, const void* up,
+    int activation, int M, int N, void* stream)
+{
+    if (M == 0) return;
+    int threads = min(1024, N);
+    threads = ((threads + 31) / 32) * 32;
+    gated_activation_split_batched_kernel<<<M, threads, 0, (cudaStream_t)stream>>>(
+        (__nv_bfloat16*)out,
+        (const __nv_bfloat16*)gate,
+        (const __nv_bfloat16*)up,
+        activation,
+        N);
 }
 
 /* ── Sigmoid-gated multiply (for gated GQA attention) ───────────────── */
@@ -1685,6 +1915,38 @@ extern "C" __global__ void kv_cache_concat_bf16_kernel(
         int64_t off = (int64_t)ti * kv_stride;
         for (int d = threadIdx.x; d < kv_stride; d += blockDim.x) {
             out[off + d] = kv_cache[off + d];
+        }
+    } else {
+        int ci = ti - cache_len;
+        if (ci < m) {
+            int64_t src_off = (int64_t)ci * kv_stride;
+            int64_t dst_off = (int64_t)ti * kv_stride;
+            for (int d = threadIdx.x; d < kv_stride; d += blockDim.x) {
+                out[dst_off + d] = kv_new[src_off + d];
+            }
+        }
+    }
+}
+
+/* Bounded FP8 KV window staging for ring-window sliding prefill.
+ * Copies only the chronological cache tail [cache_start, cache_start+cache_len)
+ * followed by the current chunk, producing [cache_len+m, kv_stride] BF16 for FA2.
+ */
+extern "C" __global__ void kv_cache_dequant_window_concat_kernel(
+    __nv_bfloat16* __restrict__ out,
+    const __nv_fp8_e4m3* __restrict__ kv_cache,
+    const __nv_bfloat16* __restrict__ kv_new,
+    int cache_start,
+    int cache_len,
+    int m,
+    int kv_stride)
+{
+    int ti = blockIdx.x;
+    if (ti < cache_len) {
+        int64_t src_off = (int64_t)(cache_start + ti) * kv_stride;
+        int64_t dst_off = (int64_t)ti * kv_stride;
+        for (int d = threadIdx.x; d < kv_stride; d += blockDim.x) {
+            out[dst_off + d] = __float2bfloat16(float(kv_cache[src_off + d]));
         }
     } else {
         int ci = ti - cache_len;
@@ -3543,10 +3805,10 @@ extern "C" __global__ void la_split_conv_output_kernel(
  */
 #include <mma.h>
 
-#define FA_BC 64    /* KV tile size */
+#define FA_BC 16    /* KV tile size; 16 keeps 512-dim Gemma heads under smem limits */
 #define FA_BR 16    /* queries per block = wmma tile M */
 #define FA_TILE 16  /* wmma tile dimension */
-#define FA_DPT 8    /* max dims per thread = ceil(256/32) */
+#define FA_DPT 16   /* max dims per thread = ceil(512/32) */
 
 __device__ __forceinline__ float fp8e4m3_to_float(__nv_fp8_e4m3 x) {
     return float(x);
@@ -3560,7 +3822,7 @@ extern "C" __global__ void flash_attn_tiled_kernel(
     const __nv_bfloat16* __restrict__ k_cur,   /* [M, kv_stride] BF16 current chunk */
     const __nv_bfloat16* __restrict__ v_cur,   /* [M, kv_stride] BF16 current chunk */
     int M, int num_q_heads, int num_kv_heads, int head_dim,
-    float softmax_scale, int start_pos, int kv_stride)
+    float softmax_scale, int start_pos, int kv_stride, int sliding_window)
 {
     int q_base = blockIdx.x * FA_BR;
     int qh = blockIdx.y;
@@ -3598,12 +3860,18 @@ extern "C" __global__ void flash_attn_tiled_kernel(
     }
     for (int i = 0; i < FA_BR * dpt; i++) O_reg[i] = 0.0f;
 
-    /* Block-level causal bound */
+    /* Block-level causal/window bounds */
     int block_last_qi = min(q_base + FA_BR - 1, M - 1);
     int block_max_kv = (q_base < M) ? (start_pos + block_last_qi + 1) : 0;
+    int block_min_kv = 0;
+    if (sliding_window > 0 && q_base < M) {
+        int first_abs_q = start_pos + q_base;
+        block_min_kv = max(0, first_abs_q - sliding_window + 1);
+        block_min_kv = (block_min_kv / FA_BC) * FA_BC;
+    }
 
     /* ══ Main loop over KV tiles ══ */
-    for (int kv_start = 0; kv_start < block_max_kv; kv_start += FA_BC) {
+    for (int kv_start = block_min_kv; kv_start < block_max_kv; kv_start += FA_BC) {
         int tile_end = min(kv_start + FA_BC, block_max_kv);
         int tile_size = tile_end - kv_start;
 
@@ -3681,7 +3949,8 @@ extern "C" __global__ void flash_attn_tiled_kernel(
             float local_max = -1e30f;
             for (int c = lane; c < FA_BC; c += 32) {
                 int abs_kv = kv_start + c;
-                if (c < tile_size && abs_kv <= abs_qi_r) {
+                int row_min_kv = (sliding_window > 0) ? max(0, abs_qi_r - sliding_window + 1) : 0;
+                if (c < tile_size && abs_kv <= abs_qi_r && abs_kv >= row_min_kv) {
                     row[c] *= softmax_scale;
                     local_max = fmaxf(local_max, row[c]);
                 } else {
@@ -4860,6 +5129,7 @@ extern "C" __global__ void kv_cache_append_k6v6_kernel(
     }
 }
 
+
 extern "C" __global__ void kv_cache_convert_fp8_to_k4v4_kernel(
     unsigned short* __restrict__ k_scale_cache,
     unsigned char* __restrict__ k_idx_cache,
@@ -4870,10 +5140,12 @@ extern "C" __global__ void kv_cache_convert_fp8_to_k4v4_kernel(
     int M,
     int kv_stride,
     int max_seq,
-    int norm_correction
+    int norm_correction,
+    int source_start_pos
 ) {
     int ti = blockIdx.x;
-    if (ti >= M || ti >= max_seq) return;
+    if (ti >= M || max_seq <= 0) return;
+    int dst_pos = (source_start_pos + ti) % max_seq;
 
     int num_blocks = kv_stride / 16;
     for (int block_idx = threadIdx.x; block_idx < num_blocks; block_idx += blockDim.x) {
@@ -4888,10 +5160,10 @@ extern "C" __global__ void kv_cache_convert_fp8_to_k4v4_kernel(
 
         unsigned char codes[16];
         float k_scale = quantize_k4_one_pass_ls_p(k_local, codes);
-        unsigned char* k_pack = k_idx_cache + (ti * num_blocks + block_idx) * 8;
+        unsigned char* k_pack = k_idx_cache + (dst_pos * num_blocks + block_idx) * 8;
         pack_k4_16_p(k_pack, codes);
         __nv_bfloat16 k_sb = __float2bfloat16(k_scale);
-        k_scale_cache[ti * num_blocks + block_idx] = *reinterpret_cast<unsigned short*>(&k_sb);
+        k_scale_cache[dst_pos * num_blocks + block_idx] = *reinterpret_cast<unsigned short*>(&k_sb);
 
         fht16_p(v_local);
         #pragma unroll
@@ -4902,7 +5174,7 @@ extern "C" __global__ void kv_cache_convert_fp8_to_k4v4_kernel(
         for (int i = 0; i < 16; i++) v_r += v_local[i] * v_local[i];
         v_r = sqrtf(v_r + 1e-12f);
         float inv_v_r = 1.0f / v_r;
-        unsigned char* v_ang = v_angles_cache + (ti * num_blocks + block_idx) * 8;
+        unsigned char* v_ang = v_angles_cache + (dst_pos * num_blocks + block_idx) * 8;
         float v_qnorm2 = 0.0f;
         #pragma unroll
         for (int i = 0; i < 8; i++) {
@@ -4917,7 +5189,7 @@ extern "C" __global__ void kv_cache_convert_fp8_to_k4v4_kernel(
             v_r = v_r / sqrtf(v_qnorm2 + 1e-12f);
         }
         __nv_bfloat16 v_rb = __float2bfloat16(v_r);
-        v_radius_cache[ti * num_blocks + block_idx] = *reinterpret_cast<unsigned short*>(&v_rb);
+        v_radius_cache[dst_pos * num_blocks + block_idx] = *reinterpret_cast<unsigned short*>(&v_rb);
     }
 }
 
@@ -4931,11 +5203,13 @@ extern "C" __global__ void kv_cache_convert_fp8_to_k6v6_kernel(
     int M,
     int kv_stride,
     int max_seq,
-    int norm_correction
+    int norm_correction,
+    int source_start_pos
 ) {
     (void)norm_correction;
     int ti = blockIdx.x;
-    if (ti >= M || ti >= max_seq) return;
+    if (ti >= M || max_seq <= 0) return;
+    int dst_pos = (source_start_pos + ti) % max_seq;
 
     int num_blocks = kv_stride / 16;
     for (int block_idx = threadIdx.x; block_idx < num_blocks; block_idx += blockDim.x) {
@@ -4950,16 +5224,16 @@ extern "C" __global__ void kv_cache_convert_fp8_to_k6v6_kernel(
 
         unsigned char codes[16];
         float k_scale = quantize_k6_one_pass_ls_p(k_local, codes);
-        unsigned char* k_pack = k_idx_cache + (ti * num_blocks + block_idx) * 12;
+        unsigned char* k_pack = k_idx_cache + (dst_pos * num_blocks + block_idx) * 12;
         pack_k6_16_p(k_pack, codes);
         __nv_bfloat16 k_sb = __float2bfloat16(k_scale);
-        k_scale_cache[ti * num_blocks + block_idx] = *reinterpret_cast<unsigned short*>(&k_sb);
+        k_scale_cache[dst_pos * num_blocks + block_idx] = *reinterpret_cast<unsigned short*>(&k_sb);
 
         float v_scale = quantize_k6_one_pass_ls_p(v_local, codes);
-        unsigned char* v_pack = v_idx_cache + (ti * num_blocks + block_idx) * 12;
+        unsigned char* v_pack = v_idx_cache + (dst_pos * num_blocks + block_idx) * 12;
         pack_k6_16_p(v_pack, codes);
         __nv_bfloat16 v_sb = __float2bfloat16(v_scale);
-        v_scale_cache[ti * num_blocks + block_idx] = *reinterpret_cast<unsigned short*>(&v_sb);
+        v_scale_cache[dst_pos * num_blocks + block_idx] = *reinterpret_cast<unsigned short*>(&v_sb);
     }
 }
 

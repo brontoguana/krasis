@@ -94,6 +94,12 @@ class TransformerLayer:
         # Layer norms (BF16)
         self.input_norm_weight = weights["norms"]["input_layernorm"]
         self.post_attn_norm_weight = weights["norms"]["post_attention_layernorm"]
+        self.pre_ffn_norm_weight = weights["norms"].get("pre_feedforward_layernorm")
+        self.post_ffn_norm_weight = weights["norms"].get("post_feedforward_layernorm")
+        self.post_ffn_norm1_weight = weights["norms"].get("post_feedforward_layernorm_1")
+        self.post_ffn_norm2_weight = weights["norms"].get("post_feedforward_layernorm_2")
+        self.pre_ffn_norm2_weight = weights["norms"].get("pre_feedforward_layernorm_2")
+        self.layer_scalar = weights["norms"].get("layer_scalar")
 
         # Attention — select backend based on layer type and attention type
         if self.layer_type == "mamba2":
@@ -132,6 +138,8 @@ class TransformerLayer:
             self.gate_weight = weights["gate"]["weight"]  # [n_experts, hidden]
             self.gate_bias = weights["gate"].get("bias")  # [n_experts] or None (GPT OSS)
             self.e_score_correction_bias = weights["gate"].get("e_score_correction_bias")
+            self.router_input_scale = weights["gate"].get("input_scale")
+            self.router_per_expert_scale = weights["gate"].get("per_expert_scale")
             self.shared_expert = weights.get("shared_expert")  # {gate_proj, up_proj, down_proj}
             # Fuse gate_proj + up_proj into single matmul to save kernel launch
             # (skip for Nemotron shared experts which have no gate_proj)
@@ -153,11 +161,13 @@ class TransformerLayer:
                 self.shared_expert.get("shared_expert_gate")
                 if self.shared_expert is not None else None
             )
-            self.dense_mlp = None
+            self.dense_mlp = weights.get("dense_mlp") if cfg.gemma4_text else None
         else:
             self.dense_mlp = weights.get("dense_mlp")
             self.gate_weight = None
             self.shared_expert = None
+            self.router_input_scale = None
+            self.router_per_expert_scale = None
 
         # Krasis CPU engine for routed experts
         self.krasis_engine = krasis_engine

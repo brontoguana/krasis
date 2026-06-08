@@ -2,6 +2,149 @@
 
 ## Unreleased
 
+- Started native Gemma4 text support on branch `gemma-dev`. Added Gemma config
+  parsing for `top_k_experts`, `hidden_activation`, full-attention head
+  geometry, `attention_k_eq_v`, and per-layer GQA helper methods; corrected the
+  Gemma test config model path casing; taught the weight loader about Gemma's
+  `router.proj`, router scale/per-expert-scale tensors, extra feed-forward
+  norms, dense-MLP-plus-MoE layer shape, and full-attention `v_proj` aliasing.
+  Extended the Marlin expert cache builder to detect Gemma's sibling
+  `layers.N.experts.gate_up_proj/down_proj` stacked BF16 experts.
+- Implemented the Gemma4 text hot path for INT4 routed experts, BF16
+  attention, compact BF16 KV, and tied embedding/lm-head weights. The Rust
+  prefill and decode paths now handle Gemma4 embedding scaling, final logit
+  softcap, plain final RMSNorm, half-split RoPE, per-layer GQA geometry,
+  full-attention `attention_k_eq_v`, no-scale V RMSNorm, Gemma4 router
+  scale/per-expert scale, extra pre/post feed-forward norms, dense MLP plus
+  routed MoE branch composition, and `layer_scalar` residual scaling.
+- Added Gemma4 tokenizer handling for `extra_special_tokens` list configs and
+  sibling `chat_template.jinja`, plus minijinja support for Python-style
+  `.get(key[, default])` calls used by the Gemma chat template.
+- Added Gemma4 variable per-layer compressed KV cache support for `k6v6` and
+  `k4v4`. The default Gemma4 k6/k4 configs use full per-layer compressed KV
+  storage: with `CFG_KV_CACHE_MB=1000`, k6v6 provides a `10624`-token context
+  and k4v4 provides a `14880`-token context on the local RTX 5090.
+- Implemented an experimental Gemma4 ring-window KV path for sliding-attention
+  layers and gated it behind explicit `CFG_RING_WINDOW_KV=1` /
+  `--ring-window-kv`. Fixed the k6v6 ring 25K long-prompt corruption by
+  passing real prefill chunk starts into GQA attention and by routing
+  ring-capped sliding layers through the custom local-window prefill path
+  instead of the FA2 local-window path. k6v6 ring remains explicit/diagnostic
+  pending witness validation and 100K quality review; k4v4 ring is now rejected
+  before model load because it still produced invalid 25K output during
+  validation. The k4v4 non-ring config remains supported.
+- Gemma4 unsupported quantization modes now fail early and visibly. The model
+  constructor rejects non-INT4 routed experts, non-BF16 attention, and KV
+  formats outside BF16/k6v6/k4v4 for Gemma4 text instead of allowing known-bad
+  modes to reach runtime.
+- Gemma4 decode CUDA graphs are disabled by model capability rather than by an
+  environment variable. The supported Gemma4 decode path is currently
+  ungraphed; per-layer graph capture still needs a Gemma-aware graph segment
+  implementation for dense-MLP-plus-routed-MoE layers.
+- Improved the diagnostic Gemma4 k6v6 ring-window prefill path after timing
+  showed the old custom path charging almost all 39,920-token prefill time to
+  GQA/KV work (`151956 ms`, `263 tok/s`). Ring-capped sliding layers still use
+  bounded local-window attention, now with an FA2 staging path when available,
+  and full-attention layers no longer get routed through the custom ring branch.
+  A 25K large-prompt validation improved from `421.6 tok/s` to
+  `480.1 tok/s` prefill with unchanged `10.2 tok/s` decode, `100%` HCS hit
+  rate, `0` copy failures, and `2098 MB` minimum free VRAM. A Gemma4 CUDA
+  graph decode attempt failed during long calibration with
+  `CUDA_ERROR_ILLEGAL_ADDRESS`, so the model capability guard remains in place
+  and the failed graph experiment was removed from the shared graph path to
+  avoid slowing existing graph-capable models.
+- Improved Gemma4 k6v6 ring-window long-context decode without enabling CUDA
+  graph capture. The ungraphed compressed-GQA decode path now reuses the
+  existing tiled k6/k8 attention kernels for long sequences when tiled buffers
+  and a device sequence-length scalar are available, and falls back to the
+  original single-block kernel for short sequences or k4v4. Clean timing-off
+  validation through `large_25k` passed with `498.2 tok/s` prefill,
+  `28.4 tok/s` decode, `100%` HCS hit rate, `0` copy failures, and `2346 MB`
+  minimum free VRAM. Follow-up prefill experiments were rejected: skipping old
+  FP8 stage-cache rows produced invalid 25K output, and reducing only the
+  export launch grid regressed 25K prefill to `470.2 tok/s`. A later
+  ring-aware temp-KV cap reduced calibration prefill growth (`359.0 KB/tok`)
+  but still regressed 25K prefill to `470.4 tok/s`; adding a 4096-token chunk
+  cap reduced prefill growth further (`155.3 KB/tok`) but collapsed 25K
+  throughput to `296.6 tok/s`. Both were reverted because they traded speed
+  for memory headroom. A direct compressed k6 ring prefill prototype was also
+  rejected: it completed startup calibration safely and reduced measured
+  prefill memory growth to `345.1 KB/tok`, but benchmark warmup took `213.0s`
+  and the first 1K timed prefill row still had not completed after a bounded
+  wait. The active code was reverted to avoid degrading the accepted
+  `498.2 tok/s` k6 ring path.
+- Added a Qwen35-vs-Gemma4 timing diagnostic to explain the current Gemma
+  prefill/decode gap. Added `tests/q35b-4-4-hqq6-k6v6-diagnostic.conf` because
+  the older Qwen35 benchmark configs used disabled KV formats. With timing
+  instrumentation enabled, Qwen35 HQQ6 k6v6 reached `9593.2 tok/s` internal
+  prefill and `113.92 tok/s` internal decode with CUDA graph replay and `100%`
+  HCS hits. Gemma4 k6v6 non-ring reached `4945.1 tok/s` best internal prefill
+  only at the 1K row and fell to about `1000 tok/s` at 10K; timing showed the
+  10K row spent `9404.8 ms` in stage-exact KV append over 30 GQA layers.
+  Qwen35's comparable 10K row spent only `0.3 ms` in KV append over 10 GQA
+  layers. Gemma4 decode remained ungraphed at `36.60 tok/s`; HCS was `100%`,
+  so the decode gap is graph/layer-path cost, not expert cache misses.
+  Fixed Gemma4 prefill timing attribution so the top-level `attn/gqa/moe`
+  buckets account for the nested Gemma layer timers instead of charging the
+  whole Gemma wrapper as broad MoE/other time. A smoke diagnostic on
+  `tests/gemma-4-4-k6v6-a16.conf` now reports an 8419-token calibration row as
+  `6434.9 ms` GQA/attention with `6304.7 ms` in KV append and only `63.2 ms`
+  MoE, matching the root-cause attribution without changing timing-off paths.
+- Ran the next Gemma4 prefill/graph speed implementation pass and rejected the
+  unsafe or slower paths by measurement. BF16 temp-KV staging worsened the
+  8419-token diagnostic (`6679.2 ms` KV append versus the prior `6304.7 ms`);
+  FP8-window FA2 routing, vectorized FP8 append, and a direct decode-KV
+  single-chunk bypass all left the 39,920-token timing row around `281 tok/s`
+  with about `141 s` in KV append, so their active code was removed. A Gemma4
+  CUDA graph decode implementation attempt reached roughly `64-73 tok/s`, but
+  failed correctness (`2/10` network prompts passed, early EOS/garbled output),
+  showing that Gemma4 needs split graph segmentation for dense MLP, router,
+  expert, merge, and `layer_scalar` work before replay is safe. The Gemma4
+  graph guard is restored with that explicit reason, and unused FP8-window
+  sidecar symbols/loaders were removed. Restored-path validation
+  `./dev test tests/gemma-4-4-k6v6-a16.conf` passed benchmark plus network:
+  `5035.9 tok/s` best prefill, `38.72 tok/s` best internal decode,
+  `67.57 tok/s` best HTTP, `14/14` network prompts, HCS `3840/3840`, and
+  `11170 MB` minimum free VRAM.
+- Implemented Gemma4 CUDA graph decode safely by making the captured graph path
+  execute Gemma4's dense-MLP + routed-MoE semantics instead of the generic MoE
+  merge. The graph segment now handles Gemma4 pre/post attention RMSNorm,
+  dense branch, pre-FFN2 expert input, router input scaling,
+  per-expert router scaling, post-expert/post-FFN norms, residual merge, and
+  `layer_scalar`. Graph replay now uses per-layer device sequence-length
+  scalars, so Gemma sliding-attention layers use their bounded attention length
+  while full-attention layers still see full context. Validation:
+  `./dev build` passed; `./dev run tests/gemma-4-4-k6v6-a16.conf --test-endpoints`
+  plus `./dev network 18013` passed `14/14`; timing-off
+  `./dev benchmark tests/gemma-4-4-k6v6-a16.conf` reached `5230.3 tok/s`
+  best prefill, `63.92 tok/s` best internal decode, `116.20 tok/s` best HTTP,
+  HCS `3840/3840`, `0` copy failures, and `11156 MB` minimum free VRAM.
+  Gemma graph decode is deliberately limited to the validated non-ring `k6v6`
+  path; k4v4 and ring-window Gemma remain on their existing non-graph paths
+  until separately validated.
+  Guard run `./dev speed-test` on Qwen3-Coder-Next HQQ4/k4v4 completed with
+  `6664.9 tok/s` prefill, `88.42 tok/s` internal decode, `138.06 tok/s` HTTP,
+  HCS `15957/24576`, `0` copy failures, and `896 MB` minimum free VRAM.
+- Validation: `./dev build` passed. Short reference probes against the legacy
+  Gemma4 HF BF16 artifact matched turn 1 exactly and turn 2 first token exactly
+  without setting `KRASIS_NO_GRAPH`. The full legacy reference sweep passed
+  turns 1-6 and diverged on longer generations with coherent output; Gemma4
+  INT4 is not yet llama-witness validated because no local Gemma witness/GGUF
+  artifact exists. `./dev benchmark tests/gemma-4-4-a16.conf` completed with
+  a clean health scan: `5051.6 tok/s` best prefill, `39.07 tok/s` internal
+  decode, `71.33 tok/s` HTTP, `3840/3840` HCS, and `11084 MB` minimum free
+  VRAM. `./dev network 18013` on the gated non-ring k6v6 config passed
+  `14/14` with `10624` context, and `./dev network 18014` on the gated
+  non-ring k4v4 config passed `14/14` with `14880` context; both had clean
+  health scans. k6v6 ring-window reached `106784` context and passed the
+  formerly failing 25K large-prompt row after the ring fix (`421.6 tok/s`
+  prefill, `2222 MB` min free), then the prefill speed follow-up passed the
+  same 25K row at `480.1 tok/s`; the 100K network row timed out while the
+  server remained GPU-bound, so 100K is still not a validated practical path.
+  k4v4 ring-window is explicitly rejected after
+  reproducing invalid 25K output. INT8 Gemma4 remains unsupported after diagnostics produced invalid
+  token/logprob output.
+
 ## 1.0.15 - 2026-06-05
 
 - Hardened Typhon/16GB startup and CUDA-fault safety. HCS startup now keeps two

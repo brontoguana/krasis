@@ -1,0 +1,25 @@
+Checking server health at http://localhost:18015... [0;32mOK[0m
+Sending warmup request... done (0.6s)
+  [2m>>> Hi! How can I help you today[0m
+
+[1m[0;36mTest 4: Network Multi-Prompt Validation[0m
+============================================================
+  [0;32mPASS[0m OK (0.5s) [factual_qa]
+  [0;32mPASS[0m OK (0.5s) [math_simple]
+  [0;32mPASS[0m OK (2.6s) [code_gen]
+  [0;32mPASS[0m OK (0.6s, 4 words) [multi_turn]
+  [0;32mPASS[0m OK (0.6s, 7 words) [short_prompt]
+  [0;32mPASS[0m OK (0.5s) [streaming_factual]
+  [0;32mPASS[0m OK (0.8s) [streaming_code]
+  [0;32mPASS[0m OK (0.8s) [json_output]
+  [0;32mPASS[0m OK (0.6s) [blocking_math]
+
+[1m[0;36mTest 5: Network Large-Prompt Validation[0m
+============================================================
+  Loading ~1K token prompt... done (7044 chars)
+  [0;32mPASS[0m OK (5.9s, 99 words) [large_2k]
+  Loading ~8K token prompt... done (35045 chars)
+  [0;32mPASS[0m OK (14.8s, 84 words) [large_10k]
+  Loading ~21K token prompt... done (87555 chars)
+  [0;32mPASS[0m OK (59.6s, 128 words) [large_25k]
+  Loading ~87K token prompt... done (244208 chars)

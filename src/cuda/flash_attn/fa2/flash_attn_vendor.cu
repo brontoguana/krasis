@@ -165,6 +165,12 @@ static void set_params_from_raw(
     params.is_kv_fp8 = false;  // Caller sets this explicitly for FP8 path
 }
 
+static void set_local_window(flash::Flash_fwd_params &params, int window_size_left, int window_size_right) {
+    params.is_causal = false;
+    params.window_size_left = window_size_left;
+    params.window_size_right = window_size_right;
+}
+
 // ============================================================================
 // Extern "C" entry points for Rust FFI (dlopen + dlsym)
 // ============================================================================
@@ -245,11 +251,60 @@ extern "C" int krasis_flash_attn_fwd_bf16(
     return 0;
 }
 
+extern "C" int krasis_flash_attn_fwd_bf16_window(
+    // Device pointers
+    void *q_ptr, void *k_ptr, void *v_ptr, void *out_ptr,
+    void *softmax_lse_ptr,
+    void *cu_seqlens_q_ptr, void *cu_seqlens_k_ptr,
+    // Dimensions
+    int batch_size, int seqlen_q, int seqlen_k,
+    int num_heads, int num_heads_k, int head_dim,
+    int total_q, int total_k,
+    // Config
+    float softmax_scale, int window_size_left, int window_size_right,
+    int unpadded_lse,
+    // CUDA stream
+    void *stream_ptr
+) {
+    flash::Flash_fwd_params params;
+    set_params_from_raw(
+        params,
+        q_ptr, k_ptr, v_ptr, out_ptr,
+        softmax_lse_ptr,
+        cu_seqlens_q_ptr, cu_seqlens_k_ptr,
+        batch_size, seqlen_q, seqlen_k,
+        num_heads, num_heads_k, head_dim,
+        total_q, total_k,
+        softmax_scale, false, true, unpadded_lse != 0
+    );
+    set_local_window(params, window_size_left, window_size_right);
+
+    cudaStream_t stream = static_cast<cudaStream_t>(stream_ptr);
+    using T = cutlass::bfloat16_t;
+
+    switch (head_dim) {
+        case 64:  flash::run_mha_fwd_<T, 64, false>(params, stream); break;
+        case 96:  flash::run_mha_fwd_<T, 96, false>(params, stream); break;
+        case 128: flash::run_mha_fwd_<T, 128, false>(params, stream); break;
+        case 192: flash::run_mha_fwd_<T, 192, false>(params, stream); break;
+        case 256: flash::run_mha_fwd_<T, 256, false>(params, stream); break;
+        default:
+            fprintf(stderr, "krasis_flash_attn_window: unsupported head_dim=%d\n", head_dim);
+            return -1;
+    }
+
+    cudaError_t launch_err = cudaGetLastError();
+    if (launch_err != cudaSuccess) {
+        fprintf(stderr, "krasis_flash_attn_window: launch failed: %s\n", cudaGetErrorString(launch_err));
+        return -2;
+    }
+    return 0;
+}
+
 // Forward pass: BF16 Q, FP8 E4M3 K/V (cross-chunk attention with FP8 KV cache).
 // K/V pointers point to FP8 E4M3 data. Strides are in FP8 elements.
 // The kernel loads FP8 from global memory, converts to BF16 in registers,
 // stores BF16 to shared memory, then proceeds with normal FA2 computation.
-// Only hdim128 supported (the only head dim QCN uses).
 extern "C" int krasis_flash_attn_fwd_bf16q_fp8kv(
     // Device pointers (q_ptr = BF16, k_ptr/v_ptr = FP8 E4M3)
     void *q_ptr, void *k_ptr, void *v_ptr, void *out_ptr,

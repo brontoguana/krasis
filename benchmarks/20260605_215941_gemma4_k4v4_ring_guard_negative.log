@@ -1,0 +1,29 @@
+[0;36m[1m=>[0m Waiting for selected GPUs (0) to clear...
+[0;32m[1mOK[0m Selected GPUs (0) clear.
+[0;36m[1m=>[0m Launching from: tests/gemma-4-4-k4v4-a16.conf
+[0;36m[1m=>[0m Run dir: /home/main/Documents/Claude/krasis/logs/dev-run_20260605_215941
+[0;36m[1m=>[0m Import origin check:
+krasis: /home/main/Documents/Claude/krasis/python/krasis/__init__.py
+krasis.krasis: /home/main/Documents/Claude/krasis/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+Pre-scan: set CUDA_VISIBLE_DEVICES=0
+Loaded config from tests/gemma-4-4-k4v4-a16.conf: {'model_path': '/home/main/.krasis/models/gemma-4-26b-a4b-it', 'selected_gpus': '0', 'num_gpus': 1, 'layer_group_size': 2, 'kv_dtype': 'k4v4', 'gpu_expert_bits': 4, 'cpu_expert_bits': 4, 'attention_quant': 'bf16', 'shared_expert_quant': 'int8', 'dense_mlp_quant': 'int8', 'lm_head_quant': 'int8', 'host': '0.0.0.0', 'port': 18014, 'enable_thinking': False}
+
+[1m[36m▸ Krasis — gemma-4-26b-a4b-it[0m
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 1[0m
+  [32mHCS host cache: source[0m
+  [32mSelected physical GPUs: 0 (config; CUDA_VISIBLE_DEVICES=0)[0m
+  [32mExperts: GPU INT4 g128 (amax)  |  Attention: bf16  |  KV: k4v4[0m
+  [32mLayer groups: 2  |  KV cache: 1000 MB  |  Threads: 40[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+  [33mUNVALIDATED BF16 debug path enabled: attention=BF16. This path likely contains unknown bugs and must not be used as a correctness oracle. Use HF Transformers BF16 reference data for validation; production runs must use quantized configs.[0m
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/main/Documents/Claude/krasis/python/krasis/server.py", line 3026, in <module>
+    main()
+  File "/home/main/Documents/Claude/krasis/python/krasis/server.py", line 1434, in main
+    _model = KrasisModel(
+             ^^^^^^^^^^^^
+  File "/home/main/Documents/Claude/krasis/python/krasis/model.py", line 707, in __init__
+    raise ValueError(
+ValueError: Gemma4 ring-window KV currently validates only k6v6. k4v4 ring-window produced invalid 25K long-prompt output during validation; use k6v6 ring-window or k4v4 without ring-window.

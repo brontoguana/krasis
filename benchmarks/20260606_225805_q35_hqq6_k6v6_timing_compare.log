@@ -1,0 +1,2329 @@
+[0;36m[1m=>[0m Decode timing ENABLED (adds ~30-50% overhead — not for speed benchmarks)
+[0;36m[1m=>[0m Waiting for selected GPUs (0) to clear...
+[0;32m[1mOK[0m Selected GPUs (0) clear.
+[0;36m[1m=>[0m Running standard benchmark: tests/q35b-4-4-hqq6-k6v6-diagnostic.conf
+[0;36m[1m=>[0m Run dir: /home/main/Documents/Claude/krasis/logs/dev-benchmark_20260606_235805
+[0;36m[1m=>[0m Log: /home/main/Documents/Claude/krasis/logs/dev-benchmark_20260606_235805/benchmark_stdout.log
+[0;36m[1m=>[0m Import origin check:
+krasis: /home/main/Documents/Claude/krasis/python/krasis/__init__.py
+krasis.krasis: /home/main/Documents/Claude/krasis/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+Pre-scan: set CUDA_VISIBLE_DEVICES=0
+Loaded config from tests/q35b-4-4-hqq6-k6v6-diagnostic.conf: {'model_path': '/home/main/.krasis/models/Qwen3.5-35B-A3B', 'selected_gpus': '0', 'num_gpus': 1, 'layer_group_size': 2, 'kv_cache_mb': 1000, 'kv_dtype': 'k6v6', 'gpu_expert_bits': 4, 'cpu_expert_bits': 4, 'attention_quant': 'hqq6', 'shared_expert_quant': 'int8', 'dense_mlp_quant': 'int8', 'lm_head_quant': 'int8', 'krasis_threads': 40, 'host': '0.0.0.0', 'port': 18016, 'gpu_prefill_threshold': 300, 'vram_safety_margin': 600, 'force_load': False, 'enable_thinking': False}
+
+[1m[36m▸ Krasis — Qwen3.5-35B-A3B[0m
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 1[0m
+  [32mHCS host cache: source[0m
+  [32mSelected physical GPUs: 0 (config; CUDA_VISIBLE_DEVICES=0)[0m
+  [32mExperts: GPU INT4 g128 (amax)  |  Attention: hqq6  |  KV: k6v6[0m
+  [32mLayer groups: 2  |  KV cache: 1000 MB  |  Threads: 40[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+
+[1m[36m▸ Loading model weights[0m
+  [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=518 MB, free=31600 MB, total=32119 MB
+
+[1m[36m▸ Loading GPU weights[0m
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:0: alloc=3626 MB, reserved=3678 MB, used=4364 MB, free=27754 MB, total=32119 MB
+  [0;32mHQQ attention artifacts validated (1140 MB cached), 27754 MB free[0m
+
+[1m[36m▸ Loading GPU expert weights from cache[0m
+    Loading GPU Marlin cache: 40 layers...
+    GPU Marlin cache loaded: 16.7 GB in 11s
+  [0;32mExpert weights loaded in 11s.[0m
+  [33m[VRAM after-phase2-expert-weights][0m cuda:0: alloc=3626 MB, reserved=3678 MB, used=4364 MB, free=27754 MB, total=32119 MB
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:0: alloc=3626 MB, reserved=3678 MB, used=4364 MB, free=27754 MB, total=32119 MB
+  [33m[VRAM after-kv-cache-init][0m cuda:0: alloc=4627 MB, reserved=4682 MB, used=5368 MB, free=26750 MB, total=32119 MB
+  [33m[VRAM after-full-load][0m cuda:0: alloc=4627 MB, reserved=4682 MB, used=5368 MB, free=26750 MB, total=32119 MB
+
+[1m[36m▸ CUDA runtime warmup[0m
+  [32mcuBLAS + Triton kernel compilation done[0m
+
+[1m[36m▸ Setting up GPU decode store[0m
+  [32mGPU decode store ready (addr=0x4e0d0240)[0m
+  [32mReleased redundant GPU execution source tensors (565 MB)[0m
+  [2mVRAM monitor started (tracking warmup)[0m
+  [2mcuda:0: 0 MB total[0m
+
+[1m[36m▸ Pre-allocating Rust prefill engine[0m
+[FLA] Loading kernels for H=32 from /home/main/Documents/Claude/krasis/python/krasis/libkrasis_fla_sm120.so
+[FLA] loaded krasis_fla_chunk_local_cumsum_scalar_kernel (H=32)
+[FLA] loaded krasis_fla_chunk_scaled_dot_kkt_fwd_kernel (H=32)
+[FLA] loaded krasis_fla_merge_16x16_to_64x64_inverse_kernel (H=32)
+[FLA] loaded krasis_fla_recompute_w_u_fwd_kernel (H=32)
+[FLA] loaded krasis_fla_chunk_gated_delta_rule_fwd_kernel_h_blockdim64 (H=32)
+[FLA] loaded krasis_fla_chunk_fwd_kernel_o (H=32)
+  [32mPrefill engine scratch buffers allocated[0m
+
+[1m[36m▸ Warmup (Rust prefill engine)[0m
+[PREFILL-TIMING] 300 tokens, 368.4ms total (814 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        1.1ms (  0.3%)
+[PREFILL-TIMING]   attn:       43.9ms ( 11.9%)  [gqa: 11.1ms, la: 32.8ms]
+[PREFILL-TIMING]     gqa breakdown (10 FA2 calls: 10 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:         3.9ms ( 34.7% of gqa)
+[PREFILL-TIMING]       qknorm:       0.2ms (  1.5% of gqa)
+[PREFILL-TIMING]       rope:         0.1ms (  1.0% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.1ms (  0.7% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.1ms over 10 calls
+[PREFILL-TIMING]       fa2         5.3ms ( 47.6% of gqa)  [0.5ms/call avg]
+[PREFILL-TIMING]       gate:         0.1ms (  0.8% of gqa)
+[PREFILL-TIMING]       o_proj:       1.5ms ( 13.3% of gqa)
+[PREFILL-TIMING]     hqq projection internals:
+[PREFILL-TIMING]       marlin_float_zp:     14.2ms over 130 calls
+[PREFILL-TIMING]       group_sums:           1.0ms over 130 calls
+[PREFILL-TIMING]       correction_gemm:     10.8ms over 130 calls
+[PREFILL-TIMING]       correction_add:       1.2ms over 130 calls
+[PREFILL-TIMING]     la breakdown (36 layers):
+[PREFILL-TIMING]       proj:        18.7ms ( 57.2% of la)
+[PREFILL-TIMING]         qkvz:         7.1ms    ba:     11.3ms
+[PREFILL-TIMING]       uninter:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       conv:         1.0ms (  2.9% of la)
+[PREFILL-TIMING]       prep:         0.7ms (  2.0% of la)
+[PREFILL-TIMING]       convert:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       fla:          6.8ms ( 20.7% of la)
+[PREFILL-TIMING]         fla/cumsum:     0.4ms kkt:     0.3ms solve:     0.5ms
+[PREFILL-TIMING]         fla/wy:         0.4ms state:     4.1ms output:     0.6ms
+[PREFILL-TIMING]       postfla:      0.3ms (  1.0% of la)
+[PREFILL-TIMING]       norm:         0.4ms (  1.2% of la)
+[PREFILL-TIMING]       o_proj:       4.5ms ( 13.8% of la)
+[PREFILL-TIMING]   moe:       322.1ms ( 87.4%)
+[PREFILL-TIMING]     moe breakdown (48 layers):
+[PREFILL-TIMING]       gate:        25.2ms (  7.8% of moe)
+[PREFILL-TIMING]       dma:        171.6ms ( 53.3% of moe)
+[PREFILL-TIMING]         route_d2h:     0.8ms ptr_alloc:     0.5ms ptr_build:     0.1ms
+[PREFILL-TIMING]         cold_h2d:     22.0ms ptr_upload:     0.4ms dma_wait:   146.4ms
+[PREFILL-TIMING]       w1+act:     102.1ms ( 31.7% of moe)
+[PREFILL-TIMING]       w2:           4.0ms (  1.3% of moe)
+[PREFILL-TIMING]       scatter:      1.1ms (  0.3% of moe)
+[PREFILL-TIMING]       shared:      17.4ms (  5.4% of moe)
+[PREFILL-TIMING]   other:       1.3ms (  0.4%)
+  [32mRust prefill warmed with 300 tokens before HCS budgeting[0m
+  [32mWarmup complete in 0.7s[0m
+  [2mcuda:0 warmup:  peak 7,452 MB used / 32,119 MB total  (min free: 24,666 MB)[0m
+
+[1m[36m▸ VRAM calibration[0m
+  [32mSafety margin: 600 MB[0m
+  [32mFree VRAM after startup: 25,572 MB / 32,119 MB[0m
+  [32mShort calibration: probing 500 prompt tokens + 32 decode tokens[0m
+[PREFILL-TIMING] 500 tokens, 537.3ms total (931 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        1.3ms (  0.2%)
+[PREFILL-TIMING]   attn:       35.7ms (  6.6%)  [gqa: 7.1ms, la: 28.6ms]
+[PREFILL-TIMING]     gqa breakdown (10 FA2 calls: 10 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:         4.6ms ( 64.3% of gqa)
+[PREFILL-TIMING]       qknorm:       0.2ms (  2.8% of gqa)
+[PREFILL-TIMING]       rope:         0.1ms (  1.6% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.1ms (  1.2% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.1ms over 10 calls
+[PREFILL-TIMING]       fa2         0.4ms (  5.2% of gqa)  [0.0ms/call avg]
+[PREFILL-TIMING]       gate:         0.1ms (  1.4% of gqa)
+[PREFILL-TIMING]       o_proj:       1.6ms ( 23.0% of gqa)
+[PREFILL-TIMING]     hqq projection internals:
+[PREFILL-TIMING]       marlin_float_zp:     18.1ms over 130 calls
+[PREFILL-TIMING]       group_sums:           1.0ms over 130 calls
+[PREFILL-TIMING]       correction_gemm:      2.7ms over 130 calls
+[PREFILL-TIMING]       correction_add:       1.4ms over 130 calls
+[PREFILL-TIMING]     la breakdown (36 layers):
+[PREFILL-TIMING]       proj:        13.3ms ( 46.5% of la)
+[PREFILL-TIMING]         qkvz:         9.9ms    ba:      3.1ms
+[PREFILL-TIMING]       uninter:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       conv:         1.3ms (  4.4% of la)
+[PREFILL-TIMING]       prep:         0.9ms (  3.1% of la)
+[PREFILL-TIMING]       convert:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       fla:          7.0ms ( 24.4% of la)
+[PREFILL-TIMING]         fla/cumsum:     0.5ms kkt:     0.3ms solve:     0.5ms
+[PREFILL-TIMING]         fla/wy:         0.4ms state:     3.9ms output:     0.9ms
+[PREFILL-TIMING]       postfla:      0.3ms (  1.1% of la)
+[PREFILL-TIMING]       norm:         0.5ms (  1.7% of la)
+[PREFILL-TIMING]       o_proj:       5.0ms ( 17.5% of la)
+[PREFILL-TIMING]   moe:       499.1ms ( 92.9%)
+[PREFILL-TIMING]     moe breakdown (48 layers):
+[PREFILL-TIMING]       gate:         2.8ms (  0.6% of moe)
+[PREFILL-TIMING]       dma:        470.4ms ( 94.3% of moe)
+[PREFILL-TIMING]         route_d2h:     0.8ms ptr_alloc:     0.4ms ptr_build:     0.3ms
+[PREFILL-TIMING]         cold_h2d:     60.0ms ptr_upload:     0.4ms dma_wait:   406.9ms
+[PREFILL-TIMING]       w1+act:      15.1ms (  3.0% of moe)
+[PREFILL-TIMING]       w2:           7.6ms (  1.5% of moe)
+[PREFILL-TIMING]       scatter:      1.6ms (  0.3% of moe)
+[PREFILL-TIMING]       shared:       1.2ms (  0.2% of moe)
+[PREFILL-TIMING]   other:       1.2ms (  0.2%)
+  [32mdecode: 32 tokens in 0.99s (32.5 tok/s)  VRAM: 25494 MB free now, 25494 MB min free during decode[0m
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (32 tokens avg)             [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:         30.41 ms/tok  ( 32.9 tok/s)    [36m│[0m
+  [36m│[0m  Attention:      0.20 ms  ( 0.6%)              [36m│[0m
+  [36m│[0m    LA (36):      0.12 ms                        [36m│[0m
+  [36m│[0m      Proj:       0.04 ms  (35.7%)             [36m│[0m
+  [36m│[0m      Conv:       0.02 ms  (13.0%)             [36m│[0m
+  [36m│[0m      Recur:      0.03 ms  (28.4%)             [36m│[0m
+  [36m│[0m      Out:        0.02 ms  (19.7%)             [36m│[0m
+  [36m│[0m    GQA (12):     0.08 ms                        [36m│[0m
+  [36m│[0m      Proj:       0.02 ms  (25.5%)             [36m│[0m
+  [36m│[0m      Attn:       0.05 ms  (62.4%)             [36m│[0m
+  [36m│[0m      Out:        0.01 ms  (10.2%)             [36m│[0m
+  [36m│[0m  MoE:            0.99 ms  ( 3.3%)              [36m│[0m
+  [36m│[0m  Norms+Emb:      0.03 ms  ( 0.1%)              [36m│[0m
+  [36m│[0m  Dense MLP:      0.00 ms  ( 0.0%)              [36m│[0m
+  [36m│[0m  LM Head:        0.02 ms  ( 0.1%)              [36m│[0m
+  [36m│[0m  Other:         29.17 ms  (95.9%)              [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  MoE breakdown (of 0.99 ms):                    [36m│[0m
+  [36m│[0m    Route sync:     0.03 ms  ( 2.8%)             [36m│[0m
+  [36m│[0m    Expert loop:    0.89 ms  (90.3%)             [36m│[0m
+  [36m│[0m      w13 GEMV:    0.00 ms  ( 0.0%)             [36m│[0m
+  [36m│[0m      silu+w2:     0.00 ms  ( 0.0%)             [36m│[0m
+  [36m│[0m      DMA wait:    0.57 ms  (cold expert DMA)    [36m│[0m
+  [36m│[0m      DMA comp:    0.22 ms  (cold expert GEMV)   [36m│[0m
+  [36m│[0m      Other:       0.11 ms                        [36m│[0m
+  [36m│[0m    Shared exp:     0.02 ms  ( 2.1%)             [36m│[0m
+  [36m│[0m    MoE other:      0.05 ms  ( 4.8%)             [36m│[0m
+  [36m│[0m  MoE other detail:                               [36m│[0m
+  [36m│[0m    Gate GEMV:      0.01 ms                        [36m│[0m
+  [36m│[0m    D2H topk:      0.00 ms                        [36m│[0m
+  [36m│[0m    APFL+setup:    0.00 ms                        [36m│[0m
+  [36m│[0m    Replay pad:     2.82 ms                        [36m│[0m
+  [36m│[0m    D2D copy:      0.01 ms                        [36m│[0m
+  [36m│[0m    Remainder:    -2.79 ms                        [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe DMA (non-serialized):                     [36m│[0m
+  [36m│[0m    Cold experts/tok: 320.0 (1280 DMA calls)      [36m│[0m
+  [36m│[0m    HCS experts/tok:  0.0 (0 cached)            [36m│[0m
+  [36m│[0m    DMA bytes/tok:    495.00 MB                     [36m│[0m
+  [36m│[0m    HCS hit/miss:     0/0                        [36m│[0m
+  [36m│[0m    Avg DMA call size: 396.0 KB                   [36m│[0m
+  [36m│[0m    Est PCIe BW:      540.2 GB/s (cold fraction)  [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [32mShort calibration: baseline=25,572 MB, prefill post-alloc=24,830 MB, prefill min=24,126 MB, decode min=25,494 MB, post-cleanup=25,494 MB[0m
+  [32mAdaptive long calibration: default target=39,920 tokens, target low-water floor=1,200 MB, estimated prefill growth=0.4236 MB/token[0m
+  [32mAdaptive long calibration: next probe 39,920 tokens (model-estimated initial probe (projected 0.4236 MB/token, validation floor 2400 MB))[0m
+  [32mLong calibration: probing 39,920 prompt tokens + 32 decode tokens[0m
+[PREFILL-TIMING] 39920 tokens, 3461.0ms total (11534 tok/s)
+[PREFILL-TIMING]   embed:       0.3ms (  0.0%)
+[PREFILL-TIMING]   norm:       54.7ms (  1.6%)
+[PREFILL-TIMING]   attn:     2494.2ms ( 72.1%)  [gqa: 887.6ms, la: 1606.5ms]
+[PREFILL-TIMING]     gqa breakdown (10 FA2 calls: 10 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:       194.5ms ( 21.9% of gqa)
+[PREFILL-TIMING]       qknorm:       8.6ms (  1.0% of gqa)
+[PREFILL-TIMING]       rope:         1.3ms (  0.1% of gqa)
+[PREFILL-TIMING]       kv_prep:      1.0ms (  0.1% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           1.0ms over 10 calls
+[PREFILL-TIMING]       fa2       598.2ms ( 67.4% of gqa)  [59.8ms/call avg]
+[PREFILL-TIMING]       gate:         7.0ms (  0.8% of gqa)
+[PREFILL-TIMING]       o_proj:      77.1ms (  8.7% of gqa)
+[PREFILL-TIMING]     hqq projection internals:
+[PREFILL-TIMING]       marlin_float_zp:   1078.6ms over 130 calls
+[PREFILL-TIMING]       group_sums:          17.8ms over 130 calls
+[PREFILL-TIMING]       correction_gemm:     57.5ms over 130 calls
+[PREFILL-TIMING]       correction_add:     108.4ms over 130 calls
+[PREFILL-TIMING]     la breakdown (36 layers):
+[PREFILL-TIMING]       proj:       769.8ms ( 47.9% of la)
+[PREFILL-TIMING]         qkvz:       712.7ms    ba:     56.2ms
+[PREFILL-TIMING]       uninter:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       conv:        77.1ms (  4.8% of la)
+[PREFILL-TIMING]       prep:        41.9ms (  2.6% of la)
+[PREFILL-TIMING]       convert:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       fla:        459.4ms ( 28.6% of la)
+[PREFILL-TIMING]         fla/cumsum:    22.3ms kkt:    13.9ms solve:    22.1ms
+[PREFILL-TIMING]         fla/wy:        32.0ms state:   327.3ms output:    41.3ms
+[PREFILL-TIMING]       postfla:      0.4ms (  0.0% of la)
+[PREFILL-TIMING]       norm:        26.3ms (  1.6% of la)
+[PREFILL-TIMING]       o_proj:     231.3ms ( 14.4% of la)
+[PREFILL-TIMING]   moe:       816.2ms ( 23.6%)
+[PREFILL-TIMING]     moe breakdown (48 layers):
+[PREFILL-TIMING]       gate:        29.5ms (  3.6% of moe)
+[PREFILL-TIMING]       dma:         19.5ms (  2.4% of moe)
+[PREFILL-TIMING]         route_d2h:     0.8ms ptr_alloc:     0.0ms ptr_build:     0.5ms
+[PREFILL-TIMING]         cold_h2d:     94.8ms ptr_upload:     0.4ms dma_wait:    15.2ms
+[PREFILL-TIMING]       w1+act:     402.8ms ( 49.3% of moe)
+[PREFILL-TIMING]       w2:         165.6ms ( 20.3% of moe)
+[PREFILL-TIMING]       scatter:    128.8ms ( 15.8% of moe)
+[PREFILL-TIMING]       shared:      69.4ms (  8.5% of moe)
+[PREFILL-TIMING]   other:      95.5ms (  2.8%)
+  [32mdecode: 32 tokens in 1.09s (29.2 tok/s)  VRAM: 25488 MB free now, 25488 MB min free during decode[0m
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (32 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:         34.03 ms/tok  ( 29.4 tok/s)    [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Graph inter-layer breakdown:                  [36m│[0m
+  [36m│[0m    GPU compute:   0.17 ms  ( 0.5%)            [36m│[0m
+  [36m│[0m    Sync wait:    30.67 ms  (90.1%)            [36m│[0m
+  [36m│[0m      inter:      29.52 ms  final:  1.14 ms     [36m│[0m
+  [36m│[0m    Classify:      0.05 ms  ( 0.1%)            [36m│[0m
+  [36m│[0m    Cold DMA:      2.75 ms  ( 8.1%)            [36m│[0m
+  [36m│[0m    Upload:        0.09 ms  ( 0.3%)            [36m│[0m
+  [36m│[0m    Launch:        0.31 ms  ( 0.9%)            [36m│[0m
+  [36m│[0m  Graph replay segment CUDA events:            [36m│[0m
+  [36m│[0m    Segment total: 11.45 ms                  [36m│[0m
+  [36m│[0m    First route:   0.13 ms  ( 1.1%)        [36m│[0m
+  [36m│[0m    Middle segs:  10.63 ms  (92.9%)        [36m│[0m
+  [36m│[0m    Final seg:     0.68 ms  ( 6.0%)        [36m│[0m
+  [36m│[0m  Graph replay typed segment totals:          [36m│[0m
+  [36m│[0m    First:       0.13 ms/tok (0.13 ms/seg) [36m│[0m
+  [36m│[0m    LA route:    5.27 ms/tok (0.18 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:   5.37 ms/tok (0.54 ms/seg) [36m│[0m
+  [36m│[0m    Final:       0.68 ms/tok (0.68 ms/seg) [36m│[0m
+  [36m│[0m  Sync wait attributed to segment:           [36m│[0m
+  [36m│[0m    First:       0.13 ms/tok (0.13 ms/seg) [36m│[0m
+  [36m│[0m    LA route:   18.67 ms/tok (0.64 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:  10.73 ms/tok (1.07 ms/seg) [36m│[0m
+  [36m│[0m    Final:       1.14 ms/tok (1.14 ms/seg) [36m│[0m
+  [36m│[0m  Slowest sync-wait segments:                [36m│[0m
+  [36m│[0m    #31   1.75 ms  graph31 experts L30 + route L31 GQA   [36m│[0m
+  [36m│[0m    #40   1.14 ms  graph40 experts L39 + final           [36m│[0m
+  [36m│[0m    #15   1.01 ms  graph15 experts L14 + route L15 GQA   [36m│[0m
+  [36m│[0m    #19   1.01 ms  graph19 experts L18 + route L19 GQA   [36m│[0m
+  [36m│[0m    #27   1.00 ms  graph27 experts L26 + route L27 GQA   [36m│[0m
+  [36m│[0m    #3    1.00 ms  graph3 experts L2 + route L3 GQA      [36m│[0m
+  [36m│[0m  Slowest graph replay segments:              [36m│[0m
+  [36m│[0m    #40   0.68 ms  graph40 experts L39 + final           [36m│[0m
+  [36m│[0m    #31   0.54 ms  graph31 experts L30 + route L31 GQA   [36m│[0m
+  [36m│[0m    #35   0.54 ms  graph35 experts L34 + route L35 GQA   [36m│[0m
+  [36m│[0m    #11   0.54 ms  graph11 experts L10 + route L11 GQA   [36m│[0m
+  [36m│[0m    #27   0.54 ms  graph27 experts L26 + route L27 GQA   [36m│[0m
+  [36m│[0m    #19   0.54 ms  graph19 experts L18 + route L19 GQA   [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe DMA (non-serialized):                     [36m│[0m
+  [36m│[0m    Cold experts/tok: 320.0 (1280 DMA calls)      [36m│[0m
+  [36m│[0m    HCS experts/tok:  0.0 (0 cached)            [36m│[0m
+  [36m│[0m    DMA bytes/tok:    495.00 MB                     [36m│[0m
+  [36m│[0m    HCS hit/miss:     0/0                        [36m│[0m
+  [36m│[0m    Avg DMA call size: 396.0 KB                   [36m│[0m
+  [36m│[0m    Est PCIe BW:      20.3 GB/s (cold fraction)  [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [32mLong calibration: baseline=25,494 MB, prefill post-alloc=7,764 MB, prefill min=7,380 MB, decode min=25,488 MB, post-cleanup=25,488 MB[0m
+  [32mScratch reservation: max=20,879 MB (at 50,000 tokens)[0m
+
+[1m[36m▸ VRAM calibration complete[0m
+  [32mPost-calibration free VRAM: 25,488 MB[0m
+  [32mTransient deltas: short prefill=1,446 MB, long prefill=18,114 MB, short decode=78 MB, long decode=6 MB[0m
+  [32mGPU0 decode HCS budget: 24,810 MB[0m
+  [32mPrefill HCS budgets: short=23,442 MB, long=6,774 MB[0m
+  [32mWorst-case prefill scratch reservation: 20,879 MB at 50,000 tokens[0m
+
+[1m[36m▸ Calculating HCS budget[0m
+
+[1m[36m▸ Building expert heatmap (decode-weighted calibration)[0m
+[PREFILL-TIMING] 35 tokens, 250.5ms total (140 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.8ms (  0.3%)
+[PREFILL-TIMING]   attn:       16.6ms (  6.6%)  [gqa: 3.9ms, la: 12.7ms]
+[PREFILL-TIMING]     gqa breakdown (10 FA2 calls: 10 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:         2.4ms ( 61.9% of gqa)
+[PREFILL-TIMING]       qknorm:       0.1ms (  3.0% of gqa)
+[PREFILL-TIMING]       rope:         0.1ms (  2.9% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.1ms (  2.0% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.1ms over 10 calls
+[PREFILL-TIMING]       fa2         0.1ms (  3.7% of gqa)  [0.0ms/call avg]
+[PREFILL-TIMING]       gate:         0.1ms (  2.0% of gqa)
+[PREFILL-TIMING]       o_proj:       0.9ms ( 23.6% of gqa)
+[PREFILL-TIMING]     hqq projection internals:
+[PREFILL-TIMING]       marlin_float_zp:      5.4ms over 130 calls
+[PREFILL-TIMING]       group_sums:           0.9ms over 130 calls
+[PREFILL-TIMING]       correction_gemm:      2.3ms over 130 calls
+[PREFILL-TIMING]       correction_add:       0.9ms over 130 calls
+[PREFILL-TIMING]     la breakdown (36 layers):
+[PREFILL-TIMING]       proj:         4.7ms ( 36.5% of la)
+[PREFILL-TIMING]         qkvz:         2.5ms    ba:      1.9ms
+[PREFILL-TIMING]       uninter:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       conv:         0.7ms (  5.2% of la)
+[PREFILL-TIMING]       prep:         0.4ms (  3.2% of la)
+[PREFILL-TIMING]       convert:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       fla:          3.3ms ( 26.0% of la)
+[PREFILL-TIMING]         fla/cumsum:     0.4ms kkt:     0.3ms solve:     0.5ms
+[PREFILL-TIMING]         fla/wy:         0.4ms state:     0.9ms output:     0.5ms
+[PREFILL-TIMING]       postfla:      0.3ms (  2.4% of la)
+[PREFILL-TIMING]       norm:         0.3ms (  2.0% of la)
+[PREFILL-TIMING]       o_proj:       2.8ms ( 21.7% of la)
+[PREFILL-TIMING]   moe:       231.8ms ( 92.5%)
+[PREFILL-TIMING]     moe breakdown (48 layers):
+[PREFILL-TIMING]       gate:         2.2ms (  0.9% of moe)
+[PREFILL-TIMING]       dma:        216.7ms ( 93.5% of moe)
+[PREFILL-TIMING]         route_d2h:     0.7ms ptr_alloc:     0.4ms ptr_build:     0.2ms
+[PREFILL-TIMING]         cold_h2d:     28.2ms ptr_upload:     0.4ms dma_wait:   186.2ms
+[PREFILL-TIMING]       w1+act:       6.9ms (  3.0% of moe)
+[PREFILL-TIMING]       w2:           3.6ms (  1.5% of moe)
+[PREFILL-TIMING]       scatter:      0.6ms (  0.2% of moe)
+[PREFILL-TIMING]       shared:       1.4ms (  0.6% of moe)
+[PREFILL-TIMING]   other:       1.3ms (  0.5%)
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (288 tokens avg)             [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:         37.79 ms/tok  ( 26.5 tok/s)    [36m│[0m
+  [36m│[0m  Attention:      4.62 ms  (LA   3.34 | GQA   1.28) [36m│[0m
+  [36m│[0m  MoE:           27.99 ms  (sync  0.78 loop 25.36) [36m│[0m
+  [36m│[0m    w13:          0.00 ms  | silu+w2    0.00 ms   [36m│[0m
+  [36m│[0m    shared:       0.62 ms  | gate       0.35 ms   [36m│[0m
+  [36m│[0m    D2H topk:     0.01 ms  | APFL       0.00 ms   [36m│[0m
+  [36m│[0m    Replay pad:   0.32 ms  | D2D        0.15 ms   [36m│[0m
+  [36m│[0m  Norms+Emb:      0.83 ms  | Dense      0.00 ms   [36m│[0m
+  [36m│[0m  LM Head:        0.56 ms                         [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe: cold 320.0/tok | HCS   0.0/tok | 495.00 MB/tok [36m│[0m
+  [36m│[0m  DMA calls: 1280.0/tok | HCS cache 0 | hit/miss 0/81920 [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+[PREFILL-TIMING] 43 tokens, 286.2ms total (150 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.8ms (  0.3%)
+[PREFILL-TIMING]   attn:       16.7ms (  5.8%)  [gqa: 3.8ms, la: 12.9ms]
+[PREFILL-TIMING]     gqa breakdown (10 FA2 calls: 10 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:         2.3ms ( 60.6% of gqa)
+[PREFILL-TIMING]       qknorm:       0.1ms (  3.1% of gqa)
+[PREFILL-TIMING]       rope:         0.1ms (  3.0% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.1ms (  2.1% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.1ms over 10 calls
+[PREFILL-TIMING]       fa2         0.2ms (  4.0% of gqa)  [0.0ms/call avg]
+[PREFILL-TIMING]       gate:         0.1ms (  2.0% of gqa)
+[PREFILL-TIMING]       o_proj:       0.9ms ( 24.1% of gqa)
+[PREFILL-TIMING]     hqq projection internals:
+[PREFILL-TIMING]       marlin_float_zp:      5.4ms over 130 calls
+[PREFILL-TIMING]       group_sums:           0.9ms over 130 calls
+[PREFILL-TIMING]       correction_gemm:      2.2ms over 130 calls
+[PREFILL-TIMING]       correction_add:       0.9ms over 130 calls
+[PREFILL-TIMING]     la breakdown (36 layers):
+[PREFILL-TIMING]       proj:         4.7ms ( 36.7% of la)
+[PREFILL-TIMING]         qkvz:         2.5ms    ba:      1.9ms
+[PREFILL-TIMING]       uninter:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       conv:         0.7ms (  5.1% of la)
+[PREFILL-TIMING]       prep:         0.5ms (  4.1% of la)
+[PREFILL-TIMING]       convert:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       fla:          3.3ms ( 25.7% of la)
+[PREFILL-TIMING]         fla/cumsum:     0.4ms kkt:     0.3ms solve:     0.5ms
+[PREFILL-TIMING]         fla/wy:         0.4ms state:     0.9ms output:     0.5ms
+[PREFILL-TIMING]       postfla:      0.3ms (  2.3% of la)
+[PREFILL-TIMING]       norm:         0.3ms (  2.0% of la)
+[PREFILL-TIMING]       o_proj:       2.7ms ( 21.3% of la)
+[PREFILL-TIMING]   moe:       267.4ms ( 93.4%)
+[PREFILL-TIMING]     moe breakdown (48 layers):
+[PREFILL-TIMING]       gate:         2.2ms (  0.8% of moe)
+[PREFILL-TIMING]       dma:        251.4ms ( 94.0% of moe)
+[PREFILL-TIMING]         route_d2h:     0.7ms ptr_alloc:     0.4ms ptr_build:     0.2ms
+[PREFILL-TIMING]         cold_h2d:     32.5ms ptr_upload:     0.4ms dma_wait:   216.3ms
+[PREFILL-TIMING]       w1+act:       7.6ms (  2.8% of moe)
+[PREFILL-TIMING]       w2:           4.0ms (  1.5% of moe)
+[PREFILL-TIMING]       scatter:      0.6ms (  0.2% of moe)
+[PREFILL-TIMING]       shared:       1.1ms (  0.4% of moe)
+[PREFILL-TIMING]   other:       1.3ms (  0.4%)
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (544 tokens avg)             [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:         37.99 ms/tok  ( 26.3 tok/s)    [36m│[0m
+  [36m│[0m  Attention:      4.91 ms  (LA   3.54 | GQA   1.37) [36m│[0m
+  [36m│[0m  MoE:           29.60 ms  (sync  0.83 loop 26.81) [36m│[0m
+  [36m│[0m    w13:          0.00 ms  | silu+w2    0.00 ms   [36m│[0m
+  [36m│[0m    shared:       0.65 ms  | gate       0.37 ms   [36m│[0m
+  [36m│[0m    D2H topk:     0.01 ms  | APFL       0.00 ms   [36m│[0m
+  [36m│[0m    Replay pad:   0.17 ms  | D2D        0.16 ms   [36m│[0m
+  [36m│[0m  Norms+Emb:      0.89 ms  | Dense      0.00 ms   [36m│[0m
+  [36m│[0m  LM Head:        0.59 ms                         [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe: cold 320.0/tok | HCS   0.0/tok | 495.00 MB/tok [36m│[0m
+  [36m│[0m  DMA calls: 1280.0/tok | HCS cache 0 | hit/miss 0/163840 [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+[PREFILL-TIMING] 35 tokens, 269.6ms total (130 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.8ms (  0.3%)
+[PREFILL-TIMING]   attn:       16.6ms (  6.2%)  [gqa: 3.8ms, la: 12.9ms]
+[PREFILL-TIMING]     gqa breakdown (10 FA2 calls: 10 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:         2.3ms ( 60.0% of gqa)
+[PREFILL-TIMING]       qknorm:       0.1ms (  3.4% of gqa)
+[PREFILL-TIMING]       rope:         0.1ms (  3.0% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.1ms (  2.1% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.1ms over 10 calls
+[PREFILL-TIMING]       fa2         0.2ms (  4.1% of gqa)  [0.0ms/call avg]
+[PREFILL-TIMING]       gate:         0.1ms (  2.1% of gqa)
+[PREFILL-TIMING]       o_proj:       0.9ms ( 24.2% of gqa)
+[PREFILL-TIMING]     hqq projection internals:
+[PREFILL-TIMING]       marlin_float_zp:      5.4ms over 130 calls
+[PREFILL-TIMING]       group_sums:           0.9ms over 130 calls
+[PREFILL-TIMING]       correction_gemm:      2.2ms over 130 calls
+[PREFILL-TIMING]       correction_add:       0.9ms over 130 calls
+[PREFILL-TIMING]     la breakdown (36 layers):
+[PREFILL-TIMING]       proj:         4.7ms ( 36.8% of la)
+[PREFILL-TIMING]         qkvz:         2.5ms    ba:      1.9ms
+[PREFILL-TIMING]       uninter:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       conv:         0.7ms (  5.1% of la)
+[PREFILL-TIMING]       prep:         0.4ms (  3.2% of la)
+[PREFILL-TIMING]       convert:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       fla:          3.4ms ( 26.2% of la)
+[PREFILL-TIMING]         fla/cumsum:     0.4ms kkt:     0.3ms solve:     0.5ms
+[PREFILL-TIMING]         fla/wy:         0.4ms state:     0.9ms output:     0.5ms
+[PREFILL-TIMING]       postfla:      0.3ms (  2.4% of la)
+[PREFILL-TIMING]       norm:         0.3ms (  1.9% of la)
+[PREFILL-TIMING]       o_proj:       2.7ms ( 21.4% of la)
+[PREFILL-TIMING]   moe:       250.2ms ( 92.8%)
+[PREFILL-TIMING]     moe breakdown (48 layers):
+[PREFILL-TIMING]       gate:         2.2ms (  0.9% of moe)
+[PREFILL-TIMING]       dma:        235.1ms ( 94.0% of moe)
+[PREFILL-TIMING]         route_d2h:     0.8ms ptr_alloc:     0.5ms ptr_build:     0.2ms
+[PREFILL-TIMING]         cold_h2d:     29.6ms ptr_upload:     0.4ms dma_wait:   203.0ms
+[PREFILL-TIMING]       w1+act:       7.1ms (  2.8% of moe)
+[PREFILL-TIMING]       w2:           3.7ms (  1.5% of moe)
+[PREFILL-TIMING]       scatter:      0.6ms (  0.2% of moe)
+[PREFILL-TIMING]       shared:       1.0ms (  0.4% of moe)
+[PREFILL-TIMING]   other:       1.9ms (  0.7%)
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (800 tokens avg)             [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:         38.02 ms/tok  ( 26.3 tok/s)    [36m│[0m
+  [36m│[0m  Attention:      5.00 ms  (LA   3.60 | GQA   1.39) [36m│[0m
+  [36m│[0m  MoE:           30.16 ms  (sync  0.84 loop 27.31) [36m│[0m
+  [36m│[0m    w13:          0.00 ms  | silu+w2    0.00 ms   [36m│[0m
+  [36m│[0m    shared:       0.67 ms  | gate       0.38 ms   [36m│[0m
+  [36m│[0m    D2H topk:     0.01 ms  | APFL       0.00 ms   [36m│[0m
+  [36m│[0m    Replay pad:   0.12 ms  | D2D        0.17 ms   [36m│[0m
+  [36m│[0m  Norms+Emb:      0.90 ms  | Dense      0.00 ms   [36m│[0m
+  [36m│[0m  LM Head:        0.60 ms                         [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe: cold 320.0/tok | HCS   0.0/tok | 495.00 MB/tok [36m│[0m
+  [36m│[0m  DMA calls: 1280.0/tok | HCS cache 0 | hit/miss 0/245760 [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+[PREFILL-TIMING] 29 tokens, 249.2ms total (116 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.9ms (  0.3%)
+[PREFILL-TIMING]   attn:       16.3ms (  6.5%)  [gqa: 3.6ms, la: 12.7ms]
+[PREFILL-TIMING]     gqa breakdown (10 FA2 calls: 10 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:         2.1ms ( 59.0% of gqa)
+[PREFILL-TIMING]       qknorm:       0.1ms (  3.2% of gqa)
+[PREFILL-TIMING]       rope:         0.1ms (  3.2% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.1ms (  2.3% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.1ms over 10 calls
+[PREFILL-TIMING]       fa2         0.2ms (  4.2% of gqa)  [0.0ms/call avg]
+[PREFILL-TIMING]       gate:         0.1ms (  2.2% of gqa)
+[PREFILL-TIMING]       o_proj:       0.9ms ( 24.1% of gqa)
+[PREFILL-TIMING]     hqq projection internals:
+[PREFILL-TIMING]       marlin_float_zp:      4.6ms over 130 calls
+[PREFILL-TIMING]       group_sums:           0.9ms over 130 calls
+[PREFILL-TIMING]       correction_gemm:      2.4ms over 130 calls
+[PREFILL-TIMING]       correction_add:       0.9ms over 130 calls
+[PREFILL-TIMING]     la breakdown (36 layers):
+[PREFILL-TIMING]       proj:         4.6ms ( 36.5% of la)
+[PREFILL-TIMING]         qkvz:         2.4ms    ba:      1.9ms
+[PREFILL-TIMING]       uninter:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       conv:         0.7ms (  5.2% of la)
+[PREFILL-TIMING]       prep:         0.4ms (  3.3% of la)
+[PREFILL-TIMING]       convert:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       fla:          3.4ms ( 26.8% of la)
+[PREFILL-TIMING]         fla/cumsum:     0.4ms kkt:     0.3ms solve:     0.5ms
+[PREFILL-TIMING]         fla/wy:         0.4ms state:     0.9ms output:     0.5ms
+[PREFILL-TIMING]       postfla:      0.3ms (  2.4% of la)
+[PREFILL-TIMING]       norm:         0.3ms (  2.0% of la)
+[PREFILL-TIMING]       o_proj:       2.6ms ( 20.6% of la)
+[PREFILL-TIMING]   moe:       230.6ms ( 92.5%)
+[PREFILL-TIMING]     moe breakdown (48 layers):
+[PREFILL-TIMING]       gate:         2.2ms (  1.0% of moe)
+[PREFILL-TIMING]       dma:        215.8ms ( 93.6% of moe)
+[PREFILL-TIMING]         route_d2h:     0.8ms ptr_alloc:     0.4ms ptr_build:     0.2ms
+[PREFILL-TIMING]         cold_h2d:     30.4ms ptr_upload:     0.4ms dma_wait:   183.0ms
+[PREFILL-TIMING]       w1+act:       6.9ms (  3.0% of moe)
+[PREFILL-TIMING]       w2:           3.6ms (  1.6% of moe)
+[PREFILL-TIMING]       scatter:      0.6ms (  0.2% of moe)
+[PREFILL-TIMING]       shared:       1.1ms (  0.5% of moe)
+[PREFILL-TIMING]   other:       1.4ms (  0.6%)
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (1056 tokens avg)             [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:         38.11 ms/tok  ( 26.2 tok/s)    [36m│[0m
+  [36m│[0m  Attention:      5.06 ms  (LA   3.65 | GQA   1.40) [36m│[0m
+  [36m│[0m  MoE:           30.50 ms  (sync  0.85 loop 27.61) [36m│[0m
+  [36m│[0m    w13:          0.00 ms  | silu+w2    0.00 ms   [36m│[0m
+  [36m│[0m    shared:       0.68 ms  | gate       0.39 ms   [36m│[0m
+  [36m│[0m    D2H topk:     0.01 ms  | APFL       0.00 ms   [36m│[0m
+  [36m│[0m    Replay pad:   0.09 ms  | D2D        0.17 ms   [36m│[0m
+  [36m│[0m  Norms+Emb:      0.92 ms  | Dense      0.00 ms   [36m│[0m
+  [36m│[0m  LM Head:        0.61 ms                         [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe: cold 320.0/tok | HCS   0.0/tok | 495.00 MB/tok [36m│[0m
+  [36m│[0m  DMA calls: 1280.0/tok | HCS cache 0 | hit/miss 0/327680 [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+[PREFILL-TIMING] 41 tokens, 286.9ms total (143 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.9ms (  0.3%)
+[PREFILL-TIMING]   attn:       17.3ms (  6.0%)  [gqa: 3.9ms, la: 13.3ms]
+[PREFILL-TIMING]     gqa breakdown (10 FA2 calls: 10 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:         2.3ms ( 59.6% of gqa)
+[PREFILL-TIMING]       qknorm:       0.1ms (  2.9% of gqa)
+[PREFILL-TIMING]       rope:         0.1ms (  2.9% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.1ms (  2.1% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.1ms over 10 calls
+[PREFILL-TIMING]       fa2         0.2ms (  4.1% of gqa)  [0.0ms/call avg]
+[PREFILL-TIMING]       gate:         0.1ms (  2.0% of gqa)
+[PREFILL-TIMING]       o_proj:       0.9ms ( 23.6% of gqa)
+[PREFILL-TIMING]     hqq projection internals:
+[PREFILL-TIMING]       marlin_float_zp:      5.4ms over 130 calls
+[PREFILL-TIMING]       group_sums:           0.9ms over 130 calls
+[PREFILL-TIMING]       correction_gemm:      2.4ms over 130 calls
+[PREFILL-TIMING]       correction_add:       0.9ms over 130 calls
+[PREFILL-TIMING]     la breakdown (36 layers):
+[PREFILL-TIMING]       proj:         5.0ms ( 37.7% of la)
+[PREFILL-TIMING]         qkvz:         2.7ms    ba:      2.0ms
+[PREFILL-TIMING]       uninter:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       conv:         0.7ms (  5.0% of la)
+[PREFILL-TIMING]       prep:         0.4ms (  3.3% of la)
+[PREFILL-TIMING]       convert:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       fla:          3.4ms ( 25.5% of la)
+[PREFILL-TIMING]         fla/cumsum:     0.4ms kkt:     0.3ms solve:     0.5ms
+[PREFILL-TIMING]         fla/wy:         0.4ms state:     0.9ms output:     0.5ms
+[PREFILL-TIMING]       postfla:      0.3ms (  2.3% of la)
+[PREFILL-TIMING]       norm:         0.3ms (  2.0% of la)
+[PREFILL-TIMING]       o_proj:       2.8ms ( 21.1% of la)
+[PREFILL-TIMING]   moe:       266.8ms ( 93.0%)
+[PREFILL-TIMING]     moe breakdown (48 layers):
+[PREFILL-TIMING]       gate:         2.5ms (  0.9% of moe)
+[PREFILL-TIMING]       dma:        250.4ms ( 93.9% of moe)
+[PREFILL-TIMING]         route_d2h:     0.8ms ptr_alloc:     0.4ms ptr_build:     0.2ms
+[PREFILL-TIMING]         cold_h2d:     34.6ms ptr_upload:     0.4ms dma_wait:   213.2ms
+[PREFILL-TIMING]       w1+act:       7.7ms (  2.9% of moe)
+[PREFILL-TIMING]       w2:           4.0ms (  1.5% of moe)
+[PREFILL-TIMING]       scatter:      0.6ms (  0.2% of moe)
+[PREFILL-TIMING]       shared:       1.1ms (  0.4% of moe)
+[PREFILL-TIMING]   other:       1.9ms (  0.7%)
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (1312 tokens avg)             [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:         38.13 ms/tok  ( 26.2 tok/s)    [36m│[0m
+  [36m│[0m  Attention:      5.10 ms  (LA   3.68 | GQA   1.42) [36m│[0m
+  [36m│[0m  MoE:           30.65 ms  (sync  0.86 loop 27.74) [36m│[0m
+  [36m│[0m    w13:          0.00 ms  | silu+w2    0.00 ms   [36m│[0m
+  [36m│[0m    shared:       0.69 ms  | gate       0.39 ms   [36m│[0m
+  [36m│[0m    D2H topk:     0.01 ms  | APFL       0.00 ms   [36m│[0m
+  [36m│[0m    Replay pad:   0.07 ms  | D2D        0.17 ms   [36m│[0m
+  [36m│[0m  Norms+Emb:      0.93 ms  | Dense      0.00 ms   [36m│[0m
+  [36m│[0m  LM Head:        0.62 ms                         [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe: cold 320.0/tok | HCS   0.0/tok | 495.00 MB/tok [36m│[0m
+  [36m│[0m  DMA calls: 1280.0/tok | HCS cache 0 | hit/miss 0/409600 [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+[PREFILL-TIMING] 46 tokens, 280.3ms total (164 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.9ms (  0.3%)
+[PREFILL-TIMING]   attn:       17.1ms (  6.1%)  [gqa: 3.9ms, la: 13.2ms]
+[PREFILL-TIMING]     gqa breakdown (10 FA2 calls: 10 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:         2.3ms ( 60.4% of gqa)
+[PREFILL-TIMING]       qknorm:       0.1ms (  3.2% of gqa)
+[PREFILL-TIMING]       rope:         0.1ms (  3.0% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.1ms (  2.1% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.1ms over 10 calls
+[PREFILL-TIMING]       fa2         0.2ms (  4.3% of gqa)  [0.0ms/call avg]
+[PREFILL-TIMING]       gate:         0.1ms (  2.0% of gqa)
+[PREFILL-TIMING]       o_proj:       0.9ms ( 24.0% of gqa)
+[PREFILL-TIMING]     hqq projection internals:
+[PREFILL-TIMING]       marlin_float_zp:      5.5ms over 130 calls
+[PREFILL-TIMING]       group_sums:           1.0ms over 130 calls
+[PREFILL-TIMING]       correction_gemm:      2.2ms over 130 calls
+[PREFILL-TIMING]       correction_add:       1.0ms over 130 calls
+[PREFILL-TIMING]     la breakdown (36 layers):
+[PREFILL-TIMING]       proj:         4.9ms ( 37.3% of la)
+[PREFILL-TIMING]         qkvz:         2.6ms    ba:      2.0ms
+[PREFILL-TIMING]       uninter:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       conv:         0.7ms (  5.2% of la)
+[PREFILL-TIMING]       prep:         0.4ms (  3.3% of la)
+[PREFILL-TIMING]       convert:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       fla:          3.4ms ( 25.7% of la)
+[PREFILL-TIMING]         fla/cumsum:     0.4ms kkt:     0.3ms solve:     0.5ms
+[PREFILL-TIMING]         fla/wy:         0.4ms state:     0.9ms output:     0.5ms
+[PREFILL-TIMING]       postfla:      0.3ms (  2.4% of la)
+[PREFILL-TIMING]       norm:         0.3ms (  2.0% of la)
+[PREFILL-TIMING]       o_proj:       2.8ms ( 21.2% of la)
+[PREFILL-TIMING]   moe:       260.4ms ( 92.9%)
+[PREFILL-TIMING]     moe breakdown (48 layers):
+[PREFILL-TIMING]       gate:         2.2ms (  0.9% of moe)
+[PREFILL-TIMING]       dma:        244.7ms ( 93.9% of moe)
+[PREFILL-TIMING]         route_d2h:     0.9ms ptr_alloc:     0.4ms ptr_build:     0.2ms
+[PREFILL-TIMING]         cold_h2d:     33.6ms ptr_upload:     0.4ms dma_wait:   208.4ms
+[PREFILL-TIMING]       w1+act:       7.5ms (  2.9% of moe)
+[PREFILL-TIMING]       w2:           3.9ms (  1.5% of moe)
+[PREFILL-TIMING]       scatter:      0.6ms (  0.2% of moe)
+[PREFILL-TIMING]       shared:       1.0ms (  0.4% of moe)
+[PREFILL-TIMING]   other:       1.9ms (  0.7%)
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (1568 tokens avg)             [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:         38.11 ms/tok  ( 26.2 tok/s)    [36m│[0m
+  [36m│[0m  Attention:      5.13 ms  (LA   3.69 | GQA   1.43) [36m│[0m
+  [36m│[0m  MoE:           30.74 ms  (sync  0.86 loop 27.82) [36m│[0m
+  [36m│[0m    w13:          0.00 ms  | silu+w2    0.00 ms   [36m│[0m
+  [36m│[0m    shared:       0.69 ms  | gate       0.39 ms   [36m│[0m
+  [36m│[0m    D2H topk:     0.01 ms  | APFL       0.00 ms   [36m│[0m
+  [36m│[0m    Replay pad:   0.06 ms  | D2D        0.17 ms   [36m│[0m
+  [36m│[0m  Norms+Emb:      0.93 ms  | Dense      0.00 ms   [36m│[0m
+  [36m│[0m  LM Head:        0.62 ms                         [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe: cold 320.0/tok | HCS   0.0/tok | 495.00 MB/tok [36m│[0m
+  [36m│[0m  DMA calls: 1280.0/tok | HCS cache 0 | hit/miss 0/491520 [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [32mHeatmap: 9,615 experts ranked from 9,615 entries[0m
+  [2mVRAM calibration: baseline 25488 MB | prefill 433.0 KB/tok, decode -1.9 KB/tok | HCS allowance prefill: short 23442 MB, long 6774 MB | decode: short 24810 MB, long 24882 MB | idle floors prefill=2046 MB decode=678 MB | decode-resident HCS budget=24810 MB[0m
+  [2mGPU0 HCS: 10240 experts (9615 ranked + 625 unranked), reclaimable: 24,810 MB[0m
+
+[1m[36m▸ Loading GPU0 HCS pool (fully reclaimable)[0m
+
+[1m[36m▸ HCS pool loaded[0m
+  [32mHCS pool: 0/10240 experts loaded in 0.00s (0.0% coverage), 0.0 MB VRAM, 0 free slots, gpu_route_sync=false, mapped_reads=false | soft: 10240 experts in 0.94s (15840.0 MB, host_mode=source) | total: 10240/10240 (100.0%) coverage[0m
+  [2mLoaded in 1.0s[0m
+
+[1m[36m▸ Decode validation[0m
+  [32mSkipped: Rust prefill already warmed before HCS budgeting[0m
+
+[1m[36m▸ VRAM monitor: runtime warnings enabled[0m
+  [32mSafety margin: 600 MB — warnings on every new low below this[0m
+
+[1m[32mKRASIS SERVER READY[0m
+  [32mModel:[0m    [1mQwen3.5-35B-A3B[0m
+  [32mAddress:[0m  [1m0.0.0.0:18016[0m
+  [32mContext:[0m  117,024 tokens  |  KV cache: 1,000 MB
+  [32mDecode:[0m   GPU  |  HCS: on  |  Think: on
+  [32mClient setup:[0m
+    Base URL:      [1mhttp://127.0.0.1:18016/v1[0m
+    Chat endpoint: http://127.0.0.1:18016/v1/chat/completions
+    Models:        http://127.0.0.1:18016/v1/models
+    API key:       [1mX[0m [2m(any value)[0m
+    Model name:    [1mQwen3.5-35B-A3B-vision[0m
+                   [2mvision-capable; use this same model for text and images[0m
+  [2mPress Q or Ctrl-C to stop[0m
+
+
+[1m[36mKRASIS BENCHMARK[0m
+
+[1m[36m▸ Collecting system info[0m
+  Model:    [1mQwen3.5-35B-A3B[0m
+  GPUs:     1x NVIDIA GeForce RTX 5090
+  Strategy: gpu_decode (layer_grouped(2))
+
+[1m[36m▸ Loading benchmark prompts (warmup + timed at 1K/5K/10K/20K/35K/50K)[0m
+  Warmup prefill:  3 prompts, ~25,000 tokens each
+  Timed prefill:   6 prompts at 1K/5K/10K/20K/35K/50K tokens
+    [1] 1,000 tokens
+    [2] 5,000 tokens
+    [3] 10,000 tokens
+    [4] 20,000 tokens
+    [5] 35,000 tokens
+    [6] 50,000 tokens
+  Decode:          6 prompts (50/100/250 tokens, warmup + timed)
+
+[1m[36m▸ Warmup (3 prefill + 3 decode via engine)[0m
+  Warmup: 2 short engine requests...
+[PREFILL-TIMING] 18 tokens, 227.3ms total (79 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.9ms (  0.4%)
+[PREFILL-TIMING]   attn:       15.9ms (  7.0%)  [gqa: 3.5ms, la: 12.4ms]
+[PREFILL-TIMING]     gqa breakdown (10 FA2 calls: 10 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:         2.1ms ( 58.6% of gqa)
+[PREFILL-TIMING]       qknorm:       0.1ms (  3.2% of gqa)
+[PREFILL-TIMING]       rope:         0.1ms (  3.2% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.1ms (  2.3% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.1ms over 10 calls
+[PREFILL-TIMING]       fa2         0.1ms (  4.2% of gqa)  [0.0ms/call avg]
+[PREFILL-TIMING]       gate:         0.1ms (  2.3% of gqa)
+[PREFILL-TIMING]       o_proj:       0.9ms ( 24.4% of gqa)
+[PREFILL-TIMING]     hqq projection internals:
+[PREFILL-TIMING]       marlin_float_zp:      4.4ms over 130 calls
+[PREFILL-TIMING]       group_sums:           0.9ms over 130 calls
+[PREFILL-TIMING]       correction_gemm:      2.3ms over 130 calls
+[PREFILL-TIMING]       correction_add:       0.9ms over 130 calls
+[PREFILL-TIMING]     la breakdown (36 layers):
+[PREFILL-TIMING]       proj:         4.4ms ( 35.3% of la)
+[PREFILL-TIMING]         qkvz:         2.2ms    ba:      1.8ms
+[PREFILL-TIMING]       uninter:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       conv:         0.7ms (  5.3% of la)
+[PREFILL-TIMING]       prep:         0.4ms (  3.3% of la)
+[PREFILL-TIMING]       convert:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       fla:          3.4ms ( 27.5% of la)
+[PREFILL-TIMING]         fla/cumsum:     0.4ms kkt:     0.3ms solve:     0.5ms
+[PREFILL-TIMING]         fla/wy:         0.4ms state:     0.9ms output:     0.5ms
+[PREFILL-TIMING]       postfla:      0.3ms (  2.4% of la)
+[PREFILL-TIMING]       norm:         0.2ms (  2.0% of la)
+[PREFILL-TIMING]       o_proj:       2.6ms ( 21.0% of la)
+[PREFILL-TIMING]   moe:        13.9ms (  6.1%)
+[PREFILL-TIMING]     moe breakdown (48 layers):
+[PREFILL-TIMING]       gate:         2.2ms ( 15.5% of moe)
+[PREFILL-TIMING]       dma:          1.8ms ( 12.9% of moe)
+[PREFILL-TIMING]         route_d2h:     0.7ms ptr_alloc:     0.4ms ptr_build:     0.0ms
+[PREFILL-TIMING]         cold_h2d:      0.0ms ptr_upload:     0.4ms dma_wait:     0.1ms
+[PREFILL-TIMING]       w1+act:       5.3ms ( 37.9% of moe)
+[PREFILL-TIMING]       w2:           2.7ms ( 19.8% of moe)
+[PREFILL-TIMING]       scatter:      0.5ms (  3.8% of moe)
+[PREFILL-TIMING]       shared:       0.9ms (  6.8% of moe)
+[PREFILL-TIMING]   other:     196.6ms ( 86.5%)
+  [32mdecode: 7 tokens in 0.07s (102.2 tok/s)  VRAM: 9558 MB free now, 9558 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=640/320 protected=9600 promotions=0 evictions=0 request_promotions=0/640 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (7 tokens avg)             [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:          9.00 ms/tok  (111.2 tok/s)    [36m│[0m
+  [36m│[0m  Attention:      0.71 ms  ( 7.9%)              [36m│[0m
+  [36m│[0m    LA (36):      0.55 ms                        [36m│[0m
+  [36m│[0m      Proj:       0.20 ms  (35.6%)             [36m│[0m
+  [36m│[0m      Conv:       0.07 ms  (13.4%)             [36m│[0m
+  [36m│[0m      Recur:      0.16 ms  (28.4%)             [36m│[0m
+  [36m│[0m      Out:        0.11 ms  (19.8%)             [36m│[0m
+  [36m│[0m      Other:      0.02 ms                        [36m│[0m
+  [36m│[0m    GQA (12):     0.16 ms                        [36m│[0m
+  [36m│[0m      Proj:       0.09 ms  (56.6%)             [36m│[0m
+  [36m│[0m      Attn:       0.03 ms  (16.4%)             [36m│[0m
+  [36m│[0m      Out:        0.04 ms  (23.4%)             [36m│[0m
+  [36m│[0m  MoE:            0.78 ms  ( 8.7%)              [36m│[0m
+  [36m│[0m  Norms+Emb:      0.14 ms  ( 1.6%)              [36m│[0m
+  [36m│[0m  Dense MLP:      0.00 ms  ( 0.0%)              [36m│[0m
+  [36m│[0m  LM Head:        0.09 ms  ( 1.0%)              [36m│[0m
+  [36m│[0m  Other:          7.28 ms  (80.9%)              [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  MoE breakdown (of 0.78 ms):                    [36m│[0m
+  [36m│[0m    Route sync:     0.13 ms  (16.1%)             [36m│[0m
+  [36m│[0m    Expert loop:    0.34 ms  (44.0%)             [36m│[0m
+  [36m│[0m      w13 GEMV:    0.17 ms  (50.7%)             [36m│[0m
+  [36m│[0m      silu+w2:     0.16 ms  (45.9%)             [36m│[0m
+  [36m│[0m      Other:       0.01 ms                        [36m│[0m
+  [36m│[0m    Shared exp:     0.10 ms  (12.4%)             [36m│[0m
+  [36m│[0m    MoE other:      0.22 ms  (27.5%)             [36m│[0m
+  [36m│[0m  MoE other detail:                               [36m│[0m
+  [36m│[0m    Gate GEMV:      0.06 ms                        [36m│[0m
+  [36m│[0m    D2H topk:      0.00 ms                        [36m│[0m
+  [36m│[0m    APFL+setup:    0.00 ms                        [36m│[0m
+  [36m│[0m    Replay pad:     0.10 ms                        [36m│[0m
+  [36m│[0m    D2D copy:      0.02 ms                        [36m│[0m
+  [36m│[0m    Remainder:     0.03 ms                        [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe DMA (non-serialized):                     [36m│[0m
+  [36m│[0m    Cold experts/tok: 0.0 (0 DMA calls)      [36m│[0m
+  [36m│[0m    HCS experts/tok:  320.0 (10240 cached)            [36m│[0m
+  [36m│[0m    DMA bytes/tok:    0.00 MB                     [36m│[0m
+  [36m│[0m    HCS hit/miss:     320/0                        [36m│[0m
+  [36m│[0m    Avg DMA call size: 0.0 KB                   [36m│[0m
+  [36m│[0m    Est PCIe BW:      0.0 GB/s (cold fraction)  [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.037169, "lock_ms": 0.000781, "prepare_runtime_ms": 264.255089, "prompt_hcs_shadow_ms": 0.008566, "prompt_tokens": 18, "release_scratch_ms": 19.849477, "restore_runtime_ms": 192.795682, "run_finalize_ms": 227.714498, "scratch_ms": 3.9070249999999995, "stop_ids_ms": 0.042698, "tokenize_ms": 0.276651, "total_ms": 708.890532, "unaccounted_ms": 0.0028960000000779473}
+[PREFILL-TIMING] 19 tokens, 222.7ms total (85 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.8ms (  0.4%)
+[PREFILL-TIMING]   attn:       15.8ms (  7.1%)  [gqa: 3.5ms, la: 12.3ms]
+[PREFILL-TIMING]     gqa breakdown (10 FA2 calls: 10 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:         2.1ms ( 59.6% of gqa)
+[PREFILL-TIMING]       qknorm:       0.1ms (  3.2% of gqa)
+[PREFILL-TIMING]       rope:         0.1ms (  3.2% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.1ms (  2.3% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.1ms over 10 calls
+[PREFILL-TIMING]       fa2         0.1ms (  4.1% of gqa)  [0.0ms/call avg]
+[PREFILL-TIMING]       gate:         0.1ms (  2.2% of gqa)
+[PREFILL-TIMING]       o_proj:       0.9ms ( 24.4% of gqa)
+[PREFILL-TIMING]     hqq projection internals:
+[PREFILL-TIMING]       marlin_float_zp:      4.4ms over 130 calls
+[PREFILL-TIMING]       group_sums:           1.0ms over 130 calls
+[PREFILL-TIMING]       correction_gemm:      2.2ms over 130 calls
+[PREFILL-TIMING]       correction_add:       0.9ms over 130 calls
+[PREFILL-TIMING]     la breakdown (36 layers):
+[PREFILL-TIMING]       proj:         4.3ms ( 34.7% of la)
+[PREFILL-TIMING]         qkvz:         2.1ms    ba:      1.8ms
+[PREFILL-TIMING]       uninter:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       conv:         0.7ms (  5.5% of la)
+[PREFILL-TIMING]       prep:         0.4ms (  3.2% of la)
+[PREFILL-TIMING]       convert:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       fla:          3.4ms ( 27.5% of la)
+[PREFILL-TIMING]         fla/cumsum:     0.4ms kkt:     0.3ms solve:     0.5ms
+[PREFILL-TIMING]         fla/wy:         0.4ms state:     0.9ms output:     0.5ms
+[PREFILL-TIMING]       postfla:      0.3ms (  2.5% of la)
+[PREFILL-TIMING]       norm:         0.2ms (  2.0% of la)
+[PREFILL-TIMING]       o_proj:       2.6ms ( 21.4% of la)
+[PREFILL-TIMING]   moe:        14.8ms (  6.6%)
+[PREFILL-TIMING]     moe breakdown (48 layers):
+[PREFILL-TIMING]       gate:         2.2ms ( 14.7% of moe)
+[PREFILL-TIMING]       dma:          1.8ms ( 12.1% of moe)
+[PREFILL-TIMING]         route_d2h:     0.7ms ptr_alloc:     0.4ms ptr_build:     0.0ms
+[PREFILL-TIMING]         cold_h2d:      0.0ms ptr_upload:     0.4ms dma_wait:     0.1ms
+[PREFILL-TIMING]       w1+act:       5.7ms ( 39.0% of moe)
+[PREFILL-TIMING]       w2:           3.0ms ( 20.3% of moe)
+[PREFILL-TIMING]       scatter:      0.5ms (  3.6% of moe)
+[PREFILL-TIMING]       shared:       1.0ms (  7.0% of moe)
+[PREFILL-TIMING]   other:     191.2ms ( 85.9%)
+  [32mdecode: 7 tokens in 0.06s (116.1 tok/s)  VRAM: 9556 MB free now, 9556 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=640/320 protected=9600 promotions=0 evictions=0 request_promotions=0/640 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (7 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:          8.44 ms/tok  (118.4 tok/s)    [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Graph inter-layer breakdown:                  [36m│[0m
+  [36m│[0m    GPU compute:   0.16 ms  ( 1.9%)            [36m│[0m
+  [36m│[0m    Sync wait:     7.84 ms  (92.8%)            [36m│[0m
+  [36m│[0m      inter:       7.15 ms  final:  0.69 ms     [36m│[0m
+  [36m│[0m    Classify:      0.02 ms  ( 0.2%)            [36m│[0m
+  [36m│[0m    Cold DMA:      0.00 ms  ( 0.0%)            [36m│[0m
+  [36m│[0m    Upload:        0.10 ms  ( 1.1%)            [36m│[0m
+  [36m│[0m    Launch:        0.33 ms  ( 3.9%)            [36m│[0m
+  [36m│[0m  Graph replay segment CUDA events:            [36m│[0m
+  [36m│[0m    Segment total:  7.99 ms                  [36m│[0m
+  [36m│[0m    First route:   0.14 ms  ( 1.7%)        [36m│[0m
+  [36m│[0m    Middle segs:   7.16 ms  (89.7%)        [36m│[0m
+  [36m│[0m    Final seg:     0.69 ms  ( 8.6%)        [36m│[0m
+  [36m│[0m  Graph replay typed segment totals:          [36m│[0m
+  [36m│[0m    First:       0.14 ms/tok (0.14 ms/seg) [36m│[0m
+  [36m│[0m    LA route:    5.49 ms/tok (0.19 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:   1.67 ms/tok (0.17 ms/seg) [36m│[0m
+  [36m│[0m    Final:       0.69 ms/tok (0.69 ms/seg) [36m│[0m
+  [36m│[0m  Sync wait attributed to segment:           [36m│[0m
+  [36m│[0m    First:       0.13 ms/tok (0.13 ms/seg) [36m│[0m
+  [36m│[0m    LA route:    5.38 ms/tok (0.19 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:   1.64 ms/tok (0.16 ms/seg) [36m│[0m
+  [36m│[0m    Final:       0.69 ms/tok (0.69 ms/seg) [36m│[0m
+  [36m│[0m  Slowest sync-wait segments:                [36m│[0m
+  [36m│[0m    #40   0.69 ms  graph40 experts L39 + final           [36m│[0m
+  [36m│[0m    #28   0.19 ms  graph28 experts L27 + route L28 LA    [36m│[0m
+  [36m│[0m    #8    0.19 ms  graph8 experts L7 + route L8 LA       [36m│[0m
+  [36m│[0m    #1    0.19 ms  graph1 experts L0 + route L1 LA       [36m│[0m
+  [36m│[0m    #20   0.19 ms  graph20 experts L19 + route L20 LA    [36m│[0m
+  [36m│[0m    #12   0.19 ms  graph12 experts L11 + route L12 LA    [36m│[0m
+  [36m│[0m  Slowest graph replay segments:              [36m│[0m
+  [36m│[0m    #40   0.69 ms  graph40 experts L39 + final           [36m│[0m
+  [36m│[0m    #25   0.19 ms  graph25 experts L24 + route L25 LA    [36m│[0m
+  [36m│[0m    #1    0.19 ms  graph1 experts L0 + route L1 LA       [36m│[0m
+  [36m│[0m    #28   0.19 ms  graph28 experts L27 + route L28 LA    [36m│[0m
+  [36m│[0m    #29   0.19 ms  graph29 experts L28 + route L29 LA    [36m│[0m
+  [36m│[0m    #8    0.19 ms  graph8 experts L7 + route L8 LA       [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe DMA (non-serialized):                     [36m│[0m
+  [36m│[0m    Cold experts/tok: 0.0 (0 DMA calls)      [36m│[0m
+  [36m│[0m    HCS experts/tok:  320.0 (10240 cached)            [36m│[0m
+  [36m│[0m    DMA bytes/tok:    0.00 MB                     [36m│[0m
+  [36m│[0m    HCS hit/miss:     320/0                        [36m│[0m
+  [36m│[0m    Avg DMA call size: 0.0 KB                   [36m│[0m
+  [36m│[0m    Est PCIe BW:      0.0 GB/s (cold fraction)  [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.038902, "lock_ms": 0.000561, "prepare_runtime_ms": 179.763685, "prompt_hcs_shadow_ms": 0.014557, "prompt_tokens": 19, "release_scratch_ms": 19.794286, "restore_runtime_ms": 162.767517, "run_finalize_ms": 223.09670200000002, "scratch_ms": 3.829252, "stop_ids_ms": 0.030145, "tokenize_ms": 0.300225, "total_ms": 589.638156, "unaccounted_ms": 0.0023239999999304928}
+  Warmup complete.
+  Prefill warmup (3 runs, ~25K tokens each)...
+[PREFILL-TIMING] 25000 tokens, 2203.6ms total (11345 tok/s)
+[PREFILL-TIMING]   embed:       0.2ms (  0.0%)
+[PREFILL-TIMING]   norm:       34.4ms (  1.6%)
+[PREFILL-TIMING]   attn:     1427.4ms ( 64.8%)  [gqa: 426.1ms, la: 1001.3ms]
+[PREFILL-TIMING]     gqa breakdown (10 FA2 calls: 10 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:       119.6ms ( 28.1% of gqa)
+[PREFILL-TIMING]       qknorm:       5.5ms (  1.3% of gqa)
+[PREFILL-TIMING]       rope:         0.8ms (  0.2% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.6ms (  0.1% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.6ms over 10 calls
+[PREFILL-TIMING]       fa2       238.4ms ( 55.9% of gqa)  [23.8ms/call avg]
+[PREFILL-TIMING]       gate:         4.4ms (  1.0% of gqa)
+[PREFILL-TIMING]       o_proj:      57.0ms ( 13.4% of gqa)
+[PREFILL-TIMING]     hqq projection internals:
+[PREFILL-TIMING]       marlin_float_zp:    675.2ms over 130 calls
+[PREFILL-TIMING]       group_sums:          19.5ms over 130 calls
+[PREFILL-TIMING]       correction_gemm:     35.1ms over 130 calls
+[PREFILL-TIMING]       correction_add:      68.1ms over 130 calls
+[PREFILL-TIMING]     la breakdown (36 layers):
+[PREFILL-TIMING]       proj:       478.1ms ( 47.8% of la)
+[PREFILL-TIMING]         qkvz:       440.7ms    ba:     36.7ms
+[PREFILL-TIMING]       uninter:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       conv:        48.4ms (  4.8% of la)
+[PREFILL-TIMING]       prep:        26.5ms (  2.6% of la)
+[PREFILL-TIMING]       convert:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       fla:        280.7ms ( 28.0% of la)
+[PREFILL-TIMING]         fla/cumsum:    14.0ms kkt:     8.7ms solve:    12.9ms
+[PREFILL-TIMING]         fla/wy:        19.9ms state:   198.5ms output:    26.1ms
+[PREFILL-TIMING]       postfla:      0.4ms (  0.0% of la)
+[PREFILL-TIMING]       norm:        16.6ms (  1.7% of la)
+[PREFILL-TIMING]       o_proj:     150.2ms ( 15.0% of la)
+[PREFILL-TIMING]   moe:       710.8ms ( 32.3%)
+[PREFILL-TIMING]     moe breakdown (48 layers):
+[PREFILL-TIMING]       gate:        21.0ms (  3.0% of moe)
+[PREFILL-TIMING]       dma:        202.9ms ( 28.5% of moe)
+[PREFILL-TIMING]         route_d2h:     0.9ms ptr_alloc:     0.4ms ptr_build:     0.2ms
+[PREFILL-TIMING]         cold_h2d:     29.2ms ptr_upload:     0.5ms dma_wait:   170.7ms
+[PREFILL-TIMING]       w1+act:     261.0ms ( 36.7% of moe)
+[PREFILL-TIMING]       w2:         106.8ms ( 15.0% of moe)
+[PREFILL-TIMING]       scatter:     76.8ms ( 10.8% of moe)
+[PREFILL-TIMING]       shared:      41.9ms (  5.9% of moe)
+[PREFILL-TIMING]   other:      30.8ms (  1.4%)
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.304983, "lock_ms": 0.0006010000000000001, "prepare_runtime_ms": 181.313138, "prompt_hcs_shadow_ms": 0.015709, "prompt_tokens": 25000, "release_scratch_ms": 26.449258, "restore_runtime_ms": 239.706686, "run_finalize_ms": 2204.3814629999997, "scratch_ms": 12.776326, "stop_ids_ms": 0.030747000000000003, "tokenize_ms": 43.814597, "total_ms": 2708.796753, "unaccounted_ms": 0.0032450000007884228}
+    [1/3] 25,000 tokens
+[PREFILL-TIMING] 25000 tokens, 2195.7ms total (11386 tok/s)
+[PREFILL-TIMING]   embed:       0.2ms (  0.0%)
+[PREFILL-TIMING]   norm:       34.4ms (  1.6%)
+[PREFILL-TIMING]   attn:     1414.8ms ( 64.4%)  [gqa: 416.1ms, la: 998.7ms]
+[PREFILL-TIMING]     gqa breakdown (10 FA2 calls: 10 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:       119.5ms ( 28.7% of gqa)
+[PREFILL-TIMING]       qknorm:       5.4ms (  1.3% of gqa)
+[PREFILL-TIMING]       rope:         0.8ms (  0.2% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.6ms (  0.1% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.6ms over 10 calls
+[PREFILL-TIMING]       fa2       237.1ms ( 57.0% of gqa)  [23.7ms/call avg]
+[PREFILL-TIMING]       gate:         4.4ms (  1.0% of gqa)
+[PREFILL-TIMING]       o_proj:      48.3ms ( 11.6% of gqa)
+[PREFILL-TIMING]     hqq projection internals:
+[PREFILL-TIMING]       marlin_float_zp:    672.7ms over 130 calls
+[PREFILL-TIMING]       group_sums:          11.0ms over 130 calls
+[PREFILL-TIMING]       correction_gemm:     34.9ms over 130 calls
+[PREFILL-TIMING]       correction_add:      68.1ms over 130 calls
+[PREFILL-TIMING]     la breakdown (36 layers):
+[PREFILL-TIMING]       proj:       480.4ms ( 48.1% of la)
+[PREFILL-TIMING]         qkvz:       443.1ms    ba:     36.7ms
+[PREFILL-TIMING]       uninter:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       conv:        48.4ms (  4.8% of la)
+[PREFILL-TIMING]       prep:        26.5ms (  2.7% of la)
+[PREFILL-TIMING]       convert:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       fla:        280.7ms ( 28.1% of la)
+[PREFILL-TIMING]         fla/cumsum:    14.0ms kkt:     8.7ms solve:    12.9ms
+[PREFILL-TIMING]         fla/wy:        19.9ms state:   198.5ms output:    26.1ms
+[PREFILL-TIMING]       postfla:      0.4ms (  0.0% of la)
+[PREFILL-TIMING]       norm:        16.6ms (  1.7% of la)
+[PREFILL-TIMING]       o_proj:     145.3ms ( 14.5% of la)
+[PREFILL-TIMING]   moe:       716.3ms ( 32.6%)
+[PREFILL-TIMING]     moe breakdown (48 layers):
+[PREFILL-TIMING]       gate:        21.0ms (  2.9% of moe)
+[PREFILL-TIMING]       dma:        201.2ms ( 28.1% of moe)
+[PREFILL-TIMING]         route_d2h:     0.8ms ptr_alloc:     0.5ms ptr_build:     0.2ms
+[PREFILL-TIMING]         cold_h2d:     28.7ms ptr_upload:     0.5ms dma_wait:   169.5ms
+[PREFILL-TIMING]       w1+act:     269.6ms ( 37.6% of moe)
+[PREFILL-TIMING]       w2:         105.6ms ( 14.7% of moe)
+[PREFILL-TIMING]       scatter:     77.8ms ( 10.9% of moe)
+[PREFILL-TIMING]       shared:      40.5ms (  5.7% of moe)
+[PREFILL-TIMING]   other:      30.0ms (  1.4%)
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.382046, "lock_ms": 0.000591, "prepare_runtime_ms": 337.106179, "prompt_hcs_shadow_ms": 0.009648, "prompt_tokens": 25000, "release_scratch_ms": 27.14357, "restore_runtime_ms": 263.749657, "run_finalize_ms": 2196.500245, "scratch_ms": 12.694614999999999, "stop_ids_ms": 0.031557999999999996, "tokenize_ms": 40.855433, "total_ms": 2878.477249, "unaccounted_ms": 0.0037069999993946112}
+    [2/3] 25,000 tokens
+[PREFILL-TIMING] 25000 tokens, 2200.4ms total (11362 tok/s)
+[PREFILL-TIMING]   embed:       0.2ms (  0.0%)
+[PREFILL-TIMING]   norm:       34.4ms (  1.6%)
+[PREFILL-TIMING]   attn:     1426.1ms ( 64.8%)  [gqa: 416.6ms, la: 1009.5ms]
+[PREFILL-TIMING]     gqa breakdown (10 FA2 calls: 10 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:       119.8ms ( 28.8% of gqa)
+[PREFILL-TIMING]       qknorm:       5.4ms (  1.3% of gqa)
+[PREFILL-TIMING]       rope:         0.8ms (  0.2% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.6ms (  0.1% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.6ms over 10 calls
+[PREFILL-TIMING]       fa2       237.2ms ( 56.9% of gqa)  [23.7ms/call avg]
+[PREFILL-TIMING]       gate:         4.4ms (  1.1% of gqa)
+[PREFILL-TIMING]       o_proj:      48.4ms ( 11.6% of gqa)
+[PREFILL-TIMING]     hqq projection internals:
+[PREFILL-TIMING]       marlin_float_zp:    675.6ms over 130 calls
+[PREFILL-TIMING]       group_sums:          11.0ms over 130 calls
+[PREFILL-TIMING]       correction_gemm:     35.0ms over 130 calls
+[PREFILL-TIMING]       correction_add:      76.1ms over 130 calls
+[PREFILL-TIMING]     la breakdown (36 layers):
+[PREFILL-TIMING]       proj:       491.0ms ( 48.6% of la)
+[PREFILL-TIMING]         qkvz:       453.7ms    ba:     36.7ms
+[PREFILL-TIMING]       uninter:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       conv:        48.4ms (  4.8% of la)
+[PREFILL-TIMING]       prep:        26.5ms (  2.6% of la)
+[PREFILL-TIMING]       convert:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       fla:        280.7ms ( 27.8% of la)
+[PREFILL-TIMING]         fla/cumsum:    14.0ms kkt:     8.8ms solve:    12.9ms
+[PREFILL-TIMING]         fla/wy:        19.9ms state:   198.4ms output:    26.1ms
+[PREFILL-TIMING]       postfla:      0.4ms (  0.0% of la)
+[PREFILL-TIMING]       norm:        16.6ms (  1.6% of la)
+[PREFILL-TIMING]       o_proj:     145.4ms ( 14.4% of la)
+[PREFILL-TIMING]   moe:       710.0ms ( 32.3%)
+[PREFILL-TIMING]     moe breakdown (48 layers):
+[PREFILL-TIMING]       gate:        20.9ms (  2.9% of moe)
+[PREFILL-TIMING]       dma:        202.2ms ( 28.5% of moe)
+[PREFILL-TIMING]         route_d2h:     0.8ms ptr_alloc:     0.5ms ptr_build:     0.2ms
+[PREFILL-TIMING]         cold_h2d:     29.1ms ptr_upload:     0.5ms dma_wait:   170.2ms
+[PREFILL-TIMING]       w1+act:     261.5ms ( 36.8% of moe)
+[PREFILL-TIMING]       w2:         106.1ms ( 14.9% of moe)
+[PREFILL-TIMING]       scatter:     76.8ms ( 10.8% of moe)
+[PREFILL-TIMING]       shared:      41.9ms (  5.9% of moe)
+[PREFILL-TIMING]   other:      29.6ms (  1.3%)
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.381094, "lock_ms": 0.000622, "prepare_runtime_ms": 382.916717, "prompt_hcs_shadow_ms": 0.010299, "prompt_tokens": 25000, "release_scratch_ms": 26.863463, "restore_runtime_ms": 335.161077, "run_finalize_ms": 2201.161553, "scratch_ms": 12.524581, "stop_ids_ms": 0.030716000000000004, "tokenize_ms": 38.923225, "total_ms": 2997.978827, "unaccounted_ms": 0.0054799999998067506}
+    [3/3] 25,000 tokens
+  Decode warmup (50/100/250 tokens, 3 separate prompts)...
+[PREFILL-TIMING] 59 tokens, 347.3ms total (170 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.9ms (  0.3%)
+[PREFILL-TIMING]   attn:       16.8ms (  4.8%)  [gqa: 3.7ms, la: 13.0ms]
+[PREFILL-TIMING]     gqa breakdown (10 FA2 calls: 10 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:         2.3ms ( 62.2% of gqa)
+[PREFILL-TIMING]       qknorm:       0.1ms (  3.1% of gqa)
+[PREFILL-TIMING]       rope:         0.1ms (  3.1% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.1ms (  2.2% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.1ms over 10 calls
+[PREFILL-TIMING]       fa2         0.2ms (  4.1% of gqa)  [0.0ms/call avg]
+[PREFILL-TIMING]       gate:         0.1ms (  2.2% of gqa)
+[PREFILL-TIMING]       o_proj:       0.8ms ( 21.5% of gqa)
+[PREFILL-TIMING]     hqq projection internals:
+[PREFILL-TIMING]       marlin_float_zp:      5.2ms over 130 calls
+[PREFILL-TIMING]       group_sums:           1.0ms over 130 calls
+[PREFILL-TIMING]       correction_gemm:      2.2ms over 130 calls
+[PREFILL-TIMING]       correction_add:       1.0ms over 130 calls
+[PREFILL-TIMING]     la breakdown (36 layers):
+[PREFILL-TIMING]       proj:         5.1ms ( 39.4% of la)
+[PREFILL-TIMING]         qkvz:         2.7ms    ba:      2.1ms
+[PREFILL-TIMING]       uninter:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       conv:         0.7ms (  5.2% of la)
+[PREFILL-TIMING]       prep:         0.4ms (  3.3% of la)
+[PREFILL-TIMING]       convert:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       fla:          3.4ms ( 25.9% of la)
+[PREFILL-TIMING]         fla/cumsum:     0.4ms kkt:     0.3ms solve:     0.5ms
+[PREFILL-TIMING]         fla/wy:         0.4ms state:     0.9ms output:     0.5ms
+[PREFILL-TIMING]       postfla:      0.3ms (  2.4% of la)
+[PREFILL-TIMING]       norm:         0.3ms (  2.1% of la)
+[PREFILL-TIMING]       o_proj:       2.4ms ( 18.6% of la)
+[PREFILL-TIMING]   moe:        18.9ms (  5.5%)
+[PREFILL-TIMING]     moe breakdown (48 layers):
+[PREFILL-TIMING]       gate:         2.2ms ( 11.6% of moe)
+[PREFILL-TIMING]       dma:          1.8ms (  9.5% of moe)
+[PREFILL-TIMING]         route_d2h:     0.7ms ptr_alloc:     0.4ms ptr_build:     0.0ms
+[PREFILL-TIMING]         cold_h2d:      0.0ms ptr_upload:     0.4ms dma_wait:     0.1ms
+[PREFILL-TIMING]       w1+act:       8.4ms ( 44.2% of moe)
+[PREFILL-TIMING]       w2:           4.4ms ( 23.2% of moe)
+[PREFILL-TIMING]       scatter:      0.6ms (  3.3% of moe)
+[PREFILL-TIMING]       shared:       1.1ms (  5.6% of moe)
+[PREFILL-TIMING]   other:     310.7ms ( 89.5%)
+  [32mdecode: 49 tokens in 0.43s (114.2 tok/s)  VRAM: 9558 MB free now, 9558 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=640/320 protected=9600 promotions=0 evictions=0 request_promotions=0/640 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (49 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:          8.59 ms/tok  (116.4 tok/s)    [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Graph inter-layer breakdown:                  [36m│[0m
+  [36m│[0m    GPU compute:   0.17 ms  ( 2.0%)            [36m│[0m
+  [36m│[0m    Sync wait:     7.98 ms  (92.8%)            [36m│[0m
+  [36m│[0m      inter:       7.29 ms  final:  0.68 ms     [36m│[0m
+  [36m│[0m    Classify:      0.02 ms  ( 0.2%)            [36m│[0m
+  [36m│[0m    Cold DMA:      0.00 ms  ( 0.0%)            [36m│[0m
+  [36m│[0m    Upload:        0.10 ms  ( 1.2%)            [36m│[0m
+  [36m│[0m    Launch:        0.33 ms  ( 3.8%)            [36m│[0m
+  [36m│[0m  Graph replay segment CUDA events:            [36m│[0m
+  [36m│[0m    Segment total:  8.12 ms                  [36m│[0m
+  [36m│[0m    First route:   0.13 ms  ( 1.6%)        [36m│[0m
+  [36m│[0m    Middle segs:   7.30 ms  (89.9%)        [36m│[0m
+  [36m│[0m    Final seg:     0.69 ms  ( 8.5%)        [36m│[0m
+  [36m│[0m  Graph replay typed segment totals:          [36m│[0m
+  [36m│[0m    First:       0.13 ms/tok (0.13 ms/seg) [36m│[0m
+  [36m│[0m    LA route:    5.49 ms/tok (0.19 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:   1.81 ms/tok (0.18 ms/seg) [36m│[0m
+  [36m│[0m    Final:       0.69 ms/tok (0.69 ms/seg) [36m│[0m
+  [36m│[0m  Sync wait attributed to segment:           [36m│[0m
+  [36m│[0m    First:       0.13 ms/tok (0.13 ms/seg) [36m│[0m
+  [36m│[0m    LA route:    5.39 ms/tok (0.19 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:   1.78 ms/tok (0.18 ms/seg) [36m│[0m
+  [36m│[0m    Final:       0.68 ms/tok (0.68 ms/seg) [36m│[0m
+  [36m│[0m  Slowest sync-wait segments:                [36m│[0m
+  [36m│[0m    #40   0.68 ms  graph40 experts L39 + final           [36m│[0m
+  [36m│[0m    #36   0.19 ms  graph36 experts L35 + route L36 LA    [36m│[0m
+  [36m│[0m    #29   0.19 ms  graph29 experts L28 + route L29 LA    [36m│[0m
+  [36m│[0m    #28   0.19 ms  graph28 experts L27 + route L28 LA    [36m│[0m
+  [36m│[0m    #2    0.19 ms  graph2 experts L1 + route L2 LA       [36m│[0m
+  [36m│[0m    #16   0.19 ms  graph16 experts L15 + route L16 LA    [36m│[0m
+  [36m│[0m  Slowest graph replay segments:              [36m│[0m
+  [36m│[0m    #40   0.69 ms  graph40 experts L39 + final           [36m│[0m
+  [36m│[0m    #36   0.19 ms  graph36 experts L35 + route L36 LA    [36m│[0m
+  [36m│[0m    #28   0.19 ms  graph28 experts L27 + route L28 LA    [36m│[0m
+  [36m│[0m    #29   0.19 ms  graph29 experts L28 + route L29 LA    [36m│[0m
+  [36m│[0m    #2    0.19 ms  graph2 experts L1 + route L2 LA       [36m│[0m
+  [36m│[0m    #6    0.19 ms  graph6 experts L5 + route L6 LA       [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe DMA (non-serialized):                     [36m│[0m
+  [36m│[0m    Cold experts/tok: 0.0 (0 DMA calls)      [36m│[0m
+  [36m│[0m    HCS experts/tok:  320.0 (10240 cached)            [36m│[0m
+  [36m│[0m    DMA bytes/tok:    0.00 MB                     [36m│[0m
+  [36m│[0m    HCS hit/miss:     320/0                        [36m│[0m
+  [36m│[0m    Avg DMA call size: 0.0 KB                   [36m│[0m
+  [36m│[0m    Est PCIe BW:      0.0 GB/s (cold fraction)  [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.0815, "lock_ms": 0.0006309999999999999, "prepare_runtime_ms": 361.758953, "prompt_hcs_shadow_ms": 0.015219, "prompt_tokens": 59, "release_scratch_ms": 19.797704, "restore_runtime_ms": 215.900218, "run_finalize_ms": 347.76023200000003, "scratch_ms": 3.7473609999999997, "stop_ids_ms": 0.030567, "tokenize_ms": 0.401902, "total_ms": 949.497132, "unaccounted_ms": 0.0028449999999793363}
+    50 tokens done
+[PREFILL-TIMING] 65 tokens, 350.1ms total (186 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.9ms (  0.2%)
+[PREFILL-TIMING]   attn:       19.3ms (  5.5%)  [gqa: 4.3ms, la: 15.0ms]
+[PREFILL-TIMING]     gqa breakdown (10 FA2 calls: 10 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:         2.8ms ( 63.7% of gqa)
+[PREFILL-TIMING]       qknorm:       0.1ms (  2.9% of gqa)
+[PREFILL-TIMING]       rope:         0.1ms (  2.7% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.1ms (  1.9% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.1ms over 10 calls
+[PREFILL-TIMING]       fa2         0.2ms (  4.1% of gqa)  [0.0ms/call avg]
+[PREFILL-TIMING]       gate:         0.1ms (  1.8% of gqa)
+[PREFILL-TIMING]       o_proj:       0.9ms ( 21.9% of gqa)
+[PREFILL-TIMING]     hqq projection internals:
+[PREFILL-TIMING]       marlin_float_zp:      7.2ms over 130 calls
+[PREFILL-TIMING]       group_sums:           1.0ms over 130 calls
+[PREFILL-TIMING]       correction_gemm:      2.2ms over 130 calls
+[PREFILL-TIMING]       correction_add:       1.0ms over 130 calls
+[PREFILL-TIMING]     la breakdown (36 layers):
+[PREFILL-TIMING]       proj:         6.2ms ( 41.5% of la)
+[PREFILL-TIMING]         qkvz:         3.3ms    ba:      2.6ms
+[PREFILL-TIMING]       uninter:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       conv:         0.7ms (  4.5% of la)
+[PREFILL-TIMING]       prep:         0.4ms (  2.9% of la)
+[PREFILL-TIMING]       convert:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       fla:          3.8ms ( 25.6% of la)
+[PREFILL-TIMING]         fla/cumsum:     0.4ms kkt:     0.3ms solve:     0.5ms
+[PREFILL-TIMING]         fla/wy:         0.4ms state:     1.3ms output:     0.5ms
+[PREFILL-TIMING]       postfla:      0.3ms (  2.0% of la)
+[PREFILL-TIMING]       norm:         0.3ms (  1.8% of la)
+[PREFILL-TIMING]       o_proj:       2.8ms ( 18.8% of la)
+[PREFILL-TIMING]   moe:        19.7ms (  5.6%)
+[PREFILL-TIMING]     moe breakdown (48 layers):
+[PREFILL-TIMING]       gate:         2.2ms ( 11.3% of moe)
+[PREFILL-TIMING]       dma:          1.8ms (  9.3% of moe)
+[PREFILL-TIMING]         route_d2h:     0.7ms ptr_alloc:     0.4ms ptr_build:     0.0ms
+[PREFILL-TIMING]         cold_h2d:      0.0ms ptr_upload:     0.4ms dma_wait:     0.1ms
+[PREFILL-TIMING]       w1+act:       8.8ms ( 44.7% of moe)
+[PREFILL-TIMING]       w2:           4.7ms ( 23.8% of moe)
+[PREFILL-TIMING]       scatter:      0.6ms (  3.2% of moe)
+[PREFILL-TIMING]       shared:       1.0ms (  5.2% of moe)
+[PREFILL-TIMING]   other:     310.3ms ( 88.6%)
+  [32mdecode: 99 tokens in 0.88s (112.8 tok/s)  VRAM: 9558 MB free now, 9558 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=640/320 protected=9600 promotions=0 evictions=0 request_promotions=0/640 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (99 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:          8.70 ms/tok  (114.9 tok/s)    [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Graph inter-layer breakdown:                  [36m│[0m
+  [36m│[0m    GPU compute:   0.16 ms  ( 1.9%)            [36m│[0m
+  [36m│[0m    Sync wait:     8.10 ms  (93.1%)            [36m│[0m
+  [36m│[0m      inter:       7.42 ms  final:  0.68 ms     [36m│[0m
+  [36m│[0m    Classify:      0.01 ms  ( 0.2%)            [36m│[0m
+  [36m│[0m    Cold DMA:      0.00 ms  ( 0.0%)            [36m│[0m
+  [36m│[0m    Upload:        0.10 ms  ( 1.2%)            [36m│[0m
+  [36m│[0m    Launch:        0.32 ms  ( 3.7%)            [36m│[0m
+  [36m│[0m  Graph replay segment CUDA events:            [36m│[0m
+  [36m│[0m    Segment total:  8.19 ms                  [36m│[0m
+  [36m│[0m    First route:   0.13 ms  ( 1.6%)        [36m│[0m
+  [36m│[0m    Middle segs:   7.37 ms  (90.0%)        [36m│[0m
+  [36m│[0m    Final seg:     0.69 ms  ( 8.4%)        [36m│[0m
+  [36m│[0m  Graph replay typed segment totals:          [36m│[0m
+  [36m│[0m    First:       0.13 ms/tok (0.13 ms/seg) [36m│[0m
+  [36m│[0m    LA route:    5.49 ms/tok (0.19 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:   1.89 ms/tok (0.19 ms/seg) [36m│[0m
+  [36m│[0m    Final:       0.69 ms/tok (0.69 ms/seg) [36m│[0m
+  [36m│[0m  Sync wait attributed to segment:           [36m│[0m
+  [36m│[0m    First:       0.13 ms/tok (0.13 ms/seg) [36m│[0m
+  [36m│[0m    LA route:    5.44 ms/tok (0.19 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:   1.85 ms/tok (0.19 ms/seg) [36m│[0m
+  [36m│[0m    Final:       0.68 ms/tok (0.68 ms/seg) [36m│[0m
+  [36m│[0m  Slowest sync-wait segments:                [36m│[0m
+  [36m│[0m    #40   0.68 ms  graph40 experts L39 + final           [36m│[0m
+  [36m│[0m    #9    0.23 ms  graph9 experts L8 + route L9 LA       [36m│[0m
+  [36m│[0m    #36   0.19 ms  graph36 experts L35 + route L36 LA    [36m│[0m
+  [36m│[0m    #5    0.19 ms  graph5 experts L4 + route L5 LA       [36m│[0m
+  [36m│[0m    #8    0.19 ms  graph8 experts L7 + route L8 LA       [36m│[0m
+  [36m│[0m    #25   0.19 ms  graph25 experts L24 + route L25 LA    [36m│[0m
+  [36m│[0m  Slowest graph replay segments:              [36m│[0m
+  [36m│[0m    #40   0.69 ms  graph40 experts L39 + final           [36m│[0m
+  [36m│[0m    #36   0.19 ms  graph36 experts L35 + route L36 LA    [36m│[0m
+  [36m│[0m    #2    0.19 ms  graph2 experts L1 + route L2 LA       [36m│[0m
+  [36m│[0m    #5    0.19 ms  graph5 experts L4 + route L5 LA       [36m│[0m
+  [36m│[0m    #8    0.19 ms  graph8 experts L7 + route L8 LA       [36m│[0m
+  [36m│[0m    #25   0.19 ms  graph25 experts L24 + route L25 LA    [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe DMA (non-serialized):                     [36m│[0m
+  [36m│[0m    Cold experts/tok: 0.0 (0 DMA calls)      [36m│[0m
+  [36m│[0m    HCS experts/tok:  320.0 (10240 cached)            [36m│[0m
+  [36m│[0m    DMA bytes/tok:    0.00 MB                     [36m│[0m
+  [36m│[0m    HCS hit/miss:     320/0                        [36m│[0m
+  [36m│[0m    Avg DMA call size: 0.0 KB                   [36m│[0m
+  [36m│[0m    Est PCIe BW:      0.0 GB/s (cold fraction)  [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.035896000000000004, "lock_ms": 0.000591, "prepare_runtime_ms": 180.254496, "prompt_hcs_shadow_ms": 0.019166, "prompt_tokens": 65, "release_scratch_ms": 19.789458999999997, "restore_runtime_ms": 181.51241100000001, "run_finalize_ms": 350.57280099999997, "scratch_ms": 3.553733, "stop_ids_ms": 0.042949, "tokenize_ms": 0.388588, "total_ms": 736.173145, "unaccounted_ms": 0.0030550000000175714}
+    100 tokens done
+[PREFILL-TIMING] 63 tokens, 347.1ms total (181 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.9ms (  0.3%)
+[PREFILL-TIMING]   attn:       16.9ms (  4.9%)  [gqa: 3.7ms, la: 13.2ms]
+[PREFILL-TIMING]     gqa breakdown (10 FA2 calls: 10 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:         2.3ms ( 62.1% of gqa)
+[PREFILL-TIMING]       qknorm:       0.1ms (  3.4% of gqa)
+[PREFILL-TIMING]       rope:         0.1ms (  3.1% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.1ms (  2.2% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.1ms over 10 calls
+[PREFILL-TIMING]       fa2         0.2ms (  4.3% of gqa)  [0.0ms/call avg]
+[PREFILL-TIMING]       gate:         0.1ms (  2.2% of gqa)
+[PREFILL-TIMING]       o_proj:       0.8ms ( 21.6% of gqa)
+[PREFILL-TIMING]     hqq projection internals:
+[PREFILL-TIMING]       marlin_float_zp:      5.3ms over 130 calls
+[PREFILL-TIMING]       group_sums:           1.0ms over 130 calls
+[PREFILL-TIMING]       correction_gemm:      2.2ms over 130 calls
+[PREFILL-TIMING]       correction_add:       1.0ms over 130 calls
+[PREFILL-TIMING]     la breakdown (36 layers):
+[PREFILL-TIMING]       proj:         5.3ms ( 39.9% of la)
+[PREFILL-TIMING]         qkvz:         2.8ms    ba:      2.2ms
+[PREFILL-TIMING]       uninter:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       conv:         0.7ms (  5.1% of la)
+[PREFILL-TIMING]       prep:         0.4ms (  3.3% of la)
+[PREFILL-TIMING]       convert:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       fla:          3.4ms ( 25.7% of la)
+[PREFILL-TIMING]         fla/cumsum:     0.4ms kkt:     0.3ms solve:     0.5ms
+[PREFILL-TIMING]         fla/wy:         0.4ms state:     0.9ms output:     0.5ms
+[PREFILL-TIMING]       postfla:      0.3ms (  2.4% of la)
+[PREFILL-TIMING]       norm:         0.3ms (  2.0% of la)
+[PREFILL-TIMING]       o_proj:       2.4ms ( 18.5% of la)
+[PREFILL-TIMING]   moe:        19.0ms (  5.5%)
+[PREFILL-TIMING]     moe breakdown (48 layers):
+[PREFILL-TIMING]       gate:         2.2ms ( 11.5% of moe)
+[PREFILL-TIMING]       dma:          1.9ms (  9.8% of moe)
+[PREFILL-TIMING]         route_d2h:     0.8ms ptr_alloc:     0.4ms ptr_build:     0.0ms
+[PREFILL-TIMING]         cold_h2d:      0.0ms ptr_upload:     0.4ms dma_wait:     0.1ms
+[PREFILL-TIMING]       w1+act:       8.4ms ( 44.3% of moe)
+[PREFILL-TIMING]       w2:           4.4ms ( 23.2% of moe)
+[PREFILL-TIMING]       scatter:      0.6ms (  3.3% of moe)
+[PREFILL-TIMING]       shared:       1.1ms (  5.5% of moe)
+[PREFILL-TIMING]   other:     310.3ms ( 89.4%)
+  [32mdecode: 249 tokens in 2.19s (113.6 tok/s)  VRAM: 9556 MB free now, 9556 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=640/320 protected=9600 promotions=0 evictions=0 request_promotions=0/640 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (249 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:          8.64 ms/tok  (115.8 tok/s)    [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Graph inter-layer breakdown:                  [36m│[0m
+  [36m│[0m    GPU compute:   0.16 ms  ( 1.9%)            [36m│[0m
+  [36m│[0m    Sync wait:     8.04 ms  (93.0%)            [36m│[0m
+  [36m│[0m      inter:       7.36 ms  final:  0.68 ms     [36m│[0m
+  [36m│[0m    Classify:      0.01 ms  ( 0.2%)            [36m│[0m
+  [36m│[0m    Cold DMA:      0.00 ms  ( 0.0%)            [36m│[0m
+  [36m│[0m    Upload:        0.10 ms  ( 1.2%)            [36m│[0m
+  [36m│[0m    Launch:        0.32 ms  ( 3.7%)            [36m│[0m
+  [36m│[0m  Graph replay segment CUDA events:            [36m│[0m
+  [36m│[0m    Segment total:  8.12 ms                  [36m│[0m
+  [36m│[0m    First route:   0.13 ms  ( 1.6%)        [36m│[0m
+  [36m│[0m    Middle segs:   7.31 ms  (90.0%)        [36m│[0m
+  [36m│[0m    Final seg:     0.68 ms  ( 8.4%)        [36m│[0m
+  [36m│[0m  Graph replay typed segment totals:          [36m│[0m
+  [36m│[0m    First:       0.13 ms/tok (0.13 ms/seg) [36m│[0m
+  [36m│[0m    LA route:    5.32 ms/tok (0.18 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:   1.98 ms/tok (0.20 ms/seg) [36m│[0m
+  [36m│[0m    Final:       0.68 ms/tok (0.68 ms/seg) [36m│[0m
+  [36m│[0m  Sync wait attributed to segment:           [36m│[0m
+  [36m│[0m    First:       0.12 ms/tok (0.12 ms/seg) [36m│[0m
+  [36m│[0m    LA route:    5.26 ms/tok (0.18 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:   1.97 ms/tok (0.20 ms/seg) [36m│[0m
+  [36m│[0m    Final:       0.68 ms/tok (0.68 ms/seg) [36m│[0m
+  [36m│[0m  Slowest sync-wait segments:                [36m│[0m
+  [36m│[0m    #40   0.68 ms  graph40 experts L39 + final           [36m│[0m
+  [36m│[0m    #38   0.22 ms  graph38 experts L37 + route L38 LA    [36m│[0m
+  [36m│[0m    #11   0.21 ms  graph11 experts L10 + route L11 GQA   [36m│[0m
+  [36m│[0m    #35   0.20 ms  graph35 experts L34 + route L35 GQA   [36m│[0m
+  [36m│[0m    #23   0.20 ms  graph23 experts L22 + route L23 GQA   [36m│[0m
+  [36m│[0m    #3    0.20 ms  graph3 experts L2 + route L3 GQA      [36m│[0m
+  [36m│[0m  Slowest graph replay segments:              [36m│[0m
+  [36m│[0m    #40   0.68 ms  graph40 experts L39 + final           [36m│[0m
+  [36m│[0m    #23   0.20 ms  graph23 experts L22 + route L23 GQA   [36m│[0m
+  [36m│[0m    #11   0.20 ms  graph11 experts L10 + route L11 GQA   [36m│[0m
+  [36m│[0m    #3    0.20 ms  graph3 experts L2 + route L3 GQA      [36m│[0m
+  [36m│[0m    #19   0.20 ms  graph19 experts L18 + route L19 GQA   [36m│[0m
+  [36m│[0m    #15   0.20 ms  graph15 experts L14 + route L15 GQA   [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe DMA (non-serialized):                     [36m│[0m
+  [36m│[0m    Cold experts/tok: 0.0 (0 DMA calls)      [36m│[0m
+  [36m│[0m    HCS experts/tok:  320.0 (10240 cached)            [36m│[0m
+  [36m│[0m    DMA bytes/tok:    0.00 MB                     [36m│[0m
+  [36m│[0m    HCS hit/miss:     320/0                        [36m│[0m
+  [36m│[0m    Avg DMA call size: 0.0 KB                   [36m│[0m
+  [36m│[0m    Est PCIe BW:      0.0 GB/s (cold fraction)  [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.036738, "lock_ms": 0.000661, "prepare_runtime_ms": 180.841313, "prompt_hcs_shadow_ms": 0.01579, "prompt_tokens": 63, "release_scratch_ms": 19.788608999999997, "restore_runtime_ms": 182.18100900000002, "run_finalize_ms": 347.571927, "scratch_ms": 3.9645230000000002, "stop_ids_ms": 0.04322, "tokenize_ms": 0.392094, "total_ms": 734.838216, "unaccounted_ms": 0.0023319999999102947}
+    250 tokens done
+  Warmup complete (18.8s). All kernels compiled.
+
+[1m[36m▸ Prefill (internal) — 1K/5K/10K/20K/35K/50K tokens, 6 runs[0m
+[PREFILL-TIMING] 1000 tokens, 102.7ms total (9739 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        1.9ms (  1.9%)
+[PREFILL-TIMING]   attn:       57.4ms ( 55.9%)  [gqa: 10.8ms, la: 46.6ms]
+[PREFILL-TIMING]     gqa breakdown (10 FA2 calls: 10 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:         6.5ms ( 60.4% of gqa)
+[PREFILL-TIMING]       qknorm:       0.3ms (  2.8% of gqa)
+[PREFILL-TIMING]       rope:         0.1ms (  1.1% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.1ms (  0.9% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.1ms over 10 calls
+[PREFILL-TIMING]       fa2         0.9ms (  8.2% of gqa)  [0.1ms/call avg]
+[PREFILL-TIMING]       gate:         0.1ms (  1.3% of gqa)
+[PREFILL-TIMING]       o_proj:       2.7ms ( 25.0% of gqa)
+[PREFILL-TIMING]     hqq projection internals:
+[PREFILL-TIMING]       marlin_float_zp:     31.0ms over 130 calls
+[PREFILL-TIMING]       group_sums:           1.2ms over 130 calls
+[PREFILL-TIMING]       correction_gemm:      3.1ms over 130 calls
+[PREFILL-TIMING]       correction_add:       2.2ms over 130 calls
+[PREFILL-TIMING]     la breakdown (36 layers):
+[PREFILL-TIMING]       proj:        21.7ms ( 46.6% of la)
+[PREFILL-TIMING]         qkvz:        18.1ms    ba:      3.2ms
+[PREFILL-TIMING]       uninter:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       conv:         2.2ms (  4.6% of la)
+[PREFILL-TIMING]       prep:         1.4ms (  3.0% of la)
+[PREFILL-TIMING]       convert:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       fla:         11.6ms ( 25.0% of la)
+[PREFILL-TIMING]         fla/cumsum:     0.6ms kkt:     0.4ms solve:     0.9ms
+[PREFILL-TIMING]         fla/wy:         0.6ms state:     7.0ms output:     1.4ms
+[PREFILL-TIMING]       postfla:      0.3ms (  0.7% of la)
+[PREFILL-TIMING]       norm:         0.8ms (  1.8% of la)
+[PREFILL-TIMING]       o_proj:       8.1ms ( 17.5% of la)
+[PREFILL-TIMING]   moe:        39.1ms ( 38.1%)
+[PREFILL-TIMING]     moe breakdown (48 layers):
+[PREFILL-TIMING]       gate:         2.7ms (  7.0% of moe)
+[PREFILL-TIMING]       dma:          1.9ms (  4.8% of moe)
+[PREFILL-TIMING]         route_d2h:     0.8ms ptr_alloc:     0.4ms ptr_build:     0.1ms
+[PREFILL-TIMING]         cold_h2d:      0.0ms ptr_upload:     0.4ms dma_wait:     0.1ms
+[PREFILL-TIMING]       w1+act:      19.8ms ( 50.6% of moe)
+[PREFILL-TIMING]       w2:           9.8ms ( 25.1% of moe)
+[PREFILL-TIMING]       scatter:      2.9ms (  7.4% of moe)
+[PREFILL-TIMING]       shared:       1.5ms (  3.7% of moe)
+[PREFILL-TIMING]   other:       4.2ms (  4.1%)
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.058198, "lock_ms": 0.000591, "prepare_runtime_ms": 293.440818, "prompt_hcs_shadow_ms": 0.019336, "prompt_tokens": 1000, "release_scratch_ms": 3.403486, "restore_runtime_ms": 246.85158900000002, "run_finalize_ms": 103.104692, "scratch_ms": 4.752057, "stop_ids_ms": 0.040926000000000004, "tokenize_ms": 1.404935, "total_ms": 653.079281, "unaccounted_ms": 0.0026530000000093423}
+[PREFILL-TIMING] 5000 tokens, 383.3ms total (13046 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        6.4ms (  1.7%)
+[PREFILL-TIMING]   attn:      252.2ms ( 65.8%)  [gqa: 47.7ms, la: 204.6ms]
+[PREFILL-TIMING]     gqa breakdown (10 FA2 calls: 10 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:        24.6ms ( 51.6% of gqa)
+[PREFILL-TIMING]       qknorm:       1.2ms (  2.4% of gqa)
+[PREFILL-TIMING]       rope:         0.2ms (  0.4% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.2ms (  0.3% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.2ms over 10 calls
+[PREFILL-TIMING]       fa2        11.3ms ( 23.8% of gqa)  [1.1ms/call avg]
+[PREFILL-TIMING]       gate:         0.8ms (  1.6% of gqa)
+[PREFILL-TIMING]       o_proj:       9.4ms ( 19.8% of gqa)
+[PREFILL-TIMING]     hqq projection internals:
+[PREFILL-TIMING]       marlin_float_zp:    134.9ms over 130 calls
+[PREFILL-TIMING]       group_sums:           2.1ms over 130 calls
+[PREFILL-TIMING]       correction_gemm:      8.2ms over 130 calls
+[PREFILL-TIMING]       correction_add:      12.8ms over 130 calls
+[PREFILL-TIMING]     la breakdown (36 layers):
+[PREFILL-TIMING]       proj:        97.5ms ( 47.7% of la)
+[PREFILL-TIMING]         qkvz:        88.4ms    ba:      8.6ms
+[PREFILL-TIMING]       uninter:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       conv:        10.4ms (  5.1% of la)
+[PREFILL-TIMING]       prep:         5.6ms (  2.8% of la)
+[PREFILL-TIMING]       convert:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       fla:         58.3ms ( 28.5% of la)
+[PREFILL-TIMING]         fla/cumsum:     2.7ms kkt:     2.1ms solve:     2.8ms
+[PREFILL-TIMING]         fla/wy:         3.8ms state:    40.4ms output:     5.9ms
+[PREFILL-TIMING]       postfla:      0.4ms (  0.2% of la)
+[PREFILL-TIMING]       norm:         3.6ms (  1.7% of la)
+[PREFILL-TIMING]       o_proj:      28.3ms ( 13.8% of la)
+[PREFILL-TIMING]   moe:       115.0ms ( 30.0%)
+[PREFILL-TIMING]     moe breakdown (48 layers):
+[PREFILL-TIMING]       gate:         6.5ms (  5.6% of moe)
+[PREFILL-TIMING]       dma:          2.0ms (  1.8% of moe)
+[PREFILL-TIMING]         route_d2h:     0.8ms ptr_alloc:     0.5ms ptr_build:     0.1ms
+[PREFILL-TIMING]         cold_h2d:      0.0ms ptr_upload:     0.5ms dma_wait:     0.1ms
+[PREFILL-TIMING]       w1+act:      61.2ms ( 53.2% of moe)
+[PREFILL-TIMING]       w2:          25.6ms ( 22.3% of moe)
+[PREFILL-TIMING]       scatter:     15.0ms ( 13.0% of moe)
+[PREFILL-TIMING]       shared:       4.1ms (  3.5% of moe)
+[PREFILL-TIMING]   other:       9.6ms (  2.5%)
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.028643, "lock_ms": 0.000602, "prepare_runtime_ms": 232.927223, "prompt_hcs_shadow_ms": 0.009276999999999999, "prompt_tokens": 5000, "release_scratch_ms": 7.341089, "restore_runtime_ms": 228.261317, "run_finalize_ms": 383.78261299999997, "scratch_ms": 6.247229, "stop_ids_ms": 0.040145, "tokenize_ms": 5.297915000000001, "total_ms": 863.9387859999999, "unaccounted_ms": 0.0027329999999210486}
+[PREFILL-TIMING] 10000 tokens, 758.2ms total (13189 tok/s)
+[PREFILL-TIMING]   embed:       0.1ms (  0.0%)
+[PREFILL-TIMING]   norm:       12.5ms (  1.6%)
+[PREFILL-TIMING]   attn:      520.8ms ( 68.7%)  [gqa: 112.2ms, la: 408.6ms]
+[PREFILL-TIMING]     gqa breakdown (10 FA2 calls: 10 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:        48.3ms ( 43.0% of gqa)
+[PREFILL-TIMING]       qknorm:       2.3ms (  2.0% of gqa)
+[PREFILL-TIMING]       rope:         0.2ms (  0.2% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.3ms (  0.2% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.3ms over 10 calls
+[PREFILL-TIMING]       fa2        40.7ms ( 36.3% of gqa)  [4.1ms/call avg]
+[PREFILL-TIMING]       gate:         1.8ms (  1.6% of gqa)
+[PREFILL-TIMING]       o_proj:      18.7ms ( 16.6% of gqa)
+[PREFILL-TIMING]     hqq projection internals:
+[PREFILL-TIMING]       marlin_float_zp:    269.2ms over 130 calls
+[PREFILL-TIMING]       group_sums:           3.8ms over 130 calls
+[PREFILL-TIMING]       correction_gemm:     14.3ms over 130 calls
+[PREFILL-TIMING]       correction_add:      26.2ms over 130 calls
+[PREFILL-TIMING]     la breakdown (36 layers):
+[PREFILL-TIMING]       proj:       192.8ms ( 47.2% of la)
+[PREFILL-TIMING]         qkvz:       176.6ms    ba:     15.7ms
+[PREFILL-TIMING]       uninter:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       conv:        19.9ms (  4.9% of la)
+[PREFILL-TIMING]       prep:        10.9ms (  2.7% of la)
+[PREFILL-TIMING]       convert:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       fla:        121.3ms ( 29.7% of la)
+[PREFILL-TIMING]         fla/cumsum:     5.5ms kkt:     3.8ms solve:     5.5ms
+[PREFILL-TIMING]         fla/wy:         7.8ms state:    87.0ms output:    11.1ms
+[PREFILL-TIMING]       postfla:      0.4ms (  0.1% of la)
+[PREFILL-TIMING]       norm:         6.9ms (  1.7% of la)
+[PREFILL-TIMING]       o_proj:      56.1ms ( 13.7% of la)
+[PREFILL-TIMING]   moe:       211.9ms ( 27.9%)
+[PREFILL-TIMING]     moe breakdown (48 layers):
+[PREFILL-TIMING]       gate:         9.0ms (  4.2% of moe)
+[PREFILL-TIMING]       dma:          1.9ms (  0.9% of moe)
+[PREFILL-TIMING]         route_d2h:     0.8ms ptr_alloc:     0.4ms ptr_build:     0.1ms
+[PREFILL-TIMING]         cold_h2d:      0.0ms ptr_upload:     0.5ms dma_wait:     0.1ms
+[PREFILL-TIMING]       w1+act:     112.5ms ( 53.1% of moe)
+[PREFILL-TIMING]       w2:          47.4ms ( 22.3% of moe)
+[PREFILL-TIMING]       scatter:     30.3ms ( 14.3% of moe)
+[PREFILL-TIMING]       shared:      10.3ms (  4.9% of moe)
+[PREFILL-TIMING]   other:      13.0ms (  1.7%)
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.12040300000000001, "lock_ms": 0.000581, "prepare_runtime_ms": 278.881214, "prompt_hcs_shadow_ms": 0.016290000000000002, "prompt_tokens": 10000, "release_scratch_ms": 12.378103, "restore_runtime_ms": 226.937426, "run_finalize_ms": 758.787093, "scratch_ms": 7.517224000000001, "stop_ids_ms": 0.04322, "tokenize_ms": 14.208833, "total_ms": 1298.893344, "unaccounted_ms": 0.002957000000151311}
+[PREFILL-TIMING] 20000 tokens, 1664.6ms total (12015 tok/s)
+[PREFILL-TIMING]   embed:       0.2ms (  0.0%)
+[PREFILL-TIMING]   norm:       27.7ms (  1.7%)
+[PREFILL-TIMING]   attn:     1093.9ms ( 65.7%)  [gqa: 296.4ms, la: 797.5ms]
+[PREFILL-TIMING]     gqa breakdown (10 FA2 calls: 10 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:        95.7ms ( 32.3% of gqa)
+[PREFILL-TIMING]       qknorm:       4.4ms (  1.5% of gqa)
+[PREFILL-TIMING]       rope:         0.6ms (  0.2% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.5ms (  0.2% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.5ms over 10 calls
+[PREFILL-TIMING]       fa2       153.2ms ( 51.7% of gqa)  [15.3ms/call avg]
+[PREFILL-TIMING]       gate:         3.5ms (  1.2% of gqa)
+[PREFILL-TIMING]       o_proj:      38.5ms ( 13.0% of gqa)
+[PREFILL-TIMING]     hqq projection internals:
+[PREFILL-TIMING]       marlin_float_zp:    536.0ms over 130 calls
+[PREFILL-TIMING]       group_sums:           8.2ms over 130 calls
+[PREFILL-TIMING]       correction_gemm:     27.9ms over 130 calls
+[PREFILL-TIMING]       correction_add:      54.1ms over 130 calls
+[PREFILL-TIMING]     la breakdown (36 layers):
+[PREFILL-TIMING]       proj:       382.0ms ( 47.9% of la)
+[PREFILL-TIMING]         qkvz:       352.5ms    ba:     28.9ms
+[PREFILL-TIMING]       uninter:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       conv:        38.8ms (  4.9% of la)
+[PREFILL-TIMING]       prep:        21.3ms (  2.7% of la)
+[PREFILL-TIMING]       convert:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       fla:        225.4ms ( 28.3% of la)
+[PREFILL-TIMING]         fla/cumsum:    11.2ms kkt:     7.2ms solve:    10.5ms
+[PREFILL-TIMING]         fla/wy:        15.8ms state:   159.1ms output:    21.1ms
+[PREFILL-TIMING]       postfla:      0.4ms (  0.0% of la)
+[PREFILL-TIMING]       norm:        13.4ms (  1.7% of la)
+[PREFILL-TIMING]       o_proj:     115.9ms ( 14.5% of la)
+[PREFILL-TIMING]   moe:       517.4ms ( 31.1%)
+[PREFILL-TIMING]     moe breakdown (48 layers):
+[PREFILL-TIMING]       gate:        15.8ms (  3.1% of moe)
+[PREFILL-TIMING]       dma:        108.7ms ( 21.0% of moe)
+[PREFILL-TIMING]         route_d2h:     0.8ms ptr_alloc:     0.5ms ptr_build:     0.1ms
+[PREFILL-TIMING]         cold_h2d:     14.9ms ptr_upload:     0.5ms dma_wait:    91.3ms
+[PREFILL-TIMING]       w1+act:     214.2ms ( 41.4% of moe)
+[PREFILL-TIMING]       w2:          85.1ms ( 16.5% of moe)
+[PREFILL-TIMING]       scatter:     65.0ms ( 12.6% of moe)
+[PREFILL-TIMING]       shared:      28.0ms (  5.4% of moe)
+[PREFILL-TIMING]   other:      25.5ms (  1.5%)
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.267424, "lock_ms": 0.0006010000000000001, "prepare_runtime_ms": 287.507843, "prompt_hcs_shadow_ms": 0.009738, "prompt_tokens": 20000, "release_scratch_ms": 22.167465, "restore_runtime_ms": 295.249137, "run_finalize_ms": 1665.307319, "scratch_ms": 10.796562000000002, "stop_ids_ms": 0.04371, "tokenize_ms": 30.374482, "total_ms": 2311.7275670000004, "unaccounted_ms": 0.003286000000571221}
+[PREFILL-TIMING] 35000 tokens, 3282.4ms total (10663 tok/s)
+[PREFILL-TIMING]   embed:       0.2ms (  0.0%)
+[PREFILL-TIMING]   norm:       48.1ms (  1.5%)
+[PREFILL-TIMING]   attn:     2106.3ms ( 64.2%)  [gqa: 711.8ms, la: 1394.5ms]
+[PREFILL-TIMING]     gqa breakdown (10 FA2 calls: 10 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:       166.7ms ( 23.4% of gqa)
+[PREFILL-TIMING]       qknorm:       7.6ms (  1.1% of gqa)
+[PREFILL-TIMING]       rope:         1.1ms (  0.2% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.8ms (  0.1% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.8ms over 10 calls
+[PREFILL-TIMING]       fa2       461.7ms ( 64.9% of gqa)  [46.2ms/call avg]
+[PREFILL-TIMING]       gate:         6.1ms (  0.9% of gqa)
+[PREFILL-TIMING]       o_proj:      67.7ms (  9.5% of gqa)
+[PREFILL-TIMING]     hqq projection internals:
+[PREFILL-TIMING]       marlin_float_zp:    933.9ms over 130 calls
+[PREFILL-TIMING]       group_sums:          15.6ms over 130 calls
+[PREFILL-TIMING]       correction_gemm:     49.7ms over 130 calls
+[PREFILL-TIMING]       correction_add:      95.0ms over 130 calls
+[PREFILL-TIMING]     la breakdown (36 layers):
+[PREFILL-TIMING]       proj:       666.5ms ( 47.8% of la)
+[PREFILL-TIMING]         qkvz:       615.6ms    ba:     50.1ms
+[PREFILL-TIMING]       uninter:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       conv:        67.6ms (  4.8% of la)
+[PREFILL-TIMING]       prep:        36.9ms (  2.6% of la)
+[PREFILL-TIMING]       convert:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       fla:        392.2ms ( 28.1% of la)
+[PREFILL-TIMING]         fla/cumsum:    19.5ms kkt:    12.3ms solve:    17.8ms
+[PREFILL-TIMING]         fla/wy:        27.9ms state:   277.8ms output:    36.3ms
+[PREFILL-TIMING]       postfla:      0.4ms (  0.0% of la)
+[PREFILL-TIMING]       norm:        23.1ms (  1.7% of la)
+[PREFILL-TIMING]       o_proj:     207.1ms ( 14.9% of la)
+[PREFILL-TIMING]   moe:      1089.5ms ( 33.2%)
+[PREFILL-TIMING]     moe breakdown (48 layers):
+[PREFILL-TIMING]       gate:        25.8ms (  2.4% of moe)
+[PREFILL-TIMING]       dma:        387.8ms ( 35.6% of moe)
+[PREFILL-TIMING]         route_d2h:     0.9ms ptr_alloc:     0.5ms ptr_build:     0.3ms
+[PREFILL-TIMING]         cold_h2d:     56.8ms ptr_upload:     0.4ms dma_wait:   326.8ms
+[PREFILL-TIMING]       w1+act:     357.1ms ( 32.8% of moe)
+[PREFILL-TIMING]       w2:         146.4ms ( 13.4% of moe)
+[PREFILL-TIMING]       scatter:    110.1ms ( 10.1% of moe)
+[PREFILL-TIMING]       shared:      61.8ms (  5.7% of moe)
+[PREFILL-TIMING]   other:      38.3ms (  1.2%)
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.598556, "lock_ms": 0.000591, "prepare_runtime_ms": 353.60360299999996, "prompt_hcs_shadow_ms": 0.067554, "prompt_tokens": 35000, "release_scratch_ms": 37.823242, "restore_runtime_ms": 188.71959999999999, "run_finalize_ms": 3283.2877529999996, "scratch_ms": 17.000811000000002, "stop_ids_ms": 0.048007999999999995, "tokenize_ms": 57.899222, "total_ms": 3939.0515370000003, "unaccounted_ms": 0.002597000000605476}
+[PREFILL-TIMING] 50000 tokens, 4557.4ms total (10971 tok/s)
+[PREFILL-TIMING]   embed:       0.4ms (  0.0%)
+[PREFILL-TIMING]   norm:       69.2ms (  1.5%)
+[PREFILL-TIMING]   attn:     3320.5ms ( 72.9%)  [gqa: 1301.1ms, la: 2019.4ms]
+[PREFILL-TIMING]     gqa breakdown (10 FA2 calls: 10 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:       242.2ms ( 18.6% of gqa)
+[PREFILL-TIMING]       qknorm:      10.8ms (  0.8% of gqa)
+[PREFILL-TIMING]       rope:         1.7ms (  0.1% of gqa)
+[PREFILL-TIMING]       kv_prep:      1.2ms (  0.1% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           1.2ms over 10 calls
+[PREFILL-TIMING]       fa2       940.1ms ( 72.3% of gqa)  [94.0ms/call avg]
+[PREFILL-TIMING]       gate:         8.7ms (  0.7% of gqa)
+[PREFILL-TIMING]       o_proj:      96.4ms (  7.4% of gqa)
+[PREFILL-TIMING]     hqq projection internals:
+[PREFILL-TIMING]       marlin_float_zp:   1347.0ms over 130 calls
+[PREFILL-TIMING]       group_sums:          22.1ms over 130 calls
+[PREFILL-TIMING]       correction_gemm:     70.7ms over 130 calls
+[PREFILL-TIMING]       correction_add:     143.0ms over 130 calls
+[PREFILL-TIMING]     la breakdown (36 layers):
+[PREFILL-TIMING]       proj:       969.6ms ( 48.0% of la)
+[PREFILL-TIMING]         qkvz:       898.1ms    ba:     70.5ms
+[PREFILL-TIMING]       uninter:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       conv:       103.3ms (  5.1% of la)
+[PREFILL-TIMING]       prep:        52.7ms (  2.6% of la)
+[PREFILL-TIMING]       convert:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       fla:        572.6ms ( 28.4% of la)
+[PREFILL-TIMING]         fla/cumsum:    28.0ms kkt:    17.6ms solve:    33.2ms
+[PREFILL-TIMING]         fla/wy:        40.4ms state:   400.5ms output:    52.2ms
+[PREFILL-TIMING]       postfla:      0.4ms (  0.0% of la)
+[PREFILL-TIMING]       norm:        32.9ms (  1.6% of la)
+[PREFILL-TIMING]       o_proj:     287.5ms ( 14.2% of la)
+[PREFILL-TIMING]   moe:      1019.7ms ( 22.4%)
+[PREFILL-TIMING]     moe breakdown (48 layers):
+[PREFILL-TIMING]       gate:        36.4ms (  3.6% of moe)
+[PREFILL-TIMING]       dma:         19.7ms (  1.9% of moe)
+[PREFILL-TIMING]         route_d2h:     0.9ms ptr_alloc:     0.0ms ptr_build:     0.5ms
+[PREFILL-TIMING]         cold_h2d:     95.1ms ptr_upload:     0.4ms dma_wait:    15.0ms
+[PREFILL-TIMING]       w1+act:     504.1ms ( 49.4% of moe)
+[PREFILL-TIMING]       w2:         206.0ms ( 20.2% of moe)
+[PREFILL-TIMING]       scatter:    160.0ms ( 15.7% of moe)
+[PREFILL-TIMING]       shared:      92.9ms (  9.1% of moe)
+[PREFILL-TIMING]   other:     147.6ms (  3.2%)
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.849339, "lock_ms": 0.000591, "prepare_runtime_ms": 181.700367, "prompt_hcs_shadow_ms": 0.022341, "prompt_tokens": 50000, "release_scratch_ms": 48.544959, "restore_runtime_ms": 316.36544100000003, "run_finalize_ms": 4558.528818, "scratch_ms": 22.622436, "stop_ids_ms": 0.044301999999999994, "tokenize_ms": 83.337783, "total_ms": 5212.020124000001, "unaccounted_ms": 0.003747000000657863}
+  Run 1: 1,531.2 tok/s (1,000 tokens in 653.1ms)
+  Run 2: 5,787.4 tok/s (5,000 tokens in 863.9ms)
+  Run 3: 7,698.9 tok/s (10,000 tokens in 1298.9ms)
+  Run 4: 8,651.5 tok/s (20,000 tokens in 2311.7ms)
+  Run 5: 8,885.4 tok/s (35,000 tokens in 3939.1ms)
+  Run 6: 9,593.2 tok/s (50,000 tokens in 5212.0ms)
+  [1mBest: 9,593.2 tok/s (50,000 tokens)[0m
+
+[1m[36m▸ Decode (internal) — 50/100/250 tokens, 3 separate prompts[0m
+[PREFILL-TIMING] 61 tokens, 352.1ms total (173 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.9ms (  0.3%)
+[PREFILL-TIMING]   attn:       16.9ms (  4.8%)  [gqa: 3.7ms, la: 13.2ms]
+[PREFILL-TIMING]     gqa breakdown (10 FA2 calls: 10 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:         2.3ms ( 62.5% of gqa)
+[PREFILL-TIMING]       qknorm:       0.1ms (  3.2% of gqa)
+[PREFILL-TIMING]       rope:         0.1ms (  3.1% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.1ms (  2.2% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.1ms over 10 calls
+[PREFILL-TIMING]       fa2         0.2ms (  4.1% of gqa)  [0.0ms/call avg]
+[PREFILL-TIMING]       gate:         0.1ms (  2.1% of gqa)
+[PREFILL-TIMING]       o_proj:       0.8ms ( 21.7% of gqa)
+[PREFILL-TIMING]     hqq projection internals:
+[PREFILL-TIMING]       marlin_float_zp:      5.2ms over 130 calls
+[PREFILL-TIMING]       group_sums:           1.0ms over 130 calls
+[PREFILL-TIMING]       correction_gemm:      2.2ms over 130 calls
+[PREFILL-TIMING]       correction_add:       1.0ms over 130 calls
+[PREFILL-TIMING]     la breakdown (36 layers):
+[PREFILL-TIMING]       proj:         5.2ms ( 39.5% of la)
+[PREFILL-TIMING]         qkvz:         2.7ms    ba:      2.2ms
+[PREFILL-TIMING]       uninter:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       conv:         0.7ms (  5.1% of la)
+[PREFILL-TIMING]       prep:         0.4ms (  3.3% of la)
+[PREFILL-TIMING]       convert:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       fla:          3.4ms ( 26.1% of la)
+[PREFILL-TIMING]         fla/cumsum:     0.4ms kkt:     0.3ms solve:     0.5ms
+[PREFILL-TIMING]         fla/wy:         0.4ms state:     0.9ms output:     0.5ms
+[PREFILL-TIMING]       postfla:      0.3ms (  2.4% of la)
+[PREFILL-TIMING]       norm:         0.3ms (  2.1% of la)
+[PREFILL-TIMING]       o_proj:       2.4ms ( 18.5% of la)
+[PREFILL-TIMING]   moe:        19.1ms (  5.4%)
+[PREFILL-TIMING]     moe breakdown (48 layers):
+[PREFILL-TIMING]       gate:         2.2ms ( 11.7% of moe)
+[PREFILL-TIMING]       dma:          1.8ms (  9.6% of moe)
+[PREFILL-TIMING]         route_d2h:     0.7ms ptr_alloc:     0.4ms ptr_build:     0.0ms
+[PREFILL-TIMING]         cold_h2d:      0.0ms ptr_upload:     0.4ms dma_wait:     0.1ms
+[PREFILL-TIMING]       w1+act:       8.4ms ( 44.2% of moe)
+[PREFILL-TIMING]       w2:           4.4ms ( 23.3% of moe)
+[PREFILL-TIMING]       scatter:      0.6ms (  3.2% of moe)
+[PREFILL-TIMING]       shared:       1.1ms (  5.6% of moe)
+[PREFILL-TIMING]   other:     315.2ms ( 89.5%)
+  [32mdecode: 49 tokens in 0.43s (114.0 tok/s)  VRAM: 9558 MB free now, 9558 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=640/320 protected=9600 promotions=0 evictions=0 request_promotions=0/640 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (49 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:          8.61 ms/tok  (116.2 tok/s)    [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Graph inter-layer breakdown:                  [36m│[0m
+  [36m│[0m    GPU compute:   0.17 ms  ( 1.9%)            [36m│[0m
+  [36m│[0m    Sync wait:     7.99 ms  (92.9%)            [36m│[0m
+  [36m│[0m      inter:       7.31 ms  final:  0.69 ms     [36m│[0m
+  [36m│[0m    Classify:      0.01 ms  ( 0.2%)            [36m│[0m
+  [36m│[0m    Cold DMA:      0.00 ms  ( 0.0%)            [36m│[0m
+  [36m│[0m    Upload:        0.10 ms  ( 1.2%)            [36m│[0m
+  [36m│[0m    Launch:        0.33 ms  ( 3.9%)            [36m│[0m
+  [36m│[0m  Graph replay segment CUDA events:            [36m│[0m
+  [36m│[0m    Segment total:  8.14 ms                  [36m│[0m
+  [36m│[0m    First route:   0.13 ms  ( 1.6%)        [36m│[0m
+  [36m│[0m    Middle segs:   7.32 ms  (89.9%)        [36m│[0m
+  [36m│[0m    Final seg:     0.69 ms  ( 8.5%)        [36m│[0m
+  [36m│[0m  Graph replay typed segment totals:          [36m│[0m
+  [36m│[0m    First:       0.13 ms/tok (0.13 ms/seg) [36m│[0m
+  [36m│[0m    LA route:    5.50 ms/tok (0.19 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:   1.82 ms/tok (0.18 ms/seg) [36m│[0m
+  [36m│[0m    Final:       0.69 ms/tok (0.69 ms/seg) [36m│[0m
+  [36m│[0m  Sync wait attributed to segment:           [36m│[0m
+  [36m│[0m    First:       0.13 ms/tok (0.13 ms/seg) [36m│[0m
+  [36m│[0m    LA route:    5.39 ms/tok (0.19 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:   1.78 ms/tok (0.18 ms/seg) [36m│[0m
+  [36m│[0m    Final:       0.69 ms/tok (0.69 ms/seg) [36m│[0m
+  [36m│[0m  Slowest sync-wait segments:                [36m│[0m
+  [36m│[0m    #40   0.69 ms  graph40 experts L39 + final           [36m│[0m
+  [36m│[0m    #36   0.19 ms  graph36 experts L35 + route L36 LA    [36m│[0m
+  [36m│[0m    #16   0.19 ms  graph16 experts L15 + route L16 LA    [36m│[0m
+  [36m│[0m    #32   0.19 ms  graph32 experts L31 + route L32 LA    [36m│[0m
+  [36m│[0m    #9    0.19 ms  graph9 experts L8 + route L9 LA       [36m│[0m
+  [36m│[0m    #37   0.19 ms  graph37 experts L36 + route L37 LA    [36m│[0m
+  [36m│[0m  Slowest graph replay segments:              [36m│[0m
+  [36m│[0m    #40   0.69 ms  graph40 experts L39 + final           [36m│[0m
+  [36m│[0m    #36   0.19 ms  graph36 experts L35 + route L36 LA    [36m│[0m
+  [36m│[0m    #32   0.19 ms  graph32 experts L31 + route L32 LA    [36m│[0m
+  [36m│[0m    #16   0.19 ms  graph16 experts L15 + route L16 LA    [36m│[0m
+  [36m│[0m    #9    0.19 ms  graph9 experts L8 + route L9 LA       [36m│[0m
+  [36m│[0m    #5    0.19 ms  graph5 experts L4 + route L5 LA       [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe DMA (non-serialized):                     [36m│[0m
+  [36m│[0m    Cold experts/tok: 0.0 (0 DMA calls)      [36m│[0m
+  [36m│[0m    HCS experts/tok:  320.0 (10240 cached)            [36m│[0m
+  [36m│[0m    DMA bytes/tok:    0.00 MB                     [36m│[0m
+  [36m│[0m    HCS hit/miss:     320/0                        [36m│[0m
+  [36m│[0m    Avg DMA call size: 0.0 KB                   [36m│[0m
+  [36m│[0m    Est PCIe BW:      0.0 GB/s (cold fraction)  [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.16649699999999998, "lock_ms": 0.000581, "prepare_runtime_ms": 484.742325, "prompt_hcs_shadow_ms": 0.02173, "prompt_tokens": 61, "release_scratch_ms": 13.495999, "restore_runtime_ms": 227.718663, "run_finalize_ms": 352.522304, "scratch_ms": 4.2217080000000005, "stop_ids_ms": 0.051434999999999995, "tokenize_ms": 0.397223, "total_ms": 1083.3419410000001, "unaccounted_ms": 0.0034760000003188907}
+[PREFILL-TIMING] 66 tokens, 349.8ms total (189 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.9ms (  0.3%)
+[PREFILL-TIMING]   attn:       19.2ms (  5.5%)  [gqa: 4.4ms, la: 14.9ms]
+[PREFILL-TIMING]     gqa breakdown (10 FA2 calls: 10 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:         2.8ms ( 64.3% of gqa)
+[PREFILL-TIMING]       qknorm:       0.1ms (  2.9% of gqa)
+[PREFILL-TIMING]       rope:         0.1ms (  2.7% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.1ms (  1.9% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.1ms over 10 calls
+[PREFILL-TIMING]       fa2         0.2ms (  4.0% of gqa)  [0.0ms/call avg]
+[PREFILL-TIMING]       gate:         0.1ms (  1.8% of gqa)
+[PREFILL-TIMING]       o_proj:       0.9ms ( 21.5% of gqa)
+[PREFILL-TIMING]     hqq projection internals:
+[PREFILL-TIMING]       marlin_float_zp:      7.2ms over 130 calls
+[PREFILL-TIMING]       group_sums:           1.0ms over 130 calls
+[PREFILL-TIMING]       correction_gemm:      2.2ms over 130 calls
+[PREFILL-TIMING]       correction_add:       1.0ms over 130 calls
+[PREFILL-TIMING]     la breakdown (36 layers):
+[PREFILL-TIMING]       proj:         6.1ms ( 41.2% of la)
+[PREFILL-TIMING]         qkvz:         3.2ms    ba:      2.6ms
+[PREFILL-TIMING]       uninter:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       conv:         0.7ms (  4.6% of la)
+[PREFILL-TIMING]       prep:         0.4ms (  2.9% of la)
+[PREFILL-TIMING]       convert:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       fla:          3.8ms ( 25.8% of la)
+[PREFILL-TIMING]         fla/cumsum:     0.4ms kkt:     0.3ms solve:     0.5ms
+[PREFILL-TIMING]         fla/wy:         0.4ms state:     1.3ms output:     0.5ms
+[PREFILL-TIMING]       postfla:      0.3ms (  2.0% of la)
+[PREFILL-TIMING]       norm:         0.3ms (  1.8% of la)
+[PREFILL-TIMING]       o_proj:       2.8ms ( 19.0% of la)
+[PREFILL-TIMING]   moe:        19.5ms (  5.6%)
+[PREFILL-TIMING]     moe breakdown (48 layers):
+[PREFILL-TIMING]       gate:         2.2ms ( 11.5% of moe)
+[PREFILL-TIMING]       dma:          1.8ms (  9.4% of moe)
+[PREFILL-TIMING]         route_d2h:     0.7ms ptr_alloc:     0.4ms ptr_build:     0.0ms
+[PREFILL-TIMING]         cold_h2d:      0.0ms ptr_upload:     0.4ms dma_wait:     0.1ms
+[PREFILL-TIMING]       w1+act:       8.7ms ( 44.7% of moe)
+[PREFILL-TIMING]       w2:           4.6ms ( 23.7% of moe)
+[PREFILL-TIMING]       scatter:      0.6ms (  3.3% of moe)
+[PREFILL-TIMING]       shared:       1.0ms (  5.0% of moe)
+[PREFILL-TIMING]   other:     310.1ms ( 88.7%)
+  [32mdecode: 99 tokens in 0.87s (113.3 tok/s)  VRAM: 9558 MB free now, 9558 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=640/320 protected=9600 promotions=0 evictions=0 request_promotions=0/640 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (99 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:          8.66 ms/tok  (115.4 tok/s)    [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Graph inter-layer breakdown:                  [36m│[0m
+  [36m│[0m    GPU compute:   0.16 ms  ( 1.9%)            [36m│[0m
+  [36m│[0m    Sync wait:     8.07 ms  (93.1%)            [36m│[0m
+  [36m│[0m      inter:       7.38 ms  final:  0.69 ms     [36m│[0m
+  [36m│[0m    Classify:      0.01 ms  ( 0.2%)            [36m│[0m
+  [36m│[0m    Cold DMA:      0.00 ms  ( 0.0%)            [36m│[0m
+  [36m│[0m    Upload:        0.10 ms  ( 1.2%)            [36m│[0m
+  [36m│[0m    Launch:        0.32 ms  ( 3.7%)            [36m│[0m
+  [36m│[0m  Graph replay segment CUDA events:            [36m│[0m
+  [36m│[0m    Segment total:  8.20 ms                  [36m│[0m
+  [36m│[0m    First route:   0.13 ms  ( 1.6%)        [36m│[0m
+  [36m│[0m    Middle segs:   7.38 ms  (90.0%)        [36m│[0m
+  [36m│[0m    Final seg:     0.69 ms  ( 8.4%)        [36m│[0m
+  [36m│[0m  Graph replay typed segment totals:          [36m│[0m
+  [36m│[0m    First:       0.13 ms/tok (0.13 ms/seg) [36m│[0m
+  [36m│[0m    LA route:    5.49 ms/tok (0.19 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:   1.89 ms/tok (0.19 ms/seg) [36m│[0m
+  [36m│[0m    Final:       0.69 ms/tok (0.69 ms/seg) [36m│[0m
+  [36m│[0m  Sync wait attributed to segment:           [36m│[0m
+  [36m│[0m    First:       0.13 ms/tok (0.13 ms/seg) [36m│[0m
+  [36m│[0m    LA route:    5.40 ms/tok (0.19 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:   1.86 ms/tok (0.19 ms/seg) [36m│[0m
+  [36m│[0m    Final:       0.69 ms/tok (0.69 ms/seg) [36m│[0m
+  [36m│[0m  Slowest sync-wait segments:                [36m│[0m
+  [36m│[0m    #40   0.69 ms  graph40 experts L39 + final           [36m│[0m
+  [36m│[0m    #20   0.19 ms  graph20 experts L19 + route L20 LA    [36m│[0m
+  [36m│[0m    #32   0.19 ms  graph32 experts L31 + route L32 LA    [36m│[0m
+  [36m│[0m    #16   0.19 ms  graph16 experts L15 + route L16 LA    [36m│[0m
+  [36m│[0m    #36   0.19 ms  graph36 experts L35 + route L36 LA    [36m│[0m
+  [36m│[0m    #13   0.19 ms  graph13 experts L12 + route L13 LA    [36m│[0m
+  [36m│[0m  Slowest graph replay segments:              [36m│[0m
+  [36m│[0m    #40   0.69 ms  graph40 experts L39 + final           [36m│[0m
+  [36m│[0m    #20   0.19 ms  graph20 experts L19 + route L20 LA    [36m│[0m
+  [36m│[0m    #16   0.19 ms  graph16 experts L15 + route L16 LA    [36m│[0m
+  [36m│[0m    #32   0.19 ms  graph32 experts L31 + route L32 LA    [36m│[0m
+  [36m│[0m    #36   0.19 ms  graph36 experts L35 + route L36 LA    [36m│[0m
+  [36m│[0m    #5    0.19 ms  graph5 experts L4 + route L5 LA       [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe DMA (non-serialized):                     [36m│[0m
+  [36m│[0m    Cold experts/tok: 0.0 (0 DMA calls)      [36m│[0m
+  [36m│[0m    HCS experts/tok:  320.0 (10240 cached)            [36m│[0m
+  [36m│[0m    DMA bytes/tok:    0.00 MB                     [36m│[0m
+  [36m│[0m    HCS hit/miss:     320/0                        [36m│[0m
+  [36m│[0m    Avg DMA call size: 0.0 KB                   [36m│[0m
+  [36m│[0m    Est PCIe BW:      0.0 GB/s (cold fraction)  [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.037629, "lock_ms": 0.00043, "prepare_runtime_ms": 275.700708, "prompt_hcs_shadow_ms": 0.024555, "prompt_tokens": 66, "release_scratch_ms": 19.771791, "restore_runtime_ms": 249.28634599999998, "run_finalize_ms": 350.252858, "scratch_ms": 3.535711, "stop_ids_ms": 0.041818, "tokenize_ms": 0.381154, "total_ms": 899.035236, "unaccounted_ms": 0.0022360000000389846}
+[PREFILL-TIMING] 61 tokens, 354.9ms total (172 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.9ms (  0.3%)
+[PREFILL-TIMING]   attn:       24.6ms (  6.9%)  [gqa: 3.8ms, la: 20.8ms]
+[PREFILL-TIMING]     gqa breakdown (10 FA2 calls: 10 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:         2.3ms ( 59.6% of gqa)
+[PREFILL-TIMING]       qknorm:       0.1ms (  3.2% of gqa)
+[PREFILL-TIMING]       rope:         0.2ms (  6.4% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.1ms (  2.2% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.1ms over 10 calls
+[PREFILL-TIMING]       fa2         0.2ms (  4.2% of gqa)  [0.0ms/call avg]
+[PREFILL-TIMING]       gate:         0.1ms (  2.0% of gqa)
+[PREFILL-TIMING]       o_proj:       0.8ms ( 20.9% of gqa)
+[PREFILL-TIMING]     hqq projection internals:
+[PREFILL-TIMING]       marlin_float_zp:      5.2ms over 130 calls
+[PREFILL-TIMING]       group_sums:           1.0ms over 130 calls
+[PREFILL-TIMING]       correction_gemm:      2.1ms over 130 calls
+[PREFILL-TIMING]       correction_add:       1.0ms over 130 calls
+[PREFILL-TIMING]     la breakdown (36 layers):
+[PREFILL-TIMING]       proj:         5.1ms ( 24.7% of la)
+[PREFILL-TIMING]         qkvz:         2.7ms    ba:      2.1ms
+[PREFILL-TIMING]       uninter:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       conv:         0.7ms (  3.3% of la)
+[PREFILL-TIMING]       prep:         8.2ms ( 39.2% of la)
+[PREFILL-TIMING]       convert:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       fla:          3.4ms ( 16.4% of la)
+[PREFILL-TIMING]         fla/cumsum:     0.4ms kkt:     0.3ms solve:     0.5ms
+[PREFILL-TIMING]         fla/wy:         0.4ms state:     0.9ms output:     0.5ms
+[PREFILL-TIMING]       postfla:      0.3ms (  1.5% of la)
+[PREFILL-TIMING]       norm:         0.3ms (  1.3% of la)
+[PREFILL-TIMING]       o_proj:       2.4ms ( 11.7% of la)
+[PREFILL-TIMING]   moe:        19.1ms (  5.4%)
+[PREFILL-TIMING]     moe breakdown (48 layers):
+[PREFILL-TIMING]       gate:         2.2ms ( 11.4% of moe)
+[PREFILL-TIMING]       dma:          1.9ms (  9.7% of moe)
+[PREFILL-TIMING]         route_d2h:     0.8ms ptr_alloc:     0.4ms ptr_build:     0.0ms
+[PREFILL-TIMING]         cold_h2d:      0.0ms ptr_upload:     0.4ms dma_wait:     0.1ms
+[PREFILL-TIMING]       w1+act:       8.5ms ( 44.4% of moe)
+[PREFILL-TIMING]       w2:           4.5ms ( 23.3% of moe)
+[PREFILL-TIMING]       scatter:      0.6ms (  3.2% of moe)
+[PREFILL-TIMING]       shared:       1.0ms (  5.4% of moe)
+[PREFILL-TIMING]   other:     310.2ms ( 87.4%)
+  [32mdecode: 249 tokens in 2.22s (112.3 tok/s)  VRAM: 9556 MB free now, 9556 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=640/320 protected=9600 promotions=0 evictions=0 request_promotions=0/640 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (249 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:          8.74 ms/tok  (114.4 tok/s)    [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Graph inter-layer breakdown:                  [36m│[0m
+  [36m│[0m    GPU compute:   0.16 ms  ( 1.9%)            [36m│[0m
+  [36m│[0m    Sync wait:     8.14 ms  (93.1%)            [36m│[0m
+  [36m│[0m      inter:       7.43 ms  final:  0.71 ms     [36m│[0m
+  [36m│[0m    Classify:      0.01 ms  ( 0.2%)            [36m│[0m
+  [36m│[0m    Cold DMA:      0.00 ms  ( 0.0%)            [36m│[0m
+  [36m│[0m    Upload:        0.10 ms  ( 1.2%)            [36m│[0m
+  [36m│[0m    Launch:        0.32 ms  ( 3.7%)            [36m│[0m
+  [36m│[0m  Graph replay segment CUDA events:            [36m│[0m
+  [36m│[0m    Segment total:  8.24 ms                  [36m│[0m
+  [36m│[0m    First route:   0.13 ms  ( 1.6%)        [36m│[0m
+  [36m│[0m    Middle segs:   7.42 ms  (90.1%)        [36m│[0m
+  [36m│[0m    Final seg:     0.69 ms  ( 8.3%)        [36m│[0m
+  [36m│[0m  Graph replay typed segment totals:          [36m│[0m
+  [36m│[0m    First:       0.13 ms/tok (0.13 ms/seg) [36m│[0m
+  [36m│[0m    LA route:    5.41 ms/tok (0.19 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:   2.01 ms/tok (0.20 ms/seg) [36m│[0m
+  [36m│[0m    Final:       0.69 ms/tok (0.69 ms/seg) [36m│[0m
+  [36m│[0m  Sync wait attributed to segment:           [36m│[0m
+  [36m│[0m    First:       0.13 ms/tok (0.13 ms/seg) [36m│[0m
+  [36m│[0m    LA route:    5.32 ms/tok (0.18 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:   1.98 ms/tok (0.20 ms/seg) [36m│[0m
+  [36m│[0m    Final:       0.71 ms/tok (0.71 ms/seg) [36m│[0m
+  [36m│[0m  Slowest sync-wait segments:                [36m│[0m
+  [36m│[0m    #40   0.71 ms  graph40 experts L39 + final           [36m│[0m
+  [36m│[0m    #23   0.20 ms  graph23 experts L22 + route L23 GQA   [36m│[0m
+  [36m│[0m    #19   0.20 ms  graph19 experts L18 + route L19 GQA   [36m│[0m
+  [36m│[0m    #3    0.20 ms  graph3 experts L2 + route L3 GQA      [36m│[0m
+  [36m│[0m    #11   0.20 ms  graph11 experts L10 + route L11 GQA   [36m│[0m
+  [36m│[0m    #35   0.20 ms  graph35 experts L34 + route L35 GQA   [36m│[0m
+  [36m│[0m  Slowest graph replay segments:              [36m│[0m
+  [36m│[0m    #40   0.69 ms  graph40 experts L39 + final           [36m│[0m
+  [36m│[0m    #23   0.20 ms  graph23 experts L22 + route L23 GQA   [36m│[0m
+  [36m│[0m    #3    0.20 ms  graph3 experts L2 + route L3 GQA      [36m│[0m
+  [36m│[0m    #19   0.20 ms  graph19 experts L18 + route L19 GQA   [36m│[0m
+  [36m│[0m    #11   0.20 ms  graph11 experts L10 + route L11 GQA   [36m│[0m
+  [36m│[0m    #35   0.20 ms  graph35 experts L34 + route L35 GQA   [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe DMA (non-serialized):                     [36m│[0m
+  [36m│[0m    Cold experts/tok: 0.0 (0 DMA calls)      [36m│[0m
+  [36m│[0m    HCS experts/tok:  320.0 (10240 cached)            [36m│[0m
+  [36m│[0m    DMA bytes/tok:    0.00 MB                     [36m│[0m
+  [36m│[0m    HCS hit/miss:     320/0                        [36m│[0m
+  [36m│[0m    Avg DMA call size: 0.0 KB                   [36m│[0m
+  [36m│[0m    Est PCIe BW:      0.0 GB/s (cold fraction)  [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+BENCH_PREFILL_BREAKDOWN_JSON {"hcs_snapshot_ms": 0.037107999999999995, "lock_ms": 0.000902, "prepare_runtime_ms": 271.01639900000004, "prompt_hcs_shadow_ms": 0.018825, "prompt_tokens": 61, "release_scratch_ms": 20.806985, "restore_runtime_ms": 273.652611, "run_finalize_ms": 355.307131, "scratch_ms": 3.8077739999999998, "stop_ids_ms": 0.042929999999999996, "tokenize_ms": 0.36802900000000005, "total_ms": 925.062021, "unaccounted_ms": 0.0033269999998992716}
+   50 tokens: 113.92 tok/s (8.8ms/tok)
+  100 tokens: 113.26 tok/s (8.8ms/tok)
+  250 tokens: 112.28 tok/s (8.9ms/tok)
+  [1mBest: 113.92 tok/s[0m
+  HCS:  10240/10240 experts loaded (100.0%)
+  VRAM: 9556 MB min free during decode (safety margin: 600 MB)
+
+[1m[36m▸ Round trip (network) — 50/100/250 tokens via HTTP[0m
+[PREFILL-TIMING] 14 tokens, 190.7ms total (73 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.8ms (  0.4%)
+[PREFILL-TIMING]   attn:       19.8ms ( 10.4%)  [gqa: 2.9ms, la: 16.9ms]
+[PREFILL-TIMING]     gqa breakdown (10 FA2 calls: 10 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:         1.7ms ( 58.2% of gqa)
+[PREFILL-TIMING]       qknorm:       0.1ms (  3.8% of gqa)
+[PREFILL-TIMING]       rope:         0.1ms (  4.1% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.1ms (  2.8% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.1ms over 10 calls
+[PREFILL-TIMING]       fa2         0.2ms (  5.3% of gqa)  [0.0ms/call avg]
+[PREFILL-TIMING]       gate:         0.1ms (  2.7% of gqa)
+[PREFILL-TIMING]       o_proj:       0.6ms ( 21.8% of gqa)
+[PREFILL-TIMING]     hqq projection internals:
+[PREFILL-TIMING]       marlin_float_zp:      3.2ms over 130 calls
+[PREFILL-TIMING]       group_sums:           1.0ms over 130 calls
+[PREFILL-TIMING]       correction_gemm:      7.4ms over 130 calls
+[PREFILL-TIMING]       correction_add:       0.9ms over 130 calls
+[PREFILL-TIMING]     la breakdown (36 layers):
+[PREFILL-TIMING]       proj:         9.5ms ( 56.0% of la)
+[PREFILL-TIMING]         qkvz:         7.6ms    ba:      1.6ms
+[PREFILL-TIMING]       uninter:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       conv:         0.7ms (  4.0% of la)
+[PREFILL-TIMING]       prep:         0.4ms (  2.3% of la)
+[PREFILL-TIMING]       convert:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       fla:          3.4ms ( 20.4% of la)
+[PREFILL-TIMING]         fla/cumsum:     0.4ms kkt:     0.3ms solve:     0.5ms
+[PREFILL-TIMING]         fla/wy:         0.4ms state:     0.9ms output:     0.5ms
+[PREFILL-TIMING]       postfla:      0.3ms (  1.8% of la)
+[PREFILL-TIMING]       norm:         0.3ms (  1.5% of la)
+[PREFILL-TIMING]       o_proj:       2.0ms ( 11.6% of la)
+[PREFILL-TIMING]   moe:        13.5ms (  7.1%)
+[PREFILL-TIMING]     moe breakdown (48 layers):
+[PREFILL-TIMING]       gate:         2.2ms ( 16.3% of moe)
+[PREFILL-TIMING]       dma:          1.7ms ( 12.6% of moe)
+[PREFILL-TIMING]         route_d2h:     0.7ms ptr_alloc:     0.4ms ptr_build:     0.0ms
+[PREFILL-TIMING]         cold_h2d:      0.0ms ptr_upload:     0.4ms dma_wait:     0.1ms
+[PREFILL-TIMING]       w1+act:       5.1ms ( 37.6% of moe)
+[PREFILL-TIMING]       w2:           2.6ms ( 19.6% of moe)
+[PREFILL-TIMING]       scatter:      0.5ms (  3.8% of moe)
+[PREFILL-TIMING]       shared:       1.0ms (  7.0% of moe)
+[PREFILL-TIMING]   other:     156.5ms ( 82.1%)
+  [32mprefill: 14 tokens in 0.58s (24.3 tok/s)  VRAM: 9558 MB free now, 5548 MB min free during prefill[0m
+  [32mdecode: 7 tokens in 0.06s (116.1 tok/s)  VRAM: 9558 MB free now, 9558 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=640/320 protected=9600 promotions=0 evictions=0 request_promotions=0/640 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (7 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:          8.43 ms/tok  (118.6 tok/s)    [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Graph inter-layer breakdown:                  [36m│[0m
+  [36m│[0m    GPU compute:   0.16 ms  ( 1.9%)            [36m│[0m
+  [36m│[0m    Sync wait:     7.82 ms  (92.8%)            [36m│[0m
+  [36m│[0m      inter:       7.14 ms  final:  0.68 ms     [36m│[0m
+  [36m│[0m    Classify:      0.02 ms  ( 0.2%)            [36m│[0m
+  [36m│[0m    Cold DMA:      0.00 ms  ( 0.0%)            [36m│[0m
+  [36m│[0m    Upload:        0.10 ms  ( 1.1%)            [36m│[0m
+  [36m│[0m    Launch:        0.33 ms  ( 3.9%)            [36m│[0m
+  [36m│[0m  Graph replay segment CUDA events:            [36m│[0m
+  [36m│[0m    Segment total:  7.97 ms                  [36m│[0m
+  [36m│[0m    First route:   0.13 ms  ( 1.7%)        [36m│[0m
+  [36m│[0m    Middle segs:   7.15 ms  (89.7%)        [36m│[0m
+  [36m│[0m    Final seg:     0.69 ms  ( 8.6%)        [36m│[0m
+  [36m│[0m  Graph replay typed segment totals:          [36m│[0m
+  [36m│[0m    First:       0.13 ms/tok (0.13 ms/seg) [36m│[0m
+  [36m│[0m    LA route:    5.50 ms/tok (0.19 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:   1.66 ms/tok (0.17 ms/seg) [36m│[0m
+  [36m│[0m    Final:       0.69 ms/tok (0.69 ms/seg) [36m│[0m
+  [36m│[0m  Sync wait attributed to segment:           [36m│[0m
+  [36m│[0m    First:       0.13 ms/tok (0.13 ms/seg) [36m│[0m
+  [36m│[0m    LA route:    5.39 ms/tok (0.19 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:   1.62 ms/tok (0.16 ms/seg) [36m│[0m
+  [36m│[0m    Final:       0.68 ms/tok (0.68 ms/seg) [36m│[0m
+  [36m│[0m  Slowest sync-wait segments:                [36m│[0m
+  [36m│[0m    #40   0.68 ms  graph40 experts L39 + final           [36m│[0m
+  [36m│[0m    #1    0.19 ms  graph1 experts L0 + route L1 LA       [36m│[0m
+  [36m│[0m    #28   0.19 ms  graph28 experts L27 + route L28 LA    [36m│[0m
+  [36m│[0m    #36   0.19 ms  graph36 experts L35 + route L36 LA    [36m│[0m
+  [36m│[0m    #2    0.19 ms  graph2 experts L1 + route L2 LA       [36m│[0m
+  [36m│[0m    #20   0.19 ms  graph20 experts L19 + route L20 LA    [36m│[0m
+  [36m│[0m  Slowest graph replay segments:              [36m│[0m
+  [36m│[0m    #40   0.69 ms  graph40 experts L39 + final           [36m│[0m
+  [36m│[0m    #1    0.19 ms  graph1 experts L0 + route L1 LA       [36m│[0m
+  [36m│[0m    #36   0.19 ms  graph36 experts L35 + route L36 LA    [36m│[0m
+  [36m│[0m    #28   0.19 ms  graph28 experts L27 + route L28 LA    [36m│[0m
+  [36m│[0m    #2    0.19 ms  graph2 experts L1 + route L2 LA       [36m│[0m
+  [36m│[0m    #20   0.19 ms  graph20 experts L19 + route L20 LA    [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe DMA (non-serialized):                     [36m│[0m
+  [36m│[0m    Cold experts/tok: 0.0 (0 DMA calls)      [36m│[0m
+  [36m│[0m    HCS experts/tok:  320.0 (10240 cached)            [36m│[0m
+  [36m│[0m    DMA bytes/tok:    0.00 MB                     [36m│[0m
+  [36m│[0m    HCS hit/miss:     320/0                        [36m│[0m
+  [36m│[0m    Avg DMA call size: 0.0 KB                   [36m│[0m
+  [36m│[0m    Est PCIe BW:      0.0 GB/s (cold fraction)  [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+[PREFILL-TIMING] 61 tokens, 346.7ms total (176 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.9ms (  0.3%)
+[PREFILL-TIMING]   attn:       16.6ms (  4.8%)  [gqa: 3.7ms, la: 12.9ms]
+[PREFILL-TIMING]     gqa breakdown (10 FA2 calls: 10 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:         2.3ms ( 62.2% of gqa)
+[PREFILL-TIMING]       qknorm:       0.1ms (  3.4% of gqa)
+[PREFILL-TIMING]       rope:         0.1ms (  3.1% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.1ms (  2.3% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.1ms over 10 calls
+[PREFILL-TIMING]       fa2         0.2ms (  4.2% of gqa)  [0.0ms/call avg]
+[PREFILL-TIMING]       gate:         0.1ms (  2.1% of gqa)
+[PREFILL-TIMING]       o_proj:       0.8ms ( 21.7% of gqa)
+[PREFILL-TIMING]     hqq projection internals:
+[PREFILL-TIMING]       marlin_float_zp:      5.2ms over 130 calls
+[PREFILL-TIMING]       group_sums:           1.0ms over 130 calls
+[PREFILL-TIMING]       correction_gemm:      2.1ms over 130 calls
+[PREFILL-TIMING]       correction_add:       1.0ms over 130 calls
+[PREFILL-TIMING]     la breakdown (36 layers):
+[PREFILL-TIMING]       proj:         5.1ms ( 39.4% of la)
+[PREFILL-TIMING]         qkvz:         2.7ms    ba:      2.1ms
+[PREFILL-TIMING]       uninter:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       conv:         0.7ms (  5.2% of la)
+[PREFILL-TIMING]       prep:         0.4ms (  3.4% of la)
+[PREFILL-TIMING]       convert:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       fla:          3.3ms ( 25.9% of la)
+[PREFILL-TIMING]         fla/cumsum:     0.4ms kkt:     0.3ms solve:     0.5ms
+[PREFILL-TIMING]         fla/wy:         0.4ms state:     0.9ms output:     0.5ms
+[PREFILL-TIMING]       postfla:      0.3ms (  2.4% of la)
+[PREFILL-TIMING]       norm:         0.3ms (  2.1% of la)
+[PREFILL-TIMING]       o_proj:       2.4ms ( 18.7% of la)
+[PREFILL-TIMING]   moe:        18.9ms (  5.5%)
+[PREFILL-TIMING]     moe breakdown (48 layers):
+[PREFILL-TIMING]       gate:         2.2ms ( 11.5% of moe)
+[PREFILL-TIMING]       dma:          1.8ms (  9.4% of moe)
+[PREFILL-TIMING]         route_d2h:     0.7ms ptr_alloc:     0.4ms ptr_build:     0.0ms
+[PREFILL-TIMING]         cold_h2d:      0.0ms ptr_upload:     0.4ms dma_wait:     0.1ms
+[PREFILL-TIMING]       w1+act:       8.4ms ( 44.5% of moe)
+[PREFILL-TIMING]       w2:           4.4ms ( 23.4% of moe)
+[PREFILL-TIMING]       scatter:      0.6ms (  3.3% of moe)
+[PREFILL-TIMING]       shared:       1.0ms (  5.5% of moe)
+[PREFILL-TIMING]   other:     310.3ms ( 89.5%)
+  [32mprefill: 61 tokens in 0.73s (83.9 tok/s)  VRAM: 9556 MB free now, 2004 MB min free during prefill[0m
+  [32mdecode: 49 tokens in 0.43s (114.1 tok/s)  VRAM: 9556 MB free now, 9556 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=640/320 protected=9600 promotions=0 evictions=0 request_promotions=0/640 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (49 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:          8.59 ms/tok  (116.4 tok/s)    [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Graph inter-layer breakdown:                  [36m│[0m
+  [36m│[0m    GPU compute:   0.16 ms  ( 1.9%)            [36m│[0m
+  [36m│[0m    Sync wait:     7.99 ms  (93.0%)            [36m│[0m
+  [36m│[0m      inter:       7.31 ms  final:  0.69 ms     [36m│[0m
+  [36m│[0m    Classify:      0.01 ms  ( 0.2%)            [36m│[0m
+  [36m│[0m    Cold DMA:      0.00 ms  ( 0.0%)            [36m│[0m
+  [36m│[0m    Upload:        0.10 ms  ( 1.2%)            [36m│[0m
+  [36m│[0m    Launch:        0.32 ms  ( 3.8%)            [36m│[0m
+  [36m│[0m  Graph replay segment CUDA events:            [36m│[0m
+  [36m│[0m    Segment total:  8.13 ms                  [36m│[0m
+  [36m│[0m    First route:   0.13 ms  ( 1.6%)        [36m│[0m
+  [36m│[0m    Middle segs:   7.31 ms  (89.9%)        [36m│[0m
+  [36m│[0m    Final seg:     0.69 ms  ( 8.5%)        [36m│[0m
+  [36m│[0m  Graph replay typed segment totals:          [36m│[0m
+  [36m│[0m    First:       0.13 ms/tok (0.13 ms/seg) [36m│[0m
+  [36m│[0m    LA route:    5.49 ms/tok (0.19 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:   1.82 ms/tok (0.18 ms/seg) [36m│[0m
+  [36m│[0m    Final:       0.69 ms/tok (0.69 ms/seg) [36m│[0m
+  [36m│[0m  Sync wait attributed to segment:           [36m│[0m
+  [36m│[0m    First:       0.13 ms/tok (0.13 ms/seg) [36m│[0m
+  [36m│[0m    LA route:    5.39 ms/tok (0.19 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:   1.79 ms/tok (0.18 ms/seg) [36m│[0m
+  [36m│[0m    Final:       0.69 ms/tok (0.69 ms/seg) [36m│[0m
+  [36m│[0m  Slowest sync-wait segments:                [36m│[0m
+  [36m│[0m    #40   0.69 ms  graph40 experts L39 + final           [36m│[0m
+  [36m│[0m    #16   0.19 ms  graph16 experts L15 + route L16 LA    [36m│[0m
+  [36m│[0m    #32   0.19 ms  graph32 experts L31 + route L32 LA    [36m│[0m
+  [36m│[0m    #13   0.19 ms  graph13 experts L12 + route L13 LA    [36m│[0m
+  [36m│[0m    #5    0.19 ms  graph5 experts L4 + route L5 LA       [36m│[0m
+  [36m│[0m    #36   0.19 ms  graph36 experts L35 + route L36 LA    [36m│[0m
+  [36m│[0m  Slowest graph replay segments:              [36m│[0m
+  [36m│[0m    #40   0.69 ms  graph40 experts L39 + final           [36m│[0m
+  [36m│[0m    #16   0.19 ms  graph16 experts L15 + route L16 LA    [36m│[0m
+  [36m│[0m    #13   0.19 ms  graph13 experts L12 + route L13 LA    [36m│[0m
+  [36m│[0m    #32   0.19 ms  graph32 experts L31 + route L32 LA    [36m│[0m
+  [36m│[0m    #5    0.19 ms  graph5 experts L4 + route L5 LA       [36m│[0m
+  [36m│[0m    #36   0.19 ms  graph36 experts L35 + route L36 LA    [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe DMA (non-serialized):                     [36m│[0m
+  [36m│[0m    Cold experts/tok: 0.0 (0 DMA calls)      [36m│[0m
+  [36m│[0m    HCS experts/tok:  320.0 (10240 cached)            [36m│[0m
+  [36m│[0m    DMA bytes/tok:    0.00 MB                     [36m│[0m
+  [36m│[0m    HCS hit/miss:     320/0                        [36m│[0m
+  [36m│[0m    Avg DMA call size: 0.0 KB                   [36m│[0m
+  [36m│[0m    Est PCIe BW:      0.0 GB/s (cold fraction)  [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+[PREFILL-TIMING] 66 tokens, 349.5ms total (189 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.9ms (  0.3%)
+[PREFILL-TIMING]   attn:       19.1ms (  5.5%)  [gqa: 4.3ms, la: 14.8ms]
+[PREFILL-TIMING]     gqa breakdown (10 FA2 calls: 10 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:         2.7ms ( 63.8% of gqa)
+[PREFILL-TIMING]       qknorm:       0.1ms (  3.0% of gqa)
+[PREFILL-TIMING]       rope:         0.1ms (  2.7% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.1ms (  2.1% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.1ms over 10 calls
+[PREFILL-TIMING]       fa2         0.2ms (  4.1% of gqa)  [0.0ms/call avg]
+[PREFILL-TIMING]       gate:         0.1ms (  1.8% of gqa)
+[PREFILL-TIMING]       o_proj:       0.9ms ( 21.7% of gqa)
+[PREFILL-TIMING]     hqq projection internals:
+[PREFILL-TIMING]       marlin_float_zp:      7.1ms over 130 calls
+[PREFILL-TIMING]       group_sums:           1.0ms over 130 calls
+[PREFILL-TIMING]       correction_gemm:      2.1ms over 130 calls
+[PREFILL-TIMING]       correction_add:       1.0ms over 130 calls
+[PREFILL-TIMING]     la breakdown (36 layers):
+[PREFILL-TIMING]       proj:         6.0ms ( 40.7% of la)
+[PREFILL-TIMING]         qkvz:         3.2ms    ba:      2.6ms
+[PREFILL-TIMING]       uninter:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       conv:         0.7ms (  4.5% of la)
+[PREFILL-TIMING]       prep:         0.4ms (  2.9% of la)
+[PREFILL-TIMING]       convert:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       fla:          3.8ms ( 26.0% of la)
+[PREFILL-TIMING]         fla/cumsum:     0.4ms kkt:     0.3ms solve:     0.5ms
+[PREFILL-TIMING]         fla/wy:         0.4ms state:     1.3ms output:     0.5ms
+[PREFILL-TIMING]       postfla:      0.3ms (  2.1% of la)
+[PREFILL-TIMING]       norm:         0.3ms (  1.8% of la)
+[PREFILL-TIMING]       o_proj:       2.8ms ( 19.2% of la)
+[PREFILL-TIMING]   moe:        19.3ms (  5.5%)
+[PREFILL-TIMING]     moe breakdown (48 layers):
+[PREFILL-TIMING]       gate:         2.3ms ( 11.7% of moe)
+[PREFILL-TIMING]       dma:          1.8ms (  9.2% of moe)
+[PREFILL-TIMING]         route_d2h:     0.7ms ptr_alloc:     0.4ms ptr_build:     0.0ms
+[PREFILL-TIMING]         cold_h2d:      0.0ms ptr_upload:     0.4ms dma_wait:     0.1ms
+[PREFILL-TIMING]       w1+act:       8.7ms ( 44.9% of moe)
+[PREFILL-TIMING]       w2:           4.6ms ( 23.8% of moe)
+[PREFILL-TIMING]       scatter:      0.6ms (  3.3% of moe)
+[PREFILL-TIMING]       shared:       1.0ms (  4.9% of moe)
+[PREFILL-TIMING]   other:     310.1ms ( 88.7%)
+  [32mprefill: 66 tokens in 0.73s (90.6 tok/s)  VRAM: 9558 MB free now, 2006 MB min free during prefill[0m
+  [32mdecode: 99 tokens in 0.88s (112.6 tok/s)  VRAM: 9558 MB free now, 9558 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=640/320 protected=9600 promotions=0 evictions=0 request_promotions=0/640 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (99 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:          8.71 ms/tok  (114.8 tok/s)    [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Graph inter-layer breakdown:                  [36m│[0m
+  [36m│[0m    GPU compute:   0.16 ms  ( 1.8%)            [36m│[0m
+  [36m│[0m    Sync wait:     8.11 ms  (93.1%)            [36m│[0m
+  [36m│[0m      inter:       7.42 ms  final:  0.69 ms     [36m│[0m
+  [36m│[0m    Classify:      0.01 ms  ( 0.2%)            [36m│[0m
+  [36m│[0m    Cold DMA:      0.00 ms  ( 0.0%)            [36m│[0m
+  [36m│[0m    Upload:        0.10 ms  ( 1.2%)            [36m│[0m
+  [36m│[0m    Launch:        0.32 ms  ( 3.7%)            [36m│[0m
+  [36m│[0m  Graph replay segment CUDA events:            [36m│[0m
+  [36m│[0m    Segment total:  8.20 ms                  [36m│[0m
+  [36m│[0m    First route:   0.13 ms  ( 1.6%)        [36m│[0m
+  [36m│[0m    Middle segs:   7.38 ms  (90.0%)        [36m│[0m
+  [36m│[0m    Final seg:     0.69 ms  ( 8.4%)        [36m│[0m
+  [36m│[0m  Graph replay typed segment totals:          [36m│[0m
+  [36m│[0m    First:       0.13 ms/tok (0.13 ms/seg) [36m│[0m
+  [36m│[0m    LA route:    5.49 ms/tok (0.19 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:   1.89 ms/tok (0.19 ms/seg) [36m│[0m
+  [36m│[0m    Final:       0.69 ms/tok (0.69 ms/seg) [36m│[0m
+  [36m│[0m  Sync wait attributed to segment:           [36m│[0m
+  [36m│[0m    First:       0.13 ms/tok (0.13 ms/seg) [36m│[0m
+  [36m│[0m    LA route:    5.39 ms/tok (0.19 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:   1.90 ms/tok (0.19 ms/seg) [36m│[0m
+  [36m│[0m    Final:       0.69 ms/tok (0.69 ms/seg) [36m│[0m
+  [36m│[0m  Slowest sync-wait segments:                [36m│[0m
+  [36m│[0m    #40   0.69 ms  graph40 experts L39 + final           [36m│[0m
+  [36m│[0m    #11   0.23 ms  graph11 experts L10 + route L11 GQA   [36m│[0m
+  [36m│[0m    #13   0.19 ms  graph13 experts L12 + route L13 LA    [36m│[0m
+  [36m│[0m    #36   0.19 ms  graph36 experts L35 + route L36 LA    [36m│[0m
+  [36m│[0m    #16   0.19 ms  graph16 experts L15 + route L16 LA    [36m│[0m
+  [36m│[0m    #37   0.19 ms  graph37 experts L36 + route L37 LA    [36m│[0m
+  [36m│[0m  Slowest graph replay segments:              [36m│[0m
+  [36m│[0m    #40   0.69 ms  graph40 experts L39 + final           [36m│[0m
+  [36m│[0m    #20   0.19 ms  graph20 experts L19 + route L20 LA    [36m│[0m
+  [36m│[0m    #13   0.19 ms  graph13 experts L12 + route L13 LA    [36m│[0m
+  [36m│[0m    #36   0.19 ms  graph36 experts L35 + route L36 LA    [36m│[0m
+  [36m│[0m    #16   0.19 ms  graph16 experts L15 + route L16 LA    [36m│[0m
+  [36m│[0m    #6    0.19 ms  graph6 experts L5 + route L6 LA       [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe DMA (non-serialized):                     [36m│[0m
+  [36m│[0m    Cold experts/tok: 0.0 (0 DMA calls)      [36m│[0m
+  [36m│[0m    HCS experts/tok:  320.0 (10240 cached)            [36m│[0m
+  [36m│[0m    DMA bytes/tok:    0.00 MB                     [36m│[0m
+  [36m│[0m    HCS hit/miss:     320/0                        [36m│[0m
+  [36m│[0m    Avg DMA call size: 0.0 KB                   [36m│[0m
+  [36m│[0m    Est PCIe BW:      0.0 GB/s (cold fraction)  [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+[PREFILL-TIMING] 61 tokens, 347.1ms total (176 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.9ms (  0.3%)
+[PREFILL-TIMING]   attn:       16.7ms (  4.8%)  [gqa: 3.7ms, la: 13.0ms]
+[PREFILL-TIMING]     gqa breakdown (10 FA2 calls: 10 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:         2.3ms ( 61.9% of gqa)
+[PREFILL-TIMING]       qknorm:       0.1ms (  3.3% of gqa)
+[PREFILL-TIMING]       rope:         0.1ms (  3.1% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.1ms (  2.3% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.1ms over 10 calls
+[PREFILL-TIMING]       fa2         0.2ms (  4.3% of gqa)  [0.0ms/call avg]
+[PREFILL-TIMING]       gate:         0.1ms (  2.1% of gqa)
+[PREFILL-TIMING]       o_proj:       0.8ms ( 21.9% of gqa)
+[PREFILL-TIMING]     hqq projection internals:
+[PREFILL-TIMING]       marlin_float_zp:      5.2ms over 130 calls
+[PREFILL-TIMING]       group_sums:           1.0ms over 130 calls
+[PREFILL-TIMING]       correction_gemm:      2.1ms over 130 calls
+[PREFILL-TIMING]       correction_add:       1.0ms over 130 calls
+[PREFILL-TIMING]     la breakdown (36 layers):
+[PREFILL-TIMING]       proj:         5.1ms ( 39.5% of la)
+[PREFILL-TIMING]         qkvz:         2.7ms    ba:      2.1ms
+[PREFILL-TIMING]       uninter:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       conv:         0.7ms (  5.2% of la)
+[PREFILL-TIMING]       prep:         0.4ms (  3.4% of la)
+[PREFILL-TIMING]       convert:      0.0ms (  0.0% of la)
+[PREFILL-TIMING]       fla:          3.4ms ( 26.0% of la)
+[PREFILL-TIMING]         fla/cumsum:     0.4ms kkt:     0.3ms solve:     0.5ms
+[PREFILL-TIMING]         fla/wy:         0.4ms state:     0.9ms output:     0.5ms
+[PREFILL-TIMING]       postfla:      0.3ms (  2.4% of la)
+[PREFILL-TIMING]       norm:         0.3ms (  2.1% of la)
+[PREFILL-TIMING]       o_proj:       2.4ms ( 18.6% of la)
+[PREFILL-TIMING]   moe:        19.1ms (  5.5%)
+[PREFILL-TIMING]     moe breakdown (48 layers):
+[PREFILL-TIMING]       gate:         2.2ms ( 11.4% of moe)
+[PREFILL-TIMING]       dma:          1.8ms (  9.4% of moe)
+[PREFILL-TIMING]         route_d2h:     0.7ms ptr_alloc:     0.4ms ptr_build:     0.0ms
+[PREFILL-TIMING]         cold_h2d:      0.0ms ptr_upload:     0.4ms dma_wait:     0.1ms
+[PREFILL-TIMING]       w1+act:       8.5ms ( 44.7% of moe)
+[PREFILL-TIMING]       w2:           4.5ms ( 23.4% of moe)
+[PREFILL-TIMING]       scatter:      0.6ms (  3.3% of moe)
+[PREFILL-TIMING]       shared:       1.0ms (  5.4% of moe)
+[PREFILL-TIMING]   other:     310.5ms ( 89.4%)
+  [32mprefill: 61 tokens in 0.73s (83.8 tok/s)  VRAM: 9558 MB free now, 2004 MB min free during prefill[0m
+  [32mdecode: 249 tokens in 2.23s (111.5 tok/s)  VRAM: 9558 MB free now, 9558 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=640/320 protected=9600 promotions=0 evictions=0 request_promotions=0/640 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [36m┌─────────────────────────────────────────────────┐[0m
+  [36m│[0m  GPU DECODE TIMING (249 tokens, graph mode)     [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Total:          8.80 ms/tok  (113.7 tok/s)    [36m│[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  Graph inter-layer breakdown:                  [36m│[0m
+  [36m│[0m    GPU compute:   0.16 ms  ( 1.8%)            [36m│[0m
+  [36m│[0m    Sync wait:     8.20 ms  (93.2%)            [36m│[0m
+  [36m│[0m      inter:       7.48 ms  final:  0.72 ms     [36m│[0m
+  [36m│[0m    Classify:      0.01 ms  ( 0.2%)            [36m│[0m
+  [36m│[0m    Cold DMA:      0.00 ms  ( 0.0%)            [36m│[0m
+  [36m│[0m    Upload:        0.10 ms  ( 1.1%)            [36m│[0m
+  [36m│[0m    Launch:        0.32 ms  ( 3.6%)            [36m│[0m
+  [36m│[0m  Graph replay segment CUDA events:            [36m│[0m
+  [36m│[0m    Segment total:  8.24 ms                  [36m│[0m
+  [36m│[0m    First route:   0.13 ms  ( 1.6%)        [36m│[0m
+  [36m│[0m    Middle segs:   7.42 ms  (90.1%)        [36m│[0m
+  [36m│[0m    Final seg:     0.69 ms  ( 8.3%)        [36m│[0m
+  [36m│[0m  Graph replay typed segment totals:          [36m│[0m
+  [36m│[0m    First:       0.13 ms/tok (0.13 ms/seg) [36m│[0m
+  [36m│[0m    LA route:    5.41 ms/tok (0.19 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:   2.01 ms/tok (0.20 ms/seg) [36m│[0m
+  [36m│[0m    Final:       0.69 ms/tok (0.69 ms/seg) [36m│[0m
+  [36m│[0m  Sync wait attributed to segment:           [36m│[0m
+  [36m│[0m    First:       0.13 ms/tok (0.13 ms/seg) [36m│[0m
+  [36m│[0m    LA route:    5.34 ms/tok (0.18 ms/seg) [36m│[0m
+  [36m│[0m    GQA route:   2.01 ms/tok (0.20 ms/seg) [36m│[0m
+  [36m│[0m    Final:       0.72 ms/tok (0.72 ms/seg) [36m│[0m
+  [36m│[0m  Slowest sync-wait segments:                [36m│[0m
+  [36m│[0m    #40   0.72 ms  graph40 experts L39 + final           [36m│[0m
+  [36m│[0m    #27   0.23 ms  graph27 experts L26 + route L27 GQA   [36m│[0m
+  [36m│[0m    #2    0.20 ms  graph2 experts L1 + route L2 LA       [36m│[0m
+  [36m│[0m    #23   0.20 ms  graph23 experts L22 + route L23 GQA   [36m│[0m
+  [36m│[0m    #19   0.20 ms  graph19 experts L18 + route L19 GQA   [36m│[0m
+  [36m│[0m    #3    0.20 ms  graph3 experts L2 + route L3 GQA      [36m│[0m
+  [36m│[0m  Slowest graph replay segments:              [36m│[0m
+  [36m│[0m    #40   0.69 ms  graph40 experts L39 + final           [36m│[0m
+  [36m│[0m    #23   0.20 ms  graph23 experts L22 + route L23 GQA   [36m│[0m
+  [36m│[0m    #3    0.20 ms  graph3 experts L2 + route L3 GQA      [36m│[0m
+  [36m│[0m    #19   0.20 ms  graph19 experts L18 + route L19 GQA   [36m│[0m
+  [36m│[0m    #11   0.20 ms  graph11 experts L10 + route L11 GQA   [36m│[0m
+  [36m│[0m    #35   0.20 ms  graph35 experts L34 + route L35 GQA   [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+  [36m├─────────────────────────────────────────────────┤[0m
+  [36m│[0m  PCIe DMA (non-serialized):                     [36m│[0m
+  [36m│[0m    Cold experts/tok: 0.0 (0 DMA calls)      [36m│[0m
+  [36m│[0m    HCS experts/tok:  320.0 (10240 cached)            [36m│[0m
+  [36m│[0m    DMA bytes/tok:    0.00 MB                     [36m│[0m
+  [36m│[0m    HCS hit/miss:     320/0                        [36m│[0m
+  [36m│[0m    Avg DMA call size: 0.0 KB                   [36m│[0m
+  [36m│[0m    Est PCIe BW:      0.0 GB/s (cold fraction)  [36m│[0m
+  [36m└─────────────────────────────────────────────────┘[0m
+   50 tokens: 231.28 tok/s (1.32s total)
+  100 tokens: 149.65 tok/s (1.76s total)
+  250 tokens: 123.74 tok/s (3.12s total)
+  [1mBest: 231.28 tok/s[0m
+
+[1m[36m▸ Writing results[0m
+
+[1m[32mBENCHMARK COMPLETE[0m
+  Model:                 [1mQwen3.5-35B-A3B[0m
+  Config:                INT4/4 HQQ6 KV=k6v6 1 GPU
+  Prefill (internal):    [32m[1m9,593.2 tok/s[0m  (best of 1K/5K/10K/20K/35K/50K)
+  Decode (internal):     [32m[1m113.92 tok/s[0m  (best of 50/100/250)
+  Round trip (network):  [32m[1m231.28 tok/s[0m  (best of 50/100/250)
+  HCS coverage:          10240/10240 (100.0%)
+  Min free VRAM:         9556 MB
+  Log:     [2mlogs/dev-benchmark_20260606_235805/benchmark_report.log[0m
+
+[0;36m[1m=>[0m Benchmark log saved: /home/main/Documents/Claude/krasis/logs/dev-benchmark_20260606_235805/benchmark_stdout.log

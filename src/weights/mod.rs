@@ -136,8 +136,9 @@ impl ModelConfig {
         // num_experts_per_tok (DeepSeek/Qwen3) OR experts_per_token (GPT OSS)
         let num_experts_per_tok = cfg.get("num_experts_per_tok")
             .or_else(|| cfg.get("experts_per_token"))
+            .or_else(|| cfg.get("top_k_experts"))
             .and_then(|v| v.as_u64())
-            .ok_or("Missing num_experts_per_tok or experts_per_token")? as usize;
+            .ok_or("Missing num_experts_per_tok, experts_per_token, or top_k_experts")? as usize;
 
         let num_hidden_layers = cfg.get("num_hidden_layers")
             .and_then(|v| v.as_u64())
@@ -146,6 +147,9 @@ impl ModelConfig {
                 let wmap = index?.get("weight_map")?.as_object()?;
                 let max_layer = wmap.keys()
                     .filter(|k| k.contains(".layers.") && k.contains(".mlp.experts."))
+                    .chain(wmap.keys().filter(|k| {
+                        k.contains(".layers.") && k.contains(".experts.gate_up_proj")
+                    }))
                     .filter_map(|k| {
                         let after = k.split(".layers.").nth(1)?;
                         after.split('.').next()?.parse::<u64>().ok()
@@ -6074,7 +6078,11 @@ fn detect_expert_prefix(weight_map: &HashMap<String, String>) -> Result<String, 
     for key in weight_map.keys() {
         if let Some(pos) = key.find(".layers.") {
             // Standard MoE: .mlp.experts.  Nemotron: .mixer.experts.
-            if key.contains(".mlp.experts.") || key.contains(".mixer.experts.") {
+            // Gemma4 stores stacked routed experts as sibling .experts tensors.
+            if key.contains(".mlp.experts.")
+                || key.contains(".mixer.experts.")
+                || key.contains(".layers.") && key.contains(".experts.gate_up_proj")
+            {
                 let prefix = &key[..pos];
                 // Skip MTP (multi-token prediction) weights — not real model layers
                 if prefix == "mtp" || prefix.ends_with(".mtp") {
@@ -6196,7 +6204,19 @@ fn dequant_fp8_to_bf16(fp8_data: &[u8], scale: f32) -> Vec<u16> {
 ///   experts.down_proj [E, hidden, inter]
 /// Instead of per-expert: experts.{E}.gate_proj.weight [inter, hidden]
 fn is_stacked_experts(weight_map: &HashMap<String, String>) -> bool {
-    weight_map.keys().any(|k| k.ends_with(".mlp.experts.gate_up_proj"))
+    weight_map.keys().any(|k| {
+        k.ends_with(".mlp.experts.gate_up_proj")
+            || k.ends_with(".experts.gate_up_proj")
+    })
+}
+
+fn stacked_experts_prefix(layers_prefix: &str, layer_idx: usize, weight_map: &HashMap<String, String>) -> String {
+    let gemma_prefix = format!("{layers_prefix}.layers.{layer_idx}.experts");
+    if weight_map.contains_key(&format!("{gemma_prefix}.gate_up_proj")) {
+        gemma_prefix
+    } else {
+        format!("{layers_prefix}.layers.{layer_idx}.mlp.experts")
+    }
 }
 
 /// Detect MXFP4 pre-quantized format (GPT OSS).
@@ -7010,7 +7030,8 @@ fn load_stacked_layer_experts(
     let hidden = config.hidden_size;
 
     // Load stacked gate_up_proj [E, 2*inter, hidden]
-    let gu_name = format!("{layers_prefix}.layers.{layer_idx}.mlp.experts.gate_up_proj");
+    let expert_prefix = stacked_experts_prefix(layers_prefix, layer_idx, weight_map);
+    let gu_name = format!("{expert_prefix}.gate_up_proj");
     let gu_shard_name = weight_map.get(&gu_name)
         .ok_or_else(|| format!("Stacked tensor not found: {gu_name}"))?;
     let gu_shard = shards.get(gu_shard_name)
@@ -7024,7 +7045,7 @@ fn load_stacked_layer_experts(
     let is_fp8 = gu_info.dtype.is_fp8();
 
     // Load stacked down_proj [E, hidden, inter]
-    let dp_name = format!("{layers_prefix}.layers.{layer_idx}.mlp.experts.down_proj");
+    let dp_name = format!("{expert_prefix}.down_proj");
     let dp_shard_name = weight_map.get(&dp_name)
         .ok_or_else(|| format!("Stacked tensor not found: {dp_name}"))?;
     let dp_shard = shards.get(dp_shard_name)

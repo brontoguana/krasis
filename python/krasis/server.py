@@ -128,6 +128,18 @@ def _warn(text: str) -> None:
     print(f"  {_YELLOW}{text}{_NC}", flush=True)
 
 
+def _abort_if_cuda_context_poisoned(context: str, exc: BaseException) -> None:
+    text = str(exc)
+    if "CUDA_ERROR_ILLEGAL_ADDRESS" in text or "illegal address" in text.lower():
+        logger.critical("%s hit fatal CUDA context error: %s", context, text)
+        print(
+            f"{_RED}FATAL: {context} hit a CUDA illegal-address error; "
+            f"exiting because the CUDA context is poisoned.{_NC}",
+            flush=True,
+        )
+        os._exit(134)
+
+
 def _headline(text: str, color: str = _CYAN) -> None:
     """Print a compact headline that stays readable when stdout is log-prefixed."""
     print(flush=True)
@@ -891,6 +903,7 @@ def main():
             "CFG_MULTI_GPU_HCS": "multi_gpu_hcs",
             "CFG_HCS_HOST_CACHE_MODE": "hcs_host_cache_mode",
             "CFG_KV_CACHE_MB": "kv_cache_mb",
+            "CFG_RING_WINDOW_KV": "ring_window_kv",
             "CFG_VRAM_SAFETY_MARGIN": "vram_safety_margin",
             "CFG_DYNAMIC_HCS": "dynamic_hcs",
             "CFG_DYNAMIC_HCS_TAIL_BLOCKS": "dynamic_hcs_tail_blocks",
@@ -914,6 +927,7 @@ def main():
             "CFG_HCS",
             "CFG_MULTI_GPU_HCS",
             "CFG_DYNAMIC_HCS",
+            "CFG_RING_WINDOW_KV",
             "CFG_STREAM_ATTENTION",
             "CFG_CPU_DECODE",
         }
@@ -1019,6 +1033,8 @@ def main():
                         help="KV cache format: k6v6 Quality default, k4v4 Ultra Compact, bf16 Full Precision, or explicit internal formats; fp8/fp8_e4m3 are deprecated and disabled")
     parser.add_argument("--kv-cache-mb", type=int, default=1000,
                         help="KV cache size in MB (default: 1000)")
+    parser.add_argument("--ring-window-kv", action="store_true",
+                        help="Experimental: cap sliding-attention KV layers to their physical window; requires correctness validation")
     parser.add_argument("--heatmap-path", default=None,
                         help="Path to expert_heatmap.json for HCS init")
     parser.add_argument("--gpu-expert-bits", type=int, default=4, choices=[4, 8],
@@ -1305,6 +1321,7 @@ def main():
         gpu_expert_int4_calib=args.gpu_expert_int4_calib,
         cpu_expert_bits=args.cpu_expert_bits,
         kv_cache_format=args.kv_dtype,
+        ring_window_kv=args.ring_window_kv,
     )
 
     # Expand ~ in paths (config files use ~/.krasis/...)
@@ -1622,6 +1639,7 @@ def main():
         _model.server_cleanup()
         _detail(f"Rust prefill warmed with {warmup_len:,} tokens before HCS budgeting")
     except Exception as e:
+        _abort_if_cuda_context_poisoned("Rust prefill warmup", e)
         logger.warning("Rust prefill warmup failed, continuing without it: %s", e)
         _warn(f"Rust prefill warmup failed: {e}")
     warmup_elapsed = time.time() - t_warmup
@@ -2000,11 +2018,17 @@ def main():
             # to avoid FP8 tensor addition (ufunc_add not implemented for Float8_e4m3fn)
             kv_total_bytes = 0
             for cache_tensor in (kv_cache.k_cache, kv_cache.v_cache):
-                if cache_tensor is not None:
+                if isinstance(cache_tensor, list):
+                    for layer_tensor in cache_tensor:
+                        kv_total_bytes += layer_tensor.nelement() * layer_tensor.element_size()
+                elif cache_tensor is not None:
                     kv_total_bytes += cache_tensor.nelement() * cache_tensor.element_size()
             kv_total_mb = kv_total_bytes / (1024 * 1024)
             # num_layers is the first dim of the cache tensor
-            num_kv_layers = kv_cache.k_cache.shape[0] if kv_cache.k_cache is not None else 0
+            if isinstance(kv_cache.k_cache, list):
+                num_kv_layers = len(kv_cache.k_cache)
+            else:
+                num_kv_layers = kv_cache.k_cache.shape[0] if kv_cache.k_cache is not None else 0
             kv_per_layer_mb = kv_total_mb / num_kv_layers if num_kv_layers > 0 else 0
         else:
             kv_per_layer_mb = 0

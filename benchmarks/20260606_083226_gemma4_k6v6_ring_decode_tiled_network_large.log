@@ -1,0 +1,70 @@
+Checking server health at http://localhost:18015... [0;32mOK[0m
+Sending warmup request... done (0.6s)
+  [2m>>> Hi! How can I help you today[0m
+
+[1m[0;36mTest 4: Network Multi-Prompt Validation[0m
+============================================================
+  [0;32mPASS[0m OK (0.5s) [factual_qa]
+  [0;32mPASS[0m OK (0.5s) [math_simple]
+  [0;32mPASS[0m OK (2.6s) [code_gen]
+  [0;32mPASS[0m OK (0.7s, 4 words) [multi_turn]
+  [0;32mPASS[0m OK (0.6s, 7 words) [short_prompt]
+  [0;32mPASS[0m OK (0.5s) [streaming_factual]
+  [0;32mPASS[0m OK (0.7s) [streaming_code]
+  [0;32mPASS[0m OK (0.9s) [json_output]
+  [0;32mPASS[0m OK (0.5s) [blocking_math]
+
+[1m[0;36mTest 5: Network Large-Prompt Validation[0m
+============================================================
+  Loading ~1K token prompt... done (7044 chars)
+  [0;32mPASS[0m OK (5.9s, 89 words) [large_2k]
+  Loading ~8K token prompt... done (35045 chars)
+  [0;32mPASS[0m OK (11.9s, 90 words) [large_10k]
+  Loading ~21K token prompt... done (87555 chars)
+  [0;32mPASS[0m OK (46.9s, 29 words) [large_25k]
+  Loading ~87K token prompt... done (244208 chars)
+Traceback (most recent call last):
+  File "/home/main/Documents/Claude/krasis/tests/test_network.py", line 706, in <module>
+    main()
+  File "/home/main/Documents/Claude/krasis/tests/test_network.py", line 661, in main
+    results_5 = run_large_prompt_tests(base_url)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/main/Documents/Claude/krasis/tests/test_network.py", line 379, in run_large_prompt_tests
+    r = test_coherent_response(base_url, name, [
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/main/Documents/Claude/krasis/tests/test_network.py", line 205, in test_coherent_response
+    status, body = send_chat_request(
+                   ^^^^^^^^^^^^^^^^^^
+  File "/home/main/Documents/Claude/krasis/tests/test_network.py", line 74, in send_chat_request
+    resp = urllib.request.urlopen(req, timeout=timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/main/miniconda3/envs/ktransformers/lib/python3.11/urllib/request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/main/miniconda3/envs/ktransformers/lib/python3.11/urllib/request.py", line 519, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/main/miniconda3/envs/ktransformers/lib/python3.11/urllib/request.py", line 536, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/main/miniconda3/envs/ktransformers/lib/python3.11/urllib/request.py", line 496, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "/home/main/miniconda3/envs/ktransformers/lib/python3.11/urllib/request.py", line 1377, in http_open
+    return self.do_open(http.client.HTTPConnection, req)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/main/miniconda3/envs/ktransformers/lib/python3.11/urllib/request.py", line 1352, in do_open
+    r = h.getresponse()
+        ^^^^^^^^^^^^^^^
+  File "/home/main/miniconda3/envs/ktransformers/lib/python3.11/http/client.py", line 1395, in getresponse
+    response.begin()
+  File "/home/main/miniconda3/envs/ktransformers/lib/python3.11/http/client.py", line 325, in begin
+    version, status, reason = self._read_status()
+                              ^^^^^^^^^^^^^^^^^^^
+  File "/home/main/miniconda3/envs/ktransformers/lib/python3.11/http/client.py", line 286, in _read_status
+    line = str(self.fp.readline(_MAXLINE + 1), "iso-8859-1")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/main/miniconda3/envs/ktransformers/lib/python3.11/socket.py", line 718, in readinto
+    return self._sock.recv_into(b)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt

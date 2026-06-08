@@ -1,5 +1,186 @@
 # Krasis Benchmark Results
 
+## Standard Benchmarks - 2026-06-05 (Gemma4 26B A4B text INT4 baseline)
+
+Hardware: EPYC 7742, 1007 GB RAM, RTX 5090 32 GB selected for the run.
+Timing instrumentation was disabled. The run used
+`./dev benchmark tests/gemma-4-4-a16.conf` on branch `gemma-dev`. Gemma4 uses
+compact BF16 KV cache because its mixed per-layer KV geometry is not supported
+by the integer KV cache formats yet. Decode ran in the Gemma4 ungraphed path;
+per-layer CUDA graph capture is disabled for Gemma4 until the graph segment
+path implements Gemma's dense-MLP-plus-routed-MoE layer composition.
+
+| Model / run | Command | Experts | Attention | KV | Context | Prefill (tok/s) | Decode (tok/s) | Round trip (tok/s) | HCS | Min free VRAM | Health | Logs |
+|-------------|---------|---------|-----------|----|--------:|----------------:|---------------:|-------------------:|-----|--------------:|--------|------|
+| Gemma4 26B A4B IT text INT4 baseline | `./dev benchmark tests/gemma-4-4-a16.conf` | INT4 | BF16 | BF16 | 4,640 | 5051.6 | 39.07 | 71.33 | 3840/3840 (100.0%) | 11084 MB | clean | [stdout](20260605_165100_gemma4_int4_nograph_benchmark_stdout.log), [report](20260605_165100_gemma4_int4_nograph_benchmark_report.log), [server log](20260605_165100_gemma4_int4_nograph_krasis.log) |
+
+Notes:
+- Benchmark prompt targets above the available context were truncated to
+  `4,540` prompt tokens, so the 5K/10K/20K/35K/50K rows all measure the same
+  capped short-context length. Row speeds were `5051.6 tok/s` at 1K, then
+  `2097.7`, `2097.3`, `1998.7`, `1994.6`, and `1990.2 tok/s` at the capped
+  `4540`-token length.
+- Short reference validation without `KRASIS_NO_GRAPH` matched the legacy HF
+  BF16 artifact for turn 1 exactly and turn 2 first token exactly. The graph
+  gate test logs are [server stdout](20260605_165746_gemma4_int4_graphgate_server.log),
+  [server log](20260605_165746_gemma4_int4_graphgate_krasis.log), and
+  [reference outputs](20260605_gemma4_graphgate_reference/turn1_actual.json).
+- Longer exact-match validation against the legacy HF BF16 artifact passed
+  turns 1-6 and diverged on longer generations. Outputs remained coherent and
+  top-token differences were often close; Gemma4 INT4 should not be claimed as
+  witness-validated until a llama-witness/GGUF reference exists.
+- INT8 Gemma4 is not supported by this baseline. Diagnostic INT8 probes
+  produced invalid token/logprob output, so INT8 remains blocked.
+
+## Diagnostics - 2026-06-05 (Gemma4 compressed KV and ring-window)
+
+Hardware: EPYC 7742, 1007 GB RAM, RTX 5090 32 GB selected for the runs.
+These are validation diagnostics on branch `gemma-dev`, not clean speed
+benchmarks.
+
+| Run | Config / command | KV | Ring-window | Context | Result | Health | Logs |
+|-----|------------------|----|-------------|--------:|--------|--------|------|
+| Gemma4 k6v6 default gate | `./dev run tests/gemma-4-4-k6v6-a16.conf --test-endpoints`; `./dev network 18013` | k6v6 | off | 10,624 | short network `14/14` passed | clean | [server](20260605_183523_gemma4_k6v6_nonring_gate_startcheck.log) |
+| Gemma4 k4v4 default gate | `./dev run tests/gemma-4-4-k4v4-a16.conf --test-endpoints`; `./dev network 18014` | k4v4 | off | 14,880 | short network `14/14` passed | clean | [server](20260605_184024_gemma4_k4v4_nonring_gate_startcheck.log) |
+| Gemma4 k6v6 ring initial diagnostic | `./dev run tests/gemma-4-4-k6v6-ring-a16.conf --test-endpoints`; equivalent large-network validation on port 18013 | k6v6 | on | 106,784 | large prompt output was garbled at 25K/100K despite script pass | clean | [startup](20260605_180611_gemma4_k6v6_ring_startcheck.log), [large](20260605_182246_gemma4_k6v6_ring_largecheck.log) |
+| Gemma4 k6v6 ring fixed 25K validation | `./dev run tests/gemma-4-4-k6v6-ring-a16.conf --test-endpoints`; `./dev network 18015 --large` stopped after 25K | k6v6 | on | 106,784 | `large_25k` passed; 25K prefill `421.6 tok/s`, decode `10.2 tok/s` | clean | [server](20260605_214730_gemma4_k6v6_ring_default_fixed_25k_validation.log), [network](20260605_214730_gemma4_k6v6_ring_default_fixed_network_large.log) |
+| Gemma4 k6v6 ring FA2 full-layer follow-up | `KRASIS_STARTUP_CAL_LONG_TOKENS=12000 ./dev run tests/gemma-4-4-k6v6-ring-a16.conf --test-endpoints`; `./dev network 18015 --large` | k6v6 | on | 106,784 | `large_25k` passed; 25K prefill `480.1 tok/s`, decode `10.2 tok/s`; 100K client timed out while server stayed GPU-bound | clean through 25K | [timing baseline](20260606_075511_gemma4_k6v6_ring_timing_baseline_server.log), [graph failure](20260606_080037_gemma4_k6v6_ring_fastpath_server.log), [server](20260606_080721_gemma4_k6v6_ring_fa2_guarded_server.log), [network](20260606_080721_gemma4_k6v6_ring_fa2_guarded_network_large.log) |
+| Gemma4 k6v6 ring tiled decode follow-up | `KRASIS_STARTUP_CALIBRATION_LONG_TOKENS_CAP=12000 ./dev run tests/gemma-4-4-k6v6-ring-a16.conf --port 18015`; `./dev network 18015 --large` stopped after 25K | k6v6 | on | 106,784 | `large_25k` passed; 25K prefill `498.2 tok/s`, decode `28.4 tok/s`; 87K remained impractical and was stopped | clean through 25K | [server](20260606_083226_gemma4_k6v6_ring_decode_tiled_server.log), [network](20260606_083226_gemma4_k6v6_ring_decode_tiled_network_large.log), [rejected export-grid server](20260606_084320_gemma4_k6v6_ring_prefill_exportfix_server.log), [rejected export-grid network](20260606_084320_gemma4_k6v6_ring_prefill_exportfix_network_large.log) |
+| Gemma4 k6v6 ring temp-KV cap rejected | `KRASIS_STARTUP_CALIBRATION_LONG_TOKENS_CAP=12000 ./dev run tests/gemma-4-4-k6v6-ring-a16.conf --port 18015`; `./dev network 18015 --large` stopped after 25K | k6v6 | on | 106,784 | `large_25k` passed but prefill regressed to `470.4 tok/s`; calibration prefill growth dropped to `359.0 KB/tok` | clean through 25K; rejected | [server](20260606_141847_gemma4_k6v6_ring_tempcap_server.log), [network](20260606_141847_gemma4_k6v6_ring_tempcap_network_large.log) |
+| Gemma4 k6v6 ring temp-KV cap + chunk4096 rejected | `KRASIS_STARTUP_CALIBRATION_LONG_TOKENS_CAP=12000 KRASIS_PREFILL_DIAG_MAX_CHUNK_TOKENS=4096 ./dev run tests/gemma-4-4-k6v6-ring-a16.conf --port 18015`; `./dev network 18015 --large` stopped after 25K | k6v6 | on | 106,784 | `large_25k` passed but prefill regressed to `296.6 tok/s`; calibration prefill growth dropped to `155.3 KB/tok` | clean through 25K; rejected | [server](20260606_142800_gemma4_k6v6_ring_tempcap_chunk4096_server.log), [network](20260606_142800_gemma4_k6v6_ring_tempcap_chunk4096_network_large.log) |
+| Gemma4 k6v6 ring direct compressed prefill rejected | `CFG_RING_WINDOW_KV=1 ./dev run tests/gemma-4-4-k6v6-ring-a16.conf --benchmark` | k6v6 | on | 106,784 | startup calibration completed safely with prefill growth `345.1 KB/tok`, but benchmark warmup took `213.0s` and the first 1K timed prefill row did not finish within the bounded wait | clean before stop; rejected and reverted | [server](20260606_184741_gemma4_k6v6_ring_direct_server.log) |
+| Gemma4 k4v4 ring rejected | `./dev run tests/gemma-4-4-k4v4-a16.conf --ring-window-kv --test-endpoints` | k4v4 | on | n/a | rejected before model load after 25K validation produced `<unused6226>` | n/a | [guard](20260605_215941_gemma4_k4v4_ring_guard_negative.log), [failed validation](20260605_215349_gemma4_k4v4_ring_default_fixed_25k_validation.log) |
+
+Findings:
+- Gemma4 now supports variable per-layer compressed KV allocation and pointer
+  registration for k6v6/k4v4. The default configs keep full physical KV per
+  layer and do not enable ring-window.
+- k6v6 ring-window now passes the formerly failing 25K large-prompt row after
+  two fixes: prefill chunked GQA now receives real chunk starts, and
+  ring-capped sliding layers use the custom local-window prefill path. The path
+  remains explicit/diagnostic until 100K output and witness validation are done.
+- The 2026-06-06 timing pass found the old k6 ring custom attention path
+  dominated long prefill (`39920` tokens in `151956 ms`, `263 tok/s`) and long
+  decode GQA attention (`123.42 ms/tok` of `174.41 ms/tok` during the timing-on
+  calibration). The accepted speed patch uses bounded FA2 staging for ring
+  sliding-layer prefill where available and keeps Gemma full-attention prefill
+  layers out of the custom ring branch.
+  Clean timing-off 25K prefill improved to `480.1 tok/s`; decode stayed
+  `10.2 tok/s` because Gemma's five full-attention layers still scale with
+  prompt length. A CUDA graph decode experiment hit `CUDA_ERROR_ILLEGAL_ADDRESS`
+  during long calibration and was removed from the shared graph path.
+- The tiled decode follow-up reused the existing graph-compatible compressed
+  GQA tiled kernels from the ungraphed decode path rather than enabling graph
+  capture. This raised 25K decode from `10.2 tok/s` to `28.4 tok/s` with clean
+  health. Prefill remains slow: the accepted run was `498.2 tok/s` at 25K,
+  while a low-risk-looking export-grid change regressed to `470.2 tok/s` and
+  was reverted. A broader FP8 stage-cache skip produced invalid 25K output and
+  was also rejected. A later ring-aware temp-KV cap improved the memory model
+  but not speed (`470.4 tok/s`), and forcing 4096-token chunks improved memory
+  headroom while reducing 25K prefill to `296.6 tok/s`; both were reverted.
+- A direct compressed k6 ring prefill prototype also failed the speed bar. It
+  avoided enough BF16 staging to reduce calibration prefill growth to
+  `345.1 KB/tok`, but benchmark warmup took `213.0s` and the first 1K timed
+  prefill row did not complete within the bounded wait. The active
+  kernel/routing code was removed; the accepted k6 ring baseline remains the
+  tiled-decode row above.
+- k4v4 ring-window remains unsafe: after the k6 fix it still produced
+  `<unused6226>` on the 25K large-prompt row and later hit request-time VRAM
+  pressure when the suite advanced into the 100K case. The mode is rejected
+  before model load; use k6v6 ring-window or k4v4 without ring-window.
+
+## Diagnostics - 2026-06-06 (Qwen35 vs Gemma4 timing attribution)
+
+Hardware: EPYC 7742, 1007 GB RAM, RTX 5090 32 GB selected for the runs.
+Timing instrumentation was enabled with `KRASIS_PREFILL_TIMING=1`,
+`KRASIS_BENCHMARK_PREFILL_BREAKDOWN=1`, and `--timing`, so these rows are
+diagnostic attribution runs rather than clean speed benchmarks.
+
+| Run | Command | Result | Key attribution | Logs |
+|-----|---------|--------|-----------------|------|
+| Qwen35 HQQ6 k6v6 diagnostic | `KRASIS_PREFILL_TIMING=1 KRASIS_BENCHMARK_PREFILL_BREAKDOWN=1 ./dev benchmark tests/q35b-4-4-hqq6-k6v6-diagnostic.conf --timing` | `9593.2 tok/s` internal prefill, `113.92 tok/s` internal decode, HCS `10240/10240`, min free `9556 MB` | 10K prefill total `758.2 ms`; KV append `0.3 ms` over 10 GQA layers. Decode used CUDA graph replay at about `8.6-8.8 ms/tok`, with `100%` HCS hits and no cold DMA. | [timing log](20260606_225805_q35_hqq6_k6v6_timing_compare.log) |
+| Gemma4 k6v6 non-ring diagnostic | `KRASIS_PREFILL_TIMING=1 KRASIS_BENCHMARK_PREFILL_BREAKDOWN=1 ./dev benchmark tests/gemma-4-4-k6v6-a16.conf --timing` | `4945.1 tok/s` best internal prefill at 1K, about `1004.6 tok/s` at 10K, `36.60 tok/s` internal decode, HCS `3840/3840`, min free `11170 MB` | 10K prefill total `9920.2 ms`; stage-exact KV append `9404.8 ms` over 30 GQA layers. Decode was ungraphed: about `23.0 ms/tok`, with ~`15.6 ms/tok` MoE and ~`5.5 ms/tok` GQA, despite `100%` HCS hits. | [timing log](20260606_230127_gemma4_k6v6_nonring_timing_compare.log) |
+| Gemma4 timing-bucket smoke | `KRASIS_PREFILL_TIMING=1 ./dev run tests/gemma-4-4-k6v6-a16.conf --test-endpoints` | accounting diagnostic only; stopped after server-ready smoke | After the attribution fix, an 8419-token calibration row reported `6434.9 ms` GQA/attention, including `6304.7 ms` KV append, and `63.2 ms` MoE. This confirms the Gemma prefill bottleneck is KV/GQA staging, not MoE. | [smoke log](20260606_231300_gemma4_timing_bucket_smoke.log) |
+
+Findings:
+- Gemma4 prefill is not slow because HCS is missing. In the final benchmark
+  rows HCS hit rate was `100%` and cold DMA was zero.
+- The dominant Gemma4 prefill gap is the current stage-exact KV append path:
+  Gemma writes all 30 GQA layers into temporary KV during prefill, and its
+  per-token KV geometry is much larger than Qwen35's hybrid GQA stack.
+- The top-level Gemma prefill timing attribution was fixed after the comparison
+  run. The diagnostic smoke now charges nested Gemma GQA/MoE timers into the
+  top-level buckets and confirms the long calibration row is dominated by
+  GQA/KV append (`6304.7 ms` of `6434.9 ms` GQA/attention).
+- The Gemma4 decode gap is separate: Qwen35 uses CUDA graph replay, while
+  Gemma4 remains on the ungraphed path because the attempted Gemma graph path
+  previously produced a CUDA illegal address.
+- No local Gemma GGUF exists under `~/.krasis/models`, so llama-witness output
+  comparison cannot be run until a Gemma GGUF/witness artifact is downloaded or
+  produced.
+
+## Diagnostics - 2026-06-07 (Gemma4 prefill and CUDA graph attempts)
+
+Hardware: EPYC 7742, 1007 GB RAM, RTX 5090 32 GB selected for the runs.
+The prefill rows with timing enabled are diagnostic attribution runs, not clean
+speed benchmarks. The final guard-restored row is the accepted timing-off
+validation.
+
+| Run | Command | Result | Decision | Logs |
+|-----|---------|--------|----------|------|
+| BF16 temp-KV staging | `KRASIS_PREFILL_TIMING=1 ./dev run tests/gemma-4-4-k6v6-a16.conf --test-endpoints` | 8419-token calibration `kv_append=6679.2 ms` over 30 calls, worse than the prior `6304.7 ms` | rejected and reverted | [log](20260607_210627_gemma4_k6v6_bf16_stage_timing_smoke.log) |
+| FP8-window FA2 route | `KRASIS_PREFILL_TIMING=1 ./dev run tests/gemma-4-4-k6v6-ring-a16.conf --test-endpoints` | 39,920-token timing row `142313.8 ms` total (`281 tok/s`), `kv_append=141115.7 ms`; route did not help the single-chunk long calibration | rejected and removed | [log](20260607_211701_gemma4_k6v6_ring_fp8_window_timing_smoke.log) |
+| Vectorized FP8 append | `KRASIS_PREFILL_TIMING=1 ./dev run tests/gemma-4-4-k6v6-ring-a16.conf --test-endpoints` | 39,920-token timing row `142180.8 ms` total (`281 tok/s`), `kv_append=140982.8 ms` | rejected and reverted | [log](20260607_212521_gemma4_k6v6_ring_vec_append_timing_smoke.log) |
+| Direct decode-KV single-chunk bypass | `KRASIS_PREFILL_TIMING=1 ./dev run tests/gemma-4-4-k6v6-ring-a16.conf --test-endpoints` | 39,920-token timing row `142272.6 ms` total (`281 tok/s`), `kv_append=141074.8 ms` | rejected and reverted | [log](20260607_213548_gemma4_k6v6_ring_direct_decodekv_timing_smoke.log) |
+| Gemma4 CUDA graph decode attempt | `./dev test tests/gemma-4-4-k6v6-a16.conf` with Gemma graph guard temporarily lifted | decode improved to roughly `64-73 tok/s`, but correctness failed: benchmark hit EOS at 4 tokens and network passed only `2/10` prompts with garbled/control-character output | rejected; guard restored | [log](20260607_215044_gemma4_k6v6_graph_test.log) |
+| Gemma4 guard-restored validation | `./dev test tests/gemma-4-4-k6v6-a16.conf` | benchmark best `5035.9 tok/s` prefill, `38.72 tok/s` internal decode, `67.57 tok/s` HTTP; network `14/14`; HCS `3840/3840`; min free `11170 MB` | accepted restored state | [log](20260607_222707_gemma4_k6v6_guard_restored_test.log) |
+
+Findings:
+- The attempted low-risk prefill fixes did not improve the measured bottleneck.
+  BF16 temp staging regressed the short diagnostic, and the ring-window FP8
+  append/direct-write variants still spent about `141 s` in KV append on the
+  39,920-token timing row.
+- Gemma4 CUDA graph replay can improve raw decode speed, but the current graph
+  segmenter is not semantically correct for Gemma4's dense-MLP-plus-routed-MoE
+  layer. The guard is restored until Gemma has split graph segmentation for
+  dense branch, router, expert branch, merge, and `layer_scalar`.
+- The accepted code removes the unused FP8-window sidecar symbol/loader and
+  keeps existing graph-capable models off the failed Gemma graph experiment.
+
+---
+
+## Standard Benchmarks - 2026-06-08 (Gemma4 CUDA graph decode)
+
+Hardware: EPYC 7742, 1007 GB RAM, RTX 5090 32 GB selected for the runs.
+Timing instrumentation was disabled for benchmark rows. The QCN row is the
+fixed `./dev speed-test` guard to check shared graph-path behavior.
+
+| Run | Command | Attention | KV | Prefill (tok/s) | Decode (tok/s) | Round trip (tok/s) | HCS | Min free VRAM | Health | Logs |
+|-----|---------|-----------|----|----------------:|---------------:|-------------------:|-----|--------------:|--------|------|
+| Gemma4 k6v6 graph decode endpoint gate | `./dev run tests/gemma-4-4-k6v6-a16.conf --test-endpoints`; `./dev network 18013` | BF16 | k6v6 | n/a | server rows mostly `57-63` | n/a | 3840/3840 (100.0%) | 11124 MB endpoint low-water | network `14/14`, `0` copy failures | [server](20260608_084624_gemma4_k6v6_graph_perlayer_endpoint.log) |
+| Gemma4 k6v6 graph decode benchmark | `./dev benchmark tests/gemma-4-4-k6v6-a16.conf` | BF16 | k6v6 | 5230.3 | 63.92 | 116.20 | 3840/3840 (100.0%) | 11156 MB | clean, `0` copy failures | [full log](20260608_084936_gemma4_k6v6_graph_benchmark.log) |
+| Qwen3-Coder-Next HQQ4 k4v4 speed-test guard | `./dev speed-test` | HQQ4 | k4v4 | 6664.9 | 88.42 | 138.06 | 15957/24576 (64.9%) | 896 MB | clean, `0` copy failures; VRAM pressure stayed above 600 MB safety | [full log](20260608_085446_qcn_speed_guard_after_gemma_graph.log) |
+
+Findings:
+- Gemma4 non-ring k6v6 decode improved from the guard-restored ungraphed
+  baseline (`38.72 tok/s`) to `63.92 tok/s` internal decode after adding
+  Gemma-specific graph segmentation and per-layer graph sequence lengths.
+- Gemma graph decode is limited in code to the validated non-ring `k6v6` path.
+  k4v4 and ring-window Gemma still require separate validation before graph
+  replay is enabled for them.
+- The short endpoint suite passed `14/14` after the per-layer sequence-length
+  fix. The earlier unsafe graph attempt failed because it replayed generic MoE
+  semantics; the accepted path explicitly handles Gemma dense branch,
+  routed-expert input, merge norms, router scaling, per-expert scale, and
+  `layer_scalar`.
+- QCN HQQ4/k4v4 speed-test did not regress relative to the latest indexed
+  June 4 HQQ4 guards (`85.34` and `83.27` internal decode). This run reached
+  `88.42 tok/s` decode with no copy failures. Low-water VRAM was `896 MB`,
+  close to but above the default `600 MB` safety margin, so HCS is still
+  operating near the intended boundary.
+
+---
+
 ## Diagnostic Benchmarks - 2026-06-04 (Q122B HQQ6+k4v4 prefill recovery)
 
 Hardware: EPYC 7742, 1007 GB RAM, RTX 5090 32 GB selected for the run.

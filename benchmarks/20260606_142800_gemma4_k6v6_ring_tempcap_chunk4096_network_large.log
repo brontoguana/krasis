@@ -1,0 +1,83 @@
+Checking server health at http://localhost:18015... [0;32mOK[0m
+Sending warmup request... done (0.6s)
+  [2m>>> Hi! How can I help you today[0m
+
+[1m[0;36mTest 4: Network Multi-Prompt Validation[0m
+============================================================
+  [0;32mPASS[0m OK (0.5s) [factual_qa]
+  [0;32mPASS[0m OK (0.5s) [math_simple]
+  [0;32mPASS[0m OK (2.6s) [code_gen]
+  [0;32mPASS[0m OK (0.6s, 4 words) [multi_turn]
+  [0;32mPASS[0m OK (0.6s, 7 words) [short_prompt]
+  [0;32mPASS[0m OK (0.5s) [streaming_factual]
+  [0;32mPASS[0m OK (0.7s) [streaming_code]
+  [0;32mPASS[0m OK (0.9s) [json_output]
+  [0;32mPASS[0m OK (0.5s) [blocking_math]
+
+[1m[0;36mTest 5: Network Large-Prompt Validation[0m
+============================================================
+  Loading ~1K token prompt... done (7044 chars)
+  [0;32mPASS[0m OK (5.9s, 91 words) [large_2k]
+  Loading ~8K token prompt... done (35045 chars)
+  [0;32mPASS[0m OK (15.3s, 91 words) [large_10k]
+  Loading ~21K token prompt... done (87555 chars)
+  [0;32mPASS[0m OK (80.7s, 96 words) [large_25k]
+  Loading ~87K token prompt... done (244208 chars)
+  [0;31mFAIL[0m Connection error: Remote end closed connection without response [large_100k]
+
+[1m[0;36mTest 6: Multi-Turn Sequential Conversation[0m
+============================================================
+  Turn 1: establishing facts... [0;31mFAIL[0m HTTP 0
+
+============================================================
+[1mSUMMARY[0m: 12/14 passed, 2 failed, 116.7s total
+
+[1mResponse texts (review for coherence):[0m
+
+  [[0;32mPASS[0m] factual_qa: OK (0.5s)
+  [2m>>> Paris[0m
+
+  [[0;32mPASS[0m] math_simple: OK (0.5s)
+  [2m>>> 56[0m
+
+  [[0;32mPASS[0m] code_gen: OK (2.6s)
+  [2m>>> ```python\ndef fibonacci(n):\n    if n <= 0:\n        return 0\n    elif n == 1:\n        return 1\n    \n    a, b = 0, 1\n    for _ in range(2, n + 1):\n        a, b = b, a + b\n    return b\n```[0m
+
+  [[0;32mPASS[0m] multi_turn: OK (0.6s, 4 words)
+  [2m>>> Your name is Alice.[0m
+
+  [[0;32mPASS[0m] short_prompt: OK (0.6s, 7 words)
+  [2m>>> Hello! How can I help you today?[0m
+
+  [[0;32mPASS[0m] streaming_factual: OK (0.5s)
+  [2m>>> Tokyo[0m
+
+  [[0;32mPASS[0m] streaming_code: OK (0.7s)
+  [2m>>> ```python\nprint("Hello, World!")\n```[0m
+
+  [[0;32mPASS[0m] json_output: OK (0.9s)
+  [2m>>> {"name": "Bob", "age": 30}[0m
+
+  [[0;32mPASS[0m] blocking_math: OK (0.5s)
+  [2m>>> 42[0m
+
+  [[0;32mPASS[0m] large_2k: OK (5.9s, 91 words)
+  [2m>>> This text provides the introductory material for Herman Melville's classic novel *Moby-Dick*, including a comprehensive table of contents, an etymological study of the word "whale," and a collection of literary extracts. The table of contents outlines the epic's progression through 135 chapters and an epilogue, tracing the journey from the narrator's arrival in Nantucket to the final chase of the white whale. The "Etymology" section, presented through the lens of a "Late Consumptive Usher," expl[0m
+
+  [[0;32mPASS[0m] large_10k: OK (15.3s, 91 words)
+  [2m>>> Based on the opening chapters provided, the following main themes emerge:\n\n### 1. The Contrast Between Appearance and Reality\nA central theme is the tension between the polished, artificial surface of high society and the true character or inner life of the individuals within it. \n* **Social Performance:** Anna Pávlovna is described as a "foreman of a spinning mill," meticulously managing the "conversational machine" to ensure social harmony. The characters often perform roles—the Prince acts wi[0m
+
+  [[0;32mPASS[0m] large_25k: OK (80.7s, 96 words)
+  [2m>>> The provided text is the opening of Victor Hugo's *Les Misérables*, specifically the Preface and the first few chapters of Volume I. It introduces the setting, the philosophical themes, and the primary character of the first section: **Bishop Myriel**.\n\nThe key events and details are as follows:\n\n**1. The Philosophical Preface**\nHugo establishes the purpose of the novel, stating that as long as social issues like poverty, the corruption of women due to hunger, and the lack of education for child[0m
+
+  [[0;31mFAIL[0m] large_100k: Connection error: Remote end closed connection without response
+  [2m>>> (no response text captured)[0m
+
+  [[0;31mFAIL[0m] multi_turn_t1: HTTP 0
+  [2m>>> (no response text captured)[0m
+
+[0;31mFailed tests:[0m
+  large_100k: Connection error: Remote end closed connection without response
+  multi_turn_t1: HTTP 0
+
+[0;31m[1m2 TEST(S) FAILED[0m
