@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Replaced the launcher Hugging Face model search/download flow with a curated
+  supported-model downloader. The launcher now offers only the Krasis-supported
+  model catalog, downloads each entry to the expected `~/.krasis/models/<name>`
+  directory, and passes the catalog's pinned Hugging Face revision into
+  `snapshot_download` so upstream `main` changes do not silently alter local
+  installs. The initial catalog contains Qwen3-Coder-Next, Qwen3.6-35B-A3B,
+  Qwen3.5-35B-A3B, Qwen3.5-122B-A10B, Qwen3-235B-A22B, and Gemma4 26B A4B IT.
 - Started native Gemma4 text support on branch `gemma-dev`. Added Gemma config
   parsing for `top_k_experts`, `hidden_activation`, full-attention head
   geometry, `attention_k_eq_v`, and per-layer GQA helper methods; corrected the

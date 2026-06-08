@@ -57,7 +57,7 @@ Krasis release. Highlights:
 - Added full GitHub release wheel packaging for Python 3.10, 3.11, 3.12, and
   3.13, with vendored CUDA sidecars injected into wheels.
 - Added `krasis update` and `krasis prerelease` maintenance commands.
-- Added an interactive Hugging Face downloader/search flow in the launcher.
+- Added an interactive curated Hugging Face downloader flow in the launcher.
 - Added reverse SSH tunnel support for exposing a local Krasis server to a
   remote machine through SSH without opening public ports.
 - Added repeatable benchmark and release-test commands, benchmark log archival,
@@ -139,7 +139,7 @@ Run:
 krasis
 ```
 
-Then use the interactive launcher to search/download supported Hugging Face
+Then use the interactive launcher to choose from Krasis-supported Hugging Face
 models, or put BF16 safetensors manually under `~/.krasis/models/`.
 
 Manual download example:
@@ -204,7 +204,7 @@ krasis
 The launcher provides:
 
 - model selection from local models
-- Hugging Face model search and download
+- curated Hugging Face model download for supported models
 - GPU selection, including selected GPU indices
 - quantization, HQQ attention, KV cache, HCS, and VRAM safety settings
 - optional reverse SSH tunnel target

@@ -1118,8 +1118,8 @@ def _model_selection_screen(
             prefix = f"  {CYAN}\u25b8{NC} " if i == cursor else "    "
             hl = BOLD if i == cursor else ""
             if row.get("action") == "download":
-                lines.append(f"{prefix}{hl}Download model from Hugging Face{NC}")
-                lines.append(f"       {DIM}Search, paste a repo URL, login, then download to ~/.krasis/models{NC}")
+                lines.append(f"{prefix}{hl}Download supported model from Hugging Face{NC}")
+                lines.append(f"       {DIM}Choose a Krasis-supported model and download it to ~/.krasis/models{NC}")
                 continue
             m = row
 
@@ -1843,9 +1843,61 @@ class Launcher:
         size = format_bytes(candidate.selected_bytes or candidate.safetensors_total_bytes * 2)
         meta = f"{candidate.pipeline_tag or 'model'} | {', '.join(status)}"
         stats = f"{candidate.downloads:,} downloads | {candidate.likes:,} likes | updated {candidate.last_modified}"
-        line1 = f"{candidate.repo_id}"
+        display_name = getattr(candidate, "display_name", "")
+        revision = getattr(candidate, "revision", "")
+        line1 = f"{display_name}  {DIM}{candidate.repo_id}{NC}" if display_name else f"{candidate.repo_id}"
         line2 = f"{meta} | download {size} | INT4 RAM ~{int4} + metadata | {stats}"
+        if revision:
+            line2 = f"{line2} | revision {revision[:12]}"
         return line1, line2
+
+    def _supported_hf_models_screen(self, models: List[Any]) -> Optional[Any]:
+        if not models:
+            self._message_screen("Model downloader", [f"{YELLOW}No supported models are configured.{NC}"])
+            return None
+        cursor = 0
+        top = 0
+        while True:
+            _clear_screen()
+            term_size = shutil.get_terminal_size((100, 32))
+            height = max(8, term_size.lines)
+            width = max(20, term_size.columns)
+            visible_count = max(1, min(10, (height - 5) // 3))
+            if cursor < top:
+                top = cursor
+            elif cursor >= top + visible_count:
+                top = cursor - visible_count + 1
+            visible = models[top:top + visible_count]
+            end = top + len(visible)
+            window = ""
+            if len(models) > visible_count:
+                window = f" {DIM}[{top + 1}-{end}/{len(models)}]{NC}"
+            lines = ["", f"  {BOLD}Supported Hugging Face models{NC}{window}", ""]
+            for offset, model in enumerate(visible):
+                i = top + offset
+                prefix = f"  {CYAN}\u25b8{NC} " if i == cursor else "    "
+                hl = BOLD if i == cursor else ""
+                line1 = f"{prefix}{hl}{model.display_name}{NC}  {DIM}{model.repo_id}{NC}"
+                line2 = f"       {DIM}{model.notes} | local {model.local_dir_name}{NC}"
+                line3 = f"       {DIM}Config: {model.recommended_config} | revision {model.revision[:12]}{NC}"
+                lines.extend([
+                    _truncate_ansi(line1, width),
+                    _truncate_ansi(line2, width),
+                    _truncate_ansi(line3, width),
+                ])
+            lines.append("")
+            lines.append(f"  {DIM}[\u2191\u2193] Select  [Enter] Details  [Esc] Back{NC}")
+            sys.stdout.write("\n".join(_truncate_ansi(line, width) for line in lines))
+            sys.stdout.flush()
+            key = _read_key()
+            if key == KEY_UP:
+                cursor = (cursor - 1) % len(models)
+            elif key == KEY_DOWN:
+                cursor = (cursor + 1) % len(models)
+            elif key == KEY_ENTER:
+                return models[cursor]
+            elif key in (KEY_ESCAPE, KEY_QUIT):
+                return None
 
     def _hf_results_screen(self, candidates: List[Any]) -> Optional[Any]:
         if not candidates:
@@ -1895,25 +1947,28 @@ class Launcher:
                 return None
 
     def _hf_detail_screen(self, candidate: Any) -> bool:
-        from krasis.hf_downloader import destination_for_repo, format_bytes
+        from krasis.hf_downloader import destination_for_supported_model, format_bytes
 
         cursor = 0
         options = ["Download", "Back"]
-        dest = destination_for_repo(self.models_dir, candidate.repo_id)
+        dest = destination_for_supported_model(self.models_dir, candidate)
         while True:
             _clear_screen()
             line1, line2 = self._format_hf_candidate(candidate)
             lines = [
-                f"  {BOLD}{candidate.repo_id}{NC}",
+                f"  {BOLD}{candidate.display_name or candidate.repo_id}{NC}",
                 "",
+                f"  Repo: {candidate.repo_id}",
                 f"  {DIM}{candidate.summary}{NC}",
                 f"  {line2}",
                 f"  Compatibility: {candidate.compatibility}",
+                f"  Recommended config: {candidate.recommended_config or 'manual'}",
+                f"  Pinned revision: {candidate.revision[:12] if candidate.revision else 'default'}",
                 f"  Files selected: {candidate.selected_file_count} "
                 f"({candidate.safetensors_file_count} safetensors)",
                 f"  Destination: {dest}",
                 "",
-                f"  {DIM}Krasis downloads safetensors/config/tokenizer files and skips GGUF/bin/checkpoints by default.{NC}",
+                f"  {DIM}Krasis downloads only supported safetensors/config/tokenizer files and skips GGUF/bin/checkpoints by default.{NC}",
                 f"  {DIM}INT4 RAM is estimated from remote safetensors metadata and excludes runtime headroom.{NC}",
                 "",
             ]
@@ -1962,7 +2017,7 @@ class Launcher:
 
         def worker() -> None:
             try:
-                result["path"] = download_model(candidate.repo_id, dest)
+                result["path"] = download_model(candidate.repo_id, dest, revision=candidate.revision or None)
             except Exception as exc:
                 result["error"] = exc
             finally:
@@ -2007,12 +2062,11 @@ class Launcher:
         return True
 
     def _hf_downloader_screen(self) -> bool:
-        from krasis.hf_downloader import get_model_details, search_models
+        from krasis.hf_downloader import get_supported_model_details, supported_models
 
         cursor = 0
         options = [
-            ("Search Hugging Face", "Search public text-generation models"),
-            ("Paste HF URL / repo id", "Open a specific model page or repo id"),
+            ("Download supported model", "Choose from models validated for Krasis"),
             ("HF login token", "Required for gated/private models and cleaner rate limits"),
             ("Back", "Return to installed models"),
         ]
@@ -2048,38 +2102,13 @@ class Launcher:
                     self._hf_login_screen()
                     _hide_cursor()
                     continue
-                if label == "Search Hugging Face":
-                    _show_cursor()
-                    query = _edit_value("Search Hugging Face", "")
-                    _hide_cursor()
-                    if not query:
-                        continue
-                    self._message_screen("Hugging Face search", [f"Searching for {query!r}..."], wait=False)
-                    try:
-                        candidates = search_models(query, limit=20)
-                    except Exception as exc:
-                        self._message_screen("Hugging Face search", [f"{RED}{exc}{NC}"])
-                        continue
-                    selected = self._hf_results_screen(candidates)
+                if label == "Download supported model":
+                    selected = self._supported_hf_models_screen(supported_models())
                     if not selected:
                         continue
                     self._message_screen("Hugging Face model", [f"Reading file metadata for {selected.repo_id}..."], wait=False)
                     try:
-                        details = get_model_details(selected.repo_id)
-                    except Exception as exc:
-                        self._message_screen("Hugging Face model", [f"{RED}{exc}{NC}"])
-                        continue
-                    if self._hf_detail_screen(details):
-                        return True
-                elif label == "Paste HF URL / repo id":
-                    _show_cursor()
-                    repo = _edit_value("HF URL or repo id", "")
-                    _hide_cursor()
-                    if not repo:
-                        continue
-                    self._message_screen("Hugging Face model", [f"Reading file metadata for {repo}..."], wait=False)
-                    try:
-                        details = get_model_details(repo)
+                        details = get_supported_model_details(selected.key)
                     except Exception as exc:
                         self._message_screen("Hugging Face model", [f"{RED}{exc}{NC}"])
                         continue

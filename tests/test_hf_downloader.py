@@ -8,10 +8,14 @@ from types import SimpleNamespace
 import krasis.hf_downloader as hf_downloader
 from krasis.hf_downloader import (
     candidate_from_info,
+    destination_for_supported_model,
     destination_for_repo,
+    download_model,
+    get_supported_model_details,
     hf_login,
     parse_hf_repo_id,
     selected_download_files,
+    supported_models,
     validate_local_model,
 )
 
@@ -146,6 +150,90 @@ class HFDownloaderTests(unittest.TestCase):
                 destination_for_repo(tmp, "Qwen/Qwen3-Coder-Next"),
                 os.path.join(tmp, "Qwen", "Qwen3-Coder-Next"),
             )
+
+    def test_supported_model_catalog_is_exact_and_pinned(self):
+        models = supported_models()
+        self.assertEqual(
+            [m.repo_id for m in models],
+            [
+                "Qwen/Qwen3-Coder-Next",
+                "Qwen/Qwen3.6-35B-A3B",
+                "Qwen/Qwen3.5-35B-A3B",
+                "Qwen/Qwen3.5-122B-A10B",
+                "Qwen/Qwen3-235B-A22B",
+                "google/gemma-4-26b-a4b-it",
+            ],
+        )
+        self.assertEqual(len({m.key for m in models}), len(models))
+        self.assertEqual(len({m.local_dir_name for m in models}), len(models))
+        for model in models:
+            self.assertRegex(model.revision, r"^[0-9a-f]{40}$")
+
+    def test_destination_for_supported_model_uses_krasis_model_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model = supported_models()[0]
+            self.assertEqual(
+                destination_for_supported_model(tmp, model),
+                os.path.join(tmp, "Qwen3-Coder-Next"),
+            )
+
+    def test_get_supported_model_details_uses_pinned_revision(self):
+        calls = []
+
+        class FakeApi:
+            def model_info(self, repo_id, *, revision=None, files_metadata=False, token=None):
+                calls.append((repo_id, revision, files_metadata, token))
+                return SimpleNamespace(
+                    id=repo_id,
+                    pipeline_tag="text-generation",
+                    tags=["transformers", "safetensors"],
+                    gated=False,
+                    private=False,
+                    downloads=1,
+                    likes=0,
+                    last_modified=None,
+                    safetensors=SimpleNamespace(total=1000, parameters={}),
+                    siblings=[
+                        SimpleNamespace(rfilename="config.json", size=100, lfs=None),
+                        SimpleNamespace(rfilename="model.safetensors", size=1000, lfs=None),
+                        SimpleNamespace(rfilename="model.gguf", size=2000, lfs=None),
+                    ],
+                )
+
+        original = hf_downloader._require_hf
+        hf_downloader._require_hf = lambda: (FakeApi, lambda: "hf_test", None, None, None, None, None)
+        try:
+            candidate = get_supported_model_details("qcn")
+        finally:
+            hf_downloader._require_hf = original
+
+        spec = supported_models()[0]
+        self.assertEqual(calls, [(spec.repo_id, spec.revision, True, True)])
+        self.assertTrue(candidate.supported_download)
+        self.assertTrue(candidate.is_krasis_candidate)
+        self.assertEqual(candidate.local_dir_name, spec.local_dir_name)
+        self.assertEqual(candidate.revision, spec.revision)
+        self.assertEqual(candidate.compatibility, "supported by Krasis")
+
+    def test_download_model_passes_revision_to_snapshot_download(self):
+        calls = []
+
+        def snapshot_download(**kwargs):
+            calls.append(kwargs)
+            return kwargs["local_dir"]
+
+        original = hf_downloader._require_hf
+        hf_downloader._require_hf = lambda: (None, lambda: None, None, snapshot_download, None, None, None)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                result = download_model("Org/Model", tmp, revision="abc123", max_workers=3)
+        finally:
+            hf_downloader._require_hf = original
+
+        self.assertEqual(result, tmp)
+        self.assertEqual(calls[0]["repo_id"], "Org/Model")
+        self.assertEqual(calls[0]["revision"], "abc123")
+        self.assertEqual(calls[0]["max_workers"], 3)
 
     def test_validate_local_model_reports_missing_required_files(self):
         with tempfile.TemporaryDirectory() as tmp:
