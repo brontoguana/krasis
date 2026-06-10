@@ -693,9 +693,10 @@ class KrasisModel:
                     f"gpu_expert_bits={self.quant_cfg.gpu_expert_bits}, "
                     f"cpu_expert_bits={self.quant_cfg.cpu_expert_bits}."
                 )
-            if self.quant_cfg.attention != "bf16":
+            if self.quant_cfg.attention not in ("bf16", "hqq4", "hqq6", "hqq8"):
                 raise ValueError(
-                    "Gemma4 text support currently validates only BF16 attention. "
+                    "Gemma4 text support validates only BF16 or fixed HQQ attention "
+                    "(hqq4, hqq6, hqq8). Mixed/auto HQQ modes are not validated for Gemma4 yet. "
                     f"Got attention_quant={self.quant_cfg.attention!r}."
                 )
             if self.quant_cfg.kv_cache_format not in ("bf16", "k6v6", "k4v4"):
@@ -3362,8 +3363,14 @@ class KrasisModel:
                 layer_idx, layer, target_device, keepalive
             )
 
-            tensor_names = []
-            for tensor_name in sorted(runtime.keys()):
+            tensor_names = sorted(runtime.keys())
+            if self.cfg.gemma4_text and layer_kind == "gqa":
+                # Gemma4 has mixed full/sliding GQA geometry. The generic HQQ
+                # fused-QKV decode branch was built for uniform Qwen-style GQA
+                # and fails on Gemma full-attention layers; use the split Q/K/V
+                # descriptors while leaving existing model fused paths unchanged.
+                tensor_names = [name for name in tensor_names if name != "fused_qkv"]
+            for tensor_name in tensor_names:
                 desc = runtime[tensor_name]
                 store.stage_hqq_runtime_tensor_formats(
                     layer_idx=layer_idx,
@@ -3387,7 +3394,6 @@ class KrasisModel:
                     zeros_dtype=desc["zeros_dtype"],
                 )
                 staged_runtime_tensors += 1
-                tensor_names.append(tensor_name)
             for sidecar in sidecar_runtime.get(layer_idx, []):
                 correction = self._move_hqq_tensor_to_device(
                     sidecar["correction"], target_device, keepalive

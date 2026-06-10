@@ -7891,8 +7891,16 @@ impl GpuDecodeStore {
             .iter()
             .any(|layer| matches!(layer.mlp, GpuMlpConfig::Gemma4MoE { .. }));
         if has_gemma4 {
-            if graph.kv_format != 7 {
-                return Some("Gemma4 CUDA graph decode is validated only for k6v6 KV");
+            if graph.kv_format != 7 && graph.kv_format != 9 {
+                return Some("Gemma4 CUDA graph decode is validated only for k6v6 and k4v4 KV");
+            }
+            if graph.kv_format == 9 {
+                let hcs_ready = graph.hcs.as_ref().map(|hcs| {
+                    hcs.num_cached > 0 || hcs.soft_num_cached > 0
+                }).unwrap_or(false);
+                if !hcs_ready {
+                    return Some("Gemma4 k4v4 CUDA graph decode requires HCS residency");
+                }
             }
             let ring_window = graph.kv_max_seq_by_layer
                 .iter()

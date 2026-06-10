@@ -40,10 +40,22 @@
   pending witness validation and 100K quality review; k4v4 ring is now rejected
   before model load because it still produced invalid 25K output during
   validation. The k4v4 non-ring config remains supported.
-- Gemma4 unsupported quantization modes now fail early and visibly. The model
-  constructor rejects non-INT4 routed experts, non-BF16 attention, and KV
-  formats outside BF16/k6v6/k4v4 for Gemma4 text instead of allowing known-bad
-  modes to reach runtime.
+- Gemma4 fixed HQQ attention modes are now supported for non-ring compressed
+  KV. The model constructor accepts Gemma4 `attention_quant` values `bf16`,
+  `hqq4`, `hqq6`, and `hqq8`, while continuing to reject mixed/auto HQQ modes,
+  non-INT4 routed experts, and KV formats outside BF16/k6v6/k4v4. Gemma4 HQQ
+  registration now uses split Q/K/V descriptors for GQA layers instead of the
+  generic fused-QKV HQQ descriptor path, because Gemma4 has mixed
+  sliding/full-attention geometry and the fused path failed startup
+  calibration on full-attention layers. Validation covered all fixed-HQQ
+  combinations with `./dev test`: HQQ8/k6v6 `1838.4` prefill / `66.56`
+  decode, HQQ6/k6v6 `1632.5` / `63.85`, HQQ4/k6v6 `1706.5` / `65.39`,
+  HQQ8/k4v4 `1590.0` / `65.42`, HQQ6/k4v4 `1628.2` / `64.43`, and HQQ4/k4v4
+  `2150.7` / `65.25`; all passed `14/14` network prompts with HCS
+  `3840/3840` and `0` copy failures. HQQ attention saves VRAM but is slower
+  than the BF16 attention fast path in prefill. HQQ4 also produced a visibly
+  weaker code-generation sample despite passing the short network test, so
+  Gemma4 HQQ should not be treated as llama-witness validated.
 - Gemma4 decode CUDA graphs are disabled by model capability rather than by an
   environment variable. The supported Gemma4 decode path is currently
   ungraphed; per-layer graph capture still needs a Gemma-aware graph segment
@@ -132,6 +144,20 @@
   Guard run `./dev speed-test` on Qwen3-Coder-Next HQQ4/k4v4 completed with
   `6664.9 tok/s` prefill, `88.42 tok/s` internal decode, `138.06 tok/s` HTTP,
   HCS `15957/24576`, `0` copy failures, and `896 MB` minimum free VRAM.
+- Extended Gemma4 CUDA graph decode to the validated non-ring `k4v4` path.
+  The first broad k4 graph gate was rejected because pre-HCS calibration
+  attempted graph replay and logged `materialized 0 routed experts`; the
+  accepted gate now requires HCS residency before enabling k4 graph replay.
+  Clean timing-off validation `./dev test tests/gemma-4-4-k4v4-a16.conf`
+  improved k4v4 decode from `38.79` to `63.69 tok/s` and HTTP from `66.92`
+  to `115.47 tok/s`, with `5192.4 tok/s` best prefill, `14/14` network
+  prompts, HCS `3840/3840`, `0` copy failures, and `11030 MB` minimum free
+  VRAM. The QCN `./dev speed-test` guard completed afterward at `6856.8`
+  prefill, `88.67` decode, `149.12` HTTP, HCS `15957/24576`, `0` copy
+  failures, and `896 MB` minimum free VRAM.
+- QCN `./dev speed-test` guard after the Gemma4 HQQ change completed at
+  `6902.6 tok/s` prefill, `89.37 tok/s` decode, `149.29 tok/s` HTTP, HCS
+  `15957/24576`, `0` copy failures, and `928 MB` minimum free VRAM.
 - Validation: `./dev build` passed. Short reference probes against the legacy
   Gemma4 HF BF16 artifact matched turn 1 exactly and turn 2 first token exactly
   without setting `KRASIS_NO_GRAPH`. The full legacy reference sweep passed

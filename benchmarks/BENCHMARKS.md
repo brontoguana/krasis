@@ -181,6 +181,71 @@ Findings:
 
 ---
 
+## Standard Benchmarks - 2026-06-09 (Gemma4 k4v4 CUDA graph decode)
+
+Hardware: EPYC 7742, 1007 GB RAM, RTX 5090 32 GB selected for the runs.
+Timing instrumentation was disabled for accepted benchmark rows. The QCN row
+uses the fixed `./dev speed-test` regression guard.
+
+| Run | Command | Attention | KV | Prefill (tok/s) | Decode (tok/s) | Round trip (tok/s) | HCS | Min free VRAM | Health | Logs |
+|-----|---------|-----------|----|----------------:|---------------:|-------------------:|-----|--------------:|--------|------|
+| Gemma4 k4v4 ungraphed baseline | `./dev test tests/gemma-4-4-k4v4-a16.conf` | BF16 | k4v4 | 5046.9 | 38.79 | 66.92 | 3840/3840 (100.0%) | 11044 MB | network `14/14`, `0` copy failures | [full log](20260608_235412_gemma4_k4v4_baseline_test.log) |
+| Gemma4 k4v4 broad graph gate rejected | `./dev test tests/gemma-4-4-k4v4-a16.conf` | BF16 | k4v4 | 5021.2 | 62.95 | 114.82 | 3840/3840 (100.0%) | 11030 MB | rejected: pre-HCS calibration logged graph replay errors | [full log](20260609_000232_gemma4_k4v4_graph_test.log) |
+| Gemma4 k4v4 HCS-gated graph decode | `./dev test tests/gemma-4-4-k4v4-a16.conf` | BF16 | k4v4 | 5192.4 | 63.69 | 115.47 | 3840/3840 (100.0%) | 11030 MB | network `14/14`, `0` copy failures, clean error scan | [full log](20260609_000935_gemma4_k4v4_graph_hcsguard_test.log) |
+| Qwen3-Coder-Next HQQ4 k4v4 speed-test guard | `./dev speed-test` | HQQ4 | k4v4 | 6856.8 | 88.67 | 149.12 | 15957/24576 (64.9%) | 896 MB | clean, `0` copy failures; VRAM pressure stayed above 600 MB safety | [full log](20260609_001711_qcn_speed_guard_after_gemma_k4_graph.log) |
+
+Findings:
+- Gemma4 non-ring k4v4 decode now uses the same Gemma-specific graph segment
+  as k6v6, but only after HCS has populated expert residency. This avoids the
+  rejected pre-HCS graph replay failure while preserving clean startup
+  calibration.
+- The accepted k4v4 graph row improves internal decode from `38.79` to
+  `63.69 tok/s` and HTTP from `66.92` to `115.47 tok/s`, while retaining the
+  compact k4v4 `14880`-token context with a 1000 MB KV cache.
+- Ring-window Gemma remains ungraphed. The ring path still needs separate
+  correctness and speed validation before graph replay is allowed there.
+- QCN speed-test remained in the expected range with `0` copy failures and
+  a decode low-water of `896 MB`, above the default `600 MB` safety margin.
+
+---
+
+## Standard Benchmarks - 2026-06-10 (Gemma4 fixed HQQ attention)
+
+Hardware: EPYC 7742, 1007 GB RAM, RTX 5090 32 GB selected for the runs.
+Timing instrumentation was disabled for accepted benchmark rows. The QCN row
+uses the fixed `./dev speed-test` regression guard.
+
+| Run | Command | Attention | KV | Context | Prefill (tok/s) | Decode (tok/s) | Round trip (tok/s) | HCS | Min free VRAM | Health | Logs |
+|-----|---------|-----------|----|--------:|----------------:|---------------:|-------------------:|-----|--------------:|--------|------|
+| Gemma4 HQQ8 k6v6 fused-descriptor reject | `./dev test tests/gemma-4-4-hqq8-k6v6-a16.conf` | HQQ8 | k6v6 | n/a | n/a | n/a | n/a | n/a | n/a | rejected: `D2D HQQ fused K split[5]: CUDA_ERROR_INVALID_VALUE` during calibration | [full log](20260610_075334_gemma4_hqq8_k6v6_test.log) |
+| Gemma4 HQQ8 k6v6 split descriptors | `./dev test tests/gemma-4-4-hqq8-k6v6-a16.conf` | HQQ8 | k6v6 | 10,624 | 1838.4 | 66.56 | 119.62 | 3840/3840 (100.0%) | 11228 MB | network `14/14`, `0` copy failures | [full log](20260610_075630_gemma4_hqq8_k6v6_split_test.log) |
+| Gemma4 HQQ6 k6v6 | `./dev test tests/gemma-4-4-hqq6-k6v6-a16.conf` | HQQ6 | k6v6 | 10,624 | 1632.5 | 63.85 | 116.36 | 3840/3840 (100.0%) | 11368 MB | network `14/14`, `0` copy failures | [full log](20260610_080221_gemma4_hqq6_k6v6_test.log) |
+| Gemma4 HQQ4 k6v6 | `./dev test tests/gemma-4-4-hqq4-k6v6-a16.conf` | HQQ4 | k6v6 | 10,624 | 1706.5 | 65.39 | 115.78 | 3840/3840 (100.0%) | 11748 MB | network `14/14`, `0` copy failures | [full log](20260610_080755_gemma4_hqq4_k6v6_test.log) |
+| Gemma4 HQQ8 k4v4 | `./dev test tests/gemma-4-4-hqq8-k4v4-a16.conf` | HQQ8 | k4v4 | 14,880 | 1590.0 | 65.42 | 119.29 | 3840/3840 (100.0%) | 10954 MB | network `14/14`, `0` copy failures | [full log](20260610_081953_gemma4_hqq8_k4v4_test.log) |
+| Gemma4 HQQ6 k4v4 | `./dev test tests/gemma-4-4-hqq6-k4v4-a16.conf` | HQQ6 | k4v4 | 14,880 | 1628.2 | 64.43 | 118.62 | 3840/3840 (100.0%) | 11094 MB | network `14/14`, `0` copy failures | [full log](20260610_082537_gemma4_hqq6_k4v4_test.log) |
+| Gemma4 HQQ4 k4v4 | `./dev test tests/gemma-4-4-hqq4-k4v4-a16.conf` | HQQ4 | k4v4 | 14,880 | 2150.7 | 65.25 | 120.10 | 3840/3840 (100.0%) | 11474 MB | network `14/14`, `0` copy failures; code-gen sample visibly weaker | [full log](20260610_083136_gemma4_hqq4_k4v4_test.log) |
+| Qwen3-Coder-Next HQQ4 k4v4 speed-test guard | `./dev speed-test` | HQQ4 | k4v4 | 136,528 | 6902.6 | 89.37 | 149.29 | 15957/24576 (64.9%) | 928 MB | clean, `0` copy failures; VRAM pressure stayed above 600 MB safety | [full log](20260610_083712_qcn_speed_guard_after_gemma_hqq.log) |
+
+Findings:
+- Gemma4 now supports fixed HQQ4/HQQ6/HQQ8 attention with both non-ring k6v6
+  and non-ring k4v4 KV. Mixed/auto HQQ remains rejected for Gemma4, and
+  ring-window Gemma remains outside this support matrix.
+- The accepted fix is descriptor-level, not a broad runtime fallback: Gemma4
+  GQA HQQ registration skips the generic fused-QKV descriptor and registers
+  split Q/K/V/O descriptors. Existing Qwen/QCN fused HQQ paths are unchanged.
+- HQQ attention reduces Gemma4 attention cache size: HQQ8 validated at about
+  `1870 MB` cached, HQQ6 at about `1430 MB`, and HQQ4 at about `990 MB`.
+  Lower HQQ bits increased measured free VRAM, but fixed-HQQ attention is much
+  slower in prefill than the BF16 Gemma attention path.
+- The short network suite passed for all six rows, but HQQ4/k4v4 generated a
+  visibly weak recursive code sample despite passing the suite. Do not treat
+  Gemma4 HQQ as llama-witness validated.
+- QCN `./dev speed-test` stayed in the expected range with `0` copy failures
+  and low-water VRAM above the default `600 MB` safety margin, so the Gemma
+  split-descriptor change did not regress the standard QCN HQQ path.
+
+---
+
 ## Diagnostic Benchmarks - 2026-06-04 (Q122B HQQ6+k4v4 prefill recovery)
 
 Hardware: EPYC 7742, 1007 GB RAM, RTX 5090 32 GB selected for the run.
