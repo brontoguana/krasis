@@ -2790,20 +2790,30 @@ def _check_gpu_deps():
         torch.set_float32_matmul_precision('high')
         if not torch.cuda.is_available():
             problems.append("CUDA-enabled PyTorch")
-        else:
             arch_list = (
-                set(torch.cuda.get_arch_list())
+                torch.cuda.get_arch_list()
                 if hasattr(torch.cuda, "get_arch_list")
-                else set()
+                else []
             )
             unsupported = []
             if arch_list:
+                # Parse compiled arch tokens (e.g. "sm_86") into (major, minor).
+                compiled = []
+                for tok in arch_list:
+                    t = str(tok)
+                    if t.startswith("sm_") or t.startswith("compute_"):
+                        v = t.split("_", 1)[1]
+                        try:
+                            compiled.append((int(v[0]), int(v[1]) if len(v) > 1 else 0))
+                        except (ValueError, IndexError):
+                            pass
                 for i in range(torch.cuda.device_count()):
                     major, minor = torch.cuda.get_device_capability(i)
-                    token = f"sm_{major}{minor}"
-                    if token not in arch_list:
+                    dev_cap = (major, minor)
+                    # GPU can run any kernel compiled for arch <= its capability.
+                    if compiled and not any(ca <= dev_cap for ca in compiled):
                         name = torch.cuda.get_device_properties(i).name
-                        unsupported.append(f"GPU {i} {name} ({token})")
+                        unsupported.append(f"GPU {i} {name} (sm_{major}{minor})")
             if unsupported:
                 problems.append(
                     "PyTorch build lacking " + ", ".join(unsupported)
