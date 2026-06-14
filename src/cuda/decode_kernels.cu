@@ -223,6 +223,53 @@ extern "C" __global__ void rmsnorm_scale(
     }
 }
 
+extern "C" __global__ void dual_rmsnorm_scale(
+    __nv_bfloat16* __restrict__ output_a,
+    __nv_bfloat16* __restrict__ output_b,
+    const __nv_bfloat16* __restrict__ input,
+    const __nv_bfloat16* __restrict__ weight_a,
+    const __nv_bfloat16* __restrict__ weight_b,
+    float scale_b,
+    float eps,
+    int hidden_size
+) {
+    extern __shared__ float smem[];
+    int tid = threadIdx.x;
+    int num_threads = blockDim.x;
+
+    float sum_sq = 0.0f;
+    for (int i = tid; i < hidden_size; i += num_threads) {
+        float x = bf16_to_f32(input[i]);
+        smem[i] = x;
+        sum_sq += x * x;
+    }
+
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+        sum_sq += __shfl_down_sync(0xffffffff, sum_sq, offset);
+    }
+    __shared__ float warp_sums[32];
+    int warp_id = tid / warpSize;
+    int lane_id = tid % warpSize;
+    if (lane_id == 0) warp_sums[warp_id] = sum_sq;
+    __syncthreads();
+
+    if (tid == 0) {
+        float total = 0.0f;
+        int num_warps = (num_threads + warpSize - 1) / warpSize;
+        for (int w = 0; w < num_warps; w++) total += warp_sums[w];
+        warp_sums[0] = rsqrtf(total / (float)hidden_size + eps);
+    }
+    __syncthreads();
+    float rms_scale = warp_sums[0];
+    float rms_scale_b = rms_scale * scale_b;
+
+    for (int i = tid; i < hidden_size; i += num_threads) {
+        float x = smem[i];
+        output_a[i] = f32_to_bf16(x * rms_scale * bf16_to_f32(weight_a[i]));
+        output_b[i] = f32_to_bf16(x * rms_scale_b * bf16_to_f32(weight_b[i]));
+    }
+}
+
 // ── SiLU * Mul (gate activation) ──────────────────────────────────────
 
 // Fused gate_proj * silu(gate_proj) * up_proj operation for MLP.
@@ -254,6 +301,20 @@ extern "C" __global__ void gelu_tanh_mul(
         const float k = 0.044715f;
         float gelu = 0.5f * g * (1.0f + tanhf(c * (g + k * g * g * g)));
         output[i] = f32_to_bf16(gelu * u);
+    }
+}
+
+extern "C" __global__ void apply_logit_softcap_f32(
+    float* __restrict__ logits,
+    float softcap,
+    int n
+) {
+    if (softcap <= 0.0f || !isfinite(softcap)) return;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    float x = logits[i];
+    if (isfinite(x)) {
+        logits[i] = tanhf(x / softcap) * softcap;
     }
 }
 
@@ -4399,6 +4460,201 @@ extern "C" __global__ void fused_silu_w2_batched(
     }
 }
 
+// Debug/timing-only variant of fused_silu_w2_batched. It preserves the same
+// output math and records phase clocks for the existing captured graph path.
+extern "C" __global__ void fused_silu_w2_batched_timed(
+    const unsigned long long* __restrict__ w2_packed_ptrs,
+    const unsigned long long* __restrict__ w2_scales_ptrs,
+    const unsigned short* __restrict__ gate_ups,
+    unsigned short* __restrict__ expert_outs,
+    const int* __restrict__ inv_weight_perm,
+    const int* __restrict__ inv_scale_perm,
+    int K, int N, int group_size,
+    const float* __restrict__ weights,
+    unsigned long long* __restrict__ debug_clocks,
+    int clock_base,
+    int max_clock_blocks,
+    int clock_slots_per_block
+) {
+    int expert_idx = blockIdx.z;
+    if (weights[expert_idx] == 0.0f) return;
+
+    int n_tile = blockIdx.x;
+    int local_block = expert_idx * gridDim.x + n_tile;
+    int clock_idx = clock_base + local_block * clock_slots_per_block;
+    bool record_clock = debug_clocks != NULL && local_block < max_clock_blocks;
+    bool record_preload_detail = record_clock && clock_slots_per_block >= 8;
+
+    int tid = threadIdx.x;
+    if (record_clock && tid == 0) {
+        unsigned long long t;
+        asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t));
+        debug_clocks[clock_idx] = t;
+    }
+
+    const unsigned int* packed = (const unsigned int*)w2_packed_ptrs[expert_idx];
+    const unsigned short* w2_scales = (const unsigned short*)w2_scales_ptrs[expert_idx];
+    const unsigned short* gate_up = gate_ups + expert_idx * 2 * K;
+    unsigned short* out = expert_outs + expert_idx * N;
+
+    extern __shared__ char smem_raw[];
+    unsigned short* s_input = (unsigned short*)smem_raw;
+    int* s_inv_wperm = (int*)(smem_raw + K * 2);
+    int* s_inv_sperm = (int*)(smem_raw + K * 2 + 1024 * 4);
+
+    unsigned long long sample_gate_up_load = 0;
+    unsigned long long sample_silu_mul = 0;
+    unsigned long long sample_shared_store = 0;
+
+    for (int i = tid; i < K; i += 256) {
+        bool sample_iter = record_preload_detail && tid == 0 && i == 0;
+        unsigned long long t_load_start = 0;
+        if (sample_iter) {
+            asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t_load_start));
+        }
+        unsigned short g_bits = gate_up[i];
+        unsigned short u_bits = gate_up[K + i];
+        unsigned long long t_load_end = 0;
+        if (sample_iter) {
+            asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t_load_end));
+            sample_gate_up_load += t_load_end - t_load_start;
+        }
+
+        float g = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&g_bits));
+        float u = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&u_bits));
+        float silu_g = g / (1.0f + __expf(-g));
+        __nv_bfloat16 val = __float2bfloat16(silu_g * u);
+        unsigned long long t_math_end = 0;
+        if (sample_iter) {
+            asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t_math_end));
+            sample_silu_mul += t_math_end - t_load_end;
+        }
+
+        s_input[i] = *reinterpret_cast<unsigned short*>(&val);
+        if (sample_iter) {
+            unsigned long long t_store_end;
+            asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t_store_end));
+            sample_shared_store += t_store_end - t_math_end;
+        }
+    }
+    unsigned long long activation_pre_sync = 0;
+    if (record_preload_detail && tid == 0) {
+        asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(activation_pre_sync));
+    }
+    __syncthreads();
+    if (record_clock && tid == 0) {
+        unsigned long long t;
+        asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t));
+        debug_clocks[clock_idx + 1] = t;
+        if (record_preload_detail) {
+            debug_clocks[clock_idx + 4] = sample_gate_up_load;
+            debug_clocks[clock_idx + 5] = sample_silu_mul;
+            debug_clocks[clock_idx + 6] = sample_shared_store;
+            debug_clocks[clock_idx + 7] = activation_pre_sync;
+        }
+    }
+
+    for (int i = tid; i < 1024; i += 256) s_inv_wperm[i] = inv_weight_perm[i];
+    if (tid < 64) s_inv_sperm[tid] = inv_scale_perm[tid];
+    __syncthreads();
+    if (record_clock && tid == 0) {
+        unsigned long long t;
+        asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t));
+        debug_clocks[clock_idx + 2] = t;
+    }
+
+    int k_slice = tid & 15;
+    int tn = tid >> 4;
+    int n = n_tile * 16 + tn;
+    if (n < N) {
+        int k_tiles_total = K >> 4;
+        int out_cols = N << 1;
+        int tiles_per_slice = k_tiles_total >> 4;
+        int kt_start = k_slice * tiles_per_slice;
+        int kt_end = (k_slice == 15) ? k_tiles_total : (kt_start + tiles_per_slice);
+
+        int tile_base = (n_tile << 8) + tn;
+        int perm_u32_col[16];
+        int perm_shift[16];
+        #pragma unroll
+        for (int tk = 0; tk < 16; tk++) {
+            int tile_pos = tile_base + (tk << 4);
+            int chunk = tile_pos >> 10;
+            int local_idx = tile_pos & 1023;
+            int perm_pos = (chunk << 10) + s_inv_wperm[local_idx];
+            perm_u32_col[tk] = perm_pos >> 3;
+            perm_shift[tk] = (perm_pos & 7) << 2;
+        }
+
+        float acc = 0.0f;
+        int cur_scale_group = -1;
+        float cached_scale = 0.0f;
+
+        for (int kt = kt_start; kt < kt_end; kt++) {
+            int k_base = kt << 4;
+            int row_base = kt * out_cols;
+            int sg_start = k_base / group_size;
+            int sg_end = (k_base + 15) / group_size;
+
+            if (sg_start != cur_scale_group) {
+                cur_scale_group = sg_start;
+                int scale_flat = sg_start * N + n;
+                int schunk = scale_flat >> 6;
+                int slocal = scale_flat & 63;
+                int sperm_pos = (schunk << 6) + s_inv_sperm[slocal];
+                unsigned short scale_bits = w2_scales[sperm_pos];
+                cached_scale = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&scale_bits));
+            }
+
+            if (sg_start == sg_end) {
+                #pragma unroll
+                for (int tk = 0; tk < 16; tk++) {
+                    unsigned int word = packed[row_base + perm_u32_col[tk]];
+                    int raw = (word >> perm_shift[tk]) & 0xF;
+                    float w_val = (float)(raw - 8);
+                    float x = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&s_input[k_base + tk]));
+                    acc += w_val * cached_scale * x;
+                }
+            } else {
+                #pragma unroll
+                for (int tk = 0; tk < 16; tk++) {
+                    int k = k_base + tk;
+                    int sg = k / group_size;
+                    if (sg != cur_scale_group) {
+                        cur_scale_group = sg;
+                        int scale_flat = sg * N + n;
+                        int schunk = scale_flat >> 6;
+                        int slocal = scale_flat & 63;
+                        int sperm_pos = (schunk << 6) + s_inv_sperm[slocal];
+                        unsigned short scale_bits = w2_scales[sperm_pos];
+                        cached_scale = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&scale_bits));
+                    }
+                    unsigned int word = packed[row_base + perm_u32_col[tk]];
+                    int raw = (word >> perm_shift[tk]) & 0xF;
+                    float w_val = (float)(raw - 8);
+                    float x = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&s_input[k]));
+                    acc += w_val * cached_scale * x;
+                }
+            }
+        }
+
+        for (int offset = 8; offset > 0; offset >>= 1) {
+            acc += __shfl_down_sync(0xFFFFFFFF, acc, offset, 16);
+        }
+
+        if (k_slice == 0) {
+            __nv_bfloat16 result = __float2bfloat16(acc);
+            out[n] = *reinterpret_cast<unsigned short*>(&result);
+        }
+    }
+    __syncthreads();
+    if (record_clock && tid == 0) {
+        unsigned long long t;
+        asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t));
+        debug_clocks[clock_idx + 3] = t;
+    }
+}
+
 // ── Batched fused silu_mul + w2 GEMV for INT8 Marlin ──────────────────
 // Analogous to fused_silu_w2_batched but with INT8 dequant logic.
 // Grid: (n_tiles, 1, num_experts), Block: (256, 1, 1)
@@ -8213,6 +8469,183 @@ extern "C" __global__ void gqa_attention_k4v4_single_g(
     }
 }
 
+// Debug/timing-only variant of gqa_attention_k4v4_single_g. It preserves the
+// same math and output path, while recording per-head phase clocks and the
+// runtime tile-count gate that a tiled graph candidate would have matched.
+extern "C" __global__ void gqa_attention_k4v4_single_g_timed(
+    float* __restrict__ output,
+    const float* __restrict__ q,
+    const unsigned short* __restrict__ k_scale_cache,
+    const unsigned char* __restrict__ k_idx_cache,
+    const unsigned short* __restrict__ v_radius_cache,
+    const unsigned char* __restrict__ v_angles_cache,
+    float sm_scale,
+    int num_kv_heads,
+    int head_dim,
+    const int* __restrict__ d_seq_len,
+    unsigned long long* __restrict__ debug_clocks,
+    unsigned long long* __restrict__ debug_stats,
+    int clock_base,
+    int stats_base,
+    int tile_size,
+    int max_tiles
+) {
+    int qh = blockIdx.x;
+    int num_q_heads = gridDim.x;
+    int seq_len = *d_seq_len;
+
+    int tid = threadIdx.x;
+    int num_threads = blockDim.x;
+    int lane_id = tid & 31;
+    int warp_id = tid >> 5;
+    int num_warps = num_threads >> 5;
+    int heads_per_kv = num_q_heads / num_kv_heads;
+    int kv_head = qh / heads_per_kv;
+    int kv_stride = num_kv_heads * head_dim;
+    int num_blocks = kv_stride / 16;
+    int block_offset_in_head = (kv_head * head_dim) / 16;
+
+    int head_clock_base = clock_base + qh * 4;
+    if (tid == 0) {
+        unsigned long long t;
+        asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t));
+        debug_clocks[head_clock_base] = t;
+    }
+    if (qh == 0 && tid == 0) {
+        int runtime_tiles = (tile_size > 0) ? ((seq_len + tile_size - 1) / tile_size) : 0;
+        int inactive_tile_blocks = 0;
+        if (max_tiles > runtime_tiles) {
+            inactive_tile_blocks = (max_tiles - runtime_tiles) * num_q_heads;
+        }
+        debug_stats[stats_base] = 1ull; // segment count for this graph replay
+        debug_stats[stats_base + 1] = (unsigned long long)(seq_len > 0 ? seq_len : 0);
+        debug_stats[stats_base + 2] = (unsigned long long)(runtime_tiles > 0 ? runtime_tiles : 0);
+        debug_stats[stats_base + 3] = (unsigned long long)(max_tiles > 0 ? max_tiles : 0);
+        debug_stats[stats_base + 4] = (tile_size > 0 && max_tiles > 1) ? 1ull : 0ull;
+        debug_stats[stats_base + 5] = 1ull; // accepted source is single-kernel path
+        debug_stats[stats_base + 6] = 0ull; // no tiled/reduce path on this accepted branch
+        debug_stats[stats_base + 7] =
+            (unsigned long long)(inactive_tile_blocks > 0 ? inactive_tile_blocks : 0);
+    }
+
+    const float* q_head = q + qh * head_dim;
+    extern __shared__ float smem[];
+    float* s_q = smem;
+    float* smem_reduce = smem + head_dim;
+    float* s_partial_v = smem_reduce + 2 * num_warps;
+
+    for (int i = tid; i < head_dim; i += num_threads) {
+        s_q[i] = q_head[i];
+    }
+    __syncthreads();
+
+    float local_max = -1e30f;
+    for (int pos = tid; pos < seq_len; pos += num_threads) {
+        float score = 0.0f;
+        for (int b = 0; b < head_dim / 16; b++) {
+            int block_idx = block_offset_in_head + b;
+            float scale = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(
+                &k_scale_cache[pos * num_blocks + block_idx]));
+            const unsigned char* k_pack = k_idx_cache + (pos * num_blocks + block_idx) * 8;
+            #pragma unroll
+            for (int j = 0; j < 16; j++) {
+                score += s_q[b * 16 + j] * scale * (float)(unpack_k4(k_pack, j) - 8);
+            }
+        }
+        local_max = fmaxf(local_max, score * sm_scale);
+    }
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        local_max = fmaxf(local_max, __shfl_down_sync(0xffffffff, local_max, offset));
+    }
+    if (lane_id == 0) smem_reduce[warp_id] = local_max;
+    __syncthreads();
+    if (tid == 0) {
+        float m = smem_reduce[0];
+        for (int i = 1; i < num_warps; i++) m = fmaxf(m, smem_reduce[i]);
+        smem_reduce[0] = m;
+    }
+    __syncthreads();
+    float global_max = smem_reduce[0];
+    if (tid == 0) {
+        unsigned long long t;
+        asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t));
+        debug_clocks[head_clock_base + 1] = t;
+    }
+
+    float local_sum_exp = 0.0f;
+    for (int d = lane_id; d < head_dim; d += 32) {
+        s_partial_v[warp_id * head_dim + d] = 0.0f;
+    }
+    __syncwarp();
+
+    for (int pos = warp_id; pos < seq_len; pos += num_warps) {
+        float score_partial = 0.0f;
+        for (int d = lane_id; d < head_dim; d += 32) {
+            int block_idx = block_offset_in_head + (d >> 4);
+            float scale = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(
+                &k_scale_cache[pos * num_blocks + block_idx]));
+            const unsigned char* k_pack = k_idx_cache + (pos * num_blocks + block_idx) * 8;
+            score_partial += s_q[d] * scale * (float)(unpack_k4(k_pack, d & 15) - 8);
+        }
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            score_partial += __shfl_down_sync(0xffffffff, score_partial, offset);
+        }
+        float w = __expf(__shfl_sync(0xffffffff, score_partial, 0) * sm_scale - global_max);
+        local_sum_exp += w;
+
+        for (int d = lane_id; d < head_dim; d += 32) {
+            int block_idx = block_offset_in_head + (d >> 4);
+            float r = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(
+                &v_radius_cache[pos * num_blocks + block_idx]));
+            const unsigned char* angs = v_angles_cache + (pos * num_blocks + block_idx) * 8;
+            unsigned char p = angs[(d & 15) >> 1];
+            float v_val = ((d & 1) == 0)
+                ? r * polar4_codebook[p & 0xF]
+                : r * polar4_codebook[p >> 4];
+            s_partial_v[warp_id * head_dim + d] += w * v_val;
+        }
+    }
+
+    if (lane_id == 0) smem_reduce[warp_id] = local_sum_exp;
+    __syncthreads();
+    if (tid == 0) {
+        float gsum = 0.0f;
+        for (int w = 0; w < num_warps; w++) gsum += smem_reduce[w];
+        smem_reduce[0] = gsum;
+    }
+    __syncthreads();
+
+    float inv_sum = 1.0f / (smem_reduce[0] + 1e-12f);
+    for (int d = tid; d < head_dim; d += num_threads) {
+        float acc = 0.0f;
+        for (int w = 0; w < num_warps; w++) acc += s_partial_v[w * head_dim + d];
+        s_q[d] = acc * inv_sum;
+    }
+    __syncthreads();
+    if (tid == 0) {
+        unsigned long long t;
+        asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t));
+        debug_clocks[head_clock_base + 2] = t;
+    }
+
+    for (int b = 0; b < head_dim / 16; b++) {
+        if (tid == b) {
+            float o_local[16];
+            for (int i = 0; i < 16; i++) o_local[i] = s_q[b*16+i];
+            fht16(o_local);
+            for (int i = 0; i < 16; i++) {
+                output[qh * head_dim + b*16 + i] = o_local[i] * 0.25f * polar4_signs[i];
+            }
+        }
+    }
+    __syncthreads();
+    if (tid == 0) {
+        unsigned long long t;
+        asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t));
+        debug_clocks[head_clock_base + 3] = t;
+    }
+}
+
 // Single-query GQA attention with blockwise INT6 K and Polar4 V.
 extern "C" __global__ void gqa_attention_k6v4(
     float* __restrict__ output,
@@ -10554,5 +10987,16 @@ extern "C" __global__ void gqa_attention_polar4_reduce_g(
         for (int i = 0; i < 16; i++) {
             output[qh * head_dim + b*16 + i] = o_local[i] * 0.25f * polar4_signs[i];
         }
+    }
+}
+
+extern "C" __global__ void record_globaltimer_u64_g(
+    unsigned long long* __restrict__ out,
+    int index
+) {
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+        unsigned long long t;
+        asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t));
+        out[index] = t;
     }
 }

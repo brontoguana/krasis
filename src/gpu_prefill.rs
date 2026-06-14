@@ -82,10 +82,133 @@ fn kv_stage_exact_enabled() -> bool {
     )
 }
 
+pub(crate) const GQA_APPEND_GAP_CHECKPOINTS: usize = 14;
+const GQA_APPEND_GAP_LABELS: [&str; GQA_APPEND_GAP_CHECKPOINTS] = [
+    "after_fa2_bookkeeping",
+    "after_attention_branch",
+    "before_reference_hook",
+    "after_reference_hook",
+    "after_trace_row_hook",
+    "after_trace_summary_hook",
+    "before_append_setup",
+    "after_append_setup",
+    "direct_compressed_branch_entry",
+    "direct_compressed_shape_math",
+    "direct_compressed_arg_setup",
+    "before_append_start_event",
+    "after_append_start_event",
+    "before_append_launch",
+];
+const GQA_GAP_AFTER_FA2_BOOKKEEPING: usize = 0;
+const GQA_GAP_AFTER_ATTENTION_BRANCH: usize = 1;
+const GQA_GAP_BEFORE_REFERENCE_HOOK: usize = 2;
+const GQA_GAP_AFTER_REFERENCE_HOOK: usize = 3;
+const GQA_GAP_AFTER_TRACE_ROW_HOOK: usize = 4;
+const GQA_GAP_AFTER_TRACE_SUMMARY_HOOK: usize = 5;
+const GQA_GAP_BEFORE_APPEND_SETUP: usize = 6;
+const GQA_GAP_AFTER_APPEND_SETUP: usize = 7;
+const GQA_GAP_DIRECT_K4_BRANCH_ENTRY: usize = 8;
+const GQA_GAP_DIRECT_K4_SHAPE_MATH: usize = 9;
+const GQA_GAP_DIRECT_K4_ARG_SETUP: usize = 10;
+const GQA_GAP_BEFORE_APPEND_START_EVENT: usize = 11;
+const GQA_GAP_AFTER_APPEND_START_EVENT: usize = 12;
+const GQA_GAP_BEFORE_APPEND_LAUNCH: usize = 13;
+
+pub(crate) const GQA_ATTENTION_BRANCHES: usize = 11;
+const GQA_ATTENTION_BRANCH_LABELS: [&str; GQA_ATTENTION_BRANCHES] = [
+    "ring_fa2_initial",
+    "ring_fa2_cross_chunk",
+    "custom_sliding",
+    "fixed_fa2",
+    "polar4_cross_chunk",
+    "tq4_cross_chunk",
+    "compressed_cross_chunk",
+    "fp8kv_cross_chunk",
+    "bf16_cross_chunk",
+    "custom_cross_chunk",
+    "custom_no_fa2",
+];
+const GQA_BRANCH_RING_FA2_INITIAL: usize = 0;
+const GQA_BRANCH_RING_FA2_CROSS_CHUNK: usize = 1;
+const GQA_BRANCH_CUSTOM_SLIDING: usize = 2;
+const GQA_BRANCH_FIXED_FA2: usize = 3;
+const GQA_BRANCH_POLAR4_CROSS_CHUNK: usize = 4;
+const GQA_BRANCH_TQ4_CROSS_CHUNK: usize = 5;
+const GQA_BRANCH_COMPRESSED_CROSS_CHUNK: usize = 6;
+const GQA_BRANCH_FP8KV_CROSS_CHUNK: usize = 7;
+const GQA_BRANCH_BF16_CROSS_CHUNK: usize = 8;
+const GQA_BRANCH_CUSTOM_CROSS_CHUNK: usize = 9;
+const GQA_BRANCH_CUSTOM_NO_FA2: usize = 10;
+
+pub(crate) const GQA_CUSTOM_TILED_STEPS: usize = 7;
+const GQA_CUSTOM_TILED_STEP_LABELS: [&str; GQA_CUSTOM_TILED_STEPS] = [
+    "entry",
+    "head_dim_check",
+    "layout_math",
+    "cache_ptr_select",
+    "arg_pack",
+    "before_kernel_launch",
+    "flash_attn_tiled_launch",
+];
+const GQA_CUSTOM_TILED_ENTRY: usize = 0;
+const GQA_CUSTOM_TILED_HEAD_DIM_CHECK: usize = 1;
+const GQA_CUSTOM_TILED_LAYOUT_MATH: usize = 2;
+const GQA_CUSTOM_TILED_CACHE_PTR_SELECT: usize = 3;
+const GQA_CUSTOM_TILED_ARG_PACK: usize = 4;
+const GQA_CUSTOM_TILED_BEFORE_KERNEL_LAUNCH: usize = 5;
+const GQA_CUSTOM_TILED_FLASH_ATTN_TILED_LAUNCH: usize = 6;
+
+const HD512_Q2_KERNEL_CLOCK_SLOTS: usize = 9;
+const HD512_Q2_KERNEL_PHASES: usize = 6;
+const HD512_Q2_KERNEL_PHASE_LABELS: [&str; HD512_Q2_KERNEL_PHASES] = [
+    "q_load",
+    "kv_tile_load",
+    "qk_score",
+    "softmax",
+    "pv_accum",
+    "final_write",
+];
+const HD512_Q2_CLOCK_TOTAL: usize = 6;
+const HD512_Q2_CLOCK_BLOCKS: usize = 7;
+const HD512_Q2_CLOCK_TILES: usize = 8;
+
+#[derive(Clone, Copy)]
+struct CustomTiledTiming {
+    layer_idx: usize,
+    branch_idx: usize,
+    fa2_supports_head_dim: bool,
+}
+
 fn gemma_custom_window_prefill_enabled() -> bool {
     std::env::var("KRASIS_GEMMA_CUSTOM_WINDOW_PREFILL")
         .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(false)
+}
+
+fn prefill_hd512_kernel_clocks_enabled() -> bool {
+    std::env::var("KRASIS_PREFILL_HD512_KERNEL_CLOCKS")
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
+fn prefill_hd512_q2_bc32_enabled() -> bool {
+    std::env::var("KRASIS_PREFILL_HD512_Q2_BC32")
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
+fn hd512_q2_dynamic_smem_bytes(
+    q_heads_per_block: usize,
+    br: usize,
+    bc: usize,
+    head_dim: usize,
+) -> usize {
+    q_heads_per_block * br * head_dim * 2
+        + bc * head_dim * 2
+        + bc * head_dim * 2
+        + q_heads_per_block * br * bc * 4
+        + q_heads_per_block * br * bc * 2
+        + q_heads_per_block * 16 * 16 * 4
 }
 
 #[derive(Clone, Debug)]
@@ -2492,6 +2615,19 @@ pub struct PrefillKernels {
     transpose_3d_021: RawCuFunc,      // [A,B,C] -> [B,A,C] FP32
     transpose_3d_021_bf16: RawCuFunc, // [A,B,C] -> [B,A,C] BF16
     flash_attn_tiled: RawCuFunc,      // tiled FA with online softmax
+    flash_attn_tiled_hd512_full: RawCuFunc, // Gemma HQQ4 hd512 full-attention specialization
+    flash_attn_tiled_hd512_full_q2: RawCuFunc,
+    flash_attn_tiled_hd512_full_q2_timed: RawCuFunc,
+    flash_attn_tiled_hd512_full_q2_bc32: RawCuFunc,
+    flash_attn_tiled_hd512_full_q2_bc32_timed: RawCuFunc,
+    flash_attn_tiled_hd512_full_bc48: RawCuFunc,
+    flash_attn_tiled_hd512_full_bc64: RawCuFunc,
+    flash_attn_tiled_hd512_full_enabled: bool,
+    flash_attn_tiled_hd512_full_tile_cols: usize,
+    flash_attn_tiled_hd512_full_q_heads_per_block: usize,
+    flash_attn_tiled_hd512_full_max_smem: usize,
+    flash_attn_tiled_hd512_full_q2_bc32_required_smem: usize,
+    flash_attn_tiled_hd512_full_q2_bc32_ready: bool,
     gated_q_split: RawCuFunc,         // split interleaved [M,H,2D] -> Q + gate
     la_split_conv_output: RawCuFunc,  // split [M,conv_dim] -> q + k + v
     concat_3_bf16: RawCuFunc,         // concat q+k+v BF16 -> [M,conv_dim]
@@ -3313,6 +3449,10 @@ pub struct PrefillEngine {
     pub scatter_event: cuda_sys::CUevent,
     pub shared_launch_event: cuda_sys::CUevent,
     pub shared_add_input_event: cuda_sys::CUevent,
+    pub gqa_timing_start_event: cuda_sys::CUevent,
+    pub gqa_timing_stop_event: cuda_sys::CUevent,
+    pub kv_append_timing_start_event: cuda_sys::CUevent,
+    pub kv_append_timing_stop_event: cuda_sys::CUevent,
     // BF16 attention weight streaming: double-buffer for q/k/v/o proj weights
     // These are only used when attention weights are BF16 (not AWQ/INT4).
     // For AWQ attention, weights are small and permanently GPU-resident.
@@ -3408,9 +3548,36 @@ pub struct PrefillEngine {
     pub t_gqa_kv_prep: Cell<f64>,  // KV cache store (FP8 path) or dequant+concat (BF16 path)
     pub t_gqa_kv_cross_stage: Cell<f64>, // Cross-chunk compressed/BF16 KV staging
     pub t_gqa_kv_append: Cell<f64>, // Current chunk K/V append into cache
+    pub t_gqa_kv_append_kernel: Cell<f64>, // CUDA-event time for direct append kernels
     pub t_gqa_fa2: Cell<f64>,      // FlashAttention-2 kernel call
     pub t_gqa_gate: Cell<f64>,     // sigmoid gate (gated attention)
     pub t_gqa_oproj: Cell<f64>,    // O projection GEMM
+    pub t_gqa_proj_event: Cell<f64>, // CUDA-event time for Q/K/V projection boundary
+    pub t_gqa_norm_event: Cell<f64>, // CUDA-event time for Q/K/V norm boundary
+    pub t_gqa_rope_event: Cell<f64>, // CUDA-event time for RoPE boundary
+    pub t_gqa_fa2_event: Cell<f64>, // CUDA-event time for fixed-length FA2 boundary
+    pub t_gqa_oproj_event: Cell<f64>, // CUDA-event time for O projection boundary
+    pub t_gqa_proj_sync: Cell<f64>, // explicit stream-sync wait after projection
+    pub t_gqa_norm_sync: Cell<f64>, // explicit stream-sync wait after norm
+    pub t_gqa_rope_sync: Cell<f64>, // explicit stream-sync wait after RoPE
+    pub t_gqa_fa2_sync: Cell<f64>, // explicit stream-sync wait after fixed-length FA2
+    pub t_gqa_kv_append_sync: Cell<f64>, // explicit stream-sync wait after direct append
+    pub t_gqa_oproj_sync: Cell<f64>, // explicit stream-sync wait after O projection
+    pub t_gqa_debt_entry_sync: Cell<f64>, // sync debt at Gemma HQQ4/k4 GQA entry
+    pub t_gqa_debt_after_q_sync: Cell<f64>, // sync debt after individual Q projection
+    pub t_gqa_debt_after_k_sync: Cell<f64>, // sync debt after individual K projection
+    pub t_gqa_debt_after_v_sync: Cell<f64>, // sync debt after individual V projection
+    pub t_gqa_debt_pre_append_sync: Cell<f64>, // sync debt immediately before append launch
+    pub t_gqa_debt_after_fa2_sync: Cell<f64>, // sync debt after fixed-length FA2
+    pub t_gqa_debt_after_oproj_sync: Cell<f64>, // sync debt after O projection
+    pub t_gqa_debt_gemma4_layer_entry_sync: Cell<f64>, // sync debt at Gemma4 layer handoff
+    pub t_gqa_debt_gemma4_pre_gqa_sync: Cell<f64>, // sync debt after Gemma4 input norm/prefetch
+    pub t_gqa_debt_append_gap_sync: [Cell<f64>; GQA_APPEND_GAP_CHECKPOINTS],
+    pub t_gqa_attention_branch_before_sync: [Cell<f64>; GQA_ATTENTION_BRANCHES],
+    pub t_gqa_attention_branch_after_sync: [Cell<f64>; GQA_ATTENTION_BRANCHES],
+    pub t_gqa_custom_tiled_wall: [Cell<f64>; GQA_CUSTOM_TILED_STEPS],
+    pub t_gqa_custom_tiled_event: [Cell<f64>; GQA_CUSTOM_TILED_STEPS],
+    pub t_gqa_custom_tiled_sync: [Cell<f64>; GQA_CUSTOM_TILED_STEPS],
     pub t_hqq_marlin_float_zp: Cell<f64>, // HQQ Marlin float-zp projection kernels
     pub t_hqq_group_sums: Cell<f64>, // HQQ grouped input-sum kernel
     pub t_hqq_correction_gemm: Cell<f64>, // HQQ correction SGEMM
@@ -3424,6 +3591,26 @@ pub struct PrefillEngine {
     pub gqa_bf16_calls: Cell<u64>, // how many used BF16 dequant path
     pub gqa_kv_cross_stage_calls: Cell<u64>,
     pub gqa_kv_append_calls: Cell<u64>,
+    pub gqa_kv_append_kernel_calls: Cell<u64>,
+    pub gqa_proj_event_calls: Cell<u64>,
+    pub gqa_norm_event_calls: Cell<u64>,
+    pub gqa_rope_event_calls: Cell<u64>,
+    pub gqa_fa2_event_calls: Cell<u64>,
+    pub gqa_oproj_event_calls: Cell<u64>,
+    pub gqa_debt_entry_calls: Cell<u64>,
+    pub gqa_debt_after_q_calls: Cell<u64>,
+    pub gqa_debt_after_k_calls: Cell<u64>,
+    pub gqa_debt_after_v_calls: Cell<u64>,
+    pub gqa_debt_pre_append_calls: Cell<u64>,
+    pub gqa_debt_after_fa2_calls: Cell<u64>,
+    pub gqa_debt_after_oproj_calls: Cell<u64>,
+    pub gqa_debt_gemma4_layer_entry_calls: Cell<u64>,
+    pub gqa_debt_gemma4_pre_gqa_calls: Cell<u64>,
+    pub gqa_debt_append_gap_calls: [Cell<u64>; GQA_APPEND_GAP_CHECKPOINTS],
+    pub gqa_attention_branch_calls: [Cell<u64>; GQA_ATTENTION_BRANCHES],
+    pub gqa_attention_branch_before_calls: [Cell<u64>; GQA_ATTENTION_BRANCHES],
+    pub gqa_attention_branch_after_calls: [Cell<u64>; GQA_ATTENTION_BRANCHES],
+    pub gqa_custom_tiled_step_calls: [Cell<u64>; GQA_CUSTOM_TILED_STEPS],
     pub gqa_kv_cross_current_tokens: Cell<u64>,
     pub gqa_kv_cross_total_tokens: Cell<u64>,
     // LA sub-component timing accumulators
@@ -3521,6 +3708,18 @@ impl Drop for PrefillEngine {
             }
             if !self.shared_add_input_event.is_null() {
                 let _ = cuda_sys::lib().cuEventDestroy_v2(self.shared_add_input_event);
+            }
+            if !self.gqa_timing_start_event.is_null() {
+                let _ = cuda_sys::lib().cuEventDestroy_v2(self.gqa_timing_start_event);
+            }
+            if !self.gqa_timing_stop_event.is_null() {
+                let _ = cuda_sys::lib().cuEventDestroy_v2(self.gqa_timing_stop_event);
+            }
+            if !self.kv_append_timing_start_event.is_null() {
+                let _ = cuda_sys::lib().cuEventDestroy_v2(self.kv_append_timing_start_event);
+            }
+            if !self.kv_append_timing_stop_event.is_null() {
+                let _ = cuda_sys::lib().cuEventDestroy_v2(self.kv_append_timing_stop_event);
             }
             if !self.dma_event.is_null() {
                 let _ = cuda_sys::lib().cuEventDestroy_v2(self.dma_event);
@@ -6280,13 +6479,365 @@ impl PrefillEngine {
             .set(self.gqa_kv_cross_total_tokens.get() + total_kv_tokens as u64);
     }
 
-    fn record_gqa_kv_append(&self, elapsed_ms: f64) {
+    fn record_gqa_kv_append(&self, elapsed_ms: f64, kernel_ms: Option<f64>, sync_ms: f64) {
         self.t_gqa_kv_prep
             .set(self.t_gqa_kv_prep.get() + elapsed_ms);
         self.t_gqa_kv_append
             .set(self.t_gqa_kv_append.get() + elapsed_ms);
         self.gqa_kv_append_calls
             .set(self.gqa_kv_append_calls.get() + 1);
+        self.t_gqa_kv_append_sync
+            .set(self.t_gqa_kv_append_sync.get() + sync_ms);
+        if let Some(ms) = kernel_ms {
+            self.t_gqa_kv_append_kernel
+                .set(self.t_gqa_kv_append_kernel.get() + ms);
+            self.gqa_kv_append_kernel_calls
+                .set(self.gqa_kv_append_kernel_calls.get() + 1);
+        }
+    }
+
+    fn gqa_timing_event_start(&self, label: &str) -> Result<bool, String> {
+        if !self.gqa_timing_enabled.get()
+            || self.gqa_timing_start_event.is_null()
+            || self.gqa_timing_stop_event.is_null()
+        {
+            return Ok(false);
+        }
+        unsafe {
+            let err = cuda_sys::lib().cuEventRecord(self.gqa_timing_start_event, self.stream);
+            if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!("record {label} timing start event: {:?}", err));
+            }
+        }
+        Ok(true)
+    }
+
+    fn gqa_timing_event_stop(&self, active: bool, label: &str) -> Result<(), String> {
+        if !active {
+            return Ok(());
+        }
+        unsafe {
+            let err = cuda_sys::lib().cuEventRecord(self.gqa_timing_stop_event, self.stream);
+            if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!("record {label} timing stop event: {:?}", err));
+            }
+        }
+        Ok(())
+    }
+
+    fn gqa_timing_event_elapsed_ms(
+        &self,
+        active: bool,
+        label: &str,
+    ) -> Result<Option<f64>, String> {
+        if !active {
+            return Ok(None);
+        }
+        let mut elapsed_ms: f32 = 0.0;
+        unsafe {
+            let err = cuda_sys::lib().cuEventElapsedTime(
+                &mut elapsed_ms,
+                self.gqa_timing_start_event,
+                self.gqa_timing_stop_event,
+            );
+            if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!("elapsed {label} timing event: {:?}", err));
+            }
+        }
+        Ok(Some(elapsed_ms as f64))
+    }
+
+    fn stream_sync_timed(&self) -> Result<f64, String> {
+        let t0 = Instant::now();
+        self.stream_sync()?;
+        Ok(t0.elapsed().as_secs_f64() * 1000.0)
+    }
+
+    fn record_gqa_queue_event(
+        &self,
+        event_cell: &Cell<f64>,
+        sync_cell: &Cell<f64>,
+        calls_cell: &Cell<u64>,
+        event_ms: Option<f64>,
+        sync_ms: f64,
+    ) {
+        sync_cell.set(sync_cell.get() + sync_ms);
+        if let Some(ms) = event_ms {
+            event_cell.set(event_cell.get() + ms);
+            calls_cell.set(calls_cell.get() + 1);
+        }
+    }
+
+    fn record_gqa_debt_sync_value(
+        &self,
+        sync_cell: &Cell<f64>,
+        calls_cell: &Cell<u64>,
+        sync_ms: f64,
+    ) {
+        sync_cell.set(sync_cell.get() + sync_ms);
+        calls_cell.set(calls_cell.get() + 1);
+    }
+
+    fn record_gqa_debt_checkpoint(
+        &self,
+        sync_cell: &Cell<f64>,
+        calls_cell: &Cell<u64>,
+    ) -> Result<f64, String> {
+        let sync_ms = self.stream_sync_timed()?;
+        self.record_gqa_debt_sync_value(sync_cell, calls_cell, sync_ms);
+        Ok(sync_ms)
+    }
+
+    fn record_gqa_append_gap_checkpoint(&self, idx: usize) -> Result<(), String> {
+        let sync_ms = self.stream_sync_timed()?;
+        self.t_gqa_debt_append_gap_sync[idx]
+            .set(self.t_gqa_debt_append_gap_sync[idx].get() + sync_ms);
+        self.gqa_debt_append_gap_calls[idx]
+            .set(self.gqa_debt_append_gap_calls[idx].get() + 1);
+        Ok(())
+    }
+
+    fn record_gqa_attention_branch_call(
+        &self,
+        idx: usize,
+        layer_idx: usize,
+        m: usize,
+        start_pos: usize,
+        attn_path: &str,
+        fixed_fa2: bool,
+        use_sliding_window: bool,
+        sliding_window: usize,
+        capture_kv_cache: bool,
+        fa2_supports_head_dim: bool,
+        prefill_kv_active: bool,
+        ring_window_decode_layer: bool,
+    ) {
+        self.gqa_attention_branch_calls[idx]
+            .set(self.gqa_attention_branch_calls[idx].get() + 1);
+        eprintln!(
+            "[PREFILL-TIMING]       gqa attention call layer={} tokens={} start_pos={} branch={} attn_path={} fixed_fa2={} attention_type={} window={} capture_kv_cache={} kv_format={} decode_kv_format={} fa2_head_dim={} prefill_kv_active={} ring_window_decode_layer={}",
+            layer_idx,
+            m,
+            start_pos,
+            GQA_ATTENTION_BRANCH_LABELS[idx],
+            attn_path,
+            fixed_fa2,
+            if use_sliding_window { "sliding" } else { "full" },
+            sliding_window,
+            capture_kv_cache,
+            self.kv_format,
+            self.decode_kv_format,
+            fa2_supports_head_dim,
+            prefill_kv_active,
+            ring_window_decode_layer,
+        );
+    }
+
+    fn record_gqa_attention_branch_debt_checkpoint(
+        &self,
+        idx: usize,
+        before: bool,
+    ) -> Result<(), String> {
+        let sync_ms = self.stream_sync_timed()?;
+        if before {
+            self.t_gqa_attention_branch_before_sync[idx]
+                .set(self.t_gqa_attention_branch_before_sync[idx].get() + sync_ms);
+            self.gqa_attention_branch_before_calls[idx]
+                .set(self.gqa_attention_branch_before_calls[idx].get() + 1);
+        } else {
+            self.t_gqa_attention_branch_after_sync[idx]
+                .set(self.t_gqa_attention_branch_after_sync[idx].get() + sync_ms);
+            self.gqa_attention_branch_after_calls[idx]
+                .set(self.gqa_attention_branch_after_calls[idx].get() + 1);
+        }
+        Ok(())
+    }
+
+    fn record_gqa_custom_tiled_step(
+        &self,
+        idx: usize,
+        layer_idx: usize,
+        m: usize,
+        start_pos: usize,
+        head_dim: usize,
+        num_q_heads: usize,
+        num_kv_heads: usize,
+        sliding_window: usize,
+        fa2_supports_head_dim: bool,
+        wall_ms: f64,
+        event_ms: Option<f64>,
+        sync_ms: f64,
+    ) {
+        let event_ms_value = event_ms.unwrap_or(0.0);
+        self.t_gqa_custom_tiled_wall[idx]
+            .set(self.t_gqa_custom_tiled_wall[idx].get() + wall_ms);
+        self.t_gqa_custom_tiled_event[idx]
+            .set(self.t_gqa_custom_tiled_event[idx].get() + event_ms_value);
+        self.t_gqa_custom_tiled_sync[idx]
+            .set(self.t_gqa_custom_tiled_sync[idx].get() + sync_ms);
+        self.gqa_custom_tiled_step_calls[idx]
+            .set(self.gqa_custom_tiled_step_calls[idx].get() + 1);
+        let hd512_base_tile_cols = if head_dim == 512 && !fa2_supports_head_dim {
+            self.kernels.flash_attn_tiled_hd512_full_tile_cols
+        } else {
+            0
+        };
+        let hd512_base_q_heads_per_block = if hd512_base_tile_cols != 0 {
+            self.kernels.flash_attn_tiled_hd512_full_q_heads_per_block
+        } else {
+            0
+        };
+        let hd512_q2_bc32_active = prefill_hd512_q2_bc32_enabled()
+            && hd512_base_tile_cols == 16
+            && hd512_base_q_heads_per_block == 2
+            && (self.use_gemma_hqq4_k4_hd512_full_attn(
+                layer_idx,
+                start_pos,
+                num_q_heads,
+                num_kv_heads,
+                head_dim,
+                sliding_window,
+            ) || self.use_gemma_hqq4_k6_stage_exact_hd512_full_attn(
+                layer_idx,
+                start_pos,
+                num_q_heads,
+                num_kv_heads,
+                head_dim,
+                sliding_window,
+            ));
+        let hd512_tile_cols = if hd512_q2_bc32_active {
+            32
+        } else {
+            hd512_base_tile_cols
+        };
+        let hd512_q_heads_per_block = if hd512_q2_bc32_active {
+            2
+        } else {
+            hd512_base_q_heads_per_block
+        };
+        eprintln!(
+            "[PREFILL-TIMING]       custom_tiled step layer={} tokens={} start_pos={} step={} wall={:.1}ms event={:.1}ms sync={:.1}ms head_dim={} q_heads={} kv_heads={} window={} fa2_head_dim={} hd512_tile_cols={} hd512_q_heads_per_block={}",
+            layer_idx,
+            m,
+            start_pos,
+            GQA_CUSTOM_TILED_STEP_LABELS[idx],
+            wall_ms,
+            event_ms_value,
+            sync_ms,
+            head_dim,
+            num_q_heads,
+            num_kv_heads,
+            sliding_window,
+            fa2_supports_head_dim,
+            hd512_tile_cols,
+            hd512_q_heads_per_block,
+        );
+    }
+
+    fn finish_gqa_custom_tiled_step(
+        &self,
+        idx: usize,
+        timing: CustomTiledTiming,
+        m: usize,
+        start_pos: usize,
+        head_dim: usize,
+        num_q_heads: usize,
+        num_kv_heads: usize,
+        sliding_window: usize,
+        event_active: bool,
+        wall_start: Instant,
+    ) -> Result<(), String> {
+        let label = GQA_CUSTOM_TILED_STEP_LABELS[idx];
+        self.gqa_timing_event_stop(event_active, label)?;
+        let sync_ms = self.stream_sync_timed()?;
+        let event_ms = self.gqa_timing_event_elapsed_ms(event_active, label)?;
+        self.record_gqa_custom_tiled_step(
+            idx,
+            timing.layer_idx,
+            m,
+            start_pos,
+            head_dim,
+            num_q_heads,
+            num_kv_heads,
+            sliding_window,
+            timing.fa2_supports_head_dim,
+            wall_start.elapsed().as_secs_f64() * 1000.0,
+            event_ms,
+            sync_ms,
+        );
+        Ok(())
+    }
+
+    fn report_hd512_q2_kernel_clocks(
+        &self,
+        clocks: &cudarc::driver::CudaSlice<u64>,
+        timing: CustomTiledTiming,
+        m: usize,
+        start_pos: usize,
+        event_ms: f64,
+    ) -> Result<(), String> {
+        let mut h = vec![0u64; HD512_Q2_KERNEL_CLOCK_SLOTS];
+        let bytes = h.len() * std::mem::size_of::<u64>();
+        unsafe {
+            let err = cuda_sys::lib().cuMemcpyDtoH_v2(
+                h.as_mut_ptr() as *mut std::ffi::c_void,
+                *clocks.device_ptr(),
+                bytes,
+            );
+            if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!("copy HD512 q2 kernel clocks: {:?}", err));
+            }
+        }
+
+        let total_ns = h[HD512_Q2_CLOCK_TOTAL] as f64;
+        let blocks = h[HD512_Q2_CLOCK_BLOCKS];
+        let tiles = h[HD512_Q2_CLOCK_TILES];
+        if total_ns <= 0.0 || blocks == 0 {
+            eprintln!(
+                "[PREFILL-TIMING]       hd512_q2 kernel layer={} tokens={} start_pos={} event={:.1}ms no_clock_data blocks={} tiles={}",
+                timing.layer_idx,
+                m,
+                start_pos,
+                event_ms,
+                blocks,
+                tiles,
+            );
+            return Ok(());
+        }
+
+        let mut phase_ms = [0.0f64; HD512_Q2_KERNEL_PHASES];
+        let mut phase_sum_ns = 0.0f64;
+        for idx in 0..HD512_Q2_KERNEL_PHASES {
+            phase_sum_ns += h[idx] as f64;
+            phase_ms[idx] = event_ms * (h[idx] as f64 / total_ns);
+        }
+        let residual_ns = (total_ns - phase_sum_ns).max(0.0);
+        let residual_ms = event_ms * (residual_ns / total_ns);
+        let avg_block_ms = total_ns / blocks as f64 / 1_000_000.0;
+        eprintln!(
+            "[PREFILL-TIMING]       hd512_q2 kernel layer={} tokens={} start_pos={} event={:.1}ms blocks={} tiles={} avg_block={:.3}ms {}={:.1}ms {}={:.1}ms {}={:.1}ms {}={:.1}ms {}={:.1}ms {}={:.1}ms residual={:.1}ms",
+            timing.layer_idx,
+            m,
+            start_pos,
+            event_ms,
+            blocks,
+            tiles,
+            avg_block_ms,
+            HD512_Q2_KERNEL_PHASE_LABELS[0],
+            phase_ms[0],
+            HD512_Q2_KERNEL_PHASE_LABELS[1],
+            phase_ms[1],
+            HD512_Q2_KERNEL_PHASE_LABELS[2],
+            phase_ms[2],
+            HD512_Q2_KERNEL_PHASE_LABELS[3],
+            phase_ms[3],
+            HD512_Q2_KERNEL_PHASE_LABELS[4],
+            phase_ms[4],
+            HD512_Q2_KERNEL_PHASE_LABELS[5],
+            phase_ms[5],
+            residual_ms,
+        );
+        Ok(())
     }
 
     pub fn set_prefill_hcs_guard_store_addr(&mut self, store_addr: usize) {
@@ -7963,6 +8514,34 @@ impl PrefillEngine {
             .unwrap_or(self.decode_kv_num_blocks)
     }
 
+    fn can_skip_stage_exact_for_single_chunk_gemma_hqq4_k4(&self) -> bool {
+        if !self.is_gemma4_model() || self.decode_kv_format != 9 {
+            return false;
+        }
+        let mut saw_hqq_gqa = false;
+        for layer in &self.layer_weights {
+            let Some(hqq) = layer.hqq_gqa.as_ref() else {
+                continue;
+            };
+            saw_hqq_gqa = true;
+            if hqq.nbits != 4 {
+                return false;
+            }
+        }
+        if !saw_hqq_gqa {
+            return false;
+        }
+        for layer_idx in 0..self.decode_kv_k_radius_ptrs.len() {
+            let has_kv = self.decode_kv_k_radius_ptrs[layer_idx] != 0
+                && layer_idx < self.decode_kv_v_radius_ptrs.len()
+                && self.decode_kv_v_radius_ptrs[layer_idx] != 0;
+            if has_kv && self.decode_kv_max_seq_for_layer(layer_idx) != self.decode_kv_max_seq {
+                return false;
+            }
+        }
+        true
+    }
+
     fn release_prefill_kv_temp(&mut self) {
         self.prefill_kv_temp_k = None;
         self.prefill_kv_temp_v = None;
@@ -8308,7 +8887,44 @@ impl PrefillEngine {
         self.d_fla_final_state = None;
         self.d_fla_v_new = None;
         self.d_fla_o = None;
-        self.setup_stage_exact_prefill_kv(prompt_tokens)?;
+        let safety_margin_mb = self.safety_margin_mb.max(PREFILL_SAFETY_MARGIN_MB);
+        let safety_bytes: usize = safety_margin_mb * 1024 * 1024;
+        let post_scratch_runtime_reserve_bytes =
+            self.measured_post_scratch_runtime_reserve_bytes(prompt_tokens);
+        let mut skip_stage_exact_single_chunk = false;
+        if self.can_skip_stage_exact_for_single_chunk_gemma_hqq4_k4() {
+            let mut free_without_stage_bytes: usize = 0;
+            let mut total_without_stage_bytes: usize = 0;
+            unsafe {
+                cuda_sys::lib().cuMemGetInfo_v2(
+                    &mut free_without_stage_bytes,
+                    &mut total_without_stage_bytes,
+                );
+            }
+            let no_stage_budget_bytes = free_without_stage_bytes
+                .saturating_sub(safety_bytes)
+                .saturating_sub(self.measured_scratch_alloc_overhead_bytes)
+                .saturating_sub(post_scratch_runtime_reserve_bytes);
+            let no_stage_max_tokens = exact_scratch_token_cap(
+                &self.config,
+                prompt_tokens.min(50000),
+                prompt_tokens,
+                no_stage_budget_bytes,
+            );
+            skip_stage_exact_single_chunk = no_stage_max_tokens >= prompt_tokens;
+            if skip_stage_exact_single_chunk {
+                self.release_prefill_kv_temp();
+                log::info!(
+                    "Stage-exact KV prefill skipped for single-chunk Gemma4 HQQ prompt: prompt_tokens={} scratch_cap_tokens={} decode_format={}",
+                    prompt_tokens,
+                    no_stage_max_tokens,
+                    self.decode_kv_format,
+                );
+            }
+        }
+        if !skip_stage_exact_single_chunk {
+            self.setup_stage_exact_prefill_kv(prompt_tokens)?;
+        }
         // Old scratch + prefill buffers now dropped, VRAM is freed.
 
         // 4. Measure free VRAM and compute optimal chunk_size for this prompt.
@@ -8318,17 +8934,10 @@ impl PrefillEngine {
         unsafe {
             cuda_sys::lib().cuMemGetInfo_v2(&mut free_bytes, &mut total_bytes);
         }
-        // Safety margin covers CUDA context overhead, allocator fragmentation, and
-        // FLA Triton kernel temporaries. 600 MB is sufficient based on runtime measurements.
-        let safety_margin_mb = self.safety_margin_mb.max(PREFILL_SAFETY_MARGIN_MB);
-        let safety_bytes: usize = safety_margin_mb * 1024 * 1024;
-
         // Size for this prompt: cap at prompt_tokens (no point allocating more).
         // Minimum 128: fused MoE Marlin kernels use block_size_m=64, need enough
         // tokens for stable sorted dispatch. 128 adds ~57 MB scratch overhead.
         let target = prompt_tokens.min(50000);
-        let post_scratch_runtime_reserve_bytes =
-            self.measured_post_scratch_runtime_reserve_bytes(prompt_tokens);
         let mut scratch_budget_bytes = free_bytes
             .saturating_sub(safety_bytes)
             .saturating_sub(self.measured_scratch_alloc_overhead_bytes)
@@ -9298,9 +9907,48 @@ impl PrefillEngine {
             self.t_gqa_kv_prep.set(0.0);
             self.t_gqa_kv_cross_stage.set(0.0);
             self.t_gqa_kv_append.set(0.0);
+            self.t_gqa_kv_append_kernel.set(0.0);
             self.t_gqa_fa2.set(0.0);
             self.t_gqa_gate.set(0.0);
             self.t_gqa_oproj.set(0.0);
+            self.t_gqa_proj_event.set(0.0);
+            self.t_gqa_norm_event.set(0.0);
+            self.t_gqa_rope_event.set(0.0);
+            self.t_gqa_fa2_event.set(0.0);
+            self.t_gqa_oproj_event.set(0.0);
+            self.t_gqa_proj_sync.set(0.0);
+            self.t_gqa_norm_sync.set(0.0);
+            self.t_gqa_rope_sync.set(0.0);
+            self.t_gqa_fa2_sync.set(0.0);
+            self.t_gqa_kv_append_sync.set(0.0);
+            self.t_gqa_oproj_sync.set(0.0);
+            self.t_gqa_debt_entry_sync.set(0.0);
+            self.t_gqa_debt_after_q_sync.set(0.0);
+            self.t_gqa_debt_after_k_sync.set(0.0);
+            self.t_gqa_debt_after_v_sync.set(0.0);
+            self.t_gqa_debt_pre_append_sync.set(0.0);
+            self.t_gqa_debt_after_fa2_sync.set(0.0);
+            self.t_gqa_debt_after_oproj_sync.set(0.0);
+            self.t_gqa_debt_gemma4_layer_entry_sync.set(0.0);
+            self.t_gqa_debt_gemma4_pre_gqa_sync.set(0.0);
+            for cell in &self.t_gqa_debt_append_gap_sync {
+                cell.set(0.0);
+            }
+            for cell in &self.t_gqa_attention_branch_before_sync {
+                cell.set(0.0);
+            }
+            for cell in &self.t_gqa_attention_branch_after_sync {
+                cell.set(0.0);
+            }
+            for cell in &self.t_gqa_custom_tiled_wall {
+                cell.set(0.0);
+            }
+            for cell in &self.t_gqa_custom_tiled_event {
+                cell.set(0.0);
+            }
+            for cell in &self.t_gqa_custom_tiled_sync {
+                cell.set(0.0);
+            }
             self.t_hqq_marlin_float_zp.set(0.0);
             self.t_hqq_group_sums.set(0.0);
             self.t_hqq_correction_gemm.set(0.0);
@@ -9314,6 +9962,36 @@ impl PrefillEngine {
             self.gqa_bf16_calls.set(0);
             self.gqa_kv_cross_stage_calls.set(0);
             self.gqa_kv_append_calls.set(0);
+            self.gqa_kv_append_kernel_calls.set(0);
+            self.gqa_proj_event_calls.set(0);
+            self.gqa_norm_event_calls.set(0);
+            self.gqa_rope_event_calls.set(0);
+            self.gqa_fa2_event_calls.set(0);
+            self.gqa_oproj_event_calls.set(0);
+            self.gqa_debt_entry_calls.set(0);
+            self.gqa_debt_after_q_calls.set(0);
+            self.gqa_debt_after_k_calls.set(0);
+            self.gqa_debt_after_v_calls.set(0);
+            self.gqa_debt_pre_append_calls.set(0);
+            self.gqa_debt_after_fa2_calls.set(0);
+            self.gqa_debt_after_oproj_calls.set(0);
+            self.gqa_debt_gemma4_layer_entry_calls.set(0);
+            self.gqa_debt_gemma4_pre_gqa_calls.set(0);
+            for cell in &self.gqa_debt_append_gap_calls {
+                cell.set(0);
+            }
+            for cell in &self.gqa_attention_branch_calls {
+                cell.set(0);
+            }
+            for cell in &self.gqa_attention_branch_before_calls {
+                cell.set(0);
+            }
+            for cell in &self.gqa_attention_branch_after_calls {
+                cell.set(0);
+            }
+            for cell in &self.gqa_custom_tiled_step_calls {
+                cell.set(0);
+            }
             self.gqa_kv_cross_current_tokens.set(0);
             self.gqa_kv_cross_total_tokens.set(0);
             self.t_la_proj.set(0.0);
@@ -11247,6 +11925,7 @@ impl PrefillEngine {
             let gk = self.t_gqa_kv_prep.get();
             let gkc = self.t_gqa_kv_cross_stage.get();
             let gka = self.t_gqa_kv_append.get();
+            let gka_kernel = self.t_gqa_kv_append_kernel.get();
             let gf = self.t_gqa_fa2.get();
             let gg = self.t_gqa_gate.get();
             let go = self.t_gqa_oproj.get();
@@ -11256,6 +11935,7 @@ impl PrefillEngine {
             let bf16c = self.gqa_bf16_calls.get();
             let cross_calls = self.gqa_kv_cross_stage_calls.get();
             let append_calls = self.gqa_kv_append_calls.get();
+            let append_kernel_calls = self.gqa_kv_append_kernel_calls.get();
             let cross_cur = self.gqa_kv_cross_current_tokens.get();
             let cross_total = self.gqa_kv_cross_total_tokens.get();
             if ga > 0.0 {
@@ -11312,6 +11992,14 @@ impl PrefillEngine {
                         gka,
                         append_calls
                     );
+                    if gka_kernel > 0.0 || append_kernel_calls > 0 {
+                        eprintln!(
+                            "[PREFILL-TIMING]         kv_append_kernel: {:>8.1}ms over {} calls (wall_minus_kernel={:.1}ms)",
+                            gka_kernel,
+                            append_kernel_calls,
+                            (gka - gka_kernel).max(0.0)
+                        );
+                    }
                 }
                 eprintln!("[PREFILL-TIMING]       {:<6} {:>8.1}ms ({:>5.1}% of gqa)  [{:.1}ms/call avg]",
                     "fa2",
@@ -11335,6 +12023,246 @@ impl PrefillEngine {
                         0.0
                     }
                 );
+                let print_queue_event = |name: &str,
+                                         wall_ms: f64,
+                                         event_ms: f64,
+                                         sync_ms: f64,
+                                         calls: u64| {
+                    if event_ms > 0.0 || sync_ms > 0.0 || calls > 0 {
+                        eprintln!(
+                            "[PREFILL-TIMING]         {:<12} event={:>8.1}ms wall={:>8.1}ms wall_minus_event={:>8.1}ms sync={:>8.1}ms over {} calls",
+                            name,
+                            event_ms,
+                            wall_ms,
+                            (wall_ms - event_ms).max(0.0),
+                            sync_ms,
+                            calls
+                        );
+                    }
+                };
+                let proj_event = self.t_gqa_proj_event.get();
+                let norm_event = self.t_gqa_norm_event.get();
+                let rope_event = self.t_gqa_rope_event.get();
+                let fa2_event = self.t_gqa_fa2_event.get();
+                let oproj_event = self.t_gqa_oproj_event.get();
+                let proj_sync = self.t_gqa_proj_sync.get();
+                let norm_sync = self.t_gqa_norm_sync.get();
+                let rope_sync = self.t_gqa_rope_sync.get();
+                let fa2_sync = self.t_gqa_fa2_sync.get();
+                let append_sync = self.t_gqa_kv_append_sync.get();
+                let oproj_sync = self.t_gqa_oproj_sync.get();
+                if proj_event > 0.0
+                    || norm_event > 0.0
+                    || rope_event > 0.0
+                    || fa2_event > 0.0
+                    || gka_kernel > 0.0
+                    || oproj_event > 0.0
+                    || proj_sync > 0.0
+                    || norm_sync > 0.0
+                    || rope_sync > 0.0
+                    || fa2_sync > 0.0
+                    || append_sync > 0.0
+                    || oproj_sync > 0.0
+                {
+                    eprintln!("[PREFILL-TIMING]     gqa queue events:");
+                    print_queue_event(
+                        "proj",
+                        gp,
+                        proj_event,
+                        proj_sync,
+                        self.gqa_proj_event_calls.get(),
+                    );
+                    print_queue_event(
+                        "qkv_norm",
+                        gn,
+                        norm_event,
+                        norm_sync,
+                        self.gqa_norm_event_calls.get(),
+                    );
+                    print_queue_event(
+                        "rope",
+                        gr,
+                        rope_event,
+                        rope_sync,
+                        self.gqa_rope_event_calls.get(),
+                    );
+                    print_queue_event(
+                        "fa2",
+                        gf,
+                        fa2_event,
+                        fa2_sync,
+                        self.gqa_fa2_event_calls.get(),
+                    );
+                    print_queue_event(
+                        "kv_append",
+                        gka,
+                        gka_kernel,
+                        append_sync,
+                        append_kernel_calls,
+                    );
+                    print_queue_event(
+                        "o_proj",
+                        go,
+                        oproj_event,
+                        oproj_sync,
+                        self.gqa_oproj_event_calls.get(),
+                    );
+                }
+                let print_debt_checkpoint = |name: &str, sync_ms: f64, calls: u64| {
+                    if sync_ms > 0.0 || calls > 0 {
+                        eprintln!(
+                            "[PREFILL-TIMING]         {:<18} sync={:>8.1}ms over {} calls",
+                            name,
+                            sync_ms,
+                            calls
+                        );
+                    }
+                };
+                let debt_entry = self.t_gqa_debt_entry_sync.get();
+                let debt_q = self.t_gqa_debt_after_q_sync.get();
+                let debt_k = self.t_gqa_debt_after_k_sync.get();
+                let debt_v = self.t_gqa_debt_after_v_sync.get();
+                let debt_pre_append = self.t_gqa_debt_pre_append_sync.get();
+                let debt_after_fa2 = self.t_gqa_debt_after_fa2_sync.get();
+                let debt_after_oproj = self.t_gqa_debt_after_oproj_sync.get();
+                let debt_layer_entry = self.t_gqa_debt_gemma4_layer_entry_sync.get();
+                let debt_pre_gqa = self.t_gqa_debt_gemma4_pre_gqa_sync.get();
+                let append_gap_has_data = self
+                    .t_gqa_debt_append_gap_sync
+                    .iter()
+                    .zip(self.gqa_debt_append_gap_calls.iter())
+                    .any(|(sync, calls)| sync.get() > 0.0 || calls.get() > 0);
+                if debt_entry > 0.0
+                    || debt_q > 0.0
+                    || debt_k > 0.0
+                    || debt_v > 0.0
+                    || debt_pre_append > 0.0
+                    || debt_after_fa2 > 0.0
+                    || debt_after_oproj > 0.0
+                    || debt_layer_entry > 0.0
+                    || debt_pre_gqa > 0.0
+                    || self.gqa_debt_entry_calls.get() > 0
+                    || self.gqa_debt_after_q_calls.get() > 0
+                    || self.gqa_debt_after_k_calls.get() > 0
+                    || self.gqa_debt_after_v_calls.get() > 0
+                    || self.gqa_debt_pre_append_calls.get() > 0
+                    || self.gqa_debt_after_fa2_calls.get() > 0
+                    || self.gqa_debt_after_oproj_calls.get() > 0
+                    || self.gqa_debt_gemma4_layer_entry_calls.get() > 0
+                    || self.gqa_debt_gemma4_pre_gqa_calls.get() > 0
+                    || append_gap_has_data
+                {
+                    eprintln!("[PREFILL-TIMING]     gqa sync-debt bisection:");
+                    print_debt_checkpoint(
+                        "gemma4_layer_entry",
+                        debt_layer_entry,
+                        self.gqa_debt_gemma4_layer_entry_calls.get(),
+                    );
+                    print_debt_checkpoint(
+                        "gemma4_pre_gqa",
+                        debt_pre_gqa,
+                        self.gqa_debt_gemma4_pre_gqa_calls.get(),
+                    );
+                    print_debt_checkpoint(
+                        "gqa_entry",
+                        debt_entry,
+                        self.gqa_debt_entry_calls.get(),
+                    );
+                    print_debt_checkpoint(
+                        "after_q_proj",
+                        debt_q,
+                        self.gqa_debt_after_q_calls.get(),
+                    );
+                    print_debt_checkpoint(
+                        "after_k_proj",
+                        debt_k,
+                        self.gqa_debt_after_k_calls.get(),
+                    );
+                    print_debt_checkpoint(
+                        "after_v_proj",
+                        debt_v,
+                        self.gqa_debt_after_v_calls.get(),
+                    );
+                    print_debt_checkpoint(
+                        "after_fa2",
+                        debt_after_fa2,
+                        self.gqa_debt_after_fa2_calls.get(),
+                    );
+                    print_debt_checkpoint(
+                        "pre_append",
+                        debt_pre_append,
+                        self.gqa_debt_pre_append_calls.get(),
+                    );
+                    print_debt_checkpoint(
+                        "after_o_proj",
+                        debt_after_oproj,
+                        self.gqa_debt_after_oproj_calls.get(),
+                    );
+                    for (idx, label) in GQA_APPEND_GAP_LABELS.iter().enumerate() {
+                        print_debt_checkpoint(
+                            label,
+                            self.t_gqa_debt_append_gap_sync[idx].get(),
+                            self.gqa_debt_append_gap_calls[idx].get(),
+                        );
+                    }
+                }
+                let branch_has_data = self
+                    .gqa_attention_branch_calls
+                    .iter()
+                    .zip(self.gqa_attention_branch_before_calls.iter())
+                    .zip(self.gqa_attention_branch_after_calls.iter())
+                    .any(|((calls, before_calls), after_calls)| {
+                        calls.get() > 0 || before_calls.get() > 0 || after_calls.get() > 0
+                    });
+                if branch_has_data {
+                    eprintln!("[PREFILL-TIMING]     gqa attention branches:");
+                    for (idx, label) in GQA_ATTENTION_BRANCH_LABELS.iter().enumerate() {
+                        let calls = self.gqa_attention_branch_calls[idx].get();
+                        let before_sync = self.t_gqa_attention_branch_before_sync[idx].get();
+                        let after_sync = self.t_gqa_attention_branch_after_sync[idx].get();
+                        let before_calls = self.gqa_attention_branch_before_calls[idx].get();
+                        let after_calls = self.gqa_attention_branch_after_calls[idx].get();
+                        if calls > 0
+                            || before_sync > 0.0
+                            || after_sync > 0.0
+                            || before_calls > 0
+                            || after_calls > 0
+                        {
+                            eprintln!(
+                                "[PREFILL-TIMING]       {:<24} calls={:>3} before_sync={:>8.1}ms/{} after_sync={:>8.1}ms/{}",
+                                label,
+                                calls,
+                                before_sync,
+                                before_calls,
+                                after_sync,
+                                after_calls
+                            );
+                        }
+                    }
+                }
+                let custom_tiled_has_data = self
+                    .gqa_custom_tiled_step_calls
+                    .iter()
+                    .any(|calls| calls.get() > 0);
+                if custom_tiled_has_data {
+                    eprintln!("[PREFILL-TIMING]     custom_tiled fallback steps:");
+                    for (idx, label) in GQA_CUSTOM_TILED_STEP_LABELS.iter().enumerate() {
+                        let calls = self.gqa_custom_tiled_step_calls[idx].get();
+                        let wall_ms = self.t_gqa_custom_tiled_wall[idx].get();
+                        let event_ms = self.t_gqa_custom_tiled_event[idx].get();
+                        let sync_ms = self.t_gqa_custom_tiled_sync[idx].get();
+                        if calls > 0 || wall_ms > 0.0 || event_ms > 0.0 || sync_ms > 0.0 {
+                            eprintln!(
+                                "[PREFILL-TIMING]       {:<24} wall={:>8.1}ms event={:>8.1}ms sync={:>8.1}ms over {} calls",
+                                label,
+                                wall_ms,
+                                event_ms,
+                                sync_ms,
+                                calls
+                            );
+                        }
+                    }
+                }
             }
             let hm = self.t_hqq_marlin_float_zp.get();
             let hg = self.t_hqq_group_sums.get();
@@ -14041,8 +14969,64 @@ impl PrefillEngine {
 
     // ── Custom Tiled Attention (fallback when FA2 not available or cross-chunk) ──
 
+    fn use_gemma_hqq4_k4_hd512_full_attn(
+        &self,
+        layer_idx: usize,
+        start_pos: usize,
+        num_q_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        sliding_window: usize,
+    ) -> bool {
+        if !self.kernels.flash_attn_tiled_hd512_full_enabled
+            || self.kv_format != 9
+            || self.prefill_kv_active
+            || start_pos != 0
+            || sliding_window != 0
+            || head_dim != 512
+            || num_q_heads != 16
+            || num_kv_heads != 2
+            || !self.is_gemma4_layer(layer_idx)
+        {
+            return false;
+        }
+        self.layer_weights[layer_idx]
+            .hqq_gqa
+            .as_ref()
+            .map_or(false, |hqq| hqq.nbits == 4)
+    }
+
+    fn use_gemma_hqq4_k6_stage_exact_hd512_full_attn(
+        &self,
+        layer_idx: usize,
+        start_pos: usize,
+        num_q_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        sliding_window: usize,
+    ) -> bool {
+        if !self.kernels.flash_attn_tiled_hd512_full_enabled
+            || self.kv_format != 1
+            || self.decode_kv_format != 7
+            || !self.prefill_kv_active
+            || start_pos != 0
+            || sliding_window != 0
+            || head_dim != 512
+            || num_q_heads != 16
+            || num_kv_heads != 2
+            || !self.is_gemma4_layer(layer_idx)
+        {
+            return false;
+        }
+        self.layer_weights[layer_idx]
+            .hqq_gqa
+            .as_ref()
+            .map_or(false, |hqq| hqq.nbits == 4)
+    }
+
     fn launch_custom_tiled_attn(
         &self,
+        layer_idx: usize,
         attn_out: u64,
         q: u64,
         k: u64,
@@ -14056,65 +15040,440 @@ impl PrefillEngine {
         head_dim: usize,
         softmax_scale: f32,
         sliding_window: usize,
+        timing: Option<CustomTiledTiming>,
     ) -> Result<(), String> {
-        if head_dim > 512 {
+        let hd512_base_tile_cols = if self.use_gemma_hqq4_k4_hd512_full_attn(
+            layer_idx,
+            start_pos,
+            num_q_heads,
+            num_kv_heads,
+            head_dim,
+            sliding_window,
+        ) || self.use_gemma_hqq4_k6_stage_exact_hd512_full_attn(
+            layer_idx,
+            start_pos,
+            num_q_heads,
+            num_kv_heads,
+            head_dim,
+            sliding_window,
+        ) {
+            self.kernels.flash_attn_tiled_hd512_full_tile_cols
+        } else {
+            0
+        };
+        let hd512_base_q_heads_per_block = if hd512_base_tile_cols != 0 {
+            self.kernels.flash_attn_tiled_hd512_full_q_heads_per_block.max(1)
+        } else {
+            1
+        };
+        let hd512_q2_bc32_requested = prefill_hd512_q2_bc32_enabled();
+        let hd512_q2_bc32_active = hd512_q2_bc32_requested
+            && hd512_base_tile_cols == 16
+            && hd512_base_q_heads_per_block == 2;
+        if hd512_q2_bc32_requested
+            && hd512_base_tile_cols != 0
+            && !hd512_q2_bc32_active
+        {
+            return Err(format!(
+                "KRASIS_PREFILL_HD512_Q2_BC32=1 requires the existing HD512 q2 path (BC=16 q_heads_per_block=2), but runtime selected BC={} q_heads_per_block={}",
+                hd512_base_tile_cols,
+                hd512_base_q_heads_per_block
+            ));
+        }
+        if hd512_q2_bc32_active {
+            let required = self
+                .kernels
+                .flash_attn_tiled_hd512_full_q2_bc32_required_smem;
+            let available = self.kernels.flash_attn_tiled_hd512_full_max_smem;
+            if available < required {
+                return Err(format!(
+                    "KRASIS_PREFILL_HD512_Q2_BC32=1 requires {} bytes opt-in shared memory for HD512 q2-BC32, but device reports {} bytes",
+                    required,
+                    available
+                ));
+            }
+            if !self
+                .kernels
+                .flash_attn_tiled_hd512_full_q2_bc32_ready
+            {
+                return Err(format!(
+                    "KRASIS_PREFILL_HD512_Q2_BC32=1 cannot run because q2-BC32 kernel shared-memory attributes were not enabled (required {} bytes, available {} bytes)",
+                    required,
+                    available
+                ));
+            }
+        }
+        let hd512_full_tile_cols = if hd512_q2_bc32_active {
+            32
+        } else {
+            hd512_base_tile_cols
+        };
+        let use_hd512_full_kernel = hd512_full_tile_cols != 0;
+        let hd512_q_heads_per_block = if use_hd512_full_kernel {
+            if hd512_q2_bc32_active {
+                2
+            } else {
+                hd512_base_q_heads_per_block
+            }
+        } else {
+            1
+        };
+        let custom_tiled_timing = timing.filter(|t| {
+            self.gqa_timing_enabled.get()
+                && t.branch_idx == GQA_BRANCH_CUSTOM_NO_FA2
+                && !t.fa2_supports_head_dim
+        });
+        if let Some(timing) = custom_tiled_timing {
+            let event = self.gqa_timing_event_start("custom_tiled entry")?;
+            let wall = Instant::now();
+            self.finish_gqa_custom_tiled_step(
+                GQA_CUSTOM_TILED_ENTRY,
+                timing,
+                m,
+                start_pos,
+                head_dim,
+                num_q_heads,
+                num_kv_heads,
+                sliding_window,
+                event,
+                wall,
+            )?;
+        }
+
+        let head_dim_too_large = {
+            let event = if custom_tiled_timing.is_some() {
+                self.gqa_timing_event_start("custom_tiled head_dim_check")?
+            } else {
+                false
+            };
+            let wall = Instant::now();
+            let too_large = head_dim > 512;
+            if let Some(timing) = custom_tiled_timing {
+                self.finish_gqa_custom_tiled_step(
+                    GQA_CUSTOM_TILED_HEAD_DIM_CHECK,
+                    timing,
+                    m,
+                    start_pos,
+                    head_dim,
+                    num_q_heads,
+                    num_kv_heads,
+                    sliding_window,
+                    event,
+                    wall,
+                )?;
+            }
+            too_large
+        };
+        if head_dim_too_large {
             return Err(format!(
                 "custom tiled attention supports head_dim <= 512, got {}",
                 head_dim
             ));
         }
-        let fa_br = 16u32;
-        let fa_bc = 16usize;
-        let grid_x = ((m as u32) + fa_br - 1) / fa_br;
-        let hd = head_dim;
-        let smem = (fa_br as usize * hd * 2
-            + fa_bc * hd * 2
-            + fa_bc * hd * 2
-            + fa_br as usize * fa_bc * 4
-            + fa_br as usize * fa_bc * 2
-            + 16 * 16 * 4) as u32;
-        let kv_stride = (num_kv_heads * head_dim) as i32;
-        let k_cache_ptr: u64 = if start_pos > 0 { layer_k_ptr } else { 0 };
-        let v_cache_ptr: u64 = if start_pos > 0 { layer_v_ptr } else { 0 };
-        let mut a0 = attn_out;
-        let mut a1 = q;
-        let mut a2 = k_cache_ptr;
-        let mut a3 = v_cache_ptr;
-        let mut a4 = k;
-        let mut a5 = v;
-        let mut a6 = m as i32;
-        let mut a7 = num_q_heads as i32;
-        let mut a8 = num_kv_heads as i32;
-        let mut a9 = head_dim as i32;
-        let mut a10 = softmax_scale;
-        let mut a11 = start_pos as i32;
-        let mut a12 = kv_stride;
-        let mut a13 = sliding_window.min(i32::MAX as usize) as i32;
-        unsafe {
-            launch(
-                self.kernels.flash_attn_tiled,
-                (grid_x, num_q_heads as u32, 1),
-                (32, 1, 1),
-                smem,
-                self.stream,
-                &mut [
-                    &mut a0 as *mut _ as *mut std::ffi::c_void,
-                    &mut a1 as *mut _ as *mut std::ffi::c_void,
-                    &mut a2 as *mut _ as *mut std::ffi::c_void,
-                    &mut a3 as *mut _ as *mut std::ffi::c_void,
-                    &mut a4 as *mut _ as *mut std::ffi::c_void,
-                    &mut a5 as *mut _ as *mut std::ffi::c_void,
-                    &mut a6 as *mut _ as *mut std::ffi::c_void,
-                    &mut a7 as *mut _ as *mut std::ffi::c_void,
-                    &mut a8 as *mut _ as *mut std::ffi::c_void,
-                    &mut a9 as *mut _ as *mut std::ffi::c_void,
-                    &mut a10 as *mut _ as *mut std::ffi::c_void,
-                    &mut a11 as *mut _ as *mut std::ffi::c_void,
-                    &mut a12 as *mut _ as *mut std::ffi::c_void,
-                    &mut a13 as *mut _ as *mut std::ffi::c_void,
-                ],
+        let (grid_x, grid_y, block_threads, smem, kv_stride) = {
+            let event = if custom_tiled_timing.is_some() {
+                self.gqa_timing_event_start("custom_tiled layout_math")?
+            } else {
+                false
+            };
+            let wall = Instant::now();
+            let fa_br = 16u32;
+            let fa_bc = if use_hd512_full_kernel {
+                hd512_full_tile_cols
+            } else {
+                16usize
+            };
+            let grid_x = ((m as u32) + fa_br - 1) / fa_br;
+            let grid_y = if use_hd512_full_kernel && hd512_q_heads_per_block > 1 {
+                ((num_q_heads + hd512_q_heads_per_block - 1) / hd512_q_heads_per_block) as u32
+            } else {
+                num_q_heads as u32
+            };
+            let block_threads = if use_hd512_full_kernel && hd512_q_heads_per_block > 1 {
+                (32 * hd512_q_heads_per_block) as u32
+            } else {
+                32u32
+            };
+            let hd = head_dim;
+            let q_heads_in_smem = if use_hd512_full_kernel {
+                hd512_q_heads_per_block
+            } else {
+                1usize
+            };
+            let smem = (q_heads_in_smem * fa_br as usize * hd * 2
+                + fa_bc * hd * 2
+                + fa_bc * hd * 2
+                + q_heads_in_smem * fa_br as usize * fa_bc * 4
+                + q_heads_in_smem * fa_br as usize * fa_bc * 2
+                + q_heads_in_smem * 16 * 16 * 4) as u32;
+            let kv_stride = (num_kv_heads * head_dim) as i32;
+            if let Some(timing) = custom_tiled_timing {
+                self.finish_gqa_custom_tiled_step(
+                    GQA_CUSTOM_TILED_LAYOUT_MATH,
+                    timing,
+                    m,
+                    start_pos,
+                    head_dim,
+                    num_q_heads,
+                    num_kv_heads,
+                    sliding_window,
+                    event,
+                    wall,
+                )?;
+            }
+            (grid_x, grid_y, block_threads, smem, kv_stride)
+        };
+        let (k_cache_ptr, v_cache_ptr) = {
+            let event = if custom_tiled_timing.is_some() {
+                self.gqa_timing_event_start("custom_tiled cache_ptr_select")?
+            } else {
+                false
+            };
+            let wall = Instant::now();
+            let k_cache_ptr: u64 = if start_pos > 0 { layer_k_ptr } else { 0 };
+            let v_cache_ptr: u64 = if start_pos > 0 { layer_v_ptr } else { 0 };
+            if let Some(timing) = custom_tiled_timing {
+                self.finish_gqa_custom_tiled_step(
+                    GQA_CUSTOM_TILED_CACHE_PTR_SELECT,
+                    timing,
+                    m,
+                    start_pos,
+                    head_dim,
+                    num_q_heads,
+                    num_kv_heads,
+                    sliding_window,
+                    event,
+                    wall,
+                )?;
+            }
+            (k_cache_ptr, v_cache_ptr)
+        };
+        let mut a0;
+        let mut a1;
+        let mut a2;
+        let mut a3;
+        let mut a4;
+        let mut a5;
+        let mut a6;
+        let mut a7;
+        let mut a8;
+        let mut a9;
+        let mut a10;
+        let mut a11;
+        let mut a12;
+        let mut a13;
+        {
+            let event = if custom_tiled_timing.is_some() {
+                self.gqa_timing_event_start("custom_tiled arg_pack")?
+            } else {
+                false
+            };
+            let wall = Instant::now();
+            a0 = attn_out;
+            a1 = q;
+            a2 = k_cache_ptr;
+            a3 = v_cache_ptr;
+            a4 = k;
+            a5 = v;
+            a6 = m as i32;
+            a7 = num_q_heads as i32;
+            a8 = num_kv_heads as i32;
+            a9 = head_dim as i32;
+            a10 = softmax_scale;
+            a11 = start_pos as i32;
+            a12 = kv_stride;
+            a13 = sliding_window.min(i32::MAX as usize) as i32;
+            if let Some(timing) = custom_tiled_timing {
+                self.finish_gqa_custom_tiled_step(
+                    GQA_CUSTOM_TILED_ARG_PACK,
+                    timing,
+                    m,
+                    start_pos,
+                    head_dim,
+                    num_q_heads,
+                    num_kv_heads,
+                    sliding_window,
+                    event,
+                    wall,
+                )?;
+            }
+        }
+        if let Some(timing) = custom_tiled_timing {
+            let event = self.gqa_timing_event_start("custom_tiled before_kernel_launch")?;
+            let wall = Instant::now();
+            self.finish_gqa_custom_tiled_step(
+                GQA_CUSTOM_TILED_BEFORE_KERNEL_LAUNCH,
+                timing,
+                m,
+                start_pos,
+                head_dim,
+                num_q_heads,
+                num_kv_heads,
+                sliding_window,
+                event,
+                wall,
             )?;
         }
+        let hd512_q2_kernel_clock_active = custom_tiled_timing.is_some()
+            && use_hd512_full_kernel
+            && hd512_q_heads_per_block == 2
+            && (hd512_full_tile_cols == 16 || hd512_q2_bc32_active)
+            && prefill_hd512_kernel_clocks_enabled();
+        let d_hd512_q2_kernel_clocks = if hd512_q2_kernel_clock_active {
+            Some(
+                self.device
+                    .alloc_zeros::<u64>(HD512_Q2_KERNEL_CLOCK_SLOTS)
+                    .map_err(|e| format!("alloc HD512 q2 kernel clocks: {:?}", e))?,
+            )
+        } else {
+            None
+        };
+        let event = if custom_tiled_timing.is_some() {
+            self.gqa_timing_event_start("custom_tiled flash_attn_tiled_launch")?
+        } else {
+            false
+        };
+        let wall = Instant::now();
+        let launch_result = unsafe {
+            if use_hd512_full_kernel {
+                if hd512_q2_kernel_clock_active {
+                    let q2_timed_func = if hd512_q2_bc32_active {
+                        self.kernels.flash_attn_tiled_hd512_full_q2_bc32_timed
+                    } else {
+                        self.kernels.flash_attn_tiled_hd512_full_q2_timed
+                    };
+                    let mut h0 = attn_out;
+                    let mut h1 = q;
+                    let mut h2 = k;
+                    let mut h3 = v;
+                    let mut h4 = m as i32;
+                    let mut h5 = num_q_heads as i32;
+                    let mut h6 = num_kv_heads as i32;
+                    let mut h7 = softmax_scale;
+                    let mut h8 = d_hd512_q2_kernel_clocks
+                        .as_ref()
+                        .map(|buf| *buf.device_ptr())
+                        .unwrap_or(0);
+                    launch(
+                        q2_timed_func,
+                        (grid_x, grid_y, 1),
+                        (block_threads, 1, 1),
+                        smem,
+                        self.stream,
+                        &mut [
+                            &mut h0 as *mut _ as *mut std::ffi::c_void,
+                            &mut h1 as *mut _ as *mut std::ffi::c_void,
+                            &mut h2 as *mut _ as *mut std::ffi::c_void,
+                            &mut h3 as *mut _ as *mut std::ffi::c_void,
+                            &mut h4 as *mut _ as *mut std::ffi::c_void,
+                            &mut h5 as *mut _ as *mut std::ffi::c_void,
+                            &mut h6 as *mut _ as *mut std::ffi::c_void,
+                            &mut h7 as *mut _ as *mut std::ffi::c_void,
+                            &mut h8 as *mut _ as *mut std::ffi::c_void,
+                        ],
+                    )
+                } else {
+                    let hd512_func = match hd512_full_tile_cols {
+                        32 if hd512_q_heads_per_block == 2 => {
+                            self.kernels.flash_attn_tiled_hd512_full_q2_bc32
+                        }
+                        16 if hd512_q_heads_per_block == 2 => {
+                            self.kernels.flash_attn_tiled_hd512_full_q2
+                        }
+                        64 => self.kernels.flash_attn_tiled_hd512_full_bc64,
+                        48 => self.kernels.flash_attn_tiled_hd512_full_bc48,
+                        32 => self.kernels.flash_attn_tiled_hd512_full,
+                        other => {
+                            return Err(format!(
+                                "unsupported hd512 full-attention tile cols {}",
+                                other
+                            ));
+                        }
+                    };
+                    let mut h0 = attn_out;
+                    let mut h1 = q;
+                    let mut h2 = k;
+                    let mut h3 = v;
+                    let mut h4 = m as i32;
+                    let mut h5 = num_q_heads as i32;
+                    let mut h6 = num_kv_heads as i32;
+                    let mut h7 = softmax_scale;
+                    launch(
+                        hd512_func,
+                        (grid_x, grid_y, 1),
+                        (block_threads, 1, 1),
+                        smem,
+                        self.stream,
+                        &mut [
+                            &mut h0 as *mut _ as *mut std::ffi::c_void,
+                            &mut h1 as *mut _ as *mut std::ffi::c_void,
+                            &mut h2 as *mut _ as *mut std::ffi::c_void,
+                            &mut h3 as *mut _ as *mut std::ffi::c_void,
+                            &mut h4 as *mut _ as *mut std::ffi::c_void,
+                            &mut h5 as *mut _ as *mut std::ffi::c_void,
+                            &mut h6 as *mut _ as *mut std::ffi::c_void,
+                            &mut h7 as *mut _ as *mut std::ffi::c_void,
+                        ],
+                    )
+                }
+            } else {
+                launch(
+                    self.kernels.flash_attn_tiled,
+                    (grid_x, grid_y, 1),
+                    (block_threads, 1, 1),
+                    smem,
+                    self.stream,
+                    &mut [
+                        &mut a0 as *mut _ as *mut std::ffi::c_void,
+                        &mut a1 as *mut _ as *mut std::ffi::c_void,
+                        &mut a2 as *mut _ as *mut std::ffi::c_void,
+                        &mut a3 as *mut _ as *mut std::ffi::c_void,
+                        &mut a4 as *mut _ as *mut std::ffi::c_void,
+                        &mut a5 as *mut _ as *mut std::ffi::c_void,
+                        &mut a6 as *mut _ as *mut std::ffi::c_void,
+                        &mut a7 as *mut _ as *mut std::ffi::c_void,
+                        &mut a8 as *mut _ as *mut std::ffi::c_void,
+                        &mut a9 as *mut _ as *mut std::ffi::c_void,
+                        &mut a10 as *mut _ as *mut std::ffi::c_void,
+                        &mut a11 as *mut _ as *mut std::ffi::c_void,
+                        &mut a12 as *mut _ as *mut std::ffi::c_void,
+                        &mut a13 as *mut _ as *mut std::ffi::c_void,
+                    ],
+                )
+            }
+        };
+        if let Some(timing) = custom_tiled_timing {
+            let label = GQA_CUSTOM_TILED_STEP_LABELS[GQA_CUSTOM_TILED_FLASH_ATTN_TILED_LAUNCH];
+            self.gqa_timing_event_stop(event, label)?;
+            let sync_ms = self.stream_sync_timed()?;
+            let event_ms = self.gqa_timing_event_elapsed_ms(event, label)?;
+            let wall_ms = wall.elapsed().as_secs_f64() * 1000.0;
+            let event_ms_for_report = event_ms.unwrap_or(wall_ms);
+            self.record_gqa_custom_tiled_step(
+                GQA_CUSTOM_TILED_FLASH_ATTN_TILED_LAUNCH,
+                timing.layer_idx,
+                m,
+                start_pos,
+                head_dim,
+                num_q_heads,
+                num_kv_heads,
+                sliding_window,
+                timing.fa2_supports_head_dim,
+                wall_ms,
+                event_ms,
+                sync_ms,
+            );
+            if let Some(clocks) = d_hd512_q2_kernel_clocks.as_ref() {
+                self.report_hd512_q2_kernel_clocks(
+                    clocks,
+                    timing,
+                    m,
+                    start_pos,
+                    event_ms_for_report,
+                )?;
+            }
+        }
+        launch_result?;
         Ok(())
     }
 
@@ -14208,6 +15567,10 @@ impl PrefillEngine {
         let q_dim = num_q_heads * head_dim;
         let kv_dim = num_kv_heads * head_dim;
         let reference_layer1_trace = self.reference_debug_trace_enabled && layer_idx == 1;
+        let gqa_debt_timing = gt
+            && self.is_gemma_hqq4_kv_timing_target(layer_idx);
+        let mut attention_branch_idx = GQA_BRANCH_CUSTOM_NO_FA2;
+        let mut attention_used_fixed_fa2 = false;
 
         if reference_layer1_trace {
             self.push_reference_stage_metadata(
@@ -14254,7 +15617,14 @@ impl PrefillEngine {
         }
 
         // Q/K/V projections (Marlin or cuBLAS BF16)
+        if gqa_debt_timing {
+            self.record_gqa_debt_checkpoint(
+                &self.t_gqa_debt_entry_sync,
+                &self.gqa_debt_entry_calls,
+            )?;
+        }
         let gt0 = Instant::now();
+        let gqa_proj_event = self.gqa_timing_event_start("GQA projection")?;
         let gate_ptr: u64;
         if lw.gqa_gated {
             // Gated attention: q_proj outputs [M, num_q_heads, head_dim * 2]
@@ -14309,6 +15679,12 @@ impl PrefillEngine {
             )?;
             gate_ptr = 0;
         }
+        if gqa_debt_timing {
+            self.record_gqa_debt_checkpoint(
+                &self.t_gqa_debt_after_q_sync,
+                &self.gqa_debt_after_q_calls,
+            )?;
+        }
         self.la_gemm(
             layer_idx,
             "k_proj",
@@ -14319,6 +15695,12 @@ impl PrefillEngine {
             k,
             m,
         )?;
+        if gqa_debt_timing {
+            self.record_gqa_debt_checkpoint(
+                &self.t_gqa_debt_after_k_sync,
+                &self.gqa_debt_after_k_calls,
+            )?;
+        }
         self.la_gemm(
             layer_idx,
             "v_proj",
@@ -14329,6 +15711,12 @@ impl PrefillEngine {
             v,
             m,
         )?;
+        if gqa_debt_timing {
+            self.record_gqa_debt_checkpoint(
+                &self.t_gqa_debt_after_v_sync,
+                &self.gqa_debt_after_v_calls,
+            )?;
+        }
         if reference_layer1_trace {
             self.push_reference_stage_snapshot(
                 "layer1_q_projection_raw_last",
@@ -14468,15 +15856,26 @@ impl PrefillEngine {
         }
 
         if gt {
-            self.stream_sync()?;
+            self.gqa_timing_event_stop(gqa_proj_event, "GQA projection")?;
+            let sync_ms = self.stream_sync_timed()?;
+            let event_ms =
+                self.gqa_timing_event_elapsed_ms(gqa_proj_event, "GQA projection")?;
             self.t_gqa_proj
                 .set(self.t_gqa_proj.get() + gt0.elapsed().as_secs_f64() * 1000.0);
+            self.record_gqa_queue_event(
+                &self.t_gqa_proj_event,
+                &self.t_gqa_proj_sync,
+                &self.gqa_proj_event_calls,
+                event_ms,
+                sync_ms,
+            );
         }
 
         // QK LayerNorm: per-head RMSNorm on Q and K after projection, before RoPE
         // Q is [m, num_q_heads, head_dim], K is [m, num_kv_heads, head_dim]
         // Treat as [m*num_heads, head_dim] rows — existing rmsnorm kernel handles this.
         let gt1 = Instant::now();
+        let gqa_norm_event = self.gqa_timing_event_start("GQA QKV norm")?;
         if lw.q_norm_ptr != 0 {
             self.launch_rmsnorm_fp32w(q, q, lw.q_norm_ptr, m * num_q_heads, head_dim)?;
         }
@@ -14571,9 +15970,19 @@ impl PrefillEngine {
         }
 
         if gt {
-            self.stream_sync()?;
+            self.gqa_timing_event_stop(gqa_norm_event, "GQA QKV norm")?;
+            let sync_ms = self.stream_sync_timed()?;
+            let event_ms =
+                self.gqa_timing_event_elapsed_ms(gqa_norm_event, "GQA QKV norm")?;
             self.t_gqa_norm
                 .set(self.t_gqa_norm.get() + gt1.elapsed().as_secs_f64() * 1000.0);
+            self.record_gqa_queue_event(
+                &self.t_gqa_norm_event,
+                &self.t_gqa_norm_sync,
+                &self.gqa_norm_event_calls,
+                event_ms,
+                sync_ms,
+            );
         }
 
         // Look up per-layer KV cache pointers (needed for both attention and cache append)
@@ -14590,6 +15999,7 @@ impl PrefillEngine {
 
         // RoPE (uses rope_half_dim for partial rotary support)
         let gt2 = Instant::now();
+        let gqa_rope_event = self.gqa_timing_event_start("GQA RoPE")?;
         if self.external_mrope_cos_ptr != 0 || self.external_mrope_sin_ptr != 0 {
             if self.external_mrope_cos_ptr == 0
                 || self.external_mrope_sin_ptr == 0
@@ -14786,9 +16196,18 @@ impl PrefillEngine {
         }
 
         if gt {
-            self.stream_sync()?;
+            self.gqa_timing_event_stop(gqa_rope_event, "GQA RoPE")?;
+            let sync_ms = self.stream_sync_timed()?;
+            let event_ms = self.gqa_timing_event_elapsed_ms(gqa_rope_event, "GQA RoPE")?;
             self.t_gqa_rope
                 .set(self.t_gqa_rope.get() + gt2.elapsed().as_secs_f64() * 1000.0);
+            self.record_gqa_queue_event(
+                &self.t_gqa_rope_event,
+                &self.t_gqa_rope_sync,
+                &self.gqa_rope_event_calls,
+                event_ms,
+                sync_ms,
+            );
         }
 
         // Attention: use vendored FlashAttention-2 when available (start_pos==0),
@@ -14817,6 +16236,13 @@ impl PrefillEngine {
         if use_ring_fa2_window_prefill {
             if start_pos == 0 {
                 attn_path = "fa2_ring_window_initial";
+                attention_branch_idx = GQA_BRANCH_RING_FA2_INITIAL;
+                if gqa_debt_timing {
+                    self.record_gqa_attention_branch_debt_checkpoint(
+                        attention_branch_idx,
+                        true,
+                    )?;
+                }
                 let lse_ptr = self
                     .scratch
                     .d_fa2_lse
@@ -14860,12 +16286,25 @@ impl PrefillEngine {
                     self.gqa_fa2_calls.set(self.gqa_fa2_calls.get() + 1);
                     self.gqa_bf16_calls.set(self.gqa_bf16_calls.get() + 1);
                 }
+                if gqa_debt_timing {
+                    self.record_gqa_attention_branch_debt_checkpoint(
+                        attention_branch_idx,
+                        false,
+                    )?;
+                }
             } else {
                 let kv_stride = num_kv_heads * head_dim;
                 let tail_len = start_pos.min(sliding_window.saturating_sub(1));
                 let cache_start = start_pos.saturating_sub(tail_len);
                 let total_kv = tail_len + m;
                     attn_path = "fa2_ring_window_cross_chunk";
+                    attention_branch_idx = GQA_BRANCH_RING_FA2_CROSS_CHUNK;
+                    if gqa_debt_timing {
+                        self.record_gqa_attention_branch_debt_checkpoint(
+                            attention_branch_idx,
+                            true,
+                        )?;
+                    }
                     let kv_buf_bytes = (total_kv * kv_stride * 2) as u64;
                     let scratch_bytes =
                         (self.scratch.d_fp32_scratch.len * std::mem::size_of::<f32>()) as u64;
@@ -15002,6 +16441,12 @@ impl PrefillEngine {
                         self.gqa_fa2_calls.set(self.gqa_fa2_calls.get() + 1);
                         self.gqa_bf16_calls.set(self.gqa_bf16_calls.get() + 1);
                     }
+                    if gqa_debt_timing {
+                        self.record_gqa_attention_branch_debt_checkpoint(
+                            attention_branch_idx,
+                            false,
+                        )?;
+                    }
             }
         } else if use_custom_sliding_prefill {
             attn_path = if start_pos == 0 {
@@ -15009,7 +16454,12 @@ impl PrefillEngine {
             } else {
                 "custom_tiled_window_cross_chunk"
             };
+            attention_branch_idx = GQA_BRANCH_CUSTOM_SLIDING;
+            if gqa_debt_timing {
+                self.record_gqa_attention_branch_debt_checkpoint(attention_branch_idx, true)?;
+            }
             self.launch_custom_tiled_attn(
+                layer_idx,
                 attn_out,
                 q,
                 k,
@@ -15023,7 +16473,11 @@ impl PrefillEngine {
                 head_dim,
                 sm_scale,
                 sliding_window,
+                None,
             )?;
+            if gqa_debt_timing {
+                self.record_gqa_attention_branch_debt_checkpoint(attention_branch_idx, false)?;
+            }
         } else if start_pos == 0 && self.kernels.flash_attn_fwd.is_some() && fa2_supports_head_dim {
             let gqa_fwd = self
                 .kernels
@@ -15040,6 +16494,8 @@ impl PrefillEngine {
                 "fa2_bf16_fixed"
             };
             attn_path = gqa_path_name;
+            attention_branch_idx = GQA_BRANCH_FIXED_FA2;
+            attention_used_fixed_fa2 = true;
                 // FA2 fixed-length forward for the normal single-sequence prefill path.
                 // Q/K/V are laid out compatibly as [batch=1, seqlen, heads, head_dim].
                 // Cross-chunk/stateful attention keeps the varlen cu_seqlens path below.
@@ -15051,6 +16507,7 @@ impl PrefillEngine {
                     .unwrap_or(std::ptr::null_mut());
 
                 let gt_fa2 = Instant::now();
+                let gqa_fa2_event = self.gqa_timing_event_start("GQA fixed FA2")?;
                 let ret = unsafe {
                     if use_sliding_window {
                         gqa_fwd_window(
@@ -15103,11 +16560,29 @@ impl PrefillEngine {
                     return Err(format!("{} forward failed with code {}", gqa_backend_name, ret));
                 }
                 if gt {
-                    self.stream_sync()?;
+                    self.gqa_timing_event_stop(gqa_fa2_event, "GQA fixed FA2")?;
+                    let sync_ms = self.stream_sync_timed()?;
+                    let event_ms =
+                        self.gqa_timing_event_elapsed_ms(gqa_fa2_event, "GQA fixed FA2")?;
                     self.t_gqa_fa2
                         .set(self.t_gqa_fa2.get() + gt_fa2.elapsed().as_secs_f64() * 1000.0);
                     self.gqa_fa2_calls.set(self.gqa_fa2_calls.get() + 1);
                     self.gqa_bf16_calls.set(self.gqa_bf16_calls.get() + 1);
+                    self.record_gqa_queue_event(
+                        &self.t_gqa_fa2_event,
+                        &self.t_gqa_fa2_sync,
+                        &self.gqa_fa2_event_calls,
+                        event_ms,
+                        sync_ms,
+                    );
+                    if gqa_debt_timing {
+                        self.record_gqa_debt_sync_value(
+                            &self.t_gqa_debt_after_fa2_sync,
+                            &self.gqa_debt_after_fa2_calls,
+                            sync_ms,
+                        );
+                        self.record_gqa_append_gap_checkpoint(GQA_GAP_AFTER_FA2_BOOKKEEPING)?;
+                    }
                 }
         } else if let (true, Some(fa2_fwd)) =
             (fa2_supports_head_dim, self.kernels.flash_attn_fwd)
@@ -15117,6 +16592,10 @@ impl PrefillEngine {
                 && self.kv_k_radius_ptrs[layer_idx] != 0
             {
                 attn_path = "fa2_polar4_cross_chunk";
+                attention_branch_idx = GQA_BRANCH_POLAR4_CROSS_CHUNK;
+                if gqa_debt_timing {
+                    self.record_gqa_attention_branch_debt_checkpoint(attention_branch_idx, true)?;
+                }
                 // Cross-chunk attention: reconstruct cached Polar4 K/V to BF16,
                 // concat current BF16 chunk, then run standard BF16 FA2.
                 let kv_stride = num_kv_heads * head_dim;
@@ -15284,6 +16763,9 @@ impl PrefillEngine {
                     self.gqa_fa2_calls.set(self.gqa_fa2_calls.get() + 1);
                     self.gqa_bf16_calls.set(self.gqa_bf16_calls.get() + 1);
                 }
+                if gqa_debt_timing {
+                    self.record_gqa_attention_branch_debt_checkpoint(attention_branch_idx, false)?;
+                }
             } else if self.kv_format == 4
                 && layer_idx < self.kv_k_radius_ptrs.len()
                 && layer_idx < self.kv_tq4_sign_ptrs.len()
@@ -15291,6 +16773,10 @@ impl PrefillEngine {
                 && self.kv_tq4_sign_ptrs[layer_idx] != 0
             {
                 attn_path = "fa2_tq4_cross_chunk";
+                attention_branch_idx = GQA_BRANCH_TQ4_CROSS_CHUNK;
+                if gqa_debt_timing {
+                    self.record_gqa_attention_branch_debt_checkpoint(attention_branch_idx, true)?;
+                }
                 let kv_stride = num_kv_heads * head_dim;
                 let total_kv = start_pos + m;
                 let kv_buf_bytes = (total_kv * kv_stride * 2) as u64; // BF16
@@ -15459,6 +16945,9 @@ impl PrefillEngine {
                     self.gqa_fa2_calls.set(self.gqa_fa2_calls.get() + 1);
                     self.gqa_bf16_calls.set(self.gqa_bf16_calls.get() + 1);
                 }
+                if gqa_debt_timing {
+                    self.record_gqa_attention_branch_debt_checkpoint(attention_branch_idx, false)?;
+                }
             } else if ((self.kv_format == 3 && layer_k_ptr != 0)
                 || ((self.kv_format == 5 || self.kv_format == 6 || self.kv_format == 7 || self.kv_format == 8 || self.kv_format == 9)
                     && layer_idx < self.kv_k_radius_ptrs.len()
@@ -15479,6 +16968,10 @@ impl PrefillEngine {
                 } else {
                     "fa2_k8v4_cross_chunk"
                 };
+                attention_branch_idx = GQA_BRANCH_COMPRESSED_CROSS_CHUNK;
+                if gqa_debt_timing {
+                    self.record_gqa_attention_branch_debt_checkpoint(attention_branch_idx, true)?;
+                }
                 // Cross-chunk attention: reconstruct cached compressed K and Polar4 V to
                 // BF16, concat current BF16 chunk, then run standard BF16 FA2.
                 let kv_stride = num_kv_heads * head_dim;
@@ -15686,6 +17179,9 @@ impl PrefillEngine {
                     self.gqa_fa2_calls.set(self.gqa_fa2_calls.get() + 1);
                     self.gqa_bf16_calls.set(self.gqa_bf16_calls.get() + 1);
                 }
+                if gqa_debt_timing {
+                    self.record_gqa_attention_branch_debt_checkpoint(attention_branch_idx, false)?;
+                }
             } else if layer_k_ptr != 0 && layer_v_ptr != 0 {
                 attn_path = "fa2_cross_chunk";
                 // Cross-chunk attention: Q attends to all K/V (cached FP8 + current BF16)
@@ -15702,6 +17198,13 @@ impl PrefillEngine {
                         && head_dim <= 128;
                 if let (true, Some(fa2_fp8)) = (use_fp8_fa2, self.kernels.flash_attn_fwd_fp8kv) {
                     attn_path = "fa2_fp8_cross_chunk";
+                    attention_branch_idx = GQA_BRANCH_FP8KV_CROSS_CHUNK;
+                    if gqa_debt_timing {
+                        self.record_gqa_attention_branch_debt_checkpoint(
+                            attention_branch_idx,
+                            true,
+                        )?;
+                    }
                     // FP8 FA2 path: store current K/V to FP8 cache FIRST, then
                     // FA2 reads directly from cache (all FP8). No temp buffer needed.
                     let gt_kv_store = Instant::now();
@@ -15736,8 +17239,12 @@ impl PrefillEngine {
                         )?;
                     }
                     if gt {
-                        self.stream_sync()?;
-                        self.record_gqa_kv_append(gt_kv_store.elapsed().as_secs_f64() * 1000.0);
+                        let sync_ms = self.stream_sync_timed()?;
+                        self.record_gqa_kv_append(
+                            gt_kv_store.elapsed().as_secs_f64() * 1000.0,
+                            None,
+                            sync_ms,
+                        );
                     }
 
                     // FA2 FP8: Q (BF16) attends to K/V (FP8 in cache [0..total_kv])
@@ -15806,13 +17313,26 @@ impl PrefillEngine {
                     }
                     kv_cache_already_stored = true;
                     kv_append_path = "fp8_pre_attn";
-	                } else {
-	                    attn_path = if self.kv_format == 0 {
-	                        "fa2_bf16kv_cross_chunk"
-	                    } else {
-	                        "fa2_bf16_cross_chunk"
-	                    };
-	                    // Fallback: concat cache + current BF16 K/V, then FA2 BF16.
+                    if gqa_debt_timing {
+                        self.record_gqa_attention_branch_debt_checkpoint(
+                            attention_branch_idx,
+                            false,
+                        )?;
+                    }
+		                } else {
+		                    attn_path = if self.kv_format == 0 {
+		                        "fa2_bf16kv_cross_chunk"
+		                    } else {
+		                        "fa2_bf16_cross_chunk"
+		                    };
+                    attention_branch_idx = GQA_BRANCH_BF16_CROSS_CHUNK;
+                    if gqa_debt_timing {
+                        self.record_gqa_attention_branch_debt_checkpoint(
+                            attention_branch_idx,
+                            true,
+                        )?;
+                    }
+		                    // Fallback: concat cache + current BF16 K/V, then FA2 BF16.
 	                    // FP8 cache dequantizes; BF16 cache copies directly.
                     let kv_buf_bytes = (total_kv * kv_stride * 2) as u64; // BF16
                     let scratch_bytes =
@@ -15975,14 +17495,25 @@ impl PrefillEngine {
                         self.t_gqa_fa2.set(
                             self.t_gqa_fa2.get() + gt_fa2_bf16.elapsed().as_secs_f64() * 1000.0,
                         );
-                        self.gqa_fa2_calls.set(self.gqa_fa2_calls.get() + 1);
-                        self.gqa_bf16_calls.set(self.gqa_bf16_calls.get() + 1);
+	                        self.gqa_fa2_calls.set(self.gqa_fa2_calls.get() + 1);
+	                        self.gqa_bf16_calls.set(self.gqa_bf16_calls.get() + 1);
+	                    }
+                    if gqa_debt_timing {
+                        self.record_gqa_attention_branch_debt_checkpoint(
+                            attention_branch_idx,
+                            false,
+                        )?;
                     }
+	                }
+	            } else {
+	                // Cross-chunk but no KV cache pointers: fallback to custom tiled kernel
+	                attn_path = "custom_tiled_cross_chunk";
+                attention_branch_idx = GQA_BRANCH_CUSTOM_CROSS_CHUNK;
+                if gqa_debt_timing {
+                    self.record_gqa_attention_branch_debt_checkpoint(attention_branch_idx, true)?;
                 }
-            } else {
-                // Cross-chunk but no KV cache pointers: fallback to custom tiled kernel
-                attn_path = "custom_tiled_cross_chunk";
-                self.launch_custom_tiled_attn(
+	                self.launch_custom_tiled_attn(
+                    layer_idx,
                     attn_out,
                     q,
                     k,
@@ -15994,18 +17525,27 @@ impl PrefillEngine {
                     num_q_heads,
                     num_kv_heads,
                     head_dim,
-                    sm_scale,
-                    0,
-                )?;
+		                    sm_scale,
+		                    0,
+                    None,
+		                )?;
+                if gqa_debt_timing {
+                    self.record_gqa_attention_branch_debt_checkpoint(attention_branch_idx, false)?;
+                }
+	            }
+	        } else {
+	            // No FA2 available: use custom tiled kernel
+	            attn_path = if start_pos == 0 {
+	                "custom_tiled"
+	            } else {
+	                "custom_tiled_cross_chunk"
+	            };
+            attention_branch_idx = GQA_BRANCH_CUSTOM_NO_FA2;
+            if gqa_debt_timing {
+                self.record_gqa_attention_branch_debt_checkpoint(attention_branch_idx, true)?;
             }
-        } else {
-            // No FA2 available: use custom tiled kernel
-            attn_path = if start_pos == 0 {
-                "custom_tiled"
-            } else {
-                "custom_tiled_cross_chunk"
-            };
-            self.launch_custom_tiled_attn(
+	            self.launch_custom_tiled_attn(
+                layer_idx,
                 attn_out,
                 q,
                 k,
@@ -16017,10 +17557,36 @@ impl PrefillEngine {
                 num_q_heads,
                 num_kv_heads,
                 head_dim,
-                sm_scale,
-                0,
-            )?;
-        }
+		                sm_scale,
+		                0,
+                    Some(CustomTiledTiming {
+                        layer_idx,
+                        branch_idx: attention_branch_idx,
+                        fa2_supports_head_dim,
+                    }),
+		            )?;
+            if gqa_debt_timing {
+                self.record_gqa_attention_branch_debt_checkpoint(attention_branch_idx, false)?;
+            }
+	        }
+	        if gqa_debt_timing {
+            self.record_gqa_attention_branch_call(
+                attention_branch_idx,
+                layer_idx,
+                m,
+                start_pos,
+                attn_path,
+                attention_used_fixed_fa2,
+                use_sliding_window,
+                sliding_window,
+                capture_kv_cache,
+                fa2_supports_head_dim,
+                self.prefill_kv_active,
+                ring_window_decode_layer,
+            );
+	            self.record_gqa_append_gap_checkpoint(GQA_GAP_AFTER_ATTENTION_BRANCH)?;
+	            self.record_gqa_append_gap_checkpoint(GQA_GAP_BEFORE_REFERENCE_HOOK)?;
+	        }
         if reference_layer1_trace {
             self.push_reference_stage_snapshot(
                 "layer1_attention_context_last",
@@ -16085,6 +17651,9 @@ impl PrefillEngine {
                 }),
             );
         }
+        if gqa_debt_timing {
+            self.record_gqa_append_gap_checkpoint(GQA_GAP_AFTER_REFERENCE_HOOK)?;
+        }
         if self.trace_prefill_layer_enabled(trace_step, layer_idx) {
             self.trace_emit_bf16_row(
                 trace_step,
@@ -16109,6 +17678,9 @@ impl PrefillEngine {
                 start_pos,
             );
         }
+        if gqa_debt_timing {
+            self.record_gqa_append_gap_checkpoint(GQA_GAP_AFTER_TRACE_ROW_HOOK)?;
+        }
         if self.trace_prefill_layer_summary_enabled(trace_step, layer_idx) {
             self.trace_emit_bf16_row_summary(
                 trace_step,
@@ -16121,11 +17693,26 @@ impl PrefillEngine {
                 q_dim,
             );
         }
+        if gqa_debt_timing {
+            self.record_gqa_append_gap_checkpoint(GQA_GAP_AFTER_TRACE_SUMMARY_HOOK)?;
+        }
 
         // KV cache append: BF16 K,V -> cache format into separate per-layer caches
         // Skip if cross-chunk path already stored K/V before attention.
+        if gqa_debt_timing {
+            self.record_gqa_append_gap_checkpoint(GQA_GAP_BEFORE_APPEND_SETUP)?;
+            self.record_gqa_debt_checkpoint(
+                &self.t_gqa_debt_pre_append_sync,
+                &self.gqa_debt_pre_append_calls,
+            )?;
+        }
         let gt_kv_append = Instant::now();
         let kv_append_path_before = kv_append_path;
+        let mut kv_append_kernel_ms: Option<f64> = None;
+        let mut kv_append_event_recorded = false;
+        if gqa_debt_timing {
+            self.record_gqa_append_gap_checkpoint(GQA_GAP_AFTER_APPEND_SETUP)?;
+        }
         if capture_kv_cache
             && self.kv_format == 2
             && layer_idx < self.kv_k_radius_ptrs.len()
@@ -16267,6 +17854,9 @@ impl PrefillEngine {
             && self.kv_v_radius_ptrs[layer_idx] != 0
             && !kv_cache_already_stored
         {
+            if gqa_debt_timing {
+                self.record_gqa_append_gap_checkpoint(GQA_GAP_DIRECT_K4_BRANCH_ENTRY)?;
+            }
             let is_k4 = self.kv_format == 9;
             let is_k7 = self.kv_format == 6;
             let is_k6v6 = self.kv_format == 7;
@@ -16275,6 +17865,9 @@ impl PrefillEngine {
             let kv_stride = (num_kv_heads * head_dim) as i32;
             let num_blocks = (kv_stride / 16) as u32;
             let kv_threads = std::cmp::max(32, ((std::cmp::min(256, num_blocks) + 31) / 32) * 32);
+            if gqa_debt_timing {
+                self.record_gqa_append_gap_checkpoint(GQA_GAP_DIRECT_K4_SHAPE_MATH)?;
+            }
             let mut p0 = self.kv_k_radius_ptrs[layer_idx];
             let mut p1 = self.kv_k_angles_ptrs[layer_idx];
             let mut p2 = self.kv_v_radius_ptrs[layer_idx];
@@ -16286,7 +17879,31 @@ impl PrefillEngine {
             let mut p8 = self.kv_max_seq as i32;
             let mut p9 = start_pos as i32;
             let mut p10 = self.polar4_norm_correction_mode;
+            let time_direct_gemma_hqq4_compressed_kernel = gt
+                && (is_k4 || is_k6v6)
+                && !self.prefill_kv_active
+                && self.is_gemma4_model()
+                && !self.kv_append_timing_start_event.is_null()
+                && !self.kv_append_timing_stop_event.is_null()
+                && lw.hqq_gqa.as_ref().map_or(false, |hqq| hqq.nbits == 4);
+            if gqa_debt_timing {
+                self.record_gqa_append_gap_checkpoint(GQA_GAP_DIRECT_K4_ARG_SETUP)?;
+                self.record_gqa_append_gap_checkpoint(GQA_GAP_BEFORE_APPEND_START_EVENT)?;
+            }
             unsafe {
+                if time_direct_gemma_hqq4_compressed_kernel {
+                    let err = cuda_sys::lib()
+                        .cuEventRecord(self.kv_append_timing_start_event, self.stream);
+                    if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                        return Err(format!("record KV append timing start event: {:?}", err));
+                    }
+                    if gqa_debt_timing {
+                        self.record_gqa_append_gap_checkpoint(GQA_GAP_AFTER_APPEND_START_EVENT)?;
+                    }
+                }
+                if gqa_debt_timing {
+                    self.record_gqa_append_gap_checkpoint(GQA_GAP_BEFORE_APPEND_LAUNCH)?;
+                }
                 launch(
 			                    if is_k8v6 {
 			                        self.kernels.kv_cache_append_k8v6
@@ -16317,6 +17934,14 @@ impl PrefillEngine {
                         &mut p10 as *mut _ as *mut std::ffi::c_void,
                     ],
                 )?;
+                if time_direct_gemma_hqq4_compressed_kernel {
+                    let err = cuda_sys::lib()
+                        .cuEventRecord(self.kv_append_timing_stop_event, self.stream);
+                    if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                        return Err(format!("record KV append timing stop event: {:?}", err));
+                    }
+                    kv_append_event_recorded = true;
+                }
             }
         } else if capture_kv_cache
             && layer_k_ptr != 0
@@ -16346,7 +17971,24 @@ impl PrefillEngine {
             } else {
                 self.kernels.kv_cache_append
             };
+            let time_stage_exact_gemma_hqq4_k6_fp8_append_kernel = gt
+                && self.kv_format == 1
+                && self.prefill_kv_active
+                && self.decode_kv_format == 7
+                && self.is_gemma_hqq4_kv_timing_target(layer_idx)
+                && !self.kv_append_timing_start_event.is_null()
+                && !self.kv_append_timing_stop_event.is_null();
             unsafe {
+                if time_stage_exact_gemma_hqq4_k6_fp8_append_kernel {
+                    self.record_gqa_append_gap_checkpoint(GQA_GAP_BEFORE_APPEND_START_EVENT)?;
+                    let err = cuda_sys::lib()
+                        .cuEventRecord(self.kv_append_timing_start_event, self.stream);
+                    if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                        return Err(format!("record KV append timing start event: {:?}", err));
+                    }
+                    self.record_gqa_append_gap_checkpoint(GQA_GAP_AFTER_APPEND_START_EVENT)?;
+                    self.record_gqa_append_gap_checkpoint(GQA_GAP_BEFORE_APPEND_LAUNCH)?;
+                }
                 launch(
                     append_kernel,
                     (m as u32, 1, 1),
@@ -16364,11 +18006,37 @@ impl PrefillEngine {
                         &mut k7 as *mut _ as *mut std::ffi::c_void,
                     ],
                 )?;
+                if time_stage_exact_gemma_hqq4_k6_fp8_append_kernel {
+                    let err = cuda_sys::lib()
+                        .cuEventRecord(self.kv_append_timing_stop_event, self.stream);
+                    if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                        return Err(format!("record KV append timing stop event: {:?}", err));
+                    }
+                    kv_append_event_recorded = true;
+                }
             }
         }
         if gt && kv_append_path != kv_append_path_before && kv_append_path != "fp8_pre_attn" {
-            self.stream_sync()?;
-            self.record_gqa_kv_append(gt_kv_append.elapsed().as_secs_f64() * 1000.0);
+            let sync_ms = self.stream_sync_timed()?;
+            if kv_append_event_recorded {
+                let mut elapsed_ms: f32 = 0.0;
+                let err = unsafe {
+                    cuda_sys::lib().cuEventElapsedTime(
+                        &mut elapsed_ms,
+                        self.kv_append_timing_start_event,
+                        self.kv_append_timing_stop_event,
+                    )
+                };
+                if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(format!("elapsed KV append timing event: {:?}", err));
+                }
+                kv_append_kernel_ms = Some(elapsed_ms as f64);
+            }
+            self.record_gqa_kv_append(
+                gt_kv_append.elapsed().as_secs_f64() * 1000.0,
+                kv_append_kernel_ms,
+                sync_ms,
+            );
         }
 
         // Gated attention: apply sigmoid(gate) to attention output
@@ -16445,6 +18113,7 @@ impl PrefillEngine {
 
         // O projection (use scratch1 as temp to avoid input/output aliasing)
         let gt_oproj = Instant::now();
+        let gqa_oproj_event = self.gqa_timing_event_start("GQA O projection")?;
         let o_temp = *self.scratch.d_scratch1.device_ptr();
         for (abs_pos, row_idx) in Self::trace_input_row_positions_for_chunk(start_pos, m) {
             self.trace_emit_bf16_row_full_words(
@@ -16524,9 +18193,26 @@ impl PrefillEngine {
             );
         }
         if gt {
-            self.stream_sync()?;
+            self.gqa_timing_event_stop(gqa_oproj_event, "GQA O projection")?;
+            let sync_ms = self.stream_sync_timed()?;
+            let event_ms =
+                self.gqa_timing_event_elapsed_ms(gqa_oproj_event, "GQA O projection")?;
             self.t_gqa_oproj
                 .set(self.t_gqa_oproj.get() + gt_oproj.elapsed().as_secs_f64() * 1000.0);
+            self.record_gqa_queue_event(
+                &self.t_gqa_oproj_event,
+                &self.t_gqa_oproj_sync,
+                &self.gqa_oproj_event_calls,
+                event_ms,
+                sync_ms,
+            );
+            if gqa_debt_timing {
+                self.record_gqa_debt_sync_value(
+                    &self.t_gqa_debt_after_oproj_sync,
+                    &self.gqa_debt_after_oproj_calls,
+                    sync_ms,
+                );
+            }
         }
         trace_emit_prefill_mark(
             self.trace.as_ref(),
@@ -22095,6 +23781,22 @@ impl PrefillEngine {
         (0..self.layer_weights.len()).any(|idx| self.is_gemma4_layer(idx))
     }
 
+    fn is_gemma_hqq4_kv_timing_target(&self, layer_idx: usize) -> bool {
+        if !self.is_gemma4_layer(layer_idx) {
+            return false;
+        }
+        if !self.layer_weights[layer_idx]
+            .hqq_gqa
+            .as_ref()
+            .map_or(false, |hqq| hqq.nbits == 4)
+        {
+            return false;
+        }
+        let direct_k4 = self.kv_format == 9 && !self.prefill_kv_active;
+        let decode_k6 = self.decode_kv_format == 7;
+        direct_k4 || decode_k6
+    }
+
     fn forward_gemma4_layer(
         &mut self,
         layer_idx: usize,
@@ -22110,7 +23812,15 @@ impl PrefillEngine {
         let attn_out = *self.scratch.d_attn_out.device_ptr();
         let dense_branch = *self.scratch.d_scratch1.device_ptr();
         let moe_branch = *self.scratch.d_scratch2.device_ptr();
+        let debt_timing = self.gqa_timing_enabled.get()
+            && self.is_gemma_hqq4_kv_timing_target(layer_idx);
 
+        if debt_timing {
+            self.record_gqa_debt_checkpoint(
+                &self.t_gqa_debt_gemma4_layer_entry_sync,
+                &self.gqa_debt_gemma4_layer_entry_calls,
+            )?;
+        }
         self.memcpy_d2d(residual, hidden, (m * h * 2) as u64)?;
         self.launch_rmsnorm(
             hidden,
@@ -22125,6 +23835,12 @@ impl PrefillEngine {
             self.prefetch_dense_pointer_table_for_layer(layer_idx, chunk_idx, 0, m)?;
         }
 
+        if debt_timing {
+            self.record_gqa_debt_checkpoint(
+                &self.t_gqa_debt_gemma4_pre_gqa_sync,
+                &self.gqa_debt_gemma4_pre_gqa_calls,
+            )?;
+        }
         match layer_type {
             0 => self.forward_gqa_chunked(layer_idx, m, chunk_start, capture_kv_cache)?,
             1 => self.forward_mamba2(layer_idx, m)?,
@@ -31310,9 +33026,9 @@ impl PrefillKernels {
                     "hqq_marlin_add_correction_bf16_kernel",
                     "hqq_prefill_int8_exception_delta_bf16_kernel",
                     "hqq_apply_sidecar_bf16_kernel",
-            "rope_batched_kernel",
-            "rope_batched_half_split_kernel",
-            "rope_batched_mrope_kernel",
+                    "rope_batched_kernel",
+                    "rope_batched_half_split_kernel",
+                    "rope_batched_mrope_kernel",
                     "silu_mul_batched_kernel",
                     "relu2_batched_kernel",
                     "gelu_tanh_mul_batched_kernel",
@@ -31359,6 +33075,13 @@ impl PrefillKernels {
                     "transpose_3d_021_kernel",
                     "transpose_3d_021_bf16_kernel",
                     "flash_attn_tiled_kernel",
+                    "flash_attn_tiled_hd512_full_kernel",
+                    "flash_attn_tiled_hd512_full_q2_kernel",
+                    "flash_attn_tiled_hd512_full_q2_timed_kernel",
+                    "flash_attn_tiled_hd512_full_q2_bc32_kernel",
+                    "flash_attn_tiled_hd512_full_q2_bc32_timed_kernel",
+                    "flash_attn_tiled_hd512_full_bc48_kernel",
+                    "flash_attn_tiled_hd512_full_bc64_kernel",
                     "gated_q_split_kernel",
                     "la_split_conv_output_kernel",
                     "concat_3_bf16_kernel",
@@ -31432,13 +33155,46 @@ impl PrefillKernels {
         // Models with head_dim > ~176 need > 48KB smem per block.
         // Query the device's max smem and set the kernel attribute.
         let flash_attn_func = get("flash_attn_tiled_kernel")?;
+        let flash_attn_hd512_full_func = get("flash_attn_tiled_hd512_full_kernel")?;
+        let flash_attn_hd512_full_q2_func = get("flash_attn_tiled_hd512_full_q2_kernel")?;
+        let flash_attn_hd512_full_q2_timed_func =
+            get("flash_attn_tiled_hd512_full_q2_timed_kernel")?;
+        let flash_attn_hd512_full_q2_bc32_func =
+            get("flash_attn_tiled_hd512_full_q2_bc32_kernel")?;
+        let flash_attn_hd512_full_q2_bc32_timed_func =
+            get("flash_attn_tiled_hd512_full_q2_bc32_timed_kernel")?;
+        let flash_attn_hd512_full_bc48_func = get("flash_attn_tiled_hd512_full_bc48_kernel")?;
+        let flash_attn_hd512_full_bc64_func = get("flash_attn_tiled_hd512_full_bc64_kernel")?;
+        let mut flash_attn_tiled_hd512_full_enabled = false;
+        let mut flash_attn_tiled_hd512_full_tile_cols = 0usize;
+        let mut flash_attn_tiled_hd512_full_q_heads_per_block = 0usize;
+        let flash_attn_tiled_hd512_full_max_smem: usize;
+        let flash_attn_tiled_hd512_full_q2_bc32_required_smem =
+            hd512_q2_dynamic_smem_bytes(2, 16, 32, 512);
+        let mut flash_attn_tiled_hd512_full_q2_bc32_ready = false;
         unsafe {
             let mut max_smem: i32 = 0;
-            cuda_sys::lib().cuDeviceGetAttribute(
+            let mut dev: i32 = 0;
+            let ctx_rc = cuda_sys::lib().cuCtxGetDevice(&mut dev);
+            if ctx_rc != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!(
+                    "cuCtxGetDevice failed while loading prefill kernels: {:?}",
+                    ctx_rc
+                ));
+            }
+            let attr_rc = cuda_sys::lib().cuDeviceGetAttribute(
                 &mut max_smem,
                 cuda_sys::CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN,
-                0,
+                dev,
             );
+            if attr_rc != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!(
+                    "cuDeviceGetAttribute(MAX_SHARED_MEMORY_PER_BLOCK_OPTIN) failed for device {}: {:?}",
+                    dev,
+                    attr_rc
+                ));
+            }
+            flash_attn_tiled_hd512_full_max_smem = max_smem.max(0) as usize;
             if max_smem > 49152 {
                 let rc = cuda_sys::lib().cuFuncSetAttribute(
                     flash_attn_func.0,
@@ -31457,6 +33213,133 @@ impl PrefillKernels {
                         rc
                     );
                 }
+            }
+            let hd512_br = 16i32;
+            let hd512_head_dim = 512i32;
+            let hd512_required_smem = |bc: i32| -> i32 {
+                hd512_br * hd512_head_dim * 2
+                    + bc * hd512_head_dim * 2
+                    + bc * hd512_head_dim * 2
+                    + hd512_br * bc * 4
+                    + hd512_br * bc * 2
+                    + 16 * 16 * 4
+            };
+            let hd512_q2_required_smem =
+                hd512_q2_dynamic_smem_bytes(2, hd512_br as usize, 16, hd512_head_dim as usize)
+                    as i32;
+            let hd512_variants = [
+                (64usize, 1usize, hd512_required_smem(64), flash_attn_hd512_full_bc64_func.0),
+                (48usize, 1usize, hd512_required_smem(48), flash_attn_hd512_full_bc48_func.0),
+                (16usize, 2usize, hd512_q2_required_smem, flash_attn_hd512_full_q2_func.0),
+                (32usize, 1usize, hd512_required_smem(32), flash_attn_hd512_full_func.0),
+            ];
+            for (bc, q_heads_per_block, required, func) in hd512_variants {
+                if max_smem < required {
+                    log::info!(
+                        "Prefill flash attention hd512 full: BC={} q_heads_per_block={} not selected, requires {} KB but device {} reports {} KB opt-in smem",
+                        bc,
+                        q_heads_per_block,
+                        required / 1024,
+                        dev,
+                        max_smem / 1024
+                    );
+                    continue;
+                }
+                let rc = cuda_sys::lib().cuFuncSetAttribute(
+                    func,
+                    cuda_sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                    max_smem,
+                );
+                if rc == cuda_sys::CUresult::CUDA_SUCCESS {
+                    if bc == 16 && q_heads_per_block == 2 {
+                        let timed_rc = cuda_sys::lib().cuFuncSetAttribute(
+                            flash_attn_hd512_full_q2_timed_func.0,
+                            cuda_sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                            max_smem,
+                        );
+                        if timed_rc != cuda_sys::CUresult::CUDA_SUCCESS {
+                            log::warn!(
+                                "Prefill flash attention hd512 full q2 timed: failed to set extended smem ({} bytes): {:?}",
+                                max_smem,
+                                timed_rc
+                            );
+                        }
+                    }
+                    if bc == 16 && q_heads_per_block == 2 {
+                        if max_smem as usize
+                            >= flash_attn_tiled_hd512_full_q2_bc32_required_smem
+                        {
+                            let bc32_rc = cuda_sys::lib().cuFuncSetAttribute(
+                                flash_attn_hd512_full_q2_bc32_func.0,
+                                cuda_sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                                max_smem,
+                            );
+                            let bc32_timed_rc = cuda_sys::lib().cuFuncSetAttribute(
+                                flash_attn_hd512_full_q2_bc32_timed_func.0,
+                                cuda_sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                                max_smem,
+                            );
+                            if bc32_rc == cuda_sys::CUresult::CUDA_SUCCESS
+                                && bc32_timed_rc == cuda_sys::CUresult::CUDA_SUCCESS
+                            {
+                                flash_attn_tiled_hd512_full_q2_bc32_ready = true;
+                                log::info!(
+                                    "Prefill flash attention hd512 q2-BC32: ready (required {} KB, opt-in {} KB, device {})",
+                                    flash_attn_tiled_hd512_full_q2_bc32_required_smem / 1024,
+                                    max_smem / 1024,
+                                    dev
+                                );
+                            } else {
+                                log::warn!(
+                                    "Prefill flash attention hd512 q2-BC32: failed to set extended smem (required {} bytes, opt-in {} bytes, device {}, normal {:?}, timed {:?})",
+                                    flash_attn_tiled_hd512_full_q2_bc32_required_smem,
+                                    max_smem,
+                                    dev,
+                                    bc32_rc,
+                                    bc32_timed_rc
+                                );
+                            }
+                        } else {
+                            log::info!(
+                                "Prefill flash attention hd512 q2-BC32: not ready, requires {} KB but device {} reports {} KB opt-in smem",
+                                flash_attn_tiled_hd512_full_q2_bc32_required_smem / 1024,
+                                dev,
+                                max_smem / 1024
+                            );
+                        }
+                    }
+                    flash_attn_tiled_hd512_full_enabled = true;
+                    flash_attn_tiled_hd512_full_tile_cols = bc;
+                    flash_attn_tiled_hd512_full_q_heads_per_block = q_heads_per_block;
+                    log::info!(
+                        "Prefill flash attention hd512 full: enabled BC={} q_heads_per_block={} specialization (required {} KB, opt-in {} KB, device {})",
+                        bc,
+                        q_heads_per_block,
+                        required / 1024,
+                        max_smem / 1024,
+                        dev
+                    );
+                    break;
+                } else {
+                    log::warn!(
+                        "Prefill flash attention hd512 full: failed to set BC={} q_heads_per_block={} extended smem (required {} bytes, opt-in {} bytes, device {}): {:?}",
+                        bc,
+                        q_heads_per_block,
+                        required,
+                        max_smem,
+                        dev,
+                        rc
+                    );
+                }
+            }
+            if !flash_attn_tiled_hd512_full_enabled {
+                let required = hd512_required_smem(32);
+                log::warn!(
+                    "Prefill flash attention hd512 full: disabled, smallest BC=32 requires {} KB opt-in smem but device {} reports {} KB",
+                    required / 1024,
+                    dev,
+                    max_smem / 1024
+                );
             }
         }
 
@@ -31548,6 +33431,19 @@ impl PrefillKernels {
             transpose_3d_021: get("transpose_3d_021_kernel")?,
             transpose_3d_021_bf16: get("transpose_3d_021_bf16_kernel")?,
             flash_attn_tiled: flash_attn_func,
+            flash_attn_tiled_hd512_full: flash_attn_hd512_full_func,
+            flash_attn_tiled_hd512_full_q2: flash_attn_hd512_full_q2_func,
+            flash_attn_tiled_hd512_full_q2_timed: flash_attn_hd512_full_q2_timed_func,
+            flash_attn_tiled_hd512_full_q2_bc32: flash_attn_hd512_full_q2_bc32_func,
+            flash_attn_tiled_hd512_full_q2_bc32_timed: flash_attn_hd512_full_q2_bc32_timed_func,
+            flash_attn_tiled_hd512_full_bc48: flash_attn_hd512_full_bc48_func,
+            flash_attn_tiled_hd512_full_bc64: flash_attn_hd512_full_bc64_func,
+            flash_attn_tiled_hd512_full_enabled,
+            flash_attn_tiled_hd512_full_tile_cols,
+            flash_attn_tiled_hd512_full_q_heads_per_block,
+            flash_attn_tiled_hd512_full_max_smem,
+            flash_attn_tiled_hd512_full_q2_bc32_required_smem,
+            flash_attn_tiled_hd512_full_q2_bc32_ready,
             gated_q_split: get("gated_q_split_kernel")?,
             la_split_conv_output: get("la_split_conv_output_kernel")?,
             concat_3_bf16: get("concat_3_bf16_kernel")?,

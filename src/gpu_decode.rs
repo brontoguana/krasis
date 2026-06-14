@@ -2868,9 +2868,11 @@ const KERNEL_NAMES: &[&str] = &[
     "fused_add_rmsnorm",
     "rmsnorm",
     "rmsnorm_scale",
+    "dual_rmsnorm_scale",
     "hqq4_dequant_bf16",
     "silu_mul",
     "gelu_tanh_mul",
+    "apply_logit_softcap_f32",
     "sigmoid_topk",
     "softmax_topk",
     "apply_topk_per_expert_scale",
@@ -2913,6 +2915,7 @@ const KERNEL_NAMES: &[&str] = &[
     "gqa_attention_tiled_bf16",
     "gqa_attention_reduce",
     "gqa_attention_k4v4_single_g",
+    "gqa_attention_k4v4_single_g_timed",
     "split_gated_q",
     "apply_gated_attn",
     "bf16_to_fp32",
@@ -2942,6 +2945,7 @@ const KERNEL_NAMES: &[&str] = &[
     "marlin_gemv_int8_v2_batched",
     "reduce_ksplits_bf16_batched",
     "fused_silu_w2_batched",
+    "fused_silu_w2_batched_timed",
     "fused_silu_w2_int8_batched",
     "multi_expert_weighted_add_bf16",
     "marlin_gemv_int4_f32",
@@ -3004,6 +3008,7 @@ const KERNEL_NAMES: &[&str] = &[
     "gqa_attention_polar4_g",
     "gqa_attention_polar4_tiled_g",
     "gqa_attention_polar4_reduce_g",
+    "record_globaltimer_u64_g",
 ];
 
 const MODULE_NAME: &str = "decode_kernels";
@@ -6402,9 +6407,11 @@ struct CachedKernels {
     fp32_to_bf16: cudarc::driver::CudaFunction,
     rmsnorm: cudarc::driver::CudaFunction,
     rmsnorm_scale: cudarc::driver::CudaFunction,
+    dual_rmsnorm_scale: cudarc::driver::CudaFunction,
     fused_add_rmsnorm: cudarc::driver::CudaFunction,
     silu_mul: cudarc::driver::CudaFunction,
     gelu_tanh_mul: cudarc::driver::CudaFunction,
+    apply_logit_softcap_f32: cudarc::driver::CudaFunction,
     sigmoid_topk: cudarc::driver::CudaFunction,
     softmax_topk: cudarc::driver::CudaFunction,
     apply_topk_per_expert_scale: cudarc::driver::CudaFunction,
@@ -6457,6 +6464,7 @@ struct CachedKernels {
     gqa_attention_tiled_bf16: cudarc::driver::CudaFunction,
     gqa_attention_reduce: cudarc::driver::CudaFunction,
     gqa_attention_k4v4_single_g: cudarc::driver::CudaFunction,
+    gqa_attention_k4v4_single_g_timed: cudarc::driver::CudaFunction,
     apply_gated_attn: cudarc::driver::CudaFunction,
     // Fused v2 kernels with inline atomic reduction (no separate reduce kernel)
     marlin_gemv_int4_v2_fused_f32: cudarc::driver::CudaFunction,
@@ -6467,6 +6475,7 @@ struct CachedKernels {
     marlin_gemv_int8_v2_batched: cudarc::driver::CudaFunction,
     reduce_ksplits_bf16_batched: cudarc::driver::CudaFunction,
     fused_silu_w2_batched: cudarc::driver::CudaFunction,
+    fused_silu_w2_batched_timed: cudarc::driver::CudaFunction,
     fused_silu_w2_int8_batched: cudarc::driver::CudaFunction,
     multi_expert_weighted_add_bf16: cudarc::driver::CudaFunction,
     // Graphable kernel variants (read position/token from GPU pointers)
@@ -6520,6 +6529,7 @@ struct CachedKernels {
     gqa_attention_polar4_g: cudarc::driver::CudaFunction,
     gqa_attention_polar4_tiled_g: cudarc::driver::CudaFunction,
     gqa_attention_polar4_reduce_g: cudarc::driver::CudaFunction,
+    record_globaltimer_u64_g: cudarc::driver::CudaFunction,
     // Mamba2 SSM kernels (Nemotron-H)
     mamba2_conv1d: cudarc::driver::CudaFunction,
     mamba2_ssm_step: cudarc::driver::CudaFunction,
@@ -6838,10 +6848,153 @@ struct GpuDecodeGraph {
     t_graph_segment_expert: f64,  // expert-compute region inside captured graphs
     t_graph_segment_routing: f64, // routing/attention/gate region inside captured graphs
     t_graph_segment_final: f64,   // final norm + LM head region inside captured graphs
+    t_graph_final_norm: f64,      // env-gated final segment RMSNorm region
+    t_graph_final_lm_head: f64,   // env-gated final segment LM head GEMV region
+    t_graph_final_gpu_softcap: f64, // env-gated GPU final-logit softcap
+    t_graph_final_graph_residual: f64, // env-gated final graph time not covered by norm/LM markers
+    t_graph_final_d2h_logits: f64, // env-gated post-final D2H logits copy
+    t_graph_final_softcap: f64,   // env-gated host final-logit softcap
+    t_graph_gqa_k4_tiled_attn: f64, // env-gated marker timing for HD512 k4v4 tiled attention
+    t_graph_gqa_k4_polar4_reduce: f64, // env-gated marker timing for HD512 k4v4 Polar4 reduce
+    t_graph_mixed_moe_expert: f64, // env-gated marker timing for mixed graph MoE expert region
+    t_graph_mixed_gqa_proj_attn: f64, // env-gated marker timing for mixed graph GQA projection/attention region
+    t_graph_mixed_route_topk: f64, // env-gated marker timing for mixed graph route/top-k side region
+    t_graph_gqa_path_projection: f64, // env-gated marker timing for HD512 k4v4 GQA QKV projection region
+    t_graph_gqa_path_norm_rope_kv: f64, // env-gated marker timing for HD512 k4v4 GQA norm/RoPE/KV write region
+    t_graph_gqa_path_attention_reduce: f64, // env-gated marker timing for HD512 k4v4 GQA attention/reduce region
+    t_graph_gqa_path_apply_gated_bf16: f64, // env-gated marker timing for gated FP32 attention -> BF16 O-proj input
+    t_graph_gqa_path_o_input_prep: f64, // env-gated marker timing for O-proj input-ready gap after gated BF16 write
+    t_graph_gqa_path_o_projection: f64, // env-gated marker timing for HD512 k4v4 GQA O projection region
+    t_graph_gqa_boundary_entry_gap: f64, // env-gated marker gap between mixed GQA start and GQA path start
+    t_graph_gqa_boundary_post_o_exit_gap: f64, // env-gated marker gap between O projection end and mixed GQA end
+    t_graph_gqa_boundary_stream_debt: f64, // env-gated residual after entry/exit and named GQA path intervals
+    t_graph_gqa_coverage_mixed_gqa_total: f64, // env-gated total mixed GRAPH_SEG_ROUTE_GQA GQA endpoint span
+    t_graph_gqa_coverage_active_mixed_gqa: f64, // env-gated mixed GQA span covered by active HD512 k4v4 path graphs
+    t_graph_gqa_coverage_active_path_endpoint: f64, // env-gated active HD512 k4v4 path start/end span
+    t_graph_gqa_coverage_active_named_path: f64, // env-gated sum of named active HD512 k4v4 sub-marker intervals
+    t_graph_gqa_coverage_active_internal_gap: f64, // env-gated active path endpoint span not covered by named sub-markers
+    t_graph_gqa_coverage_other_mixed_gqa: f64, // env-gated mixed GQA endpoint span without active HD512 k4v4 markers
+    t_graph_gqa_coverage_boundary_gap: f64, // env-gated active mixed GQA span outside active path endpoints
+    t_graph_gqa_other_projection: f64, // env-gated non-active GQA QKV projection region
+    t_graph_gqa_other_qkv_norm: f64, // env-gated non-active GQA Q/K/V norm region
+    t_graph_gqa_other_rope: f64, // env-gated non-active GQA RoPE region
+    t_graph_gqa_other_kv_write: f64, // env-gated non-active GQA KV-cache write region
+    t_graph_gqa_other_norm_rope_kv: f64, // env-gated non-active GQA norm/RoPE/KV write region
+    t_graph_gqa_other_attention_reduce: f64, // env-gated non-active GQA attention/reduce region
+    t_graph_gqa_other_apply_bf16: f64, // env-gated non-active GQA FP32 attention -> BF16 input region
+    t_graph_gqa_other_o_input_prep: f64, // env-gated non-active GQA O-proj input-ready gap
+    t_graph_gqa_other_o_projection: f64, // env-gated non-active GQA O projection region
+    t_graph_gqa_other_endpoint: f64, // env-gated non-active GQA path start/end span
+    t_graph_gqa_hd256_attn_graph: f64, // env-gated graph marker interval around sliding HD256 k4v4 single attention
+    t_graph_gqa_hd256_attn_score_max: f64, // env-gated internal score/max phase
+    t_graph_gqa_hd256_attn_weight_v: f64, // env-gated internal softmax weight + V accumulation phase
+    t_graph_gqa_hd256_attn_final_output: f64, // env-gated internal final reduce/FHT/output phase
+    t_graph_gqa_hd256_attn_internal_total: f64, // env-gated internal kernel endpoint span
+    t_graph_gqa_hd256_attn_graph_overhead: f64, // env-gated marker/graph interval not covered by internal clocks
+    graph_gqa_hd256_attn_segments: u64,
+    graph_gqa_hd256_attn_single_segments: u64,
+    graph_gqa_hd256_attn_tiled_segments: u64,
+    graph_gqa_hd256_attn_tile_gate_segments: u64,
+    graph_gqa_hd256_attn_seq_len_sum: u64,
+    graph_gqa_hd256_attn_runtime_tiles_sum: u64,
+    graph_gqa_hd256_attn_max_tiles_sum: u64,
+    graph_gqa_hd256_attn_inactive_tile_blocks_sum: u64,
+    t_graph_moe_w2_activation: f64, // env-gated fused SiLU activation/preload phase
+    t_graph_moe_w2_prep: f64, // env-gated W2 permutation/scale preload phase
+    t_graph_moe_w2_gemv: f64, // env-gated W2 GEMV + output phase
+    t_graph_moe_w2_internal_total: f64, // env-gated fused SiLU/W2 critical path
+    t_graph_moe_w2_graph_overhead: f64, // env-gated graph marker interval outside internal fused kernel clocks
+    t_graph_moe_w2_preload_gate_up_load: f64, // env-gated sampled gate/up BF16 global load inside activation preload
+    t_graph_moe_w2_preload_silu_mul: f64, // env-gated sampled SiLU/multiply math inside activation preload
+    t_graph_moe_w2_preload_shared_store: f64, // env-gated sampled activated BF16 shared-store work
+    t_graph_moe_w2_preload_sync: f64, // env-gated activation preload barrier/wait after shared stores
+    t_graph_moe_w2_preload_residual: f64, // env-gated activation wall time not covered by sampled subparts
+    t_graph_moe_w2_preload_block_sum: f64, // env-gated sum of activation preload wall time across repeated output-tile blocks
+    graph_moe_w2_segments: u64,
+    graph_moe_w2_blocks: u64,
+    t_graph_moe_route_w13_gemv: f64, // env-gated mixed segment MoE batched W13 GEMV
+    t_graph_moe_route_w13_reduce: f64, // env-gated mixed segment W13 k-split reduce
+    t_graph_moe_route_activation_w2: f64, // env-gated mixed segment activation + W2 GEMV
+    t_graph_moe_route_weighted_output: f64, // env-gated mixed segment weighted expert accumulation
+    t_graph_moe_route_post_output: f64, // env-gated mixed segment shared/scale/post-FFN output work
+    t_graph_moe_route_post_shared_gate: f64, // env-gated shared expert gate inside post-output
+    t_graph_moe_route_post_shared_w13: f64, // env-gated shared expert W13 inside post-output
+    t_graph_moe_route_post_shared_reduce: f64, // env-gated shared expert W13 reduce inside post-output
+    t_graph_moe_route_post_shared_w2: f64, // env-gated shared expert activation/W2 accumulation
+    t_graph_moe_route_post_scale: f64, // env-gated routed scaling factor application
+    t_graph_moe_route_post_hidden_write: f64, // env-gated post-FFN residual/writeback work
+    t_graph_moe_route_post_hidden_norm2: f64, // env-gated Gemma post_ffn_norm2 inside hidden write
+    t_graph_moe_route_post_hidden_add1: f64, // env-gated dense+MoE residual add inside hidden write
+    t_graph_moe_route_post_hidden_norm: f64, // env-gated Gemma post_ffn_norm inside hidden write
+    t_graph_moe_route_post_hidden_add2: f64, // env-gated final residual add inside hidden write
+    t_graph_moe_route_post_hidden_scalar: f64, // env-gated optional layer scalar/writeback inside hidden write
+    t_graph_moe_route_post_hidden_endpoint: f64, // env-gated hidden write marker/endpoint overhead
+    t_graph_moe_route_post_endpoint: f64, // env-gated remaining post-output endpoint overhead
+    t_graph_moe_route_pre_gqa_prep: f64, // env-gated route work before GQA path
+    t_graph_moe_route_post_gqa_prep: f64, // env-gated route work after GQA before router logits
+    t_graph_moe_route_logits: f64, // env-gated router logits GEMV
+    t_graph_moe_route_topk: f64, // env-gated top-k selection kernel
+    t_graph_moe_route_scale_classify: f64, // env-gated per-expert scale + graph classify prep
+    t_graph_moe_route_tail: f64, // env-gated route-end residual/marker tail
+    t_graph_route_prep_pre_gqa_norm: f64, // env-gated Gemma route prep before target GQA
+    t_graph_route_prep_post_gqa_norm_add: f64, // env-gated post-GQA norm + residual add
+    t_graph_route_prep_dense_pre_norm: f64, // env-gated dense pre-FFN norm
+    t_graph_route_prep_dense_gate: f64, // env-gated dense gate projection
+    t_graph_route_prep_dense_up: f64, // env-gated dense up projection
+    t_graph_route_prep_dense_activation: f64, // env-gated dense activation
+    t_graph_route_prep_dense_down: f64, // env-gated dense down projection
+    t_graph_route_prep_dense_post_norms: f64, // env-gated dense post/downstream norms
+    t_graph_route_prep_router_input_norm: f64, // env-gated router-input RMSNorm
     graph_segment_labels: Vec<String>,
     graph_segment_kinds: Vec<u8>,
     graph_segment_elapsed: Vec<f64>,
     graph_segment_sync_wait: Vec<f64>,
+    graph_gqa_k4_split_clock_enabled: bool,
+    graph_gqa_k4_split_active: Vec<bool>,
+    d_graph_gqa_k4_split_clocks: Option<cudarc::driver::CudaSlice<u64>>,
+    h_graph_gqa_k4_split_clocks: Vec<u64>,
+    graph_mixed_segment_clock_enabled: bool,
+    graph_mixed_segment_active: Vec<bool>,
+    d_graph_mixed_segment_clocks: Option<cudarc::driver::CudaSlice<u64>>,
+    h_graph_mixed_segment_clocks: Vec<u64>,
+    graph_gqa_path_clock_enabled: bool,
+    graph_gqa_path_active: Vec<bool>,
+    d_graph_gqa_path_clocks: Option<cudarc::driver::CudaSlice<u64>>,
+    h_graph_gqa_path_clocks: Vec<u64>,
+    graph_gqa_boundary_clock_enabled: bool,
+    graph_gqa_coverage_clock_enabled: bool,
+    graph_gqa_other_clock_enabled: bool,
+    graph_gqa_other_active: Vec<bool>,
+    graph_gqa_other_meta: Vec<GraphGqaOtherMeta>,
+    graph_gqa_other_totals: Vec<GraphGqaOtherClockTotals>,
+    d_graph_gqa_other_clocks: Option<cudarc::driver::CudaSlice<u64>>,
+    h_graph_gqa_other_clocks: Vec<u64>,
+    graph_gqa_hd256_attn_clock_enabled: bool,
+    graph_gqa_hd256_attn_clock_heads: usize,
+    graph_gqa_hd256_attn_active: Vec<bool>,
+    d_graph_gqa_hd256_attn_clocks: Option<cudarc::driver::CudaSlice<u64>>,
+    h_graph_gqa_hd256_attn_clocks: Vec<u64>,
+    d_graph_gqa_hd256_attn_stats: Option<cudarc::driver::CudaSlice<u64>>,
+    h_graph_gqa_hd256_attn_stats: Vec<u64>,
+    graph_moe_route_clock_enabled: bool,
+    graph_moe_route_active: Vec<bool>,
+    d_graph_moe_route_clocks: Option<cudarc::driver::CudaSlice<u64>>,
+    h_graph_moe_route_clocks: Vec<u64>,
+    graph_moe_w2_clock_enabled: bool,
+    graph_moe_w2_preload_clock_enabled: bool,
+    graph_moe_w2_clock_blocks: usize,
+    graph_moe_w2_clock_slots_per_block: usize,
+    graph_moe_w2_active: Vec<bool>,
+    d_graph_moe_w2_clocks: Option<cudarc::driver::CudaSlice<u64>>,
+    h_graph_moe_w2_clocks: Vec<u64>,
+    graph_route_prep_clock_enabled: bool,
+    graph_route_prep_active: Vec<bool>,
+    d_graph_route_prep_clocks: Option<cudarc::driver::CudaSlice<u64>>,
+    h_graph_route_prep_clocks: Vec<u64>,
+    graph_final_clock_enabled: bool,
+    graph_final_softcap_gpu_enabled: bool,
+    d_graph_final_clocks: Option<cudarc::driver::CudaSlice<u64>>,
+    h_graph_final_clocks: Vec<u64>,
     // DMA instrumentation (accumulated across all layers per token, then across tokens)
     dma_bytes_total: u64,    // total bytes DMA'd (cold experts only)
     dma_call_count: u64,     // number of cuMemcpyHtoDAsync calls
@@ -7099,6 +7252,56 @@ struct DecodeGraphTimingEvents {
     final_part: DecodeGraphEventSet,
 }
 
+const GRAPH_GQA_OTHER_CLOCK_SLOTS: usize = 9;
+const GRAPH_MOE_ROUTE_CLOCK_SLOTS: usize = 26;
+const GRAPH_MOE_ROUTE_POST_SHARED_GATE_END: usize = 15;
+const GRAPH_MOE_ROUTE_POST_SHARED_W13_END: usize = 16;
+const GRAPH_MOE_ROUTE_POST_SHARED_REDUCE_END: usize = 17;
+const GRAPH_MOE_ROUTE_POST_SHARED_W2_END: usize = 18;
+const GRAPH_MOE_ROUTE_POST_SCALE_END: usize = 19;
+const GRAPH_MOE_ROUTE_POST_HIDDEN_WRITE_END: usize = 20;
+const GRAPH_MOE_ROUTE_POST_HIDDEN_NORM2_END: usize = 21;
+const GRAPH_MOE_ROUTE_POST_HIDDEN_ADD1_END: usize = 22;
+const GRAPH_MOE_ROUTE_POST_HIDDEN_NORM_END: usize = 23;
+const GRAPH_MOE_ROUTE_POST_HIDDEN_ADD2_END: usize = 24;
+const GRAPH_MOE_ROUTE_POST_HIDDEN_SCALAR_END: usize = 25;
+
+#[derive(Clone, Copy, Default)]
+struct GraphGqaOtherClockTotals {
+    projection: f64,
+    qkv_norm: f64,
+    rope: f64,
+    kv_write: f64,
+    norm_rope_kv: f64,
+    attention_reduce: f64,
+    apply_bf16: f64,
+    o_input_prep: f64,
+    o_projection: f64,
+    endpoint: f64,
+}
+
+#[derive(Clone, Default)]
+struct GraphGqaOtherMeta {
+    active: bool,
+    layer_idx: usize,
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    sliding_window: usize,
+    gated: bool,
+    projection_mode: u8,
+}
+
+fn graph_gqa_projection_mode_name(mode: u8) -> &'static str {
+    match mode {
+        1 => "hqq_fused",
+        2 => "hqq_split",
+        3 => "bf16_fused",
+        4 => "bf16_split",
+        _ => "unknown",
+    }
+}
+
 impl DecodeGraphEventSet {
     fn new(num_graphs: usize) -> Result<Self, String> {
         let mut start = Vec::with_capacity(num_graphs);
@@ -7178,6 +7381,985 @@ fn create_decode_timing_event() -> Result<CudaEvent, String> {
     Ok(CudaEvent(ev))
 }
 
+fn launch_graph_clock_marker(
+    kernels: &CachedKernels,
+    clocks: &cudarc::driver::CudaSlice<u64>,
+    index: usize,
+    label: &str,
+) -> Result<(), String> {
+    use cudarc::driver::LaunchConfig;
+    unsafe {
+        kernels
+            .record_globaltimer_u64_g
+            .clone()
+            .launch(
+                LaunchConfig {
+                    grid_dim: (1, 1, 1),
+                    block_dim: (1, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (*clocks.device_ptr(), index as i32),
+            )
+            .map_err(|e| format!("record_globaltimer_u64_g[{}]: {:?}", label, e))?;
+    }
+    Ok(())
+}
+
+fn accumulate_gqa_k4_split_clocks(graph: &mut GpuDecodeGraph) -> Result<(), String> {
+    if !graph.graph_gqa_k4_split_clock_enabled {
+        return Ok(());
+    }
+    let Some(d_clocks) = graph.d_graph_gqa_k4_split_clocks.as_ref() else {
+        return Ok(());
+    };
+    if graph.h_graph_gqa_k4_split_clocks.is_empty() {
+        return Ok(());
+    }
+
+    let bytes = graph.h_graph_gqa_k4_split_clocks.len() * std::mem::size_of::<u64>();
+    unsafe {
+        let err = cuda_sys::lib().cuMemcpyDtoH_v2(
+            graph.h_graph_gqa_k4_split_clocks.as_mut_ptr() as *mut std::ffi::c_void,
+            *d_clocks.device_ptr(),
+            bytes,
+        );
+        if err != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!("copy graph GQA split clocks: {:?}", err));
+        }
+    }
+
+    for (graph_idx, &active) in graph.graph_gqa_k4_split_active.iter().enumerate() {
+        if !active {
+            continue;
+        }
+        let base = graph_idx * 3;
+        if base + 2 >= graph.h_graph_gqa_k4_split_clocks.len() {
+            continue;
+        }
+        let t0 = graph.h_graph_gqa_k4_split_clocks[base];
+        let t1 = graph.h_graph_gqa_k4_split_clocks[base + 1];
+        let t2 = graph.h_graph_gqa_k4_split_clocks[base + 2];
+        if t1 >= t0 {
+            graph.t_graph_gqa_k4_tiled_attn += (t1 - t0) as f64 / 1_000_000_000.0;
+        }
+        if t2 >= t1 {
+            graph.t_graph_gqa_k4_polar4_reduce += (t2 - t1) as f64 / 1_000_000_000.0;
+        }
+    }
+    Ok(())
+}
+
+fn accumulate_mixed_segment_clocks(graph: &mut GpuDecodeGraph) -> Result<(), String> {
+    if !graph.graph_mixed_segment_clock_enabled {
+        return Ok(());
+    }
+    let Some(d_clocks) = graph.d_graph_mixed_segment_clocks.as_ref() else {
+        return Ok(());
+    };
+    if graph.h_graph_mixed_segment_clocks.is_empty() {
+        return Ok(());
+    }
+
+    let bytes = graph.h_graph_mixed_segment_clocks.len() * std::mem::size_of::<u64>();
+    unsafe {
+        let err = cuda_sys::lib().cuMemcpyDtoH_v2(
+            graph.h_graph_mixed_segment_clocks.as_mut_ptr() as *mut std::ffi::c_void,
+            *d_clocks.device_ptr(),
+            bytes,
+        );
+        if err != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!("copy graph mixed segment clocks: {:?}", err));
+        }
+    }
+
+    for (graph_idx, &active) in graph.graph_mixed_segment_active.iter().enumerate() {
+        if !active {
+            continue;
+        }
+        let base = graph_idx * 5;
+        if base + 4 >= graph.h_graph_mixed_segment_clocks.len() {
+            continue;
+        }
+        let t0 = graph.h_graph_mixed_segment_clocks[base];
+        let t1 = graph.h_graph_mixed_segment_clocks[base + 1];
+        let t2 = graph.h_graph_mixed_segment_clocks[base + 2];
+        let t3 = graph.h_graph_mixed_segment_clocks[base + 3];
+        let t4 = graph.h_graph_mixed_segment_clocks[base + 4];
+        if t1 >= t0 {
+            graph.t_graph_mixed_moe_expert += (t1 - t0) as f64 / 1_000_000_000.0;
+        }
+        if t3 >= t2 {
+            graph.t_graph_mixed_gqa_proj_attn += (t3 - t2) as f64 / 1_000_000_000.0;
+        }
+        if t2 >= t1 {
+            graph.t_graph_mixed_route_topk += (t2 - t1) as f64 / 1_000_000_000.0;
+        }
+        if t4 >= t3 {
+            graph.t_graph_mixed_route_topk += (t4 - t3) as f64 / 1_000_000_000.0;
+        }
+    }
+    Ok(())
+}
+
+fn accumulate_moe_route_clocks(graph: &mut GpuDecodeGraph) -> Result<(), String> {
+    if !graph.graph_moe_route_clock_enabled {
+        return Ok(());
+    }
+    let Some(d_clocks) = graph.d_graph_moe_route_clocks.as_ref() else {
+        return Ok(());
+    };
+    if graph.h_graph_moe_route_clocks.is_empty() {
+        return Ok(());
+    }
+
+    let bytes = graph.h_graph_moe_route_clocks.len() * std::mem::size_of::<u64>();
+    unsafe {
+        let err = cuda_sys::lib().cuMemcpyDtoH_v2(
+            graph.h_graph_moe_route_clocks.as_mut_ptr() as *mut std::ffi::c_void,
+            *d_clocks.device_ptr(),
+            bytes,
+        );
+        if err != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!("copy graph MoE/route clocks: {:?}", err));
+        }
+    }
+
+    for (graph_idx, &active) in graph.graph_moe_route_active.iter().enumerate() {
+        if !active {
+            continue;
+        }
+        let base = graph_idx * GRAPH_MOE_ROUTE_CLOCK_SLOTS;
+        if base + GRAPH_MOE_ROUTE_CLOCK_SLOTS - 1 >= graph.h_graph_moe_route_clocks.len() {
+            continue;
+        }
+        let t0 = graph.h_graph_moe_route_clocks[base];
+        let t1 = graph.h_graph_moe_route_clocks[base + 1];
+        let t2 = graph.h_graph_moe_route_clocks[base + 2];
+        let t3 = graph.h_graph_moe_route_clocks[base + 3];
+        let t4 = graph.h_graph_moe_route_clocks[base + 4];
+        let t5 = graph.h_graph_moe_route_clocks[base + 5];
+        let r0 = graph.h_graph_moe_route_clocks[base + 6];
+        let r1 = graph.h_graph_moe_route_clocks[base + 7];
+        let r2 = graph.h_graph_moe_route_clocks[base + 8];
+        let r3 = graph.h_graph_moe_route_clocks[base + 9];
+        let r4 = graph.h_graph_moe_route_clocks[base + 10];
+        let r5 = graph.h_graph_moe_route_clocks[base + 11];
+        let r6 = graph.h_graph_moe_route_clocks[base + 12];
+        let r7 = graph.h_graph_moe_route_clocks[base + 13];
+        let r8 = graph.h_graph_moe_route_clocks[base + 14];
+        let p_shared_gate =
+            graph.h_graph_moe_route_clocks[base + GRAPH_MOE_ROUTE_POST_SHARED_GATE_END];
+        let p_shared_w13 =
+            graph.h_graph_moe_route_clocks[base + GRAPH_MOE_ROUTE_POST_SHARED_W13_END];
+        let p_shared_reduce =
+            graph.h_graph_moe_route_clocks[base + GRAPH_MOE_ROUTE_POST_SHARED_REDUCE_END];
+        let p_shared_w2 =
+            graph.h_graph_moe_route_clocks[base + GRAPH_MOE_ROUTE_POST_SHARED_W2_END];
+        let p_scale = graph.h_graph_moe_route_clocks[base + GRAPH_MOE_ROUTE_POST_SCALE_END];
+        let p_hidden_write =
+            graph.h_graph_moe_route_clocks[base + GRAPH_MOE_ROUTE_POST_HIDDEN_WRITE_END];
+        let p_hidden_norm2 =
+            graph.h_graph_moe_route_clocks[base + GRAPH_MOE_ROUTE_POST_HIDDEN_NORM2_END];
+        let p_hidden_add1 =
+            graph.h_graph_moe_route_clocks[base + GRAPH_MOE_ROUTE_POST_HIDDEN_ADD1_END];
+        let p_hidden_norm =
+            graph.h_graph_moe_route_clocks[base + GRAPH_MOE_ROUTE_POST_HIDDEN_NORM_END];
+        let p_hidden_add2 =
+            graph.h_graph_moe_route_clocks[base + GRAPH_MOE_ROUTE_POST_HIDDEN_ADD2_END];
+        let p_hidden_scalar =
+            graph.h_graph_moe_route_clocks[base + GRAPH_MOE_ROUTE_POST_HIDDEN_SCALAR_END];
+
+        if t0 != 0 && t1 >= t0 {
+            graph.t_graph_moe_route_w13_gemv += (t1 - t0) as f64 / 1_000_000_000.0;
+        }
+        if t2 >= t1 {
+            graph.t_graph_moe_route_w13_reduce += (t2 - t1) as f64 / 1_000_000_000.0;
+        }
+        if t3 >= t2 {
+            graph.t_graph_moe_route_activation_w2 += (t3 - t2) as f64 / 1_000_000_000.0;
+        }
+        if t4 >= t3 {
+            graph.t_graph_moe_route_weighted_output += (t4 - t3) as f64 / 1_000_000_000.0;
+        }
+        if t5 >= t4 {
+            graph.t_graph_moe_route_post_output += (t5 - t4) as f64 / 1_000_000_000.0;
+        }
+        let mut post_cursor = t4;
+        if p_shared_gate != 0 && p_shared_gate >= post_cursor {
+            graph.t_graph_moe_route_post_shared_gate +=
+                (p_shared_gate - post_cursor) as f64 / 1_000_000_000.0;
+            post_cursor = p_shared_gate;
+        }
+        if p_shared_w13 != 0 && p_shared_w13 >= post_cursor {
+            graph.t_graph_moe_route_post_shared_w13 +=
+                (p_shared_w13 - post_cursor) as f64 / 1_000_000_000.0;
+            post_cursor = p_shared_w13;
+        }
+        if p_shared_reduce != 0 && p_shared_reduce >= post_cursor {
+            graph.t_graph_moe_route_post_shared_reduce +=
+                (p_shared_reduce - post_cursor) as f64 / 1_000_000_000.0;
+            post_cursor = p_shared_reduce;
+        }
+        if p_shared_w2 != 0 && p_shared_w2 >= post_cursor {
+            graph.t_graph_moe_route_post_shared_w2 +=
+                (p_shared_w2 - post_cursor) as f64 / 1_000_000_000.0;
+            post_cursor = p_shared_w2;
+        }
+        if p_scale != 0 && p_scale >= post_cursor {
+            graph.t_graph_moe_route_post_scale +=
+                (p_scale - post_cursor) as f64 / 1_000_000_000.0;
+            post_cursor = p_scale;
+        }
+        if p_hidden_write != 0 && p_hidden_write >= post_cursor {
+            graph.t_graph_moe_route_post_hidden_write +=
+                (p_hidden_write - post_cursor) as f64 / 1_000_000_000.0;
+            let mut hidden_cursor = post_cursor;
+            if p_hidden_norm2 != 0 && p_hidden_norm2 >= hidden_cursor {
+                graph.t_graph_moe_route_post_hidden_norm2 +=
+                    (p_hidden_norm2 - hidden_cursor) as f64 / 1_000_000_000.0;
+                hidden_cursor = p_hidden_norm2;
+            }
+            if p_hidden_add1 != 0 && p_hidden_add1 >= hidden_cursor {
+                graph.t_graph_moe_route_post_hidden_add1 +=
+                    (p_hidden_add1 - hidden_cursor) as f64 / 1_000_000_000.0;
+                hidden_cursor = p_hidden_add1;
+            }
+            if p_hidden_norm != 0 && p_hidden_norm >= hidden_cursor {
+                graph.t_graph_moe_route_post_hidden_norm +=
+                    (p_hidden_norm - hidden_cursor) as f64 / 1_000_000_000.0;
+                hidden_cursor = p_hidden_norm;
+            }
+            if p_hidden_add2 != 0 && p_hidden_add2 >= hidden_cursor {
+                graph.t_graph_moe_route_post_hidden_add2 +=
+                    (p_hidden_add2 - hidden_cursor) as f64 / 1_000_000_000.0;
+                hidden_cursor = p_hidden_add2;
+            }
+            if p_hidden_scalar != 0 && p_hidden_scalar >= hidden_cursor {
+                graph.t_graph_moe_route_post_hidden_scalar +=
+                    (p_hidden_scalar - hidden_cursor) as f64 / 1_000_000_000.0;
+                hidden_cursor = p_hidden_scalar;
+            }
+            if p_hidden_write >= hidden_cursor {
+                graph.t_graph_moe_route_post_hidden_endpoint +=
+                    (p_hidden_write - hidden_cursor) as f64 / 1_000_000_000.0;
+            }
+            post_cursor = p_hidden_write;
+        }
+        if t5 >= post_cursor {
+            graph.t_graph_moe_route_post_endpoint +=
+                (t5 - post_cursor) as f64 / 1_000_000_000.0;
+        }
+
+        if r0 != 0 && r1 >= r0 {
+            graph.t_graph_moe_route_pre_gqa_prep += (r1 - r0) as f64 / 1_000_000_000.0;
+        }
+        if r3 >= r2 {
+            graph.t_graph_moe_route_post_gqa_prep += (r3 - r2) as f64 / 1_000_000_000.0;
+        }
+        if r4 >= r3 {
+            graph.t_graph_moe_route_logits += (r4 - r3) as f64 / 1_000_000_000.0;
+        }
+        if r5 >= r4 {
+            graph.t_graph_moe_route_topk += (r5 - r4) as f64 / 1_000_000_000.0;
+        }
+        if r7 >= r5 {
+            graph.t_graph_moe_route_scale_classify += (r7 - r5) as f64 / 1_000_000_000.0;
+        }
+        if r8 >= r7 {
+            graph.t_graph_moe_route_tail += (r8 - r7) as f64 / 1_000_000_000.0;
+        }
+    }
+
+    Ok(())
+}
+
+fn accumulate_moe_w2_clocks(graph: &mut GpuDecodeGraph) -> Result<(), String> {
+    if !graph.graph_moe_w2_clock_enabled {
+        return Ok(());
+    }
+    let Some(d_clocks) = graph.d_graph_moe_w2_clocks.as_ref() else {
+        return Ok(());
+    };
+    if graph.h_graph_moe_w2_clocks.is_empty() || graph.graph_moe_w2_clock_blocks == 0 {
+        return Ok(());
+    }
+
+    let bytes = graph.h_graph_moe_w2_clocks.len() * std::mem::size_of::<u64>();
+    unsafe {
+        let err = cuda_sys::lib().cuMemcpyDtoH_v2(
+            graph.h_graph_moe_w2_clocks.as_mut_ptr() as *mut std::ffi::c_void,
+            *d_clocks.device_ptr(),
+            bytes,
+        );
+        if err != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!("copy graph MoE W2 clocks: {:?}", err));
+        }
+    }
+
+    let blocks_per_graph = graph.graph_moe_w2_clock_blocks;
+    let slots_per_block = graph.graph_moe_w2_clock_slots_per_block.max(4);
+    for (graph_idx, &active) in graph.graph_moe_w2_active.iter().enumerate() {
+        if !active {
+            continue;
+        }
+
+        let base = graph_idx * blocks_per_graph * slots_per_block;
+        if base >= graph.h_graph_moe_w2_clocks.len() {
+            continue;
+        }
+
+        let mut min_start = u64::MAX;
+        let mut max_activation_end = 0u64;
+        let mut max_prep_end = 0u64;
+        let mut max_end = 0u64;
+        let mut activation_block_sum = 0u64;
+        let mut max_gate_up_load = 0u64;
+        let mut max_silu_mul = 0u64;
+        let mut max_shared_store = 0u64;
+        let mut max_activation_pre_sync = 0u64;
+        let mut max_activation_sync = 0u64;
+        let mut active_blocks = 0u64;
+
+        for block_idx in 0..blocks_per_graph {
+            let offset = base + block_idx * slots_per_block;
+            if offset + 3 >= graph.h_graph_moe_w2_clocks.len() {
+                break;
+            }
+            let t0 = graph.h_graph_moe_w2_clocks[offset];
+            let t1 = graph.h_graph_moe_w2_clocks[offset + 1];
+            let t2 = graph.h_graph_moe_w2_clocks[offset + 2];
+            let t3 = graph.h_graph_moe_w2_clocks[offset + 3];
+            if t0 == 0 || t1 < t0 || t2 < t1 || t3 < t2 {
+                continue;
+            }
+            min_start = min_start.min(t0);
+            max_activation_end = max_activation_end.max(t1);
+            max_prep_end = max_prep_end.max(t2);
+            max_end = max_end.max(t3);
+            activation_block_sum = activation_block_sum.saturating_add(t1.saturating_sub(t0));
+            if graph.graph_moe_w2_preload_clock_enabled && slots_per_block >= 8 {
+                let gate_up_load = graph.h_graph_moe_w2_clocks[offset + 4];
+                let silu_mul = graph.h_graph_moe_w2_clocks[offset + 5];
+                let shared_store = graph.h_graph_moe_w2_clocks[offset + 6];
+                let pre_sync_end = graph.h_graph_moe_w2_clocks[offset + 7];
+                if pre_sync_end >= t0 && t1 >= pre_sync_end {
+                    max_gate_up_load = max_gate_up_load.max(gate_up_load);
+                    max_silu_mul = max_silu_mul.max(silu_mul);
+                    max_shared_store = max_shared_store.max(shared_store);
+                    max_activation_pre_sync = max_activation_pre_sync.max(pre_sync_end);
+                    max_activation_sync = max_activation_sync.max(t1 - pre_sync_end);
+                }
+            }
+            active_blocks = active_blocks.saturating_add(1);
+        }
+
+        if active_blocks == 0 || min_start == u64::MAX || max_end < min_start {
+            continue;
+        }
+
+        let activation = max_activation_end.saturating_sub(min_start) as f64 / 1_000_000_000.0;
+        let prep = max_prep_end.saturating_sub(max_activation_end) as f64 / 1_000_000_000.0;
+        let w2 = max_end.saturating_sub(max_prep_end) as f64 / 1_000_000_000.0;
+        let internal_total = max_end.saturating_sub(min_start) as f64 / 1_000_000_000.0;
+        let preload_sync = max_activation_sync as f64 / 1_000_000_000.0;
+        let sample_total = max_gate_up_load
+            .saturating_add(max_silu_mul)
+            .saturating_add(max_shared_store);
+        let pre_sync_wall = if max_activation_pre_sync >= min_start {
+            max_activation_pre_sync - min_start
+        } else {
+            0
+        } as f64 / 1_000_000_000.0;
+        let (preload_load, preload_math, preload_store) =
+            if graph.graph_moe_w2_preload_clock_enabled && sample_total > 0 {
+                let sample = sample_total as f64;
+                (
+                    pre_sync_wall * (max_gate_up_load as f64 / sample),
+                    pre_sync_wall * (max_silu_mul as f64 / sample),
+                    pre_sync_wall * (max_shared_store as f64 / sample),
+                )
+            } else {
+                (0.0, 0.0, 0.0)
+            };
+        let preload_named = preload_load + preload_math + preload_store + preload_sync;
+        let preload_residual = if graph.graph_moe_w2_preload_clock_enabled && activation > preload_named {
+            activation - preload_named
+        } else {
+            0.0
+        };
+
+        graph.t_graph_moe_w2_activation += activation;
+        graph.t_graph_moe_w2_prep += prep;
+        graph.t_graph_moe_w2_gemv += w2;
+        graph.t_graph_moe_w2_internal_total += internal_total;
+        graph.t_graph_moe_w2_preload_gate_up_load += preload_load;
+        graph.t_graph_moe_w2_preload_silu_mul += preload_math;
+        graph.t_graph_moe_w2_preload_shared_store += preload_store;
+        graph.t_graph_moe_w2_preload_sync += preload_sync;
+        graph.t_graph_moe_w2_preload_residual += preload_residual;
+        graph.t_graph_moe_w2_preload_block_sum +=
+            activation_block_sum as f64 / 1_000_000_000.0;
+        graph.graph_moe_w2_segments = graph.graph_moe_w2_segments.saturating_add(1);
+        graph.graph_moe_w2_blocks = graph.graph_moe_w2_blocks.saturating_add(active_blocks);
+
+        let marker_base = graph_idx * GRAPH_MOE_ROUTE_CLOCK_SLOTS;
+        if marker_base + 3 < graph.h_graph_moe_route_clocks.len() {
+            let marker_start = graph.h_graph_moe_route_clocks[marker_base + 2];
+            let marker_end = graph.h_graph_moe_route_clocks[marker_base + 3];
+            if marker_start != 0 && marker_end >= marker_start {
+                let marker_total = (marker_end - marker_start) as f64 / 1_000_000_000.0;
+                if marker_total >= internal_total {
+                    graph.t_graph_moe_w2_graph_overhead += marker_total - internal_total;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn accumulate_route_prep_clocks(graph: &mut GpuDecodeGraph) -> Result<(), String> {
+    if !graph.graph_route_prep_clock_enabled {
+        return Ok(());
+    }
+    let Some(d_clocks) = graph.d_graph_route_prep_clocks.as_ref() else {
+        return Ok(());
+    };
+    if graph.h_graph_route_prep_clocks.is_empty() {
+        return Ok(());
+    }
+
+    let bytes = graph.h_graph_route_prep_clocks.len() * std::mem::size_of::<u64>();
+    unsafe {
+        let err = cuda_sys::lib().cuMemcpyDtoH_v2(
+            graph.h_graph_route_prep_clocks.as_mut_ptr() as *mut std::ffi::c_void,
+            *d_clocks.device_ptr(),
+            bytes,
+        );
+        if err != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!("copy graph route-prep clocks: {:?}", err));
+        }
+    }
+
+    for (graph_idx, &active) in graph.graph_route_prep_active.iter().enumerate() {
+        if !active {
+            continue;
+        }
+        let base = graph_idx * 12;
+        if base + 11 >= graph.h_graph_route_prep_clocks.len() {
+            continue;
+        }
+        let t0 = graph.h_graph_route_prep_clocks[base];
+        let t1 = graph.h_graph_route_prep_clocks[base + 1];
+        let t2 = graph.h_graph_route_prep_clocks[base + 2];
+        let t3 = graph.h_graph_route_prep_clocks[base + 3];
+        let t4 = graph.h_graph_route_prep_clocks[base + 4];
+        let t5 = graph.h_graph_route_prep_clocks[base + 5];
+        let t6 = graph.h_graph_route_prep_clocks[base + 6];
+        let t7 = graph.h_graph_route_prep_clocks[base + 7];
+        let t8 = graph.h_graph_route_prep_clocks[base + 8];
+        let t9 = graph.h_graph_route_prep_clocks[base + 9];
+        let t10 = graph.h_graph_route_prep_clocks[base + 10];
+        let t11 = graph.h_graph_route_prep_clocks[base + 11];
+
+        if t0 != 0 && t1 >= t0 {
+            graph.t_graph_route_prep_pre_gqa_norm += (t1 - t0) as f64 / 1_000_000_000.0;
+        }
+        if t3 >= t2 {
+            graph.t_graph_route_prep_post_gqa_norm_add += (t3 - t2) as f64 / 1_000_000_000.0;
+        }
+        if t5 >= t4 {
+            graph.t_graph_route_prep_dense_pre_norm += (t5 - t4) as f64 / 1_000_000_000.0;
+        }
+        if t6 >= t5 {
+            graph.t_graph_route_prep_dense_gate += (t6 - t5) as f64 / 1_000_000_000.0;
+        }
+        if t7 >= t6 {
+            graph.t_graph_route_prep_dense_up += (t7 - t6) as f64 / 1_000_000_000.0;
+        }
+        if t8 >= t7 {
+            graph.t_graph_route_prep_dense_activation += (t8 - t7) as f64 / 1_000_000_000.0;
+        }
+        if t9 >= t8 {
+            graph.t_graph_route_prep_dense_down += (t9 - t8) as f64 / 1_000_000_000.0;
+        }
+        if t10 >= t9 {
+            graph.t_graph_route_prep_dense_post_norms += (t10 - t9) as f64 / 1_000_000_000.0;
+        }
+        if t11 >= t10 {
+            graph.t_graph_route_prep_router_input_norm += (t11 - t10) as f64 / 1_000_000_000.0;
+        }
+    }
+
+    Ok(())
+}
+
+fn accumulate_final_clocks(graph: &mut GpuDecodeGraph) -> Result<(), String> {
+    if !graph.graph_final_clock_enabled {
+        return Ok(());
+    }
+    let Some(d_clocks) = graph.d_graph_final_clocks.as_ref() else {
+        return Ok(());
+    };
+    if graph.h_graph_final_clocks.is_empty() {
+        return Ok(());
+    }
+
+    let bytes = graph.h_graph_final_clocks.len() * std::mem::size_of::<u64>();
+    unsafe {
+        let err = cuda_sys::lib().cuMemcpyDtoH_v2(
+            graph.h_graph_final_clocks.as_mut_ptr() as *mut std::ffi::c_void,
+            *d_clocks.device_ptr(),
+            bytes,
+        );
+        if err != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!("copy graph final clocks: {:?}", err));
+        }
+    }
+
+    for (graph_idx, &kind) in graph.graph_segment_kinds.iter().enumerate() {
+        if kind != GRAPH_SEG_FINAL {
+            continue;
+        }
+        let base = graph_idx * GRAPH_FINAL_CLOCK_SLOTS;
+        if base + 3 >= graph.h_graph_final_clocks.len() {
+            continue;
+        }
+        let t0 = graph.h_graph_final_clocks[base];
+        let t1 = graph.h_graph_final_clocks[base + 1];
+        let t2 = graph.h_graph_final_clocks[base + 2];
+        let t3 = graph.h_graph_final_clocks[base + 3];
+
+        let mut marker_total = 0.0f64;
+        if t0 != 0 && t1 >= t0 {
+            let seconds = (t1 - t0) as f64 / 1_000_000_000.0;
+            graph.t_graph_final_norm += seconds;
+            marker_total += seconds;
+        }
+        if t1 != 0 && t2 >= t1 {
+            let seconds = (t2 - t1) as f64 / 1_000_000_000.0;
+            graph.t_graph_final_lm_head += seconds;
+            marker_total += seconds;
+        }
+        if t2 != 0 && t3 >= t2 {
+            let seconds = (t3 - t2) as f64 / 1_000_000_000.0;
+            graph.t_graph_final_gpu_softcap += seconds;
+            marker_total += seconds;
+        }
+
+        if let Some(events) = graph.graph_timing_events.as_ref() {
+            let final_event = events.total.elapsed_ms(graph_idx)? / 1000.0;
+            if final_event > marker_total {
+                graph.t_graph_final_graph_residual += final_event - marker_total;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn accumulate_gqa_path_clocks(graph: &mut GpuDecodeGraph) -> Result<(), String> {
+    if !graph.graph_gqa_path_clock_enabled {
+        return Ok(());
+    }
+    let Some(d_clocks) = graph.d_graph_gqa_path_clocks.as_ref() else {
+        return Ok(());
+    };
+    if graph.h_graph_gqa_path_clocks.is_empty() {
+        return Ok(());
+    }
+
+    let bytes = graph.h_graph_gqa_path_clocks.len() * std::mem::size_of::<u64>();
+    unsafe {
+        let err = cuda_sys::lib().cuMemcpyDtoH_v2(
+            graph.h_graph_gqa_path_clocks.as_mut_ptr() as *mut std::ffi::c_void,
+            *d_clocks.device_ptr(),
+            bytes,
+        );
+        if err != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!("copy graph GQA path clocks: {:?}", err));
+        }
+    }
+
+    for (graph_idx, &active) in graph.graph_gqa_path_active.iter().enumerate() {
+        if !active {
+            continue;
+        }
+        let base = graph_idx * 7;
+        if base + 6 >= graph.h_graph_gqa_path_clocks.len() {
+            continue;
+        }
+        let t0 = graph.h_graph_gqa_path_clocks[base];
+        let t1 = graph.h_graph_gqa_path_clocks[base + 1];
+        let t2 = graph.h_graph_gqa_path_clocks[base + 2];
+        let t3 = graph.h_graph_gqa_path_clocks[base + 3];
+        let t4 = graph.h_graph_gqa_path_clocks[base + 4];
+        let t5 = graph.h_graph_gqa_path_clocks[base + 5];
+        let t6 = graph.h_graph_gqa_path_clocks[base + 6];
+        if t1 >= t0 {
+            graph.t_graph_gqa_path_projection += (t1 - t0) as f64 / 1_000_000_000.0;
+        }
+        if t2 >= t1 {
+            graph.t_graph_gqa_path_norm_rope_kv += (t2 - t1) as f64 / 1_000_000_000.0;
+        }
+        if t3 >= t2 {
+            graph.t_graph_gqa_path_attention_reduce += (t3 - t2) as f64 / 1_000_000_000.0;
+        }
+        if t4 >= t3 {
+            graph.t_graph_gqa_path_apply_gated_bf16 += (t4 - t3) as f64 / 1_000_000_000.0;
+        }
+        if t5 >= t4 {
+            graph.t_graph_gqa_path_o_input_prep += (t5 - t4) as f64 / 1_000_000_000.0;
+        }
+        if t6 >= t5 {
+            graph.t_graph_gqa_path_o_projection += (t6 - t5) as f64 / 1_000_000_000.0;
+        }
+    }
+    Ok(())
+}
+
+fn accumulate_gqa_boundary_clocks(graph: &mut GpuDecodeGraph) -> Result<(), String> {
+    if !graph.graph_gqa_boundary_clock_enabled {
+        return Ok(());
+    }
+    if !graph.graph_mixed_segment_clock_enabled || !graph.graph_gqa_path_clock_enabled {
+        return Ok(());
+    }
+    if graph.h_graph_mixed_segment_clocks.is_empty() || graph.h_graph_gqa_path_clocks.is_empty() {
+        return Ok(());
+    }
+
+    for graph_idx in 0..graph.graph_gqa_path_active.len() {
+        let path_active = graph.graph_gqa_path_active.get(graph_idx).copied().unwrap_or(false);
+        let mixed_active = graph.graph_mixed_segment_active.get(graph_idx).copied().unwrap_or(false);
+        if !path_active || !mixed_active {
+            continue;
+        }
+
+        let mixed_base = graph_idx * 5;
+        let path_base = graph_idx * 7;
+        if mixed_base + 3 >= graph.h_graph_mixed_segment_clocks.len()
+            || path_base + 6 >= graph.h_graph_gqa_path_clocks.len()
+        {
+            continue;
+        }
+
+        let mixed_gqa_start = graph.h_graph_mixed_segment_clocks[mixed_base + 2];
+        let mixed_gqa_end = graph.h_graph_mixed_segment_clocks[mixed_base + 3];
+        let path_start = graph.h_graph_gqa_path_clocks[path_base];
+        let path_end = graph.h_graph_gqa_path_clocks[path_base + 6];
+
+        if path_start < mixed_gqa_start || path_end < path_start || mixed_gqa_end < path_end {
+            continue;
+        }
+
+        let full_gqa = (mixed_gqa_end - mixed_gqa_start) as f64 / 1_000_000_000.0;
+        let named_path = (path_end - path_start) as f64 / 1_000_000_000.0;
+        let entry_gap = (path_start - mixed_gqa_start) as f64 / 1_000_000_000.0;
+        let post_o_exit_gap = (mixed_gqa_end - path_end) as f64 / 1_000_000_000.0;
+        let stream_debt = full_gqa - named_path - entry_gap - post_o_exit_gap;
+
+        graph.t_graph_gqa_boundary_entry_gap += entry_gap;
+        graph.t_graph_gqa_boundary_post_o_exit_gap += post_o_exit_gap;
+        graph.t_graph_gqa_boundary_stream_debt += stream_debt;
+    }
+    Ok(())
+}
+
+fn accumulate_gqa_coverage_clocks(graph: &mut GpuDecodeGraph) -> Result<(), String> {
+    if !graph.graph_gqa_coverage_clock_enabled {
+        return Ok(());
+    }
+    if !graph.graph_mixed_segment_clock_enabled || !graph.graph_gqa_path_clock_enabled {
+        return Ok(());
+    }
+    if graph.h_graph_mixed_segment_clocks.is_empty() || graph.h_graph_gqa_path_clocks.is_empty() {
+        return Ok(());
+    }
+
+    let mixed_len = graph.graph_mixed_segment_active.len();
+    for graph_idx in 0..mixed_len {
+        let mixed_active = graph.graph_mixed_segment_active.get(graph_idx).copied().unwrap_or(false);
+        if !mixed_active {
+            continue;
+        }
+
+        let mixed_base = graph_idx * 5;
+        if mixed_base + 3 >= graph.h_graph_mixed_segment_clocks.len() {
+            continue;
+        }
+
+        let mixed_gqa_start = graph.h_graph_mixed_segment_clocks[mixed_base + 2];
+        let mixed_gqa_end = graph.h_graph_mixed_segment_clocks[mixed_base + 3];
+        if mixed_gqa_end < mixed_gqa_start {
+            continue;
+        }
+
+        let mixed_gqa = (mixed_gqa_end - mixed_gqa_start) as f64 / 1_000_000_000.0;
+        graph.t_graph_gqa_coverage_mixed_gqa_total += mixed_gqa;
+
+        let path_active = graph.graph_gqa_path_active.get(graph_idx).copied().unwrap_or(false);
+        let path_base = graph_idx * 7;
+        if !path_active || path_base + 6 >= graph.h_graph_gqa_path_clocks.len() {
+            graph.t_graph_gqa_coverage_other_mixed_gqa += mixed_gqa;
+            continue;
+        }
+
+        let t0 = graph.h_graph_gqa_path_clocks[path_base];
+        let t1 = graph.h_graph_gqa_path_clocks[path_base + 1];
+        let t2 = graph.h_graph_gqa_path_clocks[path_base + 2];
+        let t3 = graph.h_graph_gqa_path_clocks[path_base + 3];
+        let t4 = graph.h_graph_gqa_path_clocks[path_base + 4];
+        let t5 = graph.h_graph_gqa_path_clocks[path_base + 5];
+        let t6 = graph.h_graph_gqa_path_clocks[path_base + 6];
+
+        if t0 < mixed_gqa_start || t6 < t0 || mixed_gqa_end < t6 {
+            graph.t_graph_gqa_coverage_other_mixed_gqa += mixed_gqa;
+            continue;
+        }
+
+        let path_endpoint = (t6 - t0) as f64 / 1_000_000_000.0;
+        let mut named_path = 0.0f64;
+        for (start, end) in [(t0, t1), (t1, t2), (t2, t3), (t3, t4), (t4, t5), (t5, t6)] {
+            if end >= start {
+                named_path += (end - start) as f64 / 1_000_000_000.0;
+            }
+        }
+
+        graph.t_graph_gqa_coverage_active_mixed_gqa += mixed_gqa;
+        graph.t_graph_gqa_coverage_active_path_endpoint += path_endpoint;
+        graph.t_graph_gqa_coverage_active_named_path += named_path;
+        if path_endpoint >= named_path {
+            graph.t_graph_gqa_coverage_active_internal_gap += path_endpoint - named_path;
+        }
+        if mixed_gqa >= path_endpoint {
+            graph.t_graph_gqa_coverage_boundary_gap += mixed_gqa - path_endpoint;
+        }
+    }
+
+    Ok(())
+}
+
+fn accumulate_gqa_other_clocks(graph: &mut GpuDecodeGraph) -> Result<(), String> {
+    if !graph.graph_gqa_other_clock_enabled {
+        return Ok(());
+    }
+    let Some(d_clocks) = graph.d_graph_gqa_other_clocks.as_ref() else {
+        return Ok(());
+    };
+    if graph.h_graph_gqa_other_clocks.is_empty() {
+        return Ok(());
+    }
+
+    let bytes = graph.h_graph_gqa_other_clocks.len() * std::mem::size_of::<u64>();
+    unsafe {
+        let err = cuda_sys::lib().cuMemcpyDtoH_v2(
+            graph.h_graph_gqa_other_clocks.as_mut_ptr() as *mut std::ffi::c_void,
+            *d_clocks.device_ptr(),
+            bytes,
+        );
+        if err != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!("copy graph other GQA clocks: {:?}", err));
+        }
+    }
+
+    for (graph_idx, &active) in graph.graph_gqa_other_active.iter().enumerate() {
+        if !active {
+            continue;
+        }
+        let base = graph_idx * GRAPH_GQA_OTHER_CLOCK_SLOTS;
+        if base + 8 >= graph.h_graph_gqa_other_clocks.len() {
+            continue;
+        }
+        let t0 = graph.h_graph_gqa_other_clocks[base];
+        let t1 = graph.h_graph_gqa_other_clocks[base + 1];
+        let t2 = graph.h_graph_gqa_other_clocks[base + 2];
+        let t3 = graph.h_graph_gqa_other_clocks[base + 3];
+        let t4 = graph.h_graph_gqa_other_clocks[base + 4];
+        let t5 = graph.h_graph_gqa_other_clocks[base + 5];
+        let t6 = graph.h_graph_gqa_other_clocks[base + 6];
+        let t7 = graph.h_graph_gqa_other_clocks[base + 7];
+        let t8 = graph.h_graph_gqa_other_clocks[base + 8];
+        if t8 < t0 {
+            continue;
+        }
+
+        let mut totals = GraphGqaOtherClockTotals::default();
+        if t1 >= t0 {
+            totals.projection = (t1 - t0) as f64 / 1_000_000_000.0;
+        }
+        if t2 >= t1 {
+            totals.qkv_norm = (t2 - t1) as f64 / 1_000_000_000.0;
+        }
+        if t3 >= t2 {
+            totals.rope = (t3 - t2) as f64 / 1_000_000_000.0;
+        }
+        if t4 >= t3 {
+            totals.kv_write = (t4 - t3) as f64 / 1_000_000_000.0;
+        }
+        if t5 >= t4 {
+            totals.attention_reduce = (t5 - t4) as f64 / 1_000_000_000.0;
+        }
+        if t6 >= t5 {
+            totals.apply_bf16 = (t6 - t5) as f64 / 1_000_000_000.0;
+        }
+        if t7 >= t6 {
+            totals.o_input_prep = (t7 - t6) as f64 / 1_000_000_000.0;
+        }
+        if t8 >= t7 {
+            totals.o_projection = (t8 - t7) as f64 / 1_000_000_000.0;
+        }
+        totals.norm_rope_kv = totals.qkv_norm + totals.rope + totals.kv_write;
+        totals.endpoint = (t8 - t0) as f64 / 1_000_000_000.0;
+
+        graph.t_graph_gqa_other_projection += totals.projection;
+        graph.t_graph_gqa_other_qkv_norm += totals.qkv_norm;
+        graph.t_graph_gqa_other_rope += totals.rope;
+        graph.t_graph_gqa_other_kv_write += totals.kv_write;
+        graph.t_graph_gqa_other_norm_rope_kv += totals.norm_rope_kv;
+        graph.t_graph_gqa_other_attention_reduce += totals.attention_reduce;
+        graph.t_graph_gqa_other_apply_bf16 += totals.apply_bf16;
+        graph.t_graph_gqa_other_o_input_prep += totals.o_input_prep;
+        graph.t_graph_gqa_other_o_projection += totals.o_projection;
+        graph.t_graph_gqa_other_endpoint += totals.endpoint;
+
+        if let Some(dst) = graph.graph_gqa_other_totals.get_mut(graph_idx) {
+            dst.projection += totals.projection;
+            dst.qkv_norm += totals.qkv_norm;
+            dst.rope += totals.rope;
+            dst.kv_write += totals.kv_write;
+            dst.norm_rope_kv += totals.norm_rope_kv;
+            dst.attention_reduce += totals.attention_reduce;
+            dst.apply_bf16 += totals.apply_bf16;
+            dst.o_input_prep += totals.o_input_prep;
+            dst.o_projection += totals.o_projection;
+            dst.endpoint += totals.endpoint;
+        }
+    }
+
+    Ok(())
+}
+
+fn accumulate_gqa_hd256_attn_clocks(graph: &mut GpuDecodeGraph) -> Result<(), String> {
+    if !graph.graph_gqa_hd256_attn_clock_enabled {
+        return Ok(());
+    }
+    let Some(d_clocks) = graph.d_graph_gqa_hd256_attn_clocks.as_ref() else {
+        return Ok(());
+    };
+    let Some(d_stats) = graph.d_graph_gqa_hd256_attn_stats.as_ref() else {
+        return Ok(());
+    };
+    if graph.h_graph_gqa_hd256_attn_clocks.is_empty()
+        || graph.h_graph_gqa_hd256_attn_stats.is_empty()
+        || graph.graph_gqa_hd256_attn_clock_heads == 0
+    {
+        return Ok(());
+    }
+
+    unsafe {
+        let clock_bytes = graph.h_graph_gqa_hd256_attn_clocks.len() * std::mem::size_of::<u64>();
+        let err = cuda_sys::lib().cuMemcpyDtoH_v2(
+            graph.h_graph_gqa_hd256_attn_clocks.as_mut_ptr() as *mut std::ffi::c_void,
+            *d_clocks.device_ptr(),
+            clock_bytes,
+        );
+        if err != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!("copy graph HD256 GQA attn clocks: {:?}", err));
+        }
+        let stat_bytes = graph.h_graph_gqa_hd256_attn_stats.len() * std::mem::size_of::<u64>();
+        let err = cuda_sys::lib().cuMemcpyDtoH_v2(
+            graph.h_graph_gqa_hd256_attn_stats.as_mut_ptr() as *mut std::ffi::c_void,
+            *d_stats.device_ptr(),
+            stat_bytes,
+        );
+        if err != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!("copy graph HD256 GQA attn stats: {:?}", err));
+        }
+    }
+
+    let heads_stride = graph.graph_gqa_hd256_attn_clock_heads * 4;
+    for (graph_idx, &active) in graph.graph_gqa_hd256_attn_active.iter().enumerate() {
+        if !active {
+            continue;
+        }
+        let meta = graph.graph_gqa_other_meta
+            .get(graph_idx)
+            .cloned()
+            .unwrap_or_default();
+        if !meta.active || meta.num_heads == 0 {
+            continue;
+        }
+        let clock_base = graph_idx * heads_stride;
+        let mut score_max = 0.0f64;
+        let mut weight_v = 0.0f64;
+        let mut final_output = 0.0f64;
+        let mut internal_total = 0.0f64;
+        for head in 0..meta.num_heads.min(graph.graph_gqa_hd256_attn_clock_heads) {
+            let base = clock_base + head * 4;
+            if base + 3 >= graph.h_graph_gqa_hd256_attn_clocks.len() {
+                continue;
+            }
+            let t0 = graph.h_graph_gqa_hd256_attn_clocks[base];
+            let t1 = graph.h_graph_gqa_hd256_attn_clocks[base + 1];
+            let t2 = graph.h_graph_gqa_hd256_attn_clocks[base + 2];
+            let t3 = graph.h_graph_gqa_hd256_attn_clocks[base + 3];
+            if t0 == 0 || t1 < t0 || t2 < t1 || t3 < t2 {
+                continue;
+            }
+            score_max = score_max.max((t1 - t0) as f64 / 1_000_000_000.0);
+            weight_v = weight_v.max((t2 - t1) as f64 / 1_000_000_000.0);
+            final_output = final_output.max((t3 - t2) as f64 / 1_000_000_000.0);
+            internal_total = internal_total.max((t3 - t0) as f64 / 1_000_000_000.0);
+        }
+        if internal_total <= 0.0 {
+            continue;
+        }
+
+        let other_clock_base = graph_idx * GRAPH_GQA_OTHER_CLOCK_SLOTS;
+        let graph_interval = if other_clock_base + 5 < graph.h_graph_gqa_other_clocks.len() {
+            let t4 = graph.h_graph_gqa_other_clocks[other_clock_base + 4];
+            let t5 = graph.h_graph_gqa_other_clocks[other_clock_base + 5];
+            if t5 >= t4 {
+                (t5 - t4) as f64 / 1_000_000_000.0
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+        let graph_overhead = (graph_interval - internal_total).max(0.0);
+        graph.t_graph_gqa_hd256_attn_graph += graph_interval;
+        graph.t_graph_gqa_hd256_attn_score_max += score_max;
+        graph.t_graph_gqa_hd256_attn_weight_v += weight_v;
+        graph.t_graph_gqa_hd256_attn_final_output += final_output;
+        graph.t_graph_gqa_hd256_attn_internal_total += internal_total;
+        graph.t_graph_gqa_hd256_attn_graph_overhead += graph_overhead;
+
+        let stat_base = graph_idx * 8;
+        if stat_base + 7 < graph.h_graph_gqa_hd256_attn_stats.len() {
+            graph.graph_gqa_hd256_attn_segments = graph.graph_gqa_hd256_attn_segments
+                .saturating_add(graph.h_graph_gqa_hd256_attn_stats[stat_base]);
+            graph.graph_gqa_hd256_attn_seq_len_sum = graph.graph_gqa_hd256_attn_seq_len_sum
+                .saturating_add(graph.h_graph_gqa_hd256_attn_stats[stat_base + 1]);
+            graph.graph_gqa_hd256_attn_runtime_tiles_sum = graph.graph_gqa_hd256_attn_runtime_tiles_sum
+                .saturating_add(graph.h_graph_gqa_hd256_attn_stats[stat_base + 2]);
+            graph.graph_gqa_hd256_attn_max_tiles_sum = graph.graph_gqa_hd256_attn_max_tiles_sum
+                .saturating_add(graph.h_graph_gqa_hd256_attn_stats[stat_base + 3]);
+            graph.graph_gqa_hd256_attn_tile_gate_segments = graph.graph_gqa_hd256_attn_tile_gate_segments
+                .saturating_add(graph.h_graph_gqa_hd256_attn_stats[stat_base + 4]);
+            graph.graph_gqa_hd256_attn_single_segments = graph.graph_gqa_hd256_attn_single_segments
+                .saturating_add(graph.h_graph_gqa_hd256_attn_stats[stat_base + 5]);
+            graph.graph_gqa_hd256_attn_tiled_segments = graph.graph_gqa_hd256_attn_tiled_segments
+                .saturating_add(graph.h_graph_gqa_hd256_attn_stats[stat_base + 6]);
+            graph.graph_gqa_hd256_attn_inactive_tile_blocks_sum = graph.graph_gqa_hd256_attn_inactive_tile_blocks_sum
+                .saturating_add(graph.h_graph_gqa_hd256_attn_stats[stat_base + 7]);
+        }
+    }
+
+    Ok(())
+}
+
 const GRAPH_SEG_FIRST_ROUTE: u8 = 0;
 const GRAPH_SEG_ROUTE_LA: u8 = 1;
 const GRAPH_SEG_ROUTE_GQA: u8 = 2;
@@ -7186,6 +8368,7 @@ const GRAPH_SEG_ROUTE_MAMBA: u8 = 4;
 const GRAPH_SEG_ROUTE_OTHER: u8 = 5;
 const GRAPH_SEG_FINAL: u8 = 6;
 const GRAPH_SEG_KIND_COUNT: usize = 7;
+const GRAPH_FINAL_CLOCK_SLOTS: usize = 4;
 
 fn decode_graph_route_kind(graph: &GpuDecodeGraph, layer_idx: usize) -> (&'static str, u8) {
     match graph.layers.get(layer_idx).map(|layer| &layer.attn) {
@@ -10730,10 +11913,153 @@ impl GpuDecodeStore {
             t_graph_segment_expert: 0.0,
             t_graph_segment_routing: 0.0,
             t_graph_segment_final: 0.0,
+            t_graph_final_norm: 0.0,
+            t_graph_final_lm_head: 0.0,
+            t_graph_final_gpu_softcap: 0.0,
+            t_graph_final_graph_residual: 0.0,
+            t_graph_final_d2h_logits: 0.0,
+            t_graph_final_softcap: 0.0,
+            t_graph_gqa_k4_tiled_attn: 0.0,
+            t_graph_gqa_k4_polar4_reduce: 0.0,
+            t_graph_mixed_moe_expert: 0.0,
+            t_graph_mixed_gqa_proj_attn: 0.0,
+            t_graph_mixed_route_topk: 0.0,
+            t_graph_gqa_path_projection: 0.0,
+            t_graph_gqa_path_norm_rope_kv: 0.0,
+            t_graph_gqa_path_attention_reduce: 0.0,
+            t_graph_gqa_path_apply_gated_bf16: 0.0,
+            t_graph_gqa_path_o_input_prep: 0.0,
+            t_graph_gqa_path_o_projection: 0.0,
+            t_graph_gqa_boundary_entry_gap: 0.0,
+            t_graph_gqa_boundary_post_o_exit_gap: 0.0,
+            t_graph_gqa_boundary_stream_debt: 0.0,
+            t_graph_gqa_coverage_mixed_gqa_total: 0.0,
+            t_graph_gqa_coverage_active_mixed_gqa: 0.0,
+            t_graph_gqa_coverage_active_path_endpoint: 0.0,
+            t_graph_gqa_coverage_active_named_path: 0.0,
+            t_graph_gqa_coverage_active_internal_gap: 0.0,
+            t_graph_gqa_coverage_other_mixed_gqa: 0.0,
+            t_graph_gqa_coverage_boundary_gap: 0.0,
+            t_graph_gqa_other_projection: 0.0,
+            t_graph_gqa_other_qkv_norm: 0.0,
+            t_graph_gqa_other_rope: 0.0,
+            t_graph_gqa_other_kv_write: 0.0,
+            t_graph_gqa_other_norm_rope_kv: 0.0,
+            t_graph_gqa_other_attention_reduce: 0.0,
+            t_graph_gqa_other_apply_bf16: 0.0,
+            t_graph_gqa_other_o_input_prep: 0.0,
+            t_graph_gqa_other_o_projection: 0.0,
+            t_graph_gqa_other_endpoint: 0.0,
+            t_graph_gqa_hd256_attn_graph: 0.0,
+            t_graph_gqa_hd256_attn_score_max: 0.0,
+            t_graph_gqa_hd256_attn_weight_v: 0.0,
+            t_graph_gqa_hd256_attn_final_output: 0.0,
+            t_graph_gqa_hd256_attn_internal_total: 0.0,
+            t_graph_gqa_hd256_attn_graph_overhead: 0.0,
+            graph_gqa_hd256_attn_segments: 0,
+            graph_gqa_hd256_attn_single_segments: 0,
+            graph_gqa_hd256_attn_tiled_segments: 0,
+            graph_gqa_hd256_attn_tile_gate_segments: 0,
+            graph_gqa_hd256_attn_seq_len_sum: 0,
+            graph_gqa_hd256_attn_runtime_tiles_sum: 0,
+            graph_gqa_hd256_attn_max_tiles_sum: 0,
+            graph_gqa_hd256_attn_inactive_tile_blocks_sum: 0,
+            t_graph_moe_w2_activation: 0.0,
+            t_graph_moe_w2_prep: 0.0,
+            t_graph_moe_w2_gemv: 0.0,
+            t_graph_moe_w2_internal_total: 0.0,
+            t_graph_moe_w2_graph_overhead: 0.0,
+            t_graph_moe_w2_preload_gate_up_load: 0.0,
+            t_graph_moe_w2_preload_silu_mul: 0.0,
+            t_graph_moe_w2_preload_shared_store: 0.0,
+            t_graph_moe_w2_preload_sync: 0.0,
+            t_graph_moe_w2_preload_residual: 0.0,
+            t_graph_moe_w2_preload_block_sum: 0.0,
+            graph_moe_w2_segments: 0,
+            graph_moe_w2_blocks: 0,
+            t_graph_moe_route_w13_gemv: 0.0,
+            t_graph_moe_route_w13_reduce: 0.0,
+            t_graph_moe_route_activation_w2: 0.0,
+            t_graph_moe_route_weighted_output: 0.0,
+            t_graph_moe_route_post_output: 0.0,
+            t_graph_moe_route_post_shared_gate: 0.0,
+            t_graph_moe_route_post_shared_w13: 0.0,
+            t_graph_moe_route_post_shared_reduce: 0.0,
+            t_graph_moe_route_post_shared_w2: 0.0,
+            t_graph_moe_route_post_scale: 0.0,
+            t_graph_moe_route_post_hidden_write: 0.0,
+            t_graph_moe_route_post_hidden_norm2: 0.0,
+            t_graph_moe_route_post_hidden_add1: 0.0,
+            t_graph_moe_route_post_hidden_norm: 0.0,
+            t_graph_moe_route_post_hidden_add2: 0.0,
+            t_graph_moe_route_post_hidden_scalar: 0.0,
+            t_graph_moe_route_post_hidden_endpoint: 0.0,
+            t_graph_moe_route_post_endpoint: 0.0,
+            t_graph_moe_route_pre_gqa_prep: 0.0,
+            t_graph_moe_route_post_gqa_prep: 0.0,
+            t_graph_moe_route_logits: 0.0,
+            t_graph_moe_route_topk: 0.0,
+            t_graph_moe_route_scale_classify: 0.0,
+            t_graph_moe_route_tail: 0.0,
+            t_graph_route_prep_pre_gqa_norm: 0.0,
+            t_graph_route_prep_post_gqa_norm_add: 0.0,
+            t_graph_route_prep_dense_pre_norm: 0.0,
+            t_graph_route_prep_dense_gate: 0.0,
+            t_graph_route_prep_dense_up: 0.0,
+            t_graph_route_prep_dense_activation: 0.0,
+            t_graph_route_prep_dense_down: 0.0,
+            t_graph_route_prep_dense_post_norms: 0.0,
+            t_graph_route_prep_router_input_norm: 0.0,
             graph_segment_labels: Vec::new(),
             graph_segment_kinds: Vec::new(),
             graph_segment_elapsed: Vec::new(),
             graph_segment_sync_wait: Vec::new(),
+            graph_gqa_k4_split_clock_enabled: false,
+            graph_gqa_k4_split_active: Vec::new(),
+            d_graph_gqa_k4_split_clocks: None,
+            h_graph_gqa_k4_split_clocks: Vec::new(),
+            graph_mixed_segment_clock_enabled: false,
+            graph_mixed_segment_active: Vec::new(),
+            d_graph_mixed_segment_clocks: None,
+            h_graph_mixed_segment_clocks: Vec::new(),
+            graph_gqa_path_clock_enabled: false,
+            graph_gqa_path_active: Vec::new(),
+            d_graph_gqa_path_clocks: None,
+            h_graph_gqa_path_clocks: Vec::new(),
+            graph_gqa_boundary_clock_enabled: false,
+            graph_gqa_coverage_clock_enabled: false,
+            graph_gqa_other_clock_enabled: false,
+            graph_gqa_other_active: Vec::new(),
+            graph_gqa_other_meta: Vec::new(),
+            graph_gqa_other_totals: Vec::new(),
+            d_graph_gqa_other_clocks: None,
+            h_graph_gqa_other_clocks: Vec::new(),
+            graph_gqa_hd256_attn_clock_enabled: false,
+            graph_gqa_hd256_attn_clock_heads: 0,
+            graph_gqa_hd256_attn_active: Vec::new(),
+            d_graph_gqa_hd256_attn_clocks: None,
+            h_graph_gqa_hd256_attn_clocks: Vec::new(),
+            d_graph_gqa_hd256_attn_stats: None,
+            h_graph_gqa_hd256_attn_stats: Vec::new(),
+            graph_moe_route_clock_enabled: false,
+            graph_moe_route_active: Vec::new(),
+            d_graph_moe_route_clocks: None,
+            h_graph_moe_route_clocks: Vec::new(),
+            graph_moe_w2_clock_enabled: false,
+            graph_moe_w2_preload_clock_enabled: false,
+            graph_moe_w2_clock_blocks: 0,
+            graph_moe_w2_clock_slots_per_block: 4,
+            graph_moe_w2_active: Vec::new(),
+            d_graph_moe_w2_clocks: None,
+            h_graph_moe_w2_clocks: Vec::new(),
+            graph_route_prep_clock_enabled: false,
+            graph_route_prep_active: Vec::new(),
+            d_graph_route_prep_clocks: None,
+            h_graph_route_prep_clocks: Vec::new(),
+            graph_final_clock_enabled: false,
+            graph_final_softcap_gpu_enabled: false,
+            d_graph_final_clocks: None,
+            h_graph_final_clocks: Vec::new(),
             dma_bytes_total: 0,
             dma_call_count: 0,
             dma_cold_experts: 0,
@@ -10829,9 +12155,11 @@ impl GpuDecodeStore {
                 fp32_to_bf16: get("fp32_to_bf16")?,
                 rmsnorm: get("rmsnorm")?,
                 rmsnorm_scale: get("rmsnorm_scale")?,
+                dual_rmsnorm_scale: get("dual_rmsnorm_scale")?,
                 fused_add_rmsnorm: get("fused_add_rmsnorm")?,
                 silu_mul: get("silu_mul")?,
                 gelu_tanh_mul: get("gelu_tanh_mul")?,
+                apply_logit_softcap_f32: get("apply_logit_softcap_f32")?,
                 sigmoid_topk: get("sigmoid_topk")?,
                 softmax_topk: get("softmax_topk")?,
                 apply_topk_per_expert_scale: get("apply_topk_per_expert_scale")?,
@@ -10883,6 +12211,7 @@ impl GpuDecodeStore {
                 gqa_attention_tiled_bf16: get("gqa_attention_tiled_bf16")?,
                 gqa_attention_reduce: get("gqa_attention_reduce")?,
                 gqa_attention_k4v4_single_g: get("gqa_attention_k4v4_single_g")?,
+                gqa_attention_k4v4_single_g_timed: get("gqa_attention_k4v4_single_g_timed")?,
                 apply_gated_attn: get("apply_gated_attn")?,
                 // Fused v2 kernels (inline atomic reduction)
                 marlin_gemv_int4_v2_fused_f32: get("marlin_gemv_int4_v2_fused_f32")?,
@@ -10892,6 +12221,7 @@ impl GpuDecodeStore {
                 marlin_gemv_int8_v2_batched: get("marlin_gemv_int8_v2_batched")?,
                 reduce_ksplits_bf16_batched: get("reduce_ksplits_bf16_batched")?,
                 fused_silu_w2_batched: get("fused_silu_w2_batched")?,
+                fused_silu_w2_batched_timed: get("fused_silu_w2_batched_timed")?,
                 fused_silu_w2_int8_batched: get("fused_silu_w2_int8_batched")?,
                 multi_expert_weighted_add_bf16: get("multi_expert_weighted_add_bf16")?,
                 // Graphable variants
@@ -10941,6 +12271,7 @@ impl GpuDecodeStore {
                 gqa_attention_polar4_g: get("gqa_attention_polar4_g")?,
                 gqa_attention_polar4_tiled_g: get("gqa_attention_polar4_tiled_g")?,
                 gqa_attention_polar4_reduce_g: get("gqa_attention_polar4_reduce_g")?,
+                record_globaltimer_u64_g: get("record_globaltimer_u64_g")?,
                 // Mamba2 SSM kernels
                 mamba2_conv1d: get("mamba2_conv1d")?,
                 mamba2_ssm_step: get("mamba2_ssm_step")?,
@@ -12418,6 +13749,106 @@ impl GpuDecodeStore {
                 graph.t_graph_segment_expert = 0.0;
                 graph.t_graph_segment_routing = 0.0;
                 graph.t_graph_segment_final = 0.0;
+                graph.t_graph_final_norm = 0.0;
+                graph.t_graph_final_lm_head = 0.0;
+                graph.t_graph_final_gpu_softcap = 0.0;
+                graph.t_graph_final_graph_residual = 0.0;
+                graph.t_graph_final_d2h_logits = 0.0;
+                graph.t_graph_final_softcap = 0.0;
+                graph.t_graph_gqa_k4_tiled_attn = 0.0;
+                graph.t_graph_gqa_k4_polar4_reduce = 0.0;
+                graph.t_graph_mixed_moe_expert = 0.0;
+                graph.t_graph_mixed_gqa_proj_attn = 0.0;
+                graph.t_graph_mixed_route_topk = 0.0;
+                graph.t_graph_gqa_path_projection = 0.0;
+                graph.t_graph_gqa_path_norm_rope_kv = 0.0;
+                graph.t_graph_gqa_path_attention_reduce = 0.0;
+                graph.t_graph_gqa_path_apply_gated_bf16 = 0.0;
+                graph.t_graph_gqa_path_o_input_prep = 0.0;
+                graph.t_graph_gqa_path_o_projection = 0.0;
+                graph.t_graph_gqa_boundary_entry_gap = 0.0;
+                graph.t_graph_gqa_boundary_post_o_exit_gap = 0.0;
+                graph.t_graph_gqa_boundary_stream_debt = 0.0;
+                graph.t_graph_gqa_coverage_mixed_gqa_total = 0.0;
+                graph.t_graph_gqa_coverage_active_mixed_gqa = 0.0;
+                graph.t_graph_gqa_coverage_active_path_endpoint = 0.0;
+                graph.t_graph_gqa_coverage_active_named_path = 0.0;
+                graph.t_graph_gqa_coverage_active_internal_gap = 0.0;
+                graph.t_graph_gqa_coverage_other_mixed_gqa = 0.0;
+                graph.t_graph_gqa_coverage_boundary_gap = 0.0;
+                graph.t_graph_gqa_other_projection = 0.0;
+                graph.t_graph_gqa_other_qkv_norm = 0.0;
+                graph.t_graph_gqa_other_rope = 0.0;
+                graph.t_graph_gqa_other_kv_write = 0.0;
+                graph.t_graph_gqa_other_norm_rope_kv = 0.0;
+                graph.t_graph_gqa_other_attention_reduce = 0.0;
+                graph.t_graph_gqa_other_apply_bf16 = 0.0;
+                graph.t_graph_gqa_other_o_input_prep = 0.0;
+                graph.t_graph_gqa_other_o_projection = 0.0;
+                graph.t_graph_gqa_other_endpoint = 0.0;
+                graph.t_graph_gqa_hd256_attn_graph = 0.0;
+                graph.t_graph_gqa_hd256_attn_score_max = 0.0;
+                graph.t_graph_gqa_hd256_attn_weight_v = 0.0;
+                graph.t_graph_gqa_hd256_attn_final_output = 0.0;
+                graph.t_graph_gqa_hd256_attn_internal_total = 0.0;
+                graph.t_graph_gqa_hd256_attn_graph_overhead = 0.0;
+                graph.graph_gqa_hd256_attn_segments = 0;
+                graph.graph_gqa_hd256_attn_single_segments = 0;
+                graph.graph_gqa_hd256_attn_tiled_segments = 0;
+                graph.graph_gqa_hd256_attn_tile_gate_segments = 0;
+                graph.graph_gqa_hd256_attn_seq_len_sum = 0;
+                graph.graph_gqa_hd256_attn_runtime_tiles_sum = 0;
+                graph.graph_gqa_hd256_attn_max_tiles_sum = 0;
+                graph.graph_gqa_hd256_attn_inactive_tile_blocks_sum = 0;
+                graph.t_graph_moe_w2_activation = 0.0;
+                graph.t_graph_moe_w2_prep = 0.0;
+                graph.t_graph_moe_w2_gemv = 0.0;
+                graph.t_graph_moe_w2_internal_total = 0.0;
+                graph.t_graph_moe_w2_graph_overhead = 0.0;
+                graph.t_graph_moe_w2_preload_gate_up_load = 0.0;
+                graph.t_graph_moe_w2_preload_silu_mul = 0.0;
+                graph.t_graph_moe_w2_preload_shared_store = 0.0;
+                graph.t_graph_moe_w2_preload_sync = 0.0;
+                graph.t_graph_moe_w2_preload_residual = 0.0;
+                graph.t_graph_moe_w2_preload_block_sum = 0.0;
+                graph.graph_moe_w2_segments = 0;
+                graph.graph_moe_w2_blocks = 0;
+                graph.t_graph_moe_route_w13_gemv = 0.0;
+                graph.t_graph_moe_route_w13_reduce = 0.0;
+                graph.t_graph_moe_route_activation_w2 = 0.0;
+                graph.t_graph_moe_route_weighted_output = 0.0;
+                graph.t_graph_moe_route_post_output = 0.0;
+                graph.t_graph_moe_route_post_shared_gate = 0.0;
+                graph.t_graph_moe_route_post_shared_w13 = 0.0;
+                graph.t_graph_moe_route_post_shared_reduce = 0.0;
+                graph.t_graph_moe_route_post_shared_w2 = 0.0;
+                graph.t_graph_moe_route_post_scale = 0.0;
+                graph.t_graph_moe_route_post_hidden_write = 0.0;
+                graph.t_graph_moe_route_post_hidden_norm2 = 0.0;
+                graph.t_graph_moe_route_post_hidden_add1 = 0.0;
+                graph.t_graph_moe_route_post_hidden_norm = 0.0;
+                graph.t_graph_moe_route_post_hidden_add2 = 0.0;
+                graph.t_graph_moe_route_post_hidden_scalar = 0.0;
+                graph.t_graph_moe_route_post_hidden_endpoint = 0.0;
+                graph.t_graph_moe_route_post_endpoint = 0.0;
+                graph.t_graph_moe_route_pre_gqa_prep = 0.0;
+                graph.t_graph_moe_route_post_gqa_prep = 0.0;
+                graph.t_graph_moe_route_logits = 0.0;
+                graph.t_graph_moe_route_topk = 0.0;
+                graph.t_graph_moe_route_scale_classify = 0.0;
+                graph.t_graph_moe_route_tail = 0.0;
+                graph.t_graph_route_prep_pre_gqa_norm = 0.0;
+                graph.t_graph_route_prep_post_gqa_norm_add = 0.0;
+                graph.t_graph_route_prep_dense_pre_norm = 0.0;
+                graph.t_graph_route_prep_dense_gate = 0.0;
+                graph.t_graph_route_prep_dense_up = 0.0;
+                graph.t_graph_route_prep_dense_activation = 0.0;
+                graph.t_graph_route_prep_dense_down = 0.0;
+                graph.t_graph_route_prep_dense_post_norms = 0.0;
+                graph.t_graph_route_prep_router_input_norm = 0.0;
+                for total in &mut graph.graph_gqa_other_totals {
+                    *total = GraphGqaOtherClockTotals::default();
+                }
                 for elapsed in &mut graph.graph_segment_elapsed {
                     *elapsed = 0.0;
                 }
@@ -18677,6 +20108,55 @@ impl GpuDecodeStore {
             }
             event
         };
+        let prefill_timing_events_enabled = std::env::var("KRASIS_PREFILL_TIMING").is_ok();
+        let gqa_timing_start_event = if prefill_timing_events_enabled {
+            unsafe {
+                let mut event: cuda_sys::CUevent = std::ptr::null_mut();
+                let err = cuda_sys::lib().cuEventCreate(&mut event, 0);
+                if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(format!("Create GQA timing start event: {:?}", err));
+                }
+                event
+            }
+        } else {
+            std::ptr::null_mut()
+        };
+        let gqa_timing_stop_event = if prefill_timing_events_enabled {
+            unsafe {
+                let mut event: cuda_sys::CUevent = std::ptr::null_mut();
+                let err = cuda_sys::lib().cuEventCreate(&mut event, 0);
+                if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(format!("Create GQA timing stop event: {:?}", err));
+                }
+                event
+            }
+        } else {
+            std::ptr::null_mut()
+        };
+        let kv_append_timing_start_event = if prefill_timing_events_enabled {
+            unsafe {
+                let mut event: cuda_sys::CUevent = std::ptr::null_mut();
+                let err = cuda_sys::lib().cuEventCreate(&mut event, 0);
+                if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(format!("Create KV append timing start event: {:?}", err));
+                }
+                event
+            }
+        } else {
+            std::ptr::null_mut()
+        };
+        let kv_append_timing_stop_event = if prefill_timing_events_enabled {
+            unsafe {
+                let mut event: cuda_sys::CUevent = std::ptr::null_mut();
+                let err = cuda_sys::lib().cuEventCreate(&mut event, 0);
+                if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(format!("Create KV append timing stop event: {:?}", err));
+                }
+                event
+            }
+        } else {
+            std::ptr::null_mut()
+        };
 
         // Snapshot current HCS state (if available)
         let (hcs_cache_fast, hcs_ne) = if let Some(ref hcs) = graph.hcs {
@@ -18858,6 +20338,10 @@ impl GpuDecodeStore {
             scatter_event,
             shared_launch_event,
             shared_add_input_event,
+            gqa_timing_start_event,
+            gqa_timing_stop_event,
+            kv_append_timing_start_event,
+            kv_append_timing_stop_event,
             attn_weight_bufs: None,
             shared_stream,
             shared_event,
@@ -18933,9 +20417,36 @@ impl GpuDecodeStore {
             t_gqa_kv_prep: std::cell::Cell::new(0.0),
             t_gqa_kv_cross_stage: std::cell::Cell::new(0.0),
             t_gqa_kv_append: std::cell::Cell::new(0.0),
+            t_gqa_kv_append_kernel: std::cell::Cell::new(0.0),
             t_gqa_fa2: std::cell::Cell::new(0.0),
             t_gqa_gate: std::cell::Cell::new(0.0),
             t_gqa_oproj: std::cell::Cell::new(0.0),
+            t_gqa_proj_event: std::cell::Cell::new(0.0),
+            t_gqa_norm_event: std::cell::Cell::new(0.0),
+            t_gqa_rope_event: std::cell::Cell::new(0.0),
+            t_gqa_fa2_event: std::cell::Cell::new(0.0),
+            t_gqa_oproj_event: std::cell::Cell::new(0.0),
+            t_gqa_proj_sync: std::cell::Cell::new(0.0),
+            t_gqa_norm_sync: std::cell::Cell::new(0.0),
+            t_gqa_rope_sync: std::cell::Cell::new(0.0),
+            t_gqa_fa2_sync: std::cell::Cell::new(0.0),
+            t_gqa_kv_append_sync: std::cell::Cell::new(0.0),
+            t_gqa_oproj_sync: std::cell::Cell::new(0.0),
+            t_gqa_debt_entry_sync: std::cell::Cell::new(0.0),
+            t_gqa_debt_after_q_sync: std::cell::Cell::new(0.0),
+            t_gqa_debt_after_k_sync: std::cell::Cell::new(0.0),
+            t_gqa_debt_after_v_sync: std::cell::Cell::new(0.0),
+            t_gqa_debt_pre_append_sync: std::cell::Cell::new(0.0),
+            t_gqa_debt_after_fa2_sync: std::cell::Cell::new(0.0),
+            t_gqa_debt_after_oproj_sync: std::cell::Cell::new(0.0),
+            t_gqa_debt_gemma4_layer_entry_sync: std::cell::Cell::new(0.0),
+            t_gqa_debt_gemma4_pre_gqa_sync: std::cell::Cell::new(0.0),
+            t_gqa_debt_append_gap_sync: std::array::from_fn(|_| std::cell::Cell::new(0.0)),
+            t_gqa_attention_branch_before_sync: std::array::from_fn(|_| std::cell::Cell::new(0.0)),
+            t_gqa_attention_branch_after_sync: std::array::from_fn(|_| std::cell::Cell::new(0.0)),
+            t_gqa_custom_tiled_wall: std::array::from_fn(|_| std::cell::Cell::new(0.0)),
+            t_gqa_custom_tiled_event: std::array::from_fn(|_| std::cell::Cell::new(0.0)),
+            t_gqa_custom_tiled_sync: std::array::from_fn(|_| std::cell::Cell::new(0.0)),
             t_hqq_marlin_float_zp: std::cell::Cell::new(0.0),
             t_hqq_group_sums: std::cell::Cell::new(0.0),
             t_hqq_correction_gemm: std::cell::Cell::new(0.0),
@@ -18949,6 +20460,26 @@ impl GpuDecodeStore {
             gqa_bf16_calls: std::cell::Cell::new(0),
             gqa_kv_cross_stage_calls: std::cell::Cell::new(0),
             gqa_kv_append_calls: std::cell::Cell::new(0),
+            gqa_kv_append_kernel_calls: std::cell::Cell::new(0),
+            gqa_proj_event_calls: std::cell::Cell::new(0),
+            gqa_norm_event_calls: std::cell::Cell::new(0),
+            gqa_rope_event_calls: std::cell::Cell::new(0),
+            gqa_fa2_event_calls: std::cell::Cell::new(0),
+            gqa_oproj_event_calls: std::cell::Cell::new(0),
+            gqa_debt_entry_calls: std::cell::Cell::new(0),
+            gqa_debt_after_q_calls: std::cell::Cell::new(0),
+            gqa_debt_after_k_calls: std::cell::Cell::new(0),
+            gqa_debt_after_v_calls: std::cell::Cell::new(0),
+            gqa_debt_pre_append_calls: std::cell::Cell::new(0),
+            gqa_debt_after_fa2_calls: std::cell::Cell::new(0),
+            gqa_debt_after_oproj_calls: std::cell::Cell::new(0),
+            gqa_debt_gemma4_layer_entry_calls: std::cell::Cell::new(0),
+            gqa_debt_gemma4_pre_gqa_calls: std::cell::Cell::new(0),
+            gqa_debt_append_gap_calls: std::array::from_fn(|_| std::cell::Cell::new(0)),
+            gqa_attention_branch_calls: std::array::from_fn(|_| std::cell::Cell::new(0)),
+            gqa_attention_branch_before_calls: std::array::from_fn(|_| std::cell::Cell::new(0)),
+            gqa_attention_branch_after_calls: std::array::from_fn(|_| std::cell::Cell::new(0)),
+            gqa_custom_tiled_step_calls: std::array::from_fn(|_| std::cell::Cell::new(0)),
             gqa_kv_cross_current_tokens: std::cell::Cell::new(0),
             gqa_kv_cross_total_tokens: std::cell::Cell::new(0),
             t_la_proj: std::cell::Cell::new(0.0),
@@ -20158,16 +21689,264 @@ impl GpuDecodeStore {
             && std::env::var("KRASIS_DECODE_GRAPH_INTERNAL_TIMING")
                 .map(|v| v != "0")
                 .unwrap_or(true);
+        graph.graph_gqa_k4_split_clock_enabled = graph.graph_internal_timing
+            && std::env::var("KRASIS_DECODE_GQA_SPLIT_CLOCKS")
+                .map(|v| v != "0")
+                .unwrap_or(false);
+        graph.graph_gqa_boundary_clock_enabled = graph.graph_internal_timing
+            && std::env::var("KRASIS_DECODE_GQA_BOUNDARY_CLOCKS")
+                .map(|v| v != "0")
+                .unwrap_or(false);
+        graph.graph_gqa_coverage_clock_enabled = graph.graph_internal_timing
+            && std::env::var("KRASIS_DECODE_GQA_COVERAGE_CLOCKS")
+                .map(|v| v != "0")
+                .unwrap_or(false);
+        let has_gemma4_k4v4_graph_target = graph.kv_format == 9
+            && graph.layers.iter().any(|layer| {
+                matches!(layer.mlp, GpuMlpConfig::Gemma4MoE { .. })
+            });
+        let route_prep_dual_norm_env_enabled = std::env::var("KRASIS_DECODE_ROUTE_PREP_DUAL_NORM")
+            .map(|v| v != "0")
+            .unwrap_or(false);
+        let final_softcap_gpu_requested = std::env::var("KRASIS_DECODE_FINAL_SOFTCAP_GPU")
+            .map(|v| v != "0")
+            .unwrap_or(false);
+        graph.graph_final_softcap_gpu_enabled = final_softcap_gpu_requested
+            && route_prep_dual_norm_env_enabled
+            && do_final
+            && has_gemma4_k4v4_graph_target
+            && graph.final_logit_softcap.is_finite()
+            && graph.final_logit_softcap > 0.0
+            && graph.vocab_size > 0
+            && graph.vocab_size <= i32::MAX as usize;
+        graph.graph_final_clock_enabled = graph.graph_internal_timing
+            && do_final
+            && has_gemma4_k4v4_graph_target
+            && std::env::var("KRASIS_DECODE_FINAL_CLOCKS")
+                .map(|v| v != "0")
+                .unwrap_or(false);
+        let graph_route_prep_requested = graph.graph_internal_timing
+            && std::env::var("KRASIS_DECODE_ROUTE_PREP_CLOCKS")
+                .map(|v| v != "0")
+                .unwrap_or(false);
+        let graph_moe_w2_requested = graph.graph_internal_timing
+            && std::env::var("KRASIS_DECODE_MOE_W2_CLOCKS")
+                .map(|v| v != "0")
+                .unwrap_or(false);
+        let graph_moe_w2_preload_requested = graph_moe_w2_requested
+            && std::env::var("KRASIS_DECODE_MOE_W2_PRELOAD_CLOCKS")
+                .map(|v| v != "0")
+                .unwrap_or(false);
+        graph.graph_moe_route_clock_enabled = graph.graph_internal_timing
+            && has_gemma4_k4v4_graph_target
+            && (std::env::var("KRASIS_DECODE_MOE_ROUTE_CLOCKS")
+                    .map(|v| v != "0")
+                    .unwrap_or(false)
+                || graph_route_prep_requested
+                || graph_moe_w2_requested);
+        graph.graph_moe_w2_clock_enabled = graph.graph_internal_timing
+            && has_gemma4_k4v4_graph_target
+            && graph_moe_w2_requested;
+        graph.graph_moe_w2_preload_clock_enabled = graph.graph_moe_w2_clock_enabled
+            && graph_moe_w2_preload_requested;
+        graph.graph_moe_w2_clock_slots_per_block = if graph.graph_moe_w2_preload_clock_enabled {
+            8
+        } else {
+            4
+        };
+        graph.graph_moe_w2_clock_blocks = if graph.graph_moe_w2_clock_enabled {
+            graph.max_experts_per_tok.max(1) * ((graph.hidden_size + 15) / 16).max(1)
+        } else {
+            0
+        };
+        graph.graph_route_prep_clock_enabled = graph.graph_internal_timing
+            && has_gemma4_k4v4_graph_target
+            && graph_route_prep_requested;
+        let has_hd512_k4v4_graph_target = graph.kv_format == 9
+            && graph.gqa_tile_size > 0
+            && graph.gqa_max_tiles > 1
+            && graph.d_gqa_tiled_o.is_some()
+            && graph.d_gqa_tiled_lse.is_some()
+            && graph.layers.iter().any(|layer| {
+                matches!(
+                    &layer.attn,
+                    GpuAttnConfig::GQA { head_dim, .. } if *head_dim == 512
+                )
+            });
+        let graph_gqa_hd256_attn_requested = graph.graph_internal_timing
+            && std::env::var("KRASIS_DECODE_GQA_HD256_ATTN_CLOCKS")
+                .map(|v| v != "0")
+                .unwrap_or(false);
+        graph.graph_gqa_other_clock_enabled = graph.graph_internal_timing
+            && has_hd512_k4v4_graph_target
+            && (std::env::var("KRASIS_DECODE_GQA_OTHER_CLOCKS")
+                .map(|v| v != "0")
+                .unwrap_or(false)
+                || graph_gqa_hd256_attn_requested);
+        graph.graph_gqa_hd256_attn_clock_enabled =
+            graph.graph_gqa_other_clock_enabled && graph_gqa_hd256_attn_requested;
+        graph.graph_mixed_segment_clock_enabled = graph.graph_internal_timing
+            && (std::env::var("KRASIS_DECODE_MIXED_SEGMENT_CLOCKS")
+                .map(|v| v != "0")
+                .unwrap_or(false)
+                || graph.graph_gqa_boundary_clock_enabled
+                || graph.graph_gqa_coverage_clock_enabled
+                || graph.graph_gqa_other_clock_enabled
+                || graph.graph_moe_route_clock_enabled
+                || graph.graph_moe_w2_clock_enabled
+                || graph.graph_route_prep_clock_enabled);
+        graph.graph_gqa_path_clock_enabled = graph.graph_internal_timing
+            && (std::env::var("KRASIS_DECODE_GQA_PATH_CLOCKS")
+                .map(|v| v != "0")
+                .unwrap_or(false)
+                || graph.graph_gqa_boundary_clock_enabled
+                || graph.graph_gqa_coverage_clock_enabled);
         if graph.graph_internal_timing {
+            let max_gqa_heads = graph.layers.iter().filter_map(|layer| {
+                match &layer.attn {
+                    GpuAttnConfig::GQA { num_heads, .. } => Some(*num_heads),
+                    _ => None,
+                }
+            }).max().unwrap_or(1).max(1);
+            graph.graph_gqa_hd256_attn_clock_heads = max_gqa_heads;
             graph.graph_timing_events = Some(DecodeGraphTimingEvents::new(num_graphs)?);
             graph.graph_segment_labels.clear();
             graph.graph_segment_kinds.clear();
             graph.graph_segment_elapsed.clear();
             graph.graph_segment_sync_wait.clear();
+            graph.graph_gqa_k4_split_active.clear();
+            graph.graph_mixed_segment_active.clear();
+            graph.graph_gqa_path_active.clear();
+            graph.graph_gqa_other_active.clear();
+            graph.graph_gqa_hd256_attn_active.clear();
+            graph.graph_moe_route_active.clear();
+            graph.graph_moe_w2_active.clear();
+            graph.graph_route_prep_active.clear();
+            graph.graph_gqa_other_meta.clear();
+            graph.graph_gqa_other_totals.clear();
             graph.graph_segment_labels.reserve(num_graphs);
             graph.graph_segment_kinds.reserve(num_graphs);
             graph.graph_segment_elapsed.resize(num_graphs, 0.0);
             graph.graph_segment_sync_wait.resize(num_graphs, 0.0);
+            graph.graph_gqa_k4_split_active.resize(num_graphs, false);
+            graph.graph_mixed_segment_active.resize(num_graphs, false);
+            graph.graph_gqa_path_active.resize(num_graphs, false);
+            graph.graph_gqa_other_active.resize(num_graphs, false);
+            graph.graph_gqa_hd256_attn_active.resize(num_graphs, false);
+            graph.graph_moe_route_active.resize(num_graphs, false);
+            graph.graph_moe_w2_active.resize(num_graphs, false);
+            graph.graph_route_prep_active.resize(num_graphs, false);
+            graph.graph_gqa_other_meta.resize(num_graphs, GraphGqaOtherMeta::default());
+            graph.graph_gqa_other_totals.resize(num_graphs, GraphGqaOtherClockTotals::default());
+            if graph.graph_gqa_k4_split_clock_enabled {
+                let clock_slots = num_graphs * 3;
+                graph.d_graph_gqa_k4_split_clocks = Some(
+                    self.device.alloc_zeros::<u64>(clock_slots)
+                        .map_err(|e| format!("alloc graph GQA split clocks: {:?}", e))?,
+                );
+                graph.h_graph_gqa_k4_split_clocks.resize(clock_slots, 0);
+            } else {
+                graph.d_graph_gqa_k4_split_clocks = None;
+                graph.h_graph_gqa_k4_split_clocks.clear();
+            }
+            if graph.graph_mixed_segment_clock_enabled {
+                let clock_slots = num_graphs * 5;
+                graph.d_graph_mixed_segment_clocks = Some(
+                    self.device.alloc_zeros::<u64>(clock_slots)
+                        .map_err(|e| format!("alloc graph mixed segment clocks: {:?}", e))?,
+                );
+                graph.h_graph_mixed_segment_clocks.resize(clock_slots, 0);
+            } else {
+                graph.d_graph_mixed_segment_clocks = None;
+                graph.h_graph_mixed_segment_clocks.clear();
+            }
+            if graph.graph_gqa_path_clock_enabled {
+                let clock_slots = num_graphs * 7;
+                graph.d_graph_gqa_path_clocks = Some(
+                    self.device.alloc_zeros::<u64>(clock_slots)
+                        .map_err(|e| format!("alloc graph GQA path clocks: {:?}", e))?,
+                );
+                graph.h_graph_gqa_path_clocks.resize(clock_slots, 0);
+            } else {
+                graph.d_graph_gqa_path_clocks = None;
+                graph.h_graph_gqa_path_clocks.clear();
+            }
+            if graph.graph_gqa_other_clock_enabled {
+                let clock_slots = num_graphs * GRAPH_GQA_OTHER_CLOCK_SLOTS;
+                graph.d_graph_gqa_other_clocks = Some(
+                    self.device.alloc_zeros::<u64>(clock_slots)
+                        .map_err(|e| format!("alloc graph other GQA clocks: {:?}", e))?,
+                );
+                graph.h_graph_gqa_other_clocks.resize(clock_slots, 0);
+            } else {
+                graph.d_graph_gqa_other_clocks = None;
+                graph.h_graph_gqa_other_clocks.clear();
+            }
+            if graph.graph_gqa_hd256_attn_clock_enabled {
+                let clock_slots = num_graphs * graph.graph_gqa_hd256_attn_clock_heads * 4;
+                let stats_slots = num_graphs * 8;
+                graph.d_graph_gqa_hd256_attn_clocks = Some(
+                    self.device.alloc_zeros::<u64>(clock_slots)
+                        .map_err(|e| format!("alloc graph HD256 GQA attn clocks: {:?}", e))?,
+                );
+                graph.h_graph_gqa_hd256_attn_clocks.resize(clock_slots, 0);
+                graph.d_graph_gqa_hd256_attn_stats = Some(
+                    self.device.alloc_zeros::<u64>(stats_slots)
+                        .map_err(|e| format!("alloc graph HD256 GQA attn stats: {:?}", e))?,
+                );
+                graph.h_graph_gqa_hd256_attn_stats.resize(stats_slots, 0);
+            } else {
+                graph.d_graph_gqa_hd256_attn_clocks = None;
+                graph.h_graph_gqa_hd256_attn_clocks.clear();
+                graph.d_graph_gqa_hd256_attn_stats = None;
+                graph.h_graph_gqa_hd256_attn_stats.clear();
+            }
+            if graph.graph_moe_route_clock_enabled {
+                let clock_slots = num_graphs * GRAPH_MOE_ROUTE_CLOCK_SLOTS;
+                graph.d_graph_moe_route_clocks = Some(
+                    self.device.alloc_zeros::<u64>(clock_slots)
+                        .map_err(|e| format!("alloc graph MoE/route clocks: {:?}", e))?,
+                );
+                graph.h_graph_moe_route_clocks.resize(clock_slots, 0);
+            } else {
+                graph.d_graph_moe_route_clocks = None;
+                graph.h_graph_moe_route_clocks.clear();
+            }
+            if graph.graph_moe_w2_clock_enabled {
+                let clock_slots = num_graphs
+                    * graph.graph_moe_w2_clock_blocks
+                    * graph.graph_moe_w2_clock_slots_per_block;
+                graph.d_graph_moe_w2_clocks = Some(
+                    self.device.alloc_zeros::<u64>(clock_slots)
+                        .map_err(|e| format!("alloc graph MoE W2 clocks: {:?}", e))?,
+                );
+                graph.h_graph_moe_w2_clocks.resize(clock_slots, 0);
+            } else {
+                graph.d_graph_moe_w2_clocks = None;
+                graph.h_graph_moe_w2_clocks.clear();
+            }
+            if graph.graph_route_prep_clock_enabled {
+                let clock_slots = num_graphs * 12;
+                graph.d_graph_route_prep_clocks = Some(
+                    self.device.alloc_zeros::<u64>(clock_slots)
+                        .map_err(|e| format!("alloc graph route-prep clocks: {:?}", e))?,
+                );
+                graph.h_graph_route_prep_clocks.resize(clock_slots, 0);
+            } else {
+                graph.d_graph_route_prep_clocks = None;
+                graph.h_graph_route_prep_clocks.clear();
+            }
+            if graph.graph_final_clock_enabled {
+                let clock_slots = num_graphs * GRAPH_FINAL_CLOCK_SLOTS;
+                graph.d_graph_final_clocks = Some(
+                    self.device.alloc_zeros::<u64>(clock_slots)
+                        .map_err(|e| format!("alloc graph final clocks: {:?}", e))?,
+                );
+                graph.h_graph_final_clocks.resize(clock_slots, 0);
+            } else {
+                graph.d_graph_final_clocks = None;
+                graph.h_graph_final_clocks.clear();
+            }
             for graph_idx in 0..num_graphs {
                 let (kind, label) = decode_graph_segment_timing_label(&graph, graph_idx, &moe_indices);
                 graph.graph_segment_kinds.push(kind);
@@ -20178,6 +21957,51 @@ impl GpuDecodeStore {
             graph.graph_segment_kinds.clear();
             graph.graph_segment_elapsed.clear();
             graph.graph_segment_sync_wait.clear();
+            graph.graph_gqa_k4_split_active.clear();
+            graph.graph_gqa_k4_split_clock_enabled = false;
+            graph.d_graph_gqa_k4_split_clocks = None;
+            graph.h_graph_gqa_k4_split_clocks.clear();
+            graph.graph_mixed_segment_active.clear();
+            graph.graph_mixed_segment_clock_enabled = false;
+            graph.d_graph_mixed_segment_clocks = None;
+            graph.h_graph_mixed_segment_clocks.clear();
+            graph.graph_gqa_path_active.clear();
+            graph.graph_gqa_path_clock_enabled = false;
+            graph.d_graph_gqa_path_clocks = None;
+            graph.h_graph_gqa_path_clocks.clear();
+            graph.graph_gqa_boundary_clock_enabled = false;
+            graph.graph_gqa_coverage_clock_enabled = false;
+            graph.graph_gqa_other_clock_enabled = false;
+            graph.graph_gqa_other_active.clear();
+            graph.graph_gqa_other_meta.clear();
+            graph.graph_gqa_other_totals.clear();
+            graph.d_graph_gqa_other_clocks = None;
+            graph.h_graph_gqa_other_clocks.clear();
+            graph.graph_gqa_hd256_attn_clock_enabled = false;
+            graph.graph_gqa_hd256_attn_clock_heads = 0;
+            graph.graph_gqa_hd256_attn_active.clear();
+            graph.d_graph_gqa_hd256_attn_clocks = None;
+            graph.h_graph_gqa_hd256_attn_clocks.clear();
+            graph.d_graph_gqa_hd256_attn_stats = None;
+            graph.h_graph_gqa_hd256_attn_stats.clear();
+            graph.graph_moe_route_clock_enabled = false;
+            graph.graph_moe_route_active.clear();
+            graph.d_graph_moe_route_clocks = None;
+            graph.h_graph_moe_route_clocks.clear();
+            graph.graph_moe_w2_clock_enabled = false;
+            graph.graph_moe_w2_preload_clock_enabled = false;
+            graph.graph_moe_w2_clock_blocks = 0;
+            graph.graph_moe_w2_clock_slots_per_block = 4;
+            graph.graph_moe_w2_active.clear();
+            graph.d_graph_moe_w2_clocks = None;
+            graph.h_graph_moe_w2_clocks.clear();
+            graph.graph_route_prep_clock_enabled = false;
+            graph.graph_route_prep_active.clear();
+            graph.d_graph_route_prep_clocks = None;
+            graph.h_graph_route_prep_clocks.clear();
+            graph.graph_final_clock_enabled = false;
+            graph.d_graph_final_clocks = None;
+            graph.h_graph_final_clocks.clear();
         }
 
         trace_emit_global_mark(
@@ -20592,10 +22416,40 @@ impl GpuDecodeStore {
         };
         let inv_sp = *graph.d_inv_scale_perm.device_ptr();
         let is_int8 = graph.expert_bits == 8;
+        let route_prep_dual_norm_requested = std::env::var("KRASIS_DECODE_ROUTE_PREP_DUAL_NORM")
+            .map(|v| v != "0")
+            .unwrap_or(false);
 
         let d_pos_ptr = *graph.d_graph_pos.as_ref().unwrap().device_ptr();
         let d_rope_pos_ptr = *graph.d_graph_rope_pos.as_ref().unwrap().device_ptr();
         let d_seq_len_ptr = *graph.d_graph_seq_len.as_ref().unwrap().device_ptr();
+        let mixed_segment_clock_active = graph.graph_mixed_segment_clock_enabled
+            && expert_layer.is_some()
+            && routing_range.is_some()
+            && graph.graph_segment_kinds.get(graph_idx).copied() == Some(GRAPH_SEG_ROUTE_GQA);
+        let mixed_segment_clock_base = graph_idx * 5;
+        let moe_route_clock_active = graph.graph_moe_route_clock_enabled
+            && expert_layer.is_some()
+            && routing_range.is_some()
+            && graph.graph_segment_kinds.get(graph_idx).copied() == Some(GRAPH_SEG_ROUTE_GQA);
+        let moe_route_clock_base = graph_idx * GRAPH_MOE_ROUTE_CLOCK_SLOTS;
+        let route_prep_clock_base = graph_idx * 12;
+        if mixed_segment_clock_active {
+            if let Some(active) = graph.graph_mixed_segment_active.get_mut(graph_idx) {
+                *active = true;
+            }
+            let clocks = graph.d_graph_mixed_segment_clocks.as_ref()
+                .ok_or_else(|| format!("mixed segment clock buffer missing for graph {}", graph_idx))?;
+            launch_graph_clock_marker(&k, clocks, mixed_segment_clock_base, "mixed-segment-start")?;
+        }
+        if moe_route_clock_active {
+            if let Some(active) = graph.graph_moe_route_active.get_mut(graph_idx) {
+                *active = true;
+            }
+            let clocks = graph.d_graph_moe_route_clocks.as_ref()
+                .ok_or_else(|| format!("MoE/route clock buffer missing for graph {}", graph_idx))?;
+            launch_graph_clock_marker(&k, clocks, moe_route_clock_base, "moe-route-moe-start")?;
+        }
 
         // v2 K-split config
         let w13_n = 2 * intermediate;
@@ -20690,6 +22544,11 @@ impl GpuDecodeStore {
                         ),
                     ).map_err(|e| format!("batched w13 v2[{}]: {:?}", layer_idx, e))?;
                 }
+                if moe_route_clock_active {
+                    let clocks = graph.d_graph_moe_route_clocks.as_ref()
+                        .ok_or_else(|| format!("MoE/route clock buffer missing for graph {}", graph_idx))?;
+                    launch_graph_clock_marker(&k, clocks, moe_route_clock_base + 1, "moe-route-w13-end")?;
+                }
 
                 // Batched reduce. Keep the same reduction kernel even when
                 // k_splits == 1 so the graph path stays grouped for small-K
@@ -20709,6 +22568,11 @@ impl GpuDecodeStore {
                         ),
                     ).map_err(|e| format!("batched reduce[{}]: {:?}", layer_idx, e))?;
                 }
+                if moe_route_clock_active {
+                    let clocks = graph.d_graph_moe_route_clocks.as_ref()
+                        .ok_or_else(|| format!("MoE/route clock buffer missing for graph {}", graph_idx))?;
+                    launch_graph_clock_marker(&k, clocks, moe_route_clock_base + 2, "moe-route-w13-reduce-end")?;
+                }
 
                 // Batched activation + w2
                 // Select kernel based on activation type: 0=silu_gated, 1=relu2
@@ -20716,29 +22580,106 @@ impl GpuDecodeStore {
                 // relu2 input is [K] (up_proj only), silu is [2*K] (gate+up)
                 let w2_input_k = if is_relu2 { intermediate } else { intermediate };
                 let w2_smem = (w2_input_k * 2 + 1024 * 4 + 64 * 4) as u32;
-                let w2_kernel = if is_relu2 {
-                    if is_int8 { k.relu2_w2_int8_batched.clone() }
-                    else { k.relu2_w2_batched.clone() }
+                let moe_w2_clock_active = graph.graph_moe_w2_clock_enabled
+                    && moe_route_clock_active
+                    && gemma4_expert_layer
+                    && gated
+                    && !is_relu2
+                    && !is_int8
+                    && topk.saturating_mul(w2_n_tiles) <= graph.graph_moe_w2_clock_blocks;
+                if moe_w2_clock_active {
+                    if let Some(active) = graph.graph_moe_w2_active.get_mut(graph_idx) {
+                        *active = true;
+                    }
+                    let clocks = graph.d_graph_moe_w2_clocks.as_ref()
+                        .ok_or_else(|| format!("MoE W2 clock buffer missing for graph {}", graph_idx))?;
+                    let clock_base = (graph_idx
+                        * graph.graph_moe_w2_clock_blocks
+                        * graph.graph_moe_w2_clock_slots_per_block) as i32;
+                    unsafe {
+                        let mut a0 = d_w2p;
+                        let mut a1 = d_w2s;
+                        let mut a2 = *graph.d_batch_gate_ups.device_ptr();
+                        let mut a3 = *graph.d_batch_expert_outs.device_ptr();
+                        let mut a4 = inv_wp;
+                        let mut a5 = inv_sp;
+                        let mut a6 = intermediate as i32;
+                        let mut a7 = expert_hs as i32;
+                        let mut a8 = gs as i32;
+                        let mut a9 = d_wts;
+                        let mut a10 = *clocks.device_ptr();
+                        let mut a11 = clock_base;
+                        let mut a12 = graph.graph_moe_w2_clock_blocks as i32;
+                        let mut a13 = graph.graph_moe_w2_clock_slots_per_block as i32;
+                        let mut params: Vec<*mut std::ffi::c_void> = vec![
+                            &mut a0 as *mut _ as *mut std::ffi::c_void,
+                            &mut a1 as *mut _ as *mut std::ffi::c_void,
+                            &mut a2 as *mut _ as *mut std::ffi::c_void,
+                            &mut a3 as *mut _ as *mut std::ffi::c_void,
+                            &mut a4 as *mut _ as *mut std::ffi::c_void,
+                            &mut a5 as *mut _ as *mut std::ffi::c_void,
+                            &mut a6 as *mut _ as *mut std::ffi::c_void,
+                            &mut a7 as *mut _ as *mut std::ffi::c_void,
+                            &mut a8 as *mut _ as *mut std::ffi::c_void,
+                            &mut a9 as *mut _ as *mut std::ffi::c_void,
+                            &mut a10 as *mut _ as *mut std::ffi::c_void,
+                            &mut a11 as *mut _ as *mut std::ffi::c_void,
+                            &mut a12 as *mut _ as *mut std::ffi::c_void,
+                            &mut a13 as *mut _ as *mut std::ffi::c_void,
+                        ];
+                        k.fused_silu_w2_batched_timed.clone().launch(
+                            LaunchConfig {
+                                grid_dim: (w2_n_tiles as u32, 1, topk as u32),
+                                block_dim: (256, 1, 1),
+                                shared_mem_bytes: w2_smem,
+                            },
+                            &mut params,
+                        ).map_err(|e| format!(
+                            "batched silu_w2_timed[{}]: {:?}",
+                            layer_idx,
+                            e,
+                        ))?;
+                    }
                 } else {
-                    if is_int8 { k.fused_silu_w2_int8_batched.clone() }
-                    else { k.fused_silu_w2_batched.clone() }
-                };
-                unsafe {
-                    w2_kernel.launch(
-                        LaunchConfig {
-                            grid_dim: (w2_n_tiles as u32, 1, topk as u32),
-                            block_dim: (256, 1, 1),
-                            shared_mem_bytes: w2_smem,
-                        },
-                        (
-                            d_w2p, d_w2s,
-                            *graph.d_batch_gate_ups.device_ptr(),
-                            *graph.d_batch_expert_outs.device_ptr(),
-                            inv_wp, inv_sp,
-                            intermediate as i32, expert_hs as i32, gs as i32,
-                            d_wts,
-                        ),
-                    ).map_err(|e| format!("batched silu_w2[{}]: {:?}", layer_idx, e))?;
+                    let (w2_kernel, w2_grid_tiles) = if is_relu2 {
+                        if is_int8 {
+                            (k.relu2_w2_int8_batched.clone(), w2_n_tiles)
+                        } else {
+                            (k.relu2_w2_batched.clone(), w2_n_tiles)
+                        }
+                    } else {
+                        if is_int8 {
+                            (k.fused_silu_w2_int8_batched.clone(), w2_n_tiles)
+                        } else {
+                            (k.fused_silu_w2_batched.clone(), w2_n_tiles)
+                        }
+                    };
+                    unsafe {
+                        w2_kernel.launch(
+                            LaunchConfig {
+                                grid_dim: (w2_grid_tiles as u32, 1, topk as u32),
+                                block_dim: (256, 1, 1),
+                                shared_mem_bytes: w2_smem,
+                            },
+                            (
+                                d_w2p, d_w2s,
+                                *graph.d_batch_gate_ups.device_ptr(),
+                                *graph.d_batch_expert_outs.device_ptr(),
+                                inv_wp, inv_sp,
+                                intermediate as i32, expert_hs as i32, gs as i32,
+                                d_wts,
+                            ),
+                        ).map_err(|e| format!(
+                            "batched silu_w2[{}]: {:?}",
+                            layer_idx,
+                            e,
+                        ))?;
+                    }
+                }
+                if moe_route_clock_active {
+                    let clocks = graph.d_graph_moe_route_clocks.as_ref()
+                        .ok_or_else(|| format!("MoE/route clock buffer missing for graph {}", graph_idx))?;
+                    launch_graph_clock_marker(&k, clocks, moe_route_clock_base + 3, "moe-route-activation-w2-end")?;
                 }
 
                 // Multi-expert weighted add (init_zero=1: fused zero, no separate zero_bf16 needed)
@@ -20756,6 +22697,11 @@ impl GpuDecodeStore {
                             expert_hs as i32, topk as i32, 1i32,
                         ),
                     ).map_err(|e| format!("multi_expert_weighted_add[{}]: {:?}", layer_idx, e))?;
+                }
+                if moe_route_clock_active {
+                    let clocks = graph.d_graph_moe_route_clocks.as_ref()
+                        .ok_or_else(|| format!("MoE/route clock buffer missing for graph {}", graph_idx))?;
+                    launch_graph_clock_marker(&k, clocks, moe_route_clock_base + 4, "moe-route-weighted-output-end")?;
                 }
 
                 // Shared expert (if any)
@@ -20791,6 +22737,16 @@ impl GpuDecodeStore {
                             }
                         }
                     }
+                    if moe_route_clock_active {
+                        let clocks = graph.d_graph_moe_route_clocks.as_ref()
+                            .ok_or_else(|| format!("MoE/route clock buffer missing for graph {}", graph_idx))?;
+                        launch_graph_clock_marker(
+                            &k,
+                            clocks,
+                            moe_route_clock_base + GRAPH_MOE_ROUTE_POST_SHARED_GATE_END,
+                            "moe-route-post-shared-gate-end",
+                        )?;
+                    }
 
                     // w13 GEMV for shared expert
                     if use_v2_w13 {
@@ -20800,10 +22756,30 @@ impl GpuDecodeStore {
                             partial_ptr, inv_wp, inv_sp,
                             hs, shared_w13_n, gs, w13_ksplits, &k, is_int8,
                         ).map_err(|e| format!("shared w13 v2: {:?}", e))?;
+                        if moe_route_clock_active {
+                            let clocks = graph.d_graph_moe_route_clocks.as_ref()
+                                .ok_or_else(|| format!("MoE/route clock buffer missing for graph {}", graph_idx))?;
+                            launch_graph_clock_marker(
+                                &k,
+                                clocks,
+                                moe_route_clock_base + GRAPH_MOE_ROUTE_POST_SHARED_W13_END,
+                                "moe-route-post-shared-w13-end",
+                            )?;
+                        }
                         self.launch_reduce_ksplits_bf16(
                             *graph.d_expert_gate_up.device_ptr(),
                             partial_ptr, shared_w13_n, w13_ksplits, &k,
                         ).map_err(|e| format!("shared reduce: {:?}", e))?;
+                        if moe_route_clock_active {
+                            let clocks = graph.d_graph_moe_route_clocks.as_ref()
+                                .ok_or_else(|| format!("MoE/route clock buffer missing for graph {}", graph_idx))?;
+                            launch_graph_clock_marker(
+                                &k,
+                                clocks,
+                                moe_route_clock_base + GRAPH_MOE_ROUTE_POST_SHARED_REDUCE_END,
+                                "moe-route-post-shared-reduce-end",
+                            )?;
+                        }
                     } else {
                         self.launch_marlin_gemv_raw(
                             sw13p, sw13s,
@@ -20811,6 +22787,22 @@ impl GpuDecodeStore {
                             *graph.d_expert_gate_up.device_ptr(),
                             inv_wp, inv_sp, hs, shared_w13_n, gs, is_int8,
                         ).map_err(|e| format!("shared w13 raw: {:?}", e))?;
+                        if moe_route_clock_active {
+                            let clocks = graph.d_graph_moe_route_clocks.as_ref()
+                                .ok_or_else(|| format!("MoE/route clock buffer missing for graph {}", graph_idx))?;
+                            launch_graph_clock_marker(
+                                &k,
+                                clocks,
+                                moe_route_clock_base + GRAPH_MOE_ROUTE_POST_SHARED_W13_END,
+                                "moe-route-post-shared-w13-end",
+                            )?;
+                            launch_graph_clock_marker(
+                                &k,
+                                clocks,
+                                moe_route_clock_base + GRAPH_MOE_ROUTE_POST_SHARED_REDUCE_END,
+                                "moe-route-post-shared-reduce-end",
+                            )?;
+                        }
                     }
 
                     let shared_gate_ptr = if graph.moe_layers[layer_idx].as_ref()
@@ -20825,6 +22817,16 @@ impl GpuDecodeStore {
                         inv_wp, inv_sp, shared_intermediate, hs, gs,
                         1.0, shared_gate_ptr, &k, is_int8,
                     ).map_err(|e| format!("shared silu_accum: {:?}", e))?;
+                    if moe_route_clock_active {
+                        let clocks = graph.d_graph_moe_route_clocks.as_ref()
+                            .ok_or_else(|| format!("MoE/route clock buffer missing for graph {}", graph_idx))?;
+                        launch_graph_clock_marker(
+                            &k,
+                            clocks,
+                            moe_route_clock_base + GRAPH_MOE_ROUTE_POST_SHARED_W2_END,
+                            "moe-route-post-shared-w2-end",
+                        )?;
+                    }
                 }
 
                 // Scale by routed_scaling_factor
@@ -20837,6 +22839,16 @@ impl GpuDecodeStore {
                             (*graph.d_moe_out.device_ptr(), *graph.d_moe_out.device_ptr(), rsf, expert_hs as i32),
                         ).map_err(|e| format!("scale_bf16[{}]: {:?}", layer_idx, e))?;
                     }
+                }
+                if moe_route_clock_active {
+                    let clocks = graph.d_graph_moe_route_clocks.as_ref()
+                        .ok_or_else(|| format!("MoE/route clock buffer missing for graph {}", graph_idx))?;
+                    launch_graph_clock_marker(
+                        &k,
+                        clocks,
+                        moe_route_clock_base + GRAPH_MOE_ROUTE_POST_SCALE_END,
+                        "moe-route-post-scale-end",
+                    )?;
                 }
 
                 if gemma4_expert_layer {
@@ -20854,6 +22866,16 @@ impl GpuDecodeStore {
                             eps,
                             hs as i32,
                         )).map_err(|e| format!("gemma4 graph post_ffn2 rmsnorm[{}]: {:?}", layer_idx, e))?;
+                        if moe_route_clock_active {
+                            let clocks = graph.d_graph_moe_route_clocks.as_ref()
+                                .ok_or_else(|| format!("MoE/route clock buffer missing for graph {}", graph_idx))?;
+                            launch_graph_clock_marker(
+                                &k,
+                                clocks,
+                                moe_route_clock_base + GRAPH_MOE_ROUTE_POST_HIDDEN_NORM2_END,
+                                "moe-route-post-hidden-norm2-end",
+                            )?;
+                        }
                         k.add_bf16.clone().launch(
                             LaunchConfig::for_num_elems(hs as u32),
                             (
@@ -20863,6 +22885,16 @@ impl GpuDecodeStore {
                                 hs as i32,
                             ),
                         ).map_err(|e| format!("gemma4 graph dense_moe add[{}]: {:?}", layer_idx, e))?;
+                        if moe_route_clock_active {
+                            let clocks = graph.d_graph_moe_route_clocks.as_ref()
+                                .ok_or_else(|| format!("MoE/route clock buffer missing for graph {}", graph_idx))?;
+                            launch_graph_clock_marker(
+                                &k,
+                                clocks,
+                                moe_route_clock_base + GRAPH_MOE_ROUTE_POST_HIDDEN_ADD1_END,
+                                "moe-route-post-hidden-add1-end",
+                            )?;
+                        }
                         k.rmsnorm.clone().launch(norm_cfg, (
                             *graph.d_scratch.device_ptr(),
                             *graph.d_hidden.device_ptr(),
@@ -20870,6 +22902,16 @@ impl GpuDecodeStore {
                             eps,
                             hs as i32,
                         )).map_err(|e| format!("gemma4 graph post_ffn rmsnorm[{}]: {:?}", layer_idx, e))?;
+                        if moe_route_clock_active {
+                            let clocks = graph.d_graph_moe_route_clocks.as_ref()
+                                .ok_or_else(|| format!("MoE/route clock buffer missing for graph {}", graph_idx))?;
+                            launch_graph_clock_marker(
+                                &k,
+                                clocks,
+                                moe_route_clock_base + GRAPH_MOE_ROUTE_POST_HIDDEN_NORM_END,
+                                "moe-route-post-hidden-norm-end",
+                            )?;
+                        }
                         k.add_bf16.clone().launch(
                             LaunchConfig::for_num_elems(hs as u32),
                             (
@@ -20879,6 +22921,16 @@ impl GpuDecodeStore {
                                 hs as i32,
                             ),
                         ).map_err(|e| format!("gemma4 graph ffn residual add[{}]: {:?}", layer_idx, e))?;
+                        if moe_route_clock_active {
+                            let clocks = graph.d_graph_moe_route_clocks.as_ref()
+                                .ok_or_else(|| format!("MoE/route clock buffer missing for graph {}", graph_idx))?;
+                            launch_graph_clock_marker(
+                                &k,
+                                clocks,
+                                moe_route_clock_base + GRAPH_MOE_ROUTE_POST_HIDDEN_ADD2_END,
+                                "moe-route-post-hidden-add2-end",
+                            )?;
+                        }
                         if layer.layer_scalar_ptr != 0 {
                             k.scale_bf16_by_ptr.clone().launch(
                                 LaunchConfig::for_num_elems(hs as u32),
@@ -20889,6 +22941,16 @@ impl GpuDecodeStore {
                                     hs as i32,
                                 ),
                             ).map_err(|e| format!("gemma4 graph layer_scalar scale[{}]: {:?}", layer_idx, e))?;
+                            if moe_route_clock_active {
+                                let clocks = graph.d_graph_moe_route_clocks.as_ref()
+                                    .ok_or_else(|| format!("MoE/route clock buffer missing for graph {}", graph_idx))?;
+                                launch_graph_clock_marker(
+                                    &k,
+                                    clocks,
+                                    moe_route_clock_base + GRAPH_MOE_ROUTE_POST_HIDDEN_SCALAR_END,
+                                    "moe-route-post-hidden-scalar-end",
+                                )?;
+                            }
                         }
                     }
                 } else {
@@ -20900,7 +22962,28 @@ impl GpuDecodeStore {
                             expert_hs * 2, cu_stream);
                     }
                 }
+                if moe_route_clock_active {
+                    let clocks = graph.d_graph_moe_route_clocks.as_ref()
+                        .ok_or_else(|| format!("MoE/route clock buffer missing for graph {}", graph_idx))?;
+                    launch_graph_clock_marker(
+                        &k,
+                        clocks,
+                        moe_route_clock_base + GRAPH_MOE_ROUTE_POST_HIDDEN_WRITE_END,
+                        "moe-route-post-hidden-write-end",
+                    )?;
+                }
             }
+        }
+        if mixed_segment_clock_active {
+            let clocks = graph.d_graph_mixed_segment_clocks.as_ref()
+                .ok_or_else(|| format!("mixed segment clock buffer missing for graph {}", graph_idx))?;
+            launch_graph_clock_marker(&k, clocks, mixed_segment_clock_base + 1, "mixed-expert-end")?;
+        }
+        if moe_route_clock_active {
+            let clocks = graph.d_graph_moe_route_clocks.as_ref()
+                .ok_or_else(|| format!("MoE/route clock buffer missing for graph {}", graph_idx))?;
+            launch_graph_clock_marker(&k, clocks, moe_route_clock_base + 5, "moe-route-expert-end")?;
+            launch_graph_clock_marker(&k, clocks, moe_route_clock_base + 6, "moe-route-pre-gqa-start")?;
         }
 
         // Track first_residual state for routing layers
@@ -20946,8 +23029,20 @@ impl GpuDecodeStore {
             for layer_idx in range_start..=range_end {
                 let layer = &graph.layers[layer_idx];
                 let is_gemma4 = matches!(layer.mlp, GpuMlpConfig::Gemma4MoE { .. });
+                let route_prep_clock_active = graph.graph_route_prep_clock_enabled
+                    && moe_route_clock_active
+                    && is_gemma4
+                    && layer_idx == range_end;
 
                 // Pre-attention norm
+                if route_prep_clock_active {
+                    if let Some(active) = graph.graph_route_prep_active.get_mut(graph_idx) {
+                        *active = true;
+                    }
+                    let clocks = graph.d_graph_route_prep_clocks.as_ref()
+                        .ok_or_else(|| format!("route-prep clock buffer missing for graph {}", graph_idx))?;
+                    launch_graph_clock_marker(&k, clocks, route_prep_clock_base, "route-prep-pre-gqa-norm-start")?;
+                }
                 {
                     let smem = (hs as u32) * 4;
                     let threads = 256u32.min(hs as u32);
@@ -20987,6 +23082,11 @@ impl GpuDecodeStore {
                             ).map_err(|e| format!("fused_add_rmsnorm[{}]: {:?}", layer_idx, e))?;
                         }
                     }
+                }
+                if route_prep_clock_active {
+                    let clocks = graph.d_graph_route_prep_clocks.as_ref()
+                        .ok_or_else(|| format!("route-prep clock buffer missing for graph {}", graph_idx))?;
+                    launch_graph_clock_marker(&k, clocks, route_prep_clock_base + 1, "route-prep-pre-gqa-norm-end")?;
                 }
                 first_residual = false;
 
@@ -21170,6 +23270,16 @@ impl GpuDecodeStore {
                         rope_cos_ptr, rope_sin_ptr, sm_scale,
                         q_norm_ptr, k_norm_ptr, gated,
                     } => {
+                        if mixed_segment_clock_active && layer_idx == range_end {
+                            let clocks = graph.d_graph_mixed_segment_clocks.as_ref()
+                                .ok_or_else(|| format!("mixed segment clock buffer missing for graph {}", graph_idx))?;
+                            launch_graph_clock_marker(&k, clocks, mixed_segment_clock_base + 2, "mixed-gqa-start")?;
+                        }
+                        if moe_route_clock_active && layer_idx == range_end {
+                            let clocks = graph.d_graph_moe_route_clocks.as_ref()
+                                .ok_or_else(|| format!("MoE/route clock buffer missing for graph {}", graph_idx))?;
+                            launch_graph_clock_marker(&k, clocks, moe_route_clock_base + 7, "moe-route-gqa-start")?;
+                        }
                         let nh = *num_heads; let nkv = *num_kv_heads;
                         let hd = *head_dim; let half_dim = *rope_half_dim;
                         let kv_stride = nkv * hd;
@@ -21178,6 +23288,18 @@ impl GpuDecodeStore {
                             .get(layer_idx)
                             .map(|buf| *buf.device_ptr())
                             .unwrap_or(d_seq_len_ptr);
+                        let gqa_path_clock_active = graph.graph_gqa_path_clock_enabled
+                            && expert_layer.is_some()
+                            && routing_range.is_some()
+                            && graph.graph_segment_kinds.get(graph_idx).copied() == Some(GRAPH_SEG_ROUTE_GQA)
+                            && layer_idx == range_end
+                            && graph.kv_format == 9
+                            && hd == 512
+                            && graph.gqa_tile_size > 0
+                            && graph.gqa_max_tiles > 1
+                            && graph.d_gqa_tiled_o.is_some()
+                            && graph.d_gqa_tiled_lse.is_some();
+                        let gqa_path_clock_base = graph_idx * 7;
                         let hqq_gqa_exec = match &layer.hqq_exec {
                             Some(HqqExecutionDescriptor::Gqa(desc))
                                 if (desc.fused_qkv.is_some()
@@ -21215,6 +23337,54 @@ impl GpuDecodeStore {
                             }
                             None => None,
                         };
+                        let gqa_projection_mode = if let Some(exec) = hqq_gqa_exec.as_ref() {
+                            if exec.fused_qkv.is_some() { 1 } else { 2 }
+                        } else if fused_qkv.is_some() {
+                            3
+                        } else {
+                            4
+                        };
+                        let gqa_other_clock_active = graph.graph_gqa_other_clock_enabled
+                            && expert_layer.is_some()
+                            && routing_range.is_some()
+                            && graph.graph_segment_kinds.get(graph_idx).copied() == Some(GRAPH_SEG_ROUTE_GQA)
+                            && layer_idx == range_end
+                            && graph.kv_format == 9
+                            && graph.gqa_tile_size > 0
+                            && graph.gqa_max_tiles > 1
+                            && graph.d_gqa_tiled_o.is_some()
+                            && graph.d_gqa_tiled_lse.is_some()
+                            && !gqa_path_clock_active;
+                        let gqa_other_clock_base = graph_idx * GRAPH_GQA_OTHER_CLOCK_SLOTS;
+                        let gqa_hd256_attn_clock_active = graph.graph_gqa_hd256_attn_clock_enabled
+                            && gqa_other_clock_active
+                            && hd != 512;
+                        if gqa_path_clock_active {
+                            if let Some(active) = graph.graph_gqa_path_active.get_mut(graph_idx) {
+                                *active = true;
+                            }
+                            let clocks = graph.d_graph_gqa_path_clocks.as_ref()
+                                .ok_or_else(|| format!("GQA path clock buffer missing for graph {}", graph_idx))?;
+                            launch_graph_clock_marker(&k, clocks, gqa_path_clock_base, "gqa-path-start")?;
+                        }
+                        if gqa_other_clock_active {
+                            if let Some(active) = graph.graph_gqa_other_active.get_mut(graph_idx) {
+                                *active = true;
+                            }
+                            if let Some(meta) = graph.graph_gqa_other_meta.get_mut(graph_idx) {
+                                meta.active = true;
+                                meta.layer_idx = layer_idx;
+                                meta.num_heads = nh;
+                                meta.num_kv_heads = nkv;
+                                meta.head_dim = hd;
+                                meta.sliding_window = layer.gqa_sliding_window;
+                                meta.gated = *gated;
+                                meta.projection_mode = gqa_projection_mode;
+                            }
+                            let clocks = graph.d_graph_gqa_other_clocks.as_ref()
+                                .ok_or_else(|| format!("other GQA clock buffer missing for graph {}", graph_idx))?;
+                            launch_graph_clock_marker(&k, clocks, gqa_other_clock_base, "gqa-other-start")?;
+                        }
 
                         // QKV projection
                         if let Some(hqq_exec) = hqq_gqa_exec.as_ref() {
@@ -21331,13 +23501,23 @@ impl GpuDecodeStore {
                                 k.split_gated_q.clone().launch(
                                     LaunchConfig { grid_dim: (blocks, 1, 1), block_dim: (threads, 1, 1), shared_mem_bytes: 0 },
                                     (
-                                        *graph.d_gqa_q.device_ptr(),      // q_out
-                                        *graph.d_la_qkvz.device_ptr(),    // gate_out
-                                        *graph.d_gqa_out.device_ptr(),    // qg_in (separate buffer)
+                                        *graph.d_gqa_q.device_ptr(),  // q_out
+                                        *graph.d_la_qkvz.device_ptr(), // gate_out
+                                        *graph.d_gqa_out.device_ptr(), // qg_in
                                         nh as i32, hd as i32,
                                     ),
                                 ).map_err(|e| format!("split_gated_q[{}]: {:?}", layer_idx, e))?;
                             }
+                        }
+                        if gqa_path_clock_active {
+                            let clocks = graph.d_graph_gqa_path_clocks.as_ref()
+                                .ok_or_else(|| format!("GQA path clock buffer missing for graph {}", graph_idx))?;
+                            launch_graph_clock_marker(&k, clocks, gqa_path_clock_base + 1, "gqa-path-projection-end")?;
+                        }
+                        if gqa_other_clock_active {
+                            let clocks = graph.d_graph_gqa_other_clocks.as_ref()
+                                .ok_or_else(|| format!("other GQA clock buffer missing for graph {}", graph_idx))?;
+                            launch_graph_clock_marker(&k, clocks, gqa_other_clock_base + 1, "gqa-other-projection-end")?;
                         }
 
                         // QK norm
@@ -21371,6 +23551,11 @@ impl GpuDecodeStore {
                                 )).map_err(|e| format!("per_head_rmsnorm V no-scale[{}]: {:?}", layer_idx, e))?;
                             }
                         }
+                        if gqa_other_clock_active {
+                            let clocks = graph.d_graph_gqa_other_clocks.as_ref()
+                                .ok_or_else(|| format!("other GQA clock buffer missing for graph {}", graph_idx))?;
+                            launch_graph_clock_marker(&k, clocks, gqa_other_clock_base + 2, "gqa-other-qkv-norm-end")?;
+                        }
 
                         // RoPE
                         if let Some(ref d_cos) = graph.d_rope_cos {
@@ -21396,6 +23581,11 @@ impl GpuDecodeStore {
                                     ),
                                 ).map_err(|e| format!("apply_rope_g[{}]: {:?}", layer_idx, e))?;
                             }
+                        }
+                        if gqa_other_clock_active {
+                            let clocks = graph.d_graph_gqa_other_clocks.as_ref()
+                                .ok_or_else(|| format!("other GQA clock buffer missing for graph {}", graph_idx))?;
+                            launch_graph_clock_marker(&k, clocks, gqa_other_clock_base + 3, "gqa-other-rope-end")?;
                         }
 
                         // KV cache write
@@ -21569,6 +23759,16 @@ impl GpuDecodeStore {
                                 ).map_err(|e| format!("kv_cache_write_g[{}]: {:?}", layer_idx, e))?;
                             }
                         }
+                        if gqa_path_clock_active {
+                            let clocks = graph.d_graph_gqa_path_clocks.as_ref()
+                                .ok_or_else(|| format!("GQA path clock buffer missing for graph {}", graph_idx))?;
+                            launch_graph_clock_marker(&k, clocks, gqa_path_clock_base + 2, "gqa-path-norm-rope-kv-end")?;
+                        }
+                        if gqa_other_clock_active {
+                            let clocks = graph.d_graph_gqa_other_clocks.as_ref()
+                                .ok_or_else(|| format!("other GQA clock buffer missing for graph {}", graph_idx))?;
+                            launch_graph_clock_marker(&k, clocks, gqa_other_clock_base + 4, "gqa-other-kv-write-end")?;
+                        }
 
                         // GQA attention
                         if graph.kv_format == 2 {
@@ -21683,31 +23883,182 @@ impl GpuDecodeStore {
 					                            let is_k6v6 = graph.kv_format == 7;
 					                            let is_k8v6 = graph.kv_format == 8;
 					                            let fmt = if is_k8v6 { "k8v6" } else if is_k6v6 { "k6v6" } else if is_k7 { "k7v4" } else if is_k4 { "k4v4" } else { "k6v4" };
-					                            // k4v4/k6v4/k7v4 use Polar4 V; k6v6/k8v6 accumulate INT6 V in original domain.
+				                            // k4v4/k6v4/k7v4 use Polar4 V; k6v6/k8v6 accumulate INT6 V in original domain.
 				                            let threads = 256u32;
 				                            if is_k4 {
-				                                let num_warps = threads / 32;
-				                                let shared_mem_bytes = ((hd as u32) * (num_warps + 1) + 2 * num_warps) * 4 + 128;
-				                                unsafe {
-				                                    k.gqa_attention_k4v4_single_g.clone().launch(
-				                                        LaunchConfig {
-				                                            grid_dim: (nh as u32, 1, 1),
-				                                            block_dim: (threads, 1, 1),
-				                                            shared_mem_bytes,
-				                                        },
-				                                        (
-				                                            *graph.d_gqa_out.device_ptr(),
-				                                            *graph.d_gqa_q.device_ptr(),
-				                                            graph.kv_k_radius_ptrs[layer_idx],
-				                                            graph.kv_k_angles_ptrs[layer_idx],
-				                                            graph.kv_v_radius_ptrs[layer_idx],
-				                                            graph.kv_v_angles_ptrs[layer_idx],
-				                                            *sm_scale,
-				                                            nkv as i32,
-				                                            hd as i32,
-					                                            d_seq_len_ptr,
-				                                        ),
-				                                    ).map_err(|e| format!("gqa_attention_k4v4_single_g[{}]: {:?}", layer_idx, e))?;
+				                                let tile_size = graph.gqa_tile_size;
+				                                let max_tiles = graph.gqa_max_tiles;
+				                                let use_tiled_k4 = hd == 512
+				                                    && tile_size > 0
+				                                    && max_tiles > 1
+				                                    && graph.d_gqa_tiled_o.is_some()
+				                                    && graph.d_gqa_tiled_lse.is_some();
+
+				                                if use_tiled_k4 {
+				                                    let tiled_o = graph.d_gqa_tiled_o.as_ref()
+				                                        .ok_or_else(|| format!("gqa_attention_k4v4_tiled_g[{}]: tiled output buffer not allocated", layer_idx))?;
+				                                    let tiled_lse = graph.d_gqa_tiled_lse.as_ref()
+				                                        .ok_or_else(|| format!("gqa_attention_k4v4_tiled_g[{}]: tiled lse buffer not allocated", layer_idx))?;
+				                                    let tile_smem = ((tile_size + hd) as u32) * 4 + 128;
+				                                    unsafe {
+				                                        let split_clock_base = graph_idx * 3;
+				                                        let split_clocks = if graph.graph_gqa_k4_split_clock_enabled {
+				                                            if let Some(active) = graph.graph_gqa_k4_split_active.get_mut(graph_idx) {
+				                                                *active = true;
+				                                            }
+				                                            Some(graph.d_graph_gqa_k4_split_clocks.as_ref()
+				                                                .ok_or_else(|| format!("gqa split clock buffer missing for graph {}", graph_idx))?)
+				                                        } else {
+				                                            None
+				                                        };
+				                                        if let Some(clocks) = split_clocks {
+				                                            k.record_globaltimer_u64_g.clone().launch(
+				                                                LaunchConfig {
+				                                                    grid_dim: (1, 1, 1),
+				                                                    block_dim: (1, 1, 1),
+				                                                    shared_mem_bytes: 0,
+				                                                },
+				                                                (*clocks.device_ptr(), split_clock_base as i32),
+				                                            ).map_err(|e| format!("record_globaltimer_u64_g[k4v4-attn-start][{}]: {:?}", layer_idx, e))?;
+				                                        }
+				                                        k.gqa_attention_k4v4_tiled_g.clone().launch(
+				                                            LaunchConfig {
+				                                                grid_dim: (nh as u32, max_tiles as u32, 1),
+				                                                block_dim: (threads, 1, 1),
+				                                                shared_mem_bytes: tile_smem,
+				                                            },
+				                                            (
+				                                                *tiled_o.device_ptr(),
+				                                                *tiled_lse.device_ptr(),
+				                                                *graph.d_gqa_q.device_ptr(),
+				                                                graph.kv_k_radius_ptrs[layer_idx],
+				                                                graph.kv_k_angles_ptrs[layer_idx],
+				                                                graph.kv_v_radius_ptrs[layer_idx],
+				                                                graph.kv_v_angles_ptrs[layer_idx],
+				                                                *sm_scale,
+				                                                nkv as i32,
+				                                                hd as i32,
+						                                        d_seq_len_ptr,
+				                                                tile_size as i32,
+				                                            ),
+				                                        ).map_err(|e| format!("gqa_attention_k4v4_tiled_g[{}]: {:?}", layer_idx, e))?;
+				                                        if let Some(clocks) = split_clocks {
+				                                            k.record_globaltimer_u64_g.clone().launch(
+				                                                LaunchConfig {
+				                                                    grid_dim: (1, 1, 1),
+				                                                    block_dim: (1, 1, 1),
+				                                                    shared_mem_bytes: 0,
+				                                                },
+				                                                (*clocks.device_ptr(), split_clock_base as i32 + 1),
+					                                        ).map_err(|e| format!("record_globaltimer_u64_g[k4v4-reduce-start][{}]: {:?}", layer_idx, e))?;
+				                                        }
+
+					                                        let reduce_smem = ((max_tiles + hd) as u32) * 4;
+					                                        k.gqa_attention_polar4_reduce_g.clone().launch(
+					                                            LaunchConfig {
+					                                                grid_dim: (nh as u32, 1, 1),
+					                                                block_dim: (threads, 1, 1),
+					                                                shared_mem_bytes: reduce_smem,
+					                                            },
+					                                            (
+					                                                *graph.d_gqa_out.device_ptr(),
+					                                                *tiled_o.device_ptr(),
+					                                                *tiled_lse.device_ptr(),
+					                                                nh as i32, hd as i32,
+						                                                d_seq_len_ptr,
+					                                                tile_size as i32,
+					                                                max_tiles as i32,
+					                                            ),
+					                                        ).map_err(|e| format!("gqa_attention_polar4_reduce_g[k4v4][{}]: {:?}", layer_idx, e))?;
+				                                        if let Some(clocks) = split_clocks {
+				                                            k.record_globaltimer_u64_g.clone().launch(
+				                                                LaunchConfig {
+				                                                    grid_dim: (1, 1, 1),
+				                                                    block_dim: (1, 1, 1),
+				                                                    shared_mem_bytes: 0,
+				                                                },
+				                                                (*clocks.device_ptr(), split_clock_base as i32 + 2),
+				                                            ).map_err(|e| format!("record_globaltimer_u64_g[k4v4-reduce-end][{}]: {:?}", layer_idx, e))?;
+				                                        }
+				                                    }
+				                                } else {
+				                                    let num_warps = threads / 32;
+				                                    let shared_mem_bytes = ((hd as u32) * (num_warps + 1) + 2 * num_warps) * 4 + 128;
+				                                    unsafe {
+				                                        if gqa_hd256_attn_clock_active {
+				                                            if let Some(active) = graph.graph_gqa_hd256_attn_active.get_mut(graph_idx) {
+				                                                *active = true;
+				                                            }
+				                                            let clocks = graph.d_graph_gqa_hd256_attn_clocks.as_ref()
+				                                                .ok_or_else(|| format!("HD256 GQA attn clock buffer missing for graph {}", graph_idx))?;
+				                                            let stats = graph.d_graph_gqa_hd256_attn_stats.as_ref()
+				                                                .ok_or_else(|| format!("HD256 GQA attn stats buffer missing for graph {}", graph_idx))?;
+				                                            let clock_base = (graph_idx * graph.graph_gqa_hd256_attn_clock_heads * 4) as i32;
+				                                            let stats_base = (graph_idx * 8) as i32;
+				                                            let mut a0 = *graph.d_gqa_out.device_ptr();
+				                                            let mut a1 = *graph.d_gqa_q.device_ptr();
+				                                            let mut a2 = graph.kv_k_radius_ptrs[layer_idx];
+				                                            let mut a3 = graph.kv_k_angles_ptrs[layer_idx];
+				                                            let mut a4 = graph.kv_v_radius_ptrs[layer_idx];
+				                                            let mut a5 = graph.kv_v_angles_ptrs[layer_idx];
+				                                            let mut a6 = *sm_scale;
+				                                            let mut a7 = nkv as i32;
+				                                            let mut a8 = hd as i32;
+				                                            let mut a9 = d_seq_len_ptr;
+				                                            let mut a10 = *clocks.device_ptr();
+				                                            let mut a11 = *stats.device_ptr();
+				                                            let mut a12 = clock_base;
+				                                            let mut a13 = stats_base;
+				                                            let mut a14 = tile_size as i32;
+				                                            let mut a15 = max_tiles as i32;
+				                                            let mut params: Vec<*mut std::ffi::c_void> = vec![
+				                                                &mut a0 as *mut _ as *mut std::ffi::c_void,
+				                                                &mut a1 as *mut _ as *mut std::ffi::c_void,
+				                                                &mut a2 as *mut _ as *mut std::ffi::c_void,
+				                                                &mut a3 as *mut _ as *mut std::ffi::c_void,
+				                                                &mut a4 as *mut _ as *mut std::ffi::c_void,
+				                                                &mut a5 as *mut _ as *mut std::ffi::c_void,
+				                                                &mut a6 as *mut _ as *mut std::ffi::c_void,
+				                                                &mut a7 as *mut _ as *mut std::ffi::c_void,
+				                                                &mut a8 as *mut _ as *mut std::ffi::c_void,
+				                                                &mut a9 as *mut _ as *mut std::ffi::c_void,
+				                                                &mut a10 as *mut _ as *mut std::ffi::c_void,
+				                                                &mut a11 as *mut _ as *mut std::ffi::c_void,
+				                                                &mut a12 as *mut _ as *mut std::ffi::c_void,
+				                                                &mut a13 as *mut _ as *mut std::ffi::c_void,
+				                                                &mut a14 as *mut _ as *mut std::ffi::c_void,
+				                                                &mut a15 as *mut _ as *mut std::ffi::c_void,
+				                                            ];
+				                                            k.gqa_attention_k4v4_single_g_timed.clone().launch(
+				                                                LaunchConfig {
+				                                                    grid_dim: (nh as u32, 1, 1),
+				                                                    block_dim: (threads, 1, 1),
+				                                                    shared_mem_bytes,
+				                                                },
+				                                                &mut params,
+				                                            ).map_err(|e| format!("gqa_attention_k4v4_single_g_timed[{}]: {:?}", layer_idx, e))?;
+				                                        } else {
+				                                            k.gqa_attention_k4v4_single_g.clone().launch(
+				                                                LaunchConfig {
+				                                                    grid_dim: (nh as u32, 1, 1),
+				                                                    block_dim: (threads, 1, 1),
+				                                                    shared_mem_bytes,
+				                                                },
+				                                                (
+				                                                    *graph.d_gqa_out.device_ptr(),
+				                                                    *graph.d_gqa_q.device_ptr(),
+				                                                    graph.kv_k_radius_ptrs[layer_idx],
+				                                                    graph.kv_k_angles_ptrs[layer_idx],
+				                                                    graph.kv_v_radius_ptrs[layer_idx],
+				                                                    graph.kv_v_angles_ptrs[layer_idx],
+				                                                    *sm_scale,
+				                                                    nkv as i32,
+				                                                    hd as i32,
+					                                                d_seq_len_ptr,
+				                                                ),
+				                                            ).map_err(|e| format!("gqa_attention_k4v4_single_g[{}]: {:?}", layer_idx, e))?;
+				                                        }
+				                                    }
 				                                }
 				                            } else {
 				                                let tile_size = graph.gqa_tile_size;
@@ -21954,6 +24305,16 @@ impl GpuDecodeStore {
                                 ).map_err(|e| format!("gqa_attention_reduce_g[{}]: {:?}", layer_idx, e))?;
                             }
                         }
+                        if gqa_path_clock_active {
+                            let clocks = graph.d_graph_gqa_path_clocks.as_ref()
+                                .ok_or_else(|| format!("GQA path clock buffer missing for graph {}", graph_idx))?;
+                            launch_graph_clock_marker(&k, clocks, gqa_path_clock_base + 3, "gqa-path-attention-reduce-end")?;
+                        }
+                        if gqa_other_clock_active {
+                            let clocks = graph.d_graph_gqa_other_clocks.as_ref()
+                                .ok_or_else(|| format!("other GQA clock buffer missing for graph {}", graph_idx))?;
+                            launch_graph_clock_marker(&k, clocks, gqa_other_clock_base + 5, "gqa-other-attention-reduce-end")?;
+                        }
 
                         // Gated attention + BF16 conversion (or just BF16 conversion if non-gated)
                         let attn_out_dim = nh * hd;
@@ -21984,6 +24345,18 @@ impl GpuDecodeStore {
                                 ).map_err(|e| format!("fp32_to_bf16[{}]: {:?}", layer_idx, e))?;
                             }
                         }
+                        if gqa_path_clock_active {
+                            let clocks = graph.d_graph_gqa_path_clocks.as_ref()
+                                .ok_or_else(|| format!("GQA path clock buffer missing for graph {}", graph_idx))?;
+                            launch_graph_clock_marker(&k, clocks, gqa_path_clock_base + 4, "gqa-path-apply-gated-bf16-end")?;
+                            launch_graph_clock_marker(&k, clocks, gqa_path_clock_base + 5, "gqa-path-o-projection-start")?;
+                        }
+                        if gqa_other_clock_active {
+                            let clocks = graph.d_graph_gqa_other_clocks.as_ref()
+                                .ok_or_else(|| format!("other GQA clock buffer missing for graph {}", graph_idx))?;
+                            launch_graph_clock_marker(&k, clocks, gqa_other_clock_base + 6, "gqa-other-apply-bf16-end")?;
+                            launch_graph_clock_marker(&k, clocks, gqa_other_clock_base + 7, "gqa-other-o-projection-start")?;
+                        }
 
                         // O projection
                         if let Some(hqq_exec) = hqq_gqa_exec.as_ref() {
@@ -21998,8 +24371,28 @@ impl GpuDecodeStore {
                             self.gemv_bf16_internal(o_w, *graph.d_scratch.device_ptr(),
                                 *graph.d_hidden.device_ptr())?;
                         }
+                        if gqa_path_clock_active {
+                            let clocks = graph.d_graph_gqa_path_clocks.as_ref()
+                                .ok_or_else(|| format!("GQA path clock buffer missing for graph {}", graph_idx))?;
+                            launch_graph_clock_marker(&k, clocks, gqa_path_clock_base + 6, "gqa-path-o-projection-end")?;
+                        }
+                        if gqa_other_clock_active {
+                            let clocks = graph.d_graph_gqa_other_clocks.as_ref()
+                                .ok_or_else(|| format!("other GQA clock buffer missing for graph {}", graph_idx))?;
+                            launch_graph_clock_marker(&k, clocks, gqa_other_clock_base + 8, "gqa-other-o-projection-end")?;
+                        }
 
                         gqa_cache_idx += 1;
+                        if mixed_segment_clock_active && layer_idx == range_end {
+                            let clocks = graph.d_graph_mixed_segment_clocks.as_ref()
+                                .ok_or_else(|| format!("mixed segment clock buffer missing for graph {}", graph_idx))?;
+                            launch_graph_clock_marker(&k, clocks, mixed_segment_clock_base + 3, "mixed-gqa-end")?;
+                        }
+                        if moe_route_clock_active && layer_idx == range_end {
+                            let clocks = graph.d_graph_moe_route_clocks.as_ref()
+                                .ok_or_else(|| format!("MoE/route clock buffer missing for graph {}", graph_idx))?;
+                            launch_graph_clock_marker(&k, clocks, moe_route_clock_base + 8, "moe-route-gqa-end")?;
+                        }
                     }
 
                     GpuAttnConfig::MLA {
@@ -22244,6 +24637,11 @@ impl GpuDecodeStore {
                 }
 
                 // Post-attention norm
+                if route_prep_clock_active {
+                    let clocks = graph.d_graph_route_prep_clocks.as_ref()
+                        .ok_or_else(|| format!("route-prep clock buffer missing for graph {}", graph_idx))?;
+                    launch_graph_clock_marker(&k, clocks, route_prep_clock_base + 2, "route-prep-post-gqa-norm-start")?;
+                }
                 {
                     let smem = (hs as u32) * 4;
                     let threads = 256u32.min(hs as u32);
@@ -22283,6 +24681,11 @@ impl GpuDecodeStore {
                         }
                     }
                 }
+                if route_prep_clock_active {
+                    let clocks = graph.d_graph_route_prep_clocks.as_ref()
+                        .ok_or_else(|| format!("route-prep clock buffer missing for graph {}", graph_idx))?;
+                    launch_graph_clock_marker(&k, clocks, route_prep_clock_base + 3, "route-prep-post-gqa-norm-end")?;
+                }
 
                 // Dense MLP (for non-MoE layers in the routing range)
                 let is_moe_layer = layer_idx < graph.moe_layers.len()
@@ -22296,6 +24699,16 @@ impl GpuDecodeStore {
                         } => (*dense_gate_proj, *dense_up_proj, *dense_down_proj),
                         _ => unreachable!(),
                     };
+                    if route_prep_clock_active {
+                        let clocks = graph.d_graph_route_prep_clocks.as_ref()
+                            .ok_or_else(|| format!("route-prep clock buffer missing for graph {}", graph_idx))?;
+                        launch_graph_clock_marker(&k, clocks, route_prep_clock_base + 4, "route-prep-dense-start")?;
+                    }
+                    let norm_cfg = LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (256u32.min(hs as u32), 1, 1),
+                        shared_mem_bytes: (hs as u32) * 4,
+                    };
                     unsafe {
                         let err = cuda_sys::lib().cuMemcpyDtoDAsync_v2(
                             *graph.d_residual.device_ptr(),
@@ -22306,13 +24719,6 @@ impl GpuDecodeStore {
                         if err != cuda_sys::CUresult::CUDA_SUCCESS {
                             return Err(format!("gemma4 graph ffn residual copy[{}]: {:?}", layer_idx, err));
                         }
-                    }
-                    let norm_cfg = LaunchConfig {
-                        grid_dim: (1, 1, 1),
-                        block_dim: (256u32.min(hs as u32), 1, 1),
-                        shared_mem_bytes: (hs as u32) * 4,
-                    };
-                    unsafe {
                         k.rmsnorm.clone().launch(norm_cfg, (
                             *graph.d_hidden.device_ptr(),
                             *graph.d_residual.device_ptr(),
@@ -22320,6 +24726,11 @@ impl GpuDecodeStore {
                             eps,
                             hs as i32,
                         )).map_err(|e| format!("gemma4 graph pre_ffn rmsnorm[{}]: {:?}", layer_idx, e))?;
+                    }
+                    if route_prep_clock_active {
+                        let clocks = graph.d_graph_route_prep_clocks.as_ref()
+                            .ok_or_else(|| format!("route-prep clock buffer missing for graph {}", graph_idx))?;
+                        launch_graph_clock_marker(&k, clocks, route_prep_clock_base + 5, "route-prep-dense-pre-norm-end")?;
                     }
 
                     let gw = &graph.weights[dense_gate_proj];
@@ -22331,10 +24742,20 @@ impl GpuDecodeStore {
                         *graph.d_hidden.device_ptr(),
                         *graph.d_expert_gate_up.device_ptr(),
                     )?;
+                    if route_prep_clock_active {
+                        let clocks = graph.d_graph_route_prep_clocks.as_ref()
+                            .ok_or_else(|| format!("route-prep clock buffer missing for graph {}", graph_idx))?;
+                        launch_graph_clock_marker(&k, clocks, route_prep_clock_base + 6, "route-prep-dense-gate-end")?;
+                    }
                     let up_out_ptr = unsafe {
                         (*graph.d_expert_gate_up.device_ptr() as *const u16).add(dense_intermediate) as u64
                     };
                     self.gemv_bf16_internal(uw, *graph.d_hidden.device_ptr(), up_out_ptr)?;
+                    if route_prep_clock_active {
+                        let clocks = graph.d_graph_route_prep_clocks.as_ref()
+                            .ok_or_else(|| format!("route-prep clock buffer missing for graph {}", graph_idx))?;
+                        launch_graph_clock_marker(&k, clocks, route_prep_clock_base + 7, "route-prep-dense-up-end")?;
+                    }
                     unsafe {
                         k.gelu_tanh_mul.clone().launch(
                             LaunchConfig::for_num_elems(dense_intermediate as u32),
@@ -22345,11 +24766,29 @@ impl GpuDecodeStore {
                             ),
                         ).map_err(|e| format!("gemma4 graph dense gelu_tanh[{}]: {:?}", layer_idx, e))?;
                     }
+                    if route_prep_clock_active {
+                        let clocks = graph.d_graph_route_prep_clocks.as_ref()
+                            .ok_or_else(|| format!("route-prep clock buffer missing for graph {}", graph_idx))?;
+                        launch_graph_clock_marker(&k, clocks, route_prep_clock_base + 8, "route-prep-dense-activation-end")?;
+                    }
                     self.gemv_bf16_internal(
                         dw,
                         *graph.d_expert_scratch.device_ptr(),
                         *graph.d_scratch.device_ptr(),
                     )?;
+                    if route_prep_clock_active {
+                        let clocks = graph.d_graph_route_prep_clocks.as_ref()
+                            .ok_or_else(|| format!("route-prep clock buffer missing for graph {}", graph_idx))?;
+                        launch_graph_clock_marker(&k, clocks, route_prep_clock_base + 9, "route-prep-dense-down-end")?;
+                    }
+                    let dual_norm_smem_bytes = (hs as u64) * std::mem::size_of::<f32>() as u64;
+                    let route_prep_dual_norm_active = route_prep_dual_norm_requested
+                        && graph.kv_format == 9
+                        && layer_idx == range_end
+                        && layer.pre_ffn_norm2_ptr != 0
+                        && layer.router_input_scale_ptr != 0
+                        && dual_norm_smem_bytes <= graph.gqa_max_smem_bytes as u64;
+                    let router_scale = (hs as f32).powf(-0.5);
                     unsafe {
                         k.rmsnorm.clone().launch(norm_cfg, (
                             *graph.d_scratch.device_ptr(),
@@ -22358,22 +24797,48 @@ impl GpuDecodeStore {
                             eps,
                             hs as i32,
                         )).map_err(|e| format!("gemma4 graph post_ffn1 rmsnorm[{}]: {:?}", layer_idx, e))?;
-                        k.rmsnorm.clone().launch(norm_cfg, (
-                            *graph.d_fp32_scratch.device_ptr() as u64,
-                            *graph.d_residual.device_ptr(),
-                            layer.pre_ffn_norm2_ptr,
-                            eps,
-                            hs as i32,
-                        )).map_err(|e| format!("gemma4 graph pre_ffn2 rmsnorm[{}]: {:?}", layer_idx, e))?;
-                        let router_scale = (hs as f32).powf(-0.5);
-                        k.rmsnorm_scale.clone().launch(norm_cfg, (
-                            *graph.d_hidden.device_ptr(),
-                            *graph.d_residual.device_ptr(),
-                            layer.router_input_scale_ptr,
-                            router_scale,
-                            eps,
-                            hs as i32,
-                        )).map_err(|e| format!("gemma4 graph router rmsnorm_scale[{}]: {:?}", layer_idx, e))?;
+                        if route_prep_dual_norm_active {
+                            k.dual_rmsnorm_scale.clone().launch(norm_cfg, (
+                                *graph.d_fp32_scratch.device_ptr() as u64,
+                                *graph.d_hidden.device_ptr(),
+                                *graph.d_residual.device_ptr(),
+                                layer.pre_ffn_norm2_ptr,
+                                layer.router_input_scale_ptr,
+                                router_scale,
+                                eps,
+                                hs as i32,
+                            )).map_err(|e| format!("gemma4 graph dual pre_ffn2/router rmsnorm[{}]: {:?}", layer_idx, e))?;
+                        } else {
+                            k.rmsnorm.clone().launch(norm_cfg, (
+                                *graph.d_fp32_scratch.device_ptr() as u64,
+                                *graph.d_residual.device_ptr(),
+                                layer.pre_ffn_norm2_ptr,
+                                eps,
+                                hs as i32,
+                            )).map_err(|e| format!("gemma4 graph pre_ffn2 rmsnorm[{}]: {:?}", layer_idx, e))?;
+                        }
+                    }
+                    if route_prep_clock_active {
+                        let clocks = graph.d_graph_route_prep_clocks.as_ref()
+                            .ok_or_else(|| format!("route-prep clock buffer missing for graph {}", graph_idx))?;
+                        launch_graph_clock_marker(&k, clocks, route_prep_clock_base + 10, "route-prep-dense-post-norms-end")?;
+                    }
+                    if !route_prep_dual_norm_active {
+                        unsafe {
+                            k.rmsnorm_scale.clone().launch(norm_cfg, (
+                                *graph.d_hidden.device_ptr(),
+                                *graph.d_residual.device_ptr(),
+                                layer.router_input_scale_ptr,
+                                router_scale,
+                                eps,
+                                hs as i32,
+                            )).map_err(|e| format!("gemma4 graph router rmsnorm_scale[{}]: {:?}", layer_idx, e))?;
+                        }
+                    }
+                    if route_prep_clock_active {
+                        let clocks = graph.d_graph_route_prep_clocks.as_ref()
+                            .ok_or_else(|| format!("route-prep clock buffer missing for graph {}", graph_idx))?;
+                        launch_graph_clock_marker(&k, clocks, route_prep_clock_base + 11, "route-prep-router-input-norm-end")?;
                     }
                 } else if !is_moe_layer {
                     if let GpuMlpConfig::Dense { gate_proj, up_proj, down_proj } = &layer.mlp {
@@ -22413,6 +24878,11 @@ impl GpuDecodeStore {
                     let logits_ptr = unsafe {
                         (*graph.d_fp32_scratch.device_ptr() as *const f32).add(hs) as u64
                     };
+                    if moe_route_clock_active {
+                        let clocks = graph.d_graph_moe_route_clocks.as_ref()
+                            .ok_or_else(|| format!("MoE/route clock buffer missing for graph {}", graph_idx))?;
+                        launch_graph_clock_marker(&k, clocks, moe_route_clock_base + 9, "moe-route-logits-start")?;
+                    }
                     {
                         let w = &graph.weights[gate_wid];
                         let alpha: f32 = 1.0;
@@ -22435,6 +24905,11 @@ impl GpuDecodeStore {
                                 cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
                             ).map_err(|e| format!("gate GEMV[{}]: {:?}", layer_idx, e))?;
                         }
+                    }
+                    if moe_route_clock_active {
+                        let clocks = graph.d_graph_moe_route_clocks.as_ref()
+                            .ok_or_else(|| format!("MoE/route clock buffer missing for graph {}", graph_idx))?;
+                        launch_graph_clock_marker(&k, clocks, moe_route_clock_base + 10, "moe-route-logits-end")?;
                     }
 
                     // TopK routing
@@ -22472,6 +24947,11 @@ impl GpuDecodeStore {
                             }
                         }
                     }
+                    if moe_route_clock_active {
+                        let clocks = graph.d_graph_moe_route_clocks.as_ref()
+                            .ok_or_else(|| format!("MoE/route clock buffer missing for graph {}", graph_idx))?;
+                        launch_graph_clock_marker(&k, clocks, moe_route_clock_base + 11, "moe-route-topk-end")?;
+                    }
 
                     if layer.router_per_expert_scale_ptr != 0 {
                         let threads = 256u32;
@@ -22487,6 +24967,11 @@ impl GpuDecodeStore {
                                 ),
                             ).map_err(|e| format!("apply_topk_per_expert_scale graph[{}]: {:?}", layer_idx, e))?;
                         }
+                    }
+                    if moe_route_clock_active {
+                        let clocks = graph.d_graph_moe_route_clocks.as_ref()
+                            .ok_or_else(|| format!("MoE/route clock buffer missing for graph {}", graph_idx))?;
+                        launch_graph_clock_marker(&k, clocks, moe_route_clock_base + 12, "moe-route-scale-end")?;
                     }
 
                     // GPU-side expert classification: check HCS table and prepare batch upload
@@ -22534,16 +25019,39 @@ impl GpuDecodeStore {
                                     ).map_err(|e| format!("expert_classify[{}]: ptrs=[ids={:#x} wts={:#x} eptrs={:#x} upload={:#x} cold={:#x} dummy={:#x}] err={:?}",
                                         layer_idx, topk_ids_dptr, topk_wts_dptr, d_eptrs_ptr, d_upload_ptr, cold_buf_dptr, dummy_base, e))?;
                                 }
-                                graph.captured_route_sync_classifies += 1;
-                            }
-                        }
+	                                graph.captured_route_sync_classifies += 1;
+	                            }
+	                        }
+	                    }
+                    if moe_route_clock_active {
+                        let clocks = graph.d_graph_moe_route_clocks.as_ref()
+                            .ok_or_else(|| format!("MoE/route clock buffer missing for graph {}", graph_idx))?;
+                        launch_graph_clock_marker(&k, clocks, moe_route_clock_base + 13, "moe-route-classify-end")?;
                     }
-                }
-            }
-        }
+	                }
+	                if mixed_segment_clock_active && layer_idx == range_end {
+	                    let clocks = graph.d_graph_mixed_segment_clocks.as_ref()
+	                        .ok_or_else(|| format!("mixed segment clock buffer missing for graph {}", graph_idx))?;
+	                    launch_graph_clock_marker(&k, clocks, mixed_segment_clock_base + 4, "mixed-route-end")?;
+	                }
+	                if moe_route_clock_active && layer_idx == range_end {
+	                    let clocks = graph.d_graph_moe_route_clocks.as_ref()
+	                        .ok_or_else(|| format!("MoE/route clock buffer missing for graph {}", graph_idx))?;
+	                    launch_graph_clock_marker(&k, clocks, moe_route_clock_base + 14, "moe-route-end")?;
+	                }
+	            }
+	        }
 
         // ── Final norm + LM head ──
         if include_final {
+            let final_clock_active = graph.graph_final_clock_enabled;
+            let final_clock_base = graph_idx * GRAPH_FINAL_CLOCK_SLOTS;
+            if final_clock_active {
+                let clocks = graph.d_graph_final_clocks.as_ref()
+                    .ok_or_else(|| format!("final clock buffer missing for graph {}", graph_idx))?;
+                launch_graph_clock_marker(&k, clocks, final_clock_base, "final-start")?;
+            }
+
             // Final RMSNorm
             {
                 let graph_is_gemma4 = graph.layers.iter()
@@ -22577,6 +25085,11 @@ impl GpuDecodeStore {
                     }
                 }
             }
+            if final_clock_active {
+                let clocks = graph.d_graph_final_clocks.as_ref()
+                    .ok_or_else(|| format!("final clock buffer missing for graph {}", graph_idx))?;
+                launch_graph_clock_marker(&k, clocks, final_clock_base + 1, "final-norm-end")?;
+            }
 
             // LM head GEMV
             {
@@ -22601,6 +25114,30 @@ impl GpuDecodeStore {
                         cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
                     ).map_err(|e| format!("lm_head GEMV: {:?}", e))?;
                 }
+            }
+            if final_clock_active {
+                let clocks = graph.d_graph_final_clocks.as_ref()
+                    .ok_or_else(|| format!("final clock buffer missing for graph {}", graph_idx))?;
+                launch_graph_clock_marker(&k, clocks, final_clock_base + 2, "final-lm-head-end")?;
+            }
+            if graph.graph_final_softcap_gpu_enabled {
+                let threads = 256u32;
+                let blocks = ((graph.vocab_size as u32) + threads - 1) / threads;
+                unsafe {
+                    k.apply_logit_softcap_f32.clone().launch(
+                        LaunchConfig { grid_dim: (blocks, 1, 1), block_dim: (threads, 1, 1), shared_mem_bytes: 0 },
+                        (
+                            *graph.d_logits.device_ptr(),
+                            graph.final_logit_softcap,
+                            graph.vocab_size as i32,
+                        ),
+                    ).map_err(|e| format!("apply_logit_softcap_f32 graph final: {:?}", e))?;
+                }
+            }
+            if final_clock_active {
+                let clocks = graph.d_graph_final_clocks.as_ref()
+                    .ok_or_else(|| format!("final clock buffer missing for graph {}", graph_idx))?;
+                launch_graph_clock_marker(&k, clocks, final_clock_base + 3, "final-softcap-end")?;
             }
         }
         Ok(())
@@ -23015,11 +25552,27 @@ impl GpuDecodeStore {
                     graph.t_graph_segment_expert += middle_ms / 1000.0;
                     graph.t_graph_segment_final += last_ms / 1000.0;
                 }
+                accumulate_gqa_k4_split_clocks(graph)?;
+                accumulate_mixed_segment_clocks(graph)?;
+                accumulate_moe_route_clocks(graph)?;
+                accumulate_moe_w2_clocks(graph)?;
+                accumulate_route_prep_clocks(graph)?;
+                accumulate_gqa_path_clocks(graph)?;
+                accumulate_gqa_boundary_clocks(graph)?;
+                accumulate_gqa_coverage_clocks(graph)?;
+                accumulate_gqa_other_clocks(graph)?;
+                accumulate_gqa_hd256_attn_clocks(graph)?;
+                accumulate_final_clocks(graph)?;
             }
 
 
             // D2H logits
             if do_final {
+                let t_d2h_start = if timing && graph.graph_final_clock_enabled {
+                    Some(std::time::Instant::now())
+                } else {
+                    None
+                };
                 unsafe {
                     let err = cuda_sys::lib().cuMemcpyDtoH_v2(
                         graph.h_logits.as_mut_ptr() as *mut std::ffi::c_void,
@@ -23029,7 +25582,20 @@ impl GpuDecodeStore {
                         return Err(format!("D2H logits: {:?}", err));
                     }
                 }
-                apply_logit_softcap_in_place(&mut graph.h_logits, graph.final_logit_softcap);
+                if let Some(t) = t_d2h_start {
+                    graph.t_graph_final_d2h_logits += t.elapsed().as_secs_f64();
+                }
+                let t_softcap_start = if timing && graph.graph_final_clock_enabled {
+                    Some(std::time::Instant::now())
+                } else {
+                    None
+                };
+                if !graph.graph_final_softcap_gpu_enabled {
+                    apply_logit_softcap_in_place(&mut graph.h_logits, graph.final_logit_softcap);
+                }
+                if let Some(t) = t_softcap_start {
+                    graph.t_graph_final_softcap += t.elapsed().as_secs_f64();
+                }
             }
 
             return Ok(());
@@ -23685,11 +26251,27 @@ impl GpuDecodeStore {
                 graph.t_graph_segment_routing += first_ms / 1000.0;
                 graph.t_graph_segment_expert += middle_ms / 1000.0;
                 graph.t_graph_segment_final += last_ms / 1000.0;
+                accumulate_gqa_k4_split_clocks(graph)?;
+                accumulate_mixed_segment_clocks(graph)?;
+                accumulate_moe_route_clocks(graph)?;
+                accumulate_moe_w2_clocks(graph)?;
+                accumulate_route_prep_clocks(graph)?;
+                accumulate_gqa_path_clocks(graph)?;
+                accumulate_gqa_boundary_clocks(graph)?;
+                accumulate_gqa_coverage_clocks(graph)?;
+                accumulate_gqa_other_clocks(graph)?;
+                accumulate_gqa_hd256_attn_clocks(graph)?;
+                accumulate_final_clocks(graph)?;
             }
         }
 
         // D2H logits (only if this is the final segment)
         if do_final {
+            let t_d2h_start = if timing && graph.graph_final_clock_enabled {
+                Some(std::time::Instant::now())
+            } else {
+                None
+            };
             unsafe {
                 let err = cuda_sys::lib().cuMemcpyDtoH_v2(
                     graph.h_logits.as_mut_ptr() as *mut std::ffi::c_void,
@@ -23699,7 +26281,20 @@ impl GpuDecodeStore {
                     return Err(format!("D2H logits: {:?}", err));
                 }
             }
-            apply_logit_softcap_in_place(&mut graph.h_logits, graph.final_logit_softcap);
+            if let Some(t) = t_d2h_start {
+                graph.t_graph_final_d2h_logits += t.elapsed().as_secs_f64();
+            }
+            let t_softcap_start = if timing && graph.graph_final_clock_enabled {
+                Some(std::time::Instant::now())
+            } else {
+                None
+            };
+            if !graph.graph_final_softcap_gpu_enabled {
+                apply_logit_softcap_in_place(&mut graph.h_logits, graph.final_logit_softcap);
+            }
+            if let Some(t) = t_softcap_start {
+                graph.t_graph_final_softcap += t.elapsed().as_secs_f64();
+            }
 
         }
 
@@ -31533,6 +34128,105 @@ impl GpuDecodeStore {
                 g.t_graph_launch = 0.0; g.t_graph_final_sync_wait = 0.0;
                 g.t_graph_segment_total = 0.0; g.t_graph_segment_expert = 0.0;
                 g.t_graph_segment_routing = 0.0; g.t_graph_segment_final = 0.0;
+                g.t_graph_final_norm = 0.0;
+                g.t_graph_final_lm_head = 0.0;
+                g.t_graph_final_gpu_softcap = 0.0;
+                g.t_graph_final_graph_residual = 0.0;
+                g.t_graph_final_d2h_logits = 0.0;
+                g.t_graph_final_softcap = 0.0;
+                g.t_graph_gqa_k4_tiled_attn = 0.0; g.t_graph_gqa_k4_polar4_reduce = 0.0;
+                g.t_graph_mixed_moe_expert = 0.0;
+                g.t_graph_mixed_gqa_proj_attn = 0.0;
+                g.t_graph_mixed_route_topk = 0.0;
+                g.t_graph_gqa_path_projection = 0.0;
+                g.t_graph_gqa_path_norm_rope_kv = 0.0;
+                g.t_graph_gqa_path_attention_reduce = 0.0;
+                g.t_graph_gqa_path_apply_gated_bf16 = 0.0;
+                g.t_graph_gqa_path_o_input_prep = 0.0;
+                g.t_graph_gqa_path_o_projection = 0.0;
+                g.t_graph_gqa_boundary_entry_gap = 0.0;
+                g.t_graph_gqa_boundary_post_o_exit_gap = 0.0;
+                g.t_graph_gqa_boundary_stream_debt = 0.0;
+                g.t_graph_gqa_coverage_mixed_gqa_total = 0.0;
+                g.t_graph_gqa_coverage_active_mixed_gqa = 0.0;
+                g.t_graph_gqa_coverage_active_path_endpoint = 0.0;
+                g.t_graph_gqa_coverage_active_named_path = 0.0;
+                g.t_graph_gqa_coverage_active_internal_gap = 0.0;
+                g.t_graph_gqa_coverage_other_mixed_gqa = 0.0;
+                g.t_graph_gqa_coverage_boundary_gap = 0.0;
+                g.t_graph_gqa_other_projection = 0.0;
+                g.t_graph_gqa_other_qkv_norm = 0.0;
+                g.t_graph_gqa_other_rope = 0.0;
+                g.t_graph_gqa_other_kv_write = 0.0;
+                g.t_graph_gqa_other_norm_rope_kv = 0.0;
+                g.t_graph_gqa_other_attention_reduce = 0.0;
+                g.t_graph_gqa_other_apply_bf16 = 0.0;
+                g.t_graph_gqa_other_o_input_prep = 0.0;
+                g.t_graph_gqa_other_o_projection = 0.0;
+                g.t_graph_gqa_other_endpoint = 0.0;
+                g.t_graph_gqa_hd256_attn_graph = 0.0;
+                g.t_graph_gqa_hd256_attn_score_max = 0.0;
+                g.t_graph_gqa_hd256_attn_weight_v = 0.0;
+                g.t_graph_gqa_hd256_attn_final_output = 0.0;
+                g.t_graph_gqa_hd256_attn_internal_total = 0.0;
+                g.t_graph_gqa_hd256_attn_graph_overhead = 0.0;
+                g.graph_gqa_hd256_attn_segments = 0;
+                g.graph_gqa_hd256_attn_single_segments = 0;
+                g.graph_gqa_hd256_attn_tiled_segments = 0;
+                g.graph_gqa_hd256_attn_tile_gate_segments = 0;
+                g.graph_gqa_hd256_attn_seq_len_sum = 0;
+                g.graph_gqa_hd256_attn_runtime_tiles_sum = 0;
+                g.graph_gqa_hd256_attn_max_tiles_sum = 0;
+                g.graph_gqa_hd256_attn_inactive_tile_blocks_sum = 0;
+                g.t_graph_moe_w2_activation = 0.0;
+                g.t_graph_moe_w2_prep = 0.0;
+                g.t_graph_moe_w2_gemv = 0.0;
+                g.t_graph_moe_w2_internal_total = 0.0;
+                g.t_graph_moe_w2_graph_overhead = 0.0;
+                g.t_graph_moe_w2_preload_gate_up_load = 0.0;
+                g.t_graph_moe_w2_preload_silu_mul = 0.0;
+                g.t_graph_moe_w2_preload_shared_store = 0.0;
+                g.t_graph_moe_w2_preload_sync = 0.0;
+                g.t_graph_moe_w2_preload_residual = 0.0;
+                g.t_graph_moe_w2_preload_block_sum = 0.0;
+                g.graph_moe_w2_segments = 0;
+                g.graph_moe_w2_blocks = 0;
+                g.t_graph_moe_route_w13_gemv = 0.0;
+                g.t_graph_moe_route_w13_reduce = 0.0;
+                g.t_graph_moe_route_activation_w2 = 0.0;
+                g.t_graph_moe_route_weighted_output = 0.0;
+                g.t_graph_moe_route_post_output = 0.0;
+                g.t_graph_moe_route_post_shared_gate = 0.0;
+                g.t_graph_moe_route_post_shared_w13 = 0.0;
+                g.t_graph_moe_route_post_shared_reduce = 0.0;
+                g.t_graph_moe_route_post_shared_w2 = 0.0;
+                g.t_graph_moe_route_post_scale = 0.0;
+                g.t_graph_moe_route_post_hidden_write = 0.0;
+                g.t_graph_moe_route_post_hidden_norm2 = 0.0;
+                g.t_graph_moe_route_post_hidden_add1 = 0.0;
+                g.t_graph_moe_route_post_hidden_norm = 0.0;
+                g.t_graph_moe_route_post_hidden_add2 = 0.0;
+                g.t_graph_moe_route_post_hidden_scalar = 0.0;
+                g.t_graph_moe_route_post_hidden_endpoint = 0.0;
+                g.t_graph_moe_route_post_endpoint = 0.0;
+                g.t_graph_moe_route_pre_gqa_prep = 0.0;
+                g.t_graph_moe_route_post_gqa_prep = 0.0;
+                g.t_graph_moe_route_logits = 0.0;
+                g.t_graph_moe_route_topk = 0.0;
+                g.t_graph_moe_route_scale_classify = 0.0;
+                g.t_graph_moe_route_tail = 0.0;
+                g.t_graph_route_prep_pre_gqa_norm = 0.0;
+                g.t_graph_route_prep_post_gqa_norm_add = 0.0;
+                g.t_graph_route_prep_dense_pre_norm = 0.0;
+                g.t_graph_route_prep_dense_gate = 0.0;
+                g.t_graph_route_prep_dense_up = 0.0;
+                g.t_graph_route_prep_dense_activation = 0.0;
+                g.t_graph_route_prep_dense_down = 0.0;
+                g.t_graph_route_prep_dense_post_norms = 0.0;
+                g.t_graph_route_prep_router_input_norm = 0.0;
+                for total in &mut g.graph_gqa_other_totals {
+                    *total = GraphGqaOtherClockTotals::default();
+                }
                 for elapsed in &mut g.graph_segment_elapsed {
                     *elapsed = 0.0;
                 }
@@ -32467,6 +35161,862 @@ impl GpuDecodeStore {
                                     kind_count[kind] += 1;
                                 }
                             }
+                            let mixed_count = graph.graph_mixed_segment_active
+                                .iter()
+                                .filter(|&&active| active)
+                                .count();
+                            if graph.graph_mixed_segment_clock_enabled && mixed_count > 0 {
+                                let moe_ms_tok = graph.t_graph_mixed_moe_expert / n * 1000.0;
+                                let gqa_ms_tok = graph.t_graph_mixed_gqa_proj_attn / n * 1000.0;
+                                let route_ms_tok = graph.t_graph_mixed_route_topk / n * 1000.0;
+                                let marked_ms_tok = moe_ms_tok + gqa_ms_tok + route_ms_tok;
+                                let gqa_route_ms_tok = kind_sum[GRAPH_SEG_ROUTE_GQA as usize] / n * 1000.0;
+                                let segment_residual_ms_tok = gqa_route_ms_tok - marked_ms_tok;
+                                let gqa_sync_wait_ms_tok = graph.graph_segment_sync_wait
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(idx, _)| {
+                                        graph.graph_segment_kinds.get(*idx).copied()
+                                            == Some(GRAPH_SEG_ROUTE_GQA)
+                                    })
+                                    .map(|(_, seconds)| *seconds)
+                                    .sum::<f64>() / n * 1000.0;
+                                eprintln!("  \x1b[36m│\x1b[0m  Mixed experts+GQA segment split:          \x1b[36m│\x1b[0m");
+                                eprintln!(
+                                    "  \x1b[36m│\x1b[0m    MoE expert:{:6.2} ms/tok ({:4.2} ms/seg) \x1b[36m│\x1b[0m",
+                                    moe_ms_tok,
+                                    moe_ms_tok / mixed_count as f64,
+                                );
+                                eprintln!(
+                                    "  \x1b[36m│\x1b[0m    GQA path:  {:6.2} ms/tok ({:4.2} ms/seg) \x1b[36m│\x1b[0m",
+                                    gqa_ms_tok,
+                                    gqa_ms_tok / mixed_count as f64,
+                                );
+                                eprintln!(
+                                    "  \x1b[36m│\x1b[0m    Route/topk:{:6.2} ms/tok ({:4.2} ms/seg) \x1b[36m│\x1b[0m",
+                                    route_ms_tok,
+                                    route_ms_tok / mixed_count as f64,
+                                );
+                                eprintln!(
+                                    "  \x1b[36m│\x1b[0m    Marked:    {:6.2} | seg residual:{:6.2} \x1b[36m│\x1b[0m",
+                                    marked_ms_tok,
+                                    segment_residual_ms_tok,
+                                );
+                                eprintln!(
+                                    "  \x1b[36m│\x1b[0m    GQA-sync:  {:6.2} | final-sync:{:6.2} \x1b[36m│\x1b[0m",
+                                    gqa_sync_wait_ms_tok,
+                                    avg_sync_final,
+                                );
+                                log::info!(
+                                    "DECODE GRAPH MIXED SEGMENT avg_ms_per_tok moe_expert={:.3} gqa_proj_attn={:.3} route_topk={:.3} marked_total={:.3} gqa_route={:.3} segment_residual={:.3} gqa_sync_wait={:.3} final_sync_wait={:.3} active_segments={}",
+                                    moe_ms_tok,
+                                    gqa_ms_tok,
+                                    route_ms_tok,
+                                    marked_ms_tok,
+                                    gqa_route_ms_tok,
+                                    segment_residual_ms_tok,
+                                    gqa_sync_wait_ms_tok,
+                                    avg_sync_final,
+                                    mixed_count,
+                                );
+                            }
+                            let moe_route_count = graph.graph_moe_route_active
+                                .iter()
+                                .filter(|&&active| active)
+                                .count();
+                            if graph.graph_moe_route_clock_enabled && moe_route_count > 0 {
+                                let w13_ms_tok = graph.t_graph_moe_route_w13_gemv / n * 1000.0;
+                                let w13_reduce_ms_tok = graph.t_graph_moe_route_w13_reduce / n * 1000.0;
+                                let activation_w2_ms_tok = graph.t_graph_moe_route_activation_w2 / n * 1000.0;
+                                let weighted_output_ms_tok = graph.t_graph_moe_route_weighted_output / n * 1000.0;
+                                let post_output_ms_tok = graph.t_graph_moe_route_post_output / n * 1000.0;
+                                let post_shared_gate_ms_tok =
+                                    graph.t_graph_moe_route_post_shared_gate / n * 1000.0;
+                                let post_shared_w13_ms_tok =
+                                    graph.t_graph_moe_route_post_shared_w13 / n * 1000.0;
+                                let post_shared_reduce_ms_tok =
+                                    graph.t_graph_moe_route_post_shared_reduce / n * 1000.0;
+                                let post_shared_w2_ms_tok =
+                                    graph.t_graph_moe_route_post_shared_w2 / n * 1000.0;
+                                let post_scale_ms_tok =
+                                    graph.t_graph_moe_route_post_scale / n * 1000.0;
+                                let post_hidden_write_ms_tok =
+                                    graph.t_graph_moe_route_post_hidden_write / n * 1000.0;
+                                let post_hidden_norm2_ms_tok =
+                                    graph.t_graph_moe_route_post_hidden_norm2 / n * 1000.0;
+                                let post_hidden_add1_ms_tok =
+                                    graph.t_graph_moe_route_post_hidden_add1 / n * 1000.0;
+                                let post_hidden_norm_ms_tok =
+                                    graph.t_graph_moe_route_post_hidden_norm / n * 1000.0;
+                                let post_hidden_add2_ms_tok =
+                                    graph.t_graph_moe_route_post_hidden_add2 / n * 1000.0;
+                                let post_hidden_scalar_ms_tok =
+                                    graph.t_graph_moe_route_post_hidden_scalar / n * 1000.0;
+                                let post_hidden_endpoint_ms_tok =
+                                    graph.t_graph_moe_route_post_hidden_endpoint / n * 1000.0;
+                                let post_hidden_named_ms_tok = post_hidden_norm2_ms_tok
+                                    + post_hidden_add1_ms_tok
+                                    + post_hidden_norm_ms_tok
+                                    + post_hidden_add2_ms_tok
+                                    + post_hidden_scalar_ms_tok
+                                    + post_hidden_endpoint_ms_tok;
+                                let post_hidden_residual_ms_tok =
+                                    post_hidden_write_ms_tok - post_hidden_named_ms_tok;
+                                let post_endpoint_ms_tok =
+                                    graph.t_graph_moe_route_post_endpoint / n * 1000.0;
+                                let post_detail_named_ms_tok = post_shared_gate_ms_tok
+                                    + post_shared_w13_ms_tok
+                                    + post_shared_reduce_ms_tok
+                                    + post_shared_w2_ms_tok
+                                    + post_scale_ms_tok
+                                    + post_hidden_write_ms_tok
+                                    + post_endpoint_ms_tok;
+                                let post_detail_residual_ms_tok =
+                                    post_output_ms_tok - post_detail_named_ms_tok;
+                                let moe_named_ms_tok = w13_ms_tok
+                                    + w13_reduce_ms_tok
+                                    + activation_w2_ms_tok
+                                    + weighted_output_ms_tok
+                                    + post_output_ms_tok;
+                                let moe_bucket_ms_tok = graph.t_graph_mixed_moe_expert / n * 1000.0;
+                                let moe_residual_ms_tok = moe_bucket_ms_tok - moe_named_ms_tok;
+
+                                let pre_gqa_ms_tok = graph.t_graph_moe_route_pre_gqa_prep / n * 1000.0;
+                                let post_gqa_prep_ms_tok = graph.t_graph_moe_route_post_gqa_prep / n * 1000.0;
+                                let logits_ms_tok = graph.t_graph_moe_route_logits / n * 1000.0;
+                                let topk_ms_tok = graph.t_graph_moe_route_topk / n * 1000.0;
+                                let scale_classify_ms_tok = graph.t_graph_moe_route_scale_classify / n * 1000.0;
+                                let tail_ms_tok = graph.t_graph_moe_route_tail / n * 1000.0;
+                                let route_named_ms_tok = pre_gqa_ms_tok
+                                    + post_gqa_prep_ms_tok
+                                    + logits_ms_tok
+                                    + topk_ms_tok
+                                    + scale_classify_ms_tok
+                                    + tail_ms_tok;
+                                let route_bucket_ms_tok = graph.t_graph_mixed_route_topk / n * 1000.0;
+                                let route_residual_ms_tok = route_bucket_ms_tok - route_named_ms_tok;
+                                let route_prep_overhead_ms_tok =
+                                    pre_gqa_ms_tok + post_gqa_prep_ms_tok + tail_ms_tok + route_residual_ms_tok;
+
+                                eprintln!("  \x1b[36m│\x1b[0m  Gemma MoE/route split:                    \x1b[36m│\x1b[0m");
+                                eprintln!(
+                                    "  \x1b[36m│\x1b[0m    MoE W13:{:6.2} reduce:{:5.2} act+W2:{:5.2} \x1b[36m│\x1b[0m",
+                                    w13_ms_tok,
+                                    w13_reduce_ms_tok,
+                                    activation_w2_ms_tok,
+                                );
+                                eprintln!(
+                                    "  \x1b[36m│\x1b[0m    MoE out:{:6.2} post:{:7.2} residual:{:5.2} \x1b[36m│\x1b[0m",
+                                    weighted_output_ms_tok,
+                                    post_output_ms_tok,
+                                    moe_residual_ms_tok,
+                                );
+                                eprintln!(
+                                    "  \x1b[36m│\x1b[0m    Post split gate:{:5.2} w13:{:5.2} red:{:5.2} w2:{:5.2} \x1b[36m│\x1b[0m",
+                                    post_shared_gate_ms_tok,
+                                    post_shared_w13_ms_tok,
+                                    post_shared_reduce_ms_tok,
+                                    post_shared_w2_ms_tok,
+                                );
+                                eprintln!(
+                                    "  \x1b[36m│\x1b[0m    Post scale:{:5.2} write:{:5.2} endpoint:{:5.2} residual:{:5.2} \x1b[36m│\x1b[0m",
+                                    post_scale_ms_tok,
+                                    post_hidden_write_ms_tok,
+                                    post_endpoint_ms_tok,
+                                    post_detail_residual_ms_tok,
+                                );
+                                eprintln!(
+                                    "  \x1b[36m│\x1b[0m    Hidden n2:{:5.2} add1:{:5.2} norm:{:5.2} add2:{:5.2} \x1b[36m│\x1b[0m",
+                                    post_hidden_norm2_ms_tok,
+                                    post_hidden_add1_ms_tok,
+                                    post_hidden_norm_ms_tok,
+                                    post_hidden_add2_ms_tok,
+                                );
+                                eprintln!(
+                                    "  \x1b[36m│\x1b[0m    Hidden scalar:{:5.2} endpoint:{:5.2} residual:{:5.2} \x1b[36m│\x1b[0m",
+                                    post_hidden_scalar_ms_tok,
+                                    post_hidden_endpoint_ms_tok,
+                                    post_hidden_residual_ms_tok,
+                                );
+                                eprintln!(
+                                    "  \x1b[36m│\x1b[0m    Route logits:{:5.2} topk:{:5.2} scale/class:{:5.2} \x1b[36m│\x1b[0m",
+                                    logits_ms_tok,
+                                    topk_ms_tok,
+                                    scale_classify_ms_tok,
+                                );
+                                eprintln!(
+                                    "  \x1b[36m│\x1b[0m    Route prep/overhead:{:5.2} CPU classify:{:5.2} \x1b[36m│\x1b[0m",
+                                    route_prep_overhead_ms_tok,
+                                    avg_classify,
+                                );
+                                log::info!(
+                                    "DECODE GRAPH MOE ROUTE SPLIT avg_ms_per_tok moe_bucket={:.3} moe_w13_gemv={:.3} moe_w13_reduce={:.3} moe_activation_w2={:.3} moe_weighted_output={:.3} moe_post_output={:.3} moe_residual={:.3} route_bucket={:.3} route_pre_gqa_prep={:.3} route_post_gqa_prep={:.3} route_logits={:.3} route_topk={:.3} route_scale_classify={:.3} route_tail={:.3} route_residual={:.3} route_prep_overhead={:.3} cpu_classify={:.3} final_sync_wait={:.3} active_segments={}",
+                                    moe_bucket_ms_tok,
+                                    w13_ms_tok,
+                                    w13_reduce_ms_tok,
+                                    activation_w2_ms_tok,
+                                    weighted_output_ms_tok,
+                                    post_output_ms_tok,
+                                    moe_residual_ms_tok,
+                                    route_bucket_ms_tok,
+                                    pre_gqa_ms_tok,
+                                    post_gqa_prep_ms_tok,
+                                    logits_ms_tok,
+                                    topk_ms_tok,
+                                    scale_classify_ms_tok,
+                                    tail_ms_tok,
+                                    route_residual_ms_tok,
+                                    route_prep_overhead_ms_tok,
+                                    avg_classify,
+                                    avg_sync_final,
+                                    moe_route_count,
+                                );
+                                log::info!(
+                                    "DECODE GRAPH MOE POST OUTPUT SPLIT avg_ms_per_tok routed_weighted={:.3} post_total={:.3} shared_gate={:.3} shared_w13={:.3} shared_reduce={:.3} shared_w2={:.3} scale={:.3} hidden_write={:.3} endpoint={:.3} detail_residual={:.3} active_segments={}",
+                                    weighted_output_ms_tok,
+                                    post_output_ms_tok,
+                                    post_shared_gate_ms_tok,
+                                    post_shared_w13_ms_tok,
+                                    post_shared_reduce_ms_tok,
+                                    post_shared_w2_ms_tok,
+                                    post_scale_ms_tok,
+                                    post_hidden_write_ms_tok,
+                                    post_endpoint_ms_tok,
+                                    post_detail_residual_ms_tok,
+                                    moe_route_count,
+                                );
+                                log::info!(
+                                    "DECODE GRAPH MOE HIDDEN WRITE SPLIT avg_ms_per_tok hidden_total={:.3} post_ffn_norm2={:.3} dense_moe_add={:.3} post_ffn_norm={:.3} residual_add={:.3} layer_scalar={:.3} endpoint={:.3} detail_residual={:.3} active_segments={}",
+                                    post_hidden_write_ms_tok,
+                                    post_hidden_norm2_ms_tok,
+                                    post_hidden_add1_ms_tok,
+                                    post_hidden_norm_ms_tok,
+                                    post_hidden_add2_ms_tok,
+                                    post_hidden_scalar_ms_tok,
+                                    post_hidden_endpoint_ms_tok,
+                                    post_hidden_residual_ms_tok,
+                                    moe_route_count,
+                                );
+                                if graph.graph_moe_w2_clock_enabled
+                                    && graph.graph_moe_w2_segments > 0
+                                {
+                                    let moe_w2_activation_ms_tok =
+                                        graph.t_graph_moe_w2_activation / n * 1000.0;
+                                    let moe_w2_prep_ms_tok =
+                                        graph.t_graph_moe_w2_prep / n * 1000.0;
+                                    let moe_w2_gemv_ms_tok =
+                                        graph.t_graph_moe_w2_gemv / n * 1000.0;
+                                    let moe_w2_internal_ms_tok =
+                                        graph.t_graph_moe_w2_internal_total / n * 1000.0;
+                                    let moe_w2_overhead_ms_tok =
+                                        graph.t_graph_moe_w2_graph_overhead / n * 1000.0;
+                                    let moe_w2_preload_load_ms_tok =
+                                        graph.t_graph_moe_w2_preload_gate_up_load / n * 1000.0;
+                                    let moe_w2_preload_math_ms_tok =
+                                        graph.t_graph_moe_w2_preload_silu_mul / n * 1000.0;
+                                    let moe_w2_preload_store_ms_tok =
+                                        graph.t_graph_moe_w2_preload_shared_store / n * 1000.0;
+                                    let moe_w2_preload_sync_ms_tok =
+                                        graph.t_graph_moe_w2_preload_sync / n * 1000.0;
+                                    let moe_w2_preload_residual_ms_tok =
+                                        graph.t_graph_moe_w2_preload_residual / n * 1000.0;
+                                    let moe_w2_preload_repeated_work_ms_tok =
+                                        graph.t_graph_moe_w2_preload_block_sum / n * 1000.0;
+                                    let avg_blocks =
+                                        graph.graph_moe_w2_blocks as f64
+                                            / graph.graph_moe_w2_segments as f64;
+                                    let output_tiles = ((graph.hidden_size + 15) / 16).max(1) as f64;
+                                    let avg_topk_est = avg_blocks / output_tiles;
+
+                                    eprintln!("  \x1b[36m│\x1b[0m  Gemma MoE activation/W2 split:          \x1b[36m│\x1b[0m");
+                                    eprintln!(
+                                        "  \x1b[36m│\x1b[0m    Activation:{:5.2} prep:{:5.2} W2:{:5.2} internal:{:5.2} \x1b[36m│\x1b[0m",
+                                        moe_w2_activation_ms_tok,
+                                        moe_w2_prep_ms_tok,
+                                        moe_w2_gemv_ms_tok,
+                                        moe_w2_internal_ms_tok,
+                                    );
+                                    if graph.graph_moe_w2_preload_clock_enabled {
+                                        eprintln!("  \x1b[36m│\x1b[0m  Fused activation/preload detail:         \x1b[36m│\x1b[0m");
+                                        eprintln!(
+                                            "  \x1b[36m│\x1b[0m    load:{:5.2} silu_mul:{:5.2} store:{:5.2} sync:{:5.2} \x1b[36m│\x1b[0m",
+                                            moe_w2_preload_load_ms_tok,
+                                            moe_w2_preload_math_ms_tok,
+                                            moe_w2_preload_store_ms_tok,
+                                            moe_w2_preload_sync_ms_tok,
+                                        );
+                                        eprintln!(
+                                            "  \x1b[36m│\x1b[0m    residual:{:5.2} repeated_work:{:6.2} blocks/seg:{:5.1} \x1b[36m│\x1b[0m",
+                                            moe_w2_preload_residual_ms_tok,
+                                            moe_w2_preload_repeated_work_ms_tok,
+                                            avg_blocks,
+                                        );
+                                    }
+                                    eprintln!(
+                                        "  \x1b[36m│\x1b[0m    Fused bucket:{:5.2} weighted accum:{:5.2} graph/launch:{:5.2} \x1b[36m│\x1b[0m",
+                                        activation_w2_ms_tok,
+                                        weighted_output_ms_tok,
+                                        moe_w2_overhead_ms_tok,
+                                    );
+                                    log::info!(
+                                        "DECODE GRAPH MOE W2 SPLIT avg_ms_per_tok activation={:.3} w2_prep={:.3} w2_gemv={:.3} internal_total={:.3} activation_w2_bucket={:.3} weighted_accum={:.3} graph_launch_overhead={:.3} active_segments={} active_blocks={} avg_blocks_per_segment={:.2} final_sync_wait={:.3}",
+                                        moe_w2_activation_ms_tok,
+                                        moe_w2_prep_ms_tok,
+                                        moe_w2_gemv_ms_tok,
+                                        moe_w2_internal_ms_tok,
+                                        activation_w2_ms_tok,
+                                        weighted_output_ms_tok,
+                                        moe_w2_overhead_ms_tok,
+                                        graph.graph_moe_w2_segments,
+                                        graph.graph_moe_w2_blocks,
+                                        avg_blocks,
+                                        avg_sync_final,
+                                    );
+                                    if graph.graph_moe_w2_preload_clock_enabled {
+                                        log::info!(
+                                            "DECODE GRAPH MOE W2 PRELOAD DETAIL avg_ms_per_tok gate_up_load={:.3} silu_mul={:.3} shared_store={:.3} preload_sync={:.3} preload_residual={:.3} repeated_block_work={:.3} avg_blocks_per_segment={:.2} output_tiles={:.2} avg_topk_est={:.2}",
+                                            moe_w2_preload_load_ms_tok,
+                                            moe_w2_preload_math_ms_tok,
+                                            moe_w2_preload_store_ms_tok,
+                                            moe_w2_preload_sync_ms_tok,
+                                            moe_w2_preload_residual_ms_tok,
+                                            moe_w2_preload_repeated_work_ms_tok,
+                                            avg_blocks,
+                                            output_tiles as f64,
+                                            avg_topk_est,
+                                        );
+                                    }
+                                }
+                                let route_prep_split_count = graph.graph_route_prep_active
+                                    .iter()
+                                    .filter(|&&active| active)
+                                    .count();
+                                if graph.graph_route_prep_clock_enabled && route_prep_split_count > 0 {
+                                    let pre_gqa_norm_ms_tok =
+                                        graph.t_graph_route_prep_pre_gqa_norm / n * 1000.0;
+                                    let post_gqa_norm_add_ms_tok =
+                                        graph.t_graph_route_prep_post_gqa_norm_add / n * 1000.0;
+                                    let dense_pre_norm_ms_tok =
+                                        graph.t_graph_route_prep_dense_pre_norm / n * 1000.0;
+                                    let dense_gate_ms_tok =
+                                        graph.t_graph_route_prep_dense_gate / n * 1000.0;
+                                    let dense_up_ms_tok =
+                                        graph.t_graph_route_prep_dense_up / n * 1000.0;
+                                    let dense_activation_ms_tok =
+                                        graph.t_graph_route_prep_dense_activation / n * 1000.0;
+                                    let dense_down_ms_tok =
+                                        graph.t_graph_route_prep_dense_down / n * 1000.0;
+                                    let dense_post_norms_ms_tok =
+                                        graph.t_graph_route_prep_dense_post_norms / n * 1000.0;
+                                    let router_input_norm_ms_tok =
+                                        graph.t_graph_route_prep_router_input_norm / n * 1000.0;
+                                    let route_prep_named_ms_tok = pre_gqa_norm_ms_tok
+                                        + post_gqa_norm_add_ms_tok
+                                        + dense_pre_norm_ms_tok
+                                        + dense_gate_ms_tok
+                                        + dense_up_ms_tok
+                                        + dense_activation_ms_tok
+                                        + dense_down_ms_tok
+                                        + dense_post_norms_ms_tok
+                                        + router_input_norm_ms_tok;
+                                    let route_prep_remaining_ms_tok =
+                                        route_prep_overhead_ms_tok - route_prep_named_ms_tok;
+
+                                    eprintln!("  \x1b[36m│\x1b[0m  Gemma route-prep split:                  \x1b[36m│\x1b[0m");
+                                    eprintln!(
+                                        "  \x1b[36m│\x1b[0m    Pre-GQA norm:{:5.2} post-GQA norm/add:{:5.2} \x1b[36m│\x1b[0m",
+                                        pre_gqa_norm_ms_tok,
+                                        post_gqa_norm_add_ms_tok,
+                                    );
+                                    eprintln!(
+                                        "  \x1b[36m│\x1b[0m    Dense pre:{:5.2} gate:{:5.2} up:{:5.2} act:{:5.2} down:{:5.2} \x1b[36m│\x1b[0m",
+                                        dense_pre_norm_ms_tok,
+                                        dense_gate_ms_tok,
+                                        dense_up_ms_tok,
+                                        dense_activation_ms_tok,
+                                        dense_down_ms_tok,
+                                    );
+                                    eprintln!(
+                                        "  \x1b[36m│\x1b[0m    Dense post norms:{:5.2} router norm:{:5.2} remaining:{:5.2} \x1b[36m│\x1b[0m",
+                                        dense_post_norms_ms_tok,
+                                        router_input_norm_ms_tok,
+                                        route_prep_remaining_ms_tok,
+                                    );
+                                    log::info!(
+                                        "DECODE GRAPH ROUTE PREP SPLIT avg_ms_per_tok total={:.3} pre_gqa_norm_residual={:.3} post_gqa_norm_add={:.3} dense_pre_norm={:.3} dense_gate={:.3} dense_up={:.3} dense_activation={:.3} dense_down={:.3} dense_post_norms={:.3} router_input_norm={:.3} named_total={:.3} remaining_overhead={:.3} route_pre_gqa_prep={:.3} route_post_gqa_prep={:.3} route_tail={:.3} route_residual={:.3} active_segments={}",
+                                        route_prep_overhead_ms_tok,
+                                        pre_gqa_norm_ms_tok,
+                                        post_gqa_norm_add_ms_tok,
+                                        dense_pre_norm_ms_tok,
+                                        dense_gate_ms_tok,
+                                        dense_up_ms_tok,
+                                        dense_activation_ms_tok,
+                                        dense_down_ms_tok,
+                                        dense_post_norms_ms_tok,
+                                        router_input_norm_ms_tok,
+                                        route_prep_named_ms_tok,
+                                        route_prep_remaining_ms_tok,
+                                        pre_gqa_ms_tok,
+                                        post_gqa_prep_ms_tok,
+                                        tail_ms_tok,
+                                        route_residual_ms_tok,
+                                        route_prep_split_count,
+                                    );
+                                }
+                            }
+                            let gqa_path_count = graph.graph_gqa_path_active
+                                .iter()
+                                .filter(|&&active| active)
+                                .count();
+                            if graph.graph_gqa_path_clock_enabled && gqa_path_count > 0 {
+                                let projection_ms_tok = graph.t_graph_gqa_path_projection / n * 1000.0;
+                                let norm_rope_kv_ms_tok = graph.t_graph_gqa_path_norm_rope_kv / n * 1000.0;
+                                let attention_reduce_ms_tok = graph.t_graph_gqa_path_attention_reduce / n * 1000.0;
+                                let apply_gated_bf16_ms_tok = graph.t_graph_gqa_path_apply_gated_bf16 / n * 1000.0;
+                                let o_input_prep_ms_tok = graph.t_graph_gqa_path_o_input_prep / n * 1000.0;
+                                let o_projection_ms_tok = graph.t_graph_gqa_path_o_projection / n * 1000.0;
+                                let marked_ms_tok = projection_ms_tok
+                                    + norm_rope_kv_ms_tok
+                                    + attention_reduce_ms_tok
+                                    + apply_gated_bf16_ms_tok
+                                    + o_input_prep_ms_tok
+                                    + o_projection_ms_tok;
+                                let gqa_path_ms_tok = if graph.graph_mixed_segment_clock_enabled && mixed_count > 0 {
+                                    graph.t_graph_mixed_gqa_proj_attn / n * 1000.0
+                                } else {
+                                    marked_ms_tok
+                                };
+                                let residual_ms_tok = gqa_path_ms_tok - marked_ms_tok;
+                                eprintln!("  \x1b[36m│\x1b[0m  HD512 k4v4 GQA path split:               \x1b[36m│\x1b[0m");
+                                eprintln!(
+                                    "  \x1b[36m│\x1b[0m    Projection:{:6.2} ms/tok ({:4.2} ms/seg) \x1b[36m│\x1b[0m",
+                                    projection_ms_tok,
+                                    projection_ms_tok / gqa_path_count as f64,
+                                );
+                                eprintln!(
+                                    "  \x1b[36m│\x1b[0m    Norm/RoPE/KV:{:5.2} ms/tok ({:4.2} ms/seg) \x1b[36m│\x1b[0m",
+                                    norm_rope_kv_ms_tok,
+                                    norm_rope_kv_ms_tok / gqa_path_count as f64,
+                                );
+                                eprintln!(
+                                    "  \x1b[36m│\x1b[0m    Attn/reduce:{:5.2} ms/tok ({:4.2} ms/seg) \x1b[36m│\x1b[0m",
+                                    attention_reduce_ms_tok,
+                                    attention_reduce_ms_tok / gqa_path_count as f64,
+                                );
+                                eprintln!(
+                                    "  \x1b[36m│\x1b[0m    Apply gated:{:5.2} ms/tok ({:4.2} ms/seg) \x1b[36m│\x1b[0m",
+                                    apply_gated_bf16_ms_tok,
+                                    apply_gated_bf16_ms_tok / gqa_path_count as f64,
+                                );
+                                eprintln!(
+                                    "  \x1b[36m│\x1b[0m    O input prep:{:5.2} ms/tok ({:4.2} ms/seg) \x1b[36m│\x1b[0m",
+                                    o_input_prep_ms_tok,
+                                    o_input_prep_ms_tok / gqa_path_count as f64,
+                                );
+                                eprintln!(
+                                    "  \x1b[36m│\x1b[0m    O projection:{:5.2} ms/tok ({:4.2} ms/seg) \x1b[36m│\x1b[0m",
+                                    o_projection_ms_tok,
+                                    o_projection_ms_tok / gqa_path_count as f64,
+                                );
+                                eprintln!(
+                                    "  \x1b[36m│\x1b[0m    Marked:    {:6.2} | path residual:{:6.2} \x1b[36m│\x1b[0m",
+                                    marked_ms_tok,
+                                    residual_ms_tok,
+                                );
+                                log::info!(
+                                    "DECODE GRAPH HD512 K4V4 GQA PATH SPLIT avg_ms_per_tok projection={:.3} norm_rope_kv={:.3} attention_reduce={:.3} apply_gated_bf16={:.3} o_input_prep={:.3} o_projection={:.3} marked_total={:.3} gqa_path={:.3} residual={:.3} final_sync_wait={:.3} active_segments={}",
+                                    projection_ms_tok,
+                                    norm_rope_kv_ms_tok,
+                                    attention_reduce_ms_tok,
+                                    apply_gated_bf16_ms_tok,
+                                    o_input_prep_ms_tok,
+                                    o_projection_ms_tok,
+                                    marked_ms_tok,
+                                    gqa_path_ms_tok,
+                                    residual_ms_tok,
+                                    avg_sync_final,
+                                    gqa_path_count,
+                                );
+                                log::info!(
+                                    "DECODE GRAPH HD512 K4V4 GQA POST_ATTN avg_ms_per_tok apply_gated_bf16={:.3} o_input_prep={:.3} o_projection={:.3} marker_residual={:.3} final_sync_wait={:.3} active_segments={}",
+                                    apply_gated_bf16_ms_tok,
+                                    o_input_prep_ms_tok,
+                                    o_projection_ms_tok,
+                                    residual_ms_tok,
+                                    avg_sync_final,
+                                    gqa_path_count,
+                                );
+                                if graph.graph_gqa_boundary_clock_enabled && graph.graph_mixed_segment_clock_enabled && mixed_count > 0 {
+                                    let entry_gap_ms_tok = graph.t_graph_gqa_boundary_entry_gap / n * 1000.0;
+                                    let post_o_exit_gap_ms_tok = graph.t_graph_gqa_boundary_post_o_exit_gap / n * 1000.0;
+                                    let stream_debt_ms_tok = graph.t_graph_gqa_boundary_stream_debt / n * 1000.0;
+                                    let boundary_total_ms_tok = entry_gap_ms_tok
+                                        + post_o_exit_gap_ms_tok
+                                        + stream_debt_ms_tok;
+                                    eprintln!("  \x1b[36m│\x1b[0m  HD512 k4v4 GQA boundary split:           \x1b[36m│\x1b[0m");
+                                    eprintln!(
+                                        "  \x1b[36m│\x1b[0m    GQA entry:{:6.2} ms/tok ({:4.2} ms/seg) \x1b[36m│\x1b[0m",
+                                        entry_gap_ms_tok,
+                                        entry_gap_ms_tok / gqa_path_count as f64,
+                                    );
+                                    eprintln!(
+                                        "  \x1b[36m│\x1b[0m    Post-O exit:{:5.2} ms/tok ({:4.2} ms/seg) \x1b[36m│\x1b[0m",
+                                        post_o_exit_gap_ms_tok,
+                                        post_o_exit_gap_ms_tok / gqa_path_count as f64,
+                                    );
+                                    eprintln!(
+                                        "  \x1b[36m│\x1b[0m    Stream debt:{:5.2} ms/tok | residual:{:6.2} \x1b[36m│\x1b[0m",
+                                        stream_debt_ms_tok,
+                                        residual_ms_tok,
+                                    );
+                                    log::info!(
+                                        "DECODE GRAPH HD512 K4V4 GQA BOUNDARY avg_ms_per_tok entry_gap={:.3} post_o_exit_gap={:.3} hqq_graph_stream_debt={:.3} boundary_total={:.3} path_residual={:.3} full_gqa_path={:.3} named_path={:.3} final_sync_wait={:.3} active_segments={}",
+                                        entry_gap_ms_tok,
+                                        post_o_exit_gap_ms_tok,
+                                        stream_debt_ms_tok,
+                                        boundary_total_ms_tok,
+                                        residual_ms_tok,
+                                        gqa_path_ms_tok,
+                                        marked_ms_tok,
+                                        avg_sync_final,
+                                        gqa_path_count,
+                                    );
+                                }
+                                if graph.graph_gqa_coverage_clock_enabled && graph.graph_mixed_segment_clock_enabled && mixed_count > 0 {
+                                    let mixed_total_ms_tok = graph.t_graph_gqa_coverage_mixed_gqa_total / n * 1000.0;
+                                    let active_mixed_ms_tok = graph.t_graph_gqa_coverage_active_mixed_gqa / n * 1000.0;
+                                    let active_endpoint_ms_tok = graph.t_graph_gqa_coverage_active_path_endpoint / n * 1000.0;
+                                    let active_named_ms_tok = graph.t_graph_gqa_coverage_active_named_path / n * 1000.0;
+                                    let other_mixed_ms_tok = graph.t_graph_gqa_coverage_other_mixed_gqa / n * 1000.0;
+                                    let internal_gap_ms_tok = graph.t_graph_gqa_coverage_active_internal_gap / n * 1000.0;
+                                    let boundary_gap_ms_tok = graph.t_graph_gqa_coverage_boundary_gap / n * 1000.0;
+                                    let pct = |num: f64, den: f64| -> f64 {
+                                        if den.abs() > f64::EPSILON { (num / den) * 100.0 } else { 0.0 }
+                                    };
+                                    let count_coverage_pct = if mixed_count > 0 {
+                                        (gqa_path_count as f64 / mixed_count as f64) * 100.0
+                                    } else {
+                                        0.0
+                                    };
+                                    let active_time_coverage_pct = pct(
+                                        graph.t_graph_gqa_coverage_active_mixed_gqa,
+                                        graph.t_graph_gqa_coverage_mixed_gqa_total,
+                                    );
+                                    let endpoint_coverage_pct = pct(
+                                        graph.t_graph_gqa_coverage_active_path_endpoint,
+                                        graph.t_graph_gqa_coverage_active_mixed_gqa,
+                                    );
+                                    let named_endpoint_coverage_pct = pct(
+                                        graph.t_graph_gqa_coverage_active_named_path,
+                                        graph.t_graph_gqa_coverage_active_path_endpoint,
+                                    );
+                                    eprintln!("  \x1b[36m│\x1b[0m  HD512 k4v4 GQA coverage:                 \x1b[36m│\x1b[0m");
+                                    eprintln!(
+                                        "  \x1b[36m│\x1b[0m    Mixed total:{:5.2} active:{:5.2} other:{:5.2} \x1b[36m│\x1b[0m",
+                                        mixed_total_ms_tok,
+                                        active_mixed_ms_tok,
+                                        other_mixed_ms_tok,
+                                    );
+                                    eprintln!(
+                                        "  \x1b[36m│\x1b[0m    Endpoint:   {:5.2} named:{:5.2} gap:{:5.2} \x1b[36m│\x1b[0m",
+                                        active_endpoint_ms_tok,
+                                        active_named_ms_tok,
+                                        internal_gap_ms_tok,
+                                    );
+                                    eprintln!(
+                                        "  \x1b[36m│\x1b[0m    Coverage: count {:5.1}% time {:5.1}% named {:5.1}% \x1b[36m│\x1b[0m",
+                                        count_coverage_pct,
+                                        active_time_coverage_pct,
+                                        named_endpoint_coverage_pct,
+                                    );
+                                    log::info!(
+                                        "DECODE GRAPH HD512 K4V4 GQA COVERAGE avg_ms_per_tok mixed_gqa_total={:.3} active_mixed_gqa={:.3} active_path_endpoint={:.3} active_named_path={:.3} other_mixed_gqa={:.3} active_internal_gap={:.3} boundary_gap={:.3} count_coverage_pct={:.2} active_time_coverage_pct={:.2} endpoint_coverage_pct={:.2} named_endpoint_coverage_pct={:.2} mixed_segments={} active_segments={} final_sync_wait={:.3}",
+                                        mixed_total_ms_tok,
+                                        active_mixed_ms_tok,
+                                        active_endpoint_ms_tok,
+                                        active_named_ms_tok,
+                                        other_mixed_ms_tok,
+                                        internal_gap_ms_tok,
+                                        boundary_gap_ms_tok,
+                                        count_coverage_pct,
+                                        active_time_coverage_pct,
+                                        endpoint_coverage_pct,
+                                        named_endpoint_coverage_pct,
+                                        mixed_count,
+                                        gqa_path_count,
+                                        avg_sync_final,
+                                    );
+                                }
+                                if graph.graph_gqa_other_clock_enabled {
+                                    let other_count = graph.graph_gqa_other_active
+                                        .iter()
+                                        .filter(|&&active| active)
+                                        .count();
+                                    if other_count > 0 {
+                                        let projection_ms_tok = graph.t_graph_gqa_other_projection / n * 1000.0;
+                                        let qkv_norm_ms_tok = graph.t_graph_gqa_other_qkv_norm / n * 1000.0;
+                                        let rope_ms_tok = graph.t_graph_gqa_other_rope / n * 1000.0;
+                                        let kv_write_ms_tok = graph.t_graph_gqa_other_kv_write / n * 1000.0;
+                                        let norm_rope_kv_ms_tok = graph.t_graph_gqa_other_norm_rope_kv / n * 1000.0;
+                                        let attention_reduce_ms_tok = graph.t_graph_gqa_other_attention_reduce / n * 1000.0;
+                                        let apply_bf16_ms_tok = graph.t_graph_gqa_other_apply_bf16 / n * 1000.0;
+                                        let o_input_prep_ms_tok = graph.t_graph_gqa_other_o_input_prep / n * 1000.0;
+                                        let o_projection_ms_tok = graph.t_graph_gqa_other_o_projection / n * 1000.0;
+                                        let endpoint_ms_tok = graph.t_graph_gqa_other_endpoint / n * 1000.0;
+                                        let named_ms_tok = projection_ms_tok
+                                            + norm_rope_kv_ms_tok
+                                            + attention_reduce_ms_tok
+                                            + apply_bf16_ms_tok
+                                            + o_input_prep_ms_tok
+                                            + o_projection_ms_tok;
+                                        let coverage_other_ms_tok = graph.t_graph_gqa_coverage_other_mixed_gqa / n * 1000.0;
+                                        let endpoint_gap_ms_tok = endpoint_ms_tok - named_ms_tok;
+                                        let coverage_gap_ms_tok = coverage_other_ms_tok - endpoint_ms_tok;
+
+                                        eprintln!("  \x1b[36m│\x1b[0m  Non-active GQA geometry split:          \x1b[36m│\x1b[0m");
+                                        eprintln!(
+                                            "  \x1b[36m│\x1b[0m    Projection:{:6.2} Norm:{:5.2} RoPE:{:5.2} KV:{:5.2} \x1b[36m│\x1b[0m",
+                                            projection_ms_tok,
+                                            qkv_norm_ms_tok,
+                                            rope_ms_tok,
+                                            kv_write_ms_tok,
+                                        );
+                                        eprintln!(
+                                            "  \x1b[36m│\x1b[0m    Norm/KV:   {:6.2} Attn:{:5.2} BF16:{:5.2} \x1b[36m│\x1b[0m",
+                                            norm_rope_kv_ms_tok,
+                                            attention_reduce_ms_tok,
+                                            apply_bf16_ms_tok,
+                                        );
+                                        eprintln!(
+                                            "  \x1b[36m│\x1b[0m    O input/proj:{:5.2} + {:4.2} ms/tok \x1b[36m│\x1b[0m",
+                                            o_input_prep_ms_tok,
+                                            o_projection_ms_tok,
+                                        );
+                                        eprintln!(
+                                            "  \x1b[36m│\x1b[0m    Endpoint:  {:6.2} | cov gap:{:6.2} | segs:{} \x1b[36m│\x1b[0m",
+                                            endpoint_ms_tok,
+                                            coverage_gap_ms_tok,
+                                            other_count,
+                                        );
+                                        log::info!(
+                                            "DECODE GRAPH OTHER GQA TOTAL avg_ms_per_tok projection={:.3} qkv_norm={:.3} rope={:.3} kv_write={:.3} norm_rope_kv={:.3} attention_reduce={:.3} apply_bf16={:.3} o_input_prep={:.3} o_projection={:.3} named_total={:.3} endpoint={:.3} endpoint_gap={:.3} coverage_other_mixed_gqa={:.3} coverage_gap={:.3} active_segments={} final_sync_wait={:.3}",
+                                            projection_ms_tok,
+                                            qkv_norm_ms_tok,
+                                            rope_ms_tok,
+                                            kv_write_ms_tok,
+                                            norm_rope_kv_ms_tok,
+                                            attention_reduce_ms_tok,
+                                            apply_bf16_ms_tok,
+                                            o_input_prep_ms_tok,
+                                            o_projection_ms_tok,
+                                            named_ms_tok,
+                                            endpoint_ms_tok,
+                                            endpoint_gap_ms_tok,
+                                            coverage_other_ms_tok,
+                                            coverage_gap_ms_tok,
+                                            other_count,
+                                            avg_sync_final,
+                                        );
+
+                                        let mut buckets: std::collections::BTreeMap<
+                                            String,
+                                            (GraphGqaOtherClockTotals, usize, Vec<usize>),
+                                        > = std::collections::BTreeMap::new();
+                                        for graph_idx in 0..graph.graph_gqa_other_active.len() {
+                                            if !graph.graph_gqa_other_active[graph_idx] {
+                                                continue;
+                                            }
+                                            let meta = graph.graph_gqa_other_meta
+                                                .get(graph_idx)
+                                                .cloned()
+                                                .unwrap_or_default();
+                                            let totals = graph.graph_gqa_other_totals
+                                                .get(graph_idx)
+                                                .copied()
+                                                .unwrap_or_default();
+                                            if !meta.active || totals.endpoint <= 0.0 {
+                                                continue;
+                                            }
+                                            let layer_type = if meta.sliding_window > 0 { "sliding" } else { "full" };
+                                            let key = format!(
+                                                "{}_hd{}_nh{}_nkv{}_sw{}_gated{}_proj{}_kv{}_tile{}_max{}",
+                                                layer_type,
+                                                meta.head_dim,
+                                                meta.num_heads,
+                                                meta.num_kv_heads,
+                                                meta.sliding_window,
+                                                if meta.gated { 1 } else { 0 },
+                                                graph_gqa_projection_mode_name(meta.projection_mode),
+                                                graph.kv_format,
+                                                graph.gqa_tile_size,
+                                                graph.gqa_max_tiles,
+                                            );
+                                            let entry = buckets.entry(key)
+                                                .or_insert((GraphGqaOtherClockTotals::default(), 0, Vec::new()));
+                                            entry.0.projection += totals.projection;
+                                            entry.0.qkv_norm += totals.qkv_norm;
+                                            entry.0.rope += totals.rope;
+                                            entry.0.kv_write += totals.kv_write;
+                                            entry.0.norm_rope_kv += totals.norm_rope_kv;
+                                            entry.0.attention_reduce += totals.attention_reduce;
+                                            entry.0.apply_bf16 += totals.apply_bf16;
+                                            entry.0.o_input_prep += totals.o_input_prep;
+                                            entry.0.o_projection += totals.o_projection;
+                                            entry.0.endpoint += totals.endpoint;
+                                            entry.1 += 1;
+                                            entry.2.push(meta.layer_idx);
+                                        }
+
+                                        for (geometry, (totals, count, layers)) in buckets {
+                                            let projection = totals.projection / n * 1000.0;
+                                            let qkv_norm = totals.qkv_norm / n * 1000.0;
+                                            let rope = totals.rope / n * 1000.0;
+                                            let kv_write = totals.kv_write / n * 1000.0;
+                                            let norm_rope_kv = totals.norm_rope_kv / n * 1000.0;
+                                            let attention_reduce = totals.attention_reduce / n * 1000.0;
+                                            let apply_bf16 = totals.apply_bf16 / n * 1000.0;
+                                            let o_input_prep = totals.o_input_prep / n * 1000.0;
+                                            let o_projection = totals.o_projection / n * 1000.0;
+                                            let named = projection
+                                                + norm_rope_kv
+                                                + attention_reduce
+                                                + apply_bf16
+                                                + o_input_prep
+                                                + o_projection;
+                                            let endpoint = totals.endpoint / n * 1000.0;
+                                            let layers_str = layers.iter()
+                                                .map(|layer| layer.to_string())
+                                                .collect::<Vec<_>>()
+                                                .join(",");
+                                            log::info!(
+                                                "DECODE GRAPH OTHER GQA GEOMETRY geometry={} layers={} avg_ms_per_tok projection={:.3} qkv_norm={:.3} rope={:.3} kv_write={:.3} norm_rope_kv={:.3} attention_reduce={:.3} apply_bf16={:.3} o_input_prep={:.3} o_projection={:.3} named_total={:.3} endpoint={:.3} endpoint_gap={:.3} segments={} final_sync_wait={:.3}",
+                                                geometry,
+                                                layers_str,
+                                                projection,
+                                                qkv_norm,
+                                                rope,
+                                                kv_write,
+                                                norm_rope_kv,
+                                                attention_reduce,
+                                                apply_bf16,
+                                                o_input_prep,
+                                                o_projection,
+                                                named,
+                                                endpoint,
+                                                endpoint - named,
+                                                count,
+                                                avg_sync_final,
+                                            );
+                                        }
+                                    }
+                                }
+                                if graph.graph_gqa_hd256_attn_clock_enabled
+                                    && graph.graph_gqa_hd256_attn_segments > 0
+                                {
+                                    let graph_ms_tok = graph.t_graph_gqa_hd256_attn_graph / n * 1000.0;
+                                    let score_ms_tok = graph.t_graph_gqa_hd256_attn_score_max / n * 1000.0;
+                                    let weight_v_ms_tok = graph.t_graph_gqa_hd256_attn_weight_v / n * 1000.0;
+                                    let final_ms_tok = graph.t_graph_gqa_hd256_attn_final_output / n * 1000.0;
+                                    let internal_ms_tok = graph.t_graph_gqa_hd256_attn_internal_total / n * 1000.0;
+                                    let overhead_ms_tok = graph.t_graph_gqa_hd256_attn_graph_overhead / n * 1000.0;
+                                    let segments = graph.graph_gqa_hd256_attn_segments as f64;
+                                    let avg_seq_len = graph.graph_gqa_hd256_attn_seq_len_sum as f64 / segments;
+                                    let avg_runtime_tiles = graph.graph_gqa_hd256_attn_runtime_tiles_sum as f64 / segments;
+                                    let avg_max_tiles = graph.graph_gqa_hd256_attn_max_tiles_sum as f64 / segments;
+                                    let avg_inactive_tile_blocks =
+                                        graph.graph_gqa_hd256_attn_inactive_tile_blocks_sum as f64 / segments;
+                                    let tile_gate_pct =
+                                        graph.graph_gqa_hd256_attn_tile_gate_segments as f64 * 100.0 / segments;
+                                    let single_pct =
+                                        graph.graph_gqa_hd256_attn_single_segments as f64 * 100.0 / segments;
+                                    let tiled_pct =
+                                        graph.graph_gqa_hd256_attn_tiled_segments as f64 * 100.0 / segments;
+                                    let tile_cap_would_hit =
+                                        graph.graph_gqa_hd256_attn_tile_gate_segments
+                                            == graph.graph_gqa_hd256_attn_segments
+                                        && graph.graph_gqa_hd256_attn_single_segments
+                                            == graph.graph_gqa_hd256_attn_segments;
+
+                                    eprintln!("  \x1b[36m│\x1b[0m  Sliding HD256 k4v4 attention split:    \x1b[36m│\x1b[0m");
+                                    eprintln!(
+                                        "  \x1b[36m│\x1b[0m    Graph:{:7.2} Internal:{:6.2} Overhead:{:5.2} \x1b[36m│\x1b[0m",
+                                        graph_ms_tok,
+                                        internal_ms_tok,
+                                        overhead_ms_tok,
+                                    );
+                                    eprintln!(
+                                        "  \x1b[36m│\x1b[0m    Score:{:7.2} Weight/V:{:5.2} Final:{:6.2} \x1b[36m│\x1b[0m",
+                                        score_ms_tok,
+                                        weight_v_ms_tok,
+                                        final_ms_tok,
+                                    );
+                                    eprintln!(
+                                        "  \x1b[36m│\x1b[0m    Tiles avg seq:{:5.1} runtime:{:4.2} max:{:4.2} inactive-blocks:{:5.1} \x1b[36m│\x1b[0m",
+                                        avg_seq_len,
+                                        avg_runtime_tiles,
+                                        avg_max_tiles,
+                                        avg_inactive_tile_blocks,
+                                    );
+                                    log::info!(
+                                        "DECODE GRAPH HD256 K4V4 ATTN SPLIT avg_ms_per_tok graph_interval={:.3} internal_total={:.3} score_max={:.3} weight_v_accum={:.3} final_reduce_output={:.3} graph_overhead={:.3} segments={} single_path_segments={} tiled_path_segments={} tile_gate_segments={} tile_gate_pct={:.2} single_path_pct={:.2} tiled_path_pct={:.2} avg_seq_len={:.2} avg_runtime_tiles={:.2} avg_max_tiles={:.2} avg_inactive_tile_blocks={:.2} tile_cap_would_hit_current_hot_path={} final_sync_wait={:.3}",
+                                        graph_ms_tok,
+                                        internal_ms_tok,
+                                        score_ms_tok,
+                                        weight_v_ms_tok,
+                                        final_ms_tok,
+                                        overhead_ms_tok,
+                                        graph.graph_gqa_hd256_attn_segments,
+                                        graph.graph_gqa_hd256_attn_single_segments,
+                                        graph.graph_gqa_hd256_attn_tiled_segments,
+                                        graph.graph_gqa_hd256_attn_tile_gate_segments,
+                                        tile_gate_pct,
+                                        single_pct,
+                                        tiled_pct,
+                                        avg_seq_len,
+                                        avg_runtime_tiles,
+                                        avg_max_tiles,
+                                        avg_inactive_tile_blocks,
+                                        tile_cap_would_hit,
+                                        avg_sync_final,
+                                    );
+                                }
+                            }
+                            let k4_split_count = graph.graph_gqa_k4_split_active
+                                .iter()
+                                .filter(|&&active| active)
+                                .count();
+                            if graph.graph_gqa_k4_split_clock_enabled && k4_split_count > 0 {
+                                let attn_ms_tok = graph.t_graph_gqa_k4_tiled_attn / n * 1000.0;
+                                let reduce_ms_tok = graph.t_graph_gqa_k4_polar4_reduce / n * 1000.0;
+                                let split_ms_tok = attn_ms_tok + reduce_ms_tok;
+                                let gqa_route_ms_tok = kind_sum[GRAPH_SEG_ROUTE_GQA as usize] / n * 1000.0;
+                                let residual_ms_tok = gqa_route_ms_tok - split_ms_tok;
+                                eprintln!("  \x1b[36m│\x1b[0m  HD512 k4v4 GQA route split:              \x1b[36m│\x1b[0m");
+                                eprintln!(
+                                    "  \x1b[36m│\x1b[0m    Tiled attn: {:6.2} ms/tok ({:4.2} ms/seg) \x1b[36m│\x1b[0m",
+                                    attn_ms_tok,
+                                    attn_ms_tok / k4_split_count as f64,
+                                );
+                                eprintln!(
+                                    "  \x1b[36m│\x1b[0m    Polar4 red: {:6.2} ms/tok ({:4.2} ms/seg) \x1b[36m│\x1b[0m",
+                                    reduce_ms_tok,
+                                    reduce_ms_tok / k4_split_count as f64,
+                                );
+                                eprintln!(
+                                    "  \x1b[36m│\x1b[0m    Split total:{:6.2} ms/tok | residual:{:6.2} \x1b[36m│\x1b[0m",
+                                    split_ms_tok,
+                                    residual_ms_tok,
+                                );
+                                log::info!(
+                                    "DECODE GRAPH K4V4 GQA SPLIT avg_ms_per_tok tiled_attn={:.3} polar4_reduce={:.3} split_total={:.3} gqa_route={:.3} residual={:.3} active_segments={}",
+                                    attn_ms_tok,
+                                    reduce_ms_tok,
+                                    split_ms_tok,
+                                    gqa_route_ms_tok,
+                                    residual_ms_tok,
+                                    k4_split_count,
+                                );
+                            }
                             let print_kind = |name: &str, kind: u8| {
                                 let k = kind as usize;
                                 if kind_count[k] > 0 {
@@ -32596,6 +36146,43 @@ impl GpuDecodeStore {
                             }
                         }
                     }
+                }
+                if graph.graph_final_clock_enabled {
+                    let final_norm_ms_tok = graph.t_graph_final_norm / n * 1000.0;
+                    let final_lm_head_ms_tok = graph.t_graph_final_lm_head / n * 1000.0;
+                    let final_gpu_softcap_ms_tok = graph.t_graph_final_gpu_softcap / n * 1000.0;
+                    let final_graph_residual_ms_tok = graph.t_graph_final_graph_residual / n * 1000.0;
+                    let final_d2h_ms_tok = graph.t_graph_final_d2h_logits / n * 1000.0;
+                    let final_softcap_ms_tok = graph.t_graph_final_softcap / n * 1000.0;
+                    let final_marked_ms_tok = final_norm_ms_tok + final_lm_head_ms_tok + final_gpu_softcap_ms_tok;
+                    let final_sync_ms_tok = graph.t_graph_final_sync_wait / n * 1000.0;
+                    eprintln!("  \x1b[36m│\x1b[0m  Final graph split:                       \x1b[36m│\x1b[0m");
+                    eprintln!(
+                        "  \x1b[36m│\x1b[0m    RMSNorm:{:6.2} LM head:{:6.2} GPU softcap:{:6.2} \x1b[36m│\x1b[0m",
+                        final_norm_ms_tok,
+                        final_lm_head_ms_tok,
+                        final_gpu_softcap_ms_tok,
+                    );
+                    eprintln!(
+                        "  \x1b[36m│\x1b[0m    D2H logits:{:5.2} host softcap:{:5.2} residual:{:5.2} marked:{:5.2} \x1b[36m│\x1b[0m",
+                        final_d2h_ms_tok,
+                        final_softcap_ms_tok,
+                        final_graph_residual_ms_tok,
+                        final_marked_ms_tok,
+                    );
+                    log::info!(
+                        "DECODE GRAPH FINAL SPLIT avg_ms_per_tok final_norm={:.3} lm_head={:.3} gpu_softcap={:.3} graph_residual={:.3} d2h_logits={:.3} host_softcap={:.3} marked_graph={:.3} final_segment={:.3} final_sync_wait={:.3} gpu_softcap_enabled={}",
+                        final_norm_ms_tok,
+                        final_lm_head_ms_tok,
+                        final_gpu_softcap_ms_tok,
+                        final_graph_residual_ms_tok,
+                        final_d2h_ms_tok,
+                        final_softcap_ms_tok,
+                        final_marked_ms_tok,
+                        graph.t_graph_segment_final / n * 1000.0,
+                        final_sync_ms_tok,
+                        graph.graph_final_softcap_gpu_enabled,
+                    );
                 }
                 let avg_attn_la = graph.t_attn_la / n * 1000.0;
                 let avg_attn_gqa = graph.t_attn_gqa / n * 1000.0;

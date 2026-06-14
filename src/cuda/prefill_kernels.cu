@@ -4048,6 +4048,729 @@ extern "C" __global__ void flash_attn_tiled_kernel(
     }
 }
 
+/* Specialized full-prefill fallback for Gemma GQA layers with head_dim=512.
+ * The generic tiled kernel uses BC=16 to support all head dimensions <=512.
+ * For the measured Gemma full-attention path, BC=32 still fits Ampere-class
+ * opt-in shared memory and halves the number of causal KV tiles. */
+#define FA512_BC 32
+#define FA512_BR 16
+#define FA512_TILE 16
+#define FA512_DPT 16
+#define FA512_HD 512
+
+extern "C" __global__ void flash_attn_tiled_hd512_full_kernel(
+    __nv_bfloat16* __restrict__ out,
+    const __nv_bfloat16* __restrict__ q,     /* [M, num_q_heads, 512] */
+    const __nv_bfloat16* __restrict__ k_cur, /* [M, num_kv_heads, 512] */
+    const __nv_bfloat16* __restrict__ v_cur, /* [M, num_kv_heads, 512] */
+    int M, int num_q_heads, int num_kv_heads, float softmax_scale)
+{
+    int q_base = blockIdx.x * FA512_BR;
+    int qh = blockIdx.y;
+    int q_per_kv = num_q_heads / num_kv_heads;
+    int kv_h = qh / q_per_kv;
+    int lane = threadIdx.x;
+
+    extern __shared__ char smem_fa512[];
+    __nv_bfloat16* s_q = (__nv_bfloat16*)smem_fa512;                         /* [BR, 512] */
+    __nv_bfloat16* s_k = s_q + FA512_BR * FA512_HD;                          /* [BC, 512] */
+    __nv_bfloat16* s_v = s_k + FA512_BC * FA512_HD;                          /* [BC, 512] */
+    float* s_scores = (float*)(s_v + FA512_BC * FA512_HD);                   /* [BR, BC] */
+    __nv_bfloat16* s_p = (__nv_bfloat16*)(s_scores + FA512_BR * FA512_BC);   /* [BR, BC] */
+    float* s_o_tmp = (float*)(s_p + FA512_BR * FA512_BC);                    /* [16, 16] */
+
+    int q_stride = num_q_heads * FA512_HD;
+    for (int idx = lane; idx < FA512_BR * FA512_HD; idx += 32) {
+        int r = idx / FA512_HD;
+        int d = idx % FA512_HD;
+        int qi = q_base + r;
+        s_q[r * FA512_HD + d] = (qi < M)
+            ? q[(int64_t)qi * q_stride + qh * FA512_HD + d]
+            : float_to_bf16(0.0f);
+    }
+    __syncthreads();
+
+    float row_max_arr[FA512_BR], row_sum_arr[FA512_BR];
+    float O_reg[FA512_BR * FA512_DPT];
+    for (int r = 0; r < FA512_BR; r++) {
+        row_max_arr[r] = -1e30f;
+        row_sum_arr[r] = 0.0f;
+    }
+    for (int i = 0; i < FA512_BR * FA512_DPT; i++) O_reg[i] = 0.0f;
+
+    int block_last_qi = min(q_base + FA512_BR - 1, M - 1);
+    int block_max_kv = (q_base < M) ? (block_last_qi + 1) : 0;
+
+    for (int kv_start = 0; kv_start < block_max_kv; kv_start += FA512_BC) {
+        int tile_end = min(kv_start + FA512_BC, block_max_kv);
+        int tile_size = tile_end - kv_start;
+
+        for (int idx = lane; idx < FA512_BC * FA512_HD; idx += 32) {
+            int ki = idx / FA512_HD;
+            int d = idx % FA512_HD;
+            __nv_bfloat16 kval, vval;
+            if (ki < tile_size) {
+                int abs_pos = kv_start + ki;
+                int64_t off = ((int64_t)abs_pos * num_kv_heads + kv_h) * FA512_HD + d;
+                kval = k_cur[off];
+                vval = v_cur[off];
+            } else {
+                kval = float_to_bf16(0.0f);
+                vval = float_to_bf16(0.0f);
+            }
+            s_k[ki * FA512_HD + d] = kval;
+            s_v[ki * FA512_HD + d] = vval;
+        }
+        __syncwarp();
+
+        for (int nj = 0; nj < FA512_BC / FA512_TILE; nj++) {
+            nvcuda::wmma::fragment<nvcuda::wmma::accumulator, 16, 16, 16, float> s_frag;
+            nvcuda::wmma::fill_fragment(s_frag, 0.0f);
+
+            for (int kk = 0; kk < FA512_HD / FA512_TILE; kk++) {
+                nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, 16, 16, 16,
+                    __nv_bfloat16, nvcuda::wmma::row_major> q_frag;
+                nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, 16, 16, 16,
+                    __nv_bfloat16, nvcuda::wmma::col_major> k_frag;
+
+                nvcuda::wmma::load_matrix_sync(q_frag,
+                    &s_q[kk * FA512_TILE], FA512_HD);
+                nvcuda::wmma::load_matrix_sync(k_frag,
+                    &s_k[nj * FA512_TILE * FA512_HD + kk * FA512_TILE], FA512_HD);
+
+                nvcuda::wmma::mma_sync(s_frag, q_frag, k_frag, s_frag);
+            }
+
+            nvcuda::wmma::store_matrix_sync(
+                &s_scores[nj * FA512_TILE], s_frag, FA512_BC,
+                nvcuda::wmma::mem_row_major);
+        }
+        __syncwarp();
+
+        for (int r = 0; r < FA512_BR; r++) {
+            int qi = q_base + r;
+            if (qi >= M) continue;
+            float* row = &s_scores[r * FA512_BC];
+
+            float local_max = -1e30f;
+            for (int c = lane; c < FA512_BC; c += 32) {
+                int abs_kv = kv_start + c;
+                if (c < tile_size && abs_kv <= qi) {
+                    row[c] *= softmax_scale;
+                    local_max = fmaxf(local_max, row[c]);
+                } else {
+                    row[c] = -1e30f;
+                }
+            }
+            for (int off = 16; off > 0; off >>= 1)
+                local_max = fmaxf(local_max, __shfl_xor_sync(0xffffffff, local_max, off));
+
+            float old_max = row_max_arr[r];
+            float new_max = fmaxf(old_max, local_max);
+            float rescale = __expf(old_max - new_max);
+            row_max_arr[r] = new_max;
+
+            float local_sum = 0.0f;
+            for (int c = lane; c < FA512_BC; c += 32) {
+                float p = __expf(row[c] - new_max);
+                row[c] = p;
+                local_sum += p;
+            }
+            for (int off = 16; off > 0; off >>= 1)
+                local_sum += __shfl_xor_sync(0xffffffff, local_sum, off);
+
+            row_sum_arr[r] = row_sum_arr[r] * rescale + local_sum;
+
+            for (int j = 0; j < FA512_DPT; j++)
+                O_reg[r * FA512_DPT + j] *= rescale;
+
+            for (int c = lane; c < FA512_BC; c += 32)
+                s_p[r * FA512_BC + c] = float_to_bf16(row[c]);
+        }
+        __syncwarp();
+
+        for (int nj = 0; nj < FA512_HD / FA512_TILE; nj++) {
+            nvcuda::wmma::fragment<nvcuda::wmma::accumulator, 16, 16, 16, float> o_partial;
+            nvcuda::wmma::fill_fragment(o_partial, 0.0f);
+
+            for (int kk = 0; kk < FA512_BC / FA512_TILE; kk++) {
+                nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, 16, 16, 16,
+                    __nv_bfloat16, nvcuda::wmma::row_major> p_frag;
+                nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, 16, 16, 16,
+                    __nv_bfloat16, nvcuda::wmma::row_major> v_frag;
+
+                nvcuda::wmma::load_matrix_sync(p_frag,
+                    &s_p[kk * FA512_TILE], FA512_BC);
+                nvcuda::wmma::load_matrix_sync(v_frag,
+                    &s_v[kk * FA512_TILE * FA512_HD + nj * FA512_TILE], FA512_HD);
+
+                nvcuda::wmma::mma_sync(o_partial, p_frag, v_frag, o_partial);
+            }
+
+            nvcuda::wmma::store_matrix_sync(s_o_tmp, o_partial,
+                FA512_TILE, nvcuda::wmma::mem_row_major);
+            __syncwarp();
+
+            int first_t = (nj * FA512_TILE) % 32;
+            int my_col = lane - first_t;
+            if (my_col >= 0 && my_col < FA512_TILE) {
+                int d_global = nj * FA512_TILE + my_col;
+                int j = d_global / 32;
+                for (int r = 0; r < FA512_BR; r++)
+                    O_reg[r * FA512_DPT + j] += s_o_tmp[r * FA512_TILE + my_col];
+            }
+            __syncwarp();
+        }
+        __syncwarp();
+    }
+
+    for (int r = 0; r < FA512_BR; r++) {
+        int qi = q_base + r;
+        if (qi >= M) continue;
+        float inv_sum = (row_sum_arr[r] > 0.0f) ? (1.0f / row_sum_arr[r]) : 0.0f;
+        __nv_bfloat16* o_row = out + ((int64_t)qi * num_q_heads + qh) * FA512_HD;
+        for (int j = 0; j < FA512_DPT; j++) {
+            int d = lane + j * 32;
+            o_row[d] = float_to_bf16(O_reg[r * FA512_DPT + j] * inv_sum);
+        }
+    }
+}
+
+/* Two-query-head variant for devices where the wider BC=48/64 kernels do not
+ * fit. It uses two warps per block, shares the K/V tile across two adjacent Q
+ * heads, and keeps the exact same online-softmax math as the single-head path. */
+#define FA512_Q2_BC16 16
+#define FA512_Q2_BC32 32
+#define FA512_Q2_QH 2
+#define FA512_Q2_BR 16
+#define FA512_Q2_TILE 16
+#define FA512_Q2_DPT 16
+#define FA512_Q2_HD 512
+#define FA512_Q2_CLOCK_Q_LOAD 0
+#define FA512_Q2_CLOCK_KV_LOAD 1
+#define FA512_Q2_CLOCK_QK 2
+#define FA512_Q2_CLOCK_SOFTMAX 3
+#define FA512_Q2_CLOCK_PV 4
+#define FA512_Q2_CLOCK_FINAL 5
+#define FA512_Q2_CLOCK_TOTAL 6
+#define FA512_Q2_CLOCK_BLOCKS 7
+#define FA512_Q2_CLOCK_TILES 8
+
+__device__ __forceinline__ unsigned long long krasis_globaltimer_ns() {
+    unsigned long long t;
+    asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t));
+    return t;
+}
+
+__device__ __forceinline__ void hd512_q2_clock_add(
+    unsigned long long* __restrict__ debug_clocks,
+    int slot,
+    unsigned long long delta
+) {
+    if (debug_clocks && delta > 0) {
+        atomicAdd(&debug_clocks[slot], delta);
+    }
+}
+
+template <bool TIMED, int FA512_Q2_BC>
+__device__ __forceinline__ void flash_attn_tiled_hd512_full_q2_impl(
+    char* smem_fa512_q2,
+    __nv_bfloat16* __restrict__ out,
+    const __nv_bfloat16* __restrict__ q,     /* [M, num_q_heads, 512] */
+    const __nv_bfloat16* __restrict__ k_cur, /* [M, num_kv_heads, 512] */
+    const __nv_bfloat16* __restrict__ v_cur, /* [M, num_kv_heads, 512] */
+    int M, int num_q_heads, int num_kv_heads, float softmax_scale,
+    unsigned long long* __restrict__ debug_clocks)
+{
+    int q_base = blockIdx.x * FA512_Q2_BR;
+    int qh_group = blockIdx.y * FA512_Q2_QH;
+    int warp = threadIdx.x >> 5;
+    int lane = threadIdx.x & 31;
+    int qh = qh_group + warp;
+    if (qh >= num_q_heads) return;
+
+    int q_per_kv = num_q_heads / num_kv_heads;
+    int kv_h = qh_group / q_per_kv;
+
+    __nv_bfloat16* s_q = (__nv_bfloat16*)smem_fa512_q2;                     /* [2, BR, 512] */
+    __nv_bfloat16* s_k = s_q + FA512_Q2_QH * FA512_Q2_BR * FA512_Q2_HD;     /* [BC, 512] */
+    __nv_bfloat16* s_v = s_k + FA512_Q2_BC * FA512_Q2_HD;                  /* [BC, 512] */
+    float* s_scores = (float*)(s_v + FA512_Q2_BC * FA512_Q2_HD);           /* [2, BR, BC] */
+    __nv_bfloat16* s_p = (__nv_bfloat16*)(s_scores + FA512_Q2_QH * FA512_Q2_BR * FA512_Q2_BC);
+    float* s_o_tmp = (float*)(s_p + FA512_Q2_QH * FA512_Q2_BR * FA512_Q2_BC);
+
+    __nv_bfloat16* s_q_w = s_q + warp * FA512_Q2_BR * FA512_Q2_HD;
+    float* s_scores_w = s_scores + warp * FA512_Q2_BR * FA512_Q2_BC;
+    __nv_bfloat16* s_p_w = s_p + warp * FA512_Q2_BR * FA512_Q2_BC;
+    float* s_o_tmp_w = s_o_tmp + warp * FA512_Q2_TILE * FA512_Q2_TILE;
+
+    unsigned long long t_block_start = 0;
+    unsigned long long t_phase = 0;
+    if (TIMED && warp == 0 && lane == 0) {
+        t_block_start = krasis_globaltimer_ns();
+        t_phase = t_block_start;
+    }
+
+    int q_stride = num_q_heads * FA512_Q2_HD;
+    for (int idx = lane; idx < FA512_Q2_BR * FA512_Q2_HD; idx += 32) {
+        int r = idx / FA512_Q2_HD;
+        int d = idx % FA512_Q2_HD;
+        int qi = q_base + r;
+        s_q_w[r * FA512_Q2_HD + d] = (qi < M)
+            ? q[(int64_t)qi * q_stride + qh * FA512_Q2_HD + d]
+            : float_to_bf16(0.0f);
+    }
+    __syncthreads();
+    if (TIMED && warp == 0 && lane == 0) {
+        unsigned long long t = krasis_globaltimer_ns();
+        hd512_q2_clock_add(debug_clocks, FA512_Q2_CLOCK_Q_LOAD, t - t_phase);
+        t_phase = t;
+    }
+
+    float row_max_arr[FA512_Q2_BR], row_sum_arr[FA512_Q2_BR];
+    float O_reg[FA512_Q2_BR * FA512_Q2_DPT];
+    for (int r = 0; r < FA512_Q2_BR; r++) {
+        row_max_arr[r] = -1e30f;
+        row_sum_arr[r] = 0.0f;
+    }
+    for (int i = 0; i < FA512_Q2_BR * FA512_Q2_DPT; i++) O_reg[i] = 0.0f;
+
+    int block_last_qi = min(q_base + FA512_Q2_BR - 1, M - 1);
+    int block_max_kv = (q_base < M) ? (block_last_qi + 1) : 0;
+
+    for (int kv_start = 0; kv_start < block_max_kv; kv_start += FA512_Q2_BC) {
+        int tile_end = min(kv_start + FA512_Q2_BC, block_max_kv);
+        int tile_size = tile_end - kv_start;
+
+        for (int idx = threadIdx.x; idx < FA512_Q2_BC * FA512_Q2_HD; idx += 64) {
+            int ki = idx / FA512_Q2_HD;
+            int d = idx % FA512_Q2_HD;
+            __nv_bfloat16 kval, vval;
+            if (ki < tile_size) {
+                int abs_pos = kv_start + ki;
+                int64_t off = ((int64_t)abs_pos * num_kv_heads + kv_h) * FA512_Q2_HD + d;
+                kval = k_cur[off];
+                vval = v_cur[off];
+            } else {
+                kval = float_to_bf16(0.0f);
+                vval = float_to_bf16(0.0f);
+            }
+            s_k[ki * FA512_Q2_HD + d] = kval;
+            s_v[ki * FA512_Q2_HD + d] = vval;
+        }
+        __syncthreads();
+        if (TIMED && warp == 0 && lane == 0) {
+            unsigned long long t = krasis_globaltimer_ns();
+            hd512_q2_clock_add(debug_clocks, FA512_Q2_CLOCK_KV_LOAD, t - t_phase);
+            atomicAdd(&debug_clocks[FA512_Q2_CLOCK_TILES], 1ull);
+            t_phase = t;
+        }
+
+        for (int nj = 0; nj < FA512_Q2_BC / FA512_Q2_TILE; nj++) {
+            nvcuda::wmma::fragment<nvcuda::wmma::accumulator, 16, 16, 16, float> s_frag;
+            nvcuda::wmma::fill_fragment(s_frag, 0.0f);
+
+            for (int kk = 0; kk < FA512_Q2_HD / FA512_Q2_TILE; kk++) {
+                nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, 16, 16, 16,
+                    __nv_bfloat16, nvcuda::wmma::row_major> q_frag;
+                nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, 16, 16, 16,
+                    __nv_bfloat16, nvcuda::wmma::col_major> k_frag;
+
+                nvcuda::wmma::load_matrix_sync(q_frag,
+                    &s_q_w[kk * FA512_Q2_TILE], FA512_Q2_HD);
+                nvcuda::wmma::load_matrix_sync(k_frag,
+                    &s_k[nj * FA512_Q2_TILE * FA512_Q2_HD + kk * FA512_Q2_TILE],
+                    FA512_Q2_HD);
+
+                nvcuda::wmma::mma_sync(s_frag, q_frag, k_frag, s_frag);
+            }
+
+            nvcuda::wmma::store_matrix_sync(
+                &s_scores_w[nj * FA512_Q2_TILE], s_frag, FA512_Q2_BC,
+                nvcuda::wmma::mem_row_major);
+        }
+        __syncwarp();
+        if (TIMED && warp == 0 && lane == 0) {
+            unsigned long long t = krasis_globaltimer_ns();
+            hd512_q2_clock_add(debug_clocks, FA512_Q2_CLOCK_QK, t - t_phase);
+            t_phase = t;
+        }
+
+        for (int r = 0; r < FA512_Q2_BR; r++) {
+            int qi = q_base + r;
+            if (qi >= M) continue;
+            float* row = &s_scores_w[r * FA512_Q2_BC];
+
+            float local_max = -1e30f;
+            for (int c = lane; c < FA512_Q2_BC; c += 32) {
+                int abs_kv = kv_start + c;
+                if (c < tile_size && abs_kv <= qi) {
+                    row[c] *= softmax_scale;
+                    local_max = fmaxf(local_max, row[c]);
+                } else {
+                    row[c] = -1e30f;
+                }
+            }
+            for (int off = 16; off > 0; off >>= 1)
+                local_max = fmaxf(local_max, __shfl_xor_sync(0xffffffff, local_max, off));
+
+            float old_max = row_max_arr[r];
+            float new_max = fmaxf(old_max, local_max);
+            float rescale = __expf(old_max - new_max);
+            row_max_arr[r] = new_max;
+
+            float local_sum = 0.0f;
+            for (int c = lane; c < FA512_Q2_BC; c += 32) {
+                float p = __expf(row[c] - new_max);
+                row[c] = p;
+                local_sum += p;
+            }
+            for (int off = 16; off > 0; off >>= 1)
+                local_sum += __shfl_xor_sync(0xffffffff, local_sum, off);
+
+            row_sum_arr[r] = row_sum_arr[r] * rescale + local_sum;
+
+            for (int j = 0; j < FA512_Q2_DPT; j++)
+                O_reg[r * FA512_Q2_DPT + j] *= rescale;
+
+            for (int c = lane; c < FA512_Q2_BC; c += 32)
+                s_p_w[r * FA512_Q2_BC + c] = float_to_bf16(row[c]);
+        }
+        __syncwarp();
+        if (TIMED && warp == 0 && lane == 0) {
+            unsigned long long t = krasis_globaltimer_ns();
+            hd512_q2_clock_add(debug_clocks, FA512_Q2_CLOCK_SOFTMAX, t - t_phase);
+            t_phase = t;
+        }
+
+        for (int nj = 0; nj < FA512_Q2_HD / FA512_Q2_TILE; nj++) {
+            nvcuda::wmma::fragment<nvcuda::wmma::accumulator, 16, 16, 16, float> o_partial;
+            nvcuda::wmma::fill_fragment(o_partial, 0.0f);
+
+            for (int kk = 0; kk < FA512_Q2_BC / FA512_Q2_TILE; kk++) {
+                nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, 16, 16, 16,
+                    __nv_bfloat16, nvcuda::wmma::row_major> p_frag;
+                nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, 16, 16, 16,
+                    __nv_bfloat16, nvcuda::wmma::row_major> v_frag;
+
+                nvcuda::wmma::load_matrix_sync(p_frag,
+                    &s_p_w[kk * FA512_Q2_TILE], FA512_Q2_BC);
+                nvcuda::wmma::load_matrix_sync(v_frag,
+                    &s_v[kk * FA512_Q2_TILE * FA512_Q2_HD + nj * FA512_Q2_TILE],
+                    FA512_Q2_HD);
+
+                nvcuda::wmma::mma_sync(o_partial, p_frag, v_frag, o_partial);
+            }
+
+            nvcuda::wmma::store_matrix_sync(s_o_tmp_w, o_partial,
+                FA512_Q2_TILE, nvcuda::wmma::mem_row_major);
+            __syncwarp();
+
+            int first_t = (nj * FA512_Q2_TILE) % 32;
+            int my_col = lane - first_t;
+            if (my_col >= 0 && my_col < FA512_Q2_TILE) {
+                int d_global = nj * FA512_Q2_TILE + my_col;
+                int j = d_global / 32;
+                for (int r = 0; r < FA512_Q2_BR; r++)
+                    O_reg[r * FA512_Q2_DPT + j] += s_o_tmp_w[r * FA512_Q2_TILE + my_col];
+            }
+            __syncwarp();
+        }
+        __syncthreads();
+        if (TIMED && warp == 0 && lane == 0) {
+            unsigned long long t = krasis_globaltimer_ns();
+            hd512_q2_clock_add(debug_clocks, FA512_Q2_CLOCK_PV, t - t_phase);
+            t_phase = t;
+        }
+    }
+
+    for (int r = 0; r < FA512_Q2_BR; r++) {
+        int qi = q_base + r;
+        if (qi >= M) continue;
+        float inv_sum = (row_sum_arr[r] > 0.0f) ? (1.0f / row_sum_arr[r]) : 0.0f;
+        __nv_bfloat16* o_row = out + ((int64_t)qi * num_q_heads + qh) * FA512_Q2_HD;
+        for (int j = 0; j < FA512_Q2_DPT; j++) {
+            int d = lane + j * 32;
+            o_row[d] = float_to_bf16(O_reg[r * FA512_Q2_DPT + j] * inv_sum);
+        }
+    }
+    if (TIMED && warp == 0 && lane == 0) {
+        unsigned long long t = krasis_globaltimer_ns();
+        hd512_q2_clock_add(debug_clocks, FA512_Q2_CLOCK_FINAL, t - t_phase);
+        hd512_q2_clock_add(debug_clocks, FA512_Q2_CLOCK_TOTAL, t - t_block_start);
+        atomicAdd(&debug_clocks[FA512_Q2_CLOCK_BLOCKS], 1ull);
+    }
+}
+
+extern "C" __global__ void flash_attn_tiled_hd512_full_q2_kernel(
+    __nv_bfloat16* __restrict__ out,
+    const __nv_bfloat16* __restrict__ q,
+    const __nv_bfloat16* __restrict__ k_cur,
+    const __nv_bfloat16* __restrict__ v_cur,
+    int M, int num_q_heads, int num_kv_heads, float softmax_scale)
+{
+    extern __shared__ char smem_fa512_q2[];
+    flash_attn_tiled_hd512_full_q2_impl<false, FA512_Q2_BC16>(
+        smem_fa512_q2, out, q, k_cur, v_cur, M, num_q_heads, num_kv_heads,
+        softmax_scale, nullptr);
+}
+
+extern "C" __global__ void flash_attn_tiled_hd512_full_q2_timed_kernel(
+    __nv_bfloat16* __restrict__ out,
+    const __nv_bfloat16* __restrict__ q,
+    const __nv_bfloat16* __restrict__ k_cur,
+    const __nv_bfloat16* __restrict__ v_cur,
+    int M, int num_q_heads, int num_kv_heads, float softmax_scale,
+    unsigned long long* __restrict__ debug_clocks)
+{
+    extern __shared__ char smem_fa512_q2[];
+    flash_attn_tiled_hd512_full_q2_impl<true, FA512_Q2_BC16>(
+        smem_fa512_q2, out, q, k_cur, v_cur, M, num_q_heads, num_kv_heads,
+        softmax_scale, debug_clocks);
+}
+
+extern "C" __global__ void flash_attn_tiled_hd512_full_q2_bc32_kernel(
+    __nv_bfloat16* __restrict__ out,
+    const __nv_bfloat16* __restrict__ q,
+    const __nv_bfloat16* __restrict__ k_cur,
+    const __nv_bfloat16* __restrict__ v_cur,
+    int M, int num_q_heads, int num_kv_heads, float softmax_scale)
+{
+    extern __shared__ char smem_fa512_q2[];
+    flash_attn_tiled_hd512_full_q2_impl<false, FA512_Q2_BC32>(
+        smem_fa512_q2, out, q, k_cur, v_cur, M, num_q_heads, num_kv_heads,
+        softmax_scale, nullptr);
+}
+
+extern "C" __global__ void flash_attn_tiled_hd512_full_q2_bc32_timed_kernel(
+    __nv_bfloat16* __restrict__ out,
+    const __nv_bfloat16* __restrict__ q,
+    const __nv_bfloat16* __restrict__ k_cur,
+    const __nv_bfloat16* __restrict__ v_cur,
+    int M, int num_q_heads, int num_kv_heads, float softmax_scale,
+    unsigned long long* __restrict__ debug_clocks)
+{
+    extern __shared__ char smem_fa512_q2[];
+    flash_attn_tiled_hd512_full_q2_impl<true, FA512_Q2_BC32>(
+        smem_fa512_q2, out, q, k_cur, v_cur, M, num_q_heads, num_kv_heads,
+        softmax_scale, debug_clocks);
+}
+
+/* Wider variants for devices with larger opt-in shared memory. These keep the
+ * same full-attention math as flash_attn_tiled_hd512_full_kernel, but process
+ * more KV columns per tile when runtime capability allows it. */
+#define FA512_WIDE_BR 16
+#define FA512_WIDE_TILE 16
+#define FA512_WIDE_DPT 16
+#define FA512_WIDE_HD 512
+
+template <int FA512_WIDE_BC>
+__device__ __forceinline__ void flash_attn_tiled_hd512_full_wide_impl(
+    char* smem_fa512,
+    __nv_bfloat16* __restrict__ out,
+    const __nv_bfloat16* __restrict__ q,
+    const __nv_bfloat16* __restrict__ k_cur,
+    const __nv_bfloat16* __restrict__ v_cur,
+    int M, int num_q_heads, int num_kv_heads, float softmax_scale)
+{
+    int q_base = blockIdx.x * FA512_WIDE_BR;
+    int qh = blockIdx.y;
+    int q_per_kv = num_q_heads / num_kv_heads;
+    int kv_h = qh / q_per_kv;
+    int lane = threadIdx.x;
+
+    __nv_bfloat16* s_q = (__nv_bfloat16*)smem_fa512;
+    __nv_bfloat16* s_k = s_q + FA512_WIDE_BR * FA512_WIDE_HD;
+    __nv_bfloat16* s_v = s_k + FA512_WIDE_BC * FA512_WIDE_HD;
+    float* s_scores = (float*)(s_v + FA512_WIDE_BC * FA512_WIDE_HD);
+    __nv_bfloat16* s_p = (__nv_bfloat16*)(s_scores + FA512_WIDE_BR * FA512_WIDE_BC);
+    float* s_o_tmp = (float*)(s_p + FA512_WIDE_BR * FA512_WIDE_BC);
+
+    int q_stride = num_q_heads * FA512_WIDE_HD;
+    for (int idx = lane; idx < FA512_WIDE_BR * FA512_WIDE_HD; idx += 32) {
+        int r = idx / FA512_WIDE_HD;
+        int d = idx % FA512_WIDE_HD;
+        int qi = q_base + r;
+        s_q[r * FA512_WIDE_HD + d] = (qi < M)
+            ? q[(int64_t)qi * q_stride + qh * FA512_WIDE_HD + d]
+            : float_to_bf16(0.0f);
+    }
+    __syncthreads();
+
+    float row_max_arr[FA512_WIDE_BR], row_sum_arr[FA512_WIDE_BR];
+    float O_reg[FA512_WIDE_BR * FA512_WIDE_DPT];
+    for (int r = 0; r < FA512_WIDE_BR; r++) {
+        row_max_arr[r] = -1e30f;
+        row_sum_arr[r] = 0.0f;
+    }
+    for (int i = 0; i < FA512_WIDE_BR * FA512_WIDE_DPT; i++) O_reg[i] = 0.0f;
+
+    int block_last_qi = min(q_base + FA512_WIDE_BR - 1, M - 1);
+    int block_max_kv = (q_base < M) ? (block_last_qi + 1) : 0;
+
+    for (int kv_start = 0; kv_start < block_max_kv; kv_start += FA512_WIDE_BC) {
+        int tile_end = min(kv_start + FA512_WIDE_BC, block_max_kv);
+        int tile_size = tile_end - kv_start;
+
+        for (int idx = lane; idx < FA512_WIDE_BC * FA512_WIDE_HD; idx += 32) {
+            int ki = idx / FA512_WIDE_HD;
+            int d = idx % FA512_WIDE_HD;
+            __nv_bfloat16 kval, vval;
+            if (ki < tile_size) {
+                int abs_pos = kv_start + ki;
+                int64_t off = ((int64_t)abs_pos * num_kv_heads + kv_h) * FA512_WIDE_HD + d;
+                kval = k_cur[off];
+                vval = v_cur[off];
+            } else {
+                kval = float_to_bf16(0.0f);
+                vval = float_to_bf16(0.0f);
+            }
+            s_k[ki * FA512_WIDE_HD + d] = kval;
+            s_v[ki * FA512_WIDE_HD + d] = vval;
+        }
+        __syncwarp();
+
+        for (int nj = 0; nj < FA512_WIDE_BC / FA512_WIDE_TILE; nj++) {
+            nvcuda::wmma::fragment<nvcuda::wmma::accumulator, 16, 16, 16, float> s_frag;
+            nvcuda::wmma::fill_fragment(s_frag, 0.0f);
+
+            for (int kk = 0; kk < FA512_WIDE_HD / FA512_WIDE_TILE; kk++) {
+                nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, 16, 16, 16,
+                    __nv_bfloat16, nvcuda::wmma::row_major> q_frag;
+                nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, 16, 16, 16,
+                    __nv_bfloat16, nvcuda::wmma::col_major> k_frag;
+
+                nvcuda::wmma::load_matrix_sync(q_frag,
+                    &s_q[kk * FA512_WIDE_TILE], FA512_WIDE_HD);
+                nvcuda::wmma::load_matrix_sync(k_frag,
+                    &s_k[nj * FA512_WIDE_TILE * FA512_WIDE_HD + kk * FA512_WIDE_TILE],
+                    FA512_WIDE_HD);
+
+                nvcuda::wmma::mma_sync(s_frag, q_frag, k_frag, s_frag);
+            }
+
+            nvcuda::wmma::store_matrix_sync(
+                &s_scores[nj * FA512_WIDE_TILE], s_frag, FA512_WIDE_BC,
+                nvcuda::wmma::mem_row_major);
+        }
+        __syncwarp();
+
+        for (int r = 0; r < FA512_WIDE_BR; r++) {
+            int qi = q_base + r;
+            if (qi >= M) continue;
+            float* row = &s_scores[r * FA512_WIDE_BC];
+
+            float local_max = -1e30f;
+            for (int c = lane; c < FA512_WIDE_BC; c += 32) {
+                int abs_kv = kv_start + c;
+                if (c < tile_size && abs_kv <= qi) {
+                    row[c] *= softmax_scale;
+                    local_max = fmaxf(local_max, row[c]);
+                } else {
+                    row[c] = -1e30f;
+                }
+            }
+            for (int off = 16; off > 0; off >>= 1)
+                local_max = fmaxf(local_max, __shfl_xor_sync(0xffffffff, local_max, off));
+
+            float old_max = row_max_arr[r];
+            float new_max = fmaxf(old_max, local_max);
+            float rescale = __expf(old_max - new_max);
+            row_max_arr[r] = new_max;
+
+            float local_sum = 0.0f;
+            for (int c = lane; c < FA512_WIDE_BC; c += 32) {
+                float p = __expf(row[c] - new_max);
+                row[c] = p;
+                local_sum += p;
+            }
+            for (int off = 16; off > 0; off >>= 1)
+                local_sum += __shfl_xor_sync(0xffffffff, local_sum, off);
+
+            row_sum_arr[r] = row_sum_arr[r] * rescale + local_sum;
+
+            for (int j = 0; j < FA512_WIDE_DPT; j++)
+                O_reg[r * FA512_WIDE_DPT + j] *= rescale;
+
+            for (int c = lane; c < FA512_WIDE_BC; c += 32)
+                s_p[r * FA512_WIDE_BC + c] = float_to_bf16(row[c]);
+        }
+        __syncwarp();
+
+        for (int nj = 0; nj < FA512_WIDE_HD / FA512_WIDE_TILE; nj++) {
+            nvcuda::wmma::fragment<nvcuda::wmma::accumulator, 16, 16, 16, float> o_partial;
+            nvcuda::wmma::fill_fragment(o_partial, 0.0f);
+
+            for (int kk = 0; kk < FA512_WIDE_BC / FA512_WIDE_TILE; kk++) {
+                nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, 16, 16, 16,
+                    __nv_bfloat16, nvcuda::wmma::row_major> p_frag;
+                nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, 16, 16, 16,
+                    __nv_bfloat16, nvcuda::wmma::row_major> v_frag;
+
+                nvcuda::wmma::load_matrix_sync(p_frag,
+                    &s_p[kk * FA512_WIDE_TILE], FA512_WIDE_BC);
+                nvcuda::wmma::load_matrix_sync(v_frag,
+                    &s_v[kk * FA512_WIDE_TILE * FA512_WIDE_HD + nj * FA512_WIDE_TILE],
+                    FA512_WIDE_HD);
+
+                nvcuda::wmma::mma_sync(o_partial, p_frag, v_frag, o_partial);
+            }
+
+            nvcuda::wmma::store_matrix_sync(s_o_tmp, o_partial,
+                FA512_WIDE_TILE, nvcuda::wmma::mem_row_major);
+            __syncwarp();
+
+            int first_t = (nj * FA512_WIDE_TILE) % 32;
+            int my_col = lane - first_t;
+            if (my_col >= 0 && my_col < FA512_WIDE_TILE) {
+                int d_global = nj * FA512_WIDE_TILE + my_col;
+                int j = d_global / 32;
+                for (int r = 0; r < FA512_WIDE_BR; r++)
+                    O_reg[r * FA512_WIDE_DPT + j] += s_o_tmp[r * FA512_WIDE_TILE + my_col];
+            }
+            __syncwarp();
+        }
+        __syncwarp();
+    }
+
+    for (int r = 0; r < FA512_WIDE_BR; r++) {
+        int qi = q_base + r;
+        if (qi >= M) continue;
+        float inv_sum = (row_sum_arr[r] > 0.0f) ? (1.0f / row_sum_arr[r]) : 0.0f;
+        __nv_bfloat16* o_row = out + ((int64_t)qi * num_q_heads + qh) * FA512_WIDE_HD;
+        for (int j = 0; j < FA512_WIDE_DPT; j++) {
+            int d = lane + j * 32;
+            o_row[d] = float_to_bf16(O_reg[r * FA512_WIDE_DPT + j] * inv_sum);
+        }
+    }
+}
+
+extern "C" __global__ void flash_attn_tiled_hd512_full_bc48_kernel(
+    __nv_bfloat16* __restrict__ out,
+    const __nv_bfloat16* __restrict__ q,
+    const __nv_bfloat16* __restrict__ k_cur,
+    const __nv_bfloat16* __restrict__ v_cur,
+    int M, int num_q_heads, int num_kv_heads, float softmax_scale)
+{
+    extern __shared__ char smem_fa512_wide[];
+    flash_attn_tiled_hd512_full_wide_impl<48>(
+        smem_fa512_wide, out, q, k_cur, v_cur, M, num_q_heads, num_kv_heads,
+        softmax_scale);
+}
+
+extern "C" __global__ void flash_attn_tiled_hd512_full_bc64_kernel(
+    __nv_bfloat16* __restrict__ out,
+    const __nv_bfloat16* __restrict__ q,
+    const __nv_bfloat16* __restrict__ k_cur,
+    const __nv_bfloat16* __restrict__ v_cur,
+    int M, int num_q_heads, int num_kv_heads, float softmax_scale)
+{
+    extern __shared__ char smem_fa512_wide[];
+    flash_attn_tiled_hd512_full_wide_impl<64>(
+        smem_fa512_wide, out, q, k_cur, v_cur, M, num_q_heads, num_kv_heads,
+        softmax_scale);
+}
+
 
 /* ══════════════════════════════════════════════════════════════════════════
  *  GPU-only MoE routing — replaces CPU round-trip for token binning
