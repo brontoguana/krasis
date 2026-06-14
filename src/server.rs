@@ -227,6 +227,7 @@ fn prepare_store_for_rust_prefill(
     prompt_tokens: usize,
 ) -> Result<bool, String> {
     let has_hqq = store.prepare_runtime_for_prefill_rust(prompt_tokens)?;
+    store.refresh_prefill_engine_kv_cache_rust(engine)?;
     if has_hqq {
         let patches = store.hqq_prefill_pointer_patches_rust()?;
         engine.refresh_hqq_prefill_tensor_pointers(&patches)?;

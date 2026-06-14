@@ -112,6 +112,75 @@ ALLOWED_PIPELINE_TAGS = {
 
 
 @dataclass
+class SupportedHFModel:
+    key: str
+    display_name: str
+    repo_id: str
+    local_dir_name: str
+    revision: str
+    recommended_config: str
+    notes: str
+
+
+SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
+    SupportedHFModel(
+        key="qcn",
+        display_name="Qwen3-Coder-Next",
+        repo_id="Qwen/Qwen3-Coder-Next",
+        local_dir_name="Qwen3-Coder-Next",
+        revision="a7fbcb5c0e12d62a448eaa0e260346bf5dcc0feb",
+        recommended_config="tests/qcn-k4v4-hqq4-int4-benchmark.conf",
+        notes="Current production coding model.",
+    ),
+    SupportedHFModel(
+        key="qwen36-35b",
+        display_name="Qwen3.6-35B-A3B",
+        repo_id="Qwen/Qwen3.6-35B-A3B",
+        local_dir_name="Qwen3.6-35B-A3B",
+        revision="995ad96eacd98c81ed38be0c5b274b04031597b0",
+        recommended_config="tests/qwen36-35b-5090-hqq6-k6v6-benchmark.conf",
+        notes="Qwen 35B-class MoE target.",
+    ),
+    SupportedHFModel(
+        key="qwen35-35b",
+        display_name="Qwen3.5-35B-A3B",
+        repo_id="Qwen/Qwen3.5-35B-A3B",
+        local_dir_name="Qwen3.5-35B-A3B",
+        revision="b1fc3d59ae0ab1e4279e04a8dd0fc4dc361fc2b6",
+        recommended_config="tests/q35b-4-4-hqq6-benchmark.conf",
+        notes="Validated Qwen 35B-class MoE target.",
+    ),
+    SupportedHFModel(
+        key="qwen35-122b",
+        display_name="Qwen3.5-122B-A10B",
+        repo_id="Qwen/Qwen3.5-122B-A10B",
+        local_dir_name="Qwen3.5-122B-A10B",
+        revision="b000b2eb18a7f4cdf3153c4215842da339e09d99",
+        recommended_config="tests/q122b-k4v4-hqq6-int4-benchmark.conf",
+        notes="Large Qwen MoE target for multi-GPU/high-memory runs.",
+    ),
+    SupportedHFModel(
+        key="qwen3-235b",
+        display_name="Qwen3-235B-A22B",
+        repo_id="Qwen/Qwen3-235B-A22B",
+        local_dir_name="Qwen3-235B-A22B",
+        revision="8efa61729e24bd65b1d152b5ab5409052aa80e65",
+        recommended_config="tests/q235-k4v4-hqq6-int4-benchmark.conf",
+        notes="Large Qwen MoE target.",
+    ),
+    SupportedHFModel(
+        key="gemma4-26b-a4b-it",
+        display_name="Gemma4 26B A4B IT",
+        repo_id="google/gemma-4-26b-a4b-it",
+        local_dir_name="gemma-4-26b-a4b-it",
+        revision="6e6f6edea8c52db2094dca3086e4b963a0034dfc",
+        recommended_config="tests/gemma-4-4-k6v6-a16.conf",
+        notes="Gemma4 text-only path; non-ring k6v6 is the validated fast mode.",
+    ),
+)
+
+
+@dataclass
 class HFModelCandidate:
     repo_id: str
     pipeline_tag: str
@@ -128,6 +197,12 @@ class HFModelCandidate:
     selected_files: List[str]
     safetensors_file_count: int
     summary: str
+    display_name: str = ""
+    local_dir_name: str = ""
+    revision: str = ""
+    recommended_config: str = ""
+    support_notes: str = ""
+    supported_download: bool = False
 
     @property
     def has_safetensors(self) -> bool:
@@ -145,6 +220,10 @@ class HFModelCandidate:
 
     @property
     def compatibility(self) -> str:
+        if self.supported_download:
+            if not self.has_safetensors:
+                return "unsupported: selected Krasis model has no safetensors metadata"
+            return "supported by Krasis"
         if not self.has_safetensors:
             return "unsupported: no safetensors metadata"
         tags = {t.lower() for t in self.tags}
@@ -163,7 +242,7 @@ class HFModelCandidate:
 
     @property
     def is_krasis_candidate(self) -> bool:
-        return self.compatibility == "likely"
+        return self.compatibility in ("likely", "supported by Krasis")
 
 
 def _require_hf():
@@ -186,6 +265,33 @@ def _require_hf():
                 "Upgrade Hugging Face Hub in the Krasis environment."
             ) from exc
     return HfApi, get_token, login, snapshot_download, GatedRepoError, HfHubHTTPError, RepositoryNotFoundError
+
+
+def supported_models() -> List[SupportedHFModel]:
+    return list(SUPPORTED_HF_MODELS)
+
+
+def supported_model_spec(value: str) -> SupportedHFModel:
+    clean = value.strip().lower()
+    for spec in SUPPORTED_HF_MODELS:
+        if clean in {
+            spec.key.lower(),
+            spec.display_name.lower(),
+            spec.repo_id.lower(),
+            spec.local_dir_name.lower(),
+        }:
+            return spec
+    raise ValueError(f"unsupported Krasis model: {value}")
+
+
+def _apply_supported_spec(candidate: HFModelCandidate, spec: SupportedHFModel) -> HFModelCandidate:
+    candidate.display_name = spec.display_name
+    candidate.local_dir_name = spec.local_dir_name
+    candidate.revision = spec.revision
+    candidate.recommended_config = spec.recommended_config
+    candidate.support_notes = spec.notes
+    candidate.supported_download = True
+    return candidate
 
 
 def _save_hf_token(token: str) -> None:
@@ -441,9 +547,28 @@ def get_model_details(repo_or_url: str) -> HFModelCandidate:
     return candidate_from_info(info, include_files=True)
 
 
+def get_supported_model_details(key_or_repo: str) -> HFModelCandidate:
+    HfApi, *_ = _require_hf()
+    spec = supported_model_spec(key_or_repo)
+    info = HfApi().model_info(
+        spec.repo_id,
+        revision=spec.revision,
+        files_metadata=True,
+        token=_token_arg(),
+    )
+    return _apply_supported_spec(candidate_from_info(info, include_files=True), spec)
+
+
 def destination_for_repo(models_dir: str, repo_id: str) -> str:
     org, name = repo_id.split("/", 1)
     return os.path.join(models_dir, org, name)
+
+
+def destination_for_supported_model(models_dir: str, model: Any) -> str:
+    local_dir_name = getattr(model, "local_dir_name", "")
+    if not local_dir_name:
+        local_dir_name = supported_model_spec(str(getattr(model, "repo_id", model))).local_dir_name
+    return os.path.join(models_dir, local_dir_name)
 
 
 def format_bytes(num_bytes: int) -> str:
@@ -461,7 +586,7 @@ def format_bytes(num_bytes: int) -> str:
     return f"{value:.1f} {unit}"
 
 
-def download_model(repo_id: str, local_dir: str, *, max_workers: int = 8) -> str:
+def download_model(repo_id: str, local_dir: str, *, revision: Optional[str] = None, max_workers: int = 8) -> str:
     _HfApi, _get_token, _login, snapshot_download, *_ = _require_hf()
     try:
         from huggingface_hub.utils import disable_progress_bars
@@ -476,6 +601,7 @@ def download_model(repo_id: str, local_dir: str, *, max_workers: int = 8) -> str
         allow_patterns=KRASIS_HF_ALLOW_PATTERNS,
         ignore_patterns=KRASIS_HF_IGNORE_PATTERNS,
         max_workers=max_workers,
+        revision=revision,
         token=_token_arg(),
     )
 

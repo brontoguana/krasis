@@ -157,12 +157,18 @@ def find_reference_data(model_name: str, script_dir: str, profile_id: Optional[s
     # krasis-internal sits beside krasisx
     internal_dir = os.path.join(os.path.dirname(script_dir), "krasis-internal")
     ref_base = os.path.join(internal_dir, "reference-outputs", "output")
+    try:
+        ref_dirs = os.listdir(ref_base)
+    except OSError:
+        ref_dirs = []
+    dir_lookup = {name.lower(): name for name in ref_dirs}
 
     # Search order
     suffixes = ["-prefill", "-expanded", ""]
     for suffix in suffixes:
+        ref_model_name = dir_lookup.get(f"{model_name}{suffix}".lower(), f"{model_name}{suffix}")
         for filename in reference_candidate_filenames(profile_id):
-            candidate = os.path.join(ref_base, f"{model_name}{suffix}", filename)
+            candidate = os.path.join(ref_base, ref_model_name, filename)
             if os.path.isfile(candidate):
                 return candidate
 

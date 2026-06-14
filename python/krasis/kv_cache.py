@@ -46,9 +46,16 @@ class PagedKVCache:
         combined: bool = False,
         max_mb: Optional[int] = None,
         kv_format: str = "fp8",
+        layer_indices: Optional[List[int]] = None,
+        enable_ring_window: bool = False,
     ):
         self.cfg = cfg
         self.num_layers = num_layers
+        self.layer_indices = list(layer_indices) if layer_indices is not None else list(range(num_layers))
+        if len(self.layer_indices) != num_layers:
+            raise ValueError(
+                f"KV cache layer_indices length {len(self.layer_indices)} does not match num_layers {num_layers}"
+            )
         self.device = device
         self.page_size = page_size
         self.kv_dtype = kv_dtype
@@ -69,6 +76,7 @@ class PagedKVCache:
             "tq4": "tq4",
         }
         self.kv_format_str = kv_aliases.get(kv_format, kv_format)
+        self.enable_ring_window = bool(enable_ring_window)
         self.kv_format = 0  # bf16
         if self.kv_format_str == "fp8":
             self.kv_format = 1
@@ -104,6 +112,19 @@ class PagedKVCache:
             self.num_kv_heads = cfg.num_key_value_heads
             self.gqa_head_dim = cfg.gqa_head_dim
             self.kv_cache_dim = cfg.num_key_value_heads * cfg.gqa_head_dim * 2  # K + V
+            self.variable_gqa_dims = bool(getattr(cfg, "gemma4_text", False))
+        self.ring_window_gqa = (
+            self.enable_ring_window
+            and
+            cfg.is_gqa
+            and bool(getattr(cfg, "gemma4_text", False))
+            and int(getattr(cfg, "sliding_window", 0) or 0) > 0
+            and self.kv_format in (7, 9)
+        )
+        self._sliding_window_pages = 0
+        if self.ring_window_gqa:
+            self._sliding_window_pages = max(1, math.ceil(cfg.sliding_window / page_size))
+        self.layer_page_counts: List[int] = []
 
         # Size from max_mb (preferred) or max_pages (explicit)
         if max_pages is None:
@@ -146,7 +167,10 @@ class PagedKVCache:
                     prefill_ws / (1024 * 1024), new_mb,
                 )
 
-            max_pages = max(64, budget_bytes // bytes_per_page)
+            if getattr(self, "ring_window_gqa", False):
+                max_pages = self._max_pages_for_budget(budget_bytes)
+            else:
+                max_pages = max(64, budget_bytes // bytes_per_page)
             logger.info(
                 "KV cache: %d MB → %d pages (%.1fK tokens)",
                 max_mb, max_pages, max_pages * page_size / 1000,
@@ -214,31 +238,67 @@ class PagedKVCache:
             elif self.kv_format in (5, 6, 7, 8, 9):
                 # k4v4/k6v4/k7v4: integer K plus Polar4 V. k6v6/k8v6 use
                 # the same slots with integer V scale/indices instead.
-                num_blocks = (self.num_kv_heads * self.gqa_head_dim) // 16
                 k_packed_bytes = 16 if self.kv_format == 8 else 14 if self.kv_format == 6 else 8 if self.kv_format == 9 else 12
                 v_packed_bytes = 12 if self.kv_format in (7, 8) else 8
-                self.k_radius_cache = torch.zeros(
-                    num_layers, max_pages, page_size, num_blocks,
-                    dtype=torch.bfloat16, device=device,
-                )
-                self.k_angles_cache = torch.zeros(
-                    num_layers, max_pages, page_size, num_blocks * k_packed_bytes,
-                    dtype=torch.uint8, device=device,
-                )
-                self.v_radius_cache = torch.zeros(
-                    num_layers, max_pages, page_size, num_blocks,
-                    dtype=torch.bfloat16, device=device,
-                )
-                self.v_angles_cache = torch.zeros(
-                    num_layers, max_pages, page_size, num_blocks * v_packed_bytes,
-                    dtype=torch.uint8, device=device,
-                )
-                alloc_mb = (
-                    self.k_radius_cache.nbytes
-                    + self.k_angles_cache.nbytes
-                    + self.v_radius_cache.nbytes
-                    + self.v_angles_cache.nbytes
-                ) / (1024**2)
+                if self.variable_gqa_dims:
+                    self.k_radius_cache = []
+                    self.k_angles_cache = []
+                    self.v_radius_cache = []
+                    self.v_angles_cache = []
+                    self.layer_page_counts = [
+                        self._pages_for_layer(global_layer_idx, max_pages)
+                        for global_layer_idx in self.layer_indices
+                    ]
+                    alloc_bytes = 0
+                    for global_layer_idx, layer_pages in zip(self.layer_indices, self.layer_page_counts):
+                        num_blocks = self._gqa_num_blocks_for_layer(global_layer_idx)
+                        kr = torch.zeros(
+                            layer_pages, page_size, num_blocks,
+                            dtype=torch.bfloat16, device=device,
+                        )
+                        ka = torch.zeros(
+                            layer_pages, page_size, num_blocks * k_packed_bytes,
+                            dtype=torch.uint8, device=device,
+                        )
+                        vr = torch.zeros(
+                            layer_pages, page_size, num_blocks,
+                            dtype=torch.bfloat16, device=device,
+                        )
+                        va = torch.zeros(
+                            layer_pages, page_size, num_blocks * v_packed_bytes,
+                            dtype=torch.uint8, device=device,
+                        )
+                        alloc_bytes += kr.nbytes + ka.nbytes + vr.nbytes + va.nbytes
+                        self.k_radius_cache.append(kr)
+                        self.k_angles_cache.append(ka)
+                        self.v_radius_cache.append(vr)
+                        self.v_angles_cache.append(va)
+                    alloc_mb = alloc_bytes / (1024**2)
+                else:
+                    self.layer_page_counts = [max_pages] * num_layers
+                    num_blocks = (self.num_kv_heads * self.gqa_head_dim) // 16
+                    self.k_radius_cache = torch.zeros(
+                        num_layers, max_pages, page_size, num_blocks,
+                        dtype=torch.bfloat16, device=device,
+                    )
+                    self.k_angles_cache = torch.zeros(
+                        num_layers, max_pages, page_size, num_blocks * k_packed_bytes,
+                        dtype=torch.uint8, device=device,
+                    )
+                    self.v_radius_cache = torch.zeros(
+                        num_layers, max_pages, page_size, num_blocks,
+                        dtype=torch.bfloat16, device=device,
+                    )
+                    self.v_angles_cache = torch.zeros(
+                        num_layers, max_pages, page_size, num_blocks * v_packed_bytes,
+                        dtype=torch.uint8, device=device,
+                    )
+                    alloc_mb = (
+                        self.k_radius_cache.nbytes
+                        + self.k_angles_cache.nbytes
+                        + self.v_radius_cache.nbytes
+                        + self.v_angles_cache.nbytes
+                    ) / (1024**2)
                 if self.kv_format == 8:
                     layout_str = "gqa-k8v6"
                 elif self.kv_format == 7:
@@ -279,16 +339,39 @@ class PagedKVCache:
                 layout_str = "gqa-tq4"
             else:
                 # GQA: separate K and V caches [layers, pages, page_size, heads, head_dim]
-                self.k_cache = torch.zeros(
-                    num_layers, max_pages, page_size, self.num_kv_heads, self.gqa_head_dim,
-                    dtype=kv_dtype, device=device,
-                )
-                self.v_cache = torch.zeros(
-                    num_layers, max_pages, page_size, self.num_kv_heads, self.gqa_head_dim,
-                    dtype=kv_dtype, device=device,
-                )
-                alloc_mb = (self.k_cache.nbytes + self.v_cache.nbytes) / (1024**2)
-                layout_str = "gqa-split"
+                if self.variable_gqa_dims:
+                    self.k_cache = []
+                    self.v_cache = []
+                    self.layer_page_counts = [max_pages] * num_layers
+                    alloc_bytes = 0
+                    for global_layer_idx in self.layer_indices:
+                        num_kv_heads = cfg.gqa_num_kv_heads_for_layer(global_layer_idx)
+                        head_dim = cfg.gqa_head_dim_for_layer(global_layer_idx)
+                        k_layer = torch.zeros(
+                            max_pages, page_size, num_kv_heads, head_dim,
+                            dtype=kv_dtype, device=device,
+                        )
+                        v_layer = torch.zeros(
+                            max_pages, page_size, num_kv_heads, head_dim,
+                            dtype=kv_dtype, device=device,
+                        )
+                        alloc_bytes += k_layer.nbytes + v_layer.nbytes
+                        self.k_cache.append(k_layer)
+                        self.v_cache.append(v_layer)
+                    alloc_mb = alloc_bytes / (1024**2)
+                    layout_str = "gqa-split-variable"
+                else:
+                    self.layer_page_counts = [max_pages] * num_layers
+                    self.k_cache = torch.zeros(
+                        num_layers, max_pages, page_size, self.num_kv_heads, self.gqa_head_dim,
+                        dtype=kv_dtype, device=device,
+                    )
+                    self.v_cache = torch.zeros(
+                        num_layers, max_pages, page_size, self.num_kv_heads, self.gqa_head_dim,
+                        dtype=kv_dtype, device=device,
+                    )
+                    alloc_mb = (self.k_cache.nbytes + self.v_cache.nbytes) / (1024**2)
+                    layout_str = "gqa-split"
         elif combined:
             # TRTLLM MLA format: single combined cache
             self.kv_cache = torch.zeros(
@@ -315,12 +398,37 @@ class PagedKVCache:
             num_layers, max_pages, page_size, alloc_mb,
             self.attention_type, layout_str,
         )
+        if self.ring_window_gqa:
+            sliding_layers = sum(
+                1 for layer_idx in self.layer_indices
+                if self.cfg.is_sliding_attention_layer(layer_idx)
+            )
+            ring_tokens = self._sliding_window_pages * self.page_size
+            logger.info(
+                "KV ring-window enabled: %d sliding layers use %d tokens physical cache; %d full layers use %d tokens",
+                sliding_layers,
+                ring_tokens,
+                len(self.layer_indices) - sliding_layers,
+                self.max_pages * self.page_size,
+            )
 
         # Free page tracking
         self._free_pages: List[int] = list(range(max_pages))
         self._free_pages.reverse()  # pop from end
 
     def _bytes_per_page(self) -> int:
+        if getattr(self, "ring_window_gqa", False):
+            # Ring-window layers cap their physical storage at sliding_window.
+            # max_pages still defines the logical context capacity for full layers.
+            return self._bytes_for_pages(self.max_pages if hasattr(self, "max_pages") else 1)
+        if getattr(self, "variable_gqa_dims", False) and self.kv_format in (5, 6, 7, 8, 9):
+            k_packed_bytes = 16 if self.kv_format == 8 else 14 if self.kv_format == 6 else 8 if self.kv_format == 9 else 12
+            v_packed_bytes = 12 if self.kv_format in (7, 8) else 8
+            bytes_per_token = 0
+            for global_layer_idx in self.layer_indices:
+                num_blocks = self._gqa_num_blocks_for_layer(global_layer_idx)
+                bytes_per_token += num_blocks * (2 + k_packed_bytes + 2 + v_packed_bytes)
+            return self.page_size * bytes_per_token
         if self.kv_format == 2:
             # Polar4: 10 bytes per 16 elements
             # num_blocks = kv_cache_dim // 16
@@ -363,7 +471,82 @@ class PagedKVCache:
             return self.page_size * (packed_per_token * 2 + meta_per_token) * self.num_layers
 
         elem_size = 1 if self.kv_dtype == torch.float8_e4m3fn else 2
+        if getattr(self, "variable_gqa_dims", False):
+            elems_per_token = 0
+            for global_layer_idx in self.layer_indices:
+                elems_per_token += (
+                    self.cfg.gqa_num_kv_heads_for_layer(global_layer_idx)
+                    * self.cfg.gqa_head_dim_for_layer(global_layer_idx)
+                    * 2
+                )
+            return self.page_size * elems_per_token * elem_size
         return self.page_size * self.kv_cache_dim * elem_size * self.num_layers
+
+    def _pages_for_layer(self, global_layer_idx: int, max_pages: int) -> int:
+        if (
+            getattr(self, "ring_window_gqa", False)
+            and self.cfg.is_sliding_attention_layer(global_layer_idx)
+        ):
+            return min(max_pages, self._sliding_window_pages)
+        return max_pages
+
+    def _bytes_for_pages(self, max_pages: int) -> int:
+        if not (getattr(self, "variable_gqa_dims", False) and self.kv_format in (5, 6, 7, 8, 9)):
+            return max_pages * self._bytes_per_page()
+        k_packed_bytes = 16 if self.kv_format == 8 else 14 if self.kv_format == 6 else 8 if self.kv_format == 9 else 12
+        v_packed_bytes = 12 if self.kv_format in (7, 8) else 8
+        total = 0
+        for global_layer_idx in self.layer_indices:
+            layer_pages = self._pages_for_layer(global_layer_idx, max_pages)
+            num_blocks = self._gqa_num_blocks_for_layer(global_layer_idx)
+            total += layer_pages * self.page_size * num_blocks * (
+                2 + k_packed_bytes + 2 + v_packed_bytes
+            )
+        return total
+
+    def _max_pages_for_budget(self, budget_bytes: int) -> int:
+        if not getattr(self, "ring_window_gqa", False):
+            return max(64, budget_bytes // self._bytes_per_page())
+        high = max(
+            64,
+            math.ceil(self.cfg.max_position_embeddings / self.page_size),
+            self._sliding_window_pages,
+        )
+        while self._bytes_for_pages(high) <= budget_bytes and high < (1 << 31):
+            high *= 2
+        lo, hi = 1, high
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if self._bytes_for_pages(mid) <= budget_bytes:
+                lo = mid
+            else:
+                hi = mid - 1
+        return max(64, lo)
+
+    def _gqa_num_blocks_for_layer(self, global_layer_idx: int) -> int:
+        kv_elems = (
+            self.cfg.gqa_num_kv_heads_for_layer(global_layer_idx)
+            * self.cfg.gqa_head_dim_for_layer(global_layer_idx)
+        )
+        if kv_elems % 16 != 0:
+            raise ValueError(
+                f"Layer {global_layer_idx} KV stride {kv_elems} is not divisible by 16; "
+                f"{self.kv_format_str} requires 16-element blocks."
+            )
+        return kv_elems // 16
+
+    def max_num_blocks(self) -> int:
+        if getattr(self, "variable_gqa_dims", False):
+            return max(self._gqa_num_blocks_for_layer(layer_idx) for layer_idx in self.layer_indices)
+        return (self.num_kv_heads * self.gqa_head_dim) // 16
+
+    def max_seq_for_global_layer(self, global_layer_idx: int) -> int:
+        if global_layer_idx not in self.layer_indices:
+            return self.max_pages * self.page_size
+        local_idx = self.layer_indices.index(global_layer_idx)
+        if self.layer_page_counts:
+            return self.layer_page_counts[local_idx] * self.page_size
+        return self.max_pages * self.page_size
 
     @property
     def max_context_tokens(self) -> int:

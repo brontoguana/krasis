@@ -82,6 +82,12 @@ fn kv_stage_exact_enabled() -> bool {
     )
 }
 
+fn gemma_custom_window_prefill_enabled() -> bool {
+    std::env::var("KRASIS_GEMMA_CUSTOM_WINDOW_PREFILL")
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
 #[derive(Clone, Debug)]
 struct TraceRange {
     start: usize,
@@ -1461,6 +1467,18 @@ fn compute_topk_ids_from_logits_cpu(logits: &[f32], topk: usize) -> Vec<i32> {
         .collect()
 }
 
+#[inline]
+fn apply_logit_softcap_in_place(logits: &mut [f32], softcap: f32) {
+    if softcap <= 0.0 || !softcap.is_finite() {
+        return;
+    }
+    for value in logits.iter_mut() {
+        if value.is_finite() {
+            *value = (*value / softcap).tanh() * softcap;
+        }
+    }
+}
+
 fn compute_marlin_gemm_row_cpu_reference(
     input_row_bf16: &[u16],
     weight: &MarlinWeight,
@@ -2386,6 +2404,11 @@ pub struct PrefillKernels {
     rmsnorm: RawCuFunc,
     rmsnorm_fp32w: RawCuFunc,
     fused_add_rmsnorm: RawCuFunc,
+    add_bf16: RawCuFunc,
+    scale_bf16: RawCuFunc,
+    scale_bf16_by_ptr: RawCuFunc,
+    apply_topk_per_expert_scale: RawCuFunc,
+    rmsnorm_scale: RawCuFunc,
     embedding: RawCuFunc,
     hqq4_dequant_bf16: RawCuFunc,
     hqq_dequant_bf16: RawCuFunc,
@@ -2399,9 +2422,12 @@ pub struct PrefillKernels {
     hqq_prefill_int8_exception_delta_bf16: RawCuFunc,
     hqq_apply_sidecar_bf16: RawCuFunc,
     rope: RawCuFunc,
+    rope_half_split: RawCuFunc,
     rope_mrope: RawCuFunc,
     silu_mul: RawCuFunc,
     relu2: RawCuFunc,
+    gelu_tanh_mul: RawCuFunc,
+    gated_activation_split: RawCuFunc,
     sigmoid_mul: RawCuFunc, // gated GQA: out = attn * sigmoid(gate)
     sigmoid_topk: RawCuFunc,
     softmax_topk: RawCuFunc,
@@ -2412,6 +2438,7 @@ pub struct PrefillKernels {
     kv_cache_append: RawCuFunc,
     kv_cache_append_bf16: RawCuFunc,
     kv_dequant_concat: RawCuFunc,
+    kv_dequant_window_concat: RawCuFunc,
     kv_concat_bf16: RawCuFunc,
     kv_cache_append_polar4: RawCuFunc,
     kv_cache_append_k8v4: RawCuFunc,
@@ -2498,6 +2525,7 @@ pub struct PrefillKernels {
     pub fused_moe_scatter_fn: Option<FusedMoeScatterFn>,
     // FlashAttention-2: vendored (dlopen from libkrasis_flash_attn.so)
     pub flash_attn_fwd: Option<FlashAttnFwdFn>,
+    pub flash_attn_fwd_window: Option<FlashAttnFwdWindowFn>,
     // FlashAttention-2 FP8 KV: BF16 Q with FP8 E4M3 K/V (for cross-chunk FP8 KV cache)
     pub flash_attn_fwd_fp8kv: Option<FlashAttnFwdFn>,
 }
@@ -2612,6 +2640,29 @@ type FlashAttnFwdFn = unsafe extern "C" fn(
     /*total_k*/ i32,
     /*softmax_scale*/ f32,
     /*is_causal*/ i32,
+    /*unpadded_lse*/ i32,
+    /*stream_ptr*/ *mut std::ffi::c_void,
+) -> i32;
+
+type FlashAttnFwdWindowFn = unsafe extern "C" fn(
+    /*q_ptr*/ *const std::ffi::c_void,
+    /*k_ptr*/ *const std::ffi::c_void,
+    /*v_ptr*/ *const std::ffi::c_void,
+    /*out_ptr*/ *mut std::ffi::c_void,
+    /*softmax_lse_ptr*/ *mut std::ffi::c_void,
+    /*cu_seqlens_q_ptr*/ *const std::ffi::c_void,
+    /*cu_seqlens_k_ptr*/ *const std::ffi::c_void,
+    /*batch_size*/ i32,
+    /*seqlen_q*/ i32,
+    /*seqlen_k*/ i32,
+    /*num_heads*/ i32,
+    /*num_heads_k*/ i32,
+    /*head_dim*/ i32,
+    /*total_q*/ i32,
+    /*total_k*/ i32,
+    /*softmax_scale*/ f32,
+    /*window_size_left*/ i32,
+    /*window_size_right*/ i32,
     /*unpadded_lse*/ i32,
     /*stream_ptr*/ *mut std::ffi::c_void,
 ) -> i32;
@@ -2798,6 +2849,8 @@ pub struct PrefillModelConfig {
     pub num_q_heads: usize,
     pub num_kv_heads: usize,
     pub head_dim: usize,
+    pub max_gqa_q_dim: usize,
+    pub max_gqa_kv_dim: usize,
     pub vocab_size: usize,
     pub rms_norm_eps: f32,
     pub max_seq_len: usize,
@@ -2824,6 +2877,8 @@ pub struct PrefillModelConfig {
     pub mamba_conv_kernel: usize,
     pub mamba_n_groups: usize,
     pub tie_word_embeddings: bool,
+    pub embedding_scale: f32,
+    pub final_logit_softcap: f32,
     // Linear attention (Gated DeltaNet) config
     pub la_num_k_heads: usize,
     pub la_num_v_heads: usize,
@@ -3006,6 +3061,12 @@ pub struct PrefillLayerWeights {
     pub shared_w2: Option<MarlinWeight>,
     pub shared_w1_bf16: Option<Bf16Weight>,
     pub shared_w2_bf16: Option<Bf16Weight>,
+    pub dense_gate: Option<MarlinWeight>,
+    pub dense_up: Option<MarlinWeight>,
+    pub dense_down: Option<MarlinWeight>,
+    pub dense_gate_bf16: Option<Bf16Weight>,
+    pub dense_up_bf16: Option<Bf16Weight>,
+    pub dense_down_bf16: Option<Bf16Weight>,
     /// Shared expert gate weight ptr (BF16, [hidden, 1]). 0 = no gate (weight=1.0).
     pub shared_gate_ptr: u64,
     pub shared_gate_rows: usize,
@@ -3029,6 +3090,24 @@ pub struct PrefillLayerWeights {
     // QK norm (Qwen3 models): per-head RMSNorm on Q and K after projection, before RoPE
     pub q_norm_ptr: u64, // FP32 [head_dim], 0 = no QK norm
     pub k_norm_ptr: u64, // FP32 [head_dim], 0 = no QK norm
+    pub gqa_num_q_heads: usize,
+    pub gqa_num_kv_heads: usize,
+    pub gqa_head_dim: usize,
+    pub gqa_sm_scale: f32,
+    pub gqa_sliding_window: usize,
+    pub gqa_rope_half_dim: usize,
+    pub gqa_rope_cos_ptr: u64,
+    pub gqa_rope_sin_ptr: u64,
+    pub gqa_v_norm_no_scale: bool,
+    pub gqa_rope_half_split: bool,
+    pub pre_ffn_norm: u64,
+    pub post_ffn_norm: u64,
+    pub post_ffn_norm1: u64,
+    pub post_ffn_norm2: u64,
+    pub pre_ffn_norm2: u64,
+    pub layer_scalar: u64,
+    pub router_input_scale: u64,
+    pub router_per_expert_scale: u64,
     pub hqq_gqa: Option<HqqGqaPrefillDescriptor>,
     pub hqq_mla: Option<HqqMlaPrefillDescriptor>,
     pub hqq_linear_attention: Option<HqqLinearAttentionPrefillDescriptor>,
@@ -3162,6 +3241,8 @@ pub struct PrefillEngine {
     pub layer_weights: Vec<PrefillLayerWeights>,
     pub moe_layers: Vec<Option<PrefillMoeLayerData>>,
     pub embedding_ptr: u64,
+    pub embedding_scale: f32,
+    pub final_logit_softcap: f32,
     pub final_norm_ptr: u64,
     pub lm_head: Option<MarlinWeight>,
     pub lm_head_bf16_ptr: u64, // BF16 weight pointer (when lm_head is None)
@@ -3176,6 +3257,7 @@ pub struct PrefillEngine {
     pub kv_k_ptrs: Vec<u64>, // per-layer K cache pointers (FP8)
     pub kv_v_ptrs: Vec<u64>, // per-layer V cache pointers (FP8)
     pub kv_max_seq: usize,
+    pub kv_max_seq_by_layer: Vec<usize>,
     /// KV cache format: 0=bf16, 1=fp8, 2=polar4, 3=k8v4, 4=tq4, 5=k6v4, 6=k7v4, 7=k6v6, 8=k8v6, 9=k4v4
     pub kv_format: u32,
     /// Opt-in Polar4 radius norm correction mode.
@@ -3188,6 +3270,7 @@ pub struct PrefillEngine {
     pub kv_v_angles_ptrs: Vec<u64>,
     pub kv_tq4_sign_ptrs: Vec<u64>,
     pub kv_num_blocks: usize,
+    pub kv_num_blocks_by_layer: Vec<usize>,
     pub decode_kv_k_ptrs: Vec<u64>,
     pub decode_kv_v_ptrs: Vec<u64>,
     pub decode_kv_k_radius_ptrs: Vec<u64>,
@@ -3197,10 +3280,13 @@ pub struct PrefillEngine {
     pub decode_kv_tq4_sign_ptrs: Vec<u64>,
     pub decode_kv_format: u32,
     pub decode_kv_max_seq: usize,
+    pub decode_kv_max_seq_by_layer: Vec<usize>,
     pub decode_kv_num_blocks: usize,
+    pub decode_kv_num_blocks_by_layer: Vec<usize>,
     pub prefill_kv_temp_k: Option<CudaSlice<u8>>,
     pub prefill_kv_temp_v: Option<CudaSlice<u8>>,
     pub prefill_kv_layer_offsets: Vec<usize>,
+    pub prefill_kv_layer_strides: Vec<usize>,
     pub prefill_kv_temp_seq: usize,
     pub prefill_kv_temp_layers: usize,
     pub prefill_kv_active: bool,
@@ -7855,14 +7941,33 @@ impl PrefillEngine {
         self.kv_tq4_sign_ptrs = self.decode_kv_tq4_sign_ptrs.clone();
         self.kv_format = self.decode_kv_format;
         self.kv_max_seq = self.decode_kv_max_seq;
+        self.kv_max_seq_by_layer = self.decode_kv_max_seq_by_layer.clone();
         self.kv_num_blocks = self.decode_kv_num_blocks;
+        self.kv_num_blocks_by_layer = self.decode_kv_num_blocks_by_layer.clone();
         self.prefill_kv_active = false;
+    }
+
+    fn decode_kv_max_seq_for_layer(&self, layer_idx: usize) -> usize {
+        self.decode_kv_max_seq_by_layer
+            .get(layer_idx)
+            .copied()
+            .filter(|&n| n > 0)
+            .unwrap_or(self.decode_kv_max_seq)
+    }
+
+    fn decode_kv_blocks_for_layer(&self, layer_idx: usize) -> usize {
+        self.decode_kv_num_blocks_by_layer
+            .get(layer_idx)
+            .copied()
+            .filter(|&n| n > 0)
+            .unwrap_or(self.decode_kv_num_blocks)
     }
 
     fn release_prefill_kv_temp(&mut self) {
         self.prefill_kv_temp_k = None;
         self.prefill_kv_temp_v = None;
         self.prefill_kv_layer_offsets.clear();
+        self.prefill_kv_layer_strides.clear();
         self.prefill_kv_temp_seq = 0;
         self.prefill_kv_temp_layers = 0;
         self.restore_decode_kv_pointers();
@@ -7885,17 +7990,6 @@ impl PrefillEngine {
             if diag {
                 eprintln!(
                     "[KV-STAGE] unsupported_decode_format={} prompt_tokens={}",
-                    self.decode_kv_format,
-                    prompt_tokens
-                );
-            }
-            return Ok(());
-        }
-        let kv_stride = self.config.num_kv_heads * self.config.head_dim;
-        if kv_stride == 0 {
-            if diag {
-                eprintln!(
-                    "[KV-STAGE] zero_kv_stride decode_format={} prompt_tokens={}",
                     self.decode_kv_format,
                     prompt_tokens
                 );
@@ -7926,12 +8020,34 @@ impl PrefillEngine {
             }
             return Ok(());
         }
-        let bytes_per_layer = prompt_tokens
-            .checked_mul(kv_stride)
-            .ok_or("stage-exact prefill KV bytes/layer overflow")?;
-        let total_bytes = bytes_per_layer
-            .checked_mul(active_layers.len())
-            .ok_or("stage-exact prefill KV total bytes overflow")?;
+        let ptr_count = self
+            .decode_kv_k_ptrs
+            .len()
+            .max(self.decode_kv_k_radius_ptrs.len());
+        let mut offsets = vec![usize::MAX; ptr_count];
+        let mut strides = vec![0usize; ptr_count];
+        let mut total_bytes = 0usize;
+        for &layer_idx in &active_layers {
+            let layer = self
+                .layer_weights
+                .get(layer_idx)
+                .ok_or_else(|| format!("stage-exact KV setup layer {} missing weights", layer_idx))?;
+            let layer_stride = layer
+                .gqa_num_kv_heads
+                .checked_mul(layer.gqa_head_dim)
+                .ok_or("stage-exact KV setup layer stride overflow")?;
+            if layer_stride == 0 {
+                return Err(format!("stage-exact KV setup layer {} has zero KV stride", layer_idx));
+            }
+            let layer_bytes = prompt_tokens
+                .checked_mul(layer_stride)
+                .ok_or("stage-exact prefill KV bytes/layer overflow")?;
+            offsets[layer_idx] = total_bytes;
+            strides[layer_idx] = layer_stride;
+            total_bytes = total_bytes
+                .checked_add(layer_bytes)
+                .ok_or("stage-exact prefill KV total bytes overflow")?;
+        }
         let temp_k = self
             .device
             .alloc_zeros::<u8>(total_bytes)
@@ -7942,24 +8058,17 @@ impl PrefillEngine {
             .map_err(|e| format!("alloc stage-exact prefill V FP8 KV: {e}"))?;
         let k_base = *temp_k.device_ptr();
         let v_base = *temp_v.device_ptr();
-        let ptr_count = self
-            .decode_kv_k_ptrs
-            .len()
-            .max(self.decode_kv_k_radius_ptrs.len());
         let mut temp_k_ptrs = vec![0u64; ptr_count];
         let mut temp_v_ptrs = vec![0u64; ptr_count];
-        let mut offsets = vec![usize::MAX; ptr_count];
-        for (slot_idx, &layer_idx) in active_layers.iter().enumerate() {
-            let offset = slot_idx
-                .checked_mul(bytes_per_layer)
-                .ok_or("stage-exact prefill KV pointer offset overflow")?;
+        for &layer_idx in &active_layers {
+            let offset = offsets[layer_idx];
             temp_k_ptrs[layer_idx] = k_base + offset as u64;
             temp_v_ptrs[layer_idx] = v_base + offset as u64;
-            offsets[layer_idx] = slot_idx;
         }
         self.prefill_kv_temp_k = Some(temp_k);
         self.prefill_kv_temp_v = Some(temp_v);
         self.prefill_kv_layer_offsets = offsets;
+        self.prefill_kv_layer_strides = strides;
         self.prefill_kv_temp_seq = prompt_tokens;
         self.prefill_kv_temp_layers = active_layers.len();
         self.prefill_kv_active = true;
@@ -7972,22 +8081,22 @@ impl PrefillEngine {
         self.kv_tq4_sign_ptrs = vec![0u64; ptr_count];
         self.kv_format = 1;
         self.kv_max_seq = prompt_tokens;
+        self.kv_max_seq_by_layer = vec![prompt_tokens; ptr_count];
         self.kv_num_blocks = 0;
+        self.kv_num_blocks_by_layer = vec![0usize; ptr_count];
         log::info!(
-            "Stage-exact KV prefill: decode_format={} active_layers={} prompt_tokens={} kv_stride={} temp_fp8_mb={:.1}",
+            "Stage-exact KV prefill: decode_format={} active_layers={} prompt_tokens={} temp_fp8_mb={:.1}",
             self.decode_kv_format,
             active_layers.len(),
             prompt_tokens,
-            kv_stride,
             (total_bytes * 2) as f64 / 1024.0 / 1024.0,
         );
         if diag {
             eprintln!(
-                "[KV-STAGE] active decode_format={} active_layers={} prompt_tokens={} kv_stride={} temp_fp8_mb={:.1}",
+                "[KV-STAGE] active decode_format={} active_layers={} prompt_tokens={} temp_fp8_mb={:.1}",
                 self.decode_kv_format,
                 active_layers.len(),
                 prompt_tokens,
-                kv_stride,
                 (total_bytes * 2) as f64 / 1024.0 / 1024.0,
             );
         }
@@ -8005,14 +8114,6 @@ impl PrefillEngine {
                 prompt_tokens, self.decode_kv_max_seq
             ));
         }
-        let kv_stride = self.config.num_kv_heads * self.config.head_dim;
-        let num_blocks = kv_stride / 16;
-        if num_blocks != self.decode_kv_num_blocks {
-            return Err(format!(
-                "stage-exact KV export block mismatch: kv_stride={} blocks={} decode_blocks={}",
-                kv_stride, num_blocks, self.decode_kv_num_blocks
-            ));
-        }
         let k_temp = self
             .prefill_kv_temp_k
             .as_ref()
@@ -8021,41 +8122,74 @@ impl PrefillEngine {
             .prefill_kv_temp_v
             .as_ref()
             .ok_or("stage-exact KV export missing temp V cache")?;
-        let bytes_per_layer = self
-            .prefill_kv_temp_seq
-            .checked_mul(kv_stride)
-            .ok_or("stage-exact KV export bytes/layer overflow")?;
         let k_base = *k_temp.device_ptr();
         let v_base = *v_temp.device_ptr();
-        let threads =
-            std::cmp::max(32, ((std::cmp::min(256, num_blocks) + 31) / 32) * 32) as u32;
         let t0 = Instant::now();
         let mut converted = 0usize;
         for layer_idx in 0..self.prefill_kv_layer_offsets.len() {
-            let slot_idx = self.prefill_kv_layer_offsets[layer_idx];
-            if slot_idx == usize::MAX {
+            let layer_offset = self.prefill_kv_layer_offsets[layer_idx];
+            if layer_offset == usize::MAX {
                 continue;
             }
-            let offset = slot_idx
-                .checked_mul(bytes_per_layer)
-                .ok_or("stage-exact KV export pointer offset overflow")?;
+            let layer = self
+                .layer_weights
+                .get(layer_idx)
+                .ok_or_else(|| format!("stage-exact KV export layer {} missing weights", layer_idx))?;
+            let kv_stride = layer.gqa_num_kv_heads
+                .checked_mul(layer.gqa_head_dim)
+                .ok_or("stage-exact KV export layer stride overflow")?;
+            let num_blocks = kv_stride / 16;
+            let decode_blocks = self.decode_kv_blocks_for_layer(layer_idx);
+            if num_blocks == 0 || num_blocks != decode_blocks {
+                return Err(format!(
+                    "stage-exact KV export block mismatch layer={} kv_stride={} blocks={} decode_blocks={}",
+                    layer_idx, kv_stride, num_blocks, decode_blocks
+                ));
+            }
+            let threads =
+                std::cmp::max(32, ((std::cmp::min(256, num_blocks) + 31) / 32) * 32) as u32;
             let mut p0 = self.decode_kv_k_radius_ptrs[layer_idx];
             let mut p1 = self.decode_kv_k_angles_ptrs[layer_idx];
             let mut p2 = self.decode_kv_v_radius_ptrs[layer_idx];
             let mut p3 = self.decode_kv_v_angles_ptrs[layer_idx];
-            let mut p4 = k_base + offset as u64;
-            let mut p5 = v_base + offset as u64;
-            let mut p6 = prompt_tokens as i32;
+            let layer_decode_max_seq = self.decode_kv_max_seq_for_layer(layer_idx);
+            if layer_decode_max_seq == 0 {
+                return Err(format!("stage-exact KV export layer {} has zero decode max_seq", layer_idx));
+            }
+            let temp_layer_stride = self
+                .prefill_kv_layer_strides
+                .get(layer_idx)
+                .copied()
+                .unwrap_or(0);
+            if temp_layer_stride != kv_stride {
+                return Err(format!(
+                    "stage-exact KV export stride mismatch layer={} temp_stride={} layer_stride={}",
+                    layer_idx, temp_layer_stride, kv_stride
+                ));
+            }
+            let export_tokens = prompt_tokens.min(layer_decode_max_seq);
+            let source_start = prompt_tokens - export_tokens;
+            let source_elem_offset = layer_offset
+                .checked_add(
+                    source_start
+                        .checked_mul(kv_stride)
+                        .ok_or("stage-exact KV export source offset overflow")?
+                )
+                .ok_or("stage-exact KV export source pointer offset overflow")?;
+            let mut p4 = k_base + source_elem_offset as u64;
+            let mut p5 = v_base + source_elem_offset as u64;
+            let mut p6 = export_tokens as i32;
             let mut p7 = kv_stride as i32;
-            let mut p8 = self.decode_kv_max_seq as i32;
+            let mut p8 = layer_decode_max_seq as i32;
             let mut p9 = self.polar4_norm_correction_mode;
+            let mut p10 = source_start as i32;
             let kernel = match self.decode_kv_format {
                 7 => self.kernels.kv_convert_fp8_to_k6v6,
                 9 => self.kernels.kv_convert_fp8_to_k4v4,
-                other => {
+                decode => {
                     return Err(format!(
                         "stage-exact KV export unsupported decode format {}",
-                        other
+                        decode
                     ))
                 }
             };
@@ -8077,6 +8211,7 @@ impl PrefillEngine {
                         &mut p7 as *mut _ as *mut std::ffi::c_void,
                         &mut p8 as *mut _ as *mut std::ffi::c_void,
                         &mut p9 as *mut _ as *mut std::ffi::c_void,
+                        &mut p10 as *mut _ as *mut std::ffi::c_void,
                     ],
                 )?;
             }
@@ -9367,6 +9502,85 @@ impl PrefillEngine {
                     ),
                 );
 
+                if self.is_gemma4_layer(layer_idx) {
+                    let tm0 = Instant::now();
+                    let (gqa_before, la_before, moe_before) = if timing {
+                        (
+                            self.t_gqa_proj.get()
+                                + self.t_gqa_norm.get()
+                                + self.t_gqa_rope.get()
+                                + self.t_gqa_kv_prep.get()
+                                + self.t_gqa_fa2.get()
+                                + self.t_gqa_gate.get()
+                                + self.t_gqa_oproj.get(),
+                            self.t_la_proj.get()
+                                + self.t_la_uninterleave.get()
+                                + self.t_la_conv.get()
+                                + self.t_la_prep.get()
+                                + self.t_la_convert.get()
+                                + self.t_la_fla.get()
+                                + self.t_la_postfla.get()
+                                + self.t_la_norm.get()
+                                + self.t_la_oproj.get(),
+                            self.t_moe_gate.get()
+                                + self.t_moe_dma.get()
+                                + self.t_moe_w1.get()
+                                + self.t_moe_w2.get()
+                                + self.t_moe_scatter.get()
+                                + self.t_moe_shared.get(),
+                        )
+                    } else {
+                        (0.0, 0.0, 0.0)
+                    };
+                    self.forward_gemma4_layer(layer_idx, m, chunk_idx, chunk_start, true)?;
+                    has_residual = false;
+                    if timing {
+                        self.stream_sync()?;
+                        let layer_elapsed = tm0.elapsed().as_secs_f64() * 1000.0;
+                        let gqa_after = self.t_gqa_proj.get()
+                            + self.t_gqa_norm.get()
+                            + self.t_gqa_rope.get()
+                            + self.t_gqa_kv_prep.get()
+                            + self.t_gqa_fa2.get()
+                            + self.t_gqa_gate.get()
+                            + self.t_gqa_oproj.get();
+                        let la_after = self.t_la_proj.get()
+                            + self.t_la_uninterleave.get()
+                            + self.t_la_conv.get()
+                            + self.t_la_prep.get()
+                            + self.t_la_convert.get()
+                            + self.t_la_fla.get()
+                            + self.t_la_postfla.get()
+                            + self.t_la_norm.get()
+                            + self.t_la_oproj.get();
+                        let moe_after = self.t_moe_gate.get()
+                            + self.t_moe_dma.get()
+                            + self.t_moe_w1.get()
+                            + self.t_moe_w2.get()
+                            + self.t_moe_scatter.get()
+                            + self.t_moe_shared.get();
+                        let gqa_delta = (gqa_after - gqa_before).max(0.0);
+                        let la_delta = (la_after - la_before).max(0.0);
+                        let moe_delta = (moe_after - moe_before).max(0.0);
+                        let attn_delta = gqa_delta + la_delta;
+                        t_gqa_ms += gqa_delta;
+                        t_la_ms += la_delta;
+                        t_attn_ms += attn_delta;
+                        t_moe_ms += moe_delta;
+                        t_other_ms += (layer_elapsed - attn_delta - moe_delta).max(0.0);
+                    }
+                    trace_emit_prefill_mark(
+                        self.trace.as_ref(),
+                        chunk_idx,
+                        chunk_start,
+                        chunk_tok0,
+                        Some(layer_idx),
+                        "prefill_layer",
+                        "phase=layer_end layer_type=gemma4",
+                    );
+                    continue;
+                }
+
                 // DIAG: check norm weight values for layer 0
                 if diag && chunk_idx == 0 && layer_idx == 0 {
                     let norm_ptr = self.layer_weights[0].input_norm;
@@ -10651,13 +10865,23 @@ impl PrefillEngine {
         };
 
         // 4. Final RMSNorm
-        self.launch_fused_add_rmsnorm(
-            *self.scratch.d_residual.device_ptr(),
-            *self.scratch.d_hidden.device_ptr(),
-            self.final_norm_ptr,
-            m,
-            h,
-        )?;
+        if self.is_gemma4_model() {
+            self.launch_rmsnorm(
+                *self.scratch.d_hidden.device_ptr(),
+                *self.scratch.d_hidden.device_ptr(),
+                self.final_norm_ptr,
+                m,
+                h,
+            )?;
+        } else {
+            self.launch_fused_add_rmsnorm(
+                *self.scratch.d_residual.device_ptr(),
+                *self.scratch.d_hidden.device_ptr(),
+                self.final_norm_ptr,
+                m,
+                h,
+            )?;
+        }
         if self.trace.as_ref().map_or(false, |t| {
             t.should_emit(num_chunks.saturating_sub(1), None, "prefill")
         }) {
@@ -11509,6 +11733,12 @@ impl PrefillEngine {
         for layer_idx in 0..num_hidden_layers {
             let layer_type = self.layer_weights[layer_idx].layer_type;
 
+            if self.is_gemma4_layer(layer_idx) {
+                self.forward_gemma4_layer(layer_idx, m, 0, 0, false)?;
+                has_residual = false;
+                continue;
+            }
+
             if !has_residual {
                 self.memcpy_d2d(
                     *self.scratch.d_residual.device_ptr(),
@@ -11613,13 +11843,23 @@ impl PrefillEngine {
         }
 
         // 4. Final RMSNorm
-        self.launch_fused_add_rmsnorm(
-            *self.scratch.d_residual.device_ptr(),
-            *self.scratch.d_hidden.device_ptr(),
-            self.final_norm_ptr,
-            m,
-            h,
-        )?;
+        if self.is_gemma4_model() {
+            self.launch_rmsnorm(
+                *self.scratch.d_hidden.device_ptr(),
+                *self.scratch.d_hidden.device_ptr(),
+                self.final_norm_ptr,
+                m,
+                h,
+            )?;
+        } else {
+            self.launch_fused_add_rmsnorm(
+                *self.scratch.d_residual.device_ptr(),
+                *self.scratch.d_hidden.device_ptr(),
+                self.final_norm_ptr,
+                m,
+                h,
+            )?;
+        }
 
         // 5. Extract logits at sampled positions via LM head
         let mut results = Vec::new();
@@ -11688,6 +11928,7 @@ impl PrefillEngine {
                 }
             }
             self.stream_sync()?;
+            apply_logit_softcap_in_place(&mut self.h_logits, self.final_logit_softcap);
 
             // Extract top-k logprobs
             let top = crate::decode::extract_top_logprobs(&self.h_logits, v, top_k);
@@ -11752,6 +11993,7 @@ impl PrefillEngine {
         let mut p1 = self.embedding_ptr;
         let mut p2 = *self.scratch.d_token_ids.device_ptr();
         let mut p3 = d as i32;
+        let mut p4 = self.embedding_scale;
         unsafe {
             launch(
                 self.kernels.embedding,
@@ -11764,6 +12006,7 @@ impl PrefillEngine {
                     &mut p1 as *mut _ as *mut std::ffi::c_void,
                     &mut p2 as *mut _ as *mut std::ffi::c_void,
                     &mut p3 as *mut _ as *mut std::ffi::c_void,
+                    &mut p4 as *mut _ as *mut std::ffi::c_void,
                 ],
             )?;
         }
@@ -11862,6 +12105,246 @@ impl PrefillEngine {
             )?;
         }
         Ok(())
+    }
+
+    fn launch_add_bf16(
+        &self,
+        out: u64,
+        a: u64,
+        b: u64,
+        m: usize,
+        d: usize,
+    ) -> Result<(), String> {
+        let t = std::cmp::max(32, ((std::cmp::min(1024, d) + 31) / 32) * 32) as u32;
+        let mut p0 = out;
+        let mut p1 = a;
+        let mut p2 = b;
+        let mut p3 = d as i32;
+        unsafe {
+            launch(
+                self.kernels.add_bf16,
+                (m as u32, 1, 1),
+                (t, 1, 1),
+                0,
+                self.stream,
+                &mut [
+                    &mut p0 as *mut _ as *mut std::ffi::c_void,
+                    &mut p1 as *mut _ as *mut std::ffi::c_void,
+                    &mut p2 as *mut _ as *mut std::ffi::c_void,
+                    &mut p3 as *mut _ as *mut std::ffi::c_void,
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn launch_scale_bf16(
+        &self,
+        out: u64,
+        x: u64,
+        scale: f32,
+        m: usize,
+        d: usize,
+    ) -> Result<(), String> {
+        let t = std::cmp::max(32, ((std::cmp::min(1024, d) + 31) / 32) * 32) as u32;
+        let mut p0 = out;
+        let mut p1 = x;
+        let mut p2 = scale;
+        let mut p3 = d as i32;
+        unsafe {
+            launch(
+                self.kernels.scale_bf16,
+                (m as u32, 1, 1),
+                (t, 1, 1),
+                0,
+                self.stream,
+                &mut [
+                    &mut p0 as *mut _ as *mut std::ffi::c_void,
+                    &mut p1 as *mut _ as *mut std::ffi::c_void,
+                    &mut p2 as *mut _ as *mut std::ffi::c_void,
+                    &mut p3 as *mut _ as *mut std::ffi::c_void,
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn launch_scale_bf16_by_ptr(
+        &self,
+        out: u64,
+        x: u64,
+        scale_ptr: u64,
+        m: usize,
+        d: usize,
+    ) -> Result<(), String> {
+        if scale_ptr == 0 {
+            return Ok(());
+        }
+        let t = std::cmp::max(32, ((std::cmp::min(1024, d) + 31) / 32) * 32) as u32;
+        let mut p0 = out;
+        let mut p1 = x;
+        let mut p2 = scale_ptr;
+        let mut p3 = d as i32;
+        unsafe {
+            launch(
+                self.kernels.scale_bf16_by_ptr,
+                (m as u32, 1, 1),
+                (t, 1, 1),
+                0,
+                self.stream,
+                &mut [
+                    &mut p0 as *mut _ as *mut std::ffi::c_void,
+                    &mut p1 as *mut _ as *mut std::ffi::c_void,
+                    &mut p2 as *mut _ as *mut std::ffi::c_void,
+                    &mut p3 as *mut _ as *mut std::ffi::c_void,
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn launch_rmsnorm_scale(
+        &self,
+        out: u64,
+        x: u64,
+        scale_weight: u64,
+        scale: f32,
+        m: usize,
+        d: usize,
+    ) -> Result<(), String> {
+        let t = std::cmp::max(32, ((std::cmp::min(1024, d) + 31) / 32) * 32) as u32;
+        let mut p0 = out;
+        let mut p1 = x;
+        let mut p2 = scale_weight;
+        let mut p3 = scale;
+        let mut p4 = d as i32;
+        let mut p5 = self.config.rms_norm_eps;
+        unsafe {
+            launch(
+                self.kernels.rmsnorm_scale,
+                (m as u32, 1, 1),
+                (t, 1, 1),
+                t * 4,
+                self.stream,
+                &mut [
+                    &mut p0 as *mut _ as *mut std::ffi::c_void,
+                    &mut p1 as *mut _ as *mut std::ffi::c_void,
+                    &mut p2 as *mut _ as *mut std::ffi::c_void,
+                    &mut p3 as *mut _ as *mut std::ffi::c_void,
+                    &mut p4 as *mut _ as *mut std::ffi::c_void,
+                    &mut p5 as *mut _ as *mut std::ffi::c_void,
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn launch_topk_per_expert_scale(
+        &self,
+        topk_weights: u64,
+        topk_ids: u64,
+        per_expert_scale: u64,
+        m: usize,
+        topk: usize,
+    ) -> Result<(), String> {
+        if per_expert_scale == 0 || m == 0 || topk == 0 {
+            return Ok(());
+        }
+        let total = m * topk;
+        let threads = 256u32;
+        let blocks = ((total as u32) + threads - 1) / threads;
+        let mut p0 = topk_weights;
+        let mut p1 = topk_ids;
+        let mut p2 = per_expert_scale;
+        let mut p3 = total as i32;
+        unsafe {
+            launch(
+                self.kernels.apply_topk_per_expert_scale,
+                (blocks, 1, 1),
+                (threads, 1, 1),
+                0,
+                self.stream,
+                &mut [
+                    &mut p0 as *mut _ as *mut std::ffi::c_void,
+                    &mut p1 as *mut _ as *mut std::ffi::c_void,
+                    &mut p2 as *mut _ as *mut std::ffi::c_void,
+                    &mut p3 as *mut _ as *mut std::ffi::c_void,
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn launch_gated_activation(
+        &self,
+        out: u64,
+        gate_up: u64,
+        activation: u8,
+        m: usize,
+        inter: usize,
+    ) -> Result<(), String> {
+        let t = std::cmp::max(32, ((std::cmp::min(1024, inter) + 31) / 32) * 32) as u32;
+        let mut p0 = out;
+        let mut p1 = gate_up;
+        let mut p2 = inter as i32;
+        let kernel = self.activation_kernel(activation);
+        unsafe {
+            launch(
+                kernel,
+                (m as u32, 1, 1),
+                (t, 1, 1),
+                0,
+                self.stream,
+                &mut [
+                    &mut p0 as *mut _ as *mut std::ffi::c_void,
+                    &mut p1 as *mut _ as *mut std::ffi::c_void,
+                    &mut p2 as *mut _ as *mut std::ffi::c_void,
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn launch_gated_activation_split(
+        &self,
+        out: u64,
+        gate: u64,
+        up: u64,
+        activation: u8,
+        m: usize,
+        inter: usize,
+    ) -> Result<(), String> {
+        let t = std::cmp::max(32, ((std::cmp::min(1024, inter) + 31) / 32) * 32) as u32;
+        let mut p0 = out;
+        let mut p1 = gate;
+        let mut p2 = up;
+        let mut p3 = activation as i32;
+        let mut p4 = inter as i32;
+        unsafe {
+            launch(
+                self.kernels.gated_activation_split,
+                (m as u32, 1, 1),
+                (t, 1, 1),
+                0,
+                self.stream,
+                &mut [
+                    &mut p0 as *mut _ as *mut std::ffi::c_void,
+                    &mut p1 as *mut _ as *mut std::ffi::c_void,
+                    &mut p2 as *mut _ as *mut std::ffi::c_void,
+                    &mut p3 as *mut _ as *mut std::ffi::c_void,
+                    &mut p4 as *mut _ as *mut std::ffi::c_void,
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn activation_kernel(&self, activation: u8) -> RawCuFunc {
+        match activation {
+            1 => self.kernels.relu2,
+            2 => self.kernels.gelu_tanh_mul,
+            _ => self.kernels.silu_mul,
+        }
     }
 
     fn memcpy_d2d(&self, dst: u64, src: u64, bytes: u64) -> Result<(), String> {
@@ -13568,20 +14051,29 @@ impl PrefillEngine {
         layer_v_ptr: u64,
         m: usize,
         start_pos: usize,
-        cfg: &PrefillModelConfig,
+        num_q_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        softmax_scale: f32,
+        sliding_window: usize,
     ) -> Result<(), String> {
-        let scale = 1.0f32 / (cfg.head_dim as f32).sqrt();
+        if head_dim > 512 {
+            return Err(format!(
+                "custom tiled attention supports head_dim <= 512, got {}",
+                head_dim
+            ));
+        }
         let fa_br = 16u32;
-        let fa_bc = 64usize;
+        let fa_bc = 16usize;
         let grid_x = ((m as u32) + fa_br - 1) / fa_br;
-        let hd = cfg.head_dim;
+        let hd = head_dim;
         let smem = (fa_br as usize * hd * 2
             + fa_bc * hd * 2
             + fa_bc * hd * 2
             + fa_br as usize * fa_bc * 4
             + fa_br as usize * fa_bc * 2
             + 16 * 16 * 4) as u32;
-        let kv_stride = (cfg.num_kv_heads * cfg.head_dim) as i32;
+        let kv_stride = (num_kv_heads * head_dim) as i32;
         let k_cache_ptr: u64 = if start_pos > 0 { layer_k_ptr } else { 0 };
         let v_cache_ptr: u64 = if start_pos > 0 { layer_v_ptr } else { 0 };
         let mut a0 = attn_out;
@@ -13591,16 +14083,17 @@ impl PrefillEngine {
         let mut a4 = k;
         let mut a5 = v;
         let mut a6 = m as i32;
-        let mut a7 = cfg.num_q_heads as i32;
-        let mut a8 = cfg.num_kv_heads as i32;
-        let mut a9 = cfg.head_dim as i32;
-        let mut a10 = scale;
+        let mut a7 = num_q_heads as i32;
+        let mut a8 = num_kv_heads as i32;
+        let mut a9 = head_dim as i32;
+        let mut a10 = softmax_scale;
         let mut a11 = start_pos as i32;
         let mut a12 = kv_stride;
+        let mut a13 = sliding_window.min(i32::MAX as usize) as i32;
         unsafe {
             launch(
                 self.kernels.flash_attn_tiled,
-                (grid_x, cfg.num_q_heads as u32, 1),
+                (grid_x, num_q_heads as u32, 1),
                 (32, 1, 1),
                 smem,
                 self.stream,
@@ -13618,6 +14111,7 @@ impl PrefillEngine {
                     &mut a10 as *mut _ as *mut std::ffi::c_void,
                     &mut a11 as *mut _ as *mut std::ffi::c_void,
                     &mut a12 as *mut _ as *mut std::ffi::c_void,
+                    &mut a13 as *mut _ as *mut std::ffi::c_void,
                 ],
             )?;
         }
@@ -13672,8 +14166,47 @@ impl PrefillEngine {
         let attn_out = *self.scratch.d_attn_out.device_ptr();
         let trace_last_pos = m.saturating_sub(1);
         let trace_last_abs_pos = start_pos + trace_last_pos;
-        let q_dim = cfg.num_q_heads * cfg.head_dim;
-        let kv_dim = cfg.num_kv_heads * cfg.head_dim;
+        let num_q_heads = if lw.gqa_num_q_heads > 0 {
+            lw.gqa_num_q_heads
+        } else {
+            cfg.num_q_heads
+        };
+        let num_kv_heads = if lw.gqa_num_kv_heads > 0 {
+            lw.gqa_num_kv_heads
+        } else {
+            cfg.num_kv_heads
+        };
+        let head_dim = if lw.gqa_head_dim > 0 {
+            lw.gqa_head_dim
+        } else {
+            cfg.head_dim
+        };
+        let sm_scale = if lw.gqa_sm_scale > 0.0 {
+            lw.gqa_sm_scale
+        } else if let Some(hqq) = &lw.hqq_gqa {
+            hqq.sm_scale
+        } else {
+            1.0f32 / (head_dim as f32).sqrt()
+        };
+        let rope_half_dim = if lw.gqa_rope_half_dim > 0 {
+            lw.gqa_rope_half_dim
+        } else if cfg.rope_half_dim > 0 {
+            cfg.rope_half_dim
+        } else {
+            head_dim / 2
+        };
+        let rope_cos_ptr = if lw.gqa_rope_cos_ptr != 0 {
+            lw.gqa_rope_cos_ptr
+        } else {
+            self.rope_cos_ptr
+        };
+        let rope_sin_ptr = if lw.gqa_rope_sin_ptr != 0 {
+            lw.gqa_rope_sin_ptr
+        } else {
+            self.rope_sin_ptr
+        };
+        let q_dim = num_q_heads * head_dim;
+        let kv_dim = num_kv_heads * head_dim;
         let reference_layer1_trace = self.reference_debug_trace_enabled && layer_idx == 1;
 
         if reference_layer1_trace {
@@ -13687,9 +14220,9 @@ impl PrefillEngine {
                     "input_dtype": "bf16",
                     "input_device": "cuda",
                     "input_shape": [m, cfg.hidden_size],
-                    "q_shape": [m, cfg.num_q_heads, cfg.head_dim],
-                    "k_shape": [m, cfg.num_kv_heads, cfg.head_dim],
-                    "v_shape": [m, cfg.num_kv_heads, cfg.head_dim],
+                    "q_shape": [m, num_q_heads, head_dim],
+                    "k_shape": [m, num_kv_heads, head_dim],
+                    "v_shape": [m, num_kv_heads, head_dim],
                     "start_pos": start_pos,
                     "last_position": trace_last_abs_pos,
                     "capture_kv_cache": capture_kv_cache,
@@ -13740,16 +14273,16 @@ impl PrefillEngine {
 
             let gate_buf = *self.scratch.d_scratch2.device_ptr();
             let threads =
-                std::cmp::max(32, ((std::cmp::min(256, cfg.head_dim) + 31) / 32) * 32) as u32;
+                std::cmp::max(32, ((std::cmp::min(256, head_dim) + 31) / 32) * 32) as u32;
             let mut gs0 = q;
             let mut gs1 = gate_buf;
             let mut gs2 = q_raw;
-            let mut gs3 = cfg.num_q_heads as i32;
-            let mut gs4 = cfg.head_dim as i32;
+            let mut gs3 = num_q_heads as i32;
+            let mut gs4 = head_dim as i32;
             unsafe {
                 launch(
                     self.kernels.gated_q_split,
-                    (m as u32, cfg.num_q_heads as u32, 1),
+                    (m as u32, num_q_heads as u32, 1),
                     (threads, 1, 1),
                     0,
                     self.stream,
@@ -13945,10 +14478,13 @@ impl PrefillEngine {
         // Treat as [m*num_heads, head_dim] rows — existing rmsnorm kernel handles this.
         let gt1 = Instant::now();
         if lw.q_norm_ptr != 0 {
-            self.launch_rmsnorm_fp32w(q, q, lw.q_norm_ptr, m * cfg.num_q_heads, cfg.head_dim)?;
+            self.launch_rmsnorm_fp32w(q, q, lw.q_norm_ptr, m * num_q_heads, head_dim)?;
         }
         if lw.k_norm_ptr != 0 {
-            self.launch_rmsnorm_fp32w(k, k, lw.k_norm_ptr, m * cfg.num_kv_heads, cfg.head_dim)?;
+            self.launch_rmsnorm_fp32w(k, k, lw.k_norm_ptr, m * num_kv_heads, head_dim)?;
+        }
+        if lw.gqa_v_norm_no_scale {
+            self.launch_rmsnorm_scale(v, v, 0, 1.0, m * num_kv_heads, head_dim)?;
         }
         if reference_layer1_trace {
             self.push_reference_stage_snapshot(
@@ -13980,8 +14516,8 @@ impl PrefillEngine {
                 serde_json::json!({
                     "q_norm_ptr": format!("0x{:x}", lw.q_norm_ptr),
                     "k_norm_ptr": format!("0x{:x}", lw.k_norm_ptr),
-                    "q_norm_shape": if lw.q_norm_ptr != 0 { serde_json::json!([cfg.head_dim]) } else { serde_json::json!(null) },
-                    "k_norm_shape": if lw.k_norm_ptr != 0 { serde_json::json!([cfg.head_dim]) } else { serde_json::json!(null) },
+                    "q_norm_shape": if lw.q_norm_ptr != 0 { serde_json::json!([head_dim]) } else { serde_json::json!(null) },
+                    "k_norm_shape": if lw.k_norm_ptr != 0 { serde_json::json!([head_dim]) } else { serde_json::json!(null) },
                     "dtype": "bf16_input_fp32_weight",
                     "sync_after_capture": true,
                 }),
@@ -14069,9 +14605,9 @@ impl PrefillEngine {
                 + (start_pos * half * std::mem::size_of::<f32>()) as u64;
             let mut r3 = self.external_mrope_sin_ptr
                 + (start_pos * half * std::mem::size_of::<f32>()) as u64;
-            let mut r4 = cfg.num_q_heads as i32;
-            let mut r5 = cfg.num_kv_heads as i32;
-            let mut r6 = cfg.head_dim as i32;
+            let mut r4 = num_q_heads as i32;
+            let mut r5 = num_kv_heads as i32;
+            let mut r6 = head_dim as i32;
             let mut r7 = half as i32;
             unsafe {
                 launch(
@@ -14092,25 +14628,26 @@ impl PrefillEngine {
                     ],
                 )?;
             }
-        } else if self.rope_cos_ptr != 0 {
-            let half = if cfg.rope_half_dim > 0 {
-                cfg.rope_half_dim
-            } else {
-                cfg.head_dim / 2
-            };
-            let rt = std::cmp::max(32, ((std::cmp::min(512, half) + 31) / 32) * 32) as u32;
+        } else if rope_cos_ptr != 0 {
+            let half = rope_half_dim;
+            let rope_work_width = if lw.gqa_rope_half_split { head_dim } else { half };
+            let rt = std::cmp::max(32, ((std::cmp::min(512, rope_work_width) + 31) / 32) * 32) as u32;
             let mut r0 = q;
             let mut r1 = k;
             let mut r2 = *self.scratch.d_positions.device_ptr();
-            let mut r3 = self.rope_cos_ptr;
-            let mut r4 = self.rope_sin_ptr;
-            let mut r5 = cfg.num_q_heads as i32;
-            let mut r6 = cfg.num_kv_heads as i32;
-            let mut r7 = cfg.head_dim as i32;
+            let mut r3 = rope_cos_ptr;
+            let mut r4 = rope_sin_ptr;
+            let mut r5 = num_q_heads as i32;
+            let mut r6 = num_kv_heads as i32;
+            let mut r7 = head_dim as i32;
             let mut r8 = half as i32;
             unsafe {
                 launch(
-                    self.kernels.rope,
+                    if lw.gqa_rope_half_split {
+                        self.kernels.rope_half_split
+                    } else {
+                        self.kernels.rope
+                    },
                     (m as u32, 1, 1),
                     (rt, 1, 1),
                     0,
@@ -14171,10 +14708,10 @@ impl PrefillEngine {
                     "start_pos": start_pos,
                     "last_position": trace_last_abs_pos,
                     "seq_len": m,
-                    "rope_cos_ptr": format!("0x{:x}", self.rope_cos_ptr),
-                    "rope_sin_ptr": format!("0x{:x}", self.rope_sin_ptr),
-                    "head_dim": cfg.head_dim,
-                    "rope_half_dim": if cfg.rope_half_dim > 0 { cfg.rope_half_dim } else { cfg.head_dim / 2 },
+                    "rope_cos_ptr": format!("0x{:x}", rope_cos_ptr),
+                    "rope_sin_ptr": format!("0x{:x}", rope_sin_ptr),
+                    "head_dim": head_dim,
+                    "rope_half_dim": rope_half_dim,
                     "rope_interleave": false,
                     "sync_after_capture": true,
                 }),
@@ -14257,18 +14794,255 @@ impl PrefillEngine {
         // Attention: use vendored FlashAttention-2 when available (start_pos==0),
         // otherwise fall back to custom tiled kernel for cross-chunk KV cache support.
         let mut kv_cache_already_stored = false; // Set true by FP8 cross-chunk path
-        if start_pos == 0 && self.kernels.flash_attn_fwd.is_some() {
+        let fa2_supports_head_dim = matches!(head_dim, 64 | 96 | 128 | 192 | 256);
+        let sliding_window = lw.gqa_sliding_window;
+        let use_sliding_window = sliding_window > 0;
+        let sliding_window_left = sliding_window.saturating_sub(1).min(i32::MAX as usize) as i32;
+        let ring_window_decode_layer = self.prefill_kv_active
+            && self.decode_kv_max_seq > 0
+            && self.decode_kv_max_seq_for_layer(layer_idx) > 0
+            && self.decode_kv_max_seq_for_layer(layer_idx) < self.decode_kv_max_seq;
+        let use_ring_fa2_window_prefill =
+            use_sliding_window
+                && ring_window_decode_layer
+                && self.kv_format == 1
+                && layer_k_ptr != 0
+                && layer_v_ptr != 0
+                && self.kernels.flash_attn_fwd_window.is_some()
+                && fa2_supports_head_dim;
+        let use_custom_sliding_prefill =
+            use_sliding_window
+                && ((ring_window_decode_layer && !use_ring_fa2_window_prefill)
+                    || (self.prefill_kv_active && gemma_custom_window_prefill_enabled()));
+        if use_ring_fa2_window_prefill {
+            if start_pos == 0 {
+                attn_path = "fa2_ring_window_initial";
+                let lse_ptr = self
+                    .scratch
+                    .d_fa2_lse
+                    .as_ref()
+                    .map(|s| *s.device_ptr() as *mut std::ffi::c_void)
+                    .unwrap_or(std::ptr::null_mut());
+                let gt_fa2 = Instant::now();
+                let ret = unsafe {
+                    self.kernels
+                        .flash_attn_fwd_window
+                        .expect("required flash_attn_fwd_window presence")(
+                        q as *const _,
+                        k as *const _,
+                        v as *const _,
+                        attn_out as *mut _,
+                        lse_ptr,
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        1,
+                        m as i32,
+                        m as i32,
+                        num_q_heads as i32,
+                        num_kv_heads as i32,
+                        head_dim as i32,
+                        m as i32,
+                        m as i32,
+                        sm_scale,
+                        sliding_window_left,
+                        0,
+                        0,
+                        self.stream as *mut _,
+                    )
+                };
+                if ret != 0 {
+                    return Err(format!("FlashAttention-2 ring initial window failed: {}", ret));
+                }
+                if gt {
+                    self.stream_sync()?;
+                    self.t_gqa_fa2
+                        .set(self.t_gqa_fa2.get() + gt_fa2.elapsed().as_secs_f64() * 1000.0);
+                    self.gqa_fa2_calls.set(self.gqa_fa2_calls.get() + 1);
+                    self.gqa_bf16_calls.set(self.gqa_bf16_calls.get() + 1);
+                }
+            } else {
+                let kv_stride = num_kv_heads * head_dim;
+                let tail_len = start_pos.min(sliding_window.saturating_sub(1));
+                let cache_start = start_pos.saturating_sub(tail_len);
+                let total_kv = tail_len + m;
+                    attn_path = "fa2_ring_window_cross_chunk";
+                    let kv_buf_bytes = (total_kv * kv_stride * 2) as u64;
+                    let scratch_bytes =
+                        (self.scratch.d_fp32_scratch.len * std::mem::size_of::<f32>()) as u64;
+                    let required_bytes = kv_buf_bytes * 2;
+                    if required_bytes > scratch_bytes {
+                        return Err(format!(
+                            "ring-window KV staging needs {} bytes, fp32 scratch has {}",
+                            required_bytes, scratch_bytes
+                        ));
+                    }
+                    let fp32_scratch = *self.scratch.d_fp32_scratch.device_ptr();
+                    let full_k_bf16 = fp32_scratch;
+                    let full_v_bf16 = fp32_scratch + kv_buf_bytes;
+
+                    let gt_stage = Instant::now();
+                    let grid = (total_kv as u32, 1, 1);
+                    let kv_threads =
+                        std::cmp::max(32, ((std::cmp::min(512, kv_stride) + 31) / 32) * 32) as u32;
+                    unsafe {
+                        let mut k0 = full_k_bf16;
+                        let mut k1 = layer_k_ptr;
+                        let mut k2 = k;
+                        let mut k3 = cache_start as i32;
+                        let mut k4 = tail_len as i32;
+                        let mut k5 = m as i32;
+                        let mut k6 = kv_stride as i32;
+                        launch(
+                            self.kernels.kv_dequant_window_concat,
+                            grid,
+                            (kv_threads, 1, 1),
+                            0,
+                            self.stream,
+                            &mut [
+                                &mut k0 as *mut _ as *mut std::ffi::c_void,
+                                &mut k1 as *mut _ as *mut std::ffi::c_void,
+                                &mut k2 as *mut _ as *mut std::ffi::c_void,
+                                &mut k3 as *mut _ as *mut std::ffi::c_void,
+                                &mut k4 as *mut _ as *mut std::ffi::c_void,
+                                &mut k5 as *mut _ as *mut std::ffi::c_void,
+                                &mut k6 as *mut _ as *mut std::ffi::c_void,
+                            ],
+                        )?;
+                        let mut v0 = full_v_bf16;
+                        let mut v1 = layer_v_ptr;
+                        let mut v2 = v;
+                        launch(
+                            self.kernels.kv_dequant_window_concat,
+                            grid,
+                            (kv_threads, 1, 1),
+                            0,
+                            self.stream,
+                            &mut [
+                                &mut v0 as *mut _ as *mut std::ffi::c_void,
+                                &mut v1 as *mut _ as *mut std::ffi::c_void,
+                                &mut v2 as *mut _ as *mut std::ffi::c_void,
+                                &mut k3 as *mut _ as *mut std::ffi::c_void,
+                                &mut k4 as *mut _ as *mut std::ffi::c_void,
+                                &mut k5 as *mut _ as *mut std::ffi::c_void,
+                                &mut k6 as *mut _ as *mut std::ffi::c_void,
+                            ],
+                        )?;
+                    }
+                    if gt {
+                        self.stream_sync()?;
+                        self.record_gqa_kv_cross_stage(
+                            gt_stage.elapsed().as_secs_f64() * 1000.0,
+                            m,
+                            total_kv,
+                        );
+                    }
+
+                    let lse_ptr = self
+                        .scratch
+                        .d_fa2_lse
+                        .as_ref()
+                        .map(|s| *s.device_ptr() as *mut std::ffi::c_void)
+                        .unwrap_or(std::ptr::null_mut());
+                    let cu_q_data: [i32; 2] = [0, m as i32];
+                    let cu_k_data: [i32; 2] = [0, total_kv as i32];
+                    let cu_ptr = *self.scratch.d_workspace.device_ptr();
+                    let cu_k_ptr = cu_ptr + 8;
+                    unsafe {
+                        cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                            cu_ptr,
+                            cu_q_data.as_ptr() as *const _,
+                            8,
+                            self.stream,
+                        );
+                        cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                            cu_k_ptr,
+                            cu_k_data.as_ptr() as *const _,
+                            8,
+                            self.stream,
+                        );
+                    }
+
+                    let gt_fa2 = Instant::now();
+                    let ret = unsafe {
+                        self.kernels
+                            .flash_attn_fwd_window
+                            .expect("required flash_attn_fwd_window presence")(
+                            q as *const _,
+                            full_k_bf16 as *const _,
+                            full_v_bf16 as *const _,
+                            attn_out as *mut _,
+                            lse_ptr,
+                            cu_ptr as *const _,
+                            cu_k_ptr as *const _,
+                            1,
+                            m as i32,
+                            total_kv as i32,
+                            num_q_heads as i32,
+                            num_kv_heads as i32,
+                            head_dim as i32,
+                            m as i32,
+                            total_kv as i32,
+                            sm_scale,
+                            sliding_window_left,
+                            0,
+                            1,
+                            self.stream as *mut _,
+                        )
+                    };
+                    if ret != 0 {
+                        return Err(format!(
+                            "FlashAttention-2 ring-window cross-chunk failed: {}",
+                            ret
+                        ));
+                    }
+                    if gt {
+                        self.stream_sync()?;
+                        self.t_gqa_fa2
+                            .set(self.t_gqa_fa2.get() + gt_fa2.elapsed().as_secs_f64() * 1000.0);
+                        self.gqa_fa2_calls.set(self.gqa_fa2_calls.get() + 1);
+                        self.gqa_bf16_calls.set(self.gqa_bf16_calls.get() + 1);
+                    }
+            }
+        } else if use_custom_sliding_prefill {
+            attn_path = if start_pos == 0 {
+                "custom_tiled_window"
+            } else {
+                "custom_tiled_window_cross_chunk"
+            };
+            self.launch_custom_tiled_attn(
+                attn_out,
+                q,
+                k,
+                v,
+                layer_k_ptr,
+                layer_v_ptr,
+                m,
+                start_pos,
+                num_q_heads,
+                num_kv_heads,
+                head_dim,
+                sm_scale,
+                sliding_window,
+            )?;
+        } else if start_pos == 0 && self.kernels.flash_attn_fwd.is_some() && fa2_supports_head_dim {
             let gqa_fwd = self
                 .kernels
                 .flash_attn_fwd
                 .expect("checked flash_attn_fwd presence");
+            let gqa_fwd_window = self
+                .kernels
+                .flash_attn_fwd_window
+                .expect("required flash_attn_fwd_window presence");
             let gqa_backend_name = "FlashAttention-2";
-            let gqa_path_name = "fa2_bf16_fixed";
+            let gqa_path_name = if use_sliding_window {
+                "fa2_bf16_fixed_window"
+            } else {
+                "fa2_bf16_fixed"
+            };
             attn_path = gqa_path_name;
                 // FA2 fixed-length forward for the normal single-sequence prefill path.
                 // Q/K/V are laid out compatibly as [batch=1, seqlen, heads, head_dim].
                 // Cross-chunk/stateful attention keeps the varlen cu_seqlens path below.
-                let scale = 1.0f32 / (cfg.head_dim as f32).sqrt();
                 let lse_ptr = self
                     .scratch
                     .d_fa2_lse
@@ -14278,7 +15052,31 @@ impl PrefillEngine {
 
                 let gt_fa2 = Instant::now();
                 let ret = unsafe {
-                    gqa_fwd(
+                    if use_sliding_window {
+                        gqa_fwd_window(
+                            q as *const _,
+                            k as *const _,
+                            v as *const _,
+                            attn_out as *mut _,
+                            lse_ptr,
+                            std::ptr::null(),
+                            std::ptr::null(),
+                            1,
+                            m as i32,
+                            m as i32,
+                            num_q_heads as i32,
+                            num_kv_heads as i32,
+                            head_dim as i32,
+                            m as i32,
+                            m as i32,
+                            sm_scale,
+                            sliding_window_left,
+                            0,
+                            0,
+                            self.stream as *mut _,
+                        )
+                    } else {
+                        gqa_fwd(
                         q as *const _,
                         k as *const _,
                         v as *const _,
@@ -14289,16 +15087,17 @@ impl PrefillEngine {
                         1,                  // batch_size
                         m as i32,           // seqlen_q (max)
                         m as i32,           // seqlen_k (max)
-                        cfg.num_q_heads as i32,
-                        cfg.num_kv_heads as i32,
-                        cfg.head_dim as i32,
+                        num_q_heads as i32,
+                        num_kv_heads as i32,
+                        head_dim as i32,
                         m as i32, // total_q
                         m as i32, // total_k
-                        scale,
+	                        sm_scale,
                         1, // is_causal
                         0, // unpadded_lse: fixed-length LSE layout
                         self.stream as *mut _,
-                    )
+                        )
+                    }
                 };
                 if ret != 0 {
                     return Err(format!("{} forward failed with code {}", gqa_backend_name, ret));
@@ -14310,7 +15109,9 @@ impl PrefillEngine {
                     self.gqa_fa2_calls.set(self.gqa_fa2_calls.get() + 1);
                     self.gqa_bf16_calls.set(self.gqa_bf16_calls.get() + 1);
                 }
-        } else if let Some(fa2_fwd) = self.kernels.flash_attn_fwd {
+        } else if let (true, Some(fa2_fwd)) =
+            (fa2_supports_head_dim, self.kernels.flash_attn_fwd)
+        {
             if self.kv_format == 2
                 && layer_idx < self.kv_k_radius_ptrs.len()
                 && self.kv_k_radius_ptrs[layer_idx] != 0
@@ -14318,7 +15119,7 @@ impl PrefillEngine {
                 attn_path = "fa2_polar4_cross_chunk";
                 // Cross-chunk attention: reconstruct cached Polar4 K/V to BF16,
                 // concat current BF16 chunk, then run standard BF16 FA2.
-                let kv_stride = cfg.num_kv_heads * cfg.head_dim;
+                let kv_stride = num_kv_heads * head_dim;
                 let total_kv = start_pos + m;
                 let kv_buf_bytes = (total_kv * kv_stride * 2) as u64; // BF16
                 let scratch_bytes =
@@ -14394,7 +15195,6 @@ impl PrefillEngine {
                     );
                 }
 
-                let scale = 1.0f32 / (cfg.head_dim as f32).sqrt();
                 let lse_ptr = self
                     .scratch
                     .d_fa2_lse
@@ -14422,27 +15222,54 @@ impl PrefillEngine {
 
                 let gt_fa2_bf16 = Instant::now();
                 let ret = unsafe {
-                    fa2_fwd(
-                        q as *const _,
-                        full_k_bf16 as *const _,
-                        full_v_bf16 as *const _,
-                        attn_out as *mut _,
-                        lse_ptr,
-                        cu_ptr as *const _,
-                        cu_k_ptr as *const _,
-                        1,
-                        m as i32,
-                        total_kv as i32,
-                        cfg.num_q_heads as i32,
-                        cfg.num_kv_heads as i32,
-                        cfg.head_dim as i32,
-                        m as i32,
-                        total_kv as i32,
-                        scale,
-                        1,
-                        1,
-                        self.stream as *mut _,
-                    )
+                    if use_sliding_window {
+                        self.kernels
+                            .flash_attn_fwd_window
+                            .expect("required flash_attn_fwd_window presence")(
+                            q as *const _,
+                            full_k_bf16 as *const _,
+                            full_v_bf16 as *const _,
+                            attn_out as *mut _,
+                            lse_ptr,
+                            cu_ptr as *const _,
+                            cu_k_ptr as *const _,
+                            1,
+                            m as i32,
+                            total_kv as i32,
+                            num_q_heads as i32,
+                            num_kv_heads as i32,
+                            head_dim as i32,
+                            m as i32,
+                            total_kv as i32,
+                            sm_scale,
+                            sliding_window_left,
+                            0,
+                            1,
+                            self.stream as *mut _,
+                        )
+                    } else {
+                        fa2_fwd(
+                            q as *const _,
+                            full_k_bf16 as *const _,
+                            full_v_bf16 as *const _,
+                            attn_out as *mut _,
+                            lse_ptr,
+                            cu_ptr as *const _,
+                            cu_k_ptr as *const _,
+                            1,
+                            m as i32,
+                            total_kv as i32,
+                            num_q_heads as i32,
+                            num_kv_heads as i32,
+                            head_dim as i32,
+                            m as i32,
+                            total_kv as i32,
+                            sm_scale,
+                            1,
+                            1,
+                            self.stream as *mut _,
+                        )
+                    }
                 };
                 if ret != 0 {
                     return Err(format!(
@@ -14464,7 +15291,7 @@ impl PrefillEngine {
                 && self.kv_tq4_sign_ptrs[layer_idx] != 0
             {
                 attn_path = "fa2_tq4_cross_chunk";
-                let kv_stride = cfg.num_kv_heads * cfg.head_dim;
+                let kv_stride = num_kv_heads * head_dim;
                 let total_kv = start_pos + m;
                 let kv_buf_bytes = (total_kv * kv_stride * 2) as u64; // BF16
                 let scratch_bytes =
@@ -14481,8 +15308,8 @@ impl PrefillEngine {
                 let full_v_bf16 = fp32_scratch + kv_buf_bytes;
 
                 let gt_dequant = Instant::now();
-                let total_grid = (total_kv as u32, cfg.num_kv_heads as u32, 1);
-                let k_threads = std::cmp::max(32, ((std::cmp::min(256, cfg.head_dim) + 31) / 32) * 32) as u32;
+                let total_grid = (total_kv as u32, num_kv_heads as u32, 1);
+                let k_threads = std::cmp::max(32, ((std::cmp::min(256, head_dim) + 31) / 32) * 32) as u32;
                 unsafe {
                     let mut k0 = full_k_bf16;
                     let mut k1 = self.kv_k_radius_ptrs[layer_idx];
@@ -14491,13 +15318,13 @@ impl PrefillEngine {
                     let mut k4 = k;
                     let mut k5 = start_pos as i32;
                     let mut k6 = m as i32;
-                    let mut k7 = cfg.num_kv_heads as i32;
-                    let mut k8 = cfg.head_dim as i32;
+                    let mut k7 = num_kv_heads as i32;
+                    let mut k8 = head_dim as i32;
                     launch(
                         self.kernels.kv_dequant_concat_tq4_k,
                         total_grid,
                         (k_threads, 1, 1),
-                        (cfg.head_dim * std::mem::size_of::<f32>()) as u32,
+                        (head_dim * std::mem::size_of::<f32>()) as u32,
                         self.stream,
                         &mut [
                             &mut k0 as *mut _ as *mut std::ffi::c_void,
@@ -14543,7 +15370,6 @@ impl PrefillEngine {
                     );
                 }
 
-                let scale = 1.0f32 / (cfg.head_dim as f32).sqrt();
                 let lse_ptr = self
                     .scratch
                     .d_fa2_lse
@@ -14571,27 +15397,54 @@ impl PrefillEngine {
 
                 let gt_fa2_bf16 = Instant::now();
                 let ret = unsafe {
-                    fa2_fwd(
-                        q as *const _,
-                        full_k_bf16 as *const _,
-                        full_v_bf16 as *const _,
-                        attn_out as *mut _,
-                        lse_ptr,
-                        cu_ptr as *const _,
-                        cu_k_ptr as *const _,
-                        1,
-                        m as i32,
-                        total_kv as i32,
-                        cfg.num_q_heads as i32,
-                        cfg.num_kv_heads as i32,
-                        cfg.head_dim as i32,
-                        m as i32,
-                        total_kv as i32,
-                        scale,
-                        1,
-                        1,
-                        self.stream as *mut _,
-                    )
+                    if use_sliding_window {
+                        self.kernels
+                            .flash_attn_fwd_window
+                            .expect("required flash_attn_fwd_window presence")(
+                            q as *const _,
+                            full_k_bf16 as *const _,
+                            full_v_bf16 as *const _,
+                            attn_out as *mut _,
+                            lse_ptr,
+                            cu_ptr as *const _,
+                            cu_k_ptr as *const _,
+                            1,
+                            m as i32,
+                            total_kv as i32,
+                            num_q_heads as i32,
+                            num_kv_heads as i32,
+                            head_dim as i32,
+                            m as i32,
+                            total_kv as i32,
+                            sm_scale,
+                            sliding_window_left,
+                            0,
+                            1,
+                            self.stream as *mut _,
+                        )
+                    } else {
+                        fa2_fwd(
+                            q as *const _,
+                            full_k_bf16 as *const _,
+                            full_v_bf16 as *const _,
+                            attn_out as *mut _,
+                            lse_ptr,
+                            cu_ptr as *const _,
+                            cu_k_ptr as *const _,
+                            1,
+                            m as i32,
+                            total_kv as i32,
+                            num_q_heads as i32,
+                            num_kv_heads as i32,
+                            head_dim as i32,
+                            m as i32,
+                            total_kv as i32,
+                            sm_scale,
+                            1,
+                            1,
+                            self.stream as *mut _,
+                        )
+                    }
                 };
                 if ret != 0 {
                     return Err(format!(
@@ -14628,7 +15481,7 @@ impl PrefillEngine {
                 };
                 // Cross-chunk attention: reconstruct cached compressed K and Polar4 V to
                 // BF16, concat current BF16 chunk, then run standard BF16 FA2.
-                let kv_stride = cfg.num_kv_heads * cfg.head_dim;
+                let kv_stride = num_kv_heads * head_dim;
                 let total_kv = start_pos + m;
                 let kv_buf_bytes = (total_kv * kv_stride * 2) as u64; // BF16
                 let scratch_bytes =
@@ -14743,7 +15596,6 @@ impl PrefillEngine {
                     );
                 }
 
-                let scale = 1.0f32 / (cfg.head_dim as f32).sqrt();
                 let lse_ptr = self
                     .scratch
                     .d_fa2_lse
@@ -14771,27 +15623,54 @@ impl PrefillEngine {
 
                 let gt_fa2_bf16 = Instant::now();
                 let ret = unsafe {
-                    fa2_fwd(
-                        q as *const _,
-                        full_k_bf16 as *const _,
-                        full_v_bf16 as *const _,
-                        attn_out as *mut _,
-                        lse_ptr,
-                        cu_ptr as *const _,
-                        cu_k_ptr as *const _,
-                        1,
-                        m as i32,
-                        total_kv as i32,
-                        cfg.num_q_heads as i32,
-                        cfg.num_kv_heads as i32,
-                        cfg.head_dim as i32,
-                        m as i32,
-                        total_kv as i32,
-                        scale,
-                        1,
-                        1,
-                        self.stream as *mut _,
-                    )
+                    if use_sliding_window {
+                        self.kernels
+                            .flash_attn_fwd_window
+                            .expect("required flash_attn_fwd_window presence")(
+                            q as *const _,
+                            full_k_bf16 as *const _,
+                            full_v_bf16 as *const _,
+                            attn_out as *mut _,
+                            lse_ptr,
+                            cu_ptr as *const _,
+                            cu_k_ptr as *const _,
+                            1,
+                            m as i32,
+                            total_kv as i32,
+                            num_q_heads as i32,
+                            num_kv_heads as i32,
+                            head_dim as i32,
+                            m as i32,
+                            total_kv as i32,
+                            sm_scale,
+                            sliding_window_left,
+                            0,
+                            1,
+                            self.stream as *mut _,
+                        )
+                    } else {
+                        fa2_fwd(
+                            q as *const _,
+                            full_k_bf16 as *const _,
+                            full_v_bf16 as *const _,
+                            attn_out as *mut _,
+                            lse_ptr,
+                            cu_ptr as *const _,
+                            cu_k_ptr as *const _,
+                            1,
+                            m as i32,
+                            total_kv as i32,
+                            num_q_heads as i32,
+                            num_kv_heads as i32,
+                            head_dim as i32,
+                            m as i32,
+                            total_kv as i32,
+                            sm_scale,
+                            1,
+                            1,
+                            self.stream as *mut _,
+                        )
+                    }
                 };
                 if ret != 0 {
                     return Err(format!(
@@ -14810,7 +15689,7 @@ impl PrefillEngine {
             } else if layer_k_ptr != 0 && layer_v_ptr != 0 {
                 attn_path = "fa2_cross_chunk";
                 // Cross-chunk attention: Q attends to all K/V (cached FP8 + current BF16)
-                let kv_stride = cfg.num_kv_heads * cfg.head_dim;
+                let kv_stride = num_kv_heads * head_dim;
                 let total_kv = start_pos + m;
 
                 // FP8 FA2: cp.async staging (FP8 -> staging -> BF16 smem).
@@ -14820,7 +15699,7 @@ impl PrefillEngine {
                 let use_fp8_fa2 =
                     self.kv_format == 1
                         && self.kernels.flash_attn_fwd_fp8kv.is_some()
-                        && cfg.head_dim <= 128;
+                        && head_dim <= 128;
                 if let (true, Some(fa2_fp8)) = (use_fp8_fa2, self.kernels.flash_attn_fwd_fp8kv) {
                     attn_path = "fa2_fp8_cross_chunk";
                     // FP8 FA2 path: store current K/V to FP8 cache FIRST, then
@@ -14862,7 +15741,6 @@ impl PrefillEngine {
                     }
 
                     // FA2 FP8: Q (BF16) attends to K/V (FP8 in cache [0..total_kv])
-                    let scale = 1.0f32 / (cfg.head_dim as f32).sqrt();
                     let lse_ptr = self
                         .scratch
                         .d_fa2_lse
@@ -14902,12 +15780,12 @@ impl PrefillEngine {
                             1,                    // batch_size
                             m as i32,             // seqlen_q (max)
                             total_kv as i32,      // seqlen_k (max)
-                            cfg.num_q_heads as i32,
-                            cfg.num_kv_heads as i32,
-                            cfg.head_dim as i32,
+                            num_q_heads as i32,
+                            num_kv_heads as i32,
+                            head_dim as i32,
                             m as i32,        // total_q
                             total_kv as i32, // total_k
-                            scale,
+                            sm_scale,
                             1, // is_causal=1: FA2 auto-adjusts mask for seqlen_k > seqlen_q
                             1, // unpadded_lse
                             self.stream as *mut _,
@@ -15010,8 +15888,7 @@ impl PrefillEngine {
                         );
                     }
 
-                    let scale = 1.0f32 / (cfg.head_dim as f32).sqrt();
-                    let lse_ptr = self
+	                    let lse_ptr = self
                         .scratch
                         .d_fa2_lse
                         .as_ref()
@@ -15038,27 +15915,54 @@ impl PrefillEngine {
 
                     let gt_fa2_bf16 = Instant::now();
                     let ret = unsafe {
-                        fa2_fwd(
-                            q as *const _,
-                            full_k_bf16 as *const _,
-                            full_v_bf16 as *const _,
-                            attn_out as *mut _,
-                            lse_ptr,
-                            cu_ptr as *const _,
-                            cu_k_ptr as *const _,
-                            1,
-                            m as i32,
-                            total_kv as i32,
-                            cfg.num_q_heads as i32,
-                            cfg.num_kv_heads as i32,
-                            cfg.head_dim as i32,
-                            m as i32,
-                            total_kv as i32,
-                            scale,
-                            1, // is_causal
-                            1,
-                            self.stream as *mut _,
-                        )
+                        if use_sliding_window {
+                            self.kernels
+                                .flash_attn_fwd_window
+                                .expect("required flash_attn_fwd_window presence")(
+                                q as *const _,
+                                full_k_bf16 as *const _,
+                                full_v_bf16 as *const _,
+                                attn_out as *mut _,
+                                lse_ptr,
+                                cu_ptr as *const _,
+                                cu_k_ptr as *const _,
+                                1,
+                                m as i32,
+                                total_kv as i32,
+                                num_q_heads as i32,
+                                num_kv_heads as i32,
+                                head_dim as i32,
+                                m as i32,
+                                total_kv as i32,
+                                sm_scale,
+                                sliding_window_left,
+                                0,
+                                1,
+                                self.stream as *mut _,
+                            )
+                        } else {
+                            fa2_fwd(
+                                q as *const _,
+                                full_k_bf16 as *const _,
+                                full_v_bf16 as *const _,
+                                attn_out as *mut _,
+                                lse_ptr,
+                                cu_ptr as *const _,
+                                cu_k_ptr as *const _,
+                                1,
+                                m as i32,
+                                total_kv as i32,
+                                num_q_heads as i32,
+                                num_kv_heads as i32,
+                                head_dim as i32,
+                                m as i32,
+                                total_kv as i32,
+                                sm_scale,
+                                1, // is_causal
+                                1,
+                                self.stream as *mut _,
+                            )
+                        }
                     };
                     if ret != 0 {
                         return Err(format!(
@@ -15087,7 +15991,11 @@ impl PrefillEngine {
                     layer_v_ptr,
                     m,
                     start_pos,
-                    cfg,
+                    num_q_heads,
+                    num_kv_heads,
+                    head_dim,
+                    sm_scale,
+                    0,
                 )?;
             }
         } else {
@@ -15106,7 +16014,11 @@ impl PrefillEngine {
                 layer_v_ptr,
                 m,
                 start_pos,
-                cfg,
+                num_q_heads,
+                num_kv_heads,
+                head_dim,
+                sm_scale,
+                0,
             )?;
         }
         if reference_layer1_trace {
@@ -15164,10 +16076,10 @@ impl PrefillEngine {
                         "output": "bf16"
                     },
                     "shape": {
-                        "q": [m, cfg.num_q_heads, cfg.head_dim],
-                        "k": [m, cfg.num_kv_heads, cfg.head_dim],
-                        "v": [m, cfg.num_kv_heads, cfg.head_dim],
-                        "output": [m, cfg.num_q_heads, cfg.head_dim]
+                        "q": [m, num_q_heads, head_dim],
+                        "k": [m, num_kv_heads, head_dim],
+                        "v": [m, num_kv_heads, head_dim],
+                        "output": [m, num_q_heads, head_dim]
                     },
                     "sync_after_capture": true,
                 }),
@@ -15221,7 +16133,7 @@ impl PrefillEngine {
         {
             kv_append_path = "polar4_append";
             // Polar4: BF16 K,V -> 4-bit rotated polar format
-            let kv_stride = (cfg.num_kv_heads * cfg.head_dim) as i32;
+            let kv_stride = (num_kv_heads * head_dim) as i32;
             let num_blocks = (kv_stride / 16) as u32;
             let kv_threads = std::cmp::max(32, ((std::cmp::min(256, num_blocks) + 31) / 32) * 32);
             let mut p0 = self.kv_k_radius_ptrs[layer_idx];
@@ -15268,7 +16180,7 @@ impl PrefillEngine {
             kv_append_path = "tq4_append";
             let kv_threads = std::cmp::max(
                 32,
-                ((std::cmp::min(256, cfg.head_dim) + 31) / 32) * 32,
+                ((std::cmp::min(256, head_dim) + 31) / 32) * 32,
             ) as u32;
             let mut p0 = self.kv_k_radius_ptrs[layer_idx];
             let mut p1 = self.kv_k_angles_ptrs[layer_idx];
@@ -15278,16 +16190,16 @@ impl PrefillEngine {
             let mut p5 = v;
             let mut p6 = self.kv_tq4_sign_ptrs[layer_idx];
             let mut p7 = m as i32;
-            let mut p8 = cfg.num_kv_heads as i32;
-            let mut p9 = cfg.head_dim as i32;
+            let mut p8 = num_kv_heads as i32;
+            let mut p9 = head_dim as i32;
             let mut p10 = self.kv_max_seq as i32;
             let mut p11 = start_pos as i32;
             unsafe {
                 launch(
                     self.kernels.kv_cache_append_tq4,
-                    (m as u32, cfg.num_kv_heads as u32, 1),
+                    (m as u32, num_kv_heads as u32, 1),
                     (kv_threads, 1, 1),
-                    (cfg.head_dim * std::mem::size_of::<f32>()) as u32,
+                    (head_dim * std::mem::size_of::<f32>()) as u32,
                     self.stream,
                     &mut [
                         &mut p0 as *mut _ as *mut std::ffi::c_void,
@@ -15313,7 +16225,7 @@ impl PrefillEngine {
             && !kv_cache_already_stored
         {
             kv_append_path = "k8v4_append";
-            let kv_stride = (cfg.num_kv_heads * cfg.head_dim) as i32;
+            let kv_stride = (num_kv_heads * head_dim) as i32;
             let num_blocks = (kv_stride / 16) as u32;
             let kv_threads = std::cmp::max(32, ((std::cmp::min(256, num_blocks) + 31) / 32) * 32);
             let mut p0 = layer_k_ptr;
@@ -15360,7 +16272,7 @@ impl PrefillEngine {
             let is_k6v6 = self.kv_format == 7;
             let is_k8v6 = self.kv_format == 8;
             kv_append_path = if is_k8v6 { "k8v6_append" } else if is_k6v6 { "k6v6_append" } else if is_k7 { "k7v4_append" } else if is_k4 { "k4v4_append" } else { "k6v4_append" };
-            let kv_stride = (cfg.num_kv_heads * cfg.head_dim) as i32;
+            let kv_stride = (num_kv_heads * head_dim) as i32;
             let num_blocks = (kv_stride / 16) as u32;
             let kv_threads = std::cmp::max(32, ((std::cmp::min(256, num_blocks) + 31) / 32) * 32);
             let mut p0 = self.kv_k_radius_ptrs[layer_idx];
@@ -15416,7 +16328,7 @@ impl PrefillEngine {
             } else {
                 "fp8_append"
             };
-            let kv_stride = (cfg.num_kv_heads * cfg.head_dim) as i32;
+            let kv_stride = (num_kv_heads * head_dim) as i32;
             let kt = std::cmp::max(
                 32,
                 ((std::cmp::min(256, kv_stride as usize) + 31) / 32) * 32,
@@ -15462,7 +16374,7 @@ impl PrefillEngine {
         // Gated attention: apply sigmoid(gate) to attention output
         let gt_gate = Instant::now();
         if lw.gqa_gated && gate_ptr != 0 {
-            let q_dim = (cfg.num_q_heads * cfg.head_dim) as i32;
+            let q_dim = (num_q_heads * head_dim) as i32;
             let gate_threads =
                 std::cmp::max(32, ((std::cmp::min(1024, q_dim as usize) + 31) / 32) * 32) as u32;
             let mut g0 = attn_out;
@@ -21095,9 +22007,234 @@ impl PrefillEngine {
         Ok(())
     }
 
+    fn prefill_weight_gemm(
+        &self,
+        name: &str,
+        input: u64,
+        marlin: &Option<MarlinWeight>,
+        bf16: &Option<Bf16Weight>,
+        output: u64,
+        m: usize,
+    ) -> Result<(), String> {
+        if let Some(w) = marlin {
+            self.marlin_gemm(input, w, output, m)
+        } else if let Some(w) = bf16 {
+            self.cublas_bf16_gemm(input, w, output, m)
+        } else {
+            Err(format!("{name}: missing Marlin/BF16 weight"))
+        }
+    }
+
+    fn forward_gemma4_dense_mlp(&self, layer_idx: usize, input: u64, output: u64, m: usize) -> Result<(), String> {
+        let lw = &self.layer_weights[layer_idx];
+        let gate_rows = lw
+            .dense_gate
+            .as_ref()
+            .map(|w| w.n)
+            .or_else(|| lw.dense_gate_bf16.as_ref().map(|w| w.n))
+            .ok_or_else(|| format!("Gemma4 dense layer {} missing gate weight", layer_idx))?;
+        let up_rows = lw
+            .dense_up
+            .as_ref()
+            .map(|w| w.n)
+            .or_else(|| lw.dense_up_bf16.as_ref().map(|w| w.n))
+            .ok_or_else(|| format!("Gemma4 dense layer {} missing up weight", layer_idx))?;
+        if gate_rows != up_rows {
+            return Err(format!(
+                "Gemma4 dense layer {} gate/up width mismatch: gate={} up={}",
+                layer_idx, gate_rows, up_rows
+            ));
+        }
+        let inter = gate_rows;
+        let gate_buf = *self.scratch.d_scratch1.device_ptr();
+        let up_buf = *self.scratch.d_scratch2.device_ptr();
+        let act_buf = *self.scratch.d_moe_inter.device_ptr();
+
+        self.prefill_weight_gemm(
+            "gemma4_dense_gate",
+            input,
+            &lw.dense_gate,
+            &lw.dense_gate_bf16,
+            gate_buf,
+            m,
+        )?;
+        self.prefill_weight_gemm(
+            "gemma4_dense_up",
+            input,
+            &lw.dense_up,
+            &lw.dense_up_bf16,
+            up_buf,
+            m,
+        )?;
+        self.launch_gated_activation_split(act_buf, gate_buf, up_buf, lw.moe_activation, m, inter)?;
+        self.prefill_weight_gemm(
+            "gemma4_dense_down",
+            act_buf,
+            &lw.dense_down,
+            &lw.dense_down_bf16,
+            output,
+            m,
+        )
+    }
+
+    fn is_gemma4_layer(&self, layer_idx: usize) -> bool {
+        let lw = &self.layer_weights[layer_idx];
+        lw.pre_ffn_norm != 0
+            && lw.post_ffn_norm != 0
+            && lw.post_ffn_norm1 != 0
+            && lw.post_ffn_norm2 != 0
+            && lw.pre_ffn_norm2 != 0
+            && lw.router_input_scale != 0
+            && (lw.dense_gate.is_some() || lw.dense_gate_bf16.is_some())
+            && (lw.dense_up.is_some() || lw.dense_up_bf16.is_some())
+            && (lw.dense_down.is_some() || lw.dense_down_bf16.is_some())
+            && lw.moe_gate_ptr != 0
+    }
+
+    fn is_gemma4_model(&self) -> bool {
+        (0..self.layer_weights.len()).any(|idx| self.is_gemma4_layer(idx))
+    }
+
+    fn forward_gemma4_layer(
+        &mut self,
+        layer_idx: usize,
+        m: usize,
+        chunk_idx: usize,
+        chunk_start: usize,
+        capture_kv_cache: bool,
+    ) -> Result<(), String> {
+        let h = self.config.hidden_size;
+        let layer_type = self.layer_weights[layer_idx].layer_type;
+        let hidden = *self.scratch.d_hidden.device_ptr();
+        let residual = *self.scratch.d_residual.device_ptr();
+        let attn_out = *self.scratch.d_attn_out.device_ptr();
+        let dense_branch = *self.scratch.d_scratch1.device_ptr();
+        let moe_branch = *self.scratch.d_scratch2.device_ptr();
+
+        self.memcpy_d2d(residual, hidden, (m * h * 2) as u64)?;
+        self.launch_rmsnorm(
+            hidden,
+            residual,
+            self.layer_weights[layer_idx].input_norm,
+            m,
+            h,
+        )
+        .map_err(|e| format!("gemma4 input rmsnorm layer {}: {}", layer_idx, e))?;
+
+        if self.layer_weights[layer_idx].moe_gate_ptr != 0 {
+            self.prefetch_dense_pointer_table_for_layer(layer_idx, chunk_idx, 0, m)?;
+        }
+
+        match layer_type {
+            0 => self.forward_gqa_chunked(layer_idx, m, chunk_start, capture_kv_cache)?,
+            1 => self.forward_mamba2(layer_idx, m)?,
+            2 => self.memcpy_d2d(attn_out, hidden, (m * h * 2) as u64)?,
+            3 => self.forward_linear_attention(layer_idx, m, chunk_idx)?,
+            _ => self.memcpy_d2d(attn_out, hidden, (m * h * 2) as u64)?,
+        }
+
+        self.launch_rmsnorm(
+            dense_branch,
+            attn_out,
+            self.layer_weights[layer_idx].post_attn_norm,
+            m,
+            h,
+        )
+        .map_err(|e| format!("gemma4 post-attn rmsnorm layer {}: {}", layer_idx, e))?;
+        self.launch_add_bf16(hidden, residual, dense_branch, m, h)
+            .map_err(|e| format!("gemma4 post-attn add layer {}: {}", layer_idx, e))?;
+
+        self.memcpy_d2d(residual, hidden, (m * h * 2) as u64)?;
+
+        self.launch_rmsnorm(
+            hidden,
+            residual,
+            self.layer_weights[layer_idx].pre_ffn_norm,
+            m,
+            h,
+        )
+        .map_err(|e| format!("gemma4 pre-ffn rmsnorm layer {}: {}", layer_idx, e))?;
+        self.forward_gemma4_dense_mlp(layer_idx, hidden, dense_branch, m)
+            .map_err(|e| format!("gemma4 dense mlp layer {}: {}", layer_idx, e))?;
+        self.launch_rmsnorm(
+            dense_branch,
+            dense_branch,
+            self.layer_weights[layer_idx].post_ffn_norm1,
+            m,
+            h,
+        )
+        .map_err(|e| format!("gemma4 post-ffn1 rmsnorm layer {}: {}", layer_idx, e))?;
+
+        self.launch_rmsnorm(
+            hidden,
+            residual,
+            self.layer_weights[layer_idx].pre_ffn_norm2,
+            m,
+            h,
+        )
+        .map_err(|e| format!("gemma4 pre-ffn2 rmsnorm layer {}: {}", layer_idx, e))?;
+
+        let router_scale = (h as f32).powf(-0.5);
+        self.launch_rmsnorm_scale(
+            moe_branch,
+            residual,
+            self.layer_weights[layer_idx].router_input_scale,
+            router_scale,
+            m,
+            h,
+        )
+        .map_err(|e| format!("gemma4 router rmsnorm layer {}: {}", layer_idx, e))?;
+
+        self.forward_moe_with_inputs(layer_idx, m, moe_branch, hidden, hidden)
+            .map_err(|e| format!("gemma4 moe layer {}: {}", layer_idx, e))?;
+        self.launch_rmsnorm(
+            moe_branch,
+            hidden,
+            self.layer_weights[layer_idx].post_ffn_norm2,
+            m,
+            h,
+        )
+        .map_err(|e| format!("gemma4 post-ffn2 rmsnorm layer {}: {}", layer_idx, e))?;
+
+        self.launch_add_bf16(hidden, dense_branch, moe_branch, m, h)
+            .map_err(|e| format!("gemma4 dense+moe add layer {}: {}", layer_idx, e))?;
+        self.launch_rmsnorm(
+            dense_branch,
+            hidden,
+            self.layer_weights[layer_idx].post_ffn_norm,
+            m,
+            h,
+        )
+        .map_err(|e| format!("gemma4 post-ffn rmsnorm layer {}: {}", layer_idx, e))?;
+        self.launch_add_bf16(hidden, residual, dense_branch, m, h)
+            .map_err(|e| format!("gemma4 ffn residual add layer {}: {}", layer_idx, e))?;
+        self.launch_scale_bf16_by_ptr(
+            hidden,
+            hidden,
+            self.layer_weights[layer_idx].layer_scalar,
+            m,
+            h,
+        )
+        .map_err(|e| format!("gemma4 layer_scalar scale layer {}: {}", layer_idx, e))?;
+
+        Ok(())
+    }
+
     // ── MoE Forward ──
 
     fn forward_moe(&mut self, layer_idx: usize, m: usize) -> Result<(), String> {
+        let hidden = *self.scratch.d_hidden.device_ptr();
+        self.forward_moe_with_inputs(layer_idx, m, hidden, hidden, hidden)
+    }
+
+    fn forward_moe_with_inputs(
+        &mut self,
+        layer_idx: usize,
+        m: usize,
+        router_input: u64,
+        expert_input: u64,
+        output: u64,
+    ) -> Result<(), String> {
         // Use fused MoE path when available (default for prefill).
         // Supports two modes: contiguous buffer (d_fused_expert_w1_a) or pointer table
         // (d_expert_w1_ptrs). Pointer table mode computes B_expert_off = expert_ptr - B;
@@ -21113,7 +22250,7 @@ impl PrefillEngine {
                     eprintln!("[PREFILL] Using FUSED MoE path (bulk layer DMA)");
                 }
             }
-            return self.forward_moe_fused(layer_idx, m);
+            return self.forward_moe_fused(layer_idx, m, router_input, expert_input, output);
         }
         if layer_idx == 0 {
             if stderr_debug_enabled() {
@@ -21121,12 +22258,19 @@ impl PrefillEngine {
             }
         }
         // Per-expert sequential dispatch
-        self.forward_moe_sequential(layer_idx, m)
+        self.forward_moe_sequential(layer_idx, m, router_input, expert_input, output)
     }
 
     /// Fused MoE forward using MarlinDefault kernel.
     /// One kernel launch handles ALL active experts per GEMM (w1, w2).
-    fn forward_moe_fused(&mut self, layer_idx: usize, m: usize) -> Result<(), String> {
+    fn forward_moe_fused(
+        &mut self,
+        layer_idx: usize,
+        m: usize,
+        router_input: u64,
+        expert_input: u64,
+        output: u64,
+    ) -> Result<(), String> {
         let diag_moe = std::env::var("KRASIS_PREFILL_DIAG").is_ok();
         let debug_prefill = prefill_debug_enabled();
         let mt = self.gqa_timing_enabled.get(); // MoE timing flag (reuses same env var)
@@ -21154,7 +22298,7 @@ impl PrefillEngine {
             || (self.layer_weights[layer_idx].shared_w1_bf16.is_some()
                 && self.layer_weights[layer_idx].shared_w2_bf16.is_some());
 
-        let hidden = *self.scratch.d_hidden.device_ptr();
+        let hidden = router_input;
         let gate_out = *self.scratch.d_gate_out.device_ptr();
         let topk_ids_ptr = *self.scratch.d_topk_ids.device_ptr();
         let topk_weights_ptr = *self.scratch.d_topk_weights.device_ptr();
@@ -21284,6 +22428,14 @@ impl PrefillEngine {
                 )?;
             }
         }
+        self.launch_topk_per_expert_scale(
+            topk_weights_ptr,
+            topk_ids_ptr,
+            self.layer_weights[layer_idx].router_per_expert_scale,
+            m,
+            topk,
+        )
+        .map_err(|e| format!("topk per-expert scale layer {}: {}", layer_idx, e))?;
         let mut topk_sum_probe: Option<(CudaSlice<f32>, usize, usize, bool)> = None;
         let mut topk_selected_probe: Option<(CudaSlice<f32>, usize, usize, bool)> = None;
         if reference_layer0_moe_trace && scoring_func == 0 {
@@ -22738,7 +23890,7 @@ impl PrefillEngine {
         {
             let rt = std::cmp::max(32, ((std::cmp::min(1024, h) + 31) / 32) * 32) as u32;
             let mut r0 = fused_input_ptr;
-            let mut r1 = hidden;
+            let mut r1 = expert_input;
             let mut r2 = h as i32;
             let mut r3 = m as i32;
             let mut r4 = topk as i32;
@@ -23674,11 +24826,7 @@ impl PrefillEngine {
             let mut ac0 = fused_inter2_ptr;
             let mut ac1 = fused_inter_ptr;
             let mut ac2 = inter as i32;
-            let kernel = if activation == 1 {
-                self.kernels.relu2
-            } else {
-                self.kernels.silu_mul
-            };
+            let kernel = self.activation_kernel(activation);
             unsafe {
                 launch(
                     kernel,
@@ -23744,7 +24892,7 @@ impl PrefillEngine {
                 trace_moe_token_id,
                 serde_json::json!({
                     "sync_after_activation_success": sync_after_activation,
-                    "activation": if activation == 1 { "relu2" } else { "silu_mul" },
+                    "activation": match activation { 1 => "relu2", 2 => "gelu_tanh_mul", _ => "silu_mul" },
                     "gated": gated,
                     "fused_inter_ptr": format!("0x{:x}", fused_inter_ptr),
                     "fused_inter2_ptr": format!("0x{:x}", fused_inter2_ptr),
@@ -24009,11 +25157,7 @@ impl PrefillEngine {
                     let mut ac0 = ref_act_out;
                     let mut ac1 = ref_c1;
                     let mut ac2 = inter as i32;
-                    let kernel = if activation == 1 {
-                        self.kernels.relu2
-                    } else {
-                        self.kernels.silu_mul
-                    };
+                    let kernel = self.activation_kernel(activation);
                     unsafe {
                         launch(
                             kernel,
@@ -26336,7 +27480,7 @@ impl PrefillEngine {
                 serde_json::json!({
                     "sync_before_convert_success": sync_before_convert,
                     "kernel": "moe_accum_to_bf16",
-                    "hidden_output_ptr": format!("0x{:x}", hidden),
+                    "hidden_output_ptr": format!("0x{:x}", output),
                     "moe_accum_ptr": format!("0x{:x}", moe_accum),
                     "m": m,
                     "hidden_size": h,
@@ -26349,7 +27493,7 @@ impl PrefillEngine {
         }
         {
             let ct = std::cmp::max(32, ((std::cmp::min(1024, h) + 31) / 32) * 32) as u32;
-            let mut c0 = hidden;
+            let mut c0 = output;
             let mut c1 = moe_accum;
             let mut c2 = m as i32;
             let mut c3 = h as i32;
@@ -26520,7 +27664,14 @@ impl PrefillEngine {
         Ok(())
     }
 
-    fn forward_moe_sequential(&mut self, layer_idx: usize, m: usize) -> Result<(), String> {
+    fn forward_moe_sequential(
+        &mut self,
+        layer_idx: usize,
+        m: usize,
+        router_input: u64,
+        _expert_input: u64,
+        output: u64,
+    ) -> Result<(), String> {
         let lw = &self.layer_weights[layer_idx];
         let h = self.config.hidden_size;
         let n_experts = lw.moe_num_experts;
@@ -26532,7 +27683,7 @@ impl PrefillEngine {
         let _norm_topk = lw.moe_norm_topk_prob;
         let scale_factor = lw.moe_routed_scaling_factor;
 
-        let hidden = *self.scratch.d_hidden.device_ptr();
+        let hidden = router_input;
         let gate_out = *self.scratch.d_gate_out.device_ptr();
         let moe_accum = *self.scratch.d_moe_accum.device_ptr();
 
@@ -26605,6 +27756,14 @@ impl PrefillEngine {
                 )?;
             }
         }
+        self.launch_topk_per_expert_scale(
+            topk_weights_ptr,
+            topk_ids_ptr,
+            lw.router_per_expert_scale,
+            m,
+            topk,
+        )
+        .map_err(|e| format!("sequential topk per-expert scale layer {}: {}", layer_idx, e))?;
         self.trace_emit_router_compare_last(
             layer_idx,
             hidden,
@@ -27425,11 +28584,7 @@ impl PrefillEngine {
                     let mut ac0 = s2_buf;
                     let mut ac1 = s1_buf;
                     let mut ac2 = shared_inter as i32;
-                    let kernel = if activation == 1 {
-                        self.kernels.relu2
-                    } else {
-                        self.kernels.silu_mul
-                    };
+                    let kernel = self.activation_kernel(activation);
                     unsafe {
                         launch(
                             kernel,
@@ -27504,11 +28659,7 @@ impl PrefillEngine {
                     let mut ac0 = s2_buf;
                     let mut ac1 = s1_buf;
                     let mut ac2 = shared_inter as i32;
-                    let kernel = if activation == 1 {
-                        self.kernels.relu2
-                    } else {
-                        self.kernels.silu_mul
-                    };
+                    let kernel = self.activation_kernel(activation);
                     unsafe {
                         launch(
                             kernel,
@@ -27990,7 +29141,7 @@ impl PrefillEngine {
         // 11. Convert FP32 accum -> BF16 hidden
         {
             let ct = std::cmp::max(32, ((std::cmp::min(1024, h) + 31) / 32) * 32) as u32;
-            let mut c0 = hidden;
+            let mut c0 = output;
             let mut c1 = moe_accum;
             let mut c2 = m as i32;
             let mut c3 = h as i32;
@@ -28158,11 +29309,7 @@ impl PrefillEngine {
             let mut ac0 = s2_buf;
             let mut ac1 = s1_buf;
             let mut ac2 = shared_inter as i32;
-            let kernel = if activation == 1 {
-                self.kernels.relu2
-            } else {
-                self.kernels.silu_mul
-            };
+            let kernel = self.activation_kernel(activation);
             unsafe {
                 launch(
                     kernel,
@@ -28307,11 +29454,7 @@ impl PrefillEngine {
                 let mut ac0 = s2_buf;
                 let mut ac1 = s1_buf;
                 let mut ac2 = shared_inter as i32;
-                let kernel = if activation == 1 {
-                    self.kernels.relu2
-                } else {
-                    self.kernels.silu_mul
-                };
+                let kernel = self.activation_kernel(activation);
                 unsafe {
                     launch(
                         kernel,
@@ -28362,11 +29505,7 @@ impl PrefillEngine {
             let mut ac0 = s2_buf;
             let mut ac1 = s1_buf;
             let mut ac2 = shared_inter as i32;
-            let kernel = if activation == 1 {
-                self.kernels.relu2
-            } else {
-                self.kernels.silu_mul
-            };
+            let kernel = self.activation_kernel(activation);
             unsafe {
                 launch(
                     kernel,
@@ -28471,11 +29610,7 @@ impl PrefillEngine {
             let mut ac0 = s2_buf;
             let mut ac1 = s1_buf;
             let mut ac2 = shared_inter as i32;
-            let kernel = if activation == 1 {
-                self.kernels.relu2
-            } else {
-                self.kernels.silu_mul
-            };
+            let kernel = self.activation_kernel(activation);
             unsafe {
                 launch(
                     kernel,
@@ -28903,6 +30038,14 @@ impl PrefillEngine {
                     )?;
                 }
             }
+            self.launch_topk_per_expert_scale(
+                topk_weights_ptr,
+                topk_ids_ptr,
+                self.layer_weights[layer_idx].router_per_expert_scale,
+                total_m,
+                topk,
+            )
+            .map_err(|e| format!("prescan topk per-expert scale layer {}: {}", layer_idx, e))?;
 
             // Download topk_ids to CPU
             self.stream_sync()?;
@@ -29429,11 +30572,7 @@ impl PrefillEngine {
             let mut ac0 = s2_buf;
             let mut ac1 = s1_buf;
             let mut ac2 = shared_inter as i32;
-            let kernel = if activation == 1 {
-                self.kernels.relu2
-            } else {
-                self.kernels.silu_mul
-            };
+            let kernel = self.activation_kernel(activation);
             unsafe {
                 launch(
                     kernel,
@@ -29637,11 +30776,7 @@ impl PrefillEngine {
             let mut ac0 = inter_slice;
             let mut ac1 = gate_up_slice;
             let mut ac2 = inter as i32;
-            let kernel = if activation == 1 {
-                self.kernels.relu2
-            } else {
-                self.kernels.silu_mul
-            };
+            let kernel = self.activation_kernel(activation);
             unsafe {
                 launch(
                     kernel,
@@ -29792,11 +30927,7 @@ impl PrefillEngine {
             let mut ac0 = inter_slice;
             let mut ac1 = gate_up_slice;
             let mut ac2 = inter as i32;
-            let kernel = if activation == 1 {
-                self.kernels.relu2
-            } else {
-                self.kernels.silu_mul
-            };
+            let kernel = self.activation_kernel(activation);
             unsafe {
                 launch(
                     kernel,
@@ -29957,6 +31088,8 @@ impl PrefillEngine {
             }
         }
         self.stream_sync()?;
+        apply_logit_softcap_in_place(&mut self.h_logits, self.final_logit_softcap);
+
         let logits_before_suppression = if debug_reference_trace {
             Some(self.h_logits.clone())
         } else {
@@ -30160,6 +31293,11 @@ impl PrefillKernels {
                     "rmsnorm_batched_kernel",
                     "rmsnorm_batched_fp32w_kernel",
                     "fused_add_rmsnorm_batched_kernel",
+                    "add_bf16_batched_kernel",
+                    "scale_bf16_batched_kernel",
+                    "scale_bf16_by_ptr_batched_kernel",
+                    "apply_topk_per_expert_scale_kernel",
+                    "rmsnorm_scale_batched_kernel",
                     "embedding_batched_kernel",
                     "hqq4_dequant_bf16_kernel",
                     "hqq_dequant_bf16_kernel",
@@ -30172,10 +31310,13 @@ impl PrefillKernels {
                     "hqq_marlin_add_correction_bf16_kernel",
                     "hqq_prefill_int8_exception_delta_bf16_kernel",
                     "hqq_apply_sidecar_bf16_kernel",
-                    "rope_batched_kernel",
-                    "rope_batched_mrope_kernel",
+            "rope_batched_kernel",
+            "rope_batched_half_split_kernel",
+            "rope_batched_mrope_kernel",
                     "silu_mul_batched_kernel",
                     "relu2_batched_kernel",
+                    "gelu_tanh_mul_batched_kernel",
+                    "gated_activation_split_batched_kernel",
                     "sigmoid_mul_kernel",
                     "bf16_to_fp32_kernel",
                     "fp32_to_bf16_kernel",
@@ -30237,6 +31378,7 @@ impl PrefillKernels {
                     "moe_accum_to_bf16_kernel",
                     "kv_cache_append_fp8_kernel",
                     "kv_cache_dequant_concat_kernel",
+                    "kv_cache_dequant_window_concat_kernel",
                     "kv_cache_concat_bf16_kernel",
                     "kv_cache_append_polar4_kernel",
                     "kv_cache_append_k8v4_kernel",
@@ -30280,6 +31422,8 @@ impl PrefillKernels {
             .ok_or_else(|| "Required fused MoE scatter sidecar symbol unavailable or failed validation".to_string())?;
         let flash_attn_fwd = load_flash_attn()
             .ok_or_else(|| "Required FlashAttention sidecar unavailable or failed validation".to_string())?;
+        let flash_attn_fwd_window = load_flash_attn_window()
+            .ok_or_else(|| "Required FlashAttention window sidecar symbol unavailable or failed validation".to_string())?;
         let flash_attn_fwd_fp8kv = load_flash_attn_fp8kv()
             .ok_or_else(|| "Required FlashAttention FP8-KV sidecar symbol unavailable or failed validation".to_string())?;
         log::info!("Prefill: verified required Marlin and FlashAttention sidecars");
@@ -30320,6 +31464,11 @@ impl PrefillKernels {
             rmsnorm: get("rmsnorm_batched_kernel")?,
             rmsnorm_fp32w: get("rmsnorm_batched_fp32w_kernel")?,
             fused_add_rmsnorm: get("fused_add_rmsnorm_batched_kernel")?,
+            add_bf16: get("add_bf16_batched_kernel")?,
+            scale_bf16: get("scale_bf16_batched_kernel")?,
+            scale_bf16_by_ptr: get("scale_bf16_by_ptr_batched_kernel")?,
+            apply_topk_per_expert_scale: get("apply_topk_per_expert_scale_kernel")?,
+            rmsnorm_scale: get("rmsnorm_scale_batched_kernel")?,
             embedding: get("embedding_batched_kernel")?,
             hqq4_dequant_bf16: get("hqq4_dequant_bf16_kernel")?,
             hqq_dequant_bf16: get("hqq_dequant_bf16_kernel")?,
@@ -30333,9 +31482,12 @@ impl PrefillKernels {
             hqq_prefill_int8_exception_delta_bf16: get("hqq_prefill_int8_exception_delta_bf16_kernel")?,
             hqq_apply_sidecar_bf16: get("hqq_apply_sidecar_bf16_kernel")?,
             rope: get("rope_batched_kernel")?,
+            rope_half_split: get("rope_batched_half_split_kernel")?,
             rope_mrope: get("rope_batched_mrope_kernel")?,
             silu_mul: get("silu_mul_batched_kernel")?,
             relu2: get("relu2_batched_kernel")?,
+            gelu_tanh_mul: get("gelu_tanh_mul_batched_kernel")?,
+            gated_activation_split: get("gated_activation_split_batched_kernel")?,
             sigmoid_mul: get("sigmoid_mul_kernel")?,
             sigmoid_topk: get("sigmoid_topk_kernel")?,
             softmax_topk: get("softmax_topk_kernel")?,
@@ -30346,6 +31498,7 @@ impl PrefillKernels {
             kv_cache_append: get("kv_cache_append_kernel")?,
             kv_cache_append_bf16: get("kv_cache_append_bf16_kernel")?,
             kv_dequant_concat: get("kv_cache_dequant_concat_kernel")?,
+            kv_dequant_window_concat: get("kv_cache_dequant_window_concat_kernel")?,
             kv_concat_bf16: get("kv_cache_concat_bf16_kernel")?,
             kv_cache_append_polar4: get("kv_cache_append_polar4_kernel")?,
             kv_cache_append_k8v4: get("kv_cache_append_k8v4_kernel")?,
@@ -30420,6 +31573,7 @@ impl PrefillKernels {
             fused_moe_fn: Some(fused_moe_fn),
             fused_moe_scatter_fn: Some(fused_moe_scatter_fn),
             flash_attn_fwd: Some(flash_attn_fwd),
+            flash_attn_fwd_window: Some(flash_attn_fwd_window),
             flash_attn_fwd_fp8kv: Some(flash_attn_fwd_fp8kv),
         })
     }
@@ -30496,8 +31650,12 @@ pub fn hqq_prefill_materialize_bf16_enabled() -> bool {
 
 fn hqq_prefill_materialize_weight_elems(config: &PrefillModelConfig) -> usize {
     let h = config.hidden_size;
-    let q_dim = config.num_q_heads * config.head_dim;
-    let kv_dim = config.num_kv_heads * config.head_dim;
+    let q_dim = config
+        .max_gqa_q_dim
+        .max(config.num_q_heads * config.head_dim);
+    let kv_dim = config
+        .max_gqa_kv_dim
+        .max(config.num_kv_heads * config.head_dim);
     let mut max_elems = q_dim
         .checked_mul(2)
         .and_then(|rows| rows.checked_mul(h))
@@ -30534,7 +31692,10 @@ fn prefill_cross_chunk_kv_staging_floats(
     // required bytes = prompt_tokens * (num_kv_heads * head_dim) * 2 tensors * 2 bytes.
     // d_fp32_scratch is counted in f32 elements, so the required f32 element floor is
     // prompt_tokens * (num_kv_heads * head_dim).
-    prompt_tokens * config.num_kv_heads * config.head_dim
+    let kv_dim = config
+        .max_gqa_kv_dim
+        .max(config.num_kv_heads * config.head_dim);
+    prompt_tokens * kv_dim
 }
 
 fn prefill_chunk_local_fp32_scratch_floats(
@@ -30546,7 +31707,10 @@ fn prefill_chunk_local_fp32_scratch_floats(
     let has_la = config.layer_types.iter().any(|&t| t == 3);
 
     let mut max_gemm_n = std::cmp::max(h, inter * 2);
-    let gqa_q_n = config.num_q_heads * config.head_dim * 2;
+    let gqa_q_n = config
+        .max_gqa_q_dim
+        .max(config.num_q_heads * config.head_dim)
+        * 2;
     if gqa_q_n > max_gemm_n {
         max_gemm_n = gqa_q_n;
     }
@@ -30563,8 +31727,8 @@ fn prefill_chunk_local_fp32_scratch_floats(
     }
 
     let max_hqq_input_cols = h
-        .max(config.num_q_heads * config.head_dim)
-        .max(config.num_kv_heads * config.head_dim)
+        .max(config.max_gqa_q_dim.max(config.num_q_heads * config.head_dim))
+        .max(config.max_gqa_kv_dim.max(config.num_kv_heads * config.head_dim))
         .max(config.la_num_v_heads * config.la_v_head_dim);
     let max_hqq_groups = max_hqq_input_cols.div_ceil(config.group_size.max(1));
     let marlin_ctmp = max_tokens * max_gemm_n;
@@ -30625,7 +31789,10 @@ pub fn compute_scratch_vram(config: &PrefillModelConfig) -> (usize, usize) {
     // d_scratch1: max(max_tokens * inter * 2, max_tokens * num_q_heads * head_dim * 2) * 2 bytes
     let max_inter_per_tok = std::cmp::max(
         inter.max(shared_inter) * 2,
-        config.num_q_heads * config.head_dim * 2,
+        config
+            .max_gqa_q_dim
+            .max(config.num_q_heads * config.head_dim)
+            * 2,
     );
     per_token += max_inter_per_tok * 2; // BF16
                                         // d_scratch2: same size
@@ -30633,7 +31800,10 @@ pub fn compute_scratch_vram(config: &PrefillModelConfig) -> (usize, usize) {
     // d_fp32_scratch: max(marlin_ctmp, la_size) -- both scale with max_tokens
     {
         let mut max_gemm_n = std::cmp::max(h, inter.max(shared_inter) * 2);
-        let gqa_q_n = config.num_q_heads * config.head_dim * 2;
+        let gqa_q_n = config
+            .max_gqa_q_dim
+            .max(config.num_q_heads * config.head_dim)
+            * 2;
         if gqa_q_n > max_gemm_n {
             max_gemm_n = gqa_q_n;
         }
@@ -30673,15 +31843,21 @@ pub fn compute_scratch_vram(config: &PrefillModelConfig) -> (usize, usize) {
     // d_attn_out: max_tokens * attn_dim * 2, where attn_dim = max(h, q_dim, value_dim)
     // GQA writes [M, num_q_heads * head_dim], LA gated_rmsnorm no longer uses this buffer.
     let attn_dim = h
-        .max(config.num_q_heads * config.head_dim)
+        .max(config.max_gqa_q_dim.max(config.num_q_heads * config.head_dim))
         .max(config.la_num_v_heads * config.la_v_head_dim);
     per_token += attn_dim * 2;
-    // d_q: max_tokens * num_q_heads * head_dim * 2
-    per_token += config.num_q_heads * config.head_dim * 2;
-    // d_k: max_tokens * num_kv_heads * head_dim * 2
-    per_token += config.num_kv_heads * config.head_dim * 2;
-    // d_v: max_tokens * num_kv_heads * head_dim * 2
-    per_token += config.num_kv_heads * config.head_dim * 2;
+    let q_dim = config
+        .max_gqa_q_dim
+        .max(config.num_q_heads * config.head_dim);
+    let kv_dim = config
+        .max_gqa_kv_dim
+        .max(config.num_kv_heads * config.head_dim);
+    // d_q: max_tokens * max per-layer GQA q_dim * 2
+    per_token += q_dim * 2;
+    // d_k: max_tokens * max per-layer GQA kv_dim * 2
+    per_token += kv_dim * 2;
+    // d_v: max_tokens * max per-layer GQA kv_dim * 2
+    per_token += kv_dim * 2;
     // MoE buffers: sized for fused_sorted_count = max_tokens * topk + n_routed * block_size.
     // Both sequential and fused paths share these buffers (never run simultaneously).
     let w1_n = if config.moe_gated {
@@ -31130,7 +32306,11 @@ pub fn allocate_scratch_for_prompt(
 
     let mut max_inter = std::cmp::max(
         max_tokens * inter.max(shared_inter) * 2,
-        max_tokens * config.num_q_heads * config.head_dim * 2, // *2 for gated GQA (q + gate)
+        max_tokens
+            * config
+                .max_gqa_q_dim
+                .max(config.num_q_heads * config.head_dim)
+            * 2, // *2 for gated GQA (q + gate)
     );
     // FLA path reuses scratch1/scratch2 as [fla_total, nv, dk] BF16 (after repeat-interleave).
     // For models where nv * dk > num_q_heads * head_dim * 2 (e.g. 122B: 8192 vs 6144),
@@ -31184,13 +32364,22 @@ pub fn allocate_scratch_for_prompt(
         d_attn_out: {
             // Must fit max(hidden_size, num_q_heads*head_dim, value_dim) per token
             let attn_dim = h
-                .max(config.num_q_heads * config.head_dim)
+                .max(config.max_gqa_q_dim.max(config.num_q_heads * config.head_dim))
                 .max(config.la_num_v_heads * config.la_v_head_dim);
             alloc_u16(max_tokens * attn_dim, "attn_out")?
         },
-        d_q: alloc_u16(max_tokens * config.num_q_heads * config.head_dim, "q")?,
-        d_k: alloc_u16(max_tokens * config.num_kv_heads * config.head_dim, "k")?,
-        d_v: alloc_u16(max_tokens * config.num_kv_heads * config.head_dim, "v")?,
+        d_q: alloc_u16(
+            max_tokens * config.max_gqa_q_dim.max(config.num_q_heads * config.head_dim),
+            "q",
+        )?,
+        d_k: alloc_u16(
+            max_tokens * config.max_gqa_kv_dim.max(config.num_kv_heads * config.head_dim),
+            "k",
+        )?,
+        d_v: alloc_u16(
+            max_tokens * config.max_gqa_kv_dim.max(config.num_kv_heads * config.head_dim),
+            "v",
+        )?,
         d_logits: alloc_f32(config.vocab_size, "logits")?,
         d_mamba2_conv_state: if has_mamba2 {
             Some(alloc_f32(
@@ -31754,6 +32943,36 @@ fn load_flash_attn() -> Option<FlashAttnFwdFn> {
             return Some(std::mem::transmute(sym));
         }
         log::warn!("krasis_flash_attn_fwd_bf16 symbol not found in {}", path);
+    }
+    None
+}
+
+fn load_flash_attn_window() -> Option<FlashAttnFwdWindowFn> {
+    let path = find_vendor_so("libkrasis_flash_attn.so")?;
+    unsafe {
+        let lib = libc::dlopen(
+            std::ffi::CString::new(path.as_str()).ok()?.as_ptr(),
+            libc::RTLD_NOW | libc::RTLD_LOCAL,
+        );
+        if lib.is_null() {
+            return None;
+        }
+        if !verify_sidecar_abi(lib, &path, "FlashAttention", "flash_attn") {
+            return None;
+        }
+
+        let sym = libc::dlsym(
+            lib,
+            b"krasis_flash_attn_fwd_bf16_window\0".as_ptr() as *const _,
+        );
+        if !sym.is_null() {
+            log::info!("Loaded FlashAttention-2 windowed BF16 from {}", path);
+            return Some(std::mem::transmute(sym));
+        }
+        log::warn!(
+            "krasis_flash_attn_fwd_bf16_window symbol not found in {}",
+            path
+        );
     }
     None
 }
@@ -33199,6 +34418,7 @@ mod kernel_tests {
         let mut hd_i32 = hd as i32;
         let mut start_pos_i32: i32 = 0;
         let mut kv_stride_i32 = kv_stride;
+        let mut sliding_window_i32: i32 = 0;
 
         unsafe {
             // FA_BR=16, 1 warp (32 threads)
@@ -33233,6 +34453,7 @@ mod kernel_tests {
                 &mut scale as *mut _ as *mut _,
                 &mut start_pos_i32 as *mut _ as *mut _,
                 &mut kv_stride_i32 as *mut _ as *mut _,
+                &mut sliding_window_i32 as *mut _ as *mut _,
             ];
             launch(
                 kernel,
@@ -33303,6 +34524,7 @@ mod kernel_tests {
         let mut hd_i32 = hd as i32;
         let mut start_pos_i32 = cached_len as i32;
         let mut kv_stride_i32 = kv_stride;
+        let mut sliding_window_i32: i32 = 0;
 
         unsafe {
             let br = 16u32;
@@ -33335,6 +34557,7 @@ mod kernel_tests {
                 &mut scale as *mut _ as *mut _,
                 &mut start_pos_i32 as *mut _ as *mut _,
                 &mut kv_stride_i32 as *mut _ as *mut _,
+                &mut sliding_window_i32 as *mut _ as *mut _,
             ];
             launch(
                 kernel,
@@ -35622,11 +36845,13 @@ mod kernel_tests {
             let mut out_ptr = *d_out.device_ptr() as u64;
             let mut table_ptr = *d_table.device_ptr() as u64;
             let mut ids_ptr = *d_ids.device_ptr() as u64;
+            let mut scale = 1.0f32;
             let mut params: Vec<*mut std::ffi::c_void> = vec![
                 &mut out_ptr as *mut _ as *mut _,
                 &mut table_ptr as *mut _ as *mut _,
                 &mut ids_ptr as *mut _ as *mut _,
                 &mut d_i32 as *mut _ as *mut _,
+                &mut scale as *mut _ as *mut _,
             ];
             launch(
                 kernel,

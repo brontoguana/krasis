@@ -268,6 +268,7 @@ class QuantConfig:
     gpu_expert_int4_calib: str = "amax"  # "amax" or "search_rmse" for routed-expert GPU INT4 cache build
     cpu_expert_bits: int = 4       # 4 or 8 for CPU expert quantization
     kv_cache_format: str = "k6v6"  # Quality default; public modes are "k6v6", "k4v4", and "bf16"
+    ring_window_kv: bool = False    # Experimental: cap sliding-attention KV layers to their window
     hqq_cache_profile: str = HQQ_CACHE_PROFILE_BASELINE  # "baseline" or an explicit calibrated HQQ profile
     hqq_group_size: int = HQQ_ATTENTION_DEFAULT_GROUP_SIZE  # HQQ attention quantization group size
     hqq_auto_budget_pct: Optional[float] = None  # auto promotion budget as % of base-to-target attention span
@@ -437,6 +438,9 @@ class ModelConfig:
 
     # GQA dimensions (None for MLA models)
     gqa_head_dim: Optional[int] = None    # per-head dim (e.g. 128 for Qwen3)
+    global_head_dim: int = 0              # Gemma4 full-attention head dim
+    num_global_key_value_heads: int = 0   # Gemma4 full-attention KV heads
+    attention_k_eq_v: bool = False        # Gemma4 full-attention value uses k_proj source
 
     # Hybrid model: linear attention (Gated DeltaNet) + full attention
     full_attention_interval: int = 0   # 0 = all full attention; N = every Nth layer is full
@@ -476,6 +480,9 @@ class ModelConfig:
     # Pre-quantized experts
     expert_quant_method: str = ""      # "mxfp4" for GPT OSS, "" for standard BF16
     swiglu_limit: float = 0.0         # GPT OSS: 7.0 — clamp SwiGLU output to [-limit, limit]
+    gemma4_text: bool = False          # Gemma4 text tower semantics
+    embedding_scale: float = 1.0       # Gemma text embeddings multiply by sqrt(hidden_size)
+    final_logit_softcapping: float = 0.0
 
     # Nemotron-H (hybrid Mamba2 + MoE + Attention)
     model_type: str = ""               # e.g. "nemotron_h", "qwen3_next", etc.
@@ -603,7 +610,8 @@ class ModelConfig:
                                   cfg.get("num_local_experts", 0)))
         # Experts per token: num_experts_per_tok (DeepSeek/Qwen3) / experts_per_token (GPT OSS)
         experts_per_tok = cfg.get("num_experts_per_tok",
-                                 cfg.get("experts_per_token", 0))
+                                 cfg.get("experts_per_token",
+                                         cfg.get("top_k_experts", 0)))
 
         # MoE intermediate size: moe_intermediate_size (Qwen3) / intermediate_size (GPT OSS)
         moe_inter = cfg.get("moe_intermediate_size", cfg.get("intermediate_size", 0))
@@ -620,9 +628,17 @@ class ModelConfig:
 
         # RoPE: some models (Qwen3.5) nest rope_theta/partial_rotary_factor inside rope_parameters
         rope_params = cfg.get("rope_parameters", {}) or {}
+        if arch == "gemma4_text" and isinstance(rope_params, dict):
+            rope_default = rope_params.get("sliding_attention", {})
+        else:
+            rope_default = rope_params
         rope_theta = cfg.get("rope_theta", rope_params.get("rope_theta", 10000.0))
-        partial_rotary = cfg.get("partial_rotary_factor",
-                                 rope_params.get("partial_rotary_factor", 1.0))
+        if arch == "gemma4_text":
+            rope_theta = cfg.get("rope_theta", rope_default.get("rope_theta", 10000.0))
+            partial_rotary = rope_default.get("partial_rotary_factor", 1.0)
+        else:
+            partial_rotary = cfg.get("partial_rotary_factor",
+                                     rope_params.get("partial_rotary_factor", 1.0))
 
         return cls(
             model_path=model_path,
@@ -641,6 +657,9 @@ class ModelConfig:
             v_head_dim=cfg.get("v_head_dim") if is_mla else None,
             # GQA fields (None for MLA)
             gqa_head_dim=cfg.get("head_dim") if not is_mla else None,
+            global_head_dim=cfg.get("global_head_dim", 0),
+            num_global_key_value_heads=cfg.get("num_global_key_value_heads", 0),
+            attention_k_eq_v=bool(cfg.get("attention_k_eq_v", False)),
             # Hybrid model
             full_attention_interval=full_attn_interval,
             layer_types=layer_types,
@@ -661,7 +680,7 @@ class ModelConfig:
             topk_method=cfg.get("topk_method", "greedy"),
             norm_topk_prob=cfg.get("norm_topk_prob", True),
             rms_norm_eps=cfg.get("rms_norm_eps", cfg.get("norm_eps", cfg.get("layer_norm_epsilon", 1e-6))),
-            hidden_act=cfg.get("hidden_act", "silu"),
+            hidden_act=cfg.get("hidden_activation", cfg.get("hidden_act", "silu")),
             rope_theta=rope_theta,
             rope_scaling=cfg.get("rope_scaling") or rope_params or {},
             max_position_embeddings=cfg.get("max_position_embeddings", 131072),
@@ -671,6 +690,9 @@ class ModelConfig:
             sliding_window=sliding_window,
             expert_quant_method=expert_quant_method,
             swiglu_limit=swiglu_limit,
+            gemma4_text=arch == "gemma4_text",
+            embedding_scale=(cfg["hidden_size"] ** 0.5) if arch == "gemma4_text" else 1.0,
+            final_logit_softcapping=float(cfg.get("final_logit_softcapping") or 0.0),
             # Nemotron-H fields
             model_type=arch,
             hybrid_override_pattern=hybrid_pattern,
@@ -683,7 +705,8 @@ class ModelConfig:
             mamba_chunk_size=cfg.get("chunk_size", 128),
             moe_latent_size=cfg.get("moe_latent_size", 0),
             moe_shared_expert_intermediate_size=nemotron_shared_inter,
-            mlp_hidden_act=cfg.get("mlp_hidden_act", cfg.get("hidden_act", "silu")),
+            mlp_hidden_act=cfg.get("mlp_hidden_act",
+                                   cfg.get("hidden_activation", cfg.get("hidden_act", "silu"))),
             gated_attention=gated_attention,
             norm_bias_one=norm_bias_one,
             tie_word_embeddings=tie,
@@ -718,6 +741,41 @@ class ModelConfig:
         if self.is_mla:
             return self.qk_nope_head_dim + self.qk_rope_head_dim
         return self.gqa_head_dim
+
+    def gqa_head_dim_for_layer(self, layer_idx: int) -> int:
+        if self.gemma4_text and self.is_full_attention_layer(layer_idx) and not self.is_sliding_attention_layer(layer_idx):
+            return self.global_head_dim or self.gqa_head_dim
+        return self.gqa_head_dim
+
+    def gqa_num_kv_heads_for_layer(self, layer_idx: int) -> int:
+        if self.gemma4_text and self.is_full_attention_layer(layer_idx) and not self.is_sliding_attention_layer(layer_idx):
+            return self.num_global_key_value_heads or self.num_key_value_heads
+        return self.num_key_value_heads
+
+    def gqa_has_v_proj_for_layer(self, layer_idx: int) -> bool:
+        return not (
+            self.gemma4_text
+            and self.attention_k_eq_v
+            and self.is_full_attention_layer(layer_idx)
+            and not self.is_sliding_attention_layer(layer_idx)
+        )
+
+    def rope_theta_for_layer(self, layer_idx: int) -> float:
+        if self.gemma4_text and isinstance(self.rope_scaling, dict):
+            key = "sliding_attention" if self.is_sliding_attention_layer(layer_idx) else "full_attention"
+            params = self.rope_scaling.get(key, {})
+            if isinstance(params, dict):
+                return float(params.get("rope_theta", self.rope_theta))
+        return self.rope_theta
+
+    def rotary_dim_for_layer(self, layer_idx: int) -> int:
+        head_dim = self.gqa_head_dim_for_layer(layer_idx)
+        if self.gemma4_text and isinstance(self.rope_scaling, dict):
+            key = "sliding_attention" if self.is_sliding_attention_layer(layer_idx) else "full_attention"
+            params = self.rope_scaling.get(key, {})
+            if isinstance(params, dict):
+                return int(head_dim * float(params.get("partial_rotary_factor", 1.0)))
+        return int(head_dim * self.partial_rotary_factor)
 
     @property
     def q_head_dim(self) -> int:

@@ -64,6 +64,7 @@ FLASH_ATTN_SYMBOLS = [
     "krasis_sidecar_abi_version",
     "krasis_sidecar_build_id",
     "krasis_flash_attn_fwd_bf16",
+    "krasis_flash_attn_fwd_bf16_window",
     "krasis_flash_attn_fwd_bf16q_fp8kv",
 ]
 
@@ -186,7 +187,6 @@ def sidecar_inputs(nvcc: str) -> dict[str, dict[str, object]]:
         "-DFLASHATTENTION_DISABLE_DROPOUT",
         "-DFLASHATTENTION_DISABLE_ALIBI",
         "-DFLASHATTENTION_DISABLE_SOFTCAP",
-        "-DFLASHATTENTION_DISABLE_LOCAL",
         "-Isrc/cuda/flash_attn/fa2",
         "-Isrc/cuda/flash_attn/cutlass",
         f"-DKRASIS_SIDECAR_ABI_VERSION={SIDECAR_ABI_VERSION}",
@@ -315,7 +315,6 @@ def build_flash_attn(nvcc: str, build_id: str, force: bool) -> Path:
         "-DFLASHATTENTION_DISABLE_DROPOUT",
         "-DFLASHATTENTION_DISABLE_ALIBI",
         "-DFLASHATTENTION_DISABLE_SOFTCAP",
-        "-DFLASHATTENTION_DISABLE_LOCAL",
         f"-DKRASIS_SIDECAR_ABI_VERSION={SIDECAR_ABI_VERSION}",
         f"-DKRASIS_SIDECAR_BUILD_ID=\\\"{build_id}\\\"",
         "-Isrc/cuda/flash_attn/fa2",

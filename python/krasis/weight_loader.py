@@ -290,6 +290,15 @@ class WeightLoader:
             if self.cfg.layers_prefix != "model":
                 prefix = self.cfg.layers_prefix.rsplit(".", 1)[0]
                 name = f"{prefix}.lm_head.weight"
+        if name not in self._weight_map and self.cfg.gemma4_text:
+            name = "model.language_model.lm_head.weight"
+        if name not in self._weight_map:
+            tied_name = f"{self.cfg.layers_prefix}.embed_tokens.weight"
+            if tied_name in self._weight_map:
+                logger.info("LM head is tied; using embedding weight: %s", tied_name)
+                name = tied_name
+            else:
+                raise KeyError(f"Could not find LM head weight; tried lm_head.weight and {name}")
         logger.info("Loading LM head: %s (precision=%s)", name, self.quant_cfg.lm_head)
         if self.quant_cfg.lm_head == "bf16":
             return self._load_bf16(name, device)
@@ -419,7 +428,10 @@ class WeightLoader:
         # for decode is handled separately in model.py after loading.
         load_proj = self._load_bf16
 
-        for proj in ["q_proj", "k_proj", "v_proj", "o_proj"]:
+        projections = ["q_proj", "k_proj", "o_proj"]
+        if self.cfg.gqa_has_v_proj_for_layer(layer_idx):
+            projections.insert(2, "v_proj")
+        for proj in projections:
             weights[proj] = _timed_bf16_load(
                 self,
                 layer_idx=layer_idx,
@@ -437,6 +449,9 @@ class WeightLoader:
                     device=device,
                     step=f"gqa.{proj}_bias",
                 )
+        if "v_proj" not in weights:
+            weights["v_proj"] = weights["k_proj"]
+            weights["v_proj_aliases_k_proj"] = True
 
         # QK-Norm (Qwen3 and GLM-4.7 use RMSNorm on Q and K)
         q_norm_name = f"{prefix}.q_norm.weight"
@@ -462,6 +477,9 @@ class WeightLoader:
             w = self._maybe_apply_delta_rms_bias(w, k_norm_name)
             weights["k_norm"] = w
 
+        if self.cfg.gemma4_text:
+            weights["v_norm_no_scale"] = True
+
         # Attention sinks (GPT OSS: learnable logits for attention normalization)
         sinks_name = f"{prefix}.sinks"
         if sinks_name in self._weight_map:
@@ -486,6 +504,20 @@ class WeightLoader:
             "post_attention_layernorm": self._load_bf16(
                 f"{prefix}.post_attention_layernorm.weight", device),
         }
+        if self.cfg.gemma4_text:
+            for name in (
+                "pre_feedforward_layernorm",
+                "post_feedforward_layernorm",
+                "post_feedforward_layernorm_1",
+                "post_feedforward_layernorm_2",
+                "pre_feedforward_layernorm_2",
+            ):
+                tensor_name = f"{prefix}.{name}.weight"
+                if tensor_name in self._weight_map:
+                    norms[name] = self._load_bf16(tensor_name, device)
+            layer_scalar_name = f"{prefix}.layer_scalar"
+            if layer_scalar_name in self._weight_map:
+                norms["layer_scalar"] = self._load_bf16(layer_scalar_name, device)
         for key in norms:
             norms[key] = self._maybe_apply_delta_rms_bias(
                 norms[key],
@@ -513,19 +545,26 @@ class WeightLoader:
     ) -> Dict[str, torch.Tensor]:
         """Load MoE router gate weight and optional biases (BF16).
 
-        Supports both naming conventions:
+        Supports naming conventions:
         - "mlp.gate" (DeepSeek/Kimi/Qwen3)
         - "mlp.router" (GPT OSS)
+        - "router.proj" (Gemma4 text)
         """
         # Detect naming: "gate" vs "router"
         prefix_gate = f"{self.cfg.layers_prefix}.layers.{layer_idx}.mlp.gate"
         prefix_router = f"{self.cfg.layers_prefix}.layers.{layer_idx}.mlp.router"
+        prefix_gemma_router = f"{self.cfg.layers_prefix}.layers.{layer_idx}.router"
         if f"{prefix_gate}.weight" in self._weight_map:
             prefix = prefix_gate
+            weight_name = f"{prefix}.weight"
+        elif f"{prefix_gemma_router}.proj.weight" in self._weight_map:
+            prefix = prefix_gemma_router
+            weight_name = f"{prefix}.proj.weight"
         else:
             prefix = prefix_router
+            weight_name = f"{prefix}.weight"
         result = {
-            "weight": self._load_bf16(f"{prefix}.weight", device),
+            "weight": self._load_bf16(weight_name, device),
         }
         # Router bias (GPT OSS)
         bias_name = f"{prefix}.bias"
@@ -535,6 +574,13 @@ class WeightLoader:
         corr_name = f"{prefix}.e_score_correction_bias"
         if corr_name in self._weight_map:
             result["e_score_correction_bias"] = self._load_bf16(corr_name, device)
+        if self.cfg.gemma4_text:
+            scale_name = f"{prefix}.scale"
+            per_expert_scale_name = f"{prefix}.per_expert_scale"
+            if scale_name in self._weight_map:
+                result["input_scale"] = self._load_bf16(scale_name, device)
+            if per_expert_scale_name in self._weight_map:
+                result["per_expert_scale"] = self._load_bf16(per_expert_scale_name, device)
         return result
 
     def load_shared_expert(
@@ -797,6 +843,8 @@ class WeightLoader:
         mlp_started = time.perf_counter()
         if result["is_moe"]:
             result["gate"] = self.load_moe_gate(layer_idx, device)
+            if self.cfg.gemma4_text:
+                result["dense_mlp"] = self.load_dense_mlp(layer_idx, device)
             if self.cfg.n_shared_experts > 0:
                 result["shared_expert"] = self.load_shared_expert(layer_idx, device)
         else:

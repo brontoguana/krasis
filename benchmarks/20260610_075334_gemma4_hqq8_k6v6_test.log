@@ -1,0 +1,104 @@
+[0;36m[1m=>[0m Waiting for selected GPUs (0) to clear...
+[0;32m[1mOK[0m Selected GPUs (0) clear.
+[0;36m[1m=>[0m === Short Model Test ===
+[0;36m[1m=>[0m Config: tests/gemma-4-4-hqq8-k6v6-a16.conf
+[0;36m[1m=>[0m Port: 18017
+[0;36m[1m=>[0m Run dir: /home/main/Documents/Claude/krasis/logs/dev-test_20260610_075335
+[0;36m[1m=>[0m Step 1: Launching server with --benchmark...
+[0;36m[1m=>[0m Log: /home/main/Documents/Claude/krasis/logs/dev-test_20260610_075335/test_stdout.log
+[0;36m[1m=>[0m Import origin check:
+krasis: /home/main/Documents/Claude/krasis/python/krasis/__init__.py
+krasis.krasis: /home/main/Documents/Claude/krasis/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+Pre-scan: set CUDA_VISIBLE_DEVICES=0
+Loaded config from tests/gemma-4-4-hqq8-k6v6-a16.conf: {'model_path': '/home/main/.krasis/models/gemma-4-26b-a4b-it', 'selected_gpus': '0', 'num_gpus': 1, 'layer_group_size': 2, 'kv_dtype': 'k6v6', 'gpu_expert_bits': 4, 'cpu_expert_bits': 4, 'attention_quant': 'hqq8', 'hqq_group_size': 128, 'shared_expert_quant': 'int8', 'dense_mlp_quant': 'int8', 'lm_head_quant': 'int8', 'host': '0.0.0.0', 'port': 18017, 'enable_thinking': False}
+
+[1m[36m▸ Krasis — gemma-4-26b-a4b-it[0m
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 1[0m
+  [32mHCS host cache: source[0m
+  [32mSelected physical GPUs: 0 (config; CUDA_VISIBLE_DEVICES=0)[0m
+  [32mExperts: GPU INT4 g128 (amax)  |  Attention: hqq8  |  KV: k6v6[0m
+  [32mLayer groups: 2  |  KV cache: 1000 MB  |  Threads: 40[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+
+[1m[36m▸ Loading model weights[0m
+  [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=518 MB, free=31600 MB, total=32119 MB
+
+[1m[36m▸ Loading GPU weights[0m
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:0: alloc=2690 MB, reserved=2742 MB, used=3358 MB, free=28760 MB, total=32119 MB
+  [0;32mHQQ attention artifacts validated (1870 MB cached), 28760 MB free[0m
+
+[1m[36m▸ Building GPU INT4 Marlin expert cache (one-time)[0m
+  [2mCache will be saved to /home/main/.krasis/cache/gemma-4-26b-a4b-it for instant loading next time.[0m
+  [1;33m▸ Building GPU INT4 Marlin cache: 30 layers from safetensors[0m
+    GPU Marlin: 5/30 layers (4s elapsed, ~21s remaining)
+    GPU Marlin: 10/30 layers (8s elapsed, ~17s remaining)
+    GPU Marlin: 15/30 layers (13s elapsed, ~13s remaining)
+    GPU Marlin: 20/30 layers (17s elapsed, ~8s remaining)
+    GPU Marlin: 25/30 layers (21s elapsed, ~4s remaining)
+    GPU Marlin: 30/30 layers (25s elapsed, ~0s remaining)
+  [0;32m✓ GPU INT4 Marlin cache built: 12.1 GB in 27s[0m
+    Marlin timing: initial_prefetch=0.0s routed io/quant=10.1s prefetch=0.0s repack=2.5s write=12.4s misc=0.0s; shared io/quant=0.0s repack=0.0s write=0.0s; flush=0.0s
+    Loading GPU Marlin cache: 30 layers...
+    GPU Marlin cache loaded: 12.1 GB in 7s
+  [0;32mExpert cache built in 41s — next launch will be much faster.[0m
+  [33m[VRAM after-phase2-expert-weights][0m cuda:0: alloc=2690 MB, reserved=2742 MB, used=3358 MB, free=28760 MB, total=32119 MB
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:0: alloc=2690 MB, reserved=2742 MB, used=3358 MB, free=28760 MB, total=32119 MB
+  [33m[VRAM after-kv-cache-init][0m cuda:0: alloc=3706 MB, reserved=3770 MB, used=4386 MB, free=27732 MB, total=32119 MB
+  [33m[VRAM after-full-load][0m cuda:0: alloc=3706 MB, reserved=3770 MB, used=4386 MB, free=27732 MB, total=32119 MB
+
+[1m[36m▸ CUDA runtime warmup[0m
+/home/main/miniconda3/envs/ktransformers/lib/python3.11/site-packages/torch/_inductor/compile_fx.py:312: UserWarning: TensorFloat32 tensor cores for float32 matrix multiplication available but not enabled. Consider setting `torch.set_float32_matmul_precision('high')` for better performance.
+  warnings.warn(
+  [32mcuBLAS + Triton kernel compilation done[0m
+
+[1m[36m▸ Setting up GPU decode store[0m
+  [32mGPU decode store ready (addr=0x7d1edef0)[0m
+  [32mReleased redundant GPU execution source tensors (41 MB)[0m
+  [2mVRAM monitor started (tracking warmup)[0m
+  [2mcuda:0: 0 MB total[0m
+
+[1m[36m▸ Pre-allocating Rust prefill engine[0m
+[FLA] Loading kernels for H=0 from /home/main/Documents/Claude/krasis/python/krasis/libkrasis_fla_sm120.so
+  [32mPrefill engine scratch buffers allocated[0m
+
+[1m[36m▸ Warmup (Rust prefill engine)[0m
+  [32mRust prefill warmed with 300 tokens before HCS budgeting[0m
+  [32mWarmup complete in 1.0s[0m
+  [2mcuda:0 warmup:  peak 10,324 MB used / 32,119 MB total  (min free: 21,794 MB)[0m
+
+[1m[36m▸ VRAM calibration[0m
+  [32mSafety margin: 600 MB[0m
+  [32mFree VRAM after startup: 22,062 MB / 32,119 MB[0m
+  [32mShort calibration: probing 500 prompt tokens + 32 decode tokens[0m
+[2026-06-10T06:55:09Z ERROR krasis::gpu_decode] gpu_generate_stream: decode_step error: D2D HQQ fused K split[5]: CUDA_ERROR_INVALID_VALUE
+  [32mShort calibration: baseline=22,062 MB, prefill post-alloc=21,750 MB, prefill min=21,462 MB, decode min=0 MB, post-cleanup=22,066 MB[0m
+  [32mAdaptive long calibration: default target=8,419 tokens, target low-water floor=1,200 MB, estimated prefill growth=0.4431 MB/token[0m
+  [32mAdaptive long calibration: next probe 8,419 tokens (model-estimated initial probe (projected 0.4431 MB/token, validation floor 2400 MB))[0m
+  [32mLong calibration: probing 8,419 prompt tokens + 32 decode tokens[0m
+[2026-06-10T06:55:19Z ERROR krasis::gpu_decode] gpu_generate_stream: decode_step error: D2D HQQ fused K split[5]: CUDA_ERROR_INVALID_VALUE
+  [32mLong calibration: baseline=22,066 MB, prefill post-alloc=18,320 MB, prefill min=17,968 MB, decode min=0 MB, post-cleanup=22,066 MB[0m
+  [32mScratch reservation: max=16,421 MB (at 50,000 tokens)[0m
+
+[1m[36m▸ VRAM calibration complete[0m
+  [32mPost-calibration free VRAM: 22,066 MB[0m
+  [32mTransient deltas: short prefill=600 MB, long prefill=4,098 MB, short decode=22,062 MB, long decode=22,066 MB[0m
+  [32mGPU0 decode HCS budget: 0 MB[0m
+  [32mPrefill HCS budgets: short=20,866 MB, long=17,368 MB[0m
+  [32mWorst-case prefill scratch reservation: 16,421 MB at 50,000 tokens[0m
+
+[1m[36m▸ Calculating HCS budget[0m
+
+[1m[36m▸ Building expert heatmap (decode-weighted calibration)[0m
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/main/Documents/Claude/krasis/python/krasis/server.py", line 3026, in <module>
+    main()
+  File "/home/main/Documents/Claude/krasis/python/krasis/server.py", line 2227, in main
+    heatmap_path = _build_heatmap(_model, heatmap_path, args)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/main/Documents/Claude/krasis/python/krasis/server.py", line 759, in _build_heatmap
+    generated = gpu_store.gpu_generate_batch(
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: gpu_decode_step error: D2D HQQ fused K split[5]: CUDA_ERROR_INVALID_VALUE
+[0;31m[1mERROR[0m Server did not start. Check log: /home/main/Documents/Claude/krasis/logs/dev-test_20260610_075335/test_stdout.log

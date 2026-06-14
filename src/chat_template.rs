@@ -44,7 +44,9 @@ impl ChatTemplateEngine {
         let config: serde_json::Value = serde_json::from_str(&data)
             .map_err(|e| format!("Failed to parse JSON: {}", e))?;
 
-        // Extract chat_template — can be a string or a list of {name, template} objects
+        // Extract chat_template — can be a string or a list of {name, template} objects.
+        // Some model snapshots keep tokenizer_config.json at chat_template=null
+        // and ship the real template beside it as chat_template.jinja.
         let template_source = if let Some(ct) = config.get("chat_template") {
             match ct {
                 serde_json::Value::String(s) => s.clone(),
@@ -67,11 +69,14 @@ impl ChatTemplateEngine {
                     default_tmpl.or(first_tmpl)
                         .unwrap_or_else(|| DEEPSEEK_CHAT_TEMPLATE.to_string())
                 }
-                _ => DEEPSEEK_CHAT_TEMPLATE.to_string(),
+                _ => load_sibling_chat_template(tokenizer_config_path)
+                    .unwrap_or_else(|| DEEPSEEK_CHAT_TEMPLATE.to_string()),
             }
         } else {
-            log::info!("No chat_template in config — using DeepSeek format fallback");
-            DEEPSEEK_CHAT_TEMPLATE.to_string()
+            load_sibling_chat_template(tokenizer_config_path).unwrap_or_else(|| {
+                log::info!("No chat_template in config — using DeepSeek format fallback");
+                DEEPSEEK_CHAT_TEMPLATE.to_string()
+            })
         };
 
         // Extract bos_token and eos_token
@@ -266,6 +271,16 @@ impl ChatTemplateEngine {
                     };
                     Ok(minijinja::Value::from(parts))
                 }
+                "get" => {
+                    let key = args.first().ok_or_else(|| {
+                        minijinja::Error::new(minijinja::ErrorKind::InvalidOperation, "get requires a key argument")
+                    })?;
+                    match value.get_item(key) {
+                        Ok(item) if !item.is_undefined() => Ok(item),
+                        Ok(_) => Ok(args.get(1).cloned().unwrap_or(minijinja::Value::UNDEFINED)),
+                        Err(_) => Ok(args.get(1).cloned().unwrap_or(minijinja::Value::UNDEFINED)),
+                    }
+                }
                 _ => Err(minijinja::Error::new(
                     minijinja::ErrorKind::UnknownMethod,
                     format!("unknown method: {}", method),
@@ -288,6 +303,18 @@ impl ChatTemplateEngine {
 
         tmpl.render(ctx)
             .map_err(|e| format!("Template render failed: {}", e))
+    }
+}
+
+fn load_sibling_chat_template(tokenizer_config_path: &str) -> Option<String> {
+    let config_path = std::path::Path::new(tokenizer_config_path);
+    let template_path = config_path.parent()?.join("chat_template.jinja");
+    match std::fs::read_to_string(&template_path) {
+        Ok(template) => {
+            log::info!("Loaded chat template from {}", template_path.display());
+            Some(template)
+        }
+        Err(_) => None,
     }
 }
 
@@ -487,5 +514,19 @@ mod tests {
         let messages = r#"[{"role":"user","content":[{"type":"text","text":"Hello"},{"text":" world"}]}]"#;
         let rendered = engine.apply(messages, false, false).unwrap();
         assert_eq!(rendered, "Hello world");
+    }
+
+    #[test]
+    fn dict_get_method_matches_python_template_usage() {
+        let template = concat!(
+            "{% for message in messages %}",
+            "{{ message.get('reasoning') or message.get('reasoning_content', '') }}",
+            "{% endfor %}"
+        );
+        let config_path = write_tokenizer_config(template);
+        let engine = ChatTemplateEngine::from_config(&config_path).unwrap();
+        let messages = r#"[{"role":"assistant","content":"x","reasoning_content":"thinking"}]"#;
+        let rendered = engine.apply(messages, false, false).unwrap();
+        assert_eq!(rendered, "thinking");
     }
 }

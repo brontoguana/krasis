@@ -685,6 +685,31 @@ class KrasisModel:
     ):
         self.cfg = ModelConfig.from_model_path(model_path)
         self.quant_cfg = quant_cfg or QuantConfig()
+        if self.cfg.gemma4_text:
+            if self.quant_cfg.gpu_expert_bits != 4 or self.quant_cfg.cpu_expert_bits != 4:
+                raise ValueError(
+                    "Gemma4 text support currently validates only INT4 routed experts "
+                    f"(gpu_expert_bits=4, cpu_expert_bits=4). Got "
+                    f"gpu_expert_bits={self.quant_cfg.gpu_expert_bits}, "
+                    f"cpu_expert_bits={self.quant_cfg.cpu_expert_bits}."
+                )
+            if self.quant_cfg.attention not in ("bf16", "hqq4", "hqq6", "hqq8"):
+                raise ValueError(
+                    "Gemma4 text support validates only BF16 or fixed HQQ attention "
+                    "(hqq4, hqq6, hqq8). Mixed/auto HQQ modes are not validated for Gemma4 yet. "
+                    f"Got attention_quant={self.quant_cfg.attention!r}."
+                )
+            if self.quant_cfg.kv_cache_format not in ("bf16", "k6v6", "k4v4"):
+                raise ValueError(
+                    "Gemma4 text support currently validates only BF16, k6v6, and k4v4 KV cache. "
+                    f"Got kv_cache_format={self.quant_cfg.kv_cache_format!r}."
+                )
+            if self.quant_cfg.ring_window_kv and self.quant_cfg.kv_cache_format == "k4v4":
+                raise ValueError(
+                    "Gemma4 ring-window KV currently validates only k6v6. "
+                    "k4v4 ring-window produced invalid 25K long-prompt output during validation; "
+                    "use k6v6 ring-window or k4v4 without ring-window."
+                )
         self.gguf_path = gguf_path
         self.gguf_native = gguf_native
 
@@ -1560,6 +1585,17 @@ class KrasisModel:
             "is_moe": layer.is_moe,
             "layer_type": layer.layer_type,
         }
+        for attr, key in (
+            ("pre_ffn_norm_weight", "pre_feedforward_layernorm"),
+            ("post_ffn_norm_weight", "post_feedforward_layernorm"),
+            ("post_ffn_norm1_weight", "post_feedforward_layernorm_1"),
+            ("post_ffn_norm2_weight", "post_feedforward_layernorm_2"),
+            ("pre_ffn_norm2_weight", "pre_feedforward_layernorm_2"),
+            ("layer_scalar", "layer_scalar"),
+        ):
+            value = getattr(layer, attr, None)
+            if value is not None:
+                result["norms"][key] = value
 
         # ── Attention weights ──
         attn = layer.attention
@@ -1618,6 +1654,10 @@ class KrasisModel:
                 result["gate"]["bias"] = layer.gate_bias
             if layer.e_score_correction_bias is not None:
                 result["gate"]["e_score_correction_bias"] = layer.e_score_correction_bias
+            if getattr(layer, "router_input_scale", None) is not None:
+                result["gate"]["input_scale"] = layer.router_input_scale
+            if getattr(layer, "router_per_expert_scale", None) is not None:
+                result["gate"]["per_expert_scale"] = layer.router_per_expert_scale
             if layer.shared_expert is not None:
                 se = {}
                 if "gate_up_proj" in layer.shared_expert:
@@ -1640,6 +1680,8 @@ class KrasisModel:
                 if layer.shared_expert_gate is not None:
                     se["shared_expert_gate"] = layer.shared_expert_gate
                 result["shared_expert"] = se
+            if layer.dense_mlp is not None:
+                result["dense_mlp"] = dict(layer.dense_mlp)
         elif layer.dense_mlp is not None:
             result["dense_mlp"] = dict(layer.dense_mlp)
 
@@ -3113,13 +3155,67 @@ class KrasisModel:
                 k_norm_ptr = k_norm.data_ptr()
             else:
                 k_norm_ptr = 0
-            head_dim = self.cfg.gqa_head_dim or self.cfg.head_dim
-            sm_scale = 1.0 / (head_dim ** 0.5)
+            head_dim = self.cfg.gqa_head_dim_for_layer(layer_idx)
+            sm_scale = 1.0 if self.cfg.gemma4_text else 1.0 / (head_dim ** 0.5)
             gated = hasattr(self.cfg, "gated_attention") and self.cfg.gated_attention
+            max_seq = max(
+                c.max_context_tokens for c in self.kv_caches if c is not None
+            )
+            rope_params = self.cfg.rope_scaling if isinstance(self.cfg.rope_scaling, dict) else {}
+            layer_rope_params = {}
+            if self.cfg.gemma4_text and isinstance(rope_params, dict):
+                layer_type = "sliding_attention" if self.cfg.is_sliding_attention_layer(layer_idx) else "full_attention"
+                layer_rope_params = rope_params.get(layer_type, {}) or {}
+            head_dim_for_rope = self.cfg.gqa_head_dim_for_layer(layer_idx)
+            if self.cfg.gemma4_text and layer_rope_params.get("rope_type") == "proportional":
+                rope_half = head_dim_for_rope // 2
+            else:
+                rope_half = int(self.cfg.rotary_dim_for_layer(layer_idx) // 2)
+            rope_cos_ptr = 0
+            rope_sin_ptr = 0
+            if rope_half > 0:
+                theta = float(self.cfg.rope_theta_for_layer(layer_idx))
+                if self.cfg.gemma4_text and layer_rope_params.get("rope_type") == "proportional":
+                    rope_proportion = float(layer_rope_params.get("partial_rotary_factor", 1.0))
+                    rope_angles = int(rope_proportion * head_dim_for_rope // 2)
+                    inv_freq_rotated = 1.0 / (
+                        theta ** (
+                            torch.arange(0, 2 * rope_angles, 2, dtype=torch.float32)
+                            / head_dim_for_rope
+                        )
+                    )
+                    nope_angles = head_dim_for_rope // 2 - rope_angles
+                    if nope_angles > 0:
+                        inv_freq = torch.cat(
+                            (inv_freq_rotated, torch.zeros(nope_angles, dtype=torch.float32)),
+                            dim=0,
+                        )
+                    else:
+                        inv_freq = inv_freq_rotated
+                else:
+                    inv_freq = 1.0 / (
+                        theta ** (
+                            torch.arange(0, rope_half * 2, 2, dtype=torch.float32)
+                            / (rope_half * 2)
+                        )
+                    )
+                t = torch.arange(max_seq, dtype=torch.float32)
+                freqs = torch.outer(t, inv_freq)
+                rope_cos = self._move_hqq_tensor_to_device(
+                    freqs.cos().contiguous(), target_device, keepalive
+                )
+                rope_sin = self._move_hqq_tensor_to_device(
+                    freqs.sin().contiguous(), target_device, keepalive
+                )
+                rope_cos_ptr = rope_cos.data_ptr()
+                rope_sin_ptr = rope_sin.data_ptr()
             return {
                 "num_heads": int(self.cfg.num_attention_heads),
-                "num_kv_heads": int(self.cfg.num_key_value_heads),
+                "num_kv_heads": int(self.cfg.gqa_num_kv_heads_for_layer(layer_idx)),
                 "head_dim": int(head_dim),
+                "rope_half_dim": rope_half,
+                "rope_cos_ptr": int(rope_cos_ptr),
+                "rope_sin_ptr": int(rope_sin_ptr),
                 "sm_scale": float(sm_scale),
                 "q_norm_ptr": int(q_norm_ptr),
                 "k_norm_ptr": int(k_norm_ptr),
@@ -3267,8 +3363,14 @@ class KrasisModel:
                 layer_idx, layer, target_device, keepalive
             )
 
-            tensor_names = []
-            for tensor_name in sorted(runtime.keys()):
+            tensor_names = sorted(runtime.keys())
+            if self.cfg.gemma4_text and layer_kind == "gqa":
+                # Gemma4 has mixed full/sliding GQA geometry. The generic HQQ
+                # fused-QKV decode branch was built for uniform Qwen-style GQA
+                # and fails on Gemma full-attention layers; use the split Q/K/V
+                # descriptors while leaving existing model fused paths unchanged.
+                tensor_names = [name for name in tensor_names if name != "fused_qkv"]
+            for tensor_name in tensor_names:
                 desc = runtime[tensor_name]
                 store.stage_hqq_runtime_tensor_formats(
                     layer_idx=layer_idx,
@@ -3292,7 +3394,6 @@ class KrasisModel:
                     zeros_dtype=desc["zeros_dtype"],
                 )
                 staged_runtime_tensors += 1
-                tensor_names.append(tensor_name)
             for sidecar in sidecar_runtime.get(layer_idx, []):
                 correction = self._move_hqq_tensor_to_device(
                     sidecar["correction"], target_device, keepalive
@@ -3392,6 +3493,9 @@ class KrasisModel:
                     num_heads=int(layer_meta["num_heads"]),
                     num_kv_heads=int(layer_meta["num_kv_heads"]),
                     head_dim=int(layer_meta["head_dim"]),
+                    rope_half_dim=int(layer_meta["rope_half_dim"]),
+                    rope_cos_ptr=int(layer_meta["rope_cos_ptr"]),
+                    rope_sin_ptr=int(layer_meta["rope_sin_ptr"]),
                     sm_scale=float(layer_meta["sm_scale"]),
                     q_norm_ptr=int(layer_meta["q_norm_ptr"]),
                     k_norm_ptr=int(layer_meta["k_norm_ptr"]),
@@ -4151,6 +4255,16 @@ class KrasisModel:
                     layer.input_norm_weight = norms["input_layernorm"].to(dev)
                 if "post_attention_layernorm" in norms:
                     layer.post_attn_norm_weight = norms["post_attention_layernorm"].to(dev)
+                for attr, key in (
+                    ("pre_ffn_norm_weight", "pre_feedforward_layernorm"),
+                    ("post_ffn_norm_weight", "post_feedforward_layernorm"),
+                    ("post_ffn_norm1_weight", "post_feedforward_layernorm_1"),
+                    ("post_ffn_norm2_weight", "post_feedforward_layernorm_2"),
+                    ("pre_ffn_norm2_weight", "pre_feedforward_layernorm_2"),
+                    ("layer_scalar", "layer_scalar"),
+                ):
+                    if key in norms:
+                        setattr(layer, attr, norms[key].to(dev))
 
                 # Gate weights (MoE routing)
                 if layer.is_moe and "gate" in cpu_w:
@@ -4163,6 +4277,10 @@ class KrasisModel:
                     if "e_score_correction_bias" in gate_d:
                         layer.e_score_correction_bias = gate_d["e_score_correction_bias"].to(dev)
                         layer._e_score_correction_bias_f32 = layer.e_score_correction_bias.float()
+                    if "input_scale" in gate_d:
+                        layer.router_input_scale = gate_d["input_scale"].to(dev)
+                    if "per_expert_scale" in gate_d:
+                        layer.router_per_expert_scale = gate_d["per_expert_scale"].to(dev)
 
                 # Shared expert (MoE)
                 if layer.is_moe and "shared_expert" in cpu_w:
@@ -4183,8 +4301,8 @@ class KrasisModel:
                     if "shared_expert_gate" in se:
                         layer.shared_expert_gate = se["shared_expert_gate"]
 
-                # Dense MLP (non-MoE layers)
-                if not layer.is_moe and "dense_mlp" in cpu_w:
+                # Dense MLP (non-MoE layers, plus Gemma4 dense+MoE layers)
+                if "dense_mlp" in cpu_w:
                     layer.dense_mlp = self._copy_weights_dict(cpu_w["dense_mlp"], dev)
         else:
             logger.info("Attention already offloaded during load — skipping Steps 1-2")
@@ -4912,10 +5030,12 @@ class KrasisModel:
 
             # Count full attention layers in this GPU's split
             kv_offset = 0
+            kv_layer_indices = []
             for layer_idx in range(start, end):
                 if self.cfg.is_full_attention_layer(layer_idx):
                     self._kv_layer_offsets[layer_idx] = kv_offset
                     kv_offset += 1
+                    kv_layer_indices.append(layer_idx)
                 else:
                     self._kv_layer_offsets[layer_idx] = -1
 
@@ -4930,6 +5050,8 @@ class KrasisModel:
                     combined=False,
                     max_mb=kv_mb,
                     kv_format=self.quant_cfg.kv_cache_format,
+                    layer_indices=kv_layer_indices,
+                    enable_ring_window=self.quant_cfg.ring_window_kv,
                 )
             else:
                 cache = None
@@ -6640,6 +6762,12 @@ class KrasisModel:
                 q_absorbed = ma.num_heads * ma.ckv_dim  # padded to 512 for MLA
                 kv_out = ma.ckv_dim + ma.qk_rope_dim
                 max_qkv = max(max_qkv, q_out, q_absorbed, kv_out)
+            elif hasattr(layer, 'gqa_weights') and layer.gqa_weights:
+                q_sz = layer.gqa_weights["q_proj"].shape[0]
+                k_sz = layer.gqa_weights["k_proj"].shape[0]
+                v_src = layer.gqa_weights.get("v_proj", layer.gqa_weights["k_proj"])
+                v_sz = v_src.shape[0]
+                max_qkv = max(max_qkv, q_sz + k_sz + v_sz)
             elif hasattr(layer.attention, 'num_heads'):
                 ga = layer.attention
                 q_sz = ga.num_heads * ga.head_dim * (2 if ga.gated_attention else 1)
@@ -6667,6 +6795,8 @@ class KrasisModel:
         )
         # Register embedding
         store.set_embedding(self.embedding.data_ptr())
+        store.set_embedding_scale(float(getattr(self.cfg, "embedding_scale", 1.0)))
+        store.set_final_logit_softcap(float(getattr(self.cfg, "final_logit_softcapping", 0.0)))
 
         # Register final norm
         store.set_final_norm(self.final_norm.data_ptr(), self.cfg.hidden_size)
@@ -6916,6 +7046,71 @@ class KrasisModel:
                 hqq_cache_bytes >> 20,
                 self._hqq_attention_loaded_tensors,
             )
+
+        self._rust_layer_rope_tables = getattr(self, "_rust_layer_rope_tables", {})
+
+        def _gqa_rope_table_ptrs(
+            layer_idx: int,
+            max_seq: int,
+            target_device: torch.device,
+        ) -> tuple[int, int, int, torch.Tensor | None, torch.Tensor | None]:
+            rope_params = self.cfg.rope_scaling if isinstance(self.cfg.rope_scaling, dict) else {}
+            layer_rope_params = {}
+            if self.cfg.gemma4_text and isinstance(rope_params, dict):
+                layer_type = "sliding_attention" if self.cfg.is_sliding_attention_layer(layer_idx) else "full_attention"
+                layer_rope_params = rope_params.get(layer_type, {}) or {}
+            head_dim_for_rope = self.cfg.gqa_head_dim_for_layer(layer_idx)
+            if self.cfg.gemma4_text and layer_rope_params.get("rope_type") == "proportional":
+                rope_half = head_dim_for_rope // 2
+            else:
+                rope_half = int(self.cfg.rotary_dim_for_layer(layer_idx) // 2)
+            if rope_half <= 0:
+                return 0, 0, 0, None, None
+            theta = float(self.cfg.rope_theta_for_layer(layer_idx))
+            key = (
+                int(max_seq),
+                rope_half,
+                theta,
+                str(target_device),
+                str(layer_rope_params.get("rope_type", "default")),
+                float(layer_rope_params.get("partial_rotary_factor", 1.0)),
+                int(head_dim_for_rope),
+            )
+            cached = self._rust_layer_rope_tables.get(key)
+            if cached is None:
+                if self.cfg.gemma4_text and layer_rope_params.get("rope_type") == "proportional":
+                    rope_proportion = float(layer_rope_params.get("partial_rotary_factor", 1.0))
+                    rope_angles = int(rope_proportion * head_dim_for_rope // 2)
+                    inv_freq_rotated = 1.0 / (
+                        theta ** (
+                            torch.arange(0, 2 * rope_angles, 2, dtype=torch.float32)
+                            / head_dim_for_rope
+                        )
+                    )
+                    nope_angles = head_dim_for_rope // 2 - rope_angles
+                    if nope_angles > 0:
+                        inv_freq = torch.cat(
+                            (inv_freq_rotated, torch.zeros(nope_angles, dtype=torch.float32)),
+                            dim=0,
+                        )
+                    else:
+                        inv_freq = inv_freq_rotated
+                else:
+                    inv_freq = 1.0 / (
+                        theta ** (
+                            torch.arange(0, rope_half * 2, 2, dtype=torch.float32)
+                            / (rope_half * 2)
+                        )
+                    )
+                t = torch.arange(max_seq, dtype=torch.float32)
+                freqs = torch.outer(t, inv_freq)
+                cos_f32 = freqs.cos().contiguous().to(target_device)
+                sin_f32 = freqs.sin().contiguous().to(target_device)
+                cached = (cos_f32, sin_f32)
+                self._rust_layer_rope_tables[key] = cached
+                self._rust_decode_weights.extend([cos_f32, sin_f32])
+            cos_f32, sin_f32 = cached
+            return int(cos_f32.data_ptr()), int(sin_f32.data_ptr()), rope_half, cos_f32, sin_f32
 
         for layer_idx, layer in enumerate(self.layers):
             attn = layer.attention
@@ -7325,9 +7520,14 @@ class KrasisModel:
 
                 post_norm_ptr = post_norm.data_ptr() if post_norm is not None else 0
                 post_norm_size = post_norm.numel() if post_norm is not None else 0
-                _gqa_head_dim = self.cfg.gqa_head_dim or self.cfg.head_dim
-                _gqa_sm_scale = 1.0 / (_gqa_head_dim ** 0.5)
+                _gqa_head_dim = self.cfg.gqa_head_dim_for_layer(layer_idx)
+                _gqa_sm_scale = 1.0 if self.cfg.gemma4_text else 1.0 / (_gqa_head_dim ** 0.5)
                 _gqa_gated = hasattr(self.cfg, 'gated_attention') and self.cfg.gated_attention
+                _gqa_kv_heads = self.cfg.gqa_num_kv_heads_for_layer(layer_idx)
+                max_seq = max(
+                    c.max_context_tokens for c in self.kv_caches if c is not None
+                )
+                _rope_cos_ptr, _rope_sin_ptr, _rope_half, _rope_cos, _rope_sin = _gqa_rope_table_ptrs(layer_idx, max_seq, device)
                 store.register_gqa_layer(
                     layer_idx=layer_idx,
                     input_norm_ptr=inp_norm.data_ptr(), input_norm_size=inp_norm.numel(),
@@ -7336,34 +7536,65 @@ class KrasisModel:
                     v_proj_wid=v_wid, o_proj_wid=o_wid,
                     fused_qkv_wid=None,
                     num_heads=self.cfg.num_attention_heads,
-                    num_kv_heads=self.cfg.num_key_value_heads,
+                    num_kv_heads=_gqa_kv_heads,
                     head_dim=_gqa_head_dim, sm_scale=_gqa_sm_scale,
                     q_norm_ptr=q_norm_ptr, k_norm_ptr=k_norm_ptr,
                     gated=_gqa_gated,
+                    rope_half_dim=_rope_half,
+                    rope_cos_ptr=_rope_cos_ptr,
+                    rope_sin_ptr=_rope_sin_ptr,
                 )
+                if self.cfg.is_sliding_attention_layer(layer_idx) and self.cfg.sliding_window:
+                    store.set_gqa_sliding_window(layer_idx, int(self.cfg.sliding_window))
+                if gqa_w is not None and gqa_w.get("v_norm_no_scale", False):
+                    store.set_gqa_v_norm_no_scale(layer_idx, True)
+                if self.cfg.gemma4_text:
+                    store.set_gqa_rope_half_split(layer_idx, True)
 
                 # Set up RoPE tables from first GQA layer
                 if not rope_set:
-                    max_seq = max(
-                        c.max_context_tokens for c in self.kv_caches if c is not None
-                    )
-                    rope_half = self.cfg.rotary_dim // 2
-                    inv_freq = 1.0 / (self.cfg.rope_theta ** (
-                        torch.arange(0, rope_half * 2, 2, dtype=torch.float32) / (rope_half * 2)))
-                    t = torch.arange(max_seq, dtype=torch.float32)
-                    freqs = torch.outer(t, inv_freq)
-                    cos_f32 = freqs.cos().contiguous().to(device)
-                    sin_f32 = freqs.sin().contiguous().to(device)
-                    self._rust_rope_cos = cos_f32
-                    self._rust_rope_sin = sin_f32
+                    if _rope_cos is None or _rope_sin is None:
+                        raise RuntimeError(f"Missing RoPE table for GQA layer {layer_idx}")
+                    self._rust_rope_cos = _rope_cos
+                    self._rust_rope_sin = _rope_sin
                     store.set_rope_tables(
-                        cos_f32.data_ptr(), sin_f32.data_ptr(),
-                        cos_f32.shape[1], max_seq,
+                        _rope_cos.data_ptr(), _rope_sin.data_ptr(),
+                        _rope_cos.shape[1], max_seq,
                     )
                     rope_set = True
 
             # Register MLP type
-            if layer.is_moe:
+            if layer.is_moe and self.cfg.gemma4_text and layer.dense_mlp is not None:
+                gp = self._dense_mlp_tensor(layer.dense_mlp["gate_proj"])
+                up = self._dense_mlp_tensor(layer.dense_mlp["up_proj"])
+                dp = self._dense_mlp_tensor(layer.dense_mlp["down_proj"])
+                self._rust_decode_weights.extend([gp, up, dp])
+                gp_wid = store.register_weight(gp.data_ptr(), gp.shape[0], gp.shape[1], 0)
+                up_wid = store.register_weight(up.data_ptr(), up.shape[0], up.shape[1], 0)
+                dp_wid = store.register_weight(dp.data_ptr(), dp.shape[0], dp.shape[1], 0)
+                _gemma_refs = []
+                def _ptr(t):
+                    if t is None:
+                        return 0
+                    tt = t.contiguous().to(device)
+                    _gemma_refs.append(tt)
+                    return tt.data_ptr()
+                store.register_gemma4_moe_layer(
+                    layer_idx=layer_idx,
+                    dense_gate_proj_wid=gp_wid,
+                    dense_up_proj_wid=up_wid,
+                    dense_down_proj_wid=dp_wid,
+                    pre_ffn_norm_ptr=_ptr(getattr(layer, "pre_ffn_norm_weight", None)),
+                    post_ffn_norm_ptr=_ptr(getattr(layer, "post_ffn_norm_weight", None)),
+                    post_ffn_norm1_ptr=_ptr(getattr(layer, "post_ffn_norm1_weight", None)),
+                    post_ffn_norm2_ptr=_ptr(getattr(layer, "post_ffn_norm2_weight", None)),
+                    pre_ffn_norm2_ptr=_ptr(getattr(layer, "pre_ffn_norm2_weight", None)),
+                    layer_scalar_ptr=_ptr(getattr(layer, "layer_scalar", None)),
+                    router_input_scale_ptr=_ptr(getattr(layer, "router_input_scale", None)),
+                    router_per_expert_scale_ptr=_ptr(getattr(layer, "router_per_expert_scale", None)),
+                )
+                self._rust_decode_weights.extend(_gemma_refs)
+            elif layer.is_moe:
                 store.register_mlp(layer_idx, "moe")
             elif layer.dense_mlp is not None:
                 gp = self._dense_mlp_tensor(layer.dense_mlp["gate_proj"])
@@ -7409,6 +7640,18 @@ class KrasisModel:
                     )
                     logger.info("Set Nemotron MoE config for layer %d (latent_down=%s, latent_up=%s)",
                                 layer_idx, ld_wid, lu_wid)
+        elif self.cfg.gemma4_text:
+            for layer_idx, layer in enumerate(self.layers):
+                if layer.is_moe:
+                    store.set_moe_nemotron_config(
+                        layer_idx=layer_idx,
+                        activation_type=2,
+                        gated_experts=True,
+                        latent_down_wid=None,
+                        latent_up_wid=None,
+                        moe_input_size=0,
+                    )
+            logger.info("Set Gemma4 MoE config for %d layers (gelu_tanh gated experts)", sum(1 for l in self.layers if l.is_moe))
 
         # Register shared_expert_gate weights (sigmoid gate for shared expert output)
         # These are BF16 tensors loaded by Python, not in the Rust engine cache
@@ -7454,6 +7697,7 @@ class KrasisModel:
             # k4v4/k6v4/k7v4/k6v6/k8v6 KV cache: K is blockwise integer + BF16
             # scale. k4v4/k6v4/k7v4 use Polar4 V; k6v6/k8v6 use integer V.
             kintv4_ptrs = []
+            max_seq_by_layer = []
             gqa_cache_idx = 0
             for layer_idx, layer in enumerate(self.layers):
                 if (layer.layer_type not in ("linear_attention", "mamba2", "moe")
@@ -7466,8 +7710,9 @@ class KrasisModel:
                     kintv4_ptrs.append((layer_idx,
                                         kr.data_ptr(), ka.data_ptr(),
                                         vr.data_ptr(), va.data_ptr()))
+                    max_seq_by_layer.append((layer_idx, int(kr.shape[0] * kr.shape[1])))
             max_seq = cache.max_pages * cache.page_size
-            num_blocks = (cache.num_kv_heads * cache.gqa_head_dim) // 16
+            num_blocks = cache.max_num_blocks()
             if cache.kv_format == 8:
                 store.set_kv_cache_ptrs_k8v6(kintv4_ptrs, max_seq, num_blocks)
                 fmt = "k8v6"
@@ -7483,6 +7728,7 @@ class KrasisModel:
             else:
                 store.set_kv_cache_ptrs_k6v4(kintv4_ptrs, max_seq, num_blocks)
                 fmt = "k6v4"
+            store.set_kv_cache_max_seq_by_layer(max_seq_by_layer)
             logger.info("Shared %s KV cache: %d GQA layers, max_seq=%d (%d pages × %d), %d blocks",
                         fmt, len(kintv4_ptrs), max_seq, cache.max_pages, cache.page_size, num_blocks)
         elif cache is not None and cache.kv_format == 3 and cache.k_cache is not None and cache.v_radius_cache is not None:
@@ -7500,7 +7746,7 @@ class KrasisModel:
                                       k_layer.data_ptr(),
                                       vr.data_ptr(), va.data_ptr()))
             max_seq = cache.max_pages * cache.page_size
-            num_blocks = (cache.num_kv_heads * cache.gqa_head_dim) // 16
+            num_blocks = cache.max_num_blocks()
             store.set_kv_cache_ptrs_k8v4(k8v4_ptrs, max_seq, num_blocks)
             logger.info("Shared k8v4 KV cache: %d GQA layers, max_seq=%d (%d pages × %d), %d V blocks",
                         len(k8v4_ptrs), max_seq, cache.max_pages, cache.page_size, num_blocks)
@@ -7520,7 +7766,7 @@ class KrasisModel:
                                         kr.data_ptr(), vr.data_ptr(),
                                         ka.data_ptr(), va.data_ptr()))
             max_seq = cache.max_pages * cache.page_size
-            num_blocks = (cache.num_kv_heads * cache.gqa_head_dim) // 16
+            num_blocks = cache.max_num_blocks()
             store.set_kv_cache_ptrs_polar4(polar4_ptrs, max_seq, num_blocks)
             logger.info("Shared Polar4 KV cache: %d GQA layers, max_seq=%d (%d pages × %d), %d blocks",
                         len(polar4_ptrs), max_seq, cache.max_pages, cache.page_size, num_blocks)
@@ -7694,6 +7940,7 @@ class KrasisModel:
             fused_qkv_wid=None,
             num_heads=0, num_kv_heads=0, head_dim=0, sm_scale=0.0,
             q_norm_ptr=0, k_norm_ptr=0, gated=False,
+            rope_half_dim=0,
         )
 
         # Register MoE placeholder — actual expert data is wired by setup_from_engine,
@@ -7774,6 +8021,8 @@ class KrasisModel:
         # Embedding — not needed on aux (segment_skip_embedding=true), but register
         # a dummy so configure doesn't complain. Use primary embedding ptr (not accessed).
         store.set_embedding(self.embedding.data_ptr())
+        store.set_embedding_scale(float(getattr(self.cfg, "embedding_scale", 1.0)))
+        store.set_final_logit_softcap(float(getattr(self.cfg, "final_logit_softcapping", 0.0)))
 
         if is_last_segment:
             # Final norm — copy to aux GPU (only needed on last segment)
@@ -7951,9 +8200,14 @@ class KrasisModel:
                         ckv_cache_dim=attn.ckv_dim,
                     )
                 else:
-                    _gqa_head_dim = self.cfg.gqa_head_dim or self.cfg.head_dim
-                    _gqa_sm_scale = 1.0 / (_gqa_head_dim ** 0.5)
+                    _gqa_head_dim = self.cfg.gqa_head_dim_for_layer(layer_idx)
+                    _gqa_sm_scale = 1.0 if self.cfg.gemma4_text else 1.0 / (_gqa_head_dim ** 0.5)
                     _gqa_gated = hasattr(self.cfg, 'gated_attention') and self.cfg.gated_attention
+                    _gqa_kv_heads = self.cfg.gqa_num_kv_heads_for_layer(layer_idx)
+                    max_seq = max(
+                        c.max_context_tokens for c in self.kv_caches if c is not None
+                    )
+                    _rope_cos_ptr, _rope_sin_ptr, _rope_half, _rope_cos, _rope_sin = _gqa_rope_table_ptrs(layer_idx, max_seq, aux_device)
                     store.register_gqa_layer(
                         layer_idx=layer_idx,
                         input_norm_ptr=inp_norm.data_ptr(), input_norm_size=inp_norm.numel(),
@@ -7962,10 +8216,13 @@ class KrasisModel:
                         v_proj_wid=dummy_wid, o_proj_wid=dummy_wid,
                         fused_qkv_wid=None,
                         num_heads=self.cfg.num_attention_heads,
-                        num_kv_heads=self.cfg.num_key_value_heads,
+                        num_kv_heads=_gqa_kv_heads,
                         head_dim=_gqa_head_dim, sm_scale=_gqa_sm_scale,
                         q_norm_ptr=0, k_norm_ptr=0,
                         gated=_gqa_gated,
+                        rope_half_dim=_rope_half,
+                        rope_cos_ptr=_rope_cos_ptr,
+                        rope_sin_ptr=_rope_sin_ptr,
                     )
             elif layer.layer_type == "linear_attention":
                 if in_segment:
@@ -8202,9 +8459,10 @@ class KrasisModel:
                     )
             else:
                 # GQA attention — attn object is None for GQA models (weights in layer.gqa_weights)
-                _gqa_head_dim = self.cfg.gqa_head_dim or self.cfg.head_dim
-                _gqa_sm_scale = 1.0 / (_gqa_head_dim ** 0.5)
+                _gqa_head_dim = self.cfg.gqa_head_dim_for_layer(layer_idx)
+                _gqa_sm_scale = 1.0 if self.cfg.gemma4_text else 1.0 / (_gqa_head_dim ** 0.5)
                 _gqa_gated = hasattr(self.cfg, 'gated_attention') and self.cfg.gated_attention
+                _gqa_kv_heads = self.cfg.gqa_num_kv_heads_for_layer(layer_idx)
                 gqa_w = layer.gqa_weights if hasattr(layer, 'gqa_weights') else None
 
                 if in_segment:
@@ -8266,6 +8524,13 @@ class KrasisModel:
                     else:
                         k_norm_ptr = 0
 
+                    max_seq = max(
+                        c.max_context_tokens for c in self.kv_caches if c is not None
+                    )
+                    _rope_cos_ptr, _rope_sin_ptr, _rope_half, _rope_cos, _rope_sin = _gqa_rope_table_ptrs(
+                        layer_idx, max_seq, aux_device
+                    )
+
                     store.register_gqa_layer(
                         layer_idx=layer_idx,
                         input_norm_ptr=inp_norm_aux.data_ptr(), input_norm_size=inp_norm_aux.numel(),
@@ -8274,34 +8539,41 @@ class KrasisModel:
                         v_proj_wid=v_wid, o_proj_wid=o_wid,
                         fused_qkv_wid=None,
                         num_heads=self.cfg.num_attention_heads,
-                        num_kv_heads=self.cfg.num_key_value_heads,
+                        num_kv_heads=_gqa_kv_heads,
                         head_dim=_gqa_head_dim, sm_scale=_gqa_sm_scale,
                         q_norm_ptr=q_norm_ptr, k_norm_ptr=k_norm_ptr,
                         gated=_gqa_gated,
+                        rope_half_dim=_rope_half,
+                        rope_cos_ptr=_rope_cos_ptr,
+                        rope_sin_ptr=_rope_sin_ptr,
                     )
+                    if self.cfg.is_sliding_attention_layer(layer_idx) and self.cfg.sliding_window:
+                        store.set_gqa_sliding_window(layer_idx, int(self.cfg.sliding_window))
+                    if gqa_w is not None and gqa_w.get("v_norm_no_scale", False):
+                        store.set_gqa_v_norm_no_scale(layer_idx, True)
+                    if self.cfg.gemma4_text:
+                        store.set_gqa_rope_half_split(layer_idx, True)
 
                     # RoPE tables on aux GPU (from first GQA layer in segment)
                     if not aux_rope_set:
-                        max_seq = max(
-                            c.max_context_tokens for c in self.kv_caches if c is not None
-                        )
-                        rope_half = self.cfg.rotary_dim // 2
-                        inv_freq = 1.0 / (self.cfg.rope_theta ** (
-                            torch.arange(0, rope_half * 2, 2, dtype=torch.float32) / (rope_half * 2)))
-                        t = torch.arange(max_seq, dtype=torch.float32)
-                        freqs = torch.outer(t, inv_freq)
-                        cos_f32 = torch.cos(freqs).contiguous().to(aux_device)
-                        sin_f32 = torch.sin(freqs).contiguous().to(aux_device)
-                        self._aux_rope_cos = cos_f32
-                        self._aux_rope_sin = sin_f32
+                        if _rope_cos is None or _rope_sin is None:
+                            raise RuntimeError(f"Missing aux RoPE table for GQA layer {layer_idx}")
+                        self._aux_rope_cos = _rope_cos
+                        self._aux_rope_sin = _rope_sin
                         store.set_rope_tables(
-                            cos_f32.data_ptr(), sin_f32.data_ptr(),
-                            cos_f32.shape[1], max_seq,
+                            _rope_cos.data_ptr(), _rope_sin.data_ptr(),
+                            _rope_cos.shape[1], max_seq,
                         )
                         aux_rope_set = True
                 else:
                     # Placeholder GQA (never executed on this GPU)
                     dummy_wid = store.register_weight(0, 1, 1, 0)
+                    max_seq = max(
+                        c.max_context_tokens for c in self.kv_caches if c is not None
+                    )
+                    _rope_cos_ptr, _rope_sin_ptr, _rope_half, _rope_cos, _rope_sin = _gqa_rope_table_ptrs(
+                        layer_idx, max_seq, aux_device
+                    )
                     store.register_gqa_layer(
                         layer_idx=layer_idx,
                         input_norm_ptr=inp_norm.data_ptr(), input_norm_size=inp_norm.numel(),
@@ -8310,11 +8582,16 @@ class KrasisModel:
                         v_proj_wid=dummy_wid, o_proj_wid=dummy_wid,
                         fused_qkv_wid=None,
                         num_heads=self.cfg.num_attention_heads,
-                        num_kv_heads=self.cfg.num_key_value_heads,
+                        num_kv_heads=_gqa_kv_heads,
                         head_dim=_gqa_head_dim, sm_scale=_gqa_sm_scale,
                         q_norm_ptr=0, k_norm_ptr=0,
                         gated=_gqa_gated,
+                        rope_half_dim=_rope_half,
+                        rope_cos_ptr=_rope_cos_ptr,
+                        rope_sin_ptr=_rope_sin_ptr,
                     )
+                    if self.cfg.gemma4_text:
+                        store.set_gqa_rope_half_split(layer_idx, True)
 
             # Register MLP type
             if layer.is_moe:
@@ -8409,6 +8686,7 @@ class KrasisModel:
             # k4v4/k6v4/k7v4/k6v6/k8v6 KV cache: K is blockwise integer + BF16
             # scale. k4v4/k6v4/k7v4 use Polar4 V; k6v6/k8v6 use integer V.
             kintv4_ptrs = []
+            max_seq_by_layer = []
             gqa_cache_idx = 0
             for layer_idx, layer in enumerate(self.layers):
                 if (layer.layer_type not in ("linear_attention", "mamba2", "moe")
@@ -8428,6 +8706,7 @@ class KrasisModel:
                         kintv4_ptrs.append((layer_idx,
                                             kr_aux.data_ptr(), ka_aux.data_ptr(),
                                             vr_aux.data_ptr(), va_aux.data_ptr()))
+                        max_seq_by_layer.append((layer_idx, int(kr_aux.shape[0] * kr_aux.shape[1])))
                     else:
                         kr = cache.k_radius_cache[gqa_cache_idx]
                         ka = cache.k_angles_cache[gqa_cache_idx]
@@ -8436,9 +8715,10 @@ class KrasisModel:
                         kintv4_ptrs.append((layer_idx,
                                             kr.data_ptr(), ka.data_ptr(),
                                             vr.data_ptr(), va.data_ptr()))
+                        max_seq_by_layer.append((layer_idx, int(kr.shape[0] * kr.shape[1])))
                     gqa_cache_idx += 1
             max_seq = cache.max_pages * cache.page_size
-            num_blocks = (cache.num_kv_heads * cache.gqa_head_dim) // 16
+            num_blocks = cache.max_num_blocks()
             if cache.kv_format == 8:
                 store.set_kv_cache_ptrs_k8v6(kintv4_ptrs, max_seq, num_blocks)
                 fmt = "k8v6"
@@ -8454,6 +8734,7 @@ class KrasisModel:
             else:
                 store.set_kv_cache_ptrs_k6v4(kintv4_ptrs, max_seq, num_blocks)
                 fmt = "k6v4"
+            store.set_kv_cache_max_seq_by_layer(max_seq_by_layer)
             logger.info("Aux %s KV cache on cuda:%d: %d GQA layers for [%d..%d), max_seq=%d, blocks=%d",
                         fmt, gpu_idx, len(kintv4_ptrs), split_layer, layer_end, max_seq, num_blocks)
         elif cache is not None and cache.kv_format == 3 and cache.k_cache is not None and cache.v_radius_cache is not None:

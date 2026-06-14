@@ -1,6 +1,8 @@
 """HF tokenizer wrapper with chat template support."""
 
+import json
 import logging
+import os
 from typing import Dict, List, Optional
 
 from transformers import AutoTokenizer
@@ -49,9 +51,27 @@ class Tokenizer:
     )
 
     def __init__(self, model_path: str):
+        tokenizer_kwargs = {"trust_remote_code": True}
+        tokenizer_config = os.path.join(model_path, "tokenizer_config.json")
+        try:
+            with open(tokenizer_config, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            if isinstance(cfg.get("extra_special_tokens"), list):
+                tokenizer_kwargs["extra_special_tokens"] = {}
+                logger.info(
+                    "Tokenizer config extra_special_tokens is a list; overriding to empty dict for text-only loading"
+                )
+        except FileNotFoundError:
+            pass
         self.tokenizer = AutoTokenizer.from_pretrained(
-            model_path, trust_remote_code=True
+            model_path, **tokenizer_kwargs
         )
+        if not getattr(self.tokenizer, "chat_template", None):
+            template_path = os.path.join(model_path, "chat_template.jinja")
+            if os.path.isfile(template_path):
+                with open(template_path, "r", encoding="utf-8") as f:
+                    self.tokenizer.chat_template = f.read()
+                logger.info("Loaded chat template from %s", template_path)
         # Set fallback chat template if model doesn't have one
         if not getattr(self.tokenizer, "chat_template", None):
             # Detect VL2-style models: they have <|User|> as a special token

@@ -63,11 +63,12 @@ extern "C" __global__ void embedding_lookup(
     __nv_bfloat16* __restrict__ output,      // [hidden_size]
     const __nv_bfloat16* __restrict__ table,  // [vocab_size, hidden_size]
     int token_id,
-    int hidden_size
+    int hidden_size,
+    float scale
 ) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < hidden_size) {
-        output[i] = table[token_id * hidden_size + i];
+        output[i] = f32_to_bf16(bf16_to_f32(table[token_id * hidden_size + i]) * scale);
     }
 }
 
@@ -178,6 +179,50 @@ extern "C" __global__ void rmsnorm(
     }
 }
 
+extern "C" __global__ void rmsnorm_scale(
+    __nv_bfloat16* __restrict__ output,
+    const __nv_bfloat16* __restrict__ input,
+    const __nv_bfloat16* __restrict__ scale_weight,
+    float scale,
+    float eps,
+    int hidden_size
+) {
+    extern __shared__ float smem[];
+    int tid = threadIdx.x;
+    int num_threads = blockDim.x;
+
+    float sum_sq = 0.0f;
+    for (int i = tid; i < hidden_size; i += num_threads) {
+        float x = bf16_to_f32(input[i]);
+        smem[i] = x;
+        sum_sq += x * x;
+    }
+
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+        sum_sq += __shfl_down_sync(0xffffffff, sum_sq, offset);
+    }
+    __shared__ float warp_sums[32];
+    int warp_id = tid / warpSize;
+    int lane_id = tid % warpSize;
+    if (lane_id == 0) warp_sums[warp_id] = sum_sq;
+    __syncthreads();
+
+    if (tid == 0) {
+        float total = 0.0f;
+        int num_warps = (num_threads + warpSize - 1) / warpSize;
+        for (int w = 0; w < num_warps; w++) total += warp_sums[w];
+        warp_sums[0] = rsqrtf(total / (float)hidden_size + eps);
+    }
+    __syncthreads();
+    float rms_scale = warp_sums[0] * scale;
+
+    for (int i = tid; i < hidden_size; i += num_threads) {
+        float v = smem[i] * rms_scale;
+        if (scale_weight != nullptr) v *= bf16_to_f32(scale_weight[i]);
+        output[i] = f32_to_bf16(v);
+    }
+}
+
 // ── SiLU * Mul (gate activation) ──────────────────────────────────────
 
 // Fused gate_proj * silu(gate_proj) * up_proj operation for MLP.
@@ -193,6 +238,22 @@ extern "C" __global__ void silu_mul(
         float g = bf16_to_f32(gate_up[i]);
         float u = bf16_to_f32(gate_up[intermediate_size + i]);
         output[i] = f32_to_bf16(silu(g) * u);
+    }
+}
+
+extern "C" __global__ void gelu_tanh_mul(
+    __nv_bfloat16* __restrict__ output,
+    const __nv_bfloat16* __restrict__ gate_up,
+    int intermediate_size
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < intermediate_size) {
+        float g = bf16_to_f32(gate_up[i]);
+        float u = bf16_to_f32(gate_up[intermediate_size + i]);
+        const float c = 0.7978845608028654f;
+        const float k = 0.044715f;
+        float gelu = 0.5f * g * (1.0f + tanhf(c * (g + k * g * g * g)));
+        output[i] = f32_to_bf16(gelu * u);
     }
 }
 
@@ -604,6 +665,33 @@ extern "C" __global__ void scale_bf16(
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < size) {
         output[i] = f32_to_bf16(bf16_to_f32(input[i]) * scale);
+    }
+}
+
+extern "C" __global__ void scale_bf16_by_ptr(
+    __nv_bfloat16* __restrict__ output,
+    const __nv_bfloat16* __restrict__ input,
+    const __nv_bfloat16* __restrict__ scale_ptr,
+    int size
+) {
+    float scale = scale_ptr ? bf16_to_f32(scale_ptr[0]) : 1.0f;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < size) {
+        output[i] = f32_to_bf16(bf16_to_f32(input[i]) * scale);
+    }
+}
+
+extern "C" __global__ void apply_topk_per_expert_scale(
+    float* __restrict__ topk_weights,
+    const int* __restrict__ topk_ids,
+    const __nv_bfloat16* __restrict__ per_expert_scale,
+    int topk
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= topk || per_expert_scale == nullptr) return;
+    int eid = topk_ids[i];
+    if (eid >= 0) {
+        topk_weights[i] *= bf16_to_f32(per_expert_scale[eid]);
     }
 }
 
@@ -1561,7 +1649,7 @@ extern "C" __global__ void per_head_rmsnorm(
     int num_threads = blockDim.x;
 
     float* h = data + head * head_dim;
-    const float* w = weight_per_head ? (weight + head * head_dim) : weight;
+    const float* w = (weight == nullptr) ? nullptr : (weight_per_head ? (weight + head * head_dim) : weight);
 
     float sum_sq = 0.0f;
     for (int i = tid; i < head_dim; i += num_threads) {
@@ -1587,7 +1675,8 @@ extern "C" __global__ void per_head_rmsnorm(
     float rms_scale = warp_sums[0];
 
     for (int i = tid; i < head_dim; i += num_threads) {
-        h[i] = h[i] * rms_scale * w[i];
+        float scale = (w == nullptr) ? 1.0f : w[i];
+        h[i] = h[i] * rms_scale * scale;
     }
 }
 
@@ -1625,6 +1714,42 @@ extern "C" __global__ void apply_rope(
     float x2 = data[half_dim + i];
     data[i] = x1 * cos_val - x2 * sin_val;
     data[half_dim + i] = x2 * cos_val + x1 * sin_val;
+}
+
+extern "C" __global__ void apply_rope_half_split(
+    float* __restrict__ q,
+    float* __restrict__ k,
+    const float* __restrict__ cos_table,
+    const float* __restrict__ sin_table,
+    int position,
+    int num_q_heads,
+    int num_kv_heads,
+    int head_dim,
+    int half_dim
+) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_heads = num_q_heads + num_kv_heads;
+    int total_work = total_heads * head_dim;
+    if (tid >= total_work) return;
+
+    int head = tid / head_dim;
+    int i = tid - head * head_dim;
+    int ci = i < half_dim ? i : i - half_dim;
+    int src = i < half_dim ? i + half_dim : i - half_dim;
+
+    float* data;
+    if (head < num_q_heads) {
+        data = q + head * head_dim;
+    } else {
+        data = k + (head - num_q_heads) * head_dim;
+    }
+
+    float x = data[i];
+    float rotated = data[src];
+    if (i < half_dim) rotated = -rotated;
+    float cos_val = cos_table[position * half_dim + ci];
+    float sin_val = sin_table[position * half_dim + ci];
+    data[i] = x * cos_val + rotated * sin_val;
 }
 
 // Write K,V to FP8 E4M3 KV cache at given position
@@ -4435,12 +4560,13 @@ extern "C" __global__ void embedding_lookup_g(
     __nv_bfloat16* __restrict__ output,
     const __nv_bfloat16* __restrict__ table,
     const int* __restrict__ d_token_id,   // read from GPU pointer
-    int hidden_size
+    int hidden_size,
+    float scale
 ) {
     int token_id = *d_token_id;
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < hidden_size) {
-        output[i] = table[token_id * hidden_size + i];
+        output[i] = f32_to_bf16(bf16_to_f32(table[token_id * hidden_size + i]) * scale);
     }
 }
 
@@ -4478,6 +4604,43 @@ extern "C" __global__ void apply_rope_g(
     float x2 = data[half_dim + i];
     data[i] = x1 * cos_val - x2 * sin_val;
     data[half_dim + i] = x2 * cos_val + x1 * sin_val;
+}
+
+extern "C" __global__ void apply_rope_half_split_g(
+    float* __restrict__ q,
+    float* __restrict__ k,
+    const float* __restrict__ cos_table,
+    const float* __restrict__ sin_table,
+    const int* __restrict__ d_position,
+    int num_q_heads,
+    int num_kv_heads,
+    int head_dim,
+    int half_dim
+) {
+    int position = *d_position;
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_heads = num_q_heads + num_kv_heads;
+    int total_work = total_heads * head_dim;
+    if (tid >= total_work) return;
+
+    int head = tid / head_dim;
+    int i = tid - head * head_dim;
+    int ci = i < half_dim ? i : i - half_dim;
+    int src = i < half_dim ? i + half_dim : i - half_dim;
+
+    float* data;
+    if (head < num_q_heads) {
+        data = q + head * head_dim;
+    } else {
+        data = k + (head - num_q_heads) * head_dim;
+    }
+
+    float x = data[i];
+    float rotated = data[src];
+    if (i < half_dim) rotated = -rotated;
+    float cos_val = cos_table[position * half_dim + ci];
+    float sin_val = sin_table[position * half_dim + ci];
+    data[i] = x * cos_val + rotated * sin_val;
 }
 
 extern "C" __global__ void kv_cache_write_g(

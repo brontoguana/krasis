@@ -1,0 +1,49 @@
+================================================================
+Krasis Benchmark — 2026-06-05 16:53:34
+================================================================
+Model:            gemma-4-26b-a4b-it
+Architecture:     gemma4_text, 30 layers, 128 experts, top-8, 30 GQA + 0 linear
+PP Partition:     [30] (1 GPUs)
+
+Hardware:
+  CPU:            AMD EPYC 7742 64-Core Processor (64 cores)
+  RAM:            1007 GB total, 16.6 GB used by process
+  GPU 0:           NVIDIA GeForce RTX 5090 (32607 MB), 8258 MB allocated
+
+Quantization:
+  GPU experts:    INT4 (Marlin)
+  CPU experts:    INT4
+  Attention:      BF16
+  Shared expert:  INT8
+  Dense MLP:      INT8
+  LM head:        INT8
+  KV cache:       BF16
+
+Strategy:
+  Layer group size: 2 (layer_grouped(2))
+  Prefill threshold: 1
+  Mode:           gpu_decode (layer_grouped(2))
+
+Prefill (internal) — 6 runs at different lengths:
+  Run 1:  5,051.6 tok/s (1,000 tokens in 198.0ms)
+  Run 2:  2,097.7 tok/s (4,540 tokens in 2164.2ms)
+  Run 3:  2,097.3 tok/s (4,540 tokens in 2164.7ms)
+  Run 4:  1,998.7 tok/s (4,540 tokens in 2271.4ms)
+  Run 5:  1,994.6 tok/s (4,540 tokens in 2276.1ms)
+  Run 6:  1,990.2 tok/s (4,540 tokens in 2281.2ms)
+  Best:   5,051.6 tok/s (1,000 tokens)
+
+Decode (internal) — 50/100/250 tokens, 3 separate prompts:
+   50 tokens: 38.98 tok/s (25.7ms/tok)
+  100 tokens: 39.07 tok/s (25.6ms/tok)
+  250 tokens: 38.86 tok/s (25.7ms/tok)
+  Best:    39.07 tok/s
+  HCS:     3840/3840 experts (100.0%)
+  Min free VRAM: 11084 MB
+
+Round trip (network) — 50/100/250 tokens via HTTP:
+   50 tokens: 71.33 tok/s (1.37s total)
+  100 tokens: 49.80 tok/s (2.66s total)
+  250 tokens: 42.64 tok/s (6.51s total)
+  Best:    71.33 tok/s
+================================================================
