@@ -2,7 +2,6 @@
 ///
 /// This is a standalone binary test (avoids PyO3 linking issues).
 /// Run with: cargo test --release --test test_marlin_attn_shapes -- --nocapture
-
 use std::path::Path;
 
 // We can't import from krasis directly due to PyO3, so we duplicate the
@@ -41,7 +40,12 @@ struct QuantizedInt8 {
     group_size: usize,
 }
 
-fn quantize_int4(weight_bf16: &[u16], rows: usize, cols: usize, group_size: usize) -> QuantizedInt4 {
+fn quantize_int4(
+    weight_bf16: &[u16],
+    rows: usize,
+    cols: usize,
+    group_size: usize,
+) -> QuantizedInt4 {
     assert_eq!(weight_bf16.len(), rows * cols);
     assert!(cols % group_size == 0);
     assert!(cols % PACK_FACTOR == 0);
@@ -78,7 +82,13 @@ fn quantize_int4(weight_bf16: &[u16], rows: usize, cols: usize, group_size: usiz
             }
         }
     }
-    QuantizedInt4 { packed, scales, rows, cols, group_size }
+    QuantizedInt4 {
+        packed,
+        scales,
+        rows,
+        cols,
+        group_size,
+    }
 }
 
 fn dequantize_int4(q: &QuantizedInt4) -> Vec<f32> {
@@ -101,7 +111,12 @@ fn dequantize_int4(q: &QuantizedInt4) -> Vec<f32> {
     output
 }
 
-fn quantize_int8(weight_bf16: &[u16], rows: usize, cols: usize, group_size: usize) -> QuantizedInt8 {
+fn quantize_int8(
+    weight_bf16: &[u16],
+    rows: usize,
+    cols: usize,
+    group_size: usize,
+) -> QuantizedInt8 {
     assert_eq!(weight_bf16.len(), rows * cols);
     assert!(cols % group_size == 0);
 
@@ -114,7 +129,9 @@ fn quantize_int8(weight_bf16: &[u16], rows: usize, cols: usize, group_size: usiz
         for g in 0..num_groups_per_row {
             let group_start = row_offset + g * group_size;
             let mut amax: f32 = 0.0;
-            for i in 0..group_size { amax = amax.max(bf16_to_f32(weight_bf16[group_start + i]).abs()); }
+            for i in 0..group_size {
+                amax = amax.max(bf16_to_f32(weight_bf16[group_start + i]).abs());
+            }
             let scale = if amax == 0.0 { 1.0 } else { amax / 127.0 };
             scales[row * num_groups_per_row + g] = f32_to_bf16(scale);
         }
@@ -128,7 +145,13 @@ fn quantize_int8(weight_bf16: &[u16], rows: usize, cols: usize, group_size: usiz
             }
         }
     }
-    QuantizedInt8 { data, scales, rows, cols, group_size }
+    QuantizedInt8 {
+        data,
+        scales,
+        rows,
+        cols,
+        group_size,
+    }
 }
 
 fn dequantize_int8(q: &QuantizedInt8) -> Vec<f32> {
@@ -154,20 +177,28 @@ fn generate_weight_perm_int4() -> [usize; 1024] {
         let mut perm1 = [0usize; 8];
         let mut p1_idx = 0;
         for block in 0..2 {
-            for &row in &[2*(i%4), 2*(i%4)+1, 2*(i%4+4), 2*(i%4+4)+1] {
-                perm1[p1_idx] = 16*row + col + 8*block;
+            for &row in &[
+                2 * (i % 4),
+                2 * (i % 4) + 1,
+                2 * (i % 4 + 4),
+                2 * (i % 4 + 4) + 1,
+            ] {
+                perm1[p1_idx] = 16 * row + col + 8 * block;
                 p1_idx += 1;
             }
         }
         for j in 0..4 {
-            for &p in &perm1 { perm[idx] = p + 256*j; idx += 1; }
+            for &p in &perm1 {
+                perm[idx] = p + 256 * j;
+                idx += 1;
+            }
         }
     }
-    let interleave = [0,2,4,6,1,3,5,7];
+    let interleave = [0, 2, 4, 6, 1, 3, 5, 7];
     let mut result = [0usize; 1024];
-    for group in 0..(1024/8) {
+    for group in 0..(1024 / 8) {
         for (dest, &src) in interleave.iter().enumerate() {
-            result[group*8+dest] = perm[group*8+src];
+            result[group * 8 + dest] = perm[group * 8 + src];
         }
     }
     result
@@ -181,20 +212,28 @@ fn generate_weight_perm_int8() -> [usize; 1024] {
         let mut perm1 = [0usize; 8];
         let mut p1_idx = 0;
         for block in 0..2 {
-            for &row in &[2*(i%4), 2*(i%4)+1, 2*(i%4+4), 2*(i%4+4)+1] {
-                perm1[p1_idx] = 16*row + col + 8*block;
+            for &row in &[
+                2 * (i % 4),
+                2 * (i % 4) + 1,
+                2 * (i % 4 + 4),
+                2 * (i % 4 + 4) + 1,
+            ] {
+                perm1[p1_idx] = 16 * row + col + 8 * block;
                 p1_idx += 1;
             }
         }
         for j in 0..4 {
-            for &p in &perm1 { perm[idx] = p + 256*j; idx += 1; }
+            for &p in &perm1 {
+                perm[idx] = p + 256 * j;
+                idx += 1;
+            }
         }
     }
-    let interleave = [0,2,1,3];
+    let interleave = [0, 2, 1, 3];
     let mut result = [0usize; 1024];
-    for group in 0..(1024/4) {
+    for group in 0..(1024 / 4) {
         for (dest, &src) in interleave.iter().enumerate() {
-            result[group*4+dest] = perm[group*4+src];
+            result[group * 4 + dest] = perm[group * 4 + src];
         }
     }
     result
@@ -202,10 +241,18 @@ fn generate_weight_perm_int8() -> [usize; 1024] {
 
 fn generate_scale_perms() -> ([usize; 64], [usize; 32]) {
     let mut scale_perm = [0usize; 64];
-    for i in 0..8 { for j in 0..8 { scale_perm[i*8+j] = i + 8*j; } }
-    let offsets = [0,1,8,9,16,17,24,25];
+    for i in 0..8 {
+        for j in 0..8 {
+            scale_perm[i * 8 + j] = i + 8 * j;
+        }
+    }
+    let offsets = [0, 1, 8, 9, 16, 17, 24, 25];
     let mut scale_perm_single = [0usize; 32];
-    for i in 0..4 { for (j, &off) in offsets.iter().enumerate() { scale_perm_single[i*8+j] = 2*i + off; } }
+    for i in 0..4 {
+        for (j, &off) in offsets.iter().enumerate() {
+            scale_perm_single[i * 8 + j] = 2 * i + off;
+        }
+    }
     (scale_perm, scale_perm_single)
 }
 
@@ -221,7 +268,10 @@ fn marlin_repack_int4(q: &QuantizedInt4) -> MarlinRepacked {
     let n = q.rows;
     let k = q.cols;
     let group_size = q.group_size;
-    assert!(k % MARLIN_TILE == 0, "K ({k}) must be divisible by {MARLIN_TILE}");
+    assert!(
+        k % MARLIN_TILE == 0,
+        "K ({k}) must be divisible by {MARLIN_TILE}"
+    );
     assert!(n % 64 == 0, "N ({n}) must be divisible by 64");
 
     let packed_k = k / PACK_FACTOR;
@@ -230,7 +280,8 @@ fn marlin_repack_int4(q: &QuantizedInt4) -> MarlinRepacked {
         for col_pack in 0..packed_k {
             let word = q.packed[row * packed_k + col_pack];
             for j in 0..PACK_FACTOR {
-                unpacked[row * k + col_pack * PACK_FACTOR + j] = ((word >> (j as u32 * 4)) & 0xF) as u8;
+                unpacked[row * k + col_pack * PACK_FACTOR + j] =
+                    ((word >> (j as u32 * 4)) & 0xF) as u8;
             }
         }
     }
@@ -258,7 +309,9 @@ fn marlin_repack_int4(q: &QuantizedInt4) -> MarlinRepacked {
     for kt in 0..k_tiles {
         for chunk in 0..num_chunks {
             let base = kt * row_len + chunk * 1024;
-            for i in 0..1024 { perm_applied[base + i] = permuted[base + perm[i]]; }
+            for i in 0..1024 {
+                perm_applied[base + i] = permuted[base + perm[i]];
+            }
         }
     }
 
@@ -268,7 +321,8 @@ fn marlin_repack_int4(q: &QuantizedInt4) -> MarlinRepacked {
         for col in 0..out_cols {
             let mut word: u32 = 0;
             for i in 0..PACK_FACTOR {
-                word |= (perm_applied[row * row_len + col * PACK_FACTOR + i] as u32) << (i as u32 * 4);
+                word |=
+                    (perm_applied[row * row_len + col * PACK_FACTOR + i] as u32) << (i as u32 * 4);
             }
             out_packed[row * out_cols + col] = word;
         }
@@ -276,25 +330,43 @@ fn marlin_repack_int4(q: &QuantizedInt4) -> MarlinRepacked {
 
     let num_groups_k = k / group_size;
     let mut scales_transposed = vec![0u16; num_groups_k * n];
-    for row in 0..n { for g in 0..num_groups_k { scales_transposed[g * n + row] = q.scales[row * num_groups_k + g]; } }
+    for row in 0..n {
+        for g in 0..num_groups_k {
+            scales_transposed[g * n + row] = q.scales[row * num_groups_k + g];
+        }
+    }
 
     let (scale_perm, scale_perm_single) = generate_scale_perms();
     let is_grouped = group_size < k;
-    let sperm: &[usize] = if is_grouped { &scale_perm } else { &scale_perm_single };
+    let sperm: &[usize] = if is_grouped {
+        &scale_perm
+    } else {
+        &scale_perm_single
+    };
     let perm_len = sperm.len();
     let total_scale_vals = num_groups_k * n;
     let num_scale_chunks = total_scale_vals / perm_len;
     let mut scales_permuted = vec![0u16; total_scale_vals];
     for chunk in 0..num_scale_chunks {
         let base = chunk * perm_len;
-        for i in 0..perm_len { scales_permuted[base + i] = scales_transposed[base + sperm[i]]; }
+        for i in 0..perm_len {
+            scales_permuted[base + i] = scales_transposed[base + sperm[i]];
+        }
     }
 
-    MarlinRepacked { packed: out_packed, scales: scales_permuted, k, n, group_size }
+    MarlinRepacked {
+        packed: out_packed,
+        scales: scales_permuted,
+        k,
+        n,
+        group_size,
+    }
 }
 
 fn dequantize_marlin_int4(m: &MarlinRepacked) -> Vec<f32> {
-    let k = m.k; let n = m.n; let group_size = m.group_size;
+    let k = m.k;
+    let n = m.n;
+    let group_size = m.group_size;
     let k_tiles = k / MARLIN_TILE;
     let row_len = n * MARLIN_TILE;
     let out_cols = row_len / PACK_FACTOR;
@@ -305,7 +377,8 @@ fn dequantize_marlin_int4(m: &MarlinRepacked) -> Vec<f32> {
         for col in 0..out_cols {
             let word = m.packed[row * out_cols + col];
             for i in 0..PACK_FACTOR {
-                perm_applied[row * row_len + col * PACK_FACTOR + i] = ((word >> (i as u32 * 4)) & 0xF) as u8;
+                perm_applied[row * row_len + col * PACK_FACTOR + i] =
+                    ((word >> (i as u32 * 4)) & 0xF) as u8;
             }
         }
     }
@@ -317,7 +390,9 @@ fn dequantize_marlin_int4(m: &MarlinRepacked) -> Vec<f32> {
     for kt in 0..k_tiles {
         for chunk in 0..num_chunks {
             let base = kt * row_len + chunk * 1024;
-            for i in 0..1024 { permuted[base + perm[i]] = perm_applied[base + i]; }
+            for i in 0..1024 {
+                permuted[base + perm[i]] = perm_applied[base + i];
+            }
         }
     }
 
@@ -328,7 +403,8 @@ fn dequantize_marlin_int4(m: &MarlinRepacked) -> Vec<f32> {
                 for tn in 0..MARLIN_TILE {
                     let src_k = kt * MARLIN_TILE + tk;
                     let src_n = nt * MARLIN_TILE + tn;
-                    transposed[src_k * n + src_n] = permuted[kt * row_len + nt * MARLIN_TILE * MARLIN_TILE + tk * MARLIN_TILE + tn];
+                    transposed[src_k * n + src_n] = permuted
+                        [kt * row_len + nt * MARLIN_TILE * MARLIN_TILE + tk * MARLIN_TILE + tn];
                 }
             }
         }
@@ -336,14 +412,20 @@ fn dequantize_marlin_int4(m: &MarlinRepacked) -> Vec<f32> {
 
     let (scale_perm, scale_perm_single) = generate_scale_perms();
     let is_grouped = group_size < k;
-    let sperm: &[usize] = if is_grouped { &scale_perm } else { &scale_perm_single };
+    let sperm: &[usize] = if is_grouped {
+        &scale_perm
+    } else {
+        &scale_perm_single
+    };
     let perm_len = sperm.len();
     let total_scale_vals = num_groups_k * n;
     let num_scale_chunks = total_scale_vals / perm_len;
     let mut scales_transposed = vec![0u16; total_scale_vals];
     for chunk in 0..num_scale_chunks {
         let base = chunk * perm_len;
-        for i in 0..perm_len { scales_transposed[base + sperm[i]] = m.scales[base + i]; }
+        for i in 0..perm_len {
+            scales_transposed[base + sperm[i]] = m.scales[base + i];
+        }
     }
 
     let mut output = vec![0.0f32; n * k];
@@ -359,12 +441,19 @@ fn dequantize_marlin_int4(m: &MarlinRepacked) -> Vec<f32> {
 }
 
 fn marlin_repack_int8(q: &QuantizedInt8) -> MarlinRepacked {
-    let n = q.rows; let k = q.cols; let group_size = q.group_size;
-    assert!(k % MARLIN_TILE == 0, "K ({k}) must be divisible by {MARLIN_TILE}");
+    let n = q.rows;
+    let k = q.cols;
+    let group_size = q.group_size;
+    assert!(
+        k % MARLIN_TILE == 0,
+        "K ({k}) must be divisible by {MARLIN_TILE}"
+    );
     assert!(n % 64 == 0, "N ({n}) must be divisible by 64");
 
     let mut unsigned = vec![0u8; n * k];
-    for i in 0..q.data.len() { unsigned[i] = (q.data[i] as i16 + 128) as u8; }
+    for i in 0..q.data.len() {
+        unsigned[i] = (q.data[i] as i16 + 128) as u8;
+    }
 
     let k_tiles = k / MARLIN_TILE;
     let n_tiles = n / MARLIN_TILE;
@@ -375,7 +464,8 @@ fn marlin_repack_int8(q: &QuantizedInt8) -> MarlinRepacked {
             for tk in 0..MARLIN_TILE {
                 for tn in 0..MARLIN_TILE {
                     let dst_col = nt * MARLIN_TILE * MARLIN_TILE + tk * MARLIN_TILE + tn;
-                    permuted[kt * row_len + dst_col] = unsigned[(nt * MARLIN_TILE + tn) * k + kt * MARLIN_TILE + tk];
+                    permuted[kt * row_len + dst_col] =
+                        unsigned[(nt * MARLIN_TILE + tn) * k + kt * MARLIN_TILE + tk];
                 }
             }
         }
@@ -387,7 +477,9 @@ fn marlin_repack_int8(q: &QuantizedInt8) -> MarlinRepacked {
     for kt in 0..k_tiles {
         for chunk in 0..num_chunks {
             let base = kt * row_len + chunk * 1024;
-            for i in 0..1024 { perm_applied[base + i] = permuted[base + perm[i]]; }
+            for i in 0..1024 {
+                perm_applied[base + i] = permuted[base + perm[i]];
+            }
         }
     }
 
@@ -397,7 +489,8 @@ fn marlin_repack_int8(q: &QuantizedInt8) -> MarlinRepacked {
         for col in 0..out_cols {
             let mut word: u32 = 0;
             for i in 0..PACK_FACTOR_INT8 {
-                word |= (perm_applied[row * row_len + col * PACK_FACTOR_INT8 + i] as u32) << (i as u32 * 8);
+                word |= (perm_applied[row * row_len + col * PACK_FACTOR_INT8 + i] as u32)
+                    << (i as u32 * 8);
             }
             out_packed[row * out_cols + col] = word;
         }
@@ -405,25 +498,43 @@ fn marlin_repack_int8(q: &QuantizedInt8) -> MarlinRepacked {
 
     let num_groups_k = k / group_size;
     let mut scales_transposed = vec![0u16; num_groups_k * n];
-    for row in 0..n { for g in 0..num_groups_k { scales_transposed[g * n + row] = q.scales[row * num_groups_k + g]; } }
+    for row in 0..n {
+        for g in 0..num_groups_k {
+            scales_transposed[g * n + row] = q.scales[row * num_groups_k + g];
+        }
+    }
 
     let (scale_perm, scale_perm_single) = generate_scale_perms();
     let is_grouped = group_size < k;
-    let sperm: &[usize] = if is_grouped { &scale_perm } else { &scale_perm_single };
+    let sperm: &[usize] = if is_grouped {
+        &scale_perm
+    } else {
+        &scale_perm_single
+    };
     let perm_len = sperm.len();
     let total_scale_vals = num_groups_k * n;
     let num_scale_chunks = total_scale_vals / perm_len;
     let mut scales_permuted = vec![0u16; total_scale_vals];
     for chunk in 0..num_scale_chunks {
         let base = chunk * perm_len;
-        for i in 0..perm_len { scales_permuted[base + i] = scales_transposed[base + sperm[i]]; }
+        for i in 0..perm_len {
+            scales_permuted[base + i] = scales_transposed[base + sperm[i]];
+        }
     }
 
-    MarlinRepacked { packed: out_packed, scales: scales_permuted, k, n, group_size }
+    MarlinRepacked {
+        packed: out_packed,
+        scales: scales_permuted,
+        k,
+        n,
+        group_size,
+    }
 }
 
 fn dequantize_marlin_int8(m: &MarlinRepacked) -> Vec<f32> {
-    let k = m.k; let n = m.n; let group_size = m.group_size;
+    let k = m.k;
+    let n = m.n;
+    let group_size = m.group_size;
     let k_tiles = k / MARLIN_TILE;
     let row_len = n * MARLIN_TILE;
     let out_cols = row_len / PACK_FACTOR_INT8;
@@ -434,7 +545,8 @@ fn dequantize_marlin_int8(m: &MarlinRepacked) -> Vec<f32> {
         for col in 0..out_cols {
             let word = m.packed[row * out_cols + col];
             for i in 0..PACK_FACTOR_INT8 {
-                perm_applied[row * row_len + col * PACK_FACTOR_INT8 + i] = ((word >> (i as u32 * 8)) & 0xFF) as u8;
+                perm_applied[row * row_len + col * PACK_FACTOR_INT8 + i] =
+                    ((word >> (i as u32 * 8)) & 0xFF) as u8;
             }
         }
     }
@@ -446,7 +558,9 @@ fn dequantize_marlin_int8(m: &MarlinRepacked) -> Vec<f32> {
     for kt in 0..k_tiles {
         for chunk in 0..num_chunks {
             let base = kt * row_len + chunk * 1024;
-            for i in 0..1024 { permuted[base + perm[i]] = perm_applied[base + i]; }
+            for i in 0..1024 {
+                permuted[base + perm[i]] = perm_applied[base + i];
+            }
         }
     }
 
@@ -455,8 +569,8 @@ fn dequantize_marlin_int8(m: &MarlinRepacked) -> Vec<f32> {
         for nt in 0..n_tiles {
             for tk in 0..MARLIN_TILE {
                 for tn in 0..MARLIN_TILE {
-                    transposed[(kt*MARLIN_TILE+tk)*n + nt*MARLIN_TILE+tn] =
-                        permuted[kt*row_len + nt*MARLIN_TILE*MARLIN_TILE + tk*MARLIN_TILE + tn];
+                    transposed[(kt * MARLIN_TILE + tk) * n + nt * MARLIN_TILE + tn] = permuted
+                        [kt * row_len + nt * MARLIN_TILE * MARLIN_TILE + tk * MARLIN_TILE + tn];
                 }
             }
         }
@@ -464,14 +578,20 @@ fn dequantize_marlin_int8(m: &MarlinRepacked) -> Vec<f32> {
 
     let (scale_perm, scale_perm_single) = generate_scale_perms();
     let is_grouped = group_size < k;
-    let sperm: &[usize] = if is_grouped { &scale_perm } else { &scale_perm_single };
+    let sperm: &[usize] = if is_grouped {
+        &scale_perm
+    } else {
+        &scale_perm_single
+    };
     let perm_len = sperm.len();
     let total_scale_vals = num_groups_k * n;
     let num_scale_chunks = total_scale_vals / perm_len;
     let mut scales_transposed = vec![0u16; total_scale_vals];
     for chunk in 0..num_scale_chunks {
         let base = chunk * perm_len;
-        for i in 0..perm_len { scales_transposed[base + sperm[i]] = m.scales[base + i]; }
+        for i in 0..perm_len {
+            scales_transposed[base + sperm[i]] = m.scales[base + i];
+        }
     }
 
     let mut output = vec![0.0f32; n * k];
@@ -494,9 +614,11 @@ fn read_bf16_tensor(path: &Path, tensor_name: &str) -> Option<(Vec<u16>, usize, 
     let mmap = unsafe { memmap2::Mmap::map(&file).ok()? };
 
     // Header length is first 8 bytes (little-endian u64)
-    if mmap.len() < 8 { return None; }
+    if mmap.len() < 8 {
+        return None;
+    }
     let header_len = u64::from_le_bytes(mmap[0..8].try_into().unwrap()) as usize;
-    let header_str = std::str::from_utf8(&mmap[8..8+header_len]).ok()?;
+    let header_str = std::str::from_utf8(&mmap[8..8 + header_len]).ok()?;
 
     // Parse JSON header to find tensor
     // Simple JSON parsing for our needs
@@ -507,17 +629,26 @@ fn read_bf16_tensor(path: &Path, tensor_name: &str) -> Option<(Vec<u16>, usize, 
     // Find shape
     let shape_pos = after_key.find("\"shape\"")?;
     let bracket_start = after_key[shape_pos..].find('[')?;
-    let bracket_end = after_key[shape_pos+bracket_start..].find(']')?;
-    let shape_str = &after_key[shape_pos+bracket_start+1..shape_pos+bracket_start+bracket_end];
-    let dims: Vec<usize> = shape_str.split(',').map(|s| s.trim().parse().unwrap()).collect();
-    if dims.len() != 2 { return None; }
+    let bracket_end = after_key[shape_pos + bracket_start..].find(']')?;
+    let shape_str =
+        &after_key[shape_pos + bracket_start + 1..shape_pos + bracket_start + bracket_end];
+    let dims: Vec<usize> = shape_str
+        .split(',')
+        .map(|s| s.trim().parse().unwrap())
+        .collect();
+    if dims.len() != 2 {
+        return None;
+    }
 
     // Find data_offsets
     let offsets_pos = after_key.find("\"data_offsets\"")?;
     let ob_start = after_key[offsets_pos..].find('[')?;
-    let ob_end = after_key[offsets_pos+ob_start..].find(']')?;
-    let offsets_str = &after_key[offsets_pos+ob_start+1..offsets_pos+ob_start+ob_end];
-    let offsets: Vec<usize> = offsets_str.split(',').map(|s| s.trim().parse().unwrap()).collect();
+    let ob_end = after_key[offsets_pos + ob_start..].find(']')?;
+    let offsets_str = &after_key[offsets_pos + ob_start + 1..offsets_pos + ob_start + ob_end];
+    let offsets: Vec<usize> = offsets_str
+        .split(',')
+        .map(|s| s.trim().parse().unwrap())
+        .collect();
 
     let data_start = 8 + header_len + offsets[0];
     let data_end = 8 + header_len + offsets[1];
@@ -528,7 +659,7 @@ fn read_bf16_tensor(path: &Path, tensor_name: &str) -> Option<(Vec<u16>, usize, 
     assert_eq!(byte_data.len(), n_elements * 2, "BF16 size mismatch");
     let mut bf16_data = vec![0u16; n_elements];
     for i in 0..n_elements {
-        bf16_data[i] = u16::from_le_bytes([byte_data[i*2], byte_data[i*2+1]]);
+        bf16_data[i] = u16::from_le_bytes([byte_data[i * 2], byte_data[i * 2 + 1]]);
     }
 
     Some((bf16_data, dims[0], dims[1]))
@@ -537,8 +668,14 @@ fn read_bf16_tensor(path: &Path, tensor_name: &str) -> Option<(Vec<u16>, usize, 
 fn test_tensor(name: &str, bf16_data: &[u16], n: usize, k: usize) {
     // Check alignment
     assert!(n % 64 == 0, "{name}: N={n} not divisible by 64");
-    assert!(k % MARLIN_TILE == 0, "{name}: K={k} not divisible by {MARLIN_TILE}");
-    assert!(k % DEFAULT_GROUP_SIZE == 0, "{name}: K={k} not divisible by {DEFAULT_GROUP_SIZE}");
+    assert!(
+        k % MARLIN_TILE == 0,
+        "{name}: K={k} not divisible by {MARLIN_TILE}"
+    );
+    assert!(
+        k % DEFAULT_GROUP_SIZE == 0,
+        "{name}: K={k} not divisible by {DEFAULT_GROUP_SIZE}"
+    );
 
     // INT4 roundtrip
     let q4 = quantize_int4(bf16_data, n, k, DEFAULT_GROUP_SIZE);
@@ -549,16 +686,19 @@ fn test_tensor(name: &str, bf16_data: &[u16], n: usize, k: usize) {
     let mut max_diff4: f32 = 0.0;
     let mut sum_sq_err4: f64 = 0.0;
     let mut sum_sq_orig: f64 = 0.0;
-    for i in 0..(n*k) {
+    for i in 0..(n * k) {
         max_diff4 = max_diff4.max((deq4[i] - deq4m[i]).abs());
         let orig = bf16_to_f32(bf16_data[i]);
         sum_sq_err4 += ((orig - deq4m[i]) as f64).powi(2);
         sum_sq_orig += (orig as f64).powi(2);
     }
-    let rms_orig = (sum_sq_orig / (n*k) as f64).sqrt();
-    let rmse4 = (sum_sq_err4 / (n*k) as f64).sqrt();
+    let rms_orig = (sum_sq_orig / (n * k) as f64).sqrt();
+    let rmse4 = (sum_sq_err4 / (n * k) as f64).sqrt();
     let snr4 = 20.0 * (rms_orig / rmse4).log10();
-    assert!(max_diff4 == 0.0, "{name}: INT4 Marlin repack diff={max_diff4}");
+    assert!(
+        max_diff4 == 0.0,
+        "{name}: INT4 Marlin repack diff={max_diff4}"
+    );
 
     // INT8 roundtrip
     let q8 = quantize_int8(bf16_data, n, k, DEFAULT_GROUP_SIZE);
@@ -568,14 +708,17 @@ fn test_tensor(name: &str, bf16_data: &[u16], n: usize, k: usize) {
 
     let mut max_diff8: f32 = 0.0;
     let mut sum_sq_err8: f64 = 0.0;
-    for i in 0..(n*k) {
+    for i in 0..(n * k) {
         max_diff8 = max_diff8.max((deq8[i] - deq8m[i]).abs());
         let orig = bf16_to_f32(bf16_data[i]);
         sum_sq_err8 += ((orig - deq8m[i]) as f64).powi(2);
     }
-    let rmse8 = (sum_sq_err8 / (n*k) as f64).sqrt();
+    let rmse8 = (sum_sq_err8 / (n * k) as f64).sqrt();
     let snr8 = 20.0 * (rms_orig / rmse8).log10();
-    assert!(max_diff8 == 0.0, "{name}: INT8 Marlin repack diff={max_diff8}");
+    assert!(
+        max_diff8 == 0.0,
+        "{name}: INT8 Marlin repack diff={max_diff8}"
+    );
 
     eprintln!("  {name} [{n}x{k}]: INT4 SNR={snr4:.1}dB  INT8 SNR={snr8:.1}dB  PASS");
 }
@@ -584,14 +727,14 @@ fn test_tensor(name: &str, bf16_data: &[u16], n: usize, k: usize) {
 fn test_marlin_attention_shapes_synthetic() {
     // Test all QCN attention projection shapes with synthetic data
     let shapes = [
-        ("Q_proj_gqa", 4096, 2048),   // QCN GQA Q
-        ("K_proj_gqa", 512, 2048),    // QCN GQA K
-        ("V_proj_gqa", 512, 2048),    // QCN GQA V
-        ("O_proj_gqa", 2048, 4096),   // QCN GQA O
-        ("Q_proj_q235", 8192, 4096),  // Q235 Q
-        ("K_proj_q235", 512, 4096),   // Q235 K
-        ("V_proj_q235", 512, 4096),   // Q235 V
-        ("O_proj_q235", 4096, 8192),  // Q235 O
+        ("Q_proj_gqa", 4096, 2048),  // QCN GQA Q
+        ("K_proj_gqa", 512, 2048),   // QCN GQA K
+        ("V_proj_gqa", 512, 2048),   // QCN GQA V
+        ("O_proj_gqa", 2048, 4096),  // QCN GQA O
+        ("Q_proj_q235", 8192, 4096), // Q235 Q
+        ("K_proj_q235", 512, 4096),  // Q235 K
+        ("V_proj_q235", 512, 4096),  // Q235 V
+        ("O_proj_q235", 4096, 8192), // Q235 O
     ];
 
     eprintln!("\n=== Phase 0: Marlin Shape Compatibility (Synthetic) ===");
@@ -608,7 +751,8 @@ fn test_marlin_attention_shapes_synthetic() {
 
 #[test]
 fn test_marlin_attention_shapes_qcn_real() {
-    let path = Path::new("/home/main/.krasis/models/Qwen3-Coder-Next/model-00010-of-00040.safetensors");
+    let path =
+        Path::new("/home/main/.krasis/models/Qwen3-Coder-Next/model-00010-of-00040.safetensors");
     if !path.exists() {
         eprintln!("Skipping real QCN test — model not downloaded");
         return;

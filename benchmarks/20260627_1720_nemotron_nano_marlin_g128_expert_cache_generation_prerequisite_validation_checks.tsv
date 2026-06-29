@@ -1,0 +1,11 @@
+check	status	detail
+summary_assertion	pass	status closed_exact_g128_not_created_effective_g64_built; exit 0; requests 0; requested g128 absent; effective header group size 64
+cache_result_tsv_assertion	pass	requests_sent=0; requested_final_g128_present=false; effective_header_group_size=64
+log_assertion	pass	BUILD CACHE COMPLETE present; reference_test count 0; KRASIS SERVER READY count 0
+artifact_assertion	pass	requested g128 absent; effective g64 present; header group size 64
+cache_tmp_lock_check	pass	no .tmp/.lock/.pending files under Nano cache directory
+bash_n_dev	pass	dev syntax valid
+git_diff_check_krasis	pass	no whitespace errors
+git_diff_check_internal	pass	no whitespace errors
+protected_config_check	pass	only tests-only Nano HQQ4 config plus known pre-existing Nano BF16 config are untracked in protected scan
+cleanup_idle	pass	2026-06-27T17:30:47Z; no tmux server; no matching runtime process; no NVIDIA compute process; GPUs 15 MB / 11 MB; disk 589G; RAM 966Gi

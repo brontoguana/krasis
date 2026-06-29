@@ -1,0 +1,8 @@
+metric	value	note
+gpu	0	selected runtime GPU
+baseline_free_mb	23716	from long calibration log
+prefill_min_free_mb	7694	from long calibration log
+post_cleanup_free_mb	23714	from long calibration log
+long_prefill_transient_delta_mb	16022	from calibration transient delta
+configured_safety_margin_mb	600	default Krasis safety margin
+safety_observation	not_close_to_margin	startup calibration/diagnostic left substantial free VRAM; record for later HCS/production budget review, not a blocker for this output-kernel gate

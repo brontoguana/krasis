@@ -123,8 +123,16 @@ pub fn quantize_bf16_to_int16(
         for i in 0..gs {
             max_abs = max_abs.max(bf16_to_f32(input_bf16[start + i]).abs());
         }
-        let scale = if max_abs > 0.0 { max_abs / 32767.0 } else { 1.0 };
-        let inv_scale = if max_abs > 0.0 { 32767.0 / max_abs } else { 0.0 };
+        let scale = if max_abs > 0.0 {
+            max_abs / 32767.0
+        } else {
+            1.0
+        };
+        let inv_scale = if max_abs > 0.0 {
+            32767.0 / max_abs
+        } else {
+            0.0
+        };
         output_scales[g] = scale;
 
         let mut sum = 0i32;
@@ -156,8 +164,16 @@ pub fn quantize_f32_to_int16(
         for i in 0..gs {
             max_abs = max_abs.max(input_f32[start + i].abs());
         }
-        let scale = if max_abs > 0.0 { max_abs / 32767.0 } else { 1.0 };
-        let inv_scale = if max_abs > 0.0 { 32767.0 / max_abs } else { 0.0 };
+        let scale = if max_abs > 0.0 {
+            max_abs / 32767.0
+        } else {
+            1.0
+        };
+        let inv_scale = if max_abs > 0.0 {
+            32767.0 / max_abs
+        } else {
+            0.0
+        };
         output_scales[g] = scale;
 
         let mut sum = 0i32;
@@ -191,9 +207,13 @@ fn gguf_matvec_int(
                 GgmlType::Q4_K => {
                     unsafe {
                         matvec_q4_k_avx2(
-                            weights.as_ptr(), act_int16.as_ptr(),
-                            act_scales.as_ptr(), act_sums.as_ptr(),
-                            n, k, output.as_mut_ptr(),
+                            weights.as_ptr(),
+                            act_int16.as_ptr(),
+                            act_scales.as_ptr(),
+                            act_sums.as_ptr(),
+                            n,
+                            k,
+                            output.as_mut_ptr(),
                         );
                     }
                     return;
@@ -201,9 +221,12 @@ fn gguf_matvec_int(
                 GgmlType::Q8_0 => {
                     unsafe {
                         matvec_q8_0_avx2(
-                            weights.as_ptr(), act_int16.as_ptr(),
+                            weights.as_ptr(),
+                            act_int16.as_ptr(),
                             act_scales.as_ptr(),
-                            n, k, output.as_mut_ptr(),
+                            n,
+                            k,
+                            output.as_mut_ptr(),
                         );
                     }
                     return;
@@ -211,9 +234,13 @@ fn gguf_matvec_int(
                 GgmlType::Q4_0 => {
                     unsafe {
                         matvec_q4_0_avx2(
-                            weights.as_ptr(), act_int16.as_ptr(),
-                            act_scales.as_ptr(), act_sums.as_ptr(),
-                            n, k, output.as_mut_ptr(),
+                            weights.as_ptr(),
+                            act_int16.as_ptr(),
+                            act_scales.as_ptr(),
+                            act_sums.as_ptr(),
+                            n,
+                            k,
+                            output.as_mut_ptr(),
                         );
                     }
                     return;
@@ -317,18 +344,14 @@ unsafe fn matvec_q4_k_avx2(
 
                 // --- Low nibble sub-block: 32 elements [j*64 .. j*64+31] ---
                 let w16_lo0 = _mm256_cvtepu8_epi16(lo_nib_0);
-                let a16_lo0 = _mm256_loadu_si256(
-                    act_int16.add(act_base + j * 64) as *const __m256i
-                );
+                let a16_lo0 =
+                    _mm256_loadu_si256(act_int16.add(act_base + j * 64) as *const __m256i);
                 let mut int_acc_lo = _mm256_madd_epi16(w16_lo0, a16_lo0);
 
                 let w16_lo1 = _mm256_cvtepu8_epi16(lo_nib_1);
-                let a16_lo1 = _mm256_loadu_si256(
-                    act_int16.add(act_base + j * 64 + 16) as *const __m256i
-                );
-                int_acc_lo = _mm256_add_epi32(
-                    int_acc_lo, _mm256_madd_epi16(w16_lo1, a16_lo1)
-                );
+                let a16_lo1 =
+                    _mm256_loadu_si256(act_int16.add(act_base + j * 64 + 16) as *const __m256i);
+                int_acc_lo = _mm256_add_epi32(int_acc_lo, _mm256_madd_epi16(w16_lo1, a16_lo1));
 
                 let combined_lo = d * sc_lo as f32 * a_scale_lo;
                 float_acc = _mm256_fmadd_ps(
@@ -336,23 +359,18 @@ unsafe fn matvec_q4_k_avx2(
                     _mm256_set1_ps(combined_lo),
                     float_acc,
                 );
-                correction += dmin * mn_lo as f32 * a_scale_lo
-                    * *act_sums.add(lo_group) as f32;
+                correction += dmin * mn_lo as f32 * a_scale_lo * *act_sums.add(lo_group) as f32;
 
                 // --- High nibble sub-block: 32 elements [j*64+32 .. j*64+63] ---
                 let w16_hi0 = _mm256_cvtepu8_epi16(hi_nib_0);
-                let a16_hi0 = _mm256_loadu_si256(
-                    act_int16.add(act_base + j * 64 + 32) as *const __m256i
-                );
+                let a16_hi0 =
+                    _mm256_loadu_si256(act_int16.add(act_base + j * 64 + 32) as *const __m256i);
                 let mut int_acc_hi = _mm256_madd_epi16(w16_hi0, a16_hi0);
 
                 let w16_hi1 = _mm256_cvtepu8_epi16(hi_nib_1);
-                let a16_hi1 = _mm256_loadu_si256(
-                    act_int16.add(act_base + j * 64 + 48) as *const __m256i
-                );
-                int_acc_hi = _mm256_add_epi32(
-                    int_acc_hi, _mm256_madd_epi16(w16_hi1, a16_hi1)
-                );
+                let a16_hi1 =
+                    _mm256_loadu_si256(act_int16.add(act_base + j * 64 + 48) as *const __m256i);
+                int_acc_hi = _mm256_add_epi32(int_acc_hi, _mm256_madd_epi16(w16_hi1, a16_hi1));
 
                 let combined_hi = d * sc_hi as f32 * a_scale_hi;
                 float_acc = _mm256_fmadd_ps(
@@ -360,8 +378,7 @@ unsafe fn matvec_q4_k_avx2(
                     _mm256_set1_ps(combined_hi),
                     float_acc,
                 );
-                correction += dmin * mn_hi as f32 * a_scale_hi
-                    * *act_sums.add(hi_group) as f32;
+                correction += dmin * mn_hi as f32 * a_scale_hi * *act_sums.add(hi_group) as f32;
             }
         }
 
@@ -401,17 +418,13 @@ unsafe fn matvec_q8_0_avx2(
             // First 16 int8 weights → sign-extend to int16
             let raw0 = _mm_loadu_si128(qs as *const __m128i);
             let w16_0 = _mm256_cvtepi8_epi16(raw0);
-            let a16_0 = _mm256_loadu_si256(
-                act_int16.add(b * 32) as *const __m256i
-            );
+            let a16_0 = _mm256_loadu_si256(act_int16.add(b * 32) as *const __m256i);
             let mut int_acc = _mm256_madd_epi16(w16_0, a16_0);
 
             // Second 16 int8 weights
             let raw1 = _mm_loadu_si128(qs.add(16) as *const __m128i);
             let w16_1 = _mm256_cvtepi8_epi16(raw1);
-            let a16_1 = _mm256_loadu_si256(
-                act_int16.add(b * 32 + 16) as *const __m256i
-            );
+            let a16_1 = _mm256_loadu_si256(act_int16.add(b * 32 + 16) as *const __m256i);
             int_acc = _mm256_add_epi32(int_acc, _mm256_madd_epi16(w16_1, a16_1));
 
             float_acc = _mm256_fmadd_ps(
@@ -464,17 +477,13 @@ unsafe fn matvec_q4_0_avx2(
             // Low nibbles → elements 0..15
             let lo = _mm_and_si128(raw, mask_0f);
             let w16_lo = _mm256_cvtepu8_epi16(lo);
-            let a16_lo = _mm256_loadu_si256(
-                act_int16.add(b * 32) as *const __m256i
-            );
+            let a16_lo = _mm256_loadu_si256(act_int16.add(b * 32) as *const __m256i);
             let mut int_acc = _mm256_madd_epi16(w16_lo, a16_lo);
 
             // High nibbles → elements 16..31
             let hi = _mm_and_si128(_mm_srli_epi16(raw, 4), mask_0f);
             let w16_hi = _mm256_cvtepu8_epi16(hi);
-            let a16_hi = _mm256_loadu_si256(
-                act_int16.add(b * 32 + 16) as *const __m256i
-            );
+            let a16_hi = _mm256_loadu_si256(act_int16.add(b * 32 + 16) as *const __m256i);
             int_acc = _mm256_add_epi32(int_acc, _mm256_madd_epi16(w16_hi, a16_hi));
 
             let combined = d * a_scale;
@@ -560,7 +569,11 @@ fn matvec_q4_0_scalar(weights: &[u8], input: &[f32], n: usize, k: usize, output:
             let d = half::f16::from_bits(u16::from_le_bytes([block[0], block[1]])).to_f32();
             let qs = &block[2..18];
             for j in 0..32 {
-                let nibble = if j < 16 { qs[j] & 0x0F } else { (qs[j - 16] >> 4) & 0x0F };
+                let nibble = if j < 16 {
+                    qs[j] & 0x0F
+                } else {
+                    (qs[j - 16] >> 4) & 0x0F
+                };
                 let q = nibble as i32 - 8;
                 sum += d * q as f32 * input[b * 32 + j];
             }
@@ -581,7 +594,11 @@ fn matvec_q5_0_scalar(weights: &[u8], input: &[f32], n: usize, k: usize, output:
             let qh = u32::from_le_bytes([block[2], block[3], block[4], block[5]]);
             let qs = &block[6..22];
             for j in 0..32 {
-                let q4 = if j < 16 { qs[j] & 0x0F } else { (qs[j - 16] >> 4) & 0x0F };
+                let q4 = if j < 16 {
+                    qs[j] & 0x0F
+                } else {
+                    (qs[j - 16] >> 4) & 0x0F
+                };
                 let q5bit = ((qh >> j) & 1) as u8;
                 let q = (q4 | (q5bit << 4)) as i32 - 16;
                 sum += d * q as f32 * input[b * 32 + j];
@@ -703,29 +720,49 @@ pub fn expert_forward_gguf(
     if use_int_gate_up {
         quantize_bf16_to_int16(
             activation_bf16,
-            &mut scratch.input_int16, &mut scratch.input_scales, &mut scratch.input_sums,
+            &mut scratch.input_int16,
+            &mut scratch.input_scales,
+            &mut scratch.input_sums,
         );
         gguf_matvec_int(
-            expert.gate_up_type, &expert.gate_data,
-            &scratch.input_int16, &scratch.input_scales, &scratch.input_sums,
-            n, k, &mut scratch.gate_out,
+            expert.gate_up_type,
+            &expert.gate_data,
+            &scratch.input_int16,
+            &scratch.input_scales,
+            &scratch.input_sums,
+            n,
+            k,
+            &mut scratch.gate_out,
         );
         gguf_matvec_int(
-            expert.gate_up_type, &expert.up_data,
-            &scratch.input_int16, &scratch.input_scales, &scratch.input_sums,
-            n, k, &mut scratch.up_out,
+            expert.gate_up_type,
+            &expert.up_data,
+            &scratch.input_int16,
+            &scratch.input_scales,
+            &scratch.input_sums,
+            n,
+            k,
+            &mut scratch.up_out,
         );
     } else {
         for i in 0..k {
             scratch.input_f32[i] = bf16_to_f32(activation_bf16[i]);
         }
         gguf_matvec_f32(
-            expert.gate_up_type, &expert.gate_data,
-            &scratch.input_f32[..k], n, k, &mut scratch.gate_out,
+            expert.gate_up_type,
+            &expert.gate_data,
+            &scratch.input_f32[..k],
+            n,
+            k,
+            &mut scratch.gate_out,
         );
         gguf_matvec_f32(
-            expert.gate_up_type, &expert.up_data,
-            &scratch.input_f32[..k], n, k, &mut scratch.up_out,
+            expert.gate_up_type,
+            &expert.up_data,
+            &scratch.input_f32[..k],
+            n,
+            k,
+            &mut scratch.up_out,
         );
     }
 
@@ -740,17 +777,28 @@ pub fn expert_forward_gguf(
     if use_int_down {
         quantize_f32_to_int16(
             &scratch.hidden_f32[..n],
-            &mut scratch.hidden_int16, &mut scratch.hidden_scales, &mut scratch.hidden_sums,
+            &mut scratch.hidden_int16,
+            &mut scratch.hidden_scales,
+            &mut scratch.hidden_sums,
         );
         gguf_matvec_int(
-            expert.down_type, &expert.down_data,
-            &scratch.hidden_int16[..n], &scratch.hidden_scales, &scratch.hidden_sums,
-            k, n, &mut scratch.expert_out,
+            expert.down_type,
+            &expert.down_data,
+            &scratch.hidden_int16[..n],
+            &scratch.hidden_scales,
+            &scratch.hidden_sums,
+            k,
+            n,
+            &mut scratch.expert_out,
         );
     } else {
         gguf_matvec_f32(
-            expert.down_type, &expert.down_data,
-            &scratch.hidden_f32[..n], k, n, &mut scratch.expert_out,
+            expert.down_type,
+            &expert.down_data,
+            &scratch.hidden_f32[..n],
+            k,
+            n,
+            &mut scratch.expert_out,
         );
     }
 }
@@ -771,11 +819,17 @@ mod tests {
         let mut block = vec![0u8; Q4_0_BLOCK_BYTES];
         let d_bits = half::f16::from_f32(1.0).to_bits();
         block[0..2].copy_from_slice(&d_bits.to_le_bytes());
-        for i in 0..16 { block[2 + i] = 0x88; } // all nibbles = 8 → q=0
+        for i in 0..16 {
+            block[2 + i] = 0x88;
+        } // all nibbles = 8 → q=0
         let input = vec![1.0f32; 32];
         let mut output = vec![0.0f32; 1];
         matvec_q4_0_scalar(&block, &input, 1, 32, &mut output);
-        assert!((output[0] - 0.0).abs() < 1e-6, "expected 0, got {}", output[0]);
+        assert!(
+            (output[0] - 0.0).abs() < 1e-6,
+            "expected 0, got {}",
+            output[0]
+        );
     }
 
     #[test]
@@ -783,12 +837,18 @@ mod tests {
         let mut block = vec![0u8; Q8_0_BLOCK_BYTES];
         let d_bits = half::f16::from_f32(0.1).to_bits();
         block[0..2].copy_from_slice(&d_bits.to_le_bytes());
-        for i in 0..32 { block[2 + i] = 10u8; } // q8 = 10
+        for i in 0..32 {
+            block[2 + i] = 10u8;
+        } // q8 = 10
         let input = vec![1.0f32; 32];
         let mut output = vec![0.0f32; 1];
         matvec_q8_0_scalar(&block, &input, 1, 32, &mut output);
         // Expected: 32 * 0.1 * 10 = 32.0
-        assert!((output[0] - 32.0).abs() < 0.5, "expected ~32, got {}", output[0]);
+        assert!(
+            (output[0] - 32.0).abs() < 0.5,
+            "expected ~32, got {}",
+            output[0]
+        );
     }
 
     #[test]
@@ -814,7 +874,10 @@ mod tests {
                 let original = bf16_to_f32(bf16[idx]);
                 let reconstructed = int16[idx] as f32 * scales[g];
                 let err = (original - reconstructed).abs();
-                assert!(err < 0.01, "g={g} i={i}: orig={original} recon={reconstructed} err={err}");
+                assert!(
+                    err < 0.01,
+                    "g={g} i={i}: orig={original} recon={reconstructed} err={err}"
+                );
             }
         }
 

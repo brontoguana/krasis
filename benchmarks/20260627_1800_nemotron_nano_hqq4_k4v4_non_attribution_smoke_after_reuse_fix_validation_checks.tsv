@@ -1,0 +1,11 @@
+check	status	evidence
+summary_json	pass	jq asserted closed_smoke_selected_behavior_restored, 3/3 HTTP success, 3/3 selected-token match, 3/3 top-k drift caveat
+token_margin_tsv	pass	All HQQ4+k4v4 rows selected 1044 with positive 1044-1321 margins
+topk_comparison_tsv	pass	All six BF16/g32 comparisons kept selected token and retained membership/rank drift
+startup_no_cache_write	pass	Corrected server log contains no safetensors Marlin build/write line
+cache_temp_files	pass	No .tmp/.lock/.pending files under Nano cache directory
+bash_syntax	pass	bash -n dev
+repo_diff_check_krasis	pass	git diff --check
+repo_diff_check_internal	pass	git diff --check
+protected_configs	pass	No krasis/testconfigs edits; only known tests-only Nano configs are present
+cleanup_idle	pass	2026-06-27T18:18:11Z no tmux server, no matching runtime/curl process, no NVIDIA compute process, GPUs 15 MB / 11 MB

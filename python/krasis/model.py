@@ -680,6 +680,7 @@ class KrasisModel:
         layer_group_size: int = 1,
         gguf_path: Optional[str] = None,
         gguf_native: bool = False,
+        expert_hqq_diagnostic_cache_spec: Optional[str] = None,
         kv_cache_mb: int = 1000,  # MB for KV cache
         stream_attention: bool = False,
     ):
@@ -712,6 +713,7 @@ class KrasisModel:
                 )
         self.gguf_path = gguf_path
         self.gguf_native = gguf_native
+        self.expert_hqq_diagnostic_cache_spec = expert_hqq_diagnostic_cache_spec
 
         # Determine PP partition
         if pp_partition is None:
@@ -1450,7 +1452,8 @@ class KrasisModel:
 
             # ── 2. Triton/Marlin JIT Compilation ──
             try:
-                K, N, bits = self.cfg.hidden_size, self.cfg.moe_intermediate_size, 4
+                K = self.cfg.moe_latent_size or self.cfg.hidden_size
+                N, bits = self.cfg.moe_intermediate_size, 4
                 # Match the group_size auto-adjustment in the Rust cache builder
                 gs = 128
                 if K % gs != 0 or N % gs != 0:
@@ -1460,6 +1463,10 @@ class KrasisModel:
                 # Gated (silu): w13 width = 2*N (gate+up), ungated (relu2): w13 width = N (up only)
                 gated = self.cfg.mlp_hidden_act != "relu2"
                 w13_n = 2 * N if gated else N
+                logger.info(
+                    "Marlin warmup expert shape on %s: k=%d n=%d group_size=%d gated=%s latent_size=%d",
+                    device, K, N, gs, gated, self.cfg.moe_latent_size,
+                )
 
                 if is_primary:
                     # Fused MoE warmup no longer needed — Rust prefill dlopens
@@ -4557,6 +4564,7 @@ class KrasisModel:
                 expert_int4_calib=self.quant_cfg.gpu_expert_int4_calib,
                 gguf_path=self.gguf_path,
                 gguf_native=self.gguf_native,
+                expert_hqq_diagnostic_cache_spec=self.expert_hqq_diagnostic_cache_spec,
             )
         else:
             engine.load(
@@ -4566,6 +4574,7 @@ class KrasisModel:
                 gpu_num_bits=gpu_bits,
                 expert_int4_calib=self.quant_cfg.gpu_expert_int4_calib,
                 gpu_only=gpu_only,
+                expert_hqq_diagnostic_cache_spec=self.expert_hqq_diagnostic_cache_spec,
             )
 
         self.krasis_engine = engine
@@ -7914,6 +7923,7 @@ class KrasisModel:
             num_heads=cfg.mamba_num_heads, head_dim=cfg.mamba_head_dim,
             state_size=cfg.ssm_state_size,
             expand=cfg.mamba_expand, conv_kernel=cfg.mamba_conv_kernel,
+            conv_dim=cfg.mamba_conv_dim,
         )
         # Set n_groups for B/C sharing (same for all Mamba2 layers)
         store.set_mamba2_n_groups(cfg.mamba_n_groups)

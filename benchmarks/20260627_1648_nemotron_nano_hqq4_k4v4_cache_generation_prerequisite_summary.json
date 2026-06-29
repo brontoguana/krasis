@@ -1,0 +1,138 @@
+{
+  "gate": "20260627_1648_nemotron_nano_hqq4_k4v4_cache_generation_prerequisite",
+  "status": "closed",
+  "opened_utc": "2026-06-27T16:48:40Z",
+  "closed_utc": "2026-06-27T16:58:53Z",
+  "record_first": {
+    "source_gate": "20260627_1640_nemotron_nano_hqq_k4v4_inventory_non_attribution_smoke",
+    "gemma_carried_speeds": "5619.6 / 92.43 / 155.69",
+    "hqq6_g32_selected_token_restored": "0/3 selected-token changes on non-attribution smoke set",
+    "hqq6_g32_topk_drift": "3/3",
+    "hqq6_g64_case2_quality_failure": true,
+    "valid_existing_nano_hqq_k4v4_cache_spec": false,
+    "cache_generation_allowed_in_this_gate": true,
+    "quality_smoke_allowed_in_this_gate": false
+  },
+  "scope": {
+    "verify_config_fields_against_working_hqq4_k4v4_configs": true,
+    "create_tests_only_nano_config_under_tests": true,
+    "forbidden_config_dirs": [
+      "krasis/testconfigs",
+      "testconfigs"
+    ],
+    "run_only_built_cache_path": true,
+    "capture_full_log_and_artifact_paths": true,
+    "stop_after_cache_manifest_generation_verification": true
+  },
+  "config": {
+    "created": "tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+    "template": "tests/nemotron-nano-4-4-k6v6-a16.conf",
+    "verified_against": [
+      "tests/gemma-4-4-hqq4-k4v4-a16.conf",
+      "tests/qcn-k4v4-hqq4-int4-benchmark.conf"
+    ],
+    "field_changes": {
+      "CFG_KV_DTYPE": "k4v4",
+      "CFG_ATTENTION_QUANT": "hqq4",
+      "CFG_HQQ_GROUP_SIZE": "128"
+    },
+    "protected_config_dirs_touched": false
+  },
+  "run": {
+    "command": "./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf --build-cache --force-rebuild-hqq-cache",
+    "exit_code": 0,
+    "tmux_session": "nano_hqq4_k4v4_cache",
+    "full_log": "benchmarks/20260627_1648_nemotron_nano_hqq4_k4v4_cache_generation_prerequisite_cache_generation.log",
+    "run_dir": "logs/dev-run_20260627_175200",
+    "requests_sent": 0,
+    "quality_smoke_ran": false,
+    "build_cache_mode": true,
+    "hqq_attention_validation_log": "HQQ attention artifacts validated (115 MB cached), 27940 MB free",
+    "build_cache_complete": true,
+    "note": "--build-cache is the available built cache-only path; after validating HQQ attention artifacts it also ran its existing Marlin expert-cache verification/write phase before exiting."
+  },
+  "hqq_attention_cache": {
+    "status": "ok",
+    "cache_dir": "/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/attention_hqq_v5_grid65_33",
+    "manifest_path": "/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/attention_hqq_v5_grid65_33/manifest.json",
+    "format_version": 5,
+    "backend": "hqq4",
+    "complete": true,
+    "num_hidden_layers": 52,
+    "attention_layers_cached": [
+      5,
+      12,
+      19,
+      26,
+      33,
+      42
+    ],
+    "attention_layer_count": 6,
+    "tensor_records": 30,
+    "tensor_files": 30,
+    "nbits": 4,
+    "group_size": 128,
+    "axis": 1,
+    "layout": "row_major_axis1_grouped_uint4_packed",
+    "quantizer": {
+      "hqq4_global_steps": 65,
+      "hqq4_local_steps": 33,
+      "hqq4_search": "grid65_33"
+    },
+    "manifest_tensor_bytes": 120767064,
+    "manifest_file_bytes": 124198,
+    "cache_bytes_on_disk_including_manifest": 120911998
+  },
+  "headroom": {
+    "before_run": {
+      "snapshot_utc": "2026-06-27T16:51:51Z",
+      "disk_available": "613G",
+      "ram_available": "966Gi",
+      "gpu_memory_used_mb": [
+        15,
+        11
+      ]
+    },
+    "after_run": {
+      "snapshot_utc": "2026-06-27T16:58:53Z",
+      "disk_available": "598G",
+      "ram_available": "966Gi",
+      "gpu_memory_used_mb": [
+        15,
+        11
+      ]
+    }
+  },
+  "validation": {
+    "manifest_json_parse": "pass",
+    "manifest_complete": "pass",
+    "manifest_nbits_group_layout": "pass",
+    "tensor_record_count": "pass",
+    "quality_smoke_requests_absent": "pass",
+    "built_command_exit_zero": "pass",
+    "bash_n_dev": "pass",
+    "git_diff_check_krasis": "pass",
+    "git_diff_check_internal": "pass",
+    "protected_config_dirs": "pass"
+  },
+  "cleanup": {
+    "final_snapshot_utc": "2026-06-27T16:58:53Z",
+    "tmux_server": "none",
+    "matching_runtime_process": "none",
+    "gpu_memory_used_mb": [
+      15,
+      11
+    ],
+    "disk_available": "598G",
+    "ram_available": "966Gi"
+  },
+  "forbidden": [
+    "quality smoke requests",
+    "benchmarks",
+    "decode/HCS work",
+    "production enablement",
+    "new variants",
+    "source changes beyond tests-only config unless a concrete cache-path bug is exposed",
+    "edits under krasis/testconfigs"
+  ]
+}

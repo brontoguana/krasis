@@ -1,0 +1,6 @@
+field	serial	parallel
+token_ids	[1044]	[1044]
+text	,	,
+num_tokens	1	1
+finish_reason	length	length
+prefill_ms	525.3	669.3

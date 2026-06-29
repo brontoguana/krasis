@@ -1,0 +1,7 @@
+metric	g64	g32	delta_g64_minus_g32
+g64_selected_token_changed_cases	1	0	1
+topk_rank_drift_cases	3	3	0
+avg_selected_output_logprob_delta	0.110919667	0.125852000	-0.014932333
+max_common_topk_logprob_delta	0.493397000	0.578915000	-0.085518000
+max_rank_aligned_topk_logprob_delta	0.429088000	0.407414000	0.021674000
+material_quality_improvement	baseline	no	selected_token_mismatch_count_improved;topk_rank_drift_remains_all_cases

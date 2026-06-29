@@ -1,0 +1,9 @@
+step	requirement	notes
+1_record_first	record this 1335 design gate before source edits	carry baselines and 1313 timing split
+2_env	add fresh opt-in env KRASIS_MAMBA2_SSD_BLOCK_SCAN_STATE_PARALLEL_RECURRENT=1	must require block-scan, coeff-tile, startup diagnostic context; no default enablement
+3_symbol	add a new CUDA symbol rather than altering accepted recurrent kernel	accepted 1022/1113/1207/1242/1313 paths remain available
+4_buffers	reuse candidate_state, entry_state, c_state_total_exact, candidate_out; add only optional small probe/timing buffers	no new large global VRAM allocation unless sized from runtime and justified
+5_oracle_first	run ./dev build, then smallest full-oracle coeff-tile diagnostic with row97,row64,row82 probes	stop on first output/state mismatch and record max/mean errors
+6_timing_only_if_exact	run one long no-oracle candidate-timing diagnostic only after exact full oracle	compare recurrent/kernel split against 1313; no requests or speed benchmark
+7_commit_semantics	copy candidate output/state to live only after oracle success	no oracle fallback and no silent degradation
+8_cleanup_if_failed	if the prototype fails exactness, cleanup or analyze before further optimization	preserve accepted coeff-tile surface

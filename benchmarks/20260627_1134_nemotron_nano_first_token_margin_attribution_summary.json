@@ -1,0 +1,148 @@
+{
+  "gate": "20260627_1134_nemotron_nano_first_token_margin_attribution",
+  "status": "closed_existing_artifact_analysis",
+  "opened_utc": "2026-06-27T11:34:00Z",
+  "record_first": {
+    "source_gate": "20260627_1125_nemotron_nano_hqq_variant_decision_root_cause",
+    "no_further_blind_hqq_bit_group_sweeps": true,
+    "least_bad_by_selected_token_stability": "hqq6_g32",
+    "least_bad_by_logprob_distance": "hqq6_g64",
+    "least_bad_by_logprob_distance_caveat": "hqq6_g64 flips case 2",
+    "common_boundary": {
+      "token_a": 1044,
+      "token_a_text": ",",
+      "token_b": 1321,
+      "token_b_text": " and"
+    }
+  },
+  "scope": {
+    "use_existing_artifacts_first": true,
+    "live_diagnostic_allowed_only_if_required": true,
+    "allowed_live_variants": [
+      "hqq6_g32",
+      "hqq6_g64"
+    ],
+    "allowed_cases": [
+      0,
+      2
+    ],
+    "allowed_endpoint": "/v1/internal/reference_test",
+    "capture": [
+      "first_token_margins_1044_1321",
+      "topk_membership_rank_movement",
+      "selected_topk_logprob_deltas",
+      "available_per_layer_per_expert_attribution"
+    ],
+    "forbidden": [
+      "cache_generation",
+      "hqq8",
+      "new_bit_group_sweeps",
+      "production_enablement",
+      "speed_benchmark",
+      "decode_hcs",
+      "selected_expert_retargeting",
+      "workaround_instrumentation"
+    ]
+  },
+  "analysis": {
+    "existing_artifacts_used_only": true,
+    "live_server_run": "not_run",
+    "source_changes": "none",
+    "cache_generation": "not_run",
+    "target_token_margin_available": true,
+    "margin_rows": [
+      {
+        "case_id": 0,
+        "variant": "bf16",
+        "selected_token": 1044,
+        "margin_logprob_1044_minus_1321": 0.300523758
+      },
+      {
+        "case_id": 0,
+        "variant": "hqq6_g64",
+        "selected_token": 1044,
+        "margin_logprob_1044_minus_1321": 0.472423553,
+        "margin_shift_vs_bf16": 0.171899796
+      },
+      {
+        "case_id": 0,
+        "variant": "hqq6_g32",
+        "selected_token": 1044,
+        "margin_logprob_1044_minus_1321": 0.474477768,
+        "margin_shift_vs_bf16": 0.17395401
+      },
+      {
+        "case_id": 2,
+        "variant": "bf16",
+        "selected_token": 1044,
+        "margin_logprob_1044_minus_1321": 0.370508194
+      },
+      {
+        "case_id": 2,
+        "variant": "hqq6_g64",
+        "selected_token": 1321,
+        "margin_logprob_1044_minus_1321": -0.242314339,
+        "margin_shift_vs_bf16": -0.612822533
+      },
+      {
+        "case_id": 2,
+        "variant": "hqq6_g32",
+        "selected_token": 1044,
+        "margin_logprob_1044_minus_1321": 0.069721222,
+        "margin_shift_vs_bf16": -0.300786972
+      }
+    ],
+    "pattern": {
+      "case_0": "HQQ6 g64 and g32 both widen the 1044-over-1321 margin; selected token stays 1044.",
+      "case_2": "Both HQQ6 g64 and g32 reduce the 1044-over-1321 margin; g64 crosses zero and flips to 1321, while g32 remains barely positive and keeps 1044.",
+      "topk_drift": "Top-k drift persists even when selected token is stable; case 2 has top-k membership drift for both HQQ6 g64 and HQQ6 g32."
+    },
+    "available_attribution": {
+      "hqq6_g64_case2_quantization_attribution": "0640 exact-row attribution identifies layer 51 expert 60 expert-output/routed-value divergence and proves HQQ GPU equals KRHQ/HQQ6 offline.",
+      "hqq6_g64_case2_boundary_summaries": "0524 contains consume-boundary layer summaries.",
+      "limitation": "These artifacts do not project per-layer/expert deltas onto the final 1044-vs-1321 token margin."
+    },
+    "missing_margin_attribution": [
+      "LM-head row difference for target tokens 1044 and 1321",
+      "full selected-row hidden vector at final LM-head input",
+      "per-layer BF16-vs-HQQ selected-row hidden deltas for target cases and variants",
+      "routing/contributor metadata tied to the same deltas",
+      "projection of each delta onto the 1044-vs-1321 margin"
+    ]
+  },
+  "decision": {
+    "status": "stopped_after_existing_artifact_analysis",
+    "why_no_live_rerun": "Saved responses already expose target-token margins; an unmodified live rerun would not expose the missing per-layer/per-expert margin attribution.",
+    "further_blind_hqq_bit_group_sweeps": "not_justified",
+    "next_gate_if_continuing": "Add targeted margin-attribution instrumentation only, then run cases 0 and 2 for HQQ6 g32 and HQQ6 g64 through /v1/internal/reference_test using existing diagnostic specs/caches."
+  },
+  "artifacts": {
+    "token_margin_summary": "20260627_1134_nemotron_nano_first_token_margin_attribution_token_margin_summary.tsv",
+    "topk_rank_movement": "20260627_1134_nemotron_nano_first_token_margin_attribution_topk_rank_movement.tsv",
+    "attribution_availability": "20260627_1134_nemotron_nano_first_token_margin_attribution_attribution_availability.tsv",
+    "root_decision": "20260627_1134_nemotron_nano_first_token_margin_attribution_root_decision.tsv",
+    "source_artifacts": "20260627_1134_nemotron_nano_first_token_margin_attribution_source_artifacts.tsv",
+    "validation": "20260627_1134_nemotron_nano_first_token_margin_attribution_validation_checks.tsv"
+  },
+  "final_state": {
+    "timestamp_utc": "2026-06-27T11:43:02Z",
+    "tmux_server": "none",
+    "matching_runtime_generator_curl_processes": "none",
+    "nvidia_compute_processes": "none",
+    "gpu_memory_used_mb": [
+      15,
+      11
+    ],
+    "gpu_memory_free_mb": [
+      32105,
+      20043
+    ],
+    "gpu_utilization_percent": [
+      0,
+      0
+    ],
+    "disk_available": "614G",
+    "ram_available": "966Gi",
+    "protected_config_status": "pre-existing untracked tests/nemotron-nano-bf16-experts-a16.conf only"
+  }
+}

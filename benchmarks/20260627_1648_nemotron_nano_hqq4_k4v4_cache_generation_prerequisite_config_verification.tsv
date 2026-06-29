@@ -1,0 +1,15 @@
+item	status	value	evidence
+working_gemma_kv_dtype	pass	k4v4	tests/gemma-4-4-hqq4-k4v4-a16.conf
+working_gemma_attention_quant	pass	hqq4	tests/gemma-4-4-hqq4-k4v4-a16.conf
+working_gemma_hqq_group_size	pass	128	tests/gemma-4-4-hqq4-k4v4-a16.conf
+working_qcn_kv_dtype	pass	k4v4	tests/qcn-k4v4-hqq4-int4-benchmark.conf
+working_qcn_attention_quant	pass	hqq4	tests/qcn-k4v4-hqq4-int4-benchmark.conf
+default_hqq_group_size	pass	128	python/krasis/config.py HQQ_ATTENTION_DEFAULT_GROUP_SIZE
+nano_template	path	tests/nemotron-nano-4-4-k6v6-a16.conf	existing tests-only Nano k6v6 config
+nano_new_config	path	tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf	new tests-only HQQ4+k4v4 config
+nano_changed_field	pass	CFG_KV_DTYPE k6v6 -> k4v4	diff against Nano k6v6 template
+nano_changed_field	pass	CFG_ATTENTION_QUANT bf16 -> hqq4	diff against Nano k6v6 template
+nano_added_field	pass	CFG_HQQ_GROUP_SIZE=128	matches working Gemma HQQ4+k4v4 config and default HQQ group size
+protected_config_dirs	pass	unchanged	no files under testconfigs/tests/testconfigs/krasis/testconfigs changed
+expected_cache_dir	path	/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/attention_hqq_v5_grid65_33	HQQ4 nbits=4 group_size=128 baseline cache dir
+expected_manifest	path	/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/attention_hqq_v5_grid65_33/manifest.json	HQQ attention manifest path

@@ -1,0 +1,54 @@
+[0;36m[1m=>[0m Building Rust extension (repo-local maturin build --release)...
+[0;32m[1mOK[0m FLA kernels up to date (skipping)
+KRASIS_BUILD_TIMING phase="dev FLA kernels" status=0 duration_s=0
+[0;36m[1m=>[0m Building Marlin/FlashAttention sidecars...
+[sidecars] Marlin/FlashAttention sidecars are current
+KRASIS_BUILD_TIMING phase="dev Marlin/FlashAttention sidecars" status=0 duration_s=0
+[0;36m[1m=>[0m Verifying Marlin/FlashAttention sidecars...
+[sidecars] verified package sidecars and manifest
+KRASIS_BUILD_TIMING phase="dev sidecar verification" status=0 duration_s=0
+📦 Including license file `LICENSE`
+🍹 Building a mixed python/rust project
+🔗 Found pyo3 bindings
+🐍 Found CPython 3.11 at /home/main/miniconda3/envs/ktransformers/bin/python3
+📡 Using build options features from pyproject.toml
+warning: krasis@1.0.15: KRASIS_BUILD_TIMING phase="probe libnuma" duration_ms=0 duration_s=0.000
+warning: krasis@1.0.15: Reusing cached GPU decode kernels at /home/main/Documents/Claude/krasis-nemotron-dev/target/release/build/krasis-2e8fcc93ae043187/out/decode_kernels.ptx
+warning: krasis@1.0.15: KRASIS_BUILD_TIMING phase="decode PTX" duration_ms=0 duration_s=0.000
+warning: krasis@1.0.15: KRASIS_BUILD_TIMING phase="nvcc prefill PTX compile" duration_ms=5604 duration_s=5.605
+warning: krasis@1.0.15: Compiled GPU prefill kernels to PTX (/home/main/Documents/Claude/krasis-nemotron-dev/target/release/build/krasis-2e8fcc93ae043187/out/prefill_kernels.ptx)
+warning: krasis@1.0.15: KRASIS_BUILD_TIMING phase="prefill PTX" duration_ms=5604 duration_s=5.605
+warning: krasis@1.0.15: Reusing cached HQQ CUDA search kernels at /home/main/Documents/Claude/krasis-nemotron-dev/target/release/build/krasis-2e8fcc93ae043187/out/hqq_search_kernels.ptx
+warning: krasis@1.0.15: KRASIS_BUILD_TIMING phase="HQQ search PTX" duration_ms=0 duration_s=0.000
+warning: krasis@1.0.15: KRASIS_BUILD_TIMING phase="build.rs total" duration_ms=5604 duration_s=5.605
+   Compiling krasis v1.0.15 (/home/main/Documents/Claude/krasis-nemotron-dev)
+error: recursion limit reached while expanding `$crate::json_internal!`
+     --> src/gpu_prefill.rs:15647:22
+      |
+15647 |           let record = serde_json::json!({
+      |  ______________________^
+15648 | |             "available": true,
+15649 | |             "diagnostic": "mamba2_ssd_v4_cast_carry_diag",
+15650 | |             "layer": layer_idx,
+...     |
+15746 | |             },
+15747 | |         });
+      | |__________^
+      |
+      = help: consider increasing the recursion limit by adding a `#![recursion_limit = "256"]` attribute to your crate (`krasis`)
+      = note: this error originates in the macro `$crate::json_internal` which comes from the expansion of the macro `serde_json::json` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: krasis@1.0.15: KRASIS_BUILD_TIMING phase="probe libnuma" duration_ms=0 duration_s=0.000
+warning: krasis@1.0.15: Reusing cached GPU decode kernels at /home/main/Documents/Claude/krasis-nemotron-dev/target/release/build/krasis-2e8fcc93ae043187/out/decode_kernels.ptx
+warning: krasis@1.0.15: KRASIS_BUILD_TIMING phase="decode PTX" duration_ms=0 duration_s=0.000
+warning: krasis@1.0.15: KRASIS_BUILD_TIMING phase="nvcc prefill PTX compile" duration_ms=5604 duration_s=5.605
+warning: krasis@1.0.15: Compiled GPU prefill kernels to PTX (/home/main/Documents/Claude/krasis-nemotron-dev/target/release/build/krasis-2e8fcc93ae043187/out/prefill_kernels.ptx)
+warning: krasis@1.0.15: KRASIS_BUILD_TIMING phase="prefill PTX" duration_ms=5604 duration_s=5.605
+warning: krasis@1.0.15: Reusing cached HQQ CUDA search kernels at /home/main/Documents/Claude/krasis-nemotron-dev/target/release/build/krasis-2e8fcc93ae043187/out/hqq_search_kernels.ptx
+warning: krasis@1.0.15: KRASIS_BUILD_TIMING phase="HQQ search PTX" duration_ms=0 duration_s=0.000
+warning: krasis@1.0.15: KRASIS_BUILD_TIMING phase="build.rs total" duration_ms=5604 duration_s=5.605
+error: could not compile `krasis` (lib) due to 1 previous error
+💥 maturin failed
+  Caused by: Failed to build a native library through cargo
+  Caused by: Cargo build finished with "exit status: 101": `env -u CARGO PYO3_BUILD_EXTENSION_MODULE="1" PYO3_ENVIRONMENT_SIGNATURE="cpython-3.11-64bit" PYO3_PYTHON="/home/main/miniconda3/envs/ktransformers/bin/python3" PYTHON_SYS_EXECUTABLE="/home/main/miniconda3/envs/ktransformers/bin/python3" "cargo" "rustc" "--profile" "release" "--features" "pyo3/extension-module" "--features" "cuda" "--message-format" "json-render-diagnostics" "--manifest-path" "/home/main/Documents/Claude/krasis-nemotron-dev/Cargo.toml" "--lib" "--crate-type" "cdylib"`
+KRASIS_BUILD_TIMING phase="dev maturin build" status=1 duration_s=2

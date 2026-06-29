@@ -1,0 +1,2 @@
+layer	tokens	output_mismatches	output_max_abs	output_mean_abs	first_output_flat	first_output_row	first_output_head	first_output_d	first_output_candidate_bits	first_output_oracle_bits	first_output_candidate_value	first_output_oracle_value	first_output_abs_error	state_mismatches	state_max_abs	state_mean_abs	first_state_mismatch	probe_row64_state0	probe_row82_state14	result
+0	256	3	0.25	0.00000024959444999694824	400408	97	48	24	0xc233	0xc234	-44.75	-45.0	0.25	0	0.0	0.0	none	exact output 0x3bb8 and state 0x3b90c258	exact output 0xbe4d and state 0xbb05886e	failed_closed

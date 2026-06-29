@@ -1,0 +1,13 @@
+check	status	details
+summary_json_assertion	passed	status blocked_fail_closed_before_requests, ready=false, request_count=0, no_workaround_used=true
+runtime_attempt_assertion	passed	ready_reached=false and request_count=0
+root_decision_assertion	passed	decision records fail-closed stop before requests
+bash_n_dev	passed	dev syntax unchanged
+git_diff_check_krasis	passed	no whitespace errors
+git_diff_check_internal	passed	no whitespace errors
+protected_config_check	passed_known_untracked_tests_nemotron_nano_bf16_experts_a16_conf	no protected testconfigs modified
+focused_tests	not_run	no source changes in this gate
+dev_build	not_run	no source changes in this gate
+live_requests	passed_not_sent	g32 failed closed before READY; g64 not run
+cleanup	passed	./dev kill reported all GPUs clear
+final_idle_state	passed	2026-06-27T12:24:27Z no tmux server, no matching runtime/generator/build/curl process, no NVIDIA compute process, GPUs 15 MB / 11 MB, disk 614G, RAM 965Gi

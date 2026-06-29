@@ -1,0 +1,83 @@
+{
+  "gate": "20260627_1701_nemotron_nano_hqq4_k4v4_non_attribution_smoke",
+  "status": "closed_stopped_before_smoke",
+  "opened_utc": "2026-06-27T17:02:02Z",
+  "closed_utc": "2026-06-27T17:07:55Z",
+  "record_first": {
+    "source_gate": "20260627_1648_nemotron_nano_hqq4_k4v4_cache_generation_prerequisite",
+    "tests_only_config": "tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+    "hqq_attention_manifest": "/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/attention_hqq_v5_grid65_33/manifest.json",
+    "manifest_complete": true,
+    "backend": "hqq4",
+    "nbits": 4,
+    "group_size": 128,
+    "layout": "row_major_axis1_grouped_uint4_packed",
+    "tensor_records": 30,
+    "attention_layers_cached": [5, 12, 19, 26, 33, 42],
+    "cache_generation_exit_code": 0,
+    "cache_generation_requests_sent": 0
+  },
+  "scope": {
+    "use_existing_generated_cache_only": true,
+    "forbidden_flags": ["--force-rebuild-hqq-cache", "--build-cache"],
+    "command": "./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+    "endpoint": "/v1/internal/reference_test",
+    "request_debug_reference_trace": true,
+    "hqq_consume_on_if_supported": true,
+    "attribution_checkpoint_envs_off": true,
+    "send_case_2_first": true,
+    "send_cases_0_and_1_only_if_case_2_passes": true,
+    "forbidden_work": [
+      "source_changes",
+      "cache_generation",
+      "benchmarks",
+      "decode_hcs",
+      "production_enablement"
+    ]
+  },
+  "runtime": {
+    "status": "stopped_before_requests",
+    "command": "./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+    "tmux_session": "nano_hqq4_k4v4_smoke",
+    "server_log": "benchmarks/20260627_1701_nemotron_nano_hqq4_k4v4_non_attribution_smoke_server.log",
+    "exit_code": 137,
+    "server_ready": false,
+    "requests_sent": 0,
+    "case_2_sent": false,
+    "hqq_consume_enabled": false,
+    "hqq_consume_note": "The available consume gate is expert-HQQ diagnostic consumption and requires an expert-HQQ diagnostic cache spec; this attention-HQQ k4v4 config did not expose that path.",
+    "hqq_attention_cache_validated": true,
+    "hqq_attention_validation_line": "HQQ attention artifacts validated (115 MB cached), 27940 MB free",
+    "unexpected_cache_generation": {
+      "occurred": true,
+      "kind": "Marlin INT4 expert cache",
+      "log_line": "GPU INT4 Marlin cache built: 15.8 GB in 42s",
+      "artifact_path": "/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/experts_marlin_int4_g64_calamax.bin",
+      "artifact_bytes": 15849200704,
+      "artifact_mtime": "2026-06-27 18:05:46.214334671 +0100"
+    }
+  },
+  "decision": {
+    "result": "stop_no_quality_smoke",
+    "reason": "The regular run was not existing-cache-only: before READY and before any request, it built/wrote the Marlin INT4 expert cache. The gate forbids cache generation, so no smoke requests were sent.",
+    "required_next_gate": "Verify/reuse the complete Marlin expert cache as a prerequisite, then rerun the HQQ4+k4v4 smoke with no cache-build/write phase."
+  },
+  "validation": {
+    "summary_assertion": "pass",
+    "runtime_tsv_assertion": "pass",
+    "startup_cache_tsv_assertion": "pass",
+    "bash_n_dev": "pass",
+    "git_diff_check_krasis": "pass",
+    "git_diff_check_internal": "pass",
+    "protected_config_check": "pass",
+    "idle_state": "pass"
+  },
+  "cleanup": {
+    "final_snapshot_utc": "2026-06-27T17:07:55Z",
+    "tmux_server": "none",
+    "matching_runtime_process": "none",
+    "gpu_memory": "15 MB / 11 MB",
+    "disk_available": "583G",
+    "ram_available": "966Gi"
+  }
+}

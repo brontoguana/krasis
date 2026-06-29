@@ -1,0 +1,8 @@
+check	result	evidence
+hqq_attention_cache	reused	HQQ attention artifacts validated (115 MB cached).
+marlin_expert_cache	reused	Loading GPU Marlin cache: 23 layers; GPU Marlin cache loaded: 15.8 GB in 10s.
+cache_write_evidence	none	Only generic Python phase header says building cache; concrete lines show load from existing cache.
+requests	0	No reference_test or chat completion paths in startup_diagnostic2 log.
+benchmark_path	no	No benchmark-only path in startup_diagnostic2 log.
+startup_exit	yes	Startup diagnostic exit after VRAM calibration by request.
+temp_lock_files	0	Final model/cache temp and lock file checks were empty.

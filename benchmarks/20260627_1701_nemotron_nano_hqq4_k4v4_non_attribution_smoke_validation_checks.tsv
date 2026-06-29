@@ -1,0 +1,12 @@
+check	status	detail
+record_first	pass	1648 carried first: tests-only config, complete HQQ4 g128 manifest, 30 tensors on layers 5,12,19,26,33,42, exit 0, zero requests.
+summary_json	pass	status closed_stopped_before_smoke; exit 137; server_ready false; requests_sent 0; unexpected_cache_generation true.
+runtime_attempt_tsv	pass	requests_sent row is 0 and case2 was not sent.
+startup_cache_validation_tsv	pass	HQQ attention validation succeeded and Marlin expert cache build is recorded as unexpected.
+server_ready_absent	pass	KRASIS SERVER READY absent from server log.
+reference_requests_absent	pass	reference_test absent from server log and no response files were produced.
+bash_n_dev	pass	bash -n dev completed successfully.
+git_diff_check_krasis	pass	git diff --check completed successfully in krasis repo.
+git_diff_check_internal	pass	git diff --check completed successfully in krasis-internal.
+protected_config_check	pass	no krasis/testconfigs or testconfigs edits; status shows tests-only HQQ4 config plus known pre-existing Nano BF16 config.
+cleanup_idle	pass	final snapshot 2026-06-27T17:07:55Z: no tmux server, no matching runtime/curl process, GPUs 15 MB / 11 MB, disk 583G, RAM 966Gi.

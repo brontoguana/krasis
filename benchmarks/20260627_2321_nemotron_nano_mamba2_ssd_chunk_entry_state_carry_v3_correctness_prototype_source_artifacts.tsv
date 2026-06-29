@@ -1,0 +1,12 @@
+component	file	line	note
+v3_cuda_kernel	src/cuda/prefill_kernels.cu	5530	Opt-in candidate kernel; default sequential kernel remains separate.
+v3_env_gate	src/gpu_prefill.rs	16290	Requires KRASIS_MAMBA2_SSD_CHUNK_PARALLEL_V3 plus oracle env.
+v3_oracle_compare	src/gpu_prefill.rs	16358	Runs candidate on separate output/state buffers, compares to sequential, and fails closed on mismatch.
+v3_oracle_emit	src/gpu_prefill.rs	16699	Emits MAMBA2-SSD-CHUNK-V3-ORACLE JSON.
+v3_commit_after_success	src/gpu_prefill.rs	16711	Copies candidate output/state into live buffers only after oracle success.
+initial_state_snapshot	src/gpu_prefill.rs	31312	Copies live sequential entry state before sequential SSD mutates it.
+default_sequential_dispatch	src/gpu_prefill.rs	31372	Default path still launches existing sequential SSD kernel.
+local_tri_before_v3	src/gpu_prefill.rs	31407	Standalone local-tri oracle now emits before v3 full oracle can fail closed.
+v3_dispatch	src/gpu_prefill.rs	31429	Runs v3 oracle only when opt-in target is active.
+ptx_symbol_load	src/gpu_prefill.rs	53678	Loads mamba2_ssd_chunk_entry_v3_kernel symbol.
+python_fail_closed_warmup	python/krasis/server.py	1740	Startup warmup re-raises only for v3 prototype/oracle envs.

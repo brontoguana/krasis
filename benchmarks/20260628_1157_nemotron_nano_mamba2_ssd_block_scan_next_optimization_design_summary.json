@@ -1,0 +1,80 @@
+{
+  "artifacts": {
+    "buffer_plan": "20260628_1157_nemotron_nano_mamba2_ssd_block_scan_next_optimization_design_buffer_plan.tsv",
+    "final_state": "20260628_1157_nemotron_nano_mamba2_ssd_block_scan_next_optimization_design_final_state.tsv",
+    "kernel_plan": "20260628_1157_nemotron_nano_mamba2_ssd_block_scan_next_optimization_design_kernel_plan.tsv",
+    "probe_plan": "20260628_1157_nemotron_nano_mamba2_ssd_block_scan_next_optimization_design_probe_plan.tsv",
+    "runtime_not_run": "20260628_1157_nemotron_nano_mamba2_ssd_block_scan_next_optimization_design_runtime_not_run.tsv",
+    "source_analysis": "20260628_1157_nemotron_nano_mamba2_ssd_block_scan_next_optimization_design_source_analysis.tsv",
+    "static_runtime_sizing": "20260628_1157_nemotron_nano_mamba2_ssd_block_scan_next_optimization_design_static_runtime_sizing.tsv",
+    "target_decision": "20260628_1157_nemotron_nano_mamba2_ssd_block_scan_next_optimization_design_target_decision.tsv",
+    "validation": "20260628_1157_nemotron_nano_mamba2_ssd_block_scan_next_optimization_design_validation_checks.tsv"
+  },
+  "constraints": {
+    "benchmark": false,
+    "build": false,
+    "decode_hcs_changes": false,
+    "default_path_change": false,
+    "implementation": false,
+    "production_enablement": false,
+    "requests": false,
+    "runtime_diagnostic": false
+  },
+  "gate": "20260628_1157_nemotron_nano_mamba2_ssd_block_scan_next_optimization_design",
+  "opened_utc": "2026-06-28T11:57:00Z",
+  "record_first": {
+    "1128_correctness": {
+      "long_oracle_records": 69,
+      "output_mismatches": 0,
+      "small_oracle_records": 69,
+      "state_mismatches": 0
+    },
+    "1128_long_output_subloop_timing_ms_avg": {
+      "cast_store": 0.8165113826237108,
+      "d_prior_setup": 21.8252763155321,
+      "local_old_cancellation": 1845.641363228634,
+      "local_triangular_accumulation": 2158.5134908488967,
+      "output_kernel_total": 4318.312474739131,
+      "unattributed_sync_or_loop_residual": 291.5158329634442
+    },
+    "gemma_baseline": {
+      "internal_decode_tok_s": 92.43,
+      "network_tok_s": 155.69,
+      "prefill_tok_s": 5619.6
+    },
+    "nano_baseline": {
+      "internal_decode_tok_s": 94.48,
+      "network_tok_s": 164.75,
+      "prefill_tok_s": 346.5
+    },
+    "source_gate": "20260628_1128_nemotron_nano_mamba2_ssd_block_scan_output_subloop_timing"
+  },
+  "result": {
+    "chosen_next_target": "per_pair_coefficient_tiled_block_scan_output",
+    "decision": "design_only",
+    "preserve": [
+      "default sequential SSD",
+      "accepted 1022/1113 c_state_total_exact correctness surface",
+      "v5 diagnostics and timing",
+      "D/prior assembly",
+      "BF16 cast placement",
+      "row/chunk indexing",
+      "local triangular formula",
+      "per-u output accumulation order"
+    ],
+    "rejected_targets": [
+      "D/prior setup",
+      "cast/store",
+      "aggregate local_old_state_exact",
+      "affine or closed-form accepted state summaries"
+    ],
+    "static_conclusion": "The next exactness-preserving candidate should precompute per-pair local triangular and local-old scalar coefficients with the same state-loop order and BF16 casts, then assemble output with the current u-order loop. This targets the measured 2158.513ms local triangular and 1845.641ms local-old work without changing D/prior, cast placement, indexing, or accepted state propagation."
+  },
+  "scope": "static_next_optimization_design",
+  "status": "closed",
+  "validation": {
+    "final_snapshot_utc": "2026-06-28T12:05:06Z",
+    "gpu_idle": "GPU0 15 MB, GPU1 11 MB",
+    "passed": true
+  }
+}

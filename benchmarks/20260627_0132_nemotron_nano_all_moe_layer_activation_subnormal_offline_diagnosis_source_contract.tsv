@@ -1,0 +1,4 @@
+file	change	contract
+src/weights/expert_hqq.rs	added mismatch detail rows and failure-row-filtered offline comparator	diagnostic/offline only; aggregate contract unchanged; no production output consumption
+src/bin/expert_hqq_trace_compare.rs	accepted optional mismatch details and failure rows TSV outputs	offline comparator only; no runtime GPU launch
+dev	allowed ./dev expert-hqq-trace-compare optional details/filter args	built command only; no live server or benchmark path

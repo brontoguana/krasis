@@ -1,0 +1,5 @@
+decision	status	evidence	next_action
+correctness	passed	Small oracle run compared existing sequential kernel against prototype on 69 layer rows at 128 tokens with zero output/state mismatches.	No correctness blocker for this limited diagnostic input.
+performance	failed	The long 39920-token diagnostic increased SSD/scan from 114449.4ms to 120711.931ms and prefill from 117356.0ms to 123870.0ms.	Do not promote this prototype.
+production_path	preserved	Default branch still launches mamba2_ssd_sequential_kernel; prototype requires KRASIS_MAMBA2_SSD_REUSE_PROTO plus timing/liveness diagnostics.	Keep production disabled.
+prototype_retention	reject_as_optimization	The scalar-reuse attempt adds shared-memory coordination but does not reduce total runtime; it is 5.472% slower in the target substage.	Revert or replace with a real chunk-parallel design in a follow-up gate; keep only as disabled diagnostic evidence until then.

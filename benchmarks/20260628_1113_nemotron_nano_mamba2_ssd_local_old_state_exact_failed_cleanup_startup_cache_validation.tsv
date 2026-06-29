@@ -1,0 +1,10 @@
+metric	value
+hqq_attention_cache	HQQ attention artifacts validated; 115 MB cached
+expert_cache	GPU Marlin cache loaded; 15.8 GB in 10s
+cache_writes	no new Krasis temp or lock files found
+startup_exit	Startup diagnostic exit after VRAM calibration by request
+post_calibration_free_vram_mb	23714
+transient_short_prefill_mb	860
+transient_long_prefill_mb	892
+transient_short_decode_mb	0
+transient_long_decode_mb	2

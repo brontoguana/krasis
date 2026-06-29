@@ -1,0 +1,8 @@
+field	value
+gate	20260627_2102_nemotron_nano_mamba2_ssd_chunk_parallel_failed_prototype_cleanup
+result	cleanup_complete
+prototype_worth_keeping	false
+default_path_changed	false
+sequential_path_validated	true
+reason	2039 chunk-parallel candidate failed the small sequential oracle; cleanup removed only prototype additions and validated default sequential SSD startup.
+next_gate	none_required_for_cleanup

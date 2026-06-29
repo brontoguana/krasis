@@ -1,0 +1,5 @@
+file	contract	notes
+src/gpu_prefill.rs	env-gated exact-row diagnostic capture only	requires KRASIS_EXPERT_HQQ_PREFILL_EXACT_ROW_DIAG plus explicit layer/expert/row/col; fails closed if absent
+src/weights/expert_hqq.rs	offline exact-row attribution analyzer	reuses KRHQ/readback and BF16-path oracle; no tolerance or runtime behavior change
+src/bin/expert_hqq_row_attribution.rs	./dev-reachable analyzer wrapper	offline only
+dev	expert-hqq-row-attribution command	built command path; no Python converter

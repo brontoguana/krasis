@@ -202,13 +202,18 @@ impl MmapSafetensors {
         if let Some(info) = self.tensors.get(name) {
             let start = self.data_start + info.data_offsets[0];
             let len = info.data_offsets[1] - info.data_offsets[0];
-            let _ = self.mmap.advise_range(memmap2::Advice::WillNeed, start, len);
+            let _ = self
+                .mmap
+                .advise_range(memmap2::Advice::WillNeed, start, len);
         }
     }
 
     /// Evict all pages from page cache. Call after all data has been copied out.
     pub fn evict_page_cache(&self) {
-        let _ = unsafe { self.mmap.unchecked_advise(memmap2::UncheckedAdvice::DontNeed) };
+        let _ = unsafe {
+            self.mmap
+                .unchecked_advise(memmap2::UncheckedAdvice::DontNeed)
+        };
     }
 }
 
@@ -231,12 +236,19 @@ mod tests {
         let info = st.tensor_info(gate_name).expect("Expert weight not found");
 
         // V2-Lite: gate_proj is [moe_intermediate_size, hidden_size] = [1408, 2048]
-        assert_eq!(info.shape, vec![1408, 2048], "Unexpected shape: {:?}", info.shape);
+        assert_eq!(
+            info.shape,
+            vec![1408, 2048],
+            "Unexpected shape: {:?}",
+            info.shape
+        );
         assert_eq!(info.dtype, Dtype::Bf16);
         assert_eq!(info.byte_size(), 1408 * 2048 * 2); // BF16 = 2 bytes
 
         // Read actual data
-        let data = st.tensor_data(gate_name).expect("Failed to read tensor data");
+        let data = st
+            .tensor_data(gate_name)
+            .expect("Failed to read tensor data");
         assert_eq!(data.len(), 1408 * 2048 * 2);
 
         // Read as u16 slice (BF16 raw values)
@@ -245,7 +257,10 @@ mod tests {
 
         // Verify it's not all zeros (sanity check)
         let nonzero = bf16_data.iter().filter(|&&v| v != 0).count();
-        assert!(nonzero > bf16_data.len() / 2, "Too many zeros — data looks wrong");
+        assert!(
+            nonzero > bf16_data.len() / 2,
+            "Too many zeros — data looks wrong"
+        );
 
         // Print stats
         let as_f32: Vec<f32> = bf16_data.iter().map(|&v| bf16_to_f32(v)).collect();
@@ -254,7 +269,13 @@ mod tests {
         let mean: f32 = as_f32.iter().sum::<f32>() / as_f32.len() as f32;
         eprintln!(
             "gate_proj.weight [{}, {}] BF16: min={:.4}, max={:.4}, mean={:.6}, nonzero={}/{}",
-            info.shape[0], info.shape[1], min, max, mean, nonzero, bf16_data.len()
+            info.shape[0],
+            info.shape[1],
+            min,
+            max,
+            mean,
+            nonzero,
+            bf16_data.len()
         );
     }
 

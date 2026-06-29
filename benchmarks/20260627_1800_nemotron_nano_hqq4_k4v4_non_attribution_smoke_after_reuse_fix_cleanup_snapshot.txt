@@ -1,0 +1,10 @@
+2026-06-27T18:13:34Z
+no server running on /tmp/tmux-1000/default
+3228037 /bin/bash -lc ./dev kill > benchmarks/20260627_1800_nemotron_nano_hqq4_k4v4_non_attribution_smoke_after_reuse_fix_cleanup.log 2>&1 || true sleep 2 date -u +%Y-%m-%dT%H:%M:%SZ > benchmarks/20260627_1800_nemotron_nano_hqq4_k4v4_non_attribution_smoke_after_reuse_fix_cleanup_snapshot.txt tmux ls >> benchmarks/20260627_1800_nemotron_nano_hqq4_k4v4_non_attribution_smoke_after_reuse_fix_cleanup_snapshot.txt 2>&1 || true pgrep -af 'krasis|uvicorn|reference_test|curl|dev run' >> benchmarks/20260627_1800_nemotron_nano_hqq4_k4v4_non_attribution_smoke_after_reuse_fix_cleanup_snapshot.txt 2>&1 || true nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader,nounits >> benchmarks/20260627_1800_nemotron_nano_hqq4_k4v4_non_attribution_smoke_after_reuse_fix_cleanup_snapshot.txt 2>&1 || true nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv,noheader,nounits >> benchmarks/20260627_1800_nemotron_nano_hqq4_k4v4_non_attribution_smoke_after_reuse_fix_cleanup_snapshot.txt 2>&1 df -h / >> benchmarks/20260627_1800_nemotron_nano_hqq4_k4v4_non_attribution_smoke_after_reuse_fix_cleanup_snapshot.txt free -h >> benchmarks/20260627_1800_nemotron_nano_hqq4_k4v4_non_attribution_smoke_after_reuse_fix_cleanup_snapshot.txt find /home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 -maxdepth 2 -type f \( -name '*.tmp' -o -name '*.lock' -o -name '*.pending' \) -print > benchmarks/20260627_1800_nemotron_nano_hqq4_k4v4_non_attribution_smoke_after_reuse_fix_final_temp_files.txt
+0, 15, 0
+1, 11, 0
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/nvme1n1p1   11T   11T  589G  95% /
+               total        used        free      shared  buff/cache   available
+Mem:           1.0Ti        41Gi       765Gi        26Mi       229Gi       966Gi
+Swap:             0B          0B          0B

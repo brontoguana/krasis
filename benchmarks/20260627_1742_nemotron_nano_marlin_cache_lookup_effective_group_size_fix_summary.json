@@ -1,0 +1,109 @@
+{
+  "gate": "20260627_1742_nemotron_nano_marlin_cache_lookup_effective_group_size_fix",
+  "status": "closed_reuse_reached_ready",
+  "opened_utc": "2026-06-27T17:43:30Z",
+  "closed_utc": "2026-06-27T17:57:55Z",
+  "record_first": {
+    "source_gate": "20260627_1733_nemotron_nano_effective_marlin_g64_reuse_check",
+    "gemma_carried": "5619.6 / 92.43 / 155.69",
+    "hqq_attention_cache_validated": true,
+    "moe_intermediate_size": 1856,
+    "requested_expert_group_size": 128,
+    "effective_expert_group_size": 64,
+    "effective_marlin_artifact": "/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/experts_marlin_int4_g64_calamax.bin",
+    "effective_marlin_bytes": 15849200704,
+    "effective_marlin_header_group_size": 64,
+    "previous_startup_lookup_path": "/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/experts_marlin_int4_g128_calamax.bin",
+    "previous_cache_write_detected_before_ready": true,
+    "previous_requests_sent": 0,
+    "previous_tmp_or_lock_files_remaining": false
+  },
+  "scope": {
+    "source_fix": "Make startup Marlin cache lookup compute the same effective expert group size as the builder before choosing the cache path.",
+    "derive_effective_group_size_from": [
+      "moe_intermediate_size",
+      "requested_expert_group_size"
+    ],
+    "no_hardcoded_model_or_group": true,
+    "required_build": "./dev build",
+    "reuse_check_command": "./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+    "send_requests": false,
+    "stop_condition": "Stop at READY or first cache-write evidence.",
+    "attribution_checkpoint_envs_off": true,
+    "forbidden_work": [
+      "smoke_requests",
+      "benchmarks",
+      "decode_hcs",
+      "production_enablement",
+      "hardcoded_nano_or_64"
+    ]
+  },
+  "implementation": {
+    "source_file": "src/weights/mod.rs",
+    "effective_group_size_helper": "effective_marlin_group_size_for_dimensions",
+    "derivation": "Repeatedly halve requested_group_size while it is greater than 32 and the minimum of hidden_size and moe_intermediate_size is not divisible by it.",
+    "startup_lookup_paths_updated": [
+      "load_from_hf",
+      "load_from_gguf_hybrid"
+    ],
+    "builder_path_reuses_helper": true,
+    "mxfp4_hint_reuses_requested_group_size": true,
+    "focused_helper_test_added": "test_marlin_effective_group_size_uses_model_dimensions"
+  },
+  "build": {
+    "command": "./dev build",
+    "exit_code": 0,
+    "log": "benchmarks/20260627_1742_nemotron_nano_marlin_cache_lookup_effective_group_size_fix_build.log",
+    "duration_s": 169,
+    "result_lines": [
+      "Finished `release` profile [optimized] target(s) in 2m 41s",
+      "OK Build complete. Extension at: /home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so",
+      "KRASIS_BUILD_TIMING phase=\"dev build total\" status=0 duration_s=169"
+    ]
+  },
+  "runtime": {
+    "command": "./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+    "build_or_cache_flags": false,
+    "requests_sent": 0,
+    "server_ready": true,
+    "stopped_after_ready": true,
+    "hqq_attention_reused": true,
+    "hqq_attention_line": "HQQ attention artifacts validated (115 MB cached), 27940 MB free",
+    "marlin_effective_g64_loaded": true,
+    "marlin_reuse_lines": [
+      "Loading GPU Marlin cache: 23 layers...",
+      "GPU Marlin cache loaded: 15.8 GB in 10s"
+    ],
+    "marlin_safetensors_build_line_present": false,
+    "cache_write_detected": false,
+    "startup_ui_phase_header": "Building GPU INT4 Marlin expert cache (one-time)",
+    "startup_ui_phase_header_note": "The UI phase header is generic; the runtime evidence after the fix is cache load/reuse, not safetensors build/write.",
+    "server_log": "benchmarks/20260627_1742_nemotron_nano_marlin_cache_lookup_effective_group_size_fix_reuse_server.log"
+  },
+  "vram_calibration": {
+    "long_prefill_baseline_mb": 23718,
+    "long_prefill_post_alloc_mb": 13072,
+    "long_prefill_min_free_mb": 12398,
+    "long_decode_min_free_mb": 23714,
+    "decode_hcs_budget_mb": 23114,
+    "safety_margin_mb": 600,
+    "note": "Long-prefill low-water remained far above the configured safety margin in this startup-only check."
+  },
+  "cache_state": {
+    "effective_marlin_artifact": "/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/experts_marlin_int4_g64_calamax.bin",
+    "effective_marlin_bytes": 15849200704,
+    "effective_marlin_header_group_size": 64,
+    "effective_marlin_mtime": "2026-06-27 18:24:07.467816558 +0100",
+    "hqq_attention_manifest": "/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/attention_hqq_v5_grid65_33/manifest.json",
+    "tmp_or_lock_files_remaining": false
+  },
+  "cleanup": {
+    "final_snapshot_utc": "2026-06-27T17:57:55Z",
+    "tmux_server": "none",
+    "matching_runtime_process": "none",
+    "nvidia_compute_process": "none",
+    "gpu_memory": "15 MB / 11 MB",
+    "disk_available": "589G",
+    "ram_available": "967Gi"
+  }
+}

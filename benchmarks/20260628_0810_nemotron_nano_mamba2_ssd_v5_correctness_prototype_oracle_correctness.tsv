@@ -1,0 +1,3 @@
+run	tokens	exit_code	oracle_records	failed_records	output_mismatches	max_output_abs	mean_output_abs	first_output_mismatch	state_mismatches	max_state_abs	mean_state_abs	first_state_mismatch	probes	result	log
+small_startup	256	0	69	0	0	0.0	0.0	none	0	0.0	0.0	none	row64/head11/d22/state0;row82/head37/d30/state14	passed	20260628_0810_nemotron_nano_mamba2_ssd_v5_correctness_prototype_startup_diagnostic.log
+long_startup	39920	0	69	0	0	0.0	0.0	none	0	0.0	0.0	none	row64/head11/d22/state0;row82/head37/d30/state14	passed	20260628_0810_nemotron_nano_mamba2_ssd_v5_correctness_prototype_long_diagnostic.log

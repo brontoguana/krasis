@@ -1,0 +1,2 @@
+gate	attempt	command	exit_code	duration_s	warmup_tokens	calibration_tokens	oracle_records	failed_oracle_records	output_mismatches	state_mismatches	probe_status	result
+20260628_2104_nemotron_nano_parallel_ssd_token_logit_correctness	attempt_8_parallel_output_absolute_da_surface	./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf --test-endpoints	0	50	300	300	69	0	0	0	row97/head48/d24 exact; row64/state0 exact; row82/state14 exact	passed

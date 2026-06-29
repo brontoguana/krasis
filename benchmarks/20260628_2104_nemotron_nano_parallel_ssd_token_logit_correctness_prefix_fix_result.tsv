@@ -1,0 +1,6 @@
+phase	metric	value
+prefix_fix	first_token	1044
+prefix_fix	text	,
+prefix_fix	prefill_ms	676.2
+prefix_fix	max_abs_toplogprob_delta_vs_serial	0.493589
+prefix_fix	largest_delta_token	2553

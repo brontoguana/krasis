@@ -1,0 +1,10 @@
+tokens	layer_type	layers	total_layer_ms	total_sync_ms	pct_of_layer_sum	avg_layer_ms	interpretation
+300	mamba2	23	858.758	1.458	65.696	37.337	Small warmup is not representative, but Mamba2 is already largest
+300	pass	23	435.510	1.326	33.317	18.935	Pass/MoE-only layer envelope includes MoE work
+300	gqa	6	12.899	0.346	0.987	2.150	Full-attention layers are tiny at warmup length
+500	mamba2	23	1343.633	1.431	67.395	58.419	Short calibration still dominated by Mamba2
+500	pass	23	644.288	1.352	32.317	28.013	Pass/MoE-only layer envelope includes MoE work
+500	gqa	6	5.749	0.348	0.288	0.958	Full-attention layers are tiny at short length
+39920	mamba2	23	114836.447	1.624	97.884	4992.889	Long prefill root bottleneck: Mamba2 SSM layer envelope is about 115s
+39920	pass	23	1997.735	1.318	1.703	86.858	Pass/MoE-only envelope is small versus Mamba2
+39920	gqa	6	484.371	0.361	0.413	80.729	Actual full-attention/HQQ layers are small versus Mamba2

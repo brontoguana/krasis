@@ -1,0 +1,12 @@
+rule	target	contract
+exact_output_compare	all output elements	BF16 bits must match the existing sequential oracle exactly in correctness gates.
+exact_state_compare	all state elements	F32 bits must match the existing sequential oracle exactly; tolerance is not allowed for state.
+row64_output_probe	row=64 head=11 d=22	Must match runtime oracle bits; retained records expect this coordinate to be sensitive to chunk-entry state.
+state0_entry_probe	state flat=0	Entry after chunk0 and final state must match oracle exact f32 bits.
+row82_regression_probe	row=82 head=37 d=30	Must remain exact; previous local-tri diagnostics showed this row is a useful regression probe.
+state14_regression_probe	state flat=14	Must remain exact; previous state-flat probe was clean and should stay clean.
+coefficient_probe	selected row64 and row82 chunks	Compare `dt_eff`, `a_bar`, `b_bar`, and `dA_prefix` against sequential helper-derived values before trusting output assembly.
+local_output_probe	row64 and row82	Compare D*x, local triangular term, prior, and final y_pre components against v5/sequential diagnostics.
+entry_summary_diag	chunk0 to chunk1	Record exact recurrent entry versus diagnostic affine/closed-form summary, but fail only if accepted recurrent entry mismatches oracle.
+fail_closed	on any probe/full mismatch	Stop before long timing; record first mismatch plus max/mean output/state errors and source spans.
+no_oracle_fallback	on mismatch	Do not copy oracle buffers to make a request succeed.

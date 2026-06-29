@@ -1,0 +1,8 @@
+check	result	evidence
+hqq_attention_cache	pass	HQQ attention artifacts validated, 115 MB cached.
+marlin_expert_cache	pass	GPU Marlin cache loaded: 15.8 GB in 10s.
+default_path_unchanged	pass	Block-scan candidate is gated by KRASIS_MAMBA2_SSD_BLOCK_SCAN; default branch remains trace-or-sequential.
+requests_absent	pass	No request endpoint or POST lines in startup diagnostic log.
+benchmark_absent	pass	No ./dev benchmark or speed-test path was run.
+long_diagnostic_absent	pass	Small oracle failed closed, so no long startup diagnostic was run.
+temp_lock_files	pass	No Nano Krasis temp, lock, or partial files found after cleanup.

@@ -1,0 +1,9 @@
+line	kind	status	details
+24	hqq_attention_cache	reused	HQQ attention artifacts validated (115 MB cached), 27940 MB free
+26	marlin_expert_cache	write_detected	Building GPU INT4 Marlin expert cache (one-time)
+28	marlin_expert_cache	write_detected	Building GPU INT4 Marlin cache: 23 layers from safetensors
+29	marlin_expert_cache	write_progress	GPU Marlin: 5/23 layers (7s elapsed, ~27s remaining)
+30	marlin_expert_cache	write_progress	GPU Marlin: 10/23 layers (15s elapsed, ~19s remaining)
+31	marlin_expert_cache	write_progress	GPU Marlin: 15/23 layers (22s elapsed, ~12s remaining)
+absent	server_ready	fail	KRASIS SERVER READY was absent because the gate stopped on cache write
+absent	requests	pass	No /v1/internal/reference_test requests were sent

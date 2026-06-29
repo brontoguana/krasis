@@ -1,0 +1,8 @@
+check	result	evidence	decision
+record_first	pass	Gemma 5619.6 / 92.43 / 155.69; HQQ6 g32 restored 0/3 selected-token changes; top-k drift 3/3; HQQ6 g64 case-2 failure reproduced.	Inventory before any k4v4 live run.
+nano_config_inventory	no_valid_k4v4_hqq_config	tests/nemotron-nano-4-4-a16.conf uses CFG_KV_DTYPE=fp8_e4m3 and CFG_ATTENTION_QUANT=bf16; tests/nemotron-nano-4-4-k6v6-a16.conf and tests/nemotron-nano-4-4-k6v6-a16-search-rmse.conf use CFG_KV_DTYPE=k6v6 and CFG_ATTENTION_QUANT=bf16.	No existing Nano HQQ+k4v4 config is safe to run.
+other_model_k4v4_configs	present_not_applicable	Gemma, QCN, Q122/Q235, and Qwen36 have k4v4/HQQ configs.	These are not Nano configs and cannot validate the Nano final-target path.
+attention_hqq_cache_inventory	missing	/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 contains auto_heatmap.json, experts_marlin_int4_g64_calamax.bin, and experts_marlin_int4_g64_calsearchrmse.bin only; no attention_hqq_v5_grid65_33/manifest.json or k4v4 HQQ cache directory exists.	No existing Nano attention-HQQ cache/manifest is available.
+expert_hqq_diagnostic_specs	present_not_k4v4	Existing Nano diagnostic specs are HQQ6 g64, HQQ6 g32, HQQ6 g16, and HQQ8 g64 all-MoE expert-HQQ specs under benchmarks/.	These are expert-HQQ diagnostic specs, not a k4v4 target config/cache by themselves.
+benchmark_k4v4_inventory	missing	No benchmarks/*nemotron*nano*k4v4* artifact exists except this 1640 gate summary.	No prior Nano k4v4 smoke/cache artifact can be reused.
+runtime_allowed	no	Missing/ambiguous k4v4 target assets.	Do not launch a server or generate cache in this gate.

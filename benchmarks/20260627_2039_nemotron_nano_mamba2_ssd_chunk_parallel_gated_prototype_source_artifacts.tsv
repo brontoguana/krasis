@@ -1,0 +1,15 @@
+component	path	line	purpose
+env_gates	src/gpu_prefill.rs	76	Opt-in candidate/oracle env checks.
+kernel_fields	src/gpu_prefill.rs	4870	Required RawCuFunc fields for chunk-parallel candidate kernels.
+scratch_fields	src/gpu_prefill.rs	5665	Diagnostic scratch buffers for candidate and oracle.
+candidate_dispatch	src/gpu_prefill.rs	30724	SSD branch switches to candidate only under explicit env gate.
+candidate_launcher	src/gpu_prefill.rs	22128	Rust launch sequence for prepare_prefix, cb_matrix, output, state_update.
+oracle_compare	src/gpu_prefill.rs	22338	Sequential oracle comparison helper; fail-closed on mismatch.
+required_symbols	src/gpu_prefill.rs	52709	PTX symbols required at load time for the opt-in candidate.
+scratch_budget	src/gpu_prefill.rs	53358	Diagnostic scratch budget derived from runtime config dimensions.
+scratch_allocation	src/gpu_prefill.rs	54175	Diagnostic scratch allocated only when candidate env gate is active.
+prepare_prefix_kernel	src/cuda/prefill_kernels.cu	5530	CUDA stage 1: softplus dt and per-token dA prefix.
+cb_matrix_kernel	src/cuda/prefill_kernels.cu	5580	CUDA stage 2: per-head lower-triangle C dot B matrix.
+output_kernel	src/cuda/prefill_kernels.cu	5611	CUDA stage 3: candidate output from CB matrix plus chunk-entry state.
+state_update_kernel	src/cuda/prefill_kernels.cu	5671	CUDA stage 4: final recurrent state carry for the chunk.
+python_fail_closed	python/krasis/server.py	1740	Warmup re-raises only for candidate/oracle diagnostic envs.

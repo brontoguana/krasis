@@ -1,0 +1,6 @@
+item	result	detail
+build	not_run	Static-only gate per instruction; no ./dev build.
+startup_diagnostic	not_run	Static-only gate per instruction; no Krasis startup run.
+benchmark	not_run	No benchmark, speed-test, or release-test.
+requests	not_run	No HTTP requests or smoke requests.
+implementation	not_done	No source implementation; only records and analysis artifacts.

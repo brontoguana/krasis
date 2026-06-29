@@ -1,0 +1,6 @@
+check	result	evidence
+startup_only	true	exit_after_calibration set and no READY/request path reached
+hqq_attention_cache_reused	true	HQQ attention artifacts validated (115 MB cached)
+marlin_cache_loaded	true	GPU Marlin cache loaded: 15.8 GB in 10s
+requests_sent	0	no HTTP request lines; process failed during startup warmup
+long_diagnostic_run	false	stopped after small oracle mismatch

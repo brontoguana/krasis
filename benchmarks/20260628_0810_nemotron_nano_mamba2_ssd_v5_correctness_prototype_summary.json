@@ -1,0 +1,103 @@
+{
+  "artifacts": {
+    "build_result": "20260628_0810_nemotron_nano_mamba2_ssd_v5_correctness_prototype_build_result.tsv",
+    "oracle_correctness": "20260628_0810_nemotron_nano_mamba2_ssd_v5_correctness_prototype_oracle_correctness.tsv",
+    "root_decision": "20260628_0810_nemotron_nano_mamba2_ssd_v5_correctness_prototype_root_decision.tsv",
+    "runtime_attempt": "20260628_0810_nemotron_nano_mamba2_ssd_v5_correctness_prototype_runtime_attempt.tsv",
+    "source_artifacts": "20260628_0810_nemotron_nano_mamba2_ssd_v5_correctness_prototype_source_artifacts.tsv",
+    "startup_cache_validation": "20260628_0810_nemotron_nano_mamba2_ssd_v5_correctness_prototype_startup_cache_validation.tsv",
+    "timing_comparison": "20260628_0810_nemotron_nano_mamba2_ssd_v5_correctness_prototype_timing_comparison.tsv",
+    "validation": "20260628_0810_nemotron_nano_mamba2_ssd_v5_correctness_prototype_validation_checks.tsv"
+  },
+  "closed_utc": "2026-06-28T08:33:52Z",
+  "constraints": {
+    "commit_live_state_only_after_oracle_success": true,
+    "decode_hcs_changes": false,
+    "default_path_change": false,
+    "opt_in_candidate_only": true,
+    "preserve_1908_substage_timing": true,
+    "preserve_2149_2251_0650_diagnostics": true,
+    "production_enablement": false,
+    "requests": false,
+    "separate_oracle_candidate_buffers": true,
+    "speed_benchmark": false
+  },
+  "gate": "20260628_0810_nemotron_nano_mamba2_ssd_v5_correctness_prototype",
+  "opened_utc": "2026-06-28T08:10:00Z",
+  "record_first": {
+    "0802_result": {
+      "default_ssd_path": "sequential",
+      "state_update_order": "dt=softplus(dt+bias); A_bar=exp(A*dt); B_bar=BF16(B*dt); h=A_bar*h+B_bar*x",
+      "static_analysis_only": true,
+      "v5_design": "use sequential-compatible per-token f32 recurrence for chunk-entry/state propagation; keep output/local math unchanged"
+    },
+    "gemma_baseline": {
+      "internal_decode_tok_s": 92.43,
+      "network_tok_s": 155.69,
+      "prefill_tok_s": 5619.6
+    },
+    "nano_baseline": {
+      "internal_decode_tok_s": 94.48,
+      "network_tok_s": 164.75,
+      "prefill_tok_s": 346.5
+    },
+    "source_gate": "20260628_0802_nemotron_nano_mamba2_ssd_v5_sequential_compatible_chunk_entry_design"
+  },
+  "result": {
+    "build": {
+      "command": "./dev build",
+      "duration_s": 176,
+      "exit_code": 0
+    },
+    "correctness": {
+      "long_startup": {
+        "failed_oracle_records": 0,
+        "oracle_records": 69,
+        "output_mismatches": 0,
+        "state_mismatches": 0,
+        "tokens": 39920
+      },
+      "small_startup": {
+        "failed_oracle_records": 0,
+        "oracle_records": 69,
+        "output_mismatches": 0,
+        "state_mismatches": 0,
+        "tokens": 256
+      },
+      "status": "passed_exact_oracle"
+    },
+    "decision": {
+      "correctness": "accepted_for_opt_in_diagnostic_candidate",
+      "default_path": "unchanged_sequential_without_v5_envs",
+      "performance": "not_optimization_accepted",
+      "why": "long diagnostic timing includes sequential oracle, v5 candidate, and full host compare"
+    },
+    "long_timing": {
+      "baseline_1908_ssd_scan_ms": 114449.4,
+      "delta_ms": 130251.6,
+      "delta_pct": 113.807,
+      "prefill_total_ms": 248511.7,
+      "ssd_scan_ms": 244701.0,
+      "tokens_per_second": 160.5
+    },
+    "runtime": {
+      "benchmark_path": false,
+      "long_diagnostic_exit_code": 0,
+      "requests": 0,
+      "small_diagnostic_exit_code": 0
+    }
+  },
+  "scope": "opt_in_v5_sequential_compatible_correctness_prototype",
+  "status": "closed",
+  "validation": {
+    "cache_temp_lock_files_outside_hf_download_metadata": "none",
+    "final_gpu_memory_mb": {
+      "gpu0_used": 15,
+      "gpu1_used": 11
+    },
+    "final_snapshot_utc": "2026-06-28T08:33:52Z",
+    "passed": true,
+    "runtime_processes": "none",
+    "tmux_sessions": "none"
+  }
+}

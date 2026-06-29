@@ -1,0 +1,10 @@
+field	value
+command	env -u KRASIS_MAMBA2_SSD_CHUNK_PARALLEL_V2 -u KRASIS_MAMBA2_SSD_CHUNK_PARALLEL_V2_ORACLE KRASIS_STARTUP_DIAG=1 KRASIS_PREFILL_TIMING=1 KRASIS_PREFILL_LIVENESS_TIMING=1 KRASIS_STARTUP_WARMUP_TOKENS=128 KRASIS_STARTUP_CAL_SHORT_TOKENS=128 KRASIS_STARTUP_CAL_LONG_TOKENS=256 KRASIS_STARTUP_EXIT_AFTER_CALIBRATION=1 ./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf
+exit	0
+result	pass
+requests_sent	0
+benchmark_path	no
+v2_envs_absent	yes
+startup_exit_after_calibration	yes
+default_ssd_path	sequential
+startup_log	20260627_2235_nemotron_nano_mamba2_ssd_chunk_parallel_v2_failed_cleanup_startup_diagnostic.log

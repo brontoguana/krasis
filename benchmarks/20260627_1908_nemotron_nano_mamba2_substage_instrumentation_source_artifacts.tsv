@@ -1,0 +1,16 @@
+component	file	line	evidence
+stage_constants	src/gpu_prefill.rs	79	MAMBA2_PREFILL_TIMING_STAGE_* constants and labels
+engine_fields	src/gpu_prefill.rs	5956	Cell arrays for Mamba2 stage wall/event/sync/calls
+engine_initialization	src/gpu_decode.rs	24792	PrefillEngine initializes Mamba2 stage timing cells
+guarded_helpers	src/gpu_prefill.rs	13503	mamba2_prefill_timing_enabled uses existing KRASIS_PREFILL_TIMING or KRASIS_PREFILL_LIVENESS_TIMING gates
+event_sync_helpers	src/gpu_prefill.rs	13507	mamba2_timing_start/finish records CUDA event and stream-sync timing only when gated
+timing_reset	src/gpu_prefill.rs	17455	Prefill timing reset clears Mamba2 stage cells
+summary_print	src/gpu_prefill.rs	20594	PREFILL-TIMING prints Mamba2 breakdown and per-stage queue/event/sync fields
+forward_entry	src/gpu_prefill.rs	28870	forward_mamba2 instrumentation scope
+in_proj_timer	src/gpu_prefill.rs	29168	Mamba2 in-proj timing around prefill_weight_gemm
+split_extract_timer	src/gpu_prefill.rs	29365	Mamba2 split/extract timing around mamba2_extract
+conv1d_silu_timer	src/gpu_prefill.rs	29948	Mamba2 conv1d+silu timing around conv/silu and conv-state update
+ssd_scan_timer	src/gpu_prefill.rs	30317	Mamba2 SSD/scan timing around mamba2_ssd/mamba2_ssd_trace
+gated_rmsnorm_timer	src/gpu_prefill.rs	30803	Mamba2 gated RMSNorm timing
+out_proj_timer	src/gpu_prefill.rs	30998	Mamba2 out-proj timing around prefill_weight_gemm
+liveness_line	src/gpu_prefill.rs	31228	PREFILL-LIVENESS mamba2_substages per-layer line

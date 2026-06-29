@@ -1,0 +1,8 @@
+field	value
+result	cache_reuse_failed_before_ready
+decision	Do not rerun HQQ4+k4v4 smoke yet
+reason	Pre-run inventory did not contain the final g128 Marlin expert cache expected by this Nano config; startup attempted to build /home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/experts_marlin_int4_g128_calamax.bin from safetensors before READY.
+hqq_attention_cache	HQQ4 attention cache reused successfully
+marlin_cache	Marlin expert cache not reused; write path detected
+requests	0
+required_next_gate	Build or otherwise produce the exact final experts_marlin_int4_g128_calamax.bin artifact through a built cache path, then repeat the reuse prerequisite before any smoke requests.

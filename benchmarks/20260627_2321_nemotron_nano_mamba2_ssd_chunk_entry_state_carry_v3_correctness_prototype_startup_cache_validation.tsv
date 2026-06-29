@@ -1,0 +1,5 @@
+line_type	status	line	log_line
+hqq_attention	reused	HQQ attention artifacts validated (115 MB cached), 27940 MB free	24
+marlin_cache	reused	Loading GPU Marlin cache: 23 layers	28
+marlin_cache	reused	GPU Marlin cache loaded: 15.8 GB in 10s	29
+cache_write_absence	pass	No "Building GPU INT4 Marlin cache:" line in final startup diagnostic log	n/a

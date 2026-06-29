@@ -1,0 +1,13 @@
+check	status	detail
+json_summary	pass	jq asserted closed status, static-analysis scope, sequential default, and cross-chunk carry not sole cause.
+tsv_shape	pass	All 2138 TSV artifacts have at least two columns on every row.
+no_runtime_artifacts	pass	No 2138 .log or .exit artifacts exist; no runtime command was launched for this gate.
+bash_n_dev	pass	bash -n dev passed.
+git_diff_check_krasis	pass	git diff --check passed in krasis-nemotron-dev.
+git_diff_check_internal	pass	git diff --check passed in krasis-internal.
+protected_config_status	pass	Only expected tests-only Nano HQQ4 config and known Nano BF16 config are untracked in protected config scope.
+cache_temp_lock	pass	No Nano cache .tmp, .lock, or .pending files found outside Hugging Face download locks.
+tmux_idle	pass	No tmux server running.
+runtime_process_idle	pass	No matching krasis/dev run/benchmark/build process found.
+gpu_idle	pass	No NVIDIA compute process; GPUs used 15 MB / 11 MB.
+final_snapshot	pass	2026-06-27T21:46:29Z disk 588G RAM 968Gi.

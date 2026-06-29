@@ -1,0 +1,106 @@
+{
+  "label": "20260627_0132_nemotron_nano_all_moe_layer_activation_subnormal_offline_diagnosis",
+  "status": "closed_offline_diagnosis_complete",
+  "opened_utc": "2026-06-27T01:32:00Z",
+  "scope": "offline diagnosis of 2239 all-MoE-layer activation subnormal fail-closed comparator result",
+  "record_first": {
+    "source_gate": "20260626_2239_nemotron_nano_all_moe_layer_diagnostic_hqq_runtime_proof",
+    "gemma": "5619.6 / 92.43 / 155.69",
+    "focused_expert_hqq_tests": "75/0",
+    "dev_build": "passed",
+    "payloads_http_200": 3,
+    "moe_layers": 23,
+    "active_blocks": 5870,
+    "input_contract": "exact",
+    "output_contract": "exact",
+    "w13_contract": "subnormal-only within existing tolerance",
+    "activation_failure": {
+      "mismatch_count": 9,
+      "layers": [
+        6,
+        8
+      ],
+      "sum_abs": "2.571393892423753924e-39",
+      "max_abs": "1.377532442369868173e-39",
+      "reason": "zero activation tolerance"
+    },
+    "comparator_status": "ok",
+    "passes_contract": false,
+    "production_output_consumed": false
+  },
+  "plan": {
+    "reuse_existing_artifacts_first": true,
+    "live_server_rerun_before_offline_diagnosis": false,
+    "trace": "benchmarks/20260626_2239_nemotron_nano_all_moe_layer_diagnostic_hqq_runtime_proof_trace_outputs.json",
+    "cache_spec": "benchmarks/20260626_2208_nemotron_nano_diagnostic_hqq_prefill_all_moe_layers_correctness_diagnostic_cache_spec.json",
+    "metrics": "benchmarks/20260626_2239_nemotron_nano_all_moe_layer_diagnostic_hqq_runtime_proof_comparator_metrics.tsv",
+    "failures": "benchmarks/20260626_2239_nemotron_nano_all_moe_layer_diagnostic_hqq_runtime_proof_comparator_failures.tsv",
+    "if_needed": "add only offline comparator diagnostics for exact mismatch location, BF16 bit patterns, reference/observed values, and subnormal or flush-to-zero classification"
+  },
+  "forbidden": {
+    "relax_comparator_contract": true,
+    "production_hqq_wiring": true,
+    "production_output_consumption": true,
+    "fallback": true,
+    "decode_hcs": true,
+    "speed_benchmark": true
+  },
+  "closed_utc": "2026-06-27T03:02:06Z",
+  "implementation": {
+    "source_changes_made": true,
+    "runtime_server_rerun": false,
+    "production_output_consumed": false,
+    "contract_relaxed": false,
+    "offline_enhancement": "exact BF16 mismatch detail TSV plus failure-row-filtered comparator mode"
+  },
+  "offline_result": {
+    "filtered_comparator_exit": "1_expected_contract_false",
+    "status": "ok",
+    "passes_contract": false,
+    "blocks_compared": 4,
+    "detail_rows": 9,
+    "activation_mismatch_count": 9,
+    "actual_bits": {
+      "0x0000": 9
+    },
+    "expected_bits": {
+      "0x0001": 6,
+      "0x0002": 1,
+      "0x0005": 1,
+      "0x000f": 1
+    },
+    "classification": "all mismatches are observed BF16 zero versus positive BF16 subnormal reference values",
+    "diagnostics": {
+      "bf16_zero_vs_subnormal_flush_to_zero_candidate": 9
+    },
+    "sum_abs": "2.571393892423753924e-39",
+    "max_abs": "1.377532442369868173e-39"
+  },
+  "validation": {
+    "focused_expert_hqq_tests": "77/0",
+    "dev_build": "passed",
+    "filtered_comparator": "status=ok; passes_contract=false; exit 1 expected",
+    "artifact_assertions": "passed",
+    "bash_n_dev": "passed",
+    "py_compile": "passed",
+    "cargo_fmt_check": "passed",
+    "git_diff_check": "passed",
+    "protected_config_status": "pre-existing untracked tests/nemotron-nano-bf16-experts-a16.conf; not edited",
+    "cleanup": "passed",
+    "final_gpu_snapshot": "GPU0 15 MB / 32607 MB, GPU1 11 MB / 20470 MB, util 0"
+  },
+  "decision": {
+    "next_gate": "justify a diagnostic activation subnormal tolerance/contract classification change before rerunning all-layer comparator",
+    "bug_fix_gate_needed": "not indicated by current data; no normal activation mismatch found"
+  },
+  "artifacts": {
+    "mismatch_details": "benchmarks/20260627_0132_nemotron_nano_all_moe_layer_activation_subnormal_offline_diagnosis_mismatch_details.tsv",
+    "mismatch_classification": "benchmarks/20260627_0132_nemotron_nano_all_moe_layer_activation_subnormal_offline_diagnosis_mismatch_classification.tsv",
+    "filtered_metrics": "benchmarks/20260627_0132_nemotron_nano_all_moe_layer_activation_subnormal_offline_diagnosis_filtered_comparator_metrics.tsv",
+    "filtered_log": "benchmarks/20260627_0132_nemotron_nano_all_moe_layer_activation_subnormal_offline_diagnosis_filtered_comparator.log",
+    "full_attempt_log": "benchmarks/20260627_0132_nemotron_nano_all_moe_layer_activation_subnormal_offline_diagnosis_comparator.log",
+    "root_decision": "benchmarks/20260627_0132_nemotron_nano_all_moe_layer_activation_subnormal_offline_diagnosis_root_decision.tsv",
+    "source_contract": "benchmarks/20260627_0132_nemotron_nano_all_moe_layer_activation_subnormal_offline_diagnosis_source_contract.tsv",
+    "validation": "benchmarks/20260627_0132_nemotron_nano_all_moe_layer_activation_subnormal_offline_diagnosis_validation_checks.tsv"
+  }
+}

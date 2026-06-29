@@ -1,0 +1,5 @@
+check	result	details
+old_serial_oracle_attempt1	fail_closed	output mismatches 501907; row97/head48/d24 candidate 0xc21c vs oracle 0xc234; absolute entry-prior decay diagnosed.
+old_serial_oracle_after_local_prior	diagnostic_mismatch	output mismatches 56; row97/head48/d24 exact; row64/state0 exact; row82/state14 exact with output one BF16 bin off.
+targeted_row70_probe	diagnostic_mismatch	row70/head37/d50 y_pre_bf16 -6.703126430511475 on BF16 rounding boundary; candidate 0xc0d7 vs serial oracle 0xc0d6.
+token_logit_reference	pass	HTTP 200; token 1044 text comma; 12 tracked top-logprobs matched serial/control with max delta 0.000000000.

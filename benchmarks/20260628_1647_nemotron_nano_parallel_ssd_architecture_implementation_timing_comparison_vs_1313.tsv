@@ -1,0 +1,6 @@
+metric	1313_serial_coeff_tile_ms	1647_parallel_chunked_ms	delta_ms	delta_pct	note
+total_candidate_path	1171.691221826087	555.7752003913043	-615.9160214347827	-52.565553	no-oracle candidate path; 1647 not correctness-accepted yet
+recurrent_total	725.9238615217391	14.889626260869564	-711.0342352608695	-97.948871	main architectural win from chunked state source
+output_kernel	431.1865319565218	525.5645138260868	94.37798186956503	21.888	next dominant local cost in prototype
+live_state_copy	12.886277869565221	13.14796604347826	0.2616881739130393	2.031	unchanged scale
+commit_copies	0.42840569565217396	0.42401539130434784	-0.004390304347826119	-1.025	unchanged scale

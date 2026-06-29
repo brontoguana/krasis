@@ -1,0 +1,14 @@
+{
+  "all_exact_string_fields": false,
+  "cases": 3,
+  "finish_reason_match": true,
+  "max_abs_logsumexp_diff": 0.0912464697782962,
+  "max_abs_selected_log_prob_diff": 0.20660000000000012,
+  "max_abs_selected_raw_logit_diff": 0.27006053924560547,
+  "max_abs_top_k_log_prob_diff": 0.42908800000000014,
+  "max_abs_top_raw_logit_diff": 0.5203342437744141,
+  "passes_output_contract": false,
+  "text_match": false,
+  "token_ids_match": false,
+  "top_k_token_ids_match": false
+}

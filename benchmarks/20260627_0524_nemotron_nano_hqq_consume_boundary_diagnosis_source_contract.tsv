@@ -1,0 +1,8 @@
+surface	contract
+src/gpu_prefill.rs	diagnostic-only consume-boundary capture under KRASIS_EXPERT_HQQ_PREFILL_CONSUME_DIAG; no default behavior change
+BF16 expert_out capture	download BF16 expert_out before guarded HQQ overwrite and compare only as trace metadata
+HQQ expert_out capture	download copied HQQ expert_out after per-block diagnostic HQQ W2 output copy; compare hashes/top-N deltas
+scatter capture	explicit stream_sync before downloading moe_accum selected row; compare GPU scatter against CPU replay
+output capture	explicit stream_sync before downloading total accum and BF16 output selected row; compare output to rounded accum
+production output	unchanged except existing explicit HQQ consume gate from 0427; no production default enablement
+forbidden scope	no tolerance change, fallback, decode/HCS, INT4/HQQ4, selected-expert retargeting, or speed benchmark

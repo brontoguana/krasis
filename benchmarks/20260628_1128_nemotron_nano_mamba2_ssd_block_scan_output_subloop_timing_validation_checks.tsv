@@ -1,0 +1,12 @@
+check	status	details
+record_first	pass	1113 cleanup recorded before source edits; baselines carried
+build	pass	./dev build exit 0 duration_s=179
+small_oracle	pass	69/69 records exact; output_mismatches=0; state_mismatches=0; subloop_records=69
+long_oracle	pass	69/69 records exact; 23 records at 39920 tokens; output_mismatches=0; state_mismatches=0
+long_output_subloop_timing	pass	23 long subloop records emitted; avg output kernel 4318.312474739131 ms
+requests_benchmarks	pass	no request or benchmark evidence in startup logs
+source_markers	pass	subloop timing markers present; accepted c_state_total_exact present; failed local_old_state_exact markers absent
+cache_temp_locks	pass	no Krasis cache temp/lock files; standing HF download lock metadata only
+protected_configs	pass	unchanged expected tests-only Nano configs
+diff_checks	pass	git diff --check, internal diff --check, and bash -n dev passed
+idle_state	pass	final snapshot 2026-06-28T11:55:01Z; GPUs 15 MB / 11 MB; no runtime/build process

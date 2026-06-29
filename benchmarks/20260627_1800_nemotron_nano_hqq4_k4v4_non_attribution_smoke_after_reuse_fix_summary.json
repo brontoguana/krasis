@@ -1,0 +1,107 @@
+{
+  "gate": "20260627_1800_nemotron_nano_hqq4_k4v4_non_attribution_smoke_after_reuse_fix",
+  "status": "closed_smoke_selected_behavior_restored",
+  "opened_utc": "2026-06-27T18:01:18Z",
+  "closed_utc": "2026-06-27T18:18:11Z",
+  "record_first": {
+    "source_gate": "20260627_1742_nemotron_nano_marlin_cache_lookup_effective_group_size_fix",
+    "source_fix_implemented": true,
+    "dev_build_exit_code": 0,
+    "hqq_attention_reused": true,
+    "effective_marlin_g64_loaded": true,
+    "startup_reached_ready": true,
+    "requests_sent": 0,
+    "tmp_or_lock_files_remaining": false
+  },
+  "scope": {
+    "command": "./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+    "build_or_cache_flags": false,
+    "attribution_checkpoint_envs_off": true,
+    "endpoint": "/v1/internal/reference_test",
+    "request_debug_reference_trace": true,
+    "case_order": [2, 0, 1],
+    "stop_before_requests_on_cache_write": true,
+    "continue_after_case_2_only_if_stable": true,
+    "forbidden_work": [
+      "benchmarks",
+      "decode_hcs",
+      "production_enablement",
+      "cache_generation",
+      "source_changes"
+    ]
+  },
+  "runtime": {
+    "first_startup_command": "./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+    "first_startup_result": "Reached READY with clean cache reuse, but /v1/internal/reference_test returned HTTP 404 because test endpoints were not enabled.",
+    "corrected_startup_command": "./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf --test-endpoints",
+    "corrected_startup_build_or_cache_flags": false,
+    "test_endpoints_reason": "Required for the requested /v1/internal/reference_test endpoint; not a build/cache flag.",
+    "attribution_checkpoint_envs_off": true,
+    "expert_hqq_consume": "unsupported_for_attention_hqq_k4v4_path",
+    "server_ready": true,
+    "cache_write_detected": false,
+    "hqq_attention_reuse_line": "HQQ attention artifacts validated (115 MB cached), 27940 MB free",
+    "marlin_reuse_lines": [
+      "Loading GPU Marlin cache: 23 layers...",
+      "GPU Marlin cache loaded: 15.8 GB in 10s"
+    ],
+    "marlin_safetensors_build_line_present": false,
+    "tmp_or_lock_files_remaining": false,
+    "vram_calibration": {
+      "safety_margin_mb": 600,
+      "short_prefill_min_free_mb": 22798,
+      "long_prefill_min_free_mb": 12398,
+      "long_decode_min_free_mb": 23714,
+      "note": "Long-prefill low-water remained far above the configured safety margin in this smoke startup."
+    }
+  },
+  "requests": [
+    {
+      "case": 2,
+      "http_code": 200,
+      "time_total_s": 2.314992,
+      "response_bytes": 3651929,
+      "selected_token": 1044,
+      "selected_text": ",",
+      "margin_1044_minus_1321": 0.198773,
+      "decision": "passed_first_case_stop_condition"
+    },
+    {
+      "case": 0,
+      "http_code": 200,
+      "time_total_s": 2.202706,
+      "response_bytes": 3605348,
+      "selected_token": 1044,
+      "selected_text": ",",
+      "margin_1044_minus_1321": 0.149701
+    },
+    {
+      "case": 1,
+      "http_code": 200,
+      "time_total_s": 2.300908,
+      "response_bytes": 3807341,
+      "selected_token": 1044,
+      "selected_text": ",",
+      "margin_1044_minus_1321": 0.313407
+    }
+  ],
+  "result": {
+    "http_success": "3/3",
+    "selected_token_matches_bf16": "3/3",
+    "selected_token_matches_accepted_g32": "3/3",
+    "positive_1044_minus_1321_margin": "3/3",
+    "topk_membership_or_rank_drift_vs_bf16": "3/3",
+    "topk_membership_or_rank_drift_vs_accepted_g32": "3/3",
+    "decision": "HQQ4+k4v4 non-attribution smoke restores selected-token behavior on the three-case set, but this is not production quality acceptance because top-k drift remains."
+  },
+  "cleanup": {
+    "final_snapshot_utc": "2026-06-27T18:18:11Z",
+    "tmux_server": "none",
+    "matching_runtime_process": "none",
+    "nvidia_compute_process": "none",
+    "gpu_memory": "15 MB / 11 MB",
+    "disk_available": "589G",
+    "ram_available": "967Gi",
+    "tmp_or_lock_files_remaining": false
+  }
+}

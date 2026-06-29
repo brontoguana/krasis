@@ -1,0 +1,4 @@
+target_tokens	tok_s	total_s	timing_class	note
+50	164.75	0.83	network_http	HTTP/SSE client wall-clock; not internal decode.
+100	119.38	1.36	network_http	HTTP/SSE client wall-clock; not internal decode.
+250	102.81	2.95	network_http	HTTP/SSE client wall-clock; not internal decode.

@@ -1,0 +1,2 @@
+gate	command	exit	duration_s	log	result
+20260628_0835_nemotron_nano_mamba2_ssd_v5_timing_decomposition	./dev build	0	169	20260628_0835_nemotron_nano_mamba2_ssd_v5_timing_decomposition_build.log	passed

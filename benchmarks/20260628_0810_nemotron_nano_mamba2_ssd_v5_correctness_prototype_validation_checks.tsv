@@ -1,0 +1,14 @@
+check	result	evidence
+summary_json	 PASS	status closed; validation passed; constraints preserved
+tsv_shapes	 PASS	per-file FNR field-count check passed after correcting validation script
+build	 PASS	./dev build exit 0; duration_s 176
+small_startup	 PASS	exit 0; 69 v5 oracle records; 0 failed records; 0 requests
+long_startup	 PASS	exit 0; 69 v5 oracle records; 0 failed records; 0 requests
+ssd_scan_timing	 PASS	long diagnostic ssd_scan 244701.0ms over 23 calls versus 1908 baseline 114449.4ms
+source_markers	 PASS	v5 markers present; 1908 timing and 2149/2251/0650 diagnostics preserved
+default_path_contract	 PASS	non-v5 dispatch remains trace-or-sequential; v5 requires explicit envs and oracle
+static_checks	 PASS	git diff --check in both repos; bash -n dev
+protected_configs	 PASS	unchanged expected tests-only Nano configs
+cleanup	 PASS	./dev kill exit 0
+temp_lock_scan	 PASS	no Krasis temp/lock files outside standing HF download lock metadata
+idle_state	 PASS	final snapshot 2026-06-28T08:33:52Z; no tmux/runtime/build/GPU compute process; GPUs 15 MB / 11 MB

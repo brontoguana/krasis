@@ -1,0 +1,9 @@
+item	status	value	evidence
+record_first	pass	2321 recorded before cleanup	opened in changelog/tracking/debuglog before source edits
+baseline_gemma	pass	5619.6 / 92.43 / 155.69	unchanged carry-forward speed baseline
+baseline_nano	pass	346.5 / 94.48 / 164.75	unchanged carry-forward speed baseline
+first_cleanup_build	pass	exit 0, 175s	build.log contains dev build total status=0 duration_s=175
+first_cleanup_build_warning	pass	removed leftover unused helper	build.log warned parse_optional_usize_env_value was unused
+final_build	pass	exit 0, 169s	build2.log contains dev build total status=0 duration_s=169
+final_build_warning_check	pass	no v3-unused helper warning	build2.log has no parse_optional_usize warning
+build_command	pass	./dev build	built command path only

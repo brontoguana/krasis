@@ -1,0 +1,7 @@
+field	value
+gate	20260627_2149_nemotron_nano_mamba2_ssd_local_triangular_oracle_instrumentation
+command	./dev build
+exit	0
+duration_s	170
+ptx_recompiled	true
+log	benchmarks/20260627_2149_nemotron_nano_mamba2_ssd_local_triangular_oracle_instrumentation_build.log

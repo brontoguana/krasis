@@ -1,0 +1,3 @@
+case	variant	consume_rows	copied_output_bytes	rows_per_layer	nbits	group_size	trigger	projection_available	consume_boundary_diag	read_only_checkpoint_available
+1	hqq6_g32_nonattr_1540	23	365750784	2958	6	32	KRASIS_EXPERT_HQQ_PREFILL_CONSUME	false	false	false
+all_smoke	hqq6_g32_nonattr_1515_1540	69	1029740544	mixed	6	32	KRASIS_EXPERT_HQQ_PREFILL_CONSUME	false	false	false

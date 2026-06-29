@@ -1,0 +1,12 @@
+artifact	status	reference
+coeff_tile_env_gate	present	src/gpu_prefill.rs:298
+coeff_tile_requires_block_scan	present	src/gpu_prefill.rs:31645
+coeff_tile_cuda_kernel	present	src/cuda/prefill_kernels.cu:5944
+term_probe_coeff_fields	present	src/gpu_prefill.rs:32535
+ptx_symbol_check	present	src/gpu_prefill.rs:54633
+ptx_symbol_load	present	src/gpu_prefill.rs:55049
+python_warmup_fail_closed_for_coeff_tile	present	python/krasis/server.py:1746
+default_sequential_ssd	preserved	src/cuda/prefill_kernels.cu:4983
+c_state_total_exact	preserved	src/cuda/prefill_kernels.cu:5735
+local_old_state_exact	rejected_not_present	source marker scan
+affine_summary_state	rejected_not_used	timing JSON affine_summaries_used_as_state=false

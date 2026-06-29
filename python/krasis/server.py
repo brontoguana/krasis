@@ -173,6 +173,12 @@ def _startup_diag_enabled() -> bool:
     return os.environ.get("KRASIS_STARTUP_DIAG", "") == "1"
 
 
+def _heatmap_substage_timing_enabled() -> bool:
+    return os.environ.get("KRASIS_HEATMAP_SUBSTAGE_TIMING", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
 def _vram_ledger_enabled() -> bool:
     return os.environ.get("KRASIS_VRAM_LEDGER", "").strip().lower() in ("1", "true", "yes", "on")
 
@@ -715,6 +721,8 @@ def _build_heatmap(model: KrasisModel, save_path: str, args) -> str:
     _assert_heatmap_prompts_are_held_out(prompts)
     heatmap_metadata = _expected_heatmap_metadata(model, args, prompts)
     decode_params = heatmap_metadata["heatmap_build"]["decode_params"]
+    timing_enabled = _heatmap_substage_timing_enabled()
+    heatmap_t0 = time.perf_counter()
 
     gpu_store = getattr(model, '_gpu_decode_store', None)
     if gpu_store is None:
@@ -724,68 +732,148 @@ def _build_heatmap(model: KrasisModel, save_path: str, args) -> str:
     num_layers = cfg.num_hidden_layers
     num_experts = cfg.n_routed_experts
 
-    # Init lightweight HCS state for collection only (no VRAM allocation)
-    gpu_store.hcs_init_collection(num_layers, num_experts)
-    gpu_store.hcs_start_collecting()
-
-    # Run each prompt with long decode to build a decode-weighted heatmap
-    total_decode_tokens = 0
-    logger.info(
-        "Building heatmap from %d held-out prompts (%d decode tokens each, "
-        "temperature=%.3f top_k=%d top_p=%.3f enable_thinking=%s mode=%s)...",
-        len(prompts),
-        HEATMAP_DECODE_TOKENS,
-        decode_params["temperature"],
-        decode_params["top_k"],
-        decode_params["top_p"],
-        decode_params["enable_thinking"],
-        decode_params["mode"],
-    )
-    stop_ids = _default_stop_ids(model)
-    for i, prompt_text in enumerate(prompts):
-        tokens = _chat_prompt_tokens(
-            model,
-            prompt_text,
-            enable_thinking=decode_params["enable_thinking"],
-        )
-        logger.info("  Heatmap prompt %d/%d: %d prefill tokens + %d decode tokens",
-                    i + 1, len(prompts), len(tokens), HEATMAP_DECODE_TOKENS)
-        first_token, prompt_len, kv_overflow = gpu_store.rust_prefill_tokens(
-            tokens,
-            temperature=decode_params["temperature"],
-            disable_pinning=True,
-        )
-        if not kv_overflow and first_token not in stop_ids:
-            generated = gpu_store.gpu_generate_batch(
-                first_token=first_token,
-                start_position=prompt_len,
-                max_tokens=HEATMAP_DECODE_TOKENS,
-                temperature=decode_params["temperature"],
-                top_k=decode_params["top_k"],
-                top_p=decode_params["top_p"],
-                stop_ids=stop_ids,
-                presence_penalty=decode_params["presence_penalty"],
+    heatmap_collection_started = False
+    try:
+        # Init lightweight HCS state for collection only (no VRAM allocation)
+        collection_t0 = time.perf_counter()
+        gpu_store.hcs_init_collection(num_layers, num_experts)
+        gpu_store.hcs_start_collecting()
+        heatmap_collection_started = True
+        if timing_enabled:
+            logger.info(
+                "HEATMAP_TIMING collection_start prompts=%d layers=%d experts=%d collection_start_s=%.6f",
+                len(prompts),
+                num_layers,
+                num_experts,
+                time.perf_counter() - collection_t0,
             )
-            total_decode_tokens += 1 + len(generated)
-        else:
-            total_decode_tokens += 1
 
-    logger.info("Heatmap collection complete: %d decode tokens across %d prompts",
-                total_decode_tokens, len(prompts))
+        # Run each prompt with long decode to build a decode-weighted heatmap
+        total_decode_tokens = 0
+        logger.info(
+            "Building heatmap from %d held-out prompts (%d decode tokens each, "
+            "temperature=%.3f top_k=%d top_p=%.3f enable_thinking=%s mode=%s)...",
+            len(prompts),
+            HEATMAP_DECODE_TOKENS,
+            decode_params["temperature"],
+            decode_params["top_k"],
+            decode_params["top_p"],
+            decode_params["enable_thinking"],
+            decode_params["mode"],
+        )
+        stop_ids = _default_stop_ids(model)
+        for i, prompt_text in enumerate(prompts):
+            prompt_t0 = time.perf_counter()
+            tokenize_t0 = time.perf_counter()
+            tokens = _chat_prompt_tokens(
+                model,
+                prompt_text,
+                enable_thinking=decode_params["enable_thinking"],
+            )
+            tokenize_s = time.perf_counter() - tokenize_t0
+            logger.info("  Heatmap prompt %d/%d: %d prefill tokens + %d decode tokens",
+                        i + 1, len(prompts), len(tokens), HEATMAP_DECODE_TOKENS)
+            prefill_t0 = time.perf_counter()
+            first_token, prompt_len, kv_overflow = gpu_store.rust_prefill_tokens(
+                tokens,
+                temperature=decode_params["temperature"],
+                disable_pinning=True,
+            )
+            prefill_s = time.perf_counter() - prefill_t0
+            decode_s = 0.0
+            generated_tokens = 0
+            stopped_before_decode = bool(kv_overflow or first_token in stop_ids)
+            if not kv_overflow and first_token not in stop_ids:
+                decode_t0 = time.perf_counter()
+                generated = gpu_store.gpu_generate_batch(
+                    first_token=first_token,
+                    start_position=prompt_len,
+                    max_tokens=HEATMAP_DECODE_TOKENS,
+                    temperature=decode_params["temperature"],
+                    top_k=decode_params["top_k"],
+                    top_p=decode_params["top_p"],
+                    stop_ids=stop_ids,
+                    presence_penalty=decode_params["presence_penalty"],
+                )
+                decode_s = time.perf_counter() - decode_t0
+                generated_tokens = len(generated)
+                total_decode_tokens += 1 + len(generated)
+            else:
+                total_decode_tokens += 1
+            if timing_enabled:
+                logger.info(
+                    "HEATMAP_TIMING prompt index=%d total=%d prompt_tokens=%d first_token=%d "
+                    "prompt_len=%d kv_overflow=%s stopped_before_decode=%s generated_tokens=%d "
+                    "tokenize_s=%.6f prefill_s=%.6f decode_s=%.6f prompt_s=%.6f",
+                    i + 1,
+                    len(prompts),
+                    len(tokens),
+                    first_token,
+                    prompt_len,
+                    bool(kv_overflow),
+                    stopped_before_decode,
+                    generated_tokens,
+                    tokenize_s,
+                    prefill_s,
+                    decode_s,
+                    time.perf_counter() - prompt_t0,
+                )
 
-    # Export and save heatmap
-    heatmap_dict = gpu_store.hcs_export_heatmap()
-    heatmap_metadata["generated_at_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    heatmap_dict["_metadata"] = heatmap_metadata
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    with open(save_path, 'w') as f:
-        json.dump(heatmap_dict, f, sort_keys=True)
-    logger.info("Heatmap saved to %s (%d entries)", save_path, len(heatmap_dict))
+        logger.info("Heatmap collection complete: %d decode tokens across %d prompts",
+                    total_decode_tokens, len(prompts))
+        if timing_enabled:
+            logger.info(
+                "HEATMAP_TIMING prompt_loop prompts=%d decode_tokens=%d prompt_loop_s=%.6f",
+                len(prompts),
+                total_decode_tokens,
+                time.perf_counter() - heatmap_t0,
+            )
 
-    # Tear down collection-only HCS so normal startup can re-init with real budget
-    gpu_store.hcs_reset()
-
-    return save_path
+        # Export and save heatmap before tearing down the collection-only HCS.
+        export_t0 = time.perf_counter()
+        heatmap_dict = gpu_store.hcs_export_heatmap()
+        export_s = time.perf_counter() - export_t0
+        heatmap_metadata["generated_at_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        heatmap_dict["_metadata"] = heatmap_metadata
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        write_t0 = time.perf_counter()
+        with open(save_path, 'w') as f:
+            json.dump(heatmap_dict, f, sort_keys=True)
+        write_s = time.perf_counter() - write_t0
+        logger.info("Heatmap saved to %s (%d entries)", save_path, len(heatmap_dict))
+        if timing_enabled:
+            logger.info(
+                "HEATMAP_TIMING export entries=%d export_s=%.6f write_s=%.6f heatmap_total_pre_cleanup_s=%.6f",
+                len(heatmap_dict),
+                export_s,
+                write_s,
+                time.perf_counter() - heatmap_t0,
+            )
+        return save_path
+    finally:
+        reset_s = 0.0
+        cleanup_s = 0.0
+        try:
+            if heatmap_collection_started:
+                # Tear down collection-only HCS so normal startup can re-init with real budget.
+                reset_t0 = time.perf_counter()
+                gpu_store.hcs_reset()
+                reset_s = time.perf_counter() - reset_t0
+        finally:
+            # Heatmap collection runs internal prefill/decode before the server is
+            # ready. Clean it through the same lifecycle used after real requests so
+            # request-scoped KV/recurrent state cannot leak into the first user call.
+            cleanup_t0 = time.perf_counter()
+            model.server_cleanup()
+            cleanup_s = time.perf_counter() - cleanup_t0
+            logger.info("Heatmap internal decode cleanup complete")
+            if timing_enabled:
+                logger.info(
+                    "HEATMAP_TIMING cleanup reset_s=%.6f server_cleanup_s=%.6f heatmap_total_s=%.6f",
+                    reset_s,
+                    cleanup_s,
+                    time.perf_counter() - heatmap_t0,
+                )
 
 
 _registry_file: Optional[Path] = None
@@ -884,6 +972,7 @@ def main():
             "CFG_HQQ_AUTO_BUDGET_PCT": "hqq_auto_budget_pct",
             "CFG_HQQ46_AUTO_BUDGET_MB": "hqq46_auto_budget_mib",
             "CFG_HQQ_SIDECAR_MANIFEST": "hqq_sidecar_manifest",
+            "CFG_EXPERT_HQQ_DIAGNOSTIC_CACHE_SPEC": "expert_hqq_diagnostic_cache_spec",
             "CFG_SHARED_EXPERT_QUANT": "shared_expert_quant",
             "CFG_DENSE_MLP_QUANT": "dense_mlp_quant",
             "CFG_LM_HEAD_QUANT": "lm_head_quant",
@@ -1037,8 +1126,8 @@ def main():
                         help="Experimental: cap sliding-attention KV layers to their physical window; requires correctness validation")
     parser.add_argument("--heatmap-path", default=None,
                         help="Path to expert_heatmap.json for HCS init")
-    parser.add_argument("--gpu-expert-bits", type=int, default=4, choices=[4, 8],
-                        help="Marlin quantization bits for GPU prefill experts")
+    parser.add_argument("--gpu-expert-bits", type=int, default=4, choices=[4, 8, 16],
+                        help="Expert weight bits for GPU prefill experts: 4/8 use Marlin cache, 16 uses direct BF16 debug mode")
     parser.add_argument("--expert-group-size", type=int, default=128, choices=[32, 64, 128],
                         help="Expert quantization group size for routed GPU/CPU expert caches")
     parser.add_argument("--gpu-expert-int4-calib", default="amax", choices=list(GPU_EXPERT_INT4_CALIB_CHOICES),
@@ -1057,6 +1146,8 @@ def main():
                         help="Legacy HQQ4/6 auto planner HQQ6 promotion budget in MiB")
     parser.add_argument("--hqq-sidecar-manifest", default=None,
                         help="Explicit HQQ4-only sidecar manifest; HQQ8 rejects sidecar/self-correction")
+    parser.add_argument("--expert-hqq-diagnostic-cache-spec", default=None,
+                        help="Explicit diagnostic-only KRHQ cache spec for runtime metadata validation")
     parser.add_argument("--shared-expert-quant", default="int8", choices=["bf16", "int8"],
                         help="Quantization for shared expert weights")
     parser.add_argument("--dense-mlp-quant", default="int8", choices=["bf16", "int8"],
@@ -1330,6 +1421,8 @@ def main():
         args.heatmap_path = os.path.expanduser(args.heatmap_path)
     if args.gguf_path:
         args.gguf_path = os.path.expanduser(args.gguf_path)
+    if args.expert_hqq_diagnostic_cache_spec:
+        args.expert_hqq_diagnostic_cache_spec = os.path.expanduser(args.expert_hqq_diagnostic_cache_spec)
 
     _model_name = args.model_path.rstrip("/").split("/")[-1]
 
@@ -1355,7 +1448,10 @@ def main():
             f"Selected physical GPUs: {args.selected_gpus} "
             f"({args.selected_gpus_source}; CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', '')})"
         )
-    expert_detail = f"Experts: GPU INT{args.gpu_expert_bits} g{args.expert_group_size}"
+    if args.gpu_expert_bits == 16:
+        expert_detail = "Experts: GPU BF16"
+    else:
+        expert_detail = f"Experts: GPU INT{args.gpu_expert_bits} g{args.expert_group_size}"
     if args.gpu_expert_bits == 4:
         expert_detail += f" ({args.gpu_expert_int4_calib})"
     _detail(f"{expert_detail}  |  Attention: {args.attention_quant}  |  KV: {args.kv_dtype}")
@@ -1440,6 +1536,7 @@ def main():
         quant_cfg=quant_cfg,
         layer_group_size=args.layer_group_size,
         gguf_path=args.gguf_path,
+        expert_hqq_diagnostic_cache_spec=args.expert_hqq_diagnostic_cache_spec,
         force_load=args.force_load,
         gpu_prefill_threshold=1 if args.hcs else getattr(args, 'gpu_prefill_threshold', int(os.environ.get("KRASIS_PREFILL_THRESHOLD", "500"))),
         kv_cache_mb=args.kv_cache_mb,
@@ -1640,6 +1737,19 @@ def main():
         _detail(f"Rust prefill warmed with {warmup_len:,} tokens before HCS budgeting")
     except Exception as e:
         _abort_if_cuda_context_poisoned("Rust prefill warmup", e)
+        if (
+            _env_flag("KRASIS_MAMBA2_SSD_CHUNK_PARALLEL_V5")
+            or _env_flag("KRASIS_MAMBA2_SSD_CHUNK_PARALLEL_V5_ORACLE")
+            or _env_flag("KRASIS_MAMBA2_SSD_BLOCK_SCAN")
+            or _env_flag("KRASIS_MAMBA2_SSD_BLOCK_SCAN_ORACLE")
+            or _env_flag("KRASIS_MAMBA2_SSD_BLOCK_SCAN_OUTPUT_SUBLOOP_TIMING")
+            or _env_flag("KRASIS_MAMBA2_SSD_BLOCK_SCAN_COEFF_TILE")
+            or _env_flag("KRASIS_MAMBA2_SSD_BLOCK_SCAN_CANDIDATE_TIMING")
+            or _env_flag("KRASIS_MAMBA2_SSD_BLOCK_SCAN_RECURRENT_SUBLOOP_TIMING")
+            or _env_flag("KRASIS_MAMBA2_SSD_BLOCK_SCAN_STATE_PARALLEL_RECURRENT")
+            or _env_flag("KRASIS_MAMBA2_SSD_PARALLEL_CHUNKED")
+        ):
+            raise
         logger.warning("Rust prefill warmup failed, continuing without it: %s", e)
         _warn(f"Rust prefill warmup failed: {e}")
     warmup_elapsed = time.time() - t_warmup
@@ -2179,6 +2289,9 @@ def main():
         _multi_gpu_split = _multi_gpu_splits[0] if _multi_gpu_splits else 0
         _multi_gpu_gqa_offset = _multi_gpu_gqa_offsets[0] if _multi_gpu_gqa_offsets else 0
 
+    heatmap_timing_enabled = _heatmap_substage_timing_enabled()
+    heatmap_to_ready_start_s = None
+
     if not args.hcs:
         _status("GPU decode (no HCS)")
         _warn("All experts streamed via DMA per token (slow for decode)")
@@ -2225,8 +2338,15 @@ def main():
             else:
                 _status("Building expert heatmap (decode-weighted calibration)")
                 heatmap_path = _build_heatmap(_model, heatmap_path, args)
+                if heatmap_timing_enabled:
+                    heatmap_to_ready_start_s = time.perf_counter()
+                    logger.info(
+                        "HEATMAP_TIMING post_heatmap_start path=%s",
+                        heatmap_path,
+                    )
 
             # ── Load heatmap and build sorted ranking ──
+            ranking_t0 = time.perf_counter()
             if validated_heatmap_data is not None:
                 raw_heatmap = validated_heatmap_data
             else:
@@ -2237,6 +2357,13 @@ def main():
             sorted_ranking = sorted(raw_heatmap.items(), key=lambda x: x[1], reverse=True)
             ranking = [(int(k.split(",")[0]), int(k.split(",")[1])) for k, _ in sorted_ranking]
             _detail(f"Heatmap: {len(ranking):,} experts ranked from {len(raw_heatmap):,} entries")
+            if heatmap_timing_enabled and heatmap_to_ready_start_s is not None:
+                logger.info(
+                    "HEATMAP_TIMING ranking entries=%d ranking_s=%.6f post_heatmap_elapsed_s=%.6f",
+                    len(ranking),
+                    time.perf_counter() - ranking_t0,
+                    time.perf_counter() - heatmap_to_ready_start_s,
+                )
 
         # Build full ranking for a layer range: heatmap-ranked experts first,
         # then unranked experts to fill remaining VRAM (better than empty slots).
@@ -2926,6 +3053,11 @@ def main():
     _client_model_name = _vision_model_name or _model_name
     vram_monitor.report_event("server_ready")
     log_ram_ledger("server-ready")
+    if heatmap_timing_enabled and heatmap_to_ready_start_s is not None:
+        logger.info(
+            "HEATMAP_TIMING post_heatmap_to_ready_s=%.6f",
+            time.perf_counter() - heatmap_to_ready_start_s,
+        )
     _headline("KRASIS SERVER READY", _GREEN)
     print(f"  {_GREEN}Model:{_NC}    {_BOLD}{_model_name}{_NC}", flush=True)
     print(f"  {_GREEN}Address:{_NC}  {_BOLD}{args.host}:{args.port}{_NC}", flush=True)

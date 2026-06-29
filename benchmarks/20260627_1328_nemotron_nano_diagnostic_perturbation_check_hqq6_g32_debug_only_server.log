@@ -1,0 +1,436 @@
+[0;36m[1m=>[0m Waiting for selected GPUs (0) to clear...
+[0;32m[1mOK[0m Selected GPUs (0) clear.
+[0;36m[1m=>[0m Launching from: tests/nemotron-nano-bf16-experts-a16.conf
+[0;36m[1m=>[0m Run dir: /home/main/Documents/Claude/krasis-nemotron-dev/logs/dev-run_20260627_143058
+[0;36m[1m=>[0m Import origin check:
+krasis: /home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/__init__.py
+krasis.krasis: /home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+Pre-scan: set CUDA_VISIBLE_DEVICES=0
+Loaded config from tests/nemotron-nano-bf16-experts-a16.conf: {'model_path': '/home/main/.krasis/models/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16', 'selected_gpus': '0', 'num_gpus': 1, 'layer_group_size': 2, 'kv_dtype': 'bf16', 'gpu_expert_bits': 16, 'cpu_expert_bits': 8, 'attention_quant': 'bf16', 'shared_expert_quant': 'bf16', 'dense_mlp_quant': 'bf16', 'lm_head_quant': 'bf16', 'krasis_threads': 16, 'host': '0.0.0.0', 'port': 18021, 'enable_thinking': False, 'gpu_prefill_threshold': 300, 'vram_safety_margin': 600, 'force_load': False}
+
+[1m[36m▸ Krasis — NVIDIA-Nemotron-3-Nano-30B-A3B-BF16[0m
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 1[0m
+  [32mHCS host cache: source[0m
+  [32mSelected physical GPUs: 0 (config; CUDA_VISIBLE_DEVICES=0)[0m
+  [32mExperts: GPU BF16  |  Attention: bf16  |  KV: bf16[0m
+  [32mLayer groups: 2  |  KV cache: 1000 MB  |  Threads: 16[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+  [33mUNVALIDATED BF16 debug path enabled: GPU experts=BF16, attention=BF16, shared expert=BF16, dense MLP=BF16, lm head=BF16. This path likely contains unknown bugs and must not be used as a correctness oracle. Use HF Transformers BF16 reference data for validation; production runs must use quantized configs.[0m
+
+[1m[36m▸ Loading model weights[0m
+  [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=518 MB, free=31600 MB, total=32119 MB
+
+[1m[36m▸ Loading GPU weights[0m
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:0: alloc=4271 MB, reserved=4350 MB, used=4966 MB, free=27152 MB, total=32119 MB
+  [0;32mAttention resident on GPU (890 MB), 27152 MB free[0m
+
+[1m[36m▸ Loading BF16 expert weights from safetensors (UNVALIDATED debug path only; not for validation or production)[0m
+  [1;33m▸ Loading BF16 experts directly from safetensors (validation mode)[0m
+    Layer 1/23: 128 experts, 2436 MB BF16, 3.2s
+    Layer 2/23: 128 experts, 2436 MB BF16, 3.1s
+    Layer 3/23: 128 experts, 2436 MB BF16, 3.1s
+    Layer 4/23: 128 experts, 2436 MB BF16, 3.1s
+    Layer 5/23: 128 experts, 2436 MB BF16, 3.1s
+    Layer 6/23: 128 experts, 2436 MB BF16, 3.1s
+    Layer 7/23: 128 experts, 2436 MB BF16, 3.1s
+    Layer 8/23: 128 experts, 2436 MB BF16, 3.1s
+    Layer 9/23: 128 experts, 2436 MB BF16, 3.1s
+    Layer 10/23: 128 experts, 2436 MB BF16, 3.1s
+    Layer 11/23: 128 experts, 2436 MB BF16, 3.1s
+    Layer 12/23: 128 experts, 2436 MB BF16, 3.2s
+    Layer 13/23: 128 experts, 2436 MB BF16, 3.1s
+    Layer 14/23: 128 experts, 2436 MB BF16, 3.2s
+    Layer 15/23: 128 experts, 2436 MB BF16, 3.1s
+    Layer 16/23: 128 experts, 2436 MB BF16, 3.1s
+    Layer 17/23: 128 experts, 2436 MB BF16, 3.1s
+    Layer 18/23: 128 experts, 2436 MB BF16, 3.1s
+    Layer 19/23: 128 experts, 2436 MB BF16, 3.1s
+    Layer 20/23: 128 experts, 2436 MB BF16, 3.1s
+    Layer 21/23: 128 experts, 2436 MB BF16, 3.1s
+    Layer 22/23: 128 experts, 2436 MB BF16, 3.2s
+    Layer 23/23: 128 experts, 2436 MB BF16, 3.1s
+  [0;32mLoaded 2944 experts + 23 shared in 73.3s (BF16 direct)[0m
+  [0;32mUNVALIDATED BF16 debug weights loaded in 115s. Do not use this path for validation; use HF BF16 as the oracle.[0m
+  [33m[VRAM after-phase2-expert-weights][0m cuda:0: alloc=4271 MB, reserved=4350 MB, used=4966 MB, free=27152 MB, total=32119 MB
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:0: alloc=4271 MB, reserved=4350 MB, used=4966 MB, free=27152 MB, total=32119 MB
+  [33m[VRAM after-kv-cache-init][0m cuda:0: alloc=5271 MB, reserved=5350 MB, used=5966 MB, free=26152 MB, total=32119 MB
+  [33m[VRAM after-full-load][0m cuda:0: alloc=5271 MB, reserved=5350 MB, used=5966 MB, free=26152 MB, total=32119 MB
+
+[1m[36m▸ CUDA runtime warmup[0m
+  [32mcuBLAS + Triton kernel compilation done[0m
+
+[1m[36m▸ Setting up GPU decode store[0m
+  [32mGPU decode store ready (addr=0x74bfe344b690)[0m
+  [32mReleased redundant GPU execution source tensors (30 MB)[0m
+  [2mVRAM monitor started (tracking warmup)[0m
+  [2mcuda:0: 0 MB total[0m
+
+[1m[36m▸ Pre-allocating Rust prefill engine[0m
+[FLA] Loading kernels for H=0 from /home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/libkrasis_fla_sm120.so
+  [32mPrefill engine scratch buffers allocated[0m
+
+[1m[36m▸ Warmup (Rust prefill engine)[0m
+  [32mStartup diag: warmup tokens=300 (default 300, token=52528)[0m
+  [32mStartup diag env: no_graph=unset, mapped_reads=unset, prefill_debug=False, prefill_timing=True, exit_after_calibration=unset[0m
+VRAM LEDGER prefill_prepare_budget prompt_tokens=300 free_mb=24658 total_mb=32119 safety_mb=600 fixed_scratch_mb=183.0 per_tok_kb=238.2 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=0.0 all_expert_cold_reserve_mb=2455.4 measured_cold_slots=0 post_scratch_runtime_reserve_mb=0.0 scratch_budget_mb=24058.6 target_tokens=300 max_by_vram=300 runtime_chunk_cap=None chosen_scratch_tokens=300 hcs_cached_experts=0 hcs_stride=0 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=300 prompt_tokens=300 pre_alloc_free_mb=24658 post_alloc_free_mb=24446 actual_alloc_mb=212.0 estimated_scratch_mb=262.3 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=4.2 shared_fp32_mb=4.2 fp32_scratch_mb=10.6 kv_cross_floor_mb=0.3
+VRAM LEDGER prefill_ready prompt_tokens=300 scratch_tokens=300 scratch_mb=262.3 post_alloc_free_mb=24446 safety_mb=600 optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=false pinning_disabled=true optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0 prescan_layers=0 hcs_cached_experts=0 hcs_stride=0 scratch_tokens=300 chunk_size=300 num_chunks=1 chunk_plan=[300]
+[BF16-DIAG] First expert w13 GPU data: norm=0.115428, non_zero=64/64, first8=[0.0271, -0.0132, -0.0011, -0.0032, -0.0120, 0.0014, -0.0114, 0.0188]
+[BF16-DIAG] First expert gathered input first8=[-0.0430, 0.2773, 0.0659, 0.1289, 0.0952, 0.0635, -0.0267, -0.2812]
+[PREFILL-TIMING] 300 tokens, 1293.5ms total (232 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        1.4ms (  0.1%)
+[PREFILL-TIMING]   attn:      871.2ms ( 67.4%)  [gqa: 9.4ms, la: 0.0ms]
+[PREFILL-TIMING]     gqa breakdown (6 FA2 calls: 6 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:         0.5ms (  5.5% of gqa)
+[PREFILL-TIMING]       qknorm:       0.0ms (  0.4% of gqa)
+[PREFILL-TIMING]       rope:         0.1ms (  1.2% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.1ms (  0.6% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.1ms over 6 calls
+[PREFILL-TIMING]       fa2         8.2ms ( 87.0% of gqa)  [1.4ms/call avg]
+[PREFILL-TIMING]       gate:         0.0ms (  0.0% of gqa)
+[PREFILL-TIMING]       o_proj:       0.5ms (  4.9% of gqa)
+[PREFILL-TIMING]     gqa queue events:
+[PREFILL-TIMING]         proj         event=     0.5ms wall=     0.5ms wall_minus_event=     0.0ms sync=     0.2ms over 6 calls
+[PREFILL-TIMING]         qkv_norm     event=     0.0ms wall=     0.0ms wall_minus_event=     0.0ms sync=     0.0ms over 6 calls
+[PREFILL-TIMING]         rope         event=     0.1ms wall=     0.1ms wall_minus_event=     0.0ms sync=     0.1ms over 6 calls
+[PREFILL-TIMING]         fa2          event=     8.1ms wall=     8.2ms wall_minus_event=     0.0ms sync=     0.1ms over 6 calls
+[PREFILL-TIMING]         kv_append    event=     0.0ms wall=     0.1ms wall_minus_event=     0.1ms sync=     0.0ms over 0 calls
+[PREFILL-TIMING]         o_proj       event=     0.4ms wall=     0.5ms wall_minus_event=     0.0ms sync=     0.3ms over 6 calls
+[PREFILL-TIMING]   moe:       419.7ms ( 32.4%)
+[PREFILL-TIMING]   other:       1.2ms (  0.1%)
+  [32mRust prefill warmed with 300 tokens before HCS budgeting[0m
+  [32mWarmup complete in 1.3s[0m
+  [2mcuda:0 warmup:  peak 7,672 MB used / 32,119 MB total  (min free: 24,446 MB)[0m
+
+[1m[36m▸ VRAM calibration[0m
+  [32mSafety margin: 600 MB[0m
+  [32mFree VRAM after startup: 24,654 MB / 32,119 MB[0m
+  [32mStartup diag: calibration tokens short=500 (default 500), long=39,920 (default 39,920), cap=49,900, forced_long=False[0m
+  [32mShort calibration: probing 500 prompt tokens + 32 decode tokens[0m
+VRAM LEDGER prefill_prepare_budget prompt_tokens=500 free_mb=24658 total_mb=32119 safety_mb=600 fixed_scratch_mb=183.0 per_tok_kb=238.2 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=0.0 all_expert_cold_reserve_mb=2455.4 measured_cold_slots=0 post_scratch_runtime_reserve_mb=0.0 scratch_budget_mb=24058.6 target_tokens=500 max_by_vram=500 runtime_chunk_cap=None chosen_scratch_tokens=500 hcs_cached_experts=0 hcs_stride=0 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=500 prompt_tokens=500 pre_alloc_free_mb=24658 post_alloc_free_mb=24374 actual_alloc_mb=284.0 estimated_scratch_mb=313.1 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=7.1 shared_fp32_mb=7.1 fp32_scratch_mb=15.7 kv_cross_floor_mb=0.5
+VRAM LEDGER prefill_ready prompt_tokens=500 scratch_tokens=500 scratch_mb=313.1 post_alloc_free_mb=24374 safety_mb=600 optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=false pinning_disabled=true optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0 prescan_layers=0 hcs_cached_experts=0 hcs_stride=0 scratch_tokens=500 chunk_size=500 num_chunks=1 chunk_plan=[500]
+[PREFILL-TIMING] 500 tokens, 2917.6ms total (171 tok/s)
+[PREFILL-TIMING]   embed:       0.1ms (  0.0%)
+[PREFILL-TIMING]   norm:        1.5ms (  0.1%)
+[PREFILL-TIMING]   attn:     1340.5ms ( 45.9%)  [gqa: 2.2ms, la: 0.0ms]
+[PREFILL-TIMING]     gqa breakdown (6 FA2 calls: 6 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:         0.7ms ( 30.8% of gqa)
+[PREFILL-TIMING]       qknorm:       0.0ms (  1.9% of gqa)
+[PREFILL-TIMING]       rope:         0.1ms (  5.2% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.1ms (  2.5% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.1ms over 6 calls
+[PREFILL-TIMING]       fa2         0.3ms ( 13.2% of gqa)  [0.0ms/call avg]
+[PREFILL-TIMING]       gate:         0.0ms (  0.2% of gqa)
+[PREFILL-TIMING]       o_proj:       1.0ms ( 44.9% of gqa)
+[PREFILL-TIMING]     gqa queue events:
+[PREFILL-TIMING]         proj         event=     0.6ms wall=     0.7ms wall_minus_event=     0.0ms sync=     0.4ms over 6 calls
+[PREFILL-TIMING]         qkv_norm     event=     0.0ms wall=     0.0ms wall_minus_event=     0.0ms sync=     0.0ms over 6 calls
+[PREFILL-TIMING]         rope         event=     0.1ms wall=     0.1ms wall_minus_event=     0.0ms sync=     0.1ms over 6 calls
+[PREFILL-TIMING]         fa2          event=     0.3ms wall=     0.3ms wall_minus_event=     0.0ms sync=     0.2ms over 6 calls
+[PREFILL-TIMING]         kv_append    event=     0.0ms wall=     0.1ms wall_minus_event=     0.1ms sync=     0.0ms over 0 calls
+[PREFILL-TIMING]         o_proj       event=     0.9ms wall=     1.0ms wall_minus_event=     0.0ms sync=     0.9ms over 6 calls
+[PREFILL-TIMING]   moe:      1574.5ms ( 54.0%)
+[PREFILL-TIMING]   other:       1.0ms (  0.0%)
+  [32mdecode: 32 tokens in 3.55s (9.0 tok/s)  VRAM: 24628 MB free now, 24628 MB min free during decode[0m
+  [32mShort calibration: baseline=24,654 MB, prefill post-alloc=24,374 MB, prefill min=24,360 MB, decode min=24,628 MB, post-cleanup=24,628 MB[0m
+  [32mShort calibration: prefill 3.03s (165.2 tok/s), decode 4.19s (7.6 tok/s)[0m
+  [32mAdaptive long calibration: default target=39,920 tokens, target low-water floor=1,200 MB, estimated prefill growth=0.2326 MB/token[0m
+  [32mAdaptive long calibration: next probe 39,920 tokens (model-estimated initial probe (projected 0.2326 MB/token, validation floor 2400 MB))[0m
+  [32mLong calibration: probing 39,920 prompt tokens + 32 decode tokens[0m
+VRAM LEDGER prefill_prepare_budget prompt_tokens=39920 free_mb=24626 total_mb=32119 safety_mb=600 fixed_scratch_mb=183.0 per_tok_kb=238.2 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=14.0 all_expert_cold_reserve_mb=2455.4 measured_cold_slots=0 post_scratch_runtime_reserve_mb=14.0 scratch_budget_mb=24012.6 target_tokens=39920 max_by_vram=39920 runtime_chunk_cap=None chosen_scratch_tokens=39920 hcs_cached_experts=0 hcs_stride=0 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=39920 prompt_tokens=39920 pre_alloc_free_mb=24626 post_alloc_free_mb=14070 actual_alloc_mb=10556.0 estimated_scratch_mb=10571.4 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=565.3 shared_fp32_mb=565.3 fp32_scratch_mb=1252.4 kv_cross_floor_mb=39.0
+VRAM LEDGER prefill_ready prompt_tokens=39920 scratch_tokens=39920 scratch_mb=10571.4 post_alloc_free_mb=14070 safety_mb=600 optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=false pinning_disabled=true optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0 prescan_layers=0 hcs_cached_experts=0 hcs_stride=0 scratch_tokens=39920 chunk_size=39920 num_chunks=1 chunk_plan=[39920]
+[PREFILL-TIMING] 39920 tokens, 343235.9ms total (116 tok/s)
+[PREFILL-TIMING]   embed:       0.4ms (  0.0%)
+[PREFILL-TIMING]   norm:       54.8ms (  0.0%)
+[PREFILL-TIMING]   attn:   115538.7ms ( 33.7%)  [gqa: 409.3ms, la: 0.0ms]
+[PREFILL-TIMING]     gqa breakdown (6 FA2 calls: 6 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:        26.0ms (  6.3% of gqa)
+[PREFILL-TIMING]       qknorm:       0.0ms (  0.0% of gqa)
+[PREFILL-TIMING]       rope:         2.8ms (  0.7% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.3ms (  0.1% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.3ms over 6 calls
+[PREFILL-TIMING]       fa2       355.0ms ( 86.7% of gqa)  [59.2ms/call avg]
+[PREFILL-TIMING]       gate:         0.0ms (  0.0% of gqa)
+[PREFILL-TIMING]       o_proj:      25.2ms (  6.2% of gqa)
+[PREFILL-TIMING]     gqa queue events:
+[PREFILL-TIMING]         proj         event=    25.9ms wall=    26.0ms wall_minus_event=     0.1ms sync=    25.1ms over 6 calls
+[PREFILL-TIMING]         qkv_norm     event=     0.0ms wall=     0.0ms wall_minus_event=     0.0ms sync=     0.0ms over 6 calls
+[PREFILL-TIMING]         rope         event=     2.8ms wall=     2.8ms wall_minus_event=     0.0ms sync=     2.7ms over 6 calls
+[PREFILL-TIMING]         fa2          event=   354.9ms wall=   355.0ms wall_minus_event=     0.0ms sync=   354.7ms over 6 calls
+[PREFILL-TIMING]         kv_append    event=     0.0ms wall=     0.3ms wall_minus_event=     0.3ms sync=     0.2ms over 0 calls
+[PREFILL-TIMING]         o_proj       event=    25.2ms wall=    25.2ms wall_minus_event=     0.0ms sync=    25.0ms over 6 calls
+[PREFILL-TIMING]   moe:    227638.9ms ( 66.3%)
+[PREFILL-TIMING]   other:       3.0ms (  0.0%)
+  [32mdecode: 32 tokens in 3.63s (8.8 tok/s)  VRAM: 24624 MB free now, 24624 MB min free during decode[0m
+  [32mLong calibration: baseline=24,628 MB, prefill post-alloc=14,070 MB, prefill min=14,070 MB, decode min=24,624 MB, post-cleanup=24,624 MB[0m
+  [32mLong calibration: prefill 343.38s (116.3 tok/s), decode 4.29s (7.5 tok/s)[0m
+  [32mScratch reservation: max=11,815 MB (at 50,000 tokens)[0m
+
+[1m[36m▸ VRAM calibration complete[0m
+  [32mPost-calibration free VRAM: 24,624 MB[0m
+  [32mTransient deltas: short prefill=294 MB, long prefill=10,558 MB, short decode=26 MB, long decode=4 MB[0m
+  [32mGPU0 decode HCS budget: 23,998 MB[0m
+  [32mPrefill HCS budgets: short=23,730 MB, long=13,466 MB[0m
+  [32mWorst-case prefill scratch reservation: 11,815 MB at 50,000 tokens[0m
+
+[1m[36m▸ Calculating HCS budget[0m
+
+[1m[36m▸ Building expert heatmap (decode-weighted calibration)[0m
+VRAM LEDGER prefill_prepare_budget prompt_tokens=39 free_mb=24624 total_mb=32119 safety_mb=600 fixed_scratch_mb=183.0 per_tok_kb=238.2 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=14.0 all_expert_cold_reserve_mb=2455.4 measured_cold_slots=0 post_scratch_runtime_reserve_mb=14.0 scratch_budget_mb=24010.6 target_tokens=39 max_by_vram=128 runtime_chunk_cap=None chosen_scratch_tokens=128 hcs_cached_experts=0 hcs_stride=128 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=128 prompt_tokens=39 pre_alloc_free_mb=24624 post_alloc_free_mb=24456 actual_alloc_mb=168.0 estimated_scratch_mb=222.9 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=1.8 shared_fp32_mb=1.8 fp32_scratch_mb=10.6 kv_cross_floor_mb=0.0
+VRAM LEDGER prefill_ready prompt_tokens=39 scratch_tokens=128 scratch_mb=222.9 post_alloc_free_mb=24456 safety_mb=600 optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=false pinning_disabled=true optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0 prescan_layers=0 hcs_cached_experts=0 hcs_stride=128 scratch_tokens=128 chunk_size=39 num_chunks=1 chunk_plan=[39]
+[PREFILL-TIMING] 39 tokens, 1073.2ms total (36 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        1.0ms (  0.1%)
+[PREFILL-TIMING]   attn:       62.7ms (  5.8%)  [gqa: 0.9ms, la: 0.0ms]
+[PREFILL-TIMING]     gqa breakdown (6 FA2 calls: 6 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:         0.3ms ( 35.0% of gqa)
+[PREFILL-TIMING]       qknorm:       0.0ms (  3.8% of gqa)
+[PREFILL-TIMING]       rope:         0.1ms ( 11.4% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.1ms (  5.7% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.1ms over 6 calls
+[PREFILL-TIMING]       fa2         0.1ms ( 15.8% of gqa)  [0.0ms/call avg]
+[PREFILL-TIMING]       gate:         0.0ms (  0.3% of gqa)
+[PREFILL-TIMING]       o_proj:       0.2ms ( 25.2% of gqa)
+[PREFILL-TIMING]     gqa queue events:
+[PREFILL-TIMING]         proj         event=     0.3ms wall=     0.3ms wall_minus_event=     0.0ms sync=     0.1ms over 6 calls
+[PREFILL-TIMING]         qkv_norm     event=     0.0ms wall=     0.0ms wall_minus_event=     0.0ms sync=     0.0ms over 6 calls
+[PREFILL-TIMING]         rope         event=     0.1ms wall=     0.1ms wall_minus_event=     0.0ms sync=     0.1ms over 6 calls
+[PREFILL-TIMING]         fa2          event=     0.1ms wall=     0.1ms wall_minus_event=     0.0ms sync=     0.1ms over 6 calls
+[PREFILL-TIMING]         kv_append    event=     0.0ms wall=     0.1ms wall_minus_event=     0.1ms sync=     0.0ms over 0 calls
+[PREFILL-TIMING]         o_proj       event=     0.2ms wall=     0.2ms wall_minus_event=     0.0ms sync=     0.1ms over 6 calls
+[PREFILL-TIMING]   moe:      1007.9ms ( 93.9%)
+[PREFILL-TIMING]   other:       1.7ms (  0.2%)
+VRAM LEDGER prefill_prepare_budget prompt_tokens=47 free_mb=24622 total_mb=32119 safety_mb=600 fixed_scratch_mb=183.0 per_tok_kb=238.2 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=14.0 all_expert_cold_reserve_mb=2455.4 measured_cold_slots=0 post_scratch_runtime_reserve_mb=14.0 scratch_budget_mb=24008.6 target_tokens=47 max_by_vram=128 runtime_chunk_cap=None chosen_scratch_tokens=128 hcs_cached_experts=0 hcs_stride=128 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=128 prompt_tokens=47 pre_alloc_free_mb=24622 post_alloc_free_mb=24454 actual_alloc_mb=168.0 estimated_scratch_mb=222.9 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=1.8 shared_fp32_mb=1.8 fp32_scratch_mb=10.6 kv_cross_floor_mb=0.0
+VRAM LEDGER prefill_ready prompt_tokens=47 scratch_tokens=128 scratch_mb=222.9 post_alloc_free_mb=24454 safety_mb=600 optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=false pinning_disabled=true optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0 prescan_layers=0 hcs_cached_experts=0 hcs_stride=128 scratch_tokens=128 chunk_size=47 num_chunks=1 chunk_plan=[47]
+[PREFILL-TIMING] 47 tokens, 1200.7ms total (39 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        1.0ms (  0.1%)
+[PREFILL-TIMING]   attn:       81.4ms (  6.8%)  [gqa: 1.1ms, la: 0.0ms]
+[PREFILL-TIMING]     gqa breakdown (6 FA2 calls: 6 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:         0.4ms ( 39.7% of gqa)
+[PREFILL-TIMING]       qknorm:       0.0ms (  3.4% of gqa)
+[PREFILL-TIMING]       rope:         0.1ms ( 10.4% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.1ms (  5.0% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.1ms over 6 calls
+[PREFILL-TIMING]       fa2         0.2ms ( 16.4% of gqa)  [0.0ms/call avg]
+[PREFILL-TIMING]       gate:         0.0ms (  0.3% of gqa)
+[PREFILL-TIMING]       o_proj:       0.2ms ( 21.8% of gqa)
+[PREFILL-TIMING]     gqa queue events:
+[PREFILL-TIMING]         proj         event=     0.4ms wall=     0.4ms wall_minus_event=     0.1ms sync=     0.1ms over 6 calls
+[PREFILL-TIMING]         qkv_norm     event=     0.0ms wall=     0.0ms wall_minus_event=     0.0ms sync=     0.0ms over 6 calls
+[PREFILL-TIMING]         rope         event=     0.1ms wall=     0.1ms wall_minus_event=     0.0ms sync=     0.1ms over 6 calls
+[PREFILL-TIMING]         fa2          event=     0.1ms wall=     0.2ms wall_minus_event=     0.0ms sync=     0.1ms over 6 calls
+[PREFILL-TIMING]         kv_append    event=     0.0ms wall=     0.1ms wall_minus_event=     0.1ms sync=     0.0ms over 0 calls
+[PREFILL-TIMING]         o_proj       event=     0.2ms wall=     0.2ms wall_minus_event=     0.0ms sync=     0.1ms over 6 calls
+[PREFILL-TIMING]   moe:      1116.5ms ( 93.0%)
+[PREFILL-TIMING]   other:       1.9ms (  0.2%)
+VRAM LEDGER prefill_prepare_budget prompt_tokens=40 free_mb=24626 total_mb=32119 safety_mb=600 fixed_scratch_mb=183.0 per_tok_kb=238.2 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=14.0 all_expert_cold_reserve_mb=2455.4 measured_cold_slots=0 post_scratch_runtime_reserve_mb=14.0 scratch_budget_mb=24012.6 target_tokens=40 max_by_vram=128 runtime_chunk_cap=None chosen_scratch_tokens=128 hcs_cached_experts=0 hcs_stride=128 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=128 prompt_tokens=40 pre_alloc_free_mb=24626 post_alloc_free_mb=24456 actual_alloc_mb=170.0 estimated_scratch_mb=222.9 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=1.8 shared_fp32_mb=1.8 fp32_scratch_mb=10.6 kv_cross_floor_mb=0.0
+VRAM LEDGER prefill_ready prompt_tokens=40 scratch_tokens=128 scratch_mb=222.9 post_alloc_free_mb=24456 safety_mb=600 optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=false pinning_disabled=true optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0 prescan_layers=0 hcs_cached_experts=0 hcs_stride=128 scratch_tokens=128 chunk_size=40 num_chunks=1 chunk_plan=[40]
+[PREFILL-TIMING] 40 tokens, 1059.6ms total (38 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.9ms (  0.1%)
+[PREFILL-TIMING]   attn:       50.1ms (  4.7%)  [gqa: 0.9ms, la: 0.0ms]
+[PREFILL-TIMING]     gqa breakdown (6 FA2 calls: 6 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:         0.3ms ( 36.1% of gqa)
+[PREFILL-TIMING]       qknorm:       0.0ms (  3.7% of gqa)
+[PREFILL-TIMING]       rope:         0.1ms ( 11.2% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.1ms (  5.5% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.1ms over 6 calls
+[PREFILL-TIMING]       fa2         0.1ms ( 15.7% of gqa)  [0.0ms/call avg]
+[PREFILL-TIMING]       gate:         0.0ms (  0.4% of gqa)
+[PREFILL-TIMING]       o_proj:       0.2ms ( 25.2% of gqa)
+[PREFILL-TIMING]     gqa queue events:
+[PREFILL-TIMING]         proj         event=     0.3ms wall=     0.3ms wall_minus_event=     0.0ms sync=     0.1ms over 6 calls
+[PREFILL-TIMING]         qkv_norm     event=     0.0ms wall=     0.0ms wall_minus_event=     0.0ms sync=     0.0ms over 6 calls
+[PREFILL-TIMING]         rope         event=     0.1ms wall=     0.1ms wall_minus_event=     0.0ms sync=     0.1ms over 6 calls
+[PREFILL-TIMING]         fa2          event=     0.1ms wall=     0.1ms wall_minus_event=     0.0ms sync=     0.1ms over 6 calls
+[PREFILL-TIMING]         kv_append    event=     0.0ms wall=     0.1ms wall_minus_event=     0.1ms sync=     0.0ms over 0 calls
+[PREFILL-TIMING]         o_proj       event=     0.2ms wall=     0.2ms wall_minus_event=     0.0ms sync=     0.1ms over 6 calls
+[PREFILL-TIMING]   moe:      1006.8ms ( 95.0%)
+[PREFILL-TIMING]   other:       1.8ms (  0.2%)
+VRAM LEDGER prefill_prepare_budget prompt_tokens=35 free_mb=24628 total_mb=32119 safety_mb=600 fixed_scratch_mb=183.0 per_tok_kb=238.2 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=14.0 all_expert_cold_reserve_mb=2455.4 measured_cold_slots=0 post_scratch_runtime_reserve_mb=14.0 scratch_budget_mb=24014.6 target_tokens=35 max_by_vram=128 runtime_chunk_cap=None chosen_scratch_tokens=128 hcs_cached_experts=0 hcs_stride=128 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=128 prompt_tokens=35 pre_alloc_free_mb=24628 post_alloc_free_mb=24456 actual_alloc_mb=172.0 estimated_scratch_mb=222.9 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=1.8 shared_fp32_mb=1.8 fp32_scratch_mb=10.6 kv_cross_floor_mb=0.0
+VRAM LEDGER prefill_ready prompt_tokens=35 scratch_tokens=128 scratch_mb=222.9 post_alloc_free_mb=24456 safety_mb=600 optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=false pinning_disabled=true optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0 prescan_layers=0 hcs_cached_experts=0 hcs_stride=128 scratch_tokens=128 chunk_size=35 num_chunks=1 chunk_plan=[35]
+[PREFILL-TIMING] 35 tokens, 1047.0ms total (33 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        1.1ms (  0.1%)
+[PREFILL-TIMING]   attn:       41.1ms (  3.9%)  [gqa: 1.0ms, la: 0.0ms]
+[PREFILL-TIMING]     gqa breakdown (6 FA2 calls: 6 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:         0.4ms ( 35.9% of gqa)
+[PREFILL-TIMING]       qknorm:       0.0ms (  3.8% of gqa)
+[PREFILL-TIMING]       rope:         0.1ms ( 11.2% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.1ms (  5.3% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.1ms over 6 calls
+[PREFILL-TIMING]       fa2         0.2ms ( 17.1% of gqa)  [0.0ms/call avg]
+[PREFILL-TIMING]       gate:         0.0ms (  0.3% of gqa)
+[PREFILL-TIMING]       o_proj:       0.2ms ( 23.9% of gqa)
+[PREFILL-TIMING]     gqa queue events:
+[PREFILL-TIMING]         proj         event=     0.3ms wall=     0.4ms wall_minus_event=     0.1ms sync=     0.1ms over 6 calls
+[PREFILL-TIMING]         qkv_norm     event=     0.0ms wall=     0.0ms wall_minus_event=     0.0ms sync=     0.0ms over 6 calls
+[PREFILL-TIMING]         rope         event=     0.1ms wall=     0.1ms wall_minus_event=     0.0ms sync=     0.1ms over 6 calls
+[PREFILL-TIMING]         fa2          event=     0.1ms wall=     0.2ms wall_minus_event=     0.0ms sync=     0.1ms over 6 calls
+[PREFILL-TIMING]         kv_append    event=     0.0ms wall=     0.1ms wall_minus_event=     0.1ms sync=     0.0ms over 0 calls
+[PREFILL-TIMING]         o_proj       event=     0.2ms wall=     0.2ms wall_minus_event=     0.0ms sync=     0.1ms over 6 calls
+[PREFILL-TIMING]   moe:      1003.0ms ( 95.8%)
+[PREFILL-TIMING]   other:       1.8ms (  0.2%)
+VRAM LEDGER prefill_prepare_budget prompt_tokens=46 free_mb=24624 total_mb=32119 safety_mb=600 fixed_scratch_mb=183.0 per_tok_kb=238.2 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=14.0 all_expert_cold_reserve_mb=2455.4 measured_cold_slots=0 post_scratch_runtime_reserve_mb=14.0 scratch_budget_mb=24010.6 target_tokens=46 max_by_vram=128 runtime_chunk_cap=None chosen_scratch_tokens=128 hcs_cached_experts=0 hcs_stride=128 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=128 prompt_tokens=46 pre_alloc_free_mb=24624 post_alloc_free_mb=24456 actual_alloc_mb=168.0 estimated_scratch_mb=222.9 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=1.8 shared_fp32_mb=1.8 fp32_scratch_mb=10.6 kv_cross_floor_mb=0.0
+VRAM LEDGER prefill_ready prompt_tokens=46 scratch_tokens=128 scratch_mb=222.9 post_alloc_free_mb=24456 safety_mb=600 optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=false pinning_disabled=true optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0 prescan_layers=0 hcs_cached_experts=0 hcs_stride=128 scratch_tokens=128 chunk_size=46 num_chunks=1 chunk_plan=[46]
+[PREFILL-TIMING] 46 tokens, 1142.3ms total (40 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        1.0ms (  0.1%)
+[PREFILL-TIMING]   attn:       62.4ms (  5.5%)  [gqa: 0.9ms, la: 0.0ms]
+[PREFILL-TIMING]     gqa breakdown (6 FA2 calls: 6 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:         0.3ms ( 36.6% of gqa)
+[PREFILL-TIMING]       qknorm:       0.0ms (  4.0% of gqa)
+[PREFILL-TIMING]       rope:         0.1ms ( 11.6% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.1ms (  5.4% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.1ms over 6 calls
+[PREFILL-TIMING]       fa2         0.1ms ( 14.5% of gqa)  [0.0ms/call avg]
+[PREFILL-TIMING]       gate:         0.0ms (  0.3% of gqa)
+[PREFILL-TIMING]       o_proj:       0.2ms ( 25.1% of gqa)
+[PREFILL-TIMING]     gqa queue events:
+[PREFILL-TIMING]         proj         event=     0.3ms wall=     0.3ms wall_minus_event=     0.0ms sync=     0.1ms over 6 calls
+[PREFILL-TIMING]         qkv_norm     event=     0.0ms wall=     0.0ms wall_minus_event=     0.0ms sync=     0.0ms over 6 calls
+[PREFILL-TIMING]         rope         event=     0.1ms wall=     0.1ms wall_minus_event=     0.0ms sync=     0.1ms over 6 calls
+[PREFILL-TIMING]         fa2          event=     0.1ms wall=     0.1ms wall_minus_event=     0.0ms sync=     0.1ms over 6 calls
+[PREFILL-TIMING]         kv_append    event=     0.0ms wall=     0.1ms wall_minus_event=     0.1ms sync=     0.0ms over 0 calls
+[PREFILL-TIMING]         o_proj       event=     0.2ms wall=     0.2ms wall_minus_event=     0.0ms sync=     0.1ms over 6 calls
+[PREFILL-TIMING]   moe:      1076.9ms ( 94.3%)
+[PREFILL-TIMING]   other:       2.0ms (  0.2%)
+VRAM LEDGER prefill_prepare_budget prompt_tokens=50 free_mb=24624 total_mb=32119 safety_mb=600 fixed_scratch_mb=183.0 per_tok_kb=238.2 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=14.0 all_expert_cold_reserve_mb=2455.4 measured_cold_slots=0 post_scratch_runtime_reserve_mb=14.0 scratch_budget_mb=24010.6 target_tokens=50 max_by_vram=128 runtime_chunk_cap=None chosen_scratch_tokens=128 hcs_cached_experts=0 hcs_stride=128 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=128 prompt_tokens=50 pre_alloc_free_mb=24624 post_alloc_free_mb=24456 actual_alloc_mb=168.0 estimated_scratch_mb=222.9 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=1.8 shared_fp32_mb=1.8 fp32_scratch_mb=10.6 kv_cross_floor_mb=0.0
+VRAM LEDGER prefill_ready prompt_tokens=50 scratch_tokens=128 scratch_mb=222.9 post_alloc_free_mb=24456 safety_mb=600 optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=false pinning_disabled=true optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0 prescan_layers=0 hcs_cached_experts=0 hcs_stride=128 scratch_tokens=128 chunk_size=50 num_chunks=1 chunk_plan=[50]
+[PREFILL-TIMING] 50 tokens, 1176.9ms total (42 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        0.9ms (  0.1%)
+[PREFILL-TIMING]   attn:       71.4ms (  6.1%)  [gqa: 0.9ms, la: 0.0ms]
+[PREFILL-TIMING]     gqa breakdown (6 FA2 calls: 6 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:         0.3ms ( 34.9% of gqa)
+[PREFILL-TIMING]       qknorm:       0.0ms (  4.0% of gqa)
+[PREFILL-TIMING]       rope:         0.1ms ( 11.5% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.1ms (  5.3% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.1ms over 6 calls
+[PREFILL-TIMING]       fa2         0.1ms ( 15.4% of gqa)  [0.0ms/call avg]
+[PREFILL-TIMING]       gate:         0.0ms (  0.3% of gqa)
+[PREFILL-TIMING]       o_proj:       0.2ms ( 25.7% of gqa)
+[PREFILL-TIMING]     gqa queue events:
+[PREFILL-TIMING]         proj         event=     0.3ms wall=     0.3ms wall_minus_event=     0.0ms sync=     0.1ms over 6 calls
+[PREFILL-TIMING]         qkv_norm     event=     0.0ms wall=     0.0ms wall_minus_event=     0.0ms sync=     0.0ms over 6 calls
+[PREFILL-TIMING]         rope         event=     0.1ms wall=     0.1ms wall_minus_event=     0.0ms sync=     0.1ms over 6 calls
+[PREFILL-TIMING]         fa2          event=     0.1ms wall=     0.1ms wall_minus_event=     0.0ms sync=     0.1ms over 6 calls
+[PREFILL-TIMING]         kv_append    event=     0.0ms wall=     0.1ms wall_minus_event=     0.1ms sync=     0.0ms over 0 calls
+[PREFILL-TIMING]         o_proj       event=     0.2ms wall=     0.2ms wall_minus_event=     0.0ms sync=     0.1ms over 6 calls
+[PREFILL-TIMING]   moe:      1102.6ms ( 93.7%)
+[PREFILL-TIMING]   other:       1.9ms (  0.2%)
+  [32mHeatmap: 1,658 experts ranked from 1,658 entries[0m
+  [2mVRAM calibration: baseline 24624 MB | prefill 266.6 KB/tok, decode -0.6 KB/tok | HCS allowance prefill: short 23730 MB, long 13466 MB | decode: short 23998 MB, long 24020 MB | idle floors prefill=894 MB decode=626 MB | decode-resident HCS budget=23998 MB[0m
+  [2mGPU0 HCS: 2944 experts (1658 ranked + 1286 unranked), reclaimable: 23,998 MB[0m
+
+[1m[36m▸ Loading GPU0 HCS pool (fully reclaimable)[0m
+
+[1m[36m▸ HCS pool loaded[0m
+  [32mHCS pool: 0/2944 experts loaded in 0.00s (0.0% coverage), 0.0 MB VRAM, 0 free slots, gpu_route_sync=false, mapped_reads=false | soft: 1230 experts in 0.93s (23408.4 MB, host_mode=source) | total: 1230/2944 (41.8%) coverage[0m
+  [2mLoaded in 1.0s[0m
+
+[1m[36m▸ Decode validation[0m
+  [32mSkipped: Rust prefill already warmed before HCS budgeting[0m
+
+[1m[36m▸ VRAM monitor: runtime warnings enabled[0m
+  [32mSafety margin: 600 MB — warnings on every new low below this[0m
+
+[1m[32mKRASIS SERVER READY[0m
+  [32mModel:[0m    [1mNVIDIA-Nemotron-3-Nano-30B-A3B-BF16[0m
+  [32mAddress:[0m  [1m0.0.0.0:18021[0m
+  [32mContext:[0m  170,656 tokens  |  KV cache: 1,000 MB
+  [32mDecode:[0m   GPU  |  HCS: on  |  Think: on
+  [32mClient setup:[0m
+    Base URL:      [1mhttp://127.0.0.1:18021/v1[0m
+    Chat endpoint: http://127.0.0.1:18021/v1/chat/completions
+    Models:        http://127.0.0.1:18021/v1/models
+    API key:       [1mX[0m [2m(any value)[0m
+    Model name:    [1mNVIDIA-Nemotron-3-Nano-30B-A3B-BF16[0m
+  [2mPress Q or Ctrl-C to stop[0m
+
+VRAM LEDGER hcs_evict_prefill prompt_tokens=449 eviction_tokens=449 free_mb=846 base_needed_mb=894 hqq_prefill_growth_mb=0 entry_guard_mb=1200 needed_mb=2094 soft_cached=1230 soft_slots=1230 soft_slot_mb=19.031 soft_chunks_loaded=205 soft_total_chunks=205 hard_budget_mb=0 soft_max_mb=23408 safety_mb=600
+VRAM LEDGER hcs_evict_prefill_deficit prompt_tokens=449 deficit_mb=1248.0 soft_chunks_loaded=205 soft_slots_per_chunk=6 soft_slot_mb=19.031
+VRAM LEDGER hcs_evict_prefill_result prompt_tokens=449 evicted=66 freed_mb=1256.1 chunks_dropped=11 total_chunks=205 elapsed_ms=8.4 free_after_mb=2122 soft_cached_after=1164 soft_chunks_loaded_after=194
+VRAM LEDGER hcs_evict_prefill prompt_tokens=449 eviction_tokens=449 free_mb=2122 base_needed_mb=894 hqq_prefill_growth_mb=0 entry_guard_mb=1200 needed_mb=2094 soft_cached=1164 soft_slots=1230 soft_slot_mb=19.031 soft_chunks_loaded=194 soft_total_chunks=205 hard_budget_mb=0 soft_max_mb=23408 safety_mb=600
+VRAM LEDGER prefill_prepare_budget prompt_tokens=449 free_mb=2122 total_mb=32119 safety_mb=600 fixed_scratch_mb=183.0 per_tok_kb=238.2 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=44.0 all_expert_cold_reserve_mb=2455.4 measured_cold_slots=0 post_scratch_runtime_reserve_mb=44.0 scratch_budget_mb=1478.6 target_tokens=449 max_by_vram=449 runtime_chunk_cap=None chosen_scratch_tokens=449 hcs_cached_experts=1164 hcs_stride=128 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=449 prompt_tokens=449 pre_alloc_free_mb=2122 post_alloc_free_mb=1842 actual_alloc_mb=280.0 estimated_scratch_mb=299.8 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=6.4 shared_fp32_mb=6.4 fp32_scratch_mb=14.1 kv_cross_floor_mb=0.4
+VRAM LEDGER prefill_ready prompt_tokens=449 scratch_tokens=449 scratch_mb=299.8 post_alloc_free_mb=1842 safety_mb=600 optional_pinning_budget_mb=None pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_pinning_budget prompt_tokens=449 post_alloc_free_mb=1842 required_post_scratch_mb=Some(644) pinning_guard_mb=600 result_mb=Some(598)
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=true pinning_disabled=false optional_pinning_budget_mb=Some(598) pinning_active=false pinning_pool_mb=0.0 prescan_layers=0 hcs_cached_experts=1164 hcs_stride=128 scratch_tokens=449 chunk_size=449 num_chunks=1 chunk_plan=[449]
+VRAM LEDGER prefill_prescan tokens=449 active_layers=23 avg_active_experts_per_layer=126.0 dense_active=true pinned_per_layer=0 pinning_active=false pinning_pool_mb=0.0
+[RMSNORM-CANDIDATE] layer=1 rows=449 width=2688 production_replay_ms=0.302781 contig_candidate_ms=0.014377 ratio=0.047483
+[EXPERT-HQQ-CONSUME] layer=1 blocks=128 rows=2694 copied_output_bytes=14482944 nbits=6 group_size=32 trigger=KRASIS_EXPERT_HQQ_PREFILL_CONSUME
+[EXPERT-HQQ-CONSUME] layer=3 blocks=128 rows=2694 copied_output_bytes=14482944 nbits=6 group_size=32 trigger=KRASIS_EXPERT_HQQ_PREFILL_CONSUME
+[EXPERT-HQQ-CONSUME] layer=6 blocks=125 rows=2694 copied_output_bytes=14482944 nbits=6 group_size=32 trigger=KRASIS_EXPERT_HQQ_PREFILL_CONSUME
+[EXPERT-HQQ-CONSUME] layer=8 blocks=125 rows=2694 copied_output_bytes=14482944 nbits=6 group_size=32 trigger=KRASIS_EXPERT_HQQ_PREFILL_CONSUME
+[EXPERT-HQQ-CONSUME] layer=10 blocks=125 rows=2694 copied_output_bytes=14482944 nbits=6 group_size=32 trigger=KRASIS_EXPERT_HQQ_PREFILL_CONSUME
+[EXPERT-HQQ-CONSUME] layer=13 blocks=124 rows=2694 copied_output_bytes=14482944 nbits=6 group_size=32 trigger=KRASIS_EXPERT_HQQ_PREFILL_CONSUME
+[EXPERT-HQQ-CONSUME] layer=15 blocks=122 rows=2694 copied_output_bytes=14482944 nbits=6 group_size=32 trigger=KRASIS_EXPERT_HQQ_PREFILL_CONSUME
+[EXPERT-HQQ-CONSUME] layer=17 blocks=120 rows=2694 copied_output_bytes=14482944 nbits=6 group_size=32 trigger=KRASIS_EXPERT_HQQ_PREFILL_CONSUME
+[EXPERT-HQQ-CONSUME] layer=20 blocks=111 rows=2694 copied_output_bytes=14482944 nbits=6 group_size=32 trigger=KRASIS_EXPERT_HQQ_PREFILL_CONSUME
+[EXPERT-HQQ-CONSUME] layer=22 blocks=118 rows=2694 copied_output_bytes=14482944 nbits=6 group_size=32 trigger=KRASIS_EXPERT_HQQ_PREFILL_CONSUME
+[EXPERT-HQQ-CONSUME] layer=24 blocks=108 rows=2694 copied_output_bytes=14482944 nbits=6 group_size=32 trigger=KRASIS_EXPERT_HQQ_PREFILL_CONSUME
+[EXPERT-HQQ-CONSUME] layer=27 blocks=95 rows=2694 copied_output_bytes=14482944 nbits=6 group_size=32 trigger=KRASIS_EXPERT_HQQ_PREFILL_CONSUME
+[EXPERT-HQQ-CONSUME] layer=29 blocks=101 rows=2694 copied_output_bytes=14482944 nbits=6 group_size=32 trigger=KRASIS_EXPERT_HQQ_PREFILL_CONSUME
+[EXPERT-HQQ-CONSUME] layer=31 blocks=106 rows=2694 copied_output_bytes=14482944 nbits=6 group_size=32 trigger=KRASIS_EXPERT_HQQ_PREFILL_CONSUME
+[EXPERT-HQQ-CONSUME] layer=34 blocks=89 rows=2694 copied_output_bytes=14482944 nbits=6 group_size=32 trigger=KRASIS_EXPERT_HQQ_PREFILL_CONSUME
+[EXPERT-HQQ-CONSUME] layer=36 blocks=51 rows=2694 copied_output_bytes=14482944 nbits=6 group_size=32 trigger=KRASIS_EXPERT_HQQ_PREFILL_CONSUME
+[EXPERT-HQQ-CONSUME] layer=38 blocks=42 rows=2694 copied_output_bytes=14482944 nbits=6 group_size=32 trigger=KRASIS_EXPERT_HQQ_PREFILL_CONSUME
+[EXPERT-HQQ-CONSUME] layer=40 blocks=33 rows=2694 copied_output_bytes=14482944 nbits=6 group_size=32 trigger=KRASIS_EXPERT_HQQ_PREFILL_CONSUME
+[EXPERT-HQQ-CONSUME] layer=43 blocks=30 rows=2694 copied_output_bytes=14482944 nbits=6 group_size=32 trigger=KRASIS_EXPERT_HQQ_PREFILL_CONSUME
+[EXPERT-HQQ-CONSUME] layer=45 blocks=27 rows=2694 copied_output_bytes=14482944 nbits=6 group_size=32 trigger=KRASIS_EXPERT_HQQ_PREFILL_CONSUME
+[EXPERT-HQQ-CONSUME] layer=47 blocks=22 rows=2694 copied_output_bytes=14482944 nbits=6 group_size=32 trigger=KRASIS_EXPERT_HQQ_PREFILL_CONSUME
+[EXPERT-HQQ-CONSUME] layer=49 blocks=21 rows=2694 copied_output_bytes=14482944 nbits=6 group_size=32 trigger=KRASIS_EXPERT_HQQ_PREFILL_CONSUME
+[EXPERT-HQQ-CONSUME] layer=51 blocks=16 rows=2694 copied_output_bytes=14482944 nbits=6 group_size=32 trigger=KRASIS_EXPERT_HQQ_PREFILL_CONSUME
+[PREFILL-TIMING] 449 tokens, 36690.1ms total (12 tok/s)
+[PREFILL-TIMING]   embed:       0.1ms (  0.0%)
+[PREFILL-TIMING]   norm:       37.5ms (  0.1%)
+[PREFILL-TIMING]   attn:     1222.4ms (  3.3%)  [gqa: 1.8ms, la: 0.0ms]
+[PREFILL-TIMING]     gqa breakdown (6 FA2 calls: 6 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:         0.8ms ( 41.3% of gqa)
+[PREFILL-TIMING]       qknorm:       0.1ms (  2.8% of gqa)
+[PREFILL-TIMING]       rope:         0.1ms (  7.2% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.1ms (  3.7% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.1ms over 6 calls
+[PREFILL-TIMING]       fa2         0.3ms ( 18.3% of gqa)  [0.1ms/call avg]
+[PREFILL-TIMING]       gate:         0.0ms (  0.2% of gqa)
+[PREFILL-TIMING]       o_proj:       0.5ms ( 24.5% of gqa)
+[PREFILL-TIMING]     gqa queue events:
+[PREFILL-TIMING]         proj         event=     0.7ms wall=     0.8ms wall_minus_event=     0.1ms sync=     0.2ms over 6 calls
+[PREFILL-TIMING]         qkv_norm     event=     0.0ms wall=     0.1ms wall_minus_event=     0.0ms sync=     0.0ms over 6 calls
+[PREFILL-TIMING]         rope         event=     0.1ms wall=     0.1ms wall_minus_event=     0.0ms sync=     0.1ms over 6 calls
+[PREFILL-TIMING]         fa2          event=     0.3ms wall=     0.3ms wall_minus_event=     0.0ms sync=     0.2ms over 6 calls
+[PREFILL-TIMING]         kv_append    event=     0.0ms wall=     0.1ms wall_minus_event=     0.1ms sync=     0.0ms over 0 calls
+[PREFILL-TIMING]         o_proj       event=     0.4ms wall=     0.5ms wall_minus_event=     0.0ms sync=     0.3ms over 6 calls
+[PREFILL-TIMING]   moe:     35294.7ms ( 96.2%)
+[PREFILL-TIMING]   other:     135.4ms (  0.4%)
+  [36mDynamic HCS: hit=0.00% tail=276/138 protected=954 promotions=0 evictions=0 request_promotions=0/276 budget_skips=0 no_slot=0 copy_failures=0[0m

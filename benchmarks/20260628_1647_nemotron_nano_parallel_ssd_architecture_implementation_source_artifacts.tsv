@@ -1,0 +1,21 @@
+file	marker	line
+python/krasis/server.py	1750	            or _env_flag("KRASIS_MAMBA2_SSD_PARALLEL_CHUNKED")
+src/cuda/prefill_kernels.cu	6436	extern "C" __global__ void mamba2_ssd_parallel_chunk_cumsum_kernel(
+src/cuda/prefill_kernels.cu	6467	extern "C" __global__ void mamba2_ssd_parallel_chunk_state_kernel(
+src/cuda/prefill_kernels.cu	6509	extern "C" __global__ void mamba2_ssd_parallel_state_passing_kernel(
+src/cuda/prefill_kernels.cu	6540	extern "C" __global__ void mamba2_ssd_parallel_chunk_scan_output_kernel(
+src/gpu_prefill.rs	332	        std::env::var("KRASIS_MAMBA2_SSD_PARALLEL_CHUNKED")
+src/gpu_prefill.rs	31770	                "KRASIS_MAMBA2_SSD_PARALLEL_CHUNKED requires KRASIS_MAMBA2_SSD_BLOCK_SCAN=1"
+src/gpu_prefill.rs	31776	                "KRASIS_MAMBA2_SSD_PARALLEL_CHUNKED requires KRASIS_MAMBA2_SSD_BLOCK_SCAN_COEFF_TILE=1"
+src/gpu_prefill.rs	31784	                "KRASIS_MAMBA2_SSD_PARALLEL_CHUNKED and KRASIS_MAMBA2_SSD_BLOCK_SCAN_STATE_PARALLEL_RECURRENT are mutually exclusive prototype state sources"
+src/gpu_prefill.rs	31792	                "KRASIS_MAMBA2_SSD_PARALLEL_CHUNKED is a startup diagnostic architecture prototype and requires KRASIS_STARTUP_DIAG=1"
+src/gpu_prefill.rs	31800	                "KRASIS_MAMBA2_SSD_PARALLEL_CHUNKED does not use the old recurrent kernel; use KRASIS_MAMBA2_SSD_BLOCK_SCAN_CANDIDATE_TIMING for chunked phase timing"
+src/gpu_prefill.rs	33646	                                "mamba2_ssd_parallel_chunk_scan_output_kernel"
+src/gpu_prefill.rs	55592	                    "mamba2_ssd_parallel_chunk_cumsum_kernel",
+src/gpu_prefill.rs	55593	                    "mamba2_ssd_parallel_chunk_state_kernel",
+src/gpu_prefill.rs	55594	                    "mamba2_ssd_parallel_state_passing_kernel",
+src/gpu_prefill.rs	55595	                    "mamba2_ssd_parallel_chunk_scan_output_kernel",
+src/gpu_prefill.rs	56017	            mamba2_ssd_parallel_chunk_cumsum: get("mamba2_ssd_parallel_chunk_cumsum_kernel")?,
+src/gpu_prefill.rs	56018	            mamba2_ssd_parallel_chunk_state: get("mamba2_ssd_parallel_chunk_state_kernel")?,
+src/gpu_prefill.rs	56019	            mamba2_ssd_parallel_state_passing: get("mamba2_ssd_parallel_state_passing_kernel")?,
+src/gpu_prefill.rs	56021	                "mamba2_ssd_parallel_chunk_scan_output_kernel",

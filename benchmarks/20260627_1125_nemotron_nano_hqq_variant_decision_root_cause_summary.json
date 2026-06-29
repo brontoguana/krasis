@@ -1,0 +1,105 @@
+{
+  "gate": "20260627_1125_nemotron_nano_hqq_variant_decision_root_cause",
+  "status": "closed_decision_root_cause",
+  "opened_at_utc": "2026-06-27T11:25:46Z",
+  "carried_from": {
+    "gate": "20260627_1058_nemotron_nano_hqq8_g64_quality_proof",
+    "hqq8_http_200": "3/3",
+    "hqq8_request_times_seconds": [
+      39.900834,
+      35.062542,
+      39.806775
+    ],
+    "hqq8_consume_rows": 69,
+    "hqq8_copied_bytes": 1029740544,
+    "hqq8_nbits": 8,
+    "hqq8_group_size": 64,
+    "hqq8_layout": "row_major_axis1_grouped_uint8",
+    "hqq8_selected_token_changes": "2/3",
+    "hqq8_topk_rank_drift": "3/3",
+    "variant_selected_token_changes": {
+      "hqq6_g64": "1/3",
+      "hqq6_g32": "0/3",
+      "hqq6_g16": "0/3",
+      "hqq8_g64": "2/3"
+    },
+    "variant_avg_selected_output_logprob_delta": {
+      "hqq6_g64": 0.110919667,
+      "hqq6_g32": 0.125852,
+      "hqq6_g16": 0.339994333,
+      "hqq8_g64": 0.287812
+    },
+    "variant_max_common_topk_delta": {
+      "hqq6_g64": 0.493397,
+      "hqq6_g32": 0.578915,
+      "hqq6_g16": 0.571293,
+      "hqq8_g64": 0.570168
+    },
+    "variant_max_rank_aligned_topk_delta": {
+      "hqq6_g64": 0.429088,
+      "hqq6_g32": 0.407414,
+      "hqq6_g16": 0.571293,
+      "hqq8_g64": 0.489098
+    },
+    "production_hqq_enabled": false,
+    "server_or_cache_generation_in_this_gate": false
+  },
+  "scope": {
+    "use_existing_saved_artifacts_only": true,
+    "server_run": false,
+    "cache_generation": false,
+    "source_changes_expected": false,
+    "compare_variants": [
+      "hqq6_g64",
+      "hqq6_g32",
+      "hqq6_g16",
+      "hqq8_g64"
+    ],
+    "decision_required": [
+      "least_bad_candidate",
+      "common_failure_pattern",
+      "next_diagnostic_gate_or_no_more_sweeps"
+    ]
+  },
+  "analysis": {
+    "least_bad_for_selected_token_stability": "hqq6_g32",
+    "least_bad_for_logprob_distance": "hqq6_g64",
+    "overall_least_bad_candidate": "hqq6_g32_for_any_future_quality_diagnostic_only",
+    "overall_candidate_passes_acceptance": false,
+    "common_failure_pattern": "top-2 first-token boundary drift between BF16 token 1044 comma and token 1321 \" and\", with top-k rank drift on all payloads and common case-2 membership drift across variants",
+    "further_hqq_bit_group_sweeps_justified": false,
+    "next_gate_recommendation": "targeted first-token margin attribution on cases 0 and 2 for tokens 1044 vs 1321, comparing HQQ6 g32 and HQQ6 g64 only; no new cache generation or broad variant sweep",
+    "generated_artifacts": [
+      "20260627_1125_nemotron_nano_hqq_variant_decision_root_cause_variant_payload_comparison.tsv",
+      "20260627_1125_nemotron_nano_hqq_variant_decision_root_cause_variant_aggregate_comparison.tsv",
+      "20260627_1125_nemotron_nano_hqq_variant_decision_root_cause_common_failure_pattern.tsv",
+      "20260627_1125_nemotron_nano_hqq_variant_decision_root_cause_root_decision.tsv",
+      "20260627_1125_nemotron_nano_hqq_variant_decision_root_cause_source_artifacts.tsv"
+    ]
+  },
+  "closed_at_utc": "2026-06-27T11:31:13Z",
+  "decision": {
+    "least_bad_candidate": "hqq6_g32_for_selected_token_stability_only",
+    "least_bad_logprob_variant": "hqq6_g64_but_selected_token_flip_case2",
+    "candidate_passes_acceptance": false,
+    "common_failure_pattern": "first-token top-2 margin instability: token 1044 comma vs token 1321 \" and\"; top-k rank drift persists for all variants and case 2 has membership drift in every variant",
+    "further_hqq_bit_group_sweeps": "not_justified",
+    "proposed_next_gate": "targeted_first_token_margin_attribution_cases_0_2_tokens_1044_1321_hqq6_g32_vs_g64_only"
+  },
+  "final_state": {
+    "timestamp_utc": "2026-06-27T11:31:13Z",
+    "tmux_server": "none",
+    "matching_runtime_or_generator_processes": "none",
+    "nvidia_compute_processes": "none",
+    "gpu_memory_used_mb": [
+      15,
+      11
+    ],
+    "disk_available_human": "614G",
+    "ram_available_human": "966Gi",
+    "server_run": false,
+    "cache_generation": false,
+    "source_code_changes": false,
+    "tests_or_build_rerun": false
+  }
+}

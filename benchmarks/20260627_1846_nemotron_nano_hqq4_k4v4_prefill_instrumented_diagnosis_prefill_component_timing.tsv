@@ -1,0 +1,25 @@
+tokens	total_prefill_ms	total_tok_s	category	component_ms	pct_of_total_ms	notes
+39920	117324.8	340.2	total_prefill	117324.8	100.000	Rust prefill timing total from startup diagnostic calibration; not a speed benchmark
+39920	117324.8	340.2	embed	0.4	0.000	embedding is not material
+39920	117324.8	340.2	norm	53.5	0.046	final/input norm bucket is not material
+39920	117324.8	340.2	mixer_bucket_printed_as_attn	115293.9	98.267	Printed as attn, but source wraps all mixer layer types; liveness separates this into Mamba2, GQA, and pass/MoE-only layers
+39920	117324.8	340.2	hqq_attention_gqa_total	477.4	0.407	Six full-attention layers; this is the actual GQA/HQQ attention sub-bucket, not the 115293.9ms mixer envelope
+39920	117324.8	340.2	hqq_attention_fa2	353.7	0.302	Subset of GQA/HQQ attention
+39920	117324.8	340.2	hqq_attention_projection	63.1	0.054	Subset of GQA/HQQ attention
+39920	117324.8	340.2	hqq_attention_o_proj	57.2	0.049	Subset of GQA/HQQ attention
+39920	117324.8	340.2	hqq_projection_marlin_float_zp	100.7	0.086	Projection-internal diagnostic, included inside GQA/HQQ attention work
+39920	117324.8	340.2	hqq_projection_group_sums	3.9	0.003	Projection-internal diagnostic, included inside GQA/HQQ attention work
+39920	117324.8	340.2	hqq_projection_correction_gemm	5.2	0.004	Projection-internal diagnostic, included inside GQA/HQQ attention work
+39920	117324.8	340.2	hqq_projection_correction_add	8.6	0.007	Projection-internal diagnostic, included inside GQA/HQQ attention work
+39920	117324.8	340.2	marlin_expert_prefill_moe_total	1934.0	1.649	MoE/Marlin expert prefill is measurable but not the root bottleneck
+39920	117324.8	340.2	marlin_expert_gate	13.4	0.011	MoE subcomponent
+39920	117324.8	340.2	marlin_expert_dma_total	551.6	0.470	MoE DMA/synchronization bucket
+39920	117324.8	340.2	marlin_expert_route_d2h	1.3	0.001	Host transfer subcomponent
+39920	117324.8	340.2	marlin_expert_cold_h2d	29.5	0.025	Host-to-device transfer subcomponent
+39920	117324.8	340.2	marlin_expert_ptr_upload	0.3	0.000	Pointer upload subcomponent
+39920	117324.8	340.2	marlin_expert_dma_wait	546.7	0.466	MoE wait/sync subcomponent; still under 0.5% of total prefill
+39920	117324.8	340.2	marlin_expert_w1_act	704.3	0.600	MoE compute subcomponent
+39920	117324.8	340.2	marlin_expert_w2	496.9	0.423	MoE compute subcomponent
+39920	117324.8	340.2	marlin_expert_scatter	32.3	0.028	MoE scatter subcomponent
+39920	117324.8	340.2	marlin_expert_shared	132.6	0.113	Shared expert subcomponent
+39920	117324.8	340.2	other	43.0	0.037	Miscellaneous measured bucket

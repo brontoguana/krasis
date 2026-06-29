@@ -1,0 +1,23 @@
+field	value	source
+model	NVIDIA-Nemotron-3-Nano-30B-A3B-BF16	/home/main/.krasis/models/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/config.json
+hidden_size	2688	config.json:19
+num_hidden_layers	52	config.json:43
+hybrid_pattern	MEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEMEM*EMEMEMEME	config.json:20
+mamba_layer_count_measured	23	benchmarks/20260627_1908_nemotron_nano_mamba2_substage_instrumentation_mamba2_layer_liveness.tsv
+long_prefill_tokens	39920	benchmarks/20260627_1908_nemotron_nano_mamba2_substage_instrumentation_mamba2_layer_liveness.tsv
+chunk_size	128	config.json:12 and src/gpu_prefill.rs:28915
+mamba_num_heads	64	config.json:26
+mamba_head_dim	64	config.json:24
+mamba_d_inner	4096	mamba_num_heads * mamba_head_dim
+ssm_state_size	128	config.json:53
+n_groups	8	config.json:36
+bc_size	1024	n_groups * ssm_state_size
+conv_dim	6144	d_inner + 2 * bc_size
+conv_kernel	4	config.json:14
+in_proj_dim	10304	2 * d_inner + 2 * bc_size + n_heads
+ssd_threads_per_cta	64	src/gpu_prefill.rs:30194 with head_dim 64
+ssd_blocks_d	1	src/gpu_prefill.rs:30195 with head_dim 64 and 64 threads
+ssd_grid_ctas_per_layer	64	n_heads * blocks_d
+ssd_shared_mem_bytes_per_cta	1024	chunk_size * 2 * sizeof(f32)
+current_hot_path_binding	Rust launches CUDA PTX RawCuFunc	src/gpu_prefill.rs:30360 and src/gpu_prefill.rs:52611
+torch_or_python_bound	false	source audit found no Torch/Python call in SSD hot path

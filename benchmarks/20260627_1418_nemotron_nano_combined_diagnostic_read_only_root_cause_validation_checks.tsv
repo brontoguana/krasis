@@ -1,0 +1,12 @@
+check	status	detail
+json_summary_assertion	pass	status closed, missing-instrumentation decision, no side effect found, no live server
+source_audit_assertion	pass	combined-only layer-delta build recorded as CPU-only from downloaded vectors
+missing_instrumentation_assertion	pass	pre/post layer-delta GPU hashes recorded as required missing instrumentation
+bash_n_dev	pass	dev shell syntax valid
+git_diff_check_krasis	pass	no whitespace errors in krasis-nemotron-dev diff
+git_diff_check_internal	pass	no whitespace errors in krasis-internal diff
+protected_config_check	pass	only known pre-existing untracked tests/nemotron-nano-bf16-experts-a16.conf
+tmux_idle	pass	no tmux server
+runtime_process_idle	pass	no matching Krasis runtime/generator/curl/build process
+gpu_idle	pass	GPUs 15 MB / 11 MB
+final_snapshot	pass	2026-06-27T14:24:02Z disk 613G RAM 965Gi

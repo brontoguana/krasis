@@ -1,0 +1,7 @@
+decision	status	rationale
+do_not_target_d_prior_or_cast	rejected	D/prior setup averaged 21.825ms and cast/store 0.817ms inside a 4318.312ms output kernel; changing them would add correctness risk without meaningful speed upside.
+do_not_materialize_aggregate_local_old_state	rejected	The 1058 aggregate local_old_state_exact prototype changed row82 output bits despite exact state; it does not preserve the accepted output-order cancellation surface.
+do_not_use_affine_state_summaries	rejected	Prior v4/v5 work showed closed-form/affine state summaries do not preserve arbitrary f32 recurrent bit order; accepted state remains exact token-order recurrence.
+target_per_pair_coefficients	accepted	For each chunk/head, cb(t,u,group), BF16(cb*decay*dt_u), and old_state_source(t,u,head,group)*decay are independent of d but currently recomputed for every d lane; tiling these scalars preserves per-u output accumulation while removing repeated state-size dot work.
+keep_local_triangular_math	accepted	The local triangular formula and BF16 cast placement remain unchanged; only where the scalar coefficient is computed changes.
+keep_local_old_output_order	accepted	Output still loops u from chunk_start through t and accumulates local_old_state += old_coeff(t,u,head)*x[u,d] in the same order as the accepted 1022/1113 path.

@@ -1,0 +1,86 @@
+{
+  "artifacts": {
+    "build_result": "20260628_0957_nemotron_nano_mamba2_ssd_block_scan_correctness_prototype_build_result.tsv",
+    "oracle_correctness": "20260628_0957_nemotron_nano_mamba2_ssd_block_scan_correctness_prototype_oracle_correctness.tsv",
+    "root_decision": "20260628_0957_nemotron_nano_mamba2_ssd_block_scan_correctness_prototype_root_decision.tsv",
+    "runtime_attempt": "20260628_0957_nemotron_nano_mamba2_ssd_block_scan_correctness_prototype_runtime_attempt.tsv",
+    "source_artifacts": "20260628_0957_nemotron_nano_mamba2_ssd_block_scan_correctness_prototype_source_artifacts.tsv",
+    "startup_cache_validation": "20260628_0957_nemotron_nano_mamba2_ssd_block_scan_correctness_prototype_startup_cache_validation.tsv",
+    "validation_checks": "20260628_0957_nemotron_nano_mamba2_ssd_block_scan_correctness_prototype_validation_checks.tsv"
+  },
+  "closed_utc": "2026-06-28T10:12:50Z",
+  "constraints": {
+    "decode_hcs_changes": false,
+    "default_path_change": false,
+    "long_diagnostic": false,
+    "production_enablement": false,
+    "requests": false,
+    "speed_benchmark": false
+  },
+  "gate": "20260628_0957_nemotron_nano_mamba2_ssd_block_scan_correctness_prototype",
+  "opened_utc": "2026-06-28T09:57:00Z",
+  "record_first": {
+    "0944_result": {
+      "accepted_state_source": "exact token-order f32 recurrence",
+      "affine_summaries": "diagnostic_only",
+      "design": "two_phase_block_scan_static_plan",
+      "first_correction": "move unchanged local/output assembly into separate candidate buffers while preserving recurrent entry/final state"
+    },
+    "gemma_baseline": {
+      "internal_decode_tok_s": 92.43,
+      "network_tok_s": 155.69,
+      "prefill_tok_s": 5619.6
+    },
+    "nano_baseline": {
+      "internal_decode_tok_s": 94.48,
+      "network_tok_s": 164.75,
+      "prefill_tok_s": 346.5
+    },
+    "source_gate": "20260628_0944_nemotron_nano_mamba2_ssd_v5_block_scan_parallel_design"
+  },
+  "result": {
+    "build": {
+      "duration_s": 173,
+      "exit_code": 0,
+      "status": "passed"
+    },
+    "correctness": {
+      "first_output_mismatch": {
+        "abs_error": 0.25,
+        "candidate_bits": "0xc233",
+        "candidate_value": -44.75,
+        "d": 24,
+        "flat": 400408,
+        "head": 48,
+        "oracle_bits": "0xc234",
+        "oracle_value": -45.0,
+        "row": 97
+      },
+      "output_max_abs": 0.25,
+      "output_mean_abs": 0.00000024959444999694824,
+      "output_mismatches": 3,
+      "state_max_abs": 0.0,
+      "state_mean_abs": 0.0,
+      "state_mismatches": 0,
+      "status": "failed_closed"
+    },
+    "probes": {
+      "row64_state0": "exact",
+      "row82_state14": "exact"
+    },
+    "status": "not_correctness_accepted"
+  },
+  "scope": "opt_in_block_scan_correctness_prototype",
+  "status": "closed",
+  "validation": {
+    "final_gpu_memory_mb": {
+      "0": 15,
+      "1": 11
+    },
+    "final_snapshot_utc": "2026-06-28T10:12:50Z",
+    "krasis_temp_lock_files_excluding_hf_download_metadata": 0,
+    "nvidia_compute_processes": 0,
+    "passed": true,
+    "runtime_processes": 0
+  }
+}

@@ -1,0 +1,19 @@
+kind	path	line_or_span	notes
+summary	benchmarks/20260627_1846_nemotron_nano_hqq4_k4v4_prefill_instrumented_diagnosis_summary.json	1	Machine-readable gate summary
+primary_stdout	benchmarks/20260627_1846_nemotron_nano_hqq4_k4v4_prefill_instrumented_diagnosis_diagnostic_stdout.log	1	Primary built diagnostic stdout with KRASIS_PREFILL_TIMING
+primary_krasis_log	benchmarks/20260627_1846_nemotron_nano_hqq4_k4v4_prefill_instrumented_diagnosis_krasis.log	1	Copied krasis.log for primary diagnostic
+liveness_stdout	benchmarks/20260627_1846_nemotron_nano_hqq4_k4v4_prefill_instrumented_diagnosis_liveness_stdout.log	1	Second built diagnostic stdout with KRASIS_PREFILL_LIVENESS_TIMING
+liveness_krasis_log	benchmarks/20260627_1846_nemotron_nano_hqq4_k4v4_prefill_instrumented_diagnosis_liveness_krasis.log	1	Copied krasis.log for liveness diagnostic
+timing_flag_source	src/gpu_prefill.rs	17314	KRASIS_PREFILL_TIMING gate
+liveness_flag_source	src/gpu_prefill.rs	54	KRASIS_PREFILL_LIVENESS_TIMING gate
+startup_diag_source	python/krasis/server.py	1702	Startup diagnostic logs prefill timing and exit-after-calibration state
+startup_exit_source	python/krasis/server.py	2089	KRASIS_STARTUP_EXIT_AFTER_CALIBRATION exits before serving/benchmark work
+mixer_timing_source	src/gpu_prefill.rs	18642	Mixer branch includes GQA, Mamba2, pass copy, and linear attention
+mixer_bucket_source	src/gpu_prefill.rs	18683	Timing accumulates every mixer layer into t_attn_ms
+gqa_la_only_source	src/gpu_prefill.rs	18687	Only layer_type 0 is counted as GQA and layer_type 3 as LA; Mamba2 has no sub-bucket
+prefill_timing_print_source	src/gpu_prefill.rs	20082	Prints top-level attn bucket and GQA/LA sub-buckets
+liveness_layer_end_source	src/gpu_prefill.rs	19631	Layer-type liveness line used for Mamba2/GQA/pass aggregation
+mamba2_function_source	src/gpu_prefill.rs	28723	forward_mamba2 root for next substage instrumentation
+mamba2_expected_substages	src/gpu_prefill.rs	28878	Existing metadata lists runtime Mamba2 substages to time
+hybrid_pattern_parser	python/krasis/config.py	568	Nemotron-H layer pattern maps M=mamba2, E=moe, *=full_attention
+layer_type_helpers	python/krasis/config.py	821	Helpers identify Mamba2 and MoE-only layers

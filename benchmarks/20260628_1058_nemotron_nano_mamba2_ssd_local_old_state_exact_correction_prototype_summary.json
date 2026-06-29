@@ -1,0 +1,90 @@
+{
+  "artifacts": {
+    "build_result": "20260628_1058_nemotron_nano_mamba2_ssd_local_old_state_exact_correction_prototype_build_result.tsv",
+    "oracle_correctness": "20260628_1058_nemotron_nano_mamba2_ssd_local_old_state_exact_correction_prototype_oracle_correctness.tsv",
+    "root_decision": "20260628_1058_nemotron_nano_mamba2_ssd_local_old_state_exact_correction_prototype_root_decision.tsv",
+    "runtime_attempt": "20260628_1058_nemotron_nano_mamba2_ssd_local_old_state_exact_correction_prototype_runtime_attempt.tsv",
+    "source_artifacts": "20260628_1058_nemotron_nano_mamba2_ssd_local_old_state_exact_correction_prototype_source_artifacts.tsv",
+    "startup_cache_validation": "20260628_1058_nemotron_nano_mamba2_ssd_local_old_state_exact_correction_prototype_startup_cache_validation.tsv",
+    "term_probe": "20260628_1058_nemotron_nano_mamba2_ssd_local_old_state_exact_correction_prototype_term_probe.tsv",
+    "validation": "20260628_1058_nemotron_nano_mamba2_ssd_local_old_state_exact_correction_prototype_validation_checks.tsv"
+  },
+  "constraints": {
+    "decode_hcs_changes": false,
+    "default_path_change": false,
+    "production_enablement": false,
+    "requests": false,
+    "speed_benchmark": false
+  },
+  "gate": "20260628_1058_nemotron_nano_mamba2_ssd_local_old_state_exact_correction_prototype",
+  "opened_utc": "2026-06-28T10:58:00Z",
+  "record_first": {
+    "1049_result": {
+      "dominant_known_cost": "lower-triangular output loop",
+      "local_old_state_exact": "next guarded diagnostic/candidate buffer; not statically accepted because recurrent materialization may change f32 accumulation order",
+      "measured_output_kernel_ms": 100060.325232,
+      "source_gate": "20260628_1049_nemotron_nano_mamba2_ssd_1022_block_scan_output_kernel_decomposition"
+    },
+    "gemma_baseline": {
+      "internal_decode_tok_s": 92.43,
+      "network_tok_s": 155.69,
+      "prefill_tok_s": 5619.6
+    },
+    "nano_baseline": {
+      "internal_decode_tok_s": 94.48,
+      "network_tok_s": 164.75,
+      "prefill_tok_s": 346.5
+    }
+  },
+  "scope": "opt_in_local_old_state_exact_correction_prototype",
+  "result": {
+    "build": {
+      "duration_s": 178,
+      "exit_code": 0,
+      "status": "passed"
+    },
+    "correctness": {
+      "long_diagnostic_run": false,
+      "output": {
+        "first_mismatch": {
+          "abs_error": 0.0009765625,
+          "candidate_bits": "0xbe4e",
+          "candidate_value": -0.201171875,
+          "d": 30,
+          "flat": 338270,
+          "head": 37,
+          "oracle_bits": "0xbe4d",
+          "oracle_value": -0.2001953125,
+          "row": 82
+        },
+        "max_abs": 0.00390625,
+        "mean_abs": 0.000000007927155820652843,
+        "mismatches": 10
+      },
+      "passed": false,
+      "state": {
+        "first_mismatch": null,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "mismatches": 0
+      },
+      "startup_exit_code": 1
+    },
+    "decision": {
+      "accepted": false,
+      "reason": "local_old_state_exact fixed row97 but regressed row82 output bits while final state stayed exact",
+      "status": "failed_correctness_stopped"
+    },
+    "probes": {
+      "row64_state0": "output exact, state exact",
+      "row82_state14": "output mismatch, state exact",
+      "row97_head48_d24": "term probe exact, candidate/oracle bits 0xc234"
+    }
+  },
+  "status": "closed",
+  "validation": {
+    "final_snapshot_utc": "2026-06-28T11:11:37Z",
+    "gpu_idle": "GPU0 15 MB, GPU1 11 MB",
+    "passed": true
+  }
+}

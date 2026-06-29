@@ -1,0 +1,12 @@
+check	status	detail
+record_first	passed	1216 fail-closed before requests recorded with exact startup calibration error, no g64 run, and no projection trace
+focused_tests	passed	./dev test-kernels expert_hqq -> 104/0
+build	passed	./dev build exited 0
+bash_n_dev	passed	dev shell syntax valid
+git_diff_check_krasis	passed	no whitespace errors
+git_diff_check_internal	passed	no whitespace errors
+protected_config_check	passed_known_untracked_tests_nemotron_nano_bf16_experts_a16_conf	no protected testconfigs changes
+cargo_fmt_check	not_run_raw_cargo_unavailable_in_outer_shell	outer shell has no cargo; built dev commands compiled successfully
+live_diagnostic_rerun	not_run	forbidden in this fix gate
+cache_generation	not_run	forbidden in this fix gate
+cleanup_idle	passed	no tmux server, no matching runtime/build/generator process, no NVIDIA compute process, GPUs 15 MB / 11 MB

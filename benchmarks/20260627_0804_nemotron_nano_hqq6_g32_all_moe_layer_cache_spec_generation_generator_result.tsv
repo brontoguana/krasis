@@ -1,0 +1,14 @@
+field	value
+status	ok
+exit_status	0
+manifest	/home/main/Documents/Claude/krasis-nemotron-dev/benchmarks/20260627_0804_nemotron_nano_hqq6_g32_all_moe_layer_cache_spec_generation_all_layer_generation_manifest.json
+cache	/home/main/Documents/Claude/krasis-nemotron-dev/benchmarks/20260627_0804_nemotron_nano_hqq6_g32_all_moe_layer_cache_spec_generation_hqq6_g32_all_moe_layers.krhq
+diagnostic_spec	/home/main/Documents/Claude/krasis-nemotron-dev/benchmarks/20260627_0804_nemotron_nano_hqq6_g32_all_moe_layer_cache_spec_generation_diagnostic_cache_spec.json
+layer_count	23
+expert_count	128
+layer_expert_refs	2944
+tensor_records	5888
+total_payload_bytes	29374808064
+cache_file_bytes	29375326272
+nbits	6
+group_size	32

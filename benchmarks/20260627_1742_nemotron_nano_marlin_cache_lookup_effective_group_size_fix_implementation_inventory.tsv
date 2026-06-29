@@ -1,0 +1,8 @@
+item	status	details
+effective_group_helper	added	src/weights/mod.rs effective_marlin_group_size_for_dimensions derives from min(hidden_size, moe_intermediate_size) and requested_group_size
+hf_startup_lookup	fixed	load_from_hf uses detected prequant/MXFP4 hint or derived effective Marlin group size before cache_path_marlin
+gguf_hybrid_startup_lookup	fixed	load_from_gguf_hybrid uses the same derived effective Marlin group size before cache_path_marlin
+builder_alignment	fixed	streaming Marlin builder non-prequantized branch calls the same helper
+mxfp4_hint_alignment	fixed	detect_group_size_hint uses the requested group size and same helper for MXFP4 cache-path hints
+hardcoded_model_or_group	absent	no Nano-specific branch and no hardcoded 64 in runtime logic
+focused_test	added	test_marlin_effective_group_size_uses_model_dimensions covers 1856 intermediate with requested 128 reducing to 64

@@ -1,0 +1,15 @@
+check	result	evidence
+json_summary_closed	pass	status closed_failed_correctness; small oracle failed; long run disabled
+tsv_shapes	pass	build/runtime/oracle/probe/term/source/cache/final-state TSVs have consistent tab field counts
+build	pass	./dev build exit 0 duration 179s
+small_full_oracle	fail_closed	exit 1; output mismatches 5; state mismatches 134008
+long_candidate_timing_not_run	pass	no long/candidate timing artifacts under this gate prefix
+requests_absent	pass	no request path reached; startup failed during warmup
+source_markers	pass	state-parallel env/kernel/dispatch present; default sequential SSD and coeff-tile output markers present
+default_path_unchanged	pass	normal SSD branch still falls through to trace-or-sequential outside block-scan env
+diff_check	pass	git diff --check passed in krasis-nemotron-dev and krasis-internal
+dev_syntax	pass	bash -n dev passed
+protected_configs	pass	status unchanged; expected tests-only Nano config present
+temp_locks	pass	no Nano Krasis temp/lock files outside standing Hugging Face download metadata
+idle_state	pass	2026-06-28T14:04:23Z; tmux 0; runtime/build processes 0; GPU compute processes 0; GPUs 15 MB / 11 MB
+python_one_liners	pass	none used in this gate

@@ -1,0 +1,10 @@
+field	value
+gate	20260627_2138_nemotron_nano_mamba2_ssd_reference_math_mismatch_analysis
+runtime_commands_run	false
+benchmarks_run	false
+requests_sent	0
+source_implementation_changed	false
+decode_hcs_changed	false
+production_enablement	false
+default_path_changed	false
+reason	Static-analysis gate only per user instruction.

@@ -1,0 +1,7 @@
+field	value
+gate	20260627_2039_nemotron_nano_mamba2_ssd_chunk_parallel_gated_prototype
+long_diagnostic_run	false
+reason	Small startup oracle failed closed on layer 0.
+baseline_ssd_scan_ms	114449.4
+prototype_ssd_scan_ms	not_measured
+comparison_valid	false

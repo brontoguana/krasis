@@ -1,0 +1,16 @@
+field	value
+detail_rows	9
+stage	activation
+actual_bits	0x0000:9
+expected_bits	0x0001:6;0x0002:1;0x0005:1;0x000f:1
+diagnostics	bf16_zero_vs_subnormal_flush_to_zero_candidate:9
+classes	zero/subnormal/subnormal:9
+flush_to_zero_or_subnormal_rounding_true	9
+min_expected_bf16_value	9.183549615799121156e-41
+max_expected_bf16_value	1.377532442369868173e-39
+sum_abs	2.571393892423753924e-39
+max_abs	1.377532442369868173e-39
+block_case=0_layer=6_expert=72_offset=1577_rows=9	mismatches=1 columns=1782 expected_bits=0x000f abs_rows=1580
+block_case=0_layer=8_expert=123_offset=2486_rows=3	mismatches=2 columns=1152,1152 expected_bits=0x0001,0x0001 abs_rows=2487,2488
+block_case=1_layer=8_expert=123_offset=2746_rows=5	mismatches=2 columns=1152,1152 expected_bits=0x0001,0x0002 abs_rows=2747,2748
+block_case=2_layer=8_expert=123_offset=2535_rows=7	mismatches=4 columns=1152,1152,1152,1152 expected_bits=0x0001,0x0005,0x0001,0x0001 abs_rows=2536,2537,2538,2540

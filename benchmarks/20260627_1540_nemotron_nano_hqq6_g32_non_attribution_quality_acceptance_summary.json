@@ -1,0 +1,108 @@
+{
+  "gate": "20260627_1540_nemotron_nano_hqq6_g32_non_attribution_quality_acceptance",
+  "status": "closed",
+  "opened_utc": "2026-06-27T15:40:00Z",
+  "closed_utc": "2026-06-27T16:00:58Z",
+  "record_first": {
+    "source_gate": "20260627_1515_nemotron_nano_hqq6_g32_production_path_stability",
+    "http_success": "2/2",
+    "cases_checked": [0, 2],
+    "selected_token": 1044,
+    "selected_text": ",",
+    "case0_margin_1044_minus_1321": 0.585973,
+    "case2_margin_1044_minus_1321": 0.253093,
+    "production_compatible_path_restored_for_selected_token_behavior": true,
+    "topk_drift_caveat": "Top-k rank/membership drift remains; this gate can only complete selected-token smoke behavior unless top-k drift is resolved."
+  },
+  "scope": {
+    "variant": "HQQ6 g32",
+    "case_to_run": 1,
+    "endpoint": "/v1/internal/reference_test",
+    "existing_cache_spec_only": true,
+    "debug_reference_trace": true,
+    "hqq_consume": true,
+    "projection_diag": false,
+    "consume_boundary_diag": false,
+    "read_only_checkpoint_diag": false,
+    "no_g64": true,
+    "no_cache_generation": true,
+    "no_new_variants": true,
+    "no_production_enablement": true,
+    "no_speed_benchmark": true,
+    "no_decode_hcs": true
+  },
+  "planned_artifacts": {
+    "runtime_attempt": "20260627_1540_nemotron_nano_hqq6_g32_non_attribution_quality_acceptance_runtime_attempt.tsv",
+    "token_margin": "20260627_1540_nemotron_nano_hqq6_g32_non_attribution_quality_acceptance_token_margin_summary.tsv",
+    "topk_comparison": "20260627_1540_nemotron_nano_hqq6_g32_non_attribution_quality_acceptance_topk_comparison.tsv",
+    "three_case_smoke": "20260627_1540_nemotron_nano_hqq6_g32_non_attribution_quality_acceptance_three_case_smoke_summary.tsv",
+    "consume_summary": "20260627_1540_nemotron_nano_hqq6_g32_non_attribution_quality_acceptance_consume_summary.tsv",
+    "source_artifacts": "20260627_1540_nemotron_nano_hqq6_g32_non_attribution_quality_acceptance_source_artifacts.tsv",
+    "decision": "20260627_1540_nemotron_nano_hqq6_g32_non_attribution_quality_acceptance_root_decision.tsv",
+    "validation": "20260627_1540_nemotron_nano_hqq6_g32_non_attribution_quality_acceptance_validation_checks.tsv"
+  },
+  "runtime": {
+    "server_command": "./dev run tests/nemotron-nano-bf16-experts-a16.conf --test-endpoints --expert-hqq-diagnostic-cache-spec benchmarks/20260627_0804_nemotron_nano_hqq6_g32_all_moe_layer_cache_spec_generation_diagnostic_cache_spec.json",
+    "env": {
+      "KRASIS_EXPERT_HQQ_PREFILL_CONSUME": "1",
+      "KRASIS_FIRST_TOKEN_MARGIN_PROJECTION_DIAG": "unset",
+      "KRASIS_EXPERT_HQQ_PREFILL_CONSUME_DIAG": "unset",
+      "KRASIS_READ_ONLY_CHECKPOINT_DIAG": "unset"
+    },
+    "calibration": {
+      "safety_margin_mb": 600,
+      "short_prefill_min_free_mb": 24374,
+      "long_prefill_min_free_mb": 14046,
+      "post_calibration_free_mb": 24624,
+      "note": "Long-prefill low-water remained far above the safety margin in this run."
+    },
+    "requests": [
+      {
+        "case": 1,
+        "http_code": 200,
+        "time_total_s": 36.599477,
+        "response_bytes": 4578145,
+        "response_file": "benchmarks/20260627_1540_nemotron_nano_hqq6_g32_non_attribution_quality_acceptance_hqq6_g32_case1_response.json"
+      }
+    ]
+  },
+  "result": {
+    "http_success": "1/1",
+    "three_case_selected_token_matches_bf16": "3/3",
+    "three_case_selected_token_changes_vs_bf16": "0/3",
+    "three_case_selected_token_changes_vs_old_g32_quality": "0/3",
+    "case1": {
+      "selected_token": 1044,
+      "selected_text": ",",
+      "margin_1044_minus_1321": 0.642010,
+      "bf16_margin": 0.585266,
+      "old_g32_quality_margin": 0.495824,
+      "topk_tokens": [1044, 1321, 1294, 1307, 1562, 1408, 1046, 1278, 1513, 2136],
+      "projection_available": false,
+      "consume_boundary_diag": false,
+      "read_only_checkpoint_available": false
+    },
+    "consume": {
+      "case1_rows": 23,
+      "case1_copied_output_bytes": 365750784,
+      "three_case_rows": 69,
+      "three_case_copied_output_bytes": 1029740544,
+      "nbits": 6,
+      "group_size": 32
+    },
+    "quality_caveat": "Selected-token behavior is restored for the three-case smoke set on the non-attribution HQQ consume path, but top-k rank/membership drift remains 3/3."
+  },
+  "decision": {
+    "status": "hqq6_g32_non_attribution_three_case_smoke_selected_behavior_restored",
+    "not_a_quality_acceptance": true,
+    "reason": "Case 1 matched BF16 and old g32 selected-token behavior with a positive target margin, completing the three-case selected-token smoke set. Top-k drift remains, so production HQQ remains disabled."
+  },
+  "cleanup": {
+    "dev_kill_warning": "Initial ./dev kill reported zombie/GPU-reset warning after terminating the server.",
+    "settled_state_clean": true,
+    "final_snapshot_utc": "2026-06-27T16:00:58Z",
+    "gpu_memory_used_mb": [15, 11],
+    "disk_available": "613G",
+    "ram_available": "966Gi"
+  }
+}

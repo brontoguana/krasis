@@ -1,0 +1,9 @@
+metric	g64	g32	g16	delta_g64_minus_g16	delta_g32_minus_g16
+selected_token_changed_cases	1	0	0	1	0
+topk_rank_drift_cases	3	3	3	0	0
+avg_selected_output_logprob_delta	0.110919667	0.125852000	0.339994333	-0.229074667	-0.214142333
+max_common_topk_logprob_delta	0.493397000	0.578915000	0.571293000	-0.077896000	0.007622000
+max_rank_aligned_topk_logprob_delta	0.429088000	0.407414000	0.571293000	-0.142205000	-0.163879000
+total_rank_changed_count	16	17	17	-1	0
+topk_membership_changed_cases	1	2	1	0	1
+material_quality_improvement	baseline	partial_no	no	topk_rank_drift_remains_all_cases;selected_delta_worse_than_g64;rank_aligned_worse_than_g64_g32	no_material_gain_over_g32

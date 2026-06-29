@@ -1,0 +1,2 @@
+status	recommended_next_variant	why	large_cache_generated	probe_cache_generated	next_gate
+blocked_current_generator	HQQ6 g32	smallest higher-quality move from failed HQQ6 g64: same bit width/kernel family, reduced group size, estimated +3.671851008 GB payload; HQQ8 g64 is larger and unsupported by builder/reference/runtime validation	no	no	implement HQQ6 group_size manifest support plus focused fail-closed/valid g32 tests, then generate all-layer HQQ6 g32 cache/spec as prerequisite only

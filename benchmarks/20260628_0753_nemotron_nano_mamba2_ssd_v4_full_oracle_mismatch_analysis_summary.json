@@ -1,0 +1,106 @@
+{
+  "gate": "20260628_0753_nemotron_nano_mamba2_ssd_v4_full_oracle_mismatch_analysis",
+  "status": "closed",
+  "opened_utc": "2026-06-28T07:53:00Z",
+  "closed_utc": "2026-06-28T07:57:37Z",
+  "scope": "static_v4_full_oracle_mismatch_analysis",
+  "record_first": {
+    "source_gate": "20260628_0737_nemotron_nano_mamba2_ssd_v4_failed_cleanup",
+    "gemma_baseline": {
+      "prefill_tok_s": 5619.6,
+      "internal_decode_tok_s": 92.43,
+      "network_tok_s": 155.69
+    },
+    "nano_baseline": {
+      "prefill_tok_s": 346.5,
+      "internal_decode_tok_s": 94.48,
+      "network_tok_s": 164.75
+    },
+    "0737_result": {
+      "failed_v4_prototype_cleaned_up": true,
+      "default_ssd_path": "sequential",
+      "build_exit": 0,
+      "startup_diagnostic_exit": 0,
+      "cache_reuse_clean": true,
+      "requests_sent": 0,
+      "benchmark_path": false,
+      "preserved_diagnostics": [
+        "1908_mamba2_substage_timing",
+        "2149_local_triangular_oracle",
+        "2251_state_flat_probe",
+        "0650_cast_carry_diagnostic"
+      ]
+    }
+  },
+  "target": {
+    "source_gate": "20260628_0715_nemotron_nano_mamba2_ssd_v4_correctness_prototype",
+    "output": {
+      "row": 64,
+      "head": 11,
+      "d": 22,
+      "candidate_bits": "0x3bb7",
+      "sequential_bits": "0x3bb8",
+      "abs_error": 0.000030517578125
+    },
+    "state": {
+      "flat": 0,
+      "candidate_bits": "0x3b90c25a",
+      "sequential_bits": "0x3b90c258",
+      "abs_error": 0.0000000009313225746154785
+    }
+  },
+  "constraints": {
+    "static_analysis_only": true,
+    "implementation": false,
+    "build": false,
+    "startup_run": false,
+    "benchmark": false,
+    "requests": false,
+    "decode_hcs_changes": false,
+    "production_enablement": false,
+    "default_path_change": false
+  },
+  "analysis": {
+    "existing_artifacts_sufficient": true,
+    "new_diagnostic_needed": false,
+    "root_attribution": "candidate state buffer lifecycle / output prior assembly used closed-form chunk0 state accumulation that was not bit-identical to the sequential per-token recurrent f32 state update order",
+    "not_primary_causes": [
+      "reference-style cast placement",
+      "row64 local triangular self/lower-triangle math",
+      "final-state writeback for the first output mismatch"
+    ],
+    "key_evidence": {
+      "local_tri_row64_bits": "0x3bb8 == 0x3bb8",
+      "cast_carry_sequential_style_matched": true,
+      "cast_carry_reference_style_matched": false,
+      "candidate_state_flat0": "0x3b90c25a",
+      "sequential_state_flat0": "0x3b90c258",
+      "candidate_state_flat0_value": 0.004417699761688709,
+      "sequential_state_flat0_value": 0.004417698830366135
+    },
+    "next_correction": "use recurrent-entry-state buffers that replay the sequential A_bar*h + BF16(B*dt)*x f32 update order within each chunk, then assemble output from that recurrent entry state and compare probes before full oracle"
+  },
+  "artifacts": {
+    "source_audit": "20260628_0753_nemotron_nano_mamba2_ssd_v4_full_oracle_mismatch_analysis_source_audit.tsv",
+    "mismatch_attribution": "20260628_0753_nemotron_nano_mamba2_ssd_v4_full_oracle_mismatch_analysis_mismatch_attribution.tsv",
+    "next_correction_plan": "20260628_0753_nemotron_nano_mamba2_ssd_v4_full_oracle_mismatch_analysis_next_correction_plan.tsv",
+    "probe_plan": "20260628_0753_nemotron_nano_mamba2_ssd_v4_full_oracle_mismatch_analysis_probe_plan.tsv",
+    "runtime_not_run": "20260628_0753_nemotron_nano_mamba2_ssd_v4_full_oracle_mismatch_analysis_runtime_not_run.tsv"
+  },
+  "validation": {
+    "passed": true,
+    "final_snapshot_utc": "2026-06-28T08:00:42Z",
+    "runtime_processes": false,
+    "nvidia_compute_processes": false,
+    "gpu_memory_mb": {
+      "gpu0": 15,
+      "gpu1": 11
+    },
+    "nano_temp_lock_files": false,
+    "protected_config_status": [
+      "?? tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+      "?? tests/nemotron-nano-bf16-experts-a16.conf"
+    ],
+    "validation_artifact": "20260628_0753_nemotron_nano_mamba2_ssd_v4_full_oracle_mismatch_analysis_validation_checks.tsv"
+  }
+}

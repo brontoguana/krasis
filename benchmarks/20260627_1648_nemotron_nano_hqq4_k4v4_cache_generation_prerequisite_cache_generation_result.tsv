@@ -1,0 +1,16 @@
+item	status	value	detail
+command	pass	./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf --build-cache --force-rebuild-hqq-cache	built cache-only path
+exit_code	pass	0	benchmarks/20260627_1648_nemotron_nano_hqq4_k4v4_cache_generation_prerequisite_cache_generation.exit
+run_dir	pass	logs/dev-run_20260627_175200	from dev run log
+full_log	pass	benchmarks/20260627_1648_nemotron_nano_hqq4_k4v4_cache_generation_prerequisite_cache_generation.log	captured complete stdout/stderr
+hqq_validation	pass	HQQ attention artifacts validated (115 MB cached), 27940 MB free	log line 26
+build_cache_complete	pass	BUILD CACHE COMPLETE	log line 49
+quality_requests_sent	pass	0	no /v1/internal/reference_test or smoke request was sent
+server_left_running	pass	no	cache-only command exited and tmux session ended
+build_cache_note	info	Marlin phase also ran	--build-cache validates/builds GPU Marlin cache after HQQ attention validation
+before_disk	pass	613G	2026-06-27T16:51:51Z
+before_ram	pass	966Gi	2026-06-27T16:51:51Z
+after_disk	pass	598G	2026-06-27T16:58:53Z
+after_ram	pass	966Gi	2026-06-27T16:58:53Z
+after_gpu0_mb	pass	15	final idle snapshot
+after_gpu1_mb	pass	11	final idle snapshot

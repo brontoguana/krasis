@@ -1,0 +1,8 @@
+metric	value
+old_token	1044
+new_token	1044
+old_text	,
+new_text	,
+matched_topk_rows	12
+max_abs_logprob_delta	0.114579
+rank_position_differences	4

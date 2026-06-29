@@ -14,6 +14,12 @@ pub const DEFAULT_GROUP_SIZE: usize = 128;
 /// Number of INT4 values packed per u32.
 const PACK_FACTOR: usize = 8;
 
+#[inline]
+fn scale_group_count(cols: usize, group_size: usize) -> usize {
+    assert!(group_size > 0, "group_size must be > 0");
+    cols.div_ceil(group_size)
+}
+
 /// Convert a raw BF16 u16 to f32.
 #[inline]
 pub fn bf16_to_f32(v: u16) -> f32 {
@@ -34,7 +40,7 @@ pub struct QuantizedInt4 {
     /// Packed INT4 weights: 8 values per u32, row-major.
     /// Shape: [rows, cols / 8]
     pub packed: Vec<u32>,
-    /// Per-group BF16 scales. Shape: [rows, cols / group_size]
+    /// Per-group BF16 scales. Shape: [rows, ceil(cols / group_size)]
     pub scales: Vec<u16>,
     pub rows: usize,
     pub cols: usize,
@@ -45,7 +51,7 @@ pub struct QuantizedInt4 {
 pub struct QuantizedInt8 {
     /// Raw INT8 weights, row-major. Shape: [rows, cols]
     pub data: Vec<i8>,
-    /// Per-group BF16 scales. Shape: [rows, cols / group_size]
+    /// Per-group BF16 scales. Shape: [rows, ceil(cols / group_size)]
     pub scales: Vec<u16>,
     pub rows: usize,
     pub cols: usize,
@@ -68,7 +74,7 @@ pub struct QuantizedBf16 {
 /// # Arguments
 /// * `weight_bf16` - row-major BF16 weight data (as raw u16), length = rows * cols
 /// * `rows` - number of rows (output dimension)
-/// * `cols` - number of columns (input dimension), must be divisible by group_size
+/// * `cols` - number of columns (input dimension)
 /// * `group_size` - quantization group size (typically 128)
 pub fn quantize_int8(
     weight_bf16: &[u16],
@@ -77,9 +83,8 @@ pub fn quantize_int8(
     group_size: usize,
 ) -> QuantizedInt8 {
     assert_eq!(weight_bf16.len(), rows * cols);
-    assert!(cols % group_size == 0, "cols ({cols}) must be divisible by group_size ({group_size})");
 
-    let num_groups_per_row = cols / group_size;
+    let num_groups_per_row = scale_group_count(cols, group_size);
     let mut scales = vec![0u16; rows * num_groups_per_row];
     let mut data = vec![0i8; rows * cols];
 
@@ -89,9 +94,10 @@ pub fn quantize_int8(
         // Pass 1: compute per-group scales
         for g in 0..num_groups_per_row {
             let group_start = row_offset + g * group_size;
+            let group_end = (group_start + group_size).min(row_offset + cols);
             let mut amax: f32 = 0.0;
-            for i in 0..group_size {
-                let val = bf16_to_f32(weight_bf16[group_start + i]);
+            for &bits in &weight_bf16[group_start..group_end] {
+                let val = bf16_to_f32(bits);
                 amax = amax.max(val.abs());
             }
             let scale = if amax == 0.0 { 1.0 } else { amax / 127.0 };
@@ -101,13 +107,14 @@ pub fn quantize_int8(
         // Pass 2: quantize
         for g in 0..num_groups_per_row {
             let group_start = row_offset + g * group_size;
+            let group_end = (group_start + group_size).min(row_offset + cols);
             let scale = bf16_to_f32(scales[row * num_groups_per_row + g]);
             let inv_scale = if scale == 0.0 { 0.0 } else { 1.0 / scale };
 
-            for i in 0..group_size {
-                let val = bf16_to_f32(weight_bf16[group_start + i]);
+            for i in group_start..group_end {
+                let val = bf16_to_f32(weight_bf16[i]);
                 let q = (val * inv_scale).round().clamp(-128.0, 127.0) as i8;
-                data[group_start + i] = q;
+                data[i] = q;
             }
         }
     }
@@ -123,16 +130,17 @@ pub fn quantize_int8(
 
 /// Dequantize INT8 weights back to f32 for verification.
 pub fn dequantize_int8(q: &QuantizedInt8) -> Vec<f32> {
-    let num_groups_per_row = q.cols / q.group_size;
+    let num_groups_per_row = scale_group_count(q.cols, q.group_size);
     let mut output = vec![0.0f32; q.rows * q.cols];
 
     for row in 0..q.rows {
         for g in 0..num_groups_per_row {
             let scale = bf16_to_f32(q.scales[row * num_groups_per_row + g]);
             let group_start = row * q.cols + g * q.group_size;
+            let group_end = (group_start + q.group_size).min((row + 1) * q.cols);
 
-            for i in 0..q.group_size {
-                output[group_start + i] = q.data[group_start + i] as f32 * scale;
+            for i in group_start..group_end {
+                output[i] = q.data[i] as f32 * scale;
             }
         }
     }
@@ -148,7 +156,7 @@ pub fn dequantize_int8(q: &QuantizedInt8) -> Vec<f32> {
 /// # Arguments
 /// * `weight_bf16` - row-major BF16 weight data (as raw u16), length = rows * cols
 /// * `rows` - number of rows (output dimension)
-/// * `cols` - number of columns (input dimension), must be divisible by group_size
+/// * `cols` - number of columns (input dimension), must be divisible by 8
 /// * `group_size` - quantization group size (typically 128)
 pub fn quantize_int4(
     weight_bf16: &[u16],
@@ -157,10 +165,12 @@ pub fn quantize_int4(
     group_size: usize,
 ) -> QuantizedInt4 {
     assert_eq!(weight_bf16.len(), rows * cols);
-    assert!(cols % group_size == 0, "cols ({cols}) must be divisible by group_size ({group_size})");
-    assert!(cols % PACK_FACTOR == 0, "cols ({cols}) must be divisible by {PACK_FACTOR}");
+    assert!(
+        cols % PACK_FACTOR == 0,
+        "cols ({cols}) must be divisible by {PACK_FACTOR}"
+    );
 
-    let num_groups_per_row = cols / group_size;
+    let num_groups_per_row = scale_group_count(cols, group_size);
     let packed_cols = cols / PACK_FACTOR;
 
     let mut scales = vec![0u16; rows * num_groups_per_row];
@@ -172,9 +182,10 @@ pub fn quantize_int4(
         // Pass 1: compute per-group scales
         for g in 0..num_groups_per_row {
             let group_start = row_offset + g * group_size;
+            let group_end = (group_start + group_size).min(row_offset + cols);
             let mut amax: f32 = 0.0;
-            for i in 0..group_size {
-                let val = bf16_to_f32(weight_bf16[group_start + i]);
+            for &bits in &weight_bf16[group_start..group_end] {
+                let val = bf16_to_f32(bits);
                 amax = amax.max(val.abs());
             }
             // scale = amax / 7.0 (map max abs value to INT4 range [-8, 7])
@@ -186,20 +197,25 @@ pub fn quantize_int4(
         // Pass 2: quantize and pack
         for g in 0..num_groups_per_row {
             let group_start = row_offset + g * group_size;
+            let group_end = (group_start + group_size).min(row_offset + cols);
             let scale = bf16_to_f32(scales[row * num_groups_per_row + g]);
             let inv_scale = if scale == 0.0 { 0.0 } else { 1.0 / scale };
 
-            for i in (0..group_size).step_by(PACK_FACTOR) {
+            for i in (group_start..group_end).step_by(PACK_FACTOR) {
                 let mut word: u32 = 0;
                 for j in 0..PACK_FACTOR {
-                    let val = bf16_to_f32(weight_bf16[group_start + i + j]);
+                    let idx = i + j;
+                    if idx >= group_end {
+                        break;
+                    }
+                    let val = bf16_to_f32(weight_bf16[idx]);
                     // Quantize: round to nearest, clamp to [-8, 7]
                     let q = (val * inv_scale).round().clamp(-8.0, 7.0) as i8;
                     // Store as unsigned 4-bit (0..15): q + 8
                     let u4 = (q + 8) as u8 & 0xF;
                     word |= (u4 as u32) << (j * 4);
                 }
-                let col_in_row = g * group_size + i;
+                let col_in_row = i - row_offset;
                 packed[row * packed_cols + col_in_row / PACK_FACTOR] = word;
             }
         }
@@ -216,7 +232,7 @@ pub fn quantize_int4(
 
 /// Dequantize INT4 packed weights back to f32 for verification.
 pub fn dequantize_int4(q: &QuantizedInt4) -> Vec<f32> {
-    let num_groups_per_row = q.cols / q.group_size;
+    let num_groups_per_row = scale_group_count(q.cols, q.group_size);
     let packed_cols = q.cols / PACK_FACTOR;
     let mut output = vec![0.0f32; q.rows * q.cols];
 
@@ -224,11 +240,15 @@ pub fn dequantize_int4(q: &QuantizedInt4) -> Vec<f32> {
         for g in 0..num_groups_per_row {
             let scale = bf16_to_f32(q.scales[row * num_groups_per_row + g]);
 
-            for i in (0..q.group_size).step_by(PACK_FACTOR) {
-                let col_in_row = g * q.group_size + i;
+            let group_start_col = g * q.group_size;
+            let group_end_col = (group_start_col + q.group_size).min(q.cols);
+            for col_in_row in (group_start_col..group_end_col).step_by(PACK_FACTOR) {
                 let word = q.packed[row * packed_cols + col_in_row / PACK_FACTOR];
 
                 for j in 0..PACK_FACTOR {
+                    if col_in_row + j >= group_end_col {
+                        break;
+                    }
                     let u4 = ((word >> (j * 4)) & 0xF) as i8;
                     let q_val = u4 - 8; // back to signed [-8, 7]
                     let val = q_val as f32 * scale;
@@ -250,8 +270,8 @@ pub fn dequantize_int4(q: &QuantizedInt4) -> Vec<f32> {
 /// This format avoids Marlin's tile permutation overhead, giving faster single-token
 /// GEMV at the cost of slower batched GEMM (which prefill uses Marlin for).
 pub struct SimpleInt4 {
-    pub packed: Vec<u8>,   // [rows, cols/2] packed u8
-    pub scales: Vec<f32>,  // [rows, cols/group_size] FP32
+    pub packed: Vec<u8>,  // [rows, cols/2] packed u8
+    pub scales: Vec<f32>, // [rows, cols/group_size] FP32
     pub rows: usize,
     pub cols: usize,
     pub group_size: usize,
@@ -264,14 +284,14 @@ pub struct SimpleInt4 {
 /// in the same format the simple_int4_gemv kernel expects.
 pub fn simple_int4_from_quantized(q: &QuantizedInt4) -> SimpleInt4 {
     // Reinterpret packed u32 as u8 (little-endian)
-    let packed: Vec<u8> = q.packed.iter()
+    let packed: Vec<u8> = q
+        .packed
+        .iter()
         .flat_map(|word| word.to_le_bytes())
         .collect();
 
     // Convert BF16 scales to FP32
-    let scales: Vec<f32> = q.scales.iter()
-        .map(|&s| bf16_to_f32(s))
-        .collect();
+    let scales: Vec<f32> = q.scales.iter().map(|&s| bf16_to_f32(s)).collect();
 
     SimpleInt4 {
         packed,
@@ -423,8 +443,8 @@ pub fn generate_scale_perms() -> ([usize; 64], [usize; 32]) {
 /// Repack our QuantizedInt4 into Marlin GPU format.
 ///
 /// Follows vLLM's Python reference: unpack → transpose → tile permute → repack.
-/// Our format: packed `[N, K/8]`, scales `[N, K/group_size]`
-/// Marlin format: packed `[K/16, 2*N]`, scales `[K/group_size, N]`
+/// Our format: packed `[N, K/8]`, scales `[N, ceil(K/group_size)]`
+/// Marlin format: packed `[K/16, 2*N]`, scales `[ceil(K/group_size), N]`
 ///
 /// N = rows (output dim), K = cols (input dim) of the original weight matrix.
 pub fn marlin_repack(q: &QuantizedInt4) -> MarlinRepacked {
@@ -433,8 +453,14 @@ pub fn marlin_repack(q: &QuantizedInt4) -> MarlinRepacked {
     let group_size = q.group_size;
     let t0 = std::time::Instant::now();
 
-    assert!(k % MARLIN_TILE == 0, "K ({k}) must be divisible by {MARLIN_TILE}");
-    assert!(n % 64 == 0, "N ({n}) must be divisible by 64 (Marlin tile constraint)");
+    assert!(
+        k % MARLIN_TILE == 0,
+        "K ({k}) must be divisible by {MARLIN_TILE}"
+    );
+    assert!(
+        n % 64 == 0,
+        "N ({n}) must be divisible by 64 (Marlin tile constraint)"
+    );
 
     // Step 1: Unpack our [N, K/8] → individual [N, K] unsigned INT4 values (0-15)
     let packed_k = k / PACK_FACTOR;
@@ -537,8 +563,8 @@ pub fn marlin_repack(q: &QuantizedInt4) -> MarlinRepacked {
 
     let t4 = t0.elapsed();
 
-    // Step 5: Transpose scales [N, K/gs] → [K/gs, N]
-    let num_groups_k = k / group_size;
+    // Step 5: Transpose scales [N, ceil(K/gs)] -> [ceil(K/gs), N]
+    let num_groups_k = scale_group_count(k, group_size);
     let mut scales_transposed = vec![0u16; num_groups_k * n];
     for row in 0..n {
         for g in 0..num_groups_k {
@@ -550,7 +576,11 @@ pub fn marlin_repack(q: &QuantizedInt4) -> MarlinRepacked {
     let (scale_perm, scale_perm_single) = generate_scale_perms();
     // Use scale_perm (64) for grouped, scale_perm_single (32) for channelwise
     let is_grouped = group_size < k;
-    let sperm: &[usize] = if is_grouped { &scale_perm } else { &scale_perm_single };
+    let sperm: &[usize] = if is_grouped {
+        &scale_perm
+    } else {
+        &scale_perm_single
+    };
     let perm_len = sperm.len();
     let total_scale_vals = num_groups_k * n;
     let num_scale_chunks = total_scale_vals / perm_len;
@@ -600,7 +630,7 @@ pub fn dequantize_marlin(m: &MarlinRepacked) -> Vec<f32> {
     let k_tiles = k / MARLIN_TILE;
     let row_len = n * MARLIN_TILE;
     let out_cols = row_len / PACK_FACTOR;
-    let num_groups_k = k / group_size;
+    let num_groups_k = scale_group_count(k, group_size);
 
     // Step 1: Unpack Marlin-format packed [K/16, 2*N] → [K/16, N*16] values
     let mut perm_applied = vec![0u8; k_tiles * row_len];
@@ -647,7 +677,11 @@ pub fn dequantize_marlin(m: &MarlinRepacked) -> Vec<f32> {
     // Step 4: Invert scale permutation
     let (scale_perm, scale_perm_single) = generate_scale_perms();
     let is_grouped = group_size < k;
-    let sperm: &[usize] = if is_grouped { &scale_perm } else { &scale_perm_single };
+    let sperm: &[usize] = if is_grouped {
+        &scale_perm
+    } else {
+        &scale_perm_single
+    };
     let perm_len = sperm.len();
     let total_scale_vals = num_groups_k * n;
     let num_scale_chunks = total_scale_vals / perm_len;
@@ -732,8 +766,8 @@ pub fn generate_weight_perm_int8() -> [usize; 1024] {
 /// - INT8 weight permutation (interleave [0,2,1,3])
 /// - Unsigned offset: q + 128 (not q + 8)
 ///
-/// Our format: data `[N, K]` as i8, scales `[N, K/group_size]` as BF16
-/// Marlin format: packed `[K/16, 4*N]` as u32, scales `[K/group_size, N]` as BF16
+/// Our format: data `[N, K]` as i8, scales `[N, ceil(K/group_size)]` as BF16
+/// Marlin format: packed `[K/16, 4*N]` as u32, scales `[ceil(K/group_size), N]` as BF16
 ///
 /// N = rows (output dim), K = cols (input dim) of the original weight matrix.
 pub fn marlin_repack_int8(q: &QuantizedInt8) -> MarlinRepacked {
@@ -742,8 +776,14 @@ pub fn marlin_repack_int8(q: &QuantizedInt8) -> MarlinRepacked {
     let group_size = q.group_size;
     let t0 = std::time::Instant::now();
 
-    assert!(k % MARLIN_TILE == 0, "K ({k}) must be divisible by {MARLIN_TILE}");
-    assert!(n % 64 == 0, "N ({n}) must be divisible by 64 (Marlin tile constraint)");
+    assert!(
+        k % MARLIN_TILE == 0,
+        "K ({k}) must be divisible by {MARLIN_TILE}"
+    );
+    assert!(
+        n % 64 == 0,
+        "N ({n}) must be divisible by 64 (Marlin tile constraint)"
+    );
 
     // Step 1: Convert signed i8 → unsigned u8 [N, K] (q + 128)
     let mut unsigned = vec![0u8; n * k];
@@ -807,8 +847,8 @@ pub fn marlin_repack_int8(q: &QuantizedInt8) -> MarlinRepacked {
 
     let t4 = t0.elapsed();
 
-    // Step 5: Transpose scales [N, K/gs] → [K/gs, N]
-    let num_groups_k = k / group_size;
+    // Step 5: Transpose scales [N, ceil(K/gs)] -> [ceil(K/gs), N]
+    let num_groups_k = scale_group_count(k, group_size);
     let mut scales_transposed = vec![0u16; num_groups_k * n];
     for row in 0..n {
         for g in 0..num_groups_k {
@@ -819,7 +859,11 @@ pub fn marlin_repack_int8(q: &QuantizedInt8) -> MarlinRepacked {
     // Step 6: Apply scale permutation (same as INT4)
     let (scale_perm, scale_perm_single) = generate_scale_perms();
     let is_grouped = group_size < k;
-    let sperm: &[usize] = if is_grouped { &scale_perm } else { &scale_perm_single };
+    let sperm: &[usize] = if is_grouped {
+        &scale_perm
+    } else {
+        &scale_perm_single
+    };
     let perm_len = sperm.len();
     let total_scale_vals = num_groups_k * n;
     let num_scale_chunks = total_scale_vals / perm_len;
@@ -875,11 +919,20 @@ pub fn marlin_repack_hqq8_prefill(
 
     assert_eq!(packed.len(), n * k);
     assert!(group_size > 0, "group_size must be non-zero");
-    assert!(k % group_size == 0, "K ({k}) must be divisible by group_size ({group_size})");
+    assert!(
+        k % group_size == 0,
+        "K ({k}) must be divisible by group_size ({group_size})"
+    );
     assert_eq!(scales.len(), n * (k / group_size));
     assert_eq!(zeros.len(), scales.len());
-    assert!(k % MARLIN_TILE == 0, "K ({k}) must be divisible by {MARLIN_TILE}");
-    assert!(n % 64 == 0, "N ({n}) must be divisible by 64 (Marlin tile constraint)");
+    assert!(
+        k % MARLIN_TILE == 0,
+        "K ({k}) must be divisible by {MARLIN_TILE}"
+    );
+    assert!(
+        n % 64 == 0,
+        "N ({n}) must be divisible by 64 (Marlin tile constraint)"
+    );
 
     let k_tiles = k / MARLIN_TILE;
     let n_tiles = n / MARLIN_TILE;
@@ -925,7 +978,7 @@ pub fn marlin_repack_hqq8_prefill(
         }
     }
 
-    let num_groups_k = k / group_size;
+    let num_groups_k = scale_group_count(k, group_size);
     let mut scales_transposed = vec![0u16; num_groups_k * n];
     let mut delta_scales_transposed = vec![0u16; num_groups_k * n];
     for row in 0..n {
@@ -940,7 +993,11 @@ pub fn marlin_repack_hqq8_prefill(
 
     let (scale_perm, scale_perm_single) = generate_scale_perms();
     let is_grouped = group_size < k;
-    let sperm: &[usize] = if is_grouped { &scale_perm } else { &scale_perm_single };
+    let sperm: &[usize] = if is_grouped {
+        &scale_perm
+    } else {
+        &scale_perm_single
+    };
     let perm_len = sperm.len();
     let total_scale_vals = num_groups_k * n;
     let num_scale_chunks = total_scale_vals / perm_len;
@@ -1004,11 +1061,20 @@ pub fn marlin_repack_hqq8_symmetric_prefill(
     let t0 = std::time::Instant::now();
     assert_eq!(packed.len(), rows * cols);
     assert!(group_size > 0, "group_size must be non-zero");
-    assert!(cols % group_size == 0, "cols ({cols}) must be divisible by group_size ({group_size})");
+    assert!(
+        cols % group_size == 0,
+        "cols ({cols}) must be divisible by group_size ({group_size})"
+    );
     assert_eq!(scales.len(), rows * (cols / group_size));
     assert_eq!(zeros.len(), scales.len());
-    assert!(cols % MARLIN_TILE == 0, "K ({cols}) must be divisible by {MARLIN_TILE}");
-    assert!(rows % 64 == 0, "N ({rows}) must be divisible by 64 (Marlin tile constraint)");
+    assert!(
+        cols % MARLIN_TILE == 0,
+        "K ({cols}) must be divisible by {MARLIN_TILE}"
+    );
+    assert!(
+        rows % 64 == 0,
+        "N ({rows}) must be divisible by 64 (Marlin tile constraint)"
+    );
 
     let groups = cols / group_size;
     let mut data = vec![0i8; rows * cols];
@@ -1055,7 +1121,11 @@ pub fn marlin_repack_hqq8_symmetric_prefill(
 
             let scale_bf16 = f32_to_bf16(scale);
             let effective = bf16_to_f32(scale_bf16);
-            let inv = if effective == 0.0 { 0.0 } else { 1.0 / effective };
+            let inv = if effective == 0.0 {
+                0.0
+            } else {
+                1.0 / effective
+            };
             sym_scales[meta_idx] = scale_bf16;
             for i in 0..group_size {
                 let idx = group_start + i;
@@ -1114,11 +1184,20 @@ pub fn marlin_repack_hqq8_native_zp_prefill(
     let t0 = std::time::Instant::now();
     assert_eq!(packed.len(), rows * cols);
     assert!(group_size > 0, "group_size must be non-zero");
-    assert!(cols % group_size == 0, "cols ({cols}) must be divisible by group_size ({group_size})");
+    assert!(
+        cols % group_size == 0,
+        "cols ({cols}) must be divisible by group_size ({group_size})"
+    );
     assert_eq!(scales.len(), rows * (cols / group_size));
     assert_eq!(zeros.len(), scales.len());
-    assert!(cols % MARLIN_TILE == 0, "K ({cols}) must be divisible by {MARLIN_TILE}");
-    assert!(rows % 64 == 0, "N ({rows}) must be divisible by 64 (Marlin tile constraint)");
+    assert!(
+        cols % MARLIN_TILE == 0,
+        "K ({cols}) must be divisible by {MARLIN_TILE}"
+    );
+    assert!(
+        rows % 64 == 0,
+        "N ({rows}) must be divisible by 64 (Marlin tile constraint)"
+    );
 
     let n = rows;
     let k = cols;
@@ -1165,7 +1244,7 @@ pub fn marlin_repack_hqq8_native_zp_prefill(
         }
     }
 
-    let num_groups_k = k / group_size;
+    let num_groups_k = scale_group_count(k, group_size);
     let mut scales_transposed = vec![0u16; num_groups_k * n];
     let mut delta_scales_transposed = vec![0u16; num_groups_k * n];
     let mut zeros_transposed = vec![0u16; num_groups_k * n];
@@ -1187,14 +1266,17 @@ pub fn marlin_repack_hqq8_native_zp_prefill(
                 bf16_to_f32(zero_bf16) * (scale_bf16_f32 + delta_scale_bf16_f32);
             let reference_intercept = zeros[idx] * scales[idx];
             intercept_correction[idx] = rounded_intercept - reference_intercept;
-            twoscale_intercept_correction[idx] =
-                rounded_twoscale_intercept - reference_intercept;
+            twoscale_intercept_correction[idx] = rounded_twoscale_intercept - reference_intercept;
         }
     }
 
     let (scale_perm, scale_perm_single) = generate_scale_perms();
     let is_grouped = group_size < k;
-    let sperm: &[usize] = if is_grouped { &scale_perm } else { &scale_perm_single };
+    let sperm: &[usize] = if is_grouped {
+        &scale_perm
+    } else {
+        &scale_perm_single
+    };
     let perm_len = sperm.len();
     let total_scale_vals = num_groups_k * n;
     let num_scale_chunks = total_scale_vals / perm_len;
@@ -1251,12 +1333,21 @@ pub fn marlin_repack_hqq4_native_zp_prefill(
 ) -> Hqq4NativeZpMarlinPrefill {
     let t0 = std::time::Instant::now();
     assert!(group_size > 0, "group_size must be non-zero");
-    assert!(cols % group_size == 0, "cols ({cols}) must be divisible by group_size ({group_size})");
+    assert!(
+        cols % group_size == 0,
+        "cols ({cols}) must be divisible by group_size ({group_size})"
+    );
     assert_eq!(packed.len(), rows * cols / 2);
     assert_eq!(scales.len(), rows * (cols / group_size));
     assert_eq!(zeros.len(), scales.len());
-    assert!(cols % MARLIN_TILE == 0, "K ({cols}) must be divisible by {MARLIN_TILE}");
-    assert!(rows % 64 == 0, "N ({rows}) must be divisible by 64 (Marlin tile constraint)");
+    assert!(
+        cols % MARLIN_TILE == 0,
+        "K ({cols}) must be divisible by {MARLIN_TILE}"
+    );
+    assert!(
+        rows % 64 == 0,
+        "N ({rows}) must be divisible by 64 (Marlin tile constraint)"
+    );
 
     let n = rows;
     let k = cols;
@@ -1335,14 +1426,17 @@ pub fn marlin_repack_hqq4_native_zp_prefill(
                 bf16_to_f32(zero_bf16) * (scale_bf16_f32 + delta_scale_bf16_f32);
             let reference_intercept = zeros[idx] * scales[idx];
             intercept_correction[idx] = rounded_intercept - reference_intercept;
-            twoscale_intercept_correction[idx] =
-                rounded_twoscale_intercept - reference_intercept;
+            twoscale_intercept_correction[idx] = rounded_twoscale_intercept - reference_intercept;
         }
     }
 
     let (scale_perm, scale_perm_single) = generate_scale_perms();
     let is_grouped = group_size < k;
-    let sperm: &[usize] = if is_grouped { &scale_perm } else { &scale_perm_single };
+    let sperm: &[usize] = if is_grouped {
+        &scale_perm
+    } else {
+        &scale_perm_single
+    };
     let perm_len = sperm.len();
     let total_scale_vals = num_groups_k * n;
     let num_scale_chunks = total_scale_vals / perm_len;
@@ -1395,7 +1489,7 @@ pub fn dequantize_marlin_int8(m: &MarlinRepacked) -> Vec<f32> {
     let k_tiles = k / MARLIN_TILE;
     let row_len = n * MARLIN_TILE;
     let out_cols = row_len / PACK_FACTOR_INT8;
-    let num_groups_k = k / group_size;
+    let num_groups_k = scale_group_count(k, group_size);
 
     // Step 1: Unpack [K/16, 4*N] → [K/16, N*16] unsigned values
     let mut perm_applied = vec![0u8; k_tiles * row_len];
@@ -1441,7 +1535,11 @@ pub fn dequantize_marlin_int8(m: &MarlinRepacked) -> Vec<f32> {
     // Step 4: Invert scale permutation
     let (scale_perm, scale_perm_single) = generate_scale_perms();
     let is_grouped = group_size < k;
-    let sperm: &[usize] = if is_grouped { &scale_perm } else { &scale_perm_single };
+    let sperm: &[usize] = if is_grouped {
+        &scale_perm
+    } else {
+        &scale_perm_single
+    };
     let perm_len = sperm.len();
     let total_scale_vals = num_groups_k * n;
     let num_scale_chunks = total_scale_vals / perm_len;
@@ -1492,7 +1590,7 @@ mod tests {
         let q = quantize_int4(&bf16_data, rows, cols, group_size);
 
         assert_eq!(q.packed.len(), rows * cols / PACK_FACTOR);
-        assert_eq!(q.scales.len(), rows * (cols / group_size));
+        assert_eq!(q.scales.len(), rows * scale_group_count(cols, group_size));
 
         // Dequantize and check error
         let deq = dequantize_int4(&q);
@@ -1506,7 +1604,10 @@ mod tests {
         }
         let rmse = (sum_sq_err / bf16_data.len() as f64).sqrt();
 
-        eprintln!("Synthetic roundtrip: max_err={:.6}, rmse={:.6}", max_err, rmse);
+        eprintln!(
+            "Synthetic roundtrip: max_err={:.6}, rmse={:.6}",
+            max_err, rmse
+        );
         // INT4 with 16 levels over [-0.1, 0.1] → step ~0.013, max_err should be < step/2
         assert!(max_err < 0.02, "Max error too large: {max_err}");
     }
@@ -1627,9 +1728,7 @@ mod tests {
             max_diff = max_diff.max(diff);
         }
 
-        eprintln!(
-            "Marlin repack roundtrip {n}×{k}: max_diff={max_diff:.8} (should be 0.0)"
-        );
+        eprintln!("Marlin repack roundtrip {n}×{k}: max_diff={max_diff:.8} (should be 0.0)");
         assert!(
             max_diff == 0.0,
             "Marlin repack changed values! max_diff={max_diff}"
@@ -1690,7 +1789,10 @@ mod tests {
         let mut sorted = perm.to_vec();
         sorted.sort();
         for (i, &v) in sorted.iter().enumerate() {
-            assert_eq!(v, i, "INT8 perm: not a valid permutation, missing index {i}");
+            assert_eq!(
+                v, i,
+                "INT8 perm: not a valid permutation, missing index {i}"
+            );
         }
         eprintln!("INT8 weight perm: valid permutation of 0..1024 ✓");
     }
@@ -1730,9 +1832,7 @@ mod tests {
             max_diff = max_diff.max(diff);
         }
 
-        eprintln!(
-            "Marlin INT8 repack roundtrip {n}×{k}: max_diff={max_diff:.8} (should be 0.0)"
-        );
+        eprintln!("Marlin INT8 repack roundtrip {n}×{k}: max_diff={max_diff:.8} (should be 0.0)");
         assert!(
             max_diff == 0.0,
             "Marlin INT8 repack changed values! max_diff={max_diff}"
@@ -1810,9 +1910,8 @@ mod tests {
             }
         }
 
-        let hqq = marlin_repack_hqq8_symmetric_prefill(
-            &packed, &scales, &zeros, rows, cols, group_size,
-        );
+        let hqq =
+            marlin_repack_hqq8_symmetric_prefill(&packed, &scales, &zeros, rows, cols, group_size);
         assert_eq!(hqq.marlin.n, rows);
         assert_eq!(hqq.marlin.k, cols);
         assert_eq!(hqq.marlin.scales.len(), rows * groups);
@@ -1850,9 +1949,8 @@ mod tests {
             }
         }
 
-        let hqq = marlin_repack_hqq8_native_zp_prefill(
-            &packed, &scales, &zeros, rows, cols, group_size,
-        );
+        let hqq =
+            marlin_repack_hqq8_native_zp_prefill(&packed, &scales, &zeros, rows, cols, group_size);
         assert_eq!(hqq.marlin.n, rows);
         assert_eq!(hqq.marlin.k, cols);
         assert_eq!(hqq.marlin.scales.len(), rows * groups);
@@ -1918,7 +2016,9 @@ mod tests {
     #[test]
     fn test_marlin_attention_shapes_qcn() {
         // Use the safetensors file that contains GQA layer 11
-        let path = Path::new("/home/main/.krasis/models/Qwen3-Coder-Next/model-00010-of-00040.safetensors");
+        let path = Path::new(
+            "/home/main/.krasis/models/Qwen3-Coder-Next/model-00010-of-00040.safetensors",
+        );
         if !path.exists() {
             eprintln!("Skipping — QCN model not downloaded");
             return;
@@ -1966,7 +2066,10 @@ mod tests {
             let rms_orig = (sum_sq_orig / (n * k) as f64).sqrt();
             let snr4 = 20.0 * (rms_orig / rmse4).log10();
 
-            assert!(max_diff4 == 0.0, "INT4 Marlin repack changed values for {tensor_name}! max_diff={max_diff4}");
+            assert!(
+                max_diff4 == 0.0,
+                "INT4 Marlin repack changed values for {tensor_name}! max_diff={max_diff4}"
+            );
 
             // === INT8 ===
             let q8 = quantize_int8(bf16_data, n, k, DEFAULT_GROUP_SIZE);
@@ -1986,7 +2089,10 @@ mod tests {
             let rmse8 = (sum_sq_err8 / (n * k) as f64).sqrt();
             let snr8 = 20.0 * (rms_orig / rmse8).log10();
 
-            assert!(max_diff8 == 0.0, "INT8 Marlin repack changed values for {tensor_name}! max_diff={max_diff8}");
+            assert!(
+                max_diff8 == 0.0,
+                "INT8 Marlin repack changed values for {tensor_name}! max_diff={max_diff8}"
+            );
 
             eprintln!(
                 "  {tensor_name} [{n}x{k}]: INT4 SNR={snr4:.1}dB  INT8 SNR={snr8:.1}dB  repack OK",
@@ -1997,7 +2103,8 @@ mod tests {
     /// Phase 0: also test with Q235 attention shapes (different dimensions)
     #[test]
     fn test_marlin_attention_shapes_q235() {
-        let path = Path::new("/home/main/.krasis/models/Qwen3-235B-A22B/model-00001-of-00197.safetensors");
+        let path =
+            Path::new("/home/main/.krasis/models/Qwen3-235B-A22B/model-00001-of-00197.safetensors");
         if !path.exists() {
             eprintln!("Skipping — Q235 model not downloaded");
             return;
@@ -2035,7 +2142,10 @@ mod tests {
             for i in 0..(n * k) {
                 max_diff4 = max_diff4.max((deq4_ours[i] - deq4_marlin[i]).abs());
             }
-            assert!(max_diff4 == 0.0, "INT4 repack error for {tensor_name}: {max_diff4}");
+            assert!(
+                max_diff4 == 0.0,
+                "INT4 repack error for {tensor_name}: {max_diff4}"
+            );
 
             // INT8
             let q8 = quantize_int8(bf16_data, n, k, DEFAULT_GROUP_SIZE);
@@ -2047,7 +2157,10 @@ mod tests {
             for i in 0..(n * k) {
                 max_diff8 = max_diff8.max((deq8_ours[i] - deq8_marlin[i]).abs());
             }
-            assert!(max_diff8 == 0.0, "INT8 repack error for {tensor_name}: {max_diff8}");
+            assert!(
+                max_diff8 == 0.0,
+                "INT8 repack error for {tensor_name}: {max_diff8}"
+            );
 
             eprintln!("  {tensor_name} [{n}x{k}]: INT4+INT8 Marlin repack OK");
         }

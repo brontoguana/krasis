@@ -1,0 +1,15 @@
+check	status	detail
+summary_json_assertion	pass	status closed_reuse_failed_before_ready; requests 0; READY false; cache write true; g64 header 64
+runtime_tsv_assertion	pass	hqq_attention_reused=true; cache_write_detected=true; requests_sent=0; effective_marlin_g64_loaded=false
+server_log_hqq_attention	pass	HQQ attention artifacts validated line present
+server_log_cache_write	pass	Building GPU INT4 Marlin expert cache line present
+server_log_no_requests	pass	reference_test matches 0
+server_log_no_ready	pass	KRASIS SERVER READY matches 0
+g128_tmp_removed	pass	experts_marlin_int4_g128_calamax.bin.tmp absent after cleanup
+g128_lock_removed	pass	experts_marlin_int4_g128_calamax.bin.lock absent after cleanup
+effective_g64_present	pass	experts_marlin_int4_g64_calamax.bin present
+bash_syntax	pass	bash -n dev
+diff_check_krasis	pass	git diff --check
+diff_check_internal	pass	git diff --check
+protected_config_status	pass	only tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf plus known pre-existing Nano BF16 config status
+cleanup_idle	pass	2026-06-27T17:40:30Z no tmux server, no matching runtime/request process, no NVIDIA compute process, GPUs 15 MB / 11 MB, disk 589G, RAM 967Gi, no cache temp/lock files

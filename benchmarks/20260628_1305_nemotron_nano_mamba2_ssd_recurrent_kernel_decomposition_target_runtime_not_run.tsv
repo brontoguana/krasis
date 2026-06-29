@@ -1,0 +1,6 @@
+action	status	reason
+build	not_run	Existing instrumentation cannot split recurrent-kernel internals; this gate records the minimum timing-only change instead of modifying source.
+startup_diagnostic	not_run	Running current envs would repeat the 1242 aggregate recurrent total without subloop attribution.
+requests	not_run	Out of scope by gate constraint.
+speed_benchmark	not_run	Out of scope by gate constraint.
+decode_hcs	not_run	Out of scope by gate constraint.

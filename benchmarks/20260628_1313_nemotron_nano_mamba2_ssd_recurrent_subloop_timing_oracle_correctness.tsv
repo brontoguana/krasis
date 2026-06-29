@@ -1,0 +1,2 @@
+scope	tokens	oracle_records	passed_records	output_mismatches	state_mismatches	probe_mismatches	row97_head48_d24	row64_state0	row82_state14
+small_full_oracle	256	69	69	0	0	0	exact	exact	exact

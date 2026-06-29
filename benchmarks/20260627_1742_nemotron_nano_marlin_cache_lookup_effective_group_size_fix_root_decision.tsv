@@ -1,0 +1,6 @@
+decision	status	details
+source_fix	accepted	Startup Marlin cache lookup now derives the same effective group size as the builder before choosing cache_path_marlin
+reuse_check	passed	Normal startup reached READY using existing HQQ attention cache and effective Marlin g64 cache
+smoke_unblocked	yes	Cache reuse prerequisite is now clean for a following no-cache-generation smoke gate
+remaining_caveat	recorded	Python UI phase header still says "Building GPU INT4 Marlin expert cache" even when the runtime loads an existing cache; actual safetensors write line was absent
+requests_sent	none	No smoke/reference-test requests were sent in this source-fix gate

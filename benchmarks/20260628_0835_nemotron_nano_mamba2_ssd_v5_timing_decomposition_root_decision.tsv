@@ -1,0 +1,6 @@
+finding	evidence	decision
+correctness_remained_exact	207 v5 oracle records across token groups 35,39,40,46,47,50,300,500,39920; all failed=0 and output/state mismatches=0	component timing data is valid for this diagnostic gate
+long_path_dominated_by_double_kernel_execution	39920-token decomposition: sequential_oracle 114292.932890ms and v5_candidate 114293.155150ms out of ssd_scan 251443.8ms	v5 timing regression is primarily expected oracle-plus-candidate duplication, not commit copies
+host_download_and_compare_are_secondary_but_material	39920-token downloads 9043.142551ms and host comparison 12390.200665ms, together 21433.343216ms	remove full host comparison/downloads before treating v5 as an optimization benchmark
+commit_copies_are_negligible	39920-token commit copies 11.745775ms, 0.004671 percent of ssd_scan	commit copies are not the performance bottleneck
+v5_not_production_enabled	default path unchanged and v5 requires explicit envs; startup was stopped after READY with no requests	keep v5 as correctness/timing diagnostic seed only

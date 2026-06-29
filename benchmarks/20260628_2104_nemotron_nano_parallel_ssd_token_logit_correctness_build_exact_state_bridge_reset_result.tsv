@@ -1,0 +1,2 @@
+artifact	status	exit_code	duration_s	error	notes
+build_exact_state_bridge_reset	fail_compile	1	14	E0599_initial_state_option_device_ptr	initial reset patch used initial_state as a GpuBuf while it was still Option; fixed by allocating initial_state for parallel chunked mode and unwrapping explicitly

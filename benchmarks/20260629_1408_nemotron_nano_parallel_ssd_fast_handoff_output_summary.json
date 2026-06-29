@@ -1,0 +1,94 @@
+{
+  "gate": "20260629_1408_nemotron_nano_parallel_ssd_fast_handoff_output",
+  "status": "closed",
+  "opened_utc": "2026-06-29T14:08:19Z",
+  "closed_utc": "2026-06-29T14:47:52Z",
+  "scope": "Fix the guarded Nano parallel chunked SSD architecture by removing the exact recurrent bridge and replacing the slow corrected output replay with a fast true chunked handoff/output path.",
+  "baseline_models": {
+    "gemma": "5619.6 / 92.43 / 155.69",
+    "nano": "346.5 / 94.48 / 164.75"
+  },
+  "record_first_from": "20260629_1038_nemotron_nano_parallel_ssd_corrected_remeasure",
+  "carry_forward_1038_long_39920_avg_ms": {
+    "total_candidate": 9827.873,
+    "output_kernel": 9075.657,
+    "recurrent_total": 735.99,
+    "exact_state_bridge": 723.448,
+    "chunk_cumsum": 0.04,
+    "chunk_state": 10.705,
+    "state_passing": 1.783
+  },
+  "guard": "KRASIS_MAMBA2_SSD_PARALLEL_CHUNKED=1 with existing block-scan, coeff-tile, candidate-timing, and startup-diagnostic guards",
+  "implementation_result": {
+    "default_sequential_ssd_changed": false,
+    "production_enabled": false,
+    "decode_hcs_changed": false,
+    "exact_recurrent_bridge_removed_from_fast_path": true,
+    "output_replay_removed_from_fast_path": true,
+    "active_state_source": "parallel_chunked_state_passing",
+    "accepted_output_kernel": "mamba2_ssd_parallel_chunk_scan_output_kernel"
+  },
+  "build_results": {
+    "build1_exit": 0,
+    "build1_duration_s": 179,
+    "build2_exit": 0,
+    "build2_duration_s": 174,
+    "build2_note": "Maturin command exited 0 but nvcc compile failed and prefill kernels were disabled; runtime follow-up failed closed before warmup.",
+    "build3_exit": 0,
+    "build3_duration_s": 181,
+    "build3_prefill_ptx_compiled": true
+  },
+  "correctness_results": {
+    "old_serial_oracle_status": "diagnostic_mismatch_after_bridge_removal",
+    "old_serial_oracle_best_output_mismatches": 56,
+    "old_serial_oracle_note": "Remaining old-oracle mismatches are BF16 boundary-level after replacing the bridge; serial internal-state identity is diagnostic for this parallel architecture.",
+    "token_logit_reference_status": "pass",
+    "token_logit_http_status": 200,
+    "first_token_id": 1044,
+    "first_token_text": ",",
+    "tracked_toplogprobs": 12,
+    "serial_vs_fast_max_delta": 0.0,
+    "control_vs_fast_max_delta": 0.0
+  },
+  "long_39920_runtime": {
+    "command": "./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+    "exit": 0,
+    "duration_s": 61,
+    "oracle_records": 0,
+    "subloop_records": 0,
+    "request_records": 0,
+    "long_records": 23,
+    "prefill_s": 17.99,
+    "prefill_tok_s": 2219.4,
+    "decode_s": 2.81,
+    "decode_tok_s": 11.4,
+    "vram_baseline_mb": 23714,
+    "vram_prefill_min_mb": 7694,
+    "long_prefill_transient_delta_mb": 16020
+  },
+  "long_39920_avg_ms": {
+    "total_candidate": 656.021773,
+    "output_kernel": 627.435713,
+    "recurrent_total": 12.637921,
+    "exact_state_bridge": 0.0,
+    "chunk_cumsum": 0.156404,
+    "chunk_state": 10.697588,
+    "state_passing": 1.782629,
+    "buffer_alloc_zeroed": 1.370917,
+    "live_to_candidate_state_copy": 0.576037,
+    "commit_copies": 0.418457,
+    "residual": 13.58269
+  },
+  "comparison_vs_1038": {
+    "total_candidate_delta_ms": -9171.851,
+    "total_candidate_percent_change": -93.3,
+    "output_kernel_delta_ms": -8448.221,
+    "output_kernel_percent_change": -93.1,
+    "recurrent_total_delta_ms": -723.352,
+    "recurrent_total_percent_change": -98.3,
+    "exact_state_bridge_delta_ms": -723.448,
+    "exact_state_bridge_percent_change": -100.0
+  },
+  "decision": "Guarded fast handoff/output path is token/logit correct and removes the corrected scaffold cost. It is not production-enabled; output remains the next measured bottleneck.",
+  "next_target": "Decompose and optimize the output/chunk-scan kernel, currently 627.436ms of the 656.022ms long candidate path."
+}

@@ -1,0 +1,17 @@
+metric	value
+recorded_utc	2026-06-27T08:17:09Z
+disk_filesystem	/dev/nvme1n1p1
+disk_size_bytes	12001220059136
+disk_used_bytes	11268116283392
+disk_available_bytes	729408569344
+disk_use_percent	94%
+ram_total_bytes	1082021437440
+ram_used_bytes	47922790400
+ram_free_bytes	847713189888
+ram_available_bytes	1034098647040
+gpu0_memory_used_mb	15
+gpu0_memory_free_mb	32105
+gpu0_utilization_percent	0
+gpu1_memory_used_mb	11
+gpu1_memory_free_mb	20043
+gpu1_utilization_percent	0

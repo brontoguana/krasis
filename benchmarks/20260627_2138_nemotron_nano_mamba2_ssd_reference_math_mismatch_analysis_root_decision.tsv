@@ -1,0 +1,11 @@
+field	value
+gate	20260627_2138_nemotron_nano_mamba2_ssd_reference_math_mismatch_analysis
+status	corrected_design_recorded
+implementation_in_this_gate	false
+benchmarks_or_requests	false
+concrete_design	Replace the previous four-stage shortcut with chunk_cumsum, chunk_state, state_passing, cb_matrix, chunk_scan_output, final_state_commit, and mandatory sequential-oracle comparison.
+primary_2039_design_gap	Missing explicit chunk_state plus state_passing and entry_states scratch; direct in-place per-chunk output/state ordering is not equivalent to the vendored/reference SSD pipeline.
+first_output_mismatch_domain	local_triangular_output inside chunk 0, not cross-chunk carry.
+exact_2039_line_known	false
+exact_unknown	Candidate intermediates were not captured before cleanup, so the exact removed line responsible for t=70/head=37/d=50 output mismatch cannot be proven statically.
+next_minimal_gate	Implement only the corrected gated design with mandatory small oracle and first-mismatch intermediate diagnostics; stop on any mismatch before long timing.

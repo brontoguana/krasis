@@ -1,0 +1,68 @@
+{
+  "gate": "20260627_1227_nemotron_nano_projection_request_scoping_fix",
+  "status": "closed",
+  "opened_utc": "2026-06-27T12:27:41Z",
+  "closed_utc": "2026-06-27T12:40:01Z",
+  "record_first": {
+    "source_gate": "20260627_1216_nemotron_nano_first_token_margin_projection_diagnostic_run",
+    "result": "blocked_fail_closed_before_requests",
+    "failure_phase": "startup_vram_calibration_short_probe",
+    "fail_closed_error": "KRASIS_FIRST_TOKEN_MARGIN_PROJECTION_DIAG requires debug_reference_trace=true",
+    "request_count": 0,
+    "projection_trace_emitted": false,
+    "hqq6_g64_run": false
+  },
+  "implementation": {
+    "result": "request_scoping_fixed",
+    "production_behavior_changed": false,
+    "live_diagnostic_rerun": false,
+    "server_or_request_scope": "PrefillEngine projection target parsing is disabled unless the Rust /v1/internal/reference_test handler explicitly enables the per-request projection scope.",
+    "startup_calibration_behavior": "Python startup warmup/calibration use the PyO3 rust_prefill_tokens bridge and never enable the projection request scope, so projection env no longer trips non-request prefill.",
+    "reference_test_fail_closed": "The Rust fail-closed debug_reference_trace=true requirement is preserved when /v1/internal/reference_test enables the projection request scope and the projection env is set.",
+    "clearing": "The reference-test handler clears projection request scope on trace setup failure and immediately after prefill before result handling."
+  },
+  "focused_tests": {
+    "startup_non_request_prefill_not_tripping_projection": "passed",
+    "reference_test_missing_debug_fails_closed": "passed",
+    "debug_enabled_projection_still_emits_trace_target": "passed",
+    "test_kernels_expert_hqq": {
+      "passed": 104,
+      "failed": 0,
+      "log": "benchmarks/20260627_1227_nemotron_nano_projection_request_scoping_fix_test_kernels.log"
+    }
+  },
+  "validation": {
+    "build": {
+      "status": "passed",
+      "log": "benchmarks/20260627_1227_nemotron_nano_projection_request_scoping_fix_build.log"
+    },
+    "bash_n_dev": "passed",
+    "git_diff_check_krasis": "passed",
+    "git_diff_check_internal": "passed",
+    "protected_config_check": "passed_known_untracked_tests_nemotron_nano_bf16_experts_a16_conf",
+    "cargo_fmt_check": "not_run_raw_cargo_unavailable_in_outer_shell",
+    "cleanup": "passed"
+  },
+  "forbidden_scope": {
+    "live_diagnostic_rerun": false,
+    "cache_generation": false,
+    "HQQ8": false,
+    "new_variants": false,
+    "production_enablement": false,
+    "speed_benchmark": false,
+    "decode_HCS": false,
+    "selected_expert_retargeting": false
+  },
+  "final_state": {
+    "timestamp_utc": "2026-06-27T12:42:08Z",
+    "tmux_server": "none",
+    "matching_runtime_generator_build_processes": "none",
+    "nvidia_compute_processes": "none",
+    "gpu_memory_used_mb": {
+      "gpu0": 15,
+      "gpu1": 11
+    },
+    "disk_available": "614G",
+    "ram_available": "965Gi"
+  }
+}

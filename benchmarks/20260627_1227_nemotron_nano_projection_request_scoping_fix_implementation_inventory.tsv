@@ -1,0 +1,7 @@
+component	change	scope
+gpu_prefill.rs:first_token_margin_projection_target_for_scope	Added request-scope gate before parsing projection env; non-request prefill returns None even when env is set.	diagnostic-only projection activation
+gpu_prefill.rs:first_token_margin_projection_target_for_scope	Preserved fail-closed error when request scope is enabled, projection env is set, and debug_reference_trace is false.	reference-test diagnostic requests
+gpu_prefill.rs:PrefillEngine	Added first_token_margin_projection_request_enabled plus setter that clears projection layer deltas when disabled.	request-scoped state
+server.rs:/v1/internal/reference_test	Enabled projection request scope only around reference-test prefill and cleared it on setup failure and after prefill.	server/request scoped enable-clear
+gpu_decode.rs:PrefillEngine init	Initialized projection request scope to false.	startup/non-request default
+gpu_prefill.rs:tests	Added focused tests for non-request suppression, missing-debug fail-closed behavior, and debug-enabled target parsing; existing projection JSON test still proves emitted trace shape.	focused test coverage

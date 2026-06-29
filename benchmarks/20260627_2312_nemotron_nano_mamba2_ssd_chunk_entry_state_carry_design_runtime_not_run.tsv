@@ -1,0 +1,10 @@
+item	value
+runtime_command_run	no
+build_run	no
+benchmark_run	no
+request_sent	no
+cache_generation	no
+decode_hcs_change	no
+production_enablement	no
+source_implementation_change	no
+reason	static design gate; existing 2251 diagnostics were sufficient and no tiny guarded diagnostic was needed

@@ -1,0 +1,11 @@
+check	result	evidence
+summary_closed	pass	status=closed validation.passed=true
+static_only	pass	no implementation/build/startup/benchmark/request/decode/HCS/default-path change
+artifact_shapes	pass	source_audit/buffer/lifecycle/probe/oracle/runtime-not-run TSVs present
+runtime_artifacts_absent	pass	no `20260628_0802` build/startup/runtime-attempt artifacts
+v5_source_markers_absent	pass	no `KRASIS_MAMBA2_SSD_CHUNK_PARALLEL_V5` or v5 kernel/source markers
+diff_whitespace	pass	`git diff --check` passed in `krasis-nemotron-dev` and `krasis-internal`
+shell_syntax	pass	`bash -n dev` passed
+protected_config_status	pass	only expected tests-only Nano configs are untracked
+temp_lock_files	pass	no Nano Krasis temp/lock files outside HF download metadata
+idle_state	pass	final snapshot 2026-06-28T08:08:37Z; no tmux/runtime/build/GPU compute process; GPUs 15 MB / 11 MB

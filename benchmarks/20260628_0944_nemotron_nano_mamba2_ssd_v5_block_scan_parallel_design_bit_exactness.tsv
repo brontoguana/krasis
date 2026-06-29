@@ -1,0 +1,7 @@
+claim	status	reason
+unchanged_local_output_math	required	Local triangular output has already been validated separately; changing it risks recreating earlier mismatches.
+accepted_state_not_affine_summary	required	Closed-form/affine summaries changed f32 rounding order in earlier gates, so they cannot feed accepted state without a separate proof.
+exact_entry_bits_maintained	possible_if_block_entry_replays_tokens_in_order	Each block entry/exit is produced by the same per-token CUDA operation order as v5: `A_bar*h + BF16(B*dt)*x` in f32.
+parallelism_source	output_and_coefficients_parallelized_around_serial_spine	The irreducible exact dependency is chunk-to-chunk state. The plan moves coefficient/local/output work out of the serial spine instead of reordering f32 state updates.
+block_scan_limit	explicit	A compact P/Q prefix scan is not accepted as bit-exact for arbitrary nonzero state because f32 recurrence rounding is not associative.
+first_prototype_expectation	correctness_before_speed	The first prototype should prove exactness and decompose state-propagation versus local-output timing before any speed benchmark.

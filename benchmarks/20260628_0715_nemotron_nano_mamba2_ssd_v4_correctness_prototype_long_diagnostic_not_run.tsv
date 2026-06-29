@@ -1,0 +1,6 @@
+reason	value
+full_oracle_passed	false
+long_startup_diagnostic_run	false
+why	v4 correctness oracle failed during the smallest startup diagnostic, so the gate stopped before timing
+speed_benchmark_run	false
+requests_run	false

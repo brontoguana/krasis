@@ -1,0 +1,2 @@
+artifact	status	exit_code	duration_s	first_bad_layer	output_mismatches	output_max_abs	output_mean_abs	state_mismatches	state_max_abs	state_mean_abs	first_output_row	first_output_head	first_output_d	first_output_candidate	first_output_oracle	notes
+small_oracle_42_parallel_initial_snapshot	fail_output_only	1	35	2	1	0.00390625	0.000000022706531	0	0.0	0.0	28	42	50	0xbf69	0xbf6a	layer0 exact; initial-state reset fixed final state, remaining mismatch is output reconstruction only

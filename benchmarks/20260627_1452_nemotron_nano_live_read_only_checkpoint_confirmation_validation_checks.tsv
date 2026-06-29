@@ -1,0 +1,26 @@
+check	status	detail
+record_first	pass	1426 support result recorded before live run
+scope	pass	HQQ6 g32 case 0 only, existing g32 cache/spec, endpoint /v1/internal/reference_test
+request_debug_trace	pass	saved case-0 request includes debug_reference_trace=true
+runtime_http	pass	HTTP 200, time_total=45.388963s, response_bytes=5241220
+selected_token	pass	selected token 1044 comma
+projection_trace	pass	debug_reference_trace.prefill_stage_trace.first_token_margin_projection present
+checkpoint_trace	pass	debug_reference_trace.prefill_stage_trace.read_only_checkpoints present
+pre_post_hashes	pass	23/23 layer-delta checkpoints match
+mutation_point	pass	no checkpoint mismatch and no route/top-k/gather/final-hidden mutation point exposed
+g64_not_run	pass	no HQQ6 g64 run in this gate
+cache_generation	pass	no cache generation
+new_variants	pass	no new variants
+production_enablement	pass	no production HQQ enablement
+speed_benchmark	pass	no benchmark
+decode_hcs	pass	no decode/HCS changes
+cleanup_warning	resolved	initial ./dev kill reported zombie/GPU-reset warning; follow-up state clean
+final_state	pass	no tmux server, no matching runtime/curl/generator process, no NVIDIA compute process, GPUs 15 MB / 11 MB
+json_summary	pass	jq summary assertion passed
+checkpoint_summary	pass	TSV checkpoint summary assertion passed
+checkpoint_layer_hashes	pass	all layer pre_post_match values true
+bash_syntax	pass	bash -n dev
+diff_check_krasis	pass	git diff --check
+diff_check_internal	pass	git diff --check in krasis-internal
+protected_config_check	pass	only known untracked tests/nemotron-nano-bf16-experts-a16.conf
+final_snapshot	pass	2026-06-27T15:13:26Z; disk 613G; RAM 965Gi; GPUs 15 MB / 11 MB

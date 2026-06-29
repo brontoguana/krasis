@@ -1,0 +1,11 @@
+item	status	path	line	evidence
+cuda_v3_kernel_removed	pass	src/cuda/prefill_kernels.cu	0	no mamba2_ssd_chunk_entry_v3 marker remains
+rust_v3_gate_removed	pass	src/gpu_prefill.rs	0	no KRASIS_MAMBA2_SSD_CHUNK_PARALLEL_V3 marker remains
+rust_v3_dispatch_removed	pass	src/gpu_prefill.rs	0	no MAMBA2-SSD-CHUNK-V3 marker remains
+python_v3_warmup_removed	pass	python/krasis/server.py	1739	warmup handling is generic warning/continue again
+sequential_ssd_kernel_preserved	pass	src/cuda/prefill_kernels.cu	4968	mamba2_ssd_sequential_kernel remains
+sequential_ssd_wrapper_preserved	pass	src/cuda/prefill_kernels.cu	5530	krasis_mamba2_ssd_fwd launches sequential kernel
+sequential_dispatch_preserved	pass	src/gpu_prefill.rs	30872	default dispatch calls self.kernels.mamba2_ssd
+local_tri_diagnostic_preserved	pass	src/gpu_prefill.rs	16199	mamba2_ssd_local_tri_oracle_target remains
+state_flat_diagnostic_preserved	pass	src/gpu_prefill.rs	16242	KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE_STATE_FLAT remains
+substage_timing_preserved	pass	src/gpu_prefill.rs	31763	mamba2_substages timing print remains

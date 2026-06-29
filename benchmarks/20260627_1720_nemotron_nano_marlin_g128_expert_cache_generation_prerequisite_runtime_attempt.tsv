@@ -1,0 +1,12 @@
+field	value
+tmux_session	nano_marlin_g128_gen
+server_log	benchmarks/20260627_1720_nemotron_nano_marlin_g128_expert_cache_generation_prerequisite_cache_generation.log
+exit_file	benchmarks/20260627_1720_nemotron_nano_marlin_g128_expert_cache_generation_prerequisite_cache_generation.exit
+exit_code	0
+mode	build-cache
+smoke_requests_sent	0
+reference_test_log_matches	0
+server_ready_log_matches	0
+force_rebuild_hqq_cache	false
+force_rebuild_marlin_cache	false
+attribution_checkpoint_envs	unset

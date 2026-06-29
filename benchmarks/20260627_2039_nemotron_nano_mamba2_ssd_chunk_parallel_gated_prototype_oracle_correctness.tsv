@@ -1,0 +1,14 @@
+field	value
+gate	20260627_2039_nemotron_nano_mamba2_ssd_chunk_parallel_gated_prototype
+result	fail_closed
+layer	0
+tokens	256
+output_mismatches	27
+output_max_abs	2.000000000
+output_mean_abs	0.000003399
+output_first_mismatch	289138
+state_mismatches	134008
+state_max_abs	0.000366211
+state_mean_abs	0.000000023
+state_first_mismatch	14
+oracle_line	[MAMBA2-SSD-CHUNK-ORACLE] layer=0 tokens=256 output_mismatches=27 output_max_abs=2.000000000 output_mean_abs=0.000003399 output_first_mismatch=289138 state_mismatches=134008 state_max_abs=0.000366211 state_mean_abs=0.000000023 state_first_mismatch=14

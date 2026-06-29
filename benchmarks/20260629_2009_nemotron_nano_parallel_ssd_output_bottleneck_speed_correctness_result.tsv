@@ -1,0 +1,6 @@
+check	result	detail
+selected_token_smoke	PASS	1044/,/261.4/12
+precompute_cb_vs_unroll_topk	DIAGNOSTIC	max_delta=0.114579 rank_diffs=4 rows=12
+separate_process_topk_noise	KNOWN	control_vs_control_max_delta=0.126997 rank_diffs=3
+state_split_branch	REJECTED	slower at 462-token candidate timing and not promoted
+reference_test_setup_error	RECORDED	first unroll request returned 404 because server lacked --test-endpoints

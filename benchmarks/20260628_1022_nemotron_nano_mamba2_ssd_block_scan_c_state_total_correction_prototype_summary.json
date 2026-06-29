@@ -1,0 +1,108 @@
+{
+  "artifacts": {
+    "build_result": "20260628_1022_nemotron_nano_mamba2_ssd_block_scan_c_state_total_correction_prototype_build_result.tsv",
+    "component_timing": "20260628_1022_nemotron_nano_mamba2_ssd_block_scan_c_state_total_correction_prototype_component_timing.tsv",
+    "oracle_correctness": "20260628_1022_nemotron_nano_mamba2_ssd_block_scan_c_state_total_correction_prototype_oracle_correctness.tsv",
+    "root_decision": "20260628_1022_nemotron_nano_mamba2_ssd_block_scan_c_state_total_correction_prototype_root_decision.tsv",
+    "runtime_attempt": "20260628_1022_nemotron_nano_mamba2_ssd_block_scan_c_state_total_correction_prototype_runtime_attempt.tsv",
+    "source_artifacts": "20260628_1022_nemotron_nano_mamba2_ssd_block_scan_c_state_total_correction_prototype_source_artifacts.tsv",
+    "startup_cache_validation": "20260628_1022_nemotron_nano_mamba2_ssd_block_scan_c_state_total_correction_prototype_startup_cache_validation.tsv",
+    "term_probe": "20260628_1022_nemotron_nano_mamba2_ssd_block_scan_c_state_total_correction_prototype_term_probe.tsv",
+    "validation": "20260628_1022_nemotron_nano_mamba2_ssd_block_scan_c_state_total_correction_prototype_validation_checks.tsv"
+  },
+  "constraints": {
+    "decode_hcs_changes": false,
+    "default_path_change": false,
+    "production_enablement": false,
+    "requests": false,
+    "speed_benchmark": false
+  },
+  "gate": "20260628_1022_nemotron_nano_mamba2_ssd_block_scan_c_state_total_correction_prototype",
+  "opened_utc": "2026-06-28T10:22:00Z",
+  "record_first": {
+    "1014_result": {
+      "correction_plan": "materialize c_state_total_exact in the exact recurrent phase and feed it to block-scan output assembly",
+      "first_output_mismatch": {
+        "abs_error": 0.25,
+        "candidate_bits": "0xc233",
+        "candidate_value": -44.75,
+        "d": 24,
+        "flat": 400408,
+        "head": 48,
+        "oracle_bits": "0xc234",
+        "oracle_value": -45.0,
+        "row": 97
+      },
+      "output_mismatches": 3,
+      "row64_state0_probe": "exact",
+      "row82_state14_probe": "exact",
+      "state_mismatches": 0,
+      "static_attribution": "output assembly recomputed c_state_total from entry_state before local_old_state cancellation"
+    },
+    "gemma_baseline": {
+      "internal_decode_tok_s": 92.43,
+      "network_tok_s": 155.69,
+      "prefill_tok_s": 5619.6
+    },
+    "nano_baseline": {
+      "internal_decode_tok_s": 94.48,
+      "network_tok_s": 164.75,
+      "prefill_tok_s": 346.5
+    },
+    "source_gate": "20260628_1014_nemotron_nano_mamba2_ssd_0957_block_scan_output_mismatch_analysis"
+  },
+  "result": {
+    "build": {
+      "duration_s": 178,
+      "exit": 0
+    },
+    "correctness": {
+      "long_oracle_records": 69,
+      "long_output_mismatches": 0,
+      "long_state_mismatches": 0,
+      "small_oracle_records": 69,
+      "small_output_mismatches": 0,
+      "small_state_mismatches": 0,
+      "status": "passed_exact"
+    },
+    "long_startup_diagnostic": {
+      "decode_s": 2.87,
+      "decode_tok_s": 11.2,
+      "exit": 0,
+      "prefill_s": 256.73,
+      "prefill_tok_s": 155.5,
+      "tokens": 39920
+    },
+    "status": "correctness_passed_timing_collected",
+    "term_probe": {
+      "long_records": 69,
+      "long_target": {
+        "d": 24,
+        "flat": 400408,
+        "head": 48,
+        "row": 97
+      },
+      "max_abs_c_state_total_exact_minus_replayed": 0.000003814697265625,
+      "matches": 69
+    },
+    "timing_ms": {
+      "long_component_layers": 23,
+      "total_block_scan_path": 253940.599995,
+      "sequential_oracle_kernel": 114284.518733,
+      "block_scan_recurrent_kernel": 16487.771138,
+      "block_scan_output_kernel": 100060.325232,
+      "full_buffer_downloads": 9055.823995,
+      "host_comparison": 12359.669588,
+      "commit_copies": 11.014996,
+      "state_snapshot_copies": 306.799563,
+      "buffer_alloc_zeroed": 22.977102,
+      "residual": 1351.699648
+    }
+  },
+  "scope": "opt_in_block_scan_c_state_total_correction_prototype",
+  "status": "closed",
+  "validation": {
+    "final_snapshot_utc": "2026-06-28T10:46:16Z",
+    "passed": true
+  }
+}

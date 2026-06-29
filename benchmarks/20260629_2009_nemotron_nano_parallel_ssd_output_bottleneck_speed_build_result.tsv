@@ -1,0 +1,6 @@
+build	exit	duration_s	artifact	note
+build1	0	180	20260629_2009_nemotron_nano_parallel_ssd_output_bottleneck_speed_build1.log	state-split initial candidate
+build2	0	179	20260629_2009_nemotron_nano_parallel_ssd_output_bottleneck_speed_build2.log	state-split exact-prior candidate
+build3	0	180	20260629_2009_nemotron_nano_parallel_ssd_output_bottleneck_speed_build3.log	state-split exact-loops candidate
+build4	0	181	20260629_2009_nemotron_nano_parallel_ssd_output_bottleneck_speed_build4.log	precompute-CB candidate
+build5	0	181	20260629_2009_nemotron_nano_parallel_ssd_output_bottleneck_speed_build5.log	precompute-CB ordered-unroll candidate

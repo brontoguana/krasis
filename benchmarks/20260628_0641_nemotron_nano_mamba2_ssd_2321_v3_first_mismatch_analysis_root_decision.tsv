@@ -1,0 +1,5 @@
+decision	result	evidence	next_action
+row64_attribution	static_direct_cause_is_chunk_entry_prior_path	First output mismatch is row64 chunk_idx1 chunk_pos0. Final-state commit cannot affect row output. Reference chunk_scan reads entry_state[chunk] for prior term.	Build v4 probes around entry_state1/prior before another candidate timing run.
+underlying_suspect	chunk_state0_accumulation_cast_order	Startup initial state is expected zero, making exp(dA_last0)*initial unlikely. Sequential oracle casts BF16(B*dt) before recurrence; vendored chunk_state casts BF16(B*exp_decay*dt).	Implement v4 chunk_state in sequential-oracle-compatible form and add a cast-order A/B probe.
+not_proven	exact_removed_v3_faulty_line	v3 source was reverted and 2321 artifacts lack row64 prior/local/D and flat0 chunk_state intermediate values.	Do not claim exact code-line proof; require v4 first-mismatch component dump before cleanup.
+runtime_needed	no	Current preserved diagnostics can only inspect sequential path; they cannot reconstruct removed v3 candidate internals.	No runtime diagnostic in this static gate.

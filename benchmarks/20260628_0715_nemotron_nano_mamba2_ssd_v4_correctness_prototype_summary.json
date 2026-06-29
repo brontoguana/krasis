@@ -1,0 +1,130 @@
+{
+  "gate": "20260628_0715_nemotron_nano_mamba2_ssd_v4_correctness_prototype",
+  "status": "closed",
+  "opened_utc": "2026-06-28T07:15:00Z",
+  "closed_utc": "2026-06-28T07:35:19Z",
+  "scope": "opt_in_v4_correctness_prototype",
+  "record_first": {
+    "source_gate": "20260628_0650_nemotron_nano_mamba2_ssd_v4_cast_carry_diagnostic",
+    "gemma_baseline": {
+      "prefill_tok_s": 5619.6,
+      "internal_decode_tok_s": 92.43,
+      "network_tok_s": 155.69
+    },
+    "nano_baseline": {
+      "prefill_tok_s": 346.5,
+      "internal_decode_tok_s": 94.48,
+      "network_tok_s": 164.75
+    },
+    "0650_result": {
+      "default_ssd_path_changed": false,
+      "optimized_path_added": false,
+      "build_exit": 0,
+      "startup_diagnostic_exit": 0,
+      "cache_reuse_clean": true,
+      "sequential_cast": "exp_decay * BF16(B*dt) * x",
+      "sequential_cast_matched_gpu_bits": true,
+      "reference_cast": "BF16(B*exp_decay*dt) * x",
+      "reference_cast_matched_gpu_bits": false,
+      "long_ssd_scan_ms": 114430.8
+    }
+  },
+  "implementation": {
+    "default_path_remains_sequential": true,
+    "opt_in_candidate_only": true,
+    "candidate_env": "KRASIS_MAMBA2_SSD_CHUNK_PARALLEL_V4",
+    "oracle_env": "KRASIS_MAMBA2_SSD_CHUNK_PARALLEL_V4_ORACLE",
+    "separate_candidate_oracle_buffers": true,
+    "preserved_0650_diagnostic": true,
+    "cast_placement": "exp_decay * BF16(B*dt) * x",
+    "commit_live_state_only_after_oracle_success": true,
+    "silent_fallback": false
+  },
+  "build": {
+    "command": "./dev build",
+    "exit_code": 0,
+    "duration_s": 176
+  },
+  "runtime": {
+    "command": "./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+    "mode": "startup diagnostic with local-tri, cast/carry, and full v4 oracle envs",
+    "exit_code": 1,
+    "fail_closed": true,
+    "requests_sent": 0,
+    "benchmark_path": false,
+    "long_diagnostic_run": false,
+    "reason_long_diagnostic_not_run": "full oracle failed during the smallest startup diagnostic"
+  },
+  "cache": {
+    "hqq_attention_reused": true,
+    "effective_marlin_g64_loaded": true,
+    "cache_write_evidence": false,
+    "temp_lock_files": false
+  },
+  "preflight": {
+    "local_tri_target": "row=64 head=11 d=22 state_flat=0",
+    "local_tri_matched_sequential_gpu_bits": true,
+    "cast_carry_seq_style_matched_gpu_bits": true,
+    "cast_carry_reference_style_matched_gpu_bits": false,
+    "secondary_probe": "row=82 head=37 d=30 state_flat=14"
+  },
+  "oracle": {
+    "passed": false,
+    "candidate_kernel_wall_ms": 19.186617,
+    "output": {
+      "mismatches": 55,
+      "max_abs": 2.0,
+      "mean_abs": 0.000009420169817531132,
+      "first_mismatch": {
+        "row": 64,
+        "head": 11,
+        "d": 22,
+        "flat": 262870,
+        "candidate_bits": "0x3bb7",
+        "sequential_bits": "0x3bb8",
+        "abs_error": 0.000030517578125
+      }
+    },
+    "state": {
+      "mismatches": 506113,
+      "max_abs": 0.0048828125,
+      "mean_abs": 0.0000016492683093835812,
+      "first_mismatch": {
+        "flat": 0,
+        "head": 0,
+        "d": 0,
+        "state": 0,
+        "candidate_bits": "0x3b90c25a",
+        "sequential_bits": "0x3b90c258",
+        "abs_error": 0.0000000009313225746154785
+      }
+    }
+  },
+  "validation": {
+    "passed": true,
+    "final_snapshot_utc": "2026-06-28T07:35:19Z",
+    "gpu_memory_mb": {
+      "gpu0": 15,
+      "gpu1": 11
+    },
+    "runtime_processes": false,
+    "nvidia_compute_processes": false,
+    "nano_temp_lock_files": false,
+    "protected_config_status": [
+      "?? tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+      "?? tests/nemotron-nano-bf16-experts-a16.conf"
+    ]
+  },
+  "artifacts": {
+    "build_result": "20260628_0715_nemotron_nano_mamba2_ssd_v4_correctness_prototype_build_result.tsv",
+    "runtime_attempt": "20260628_0715_nemotron_nano_mamba2_ssd_v4_correctness_prototype_runtime_attempt.tsv",
+    "startup_cache_validation": "20260628_0715_nemotron_nano_mamba2_ssd_v4_correctness_prototype_startup_cache_validation.tsv",
+    "local_tri_preflight": "20260628_0715_nemotron_nano_mamba2_ssd_v4_correctness_prototype_local_tri_preflight.tsv",
+    "cast_carry_preflight": "20260628_0715_nemotron_nano_mamba2_ssd_v4_correctness_prototype_cast_carry_preflight.tsv",
+    "oracle_correctness": "20260628_0715_nemotron_nano_mamba2_ssd_v4_correctness_prototype_oracle_correctness.tsv",
+    "long_diagnostic_not_run": "20260628_0715_nemotron_nano_mamba2_ssd_v4_correctness_prototype_long_diagnostic_not_run.tsv",
+    "source_artifacts": "20260628_0715_nemotron_nano_mamba2_ssd_v4_correctness_prototype_source_artifacts.tsv",
+    "decision": "20260628_0715_nemotron_nano_mamba2_ssd_v4_correctness_prototype_root_decision.tsv",
+    "validation": "20260628_0715_nemotron_nano_mamba2_ssd_v4_correctness_prototype_validation_checks.tsv"
+  }
+}

@@ -1,0 +1,1954 @@
+{
+  "attribution": "hqq_gpu_matches_krhq_dequant_math_at_output; divergence is attributable to HQQ6 dequantized-weight math versus captured BF16 expert output",
+  "cache_path": "/home/main/Documents/Claude/krasis-nemotron-dev/benchmarks/20260626_2208_nemotron_nano_diagnostic_hqq_prefill_all_moe_layers_correctness_hqq6_g64_all_moe_layers.krhq",
+  "experts_gated": false,
+  "layer_idx": 51,
+  "requested_col": 1599,
+  "requested_expert_idx": 60,
+  "requested_sorted_row": 1837,
+  "response_path": "/home/main/Documents/Claude/krasis-nemotron-dev/benchmarks/20260627_0640_nemotron_nano_hqq6_exact_row_quantization_attribution_case2_response.json",
+  "rows": [
+    {
+      "absolute_row": 352,
+      "bf16_output_col": -28.125,
+      "expert": 28,
+      "gather_src": 445,
+      "gather_weight": 0.2877544164657593,
+      "hqq_gpu_output_col": -29.25,
+      "is_requested_worst_global_row": false,
+      "is_selected_contributor": true,
+      "krhq_dequant_output_col": -29.25,
+      "krhq_dequant_output_col_bf16_bits": "0xc1ea",
+      "requested_col": 1599,
+      "w13_top_dequant_contributors_for_largest_w2_term": {
+        "activation_index": 1116,
+        "top_input_weight_contributors": [
+          {
+            "contribution": 1.318359375,
+            "input_bf16_bits": "0x4196",
+            "input_index": 2550,
+            "input_value": 18.75,
+            "w13_dequant_f32_bits": "0x3d900000",
+            "w13_dequant_value": 0.0703125
+          },
+          {
+            "contribution": -1.20465087890625,
+            "input_bf16_bits": "0xc119",
+            "input_index": 894,
+            "input_value": -9.5625,
+            "w13_dequant_f32_bits": "0x3e010000",
+            "w13_dequant_value": 0.1259765625
+          },
+          {
+            "contribution": -0.7379150390625,
+            "input_bf16_bits": "0xc0f8",
+            "input_index": 1301,
+            "input_value": -7.75,
+            "w13_dequant_f32_bits": "0x3dc30000",
+            "w13_dequant_value": 0.09521484375
+          },
+          {
+            "contribution": 0.6817322373390198,
+            "input_bf16_bits": "0x40b2",
+            "input_index": 357,
+            "input_value": 5.5625,
+            "w13_dequant_f32_bits": "0x3dfb0001",
+            "w13_dequant_value": 0.1225586012005806
+          },
+          {
+            "contribution": 0.659912109375,
+            "input_bf16_bits": "0x40d4",
+            "input_index": 2383,
+            "input_value": 6.625,
+            "w13_dequant_f32_bits": "0x3dcc0000",
+            "w13_dequant_value": 0.099609375
+          },
+          {
+            "contribution": 0.6302185654640198,
+            "input_bf16_bits": "0x40c1",
+            "input_index": 2352,
+            "input_value": 6.03125,
+            "w13_dequant_f32_bits": "0x3dd60001",
+            "w13_dequant_value": 0.1044921949505806
+          },
+          {
+            "contribution": 0.62432861328125,
+            "input_bf16_bits": "0xc0d4",
+            "input_index": 972,
+            "input_value": -6.625,
+            "w13_dequant_f32_bits": "0xbdc10000",
+            "w13_dequant_value": -0.09423828125
+          },
+          {
+            "contribution": 0.4943237602710724,
+            "input_bf16_bits": "0x40b6",
+            "input_index": 2177,
+            "input_value": 5.6875,
+            "w13_dequant_f32_bits": "0x3db20001",
+            "w13_dequant_value": 0.0869140699505806
+          },
+          {
+            "contribution": 0.4466477930545807,
+            "input_bf16_bits": "0x40bf",
+            "input_index": 1916,
+            "input_value": 5.96875,
+            "w13_dequant_f32_bits": "0x3d994105",
+            "w13_dequant_value": 0.0748310461640358
+          },
+          {
+            "contribution": 0.41324383020401,
+            "input_bf16_bits": "0xc0bb",
+            "input_index": 105,
+            "input_value": -5.84375,
+            "w13_dequant_f32_bits": "0xbd90d34d",
+            "w13_dequant_value": -0.0707155242562294
+          },
+          {
+            "contribution": -0.3334394097328186,
+            "input_bf16_bits": "0x40cc",
+            "input_index": 1074,
+            "input_value": 6.375,
+            "w13_dequant_f32_bits": "0xbd563cf4",
+            "w13_dequant_value": -0.0523042231798172
+          },
+          {
+            "contribution": -0.3295051157474518,
+            "input_bf16_bits": "0xc121",
+            "input_index": 1890,
+            "input_value": -10.0625,
+            "w13_dequant_f32_bits": "0x3d062083",
+            "w13_dequant_value": 0.0327458493411541
+          },
+          {
+            "contribution": -0.311737060546875,
+            "input_bf16_bits": "0x4063",
+            "input_index": 1251,
+            "input_value": 3.546875,
+            "w13_dequant_f32_bits": "0xbdb40000",
+            "w13_dequant_value": -0.087890625
+          },
+          {
+            "contribution": 0.2987823486328125,
+            "input_bf16_bits": "0x4037",
+            "input_index": 2062,
+            "input_value": 2.859375,
+            "w13_dequant_f32_bits": "0x3dd60000",
+            "w13_dequant_value": 0.1044921875
+          },
+          {
+            "contribution": -0.288628488779068,
+            "input_bf16_bits": "0x40be",
+            "input_index": 1435,
+            "input_value": 5.9375,
+            "w13_dequant_f32_bits": "0xbd471c72",
+            "w13_dequant_value": -0.0486111119389534
+          },
+          {
+            "contribution": 0.2841331958770752,
+            "input_bf16_bits": "0x41a0",
+            "input_index": 2099,
+            "input_value": 20.0,
+            "w13_dequant_f32_bits": "0x3c68c30c",
+            "w13_dequant_value": 0.0142066590487957
+          }
+        ]
+      },
+      "w2_requested_col_top_dequant_contributors": [
+        {
+          "activation_bf16_bits": "0x420a",
+          "activation_index": 1116,
+          "activation_value": 34.5,
+          "contribution": -50.1328125,
+          "w2_dequant_f32_bits": "0xbfba0000",
+          "w2_dequant_value": -1.453125
+        },
+        {
+          "activation_bf16_bits": "0x41a7",
+          "activation_index": 451,
+          "activation_value": 20.875,
+          "contribution": 11.49755859375,
+          "w2_dequant_f32_bits": "0x3f0d0000",
+          "w2_dequant_value": 0.55078125
+        },
+        {
+          "activation_bf16_bits": "0x4233",
+          "activation_index": 585,
+          "activation_value": 44.75,
+          "contribution": 5.036733627319336,
+          "w2_dequant_f32_bits": "0x3de68209",
+          "w2_dequant_value": 0.112552709877491
+        },
+        {
+          "activation_bf16_bits": "0x41be",
+          "activation_index": 1767,
+          "activation_value": 23.75,
+          "contribution": 4.49951171875,
+          "w2_dequant_f32_bits": "0x3e420000",
+          "w2_dequant_value": 0.189453125
+        },
+        {
+          "activation_bf16_bits": "0x41c8",
+          "activation_index": 1433,
+          "activation_value": 25.0,
+          "contribution": 4.150390148162842,
+          "w2_dequant_f32_bits": "0x3e29ffff",
+          "w2_dequant_value": 0.1660156100988388
+        },
+        {
+          "activation_bf16_bits": "0x4221",
+          "activation_index": 1037,
+          "activation_value": 40.25,
+          "contribution": -3.6648762226104736,
+          "w2_dequant_f32_bits": "0xbdba79e7",
+          "w2_dequant_value": -0.0910528227686882
+        },
+        {
+          "activation_bf16_bits": "0x41b7",
+          "activation_index": 1716,
+          "activation_value": 22.875,
+          "contribution": -3.642299175262451,
+          "w2_dequant_f32_bits": "0xbe230c31",
+          "w2_dequant_value": -0.159226194024086
+        },
+        {
+          "activation_bf16_bits": "0x41ab",
+          "activation_index": 202,
+          "activation_value": 21.375,
+          "contribution": -3.611205816268921,
+          "w2_dequant_f32_bits": "0xbe2cffff",
+          "w2_dequant_value": -0.1689452975988388
+        },
+        {
+          "activation_bf16_bits": "0x418a",
+          "activation_index": 882,
+          "activation_value": 17.25,
+          "contribution": -2.947998046875,
+          "w2_dequant_f32_bits": "0xbe2f0000",
+          "w2_dequant_value": -0.1708984375
+        },
+        {
+          "activation_bf16_bits": "0x41ad",
+          "activation_index": 1669,
+          "activation_value": 21.625,
+          "contribution": 2.766479253768921,
+          "w2_dequant_f32_bits": "0x3e02ffff",
+          "w2_dequant_value": 0.1279296725988388
+        },
+        {
+          "activation_bf16_bits": "0x418e",
+          "activation_index": 80,
+          "activation_value": 17.75,
+          "contribution": -2.728039026260376,
+          "w2_dequant_f32_bits": "0xbe1d6186",
+          "w2_dequant_value": -0.1536923348903656
+        },
+        {
+          "activation_bf16_bits": "0x41f5",
+          "activation_index": 586,
+          "activation_value": 30.625,
+          "contribution": 2.495117425918579,
+          "w2_dequant_f32_bits": "0x3da6db6f",
+          "w2_dequant_value": 0.0814732238650322
+        },
+        {
+          "activation_bf16_bits": "0x423d",
+          "activation_index": 1551,
+          "activation_value": 47.25,
+          "contribution": 2.483642339706421,
+          "w2_dequant_f32_bits": "0x3d574d33",
+          "w2_dequant_value": 0.0525638572871685
+        },
+        {
+          "activation_bf16_bits": "0x4210",
+          "activation_index": 223,
+          "activation_value": 36.0,
+          "contribution": 2.4659600257873535,
+          "w2_dequant_f32_bits": "0x3d8c4925",
+          "w2_dequant_value": 0.0684988871216774
+        },
+        {
+          "activation_bf16_bits": "0x415d",
+          "activation_index": 1747,
+          "activation_value": 13.8125,
+          "contribution": 2.158952474594116,
+          "w2_dequant_f32_bits": "0x3e200e39",
+          "w2_dequant_value": 0.1563042551279068
+        },
+        {
+          "activation_bf16_bits": "0x41c3",
+          "activation_index": 45,
+          "activation_value": 24.375,
+          "contribution": 1.91922128200531,
+          "w2_dequant_f32_bits": "0x3da14103",
+          "w2_dequant_value": 0.0787372812628746
+        }
+      ]
+    },
+    {
+      "absolute_row": 583,
+      "bf16_output_col": 75.5,
+      "expert": 47,
+      "gather_src": 445,
+      "gather_weight": 0.3534761369228363,
+      "hqq_gpu_output_col": 75.5,
+      "is_requested_worst_global_row": false,
+      "is_selected_contributor": true,
+      "krhq_dequant_output_col": 75.5,
+      "krhq_dequant_output_col_bf16_bits": "0x4297",
+      "requested_col": 1599,
+      "w13_top_dequant_contributors_for_largest_w2_term": {
+        "activation_index": 1399,
+        "top_input_weight_contributors": [
+          {
+            "contribution": 0.6656465530395508,
+            "input_bf16_bits": "0x4196",
+            "input_index": 2550,
+            "input_value": 18.75,
+            "w13_dequant_f32_bits": "0x3d1169a7",
+            "w13_dequant_value": 0.0355011485517025
+          },
+          {
+            "contribution": 0.3937140703201294,
+            "input_bf16_bits": "0x4106",
+            "input_index": 149,
+            "input_value": 8.375,
+            "w13_dequant_f32_bits": "0x3d408e39",
+            "w13_dequant_value": 0.0470106340944767
+          },
+          {
+            "contribution": -0.36063051223754883,
+            "input_bf16_bits": "0x41a0",
+            "input_index": 2099,
+            "input_value": 20.0,
+            "w13_dequant_f32_bits": "0xbc93b6da",
+            "w13_dequant_value": -0.0180315263569355
+          },
+          {
+            "contribution": 0.33282470703125,
+            "input_bf16_bits": "0x4085",
+            "input_index": 104,
+            "input_value": 4.15625,
+            "w13_dequant_f32_bits": "0x3da40000",
+            "w13_dequant_value": 0.080078125
+          },
+          {
+            "contribution": 0.328399658203125,
+            "input_bf16_bits": "0x40cc",
+            "input_index": 30,
+            "input_value": 6.375,
+            "w13_dequant_f32_bits": "0x3d530000",
+            "w13_dequant_value": 0.051513671875
+          },
+          {
+            "contribution": 0.3092041015625,
+            "input_bf16_bits": "0x4088",
+            "input_index": 903,
+            "input_value": 4.25,
+            "w13_dequant_f32_bits": "0x3d950000",
+            "w13_dequant_value": 0.07275390625
+          },
+          {
+            "contribution": 0.2906097173690796,
+            "input_bf16_bits": "0x412a",
+            "input_index": 1889,
+            "input_value": 10.625,
+            "w13_dequant_f32_bits": "0x3ce01042",
+            "w13_dequant_value": 0.0273515023291111
+          },
+          {
+            "contribution": -0.2800350785255432,
+            "input_bf16_bits": "0x408d",
+            "input_index": 251,
+            "input_value": 4.40625,
+            "w13_dequant_f32_bits": "0xbd8228a2",
+            "w13_dequant_value": -0.0635540634393692
+          },
+          {
+            "contribution": -0.25856781005859375,
+            "input_bf16_bits": "0x408f",
+            "input_index": 1111,
+            "input_value": 4.46875,
+            "w13_dequant_f32_bits": "0xbd6d0000",
+            "w13_dequant_value": -0.057861328125
+          },
+          {
+            "contribution": -0.2535552978515625,
+            "input_bf16_bits": "0x402e",
+            "input_index": 2182,
+            "input_value": 2.71875,
+            "w13_dequant_f32_bits": "0xbdbf0000",
+            "w13_dequant_value": -0.09326171875
+          },
+          {
+            "contribution": 0.2191009521484375,
+            "input_bf16_bits": "0x402d",
+            "input_index": 1913,
+            "input_value": 2.703125,
+            "w13_dequant_f32_bits": "0x3da60000",
+            "w13_dequant_value": 0.0810546875
+          },
+          {
+            "contribution": -0.2180483490228653,
+            "input_bf16_bits": "0xc0e2",
+            "input_index": 1936,
+            "input_value": -7.0625,
+            "w13_dequant_f32_bits": "0x3cfcebb0",
+            "w13_dequant_value": 0.030874103307724
+          },
+          {
+            "contribution": 0.2012881338596344,
+            "input_bf16_bits": "0x40c0",
+            "input_index": 1910,
+            "input_value": 6.0,
+            "w13_dequant_f32_bits": "0x3d0969a7",
+            "w13_dequant_value": 0.0335480235517025
+          },
+          {
+            "contribution": -0.195836141705513,
+            "input_bf16_bits": "0x415a",
+            "input_index": 490,
+            "input_value": 13.625,
+            "w13_dequant_f32_bits": "0xbc6b7df8",
+            "w13_dequant_value": -0.0143732950091362
+          },
+          {
+            "contribution": 0.19578927755355835,
+            "input_bf16_bits": "0x4089",
+            "input_index": 459,
+            "input_value": 4.28125,
+            "w13_dequant_f32_bits": "0x3d3b5145",
+            "w13_dequant_value": 0.0457318015396595
+          },
+          {
+            "contribution": -0.19560132920742035,
+            "input_bf16_bits": "0xc0c3",
+            "input_index": 2509,
+            "input_value": -6.09375,
+            "w13_dequant_f32_bits": "0x3d0379e8",
+            "w13_dequant_value": 0.0320986807346344
+          }
+        ]
+      },
+      "w2_requested_col_top_dequant_contributors": [
+        {
+          "activation_bf16_bits": "0x4244",
+          "activation_index": 1399,
+          "activation_value": 49.0,
+          "contribution": 4.8102216720581055,
+          "w2_dequant_f32_bits": "0x3dc90c31",
+          "w2_dequant_value": 0.098167784512043
+        },
+        {
+          "activation_bf16_bits": "0x4203",
+          "activation_index": 1761,
+          "activation_value": 32.75,
+          "contribution": 3.4728848934173584,
+          "w2_dequant_f32_bits": "0x3dd92cb3",
+          "w2_dequant_value": 0.1060422882437706
+        },
+        {
+          "activation_bf16_bits": "0x4203",
+          "activation_index": 987,
+          "activation_value": 32.75,
+          "contribution": 3.2827675342559814,
+          "w2_dequant_f32_bits": "0x3dcd4926",
+          "w2_dequant_value": 0.100237175822258
+        },
+        {
+          "activation_bf16_bits": "0x4246",
+          "activation_index": 66,
+          "activation_value": 49.5,
+          "contribution": 2.8485984802246094,
+          "w2_dequant_f32_bits": "0x3d6bb6de",
+          "w2_dequant_value": 0.057547442615032196
+        },
+        {
+          "activation_bf16_bits": "0x41cb",
+          "activation_index": 1539,
+          "activation_value": 25.375,
+          "contribution": 2.2325847148895264,
+          "w2_dequant_f32_bits": "0x3db430c4",
+          "w2_dequant_value": 0.087983638048172
+        },
+        {
+          "activation_bf16_bits": "0x41a9",
+          "activation_index": 1440,
+          "activation_value": 21.125,
+          "contribution": 2.164336681365967,
+          "w2_dequant_f32_bits": "0x3dd1d34d",
+          "w2_dequant_value": 0.1024538055062294
+        },
+        {
+          "activation_bf16_bits": "0x41ef",
+          "activation_index": 1277,
+          "activation_value": 29.875,
+          "contribution": -2.1339285373687744,
+          "w2_dequant_f32_bits": "0xbd924924",
+          "w2_dequant_value": -0.0714285671710968
+        },
+        {
+          "activation_bf16_bits": "0x415a",
+          "activation_index": 1423,
+          "activation_value": 13.625,
+          "contribution": 2.035977840423584,
+          "w2_dequant_f32_bits": "0x3e190410",
+          "w2_dequant_value": 0.1494295597076416
+        },
+        {
+          "activation_bf16_bits": "0x41c8",
+          "activation_index": 539,
+          "activation_value": 25.0,
+          "contribution": 1.8484935760498047,
+          "w2_dequant_f32_bits": "0x3d976db8",
+          "w2_dequant_value": 0.0739397406578064
+        },
+        {
+          "activation_bf16_bits": "0x4235",
+          "activation_index": 135,
+          "activation_value": 45.25,
+          "contribution": 1.7865160703659058,
+          "w2_dequant_f32_bits": "0x3d21b6d9",
+          "w2_dequant_value": 0.039481017738580704
+        },
+        {
+          "activation_bf16_bits": "0x41df",
+          "activation_index": 94,
+          "activation_value": 27.875,
+          "contribution": 1.6784543991088867,
+          "w2_dequant_f32_bits": "0x3d76a28c",
+          "w2_dequant_value": 0.0602136105298996
+        },
+        {
+          "activation_bf16_bits": "0x4174",
+          "activation_index": 899,
+          "activation_value": 15.25,
+          "contribution": 1.623290777206421,
+          "w2_dequant_f32_bits": "0x3dd9fffe",
+          "w2_dequant_value": 0.1064452975988388
+        },
+        {
+          "activation_bf16_bits": "0x4207",
+          "activation_index": 1655,
+          "activation_value": 33.75,
+          "contribution": 1.5176827907562256,
+          "w2_dequant_f32_bits": "0x3d3830c3",
+          "w2_dequant_value": 0.0449683777987957
+        },
+        {
+          "activation_bf16_bits": "0x423b",
+          "activation_index": 587,
+          "activation_value": 46.75,
+          "contribution": 1.393543004989624,
+          "w2_dequant_f32_bits": "0x3cf430c2",
+          "w2_dequant_value": 0.0298084057867527
+        },
+        {
+          "activation_bf16_bits": "0x41a9",
+          "activation_index": 603,
+          "activation_value": 21.125,
+          "contribution": 1.3763079643249512,
+          "w2_dequant_f32_bits": "0x3d856db7",
+          "w2_dequant_value": 0.0651506707072258
+        },
+        {
+          "activation_bf16_bits": "0x414f",
+          "activation_index": 872,
+          "activation_value": 12.9375,
+          "contribution": 1.372022271156311,
+          "w2_dequant_f32_bits": "0x3dd930c2",
+          "w2_dequant_value": 0.1060500293970108
+        }
+      ]
+    },
+    {
+      "absolute_row": 1015,
+      "bf16_output_col": 82.5,
+      "expert": 53,
+      "gather_src": 445,
+      "gather_weight": 0.37110981345176697,
+      "hqq_gpu_output_col": 82.5,
+      "is_requested_worst_global_row": false,
+      "is_selected_contributor": true,
+      "krhq_dequant_output_col": 82.5,
+      "krhq_dequant_output_col_bf16_bits": "0x42a5",
+      "requested_col": 1599,
+      "w13_top_dequant_contributors_for_largest_w2_term": {
+        "activation_index": 1609,
+        "top_input_weight_contributors": [
+          {
+            "contribution": 0.78924560546875,
+            "input_bf16_bits": "0x40c1",
+            "input_index": 2352,
+            "input_value": 6.03125,
+            "w13_dequant_f32_bits": "0x3e060000",
+            "w13_dequant_value": 0.130859375
+          },
+          {
+            "contribution": 0.47098803520202637,
+            "input_bf16_bits": "0x4196",
+            "input_index": 2550,
+            "input_value": 18.75,
+            "w13_dequant_f32_bits": "0x3ccdc71f",
+            "w13_dequant_value": 0.025119362398982048
+          },
+          {
+            "contribution": 0.4599122703075409,
+            "input_bf16_bits": "0xc135",
+            "input_index": 1152,
+            "input_value": -11.3125,
+            "w13_dequant_f32_bits": "0xbd268619",
+            "w13_dequant_value": -0.0406552292406559
+          },
+          {
+            "contribution": 0.45086669921875,
+            "input_bf16_bits": "0x40b2",
+            "input_index": 357,
+            "input_value": 5.5625,
+            "w13_dequant_f32_bits": "0x3da60000",
+            "w13_dequant_value": 0.0810546875
+          },
+          {
+            "contribution": 0.446319580078125,
+            "input_bf16_bits": "0xc0e1",
+            "input_index": 166,
+            "input_value": -7.03125,
+            "w13_dequant_f32_bits": "0xbd820000",
+            "w13_dequant_value": -0.0634765625
+          },
+          {
+            "contribution": 0.4194488525390625,
+            "input_bf16_bits": "0xc0bb",
+            "input_index": 105,
+            "input_value": -5.84375,
+            "w13_dequant_f32_bits": "0xbd930000",
+            "w13_dequant_value": -0.07177734375
+          },
+          {
+            "contribution": 0.3042449653148651,
+            "input_bf16_bits": "0x407e",
+            "input_index": 1884,
+            "input_value": 3.96875,
+            "w13_dequant_f32_bits": "0x3d9cffff",
+            "w13_dequant_value": 0.0766601487994194
+          },
+          {
+            "contribution": 0.28749847412109375,
+            "input_bf16_bits": "0xc0ed",
+            "input_index": 1424,
+            "input_value": -7.40625,
+            "w13_dequant_f32_bits": "0xbd1f0000",
+            "w13_dequant_value": -0.038818359375
+          },
+          {
+            "contribution": 0.2653101086616516,
+            "input_bf16_bits": "0x40d4",
+            "input_index": 2383,
+            "input_value": 6.625,
+            "w13_dequant_f32_bits": "0x3d240820",
+            "w13_dequant_value": 0.0400468111038208
+          },
+          {
+            "contribution": 0.2341156005859375,
+            "input_bf16_bits": "0xc065",
+            "input_index": 2136,
+            "input_value": -3.578125,
+            "w13_dequant_f32_bits": "0xbd860000",
+            "w13_dequant_value": -0.0654296875
+          },
+          {
+            "contribution": -0.2094753086566925,
+            "input_bf16_bits": "0xc03b",
+            "input_index": 2313,
+            "input_value": -2.921875,
+            "w13_dequant_f32_bits": "0x3d92d34d",
+            "w13_dequant_value": 0.0716920867562294
+          },
+          {
+            "contribution": 0.2073930948972702,
+            "input_bf16_bits": "0xc09d",
+            "input_index": 1171,
+            "input_value": -4.90625,
+            "w13_dequant_f32_bits": "0xbd2d2492",
+            "w13_dequant_value": -0.0422712042927742
+          },
+          {
+            "contribution": -0.2068464756011963,
+            "input_bf16_bits": "0x40cb",
+            "input_index": 1651,
+            "input_value": 6.34375,
+            "w13_dequant_f32_bits": "0xbd058e3a",
+            "w13_dequant_value": -0.032606340944767
+          },
+          {
+            "contribution": 0.19380949437618256,
+            "input_bf16_bits": "0x40bf",
+            "input_index": 1916,
+            "input_value": 5.96875,
+            "w13_dequant_f32_bits": "0x3d04ffff",
+            "w13_dequant_value": 0.0324706993997097
+          },
+          {
+            "contribution": 0.18119049072265625,
+            "input_bf16_bits": "0x403b",
+            "input_index": 2417,
+            "input_value": 2.921875,
+            "w13_dequant_f32_bits": "0x3d7e0000",
+            "w13_dequant_value": 0.06201171875
+          },
+          {
+            "contribution": -0.1785176396369934,
+            "input_bf16_bits": "0xc121",
+            "input_index": 1890,
+            "input_value": -10.0625,
+            "w13_dequant_f32_bits": "0x3c915554",
+            "w13_dequant_value": 0.0177408829331398
+          }
+        ]
+      },
+      "w2_requested_col_top_dequant_contributors": [
+        {
+          "activation_bf16_bits": "0x4230",
+          "activation_index": 1609,
+          "activation_value": 44.0,
+          "contribution": -17.31299591064453,
+          "w2_dequant_f32_bits": "0xbec975d7",
+          "w2_dequant_value": -0.3934771716594696
+        },
+        {
+          "activation_bf16_bits": "0x4215",
+          "activation_index": 637,
+          "activation_value": 37.25,
+          "contribution": -13.968750953674316,
+          "w2_dequant_f32_bits": "0xbec00001",
+          "w2_dequant_value": -0.3750000298023224
+        },
+        {
+          "activation_bf16_bits": "0x420d",
+          "activation_index": 558,
+          "activation_value": 35.25,
+          "contribution": 10.36648941040039,
+          "w2_dequant_f32_bits": "0x3e969249",
+          "w2_dequant_value": 0.2940848171710968
+        },
+        {
+          "activation_bf16_bits": "0x4219",
+          "activation_index": 251,
+          "activation_value": 38.25,
+          "contribution": -8.29248046875,
+          "w2_dequant_f32_bits": "0xbe5e0000",
+          "w2_dequant_value": -0.216796875
+        },
+        {
+          "activation_bf16_bits": "0x41d0",
+          "activation_index": 490,
+          "activation_value": 26.0,
+          "contribution": -8.27734375,
+          "w2_dequant_f32_bits": "0xbea30000",
+          "w2_dequant_value": -0.318359375
+        },
+        {
+          "activation_bf16_bits": "0x4142",
+          "activation_index": 1222,
+          "activation_value": 12.125,
+          "contribution": -7.1044921875,
+          "w2_dequant_f32_bits": "0xbf160000",
+          "w2_dequant_value": -0.5859375
+        },
+        {
+          "activation_bf16_bits": "0x4161",
+          "activation_index": 1451,
+          "activation_value": 14.0625,
+          "contribution": -6.784057140350342,
+          "w2_dequant_f32_bits": "0xbef6ffff",
+          "w2_dequant_value": -0.4824218451976776
+        },
+        {
+          "activation_bf16_bits": "0x42b0",
+          "activation_index": 1235,
+          "activation_value": 88.0,
+          "contribution": 5.925596237182617,
+          "w2_dequant_f32_bits": "0x3d89e7a0",
+          "w2_dequant_value": 0.0673363208770752
+        },
+        {
+          "activation_bf16_bits": "0x4229",
+          "activation_index": 571,
+          "activation_value": 42.25,
+          "contribution": 5.422712326049805,
+          "w2_dequant_f32_bits": "0x3e036db7",
+          "w2_dequant_value": 0.1283482164144516
+        },
+        {
+          "activation_bf16_bits": "0x420c",
+          "activation_index": 356,
+          "activation_value": 35.0,
+          "contribution": 4.943576335906982,
+          "w2_dequant_f32_bits": "0x3e10a28a",
+          "w2_dequant_value": 0.141245037317276
+        },
+        {
+          "activation_bf16_bits": "0x4174",
+          "activation_index": 1813,
+          "activation_value": 15.25,
+          "contribution": 4.216018199920654,
+          "w2_dequant_f32_bits": "0x3e8d8c31",
+          "w2_dequant_value": 0.276460200548172
+        },
+        {
+          "activation_bf16_bits": "0x41f8",
+          "activation_index": 1769,
+          "activation_value": 31.0,
+          "contribution": -4.0869140625,
+          "w2_dequant_f32_bits": "0xbe070000",
+          "w2_dequant_value": -0.1318359375
+        },
+        {
+          "activation_bf16_bits": "0x41b2",
+          "activation_index": 678,
+          "activation_value": 22.25,
+          "contribution": 4.0170159339904785,
+          "w2_dequant_f32_bits": "0x3e38df7d",
+          "w2_dequant_value": 0.1805400401353836
+        },
+        {
+          "activation_bf16_bits": "0x418e",
+          "activation_index": 132,
+          "activation_value": 17.75,
+          "contribution": -3.84814453125,
+          "w2_dequant_f32_bits": "0xbe5e0000",
+          "w2_dequant_value": -0.216796875
+        },
+        {
+          "activation_bf16_bits": "0x4204",
+          "activation_index": 1344,
+          "activation_value": 33.0,
+          "contribution": 3.812453269958496,
+          "w2_dequant_f32_bits": "0x3dec9a69",
+          "w2_dequant_value": 0.1155288890004158
+        },
+        {
+          "activation_bf16_bits": "0x4058",
+          "activation_index": 1651,
+          "activation_value": 3.375,
+          "contribution": -3.5595703125,
+          "w2_dequant_f32_bits": "0xbf870000",
+          "w2_dequant_value": -1.0546875
+        }
+      ]
+    },
+    {
+      "absolute_row": 1451,
+      "bf16_output_col": -105.0,
+      "expert": 58,
+      "gather_src": 445,
+      "gather_weight": 0.32741302251815796,
+      "hqq_gpu_output_col": -105.5,
+      "is_requested_worst_global_row": false,
+      "is_selected_contributor": true,
+      "krhq_dequant_output_col": -105.5,
+      "krhq_dequant_output_col_bf16_bits": "0xc2d3",
+      "requested_col": 1599,
+      "w13_top_dequant_contributors_for_largest_w2_term": {
+        "activation_index": 993,
+        "top_input_weight_contributors": [
+          {
+            "contribution": 1.6705322265625,
+            "input_bf16_bits": "0xc121",
+            "input_index": 1890,
+            "input_value": -10.0625,
+            "w13_dequant_f32_bits": "0xbe2a0000",
+            "w13_dequant_value": -0.166015625
+          },
+          {
+            "contribution": 1.3824462890625,
+            "input_bf16_bits": "0x4196",
+            "input_index": 2550,
+            "input_value": 18.75,
+            "w13_dequant_f32_bits": "0x3d970000",
+            "w13_dequant_value": 0.07373046875
+          },
+          {
+            "contribution": 0.8837890625,
+            "input_bf16_bits": "0xc135",
+            "input_index": 1152,
+            "input_value": -11.3125,
+            "w13_dequant_f32_bits": "0xbda00000",
+            "w13_dequant_value": -0.078125
+          },
+          {
+            "contribution": 0.7932128310203552,
+            "input_bf16_bits": "0x4098",
+            "input_index": 348,
+            "input_value": 4.75,
+            "w13_dequant_f32_bits": "0x3e2affff",
+            "w13_dequant_value": 0.1669921725988388
+          },
+          {
+            "contribution": -0.6962890625,
+            "input_bf16_bits": "0xc0f8",
+            "input_index": 1301,
+            "input_value": -7.75,
+            "w13_dequant_f32_bits": "0x3db80000",
+            "w13_dequant_value": 0.08984375
+          },
+          {
+            "contribution": 0.6365579962730408,
+            "input_bf16_bits": "0x412a",
+            "input_index": 1889,
+            "input_value": 10.625,
+            "w13_dequant_f32_bits": "0x3d756598",
+            "w13_dequant_value": 0.0599113404750824
+          },
+          {
+            "contribution": 0.5404789447784424,
+            "input_bf16_bits": "0xc0d4",
+            "input_index": 972,
+            "input_value": -6.625,
+            "w13_dequant_f32_bits": "0xbda71452",
+            "w13_dequant_value": -0.0815817266702652
+          },
+          {
+            "contribution": -0.517730712890625,
+            "input_bf16_bits": "0x402e",
+            "input_index": 2182,
+            "input_value": 2.71875,
+            "w13_dequant_f32_bits": "0xbe430000",
+            "w13_dequant_value": -0.1904296875
+          },
+          {
+            "contribution": 0.4627685546875,
+            "input_bf16_bits": "0x4088",
+            "input_index": 903,
+            "input_value": 4.25,
+            "w13_dequant_f32_bits": "0x3ddf0000",
+            "w13_dequant_value": 0.10888671875
+          },
+          {
+            "contribution": -0.4365052878856659,
+            "input_bf16_bits": "0x408f",
+            "input_index": 1111,
+            "input_value": 4.46875,
+            "w13_dequant_f32_bits": "0xbdc80c31",
+            "w13_dequant_value": -0.097679503262043
+          },
+          {
+            "contribution": 0.43196868896484375,
+            "input_bf16_bits": "0xc073",
+            "input_index": 464,
+            "input_value": -3.796875,
+            "w13_dequant_f32_bits": "0xbde90000",
+            "w13_dequant_value": -0.11376953125
+          },
+          {
+            "contribution": -0.426177978515625,
+            "input_bf16_bits": "0x40be",
+            "input_index": 1435,
+            "input_value": 5.9375,
+            "w13_dequant_f32_bits": "0xbd930000",
+            "w13_dequant_value": -0.07177734375
+          },
+          {
+            "contribution": 0.3958849310874939,
+            "input_bf16_bits": "0x40c1",
+            "input_index": 2352,
+            "input_value": 6.03125,
+            "w13_dequant_f32_bits": "0x3d866db7",
+            "w13_dequant_value": 0.0656389519572258
+          },
+          {
+            "contribution": 0.3600027859210968,
+            "input_bf16_bits": "0x409c",
+            "input_index": 1243,
+            "input_value": 4.875,
+            "w13_dequant_f32_bits": "0x3d973cf4",
+            "w13_dequant_value": 0.0738467276096344
+          },
+          {
+            "contribution": -0.35977795720100403,
+            "input_bf16_bits": "0x41a0",
+            "input_index": 2099,
+            "input_value": 20.0,
+            "w13_dequant_f32_bits": "0xbc935d74",
+            "w13_dequant_value": -0.0179888978600502
+          },
+          {
+            "contribution": -0.3419894278049469,
+            "input_bf16_bits": "0xc0c3",
+            "input_index": 2509,
+            "input_value": -6.09375,
+            "w13_dequant_f32_bits": "0x3d65df7e",
+            "w13_dequant_value": 0.0561213418841362
+          }
+        ]
+      },
+      "w2_requested_col_top_dequant_contributors": [
+        {
+          "activation_bf16_bits": "0x421b",
+          "activation_index": 993,
+          "activation_value": 38.75,
+          "contribution": -11.775405883789062,
+          "w2_dequant_f32_bits": "0xbe9b9659",
+          "w2_dequant_value": -0.30388143658638
+        },
+        {
+          "activation_bf16_bits": "0x41be",
+          "activation_index": 1354,
+          "activation_value": 23.75,
+          "contribution": -9.88037109375,
+          "w2_dequant_f32_bits": "0xbed50000",
+          "w2_dequant_value": -0.416015625
+        },
+        {
+          "activation_bf16_bits": "0x41b0",
+          "activation_index": 925,
+          "activation_value": 22.0,
+          "contribution": -8.5078125,
+          "w2_dequant_f32_bits": "0xbec60000",
+          "w2_dequant_value": -0.38671875
+        },
+        {
+          "activation_bf16_bits": "0x41a9",
+          "activation_index": 987,
+          "activation_value": 21.125,
+          "contribution": -7.01416015625,
+          "w2_dequant_f32_bits": "0xbeaa0000",
+          "w2_dequant_value": -0.33203125
+        },
+        {
+          "activation_bf16_bits": "0x4199",
+          "activation_index": 207,
+          "activation_value": 19.125,
+          "contribution": -6.163330078125,
+          "w2_dequant_f32_bits": "0xbea50000",
+          "w2_dequant_value": -0.322265625
+        },
+        {
+          "activation_bf16_bits": "0x41ef",
+          "activation_index": 59,
+          "activation_value": 29.875,
+          "contribution": 5.1055908203125,
+          "w2_dequant_f32_bits": "0x3e2f0000",
+          "w2_dequant_value": 0.1708984375
+        },
+        {
+          "activation_bf16_bits": "0x427c",
+          "activation_index": 89,
+          "activation_value": 63.0,
+          "contribution": -3.79248046875,
+          "w2_dequant_f32_bits": "0xbd769249",
+          "w2_dequant_value": -0.0601981021463871
+        },
+        {
+          "activation_bf16_bits": "0x41a0",
+          "activation_index": 461,
+          "activation_value": 20.0,
+          "contribution": 3.085937261581421,
+          "w2_dequant_f32_bits": "0x3e1dffff",
+          "w2_dequant_value": 0.1542968600988388
+        },
+        {
+          "activation_bf16_bits": "0x40c3",
+          "activation_index": 28,
+          "activation_value": 6.09375,
+          "contribution": -3.046875,
+          "w2_dequant_f32_bits": "0xbf000000",
+          "w2_dequant_value": -0.5
+        },
+        {
+          "activation_bf16_bits": "0x4174",
+          "activation_index": 1613,
+          "activation_value": 15.25,
+          "contribution": -2.542966842651367,
+          "w2_dequant_f32_bits": "0xbe2ac104",
+          "w2_dequant_value": -0.1667519211769104
+        },
+        {
+          "activation_bf16_bits": "0x41b0",
+          "activation_index": 832,
+          "activation_value": 22.0,
+          "contribution": -2.1504838466644287,
+          "w2_dequant_f32_bits": "0xbdc830c4",
+          "w2_dequant_value": -0.097749263048172
+        },
+        {
+          "activation_bf16_bits": "0x41da",
+          "activation_index": 1374,
+          "activation_value": 27.25,
+          "contribution": 1.9825443029403687,
+          "w2_dequant_f32_bits": "0x3d950002",
+          "w2_dequant_value": 0.0727539211511612
+        },
+        {
+          "activation_bf16_bits": "0x41c3",
+          "activation_index": 1651,
+          "activation_value": 24.375,
+          "contribution": 1.8942842483520508,
+          "w2_dequant_f32_bits": "0x3d9f28a3",
+          "w2_dequant_value": 0.0777142271399498
+        },
+        {
+          "activation_bf16_bits": "0x41a7",
+          "activation_index": 1714,
+          "activation_value": 20.875,
+          "contribution": -1.771618127822876,
+          "w2_dequant_f32_bits": "0xbdadcf3d",
+          "w2_dequant_value": -0.0848679319024086
+        },
+        {
+          "activation_bf16_bits": "0x41a4",
+          "activation_index": 309,
+          "activation_value": 20.5,
+          "contribution": -1.7531392574310303,
+          "w2_dequant_f32_bits": "0xbdaf2494",
+          "w2_dequant_value": -0.0855189859867096
+        },
+        {
+          "activation_bf16_bits": "0x41b0",
+          "activation_index": 1788,
+          "activation_value": 22.0,
+          "contribution": -1.6930029392242432,
+          "w2_dequant_f32_bits": "0xbd9d9a6a",
+          "w2_dequant_value": -0.0769546777009964
+        }
+      ]
+    },
+    {
+      "absolute_row": 1837,
+      "bf16_output_col": 1072.0,
+      "expert": 60,
+      "gather_src": 431,
+      "gather_weight": 0.31420233845710754,
+      "hqq_gpu_output_col": 1104.0,
+      "is_requested_worst_global_row": true,
+      "is_selected_contributor": false,
+      "krhq_dequant_output_col": 1104.0,
+      "krhq_dequant_output_col_bf16_bits": "0x448a",
+      "requested_col": 1599,
+      "w13_top_dequant_contributors_for_largest_w2_term": {
+        "activation_index": 977,
+        "top_input_weight_contributors": [
+          {
+            "contribution": 3.71630859375,
+            "input_bf16_bits": "0x41ec",
+            "input_index": 2550,
+            "input_value": 29.5,
+            "w13_dequant_f32_bits": "0x3e010000",
+            "w13_dequant_value": 0.1259765625
+          },
+          {
+            "contribution": -1.2393189668655396,
+            "input_bf16_bits": "0xc103",
+            "input_index": 1301,
+            "input_value": -8.1875,
+            "w13_dequant_f32_bits": "0x3e1b0001",
+            "w13_dequant_value": 0.1513672024011612
+          },
+          {
+            "contribution": -0.6662559509277344,
+            "input_bf16_bits": "0x41bc",
+            "input_index": 2099,
+            "input_value": 23.5,
+            "w13_dequant_f32_bits": "0xbce84106",
+            "w13_dequant_value": -0.0283513180911541
+          },
+          {
+            "contribution": -0.6010538339614868,
+            "input_bf16_bits": "0xc13a",
+            "input_index": 1890,
+            "input_value": -11.625,
+            "w13_dequant_f32_bits": "0x3d53c71c",
+            "w13_dequant_value": 0.0517035573720932
+          },
+          {
+            "contribution": -0.5646842122077942,
+            "input_bf16_bits": "0xc0e1",
+            "input_index": 1123,
+            "input_value": -7.03125,
+            "w13_dequant_f32_bits": "0x3da479e8",
+            "w13_dequant_value": 0.0803106427192688
+          },
+          {
+            "contribution": -0.532745361328125,
+            "input_bf16_bits": "0xc07d",
+            "input_index": 876,
+            "input_value": -3.953125,
+            "w13_dequant_f32_bits": "0x3e0a0000",
+            "w13_dequant_value": 0.134765625
+          },
+          {
+            "contribution": -0.5314708948135376,
+            "input_bf16_bits": "0x415f",
+            "input_index": 490,
+            "input_value": 13.9375,
+            "w13_dequant_f32_bits": "0xbd1c30c3",
+            "w13_dequant_value": -0.0381324402987957
+          },
+          {
+            "contribution": 0.5219898819923401,
+            "input_bf16_bits": "0x40bb",
+            "input_index": 30,
+            "input_value": 5.84375,
+            "w13_dequant_f32_bits": "0x3db6efbf",
+            "w13_dequant_value": 0.0893244668841362
+          },
+          {
+            "contribution": 0.4877668023109436,
+            "input_bf16_bits": "0x40ae",
+            "input_index": 855,
+            "input_value": 5.4375,
+            "w13_dequant_f32_bits": "0x3db7b6db",
+            "w13_dequant_value": 0.0897042378783226
+          },
+          {
+            "contribution": 0.4846518337726593,
+            "input_bf16_bits": "0xc09f",
+            "input_index": 2360,
+            "input_value": -4.96875,
+            "w13_dequant_f32_bits": "0xbdc7c30c",
+            "w13_dequant_value": -0.0975399911403656
+          },
+          {
+            "contribution": 0.42394590377807617,
+            "input_bf16_bits": "0x410d",
+            "input_index": 149,
+            "input_value": 8.8125,
+            "w13_dequant_f32_bits": "0x3d450c33",
+            "w13_dequant_value": 0.0481073372066021
+          },
+          {
+            "contribution": 0.3839111328125,
+            "input_bf16_bits": "0xc02a",
+            "input_index": 2217,
+            "input_value": -2.65625,
+            "w13_dequant_f32_bits": "0xbe140000",
+            "w13_dequant_value": -0.14453125
+          },
+          {
+            "contribution": 0.383148193359375,
+            "input_bf16_bits": "0x409b",
+            "input_index": 2646,
+            "input_value": 4.84375,
+            "w13_dequant_f32_bits": "0x3da20000",
+            "w13_dequant_value": 0.0791015625
+          },
+          {
+            "contribution": 0.3785378932952881,
+            "input_bf16_bits": "0xc0e3",
+            "input_index": 1936,
+            "input_value": -7.09375,
+            "w13_dequant_f32_bits": "0xbd5a924a",
+            "w13_dequant_value": -0.0533621683716774
+          },
+          {
+            "contribution": 0.3782043755054474,
+            "input_bf16_bits": "0xc04c",
+            "input_index": 998,
+            "input_value": -3.1875,
+            "w13_dequant_f32_bits": "0xbdf30001",
+            "w13_dequant_value": -0.1186523512005806
+          },
+          {
+            "contribution": -0.3738839328289032,
+            "input_bf16_bits": "0xc106",
+            "input_index": 894,
+            "input_value": -8.375,
+            "w13_dequant_f32_bits": "0x3d36db6e",
+            "w13_dequant_value": 0.0446428582072258
+          }
+        ]
+      },
+      "w2_requested_col_top_dequant_contributors": [
+        {
+          "activation_bf16_bits": "0x4412",
+          "activation_index": 977,
+          "activation_value": 584.0,
+          "contribution": 711.75,
+          "w2_dequant_f32_bits": "0x3f9c0000",
+          "w2_dequant_value": 1.21875
+        },
+        {
+          "activation_bf16_bits": "0x438a",
+          "activation_index": 145,
+          "activation_value": 276.0,
+          "contribution": 429.09375,
+          "w2_dequant_f32_bits": "0x3fc70000",
+          "w2_dequant_value": 1.5546875
+        },
+        {
+          "activation_bf16_bits": "0x4282",
+          "activation_index": 1017,
+          "activation_value": 65.0,
+          "contribution": 10.22174072265625,
+          "w2_dequant_f32_bits": "0x3e210820",
+          "w2_dequant_value": 0.1572575569152832
+        },
+        {
+          "activation_bf16_bits": "0x421e",
+          "activation_index": 1809,
+          "activation_value": 39.5,
+          "contribution": -6.315150260925293,
+          "w2_dequant_f32_bits": "0xbe23b6db",
+          "w2_dequant_value": -0.1598772257566452
+        },
+        {
+          "activation_bf16_bits": "0x4263",
+          "activation_index": 775,
+          "activation_value": 56.75,
+          "contribution": 5.271050453186035,
+          "w2_dequant_f32_bits": "0x3dbe38e4",
+          "w2_dequant_value": 0.0928819477558136
+        },
+        {
+          "activation_bf16_bits": "0x4227",
+          "activation_index": 1597,
+          "activation_value": 41.75,
+          "contribution": -3.7056751251220703,
+          "w2_dequant_f32_bits": "0xbdb5c71d",
+          "w2_dequant_value": -0.088758684694767
+        },
+        {
+          "activation_bf16_bits": "0x41c6",
+          "activation_index": 684,
+          "activation_value": 24.75,
+          "contribution": -3.013183832168579,
+          "w2_dequant_f32_bits": "0xbdf95557",
+          "w2_dequant_value": -0.121744804084301
+        },
+        {
+          "activation_bf16_bits": "0x4297",
+          "activation_index": 147,
+          "activation_value": 75.5,
+          "contribution": -2.752603530883789,
+          "w2_dequant_f32_bits": "0xbd155553",
+          "w2_dequant_value": -0.036458324640989304
+        },
+        {
+          "activation_bf16_bits": "0x4182",
+          "activation_index": 101,
+          "activation_value": 16.25,
+          "contribution": -2.638559341430664,
+          "w2_dequant_f32_bits": "0xbe264514",
+          "w2_dequant_value": -0.162372887134552
+        },
+        {
+          "activation_bf16_bits": "0x4216",
+          "activation_index": 1627,
+          "activation_value": 37.5,
+          "contribution": 2.636718511581421,
+          "w2_dequant_f32_bits": "0x3d8fffff",
+          "w2_dequant_value": 0.0703124925494194
+        },
+        {
+          "activation_bf16_bits": "0x41be",
+          "activation_index": 61,
+          "activation_value": 23.75,
+          "contribution": 2.528076410293579,
+          "w2_dequant_f32_bits": "0x3dda0002",
+          "w2_dequant_value": 0.1064453274011612
+        },
+        {
+          "activation_bf16_bits": "0x4135",
+          "activation_index": 843,
+          "activation_value": 11.3125,
+          "contribution": -2.35308837890625,
+          "w2_dequant_f32_bits": "0xbe550000",
+          "w2_dequant_value": -0.2080078125
+        },
+        {
+          "activation_bf16_bits": "0x4176",
+          "activation_index": 212,
+          "activation_value": 15.375,
+          "contribution": 2.3437154293060303,
+          "w2_dequant_f32_bits": "0x3e1c1863",
+          "w2_dequant_value": 0.1524367779493332
+        },
+        {
+          "activation_bf16_bits": "0x4090",
+          "activation_index": 823,
+          "activation_value": 4.5,
+          "contribution": 1.9951171875,
+          "w2_dequant_f32_bits": "0x3ee30000",
+          "w2_dequant_value": 0.443359375
+        },
+        {
+          "activation_bf16_bits": "0x4203",
+          "activation_index": 536,
+          "activation_value": 32.75,
+          "contribution": -1.9829100370407104,
+          "w2_dequant_f32_bits": "0xbd77ffff",
+          "w2_dequant_value": -0.0605468712747097
+        },
+        {
+          "activation_bf16_bits": "0x4199",
+          "activation_index": 1566,
+          "activation_value": 19.125,
+          "contribution": -1.9527587890625,
+          "w2_dequant_f32_bits": "0xbdd11c72",
+          "w2_dequant_value": -0.1021050363779068
+        }
+      ]
+    },
+    {
+      "absolute_row": 1848,
+      "bf16_output_col": 868.0,
+      "expert": 60,
+      "gather_src": 445,
+      "gather_weight": 0.5816177129745483,
+      "hqq_gpu_output_col": 884.0,
+      "is_requested_worst_global_row": false,
+      "is_selected_contributor": true,
+      "krhq_dequant_output_col": 884.0,
+      "krhq_dequant_output_col_bf16_bits": "0x445d",
+      "requested_col": 1599,
+      "w13_top_dequant_contributors_for_largest_w2_term": {
+        "activation_index": 977,
+        "top_input_weight_contributors": [
+          {
+            "contribution": 2.362060546875,
+            "input_bf16_bits": "0x4196",
+            "input_index": 2550,
+            "input_value": 18.75,
+            "w13_dequant_f32_bits": "0x3e010000",
+            "w13_dequant_value": 0.1259765625
+          },
+          {
+            "contribution": -1.1730958223342896,
+            "input_bf16_bits": "0xc0f8",
+            "input_index": 1301,
+            "input_value": -7.75,
+            "w13_dequant_f32_bits": "0x3e1b0001",
+            "w13_dequant_value": 0.1513672024011612
+          },
+          {
+            "contribution": -0.61065673828125,
+            "input_bf16_bits": "0xc091",
+            "input_index": 876,
+            "input_value": -4.53125,
+            "w13_dequant_f32_bits": "0x3e0a0000",
+            "w13_dequant_value": 0.134765625
+          },
+          {
+            "contribution": 0.5694434642791748,
+            "input_bf16_bits": "0x40cc",
+            "input_index": 30,
+            "input_value": 6.375,
+            "w13_dequant_f32_bits": "0x3db6efbf",
+            "w13_dequant_value": 0.0893244668841362
+          },
+          {
+            "contribution": -0.5670263767242432,
+            "input_bf16_bits": "0x41a0",
+            "input_index": 2099,
+            "input_value": 20.0,
+            "w13_dequant_f32_bits": "0xbce84106",
+            "w13_dequant_value": -0.0283513180911541
+          },
+          {
+            "contribution": -0.5471162796020508,
+            "input_bf16_bits": "0xc0da",
+            "input_index": 1123,
+            "input_value": -6.8125,
+            "w13_dequant_f32_bits": "0x3da479e8",
+            "w13_dequant_value": 0.0803106427192688
+          },
+          {
+            "contribution": -0.5202670693397522,
+            "input_bf16_bits": "0xc121",
+            "input_index": 1890,
+            "input_value": -10.0625,
+            "w13_dequant_f32_bits": "0x3d53c71c",
+            "w13_dequant_value": 0.0517035573720932
+          },
+          {
+            "contribution": -0.5195544958114624,
+            "input_bf16_bits": "0x415a",
+            "input_index": 490,
+            "input_value": 13.625,
+            "w13_dequant_f32_bits": "0xbd1c30c3",
+            "w13_dequant_value": -0.0381324402987957
+          },
+          {
+            "contribution": 0.4572187066078186,
+            "input_bf16_bits": "0xc096",
+            "input_index": 2360,
+            "input_value": -4.6875,
+            "w13_dequant_f32_bits": "0xbdc7c30c",
+            "w13_dequant_value": -0.0975399911403656
+          },
+          {
+            "contribution": 0.4513244330883026,
+            "input_bf16_bits": "0x40a1",
+            "input_index": 855,
+            "input_value": 5.03125,
+            "w13_dequant_f32_bits": "0x3db7b6db",
+            "w13_dequant_value": 0.0897042378783226
+          },
+          {
+            "contribution": 0.4283512532711029,
+            "input_bf16_bits": "0xc08d",
+            "input_index": 134,
+            "input_value": -4.40625,
+            "w13_dequant_f32_bits": "0xbdc71861",
+            "w13_dequant_value": -0.0972144678235054
+          },
+          {
+            "contribution": -0.4268973171710968,
+            "input_bf16_bits": "0xc119",
+            "input_index": 894,
+            "input_value": -9.5625,
+            "w13_dequant_f32_bits": "0x3d36db6e",
+            "w13_dequant_value": 0.0446428582072258
+          },
+          {
+            "contribution": 0.4028989374637604,
+            "input_bf16_bits": "0x4106",
+            "input_index": 149,
+            "input_value": 8.375,
+            "w13_dequant_f32_bits": "0x3d450c33",
+            "w13_dequant_value": 0.0481073372066021
+          },
+          {
+            "contribution": 0.3768703043460846,
+            "input_bf16_bits": "0xc0e2",
+            "input_index": 1936,
+            "input_value": -7.0625,
+            "w13_dequant_f32_bits": "0xbd5a924a",
+            "w13_dequant_value": -0.0533621683716774
+          },
+          {
+            "contribution": 0.35455322265625,
+            "input_bf16_bits": "0xc01d",
+            "input_index": 2217,
+            "input_value": -2.453125,
+            "w13_dequant_f32_bits": "0xbe140000",
+            "w13_dequant_value": -0.14453125
+          },
+          {
+            "contribution": 0.3411255180835724,
+            "input_bf16_bits": "0xc038",
+            "input_index": 998,
+            "input_value": -2.875,
+            "w13_dequant_f32_bits": "0xbdf30001",
+            "w13_dequant_value": -0.1186523512005806
+          }
+        ]
+      },
+      "w2_requested_col_top_dequant_contributors": [
+        {
+          "activation_bf16_bits": "0x43ed",
+          "activation_index": 977,
+          "activation_value": 474.0,
+          "contribution": 577.6875,
+          "w2_dequant_f32_bits": "0x3f9c0000",
+          "w2_dequant_value": 1.21875
+        },
+        {
+          "activation_bf16_bits": "0x4356",
+          "activation_index": 145,
+          "activation_value": 214.0,
+          "contribution": 332.703125,
+          "w2_dequant_f32_bits": "0x3fc70000",
+          "w2_dequant_value": 1.5546875
+        },
+        {
+          "activation_bf16_bits": "0x4223",
+          "activation_index": 1017,
+          "activation_value": 40.75,
+          "contribution": 6.40824556350708,
+          "w2_dequant_f32_bits": "0x3e210820",
+          "w2_dequant_value": 0.1572575569152832
+        },
+        {
+          "activation_bf16_bits": "0x41d0",
+          "activation_index": 1809,
+          "activation_value": 26.0,
+          "contribution": -4.156807899475098,
+          "w2_dequant_f32_bits": "0xbe23b6db",
+          "w2_dequant_value": -0.1598772257566452
+        },
+        {
+          "activation_bf16_bits": "0x41dc",
+          "activation_index": 775,
+          "activation_value": 27.5,
+          "contribution": 2.554253578186035,
+          "w2_dequant_f32_bits": "0x3dbe38e4",
+          "w2_dequant_value": 0.0928819477558136
+        },
+        {
+          "activation_bf16_bits": "0x4199",
+          "activation_index": 684,
+          "activation_value": 19.125,
+          "contribution": -2.328369379043579,
+          "w2_dequant_f32_bits": "0xbdf95557",
+          "w2_dequant_value": -0.121744804084301
+        },
+        {
+          "activation_bf16_bits": "0x41a0",
+          "activation_index": 61,
+          "activation_value": 20.0,
+          "contribution": 2.128906488418579,
+          "w2_dequant_f32_bits": "0x3dda0002",
+          "w2_dequant_value": 0.1064453274011612
+        },
+        {
+          "activation_bf16_bits": "0x4148",
+          "activation_index": 1195,
+          "activation_value": 12.5,
+          "contribution": -2.1158852577209473,
+          "w2_dequant_f32_bits": "0xbe2d5555",
+          "w2_dequant_value": -0.1692708283662796
+        },
+        {
+          "activation_bf16_bits": "0x41be",
+          "activation_index": 1597,
+          "activation_value": 23.75,
+          "contribution": -2.1080188751220703,
+          "w2_dequant_f32_bits": "0xbdb5c71d",
+          "w2_dequant_value": -0.088758684694767
+        },
+        {
+          "activation_bf16_bits": "0x414f",
+          "activation_index": 101,
+          "activation_value": 12.9375,
+          "contribution": -2.1006991863250732,
+          "w2_dequant_f32_bits": "0xbe264514",
+          "w2_dequant_value": -0.162372887134552
+        },
+        {
+          "activation_bf16_bits": "0x413b",
+          "activation_index": 1468,
+          "activation_value": 11.6875,
+          "contribution": -2.0499141216278076,
+          "w2_dequant_f32_bits": "0xbe339a6a",
+          "w2_dequant_value": -0.1753937304019928
+        },
+        {
+          "activation_bf16_bits": "0x425f",
+          "activation_index": 147,
+          "activation_value": 55.75,
+          "contribution": -2.0325515270233154,
+          "w2_dequant_f32_bits": "0xbd155553",
+          "w2_dequant_value": -0.036458324640989304
+        },
+        {
+          "activation_bf16_bits": "0x4135",
+          "activation_index": 234,
+          "activation_value": 11.3125,
+          "contribution": 2.010620355606079,
+          "w2_dequant_f32_bits": "0x3e360001",
+          "w2_dequant_value": 0.1777343899011612
+        },
+        {
+          "activation_bf16_bits": "0x41da",
+          "activation_index": 1627,
+          "activation_value": 27.25,
+          "contribution": 1.916015386581421,
+          "w2_dequant_f32_bits": "0x3d8fffff",
+          "w2_dequant_value": 0.0703124925494194
+        },
+        {
+          "activation_bf16_bits": "0x418e",
+          "activation_index": 1566,
+          "activation_value": 17.75,
+          "contribution": -1.8123643398284912,
+          "w2_dequant_f32_bits": "0xbdd11c72",
+          "w2_dequant_value": -0.1021050363779068
+        },
+        {
+          "activation_bf16_bits": "0x410a",
+          "activation_index": 843,
+          "activation_value": 8.625,
+          "contribution": -1.7940673828125,
+          "w2_dequant_f32_bits": "0xbe550000",
+          "w2_dequant_value": -0.2080078125
+        }
+      ]
+    },
+    {
+      "absolute_row": 2669,
+      "bf16_output_col": -58.5,
+      "expert": 92,
+      "gather_src": 445,
+      "gather_weight": 0.5786288976669312,
+      "hqq_gpu_output_col": -58.0,
+      "is_requested_worst_global_row": false,
+      "is_selected_contributor": true,
+      "krhq_dequant_output_col": -58.0,
+      "krhq_dequant_output_col_bf16_bits": "0xc268",
+      "requested_col": 1599,
+      "w13_top_dequant_contributors_for_largest_w2_term": {
+        "activation_index": 1552,
+        "top_input_weight_contributors": [
+          {
+            "contribution": 0.5937957763671875,
+            "input_bf16_bits": "0xc135",
+            "input_index": 1152,
+            "input_value": -11.3125,
+            "w13_dequant_f32_bits": "0xbd570000",
+            "w13_dequant_value": -0.052490234375
+          },
+          {
+            "contribution": 0.5340576171875,
+            "input_bf16_bits": "0x4196",
+            "input_index": 2550,
+            "input_value": 18.75,
+            "w13_dequant_f32_bits": "0x3ce95556",
+            "w13_dequant_value": 0.0284830741584301
+          },
+          {
+            "contribution": 0.40789031982421875,
+            "input_bf16_bits": "0xc0fb",
+            "input_index": 897,
+            "input_value": -7.84375,
+            "w13_dequant_f32_bits": "0xbd550000",
+            "w13_dequant_value": -0.052001953125
+          },
+          {
+            "contribution": 0.3640933930873871,
+            "input_bf16_bits": "0xc121",
+            "input_index": 1890,
+            "input_value": -10.0625,
+            "w13_dequant_f32_bits": "0xbd1434d4",
+            "w13_dequant_value": -0.0361831933259964
+          },
+          {
+            "contribution": -0.2712249457836151,
+            "input_bf16_bits": "0xc0e1",
+            "input_index": 166,
+            "input_value": -7.03125,
+            "w13_dequant_f32_bits": "0x3d1dffff",
+            "w13_dequant_value": 0.0385742150247097
+          },
+          {
+            "contribution": 0.2371215969324112,
+            "input_bf16_bits": "0x40b9",
+            "input_index": 1733,
+            "input_value": 5.78125,
+            "w13_dequant_f32_bits": "0x3d280001",
+            "w13_dequant_value": 0.0410156287252903
+          },
+          {
+            "contribution": 0.2254987210035324,
+            "input_bf16_bits": "0x4106",
+            "input_index": 149,
+            "input_value": 8.375,
+            "w13_dequant_f32_bits": "0x3cdc9248",
+            "w13_dequant_value": 0.0269252210855484
+          },
+          {
+            "contribution": -0.2078552097082138,
+            "input_bf16_bits": "0xc08b",
+            "input_index": 1610,
+            "input_value": -4.34375,
+            "w13_dequant_f32_bits": "0x3d43ffff",
+            "w13_dequant_value": 0.0478515587747097
+          },
+          {
+            "contribution": -0.2067238837480545,
+            "input_bf16_bits": "0x4082",
+            "input_index": 2388,
+            "input_value": 4.0625,
+            "w13_dequant_f32_bits": "0xbd506db6",
+            "w13_dequant_value": -0.0508858785033226
+          },
+          {
+            "contribution": 0.20003128051757812,
+            "input_bf16_bits": "0xc067",
+            "input_index": 2323,
+            "input_value": -3.609375,
+            "w13_dequant_f32_bits": "0xbd630000",
+            "w13_dequant_value": -0.055419921875
+          },
+          {
+            "contribution": -0.1956939846277237,
+            "input_bf16_bits": "0xc096",
+            "input_index": 2360,
+            "input_value": -4.6875,
+            "w13_dequant_f32_bits": "0x3d2b0001",
+            "w13_dequant_value": 0.0417480506002903
+          },
+          {
+            "contribution": 0.193115234375,
+            "input_bf16_bits": "0x4060",
+            "input_index": 334,
+            "input_value": 3.5,
+            "w13_dequant_f32_bits": "0x3d620000",
+            "w13_dequant_value": 0.05517578125
+          },
+          {
+            "contribution": 0.1828257292509079,
+            "input_bf16_bits": "0xc0c3",
+            "input_index": 2509,
+            "input_value": -6.09375,
+            "w13_dequant_f32_bits": "0xbcf5c71d",
+            "w13_dequant_value": -0.03000217117369175
+          },
+          {
+            "contribution": 0.180998295545578,
+            "input_bf16_bits": "0xc070",
+            "input_index": 445,
+            "input_value": -3.75,
+            "w13_dequant_f32_bits": "0xbd45b2cb",
+            "w13_dequant_value": -0.0482662133872509
+          },
+          {
+            "contribution": -0.17749786376953125,
+            "input_bf16_bits": "0x408d",
+            "input_index": 251,
+            "input_value": 4.40625,
+            "w13_dequant_f32_bits": "0xbd250000",
+            "w13_dequant_value": -0.040283203125
+          },
+          {
+            "contribution": 0.1766168177127838,
+            "input_bf16_bits": "0x415a",
+            "input_index": 490,
+            "input_value": 13.625,
+            "w13_dequant_f32_bits": "0x3c546183",
+            "w13_dequant_value": 0.012962701730430126
+          }
+        ]
+      },
+      "w2_requested_col_top_dequant_contributors": [
+        {
+          "activation_bf16_bits": "0x427c",
+          "activation_index": 1552,
+          "activation_value": 63.0,
+          "contribution": -8.517578125,
+          "w2_dequant_f32_bits": "0xbe0a71c7",
+          "w2_dequant_value": -0.1351996511220932
+        },
+        {
+          "activation_bf16_bits": "0x4221",
+          "activation_index": 1835,
+          "activation_value": 40.25,
+          "contribution": -6.867432117462158,
+          "w2_dequant_f32_bits": "0xbe2eb6dc",
+          "w2_dequant_value": -0.1706194281578064
+        },
+        {
+          "activation_bf16_bits": "0x4244",
+          "activation_index": 411,
+          "activation_value": 49.0,
+          "contribution": 3.199218511581421,
+          "w2_dequant_f32_bits": "0x3d85b6db",
+          "w2_dequant_value": 0.0652901753783226
+        },
+        {
+          "activation_bf16_bits": "0x4224",
+          "activation_index": 1397,
+          "activation_value": 41.0,
+          "contribution": -2.5297696590423584,
+          "w2_dequant_f32_bits": "0xbd7cbaeb",
+          "w2_dequant_value": -0.0617016963660717
+        },
+        {
+          "activation_bf16_bits": "0x41e2",
+          "activation_index": 704,
+          "activation_value": 28.25,
+          "contribution": -2.464517831802368,
+          "w2_dequant_f32_bits": "0xbdb2aaa9",
+          "w2_dequant_value": -0.087239570915699
+        },
+        {
+          "activation_bf16_bits": "0x41ad",
+          "activation_index": 1721,
+          "activation_value": 21.625,
+          "contribution": -2.3984200954437256,
+          "w2_dequant_f32_bits": "0xbde32493",
+          "w2_dequant_value": -0.110909603536129
+        },
+        {
+          "activation_bf16_bits": "0x42bc",
+          "activation_index": 456,
+          "activation_value": 94.0,
+          "contribution": -2.3765194416046143,
+          "w2_dequant_f32_bits": "0xbccf1c74",
+          "w2_dequant_value": -0.025282122194767
+        },
+        {
+          "activation_bf16_bits": "0x4197",
+          "activation_index": 738,
+          "activation_value": 18.875,
+          "contribution": 2.313732624053955,
+          "w2_dequant_f32_bits": "0x3dfb0c33",
+          "w2_dequant_value": 0.1225818619132042
+        },
+        {
+          "activation_bf16_bits": "0x41b7",
+          "activation_index": 315,
+          "activation_value": 22.875,
+          "contribution": -2.2413330078125,
+          "w2_dequant_f32_bits": "0xbdc8aaab",
+          "w2_dequant_value": -0.0979817733168602
+        },
+        {
+          "activation_bf16_bits": "0x41b2",
+          "activation_index": 1161,
+          "activation_value": 22.25,
+          "contribution": 2.1542272567749023,
+          "w2_dequant_f32_bits": "0x3dc64925",
+          "w2_dequant_value": 0.0968191996216774
+        },
+        {
+          "activation_bf16_bits": "0x41c6",
+          "activation_index": 45,
+          "activation_value": 24.75,
+          "contribution": -2.0532925128936768,
+          "w2_dequant_f32_bits": "0xbda9e79f",
+          "w2_dequant_value": -0.0829613134264946
+        },
+        {
+          "activation_bf16_bits": "0x4186",
+          "activation_index": 731,
+          "activation_value": 16.75,
+          "contribution": -2.0470142364501953,
+          "w2_dequant_f32_bits": "0xbdfa4923",
+          "w2_dequant_value": -0.1222098097205162
+        },
+        {
+          "activation_bf16_bits": "0x41d2",
+          "activation_index": 1250,
+          "activation_value": 26.25,
+          "contribution": -1.986083745956421,
+          "w2_dequant_f32_bits": "0xbd9af3ce",
+          "w2_dequant_value": -0.0756603330373764
+        },
+        {
+          "activation_bf16_bits": "0x41fd",
+          "activation_index": 1033,
+          "activation_value": 31.625,
+          "contribution": -1.9015591144561768,
+          "w2_dequant_f32_bits": "0xbd764925",
+          "w2_dequant_value": -0.0601283498108387
+        },
+        {
+          "activation_bf16_bits": "0x415b",
+          "activation_index": 1708,
+          "activation_value": 13.6875,
+          "contribution": 1.871337890625,
+          "w2_dequant_f32_bits": "0x3e0c0000",
+          "w2_dequant_value": 0.13671875
+        },
+        {
+          "activation_bf16_bits": "0x41c1",
+          "activation_index": 1065,
+          "activation_value": 24.125,
+          "contribution": -1.8342807292938232,
+          "w2_dequant_f32_bits": "0xbd9bb6db",
+          "w2_dequant_value": -0.0760323628783226
+        }
+      ]
+    }
+  ],
+  "selected_routed": {
+    "bf16_value": 485.82693196833134,
+    "bf16_vs_hqq_gpu_abs": 9.10776762664318,
+    "bf16_vs_krhq_abs": 9.10776762664318,
+    "contributor_rows": 6,
+    "hqq_gpu_value": 494.9346995949745,
+    "hqq_gpu_vs_krhq_abs": 0.0,
+    "krhq_dequant_value": 494.9346995949745
+  },
+  "spec_path": "/home/main/Documents/Claude/krasis-nemotron-dev/benchmarks/20260626_2208_nemotron_nano_diagnostic_hqq_prefill_all_moe_layers_correctness_diagnostic_cache_spec.json"
+}

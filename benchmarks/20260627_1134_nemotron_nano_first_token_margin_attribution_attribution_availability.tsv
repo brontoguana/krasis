@@ -1,0 +1,9 @@
+item	available	scope	evidence	limitation_or_missing_requirement
+target_token_topk_margin	true	cases 0 and 2, BF16/HQQ6 g64/HQQ6 g32	Saved responses contain top-10 raw logits/logprobs for tokens 1044 and 1321.	Sufficient for token-level margin, rank, selected-token, and top-k movement.
+case2_hqq6_g64_quantization_attribution	true	case 2, HQQ6 g64, layer 51 expert 60	0640 exact-row attribution proves HQQ GPU equals KRHQ/HQQ6 offline and worst row is BF16 1072.0 vs HQQ 1104.0.	This attributes an expert-output/routed-value delta, not the final token 1044-vs-1321 logit margin.
+case2_hqq6_g64_boundary_layer_summaries	true	case 2, HQQ6 g64	0524 sync layer summary captures BF16 expert_out, HQQ copied expert_out, routed scatter summaries, and post-output conversion.	Summaries/top-N only; not a projection onto token 1044 vs 1321 margin.
+case0_hqq6_g64_boundary_attribution	false	case 0, HQQ6 g64	Saved quality response has top-k/logit trace and HQQ consume rows.	No BF16-vs-HQQ consume-boundary per-layer delta capture for case 0.
+case0_or_case2_hqq6_g32_boundary_attribution	false	cases 0 and 2, HQQ6 g32	Saved quality responses have top-k/logit traces and HQQ consume rows.	No BF16-vs-HQQ per-layer/expert delta capture for HQQ6 g32.
+lm_head_target_rows_1044_1321	false	all target cases/variants	Trace records LM-head kind and weight shape only.	Missing exact LM-head rows or row-difference vector for tokens 1044 and 1321.
+full_final_hidden_vector	false	all target cases/variants	Trace records hashes, stats, and sparse samples for final_hidden_before_lm_head.	Missing full selected-row hidden vector needed for exact token-margin projection.
+per_layer_hidden_delta_projection	false	all target cases/variants	No saved artifact gives per-layer selected-row hidden deltas projected through LM-head token row difference.	Required to attribute final token margin movement to layers/experts instead of only observing final top-k movement.

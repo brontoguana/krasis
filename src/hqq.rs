@@ -213,7 +213,10 @@ fn solve_fixed_zero_row(chunk: &[f32], zero: f32, scale_seed: f32) -> (Vec<u8>, 
             scale = scale.max(HQQ4_SCALE_EPS);
         }
     }
-    (quantize_row_with_scale_zero_solve(chunk, scale, zero), scale)
+    (
+        quantize_row_with_scale_zero_solve(chunk, scale, zero),
+        scale,
+    )
 }
 
 fn solve_fixed_zero_row_into(chunk: &[f32], zero: f32, scale_seed: f32, q: &mut [u8]) -> f32 {
@@ -252,13 +255,15 @@ fn update_best_group_fit(
             let mut candidate_q = vec![0u8; chunk_cols];
             for &(zero_grid, scale_seed) in phases {
                 for &zero in zero_grid {
-                    let scale = solve_fixed_zero_row_into(row, zero, scale_seed[row_idx], &mut candidate_q);
+                    let scale =
+                        solve_fixed_zero_row_into(row, zero, scale_seed[row_idx], &mut candidate_q);
                     let rmse = compute_rmse_from_quantized_row(row, &candidate_q, scale, zero);
                     if rmse < local_best_rmse {
                         local_best_rmse = rmse;
                         local_best_scale = scale;
                         local_best_zero = zero;
-                        let best_candidate = local_best_q.get_or_insert_with(|| vec![0u8; chunk_cols]);
+                        let best_candidate =
+                            local_best_q.get_or_insert_with(|| vec![0u8; chunk_cols]);
                         best_candidate.copy_from_slice(&candidate_q);
                     }
                 }
@@ -283,7 +288,11 @@ fn update_best_group_fit(
     }
 }
 
-fn refine_group_fit(chunk: &[f32], rows: usize, chunk_cols: usize) -> (Vec<u8>, Vec<f32>, Vec<f32>) {
+fn refine_group_fit(
+    chunk: &[f32],
+    rows: usize,
+    chunk_cols: usize,
+) -> (Vec<u8>, Vec<f32>, Vec<f32>) {
     let init_rows: Vec<(Vec<u8>, f32, f32, f32)> = (0..rows)
         .into_par_iter()
         .map(|row_idx| {
@@ -325,7 +334,10 @@ fn refine_group_fit(chunk: &[f32], rows: usize, chunk_cols: usize) -> (Vec<u8>, 
         chunk,
         rows,
         chunk_cols,
-        &[(&global_zero_grid, &range_scale), (&global_zero_grid, &abs_scale)],
+        &[
+            (&global_zero_grid, &range_scale),
+            (&global_zero_grid, &abs_scale),
+        ],
         &mut best_q,
         &mut best_scale,
         &mut best_zero,
@@ -365,6 +377,98 @@ fn quantize_group_current_rows(chunk: &[f32], rows: usize, chunk_cols: usize) ->
             RowInit { q, scale, zero }
         })
         .collect()
+}
+
+pub(crate) fn hqq4_quantize_tensor_to_components(
+    input: &[f32],
+    rows: usize,
+    cols: usize,
+    group_size: usize,
+    inner_threads: Option<usize>,
+) -> Result<(Vec<u8>, Vec<f32>, Vec<f32>), String> {
+    if rows == 0 || cols == 0 {
+        return Err("HQQ Rust quantizer expects positive rows and cols".to_string());
+    }
+    if group_size == 0 {
+        return Err("HQQ Rust quantizer expects positive group_size".to_string());
+    }
+    let input_len = rows
+        .checked_mul(cols)
+        .ok_or_else(|| "rows * cols overflowed".to_string())?;
+    if input.len() != input_len {
+        return Err(format!(
+            "HQQ Rust quantizer input length {} != rows*cols {}",
+            input.len(),
+            input_len
+        ));
+    }
+
+    let groups = hqq_num_groups(cols, group_size);
+    let padded_cols = hqq_padded_cols(cols, group_size);
+    let packed_cols = hqq_packed_cols(cols, group_size);
+    let packed_len = rows
+        .checked_mul(packed_cols)
+        .ok_or_else(|| "rows * packed_cols overflowed".to_string())?;
+    let group_meta_len = rows
+        .checked_mul(groups)
+        .ok_or_else(|| "rows * groups overflowed".to_string())?;
+
+    let mut scales = vec![0.0f32; group_meta_len];
+    let mut zeros = vec![0.0f32; group_meta_len];
+    let mut packed = vec![0u8; packed_len];
+    let mut quant = vec![0u8; rows * padded_cols];
+    let mut run_quantize = || {
+        for group_idx in 0..groups {
+            let start = group_idx * group_size;
+            let end = (start + group_size).min(cols);
+            let chunk_cols = end - start;
+            let mut chunk = vec![0.0f32; rows * chunk_cols];
+            for row_idx in 0..rows {
+                let src_start = row_idx * cols + start;
+                let src_end = src_start + chunk_cols;
+                let dst_start = row_idx * chunk_cols;
+                let dst_end = dst_start + chunk_cols;
+                chunk[dst_start..dst_end].copy_from_slice(&input[src_start..src_end]);
+            }
+
+            let (best_q, best_scale, best_zero) = refine_group_fit(&chunk, rows, chunk_cols);
+            for row_idx in 0..rows {
+                let quant_row_offset = row_idx * padded_cols + start;
+                let q_src_offset = row_idx * chunk_cols;
+                let q_src_end = q_src_offset + chunk_cols;
+                quant[quant_row_offset..quant_row_offset + chunk_cols]
+                    .copy_from_slice(&best_q[q_src_offset..q_src_end]);
+                scales[row_idx * groups + group_idx] = best_scale[row_idx];
+                zeros[row_idx * groups + group_idx] = best_zero[row_idx];
+            }
+        }
+    };
+
+    if let Some(thread_count) = inner_threads.filter(|&n| n > 0) {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(thread_count)
+            .build()
+            .map_err(|exc| format!("failed to build HQQ4 local rayon pool: {exc}"))?
+            .install(run_quantize);
+    } else {
+        run_quantize();
+    }
+
+    for row_idx in 0..rows {
+        let quant_row = &quant[(row_idx * padded_cols)..((row_idx + 1) * padded_cols)];
+        let packed_row = &mut packed[(row_idx * packed_cols)..((row_idx + 1) * packed_cols)];
+        for out_idx in 0..packed_cols {
+            let lo = quant_row[out_idx * 2] & 0x0f;
+            let hi = if out_idx * 2 + 1 < padded_cols {
+                (quant_row[out_idx * 2 + 1] & 0x0f) << 4
+            } else {
+                0
+            };
+            packed_row[out_idx] = lo | hi;
+        }
+    }
+
+    Ok((packed, scales, zeros))
 }
 
 #[cfg(has_hqq_search_kernels)]
@@ -424,7 +528,9 @@ unsafe fn launch_kernel(
 fn load_hqq_search_func(device: &Arc<CudaDevice>, name: &str) -> PyResult<RawCuFunc> {
     let func = device
         .get_func(HQQ_SEARCH_MODULE_NAME, name)
-        .ok_or_else(|| PyRuntimeError::new_err(format!("HQQ CUDA search kernel not found: {name}")))?;
+        .ok_or_else(|| {
+            PyRuntimeError::new_err(format!("HQQ CUDA search kernel not found: {name}"))
+        })?;
     Ok(extract_cu_func(&func))
 }
 
@@ -546,7 +652,9 @@ fn hqq_search_cuda_tensor_ptr_impl(
     device_idx: usize,
 ) -> PyResult<()> {
     if input_ptr == 0 || quant_ptr == 0 || scales_ptr == 0 || zeros_ptr == 0 {
-        return Err(PyValueError::new_err("HQQ CUDA search received a null pointer"));
+        return Err(PyValueError::new_err(
+            "HQQ CUDA search received a null pointer",
+        ));
     }
     if rows == 0 || cols == 0 || group_size == 0 {
         return Err(PyValueError::new_err(
@@ -554,7 +662,9 @@ fn hqq_search_cuda_tensor_ptr_impl(
         ));
     }
     if !matches!(nbits, 4 | 6 | 8) {
-        return Err(PyValueError::new_err("HQQ CUDA search supports nbits 4, 6, or 8"));
+        return Err(PyValueError::new_err(
+            "HQQ CUDA search supports nbits 4, 6, or 8",
+        ));
     }
     if group_size > 256 {
         return Err(PyValueError::new_err(
@@ -573,10 +683,14 @@ fn hqq_search_cuda_tensor_ptr_impl(
         .checked_mul(groups)
         .ok_or_else(|| PyValueError::new_err("rows * groups overflowed"))?;
     if row_groups > u32::MAX as usize {
-        return Err(PyValueError::new_err("HQQ CUDA search grid exceeds u32::MAX"));
+        return Err(PyValueError::new_err(
+            "HQQ CUDA search grid exceeds u32::MAX",
+        ));
     }
     if groups > u32::MAX as usize {
-        return Err(PyValueError::new_err("HQQ CUDA search group grid exceeds u32::MAX"));
+        return Err(PyValueError::new_err(
+            "HQQ CUDA search group grid exceeds u32::MAX",
+        ));
     }
 
     let device = CudaDevice::new(device_idx)
@@ -652,8 +766,13 @@ fn hqq_search_cuda_tensor_ptr_impl(
             &mut b_local_max as *mut _ as *mut std::ffi::c_void,
         ];
         unsafe {
-            launch_kernel(bounds_func, groups as u32, bounds_block_x, &mut bounds_params)
-                .map_err(PyRuntimeError::new_err)?;
+            launch_kernel(
+                bounds_func,
+                groups as u32,
+                bounds_block_x,
+                &mut bounds_params,
+            )
+            .map_err(PyRuntimeError::new_err)?;
         }
 
         let mut l_input = input_ptr as u64;
@@ -711,10 +830,14 @@ pub fn hqq4_init_group_ptr(
     zeros_ptr: usize,
 ) -> PyResult<()> {
     if input_ptr == 0 || q_ptr == 0 || scales_ptr == 0 || zeros_ptr == 0 {
-        return Err(PyValueError::new_err("HQQ Rust init received a null pointer"));
+        return Err(PyValueError::new_err(
+            "HQQ Rust init received a null pointer",
+        ));
     }
     if rows == 0 || cols == 0 {
-        return Err(PyValueError::new_err("HQQ Rust init expects positive rows and cols"));
+        return Err(PyValueError::new_err(
+            "HQQ Rust init expects positive rows and cols",
+        ));
     }
 
     let input_len = rows
@@ -746,16 +869,15 @@ pub fn hqq4_solve_group_ptr(
     q_ptr: usize,
     scales_ptr: usize,
 ) -> PyResult<()> {
-    if input_ptr == 0
-        || zero_ptr == 0
-        || scale_seed_ptr == 0
-        || q_ptr == 0
-        || scales_ptr == 0
-    {
-        return Err(PyValueError::new_err("HQQ Rust solve received a null pointer"));
+    if input_ptr == 0 || zero_ptr == 0 || scale_seed_ptr == 0 || q_ptr == 0 || scales_ptr == 0 {
+        return Err(PyValueError::new_err(
+            "HQQ Rust solve received a null pointer",
+        ));
     }
     if rows == 0 || cols == 0 {
-        return Err(PyValueError::new_err("HQQ Rust solve expects positive rows and cols"));
+        return Err(PyValueError::new_err(
+            "HQQ Rust solve expects positive rows and cols",
+        ));
     }
 
     let input_len = rows
@@ -794,16 +916,15 @@ pub fn hqq4_rmse_group_ptr(
     zeros_ptr: usize,
     rmse_ptr: usize,
 ) -> PyResult<()> {
-    if input_ptr == 0
-        || q_ptr == 0
-        || scales_ptr == 0
-        || zeros_ptr == 0
-        || rmse_ptr == 0
-    {
-        return Err(PyValueError::new_err("HQQ Rust RMSE received a null pointer"));
+    if input_ptr == 0 || q_ptr == 0 || scales_ptr == 0 || zeros_ptr == 0 || rmse_ptr == 0 {
+        return Err(PyValueError::new_err(
+            "HQQ Rust RMSE received a null pointer",
+        ));
     }
     if rows == 0 || cols == 0 {
-        return Err(PyValueError::new_err("HQQ Rust RMSE expects positive rows and cols"));
+        return Err(PyValueError::new_err(
+            "HQQ Rust RMSE expects positive rows and cols",
+        ));
     }
 
     let input_len = rows
@@ -839,84 +960,35 @@ fn hqq4_quantize_tensor_impl(
     inner_threads: Option<usize>,
 ) -> PyResult<()> {
     if input_ptr == 0 || packed_ptr == 0 || scales_ptr == 0 || zeros_ptr == 0 {
-        return Err(PyValueError::new_err("HQQ Rust quantizer received a null pointer"));
+        return Err(PyValueError::new_err(
+            "HQQ Rust quantizer received a null pointer",
+        ));
     }
     if rows == 0 || cols == 0 {
-        return Err(PyValueError::new_err("HQQ Rust quantizer expects positive rows and cols"));
+        return Err(PyValueError::new_err(
+            "HQQ Rust quantizer expects positive rows and cols",
+        ));
     }
     if group_size == 0 {
-        return Err(PyValueError::new_err("HQQ Rust quantizer expects positive group_size"));
+        return Err(PyValueError::new_err(
+            "HQQ Rust quantizer expects positive group_size",
+        ));
     }
 
-    let groups = hqq_num_groups(cols, group_size);
-    let padded_cols = hqq_padded_cols(cols, group_size);
-    let packed_cols = hqq_packed_cols(cols, group_size);
     let input_len = rows
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("rows * cols overflowed"))?;
-    let packed_len = rows
-        .checked_mul(packed_cols)
-        .ok_or_else(|| PyValueError::new_err("rows * packed_cols overflowed"))?;
-    let group_meta_len = rows
-        .checked_mul(groups)
-        .ok_or_else(|| PyValueError::new_err("rows * groups overflowed"))?;
-
     let input = unsafe { std::slice::from_raw_parts(input_ptr as *const f32, input_len) };
-    let scales = unsafe { std::slice::from_raw_parts_mut(scales_ptr as *mut f32, group_meta_len) };
-    let zeros = unsafe { std::slice::from_raw_parts_mut(zeros_ptr as *mut f32, group_meta_len) };
-    let packed = unsafe { std::slice::from_raw_parts_mut(packed_ptr as *mut u8, packed_len) };
-
-    let mut quant = vec![0u8; rows * padded_cols];
-    let mut run_quantize = || {
-        for group_idx in 0..groups {
-            let start = group_idx * group_size;
-            let end = (start + group_size).min(cols);
-            let chunk_cols = end - start;
-            let mut chunk = vec![0.0f32; rows * chunk_cols];
-            for row_idx in 0..rows {
-                let src_start = row_idx * cols + start;
-                let src_end = src_start + chunk_cols;
-                let dst_start = row_idx * chunk_cols;
-                let dst_end = dst_start + chunk_cols;
-                chunk[dst_start..dst_end].copy_from_slice(&input[src_start..src_end]);
-            }
-
-            let (best_q, best_scale, best_zero) = refine_group_fit(&chunk, rows, chunk_cols);
-            for row_idx in 0..rows {
-                let quant_row_offset = row_idx * padded_cols + start;
-                let q_src_offset = row_idx * chunk_cols;
-                let q_src_end = q_src_offset + chunk_cols;
-                quant[quant_row_offset..quant_row_offset + chunk_cols]
-                    .copy_from_slice(&best_q[q_src_offset..q_src_end]);
-                scales[row_idx * groups + group_idx] = best_scale[row_idx];
-                zeros[row_idx * groups + group_idx] = best_zero[row_idx];
-            }
-        }
-    };
-
-    if let Some(thread_count) = inner_threads.filter(|&n| n > 0) {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(thread_count)
-            .build()
-            .map_err(|exc| PyRuntimeError::new_err(format!("failed to build HQQ4 local rayon pool: {exc}")))?
-            .install(run_quantize);
-    } else {
-        run_quantize();
-    }
-
-    for row_idx in 0..rows {
-        let quant_row = &quant[(row_idx * padded_cols)..((row_idx + 1) * padded_cols)];
-        let packed_row = &mut packed[(row_idx * packed_cols)..((row_idx + 1) * packed_cols)];
-        for out_idx in 0..packed_cols {
-            let lo = quant_row[out_idx * 2] & 0x0f;
-            let hi = if out_idx * 2 + 1 < padded_cols {
-                (quant_row[out_idx * 2 + 1] & 0x0f) << 4
-            } else {
-                0
-            };
-            packed_row[out_idx] = lo | hi;
-        }
-    }
+    let (packed_out, scales_out, zeros_out) =
+        hqq4_quantize_tensor_to_components(input, rows, cols, group_size, inner_threads)
+            .map_err(PyRuntimeError::new_err)?;
+    let packed = unsafe { std::slice::from_raw_parts_mut(packed_ptr as *mut u8, packed_out.len()) };
+    let scales =
+        unsafe { std::slice::from_raw_parts_mut(scales_ptr as *mut f32, scales_out.len()) };
+    let zeros = unsafe { std::slice::from_raw_parts_mut(zeros_ptr as *mut f32, zeros_out.len()) };
+    packed.copy_from_slice(&packed_out);
+    scales.copy_from_slice(&scales_out);
+    zeros.copy_from_slice(&zeros_out);
 
     Ok(())
 }

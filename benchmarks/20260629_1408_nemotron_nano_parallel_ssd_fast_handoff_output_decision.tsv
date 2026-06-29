@@ -1,0 +1,2 @@
+decision	result	next_target
+guarded_fast_handoff_output	token/logit correct and fast scaffold removed; not production-enabled	output/chunk-scan kernel remains dominant at 627.436ms avg out of 656.022ms

@@ -1,0 +1,3 @@
+decision	evidence	next_step
+not_correctness_accepted	The opt-in block-scan candidate preserved final state exactly and the row64/state0 plus row82/state14 probes matched, but full output oracle found 3 BF16 mismatches; first mismatch row=97 head=48 d=24 candidate 0xc233 vs oracle 0xc234 with abs error 0.25.	Stop before long diagnostic; next gate should analyze output assembly replay math around row97/head48/d24, especially direct replay c_state_total/local_old_state ordering in the separated output kernel.
+no_long_timing	The user requested one long startup diagnostic only if exact correctness passed; small oracle failed closed.	Do not run long timing in this gate.

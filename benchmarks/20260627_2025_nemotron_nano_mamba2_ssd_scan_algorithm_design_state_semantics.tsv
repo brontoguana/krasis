@@ -1,0 +1,11 @@
+item	formula_or_rule	source	implementation_requirement
+dt_softplus	dt_h[t] = softplus(dt[t,h] + dt_bias[h]) when use_softplus=1	src/cuda/prefill_kernels.cu:42	Use same helper/cast order as sequential.
+dA_prefix	prefix_h[i] = sum_{r=0..i} A_val[h] * dt_h[r]	src/cuda/prefill_kernels.cu:72	Compute inclusive per-head prefix inside chunk.
+chunk_entry_state	h0[h,d,s] = ssm_state[h,d,s] at chunk entry	src/cuda/prefill_kernels.cu:4995	Do not update ssm_state until all output for the chunk has read h0.
+local_cb	CB_g[t,u] = sum_s C[t,g,s] * B[u,g,s] in reverse s order	src/cuda/prefill_kernels.cu:56	Compute once per group,t,u and reuse across heads/head_dim.
+local_decay	decay_h[t,u] = 1 when u=t else exp(min(prefix_h[t] - prefix_h[u], 0))	src/cuda/prefill_kernels.cu:5074	Compute from per-head prefix; no dependence on d.
+local_emission	local[h,t,d] = sum_{u<=t} BF16(CB_g[t,u] * decay_h[t,u] * dt_h[u]) * x[u,h,d]	src/cuda/prefill_kernels.cu:5090	Preserve BF16 cast before multiplying by x.
+prior_state	prior[h,t,d] = 0 for first chunk else exp(prefix_h[t]) * sum_s C[t,g,s] * h0[h,d,s]	src/cuda/prefill_kernels.cu:5099	Compute directly; do not reproduce current c_state_total minus local_old_state workaround.
+output	y[h,t,d] = D[h] * x[t,h,d] + prior[h,t,d] + local[h,t,d]	src/cuda/prefill_kernels.cu:5100	Store BF16 to existing SSD output layout [L,n_heads,head_dim].
+state_update	h_end[h,d,s] = exp(prefix_h[last]) * h0[h,d,s] + sum_u exp(prefix_h[last] - prefix_h[u]) * BF16(B[u,g,s] * dt_h[u]) * x[u,h,d]	src/cuda/prefill_kernels.cu:5037	Write ssm_state only after output kernel completes for the chunk.
+chunk_carry	Next chunk h0 is previous chunk h_end	src/cuda/prefill_shim.h:323	Host/Rust loop over chunks remains sequential in first implementation.

@@ -1,0 +1,98 @@
+{
+  "gate": "20260627_1711_nemotron_nano_marlin_expert_cache_reuse_prerequisite",
+  "status": "closed_cache_reuse_failed_before_ready",
+  "opened_utc": "2026-06-27T17:11:48Z",
+  "closed_utc": "2026-06-27T17:14:54Z",
+  "record_first": {
+    "source_gate": "20260627_1701_nemotron_nano_hqq4_k4v4_non_attribution_smoke",
+    "tests_only_config": "tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+    "hqq_attention_cache_validated": true,
+    "hqq_attention_validation_line": "HQQ attention artifacts validated (115 MB cached), 27940 MB free",
+    "normal_server_generated_marlin_expert_cache_before_ready": true,
+    "marlin_generation_line": "GPU INT4 Marlin cache built: 15.8 GB in 42s",
+    "marlin_artifact_path": "/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/experts_marlin_int4_g64_calamax.bin",
+    "marlin_artifact_bytes": 15849200704,
+    "server_ready": false,
+    "exit_code": 137,
+    "requests_sent": 0,
+    "case_2_sent": false,
+    "smoke_result_available": false
+  },
+  "scope": {
+    "use_existing_artifacts_first": true,
+    "verify_marlin_cache_complete_final": true,
+    "verify_no_tmp_files": true,
+    "command": "./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+    "forbidden_flags": ["--build-cache", "--force-rebuild-hqq-cache"],
+    "attribution_checkpoint_envs_off": true,
+    "stop_after_ready_or_cache_write": true,
+    "send_smoke_requests": false,
+    "forbidden_work": [
+      "smoke_requests",
+      "cache_generation_intent",
+      "benchmarks",
+      "decode_hcs",
+      "production_enablement",
+      "source_changes"
+    ]
+  },
+  "pre_gate_snapshot": {
+    "utc": "2026-06-27T17:11:48Z",
+    "disk_available": "589G",
+    "ram_available": "966Gi",
+    "gpu_memory": "15 MB / 11 MB"
+  },
+  "cache_inventory": {
+    "pre_run_g128_final_present": false,
+    "pre_run_tmp_files_present": false,
+    "pre_run_g64_calamax_present": true,
+    "pre_run_g64_calamax_bytes": 15849200704,
+    "detected_partial_g128_tmp_bytes": 11531751232,
+    "detected_partial_g128_lock_bytes": 7,
+    "partial_g128_tmp_and_lock_removed": true,
+    "post_cleanup_tmp_files_present": false
+  },
+  "runtime": {
+    "command": "./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+    "tmux_session": "nano_marlin_reuse",
+    "server_log": "benchmarks/20260627_1711_nemotron_nano_marlin_expert_cache_reuse_prerequisite_server.log",
+    "exit_code": 137,
+    "server_ready": false,
+    "requests_sent": 0,
+    "case_2_sent": false,
+    "hqq_attention_cache_validated": true,
+    "hqq_attention_validation_line": "HQQ attention artifacts validated (115 MB cached), 27940 MB free",
+    "cache_write_detected": true,
+    "cache_write_lines": [
+      "Building GPU INT4 Marlin expert cache (one-time)",
+      "Building GPU INT4 Marlin cache: 23 layers from safetensors"
+    ]
+  },
+  "decision": {
+    "result": "do_not_run_smoke",
+    "reason": "The exact g128 Marlin expert cache expected by this config was not present as a final file; startup attempted to build it before READY. HQQ attention cache reuse is proven, but Marlin expert-cache reuse is not.",
+    "required_next_gate": "Create/verify the final experts_marlin_int4_g128_calamax.bin through a built cache path, then repeat this reuse prerequisite before smoke requests."
+  },
+  "validation": {
+    "summary_assertion": "pass",
+    "runtime_tsv_assertion": "pass",
+    "startup_cache_tsv_assertion": "pass",
+    "no_request_evidence": "pass",
+    "cache_tmp_cleanup": "pass",
+    "bash_n_dev": "pass",
+    "git_diff_check_krasis": "pass",
+    "git_diff_check_internal": "pass",
+    "protected_config_check": "pass",
+    "idle_state": "pass"
+  },
+  "cleanup": {
+    "final_snapshot_utc": "2026-06-27T17:16:54Z",
+    "tmux_server": "none",
+    "matching_runtime_process": "none",
+    "nvidia_compute_process": "none",
+    "gpu_memory": "15 MB / 11 MB",
+    "disk_available": "589G",
+    "ram_available": "966Gi",
+    "cache_tmp_files_remaining": false
+  }
+}

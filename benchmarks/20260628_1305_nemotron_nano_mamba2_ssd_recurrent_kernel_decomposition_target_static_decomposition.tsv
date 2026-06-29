@@ -1,0 +1,7 @@
+phase	current_instrumentation	static_work_units_39920	static_evidence	exactness_notes
+entry_state_snapshot	none inside recurrent kernel	327155712 f32 copies	624 chunks * 4096 d_inner * 128 state_size	Must keep exact chunk-entry values and timing-only instrumentation must not change writes.
+dt_A_x_setup	none inside recurrent kernel	163512320 row-lanes	39920 tokens * 4096 d_inner, includes softplus/dt bias, expf, x load	Do not change dt/A_bar computation or BF16 input loads in this gate.
+state_recurrence_update	none inside recurrent kernel	20929576960 state elements	39920 tokens * 4096 d_inner * 128 state_size, B load, BF16(B*dt), h update	Accepted state source; no affine summaries or altered f32 order.
+c_state_total_dot	none inside recurrent kernel	20929576960 state elements	39920 tokens * 4096 d_inner * 128 state_size, C load, C*h accumulation	Feeds accepted c_state_total_exact; must preserve f32 accumulation order.
+c_state_total_store	none inside recurrent kernel	163512320 f32 stores	One c_state_total_exact value per token/head/d lane	Preserve c_state_total_exact buffer consumed by coeff-tile output.
+kernel_overhead_sync	whole-kernel host timing only	23 records, avg recurrent 716.036155ms	Launch submit is negligible; sync_wait absorbs all device work	Need in-kernel clock64 split to explain cost.

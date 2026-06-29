@@ -38,6 +38,8 @@
 #   ./dev hqq-attn-diff <model>     Offline HQQ attention artifact diff against BF16 source
 #   ./dev hqq-self-calibrate <config>  Capture self-calibration evidence / candidates only
 #   ./dev hqq-gpu-search-probe       Prototype GPU HQQ candidate-search timing/quality
+#   ./dev expert-hqq-cache-generate <manifest.json>  Generate KRHQ cache from explicit manifest
+#   ./dev expert-hqq-trace-compare <trace.json> <spec.json> <metrics.tsv>  Compare diagnostic HQQ trace export offline
 #   ./dev capture-box <subcommand>  ARCHIVED HF capture wrapper; requires explicit override
 #   ./dev capture-preflight         ARCHIVED HF capture host preflight; requires explicit override
 #   ./dev reference-prep <model>    ARCHIVED HF dependency/model prep; requires explicit override
@@ -1269,10 +1271,106 @@ do_test_kernels() {
     cd "$SCRIPT_DIR"
     if [[ $# -gt 0 ]]; then
         local filter="kernel_tests::test_$1"
+        if [[ "$1" == "expert_hqq" ]]; then
+            filter="expert_hqq"
+        fi
         info "Filter: $filter"
-        cargo test --release --lib "$filter" -- --nocapture 2>&1
+        PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
+            cargo test --release --lib "$filter" -- --nocapture 2>&1
     else
-        cargo test --release --lib kernel_tests -- --nocapture 2>&1
+        PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
+            cargo test --release --lib kernel_tests -- --nocapture 2>&1
+    fi
+}
+
+do_expert_hqq_cache_generate() {
+    if [[ $# -ne 1 || "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        echo "Usage: ./dev expert-hqq-cache-generate <manifest.json>"
+        echo "  Generates an expert-HQQ KRHQ cache from an explicit validated manifest."
+        echo "  This is a data-generation command only; it does not launch runtime GPU HQQ kernels."
+        return 0
+    fi
+    local manifest="$1"
+    [[ -f "$manifest" ]] || err "Manifest not found: $manifest"
+
+    local pyver
+    pyver=$("$PYTHON" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+    local pylibdir
+    pylibdir=$("$PYTHON" -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")
+    export PYO3_PYTHON="$PYTHON"
+    export LD_LIBRARY_PATH="$pylibdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    export RUSTFLAGS="${RUSTFLAGS:-} -L $pylibdir -l python${pyver}"
+
+    cd "$SCRIPT_DIR"
+    PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
+        cargo run --release --bin expert_hqq_cache_generate -- "$manifest"
+}
+
+do_expert_hqq_trace_compare() {
+    if [[ $# -lt 3 || $# -gt 5 || "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        echo "Usage: ./dev expert-hqq-trace-compare <trace_outputs.json> <diagnostic_spec.json> <metrics.tsv> [mismatch_details.tsv [failure_rows.tsv]]"
+        echo "  Compares diagnostic expert-HQQ full-buffer trace export against the BF16-path oracle offline."
+        echo "  If mismatch_details.tsv is provided, writes exact BF16 mismatch locations and bit patterns."
+        echo "  If failure_rows.tsv is provided, compares only those failing activation blocks."
+        echo "  This command does not launch runtime GPU kernels or consume model outputs."
+        return 0
+    fi
+    local trace_path="$1"
+    local spec_path="$2"
+    local metrics_path="$3"
+    [[ -f "$trace_path" ]] || err "Trace outputs not found: $trace_path"
+    [[ -f "$spec_path" ]] || err "Diagnostic spec not found: $spec_path"
+
+    local pyver
+    pyver=$("$PYTHON" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+    local pylibdir
+    pylibdir=$("$PYTHON" -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")
+    export PYO3_PYTHON="$PYTHON"
+    export LD_LIBRARY_PATH="$pylibdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    export RUSTFLAGS="${RUSTFLAGS:-} -L $pylibdir -l python${pyver}"
+
+    cd "$SCRIPT_DIR"
+    if [[ $# -eq 5 ]]; then
+        [[ -f "$5" ]] || err "Failure rows TSV not found: $5"
+        PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
+            cargo run --release --bin expert_hqq_trace_compare -- "$trace_path" "$spec_path" "$metrics_path" "$4" "$5"
+    elif [[ $# -eq 4 ]]; then
+        PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
+            cargo run --release --bin expert_hqq_trace_compare -- "$trace_path" "$spec_path" "$metrics_path" "$4"
+    else
+        PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
+            cargo run --release --bin expert_hqq_trace_compare -- "$trace_path" "$spec_path" "$metrics_path"
+    fi
+}
+
+do_expert_hqq_row_attribution() {
+    if [[ $# -lt 3 || $# -gt 4 || "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        echo "Usage: ./dev expert-hqq-row-attribution <response.json> <diagnostic_spec.json> <metrics.tsv> [details.json]"
+        echo "  Attributes a targeted expert-HQQ exact-row capture against KRHQ/HQQ dequant math offline."
+        echo "  This command does not launch runtime GPU kernels or consume model outputs."
+        return 0
+    fi
+    local response_path="$1"
+    local spec_path="$2"
+    local metrics_path="$3"
+    [[ -f "$response_path" ]] || err "Response JSON not found: $response_path"
+    [[ -f "$spec_path" ]] || err "Diagnostic spec not found: $spec_path"
+
+    local pyver
+    pyver=$("$PYTHON" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+    local pylibdir
+    pylibdir=$("$PYTHON" -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")
+    export PYO3_PYTHON="$PYTHON"
+    export LD_LIBRARY_PATH="$pylibdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    export RUSTFLAGS="${RUSTFLAGS:-} -L $pylibdir -l python${pyver}"
+
+    cd "$SCRIPT_DIR"
+    if [[ $# -eq 4 ]]; then
+        PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
+            cargo run --release --bin expert_hqq_row_attribution -- "$response_path" "$spec_path" "$metrics_path" "$4"
+    else
+        PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
+            cargo run --release --bin expert_hqq_row_attribution -- "$response_path" "$spec_path" "$metrics_path"
     fi
 }
 
@@ -2453,7 +2551,7 @@ do_reference_prep() {
 }
 
 do_generate_reference() {
-    [[ $# -lt 1 ]] && err "Usage: ./dev generate-reference <model> [--max-tokens N] [--profile PROFILE] [--conversation-index N [--turn-index N|--turn-start-index N --turn-end-index N] | --first-stored-turns N] [--attn-implementation eager|sdpa|flash_attention_2] [--use-cache auto|on|off] [--generate-use-cache auto|on|off] [--diagnostic-use-cache auto|on|off] [--diagnostic-scope all|final|postponed] [--between-turn-cleanup none|gc|reset] [--diagnose-pre-post-forward] [--reload-model-between-turns] [--diagnostic-only] [--output PATH]
+    [[ $# -lt 1 ]] && err "Usage: ./dev generate-reference <model> [--max-tokens N] [--profile PROFILE] [--conversation-index N [--turn-index N|--turn-start-index N --turn-end-index N] | --first-stored-turns N | --raw-input-json PATH] [--attn-implementation eager|sdpa|flash_attention_2] [--use-cache auto|on|off] [--generate-use-cache auto|on|off] [--diagnostic-use-cache auto|on|off] [--diagnostic-scope all|final|postponed] [--between-turn-cleanup none|gc|reset] [--diagnose-pre-post-forward] [--diagnose-hidden-summaries] [--diagnose-layer0-internals] [--diagnose-layer0-element-dims CSV] [--diagnose-layer1-internals] [--diagnose-layer1-element-dims CSV] [--reload-model-between-turns] [--diagnostic-only] [--output PATH]
   ARCHIVED: HF/Transformers reference capture is no longer trusted by default.
   Generates a BF16 HuggingFace greedy reference with full contract metadata only when explicitly unarchived for forensic evidence.
   Subset captures write a diagnostic non-canonical filename unless --output is supplied.
@@ -2467,6 +2565,7 @@ do_generate_reference() {
     ./dev generate-reference qwen35 --profile greedy_chat_thinking_off --conversation-index 0 --turn-index 0 --diag-steps 1 --diag-topk 10 --attn-implementation eager
     ./dev generate-reference qwen35 --profile greedy_chat_thinking_off --conversation-index 0 --turn-start-index 0 --turn-end-index 1 --diag-steps 1 --diag-topk 10 --attn-implementation sdpa --diagnostic-scope final --diagnostic-only
     ./dev generate-reference qwen35 --profile greedy_chat_thinking_off --first-stored-turns 4 --diag-steps 1 --diag-topk 10 --attn-implementation sdpa --diagnostic-scope postponed --diagnostic-only
+	    ./dev generate-reference nemotron-super --raw-input-json benchmarks/exact_payload.json --max-tokens 2 --diag-steps 2 --diag-topk 12 --diagnose-pre-post-forward --diagnose-hidden-summaries --diagnose-layer0-internals --diagnose-layer0-element-dims 3265,739,1067,445 --diagnose-layer1-internals --diagnose-layer1-element-dims 3265,739,1067,445 --output benchmarks/exact_oracle.json
     ./dev generate-reference qwen35 --profile greedy_chat_thinking_off --conversation-index 0 --turn-start-index 0 --turn-end-index 1 --diag-steps 1 --diag-topk 10 --attn-implementation sdpa --generate-use-cache auto --diagnostic-use-cache off --diagnose-pre-post-forward --diagnostic-only"
     require_archived_hf_reference_override "./dev generate-reference"
     cleanup_gpu
@@ -2808,6 +2907,9 @@ case "$cmd" in
     hqq-self-calibrate) do_hqq_self_calibrate "$@" ;;
     hqq-self-calibrate-test) do_hqq_self_calibrate_test "$@" ;;
     hqq-gpu-search-probe) do_hqq_gpu_search_probe "$@" ;;
+    expert-hqq-cache-generate) do_expert_hqq_cache_generate "$@" ;;
+    expert-hqq-trace-compare) do_expert_hqq_trace_compare "$@" ;;
+    expert-hqq-row-attribution) do_expert_hqq_row_attribution "$@" ;;
     reference-inventory) do_reference_inventory "$@" ;;
     capture-box)    do_capture_box "$@" ;;
     capture-preflight) do_capture_preflight "$@" ;;
@@ -2860,6 +2962,9 @@ case "$cmd" in
         echo "  witness-compare <config>       Compare Krasis against llama-witness JSON"
         echo "  hqq-attn-diff <model>          Offline HQQ attention artifact diff against BF16 source"
         echo "  hqq-self-calibrate <config>    Capture HQQ self-calibration evidence/candidates"
+        echo "  expert-hqq-cache-generate <manifest.json> Generate KRHQ cache from explicit manifest"
+        echo "  expert-hqq-trace-compare <trace.json> <spec.json> <metrics.tsv> Compare HQQ trace export offline"
+        echo "  expert-hqq-row-attribution <response.json> <spec.json> <metrics.tsv> Attribute exact HQQ row capture"
         echo "  capture-box <subcommand>      ARCHIVED HF capture wrapper; requires explicit override"
         echo "  capture-preflight             ARCHIVED HF capture host preflight; requires explicit override"
         echo "  reference-prep <model>         ARCHIVED HF dependency/model prep; requires explicit override"
@@ -2935,6 +3040,10 @@ case "$cmd" in
         echo "    --diagnostic-use-cache MODE  Cache mode for diagnostic forward only: auto, on, off"
         echo "    --diagnostic-scope MODE      all, final, or postponed diagnostics for selected turns"
         echo "    --diagnose-pre-post-forward  Capture diagnostic forward before and after generate"
+        echo "    --diagnose-hidden-summaries  Capture per-hidden-state summaries during diagnostic forward"
+        echo "    --diagnose-layer0-internals Capture layer-0 internal summaries during diagnostic forward"
+        echo "    --diagnose-layer1-internals Capture layer-1 MoE internal summaries during diagnostic forward"
+        echo "    --diagnose-layer1-element-dims CSV  Limit layer-1 exact element details to these hidden dims"
         echo "    --between-turn-cleanup MODE  none, gc, or reset before turns after the first"
         echo "    --reload-model-between-turns Reload HF model before turns after the first"
         echo "    --diagnostic-only            Write diagnostic/failure manifest only, not a reference artifact"

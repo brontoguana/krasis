@@ -1,0 +1,8 @@
+probe	target	fields	expected_use
+row97_local_old_candidate	row=97 head=48 d=24	output_local_old_state,recurrent_local_old_state,delta,prior_from_output,prior_from_recurrent,y_from_output,y_from_recurrent,bf16_bits_output,bf16_bits_recurrent,chunk_idx,chunk_start,chunk_pos,group,dA_target	Primary proof for whether local_old_state_exact can be accepted from recurrent phase.
+row97_existing_terms	row=97 head=48 d=24	c_state_total_exact,c_state_total_replayed,local_old_state,prior_chunk_state,local_hf_chunk_scan,d_skip,y_pre_bf16,candidate_bits,oracle_bits	Regression against 1022 term probe; must continue matching.
+row97_loop_bounds	row=97 head=48 d=24	first_u,last_u,u_count,state_size,largest_abs_old_state_u,largest_abs_local_hf_u	Identifies whether row97 cost and drift risk are concentrated in local_old or local_tri contributors.
+row64_state0_regression	row=64 head=11 d=22 state_flat=0	output_bits,state_bits,chunk_idx,chunk_pos,state_delta	Protects the earlier v4 chunk-entry/state0 failure surface.
+row82_state14_regression	row=82 head=37 d=30 state_flat=14	output_bits,state_bits,chunk_idx,chunk_pos,state_delta	Protects the earlier local-tri/state14 investigation.
+full_oracle	all output/state buffers	output_mismatches,first_output_mismatch,output_max_abs,output_mean_abs,state_mismatches,first_state_mismatch,state_max_abs,state_mean_abs	Required pass condition before any commit or timing.
+optional_subloop_timing	next gate only	D_skip_prior_ms,local_old_ms,local_hf_tri_ms,final_store_ms,total_output_kernel_ms	Add only if static split is insufficient for prioritization; keep behind block-scan env and do not change default path.

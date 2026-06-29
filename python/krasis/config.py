@@ -494,6 +494,7 @@ class ModelConfig:
     mamba_conv_kernel: int = 0         # Mamba2 conv1d kernel size (e.g. 4)
     mamba_n_groups: int = 1            # Mamba2 number of groups for B/C (e.g. 8)
     mamba_chunk_size: int = 128        # Mamba2 SSD chunk size (must be power of 2)
+    rescale_prenorm_residual: bool = False  # Nemotron-H scales Mamba out_proj by 1/sqrt(num_hidden_layers)
     moe_latent_size: int = 0           # LatentMoE: latent projection dim (e.g. 1024)
     moe_shared_expert_intermediate_size: int = 0  # LatentMoE shared expert intermediate
     mlp_hidden_act: str = "silu"       # MLP activation: "silu" or "relu2"
@@ -703,6 +704,7 @@ class ModelConfig:
             mamba_conv_kernel=cfg.get("conv_kernel", 0),
             mamba_n_groups=cfg.get("n_groups", 1),
             mamba_chunk_size=cfg.get("chunk_size", 128),
+            rescale_prenorm_residual=bool(cfg.get("rescale_prenorm_residual", False)),
             moe_latent_size=cfg.get("moe_latent_size", 0),
             moe_shared_expert_intermediate_size=nemotron_shared_inter,
             mlp_hidden_act=cfg.get("mlp_hidden_act",

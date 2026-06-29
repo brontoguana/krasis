@@ -1,0 +1,11 @@
+field	value	notes
+status	isolated_to_interaction	HQQ6 g32 case 0 output changes only when projection and consume-boundary diagnostics are both enabled
+projection_only_perturbs_output	false	live projection-only selected token stayed 1044
+consume_boundary_only_perturbs_output	false	live consume-boundary-only selected token stayed 1044
+projection_plus_consume_boundary_perturbs_output	true	1244 saved combo selected token 1321
+old_g32_quality_case0	1044	0826 quality proof selected comma with no projection or consume-boundary diagnostic
+debug_trace_only_case0	1044	live 1328 check selected comma
+projection_only_case0	1044	live 1328 check selected comma and emitted projection trace
+consume_diag_only_case0	1044	live 1328 check selected comma and emitted 69 consume-boundary rows
+combo_case0	1321	1244 saved projection plus consume-boundary diagnostic selected " and"
+next_required_fix	if_continuing inspect combined projection-plus-consume-boundary diagnostic interaction	combined diagnostic attribution should not be used for quality decisions until read-only behavior is proven

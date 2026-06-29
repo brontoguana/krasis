@@ -1,0 +1,112 @@
+{
+  "gate": "20260627_2346_nemotron_nano_mamba2_ssd_v3_failed_cleanup",
+  "status": "closed",
+  "opened_utc": "2026-06-27T23:46:00Z",
+  "closed_utc": "2026-06-28T00:05:08Z",
+  "scope": "failed_v3_cleanup",
+  "record_first": {
+    "source_gate": "20260627_2321_nemotron_nano_mamba2_ssd_chunk_entry_state_carry_v3_correctness_prototype",
+    "v3_opt_in_only": true,
+    "default_sequential_ssd_reported_unchanged": true,
+    "build_passed": true,
+    "small_diagnostic_fail_closed": true,
+    "long_diagnostic_run": false,
+    "first_output_mismatch": {
+      "row": 64,
+      "head": 11,
+      "d": 22
+    },
+    "output_max_mean": {
+      "max_abs": 2.0,
+      "mean_abs": 0.000009420193521236797
+    },
+    "first_state_mismatch": {
+      "flat": 0,
+      "head": 0,
+      "d": 0,
+      "state": 0
+    },
+    "state_max_mean": {
+      "max_abs": 0.0048828125,
+      "mean_abs": 0.000001652099002238201
+    }
+  },
+  "baselines": {
+    "gemma": {
+      "prefill_tok_s": 5619.6,
+      "internal_decode_tok_s": 92.43,
+      "network_round_trip_tok_s": 155.69
+    },
+    "nano": {
+      "prefill_tok_s": 346.5,
+      "internal_decode_tok_s": 94.48,
+      "network_round_trip_tok_s": 164.75
+    }
+  },
+  "cleanup_result": {
+    "removed_cuda_v3_kernel": true,
+    "removed_rust_v3_env_gates": true,
+    "removed_rust_v3_temp_buffers": true,
+    "removed_rust_v3_oracle_dispatch_ptx_checks": true,
+    "removed_python_v3_warmup_fail_closed": true,
+    "preserved_1908_substage_instrumentation": true,
+    "preserved_2149_2251_local_tri_state_flat_diagnostics": true,
+    "preserved_artifacts": true,
+    "default_path_changed": false
+  },
+  "build": {
+    "command": "./dev build",
+    "first_cleanup_build_exit": 0,
+    "first_cleanup_build_duration_s": 175,
+    "first_cleanup_build_note": "exposed leftover unused parse_optional_usize_env_value helper, then removed it",
+    "final_build_exit": 0,
+    "final_build_duration_s": 169,
+    "final_build_log": "20260627_2346_nemotron_nano_mamba2_ssd_v3_failed_cleanup_build2.log"
+  },
+  "startup_diagnostic": {
+    "command": "KRASIS_STARTUP_DIAG=1 KRASIS_PREFILL_TIMING=1 KRASIS_PREFILL_LIVENESS_TIMING=1 KRASIS_STARTUP_EXIT_AFTER_CALIBRATION=1 ./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+    "v3_envs_unset": true,
+    "local_tri_envs_unset": true,
+    "exit": 0,
+    "requests_sent": 0,
+    "benchmark_path": false,
+    "ready_reached": false,
+    "startup_exit": true,
+    "hqq_attention_cache_reused": true,
+    "effective_marlin_g64_loaded": true,
+    "cache_write_evidence": false,
+    "long_prefill_tokens": 39920,
+    "long_prefill_total_ms": 117371.9,
+    "ssd_scan_wall_ms": 114464.9,
+    "ssd_scan_calls": 23
+  },
+  "artifacts": {
+    "build_result": "20260627_2346_nemotron_nano_mamba2_ssd_v3_failed_cleanup_build_result.tsv",
+    "runtime_attempt": "20260627_2346_nemotron_nano_mamba2_ssd_v3_failed_cleanup_runtime_attempt.tsv",
+    "startup_cache_validation": "20260627_2346_nemotron_nano_mamba2_ssd_v3_failed_cleanup_startup_cache_validation.tsv",
+    "source_artifacts": "20260627_2346_nemotron_nano_mamba2_ssd_v3_failed_cleanup_source_artifacts.tsv",
+    "root_decision": "20260627_2346_nemotron_nano_mamba2_ssd_v3_failed_cleanup_root_decision.tsv",
+    "validation_checks": "20260627_2346_nemotron_nano_mamba2_ssd_v3_failed_cleanup_validation_checks.tsv",
+    "final_build_log": "20260627_2346_nemotron_nano_mamba2_ssd_v3_failed_cleanup_build2.log",
+    "startup_diagnostic_log": "20260627_2346_nemotron_nano_mamba2_ssd_v3_failed_cleanup_startup_diagnostic.log"
+  },
+  "validation": {
+    "passed": true,
+    "final_snapshot_utc": "2026-06-28T00:05:08Z",
+    "cleanup_exit": 0,
+    "no_tmux_server": true,
+    "no_runtime_build_process": true,
+    "no_nvidia_compute_process": true,
+    "gpu_memory_used_mb": {
+      "gpu0": 15,
+      "gpu1": 11
+    },
+    "disk_free": "588G",
+    "ram_available": "966Gi",
+    "nano_temp_lock_files": 0,
+    "protected_config_status": [
+      "?? tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+      "?? tests/nemotron-nano-bf16-experts-a16.conf"
+    ]
+  }
+}

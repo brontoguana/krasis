@@ -1,0 +1,6 @@
+[0;36m[1m=>[0m Killing all krasis processes and freeing GPU memory...
+[1;33m[1m!![0m   Killing PID 4141438: /home/main/miniconda3/envs/ktransformers/bin/python -m krasis.server --config tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf --test-endpoints
+[1;33m[1m!![0m Found zombie processes — killing their parents:
+[1;33m[1m!![0m   Zombie PID 4141438, killing parent PID 4141435
+[1;33m[1m!![0m   Zombie PID 4141818, killing parent PID 4141438
+[0;32m[1mOK[0m All GPUs clear.

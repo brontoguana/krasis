@@ -1,0 +1,14 @@
+source_metric	value_ms	notes
+1207_total_block_scan_path	7179.206093739131	Oracle-enabled long run with coeff tile and subloop timing enabled.
+1207_sequential_oracle	4960.68509326087	Removable from candidate-only timing.
+1207_full_buffer_downloads	391.73525113043473	Removable when full oracle host compare is skipped.
+1207_host_comparison	537.3217927391304	Removable when full oracle host compare is skipped.
+1207_commit_copies	0.48902200000000007	Would remain in a candidate path that commits candidate output/state after run.
+1207_state_snapshot_copies	13.178852391304346	Current value includes initial, oracle, and candidate state copies; candidate-only should need only live-to-candidate state copy if it preserves live state until commit.
+1207_recurrent_kernel	715.7697665652174	Candidate-side cost, already host-timed.
+1207_coeff_tile_output_kernel_instrumented	500.6286002173913	Candidate-side output kernel total, but includes subloop timing overhead from KRASIS_MAMBA2_SSD_BLOCK_SCAN_OUTPUT_SUBLOOP_TIMING.
+1207_alloc_zeroed	1.0791346086956524	Current allocation includes oracle buffers; candidate-only allocation should be smaller.
+1207_residual	58.31858082608719	Oracle-inclusive timing residual; candidate-only residual must be remeasured.
+oracle_download_compare_removed_sum	5889.742137130435	sequential_oracle + full_buffer_downloads + host_comparison.
+oracle_inclusive_candidate_subtotal_upper_bound	1289.4639566086957	total minus sequential_oracle, full_buffer_downloads, and host_comparison; still includes oracle-oriented alloc/copies, commit, subloop timing overhead, and residual.
+clean_candidate_cost_available_from_existing_logs	false	Existing logs bound the target but do not establish a clean no-oracle/no-subloop candidate-side measurement.

@@ -1,0 +1,897 @@
+[0;36m[1m=>[0m Waiting for selected GPUs (0) to clear...
+[0;32m[1mOK[0m Selected GPUs (0) clear.
+[0;36m[1m=>[0m Launching from: tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf
+[0;36m[1m=>[0m Run dir: /home/main/Documents/Claude/krasis-nemotron-dev/logs/dev-run_20260627_205740
+[0;36m[1m=>[0m Import origin check:
+krasis: /home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/__init__.py
+krasis.krasis: /home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+Pre-scan: set CUDA_VISIBLE_DEVICES=0
+Loaded config from tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf: {'model_path': '/home/main/.krasis/models/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16', 'selected_gpus': '0', 'num_gpus': 1, 'layer_group_size': 2, 'kv_dtype': 'k4v4', 'gpu_expert_bits': 4, 'cpu_expert_bits': 4, 'attention_quant': 'hqq4', 'hqq_group_size': 128, 'shared_expert_quant': 'int8', 'dense_mlp_quant': 'int8', 'lm_head_quant': 'int8', 'krasis_threads': 16, 'host': '0.0.0.0', 'port': 18012, 'enable_thinking': False, 'gpu_prefill_threshold': 300, 'vram_safety_margin': 600, 'force_load': False}
+
+[1m[36m▸ Krasis — NVIDIA-Nemotron-3-Nano-30B-A3B-BF16[0m
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 1[0m
+  [32mHCS host cache: source[0m
+  [32mSelected physical GPUs: 0 (config; CUDA_VISIBLE_DEVICES=0)[0m
+  [32mExperts: GPU INT4 g128 (amax)  |  Attention: hqq4  |  KV: k4v4[0m
+  [32mLayer groups: 2  |  KV cache: 1000 MB  |  Threads: 16[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+
+[1m[36m▸ Loading model weights[0m
+  [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=518 MB, free=31600 MB, total=32119 MB
+
+[1m[36m▸ Loading GPU weights[0m
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:0: alloc=3477 MB, reserved=3562 MB, used=4178 MB, free=27940 MB, total=32119 MB
+  [0;32mHQQ attention artifacts validated (115 MB cached), 27940 MB free[0m
+
+[1m[36m▸ Building GPU INT4 Marlin expert cache (one-time)[0m
+  [2mCache will be saved to /home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 for instant loading next time.[0m
+    Loading GPU Marlin cache: 23 layers...
+    GPU Marlin cache loaded: 15.8 GB in 10s
+  [0;32mExpert cache built in 10s — next launch will be much faster.[0m
+  [33m[VRAM after-phase2-expert-weights][0m cuda:0: alloc=3477 MB, reserved=3562 MB, used=4178 MB, free=27940 MB, total=32119 MB
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:0: alloc=3477 MB, reserved=3562 MB, used=4178 MB, free=27940 MB, total=32119 MB
+  [33m[VRAM after-kv-cache-init][0m cuda:0: alloc=4477 MB, reserved=4562 MB, used=5178 MB, free=26940 MB, total=32119 MB
+  [33m[VRAM after-full-load][0m cuda:0: alloc=4477 MB, reserved=4562 MB, used=5178 MB, free=26940 MB, total=32119 MB
+
+[1m[36m▸ CUDA runtime warmup[0m
+  [32mcuBLAS + Triton kernel compilation done[0m
+
+[1m[36m▸ Setting up GPU decode store[0m
+  [32mGPU decode store ready (addr=0x3ddf3ec0)[0m
+  [32mReleased redundant GPU execution source tensors (366 MB)[0m
+  [2mVRAM monitor started (tracking warmup)[0m
+  [2mcuda:0: 0 MB total[0m
+
+[1m[36m▸ Pre-allocating Rust prefill engine[0m
+[FLA] Loading kernels for H=0 from /home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/libkrasis_fla_sm120.so
+  [32mPrefill engine scratch buffers allocated[0m
+
+[1m[36m▸ Warmup (Rust prefill engine)[0m
+  [32mStartup diag: warmup tokens=128 (default 300, token=52528)[0m
+  [32mStartup diag env: no_graph=unset, mapped_reads=unset, prefill_debug=False, prefill_timing=True, exit_after_calibration=True[0m
+[PREFILL-LIVENESS] run_start total_tokens=128 scratch_max_tokens=128 max_chunk=128 chunk_size=128 num_chunks=1 chunk_plan=[128] expert_bits=4 shared_expert_bits=4 hidden_size=2688 layers=52
+[PREFILL-LIVENESS] chunk_start chunk=0 total_chunks=1 start=0 end=128 tokens=128 tok0=52528 last_pos=127 last_tok=52528
+[PREFILL-LIVENESS] chunk_after_hcs_guard chunk=0 tokens=128 elapsed_ms=0.018
+[PREFILL-LIVENESS] layer_start chunk=0 layer=0 layer_type=mamba2 tokens=128 has_residual=false moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=0 tokens=128 total_ms=130.620 in_proj_ms=99.379 split_extract_ms=0.013 conv1d_silu_ms=0.024 ssd_scan_ms=13.403 gated_rmsnorm_ms=0.014 out_proj_ms=17.787
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=0 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=130.773
+[PREFILL-LIVENESS] layer_end chunk=0 layer=0 layer_type=mamba2 tokens=128 layer_ms=130.785 sync_ms=0.012
+[PREFILL-LIVENESS] layer_start chunk=0 layer=1 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=1 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=1 tokens=128 elapsed_ms=319.561
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=1 layer_type=pass tokens=128 elapsed_before_sync_ms=319.629
+[PREFILL-LIVENESS] layer_end chunk=0 layer=1 layer_type=pass tokens=128 layer_ms=319.638 sync_ms=0.009
+[PREFILL-LIVENESS] layer_start chunk=0 layer=2 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=2 tokens=128 total_ms=13.561 in_proj_ms=0.096 split_extract_ms=0.012 conv1d_silu_ms=0.023 ssd_scan_ms=13.374 gated_rmsnorm_ms=0.014 out_proj_ms=0.041
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=2 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.651
+[PREFILL-LIVENESS] layer_end chunk=0 layer=2 layer_type=mamba2 tokens=128 layer_ms=13.660 sync_ms=0.009
+[PREFILL-LIVENESS] layer_start chunk=0 layer=3 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=3 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=3 tokens=128 elapsed_ms=2.238
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=3 layer_type=pass tokens=128 elapsed_before_sync_ms=2.292
+[PREFILL-LIVENESS] layer_end chunk=0 layer=3 layer_type=pass tokens=128 layer_ms=2.300 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=4 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=4 tokens=128 total_ms=13.537 in_proj_ms=0.062 split_extract_ms=0.010 conv1d_silu_ms=0.022 ssd_scan_ms=13.392 gated_rmsnorm_ms=0.014 out_proj_ms=0.037
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=4 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.608
+[PREFILL-LIVENESS] layer_end chunk=0 layer=4 layer_type=mamba2 tokens=128 layer_ms=13.616 sync_ms=0.009
+[PREFILL-LIVENESS] layer_start chunk=0 layer=5 layer_type=gqa tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=5 layer_type=gqa tokens=128 elapsed_before_sync_ms=8.485
+[PREFILL-LIVENESS] layer_end chunk=0 layer=5 layer_type=gqa tokens=128 layer_ms=8.498 sync_ms=0.013
+[PREFILL-LIVENESS] layer_start chunk=0 layer=6 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=6 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=6 tokens=128 elapsed_ms=2.928
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=6 layer_type=pass tokens=128 elapsed_before_sync_ms=2.978
+[PREFILL-LIVENESS] layer_end chunk=0 layer=6 layer_type=pass tokens=128 layer_ms=2.986 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=7 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=7 tokens=128 total_ms=13.516 in_proj_ms=0.062 split_extract_ms=0.010 conv1d_silu_ms=0.022 ssd_scan_ms=13.369 gated_rmsnorm_ms=0.013 out_proj_ms=0.038
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=7 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.586
+[PREFILL-LIVENESS] layer_end chunk=0 layer=7 layer_type=mamba2 tokens=128 layer_ms=13.597 sync_ms=0.011
+[PREFILL-LIVENESS] layer_start chunk=0 layer=8 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=8 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=8 tokens=128 elapsed_ms=3.819
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=8 layer_type=pass tokens=128 elapsed_before_sync_ms=3.870
+[PREFILL-LIVENESS] layer_end chunk=0 layer=8 layer_type=pass tokens=128 layer_ms=3.878 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=9 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=9 tokens=128 total_ms=13.519 in_proj_ms=0.063 split_extract_ms=0.011 conv1d_silu_ms=0.028 ssd_scan_ms=13.365 gated_rmsnorm_ms=0.014 out_proj_ms=0.038
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=9 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.587
+[PREFILL-LIVENESS] layer_end chunk=0 layer=9 layer_type=mamba2 tokens=128 layer_ms=13.595 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=10 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=10 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=10 tokens=128 elapsed_ms=3.596
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=10 layer_type=pass tokens=128 elapsed_before_sync_ms=3.644
+[PREFILL-LIVENESS] layer_end chunk=0 layer=10 layer_type=pass tokens=128 layer_ms=3.652 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=11 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=11 tokens=128 total_ms=13.455 in_proj_ms=0.063 split_extract_ms=0.010 conv1d_silu_ms=0.024 ssd_scan_ms=13.310 gated_rmsnorm_ms=0.013 out_proj_ms=0.037
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=11 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.524
+[PREFILL-LIVENESS] layer_end chunk=0 layer=11 layer_type=mamba2 tokens=128 layer_ms=13.533 sync_ms=0.009
+[PREFILL-LIVENESS] layer_start chunk=0 layer=12 layer_type=gqa tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=12 layer_type=gqa tokens=128 elapsed_before_sync_ms=0.494
+[PREFILL-LIVENESS] layer_end chunk=0 layer=12 layer_type=gqa tokens=128 layer_ms=0.503 sync_ms=0.010
+[PREFILL-LIVENESS] layer_start chunk=0 layer=13 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=13 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=13 tokens=128 elapsed_ms=3.117
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=13 layer_type=pass tokens=128 elapsed_before_sync_ms=3.166
+[PREFILL-LIVENESS] layer_end chunk=0 layer=13 layer_type=pass tokens=128 layer_ms=3.174 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=14 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=14 tokens=128 total_ms=13.439 in_proj_ms=0.060 split_extract_ms=0.011 conv1d_silu_ms=0.023 ssd_scan_ms=13.295 gated_rmsnorm_ms=0.013 out_proj_ms=0.037
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=14 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.509
+[PREFILL-LIVENESS] layer_end chunk=0 layer=14 layer_type=mamba2 tokens=128 layer_ms=13.518 sync_ms=0.009
+[PREFILL-LIVENESS] layer_start chunk=0 layer=15 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=15 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=15 tokens=128 elapsed_ms=2.705
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=15 layer_type=pass tokens=128 elapsed_before_sync_ms=2.753
+[PREFILL-LIVENESS] layer_end chunk=0 layer=15 layer_type=pass tokens=128 layer_ms=2.761 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=16 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=16 tokens=128 total_ms=13.454 in_proj_ms=0.061 split_extract_ms=0.011 conv1d_silu_ms=0.021 ssd_scan_ms=13.311 gated_rmsnorm_ms=0.013 out_proj_ms=0.037
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=16 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.524
+[PREFILL-LIVENESS] layer_end chunk=0 layer=16 layer_type=mamba2 tokens=128 layer_ms=13.532 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=17 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=17 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=17 tokens=128 elapsed_ms=3.347
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=17 layer_type=pass tokens=128 elapsed_before_sync_ms=3.395
+[PREFILL-LIVENESS] layer_end chunk=0 layer=17 layer_type=pass tokens=128 layer_ms=3.404 sync_ms=0.009
+[PREFILL-LIVENESS] layer_start chunk=0 layer=18 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=18 tokens=128 total_ms=13.452 in_proj_ms=0.059 split_extract_ms=0.011 conv1d_silu_ms=0.023 ssd_scan_ms=13.308 gated_rmsnorm_ms=0.013 out_proj_ms=0.038
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=18 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.519
+[PREFILL-LIVENESS] layer_end chunk=0 layer=18 layer_type=mamba2 tokens=128 layer_ms=13.527 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=19 layer_type=gqa tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=19 layer_type=gqa tokens=128 elapsed_before_sync_ms=0.470
+[PREFILL-LIVENESS] layer_end chunk=0 layer=19 layer_type=gqa tokens=128 layer_ms=0.480 sync_ms=0.010
+[PREFILL-LIVENESS] layer_start chunk=0 layer=20 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=20 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=20 tokens=128 elapsed_ms=3.434
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=20 layer_type=pass tokens=128 elapsed_before_sync_ms=3.481
+[PREFILL-LIVENESS] layer_end chunk=0 layer=20 layer_type=pass tokens=128 layer_ms=3.489 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=21 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=21 tokens=128 total_ms=13.449 in_proj_ms=0.059 split_extract_ms=0.010 conv1d_silu_ms=0.021 ssd_scan_ms=13.310 gated_rmsnorm_ms=0.012 out_proj_ms=0.037
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=21 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.516
+[PREFILL-LIVENESS] layer_end chunk=0 layer=21 layer_type=mamba2 tokens=128 layer_ms=13.525 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=22 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=22 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=22 tokens=128 elapsed_ms=4.390
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=22 layer_type=pass tokens=128 elapsed_before_sync_ms=4.438
+[PREFILL-LIVENESS] layer_end chunk=0 layer=22 layer_type=pass tokens=128 layer_ms=4.446 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=23 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=23 tokens=128 total_ms=13.456 in_proj_ms=0.062 split_extract_ms=0.010 conv1d_silu_ms=0.021 ssd_scan_ms=13.312 gated_rmsnorm_ms=0.013 out_proj_ms=0.038
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=23 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.525
+[PREFILL-LIVENESS] layer_end chunk=0 layer=23 layer_type=mamba2 tokens=128 layer_ms=13.534 sync_ms=0.009
+[PREFILL-LIVENESS] layer_start chunk=0 layer=24 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=24 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=24 tokens=128 elapsed_ms=5.321
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=24 layer_type=pass tokens=128 elapsed_before_sync_ms=5.370
+[PREFILL-LIVENESS] layer_end chunk=0 layer=24 layer_type=pass tokens=128 layer_ms=5.378 sync_ms=0.009
+[PREFILL-LIVENESS] layer_start chunk=0 layer=25 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=25 tokens=128 total_ms=13.464 in_proj_ms=0.063 split_extract_ms=0.010 conv1d_silu_ms=0.023 ssd_scan_ms=13.318 gated_rmsnorm_ms=0.013 out_proj_ms=0.037
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=25 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.534
+[PREFILL-LIVENESS] layer_end chunk=0 layer=25 layer_type=mamba2 tokens=128 layer_ms=13.542 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=26 layer_type=gqa tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=26 layer_type=gqa tokens=128 elapsed_before_sync_ms=0.461
+[PREFILL-LIVENESS] layer_end chunk=0 layer=26 layer_type=gqa tokens=128 layer_ms=0.471 sync_ms=0.009
+[PREFILL-LIVENESS] layer_start chunk=0 layer=27 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=27 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=27 tokens=128 elapsed_ms=6.748
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=27 layer_type=pass tokens=128 elapsed_before_sync_ms=6.797
+[PREFILL-LIVENESS] layer_end chunk=0 layer=27 layer_type=pass tokens=128 layer_ms=6.805 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=28 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=28 tokens=128 total_ms=13.485 in_proj_ms=0.063 split_extract_ms=0.011 conv1d_silu_ms=0.039 ssd_scan_ms=13.324 gated_rmsnorm_ms=0.013 out_proj_ms=0.035
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=28 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.554
+[PREFILL-LIVENESS] layer_end chunk=0 layer=28 layer_type=mamba2 tokens=128 layer_ms=13.563 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=29 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=29 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=29 tokens=128 elapsed_ms=5.870
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=29 layer_type=pass tokens=128 elapsed_before_sync_ms=5.917
+[PREFILL-LIVENESS] layer_end chunk=0 layer=29 layer_type=pass tokens=128 layer_ms=5.925 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=30 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=30 tokens=128 total_ms=13.470 in_proj_ms=0.060 split_extract_ms=0.010 conv1d_silu_ms=0.021 ssd_scan_ms=13.328 gated_rmsnorm_ms=0.013 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=30 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.538
+[PREFILL-LIVENESS] layer_end chunk=0 layer=30 layer_type=mamba2 tokens=128 layer_ms=13.546 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=31 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=31 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=31 tokens=128 elapsed_ms=7.344
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=31 layer_type=pass tokens=128 elapsed_before_sync_ms=7.395
+[PREFILL-LIVENESS] layer_end chunk=0 layer=31 layer_type=pass tokens=128 layer_ms=7.403 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=32 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=32 tokens=128 total_ms=13.462 in_proj_ms=0.061 split_extract_ms=0.010 conv1d_silu_ms=0.022 ssd_scan_ms=13.320 gated_rmsnorm_ms=0.012 out_proj_ms=0.035
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=32 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.530
+[PREFILL-LIVENESS] layer_end chunk=0 layer=32 layer_type=mamba2 tokens=128 layer_ms=13.538 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=33 layer_type=gqa tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=33 layer_type=gqa tokens=128 elapsed_before_sync_ms=0.471
+[PREFILL-LIVENESS] layer_end chunk=0 layer=33 layer_type=gqa tokens=128 layer_ms=0.481 sync_ms=0.010
+[PREFILL-LIVENESS] layer_start chunk=0 layer=34 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=34 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=34 tokens=128 elapsed_ms=5.793
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=34 layer_type=pass tokens=128 elapsed_before_sync_ms=5.840
+[PREFILL-LIVENESS] layer_end chunk=0 layer=34 layer_type=pass tokens=128 layer_ms=5.848 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=35 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=35 tokens=128 total_ms=13.460 in_proj_ms=0.061 split_extract_ms=0.011 conv1d_silu_ms=0.022 ssd_scan_ms=13.318 gated_rmsnorm_ms=0.012 out_proj_ms=0.035
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=35 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.527
+[PREFILL-LIVENESS] layer_end chunk=0 layer=35 layer_type=mamba2 tokens=128 layer_ms=13.535 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=36 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=36 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=36 tokens=128 elapsed_ms=5.618
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=36 layer_type=pass tokens=128 elapsed_before_sync_ms=5.667
+[PREFILL-LIVENESS] layer_end chunk=0 layer=36 layer_type=pass tokens=128 layer_ms=5.675 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=37 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=37 tokens=128 total_ms=13.445 in_proj_ms=0.059 split_extract_ms=0.010 conv1d_silu_ms=0.022 ssd_scan_ms=13.304 gated_rmsnorm_ms=0.013 out_proj_ms=0.037
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=37 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.516
+[PREFILL-LIVENESS] layer_end chunk=0 layer=37 layer_type=mamba2 tokens=128 layer_ms=13.525 sync_ms=0.009
+[PREFILL-LIVENESS] layer_start chunk=0 layer=38 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=38 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=38 tokens=128 elapsed_ms=5.164
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=38 layer_type=pass tokens=128 elapsed_before_sync_ms=5.212
+[PREFILL-LIVENESS] layer_end chunk=0 layer=38 layer_type=pass tokens=128 layer_ms=5.220 sync_ms=0.009
+[PREFILL-LIVENESS] layer_start chunk=0 layer=39 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=39 tokens=128 total_ms=13.470 in_proj_ms=0.060 split_extract_ms=0.010 conv1d_silu_ms=0.024 ssd_scan_ms=13.326 gated_rmsnorm_ms=0.013 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=39 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.536
+[PREFILL-LIVENESS] layer_end chunk=0 layer=39 layer_type=mamba2 tokens=128 layer_ms=13.544 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=40 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=40 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=40 tokens=128 elapsed_ms=3.311
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=40 layer_type=pass tokens=128 elapsed_before_sync_ms=3.358
+[PREFILL-LIVENESS] layer_end chunk=0 layer=40 layer_type=pass tokens=128 layer_ms=3.366 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=41 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=41 tokens=128 total_ms=13.469 in_proj_ms=0.061 split_extract_ms=0.010 conv1d_silu_ms=0.021 ssd_scan_ms=13.326 gated_rmsnorm_ms=0.013 out_proj_ms=0.037
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=41 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.535
+[PREFILL-LIVENESS] layer_end chunk=0 layer=41 layer_type=mamba2 tokens=128 layer_ms=13.543 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=42 layer_type=gqa tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=42 layer_type=gqa tokens=128 elapsed_before_sync_ms=0.458
+[PREFILL-LIVENESS] layer_end chunk=0 layer=42 layer_type=gqa tokens=128 layer_ms=0.468 sync_ms=0.010
+[PREFILL-LIVENESS] layer_start chunk=0 layer=43 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=43 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=43 tokens=128 elapsed_ms=3.790
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=43 layer_type=pass tokens=128 elapsed_before_sync_ms=3.837
+[PREFILL-LIVENESS] layer_end chunk=0 layer=43 layer_type=pass tokens=128 layer_ms=3.845 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=44 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=44 tokens=128 total_ms=13.443 in_proj_ms=0.060 split_extract_ms=0.011 conv1d_silu_ms=0.021 ssd_scan_ms=13.303 gated_rmsnorm_ms=0.013 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=44 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.508
+[PREFILL-LIVENESS] layer_end chunk=0 layer=44 layer_type=mamba2 tokens=128 layer_ms=13.517 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=45 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=45 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=45 tokens=128 elapsed_ms=3.294
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=45 layer_type=pass tokens=128 elapsed_before_sync_ms=3.341
+[PREFILL-LIVENESS] layer_end chunk=0 layer=45 layer_type=pass tokens=128 layer_ms=3.349 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=46 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=46 tokens=128 total_ms=13.451 in_proj_ms=0.057 split_extract_ms=0.010 conv1d_silu_ms=0.020 ssd_scan_ms=13.316 gated_rmsnorm_ms=0.013 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=46 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.519
+[PREFILL-LIVENESS] layer_end chunk=0 layer=46 layer_type=mamba2 tokens=128 layer_ms=13.527 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=47 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=47 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=47 tokens=128 elapsed_ms=2.865
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=47 layer_type=pass tokens=128 elapsed_before_sync_ms=2.911
+[PREFILL-LIVENESS] layer_end chunk=0 layer=47 layer_type=pass tokens=128 layer_ms=2.919 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=48 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=48 tokens=128 total_ms=13.457 in_proj_ms=0.060 split_extract_ms=0.010 conv1d_silu_ms=0.020 ssd_scan_ms=13.319 gated_rmsnorm_ms=0.013 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=48 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.524
+[PREFILL-LIVENESS] layer_end chunk=0 layer=48 layer_type=mamba2 tokens=128 layer_ms=13.533 sync_ms=0.009
+[PREFILL-LIVENESS] layer_start chunk=0 layer=49 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=49 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=49 tokens=128 elapsed_ms=2.753
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=49 layer_type=pass tokens=128 elapsed_before_sync_ms=2.805
+[PREFILL-LIVENESS] layer_end chunk=0 layer=49 layer_type=pass tokens=128 layer_ms=2.813 sync_ms=0.009
+[PREFILL-LIVENESS] layer_start chunk=0 layer=50 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=50 tokens=128 total_ms=13.466 in_proj_ms=0.059 split_extract_ms=0.010 conv1d_silu_ms=0.022 ssd_scan_ms=13.321 gated_rmsnorm_ms=0.014 out_proj_ms=0.039
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=50 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.534
+[PREFILL-LIVENESS] layer_end chunk=0 layer=50 layer_type=mamba2 tokens=128 layer_ms=13.542 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=51 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=51 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=51 tokens=128 elapsed_ms=2.699
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=51 layer_type=pass tokens=128 elapsed_before_sync_ms=2.746
+[PREFILL-LIVENESS] layer_end chunk=0 layer=51 layer_type=pass tokens=128 layer_ms=2.754 sync_ms=0.008
+[PREFILL-LIVENESS] chunk_end chunk=0 tokens=128 elapsed_ms=851.370
+[PREFILL-TIMING] 128 tokens, 868.4ms total (147 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        1.0ms (  0.1%)
+[PREFILL-TIMING]   attn:      438.7ms ( 50.5%)  [gqa: 10.7ms, la: 0.0ms]
+[PREFILL-TIMING]     gqa breakdown (6 FA2 calls: 6 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:         2.0ms ( 18.4% of gqa)
+[PREFILL-TIMING]       qknorm:       0.0ms (  0.3% of gqa)
+[PREFILL-TIMING]       rope:         0.1ms (  1.0% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.0ms (  0.4% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.0ms over 6 calls
+[PREFILL-TIMING]       fa2         7.9ms ( 74.0% of gqa)  [1.3ms/call avg]
+[PREFILL-TIMING]       gate:         0.0ms (  0.0% of gqa)
+[PREFILL-TIMING]       o_proj:       0.6ms (  5.3% of gqa)
+[PREFILL-TIMING]     gqa queue events:
+[PREFILL-TIMING]         proj         event=     1.9ms wall=     2.0ms wall_minus_event=     0.0ms sync=     0.0ms over 6 calls
+[PREFILL-TIMING]         qkv_norm     event=     0.0ms wall=     0.0ms wall_minus_event=     0.0ms sync=     0.0ms over 6 calls
+[PREFILL-TIMING]         rope         event=     0.1ms wall=     0.1ms wall_minus_event=     0.0ms sync=     0.1ms over 6 calls
+[PREFILL-TIMING]         fa2          event=     7.9ms wall=     7.9ms wall_minus_event=     0.0ms sync=     0.1ms over 6 calls
+[PREFILL-TIMING]         kv_append    event=     0.0ms wall=     0.0ms wall_minus_event=     0.0ms sync=     0.0ms over 0 calls
+[PREFILL-TIMING]         o_proj       event=     0.5ms wall=     0.6ms wall_minus_event=     0.0ms sync=     0.0ms over 6 calls
+[PREFILL-TIMING]     hqq projection internals:
+[PREFILL-TIMING]       marlin_float_zp:      1.4ms over 24 calls
+[PREFILL-TIMING]       group_sums:           0.2ms over 24 calls
+[PREFILL-TIMING]       correction_gemm:      0.5ms over 24 calls
+[PREFILL-TIMING]       correction_add:       0.2ms over 24 calls
+[PREFILL-TIMING]     mamba2 breakdown (diagnostic sync-isolated): wall=   427.0ms ( 49.2% of prefill,  97.3% of mixer) event=   426.5ms sync=   308.6ms
+[PREFILL-TIMING]       in_proj          wall=   100.7ms event=   100.7ms sync=     1.0ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]       split_extract    wall=     0.2ms event=     0.2ms sync=     0.1ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]       conv1d_silu      wall=     0.5ms event=     0.4ms sync=     0.3ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]       ssd_scan         wall=   306.6ms event=   306.5ms sync=   306.4ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]       gated_rmsnorm    wall=     0.3ms event=     0.2ms sync=     0.2ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]       out_proj         wall=    18.6ms event=    18.5ms sync=     0.5ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]   moe:       410.0ms ( 47.2%)
+[PREFILL-TIMING]     moe breakdown (48 layers):
+[PREFILL-TIMING]       gate:        49.3ms ( 12.0% of moe)
+[PREFILL-TIMING]       dma:         81.7ms ( 19.9% of moe)
+[PREFILL-TIMING]         route_d2h:     0.5ms ptr_alloc:     0.4ms ptr_build:     0.0ms
+[PREFILL-TIMING]         cold_h2d:      3.5ms ptr_upload:     0.2ms dma_wait:    72.6ms
+[PREFILL-TIMING]       w1+act:     273.8ms ( 66.8% of moe)
+[PREFILL-TIMING]       w2:           3.8ms (  0.9% of moe)
+[PREFILL-TIMING]       scatter:      0.3ms (  0.1% of moe)
+[PREFILL-TIMING]       shared:       0.3ms (  0.1% of moe)
+[PREFILL-TIMING]   other:      18.7ms (  2.2%)
+  [32mRust prefill warmed with 128 tokens before HCS budgeting[0m
+  [32mWarmup complete in 0.9s[0m
+  [2mcuda:0 warmup:  peak 8,762 MB used / 32,119 MB total  (min free: 23,356 MB)[0m
+
+[1m[36m▸ VRAM calibration[0m
+  [32mSafety margin: 600 MB[0m
+  [32mFree VRAM after startup: 23,716 MB / 32,119 MB[0m
+  [32mStartup diag: calibration tokens short=128 (default 500), long=39,920 (default 39,920), cap=49,900, forced_long=True[0m
+  [32mShort calibration: probing 128 prompt tokens + 32 decode tokens[0m
+[PREFILL-LIVENESS] run_start total_tokens=128 scratch_max_tokens=128 max_chunk=128 chunk_size=128 num_chunks=1 chunk_plan=[128] expert_bits=4 shared_expert_bits=4 hidden_size=2688 layers=52
+[PREFILL-LIVENESS] chunk_start chunk=0 total_chunks=1 start=0 end=128 tokens=128 tok0=10 last_pos=127 last_tok=1010
+[PREFILL-LIVENESS] chunk_after_hcs_guard chunk=0 tokens=128 elapsed_ms=0.022
+[PREFILL-LIVENESS] layer_start chunk=0 layer=0 layer_type=mamba2 tokens=128 has_residual=false moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=0 tokens=128 total_ms=13.577 in_proj_ms=0.107 split_extract_ms=0.012 conv1d_silu_ms=0.023 ssd_scan_ms=13.373 gated_rmsnorm_ms=0.014 out_proj_ms=0.047
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=0 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.674
+[PREFILL-LIVENESS] layer_end chunk=0 layer=0 layer_type=mamba2 tokens=128 layer_ms=13.683 sync_ms=0.010
+[PREFILL-LIVENESS] layer_start chunk=0 layer=1 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=1 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=1 tokens=128 elapsed_ms=29.283
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=1 layer_type=pass tokens=128 elapsed_before_sync_ms=29.334
+[PREFILL-LIVENESS] layer_end chunk=0 layer=1 layer_type=pass tokens=128 layer_ms=29.343 sync_ms=0.009
+[PREFILL-LIVENESS] layer_start chunk=0 layer=2 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=2 tokens=128 total_ms=13.492 in_proj_ms=0.060 split_extract_ms=0.011 conv1d_silu_ms=0.020 ssd_scan_ms=13.351 gated_rmsnorm_ms=0.013 out_proj_ms=0.037
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=2 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.565
+[PREFILL-LIVENESS] layer_end chunk=0 layer=2 layer_type=mamba2 tokens=128 layer_ms=13.574 sync_ms=0.009
+[PREFILL-LIVENESS] layer_start chunk=0 layer=3 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=3 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=3 tokens=128 elapsed_ms=25.696
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=3 layer_type=pass tokens=128 elapsed_before_sync_ms=25.743
+[PREFILL-LIVENESS] layer_end chunk=0 layer=3 layer_type=pass tokens=128 layer_ms=25.751 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=4 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=4 tokens=128 total_ms=13.499 in_proj_ms=0.059 split_extract_ms=0.010 conv1d_silu_ms=0.021 ssd_scan_ms=13.359 gated_rmsnorm_ms=0.013 out_proj_ms=0.037
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=4 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.566
+[PREFILL-LIVENESS] layer_end chunk=0 layer=4 layer_type=mamba2 tokens=128 layer_ms=13.575 sync_ms=0.009
+[PREFILL-LIVENESS] layer_start chunk=0 layer=5 layer_type=gqa tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=5 layer_type=gqa tokens=128 elapsed_before_sync_ms=0.498
+[PREFILL-LIVENESS] layer_end chunk=0 layer=5 layer_type=gqa tokens=128 layer_ms=0.508 sync_ms=0.010
+[PREFILL-LIVENESS] layer_start chunk=0 layer=6 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=6 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=6 tokens=128 elapsed_ms=24.574
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=6 layer_type=pass tokens=128 elapsed_before_sync_ms=24.621
+[PREFILL-LIVENESS] layer_end chunk=0 layer=6 layer_type=pass tokens=128 layer_ms=24.629 sync_ms=0.009
+[PREFILL-LIVENESS] layer_start chunk=0 layer=7 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=7 tokens=128 total_ms=13.469 in_proj_ms=0.057 split_extract_ms=0.010 conv1d_silu_ms=0.021 ssd_scan_ms=13.331 gated_rmsnorm_ms=0.013 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=7 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.535
+[PREFILL-LIVENESS] layer_end chunk=0 layer=7 layer_type=mamba2 tokens=128 layer_ms=13.543 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=8 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=8 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=8 tokens=128 elapsed_ms=25.412
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=8 layer_type=pass tokens=128 elapsed_before_sync_ms=25.459
+[PREFILL-LIVENESS] layer_end chunk=0 layer=8 layer_type=pass tokens=128 layer_ms=25.468 sync_ms=0.009
+[PREFILL-LIVENESS] layer_start chunk=0 layer=9 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=9 tokens=128 total_ms=13.497 in_proj_ms=0.059 split_extract_ms=0.010 conv1d_silu_ms=0.022 ssd_scan_ms=13.358 gated_rmsnorm_ms=0.013 out_proj_ms=0.035
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=9 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.564
+[PREFILL-LIVENESS] layer_end chunk=0 layer=9 layer_type=mamba2 tokens=128 layer_ms=13.572 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=10 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=10 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=10 tokens=128 elapsed_ms=23.972
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=10 layer_type=pass tokens=128 elapsed_before_sync_ms=24.018
+[PREFILL-LIVENESS] layer_end chunk=0 layer=10 layer_type=pass tokens=128 layer_ms=24.026 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=11 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=11 tokens=128 total_ms=13.446 in_proj_ms=0.059 split_extract_ms=0.011 conv1d_silu_ms=0.021 ssd_scan_ms=13.306 gated_rmsnorm_ms=0.012 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=11 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.513
+[PREFILL-LIVENESS] layer_end chunk=0 layer=11 layer_type=mamba2 tokens=128 layer_ms=13.521 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=12 layer_type=gqa tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=12 layer_type=gqa tokens=128 elapsed_before_sync_ms=0.464
+[PREFILL-LIVENESS] layer_end chunk=0 layer=12 layer_type=gqa tokens=128 layer_ms=0.474 sync_ms=0.010
+[PREFILL-LIVENESS] layer_start chunk=0 layer=13 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=13 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=13 tokens=128 elapsed_ms=23.021
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=13 layer_type=pass tokens=128 elapsed_before_sync_ms=23.068
+[PREFILL-LIVENESS] layer_end chunk=0 layer=13 layer_type=pass tokens=128 layer_ms=23.076 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=14 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=14 tokens=128 total_ms=13.447 in_proj_ms=0.059 split_extract_ms=0.010 conv1d_silu_ms=0.021 ssd_scan_ms=13.307 gated_rmsnorm_ms=0.013 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=14 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.514
+[PREFILL-LIVENESS] layer_end chunk=0 layer=14 layer_type=mamba2 tokens=128 layer_ms=13.522 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=15 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=15 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=15 tokens=128 elapsed_ms=22.667
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=15 layer_type=pass tokens=128 elapsed_before_sync_ms=22.713
+[PREFILL-LIVENESS] layer_end chunk=0 layer=15 layer_type=pass tokens=128 layer_ms=22.721 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=16 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=16 tokens=128 total_ms=13.450 in_proj_ms=0.059 split_extract_ms=0.010 conv1d_silu_ms=0.020 ssd_scan_ms=13.307 gated_rmsnorm_ms=0.013 out_proj_ms=0.041
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=16 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.517
+[PREFILL-LIVENESS] layer_end chunk=0 layer=16 layer_type=mamba2 tokens=128 layer_ms=13.526 sync_ms=0.009
+[PREFILL-LIVENESS] layer_start chunk=0 layer=17 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=17 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=17 tokens=128 elapsed_ms=21.998
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=17 layer_type=pass tokens=128 elapsed_before_sync_ms=22.045
+[PREFILL-LIVENESS] layer_end chunk=0 layer=17 layer_type=pass tokens=128 layer_ms=22.053 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=18 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=18 tokens=128 total_ms=13.446 in_proj_ms=0.057 split_extract_ms=0.011 conv1d_silu_ms=0.021 ssd_scan_ms=13.309 gated_rmsnorm_ms=0.013 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=18 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.512
+[PREFILL-LIVENESS] layer_end chunk=0 layer=18 layer_type=mamba2 tokens=128 layer_ms=13.520 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=19 layer_type=gqa tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=19 layer_type=gqa tokens=128 elapsed_before_sync_ms=0.456
+[PREFILL-LIVENESS] layer_end chunk=0 layer=19 layer_type=gqa tokens=128 layer_ms=0.465 sync_ms=0.010
+[PREFILL-LIVENESS] layer_start chunk=0 layer=20 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=20 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=20 tokens=128 elapsed_ms=21.629
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=20 layer_type=pass tokens=128 elapsed_before_sync_ms=21.676
+[PREFILL-LIVENESS] layer_end chunk=0 layer=20 layer_type=pass tokens=128 layer_ms=21.684 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=21 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=21 tokens=128 total_ms=13.447 in_proj_ms=0.058 split_extract_ms=0.010 conv1d_silu_ms=0.021 ssd_scan_ms=13.308 gated_rmsnorm_ms=0.013 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=21 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.513
+[PREFILL-LIVENESS] layer_end chunk=0 layer=21 layer_type=mamba2 tokens=128 layer_ms=13.521 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=22 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=22 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=22 tokens=128 elapsed_ms=21.526
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=22 layer_type=pass tokens=128 elapsed_before_sync_ms=21.572
+[PREFILL-LIVENESS] layer_end chunk=0 layer=22 layer_type=pass tokens=128 layer_ms=21.581 sync_ms=0.009
+[PREFILL-LIVENESS] layer_start chunk=0 layer=23 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=23 tokens=128 total_ms=13.453 in_proj_ms=0.063 split_extract_ms=0.010 conv1d_silu_ms=0.021 ssd_scan_ms=13.309 gated_rmsnorm_ms=0.013 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=23 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.521
+[PREFILL-LIVENESS] layer_end chunk=0 layer=23 layer_type=mamba2 tokens=128 layer_ms=13.529 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=24 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=24 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=24 tokens=128 elapsed_ms=20.319
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=24 layer_type=pass tokens=128 elapsed_before_sync_ms=20.366
+[PREFILL-LIVENESS] layer_end chunk=0 layer=24 layer_type=pass tokens=128 layer_ms=20.375 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=25 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=25 tokens=128 total_ms=13.445 in_proj_ms=0.059 split_extract_ms=0.010 conv1d_silu_ms=0.027 ssd_scan_ms=13.300 gated_rmsnorm_ms=0.013 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=25 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.512
+[PREFILL-LIVENESS] layer_end chunk=0 layer=25 layer_type=mamba2 tokens=128 layer_ms=13.520 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=26 layer_type=gqa tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=26 layer_type=gqa tokens=128 elapsed_before_sync_ms=0.456
+[PREFILL-LIVENESS] layer_end chunk=0 layer=26 layer_type=gqa tokens=128 layer_ms=0.465 sync_ms=0.010
+[PREFILL-LIVENESS] layer_start chunk=0 layer=27 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=27 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=27 tokens=128 elapsed_ms=17.117
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=27 layer_type=pass tokens=128 elapsed_before_sync_ms=17.164
+[PREFILL-LIVENESS] layer_end chunk=0 layer=27 layer_type=pass tokens=128 layer_ms=17.172 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=28 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=28 tokens=128 total_ms=13.447 in_proj_ms=0.059 split_extract_ms=0.010 conv1d_silu_ms=0.021 ssd_scan_ms=13.308 gated_rmsnorm_ms=0.013 out_proj_ms=0.035
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=28 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.512
+[PREFILL-LIVENESS] layer_end chunk=0 layer=28 layer_type=mamba2 tokens=128 layer_ms=13.520 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=29 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=29 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=29 tokens=128 elapsed_ms=16.082
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=29 layer_type=pass tokens=128 elapsed_before_sync_ms=16.129
+[PREFILL-LIVENESS] layer_end chunk=0 layer=29 layer_type=pass tokens=128 layer_ms=16.137 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=30 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=30 tokens=128 total_ms=13.442 in_proj_ms=0.059 split_extract_ms=0.010 conv1d_silu_ms=0.022 ssd_scan_ms=13.301 gated_rmsnorm_ms=0.013 out_proj_ms=0.037
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=30 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.509
+[PREFILL-LIVENESS] layer_end chunk=0 layer=30 layer_type=mamba2 tokens=128 layer_ms=13.517 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=31 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=31 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=31 tokens=128 elapsed_ms=18.373
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=31 layer_type=pass tokens=128 elapsed_before_sync_ms=18.420
+[PREFILL-LIVENESS] layer_end chunk=0 layer=31 layer_type=pass tokens=128 layer_ms=18.428 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=32 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=32 tokens=128 total_ms=13.450 in_proj_ms=0.059 split_extract_ms=0.010 conv1d_silu_ms=0.022 ssd_scan_ms=13.309 gated_rmsnorm_ms=0.013 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=32 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.517
+[PREFILL-LIVENESS] layer_end chunk=0 layer=32 layer_type=mamba2 tokens=128 layer_ms=13.525 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=33 layer_type=gqa tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=33 layer_type=gqa tokens=128 elapsed_before_sync_ms=0.460
+[PREFILL-LIVENESS] layer_end chunk=0 layer=33 layer_type=gqa tokens=128 layer_ms=0.469 sync_ms=0.010
+[PREFILL-LIVENESS] layer_start chunk=0 layer=34 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=34 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=34 tokens=128 elapsed_ms=14.801
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=34 layer_type=pass tokens=128 elapsed_before_sync_ms=14.848
+[PREFILL-LIVENESS] layer_end chunk=0 layer=34 layer_type=pass tokens=128 layer_ms=14.857 sync_ms=0.009
+[PREFILL-LIVENESS] layer_start chunk=0 layer=35 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=35 tokens=128 total_ms=13.443 in_proj_ms=0.057 split_extract_ms=0.011 conv1d_silu_ms=0.022 ssd_scan_ms=13.304 gated_rmsnorm_ms=0.012 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=35 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.509
+[PREFILL-LIVENESS] layer_end chunk=0 layer=35 layer_type=mamba2 tokens=128 layer_ms=13.518 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=36 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=36 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=36 tokens=128 elapsed_ms=8.942
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=36 layer_type=pass tokens=128 elapsed_before_sync_ms=8.989
+[PREFILL-LIVENESS] layer_end chunk=0 layer=36 layer_type=pass tokens=128 layer_ms=8.997 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=37 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=37 tokens=128 total_ms=13.462 in_proj_ms=0.060 split_extract_ms=0.010 conv1d_silu_ms=0.022 ssd_scan_ms=13.322 gated_rmsnorm_ms=0.011 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=37 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.529
+[PREFILL-LIVENESS] layer_end chunk=0 layer=37 layer_type=mamba2 tokens=128 layer_ms=13.537 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=38 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=38 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=38 tokens=128 elapsed_ms=7.515
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=38 layer_type=pass tokens=128 elapsed_before_sync_ms=7.561
+[PREFILL-LIVENESS] layer_end chunk=0 layer=38 layer_type=pass tokens=128 layer_ms=7.569 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=39 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=39 tokens=128 total_ms=13.456 in_proj_ms=0.059 split_extract_ms=0.011 conv1d_silu_ms=0.022 ssd_scan_ms=13.315 gated_rmsnorm_ms=0.013 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=39 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.523
+[PREFILL-LIVENESS] layer_end chunk=0 layer=39 layer_type=mamba2 tokens=128 layer_ms=13.531 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=40 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=40 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=40 tokens=128 elapsed_ms=5.216
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=40 layer_type=pass tokens=128 elapsed_before_sync_ms=5.264
+[PREFILL-LIVENESS] layer_end chunk=0 layer=40 layer_type=pass tokens=128 layer_ms=5.272 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=41 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=41 tokens=128 total_ms=13.441 in_proj_ms=0.060 split_extract_ms=0.011 conv1d_silu_ms=0.023 ssd_scan_ms=13.296 gated_rmsnorm_ms=0.014 out_proj_ms=0.037
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=41 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.509
+[PREFILL-LIVENESS] layer_end chunk=0 layer=41 layer_type=mamba2 tokens=128 layer_ms=13.517 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=42 layer_type=gqa tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=42 layer_type=gqa tokens=128 elapsed_before_sync_ms=0.458
+[PREFILL-LIVENESS] layer_end chunk=0 layer=42 layer_type=gqa tokens=128 layer_ms=0.467 sync_ms=0.010
+[PREFILL-LIVENESS] layer_start chunk=0 layer=43 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=43 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=43 tokens=128 elapsed_ms=5.203
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=43 layer_type=pass tokens=128 elapsed_before_sync_ms=5.251
+[PREFILL-LIVENESS] layer_end chunk=0 layer=43 layer_type=pass tokens=128 layer_ms=5.259 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=44 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=44 tokens=128 total_ms=13.464 in_proj_ms=0.062 split_extract_ms=0.010 conv1d_silu_ms=0.022 ssd_scan_ms=13.320 gated_rmsnorm_ms=0.013 out_proj_ms=0.037
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=44 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.531
+[PREFILL-LIVENESS] layer_end chunk=0 layer=44 layer_type=mamba2 tokens=128 layer_ms=13.539 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=45 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=45 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=45 tokens=128 elapsed_ms=4.976
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=45 layer_type=pass tokens=128 elapsed_before_sync_ms=5.023
+[PREFILL-LIVENESS] layer_end chunk=0 layer=45 layer_type=pass tokens=128 layer_ms=5.031 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=46 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=46 tokens=128 total_ms=13.431 in_proj_ms=0.058 split_extract_ms=0.010 conv1d_silu_ms=0.022 ssd_scan_ms=13.292 gated_rmsnorm_ms=0.013 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=46 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.498
+[PREFILL-LIVENESS] layer_end chunk=0 layer=46 layer_type=mamba2 tokens=128 layer_ms=13.506 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=47 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=47 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=47 tokens=128 elapsed_ms=4.111
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=47 layer_type=pass tokens=128 elapsed_before_sync_ms=4.157
+[PREFILL-LIVENESS] layer_end chunk=0 layer=47 layer_type=pass tokens=128 layer_ms=4.165 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=48 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=48 tokens=128 total_ms=13.453 in_proj_ms=0.061 split_extract_ms=0.010 conv1d_silu_ms=0.022 ssd_scan_ms=13.310 gated_rmsnorm_ms=0.013 out_proj_ms=0.038
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=48 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.521
+[PREFILL-LIVENESS] layer_end chunk=0 layer=48 layer_type=mamba2 tokens=128 layer_ms=13.529 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=49 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=49 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=49 tokens=128 elapsed_ms=3.943
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=49 layer_type=pass tokens=128 elapsed_before_sync_ms=3.990
+[PREFILL-LIVENESS] layer_end chunk=0 layer=49 layer_type=pass tokens=128 layer_ms=3.999 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=50 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=50 tokens=128 total_ms=13.448 in_proj_ms=0.060 split_extract_ms=0.011 conv1d_silu_ms=0.022 ssd_scan_ms=13.306 gated_rmsnorm_ms=0.013 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=50 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.517
+[PREFILL-LIVENESS] layer_end chunk=0 layer=50 layer_type=mamba2 tokens=128 layer_ms=13.525 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=51 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=51 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=51 tokens=128 elapsed_ms=3.499
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=51 layer_type=pass tokens=128 elapsed_before_sync_ms=3.546
+[PREFILL-LIVENESS] layer_end chunk=0 layer=51 layer_type=pass tokens=128 layer_ms=3.554 sync_ms=0.008
+[PREFILL-LIVENESS] chunk_end chunk=0 tokens=128 elapsed_ms=685.933
+[PREFILL-TIMING] 128 tokens, 686.7ms total (186 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        1.0ms (  0.1%)
+[PREFILL-TIMING]   attn:      313.2ms ( 45.6%)  [gqa: 2.6ms, la: 0.0ms]
+[PREFILL-TIMING]     gqa breakdown (6 FA2 calls: 6 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:         1.7ms ( 66.7% of gqa)
+[PREFILL-TIMING]       qknorm:       0.0ms (  1.4% of gqa)
+[PREFILL-TIMING]       rope:         0.1ms (  3.9% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.0ms (  1.8% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.0ms over 6 calls
+[PREFILL-TIMING]       fa2         0.1ms (  5.5% of gqa)  [0.0ms/call avg]
+[PREFILL-TIMING]       gate:         0.0ms (  0.1% of gqa)
+[PREFILL-TIMING]       o_proj:       0.5ms ( 19.5% of gqa)
+[PREFILL-TIMING]     gqa queue events:
+[PREFILL-TIMING]         proj         event=     1.7ms wall=     1.7ms wall_minus_event=     0.0ms sync=     0.0ms over 6 calls
+[PREFILL-TIMING]         qkv_norm     event=     0.0ms wall=     0.0ms wall_minus_event=     0.0ms sync=     0.0ms over 6 calls
+[PREFILL-TIMING]         rope         event=     0.1ms wall=     0.1ms wall_minus_event=     0.0ms sync=     0.1ms over 6 calls
+[PREFILL-TIMING]         fa2          event=     0.1ms wall=     0.1ms wall_minus_event=     0.0ms sync=     0.1ms over 6 calls
+[PREFILL-TIMING]         kv_append    event=     0.0ms wall=     0.0ms wall_minus_event=     0.0ms sync=     0.0ms over 0 calls
+[PREFILL-TIMING]         o_proj       event=     0.5ms wall=     0.5ms wall_minus_event=     0.0ms sync=     0.0ms over 6 calls
+[PREFILL-TIMING]     hqq projection internals:
+[PREFILL-TIMING]       marlin_float_zp:      1.3ms over 24 calls
+[PREFILL-TIMING]       group_sums:           0.2ms over 24 calls
+[PREFILL-TIMING]       correction_gemm:      0.4ms over 24 calls
+[PREFILL-TIMING]       correction_add:       0.2ms over 24 calls
+[PREFILL-TIMING]     mamba2 breakdown (diagnostic sync-isolated): wall=   309.6ms ( 45.1% of prefill,  98.9% of mixer) event=   309.1ms sync=   308.3ms
+[PREFILL-TIMING]       in_proj          wall=     1.4ms event=     1.3ms sync=     1.0ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]       split_extract    wall=     0.2ms event=     0.2ms sync=     0.1ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]       conv1d_silu      wall=     0.5ms event=     0.4ms sync=     0.3ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]       ssd_scan         wall=   306.3ms event=   306.2ms sync=   306.2ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]       gated_rmsnorm    wall=     0.3ms event=     0.2ms sync=     0.2ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]       out_proj         wall=     0.9ms event=     0.8ms sync=     0.5ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]   moe:       370.1ms ( 53.9%)
+[PREFILL-TIMING]     moe breakdown (48 layers):
+[PREFILL-TIMING]       gate:         1.2ms (  0.3% of moe)
+[PREFILL-TIMING]       dma:        345.4ms ( 93.3% of moe)
+[PREFILL-TIMING]         route_d2h:     0.5ms ptr_alloc:     0.4ms ptr_build:     0.1ms
+[PREFILL-TIMING]         cold_h2d:     14.8ms ptr_upload:     0.2ms dma_wait:   327.6ms
+[PREFILL-TIMING]       w1+act:      12.5ms (  3.4% of moe)
+[PREFILL-TIMING]       w2:           9.7ms (  2.6% of moe)
+[PREFILL-TIMING]       scatter:      0.3ms (  0.1% of moe)
+[PREFILL-TIMING]       shared:       0.3ms (  0.1% of moe)
+[PREFILL-TIMING]   other:       2.4ms (  0.4%)
+  [32mdecode: 32 tokens in 1.21s (26.5 tok/s)  VRAM: 23714 MB free now, 23714 MB min free during decode[0m
+  [32mShort calibration: baseline=23,716 MB, prefill post-alloc=23,548 MB, prefill min=22,940 MB, decode min=23,714 MB, post-cleanup=23,714 MB[0m
+  [32mShort calibration: prefill 0.85s (151.0 tok/s), decode 1.80s (17.8 tok/s)[0m
+  [32mLong calibration: probing 39,920 prompt tokens + 32 decode tokens[0m
+[PREFILL-LIVENESS] run_start total_tokens=39920 scratch_max_tokens=39920 max_chunk=39920 chunk_size=39920 num_chunks=1 chunk_plan=[39920] expert_bits=4 shared_expert_bits=4 hidden_size=2688 layers=52
+[PREFILL-LIVENESS] chunk_start chunk=0 total_chunks=1 start=0 end=39920 tokens=39920 tok0=10 last_pos=39919 last_tok=1010
+[PREFILL-LIVENESS] chunk_after_hcs_guard chunk=0 tokens=39920 elapsed_ms=0.018
+[PREFILL-LIVENESS] layer_start chunk=0 layer=0 layer_type=mamba2 tokens=39920 has_residual=false moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=0 tokens=39920 total_ms=5263.113 in_proj_ms=9.372 split_extract_ms=0.803 conv1d_silu_ms=1.821 ssd_scan_ms=5246.020 gated_rmsnorm_ms=1.087 out_proj_ms=4.010
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=0 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=5264.391
+[PREFILL-LIVENESS] layer_end chunk=0 layer=0 layer_type=mamba2 tokens=39920 layer_ms=5264.403 sync_ms=0.013
+[PREFILL-LIVENESS] layer_start chunk=0 layer=1 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=1 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=1 tokens=39920 elapsed_ms=92.991
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=1 layer_type=pass tokens=39920 elapsed_before_sync_ms=94.324
+[PREFILL-LIVENESS] layer_end chunk=0 layer=1 layer_type=pass tokens=39920 layer_ms=94.332 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=2 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=2 tokens=39920 total_ms=5257.081 in_proj_ms=9.290 split_extract_ms=0.803 conv1d_silu_ms=1.826 ssd_scan_ms=5240.137 gated_rmsnorm_ms=1.091 out_proj_ms=3.933
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=2 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=5258.179
+[PREFILL-LIVENESS] layer_end chunk=0 layer=2 layer_type=mamba2 tokens=39920 layer_ms=5258.189 sync_ms=0.010
+[PREFILL-LIVENESS] layer_start chunk=0 layer=3 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=3 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=3 tokens=39920 elapsed_ms=84.398
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=3 layer_type=pass tokens=39920 elapsed_before_sync_ms=87.114
+[PREFILL-LIVENESS] layer_end chunk=0 layer=3 layer_type=pass tokens=39920 layer_ms=87.122 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=4 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=4 tokens=39920 total_ms=5286.337 in_proj_ms=9.285 split_extract_ms=0.807 conv1d_silu_ms=1.828 ssd_scan_ms=5269.374 gated_rmsnorm_ms=1.094 out_proj_ms=3.949
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=4 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=5287.434
+[PREFILL-LIVENESS] layer_end chunk=0 layer=4 layer_type=mamba2 tokens=39920 layer_ms=5287.444 sync_ms=0.010
+[PREFILL-LIVENESS] layer_start chunk=0 layer=5 layer_type=gqa tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=5 layer_type=gqa tokens=39920 elapsed_before_sync_ms=80.952
+[PREFILL-LIVENESS] layer_end chunk=0 layer=5 layer_type=gqa tokens=39920 layer_ms=80.963 sync_ms=0.011
+[PREFILL-LIVENESS] layer_start chunk=0 layer=6 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=6 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=6 tokens=39920 elapsed_ms=83.935
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=6 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.611
+[PREFILL-LIVENESS] layer_end chunk=0 layer=6 layer_type=pass tokens=39920 layer_ms=86.620 sync_ms=0.009
+[PREFILL-LIVENESS] layer_start chunk=0 layer=7 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=7 tokens=39920 total_ms=5274.684 in_proj_ms=9.302 split_extract_ms=0.803 conv1d_silu_ms=1.823 ssd_scan_ms=5257.688 gated_rmsnorm_ms=1.096 out_proj_ms=3.974
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=7 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=5275.789
+[PREFILL-LIVENESS] layer_end chunk=0 layer=7 layer_type=mamba2 tokens=39920 layer_ms=5275.799 sync_ms=0.011
+[PREFILL-LIVENESS] layer_start chunk=0 layer=8 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=8 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=8 tokens=39920 elapsed_ms=83.617
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=8 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.330
+[PREFILL-LIVENESS] layer_end chunk=0 layer=8 layer_type=pass tokens=39920 layer_ms=86.338 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=9 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=9 tokens=39920 total_ms=5285.348 in_proj_ms=9.281 split_extract_ms=0.804 conv1d_silu_ms=1.821 ssd_scan_ms=5268.454 gated_rmsnorm_ms=1.083 out_proj_ms=3.906
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=9 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=5286.405
+[PREFILL-LIVENESS] layer_end chunk=0 layer=9 layer_type=mamba2 tokens=39920 layer_ms=5286.414 sync_ms=0.010
+[PREFILL-LIVENESS] layer_start chunk=0 layer=10 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=10 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=10 tokens=39920 elapsed_ms=83.589
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=10 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.246
+[PREFILL-LIVENESS] layer_end chunk=0 layer=10 layer_type=pass tokens=39920 layer_ms=86.254 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=11 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=11 tokens=39920 total_ms=5265.033 in_proj_ms=9.281 split_extract_ms=0.802 conv1d_silu_ms=1.824 ssd_scan_ms=5248.140 gated_rmsnorm_ms=1.083 out_proj_ms=3.903
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=11 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=5266.083
+[PREFILL-LIVENESS] layer_end chunk=0 layer=11 layer_type=mamba2 tokens=39920 layer_ms=5266.093 sync_ms=0.009
+[PREFILL-LIVENESS] layer_start chunk=0 layer=12 layer_type=gqa tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=12 layer_type=gqa tokens=39920 elapsed_before_sync_ms=80.300
+[PREFILL-LIVENESS] layer_end chunk=0 layer=12 layer_type=gqa tokens=39920 layer_ms=80.311 sync_ms=0.011
+[PREFILL-LIVENESS] layer_start chunk=0 layer=13 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=13 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=13 tokens=39920 elapsed_ms=83.911
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=13 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.583
+[PREFILL-LIVENESS] layer_end chunk=0 layer=13 layer_type=pass tokens=39920 layer_ms=86.591 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=14 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=14 tokens=39920 total_ms=5264.995 in_proj_ms=9.296 split_extract_ms=0.803 conv1d_silu_ms=1.830 ssd_scan_ms=5248.080 gated_rmsnorm_ms=1.081 out_proj_ms=3.905
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=14 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=5266.045
+[PREFILL-LIVENESS] layer_end chunk=0 layer=14 layer_type=mamba2 tokens=39920 layer_ms=5266.054 sync_ms=0.009
+[PREFILL-LIVENESS] layer_start chunk=0 layer=15 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=15 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=15 tokens=39920 elapsed_ms=83.633
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=15 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.260
+[PREFILL-LIVENESS] layer_end chunk=0 layer=15 layer_type=pass tokens=39920 layer_ms=86.268 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=16 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=16 tokens=39920 total_ms=5265.087 in_proj_ms=9.280 split_extract_ms=0.801 conv1d_silu_ms=1.822 ssd_scan_ms=5248.081 gated_rmsnorm_ms=1.114 out_proj_ms=3.990
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=16 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=5266.261
+[PREFILL-LIVENESS] layer_end chunk=0 layer=16 layer_type=mamba2 tokens=39920 layer_ms=5266.272 sync_ms=0.010
+[PREFILL-LIVENESS] layer_start chunk=0 layer=17 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=17 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=17 tokens=39920 elapsed_ms=83.707
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=17 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.805
+[PREFILL-LIVENESS] layer_end chunk=0 layer=17 layer_type=pass tokens=39920 layer_ms=86.813 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=18 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=18 tokens=39920 total_ms=5264.224 in_proj_ms=9.284 split_extract_ms=0.808 conv1d_silu_ms=1.823 ssd_scan_ms=5247.257 gated_rmsnorm_ms=1.085 out_proj_ms=3.966
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=18 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=5265.302
+[PREFILL-LIVENESS] layer_end chunk=0 layer=18 layer_type=mamba2 tokens=39920 layer_ms=5265.311 sync_ms=0.009
+[PREFILL-LIVENESS] layer_start chunk=0 layer=19 layer_type=gqa tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=19 layer_type=gqa tokens=39920 elapsed_before_sync_ms=80.609
+[PREFILL-LIVENESS] layer_end chunk=0 layer=19 layer_type=gqa tokens=39920 layer_ms=80.620 sync_ms=0.011
+[PREFILL-LIVENESS] layer_start chunk=0 layer=20 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=20 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=20 tokens=39920 elapsed_ms=83.979
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=20 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.673
+[PREFILL-LIVENESS] layer_end chunk=0 layer=20 layer_type=pass tokens=39920 layer_ms=86.681 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=21 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=21 tokens=39920 total_ms=5265.003 in_proj_ms=9.286 split_extract_ms=0.801 conv1d_silu_ms=1.842 ssd_scan_ms=5247.966 gated_rmsnorm_ms=1.116 out_proj_ms=3.993
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=21 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=5266.185
+[PREFILL-LIVENESS] layer_end chunk=0 layer=21 layer_type=mamba2 tokens=39920 layer_ms=5266.195 sync_ms=0.010
+[PREFILL-LIVENESS] layer_start chunk=0 layer=22 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=22 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=22 tokens=39920 elapsed_ms=83.817
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=22 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.882
+[PREFILL-LIVENESS] layer_end chunk=0 layer=22 layer_type=pass tokens=39920 layer_ms=86.890 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=23 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=23 tokens=39920 total_ms=5264.693 in_proj_ms=9.284 split_extract_ms=0.809 conv1d_silu_ms=1.821 ssd_scan_ms=5247.656 gated_rmsnorm_ms=1.114 out_proj_ms=4.009
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=23 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=5265.875
+[PREFILL-LIVENESS] layer_end chunk=0 layer=23 layer_type=mamba2 tokens=39920 layer_ms=5265.886 sync_ms=0.011
+[PREFILL-LIVENESS] layer_start chunk=0 layer=24 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=24 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=24 tokens=39920 elapsed_ms=83.710
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=24 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.870
+[PREFILL-LIVENESS] layer_end chunk=0 layer=24 layer_type=pass tokens=39920 layer_ms=86.878 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=25 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=25 tokens=39920 total_ms=5262.898 in_proj_ms=9.287 split_extract_ms=0.809 conv1d_silu_ms=1.830 ssd_scan_ms=5245.861 gated_rmsnorm_ms=1.114 out_proj_ms=3.997
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=25 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=5264.048
+[PREFILL-LIVENESS] layer_end chunk=0 layer=25 layer_type=mamba2 tokens=39920 layer_ms=5264.058 sync_ms=0.010
+[PREFILL-LIVENESS] layer_start chunk=0 layer=26 layer_type=gqa tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=26 layer_type=gqa tokens=39920 elapsed_before_sync_ms=80.723
+[PREFILL-LIVENESS] layer_end chunk=0 layer=26 layer_type=gqa tokens=39920 layer_ms=80.734 sync_ms=0.012
+[PREFILL-LIVENESS] layer_start chunk=0 layer=27 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=27 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=27 tokens=39920 elapsed_ms=83.683
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=27 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.670
+[PREFILL-LIVENESS] layer_end chunk=0 layer=27 layer_type=pass tokens=39920 layer_ms=86.678 sync_ms=0.009
+[PREFILL-LIVENESS] layer_start chunk=0 layer=28 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=28 tokens=39920 total_ms=5262.818 in_proj_ms=9.292 split_extract_ms=0.809 conv1d_silu_ms=1.831 ssd_scan_ms=5245.767 gated_rmsnorm_ms=1.106 out_proj_ms=4.013
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=28 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=5263.998
+[PREFILL-LIVENESS] layer_end chunk=0 layer=28 layer_type=mamba2 tokens=39920 layer_ms=5264.010 sync_ms=0.012
+[PREFILL-LIVENESS] layer_start chunk=0 layer=29 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=29 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=29 tokens=39920 elapsed_ms=83.639
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=29 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.643
+[PREFILL-LIVENESS] layer_end chunk=0 layer=29 layer_type=pass tokens=39920 layer_ms=86.651 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=30 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=30 tokens=39920 total_ms=5263.617 in_proj_ms=9.291 split_extract_ms=0.803 conv1d_silu_ms=1.819 ssd_scan_ms=5246.587 gated_rmsnorm_ms=1.104 out_proj_ms=4.013
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=30 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=5264.772
+[PREFILL-LIVENESS] layer_end chunk=0 layer=30 layer_type=mamba2 tokens=39920 layer_ms=5264.782 sync_ms=0.010
+[PREFILL-LIVENESS] layer_start chunk=0 layer=31 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=31 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=31 tokens=39920 elapsed_ms=83.657
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=31 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.606
+[PREFILL-LIVENESS] layer_end chunk=0 layer=31 layer_type=pass tokens=39920 layer_ms=86.614 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=32 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=32 tokens=39920 total_ms=5262.594 in_proj_ms=9.290 split_extract_ms=0.809 conv1d_silu_ms=1.828 ssd_scan_ms=5245.545 gated_rmsnorm_ms=1.120 out_proj_ms=4.003
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=32 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=5263.778
+[PREFILL-LIVENESS] layer_end chunk=0 layer=32 layer_type=mamba2 tokens=39920 layer_ms=5263.788 sync_ms=0.011
+[PREFILL-LIVENESS] layer_start chunk=0 layer=33 layer_type=gqa tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=33 layer_type=gqa tokens=39920 elapsed_before_sync_ms=80.820
+[PREFILL-LIVENESS] layer_end chunk=0 layer=33 layer_type=gqa tokens=39920 layer_ms=80.830 sync_ms=0.011
+[PREFILL-LIVENESS] layer_start chunk=0 layer=34 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=34 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=34 tokens=39920 elapsed_ms=83.581
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=34 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.612
+[PREFILL-LIVENESS] layer_end chunk=0 layer=34 layer_type=pass tokens=39920 layer_ms=86.620 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=35 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=35 tokens=39920 total_ms=5262.859 in_proj_ms=9.334 split_extract_ms=0.809 conv1d_silu_ms=1.830 ssd_scan_ms=5245.770 gated_rmsnorm_ms=1.115 out_proj_ms=4.001
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=35 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=5264.037
+[PREFILL-LIVENESS] layer_end chunk=0 layer=35 layer_type=mamba2 tokens=39920 layer_ms=5264.047 sync_ms=0.010
+[PREFILL-LIVENESS] layer_start chunk=0 layer=36 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=36 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=36 tokens=39920 elapsed_ms=83.584
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=36 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.690
+[PREFILL-LIVENESS] layer_end chunk=0 layer=36 layer_type=pass tokens=39920 layer_ms=86.698 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=37 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=37 tokens=39920 total_ms=5262.698 in_proj_ms=9.294 split_extract_ms=0.811 conv1d_silu_ms=1.826 ssd_scan_ms=5245.649 gated_rmsnorm_ms=1.116 out_proj_ms=4.001
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=37 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=5263.849
+[PREFILL-LIVENESS] layer_end chunk=0 layer=37 layer_type=mamba2 tokens=39920 layer_ms=5263.860 sync_ms=0.010
+[PREFILL-LIVENESS] layer_start chunk=0 layer=38 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=38 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=38 tokens=39920 elapsed_ms=83.668
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=38 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.676
+[PREFILL-LIVENESS] layer_end chunk=0 layer=38 layer_type=pass tokens=39920 layer_ms=86.684 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=39 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=39 tokens=39920 total_ms=5261.619 in_proj_ms=9.295 split_extract_ms=0.809 conv1d_silu_ms=1.829 ssd_scan_ms=5244.634 gated_rmsnorm_ms=1.090 out_proj_ms=3.963
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=39 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=5262.740
+[PREFILL-LIVENESS] layer_end chunk=0 layer=39 layer_type=mamba2 tokens=39920 layer_ms=5262.752 sync_ms=0.012
+[PREFILL-LIVENESS] layer_start chunk=0 layer=40 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=40 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=40 tokens=39920 elapsed_ms=83.544
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=40 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.390
+[PREFILL-LIVENESS] layer_end chunk=0 layer=40 layer_type=pass tokens=39920 layer_ms=86.398 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=41 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=41 tokens=39920 total_ms=5261.566 in_proj_ms=9.301 split_extract_ms=0.803 conv1d_silu_ms=1.826 ssd_scan_ms=5244.520 gated_rmsnorm_ms=1.117 out_proj_ms=3.999
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=41 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=5262.747
+[PREFILL-LIVENESS] layer_end chunk=0 layer=41 layer_type=mamba2 tokens=39920 layer_ms=5262.757 sync_ms=0.010
+[PREFILL-LIVENESS] layer_start chunk=0 layer=42 layer_type=gqa tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=42 layer_type=gqa tokens=39920 elapsed_before_sync_ms=80.604
+[PREFILL-LIVENESS] layer_end chunk=0 layer=42 layer_type=gqa tokens=39920 layer_ms=80.615 sync_ms=0.011
+[PREFILL-LIVENESS] layer_start chunk=0 layer=43 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=43 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=43 tokens=39920 elapsed_ms=83.656
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=43 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.717
+[PREFILL-LIVENESS] layer_end chunk=0 layer=43 layer_type=pass tokens=39920 layer_ms=86.726 sync_ms=0.009
+[PREFILL-LIVENESS] layer_start chunk=0 layer=44 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=44 tokens=39920 total_ms=5262.315 in_proj_ms=9.334 split_extract_ms=0.812 conv1d_silu_ms=1.829 ssd_scan_ms=5245.227 gated_rmsnorm_ms=1.117 out_proj_ms=3.997
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=44 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=5263.496
+[PREFILL-LIVENESS] layer_end chunk=0 layer=44 layer_type=mamba2 tokens=39920 layer_ms=5263.507 sync_ms=0.010
+[PREFILL-LIVENESS] layer_start chunk=0 layer=45 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=45 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=45 tokens=39920 elapsed_ms=83.591
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=45 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.666
+[PREFILL-LIVENESS] layer_end chunk=0 layer=45 layer_type=pass tokens=39920 layer_ms=86.674 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=46 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=46 tokens=39920 total_ms=5261.195 in_proj_ms=9.302 split_extract_ms=0.809 conv1d_silu_ms=1.835 ssd_scan_ms=5244.169 gated_rmsnorm_ms=1.097 out_proj_ms=3.983
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=46 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=5262.309
+[PREFILL-LIVENESS] layer_end chunk=0 layer=46 layer_type=mamba2 tokens=39920 layer_ms=5262.319 sync_ms=0.010
+[PREFILL-LIVENESS] layer_start chunk=0 layer=47 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=47 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=47 tokens=39920 elapsed_ms=83.591
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=47 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.369
+[PREFILL-LIVENESS] layer_end chunk=0 layer=47 layer_type=pass tokens=39920 layer_ms=86.377 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=48 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=48 tokens=39920 total_ms=5275.897 in_proj_ms=23.362 split_extract_ms=0.812 conv1d_silu_ms=1.842 ssd_scan_ms=5244.805 gated_rmsnorm_ms=1.108 out_proj_ms=3.967
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=48 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=5277.047
+[PREFILL-LIVENESS] layer_end chunk=0 layer=48 layer_type=mamba2 tokens=39920 layer_ms=5277.058 sync_ms=0.011
+[PREFILL-LIVENESS] layer_start chunk=0 layer=49 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=49 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=49 tokens=39920 elapsed_ms=83.357
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=49 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.270
+[PREFILL-LIVENESS] layer_end chunk=0 layer=49 layer_type=pass tokens=39920 layer_ms=86.278 sync_ms=0.008
+[PREFILL-LIVENESS] layer_start chunk=0 layer=50 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=50 tokens=39920 total_ms=5261.546 in_proj_ms=9.303 split_extract_ms=0.803 conv1d_silu_ms=1.827 ssd_scan_ms=5244.544 gated_rmsnorm_ms=1.102 out_proj_ms=3.967
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=50 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=5262.684
+[PREFILL-LIVENESS] layer_end chunk=0 layer=50 layer_type=mamba2 tokens=39920 layer_ms=5262.695 sync_ms=0.011
+[PREFILL-LIVENESS] layer_start chunk=0 layer=51 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=51 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=51 tokens=39920 elapsed_ms=83.435
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=51 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.379
+[PREFILL-LIVENESS] layer_end chunk=0 layer=51 layer_type=pass tokens=39920 layer_ms=86.387 sync_ms=0.008
+[PREFILL-LIVENESS] chunk_end chunk=0 tokens=39920 elapsed_ms=123628.296
+[PREFILL-TIMING] 39920 tokens, 123630.0ms total (323 tok/s)
+[PREFILL-TIMING]   embed:       0.4ms (  0.0%)
+[PREFILL-TIMING]   norm:       53.6ms (  0.0%)
+[PREFILL-TIMING]   attn:   121604.4ms ( 98.4%)  [gqa: 477.7ms, la: 0.0ms]
+[PREFILL-TIMING]     gqa breakdown (6 FA2 calls: 6 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:        63.2ms ( 13.2% of gqa)
+[PREFILL-TIMING]       qknorm:       0.0ms (  0.0% of gqa)
+[PREFILL-TIMING]       rope:         2.9ms (  0.6% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.4ms (  0.1% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.4ms over 6 calls
+[PREFILL-TIMING]       fa2       353.8ms ( 74.1% of gqa)  [59.0ms/call avg]
+[PREFILL-TIMING]       gate:         0.0ms (  0.0% of gqa)
+[PREFILL-TIMING]       o_proj:      57.3ms ( 12.0% of gqa)
+[PREFILL-TIMING]     gqa queue events:
+[PREFILL-TIMING]         proj         event=    63.1ms wall=    63.2ms wall_minus_event=     0.0ms sync=     0.0ms over 6 calls
+[PREFILL-TIMING]         qkv_norm     event=     0.0ms wall=     0.0ms wall_minus_event=     0.0ms sync=     0.0ms over 6 calls
+[PREFILL-TIMING]         rope         event=     2.9ms wall=     2.9ms wall_minus_event=     0.0ms sync=     2.9ms over 6 calls
+[PREFILL-TIMING]         fa2          event=   353.8ms wall=   353.8ms wall_minus_event=     0.0ms sync=   353.4ms over 6 calls
+[PREFILL-TIMING]         kv_append    event=     0.0ms wall=     0.4ms wall_minus_event=     0.4ms sync=     0.3ms over 0 calls
+[PREFILL-TIMING]         o_proj       event=    57.3ms wall=    57.3ms wall_minus_event=     0.0ms sync=     1.7ms over 6 calls
+[PREFILL-TIMING]     hqq projection internals:
+[PREFILL-TIMING]       marlin_float_zp:    100.9ms over 24 calls
+[PREFILL-TIMING]       group_sums:           3.9ms over 24 calls
+[PREFILL-TIMING]       correction_gemm:      5.0ms over 24 calls
+[PREFILL-TIMING]       correction_add:       8.6ms over 24 calls
+[PREFILL-TIMING]     mamba2 breakdown (diagnostic sync-isolated): wall=121117.2ms ( 98.0% of prefill,  99.6% of mixer) event=121102.9ms sync=121113.1ms
+[PREFILL-TIMING]       in_proj          wall=   227.9ms event=   213.8ms sync=   227.4ms wall_minus_event=    14.2ms over 23 calls
+[PREFILL-TIMING]       split_extract    wall=    18.5ms event=    18.4ms sync=    18.3ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]       conv1d_silu      wall=    42.0ms event=    41.9ms sync=    41.8ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]       ssd_scan         wall=120711.9ms event=120712.1ms sync=120711.5ms wall_minus_event=     0.0ms over 23 calls
+[PREFILL-TIMING]       gated_rmsnorm    wall=    25.4ms event=    25.3ms sync=    24.7ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]       out_proj         wall=    91.4ms event=    91.3ms sync=    89.4ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]   moe:      1934.5ms (  1.6%)
+[PREFILL-TIMING]     moe breakdown (48 layers):
+[PREFILL-TIMING]       gate:        14.4ms (  0.7% of moe)
+[PREFILL-TIMING]       dma:        549.7ms ( 28.4% of moe)
+[PREFILL-TIMING]         route_d2h:     2.0ms ptr_alloc:     0.0ms ptr_build:     0.1ms
+[PREFILL-TIMING]         cold_h2d:     31.3ms ptr_upload:     0.5ms dma_wait:   544.2ms
+[PREFILL-TIMING]       w1+act:     710.5ms ( 36.7% of moe)
+[PREFILL-TIMING]       w2:         496.6ms ( 25.7% of moe)
+[PREFILL-TIMING]       scatter:     32.5ms (  1.7% of moe)
+[PREFILL-TIMING]       shared:     129.6ms (  6.7% of moe)
+[PREFILL-TIMING]   other:      37.2ms (  0.0%)
+  [32mdecode: 32 tokens in 2.32s (13.8 tok/s)  VRAM: 23716 MB free now, 23716 MB min free during decode[0m
+  [32mLong calibration: baseline=23,714 MB, prefill post-alloc=13,072 MB, prefill min=12,398 MB, decode min=23,716 MB, post-cleanup=23,716 MB[0m
+  [32mLong calibration: prefill 123.87s (322.3 tok/s), decode 2.92s (11.0 tok/s)[0m
+  [32mScratch reservation: max=11,786 MB (at 50,000 tokens)[0m
+
+[1m[36m▸ VRAM calibration complete[0m
+  [32mPost-calibration free VRAM: 23,716 MB[0m
+  [32mTransient deltas: short prefill=776 MB, long prefill=11,316 MB, short decode=2 MB, long decode=0 MB[0m
+  [32mGPU0 decode HCS budget: 23,114 MB[0m
+  [32mPrefill HCS budgets: short=22,340 MB, long=11,800 MB[0m
+  [32mWorst-case prefill scratch reservation: 11,786 MB at 50,000 tokens[0m
+
+[1m[36m▸ Startup diagnostic exit[0m
+  [32mExiting after VRAM calibration by request[0m

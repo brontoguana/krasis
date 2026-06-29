@@ -1,0 +1,2 @@
+decision	status	reason
+stop_after_case2	hqq6_g64_instability_reproduced	case2 selected 1321 instead of BF16 1044 and margin 1044-1321 was -0.242314; cases 0/1 were not sent per gate rule

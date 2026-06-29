@@ -1,0 +1,2 @@
+gate	attempt	command	exit_code	duration_s	warmup_tokens	observed_warmup_output_mismatches	observed_warmup_state_mismatches	observed_probe_status	exit_reason	result
+20260628_2104_nemotron_nano_parallel_ssd_token_logit_correctness	attempt_8_parallel_output_absolute_da_surface	./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf --test-endpoints	1	45	300	0	0	row97 exact; row64/state0 exact; row82/state14 exact	later 64-token calibration term-probe target row97 out of range	warmup_exact_not_acceptance_run

@@ -1,0 +1,100 @@
+{
+  "gate": "20260627_1328_nemotron_nano_diagnostic_perturbation_check",
+  "status": "closed",
+  "opened_utc": "2026-06-27T13:28:00Z",
+  "closed_utc": "2026-06-27T14:15:26Z",
+  "record_first": {
+    "source_gate": "20260627_1244_nemotron_nano_projection_diagnostic_rerun",
+    "g32_previous_quality_selected_flips": "0/3",
+    "g32_projection_rerun_case0_flip": true,
+    "g32_projection_rerun_case0_token_change": "1044 -> 1321",
+    "g32_projection_rerun_case2_stayed_token": 1044,
+    "g32_projection_rerun_projection_traces": "4/4 present and valid",
+    "g32_projection_rerun_no_cache_generation": true,
+    "g32_projection_rerun_no_production_enablement": true
+  },
+  "scope": {
+    "use_existing_artifacts_first": true,
+    "live_variant": "hqq6_g32",
+    "live_cases": [0],
+    "endpoint": "/v1/internal/reference_test",
+    "existing_cache_spec_only": true,
+    "stop_condition": "stop as soon as the output-changing diagnostic flag is isolated"
+  },
+  "existing_artifact_comparison": {
+    "old_g32_quality_case0": {
+      "artifact": "benchmarks/20260627_0826_nemotron_nano_hqq6_g32_quality_proof_hqq_g32_case0_response.json",
+      "selected_token": 1044,
+      "margin_1044_minus_1321": 0.474478,
+      "projection_available": false,
+      "consume_boundary_rows": 0
+    },
+    "projection_plus_consume_boundary_1244_case0": {
+      "artifact": "benchmarks/20260627_1244_nemotron_nano_projection_diagnostic_rerun_hqq6_g32_case0_response.json",
+      "selected_token": 1321,
+      "margin_1044_minus_1321": -0.087939,
+      "projection_available": true,
+      "consume_boundary_rows": 69
+    }
+  },
+  "live_result": {
+    "variant": "hqq6_g32",
+    "case": 0,
+    "endpoint": "/v1/internal/reference_test",
+    "cache_spec": "benchmarks/20260627_0804_nemotron_nano_hqq6_g32_all_moe_layer_cache_spec_generation_diagnostic_cache_spec.json",
+    "runs": [
+      {
+        "condition": "debug_trace_only",
+        "http_status": 200,
+        "time_total_s": 36.943106,
+        "selected_token": 1044,
+        "margin_1044_minus_1321": 0.270762,
+        "projection_available": false,
+        "consume_boundary_rows": 0
+      },
+      {
+        "condition": "projection_only",
+        "http_status": 200,
+        "time_total_s": 36.428060,
+        "selected_token": 1044,
+        "margin_1044_minus_1321": 0.522049,
+        "projection_available": true,
+        "consume_boundary_rows": 0
+      },
+      {
+        "condition": "consume_diag_only",
+        "http_status": 200,
+        "time_total_s": 44.020051,
+        "selected_token": 1044,
+        "margin_1044_minus_1321": 0.315884,
+        "projection_available": false,
+        "consume_boundary_rows": 69
+      }
+    ]
+  },
+  "decision": {
+    "status": "isolated_to_interaction",
+    "single_flag_projection_perturbs_output": false,
+    "single_flag_consume_boundary_diagnostics_perturbs_output": false,
+    "combined_projection_plus_consume_boundary_perturbs_output": true,
+    "interpretation": "HQQ6 g32 case 0 remains stable when projection and consume-boundary diagnostics are tested independently. The 1244 selected-token flip requires the combined projection plus consume-boundary diagnostic path.",
+    "next_required_fix_if_continuing": "inspect and fix the combined projection-plus-consume-boundary diagnostic interaction so projection remains read-only with respect to final hidden/logit output before using combined projection attribution for quality decisions"
+  },
+  "final_state": {
+    "timestamp_utc": "2026-06-27T14:15:26Z",
+    "tmux_server": "none",
+    "matching_runtime_processes": "none",
+    "gpu_memory_used_mb": [15, 11],
+    "disk_available": "614G",
+    "ram_available": "965Gi"
+  },
+  "forbidden": [
+    "hqq6_g64_run",
+    "cache_generation",
+    "new_variants",
+    "production_hqq_enablement",
+    "speed_benchmark",
+    "decode_hcs",
+    "selected_expert_retargeting"
+  ]
+}

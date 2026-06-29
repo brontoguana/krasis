@@ -1,0 +1,18 @@
+check	status	detail
+record_first	passed	1000 support stop recorded before source inspection/implementation
+focused_expert_hqq_tests	passed	./dev test-kernels expert_hqq => 98 passed / 0 failed
+dev_build	passed	./dev build exit 0
+cargo_fmt_check	passed	/home/main/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo fmt --check
+bash_n_dev	passed	bash -n dev
+git_diff_check_krasis	passed	git diff --check
+git_diff_check_internal	passed	git diff --check
+protected_config_check	passed	only known pre-existing untracked tests/nemotron-nano-bf16-experts-a16.conf
+hqq8_cache_generation	not_run	forbidden in this gate
+live_server	not_run	forbidden in this gate
+speed_benchmark	not_run	forbidden in this gate
+production_hqq	not_enabled	default behavior unchanged
+cleanup	passed	./dev kill reported all GPUs clear
+final_tmux	passed	no server running
+final_process_check	passed	no matching runtime/generator/build/curl process
+final_gpu_state	passed	gpu0 15 MB used / gpu1 11 MB used, 0 percent utilization
+final_headroom	recorded	disk 645G available / RAM 965Gi available

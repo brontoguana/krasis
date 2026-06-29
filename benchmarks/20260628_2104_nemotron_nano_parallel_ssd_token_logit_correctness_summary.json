@@ -1,0 +1,227 @@
+{
+  "gate": "20260628_2104_nemotron_nano_parallel_ssd_token_logit_correctness",
+  "opened_utc": "2026-06-28T21:04:49Z",
+  "recorded_prior_gate_first": "2017",
+  "baselines": {
+    "gemma": "5619.6 / 92.43 / 155.69",
+    "nano": "346.5 / 94.48 / 164.75"
+  },
+  "prior_gate_result": {
+    "gate": "20260628_2017_nemotron_nano_parallel_ssd_correctness_debug",
+    "status": "closed_not_accepted_against_internal_serial_oracle",
+    "output_mismatches_after_attempt4": 17,
+    "state_mismatches_after_attempt4": 382618,
+    "tracked_probe_status": "row97 exact, row64/state0 exact, row82/state14 state exact but row82 output one BF16 bin off",
+    "important_distinction": "old internal serial-state bit identity is diagnostic only for the parallel architecture"
+  },
+  "scope": {
+    "mode": "guarded_token_logit_correctness_debug",
+    "default_path_change": false,
+    "production_enablement": false,
+    "speed_benchmark": false,
+    "decode_hcs": false,
+    "python_runtime_fallback": false,
+    "python_scripts_or_one_liners": false,
+    "requests": "minimal /v1/internal/reference_test comparison only"
+  },
+  "payload": {
+    "source": "benchmarks/20260624_2256_nemotron_nano_int4_first_correctness_gate_clean_forced_token_payload.json",
+    "input_token_count": 42,
+    "max_tokens": 1,
+    "top_logprobs": 12
+  },
+  "acceptance_target": {
+    "primary": "first-token and top-logprob parity or bounded diagnostic deltas versus accepted serial Krasis path on the same quantized config",
+    "secondary": "internal serial SSD oracle remains diagnostic and must not force architecture rollback"
+  },
+  "patch_attempts": {
+    "attempt_1_prefix_order": {
+      "status": "built_and_measured_not_sufficient",
+      "change": "parallel chunk cumsum now uses the accepted coeff-tile parallel-prefix addition order",
+      "first_token": "matched serial token 1044",
+      "max_tracked_top_logprob_delta": 0.493589
+    },
+    "attempt_2_exact_state_bridge": {
+      "opened_utc": "2026-06-28T21:45:19Z",
+      "status": "built_then_failed_state_only_on_42_token_oracle",
+      "change": "guarded parallel chunked path now computes chunked phases but bridges chunk-entry/final state through the accepted token-order recurrent kernel before parallel output/commit",
+      "scope": "diagnostic correctness bridge only under KRASIS_MAMBA2_SSD_PARALLEL_CHUNKED=1; default path and production behavior unchanged",
+      "build": {
+        "exit_code": 0,
+        "duration_s": 174
+      },
+      "small_oracle_42": {
+        "exit_code": 1,
+        "duration_s": 35,
+        "output_mismatches": 0,
+        "state_mismatches": 332283,
+        "state_max_abs": 213.221740723,
+        "diagnosis": "bridge recurrent started from candidate_state after parallel state-passing mutated it"
+      }
+    },
+    "attempt_3_exact_state_bridge_reset": {
+      "opened_utc": "2026-06-28T21:50:58Z",
+      "status": "compile_failed_then_fixed",
+      "change": "restore initial_state into candidate_state immediately before the exact-state bridge recurrent kernel",
+      "scope": "guarded diagnostic bridge only; default path and production behavior unchanged",
+      "build": {
+        "exit_code": 1,
+        "duration_s": 14,
+        "error": "E0599 initial_state was Option<GpuBuf<f32>> at reset site"
+      }
+    },
+    "attempt_4_parallel_initial_snapshot": {
+      "opened_utc": "2026-06-28T21:52:33Z",
+      "status": "built_then_failed_output_only_on_42_token_oracle",
+      "change": "allocate initial_state for parallel chunked mode, copy live state into it, and unwrap it explicitly for the exact-state bridge reset",
+      "scope": "guarded diagnostic bridge only; default path and production behavior unchanged",
+      "build": {
+        "exit_code": 0,
+        "duration_s": 172
+      },
+      "small_oracle_42": {
+        "exit_code": 1,
+        "duration_s": 35,
+        "first_bad_layer": 2,
+        "output_mismatches": 1,
+        "state_mismatches": 0,
+        "first_output": "row28/head42/d50 0xbf69 vs 0xbf6a"
+      }
+    },
+    "attempt_5_parallel_output_multiply_order": {
+      "opened_utc": "2026-06-28T21:59:12Z",
+      "status": "built_and_passed_42_token_oracle_then_failed_multi_chunk_output_only",
+      "change": "match accepted coeff-tile output multiplication order by computing scale = decay * dt before BF16-casting cb * scale, and compute old_coeff before multiplying by x_u",
+      "scope": "guarded parallel chunk-scan output only; default path and production behavior unchanged",
+      "build": {
+        "exit_code": 0,
+        "duration_s": 180
+      },
+      "small_oracle_42": {
+        "oracle_records": 161,
+        "passed_records": 161,
+        "mismatch_records": 0
+      },
+      "multi_chunk_oracle_300": {
+        "exit_code": 1,
+        "duration_s": 36,
+        "first_bad_layer": 0,
+        "output_mismatches": 8,
+        "state_mismatches": 0,
+        "first_output": "row161/head32/d39 0xbff8 vs 0xbff7",
+        "tracked_probes": "row97/head48/d24 exact, row64/state0 exact, row82/state14 exact"
+      }
+    },
+    "attempt_6_parallel_output_exact_prior": {
+      "opened_utc": "2026-06-28T22:07:36Z",
+      "status": "built_then_failed_multi_chunk_output_only",
+      "change": "pass c_state_total_exact into the guarded parallel chunk-scan output kernel and use it for chunk_gt0 prior reconstruction, matching the accepted coeff-tile prior source",
+      "scope": "guarded parallel chunk-scan output only; default path and production behavior unchanged",
+      "build": {
+        "exit_code": 0,
+        "duration_s": 179
+      },
+      "multi_chunk_oracle_300": {
+        "exit_code": 1,
+        "duration_s": 41,
+        "first_bad_layer": 0,
+        "output_mismatches": 8,
+        "state_mismatches": 0,
+        "first_output": "row161/head32/d39 0xbff8 vs 0xbff7",
+        "output_max_abs": 0.0078125,
+        "output_mean_abs": 0.000000016690853,
+        "tracked_probes": "row97/head48/d24 exact, row64/state0 exact, row82/state14 exact",
+        "term_probe_161": "state replay exact, y_pre_bf16=-1.93359375 on BF16 boundary"
+      }
+    },
+    "attempt_7_parallel_output_old_coeff_tile": {
+      "opened_utc": "2026-06-28T23:17:00Z",
+      "status": "built_then_failed_multi_chunk_output_only",
+      "change": "precompute old-state coefficients into the guarded parallel chunk-scan shared coefficient tile, matching accepted coeff-tile output accumulation surface",
+      "scope": "guarded parallel chunk-scan output only; default path and production behavior unchanged",
+      "build": {
+        "exit_code": 0,
+        "duration_s": 180
+      },
+      "multi_chunk_oracle_300": {
+        "exit_code": 1,
+        "duration_s": 42,
+        "first_bad_layer": 0,
+        "output_mismatches": 8,
+        "state_mismatches": 0,
+        "first_output": "row161/head32/d39 0xbff8 vs 0xbff7",
+        "output_max_abs": 0.0078125,
+        "output_mean_abs": 0.000000016690853,
+        "tracked_probes": "row97/head48/d24 exact, row64/state0 exact, row82/state14 exact"
+      }
+    },
+    "attempt_8_parallel_output_absolute_da_surface": {
+      "opened_utc": "2026-06-28T23:25:00Z",
+      "status": "built_and_passed_300_token_multi_chunk_oracle",
+      "change": "carry dA_chunk_base inside the guarded parallel output kernel and use absolute dA target/running values for decay subtraction, matching accepted coeff-tile output",
+      "evidence": "accepted row161/head32/d39 y_pre_bf16=-1.9335936307907104 while parallel used -1.93359375; local_old_state differed by about 1.04e-7 because accepted decay subtraction used dA_chunk_base + dA_prefix",
+      "scope": "guarded parallel chunk-scan output only; default path and production behavior unchanged",
+      "build": {
+        "exit_code": 0,
+        "duration_s": 180
+      },
+      "multi_chunk_oracle_300_all_calibration_300": {
+        "exit_code": 0,
+        "duration_s": 50,
+        "oracle_records": 69,
+        "failed_oracle_records": 0,
+        "output_mismatches": 0,
+        "state_mismatches": 0,
+        "tracked_probes": "row97/head48/d24 exact, row64/state0 exact, row82/state14 exact"
+      }
+    }
+  },
+  "final_result": {
+    "closed_utc": "2026-06-28T22:34:19Z",
+    "status": "correctness_fixed_for_guarded_parallel_ssd_surface",
+    "default_path_change": false,
+    "production_enablement": false,
+    "speed_benchmark": false,
+    "decode_hcs": false,
+    "requests": 1,
+    "oracle": {
+      "multi_chunk_300_tokens": "passed",
+      "oracle_records": 69,
+      "failed_oracle_records": 0,
+      "output_mismatches": 0,
+      "state_mismatches": 0,
+      "probes": "row97/head48/d24 exact, row64/state0 exact, row82/state14 exact"
+    },
+    "token_logit_comparison": {
+      "payload_tokens": 42,
+      "first_token_id": 1044,
+      "first_token_text": ",",
+      "tracked_toplogprobs": 12,
+      "serial_max_delta": 0.0,
+      "control_max_delta": 0.0,
+      "parallel_prefill_ms": 693.2
+    },
+    "accepted_fixes": [
+      "parallel chunk cumsum prefix order matches accepted coeff-tile prefix order",
+      "guarded exact-state bridge starts from an initial state snapshot",
+      "parallel output matches accepted BF16 coefficient multiplication order",
+      "parallel output uses c_state_total_exact for prior reconstruction",
+      "parallel output precomputes old coefficients in shared tile",
+      "parallel output uses absolute dA_chunk_base + prefix values for decay subtraction"
+    ]
+  },
+  "final_validation": {
+    "timestamp_utc": "2026-06-28T22:36:34Z",
+    "json_tsv_shapes": "passed",
+    "benchmark_links": "passed",
+    "diff_check": "passed",
+    "dev_syntax": "passed",
+    "protected_configs": "unchanged; expected untracked tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+    "tmux_sessions": 0,
+    "runtime_build_processes": 0,
+    "gpu_memory_mb": "15 / 11",
+    "gpu_compute_processes": 0,
+    "nano_temp_locks": "standing Hugging Face download locks only"
+  },
+  "status": "closed"
+}

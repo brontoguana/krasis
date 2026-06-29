@@ -1,0 +1,8 @@
+probe	how_to_run	expected_requirement	purpose
+row97_head48_d24	set KRASIS_MAMBA2_SSD_BLOCK_SCAN_TERM_PROBE=97:48:24 in smallest full-oracle diagnostic	output bits exact; term probe should show c_state_total_exact and coeff-tile terms unchanged	regression for row97 surface fixed by c_state_total_exact and coeff tiling
+row64_state0	set KRASIS_MAMBA2_SSD_V5_PROBES=64:11:22:0 in smallest full-oracle diagnostic	output and state exact	regression for chunk 1 entry/state flat0 surface from v4/v5 gates
+row82_state14	set KRASIS_MAMBA2_SSD_V5_PROBES=82:37:30:14 in smallest full-oracle diagnostic	output and state exact	regression for local_old_state_exact failure surface
+full_output_oracle	existing block-scan full-oracle compare over smallest startup diagnostic	0 BF16 output mismatches	required before any timing or commit acceptance
+full_state_oracle	existing block-scan full-oracle compare over smallest startup diagnostic	0 f32 state mismatches	proves state-parallel recurrence preserved final state
+candidate_timing_long	only after full oracle exact; no oracle and no output/recurrent extra instrumentation unless requested	records candidate total, recurrent state-parallel kernel, coeff-tile output, copies, residual	measures viability without oracle/host-compare overhead
+new_recurrent_timing_optional	optional next prototype env if the state-parallel kernel is implemented	split dt/A/x, B/C cache, state update, serial C-dot, stores, barriers/residual	explains whether state update moved or whether C-dot/barriers dominate

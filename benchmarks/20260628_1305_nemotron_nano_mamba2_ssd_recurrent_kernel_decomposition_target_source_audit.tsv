@@ -1,0 +1,10 @@
+artifact	path	line	evidence	decision
+1242_candidate_timing	benchmarks/20260628_1242_nemotron_nano_mamba2_ssd_coeff_tile_candidate_timing_measurement_candidate_timing.tsv	3	39920 tokens, 23 records, recurrent avg 716.036155ms, coeff-tile output avg 431.422382ms	Recurrent is the largest clean no-oracle candidate component.
+host_timing	src/gpu_prefill.rs	32306	Recurrent timing wraps one kernel launch plus stream sync only.	Existing host timing cannot split recurrent subloops.
+candidate_record	src/gpu_prefill.rs	32874	Candidate timing JSON reports block_scan_recurrent_kernel launch_submit, sync_wait, total only.	No recurrent subloop fields exist in current records.
+recurrent_kernel	src/cuda/prefill_kernels.cu	5682	One thread handles one head/d lane and loops token-order over L.	Exact state source remains token-order f32 recurrence.
+entry_snapshot	src/cuda/prefill_kernels.cu	5714	At chunk_pos 0, entry_state snapshot writes state_size f32 values.	Need timing slot for entry snapshot cost; static count is small relative to state loops.
+dt_setup	src/cuda/prefill_kernels.cu	5721	Per token, kernel computes dt, A_bar, and x_val before state loop.	Need timing slot for dt/A/x setup and exp cost.
+state_recurrence	src/cuda/prefill_kernels.cu	5724	Per token, loops state_size over B, BF16(B*dt), and h update.	Likely major cost, but must be measured before optimizing.
+c_state_dot	src/cuda/prefill_kernels.cu	5729	Per token, loops state_size over C dot h and writes c_state_total_exact.	Likely major cost, but must be measured before optimizing.
+full_oracle_path	src/gpu_prefill.rs	32139	Block-scan oracle mode remains separate from clean candidate timing mode.	Next timing must preserve full-oracle correctness path.

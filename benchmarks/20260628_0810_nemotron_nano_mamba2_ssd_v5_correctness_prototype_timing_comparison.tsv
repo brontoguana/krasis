@@ -1,0 +1,4 @@
+metric	baseline_1908_ms	v5_long_diagnostic_ms	delta_ms	delta_pct	notes
+ssd_scan	114449.4	244701.0	130251.6	113.807	timed path includes sequential oracle plus v5 candidate plus full host-side compare; not a production speed benchmark
+total_prefill	117356.0	248511.7	131155.7	111.754	v5 long startup diagnostic total versus 1908 long diagnostic total
+long_prefill_tok_s	340.1	160.5	-179.6	-52.808	startup diagnostic calibration line, not speed-test result

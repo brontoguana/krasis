@@ -1,0 +1,5 @@
+run	exit	duration_s	log	notes
+build	0	178	benchmarks/20260628_1647_nemotron_nano_parallel_ssd_architecture_implementation_build.log	./dev build passed
+small_full_oracle	1	41	benchmarks/20260628_1647_nemotron_nano_parallel_ssd_architecture_implementation_small_full_oracle.log	failed closed against serial oracle; architecture path executed
+no_oracle_startup_256	0	41	benchmarks/20260628_1647_nemotron_nano_parallel_ssd_architecture_implementation_no_oracle_startup.log	committed through startup calibration at 256-token long setting
+long_no_oracle_candidate_timing	0	59	benchmarks/20260628_1647_nemotron_nano_parallel_ssd_architecture_implementation_long_no_oracle_candidate_timing.log	39920-token no-oracle candidate timing; no requests

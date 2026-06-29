@@ -1,0 +1,15 @@
+component	file	line	notes
+prototype_env	src/gpu_prefill.rs	66	KRASIS_MAMBA2_SSD_REUSE_PROTO helper; default false when unset.
+oracle_env	src/gpu_prefill.rs	77	KRASIS_MAMBA2_SSD_REUSE_PROTO_ORACLE helper; requires prototype gate.
+oracle_diff	src/gpu_prefill.rs	2305	BF16/FP32 exact mismatch and max/mean error accounting.
+kernel_launch_helper	src/gpu_prefill.rs	22141	Shared launcher used by old sequential and prototype kernels.
+gate_checks	src/gpu_prefill.rs	30383	Fail-closed checks for oracle without prototype and diagnostics-only prototype activation.
+prototype_dispatch	src/gpu_prefill.rs	30565	Gated prototype branch; default branch below keeps sequential kernel.
+oracle_launch	src/gpu_prefill.rs	30597	Existing sequential kernel launches into oracle buffers before prototype launch.
+prototype_launch	src/gpu_prefill.rs	30620	Prototype head-shared SSD kernel launch.
+mismatch_fail_closed	src/gpu_prefill.rs	30670	Any output/state mismatch returns an error; no silent fallback.
+required_ptx_symbol	src/gpu_prefill.rs	52519	Kernel symbol required during PTX validation.
+kernel_loader	src/gpu_prefill.rs	52932	Loads mamba2_ssd_head_shared_kernel.
+cuda_kernel	src/cuda/prefill_kernels.cu	5115	Head-shared diagnostic prototype kernel.
+cuda_wrapper	src/cuda/prefill_kernels.cu	5699	Host wrapper ensures the kernel is emitted and callable.
+warmup_fail_closed	python/krasis/server.py	1740	Prototype/oracle warmup failures re-raise instead of being treated as optional warmup failures.

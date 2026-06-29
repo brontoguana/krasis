@@ -58,11 +58,9 @@ pub(crate) fn messages_have_image_parts(messages: &serde_json::Value) -> bool {
         msg.get("content")
             .and_then(|content| content.as_array())
             .map(|parts| {
-                parts.iter().any(|part| {
-                    part.as_object()
-                        .map(is_image_part)
-                        .unwrap_or(false)
-                })
+                parts
+                    .iter()
+                    .any(|part| part.as_object().map(is_image_part).unwrap_or(false))
             })
             .unwrap_or(false)
     })

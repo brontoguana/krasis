@@ -1,0 +1,16 @@
+check	value	result
+bychunk_reference_http_after_build3	200	pass
+control_reference_http	200	pass
+token_id	1044	pass
+text	,	pass
+tracked_toplogprobs	12/12 exact	pass
+max_toplogprob_delta	0.000000000	pass
+long_no_oracle_exit	0	pass
+long_no_oracle_duration_s_after_build3	51	pass
+long_no_oracle_records_total	69	pass
+long_no_oracle_records_39920	23	pass
+long_no_oracle_oracle_records	0	pass
+long_no_oracle_output_subloop_records	0	pass
+long_no_oracle_recurrent_subloop_records	0	pass
+long_calibration_prefill_s	7.01	pass
+long_calibration_prefill_tok_s	5693.8	pass

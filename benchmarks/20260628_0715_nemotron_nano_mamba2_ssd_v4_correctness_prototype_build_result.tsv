@@ -1,0 +1,8 @@
+artifact	value	evidence
+gate	20260628_0715_nemotron_nano_mamba2_ssd_v4_correctness_prototype	recorded after build
+command	./dev build	built command only
+exit_code	0	benchmarks/20260628_0715_nemotron_nano_mamba2_ssd_v4_correctness_prototype_build.exit
+dev_maturin_build_duration_s	172	KRASIS_BUILD_TIMING phase="dev maturin build" status=0 duration_s=172
+dev_build_total_duration_s	176	KRASIS_BUILD_TIMING phase="dev build total" status=0 duration_s=176
+prefill_ptx_compile_duration_s	5.700	KRASIS_BUILD_TIMING phase="nvcc prefill PTX compile" duration_ms=5700
+result	pass	OK Build complete

@@ -1,0 +1,17 @@
+check	result	evidence
+summary_json	pass	status closed_diagnosis_completed; mamba2 total 114836.447ms; HQQ/GQA 477.4ms; MoE/Marlin 1934.0ms; no speed benchmark or requests
+component_tsv	pass	component header valid and long-prefill component rows present
+liveness_tsv	pass	39920-token mamba2 row present with 114836.447ms
+decision_tsv	pass	root_bottleneck row records Mamba2 diagnosis
+no_requests_or_ready	pass	diagnostic stdout logs contain no KRASIS SERVER READY and no /v1/internal/reference_test
+not_benchmark	pass	diagnostic stdout logs contain no BENCHMARK COMPLETE and no ./dev benchmark
+no_cache_rebuild_flags	pass	diagnostic stdout logs contain no --build-cache or --force-rebuild-hqq-cache
+no_safetensors_cache_write	pass	diagnostic stdout logs contain no "Building GPU INT4 Marlin cache: 23 layers from safetensors"
+prefill_instrumentation_enabled	pass	runtime_attempt records KRASIS_PREFILL_TIMING=1
+decode_timing_not_enabled	pass	runtime_attempt/stdout logs contain no KRASIS_DECODE_TIMING=1
+bash_n_dev	pass	dev shell syntax ok
+krasis_git_diff_check	pass	git diff --check passed in krasis-nemotron-dev
+internal_git_diff_check	pass	git diff --check passed in krasis-internal
+protected_config_check	pass	only expected tests-only Nano HQQ4 config and known Nano BF16 config are untracked
+idle_state	pass	2026-06-27T19:04:49Z no tmux server, no matching runtime process, no NVIDIA compute process, GPUs 15 MB / 11 MB
+cache_temp_lock_check	pass	no .tmp/.lock/.pending files under Nano cache directory

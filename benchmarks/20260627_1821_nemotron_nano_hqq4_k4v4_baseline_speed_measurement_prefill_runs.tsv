@@ -1,0 +1,7 @@
+run	prompt_tokens	tok_s	elapsed_ms	timing_class
+1	1001	346.5	2888.5	internal_engine
+2	5001	341.0	14665.8	internal_engine
+3	10001	341.3	29305.1	internal_engine
+4	20001	341.6	58542.5	internal_engine
+5	35001	341.0	102645.5	internal_engine
+6	50001	337.1	148334.6	internal_engine

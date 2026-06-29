@@ -304,6 +304,19 @@ extern "C" __global__ void gelu_tanh_mul(
     }
 }
 
+extern "C" __global__ void relu2_bf16(
+    __nv_bfloat16* __restrict__ output,
+    const __nv_bfloat16* __restrict__ input,
+    int intermediate_size
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < intermediate_size) {
+        float u = bf16_to_f32(input[i]);
+        float r = fmaxf(u, 0.0f);
+        output[i] = f32_to_bf16(r * r);
+    }
+}
+
 extern "C" __global__ void apply_logit_softcap_f32(
     float* __restrict__ logits,
     float softcap,
@@ -321,7 +334,8 @@ extern "C" __global__ void apply_logit_softcap_f32(
 // ── Sigmoid + TopK for MoE Routing ────────────────────────────────────
 
 // Apply sigmoid to gate logits, optionally add bias and e_score_correction,
-// then find topk expert indices and weights.
+// then find topk expert indices and raw weights. Normalization is a separate
+// post-scale step so decode matches prefill's sigmoid routing order.
 // This is a single-block kernel since num_experts is small (64-512).
 extern "C" __global__ void sigmoid_topk(
     const float* __restrict__ logits,           // [num_experts]
@@ -336,13 +350,14 @@ extern "C" __global__ void sigmoid_topk(
     // This is NOT the bottleneck — gate matmul is.
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
-    // Compute sigmoid scores
+    // Compute selection scores. e_score_correction_bias affects top-k
+    // selection only; routed weights are gathered from the raw sigmoid score.
     extern __shared__ float scores[];
     for (int i = 0; i < num_experts; i++) {
         float x = logits[i];
         if (bias) x += bias[i];
-        scores[i] = 1.0f / (1.0f + __expf(-x));
-        if (e_score_corr) scores[i] += e_score_corr[i];
+        float raw = 1.0f / (1.0f + __expf(-x));
+        scores[i] = raw + (e_score_corr ? e_score_corr[i] : 0.0f);
     }
 
     // Simple selection sort for topk (small k)
@@ -356,15 +371,28 @@ extern "C" __global__ void sigmoid_topk(
             }
         }
         topk_indices[t] = best_idx;
-        topk_weights[t] = best_val;
+        float raw_x = logits[best_idx];
+        if (bias) raw_x += bias[best_idx];
+        topk_weights[t] = 1.0f / (1.0f + __expf(-raw_x));
         scores[best_idx] = -1e30f; // mask out selected
     }
 
-    // Normalize weights
+}
+
+extern "C" __global__ void normalize_topk_weights(
+    float* __restrict__ topk_weights,           // [topk]
+    int topk
+) {
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
     float sum = 0.0f;
-    for (int t = 0; t < topk; t++) sum += topk_weights[t];
+    for (int t = 0; t < topk; t++) {
+        sum += topk_weights[t];
+    }
     if (sum > 0.0f) {
-        for (int t = 0; t < topk; t++) topk_weights[t] /= sum;
+        float inv = 1.0f / sum;
+        for (int t = 0; t < topk; t++) {
+            topk_weights[t] *= inv;
+        }
     }
 }
 
@@ -663,6 +691,21 @@ extern "C" __global__ void weighted_add_bf16(
     }
 }
 
+extern "C" __global__ void weighted_add_bf16_sigmoid_f32(
+    __nv_bfloat16* __restrict__ output,      // [size]
+    const __nv_bfloat16* __restrict__ input,  // [size]
+    const float* __restrict__ gate_logit_ptr, // [1] FP32
+    int size
+) {
+    float weight = gate_logit_ptr ? 1.0f / (1.0f + __expf(-gate_logit_ptr[0])) : 1.0f;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < size) {
+        float o = bf16_to_f32(output[i]);
+        float x = bf16_to_f32(input[i]);
+        output[i] = f32_to_bf16(o + weight * x);
+    }
+}
+
 // Zero a BF16 buffer
 extern "C" __global__ void zero_bf16(
     __nv_bfloat16* __restrict__ buf,
@@ -739,20 +782,6 @@ extern "C" __global__ void scale_bf16_by_ptr(
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < size) {
         output[i] = f32_to_bf16(bf16_to_f32(input[i]) * scale);
-    }
-}
-
-extern "C" __global__ void apply_topk_per_expert_scale(
-    float* __restrict__ topk_weights,
-    const int* __restrict__ topk_ids,
-    const __nv_bfloat16* __restrict__ per_expert_scale,
-    int topk
-) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= topk || per_expert_scale == nullptr) return;
-    int eid = topk_ids[i];
-    if (eid >= 0) {
-        topk_weights[i] *= bf16_to_f32(per_expert_scale[eid]);
     }
 }
 

@@ -1,0 +1,26 @@
+artifact	path	line	marker	notes
+source	src/gpu_prefill.rs	306	306:fn mamba2_ssd_block_scan_candidate_timing_requested() -> bool {	guarded candidate timing mode
+source	src/gpu_prefill.rs	31666	31666:                "KRASIS_MAMBA2_SSD_BLOCK_SCAN_CANDIDATE_TIMING requires KRASIS_MAMBA2_SSD_BLOCK_SCAN=1"	guarded candidate timing mode
+source	src/gpu_prefill.rs	31674	31674:                "KRASIS_MAMBA2_SSD_BLOCK_SCAN_CANDIDATE_TIMING requires KRASIS_MAMBA2_SSD_BLOCK_SCAN_COEFF_TILE=1"	guarded candidate timing mode
+source	src/gpu_prefill.rs	32139	32139:            let block_scan_oracle_enabled = mamba2_ssd_block_scan_oracle_requested;	guarded candidate timing mode
+source	src/gpu_prefill.rs	32140	32140:            let clean_candidate_timing_mode =	guarded candidate timing mode
+source	src/gpu_prefill.rs	32141	32141:                mamba2_ssd_block_scan_candidate_timing_requested && !block_scan_oracle_enabled;	guarded candidate timing mode
+source	src/gpu_prefill.rs	32143	32143:            let initial_state = if block_scan_oracle_enabled {	guarded candidate timing mode
+source	src/gpu_prefill.rs	32152	32152:            let oracle_state = if block_scan_oracle_enabled {	guarded candidate timing mode
+source	src/gpu_prefill.rs	32166	32166:            let term_probe = if block_scan_oracle_enabled && mamba2_ssd_block_scan_term_target.is_some() {	guarded candidate timing mode
+source	src/gpu_prefill.rs	32182	32182:            let oracle_out = if block_scan_oracle_enabled {	guarded candidate timing mode
+source	src/gpu_prefill.rs	32197	32197:            let candidate_state_copy_ms = if block_scan_oracle_enabled {	guarded candidate timing mode
+source	src/gpu_prefill.rs	32232	32232:            if block_scan_oracle_enabled {	guarded candidate timing mode
+source	src/gpu_prefill.rs	32684	32684:            let (compare_timing, compare_total_ms) = if block_scan_oracle_enabled {	guarded candidate timing mode
+source	src/gpu_prefill.rs	32741	32741:            if block_scan_oracle_enabled {	guarded candidate timing mode
+source	src/gpu_prefill.rs	32835	32835:                let total_candidate_path_ms = if clean_candidate_timing_mode {	guarded candidate timing mode
+source	src/gpu_prefill.rs	32841	32841:                    "[MAMBA2-SSD-BLOCK-SCAN-CANDIDATE-TIMING] {}",	guarded candidate timing mode
+source	src/gpu_prefill.rs	32846	32846:                        "measurement_mode": if clean_candidate_timing_mode {	guarded candidate timing mode
+source	src/gpu_prefill.rs	32851	32851:                        "visible_no_oracle_timing_mode": clean_candidate_timing_mode,	guarded candidate timing mode
+source	src/gpu_prefill.rs	32893	32893:                            "sequential_oracle_kernel": clean_candidate_timing_mode,	guarded candidate timing mode
+source	src/gpu_prefill.rs	32894	32894:                            "full_buffer_downloads": clean_candidate_timing_mode,	guarded candidate timing mode
+source	src/gpu_prefill.rs	32895	32895:                            "host_comparison": clean_candidate_timing_mode,	guarded candidate timing mode
+source	src/gpu_prefill.rs	32896	32896:                            "term_probe_downloads": clean_candidate_timing_mode,	guarded candidate timing mode
+source	src/gpu_prefill.rs	32897	32897:                            "output_subloop_timing": clean_candidate_timing_mode,	guarded candidate timing mode
+source	src/gpu_prefill.rs	32902	32902:                            "oracle_enabled": block_scan_oracle_enabled,	guarded candidate timing mode
+source	python/krasis/server.py	1747	1747:            or _env_flag("KRASIS_MAMBA2_SSD_BLOCK_SCAN_CANDIDATE_TIMING")	warmup fail-closed env preserved

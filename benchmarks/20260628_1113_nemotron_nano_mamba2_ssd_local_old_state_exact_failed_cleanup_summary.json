@@ -1,0 +1,81 @@
+{
+  "artifacts": {
+    "build_result": "20260628_1113_nemotron_nano_mamba2_ssd_local_old_state_exact_failed_cleanup_build_result.tsv",
+    "oracle_correctness": "20260628_1113_nemotron_nano_mamba2_ssd_local_old_state_exact_failed_cleanup_oracle_correctness.tsv",
+    "runtime_attempt": "20260628_1113_nemotron_nano_mamba2_ssd_local_old_state_exact_failed_cleanup_runtime_attempt.tsv",
+    "source_artifacts": "20260628_1113_nemotron_nano_mamba2_ssd_local_old_state_exact_failed_cleanup_source_artifacts.tsv",
+    "startup_cache_validation": "20260628_1113_nemotron_nano_mamba2_ssd_local_old_state_exact_failed_cleanup_startup_cache_validation.tsv",
+    "term_probe": "20260628_1113_nemotron_nano_mamba2_ssd_local_old_state_exact_failed_cleanup_term_probe.tsv",
+    "validation": "20260628_1113_nemotron_nano_mamba2_ssd_local_old_state_exact_failed_cleanup_validation_checks.tsv"
+  },
+  "constraints": {
+    "decode_hcs_changes": false,
+    "default_path_change": false,
+    "production_enablement": false,
+    "requests": false,
+    "speed_benchmark": false
+  },
+  "gate": "20260628_1113_nemotron_nano_mamba2_ssd_local_old_state_exact_failed_cleanup",
+  "opened_utc": "2026-06-28T11:13:00Z",
+  "record_first": {
+    "1058_result": {
+      "accepted": false,
+      "first_output_mismatch": {
+        "candidate_bits": "0xbe4e",
+        "d": 30,
+        "head": 37,
+        "oracle_bits": "0xbe4d",
+        "row": 82
+      },
+      "output_mismatches": 10,
+      "row97_probe": "exact",
+      "state_mismatches": 0,
+      "source_gate": "20260628_1058_nemotron_nano_mamba2_ssd_local_old_state_exact_correction_prototype"
+    },
+    "gemma_baseline": {
+      "internal_decode_tok_s": 92.43,
+      "network_tok_s": 155.69,
+      "prefill_tok_s": 5619.6
+    },
+    "nano_baseline": {
+      "internal_decode_tok_s": 94.48,
+      "network_tok_s": 164.75,
+      "prefill_tok_s": 346.5
+    }
+  },
+  "scope": "failed_local_old_state_exact_cleanup",
+  "result": {
+    "build": {
+      "duration_s": 177,
+      "exit_code": 0,
+      "status": "passed"
+    },
+    "correctness": {
+      "branch_restored_to": "accepted_1022_c_state_total_exact_correctness_surface",
+      "long_diagnostic_run": false,
+      "oracle_records": 69,
+      "output_mismatches": 0,
+      "passed": true,
+      "probe_failures": 0,
+      "state_mismatches": 0,
+      "startup_exit_code": 0,
+      "term_probe_records": 69
+    },
+    "decision": {
+      "accepted": true,
+      "reason": "cleanup removed failed local_old_state_exact materialization; block-scan full oracle and row97/row64/row82 probes returned exact",
+      "status": "cleanup_restored_accepted_1022_surface"
+    },
+    "runtime": {
+      "duration_s": 47,
+      "requests": 0,
+      "speed_benchmark": false
+    }
+  },
+  "status": "closed",
+  "validation": {
+    "final_snapshot_utc": "2026-06-28T11:26:20Z",
+    "gpu_idle": "GPU0 15 MB, GPU1 11 MB",
+    "passed": true
+  }
+}

@@ -1,0 +1,2 @@
+decision	status	reason	next_gate
+cache_generation_prerequisite_complete	ok	Nano HQQ4+k4v4 tests-only config was created under tests/ and the built cache-only path generated and validated a complete HQQ4 g128 attention cache/manifest.	Nemotron Nano HQQ4+k4v4 non-attribution quality smoke can run later using this existing cache/spec; do not include cache generation in that smoke gate.

@@ -1,0 +1,14 @@
+check	status	evidence
+record_first_1908	passed	Recorded SSD/scan 114449.4ms, 99.661% of Mamba2, 97.523% of total long prefill; GQA/HQQ and MoE ruled out.
+source_audit	passed	Inspected forward_mamba2 launch path, RawCuFunc binding, and mamba2_ssd_sequential_kernel.
+tensor_dimensions	passed	Dimensions derived from config: heads 64, head_dim 64, d_inner 4096, state_size 128, n_groups 8, chunk_size 128.
+per_layer_spread	passed	23 layers, mean SSD 4976.062ms, stddev 5.678ms, spread 0.6184% of mean.
+complexity_estimate	passed	Recorded 2694647382016 inner state multiplications per layer and 61976889786368 across 23 measured layers.
+runtime_confirmation	not_run	Existing 1908 timing and source audit answered the question; no additional built diagnostic command was needed.
+speed_benchmark	not_run	Gate was analysis-only and not a speed benchmark.
+source_optimization	not_run	No optimization patch was applied in this gate.
+cache_temp_lock_check	passed	No Krasis cache .tmp/.pending/.lock files outside HF download locks.
+idle_state_check	passed	2026-06-27T19:36:02Z no tmux server, no matching runtime/build process, no NVIDIA compute process.
+git_diff_check_krasis	passed	git diff --check passed.
+git_diff_check_internal	passed	git diff --check passed in krasis-internal.
+protected_config_check	passed	No protected testconfig edits; only expected tests-only Nano configs remain in git status.

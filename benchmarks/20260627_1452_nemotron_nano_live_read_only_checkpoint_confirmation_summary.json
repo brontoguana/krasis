@@ -1,0 +1,130 @@
+{
+  "gate": "20260627_1452_nemotron_nano_live_read_only_checkpoint_confirmation",
+  "status": "closed",
+  "opened_utc": "2026-06-27T14:52:00Z",
+  "closed_utc": "2026-06-27T15:13:26Z",
+  "record_first": {
+    "source_gate": "20260627_1426_nemotron_nano_read_only_checkpoint_instrumentation_support",
+    "read_only_checkpoint_support_implemented": true,
+    "diagnostic_gate": "KRASIS_READ_ONLY_CHECKPOINT_DIAG",
+    "request_scoped": true,
+    "non_request_prefill_ignores_env": true,
+    "reference_test_requires_debug_reference_trace": true,
+    "focused_checkpoint_test": "1/0",
+    "expert_hqq_tests": "108/0",
+    "build": "passed",
+    "source_gate_live_server_run": false,
+    "source_gate_cache_generation": false,
+    "source_gate_final_state": {
+      "gpu_memory_used_mb": [15, 11],
+      "disk_available": "613G",
+      "ram_available": "965Gi"
+    }
+  },
+  "scope": {
+    "variant": "HQQ6 g32",
+    "cases": [0],
+    "endpoint": "/v1/internal/reference_test",
+    "existing_cache_spec_only": true,
+    "debug_reference_trace": true,
+    "projection_diag": true,
+    "consume_boundary_diag": true,
+    "read_only_checkpoint_diag": true,
+    "no_g64": true,
+    "no_cache_generation": true,
+    "no_new_variants": true,
+    "no_production_enablement": true,
+    "no_speed_benchmark": true,
+    "no_decode_hcs": true
+  },
+  "capture_requirements": [
+    "HTTP status/timing",
+    "selected token/top-k/margin",
+    "debug_reference_trace.first_token_margin_projection",
+    "debug_reference_trace.read_only_checkpoints",
+    "pre/post hashes around layer-delta construction",
+    "route/top-k/gather/final-hidden hashes"
+  ],
+  "runtime": {
+    "variant": "hqq6_g32",
+    "case": 0,
+    "endpoint": "/v1/internal/reference_test",
+    "http_code": 200,
+    "time_total_s": 45.388963,
+    "response_bytes": 5241220,
+    "request_file": "benchmarks/20260627_0427_nemotron_nano_guarded_hqq_prefill_output_consumption_proof_case0_request.json",
+    "response_file": "benchmarks/20260627_1452_nemotron_nano_live_read_only_checkpoint_confirmation_hqq6_g32_case0_response.json",
+    "server_log": "benchmarks/20260627_1452_nemotron_nano_live_read_only_checkpoint_confirmation_hqq6_g32_server.log",
+    "debug_reference_trace": true,
+    "projection_diag": true,
+    "consume_boundary_diag": true,
+    "read_only_checkpoint_diag": true
+  },
+  "result": {
+    "selected_token": 1044,
+    "selected_text": ",",
+    "topk_tokens": [1044, 1321, 1294, 1562, 1307, 1046, 1408, 2136, 2553, 1278],
+    "token_1044_logprob": -1.695717,
+    "token_1321_logprob": -2.321527,
+    "margin_1044_minus_1321": 0.6258100000000002,
+    "saved_bf16_margin_1044_minus_1321": 0.300523758,
+    "margin_shift_vs_bf16": 0.3252862420000002,
+    "first_token_margin_projection_present": true,
+    "read_only_checkpoints_present": true,
+    "projection_downloaded_margin": 0.6258096694946289,
+    "projection_raw_margin": 0.625808282289654,
+    "selected_hidden_hash": "0xc0317cde307060bf",
+    "lm_head_row_difference_hash": "0xaa7ef9987a8fa6a7",
+    "final_hidden_before_lm_hash": "0xc0317cde307060bf",
+    "layer_delta_checkpoint_count": 23,
+    "all_pre_post_hashes_match": true,
+    "mismatch_count": 0,
+    "mismatch_layers": [],
+    "consume_rows": 23,
+    "copied_output_bytes": 333107712,
+    "nbits": 6,
+    "group_size": 32,
+    "top_layer_projections_by_abs": [
+      {"layer": 40, "projection": 0.25664772289572113},
+      {"layer": 51, "projection": -0.23012503885943403},
+      {"layer": 45, "projection": 0.16927537585891628}
+    ],
+    "top_expert_projections_by_abs": [
+      {"layer": 45, "expert": 5, "row": 168, "projection": 0.11840678096536505},
+      {"layer": 40, "expert": 39, "row": 1532, "projection": 0.10474223421275375},
+      {"layer": 51, "expert": 60, "row": 1803, "projection": -0.08511072425382676}
+    ]
+  },
+  "decision": {
+    "status": "checkpointed_combined_run_read_only_confirmed",
+    "pre_post_layer_delta_hashes": "23/23 match",
+    "mutation_point_exposed": false,
+    "old_1244_uncheckpointed_flip_reproduced": false,
+    "note": "The checkpointed combined diagnostic run selected 1044, so it did not reproduce the earlier uncheckpointed 1244 case-0 flip. This confirms no mutation across layer-delta construction in the checkpointed run, but does not identify a source span for the old flip."
+  },
+  "artifacts": {
+    "request_result": "20260627_1452_nemotron_nano_live_read_only_checkpoint_confirmation_request_result.tsv",
+    "token_margin": "20260627_1452_nemotron_nano_live_read_only_checkpoint_confirmation_token_margin_summary.tsv",
+    "projection": "20260627_1452_nemotron_nano_live_read_only_checkpoint_confirmation_projection_summary.tsv",
+    "checkpoint_summary": "20260627_1452_nemotron_nano_live_read_only_checkpoint_confirmation_checkpoint_summary.tsv",
+    "checkpoint_layer_hashes": "20260627_1452_nemotron_nano_live_read_only_checkpoint_confirmation_checkpoint_layer_hashes.tsv",
+    "top_layer_projection": "20260627_1452_nemotron_nano_live_read_only_checkpoint_confirmation_top_layer_projection_summary.tsv",
+    "top_expert_projection": "20260627_1452_nemotron_nano_live_read_only_checkpoint_confirmation_top_expert_projection_summary.tsv",
+    "consume_summary": "20260627_1452_nemotron_nano_live_read_only_checkpoint_confirmation_consume_summary.tsv",
+    "root_decision": "20260627_1452_nemotron_nano_live_read_only_checkpoint_confirmation_root_decision.tsv",
+    "validation": "20260627_1452_nemotron_nano_live_read_only_checkpoint_confirmation_validation_checks.tsv"
+  },
+  "cleanup": {
+    "dev_kill_warning": "initial ./dev kill reported zombie/GPU-reset warning after terminating server",
+    "settled_state_clean": true
+  },
+  "final_state": {
+    "snapshot_utc": "2026-06-27T15:13:26Z",
+    "tmux_server": "none",
+    "matching_runtime_process": "none",
+    "nvidia_compute_process": "none",
+    "gpu_memory_used_mb": [15, 11],
+    "disk_available": "613G",
+    "ram_available": "965Gi"
+  }
+}

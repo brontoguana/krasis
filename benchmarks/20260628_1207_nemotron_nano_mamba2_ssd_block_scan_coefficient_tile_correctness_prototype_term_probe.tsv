@@ -1,0 +1,3 @@
+scope	records	row	head	d	output_matches	coefficient_tile_enabled	max_tri_coeff_delta	max_old_coeff_delta	first_mismatch_kind	first_mismatch_u	compared_pairs_for_target_row
+all_records	138	97	48	24	138	true	0.0	0.0	none	-1	34
+long_39920	23	97	48	24	23	true	0.0	0.0	none	-1	34

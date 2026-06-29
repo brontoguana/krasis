@@ -1,0 +1,13 @@
+item	status	path	line	detail
+cuda_chunk_prepare_prefix	removed	src/cuda/prefill_kernels.cu	0	No mamba2_ssd_chunk_prepare_prefix_kernel symbol remains.
+cuda_chunk_cb_matrix	removed	src/cuda/prefill_kernels.cu	0	No mamba2_ssd_chunk_cb_matrix_kernel symbol remains.
+cuda_chunk_output	removed	src/cuda/prefill_kernels.cu	0	No mamba2_ssd_chunk_output_kernel symbol remains.
+cuda_chunk_state_update	removed	src/cuda/prefill_kernels.cu	0	No mamba2_ssd_chunk_state_update_kernel symbol remains.
+rust_chunk_envs	removed	src/gpu_prefill.rs	0	No KRASIS_MAMBA2_SSD_CHUNK_PARALLEL or ORACLE gate remains.
+rust_chunk_scratch_oracle	removed	src/gpu_prefill.rs	0	No d_mamba2_ssd_chunk or d_mamba2_ssd_oracle fields remain.
+rust_chunk_dispatch_oracle	removed	src/gpu_prefill.rs	0	No candidate dispatch or oracle compare helper remains.
+rust_ptx_required_symbols	removed	src/gpu_prefill.rs	52202	Required PTX list contains only mamba2_ssd_sequential_kernel and trace for SSD.
+rust_sequential_dispatch	preserved	src/gpu_prefill.rs	30364	Default non-trace dispatch launches self.kernels.mamba2_ssd.
+rust_mamba2_substage_timing	preserved	src/gpu_prefill.rs	31233	1908 mamba2_substages liveness print remains.
+cuda_sequential_kernel	preserved	src/cuda/prefill_kernels.cu	4968	Default sequential SSD kernel remains.
+python_warmup_handling	restored	python/krasis/server.py	1740	Prototype-specific warmup re-raise removed; normal warmup warning remains.

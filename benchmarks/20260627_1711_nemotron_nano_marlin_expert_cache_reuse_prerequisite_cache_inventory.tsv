@@ -1,0 +1,9 @@
+item	status	details
+pre_run_hqq_attention_manifest	present	/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/attention_hqq_v5_grid65_33/manifest.json; validated by 1701 and this run
+pre_run_marlin_g128_final	missing	No final /home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/experts_marlin_int4_g128_calamax.bin was present before startup
+pre_run_marlin_g128_tmp_files	pass	No *.tmp/*.pending/*.lock files were present before startup
+pre_run_marlin_g64_calamax	present	/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/experts_marlin_int4_g64_calamax.bin; 15849200704 bytes; mtime 2026-06-27 18:05:46.214334671 +0100
+pre_run_marlin_g64_calsearchrmse	present	/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/experts_marlin_int4_g64_calsearchrmse.bin; 15849200704 bytes; mtime 2026-06-26T06:56:11.5436552730BST
+detected_partial_g128_tmp	recorded_then_removed	/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/experts_marlin_int4_g128_calamax.bin.tmp; 11531751232 bytes; mtime 2026-06-27 18:14:18.328127698 +0100
+detected_partial_g128_lock	recorded_then_removed	/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/experts_marlin_int4_g128_calamax.bin.lock; 7 bytes; mtime 2026-06-27 18:13:53.053755583 +0100
+post_cleanup_tmp_files	pass	No *.tmp/*.pending/*.lock files remain under the Nano cache directory

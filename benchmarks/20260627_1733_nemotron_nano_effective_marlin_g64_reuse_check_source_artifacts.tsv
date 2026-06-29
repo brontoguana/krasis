@@ -1,0 +1,10 @@
+file	line	meaning
+python/krasis/model.py	4570	Python passes self.quant_cfg.expert_group_size into Rust engine.load
+src/weights/mod.rs	2291	Rust load path only detects effective group size for prequantized models before cache lookup
+src/weights/mod.rs	2293	For this BF16-source Nano model, cache_gs falls back to requested group_size 128
+src/weights/mod.rs	2347	Startup cache lookup uses cache_path_marlin(model_dir, cache_gs, ...)
+src/weights/mod.rs	2383	If requested-path cache is absent, startup enters the build path
+src/weights/mod.rs	3428	Builder begins with requested group_size and computes an effective group size
+src/weights/mod.rs	3430	Builder halves non-divisible group sizes until model dimensions divide
+src/weights/mod.rs	3927	Completed cache is renamed to the effective group-size path
+src/weights/mod.rs	1343	cache_path_marlin encodes group size in the filename

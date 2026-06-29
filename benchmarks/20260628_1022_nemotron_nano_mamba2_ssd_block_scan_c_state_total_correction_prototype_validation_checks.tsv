@@ -1,0 +1,13 @@
+check	result	detail
+summary_json	pass	Closed summary JSON is valid and records status=closed.
+build	pass	./dev build exit 0, duration 178s.
+small_startup	pass	Small startup diagnostic exit 0 with 69/69 oracle records exact.
+long_startup	pass	Long startup diagnostic exit 0 with 69/69 oracle records exact.
+row97_term_probe	pass	Small and long term probes matched oracle output bits; max abs c_state_total_exact-minus-replayed was 0.000003814697265625.
+requests_absent	pass	No POST /v1 or request-received log lines.
+benchmark_absent	pass	No benchmark, speed-test, or release-test path.
+source_markers	pass	Block-scan c_state_total_exact markers present; default sequential kernel and dispatch remain present.
+protected_configs	pass	Protected config status unchanged; only expected tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf is untracked.
+temp_lock_scan	pass	No Nano Krasis .tmp/.partial/.lock files outside standing Hugging Face download metadata.
+diff_check	pass	git diff --check in krasis-nemotron-dev and krasis-internal passed; bash -n dev passed.
+idle_state	pass	Final snapshot 2026-06-28T10:46:16Z: no tmux/runtime/build/GPU compute process; GPUs 15 MB / 11 MB.

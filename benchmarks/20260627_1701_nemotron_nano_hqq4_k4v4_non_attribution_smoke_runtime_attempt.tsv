@@ -1,0 +1,11 @@
+stage	status	value	detail
+command	pass	./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf	no --build-cache or --force-rebuild-hqq-cache flags
+tmux_session	pass	nano_hqq4_k4v4_smoke	server launched in tmux
+exit_code	stopped	137	terminated by cleanup after forbidden cache generation was observed
+server_ready	fail	false	KRASIS SERVER READY was not present in the server log
+requests_sent	pass	0	no /v1/internal/reference_test request was sent
+case2_sent	pass	false	stopped before first smoke request
+hqq_attention_validation	pass	HQQ attention artifacts validated (115 MB cached), 27940 MB free	existing HQQ4 attention cache validated
+unexpected_cache_generation	fail	GPU INT4 Marlin cache built: 15.8 GB in 42s	regular run wrote expert cache before READY
+expert_cache_artifact	warn	/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/experts_marlin_int4_g64_calamax.bin	15849200704 bytes; mtime 2026-06-27 18:05:46.214334671 +0100
+hqq_consume	not_enabled	unsupported_for_this_loaded_path	available consume switch is expert-HQQ diagnostic consumption and this attention-HQQ config had no expert-HQQ diagnostic cache spec

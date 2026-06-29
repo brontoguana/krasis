@@ -1,0 +1,9 @@
+check	status	evidence
+record_first	passed	0957 failure and Gemma/Nano baselines recorded before static analysis artifacts were written.
+artifact_shape	passed	jq summary check and tab-field TSV checks passed for all 1014 artifacts.
+static_only_runtime_absence	passed	No 1014 build, startup diagnostic, request, or benchmark artifacts exist; runtime_not_run.tsv records the reason.
+source_change_scope	passed	No implementation/source files were edited in this gate; only changelog, tracking/debug, benchmark index, and analysis artifacts changed.
+diff_checks	passed	git diff --check in krasis-nemotron-dev and krasis-internal passed; bash -n dev passed.
+protected_configs	passed	Protected-config status unchanged; only the expected tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf remains untracked.
+temp_lock_scan	passed	No Nano Krasis temp/lock files found outside standing Hugging Face download metadata.
+idle_state	passed	Final snapshot 2026-06-28T10:19:12Z: no tmux/runtime/build/GPU compute process; GPUs 15 MB / 11 MB.

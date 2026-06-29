@@ -1,0 +1,9 @@
+item	value
+snapshot_utc	2026-06-28T12:30:21Z
+gpu0_used_mb	15
+gpu1_used_mb	11
+tmux_sessions	none
+runtime_build_processes	none
+nvidia_compute_processes	none
+krasis_temp_lock_files	none
+protected_config_status	unchanged: untracked tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf and tests/nemotron-nano-bf16-experts-a16.conf

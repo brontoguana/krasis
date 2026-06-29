@@ -1,0 +1,15 @@
+check	status	detail
+manifest_json_parse	pass	jq parsed final manifest
+manifest_complete	pass	complete=true
+manifest_nbits_group_layout	pass	nbits=4 group_size=128 layout=row_major_axis1_grouped_uint4_packed
+manifest_tensor_records	pass	30 records across 6 attention layers
+cache_file_count	pass	30 tensor files plus manifest
+built_command_exit_zero	pass	exit_code=0
+quality_smoke_absent	pass	no reference-test requests sent
+config_created_under_tests	pass	tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf
+protected_config_dirs	pass	only known untracked tests/nemotron-nano-bf16-experts-a16.conf plus new tests-only Nano HQQ4 config; no testconfigs/krasis/testconfigs changes
+bash_n_dev	pass	bash -n dev
+git_diff_check_krasis	pass	git diff --check
+git_diff_check_internal	pass	git diff --check
+cleanup	pass	./dev kill completed
+final_snapshot	pass	2026-06-27T16:58:53Z no tmux server, no matching runtime process, GPUs 15 MB / 11 MB, disk 598G, RAM 966Gi

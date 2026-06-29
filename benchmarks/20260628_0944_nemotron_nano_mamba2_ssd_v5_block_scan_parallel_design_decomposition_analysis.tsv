@@ -1,0 +1,7 @@
+finding	evidence	decision
+double_execution_is_primary_cost	For 39,920 tokens, sequential oracle was 114292.932890ms and v5 candidate was 114293.155150ms, together 90.909% of ssd_scan.	A production-shaped candidate must not execute both full serial paths during performance measurement; oracle stays diagnostic only.
+full_download_compare_secondary	Full-buffer downloads plus host comparison were 21433.343216ms, 8.524% of ssd_scan.	Next correctness prototype may keep them; next performance prototype must replace them with device-side compare or targeted probes before benchmarking.
+commit_copy_not_bottleneck	Commit copies were 11.745775ms, 0.004671% of ssd_scan.	Do not optimize commit copies first.
+monolithic_v5_candidate_matches_oracle	0810 and 0835 exact oracle records show zero output and state mismatches, including row64/state0 and row82/state14 when rows are in range.	The v5 recurrence/output operation order is the correctness baseline for a parallel design.
+affine_summary_not_accepted	Closed-form v4 drift and 0753 analysis showed compact closed-form state did not match sequential f32 recurrence bits.	Do not use affine P/Q summaries as accepted state source unless a separate oracle gate proves exactness for all runtime states.
+exact_serial_dependency_remains	Sequential-compatible f32 recurrence rounds after each token update.	Bit-exact design can shorten the serial critical path and move independent output/local work out of it, but cannot reorder token updates inside accepted block-entry propagation.

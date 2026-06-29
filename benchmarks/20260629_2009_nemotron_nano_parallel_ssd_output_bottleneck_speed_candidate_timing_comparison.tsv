@@ -1,0 +1,7 @@
+metric	1818_bychunk	precompute_cb	precompute_cb_unroll	delta_1818_to_final	delta_precompute_to_final
+prefill_tok_s	5693.8	6485.2	7765.1	+36.4%	+19.7%
+prefill_seconds	7.01	6.16	5.14	-26.7%	-16.6%
+total_candidate_ms	177.278934	142.144658	98.162166	-44.6%	-30.9%
+output_ms	148.531186	110.330955	66.309823	-55.4%	-39.9%
+cb_precompute_ms	0	3.002978	3.001623	NA	-0.0%
+recurrent_ms	12.645583	12.772272	12.791758	+1.2%	+0.2%

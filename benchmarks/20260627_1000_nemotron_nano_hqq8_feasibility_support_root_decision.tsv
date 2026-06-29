@@ -1,0 +1,23 @@
+field	value
+decision	stop_before_hqq8_generator_enablement
+path_truly_descriptor_generic	false
+cache_descriptor_can_represent_hqq8	true
+component_size_helper_supports_hqq8	true
+cuda_hqq8_kernel_exists	true
+expert_hqq_generation_supports_hqq8	false
+expert_hqq_reference_execution_supports_hqq8	false
+expert_hqq_runtime_diagnostic_supports_hqq8	false
+root_reason	HQQ8 is not currently descriptor-generic through expert-HQQ generation/reference/runtime diagnostic consumption; generator-only enablement would create unusable cache/spec artifacts.
+required_fix_1	Add HQQ8 safetensors quantization input builder support with qmax=255 and row-major uint8 payloads.
+required_fix_2	Add HQQ8 reference decode/dequant and reference plan validation.
+required_fix_3	Wire Expert-HQQ runtime diagnostic validation/launch to accept row_major_axis1_grouped_uint8, stride=padded_cols, and hqq8_prefill_gemm_bf16_kernel.
+required_fix_4	Extend GPU prototype tests/helpers to load and dispatch hqq8_prefill_gemm_bf16_kernel.
+cache_generation	no
+live_server	no
+production_hqq	no
+speed_benchmark	no
+fallback	no
+decode_hcs	no
+selected_expert_retargeting	no
+int4_hqq4	no
+kv_work	no

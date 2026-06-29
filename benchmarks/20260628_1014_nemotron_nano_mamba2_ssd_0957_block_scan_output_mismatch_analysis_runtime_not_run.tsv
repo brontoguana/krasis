@@ -1,0 +1,6 @@
+item	status	reason
+build	not_run	User requested static analysis only; existing artifacts were sufficient to produce bounded attribution and a correction/probe plan.
+startup_diagnostic	not_run	User requested no run unless artifacts could not answer a required question; retained 0957 oracle/log/source artifacts were sufficient for this gate.
+benchmark	not_run	Benchmarks and speed tests were explicitly out of scope.
+requests	not_run	Requests were explicitly out of scope.
+cleanup	not_run	User requested analysis before cleanup or new prototype.

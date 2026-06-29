@@ -1,0 +1,2 @@
+scope	layer	passed	output_mismatches	output_first_row	output_first_head	output_first_d	output_candidate_bits	output_oracle_bits	output_first_abs_error	output_max_abs	output_mean_abs	state_mismatches	state_first_flat	state_first_head	state_first_d	state_first_state_idx	state_candidate_bits	state_oracle_bits	state_first_abs_error	state_max_abs	state_mean_abs
+small_full_oracle	0	false	5	82	37	30	0xbe4e	0xbe4d	0.0009765625	0.25	0.00000025064218789339066	134008	14	0	0	14	0xbb05886f	0xbb05886e	0.00000000023283064365386963	0.0003662109375	0.00000002278079460770008

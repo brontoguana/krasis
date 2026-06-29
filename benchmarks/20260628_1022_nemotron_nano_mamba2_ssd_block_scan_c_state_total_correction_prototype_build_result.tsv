@@ -1,0 +1,9 @@
+check	result	detail
+record_first	pass	Recorded 1014 first with Gemma 5619.6 / 92.43 / 155.69 and Nano 346.5 / 94.48 / 164.75 before source edits.
+pre_build_cleanup	pass	./dev kill exit 0 before build.
+command	pass	./dev build
+build_exit	pass	0
+build_duration_s	pass	178
+maturin_build_duration_s	pass	173
+direct_python	pass	No Python script was run directly.
+log	pass	benchmarks/20260628_1022_nemotron_nano_mamba2_ssd_block_scan_c_state_total_correction_prototype_build.log

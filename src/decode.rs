@@ -6,18 +6,18 @@
 
 use crate::kernel::avx2::{
     matmul_int4_transposed_integer, matmul_int4_transposed_integer_parallel,
-    matmul_int4_transposed_integer_tiled, matmul_int4_transposed_integer_parallel_tiled,
+    matmul_int4_transposed_integer_parallel_tiled, matmul_int4_transposed_integer_tiled,
     matmul_int8_transposed_integer, matmul_int8_transposed_integer_parallel,
-    matmul_int8_transposed_integer_tiled, matmul_int8_transposed_integer_parallel_tiled,
-    repack_tiled_int4_packed, repack_tiled_int8_packed, repack_tiled_scales,
-    quantize_activation_int16_f32,
+    matmul_int8_transposed_integer_parallel_tiled, matmul_int8_transposed_integer_tiled,
+    quantize_activation_int16_f32, repack_tiled_int4_packed, repack_tiled_int8_packed,
+    repack_tiled_scales,
 };
-use crate::moe::{ExpertScratch, moe_forward_unified, PflPrefetch};
+use crate::moe::{moe_forward_unified, ExpertScratch, PflPrefetch};
 use crate::weights::marlin::f32_to_bf16;
 use crate::weights::WeightStore;
 use pyo3::prelude::*;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 /// A single quantized weight matrix in transposed format for CPU decode.
 struct TransposedWeight {
@@ -50,8 +50,17 @@ fn quantize_f32_to_transposed_int4(
     group_size: usize,
 ) -> TransposedWeight {
     assert_eq!(weight.len(), rows * cols);
-    assert!(cols % group_size == 0, "cols {} must be divisible by group_size {}", cols, group_size);
-    assert!(cols % 8 == 0, "cols {} must be divisible by 8 for INT4", cols);
+    assert!(
+        cols % group_size == 0,
+        "cols {} must be divisible by group_size {}",
+        cols,
+        group_size
+    );
+    assert!(
+        cols % 8 == 0,
+        "cols {} must be divisible by 8 for INT4",
+        cols
+    );
     assert!(group_size % 8 == 0);
 
     let packed_k = cols / 8;
@@ -105,7 +114,15 @@ fn quantize_f32_to_transposed_int4(
         }
     }
 
-    TransposedWeight { packed, scales, rows, cols, group_size, num_bits: 4, tiled: false }
+    TransposedWeight {
+        packed,
+        scales,
+        rows,
+        cols,
+        group_size,
+        num_bits: 4,
+        tiled: false,
+    }
 }
 
 /// Quantize f32 weight matrix [N, K] to transposed INT8 format.
@@ -119,7 +136,12 @@ fn quantize_f32_to_transposed_int8(
     group_size: usize,
 ) -> TransposedWeight {
     assert_eq!(weight.len(), rows * cols);
-    assert!(cols % group_size == 0, "cols {} must be divisible by group_size {}", cols, group_size);
+    assert!(
+        cols % group_size == 0,
+        "cols {} must be divisible by group_size {}",
+        cols,
+        group_size
+    );
     assert!(group_size % 2 == 0);
 
     let num_groups = cols / group_size;
@@ -174,7 +196,15 @@ fn quantize_f32_to_transposed_int8(
         }
     }
 
-    TransposedWeight { packed, scales, rows, cols, group_size, num_bits: 8, tiled: false }
+    TransposedWeight {
+        packed,
+        scales,
+        rows,
+        cols,
+        group_size,
+        num_bits: 8,
+        tiled: false,
+    }
 }
 
 /// A single MoE routing weight stored as float32 (small, accuracy-critical).
@@ -259,7 +289,8 @@ fn detect_l3_cache() -> (usize, usize) {
     // Count total L3 instances by scanning all CPUs for unique L3 ids
     let num_cpus = std::fs::read_dir("/sys/devices/system/cpu/")
         .map(|entries| {
-            entries.filter_map(|e| e.ok())
+            entries
+                .filter_map(|e| e.ok())
                 .filter(|e| {
                     let name = e.file_name();
                     let s = name.to_string_lossy();
@@ -271,7 +302,10 @@ fn detect_l3_cache() -> (usize, usize) {
 
     for cpu in 0..num_cpus {
         for idx in 0..10 {
-            let level_path = format!("/sys/devices/system/cpu/cpu{}/cache/index{}/level", cpu, idx);
+            let level_path = format!(
+                "/sys/devices/system/cpu/cpu{}/cache/index{}/level",
+                cpu, idx
+            );
             let id_path = format!("/sys/devices/system/cpu/cpu{}/cache/index{}/id", cpu, idx);
             if let Ok(level) = std::fs::read_to_string(&level_path) {
                 if level.trim() == "3" {
@@ -289,19 +323,32 @@ fn detect_l3_cache() -> (usize, usize) {
 
 /// Calculate expert size in bytes from model dimensions and quantization.
 /// expert_size = w13_packed + w13_scales + w2_packed + w2_scales
-fn compute_expert_size_bytes(hidden: usize, intermediate: usize, group_size: usize, num_bits: u8) -> usize {
+fn compute_expert_size_bytes(
+    hidden: usize,
+    intermediate: usize,
+    group_size: usize,
+    num_bits: u8,
+) -> usize {
     if num_bits == 16 {
         // BF16 validation mode: raw BF16 data, no scales
         let w13 = hidden * 2 * intermediate * 2; // [hidden, 2*intermediate] * 2 bytes
-        let w2 = intermediate * hidden * 2;       // [intermediate, hidden] * 2 bytes
+        let w2 = intermediate * hidden * 2; // [intermediate, hidden] * 2 bytes
         return w13 + w2;
     }
     let two_m = 2 * intermediate;
     // w13: K=hidden, N=2*intermediate
-    let w13_packed = if num_bits == 4 { (hidden / 8) * two_m * 4 } else { hidden * two_m * 4 };
+    let w13_packed = if num_bits == 4 {
+        (hidden / 8) * two_m * 4
+    } else {
+        hidden * two_m * 4
+    };
     let w13_scales = (hidden / group_size) * two_m * 2;
     // w2: K=intermediate, N=hidden
-    let w2_packed = if num_bits == 4 { (intermediate / 8) * hidden * 4 } else { intermediate * hidden * 4 };
+    let w2_packed = if num_bits == 4 {
+        (intermediate / 8) * hidden * 4
+    } else {
+        intermediate * hidden * 4
+    };
     let w2_scales = (intermediate / group_size) * hidden * 2;
     w13_packed + w13_scales + w2_packed + w2_scales
 }
@@ -311,7 +358,10 @@ impl PflConfig {
     /// based on detected L3 cache size when KRASIS_PFL_PREFETCH is not set.
     fn from_env_with_expert_size(expert_size_bytes: usize) -> Self {
         let num_friends = std::env::var("KRASIS_PFL_FRIENDS")
-            .ok().and_then(|v| v.parse().ok()).unwrap_or(24usize).min(PFL_MAX_FRIENDS);
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(24usize)
+            .min(PFL_MAX_FRIENDS);
 
         let prefetch_count = if let Ok(v) = std::env::var("KRASIS_PFL_PREFETCH") {
             v.parse().unwrap_or(32usize)
@@ -338,9 +388,13 @@ impl PflConfig {
                 32 // fallback if expert size unknown
             };
 
-            log::info!("PFL auto-tune: L3 {}MB × {} instances = {}MB total, {} active CCDs",
-                l3_per_instance / (1024 * 1024), num_instances,
-                (l3_per_instance * num_instances) / (1024 * 1024), active_ccds);
+            log::info!(
+                "PFL auto-tune: L3 {}MB × {} instances = {}MB total, {} active CCDs",
+                l3_per_instance / (1024 * 1024),
+                num_instances,
+                (l3_per_instance * num_instances) / (1024 * 1024),
+                active_ccds
+            );
             log::info!("PFL auto-tune: expert {}KB, per-CCD budget {}MB → prefetch {} experts (~{} per CCD)",
                 expert_size_bytes / 1024, (l3_per_instance * 60 / 100) / (1024 * 1024),
                 auto_count, (auto_count + active_ccds - 1) / active_ccds);
@@ -349,15 +403,24 @@ impl PflConfig {
         };
 
         let two_layer = std::env::var("KRASIS_PFL_TWO_LAYER")
-            .map(|v| v == "1").unwrap_or(false);
+            .map(|v| v == "1")
+            .unwrap_or(false);
         let stride = std::env::var("KRASIS_PFL_STRIDE")
-            .ok().and_then(|v| v.parse().ok()).unwrap_or(512usize);
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(512usize);
         let hint = match std::env::var("KRASIS_PFL_HINT").as_deref() {
             Ok("t1") => 1,
             Ok("t0") => 2,
             _ => 0, // NTA default
         };
-        PflConfig { num_friends, prefetch_count, two_layer, stride, hint }
+        PflConfig {
+            num_friends,
+            prefetch_count,
+            two_layer,
+            stride,
+            hint,
+        }
     }
 }
 
@@ -412,15 +475,22 @@ impl Pfl {
 
     /// Update PFL: for each expert selected at prev_moe_layer, increment counts
     /// for each expert selected at current moe_layer.
-    fn update(&mut self, prev_moe_layer: usize, prev_experts: &[u16],
-              curr_moe_layer: usize, curr_experts: &[u16]) {
+    fn update(
+        &mut self,
+        prev_moe_layer: usize,
+        prev_experts: &[u16],
+        curr_moe_layer: usize,
+        curr_experts: &[u16],
+    ) {
         if prev_moe_layer >= self.num_moe_layers || curr_moe_layer >= self.num_moe_layers {
             return;
         }
         let nf = self.config.num_friends;
         for &prev_eid in prev_experts {
             let idx = prev_moe_layer * self.num_experts + prev_eid as usize;
-            if idx >= self.friends.len() { continue; }
+            if idx >= self.friends.len() {
+                continue;
+            }
             let friends = &mut self.friends[idx];
             let counts = &mut self.counts[idx];
 
@@ -458,8 +528,7 @@ impl Pfl {
 
     /// Get predicted expert IDs for next_moe_layer based on selected experts.
     /// When two_layer is enabled, also uses prev2 layer's experts for richer predictions.
-    fn predict(&self, curr_moe_layer: usize, selected_experts: &[u16],
-               out: &mut Vec<u16>) {
+    fn predict(&self, curr_moe_layer: usize, selected_experts: &[u16], out: &mut Vec<u16>) {
         out.clear();
         if curr_moe_layer >= self.num_moe_layers.saturating_sub(1) {
             return;
@@ -472,12 +541,16 @@ impl Pfl {
         // Primary: layer L experts -> layer L+1 predictions
         for &eid in selected_experts {
             let idx = curr_moe_layer * self.num_experts + eid as usize;
-            if idx >= self.friends.len() { continue; }
+            if idx >= self.friends.len() {
+                continue;
+            }
             let friends = &self.friends[idx];
             let counts = &self.counts[idx];
 
             for slot in 0..nf {
-                if friends[slot] == u16::MAX { break; }
+                if friends[slot] == u16::MAX {
+                    break;
+                }
                 let fid = friends[slot];
                 let cnt = counts[slot];
                 let mut found = false;
@@ -498,7 +571,8 @@ impl Pfl {
         // Two-layer: also use layer L-1 experts -> layer L+1 predictions (skip-layer)
         // This requires a skip-1 table which we approximate by chaining:
         // L-1 -> L friends, then L -> L+1 friends for those predicted L experts.
-        if self.config.two_layer && self.prev2_moe_layer_idx < usize::MAX
+        if self.config.two_layer
+            && self.prev2_moe_layer_idx < usize::MAX
             && self.prev2_moe_layer_idx + 2 == curr_moe_layer + 1
         {
             // Get what L-2's friends predict for L-1 (which is curr layer)
@@ -510,24 +584,32 @@ impl Pfl {
             let prev2_layer = self.prev2_moe_layer_idx;
             for &prev2_eid in &self.prev2_layer_experts {
                 let idx = prev2_layer * self.num_experts + prev2_eid as usize;
-                if idx >= self.friends.len() { continue; }
+                if idx >= self.friends.len() {
+                    continue;
+                }
                 let friends = &self.friends[idx];
                 let counts = &self.counts[idx];
                 // Check which of prev2's friends are actually in current layer's selection
                 for slot in 0..nf {
-                    if friends[slot] == u16::MAX { break; }
+                    if friends[slot] == u16::MAX {
+                        break;
+                    }
                     let predicted_curr = friends[slot];
                     // If this expert WAS selected at current layer, its predictions
                     // are more trustworthy — boost its candidates
                     if selected_experts.contains(&predicted_curr) {
                         let boost = counts[slot] / 2; // Half-weight boost
-                        // Boost all candidates that came from this expert
+                                                      // Boost all candidates that came from this expert
                         let cidx = curr_moe_layer * self.num_experts + predicted_curr as usize;
-                        if cidx >= self.friends.len() { continue; }
+                        if cidx >= self.friends.len() {
+                            continue;
+                        }
                         let cfriends = &self.friends[cidx];
                         let ccounts = &self.counts[cidx];
                         for cs in 0..nf {
-                            if cfriends[cs] == u16::MAX { break; }
+                            if cfriends[cs] == u16::MAX {
+                                break;
+                            }
                             let cfid = cfriends[cs];
                             for c in candidates[..n_candidates].iter_mut() {
                                 if c.0 == cfid {
@@ -645,21 +727,26 @@ impl CpuDecodeStore {
         num_bits: u8,
     ) -> PyResult<usize> {
         if num_bits != 4 && num_bits != 8 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                format!("num_bits must be 4 or 8, got {}", num_bits)));
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "num_bits must be 4 or 8, got {}",
+                num_bits
+            )));
         }
         if cols % self.group_size != 0 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                format!("cols {} must be divisible by group_size {}", cols, self.group_size)));
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "cols {} must be divisible by group_size {}",
+                cols, self.group_size
+            )));
         }
         if num_bits == 4 && cols % 8 != 0 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                format!("cols {} must be divisible by 8 for INT4", cols)));
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "cols {} must be divisible by 8 for INT4",
+                cols
+            )));
         }
 
-        let data: &[f32] = unsafe {
-            std::slice::from_raw_parts(data_ptr as *const f32, rows * cols)
-        };
+        let data: &[f32] =
+            unsafe { std::slice::from_raw_parts(data_ptr as *const f32, rows * cols) };
 
         let weight = match num_bits {
             4 => quantize_f32_to_transposed_int4(data, rows, cols, self.group_size),
@@ -677,8 +764,14 @@ impl CpuDecodeStore {
         let id = self.weights.len();
         let bytes = weight.packed.len() * 4 + weight.scales.len() * 2;
         self.weights.push(weight);
-        log::debug!("Stored weight {}: [{}x{}] INT{} transposed, {:.1} KB",
-            id, rows, cols, num_bits, bytes as f64 / 1024.0);
+        log::debug!(
+            "Stored weight {}: [{}x{}] INT{} transposed, {:.1} KB",
+            id,
+            rows,
+            cols,
+            num_bits,
+            bytes as f64 / 1024.0
+        );
         Ok(id)
     }
 
@@ -692,26 +785,35 @@ impl CpuDecodeStore {
         output_ptr: usize,
     ) -> PyResult<()> {
         if weight_id >= self.weights.len() {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                format!("weight_id {} out of range ({})", weight_id, self.weights.len())));
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "weight_id {} out of range ({})",
+                weight_id,
+                self.weights.len()
+            )));
         }
         let w = &self.weights[weight_id];
         let k = w.cols;
         let n = w.rows;
         let gs = w.group_size;
 
-        let input: &[f32] = unsafe {
-            std::slice::from_raw_parts(input_ptr as *const f32, k)
-        };
-        let output: &mut [f32] = unsafe {
-            std::slice::from_raw_parts_mut(output_ptr as *mut f32, n)
-        };
+        let input: &[f32] = unsafe { std::slice::from_raw_parts(input_ptr as *const f32, k) };
+        let output: &mut [f32] =
+            unsafe { std::slice::from_raw_parts_mut(output_ptr as *mut f32, n) };
 
         // Quantize input to INT16
         quantize_activation_int16_f32(
-            input, gs, &mut self.act_int16[..k], &mut self.act_scales[..k / gs]);
+            input,
+            gs,
+            &mut self.act_int16[..k],
+            &mut self.act_scales[..k / gs],
+        );
 
-        self.dispatch_matmul(weight_id, &self.act_int16[..k], &self.act_scales[..k / gs], output);
+        self.dispatch_matmul(
+            weight_id,
+            &self.act_int16[..k],
+            &self.act_scales[..k / gs],
+            output,
+        );
         Ok(())
     }
 
@@ -729,7 +831,8 @@ impl CpuDecodeStore {
     ) -> PyResult<()> {
         if weight_ids.len() != output_ptrs.len() {
             return Err(pyo3::exceptions::PyValueError::new_err(
-                "weight_ids and output_ptrs must have same length"));
+                "weight_ids and output_ptrs must have same length",
+            ));
         }
         if weight_ids.is_empty() {
             return Ok(());
@@ -738,23 +841,29 @@ impl CpuDecodeStore {
         let k = self.weights[weight_ids[0]].cols;
         let gs = self.weights[weight_ids[0]].group_size;
 
-        let input: &[f32] = unsafe {
-            std::slice::from_raw_parts(input_ptr as *const f32, k)
-        };
+        let input: &[f32] = unsafe { std::slice::from_raw_parts(input_ptr as *const f32, k) };
 
         // Quantize input once
         quantize_activation_int16_f32(
-            input, gs, &mut self.act_int16[..k], &mut self.act_scales[..k / gs]);
+            input,
+            gs,
+            &mut self.act_int16[..k],
+            &mut self.act_scales[..k / gs],
+        );
 
         for i in 0..weight_ids.len() {
             let wid = weight_ids[i];
             let w = &self.weights[wid];
             assert_eq!(w.cols, k, "All weights in batch must have same K");
             let n = w.rows;
-            let output: &mut [f32] = unsafe {
-                std::slice::from_raw_parts_mut(output_ptrs[i] as *mut f32, n)
-            };
-            self.dispatch_matmul(wid, &self.act_int16[..k], &self.act_scales[..k / gs], output);
+            let output: &mut [f32] =
+                unsafe { std::slice::from_raw_parts_mut(output_ptrs[i] as *mut f32, n) };
+            self.dispatch_matmul(
+                wid,
+                &self.act_int16[..k],
+                &self.act_scales[..k / gs],
+                output,
+            );
         }
         Ok(())
     }
@@ -772,29 +881,28 @@ impl CpuDecodeStore {
         size: usize,
         first_call: bool,
     ) -> PyResult<()> {
-        let hidden: &mut [f32] = unsafe {
-            std::slice::from_raw_parts_mut(hidden_ptr as *mut f32, size)
-        };
-        let residual: &mut [f32] = unsafe {
-            std::slice::from_raw_parts_mut(residual_ptr as *mut f32, size)
-        };
-        let weight: &[f32] = unsafe {
-            std::slice::from_raw_parts(weight_ptr as *const f32, size)
-        };
+        let hidden: &mut [f32] =
+            unsafe { std::slice::from_raw_parts_mut(hidden_ptr as *mut f32, size) };
+        let residual: &mut [f32] =
+            unsafe { std::slice::from_raw_parts_mut(residual_ptr as *mut f32, size) };
+        let weight: &[f32] = unsafe { std::slice::from_raw_parts(weight_ptr as *const f32, size) };
 
-        unsafe { fused_add_rmsnorm_avx2(hidden, residual, weight, eps, first_call, self.norm_bias_one) };
+        unsafe {
+            fused_add_rmsnorm_avx2(
+                hidden,
+                residual,
+                weight,
+                eps,
+                first_call,
+                self.norm_bias_one,
+            )
+        };
         Ok(())
     }
 
     /// Store norm weight in Rust for zero-overhead access. Returns norm_id.
-    pub fn store_norm_weight(
-        &mut self,
-        data_ptr: usize,
-        size: usize,
-    ) -> PyResult<usize> {
-        let data: &[f32] = unsafe {
-            std::slice::from_raw_parts(data_ptr as *const f32, size)
-        };
+    pub fn store_norm_weight(&mut self, data_ptr: usize, size: usize) -> PyResult<usize> {
+        let data: &[f32] = unsafe { std::slice::from_raw_parts(data_ptr as *const f32, size) };
         let id = self.norm_weights.len();
         self.norm_weights.push(data.to_vec());
         Ok(id)
@@ -814,18 +922,28 @@ impl CpuDecodeStore {
         first_call: bool,
     ) -> PyResult<()> {
         if norm_id >= self.norm_weights.len() {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                format!("norm_id {} out of range ({})", norm_id, self.norm_weights.len())));
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "norm_id {} out of range ({})",
+                norm_id,
+                self.norm_weights.len()
+            )));
         }
-        let hidden: &mut [f32] = unsafe {
-            std::slice::from_raw_parts_mut(hidden_ptr as *mut f32, size)
-        };
-        let residual: &mut [f32] = unsafe {
-            std::slice::from_raw_parts_mut(residual_ptr as *mut f32, size)
-        };
+        let hidden: &mut [f32] =
+            unsafe { std::slice::from_raw_parts_mut(hidden_ptr as *mut f32, size) };
+        let residual: &mut [f32] =
+            unsafe { std::slice::from_raw_parts_mut(residual_ptr as *mut f32, size) };
         let weight = &self.norm_weights[norm_id];
 
-        unsafe { fused_add_rmsnorm_avx2(hidden, residual, weight, eps, first_call, self.norm_bias_one) };
+        unsafe {
+            fused_add_rmsnorm_avx2(
+                hidden,
+                residual,
+                weight,
+                eps,
+                first_call,
+                self.norm_bias_one,
+            )
+        };
         Ok(())
     }
 
@@ -838,15 +956,10 @@ impl CpuDecodeStore {
         output_ptr: usize,
         size: usize,
     ) -> PyResult<()> {
-        let input: &[f32] = unsafe {
-            std::slice::from_raw_parts(input_ptr as *const f32, size)
-        };
-        let weight: &[f32] = unsafe {
-            std::slice::from_raw_parts(weight_ptr as *const f32, size)
-        };
-        let output: &mut [f32] = unsafe {
-            std::slice::from_raw_parts_mut(output_ptr as *mut f32, size)
-        };
+        let input: &[f32] = unsafe { std::slice::from_raw_parts(input_ptr as *const f32, size) };
+        let weight: &[f32] = unsafe { std::slice::from_raw_parts(weight_ptr as *const f32, size) };
+        let output: &mut [f32] =
+            unsafe { std::slice::from_raw_parts_mut(output_ptr as *mut f32, size) };
 
         let mut sum_sq: f32 = 0.0;
         for i in 0..size {
@@ -875,15 +988,10 @@ impl CpuDecodeStore {
         output_ptr: usize,
         size: usize,
     ) -> PyResult<()> {
-        let gate: &[f32] = unsafe {
-            std::slice::from_raw_parts(gate_ptr as *const f32, size)
-        };
-        let up: &[f32] = unsafe {
-            std::slice::from_raw_parts(up_ptr as *const f32, size)
-        };
-        let output: &mut [f32] = unsafe {
-            std::slice::from_raw_parts_mut(output_ptr as *mut f32, size)
-        };
+        let gate: &[f32] = unsafe { std::slice::from_raw_parts(gate_ptr as *const f32, size) };
+        let up: &[f32] = unsafe { std::slice::from_raw_parts(up_ptr as *const f32, size) };
+        let output: &mut [f32] =
+            unsafe { std::slice::from_raw_parts_mut(output_ptr as *mut f32, size) };
 
         for i in 0..size {
             let x = gate[i];
@@ -913,17 +1021,24 @@ impl CpuDecodeStore {
         let gs = gu_w.group_size;
         let intermediate = n_gu / 2;
 
-        let input: &[f32] = unsafe {
-            std::slice::from_raw_parts(input_ptr as *const f32, k_in)
-        };
+        let input: &[f32] = unsafe { std::slice::from_raw_parts(input_ptr as *const f32, k_in) };
 
         // Quantize input once for gate_up
         quantize_activation_int16_f32(
-            input, gs, &mut self.act_int16[..k_in], &mut self.act_scales[..k_in / gs]);
+            input,
+            gs,
+            &mut self.act_int16[..k_in],
+            &mut self.act_scales[..k_in / gs],
+        );
 
         // gate_up matmul
         let mut gate_up = vec![0f32; n_gu];
-        self.dispatch_matmul_ext(gate_up_wid, &self.act_int16[..k_in], &self.act_scales[..k_in / gs], &mut gate_up);
+        self.dispatch_matmul_ext(
+            gate_up_wid,
+            &self.act_int16[..k_in],
+            &self.act_scales[..k_in / gs],
+            &mut gate_up,
+        );
 
         // SiLU(gate) * up → hidden
         let mut se_hidden = vec![0f32; intermediate];
@@ -947,12 +1062,20 @@ impl CpuDecodeStore {
         }
 
         quantize_activation_int16_f32(
-            &se_hidden, gs_down, &mut self.act_int16[..k_down], &mut self.act_scales[..k_down / gs_down]);
+            &se_hidden,
+            gs_down,
+            &mut self.act_int16[..k_down],
+            &mut self.act_scales[..k_down / gs_down],
+        );
 
-        let output: &mut [f32] = unsafe {
-            std::slice::from_raw_parts_mut(output_ptr as *mut f32, n_down)
-        };
-        self.dispatch_matmul_ext(down_wid, &self.act_int16[..k_down], &self.act_scales[..k_down / gs_down], output);
+        let output: &mut [f32] =
+            unsafe { std::slice::from_raw_parts_mut(output_ptr as *mut f32, n_down) };
+        self.dispatch_matmul_ext(
+            down_wid,
+            &self.act_int16[..k_down],
+            &self.act_scales[..k_down / gs_down],
+            output,
+        );
 
         Ok(())
     }
@@ -979,17 +1102,15 @@ impl CpuDecodeStore {
         dk: usize,
         dv: usize,
     ) -> PyResult<()> {
-        let state: &mut [f32] = unsafe {
-            std::slice::from_raw_parts_mut(state_ptr as *mut f32, nv * dk * dv)
-        };
+        let state: &mut [f32] =
+            unsafe { std::slice::from_raw_parts_mut(state_ptr as *mut f32, nv * dk * dv) };
         let q: &[f32] = unsafe { std::slice::from_raw_parts(q_ptr as *const f32, nv * dk) };
         let k: &[f32] = unsafe { std::slice::from_raw_parts(k_ptr as *const f32, nv * dk) };
         let v: &[f32] = unsafe { std::slice::from_raw_parts(v_ptr as *const f32, nv * dv) };
         let g: &[f32] = unsafe { std::slice::from_raw_parts(g_ptr as *const f32, nv) };
         let beta: &[f32] = unsafe { std::slice::from_raw_parts(beta_ptr as *const f32, nv) };
-        let output: &mut [f32] = unsafe {
-            std::slice::from_raw_parts_mut(output_ptr as *mut f32, nv * dv)
-        };
+        let output: &mut [f32] =
+            unsafe { std::slice::from_raw_parts_mut(output_ptr as *mut f32, nv * dv) };
 
         // Dispatch to AVX2 implementation
         unsafe {
@@ -1020,12 +1141,10 @@ impl CpuDecodeStore {
         let size = nv * dv;
         let x: &[f32] = unsafe { std::slice::from_raw_parts(x_ptr as *const f32, size) };
         let z: &[f32] = unsafe { std::slice::from_raw_parts(z_ptr as *const f32, size) };
-        let norm_weight: &[f32] = unsafe {
-            std::slice::from_raw_parts(norm_weight_ptr as *const f32, size)
-        };
-        let output: &mut [f32] = unsafe {
-            std::slice::from_raw_parts_mut(output_ptr as *mut f32, size)
-        };
+        let norm_weight: &[f32] =
+            unsafe { std::slice::from_raw_parts(norm_weight_ptr as *const f32, size) };
+        let output: &mut [f32] =
+            unsafe { std::slice::from_raw_parts_mut(output_ptr as *mut f32, size) };
 
         // Per-head RMSNorm: for each head h, norm over dv dimensions
         for h in 0..nv {
@@ -1092,45 +1211,32 @@ impl CpuDecodeStore {
         hr: usize,
         kernel_dim: usize,
     ) -> PyResult<()> {
-        let conv_dim = nk * dk * 2 + nv * dv;  // q_flat + k_flat + v_flat
+        let conv_dim = nk * dk * 2 + nv * dv; // q_flat + k_flat + v_flat
         let group_dim = 2 * dk + 2 * dv * hr;
 
-        let qkvz: &[f32] = unsafe {
-            std::slice::from_raw_parts(qkvz_ptr as *const f32, nk * group_dim)
-        };
-        let ba: &[f32] = unsafe {
-            std::slice::from_raw_parts(ba_ptr as *const f32, nk * 2 * hr)
-        };
+        let qkvz: &[f32] =
+            unsafe { std::slice::from_raw_parts(qkvz_ptr as *const f32, nk * group_dim) };
+        let ba: &[f32] = unsafe { std::slice::from_raw_parts(ba_ptr as *const f32, nk * 2 * hr) };
         let conv_state: &mut [f32] = unsafe {
             std::slice::from_raw_parts_mut(conv_state_ptr as *mut f32, conv_dim * kernel_dim)
         };
         let conv_weight: &[f32] = unsafe {
             std::slice::from_raw_parts(conv_weight_ptr as *const f32, conv_dim * kernel_dim)
         };
-        let a_log: &[f32] = unsafe {
-            std::slice::from_raw_parts(a_log_ptr as *const f32, nv)
-        };
-        let dt_bias: &[f32] = unsafe {
-            std::slice::from_raw_parts(dt_bias_ptr as *const f32, nv)
-        };
-        let q_out: &mut [f32] = unsafe {
-            std::slice::from_raw_parts_mut(q_out_ptr as *mut f32, nv * dk)
-        };
-        let k_out: &mut [f32] = unsafe {
-            std::slice::from_raw_parts_mut(k_out_ptr as *mut f32, nv * dk)
-        };
-        let v_out: &mut [f32] = unsafe {
-            std::slice::from_raw_parts_mut(v_out_ptr as *mut f32, nv * dv)
-        };
-        let z_out: &mut [f32] = unsafe {
-            std::slice::from_raw_parts_mut(z_out_ptr as *mut f32, nv * dv)
-        };
-        let g_out: &mut [f32] = unsafe {
-            std::slice::from_raw_parts_mut(g_out_ptr as *mut f32, nv)
-        };
-        let beta_out: &mut [f32] = unsafe {
-            std::slice::from_raw_parts_mut(beta_out_ptr as *mut f32, nv)
-        };
+        let a_log: &[f32] = unsafe { std::slice::from_raw_parts(a_log_ptr as *const f32, nv) };
+        let dt_bias: &[f32] = unsafe { std::slice::from_raw_parts(dt_bias_ptr as *const f32, nv) };
+        let q_out: &mut [f32] =
+            unsafe { std::slice::from_raw_parts_mut(q_out_ptr as *mut f32, nv * dk) };
+        let k_out: &mut [f32] =
+            unsafe { std::slice::from_raw_parts_mut(k_out_ptr as *mut f32, nv * dk) };
+        let v_out: &mut [f32] =
+            unsafe { std::slice::from_raw_parts_mut(v_out_ptr as *mut f32, nv * dv) };
+        let z_out: &mut [f32] =
+            unsafe { std::slice::from_raw_parts_mut(z_out_ptr as *mut f32, nv * dv) };
+        let g_out: &mut [f32] =
+            unsafe { std::slice::from_raw_parts_mut(g_out_ptr as *mut f32, nv) };
+        let beta_out: &mut [f32] =
+            unsafe { std::slice::from_raw_parts_mut(beta_out_ptr as *mut f32, nv) };
 
         // Step 1: Un-interleave qkvz [nk, group_dim] into q[nk,dk], k[nk,dk], v[nv,dv], z[nv,dv]
         // and ba [nk, 2*hr] into b[nv], a_param[nv]
@@ -1154,8 +1260,7 @@ impl CpuDecodeStore {
                 let z_src = src + 2 * dk + hr * dv + r * dv;
                 mixed_qkv[2 * key_dim + v_head * dv..2 * key_dim + (v_head + 1) * dv]
                     .copy_from_slice(&qkvz[v_src..v_src + dv]);
-                z_out[v_head * dv..(v_head + 1) * dv]
-                    .copy_from_slice(&qkvz[z_src..z_src + dv]);
+                z_out[v_head * dv..(v_head + 1) * dv].copy_from_slice(&qkvz[z_src..z_src + dv]);
             }
         }
 
@@ -1201,8 +1306,8 @@ impl CpuDecodeStore {
 
         // Expand + normalize q
         for vh in 0..nv {
-            let kh = vh / hr;  // source key head
-            let src_base = kh * dk;  // q is first key_dim elements
+            let kh = vh / hr; // source key head
+            let src_base = kh * dk; // q is first key_dim elements
             let dst_base = vh * dk;
             // L2 norm
             let mut sum_sq = 0.0f32;
@@ -1210,7 +1315,11 @@ impl CpuDecodeStore {
                 let val = conv_out[src_base + i];
                 sum_sq += val * val;
             }
-            let inv_norm = if sum_sq > 0.0 { 1.0 / sum_sq.sqrt() } else { 0.0 };
+            let inv_norm = if sum_sq > 0.0 {
+                1.0 / sum_sq.sqrt()
+            } else {
+                0.0
+            };
             for i in 0..dk {
                 q_out[dst_base + i] = conv_out[src_base + i] * inv_norm * scale;
             }
@@ -1219,14 +1328,18 @@ impl CpuDecodeStore {
         // Expand + normalize k
         for vh in 0..nv {
             let kh = vh / hr;
-            let src_base = key_dim + kh * dk;  // k starts at key_dim
+            let src_base = key_dim + kh * dk; // k starts at key_dim
             let dst_base = vh * dk;
             let mut sum_sq = 0.0f32;
             for i in 0..dk {
                 let val = conv_out[src_base + i];
                 sum_sq += val * val;
             }
-            let inv_norm = if sum_sq > 0.0 { 1.0 / sum_sq.sqrt() } else { 0.0 };
+            let inv_norm = if sum_sq > 0.0 {
+                1.0 / sum_sq.sqrt()
+            } else {
+                0.0
+            };
             for i in 0..dk {
                 k_out[dst_base + i] = conv_out[src_base + i] * inv_norm;
             }
@@ -1237,10 +1350,14 @@ impl CpuDecodeStore {
 
         // Step 5: Gate parameters
         for h in 0..nv {
-            beta_out[h] = 1.0 / (1.0 + (-b_raw[h]).exp());  // sigmoid(b)
-            // g = -exp(A_log) * softplus(a_param + dt_bias)
+            beta_out[h] = 1.0 / (1.0 + (-b_raw[h]).exp()); // sigmoid(b)
+                                                           // g = -exp(A_log) * softplus(a_param + dt_bias)
             let ap_dt = a_param[h] + dt_bias[h];
-            let softplus = if ap_dt > 20.0 { ap_dt } else { (1.0 + ap_dt.exp()).ln() };
+            let softplus = if ap_dt > 20.0 {
+                ap_dt
+            } else {
+                (1.0 + ap_dt.exp()).ln()
+            };
             g_out[h] = -(a_log[h].exp()) * softplus;
         }
 
@@ -1262,9 +1379,8 @@ impl CpuDecodeStore {
         e_score_corr_ptr: Option<usize>,
         e_score_corr_len: usize,
     ) -> PyResult<usize> {
-        let data: &[f32] = unsafe {
-            std::slice::from_raw_parts(data_ptr as *const f32, num_experts * hidden_dim)
-        };
+        let data: &[f32] =
+            unsafe { std::slice::from_raw_parts(data_ptr as *const f32, num_experts * hidden_dim) };
         let mut rw = RouteWeight {
             data: data.to_vec(),
             bias: None,
@@ -1274,17 +1390,14 @@ impl CpuDecodeStore {
         };
         if let Some(bp) = bias_ptr {
             if bias_len > 0 {
-                let b: &[f32] = unsafe {
-                    std::slice::from_raw_parts(bp as *const f32, bias_len)
-                };
+                let b: &[f32] = unsafe { std::slice::from_raw_parts(bp as *const f32, bias_len) };
                 rw.bias = Some(b.to_vec());
             }
         }
         if let Some(ep) = e_score_corr_ptr {
             if e_score_corr_len > 0 {
-                let e: &[f32] = unsafe {
-                    std::slice::from_raw_parts(ep as *const f32, e_score_corr_len)
-                };
+                let e: &[f32] =
+                    unsafe { std::slice::from_raw_parts(ep as *const f32, e_score_corr_len) };
                 rw.e_score_corr = Some(e.to_vec());
             }
         }
@@ -1292,8 +1405,13 @@ impl CpuDecodeStore {
         let bytes = num_experts * hidden_dim * 4
             + rw.bias.as_ref().map_or(0, |b| b.len() * 4)
             + rw.e_score_corr.as_ref().map_or(0, |e| e.len() * 4);
-        log::debug!("Stored route weight {}: [{}x{}] f32, {:.1} KB",
-            id, num_experts, hidden_dim, bytes as f64 / 1024.0);
+        log::debug!(
+            "Stored route weight {}: [{}x{}] f32, {:.1} KB",
+            id,
+            num_experts,
+            hidden_dim,
+            bytes as f64 / 1024.0
+        );
         self.route_weights.push(rw);
         // Pre-allocate scratch buffers for max expert count seen
         if num_experts > self.route_logits.len() {
@@ -1323,22 +1441,21 @@ impl CpuDecodeStore {
         norm_topk_prob: bool,
     ) -> PyResult<()> {
         if route_id >= self.route_weights.len() {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                format!("route_id {} out of range ({})", route_id, self.route_weights.len())));
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "route_id {} out of range ({})",
+                route_id,
+                self.route_weights.len()
+            )));
         }
         let rw = &self.route_weights[route_id];
         let ne = rw.num_experts;
         let hd = rw.hidden_dim;
 
-        let hidden: &[f32] = unsafe {
-            std::slice::from_raw_parts(hidden_ptr as *const f32, hd)
-        };
-        let topk_ids: &mut [i32] = unsafe {
-            std::slice::from_raw_parts_mut(topk_ids_out_ptr as *mut i32, topk)
-        };
-        let topk_weights: &mut [f32] = unsafe {
-            std::slice::from_raw_parts_mut(topk_weights_out_ptr as *mut f32, topk)
-        };
+        let hidden: &[f32] = unsafe { std::slice::from_raw_parts(hidden_ptr as *const f32, hd) };
+        let topk_ids: &mut [i32] =
+            unsafe { std::slice::from_raw_parts_mut(topk_ids_out_ptr as *mut i32, topk) };
+        let topk_weights: &mut [f32] =
+            unsafe { std::slice::from_raw_parts_mut(topk_weights_out_ptr as *mut f32, topk) };
 
         // Use pre-allocated scratch buffers
         let logits = &mut self.route_logits[..ne];
@@ -1423,7 +1540,8 @@ impl CpuDecodeStore {
             2 => {
                 // swiglu: topk on raw logits, then softmax on topk values
                 topk_indices(logits, topk, topk_ids);
-                let max_l = (0..topk).map(|i| logits[topk_ids[i] as usize])
+                let max_l = (0..topk)
+                    .map(|i| logits[topk_ids[i] as usize])
                     .fold(f32::NEG_INFINITY, f32::max);
                 let mut sum_exp = 0.0f32;
                 for i in 0..topk {
@@ -1437,8 +1555,10 @@ impl CpuDecodeStore {
                 }
             }
             _ => {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    format!("Unknown scoring_func: {}", scoring_func)));
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "Unknown scoring_func: {}",
+                    scoring_func
+                )));
             }
         }
 
@@ -1452,14 +1572,20 @@ impl CpuDecodeStore {
 
     /// Total bytes used by stored weights (quantized + routing).
     pub fn total_bytes(&self) -> usize {
-        let quant: usize = self.weights.iter().map(|w| {
-            w.packed.len() * 4 + w.scales.len() * 2
-        }).sum();
-        let route: usize = self.route_weights.iter().map(|rw| {
-            rw.data.len() * 4
-            + rw.bias.as_ref().map_or(0, |b| b.len() * 4)
-            + rw.e_score_corr.as_ref().map_or(0, |e| e.len() * 4)
-        }).sum();
+        let quant: usize = self
+            .weights
+            .iter()
+            .map(|w| w.packed.len() * 4 + w.scales.len() * 2)
+            .sum();
+        let route: usize = self
+            .route_weights
+            .iter()
+            .map(|rw| {
+                rw.data.len() * 4
+                    + rw.bias.as_ref().map_or(0, |b| b.len() * 4)
+                    + rw.e_score_corr.as_ref().map_or(0, |e| e.len() * 4)
+            })
+            .sum();
         quant + route
     }
 
@@ -1485,7 +1611,9 @@ impl Drop for CpuDecodeStore {
             }
             // Unmap the contiguous regions
             for &(base_usize, len) in &self.mmap_regions {
-                unsafe { libc::munmap(base_usize as *mut libc::c_void, len); }
+                unsafe {
+                    libc::munmap(base_usize as *mut libc::c_void, len);
+                }
             }
         }
     }
@@ -1494,12 +1622,24 @@ impl Drop for CpuDecodeStore {
 // Private helper (not exposed to Python)
 impl CpuDecodeStore {
     /// Dispatch matmul to correct INT4/INT8 kernel (uses provided buffers).
-    fn dispatch_matmul_ext(&self, weight_id: usize, act_int16: &[i16], act_scales: &[f32], output: &mut [f32]) {
+    fn dispatch_matmul_ext(
+        &self,
+        weight_id: usize,
+        act_int16: &[i16],
+        act_scales: &[f32],
+        output: &mut [f32],
+    ) {
         self.dispatch_matmul(weight_id, act_int16, act_scales, output);
     }
 
     /// Dispatch matmul to correct INT4/INT8 kernel.
-    fn dispatch_matmul(&self, weight_id: usize, act_int16: &[i16], act_scales: &[f32], output: &mut [f32]) {
+    fn dispatch_matmul(
+        &self,
+        weight_id: usize,
+        act_int16: &[i16],
+        act_scales: &[f32],
+        output: &mut [f32],
+    ) {
         let w = &self.weights[weight_id];
         let k = w.cols;
         let n = w.rows;
@@ -1509,37 +1649,45 @@ impl CpuDecodeStore {
             (4, true) => {
                 if self.parallel && n > 64 {
                     matmul_int4_transposed_integer_parallel_tiled(
-                        &w.packed, &w.scales, act_int16, act_scales, output, k, n, gs);
+                        &w.packed, &w.scales, act_int16, act_scales, output, k, n, gs,
+                    );
                 } else {
                     matmul_int4_transposed_integer_tiled(
-                        &w.packed, &w.scales, act_int16, act_scales, output, k, n, gs);
+                        &w.packed, &w.scales, act_int16, act_scales, output, k, n, gs,
+                    );
                 }
             }
             (4, false) => {
                 if self.parallel && n > 64 {
                     matmul_int4_transposed_integer_parallel(
-                        &w.packed, &w.scales, act_int16, act_scales, output, k, n, gs);
+                        &w.packed, &w.scales, act_int16, act_scales, output, k, n, gs,
+                    );
                 } else {
                     matmul_int4_transposed_integer(
-                        &w.packed, &w.scales, act_int16, act_scales, output, k, n, gs);
+                        &w.packed, &w.scales, act_int16, act_scales, output, k, n, gs,
+                    );
                 }
             }
             (8, true) => {
                 if self.parallel && n > 64 {
                     matmul_int8_transposed_integer_parallel_tiled(
-                        &w.packed, &w.scales, act_int16, act_scales, output, k, n, gs);
+                        &w.packed, &w.scales, act_int16, act_scales, output, k, n, gs,
+                    );
                 } else {
                     matmul_int8_transposed_integer_tiled(
-                        &w.packed, &w.scales, act_int16, act_scales, output, k, n, gs);
+                        &w.packed, &w.scales, act_int16, act_scales, output, k, n, gs,
+                    );
                 }
             }
             (8, false) => {
                 if self.parallel && n > 64 {
                     matmul_int8_transposed_integer_parallel(
-                        &w.packed, &w.scales, act_int16, act_scales, output, k, n, gs);
+                        &w.packed, &w.scales, act_int16, act_scales, output, k, n, gs,
+                    );
                 } else {
                     matmul_int8_transposed_integer(
-                        &w.packed, &w.scales, act_int16, act_scales, output, k, n, gs);
+                        &w.packed, &w.scales, act_int16, act_scales, output, k, n, gs,
+                    );
                 }
             }
             _ => unreachable!(),
@@ -1696,8 +1844,10 @@ unsafe fn linear_attention_recurrent_avx2(
                 let s_decayed = _mm256_mul_ps(s, g_exp_v);
                 _mm256_storeu_ps(row_ptr.add(j8), s_decayed);
                 let km = _mm256_loadu_ps(kv_mem.as_ptr().add(j8));
-                _mm256_storeu_ps(kv_mem.as_mut_ptr().add(j8),
-                    _mm256_fmadd_ps(s_decayed, k_v, km));
+                _mm256_storeu_ps(
+                    kv_mem.as_mut_ptr().add(j8),
+                    _mm256_fmadd_ps(s_decayed, k_v, km),
+                );
             }
         }
 
@@ -1723,16 +1873,20 @@ unsafe fn linear_attention_recurrent_avx2(
                 let s_new = _mm256_fmadd_ps(k_v, d, s);
                 _mm256_storeu_ps(row_ptr.add(j8), s_new);
                 let ob = _mm256_loadu_ps(out_buf.as_ptr().add(j8));
-                _mm256_storeu_ps(out_buf.as_mut_ptr().add(j8),
-                    _mm256_fmadd_ps(s_new, q_v, ob));
+                _mm256_storeu_ps(
+                    out_buf.as_mut_ptr().add(j8),
+                    _mm256_fmadd_ps(s_new, q_v, ob),
+                );
             }
         }
 
         // Write output
         for j in 0..dv8 {
             let j8 = j * 8;
-            _mm256_storeu_ps(output.as_mut_ptr().add(o_base + j8),
-                _mm256_loadu_ps(out_buf.as_ptr().add(j8)));
+            _mm256_storeu_ps(
+                output.as_mut_ptr().add(o_base + j8),
+                _mm256_loadu_ps(out_buf.as_ptr().add(j8)),
+            );
         }
     }
 }
@@ -1910,45 +2064,101 @@ fn dispatch_matmul_free(
         (4, true) => {
             if parallel && w.rows > 64 {
                 matmul_int4_transposed_integer_parallel_tiled(
-                    &w.packed, &w.scales, act_int16, act_scales, output,
-                    w.cols, w.rows, w.group_size);
+                    &w.packed,
+                    &w.scales,
+                    act_int16,
+                    act_scales,
+                    output,
+                    w.cols,
+                    w.rows,
+                    w.group_size,
+                );
             } else {
                 matmul_int4_transposed_integer_tiled(
-                    &w.packed, &w.scales, act_int16, act_scales, output,
-                    w.cols, w.rows, w.group_size);
+                    &w.packed,
+                    &w.scales,
+                    act_int16,
+                    act_scales,
+                    output,
+                    w.cols,
+                    w.rows,
+                    w.group_size,
+                );
             }
         }
         (4, false) => {
             if parallel && w.rows > 64 {
                 matmul_int4_transposed_integer_parallel(
-                    &w.packed, &w.scales, act_int16, act_scales, output,
-                    w.cols, w.rows, w.group_size);
+                    &w.packed,
+                    &w.scales,
+                    act_int16,
+                    act_scales,
+                    output,
+                    w.cols,
+                    w.rows,
+                    w.group_size,
+                );
             } else {
                 matmul_int4_transposed_integer(
-                    &w.packed, &w.scales, act_int16, act_scales, output,
-                    w.cols, w.rows, w.group_size);
+                    &w.packed,
+                    &w.scales,
+                    act_int16,
+                    act_scales,
+                    output,
+                    w.cols,
+                    w.rows,
+                    w.group_size,
+                );
             }
         }
         (8, true) => {
             if parallel && w.rows > 64 {
                 matmul_int8_transposed_integer_parallel_tiled(
-                    &w.packed, &w.scales, act_int16, act_scales, output,
-                    w.cols, w.rows, w.group_size);
+                    &w.packed,
+                    &w.scales,
+                    act_int16,
+                    act_scales,
+                    output,
+                    w.cols,
+                    w.rows,
+                    w.group_size,
+                );
             } else {
                 matmul_int8_transposed_integer_tiled(
-                    &w.packed, &w.scales, act_int16, act_scales, output,
-                    w.cols, w.rows, w.group_size);
+                    &w.packed,
+                    &w.scales,
+                    act_int16,
+                    act_scales,
+                    output,
+                    w.cols,
+                    w.rows,
+                    w.group_size,
+                );
             }
         }
         (8, false) => {
             if parallel && w.rows > 64 {
                 matmul_int8_transposed_integer_parallel(
-                    &w.packed, &w.scales, act_int16, act_scales, output,
-                    w.cols, w.rows, w.group_size);
+                    &w.packed,
+                    &w.scales,
+                    act_int16,
+                    act_scales,
+                    output,
+                    w.cols,
+                    w.rows,
+                    w.group_size,
+                );
             } else {
                 matmul_int8_transposed_integer(
-                    &w.packed, &w.scales, act_int16, act_scales, output,
-                    w.cols, w.rows, w.group_size);
+                    &w.packed,
+                    &w.scales,
+                    act_int16,
+                    act_scales,
+                    output,
+                    w.cols,
+                    w.rows,
+                    w.group_size,
+                );
             }
         }
         _ => unreachable!(),
@@ -2019,7 +2229,9 @@ unsafe fn fast_silu_avx2(input: &mut [f32], n: usize) {
         let poly = _mm256_fmadd_ps(poly, f, c1);
         let poly = _mm256_fmadd_ps(poly, f, one);
         let pow2n = _mm256_castsi256_ps(_mm256_slli_epi32(
-            _mm256_add_epi32(ni, _mm256_set1_epi32(127)), 23));
+            _mm256_add_epi32(ni, _mm256_set1_epi32(127)),
+            23,
+        ));
         _mm256_mul_ps(poly, pow2n)
     }
 
@@ -2030,7 +2242,8 @@ unsafe fn fast_silu_avx2(input: &mut [f32], n: usize) {
         let neg_x = _mm256_sub_ps(_mm256_setzero_ps(), x);
         let clamped = _mm256_max_ps(
             _mm256_min_ps(neg_x, _mm256_set1_ps(20.0)),
-            _mm256_set1_ps(-20.0));
+            _mm256_set1_ps(-20.0),
+        );
         let exp_neg_x = fast_exp_avx2_inline(clamped);
         let denom = _mm256_add_ps(_mm256_set1_ps(1.0), exp_neg_x);
         let rcp = _mm256_rcp_ps(denom);
@@ -2072,7 +2285,9 @@ unsafe fn fast_silu_mul_avx2(gate: &[f32], up: &[f32], output: &mut [f32], n: us
         let poly = _mm256_fmadd_ps(poly, f, c1);
         let poly = _mm256_fmadd_ps(poly, f, one);
         let pow2n = _mm256_castsi256_ps(_mm256_slli_epi32(
-            _mm256_add_epi32(ni, _mm256_set1_epi32(127)), 23));
+            _mm256_add_epi32(ni, _mm256_set1_epi32(127)),
+            23,
+        ));
         _mm256_mul_ps(poly, pow2n)
     }
 
@@ -2083,7 +2298,8 @@ unsafe fn fast_silu_mul_avx2(gate: &[f32], up: &[f32], output: &mut [f32], n: us
         let neg_g = _mm256_sub_ps(_mm256_setzero_ps(), g);
         let clamped = _mm256_max_ps(
             _mm256_min_ps(neg_g, _mm256_set1_ps(20.0)),
-            _mm256_set1_ps(-20.0));
+            _mm256_set1_ps(-20.0),
+        );
         let exp_neg_g = fast_exp_avx2_inline(clamped);
         let denom = _mm256_add_ps(_mm256_set1_ps(1.0), exp_neg_g);
         let rcp = _mm256_rcp_ps(denom);
@@ -2106,12 +2322,17 @@ enum DecodeAttnConfig {
         in_proj_qkvz_wid: usize,
         in_proj_ba_wid: usize,
         out_proj_wid: usize,
-        conv_weight: Vec<f32>,    // [conv_dim * kernel_dim]
-        a_log: Vec<f32>,          // [nv]
-        dt_bias: Vec<f32>,        // [nv]
-        norm_weight: Vec<f32>,    // [nv * dv] (expanded)
-        nk: usize, nv: usize, dk: usize, dv: usize, hr: usize,
-        kernel_dim: usize, conv_dim: usize,
+        conv_weight: Vec<f32>, // [conv_dim * kernel_dim]
+        a_log: Vec<f32>,       // [nv]
+        dt_bias: Vec<f32>,     // [nv]
+        norm_weight: Vec<f32>, // [nv * dv] (expanded)
+        nk: usize,
+        nv: usize,
+        dk: usize,
+        dv: usize,
+        hr: usize,
+        kernel_dim: usize,
+        conv_dim: usize,
         scale: f32,
     },
     GQA {
@@ -2126,27 +2347,27 @@ enum DecodeAttnConfig {
         num_kv_heads: usize,
         head_dim: usize,
         sm_scale: f32,
-        fused_qkv_wid: Option<usize>,  // fused Q+K+V weight for single dispatch
+        fused_qkv_wid: Option<usize>, // fused Q+K+V weight for single dispatch
     },
     /// Multi-head Latent Attention (DeepSeek V2/V3, Kimi K2.5).
     /// KV is compressed into a low-rank latent vector + rope embedding.
     MLA {
         // Quantized projection weights (stored as TransposedWeight IDs)
-        kv_a_proj_wid: usize,  // [kv_lora_rank + rope_dim, hidden_size]
-        o_proj_wid: usize,     // [hidden_size, num_heads * v_head_dim]
+        kv_a_proj_wid: usize, // [kv_lora_rank + rope_dim, hidden_size]
+        o_proj_wid: usize,    // [hidden_size, num_heads * v_head_dim]
         // Q path: either direct or LoRA
-        q_proj_wid: Option<usize>,      // [num_heads * head_dim, hidden_size]
-        q_a_proj_wid: Option<usize>,    // [q_lora_rank, hidden_size]
-        q_b_proj_wid: Option<usize>,    // [num_heads * head_dim, q_lora_rank]
+        q_proj_wid: Option<usize>,   // [num_heads * head_dim, hidden_size]
+        q_a_proj_wid: Option<usize>, // [q_lora_rank, hidden_size]
+        q_b_proj_wid: Option<usize>, // [num_heads * head_dim, q_lora_rank]
         // BF16 per-head projection matrices (stored as f32 for compute)
-        w_kc: Vec<f32>,         // [num_heads, qk_nope_dim, kv_lora_rank]
-        w_vc: Vec<f32>,         // [num_heads, v_head_dim, kv_lora_rank]
+        w_kc: Vec<f32>, // [num_heads, qk_nope_dim, kv_lora_rank]
+        w_vc: Vec<f32>, // [num_heads, v_head_dim, kv_lora_rank]
         // Norm weights
-        kv_a_norm: Vec<f32>,    // [kv_lora_rank]
-        q_a_norm: Option<Vec<f32>>,  // [q_lora_rank] (only if LoRA)
+        kv_a_norm: Vec<f32>,        // [kv_lora_rank]
+        q_a_norm: Option<Vec<f32>>, // [q_lora_rank] (only if LoRA)
         // MLA-specific RoPE (YaRN) — separate from GQA rope
-        rope_cos: Vec<f32>,     // [max_seq, rope_dim/2]
-        rope_sin: Vec<f32>,     // [max_seq, rope_dim/2]
+        rope_cos: Vec<f32>, // [max_seq, rope_dim/2]
+        rope_sin: Vec<f32>, // [max_seq, rope_dim/2]
         // Dimensions
         num_heads: usize,
         kv_lora_rank: usize,
@@ -2164,7 +2385,7 @@ enum DecodeMlpConfig {
         moe_layer_idx: usize,
         shared_gate_up_wid: Option<usize>,
         shared_down_wid: Option<usize>,
-        shared_gate_wid: Option<usize>,  // shared_expert_gate
+        shared_gate_wid: Option<usize>, // shared_expert_gate
     },
     Dense {
         gate_proj_wid: usize,
@@ -2231,29 +2452,29 @@ struct DecodeGraph {
     la_beta_buf: Vec<f32>,
     la_recur_out: Vec<f32>,
     la_gated_out: Vec<f32>,
-    la_mixed_qkv: Vec<f32>,  // scratch for decode_la_conv (avoids heap alloc per call)
-    la_conv_out: Vec<f32>,   // scratch for decode_la_conv
+    la_mixed_qkv: Vec<f32>, // scratch for decode_la_conv (avoids heap alloc per call)
+    la_conv_out: Vec<f32>,  // scratch for decode_la_conv
 
     // GQA scratch
     gqa_q_buf: Vec<f32>,
     gqa_k_buf: Vec<f32>,
     gqa_v_buf: Vec<f32>,
-    gqa_qkv_buf: Vec<f32>,  // fused Q+K+V output buffer
+    gqa_qkv_buf: Vec<f32>, // fused Q+K+V output buffer
     gqa_scores: Vec<f32>,
     gqa_attn_out: Vec<f32>,
 
     // MLA scratch
-    mla_kv_out: Vec<f32>,           // kv_a_proj output [kv_lora_rank + rope_dim]
-    mla_kv_compressed: Vec<f32>,    // normed [kv_lora_rank]
-    mla_q_full: Vec<f32>,           // [num_heads * head_dim]
-    mla_q_compressed: Vec<f32>,     // q_a_proj output [q_lora_rank] (LoRA path)
-    mla_q_absorbed: Vec<f32>,       // [num_heads * kv_lora_rank] after w_kc absorption
-    mla_attn_scores: Vec<f32>,      // [num_heads * kv_max_seq]
-    mla_attn_out: Vec<f32>,         // [num_heads * kv_lora_rank]
-    mla_v_projected: Vec<f32>,      // [num_heads * v_head_dim]
+    mla_kv_out: Vec<f32>,        // kv_a_proj output [kv_lora_rank + rope_dim]
+    mla_kv_compressed: Vec<f32>, // normed [kv_lora_rank]
+    mla_q_full: Vec<f32>,        // [num_heads * head_dim]
+    mla_q_compressed: Vec<f32>,  // q_a_proj output [q_lora_rank] (LoRA path)
+    mla_q_absorbed: Vec<f32>,    // [num_heads * kv_lora_rank] after w_kc absorption
+    mla_attn_scores: Vec<f32>,   // [num_heads * kv_max_seq]
+    mla_attn_out: Vec<f32>,      // [num_heads * kv_lora_rank]
+    mla_v_projected: Vec<f32>,   // [num_heads * v_head_dim]
     // MLA KV cache: per-layer pointers to flat [max_seq, dim] f32 arrays
-    mla_ckv_ptrs: Vec<usize>,       // compressed KV [max_seq * kv_lora_rank] per layer
-    mla_kpe_ptrs: Vec<usize>,       // rope K position [max_seq * rope_dim] per layer
+    mla_ckv_ptrs: Vec<usize>, // compressed KV [max_seq * kv_lora_rank] per layer
+    mla_kpe_ptrs: Vec<usize>, // rope K position [max_seq * rope_dim] per layer
 
     // MLP scratch
     mlp_gate_up: Vec<f32>,
@@ -2356,8 +2577,12 @@ impl CpuDecodeStore {
             parallel: self.parallel,
             layers: Vec::with_capacity(num_layers),
             embedding_ptr,
-            rope_cos_ptr: 0, rope_sin_ptr: 0, rope_half_dim: 0, max_rope_seq: 0,
-            seq_len: 0, kv_max_seq: 0,
+            rope_cos_ptr: 0,
+            rope_sin_ptr: 0,
+            rope_half_dim: 0,
+            max_rope_seq: 0,
+            seq_len: 0,
+            kv_max_seq: 0,
             kv_k_ptrs: vec![0; num_layers],
             kv_v_ptrs: vec![0; num_layers],
             conv_state_ptrs: vec![0; num_layers],
@@ -2365,30 +2590,50 @@ impl CpuDecodeStore {
             hidden: vec![0.0; hidden_size],
             residual: vec![0.0; hidden_size],
             // Scratch — sized during finalize
-            la_qkvz_buf: Vec::new(), la_ba_buf: Vec::new(),
-            la_q_buf: Vec::new(), la_k_buf: Vec::new(),
-            la_v_buf: Vec::new(), la_z_buf: Vec::new(),
-            la_g_buf: Vec::new(), la_beta_buf: Vec::new(),
-            la_recur_out: Vec::new(), la_gated_out: Vec::new(),
-            la_mixed_qkv: Vec::new(), la_conv_out: Vec::new(),
-            gqa_q_buf: Vec::new(), gqa_k_buf: Vec::new(), gqa_v_buf: Vec::new(),
+            la_qkvz_buf: Vec::new(),
+            la_ba_buf: Vec::new(),
+            la_q_buf: Vec::new(),
+            la_k_buf: Vec::new(),
+            la_v_buf: Vec::new(),
+            la_z_buf: Vec::new(),
+            la_g_buf: Vec::new(),
+            la_beta_buf: Vec::new(),
+            la_recur_out: Vec::new(),
+            la_gated_out: Vec::new(),
+            la_mixed_qkv: Vec::new(),
+            la_conv_out: Vec::new(),
+            gqa_q_buf: Vec::new(),
+            gqa_k_buf: Vec::new(),
+            gqa_v_buf: Vec::new(),
             gqa_qkv_buf: Vec::new(),
-            gqa_scores: Vec::new(), gqa_attn_out: Vec::new(),
-            mla_kv_out: Vec::new(), mla_kv_compressed: Vec::new(),
-            mla_q_full: Vec::new(), mla_q_compressed: Vec::new(),
-            mla_q_absorbed: Vec::new(), mla_attn_scores: Vec::new(),
-            mla_attn_out: Vec::new(), mla_v_projected: Vec::new(),
-            mla_ckv_ptrs: vec![0; num_layers], mla_kpe_ptrs: vec![0; num_layers],
-            mlp_gate_up: Vec::new(), mlp_hidden_buf: Vec::new(),
-            moe_store: None, moe_scratch: None, moe_scratch_pool: Vec::new(),
+            gqa_scores: Vec::new(),
+            gqa_attn_out: Vec::new(),
+            mla_kv_out: Vec::new(),
+            mla_kv_compressed: Vec::new(),
+            mla_q_full: Vec::new(),
+            mla_q_compressed: Vec::new(),
+            mla_q_absorbed: Vec::new(),
+            mla_attn_scores: Vec::new(),
+            mla_attn_out: Vec::new(),
+            mla_v_projected: Vec::new(),
+            mla_ckv_ptrs: vec![0; num_layers],
+            mla_kpe_ptrs: vec![0; num_layers],
+            mlp_gate_up: Vec::new(),
+            mlp_hidden_buf: Vec::new(),
+            moe_store: None,
+            moe_scratch: None,
+            moe_scratch_pool: Vec::new(),
             moe_output: vec![0.0; hidden_size],
             moe_act_bf16: vec![0u16; hidden_size],
             shared_out: vec![0.0; hidden_size],
             moe_topk_ids: vec![0i32; topk.max(1)],
             moe_topk_weights: vec![0.0f32; topk.max(1)],
             moe_parallel: true,
-            route_logits: Vec::new(), route_scores: Vec::new(), route_corrected: Vec::new(),
-            act_int16: Vec::new(), act_scales: Vec::new(),
+            route_logits: Vec::new(),
+            route_scores: Vec::new(),
+            route_corrected: Vec::new(),
+            act_int16: Vec::new(),
+            act_scales: Vec::new(),
             group_size: gs,
             // PFL — initialized properly in finalize_decode once we know num_experts
             pfl: None,
@@ -2398,19 +2643,42 @@ impl CpuDecodeStore {
             pfl_current_experts: Vec::with_capacity(32),
             pfl_hits: 0,
             pfl_predictions: 0,
-            timing_enabled: std::env::var("KRASIS_CPU_DECODE_TIMING").map(|v| v == "1").unwrap_or(false),
+            timing_enabled: std::env::var("KRASIS_CPU_DECODE_TIMING")
+                .map(|v| v == "1")
+                .unwrap_or(false),
             timing_step_count: 0,
             timing_report_interval: std::env::var("KRASIS_TIMING_INTERVAL")
-                .ok().and_then(|v| v.parse().ok()).unwrap_or(20),
-            t_norm: 0.0, t_la_proj: 0.0, t_la_conv: 0.0, t_la_recur: 0.0,
-            t_la_gate_norm: 0.0, t_la_out_proj: 0.0,
-            t_gqa_proj: 0.0, t_gqa_rope: 0.0, t_gqa_attn: 0.0, t_gqa_o_proj: 0.0,
-            t_mla_proj: 0.0, t_mla_rope: 0.0, t_mla_attn: 0.0, t_mla_o_proj: 0.0,
-            t_moe_route: 0.0, t_moe_experts: 0.0, t_moe_shared: 0.0,
-            t_dense_mlp: 0.0, t_lm_head: 0.0, t_total: 0.0,
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(20),
+            t_norm: 0.0,
+            t_la_proj: 0.0,
+            t_la_conv: 0.0,
+            t_la_recur: 0.0,
+            t_la_gate_norm: 0.0,
+            t_la_out_proj: 0.0,
+            t_gqa_proj: 0.0,
+            t_gqa_rope: 0.0,
+            t_gqa_attn: 0.0,
+            t_gqa_o_proj: 0.0,
+            t_mla_proj: 0.0,
+            t_mla_rope: 0.0,
+            t_mla_attn: 0.0,
+            t_mla_o_proj: 0.0,
+            t_moe_route: 0.0,
+            t_moe_experts: 0.0,
+            t_moe_shared: 0.0,
+            t_dense_mlp: 0.0,
+            t_lm_head: 0.0,
+            t_total: 0.0,
         }));
-        log::info!("DecodeGraph configured: hidden={}, layers={}, vocab={}, topk={}",
-            hidden_size, num_layers, vocab_size, topk);
+        log::info!(
+            "DecodeGraph configured: hidden={}, layers={}, vocab={}, topk={}",
+            hidden_size,
+            num_layers,
+            vocab_size,
+            topk
+        );
         Ok(())
     }
 
@@ -2428,32 +2696,47 @@ impl CpuDecodeStore {
         a_log_ptr: usize,
         dt_bias_ptr: usize,
         norm_weight_ptr: usize,
-        nk: usize, nv: usize, dk: usize, dv: usize, hr: usize,
+        nk: usize,
+        nv: usize,
+        dk: usize,
+        dv: usize,
+        hr: usize,
         kernel_dim: usize,
         scale: f32,
     ) -> PyResult<()> {
-        let g = self.decode_graph.as_mut()
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure_decode first"))?;
+        let g = self.decode_graph.as_mut().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("Call configure_decode first")
+        })?;
         let conv_dim = nk * dk * 2 + nv * dv;
         let conv_weight: Vec<f32> = unsafe {
-            std::slice::from_raw_parts(conv_weight_ptr as *const f32, conv_dim * kernel_dim).to_vec()
+            std::slice::from_raw_parts(conv_weight_ptr as *const f32, conv_dim * kernel_dim)
+                .to_vec()
         };
-        let a_log: Vec<f32> = unsafe {
-            std::slice::from_raw_parts(a_log_ptr as *const f32, nv).to_vec()
-        };
-        let dt_bias: Vec<f32> = unsafe {
-            std::slice::from_raw_parts(dt_bias_ptr as *const f32, nv).to_vec()
-        };
-        let norm_weight: Vec<f32> = unsafe {
-            std::slice::from_raw_parts(norm_weight_ptr as *const f32, nv * dv).to_vec()
-        };
+        let a_log: Vec<f32> =
+            unsafe { std::slice::from_raw_parts(a_log_ptr as *const f32, nv).to_vec() };
+        let dt_bias: Vec<f32> =
+            unsafe { std::slice::from_raw_parts(dt_bias_ptr as *const f32, nv).to_vec() };
+        let norm_weight: Vec<f32> =
+            unsafe { std::slice::from_raw_parts(norm_weight_ptr as *const f32, nv * dv).to_vec() };
         g.layers.push(DecodeLayer {
             input_norm_id,
             post_attn_norm_id,
             attn: DecodeAttnConfig::LinearAttention {
-                in_proj_qkvz_wid, in_proj_ba_wid, out_proj_wid,
-                conv_weight, a_log, dt_bias, norm_weight,
-                nk, nv, dk, dv, hr, kernel_dim, conv_dim, scale,
+                in_proj_qkvz_wid,
+                in_proj_ba_wid,
+                out_proj_wid,
+                conv_weight,
+                a_log,
+                dt_bias,
+                norm_weight,
+                nk,
+                nv,
+                dk,
+                dv,
+                hr,
+                kernel_dim,
+                conv_dim,
+                scale,
             },
             mlp: DecodeMlpConfig::None,
         });
@@ -2481,20 +2764,38 @@ impl CpuDecodeStore {
         head_dim: usize,
         sm_scale: f32,
     ) -> PyResult<()> {
-        let g = self.decode_graph.as_mut()
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure_decode first"))?;
+        let g = self.decode_graph.as_mut().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("Call configure_decode first")
+        })?;
         let q_norm = if q_norm_len > 0 {
-            Some(unsafe { std::slice::from_raw_parts(q_norm_ptr as *const f32, q_norm_len).to_vec() })
-        } else { None };
+            Some(unsafe {
+                std::slice::from_raw_parts(q_norm_ptr as *const f32, q_norm_len).to_vec()
+            })
+        } else {
+            None
+        };
         let k_norm = if k_norm_len > 0 {
-            Some(unsafe { std::slice::from_raw_parts(k_norm_ptr as *const f32, k_norm_len).to_vec() })
-        } else { None };
+            Some(unsafe {
+                std::slice::from_raw_parts(k_norm_ptr as *const f32, k_norm_len).to_vec()
+            })
+        } else {
+            None
+        };
         g.layers.push(DecodeLayer {
             input_norm_id,
             post_attn_norm_id,
             attn: DecodeAttnConfig::GQA {
-                q_proj_wid, k_proj_wid, v_proj_wid, o_proj_wid,
-                q_norm, k_norm, gated, num_heads, num_kv_heads, head_dim, sm_scale,
+                q_proj_wid,
+                k_proj_wid,
+                v_proj_wid,
+                o_proj_wid,
+                q_norm,
+                k_norm,
+                gated,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+                sm_scale,
                 fused_qkv_wid: None,
             },
             mlp: DecodeMlpConfig::None,
@@ -2520,12 +2821,18 @@ impl CpuDecodeStore {
         q_proj_wid: Option<usize>,
         q_a_proj_wid: Option<usize>,
         q_b_proj_wid: Option<usize>,
-        w_kc_ptr: usize, w_kc_len: usize,
-        w_vc_ptr: usize, w_vc_len: usize,
-        kv_a_norm_ptr: usize, kv_a_norm_len: usize,
-        q_a_norm_ptr: usize, q_a_norm_len: usize,
-        rope_cos_ptr: usize, rope_sin_ptr: usize,
-        rope_len: usize, rope_max_seq: usize,
+        w_kc_ptr: usize,
+        w_kc_len: usize,
+        w_vc_ptr: usize,
+        w_vc_len: usize,
+        kv_a_norm_ptr: usize,
+        kv_a_norm_len: usize,
+        q_a_norm_ptr: usize,
+        q_a_norm_len: usize,
+        rope_cos_ptr: usize,
+        rope_sin_ptr: usize,
+        rope_len: usize,
+        rope_max_seq: usize,
         num_heads: usize,
         kv_lora_rank: usize,
         qk_nope_dim: usize,
@@ -2533,41 +2840,66 @@ impl CpuDecodeStore {
         v_head_dim: usize,
         sm_scale: f32,
     ) -> PyResult<()> {
-        let g = self.decode_graph.as_mut()
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure_decode first"))?;
+        let g = self.decode_graph.as_mut().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("Call configure_decode first")
+        })?;
 
         // Copy BF16 w_kc/w_vc to f32
         let w_kc_bf16 = unsafe { std::slice::from_raw_parts(w_kc_ptr as *const u16, w_kc_len) };
-        let w_kc: Vec<f32> = w_kc_bf16.iter().map(|&b| crate::weights::marlin::bf16_to_f32(b)).collect();
+        let w_kc: Vec<f32> = w_kc_bf16
+            .iter()
+            .map(|&b| crate::weights::marlin::bf16_to_f32(b))
+            .collect();
         let w_vc_bf16 = unsafe { std::slice::from_raw_parts(w_vc_ptr as *const u16, w_vc_len) };
-        let w_vc: Vec<f32> = w_vc_bf16.iter().map(|&b| crate::weights::marlin::bf16_to_f32(b)).collect();
+        let w_vc: Vec<f32> = w_vc_bf16
+            .iter()
+            .map(|&b| crate::weights::marlin::bf16_to_f32(b))
+            .collect();
 
         // Copy norm weights
         let kv_a_norm = unsafe {
             std::slice::from_raw_parts(kv_a_norm_ptr as *const f32, kv_a_norm_len).to_vec()
         };
         let q_a_norm = if q_a_norm_len > 0 {
-            Some(unsafe { std::slice::from_raw_parts(q_a_norm_ptr as *const f32, q_a_norm_len).to_vec() })
-        } else { None };
+            Some(unsafe {
+                std::slice::from_raw_parts(q_a_norm_ptr as *const f32, q_a_norm_len).to_vec()
+            })
+        } else {
+            None
+        };
 
         // Copy RoPE tables (already f32 from Python)
         let rope_half = qk_rope_dim / 2;
         let rope_cos = unsafe {
-            std::slice::from_raw_parts(rope_cos_ptr as *const f32, rope_max_seq * rope_half).to_vec()
+            std::slice::from_raw_parts(rope_cos_ptr as *const f32, rope_max_seq * rope_half)
+                .to_vec()
         };
         let rope_sin = unsafe {
-            std::slice::from_raw_parts(rope_sin_ptr as *const f32, rope_max_seq * rope_half).to_vec()
+            std::slice::from_raw_parts(rope_sin_ptr as *const f32, rope_max_seq * rope_half)
+                .to_vec()
         };
 
         g.layers.push(DecodeLayer {
             input_norm_id,
             post_attn_norm_id,
             attn: DecodeAttnConfig::MLA {
-                kv_a_proj_wid, o_proj_wid,
-                q_proj_wid, q_a_proj_wid, q_b_proj_wid,
-                w_kc, w_vc, kv_a_norm, q_a_norm,
-                rope_cos, rope_sin,
-                num_heads, kv_lora_rank, qk_nope_dim, qk_rope_dim, v_head_dim, sm_scale,
+                kv_a_proj_wid,
+                o_proj_wid,
+                q_proj_wid,
+                q_a_proj_wid,
+                q_b_proj_wid,
+                w_kc,
+                w_vc,
+                kv_a_norm,
+                q_a_norm,
+                rope_cos,
+                rope_sin,
+                num_heads,
+                kv_lora_rank,
+                qk_nope_dim,
+                qk_rope_dim,
+                v_head_dim,
+                sm_scale,
             },
             mlp: DecodeMlpConfig::None,
         });
@@ -2585,11 +2917,15 @@ impl CpuDecodeStore {
         shared_down_wid: Option<usize>,
         shared_gate_wid: Option<usize>,
     ) -> PyResult<()> {
-        let g = self.decode_graph.as_mut()
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure_decode first"))?;
+        let g = self.decode_graph.as_mut().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("Call configure_decode first")
+        })?;
         g.layers[layer_idx].mlp = DecodeMlpConfig::MoE {
-            route_id, moe_layer_idx,
-            shared_gate_up_wid, shared_down_wid, shared_gate_wid,
+            route_id,
+            moe_layer_idx,
+            shared_gate_up_wid,
+            shared_down_wid,
+            shared_gate_wid,
         };
         Ok(())
     }
@@ -2603,10 +2939,13 @@ impl CpuDecodeStore {
         up_proj_wid: usize,
         down_proj_wid: usize,
     ) -> PyResult<()> {
-        let g = self.decode_graph.as_mut()
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure_decode first"))?;
+        let g = self.decode_graph.as_mut().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("Call configure_decode first")
+        })?;
         g.layers[layer_idx].mlp = DecodeMlpConfig::Dense {
-            gate_proj_wid, up_proj_wid, down_proj_wid,
+            gate_proj_wid,
+            up_proj_wid,
+            down_proj_wid,
         };
         Ok(())
     }
@@ -2620,8 +2959,9 @@ impl CpuDecodeStore {
         half_dim: usize,
         max_seq: usize,
     ) -> PyResult<()> {
-        let g = self.decode_graph.as_mut()
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure_decode first"))?;
+        let g = self.decode_graph.as_mut().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("Call configure_decode first")
+        })?;
         g.rope_cos_ptr = cos_ptr;
         g.rope_sin_ptr = sin_ptr;
         g.rope_half_dim = half_dim;
@@ -2630,11 +2970,16 @@ impl CpuDecodeStore {
     }
 
     /// Share MoE weight store from KrasisEngine.
-    pub fn set_moe_store(&mut self, engine: PyRefMut<'_, crate::moe::KrasisEngine>) -> PyResult<()> {
-        let store = engine.get_weight_store()
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Engine has no weight store"))?;
-        let g = self.decode_graph.as_mut()
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure_decode first"))?;
+    pub fn set_moe_store(
+        &mut self,
+        engine: PyRefMut<'_, crate::moe::KrasisEngine>,
+    ) -> PyResult<()> {
+        let store = engine.get_weight_store().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("Engine has no weight store")
+        })?;
+        let g = self.decode_graph.as_mut().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("Call configure_decode first")
+        })?;
         let cfg = &store.config;
         let hidden = cfg.hidden_size;
         let intermediate = cfg.moe_intermediate_size;
@@ -2642,22 +2987,33 @@ impl CpuDecodeStore {
         let topk = g.topk;
         g.moe_parallel = engine.get_parallel();
         g.moe_scratch = Some(ExpertScratch::new(hidden, intermediate, gs));
-        g.moe_scratch_pool = (0..topk).map(|_| ExpertScratch::new(hidden, intermediate, gs)).collect();
+        g.moe_scratch_pool = (0..topk)
+            .map(|_| ExpertScratch::new(hidden, intermediate, gs))
+            .collect();
         g.moe_store = Some(store);
-        log::info!("DecodeGraph MoE store set: hidden={}, intermediate={}, topk={}", hidden, intermediate, topk);
+        log::info!(
+            "DecodeGraph MoE store set: hidden={}, intermediate={}, topk={}",
+            hidden,
+            intermediate,
+            topk
+        );
         Ok(())
     }
 
     /// Repack all weights (non-expert + expert) to tiled layout for better memory access.
     /// Call after all weights are loaded but before running decode.
     pub fn repack_to_tiled(&mut self) -> PyResult<()> {
-        use crate::kernel::avx2::{repack_tiled_int4_packed, repack_tiled_int8_packed, repack_tiled_scales};
+        use crate::kernel::avx2::{
+            repack_tiled_int4_packed, repack_tiled_int8_packed, repack_tiled_scales,
+        };
         let t0 = std::time::Instant::now();
 
         // Repack non-expert TransposedWeights
         let mut n_weights = 0usize;
         for w in self.weights.iter_mut() {
-            if w.tiled { continue; }
+            if w.tiled {
+                continue;
+            }
             let num_groups = w.cols / w.group_size;
             let new_packed = if w.num_bits == 4 {
                 repack_tiled_int4_packed(&w.packed, w.cols, w.rows)
@@ -2678,7 +3034,9 @@ impl CpuDecodeStore {
                 if let Some(ws) = Arc::get_mut(arc) {
                     for layer in ws.experts_cpu.iter_mut() {
                         for expert in layer.iter_mut() {
-                            if expert.tiled || expert.num_bits == 16 { continue; }
+                            if expert.tiled || expert.num_bits == 16 {
+                                continue;
+                            }
                             let h = expert.hidden_size;
                             let m = expert.intermediate_size;
                             let gs = expert.group_size;
@@ -2690,7 +3048,8 @@ impl CpuDecodeStore {
                             } else {
                                 repack_tiled_int8_packed(&expert.w13_packed, h, two_m)
                             };
-                            expert.w13_scales = repack_tiled_scales(&expert.w13_scales, h / gs, two_m);
+                            expert.w13_scales =
+                                repack_tiled_scales(&expert.w13_scales, h / gs, two_m);
 
                             // w2: K=intermediate_size, N=hidden_size
                             expert.w2_packed = if expert.w2_bits == 4 {
@@ -2710,8 +3069,12 @@ impl CpuDecodeStore {
             }
         }
 
-        log::info!("Repacked to tiled layout: {} weights + {} experts in {:.1}s",
-            n_weights, n_experts, t0.elapsed().as_secs_f64());
+        log::info!(
+            "Repacked to tiled layout: {} weights + {} experts in {:.1}s",
+            n_weights,
+            n_experts,
+            t0.elapsed().as_secs_f64()
+        );
         Ok(())
     }
 
@@ -2727,7 +3090,8 @@ impl CpuDecodeStore {
         }
         if !self.mmap_regions.is_empty() {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                "Weights already consolidated into mmap"));
+                "Weights already consolidated into mmap",
+            ));
         }
 
         let t0 = std::time::Instant::now();
@@ -2740,8 +3104,12 @@ impl CpuDecodeStore {
             return Ok(());
         }
 
-        log::info!("Consolidating {} weights into contiguous mmap: {:.1} MB packed + {:.1} MB scales",
-            self.weights.len(), total_packed_bytes as f64 / 1e6, total_scales_bytes as f64 / 1e6);
+        log::info!(
+            "Consolidating {} weights into contiguous mmap: {:.1} MB packed + {:.1} MB scales",
+            self.weights.len(),
+            total_packed_bytes as f64 / 1e6,
+            total_scales_bytes as f64 / 1e6
+        );
 
         // On multi-NUMA systems, set interleave policy so pages spread across
         // all memory controllers. Maximizes aggregate bandwidth for decode reads.
@@ -2754,28 +3122,44 @@ impl CpuDecodeStore {
 
         // Allocate contiguous mmap regions
         let packed_base = unsafe {
-            libc::mmap(std::ptr::null_mut(), total_packed_bytes,
+            libc::mmap(
+                std::ptr::null_mut(),
+                total_packed_bytes,
                 libc::PROT_READ | libc::PROT_WRITE,
                 libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                -1, 0)
+                -1,
+                0,
+            )
         };
         if packed_base == libc::MAP_FAILED {
-            if interleaved { crate::numa::reset_mempolicy(); }
+            if interleaved {
+                crate::numa::reset_mempolicy();
+            }
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                "mmap failed for packed weight consolidation"));
+                "mmap failed for packed weight consolidation",
+            ));
         }
 
         let scales_base = unsafe {
-            libc::mmap(std::ptr::null_mut(), total_scales_bytes,
+            libc::mmap(
+                std::ptr::null_mut(),
+                total_scales_bytes,
                 libc::PROT_READ | libc::PROT_WRITE,
                 libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                -1, 0)
+                -1,
+                0,
+            )
         };
         if scales_base == libc::MAP_FAILED {
-            unsafe { libc::munmap(packed_base, total_packed_bytes); }
-            if interleaved { crate::numa::reset_mempolicy(); }
+            unsafe {
+                libc::munmap(packed_base, total_packed_bytes);
+            }
+            if interleaved {
+                crate::numa::reset_mempolicy();
+            }
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                "mmap failed for scales consolidation"));
+                "mmap failed for scales consolidation",
+            ));
         }
 
         // Request huge pages
@@ -2806,10 +3190,7 @@ impl CpuDecodeStore {
             let old_packed = std::mem::take(&mut w.packed);
             drop(old_packed);
             w.packed = unsafe {
-                Vec::from_raw_parts(
-                    (packed_base as *mut u32).add(p_off / 4),
-                    pk_len, pk_len,
-                )
+                Vec::from_raw_parts((packed_base as *mut u32).add(p_off / 4), pk_len, pk_len)
             };
             p_off += pk_bytes;
 
@@ -2824,10 +3205,7 @@ impl CpuDecodeStore {
             let old_scales = std::mem::take(&mut w.scales);
             drop(old_scales);
             w.scales = unsafe {
-                Vec::from_raw_parts(
-                    (scales_base as *mut u16).add(s_off / 2),
-                    sc_len, sc_len,
-                )
+                Vec::from_raw_parts((scales_base as *mut u16).add(s_off / 2), sc_len, sc_len)
             };
             s_off += sc_bytes;
         }
@@ -2838,22 +3216,30 @@ impl CpuDecodeStore {
         // Reset NUMA policy now that pages are placed
         if interleaved {
             crate::numa::reset_mempolicy();
-            log::info!("NUMA: interleaved weight consolidation across {} nodes", topo.num_nodes);
+            log::info!(
+                "NUMA: interleaved weight consolidation across {} nodes",
+                topo.num_nodes
+            );
         }
 
         // Track mmap regions for cleanup (stored as usize for Send/Sync)
-        self.mmap_regions.push((packed_base as usize, total_packed_bytes));
-        self.mmap_regions.push((scales_base as usize, total_scales_bytes));
+        self.mmap_regions
+            .push((packed_base as usize, total_packed_bytes));
+        self.mmap_regions
+            .push((scales_base as usize, total_scales_bytes));
 
-        log::info!("Consolidated weights into mmap with MADV_HUGEPAGE in {:.1}ms",
-            t0.elapsed().as_secs_f64() * 1000.0);
+        log::info!(
+            "Consolidated weights into mmap with MADV_HUGEPAGE in {:.1}ms",
+            t0.elapsed().as_secs_f64() * 1000.0
+        );
         Ok(())
     }
 
     /// Finalize decode graph — allocate scratch buffers based on layer configs.
     pub fn finalize_decode(&mut self) -> PyResult<()> {
-        let g = self.decode_graph.as_mut()
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure_decode first"))?;
+        let g = self.decode_graph.as_mut().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("Call configure_decode first")
+        })?;
         let hs = g.hidden_size;
         let gs = g.group_size;
         // Find max dimensions across layers
@@ -2872,8 +3258,19 @@ impl CpuDecodeStore {
 
         for layer in &g.layers {
             match &layer.attn {
-                DecodeAttnConfig::LinearAttention { nk, nv, dk, dv, hr, kernel_dim: _, conv_dim,
-                    in_proj_qkvz_wid, in_proj_ba_wid, out_proj_wid, .. } => {
+                DecodeAttnConfig::LinearAttention {
+                    nk,
+                    nv,
+                    dk,
+                    dv,
+                    hr,
+                    kernel_dim: _,
+                    conv_dim,
+                    in_proj_qkvz_wid,
+                    in_proj_ba_wid,
+                    out_proj_wid,
+                    ..
+                } => {
                     let group_dim = 2 * dk + 2 * dv * hr;
                     max_qkvz = max_qkvz.max(nk * group_dim);
                     max_ba = max_ba.max(nk * 2 * hr);
@@ -2885,9 +3282,23 @@ impl CpuDecodeStore {
                     max_k = max_k.max(self.weights[*in_proj_ba_wid].cols);
                     max_k = max_k.max(self.weights[*out_proj_wid].cols);
                 }
-                DecodeAttnConfig::GQA { num_heads, num_kv_heads, head_dim, gated,
-                    q_proj_wid, k_proj_wid, v_proj_wid, o_proj_wid, fused_qkv_wid, .. } => {
-                    let q_size = if *gated { num_heads * head_dim * 2 } else { num_heads * head_dim };
+                DecodeAttnConfig::GQA {
+                    num_heads,
+                    num_kv_heads,
+                    head_dim,
+                    gated,
+                    q_proj_wid,
+                    k_proj_wid,
+                    v_proj_wid,
+                    o_proj_wid,
+                    fused_qkv_wid,
+                    ..
+                } => {
+                    let q_size = if *gated {
+                        num_heads * head_dim * 2
+                    } else {
+                        num_heads * head_dim
+                    };
                     max_q_proj = max_q_proj.max(q_size);
                     max_kv_proj = max_kv_proj.max(num_kv_heads * head_dim);
                     max_heads = max_heads.max(*num_heads);
@@ -2901,9 +3312,19 @@ impl CpuDecodeStore {
                     }
                     max_k = max_k.max(self.weights[*o_proj_wid].cols);
                 }
-                DecodeAttnConfig::MLA { kv_a_proj_wid, o_proj_wid,
-                    q_proj_wid, q_a_proj_wid, q_b_proj_wid,
-                    num_heads, kv_lora_rank, qk_nope_dim, qk_rope_dim, v_head_dim, .. } => {
+                DecodeAttnConfig::MLA {
+                    kv_a_proj_wid,
+                    o_proj_wid,
+                    q_proj_wid,
+                    q_a_proj_wid,
+                    q_b_proj_wid,
+                    num_heads,
+                    kv_lora_rank,
+                    qk_nope_dim,
+                    qk_rope_dim,
+                    v_head_dim,
+                    ..
+                } => {
                     max_heads = max_heads.max(*num_heads);
                     max_heads_hd = max_heads_hd.max(num_heads * v_head_dim);
                     max_k = max_k.max(self.weights[*kv_a_proj_wid].cols);
@@ -2920,7 +3341,11 @@ impl CpuDecodeStore {
                 }
             }
             match &layer.mlp {
-                DecodeMlpConfig::MoE { shared_gate_up_wid, shared_down_wid, .. } => {
+                DecodeMlpConfig::MoE {
+                    shared_gate_up_wid,
+                    shared_down_wid,
+                    ..
+                } => {
                     if let Some(wid) = shared_gate_up_wid {
                         max_intermediate = max_intermediate.max(self.weights[*wid].rows / 2);
                         max_k = max_k.max(self.weights[*wid].cols);
@@ -2929,7 +3354,11 @@ impl CpuDecodeStore {
                         max_k = max_k.max(self.weights[*wid].cols);
                     }
                 }
-                DecodeMlpConfig::Dense { gate_proj_wid, up_proj_wid, down_proj_wid } => {
+                DecodeMlpConfig::Dense {
+                    gate_proj_wid,
+                    up_proj_wid,
+                    down_proj_wid,
+                } => {
                     max_intermediate = max_intermediate.max(self.weights[*gate_proj_wid].rows);
                     // down_proj.cols may be padded larger than gate_proj.rows
                     max_intermediate = max_intermediate.max(self.weights[*down_proj_wid].cols);
@@ -2973,8 +3402,16 @@ impl CpuDecodeStore {
             let mut max_q_absorbed = 0usize;
             let mut max_v_projected = 0usize;
             for layer in &g.layers {
-                if let DecodeAttnConfig::MLA { num_heads, kv_lora_rank, qk_nope_dim, qk_rope_dim,
-                    v_head_dim, q_a_proj_wid, .. } = &layer.attn {
+                if let DecodeAttnConfig::MLA {
+                    num_heads,
+                    kv_lora_rank,
+                    qk_nope_dim,
+                    qk_rope_dim,
+                    v_head_dim,
+                    q_a_proj_wid,
+                    ..
+                } = &layer.attn
+                {
                     let head_dim = qk_nope_dim + qk_rope_dim;
                     max_kv_out = max_kv_out.max(kv_lora_rank + qk_rope_dim);
                     max_kv_lora = max_kv_lora.max(*kv_lora_rank);
@@ -3024,26 +3461,40 @@ impl CpuDecodeStore {
                 }
             }
             if num_moe_layers >= 2 {
-                let pfl_disabled = std::env::var("KRASIS_PFL_DISABLE").map(|v| v == "1").unwrap_or(false);
+                let pfl_disabled = std::env::var("KRASIS_PFL_DISABLE")
+                    .map(|v| v == "1")
+                    .unwrap_or(false);
                 if !pfl_disabled {
                     // Compute expert size from model config for auto-tuning prefetch count
                     let expert_size_bytes = if let Some(ref store) = g.moe_store {
                         let cfg = &store.config;
                         compute_expert_size_bytes(
-                            cfg.hidden_size, cfg.moe_intermediate_size,
-                            store.group_size, store.cpu_num_bits)
+                            cfg.hidden_size,
+                            cfg.moe_intermediate_size,
+                            store.group_size,
+                            store.cpu_num_bits,
+                        )
                     } else {
                         0 // will use fallback default
                     };
                     let pfl = Pfl::new(num_moe_layers, max_ne, expert_size_bytes);
-                    let pfl_bytes = num_moe_layers * max_ne *
-                        (PFL_MAX_FRIENDS * (std::mem::size_of::<u16>() + std::mem::size_of::<u32>()));
-                    let hint_name = match pfl.config.hint { 1 => "T1", 2 => "T0", _ => "NTA" };
+                    let pfl_bytes = num_moe_layers
+                        * max_ne
+                        * (PFL_MAX_FRIENDS
+                            * (std::mem::size_of::<u16>() + std::mem::size_of::<u32>()));
+                    let hint_name = match pfl.config.hint {
+                        1 => "T1",
+                        2 => "T0",
+                        _ => "NTA",
+                    };
                     log::info!("PFL enabled: {} MoE layers × {} experts, {} friends, prefetch {}, stride {}, hint {}, two_layer {}",
                         num_moe_layers, max_ne, pfl.config.num_friends, pfl.config.prefetch_count,
                         pfl.config.stride, hint_name, pfl.config.two_layer);
-                    log::info!("PFL table: {:.1} MB, expert size: {} KB",
-                        pfl_bytes as f64 / 1024.0 / 1024.0, expert_size_bytes / 1024);
+                    log::info!(
+                        "PFL table: {:.1} MB, expert size: {} KB",
+                        pfl_bytes as f64 / 1024.0 / 1024.0,
+                        expert_size_bytes / 1024
+                    );
                     g.pfl = Some(pfl);
                     g.pfl_enabled = true;
                 } else {
@@ -3062,7 +3513,11 @@ impl CpuDecodeStore {
             }
         }
 
-        log::info!("DecodeGraph finalized: {} layers, max_k={}, scratch allocated", g.layers.len(), max_k);
+        log::info!(
+            "DecodeGraph finalized: {} layers, max_k={}, scratch allocated",
+            g.layers.len(),
+            max_k
+        );
         Ok(())
     }
 
@@ -3079,16 +3534,21 @@ impl CpuDecodeStore {
         mla_ckv_ptrs: Option<Vec<usize>>,
         mla_kpe_ptrs: Option<Vec<usize>>,
     ) -> PyResult<()> {
-        let g = self.decode_graph.as_mut()
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure_decode first"))?;
+        let g = self.decode_graph.as_mut().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("Call configure_decode first")
+        })?;
         g.seq_len = seq_len;
         g.kv_max_seq = kv_max_seq;
         g.kv_k_ptrs = kv_k_ptrs;
         g.kv_v_ptrs = kv_v_ptrs;
         g.conv_state_ptrs = conv_state_ptrs;
         g.recur_state_ptrs = recur_state_ptrs;
-        if let Some(ptrs) = mla_ckv_ptrs { g.mla_ckv_ptrs = ptrs; }
-        if let Some(ptrs) = mla_kpe_ptrs { g.mla_kpe_ptrs = ptrs; }
+        if let Some(ptrs) = mla_ckv_ptrs {
+            g.mla_ckv_ptrs = ptrs;
+        }
+        if let Some(ptrs) = mla_kpe_ptrs {
+            g.mla_kpe_ptrs = ptrs;
+        }
         // Allocate/resize GQA scores buffer for current max_seq
         let mut max_heads = 0;
         for layer in &g.layers {
@@ -3126,8 +3586,9 @@ impl CpuDecodeStore {
         use std::time::Instant;
 
         // Split borrows: graph is mutable, weights/norms/routes are read-only
-        let graph = self.decode_graph.as_mut()
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure_decode first"))?;
+        let graph = self.decode_graph.as_mut().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("Call configure_decode first")
+        })?;
         let weights = &self.weights;
         let norm_weights = &self.norm_weights;
         let route_weights = &self.route_weights;
@@ -3137,12 +3598,15 @@ impl CpuDecodeStore {
         let eps = graph.eps;
         let parallel = graph.parallel;
         let timing = graph.timing_enabled;
-        let t_step_start = if timing { Instant::now() } else { Instant::now() };
+        let t_step_start = if timing {
+            Instant::now()
+        } else {
+            Instant::now()
+        };
 
         // ── Embedding lookup ──
         let emb: &[f32] = unsafe {
-            std::slice::from_raw_parts(
-                (graph.embedding_ptr as *const f32).add(token_id * hs), hs)
+            std::slice::from_raw_parts((graph.embedding_ptr as *const f32).add(token_id * hs), hs)
         };
         graph.hidden[..hs].copy_from_slice(emb);
 
@@ -3154,65 +3618,116 @@ impl CpuDecodeStore {
             let t0 = if timing { Instant::now() } else { t_step_start };
             unsafe {
                 fused_add_rmsnorm_avx2(
-                    &mut graph.hidden, &mut graph.residual,
+                    &mut graph.hidden,
+                    &mut graph.residual,
                     &norm_weights[graph.layers[layer_idx].input_norm_id],
-                    eps, first_residual, norm_bias_one);
+                    eps,
+                    first_residual,
+                    norm_bias_one,
+                );
             }
-            if timing { graph.t_norm += t0.elapsed().as_secs_f64(); }
+            if timing {
+                graph.t_norm += t0.elapsed().as_secs_f64();
+            }
             first_residual = false;
 
             // Attention
             match &graph.layers[layer_idx].attn {
                 DecodeAttnConfig::LinearAttention {
-                    in_proj_qkvz_wid, in_proj_ba_wid, out_proj_wid,
-                    conv_weight, a_log, dt_bias, norm_weight,
-                    nk, nv, dk, dv, hr, kernel_dim, conv_dim, scale,
+                    in_proj_qkvz_wid,
+                    in_proj_ba_wid,
+                    out_proj_wid,
+                    conv_weight,
+                    a_log,
+                    dt_bias,
+                    norm_weight,
+                    nk,
+                    nv,
+                    dk,
+                    dv,
+                    hr,
+                    kernel_dim,
+                    conv_dim,
+                    scale,
                 } => {
-                    let nk = *nk; let nv = *nv; let dk = *dk; let dv = *dv;
-                    let hr = *hr; let kd = *kernel_dim; let cd = *conv_dim;
+                    let nk = *nk;
+                    let nv = *nv;
+                    let dk = *dk;
+                    let dv = *dv;
+                    let hr = *hr;
+                    let kd = *kernel_dim;
+                    let cd = *conv_dim;
 
                     // Projections
                     let t0 = if timing { Instant::now() } else { t_step_start };
                     let k_in = weights[*in_proj_qkvz_wid].cols;
                     quantize_activation_int16_f32(
-                        &graph.hidden[..k_in], graph.group_size,
+                        &graph.hidden[..k_in],
+                        graph.group_size,
                         &mut graph.act_int16[..k_in],
-                        &mut graph.act_scales[..k_in / graph.group_size]);
+                        &mut graph.act_scales[..k_in / graph.group_size],
+                    );
                     dispatch_matmul_free(
                         &weights[*in_proj_qkvz_wid],
                         &graph.act_int16[..k_in],
                         &graph.act_scales[..k_in / graph.group_size],
                         &mut graph.la_qkvz_buf[..weights[*in_proj_qkvz_wid].rows],
-                        parallel);
+                        parallel,
+                    );
                     dispatch_matmul_free(
                         &weights[*in_proj_ba_wid],
                         &graph.act_int16[..k_in],
                         &graph.act_scales[..k_in / graph.group_size],
                         &mut graph.la_ba_buf[..weights[*in_proj_ba_wid].rows],
-                        parallel);
-                    if timing { graph.t_la_proj += t0.elapsed().as_secs_f64(); }
+                        parallel,
+                    );
+                    if timing {
+                        graph.t_la_proj += t0.elapsed().as_secs_f64();
+                    }
 
                     // Conv + gate params
                     let t0 = if timing { Instant::now() } else { t_step_start };
                     let conv_state: &mut [f32] = unsafe {
                         std::slice::from_raw_parts_mut(
-                            graph.conv_state_ptrs[layer_idx] as *mut f32, cd * kd)
+                            graph.conv_state_ptrs[layer_idx] as *mut f32,
+                            cd * kd,
+                        )
                     };
                     decode_la_conv(
-                        &graph.la_qkvz_buf, &graph.la_ba_buf,
-                        conv_state, conv_weight, a_log, dt_bias, *scale,
-                        &mut graph.la_q_buf, &mut graph.la_k_buf,
-                        &mut graph.la_v_buf, &mut graph.la_z_buf,
-                        &mut graph.la_g_buf, &mut graph.la_beta_buf,
-                        &mut graph.la_mixed_qkv, &mut graph.la_conv_out,
-                        nk, nv, dk, dv, hr, kd, cd);
-                    if timing { graph.t_la_conv += t0.elapsed().as_secs_f64(); }
+                        &graph.la_qkvz_buf,
+                        &graph.la_ba_buf,
+                        conv_state,
+                        conv_weight,
+                        a_log,
+                        dt_bias,
+                        *scale,
+                        &mut graph.la_q_buf,
+                        &mut graph.la_k_buf,
+                        &mut graph.la_v_buf,
+                        &mut graph.la_z_buf,
+                        &mut graph.la_g_buf,
+                        &mut graph.la_beta_buf,
+                        &mut graph.la_mixed_qkv,
+                        &mut graph.la_conv_out,
+                        nk,
+                        nv,
+                        dk,
+                        dv,
+                        hr,
+                        kd,
+                        cd,
+                    );
+                    if timing {
+                        graph.t_la_conv += t0.elapsed().as_secs_f64();
+                    }
 
                     // Recurrent state update
                     let t0 = if timing { Instant::now() } else { t_step_start };
                     let state: &mut [f32] = unsafe {
                         std::slice::from_raw_parts_mut(
-                            graph.recur_state_ptrs[layer_idx] as *mut f32, nv * dk * dv)
+                            graph.recur_state_ptrs[layer_idx] as *mut f32,
+                            nv * dk * dv,
+                        )
                     };
                     unsafe {
                         linear_attention_recurrent_avx2(
@@ -3223,41 +3738,69 @@ impl CpuDecodeStore {
                             &graph.la_g_buf[..nv],
                             &graph.la_beta_buf[..nv],
                             &mut graph.la_recur_out[..nv * dv],
-                            nv, dk, dv);
+                            nv,
+                            dk,
+                            dv,
+                        );
                     }
-                    if timing { graph.t_la_recur += t0.elapsed().as_secs_f64(); }
+                    if timing {
+                        graph.t_la_recur += t0.elapsed().as_secs_f64();
+                    }
 
                     // Gated RMSNorm + SiLU (AVX2)
                     let t0 = if timing { Instant::now() } else { t_step_start };
                     unsafe {
                         gated_rmsnorm_silu_avx2(
-                            &graph.la_recur_out, &graph.la_z_buf, norm_weight,
-                            &mut graph.la_gated_out, nv, dv, eps);
+                            &graph.la_recur_out,
+                            &graph.la_z_buf,
+                            norm_weight,
+                            &mut graph.la_gated_out,
+                            nv,
+                            dv,
+                            eps,
+                        );
                     }
-                    if timing { graph.t_la_gate_norm += t0.elapsed().as_secs_f64(); }
+                    if timing {
+                        graph.t_la_gate_norm += t0.elapsed().as_secs_f64();
+                    }
 
                     // Out projection
                     let t0 = if timing { Instant::now() } else { t_step_start };
                     let k_out = weights[*out_proj_wid].cols;
                     quantize_activation_int16_f32(
-                        &graph.la_gated_out[..k_out], graph.group_size,
+                        &graph.la_gated_out[..k_out],
+                        graph.group_size,
                         &mut graph.act_int16[..k_out],
-                        &mut graph.act_scales[..k_out / graph.group_size]);
+                        &mut graph.act_scales[..k_out / graph.group_size],
+                    );
                     dispatch_matmul_free(
                         &weights[*out_proj_wid],
                         &graph.act_int16[..k_out],
                         &graph.act_scales[..k_out / graph.group_size],
                         &mut graph.hidden[..hs],
-                        parallel);
-                    if timing { graph.t_la_out_proj += t0.elapsed().as_secs_f64(); }
+                        parallel,
+                    );
+                    if timing {
+                        graph.t_la_out_proj += t0.elapsed().as_secs_f64();
+                    }
                 }
 
                 DecodeAttnConfig::GQA {
-                    q_proj_wid, k_proj_wid, v_proj_wid, o_proj_wid,
-                    q_norm, k_norm, gated, num_heads, num_kv_heads, head_dim, sm_scale,
+                    q_proj_wid,
+                    k_proj_wid,
+                    v_proj_wid,
+                    o_proj_wid,
+                    q_norm,
+                    k_norm,
+                    gated,
+                    num_heads,
+                    num_kv_heads,
+                    head_dim,
+                    sm_scale,
                     fused_qkv_wid,
                 } => {
-                    let nh = *num_heads; let nkv = *num_kv_heads;
+                    let nh = *num_heads;
+                    let nkv = *num_kv_heads;
                     let hd = *head_dim;
 
                     // Q/K/V projections
@@ -3271,41 +3814,67 @@ impl CpuDecodeStore {
                         let k_in = fw.cols;
                         let total_rows = fw.rows;
                         quantize_activation_int16_f32(
-                            &graph.hidden[..k_in], graph.group_size,
+                            &graph.hidden[..k_in],
+                            graph.group_size,
                             &mut graph.act_int16[..k_in],
-                            &mut graph.act_scales[..k_in / graph.group_size]);
-                        dispatch_matmul_free(fw,
-                            &graph.act_int16[..k_in], &graph.act_scales[..k_in / graph.group_size],
-                            &mut graph.gqa_qkv_buf[..total_rows], parallel);
+                            &mut graph.act_scales[..k_in / graph.group_size],
+                        );
+                        dispatch_matmul_free(
+                            fw,
+                            &graph.act_int16[..k_in],
+                            &graph.act_scales[..k_in / graph.group_size],
+                            &mut graph.gqa_qkv_buf[..total_rows],
+                            parallel,
+                        );
                         // Split fused output into Q, K, V
                         graph.gqa_q_buf[..q_rows].copy_from_slice(&graph.gqa_qkv_buf[..q_rows]);
-                        graph.gqa_k_buf[..k_rows].copy_from_slice(&graph.gqa_qkv_buf[q_rows..q_rows+k_rows]);
-                        graph.gqa_v_buf[..v_rows].copy_from_slice(&graph.gqa_qkv_buf[q_rows+k_rows..q_rows+k_rows+v_rows]);
+                        graph.gqa_k_buf[..k_rows]
+                            .copy_from_slice(&graph.gqa_qkv_buf[q_rows..q_rows + k_rows]);
+                        graph.gqa_v_buf[..v_rows].copy_from_slice(
+                            &graph.gqa_qkv_buf[q_rows + k_rows..q_rows + k_rows + v_rows],
+                        );
                     } else {
                         // Separate Q, K, V dispatches
                         let k_in = weights[*q_proj_wid].cols;
                         quantize_activation_int16_f32(
-                            &graph.hidden[..k_in], graph.group_size,
+                            &graph.hidden[..k_in],
+                            graph.group_size,
                             &mut graph.act_int16[..k_in],
-                            &mut graph.act_scales[..k_in / graph.group_size]);
-                        dispatch_matmul_free(&weights[*q_proj_wid],
-                            &graph.act_int16[..k_in], &graph.act_scales[..k_in / graph.group_size],
-                            &mut graph.gqa_q_buf[..q_rows], parallel);
-                        dispatch_matmul_free(&weights[*k_proj_wid],
-                            &graph.act_int16[..k_in], &graph.act_scales[..k_in / graph.group_size],
-                            &mut graph.gqa_k_buf[..k_rows], parallel);
-                        dispatch_matmul_free(&weights[*v_proj_wid],
-                            &graph.act_int16[..k_in], &graph.act_scales[..k_in / graph.group_size],
-                            &mut graph.gqa_v_buf[..v_rows], parallel);
+                            &mut graph.act_scales[..k_in / graph.group_size],
+                        );
+                        dispatch_matmul_free(
+                            &weights[*q_proj_wid],
+                            &graph.act_int16[..k_in],
+                            &graph.act_scales[..k_in / graph.group_size],
+                            &mut graph.gqa_q_buf[..q_rows],
+                            parallel,
+                        );
+                        dispatch_matmul_free(
+                            &weights[*k_proj_wid],
+                            &graph.act_int16[..k_in],
+                            &graph.act_scales[..k_in / graph.group_size],
+                            &mut graph.gqa_k_buf[..k_rows],
+                            parallel,
+                        );
+                        dispatch_matmul_free(
+                            &weights[*v_proj_wid],
+                            &graph.act_int16[..k_in],
+                            &graph.act_scales[..k_in / graph.group_size],
+                            &mut graph.gqa_v_buf[..v_rows],
+                            parallel,
+                        );
                     }
-                    if timing { graph.t_gqa_proj += t0.elapsed().as_secs_f64(); }
+                    if timing {
+                        graph.t_gqa_proj += t0.elapsed().as_secs_f64();
+                    }
 
                     // Gated attention rearrange + QK norm + RoPE
                     let t0 = if timing { Instant::now() } else { t_step_start };
                     if *gated {
                         for h in 0..nh {
                             for d in 0..hd {
-                                graph.gqa_attn_out[h * hd + d] = graph.gqa_q_buf[h * hd * 2 + hd + d];
+                                graph.gqa_attn_out[h * hd + d] =
+                                    graph.gqa_q_buf[h * hd * 2 + hd + d];
                             }
                         }
                         for h in (1..nh).rev() {
@@ -3346,11 +3915,15 @@ impl CpuDecodeStore {
                     let d2 = graph.rope_half_dim;
                     let cos: &[f32] = unsafe {
                         std::slice::from_raw_parts(
-                            (graph.rope_cos_ptr as *const f32).add(position * d2), d2)
+                            (graph.rope_cos_ptr as *const f32).add(position * d2),
+                            d2,
+                        )
                     };
                     let sin: &[f32] = unsafe {
                         std::slice::from_raw_parts(
-                            (graph.rope_sin_ptr as *const f32).add(position * d2), d2)
+                            (graph.rope_sin_ptr as *const f32).add(position * d2),
+                            d2,
+                        )
                     };
                     for h in 0..nh {
                         let base = h * hd;
@@ -3370,7 +3943,9 @@ impl CpuDecodeStore {
                             graph.gqa_k_buf[base + d2 + i] = x2 * cos[i] + x1 * sin[i];
                         }
                     }
-                    if timing { graph.t_gqa_rope += t0.elapsed().as_secs_f64(); }
+                    if timing {
+                        graph.t_gqa_rope += t0.elapsed().as_secs_f64();
+                    }
 
                     // KV cache write (FP16) + Attention compute
                     let t0 = if timing { Instant::now() } else { t_step_start };
@@ -3378,54 +3953,86 @@ impl CpuDecodeStore {
                     let k_cache: &mut [u16] = unsafe {
                         std::slice::from_raw_parts_mut(
                             graph.kv_k_ptrs[layer_idx] as *mut u16,
-                            graph.kv_max_seq * kv_stride)
+                            graph.kv_max_seq * kv_stride,
+                        )
                     };
                     let v_cache: &mut [u16] = unsafe {
                         std::slice::from_raw_parts_mut(
                             graph.kv_v_ptrs[layer_idx] as *mut u16,
-                            graph.kv_max_seq * kv_stride)
+                            graph.kv_max_seq * kv_stride,
+                        )
                     };
                     let write_offset = position * kv_stride;
                     unsafe {
                         f32_slice_to_fp16(
                             &graph.gqa_k_buf[..kv_stride],
-                            &mut k_cache[write_offset..write_offset + kv_stride]);
+                            &mut k_cache[write_offset..write_offset + kv_stride],
+                        );
                         f32_slice_to_fp16(
                             &graph.gqa_v_buf[..kv_stride],
-                            &mut v_cache[write_offset..write_offset + kv_stride]);
+                            &mut v_cache[write_offset..write_offset + kv_stride],
+                        );
                     }
                     let seq_len = position + 1;
                     unsafe {
                         gqa_attention_compute_fp16_avx2(
-                            &graph.gqa_q_buf, k_cache, v_cache,
-                            &mut graph.gqa_scores, &mut graph.gqa_attn_out,
-                            nh, nkv, hd, graph.kv_max_seq, seq_len, *sm_scale,
-                            *gated);
+                            &graph.gqa_q_buf,
+                            k_cache,
+                            v_cache,
+                            &mut graph.gqa_scores,
+                            &mut graph.gqa_attn_out,
+                            nh,
+                            nkv,
+                            hd,
+                            graph.kv_max_seq,
+                            seq_len,
+                            *sm_scale,
+                            *gated,
+                        );
                     }
-                    if timing { graph.t_gqa_attn += t0.elapsed().as_secs_f64(); }
+                    if timing {
+                        graph.t_gqa_attn += t0.elapsed().as_secs_f64();
+                    }
 
                     // O projection
                     let t0 = if timing { Instant::now() } else { t_step_start };
                     let o_k = weights[*o_proj_wid].cols;
                     quantize_activation_int16_f32(
-                        &graph.gqa_attn_out[..o_k], graph.group_size,
+                        &graph.gqa_attn_out[..o_k],
+                        graph.group_size,
                         &mut graph.act_int16[..o_k],
-                        &mut graph.act_scales[..o_k / graph.group_size]);
+                        &mut graph.act_scales[..o_k / graph.group_size],
+                    );
                     dispatch_matmul_free(
                         &weights[*o_proj_wid],
                         &graph.act_int16[..o_k],
                         &graph.act_scales[..o_k / graph.group_size],
                         &mut graph.hidden[..hs],
-                        parallel);
-                    if timing { graph.t_gqa_o_proj += t0.elapsed().as_secs_f64(); }
+                        parallel,
+                    );
+                    if timing {
+                        graph.t_gqa_o_proj += t0.elapsed().as_secs_f64();
+                    }
                 }
 
                 DecodeAttnConfig::MLA {
-                    kv_a_proj_wid, o_proj_wid,
-                    q_proj_wid, q_a_proj_wid, q_b_proj_wid,
-                    w_kc, w_vc, kv_a_norm, q_a_norm,
-                    rope_cos, rope_sin,
-                    num_heads, kv_lora_rank, qk_nope_dim, qk_rope_dim, v_head_dim, sm_scale,
+                    kv_a_proj_wid,
+                    o_proj_wid,
+                    q_proj_wid,
+                    q_a_proj_wid,
+                    q_b_proj_wid,
+                    w_kc,
+                    w_vc,
+                    kv_a_norm,
+                    q_a_norm,
+                    rope_cos,
+                    rope_sin,
+                    num_heads,
+                    kv_lora_rank,
+                    qk_nope_dim,
+                    qk_rope_dim,
+                    v_head_dim,
+                    sm_scale,
                 } => {
                     let nh = *num_heads;
                     let klr = *kv_lora_rank;
@@ -3440,15 +4047,18 @@ impl CpuDecodeStore {
                     let t0 = if timing { Instant::now() } else { t_step_start };
                     let k_in = weights[*kv_a_proj_wid].cols;
                     quantize_activation_int16_f32(
-                        &graph.hidden[..k_in], graph.group_size,
+                        &graph.hidden[..k_in],
+                        graph.group_size,
                         &mut graph.act_int16[..k_in],
-                        &mut graph.act_scales[..k_in / graph.group_size]);
+                        &mut graph.act_scales[..k_in / graph.group_size],
+                    );
                     dispatch_matmul_free(
                         &weights[*kv_a_proj_wid],
                         &graph.act_int16[..k_in],
                         &graph.act_scales[..k_in / graph.group_size],
                         &mut graph.mla_kv_out[..klr + qk_rd],
-                        parallel);
+                        parallel,
+                    );
 
                     // Split: kv_compressed = kv_out[..klr], k_pe = kv_out[klr..]
                     // RMSNorm on kv_compressed
@@ -3470,15 +4080,18 @@ impl CpuDecodeStore {
                         let qa_rows = weights[*qa_wid].rows;
                         let qa_k = weights[*qa_wid].cols;
                         quantize_activation_int16_f32(
-                            &graph.hidden[..qa_k], graph.group_size,
+                            &graph.hidden[..qa_k],
+                            graph.group_size,
                             &mut graph.act_int16[..qa_k],
-                            &mut graph.act_scales[..qa_k / graph.group_size]);
+                            &mut graph.act_scales[..qa_k / graph.group_size],
+                        );
                         dispatch_matmul_free(
                             &weights[*qa_wid],
                             &graph.act_int16[..qa_k],
                             &graph.act_scales[..qa_k / graph.group_size],
                             &mut graph.mla_q_compressed[..qa_rows],
-                            parallel);
+                            parallel,
+                        );
                         // RMSNorm on q_compressed
                         if let Some(qa_norm) = q_a_norm {
                             let mut sum_sq = 0.0f32;
@@ -3494,31 +4107,39 @@ impl CpuDecodeStore {
                         let qb_wid = q_b_proj_wid.unwrap();
                         let qb_k = weights[qb_wid].cols;
                         quantize_activation_int16_f32(
-                            &graph.mla_q_compressed[..qb_k], graph.group_size,
+                            &graph.mla_q_compressed[..qb_k],
+                            graph.group_size,
                             &mut graph.act_int16[..qb_k],
-                            &mut graph.act_scales[..qb_k / graph.group_size]);
+                            &mut graph.act_scales[..qb_k / graph.group_size],
+                        );
                         dispatch_matmul_free(
                             &weights[qb_wid],
                             &graph.act_int16[..qb_k],
                             &graph.act_scales[..qb_k / graph.group_size],
                             &mut graph.mla_q_full[..nh * head_dim],
-                            parallel);
+                            parallel,
+                        );
                     } else {
                         // Direct path: q_proj
                         let qw = q_proj_wid.as_ref().unwrap();
                         let q_k = weights[*qw].cols;
                         quantize_activation_int16_f32(
-                            &graph.hidden[..q_k], graph.group_size,
+                            &graph.hidden[..q_k],
+                            graph.group_size,
                             &mut graph.act_int16[..q_k],
-                            &mut graph.act_scales[..q_k / graph.group_size]);
+                            &mut graph.act_scales[..q_k / graph.group_size],
+                        );
                         dispatch_matmul_free(
                             &weights[*qw],
                             &graph.act_int16[..q_k],
                             &graph.act_scales[..q_k / graph.group_size],
                             &mut graph.mla_q_full[..nh * head_dim],
-                            parallel);
+                            parallel,
+                        );
                     }
-                    if timing { graph.t_mla_proj += t0.elapsed().as_secs_f64(); }
+                    if timing {
+                        graph.t_mla_proj += t0.elapsed().as_secs_f64();
+                    }
 
                     // ── Step 3: De-interleave + RoPE ──
                     let t0 = if timing { Instant::now() } else { t_step_start };
@@ -3530,7 +4151,7 @@ impl CpuDecodeStore {
                         let mut tmp = [0.0f32; 256]; // qk_rope_dim is typically 64
                         let src = &graph.mla_kv_out[klr..klr + qk_rd];
                         for i in 0..rope_half {
-                            tmp[i] = src[i * 2];               // real parts
+                            tmp[i] = src[i * 2]; // real parts
                             tmp[rope_half + i] = src[i * 2 + 1]; // imag parts
                         }
                         graph.mla_kv_out[klr..klr + qk_rd].copy_from_slice(&tmp[..qk_rd]);
@@ -3542,7 +4163,7 @@ impl CpuDecodeStore {
 
                     for h in 0..nh {
                         let base = h * head_dim + qk_nd; // start of q_pe for this head
-                        // De-interleave q_pe for this head
+                                                         // De-interleave q_pe for this head
                         let mut tmp = [0.0f32; 256];
                         for i in 0..rope_half {
                             tmp[i] = graph.mla_q_full[base + i * 2];
@@ -3573,10 +4194,18 @@ impl CpuDecodeStore {
                     #[cfg(target_arch = "x86_64")]
                     unsafe {
                         mla_absorb_wkc_avx2(
-                            &graph.mla_q_full, w_kc, &mut graph.mla_q_absorbed,
-                            nh, qk_nd, klr, head_dim);
+                            &graph.mla_q_full,
+                            w_kc,
+                            &mut graph.mla_q_absorbed,
+                            nh,
+                            qk_nd,
+                            klr,
+                            head_dim,
+                        );
                     }
-                    if timing { graph.t_mla_rope += t0.elapsed().as_secs_f64(); }
+                    if timing {
+                        graph.t_mla_rope += t0.elapsed().as_secs_f64();
+                    }
 
                     // ── Step 5: KV cache write (FP16) + Attention ──
                     let t0 = if timing { Instant::now() } else { t_step_start };
@@ -3585,24 +4214,28 @@ impl CpuDecodeStore {
                     let ckv_cache: &mut [u16] = unsafe {
                         std::slice::from_raw_parts_mut(
                             graph.mla_ckv_ptrs[layer_idx] as *mut u16,
-                            graph.kv_max_seq * klr)
+                            graph.kv_max_seq * klr,
+                        )
                     };
                     let kpe_cache: &mut [u16] = unsafe {
                         std::slice::from_raw_parts_mut(
                             graph.mla_kpe_ptrs[layer_idx] as *mut u16,
-                            graph.kv_max_seq * qk_rd)
+                            graph.kv_max_seq * qk_rd,
+                        )
                     };
                     let ckv_offset = position * klr;
                     unsafe {
                         f32_slice_to_fp16(
                             &graph.mla_kv_compressed[..klr],
-                            &mut ckv_cache[ckv_offset..ckv_offset + klr]);
+                            &mut ckv_cache[ckv_offset..ckv_offset + klr],
+                        );
                     }
                     let kpe_offset = position * qk_rd;
                     unsafe {
                         f32_slice_to_fp16(
                             &graph.mla_kv_out[klr..klr + qk_rd],
-                            &mut kpe_cache[kpe_offset..kpe_offset + qk_rd]);
+                            &mut kpe_cache[kpe_offset..kpe_offset + qk_rd],
+                        );
                     }
 
                     // Attention: per head (AVX2+F16C vectorized, FP16 cache)
@@ -3619,16 +4252,22 @@ impl CpuDecodeStore {
                             let mut s = unsafe {
                                 mla_attn_dot_fp16_avx2(
                                     &graph.mla_q_absorbed[qa_base..qa_base + klr],
-                                    &ckv_cache[t * klr..], klr)
+                                    &ckv_cache[t * klr..],
+                                    klr,
+                                )
                             };
                             s += unsafe {
                                 mla_attn_dot_fp16_avx2(
                                     &graph.mla_q_full[qpe_base..qpe_base + qk_rd],
-                                    &kpe_cache[t * qk_rd..], qk_rd)
+                                    &kpe_cache[t * qk_rd..],
+                                    qk_rd,
+                                )
                             };
                             s *= sm_scale;
                             graph.mla_attn_scores[score_base + t] = s;
-                            if s > max_score { max_score = s; }
+                            if s > max_score {
+                                max_score = s;
+                            }
                         }
 
                         // Softmax
@@ -3648,11 +4287,16 @@ impl CpuDecodeStore {
                         unsafe {
                             mla_weighted_sum_fp16_avx2(
                                 &graph.mla_attn_scores[score_base..score_base + seq_len],
-                                ckv_cache, &mut graph.mla_attn_out[out_base..out_base + klr],
-                                seq_len, klr);
+                                ckv_cache,
+                                &mut graph.mla_attn_out[out_base..out_base + klr],
+                                seq_len,
+                                klr,
+                            );
                         }
                     }
-                    if timing { graph.t_mla_attn += t0.elapsed().as_secs_f64(); }
+                    if timing {
+                        graph.t_mla_attn += t0.elapsed().as_secs_f64();
+                    }
 
                     // ── Step 6: w_vc projection + o_proj ──
                     let t0 = if timing { Instant::now() } else { t_step_start };
@@ -3662,23 +4306,33 @@ impl CpuDecodeStore {
                     #[cfg(target_arch = "x86_64")]
                     unsafe {
                         mla_project_wvc_avx2(
-                            w_vc, &graph.mla_attn_out, &mut graph.mla_v_projected,
-                            nh, vhd, klr);
+                            w_vc,
+                            &graph.mla_attn_out,
+                            &mut graph.mla_v_projected,
+                            nh,
+                            vhd,
+                            klr,
+                        );
                     }
 
                     // o_proj: [num_heads * v_head_dim] → [hidden_size]
                     let o_k = weights[*o_proj_wid].cols;
                     quantize_activation_int16_f32(
-                        &graph.mla_v_projected[..o_k], graph.group_size,
+                        &graph.mla_v_projected[..o_k],
+                        graph.group_size,
                         &mut graph.act_int16[..o_k],
-                        &mut graph.act_scales[..o_k / graph.group_size]);
+                        &mut graph.act_scales[..o_k / graph.group_size],
+                    );
                     dispatch_matmul_free(
                         &weights[*o_proj_wid],
                         &graph.act_int16[..o_k],
                         &graph.act_scales[..o_k / graph.group_size],
                         &mut graph.hidden[..hs],
-                        parallel);
-                    if timing { graph.t_mla_o_proj += t0.elapsed().as_secs_f64(); }
+                        parallel,
+                    );
+                    if timing {
+                        graph.t_mla_o_proj += t0.elapsed().as_secs_f64();
+                    }
                 }
             }
 
@@ -3686,17 +4340,26 @@ impl CpuDecodeStore {
             let t0 = if timing { Instant::now() } else { t_step_start };
             unsafe {
                 fused_add_rmsnorm_avx2(
-                    &mut graph.hidden, &mut graph.residual,
+                    &mut graph.hidden,
+                    &mut graph.residual,
                     &norm_weights[graph.layers[layer_idx].post_attn_norm_id],
-                    eps, false, norm_bias_one);
+                    eps,
+                    false,
+                    norm_bias_one,
+                );
             }
-            if timing { graph.t_norm += t0.elapsed().as_secs_f64(); }
+            if timing {
+                graph.t_norm += t0.elapsed().as_secs_f64();
+            }
 
             // MLP
             match &graph.layers[layer_idx].mlp {
                 DecodeMlpConfig::MoE {
-                    route_id, moe_layer_idx,
-                    shared_gate_up_wid, shared_down_wid, shared_gate_wid,
+                    route_id,
+                    moe_layer_idx,
+                    shared_gate_up_wid,
+                    shared_down_wid,
+                    shared_gate_wid,
                 } => {
                     let route_id = *route_id;
                     let moe_layer_idx = *moe_layer_idx;
@@ -3718,15 +4381,28 @@ impl CpuDecodeStore {
                     let corrected_buf = &mut graph.route_corrected[..ne];
                     // Serial routing: gate data fits in L3, parallel dispatch overhead
                     // (thread wake-up ~30us * 11 threads * 40 layers) dominates for small ne.
-                    unsafe { moe_route_matmul_avx2(&rw.data, &graph.hidden[..hd], logits_buf, ne, hd) };
+                    unsafe {
+                        moe_route_matmul_avx2(&rw.data, &graph.hidden[..hd], logits_buf, ne, hd)
+                    };
                     if let Some(ref bias) = rw.bias {
-                        for e in 0..ne { logits_buf[e] += bias[e]; }
+                        for e in 0..ne {
+                            logits_buf[e] += bias[e];
+                        }
                     }
                     moe_route_score_topk(
-                        logits_buf, scores_buf, corrected_buf,
-                        &rw.e_score_corr, sf, ntp, topk,
-                        &mut graph.moe_topk_ids, &mut graph.moe_topk_weights);
-                    if timing { graph.t_moe_route += t0.elapsed().as_secs_f64(); }
+                        logits_buf,
+                        scores_buf,
+                        corrected_buf,
+                        &rw.e_score_corr,
+                        sf,
+                        ntp,
+                        topk,
+                        &mut graph.moe_topk_ids,
+                        &mut graph.moe_topk_weights,
+                    );
+                    if timing {
+                        graph.t_moe_route += t0.elapsed().as_secs_f64();
+                    }
 
                     // ── PFL: update + speculative prefetch ──
                     // 1. Record current layer's selected experts
@@ -3761,31 +4437,42 @@ impl CpuDecodeStore {
                             {
                                 let prev = pfl.prev_layer_experts.clone();
                                 pfl.update(
-                                    pfl.prev_moe_layer_idx, &prev,
-                                    moe_layer_idx, &graph.pfl_current_experts,
+                                    pfl.prev_moe_layer_idx,
+                                    &prev,
+                                    moe_layer_idx,
+                                    &graph.pfl_current_experts,
                                 );
                             }
 
                             // Shift prev -> prev2 for two-layer prediction
-                            std::mem::swap(&mut pfl.prev2_layer_experts, &mut pfl.prev_layer_experts);
+                            std::mem::swap(
+                                &mut pfl.prev2_layer_experts,
+                                &mut pfl.prev_layer_experts,
+                            );
                             pfl.prev2_moe_layer_idx = pfl.prev_moe_layer_idx;
 
                             // Save current as "previous" for next layer
                             pfl.prev_layer_experts.clear();
-                            pfl.prev_layer_experts.extend_from_slice(&graph.pfl_current_experts);
+                            pfl.prev_layer_experts
+                                .extend_from_slice(&graph.pfl_current_experts);
                             pfl.prev_moe_layer_idx = moe_layer_idx;
 
                             // Speculative prefetch for next layer (if warm enough)
                             if pfl.is_warm() {
-                                pfl.predict(moe_layer_idx, &graph.pfl_current_experts,
-                                            &mut graph.pfl_predicted);
+                                pfl.predict(
+                                    moe_layer_idx,
+                                    &graph.pfl_current_experts,
+                                    &mut graph.pfl_predicted,
+                                );
                                 let next_moe_layer = moe_layer_idx + 1;
                                 if !graph.pfl_predicted.is_empty()
                                     && next_moe_layer < pfl.num_moe_layers
                                 {
                                     // Save predictions for hit counting at next layer
                                     graph.pfl_last_predicted.clear();
-                                    graph.pfl_last_predicted.extend_from_slice(&graph.pfl_predicted);
+                                    graph
+                                        .pfl_last_predicted
+                                        .extend_from_slice(&graph.pfl_predicted);
                                     // Inline prefetch happens inside moe_forward_unified via PflPrefetch
                                 }
                             }
@@ -3853,20 +4540,30 @@ impl CpuDecodeStore {
                                     let pool = &mut g.moe_scratch_pool;
                                     let mut no_shared: Option<ExpertScratch> = None;
                                     moe_forward_unified(
-                                        &*moe_store, moe_layer_idx,
+                                        &*moe_store,
+                                        moe_layer_idx,
                                         &g.moe_act_bf16[..hs],
                                         &expert_indices[..n_exp],
                                         &expert_weights_arr[..n_exp],
                                         &mut g.moe_output,
-                                        scratch, pool, &mut no_shared,
-                                        moe_par, None, pfl_ctx.as_ref());
+                                        scratch,
+                                        pool,
+                                        &mut no_shared,
+                                        moe_par,
+                                        None,
+                                        pfl_ctx.as_ref(),
+                                    );
                                 }
                                 if rsf != 1.0 {
-                                    for j in 0..hs { g.moe_output[j] *= rsf; }
+                                    for j in 0..hs {
+                                        g.moe_output[j] *= rsf;
+                                    }
                                 }
                             },
                             move || unsafe {
-                                if !has_shared { return; }
+                                if !has_shared {
+                                    return;
+                                }
                                 let g = &mut *(gp as *mut DecodeGraph);
                                 let gu_wid = sgu_wid.unwrap();
                                 let dn_wid = sd_wid.unwrap();
@@ -3875,42 +4572,60 @@ impl CpuDecodeStore {
                                 let n_gu = gu_w.rows;
                                 let intermediate = n_gu / 2;
                                 quantize_activation_int16_f32(
-                                    &g.hidden[..k_in], gs,
+                                    &g.hidden[..k_in],
+                                    gs,
                                     &mut g.act_int16[..k_in],
-                                    &mut g.act_scales[..k_in / gs]);
-                                dispatch_matmul_free(gu_w,
+                                    &mut g.act_scales[..k_in / gs],
+                                );
+                                dispatch_matmul_free(
+                                    gu_w,
                                     &g.act_int16[..k_in],
                                     &g.act_scales[..k_in / gs],
-                                    &mut g.mlp_gate_up[..n_gu], parallel);
+                                    &mut g.mlp_gate_up[..n_gu],
+                                    parallel,
+                                );
                                 fast_silu_mul_avx2(
                                     &g.mlp_gate_up[..intermediate],
                                     &g.mlp_gate_up[intermediate..n_gu],
                                     &mut g.mlp_hidden_buf[..intermediate],
-                                    intermediate);
+                                    intermediate,
+                                );
                                 let dn_w = &weights[dn_wid];
                                 let k_dn = dn_w.cols;
                                 quantize_activation_int16_f32(
-                                    &g.mlp_hidden_buf[..k_dn], gs,
+                                    &g.mlp_hidden_buf[..k_dn],
+                                    gs,
                                     &mut g.act_int16[..k_dn],
-                                    &mut g.act_scales[..k_dn / gs]);
-                                dispatch_matmul_free(dn_w,
+                                    &mut g.act_scales[..k_dn / gs],
+                                );
+                                dispatch_matmul_free(
+                                    dn_w,
                                     &g.act_int16[..k_dn],
                                     &g.act_scales[..k_dn / gs],
-                                    &mut g.shared_out[..hs], parallel);
+                                    &mut g.shared_out[..hs],
+                                    parallel,
+                                );
                                 if let Some(sg) = sg_wid {
                                     let sg_w = &weights[sg];
                                     let sg_k = sg_w.cols;
                                     quantize_activation_int16_f32(
-                                        &g.hidden[..sg_k], gs,
+                                        &g.hidden[..sg_k],
+                                        gs,
                                         &mut g.act_int16[..sg_k],
-                                        &mut g.act_scales[..sg_k / gs]);
+                                        &mut g.act_scales[..sg_k / gs],
+                                    );
                                     let mut gate_val = [0.0f32; 1];
-                                    dispatch_matmul_free(sg_w,
+                                    dispatch_matmul_free(
+                                        sg_w,
                                         &g.act_int16[..sg_k],
                                         &g.act_scales[..sg_k / gs],
-                                        &mut gate_val, parallel);
+                                        &mut gate_val,
+                                        parallel,
+                                    );
                                     let gate_sigmoid = 1.0 / (1.0 + (-gate_val[0]).exp());
-                                    for j in 0..hs { g.shared_out[j] *= gate_sigmoid; }
+                                    for j in 0..hs {
+                                        g.shared_out[j] *= gate_sigmoid;
+                                    }
                                 }
                             },
                         );
@@ -3922,13 +4637,19 @@ impl CpuDecodeStore {
                             graph.hidden[..hs].copy_from_slice(&graph.moe_output[..hs]);
                         }
                     }
-                    if timing { graph.t_moe_experts += t0.elapsed().as_secs_f64(); }
+                    if timing {
+                        graph.t_moe_experts += t0.elapsed().as_secs_f64();
+                    }
 
                     // PFL: inline prefetch happened inside moe_forward_unified.
                     // Rayon threads read predicted next-layer experts into local L3.
                 }
 
-                DecodeMlpConfig::Dense { gate_proj_wid, up_proj_wid, down_proj_wid } => {
+                DecodeMlpConfig::Dense {
+                    gate_proj_wid,
+                    up_proj_wid,
+                    down_proj_wid,
+                } => {
                     let t0 = if timing { Instant::now() } else { t_step_start };
                     let gw = &weights[*gate_proj_wid];
                     let uw = &weights[*up_proj_wid];
@@ -3936,35 +4657,51 @@ impl CpuDecodeStore {
                     let k_in = gw.cols;
                     let intermediate = gw.rows;
                     quantize_activation_int16_f32(
-                        &graph.hidden[..k_in], graph.group_size,
+                        &graph.hidden[..k_in],
+                        graph.group_size,
                         &mut graph.act_int16[..k_in],
-                        &mut graph.act_scales[..k_in / graph.group_size]);
-                    dispatch_matmul_free(gw,
+                        &mut graph.act_scales[..k_in / graph.group_size],
+                    );
+                    dispatch_matmul_free(
+                        gw,
                         &graph.act_int16[..k_in],
                         &graph.act_scales[..k_in / graph.group_size],
-                        &mut graph.mlp_gate_up[..intermediate], parallel);
-                    dispatch_matmul_free(uw,
+                        &mut graph.mlp_gate_up[..intermediate],
+                        parallel,
+                    );
+                    dispatch_matmul_free(
+                        uw,
                         &graph.act_int16[..k_in],
                         &graph.act_scales[..k_in / graph.group_size],
-                        &mut graph.mlp_gate_up[intermediate..2*intermediate], parallel);
+                        &mut graph.mlp_gate_up[intermediate..2 * intermediate],
+                        parallel,
+                    );
                     // AVX2 fused SiLU(gate) * up
                     unsafe {
                         fast_silu_mul_avx2(
                             &graph.mlp_gate_up[..intermediate],
-                            &graph.mlp_gate_up[intermediate..2*intermediate],
+                            &graph.mlp_gate_up[intermediate..2 * intermediate],
                             &mut graph.mlp_hidden_buf[..intermediate],
-                            intermediate);
+                            intermediate,
+                        );
                     }
                     let k_dn = dw.cols;
                     quantize_activation_int16_f32(
-                        &graph.mlp_hidden_buf[..k_dn], graph.group_size,
+                        &graph.mlp_hidden_buf[..k_dn],
+                        graph.group_size,
                         &mut graph.act_int16[..k_dn],
-                        &mut graph.act_scales[..k_dn / graph.group_size]);
-                    dispatch_matmul_free(dw,
+                        &mut graph.act_scales[..k_dn / graph.group_size],
+                    );
+                    dispatch_matmul_free(
+                        dw,
                         &graph.act_int16[..k_dn],
                         &graph.act_scales[..k_dn / graph.group_size],
-                        &mut graph.hidden[..hs], parallel);
-                    if timing { graph.t_dense_mlp += t0.elapsed().as_secs_f64(); }
+                        &mut graph.hidden[..hs],
+                        parallel,
+                    );
+                    if timing {
+                        graph.t_dense_mlp += t0.elapsed().as_secs_f64();
+                    }
                 }
 
                 DecodeMlpConfig::None => {}
@@ -3984,28 +4721,39 @@ impl CpuDecodeStore {
         let t0 = if timing { Instant::now() } else { t_step_start };
         unsafe {
             fused_add_rmsnorm_avx2(
-                &mut graph.hidden, &mut graph.residual,
+                &mut graph.hidden,
+                &mut graph.residual,
                 &norm_weights[graph.final_norm_id],
-                eps, false, norm_bias_one);
+                eps,
+                false,
+                norm_bias_one,
+            );
         }
-        if timing { graph.t_norm += t0.elapsed().as_secs_f64(); }
+        if timing {
+            graph.t_norm += t0.elapsed().as_secs_f64();
+        }
 
         // ── LM head ──
         let t0 = if timing { Instant::now() } else { t_step_start };
         let lm_k = weights[graph.lm_head_wid].cols;
         quantize_activation_int16_f32(
-            &graph.hidden[..lm_k], graph.group_size,
+            &graph.hidden[..lm_k],
+            graph.group_size,
             &mut graph.act_int16[..lm_k],
-            &mut graph.act_scales[..lm_k / graph.group_size]);
-        let output: &mut [f32] = unsafe {
-            std::slice::from_raw_parts_mut(output_ptr as *mut f32, graph.vocab_size)
-        };
+            &mut graph.act_scales[..lm_k / graph.group_size],
+        );
+        let output: &mut [f32] =
+            unsafe { std::slice::from_raw_parts_mut(output_ptr as *mut f32, graph.vocab_size) };
         dispatch_matmul_free(
             &weights[graph.lm_head_wid],
             &graph.act_int16[..lm_k],
             &graph.act_scales[..lm_k / graph.group_size],
-            output, parallel);
-        if timing { graph.t_lm_head += t0.elapsed().as_secs_f64(); }
+            output,
+            parallel,
+        );
+        if timing {
+            graph.t_lm_head += t0.elapsed().as_secs_f64();
+        }
 
         // ── Timing report ──
         if timing {
@@ -4015,37 +4763,134 @@ impl CpuDecodeStore {
             if n % graph.timing_report_interval == 0 {
                 let nf = n as f64;
                 let total_ms = graph.t_total / nf * 1000.0;
-                log::info!("=== CPU DECODE TIMING ({} steps, avg {:.1} ms/tok, {:.2} tok/s) ===",
-                    n, total_ms, 1000.0 / total_ms);
-                log::info!("  norm:         {:6.1} ms ({:4.1}%)", graph.t_norm / nf * 1000.0, graph.t_norm / graph.t_total * 100.0);
-                log::info!("  la_proj:      {:6.1} ms ({:4.1}%)", graph.t_la_proj / nf * 1000.0, graph.t_la_proj / graph.t_total * 100.0);
-                log::info!("  la_conv:      {:6.1} ms ({:4.1}%)", graph.t_la_conv / nf * 1000.0, graph.t_la_conv / graph.t_total * 100.0);
-                log::info!("  la_recur:     {:6.1} ms ({:4.1}%)", graph.t_la_recur / nf * 1000.0, graph.t_la_recur / graph.t_total * 100.0);
-                log::info!("  la_gate_norm: {:6.1} ms ({:4.1}%)", graph.t_la_gate_norm / nf * 1000.0, graph.t_la_gate_norm / graph.t_total * 100.0);
-                log::info!("  la_out_proj:  {:6.1} ms ({:4.1}%)", graph.t_la_out_proj / nf * 1000.0, graph.t_la_out_proj / graph.t_total * 100.0);
-                log::info!("  gqa_proj:     {:6.1} ms ({:4.1}%)", graph.t_gqa_proj / nf * 1000.0, graph.t_gqa_proj / graph.t_total * 100.0);
-                log::info!("  gqa_rope:     {:6.1} ms ({:4.1}%)", graph.t_gqa_rope / nf * 1000.0, graph.t_gqa_rope / graph.t_total * 100.0);
-                log::info!("  gqa_attn:     {:6.1} ms ({:4.1}%)", graph.t_gqa_attn / nf * 1000.0, graph.t_gqa_attn / graph.t_total * 100.0);
-                log::info!("  gqa_o_proj:   {:6.1} ms ({:4.1}%)", graph.t_gqa_o_proj / nf * 1000.0, graph.t_gqa_o_proj / graph.t_total * 100.0);
+                log::info!(
+                    "=== CPU DECODE TIMING ({} steps, avg {:.1} ms/tok, {:.2} tok/s) ===",
+                    n,
+                    total_ms,
+                    1000.0 / total_ms
+                );
+                log::info!(
+                    "  norm:         {:6.1} ms ({:4.1}%)",
+                    graph.t_norm / nf * 1000.0,
+                    graph.t_norm / graph.t_total * 100.0
+                );
+                log::info!(
+                    "  la_proj:      {:6.1} ms ({:4.1}%)",
+                    graph.t_la_proj / nf * 1000.0,
+                    graph.t_la_proj / graph.t_total * 100.0
+                );
+                log::info!(
+                    "  la_conv:      {:6.1} ms ({:4.1}%)",
+                    graph.t_la_conv / nf * 1000.0,
+                    graph.t_la_conv / graph.t_total * 100.0
+                );
+                log::info!(
+                    "  la_recur:     {:6.1} ms ({:4.1}%)",
+                    graph.t_la_recur / nf * 1000.0,
+                    graph.t_la_recur / graph.t_total * 100.0
+                );
+                log::info!(
+                    "  la_gate_norm: {:6.1} ms ({:4.1}%)",
+                    graph.t_la_gate_norm / nf * 1000.0,
+                    graph.t_la_gate_norm / graph.t_total * 100.0
+                );
+                log::info!(
+                    "  la_out_proj:  {:6.1} ms ({:4.1}%)",
+                    graph.t_la_out_proj / nf * 1000.0,
+                    graph.t_la_out_proj / graph.t_total * 100.0
+                );
+                log::info!(
+                    "  gqa_proj:     {:6.1} ms ({:4.1}%)",
+                    graph.t_gqa_proj / nf * 1000.0,
+                    graph.t_gqa_proj / graph.t_total * 100.0
+                );
+                log::info!(
+                    "  gqa_rope:     {:6.1} ms ({:4.1}%)",
+                    graph.t_gqa_rope / nf * 1000.0,
+                    graph.t_gqa_rope / graph.t_total * 100.0
+                );
+                log::info!(
+                    "  gqa_attn:     {:6.1} ms ({:4.1}%)",
+                    graph.t_gqa_attn / nf * 1000.0,
+                    graph.t_gqa_attn / graph.t_total * 100.0
+                );
+                log::info!(
+                    "  gqa_o_proj:   {:6.1} ms ({:4.1}%)",
+                    graph.t_gqa_o_proj / nf * 1000.0,
+                    graph.t_gqa_o_proj / graph.t_total * 100.0
+                );
                 if graph.t_mla_proj > 0.0 {
-                    log::info!("  mla_proj:     {:6.1} ms ({:4.1}%)", graph.t_mla_proj / nf * 1000.0, graph.t_mla_proj / graph.t_total * 100.0);
-                    log::info!("  mla_rope:     {:6.1} ms ({:4.1}%)", graph.t_mla_rope / nf * 1000.0, graph.t_mla_rope / graph.t_total * 100.0);
-                    log::info!("  mla_attn:     {:6.1} ms ({:4.1}%)", graph.t_mla_attn / nf * 1000.0, graph.t_mla_attn / graph.t_total * 100.0);
-                    log::info!("  mla_o_proj:   {:6.1} ms ({:4.1}%)", graph.t_mla_o_proj / nf * 1000.0, graph.t_mla_o_proj / graph.t_total * 100.0);
+                    log::info!(
+                        "  mla_proj:     {:6.1} ms ({:4.1}%)",
+                        graph.t_mla_proj / nf * 1000.0,
+                        graph.t_mla_proj / graph.t_total * 100.0
+                    );
+                    log::info!(
+                        "  mla_rope:     {:6.1} ms ({:4.1}%)",
+                        graph.t_mla_rope / nf * 1000.0,
+                        graph.t_mla_rope / graph.t_total * 100.0
+                    );
+                    log::info!(
+                        "  mla_attn:     {:6.1} ms ({:4.1}%)",
+                        graph.t_mla_attn / nf * 1000.0,
+                        graph.t_mla_attn / graph.t_total * 100.0
+                    );
+                    log::info!(
+                        "  mla_o_proj:   {:6.1} ms ({:4.1}%)",
+                        graph.t_mla_o_proj / nf * 1000.0,
+                        graph.t_mla_o_proj / graph.t_total * 100.0
+                    );
                 }
-                log::info!("  moe_route:    {:6.1} ms ({:4.1}%)", graph.t_moe_route / nf * 1000.0, graph.t_moe_route / graph.t_total * 100.0);
-                log::info!("  moe_experts:  {:6.1} ms ({:4.1}%)", graph.t_moe_experts / nf * 1000.0, graph.t_moe_experts / graph.t_total * 100.0);
-                log::info!("  moe_shared:   {:6.1} ms ({:4.1}%)", graph.t_moe_shared / nf * 1000.0, graph.t_moe_shared / graph.t_total * 100.0);
-                log::info!("  dense_mlp:    {:6.1} ms ({:4.1}%)", graph.t_dense_mlp / nf * 1000.0, graph.t_dense_mlp / graph.t_total * 100.0);
-                log::info!("  lm_head:      {:6.1} ms ({:4.1}%)", graph.t_lm_head / nf * 1000.0, graph.t_lm_head / graph.t_total * 100.0);
-                let accounted = graph.t_norm + graph.t_la_proj + graph.t_la_conv + graph.t_la_recur
-                    + graph.t_la_gate_norm + graph.t_la_out_proj + graph.t_gqa_proj + graph.t_gqa_rope
-                    + graph.t_gqa_attn + graph.t_gqa_o_proj
-                    + graph.t_mla_proj + graph.t_mla_rope + graph.t_mla_attn + graph.t_mla_o_proj
-                    + graph.t_moe_route + graph.t_moe_experts
-                    + graph.t_moe_shared + graph.t_dense_mlp + graph.t_lm_head;
+                log::info!(
+                    "  moe_route:    {:6.1} ms ({:4.1}%)",
+                    graph.t_moe_route / nf * 1000.0,
+                    graph.t_moe_route / graph.t_total * 100.0
+                );
+                log::info!(
+                    "  moe_experts:  {:6.1} ms ({:4.1}%)",
+                    graph.t_moe_experts / nf * 1000.0,
+                    graph.t_moe_experts / graph.t_total * 100.0
+                );
+                log::info!(
+                    "  moe_shared:   {:6.1} ms ({:4.1}%)",
+                    graph.t_moe_shared / nf * 1000.0,
+                    graph.t_moe_shared / graph.t_total * 100.0
+                );
+                log::info!(
+                    "  dense_mlp:    {:6.1} ms ({:4.1}%)",
+                    graph.t_dense_mlp / nf * 1000.0,
+                    graph.t_dense_mlp / graph.t_total * 100.0
+                );
+                log::info!(
+                    "  lm_head:      {:6.1} ms ({:4.1}%)",
+                    graph.t_lm_head / nf * 1000.0,
+                    graph.t_lm_head / graph.t_total * 100.0
+                );
+                let accounted = graph.t_norm
+                    + graph.t_la_proj
+                    + graph.t_la_conv
+                    + graph.t_la_recur
+                    + graph.t_la_gate_norm
+                    + graph.t_la_out_proj
+                    + graph.t_gqa_proj
+                    + graph.t_gqa_rope
+                    + graph.t_gqa_attn
+                    + graph.t_gqa_o_proj
+                    + graph.t_mla_proj
+                    + graph.t_mla_rope
+                    + graph.t_mla_attn
+                    + graph.t_mla_o_proj
+                    + graph.t_moe_route
+                    + graph.t_moe_experts
+                    + graph.t_moe_shared
+                    + graph.t_dense_mlp
+                    + graph.t_lm_head;
                 let overhead = graph.t_total - accounted;
-                log::info!("  overhead:     {:6.1} ms ({:4.1}%)", overhead / nf * 1000.0, overhead / graph.t_total * 100.0);
+                log::info!(
+                    "  overhead:     {:6.1} ms ({:4.1}%)",
+                    overhead / nf * 1000.0,
+                    overhead / graph.t_total * 100.0
+                );
                 if graph.pfl_enabled {
                     if let Some(ref pfl) = graph.pfl {
                         let hit_rate = if graph.pfl_predictions > 0 {
@@ -4053,9 +4898,14 @@ impl CpuDecodeStore {
                         } else {
                             0.0
                         };
-                        log::info!("  PFL: {} tokens seen, warm={}, hits={}/{} ({:.1}%)",
-                            pfl.tokens_seen, pfl.is_warm(),
-                            graph.pfl_hits, graph.pfl_predictions, hit_rate);
+                        log::info!(
+                            "  PFL: {} tokens seen, warm={}, hits={}/{} ({:.1}%)",
+                            pfl.tokens_seen,
+                            pfl.is_warm(),
+                            graph.pfl_hits,
+                            graph.pfl_predictions,
+                            hit_rate
+                        );
                     }
                 }
             }
@@ -4080,8 +4930,9 @@ impl CpuDecodeStore {
     ) -> PyResult<Vec<usize>> {
         use std::time::Instant;
 
-        let graph = self.decode_graph.as_ref()
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure_decode first"))?;
+        let graph = self.decode_graph.as_ref().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("Call configure_decode first")
+        })?;
         let vocab_size = graph.vocab_size;
 
         // Pre-allocate logits buffer
@@ -4096,7 +4947,9 @@ impl CpuDecodeStore {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos() as u64;
-        if rng_state == 0 { rng_state = 0xDEADBEEF; }
+        if rng_state == 0 {
+            rng_state = 0xDEADBEEF;
+        }
         let mut rng_next = move || -> u64 {
             rng_state ^= rng_state << 13;
             rng_state ^= rng_state >> 7;
@@ -4125,7 +4978,13 @@ impl CpuDecodeStore {
             }
 
             next_token = sample_from_logits(
-                &mut logits, vocab_size, temperature, top_k, top_p, &mut rng_next);
+                &mut logits,
+                vocab_size,
+                temperature,
+                top_k,
+                top_p,
+                &mut rng_next,
+            );
             seen_tokens.insert(next_token);
             result.push(next_token);
 
@@ -4138,8 +4997,12 @@ impl CpuDecodeStore {
         self.last_decode_elapsed_s = elapsed;
         if !result.is_empty() {
             let tps = result.len() as f64 / elapsed;
-            log::info!("generate_batch: {} tokens in {:.2}s ({:.1} tok/s)",
-                result.len(), elapsed, tps);
+            log::info!(
+                "generate_batch: {} tokens in {:.2}s ({:.1} tok/s)",
+                result.len(),
+                elapsed,
+                tps
+            );
         }
 
         Ok(result)
@@ -4173,7 +5036,10 @@ impl CpuDecodeStore {
 
         let graph = match self.decode_graph.as_ref() {
             Some(g) => g,
-            None => { log::error!("generate_stream: decode_graph not configured"); return 0; }
+            None => {
+                log::error!("generate_stream: decode_graph not configured");
+                return 0;
+            }
         };
         let vocab_size = graph.vocab_size;
 
@@ -4187,7 +5053,9 @@ impl CpuDecodeStore {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos() as u64;
-        if rng_state == 0 { rng_state = 0xDEADBEEF; }
+        if rng_state == 0 {
+            rng_state = 0xDEADBEEF;
+        }
         let mut rng_next = move || -> u64 {
             rng_state ^= rng_state << 13;
             rng_state ^= rng_state >> 7;
@@ -4225,7 +5093,13 @@ impl CpuDecodeStore {
             }
 
             next_token = sample_from_logits(
-                &mut logits, vocab_size, temperature, top_k, top_p, &mut rng_next);
+                &mut logits,
+                vocab_size,
+                temperature,
+                top_k,
+                top_p,
+                &mut rng_next,
+            );
             seen_tokens.insert(next_token);
             generated += 1;
 
@@ -4253,8 +5127,12 @@ impl CpuDecodeStore {
         self.last_decode_elapsed_s = elapsed;
         if generated > 0 {
             let tps = generated as f64 / elapsed;
-            log::info!("generate_stream: {} tokens in {:.2}s ({:.1} tok/s)",
-                generated, elapsed, tps);
+            log::info!(
+                "generate_stream: {} tokens in {:.2}s ({:.1} tok/s)",
+                generated,
+                elapsed,
+                tps
+            );
         }
 
         generated
@@ -4304,19 +5182,27 @@ fn sample_from_logits(
     }
 
     // Top-k: find k-th largest value, mask everything below it
-    let effective_k = if top_k > 0 && top_k < vocab_size { top_k } else { vocab_size };
+    let effective_k = if top_k > 0 && top_k < vocab_size {
+        top_k
+    } else {
+        vocab_size
+    };
 
     // Build index array for sorting (only if we need top-k or top-p)
     let mut indices: Vec<usize> = (0..vocab_size).collect();
     // Partial sort: we only need top-k elements
     indices.select_nth_unstable_by(effective_k.min(vocab_size) - 1, |&a, &b| {
-        logits[b].partial_cmp(&logits[a]).unwrap_or(std::cmp::Ordering::Equal)
+        logits[b]
+            .partial_cmp(&logits[a])
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
 
     // Sort the top-k portion for top-p filtering
     let top_slice = &mut indices[..effective_k];
     top_slice.sort_unstable_by(|&a, &b| {
-        logits[b].partial_cmp(&logits[a]).unwrap_or(std::cmp::Ordering::Equal)
+        logits[b]
+            .partial_cmp(&logits[a])
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
 
     // Softmax over top-k (numerically stable)
@@ -4374,15 +5260,28 @@ fn sample_from_logits(
 // ── Helper: LA conv (factored out for clarity) ──
 
 fn decode_la_conv(
-    qkvz: &[f32], ba: &[f32],
-    conv_state: &mut [f32], conv_weight: &[f32],
-    a_log: &[f32], dt_bias: &[f32], scale: f32,
-    q_out: &mut [f32], k_out: &mut [f32],
-    v_out: &mut [f32], z_out: &mut [f32],
-    g_out: &mut [f32], beta_out: &mut [f32],
-    mixed_qkv: &mut [f32], conv_out: &mut [f32],
-    nk: usize, nv: usize, dk: usize, dv: usize, hr: usize,
-    kernel_dim: usize, conv_dim: usize,
+    qkvz: &[f32],
+    ba: &[f32],
+    conv_state: &mut [f32],
+    conv_weight: &[f32],
+    a_log: &[f32],
+    dt_bias: &[f32],
+    scale: f32,
+    q_out: &mut [f32],
+    k_out: &mut [f32],
+    v_out: &mut [f32],
+    z_out: &mut [f32],
+    g_out: &mut [f32],
+    beta_out: &mut [f32],
+    mixed_qkv: &mut [f32],
+    conv_out: &mut [f32],
+    nk: usize,
+    nv: usize,
+    dk: usize,
+    dv: usize,
+    hr: usize,
+    kernel_dim: usize,
+    conv_dim: usize,
 ) {
     let group_dim = 2 * dk + 2 * dv * hr;
     let key_dim = nk * dk;
@@ -4399,8 +5298,7 @@ fn decode_la_conv(
             let z_src = src + 2 * dk + hr * dv + r * dv;
             mixed_qkv[2 * key_dim + v_head * dv..2 * key_dim + (v_head + 1) * dv]
                 .copy_from_slice(&qkvz[v_src..v_src + dv]);
-            z_out[v_head * dv..(v_head + 1) * dv]
-                .copy_from_slice(&qkvz[z_src..z_src + dv]);
+            z_out[v_head * dv..(v_head + 1) * dv].copy_from_slice(&qkvz[z_src..z_src + dv]);
         }
     }
 
@@ -4437,7 +5335,9 @@ fn decode_la_conv(
         }
     }
     // Apply SiLU in bulk using AVX2
-    unsafe { fast_silu_avx2(conv_out, conv_dim); }
+    unsafe {
+        fast_silu_avx2(conv_out, conv_dim);
+    }
 
     // Expand + L2 normalize q/k using AVX2
     unsafe {
@@ -4457,7 +5357,11 @@ fn decode_la_conv(
             let a_p = ba[src + hr + r];
             beta_out[vh] = 1.0 / (1.0 + (-b_raw).exp());
             let ap_dt = a_p + dt_bias[vh];
-            let softplus = if ap_dt > 20.0 { ap_dt } else { (1.0 + ap_dt.exp()).ln() };
+            let softplus = if ap_dt > 20.0 {
+                ap_dt
+            } else {
+                (1.0 + ap_dt.exp()).ln()
+            };
             g_out[vh] = -(a_log[vh].exp()) * softplus;
         }
     }
@@ -4468,8 +5372,12 @@ fn decode_la_conv(
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn l2_normalize_expand_avx2(
-    src: &[f32], dst: &mut [f32],
-    src_offset: usize, dk: usize, nv: usize, hr: usize,
+    src: &[f32],
+    dst: &mut [f32],
+    src_offset: usize,
+    dk: usize,
+    nv: usize,
+    hr: usize,
     scale: f32,
 ) {
     use std::arch::x86_64::*;
@@ -4502,7 +5410,11 @@ unsafe fn l2_normalize_expand_avx2(
             sum_sq += v * v;
         }
 
-        let inv_norm = if sum_sq > 0.0 { 1.0 / sum_sq.sqrt() } else { 0.0 };
+        let inv_norm = if sum_sq > 0.0 {
+            1.0 / sum_sq.sqrt()
+        } else {
+            0.0
+        };
         let inv_v = _mm256_mul_ps(_mm256_set1_ps(inv_norm), scale_v);
 
         for i in 0..dk8 {
@@ -4518,8 +5430,12 @@ unsafe fn l2_normalize_expand_avx2(
 
 #[cfg(not(target_arch = "x86_64"))]
 unsafe fn l2_normalize_expand_avx2(
-    src: &[f32], dst: &mut [f32],
-    src_offset: usize, dk: usize, nv: usize, hr: usize,
+    src: &[f32],
+    dst: &mut [f32],
+    src_offset: usize,
+    dk: usize,
+    nv: usize,
+    hr: usize,
     scale: f32,
 ) {
     for vh in 0..nv {
@@ -4527,9 +5443,17 @@ unsafe fn l2_normalize_expand_avx2(
         let s_base = src_offset + kh * dk;
         let d_base = vh * dk;
         let mut sum_sq = 0.0f32;
-        for i in 0..dk { sum_sq += src[s_base + i] * src[s_base + i]; }
-        let inv_norm = if sum_sq > 0.0 { 1.0 / sum_sq.sqrt() } else { 0.0 };
-        for i in 0..dk { dst[d_base + i] = src[s_base + i] * inv_norm * scale; }
+        for i in 0..dk {
+            sum_sq += src[s_base + i] * src[s_base + i];
+        }
+        let inv_norm = if sum_sq > 0.0 {
+            1.0 / sum_sq.sqrt()
+        } else {
+            0.0
+        };
+        for i in 0..dk {
+            dst[d_base + i] = src[s_base + i] * inv_norm * scale;
+        }
     }
 }
 
@@ -4538,8 +5462,13 @@ unsafe fn l2_normalize_expand_avx2(
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn gated_rmsnorm_silu_avx2(
-    recur_out: &[f32], z_buf: &[f32], norm_weight: &[f32],
-    gated_out: &mut [f32], nv: usize, dv: usize, eps: f32,
+    recur_out: &[f32],
+    z_buf: &[f32],
+    norm_weight: &[f32],
+    gated_out: &mut [f32],
+    nv: usize,
+    dv: usize,
+    eps: f32,
 ) {
     use std::arch::x86_64::*;
 
@@ -4562,7 +5491,9 @@ unsafe fn gated_rmsnorm_silu_avx2(
         let poly = _mm256_fmadd_ps(poly, f, c1);
         let poly = _mm256_fmadd_ps(poly, f, one);
         let pow2n = _mm256_castsi256_ps(_mm256_slli_epi32(
-            _mm256_add_epi32(ni, _mm256_set1_epi32(127)), 23));
+            _mm256_add_epi32(ni, _mm256_set1_epi32(127)),
+            23,
+        ));
         _mm256_mul_ps(poly, pow2n)
     }
 
@@ -4584,7 +5515,9 @@ unsafe fn gated_rmsnorm_silu_avx2(
         let s1 = _mm_add_ps(sum128, shuf);
         let s2 = _mm_add_ps(s1, _mm_movehl_ps(shuf, s1));
         let mut sum_sq = _mm_cvtss_f32(s2);
-        for i in (dv8 * 8)..dv { sum_sq += recur_out[base + i] * recur_out[base + i]; }
+        for i in (dv8 * 8)..dv {
+            sum_sq += recur_out[base + i] * recur_out[base + i];
+        }
 
         let rms = (sum_sq / dv as f32 + eps).sqrt().recip();
         let rms_v = _mm256_set1_ps(rms);
@@ -4628,13 +5561,20 @@ unsafe fn gated_rmsnorm_silu_avx2(
 
 #[cfg(not(target_arch = "x86_64"))]
 unsafe fn gated_rmsnorm_silu_avx2(
-    recur_out: &[f32], z_buf: &[f32], norm_weight: &[f32],
-    gated_out: &mut [f32], nv: usize, dv: usize, eps: f32,
+    recur_out: &[f32],
+    z_buf: &[f32],
+    norm_weight: &[f32],
+    gated_out: &mut [f32],
+    nv: usize,
+    dv: usize,
+    eps: f32,
 ) {
     for h in 0..nv {
         let base = h * dv;
         let mut sum_sq = 0.0f32;
-        for j in 0..dv { sum_sq += recur_out[base + j] * recur_out[base + j]; }
+        for j in 0..dv {
+            sum_sq += recur_out[base + j] * recur_out[base + j];
+        }
         let rms = (sum_sq / dv as f32 + eps).sqrt().recip();
         for j in 0..dv {
             let normed = recur_out[base + j] * rms * norm_weight[base + j];
@@ -4684,10 +5624,17 @@ fn moe_route_score_topk(
                         let c4 = _mm256_set1_ps(0.009518);
                         let poly = _mm256_fmadd_ps(
                             _mm256_fmadd_ps(
-                                _mm256_fmadd_ps(
-                                    _mm256_fmadd_ps(c4, f, c3), f, c2), f, c1), f, c0);
+                                _mm256_fmadd_ps(_mm256_fmadd_ps(c4, f, c3), f, c2),
+                                f,
+                                c1,
+                            ),
+                            f,
+                            c0,
+                        );
                         let pow2n = _mm256_castsi256_ps(_mm256_slli_epi32(
-                            _mm256_add_epi32(ni, _mm256_set1_epi32(127)), 23));
+                            _mm256_add_epi32(ni, _mm256_set1_epi32(127)),
+                            23,
+                        ));
                         let exp_neg = _mm256_mul_ps(poly, pow2n);
                         let sigmoid = _mm256_div_ps(one, _mm256_add_ps(one, exp_neg));
                         _mm256_storeu_ps(scores.as_mut_ptr().add(i * 8), sigmoid);
@@ -4698,40 +5645,64 @@ fn moe_route_score_topk(
                 }
             }
             #[cfg(not(target_arch = "x86_64"))]
-            for e in 0..ne { scores[e] = 1.0 / (1.0 + (-logits[e]).exp()); }
+            for e in 0..ne {
+                scores[e] = 1.0 / (1.0 + (-logits[e]).exp());
+            }
             if let Some(ref esc) = e_score_corr {
-                for e in 0..ne { corrected[e] = scores[e] + esc[e]; }
+                for e in 0..ne {
+                    corrected[e] = scores[e] + esc[e];
+                }
                 topk_indices(&corrected[..ne], topk, topk_ids);
             } else {
                 topk_indices(scores, topk, topk_ids);
             }
-            for i in 0..topk { topk_weights[i] = scores[topk_ids[i] as usize]; }
+            for i in 0..topk {
+                topk_weights[i] = scores[topk_ids[i] as usize];
+            }
             if norm_topk_prob {
                 let sum: f32 = topk_weights[..topk].iter().sum();
-                if sum > 0.0 { for w in topk_weights[..topk].iter_mut() { *w /= sum; } }
+                if sum > 0.0 {
+                    for w in topk_weights[..topk].iter_mut() {
+                        *w /= sum;
+                    }
+                }
             }
         }
         1 => {
             let max_l = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
             let mut sum_exp = 0.0f32;
-            for e in 0..ne { scores[e] = (logits[e] - max_l).exp(); sum_exp += scores[e]; }
+            for e in 0..ne {
+                scores[e] = (logits[e] - max_l).exp();
+                sum_exp += scores[e];
+            }
             let inv = 1.0 / sum_exp;
-            for e in 0..ne { scores[e] *= inv; }
+            for e in 0..ne {
+                scores[e] *= inv;
+            }
             if let Some(ref esc) = e_score_corr {
-                for e in 0..ne { corrected[e] = scores[e] + esc[e]; }
+                for e in 0..ne {
+                    corrected[e] = scores[e] + esc[e];
+                }
                 topk_indices(&corrected[..ne], topk, topk_ids);
             } else {
                 topk_indices(scores, topk, topk_ids);
             }
-            for i in 0..topk { topk_weights[i] = scores[topk_ids[i] as usize]; }
+            for i in 0..topk {
+                topk_weights[i] = scores[topk_ids[i] as usize];
+            }
             if norm_topk_prob {
                 let sum: f32 = topk_weights[..topk].iter().sum();
-                if sum > 0.0 { for w in topk_weights[..topk].iter_mut() { *w /= sum; } }
+                if sum > 0.0 {
+                    for w in topk_weights[..topk].iter_mut() {
+                        *w /= sum;
+                    }
+                }
             }
         }
         2 => {
             topk_indices(logits, topk, topk_ids);
-            let max_l = (0..topk).map(|i| logits[topk_ids[i] as usize])
+            let max_l = (0..topk)
+                .map(|i| logits[topk_ids[i] as usize])
                 .fold(f32::NEG_INFINITY, f32::max);
             let mut sum_exp = 0.0f32;
             for i in 0..topk {
@@ -4740,7 +5711,9 @@ fn moe_route_score_topk(
                 sum_exp += v;
             }
             let inv = 1.0 / sum_exp;
-            for i in 0..topk { topk_weights[i] *= inv; }
+            for i in 0..topk {
+                topk_weights[i] *= inv;
+            }
         }
         _ => {}
     }
@@ -4753,11 +5726,11 @@ fn moe_route_score_topk(
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma,f16c")]
 unsafe fn gqa_attention_compute_fp16_avx2(
-    q: &[f32],              // [num_heads * head_dim]
-    k_cache: &[u16],        // [max_seq * kv_heads * head_dim] FP16
-    v_cache: &[u16],        // [max_seq * kv_heads * head_dim] FP16
-    scores: &mut [f32],     // scratch [num_heads * seq_len]
-    attn_out: &mut [f32],   // output [num_heads * head_dim * (2 if gated)]
+    q: &[f32],            // [num_heads * head_dim]
+    k_cache: &[u16],      // [max_seq * kv_heads * head_dim] FP16
+    v_cache: &[u16],      // [max_seq * kv_heads * head_dim] FP16
+    scores: &mut [f32],   // scratch [num_heads * seq_len]
+    attn_out: &mut [f32], // output [num_heads * head_dim * (2 if gated)]
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
@@ -4812,11 +5785,16 @@ unsafe fn gqa_attention_compute_fp16_avx2(
             sum_exp += *v;
         }
         let inv = 1.0 / sum_exp;
-        for v in sc.iter_mut() { *v *= inv; }
+        for v in sc.iter_mut() {
+            *v *= inv;
+        }
 
         // Weighted sum of values
         for b in 0..hd8 {
-            _mm256_storeu_ps(attn_out.as_mut_ptr().add(o_base + b * 8), _mm256_setzero_ps());
+            _mm256_storeu_ps(
+                attn_out.as_mut_ptr().add(o_base + b * 8),
+                _mm256_setzero_ps(),
+            );
         }
         for s in 0..seq_len {
             let w = _mm256_set1_ps(scores[s_base + s]);
@@ -4844,9 +5822,7 @@ unsafe fn gqa_attention_compute_fp16_avx2(
 /// AVX2+F16C MLA dot product with FP16 cache: dot(q[f32], cache[FP16], dim).
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma,f16c")]
-unsafe fn mla_attn_dot_fp16_avx2(
-    q: &[f32], cache: &[u16], dim: usize,
-) -> f32 {
+unsafe fn mla_attn_dot_fp16_avx2(q: &[f32], cache: &[u16], dim: usize) -> f32 {
     use std::arch::x86_64::*;
     let n8 = dim / 8;
     let mut acc0 = _mm256_setzero_ps();
@@ -4885,9 +5861,9 @@ unsafe fn mla_attn_dot_fp16_avx2(
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma,f16c")]
 unsafe fn mla_weighted_sum_fp16_avx2(
-    weights: &[f32],    // [seq_len] attention weights
-    cache: &[u16],      // [max_seq * dim] FP16 cache data
-    out: &mut [f32],    // [dim] output
+    weights: &[f32], // [seq_len] attention weights
+    cache: &[u16],   // [max_seq * dim] FP16 cache data
+    out: &mut [f32], // [dim] output
     seq_len: usize,
     dim: usize,
 ) {
@@ -4905,8 +5881,7 @@ unsafe fn mla_weighted_sum_fp16_avx2(
         for j in 0..dim8 {
             let c = fp16x8_to_f32x8(cache.as_ptr().add(cache_t + j * 8));
             let o = _mm256_loadu_ps(out.as_ptr().add(j * 8));
-            _mm256_storeu_ps(out.as_mut_ptr().add(j * 8),
-                _mm256_fmadd_ps(w, c, o));
+            _mm256_storeu_ps(out.as_mut_ptr().add(j * 8), _mm256_fmadd_ps(w, c, o));
         }
     }
 }
@@ -4917,7 +5892,9 @@ unsafe fn mla_weighted_sum_fp16_avx2(
 struct Xorshift64(u64);
 
 impl Xorshift64 {
-    fn new(seed: u64) -> Self { Self(if seed == 0 { 0xDEADBEEF } else { seed }) }
+    fn new(seed: u64) -> Self {
+        Self(if seed == 0 { 0xDEADBEEF } else { seed })
+    }
     #[inline]
     fn next_u64(&mut self) -> u64 {
         self.0 ^= self.0 << 13;
@@ -4926,7 +5903,9 @@ impl Xorshift64 {
         self.0
     }
     #[inline]
-    fn next_u32(&mut self) -> u32 { self.next_u64() as u32 }
+    fn next_u32(&mut self) -> u32 {
+        self.next_u64() as u32
+    }
     /// Random f32 in [-scale, scale]
     #[inline]
     fn next_f32(&mut self, scale: f32) -> f32 {
@@ -4966,7 +5945,7 @@ fn fill_random_u16(v: &mut [u16], rng: &mut Xorshift64) {
         // FP16: sign(1) exp(5) mant(10), keep exp in reasonable range [8..22] -> values ~0.001..64
         let bits = rng.next_u64();
         let sign = ((bits >> 15) & 1) as u16;
-        let exp = (((bits >> 5) & 0xF) + 8) as u16;  // exp 8-23
+        let exp = (((bits >> 5) & 0xF) + 8) as u16; // exp 8-23
         let mant = (bits & 0x3FF) as u16;
         *val = (sign << 15) | (exp << 10) | mant;
     }
@@ -4975,10 +5954,14 @@ fn fill_random_u16(v: &mut [u16], rng: &mut Xorshift64) {
 /// Hint the OS to use transparent huge pages for a large allocation.
 #[cfg(target_os = "linux")]
 fn hint_hugepages<T>(v: &mut [T]) {
-    if v.is_empty() { return; }
+    if v.is_empty() {
+        return;
+    }
     let ptr = v.as_mut_ptr() as *mut libc::c_void;
     let len = v.len() * std::mem::size_of::<T>();
-    unsafe { libc::madvise(ptr, len, libc::MADV_HUGEPAGE); }
+    unsafe {
+        libc::madvise(ptr, len, libc::MADV_HUGEPAGE);
+    }
 }
 
 // ── FP16 CPU KV Cache Support ──
@@ -5027,18 +6010,24 @@ unsafe fn f32_slice_to_fp16(src: &[f32], dst: &mut [u16]) {
     let n8 = src.len() / 8;
     for i in 0..n8 {
         let v = _mm256_loadu_ps(src.as_ptr().add(i * 8));
-        let h = _mm256_cvtps_ph::<{_MM_FROUND_TO_NEAREST_INT}>(v);
+        let h = _mm256_cvtps_ph::<{ _MM_FROUND_TO_NEAREST_INT }>(v);
         _mm_storeu_si128(dst.as_mut_ptr().add(i * 8) as *mut __m128i, h);
     }
     // Scalar remainder
     for i in (n8 * 8)..src.len() {
         let v = _mm256_set1_ps(*src.get_unchecked(i));
-        let h = _mm256_cvtps_ph::<{_MM_FROUND_TO_NEAREST_INT}>(v);
+        let h = _mm256_cvtps_ph::<{ _MM_FROUND_TO_NEAREST_INT }>(v);
         *dst.get_unchecked_mut(i) = _mm_extract_epi16(h, 0) as u16;
     }
 }
 
-fn fake_transposed_weight(rows: usize, cols: usize, group_size: usize, num_bits: u8, rng: &mut Xorshift64) -> TransposedWeight {
+fn fake_transposed_weight(
+    rows: usize,
+    cols: usize,
+    group_size: usize,
+    num_bits: u8,
+    rng: &mut Xorshift64,
+) -> TransposedWeight {
     let mut packed = if num_bits == 4 {
         let pk = cols / 8;
         vec![0u32; pk * rows]
@@ -5051,7 +6040,15 @@ fn fake_transposed_weight(rows: usize, cols: usize, group_size: usize, num_bits:
     let num_groups = cols / group_size;
     let mut scales = vec![0u16; num_groups * rows];
     fill_random_scales_u16(&mut scales, rng);
-    TransposedWeight { packed, scales, rows, cols, group_size, num_bits, tiled: false }
+    TransposedWeight {
+        packed,
+        scales,
+        rows,
+        cols,
+        group_size,
+        num_bits,
+        tiled: false,
+    }
 }
 
 // ── AVX2 MLA kernels ──
@@ -5067,13 +6064,16 @@ fn fake_transposed_weight(rows: usize, cols: usize, group_size: usize, num_bits:
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn mla_absorb_wkc_avx2(
-    q_nope: &[f32],    // [nh * head_dim] — q_nope starts at offset h*head_dim
-    w_kc: &[f32],      // [nh, qk_nd, klr]
-    out: &mut [f32],    // [nh * klr]
-    nh: usize, qk_nd: usize, klr: usize, head_dim: usize,
+    q_nope: &[f32],  // [nh * head_dim] — q_nope starts at offset h*head_dim
+    w_kc: &[f32],    // [nh, qk_nd, klr]
+    out: &mut [f32], // [nh * klr]
+    nh: usize,
+    qk_nd: usize,
+    klr: usize,
+    head_dim: usize,
 ) {
-    use std::arch::x86_64::*;
     use rayon::prelude::*;
+    use std::arch::x86_64::*;
     let klr8 = klr / 8;
 
     // Parallel across heads
@@ -5101,8 +6101,7 @@ unsafe fn mla_absorb_wkc_avx2(
             for j in 0..klr8 {
                 let w = _mm256_loadu_ps(w_kc.add(w_row + j * 8));
                 let o = _mm256_loadu_ps(out.add(out_base + j * 8) as *const f32);
-                _mm256_storeu_ps(out.add(out_base + j * 8),
-                    _mm256_fmadd_ps(q_val, w, o));
+                _mm256_storeu_ps(out.add(out_base + j * 8), _mm256_fmadd_ps(q_val, w, o));
             }
         }
     });
@@ -5114,13 +6113,15 @@ unsafe fn mla_absorb_wkc_avx2(
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn mla_project_wvc_avx2(
-    w_vc: &[f32],       // [nh, vhd, klr]
-    attn_out: &[f32],   // [nh * klr]
+    w_vc: &[f32],            // [nh, vhd, klr]
+    attn_out: &[f32],        // [nh * klr]
     v_projected: &mut [f32], // [nh * vhd]
-    nh: usize, vhd: usize, klr: usize,
+    nh: usize,
+    vhd: usize,
+    klr: usize,
 ) {
-    use std::arch::x86_64::*;
     use rayon::prelude::*;
+    use std::arch::x86_64::*;
     let klr8 = klr / 8;
 
     let wvc_ptr = w_vc.as_ptr() as usize;
@@ -5186,8 +6187,12 @@ pub fn extract_top_logprobs(logits: &[f32], vocab_size: usize, top_n: usize) -> 
     }
     // Compute log-softmax: log_prob[i] = logit[i] - log(sum(exp(logit[j])))
     // Numerically stable: subtract max first
-    let max_logit = logits[..vocab_size].iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let sum_exp: f64 = logits[..vocab_size].iter()
+    let max_logit = logits[..vocab_size]
+        .iter()
+        .cloned()
+        .fold(f32::NEG_INFINITY, f32::max);
+    let sum_exp: f64 = logits[..vocab_size]
+        .iter()
         .map(|&x| ((x - max_logit) as f64).exp())
         .sum();
     let log_sum_exp = max_logit as f64 + sum_exp.ln();

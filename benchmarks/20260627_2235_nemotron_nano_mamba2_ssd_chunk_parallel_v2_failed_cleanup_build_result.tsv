@@ -1,0 +1,8 @@
+field	value
+command	./dev build
+exit	0
+duration_s	175
+nvcc_prefill_ptx_compile_s	5.599
+maturin_build_s	171
+log	20260627_2235_nemotron_nano_mamba2_ssd_chunk_parallel_v2_failed_cleanup_build.log
+result	pass

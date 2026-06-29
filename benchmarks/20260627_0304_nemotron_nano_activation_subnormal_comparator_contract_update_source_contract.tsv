@@ -1,0 +1,8 @@
+path	contract
+src/weights/expert_hqq.rs	activation_trace_contract_passes allows only activation-stage exact-contract failures where every mismatch is actual 0x0000 and expected positive BF16 subnormal with positive subnormal raw value
+src/weights/expert_hqq.rs	stage_totals and layer_stage_totals now aggregate per-case contract pass bits so accepted activation FTZ classifications remain visible as nonzero deltas but pass the diagnostic contract
+src/weights/expert_hqq.rs	W13 tolerance remains unchanged at existing 1.0e-30 sum/max comparator tolerance
+src/weights/expert_hqq.rs	input/output exact contracts remain unchanged and do not accept zero-vs-subnormal mismatches
+src/weights/expert_hqq.rs	tests cover valid activation zero-vs-positive-subnormal pass, normal activation fail-closed, wrong output-stage fail-closed, and negative subnormal reference rejection
+src/bin/expert_hqq_trace_compare.rs	no CLI/runtime semantic change in this gate; existing offline comparator command reused
+dev	no command surface change in this gate; existing ./dev expert-hqq-trace-compare reused

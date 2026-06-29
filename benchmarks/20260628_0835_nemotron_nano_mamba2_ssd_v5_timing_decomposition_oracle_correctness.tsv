@@ -1,0 +1,10 @@
+tokens	records	failed	output_mismatches	state_mismatches	max_output_abs	max_state_abs	probe_result
+35	23	0	0	0	0.0	0.0	state_probes_exact; output probes out of range by design for row64/row82
+39	23	0	0	0	0.0	0.0	state_probes_exact; output probes out of range by design for row64/row82
+40	23	0	0	0	0.0	0.0	state_probes_exact; output probes out of range by design for row64/row82
+46	23	0	0	0	0.0	0.0	state_probes_exact; output probes out of range by design for row64/row82
+47	23	0	0	0	0.0	0.0	state_probes_exact; output probes out of range by design for row64/row82
+50	23	0	0	0	0.0	0.0	state_probes_exact; output probes out of range by design for row64/row82
+300	23	0	0	0	0.0	0.0	row64_state0_and_row82_state14_exact
+500	23	0	0	0	0.0	0.0	row64_state0_and_row82_state14_exact
+39920	23	0	0	0	0.0	0.0	row64_state0_and_row82_state14_exact

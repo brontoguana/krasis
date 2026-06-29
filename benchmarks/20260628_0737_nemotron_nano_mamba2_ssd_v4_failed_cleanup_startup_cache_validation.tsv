@@ -1,0 +1,9 @@
+check	status	evidence
+hqq_attention_cache_reused	pass	"HQQ attention artifacts validated (115 MB cached)"
+effective_marlin_cache_loaded	pass	"Loading GPU Marlin cache: 23 layers; GPU Marlin cache loaded: 15.8 GB in 10s"
+cache_write_evidence_absent	pass	"No cache write/save lines beyond the existing Marlin section header; cache loaded from existing files"
+krasis_temp_lock_files_absent	pass	"No *.tmp/*.lock/*.partial/*.incomplete files outside Hugging Face download lock metadata"
+requests_absent	pass	"No POST /v1 chat/completions lines"
+benchmark_path_absent	pass	"No benchmark-only or KrasisBenchmark lines"
+v4_oracle_absent	pass	"No MAMBA2-SSD-CHUNK-V4-ORACLE lines"
+startup_exit	pass	"Startup diagnostic exit after VRAM calibration"

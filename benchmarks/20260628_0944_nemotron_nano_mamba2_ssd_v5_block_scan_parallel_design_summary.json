@@ -1,0 +1,75 @@
+{
+  "artifacts": {
+    "bit_exactness": "20260628_0944_nemotron_nano_mamba2_ssd_v5_block_scan_parallel_design_bit_exactness.tsv",
+    "buffer_plan": "20260628_0944_nemotron_nano_mamba2_ssd_v5_block_scan_parallel_design_buffer_plan.tsv",
+    "decomposition_analysis": "20260628_0944_nemotron_nano_mamba2_ssd_v5_block_scan_parallel_design_decomposition_analysis.tsv",
+    "kernel_plan": "20260628_0944_nemotron_nano_mamba2_ssd_v5_block_scan_parallel_design_kernel_plan.tsv",
+    "oracle_probe_rules": "20260628_0944_nemotron_nano_mamba2_ssd_v5_block_scan_parallel_design_oracle_probe_rules.tsv",
+    "runtime_not_run": "20260628_0944_nemotron_nano_mamba2_ssd_v5_block_scan_parallel_design_runtime_not_run.tsv",
+    "source_audit": "20260628_0944_nemotron_nano_mamba2_ssd_v5_block_scan_parallel_design_source_audit.tsv",
+    "synchronization_plan": "20260628_0944_nemotron_nano_mamba2_ssd_v5_block_scan_parallel_design_synchronization_plan.tsv",
+    "validation_checks": "20260628_0944_nemotron_nano_mamba2_ssd_v5_block_scan_parallel_design_validation_checks.tsv"
+  },
+  "closed_utc": "2026-06-28T09:55:58Z",
+  "constraints": {
+    "build": false,
+    "decode_hcs_changes": false,
+    "default_path_change": false,
+    "implementation": false,
+    "production_enablement": false,
+    "requests": false,
+    "runtime_diagnostic": false,
+    "speed_benchmark": false
+  },
+  "gate": "20260628_0944_nemotron_nano_mamba2_ssd_v5_block_scan_parallel_design",
+  "opened_utc": "2026-06-28T09:44:00Z",
+  "record_first": {
+    "0835_result": {
+      "commit_copies_ms": 11.745775,
+      "correctness": "passed_exact_oracle",
+      "full_buffer_downloads_ms": 9043.142551,
+      "host_comparison_ms": 12390.200665,
+      "long_prefill_ssd_scan_ms": 251443.8,
+      "sequential_oracle_ms": 114292.93289,
+      "total_v5_path_ms": 251386.108393,
+      "v5_candidate_ms": 114293.15515
+    },
+    "gemma_baseline": {
+      "internal_decode_tok_s": 92.43,
+      "network_tok_s": 155.69,
+      "prefill_tok_s": 5619.6
+    },
+    "nano_baseline": {
+      "internal_decode_tok_s": 94.48,
+      "network_tok_s": 164.75,
+      "prefill_tok_s": 346.5
+    },
+    "source_gate": "20260628_0835_nemotron_nano_mamba2_ssd_v5_timing_decomposition"
+  },
+  "result": {
+    "bit_exactness_position": "A compact affine P/Q prefix summary is not accepted as bit-exact for arbitrary nonzero f32 state because it changes recurrence rounding order. Accepted block entries must be produced by replaying the same per-token f32 recurrence in token order from the actual entry state.",
+    "design": "two_phase_block_scan_static_plan",
+    "next_candidate_shape": [
+      "precompute sequential-compatible dt/a_bar/b_bar/dA_prefix coefficients",
+      "parallelize local D plus triangular output terms independently of prior state",
+      "propagate exact chunk entries with a chunk/window ordered recurrent spine using the same h=A_bar*h+BF16(B*dt)*x token order",
+      "assemble prior output from exact entry states plus unchanged local/output math",
+      "compare exact BF16 output and exact f32 state before committing candidate buffers"
+    ],
+    "performance_target": "Remove v5's second full monolithic serial candidate path; first correctness prototype may still use oracle overhead, but any performance gate must remove or isolate full host downloads and comparison.",
+    "status": "design_recorded"
+  },
+  "scope": "static_block_scan_parallel_design",
+  "status": "closed",
+  "validation": {
+    "final_gpu_memory_mb": {
+      "0": 15,
+      "1": 11
+    },
+    "final_snapshot_utc": "2026-06-28T09:55:58Z",
+    "krasis_temp_lock_files_excluding_hf_download_metadata": 0,
+    "nvidia_compute_processes": 0,
+    "passed": true,
+    "runtime_processes": 0
+  }
+}

@@ -1,0 +1,2 @@
+artifact	status	exit_code	duration_s	first_bad_layer	output_mismatches	output_max_abs	output_mean_abs	state_mismatches	state_max_abs	state_mean_abs	first_output_row	first_output_head	first_output_d	first_output_candidate	first_output_oracle	probe_row97	probe_row64_state0	probe_row82_state14	notes
+multi_chunk_oracle_300_output_order	fail_output_only	1	36	0	8	0.0078125	0.000000016690853	0	0.0	0.0	161	32	39	0xbff8	0xbff7	exact	exact	exact	state exact and tracked probes exact; remaining mismatch is chunk_gt0 output prior reconstruction

@@ -1,0 +1,15 @@
+check	status	evidence
+summary_json	pass	closed_diagnosis_completed; build exit 0; diagnostic exit 0; requests_sent 0; SSD/scan 114449.4ms
+substage_tsv	pass	ssd_scan row present with 114449.4ms wall and 99.661% of Mamba2 wall
+layer_liveness_tsv	pass	23 long-prefill Mamba2 layer rows; aggregate total 114839.128ms; aggregate SSD/scan 114449.418ms
+no_request_or_benchmark	pass	No /v1/internal/reference_test, BENCHMARK COMPLETE, or ./dev benchmark evidence in diagnostic logs
+no_cache_write_or_rebuild	pass	No safetensors Marlin build line, GPU Marlin cache built line, --build-cache, or --force-rebuild-hqq-cache in diagnostic logs
+bash_syntax	pass	bash -n dev
+krasis_diff_check	pass	git diff --check in krasis-nemotron-dev
+internal_diff_check	pass	git diff --check in krasis-internal
+protected_config_status	pass	Only expected untracked tests-only Nano HQQ4 config and known Nano BF16 config; no krasis/testconfigs edits
+cleanup	pass	./dev kill completed and reported all GPUs clear
+idle_state	pass	2026-06-27T19:26:24Z no tmux server, no matching runtime/build/curl process, no NVIDIA compute process
+gpu_idle	pass	GPU0 15 MB, GPU1 11 MB
+disk_ram	pass	Disk available 588G, RAM available 967Gi
+krasis_cache_tmp_lock	pass	No .tmp/.pending/.lock files under /home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16

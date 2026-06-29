@@ -1,0 +1,9 @@
+check	result	detail
+summary_json	pass	status closed_missing_k4v4_asset; valid_existing_k4v4_cache_spec=false; runtime_run=false
+inventory	pass	runtime_allowed=no and no valid Nano HQQ+k4v4 config/cache/spec found
+decision	pass	stopped missing/ambiguous k4v4 asset; proposed prerequisite gate recorded
+bash_n_dev	pass	dev syntax check passed
+diff_check_public	pass	git diff --check passed in krasis-nemotron-dev
+diff_check_internal	pass	git diff --check passed in krasis-internal
+protected_configs	pass	unchanged; only known untracked tests/nemotron-nano-bf16-experts-a16.conf
+final_snapshot	pass	2026-06-27T16:44:38Z no tmux server; no matching runtime/generator process; GPUs 15 MB / 11 MB; disk 613G; RAM 966Gi

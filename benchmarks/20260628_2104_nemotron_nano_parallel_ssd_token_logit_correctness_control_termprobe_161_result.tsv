@@ -1,0 +1,2 @@
+gate	command	exit_code	duration_s	target	layer0_candidate_bits	layer0_oracle_bits	layer0_y_pre_bf16	layer0_local_old_state	layer0_local_hf_chunk_scan	layer0_dA_target	result
+20260628_2104_nemotron_nano_parallel_ssd_token_logit_correctness	control coeff-tile term probe without KRASIS_MAMBA2_SSD_PARALLEL_CHUNKED	1	38	row161/head32/d39	0xbff7	0xbff7	-1.9335936307907104	-0.19068525731563568	-0.19289755821228027	-13.776796340942383	warmup_layer0_exact_then_later_calibration_target_out_of_range

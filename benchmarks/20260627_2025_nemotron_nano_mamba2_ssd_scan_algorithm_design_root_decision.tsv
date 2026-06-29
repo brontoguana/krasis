@@ -1,0 +1,10 @@
+field	value
+gate	20260627_2025_nemotron_nano_mamba2_ssd_scan_algorithm_design
+status	proposed_patch_recorded
+default_path_changes	false
+implementation_in_this_gate	false
+reason_not_implemented	Design requires new scratch buffers, four CUDA kernels, Rust dispatch/symbol plumbing, and an oracle comparison path; not unambiguously safe as a same-gate patch.
+next_patch_summary	Add an explicitly gated chunk-parallel SSD path with prepare_prefix, cb_matrix, output, and state_update kernels, retaining the sequential kernel as mandatory oracle for the first diagnostic.
+expected_measurable_effect	Reduce dominant duplicated C/B scalar work across head_dim lanes and parallelize chunk-local triangular emission/state update; expected to lower ssd_scan if kernel occupancy beats added per-chunk launch overhead.
+first_validation_command	KRASIS_STARTUP_DIAG=1 KRASIS_PREFILL_TIMING=1 KRASIS_PREFILL_LIVENESS_TIMING=1 KRASIS_MAMBA2_SSD_CHUNK_PARALLEL=1 KRASIS_MAMBA2_SSD_CHUNK_PARALLEL_ORACLE=1 KRASIS_STARTUP_WARMUP_TOKENS=128 KRASIS_STARTUP_CAL_SHORT_TOKENS=128 KRASIS_STARTUP_CAL_LONG_TOKENS=128 KRASIS_STARTUP_EXIT_AFTER_CALIBRATION=1 ./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf
+forbidden_in_this_gate	benchmarks, smoke requests, decode/HCS changes, production enablement, cache generation, default-path changes

@@ -1,0 +1,19 @@
+check	result	evidence
+record_first_summary	pass	jq summary assertion passed
+build_exit	pass	build.exit = 0
+startup_diagnostic_exit	pass	startup_diagnostic.exit = 0
+prototype_markers_removed	pass	no KRASIS_MAMBA2_SSD_REUSE_PROTO / MAMBA2-SSD-PROTO / mamba2_ssd_head_shared / Mamba2SsdOracle matches in src or python
+1908_mamba2_timing_preserved	pass	mamba2_substages, Mamba2 SSD/scan, and mamba2 breakdown remain in src/gpu_prefill.rs
+startup_cache_reuse	pass	HQQ attention validated; Loading GPU Marlin cache; GPU Marlin cache loaded
+no_requests_or_benchmark	pass	no /v1/internal/reference_test, BENCHMARK COMPLETE, or ./dev benchmark lines in diagnostic log
+no_cache_rebuild_flags_or_write	pass	no --build-cache, --force-rebuild-hqq-cache, or safetensors Marlin cache build line in diagnostic log
+bash_syntax	pass	bash -n dev
+krasis_diff_check	pass	git diff --check in krasis-nemotron-dev
+internal_diff_check	pass	git diff --check in krasis-internal
+protected_config_status	pass	only tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf and known tests/nemotron-nano-bf16-experts-a16.conf are untracked
+cleanup_command	pass	./dev kill exit 0
+cache_temp_lock_files	pass	none under Nano model cache after cleanup
+tmux_runtime_processes	pass	none at 2026-06-27T20:23:18Z
+nvidia_compute_processes	pass	none at 2026-06-27T20:23:18Z
+gpu_idle	pass	GPU0 15 MB, GPU1 11 MB at 2026-06-27T20:23:18Z
+disk_ram_snapshot	pass	disk 588G free; RAM 967Gi available

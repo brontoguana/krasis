@@ -24,12 +24,199 @@ __device__ __forceinline__ __nv_bfloat16 float_to_bf16(float x) {
     return __float2bfloat16(x);
 }
 
+extern "C" __device__ float __nv_logf(float);
+extern "C" __device__ float __nv_expf(float);
+
+__device__ __forceinline__ float mamba2_ssd_exp_a_log(float a_log) {
+    return __nv_expf(a_log);
+}
+
+__device__ __forceinline__ float mamba2_ssd_a_value(float a_log) {
+    return -mamba2_ssd_exp_a_log(a_log);
+}
+
+__device__ __forceinline__ float mamba2_chunk_cumsum_softplus(float x) {
+    return __nv_logf(1.0f + __expf(x));
+}
+
+__device__ __forceinline__ float mamba2_ssd_dt_value(
+    const __nv_bfloat16* __restrict__ dt_in,
+    const float* __restrict__ dt_bias,
+    int t,
+    int n_heads,
+    int head,
+    int use_softplus)
+{
+    float dt = bf16_to_float(dt_in[t * n_heads + head]);
+    if (dt_bias != NULL) dt += dt_bias[head];
+    if (use_softplus) dt = mamba2_chunk_cumsum_softplus(dt);
+    return dt;
+}
+
+__device__ __forceinline__ float mamba2_ssd_cb_dot_reverse(
+    const __nv_bfloat16* __restrict__ C_mat,
+    const __nv_bfloat16* __restrict__ B_mat,
+    int c_row_base_idx,
+    int b_row_base_idx,
+    int state_size)
+{
+    float cb = 0.0f;
+    for (int s = state_size - 1; s >= 0; s--) {
+        float C_val = bf16_to_float(C_mat[c_row_base_idx + s]);
+        float B_val = bf16_to_float(B_mat[b_row_base_idx + s]);
+        cb += C_val * B_val;
+    }
+    return cb;
+}
+
+__device__ __forceinline__ void mamba2_ssd_timing_add(
+    unsigned long long* __restrict__ timing,
+    int idx,
+    unsigned long long cycles)
+{
+    if (timing != NULL && cycles != 0ULL) {
+        atomicAdd(&timing[idx], cycles);
+    }
+}
+
+__device__ __forceinline__ int mamba2_ssd_lower_tri_pair_index(int t_pos, int u_pos)
+{
+    return (t_pos * (t_pos + 1)) / 2 + u_pos;
+}
+
+__device__ __forceinline__ void mamba2_ssd_lower_tri_pair_decode(
+    int pair_idx,
+    int* __restrict__ t_pos,
+    int* __restrict__ u_pos)
+{
+    int row = (int)((sqrtf((float)(8 * pair_idx + 1)) - 1.0f) * 0.5f);
+    while ((row * (row + 1)) / 2 > pair_idx) row--;
+    while (((row + 1) * (row + 2)) / 2 <= pair_idx) row++;
+    *t_pos = row;
+    *u_pos = pair_idx - (row * (row + 1)) / 2;
+}
+
+__device__ __forceinline__ float* mamba2_ssd_build_da_prefix_scan(
+    float* da_smem,
+    int chunk_capacity,
+    const __nv_bfloat16* __restrict__ dt_in,
+    const float* __restrict__ dt_bias,
+    float A_val,
+    int n_heads,
+    int head,
+    int chunk_start,
+    int chunk_len,
+    int use_softplus)
+{
+    float* src = da_smem;
+    float* dst = da_smem + chunk_capacity;
+    for (int i = threadIdx.x; i < chunk_len; i += blockDim.x) {
+        float dt = mamba2_ssd_dt_value(dt_in, dt_bias, chunk_start + i, n_heads, head, use_softplus);
+        src[i] = A_val * dt;
+    }
+    __syncthreads();
+
+    for (int offset = 1; offset < chunk_len; offset <<= 1) {
+        for (int i = threadIdx.x; i < chunk_len; i += blockDim.x) {
+            float value = src[i];
+            if (i >= offset) value += src[i - offset];
+            dst[i] = value;
+        }
+        __syncthreads();
+        float* tmp = src;
+        src = dst;
+        dst = tmp;
+    }
+    return src;
+}
+
 __device__ __forceinline__ __nv_fp8_e4m3 f32_to_fp8e4m3(float x) {
     return __nv_fp8_e4m3(x);
 }
 
 __device__ __forceinline__ __nv_fp8_e4m3 bf16_to_fp8e4m3(__nv_bfloat16 x) {
     return f32_to_fp8e4m3(bf16_to_float(x));
+}
+
+__device__ __forceinline__ float trace_sqrt_rn_f32(float x) {
+    float y;
+    asm volatile("sqrt.rn.f32 %0, %1;" : "=f"(y) : "f"(x));
+    return y;
+}
+
+__device__ __forceinline__ float trace_div_rn_f32(float a, float b) {
+    float y;
+    asm volatile("div.rn.f32 %0, %1, %2;" : "=f"(y) : "f"(a), "f"(b));
+    return y;
+}
+
+__device__ __forceinline__ float trace_rcp_rn_f32(float x) {
+    float y;
+    asm volatile("rcp.rn.f32 %0, %1;" : "=f"(y) : "f"(x));
+    return y;
+}
+
+__device__ __forceinline__ float trace_sqrt_approx_f32(float x) {
+    float y;
+    asm volatile("sqrt.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(x));
+    return y;
+}
+
+__device__ __forceinline__ float trace_div_approx_f32(float a, float b) {
+    float y;
+    asm volatile("div.approx.ftz.f32 %0, %1, %2;" : "=f"(y) : "f"(a), "f"(b));
+    return y;
+}
+
+__device__ __forceinline__ float trace_rsqrt_approx_f32(float x) {
+    float y;
+    asm volatile("rsqrt.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(x));
+    return y;
+}
+
+__device__ __forceinline__ float mamba2_gated_rmsnorm_triton_rstd(float x) {
+    float sqrt_approx;
+    asm volatile("sqrt.approx.ftz.f32 %0, %1;" : "=f"(sqrt_approx) : "f"(x));
+    float y;
+    asm volatile("div.rn.f32 %0, %1, %2;" : "=f"(y) : "f"(1.0f), "f"(sqrt_approx));
+    return y;
+}
+
+__device__ __forceinline__ float trace_mul_rn_f32(float a, float b) {
+    float y;
+    asm volatile("mul.rn.f32 %0, %1, %2;" : "=f"(y) : "f"(a), "f"(b));
+    return y;
+}
+
+__device__ __forceinline__ float trace_add_rn_f32(float a, float b) {
+    float y;
+    asm volatile("add.rn.f32 %0, %1, %2;" : "=f"(y) : "f"(a), "f"(b));
+    return y;
+}
+
+__device__ __forceinline__ float trace_fma_rn_f32(float a, float b, float c) {
+    float y;
+    asm volatile("fma.rn.f32 %0, %1, %2, %3;" : "=f"(y) : "f"(a), "f"(b), "f"(c));
+    return y;
+}
+
+__device__ __forceinline__ unsigned long long trace_mix_u64(
+    unsigned long long h,
+    unsigned long long v)
+{
+    h ^= v;
+    h *= 1099511628211ULL;
+    return h;
+}
+
+__device__ __forceinline__ void gated_rmsnorm_adjacent_pairwise_reduce(float* smem) {
+    for (int stride = 1; stride < blockDim.x; stride <<= 1) {
+        int span = stride << 1;
+        if (((threadIdx.x & (span - 1)) == 0) && threadIdx.x + stride < blockDim.x) {
+            smem[threadIdx.x] += smem[threadIdx.x + stride];
+        }
+        __syncthreads();
+    }
 }
 
 /* ── Batched RMSNorm ──────────────────────────────────────────────────── */
@@ -106,6 +293,47 @@ extern "C" __global__ void rmsnorm_batched_fp32w_kernel(
     }
 }
 
+/* Diagnostic candidate: contiguous per-thread chunks before the block
+ * reduction. This preserves parallel output writes and avoids a serial row
+ * loop while testing whether reduction order can match HF/index-order stores.
+ */
+extern "C" __global__ void rmsnorm_batched_contig_reduce_kernel(
+    __nv_bfloat16* __restrict__ out,
+    const __nv_bfloat16* __restrict__ x,
+    const __nv_bfloat16* __restrict__ weight,
+    int D,
+    float eps)
+{
+    int token = blockIdx.x;
+    const __nv_bfloat16* x_row = x + (int64_t)token * D;
+    __nv_bfloat16* o_row = out + (int64_t)token * D;
+
+    extern __shared__ float smem[];
+
+    float local_ss = 0.0f;
+    int elems_per_thread = (D + blockDim.x - 1) / blockDim.x;
+    int start = threadIdx.x * elems_per_thread;
+    int end = min(D, start + elems_per_thread);
+    for (int i = start; i < end; ++i) {
+        float v = bf16_to_float(x_row[i]);
+        local_ss += v * v;
+    }
+    smem[threadIdx.x] = local_ss;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) smem[threadIdx.x] += smem[threadIdx.x + s];
+        __syncthreads();
+    }
+
+    float rms_inv = rsqrtf(smem[0] / (float)D + eps);
+
+    for (int i = threadIdx.x; i < D; i += blockDim.x) {
+        float v = bf16_to_float(x_row[i]) * rms_inv;
+        o_row[i] = float_to_bf16(v * bf16_to_float(weight[i]));
+    }
+}
+
 extern "C" void krasis_rmsnorm_batched(
     void* out, const void* x, const void* weight,
     int M, int D, float eps, void* stream)
@@ -141,8 +369,10 @@ extern "C" __global__ void fused_add_rmsnorm_batched_kernel(
     float local_ss = 0.0f;
     for (int i = threadIdx.x; i < D; i += blockDim.x) {
         float r = bf16_to_float(res_row[i]) + bf16_to_float(x_row[i]);
-        res_row[i] = float_to_bf16(r);
-        local_ss += r * r;
+        __nv_bfloat16 rounded = float_to_bf16(r);
+        res_row[i] = rounded;
+        float v = bf16_to_float(rounded);
+        local_ss += v * v;
     }
     smem[threadIdx.x] = local_ss;
     __syncthreads();
@@ -1153,7 +1383,7 @@ extern "C" __global__ void sigmoid_topk_kernel(
     float* top_vals = scores + E;        /* [topk] */
     int* top_idxs = (int*)(top_vals + topk); /* [topk] */
 
-    /* Compute sigmoid scores */
+    /* Compute sigmoid scores. */
     for (int i = threadIdx.x; i < E; i += blockDim.x) {
         scores[i] = 1.0f / (1.0f + __expf(-g[i]));
     }
@@ -1199,6 +1429,24 @@ extern "C" void krasis_sigmoid_topk(
         (float*)topk_weights, (int*)topk_ids,
         (const float*)gate_logits,
         num_experts, topk);
+}
+
+extern "C" __global__ void normalize_topk_weights_kernel(
+    float* __restrict__ topk_weights,  /* [M, topk] */
+    int M,
+    int topk)
+{
+    int token = blockIdx.x;
+    if (token >= M || threadIdx.x != 0) return;
+    float* row = topk_weights + (int64_t)token * topk;
+    float sum = 0.0f;
+    for (int k = 0; k < topk; k++) {
+        sum += row[k];
+    }
+    float inv_sum = 1.0f / (sum + 1.0e-20f);
+    for (int k = 0; k < topk; k++) {
+        row[k] *= inv_sum;
+    }
 }
 
 /* ── Softmax Top-K routing ─────────────────────────────────────────────── */
@@ -1659,6 +1907,2471 @@ extern "C" void krasis_stream_sync(void* stream) {
     cudaStreamSynchronize((cudaStream_t)stream);
 }
 
+/* ── Non-perturbing debug summaries ───────────────────────────────────── */
+
+__device__ __forceinline__ unsigned long long trace_f32_bits(float v) {
+    union {
+        float f;
+        unsigned int u;
+    } cvt;
+    cvt.f = v;
+    return (unsigned long long)cvt.u;
+}
+
+extern "C" __global__ void prefill_trace_bf16_row_summary_kernel(
+    const __nv_bfloat16* __restrict__ row,
+    unsigned long long* __restrict__ trace,
+    int entry_idx,
+    int stage_id,
+    int layer_idx,
+    int chunk_idx,
+    int absolute_position,
+    int token_id,
+    int row_idx,
+    int width)
+{
+    if (width <= 0) return;
+
+    __shared__ unsigned long long s_hash[256];
+    __shared__ double s_sum[256];
+    __shared__ double s_sumsq[256];
+    __shared__ float s_min[256];
+    __shared__ float s_max[256];
+    __shared__ int s_finite[256];
+    __shared__ int s_nan[256];
+    __shared__ int s_inf[256];
+
+    const unsigned short* bits = (const unsigned short*)row;
+    unsigned long long h = 1469598103934665603ULL ^ (unsigned long long)(threadIdx.x + 1);
+    double sum = 0.0;
+    double sumsq = 0.0;
+    float min_v = INFINITY;
+    float max_v = -INFINITY;
+    int finite_count = 0;
+    int nan_count = 0;
+    int inf_count = 0;
+
+    for (int i = threadIdx.x; i < width; i += blockDim.x) {
+        unsigned int raw = (unsigned int)bits[i];
+        h ^= (unsigned long long)raw;
+        h *= 1099511628211ULL;
+
+        float v = bf16_to_float(row[i]);
+        if (isfinite(v)) {
+            finite_count++;
+            sum += (double)v;
+            sumsq += (double)v * (double)v;
+        } else if (isnan(v)) {
+            nan_count++;
+        } else {
+            inf_count++;
+        }
+        if (v < min_v) min_v = v;
+        if (v > max_v) max_v = v;
+    }
+
+    int tid = threadIdx.x;
+    s_hash[tid] = h;
+    s_sum[tid] = sum;
+    s_sumsq[tid] = sumsq;
+    s_min[tid] = min_v;
+    s_max[tid] = max_v;
+    s_finite[tid] = finite_count;
+    s_nan[tid] = nan_count;
+    s_inf[tid] = inf_count;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            s_hash[tid] ^= s_hash[tid + stride];
+            s_hash[tid] *= 1099511628211ULL;
+            s_sum[tid] += s_sum[tid + stride];
+            s_sumsq[tid] += s_sumsq[tid + stride];
+            if (s_min[tid + stride] < s_min[tid]) s_min[tid] = s_min[tid + stride];
+            if (s_max[tid + stride] > s_max[tid]) s_max[tid] = s_max[tid + stride];
+            s_finite[tid] += s_finite[tid + stride];
+            s_nan[tid] += s_nan[tid + stride];
+            s_inf[tid] += s_inf[tid + stride];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        int base = entry_idx * 16;
+        float mean = (s_finite[0] > 0) ? (float)(s_sum[0] / (double)s_finite[0]) : NAN;
+        float l2 = sqrtf((float)s_sumsq[0]);
+        trace[base + 0] = (unsigned long long)stage_id;
+        trace[base + 1] = (unsigned long long)layer_idx;
+        trace[base + 2] = (unsigned long long)chunk_idx;
+        trace[base + 3] = (unsigned long long)absolute_position;
+        trace[base + 4] = (unsigned long long)token_id;
+        trace[base + 5] = (unsigned long long)row_idx;
+        trace[base + 6] = (unsigned long long)width;
+        trace[base + 7] = s_hash[0];
+        trace[base + 8] = trace_f32_bits(mean);
+        trace[base + 9] = trace_f32_bits(l2);
+        trace[base + 10] = trace_f32_bits(s_min[0]);
+        trace[base + 11] = trace_f32_bits(s_max[0]);
+        trace[base + 12] = (unsigned long long)s_finite[0];
+        trace[base + 13] = (unsigned long long)s_nan[0];
+        trace[base + 14] = (unsigned long long)s_inf[0];
+        trace[base + 15] = 1ULL;
+    }
+}
+
+extern "C" __global__ void prefill_trace_f32_slice_summary_kernel(
+    const float* __restrict__ values,
+    unsigned long long* __restrict__ trace,
+    int entry_idx,
+    int stage_id,
+    int layer_idx,
+    int chunk_idx,
+    int absolute_position,
+    int token_id,
+    int row_idx,
+    int width)
+{
+    if (width <= 0) return;
+
+    __shared__ unsigned long long s_hash[256];
+    __shared__ double s_sum[256];
+    __shared__ double s_sumsq[256];
+    __shared__ float s_min[256];
+    __shared__ float s_max[256];
+    __shared__ int s_finite[256];
+    __shared__ int s_nan[256];
+    __shared__ int s_inf[256];
+
+    unsigned long long h = 1469598103934665603ULL ^ (unsigned long long)(threadIdx.x + 1);
+    double sum = 0.0;
+    double sumsq = 0.0;
+    float min_v = INFINITY;
+    float max_v = -INFINITY;
+    int finite_count = 0;
+    int nan_count = 0;
+    int inf_count = 0;
+
+    for (int i = threadIdx.x; i < width; i += blockDim.x) {
+        float v = values[i];
+        unsigned long long raw = trace_f32_bits(v);
+        h ^= raw;
+        h *= 1099511628211ULL;
+
+        if (isfinite(v)) {
+            finite_count++;
+            sum += (double)v;
+            sumsq += (double)v * (double)v;
+        } else if (isnan(v)) {
+            nan_count++;
+        } else {
+            inf_count++;
+        }
+        if (v < min_v) min_v = v;
+        if (v > max_v) max_v = v;
+    }
+
+    int tid = threadIdx.x;
+    s_hash[tid] = h;
+    s_sum[tid] = sum;
+    s_sumsq[tid] = sumsq;
+    s_min[tid] = min_v;
+    s_max[tid] = max_v;
+    s_finite[tid] = finite_count;
+    s_nan[tid] = nan_count;
+    s_inf[tid] = inf_count;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            s_hash[tid] ^= s_hash[tid + stride];
+            s_hash[tid] *= 1099511628211ULL;
+            s_sum[tid] += s_sum[tid + stride];
+            s_sumsq[tid] += s_sumsq[tid + stride];
+            if (s_min[tid + stride] < s_min[tid]) s_min[tid] = s_min[tid + stride];
+            if (s_max[tid + stride] > s_max[tid]) s_max[tid] = s_max[tid + stride];
+            s_finite[tid] += s_finite[tid + stride];
+            s_nan[tid] += s_nan[tid + stride];
+            s_inf[tid] += s_inf[tid + stride];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        int base = entry_idx * 16;
+        float mean = (s_finite[0] > 0) ? (float)(s_sum[0] / (double)s_finite[0]) : NAN;
+        float l2 = sqrtf((float)s_sumsq[0]);
+        trace[base + 0] = (unsigned long long)stage_id;
+        trace[base + 1] = (unsigned long long)layer_idx;
+        trace[base + 2] = (unsigned long long)chunk_idx;
+        trace[base + 3] = (unsigned long long)absolute_position;
+        trace[base + 4] = (unsigned long long)token_id;
+        trace[base + 5] = (unsigned long long)row_idx;
+        trace[base + 6] = (unsigned long long)width;
+        trace[base + 7] = s_hash[0];
+        trace[base + 8] = trace_f32_bits(mean);
+        trace[base + 9] = trace_f32_bits(l2);
+        trace[base + 10] = trace_f32_bits(s_min[0]);
+        trace[base + 11] = trace_f32_bits(s_max[0]);
+        trace[base + 12] = (unsigned long long)s_finite[0];
+        trace[base + 13] = (unsigned long long)s_nan[0];
+        trace[base + 14] = (unsigned long long)s_inf[0];
+        trace[base + 15] = 1ULL;
+    }
+}
+
+extern "C" __global__ void prefill_trace_i32_slice_summary_kernel(
+    const int* __restrict__ values,
+    unsigned long long* __restrict__ trace,
+    int entry_idx,
+    int stage_id,
+    int layer_idx,
+    int chunk_idx,
+    int absolute_position,
+    int token_id,
+    int row_idx,
+    int width)
+{
+    if (width <= 0) return;
+
+    __shared__ unsigned long long s_hash[256];
+    __shared__ double s_sum[256];
+    __shared__ double s_sumsq[256];
+    __shared__ float s_min[256];
+    __shared__ float s_max[256];
+    __shared__ int s_finite[256];
+
+    unsigned long long h = 1469598103934665603ULL ^ (unsigned long long)(threadIdx.x + 1);
+    double sum = 0.0;
+    double sumsq = 0.0;
+    float min_v = INFINITY;
+    float max_v = -INFINITY;
+    int finite_count = 0;
+
+    for (int i = threadIdx.x; i < width; i += blockDim.x) {
+        int raw_i = values[i];
+        float v = (float)raw_i;
+        unsigned int raw = (unsigned int)raw_i;
+        h ^= (unsigned long long)raw;
+        h *= 1099511628211ULL;
+        finite_count++;
+        sum += (double)v;
+        sumsq += (double)v * (double)v;
+        if (v < min_v) min_v = v;
+        if (v > max_v) max_v = v;
+    }
+
+    int tid = threadIdx.x;
+    s_hash[tid] = h;
+    s_sum[tid] = sum;
+    s_sumsq[tid] = sumsq;
+    s_min[tid] = min_v;
+    s_max[tid] = max_v;
+    s_finite[tid] = finite_count;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            s_hash[tid] ^= s_hash[tid + stride];
+            s_hash[tid] *= 1099511628211ULL;
+            s_sum[tid] += s_sum[tid + stride];
+            s_sumsq[tid] += s_sumsq[tid + stride];
+            if (s_min[tid + stride] < s_min[tid]) s_min[tid] = s_min[tid + stride];
+            if (s_max[tid + stride] > s_max[tid]) s_max[tid] = s_max[tid + stride];
+            s_finite[tid] += s_finite[tid + stride];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        int base = entry_idx * 16;
+        float mean = (s_finite[0] > 0) ? (float)(s_sum[0] / (double)s_finite[0]) : NAN;
+        float l2 = sqrtf((float)s_sumsq[0]);
+        trace[base + 0] = (unsigned long long)stage_id;
+        trace[base + 1] = (unsigned long long)layer_idx;
+        trace[base + 2] = (unsigned long long)chunk_idx;
+        trace[base + 3] = (unsigned long long)absolute_position;
+        trace[base + 4] = (unsigned long long)token_id;
+        trace[base + 5] = (unsigned long long)row_idx;
+        trace[base + 6] = (unsigned long long)width;
+        trace[base + 7] = s_hash[0];
+        trace[base + 8] = trace_f32_bits(mean);
+        trace[base + 9] = trace_f32_bits(l2);
+        trace[base + 10] = trace_f32_bits(s_min[0]);
+        trace[base + 11] = trace_f32_bits(s_max[0]);
+        trace[base + 12] = (unsigned long long)s_finite[0];
+        trace[base + 13] = 0ULL;
+        trace[base + 14] = 0ULL;
+        trace[base + 15] = 1ULL;
+    }
+}
+
+extern "C" __global__ void prefill_trace_router_row_candidate_kernel(
+    float* __restrict__ out,
+    const __nv_bfloat16* __restrict__ hidden_row,
+    const __nv_bfloat16* __restrict__ weight,
+    const float* __restrict__ logits_row,
+    const float* __restrict__ topk_weights_row,
+    int hidden_size,
+    int num_experts,
+    int topk,
+    float routed_scale,
+    int mode)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (mode == 0) {
+        if (idx >= num_experts) return;
+        const __nv_bfloat16* w_row = weight + (int64_t)idx * hidden_size;
+        float acc = 0.0f;
+        for (int i = 0; i < hidden_size; i++) {
+            acc += bf16_to_float(hidden_row[i]) * bf16_to_float(w_row[i]);
+        }
+        out[idx] = acc;
+    } else if (mode == 1) {
+        if (idx >= num_experts) return;
+        float v = logits_row[idx];
+        out[idx] = 1.0f / (1.0f + __expf(-v));
+    } else if (mode == 2) {
+        if (idx >= topk) return;
+        out[idx] = topk_weights_row[idx] * routed_scale;
+    }
+}
+
+extern "C" __global__ void prefill_trace_router_logit_detail_kernel(
+    unsigned long long* __restrict__ trace,
+    int entry_base_idx,
+    int stage_id,
+    int layer_idx,
+    int chunk_idx,
+    int absolute_position,
+    int token_id,
+    const __nv_bfloat16* __restrict__ hidden_row,
+    const __nv_bfloat16* __restrict__ weight,
+    const float* __restrict__ logits_row,
+    int hidden_size,
+    int num_experts)
+{
+    int expert = blockIdx.x;
+    if (threadIdx.x != 0 || expert >= num_experts || hidden_size <= 0) return;
+
+    const unsigned short* hidden_bits = reinterpret_cast<const unsigned short*>(hidden_row);
+    const unsigned short* weight_bits = reinterpret_cast<const unsigned short*>(weight);
+    const __nv_bfloat16* weight_row = weight + (int64_t)expert * hidden_size;
+    const unsigned short* weight_row_bits = weight_bits + (int64_t)expert * hidden_size;
+
+    unsigned long long input_hash = 14695981039346656037ULL;
+    unsigned long long weight_hash = 14695981039346656037ULL;
+    float acc = 0.0f;
+    float max_abs_contrib = -1.0f;
+    int max_abs_contrib_idx = 0;
+    float max_abs_hidden = 0.0f;
+    float max_abs_weight = 0.0f;
+
+    for (int i = 0; i < hidden_size; i++) {
+        unsigned int h_raw = (unsigned int)hidden_bits[i];
+        unsigned int w_raw = (unsigned int)weight_row_bits[i];
+        input_hash ^= (unsigned long long)(h_raw & 0xffU);
+        input_hash *= 1099511628211ULL;
+        input_hash ^= (unsigned long long)((h_raw >> 8) & 0xffU);
+        input_hash *= 1099511628211ULL;
+        weight_hash ^= (unsigned long long)(w_raw & 0xffU);
+        weight_hash *= 1099511628211ULL;
+        weight_hash ^= (unsigned long long)((w_raw >> 8) & 0xffU);
+        weight_hash *= 1099511628211ULL;
+
+        float h = bf16_to_float(hidden_row[i]);
+        float w = bf16_to_float(weight_row[i]);
+        float prod = h * w;
+        acc += prod;
+        float abs_prod = fabsf(prod);
+        if (abs_prod > max_abs_contrib) {
+            max_abs_contrib = abs_prod;
+            max_abs_contrib_idx = i;
+            max_abs_hidden = h;
+            max_abs_weight = w;
+        }
+    }
+
+    float production = logits_row[expert];
+    int base = (entry_base_idx + expert) * 16;
+    trace[base + 0] = (unsigned long long)stage_id;
+    trace[base + 1] = (unsigned long long)layer_idx;
+    trace[base + 2] = (unsigned long long)chunk_idx;
+    trace[base + 3] = (unsigned long long)absolute_position;
+    trace[base + 4] = (unsigned long long)token_id;
+    trace[base + 5] = (unsigned long long)expert;
+    trace[base + 6] = (unsigned long long)hidden_size;
+    trace[base + 7] = input_hash;
+    trace[base + 8] = weight_hash;
+    trace[base + 9] = trace_f32_bits(acc);
+    trace[base + 10] = trace_f32_bits(production);
+    trace[base + 11] = trace_f32_bits(acc - production);
+    trace[base + 12] = (unsigned long long)max_abs_contrib_idx;
+    trace[base + 13] = trace_f32_bits(max_abs_hidden);
+    trace[base + 14] = trace_f32_bits(max_abs_weight);
+    trace[base + 15] = 1ULL;
+}
+
+extern "C" __global__ void prefill_trace_bf16_element_detail_kernel(
+    unsigned long long* __restrict__ trace,
+    int entry_idx,
+    int stage_id,
+    int layer_idx,
+    int chunk_idx,
+    int absolute_position,
+    int token_id,
+    const __nv_bfloat16* __restrict__ row,
+    int width,
+    int dim_index)
+{
+    if (threadIdx.x != 0 || blockIdx.x != 0 || width <= 0 || dim_index < 0 || dim_index >= width) return;
+
+    const unsigned short* row_bits = reinterpret_cast<const unsigned short*>(row);
+    unsigned long long row_hash = 14695981039346656037ULL;
+    for (int i = 0; i < width; i++) {
+        unsigned int raw = (unsigned int)row_bits[i];
+        row_hash ^= (unsigned long long)(raw & 0xffU);
+        row_hash *= 1099511628211ULL;
+        row_hash ^= (unsigned long long)((raw >> 8) & 0xffU);
+        row_hash *= 1099511628211ULL;
+    }
+
+    float value = bf16_to_float(row[dim_index]);
+    int base = entry_idx * 16;
+    trace[base + 0] = (unsigned long long)stage_id;
+    trace[base + 1] = (unsigned long long)layer_idx;
+    trace[base + 2] = (unsigned long long)chunk_idx;
+    trace[base + 3] = (unsigned long long)absolute_position;
+    trace[base + 4] = (unsigned long long)token_id;
+    trace[base + 5] = (unsigned long long)dim_index;
+    trace[base + 6] = (unsigned long long)width;
+    trace[base + 7] = (unsigned long long)row_bits[dim_index];
+    trace[base + 8] = row_hash;
+    trace[base + 9] = trace_f32_bits(value);
+    trace[base + 10] = 0ULL;
+    trace[base + 11] = 0ULL;
+    trace[base + 12] = 0ULL;
+    trace[base + 13] = 0ULL;
+    trace[base + 14] = 0ULL;
+    trace[base + 15] = 1ULL;
+}
+
+extern "C" __global__ void prefill_trace_bf16_row_element_detail_kernel(
+    unsigned long long* __restrict__ trace,
+    int entry_base_idx,
+    int stage_id,
+    int layer_idx,
+    int chunk_idx,
+    int absolute_position,
+    int token_id,
+    const __nv_bfloat16* __restrict__ row,
+    int width,
+    int element_count)
+{
+    int dim_index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (dim_index >= element_count || dim_index >= width || width <= 0) return;
+
+    const unsigned short* row_bits = reinterpret_cast<const unsigned short*>(row);
+    float value = bf16_to_float(row[dim_index]);
+    int base = (entry_base_idx + dim_index) * 16;
+    trace[base + 0] = (unsigned long long)stage_id;
+    trace[base + 1] = (unsigned long long)layer_idx;
+    trace[base + 2] = (unsigned long long)chunk_idx;
+    trace[base + 3] = (unsigned long long)absolute_position;
+    trace[base + 4] = (unsigned long long)token_id;
+    trace[base + 5] = (unsigned long long)dim_index;
+    trace[base + 6] = (unsigned long long)width;
+    trace[base + 7] = (unsigned long long)row_bits[dim_index];
+    trace[base + 8] = 0ULL;
+    trace[base + 9] = trace_f32_bits(value);
+    trace[base + 10] = 0ULL;
+    trace[base + 11] = 0ULL;
+    trace[base + 12] = 0ULL;
+    trace[base + 13] = 0ULL;
+    trace[base + 14] = 0ULL;
+    trace[base + 15] = 1ULL;
+}
+
+extern "C" __global__ void prefill_trace_bf16_projection_detail_kernel(
+    unsigned long long* __restrict__ trace,
+    int entry_idx,
+    int stage_id,
+    int layer_idx,
+    int chunk_idx,
+    int absolute_position,
+    int token_id,
+    const __nv_bfloat16* __restrict__ input_row,
+    const __nv_bfloat16* __restrict__ weight,
+    const __nv_bfloat16* __restrict__ output_row,
+    int input_width,
+    int output_width,
+    int output_dim)
+{
+    if (threadIdx.x != 0 || blockIdx.x != 0 || input_width <= 0 || output_width <= 0 ||
+        output_dim < 0 || output_dim >= output_width) return;
+
+    const unsigned short* input_bits = reinterpret_cast<const unsigned short*>(input_row);
+    const __nv_bfloat16* weight_row = weight + (int64_t)output_dim * input_width;
+    const unsigned short* weight_bits = reinterpret_cast<const unsigned short*>(weight_row);
+    const unsigned short* output_bits = reinterpret_cast<const unsigned short*>(output_row);
+
+    unsigned long long input_hash = 14695981039346656037ULL;
+    unsigned long long weight_hash = 14695981039346656037ULL;
+    float acc = 0.0f;
+    float max_abs_contrib = -1.0f;
+    int max_abs_contrib_idx = 0;
+    float max_abs_input = 0.0f;
+    float max_abs_weight = 0.0f;
+
+    for (int i = 0; i < input_width; i++) {
+        unsigned int h_raw = (unsigned int)input_bits[i];
+        unsigned int w_raw = (unsigned int)weight_bits[i];
+        input_hash ^= (unsigned long long)(h_raw & 0xffU);
+        input_hash *= 1099511628211ULL;
+        input_hash ^= (unsigned long long)((h_raw >> 8) & 0xffU);
+        input_hash *= 1099511628211ULL;
+        weight_hash ^= (unsigned long long)(w_raw & 0xffU);
+        weight_hash *= 1099511628211ULL;
+        weight_hash ^= (unsigned long long)((w_raw >> 8) & 0xffU);
+        weight_hash *= 1099511628211ULL;
+
+        float h = bf16_to_float(input_row[i]);
+        float w = bf16_to_float(weight_row[i]);
+        float prod = h * w;
+        acc += prod;
+        float abs_prod = fabsf(prod);
+        if (abs_prod > max_abs_contrib) {
+            max_abs_contrib = abs_prod;
+            max_abs_contrib_idx = i;
+            max_abs_input = h;
+            max_abs_weight = w;
+        }
+    }
+
+    float production = bf16_to_float(output_row[output_dim]);
+    int base = entry_idx * 16;
+    trace[base + 0] = (unsigned long long)stage_id;
+    trace[base + 1] = (unsigned long long)layer_idx;
+    trace[base + 2] = (unsigned long long)chunk_idx;
+    trace[base + 3] = (unsigned long long)absolute_position;
+    trace[base + 4] = (unsigned long long)token_id;
+    trace[base + 5] = (unsigned long long)output_dim;
+    trace[base + 6] = (unsigned long long)input_width;
+    trace[base + 7] = input_hash;
+    trace[base + 8] = weight_hash;
+    trace[base + 9] = trace_f32_bits(acc);
+    trace[base + 10] = trace_f32_bits(production);
+    trace[base + 11] = trace_f32_bits(acc - production);
+    trace[base + 12] = (unsigned long long)max_abs_contrib_idx;
+    trace[base + 13] = trace_f32_bits(max_abs_input);
+    trace[base + 14] = trace_f32_bits(max_abs_weight);
+    trace[base + 15] = (unsigned long long)(output_bits[output_dim] | 0x10000U);
+}
+
+extern "C" __global__ void prefill_trace_mamba2_gated_norm_detail_kernel(
+    unsigned long long* __restrict__ trace,
+    int entry_base_idx,
+    int stage_input_id,
+    int stage_output_id,
+    int stage_rstd_candidate_id,
+    int stage_ptx_candidate_id,
+    int layer_idx,
+    int chunk_idx,
+    int absolute_position,
+    int token_id,
+    const __nv_bfloat16* __restrict__ x_row,
+    const __nv_bfloat16* __restrict__ gate_row,
+    const float* __restrict__ weight,
+    const __nv_bfloat16* __restrict__ out_row,
+    int d_inner,
+    int n_groups,
+    int group_size,
+    int proj_dim,
+    float eps,
+    int dim_index)
+{
+    if (d_inner <= 0 || n_groups <= 0 || group_size <= 0 || proj_dim <= 0) return;
+    if (dim_index < 0 || dim_index >= d_inner || dim_index >= proj_dim) return;
+
+    int group = dim_index / group_size;
+    if (group < 0 || group >= n_groups) return;
+    int group_base = group * group_size;
+
+    extern __shared__ float smem[];
+    float local_ss = 0.0f;
+    for (int i = threadIdx.x; i < group_size; i += blockDim.x) {
+        int idx = group_base + i;
+        float xv = bf16_to_float(x_row[idx]);
+        float gv = bf16_to_float(gate_row[idx]);
+        float silu_g = gv / (1.0f + __expf(-gv));
+        float gated = xv * silu_g;
+        local_ss += gated * gated;
+    }
+    smem[threadIdx.x] = local_ss;
+    __syncthreads();
+
+    gated_rmsnorm_adjacent_pairwise_reduce(smem);
+
+    if (threadIdx.x != 0) return;
+
+    const unsigned short* x_bits = reinterpret_cast<const unsigned short*>(x_row);
+    const unsigned short* gate_bits = reinterpret_cast<const unsigned short*>(gate_row);
+    const unsigned short* out_bits = reinterpret_cast<const unsigned short*>(out_row);
+
+    float xv = bf16_to_float(x_row[dim_index]);
+    float gv = bf16_to_float(gate_row[dim_index]);
+    float silu_g = gv / (1.0f + __expf(-gv));
+    float gated = xv * silu_g;
+    float mean_square = smem[0] / (float)group_size;
+    float mean_square_plus_eps = mean_square + eps;
+    float rms_inv = rsqrtf(mean_square_plus_eps);
+    float sqrt_value = sqrtf(mean_square_plus_eps);
+    float one_over_sqrtf = 1.0f / sqrt_value;
+    float double_promoted_rstd = (float)(1.0 / sqrt((double)mean_square_plus_eps));
+    float sqrt_rn = trace_sqrt_rn_f32(mean_square_plus_eps);
+    float rstd_sqrt_rn_div_rn = trace_div_rn_f32(1.0f, sqrt_rn);
+    float rstd_sqrt_rn_rcp_rn = trace_rcp_rn_f32(sqrt_rn);
+    float sqrt_approx = trace_sqrt_approx_f32(mean_square_plus_eps);
+    float rstd_sqrt_approx_div_rn = trace_div_rn_f32(1.0f, sqrt_approx);
+    float rstd_sqrt_approx_div_approx = trace_div_approx_f32(1.0f, sqrt_approx);
+    float rstd_rsqrt_approx = trace_rsqrt_approx_f32(mean_square_plus_eps);
+    float normalized = gated * rms_inv;
+    float weight_value = weight[dim_index];
+    float pre_store = normalized * weight_value;
+    float pre_store_one_over_sqrtf = (gated * one_over_sqrtf) * weight_value;
+    float pre_store_double_promoted = (gated * double_promoted_rstd) * weight_value;
+    float stored_value = bf16_to_float(out_row[dim_index]);
+
+    int base = entry_base_idx * 16;
+    trace[base + 0] = (unsigned long long)stage_input_id;
+    trace[base + 1] = (unsigned long long)layer_idx;
+    trace[base + 2] = (unsigned long long)chunk_idx;
+    trace[base + 3] = (unsigned long long)absolute_position;
+    trace[base + 4] = (unsigned long long)token_id;
+    trace[base + 5] = (unsigned long long)dim_index;
+    trace[base + 6] = (unsigned long long)d_inner;
+    trace[base + 7] = (unsigned long long)x_bits[dim_index];
+    trace[base + 8] = (unsigned long long)gate_bits[dim_index];
+    trace[base + 9] = (unsigned long long)out_bits[dim_index];
+    trace[base + 10] = trace_f32_bits(xv);
+    trace[base + 11] = trace_f32_bits(gv);
+    trace[base + 12] = trace_f32_bits(silu_g);
+    trace[base + 13] = trace_f32_bits(gated);
+    trace[base + 14] = (unsigned long long)group;
+    trace[base + 15] = trace_f32_bits(eps);
+
+    int base2 = (entry_base_idx + 1) * 16;
+    trace[base2 + 0] = (unsigned long long)stage_output_id;
+    trace[base2 + 1] = (unsigned long long)layer_idx;
+    trace[base2 + 2] = (unsigned long long)chunk_idx;
+    trace[base2 + 3] = (unsigned long long)absolute_position;
+    trace[base2 + 4] = (unsigned long long)token_id;
+    trace[base2 + 5] = (unsigned long long)dim_index;
+    trace[base2 + 6] = (unsigned long long)group_size;
+    trace[base2 + 7] = (unsigned long long)trace_f32_bits(weight_value);
+    trace[base2 + 8] = (unsigned long long)group;
+    trace[base2 + 9] = trace_f32_bits(mean_square);
+    trace[base2 + 10] = trace_f32_bits(rms_inv);
+    trace[base2 + 11] = trace_f32_bits(normalized);
+    trace[base2 + 12] = trace_f32_bits(pre_store);
+    trace[base2 + 13] = trace_f32_bits(stored_value);
+    trace[base2 + 14] = (unsigned long long)out_bits[dim_index];
+    trace[base2 + 15] = trace_f32_bits(mean_square_plus_eps);
+
+    int base3 = (entry_base_idx + 2) * 16;
+    trace[base3 + 0] = (unsigned long long)stage_rstd_candidate_id;
+    trace[base3 + 1] = (unsigned long long)layer_idx;
+    trace[base3 + 2] = (unsigned long long)chunk_idx;
+    trace[base3 + 3] = (unsigned long long)absolute_position;
+    trace[base3 + 4] = (unsigned long long)token_id;
+    trace[base3 + 5] = (unsigned long long)dim_index;
+    trace[base3 + 6] = (unsigned long long)group_size;
+    trace[base3 + 7] = (unsigned long long)group;
+    trace[base3 + 8] = trace_f32_bits(mean_square_plus_eps);
+    trace[base3 + 9] = trace_f32_bits(rms_inv);
+    trace[base3 + 10] = trace_f32_bits(sqrt_value);
+    trace[base3 + 11] = trace_f32_bits(one_over_sqrtf);
+    trace[base3 + 12] = trace_f32_bits(double_promoted_rstd);
+    trace[base3 + 13] = trace_f32_bits(pre_store);
+    trace[base3 + 14] = trace_f32_bits(pre_store_one_over_sqrtf);
+    trace[base3 + 15] = trace_f32_bits(pre_store_double_promoted);
+
+    int base4 = (entry_base_idx + 3) * 16;
+    trace[base4 + 0] = (unsigned long long)stage_ptx_candidate_id;
+    trace[base4 + 1] = (unsigned long long)layer_idx;
+    trace[base4 + 2] = (unsigned long long)chunk_idx;
+    trace[base4 + 3] = (unsigned long long)absolute_position;
+    trace[base4 + 4] = (unsigned long long)token_id;
+    trace[base4 + 5] = (unsigned long long)dim_index;
+    trace[base4 + 6] = (unsigned long long)group_size;
+    trace[base4 + 7] = (unsigned long long)group;
+    trace[base4 + 8] = trace_f32_bits(mean_square_plus_eps);
+    trace[base4 + 9] = trace_f32_bits(sqrt_rn);
+    trace[base4 + 10] = trace_f32_bits(rstd_sqrt_rn_div_rn);
+    trace[base4 + 11] = trace_f32_bits(rstd_sqrt_rn_rcp_rn);
+    trace[base4 + 12] = trace_f32_bits(sqrt_approx);
+    trace[base4 + 13] = trace_f32_bits(rstd_sqrt_approx_div_rn);
+    trace[base4 + 14] = trace_f32_bits(rstd_sqrt_approx_div_approx);
+    trace[base4 + 15] = trace_f32_bits(rstd_rsqrt_approx);
+}
+
+extern "C" __global__ void prefill_trace_mamba2_gated_norm_reduction_detail_kernel(
+    unsigned long long* __restrict__ trace,
+    int entry_base_idx,
+    int max_entries,
+    int stage_term_id,
+    int stage_reduction_id,
+    int stage_summary_id,
+    int layer_idx,
+    int chunk_idx,
+    int absolute_position,
+    int token_id,
+    const __nv_bfloat16* __restrict__ x_row,
+    const __nv_bfloat16* __restrict__ gate_row,
+    int d_inner,
+    int n_groups,
+    int group_size,
+    int proj_dim,
+    float eps,
+    int dim_index)
+{
+    if (trace == NULL || max_entries <= 0 || d_inner <= 0 || n_groups <= 0 ||
+        group_size <= 0 || proj_dim <= 0) return;
+    if (dim_index < 0 || dim_index >= d_inner || dim_index >= proj_dim) return;
+
+    int group = dim_index / group_size;
+    if (group < 0 || group >= n_groups) return;
+    int group_base = group * group_size;
+
+    extern __shared__ float smem[];
+    const unsigned short* x_bits = reinterpret_cast<const unsigned short*>(x_row);
+    const unsigned short* gate_bits = reinterpret_cast<const unsigned short*>(gate_row);
+
+    float local_ss = 0.0f;
+    for (int i = threadIdx.x; i < group_size; i += blockDim.x) {
+        int idx = group_base + i;
+        float xv = bf16_to_float(x_row[idx]);
+        float gv = bf16_to_float(gate_row[idx]);
+        float silu_g = gv / (1.0f + __expf(-gv));
+        float gated = xv * silu_g;
+        float square = gated * gated;
+        local_ss += square;
+
+        int entry = entry_base_idx + i;
+        if (entry >= 0 && entry < max_entries) {
+            int base = entry * 16;
+            unsigned long long packed_bf16 =
+                ((unsigned long long)(gate_bits[idx] & 0xffffU) << 16) |
+                (unsigned long long)(x_bits[idx] & 0xffffU);
+            trace[base + 0] = (unsigned long long)stage_term_id;
+            trace[base + 1] = (unsigned long long)layer_idx;
+            trace[base + 2] = (unsigned long long)chunk_idx;
+            trace[base + 3] = (unsigned long long)absolute_position;
+            trace[base + 4] = (unsigned long long)token_id;
+            trace[base + 5] = (unsigned long long)group;
+            trace[base + 6] = (unsigned long long)group_size;
+            trace[base + 7] = (unsigned long long)i;
+            trace[base + 8] = (unsigned long long)idx;
+            trace[base + 9] = (unsigned long long)threadIdx.x;
+            trace[base + 10] = packed_bf16;
+            trace[base + 11] = trace_f32_bits(silu_g);
+            trace[base + 12] = trace_f32_bits(gated);
+            trace[base + 13] = trace_f32_bits(square);
+            trace[base + 14] = trace_f32_bits(local_ss);
+            trace[base + 15] = 1ULL;
+        }
+    }
+
+    smem[threadIdx.x] = local_ss;
+    __syncthreads();
+
+    int reduction_entry_base = entry_base_idx + group_size;
+    int reduction_offset = 0;
+    for (int stride = 1; stride < blockDim.x; stride <<= 1) {
+        int span = stride << 1;
+        int active_count = blockDim.x / span;
+        if (((threadIdx.x & (span - 1)) == 0) && threadIdx.x + stride < blockDim.x) {
+            float left_before = smem[threadIdx.x];
+            float right_before = smem[threadIdx.x + stride];
+            float after = left_before + right_before;
+            int entry = reduction_entry_base + reduction_offset + threadIdx.x / span;
+            if (entry >= 0 && entry < max_entries) {
+                int base = entry * 16;
+                trace[base + 0] = (unsigned long long)stage_reduction_id;
+                trace[base + 1] = (unsigned long long)layer_idx;
+                trace[base + 2] = (unsigned long long)chunk_idx;
+                trace[base + 3] = (unsigned long long)absolute_position;
+                trace[base + 4] = (unsigned long long)token_id;
+                trace[base + 5] = (unsigned long long)group;
+                trace[base + 6] = (unsigned long long)group_size;
+                trace[base + 7] = (unsigned long long)stride;
+                trace[base + 8] = (unsigned long long)threadIdx.x;
+                trace[base + 9] = (unsigned long long)(threadIdx.x + stride);
+                trace[base + 10] = trace_f32_bits(left_before);
+                trace[base + 11] = trace_f32_bits(right_before);
+                trace[base + 12] = trace_f32_bits(after);
+                trace[base + 13] = (unsigned long long)(reduction_offset + threadIdx.x / span);
+                trace[base + 14] = (unsigned long long)blockDim.x;
+                trace[base + 15] = 1ULL;
+            }
+            smem[threadIdx.x] = after;
+        }
+        __syncthreads();
+        reduction_offset += active_count;
+    }
+
+    if (threadIdx.x == 0) {
+        int entry = reduction_entry_base + reduction_offset;
+        if (entry >= 0 && entry < max_entries) {
+            float sum = smem[0];
+            float mean_square = sum / (float)group_size;
+            float mean_square_plus_eps = mean_square + eps;
+            float rms_inv = rsqrtf(mean_square_plus_eps);
+            int base = entry * 16;
+            trace[base + 0] = (unsigned long long)stage_summary_id;
+            trace[base + 1] = (unsigned long long)layer_idx;
+            trace[base + 2] = (unsigned long long)chunk_idx;
+            trace[base + 3] = (unsigned long long)absolute_position;
+            trace[base + 4] = (unsigned long long)token_id;
+            trace[base + 5] = (unsigned long long)group;
+            trace[base + 6] = (unsigned long long)group_size;
+            trace[base + 7] = (unsigned long long)blockDim.x;
+            trace[base + 8] = trace_f32_bits(sum);
+            trace[base + 9] = trace_f32_bits(mean_square);
+            trace[base + 10] = trace_f32_bits(eps);
+            trace[base + 11] = trace_f32_bits(mean_square_plus_eps);
+            trace[base + 12] = trace_f32_bits(rms_inv);
+            trace[base + 13] = (unsigned long long)group_size;
+            trace[base + 14] = (unsigned long long)reduction_offset;
+            trace[base + 15] = 1ULL;
+        }
+    }
+}
+
+extern "C" __global__ void prefill_trace_fused_rmsnorm_input_detail_kernel(
+    unsigned long long* __restrict__ trace,
+    int entry_base_idx,
+    int stage_id,
+    int layer_idx,
+    int chunk_idx,
+    int absolute_position,
+    int token_id,
+    const __nv_bfloat16* __restrict__ residual_row,
+    const __nv_bfloat16* __restrict__ hidden_row,
+    int width,
+    int dim_start,
+    int element_count)
+{
+    int out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int idx = dim_start + out_idx;
+    if (out_idx >= element_count || idx >= width) return;
+
+    const unsigned short* residual_bits = reinterpret_cast<const unsigned short*>(residual_row);
+    const unsigned short* hidden_bits = reinterpret_cast<const unsigned short*>(hidden_row);
+    float residual = bf16_to_float(residual_row[idx]);
+    float hidden = bf16_to_float(hidden_row[idx]);
+    float added = residual + hidden;
+    __nv_bfloat16 rounded = float_to_bf16(added);
+    unsigned short rounded_bits = *reinterpret_cast<unsigned short*>(&rounded);
+
+    int base = (entry_base_idx + out_idx) * 16;
+    trace[base + 0] = (unsigned long long)stage_id;
+    trace[base + 1] = (unsigned long long)layer_idx;
+    trace[base + 2] = (unsigned long long)chunk_idx;
+    trace[base + 3] = (unsigned long long)absolute_position;
+    trace[base + 4] = (unsigned long long)token_id;
+    trace[base + 5] = (unsigned long long)idx;
+    trace[base + 6] = (unsigned long long)width;
+    trace[base + 7] = (unsigned long long)residual_bits[idx];
+    trace[base + 8] = (unsigned long long)hidden_bits[idx];
+    trace[base + 9] = (unsigned long long)rounded_bits;
+    trace[base + 10] = trace_f32_bits(residual);
+    trace[base + 11] = trace_f32_bits(hidden);
+    trace[base + 12] = trace_f32_bits(added);
+    trace[base + 13] = trace_f32_bits(bf16_to_float(rounded));
+    trace[base + 14] = 0ULL;
+    trace[base + 15] = 1ULL;
+}
+
+extern "C" __global__ void prefill_trace_fused_add_source_metadata_kernel(
+    unsigned long long* __restrict__ trace,
+    int entry_idx,
+    int stage_id,
+    int layer_idx,
+    int chunk_idx,
+    int absolute_position,
+    int token_id,
+    int row_idx,
+    int width,
+    unsigned long long lhs_row_ptr,
+    unsigned long long rhs_row_ptr,
+    unsigned long long rounded_store_row_ptr,
+    unsigned long long flags)
+{
+    int base = entry_idx * 16;
+    trace[base + 0] = (unsigned long long)stage_id;
+    trace[base + 1] = (unsigned long long)layer_idx;
+    trace[base + 2] = (unsigned long long)chunk_idx;
+    trace[base + 3] = (unsigned long long)absolute_position;
+    trace[base + 4] = (unsigned long long)token_id;
+    trace[base + 5] = (unsigned long long)row_idx;
+    trace[base + 6] = (unsigned long long)width;
+    trace[base + 7] = lhs_row_ptr;
+    trace[base + 8] = rhs_row_ptr;
+    trace[base + 9] = rounded_store_row_ptr;
+    trace[base + 10] = flags;
+    trace[base + 11] = (lhs_row_ptr == rhs_row_ptr) ? 1ULL : 0ULL;
+    trace[base + 12] = (lhs_row_ptr == rounded_store_row_ptr) ? 1ULL : 0ULL;
+    trace[base + 13] = (rhs_row_ptr == rounded_store_row_ptr) ? 1ULL : 0ULL;
+    trace[base + 14] = 0ULL;
+    trace[base + 15] = 1ULL;
+}
+
+extern "C" __global__ void prefill_trace_fused_rmsnorm_output_detail_kernel(
+    unsigned long long* __restrict__ trace,
+    int entry_base_idx,
+    int stage_id,
+    int layer_idx,
+    int chunk_idx,
+    int absolute_position,
+    int token_id,
+    const __nv_bfloat16* __restrict__ norm_input_row,
+    const __nv_bfloat16* __restrict__ weight,
+    const __nv_bfloat16* __restrict__ output_row,
+    int width,
+    float eps,
+    int dim_start,
+    int element_count)
+{
+    if (width <= 0) return;
+
+    __shared__ float s_ms[1024];
+    int tid = threadIdx.x;
+    float local_ss = 0.0f;
+    for (int i = tid; i < width; i += blockDim.x) {
+        float v = bf16_to_float(norm_input_row[i]);
+        local_ss += v * v;
+    }
+    s_ms[tid] = local_ss;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            s_ms[tid] += s_ms[tid + stride];
+        }
+        __syncthreads();
+    }
+    float rms_inv = rsqrtf(s_ms[0] / (float)width + eps);
+
+    const unsigned short* input_bits = reinterpret_cast<const unsigned short*>(norm_input_row);
+    const unsigned short* weight_bits = reinterpret_cast<const unsigned short*>(weight);
+    const unsigned short* output_bits = reinterpret_cast<const unsigned short*>(output_row);
+
+    for (int out_idx = tid; out_idx < element_count; out_idx += blockDim.x) {
+        int idx = dim_start + out_idx;
+        if (idx >= width) continue;
+        float norm_input = bf16_to_float(norm_input_row[idx]);
+        float weight_value = bf16_to_float(weight[idx]);
+        float pre_store = norm_input * rms_inv * weight_value;
+        int base = (entry_base_idx + out_idx) * 16;
+        trace[base + 0] = (unsigned long long)stage_id;
+        trace[base + 1] = (unsigned long long)layer_idx;
+        trace[base + 2] = (unsigned long long)chunk_idx;
+        trace[base + 3] = (unsigned long long)absolute_position;
+        trace[base + 4] = (unsigned long long)token_id;
+        trace[base + 5] = (unsigned long long)idx;
+        trace[base + 6] = (unsigned long long)width;
+        trace[base + 7] = (unsigned long long)input_bits[idx];
+        trace[base + 8] = (unsigned long long)weight_bits[idx];
+        trace[base + 9] = (unsigned long long)output_bits[idx];
+        trace[base + 10] = trace_f32_bits(norm_input);
+        trace[base + 11] = trace_f32_bits(weight_value);
+        trace[base + 12] = trace_f32_bits(rms_inv);
+        trace[base + 13] = trace_f32_bits(pre_store);
+        trace[base + 14] = trace_f32_bits(bf16_to_float(output_row[idx]));
+        trace[base + 15] = 1ULL;
+    }
+}
+
+extern "C" __global__ void prefill_trace_rmsnorm_summary_kernel(
+    const __nv_bfloat16* __restrict__ x_row,
+    const __nv_bfloat16* __restrict__ weight,
+    const __nv_bfloat16* __restrict__ out_row,
+    unsigned long long* __restrict__ trace,
+    int entry_idx,
+    int stage_id,
+    int layer_idx,
+    int chunk_idx,
+    int absolute_position,
+    int token_id,
+    int row_idx,
+    int width,
+    float eps,
+    int mode)
+{
+    if (width <= 0) return;
+
+    __shared__ float s_ms[1024];
+    __shared__ unsigned long long s_hash[1024];
+    __shared__ double s_sum[1024];
+    __shared__ double s_sumsq[1024];
+    __shared__ float s_min[1024];
+    __shared__ float s_max[1024];
+    __shared__ int s_finite[1024];
+    __shared__ int s_nan[1024];
+    __shared__ int s_inf[1024];
+
+    int tid = threadIdx.x;
+    if (tid >= 1024) return;
+
+    float local_ss = 0.0f;
+    for (int i = tid; i < width; i += blockDim.x) {
+        float v = bf16_to_float(x_row[i]);
+        local_ss += v * v;
+    }
+    s_ms[tid] = local_ss;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            s_ms[tid] += s_ms[tid + stride];
+        }
+        __syncthreads();
+    }
+
+    float mean_square = s_ms[0] / (float)width;
+    float rms_inv = rsqrtf(mean_square + eps);
+    if (tid == 0) {
+        float seq_ss = 0.0f;
+        for (int i = 0; i < width; ++i) {
+            float v = bf16_to_float(x_row[i]);
+            seq_ss += v * v;
+        }
+        s_ms[0] = seq_ss / (float)width;
+    }
+    __syncthreads();
+    float seq_mean_square = s_ms[0];
+    float seq_rms_inv = rsqrtf(seq_mean_square + eps);
+
+    float contig_local_ss = 0.0f;
+    int elems_per_thread = (width + blockDim.x - 1) / blockDim.x;
+    int start = tid * elems_per_thread;
+    int end = min(width, start + elems_per_thread);
+    for (int i = start; i < end; ++i) {
+        float v = bf16_to_float(x_row[i]);
+        contig_local_ss += v * v;
+    }
+    s_ms[tid] = contig_local_ss;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            s_ms[tid] += s_ms[tid + stride];
+        }
+        __syncthreads();
+    }
+    float contig_mean_square = s_ms[0] / (float)width;
+    float contig_rms_inv = rsqrtf(contig_mean_square + eps);
+
+    int value_count = ((mode >= 2 && mode <= 4) || mode == 8 || mode == 9 || mode == 12 || mode == 13) ? 1 : width;
+
+    unsigned long long h = 1469598103934665603ULL ^ (unsigned long long)(tid + 1);
+    double sum = 0.0;
+    double sumsq = 0.0;
+    float min_v = INFINITY;
+    float max_v = -INFINITY;
+    int finite_count = 0;
+    int nan_count = 0;
+    int inf_count = 0;
+
+    for (int i = tid; i < value_count; i += blockDim.x) {
+        float v;
+        if (mode == 0) {
+            v = bf16_to_float(x_row[i]);
+        } else if (mode == 1) {
+            v = bf16_to_float(weight[i]);
+        } else if (mode == 2) {
+            v = mean_square;
+        } else if (mode == 3) {
+            v = eps;
+        } else if (mode == 4) {
+            v = rms_inv;
+        } else if (mode == 5) {
+            v = bf16_to_float(x_row[i]) * rms_inv;
+        } else if (mode == 6) {
+            v = bf16_to_float(x_row[i]) * rms_inv * bf16_to_float(weight[i]);
+        } else if (mode == 8) {
+            v = seq_mean_square;
+        } else if (mode == 9) {
+            v = seq_rms_inv;
+        } else if (mode == 10) {
+            v = bf16_to_float(x_row[i]) * seq_rms_inv * bf16_to_float(weight[i]);
+        } else if (mode == 11) {
+            float out_v = bf16_to_float(x_row[i]) * seq_rms_inv * bf16_to_float(weight[i]);
+            v = bf16_to_float(float_to_bf16(out_v));
+        } else if (mode == 12) {
+            v = contig_mean_square;
+        } else if (mode == 13) {
+            v = contig_rms_inv;
+        } else if (mode == 14) {
+            v = bf16_to_float(x_row[i]) * contig_rms_inv * bf16_to_float(weight[i]);
+        } else if (mode == 15) {
+            float out_v = bf16_to_float(x_row[i]) * contig_rms_inv * bf16_to_float(weight[i]);
+            v = bf16_to_float(float_to_bf16(out_v));
+        } else {
+            v = bf16_to_float(out_row[i]);
+        }
+
+        unsigned long long raw = trace_f32_bits(v);
+        h ^= raw;
+        h *= 1099511628211ULL;
+
+        if (isfinite(v)) {
+            finite_count++;
+            sum += (double)v;
+            sumsq += (double)v * (double)v;
+        } else if (isnan(v)) {
+            nan_count++;
+        } else {
+            inf_count++;
+        }
+        if (v < min_v) min_v = v;
+        if (v > max_v) max_v = v;
+    }
+
+    s_hash[tid] = h;
+    s_sum[tid] = sum;
+    s_sumsq[tid] = sumsq;
+    s_min[tid] = min_v;
+    s_max[tid] = max_v;
+    s_finite[tid] = finite_count;
+    s_nan[tid] = nan_count;
+    s_inf[tid] = inf_count;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            s_hash[tid] ^= s_hash[tid + stride];
+            s_hash[tid] *= 1099511628211ULL;
+            s_sum[tid] += s_sum[tid + stride];
+            s_sumsq[tid] += s_sumsq[tid + stride];
+            if (s_min[tid + stride] < s_min[tid]) s_min[tid] = s_min[tid + stride];
+            if (s_max[tid + stride] > s_max[tid]) s_max[tid] = s_max[tid + stride];
+            s_finite[tid] += s_finite[tid + stride];
+            s_nan[tid] += s_nan[tid + stride];
+            s_inf[tid] += s_inf[tid + stride];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        int base = entry_idx * 16;
+        float mean = (s_finite[0] > 0) ? (float)(s_sum[0] / (double)s_finite[0]) : NAN;
+        float l2 = sqrtf((float)s_sumsq[0]);
+        trace[base + 0] = (unsigned long long)stage_id;
+        trace[base + 1] = (unsigned long long)layer_idx;
+        trace[base + 2] = (unsigned long long)chunk_idx;
+        trace[base + 3] = (unsigned long long)absolute_position;
+        trace[base + 4] = (unsigned long long)token_id;
+        trace[base + 5] = (unsigned long long)row_idx;
+        trace[base + 6] = (unsigned long long)value_count;
+        trace[base + 7] = s_hash[0];
+        trace[base + 8] = trace_f32_bits(mean);
+        trace[base + 9] = trace_f32_bits(l2);
+        trace[base + 10] = trace_f32_bits(s_min[0]);
+        trace[base + 11] = trace_f32_bits(s_max[0]);
+        trace[base + 12] = (unsigned long long)s_finite[0];
+        trace[base + 13] = (unsigned long long)s_nan[0];
+        trace[base + 14] = (unsigned long long)s_inf[0];
+        trace[base + 15] = 1ULL;
+    }
+}
+
+extern "C" __global__ void prefill_trace_mamba2_dt_softplus_summary_kernel(
+    const __nv_bfloat16* __restrict__ dt_row,
+    const float* __restrict__ dt_bias,
+    unsigned long long* __restrict__ trace,
+    int entry_idx,
+    int stage_id,
+    int layer_idx,
+    int chunk_idx,
+    int absolute_position,
+    int token_id,
+    int row_idx,
+    int width,
+    int mode)
+{
+    if (width <= 0) return;
+
+    __shared__ unsigned long long s_hash[256];
+    __shared__ double s_sum[256];
+    __shared__ double s_sumsq[256];
+    __shared__ float s_min[256];
+    __shared__ float s_max[256];
+    __shared__ int s_finite[256];
+    __shared__ int s_nan[256];
+    __shared__ int s_inf[256];
+
+    unsigned long long h = 1469598103934665603ULL ^ (unsigned long long)(threadIdx.x + 1);
+    double sum = 0.0;
+    double sumsq = 0.0;
+    float min_v = INFINITY;
+    float max_v = -INFINITY;
+    int finite_count = 0;
+    int nan_count = 0;
+    int inf_count = 0;
+
+    for (int i = threadIdx.x; i < width; i += blockDim.x) {
+        float raw_dt = bf16_to_float(dt_row[i]);
+        float bias = (dt_bias != NULL) ? dt_bias[i] : 0.0f;
+        float biased_dt = raw_dt + bias;
+        float v;
+        if (mode == 0) {
+            v = raw_dt;
+        } else if (mode == 1) {
+            v = bias;
+        } else if (mode == 2) {
+            v = biased_dt;
+        } else {
+            v = mamba2_chunk_cumsum_softplus(biased_dt);
+        }
+        unsigned long long raw = trace_f32_bits(v);
+        h ^= raw;
+        h *= 1099511628211ULL;
+
+        if (isfinite(v)) {
+            finite_count++;
+            sum += (double)v;
+            sumsq += (double)v * (double)v;
+        } else if (isnan(v)) {
+            nan_count++;
+        } else {
+            inf_count++;
+        }
+        if (v < min_v) min_v = v;
+        if (v > max_v) max_v = v;
+    }
+
+    int tid = threadIdx.x;
+    s_hash[tid] = h;
+    s_sum[tid] = sum;
+    s_sumsq[tid] = sumsq;
+    s_min[tid] = min_v;
+    s_max[tid] = max_v;
+    s_finite[tid] = finite_count;
+    s_nan[tid] = nan_count;
+    s_inf[tid] = inf_count;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            s_hash[tid] ^= s_hash[tid + stride];
+            s_hash[tid] *= 1099511628211ULL;
+            s_sum[tid] += s_sum[tid + stride];
+            s_sumsq[tid] += s_sumsq[tid + stride];
+            if (s_min[tid + stride] < s_min[tid]) s_min[tid] = s_min[tid + stride];
+            if (s_max[tid + stride] > s_max[tid]) s_max[tid] = s_max[tid + stride];
+            s_finite[tid] += s_finite[tid + stride];
+            s_nan[tid] += s_nan[tid + stride];
+            s_inf[tid] += s_inf[tid + stride];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        int base = entry_idx * 16;
+        float mean = (s_finite[0] > 0) ? (float)(s_sum[0] / (double)s_finite[0]) : NAN;
+        float l2 = sqrtf((float)s_sumsq[0]);
+        trace[base + 0] = (unsigned long long)stage_id;
+        trace[base + 1] = (unsigned long long)layer_idx;
+        trace[base + 2] = (unsigned long long)chunk_idx;
+        trace[base + 3] = (unsigned long long)absolute_position;
+        trace[base + 4] = (unsigned long long)token_id;
+        trace[base + 5] = (unsigned long long)row_idx;
+        trace[base + 6] = (unsigned long long)width;
+        trace[base + 7] = s_hash[0];
+        trace[base + 8] = trace_f32_bits(mean);
+        trace[base + 9] = trace_f32_bits(l2);
+        trace[base + 10] = trace_f32_bits(s_min[0]);
+        trace[base + 11] = trace_f32_bits(s_max[0]);
+        trace[base + 12] = (unsigned long long)s_finite[0];
+        trace[base + 13] = (unsigned long long)s_nan[0];
+        trace[base + 14] = (unsigned long long)s_inf[0];
+        trace[base + 15] = 1ULL;
+    }
+}
+
+extern "C" __global__ void prefill_trace_mamba2_ssd_scan_summary_kernel(
+    const __nv_bfloat16* __restrict__ x,
+    const __nv_bfloat16* __restrict__ dt_in,
+    const float* __restrict__ A_log,
+    const __nv_bfloat16* __restrict__ B_mat,
+    const __nv_bfloat16* __restrict__ C_mat,
+    const float* __restrict__ D_vec,
+    const float* __restrict__ ssm_state,
+    const float* __restrict__ dt_bias,
+    unsigned long long* __restrict__ trace,
+    int entry_idx,
+    int stage_id,
+    int layer_idx,
+    int chunk_idx,
+    int absolute_position,
+    int token_id,
+    int row_idx,
+    int L,
+    int n_heads,
+    int head_dim,
+    int state_size,
+    int n_groups,
+    int mode)
+{
+    if (L <= 0 || n_heads <= 0 || head_dim <= 0 || state_size <= 0 || n_groups <= 0) return;
+    int heads_per_group = n_heads / n_groups;
+    if (heads_per_group <= 0) return;
+    int t_last = row_idx;
+    if (t_last < 0) t_last = L - 1;
+    if (t_last >= L) t_last = L - 1;
+
+    int d_inner = n_heads * head_dim;
+    int value_count;
+    if (mode <= 4) {
+        value_count = n_heads;
+    } else if (mode <= 7) {
+        value_count = d_inner;
+    } else if (mode <= 20) {
+        value_count = d_inner * state_size;
+    } else {
+        value_count = d_inner;
+    }
+    if (value_count <= 0) return;
+
+    __shared__ unsigned long long s_hash[256];
+    __shared__ double s_sum[256];
+    __shared__ double s_sumsq[256];
+    __shared__ float s_min[256];
+    __shared__ float s_max[256];
+    __shared__ int s_finite[256];
+    __shared__ int s_nan[256];
+    __shared__ int s_inf[256];
+
+    unsigned long long h = 1469598103934665603ULL ^ (unsigned long long)(threadIdx.x + 1);
+    double sum = 0.0;
+    double sumsq = 0.0;
+    float min_v = INFINITY;
+    float max_v = -INFINITY;
+    int finite_count = 0;
+    int nan_count = 0;
+    int inf_count = 0;
+
+    for (int i = threadIdx.x; i < value_count; i += blockDim.x) {
+        int head;
+        int d = 0;
+        int state_idx = 0;
+        if (mode <= 4) {
+            head = i;
+        } else if (mode <= 7) {
+            head = i / head_dim;
+            d = i - head * head_dim;
+        } else if (mode <= 20) {
+            int hd = i / state_size;
+            state_idx = i - hd * state_size;
+            head = hd / head_dim;
+            d = hd - head * head_dim;
+        } else {
+            head = i / head_dim;
+            d = i - head * head_dim;
+        }
+        int group = head / heads_per_group;
+        float A_val = mamba2_ssd_a_value(A_log[head]);
+        float raw_dt = bf16_to_float(dt_in[t_last * n_heads + head]);
+        float dt = raw_dt + ((dt_bias != NULL) ? dt_bias[head] : 0.0f);
+        dt = mamba2_chunk_cumsum_softplus(dt);
+        float v = 0.0f;
+
+        if (mode == 0) {
+            v = A_val;
+        } else if (mode == 1) {
+            v = (D_vec != NULL) ? D_vec[head] : 0.0f;
+        } else if (mode == 2) {
+            v = A_val * dt;
+        } else if (mode == 3) {
+            float acc = 0.0f;
+            for (int t = 0; t <= t_last; t++) {
+                float dt_t = bf16_to_float(dt_in[t * n_heads + head]);
+                dt_t += (dt_bias != NULL) ? dt_bias[head] : 0.0f;
+                dt_t = mamba2_chunk_cumsum_softplus(dt_t);
+                acc += A_val * dt_t;
+            }
+            v = acc;
+        } else if (mode == 4) {
+            v = __expf(A_val * dt);
+        } else if (mode == 5) {
+            float x_val = bf16_to_float(x[(t_last * n_heads + head) * head_dim + d]);
+            float D_val = (D_vec != NULL) ? D_vec[head] : 0.0f;
+            v = D_val * x_val;
+        } else if (mode == 6 || mode == 7) {
+            float contrib = 0.0f;
+            const float* h_state = ssm_state + ((int64_t)head * head_dim + d) * state_size;
+            for (int s = 0; s < state_size; s++) {
+                float C_val = bf16_to_float(C_mat[(t_last * n_groups + group) * state_size + s]);
+                contrib += C_val * h_state[s];
+            }
+            if (mode == 6) {
+                v = contrib;
+            } else {
+                float x_val = bf16_to_float(x[(t_last * n_heads + head) * head_dim + d]);
+                float D_val = (D_vec != NULL) ? D_vec[head] : 0.0f;
+                v = D_val * x_val + contrib;
+            }
+        } else if (mode == 8) {
+            float x_val = bf16_to_float(x[(t_last * n_heads + head) * head_dim + d]);
+            float B_val = bf16_to_float(B_mat[(t_last * n_groups + group) * state_size + state_idx]);
+            v = B_val * dt * x_val;
+        } else if (mode == 9) {
+            const float* h_state = ssm_state + ((int64_t)head * head_dim + d) * state_size;
+            float C_val = bf16_to_float(C_mat[(t_last * n_groups + group) * state_size + state_idx]);
+            v = C_val * h_state[state_idx];
+        } else if (mode <= 20) {
+            float pre_state = 0.0f;
+            for (int t = 0; t < t_last; t++) {
+                float dt_t = bf16_to_float(dt_in[t * n_heads + head]);
+                dt_t += (dt_bias != NULL) ? dt_bias[head] : 0.0f;
+                dt_t = mamba2_chunk_cumsum_softplus(dt_t);
+                float A_bar_t = __expf(A_val * dt_t);
+                float x_t = bf16_to_float(x[(t * n_heads + head) * head_dim + d]);
+                float B_t = bf16_to_float(B_mat[(t * n_groups + group) * state_size + state_idx]);
+                float B_bar_t = bf16_to_float(float_to_bf16(B_t * dt_t));
+                pre_state = A_bar_t * pre_state + B_bar_t * x_t;
+            }
+
+            float A_bar = __expf(A_val * dt);
+            float x_val = bf16_to_float(x[(t_last * n_heads + head) * head_dim + d]);
+            float B_val = bf16_to_float(B_mat[(t_last * n_groups + group) * state_size + state_idx]);
+            float post_decay = A_bar * pre_state;
+            float update_fp32 = B_val * dt * x_val;
+            float bdt_bf16 = bf16_to_float(float_to_bf16(B_val * dt));
+            float update_bf16_bdt = bdt_bf16 * x_val;
+            float post_fp32 = post_decay + update_fp32;
+            float post_bf16_update = post_decay + update_bf16_bdt;
+
+            float da_final = 0.0f;
+            float da_at_selected = 0.0f;
+            for (int t = 0; t < L; t++) {
+                float dt_t = bf16_to_float(dt_in[t * n_heads + head]);
+                dt_t += (dt_bias != NULL) ? dt_bias[head] : 0.0f;
+                dt_t = mamba2_chunk_cumsum_softplus(dt_t);
+                da_final += A_val * dt_t;
+                if (t == t_last) {
+                    da_at_selected = da_final;
+                }
+            }
+            float selected_scale = __expf(fminf(da_final - da_at_selected, 0.0f)) * dt;
+            float final_contrib_fp32 = B_val * selected_scale * x_val;
+            float bscale_bf16 = bf16_to_float(float_to_bf16(B_val * selected_scale));
+            float final_contrib_bf16_bscale = bscale_bf16 * x_val;
+
+            float chunk_formula_final_fp32 = 0.0f;
+            float chunk_formula_final_bf16_bscale = 0.0f;
+            float da_running = 0.0f;
+            for (int t = 0; t < L; t++) {
+                float dt_t = bf16_to_float(dt_in[t * n_heads + head]);
+                dt_t += (dt_bias != NULL) ? dt_bias[head] : 0.0f;
+                dt_t = mamba2_chunk_cumsum_softplus(dt_t);
+                da_running += A_val * dt_t;
+                float scale_t = __expf(fminf(da_final - da_running, 0.0f)) * dt_t;
+                float x_t = bf16_to_float(x[(t * n_heads + head) * head_dim + d]);
+                float B_t = bf16_to_float(B_mat[(t * n_groups + group) * state_size + state_idx]);
+                chunk_formula_final_fp32 += B_t * scale_t * x_t;
+                float bscale_t_bf16 = bf16_to_float(float_to_bf16(B_t * scale_t));
+                chunk_formula_final_bf16_bscale += bscale_t_bf16 * x_t;
+            }
+
+            if (mode == 10) {
+                v = pre_state;
+            } else if (mode == 11) {
+                v = A_bar;
+            } else if (mode == 12) {
+                v = post_decay;
+            } else if (mode == 13) {
+                v = update_fp32;
+            } else if (mode == 14) {
+                v = update_bf16_bdt;
+            } else if (mode == 15) {
+                v = post_fp32;
+            } else if (mode == 16) {
+                v = post_bf16_update;
+            } else if (mode == 17) {
+                v = final_contrib_fp32;
+            } else if (mode == 18) {
+                v = final_contrib_bf16_bscale;
+            } else if (mode == 19) {
+                v = chunk_formula_final_fp32;
+            } else if (mode == 20) {
+                v = chunk_formula_final_bf16_bscale;
+            }
+        } else {
+            float dA_target = 0.0f;
+            for (int t = 0; t <= t_last; t++) {
+                float dt_t = bf16_to_float(dt_in[t * n_heads + head]);
+                dt_t += (dt_bias != NULL) ? dt_bias[head] : 0.0f;
+                dt_t = mamba2_chunk_cumsum_softplus(dt_t);
+                dA_target += A_val * dt_t;
+            }
+
+            float c_state_fp32_cbscale = 0.0f;
+            float c_state_bf16_cbscale = 0.0f;
+            float dA_running = 0.0f;
+            for (int t = 0; t <= t_last; t++) {
+                float dt_t = bf16_to_float(dt_in[t * n_heads + head]);
+                dt_t += (dt_bias != NULL) ? dt_bias[head] : 0.0f;
+                dt_t = mamba2_chunk_cumsum_softplus(dt_t);
+                dA_running += A_val * dt_t;
+
+                int c_row_base_idx = (t_last * n_groups + group) * state_size;
+                int b_row_base_idx = (t * n_groups + group) * state_size;
+                float cb = mamba2_ssd_cb_dot_reverse(
+                    C_mat, B_mat, c_row_base_idx, b_row_base_idx, state_size);
+                float scale = __expf(fminf(dA_target - dA_running, 0.0f)) * dt_t;
+                float cb_scaled = cb * scale;
+                float cb_scaled_bf16 = bf16_to_float(float_to_bf16(cb_scaled));
+                float x_t = bf16_to_float(x[(t * n_heads + head) * head_dim + d]);
+                c_state_fp32_cbscale += cb_scaled * x_t;
+                c_state_bf16_cbscale += cb_scaled_bf16 * x_t;
+            }
+
+            float x_val = bf16_to_float(x[(t_last * n_heads + head) * head_dim + d]);
+            float D_val = (D_vec != NULL) ? D_vec[head] : 0.0f;
+            float d_x = D_val * x_val;
+            float y_fp32_cbscale = d_x + c_state_fp32_cbscale;
+            float y_bf16_cbscale = d_x + c_state_bf16_cbscale;
+
+            if (mode == 21) {
+                v = c_state_fp32_cbscale;
+            } else if (mode == 22) {
+                v = c_state_bf16_cbscale;
+            } else if (mode == 23) {
+                v = y_fp32_cbscale;
+            } else if (mode == 24) {
+                v = y_bf16_cbscale;
+            } else if (mode == 25) {
+                v = bf16_to_float(float_to_bf16(y_bf16_cbscale));
+            }
+        }
+
+        unsigned long long raw = trace_f32_bits(v);
+        h ^= raw;
+        h *= 1099511628211ULL;
+
+        if (isfinite(v)) {
+            finite_count++;
+            sum += (double)v;
+            sumsq += (double)v * (double)v;
+        } else if (isnan(v)) {
+            nan_count++;
+        } else {
+            inf_count++;
+        }
+        if (v < min_v) min_v = v;
+        if (v > max_v) max_v = v;
+    }
+
+    int tid = threadIdx.x;
+    s_hash[tid] = h;
+    s_sum[tid] = sum;
+    s_sumsq[tid] = sumsq;
+    s_min[tid] = min_v;
+    s_max[tid] = max_v;
+    s_finite[tid] = finite_count;
+    s_nan[tid] = nan_count;
+    s_inf[tid] = inf_count;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            s_hash[tid] ^= s_hash[tid + stride];
+            s_hash[tid] *= 1099511628211ULL;
+            s_sum[tid] += s_sum[tid + stride];
+            s_sumsq[tid] += s_sumsq[tid + stride];
+            if (s_min[tid + stride] < s_min[tid]) s_min[tid] = s_min[tid + stride];
+            if (s_max[tid + stride] > s_max[tid]) s_max[tid] = s_max[tid + stride];
+            s_finite[tid] += s_finite[tid + stride];
+            s_nan[tid] += s_nan[tid + stride];
+            s_inf[tid] += s_inf[tid + stride];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        int base = entry_idx * 16;
+        float mean = (s_finite[0] > 0) ? (float)(s_sum[0] / (double)s_finite[0]) : NAN;
+        float l2 = sqrtf((float)s_sumsq[0]);
+        trace[base + 0] = (unsigned long long)stage_id;
+        trace[base + 1] = (unsigned long long)layer_idx;
+        trace[base + 2] = (unsigned long long)chunk_idx;
+        trace[base + 3] = (unsigned long long)absolute_position;
+        trace[base + 4] = (unsigned long long)token_id;
+        trace[base + 5] = (unsigned long long)row_idx;
+        trace[base + 6] = (unsigned long long)value_count;
+        trace[base + 7] = s_hash[0];
+        trace[base + 8] = trace_f32_bits(mean);
+        trace[base + 9] = trace_f32_bits(l2);
+        trace[base + 10] = trace_f32_bits(s_min[0]);
+        trace[base + 11] = trace_f32_bits(s_max[0]);
+        trace[base + 12] = (unsigned long long)s_finite[0];
+        trace[base + 13] = (unsigned long long)s_nan[0];
+        trace[base + 14] = (unsigned long long)s_inf[0];
+        trace[base + 15] = 1ULL;
+    }
+}
+
+extern "C" __global__ void prefill_trace_mamba2_ssd_output_detail_kernel(
+    const __nv_bfloat16* __restrict__ out,
+    const __nv_bfloat16* __restrict__ x,
+    const __nv_bfloat16* __restrict__ dt_in,
+    const float* __restrict__ A_log,
+    const __nv_bfloat16* __restrict__ B_mat,
+    const __nv_bfloat16* __restrict__ C_mat,
+    const float* __restrict__ D_vec,
+    const float* __restrict__ dt_bias,
+    unsigned long long* __restrict__ trace,
+    int entry_base_idx,
+    int stage_value_id,
+    int stage_component_id,
+    int stage_source_id,
+    int stage_hash_id,
+    int layer_idx,
+    int chunk_idx,
+    int absolute_position,
+    int token_id,
+    int row_idx,
+    int L,
+    int n_heads,
+    int head_dim,
+    int state_size,
+    int n_groups,
+    int chunk_size,
+    int use_softplus,
+    int dim_index)
+{
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+    if (L <= 0 || n_heads <= 0 || head_dim <= 0 || state_size <= 0 || n_groups <= 0) return;
+    int d_inner = n_heads * head_dim;
+    if (dim_index < 0 || dim_index >= d_inner) return;
+    int heads_per_group = n_heads / n_groups;
+    if (heads_per_group <= 0) return;
+
+    int t_last = row_idx;
+    if (t_last < 0) t_last = L - 1;
+    if (t_last >= L) t_last = L - 1;
+
+    int head = dim_index / head_dim;
+    int d = dim_index - head * head_dim;
+    int group = head / heads_per_group;
+    int effective_chunk_size = (chunk_size > 0) ? chunk_size : L;
+    int chunk_start = (t_last / effective_chunk_size) * effective_chunk_size;
+
+    float A_log_value = A_log[head];
+    float exp_A_log = mamba2_ssd_exp_a_log(A_log_value);
+    float A_val = -exp_A_log;
+    float D_val = (D_vec != NULL) ? D_vec[head] : 0.0f;
+    const unsigned short* out_bits = reinterpret_cast<const unsigned short*>(out);
+    const unsigned short* x_bits = reinterpret_cast<const unsigned short*>(x);
+    const unsigned short* dt_bits = reinterpret_cast<const unsigned short*>(dt_in);
+
+    float dt_raw = bf16_to_float(dt_in[t_last * n_heads + head]);
+    float dt_last = dt_raw + ((dt_bias != NULL) ? dt_bias[head] : 0.0f);
+    if (use_softplus) dt_last = mamba2_chunk_cumsum_softplus(dt_last);
+
+    float dA_target = 0.0f;
+    float dA_chunk_base = 0.0f;
+    for (int t = 0; t <= t_last; t++) {
+        if (t == chunk_start) {
+            dA_chunk_base = dA_target;
+        }
+        float dt_t = bf16_to_float(dt_in[t * n_heads + head]);
+        dt_t += (dt_bias != NULL) ? dt_bias[head] : 0.0f;
+        if (use_softplus) dt_t = mamba2_chunk_cumsum_softplus(dt_t);
+        dA_target += A_val * dt_t;
+    }
+
+    float x_last = bf16_to_float(x[(t_last * n_heads + head) * head_dim + d]);
+    float d_x = D_val * x_last;
+
+    float c_state_total = 0.0f;
+    for (int s = 0; s < state_size; s++) {
+        float h = 0.0f;
+        for (int t = 0; t <= t_last; t++) {
+            float dt_t = bf16_to_float(dt_in[t * n_heads + head]);
+            dt_t += (dt_bias != NULL) ? dt_bias[head] : 0.0f;
+            if (use_softplus) dt_t = mamba2_chunk_cumsum_softplus(dt_t);
+            float A_bar = __expf(A_val * dt_t);
+            float x_t = bf16_to_float(x[(t * n_heads + head) * head_dim + d]);
+            float B_val = bf16_to_float(B_mat[(t * n_groups + group) * state_size + s]);
+            float B_bar = bf16_to_float(float_to_bf16(B_val * dt_t));
+            h = A_bar * h + B_bar * x_t;
+        }
+        float C_val = bf16_to_float(C_mat[(t_last * n_groups + group) * state_size + s]);
+        c_state_total += C_val * h;
+    }
+
+    float local_old_state = 0.0f;
+    float local_hf_chunk_scan = 0.0f;
+    float dA_running = dA_chunk_base;
+    for (int u = chunk_start; u <= t_last; u++) {
+        float dt_u = bf16_to_float(dt_in[u * n_heads + head]);
+        dt_u += (dt_bias != NULL) ? dt_bias[head] : 0.0f;
+        float dt_u_scale = dt_u;
+        if (use_softplus) {
+            dt_u = mamba2_chunk_cumsum_softplus(dt_u);
+            dt_u_scale = mamba2_chunk_cumsum_softplus(dt_u_scale);
+        }
+        dA_running += A_val * dt_u;
+        float decay = __expf(fminf(dA_target - dA_running, 0.0f));
+
+        float old_state_source = 0.0f;
+        int c_row_base_idx = (t_last * n_groups + group) * state_size;
+        int b_row_base_idx = (u * n_groups + group) * state_size;
+        float cb = mamba2_ssd_cb_dot_reverse(
+            C_mat, B_mat, c_row_base_idx, b_row_base_idx, state_size);
+        if (chunk_start != 0) {
+            for (int s = 0; s < state_size; s++) {
+                float C_val = bf16_to_float(C_mat[c_row_base_idx + s]);
+                float B_val = bf16_to_float(B_mat[b_row_base_idx + s]);
+                float B_bar = bf16_to_float(float_to_bf16(B_val * dt_u));
+                old_state_source += C_val * B_bar;
+            }
+        }
+
+        float scale = decay * dt_u_scale;
+        float cb_scaled_bf16 = bf16_to_float(float_to_bf16(cb * scale));
+        float x_u = bf16_to_float(x[(u * n_heads + head) * head_dim + d]);
+        local_old_state += old_state_source * decay * x_u;
+        local_hf_chunk_scan += cb_scaled_bf16 * x_u;
+    }
+
+    float prior_chunk_state = (chunk_start == 0) ? 0.0f : (c_state_total - local_old_state);
+    float y = d_x + prior_chunk_state + local_hf_chunk_scan;
+    float stored = bf16_to_float(out[(t_last * n_heads + head) * head_dim + d]);
+    unsigned int out_raw = out_bits[(t_last * n_heads + head) * head_dim + d];
+    unsigned int x_raw = x_bits[(t_last * n_heads + head) * head_dim + d];
+    unsigned int dt_raw_bits = dt_bits[t_last * n_heads + head];
+
+    unsigned long long c_hash = 14695981039346656037ULL;
+    for (int s = 0; s < state_size; s++) {
+        unsigned int raw = reinterpret_cast<const unsigned short*>(C_mat)[(t_last * n_groups + group) * state_size + s];
+        c_hash ^= (unsigned long long)(raw & 0xffU);
+        c_hash *= 1099511628211ULL;
+        c_hash ^= (unsigned long long)((raw >> 8) & 0xffU);
+        c_hash *= 1099511628211ULL;
+    }
+    unsigned long long b_hash = 14695981039346656037ULL;
+    unsigned long long x_chunk_hash = 14695981039346656037ULL;
+    unsigned long long dt_chunk_hash = 14695981039346656037ULL;
+    for (int u = chunk_start; u <= t_last; u++) {
+        unsigned int x_u_raw = x_bits[(u * n_heads + head) * head_dim + d];
+        x_chunk_hash ^= (unsigned long long)(x_u_raw & 0xffU);
+        x_chunk_hash *= 1099511628211ULL;
+        x_chunk_hash ^= (unsigned long long)((x_u_raw >> 8) & 0xffU);
+        x_chunk_hash *= 1099511628211ULL;
+
+        unsigned int dt_u_raw = dt_bits[u * n_heads + head];
+        dt_chunk_hash ^= (unsigned long long)(dt_u_raw & 0xffU);
+        dt_chunk_hash *= 1099511628211ULL;
+        dt_chunk_hash ^= (unsigned long long)((dt_u_raw >> 8) & 0xffU);
+        dt_chunk_hash *= 1099511628211ULL;
+
+        for (int s = 0; s < state_size; s++) {
+            unsigned int raw = reinterpret_cast<const unsigned short*>(B_mat)[(u * n_groups + group) * state_size + s];
+            b_hash ^= (unsigned long long)(raw & 0xffU);
+            b_hash *= 1099511628211ULL;
+            b_hash ^= (unsigned long long)((raw >> 8) & 0xffU);
+            b_hash *= 1099511628211ULL;
+        }
+    }
+
+    int base = entry_base_idx * 16;
+    trace[base + 0] = (unsigned long long)stage_value_id;
+    trace[base + 1] = (unsigned long long)layer_idx;
+    trace[base + 2] = (unsigned long long)chunk_idx;
+    trace[base + 3] = (unsigned long long)absolute_position;
+    trace[base + 4] = (unsigned long long)token_id;
+    trace[base + 5] = (unsigned long long)dim_index;
+    trace[base + 6] = (unsigned long long)d_inner;
+    trace[base + 7] = (unsigned long long)out_raw;
+    trace[base + 8] = (unsigned long long)x_raw;
+    trace[base + 9] = (unsigned long long)dt_raw_bits;
+    trace[base + 10] = trace_f32_bits(x_last);
+    trace[base + 11] = trace_f32_bits(dt_raw);
+    trace[base + 12] = trace_f32_bits(dt_last);
+    trace[base + 13] = trace_f32_bits(y);
+    trace[base + 14] = trace_f32_bits(stored);
+    trace[base + 15] = (unsigned long long)head;
+
+    int base2 = (entry_base_idx + 1) * 16;
+    trace[base2 + 0] = (unsigned long long)stage_component_id;
+    trace[base2 + 1] = (unsigned long long)layer_idx;
+    trace[base2 + 2] = (unsigned long long)chunk_idx;
+    trace[base2 + 3] = (unsigned long long)absolute_position;
+    trace[base2 + 4] = (unsigned long long)token_id;
+    trace[base2 + 5] = (unsigned long long)dim_index;
+    trace[base2 + 6] = (unsigned long long)head;
+    trace[base2 + 7] = (unsigned long long)d;
+    trace[base2 + 8] = trace_f32_bits(d_x);
+    trace[base2 + 9] = trace_f32_bits(prior_chunk_state);
+    trace[base2 + 10] = trace_f32_bits(local_hf_chunk_scan);
+    trace[base2 + 11] = trace_f32_bits(c_state_total);
+    trace[base2 + 12] = trace_f32_bits(local_old_state);
+    trace[base2 + 13] = trace_f32_bits(A_val);
+    trace[base2 + 14] = trace_f32_bits(A_log_value);
+    trace[base2 + 15] = trace_f32_bits(exp_A_log);
+
+    int base3 = (entry_base_idx + 2) * 16;
+    trace[base3 + 0] = (unsigned long long)stage_source_id;
+    trace[base3 + 1] = (unsigned long long)layer_idx;
+    trace[base3 + 2] = (unsigned long long)chunk_idx;
+    trace[base3 + 3] = (unsigned long long)absolute_position;
+    trace[base3 + 4] = (unsigned long long)token_id;
+    trace[base3 + 5] = (unsigned long long)dim_index;
+    trace[base3 + 6] = (unsigned long long)row_idx;
+    trace[base3 + 7] = (unsigned long long)(x + (int64_t)t_last * d_inner);
+    trace[base3 + 8] = (unsigned long long)(dt_in + (int64_t)t_last * n_heads);
+    trace[base3 + 9] = (unsigned long long)(B_mat + ((int64_t)t_last * n_groups + group) * state_size);
+    trace[base3 + 10] = (unsigned long long)(C_mat + ((int64_t)t_last * n_groups + group) * state_size);
+    trace[base3 + 11] = (unsigned long long)(out + (int64_t)t_last * d_inner);
+    trace[base3 + 12] = (unsigned long long)n_heads;
+    trace[base3 + 13] = (unsigned long long)head_dim;
+    trace[base3 + 14] = (unsigned long long)state_size;
+    trace[base3 + 15] = (unsigned long long)n_groups;
+
+    int base4 = (entry_base_idx + 3) * 16;
+    trace[base4 + 0] = (unsigned long long)stage_hash_id;
+    trace[base4 + 1] = (unsigned long long)layer_idx;
+    trace[base4 + 2] = (unsigned long long)chunk_idx;
+    trace[base4 + 3] = (unsigned long long)absolute_position;
+    trace[base4 + 4] = (unsigned long long)token_id;
+    trace[base4 + 5] = (unsigned long long)dim_index;
+    trace[base4 + 6] = (unsigned long long)(chunk_start + 1);
+    trace[base4 + 7] = (unsigned long long)t_last;
+    trace[base4 + 8] = c_hash;
+    trace[base4 + 9] = b_hash;
+    trace[base4 + 10] = x_chunk_hash;
+    trace[base4 + 11] = dt_chunk_hash;
+    trace[base4 + 12] = trace_f32_bits(dA_chunk_base);
+    trace[base4 + 13] = trace_f32_bits(dA_target);
+    trace[base4 + 14] = (unsigned long long)effective_chunk_size;
+    trace[base4 + 15] = 1ULL;
+
+}
+
+extern "C" __global__ void prefill_trace_mamba2_ssd_local_scan_detail_kernel(
+    const __nv_bfloat16* __restrict__ x,
+    const __nv_bfloat16* __restrict__ dt_in,
+    const float* __restrict__ A_log,
+    const __nv_bfloat16* __restrict__ B_mat,
+    const __nv_bfloat16* __restrict__ C_mat,
+    const float* __restrict__ dt_bias,
+    unsigned long long* __restrict__ trace,
+    int entry_base_idx,
+    int max_entries,
+    int stage_summary_id,
+    int stage_token_id,
+    int stage_cb_id,
+    int stage_dt_id,
+    int stage_scale_id,
+    int stage_accum_candidate_id,
+    int stage_cb_term_id,
+    int stage_cb_term_summary_id,
+    int selected_local_scan_token,
+    int layer_idx,
+    int chunk_idx,
+    int absolute_position,
+    int token_id,
+    int row_idx,
+    int L,
+    int n_heads,
+    int head_dim,
+    int state_size,
+    int n_groups,
+    int chunk_size,
+    int use_softplus,
+    int dim_index)
+{
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+    if (L <= 0 || n_heads <= 0 || head_dim <= 0 || state_size <= 0 || n_groups <= 0) return;
+    if (entry_base_idx < 0 || entry_base_idx >= max_entries) return;
+    int d_inner = n_heads * head_dim;
+    if (dim_index < 0 || dim_index >= d_inner) return;
+    int heads_per_group = n_heads / n_groups;
+    if (heads_per_group <= 0) return;
+
+    int t_last = row_idx;
+    if (t_last < 0) t_last = L - 1;
+    if (t_last >= L) t_last = L - 1;
+
+    int head = dim_index / head_dim;
+    int d = dim_index - head * head_dim;
+    int group = head / heads_per_group;
+    int effective_chunk_size = (chunk_size > 0) ? chunk_size : L;
+    int chunk_start = (t_last / effective_chunk_size) * effective_chunk_size;
+
+    float A_val = mamba2_ssd_a_value(A_log[head]);
+    const unsigned short* x_bits = reinterpret_cast<const unsigned short*>(x);
+    const unsigned short* dt_bits = reinterpret_cast<const unsigned short*>(dt_in);
+
+    float dA_target = 0.0f;
+    float dA_chunk_base = 0.0f;
+    for (int t = 0; t <= t_last; t++) {
+        if (t == chunk_start) {
+            dA_chunk_base = dA_target;
+        }
+        float dt_t = bf16_to_float(dt_in[t * n_heads + head]);
+        dt_t += (dt_bias != NULL) ? dt_bias[head] : 0.0f;
+        if (use_softplus) dt_t = mamba2_chunk_cumsum_softplus(dt_t);
+        dA_target += A_val * dt_t;
+    }
+
+    float local_scan_forward = 0.0f;
+    float local_scan_kahan = 0.0f;
+    float local_scan_kahan_c = 0.0f;
+    float local_scan_fp32_cbscale = 0.0f;
+    float local_scan_mul_rn_add_rn = 0.0f;
+    float local_scan_fma_rn = 0.0f;
+    float dA_running = dA_chunk_base;
+    int entry_idx = entry_base_idx + 1;
+    int cb_term_entry_idx = entry_base_idx + 1 + (t_last - chunk_start + 1) * 5;
+    int cb_term_count = 0;
+
+    for (int u = chunk_start; u <= t_last; u++) {
+        float raw_dt_u = bf16_to_float(dt_in[u * n_heads + head]);
+        float dt_bias_value = (dt_bias != NULL) ? dt_bias[head] : 0.0f;
+        float dt_plus_bias = raw_dt_u + dt_bias_value;
+        __nv_bfloat16 dt_plus_bias_bf16_raw = float_to_bf16(dt_plus_bias);
+        float dt_plus_bias_bf16 = bf16_to_float(dt_plus_bias_bf16_raw);
+        unsigned int dt_plus_bias_bf16_bits =
+            (unsigned int)(*reinterpret_cast<unsigned short*>(&dt_plus_bias_bf16_raw));
+        float softplus_log_fast = dt_plus_bias;
+        float softplus_log1p_exp = dt_plus_bias;
+        float softplus_bf16_plus_log_fast = dt_plus_bias_bf16;
+        if (use_softplus) {
+            softplus_log_fast = mamba2_chunk_cumsum_softplus(dt_plus_bias);
+            softplus_log1p_exp = log1pf(expf(dt_plus_bias));
+            softplus_bf16_plus_log_fast = mamba2_chunk_cumsum_softplus(dt_plus_bias_bf16);
+        }
+        float dt_u = softplus_log_fast;
+        float dt_u_scale = softplus_log_fast;
+        dA_running += A_val * dt_u;
+        float decay = __expf(fminf(dA_target - dA_running, 0.0f));
+
+        float cb_forward = 0.0f;
+        float cb_reverse = 0.0f;
+        float top_state_abs = -1.0f;
+        float top_state_contrib = 0.0f;
+        int top_state_index = 0;
+        bool capture_cb_terms = selected_local_scan_token >= chunk_start &&
+            selected_local_scan_token <= t_last &&
+            u == selected_local_scan_token &&
+            stage_cb_term_id != 0;
+        for (int s = 0; s < state_size; s++) {
+            float C_val = bf16_to_float(C_mat[(t_last * n_groups + group) * state_size + s]);
+            float B_val = bf16_to_float(B_mat[(u * n_groups + group) * state_size + s]);
+            float contrib = C_val * B_val;
+            float partial_before = cb_forward;
+            cb_forward += contrib;
+            float abs_contrib = fabsf(contrib);
+            if (abs_contrib > top_state_abs) {
+                top_state_abs = abs_contrib;
+                top_state_contrib = contrib;
+                top_state_index = s;
+            }
+            if (capture_cb_terms && cb_term_entry_idx < max_entries) {
+                const unsigned short* c_bits = reinterpret_cast<const unsigned short*>(C_mat);
+                const unsigned short* b_bits = reinterpret_cast<const unsigned short*>(B_mat);
+                int c_idx = (t_last * n_groups + group) * state_size + s;
+                int b_idx = (u * n_groups + group) * state_size + s;
+                int base = cb_term_entry_idx * 16;
+                trace[base + 0] = (unsigned long long)stage_cb_term_id;
+                trace[base + 1] = (unsigned long long)layer_idx;
+                trace[base + 2] = (unsigned long long)chunk_idx;
+                trace[base + 3] = (unsigned long long)absolute_position;
+                trace[base + 4] = (unsigned long long)token_id;
+                trace[base + 5] = (unsigned long long)dim_index;
+                trace[base + 6] = (unsigned long long)u;
+                trace[base + 7] = (unsigned long long)s;
+                trace[base + 8] = (unsigned long long)c_bits[c_idx];
+                trace[base + 9] = (unsigned long long)b_bits[b_idx];
+                trace[base + 10] = trace_f32_bits(C_val);
+                trace[base + 11] = trace_f32_bits(B_val);
+                trace[base + 12] = trace_f32_bits(contrib);
+                trace[base + 13] = trace_f32_bits(partial_before);
+                trace[base + 14] = trace_f32_bits(cb_forward);
+                trace[base + 15] = 1ULL;
+                cb_term_entry_idx++;
+                cb_term_count++;
+            }
+        }
+
+        for (int s = state_size - 1; s >= 0; s--) {
+            float C_val = bf16_to_float(C_mat[(t_last * n_groups + group) * state_size + s]);
+            float B_val = bf16_to_float(B_mat[(u * n_groups + group) * state_size + s]);
+            cb_reverse += C_val * B_val;
+        }
+        if (capture_cb_terms && stage_cb_term_summary_id != 0 && cb_term_entry_idx < max_entries) {
+            int base = cb_term_entry_idx * 16;
+            trace[base + 0] = (unsigned long long)stage_cb_term_summary_id;
+            trace[base + 1] = (unsigned long long)layer_idx;
+            trace[base + 2] = (unsigned long long)chunk_idx;
+            trace[base + 3] = (unsigned long long)absolute_position;
+            trace[base + 4] = (unsigned long long)token_id;
+            trace[base + 5] = (unsigned long long)dim_index;
+            trace[base + 6] = (unsigned long long)u;
+            trace[base + 7] = (unsigned long long)state_size;
+            trace[base + 8] = trace_f32_bits(cb_forward);
+            trace[base + 9] = trace_f32_bits(cb_reverse);
+            trace[base + 10] = (unsigned long long)top_state_index;
+            trace[base + 11] = trace_f32_bits(top_state_contrib);
+            trace[base + 12] = (unsigned long long)selected_local_scan_token;
+            trace[base + 13] = (unsigned long long)group;
+            trace[base + 14] = (unsigned long long)cb_term_count;
+            trace[base + 15] = 1ULL;
+            cb_term_entry_idx++;
+        }
+
+        float scale = decay * dt_u_scale;
+        float cb_scaled_fp32 = cb_forward * scale;
+        __nv_bfloat16 cb_scaled_bf16_raw = float_to_bf16(cb_scaled_fp32);
+        float cb_scaled_bf16 = bf16_to_float(cb_scaled_bf16_raw);
+        unsigned int cb_scaled_bf16_bits =
+            (unsigned int)(*reinterpret_cast<unsigned short*>(&cb_scaled_bf16_raw));
+        float x_u = bf16_to_float(x[(u * n_heads + head) * head_dim + d]);
+        float term_bf16 = cb_scaled_bf16 * x_u;
+        float term_fp32 = cb_scaled_fp32 * x_u;
+        float term_mul_rn = trace_mul_rn_f32(cb_scaled_bf16, x_u);
+
+        local_scan_forward += term_bf16;
+        local_scan_mul_rn_add_rn = trace_add_rn_f32(local_scan_mul_rn_add_rn, term_mul_rn);
+        local_scan_fma_rn = trace_fma_rn_f32(cb_scaled_bf16, x_u, local_scan_fma_rn);
+        float kahan_y = term_bf16 - local_scan_kahan_c;
+        float kahan_t = local_scan_kahan + kahan_y;
+        local_scan_kahan_c = (kahan_t - local_scan_kahan) - kahan_y;
+        local_scan_kahan = kahan_t;
+        local_scan_fp32_cbscale += term_fp32;
+
+        if (entry_idx < max_entries) {
+            int base = entry_idx * 16;
+            trace[base + 0] = (unsigned long long)stage_token_id;
+            trace[base + 1] = (unsigned long long)layer_idx;
+            trace[base + 2] = (unsigned long long)chunk_idx;
+            trace[base + 3] = (unsigned long long)absolute_position;
+            trace[base + 4] = (unsigned long long)token_id;
+            trace[base + 5] = (unsigned long long)dim_index;
+            trace[base + 6] = (unsigned long long)(u + 1);
+            trace[base + 7] = (unsigned long long)head;
+            trace[base + 8] = (unsigned long long)x_bits[(u * n_heads + head) * head_dim + d];
+            trace[base + 9] = (unsigned long long)dt_bits[u * n_heads + head];
+            trace[base + 10] = trace_f32_bits(x_u);
+            trace[base + 11] = trace_f32_bits(dt_u);
+            trace[base + 12] = trace_f32_bits(dA_running);
+            trace[base + 13] = trace_f32_bits(decay);
+            trace[base + 14] = trace_f32_bits(term_bf16);
+            trace[base + 15] = trace_f32_bits(local_scan_forward);
+        }
+        entry_idx++;
+
+        if (entry_idx < max_entries) {
+            int base = entry_idx * 16;
+            trace[base + 0] = (unsigned long long)stage_cb_id;
+            trace[base + 1] = (unsigned long long)layer_idx;
+            trace[base + 2] = (unsigned long long)chunk_idx;
+            trace[base + 3] = (unsigned long long)absolute_position;
+            trace[base + 4] = (unsigned long long)token_id;
+            trace[base + 5] = (unsigned long long)dim_index;
+            trace[base + 6] = (unsigned long long)(u + 1);
+            trace[base + 7] = (unsigned long long)top_state_index;
+            trace[base + 8] = trace_f32_bits(cb_forward);
+            trace[base + 9] = trace_f32_bits(cb_reverse);
+            trace[base + 10] = trace_f32_bits(cb_scaled_fp32);
+            trace[base + 11] = trace_f32_bits(cb_scaled_bf16);
+            trace[base + 12] = trace_f32_bits(term_fp32);
+            trace[base + 13] = trace_f32_bits(top_state_contrib);
+        trace[base + 14] = (unsigned long long)cb_scaled_bf16_bits;
+            trace[base + 15] = 1ULL;
+        }
+        entry_idx++;
+
+        if (entry_idx < max_entries) {
+            int base = entry_idx * 16;
+            trace[base + 0] = (unsigned long long)stage_dt_id;
+            trace[base + 1] = (unsigned long long)layer_idx;
+            trace[base + 2] = (unsigned long long)chunk_idx;
+            trace[base + 3] = (unsigned long long)absolute_position;
+            trace[base + 4] = (unsigned long long)token_id;
+            trace[base + 5] = (unsigned long long)dim_index;
+            trace[base + 6] = (unsigned long long)(u + 1);
+            trace[base + 7] = (unsigned long long)head;
+            trace[base + 8] = (unsigned long long)dt_bits[u * n_heads + head];
+            trace[base + 9] = trace_f32_bits(raw_dt_u);
+            trace[base + 10] = trace_f32_bits(dt_bias_value);
+            trace[base + 11] = trace_f32_bits(dt_plus_bias);
+            trace[base + 12] = (unsigned long long)dt_plus_bias_bf16_bits;
+            trace[base + 13] = trace_f32_bits(softplus_log_fast);
+            trace[base + 14] = trace_f32_bits(softplus_log1p_exp);
+            trace[base + 15] = trace_f32_bits(softplus_bf16_plus_log_fast);
+        }
+        entry_idx++;
+
+        float scale_log1p_exp = decay * softplus_log1p_exp;
+        float scale_bf16_plus_log_fast = decay * softplus_bf16_plus_log_fast;
+        __nv_bfloat16 cb_scaled_log1p_exp_raw = float_to_bf16(cb_forward * scale_log1p_exp);
+        __nv_bfloat16 cb_scaled_bf16_plus_raw =
+            float_to_bf16(cb_forward * scale_bf16_plus_log_fast);
+        unsigned int cb_scaled_log1p_exp_bits =
+            (unsigned int)(*reinterpret_cast<unsigned short*>(&cb_scaled_log1p_exp_raw));
+        unsigned int cb_scaled_bf16_plus_bits =
+            (unsigned int)(*reinterpret_cast<unsigned short*>(&cb_scaled_bf16_plus_raw));
+        if (entry_idx < max_entries) {
+            int base = entry_idx * 16;
+            trace[base + 0] = (unsigned long long)stage_scale_id;
+            trace[base + 1] = (unsigned long long)layer_idx;
+            trace[base + 2] = (unsigned long long)chunk_idx;
+            trace[base + 3] = (unsigned long long)absolute_position;
+            trace[base + 4] = (unsigned long long)token_id;
+            trace[base + 5] = (unsigned long long)dim_index;
+            trace[base + 6] = (unsigned long long)(u + 1);
+            trace[base + 7] = (unsigned long long)head;
+            trace[base + 8] = trace_f32_bits(decay);
+            trace[base + 9] = trace_f32_bits(scale);
+            trace[base + 10] = trace_f32_bits(scale_log1p_exp);
+            trace[base + 11] = trace_f32_bits(scale_bf16_plus_log_fast);
+            trace[base + 12] = (unsigned long long)cb_scaled_bf16_bits;
+            trace[base + 13] = (unsigned long long)cb_scaled_log1p_exp_bits;
+            trace[base + 14] = (unsigned long long)cb_scaled_bf16_plus_bits;
+            trace[base + 15] = 1ULL;
+        }
+        entry_idx++;
+
+        if (entry_idx < max_entries) {
+            int base = entry_idx * 16;
+            trace[base + 0] = (unsigned long long)stage_accum_candidate_id;
+            trace[base + 1] = (unsigned long long)layer_idx;
+            trace[base + 2] = (unsigned long long)chunk_idx;
+            trace[base + 3] = (unsigned long long)absolute_position;
+            trace[base + 4] = (unsigned long long)token_id;
+            trace[base + 5] = (unsigned long long)dim_index;
+            trace[base + 6] = (unsigned long long)(u + 1);
+            trace[base + 7] = (unsigned long long)head;
+            trace[base + 8] = trace_f32_bits(term_bf16);
+            trace[base + 9] = trace_f32_bits(local_scan_forward);
+            trace[base + 10] = trace_f32_bits(term_mul_rn);
+            trace[base + 11] = trace_f32_bits(local_scan_mul_rn_add_rn);
+            trace[base + 12] = trace_f32_bits(local_scan_fma_rn);
+            trace[base + 13] = trace_f32_bits(local_scan_kahan);
+            trace[base + 14] = trace_f32_bits(local_scan_fp32_cbscale);
+            trace[base + 15] = 1ULL;
+        }
+        entry_idx++;
+    }
+
+    int base = entry_base_idx * 16;
+    trace[base + 0] = (unsigned long long)stage_summary_id;
+    trace[base + 1] = (unsigned long long)layer_idx;
+    trace[base + 2] = (unsigned long long)chunk_idx;
+    trace[base + 3] = (unsigned long long)absolute_position;
+    trace[base + 4] = (unsigned long long)token_id;
+    trace[base + 5] = (unsigned long long)dim_index;
+    trace[base + 6] = (unsigned long long)head;
+    trace[base + 7] = (unsigned long long)d;
+    trace[base + 8] = trace_f32_bits(local_scan_forward);
+    trace[base + 9] = trace_f32_bits(local_scan_kahan);
+    trace[base + 10] = trace_f32_bits(local_scan_fp32_cbscale);
+    trace[base + 11] = trace_f32_bits(dA_chunk_base);
+    trace[base + 12] = trace_f32_bits(dA_target);
+    trace[base + 13] = trace_f32_bits(A_val);
+    trace[base + 14] = (unsigned long long)(chunk_start + 1);
+    trace[base + 15] = (unsigned long long)t_last;
+}
+
+extern "C" __global__ void prefill_trace_mamba2_ssd_shadow_context_detail_kernel(
+    const __nv_bfloat16* __restrict__ x,
+    const __nv_bfloat16* __restrict__ dt_in,
+    const float* __restrict__ A_log,
+    const __nv_bfloat16* __restrict__ B_mat,
+    const __nv_bfloat16* __restrict__ C_mat,
+    const float* __restrict__ D_vec,
+    const float* __restrict__ ssm_state,
+    const float* __restrict__ dt_bias,
+    const __nv_bfloat16* __restrict__ out,
+    unsigned long long* __restrict__ trace,
+    int entry_base_idx,
+    int max_entries,
+    int stage_pointer_id,
+    int stage_index_id,
+    int stage_sample_id,
+    int stage_summary_id,
+    int layer_idx,
+    int chunk_idx,
+    int absolute_position,
+    int row_idx,
+    int L,
+    int n_heads,
+    int head_dim,
+    int state_size,
+    int n_groups,
+    int chunk_size,
+    int use_softplus,
+    int dim_index)
+{
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+    if (L <= 0 || n_heads <= 0 || head_dim <= 0 || state_size <= 0 || n_groups <= 0) return;
+    if (entry_base_idx < 0 || entry_base_idx + 5 >= max_entries) return;
+    int d_inner = n_heads * head_dim;
+    if (dim_index < 0 || dim_index >= d_inner) return;
+    int heads_per_group = n_heads / n_groups;
+    if (heads_per_group <= 0) return;
+
+    int t_last = row_idx;
+    if (t_last < 0) t_last = L - 1;
+    if (t_last >= L) t_last = L - 1;
+
+    int head = dim_index / head_dim;
+    int d = dim_index - head * head_dim;
+    int group = head / heads_per_group;
+    int effective_chunk_size = (chunk_size > 0) ? chunk_size : L;
+    int chunk_start = (t_last / effective_chunk_size) * effective_chunk_size;
+    int mid_u = chunk_start + (t_last - chunk_start) / 2;
+    int out_flat_idx = (t_last * n_heads + head) * head_dim + d;
+    int x_target_flat_idx = out_flat_idx;
+    int dt_target_idx = t_last * n_heads + head;
+    int c_row_base_idx = (t_last * n_groups + group) * state_size;
+    int b_chunk_start_base_idx = (chunk_start * n_groups + group) * state_size;
+    int b_target_base_idx = (t_last * n_groups + group) * state_size;
+
+    int base_ptr = entry_base_idx * 16;
+    trace[base_ptr + 0] = (unsigned long long)stage_pointer_id;
+    trace[base_ptr + 1] = (unsigned long long)layer_idx;
+    trace[base_ptr + 2] = (unsigned long long)chunk_idx;
+    trace[base_ptr + 3] = (unsigned long long)absolute_position;
+    trace[base_ptr + 4] = (unsigned long long)t_last;
+    trace[base_ptr + 5] = (unsigned long long)dim_index;
+    trace[base_ptr + 6] = (unsigned long long)x;
+    trace[base_ptr + 7] = (unsigned long long)dt_in;
+    trace[base_ptr + 8] = (unsigned long long)B_mat;
+    trace[base_ptr + 9] = (unsigned long long)C_mat;
+    trace[base_ptr + 10] = (unsigned long long)A_log;
+    trace[base_ptr + 11] = (unsigned long long)D_vec;
+    trace[base_ptr + 12] = (unsigned long long)dt_bias;
+    trace[base_ptr + 13] = (unsigned long long)out;
+    trace[base_ptr + 14] = (unsigned long long)ssm_state;
+    trace[base_ptr + 15] = 1ULL;
+
+    int base_idx = (entry_base_idx + 1) * 16;
+    trace[base_idx + 0] = (unsigned long long)stage_index_id;
+    trace[base_idx + 1] = (unsigned long long)layer_idx;
+    trace[base_idx + 2] = (unsigned long long)chunk_idx;
+    trace[base_idx + 3] = (unsigned long long)t_last;
+    trace[base_idx + 4] = (unsigned long long)dim_index;
+    trace[base_idx + 5] = (unsigned long long)head;
+    trace[base_idx + 6] = (unsigned long long)d;
+    trace[base_idx + 7] = (unsigned long long)group;
+    trace[base_idx + 8] = (unsigned long long)out_flat_idx;
+    trace[base_idx + 9] = (unsigned long long)x_target_flat_idx;
+    trace[base_idx + 10] = (unsigned long long)dt_target_idx;
+    trace[base_idx + 11] = (unsigned long long)c_row_base_idx;
+    trace[base_idx + 12] = (unsigned long long)b_chunk_start_base_idx;
+    trace[base_idx + 13] = (unsigned long long)b_target_base_idx;
+    trace[base_idx + 14] = (unsigned long long)chunk_start;
+    trace[base_idx + 15] = (unsigned long long)effective_chunk_size;
+
+    float A_val = mamba2_ssd_a_value(A_log[head]);
+    float dA_target = 0.0f;
+    float dA_chunk_base = 0.0f;
+    for (int t = 0; t <= t_last; t++) {
+        if (t == chunk_start) {
+            dA_chunk_base = dA_target;
+        }
+        float dt_t = bf16_to_float(dt_in[t * n_heads + head]);
+        dt_t += (dt_bias != NULL) ? dt_bias[head] : 0.0f;
+        if (use_softplus) dt_t = mamba2_chunk_cumsum_softplus(dt_t);
+        dA_target += A_val * dt_t;
+    }
+
+    const unsigned short* x_bits = reinterpret_cast<const unsigned short*>(x);
+    const unsigned short* dt_bits = reinterpret_cast<const unsigned short*>(dt_in);
+    float dt_bias_value = (dt_bias != NULL) ? dt_bias[head] : 0.0f;
+    float local_scan = 0.0f;
+    float dA_running = dA_chunk_base;
+    int sample_count = 0;
+
+    for (int u = chunk_start; u <= t_last; u++) {
+        float dt_u = bf16_to_float(dt_in[u * n_heads + head]);
+        if (dt_bias != NULL) dt_u += dt_bias[head];
+        float dt_u_scale = dt_u;
+        if (use_softplus) {
+            dt_u = mamba2_chunk_cumsum_softplus(dt_u);
+            dt_u_scale = mamba2_chunk_cumsum_softplus(dt_u_scale);
+        }
+        dA_running += A_val * dt_u;
+        float decay = __expf(fminf(dA_target - dA_running, 0.0f));
+
+        float cb_forward = 0.0f;
+        for (int s = 0; s < state_size; s++) {
+            float C_val = bf16_to_float(C_mat[(t_last * n_groups + group) * state_size + s]);
+            float B_val = bf16_to_float(B_mat[(u * n_groups + group) * state_size + s]);
+            cb_forward += C_val * B_val;
+        }
+
+        float scale = decay * dt_u_scale;
+        __nv_bfloat16 cb_scaled_bf16_raw = float_to_bf16(cb_forward * scale);
+        float cb_scaled_bf16 = bf16_to_float(cb_scaled_bf16_raw);
+        unsigned int cb_scaled_bf16_bits =
+            (unsigned int)(*reinterpret_cast<unsigned short*>(&cb_scaled_bf16_raw));
+        int x_flat_idx = (u * n_heads + head) * head_dim + d;
+        int dt_idx = u * n_heads + head;
+        int b_row_base_idx = (u * n_groups + group) * state_size;
+        float x_u = bf16_to_float(x[x_flat_idx]);
+        float term_bf16 = cb_scaled_bf16 * x_u;
+        local_scan += term_bf16;
+
+        if ((u == chunk_start || u == mid_u || u == t_last) && sample_count < 3) {
+            int base_sample = (entry_base_idx + 2 + sample_count) * 16;
+            trace[base_sample + 0] = (unsigned long long)stage_sample_id;
+            trace[base_sample + 1] = (unsigned long long)layer_idx;
+            trace[base_sample + 2] = (unsigned long long)chunk_idx;
+            trace[base_sample + 3] = (unsigned long long)t_last;
+            trace[base_sample + 4] = (unsigned long long)dim_index;
+            trace[base_sample + 5] = (unsigned long long)u;
+            trace[base_sample + 6] = (unsigned long long)x_flat_idx;
+            trace[base_sample + 7] = (unsigned long long)dt_idx;
+            trace[base_sample + 8] = (unsigned long long)b_row_base_idx;
+            trace[base_sample + 9] = (unsigned long long)c_row_base_idx;
+            trace[base_sample + 10] = (unsigned long long)x_bits[x_flat_idx];
+            trace[base_sample + 11] = (unsigned long long)dt_bits[dt_idx];
+            trace[base_sample + 12] = trace_f32_bits(decay);
+            trace[base_sample + 13] = trace_f32_bits(cb_forward);
+            trace[base_sample + 14] = (unsigned long long)cb_scaled_bf16_bits;
+            trace[base_sample + 15] = trace_f32_bits(term_bf16);
+            sample_count++;
+        }
+    }
+
+    int base_summary = (entry_base_idx + 5) * 16;
+    trace[base_summary + 0] = (unsigned long long)stage_summary_id;
+    trace[base_summary + 1] = (unsigned long long)layer_idx;
+    trace[base_summary + 2] = (unsigned long long)chunk_idx;
+    trace[base_summary + 3] = (unsigned long long)t_last;
+    trace[base_summary + 4] = (unsigned long long)dim_index;
+    trace[base_summary + 5] = (unsigned long long)head;
+    trace[base_summary + 6] = (unsigned long long)group;
+    trace[base_summary + 7] = (unsigned long long)chunk_start;
+    trace[base_summary + 8] = trace_f32_bits(local_scan);
+    trace[base_summary + 9] = trace_f32_bits(dA_chunk_base);
+    trace[base_summary + 10] = trace_f32_bits(dA_target);
+    trace[base_summary + 11] = trace_f32_bits(A_val);
+    trace[base_summary + 12] = trace_f32_bits(dt_bias_value);
+    trace[base_summary + 13] = (unsigned long long)sample_count;
+    trace[base_summary + 14] = (unsigned long long)out_flat_idx;
+    trace[base_summary + 15] = 1ULL;
+}
+
+extern "C" __global__ void prefill_trace_bf16_pair_sum_row_summary_kernel(
+    const __nv_bfloat16* __restrict__ lhs,
+    const __nv_bfloat16* __restrict__ rhs,
+    unsigned long long* __restrict__ trace,
+    int entry_idx,
+    int stage_id,
+    int layer_idx,
+    int chunk_idx,
+    int absolute_position,
+    int token_id,
+    int row_idx,
+    int width)
+{
+    if (width <= 0) return;
+
+    __shared__ unsigned long long s_hash[256];
+    __shared__ double s_sum[256];
+    __shared__ double s_sumsq[256];
+    __shared__ float s_min[256];
+    __shared__ float s_max[256];
+    __shared__ int s_finite[256];
+    __shared__ int s_nan[256];
+    __shared__ int s_inf[256];
+
+    unsigned long long h = 1469598103934665603ULL ^ (unsigned long long)(threadIdx.x + 1);
+    double sum = 0.0;
+    double sumsq = 0.0;
+    float min_v = INFINITY;
+    float max_v = -INFINITY;
+    int finite_count = 0;
+    int nan_count = 0;
+    int inf_count = 0;
+
+    for (int i = threadIdx.x; i < width; i += blockDim.x) {
+        float v = bf16_to_float(lhs[i]) + bf16_to_float(rhs[i]);
+        unsigned long long raw = trace_f32_bits(v);
+        h ^= raw;
+        h *= 1099511628211ULL;
+
+        if (isfinite(v)) {
+            finite_count++;
+            sum += (double)v;
+            sumsq += (double)v * (double)v;
+        } else if (isnan(v)) {
+            nan_count++;
+        } else {
+            inf_count++;
+        }
+        if (v < min_v) min_v = v;
+        if (v > max_v) max_v = v;
+    }
+
+    int tid = threadIdx.x;
+    s_hash[tid] = h;
+    s_sum[tid] = sum;
+    s_sumsq[tid] = sumsq;
+    s_min[tid] = min_v;
+    s_max[tid] = max_v;
+    s_finite[tid] = finite_count;
+    s_nan[tid] = nan_count;
+    s_inf[tid] = inf_count;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            s_hash[tid] ^= s_hash[tid + stride];
+            s_hash[tid] *= 1099511628211ULL;
+            s_sum[tid] += s_sum[tid + stride];
+            s_sumsq[tid] += s_sumsq[tid + stride];
+            if (s_min[tid + stride] < s_min[tid]) s_min[tid] = s_min[tid + stride];
+            if (s_max[tid + stride] > s_max[tid]) s_max[tid] = s_max[tid + stride];
+            s_finite[tid] += s_finite[tid + stride];
+            s_nan[tid] += s_nan[tid + stride];
+            s_inf[tid] += s_inf[tid + stride];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        int base = entry_idx * 16;
+        float mean = (s_finite[0] > 0) ? (float)(s_sum[0] / (double)s_finite[0]) : NAN;
+        float l2 = sqrtf((float)s_sumsq[0]);
+        trace[base + 0] = (unsigned long long)stage_id;
+        trace[base + 1] = (unsigned long long)layer_idx;
+        trace[base + 2] = (unsigned long long)chunk_idx;
+        trace[base + 3] = (unsigned long long)absolute_position;
+        trace[base + 4] = (unsigned long long)token_id;
+        trace[base + 5] = (unsigned long long)row_idx;
+        trace[base + 6] = (unsigned long long)width;
+        trace[base + 7] = s_hash[0];
+        trace[base + 8] = trace_f32_bits(mean);
+        trace[base + 9] = trace_f32_bits(l2);
+        trace[base + 10] = trace_f32_bits(s_min[0]);
+        trace[base + 11] = trace_f32_bits(s_max[0]);
+        trace[base + 12] = (unsigned long long)s_finite[0];
+        trace[base + 13] = (unsigned long long)s_nan[0];
+        trace[base + 14] = (unsigned long long)s_inf[0];
+        trace[base + 15] = 1ULL;
+    }
+}
+
 /* ── GQA Prefill Attention ─────────────────────────────────────────────── */
 
 /* Basic tiled GQA attention for prefill. Not FlashAttention-optimized yet,
@@ -1998,6 +4711,194 @@ extern "C" __global__ void mamba2_extract_kernel(
     }
 }
 
+/* Causal conv1d + SiLU over the row-major Mamba2 xBC segment.
+ *
+ * in_proj row layout: [z(d_inner) | x(d_inner) | B(bc) | C(bc) | dt(n_heads)]
+ * conv_dim = d_inner + 2*bc. The convolved x/B/C outputs stay row-major and
+ * are split into the existing x_out/b_out/c_out buffers for SSD.
+ */
+extern "C" __global__ void mamba2_xbc_conv1d_silu_split_kernel(
+    __nv_bfloat16* __restrict__ x_out,       /* [M, d_inner] */
+    __nv_bfloat16* __restrict__ b_out,       /* [M, bc] */
+    __nv_bfloat16* __restrict__ c_out,       /* [M, bc] */
+    const float* __restrict__ conv_state,    /* [conv_dim, conv_kernel] FP32 or NULL */
+    const __nv_bfloat16* __restrict__ inp,   /* [M, proj_dim] */
+    const float* __restrict__ weight,        /* [conv_dim, conv_kernel] FP32 */
+    const float* __restrict__ bias,          /* [conv_dim] FP32 or NULL */
+    int M,
+    int d_inner,
+    int bc,
+    int proj_dim,
+    int conv_dim,
+    int conv_kernel)
+{
+    int token = blockIdx.x;
+    if (token >= M) return;
+
+    for (int ch = threadIdx.x; ch < conv_dim; ch += blockDim.x) {
+        const float* wt = weight + (int64_t)ch * conv_kernel;
+        float acc = (bias != NULL) ? bias[ch] : 0.0f;
+        for (int k = 0; k < conv_kernel; k++) {
+            int src_pos = token + k - (conv_kernel - 1);
+            float val = 0.0f;
+            if (src_pos >= 0) {
+                val = bf16_to_float(inp[(int64_t)src_pos * proj_dim + d_inner + ch]);
+            } else if (conv_state != NULL) {
+                int state_idx = conv_kernel + src_pos;
+                if (state_idx >= 0 && state_idx < conv_kernel) {
+                    val = conv_state[(int64_t)ch * conv_kernel + state_idx];
+                }
+            }
+            acc += val * wt[k];
+        }
+        float silu = acc / (1.0f + __expf(-acc));
+        if (ch < d_inner) {
+            x_out[(int64_t)token * d_inner + ch] = float_to_bf16(silu);
+        } else if (ch < d_inner + bc) {
+            b_out[(int64_t)token * bc + (ch - d_inner)] = float_to_bf16(silu);
+        } else {
+            c_out[(int64_t)token * bc + (ch - d_inner - bc)] = float_to_bf16(silu);
+        }
+    }
+}
+
+extern "C" __global__ void mamba2_xbc_update_conv_state_kernel(
+    float* __restrict__ conv_state,          /* [conv_dim, conv_kernel] FP32 */
+    const __nv_bfloat16* __restrict__ inp,   /* [M, proj_dim] */
+    int M,
+    int d_inner,
+    int proj_dim,
+    int conv_dim,
+    int conv_kernel)
+{
+    int ch = blockIdx.x * blockDim.x + threadIdx.x;
+    if (ch >= conv_dim || conv_state == NULL || M <= 0) return;
+
+    float* st = conv_state + (int64_t)ch * conv_kernel;
+    for (int k = 0; k < conv_kernel; k++) {
+        int src_pos = M - conv_kernel + k;
+        float val = 0.0f;
+        if (src_pos >= 0) {
+            val = bf16_to_float(inp[(int64_t)src_pos * proj_dim + d_inner + ch]);
+        } else {
+            int state_idx = conv_kernel + src_pos;
+            if (state_idx >= 0 && state_idx < conv_kernel) {
+                val = st[state_idx];
+            }
+        }
+        st[k] = val;
+    }
+}
+
+/* Reference-compatible Mamba2 gated group RMSNorm.
+ *
+ * Python reference computes:
+ *   gated = scan_output * silu(gate)
+ *   out = norm_weight * group_rmsnorm(gated)
+ *
+ * group_size = d_inner / n_groups. Weight is full d_inner FP32, not a
+ * per-head vector.
+ */
+extern "C" __global__ void mamba2_gated_group_rmsnorm_kernel(
+    __nv_bfloat16* __restrict__ out,          /* [M, d_inner] BF16 */
+    const __nv_bfloat16* __restrict__ x,      /* [M, d_inner] BF16 */
+    const __nv_bfloat16* __restrict__ gate,   /* [M, d_inner] BF16 */
+    const float* __restrict__ weight,         /* [d_inner] FP32 */
+    int n_groups,
+    int group_size,
+    int proj_dim,
+    float eps)
+{
+    int token = blockIdx.x;
+    int group = blockIdx.y;
+    int group_base = group * group_size;
+    const __nv_bfloat16* x_row = x + (int64_t)token * n_groups * group_size;
+    const __nv_bfloat16* gate_row = gate + (int64_t)token * proj_dim;
+    __nv_bfloat16* out_row = out + (int64_t)token * n_groups * group_size;
+
+    extern __shared__ float smem[];
+    float local_ss = 0.0f;
+    for (int i = threadIdx.x; i < group_size; i += blockDim.x) {
+        int idx = group_base + i;
+        float xv = bf16_to_float(x_row[idx]);
+        float gv = bf16_to_float(gate_row[idx]);
+        float silu_g = gv / (1.0f + __expf(-gv));
+        float gated = xv * silu_g;
+        local_ss += gated * gated;
+    }
+    smem[threadIdx.x] = local_ss;
+    __syncthreads();
+
+    gated_rmsnorm_adjacent_pairwise_reduce(smem);
+
+    if (threadIdx.x == 0) {
+        float mean_square_plus_eps = smem[0] / (float)group_size + eps;
+        smem[0] = mamba2_gated_rmsnorm_triton_rstd(mean_square_plus_eps);
+    }
+    __syncthreads();
+
+    float rms_inv = smem[0];
+    for (int i = threadIdx.x; i < group_size; i += blockDim.x) {
+        int idx = group_base + i;
+        float xv = bf16_to_float(x_row[idx]);
+        float gv = bf16_to_float(gate_row[idx]);
+        float silu_g = gv / (1.0f + __expf(-gv));
+        float gated = xv * silu_g;
+        out_row[idx] = float_to_bf16(gated * rms_inv * weight[idx]);
+    }
+}
+
+extern "C" __global__ void mamba2_gated_group_rmsnorm_sqrt_approx_div_rn_replay_kernel(
+    __nv_bfloat16* __restrict__ out,          /* [M, d_inner] BF16 */
+    const __nv_bfloat16* __restrict__ x,      /* [M, d_inner] BF16 */
+    const __nv_bfloat16* __restrict__ gate,   /* [M, d_inner] BF16 */
+    const float* __restrict__ weight,         /* [d_inner] FP32 */
+    int row_index,
+    int n_groups,
+    int group_size,
+    int proj_dim,
+    float eps)
+{
+    if (row_index < 0 || n_groups <= 0 || group_size <= 0 || proj_dim <= 0) return;
+    int group = blockIdx.x;
+    if (group >= n_groups) return;
+    int group_base = group * group_size;
+    const __nv_bfloat16* x_row = x + (int64_t)row_index * n_groups * group_size;
+    const __nv_bfloat16* gate_row = gate + (int64_t)row_index * proj_dim;
+    __nv_bfloat16* out_row = out + (int64_t)row_index * n_groups * group_size;
+
+    extern __shared__ float smem[];
+    float local_ss = 0.0f;
+    for (int i = threadIdx.x; i < group_size; i += blockDim.x) {
+        int idx = group_base + i;
+        float xv = bf16_to_float(x_row[idx]);
+        float gv = bf16_to_float(gate_row[idx]);
+        float silu_g = gv / (1.0f + __expf(-gv));
+        float gated = xv * silu_g;
+        local_ss += gated * gated;
+    }
+    smem[threadIdx.x] = local_ss;
+    __syncthreads();
+
+    gated_rmsnorm_adjacent_pairwise_reduce(smem);
+
+    if (threadIdx.x == 0) {
+        float mean_square_plus_eps = smem[0] / (float)group_size + eps;
+        smem[0] = mamba2_gated_rmsnorm_triton_rstd(mean_square_plus_eps);
+    }
+    __syncthreads();
+
+    float rms_inv = smem[0];
+    for (int i = threadIdx.x; i < group_size; i += blockDim.x) {
+        int idx = group_base + i;
+        float xv = bf16_to_float(x_row[idx]);
+        float gv = bf16_to_float(gate_row[idx]);
+        float silu_g = gv / (1.0f + __expf(-gv));
+        float gated = xv * silu_g;
+        out_row[idx] = float_to_bf16(gated * rms_inv * weight[idx]);
+    }
+}
+
 /* ── Mamba2 Causal Conv1d (prefill) ────────────────────────────────────── */
 
 /* Simple causal conv1d for Mamba2 prefill.
@@ -2082,7 +4983,8 @@ extern "C" void krasis_causal_conv1d_fwd(
 /* Mamba2 SSD (Structured State-Space Duality) chunked scan.
  *
  * This implements the chunked SSD algorithm for prefill:
- * 1. Discretize: dt → A_bar = exp(A * softplus(dt + bias)), B_bar = B * softplus(dt + bias)
+ * 1. Discretize: dt → A_bar = exp(A * softplus(dt + bias)),
+ *    B_bar = bf16(B * softplus(dt + bias))
  * 2. Within each chunk of size C:
  *    - Compute chunk-level SSM: parallel O(C²) attention-like computation
  * 3. Between chunks: sequential state passing
@@ -2094,7 +4996,7 @@ extern "C" __global__ void mamba2_ssd_sequential_kernel(
     __nv_bfloat16* __restrict__ out,        /* [L, n_heads, head_dim] */
     const __nv_bfloat16* __restrict__ x,    /* [L, n_heads, head_dim] */
     const __nv_bfloat16* __restrict__ dt_in,/* [L, n_heads] */
-    const float* __restrict__ A,            /* [n_heads] */
+    const float* __restrict__ A_log,        /* [n_heads] */
     const __nv_bfloat16* __restrict__ B_mat,/* [L, n_groups, state_size] */
     const __nv_bfloat16* __restrict__ C_mat,/* [L, n_groups, state_size] */
     const float* __restrict__ D_vec,        /* [n_heads] or NULL */
@@ -2105,65 +5007,2380 @@ extern "C" __global__ void mamba2_ssd_sequential_kernel(
     int head_dim,
     int state_size,
     int n_groups,
+    int chunk_size,
     int use_softplus)
 {
     /* One block per (head, head_dim_idx) pair */
     int head = blockIdx.x;
     int d = blockIdx.y * blockDim.x + threadIdx.x;
-    if (d >= head_dim) return;
+    bool valid_d = d < head_dim;
 
     int group = head / (n_heads / n_groups);
-    float A_val = A[head];
+    float A_val = mamba2_ssd_a_value(A_log[head]);
     float D_val = (D_vec != NULL) ? D_vec[head] : 0.0f;
 
     /* SSM state for this (head, d): [state_size] floats */
-    float* h = ssm_state + ((int64_t)head * head_dim + d) * state_size;
+    float* h = valid_d ? (ssm_state + ((int64_t)head * head_dim + d) * state_size) : NULL;
+
+    int effective_chunk_size = (chunk_size > 0) ? chunk_size : L;
+    float dA_chunk_base = 0.0f;
+    extern __shared__ float mamba2_ssd_da_prefix_smem[];
 
     /* Sequential scan over time steps */
     for (int t = 0; t < L; t++) {
-        /* Get dt, apply bias and softplus */
-        float dt = bf16_to_float(dt_in[t * n_heads + head]);
-        if (dt_bias != NULL) dt += dt_bias[head];
-        if (use_softplus) dt = logf(1.0f + __expf(dt));
+        int chunk_start = (t / effective_chunk_size) * effective_chunk_size;
+        int chunk_pos = t - chunk_start;
+        int chunk_len = min(effective_chunk_size, L - chunk_start);
+        float* dA_prefix = NULL;
+        if (chunk_pos == 0) {
+            dA_prefix = mamba2_ssd_build_da_prefix_scan(
+                mamba2_ssd_da_prefix_smem,
+                effective_chunk_size,
+                dt_in,
+                dt_bias,
+                A_val,
+                n_heads,
+                head,
+                chunk_start,
+                chunk_len,
+                use_softplus);
+        } else {
+            dA_prefix = mamba2_ssd_da_prefix_smem;
+            int rounds = 0;
+            for (int offset = 1; offset < chunk_len; offset <<= 1) rounds++;
+            if ((rounds & 1) != 0) dA_prefix += effective_chunk_size;
+        }
+
+        float dt = mamba2_ssd_dt_value(dt_in, dt_bias, t, n_heads, head, use_softplus);
 
         /* Discretize: A_bar = exp(A * dt) */
         float A_bar = __expf(A_val * dt);
+        float dA_target = dA_chunk_base + dA_prefix[chunk_pos];
 
         /* Get x for this timestep */
-        float x_val = bf16_to_float(x[(t * n_heads + head) * head_dim + d]);
+        float x_val = valid_d ? bf16_to_float(x[(t * n_heads + head) * head_dim + d]) : 0.0f;
 
-        /* Compute output: y = sum_s(C[s] * h[s]) + D * x */
-        float y = D_val * x_val;
+        /* Update final SSM state. */
+        if (valid_d) {
+            for (int s = 0; s < state_size; s++) {
+                float B_val = bf16_to_float(B_mat[(t * n_groups + group) * state_size + s]);
 
-        for (int s = 0; s < state_size; s++) {
-            float B_val = bf16_to_float(B_mat[(t * n_groups + group) * state_size + s]);
-            float C_val = bf16_to_float(C_mat[(t * n_groups + group) * state_size + s]);
-
-            /* State update: h[s] = A_bar * h[s] + B_bar * x */
-            float B_bar = B_val * dt;
-            h[s] = A_bar * h[s] + B_bar * x_val;
-
-            /* Output contribution */
-            y += C_val * h[s];
+                /* HF chunk-state casts scaled B back to x dtype before FP32 accumulation. */
+                float B_bar = bf16_to_float(float_to_bf16(B_val * dt));
+                h[s] = A_bar * h[s] + B_bar * x_val;
+            }
         }
 
-        out[(t * n_heads + head) * head_dim + d] = float_to_bf16(y);
+        /*
+         * HF chunk-scan emission is separate from chunk-state accumulation:
+         * y[t] = D*x[t] + dot(BF16((C[t] @ B[u]) * decay(t,u) * dt[u]), x[u]).
+         * Use the recurrent state for prior chunks, then replace only the
+         * current chunk's local C*state contribution with HF's CB emission.
+         */
+        float c_state_total = 0.0f;
+        if (valid_d) {
+            for (int s = 0; s < state_size; s++) {
+                float C_val = bf16_to_float(C_mat[(t * n_groups + group) * state_size + s]);
+                c_state_total += C_val * h[s];
+            }
+        }
+
+        float local_old_state = 0.0f;
+        float local_hf_chunk_scan = 0.0f;
+        if (valid_d) {
+            for (int u = chunk_start; u <= t; u++) {
+                int u_chunk_pos = u - chunk_start;
+                float dA_running = dA_chunk_base + dA_prefix[u_chunk_pos];
+                float dt_u = bf16_to_float(dt_in[u * n_heads + head]);
+                if (dt_bias != NULL) dt_u += dt_bias[head];
+                float dt_u_scale = dt_u;
+                if (use_softplus) {
+                    dt_u = mamba2_chunk_cumsum_softplus(dt_u);
+                    dt_u_scale = mamba2_chunk_cumsum_softplus(dt_u_scale);
+                }
+                float decay = (u == t) ? 1.0f : __expf(fminf(dA_target - dA_running, 0.0f));
+
+                float old_state_source = 0.0f;
+                int c_row_base_idx = (t * n_groups + group) * state_size;
+                int b_row_base_idx = (u * n_groups + group) * state_size;
+                float cb = mamba2_ssd_cb_dot_reverse(
+                    C_mat, B_mat, c_row_base_idx, b_row_base_idx, state_size);
+                if (chunk_start != 0) {
+                    for (int s = 0; s < state_size; s++) {
+                        float C_val = bf16_to_float(C_mat[c_row_base_idx + s]);
+                        float B_val = bf16_to_float(B_mat[b_row_base_idx + s]);
+                        float B_bar = bf16_to_float(float_to_bf16(B_val * dt_u));
+                        old_state_source += C_val * B_bar;
+                    }
+                }
+
+                float scale = decay * dt_u_scale;
+                float cb_scaled_bf16 = bf16_to_float(float_to_bf16(cb * scale));
+                float x_u = bf16_to_float(x[(u * n_heads + head) * head_dim + d]);
+                local_old_state += old_state_source * decay * x_u;
+                local_hf_chunk_scan += cb_scaled_bf16 * x_u;
+            }
+        }
+
+        if (valid_d) {
+            float prior_chunk_state = (chunk_start == 0) ? 0.0f : (c_state_total - local_old_state);
+            float y = D_val * x_val + prior_chunk_state + local_hf_chunk_scan;
+            int flat_idx = (t * n_heads + head) * head_dim + d;
+            out[flat_idx] = float_to_bf16(y);
+        }
+        if (chunk_pos + 1 == chunk_len) {
+            dA_chunk_base += dA_prefix[chunk_len - 1];
+        }
+        __syncthreads();
+    }
+}
+
+extern "C" __global__ void mamba2_ssd_sequential_kernel_trace(
+    __nv_bfloat16* __restrict__ out,        /* [L, n_heads, head_dim] */
+    const __nv_bfloat16* __restrict__ x,    /* [L, n_heads, head_dim] */
+    const __nv_bfloat16* __restrict__ dt_in,/* [L, n_heads] */
+    const float* __restrict__ A_log,        /* [n_heads] */
+    const __nv_bfloat16* __restrict__ B_mat,/* [L, n_groups, state_size] */
+    const __nv_bfloat16* __restrict__ C_mat,/* [L, n_groups, state_size] */
+    const float* __restrict__ D_vec,        /* [n_heads] or NULL */
+    float* __restrict__ ssm_state,          /* [n_heads, head_dim, state_size] */
+    const float* __restrict__ dt_bias,      /* [n_heads] or NULL */
+    int L,
+    int n_heads,
+    int head_dim,
+    int state_size,
+    int n_groups,
+    int chunk_size,
+    int use_softplus,
+    unsigned long long* __restrict__ trace,
+    int trace_entry_idx,
+    int trace_stage_id,
+    int trace_component_stage_id,
+    int trace_same_kernel_summary_stage_id,
+    int trace_same_kernel_context_stage_id,
+    int trace_same_kernel_final_sample_operand_stage_id,
+    int trace_same_kernel_final_sample_index_stage_id,
+    int trace_same_kernel_final_sample_decay_stage_id,
+    int trace_target_row,
+    int trace_target_dim,
+    int trace_layer_idx,
+    int trace_chunk_idx,
+    int trace_start_abs_pos)
+{
+    /* One block per (head, head_dim_idx) pair */
+    int head = blockIdx.x;
+    int d = blockIdx.y * blockDim.x + threadIdx.x;
+    bool valid_d = d < head_dim;
+    int dim_index = head * head_dim + d;
+
+    int group = head / (n_heads / n_groups);
+    float A_val = mamba2_ssd_a_value(A_log[head]);
+    float D_val = (D_vec != NULL) ? D_vec[head] : 0.0f;
+    int d_inner = n_heads * head_dim;
+    unsigned short* out_bits = reinterpret_cast<unsigned short*>(out);
+
+    /* SSM state for this (head, d): [state_size] floats */
+    float* h = valid_d ? (ssm_state + ((int64_t)head * head_dim + d) * state_size) : NULL;
+
+    int effective_chunk_size = (chunk_size > 0) ? chunk_size : L;
+    float dA_chunk_base = 0.0f;
+    extern __shared__ float mamba2_ssd_da_prefix_smem[];
+
+    /* Sequential scan over time steps */
+    for (int t = 0; t < L; t++) {
+        int chunk_start = (t / effective_chunk_size) * effective_chunk_size;
+        int chunk_pos = t - chunk_start;
+        int chunk_len = min(effective_chunk_size, L - chunk_start);
+        float* dA_prefix = NULL;
+        if (chunk_pos == 0) {
+            dA_prefix = mamba2_ssd_build_da_prefix_scan(
+                mamba2_ssd_da_prefix_smem,
+                effective_chunk_size,
+                dt_in,
+                dt_bias,
+                A_val,
+                n_heads,
+                head,
+                chunk_start,
+                chunk_len,
+                use_softplus);
+        } else {
+            dA_prefix = mamba2_ssd_da_prefix_smem;
+            int rounds = 0;
+            for (int offset = 1; offset < chunk_len; offset <<= 1) rounds++;
+            if ((rounds & 1) != 0) dA_prefix += effective_chunk_size;
+        }
+
+        float dt = mamba2_ssd_dt_value(dt_in, dt_bias, t, n_heads, head, use_softplus);
+
+        /* Discretize: A_bar = exp(A * dt) */
+        float A_bar = __expf(A_val * dt);
+        float dA_target = dA_chunk_base + dA_prefix[chunk_pos];
+
+        /* Get x for this timestep */
+        float x_val = valid_d ? bf16_to_float(x[(t * n_heads + head) * head_dim + d]) : 0.0f;
+
+        /* Update final SSM state. */
+        if (valid_d) {
+            for (int s = 0; s < state_size; s++) {
+                float B_val = bf16_to_float(B_mat[(t * n_groups + group) * state_size + s]);
+
+                /* HF chunk-state casts scaled B back to x dtype before FP32 accumulation. */
+                float B_bar = bf16_to_float(float_to_bf16(B_val * dt));
+                h[s] = A_bar * h[s] + B_bar * x_val;
+            }
+        }
+
+        /*
+         * HF chunk-scan emission is separate from chunk-state accumulation:
+         * y[t] = D*x[t] + dot(BF16((C[t] @ B[u]) * decay(t,u) * dt[u]), x[u]).
+         * Use the recurrent state for prior chunks, then replace only the
+         * current chunk's local C*state contribution with HF's CB emission.
+         */
+        float c_state_total = 0.0f;
+        if (valid_d) {
+            for (int s = 0; s < state_size; s++) {
+                float C_val = bf16_to_float(C_mat[(t * n_groups + group) * state_size + s]);
+                c_state_total += C_val * h[s];
+            }
+        }
+
+        float local_old_state = 0.0f;
+        float local_hf_chunk_scan = 0.0f;
+        if (valid_d) {
+            for (int u = chunk_start; u <= t; u++) {
+                int u_chunk_pos = u - chunk_start;
+                float dA_running = dA_chunk_base + dA_prefix[u_chunk_pos];
+                float dt_u = bf16_to_float(dt_in[u * n_heads + head]);
+                if (dt_bias != NULL) dt_u += dt_bias[head];
+                float dt_u_scale = dt_u;
+                if (use_softplus) {
+                    dt_u = mamba2_chunk_cumsum_softplus(dt_u);
+                    dt_u_scale = mamba2_chunk_cumsum_softplus(dt_u_scale);
+                }
+                float decay = (u == t) ? 1.0f : __expf(fminf(dA_target - dA_running, 0.0f));
+
+                float old_state_source = 0.0f;
+                int c_row_base_idx = (t * n_groups + group) * state_size;
+                int b_row_base_idx = (u * n_groups + group) * state_size;
+                float cb = mamba2_ssd_cb_dot_reverse(
+                    C_mat, B_mat, c_row_base_idx, b_row_base_idx, state_size);
+                if (chunk_start != 0) {
+                    for (int s = 0; s < state_size; s++) {
+                        float C_val = bf16_to_float(C_mat[c_row_base_idx + s]);
+                        float B_val = bf16_to_float(B_mat[b_row_base_idx + s]);
+                        float B_bar = bf16_to_float(float_to_bf16(B_val * dt_u));
+                        old_state_source += C_val * B_bar;
+                    }
+                }
+
+                float scale = decay * dt_u_scale;
+                float cb_scaled_bf16 = bf16_to_float(float_to_bf16(cb * scale));
+                float x_u = bf16_to_float(x[(u * n_heads + head) * head_dim + d]);
+                local_old_state += old_state_source * decay * x_u;
+                local_hf_chunk_scan += cb_scaled_bf16 * x_u;
+            }
+        }
+
+        float prior_chunk_state = valid_d
+            ? ((chunk_start == 0) ? 0.0f : (c_state_total - local_old_state))
+            : 0.0f;
+        float y = valid_d ? (D_val * x_val + prior_chunk_state + local_hf_chunk_scan) : 0.0f;
+        int flat_idx = (t * n_heads + head) * head_dim + d;
+        __nv_bfloat16 y_bf16 = float_to_bf16(y);
+        bool capture_store = trace != NULL && trace_entry_idx >= 0 && trace_stage_id != 0 &&
+            valid_d && t == trace_target_row && dim_index == trace_target_dim;
+        unsigned int pre_existing_raw = capture_store ? (unsigned int)out_bits[flat_idx] : 0U;
+        unsigned int candidate_raw = capture_store
+            ? (unsigned int)(*reinterpret_cast<unsigned short*>(&y_bf16))
+            : 0U;
+        float duplicate_local_scan = 0.0f;
+        float duplicate_y = y;
+        unsigned long long input_checksum = 1469598103934665603ULL;
+        unsigned long long term_checksum = 1469598103934665603ULL;
+        unsigned int first_term_bits = 0U;
+        unsigned int mid_term_bits = 0U;
+        unsigned int last_term_bits = 0U;
+        unsigned int duplicate_count = 0U;
+        unsigned int final_x_bits = 0U;
+        unsigned int final_dt_bits = 0U;
+        unsigned int final_cb_scaled_bits = 0U;
+        int final_x_flat_idx = -1;
+        int final_dt_idx = -1;
+        int final_b_row_base_idx = -1;
+        int final_c_row_base_idx = -1;
+        float final_dt_softplus = 0.0f;
+        float final_scale = 0.0f;
+        float final_cb = 0.0f;
+        float final_cb_scaled_pre_bf16 = 0.0f;
+        float final_dA_target = 0.0f;
+        float final_dA_chunk_base = 0.0f;
+        float final_dA_running_before = 0.0f;
+        float final_dA_increment = 0.0f;
+        float final_dA_running_after = 0.0f;
+        float final_decay_arg = 0.0f;
+        float final_decay = 0.0f;
+        if (capture_store &&
+            (trace_same_kernel_summary_stage_id != 0 ||
+             trace_same_kernel_context_stage_id != 0 ||
+             trace_same_kernel_final_sample_operand_stage_id != 0 ||
+             trace_same_kernel_final_sample_index_stage_id != 0 ||
+             trace_same_kernel_final_sample_decay_stage_id != 0)) {
+            const unsigned short* x_bits = reinterpret_cast<const unsigned short*>(x);
+            const unsigned short* dt_bits = reinterpret_cast<const unsigned short*>(dt_in);
+            int mid_u = chunk_start + (t - chunk_start) / 2;
+            for (int u = chunk_start; u <= t; u++) {
+                float dt_u = bf16_to_float(dt_in[u * n_heads + head]);
+                if (dt_bias != NULL) dt_u += dt_bias[head];
+                float dt_u_scale = dt_u;
+                if (use_softplus) {
+                    dt_u = mamba2_chunk_cumsum_softplus(dt_u);
+                    dt_u_scale = mamba2_chunk_cumsum_softplus(dt_u_scale);
+                }
+                int u_chunk_pos = u - chunk_start;
+                float dA_running_after = dA_chunk_base + dA_prefix[u_chunk_pos];
+                float dA_running_before = (u_chunk_pos == 0)
+                    ? dA_chunk_base
+                    : (dA_chunk_base + dA_prefix[u_chunk_pos - 1]);
+                float dA_increment = A_val * dt_u;
+                float decay_arg = (u == t) ? 0.0f : fminf(dA_target - dA_running_after, 0.0f);
+                float decay = (u == t) ? 1.0f : __expf(decay_arg);
+
+                int c_row_base_idx = (t * n_groups + group) * state_size;
+                int b_row_base_idx = (u * n_groups + group) * state_size;
+                float cb = mamba2_ssd_cb_dot_reverse(
+                    C_mat, B_mat, c_row_base_idx, b_row_base_idx, state_size);
+
+                float scale = decay * dt_u_scale;
+                __nv_bfloat16 cb_scaled_raw = float_to_bf16(cb * scale);
+                unsigned int cb_scaled_bits =
+                    (unsigned int)(*reinterpret_cast<unsigned short*>(&cb_scaled_raw));
+                float cb_scaled_bf16 = bf16_to_float(cb_scaled_raw);
+                int x_flat_idx = (u * n_heads + head) * head_dim + d;
+                int dt_idx = u * n_heads + head;
+                float x_u = bf16_to_float(x[x_flat_idx]);
+                float term = cb_scaled_bf16 * x_u;
+                duplicate_local_scan += term;
+
+                if (u == t) {
+                    final_x_bits = (unsigned int)x_bits[x_flat_idx];
+                    final_dt_bits = (unsigned int)dt_bits[dt_idx];
+                    final_cb_scaled_bits = cb_scaled_bits;
+                    final_x_flat_idx = x_flat_idx;
+                    final_dt_idx = dt_idx;
+                    final_b_row_base_idx = b_row_base_idx;
+                    final_c_row_base_idx = c_row_base_idx;
+                    final_dt_softplus = dt_u_scale;
+                    final_scale = scale;
+                    final_cb = cb;
+                    final_cb_scaled_pre_bf16 = cb * scale;
+                    final_dA_target = dA_target;
+                    final_dA_chunk_base = dA_chunk_base;
+                    final_dA_running_before = dA_running_before;
+                    final_dA_increment = dA_increment;
+                    final_dA_running_after = dA_running_after;
+                    final_decay_arg = decay_arg;
+                    final_decay = decay;
+                }
+
+                unsigned int term_bits = (unsigned int)trace_f32_bits(term);
+                if (u == chunk_start) first_term_bits = term_bits;
+                if (u == mid_u) mid_term_bits = term_bits;
+                if (u == t) last_term_bits = term_bits;
+                input_checksum = trace_mix_u64(input_checksum, (unsigned long long)u);
+                input_checksum = trace_mix_u64(input_checksum, (unsigned long long)x_flat_idx);
+                input_checksum = trace_mix_u64(input_checksum, (unsigned long long)dt_idx);
+                input_checksum = trace_mix_u64(input_checksum, (unsigned long long)b_row_base_idx);
+                input_checksum = trace_mix_u64(input_checksum, (unsigned long long)c_row_base_idx);
+                input_checksum = trace_mix_u64(input_checksum, (unsigned long long)x_bits[x_flat_idx]);
+                input_checksum = trace_mix_u64(input_checksum, (unsigned long long)dt_bits[dt_idx]);
+                input_checksum = trace_mix_u64(input_checksum, (unsigned long long)cb_scaled_bits);
+                term_checksum = trace_mix_u64(term_checksum, (unsigned long long)term_bits);
+                duplicate_count++;
+            }
+            duplicate_y = D_val * x_val + prior_chunk_state + duplicate_local_scan;
+        }
+        if (valid_d) {
+            out[flat_idx] = y_bf16;
+        }
+        if (chunk_pos + 1 == chunk_len) {
+            dA_chunk_base += dA_prefix[chunk_len - 1];
+        }
+        if (capture_store) {
+            unsigned int post_store_raw = (unsigned int)out_bits[flat_idx];
+            int base = trace_entry_idx * 16;
+            trace[base + 0] = (unsigned long long)trace_stage_id;
+            trace[base + 1] = (unsigned long long)trace_layer_idx;
+            trace[base + 2] = (unsigned long long)trace_chunk_idx;
+            trace[base + 3] = (unsigned long long)(trace_start_abs_pos + t);
+            trace[base + 4] = (unsigned long long)t;
+            trace[base + 5] = (unsigned long long)dim_index;
+            trace[base + 6] = (unsigned long long)flat_idx;
+            trace[base + 7] = (unsigned long long)pre_existing_raw;
+            trace[base + 8] = trace_f32_bits(y);
+            trace[base + 9] = (unsigned long long)candidate_raw;
+            trace[base + 10] = (unsigned long long)post_store_raw;
+            trace[base + 11] = (unsigned long long)(out + flat_idx);
+            trace[base + 12] = (unsigned long long)head;
+            trace[base + 13] = (unsigned long long)d;
+            trace[base + 14] = (unsigned long long)d_inner;
+            trace[base + 15] = 1ULL;
+            if (trace_component_stage_id != 0) {
+                int base2 = (trace_entry_idx + 1) * 16;
+                float component_sum = D_val * x_val + prior_chunk_state + local_hf_chunk_scan;
+                trace[base2 + 0] = (unsigned long long)trace_component_stage_id;
+                trace[base2 + 1] = (unsigned long long)trace_layer_idx;
+                trace[base2 + 2] = (unsigned long long)trace_chunk_idx;
+                trace[base2 + 3] = (unsigned long long)(trace_start_abs_pos + t);
+                trace[base2 + 4] = (unsigned long long)t;
+                trace[base2 + 5] = (unsigned long long)dim_index;
+                trace[base2 + 6] = (unsigned long long)flat_idx;
+                trace[base2 + 7] = (unsigned long long)head;
+                trace[base2 + 8] = (unsigned long long)d;
+                trace[base2 + 9] = trace_f32_bits(D_val * x_val);
+                trace[base2 + 10] = trace_f32_bits(prior_chunk_state);
+                trace[base2 + 11] = trace_f32_bits(local_hf_chunk_scan);
+                trace[base2 + 12] = trace_f32_bits(c_state_total);
+                trace[base2 + 13] = trace_f32_bits(local_old_state);
+                trace[base2 + 14] = trace_f32_bits(component_sum);
+                trace[base2 + 15] = trace_f32_bits(y);
+            }
+            if (trace_same_kernel_summary_stage_id != 0) {
+                int base3 = (trace_entry_idx + 2) * 16;
+                trace[base3 + 0] = (unsigned long long)trace_same_kernel_summary_stage_id;
+                trace[base3 + 1] = (unsigned long long)trace_layer_idx;
+                trace[base3 + 2] = (unsigned long long)trace_chunk_idx;
+                trace[base3 + 3] = (unsigned long long)(trace_start_abs_pos + t);
+                trace[base3 + 4] = (unsigned long long)t;
+                trace[base3 + 5] = (unsigned long long)dim_index;
+                trace[base3 + 6] = (unsigned long long)head;
+                trace[base3 + 7] = (unsigned long long)d;
+                trace[base3 + 8] = trace_f32_bits(local_hf_chunk_scan);
+                trace[base3 + 9] = trace_f32_bits(duplicate_local_scan);
+                trace[base3 + 10] = trace_f32_bits(y);
+                trace[base3 + 11] = trace_f32_bits(duplicate_y);
+                trace[base3 + 12] = term_checksum;
+                trace[base3 + 13] = input_checksum;
+                trace[base3 + 14] =
+                    ((unsigned long long)first_term_bits << 32) | (unsigned long long)mid_term_bits;
+                trace[base3 + 15] =
+                    ((unsigned long long)last_term_bits << 32) | (unsigned long long)duplicate_count;
+            }
+            if (trace_same_kernel_context_stage_id != 0) {
+                int base4 = (trace_entry_idx + 3) * 16;
+                int dt_target_idx = t * n_heads + head;
+                int c_row_base_idx = (t * n_groups + group) * state_size;
+                int b_target_base_idx = (t * n_groups + group) * state_size;
+                trace[base4 + 0] = (unsigned long long)trace_same_kernel_context_stage_id;
+                trace[base4 + 1] = (unsigned long long)trace_layer_idx;
+                trace[base4 + 2] = (unsigned long long)trace_chunk_idx;
+                trace[base4 + 3] = (unsigned long long)(trace_start_abs_pos + t);
+                trace[base4 + 4] = (unsigned long long)t;
+                trace[base4 + 5] = (unsigned long long)dim_index;
+                trace[base4 + 6] = (unsigned long long)x;
+                trace[base4 + 7] = (unsigned long long)dt_in;
+                trace[base4 + 8] = (unsigned long long)B_mat;
+                trace[base4 + 9] = (unsigned long long)C_mat;
+                trace[base4 + 10] = (unsigned long long)out;
+                trace[base4 + 11] = (unsigned long long)flat_idx;
+                trace[base4 + 12] = (unsigned long long)dt_target_idx;
+                trace[base4 + 13] = (unsigned long long)c_row_base_idx;
+                trace[base4 + 14] = (unsigned long long)b_target_base_idx;
+                trace[base4 + 15] =
+                    ((unsigned long long)chunk_start << 32) | (unsigned long long)effective_chunk_size;
+            }
+            if (trace_same_kernel_final_sample_operand_stage_id != 0) {
+                int base5 = (trace_entry_idx + 4) * 16;
+                trace[base5 + 0] =
+                    (unsigned long long)trace_same_kernel_final_sample_operand_stage_id;
+                trace[base5 + 1] = (unsigned long long)trace_layer_idx;
+                trace[base5 + 2] = (unsigned long long)trace_chunk_idx;
+                trace[base5 + 3] = (unsigned long long)(trace_start_abs_pos + t);
+                trace[base5 + 4] = (unsigned long long)t;
+                trace[base5 + 5] = (unsigned long long)dim_index;
+                trace[base5 + 6] = (unsigned long long)t;
+                trace[base5 + 7] = (unsigned long long)head;
+                trace[base5 + 8] = (unsigned long long)d;
+                trace[base5 + 9] = (unsigned long long)final_x_bits;
+                trace[base5 + 10] = (unsigned long long)final_dt_bits;
+                trace[base5 + 11] = trace_f32_bits(final_dt_softplus);
+                trace[base5 + 12] = trace_f32_bits(final_scale);
+                trace[base5 + 13] = trace_f32_bits(final_cb);
+                trace[base5 + 14] = trace_f32_bits(final_cb_scaled_pre_bf16);
+                trace[base5 + 15] = (unsigned long long)final_cb_scaled_bits;
+            }
+            if (trace_same_kernel_final_sample_index_stage_id != 0) {
+                int base6 = (trace_entry_idx + 5) * 16;
+                trace[base6 + 0] =
+                    (unsigned long long)trace_same_kernel_final_sample_index_stage_id;
+                trace[base6 + 1] = (unsigned long long)trace_layer_idx;
+                trace[base6 + 2] = (unsigned long long)trace_chunk_idx;
+                trace[base6 + 3] = (unsigned long long)(trace_start_abs_pos + t);
+                trace[base6 + 4] = (unsigned long long)t;
+                trace[base6 + 5] = (unsigned long long)dim_index;
+                trace[base6 + 6] = (unsigned long long)t;
+                trace[base6 + 7] = (unsigned long long)final_x_flat_idx;
+                trace[base6 + 8] = (unsigned long long)final_dt_idx;
+                trace[base6 + 9] = (unsigned long long)final_b_row_base_idx;
+                trace[base6 + 10] = (unsigned long long)final_c_row_base_idx;
+                trace[base6 + 11] = (unsigned long long)x;
+                trace[base6 + 12] = (unsigned long long)dt_in;
+                trace[base6 + 13] = (unsigned long long)B_mat;
+                trace[base6 + 14] = (unsigned long long)C_mat;
+                trace[base6 + 15] = 1ULL;
+            }
+            if (trace_same_kernel_final_sample_decay_stage_id != 0) {
+                int base7 = (trace_entry_idx + 6) * 16;
+                trace[base7 + 0] =
+                    (unsigned long long)trace_same_kernel_final_sample_decay_stage_id;
+                trace[base7 + 1] = (unsigned long long)trace_layer_idx;
+                trace[base7 + 2] = (unsigned long long)trace_chunk_idx;
+                trace[base7 + 3] = (unsigned long long)(trace_start_abs_pos + t);
+                trace[base7 + 4] = (unsigned long long)t;
+                trace[base7 + 5] = (unsigned long long)dim_index;
+                trace[base7 + 6] = (unsigned long long)t;
+                trace[base7 + 7] = (unsigned long long)head;
+                trace[base7 + 8] = (unsigned long long)d;
+                trace[base7 + 9] = trace_f32_bits(final_dA_target);
+                trace[base7 + 10] = trace_f32_bits(final_dA_chunk_base);
+                trace[base7 + 11] = trace_f32_bits(final_dA_running_before);
+                trace[base7 + 12] = trace_f32_bits(final_dA_increment);
+                trace[base7 + 13] = trace_f32_bits(final_dA_running_after);
+                trace[base7 + 14] = trace_f32_bits(final_decay_arg);
+                trace[base7 + 15] = trace_f32_bits(final_decay);
+            }
+        }
+        __syncthreads();
+    }
+}
+
+/*
+ * Opt-in v5 correctness candidate. This intentionally preserves the current
+ * sequential per-token FP32 recurrence for state propagation while writing to
+ * separate candidate buffers. It exists only behind Rust-side oracle gates.
+ */
+extern "C" __global__ void mamba2_ssd_v5_recurrent_kernel(
+    __nv_bfloat16* __restrict__ out,        /* [L, n_heads, head_dim] */
+    const __nv_bfloat16* __restrict__ x,    /* [L, n_heads, head_dim] */
+    const __nv_bfloat16* __restrict__ dt_in,/* [L, n_heads] */
+    const float* __restrict__ A_log,        /* [n_heads] */
+    const __nv_bfloat16* __restrict__ B_mat,/* [L, n_groups, state_size] */
+    const __nv_bfloat16* __restrict__ C_mat,/* [L, n_groups, state_size] */
+    const float* __restrict__ D_vec,        /* [n_heads] or NULL */
+    float* __restrict__ ssm_state,          /* [n_heads, head_dim, state_size] */
+    const float* __restrict__ dt_bias,      /* [n_heads] or NULL */
+    int L,
+    int n_heads,
+    int head_dim,
+    int state_size,
+    int n_groups,
+    int chunk_size,
+    int use_softplus)
+{
+    int head = blockIdx.x;
+    int d = blockIdx.y * blockDim.x + threadIdx.x;
+    bool valid_d = d < head_dim;
+
+    int group = head / (n_heads / n_groups);
+    float A_val = mamba2_ssd_a_value(A_log[head]);
+    float D_val = (D_vec != NULL) ? D_vec[head] : 0.0f;
+    float* h = valid_d ? (ssm_state + ((int64_t)head * head_dim + d) * state_size) : NULL;
+
+    int effective_chunk_size = (chunk_size > 0) ? chunk_size : L;
+    float dA_chunk_base = 0.0f;
+    extern __shared__ float mamba2_ssd_v5_da_prefix_smem[];
+
+    for (int t = 0; t < L; t++) {
+        int chunk_start = (t / effective_chunk_size) * effective_chunk_size;
+        int chunk_pos = t - chunk_start;
+        int chunk_len = min(effective_chunk_size, L - chunk_start);
+        float* dA_prefix = NULL;
+        if (chunk_pos == 0) {
+            dA_prefix = mamba2_ssd_build_da_prefix_scan(
+                mamba2_ssd_v5_da_prefix_smem,
+                effective_chunk_size,
+                dt_in,
+                dt_bias,
+                A_val,
+                n_heads,
+                head,
+                chunk_start,
+                chunk_len,
+                use_softplus);
+        } else {
+            dA_prefix = mamba2_ssd_v5_da_prefix_smem;
+            int rounds = 0;
+            for (int offset = 1; offset < chunk_len; offset <<= 1) rounds++;
+            if ((rounds & 1) != 0) dA_prefix += effective_chunk_size;
+        }
+
+        float dt = mamba2_ssd_dt_value(dt_in, dt_bias, t, n_heads, head, use_softplus);
+        float A_bar = __expf(A_val * dt);
+        float dA_target = dA_chunk_base + dA_prefix[chunk_pos];
+        float x_val = valid_d ? bf16_to_float(x[(t * n_heads + head) * head_dim + d]) : 0.0f;
+
+        if (valid_d) {
+            for (int s = 0; s < state_size; s++) {
+                float B_val = bf16_to_float(B_mat[(t * n_groups + group) * state_size + s]);
+                float B_bar = bf16_to_float(float_to_bf16(B_val * dt));
+                h[s] = A_bar * h[s] + B_bar * x_val;
+            }
+        }
+
+        float c_state_total = 0.0f;
+        if (valid_d) {
+            for (int s = 0; s < state_size; s++) {
+                float C_val = bf16_to_float(C_mat[(t * n_groups + group) * state_size + s]);
+                c_state_total += C_val * h[s];
+            }
+        }
+
+        float local_old_state = 0.0f;
+        float local_hf_chunk_scan = 0.0f;
+        if (valid_d) {
+            for (int u = chunk_start; u <= t; u++) {
+                int u_chunk_pos = u - chunk_start;
+                float dA_running = dA_chunk_base + dA_prefix[u_chunk_pos];
+                float dt_u = bf16_to_float(dt_in[u * n_heads + head]);
+                if (dt_bias != NULL) dt_u += dt_bias[head];
+                float dt_u_scale = dt_u;
+                if (use_softplus) {
+                    dt_u = mamba2_chunk_cumsum_softplus(dt_u);
+                    dt_u_scale = mamba2_chunk_cumsum_softplus(dt_u_scale);
+                }
+                float decay = (u == t) ? 1.0f : __expf(fminf(dA_target - dA_running, 0.0f));
+
+                float old_state_source = 0.0f;
+                int c_row_base_idx = (t * n_groups + group) * state_size;
+                int b_row_base_idx = (u * n_groups + group) * state_size;
+                float cb = mamba2_ssd_cb_dot_reverse(
+                    C_mat, B_mat, c_row_base_idx, b_row_base_idx, state_size);
+                if (chunk_start != 0) {
+                    for (int s = 0; s < state_size; s++) {
+                        float C_val = bf16_to_float(C_mat[c_row_base_idx + s]);
+                        float B_val = bf16_to_float(B_mat[b_row_base_idx + s]);
+                        float B_bar = bf16_to_float(float_to_bf16(B_val * dt_u));
+                        old_state_source += C_val * B_bar;
+                    }
+                }
+
+                float scale = decay * dt_u_scale;
+                float cb_scaled_bf16 = bf16_to_float(float_to_bf16(cb * scale));
+                float x_u = bf16_to_float(x[(u * n_heads + head) * head_dim + d]);
+                local_old_state += old_state_source * decay * x_u;
+                local_hf_chunk_scan += cb_scaled_bf16 * x_u;
+            }
+        }
+
+        if (valid_d) {
+            float prior_chunk_state = (chunk_start == 0) ? 0.0f : (c_state_total - local_old_state);
+            float y = D_val * x_val + prior_chunk_state + local_hf_chunk_scan;
+            int flat_idx = (t * n_heads + head) * head_dim + d;
+            out[flat_idx] = float_to_bf16(y);
+        }
+        if (chunk_pos + 1 == chunk_len) {
+            dA_chunk_base += dA_prefix[chunk_len - 1];
+        }
+        __syncthreads();
+    }
+}
+
+/*
+ * Opt-in block-scan correctness seed, phase 1. This preserves the exact
+ * token-order FP32 recurrence as the accepted source for chunk entries and
+ * final state, while writing per-chunk entry snapshots for a separate output
+ * assembly phase.
+ */
+extern "C" __global__ void mamba2_ssd_block_scan_recurrent_kernel(
+    const __nv_bfloat16* __restrict__ x,    /* [L, n_heads, head_dim] */
+    const __nv_bfloat16* __restrict__ dt_in,/* [L, n_heads] */
+    const float* __restrict__ A_log,        /* [n_heads] */
+    const __nv_bfloat16* __restrict__ B_mat,/* [L, n_groups, state_size] */
+    const __nv_bfloat16* __restrict__ C_mat,/* [L, n_groups, state_size] */
+	    float* __restrict__ ssm_state,          /* [n_heads, head_dim, state_size] */
+	    float* __restrict__ entry_state,        /* [n_chunks, n_heads, head_dim, state_size] */
+	    float* __restrict__ c_state_total_exact,/* [L, n_heads, head_dim] */
+	    unsigned long long* __restrict__ recurrent_subloop_timing,/* optional [11], NULL when disabled */
+	    const float* __restrict__ dt_bias,      /* [n_heads] or NULL */
+	    int L,
+    int n_heads,
+    int head_dim,
+    int state_size,
+    int n_groups,
+    int chunk_size,
+    int use_softplus)
+{
+    int head = blockIdx.x;
+    int d = blockIdx.y * blockDim.x + threadIdx.x;
+    bool valid_d = d < head_dim;
+    if (!valid_d) return;
+
+    int group = head / (n_heads / n_groups);
+	    float A_val = mamba2_ssd_a_value(A_log[head]);
+			    int effective_chunk_size = (chunk_size > 0) ? chunk_size : L;
+			    int state_base = ((int64_t)head * head_dim + d) * state_size;
+			    float* h = ssm_state + state_base;
+	    unsigned long long thread_total_t0 = (recurrent_subloop_timing != NULL) ? clock64() : 0ULL;
+	    unsigned long long entry_snapshot_cycles = 0ULL;
+	    unsigned long long dt_a_x_setup_cycles = 0ULL;
+	    unsigned long long state_update_cycles = 0ULL;
+	    unsigned long long c_dot_cycles = 0ULL;
+	    unsigned long long c_state_store_cycles = 0ULL;
+	    unsigned long long row_lanes = 0ULL;
+	    unsigned long long entry_snapshot_elements = 0ULL;
+	    unsigned long long state_update_elements = 0ULL;
+	    unsigned long long c_dot_elements = 0ULL;
+	    unsigned long long c_state_stores = 0ULL;
+
+		    for (int t = 0; t < L; t++) {
+			        int chunk_idx = t / effective_chunk_size;
+		        int chunk_pos = t - chunk_idx * effective_chunk_size;
+		        if (chunk_pos == 0) {
+	            unsigned long long entry_t0 = (recurrent_subloop_timing != NULL) ? clock64() : 0ULL;
+			            int64_t entry_base = ((int64_t)chunk_idx * n_heads * head_dim + (int64_t)head * head_dim + d) * state_size;
+			            for (int s = 0; s < state_size; s++) {
+			                entry_state[entry_base + s] = h[s];
+			            }
+	            if (recurrent_subloop_timing != NULL) {
+	                entry_snapshot_cycles += clock64() - entry_t0;
+	                entry_snapshot_elements += (unsigned long long)state_size;
+	            }
+			        }
+
+	        unsigned long long setup_t0 = (recurrent_subloop_timing != NULL) ? clock64() : 0ULL;
+		        float dt = mamba2_ssd_dt_value(dt_in, dt_bias, t, n_heads, head, use_softplus);
+		        float A_bar = __expf(A_val * dt);
+			        float x_val = bf16_to_float(x[(t * n_heads + head) * head_dim + d]);
+	        if (recurrent_subloop_timing != NULL) {
+	            dt_a_x_setup_cycles += clock64() - setup_t0;
+	        }
+	        unsigned long long update_t0 = (recurrent_subloop_timing != NULL) ? clock64() : 0ULL;
+			        for (int s = 0; s < state_size; s++) {
+			            float B_val = bf16_to_float(B_mat[(t * n_groups + group) * state_size + s]);
+			            float B_bar = bf16_to_float(float_to_bf16(B_val * dt));
+			            h[s] = A_bar * h[s] + B_bar * x_val;
+			        }
+	        if (recurrent_subloop_timing != NULL) {
+	            state_update_cycles += clock64() - update_t0;
+	            state_update_elements += (unsigned long long)state_size;
+	        }
+			        float c_state_total = 0.0f;
+			        int c_row_base_idx = (t * n_groups + group) * state_size;
+	        unsigned long long cdot_t0 = (recurrent_subloop_timing != NULL) ? clock64() : 0ULL;
+			        for (int s = 0; s < state_size; s++) {
+			            float C_val = bf16_to_float(C_mat[c_row_base_idx + s]);
+			            c_state_total += C_val * h[s];
+			        }
+	        if (recurrent_subloop_timing != NULL) {
+	            c_dot_cycles += clock64() - cdot_t0;
+	            c_dot_elements += (unsigned long long)state_size;
+	        }
+	        unsigned long long store_t0 = (recurrent_subloop_timing != NULL) ? clock64() : 0ULL;
+			        c_state_total_exact[(t * n_heads + head) * head_dim + d] = c_state_total;
+	        if (recurrent_subloop_timing != NULL) {
+	            c_state_store_cycles += clock64() - store_t0;
+	            c_state_stores += 1ULL;
+	            row_lanes += 1ULL;
+	        }
+			    }
+	    if (recurrent_subloop_timing != NULL) {
+	        mamba2_ssd_timing_add(recurrent_subloop_timing, 0, entry_snapshot_cycles);
+	        mamba2_ssd_timing_add(recurrent_subloop_timing, 1, dt_a_x_setup_cycles);
+	        mamba2_ssd_timing_add(recurrent_subloop_timing, 2, state_update_cycles);
+	        mamba2_ssd_timing_add(recurrent_subloop_timing, 3, c_dot_cycles);
+	        mamba2_ssd_timing_add(recurrent_subloop_timing, 4, c_state_store_cycles);
+	        mamba2_ssd_timing_add(recurrent_subloop_timing, 5, clock64() - thread_total_t0);
+	        atomicAdd(&recurrent_subloop_timing[6], row_lanes);
+	        atomicAdd(&recurrent_subloop_timing[7], entry_snapshot_elements);
+	        atomicAdd(&recurrent_subloop_timing[8], state_update_elements);
+	        atomicAdd(&recurrent_subloop_timing[9], c_dot_elements);
+	        atomicAdd(&recurrent_subloop_timing[10], c_state_stores);
+		    }
+				}
+
+/*
+ * Opt-in state-parallel recurrent prototype. Token order is unchanged for each
+ * (head,d,s) recurrence. Independent state slots are updated in parallel, then
+ * one thread per d lane computes c_state_total_exact with the same serial
+ * ascending-s accumulation order as the accepted recurrent kernel.
+ */
+extern "C" __global__ void mamba2_ssd_block_scan_recurrent_state_parallel_kernel(
+    const __nv_bfloat16* __restrict__ x,    /* [L, n_heads, head_dim] */
+    const __nv_bfloat16* __restrict__ dt_in,/* [L, n_heads] */
+    const float* __restrict__ A_log,        /* [n_heads] */
+    const __nv_bfloat16* __restrict__ B_mat,/* [L, n_groups, state_size] */
+    const __nv_bfloat16* __restrict__ C_mat,/* [L, n_groups, state_size] */
+    float* __restrict__ ssm_state,          /* [n_heads, head_dim, state_size] */
+    float* __restrict__ entry_state,        /* [n_chunks, n_heads, head_dim, state_size] */
+    float* __restrict__ c_state_total_exact,/* [L, n_heads, head_dim] */
+    unsigned long long* __restrict__ recurrent_subloop_timing,/* optional [11], NULL when disabled */
+    const float* __restrict__ dt_bias,      /* [n_heads] or NULL */
+    int L,
+    int n_heads,
+    int head_dim,
+    int state_size,
+    int n_groups,
+    int chunk_size,
+    int use_softplus)
+{
+    int head = blockIdx.x;
+    int effective_chunk_size = (chunk_size > 0) ? chunk_size : L;
+    int d_tile = blockDim.x / state_size;
+    if (d_tile <= 0) return;
+
+    int lane = threadIdx.x / state_size;
+    int state_idx = threadIdx.x - lane * state_size;
+    int d = blockIdx.y * d_tile + lane;
+    bool valid_lane = lane < d_tile && state_idx < state_size && d < head_dim;
+    int group = head / (n_heads / n_groups);
+    float A_val = mamba2_ssd_a_value(A_log[head]);
+
+    extern __shared__ float mamba2_ssd_state_parallel_smem[];
+    float* h_tile = mamba2_ssd_state_parallel_smem;
+    float* b_bar_tile = h_tile + d_tile * state_size;
+    float* c_tile = b_bar_tile + state_size;
+    float* x_tile = c_tile + state_size;
+    float* scalar_tile = x_tile + d_tile;
+
+    unsigned long long thread_total_t0 = (recurrent_subloop_timing != NULL) ? clock64() : 0ULL;
+    unsigned long long entry_snapshot_cycles = 0ULL;
+    unsigned long long dt_a_x_setup_cycles = 0ULL;
+    unsigned long long state_update_cycles = 0ULL;
+    unsigned long long c_dot_cycles = 0ULL;
+    unsigned long long c_state_store_cycles = 0ULL;
+    unsigned long long row_lanes = 0ULL;
+    unsigned long long entry_snapshot_elements = 0ULL;
+    unsigned long long state_update_elements = 0ULL;
+    unsigned long long c_dot_elements = 0ULL;
+    unsigned long long c_state_stores = 0ULL;
+
+    if (valid_lane) {
+        int64_t state_base = ((int64_t)head * head_dim + d) * state_size;
+        h_tile[lane * state_size + state_idx] = ssm_state[state_base + state_idx];
+    }
+    __syncthreads();
+
+    for (int t = 0; t < L; t++) {
+        int chunk_idx = t / effective_chunk_size;
+        int chunk_pos = t - chunk_idx * effective_chunk_size;
+        if (chunk_pos == 0) {
+            unsigned long long entry_t0 = (recurrent_subloop_timing != NULL) ? clock64() : 0ULL;
+            if (valid_lane) {
+                int64_t entry_base =
+                    ((int64_t)chunk_idx * n_heads * head_dim + (int64_t)head * head_dim + d)
+                    * state_size;
+                entry_state[entry_base + state_idx] = h_tile[lane * state_size + state_idx];
+            }
+            if (recurrent_subloop_timing != NULL) {
+                entry_snapshot_cycles += clock64() - entry_t0;
+                if (valid_lane) entry_snapshot_elements += 1ULL;
+            }
+        }
+
+        unsigned long long setup_t0 = (recurrent_subloop_timing != NULL) ? clock64() : 0ULL;
+        if (threadIdx.x == 0) {
+            float dt = mamba2_ssd_dt_value(dt_in, dt_bias, t, n_heads, head, use_softplus);
+            scalar_tile[0] = dt;
+            scalar_tile[1] = __expf(A_val * dt);
+        }
+        __syncthreads();
+        float dt = scalar_tile[0];
+        if (lane == 0 && state_idx < state_size) {
+            int row_base = (t * n_groups + group) * state_size;
+            float B_val = bf16_to_float(B_mat[row_base + state_idx]);
+            b_bar_tile[state_idx] = bf16_to_float(float_to_bf16(B_val * dt));
+            c_tile[state_idx] = bf16_to_float(C_mat[row_base + state_idx]);
+        }
+        if (state_idx == 0 && d < head_dim) {
+            x_tile[lane] = bf16_to_float(x[(t * n_heads + head) * head_dim + d]);
+        }
+        __syncthreads();
+        if (recurrent_subloop_timing != NULL) {
+            dt_a_x_setup_cycles += clock64() - setup_t0;
+        }
+
+        unsigned long long update_t0 = (recurrent_subloop_timing != NULL) ? clock64() : 0ULL;
+        if (valid_lane) {
+            int h_idx = lane * state_size + state_idx;
+            h_tile[h_idx] = scalar_tile[1] * h_tile[h_idx] + b_bar_tile[state_idx] * x_tile[lane];
+        }
+        if (recurrent_subloop_timing != NULL) {
+            state_update_cycles += clock64() - update_t0;
+            if (valid_lane) state_update_elements += 1ULL;
+        }
+        __syncthreads();
+
+        if (state_idx == 0 && d < head_dim) {
+            float c_state_total = 0.0f;
+            unsigned long long cdot_t0 = (recurrent_subloop_timing != NULL) ? clock64() : 0ULL;
+            for (int s = 0; s < state_size; s++) {
+                c_state_total += c_tile[s] * h_tile[lane * state_size + s];
+            }
+            if (recurrent_subloop_timing != NULL) {
+                c_dot_cycles += clock64() - cdot_t0;
+                c_dot_elements += (unsigned long long)state_size;
+            }
+            unsigned long long store_t0 = (recurrent_subloop_timing != NULL) ? clock64() : 0ULL;
+            c_state_total_exact[(t * n_heads + head) * head_dim + d] = c_state_total;
+            if (recurrent_subloop_timing != NULL) {
+                c_state_store_cycles += clock64() - store_t0;
+                c_state_stores += 1ULL;
+                row_lanes += 1ULL;
+            }
+        }
+        __syncthreads();
+    }
+
+    if (valid_lane) {
+        int64_t state_base = ((int64_t)head * head_dim + d) * state_size;
+        ssm_state[state_base + state_idx] = h_tile[lane * state_size + state_idx];
+    }
+
+    if (recurrent_subloop_timing != NULL) {
+        mamba2_ssd_timing_add(recurrent_subloop_timing, 0, entry_snapshot_cycles);
+        mamba2_ssd_timing_add(recurrent_subloop_timing, 1, dt_a_x_setup_cycles);
+        mamba2_ssd_timing_add(recurrent_subloop_timing, 2, state_update_cycles);
+        mamba2_ssd_timing_add(recurrent_subloop_timing, 3, c_dot_cycles);
+        mamba2_ssd_timing_add(recurrent_subloop_timing, 4, c_state_store_cycles);
+        mamba2_ssd_timing_add(recurrent_subloop_timing, 5, clock64() - thread_total_t0);
+        atomicAdd(&recurrent_subloop_timing[6], row_lanes);
+        atomicAdd(&recurrent_subloop_timing[7], entry_snapshot_elements);
+        atomicAdd(&recurrent_subloop_timing[8], state_update_elements);
+        atomicAdd(&recurrent_subloop_timing[9], c_dot_elements);
+        atomicAdd(&recurrent_subloop_timing[10], c_state_stores);
+    }
+}
+
+/*
+ * Opt-in block-scan correctness seed, phase 2. Output assembly is separated
+ * from accepted final-state propagation. For each row, replay the same
+ * token-order recurrence from the exact chunk-entry snapshot up to that row,
+ * then run the existing local/output assembly math into candidate output.
+ */
+extern "C" __global__ void mamba2_ssd_block_scan_output_kernel(
+    __nv_bfloat16* __restrict__ out,        /* [L, n_heads, head_dim] */
+    const __nv_bfloat16* __restrict__ x,    /* [L, n_heads, head_dim] */
+    const __nv_bfloat16* __restrict__ dt_in,/* [L, n_heads] */
+    const float* __restrict__ A_log,        /* [n_heads] */
+    const __nv_bfloat16* __restrict__ B_mat,/* [L, n_groups, state_size] */
+    const __nv_bfloat16* __restrict__ C_mat,/* [L, n_groups, state_size] */
+		    const float* __restrict__ D_vec,        /* [n_heads] or NULL */
+	    const float* __restrict__ entry_state,  /* [n_chunks, n_heads, head_dim, state_size] */
+	    const float* __restrict__ c_state_total_exact,/* [L, n_heads, head_dim] */
+		    float* __restrict__ term_probe,         /* optional [16], NULL when disabled */
+		    unsigned long long* __restrict__ subloop_timing,/* optional [8], NULL when disabled */
+	    const float* __restrict__ dt_bias,      /* [n_heads] or NULL */
+    int probe_row,
+    int probe_head,
+    int probe_d,
+    int L,
+    int n_heads,
+    int head_dim,
+    int state_size,
+    int n_groups,
+    int chunk_size,
+    int use_softplus)
+{
+    int head = blockIdx.x;
+    int d = blockIdx.y * blockDim.x + threadIdx.x;
+    bool valid_d = d < head_dim;
+
+    int group = head / (n_heads / n_groups);
+    float A_val = mamba2_ssd_a_value(A_log[head]);
+    float D_val = (D_vec != NULL) ? D_vec[head] : 0.0f;
+    int effective_chunk_size = (chunk_size > 0) ? chunk_size : L;
+    float dA_chunk_base = 0.0f;
+    extern __shared__ float mamba2_ssd_block_scan_da_prefix_smem[];
+    unsigned long long thread_total_t0 = (subloop_timing != NULL) ? clock64() : 0ULL;
+
+    for (int t = 0; t < L; t++) {
+        unsigned long long setup_t0 = (subloop_timing != NULL) ? clock64() : 0ULL;
+        int chunk_idx = t / effective_chunk_size;
+        int chunk_start = chunk_idx * effective_chunk_size;
+        int chunk_pos = t - chunk_start;
+        int chunk_len = min(effective_chunk_size, L - chunk_start);
+        float* dA_prefix = NULL;
+        if (chunk_pos == 0) {
+            dA_prefix = mamba2_ssd_build_da_prefix_scan(
+                mamba2_ssd_block_scan_da_prefix_smem,
+                effective_chunk_size,
+                dt_in,
+                dt_bias,
+                A_val,
+                n_heads,
+                head,
+                chunk_start,
+                chunk_len,
+                use_softplus);
+        } else {
+            dA_prefix = mamba2_ssd_block_scan_da_prefix_smem;
+            int rounds = 0;
+            for (int offset = 1; offset < chunk_len; offset <<= 1) rounds++;
+            if ((rounds & 1) != 0) dA_prefix += effective_chunk_size;
+        }
+
+        float dA_target = dA_chunk_base + dA_prefix[chunk_pos];
+        float x_val = valid_d ? bf16_to_float(x[(t * n_heads + head) * head_dim + d]) : 0.0f;
+
+        float c_state_total = valid_d
+            ? c_state_total_exact[(t * n_heads + head) * head_dim + d]
+            : 0.0f;
+        if (subloop_timing != NULL) {
+            mamba2_ssd_timing_add(subloop_timing, 0, clock64() - setup_t0);
+        }
+
+		        float local_old_state = 0.0f;
+		        float local_hf_chunk_scan = 0.0f;
+		        if (valid_d) {
+		            if (subloop_timing != NULL) {
+		                atomicAdd(&subloop_timing[5], 1ULL);
+		                atomicAdd(&subloop_timing[6], (unsigned long long)(t - chunk_start + 1));
+		            }
+		            for (int u = chunk_start; u <= t; u++) {
+                int u_chunk_pos = u - chunk_start;
+                float dA_running = dA_chunk_base + dA_prefix[u_chunk_pos];
+                float dt_u = bf16_to_float(dt_in[u * n_heads + head]);
+                if (dt_bias != NULL) dt_u += dt_bias[head];
+                float dt_u_scale = dt_u;
+                if (use_softplus) {
+                    dt_u = mamba2_chunk_cumsum_softplus(dt_u);
+                    dt_u_scale = mamba2_chunk_cumsum_softplus(dt_u_scale);
+                }
+		                float decay = (u == t) ? 1.0f : __expf(fminf(dA_target - dA_running, 0.0f));
+
+		                float old_state_source = 0.0f;
+		                int c_row_base_idx = (t * n_groups + group) * state_size;
+		                int b_row_base_idx = (u * n_groups + group) * state_size;
+		                unsigned long long tri_t0 = (subloop_timing != NULL) ? clock64() : 0ULL;
+		                float cb = mamba2_ssd_cb_dot_reverse(
+		                    C_mat, B_mat, c_row_base_idx, b_row_base_idx, state_size);
+		                if (subloop_timing != NULL) {
+		                    mamba2_ssd_timing_add(subloop_timing, 2, clock64() - tri_t0);
+		                }
+		                unsigned long long old_t0 = (subloop_timing != NULL) ? clock64() : 0ULL;
+		                if (chunk_start != 0) {
+		                    for (int s = 0; s < state_size; s++) {
+		                        float C_val = bf16_to_float(C_mat[c_row_base_idx + s]);
+		                        float B_val = bf16_to_float(B_mat[b_row_base_idx + s]);
+		                        float B_bar = bf16_to_float(float_to_bf16(B_val * dt_u));
+		                        old_state_source += C_val * B_bar;
+		                    }
+		                }
+		                if (subloop_timing != NULL) {
+		                    mamba2_ssd_timing_add(subloop_timing, 1, clock64() - old_t0);
+		                }
+
+		                tri_t0 = (subloop_timing != NULL) ? clock64() : 0ULL;
+		                float scale = decay * dt_u_scale;
+		                float cb_scaled_bf16 = bf16_to_float(float_to_bf16(cb * scale));
+		                float x_u = bf16_to_float(x[(u * n_heads + head) * head_dim + d]);
+		                if (subloop_timing != NULL) {
+		                    mamba2_ssd_timing_add(subloop_timing, 2, clock64() - tri_t0);
+		                }
+		                old_t0 = (subloop_timing != NULL) ? clock64() : 0ULL;
+		                local_old_state += old_state_source * decay * x_u;
+		                if (subloop_timing != NULL) {
+		                    mamba2_ssd_timing_add(subloop_timing, 1, clock64() - old_t0);
+		                }
+		                tri_t0 = (subloop_timing != NULL) ? clock64() : 0ULL;
+		                local_hf_chunk_scan += cb_scaled_bf16 * x_u;
+		                if (subloop_timing != NULL) {
+		                    mamba2_ssd_timing_add(subloop_timing, 2, clock64() - tri_t0);
+		                }
+		            }
+	        }
+
+        if (valid_d) {
+            unsigned long long d_prior_t0 = (subloop_timing != NULL) ? clock64() : 0ULL;
+            float prior_chunk_state = (chunk_start == 0) ? 0.0f : (c_state_total - local_old_state);
+            float d_skip = D_val * x_val;
+            float y = d_skip + prior_chunk_state + local_hf_chunk_scan;
+            if (subloop_timing != NULL) {
+                mamba2_ssd_timing_add(subloop_timing, 0, clock64() - d_prior_t0);
+            }
+            int flat_idx = (t * n_heads + head) * head_dim + d;
+            unsigned long long cast_t0 = (subloop_timing != NULL) ? clock64() : 0ULL;
+	            out[flat_idx] = float_to_bf16(y);
+            if (subloop_timing != NULL) {
+                mamba2_ssd_timing_add(subloop_timing, 3, clock64() - cast_t0);
+            }
+	            if (term_probe != NULL && t == probe_row && head == probe_head && d == probe_d) {
+		                float c_state_total_replayed = 0.0f;
+		                int64_t entry_base = ((int64_t)chunk_idx * n_heads * head_dim + (int64_t)head * head_dim + d) * state_size;
+		                int c_row_base_idx = (t * n_groups + group) * state_size;
+	                for (int s = 0; s < state_size; s++) {
+                    float h_s = entry_state[entry_base + s];
+                    for (int v = chunk_start; v <= t; v++) {
+                        float dt_v = mamba2_ssd_dt_value(dt_in, dt_bias, v, n_heads, head, use_softplus);
+                        float A_bar_v = __expf(A_val * dt_v);
+                        float B_val = bf16_to_float(B_mat[(v * n_groups + group) * state_size + s]);
+                        float B_bar = bf16_to_float(float_to_bf16(B_val * dt_v));
+                        float x_v = bf16_to_float(x[(v * n_heads + head) * head_dim + d]);
+                        h_s = A_bar_v * h_s + B_bar * x_v;
+                    }
+		                    float C_val = bf16_to_float(C_mat[c_row_base_idx + s]);
+		                    c_state_total_replayed += C_val * h_s;
+		                }
+		                term_probe[0] = c_state_total;
+		                term_probe[1] = c_state_total_replayed;
+		                term_probe[2] = local_old_state;
+                term_probe[3] = prior_chunk_state;
+                term_probe[4] = local_hf_chunk_scan;
+                term_probe[5] = D_val * x_val;
+                term_probe[6] = y;
+                term_probe[7] = c_state_total - c_state_total_replayed;
+                term_probe[8] = (float)chunk_idx;
+                term_probe[9] = (float)chunk_start;
+                term_probe[10] = (float)chunk_pos;
+                term_probe[11] = (float)group;
+                term_probe[12] = dA_target;
+	                term_probe[13] = x_val;
+		                term_probe[14] = D_val;
+		                term_probe[15] = 1.0f;
+		            }
+	        }
+        if (chunk_pos + 1 == chunk_len) {
+            dA_chunk_base += dA_prefix[chunk_len - 1];
+        }
+        __syncthreads();
+    }
+	    if (subloop_timing != NULL) {
+	        mamba2_ssd_timing_add(subloop_timing, 4, clock64() - thread_total_t0);
+	    }
+	}
+
+/*
+ * Opt-in coefficient-tiled block-scan output assembly. This keeps the
+ * accepted recurrent state and c_state_total_exact path unchanged, but
+ * computes per-(t,u) local scalar coefficients once per block before applying
+ * them in the same increasing-u output accumulation order as the accepted
+ * block-scan output kernel.
+ */
+extern "C" __global__ void mamba2_ssd_block_scan_output_coeff_tile_kernel(
+    __nv_bfloat16* __restrict__ out,        /* [L, n_heads, head_dim] */
+    const __nv_bfloat16* __restrict__ x,    /* [L, n_heads, head_dim] */
+    const __nv_bfloat16* __restrict__ dt_in,/* [L, n_heads] */
+    const float* __restrict__ A_log,        /* [n_heads] */
+    const __nv_bfloat16* __restrict__ B_mat,/* [L, n_groups, state_size] */
+    const __nv_bfloat16* __restrict__ C_mat,/* [L, n_groups, state_size] */
+    const float* __restrict__ D_vec,        /* [n_heads] or NULL */
+    const float* __restrict__ entry_state,  /* [n_chunks, n_heads, head_dim, state_size] */
+    const float* __restrict__ c_state_total_exact,/* unused in fast chunked path */
+    float* __restrict__ term_probe,         /* optional [32], NULL when disabled */
+    unsigned long long* __restrict__ subloop_timing,/* optional [10], NULL when disabled */
+    const float* __restrict__ dt_bias,      /* [n_heads] or NULL */
+    int probe_row,
+    int probe_head,
+    int probe_d,
+    int L,
+    int n_heads,
+    int head_dim,
+    int state_size,
+    int n_groups,
+    int chunk_size,
+    int use_softplus)
+{
+    int head = blockIdx.x;
+    int d = blockIdx.y * blockDim.x + threadIdx.x;
+    bool valid_d = d < head_dim;
+
+    int group = head / (n_heads / n_groups);
+    float A_val = mamba2_ssd_a_value(A_log[head]);
+    float D_val = (D_vec != NULL) ? D_vec[head] : 0.0f;
+    int effective_chunk_size = (chunk_size > 0) ? chunk_size : L;
+
+    extern __shared__ unsigned char mamba2_ssd_coeff_tile_smem[];
+    float* dA_smem = reinterpret_cast<float*>(mamba2_ssd_coeff_tile_smem);
+    int max_pair_count = (effective_chunk_size * (effective_chunk_size + 1)) / 2;
+    size_t prefix_bytes = (size_t)effective_chunk_size * 2 * sizeof(float);
+    size_t tri_offset = prefix_bytes;
+    size_t tri_bytes = (size_t)max_pair_count * sizeof(unsigned short);
+    size_t old_offset = (tri_offset + tri_bytes + sizeof(float) - 1) & ~(sizeof(float) - 1);
+    unsigned short* tri_coeff_bits = reinterpret_cast<unsigned short*>(mamba2_ssd_coeff_tile_smem + tri_offset);
+    float* old_coeff_tile = reinterpret_cast<float*>(mamba2_ssd_coeff_tile_smem + old_offset);
+    unsigned long long thread_total_t0 = (subloop_timing != NULL) ? clock64() : 0ULL;
+
+    float dA_chunk_base = 0.0f;
+    for (int chunk_start = 0; chunk_start < L; chunk_start += effective_chunk_size) {
+        int chunk_len = min(effective_chunk_size, L - chunk_start);
+        float* dA_prefix = mamba2_ssd_build_da_prefix_scan(
+            dA_smem,
+            effective_chunk_size,
+            dt_in,
+            dt_bias,
+            A_val,
+            n_heads,
+            head,
+            chunk_start,
+            chunk_len,
+            use_softplus);
+
+        unsigned long long coeff_t0 = (subloop_timing != NULL) ? clock64() : 0ULL;
+        for (int t_pos = 0; t_pos < chunk_len; t_pos++) {
+            float dA_target = dA_chunk_base + dA_prefix[t_pos];
+            int t_abs = chunk_start + t_pos;
+            int c_row_base_idx = (t_abs * n_groups + group) * state_size;
+            for (int u_pos = threadIdx.x; u_pos <= t_pos; u_pos += blockDim.x) {
+                int u_abs = chunk_start + u_pos;
+                int pair_idx = mamba2_ssd_lower_tri_pair_index(t_pos, u_pos);
+                float dA_running = dA_chunk_base + dA_prefix[u_pos];
+                float dt_u = bf16_to_float(dt_in[u_abs * n_heads + head]);
+                if (dt_bias != NULL) dt_u += dt_bias[head];
+                float dt_u_scale = dt_u;
+                if (use_softplus) {
+                    dt_u = mamba2_chunk_cumsum_softplus(dt_u);
+                    dt_u_scale = mamba2_chunk_cumsum_softplus(dt_u_scale);
+                }
+                float decay = (u_pos == t_pos) ? 1.0f : __expf(fminf(dA_target - dA_running, 0.0f));
+                int b_row_base_idx = (u_abs * n_groups + group) * state_size;
+                float cb = mamba2_ssd_cb_dot_reverse(
+                    C_mat, B_mat, c_row_base_idx, b_row_base_idx, state_size);
+                float scale = decay * dt_u_scale;
+                __nv_bfloat16 tri_bf16 = float_to_bf16(cb * scale);
+                tri_coeff_bits[pair_idx] = *reinterpret_cast<unsigned short*>(&tri_bf16);
+
+                float old_state_source = 0.0f;
+                if (chunk_start != 0) {
+                    for (int s = 0; s < state_size; s++) {
+                        float C_val = bf16_to_float(C_mat[c_row_base_idx + s]);
+                        float B_val = bf16_to_float(B_mat[b_row_base_idx + s]);
+                        float B_bar = bf16_to_float(float_to_bf16(B_val * dt_u));
+                        old_state_source += C_val * B_bar;
+                    }
+                }
+                old_coeff_tile[pair_idx] = old_state_source * decay;
+            }
+        }
+        if (subloop_timing != NULL) {
+            mamba2_ssd_timing_add(subloop_timing, 7, clock64() - coeff_t0);
+            if (threadIdx.x == 0) {
+                atomicAdd(&subloop_timing[8], (unsigned long long)((chunk_len * (chunk_len + 1)) / 2));
+            }
+        }
+        __syncthreads();
+
+        int chunk_idx = chunk_start / effective_chunk_size;
+        for (int t_pos = 0; t_pos < chunk_len; t_pos++) {
+            unsigned long long setup_t0 = (subloop_timing != NULL) ? clock64() : 0ULL;
+            int t = chunk_start + t_pos;
+            float dA_target = dA_chunk_base + dA_prefix[t_pos];
+            float x_val = valid_d ? bf16_to_float(x[(t * n_heads + head) * head_dim + d]) : 0.0f;
+            float c_state_total = valid_d
+                ? c_state_total_exact[(t * n_heads + head) * head_dim + d]
+                : 0.0f;
+            if (subloop_timing != NULL) {
+                mamba2_ssd_timing_add(subloop_timing, 0, clock64() - setup_t0);
+            }
+
+            float local_old_state = 0.0f;
+            float local_hf_chunk_scan = 0.0f;
+            float probe_max_tri_delta = 0.0f;
+            float probe_max_old_delta = 0.0f;
+            float probe_inline_tri = 0.0f;
+            float probe_tiled_tri = 0.0f;
+            float probe_inline_old = 0.0f;
+            float probe_tiled_old = 0.0f;
+            int probe_first_mismatch_u = -1;
+            int probe_first_mismatch_kind = 0;
+            int probe_compared = 0;
+            bool target_probe = term_probe != NULL && t == probe_row && head == probe_head && d == probe_d;
+
+            if (valid_d) {
+                if (subloop_timing != NULL) {
+                    atomicAdd(&subloop_timing[5], 1ULL);
+                    atomicAdd(&subloop_timing[6], (unsigned long long)(t_pos + 1));
+                }
+                for (int u_pos = 0; u_pos <= t_pos; u_pos++) {
+                    int u = chunk_start + u_pos;
+                    int pair_idx = mamba2_ssd_lower_tri_pair_index(t_pos, u_pos);
+                    unsigned short tiled_tri_bits = tri_coeff_bits[pair_idx];
+                    __nv_bfloat16 tiled_tri_bf16 = *reinterpret_cast<__nv_bfloat16*>(&tiled_tri_bits);
+                    float tri_coeff = bf16_to_float(tiled_tri_bf16);
+                    float old_coeff = old_coeff_tile[pair_idx];
+
+                    if (target_probe) {
+                        float dA_running = dA_chunk_base + dA_prefix[u_pos];
+                        float dt_u = bf16_to_float(dt_in[u * n_heads + head]);
+                        if (dt_bias != NULL) dt_u += dt_bias[head];
+                        float dt_u_scale = dt_u;
+                        if (use_softplus) {
+                            dt_u = mamba2_chunk_cumsum_softplus(dt_u);
+                            dt_u_scale = mamba2_chunk_cumsum_softplus(dt_u_scale);
+                        }
+                        float decay = (u_pos == t_pos) ? 1.0f : __expf(fminf(dA_target - dA_running, 0.0f));
+                        int c_row_base_idx = (t * n_groups + group) * state_size;
+                        int b_row_base_idx = (u * n_groups + group) * state_size;
+                        float cb = mamba2_ssd_cb_dot_reverse(
+                            C_mat, B_mat, c_row_base_idx, b_row_base_idx, state_size);
+                        float scale = decay * dt_u_scale;
+                        __nv_bfloat16 inline_tri_bf16 = float_to_bf16(cb * scale);
+                        unsigned short inline_tri_bits = *reinterpret_cast<unsigned short*>(&inline_tri_bf16);
+                        float inline_tri = bf16_to_float(inline_tri_bf16);
+                        float old_state_source = 0.0f;
+                        if (chunk_start != 0) {
+                            for (int s = 0; s < state_size; s++) {
+                                float C_val = bf16_to_float(C_mat[c_row_base_idx + s]);
+                                float B_val = bf16_to_float(B_mat[b_row_base_idx + s]);
+                                float B_bar = bf16_to_float(float_to_bf16(B_val * dt_u));
+                                old_state_source += C_val * B_bar;
+                            }
+                        }
+                        float inline_old = old_state_source * decay;
+                        float tri_delta = fabsf(inline_tri - tri_coeff);
+                        float old_delta = fabsf(inline_old - old_coeff);
+                        if (tri_delta > probe_max_tri_delta) {
+                            probe_max_tri_delta = tri_delta;
+                            probe_inline_tri = inline_tri;
+                            probe_tiled_tri = tri_coeff;
+                        }
+                        if (old_delta > probe_max_old_delta) {
+                            probe_max_old_delta = old_delta;
+                            probe_inline_old = inline_old;
+                            probe_tiled_old = old_coeff;
+                        }
+                        if (probe_first_mismatch_u < 0 && inline_tri_bits != tiled_tri_bits) {
+                            probe_first_mismatch_u = u;
+                            probe_first_mismatch_kind = 1;
+                            probe_inline_tri = inline_tri;
+                            probe_tiled_tri = tri_coeff;
+                        }
+                        if (
+                            probe_first_mismatch_u < 0
+                            && __float_as_uint(inline_old) != __float_as_uint(old_coeff)
+                        ) {
+                            probe_first_mismatch_u = u;
+                            probe_first_mismatch_kind = 2;
+                            probe_inline_old = inline_old;
+                            probe_tiled_old = old_coeff;
+                        }
+                        probe_compared++;
+                    }
+
+                    float x_u = bf16_to_float(x[(u * n_heads + head) * head_dim + d]);
+                    unsigned long long old_t0 = (subloop_timing != NULL) ? clock64() : 0ULL;
+                    local_old_state += old_coeff * x_u;
+                    if (subloop_timing != NULL) {
+                        mamba2_ssd_timing_add(subloop_timing, 1, clock64() - old_t0);
+                    }
+                    unsigned long long tri_t0 = (subloop_timing != NULL) ? clock64() : 0ULL;
+                    local_hf_chunk_scan += tri_coeff * x_u;
+                    if (subloop_timing != NULL) {
+                        mamba2_ssd_timing_add(subloop_timing, 2, clock64() - tri_t0);
+                    }
+                }
+            }
+
+            if (valid_d) {
+                unsigned long long d_prior_t0 = (subloop_timing != NULL) ? clock64() : 0ULL;
+                float prior_chunk_state = (chunk_start == 0) ? 0.0f : (c_state_total - local_old_state);
+                float d_skip = D_val * x_val;
+                float y = d_skip + prior_chunk_state + local_hf_chunk_scan;
+                if (subloop_timing != NULL) {
+                    mamba2_ssd_timing_add(subloop_timing, 0, clock64() - d_prior_t0);
+                }
+                int flat_idx = (t * n_heads + head) * head_dim + d;
+                unsigned long long cast_t0 = (subloop_timing != NULL) ? clock64() : 0ULL;
+                out[flat_idx] = float_to_bf16(y);
+                if (subloop_timing != NULL) {
+                    mamba2_ssd_timing_add(subloop_timing, 3, clock64() - cast_t0);
+                }
+                if (target_probe) {
+                    float c_state_total_replayed = 0.0f;
+                    int64_t entry_base = ((int64_t)chunk_idx * n_heads * head_dim + (int64_t)head * head_dim + d) * state_size;
+                    int c_row_base_idx = (t * n_groups + group) * state_size;
+                    for (int s = 0; s < state_size; s++) {
+                        float h_s = entry_state[entry_base + s];
+                        for (int v = chunk_start; v <= t; v++) {
+                            float dt_v = mamba2_ssd_dt_value(dt_in, dt_bias, v, n_heads, head, use_softplus);
+                            float A_bar_v = __expf(A_val * dt_v);
+                            float B_val = bf16_to_float(B_mat[(v * n_groups + group) * state_size + s]);
+                            float B_bar = bf16_to_float(float_to_bf16(B_val * dt_v));
+                            float x_v = bf16_to_float(x[(v * n_heads + head) * head_dim + d]);
+                            h_s = A_bar_v * h_s + B_bar * x_v;
+                        }
+                        float C_val = bf16_to_float(C_mat[c_row_base_idx + s]);
+                        c_state_total_replayed += C_val * h_s;
+                    }
+                    term_probe[0] = c_state_total;
+                    term_probe[1] = c_state_total_replayed;
+                    term_probe[2] = local_old_state;
+                    term_probe[3] = prior_chunk_state;
+                    term_probe[4] = local_hf_chunk_scan;
+                    term_probe[5] = D_val * x_val;
+                    term_probe[6] = y;
+                    term_probe[7] = c_state_total - c_state_total_replayed;
+                    term_probe[8] = (float)chunk_idx;
+                    term_probe[9] = (float)chunk_start;
+                    term_probe[10] = (float)t_pos;
+                    term_probe[11] = (float)group;
+                    term_probe[12] = dA_target;
+                    term_probe[13] = x_val;
+                    term_probe[14] = D_val;
+                    term_probe[15] = 1.0f;
+                    term_probe[16] = probe_max_tri_delta;
+                    term_probe[17] = probe_max_old_delta;
+                    term_probe[18] = (float)probe_first_mismatch_u;
+                    term_probe[19] = (float)probe_first_mismatch_kind;
+                    term_probe[20] = probe_inline_tri;
+                    term_probe[21] = probe_tiled_tri;
+                    term_probe[22] = probe_inline_old;
+                    term_probe[23] = probe_tiled_old;
+                    term_probe[24] = (float)probe_compared;
+                    term_probe[25] = 1.0f;
+                }
+            }
+        }
+
+        dA_chunk_base += dA_prefix[chunk_len - 1];
+        __syncthreads();
+    }
+    if (subloop_timing != NULL) {
+        mamba2_ssd_timing_add(subloop_timing, 4, clock64() - thread_total_t0);
+    }
+}
+
+/*
+ * Opt-in parallel/chunked SSD architecture seed. These kernels mirror the
+ * mamba-ssm prefill decomposition at the phase level:
+ *   chunk cumsum -> chunk state -> state passing -> chunk scan output.
+ * The path is selected only from Rust behind an explicit diagnostic env gate.
+ */
+extern "C" __global__ void mamba2_ssd_parallel_chunk_cumsum_kernel(
+    const __nv_bfloat16* __restrict__ dt_in,/* [L, n_heads] */
+    const float* __restrict__ A_log,        /* [n_heads] */
+    const float* __restrict__ dt_bias,      /* [n_heads] or NULL */
+    float* __restrict__ dt_out,             /* [n_chunks, n_heads, chunk_size] */
+    float* __restrict__ dA_cumsum,          /* [n_chunks, n_heads, chunk_size] */
+    int L,
+    int n_heads,
+    int chunk_size,
+    int use_softplus)
+{
+    int head = blockIdx.x;
+    int chunk_idx = blockIdx.y;
+    if (head >= n_heads || chunk_size <= 0) return;
+
+    int chunk_start = chunk_idx * chunk_size;
+    float A_val = mamba2_ssd_a_value(A_log[head]);
+    int64_t base = ((int64_t)chunk_idx * n_heads + head) * chunk_size;
+    int chunk_len = min(chunk_size, L - chunk_start);
+    if (chunk_len <= 0) {
+        for (int pos = threadIdx.x; pos < chunk_size; pos += blockDim.x) {
+            dt_out[base + pos] = 0.0f;
+            dA_cumsum[base + pos] = 0.0f;
+        }
+        return;
+    }
+
+    extern __shared__ float cumsum_smem[];
+    float* src = cumsum_smem;
+    float* dst = cumsum_smem + chunk_size;
+
+    for (int pos = threadIdx.x; pos < chunk_len; pos += blockDim.x) {
+        int t = chunk_start + pos;
+        float dt = mamba2_ssd_dt_value(dt_in, dt_bias, t, n_heads, head, use_softplus);
+        dt_out[base + pos] = dt;
+        src[pos] = A_val * dt;
+    }
+    __syncthreads();
+
+    for (int offset = 1; offset < chunk_len; offset <<= 1) {
+        for (int pos = threadIdx.x; pos < chunk_len; pos += blockDim.x) {
+            float value = src[pos];
+            if (pos >= offset) value += src[pos - offset];
+            dst[pos] = value;
+        }
+        __syncthreads();
+        float* tmp = src;
+        src = dst;
+        dst = tmp;
+    }
+
+    float final_prefix = src[chunk_len - 1];
+    for (int pos = threadIdx.x; pos < chunk_size; pos += blockDim.x) {
+        if (pos >= chunk_len) {
+            dt_out[base + pos] = 0.0f;
+        }
+        dA_cumsum[base + pos] = (pos < chunk_len) ? src[pos] : final_prefix;
+    }
+}
+
+extern "C" __global__ void mamba2_ssd_parallel_chunk_state_kernel(
+    const __nv_bfloat16* __restrict__ x,    /* [L, n_heads, head_dim] */
+    const __nv_bfloat16* __restrict__ B_mat,/* [L, n_groups, state_size] */
+    const float* __restrict__ dt_out,       /* [n_chunks, n_heads, chunk_size] */
+    const float* __restrict__ A_log,        /* [n_heads] */
+    const float* __restrict__ dA_cumsum,    /* [n_chunks, n_heads, chunk_size] */
+    float* __restrict__ chunk_states,       /* [n_chunks, n_heads, head_dim, state_size] */
+    int L,
+    int n_heads,
+    int head_dim,
+    int state_size,
+    int n_groups,
+    int chunk_size)
+{
+    int head = blockIdx.x;
+    int d = blockIdx.y;
+    int chunk_idx = blockIdx.z;
+    int s = threadIdx.x;
+    if (head >= n_heads || d >= head_dim || s >= state_size || chunk_size <= 0) return;
+
+    int group = head / (n_heads / n_groups);
+    int chunk_start = chunk_idx * chunk_size;
+    int chunk_len = min(chunk_size, L - chunk_start);
+    if (chunk_len <= 0) return;
+
+    int64_t chunk_base = ((int64_t)chunk_idx * n_heads + head) * chunk_size;
+    (void)dA_cumsum;
+    float A_val = mamba2_ssd_a_value(A_log[head]);
+    float h = 0.0f;
+    for (int pos = 0; pos < chunk_len; pos++) {
+        int t = chunk_start + pos;
+        float dt = dt_out[chunk_base + pos];
+        float A_bar = __expf(A_val * dt);
+        float B_val = bf16_to_float(B_mat[(t * n_groups + group) * state_size + s]);
+        float B_bar = bf16_to_float(float_to_bf16(B_val * dt));
+        float x_val = bf16_to_float(x[(t * n_heads + head) * head_dim + d]);
+        h = A_bar * h + B_bar * x_val;
+    }
+
+    int64_t out_idx = (((int64_t)chunk_idx * n_heads + head) * head_dim + d) * state_size + s;
+    chunk_states[out_idx] = h;
+}
+
+extern "C" __global__ void mamba2_ssd_parallel_state_passing_kernel(
+    const float* __restrict__ chunk_states, /* [n_chunks, n_heads, head_dim, state_size] */
+    const float* __restrict__ dA_cumsum,    /* [n_chunks, n_heads, chunk_size] */
+    float* __restrict__ ssm_state,          /* [n_heads, head_dim, state_size] */
+    float* __restrict__ entry_state,        /* [n_chunks, n_heads, head_dim, state_size] */
+    int n_chunks,
+    int n_heads,
+    int head_dim,
+    int state_size,
+    int chunk_size)
+{
+    int head = blockIdx.x;
+    int flat = blockIdx.y * blockDim.x + threadIdx.x;
+    int elems_per_head = head_dim * state_size;
+    if (head >= n_heads || flat >= elems_per_head || chunk_size <= 0) return;
+
+    int d = flat / state_size;
+    int s = flat - d * state_size;
+    int64_t state_idx = ((int64_t)head * head_dim + d) * state_size + s;
+    float state = ssm_state[state_idx];
+    for (int chunk_idx = 0; chunk_idx < n_chunks; chunk_idx++) {
+        int64_t entry_idx = (((int64_t)chunk_idx * n_heads + head) * head_dim + d) * state_size + s;
+        entry_state[entry_idx] = state;
+        int64_t chunk_base = ((int64_t)chunk_idx * n_heads + head) * chunk_size;
+        float dA_last = dA_cumsum[chunk_base + chunk_size - 1];
+        float new_state = chunk_states[entry_idx];
+        state = __expf(dA_last) * state + new_state;
+    }
+    ssm_state[state_idx] = state;
+}
+
+extern "C" __global__ void mamba2_ssd_parallel_chunk_scan_output_kernel(
+    __nv_bfloat16* __restrict__ out,        /* [L, n_heads, head_dim] */
+    const __nv_bfloat16* __restrict__ x,    /* [L, n_heads, head_dim] */
+    const __nv_bfloat16* __restrict__ B_mat,/* [L, n_groups, state_size] */
+    const __nv_bfloat16* __restrict__ C_mat,/* [L, n_groups, state_size] */
+    const float* __restrict__ D_vec,        /* [n_heads] or NULL */
+    const float* __restrict__ A_log,        /* [n_heads] */
+    const float* __restrict__ dt_out,       /* [n_chunks, n_heads, chunk_size] */
+    const float* __restrict__ dA_cumsum,    /* [n_chunks, n_heads, chunk_size] */
+    const float* __restrict__ entry_state,  /* [n_chunks, n_heads, head_dim, state_size] */
+    const float* __restrict__ c_state_total_exact,/* [L, n_heads, head_dim] */
+    float* __restrict__ term_probe,         /* optional [32], NULL when disabled */
+    unsigned long long* __restrict__ subloop_timing,/* optional [10], NULL when disabled */
+    int probe_row,
+    int probe_head,
+    int probe_d,
+    int L,
+    int n_heads,
+    int head_dim,
+    int state_size,
+    int n_groups,
+    int chunk_size)
+{
+    int head = blockIdx.x;
+    int d = blockIdx.y * blockDim.x + threadIdx.x;
+    bool valid_d = d < head_dim;
+    if (head >= n_heads || chunk_size <= 0) return;
+
+    int group = head / (n_heads / n_groups);
+    float D_val = (D_vec != NULL) ? D_vec[head] : 0.0f;
+    (void)A_log;
+    (void)c_state_total_exact;
+    int max_pair_count = (chunk_size * (chunk_size + 1)) / 2;
+    extern __shared__ unsigned char parallel_chunk_scan_smem[];
+    unsigned short* tri_coeff_bits = reinterpret_cast<unsigned short*>(parallel_chunk_scan_smem);
+    unsigned long long thread_total_t0 = (subloop_timing != NULL) ? clock64() : 0ULL;
+
+    float dA_chunk_base = 0.0f;
+    for (int chunk_start = 0, chunk_idx = 0; chunk_start < L; chunk_start += chunk_size, chunk_idx++) {
+        int chunk_len = min(chunk_size, L - chunk_start);
+        int64_t chunk_base = ((int64_t)chunk_idx * n_heads + head) * chunk_size;
+
+        unsigned long long coeff_t0 = (subloop_timing != NULL) ? clock64() : 0ULL;
+        for (int t_pos = 0; t_pos < chunk_len; t_pos++) {
+            float dA_local_target = dA_cumsum[chunk_base + t_pos];
+            float dA_target = dA_chunk_base + dA_local_target;
+            int t_abs = chunk_start + t_pos;
+            int c_row_base_idx = (t_abs * n_groups + group) * state_size;
+            for (int u_pos = threadIdx.x; u_pos <= t_pos; u_pos += blockDim.x) {
+                int u_abs = chunk_start + u_pos;
+                int pair_idx = mamba2_ssd_lower_tri_pair_index(t_pos, u_pos);
+                float dA_running = dA_chunk_base + dA_cumsum[chunk_base + u_pos];
+                float dt_u = dt_out[chunk_base + u_pos];
+                float decay = (u_pos == t_pos) ? 1.0f : __expf(fminf(dA_target - dA_running, 0.0f));
+                int b_row_base_idx = (u_abs * n_groups + group) * state_size;
+                float cb = mamba2_ssd_cb_dot_reverse(
+                    C_mat, B_mat, c_row_base_idx, b_row_base_idx, state_size);
+                float scale = decay * dt_u;
+                __nv_bfloat16 tri_bf16 = float_to_bf16(cb * scale);
+                tri_coeff_bits[pair_idx] = *reinterpret_cast<unsigned short*>(&tri_bf16);
+            }
+        }
+        if (subloop_timing != NULL) {
+            mamba2_ssd_timing_add(subloop_timing, 7, clock64() - coeff_t0);
+            if (threadIdx.x == 0) {
+                atomicAdd(&subloop_timing[8], (unsigned long long)((chunk_len * (chunk_len + 1)) / 2));
+            }
+        }
+        __syncthreads();
+
+        for (int t_pos = 0; t_pos < chunk_len; t_pos++) {
+            int t = chunk_start + t_pos;
+            float x_val = valid_d ? bf16_to_float(x[(t * n_heads + head) * head_dim + d]) : 0.0f;
+            float dA_local_target = dA_cumsum[chunk_base + t_pos];
+            float dA_target = dA_chunk_base + dA_local_target;
+            float prior_chunk_state = 0.0f;
+            float local_hf_chunk_scan = 0.0f;
+            float entry_dot = 0.0f;
+
+            if (valid_d) {
+                int flat_idx = (t * n_heads + head) * head_dim + d;
+                unsigned long long prior_t0 = (subloop_timing != NULL) ? clock64() : 0ULL;
+                int c_row_base_idx = (t * n_groups + group) * state_size;
+                int64_t entry_base =
+                    (((int64_t)chunk_idx * n_heads + head) * head_dim + d) * state_size;
+                if (chunk_start != 0) {
+                    for (int s = 0; s < state_size; s++) {
+                        float C_val = bf16_to_float(C_mat[c_row_base_idx + s]);
+                        entry_dot += C_val * entry_state[entry_base + s];
+                    }
+                    prior_chunk_state = __expf(dA_local_target) * entry_dot;
+                }
+                if (subloop_timing != NULL) {
+                    mamba2_ssd_timing_add(subloop_timing, 0, clock64() - prior_t0);
+                    atomicAdd(&subloop_timing[5], 1ULL);
+                    atomicAdd(&subloop_timing[6], (unsigned long long)(t_pos + 1));
+                }
+
+                for (int u_pos = 0; u_pos <= t_pos; u_pos++) {
+                    int u = chunk_start + u_pos;
+                    int pair_idx = mamba2_ssd_lower_tri_pair_index(t_pos, u_pos);
+                    unsigned short tri_bits = tri_coeff_bits[pair_idx];
+                    __nv_bfloat16 tri_bf16 = *reinterpret_cast<__nv_bfloat16*>(&tri_bits);
+                    float tri_coeff = bf16_to_float(tri_bf16);
+                    float x_u = bf16_to_float(x[(u * n_heads + head) * head_dim + d]);
+                    unsigned long long tri_t0 = (subloop_timing != NULL) ? clock64() : 0ULL;
+                    local_hf_chunk_scan += tri_coeff * x_u;
+                    if (subloop_timing != NULL) {
+                        mamba2_ssd_timing_add(subloop_timing, 2, clock64() - tri_t0);
+                    }
+                }
+
+                unsigned long long d_t0 = (subloop_timing != NULL) ? clock64() : 0ULL;
+                float d_skip = D_val * x_val;
+                float y = d_skip + prior_chunk_state + local_hf_chunk_scan;
+                if (subloop_timing != NULL) {
+                    mamba2_ssd_timing_add(subloop_timing, 0, clock64() - d_t0);
+                }
+                unsigned long long cast_t0 = (subloop_timing != NULL) ? clock64() : 0ULL;
+                out[flat_idx] = float_to_bf16(y);
+                if (subloop_timing != NULL) {
+                    mamba2_ssd_timing_add(subloop_timing, 3, clock64() - cast_t0);
+                }
+                if (term_probe != NULL && t == probe_row && head == probe_head && d == probe_d) {
+                    term_probe[0] = entry_dot;
+                    term_probe[1] = __expf(dA_local_target);
+                    term_probe[2] = entry_dot * __expf(dA_local_target);
+                    term_probe[3] = prior_chunk_state;
+                    term_probe[4] = local_hf_chunk_scan;
+                    term_probe[5] = d_skip;
+                    term_probe[6] = y;
+                    term_probe[7] = 0.0f;
+                    term_probe[8] = (float)chunk_idx;
+                    term_probe[9] = (float)chunk_start;
+                    term_probe[10] = (float)t_pos;
+                    term_probe[11] = (float)group;
+                    term_probe[12] = dA_target;
+                    term_probe[13] = x_val;
+                    term_probe[14] = D_val;
+                    term_probe[15] = 1.0f;
+                    term_probe[16] = 0.0f;
+                    term_probe[17] = 0.0f;
+                    term_probe[18] = -1.0f;
+                    term_probe[19] = 0.0f;
+                    term_probe[20] = 0.0f;
+                    term_probe[21] = 0.0f;
+                    term_probe[22] = 0.0f;
+                    term_probe[23] = 0.0f;
+                    term_probe[24] = (float)(t_pos + 1);
+                    term_probe[25] = 2.0f;
+                }
+            }
+        }
+        dA_chunk_base += dA_cumsum[chunk_base + chunk_len - 1];
+        (void)max_pair_count;
+        __syncthreads();
+    }
+    if (subloop_timing != NULL) {
+        mamba2_ssd_timing_add(subloop_timing, 4, clock64() - thread_total_t0);
+    }
+}
+
+extern "C" __global__ void mamba2_ssd_parallel_chunk_scan_output_by_chunk_kernel(
+    __nv_bfloat16* __restrict__ out,        /* [L, n_heads, head_dim] */
+    const __nv_bfloat16* __restrict__ x,    /* [L, n_heads, head_dim] */
+    const __nv_bfloat16* __restrict__ B_mat,/* [L, n_groups, state_size] */
+    const __nv_bfloat16* __restrict__ C_mat,/* [L, n_groups, state_size] */
+    const float* __restrict__ D_vec,        /* [n_heads] or NULL */
+    const float* __restrict__ A_log,        /* [n_heads] */
+    const float* __restrict__ dt_out,       /* [n_chunks, n_heads, chunk_size] */
+    const float* __restrict__ dA_cumsum,    /* [n_chunks, n_heads, chunk_size] */
+    const float* __restrict__ entry_state,  /* [n_chunks, n_heads, head_dim, state_size] */
+    const float* __restrict__ c_state_total_exact,/* [L, n_heads, head_dim] */
+    float* __restrict__ term_probe,         /* optional [32], NULL when disabled */
+    unsigned long long* __restrict__ subloop_timing,/* optional [10], NULL when disabled */
+    int probe_row,
+    int probe_head,
+    int probe_d,
+    int L,
+    int n_heads,
+    int head_dim,
+    int state_size,
+    int n_groups,
+    int chunk_size)
+{
+    int head = blockIdx.x;
+    int d = blockIdx.y * blockDim.x + threadIdx.x;
+    int chunk_idx = blockIdx.z;
+    bool valid_d = d < head_dim;
+    if (head >= n_heads || chunk_size <= 0) return;
+
+    int chunk_start = chunk_idx * chunk_size;
+    if (chunk_start >= L) return;
+    int chunk_len = min(chunk_size, L - chunk_start);
+    if (chunk_len <= 0) return;
+
+    int group = head / (n_heads / n_groups);
+    float D_val = (D_vec != NULL) ? D_vec[head] : 0.0f;
+    (void)A_log;
+    (void)c_state_total_exact;
+    int max_pair_count = (chunk_size * (chunk_size + 1)) / 2;
+    extern __shared__ unsigned char parallel_chunk_scan_smem[];
+    unsigned short* tri_coeff_bits = reinterpret_cast<unsigned short*>(parallel_chunk_scan_smem);
+    __shared__ float dA_chunk_base_shared;
+    unsigned long long thread_total_t0 = (subloop_timing != NULL) ? clock64() : 0ULL;
+
+    if (threadIdx.x == 0) {
+        float dA_chunk_base = 0.0f;
+        for (int prev_chunk = 0; prev_chunk < chunk_idx; prev_chunk++) {
+            int prev_start = prev_chunk * chunk_size;
+            int prev_len = min(chunk_size, L - prev_start);
+            if (prev_len > 0) {
+                int64_t prev_base = ((int64_t)prev_chunk * n_heads + head) * chunk_size;
+                dA_chunk_base += dA_cumsum[prev_base + prev_len - 1];
+            }
+        }
+        dA_chunk_base_shared = dA_chunk_base;
+    }
+    __syncthreads();
+    float dA_chunk_base = dA_chunk_base_shared;
+    int64_t chunk_base = ((int64_t)chunk_idx * n_heads + head) * chunk_size;
+
+    unsigned long long coeff_t0 = (subloop_timing != NULL) ? clock64() : 0ULL;
+    for (int t_pos = 0; t_pos < chunk_len; t_pos++) {
+        float dA_local_target = dA_cumsum[chunk_base + t_pos];
+        float dA_target = dA_chunk_base + dA_local_target;
+        int t_abs = chunk_start + t_pos;
+        int c_row_base_idx = (t_abs * n_groups + group) * state_size;
+        for (int u_pos = threadIdx.x; u_pos <= t_pos; u_pos += blockDim.x) {
+            int u_abs = chunk_start + u_pos;
+            int pair_idx = mamba2_ssd_lower_tri_pair_index(t_pos, u_pos);
+            float dA_running = dA_chunk_base + dA_cumsum[chunk_base + u_pos];
+            float dt_u = dt_out[chunk_base + u_pos];
+            float decay = (u_pos == t_pos) ? 1.0f : __expf(fminf(dA_target - dA_running, 0.0f));
+            int b_row_base_idx = (u_abs * n_groups + group) * state_size;
+            float cb = mamba2_ssd_cb_dot_reverse(
+                C_mat, B_mat, c_row_base_idx, b_row_base_idx, state_size);
+            float scale = decay * dt_u;
+            __nv_bfloat16 tri_bf16 = float_to_bf16(cb * scale);
+            tri_coeff_bits[pair_idx] = *reinterpret_cast<unsigned short*>(&tri_bf16);
+        }
+    }
+    if (subloop_timing != NULL) {
+        mamba2_ssd_timing_add(subloop_timing, 7, clock64() - coeff_t0);
+        if (threadIdx.x == 0) {
+            atomicAdd(&subloop_timing[8], (unsigned long long)((chunk_len * (chunk_len + 1)) / 2));
+        }
+    }
+    __syncthreads();
+
+    for (int t_pos = 0; t_pos < chunk_len; t_pos++) {
+        int t = chunk_start + t_pos;
+        float x_val = valid_d ? bf16_to_float(x[(t * n_heads + head) * head_dim + d]) : 0.0f;
+        float dA_local_target = dA_cumsum[chunk_base + t_pos];
+        float dA_target = dA_chunk_base + dA_local_target;
+        float prior_chunk_state = 0.0f;
+        float local_hf_chunk_scan = 0.0f;
+        float entry_dot = 0.0f;
+
+        if (valid_d) {
+            int flat_idx = (t * n_heads + head) * head_dim + d;
+            unsigned long long prior_t0 = (subloop_timing != NULL) ? clock64() : 0ULL;
+            int c_row_base_idx = (t * n_groups + group) * state_size;
+            int64_t entry_base =
+                (((int64_t)chunk_idx * n_heads + head) * head_dim + d) * state_size;
+            if (chunk_start != 0) {
+                for (int s = 0; s < state_size; s++) {
+                    float C_val = bf16_to_float(C_mat[c_row_base_idx + s]);
+                    entry_dot += C_val * entry_state[entry_base + s];
+                }
+                prior_chunk_state = __expf(dA_local_target) * entry_dot;
+            }
+            if (subloop_timing != NULL) {
+                mamba2_ssd_timing_add(subloop_timing, 0, clock64() - prior_t0);
+                atomicAdd(&subloop_timing[5], 1ULL);
+                atomicAdd(&subloop_timing[6], (unsigned long long)(t_pos + 1));
+            }
+
+            for (int u_pos = 0; u_pos <= t_pos; u_pos++) {
+                int u = chunk_start + u_pos;
+                int pair_idx = mamba2_ssd_lower_tri_pair_index(t_pos, u_pos);
+                unsigned short tri_bits = tri_coeff_bits[pair_idx];
+                __nv_bfloat16 tri_bf16 = *reinterpret_cast<__nv_bfloat16*>(&tri_bits);
+                float tri_coeff = bf16_to_float(tri_bf16);
+                float x_u = bf16_to_float(x[(u * n_heads + head) * head_dim + d]);
+                unsigned long long tri_t0 = (subloop_timing != NULL) ? clock64() : 0ULL;
+                local_hf_chunk_scan += tri_coeff * x_u;
+                if (subloop_timing != NULL) {
+                    mamba2_ssd_timing_add(subloop_timing, 2, clock64() - tri_t0);
+                }
+            }
+
+            unsigned long long d_t0 = (subloop_timing != NULL) ? clock64() : 0ULL;
+            float d_skip = D_val * x_val;
+            float y = d_skip + prior_chunk_state + local_hf_chunk_scan;
+            if (subloop_timing != NULL) {
+                mamba2_ssd_timing_add(subloop_timing, 0, clock64() - d_t0);
+            }
+            unsigned long long cast_t0 = (subloop_timing != NULL) ? clock64() : 0ULL;
+            out[flat_idx] = float_to_bf16(y);
+            if (subloop_timing != NULL) {
+                mamba2_ssd_timing_add(subloop_timing, 3, clock64() - cast_t0);
+            }
+            if (term_probe != NULL && t == probe_row && head == probe_head && d == probe_d) {
+                term_probe[0] = entry_dot;
+                term_probe[1] = __expf(dA_local_target);
+                term_probe[2] = entry_dot * __expf(dA_local_target);
+                term_probe[3] = prior_chunk_state;
+                term_probe[4] = local_hf_chunk_scan;
+                term_probe[5] = d_skip;
+                term_probe[6] = y;
+                term_probe[7] = 0.0f;
+                term_probe[8] = (float)chunk_idx;
+                term_probe[9] = (float)chunk_start;
+                term_probe[10] = (float)t_pos;
+                term_probe[11] = (float)group;
+                term_probe[12] = dA_target;
+                term_probe[13] = x_val;
+                term_probe[14] = D_val;
+                term_probe[15] = 1.0f;
+                term_probe[16] = 0.0f;
+                term_probe[17] = 0.0f;
+                term_probe[18] = -1.0f;
+                term_probe[19] = 0.0f;
+                term_probe[20] = 0.0f;
+                term_probe[21] = 0.0f;
+                term_probe[22] = 0.0f;
+                term_probe[23] = 0.0f;
+                term_probe[24] = (float)(t_pos + 1);
+                term_probe[25] = 3.0f;
+            }
+        }
+    }
+    (void)max_pair_count;
+    if (subloop_timing != NULL) {
+        mamba2_ssd_timing_add(subloop_timing, 4, clock64() - thread_total_t0);
+    }
+}
+
+extern "C" __global__ void mamba2_ssd_parallel_precompute_cb_kernel(
+    const __nv_bfloat16* __restrict__ B_mat,/* [L, n_groups, state_size] */
+    const __nv_bfloat16* __restrict__ C_mat,/* [L, n_groups, state_size] */
+    float* __restrict__ cb_tile,            /* [n_chunks, n_groups, max_pair_count] */
+    int L,
+    int state_size,
+    int n_groups,
+    int chunk_size)
+{
+    int group = blockIdx.x;
+    int chunk_idx = blockIdx.y;
+    if (group >= n_groups || chunk_size <= 0) return;
+
+    int chunk_start = chunk_idx * chunk_size;
+    if (chunk_start >= L) return;
+    int chunk_len = min(chunk_size, L - chunk_start);
+    if (chunk_len <= 0) return;
+
+    int max_pair_count = (chunk_size * (chunk_size + 1)) / 2;
+    int64_t tile_base = ((int64_t)chunk_idx * n_groups + group) * max_pair_count;
+    for (int t_pos = 0; t_pos < chunk_len; t_pos++) {
+        int t_abs = chunk_start + t_pos;
+        int c_row_base_idx = (t_abs * n_groups + group) * state_size;
+        for (int u_pos = threadIdx.x; u_pos <= t_pos; u_pos += blockDim.x) {
+            int u_abs = chunk_start + u_pos;
+            int pair_idx = mamba2_ssd_lower_tri_pair_index(t_pos, u_pos);
+            int b_row_base_idx = (u_abs * n_groups + group) * state_size;
+            cb_tile[tile_base + pair_idx] = mamba2_ssd_cb_dot_reverse(
+                C_mat, B_mat, c_row_base_idx, b_row_base_idx, state_size);
+        }
+    }
+}
+
+extern "C" __global__ void mamba2_ssd_parallel_chunk_scan_output_precomputed_cb_kernel(
+    __nv_bfloat16* __restrict__ out,        /* [L, n_heads, head_dim] */
+    const __nv_bfloat16* __restrict__ x,    /* [L, n_heads, head_dim] */
+    const __nv_bfloat16* __restrict__ B_mat,/* [L, n_groups, state_size] */
+    const __nv_bfloat16* __restrict__ C_mat,/* [L, n_groups, state_size] */
+    const float* __restrict__ D_vec,        /* [n_heads] or NULL */
+    const float* __restrict__ A_log,        /* [n_heads] */
+    const float* __restrict__ dt_out,       /* [n_chunks, n_heads, chunk_size] */
+    const float* __restrict__ dA_cumsum,    /* [n_chunks, n_heads, chunk_size] */
+    const float* __restrict__ entry_state,  /* [n_chunks, n_heads, head_dim, state_size] */
+    const float* __restrict__ c_state_total_exact,/* [L, n_heads, head_dim] */
+    const float* __restrict__ cb_tile,      /* [n_chunks, n_groups, max_pair_count] */
+    float* __restrict__ term_probe,         /* optional [32], NULL when disabled */
+    unsigned long long* __restrict__ subloop_timing,/* optional [10], NULL when disabled */
+    int probe_row,
+    int probe_head,
+    int probe_d,
+    int L,
+    int n_heads,
+    int head_dim,
+    int state_size,
+    int n_groups,
+    int chunk_size)
+{
+    int head = blockIdx.x;
+    int d = blockIdx.y * blockDim.x + threadIdx.x;
+    int chunk_idx = blockIdx.z;
+    bool valid_d = d < head_dim;
+    if (head >= n_heads || chunk_size <= 0) return;
+
+    int chunk_start = chunk_idx * chunk_size;
+    if (chunk_start >= L) return;
+    int chunk_len = min(chunk_size, L - chunk_start);
+    if (chunk_len <= 0) return;
+
+    int group = head / (n_heads / n_groups);
+    float D_val = (D_vec != NULL) ? D_vec[head] : 0.0f;
+    (void)A_log;
+    (void)B_mat;
+    (void)C_mat;
+    (void)c_state_total_exact;
+    int max_pair_count = (chunk_size * (chunk_size + 1)) / 2;
+    extern __shared__ unsigned char parallel_chunk_scan_smem[];
+    unsigned short* tri_coeff_bits = reinterpret_cast<unsigned short*>(parallel_chunk_scan_smem);
+    __shared__ float dA_chunk_base_shared;
+    unsigned long long thread_total_t0 = (subloop_timing != NULL) ? clock64() : 0ULL;
+
+    if (threadIdx.x == 0) {
+        float dA_chunk_base = 0.0f;
+        for (int prev_chunk = 0; prev_chunk < chunk_idx; prev_chunk++) {
+            int prev_start = prev_chunk * chunk_size;
+            int prev_len = min(chunk_size, L - prev_start);
+            if (prev_len > 0) {
+                int64_t prev_base = ((int64_t)prev_chunk * n_heads + head) * chunk_size;
+                dA_chunk_base += dA_cumsum[prev_base + prev_len - 1];
+            }
+        }
+        dA_chunk_base_shared = dA_chunk_base;
+    }
+    __syncthreads();
+    float dA_chunk_base = dA_chunk_base_shared;
+    int64_t chunk_base = ((int64_t)chunk_idx * n_heads + head) * chunk_size;
+    int64_t cb_tile_base = ((int64_t)chunk_idx * n_groups + group) * max_pair_count;
+
+    unsigned long long coeff_t0 = (subloop_timing != NULL) ? clock64() : 0ULL;
+    for (int t_pos = 0; t_pos < chunk_len; t_pos++) {
+        float dA_local_target = dA_cumsum[chunk_base + t_pos];
+        float dA_target = dA_chunk_base + dA_local_target;
+        for (int u_pos = threadIdx.x; u_pos <= t_pos; u_pos += blockDim.x) {
+            int pair_idx = mamba2_ssd_lower_tri_pair_index(t_pos, u_pos);
+            float dA_running = dA_chunk_base + dA_cumsum[chunk_base + u_pos];
+            float dt_u = dt_out[chunk_base + u_pos];
+            float decay = (u_pos == t_pos) ? 1.0f : __expf(fminf(dA_target - dA_running, 0.0f));
+            float scale = decay * dt_u;
+            __nv_bfloat16 tri_bf16 = float_to_bf16(cb_tile[cb_tile_base + pair_idx] * scale);
+            tri_coeff_bits[pair_idx] = *reinterpret_cast<unsigned short*>(&tri_bf16);
+        }
+    }
+    if (subloop_timing != NULL) {
+        mamba2_ssd_timing_add(subloop_timing, 7, clock64() - coeff_t0);
+        if (threadIdx.x == 0) {
+            atomicAdd(&subloop_timing[8], (unsigned long long)((chunk_len * (chunk_len + 1)) / 2));
+        }
+    }
+    __syncthreads();
+
+    for (int t_pos = 0; t_pos < chunk_len; t_pos++) {
+        int t = chunk_start + t_pos;
+        float x_val = valid_d ? bf16_to_float(x[(t * n_heads + head) * head_dim + d]) : 0.0f;
+        float dA_local_target = dA_cumsum[chunk_base + t_pos];
+        float dA_target = dA_chunk_base + dA_local_target;
+        float prior_chunk_state = 0.0f;
+        float local_hf_chunk_scan = 0.0f;
+        float entry_dot = 0.0f;
+
+        if (valid_d) {
+            int flat_idx = (t * n_heads + head) * head_dim + d;
+            unsigned long long prior_t0 = (subloop_timing != NULL) ? clock64() : 0ULL;
+            int c_row_base_idx = (t * n_groups + group) * state_size;
+            int64_t entry_base =
+                (((int64_t)chunk_idx * n_heads + head) * head_dim + d) * state_size;
+            if (chunk_start != 0) {
+                int s = 0;
+                for (; s + 3 < state_size; s += 4) {
+                    float C_val0 = bf16_to_float(C_mat[c_row_base_idx + s]);
+                    entry_dot += C_val0 * entry_state[entry_base + s];
+                    float C_val1 = bf16_to_float(C_mat[c_row_base_idx + s + 1]);
+                    entry_dot += C_val1 * entry_state[entry_base + s + 1];
+                    float C_val2 = bf16_to_float(C_mat[c_row_base_idx + s + 2]);
+                    entry_dot += C_val2 * entry_state[entry_base + s + 2];
+                    float C_val3 = bf16_to_float(C_mat[c_row_base_idx + s + 3]);
+                    entry_dot += C_val3 * entry_state[entry_base + s + 3];
+                }
+                for (; s < state_size; s++) {
+                    float C_val = bf16_to_float(C_mat[c_row_base_idx + s]);
+                    entry_dot += C_val * entry_state[entry_base + s];
+                }
+                prior_chunk_state = __expf(dA_local_target) * entry_dot;
+            }
+            if (subloop_timing != NULL) {
+                mamba2_ssd_timing_add(subloop_timing, 0, clock64() - prior_t0);
+                atomicAdd(&subloop_timing[5], 1ULL);
+                atomicAdd(&subloop_timing[6], (unsigned long long)(t_pos + 1));
+            }
+
+            int u_pos = 0;
+            for (; u_pos + 3 <= t_pos; u_pos += 4) {
+                int u0 = chunk_start + u_pos;
+                int pair_idx0 = mamba2_ssd_lower_tri_pair_index(t_pos, u_pos);
+                unsigned short tri_bits0 = tri_coeff_bits[pair_idx0];
+                __nv_bfloat16 tri_bf160 = *reinterpret_cast<__nv_bfloat16*>(&tri_bits0);
+                float tri_coeff0 = bf16_to_float(tri_bf160);
+                float x_u0 = bf16_to_float(x[(u0 * n_heads + head) * head_dim + d]);
+                unsigned long long tri_t0 = (subloop_timing != NULL) ? clock64() : 0ULL;
+                local_hf_chunk_scan += tri_coeff0 * x_u0;
+                if (subloop_timing != NULL) {
+                    mamba2_ssd_timing_add(subloop_timing, 2, clock64() - tri_t0);
+                }
+
+                int u1 = chunk_start + u_pos + 1;
+                int pair_idx1 = mamba2_ssd_lower_tri_pair_index(t_pos, u_pos + 1);
+                unsigned short tri_bits1 = tri_coeff_bits[pair_idx1];
+                __nv_bfloat16 tri_bf161 = *reinterpret_cast<__nv_bfloat16*>(&tri_bits1);
+                float tri_coeff1 = bf16_to_float(tri_bf161);
+                float x_u1 = bf16_to_float(x[(u1 * n_heads + head) * head_dim + d]);
+                unsigned long long tri_t1 = (subloop_timing != NULL) ? clock64() : 0ULL;
+                local_hf_chunk_scan += tri_coeff1 * x_u1;
+                if (subloop_timing != NULL) {
+                    mamba2_ssd_timing_add(subloop_timing, 2, clock64() - tri_t1);
+                }
+
+                int u2 = chunk_start + u_pos + 2;
+                int pair_idx2 = mamba2_ssd_lower_tri_pair_index(t_pos, u_pos + 2);
+                unsigned short tri_bits2 = tri_coeff_bits[pair_idx2];
+                __nv_bfloat16 tri_bf162 = *reinterpret_cast<__nv_bfloat16*>(&tri_bits2);
+                float tri_coeff2 = bf16_to_float(tri_bf162);
+                float x_u2 = bf16_to_float(x[(u2 * n_heads + head) * head_dim + d]);
+                unsigned long long tri_t2 = (subloop_timing != NULL) ? clock64() : 0ULL;
+                local_hf_chunk_scan += tri_coeff2 * x_u2;
+                if (subloop_timing != NULL) {
+                    mamba2_ssd_timing_add(subloop_timing, 2, clock64() - tri_t2);
+                }
+
+                int u3 = chunk_start + u_pos + 3;
+                int pair_idx3 = mamba2_ssd_lower_tri_pair_index(t_pos, u_pos + 3);
+                unsigned short tri_bits3 = tri_coeff_bits[pair_idx3];
+                __nv_bfloat16 tri_bf163 = *reinterpret_cast<__nv_bfloat16*>(&tri_bits3);
+                float tri_coeff3 = bf16_to_float(tri_bf163);
+                float x_u3 = bf16_to_float(x[(u3 * n_heads + head) * head_dim + d]);
+                unsigned long long tri_t3 = (subloop_timing != NULL) ? clock64() : 0ULL;
+                local_hf_chunk_scan += tri_coeff3 * x_u3;
+                if (subloop_timing != NULL) {
+                    mamba2_ssd_timing_add(subloop_timing, 2, clock64() - tri_t3);
+                }
+            }
+            for (; u_pos <= t_pos; u_pos++) {
+                int u = chunk_start + u_pos;
+                int pair_idx = mamba2_ssd_lower_tri_pair_index(t_pos, u_pos);
+                unsigned short tri_bits = tri_coeff_bits[pair_idx];
+                __nv_bfloat16 tri_bf16 = *reinterpret_cast<__nv_bfloat16*>(&tri_bits);
+                float tri_coeff = bf16_to_float(tri_bf16);
+                float x_u = bf16_to_float(x[(u * n_heads + head) * head_dim + d]);
+                unsigned long long tri_t0 = (subloop_timing != NULL) ? clock64() : 0ULL;
+                local_hf_chunk_scan += tri_coeff * x_u;
+                if (subloop_timing != NULL) {
+                    mamba2_ssd_timing_add(subloop_timing, 2, clock64() - tri_t0);
+                }
+            }
+
+            unsigned long long d_t0 = (subloop_timing != NULL) ? clock64() : 0ULL;
+            float d_skip = D_val * x_val;
+            float y = d_skip + prior_chunk_state + local_hf_chunk_scan;
+            if (subloop_timing != NULL) {
+                mamba2_ssd_timing_add(subloop_timing, 0, clock64() - d_t0);
+            }
+            unsigned long long cast_t0 = (subloop_timing != NULL) ? clock64() : 0ULL;
+            out[flat_idx] = float_to_bf16(y);
+            if (subloop_timing != NULL) {
+                mamba2_ssd_timing_add(subloop_timing, 3, clock64() - cast_t0);
+            }
+            if (term_probe != NULL && t == probe_row && head == probe_head && d == probe_d) {
+                term_probe[0] = entry_dot;
+                term_probe[1] = __expf(dA_local_target);
+                term_probe[2] = entry_dot * __expf(dA_local_target);
+                term_probe[3] = prior_chunk_state;
+                term_probe[4] = local_hf_chunk_scan;
+                term_probe[5] = d_skip;
+                term_probe[6] = y;
+                term_probe[7] = 0.0f;
+                term_probe[8] = (float)chunk_idx;
+                term_probe[9] = (float)chunk_start;
+                term_probe[10] = (float)t_pos;
+                term_probe[11] = (float)group;
+                term_probe[12] = dA_target;
+                term_probe[13] = x_val;
+                term_probe[14] = D_val;
+                term_probe[15] = 1.0f;
+                term_probe[16] = 0.0f;
+                term_probe[17] = 0.0f;
+                term_probe[18] = -1.0f;
+                term_probe[19] = 0.0f;
+                term_probe[20] = 0.0f;
+                term_probe[21] = 0.0f;
+                term_probe[22] = 0.0f;
+                term_probe[23] = 0.0f;
+                term_probe[24] = (float)(t_pos + 1);
+                term_probe[25] = 5.0f;
+            }
+        }
+    }
+    if (subloop_timing != NULL) {
+        mamba2_ssd_timing_add(subloop_timing, 4, clock64() - thread_total_t0);
+    }
+}
+
+extern "C" __global__ void mamba2_ssd_parallel_chunk_scan_output_state_split_kernel(
+    __nv_bfloat16* __restrict__ out,        /* [L, n_heads, head_dim] */
+    const __nv_bfloat16* __restrict__ x,    /* [L, n_heads, head_dim] */
+    const __nv_bfloat16* __restrict__ B_mat,/* [L, n_groups, state_size] */
+    const __nv_bfloat16* __restrict__ C_mat,/* [L, n_groups, state_size] */
+    const float* __restrict__ D_vec,        /* [n_heads] or NULL */
+    const float* __restrict__ A_log,        /* [n_heads] */
+    const float* __restrict__ dt_out,       /* [n_chunks, n_heads, chunk_size] */
+    const float* __restrict__ dA_cumsum,    /* [n_chunks, n_heads, chunk_size] */
+    const float* __restrict__ entry_state,  /* [n_chunks, n_heads, head_dim, state_size] */
+    const float* __restrict__ c_state_total_exact,/* [L, n_heads, head_dim] */
+    float* __restrict__ term_probe,         /* optional [32], NULL when disabled */
+    unsigned long long* __restrict__ subloop_timing,/* optional [10], NULL when disabled */
+    int probe_row,
+    int probe_head,
+    int probe_d,
+    int L,
+    int n_heads,
+    int head_dim,
+    int state_size,
+    int n_groups,
+    int chunk_size,
+    int d_tile,
+    int state_lanes)
+{
+    int head = blockIdx.x;
+    int chunk_idx = blockIdx.z;
+    if (head >= n_heads || chunk_size <= 0 || d_tile <= 0 || state_lanes <= 0) return;
+
+    int chunk_start = chunk_idx * chunk_size;
+    if (chunk_start >= L) return;
+    int chunk_len = min(chunk_size, L - chunk_start);
+    if (chunk_len <= 0) return;
+
+    int lane = threadIdx.x;
+    int d_in_tile = lane / state_lanes;
+    int state_lane = lane - d_in_tile * state_lanes;
+    int d = blockIdx.y * d_tile + d_in_tile;
+    bool valid_d = d_in_tile < d_tile && d < head_dim;
+
+    int group = head / (n_heads / n_groups);
+    float D_val = (D_vec != NULL) ? D_vec[head] : 0.0f;
+    (void)A_log;
+    (void)c_state_total_exact;
+    int pair_count = (chunk_len * (chunk_len + 1)) / 2;
+    int max_pair_count = (chunk_size * (chunk_size + 1)) / 2;
+    extern __shared__ unsigned char parallel_chunk_scan_smem[];
+    unsigned short* tri_coeff_bits = reinterpret_cast<unsigned short*>(parallel_chunk_scan_smem);
+    int tri_bytes = max_pair_count * (int)sizeof(unsigned short);
+    __shared__ float dA_chunk_base_shared;
+    unsigned long long thread_total_t0 = (subloop_timing != NULL) ? clock64() : 0ULL;
+
+    if (threadIdx.x == 0) {
+        float dA_chunk_base = 0.0f;
+        for (int prev_chunk = 0; prev_chunk < chunk_idx; prev_chunk++) {
+            int prev_start = prev_chunk * chunk_size;
+            int prev_len = min(chunk_size, L - prev_start);
+            if (prev_len > 0) {
+                int64_t prev_base = ((int64_t)prev_chunk * n_heads + head) * chunk_size;
+                dA_chunk_base += dA_cumsum[prev_base + prev_len - 1];
+            }
+        }
+        dA_chunk_base_shared = dA_chunk_base;
+    }
+    __syncthreads();
+    float dA_chunk_base = dA_chunk_base_shared;
+    int64_t chunk_base = ((int64_t)chunk_idx * n_heads + head) * chunk_size;
+
+    unsigned long long coeff_t0 = (subloop_timing != NULL) ? clock64() : 0ULL;
+    for (int t_pos = 0; t_pos < chunk_len; t_pos++) {
+        float dA_local_target = dA_cumsum[chunk_base + t_pos];
+        float dA_target = dA_chunk_base + dA_local_target;
+        int t_abs = chunk_start + t_pos;
+        int c_row_base_idx = (t_abs * n_groups + group) * state_size;
+        for (int u_pos = threadIdx.x; u_pos <= t_pos; u_pos += blockDim.x) {
+            int u_abs = chunk_start + u_pos;
+            int pair_idx = mamba2_ssd_lower_tri_pair_index(t_pos, u_pos);
+            float dA_running = dA_chunk_base + dA_cumsum[chunk_base + u_pos];
+            float dt_u = dt_out[chunk_base + u_pos];
+            float decay = (u_pos == t_pos) ? 1.0f : __expf(fminf(dA_target - dA_running, 0.0f));
+            int b_row_base_idx = (u_abs * n_groups + group) * state_size;
+            float cb = mamba2_ssd_cb_dot_reverse(
+                C_mat, B_mat, c_row_base_idx, b_row_base_idx, state_size);
+            float scale = decay * dt_u;
+            __nv_bfloat16 tri_bf16 = float_to_bf16(cb * scale);
+            tri_coeff_bits[pair_idx] = *reinterpret_cast<unsigned short*>(&tri_bf16);
+        }
+    }
+    if (subloop_timing != NULL) {
+        mamba2_ssd_timing_add(subloop_timing, 7, clock64() - coeff_t0);
+        if (threadIdx.x == 0) {
+            atomicAdd(&subloop_timing[8], (unsigned long long)pair_count);
+        }
+    }
+    __syncthreads();
+
+    for (int t_pos = 0; t_pos < chunk_len; t_pos++) {
+        int t = chunk_start + t_pos;
+        float dA_local_target = dA_cumsum[chunk_base + t_pos];
+        float dA_target = dA_chunk_base + dA_local_target;
+        float x_val = valid_d ? bf16_to_float(x[(t * n_heads + head) * head_dim + d]) : 0.0f;
+        unsigned long long prior_t0 = (subloop_timing != NULL) ? clock64() : 0ULL;
+        int c_row_base_idx = (t * n_groups + group) * state_size;
+        int64_t entry_base =
+            (((int64_t)chunk_idx * n_heads + head) * head_dim + d) * state_size;
+
+        if (valid_d && state_lane == 0) {
+            int flat_idx = (t * n_heads + head) * head_dim + d;
+            float entry_dot = 0.0f;
+            if (chunk_start != 0) {
+                for (int s = 0; s < state_size; s++) {
+                    float C_val = bf16_to_float(C_mat[c_row_base_idx + s]);
+                    entry_dot += C_val * entry_state[entry_base + s];
+                }
+            }
+            float prior_chunk_state = (chunk_start == 0) ? 0.0f : __expf(dA_local_target) * entry_dot;
+            if (subloop_timing != NULL) {
+                mamba2_ssd_timing_add(subloop_timing, 0, clock64() - prior_t0);
+                atomicAdd(&subloop_timing[5], 1ULL);
+                atomicAdd(&subloop_timing[6], (unsigned long long)(t_pos + 1));
+            }
+
+            float local_hf_chunk_scan = 0.0f;
+            for (int u_pos = 0; u_pos <= t_pos; u_pos++) {
+                int u = chunk_start + u_pos;
+                int pair_idx = mamba2_ssd_lower_tri_pair_index(t_pos, u_pos);
+                unsigned short tri_bits = tri_coeff_bits[pair_idx];
+                __nv_bfloat16 tri_bf16 = *reinterpret_cast<__nv_bfloat16*>(&tri_bits);
+                float tri_coeff = bf16_to_float(tri_bf16);
+                float x_u = bf16_to_float(x[(u * n_heads + head) * head_dim + d]);
+                unsigned long long tri_t0 = (subloop_timing != NULL) ? clock64() : 0ULL;
+                local_hf_chunk_scan += tri_coeff * x_u;
+                if (subloop_timing != NULL) {
+                    mamba2_ssd_timing_add(subloop_timing, 2, clock64() - tri_t0);
+                }
+            }
+
+            unsigned long long d_t0 = (subloop_timing != NULL) ? clock64() : 0ULL;
+            float d_skip = D_val * x_val;
+            float y = d_skip + prior_chunk_state + local_hf_chunk_scan;
+            if (subloop_timing != NULL) {
+                mamba2_ssd_timing_add(subloop_timing, 0, clock64() - d_t0);
+            }
+            unsigned long long cast_t0 = (subloop_timing != NULL) ? clock64() : 0ULL;
+            out[flat_idx] = float_to_bf16(y);
+            if (subloop_timing != NULL) {
+                mamba2_ssd_timing_add(subloop_timing, 3, clock64() - cast_t0);
+            }
+            if (term_probe != NULL && t == probe_row && head == probe_head && d == probe_d) {
+                term_probe[0] = entry_dot;
+                term_probe[1] = __expf(dA_local_target);
+                term_probe[2] = entry_dot * __expf(dA_local_target);
+                term_probe[3] = prior_chunk_state;
+                term_probe[4] = local_hf_chunk_scan;
+                term_probe[5] = d_skip;
+                term_probe[6] = y;
+                term_probe[7] = 0.0f;
+                term_probe[8] = (float)chunk_idx;
+                term_probe[9] = (float)chunk_start;
+                term_probe[10] = (float)t_pos;
+                term_probe[11] = (float)group;
+                term_probe[12] = dA_target;
+                term_probe[13] = x_val;
+                term_probe[14] = D_val;
+                term_probe[15] = 1.0f;
+                term_probe[16] = 0.0f;
+                term_probe[17] = 0.0f;
+                term_probe[18] = -1.0f;
+                term_probe[19] = 0.0f;
+                term_probe[20] = 0.0f;
+                term_probe[21] = 0.0f;
+                term_probe[22] = 0.0f;
+                term_probe[23] = 0.0f;
+                term_probe[24] = (float)(t_pos + 1);
+                term_probe[25] = 4.0f;
+            }
+        }
+        __syncthreads();
+    }
+    if (subloop_timing != NULL) {
+        mamba2_ssd_timing_add(subloop_timing, 4, clock64() - thread_total_t0);
     }
 }
 
 extern "C" void krasis_mamba2_ssd_fwd(
     void* out, const void* x, const void* dt,
-    const void* A, const void* B_mat, const void* C_mat,
+    const void* A_log, const void* B_mat, const void* C_mat,
     const void* D_vec, void* ssm_state,
     int B_batch, int L, int n_heads, int head_dim, int state_size,
     int n_groups, int chunk_size,
-    const void* dt_bias, float dt_softplus,
+    const void* dt_bias, float dt_softplus_flag,
     void* stream)
 {
     if (L == 0) return;
     (void)B_batch;  /* always 1 for inference */
-    (void)chunk_size;  /* TODO: use chunked algorithm */
-
     /* SSM state must be in float32 for numerical stability */
     /* Caller provides float32 ssm_state: [n_heads, head_dim, state_size] */
 
@@ -2172,15 +7389,18 @@ extern "C" void krasis_mamba2_ssd_fwd(
     if (threads == 0) threads = 32;
     int blocks_d = (head_dim + threads - 1) / threads;
     dim3 grid(n_heads, blocks_d);
+    int effective_chunk_size = (chunk_size > 0) ? chunk_size : L;
+    size_t shared_mem_bytes = (size_t)effective_chunk_size * 2 * sizeof(float);
 
-    mamba2_ssd_sequential_kernel<<<grid, threads, 0, (cudaStream_t)stream>>>(
+    mamba2_ssd_sequential_kernel<<<grid, threads, shared_mem_bytes, (cudaStream_t)stream>>>(
         (__nv_bfloat16*)out, (const __nv_bfloat16*)x,
-        (const __nv_bfloat16*)dt, (const float*)A,
+        (const __nv_bfloat16*)dt, (const float*)A_log,
         (const __nv_bfloat16*)B_mat, (const __nv_bfloat16*)C_mat,
         (const float*)D_vec, (float*)ssm_state,
         (const float*)dt_bias,
         L, n_heads, head_dim, state_size, n_groups,
-        dt_softplus > 0.5f ? 1 : 0);
+        chunk_size,
+        dt_softplus_flag > 0.5f ? 1 : 0);
 }
 
 /* ── MoE Gather: collect tokens by expert ID ─────────────────────────── */
@@ -2223,12 +7443,13 @@ extern "C" __global__ void moe_gather_kernel(
  *
  * expert_out [total_active, D] (bf16): expert GEMM outputs.
  * accum [M, D] (fp32): accumulator (zero-initialized before MoE).
- *   NOTE: accum is FP32 to allow safe atomicAdd when multiple experts
- *   map to the same token. Caller converts to BF16 after scatter completes.
+ *   Deterministic: each block owns one destination token and column tile, scans
+ *   total_active rows in row order, and writes the sum once. Caller converts to
+ *   BF16 after scatter completes.
  * gather_src_map [total_active]: source token index for each gathered row.
  * gather_weight_map [total_active]: routing weight (fp32) for each gathered row.
  *
- * Grid: (total_active, 1, 1), Block: (min(1024, D_padded32), 1, 1)
+ * Grid: (M, ceil(D / blockDim.x), 1), Block: (columns, 1, 1)
  */
 extern "C" __global__ void moe_scatter_add_kernel(
     float* __restrict__ accum,
@@ -2238,16 +7459,19 @@ extern "C" __global__ void moe_scatter_add_kernel(
     int total_active,
     int D)
 {
-    int row = blockIdx.x;
-    if (row >= total_active) return;
-    int dst_token = gather_src_map[row];
-    float w = gather_weight_map[row];
-    const __nv_bfloat16* src = expert_out + (int64_t)row * D;
-    float* dst = accum + (int64_t)dst_token * D;
-    for (int i = threadIdx.x; i < D; i += blockDim.x) {
-        float val = bf16_to_float(src[i]) * w;
-        atomicAdd(&dst[i], val);
+    int dst_token = blockIdx.x;
+    int col = blockIdx.y * blockDim.x + threadIdx.x;
+    if (col >= D) return;
+
+    float sum = 0.0f;
+    for (int row = 0; row < total_active; row++) {
+        if (gather_src_map[row] == dst_token) {
+            float w = gather_weight_map[row];
+            float val = bf16_to_float(expert_out[(int64_t)row * D + col]);
+            sum += val * w;
+        }
     }
+    accum[(int64_t)dst_token * D + col] = sum;
 }
 
 /* ── MoE Zero Accumulator ────────────────────────────────────────────── */
@@ -2318,6 +7542,23 @@ extern "C" __global__ void moe_accum_to_bf16_kernel(
     const float* a = accum + (int64_t)row * D;
     for (int i = threadIdx.x; i < D; i += blockDim.x) {
         o[i] = float_to_bf16(a[i]);
+    }
+}
+
+/* ── MoE FP32 Accum -> BF16-rounded FP32 in-place ──────────────────────── */
+
+/* Match BF16 module-boundary semantics while preserving the FP32 accumulator
+ * storage used by the shared-expert add kernel.
+ * Grid: (M, 1, 1), Block: (min(1024, D_padded32), 1, 1) */
+extern "C" __global__ void moe_round_accum_bf16_inplace_kernel(
+    float* __restrict__ accum,
+    int M, int D)
+{
+    int row = blockIdx.x;
+    if (row >= M) return;
+    float* a = accum + (int64_t)row * D;
+    for (int i = threadIdx.x; i < D; i += blockDim.x) {
+        a[i] = bf16_to_float(float_to_bf16(a[i]));
     }
 }
 
@@ -4857,6 +10098,69 @@ extern "C" __global__ void moe_build_maps_kernel(
     }
 }
 
+/* Stable map builder for validation paths that must be repeatable.
+ * Rows are ordered by expert, then token position, then top-k slot. */
+extern "C" __global__ void moe_build_maps_stable_kernel(
+    int* __restrict__ gather_src_map,      /* [total_active] output */
+    float* __restrict__ gather_weight_map, /* [total_active] output */
+    int* __restrict__ write_offsets,       /* [E] output: count written per expert */
+    const int* __restrict__ topk_ids,      /* [M, topk] */
+    const float* __restrict__ topk_weights,/* [M, topk] */
+    const int* __restrict__ expert_offsets,/* [E+1] base offsets */
+    int M, int topk, int E,
+    float scale_factor
+) {
+    int eid = blockIdx.x;
+    if (eid >= E) return;
+
+    extern __shared__ int stable_counts[];
+    int tid = threadIdx.x;
+    int start_t = ((long long)M * tid) / blockDim.x;
+    int end_t = ((long long)M * (tid + 1)) / blockDim.x;
+
+    int local_count = 0;
+    for (int t = start_t; t < end_t; t++) {
+        for (int k = 0; k < topk; k++) {
+            int routed_eid = topk_ids[t * topk + k];
+            if (routed_eid == eid) {
+                local_count++;
+            }
+        }
+    }
+
+    stable_counts[tid] = local_count;
+    __syncthreads();
+
+    for (int offset = 1; offset < blockDim.x; offset <<= 1) {
+        int add = 0;
+        if (tid >= offset) {
+            add = stable_counts[tid - offset];
+        }
+        __syncthreads();
+        stable_counts[tid] += add;
+        __syncthreads();
+    }
+
+    int pos = expert_offsets[eid] + stable_counts[tid] - local_count;
+    const int expert_end = expert_offsets[eid + 1];
+    for (int t = start_t; t < end_t; t++) {
+        for (int k = 0; k < topk; k++) {
+            int routed_eid = topk_ids[t * topk + k];
+            if (routed_eid == eid) {
+                if (pos < expert_end) {
+                    gather_src_map[pos] = t;
+                    gather_weight_map[pos] = topk_weights[t * topk + k] * scale_factor;
+                    pos++;
+                }
+            }
+        }
+    }
+
+    if (tid == blockDim.x - 1) {
+        write_offsets[eid] = stable_counts[tid];
+    }
+}
+
 
 /* ══════════════════════════════════════════════════════════════════════════
  *  Fused MoE support kernels — moe_align_block_size and gather/scatter
@@ -5005,35 +10309,45 @@ extern "C" __global__ void moe_gather_sorted_kernel(
  * The fused kernel outputs [total_sorted, hidden] with topk_weights already applied
  * (mul_topk_weights=True). sorted_token_ids[pos] gives the original token index.
  * Multiple sorted positions map to the same token (one per topk expert).
- * We scatter-add using atomicAdd on FP32.
  *
- * Grid: (total_sorted, 1, 1), Block: (threads, 1, 1)
+ * Accumulate in sorted-position order for each destination token/column. This
+ * avoids FP32 atomicAdd reduction-order nondeterminism.
+ *
+ * Grid: (M, ceil(hidden / blockDim.x), 1), Block: (columns, 1, 1)
  */
 extern "C" __global__ void moe_scatter_fused_kernel(
     float* __restrict__ accum,              // [M, hidden] FP32 accumulator (pre-zeroed)
     const __nv_bfloat16* __restrict__ src,  // [total_sorted, hidden] fused output
     const int* __restrict__ sorted_ids,     // [total_sorted] maps sorted pos -> token*topk+slot
     int hidden, int M, float scale_factor,
-    int topk                                // topk for vLLM-format sorted_ids (divide to get token)
+    int topk,                               // topk for vLLM-format sorted_ids (divide to get token)
+    int total_sorted
 ) {
-    int pos = blockIdx.x;
-    int sid = sorted_ids[pos];
-    int tid = topk > 1 ? sid / topk : sid;
-    if (tid >= M) return; // padding slot
-    for (int i = threadIdx.x; i < hidden; i += blockDim.x) {
-        float val = bf16_to_float(src[pos * hidden + i]) * scale_factor;
-        atomicAdd(&accum[tid * hidden + i], val);
+    int token = blockIdx.x;
+    int col = blockIdx.y * blockDim.x + threadIdx.x;
+    if (token >= M || col >= hidden || total_sorted <= 0) return;
+
+    float sum = 0.0f;
+    for (int pos = 0; pos < total_sorted; pos++) {
+        int sid = sorted_ids[pos];
+        if (sid < 0) continue;
+        int tid = topk > 1 ? sid / topk : sid;
+        if (tid == token) {
+            sum += bf16_to_float(src[(int64_t)pos * hidden + col]) * scale_factor;
+        }
     }
+    accum[(int64_t)token * hidden + col] = sum;
 }
 
 
 /* Scatter fused MoE w2 output back to per-token FP32 accumulator with topk weights.
  * The fused Marlin w2 kernel writes compact rows directly at sorted_id = token*topk+slot,
- * so the routed contribution can be accumulated by iterating the compact [M*topk, hidden]
- * buffer directly. The padded sorted_ids metadata is still produced for the fused GEMM, but
- * it is not needed for the final scatter once rows are compact.
+ * so the routed contribution is accumulated in deterministic slot order by a block that
+ * owns one destination token and column tile. The padded sorted_ids metadata is still
+ * produced for the fused GEMM, but it is not needed for the final scatter once rows are
+ * compact.
  *
- * Grid: (M*topk, 1, 1), Block: (threads, 1, 1)
+ * Grid: (M, ceil(hidden / blockDim.x), 1), Block: (columns, 1, 1)
  */
 extern "C" __global__ void moe_scatter_weighted_kernel(
     float* __restrict__ accum,              // [M, hidden] FP32 accumulator (pre-zeroed)
@@ -5042,16 +10356,21 @@ extern "C" __global__ void moe_scatter_weighted_kernel(
     const float* __restrict__ topk_weights, // [M * topk] routing weights
     int hidden, int M, int topk, int total_sorted, float scale_factor
 ) {
-    int row = blockIdx.x;  // compact sorted_id row = token*topk+slot
+    int token = blockIdx.x;
+    int col = blockIdx.y * blockDim.x + threadIdx.x;
     int m_topk = M * topk;
-    if (row >= m_topk) return;
-    int token = row / topk;
-    float w = topk_weights[row] * scale_factor;
-    if (w == 0.0f) return;  // skip zero-weight entries
-    for (int i = threadIdx.x; i < hidden; i += blockDim.x) {
-        float val = bf16_to_float(src[row * hidden + i]) * w;
-        atomicAdd(&accum[token * hidden + i], val);
+    if (token >= M || col >= hidden || total_sorted < m_topk) return;
+
+    float sum = 0.0f;
+    int base = token * topk;
+    for (int slot = 0; slot < topk; slot++) {
+        int row = base + slot;
+        float w = topk_weights[row] * scale_factor;
+        if (w != 0.0f) {
+            sum += bf16_to_float(src[(int64_t)row * hidden + col]) * w;
+        }
     }
+    accum[(int64_t)token * hidden + col] = sum;
 }
 
 

@@ -38,6 +38,43 @@ namespace device::marlin_moe {
 // In vendored mode there is no device::marlin in this TU anyway.
 using namespace ::marlin;
 
+struct KrasisMoeW2LaneDiagEntry {
+  int stage;  // 1=pre_store_accumulator, 2=final_store
+  int block_idx;
+  int thread_idx;
+  int slice_col;
+  int slice_idx;
+  int slice_count;
+  int moe_block_id;
+  int expert_id;
+  int sorted_row;
+  int slot_in_block;
+  int target_dim;
+  int target_lane;
+  int c_pack;
+  int c_lane;
+  int sh_half2_idx;
+  int sh_int4_idx;
+  int true_idx;
+  int flags;
+  float acc0;
+  float acc1;
+  float scale0;
+  float scale1;
+  unsigned int scale0_bits;
+  unsigned int scale1_bits;
+  unsigned int bf16_0_bits;
+  unsigned int bf16_1_bits;
+  unsigned int final_bits;
+};
+
+__device__ int krasis_moe_w2_lane_diag_enabled = 0;
+__device__ int krasis_moe_w2_lane_diag_target_row = 0;
+__device__ int krasis_moe_w2_lane_diag_dim_count = 0;
+__device__ int krasis_moe_w2_lane_diag_dims[4] = {-1, -1, -1, -1};
+__device__ int krasis_moe_w2_lane_diag_count = 0;
+__device__ KrasisMoeW2LaneDiagEntry krasis_moe_w2_lane_diag_entries[128];
+
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
 
 template <
@@ -376,10 +413,9 @@ __global__ void Marlin(
   constexpr int pack_factor = 32 / w_type.size_bits();
   static_assert(thread_m_blocks == 1 || !m_block_size_8);
   constexpr int moe_block_size = m_block_size_8 ? 8 : (16 * thread_m_blocks);
-  const int group_size = (!has_act_order && group_blocks == -1) ? prob_k : prob_k / num_groups;
-  const int scales_expert_stride = prob_n * prob_k / group_size / (w_type == host::kFE2M1f ? 16 : 8);
+  const int scales_expert_stride = prob_n * num_groups / (w_type == host::kFE2M1f ? 16 : 8);
   const int zp_expert_stride =
-      is_zp_float ? prob_n * prob_k / group_size / 8 : prob_n * prob_k / group_size / (pack_factor * 4);
+      is_zp_float ? prob_n * num_groups / 8 : prob_n * num_groups / (pack_factor * 4);
   const int b_bias_expert_stride = prob_n / 8;
 
   // parallel: num valid moe blocks
@@ -1601,20 +1637,126 @@ __global__ void Marlin(
 
     int c_sh_rd = c_sh_stride * (threadIdx.x / (2 * thread_n_blocks)) + (threadIdx.x % (2 * thread_n_blocks));
 
+    auto diag_scalar_bits = [](scalar_t v) -> unsigned int {
+      return static_cast<unsigned int>(*reinterpret_cast<unsigned short*>(&v));
+    };
+
+    auto diag_target_slot = [&]() -> int {
+      if (!krasis_moe_w2_lane_diag_enabled) return -1;
+      int target_row = krasis_moe_w2_lane_diag_target_row;
+      for (int r = 0; r < block_num_valid_tokens; r++) {
+        if (sh_block_sorted_ids[r] == target_row) return r;
+      }
+      return -1;
+    };
+
+    auto diag_target_half2_idx = [&](int target_slot, int target_dim) -> int {
+      if (target_slot < 0 || target_dim < 0 || target_dim >= prob_n) return -1;
+      int target_c_pack = target_dim / 8;
+      int tile_pack_start = (2 * thread_n_blocks) * slice_col;
+      int pack_in_tile = target_c_pack - tile_pack_start;
+      if (pack_in_tile < 0 || pack_in_tile >= 2 * thread_n_blocks) return -1;
+      int rows_per_iter = threads / (2 * thread_n_blocks);
+      if (rows_per_iter <= 0) return -1;
+      int target_thread = (target_slot % rows_per_iter) * (2 * thread_n_blocks) + pack_in_tile;
+      int target_iter = target_slot / rows_per_iter;
+      int target_int4_idx = c_sh_stride * (target_thread / (2 * thread_n_blocks)) +
+                            (target_thread % (2 * thread_n_blocks)) +
+                            target_iter * c_sh_rd_delta;
+      return target_int4_idx * 4 + (target_dim % 8) / 2;
+    };
+
+    auto diag_record_pre_store = [&](int sh_half2_idx, int target_dim, float c0, float c1, scalar_t2 scale, scalar_t2 res) {
+      if (!krasis_moe_w2_lane_diag_enabled) return;
+      int target_slot = diag_target_slot();
+      int target_idx = diag_target_half2_idx(target_slot, target_dim);
+      if (target_idx < 0 || sh_half2_idx != target_idx) return;
+      int entry_idx = atomicAdd(&krasis_moe_w2_lane_diag_count, 1);
+      if (entry_idx < 0 || entry_idx >= 128) return;
+      KrasisMoeW2LaneDiagEntry& entry = krasis_moe_w2_lane_diag_entries[entry_idx];
+      entry.stage = 1;
+      entry.block_idx = static_cast<int>(blockIdx.x);
+      entry.thread_idx = static_cast<int>(threadIdx.x);
+      entry.slice_col = slice_col;
+      entry.slice_idx = slice_idx;
+      entry.slice_count = slice_count;
+      entry.moe_block_id = block_id;
+      entry.expert_id = expert_id;
+      entry.sorted_row = krasis_moe_w2_lane_diag_target_row;
+      entry.slot_in_block = target_slot;
+      entry.target_dim = target_dim;
+      entry.target_lane = target_dim % 8;
+      entry.c_pack = target_dim / 8;
+      entry.c_lane = target_dim % 8;
+      entry.sh_half2_idx = sh_half2_idx;
+      entry.sh_int4_idx = sh_half2_idx / 4;
+      entry.true_idx = entry.sorted_row * (prob_n / 8) + entry.c_pack;
+      entry.flags = (last ? 1 : 0) | (use_fp32_reduce ? 2 : 0) | (use_atomic_add ? 4 : 0);
+      entry.acc0 = c0;
+      entry.acc1 = c1;
+      entry.scale0 = Dtype::num2float(scale.x);
+      entry.scale1 = Dtype::num2float(scale.y);
+      entry.scale0_bits = diag_scalar_bits(scale.x);
+      entry.scale1_bits = diag_scalar_bits(scale.y);
+      entry.bf16_0_bits = diag_scalar_bits(res.x);
+      entry.bf16_1_bits = diag_scalar_bits(res.y);
+      entry.final_bits = (entry.target_lane % 2 == 0) ? entry.bf16_0_bits : entry.bf16_1_bits;
+    };
+
+    auto diag_record_final_store = [&](int sh_int4_idx, int64_t true_idx, int64_t sorted_row, int c_pack) {
+      if (!krasis_moe_w2_lane_diag_enabled || sorted_row != krasis_moe_w2_lane_diag_target_row) return;
+      for (int d = 0; d < krasis_moe_w2_lane_diag_dim_count && d < 4; d++) {
+        int target_dim = krasis_moe_w2_lane_diag_dims[d];
+        if (target_dim < 0 || target_dim >= prob_n || target_dim / 8 != c_pack) continue;
+        int entry_idx = atomicAdd(&krasis_moe_w2_lane_diag_count, 1);
+        if (entry_idx < 0 || entry_idx >= 128) return;
+        scalar_t* out = reinterpret_cast<scalar_t*>(&sh_red[sh_int4_idx]);
+        int lane = target_dim % 8;
+        KrasisMoeW2LaneDiagEntry& entry = krasis_moe_w2_lane_diag_entries[entry_idx];
+        entry.stage = 2;
+        entry.block_idx = static_cast<int>(blockIdx.x);
+        entry.thread_idx = static_cast<int>(threadIdx.x);
+        entry.slice_col = slice_col;
+        entry.slice_idx = slice_idx;
+        entry.slice_count = slice_count;
+        entry.moe_block_id = block_id;
+        entry.expert_id = expert_id;
+        entry.sorted_row = static_cast<int>(sorted_row);
+        entry.slot_in_block = c_gl_wr / c_gl_stride;
+        entry.target_dim = target_dim;
+        entry.target_lane = lane;
+        entry.c_pack = c_pack;
+        entry.c_lane = lane;
+        entry.sh_half2_idx = sh_int4_idx * 4 + lane / 2;
+        entry.sh_int4_idx = sh_int4_idx;
+        entry.true_idx = static_cast<int>(true_idx);
+        entry.flags = (last ? 1 : 0) | (use_fp32_reduce ? 2 : 0) | (use_atomic_add ? 4 : 0);
+        entry.acc0 = 0.0f;
+        entry.acc1 = 0.0f;
+        entry.scale0 = 0.0f;
+        entry.scale1 = 0.0f;
+        entry.scale0_bits = 0;
+        entry.scale1_bits = 0;
+        entry.bf16_0_bits = 0;
+        entry.bf16_1_bits = 0;
+        entry.final_bits = diag_scalar_bits(out[lane]);
+      }
+    };
+
     // We first reorder in shared memory to guarantee the most efficient final
     // global write patterns
     auto write = [&](int idx, float c0, float c1, FragS& s, FragS& b_bias) {
       scalar_t2 res = Dtype::nums2num2(Dtype::float2num(c0), Dtype::float2num(c1));
+      scalar_t2 diag_scale = s[0];
+      if constexpr (m_block_size_8) {
+        diag_scale = Dtype::num2num2(reinterpret_cast<scalar_t*>(&s[0])[(threadIdx.x % 8) / 4]);
+      }
 
       // For per-column quantization we finally apply the scale here (only for
       // 4-bit)
       if constexpr (
           !has_act_order && group_blocks == -1 && w_type.size_bits() == 4 && (has_zp && dequant_skip_flop || !has_zp)) {
-        scalar_t2 tmp_scale = s[0];
-        if constexpr (m_block_size_8) {
-          tmp_scale = Dtype::num2num2(reinterpret_cast<scalar_t*>(&s[0])[(threadIdx.x % 8) / 4]);
-        }
-        res = __hmul2(res, tmp_scale);
+        res = __hmul2(res, diag_scale);
       }
 
       if constexpr (w_type == host::kFE2M1f && s_type == host::kFE4M3fn) {
@@ -1628,6 +1770,12 @@ __global__ void Marlin(
           tmp_bias = Dtype::num2num2(reinterpret_cast<scalar_t*>(&b_bias[0])[(threadIdx.x % 8) / 4]);
         }
         res = __hadd2(res, tmp_bias);
+      }
+
+      if (krasis_moe_w2_lane_diag_enabled) {
+        for (int d = 0; d < krasis_moe_w2_lane_diag_dim_count && d < 4; d++) {
+          diag_record_pre_store(idx, krasis_moe_w2_lane_diag_dims[d], c0, c1, diag_scale, res);
+        }
       }
 
       if constexpr (m_block_size_8) {
@@ -1717,6 +1865,7 @@ __global__ void Marlin(
         } else {
           C[true_idx] = sh_red[c_sh_rd];
         }
+        diag_record_final_store(c_sh_rd, true_idx, sorted_row, c_gl_wr % c_gl_stride);
         c_gl_wr += c_gl_wr_delta;
         c_sh_rd += c_sh_rd_delta;
       }

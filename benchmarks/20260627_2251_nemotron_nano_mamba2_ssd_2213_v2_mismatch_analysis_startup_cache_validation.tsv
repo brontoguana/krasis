@@ -1,0 +1,6 @@
+line	evidence	classification
+24	HQQ attention artifacts validated (115 MB cached), 27940 MB free	hqq_attention_reused
+26	Building GPU INT4 Marlin expert cache (one-time)	generic_phase_header_only
+28	Loading GPU Marlin cache: 23 layers...	marlin_effective_g64_reused
+29	GPU Marlin cache loaded: 15.8 GB in 10s	marlin_effective_g64_reused
+900	STARTUP_EXIT_AFTER_CALIBRATION requested; exiting after startup calibration	clean_diagnostic_exit

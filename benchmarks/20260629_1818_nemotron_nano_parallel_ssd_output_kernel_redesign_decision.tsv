@@ -1,0 +1,5 @@
+item	decision	detail
+acceptance	accepted_guarded	`KRASIS_MAMBA2_SSD_PARALLEL_OUTPUT_BY_CHUNK=1` is token/logit correct against the accepted guarded parallel chunked control path.
+default_path	unchanged	Default sequential SSD and production behavior remain unchanged.
+speed	result_measured	Long 39920 startup diagnostic improved from 2219.4 tok/s to 5693.8 tok/s.
+next_target	remaining_output_work	Output/chunk-scan remains the largest candidate component at 148.531ms of 177.279ms.

@@ -1,0 +1,11 @@
+rule	contract	rationale
+default_path	Default production path remains the existing sequential SSD dispatch unless explicit v5 envs are set.	No default-path change.
+oracle_required	The v5 candidate must require an oracle env in prototype gates; requesting candidate without oracle should fail closed.	Prevents silent correctness drift.
+separate_buffers	Sequential oracle, candidate output, and candidate state must use separate buffers initialized from the same snapshot.	No cross-contamination and no mutation of live state during comparison.
+no_oracle_fallback	On success, commit candidate buffers; on mismatch, error. Do not copy oracle buffers to make the request succeed.	No silent fallback or degraded contract.
+exact_output_compare	BF16 output compare is exact bit equality for all elements.	The existing sequential kernel is the current oracle.
+exact_state_compare	F32 state compare is exact bit equality for all elements.	The mismatch being fixed is two f32 bits; tolerance would hide the known bug.
+component_preflights	Row64/state0 and row82/state14 component probes must pass before full compare and before any long timing.	Finds the specific failure area cheaply.
+runtime_dimensions	All buffer sizes and flat-coordinate decoding are derived from runtime `L`, `n_heads`, `head_dim`, `state_size`, `n_groups`, and `chunk_size`.	No Nano/model/hardware hardcodes.
+commit_order	Only after full oracle pass: candidate output to `ssd_out`, candidate final state to live `ssm_state`, then continue Mamba2 norm/out-proj.	Preserves fail-closed behavior.
+failure_record	On failure, record first output mismatch, first state mismatch, max/mean errors, probe component deltas, cache/temp status, and source spans.	Maintains measurement integrity before any optimization timing.

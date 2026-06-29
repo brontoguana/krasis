@@ -1,0 +1,20 @@
+check	status	detail
+record_first	pass	0304 carry-forward recorded: Gemma 5619.6 / 92.43 / 155.69; 81/0; build passed; filtered comparator pass; nine activation FTZ/subnormal mismatches; no production output consumption
+focused_tests	pass	./dev test-kernels expert_hqq -> 81/0
+dev_build	pass	./dev build passed before full replay
+baseline_instrumentation	pass	filtered comparator over four failure blocks measured 5:45.78 elapsed and 91022804 KB max RSS before optimization
+full_offline_comparator	pass	status=ok; passes_contract=true; cases=3; blocks=5870; metric_rows=23576; mismatch_detail_rows=9
+full_offline_comparator_profile	pass	load_cache=31844ms; parse_trace=97685ms; compare_all_cases=1438780ms; total_profile=1568350ms; max_rss=81839016 KB
+production_output_consumption	pass	false
+live_server_rerun	pass	false
+final_artifact_assertions	pass	summary JSON, profile TSV, full metrics totals, and nine mismatch detail rows asserted
+bash_n_dev	pass	bash -n dev
+py_compile	pass	./dev python -m py_compile python/krasis/*.py
+cargo_fmt_check	pass	PATH="$HOME/.cargo/bin:$PATH" cargo fmt --check
+git_diff_check	pass	git diff --check and krasis-internal diff --check
+protected_config_check	pass	only pre-existing untracked tests/nemotron-nano-bf16-experts-a16.conf reported
+source_scope_check	pass	forbidden-scope scan only found records stating fallback/decode/HCS/speed paths were not added
+cleanup	pass	./dev kill passed when run alone; an earlier combined shell cleanup command was killed by its own process-pattern argument and was not used as final state
+final_tmux_state	pass	no server running on /tmp/tmux-1000/default
+final_process_state	pass	no matching Krasis runtime/comparator/generator process
+final_gpu_state	pass	GPU0 15/32607 MB util 0; GPU1 11/20470 MB util 0

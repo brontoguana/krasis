@@ -1,0 +1,5 @@
+case	comparison	selected_ref	selected_new	selected_changed	selected_lp_delta	margin_ref	margin_new	margin_delta	max_common_topk_delta	rank_changed_count	common_count	membership_changed
+0	bf16_vs_prod_path	1044	1044	false	0.452281	0.300524	0.585973	0.285449	0.516620	5	10	false
+0	old_g32_vs_prod_path	1044	1044	false	0.397528	0.474478	0.585973	0.111495	0.397528	6	10	false
+2	bf16_vs_prod_path	1044	1044	false	0.255401	0.370508	0.253093	-0.117415	0.308095	3	9	true
+2	old_g32_vs_prod_path	1044	1044	false	0.085200	0.069721	0.253093	0.183372	0.509055	3	8	true

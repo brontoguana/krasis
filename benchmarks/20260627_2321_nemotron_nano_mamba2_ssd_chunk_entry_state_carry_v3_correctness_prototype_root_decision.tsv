@@ -1,0 +1,2 @@
+decision	status	evidence	next_step
+v3_correctness	failed_closed	Small startup diagnostic emitted local-tri preflight, then v3 oracle failed on layer 0 with 57 output mismatches and 506267 state mismatches. First output mismatch: row=64 head=11 d=22; output max/mean=2.0/0.000009420193521236797. First state mismatch: flat=0 head=0 d=0 state=0; state max/mean=0.0048828125/0.000001652099002238201.	Cleanup or replace v3 candidate before any long timing or performance run.

@@ -1,0 +1,19 @@
+metric	value	notes
+status	ok	offline analyzer completed
+layer_idx	51	target layer
+requested_expert_idx	60	target expert
+requested_sorted_row	1837	worst global expert_out row
+requested_col	1599	worst column
+captured_rows	7	requested row plus selected-row contributors
+selected_contributors	6	contributors for trace row 445
+worst_bf16_value_at_col	1.072000000000000000e3	captured BF16 expert_out
+worst_hqq_gpu_value_at_col	1.104000000000000000e3	HQQ GPU copied expert_out
+worst_krhq_value_at_col	1.104000000000000000e3	offline KRHQ/HQQ6 dequant math
+worst_bf16_vs_hqq_gpu_abs_at_col	3.200000000000000000e1	target delta
+worst_hqq_gpu_vs_krhq_abs_at_col	0.000000000000000000e0	GPU vs offline dequant
+selected_bf16_value	4.858269319683313370e2	routed selected row col 1599
+selected_hqq_gpu_value	4.949346995949745178e2	routed selected row col 1599
+selected_krhq_value	4.949346995949745178e2	routed selected row col 1599
+selected_bf16_vs_hqq_gpu_abs	9.107767626643180847e0	routed selected-row delta
+selected_hqq_gpu_vs_krhq_abs	0.000000000000000000e0	routed GPU vs offline dequant
+attribution	hqq_gpu_matches_krhq_dequant_math_at_output; divergence is attributable to HQQ6 dequantized-weight math versus captured BF16 expert output	root attribution

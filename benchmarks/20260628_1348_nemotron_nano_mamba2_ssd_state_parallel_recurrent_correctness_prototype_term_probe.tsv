@@ -1,0 +1,2 @@
+target	available	coefficient_tile_enabled	c_state_total_exact	c_state_total_replayed	c_state_total_exact_minus_replayed	local_old_state	prior_chunk_state	local_hf_chunk_scan	d_skip	y_pre_bf16	candidate_bits	oracle_bits	matches	chunk_idx	chunk_start	chunk_pos	group
+row97_head48_d24	true	true	-44.88219451904297	-44.88219451904297	0.0	-17.797197341918945	-27.084997177124023	-17.792999267578125	0.003001570701599121	-44.87499237060547	0xc233	0xc234	false	1	64	33	6

@@ -1,0 +1,11 @@
+component	file	line	evidence
+default_sequential_kernel	src/cuda/prefill_kernels.cu	4968	mamba2_ssd_sequential_kernel preserved as default oracle and default path kernel
+v5_diagnostic_kernel_preserved	src/cuda/prefill_kernels.cu	5535	mamba2_ssd_v5_recurrent_kernel preserved
+block_scan_recurrent_kernel	src/cuda/prefill_kernels.cu	5667	New opt-in exact token-order recurrent entry/final-state kernel
+block_scan_output_kernel	src/cuda/prefill_kernels.cu	5721	New opt-in separate output assembly kernel
+block_scan_env_gate	src/gpu_prefill.rs	267	KRASIS_MAMBA2_SSD_BLOCK_SCAN parsed separately from v5 gates
+block_scan_dispatch	src/gpu_prefill.rs	31952	New opt-in dispatch branch runs oracle, recurrent kernel, output kernel, exact compare, then commit
+block_scan_oracle_log	src/gpu_prefill.rs	32168	Block-scan full oracle records use MAMBA2-SSD-BLOCK-SCAN-ORACLE prefix
+block_scan_timing_log	src/gpu_prefill.rs	32210	Block-scan component timing records use MAMBA2-SSD-BLOCK-SCAN-TIMING prefix when correctness reaches timing emission
+ptx_symbol_registration	src/gpu_prefill.rs	54218	Block-scan CUDA symbols are explicitly loaded from PTX
+python_fail_closed_warmup	python/krasis/server.py	1743	Startup warmup re-raises block-scan candidate/oracle failures instead of swallowing them

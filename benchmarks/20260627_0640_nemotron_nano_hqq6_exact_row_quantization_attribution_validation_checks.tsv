@@ -1,0 +1,15 @@
+check	status	details
+record_first	passed	0629 blocker and worst coordinates recorded before implementation
+focused_tests	passed	./dev test-kernels expert_hqq: 92/0
+build	passed	./dev build
+live_case2_capture	passed	HTTP 200, response bytes 5020888
+offline_row_attribution	passed	hqq_gpu_matches_krhq_dequant_math_at_output; divergence is attributable to HQQ6 dequantized-weight math versus captured BF16 expert output
+artifact_assertions	passed	summary, row metrics, row details, runtime, decision, source contract, logs present and internally consistent
+bash_n_dev	passed	bash -n dev
+py_compile	passed	./dev python -m py_compile python/krasis/*.py
+cargo_fmt_check	passed	cargo fmt --check
+git_diff_check	passed	git diff --check in krasis-nemotron-dev
+internal_diff_check	passed	git diff --check in krasis-internal
+protected_config_status	passed	only pre-existing untracked tests/nemotron-nano-bf16-experts-a16.conf
+cleanup	passed	./dev kill reported all GPUs clear
+final_idle_snapshot	passed	2026-06-27T07:25:34Z; no tmux server; no matching runtime/analyzer/generator/curl process; GPUs 15 MB / 11 MB used

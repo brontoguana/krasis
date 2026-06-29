@@ -1,0 +1,13 @@
+check	result	evidence
+summary_json	pass	status closed, correctness failed as expected, output mismatches 10, state mismatches 0, no long diagnostic.
+artifact_tsv_shapes	pass	Build, runtime, oracle, term probe, source, cache, and decision TSVs have consistent tab-separated field counts.
+build_log	pass	./dev build exit marker 0, duration 178s.
+startup_log	pass	Small startup diagnostic exit marker 1 with fail-closed Mamba2 SSD oracle mismatch.
+long_diagnostic_absent	pass	No 1058 long diagnostic artifact exists.
+request_absent	pass	No POST or /v1/chat/completions evidence in startup diagnostic log.
+benchmark_absent	pass	No ./dev benchmark or speed-test command was run.
+source_markers	pass	local_old_state_exact markers present only in block-scan candidate path; default sequential SSD markers still present.
+diff_check	pass	git diff --check passed in krasis-nemotron-dev and krasis-internal; bash -n dev passed.
+protected_configs	pass	Status unchanged with expected untracked tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf and tests/nemotron-nano-bf16-experts-a16.conf.
+temp_lock_scan	pass	No Nano Krasis temp, lock, or partial files found after cleanup.
+idle_state	pass	Final snapshot 2026-06-28T11:11:37Z: no tmux/runtime/build/GPU compute process; GPUs 15 MB / 11 MB.

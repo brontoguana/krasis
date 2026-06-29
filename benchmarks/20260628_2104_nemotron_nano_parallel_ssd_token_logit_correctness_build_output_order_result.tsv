@@ -1,0 +1,2 @@
+artifact	status	exit_code	duration_s	notes
+build_output_order	pass	0	180	./dev build completed after matching guarded parallel output coefficient multiplication order to accepted coeff-tile path

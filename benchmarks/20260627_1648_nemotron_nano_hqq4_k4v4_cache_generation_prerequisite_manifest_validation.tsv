@@ -1,0 +1,21 @@
+item	status	value	detail
+cache_dir	pass	/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/attention_hqq_v5_grid65_33	HQQ4 group_size 128 baseline cache dir
+manifest_path	pass	/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/attention_hqq_v5_grid65_33/manifest.json	final manifest
+format_version	pass	5	manifest format_version
+backend	pass	hqq4	manifest backend
+complete	pass	true	manifest complete flag
+num_hidden_layers	pass	52	Nano config layer count
+attention_layers_cached	pass	5,12,19,26,33,42	full-attention layers present in manifest
+attention_layer_count	pass	6	unique cached layers
+tensor_records	pass	30	manifest tensors length
+tensor_files	pass	30	.safetensors files on disk
+tensor_names	pass	fused_qkv=6,k_proj=6,o_proj=6,q_proj=6,v_proj=6	one each per cached attention layer
+nbits	pass	4	manifest nbits
+group_size	pass	128	manifest group_size
+axis	pass	1	manifest axis
+layout	pass	row_major_axis1_grouped_uint4_packed	manifest layout
+hqq4_search	pass	grid65_33	quantizer metadata
+manifest_tensor_bytes	pass	120767064	manifest totals.tensor_bytes
+manifest_file_bytes	pass	124198	stat manifest.json
+cache_bytes_on_disk_including_manifest	pass	120911998	sum of manifest plus tensor artifact file sizes
+pending_manifest_absent	pass	true	no manifest.build.json after successful close

@@ -1,0 +1,7 @@
+condition	source	http_status	time_total_s	projection_env	consume_boundary_diag	debug_reference_trace	selected_token	selected_text	token1044_logprob	token1044_rank	token1321_logprob	token1321_rank	margin_1044_minus_1321	projection_available	consume_boundary_rows	topk_token_ids
+bf16_baseline	0427_saved_bf16	n/a	n/a	false	false	true	1044	,	-2.047513	1	-2.348037	2	0.300524	false	0	1044,1321,1294,1562,1408,1307,2553,2136,1513,1046
+old_g32_quality	0826_saved_g32	n/a	n/a	false	false	true	1044	,	-1.992760	1	-2.467238	2	0.474478	false	0	1044,1321,1294,1562,1307,1408,2136,2553,1046,1513
+debug_trace_only	1328_live	200	36.943106	false	false	true	1044	,	-1.927179	1	-2.197941	2	0.270762	false	0	1044,1321,1294,1307,5355,1562,1046,1513,1408,2553
+projection_only	1328_live	200	36.428060	true	false	true	1044	,	-1.819920	1	-2.341969	2	0.522049	true	0	1044,1321,1294,1562,1307,2136,1513,1408,1046,2553
+consume_diag_only	1328_live	200	44.020051	false	true	true	1044	,	-1.970987	1	-2.286871	2	0.315884	false	69	1044,1321,1294,1562,1307,1408,1046,2136,2553,1513
+projection_plus_consume_diag	1244_saved_combo	200	44.551525	true	true	true	1321	 and	-1.735141	2	-1.647202	1	-0.087939	true	69	1321,1044,1294,1307,1562,2136,1046,1408,5355,2553

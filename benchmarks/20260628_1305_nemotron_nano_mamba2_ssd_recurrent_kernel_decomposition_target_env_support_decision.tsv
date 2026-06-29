@@ -1,0 +1,5 @@
+question	answer	evidence	decision
+Can existing 1242 records split recurrent_kernel below whole-kernel total?	no	Candidate timing JSON has launch_submit, sync_wait, total for block_scan_recurrent_kernel only.	Do not run another existing-env diagnostic; it would repeat the same aggregate number.
+Can output subloop timing explain recurrent_kernel?	no	KRASIS_MAMBA2_SSD_BLOCK_SCAN_OUTPUT_SUBLOOP_TIMING instruments only output kernel subloops and was disabled for clean 1242 no-oracle run.	Do not use output subloop timing for recurrent attribution.
+Can full oracle compare/probes explain recurrent performance?	no	Full oracle proves correctness and row probes, but downloads/host comparison are orthogonal to recurrent kernel internals.	Preserve oracle path; do not mix it into candidate cost analysis.
+Is a new optimization justified before recurrent split?	no	Recurrent is largest clean component but internal split is unknown.	Add timing-only recurrent decomposition first.

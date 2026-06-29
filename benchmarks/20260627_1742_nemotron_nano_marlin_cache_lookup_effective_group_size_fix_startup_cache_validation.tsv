@@ -1,0 +1,10 @@
+line	status	details
+24	pass	HQQ attention artifacts validated (115 MB cached), 27940 MB free
+28	pass	Loading GPU Marlin cache: 23 layers...
+29	pass	GPU Marlin cache loaded: 15.8 GB in 10s
+95	pass	KRASIS SERVER READY
+safetensors_build_absent	pass	No "Building GPU INT4 Marlin cache: 23 layers from safetensors" line
+cache_built_absent	pass	No "GPU INT4 Marlin cache built" line
+requests_absent	pass	0 reference_test lines
+tmp_lock_absent	pass	No .tmp/.lock/.pending files after cleanup
+ui_phase_header	info	Generic Python phase header still says "Building GPU INT4 Marlin expert cache (one-time)" although runtime loaded existing cache

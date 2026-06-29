@@ -1,0 +1,31 @@
+check	status	value	evidence
+summary_json	pass	closed and validation.passed=true	jq validation
+tsv_shapes	pass	all 2346 TSV files have consistent field counts	awk validation
+final_build_exit	pass	0	build2.exit normalized numeric zero
+final_build_log	pass	status=0 duration_s=169	build2.log
+startup_diagnostic_exit	pass	0	startup_diagnostic.exit normalized numeric zero
+startup_diagnostic_exit_line	pass	present	Startup diagnostic exit line in log
+hqq_attention_reuse	pass	present	HQQ attention artifacts validated line in log
+marlin_reuse	pass	present	GPU Marlin cache loaded line in log
+cache_write_absent	pass	absent	no Building GPU INT4 Marlin cache line
+request_absent	pass	absent	no reference_test or chat completion line
+benchmark_absent	pass	absent	no benchmark-only line
+ready_absent	pass	expected	startup-exit diagnostic stops before READY
+v3_source_markers_absent	pass	absent	no v3 env/kernel/oracle markers in Rust/CUDA/Python
+local_tri_diagnostic_preserved	pass	present	KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE_STATE_FLAT remains
+substage_timing_preserved	pass	present	mamba2_substages remains
+v3_log_markers_absent	pass	absent	no MAMBA2-SSD-CHUNK-V3 log marker
+local_tri_log_markers_absent	pass	absent	local-tri env unset, no local-tri log marker
+sequential_ssd_timing	pass	114464.9ms over 23 calls	startup diagnostic log
+git_diff_check_krasis	pass	clean	git diff --check
+git_diff_check_internal	pass	clean	git diff --check in krasis-internal
+dev_syntax	pass	clean	bash -n dev
+cleanup	pass	exit 0	./dev kill
+protected_config_status	pass	expected tests-only Nano configs only	git status protected config scope
+nano_model_temp_lock	pass	0	no .tmp/.lock outside HF download cache
+nano_cache_temp_lock	pass	0	no .tmp/.lock in Krasis Nano cache
+tmux_idle	pass	none	tmux ls no server running
+runtime_process_idle	pass	none	no krasis/run/build process
+nvidia_compute_idle	pass	none	nvidia-smi compute apps empty
+gpu_memory_idle	pass	gpu0 15 MB, gpu1 11 MB	nvidia-smi gpu memory
+final_snapshot	pass	2026-06-28T00:05:08Z	disk 588G, RAM 966Gi

@@ -1,0 +1,9 @@
+field	value
+decision	cache_reuse_failed_before_ready
+result	HQQ attention cache reused, but effective Marlin g64 was not reused by startup
+reason	The startup load path checked the requested g128 cache path, found it absent, and entered the Marlin build path even though the effective g64 cache exists and has header group size 64.
+lookup_mismatch	requested cache_gs=128 before load; builder effective_group_size=64 after dimension check
+mutation_or_source_change	none
+smoke_unblocked	false
+requests_sent	0
+required_next_fix	Make Marlin cache lookup use the same runtime effective group-size calculation as the builder for non-prequantized models, or persist/load an effective-group metadata marker before attempting startup reuse.

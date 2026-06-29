@@ -1,0 +1,11 @@
+artifact	value	evidence
+gate	20260628_0715_nemotron_nano_mamba2_ssd_v4_correctness_prototype	startup diagnostic only
+command	KRASIS_STARTUP_DIAG=1 KRASIS_STARTUP_WARMUP_TOKENS=256 KRASIS_STARTUP_CAL_SHORT_TOKENS=256 KRASIS_STARTUP_CAL_LONG_TOKENS=256 KRASIS_PREFILL_TIMING=1 KRASIS_PREFILL_LIVENESS_TIMING=1 KRASIS_STARTUP_EXIT_AFTER_CALIBRATION=1 KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE=1 KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE_LAYER=0 KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE_ROW=64 KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE_HEAD=11 KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE_D=22 KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE_STATE_FLAT=0 KRASIS_MAMBA2_SSD_V4_CAST_CARRY_DIAG=1 KRASIS_MAMBA2_SSD_CHUNK_PARALLEL_V4=1 KRASIS_MAMBA2_SSD_CHUNK_PARALLEL_V4_ORACLE=1 KRASIS_MAMBA2_SSD_CHUNK_PARALLEL_V4_PROBE2_ROW=82 KRASIS_MAMBA2_SSD_CHUNK_PARALLEL_V4_PROBE2_HEAD=37 KRASIS_MAMBA2_SSD_CHUNK_PARALLEL_V4_PROBE2_D=30 KRASIS_MAMBA2_SSD_CHUNK_PARALLEL_V4_PROBE2_STATE_FLAT=14 ./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf	built run path in tmux
+exit_code	1	fail-closed v4 oracle mismatch
+failure_stage	warmup_prefill_before_ready	RuntimeError on Mamba2 layer 0
+requests_sent	0	no request endpoint lines
+benchmark_path	no	no benchmark-only path
+long_diagnostic_run	no	skipped because full oracle failed
+smoke_requests	no	no reference_test or chat completion requests
+decode_hcs_changes	no	no decode/HCS work in gate
+production_enablement	no	v4 opt-in diagnostic only

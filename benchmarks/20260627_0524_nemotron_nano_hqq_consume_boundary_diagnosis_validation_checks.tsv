@@ -1,0 +1,16 @@
+check	result	details
+record_0427_first	passed	summary and changelog/tracking/debuglog carry 0427 values
+cargo_fmt_check	passed	PATH=$HOME/.cargo/bin:$PATH cargo fmt --check
+bash_n_dev	passed	bash -n dev
+focused_tests	passed	./dev test-kernels expert_hqq -> 86/0
+dev_build	passed	./dev build passed after sync patch
+first_live_attempt	informational	HTTP 200; exposed unsynced diagnostic capture stale read
+synced_live_attempt	passed	one saved case-2 payload HTTP 200; 23 consume rows; 330,882,048 copied bytes
+production_scope	passed	no production default enablement, tolerance change, fallback, decode/HCS, INT4/HQQ4, selected-expert retargeting, or speed benchmark
+cleanup_snapshot	passed	2026-06-27T06:20:05Z no tmux/runtime; GPUs 15 MB / 11 MB
+artifact_assertions	passed	summary/result artifacts present and numeric assertions passed
+python_syntax	passed	bash -n dev && ./dev python -m py_compile python/krasis/*.py
+cargo_fmt_check_final	passed	cargo fmt --check
+diff_check	passed	git diff --check in Krasis and krasis-internal
+protected_config_status	passed	no protected config edits; pre-existing untracked tests/nemotron-nano-bf16-experts-a16.conf remains
+final_cleanup_snapshot	passed	2026-06-27T06:24:00Z no tmux server, no runtime/comparator/generator/curl process, GPUs 15 MB / 11 MB

@@ -1,0 +1,16 @@
+check	result	details
+json_summary	valid	jq -e summary passed
+response_json	valid	jq -e fastpath response passed
+tsv_shapes	pass	build/correctness/runtime/token/timing/comparison/decision TSV field counts consistent
+long_log_exit	pass	exit 0 duration 61s
+long_record_count	pass	23 records with tokens=39920
+exact_bridge_absent	pass	0 long records with exact_state_bridge != 0
+oracle_records_absent	pass	no bracketed ORACLE timing/correctness records in long no-oracle log
+subloop_records_absent	pass	no bracketed SUBLOOP timing records in long no-oracle log
+request_records_absent	pass	no request records in long no-oracle log
+token_logit	pass	serial/control vs fast top-logprob max deltas 0.000000000
+diff_check	pass	git diff --check passed in krasis-nemotron-dev and krasis-internal
+dev_syntax	pass	bash -n dev passed
+protected_configs	pass	no status output for protected config paths
+source_review	pass	focused review confirms guard, bridge-zero timing, parallel entry-state handoff, and output kernel path
+final_idle	pass	2026-06-29T14:47:52Z GPUs 15 MB / 11 MB; no tmux session; no runtime/build/GPU compute process

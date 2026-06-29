@@ -1,0 +1,7 @@
+check	result	evidence
+HQQ attention cache reused	pass	startup_diagnostic.log:24 HQQ attention artifacts validated (115 MB cached)
+effective Marlin cache reused	pass	startup_diagnostic.log:28 Loading GPU Marlin cache: 23 layers
+effective Marlin cache loaded	pass	startup_diagnostic.log:29 GPU Marlin cache loaded: 15.8 GB in 10s
+cache write line absent	pass	no "Building GPU INT4 Marlin cache: 23 layers from safetensors" line
+cache rebuild flags absent	pass	command has no --build-cache or --force-rebuild-hqq-cache
+cache temp/lock files absent	pass	final snapshot 2026-06-27T20:23:18Z

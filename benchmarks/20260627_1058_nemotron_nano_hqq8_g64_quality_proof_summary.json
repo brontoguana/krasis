@@ -1,0 +1,175 @@
+{
+  "gate": "20260627_1058_nemotron_nano_hqq8_g64_quality_proof",
+  "status": "closed_quality_proof",
+  "opened_utc": "2026-06-27T10:58:00Z",
+  "record_first": {
+    "source_gate": "20260627_1038_nemotron_nano_hqq8_g64_all_moe_layer_cache_spec_generation",
+    "generator_status": "ok",
+    "cache_bytes": 33047177280,
+    "payload_bytes": 33046659072,
+    "tensor_records": 5888,
+    "nbits": 8,
+    "group_size": 64,
+    "layout": "row_major_axis1_grouped_uint8",
+    "headroom_after_generation": {
+      "disk_available_human": "614G",
+      "ram_available_human": "964Gi"
+    },
+    "final_state_clean": true,
+    "gemma_speeds": "5619.6 / 92.43 / 155.69",
+    "source_changes_in_1038": false,
+    "live_server_in_1038": false,
+    "production_hqq_enabled": false
+  },
+  "scope": {
+    "reuse_saved_bf16_1023_baselines": true,
+    "reuse_same_three_payloads": true,
+    "run_hqq8_g64_guarded_live_pass": true,
+    "endpoint": "/v1/internal/reference_test",
+    "bf16_server_rerun": false,
+    "compare_against": [
+      "BF16",
+      "HQQ6 g64",
+      "HQQ6 g32",
+      "HQQ6 g16"
+    ],
+    "forbidden": [
+      "production HQQ",
+      "speed benchmark",
+      "fallback",
+      "decode/HCS",
+      "selected-expert routing",
+      "INT4/HQQ4",
+      "k/v work"
+    ]
+  },
+  "closed_utc": "2026-06-27T11:20:13Z",
+  "runtime": {
+    "bf16_server_run": false,
+    "hqq8_server_run": true,
+    "endpoint": "/v1/internal/reference_test",
+    "http_200_count": 3,
+    "request_count": 3,
+    "request_times_s": {
+      "case0": 39.900834,
+      "case1": 35.062542,
+      "case2": 39.806775
+    },
+    "long_calibration_prefill_s": 343.25,
+    "long_calibration_decode_s": 4.28,
+    "long_calibration_prefill_min_free_mb": 14070,
+    "vram_safety_margin_mb": 600,
+    "consume_rows": 69,
+    "copied_output_bytes": 1029740544,
+    "nbits": 8,
+    "group_size": 64,
+    "layout": "row_major_axis1_grouped_uint8",
+    "bad_nbits_rows": 0,
+    "bad_group_size_rows": 0
+  },
+  "quality": {
+    "selected_token_changed_cases": {
+      "hqq6_g64": 1,
+      "hqq6_g32": 0,
+      "hqq6_g16": 0,
+      "hqq8_g64": 2
+    },
+    "topk_rank_drift_cases": {
+      "hqq6_g64": 3,
+      "hqq6_g32": 3,
+      "hqq6_g16": 3,
+      "hqq8_g64": 3
+    },
+    "avg_selected_output_logprob_delta": {
+      "hqq6_g64": 0.11091966666666668,
+      "hqq6_g32": 0.12585199999999994,
+      "hqq6_g16": 0.33999433333333334,
+      "hqq8_g64": 0.287812
+    },
+    "max_common_topk_logprob_delta": {
+      "hqq6_g64": 0.49339699999999986,
+      "hqq6_g32": 0.5789149999999998,
+      "hqq6_g16": 0.5712929999999998,
+      "hqq8_g64": 0.5701680000000002
+    },
+    "max_rank_aligned_topk_logprob_delta": {
+      "hqq6_g64": 0.42908800000000014,
+      "hqq6_g32": 0.4074139999999997,
+      "hqq6_g16": 0.5712929999999998,
+      "hqq8_g64": 0.48909800000000003
+    },
+    "cases": [
+      {
+        "case": 0,
+        "bf16_token": 1044,
+        "hqq8_token": 1321,
+        "hqq8_text": " and",
+        "hqq8_token_changed": true,
+        "hqq8_selected_output_logprob_delta": 0.269644,
+        "hqq8_max_common_topk_logprob_delta": 0.570168,
+        "hqq8_max_rank_aligned_topk_logprob_delta": 0.487529,
+        "hqq8_topk_rank_changed_count": 8,
+        "hqq8_topk_membership_changed": true
+      },
+      {
+        "case": 1,
+        "bf16_token": 1044,
+        "hqq8_token": 1044,
+        "hqq8_text": ",",
+        "hqq8_token_changed": false,
+        "hqq8_selected_output_logprob_delta": 0.489098,
+        "hqq8_max_common_topk_logprob_delta": 0.489098,
+        "hqq8_max_rank_aligned_topk_logprob_delta": 0.489098,
+        "hqq8_topk_rank_changed_count": 4,
+        "hqq8_topk_membership_changed": false
+      },
+      {
+        "case": 2,
+        "bf16_token": 1044,
+        "hqq8_token": 1321,
+        "hqq8_text": " and",
+        "hqq8_token_changed": true,
+        "hqq8_selected_output_logprob_delta": 0.104694,
+        "hqq8_max_common_topk_logprob_delta": 0.265814,
+        "hqq8_max_rank_aligned_topk_logprob_delta": 0.242164,
+        "hqq8_topk_rank_changed_count": 4,
+        "hqq8_topk_membership_changed": true
+      }
+    ]
+  },
+  "decision": {
+    "material_quality_improvement": false,
+    "classification": "hqq8_g64_not_material_quality_improvement_for_nano",
+    "rationale": "HQQ8 g64 changed selected tokens on 2/3 saved 1023 payloads, worse than HQQ6 g64/g32/g16, and top-k rank drift remained 3/3. Aggregate selected-output delta improved versus HQQ6 g16 but remained worse than HQQ6 g64/g32; top-k deltas did not justify production use.",
+    "production_hqq_enabled": false
+  },
+  "artifacts": {
+    "requests": "benchmarks/20260627_1058_nemotron_nano_hqq8_g64_quality_proof_hqq8_g64_requests.tsv",
+    "runtime_attempt": "benchmarks/20260627_1058_nemotron_nano_hqq8_g64_quality_proof_runtime_attempt.tsv",
+    "consume_report": "benchmarks/20260627_1058_nemotron_nano_hqq8_g64_quality_proof_consume_report.tsv",
+    "payload_quality_summary": "benchmarks/20260627_1058_nemotron_nano_hqq8_g64_quality_proof_payload_quality_summary.tsv",
+    "topk_rank_changes": "benchmarks/20260627_1058_nemotron_nano_hqq8_g64_quality_proof_topk_rank_changes.tsv",
+    "comparison_summary": "benchmarks/20260627_1058_nemotron_nano_hqq8_g64_quality_proof_hqq8_vs_hqq6_variants.tsv",
+    "server_log": "benchmarks/20260627_1058_nemotron_nano_hqq8_g64_quality_proof_hqq8_g64_server.log",
+    "hqq8_case0_response": "benchmarks/20260627_1058_nemotron_nano_hqq8_g64_quality_proof_hqq8_g64_case0_response.json",
+    "hqq8_case1_response": "benchmarks/20260627_1058_nemotron_nano_hqq8_g64_quality_proof_hqq8_g64_case1_response.json",
+    "hqq8_case2_response": "benchmarks/20260627_1058_nemotron_nano_hqq8_g64_quality_proof_hqq8_g64_case2_response.json"
+  },
+  "final_state": {
+    "timestamp_utc": "2026-06-27T11:21:54Z",
+    "tmux": "no server running",
+    "matching_runtime_generator_curl_processes": "none",
+    "gpu_memory_used_mb": {
+      "gpu0": 15,
+      "gpu1": 11
+    },
+    "gpu_utilization_percent": {
+      "gpu0": 0,
+      "gpu1": 0
+    },
+    "disk_available_human": "614G",
+    "disk_available_bytes": 658763722752,
+    "ram_available_human": "965Gi",
+    "ram_available_bytes": 1036732280832
+  }
+}

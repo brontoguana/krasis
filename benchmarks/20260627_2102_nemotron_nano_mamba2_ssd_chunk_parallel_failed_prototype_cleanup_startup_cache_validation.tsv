@@ -1,0 +1,8 @@
+field	value
+gate	20260627_2102_nemotron_nano_mamba2_ssd_chunk_parallel_failed_prototype_cleanup
+hqq_attention_line	log:24 HQQ attention artifacts validated (115 MB cached), 27940 MB free
+marlin_reuse_line	log:29 GPU Marlin cache loaded: 15.8 GB in 10s
+marlin_generic_phase_header_present	true
+marlin_concrete_safetensors_write_marker	false
+cache_generation_flag	false
+cache_temp_or_lock_files_after_run	false

@@ -1,0 +1,8 @@
+check	result	detail
+hqq_attention_cache	pass	HQQ attention artifacts validated (115 MB cached) in both startup diagnostics.
+gpu_marlin_cache	pass	GPU Marlin cache loaded 23 layers / 15.8 GB during startup diagnostics.
+requests_absent	pass	No POST /v1 or request-received log lines in small or long startup diagnostic.
+benchmark_absent	pass	No benchmark, speed-test, or release-test path was used.
+startup_exit	pass	Both runs exited after VRAM calibration by KRASIS_STARTUP_EXIT_AFTER_CALIBRATION=1.
+krasis_temp_lock_files	pass	Final scan found no Nano Krasis .tmp/.partial/.lock files outside standing Hugging Face download metadata.
+final_gpu_idle	pass	Final snapshot 2026-06-28T10:46:16Z: GPU0 15 MB used / 32105 MB free and GPU1 11 MB used / 20043 MB free.

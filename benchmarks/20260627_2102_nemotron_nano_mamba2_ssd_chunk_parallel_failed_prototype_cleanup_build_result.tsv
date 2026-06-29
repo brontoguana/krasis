@@ -1,0 +1,8 @@
+field	value
+gate	20260627_2102_nemotron_nano_mamba2_ssd_chunk_parallel_failed_prototype_cleanup
+command	./dev build
+exit	0
+passed	true
+total_s	175
+maturin_phase_s	170
+log	benchmarks/20260627_2102_nemotron_nano_mamba2_ssd_chunk_parallel_failed_prototype_cleanup_build.log

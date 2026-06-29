@@ -1,0 +1,7 @@
+check	status	evidence
+hqq_attention_cache	pass	HQQ attention artifacts validated: 115 MB cached
+effective_marlin_cache	observed_loaded	stage header says Building GPU INT4 Marlin expert cache, but log evidence says Loading GPU Marlin cache: 23 layers and GPU Marlin cache loaded: 15.8 GB in 10s
+cache_write_evidence	not_asserted_clean	startup log contains generic Cache will be saved wording from the stage header; no Krasis temp/lock files were found in final validation
+requests	pass	no POST or Received request evidence; only endpoint advertisement was present
+benchmark_path	pass	no speed-test, release-test, reference_test, Benchmarking, or benchmark path evidence
+server_ready	pass	KRASIS SERVER READY at startup log line 908; diagnostic stopped by ./dev kill after capture

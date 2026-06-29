@@ -1,0 +1,14 @@
+check	status	detail
+summary_json	pass	Closed summary records 2011 carry-forward, Gemma 5619.6/92.43/155.69, Nano 346.5/94.48/164.75, rejected 1938 +5.472% SSD/scan regression, no implementation, no benchmark, no request, and no default-path change.
+tsv_field_counts	pass	All 20260627_2025 design TSV artifacts have consistent tab-separated field counts.
+no_new_source_markers	pass	No KRASIS_MAMBA2_SSD_CHUNK_PARALLEL, mamba2_ssd_chunk, cb_matrix_kernel, prepare_prefix_kernel, or oracle_compare implementation markers exist in src/python/dev.
+mamba2_instrumentation_preserved	pass	1908 Mamba2 substage instrumentation markers remain present in src/gpu_prefill.rs.
+diff_check_krasis	pass	git diff --check passed in krasis-nemotron-dev.
+diff_check_internal	pass	git diff --check passed in krasis-internal.
+bash_n_dev	pass	bash -n dev passed.
+protected_config_status	pass	Protected-config check unchanged: only tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf and tests/nemotron-nano-bf16-experts-a16.conf are untracked.
+no_runtime_processes	pass	No tmux server and no matching Krasis runtime/build process were present at final probe.
+no_nvidia_compute_processes	pass	nvidia-smi compute-app list was empty at final probe.
+gpu_idle	pass	GPUs idle at 15 MB / 11 MB at final probe.
+no_cache_temp_lock_files	pass	Nano cache has no .tmp, .lock, or .pending files excluding Hugging Face download locks.
+no_benchmark_request_cache_generation	pass	Runtime-not-run artifact records no benchmark, request, decode/HCS, production enablement, cache generation, or default-path change.

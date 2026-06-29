@@ -1,0 +1,4 @@
+probe	records	matched	notes
+row97_head48_d24	69	69	term probe candidate bits matched oracle bits
+row64_state0	69	69	covered by full oracle and KRASIS_MAMBA2_SSD_V5_PROBES=64:11:22:0
+row82_state14	69	69	covered by full oracle and KRASIS_MAMBA2_SSD_V5_PROBES=82:37:30:14

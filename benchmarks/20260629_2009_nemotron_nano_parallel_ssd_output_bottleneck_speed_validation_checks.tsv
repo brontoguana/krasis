@@ -1,0 +1,12 @@
+check	result	detail
+summary_json	PASS	jq parsed summary JSON
+artifact_tsv_shapes	PASS	decision/plan/build/correctness/runtime/comparison/timing TSVs have consistent field counts
+build_final	PASS	./dev build build5 exit 0 duration 181s
+selected_token_smoke	PASS	462-token reference_test selected token 1044 text comma with 12 top-k rows
+long_no_oracle_timing	PASS	39920-token startup diagnostic exit 0; 23 long records; 7765.1 tok/s
+git_diff_check_public	PASS	git diff --check in krasis-nemotron-dev passed
+git_diff_check_internal	PASS	git diff --check in krasis-internal passed
+dev_syntax	PASS	bash -n dev passed
+protected_configs	PASS	no status output for testconfigs/tests/testconfigs/krasis/testconfigs
+runtime_processes	PASS	standalone process scan found no tmux/Krasis/build/GPU compute process
+gpu_idle	PASS	GPU0 15/32607 MB, GPU1 11/20470 MB at 2026-06-29T21:30:35Z

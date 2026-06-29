@@ -1,0 +1,70 @@
+{
+  "gate": "20260628_0802_nemotron_nano_mamba2_ssd_v5_sequential_compatible_chunk_entry_design",
+  "status": "closed",
+  "opened_utc": "2026-06-28T08:02:00Z",
+  "closed_utc": "2026-06-28T08:08:37Z",
+  "scope": "static_v5_sequential_compatible_chunk_entry_design",
+  "record_first": {
+    "source_gate": "20260628_0753_nemotron_nano_mamba2_ssd_v4_full_oracle_mismatch_analysis",
+    "gemma_baseline": {
+      "prefill_tok_s": 5619.6,
+      "internal_decode_tok_s": 92.43,
+      "network_tok_s": 155.69
+    },
+    "nano_baseline": {
+      "prefill_tok_s": 346.5,
+      "internal_decode_tok_s": 94.48,
+      "network_tok_s": 164.75
+    },
+    "0753_result": {
+      "static_analysis_only": true,
+      "existing_artifacts_sufficient": true,
+      "default_ssd_path": "sequential",
+      "root_attribution": "v4 candidate entry-state/output-prior assembly used closed-form chunk0 state accumulation instead of current sequential per-token f32 recurrence",
+      "next_correction": "replace closed-form chunk-state accumulation with sequential-compatible per-token f32 recurrence for chunk entry/state propagation"
+    }
+  },
+  "constraints": {
+    "static_analysis_only": true,
+    "implementation": false,
+    "build": false,
+    "startup_run": false,
+    "benchmark": false,
+    "requests": false,
+    "decode_hcs_changes": false,
+    "production_enablement": false,
+    "default_path_change": false
+  },
+  "analysis": {
+    "existing_artifacts_sufficient": true,
+    "new_diagnostic_needed": false,
+    "design_result": "v5 should use sequential-compatible recurrent entry-state propagation, not closed-form chunk-state accumulation",
+    "state_update_order": "dt=softplus(dt+bias); A_bar=exp(A*dt); B_bar=BF16(B*dt); h=A_bar*h+B_bar*x in f32 for each token in chunk order",
+    "output_math": "unchanged: D*x plus prior from recurrent chunk-entry state plus existing local triangular BF16(CB*decay*dt)*x term",
+    "commit_contract": "candidate output/state commit only after exact full oracle success; no oracle fallback"
+  },
+  "artifacts": {
+    "source_audit": "20260628_0802_nemotron_nano_mamba2_ssd_v5_sequential_compatible_chunk_entry_design_source_audit.tsv",
+    "buffer_plan": "20260628_0802_nemotron_nano_mamba2_ssd_v5_sequential_compatible_chunk_entry_design_buffer_plan.tsv",
+    "lifecycle": "20260628_0802_nemotron_nano_mamba2_ssd_v5_sequential_compatible_chunk_entry_design_lifecycle.tsv",
+    "probe_plan": "20260628_0802_nemotron_nano_mamba2_ssd_v5_sequential_compatible_chunk_entry_design_probe_plan.tsv",
+    "oracle_commit_rules": "20260628_0802_nemotron_nano_mamba2_ssd_v5_sequential_compatible_chunk_entry_design_oracle_commit_rules.tsv",
+    "runtime_not_run": "20260628_0802_nemotron_nano_mamba2_ssd_v5_sequential_compatible_chunk_entry_design_runtime_not_run.tsv"
+  },
+  "validation": {
+    "passed": true,
+    "final_snapshot_utc": "2026-06-28T08:08:37Z",
+    "runtime_processes": false,
+    "nvidia_compute_processes": false,
+    "gpu_memory_mb": {
+      "gpu0": 15,
+      "gpu1": 11
+    },
+    "nano_temp_lock_files": false,
+    "protected_config_status": [
+      "?? tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+      "?? tests/nemotron-nano-bf16-experts-a16.conf"
+    ],
+    "validation_artifact": "20260628_0802_nemotron_nano_mamba2_ssd_v5_sequential_compatible_chunk_entry_design_validation_checks.tsv"
+  }
+}

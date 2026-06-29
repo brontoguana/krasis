@@ -1,0 +1,64 @@
+{
+  "gate": "20260628_2017_nemotron_nano_parallel_ssd_correctness_debug",
+  "opened_utc": "2026-06-28T20:17:45Z",
+  "recorded_prior_gate_first": "1647",
+  "baselines": {
+    "gemma": "5619.6 / 92.43 / 155.69",
+    "nano": "346.5 / 94.48 / 164.75"
+  },
+  "prior_gate_result": {
+    "gate": "20260628_1647_nemotron_nano_parallel_ssd_architecture_implementation",
+    "parallel_chunked_env": "KRASIS_MAMBA2_SSD_PARALLEL_CHUNKED=1",
+    "default_path_changed": false,
+    "timing_direction_promising": true,
+    "chunked_state_source_avg_ms": 14.890,
+    "serial_recurrent_source_avg_ms": 725.924,
+    "small_full_oracle_result": "failed_closed_against_serial_oracle",
+    "output_mismatches": 73071,
+    "state_mismatches": 524273
+  },
+  "scope": {
+    "mode": "guarded_correctness_debug",
+    "default_path_change": false,
+    "production_enablement": false,
+    "requests": false,
+    "speed_benchmark": false,
+    "decode_hcs": false,
+    "python_runtime_fallback": false,
+    "python_scripts_or_one_liners": false
+  },
+  "implementation": {
+    "patch_attempts": [
+      "align_chunk_state_BF16_boundary_and_FP32_entry_state",
+      "token_order_chunk_state_from_zero",
+      "accepted_output_surface_replay_bridge",
+      "token_outer_state_inner_shared_replay_tile"
+    ],
+    "default_path_changed": false,
+    "parallel_chunked_gate": "KRASIS_MAMBA2_SSD_PARALLEL_CHUNKED=1"
+  },
+  "results": {
+    "builds": [
+      {"attempt": 1, "exit": 0, "duration_s": 180},
+      {"attempt": 2, "exit": 0, "duration_s": 179},
+      {"attempt": 3, "exit": 0, "duration_s": 180},
+      {"attempt": 4, "exit": 0, "duration_s": 178}
+    ],
+    "small_full_oracle": {
+      "accepted": false,
+      "attempt4_exit": 1,
+      "attempt4_duration_s": 41,
+      "output_mismatches": 17,
+      "state_mismatches": 382618,
+      "row97_head48_d24": "exact",
+      "row64_state0": "exact",
+      "row82_state14": "state_exact_output_one_bf16_bin_off"
+    },
+    "no_long_timing_run": true,
+    "requests": 0,
+    "speed_benchmark": false,
+    "decode_hcs": false,
+    "production_enablement": false
+  },
+  "status": "closed_not_accepted"
+}

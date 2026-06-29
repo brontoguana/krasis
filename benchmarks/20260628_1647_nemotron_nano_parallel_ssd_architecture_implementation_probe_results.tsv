@@ -1,0 +1,3 @@
+probe	target	output_matches	output_candidate_bits	output_oracle_bits	state_matches	state_candidate_bits	state_oracle_bits
+oracle_probe	row=64 head=11 d=22 state_flat=0	true	0x3bb8	0x3bb8	false	0x3b90c20e	0x3b90c258
+oracle_probe	row=82 head=37 d=30 state_flat=14	false	0xbe4e	0xbe4d	false	0xbb05887b	0xbb05886e

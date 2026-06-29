@@ -1,0 +1,12 @@
+probe	field	value
+primary	target	row=64 head=11 d=22 state_flat=0
+primary	sequential_cast_formula	exp_decay * BF16(B*dt) * x
+primary	reference_cast_formula	BF16(B*exp_decay*dt) * x
+primary	seq_style_matches_sequential_gpu_bits	true
+primary	ref_style_matches_sequential_gpu_bits	false
+primary	seq_style_bits	0x3bb8
+primary	ref_style_bits	0x3bb9
+primary	sequential_gpu_bits	0x3bb8
+primary	prior_seq_minus_ref	-0.00003167754039168358
+primary	state_flat_entry_seq_minus_ref	0.000000035390257835388184
+primary	interpretation	v4 candidate correctly used sequential-compatible cast placement, but full candidate still mismatched

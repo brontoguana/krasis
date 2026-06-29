@@ -1,0 +1,93 @@
+{
+  "gate": "20260627_0853_nemotron_nano_hqq6_g16_feasibility_support",
+  "status": "closed_passed",
+  "opened_utc": "2026-06-27T08:53:00Z",
+  "closed_utc": "2026-06-27T09:07:02Z",
+  "record_first": {
+    "source_gate": "20260627_0826_nemotron_nano_hqq6_g32_quality_proof",
+    "gemma_speeds": "5619.6 / 92.43 / 155.69",
+    "hqq6_g32_http_200": "3/3",
+    "hqq6_g32_consume_rows": 69,
+    "hqq6_g32_copied_output_bytes": 1029740544,
+    "hqq6_g32_selected_token_changes": "0/3",
+    "hqq6_g32_topk_rank_drift": "3/3",
+    "g64_avg_selected_output_logprob_delta": 0.110919667,
+    "g32_avg_selected_output_logprob_delta": 0.125852,
+    "g64_max_common_topk_delta": 0.493397,
+    "g32_max_common_topk_delta": 0.578915,
+    "production_enablement": false
+  },
+  "scope": {
+    "candidate": {
+      "nbits": 6,
+      "group_size": 16
+    },
+    "actions": [
+      "inspect generator/cache/spec/runtime group-size assumptions",
+      "estimate cache size, disk, and RAM before generation",
+      "if safe, implement narrow HQQ6 g16 generator/test support",
+      "run focused expert_hqq tests and ./dev build only if source changes are made"
+    ],
+    "forbidden": [
+      "live server",
+      "cache generation",
+      "HQQ8",
+      "production HQQ",
+      "speed benchmark",
+      "fallback",
+      "decode/HCS"
+    ]
+  },
+  "inspection": {
+    "runtime_group_size_generic": true,
+    "unsupported_runtime_path_found": false,
+    "size_estimate_artifact": "benchmarks/20260627_0853_nemotron_nano_hqq6_g16_feasibility_support_size_estimate.tsv",
+    "assumption_inventory_artifact": "benchmarks/20260627_0853_nemotron_nano_hqq6_g16_feasibility_support_group_size_assumption_inventory.tsv",
+    "g16_cache_estimate_bytes": 36719028288,
+    "disk_available_before_generation_bytes": 729393119232,
+    "ram_available_before_generation_bytes": 1037494419456
+  },
+  "implementation": {
+    "source_changed": true,
+    "files": [
+      "src/weights/expert_hqq.rs"
+    ],
+    "change": "extend HQQ6 generation group-size allowlist from [32, 64] to [16, 32, 64] and add g16/fail-closed tests"
+  },
+  "validation": {
+    "test_kernels_expert_hqq": "94/0",
+    "dev_build": "passed",
+    "bash_n_dev": "passed",
+    "py_compile": "passed",
+    "cargo_fmt_check": "passed",
+    "git_diff_check_krasis": "passed",
+    "git_diff_check_internal": "passed",
+    "protected_configs": "only known pre-existing untracked tests/nemotron-nano-bf16-experts-a16.conf",
+    "validation_artifact": "benchmarks/20260627_0853_nemotron_nano_hqq6_g16_feasibility_support_validation_checks.tsv"
+  },
+  "decision": {
+    "root_decision": "hqq6_g16_generator_support_passed",
+    "runtime_kernel_blocker_found": false,
+    "generation_allowlist": [
+      16,
+      32,
+      64
+    ],
+    "hqq8_status": "still_rejected",
+    "cache_generation_attempted": false,
+    "production_enablement": false,
+    "next_gate": "all_moe_hqq6_g16_cache_spec_generation_prerequisite",
+    "decision_artifact": "benchmarks/20260627_0853_nemotron_nano_hqq6_g16_feasibility_support_root_decision.tsv"
+  },
+  "final_state": {
+    "timestamp_utc": "2026-06-27T09:07:02Z",
+    "tmux_server": "none",
+    "matching_runtime_generator_analyzer_build_processes": "none",
+    "gpu_memory_used_mb": [
+      15,
+      11
+    ],
+    "disk_available": "680G",
+    "ram_available": "965Gi"
+  }
+}

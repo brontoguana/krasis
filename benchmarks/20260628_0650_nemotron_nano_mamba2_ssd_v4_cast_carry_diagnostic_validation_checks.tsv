@@ -1,0 +1,19 @@
+check	result	evidence
+summary_closed	pass	Summary status closed with validation.passed true and final snapshot 2026-06-28T07:11:36Z.
+build_final	pass	./dev build final attempt exited 0; dev build total duration 170s.
+startup_diagnostic_final	pass	Startup diagnostic2 exited 0 after VRAM calibration by request.
+instrumentation_attempts_recorded	pass	Build1 macro-recursion failure and startup_diagnostic1 layer-scope failure are recorded as diagnostic implementation fixes.
+requests_absent	pass	No reference_test or chat completion path in startup_diagnostic2 log.
+benchmark_absent	pass	No benchmark-only path in startup_diagnostic2 log.
+optimized_path_absent	pass	No v4 chunk-parallel/optimized dispatch markers were added; only v4 cast/carry diagnostic markers exist.
+cache_reuse	pass	HQQ attention artifacts validated; GPU Marlin cache loaded 15.8 GB in 10s.
+cache_write_evidence_absent	pass	Concrete cache lines show cache load; no cache temp/lock files remained.
+cast_carry_result	pass	Sequential-style cast matched GPU bits for 300/500/39920 records; reference-style did not.
+local_tri_preflight	pass	Local triangular CPU recompute matched GPU output bits for all emitted records.
+default_path_unchanged	pass	Default SSD dispatch still launches mamba2_ssd_sequential_kernel; v4 diagnostic runs after existing sequential SSD.
+git_diff_check_krasis	pass	git diff --check passed in krasis-nemotron-dev.
+git_diff_check_internal	pass	git diff --check passed in krasis-internal.
+dev_shell_syntax	pass	bash -n dev passed.
+protected_configs	pass	Only expected tests-only Nano configs are untracked in protected config scope.
+cleanup	pass	./dev kill post-validation cleanup exited 0.
+idle_state	pass	No tmux server, no matching runtime/build process, no NVIDIA compute process, GPUs 15 MB / 11 MB.

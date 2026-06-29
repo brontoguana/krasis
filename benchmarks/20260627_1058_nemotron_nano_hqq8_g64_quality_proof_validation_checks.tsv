@@ -1,0 +1,16 @@
+check	status	details
+record_1038_first	passed	generator ok; cache bytes 33047177280; payload bytes 33046659072; 5888 tensors; nbits=8; group_size=64; layout row_major_axis1_grouped_uint8; headroom 614G/964Gi; Gemma 5619.6 / 92.43 / 155.69
+bf16_server_not_run	passed	saved BF16 1023 baseline responses reused
+endpoint_reference_test_only	passed	all quality requests were sent to /v1/internal/reference_test
+http_200_count	passed	3/3
+consume_rows	passed	69
+copied_output_bytes	passed	1029740544
+hqq8_metadata	passed	bad_nbits_rows=0; bad_group_size_rows=0; layout=row_major_axis1_grouped_uint8
+quality_comparison	passed	HQQ8 compared against BF16, HQQ6 g64, HQQ6 g32, and HQQ6 g16
+production_hqq_not_enabled	passed	diagnostic consume gate only
+forbidden_scope_scan	passed	no speed benchmark, fallback, decode/HCS, selected-expert routing, INT4/HQQ4, or k/v work
+source_changes	passed	no source changes in this gate
+focused_tests_build	not_run	no source changes were made
+cleanup_initial_dev_kill	passed	./dev kill reported zombie/reset warning, but follow-up tmux/process/NVIDIA checks were clean
+final_snapshot_utc	passed	2026-06-27T11:21:54Z
+final_tmux_process_gpu_state	passed	tmux none; matching processes none; gpu0=15MB; gpu1=11MB

@@ -1,0 +1,14 @@
+check	status	evidence
+summary_json	pass	jq confirmed closed status, build exit 0, diagnostic exit 0, row82 calibration exact count 2, state flat14 calibration exact count 2, and local_triangular_math_primary_cause=false
+tsv_shapes	pass	all 2251 TSV artifacts have consistent tab-separated field counts
+raw_oracle_json	pass	state diagnostic log contains 3 local-tri records; 2/2 calibration records match output bits and state probe f32 bits exactly
+v2_marker_absence	pass	no KRASIS_MAMBA2_SSD_CHUNK_PARALLEL_V2, CHUNK_PARALLEL_V2, mamba2_ssd_chunk_v2, or MAMBA2-SSD-CHUNK-V2 markers in Rust/CUDA/Python source
+guarded_state_probe_present	pass	KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE_STATE_FLAT and state_probe remain guarded under the local-tri oracle diagnostic
+no_request_or_benchmark_path	pass	2251 logs contain no reference_test, /v1/chat/completions, or benchmark-only evidence
+no_cache_write_evidence	pass	state diagnostic contains HQQ validation and Marlin load lines but no Building GPU INT4 Marlin cache: write line, temp, or lock evidence
+built_command_build	pass	./dev build exited 0 and reported KRASIS_BUILD_TIMING total duration_s=169
+shell_static_checks	pass	bash -n dev and git diff --check passed in nemotron-dev; git diff --check passed in krasis-internal
+protected_config_status	pass	only expected tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf and known tests/nemotron-nano-bf16-experts-a16.conf are untracked in protected-config scope
+cleanup	pass	./dev kill post-validation cleanup exit 0
+cache_temp_lock	pass	no Nano .tmp/.lock/.pending cache files outside HF download locks
+idle_state	pass	final snapshot 2026-06-27T23:10:32Z: no tmux server, no matching runtime/build process, no NVIDIA compute process, GPUs 15 MB / 11 MB, disk 588G, RAM 966Gi available

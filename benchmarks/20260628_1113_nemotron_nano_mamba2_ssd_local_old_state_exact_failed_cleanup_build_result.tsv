@@ -1,0 +1,6 @@
+metric	value
+command	./dev build
+exit_code	0
+duration_s	177
+result	pass
+notes	release build completed through built dev command; existing warnings only

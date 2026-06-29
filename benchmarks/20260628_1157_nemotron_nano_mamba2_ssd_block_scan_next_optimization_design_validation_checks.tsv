@@ -1,0 +1,10 @@
+check	status	detail
+record_first	pass	1128 carried first with exact correctness and subloop split; baselines Gemma 5619.6/92.43/155.69 and Nano 346.5/94.48/164.75 recorded.
+static_only	pass	No implementation, build, startup diagnostic, benchmark, request, decode/HCS work, production enablement, or default-path change.
+artifact_shape	pass	Summary JSON and TSV artifacts validated with consistent tab-separated fields.
+runtime_artifact_absence	pass	No 1157 build/startup/runtime/request/benchmark artifacts exist.
+source_marker_absence	pass	No coeff-tile/probe implementation markers were added to source.
+diff_check	pass	git diff --check, bash -n dev, and krasis-internal diff check passed.
+protected_configs	pass	Protected config status unchanged; expected tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf remains untracked.
+temp_lock_scan	pass	No Nano Krasis temp/lock files found.
+idle_state	pass	2026-06-28T12:05:06Z GPUs 15 MB / 11 MB; no runtime/build/GPU compute process observed.

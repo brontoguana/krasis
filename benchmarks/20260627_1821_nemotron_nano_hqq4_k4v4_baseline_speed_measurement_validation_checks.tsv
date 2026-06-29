@@ -1,0 +1,16 @@
+check	status	detail
+summary_json	pass	status closed_benchmark_completed; internal prefill 346.5; internal decode 94.48
+speed_summary	pass	prefill/decode/round-trip classes present and separated
+prefill_run_count	pass	6 prefill rows
+decode_run_count	pass	3 decode rows
+round_trip_run_count	pass	3 network rows
+decode_timing_disabled	pass	no --timing / KRASIS_DECODE_TIMING enabled evidence in logs
+cache_rebuild_flags_absent	pass	no --build-cache / --force-rebuild-hqq-cache evidence in command/logs
+cache_write_absent	pass	no safetensors Marlin cache build/write line in benchmark logs
+benchmark_exit	pass	exit code 0
+bash_syntax	pass	bash -n dev
+repo_diff_check_krasis	pass	git diff --check
+repo_diff_check_internal	pass	git diff --check
+protected_config_check	pass	only tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf plus known tests/nemotron-nano-bf16-experts-a16.conf
+cleanup_idle	pass	2026-06-27T18:43:21Z no tmux/runtime/NVIDIA compute process; GPUs 15 MB / 11 MB
+cache_temp_lock_absent	pass	no .tmp/.lock/.pending files under Nano cache dir

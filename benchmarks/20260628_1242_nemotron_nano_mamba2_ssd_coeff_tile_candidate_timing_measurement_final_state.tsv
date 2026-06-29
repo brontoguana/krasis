@@ -1,0 +1,2 @@
+snapshot_utc	gpu0_used_mb	gpu1_used_mb	active_processes	active_tmux	notes
+2026-06-28T13:03:26Z	15	11	0	0	final post-stamp validation snapshot; only standing HF download lock metadata observed

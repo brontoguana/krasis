@@ -1,0 +1,26 @@
+field	value
+status	checkpointed_combined_run_read_only_confirmed
+variant	hqq6_g32
+case	0
+endpoint	/v1/internal/reference_test
+http_status	200
+selected_token	1044
+selected_text	,
+margin_1044_minus_1321	0.6258100000000002
+saved_bf16_margin_1044_minus_1321	0.300523758
+margin_shift_vs_bf16	0.3252862420000002
+first_token_margin_projection	present
+read_only_checkpoints	present
+layer_delta_checkpoints	23
+pre_post_hashes	23/23 match
+mutation_point_exposed	false
+final_hidden_hash	0xc0317cde307060bf
+lm_head_row_difference_hash	0xaa7ef9987a8fa6a7
+old_1244_uncheckpointed_flip_reproduced	false
+note	Checkpointed combined diagnostic run selected 1044 and exposed no pre/post layer-delta hash mutation; this does not identify a source span for the older uncheckpointed 1244 flip.
+g64_run	false
+cache_generation	false
+new_variants	false
+production_enablement	false
+speed_benchmark	false
+decode_hcs	false

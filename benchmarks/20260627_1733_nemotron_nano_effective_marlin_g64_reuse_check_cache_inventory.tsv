@@ -1,0 +1,10 @@
+item	value	detail
+pre_run_utc	2026-06-27T17:35:25Z	recorded before startup-only run
+hqq_attention_manifest	/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/attention_hqq_v5_grid65_33/manifest.json	124198 bytes; mtime 2026-06-27 18:23:27.074673424 +0100
+effective_marlin_g64	/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/experts_marlin_int4_g64_calamax.bin	15849200704 bytes; mtime 2026-06-27 18:24:07.467816558 +0100
+effective_marlin_g64_header_group_size	64	read from cache header offset 40
+requested_marlin_g128	/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/experts_marlin_int4_g128_calamax.bin	absent before run
+tmp_or_lock_files_before_run	false	no .tmp/.lock/.pending files found
+disk_available_before_run	589G	/
+ram_available_before_run	967Gi	free -h available
+gpu_memory_before_run	15 MB / 11 MB	nvidia-smi

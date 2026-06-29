@@ -1,0 +1,175 @@
+{
+  "analysis": {
+    "case2_corrected_0524": {
+      "bf16_selected_log_prob": "-1.646874",
+      "bf16_selected_token_bf16_log_prob": "-1.646874",
+      "bf16_selected_token_delta_hqq_minus_bf16": "-0.44891400000000026",
+      "bf16_selected_token_hqq_log_prob": "-2.095788",
+      "bf16_text": ",",
+      "bf16_token_id": "1044",
+      "hqq_selected_token_bf16_log_prob": "-2.017382",
+      "hqq_selected_token_delta_hqq_minus_bf16": "0.16390799999999994",
+      "hqq_selected_token_hqq_log_prob": "-1.853474",
+      "hqq_sync_selected_log_prob": "-1.853474",
+      "hqq_sync_text": " and",
+      "hqq_sync_token_id": "1321",
+      "matches_previous_0427_hqq_token": "True",
+      "max_common_topk_log_prob_abs_delta": "0.49339699999999986",
+      "max_common_topk_log_prob_abs_delta_token_id": "1307",
+      "max_common_topk_log_prob_signed_delta_hqq_minus_bf16": "-0.49339699999999986",
+      "previous_0427_hqq_token_id": "1321",
+      "selected_log_prob_delta_hqq_minus_bf16": "-0.20660000000000012",
+      "token_id_changed": "True"
+    },
+    "cases": 3,
+    "exact_row_attribution_summary": {
+      "attribution": "hqq_gpu_matches_krhq_dequant_math_at_output; divergence is attributable to HQQ6 dequantized-weight math versus captured BF16 expert output",
+      "captured_rows": "7",
+      "layer_idx": "51",
+      "requested_col": "1599",
+      "requested_expert_idx": "60",
+      "requested_sorted_row": "1837",
+      "selected_bf16_value": "4.858269319683313370e2",
+      "selected_bf16_vs_hqq_gpu_abs": "9.107767626643180847e0",
+      "selected_contributors": "6",
+      "selected_hqq_gpu_value": "4.949346995949745178e2",
+      "selected_hqq_gpu_vs_krhq_abs": "0.000000000000000000e0",
+      "selected_krhq_value": "4.949346995949745178e2",
+      "status": "ok",
+      "worst_bf16_value_at_col": "1.072000000000000000e3",
+      "worst_bf16_vs_hqq_gpu_abs_at_col": "3.200000000000000000e1",
+      "worst_hqq_gpu_value_at_col": "1.104000000000000000e3",
+      "worst_hqq_gpu_vs_krhq_abs_at_col": "0.000000000000000000e0",
+      "worst_krhq_value_at_col": "1.104000000000000000e3"
+    },
+    "layer51_worst_layer_summary": {
+      "checked_experts": "17",
+      "consumed_blocks": "17",
+      "consumed_rows": "2676",
+      "expert_out_actual_at_max": "1104.0",
+      "expert_out_expected_at_max": "1072.0",
+      "expert_out_max_abs": "32.0",
+      "expert_out_max_abs_index": "4939455",
+      "expert_out_sum_abs": "1231538.9078198522",
+      "layer": "51",
+      "output_max_abs": "0.0",
+      "rank_by_expert_out_max": "1",
+      "routed_max_abs": "9.1077880859375",
+      "routed_sum_abs": "512.6837208271027",
+      "scatter_max_abs": "3.814697265625e-06"
+    },
+    "live_server_run": false,
+    "max_common_topk_logprob_abs_delta_from_json": 0.493397,
+    "max_selected_logprob_abs_delta_0427": 0.20660000000000012,
+    "max_topk_logprob_abs_delta_0427": 0.42908800000000014,
+    "selected_token_changed_cases": 1,
+    "source_artifacts_used": [
+      "benchmarks/20260627_0427_nemotron_nano_guarded_hqq_prefill_output_consumption_proof_bf16_vs_hqq_consumed_response_comparison.tsv",
+      "benchmarks/20260627_0524_nemotron_nano_hqq_consume_boundary_diagnosis_sync_response_comparison.tsv",
+      "benchmarks/20260627_0629_nemotron_nano_hqq6_quantization_error_attribution_worst_layer_summary.tsv",
+      "benchmarks/20260627_0640_nemotron_nano_hqq6_exact_row_quantization_attribution_row_attribution_summary.tsv"
+    ],
+    "source_changes": false,
+    "topk_rank_changed_cases": 3,
+    "topk_token_set_changed_cases": 1
+  },
+  "artifacts": {
+    "decision": "benchmarks/20260627_0728_nemotron_nano_hqq6_quality_acceptance_root_decision.tsv",
+    "layer51_expert60_concentration_evidence": "benchmarks/20260627_0728_nemotron_nano_hqq6_quality_acceptance_layer51_expert60_concentration_evidence.tsv",
+    "payload_quality_summary": "benchmarks/20260627_0728_nemotron_nano_hqq6_quality_acceptance_payload_quality_summary.tsv",
+    "summary": "benchmarks/20260627_0728_nemotron_nano_hqq6_quality_acceptance_summary.json",
+    "topk_rank_changes": "benchmarks/20260627_0728_nemotron_nano_hqq6_quality_acceptance_topk_rank_changes.tsv",
+    "validation": "benchmarks/20260627_0728_nemotron_nano_hqq6_quality_acceptance_validation_checks.tsv"
+  },
+  "closed_utc": "2026-06-27T07:34:00Z",
+  "decision": {
+    "concentration": "case2 proven concentrated at layer 51/expert 60 worst attribution path; cases0/1 not per-layer-attributed from existing artifacts",
+    "hqq6_g64_for_nano": "implementation_correct_but_quality_failing",
+    "move_to_next_quantization_variant": true,
+    "rationale": "HQQ GPU matches KRHQ/HQQ6 offline exactly at the attributed path, but all 3/3 saved 1023 payloads change top-k ordering/ranks, 1/3 changes top-k membership, and case 2 changes the selected token with material logprob shifts.",
+    "skip_hqq6_g64_for_nano_production": true
+  },
+  "final_state": {
+    "gpu_memory_free_mb": [
+      32105,
+      20043
+    ],
+    "gpu_memory_used_mb": [
+      15,
+      11
+    ],
+    "gpu_utilization_percent": [
+      0,
+      0
+    ],
+    "matching_processes": "none",
+    "tmux": "no server running on /tmp/tmux-1000/default"
+  },
+  "forbidden": {
+    "decode_hcs": true,
+    "fallback": true,
+    "int4_hqq4_code": true,
+    "live_server_initially": true,
+    "production_hqq": true,
+    "speed_benchmark": true,
+    "tolerance_change": true
+  },
+  "gate": "HQQ6 quality/acceptance",
+  "label": "20260627_0728_nemotron_nano_hqq6_quality_acceptance",
+  "opened_utc": "2026-06-27T07:28:00Z",
+  "planned_work": {
+    "artifact_inputs": [
+      "0427 guarded HQQ prefill output-consumption proof",
+      "0524 consume-boundary diagnosis",
+      "0640 targeted exact-row HQQ6 quantization attribution"
+    ],
+    "decision": "determine whether HQQ6 g64 is implementation-correct but quality-failing for Nano and whether to skip it for the next quantization variant",
+    "diagnostic_extraction_only_if_existing_artifacts_are_insufficient": true,
+    "live_server_initially": false,
+    "summaries": [
+      "selected token changes for all three saved 1023 payloads",
+      "top-k rank changes for all three saved 1023 payloads",
+      "selected and top-k logprob deltas",
+      "whether observed deltas concentrate in the layer 51 / expert 60 attribution path"
+    ]
+  },
+  "record_first": {
+    "dev_build": "passed",
+    "gemma_speed": "5619.6 / 92.43 / 155.69",
+    "hqq_gpu_equals_krhq_offline": true,
+    "previous_gate": "0640",
+    "production_enablement": "none",
+    "selected_routed_delta": {
+      "abs_delta": 9.10776762664318,
+      "bf16": 485.82693196833134,
+      "hqq": 494.9346995949745
+    },
+    "test_kernels_expert_hqq": "92/0",
+    "worst_row": {
+      "bf16": 1072.0,
+      "col": 1599,
+      "expert": 60,
+      "hqq": 1104.0,
+      "krhq": 1104.0,
+      "layer": 51,
+      "sorted_row": 1837
+    }
+  },
+  "status": "closed",
+  "validation": {
+    "artifact_assertions": "passed",
+    "bash_n_dev": "passed",
+    "cargo_fmt_check": "passed",
+    "cleanup": "passed",
+    "dev_build": "not_run",
+    "final_idle_snapshot": "passed",
+    "git_diff_check": "passed",
+    "internal_diff_check": "passed",
+    "live_server": "not_run",
+    "protected_config_status": "passed",
+    "py_compile": "passed",
+    "record_first_0640": "passed",
+    "source_changes": "not_run",
+    "test_kernels_expert_hqq": "not_run"
+  }
+}

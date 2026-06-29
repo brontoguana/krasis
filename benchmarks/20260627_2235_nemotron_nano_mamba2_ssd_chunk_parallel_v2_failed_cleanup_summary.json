@@ -1,0 +1,115 @@
+{
+  "gate": "20260627_2235_nemotron_nano_mamba2_ssd_chunk_parallel_v2_failed_cleanup",
+  "status": "closed",
+  "opened_utc": "2026-06-27T22:36:20Z",
+  "closed_utc": "2026-06-27T22:46:29Z",
+  "record_first": {
+    "source_gate": "20260627_2213_nemotron_nano_mamba2_ssd_chunk_parallel_v2_prototype",
+    "build": {
+      "command": "./dev build",
+      "exit": 0,
+      "duration_s": 175
+    },
+    "term_preflight": {
+      "passed": true,
+      "row": 70,
+      "head": 37,
+      "d": 50,
+      "chunk_start": 64,
+      "chunk_pos": 6
+    },
+    "full_oracle": {
+      "result": "failed_closed",
+      "layer": 0,
+      "output_first_mismatch": {
+        "row": 82,
+        "head": 37,
+        "d": 30
+      },
+      "output_max_abs": 0.25,
+      "output_mean_abs": 0.000000479,
+      "state_mismatches": 143240,
+      "state_max_abs": 0.000244141,
+      "state_mean_abs": 0.000000021,
+      "state_first_mismatch": {
+        "head": 0,
+        "d": 0,
+        "state": 14
+      }
+    },
+    "long_diagnostic_run": false
+  },
+  "scope": {
+    "revert_only_v2_additions": true,
+    "preserve_1908_substage_instrumentation": true,
+    "preserve_2149_local_triangular_diagnostic_unless_entangled": true,
+    "preserve_artifacts": true,
+    "smoke_requests": false,
+    "speed_benchmark": false,
+    "decode_hcs": false,
+    "production_enablement": false
+  },
+  "cleanup": {
+    "cuda_v2_kernels_removed": true,
+    "rust_v2_env_temp_buffers_oracle_dispatch_symbols_removed": true,
+    "python_v2_warmup_fail_closed_removed": true,
+    "source_v2_markers_remaining": false,
+    "local_triangular_diagnostic_preserved": true,
+    "mamba2_substage_instrumentation_preserved": true
+  },
+  "build": {
+    "command": "./dev build",
+    "exit": 0,
+    "duration_s": 175,
+    "log": "20260627_2235_nemotron_nano_mamba2_ssd_chunk_parallel_v2_failed_cleanup_build.log"
+  },
+  "startup_diagnostic": {
+    "command": "env -u KRASIS_MAMBA2_SSD_CHUNK_PARALLEL_V2 -u KRASIS_MAMBA2_SSD_CHUNK_PARALLEL_V2_ORACLE KRASIS_STARTUP_DIAG=1 KRASIS_PREFILL_TIMING=1 KRASIS_PREFILL_LIVENESS_TIMING=1 KRASIS_STARTUP_WARMUP_TOKENS=128 KRASIS_STARTUP_CAL_SHORT_TOKENS=128 KRASIS_STARTUP_CAL_LONG_TOKENS=256 KRASIS_STARTUP_EXIT_AFTER_CALIBRATION=1 ./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+    "exit": 0,
+    "requests_sent": 0,
+    "benchmark_path": false,
+    "cache_reuse": {
+      "hqq_attention": "validated_from_cache",
+      "marlin": "effective_g64_loaded",
+      "cache_write_evidence": false
+    },
+    "default_ssd": {
+      "path": "sequential",
+      "short_ssd_scan_ms": 293.5,
+      "long_ssd_scan_ms": 674.3,
+      "calls": 23
+    },
+    "v2_runtime_markers": false,
+    "log": "20260627_2235_nemotron_nano_mamba2_ssd_chunk_parallel_v2_failed_cleanup_startup_diagnostic.log"
+  },
+  "decision": {
+    "result": "cleanup_passed",
+    "default_path": "sequential_ssd",
+    "prototype_v2": "removed_from_source"
+  },
+  "artifacts": {
+    "build_result": "20260627_2235_nemotron_nano_mamba2_ssd_chunk_parallel_v2_failed_cleanup_build_result.tsv",
+    "runtime_attempt": "20260627_2235_nemotron_nano_mamba2_ssd_chunk_parallel_v2_failed_cleanup_runtime_attempt.tsv",
+    "startup_cache_validation": "20260627_2235_nemotron_nano_mamba2_ssd_chunk_parallel_v2_failed_cleanup_startup_cache_validation.tsv",
+    "source_artifacts": "20260627_2235_nemotron_nano_mamba2_ssd_chunk_parallel_v2_failed_cleanup_source_artifacts.tsv",
+    "decision": "20260627_2235_nemotron_nano_mamba2_ssd_chunk_parallel_v2_failed_cleanup_root_decision.tsv",
+    "validation": "20260627_2235_nemotron_nano_mamba2_ssd_chunk_parallel_v2_failed_cleanup_validation_checks.tsv",
+    "build_log": "20260627_2235_nemotron_nano_mamba2_ssd_chunk_parallel_v2_failed_cleanup_build.log",
+    "startup_diagnostic_log": "20260627_2235_nemotron_nano_mamba2_ssd_chunk_parallel_v2_failed_cleanup_startup_diagnostic.log"
+  },
+  "validation": {
+    "passed": true,
+    "final_snapshot_utc": "2026-06-27T22:49:22Z"
+  },
+  "final_state": {
+    "snapshot_utc": "2026-06-27T22:49:22Z",
+    "disk_free": "588G",
+    "ram_available": "966Gi",
+    "gpu0_used_mb": 15,
+    "gpu1_used_mb": 11,
+    "runtime_processes": false,
+    "nvidia_compute_processes": false,
+    "tmux_server": false,
+    "nano_temp_lock_files": false
+  }
+}

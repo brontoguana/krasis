@@ -1,0 +1,17 @@
+area	status	source_span
+prototype env helpers	removed	no KRASIS_MAMBA2_SSD_REUSE_PROTO matches in src/gpu_prefill.rs or python/krasis/server.py
+prototype oracle structs	removed	no Mamba2SsdOracle matches in src/gpu_prefill.rs
+prototype log marker	removed	no MAMBA2-SSD-PROTO matches in source
+CUDA prototype kernel	removed	no mamba2_ssd_head_shared_kernel matches in source
+CUDA prototype wrapper	removed	no krasis_mamba2_ssd_head_shared_fwd matches in source
+Python warmup fail-closed prototype handling	removed	python/krasis/server.py:1738
+Mamba2 timing stage constants	preserved	src/gpu_prefill.rs:79
+Mamba2 substage liveness print	preserved	src/gpu_prefill.rs:31233
+Mamba2 timing summary print	preserved	src/gpu_prefill.rs:20594
+Rust sequential SSD dispatch	active	src/gpu_prefill.rs:30364
+Rust SSD timing bracket	active	src/gpu_prefill.rs:30316
+Rust SSD timing finish	active	src/gpu_prefill.rs:30390
+required PTX symbols	sequential_only	src/gpu_prefill.rs:52202
+kernel loader	sequential_only	src/gpu_prefill.rs:52614
+CUDA sequential kernel	active	src/cuda/prefill_kernels.cu:4968
+CUDA sequential host wrapper	active	src/cuda/prefill_kernels.cu:5552

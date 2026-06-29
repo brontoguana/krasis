@@ -1,0 +1,23 @@
+category	field	value
+gate	result	fail_closed
+gate	long_diagnostic_run	false
+candidate	kernel_wall_ms	19.186617
+candidate	cast_placement	exp_decay * BF16(B*dt) * x
+output	mismatches	55
+output	max_abs	2.0
+output	mean_abs	0.000009420169817531132
+output	first_mismatch	row=64 head=11 d=22 flat=262870
+output	first_candidate_bits	0x3bb7
+output	first_sequential_bits	0x3bb8
+output	first_abs_error	0.000030517578125
+state	mismatches	506113
+state	max_abs	0.0048828125
+state	mean_abs	0.0000016492683093835812
+state	first_mismatch	flat=0 head=0 d=0 state=0
+state	first_candidate_bits	0x3b90c25a
+state	first_sequential_bits	0x3b90c258
+state	first_abs_error	0.0000000009313225746154785
+probe_primary	output	row=64 head=11 d=22 candidate=0x3bb7 sequential=0x3bb8 abs=0.000030517578125
+probe_primary	state	flat=0 candidate=0x3b90c25a sequential=0x3b90c258 abs=0.0000000009313225746154785
+probe_secondary	output	row=82 head=37 d=30 candidate=0xbe4e sequential=0xbe4d abs=0.0009765625
+probe_secondary	state	flat=14 candidate=0xbb058870 sequential=0xbb05886e abs=0.0000000004656612873077393

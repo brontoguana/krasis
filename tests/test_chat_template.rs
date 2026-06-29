@@ -43,7 +43,11 @@ fn qwen36_preserve_thinking_is_defined_false() {
     let config_path = write_tokenizer_config(template, "preserve");
     let engine = ChatTemplateEngine::from_config(&config_path).unwrap();
     let rendered = engine
-        .apply(r#"[{"role":"assistant","content":"old reasoning"}]"#, false, false)
+        .apply(
+            r#"[{"role":"assistant","content":"old reasoning"}]"#,
+            false,
+            false,
+        )
         .unwrap();
     assert_eq!(rendered, "DROP:old reasoning");
 }
@@ -74,6 +78,7 @@ fn text_content_parts_are_flattened_for_templates() {
     let template = "{% for message in messages %}{{ message.content }}{% endfor %}";
     let config_path = write_tokenizer_config(template, "text_parts");
     let engine = ChatTemplateEngine::from_config(&config_path).unwrap();
-    let messages = r#"[{"role":"user","content":[{"type":"text","text":"Hello"},{"text":" world"}]}]"#;
+    let messages =
+        r#"[{"role":"user","content":[{"type":"text","text":"Hello"},{"text":" world"}]}]"#;
     assert_eq!(engine.apply(messages, false, false).unwrap(), "Hello world");
 }

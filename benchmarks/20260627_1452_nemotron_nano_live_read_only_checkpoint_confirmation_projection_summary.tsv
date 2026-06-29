@@ -1,0 +1,2 @@
+case	variant	projection_available	token_a	token_b	downloaded_margin	projection_raw_margin	projection_softcapped_margin	selected_hidden_hash	lm_head_row_diff_hash	layer_delta_available	layer_delta_count
+0	hqq6_g32	true	1044	1321	0.6258096694946289	0.625808282289654	0.625808282289654	0xc0317cde307060bf	0xaa7ef9987a8fa6a7	true	23

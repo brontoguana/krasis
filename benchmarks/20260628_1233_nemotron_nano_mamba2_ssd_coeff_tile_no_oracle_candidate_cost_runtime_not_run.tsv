@@ -1,0 +1,6 @@
+command	status	reason
+no_oracle_coeff_tile_long_startup	not_run	Existing envs do not support KRASIS_MAMBA2_SSD_BLOCK_SCAN=1 without KRASIS_MAMBA2_SSD_BLOCK_SCAN_ORACLE=1; running would only prove the known guard error.
+build	not_run	No source changes were made in this gate.
+startup_diagnostic	not_run	No supported no-oracle timing env exists yet.
+requests	not_run	Forbidden by gate scope.
+speed_benchmark	not_run	Forbidden by gate scope.

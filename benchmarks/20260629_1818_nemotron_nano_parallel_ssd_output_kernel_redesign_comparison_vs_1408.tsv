@@ -1,0 +1,5 @@
+metric	baseline_1408_ms	bychunk_1818_ms	delta_ms	delta_pct
+total_candidate	656.021773	178.282809	-477.738964	-72.8%
+output_kernel	627.435713	149.472189	-477.963524	-76.2%
+recurrent_total	12.637921	12.676763	0.038842	0.3%
+exact_state_bridge	0.000000	0.000000	0.000000	NA

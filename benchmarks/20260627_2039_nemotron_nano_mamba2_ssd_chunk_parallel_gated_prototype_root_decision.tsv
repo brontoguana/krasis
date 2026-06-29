@@ -1,0 +1,8 @@
+field	value
+gate	20260627_2039_nemotron_nano_mamba2_ssd_chunk_parallel_gated_prototype
+decision	prototype_correctness_failed
+worth_keeping	false
+default_path_changed	false
+long_diagnostic_allowed	false
+recommended_next_gate	revert_or_replace_chunk_parallel_candidate
+reason	Candidate produced output and final state but mismatched the existing sequential oracle in the small diagnostic.

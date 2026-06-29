@@ -1,0 +1,3 @@
+run	cache_reuse	default_path	requests	benchmark	vram_final	notes
+small_full_oracle	HQQ attention reused; effective Marlin g64 loaded	default sequential unchanged; block-scan only under env	0	no	15 MB / 11 MB after cleanup	startup diagnostic only
+long_candidate_timing	HQQ attention reused; effective Marlin g64 loaded	default sequential unchanged; block-scan only under env	0	no	15 MB / 11 MB after cleanup	no-oracle timing, output-subloop disabled

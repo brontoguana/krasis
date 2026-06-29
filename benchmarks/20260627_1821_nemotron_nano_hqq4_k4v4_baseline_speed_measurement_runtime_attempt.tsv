@@ -1,0 +1,2 @@
+attempt	command	config	timing_flag	cache_rebuild_flags	exit_code	run_dir	result
+1	./dev benchmark tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf	tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf	false	false	0	logs/dev-benchmark_20260627_192351	completed

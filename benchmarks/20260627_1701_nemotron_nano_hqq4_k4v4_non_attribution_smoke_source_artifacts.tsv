@@ -1,0 +1,9 @@
+artifact_role	path	notes
+tests_only_config	tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf	created in 1648; reused here
+hqq_attention_manifest	/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/attention_hqq_v5_grid65_33/manifest.json	complete HQQ4 g128 manifest from 1648
+case0_request	benchmarks/20260627_0427_nemotron_nano_guarded_hqq_prefill_output_consumption_proof_case0_request.json	saved raw-token request; not sent
+case1_request	benchmarks/20260627_0427_nemotron_nano_guarded_hqq_prefill_output_consumption_proof_case1_request.json	saved raw-token request; not sent
+case2_request	benchmarks/20260627_0427_nemotron_nano_guarded_hqq_prefill_output_consumption_proof_case2_request.json	saved raw-token request; intended first request but not sent
+bf16_g32_three_case_baseline	benchmarks/20260627_1540_nemotron_nano_hqq6_g32_non_attribution_quality_acceptance_three_case_smoke_summary.tsv	accepted g32 selected-token baseline and BF16 margins
+server_log	benchmarks/20260627_1701_nemotron_nano_hqq4_k4v4_non_attribution_smoke_server.log	contains HQQ attention validation and unexpected Marlin expert-cache build
+cleanup_log	benchmarks/20260627_1701_nemotron_nano_hqq4_k4v4_non_attribution_smoke_cleanup.log	cleanup after stopping before requests

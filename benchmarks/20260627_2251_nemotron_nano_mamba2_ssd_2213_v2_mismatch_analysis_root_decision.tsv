@@ -1,0 +1,12 @@
+item	value
+gate_status	closed_after_diagnostic
+optimized_path_added	no
+default_path_changed	no
+output_coordinate	row=82 head=37 d=30 flat=338270 chunk_start=64 chunk_pos=18
+state_coordinate	flat=14 head=0 d=0 state=14
+output_local_terms_result	warmup one-BF16-bit CPU/GPU local recompute mismatch; both calibration passes match exactly
+output_local_terms_delta	warmup abs_y_delta=0.0009765625 versus v2 first-output mismatch magnitude 0.25
+state_probe_result	calibration passes exact; warmup recompute differs by 2.3283064365386963e-10 only
+interpretation	local triangular output math is not the primary explanation for the v2 full-oracle mismatch
+corrected_patch_plan	focus next candidate diagnostics on chunk-entry state/carry and state-update/writeback buffer semantics; emit candidate-vs-sequential state_flat=14 and candidate output component traces before fail-closed comparison
+remaining_unknown	v2 candidate was reverted, so its intermediate candidate values for row=82/head=37/d=30 and state_flat=14 are not available from the existing artifacts

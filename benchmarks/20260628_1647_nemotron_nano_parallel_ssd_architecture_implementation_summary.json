@@ -1,0 +1,99 @@
+{
+  "gate": "20260628_1647_nemotron_nano_parallel_ssd_architecture_implementation",
+  "opened_utc": "2026-06-28T16:47:12Z",
+  "closed_utc": "2026-06-28T17:14:23Z",
+  "recorded_prior_gate_first": "1630",
+  "baselines": {
+    "gemma": "5619.6 / 92.43 / 155.69",
+    "nano": "346.5 / 94.48 / 164.75"
+  },
+  "prior_gate_result": {
+    "gate": "20260628_1630_nemotron_nano_parallel_prefill_reference_design",
+    "decision": "implement guarded chunked SSD fast-path architecture",
+    "token_logit_correctness_is_acceptance_target": true,
+    "internal_serial_state_identity_is_diagnostic": true
+  },
+  "scope": {
+    "mode": "guarded_architecture_implementation",
+    "default_path_change": false,
+    "production_enablement": false,
+    "requests": false,
+    "speed_benchmark": false,
+    "decode_hcs": false,
+    "python_runtime_fallback": false
+  },
+  "implementation": {
+    "env": "KRASIS_MAMBA2_SSD_PARALLEL_CHUNKED=1",
+    "requires_block_scan": true,
+    "requires_coeff_tile": true,
+    "requires_startup_diag": true,
+    "default_path_changed": false,
+    "full_oracle_path_preserved": true,
+    "candidate_timing_mode_preserved": true,
+    "production_enabled": false
+  },
+  "validation": {
+    "build_exit": 0,
+    "small_full_oracle_exit": 1,
+    "small_full_oracle_result": "failed_closed_against_serial_oracle",
+    "no_oracle_startup_256_exit": 0,
+    "long_no_oracle_candidate_timing_exit": 0,
+    "requests": 0,
+    "speed_benchmark": false,
+    "decode_hcs": false
+  },
+  "serial_oracle_mismatch": {
+    "output_mismatches": 73071,
+    "output_max_abs": 16.0,
+    "output_mean_abs": 0.0020988934409373883,
+    "first_output_mismatch": {
+      "row": 64,
+      "head": 1,
+      "d": 5,
+      "candidate_bits": "0xbdef",
+      "oracle_bits": "0xbdee"
+    },
+    "state_mismatches": 524273,
+    "state_max_abs": 10.61376953125,
+    "state_mean_abs": 0.0012460283959495207,
+    "first_state_mismatch": {
+      "flat": 0,
+      "head": 0,
+      "d": 0,
+      "state": 0,
+      "candidate_bits": "0x3b90c20e",
+      "oracle_bits": "0x3b90c258"
+    }
+  },
+  "long_no_oracle_candidate_timing_avg_ms": {
+    "records": 23,
+    "tokens": 39920,
+    "total_candidate_path": 555.7752003913043,
+    "chunked_recurrent_total": 14.889626260869564,
+    "chunk_cumsum": 0.5805520869565216,
+    "chunk_state": 12.971289,
+    "state_passing": 1.3365486956521742,
+    "output_kernel": 525.5645138260868,
+    "live_state_copy": 13.14796604347826,
+    "commit_copies": 0.42401539130434784,
+    "buffer_alloc_zeroed": 1.747610956521739,
+    "residual": 0.001422739130451033
+  },
+  "comparison_vs_1313_no_oracle": {
+    "total_candidate_delta_pct": -52.565553,
+    "recurrent_delta_pct": -97.948871,
+    "output_delta_pct": 21.888,
+    "acceptance_note": "not correctness-accepted; this is the guarded path to debug, not production behavior"
+  },
+  "artifacts": {
+    "build_result": "benchmarks/20260628_1647_nemotron_nano_parallel_ssd_architecture_implementation_build_result.tsv",
+    "runtime_attempt": "benchmarks/20260628_1647_nemotron_nano_parallel_ssd_architecture_implementation_runtime_attempt.tsv",
+    "oracle_correctness": "benchmarks/20260628_1647_nemotron_nano_parallel_ssd_architecture_implementation_oracle_correctness.tsv",
+    "probe_results": "benchmarks/20260628_1647_nemotron_nano_parallel_ssd_architecture_implementation_probe_results.tsv",
+    "term_probe": "benchmarks/20260628_1647_nemotron_nano_parallel_ssd_architecture_implementation_term_probe.tsv",
+    "candidate_timing_summary": "benchmarks/20260628_1647_nemotron_nano_parallel_ssd_architecture_implementation_candidate_timing_summary.tsv",
+    "timing_comparison": "benchmarks/20260628_1647_nemotron_nano_parallel_ssd_architecture_implementation_timing_comparison_vs_1313.tsv",
+    "source_artifacts": "benchmarks/20260628_1647_nemotron_nano_parallel_ssd_architecture_implementation_source_artifacts.tsv"
+  },
+  "status": "closed_prototype_debug_required"
+}

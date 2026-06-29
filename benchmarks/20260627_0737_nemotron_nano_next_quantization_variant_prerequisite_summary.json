@@ -1,0 +1,172 @@
+{
+  "gate": "next quantization variant prerequisite",
+  "label": "20260627_0737_nemotron_nano_next_quantization_variant_prerequisite",
+  "opened_utc": "2026-06-27T07:38:09Z",
+  "status": "closed_blocked_current_generator",
+  "record_first": {
+    "previous_gate": "0728",
+    "hqq6_g64_for_nano": "implementation_correct_but_quality_failing",
+    "case2_token_change": "1044 -> 1321",
+    "topk_rank_drift_payloads": "3/3",
+    "production_enablement": "none"
+  },
+  "planned_work": {
+    "inspect_existing_cache_generator_parameters": true,
+    "inspect_existing_artifacts": true,
+    "identify_smallest_next_higher_quality_variant": true,
+    "candidate_priority": [
+      "reduced group size",
+      "higher bit-width",
+      "defer k4v4/k6v6 work"
+    ],
+    "large_cache_generation_before_support_and_size_estimate": false,
+    "if_supported": "create only prerequisite cache/spec generation gate and focused tests",
+    "if_unsupported": "stop with exact generator changes required"
+  },
+  "forbidden": {
+    "live_server": true,
+    "production_hqq": true,
+    "speed_benchmark": true,
+    "fallback": true,
+    "decode_hcs": true,
+    "selected_expert_retargeting": true
+  },
+  "artifacts": {
+    "summary": "benchmarks/20260627_0737_nemotron_nano_next_quantization_variant_prerequisite_summary.json",
+    "artifact_size_estimate": "benchmarks/20260627_0737_nemotron_nano_next_quantization_variant_prerequisite_artifact_size_estimate.tsv",
+    "variant_support_matrix": "benchmarks/20260627_0737_nemotron_nano_next_quantization_variant_prerequisite_variant_support_matrix.tsv",
+    "generator_change_requirements": "benchmarks/20260627_0737_nemotron_nano_next_quantization_variant_prerequisite_generator_change_requirements.tsv",
+    "root_decision": "benchmarks/20260627_0737_nemotron_nano_next_quantization_variant_prerequisite_root_decision.tsv",
+    "hqq6_g32_generator_probe_manifest": "benchmarks/20260627_0737_nemotron_nano_next_quantization_variant_prerequisite_hqq6_g32_generator_probe_manifest.json",
+    "hqq6_g32_generator_probe_log": "benchmarks/20260627_0737_nemotron_nano_next_quantization_variant_prerequisite_hqq6_g32_generator_probe.log",
+    "hqq8_g64_generator_probe_manifest": "benchmarks/20260627_0737_nemotron_nano_next_quantization_variant_prerequisite_hqq8_g64_generator_probe_manifest.json",
+    "hqq8_g64_generator_probe_log": "benchmarks/20260627_0737_nemotron_nano_next_quantization_variant_prerequisite_hqq8_g64_generator_probe.log",
+    "validation": "benchmarks/20260627_0737_nemotron_nano_next_quantization_variant_prerequisite_validation_checks.tsv"
+  },
+  "analysis": {
+    "recommended_next_variant": "HQQ6 g32",
+    "hqq6_g32_probe": {
+      "status": "expert_hqq_cache_generate status=error",
+      "error": "expert-HQQ cache generation manifest requires group_size=64, got 32"
+    },
+    "hqq8_g64_probe": {
+      "status": "expert_hqq_cache_generate status=error",
+      "error": "expert-HQQ cache generation manifest requires nbits=6 for HQQ6, got 8"
+    },
+    "artifact_size_estimate": {
+      "hqq6_g64_baseline": {
+        "variant": "hqq6_g64_baseline",
+        "nbits": "6",
+        "group_size": "64",
+        "w13_packed_bytes_per_tensor": "3741696",
+        "w13_scales_bytes_per_tensor": "311808",
+        "w13_zeros_bytes_per_tensor": "311808",
+        "w2_packed_bytes_per_tensor": "3741696",
+        "w2_scales_bytes_per_tensor": "311808",
+        "w2_zeros_bytes_per_tensor": "311808",
+        "payload_bytes": "25702957056",
+        "estimated_cache_file_bytes": "25703475264",
+        "delta_vs_hqq6_g64_bytes": "0",
+        "payload_gib": "23.937744140625",
+        "cache_file_gib": "23.938226759433746"
+      },
+      "hqq6_g32_candidate": {
+        "variant": "hqq6_g32_candidate",
+        "nbits": "6",
+        "group_size": "32",
+        "w13_packed_bytes_per_tensor": "3741696",
+        "w13_scales_bytes_per_tensor": "623616",
+        "w13_zeros_bytes_per_tensor": "623616",
+        "w2_packed_bytes_per_tensor": "3741696",
+        "w2_scales_bytes_per_tensor": "623616",
+        "w2_zeros_bytes_per_tensor": "623616",
+        "payload_bytes": "29374808064",
+        "estimated_cache_file_bytes": "29375326272",
+        "delta_vs_hqq6_g64_bytes": "3671851008",
+        "payload_gib": "27.357421875",
+        "cache_file_gib": "27.357904493808746"
+      },
+      "hqq6_g16_reference_only": {
+        "variant": "hqq6_g16_reference_only",
+        "nbits": "6",
+        "group_size": "16",
+        "w13_packed_bytes_per_tensor": "3741696",
+        "w13_scales_bytes_per_tensor": "1247232",
+        "w13_zeros_bytes_per_tensor": "1247232",
+        "w2_packed_bytes_per_tensor": "3741696",
+        "w2_scales_bytes_per_tensor": "1247232",
+        "w2_zeros_bytes_per_tensor": "1247232",
+        "payload_bytes": "36718510080",
+        "estimated_cache_file_bytes": "36719028288",
+        "delta_vs_hqq6_g64_bytes": "11015553024",
+        "payload_gib": "34.19677734375",
+        "cache_file_gib": "34.197259962558746"
+      },
+      "hqq8_g64_higher_bitwidth": {
+        "variant": "hqq8_g64_higher_bitwidth",
+        "nbits": "8",
+        "group_size": "64",
+        "w13_packed_bytes_per_tensor": "4988928",
+        "w13_scales_bytes_per_tensor": "311808",
+        "w13_zeros_bytes_per_tensor": "311808",
+        "w2_packed_bytes_per_tensor": "4988928",
+        "w2_scales_bytes_per_tensor": "311808",
+        "w2_zeros_bytes_per_tensor": "311808",
+        "payload_bytes": "33046659072",
+        "estimated_cache_file_bytes": "33047177280",
+        "delta_vs_hqq6_g64_bytes": "7343702016",
+        "payload_gib": "30.777099609375",
+        "cache_file_gib": "30.777582228183746"
+      }
+    },
+    "disk_headroom_gb": "707G available on /",
+    "ram_headroom": "965Gi available",
+    "large_cache_generated": false,
+    "probe_cache_generated": false,
+    "reason": "current generator manifest planner hard-requires HQQ6 g64; HQQ6 g32 is the smallest next higher-quality candidate but needs a narrow generator-support gate first"
+  },
+  "decision": {
+    "status": "blocked_current_generator",
+    "recommended_next_variant": "HQQ6 g32",
+    "why": "smallest higher-quality move from failed HQQ6 g64: same bit width/kernel family, reduced group size, estimated +3.671851008 GB payload; HQQ8 g64 is larger and unsupported by builder/reference/runtime validation",
+    "large_cache_generated": "no",
+    "probe_cache_generated": "no",
+    "next_gate": "implement HQQ6 group_size manifest support plus focused fail-closed/valid g32 tests, then generate all-layer HQQ6 g32 cache/spec as prerequisite only"
+  },
+  "closed_utc": "2026-06-27T07:46:23Z",
+  "validation": {
+    "record_first_0728": "passed",
+    "artifact_assertions": "passed",
+    "hqq6_g32_generator_probe": "expected_fail_closed",
+    "hqq8_g64_generator_probe": "expected_fail_closed",
+    "large_cache_generated": "not_run",
+    "live_server": "not_run",
+    "source_changes": "not_run",
+    "test_kernels_expert_hqq": "not_run",
+    "dev_build": "not_run",
+    "bash_n_dev": "passed",
+    "py_compile": "passed",
+    "cargo_fmt_check": "passed",
+    "git_diff_check": "passed",
+    "internal_diff_check": "passed",
+    "protected_config_status": "passed",
+    "cleanup": "passed",
+    "final_idle_snapshot": "passed"
+  },
+  "final_state": {
+    "tmux": "no server running on /tmp/tmux-1000/default",
+    "matching_processes": "none",
+    "gpu_memory_used_mb": [
+      15,
+      11
+    ],
+    "gpu_memory_free_mb": [
+      32105,
+      20043
+    ],
+    "gpu_utilization_percent": [
+      0,
+      0
+    ]
+  }
+}

@@ -1,0 +1,10 @@
+surface	status	notes
+default_behavior	preserved	consume requires KRASIS_EXPERT_HQQ_PREFILL_CONSUME and reference/debug request context
+explicit_gate	added	KRASIS_EXPERT_HQQ_PREFILL_CONSUME truthy; optional KRASIS_EXPERT_HQQ_PREFILL_CONSUME_LAYERS
+cache_spec_validation	preserved	uses existing KRHQ diagnostic spec registration and runtime prefill contract
+output_consumption	diagnostic_only	copies HQQ W2 output into expert_out only under gate before scatter
+capture_full_buffers	not_used_for_consume	consume path avoids full-buffer trace downloads
+decode_hcs	untouched	no decode/HCS changes
+fallback	not_added	fail-closed contract retained
+int4_hqq4	untouched	HQQ6 g64 only
+speed_benchmark	not_run	correctness proof only

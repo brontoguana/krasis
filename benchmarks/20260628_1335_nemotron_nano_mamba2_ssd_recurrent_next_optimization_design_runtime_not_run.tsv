@@ -1,0 +1,8 @@
+item	status	reason
+build	not_run	static design gate only
+startup_diagnostic	not_run	static design gate only
+benchmark	not_run	explicitly out of scope
+requests	not_run	explicitly out of scope
+decode_hcs	not_touched	explicitly out of scope
+production_enablement	not_touched	explicitly out of scope
+default_path_change	not_touched	explicitly out of scope

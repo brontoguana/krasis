@@ -1,0 +1,8 @@
+artifact	role
+benchmarks/20260627_1701_nemotron_nano_hqq4_k4v4_non_attribution_smoke_summary.json	source 1701 carry-forward
+benchmarks/20260627_1701_nemotron_nano_hqq4_k4v4_non_attribution_smoke_server.log	source 1701 startup/cache-write evidence
+tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf	tests-only Nano HQQ4+k4v4 config
+/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/attention_hqq_v5_grid65_33/manifest.json	HQQ4 attention cache manifest
+/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/experts_marlin_int4_g64_calamax.bin	pre-existing g64 Marlin expert artifact from 1701
+benchmarks/20260627_1711_nemotron_nano_marlin_expert_cache_reuse_prerequisite_server.log	startup-only reuse attempt log
+benchmarks/20260627_1711_nemotron_nano_marlin_expert_cache_reuse_prerequisite_cleanup.log	cleanup log

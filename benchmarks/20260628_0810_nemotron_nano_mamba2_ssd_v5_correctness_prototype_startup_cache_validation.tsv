@@ -1,0 +1,3 @@
+run	hqq_attention	effective_marlin_gpu_cache	cache_temp_lock_files	requests	benchmark_path	notes
+small_startup	validated cached artifacts	GPU Marlin cache loaded	none observed after cleanup	0	no	log uses existing builder banner while loading cached GPU Marlin artifacts
+long_startup	validated cached artifacts	GPU Marlin cache loaded	none observed after cleanup	0	no	log uses existing builder banner while loading cached GPU Marlin artifacts

@@ -1,0 +1,10 @@
+line	status	evidence
+24	pass	HQQ attention artifacts validated (115 MB cached), 27940 MB free
+28	pass	Loading GPU Marlin cache: 23 layers...
+29	pass	GPU Marlin cache loaded: 15.8 GB in 10s
+safetensors_build_absent	pass	No "Building GPU INT4 Marlin cache: 23 layers from safetensors" line in diagnostic stdout.
+cache_built_absent	pass	No "GPU INT4 Marlin cache built" line in diagnostic stdout.
+reference_test_absent	pass	No /v1/internal/reference_test request path in diagnostic stdout.
+benchmark_absent	pass	No BENCHMARK COMPLETE or ./dev benchmark evidence in diagnostic stdout.
+krasis_cache_tmp_lock_absent	pass	No .tmp/.pending/.lock files under the Nano Krasis cache path after cleanup.
+huggingface_download_locks_ignored	info	Existing Hugging Face download .lock files under model .cache are unrelated to Krasis cache generation and were not counted as this run's cache temp files.

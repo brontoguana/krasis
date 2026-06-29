@@ -1,0 +1,61 @@
+[0;36m[1m=>[0m Waiting for selected GPUs (0) to clear...
+[0;32m[1mOK[0m Selected GPUs (0) clear.
+[0;36m[1m=>[0m Launching from: tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf
+[0;36m[1m=>[0m Run dir: /home/main/Documents/Claude/krasis-nemotron-dev/logs/dev-run_20260629_151832
+[0;36m[1m=>[0m Import origin check:
+krasis: /home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/__init__.py
+krasis.krasis: /home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+Pre-scan: set CUDA_VISIBLE_DEVICES=0
+Loaded config from tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf: {'model_path': '/home/main/.krasis/models/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16', 'selected_gpus': '0', 'num_gpus': 1, 'layer_group_size': 2, 'kv_dtype': 'k4v4', 'gpu_expert_bits': 4, 'cpu_expert_bits': 4, 'attention_quant': 'hqq4', 'hqq_group_size': 128, 'shared_expert_quant': 'int8', 'dense_mlp_quant': 'int8', 'lm_head_quant': 'int8', 'krasis_threads': 16, 'host': '0.0.0.0', 'port': 18012, 'enable_thinking': False, 'gpu_prefill_threshold': 300, 'vram_safety_margin': 600, 'force_load': False}
+
+[1m[36m▸ Krasis — NVIDIA-Nemotron-3-Nano-30B-A3B-BF16[0m
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 1[0m
+  [32mHCS host cache: source[0m
+  [32mSelected physical GPUs: 0 (config; CUDA_VISIBLE_DEVICES=0)[0m
+  [32mExperts: GPU INT4 g128 (amax)  |  Attention: hqq4  |  KV: k4v4[0m
+  [32mLayer groups: 2  |  KV cache: 1000 MB  |  Threads: 16[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+
+[1m[36m▸ Loading model weights[0m
+  [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=518 MB, free=31600 MB, total=32119 MB
+
+[1m[36m▸ Loading GPU weights[0m
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:0: alloc=3477 MB, reserved=3562 MB, used=4178 MB, free=27940 MB, total=32119 MB
+  [0;32mHQQ attention artifacts validated (115 MB cached), 27940 MB free[0m
+
+[1m[36m▸ Building GPU INT4 Marlin expert cache (one-time)[0m
+  [2mCache will be saved to /home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 for instant loading next time.[0m
+    Loading GPU Marlin cache: 23 layers...
+    GPU Marlin cache loaded: 15.8 GB in 10s
+  [0;32mExpert cache built in 10s — next launch will be much faster.[0m
+  [33m[VRAM after-phase2-expert-weights][0m cuda:0: alloc=3477 MB, reserved=3562 MB, used=4178 MB, free=27940 MB, total=32119 MB
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:0: alloc=3477 MB, reserved=3562 MB, used=4178 MB, free=27940 MB, total=32119 MB
+  [33m[VRAM after-kv-cache-init][0m cuda:0: alloc=4477 MB, reserved=4562 MB, used=5178 MB, free=26940 MB, total=32119 MB
+  [33m[VRAM after-full-load][0m cuda:0: alloc=4477 MB, reserved=4562 MB, used=5178 MB, free=26940 MB, total=32119 MB
+
+[1m[36m▸ CUDA runtime warmup[0m
+  [32mcuBLAS + Triton kernel compilation done[0m
+
+[1m[36m▸ Setting up GPU decode store[0m
+  [32mGPU decode store ready (addr=0x3ae7cb10)[0m
+  [32mReleased redundant GPU execution source tensors (366 MB)[0m
+  [2mVRAM monitor started (tracking warmup)[0m
+  [2mcuda:0: 0 MB total[0m
+
+[1m[36m▸ Pre-allocating Rust prefill engine[0m
+[FLA] Loading kernels for H=0 from /home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/libkrasis_fla_sm120.so
+  [32mPrefill engine scratch buffers allocated[0m
+
+[1m[36m▸ Warmup (Rust prefill engine)[0m
+  [32mStartup diag: warmup tokens=300 (default 300, token=52528)[0m
+  [32mStartup diag env: no_graph=unset, mapped_reads=unset, prefill_debug=False, prefill_timing=unset, exit_after_calibration=True[0m
+[MAMBA2-SSD-BLOCK-SCAN-TERM-PROBE] {"available":true,"coefficient_tile":{"compared_pairs_for_target_row":34,"enabled":false,"first_mismatch_kind":"none","first_mismatch_u":-1,"inline_old_at_max_or_first":0.0,"inline_tri_at_max_or_first":0.0,"max_old_coeff_delta":0.0,"max_tri_coeff_delta":0.0,"tiled_old_at_max_or_first":0.0,"tiled_tri_at_max_or_first":0.0},"components":{"D":-0.11279296875,"c_state_total_exact":-30.90070152282715,"c_state_total_exact_minus_replayed":0.0,"c_state_total_replayed":0.6839377284049988,"d_skip":0.003001570701599121,"local_hf_chunk_scan":-17.792999267578125,"local_old_state":-21.1341552734375,"prior_chunk_state":-21.1341552734375,"x_target":-0.026611328125,"y_pre_bf16":-38.92415237426758},"diagnostic":"mamba2_ssd_block_scan_c_state_total_term_probe","dimensions":{"head_dim":64,"m":300,"n_heads":64,"requested_chunk_size":64,"state_size":128},"indexing":{"chunk_idx":1,"chunk_pos":33,"chunk_start":64,"dA_target":-0.3798883557319641,"group":6},"layer":0,"output":{"candidate_bits":"0xc21c","candidate_value":-39.0,"matches":false,"oracle_bits":"0xc234","oracle_value":-45.0},"target":{"d":24,"flat":400408,"head":48,"row":97}}
+[MAMBA2-SSD-BLOCK-SCAN-ORACLE] {"diagnostic":"mamba2_ssd_block_scan_full_oracle","dimensions":{"d_inner":4096,"head_dim":64,"m":300,"n_heads":64,"output_elems":1228800,"state_elems":524288,"state_size":128},"layer":0,"output":{"first_mismatch":{"abs_error":0.00048828125,"candidate_bits":"0xbd9e","candidate_value":-0.0771484375,"d":0,"flat":262144,"head":0,"oracle_bits":"0xbd9f","oracle_value":-0.07763671875,"row":64},"max_abs":2536.0,"mean_abs":1.045678093201756,"mismatches":501907},"passed":false,"probes":[{"output":{"available":true,"candidate_bits":"0x3c35","candidate_value":0.01104736328125,"flat":262870,"matches":false,"oracle_bits":"0x3bb8","oracle_value":0.005615234375},"state":{"available":true,"candidate_bits":"0x3b90c258","candidate_value":0.004417698830366135,"d":0,"flat":0,"head":0,"matches":true,"oracle_bits":"0x3b90c258","oracle_value":0.004417698830366135,"state":0},"target":{"d":22,"head":11,"row":64,"state_flat":0}},{"output":{"available":true,"candidate_bits":"0xbded","candidate_value":-0.11572265625,"flat":338270,"matches":false,"oracle_bits":"0xbe4d","oracle_value":-0.2001953125},"state":{"available":true,"candidate_bits":"0xbb05886e","candidate_value":-0.002037550788372755,"d":0,"flat":14,"head":0,"matches":true,"oracle_bits":"0xbb05886e","oracle_value":-0.002037550788372755,"state":14},"target":{"d":30,"head":37,"row":82,"state_flat":14}}],"state":{"first_mismatch":{"abs_error":1.862645149230957e-9,"candidate_bits":"0xbc8efc91","candidate_value":-0.017454417422413826,"d":0,"flat":52,"head":0,"oracle_bits":"0xbc8efc92","oracle_value":-0.017454419285058975,"state":52},"max_abs":0.00244140625,"mean_abs":1.071408573597601e-6,"mismatches":398792},"timing_ms":{"candidate_output_download":0.489198,"candidate_state_download":0.36292399999999997,"comparison":6.457141,"full_buffer_downloads":1.646408,"oracle_output_download":0.429939,"oracle_state_download":0.364347,"output_compare":4.1063849999999995,"pre_download_sync":0.001111,"probe_build":0.012373,"state_compare":2.338383}}
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/server.py", line 3158, in <module>
+    main()
+  File "/home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/server.py", line 1731, in main
+    gpu_store.rust_prefill_tokens(
+RuntimeError: mamba2 layer 0: Mamba2 SSD v5 oracle mismatch layer 0: output mismatches=501907 max_abs=2536.000000000 mean_abs=1.045678093201756; state mismatches=398792 max_abs=0.002441406 mean_abs=0.000001071408574

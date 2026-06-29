@@ -1,0 +1,2 @@
+phase	command	exit_code	duration_s	log	notes
+build	./dev build	0	172	benchmarks/20260628_1242_nemotron_nano_mamba2_ssd_coeff_tile_candidate_timing_measurement_build.log	final build after guarded candidate-timing implementation

@@ -1,0 +1,9 @@
+stage	baseline_1908_ms	prototype_1938_ms	delta_ms	delta_pct	calls	diagnosis
+total_prefill	117356.000	123870.000	6514.000	5.551	1	prototype long prefill slower
+total_mamba2	114839.100	121117.220	6278.120	5.467	23	prototype Mamba2 envelope slower
+in_proj	213.900	227.926	14.026	6.557	23	not target
+split_extract	18.500	18.542	0.042	0.227	23	not target
+conv1d_silu	41.900	42.033	0.133	0.317	23	not target
+ssd_scan	114449.400	120711.931	6262.531	5.472	23	performance-negative target
+gated_rmsnorm	25.100	25.350	0.250	0.996	23	not target
+out_proj	90.300	91.442	1.142	1.265	23	not target

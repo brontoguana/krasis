@@ -1,0 +1,12 @@
+field	value
+gate	20260628_1058_nemotron_nano_mamba2_ssd_local_old_state_exact_correction_prototype
+command	KRASIS_STARTUP_DIAG=1 KRASIS_STARTUP_EXIT_AFTER_CALIBRATION=1 KRASIS_STARTUP_WARMUP_TOKENS=256 KRASIS_STARTUP_CAL_SHORT_TOKENS=256 KRASIS_STARTUP_CAL_LONG_TOKENS=256 KRASIS_MAMBA2_SSD_BLOCK_SCAN=1 KRASIS_MAMBA2_SSD_BLOCK_SCAN_ORACLE=1 KRASIS_MAMBA2_SSD_BLOCK_SCAN_TERM_PROBE=97:48:24 KRASIS_MAMBA2_SSD_V5_PROBES=64:11:22:0,82:37:30:14 ./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf
+exit_code	1
+duration_s	41
+result	fail_closed
+startup_ready	no
+requests_sent	0
+benchmark_path	no
+long_diagnostic_run	no
+reason	Mamba2 SSD block-scan full oracle failed during warmup; stopped per gate scope.
+log	20260628_1058_nemotron_nano_mamba2_ssd_local_old_state_exact_correction_prototype_startup_diagnostic.log

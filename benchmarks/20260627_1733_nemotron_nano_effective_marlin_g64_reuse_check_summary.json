@@ -1,0 +1,106 @@
+{
+  "gate": "20260627_1733_nemotron_nano_effective_marlin_g64_reuse_check",
+  "status": "closed_reuse_failed_before_ready",
+  "opened_utc": "2026-06-27T17:33:00Z",
+  "closed_utc": "2026-06-27T17:40:30Z",
+  "record_first": {
+    "source_gate": "20260627_1720_nemotron_nano_marlin_g128_expert_cache_generation_prerequisite",
+    "gemma_carried": "5619.6 / 92.43 / 155.69",
+    "tests_only_config": "tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+    "hqq_attention_cache_validated": true,
+    "moe_intermediate_size": 1856,
+    "requested_expert_group_size": 128,
+    "effective_expert_group_size": 64,
+    "requested_final_g128_present": false,
+    "effective_marlin_artifact": "/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/experts_marlin_int4_g64_calamax.bin",
+    "effective_marlin_bytes": 15849200704,
+    "requests_sent": 0,
+    "tmp_or_lock_files_remaining": false
+  },
+  "scope": {
+    "run_command": "./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+    "build_or_cache_flags": false,
+    "send_requests": false,
+    "attribution_checkpoint_envs_off": true,
+    "stop_condition": "Stop at READY or first cache-write evidence.",
+    "capture_hqq_attention_reuse": true,
+    "capture_effective_marlin_g64_reuse": true,
+    "if_ready_clean": "Close as smoke-unblocking.",
+    "if_rebuild_detected": "Record exact cache lookup/write mismatch and source spans.",
+    "forbidden_work": [
+      "smoke_requests",
+      "cache_generation_flags",
+      "source_changes",
+      "benchmarks",
+      "decode_hcs",
+      "production_enablement"
+    ]
+  },
+  "pre_gate_snapshot": {
+    "utc": "2026-06-27T17:35:25Z",
+    "disk_available": "589G",
+    "ram_available": "967Gi",
+    "gpu_memory": "15 MB / 11 MB"
+  },
+  "cache_inventory": {
+    "hqq_attention_manifest": "/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/attention_hqq_v5_grid65_33/manifest.json",
+    "hqq_attention_manifest_bytes": 124198,
+    "effective_marlin_g64": "/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/experts_marlin_int4_g64_calamax.bin",
+    "effective_marlin_g64_bytes": 15849200704,
+    "effective_marlin_g64_header_group_size": 64,
+    "requested_marlin_g128_present_before_run": false,
+    "tmp_or_lock_files_before_run": false
+  },
+  "runtime": {
+    "command": "./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+    "tmux_session": "nano_effective_g64_reuse",
+    "exit_code": 137,
+    "server_ready": false,
+    "requests_sent": 0,
+    "hqq_attention_reused": true,
+    "hqq_attention_validation_line": "HQQ attention artifacts validated (115 MB cached), 27940 MB free",
+    "effective_marlin_g64_present": true,
+    "effective_marlin_g64_loaded": false,
+    "cache_write_detected": true,
+    "cache_write_lines": [
+      "Building GPU INT4 Marlin expert cache (one-time)",
+      "Building GPU INT4 Marlin cache: 23 layers from safetensors"
+    ],
+    "partial_tmp_recorded": "/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/experts_marlin_int4_g128_calamax.bin.tmp",
+    "partial_tmp_bytes": 2711326528,
+    "partial_lock_recorded": "/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/experts_marlin_int4_g128_calamax.bin.lock",
+    "partial_lock_bytes": 7,
+    "partial_files_removed": true
+  },
+  "lookup_mismatch": {
+    "startup_requested_group_size": 128,
+    "startup_lookup_path": "/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/experts_marlin_int4_g128_calamax.bin",
+    "existing_effective_group_size": 64,
+    "existing_effective_path": "/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/experts_marlin_int4_g64_calamax.bin",
+    "source_summary": "The load path falls back to requested group_size for non-prequantized models before cache lookup, while the builder later reduces to effective group_size=64 and renames the cache."
+  },
+  "decision": {
+    "result": "cache_reuse_failed_before_ready",
+    "smoke_unblocked": false,
+    "reason": "HQQ attention cache reused, but startup did not reuse the effective Marlin g64 cache. It checked the requested g128 cache path, found it absent, and entered the write path.",
+    "required_next_fix": "Make startup lookup use the same runtime effective group-size calculation as the builder for non-prequantized Marlin expert caches, or persist/load effective-group metadata before lookup."
+  },
+  "validation": {
+    "hqq_attention_reuse_line": "pass",
+    "cache_write_detected": "pass",
+    "no_requests": "pass",
+    "server_ready_absent": "pass",
+    "effective_g64_still_present": "pass",
+    "partial_tmp_and_lock_removed": "pass"
+  },
+  "cleanup": {
+    "final_snapshot_utc": "2026-06-27T17:40:30Z",
+    "tmux_server": "none",
+    "matching_runtime_process": "none",
+    "nvidia_compute_process": "none",
+    "gpu_memory": "15 MB / 11 MB",
+    "disk_available": "589G",
+    "ram_available": "967Gi",
+    "cache_tmp_files_remaining": false
+  }
+}

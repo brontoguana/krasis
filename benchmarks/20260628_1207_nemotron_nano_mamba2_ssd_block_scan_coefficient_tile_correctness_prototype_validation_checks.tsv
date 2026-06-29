@@ -1,0 +1,13 @@
+check	status	evidence
+summary_json	pass	jq status closed; total oracle records 138; output/state mismatches 0/0; production_enabled false
+tsv_shape	pass	all result TSVs have stable tab field counts
+build_log	pass	./dev build log contains OK Build complete; exit code 0
+small_startup_log	pass	__EXIT_CODE__=0; 69/69 oracle records exact
+long_startup_log	pass	__EXIT_CODE__=0; 23/23 long 39920-token records exact and 69/69 total long-run oracle records exact
+request_absence	pass	no POST/GET /v1 request evidence in startup logs
+benchmark_absence	pass	no ./dev benchmark or ./dev speed-test evidence in startup logs
+source_markers	pass	coefficient-tile env/kernel present; local_old_state_exact absent; sequential SSD marker present
+diff_check	pass	git diff --check, bash -n dev, and krasis-internal diff check passed
+protected_configs	pass	unchanged expected tests-only Nano configs remain untracked
+temp_files	pass	no Nano Krasis tmp/lock/partial files outside standing HF download metadata
+idle_state	pass	2026-06-28T12:30:21Z GPUs 15 MB / 11 MB; no tmux/runtime/build/NVIDIA compute process

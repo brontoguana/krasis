@@ -1,0 +1,4 @@
+case	variant	selected_token	selected_text	token1044_logprob	token1321_logprob	margin_1044_minus_1321	margin_shift_vs_bf16	margin_shift_vs_old_g64	topk_tokens	projection_available	consume_boundary_diag	read_only_checkpoint_available
+2	bf16_saved_0427	1044	,	-1.646874	-2.017382	0.37050800000000006	0	0.6128220000000002	1044,1321,1294,1307,1562,2136,1408,1046,1513,1319	false	false	false
+2	hqq6_g64_old_quality_0427	1321	 and	-2.095788	-1.853474	-0.24231400000000014	-0.6128220000000002	0	1321,1044,1294,1562,1307,1046,5355,1513,1408,2136	false	false	false
+2	hqq6_g64_nonattr_1603	1321	 and	-2.095788	-1.853474	-0.24231400000000014	-0.6128220000000002	0	1321,1044,1294,1562,1307,1046,5355,1513,1408,2136	false	false	false

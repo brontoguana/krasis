@@ -1,0 +1,13 @@
+field	value
+decision	generated_hqq8_g64_all_moe_cache_spec_prerequisite
+status	ok
+implementation_scope	cache_spec_generation_only
+next_gate	guarded_hqq8_g64_quality_proof
+production_hqq_enabled	false
+live_server	false
+speed_benchmark	false
+fallback	false
+decode_hcs	false
+selected_expert_routing	false
+int4_hqq4	false
+kv_work	false

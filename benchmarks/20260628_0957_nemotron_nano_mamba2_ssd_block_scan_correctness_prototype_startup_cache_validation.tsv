@@ -1,0 +1,6 @@
+check	result	evidence
+attention_cache	clean_reuse	HQQ attention artifacts validated (115 MB cached)
+expert_cache	clean_load	GPU Marlin cache loaded: 15.8 GB in 10s
+cache_temp_lock_files	none	No Nano Krasis temp/lock/partial files found after cleanup, excluding standing Hugging Face download metadata
+requests	none	No POST /v1, request_id, or request handling evidence in startup diagnostic log
+benchmark_path	none	No speed-test, release-test, benchmark, or reference_test path evidence in startup diagnostic log

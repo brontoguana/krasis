@@ -1,0 +1,21 @@
+check	status	detail
+summary_json	pass	jq -e summary succeeded
+tsv_shapes	pass	runtime/oracle/probes/term/timing/comparison/source TSV field counts are consistent
+build	pass	./dev build exit 0 duration 178s
+small_full_oracle	expected_fail_closed	exit 1 against old serial oracle; output mismatches 73071; state mismatches 524273
+no_oracle_startup	pass	exit 0; guarded path committed through startup calibration at 256-token long setting
+long_no_oracle_candidate_timing	pass	exit 0 duration 59s; 23 records at 39920 tokens; no oracle/subloop/request records
+source_guards	pass	KRASIS_MAMBA2_SSD_PARALLEL_CHUNKED requires block-scan, coeff-tile, and startup diagnostic mode
+default_path	pass	default sequential SSD and non-env block-scan paths remain available
+python_fallback	pass	no Python runtime fallback added; warmup re-raises under the new env
+protected_configs	pass	only expected tests/nemotron Nano configs are untracked; no testconfigs edits
+diff_check	pass	git diff --check passed in krasis-nemotron-dev and krasis-internal
+dev_syntax	pass	bash -n dev passed
+temp_scan	pass	only standing Hugging Face download locks found; no gate-created Krasis runtime temp/lock files
+runtime_processes	pass	no Krasis/build/GPU compute process at final snapshot
+tmux	pass	no tmux session at final snapshot
+gpu_idle	pass	final snapshot 2026-06-28T17:14:23Z GPUs 15 MB / 11 MB
+requests	pass	no request path was run
+speed_benchmark	pass	no speed benchmark was run
+decode_hcs	pass	decode/HCS behavior not changed
+production_enablement	pass	no production/default enablement

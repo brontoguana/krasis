@@ -1,0 +1,7 @@
+metric	baseline_1908	prototype_1938	delta	delta_pct	result
+ssd_scan_ms	114449.400	120711.931	6262.531	5.472	slower
+ssd_scan_mean_per_layer_ms	4976.061	5248.345	272.284	5.472	slower
+prefill_wall_ms	117356.000	123870.000	6514.000	5.551	slower
+prefill_tok_s	340.000	322.300	-17.700	-5.206	slower
+correctness_mismatch_count	0	0	0	0.000	pass
+prototype_decision	keep_sequential_default	reject_as_optimization	NA	NA	revert_or_replace_in_follow_up

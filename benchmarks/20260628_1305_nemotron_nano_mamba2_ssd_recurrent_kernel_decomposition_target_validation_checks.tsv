@@ -1,0 +1,10 @@
+check	status	evidence
+json_summary	pass	status closed, source gate 1242, static result recorded
+tsv_shapes	pass	source audit, static decomposition, env decision, timing plan, runtime-not-run TSVs have consistent tab fields
+existing_instrumentation_decision	pass	1242 candidate timing exposes recurrent launch_submit/sync_wait/total only
+runtime_absent	pass	no build/startup/request/runtime artifacts produced for 1305 gate
+source_marker_absent	pass	proposed recurrent subloop env not added to source in this gate
+diff_checks	pass	git diff --check in krasis-nemotron-dev and krasis-internal, bash -n dev
+protected_configs	pass	unchanged; expected tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf status only
+temp_files	pass	no Nano Krasis temp/lock files found outside standing Hugging Face download metadata
+idle_state	pass	2026-06-28T13:11:29Z gpu0=15MB gpu1=11MB runtime_processes=0 tmux_sessions=0

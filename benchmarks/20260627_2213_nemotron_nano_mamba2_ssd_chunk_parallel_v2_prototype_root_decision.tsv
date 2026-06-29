@@ -1,0 +1,8 @@
+field	value
+decision	v2_candidate_failed_correctness
+prototype_v2_worth_keeping	false
+default_path_changed	false
+term_preflight_status	pass
+full_oracle_status	fail_closed
+reason	The corrected v2 candidate preserves runtime chunk size and matches the 2149 target term preflight, but full output/state sequential oracle mismatches on layer 0.
+next_step	Do not run performance. Analyze or replace v2 output/state math before another long diagnostic; keep default sequential path as the only valid production path.

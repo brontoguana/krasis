@@ -1,0 +1,8 @@
+item	status	detail
+implementation	not_run	Static design gate only; no source implementation was added.
+build	not_run	User explicitly requested no build.
+startup_diagnostic	not_run	User explicitly requested no runtime diagnostic.
+benchmark	not_run	User explicitly requested no benchmark or speed test.
+request	not_run	No HTTP/chat/completions requests were made.
+decode_hcs	not_touched	No decode/HCS code or runtime path was changed.
+default_path	not_touched	Default sequential SSD dispatch was not changed.

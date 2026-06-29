@@ -1,0 +1,17 @@
+check	status	evidence
+record_first	pass	1515 carry-forward recorded before live run: 2/2 HTTP 200, cases 0/2 selected 1044, positive margins, selected-token behavior restored caveat top-k drift remains.
+http_case1	pass	Case 1 returned HTTP 200 in 36.599477s.
+selected_case1	pass	Case 1 selected token 1044.
+margin_case1	pass	Case 1 margin 1044-1321 was positive at 0.642010.
+three_case_selected_smoke	pass	Cases 0/1/2 all select 1044 on the non-attribution HQQ6 g32 consume path.
+topk_caveat_recorded	pass	Three-case top-k drift remains 3/3 and is recorded as blocking quality acceptance.
+diagnostic_env_scope	pass	Projection, consume-boundary, and read-only checkpoint env gates were off; projection/checkpoint trace objects unavailable.
+consume_rows	pass	Case 1 emitted 23 HQQ consume rows and copied 365750784 bytes; three-case total is 69 rows and 1029740544 bytes.
+calibration_margin_observed	pass	Long-prefill min free was 14046 MB, well above the 600 MB safety margin.
+no_forbidden_scope	pass	No g64 run, cache generation, variants, production enablement, benchmark, decode/HCS, or selected-expert retargeting.
+bash_n_dev	pass	bash -n dev passed.
+diff_check_krasis	pass	git diff --check passed in krasis-nemotron-dev.
+diff_check_internal	pass	git diff --check passed in krasis-internal.
+protected_config_check	pass	Only known untracked tests/nemotron-nano-bf16-experts-a16.conf shown.
+cleanup_idle	pass	Final snapshot 2026-06-27T16:00:58Z: no tmux server, no matching runtime/curl/generator process, GPUs 15 MB / 11 MB.
+tests_build_not_run	not_run	No source code changed in this gate, so focused tests and ./dev build were not rerun.

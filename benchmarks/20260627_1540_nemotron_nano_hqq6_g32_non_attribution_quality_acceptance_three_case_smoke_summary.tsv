@@ -1,0 +1,5 @@
+case	bf16_selected_token	old_g32_selected_token	nonattr_selected_token	nonattr_matches_bf16_selected	margin_bf16	margin_old_g32	margin_nonattr	topk_drift_vs_bf16	nonattr_source_gate
+0	1044	1044	1044	true	0.300524	0.474478	0.585973	true	20260627_1515_nemotron_nano_hqq6_g32_production_path_stability
+1	1044	1044	1044	true	0.585266	0.495824	0.642010	true	20260627_1540_nemotron_nano_hqq6_g32_non_attribution_quality_acceptance
+2	1044	1044	1044	true	0.370508	0.069721	0.253093	true	20260627_1515_nemotron_nano_hqq6_g32_production_path_stability
+all	3/3	3/3	3/3	true	mixed	mixed	mixed	3/3	selected-token smoke restored; top-k drift remains

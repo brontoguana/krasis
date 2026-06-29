@@ -1,0 +1,2 @@
+artifact	status	oracle_records	passed_records	mismatch_records	exit_handling	notes
+small_oracle_42_output_order	pass_exact	161	161	0	server_killed_after_success	42-token full-oracle diagnostic stayed up after exact startup; stopped with ./dev kill; no output/state mismatches found

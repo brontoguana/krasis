@@ -1,0 +1,5 @@
+metric	value	unit	note
+consume_rows	23	layers	EXPERT-HQQ-CONSUME rows in server log
+copied_output_bytes	333107712	bytes	sum over 23 HQQ consume layers
+nbits	6	bits	diagnostic spec/runtime metadata
+group_size	32	rows	diagnostic spec/runtime metadata

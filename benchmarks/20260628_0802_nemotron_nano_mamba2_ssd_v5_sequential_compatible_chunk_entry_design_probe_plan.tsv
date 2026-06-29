@@ -1,0 +1,13 @@
+probe	coordinate	buffer_or_component	expected_contract
+row64_output_bits	row=64 head=11 d=22	`candidate_output` vs `oracle_output`	Must match sequential BF16 bits; retained small diagnostic expected `0x3bb8`, but implementation must compare runtime oracle not hardcode.
+row64_prior_recurrent	row=64 head=11 d=22	`C[row64] dot recurrent candidate_entry_state[chunk1]` with row prefix scale	Must match oracle prior component; this is the primary correction target.
+row64_prior_closed_form_delta	row=64 head=11 d=22	`closed_form_entry_diag` prior minus recurrent prior	Diagnostic-only; should reproduce the prior v4 drift direction and never drive accepted output.
+state_flat0_entry	state flat=0	`candidate_entry_state` after chunk0	Must match sequential recurrent entry/final state for the chunk1 boundary; retained small diagnostic expected oracle bits `0x3b90c258`.
+state_flat0_closed_form	state flat=0	`closed_form_entry_diag` after chunk0	Expected diagnostic drift toward prior v4 candidate bits `0x3b90c25a`; record delta only.
+state_flat0_final	state flat=0	`candidate_state` vs `oracle_state`	Must match exact f32 bits before any commit.
+row64_top_prior_index_78	row=64 head=11 d=22 state index=78	Recurrent and closed-form entry contribution to C dot state	Record value and contribution; `0753` identified this as a sensitive prior component.
+row82_output_bits	row=82 head=37 d=30	`candidate_output` vs `oracle_output`	Regression probe from v2/v4; must match runtime oracle exactly.
+row82_prior_local_components	row=82 head=37 d=30	Prior, local triangular, D*x, y_pre	Verify row82 did not regress while fixing row64 entry-state lifecycle.
+state_flat14_entry	state flat=14	Recurrent entry, closed-form entry, candidate final, oracle final	Regression probe from v2/v4; must match runtime oracle exact f32 bits for recurrent/final.
+full_output_compare	all output elements	`candidate_output` vs `oracle_output`	Exact BF16 bit equality; on mismatch record first row/head/d/flat and max/mean abs.
+full_state_compare	all state elements	`candidate_state` vs `oracle_state`	Exact f32 bit equality; on mismatch record first head/d/state/flat and max/mean abs.

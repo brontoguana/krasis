@@ -1,0 +1,3 @@
+case	comparison	selected_ref	selected_new	selected_changed	ref_selected_logprob	new_selected_logprob	selected_logprob_delta	ref_margin	new_margin	margin_delta	rank_changed_count	membership_changed	common_count	max_common_topk_logprob_delta	ref_topk	new_topk
+1	bf16_saved_0427_vs_nonattr_1540	1044	1044	false	-1.954504	-1.699196	0.255308	0.585266	0.642010	0.056744	1	true	9	0.398478	1044,1321,1294,1307,1562,1408,1046,2136,1513,2553	1044,1321,1294,1307,1562,1408,1046,1278,1513,2136
+1	hqq6_g32_old_quality_0826_vs_nonattr_1540	1044	1044	false	-2.107106	-1.699196	0.407910	0.495824	0.642010	0.146186	5	true	8	0.407910	1044,1321,1562,1294,1307,1408,5355,2136,2553,1513	1044,1321,1294,1307,1562,1408,1046,1278,1513,2136

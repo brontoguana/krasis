@@ -1,0 +1,136 @@
+{
+  "label": "20260627_0524_nemotron_nano_hqq_consume_boundary_diagnosis",
+  "opened_utc": "2026-06-27T05:24:00Z",
+  "record_first": {
+    "source_gate": "0427",
+    "gemma": "5619.6 / 92.43 / 155.69",
+    "focused_expert_hqq_tests": "83/0",
+    "dev_build": "passed",
+    "bf16_http_200": "3/3",
+    "hqq_http_200": "3/3",
+    "hqq_consume_rows": 69,
+    "hqq_copied_output_bytes": 1029740544,
+    "case_0_selected_token": "BF16=1044 HQQ=1044",
+    "case_1_selected_token": "BF16=1044 HQQ=1044",
+    "case_2_selected_token": "BF16=1044 HQQ=1321",
+    "max_selected_logprob_delta": 0.2066,
+    "max_topk_logprob_delta": 0.429088,
+    "production_hqq_enabled": false
+  },
+  "planned_work": {
+    "diagnose_quantization_vs_consume_scatter_layout_sync": true,
+    "capture_one_saved_1023_payload": true,
+    "capture_bf16_expert_out_before_overwrite": true,
+    "capture_hqq_copied_expert_out": true,
+    "capture_post_scatter_layer_summaries": true,
+    "allow_checksums_and_topn_if_full_capture_too_large": true,
+    "focused_tests_required_for_source_change": true,
+    "dev_build_required_for_source_change": true,
+    "minimal_live_proof_required": true
+  },
+  "forbidden": {
+    "tolerance_change": true,
+    "production_behavior_change": true,
+    "fallback": true,
+    "decode_hcs": true,
+    "int4_hqq4": true,
+    "selected_expert_retargeting": true,
+    "speed_benchmark": true
+  },
+  "status": "closed",
+  "closed_utc": "2026-06-27T06:24:00Z",
+  "implementation": {
+    "source_files_changed": [
+      "src/gpu_prefill.rs"
+    ],
+    "diagnostic_capture_added": true,
+    "boundary_capture_scope": "one saved 1023 case-2 payload, all 23 MoE layers, checksums/summaries/top-N deltas only",
+    "captured": "BF16 expert_out before HQQ overwrite, HQQ copied expert_out, CPU-derived routed scatter, GPU routed scatter, post-output conversion summary",
+    "corrective_diagnostic_sync_patch": "added explicit stream_sync before post-scatter and post-output diagnostic downloads after the first live capture proved unsynced reads were stale",
+    "production_behavior_changed": false,
+    "default_behavior_changed": false,
+    "tolerances_changed": false,
+    "fallback_added": false,
+    "decode_hcs_touched": false,
+    "int4_hqq4_touched": false,
+    "speed_benchmark_run": false
+  },
+  "validation": {
+    "focused_expert_hqq_tests": "86/0",
+    "dev_build": "passed",
+    "first_unsynced_live_attempt": "HTTP 200; exposed diagnostic capture sync bug, not used for final decision",
+    "synced_live_attempt": "HTTP 200",
+    "synced_request_time_s": "38.700786",
+    "synced_response_size_bytes": "4689414",
+    "long_calibration_prefill_s": "343.33",
+    "long_calibration_decode_s": "4.21",
+    "long_calibration_prefill_min_free_mb": "14070",
+    "synced_consume_rows": "23",
+    "synced_copied_output_bytes": "330882048"
+  },
+  "numeric_result": {
+    "moe_layers": 23,
+    "hqq6_g64_expert_out_vs_bf16": {
+      "max_layer_max_abs": 32.0,
+      "sum_abs_across_layers": 10178743.488197472
+    },
+    "selected_row_hqq_cpu_routed_vs_bf16_cpu_routed": {
+      "max_layer_max_abs": 9.1077880859375,
+      "sum_abs_across_layers": 3966.7455259748385
+    },
+    "synced_gpu_scatter_vs_cpu_scatter": {
+      "max_layer_max_abs": 7.62939453125e-06,
+      "sum_abs_across_layers": 0.006416842260478006
+    },
+    "post_output_vs_rounded_accum": {
+      "max_layer_max_abs": 0.0,
+      "sum_abs_across_layers": 0.0
+    },
+    "first_unsynced_capture": {
+      "hqq_gpu_vs_hqq_cpu_scatter_max_abs_max": 494.9346923828125,
+      "output_vs_rounded_accum_max_abs_max": 25.375
+    }
+  },
+  "response_result": {
+    "bf16_token_id": "1044",
+    "bf16_text": ",",
+    "hqq_sync_token_id": "1321",
+    "hqq_sync_text": " and",
+    "token_id_changed": "True",
+    "previous_0427_hqq_token_id": "1321",
+    "matches_previous_0427_hqq_token": "True",
+    "bf16_selected_log_prob": "-1.646874",
+    "hqq_sync_selected_log_prob": "-1.853474",
+    "selected_log_prob_delta_hqq_minus_bf16": "-0.20660000000000012",
+    "max_common_topk_log_prob_abs_delta": "0.49339699999999986",
+    "max_common_topk_log_prob_abs_delta_token_id": "1307",
+    "max_common_topk_log_prob_signed_delta_hqq_minus_bf16": "-0.49339699999999986",
+    "bf16_selected_token_bf16_log_prob": "-1.646874",
+    "bf16_selected_token_hqq_log_prob": "-2.095788",
+    "bf16_selected_token_delta_hqq_minus_bf16": "-0.44891400000000026",
+    "hqq_selected_token_bf16_log_prob": "-2.017382",
+    "hqq_selected_token_hqq_log_prob": "-1.853474",
+    "hqq_selected_token_delta_hqq_minus_bf16": "0.16390799999999994"
+  },
+  "decision": "Divergence is attributable to HQQ6 g64 quantization/local expert-output numeric deltas, not to the consume DtoD copy, scatter layout, scatter sync, or final BF16 conversion in the corrected diagnostic proof.",
+  "artifacts": {
+    "synced_layer_delta_summary": "20260627_0524_nemotron_nano_hqq_consume_boundary_diagnosis_sync_layer_delta_summary.tsv",
+    "synced_top_deltas": "20260627_0524_nemotron_nano_hqq_consume_boundary_diagnosis_sync_top_deltas.tsv",
+    "synced_response_comparison": "20260627_0524_nemotron_nano_hqq_consume_boundary_diagnosis_sync_response_comparison.tsv",
+    "synced_runtime_attempt": "20260627_0524_nemotron_nano_hqq_consume_boundary_diagnosis_sync_runtime_attempt.tsv",
+    "unsynced_layer_delta_summary": "20260627_0524_nemotron_nano_hqq_consume_boundary_diagnosis_layer_delta_summary.tsv",
+    "unsynced_response": "20260627_0524_nemotron_nano_hqq_consume_boundary_diagnosis_hqq_case2_response.json",
+    "synced_response": "20260627_0524_nemotron_nano_hqq_consume_boundary_diagnosis_hqq_sync_case2_response.json",
+    "source_contract": "20260627_0524_nemotron_nano_hqq_consume_boundary_diagnosis_source_contract.tsv",
+    "root_decision": "20260627_0524_nemotron_nano_hqq_consume_boundary_diagnosis_root_decision.tsv",
+    "validation": "20260627_0524_nemotron_nano_hqq_consume_boundary_diagnosis_validation_checks.tsv",
+    "server_log_synced": "20260627_0524_nemotron_nano_hqq_consume_boundary_diagnosis_hqq_diag_sync_server.log",
+    "server_log_unsynced": "20260627_0524_nemotron_nano_hqq_consume_boundary_diagnosis_hqq_diag_server.log"
+  },
+  "final_state": {
+    "timestamp_utc": "2026-06-27T06:24:00Z",
+    "tmux": "none",
+    "runtime_process": "none",
+    "gpu_memory_used_mb": "15 / 11"
+  }
+}

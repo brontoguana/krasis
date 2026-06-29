@@ -104,7 +104,11 @@ fn check_hugepages() {
         Ok(content) => {
             let n: usize = content.trim().parse().unwrap_or(0);
             if n > 0 {
-                log::info!("2MB hugepages: {} allocated ({:.1} GB)", n, n as f64 * 2.0 / 1024.0);
+                log::info!(
+                    "2MB hugepages: {} allocated ({:.1} GB)",
+                    n,
+                    n as f64 * 2.0 / 1024.0
+                );
             }
         }
         Err(_) => {}
@@ -132,7 +136,8 @@ fn check_memory(model_ram_gb: f64) {
 
             log::info!(
                 "System memory: {:.1} GB total, {:.1} GB available",
-                total_gb, avail_gb,
+                total_gb,
+                avail_gb,
             );
 
             if model_ram_gb > 0.0 {
@@ -141,7 +146,8 @@ fn check_memory(model_ram_gb: f64) {
                     log::warn!(
                         "INSUFFICIENT MEMORY: model needs {:.1} GB but only {:.1} GB available. \
                          System may OOM or swap heavily.",
-                        model_ram_gb, avail_gb,
+                        model_ram_gb,
+                        avail_gb,
                     );
                 } else if headroom < 32.0 {
                     log::warn!(
@@ -152,7 +158,8 @@ fn check_memory(model_ram_gb: f64) {
                 } else {
                     log::info!(
                         "Memory budget: {:.1} GB for model, {:.1} GB headroom ✓",
-                        model_ram_gb, headroom,
+                        model_ram_gb,
+                        headroom,
                     );
                 }
             }
@@ -217,7 +224,9 @@ fn check_cpu_features() {
     } else {
         log::warn!(
             "CPU features: AVX2={}, FMA={}, F16C={} — all required for decode!",
-            has_avx2, has_fma, has_f16c,
+            has_avx2,
+            has_fma,
+            has_f16c,
         );
     }
 }
@@ -243,7 +252,8 @@ pub fn log_memory_usage(label: &str) {
     };
 
     // System-level memory from /proc/meminfo
-    let (total_kb, avail_kb, cached_kb, buffers_kb) = match std::fs::read_to_string("/proc/meminfo") {
+    let (total_kb, avail_kb, cached_kb, buffers_kb) = match std::fs::read_to_string("/proc/meminfo")
+    {
         Ok(content) => {
             let mut total: u64 = 0;
             let mut avail: u64 = 0;

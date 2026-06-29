@@ -1,0 +1,16 @@
+tensor	dtype	shape_expr	nano_long_example	lifetime	notes
+x	BF16	[L, n_heads, head_dim]	[39920,64,64]	input to SSD	Post-conv x from mamba2_xbc_conv1d_silu_split.
+dt	BF16	[L, n_heads]	[39920,64]	input to SSD	Raw dt; use dt_softplus = softplus(dt + dt_bias) when enabled.
+A_log	FP32	[n_heads]	[64]	weights	A_val = -exp(A_log[head]).
+D_vec	FP32	[n_heads]	[64]	weights	Skip term D[head] * x[t,head,d].
+B_mat	BF16	[L, n_groups, state_size]	[39920,8,128]	input to SSD	Shared by heads in each group.
+C_mat	BF16	[L, n_groups, state_size]	[39920,8,128]	input to SSD	Shared by heads in each group.
+ssm_state	FP32	[n_heads, head_dim, state_size]	[64,64,128]	in/out	Chunk entry state is h0; state update must write chunk final state for decode.
+out	BF16	[L, n_heads, head_dim]	[39920,64,64]	output	Existing d_mamba2_ssd_out buffer.
+dt_softplus_chunk	FP32	[n_heads, chunk_len]	[64,<=128]	per chunk scratch	Derived from runtime chunk_len; no full-prompt allocation required.
+dA_prefix_chunk	FP32	[n_heads, chunk_len]	[64,<=128]	per chunk scratch	Inclusive prefix of A_val * dt_softplus within the current chunk.
+cb_chunk	FP32	[n_groups, chunk_len, chunk_len]	[8,<=128,<=128]	per chunk scratch	CB[t,u] = C[t,group] dot B[u,group], lower triangle used.
+chunk_entry_state	FP32	[n_heads, head_dim, state_size]	[64,64,128]	alias/read	Use current ssm_state as read-only h0 during output kernel.
+chunk_final_state	FP32	[n_heads, head_dim, state_size]	[64,64,128]	write	May write ssm_state in place after output kernel completes.
+oracle_out	BF16	[L, n_heads, head_dim]	diagnostic only	oracle scratch	Only allocate in oracle mode to compare sequential vs new output.
+oracle_state	FP32	[n_heads, head_dim, state_size]	diagnostic only	oracle scratch	Only allocate in oracle mode to compare final state.

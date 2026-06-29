@@ -1,0 +1,14 @@
+field	value
+command	./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf
+build_or_cache_flags	false
+attribution_checkpoint_envs_off	true
+requests_sent	0
+server_ready	true
+stopped_after_ready	true
+exit_file_present	false
+hqq_attention_reused	true
+effective_marlin_g64_loaded	true
+cache_write_detected	false
+actual_safetensors_build_line_present	false
+ready_line	95
+server_log	benchmarks/20260627_1742_nemotron_nano_marlin_cache_lookup_effective_group_size_fix_reuse_server.log

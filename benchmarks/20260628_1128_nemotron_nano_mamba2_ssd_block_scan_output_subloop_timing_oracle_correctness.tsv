@@ -1,0 +1,4 @@
+run	tokens	records	passed_records	output_mismatches	state_mismatches	probe_failures
+small	256	69	69	0	0	0
+long_all	mixed	69	69	0	0	0
+long_39920	39920	23	23	0	0	0

@@ -1,0 +1,11 @@
+check	status	notes
+artifact_projection_margin_summary	pass	4/4 rows have projection_available=true, layer_delta_available=true, captured_layer_count=23
+artifact_topk_movement	pass	4 result rows present
+artifact_top_layer_projection	pass	32 top-layer rows present
+artifact_top_expert_projection	pass	32 top-expert rows present
+summary_json_parse	pass	closed summary parsed and required result fields matched
+bash_n_dev	pass	shell syntax check passed
+git_diff_check_krasis	pass	no whitespace errors
+git_diff_check_internal	pass	no whitespace errors
+protected_config_check	pass	only known untracked tests/nemotron-nano-bf16-experts-a16.conf present
+cleanup_idleness	pass	2026-06-27T13:24:58Z no tmux server, no matching runtime/generator/curl/build process, no NVIDIA compute process; GPUs 15 MB / 11 MB

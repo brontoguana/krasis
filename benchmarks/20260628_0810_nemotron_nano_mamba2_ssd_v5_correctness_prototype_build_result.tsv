@@ -1,0 +1,6 @@
+artifact	metric	value	notes
+build	command	./dev build	built command only
+build	exit_code	0	exit marker normalized from tmux wrapper
+build	duration_s	176	KRASIS_BUILD_TIMING phase="dev build total"
+build	maturin_duration_s	172	KRASIS_BUILD_TIMING phase="dev maturin build"
+build_log	path	20260628_0810_nemotron_nano_mamba2_ssd_v5_correctness_prototype_build.log	full build log

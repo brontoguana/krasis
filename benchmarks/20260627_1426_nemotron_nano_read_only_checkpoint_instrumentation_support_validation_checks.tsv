@@ -1,0 +1,14 @@
+check	status	detail
+record_first	pass	Recorded 1418 first with Gemma 5619.6 / 92.43 / 155.69, no source/live changes, no combined-only mutation found, and combined attribution invalid for quality decisions.
+focused_trace_test	pass	./dev test-kernels read_only_checkpoint -> 1 passed / 0 failed; log 20260627_1426_nemotron_nano_read_only_checkpoint_instrumentation_support_trace_tests_rerun.log
+expert_hqq_tests	pass	./dev test-kernels expert_hqq -> 108 passed / 0 failed; log 20260627_1426_nemotron_nano_read_only_checkpoint_instrumentation_support_test_kernels.log
+build	pass	./dev build passed; log 20260627_1426_nemotron_nano_read_only_checkpoint_instrumentation_support_build.log
+artifact_assertions	pass	Summary JSON, implementation TSV, and validation TSV assertions passed after closeout stamping.
+bash_syntax	pass	bash -n dev passed.
+diff_whitespace	pass	git diff --check passed in krasis-nemotron-dev and krasis-internal.
+protected_config_check	pass	Only known pre-existing untracked tests/nemotron-nano-bf16-experts-a16.conf is present; krasis/testconfigs and testconfigs unchanged.
+live_server_absent	pass	No live server was run in this support gate.
+cache_generation_absent	pass	No cache generation was run in this support gate.
+forbidden_work_absent	pass	No new variants, production HQQ enablement, speed benchmark, decode/HCS, or selected-expert retargeting.
+cleanup	pass	./dev kill completed and reported all GPUs clear.
+final_snapshot	pass	2026-06-27T14:49:40Z: no tmux server, no matching runtime/build/generator process, GPUs 15 MB / 11 MB, disk 613G, RAM 965Gi.

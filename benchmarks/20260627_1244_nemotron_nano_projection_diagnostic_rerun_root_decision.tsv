@@ -1,0 +1,19 @@
+decision_key	value
+gate	20260627_1244_nemotron_nano_projection_diagnostic_rerun
+status	completed
+record_first_source	20260627_1227_nemotron_nano_projection_request_scoping_fix
+projection_trace_present	4/4
+http_200	4/4
+bf16_server_rerun	no
+hqq6_g32_result	valid projection trace; case 0 flips 1044->1321; case 2 remains 1044
+hqq6_g64_result	valid projection trace; case 0 remains 1044; case 2 flips 1044->1321
+common_boundary	token 1044 comma vs token 1321 " and"
+g32_case0_margin_shift	-0.3884630203901367
+g64_case2_margin_shift	-0.612822532684082
+g32_case0_top_negative_layers	layer40=-0.2923920260297237; layer51=-0.21036926111406729
+g64_case2_top_negative_layers	layer38=-0.3824445933639993; layer51=-0.1498680585600738
+layer51_expert60_note	g32 case0 projection -0.08048306029810348; g64 case2 projection +0.10214764244288532
+attribution_limit	immediate selected-row routed deltas projected through final LM-head row difference; not full nonlinear downstream causal decomposition
+root_pattern	margin movement is distributed across layers/experts; layer 51 participates but is not a sole final-token-margin explanation
+next_gate_if_needed	investigate why g32 case0 flips under projection+consume diagnostics despite prior g32 quality proof keeping all selected tokens stable
+forbidden_scope_respected	yes

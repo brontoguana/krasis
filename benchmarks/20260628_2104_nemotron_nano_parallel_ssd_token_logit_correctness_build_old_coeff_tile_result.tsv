@@ -1,0 +1,2 @@
+gate	attempt	command	exit_code	duration_s	log	result
+20260628_2104_nemotron_nano_parallel_ssd_token_logit_correctness	attempt_7_parallel_output_old_coeff_tile	./dev build	0	180	benchmarks/20260628_2104_nemotron_nano_parallel_ssd_token_logit_correctness_build_old_coeff_tile.log	build_passed

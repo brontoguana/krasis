@@ -1,0 +1,15 @@
+{
+  "purpose": "expert_hqq_cache_generation",
+  "model_dir": "/home/main/.krasis/models/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+  "config_hash": "0xcb80fec7613cc46a",
+  "layer_count": 23,
+  "first_layer": 1,
+  "last_layer": 51,
+  "expert_count": 128,
+  "tensor_records": 5888,
+  "nbits": 8,
+  "group_size": 64,
+  "layout": "row_major_axis1_grouped_uint8",
+  "output_cache_path": "/home/main/Documents/Claude/krasis-nemotron-dev/benchmarks/20260627_1038_nemotron_nano_hqq8_g64_all_moe_layer_cache_spec_generation_hqq8_g64_all_moe_layers.krhq",
+  "diagnostic_spec_path": "/home/main/Documents/Claude/krasis-nemotron-dev/benchmarks/20260627_1038_nemotron_nano_hqq8_g64_all_moe_layer_cache_spec_generation_diagnostic_cache_spec.json"
+}
