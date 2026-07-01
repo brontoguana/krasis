@@ -1,0 +1,9 @@
+step	utc	scope	command_or_file	status	notes
+1	2026-07-01T00:55:20Z	default-policy	src/gpu_decode.rs	completed	Promoted accepted Nemotron decode optimizations from env-only opt-in to guarded default paths for benchmark and production.
+2	2026-07-01T02:08:00Z	default-policy	src/gpu_prefill.rs	completed	Promoted accepted parallel SSD prefill stack by default for Nemotron-shaped runtime config; explicit envs still override/disable.
+3	2026-07-01T02:10:00Z	build	./dev build	completed	Corrected-source build passed via built command; no direct Python execution.
+4	2026-07-01T02:16:55Z	validation	Super no-env benchmark	completed	`./dev benchmark tests/nemotron-super-bf16kv-a16.conf` completed with no Nano optimization env stack.
+5	2026-07-01T02:20:43Z	validation	Nano no-env benchmark	completed	`./dev benchmark tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf` completed with no optimization env stack.
+6	2026-07-01T02:22:00Z	review	src/gpu_prefill.rs	completed	Added per-SSD-env false-value opt-outs so individual prefill defaults can be disabled without disabling all Nemotron defaults.
+7	2026-07-01T02:25:00Z	build	./dev build	completed	Post-review build passed via built command after prefill opt-out cleanup.
+5	2026-07-01T01:21:27Z	validation	Nano no-env benchmark	completed	`./dev benchmark tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf` completed with no optimization env stack.

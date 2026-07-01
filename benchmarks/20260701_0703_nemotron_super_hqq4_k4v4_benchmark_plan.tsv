@@ -1,0 +1,6 @@
+step	status	notes
+audit_super_configs	completed	Found the previous Super benchmark used tests/nemotron-super-bf16kv-a16.conf with BF16 attention and BF16 KV; no existing Super HQQ4+k4v4 config was present under tests/.
+create_corrected_config	completed	Added tests/nemotron-super-4-4-hqq4-k4v4-a16.conf with INT4 GPU/CPU experts, HQQ4 attention, k4v4 KV, and int8 shared/dense/head.
+run_standard_benchmark	completed	Ran ./dev benchmark tests/nemotron-super-4-4-hqq4-k4v4-a16.conf timing-off through tmux; command exited 0.
+preserve_artifacts	completed	Copied benchmark report/stdout/krasis logs into benchmarks/ and wrote result/summary artifacts.
+evaluate_result	completed	Correct config is valid; decode is not optimized because final HCS residency is 2484/20480 while decode min free VRAM is 5838 MB against a 600 MB safety margin.

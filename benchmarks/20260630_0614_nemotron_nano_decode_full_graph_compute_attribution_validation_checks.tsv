@@ -1,0 +1,14 @@
+check	status	detail
+summary_json	pass	jq empty benchmarks/20260630_0614_nemotron_nano_decode_full_graph_compute_attribution_summary.json
+tsv_shapes	pass	decode_comparison candidate_decisions and plan TSV field counts are consistent per file
+rejected_symbol_scan	pass	no rejected candidate env or kernel names remain in src/gpu_decode.rs or src/cuda/decode_kernels.cu
+source_diff_check	pass	git diff --check passed for changed source and current gate artifacts
+internal_diff_check	pass	git -C ../krasis-internal diff --check passed for CHANGELOG.md TRACKING.md DEBUGLOG.md
+dev_shell_syntax	pass	bash -n dev
+protected_configs	pass	git status --short tests/testconfigs returned no changes
+tests_status	pass	git status --short tests returned no changes
+cleanup_build	pass	benchmarks/20260630_0614_nemotron_nano_decode_full_graph_compute_attribution_cleanup2_build.exit = 0
+tmux_idle	pass	no tmux session
+process_idle	pass	no krasis/maturin/cargo/nvcc/rustc process
+gpu_idle	pass	GPU0 15 MB used / 32105 MB free; GPU1 11 MB used / 20043 MB free
+timestamp_utc	info	2026-06-30T11:39:57Z

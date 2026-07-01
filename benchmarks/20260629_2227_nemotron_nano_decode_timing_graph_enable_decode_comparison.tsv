@@ -1,0 +1,6 @@
+run	mode	timing	env	request_tokens	decode_ms	response_tok_per_s	internal_ms_per_tok	internal_tok_per_s	server_decode_tok_per_s	hcs_hit_rate	min_free_vram_mb	result
+baseline	default_non_graph	on	KRASIS_DECODE_GRAPH_INTERNAL_TIMING=1	128	1758.1	72.806	12.72	78.6	72.2	100.00%	8714	control
+graph_final	mamba2_graph_fast_inproj	on	KRASIS_MAMBA2_DECODE_GRAPH=1 KRASIS_MAMBA2_DECODE_GRAPH_FAST_INPROJ=1 KRASIS_DECODE_GRAPH_INTERNAL_TIMING=1	128	1139.1	112.369	7.96	125.6	111.5	100.00%	8706	accepted_timing_profile
+graph_final_speed	mamba2_graph_fast_inproj	off	KRASIS_MAMBA2_DECODE_GRAPH=1 KRASIS_MAMBA2_DECODE_GRAPH_FAST_INPROJ=1	128	1127.7	113.505	NA	NA	112.6	100.00%	8706	accepted_speed_measurement
+gpu_route_sync	mamba2_graph_gpu_route_sync	on	KRASIS_MAMBA2_DECODE_GRAPH=1 KRASIS_GPU_ROUTE_SYNC=1 KRASIS_DECODE_GRAPH_INTERNAL_TIMING=1	128	1160.4	110.307	8.13	123.0	109.5	100.00%	NA	not_promoted_no_speed_win
+mixed_segment_clock	mamba2_graph_mixed_segment_clock	on	KRASIS_MAMBA2_DECODE_GRAPH=1 KRASIS_DECODE_MIXED_SEGMENT_CLOCKS=1 KRASIS_DECODE_GRAPH_INTERNAL_TIMING=1	128	1146.7	111.624	8.01	124.8	110.8	100.00%	NA	diagnostic_marker_issue

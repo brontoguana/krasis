@@ -1,0 +1,14 @@
+check	result	details
+final_build_exit	pass	benchmarks/20260701_1012_super_hqq4_policy_review_build2.exit = exit=0; build log benchmarks/20260701_1012_super_hqq4_policy_review_build2.log
+final_benchmark_exit	pass	benchmarks/20260701_1016_nemotron_super_hqq4_policy_final_benchmark.exit = exit=0; command ./dev benchmark tests/nemotron-super-4-4-hqq4-k4v4-a16.conf
+final_benchmark_numbers	pass	prefill=1197.8 tok/s; internal_decode=28.29 tok/s; http=45.37 tok/s; HCS=4278/20480; decode_min_free=924 MB; safety=600 MB
+mirror_diagnostic_exit	pass	benchmarks/20260701_0857_nemotron_super_hqq4_mirror_benchmark.exit = exit=0; rejected with decode=11.76 tok/s
+chunk_diagnostic_exit	pass	benchmarks/20260701_0853_nemotron_super_hqq4_chunk2048_benchmark.exit = exit=130 after intentional stop; rejected as speed path
+json_parse	pass	jq parsed 20260701_1016_nemotron_super_hqq4_policy_final_summary.json and 20260701_0853_nemotron_super_hqq4_policy_summary.json
+tsv_shape	pass	20260701_1016_nemotron_super_hqq4_policy_final_result.tsv and 20260701_0853_nemotron_super_hqq4_policy_result.tsv have 13 columns on every row
+source_whitespace	pass	git diff --check passed for src/gpu_decode.rs src/server.rs python/krasis/benchmark.py python/krasis/hf_downloader.py tests/test_hf_downloader.py benchmarks/BENCHMARKS.md
+dev_shell_syntax	pass	bash -n dev passed
+protected_testconfigs	pass	git status --short -- testconfigs returned no changes
+internal_records_whitespace	pass	git -C krasis-internal diff --check -- CHANGELOG.md TRACKING.md DEBUGLOG.md passed
+process_idle	pass	tmux ls reported no server; no krasis.server/dev benchmark/dev build processes matched
+gpu_idle	pass	nvidia-smi reported GPU0 15 MB used, GPU1 11 MB used

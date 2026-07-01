@@ -1,0 +1,68 @@
+{
+  "gate": "20260701_1710_super_vramfix_final",
+  "model": "NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+  "config": "tests/nemotron-super-4-4-hqq4-k4v4-a16.conf",
+  "decision": "accepted",
+  "problem": "Nemotron Super HQQ4+k4v4 had a large unexplained startup VRAM gap versus Qwen3.5-122B, which capped Super prefill at about 5K tokens and suppressed benchmark prefill speed.",
+  "root_causes": [
+    "The HQQ BF16 attention release path skipped Nemotron Super full-GQA layers whose BF16 projections live in layer.gqa_weights while attention is None.",
+    "The HQQ GQA decode descriptors built identical full-context RoPE cos/sin tables once per Super GQA layer, then the global Rust RoPE table built another copy."
+  ],
+  "implemented_changes": [
+    "Release HQQ-replaced GQA projection tensors from layer.gqa_weights even when the layer has no attention object.",
+    "Cache HQQ GQA RoPE cos/sin tables by exact runtime parameters: device, max_seq, rope half width, theta, head dim, Gemma flag, and layer RoPE params.",
+    "Reuse the matching HQQ GQA RoPE table for the shared Rust decode RoPE table instead of allocating another identical table."
+  ],
+  "memory_result": {
+    "startup_free_mb_before": 12688,
+    "startup_free_mb_after": 14430,
+    "startup_free_mb_delta": 1742,
+    "long_prefill_cap_tokens_before": 5088,
+    "long_prefill_cap_tokens_after": 7422,
+    "long_prefill_cap_tokens_delta": 2334,
+    "decode_hcs_budget_mb_after": 13738,
+    "prefill_long_hcs_budget_mb_after": 418
+  },
+  "speed_result": {
+    "baseline_run": "20260701_1300_super_prefill_unzeroed_final_benchmark",
+    "baseline_prefill_internal_tok_s": 1464.5,
+    "baseline_decode_internal_tok_s": 27.84,
+    "baseline_http_tok_s": 44.54,
+    "baseline_hcs_loaded": "4278/20480",
+    "baseline_decode_min_free_mb": 922,
+    "accepted_run": "20260701_1710_super_vramfix_final_benchmark",
+    "accepted_prefill_internal_tok_s": 1733.4,
+    "accepted_decode_internal_tok_s": 28.94,
+    "accepted_http_tok_s": 47.39,
+    "accepted_hcs_loaded": "4922/20480",
+    "accepted_hcs_coverage_percent": 24.0,
+    "accepted_decode_min_free_mb": 886,
+    "prefill_delta_tok_s": 268.9,
+    "prefill_delta_percent": 18.4,
+    "decode_delta_percent": 4.0,
+    "http_delta_percent": 6.4
+  },
+  "remaining_gap": {
+    "same_code_q122_startup_free_mb": 19608,
+    "super_startup_free_mb_after": 14430,
+    "remaining_startup_free_gap_mb": 5178,
+    "known_structural_causes": [
+      "Super has larger resident Mamba2/shared-expert/runtime footprint than Q122 after full load.",
+      "Super prefill scratch still grows faster, so calibration still caps Super at 7422 tokens instead of Q122's long 20K regime."
+    ]
+  },
+  "artifacts": {
+    "result": "20260701_1710_super_vramfix_final_result.tsv",
+    "summary": "20260701_1710_super_vramfix_final_summary.json",
+    "final_report": "20260701_1710_super_vramfix_final_benchmark_report.log",
+    "final_stdout": "20260701_1710_super_vramfix_final_benchmark_stdout_full.log",
+    "final_server_log": "20260701_1710_super_vramfix_final_krasis.log",
+    "startup_diagnostic_stdout": "20260701_1550_super_vram_rope_release_stdout.log",
+    "validation": "20260701_1710_super_vramfix_final_validation_checks.tsv"
+  },
+  "validation": {
+    "benchmark_exit": 0,
+    "py_compile": "./dev python -m py_compile python/krasis/model.py",
+    "timing": "off for final benchmark"
+  }
+}

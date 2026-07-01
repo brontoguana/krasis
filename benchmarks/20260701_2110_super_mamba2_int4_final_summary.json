@@ -1,0 +1,93 @@
+{
+  "gate": "20260701_2110_super_mamba2_int4_final",
+  "model": "NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+  "config": "tests/nemotron-super-4-4-hqq4-k4v4-a16.conf",
+  "decision": "accepted_for_vram_hcs_decode_small_prefill_gain",
+  "problem": "Nemotron Super kept 8360.0 MB of BF16 Mamba2 in_proj/out_proj projection weights resident, which limited startup free VRAM, long prefill calibration length, and HCS residency.",
+  "implemented_changes": [
+    "Added a cached dense-backbone INT4 cache namespace for Mamba2 in_proj/out_proj projections, separate from HCS expert cache.",
+    "Cached both Marlin INT4 prefill payloads and matching simple INT4 decode payloads so prefill and decode consume the same quantized artifacts.",
+    "Registered cached projection artifacts through existing single-slot Marlin/simple INT4 descriptors and released BF16 projection tensors after registration.",
+    "Added config-derived Mamba2 SSD runtime-temp reserve to prefill budgeting after the freed VRAM allowed longer startup calibration probes.",
+    "Post-review hardening binds the projection cache manifest to the source model path, config/index contents, and source shard size/mtime metadata so stale same-shape cache reuse fails closed."
+  ],
+  "cache": {
+    "namespace": "mamba2_projection_marlin_int4_v1_g128",
+    "format": "krasis_mamba2_projection_marlin_int4",
+    "group_size": 128,
+    "tensor_count": 80,
+    "cache_tensor_bytes": 4588551000,
+    "hcs_participation": false
+  },
+  "memory_result": {
+    "baseline_startup_free_mb": 14430,
+    "accepted_startup_free_mb": 20232,
+    "startup_free_delta_mb": 5802,
+    "baseline_long_prefill_cap_tokens": 7422,
+    "accepted_long_prefill_cap_tokens": 15191,
+    "long_prefill_cap_delta_tokens": 7769,
+    "bf16_projection_bucket_mb_before": 8360.0,
+    "int4_projection_bucket_mb_after": 2220.6,
+    "projection_bucket_delta_mb": 6139.4
+  },
+  "speed_result": {
+    "baseline_run": "20260701_1710_super_vramfix_final_benchmark",
+    "baseline_prefill_internal_tok_s": 1733.4,
+    "baseline_decode_internal_tok_s": 28.94,
+    "baseline_http_tok_s": 47.39,
+    "baseline_hcs_loaded": "4922/20480",
+    "baseline_hcs_coverage_percent": 24.0,
+    "baseline_decode_min_free_mb": 886,
+    "accepted_run": "20260701_2110_super_mamba2_int4_final_benchmark",
+    "accepted_prefill_internal_tok_s": 1753.7,
+    "accepted_decode_internal_tok_s": 41.96,
+    "accepted_http_tok_s": 49.12,
+    "accepted_hcs_loaded": "7038/20480",
+    "accepted_hcs_coverage_percent": 34.4,
+    "accepted_decode_min_free_mb": 878,
+    "prefill_delta_percent": 1.2,
+    "decode_delta_percent": 45.0,
+    "http_delta_percent": 3.7
+  },
+  "prefill_runs": [
+    {
+      "tokens": 1001,
+      "tok_s": 419.2
+    },
+    {
+      "tokens": 5001,
+      "tok_s": 1312.7
+    },
+    {
+      "tokens": 10001,
+      "tok_s": 1753.7
+    },
+    {
+      "tokens": 15192,
+      "tok_s": 1568.8
+    }
+  ],
+  "diagnostic_findings": [
+    "The first startup diagnostic proved the projection cache path registered successfully but exposed missing Mamba2 SSD runtime-temp reservation when calibration grew to 15191 tokens.",
+    "The fixed planner reserved mamba2_runtime_reserve_mb=1955.6 at 15191 tokens and passed long calibration with min free 1512 MB.",
+    "A post-review startup diagnostic rebuilt the cache with source_signature=e8fc857ad12b271c221f52cdd0e8a9ee574f79a7a85125f142064a3cdcc1489f, reached KRASIS SERVER READY, and reproduced startup free 20232 MB and HCS 7084/20480 before pressure eviction.",
+    "The final timing-off run shows the change is a major VRAM/HCS/decode improvement, but not a substantial prefill-speed improvement; the next prefill target remains Mamba2 SSD/output scan and compute/runtime pressure."
+  ],
+  "artifacts": {
+    "result": "20260701_2110_super_mamba2_int4_final_result.tsv",
+    "summary": "20260701_2110_super_mamba2_int4_final_summary.json",
+    "final_report": "20260701_2110_super_mamba2_int4_final_benchmark_report.log",
+    "final_stdout": "20260701_2110_super_mamba2_int4_final_benchmark_stdout.log",
+    "final_server_log": "20260701_2110_super_mamba2_int4_final_krasis.log",
+    "startup_diagnostic_rejected": "20260701_1935_super_mamba2_int4_startup.log",
+    "startup_diagnostic_fixed": "20260701_2055_super_mamba2_int4_startup2.log",
+    "startup_diagnostic_source_signature": "20260701_2130_super_mamba2_int4_signature_startup.log",
+    "startup_diagnostic_source_signature_server_log": "20260701_2130_super_mamba2_int4_signature_startup_krasis.log",
+    "validation": "20260701_2110_super_mamba2_int4_final_validation_checks.tsv"
+  },
+  "validation": {
+    "build": "./dev build",
+    "benchmark": "./dev benchmark tests/nemotron-super-4-4-hqq4-k4v4-a16.conf",
+    "timing": "off for final benchmark"
+  }
+}

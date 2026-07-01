@@ -1,0 +1,11 @@
+check	command	result	notes
+final_benchmark	./dev benchmark tests/nemotron-super-4-4-hqq4-k4v4-a16.conf	pass	exit 0; final timing-off benchmark in logs/dev-benchmark_20260701_170417 and copied benchmark artifacts
+py_compile	./dev python -m py_compile python/krasis/model.py	pass	model.py syntax valid through built dev command
+summary_json	jq empty benchmarks/20260701_1710_super_vramfix_final_summary.json	pass	summary JSON parses
+result_tsv	awk field-count check on benchmarks/20260701_1710_super_vramfix_final_result.tsv	pass	all result rows have 15 tab-separated fields
+validation_tsv	awk field-count check on benchmarks/20260701_1710_super_vramfix_final_validation_checks.tsv	pass	all validation rows have 4 tab-separated fields
+krasis_diff_check	git diff --check -- python/krasis/model.py benchmarks/BENCHMARKS.md benchmarks/20260701_1710_super_vramfix_final_result.tsv benchmarks/20260701_1710_super_vramfix_final_summary.json	pass	no whitespace errors in changed Krasis source/public records checked
+internal_diff_check	git -C /home/main/Documents/Claude/krasis-internal diff --check -- CHANGELOG.md TRACKING.md DEBUGLOG.md	pass	no whitespace errors in internal records
+dev_shell_syntax	bash -n dev	pass	dev shell syntax valid
+protected_configs	git status --short -- testconfigs	pass	no protected krasis/testconfigs changes
+process_idle	tmux ls; ps rg krasis.server/dev benchmark/dev run/dev build/rustc/cargo/maturin; nvidia-smi compute apps	pass	no tmux session, no Krasis runtime/build process, no GPU compute app after final benchmark

@@ -1,0 +1,10 @@
+check	result	detail
+summary_json	pass	jq empty benchmarks/20260630_1400_nemotron_nano_decode_mamba2_fast_outproj_candidate_summary.json
+tsv_shapes	pass	1341 result, 1400 plan, and 1400 result TSV column counts are consistent
+public_diff_check	pass	git diff --check on touched public source and benchmark artifacts
+internal_diff_check	pass	git diff --check on krasis-internal CHANGELOG/TRACKING/DEBUGLOG
+shell_syntax	pass	bash -n dev
+protected_configs	pass	git status --short -- testconfigs tests/testconfigs returned no protected config changes
+rejected_symbol_scan	pass	no KRASIS_DECODE_GRAPH_SHARED_W2_V2, KRASIS_MAMBA2_DECODE_GRAPH_FAST_OUTPROJ, or reduce_ksplits_weighted_accum_bf16_by_ptr symbols remain
+cleanup_build	pass	benchmarks/20260630_1400_nemotron_nano_decode_mamba2_fast_outproj_candidate_cleanup_build.exit = 0
+runtime_idle	pass	no tmux/runtime/build process; GPU0 15 MB, GPU1 11 MB

@@ -255,6 +255,36 @@ fn expert_hqq_truthy_env_value(value: Option<&str>) -> bool {
         .unwrap_or(false)
 }
 
+fn expert_hqq_false_env_value(value: Option<&str>) -> bool {
+    value
+        .map(|raw| {
+            matches!(
+                raw.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn nemotron_default_prefill_optimizations_enabled(config: &PrefillModelConfig) -> bool {
+    !expert_hqq_false_env_value(
+        std::env::var("KRASIS_NEMOTRON_DEFAULT_OPTIMIZATIONS")
+            .ok()
+            .as_deref(),
+    )
+        && config.layer_types.iter().any(|&t| t == 1)
+        && config.n_routed_experts > 0
+        && config.moe_activation == 1
+        && !config.moe_gated
+}
+
+fn prefill_moe_lookahead_prefetch_requested(config: &PrefillModelConfig) -> bool {
+    let value = std::env::var("KRASIS_PREFILL_MOE_LOOKAHEAD_PREFETCH").ok();
+    !expert_hqq_false_env_value(value.as_deref())
+        && (expert_hqq_truthy_env_value(value.as_deref())
+            || nemotron_default_prefill_optimizations_enabled(config))
+}
+
 fn mamba2_ssd_v5_candidate_requested() -> bool {
     expert_hqq_truthy_env_value(
         std::env::var("KRASIS_MAMBA2_SSD_CHUNK_PARALLEL_V5")
@@ -271,12 +301,10 @@ fn mamba2_ssd_v5_oracle_requested() -> bool {
     )
 }
 
-fn mamba2_ssd_block_scan_candidate_requested() -> bool {
-    expert_hqq_truthy_env_value(
-        std::env::var("KRASIS_MAMBA2_SSD_BLOCK_SCAN")
-            .ok()
-            .as_deref(),
-    )
+fn mamba2_ssd_block_scan_candidate_requested(default_enabled: bool) -> bool {
+    let value = std::env::var("KRASIS_MAMBA2_SSD_BLOCK_SCAN").ok();
+    !expert_hqq_false_env_value(value.as_deref())
+        && (expert_hqq_truthy_env_value(value.as_deref()) || default_enabled)
 }
 
 fn mamba2_ssd_block_scan_oracle_requested() -> bool {
@@ -295,12 +323,10 @@ fn mamba2_ssd_block_scan_output_subloop_timing_requested() -> bool {
     )
 }
 
-fn mamba2_ssd_block_scan_coeff_tile_requested() -> bool {
-    expert_hqq_truthy_env_value(
-        std::env::var("KRASIS_MAMBA2_SSD_BLOCK_SCAN_COEFF_TILE")
-            .ok()
-            .as_deref(),
-    )
+fn mamba2_ssd_block_scan_coeff_tile_requested(default_enabled: bool) -> bool {
+    let value = std::env::var("KRASIS_MAMBA2_SSD_BLOCK_SCAN_COEFF_TILE").ok();
+    !expert_hqq_false_env_value(value.as_deref())
+        && (expert_hqq_truthy_env_value(value.as_deref()) || default_enabled)
 }
 
 fn mamba2_ssd_block_scan_candidate_timing_requested() -> bool {
@@ -327,20 +353,16 @@ fn mamba2_ssd_block_scan_state_parallel_recurrent_requested() -> bool {
     )
 }
 
-fn mamba2_ssd_parallel_chunked_requested() -> bool {
-    expert_hqq_truthy_env_value(
-        std::env::var("KRASIS_MAMBA2_SSD_PARALLEL_CHUNKED")
-            .ok()
-            .as_deref(),
-    )
+fn mamba2_ssd_parallel_chunked_requested(default_enabled: bool) -> bool {
+    let value = std::env::var("KRASIS_MAMBA2_SSD_PARALLEL_CHUNKED").ok();
+    !expert_hqq_false_env_value(value.as_deref())
+        && (expert_hqq_truthy_env_value(value.as_deref()) || default_enabled)
 }
 
-fn mamba2_ssd_parallel_output_by_chunk_requested() -> bool {
-    expert_hqq_truthy_env_value(
-        std::env::var("KRASIS_MAMBA2_SSD_PARALLEL_OUTPUT_BY_CHUNK")
-            .ok()
-            .as_deref(),
-    )
+fn mamba2_ssd_parallel_output_by_chunk_requested(default_enabled: bool) -> bool {
+    let value = std::env::var("KRASIS_MAMBA2_SSD_PARALLEL_OUTPUT_BY_CHUNK").ok();
+    !expert_hqq_false_env_value(value.as_deref())
+        && (expert_hqq_truthy_env_value(value.as_deref()) || default_enabled)
 }
 
 fn mamba2_ssd_parallel_output_state_split_requested() -> bool {
@@ -351,12 +373,16 @@ fn mamba2_ssd_parallel_output_state_split_requested() -> bool {
     )
 }
 
-fn mamba2_ssd_parallel_output_precompute_cb_requested() -> bool {
-    expert_hqq_truthy_env_value(
-        std::env::var("KRASIS_MAMBA2_SSD_PARALLEL_OUTPUT_PRECOMPUTE_CB")
-            .ok()
-            .as_deref(),
-    )
+fn mamba2_ssd_parallel_output_precompute_cb_requested(default_enabled: bool) -> bool {
+    let value = std::env::var("KRASIS_MAMBA2_SSD_PARALLEL_OUTPUT_PRECOMPUTE_CB").ok();
+    !expert_hqq_false_env_value(value.as_deref())
+        && (expert_hqq_truthy_env_value(value.as_deref()) || default_enabled)
+}
+
+fn mamba2_ssd_unzeroed_temps_requested(default_enabled: bool) -> bool {
+    let value = std::env::var("KRASIS_MAMBA2_SSD_UNZEROED_TEMPS").ok();
+    !expert_hqq_false_env_value(value.as_deref())
+        && (expert_hqq_truthy_env_value(value.as_deref()) || default_enabled)
 }
 
 fn expert_hqq_parse_required_usize_env(value: Option<&str>, name: &str) -> Result<usize, String> {
@@ -4396,7 +4422,7 @@ unsafe impl<T: Copy + Send> Send for GpuBuf<T> {}
 unsafe impl<T: Copy + Sync> Sync for GpuBuf<T> {}
 
 impl<T: Copy> GpuBuf<T> {
-    pub fn alloc_zeroed(count: usize) -> Result<Self, String> {
+    pub fn alloc_uninit(count: usize) -> Result<Self, String> {
         let bytes = count * std::mem::size_of::<T>();
         if bytes == 0 {
             return Ok(Self {
@@ -4416,19 +4442,28 @@ impl<T: Copy> GpuBuf<T> {
         if err != cuda_sys::CUresult::CUDA_SUCCESS {
             return Err(format!("cuMemAlloc_v2({} bytes) failed: {:?}", bytes, err));
         }
-        let err = unsafe { cuda_sys::lib().cuMemsetD8_v2(ptr, 0, bytes) };
-        if err != cuda_sys::CUresult::CUDA_SUCCESS {
-            unsafe {
-                cuda_sys::lib().cuMemFree_v2(ptr);
-            }
-            return Err(format!("cuMemsetD8({} bytes) failed: {:?}", bytes, err));
-        }
         Ok(Self {
             ptr,
             len: count,
             device_ordinal: dev,
             _phantom: std::marker::PhantomData,
         })
+    }
+
+    pub fn alloc_zeroed(count: usize) -> Result<Self, String> {
+        let buf = Self::alloc_uninit(count)?;
+        let bytes = count * std::mem::size_of::<T>();
+        if bytes == 0 {
+            return Ok(buf);
+        }
+        let err = unsafe { cuda_sys::lib().cuMemsetD8_v2(buf.ptr, 0, bytes) };
+        if err != cuda_sys::CUresult::CUDA_SUCCESS {
+            unsafe {
+                cuda_sys::lib().cuMemFree_v2(buf.ptr);
+            }
+            return Err(format!("cuMemsetD8({} bytes) failed: {:?}", bytes, err));
+        }
+        Ok(buf)
     }
 
     /// Compatible with CudaSlice::device_ptr() — returns &u64 so *buf.device_ptr() works.
@@ -5531,6 +5566,7 @@ pub struct PrefillModelConfig {
     pub mamba_conv_dim: usize,
     pub mamba_conv_kernel: usize,
     pub mamba_n_groups: usize,
+    pub mamba_chunk_size: usize,
     pub tie_word_embeddings: bool,
     pub embedding_scale: f32,
     pub final_logit_softcap: f32,
@@ -14269,6 +14305,11 @@ impl PrefillEngine {
         predicted_active.saturating_mul(4) >= n_experts.saturating_mul(3)
     }
 
+    fn next_moe_layer_after(&self, layer_idx: usize) -> Option<usize> {
+        ((layer_idx + 1)..self.config.num_hidden_layers)
+            .find(|&idx| self.layer_weights[idx].moe_gate_ptr != 0)
+    }
+
     fn prefetch_dense_pointer_table_for_layer(
         &mut self,
         layer_idx: usize,
@@ -14305,13 +14346,54 @@ impl PrefillEngine {
             self.release_prefetched_ptr_table();
         }
 
+        let Some(moe_expert_count) = self
+            .moe_layers
+            .get(moe_layer_idx)
+            .and_then(|o| o.as_ref())
+            .map(|data| data.experts.len())
+        else {
+            return Ok(());
+        };
+        let mut needed_cold_slots = 0usize;
+        for eid in 0..n_experts.min(moe_expert_count) {
+            if self.expert_lookup(moe_layer_idx, eid).is_some() {
+                continue;
+            }
+            let pinned = self.pinning_active
+                && moe_layer_idx < self.pinned_expert_offsets.len()
+                && eid < self.pinned_expert_offsets[moe_layer_idx].len()
+                && self.pinned_expert_offsets[moe_layer_idx][eid].is_some();
+            if !pinned {
+                needed_cold_slots += 1;
+            }
+        }
+        if needed_cold_slots > self.max_cold_experts || self.d_cold_staging.is_none() {
+            if let Err(err) = self.ensure_cold_staging_capacity(needed_cold_slots, m) {
+                if vram_ledger_enabled() {
+                    vram_ledger_log!(
+                        "VRAM LEDGER prefill_ptr_prefetch_skip layer={} moe_layer={} needed_cold_slots={} reason=cold_staging_capacity error={}",
+                        layer_idx,
+                        moe_layer_idx,
+                        needed_cold_slots,
+                        err,
+                    );
+                }
+                if prefill_debug_enabled() || stderr_debug_enabled() {
+                    eprintln!(
+                        "[PTR-PREFETCH] skipping layer {}: cold staging capacity unavailable for {} slots: {}",
+                        layer_idx, needed_cold_slots, err
+                    );
+                }
+                return Ok(());
+            }
+        }
+        let cold_staging_base = self.d_cold_staging.as_ref().map_or(0, |s| *s.device_ptr());
+        if cold_staging_base == 0 || self.max_cold_experts < needed_cold_slots {
+            return Ok(());
+        }
         let Some(moe_data) = self.moe_layers.get(moe_layer_idx).and_then(|o| o.as_ref()) else {
             return Ok(());
         };
-        let cold_staging_base = self.d_cold_staging.as_ref().map_or(0, |s| *s.device_ptr());
-        if cold_staging_base == 0 || self.max_cold_experts < n_experts {
-            return Ok(());
-        }
 
         let ptrs_bytes = n_experts * std::mem::size_of::<u64>();
         let mut ptrs = [0u64; 4];
@@ -14502,6 +14584,20 @@ impl PrefillEngine {
             eprintln!(
                 "[PTR-PREFETCH] layer0 all-expert table hcs={} pinned={} cold={} total={} chunk={}",
                 hcs_count, pinned_count, cold_count, n_experts, chunk_idx
+            );
+        }
+        if vram_ledger_enabled() {
+            vram_ledger_log!(
+                "VRAM LEDGER prefill_ptr_prefetch layer={} moe_layer={} chunk={} hcs={} pinned={} cold={} total={} needed_cold_slots={} max_cold_experts={}",
+                layer_idx,
+                moe_layer_idx,
+                chunk_idx,
+                hcs_count,
+                pinned_count,
+                cold_count,
+                n_experts,
+                needed_cold_slots,
+                self.max_cold_experts,
             );
         }
         Ok(())
@@ -17716,6 +17812,14 @@ impl PrefillEngine {
         let safety_bytes: usize = safety_margin_mb * 1024 * 1024;
         let mut post_scratch_runtime_reserve_bytes =
             self.measured_post_scratch_runtime_reserve_bytes(prompt_tokens);
+        let mamba2_runtime_reserve_bytes =
+            estimate_mamba2_ssd_runtime_temp_bytes(&self.config, prompt_tokens);
+        let combined_runtime_reserve_bytes = self
+            .all_expert_cold_staging_bytes()
+            .saturating_add(mamba2_runtime_reserve_bytes);
+        if combined_runtime_reserve_bytes > post_scratch_runtime_reserve_bytes {
+            post_scratch_runtime_reserve_bytes = combined_runtime_reserve_bytes;
+        }
         let mut skip_stage_exact_single_chunk = false;
         if self.can_skip_stage_exact_for_single_chunk_gemma_hqq4_k4() {
             let mut free_without_stage_bytes: usize = 0;
@@ -17923,7 +18027,7 @@ impl PrefillEngine {
         }
         if ledger_enabled {
             vram_ledger_log!(
-                "VRAM LEDGER prefill_prepare_budget prompt_tokens={} free_mb={} total_mb={} safety_mb={} fixed_scratch_mb={:.1} per_tok_kb={:.1} measured_alloc_overhead_mb={:.1} measured_runtime_overhead_mb={:.1} all_expert_cold_reserve_mb={:.1} measured_cold_slots={} post_scratch_runtime_reserve_mb={:.1} scratch_budget_mb={:.1} target_tokens={} max_by_vram={} runtime_chunk_cap={:?} chosen_scratch_tokens={} hcs_cached_experts={} hcs_stride={} old_scratch_tokens={}",
+                "VRAM LEDGER prefill_prepare_budget prompt_tokens={} free_mb={} total_mb={} safety_mb={} fixed_scratch_mb={:.1} per_tok_kb={:.1} measured_alloc_overhead_mb={:.1} measured_runtime_overhead_mb={:.1} all_expert_cold_reserve_mb={:.1} mamba2_runtime_reserve_mb={:.1} measured_cold_slots={} post_scratch_runtime_reserve_mb={:.1} scratch_budget_mb={:.1} target_tokens={} max_by_vram={} runtime_chunk_cap={:?} chosen_scratch_tokens={} hcs_cached_experts={} hcs_stride={} old_scratch_tokens={}",
                 prompt_tokens,
                 free_bytes / (1024 * 1024),
                 total_bytes / (1024 * 1024),
@@ -17933,6 +18037,7 @@ impl PrefillEngine {
                 self.measured_scratch_alloc_overhead_bytes as f64 / (1024.0 * 1024.0),
                 self.measured_prefill_runtime_overhead_bytes as f64 / (1024.0 * 1024.0),
                 self.all_expert_cold_staging_bytes() as f64 / (1024.0 * 1024.0),
+                mamba2_runtime_reserve_bytes as f64 / (1024.0 * 1024.0),
                 self.measured_cold_slots_from_prescan(),
                 post_scratch_runtime_reserve_bytes as f64 / (1024.0 * 1024.0),
                 scratch_budget_bytes as f64 / (1024.0 * 1024.0),
@@ -20149,6 +20254,23 @@ impl PrefillEngine {
                         chunk_start,
                         m,
                     )?;
+                } else if prefill_moe_lookahead_prefetch_requested(&self.config) {
+                    if let Some(next_moe_layer) = self.next_moe_layer_after(layer_idx) {
+                        if let Err(err) = self.prefetch_dense_pointer_table_for_layer(
+                            next_moe_layer,
+                            chunk_idx,
+                            chunk_start,
+                            m,
+                        ) {
+                            self.release_prefetched_ptr_table();
+                            if prefill_debug_enabled() || stderr_debug_enabled() {
+                                eprintln!(
+                                    "[PTR-PREFETCH] lookahead skip current_layer={} next_moe_layer={} chunk={} error={}",
+                                    layer_idx, next_moe_layer, chunk_idx, err
+                                );
+                            }
+                        }
+                    }
                 }
 
                 // Mixer
@@ -22478,6 +22600,20 @@ impl PrefillEngine {
 
             if self.layer_weights[layer_idx].moe_gate_ptr != 0 {
                 self.prefetch_dense_pointer_table_for_layer(layer_idx, 0, 0, m)?;
+            } else if prefill_moe_lookahead_prefetch_requested(&self.config) {
+                if let Some(next_moe_layer) = self.next_moe_layer_after(layer_idx) {
+                    if let Err(err) =
+                        self.prefetch_dense_pointer_table_for_layer(next_moe_layer, 0, 0, m)
+                    {
+                        self.release_prefetched_ptr_table();
+                        if prefill_debug_enabled() || stderr_debug_enabled() {
+                            eprintln!(
+                                "[PTR-PREFETCH] lookahead skip current_layer={} next_moe_layer={} error={}",
+                                layer_idx, next_moe_layer, err
+                            );
+                        }
+                    }
+                }
             }
 
             match layer_type {
@@ -30332,7 +30468,7 @@ impl PrefillEngine {
         let head_dim = cfg.mamba_head_dim;
         let d_state = cfg.mamba_d_state;
         let n_groups = cfg.mamba_n_groups;
-        let mamba_chunk_size = cfg.la_chunk_size.max(1);
+        let mamba_chunk_size = cfg.mamba_chunk_size.max(1);
         let bc_size = n_groups * d_state;
         let conv_dim = cfg.mamba_conv_dim;
         let conv_kernel = cfg.mamba_conv_kernel;
@@ -31669,25 +31805,31 @@ impl PrefillEngine {
         let mamba2_ssd_local_tri_target = self.mamba2_ssd_local_tri_oracle_target(layer_idx)?;
         let mamba2_ssd_v5_requested = mamba2_ssd_v5_candidate_requested();
         let mamba2_ssd_v5_oracle_requested = mamba2_ssd_v5_oracle_requested();
-        let mamba2_ssd_block_scan_requested = mamba2_ssd_block_scan_candidate_requested();
+        let nemotron_default_prefill_requested =
+            nemotron_default_prefill_optimizations_enabled(&self.config);
+        let mamba2_ssd_block_scan_requested =
+            mamba2_ssd_block_scan_candidate_requested(nemotron_default_prefill_requested);
         let mamba2_ssd_block_scan_oracle_requested = mamba2_ssd_block_scan_oracle_requested();
         let mamba2_ssd_block_scan_output_subloop_timing_requested =
             mamba2_ssd_block_scan_output_subloop_timing_requested();
         let mamba2_ssd_block_scan_coeff_tile_requested =
-            mamba2_ssd_block_scan_coeff_tile_requested();
+            mamba2_ssd_block_scan_coeff_tile_requested(nemotron_default_prefill_requested);
         let mamba2_ssd_block_scan_candidate_timing_requested =
             mamba2_ssd_block_scan_candidate_timing_requested();
         let mamba2_ssd_block_scan_recurrent_subloop_timing_requested =
             mamba2_ssd_block_scan_recurrent_subloop_timing_requested();
         let mamba2_ssd_block_scan_state_parallel_recurrent_requested =
             mamba2_ssd_block_scan_state_parallel_recurrent_requested();
-        let mamba2_ssd_parallel_chunked_requested = mamba2_ssd_parallel_chunked_requested();
+        let mamba2_ssd_parallel_chunked_requested =
+            mamba2_ssd_parallel_chunked_requested(nemotron_default_prefill_requested);
         let mamba2_ssd_parallel_output_by_chunk_requested =
-            mamba2_ssd_parallel_output_by_chunk_requested();
+            mamba2_ssd_parallel_output_by_chunk_requested(nemotron_default_prefill_requested);
         let mamba2_ssd_parallel_output_state_split_requested =
             mamba2_ssd_parallel_output_state_split_requested();
         let mamba2_ssd_parallel_output_precompute_cb_requested =
-            mamba2_ssd_parallel_output_precompute_cb_requested();
+            mamba2_ssd_parallel_output_precompute_cb_requested(nemotron_default_prefill_requested);
+        let mamba2_ssd_unzeroed_temps_requested =
+            mamba2_ssd_unzeroed_temps_requested(nemotron_default_prefill_requested);
         if mamba2_ssd_v5_requested && !mamba2_ssd_v5_oracle_requested {
             return Err(
                 "KRASIS_MAMBA2_SSD_CHUNK_PARALLEL_V5 requires KRASIS_MAMBA2_SSD_CHUNK_PARALLEL_V5_ORACLE=1 in this correctness gate"
@@ -31697,15 +31839,6 @@ impl PrefillEngine {
         if mamba2_ssd_v5_oracle_requested && !mamba2_ssd_v5_requested {
             return Err(
                 "KRASIS_MAMBA2_SSD_CHUNK_PARALLEL_V5_ORACLE was set without KRASIS_MAMBA2_SSD_CHUNK_PARALLEL_V5"
-                    .to_string(),
-            );
-        }
-        if mamba2_ssd_block_scan_requested
-            && !mamba2_ssd_block_scan_oracle_requested
-            && !mamba2_ssd_block_scan_candidate_timing_requested
-        {
-            return Err(
-                "KRASIS_MAMBA2_SSD_BLOCK_SCAN requires KRASIS_MAMBA2_SSD_BLOCK_SCAN_ORACLE=1 in this correctness gate"
                     .to_string(),
             );
         }
@@ -31816,14 +31949,6 @@ impl PrefillEngine {
         {
             return Err(
                 "KRASIS_MAMBA2_SSD_PARALLEL_CHUNKED and KRASIS_MAMBA2_SSD_BLOCK_SCAN_STATE_PARALLEL_RECURRENT are mutually exclusive prototype state sources"
-                    .to_string(),
-            );
-        }
-        if mamba2_ssd_parallel_chunked_requested
-            && !expert_hqq_truthy_env_value(std::env::var("KRASIS_STARTUP_DIAG").ok().as_deref())
-        {
-            return Err(
-                "KRASIS_MAMBA2_SSD_PARALLEL_CHUNKED is a startup diagnostic architecture prototype and requires KRASIS_STARTUP_DIAG=1"
                     .to_string(),
             );
         }
@@ -32333,14 +32458,35 @@ impl PrefillEngine {
             let block_scan_oracle_enabled = mamba2_ssd_block_scan_oracle_requested;
             let clean_candidate_timing_mode =
                 mamba2_ssd_block_scan_candidate_timing_requested && !block_scan_oracle_enabled;
+            let use_unzeroed_parallel_ssd_temps = mamba2_ssd_unzeroed_temps_requested
+                && mamba2_ssd_parallel_chunked_requested
+                && !block_scan_oracle_enabled
+                && !mamba2_ssd_block_scan_output_subloop_timing_requested
+                && !mamba2_ssd_block_scan_recurrent_subloop_timing_requested
+                && mamba2_ssd_block_scan_term_target.is_none();
+            let alloc_f32_temp = |elems: usize, label: &str| -> Result<GpuBuf<f32>, String> {
+                if use_unzeroed_parallel_ssd_temps {
+                    GpuBuf::<f32>::alloc_uninit(elems)
+                } else {
+                    GpuBuf::<f32>::alloc_zeroed(elems)
+                }
+                .map_err(|e| format!("alloc Mamba2 SSD {label}: {e}"))
+            };
+            let alloc_u16_temp = |elems: usize, label: &str| -> Result<GpuBuf<u16>, String> {
+                if use_unzeroed_parallel_ssd_temps {
+                    GpuBuf::<u16>::alloc_uninit(elems)
+                } else {
+                    GpuBuf::<u16>::alloc_zeroed(elems)
+                }
+                .map_err(|e| format!("alloc Mamba2 SSD {label}: {e}"))
+            };
             let alloc_t0 = Instant::now();
             let initial_state = if block_scan_oracle_enabled || mamba2_ssd_parallel_chunked_requested
             {
-                Some(
-                    GpuBuf::<f32>::alloc_zeroed(state_elems).map_err(|e| {
-                        format!("alloc Mamba2 SSD block-scan initial state snapshot: {e}")
-                    })?,
-                )
+                Some(alloc_f32_temp(
+                    state_elems,
+                    "block-scan initial state snapshot",
+                )?)
             } else {
                 None
             };
@@ -32352,12 +32498,10 @@ impl PrefillEngine {
             } else {
                 None
             };
-            let candidate_state = GpuBuf::<f32>::alloc_zeroed(state_elems)
-                .map_err(|e| format!("alloc Mamba2 SSD block-scan candidate state: {e}"))?;
-            let entry_state = GpuBuf::<f32>::alloc_zeroed(entry_state_elems)
-                .map_err(|e| format!("alloc Mamba2 SSD block-scan entry state: {e}"))?;
-            let c_state_total_exact = GpuBuf::<f32>::alloc_zeroed(c_state_total_elems)
-                .map_err(|e| format!("alloc Mamba2 SSD block-scan c_state_total_exact: {e}"))?;
+            let candidate_state = alloc_f32_temp(state_elems, "block-scan candidate state")?;
+            let entry_state = alloc_f32_temp(entry_state_elems, "block-scan entry state")?;
+            let c_state_total_exact =
+                alloc_f32_temp(c_state_total_elems, "block-scan c_state_total_exact")?;
             let term_probe = if block_scan_oracle_enabled && mamba2_ssd_block_scan_term_target.is_some() {
                 Some(
                     GpuBuf::<f32>::alloc_zeroed(32)
@@ -32399,46 +32543,45 @@ impl PrefillEngine {
                 .checked_mul(std::mem::size_of::<f32>())
                 .ok_or("Mamba2 SSD parallel entry-state byte count overflow")?
                 as u64;
-            let parallel_dt_out = if mamba2_ssd_parallel_chunked_requested {
-                Some(
-                    GpuBuf::<f32>::alloc_zeroed(parallel_chunk_scalar_elems)
-                        .map_err(|e| format!("alloc Mamba2 SSD parallel dt_out: {e}"))?,
-                )
+            let parallel_dt_out_owned = if mamba2_ssd_parallel_chunked_requested {
+                Some(alloc_f32_temp(
+                    parallel_chunk_scalar_elems,
+                    "parallel dt_out",
+                )?)
             } else {
                 None
             };
-            let parallel_dA_cumsum = if mamba2_ssd_parallel_chunked_requested {
-                Some(
-                    GpuBuf::<f32>::alloc_zeroed(parallel_chunk_scalar_elems)
-                        .map_err(|e| format!("alloc Mamba2 SSD parallel dA_cumsum: {e}"))?,
-                )
+            let parallel_dt_out = parallel_dt_out_owned.as_ref();
+            let parallel_dA_cumsum_owned = if mamba2_ssd_parallel_chunked_requested {
+                Some(alloc_f32_temp(
+                    parallel_chunk_scalar_elems,
+                    "parallel dA_cumsum",
+                )?)
             } else {
                 None
             };
-            let parallel_chunk_states = if mamba2_ssd_parallel_chunked_requested {
-                Some(
-                    GpuBuf::<f32>::alloc_zeroed(parallel_chunk_state_elems)
-                        .map_err(|e| format!("alloc Mamba2 SSD parallel chunk states: {e}"))?,
-                )
+            let parallel_dA_cumsum = parallel_dA_cumsum_owned.as_ref();
+            let parallel_chunk_states_owned = if mamba2_ssd_parallel_chunked_requested {
+                Some(alloc_f32_temp(
+                    parallel_chunk_state_elems,
+                    "parallel chunk states",
+                )?)
             } else {
                 None
             };
-            let parallel_entry_state = if mamba2_ssd_parallel_chunked_requested {
-                Some(
-                    GpuBuf::<f32>::alloc_zeroed(entry_state_elems)
-                        .map_err(|e| format!("alloc Mamba2 SSD parallel entry state: {e}"))?,
-                )
+            let parallel_chunk_states = parallel_chunk_states_owned.as_ref();
+            let parallel_entry_state_owned = if mamba2_ssd_parallel_chunked_requested {
+                Some(alloc_f32_temp(entry_state_elems, "parallel entry state")?)
             } else {
                 None
             };
-            let parallel_cb_tile = if mamba2_ssd_parallel_output_precompute_cb_requested {
-                Some(
-                    GpuBuf::<f32>::alloc_zeroed(parallel_cb_tile_elems)
-                        .map_err(|e| format!("alloc Mamba2 SSD parallel CB tile: {e}"))?,
-                )
+            let parallel_entry_state = parallel_entry_state_owned.as_ref();
+            let parallel_cb_tile_owned = if mamba2_ssd_parallel_output_precompute_cb_requested {
+                Some(alloc_f32_temp(parallel_cb_tile_elems, "parallel CB tile")?)
             } else {
                 None
             };
+            let parallel_cb_tile = parallel_cb_tile_owned.as_ref();
             let (
                 recurrent_kernel_func,
                 recurrent_grid,
@@ -32548,8 +32691,7 @@ impl PrefillEngine {
             } else {
                 None
             };
-            let candidate_out = GpuBuf::<u16>::alloc_zeroed(output_elems)
-                .map_err(|e| format!("alloc Mamba2 SSD block-scan candidate output: {e}"))?;
+            let candidate_out = alloc_u16_temp(output_elems, "block-scan candidate output")?;
             let alloc_ms = alloc_t0.elapsed().as_secs_f64() * 1000.0;
 
             let mut initial_state_copy_ms = 0.0;
@@ -33892,19 +34034,21 @@ impl PrefillEngine {
                         "major_component_sum": major_component_sum_ms,
                         "residual": total_block_scan_path_ms - major_component_sum_ms,
                     },
-	                        "notes": {
-	                            "default_path_changed": false,
-		                            "instrumented_only_under_block_scan_env": true,
-		                            "accepted_state_source": if mamba2_ssd_parallel_chunked_requested {
-                                        "parallel_chunked_state_passing"
-                                    } else {
-                                        "exact_token_order_f32_recurrence"
-                                    },
-		                            "affine_summaries_used_as_state": false,
-			                            "local_output_assembly_separate": true,
-			                            "local_old_state_source": if mamba2_ssd_parallel_chunked_requested {
-                                        "not_used_by_parallel_chunked_output"
-                                    } else {
+		                        "notes": {
+		                            "default_path_changed": false,
+			                            "instrumented_only_under_block_scan_env": true,
+			                            "accepted_state_source": if mamba2_ssd_parallel_chunked_requested {
+	                                        "parallel_chunked_state_passing"
+	                                    } else {
+	                                        "exact_token_order_f32_recurrence"
+                                            },
+                                            "unzeroed_temps_env": mamba2_ssd_unzeroed_temps_requested,
+                                            "unzeroed_parallel_temps_used": use_unzeroed_parallel_ssd_temps,
+				                            "affine_summaries_used_as_state": false,
+				                            "local_output_assembly_separate": true,
+				                            "local_old_state_source": if mamba2_ssd_parallel_chunked_requested {
+	                                        "not_used_by_parallel_chunked_output"
+	                                    } else {
                                         "output_kernel_order"
                                     },
 		                            "output_subloop_timing_env": mamba2_ssd_block_scan_output_subloop_timing_requested,
@@ -34037,11 +34181,13 @@ impl PrefillEngine {
                                 "exact_token_order_f32_recurrence"
                             },
                             "parallel_output_by_chunk_env": mamba2_ssd_parallel_output_by_chunk_requested,
-                            "parallel_output_state_split_env": mamba2_ssd_parallel_output_state_split_requested,
-                            "parallel_output_precompute_cb_env": mamba2_ssd_parallel_output_precompute_cb_requested,
-                            "parallel_output_state_split": if mamba2_ssd_parallel_output_state_split_requested {
-                                serde_json::json!({
-                                    "d_tile": parallel_output_state_split_d_tile,
+	                            "parallel_output_state_split_env": mamba2_ssd_parallel_output_state_split_requested,
+	                            "parallel_output_precompute_cb_env": mamba2_ssd_parallel_output_precompute_cb_requested,
+	                            "unzeroed_temps_env": mamba2_ssd_unzeroed_temps_requested,
+	                            "unzeroed_parallel_temps_used": use_unzeroed_parallel_ssd_temps,
+	                            "parallel_output_state_split": if mamba2_ssd_parallel_output_state_split_requested {
+	                                serde_json::json!({
+	                                    "d_tile": parallel_output_state_split_d_tile,
                                     "state_lanes": parallel_output_state_split_lanes,
                                     "block_threads": parallel_output_state_split_block.0,
                                     "shared_memory": parallel_output_state_split_shared_mem_bytes,
@@ -57022,7 +57168,8 @@ pub fn compute_scratch_vram(config: &PrefillModelConfig) -> (usize, usize) {
     }
     if has_mamba2 {
         fixed += config.mamba_conv_dim * config.mamba_conv_kernel.max(1) * 4;
-        fixed += config.mamba_num_heads * config.mamba_head_dim * config.mamba_d_state * 4;
+        let mamba_state_elems = config.mamba_num_heads * config.mamba_head_dim * config.mamba_d_state;
+        fixed += mamba_state_elems * 4;
         let dim = 2 * config.mamba_d_inner
             + 2 * config.mamba_n_groups * config.mamba_d_state
             + config.mamba_num_heads;
@@ -57265,6 +57412,67 @@ fn estimate_scratch_vram_for_prompt(
     }
 
     bytes
+}
+
+fn estimate_mamba2_ssd_runtime_temp_bytes(config: &PrefillModelConfig, tokens: usize) -> usize {
+    if tokens == 0 || !config.layer_types.iter().any(|&t| t == 1) {
+        return 0;
+    }
+    let nemotron_default_prefill_requested = nemotron_default_prefill_optimizations_enabled(config);
+    let block_scan_requested =
+        mamba2_ssd_block_scan_candidate_requested(nemotron_default_prefill_requested);
+    if !block_scan_requested {
+        return 0;
+    }
+
+    let n_heads = config.mamba_num_heads;
+    let head_dim = config.mamba_head_dim;
+    let d_state = config.mamba_d_state;
+    let n_groups = config.mamba_n_groups;
+    let chunk_size = config.mamba_chunk_size.max(1);
+    let n_chunks = tokens.saturating_add(chunk_size - 1) / chunk_size;
+    let state_elems = n_heads
+        .saturating_mul(head_dim)
+        .saturating_mul(d_state);
+    let entry_state_elems = n_chunks.saturating_mul(state_elems);
+    let output_elems = tokens
+        .saturating_mul(n_heads)
+        .saturating_mul(head_dim);
+
+    let mut f32_elems = 0usize;
+    // block-scan candidate_state, entry_state, c_state_total_exact
+    f32_elems = f32_elems.saturating_add(state_elems);
+    f32_elems = f32_elems.saturating_add(entry_state_elems);
+    f32_elems = f32_elems.saturating_add(output_elems);
+
+    let oracle_requested = mamba2_ssd_block_scan_oracle_requested();
+    let parallel_chunked_requested =
+        mamba2_ssd_parallel_chunked_requested(nemotron_default_prefill_requested);
+    if oracle_requested || parallel_chunked_requested {
+        f32_elems = f32_elems.saturating_add(state_elems);
+    }
+    if parallel_chunked_requested {
+        let chunk_scalar_elems = n_chunks
+            .saturating_mul(n_heads)
+            .saturating_mul(chunk_size);
+        // parallel dt_out, dA_cumsum, chunk_states, entry_state
+        f32_elems = f32_elems.saturating_add(chunk_scalar_elems.saturating_mul(2));
+        f32_elems = f32_elems.saturating_add(entry_state_elems.saturating_mul(2));
+
+        let output_by_chunk_requested =
+            mamba2_ssd_parallel_output_by_chunk_requested(nemotron_default_prefill_requested);
+        let precompute_cb_requested =
+            mamba2_ssd_parallel_output_precompute_cb_requested(nemotron_default_prefill_requested);
+        if output_by_chunk_requested && precompute_cb_requested {
+            let coeff_pair_count = chunk_size.saturating_mul(chunk_size + 1) / 2;
+            let cb_tile_elems = n_chunks
+                .saturating_mul(n_groups)
+                .saturating_mul(coeff_pair_count);
+            f32_elems = f32_elems.saturating_add(cb_tile_elems);
+        }
+    }
+
+    f32_elems.saturating_mul(std::mem::size_of::<f32>())
 }
 
 fn exact_scratch_token_cap(

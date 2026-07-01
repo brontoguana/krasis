@@ -1,0 +1,23 @@
+metric	model	value	notes
+command	Super	./dev benchmark tests/nemotron-super-bf16kv-a16.conf	No optimization env stack; corrected-source build.
+exit_code	Super	0	Benchmark completed.
+prefill_internal_best_tok_s	Super	1228.7	Best of 1K/5K/8150 token internal prefill runs.
+decode_internal_best_tok_s	Super	22.15	Best of 50/100/250 token internal decode runs.
+http_round_trip_best_tok_s	Super	35.24	Best of 50/100/250 token HTTP runs.
+hcs_loaded_experts	Super	3358/20480	16.4% after benchmark decode.
+hcs_startup_pool	Super	5152/20480	25.2% soft pool at startup ready.
+startup_ready_free_mb	Super	958	Safety margin 600 MB.
+decode_min_free_mb	Super	850	Safety margin 600 MB.
+prefill_cap_tokens	Super	8150	Runtime-calibrated cap from long probe low-water.
+previous_prefill_internal_best_tok_s	Super	192.9	Previous standard Super benchmark before default parallel SSD promotion.
+previous_decode_internal_best_tok_s	Super	21.86	Previous standard Super benchmark.
+prefill_speedup_x	Super	6.37	1228.7 / 192.9.
+command	Nano	./dev benchmark tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf	No optimization env stack; corrected-source build.
+exit_code	Nano	0	Benchmark completed.
+prefill_internal_best_tok_s	Nano	8317.6	Best of 1K/5K/10K/20K/35K/39920 token internal prefill runs.
+decode_internal_best_tok_s	Nano	135.33	Best of 50/100/250 token internal decode runs.
+http_round_trip_best_tok_s	Nano	325.13	Best of 50/100/250 token HTTP runs.
+hcs_loaded_experts	Nano	2944/2944	100.0% after benchmark decode.
+decode_min_free_mb	Nano	8708	Safety margin 600 MB.
+prefill_cap_tokens	Nano	39920	Runtime-calibrated cap from long probe low-water.
+decision	both	accepted	Accepted Nano/Nemotron optimizations are now guarded defaults for benchmark and production paths, with no explicit optimization env stack required.

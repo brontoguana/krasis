@@ -1,0 +1,11 @@
+check	command	result	notes
+build	./dev build	pass	benchmarks/20260701_1245_super_prefill_post_reject_build.exit = 0 after removing rejected reusable temp scratch
+benchmark	./dev benchmark tests/nemotron-super-4-4-hqq4-k4v4-a16.conf	pass	benchmarks/20260701_1300_super_prefill_unzeroed_final_benchmark.exit = 0
+summary_json	jq '.' benchmarks/20260701_1052_super_prefill_unzeroed_temps_summary.json	pass	JSON parses
+result_tsv	awk field-count check on benchmarks/20260701_1052_super_prefill_unzeroed_temps_result.tsv	pass	All rows match header width
+shell_syntax	bash -n dev	pass	dev wrapper syntax valid
+source_whitespace	git diff --check on touched Krasis files	pass	No whitespace errors
+internal_whitespace	git -C /home/main/Documents/Claude/krasis-internal diff --check -- CHANGELOG.md TRACKING.md DEBUGLOG.md	pass	No whitespace errors
+rejected_symbol_scan	rg 'REUSE_TEMP|reuse_temp|Mamba2SsdTemp|mamba2_ssd_temp|Box::leak|use_reused_parallel' src/gpu_prefill.rs	pass	Rejected reusable-temp scratch path removed
+protected_configs	git status --short -- krasis/testconfigs testconfigs	pass	No protected config changes
+runtime_idle	tmux/process/GPU snapshot	pass	No tmux/runtime/build processes; GPUs idle at 15 MB / 11 MB

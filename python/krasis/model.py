@@ -11,6 +11,7 @@ Loading sequence:
 """
 
 import gc
+import hashlib
 import logging
 import os
 import json
@@ -83,6 +84,9 @@ from krasis.sampler import sample
 from krasis.tokenizer import Tokenizer
 
 logger = logging.getLogger(__name__)
+
+MAMBA2_PROJECTION_INT4_CACHE_VERSION = 1
+MAMBA2_PROJECTION_INT4_CACHE_FORMAT = "krasis_mamba2_projection_marlin_int4"
 
 
 class KrasisVisionVramError(RuntimeError):
@@ -3046,15 +3050,30 @@ class KrasisModel:
 
     @staticmethod
     def _move_hqq_tensor_to_device(
-        tensor: torch.Tensor, device: torch.device, keepalive: list
+        tensor: torch.Tensor,
+        device: torch.device,
+        keepalive: list,
+        label: str = "hqq_attention_meta",
     ) -> torch.Tensor:
         if tensor.device != device:
             tensor = tensor.to(device, non_blocking=True)
         # HQQ metadata frequently passes same-device temporaries such as
         # `.float().contiguous()` into Rust by raw pointer. Keep every returned
         # tensor alive, even when no device copy was needed.
-        keepalive.append(tensor)
+        if hasattr(keepalive, "keep"):
+            keepalive.keep(label, tensor)
+        else:
+            keepalive.append(tensor)
         return tensor
+
+    def _keep_rust_decode_weight(self, label: str, *values) -> None:
+        keepalive = getattr(self, "_rust_decode_weights", None)
+        if keepalive is None:
+            return
+        if hasattr(keepalive, "keep"):
+            keepalive.keep(label, *values)
+        else:
+            keepalive.extend(values)
 
     def _release_hqq_bf16_attention_residency(self) -> None:
         """Drop BF16 attention projection tensors replaced by HQQ runtime descriptors."""
@@ -3092,12 +3111,12 @@ class KrasisModel:
 
         for hqq_layer in self.layers:
             attn_obj = hqq_layer.attention
-            if attn_obj is None:
-                continue
             if hqq_layer.layer_type == "linear_attention":
+                if attn_obj is None:
+                    continue
                 for name in ("in_proj_qkvz", "in_proj_ba", "out_proj"):
                     _release_attr(attn_obj, name)
-            elif hasattr(attn_obj, "kv_a_proj"):
+            elif attn_obj is not None and hasattr(attn_obj, "kv_a_proj"):
                 for name in (
                     "q_proj", "q_a_proj", "q_b_proj",
                     "kv_a_proj", "kv_a_proj_with_mqa", "kv_b_proj",
@@ -3108,7 +3127,8 @@ class KrasisModel:
                 gqa_w = getattr(hqq_layer, "gqa_weights", None)
                 for name in ("q_proj", "k_proj", "v_proj", "o_proj", "fused_qkv"):
                     _release_dict_tensor(gqa_w, name)
-                    _release_attr(attn_obj, name)
+                    if attn_obj is not None:
+                        _release_attr(attn_obj, name)
 
         if released_tensors:
             import gc
@@ -3135,6 +3155,521 @@ class KrasisModel:
                     released_tensors,
                     released_bytes / (1024.0 * 1024.0),
                 )
+
+    def _mamba2_projection_int4_requested(self) -> bool:
+        if self.cfg.model_type != "nemotron_h":
+            return False
+        raw = os.environ.get("KRASIS_MAMBA2_PROJECTION_INT4")
+        if raw is not None:
+            return raw.strip().lower() not in ("0", "false", "off", "no")
+        defaults = os.environ.get("KRASIS_NEMOTRON_DEFAULT_OPTIMIZATIONS", "1").strip().lower()
+        if defaults in ("0", "false", "off", "no"):
+            return False
+        return self.quant_cfg.attention == "hqq4"
+
+    def _mamba2_projection_int4_group_size(self) -> int:
+        return int(self.quant_cfg.hqq_group_size)
+
+    def _mamba2_projection_int4_source_name(self, layer_idx: int, tensor_name: str) -> str:
+        return f"{self.cfg.layers_prefix}.layers.{int(layer_idx)}.mixer.{tensor_name}.weight"
+
+    def _mamba2_projection_int4_update_digest_from_file(self, digest, path: str) -> None:
+        with open(path, "rb") as handle:
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+
+    def _mamba2_projection_int4_source_signature(
+        self,
+        expected: list[tuple[int, str, list[int]]],
+    ) -> dict:
+        model_path = os.path.abspath(os.path.expanduser(self.cfg.model_path))
+        digest = hashlib.sha256()
+        digest.update(MAMBA2_PROJECTION_INT4_CACHE_FORMAT.encode("utf-8"))
+        digest.update(str(MAMBA2_PROJECTION_INT4_CACHE_VERSION).encode("utf-8"))
+        digest.update(str(model_path).encode("utf-8"))
+        digest.update(str(self.cfg.model_type).encode("utf-8"))
+        digest.update(str(self.cfg.num_hidden_layers).encode("utf-8"))
+        digest.update(str(bool(self.cfg.rescale_prenorm_residual)).encode("utf-8"))
+
+        source_files = []
+        for rel_path in ("config.json", "model.safetensors.index.json"):
+            path = os.path.join(model_path, rel_path)
+            if not os.path.isfile(path):
+                continue
+            stat = os.stat(path)
+            digest.update(rel_path.encode("utf-8"))
+            digest.update(str(stat.st_size).encode("utf-8"))
+            self._mamba2_projection_int4_update_digest_from_file(digest, path)
+            source_files.append({
+                "file": rel_path,
+                "bytes": int(stat.st_size),
+                "mtime_ns": int(stat.st_mtime_ns),
+                "role": "metadata",
+            })
+
+        index_path = os.path.join(model_path, "model.safetensors.index.json")
+        weight_map = {}
+        if os.path.isfile(index_path):
+            with open(index_path, "r", encoding="utf-8") as handle:
+                index = json.load(handle)
+            weight_map = index.get("weight_map", {}) or {}
+
+        if weight_map:
+            for layer_idx, tensor_name, _shape in expected:
+                source_name = self._mamba2_projection_int4_source_name(layer_idx, tensor_name)
+                shard_name = weight_map.get(source_name)
+                if not shard_name:
+                    raise RuntimeError(
+                        "Mamba2 projection INT4 source signature could not find source tensor "
+                        f"{source_name} in model.safetensors.index.json."
+                    )
+                shard_path = os.path.join(model_path, shard_name)
+                if not os.path.isfile(shard_path):
+                    raise RuntimeError(
+                        "Mamba2 projection INT4 source signature could not find shard "
+                        f"{shard_path} for source tensor {source_name}."
+                    )
+                stat = os.stat(shard_path)
+                digest.update(source_name.encode("utf-8"))
+                digest.update(shard_name.encode("utf-8"))
+                digest.update(str(stat.st_size).encode("utf-8"))
+                digest.update(str(stat.st_mtime_ns).encode("utf-8"))
+                source_files.append({
+                    "layer_idx": int(layer_idx),
+                    "tensor_name": tensor_name,
+                    "source_name": source_name,
+                    "file": shard_name,
+                    "bytes": int(stat.st_size),
+                    "mtime_ns": int(stat.st_mtime_ns),
+                    "role": "projection_shard",
+                })
+        else:
+            safetensors_files = sorted(
+                name for name in os.listdir(model_path) if name.endswith(".safetensors")
+            )
+            if not safetensors_files:
+                raise RuntimeError(
+                    f"Mamba2 projection INT4 source signature found no safetensors files in {model_path}."
+                )
+            for file_name in safetensors_files:
+                path = os.path.join(model_path, file_name)
+                stat = os.stat(path)
+                digest.update(file_name.encode("utf-8"))
+                digest.update(str(stat.st_size).encode("utf-8"))
+                digest.update(str(stat.st_mtime_ns).encode("utf-8"))
+                source_files.append({
+                    "file": file_name,
+                    "bytes": int(stat.st_size),
+                    "mtime_ns": int(stat.st_mtime_ns),
+                    "role": "projection_shard_fallback",
+                })
+
+        return {
+            "signature": digest.hexdigest(),
+            "model_path": model_path,
+            "files": source_files,
+        }
+
+    def _mamba2_projection_int4_cache_dir(self) -> str:
+        group_size = self._mamba2_projection_int4_group_size()
+        dirname = (
+            f"mamba2_projection_marlin_int4_v{MAMBA2_PROJECTION_INT4_CACHE_VERSION}"
+            f"_g{group_size}"
+        )
+        return os.path.join(cache_dir_for_model(self.cfg.model_path), dirname)
+
+    def _mamba2_projection_int4_manifest_path(self) -> str:
+        return os.path.join(self._mamba2_projection_int4_cache_dir(), "manifest.json")
+
+    def _mamba2_projection_int4_expected(self) -> list[tuple[int, str, list[int]]]:
+        expected = []
+        for layer_idx, layer in enumerate(self.layers):
+            if layer.layer_type != "mamba2":
+                continue
+            weights = layer.mamba2_weights or {}
+            for tensor_name in ("in_proj", "out_proj"):
+                tensor = weights.get(tensor_name)
+                if not isinstance(tensor, torch.Tensor):
+                    raise RuntimeError(
+                        f"Mamba2 projection INT4 cache requested but layer {layer_idx} "
+                        f"{tensor_name} source tensor is unavailable."
+                    )
+                if tensor.dim() != 2:
+                    raise RuntimeError(
+                        f"Mamba2 projection INT4 cache requires 2D tensors; layer {layer_idx} "
+                        f"{tensor_name} has shape {tuple(tensor.shape)}."
+                    )
+                expected.append((layer_idx, tensor_name, [int(tensor.shape[0]), int(tensor.shape[1])]))
+        return expected
+
+    def _mamba2_projection_int4_manifest_base(self, expected: list[tuple[int, str, list[int]]]) -> dict:
+        group_size = self._mamba2_projection_int4_group_size()
+        source_signature = self._mamba2_projection_int4_source_signature(expected)
+        return {
+            "format": MAMBA2_PROJECTION_INT4_CACHE_FORMAT,
+            "format_version": MAMBA2_PROJECTION_INT4_CACHE_VERSION,
+            "backend": "marlin_int4_single_slot",
+            "nbits": 4,
+            "group_size": group_size,
+            "num_hidden_layers": int(self.cfg.num_hidden_layers),
+            "model_type": str(self.cfg.model_type),
+            "rescale_prenorm_residual": bool(self.cfg.rescale_prenorm_residual),
+            "model_path": source_signature["model_path"],
+            "source_signature": source_signature["signature"],
+            "source_files": source_signature["files"],
+            "complete": False,
+            "expected": [
+                {
+                    "layer_idx": int(layer_idx),
+                    "tensor_name": tensor_name,
+                    "shape": shape,
+                }
+                for layer_idx, tensor_name, shape in expected
+            ],
+            "tensors": [],
+            "totals": {
+                "num_tensors": 0,
+                "tensor_bytes": 0,
+            },
+        }
+
+    def _load_mamba2_projection_int4_manifest(self) -> Optional[dict]:
+        path = self._mamba2_projection_int4_manifest_path()
+        if not os.path.isfile(path):
+            return None
+        with open(path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+
+    def _save_mamba2_projection_int4_manifest(self) -> None:
+        manifest = getattr(self, "_mamba2_projection_int4_manifest", None)
+        if not isinstance(manifest, dict):
+            return
+        path = self._mamba2_projection_int4_manifest_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp_path = path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(manifest, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.replace(tmp_path, path)
+
+    def _mamba2_projection_int4_manifest_compatible(
+        self,
+        manifest: Optional[dict],
+        expected: list[tuple[int, str, list[int]]],
+    ) -> bool:
+        if not isinstance(manifest, dict):
+            return False
+        group_size = self._mamba2_projection_int4_group_size()
+        if (
+            manifest.get("format") != MAMBA2_PROJECTION_INT4_CACHE_FORMAT
+            or manifest.get("format_version") != MAMBA2_PROJECTION_INT4_CACHE_VERSION
+            or manifest.get("backend") != "marlin_int4_single_slot"
+            or int(manifest.get("nbits", -1)) != 4
+            or int(manifest.get("group_size", -1)) != group_size
+            or int(manifest.get("num_hidden_layers", -1)) != int(self.cfg.num_hidden_layers)
+            or manifest.get("model_type") != str(self.cfg.model_type)
+            or bool(manifest.get("rescale_prenorm_residual", False)) != bool(self.cfg.rescale_prenorm_residual)
+            or not manifest.get("complete")
+        ):
+            return False
+        source_signature = self._mamba2_projection_int4_source_signature(expected)
+        if (
+            manifest.get("source_signature") != source_signature["signature"]
+            or os.path.abspath(os.path.expanduser(str(manifest.get("model_path", "")))) != source_signature["model_path"]
+        ):
+            return False
+        expected_map = {
+            (int(layer_idx), tensor_name): shape
+            for layer_idx, tensor_name, shape in expected
+        }
+        entries = manifest.get("tensors", [])
+        if len(entries) != len(expected_map):
+            return False
+        cache_dir = self._mamba2_projection_int4_cache_dir()
+        seen = set()
+        for entry in entries:
+            try:
+                key = (int(entry["layer_idx"]), str(entry["tensor_name"]))
+                shape = [int(v) for v in entry["shape"]]
+            except (KeyError, TypeError, ValueError):
+                return False
+            if key not in expected_map or expected_map[key] != shape or key in seen:
+                return False
+            if int(entry.get("group_size", -1)) != group_size or int(entry.get("nbits", -1)) != 4:
+                return False
+            file_name = entry.get("file")
+            if not file_name or not os.path.isfile(os.path.join(cache_dir, file_name)):
+                return False
+            seen.add(key)
+        return len(seen) == len(expected_map)
+
+    def _prepare_mamba2_projection_int4_cache(self) -> None:
+        self._mamba2_projection_int4_enabled = self._mamba2_projection_int4_requested()
+        self._mamba2_projection_int4_rebuild = False
+        self._mamba2_projection_int4_entries = {}
+        self._mamba2_projection_bf16_released_bytes = 0
+        self._mamba2_projection_bf16_released_tensors = 0
+        if not self._mamba2_projection_int4_enabled:
+            self._mamba2_projection_int4_manifest = None
+            return
+
+        expected = self._mamba2_projection_int4_expected()
+        if not expected:
+            self._mamba2_projection_int4_manifest = None
+            self._mamba2_projection_int4_enabled = False
+            return
+
+        group_size = self._mamba2_projection_int4_group_size()
+        for layer_idx, tensor_name, shape in expected:
+            rows, cols = shape
+            if rows % 64 != 0 or cols % 16 != 0 or cols % group_size != 0:
+                raise RuntimeError(
+                    "Mamba2 projection INT4 cache requested but tensor is not Marlin-compatible: "
+                    f"layer={layer_idx} tensor={tensor_name} shape={rows}x{cols} group_size={group_size}."
+                )
+
+        manifest = self._load_mamba2_projection_int4_manifest()
+        if self._mamba2_projection_int4_manifest_compatible(manifest, expected):
+            self._mamba2_projection_int4_manifest = manifest
+            self._mamba2_projection_int4_entries = {
+                (int(entry["layer_idx"]), str(entry["tensor_name"])): entry
+                for entry in manifest.get("tensors", [])
+            }
+            logger.info(
+                "Using cached Mamba2 projection INT4 artifacts: tensors=%d cache=%s",
+                len(self._mamba2_projection_int4_entries),
+                self._mamba2_projection_int4_cache_dir(),
+            )
+            return
+
+        cache_dir = self._mamba2_projection_int4_cache_dir()
+        if os.path.isdir(cache_dir):
+            shutil.rmtree(cache_dir)
+        os.makedirs(cache_dir, exist_ok=True)
+        self._mamba2_projection_int4_rebuild = True
+        self._mamba2_projection_int4_manifest = self._mamba2_projection_int4_manifest_base(expected)
+        self._save_mamba2_projection_int4_manifest()
+        logger.info(
+            "Building Mamba2 projection INT4 cache: tensors=%d group_size=%d cache=%s",
+            len(expected),
+            group_size,
+            cache_dir,
+        )
+
+    def _write_mamba2_projection_int4_artifact(
+        self,
+        store,
+        layer_idx: int,
+        tensor_name: str,
+        weight: torch.Tensor,
+    ) -> dict:
+        group_size = self._mamba2_projection_int4_group_size()
+        rows, cols = int(weight.shape[0]), int(weight.shape[1])
+        weight_cpu = weight.detach().to(device="cpu", dtype=torch.bfloat16).contiguous()
+        (
+            marlin_packed_bytes,
+            marlin_scales_bytes,
+            simple_packed_bytes,
+            simple_scales_bytes,
+            packed_rows,
+            packed_cols,
+        ) = store.repack_marlin_int4_cpu_full(
+            weight_cpu.data_ptr(),
+            rows,
+            cols,
+            group_size,
+        )
+        del weight_cpu
+        if int(packed_rows) != rows or int(packed_cols) != cols:
+            raise RuntimeError(
+                f"Mamba2 projection INT4 pack shape mismatch for layer {layer_idx} "
+                f"{tensor_name}: packed {packed_rows}x{packed_cols}, expected {rows}x{cols}."
+            )
+
+        marlin_packed = torch.from_numpy(
+            np.frombuffer(marlin_packed_bytes, dtype=np.uint32).copy()
+        ).to(torch.int32).reshape(cols // 16, 2 * rows).contiguous()
+        marlin_scales = torch.from_numpy(
+            np.frombuffer(marlin_scales_bytes, dtype=np.uint16).copy()
+        ).to(torch.int16).reshape(cols // group_size, rows).contiguous()
+        simple_packed = torch.from_numpy(
+            np.frombuffer(simple_packed_bytes, dtype=np.uint8).copy()
+        ).reshape(rows, cols // 2).contiguous()
+        simple_scales = torch.from_numpy(
+            np.frombuffer(simple_scales_bytes, dtype=np.float32).copy()
+        ).reshape(rows, cols // group_size).contiguous()
+
+        cache_dir = self._mamba2_projection_int4_cache_dir()
+        file_name = f"layer_{layer_idx:03d}_{tensor_name}_marlin_int4.safetensors"
+        path = os.path.join(cache_dir, file_name)
+        from safetensors.torch import save_file
+        save_file(
+            {
+                "marlin_packed": marlin_packed,
+                "marlin_scales": marlin_scales,
+                "simple_packed": simple_packed,
+                "simple_scales": simple_scales,
+            },
+            path,
+            metadata={
+                "format": MAMBA2_PROJECTION_INT4_CACHE_FORMAT,
+                "format_version": str(MAMBA2_PROJECTION_INT4_CACHE_VERSION),
+                "backend": "marlin_int4_single_slot",
+                "layer_idx": str(layer_idx),
+                "tensor_name": tensor_name,
+                "nbits": "4",
+                "group_size": str(group_size),
+                "rows": str(rows),
+                "cols": str(cols),
+                "original_dtype": str(weight.dtype).replace("torch.", ""),
+            },
+        )
+        tensor_bytes = int(os.path.getsize(path))
+        entry = {
+            "layer_idx": int(layer_idx),
+            "tensor_name": tensor_name,
+            "file": file_name,
+            "shape": [rows, cols],
+            "nbits": 4,
+            "group_size": group_size,
+            "marlin_packed_shape": [cols // 16, 2 * rows],
+            "marlin_scales_shape": [cols // group_size, rows],
+            "simple_packed_shape": [rows, cols // 2],
+            "simple_scales_shape": [rows, cols // group_size],
+            "tensor_bytes": tensor_bytes,
+            "original_dtype": str(weight.dtype).replace("torch.", ""),
+        }
+        manifest = self._mamba2_projection_int4_manifest
+        manifest["tensors"].append(entry)
+        manifest["totals"]["num_tensors"] = len(manifest["tensors"])
+        manifest["totals"]["tensor_bytes"] = int(manifest["totals"].get("tensor_bytes", 0)) + tensor_bytes
+        self._mamba2_projection_int4_entries[(int(layer_idx), tensor_name)] = entry
+        self._save_mamba2_projection_int4_manifest()
+        return entry
+
+    def _register_mamba2_projection_int4(
+        self,
+        store,
+        layer_idx: int,
+        tensor_name: str,
+        weight: torch.Tensor,
+        device: torch.device,
+    ) -> tuple[int, "MarlinWeight"]:
+        if getattr(self, "_mamba2_projection_int4_rebuild", False):
+            entry = self._write_mamba2_projection_int4_artifact(store, layer_idx, tensor_name, weight)
+        else:
+            entry = self._mamba2_projection_int4_entries.get((int(layer_idx), tensor_name))
+            if entry is None:
+                raise RuntimeError(
+                    f"Mamba2 projection INT4 cache missing manifest entry for layer {layer_idx} {tensor_name}."
+                )
+
+        rows, cols = [int(v) for v in entry["shape"]]
+        group_size = int(entry["group_size"])
+        path = os.path.join(self._mamba2_projection_int4_cache_dir(), entry["file"])
+        with safe_open(path, framework="pt", device="cpu") as handle:
+            metadata = handle.metadata() or {}
+            if metadata.get("format") != MAMBA2_PROJECTION_INT4_CACHE_FORMAT:
+                raise RuntimeError(f"Mamba2 projection INT4 artifact format mismatch: {path}")
+            if metadata.get("backend") != "marlin_int4_single_slot":
+                raise RuntimeError(f"Mamba2 projection INT4 artifact backend mismatch: {path}")
+            marlin_packed = handle.get_tensor("marlin_packed").contiguous()
+            marlin_scales = handle.get_tensor("marlin_scales").contiguous()
+            simple_packed = handle.get_tensor("simple_packed").contiguous()
+            simple_scales = handle.get_tensor("simple_scales").contiguous()
+
+        expected_shapes = {
+            "marlin_packed": [cols // 16, 2 * rows],
+            "marlin_scales": [cols // group_size, rows],
+            "simple_packed": [rows, cols // 2],
+            "simple_scales": [rows, cols // group_size],
+        }
+        actual_shapes = {
+            "marlin_packed": list(marlin_packed.shape),
+            "marlin_scales": list(marlin_scales.shape),
+            "simple_packed": list(simple_packed.shape),
+            "simple_scales": list(simple_scales.shape),
+        }
+        for name, expected_shape in expected_shapes.items():
+            if actual_shapes[name] != expected_shape:
+                raise RuntimeError(
+                    f"Mamba2 projection INT4 artifact shape mismatch for {path} {name}: "
+                    f"got {actual_shapes[name]}, expected {expected_shape}."
+                )
+
+        repacked = marlin_packed.to(dtype=torch.int32, device=device, non_blocking=True)
+        scale_raw = marlin_scales.reshape(-1).to(dtype=torch.int16)
+        n_scale_elements = int(scale_raw.numel())
+        scales_slot = torch.empty(n_scale_elements * 2, dtype=torch.int16, device=device)
+        scales_slot[:n_scale_elements].copy_(scale_raw.to(device, non_blocking=True))
+        scale_perm = scales_slot[:n_scale_elements].view(torch.bfloat16).reshape(cols // group_size, rows)
+        simple_packed = simple_packed.to(dtype=torch.uint8).contiguous()
+        simple_scales = simple_scales.to(dtype=torch.float32).contiguous()
+        store.stage_simple_int4_cpu(
+            simple_packed.data_ptr(),
+            simple_packed.numel(),
+            simple_scales.data_ptr(),
+            simple_scales.numel(),
+            rows,
+            cols,
+            group_size,
+        )
+        wid = store.register_marlin_int4_weight(
+            repacked.data_ptr(),
+            scales_slot.data_ptr(),
+            rows,
+            cols,
+            group_size,
+        )
+        from krasis.attention import MarlinWeight
+        from krasis.marlin_utils import get_scalar_type, marlin_make_workspace
+        if not hasattr(self, "_mamba2_projection_marlin_workspace"):
+            self._mamba2_projection_marlin_workspace = marlin_make_workspace(device)
+            self._mamba2_projection_marlin_scalar_type = get_scalar_type(4, False)
+        marlin_weight = MarlinWeight(
+            repacked,
+            scale_perm,
+            self._mamba2_projection_marlin_workspace,
+            self._mamba2_projection_marlin_scalar_type,
+            rows,
+            cols,
+        )
+        self._keep_rust_decode_weight("mamba2_projection_int4", repacked, scales_slot)
+        return wid, marlin_weight
+
+    def _finalize_mamba2_projection_int4_cache(self) -> None:
+        if not getattr(self, "_mamba2_projection_int4_enabled", False):
+            return
+        if getattr(self, "_mamba2_projection_int4_rebuild", False):
+            expected_count = len(getattr(self, "_mamba2_projection_int4_manifest", {}).get("expected", []))
+            actual_count = len(getattr(self, "_mamba2_projection_int4_manifest", {}).get("tensors", []))
+            if expected_count != actual_count:
+                raise RuntimeError(
+                    f"Mamba2 projection INT4 cache build incomplete: {actual_count}/{expected_count} tensors."
+                )
+            self._mamba2_projection_int4_manifest["complete"] = True
+            self._save_mamba2_projection_int4_manifest()
+            logger.info(
+                "Mamba2 projection INT4 cache build complete: tensors=%d bytes=%.1f MB cache=%s",
+                actual_count,
+                int(self._mamba2_projection_int4_manifest["totals"]["tensor_bytes"]) / (1024.0 * 1024.0),
+                self._mamba2_projection_int4_cache_dir(),
+            )
+
+        released_tensors = int(getattr(self, "_mamba2_projection_bf16_released_tensors", 0))
+        released_bytes = int(getattr(self, "_mamba2_projection_bf16_released_bytes", 0))
+        if released_tensors:
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            logger.info(
+                "Mamba2 BF16 projection residency released after INT4 registration: tensors=%d cuda_mb=%.1f",
+                released_tensors,
+                released_bytes / (1024.0 * 1024.0),
+            )
 
     def _hqq_layer_meta(
         self,
@@ -3182,38 +3717,58 @@ class KrasisModel:
             rope_sin_ptr = 0
             if rope_half > 0:
                 theta = float(self.cfg.rope_theta_for_layer(layer_idx))
-                if self.cfg.gemma4_text and layer_rope_params.get("rope_type") == "proportional":
-                    rope_proportion = float(layer_rope_params.get("partial_rotary_factor", 1.0))
-                    rope_angles = int(rope_proportion * head_dim_for_rope // 2)
-                    inv_freq_rotated = 1.0 / (
-                        theta ** (
-                            torch.arange(0, 2 * rope_angles, 2, dtype=torch.float32)
-                            / head_dim_for_rope
+                cache = getattr(self, "_hqq_gqa_rope_table_cache", None)
+                if cache is None:
+                    cache = {}
+                    self._hqq_gqa_rope_table_cache = cache
+                rope_param_key = json.dumps(layer_rope_params, sort_keys=True, default=str)
+                cache_key = (
+                    target_device.type,
+                    target_device.index,
+                    max_seq,
+                    rope_half,
+                    theta,
+                    head_dim_for_rope,
+                    bool(self.cfg.gemma4_text),
+                    rope_param_key,
+                )
+                cached = cache.get(cache_key)
+                if cached is None:
+                    if self.cfg.gemma4_text and layer_rope_params.get("rope_type") == "proportional":
+                        rope_proportion = float(layer_rope_params.get("partial_rotary_factor", 1.0))
+                        rope_angles = int(rope_proportion * head_dim_for_rope // 2)
+                        inv_freq_rotated = 1.0 / (
+                            theta ** (
+                                torch.arange(0, 2 * rope_angles, 2, dtype=torch.float32)
+                                / head_dim_for_rope
+                            )
                         )
-                    )
-                    nope_angles = head_dim_for_rope // 2 - rope_angles
-                    if nope_angles > 0:
-                        inv_freq = torch.cat(
-                            (inv_freq_rotated, torch.zeros(nope_angles, dtype=torch.float32)),
-                            dim=0,
-                        )
+                        nope_angles = head_dim_for_rope // 2 - rope_angles
+                        if nope_angles > 0:
+                            inv_freq = torch.cat(
+                                (inv_freq_rotated, torch.zeros(nope_angles, dtype=torch.float32)),
+                                dim=0,
+                            )
+                        else:
+                            inv_freq = inv_freq_rotated
                     else:
-                        inv_freq = inv_freq_rotated
-                else:
-                    inv_freq = 1.0 / (
-                        theta ** (
-                            torch.arange(0, rope_half * 2, 2, dtype=torch.float32)
-                            / (rope_half * 2)
+                        inv_freq = 1.0 / (
+                            theta ** (
+                                torch.arange(0, rope_half * 2, 2, dtype=torch.float32)
+                                / (rope_half * 2)
+                            )
                         )
+                    t = torch.arange(max_seq, dtype=torch.float32)
+                    freqs = torch.outer(t, inv_freq)
+                    rope_cos = self._move_hqq_tensor_to_device(
+                        freqs.cos().contiguous(), target_device, keepalive, "hqq_rope_tables"
                     )
-                t = torch.arange(max_seq, dtype=torch.float32)
-                freqs = torch.outer(t, inv_freq)
-                rope_cos = self._move_hqq_tensor_to_device(
-                    freqs.cos().contiguous(), target_device, keepalive
-                )
-                rope_sin = self._move_hqq_tensor_to_device(
-                    freqs.sin().contiguous(), target_device, keepalive
-                )
+                    rope_sin = self._move_hqq_tensor_to_device(
+                        freqs.sin().contiguous(), target_device, keepalive, "hqq_rope_tables"
+                    )
+                    cache[cache_key] = (rope_cos, rope_sin)
+                else:
+                    rope_cos, rope_sin = cached
                 rope_cos_ptr = rope_cos.data_ptr()
                 rope_sin_ptr = rope_sin.data_ptr()
             return {
@@ -3403,25 +3958,25 @@ class KrasisModel:
                 staged_runtime_tensors += 1
             for sidecar in sidecar_runtime.get(layer_idx, []):
                 correction = self._move_hqq_tensor_to_device(
-                    sidecar["correction"], target_device, keepalive
+                    sidecar["correction"], target_device, keepalive, "hqq_prefill_sidecar"
                 )
                 scales = self._move_hqq_tensor_to_device(
-                    sidecar["scales"], target_device, keepalive
+                    sidecar["scales"], target_device, keepalive, "hqq_prefill_sidecar"
                 )
                 output_rows = self._move_hqq_tensor_to_device(
-                    sidecar["output_rows"], target_device, keepalive
+                    sidecar["output_rows"], target_device, keepalive, "hqq_prefill_sidecar"
                 )
                 groups = self._move_hqq_tensor_to_device(
-                    sidecar["groups"], target_device, keepalive
+                    sidecar["groups"], target_device, keepalive, "hqq_prefill_sidecar"
                 )
                 start_cols = self._move_hqq_tensor_to_device(
-                    sidecar["start_cols"], target_device, keepalive
+                    sidecar["start_cols"], target_device, keepalive, "hqq_prefill_sidecar"
                 )
                 widths = self._move_hqq_tensor_to_device(
-                    sidecar["widths"], target_device, keepalive
+                    sidecar["widths"], target_device, keepalive, "hqq_prefill_sidecar"
                 )
                 base_f32 = self._move_hqq_tensor_to_device(
-                    sidecar["base_f32"], target_device, keepalive
+                    sidecar["base_f32"], target_device, keepalive, "hqq_prefill_sidecar"
                 )
                 store.stage_hqq_prefill_sidecar_tensor(
                     layer_idx=layer_idx,
@@ -3890,6 +4445,22 @@ class KrasisModel:
                 for item in value:
                     _add_any(category, item)
 
+        def _safe_category_label(label: object) -> str:
+            text = str(label or "unclassified")
+            text = "".join(ch if ch.isalnum() else "_" for ch in text)
+            text = "_".join(part for part in text.split("_") if part)
+            return text or "unclassified"
+
+        def _add_rust_decode_keepalive(value) -> None:
+            if value is None:
+                return
+            labels = getattr(value, "labels", None)
+            if labels is None or len(labels) != len(value):
+                _add_any("rust_decode_keepalive", value)
+                return
+            for label, item in zip(labels, value):
+                _add_any(f"rust_keepalive_{_safe_category_label(label)}", item)
+
         _add_any("top_embedding", self.embedding)
         _add_any("top_final_norm", self.final_norm)
         _add_any("top_lm_head", self.lm_head_data)
@@ -3905,7 +4476,7 @@ class KrasisModel:
                 _add_any("kv_cache", getattr(cache, name, None))
 
         _add_any("marlin_attention_weights", getattr(self, "_marlin_attn_weights", None))
-        _add_any("rust_decode_keepalive", getattr(self, "_rust_decode_weights", None))
+        _add_rust_decode_keepalive(getattr(self, "_rust_decode_weights", None))
         _add_any("rust_rope_tables", getattr(self, "_rust_rope_cos", None))
         _add_any("rust_rope_tables", getattr(self, "_rust_rope_sin", None))
         _add_any("rust_tq4_signs", getattr(self, "_tq4_sign_refs", None))
@@ -3959,25 +4530,21 @@ class KrasisModel:
                 for name, bytes_ in sorted(categories.items())
                 if bytes_ > 0
             )
-            logger.info(
-                "VRAM LEDGER residency label=%s device=%d free_mb=%d total_mb=%d "
-                "driver_used_mb=%d torch_allocated_mb=%d torch_reserved_mb=%d "
-                "inventoried_cuda_mb=%.1f untracked_driver_mb=%.1f "
-                "untracked_reserved_mb=%.1f duplicate_refs=%d duplicate_storage_mb=%.1f %s",
-                label,
-                device_idx,
-                free >> 20,
-                total >> 20,
-                driver_used >> 20,
-                allocated >> 20,
-                reserved >> 20,
-                inventoried / (1024 * 1024),
-                (driver_used - inventoried) / (1024 * 1024),
-                (reserved - inventoried) / (1024 * 1024),
-                duplicate_refs,
-                duplicate_bytes / (1024 * 1024),
-                category_parts,
+            message = (
+                f"VRAM LEDGER residency label={label} device={device_idx} "
+                f"free_mb={free >> 20} total_mb={total >> 20} "
+                f"driver_used_mb={driver_used >> 20} "
+                f"torch_allocated_mb={allocated >> 20} "
+                f"torch_reserved_mb={reserved >> 20} "
+                f"inventoried_cuda_mb={inventoried / (1024 * 1024):.1f} "
+                f"untracked_driver_mb={(driver_used - inventoried) / (1024 * 1024):.1f} "
+                f"untracked_reserved_mb={(reserved - inventoried) / (1024 * 1024):.1f} "
+                f"duplicate_refs={duplicate_refs} "
+                f"duplicate_storage_mb={duplicate_bytes / (1024 * 1024):.1f} "
+                f"{category_parts}"
             )
+            logger.info(message)
+            print(message, flush=True)
 
     def release_redundant_gpu_execution_tensors(
         self,
@@ -6836,11 +7403,29 @@ class KrasisModel:
         self._la_wids = {}
         rope_set = False
 
+        class _DecodeKeepalive(list):
+            def __init__(self):
+                super().__init__()
+                self.labels = []
+
+            def append(self, value):
+                super().append(value)
+                self.labels.append("unclassified")
+
+            def extend(self, values):
+                for value in values:
+                    self.append(value)
+
+            def keep(self, label: str, *values):
+                for value in values:
+                    super().append(value)
+                    self.labels.append(label)
+
         # When streaming attention is enabled, the layer's weight attributes point to
         # ping-pong GPU buffers that may contain a DIFFERENT layer's data.  We must
         # create permanent GPU copies from the CPU-pinned originals so Rust decode
         # always sees correct weights for every layer.
-        self._rust_decode_weights = []  # prevent GC of permanent GPU copies
+        self._rust_decode_weights = _DecodeKeepalive()  # prevent GC of permanent GPU copies
 
         attn_quant = self.quant_cfg.attention  # "bf16" or "awq"
         hqq_active = is_hqq_attention(attn_quant)
@@ -7023,7 +7608,7 @@ class KrasisModel:
             # BF16 path: weight must be on GPU
             if not w.is_cuda:
                 w = w.to(device, non_blocking=True)
-                self._rust_decode_weights.append(w)  # prevent GC
+                self._keep_rust_decode_weight("attention_bf16_gpu_copy", w)
             return store.register_weight(
                 w.data_ptr(), w.shape[0], w.shape[1], _weight_dtype_code(w))
 
@@ -7055,6 +7640,8 @@ class KrasisModel:
                 hqq_cache_bytes >> 20,
                 self._hqq_attention_loaded_tensors,
             )
+
+        self._prepare_mamba2_projection_int4_cache()
 
         self._rust_layer_rope_tables = getattr(self, "_rust_layer_rope_tables", {})
 
@@ -7618,6 +8205,8 @@ class KrasisModel:
             else:
                 store.register_mlp(layer_idx, "none")
 
+        self._finalize_mamba2_projection_int4_cache()
+
         # Register MoE expert data from engine (all MoE layers at once)
         if self.krasis_engine is not None:
             store.setup_from_engine(self.krasis_engine)
@@ -7631,7 +8220,9 @@ class KrasisModel:
                     if latent is not None:
                         fc1_down = latent["fc1_latent_proj"]
                         fc2_up = latent["fc2_latent_proj"]
-                        self._rust_decode_weights.extend([fc1_down, fc2_up])
+                        self._keep_rust_decode_weight(
+                            "nemotron_latent_projection_bf16", fc1_down, fc2_up
+                        )
                         ld_wid = store.register_weight(
                             fc1_down.data_ptr(), fc1_down.shape[0], fc1_down.shape[1], 0)
                         lu_wid = store.register_weight(
@@ -7812,12 +8403,32 @@ class KrasisModel:
                 c.max_context_tokens for c in self.kv_caches if c is not None
             )
             rope_half = self.cfg.rotary_dim // 2
-            inv_freq = 1.0 / (self.cfg.rope_theta ** (
-                torch.arange(0, rope_half * 2, 2, dtype=torch.float32) / (rope_half * 2)))
-            t = torch.arange(max_seq, dtype=torch.float32)
-            freqs = torch.outer(t, inv_freq)
-            cos_f32 = freqs.cos().contiguous().to(device)
-            sin_f32 = freqs.sin().contiguous().to(device)
+            cos_f32 = None
+            sin_f32 = None
+            reused_hqq_gqa_rope = False
+            if not self.cfg.gemma4_text:
+                cache = getattr(self, "_hqq_gqa_rope_table_cache", {}) or {}
+                expected_cache_key = (
+                    device.type,
+                    device.index,
+                    max_seq,
+                    rope_half,
+                    float(self.cfg.rope_theta),
+                    self.cfg.gqa_head_dim,
+                    False,
+                    "{}",
+                )
+                cached = cache.get(expected_cache_key)
+                if cached is not None:
+                    cos_f32, sin_f32 = cached
+                    reused_hqq_gqa_rope = True
+            if cos_f32 is None or sin_f32 is None:
+                inv_freq = 1.0 / (self.cfg.rope_theta ** (
+                    torch.arange(0, rope_half * 2, 2, dtype=torch.float32) / (rope_half * 2)))
+                t = torch.arange(max_seq, dtype=torch.float32)
+                freqs = torch.outer(t, inv_freq)
+                cos_f32 = freqs.cos().contiguous().to(device)
+                sin_f32 = freqs.sin().contiguous().to(device)
             self._rust_rope_cos = cos_f32
             self._rust_rope_sin = sin_f32
             store.set_rope_tables(
@@ -7825,7 +8436,12 @@ class KrasisModel:
                 cos_f32.shape[1], max_seq,
             )
             rope_set = True
-            logger.info("HQQ attention RoPE tables registered: max_seq=%d rope_half=%d", max_seq, rope_half)
+            logger.info(
+                "HQQ attention RoPE tables registered: max_seq=%d rope_half=%d reused_hqq_gqa_cache=%s",
+                max_seq,
+                rope_half,
+                reused_hqq_gqa_rope,
+            )
 
         if hqq_active:
             logger.info(
@@ -7867,24 +8483,42 @@ class KrasisModel:
         cfg = self.cfg
 
         # Mamba2 projection weights: in_proj [in_proj_out, hidden_size], out_proj [hidden_size, d_inner]
-        # Register as Marlin GEMV weights for decode
+        # Register as cached INT4 Marlin/simple single-slot weights when enabled.
         in_proj = m2["in_proj"]
         out_proj = m2["out_proj"]
-        self._rust_decode_weights.extend([in_proj, out_proj])
-        in_proj_wid = store.register_weight(
-            in_proj.data_ptr(), in_proj.shape[0], in_proj.shape[1], 0)
-        out_proj_wid = store.register_weight(
-            out_proj.data_ptr(), out_proj.shape[0], out_proj.shape[1], 0)
+        if getattr(self, "_mamba2_projection_int4_enabled", False):
+            in_proj_wid, in_proj_marlin = self._register_mamba2_projection_int4(
+                store, layer_idx, "in_proj", in_proj, device
+            )
+            out_proj_wid, out_proj_marlin = self._register_mamba2_projection_int4(
+                store, layer_idx, "out_proj", out_proj, device
+            )
+            for tensor_name, marlin_weight in (
+                ("in_proj", in_proj_marlin),
+                ("out_proj", out_proj_marlin),
+            ):
+                tensor = in_proj if tensor_name == "in_proj" else out_proj
+                if isinstance(tensor, torch.Tensor) and tensor.is_cuda:
+                    self._mamba2_projection_bf16_released_bytes += tensor.numel() * tensor.element_size()
+                    self._mamba2_projection_bf16_released_tensors += 1
+                m2[tensor_name] = marlin_weight
+            del in_proj, out_proj
+        else:
+            self._keep_rust_decode_weight("mamba2_projection_bf16", in_proj, out_proj)
+            in_proj_wid = store.register_weight(
+                in_proj.data_ptr(), in_proj.shape[0], in_proj.shape[1], 0)
+            out_proj_wid = store.register_weight(
+                out_proj.data_ptr(), out_proj.shape[0], out_proj.shape[1], 0)
 
         # Conv1d weight: [conv_dim, conv_kernel] FP32 on GPU
         conv_w = m2["conv1d_weight"].float().contiguous().to(device)
-        self._rust_decode_weights.append(conv_w)
+        self._keep_rust_decode_weight("mamba2_conv_fp32", conv_w)
 
         # Conv1d bias: [conv_dim] FP32 on GPU (optional)
         conv_bias = m2.get("conv1d_bias")
         if conv_bias is not None:
             conv_bias = conv_bias.float().contiguous().to(device)
-            self._rust_decode_weights.append(conv_bias)
+            self._keep_rust_decode_weight("mamba2_conv_bias_fp32", conv_bias)
             store.set_mamba2_conv_bias(layer_idx, conv_bias.data_ptr())
 
         # A_log, D, dt_bias, norm: all FP32 on GPU
@@ -7892,7 +8526,9 @@ class KrasisModel:
         d_param = m2["D"].float().contiguous().to(device)
         dt_bias = m2["dt_bias"].float().contiguous().to(device)
         norm_w = m2["norm_weight"].float().contiguous().to(device)
-        self._rust_decode_weights.extend([a_log, d_param, dt_bias, norm_w])
+        self._keep_rust_decode_weight(
+            "mamba2_params_fp32", a_log, d_param, dt_bias, norm_w
+        )
 
         # Allocate SSM state buffers on GPU (persistent across tokens)
         # Conv state: [conv_dim, conv_kernel] FP32
@@ -7902,7 +8538,7 @@ class KrasisModel:
                                  dtype=torch.float32, device=device)
         ssm_state = torch.zeros(cfg.mamba_num_heads, cfg.mamba_head_dim, cfg.ssm_state_size,
                                 dtype=torch.float32, device=device)
-        self._rust_decode_weights.extend([conv_state, ssm_state])
+        self._keep_rust_decode_weight("mamba2_state_fp32", conv_state, ssm_state)
         # Save references for prefill -> decode state transfer
         if not hasattr(self, '_mamba2_decode_states'):
             self._mamba2_decode_states = {}
@@ -7927,9 +8563,11 @@ class KrasisModel:
         )
         # Set n_groups for B/C sharing (same for all Mamba2 layers)
         store.set_mamba2_n_groups(cfg.mamba_n_groups)
+        store.set_mamba2_chunk_size(cfg.mamba_chunk_size)
 
-        logger.info("Registered Mamba2 layer %d (conv_dim=%d, heads=%d, state=%d)",
-                     layer_idx, conv_dim, cfg.mamba_num_heads, cfg.ssm_state_size)
+        logger.info("Registered Mamba2 layer %d (conv_dim=%d, heads=%d, state=%d, chunk=%d)",
+                     layer_idx, conv_dim, cfg.mamba_num_heads, cfg.ssm_state_size,
+                     cfg.mamba_chunk_size)
 
     def _register_nemotron_moe_only_layer(self, store, layer_idx, layer, device):
         """Register a Nemotron MoE-only layer (no attention) with the Rust decode store.

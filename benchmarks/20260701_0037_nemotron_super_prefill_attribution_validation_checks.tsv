@@ -1,0 +1,9 @@
+check	result	notes
+json_summary	pass	jq empty benchmarks/20260701_0037_nemotron_super_prefill_attribution_summary.json
+tsv_shape	pass	plan/result TSV files have consistent tab-separated field counts.
+public_diff_check	pass	git diff --check on touched public benchmark artifacts.
+internal_diff_check	pass	git -C krasis-internal diff --check on CHANGELOG.md, TRACKING.md, DEBUGLOG.md.
+protected_configs	pass	git status --short -- testconfigs tests/testconfigs produced no output.
+tmux_idle	pass	no tmux server running after diagnostic exit.
+runtime_processes_idle	pass	no matching krasis/python/maturin/cargo/rustc/nvcc process running.
+gpu_idle	pass	GPU0 15 MB used, GPU1 11 MB used, both 0% utilization.

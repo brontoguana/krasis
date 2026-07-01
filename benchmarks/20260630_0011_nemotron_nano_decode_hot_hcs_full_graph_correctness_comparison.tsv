@@ -1,0 +1,5 @@
+run	first_token	text_prefix	top_k_count	top_k_match_baseline	token_prefix_match_baseline	notes
+0011_hot_hcs_nosync_timing	1044	,toberBhun left und-	12	true	true	Matches the current known graph-control top-k/token prefix surface.
+0011_hot_hcs_full_graph_timing	1044	,toberBhun left und-	12	true	true	Single full graph preserves the checked first-token top-k/token prefix surface.
+0011_hot_hcs_full_graph_direct_w13_timing	1044	,toberBhun left und-	12	true	true	Direct W13 BF16 output preserves the checked first-token top-k/token prefix surface.
+0011_hot_hcs_full_graph_direct_w13_speed	1044	,toberBhun left und-	12	true	true	Timing-off speed request preserves the checked first-token top-k/token prefix surface.

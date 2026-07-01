@@ -1,0 +1,72 @@
+{
+  "gate": "20260630_0614_nemotron_nano_decode_full_graph_compute_attribution",
+  "model": "NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+  "config": "tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+  "baseline": {
+    "source_gate": "20260630_0011_nemotron_nano_decode_hot_hcs_full_graph",
+    "timing_off_server_decode_tok_s": 114.2,
+    "timing_on_internal_ms_per_tok": 7.77,
+    "full_graph_cuda_event_ms_per_tok": 7.43,
+    "hcs_hit_rate": "100%",
+    "cold_dma": 0
+  },
+  "accepted_speed_change": false,
+  "current_best_decode_tok_s": 114.2,
+  "attribution_control": {
+    "mode": "segmented_graph_timing_on",
+    "server_decode_tok_s": 98.5,
+    "internal_ms_per_tok": 9.10,
+    "graph_event_ms_per_tok": 8.51,
+    "hcs_hit_miss": "138/0",
+    "cold_dma": 0,
+    "moe_expert_ms_per_tok": 3.85,
+    "moe_routed_w13_ms_per_tok": 1.07,
+    "moe_routed_reduce_ms_per_tok": 0.02,
+    "moe_routed_activation_w2_ms_per_tok": 1.09,
+    "moe_routed_output_add_ms_per_tok": 0.06,
+    "moe_post_shared_total_ms_per_tok": 1.61,
+    "moe_shared_gate_ms_per_tok": 0.05,
+    "moe_shared_w13_ms_per_tok": 0.67,
+    "moe_shared_reduce_ms_per_tok": 0.06,
+    "moe_shared_w2_ms_per_tok": 0.73,
+    "mamba2_total_ms_per_tok": 2.19,
+    "mamba2_in_proj_ms_per_tok": 0.93,
+    "mamba2_to_fp32_ms_per_tok": 0.05,
+    "mamba2_conv_ms_per_tok": 0.09,
+    "mamba2_discretize_ms_per_tok": 0.25,
+    "mamba2_ssm_ms_per_tok": 0.39,
+    "mamba2_gate_ms_per_tok": 0.09,
+    "mamba2_out_proj_ms_per_tok": 0.39
+  },
+  "candidate_results": [
+    {
+      "candidate": "mamba2_custom_bf16_gemv",
+      "env": "KRASIS_MAMBA2_DECODE_GRAPH_CUSTOM_BF16_GEMV=1",
+      "build_exit": 0,
+      "first_token": 1044,
+      "decision": "rejected",
+      "reason": "top-logprob drifted from graph control and Mamba2 projection timing worsened from 2.19 to 2.53 ms/tok"
+    },
+    {
+      "candidate": "relu2_w2_two_tiles",
+      "env": "KRASIS_DECODE_GRAPH_RELU2_W2_TWO_TILES=1",
+      "build_exit": 0,
+      "decision": "rejected",
+      "reason": "128-token request diverged and stopped after 103 generated tokens; routed activation+W2 worsened to 1.33 ms/tok"
+    },
+    {
+      "candidate": "relu2_w2_preactivation",
+      "env": "KRASIS_DECODE_GRAPH_RELU2_W2_PREACT=1",
+      "build_exit": 0,
+      "first_token": 1044,
+      "candidate_num_tokens": 104,
+      "decision": "rejected_and_removed",
+      "reason": "first-token top-logprob surface drifted, request stopped after 104 tokens, and routed activation+W2 stayed at 1.09 ms/tok"
+    }
+  ],
+  "final_source_state": {
+    "cleanup_build_exit": 0,
+    "rejected_candidate_envs_present": false,
+    "accepted_speed_change_in_this_gate": false
+  }
+}

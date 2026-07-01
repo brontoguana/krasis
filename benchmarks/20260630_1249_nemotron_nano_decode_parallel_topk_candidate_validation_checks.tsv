@@ -1,0 +1,12 @@
+check	status	details
+json_shape	pass	jq empty 20260630_1249_nemotron_nano_decode_parallel_topk_candidate_summary.json
+tsv_shape	pass	plan/result/comparison TSV files have consistent column counts
+source_whitespace	pass	git diff --check on touched public source and benchmark artifacts
+internal_whitespace	pass	git diff --check on krasis-internal CHANGELOG/TRACKING/DEBUGLOG
+shell_syntax	pass	bash -n dev
+protected_configs	pass	no status output for testconfigs or tests/testconfigs
+rejected_shared_relu2_absent	pass	no KRASIS_DECODE_SHARED_RELU2/direct shared relu2 rejected symbols in touched source
+build	pass	./dev build exit 0, duration 184s
+timing_on_correctness	pass	candidate and same-payload control matched first-token top-k and generated text exactly
+timing_off_speed	pass	candidate timing-off request measured 103 decode tokens in 0.89s, 115.2 tok/s
+final_idle	pass	no tmux/runtime/build process; GPU0 15 MB used, GPU1 11 MB used

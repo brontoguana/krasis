@@ -1,0 +1,6 @@
+metric	baseline_source	baseline	candidate_source	candidate	delta	percent_change	notes
+timing_off_server_decode_tok_s	20260630_1249_nemotron_nano_decode_parallel_topk_candidate	115.2	20260630_1509_fixed_coalesced_speed	119.2	4.0	3.47	accepted full speed comparison with timing disabled
+same_payload_timing_on_server_decode_tok_s	20260630_1341_same_payload_control	106.0	20260630_1509_fixed_coalesced_timing	117.4	11.4	10.75	instrumentation-on comparison; not used as final speed number
+same_payload_timing_on_internal_ms_tok	20260630_1341_same_payload_control	8.41	20260630_1509_fixed_coalesced_timing	7.37	-1.04	-12.37	instrumentation-on component total
+same_payload_generated_tokens	20260630_1341_same_payload_control	104	20260630_1509_fixed_coalesced_speed	104	0	0.00	control and fixed candidate generated identical token sequence
+same_payload_min_free_vram_mb	20260630_1341_same_payload_control	8730	20260630_1509_fixed_coalesced_speed	8730	0	0.00	HCS hot; min free remains high for later budget review

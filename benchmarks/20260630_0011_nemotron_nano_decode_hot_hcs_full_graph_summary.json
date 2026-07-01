@@ -1,0 +1,113 @@
+{
+  "gate": "20260630_0011_nemotron_nano_decode_hot_hcs_full_graph",
+  "model": "NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+  "config": "tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+  "scope": "guarded Nano decode speed follow-up after 20260629_2227 graph enable",
+  "default_behavior_changed": false,
+  "implemented_gates": [
+    "KRASIS_GPU_ROUTE_SYNC_HOT_NOSYNC=1",
+    "KRASIS_GPU_ROUTE_SYNC_HOT_FULL_GRAPH=1",
+    "KRASIS_DECODE_GRAPH_DIRECT_W13_BF16=1"
+  ],
+  "required_existing_gates": [
+    "KRASIS_MAMBA2_DECODE_GRAPH=1",
+    "KRASIS_MAMBA2_DECODE_GRAPH_FAST_INPROJ=1",
+    "KRASIS_GPU_ROUTE_SYNC=1"
+  ],
+  "builds": {
+    "hot_hcs_nosync": {
+      "command": "./dev build",
+      "exit_code": 0,
+      "duration_s": 175
+    },
+    "hot_hcs_full_graph": {
+      "command": "./dev build",
+      "exit_code": 0,
+      "duration_s": 175
+    },
+    "direct_w13": {
+      "command": "./dev build",
+      "exit_code": 0,
+      "duration_s": 182
+    }
+  },
+  "baseline": {
+    "gate": "20260629_2227_nemotron_nano_decode_timing_graph_enable",
+    "timing_on_internal_ms_per_tok": 7.96,
+    "timing_on_internal_tok_s": 125.6,
+    "timing_off_server_tok_s": 112.6,
+    "hcs_hit_pct": 100.0,
+    "cold_dma": 0,
+    "min_free_mb": 8706
+  },
+  "final_timing_on": {
+    "env": "KRASIS_MAMBA2_DECODE_GRAPH=1 KRASIS_MAMBA2_DECODE_GRAPH_FAST_INPROJ=1 KRASIS_GPU_ROUTE_SYNC=1 KRASIS_GPU_ROUTE_SYNC_HOT_NOSYNC=1 KRASIS_GPU_ROUTE_SYNC_HOT_FULL_GRAPH=1 KRASIS_DECODE_GRAPH_DIRECT_W13_BF16=1 KRASIS_DECODE_GRAPH_INTERNAL_TIMING=1",
+    "response_decode_ms": 1121.2,
+    "response_tokens": 128,
+    "server_decode_tokens": 127,
+    "server_decode_s": 1.12,
+    "server_tok_s": 113.5,
+    "internal_ms_per_tok": 7.77,
+    "internal_tok_s": 128.7,
+    "graph_event_ms_per_tok": 7.43,
+    "hcs_hit_pct": 100.0,
+    "hcs_experts_per_tok": 138.0,
+    "cold_dma": 0,
+    "min_free_mb": 8730
+  },
+  "final_timing_off_speed": {
+    "env": "KRASIS_MAMBA2_DECODE_GRAPH=1 KRASIS_MAMBA2_DECODE_GRAPH_FAST_INPROJ=1 KRASIS_GPU_ROUTE_SYNC=1 KRASIS_GPU_ROUTE_SYNC_HOT_NOSYNC=1 KRASIS_GPU_ROUTE_SYNC_HOT_FULL_GRAPH=1 KRASIS_DECODE_GRAPH_DIRECT_W13_BF16=1",
+    "response_decode_ms": 1112.2,
+    "response_tokens": 128,
+    "response_tok_s": 115.1,
+    "server_decode_tokens": 127,
+    "server_decode_s": 1.11,
+    "server_tok_s": 114.2,
+    "hcs_hit_pct": 100.0,
+    "cold_dma": 0,
+    "min_free_mb": 8730
+  },
+  "correctness": {
+    "first_token": 1044,
+    "text_prefix": ",toberBhun left und-",
+    "top_k_count": 12,
+    "top_k_match_baseline": true,
+    "token_prefix_match_baseline": true
+  },
+  "decision": {
+    "accepted": "guarded implementation and measurements accepted",
+    "speed_assessment": "small gain only; timing-off server decode improved from 112.6 tok/s to 114.2 tok/s",
+    "next_bottleneck": "actual full-graph GPU compute remains about 7.43 ms/tok; HCS, cold DMA, CPU polling, launch overhead, and W13 reduce are not the dominant blockers"
+  },
+  "artifacts": {
+    "build": "20260630_0011_nemotron_nano_decode_hot_hcs_full_graph_build_result.tsv",
+    "comparison": "20260630_0011_nemotron_nano_decode_hot_hcs_full_graph_decode_comparison.tsv",
+    "correctness": "20260630_0011_nemotron_nano_decode_hot_hcs_full_graph_correctness_comparison.tsv",
+    "hot_nosync_timing_log": "20260630_0011_nemotron_nano_decode_hot_hcs_graph_nosync_timing_server.log",
+    "hot_nosync_response": "20260630_0011_nemotron_nano_decode_hot_hcs_graph_nosync_timing_response.json",
+    "full_graph_timing_log": "20260630_0011_nemotron_nano_decode_hot_hcs_full_graph_timing_server.log",
+    "full_graph_response": "20260630_0011_nemotron_nano_decode_hot_hcs_full_graph_timing_response.json",
+    "direct_w13_timing_log": "20260630_0011_nemotron_nano_decode_hot_hcs_full_graph_direct_w13_timing_server.log",
+    "direct_w13_timing_response": "20260630_0011_nemotron_nano_decode_hot_hcs_full_graph_direct_w13_timing_response.json",
+    "direct_w13_speed_log": "20260630_0011_nemotron_nano_decode_hot_hcs_full_graph_direct_w13_speed_server.log",
+    "direct_w13_speed_response": "20260630_0011_nemotron_nano_decode_hot_hcs_full_graph_direct_w13_speed_response.json",
+    "validation": "20260630_0011_nemotron_nano_decode_hot_hcs_full_graph_validation_checks.tsv"
+  },
+  "final_state": {
+    "timestamp_utc": "2026-06-30T00:55:17Z",
+    "tmux_sessions": 0,
+    "runtime_or_build_processes": 0,
+    "gpu_memory": [
+      {
+        "gpu": 0,
+        "used_mb": 15,
+        "free_mb": 32105
+      },
+      {
+        "gpu": 1,
+        "used_mb": 11,
+        "free_mb": 20043
+      }
+    ]
+  }
+}

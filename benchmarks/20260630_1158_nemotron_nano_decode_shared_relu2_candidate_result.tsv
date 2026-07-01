@@ -1,0 +1,18 @@
+field	value
+gate	20260630_1158_nemotron_nano_decode_shared_relu2_candidate
+build_int8_candidate	exit 0; log benchmarks/20260630_1158_nemotron_nano_decode_shared_relu2_candidate_int8_build.log
+first_server_attempt	exit 1; missing parent env KRASIS_GPU_ROUTE_SYNC=1 for KRASIS_GPU_ROUTE_SYNC_HOT_NOSYNC=1
+second_server_attempt	exit not accepted as final server run; request completed
+request_env	KRASIS_MAMBA2_DECODE_GRAPH=1 KRASIS_MAMBA2_DECODE_GRAPH_FAST_INPROJ=1 KRASIS_GPU_ROUTE_SYNC=1 KRASIS_GPU_ROUTE_SYNC_HOT_NOSYNC=1 KRASIS_DECODE_GRAPH_DIRECT_W13_BF16=1 KRASIS_DECODE_GRAPH_MOE_ROUTE_CLOCK=1 KRASIS_DECODE_GRAPH_MIXED_SEGMENT_CLOCK=1 KRASIS_MAMBA2_GRAPH_CLOCK=1 KRASIS_DECODE_SHARED_RELU2=1
+request_log	benchmarks/20260630_1158_nemotron_nano_decode_shared_relu2_candidate_int8_timing2_server.log
+request_response	benchmarks/20260630_1158_nemotron_nano_decode_shared_relu2_candidate_int8_decode128_response.json
+request_decode_server	127 tokens in 1.10s = 115.9 tok/s
+request_internal_timing	7.64 ms/tok = 131.0 tok/s
+request_graph_event	total 7.30 ms/tok; middle 6.57 ms/tok; final 0.60 ms/tok
+request_hcs	138/0 hit/miss; cold DMA 0; min free 8738 MB
+candidate_first_token	1044
+candidate_top2	1044:-1.650548; 1321:-1.651549
+control_top2	20260630_0614 segmented MoE clock control 1044:-1.552999; 1321:-1.858330
+decision	rejected
+reason	first-token top-logprob surface drifted to the same pattern as prior rejected candidates; no correctness acceptance despite marginal speed
+cleanup	rejected KRASIS_DECODE_SHARED_RELU2 env/path and direct shared relu2 kernels removed before closeout

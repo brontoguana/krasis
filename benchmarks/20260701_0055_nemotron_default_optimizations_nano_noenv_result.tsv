@@ -1,0 +1,21 @@
+metric	value	notes
+command	./dev benchmark tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf	No optimization env stack; corrected-source build with Nemotron defaults.
+exit_code	0	Benchmark completed.
+model	NVIDIA-Nemotron-3-Nano-30B-A3B-BF16	1x RTX 5090.
+config	tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf	INT4 routed experts, HQQ4 attention, K4V4 KV, INT8 shared/dense/LM head.
+prefill_internal_best_tok_s	8317.6	Best of 1K/5K/10K/20K/35K/39920 token internal prefill runs.
+prefill_run_1_tok_s	4428.4	1001 tokens in 226.0 ms.
+prefill_run_2_tok_s	7158.4	5001 tokens in 698.6 ms.
+prefill_run_3_tok_s	8263.6	10001 tokens in 1210.3 ms.
+prefill_run_4_tok_s	8317.6	20001 tokens in 2404.7 ms.
+prefill_run_5_tok_s	7960.5	35001 tokens in 4396.8 ms.
+prefill_run_6_tok_s	7879.9	39921 tokens in 5066.2 ms.
+decode_internal_best_tok_s	135.33	Best of 50/100/250 token internal decode runs.
+decode_50_tok_s	133.79	7.5 ms/tok.
+decode_100_tok_s	133.44	7.5 ms/tok.
+decode_250_tok_s	135.33	7.4 ms/tok.
+http_round_trip_best_tok_s	325.13	Best of 50/100/250 token HTTP runs.
+hcs_loaded_experts	2944/2944	100.0% after benchmark decode.
+decode_min_free_mb	8708	Benchmark decode low-water; safety margin 600 MB.
+prefill_cap_tokens	39920	Runtime-calibrated cap from long probe low-water.
+decision	accepted	No-env standard benchmark confirms accepted Nemotron defaults are normal path for Nano.

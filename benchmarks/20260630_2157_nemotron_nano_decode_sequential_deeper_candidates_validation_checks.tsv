@@ -1,0 +1,13 @@
+check	result	details
+final_cleanup_build	pass	benchmarks/20260630_2157_nemotron_nano_decode_sequential_deeper_candidates_final_cleanup_build.exit = 0
+summary_json	pass	jq empty passed for benchmarks/20260630_2157_nemotron_nano_decode_sequential_deeper_candidates_summary.json
+tsv_shape	pass	per-file TSV shape checks passed for plan/result/comparison
+rejected_symbol_scan	pass	no source refs for WEIGHTED_ADD_NOZERO, RELU2_W2_WEIGHTED_ACCUM, FUSED_ROUTED_SCALE, FUSED_DISC_SSM, multi_expert_weighted_add_bf16_scaled, or mamba2_discretize_ssm_step
+public_diff_check	pass	git diff --check passed for touched public source and 2157 benchmark files
+internal_diff_check	pass	git diff --check passed for internal CHANGELOG.md, TRACKING.md, DEBUGLOG.md
+dev_syntax	pass	bash -n dev passed
+protected_configs	pass	no status output under testconfigs or tests/testconfigs
+runtime_processes	pass	no krasis/python/maturin/cargo/rustc/nvcc processes after cleanup
+tmux_sessions	pass	no tmux server/session after cleanup
+gpu_idle	pass	final snapshot: GPU0 15 MB used / 32105 MB free / 0 pct util; GPU1 11 MB used / 20043 MB free / 0 pct util
+closed_utc	pass	2026-06-30T23:02:58Z

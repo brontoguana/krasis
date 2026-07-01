@@ -1,0 +1,11 @@
+field	value
+gate	20260630_2340_nemotron_super_standard_benchmark
+scope	Run Nemotron Super standard benchmark through ./dev; if it fails, fix the actual blocker and rerun.
+config	tests/nemotron-super-bf16kv-a16.conf
+model	/home/main/.krasis/models/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+precision	INT4 routed experts, BF16 attention/KV, INT8 shared/dense/LM head
+timing	trace disabled; decode timing disabled for speed benchmark
+gpu	0
+accepted_nano_envs_to_try	KRASIS_MAMBA2_DECODE_GRAPH=1 KRASIS_MAMBA2_DECODE_GRAPH_FAST_INPROJ=1 KRASIS_DECODE_PARALLEL_TOPK=1 KRASIS_DECODE_GRAPH_RELU2_W2_COALESCED=1
+conditional_envs_not_assumed	KRASIS_GPU_ROUTE_SYNC_HOT_NOSYNC and KRASIS_GPU_ROUTE_SYNC_HOT_FULL_GRAPH require full HCS residency and are not assumed for Super.
+acceptance	benchmark completes with real prefill/decode/round-trip numbers; min VRAM recorded; any failure is diagnosed with data before code changes

@@ -57,6 +57,17 @@ fn env_truthy(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn env_false(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            )
+        })
+        .unwrap_or(false)
+}
+
 macro_rules! vram_ledger_log {
     ($($arg:tt)*) => {{
         log::info!($($arg)*);
@@ -2998,6 +3009,7 @@ const KERNEL_NAMES: &[&str] = &[
     "relu2_bf16",
     "apply_logit_softcap_f32",
     "sigmoid_topk",
+    "sigmoid_topk_parallel_scores",
     "softmax_topk",
     "normalize_topk_weights",
     "weighted_add_bf16",
@@ -3044,6 +3056,7 @@ const KERNEL_NAMES: &[&str] = &[
     "split_gated_q",
     "apply_gated_attn",
     "bf16_to_fp32",
+    "duplicate_bf16_vector_columns",
     "fp32_to_bf16",
     "gemv_bf16_weight_f32_input_bf16",
     "marlin_gemv_int4",
@@ -3067,6 +3080,7 @@ const KERNEL_NAMES: &[&str] = &[
     "hqq_decode_int8_exception_delta_f32",
     "hqq_decode_int8_exception_delta_bf16",
     "marlin_gemv_int4_v2_batched",
+    "marlin_gemv_int4_v2_batched_bf16_out",
     "marlin_gemv_int8_v2_batched",
     "reduce_ksplits_bf16_batched",
     "fused_silu_w2_batched",
@@ -3125,6 +3139,7 @@ const KERNEL_NAMES: &[&str] = &[
     "mamba2_gate_output",
     // relu2 expert activation (Nemotron LatentMoE)
     "relu2_w2_batched",
+    "relu2_w2_batched_coalesced",
     "relu2_w2_int8_batched",
     // 4-bit PolarQuant kernels
     "kv_cache_write_polar4",
@@ -4353,7 +4368,7 @@ impl HcsState {
         }
     }
 
-    fn begin_dynamic_request(&mut self) {
+    fn begin_dynamic_request(&mut self, max_decode_tokens: usize) {
         if !self.dynamic_enabled {
             return;
         }
@@ -4371,14 +4386,30 @@ impl HcsState {
             loaded_slots
         };
         self.dynamic_request_promotions = 0;
+        let requested_token_slots = max_decode_tokens
+            .max(1)
+            .saturating_mul(self.dynamic_active_block_slots.max(1));
+        let request_scaled_limit = requested_token_slots.max(evictable_slots);
         self.dynamic_request_promotion_limit =
-            ((evictable_slots as f64) * self.dynamic_promotion_budget_mult).ceil() as u64;
+            ((request_scaled_limit as f64) * self.dynamic_promotion_budget_mult).ceil() as u64;
         if self.debug_hcs_transition_trace_active {
             let mut entry = self.debug_hcs_summary_json("begin_dynamic_request");
             if let Some(obj) = entry.as_object_mut() {
                 obj.insert(
+                    "max_decode_tokens".to_string(),
+                    serde_json::json!(max_decode_tokens),
+                );
+                obj.insert(
+                    "active_block_slots_for_limit".to_string(),
+                    serde_json::json!(self.dynamic_active_block_slots),
+                );
+                obj.insert(
                     "evictable_slots_for_limit".to_string(),
                     serde_json::json!(evictable_slots),
+                );
+                obj.insert(
+                    "request_scaled_limit".to_string(),
+                    serde_json::json!(request_scaled_limit),
                 );
             }
             self.debug_hcs_transition_record(entry);
@@ -8744,6 +8775,7 @@ unsafe impl Sync for PinnedMapped {}
 #[derive(Clone)]
 struct CachedKernels {
     bf16_to_fp32: cudarc::driver::CudaFunction,
+    duplicate_bf16_vector_columns: cudarc::driver::CudaFunction,
     fp32_to_bf16: cudarc::driver::CudaFunction,
     rmsnorm: cudarc::driver::CudaFunction,
     rmsnorm_scale: cudarc::driver::CudaFunction,
@@ -8754,6 +8786,7 @@ struct CachedKernels {
     relu2_bf16: cudarc::driver::CudaFunction,
     apply_logit_softcap_f32: cudarc::driver::CudaFunction,
     sigmoid_topk: cudarc::driver::CudaFunction,
+    sigmoid_topk_parallel_scores: cudarc::driver::CudaFunction,
     softmax_topk: cudarc::driver::CudaFunction,
     normalize_topk_weights: cudarc::driver::CudaFunction,
     zero_bf16: cudarc::driver::CudaFunction,
@@ -8814,11 +8847,13 @@ struct CachedKernels {
     marlin_gemv_int8_v2_fused_f32: cudarc::driver::CudaFunction,
     // Batched expert kernels — reduce launch overhead from 30/layer to 4/layer
     marlin_gemv_int4_v2_batched: cudarc::driver::CudaFunction,
+    marlin_gemv_int4_v2_batched_bf16_out: cudarc::driver::CudaFunction,
     marlin_gemv_int8_v2_batched: cudarc::driver::CudaFunction,
     reduce_ksplits_bf16_batched: cudarc::driver::CudaFunction,
     fused_silu_w2_batched: cudarc::driver::CudaFunction,
     fused_silu_w2_batched_timed: cudarc::driver::CudaFunction,
     fused_silu_w2_int8_batched: cudarc::driver::CudaFunction,
+    relu2_w2_batched_coalesced: cudarc::driver::CudaFunction,
     multi_expert_weighted_add_bf16: cudarc::driver::CudaFunction,
     // Graphable kernel variants (read position/token from GPU pointers)
     embedding_lookup_g: cudarc::driver::CudaFunction,
@@ -9049,8 +9084,14 @@ struct GpuDecodeGraph {
     // Mamba2 SSM scratch (FP32)
     d_mamba2_conv_out: Option<cudarc::driver::CudaSlice<f32>>, // [conv_dim] FP32
     mamba2_conv_out_size: usize, // track allocated size (CudaSlice has no .len())
+    d_mamba2_bf16_graph_input: Option<cudarc::driver::CudaSlice<u16>>, // [cols * N] BF16
+    d_mamba2_bf16_graph_output: Option<cudarc::driver::CudaSlice<u16>>, // [rows * N] BF16
+    mamba2_bf16_graph_input_size: usize,
+    mamba2_bf16_graph_output_size: usize,
     /// Number of B/C groups for Mamba2 (n_groups from config, e.g. 8)
     mamba2_n_groups: usize,
+    /// Mamba2 SSD chunk size from model config.
+    mamba2_chunk_size: usize,
     /// Conv bias pointers per Mamba2 layer (FP32 on GPU, keyed by layer_idx)
     mamba2_conv_bias_ptrs: std::collections::HashMap<usize, u64>,
 
@@ -9076,6 +9117,13 @@ struct GpuDecodeGraph {
     mapped_cold_buf: Option<PinnedMapped>,
     /// Whether GPU-side route sync is active (classify kernel available + HCS has d_expert_ptrs)
     gpu_route_sync: bool,
+    /// Fully resident HCS mode: graph replay trusts the GPU classify kernel to
+    /// populate the next batch table and skips CPU polling. Nemotron defaults
+    /// may enable this only after runtime HCS residency is verified.
+    gpu_route_sync_hot_nosync: bool,
+    /// Fully resident HCS mode: capture/replay all decode segments as a single
+    /// CUDA graph. Default enablement requires runtime HCS residency proof.
+    gpu_route_sync_hot_full_graph: bool,
     /// Whether mapped host memory reads are active (GPU reads cold experts directly over PCIe).
     /// When true, d_expert_ptrs contains valid pointers for ALL experts (VRAM for cached,
     /// mapped host for cold), and no CPU sync/DMA is needed between graph replays.
@@ -9083,7 +9131,8 @@ struct GpuDecodeGraph {
     /// Mapped activation buffer for recording topk IDs when mapped reads bypass CPU sync.
     /// Layout: [num_moe_layers * topk] i32 — classify kernel writes per-layer topk IDs here.
     mapped_activations: Option<PinnedMapped>,
-
+    /// Hard opt-in candidate: parallel sigmoid score fill for route top-k.
+    parallel_topk_enabled: bool,
     // Cached kernel function handles (populated after configure)
     kernels: Option<CachedKernels>,
 
@@ -9290,6 +9339,13 @@ struct GpuDecodeGraph {
     t_graph_route_prep_dense_down: f64,   // env-gated dense down projection
     t_graph_route_prep_dense_post_norms: f64, // env-gated dense post/downstream norms
     t_graph_route_prep_router_input_norm: f64, // env-gated router-input RMSNorm
+    t_graph_mamba2_in_proj: f64,          // env-gated Mamba2 graph BF16 in-projection
+    t_graph_mamba2_to_fp32: f64,          // env-gated Mamba2 graph BF16->FP32 conversion
+    t_graph_mamba2_conv: f64,             // env-gated Mamba2 graph conv1d+silu
+    t_graph_mamba2_discretize: f64,       // env-gated Mamba2 graph discretize
+    t_graph_mamba2_ssm: f64,              // env-gated Mamba2 graph SSM state step
+    t_graph_mamba2_gate: f64,             // env-gated Mamba2 graph gate/norm output
+    t_graph_mamba2_out_proj: f64,         // env-gated Mamba2 graph output projection
     graph_segment_labels: Vec<String>,
     graph_segment_kinds: Vec<u8>,
     graph_segment_elapsed: Vec<f64>,
@@ -9336,6 +9392,10 @@ struct GpuDecodeGraph {
     graph_route_prep_active: Vec<bool>,
     d_graph_route_prep_clocks: Option<cudarc::driver::CudaSlice<u64>>,
     h_graph_route_prep_clocks: Vec<u64>,
+    graph_mamba2_clock_enabled: bool,
+    graph_mamba2_active: Vec<bool>,
+    d_graph_mamba2_clocks: Option<cudarc::driver::CudaSlice<u64>>,
+    h_graph_mamba2_clocks: Vec<u64>,
     graph_final_clock_enabled: bool,
     graph_final_softcap_gpu_enabled: bool,
     d_graph_final_clocks: Option<cudarc::driver::CudaSlice<u64>>,
@@ -9460,6 +9520,10 @@ struct GpuDecodeGraph {
     /// Per-layer graph executables: graph[0] = routing for first MoE layer,
     /// graph[1..N-1] = experts(N-1) + routing(N), graph[N] = experts(last) + final.
     per_layer_graphs: Vec<CudaGraphExecPtr>,
+    /// Optional single full decode graph for the hot-HCS route-sync path.
+    /// This is only valid when all MoE experts are resident and route-sync
+    /// classify kernels can write the next expert pointer table on stream.
+    hot_hcs_full_graph: Option<CudaGraphExecPtr>,
     /// Whether per-layer graphs are valid for replay.
     per_layer_graphs_valid: bool,
     /// Whether graphs have ever been successfully captured (for cross-request reuse).
@@ -9471,6 +9535,8 @@ struct GpuDecodeGraph {
     graphs_ever_captured: bool,
     /// Whether the currently captured graph set includes metadata-only GPU route sync.
     captured_gpu_route_sync: bool,
+    /// Whether a hot-HCS full decode graph was captured for this graph set.
+    captured_hot_hcs_full_graph: bool,
     /// Number of expert_classify_prepare launches recorded during the current graph capture.
     captured_route_sync_classifies: usize,
     /// Snapshot of LA state pointers at capture time, for verifying address stability.
@@ -9506,7 +9572,127 @@ struct GpuDecodeGraph {
     graph_dynamic_promotion_event: Option<CudaEvent>,
 }
 
+fn hcs_moe_expert_residency(
+    hcs: &HcsState,
+    moe_layers: &[Option<MoeLayerData>],
+    moe_indices: Option<&[usize]>,
+) -> (bool, usize, usize, Option<(usize, usize)>) {
+    let mut resident = 0usize;
+    let mut total = 0usize;
+    let mut first_missing: Option<(usize, usize)> = None;
+
+    let mut scan_layer = |layer_idx: usize, moe: &MoeLayerData| {
+        for expert_idx in 0..moe.num_experts {
+            total += 1;
+            if hcs.get_fast(layer_idx, expert_idx).is_some() {
+                resident += 1;
+            } else if first_missing.is_none() {
+                first_missing = Some((layer_idx, expert_idx));
+            }
+        }
+    };
+
+    if let Some(indices) = moe_indices {
+        for &layer_idx in indices {
+            if let Some(moe) = moe_layers.get(layer_idx).and_then(|m| m.as_ref()) {
+                scan_layer(layer_idx, moe);
+            }
+        }
+    } else {
+        for (layer_idx, moe_opt) in moe_layers.iter().enumerate() {
+            if let Some(moe) = moe_opt.as_ref() {
+                scan_layer(layer_idx, moe);
+            }
+        }
+    }
+
+    (total > 0 && resident == total, resident, total, first_missing)
+}
+
 impl GpuDecodeGraph {
+    fn is_nemotron_h_decode_model(&self) -> bool {
+        if env_false("KRASIS_NEMOTRON_DEFAULT_OPTIMIZATIONS") {
+            return false;
+        }
+        let has_mamba2 = self
+            .layers
+            .iter()
+            .any(|layer| matches!(layer.attn, GpuAttnConfig::Mamba2 { .. }));
+        let has_nemotron_moe = self
+            .moe_layers
+            .iter()
+            .filter_map(|m| m.as_ref())
+            .any(|m| m.activation_type == 1 && !m.gated_experts);
+        has_mamba2 && has_nemotron_moe
+    }
+
+    fn mamba2_decode_graph_enabled(&self) -> bool {
+        !env_false("KRASIS_MAMBA2_DECODE_GRAPH")
+            && (env_truthy("KRASIS_MAMBA2_DECODE_GRAPH") || self.is_nemotron_h_decode_model())
+    }
+
+    fn mamba2_decode_graph_fast_inproj_enabled(&self) -> bool {
+        !env_false("KRASIS_MAMBA2_DECODE_GRAPH_FAST_INPROJ")
+            && (env_truthy("KRASIS_MAMBA2_DECODE_GRAPH_FAST_INPROJ")
+                || self.is_nemotron_h_decode_model())
+    }
+
+    fn parallel_topk_enabled_for_moe(&self, moe: &MoeLayerData) -> bool {
+        !env_false("KRASIS_DECODE_PARALLEL_TOPK")
+            && (self.parallel_topk_enabled
+                || (self.is_nemotron_h_decode_model()
+                    && moe.scoring_func == 1
+                    && moe.num_experts <= 1024))
+    }
+
+    fn relu2_w2_coalesced_enabled_for_moe(
+        &self,
+        moe: &MoeLayerData,
+        expert_bits: u8,
+        w2_n_tiles: usize,
+    ) -> bool {
+        !env_false("KRASIS_DECODE_GRAPH_RELU2_W2_COALESCED")
+            && (env_truthy("KRASIS_DECODE_GRAPH_RELU2_W2_COALESCED")
+                || (self.is_nemotron_h_decode_model()
+                    && moe.activation_type == 1
+                    && !moe.gated_experts
+                    && expert_bits == 4
+                    && w2_n_tiles > 0))
+    }
+
+    fn direct_w13_bf16_enabled_for_moe(
+        &self,
+        moe: &MoeLayerData,
+        expert_bits: u8,
+        w13_ksplits_batched: usize,
+    ) -> bool {
+        !env_false("KRASIS_DECODE_GRAPH_DIRECT_W13_BF16")
+            && (env_truthy("KRASIS_DECODE_GRAPH_DIRECT_W13_BF16")
+                || (self.is_nemotron_h_decode_model()
+                    && moe.activation_type == 1
+                    && !moe.gated_experts
+                    && expert_bits == 4
+                    && w13_ksplits_batched == 1))
+    }
+
+    fn hcs_all_moe_experts_resident_for_layers(
+        &self,
+        moe_indices: &[usize],
+    ) -> (bool, usize, usize, Option<(usize, usize)>) {
+        let Some(hcs) = self.hcs.as_ref() else {
+            return (false, 0, 0, None);
+        };
+        hcs_moe_expert_residency(hcs, &self.moe_layers, Some(moe_indices))
+    }
+
+    fn hcs_routed_experts_per_decode_token_for_layers(&self, moe_indices: &[usize]) -> usize {
+        moe_indices
+            .iter()
+            .filter_map(|&layer_idx| self.moe_layers.get(layer_idx).and_then(|m| m.as_ref()))
+            .map(|m| m.topk)
+            .sum()
+    }
+
     fn refresh_kv_blocks_by_layer(&mut self) {
         self.kv_num_blocks_by_layer = self
             .layers
@@ -9617,6 +9803,7 @@ const GRAPH_MOE_ROUTE_POST_HIDDEN_ADD1_END: usize = 22;
 const GRAPH_MOE_ROUTE_POST_HIDDEN_NORM_END: usize = 23;
 const GRAPH_MOE_ROUTE_POST_HIDDEN_ADD2_END: usize = 24;
 const GRAPH_MOE_ROUTE_POST_HIDDEN_SCALAR_END: usize = 25;
+const GRAPH_MAMBA2_CLOCK_SLOTS: usize = 8;
 
 #[derive(Clone, Copy, Default)]
 struct GraphGqaOtherClockTotals {
@@ -9775,6 +9962,71 @@ fn launch_graph_clock_marker(
             )
             .map_err(|e| format!("record_globaltimer_u64_g[{}]: {:?}", label, e))?;
     }
+    Ok(())
+}
+
+fn accumulate_mamba2_graph_clocks(graph: &mut GpuDecodeGraph) -> Result<(), String> {
+    if !graph.graph_mamba2_clock_enabled {
+        return Ok(());
+    }
+    let Some(d_clocks) = graph.d_graph_mamba2_clocks.as_ref() else {
+        return Ok(());
+    };
+    if graph.h_graph_mamba2_clocks.is_empty() {
+        return Ok(());
+    }
+
+    let bytes = graph.h_graph_mamba2_clocks.len() * std::mem::size_of::<u64>();
+    unsafe {
+        let err = cuda_sys::lib().cuMemcpyDtoH_v2(
+            graph.h_graph_mamba2_clocks.as_mut_ptr() as *mut std::ffi::c_void,
+            *d_clocks.device_ptr(),
+            bytes,
+        );
+        if err != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!("copy graph Mamba2 clocks: {:?}", err));
+        }
+    }
+
+    for (layer_idx, &active) in graph.graph_mamba2_active.iter().enumerate() {
+        if !active {
+            continue;
+        }
+        let base = layer_idx * GRAPH_MAMBA2_CLOCK_SLOTS;
+        if base + GRAPH_MAMBA2_CLOCK_SLOTS - 1 >= graph.h_graph_mamba2_clocks.len() {
+            continue;
+        }
+        let t0 = graph.h_graph_mamba2_clocks[base];
+        let t1 = graph.h_graph_mamba2_clocks[base + 1];
+        let t2 = graph.h_graph_mamba2_clocks[base + 2];
+        let t3 = graph.h_graph_mamba2_clocks[base + 3];
+        let t4 = graph.h_graph_mamba2_clocks[base + 4];
+        let t5 = graph.h_graph_mamba2_clocks[base + 5];
+        let t6 = graph.h_graph_mamba2_clocks[base + 6];
+        let t7 = graph.h_graph_mamba2_clocks[base + 7];
+        if t0 != 0 && t1 >= t0 {
+            graph.t_graph_mamba2_in_proj += (t1 - t0) as f64 / 1_000_000_000.0;
+        }
+        if t2 >= t1 {
+            graph.t_graph_mamba2_to_fp32 += (t2 - t1) as f64 / 1_000_000_000.0;
+        }
+        if t3 >= t2 {
+            graph.t_graph_mamba2_conv += (t3 - t2) as f64 / 1_000_000_000.0;
+        }
+        if t4 >= t3 {
+            graph.t_graph_mamba2_discretize += (t4 - t3) as f64 / 1_000_000_000.0;
+        }
+        if t5 >= t4 {
+            graph.t_graph_mamba2_ssm += (t5 - t4) as f64 / 1_000_000_000.0;
+        }
+        if t6 >= t5 {
+            graph.t_graph_mamba2_gate += (t6 - t5) as f64 / 1_000_000_000.0;
+        }
+        if t7 >= t6 {
+            graph.t_graph_mamba2_out_proj += (t7 - t6) as f64 / 1_000_000_000.0;
+        }
+    }
+
     Ok(())
 }
 
@@ -11481,8 +11733,10 @@ impl GpuDecodeStore {
         let has_mamba2 = graph.layers[range_start..range_end]
             .iter()
             .any(|layer| matches!(layer.attn, GpuAttnConfig::Mamba2 { .. }));
-        if has_mamba2 {
-            return Some("Mamba2 CUDA graph decode is not supported; using non-graph decode");
+        if has_mamba2 && !graph.mamba2_decode_graph_enabled() {
+            return Some(
+                "Mamba2 CUDA graph decode is disabled; Nemotron-H enables it by default unless KRASIS_NEMOTRON_DEFAULT_OPTIMIZATIONS=0",
+            );
         }
         let has_gemma4 = graph.layers[range_start..range_end]
             .iter()
@@ -14511,7 +14765,12 @@ impl GpuDecodeStore {
             d_la_gated_out,
             d_mamba2_conv_out: None,
             mamba2_conv_out_size: 0,
+            d_mamba2_bf16_graph_input: None,
+            d_mamba2_bf16_graph_output: None,
+            mamba2_bf16_graph_input_size: 0,
+            mamba2_bf16_graph_output_size: 0,
             mamba2_n_groups: 1,
+            mamba2_chunk_size: 128,
             mamba2_conv_bias_ptrs: std::collections::HashMap::new(),
             moe_input_override_ptr: 0,
             moe_router_override_ptr: 0,
@@ -14523,8 +14782,11 @@ impl GpuDecodeStore {
             // GPU-side route sync: [cold_count, ready_flag, cold_ids[topk], cold_slots[topk]]
             mapped_cold_buf: PinnedMapped::new((2 + max_experts_per_tok * 2) * 4).ok(),
             gpu_route_sync: false,
+            gpu_route_sync_hot_nosync: false,
+            gpu_route_sync_hot_full_graph: false,
             mapped_reads_active: false,
             mapped_activations: None,
+            parallel_topk_enabled: env_truthy("KRASIS_DECODE_PARALLEL_TOPK"),
             kernels: None,
             pre_events: None,
             norm_bias_one: false,
@@ -14694,6 +14956,13 @@ impl GpuDecodeStore {
             t_graph_route_prep_dense_down: 0.0,
             t_graph_route_prep_dense_post_norms: 0.0,
             t_graph_route_prep_router_input_norm: 0.0,
+            t_graph_mamba2_in_proj: 0.0,
+            t_graph_mamba2_to_fp32: 0.0,
+            t_graph_mamba2_conv: 0.0,
+            t_graph_mamba2_discretize: 0.0,
+            t_graph_mamba2_ssm: 0.0,
+            t_graph_mamba2_gate: 0.0,
+            t_graph_mamba2_out_proj: 0.0,
             graph_segment_labels: Vec::new(),
             graph_segment_kinds: Vec::new(),
             graph_segment_elapsed: Vec::new(),
@@ -14740,6 +15009,10 @@ impl GpuDecodeStore {
             graph_route_prep_active: Vec::new(),
             d_graph_route_prep_clocks: None,
             h_graph_route_prep_clocks: Vec::new(),
+            graph_mamba2_clock_enabled: false,
+            graph_mamba2_active: Vec::new(),
+            d_graph_mamba2_clocks: None,
+            h_graph_mamba2_clocks: Vec::new(),
             graph_final_clock_enabled: false,
             graph_final_softcap_gpu_enabled: false,
             d_graph_final_clocks: None,
@@ -14817,9 +15090,11 @@ impl GpuDecodeStore {
             d_dummy_ptrs: None,
             h_dummy_ptrs: [0u64; 4],
             per_layer_graphs: Vec::new(),
+            hot_hcs_full_graph: None,
             per_layer_graphs_valid: false,
             graphs_ever_captured: false,
             captured_gpu_route_sync: false,
+            captured_hot_hcs_full_graph: false,
             captured_route_sync_classifies: 0,
             captured_la_ptrs: Vec::new(),
             captured_kv_ptrs: Vec::new(),
@@ -14846,6 +15121,7 @@ impl GpuDecodeStore {
             };
             let kernels = CachedKernels {
                 bf16_to_fp32: get("bf16_to_fp32")?,
+                duplicate_bf16_vector_columns: get("duplicate_bf16_vector_columns")?,
                 fp32_to_bf16: get("fp32_to_bf16")?,
                 rmsnorm: get("rmsnorm")?,
                 rmsnorm_scale: get("rmsnorm_scale")?,
@@ -14856,6 +15132,7 @@ impl GpuDecodeStore {
                 relu2_bf16: get("relu2_bf16")?,
                 apply_logit_softcap_f32: get("apply_logit_softcap_f32")?,
                 sigmoid_topk: get("sigmoid_topk")?,
+                sigmoid_topk_parallel_scores: get("sigmoid_topk_parallel_scores")?,
                 softmax_topk: get("softmax_topk")?,
                 normalize_topk_weights: get("normalize_topk_weights")?,
                 zero_bf16: get("zero_bf16")?,
@@ -14914,6 +15191,9 @@ impl GpuDecodeStore {
                 marlin_gemv_int8_v2: get("marlin_gemv_int8_v2")?,
                 marlin_gemv_int8_v2_fused_f32: get("marlin_gemv_int8_v2_fused_f32")?,
                 marlin_gemv_int4_v2_batched: get("marlin_gemv_int4_v2_batched")?,
+                marlin_gemv_int4_v2_batched_bf16_out: get(
+                    "marlin_gemv_int4_v2_batched_bf16_out",
+                )?,
                 marlin_gemv_int8_v2_batched: get("marlin_gemv_int8_v2_batched")?,
                 reduce_ksplits_bf16_batched: get("reduce_ksplits_bf16_batched")?,
                 fused_silu_w2_batched: get("fused_silu_w2_batched")?,
@@ -14975,6 +15255,7 @@ impl GpuDecodeStore {
                 mamba2_gate_output: get("mamba2_gate_output")?,
                 // relu2 expert activation
                 relu2_w2_batched: get("relu2_w2_batched")?,
+                relu2_w2_batched_coalesced: get("relu2_w2_batched_coalesced")?,
                 relu2_w2_int8_batched: get("relu2_w2_int8_batched")?,
             };
             // Extract raw CUfunction handles for spec routing on spec_stream.
@@ -16301,6 +16582,121 @@ impl GpuDecodeStore {
         })
     }
 
+    /// Quantize a CPU BF16 weight to Marlin INT4 and return both runtime formats.
+    /// This is used by cached dense projection artifacts: Marlin for batched prefill,
+    /// simple INT4 for decode GEMV. Unlike repack_marlin_int4_cpu(), this does not
+    /// mutate pending_simple_int4; cached loads stage the simple side explicitly.
+    fn repack_marlin_int4_cpu_full(
+        &self,
+        cpu_bf16_ptr: usize,
+        rows: usize,
+        cols: usize,
+        group_size: usize,
+    ) -> PyResult<(
+        pyo3::Py<pyo3::types::PyBytes>,
+        pyo3::Py<pyo3::types::PyBytes>,
+        pyo3::Py<pyo3::types::PyBytes>,
+        pyo3::Py<pyo3::types::PyBytes>,
+        usize,
+        usize,
+    )> {
+        use crate::weights::marlin::{marlin_repack, quantize_int4, simple_int4_from_quantized};
+
+        let n = rows;
+        let k = cols;
+        let total_elements = n
+            .checked_mul(k)
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("INT4 pack element count overflow"))?;
+
+        let bf16_data: Vec<u16> = unsafe {
+            std::slice::from_raw_parts(cpu_bf16_ptr as *const u16, total_elements).to_vec()
+        };
+
+        let q = quantize_int4(&bf16_data, n, k, group_size);
+        let m = marlin_repack(&q);
+        let simple = simple_int4_from_quantized(&q);
+
+        let marlin_packed_bytes: Vec<u8> =
+            m.packed.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let marlin_scales_bytes: Vec<u8> =
+            m.scales.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let simple_packed_bytes = simple.packed;
+        let simple_scales_bytes: Vec<u8> =
+            simple.scales.iter().flat_map(|f| f.to_le_bytes()).collect();
+
+        pyo3::Python::with_gil(|py| {
+            Ok((
+                pyo3::types::PyBytes::new(py, &marlin_packed_bytes).into(),
+                pyo3::types::PyBytes::new(py, &marlin_scales_bytes).into(),
+                pyo3::types::PyBytes::new(py, &simple_packed_bytes).into(),
+                pyo3::types::PyBytes::new(py, &simple_scales_bytes).into(),
+                n,
+                k,
+            ))
+        })
+    }
+
+    /// Stage cached simple INT4 data so the next register_marlin_int4_weight()
+    /// creates a normal single-slot Marlin/simple descriptor.
+    fn stage_simple_int4_cpu(
+        &mut self,
+        packed_ptr: usize,
+        packed_len: usize,
+        scales_ptr: usize,
+        scales_len: usize,
+        rows: usize,
+        cols: usize,
+        group_size: usize,
+    ) -> PyResult<()> {
+        if rows == 0 || cols == 0 || group_size == 0 {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "stage_simple_int4_cpu invalid shape rows={} cols={} group_size={}",
+                rows, cols, group_size
+            )));
+        }
+        if cols % 2 != 0 {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "stage_simple_int4_cpu requires even cols, got {}",
+                cols
+            )));
+        }
+        if cols % group_size != 0 {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "stage_simple_int4_cpu requires cols % group_size == 0, got cols={} group_size={}",
+                cols, group_size
+            )));
+        }
+        let expected_packed = rows
+            .checked_mul(cols / 2)
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("simple INT4 packed byte count overflow"))?;
+        let expected_scales = rows
+            .checked_mul(cols / group_size)
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("simple INT4 scale count overflow"))?;
+        if packed_len != expected_packed {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "stage_simple_int4_cpu packed length mismatch: got {} expected {}",
+                packed_len, expected_packed
+            )));
+        }
+        if scales_len != expected_scales {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "stage_simple_int4_cpu scales length mismatch: got {} expected {}",
+                scales_len, expected_scales
+            )));
+        }
+
+        let packed = unsafe { std::slice::from_raw_parts(packed_ptr as *const u8, packed_len).to_vec() };
+        let scales = unsafe { std::slice::from_raw_parts(scales_ptr as *const f32, scales_len).to_vec() };
+        self.pending_simple_int4.push(crate::weights::marlin::SimpleInt4 {
+            packed,
+            scales,
+            rows,
+            cols,
+            group_size,
+        });
+        Ok(())
+    }
+
     /// Quantize a CPU BF16 weight to Marlin INT4 format without producing decode-side
     /// simple-INT4 state. Use this for synthetic/offline packing where we only need
     /// the Marlin-format bytes and must not grow pending_simple_int4.
@@ -16808,6 +17204,13 @@ impl GpuDecodeStore {
                 graph.t_graph_route_prep_dense_down = 0.0;
                 graph.t_graph_route_prep_dense_post_norms = 0.0;
                 graph.t_graph_route_prep_router_input_norm = 0.0;
+                graph.t_graph_mamba2_in_proj = 0.0;
+                graph.t_graph_mamba2_to_fp32 = 0.0;
+                graph.t_graph_mamba2_conv = 0.0;
+                graph.t_graph_mamba2_discretize = 0.0;
+                graph.t_graph_mamba2_ssm = 0.0;
+                graph.t_graph_mamba2_gate = 0.0;
+                graph.t_graph_mamba2_out_proj = 0.0;
                 for total in &mut graph.graph_gqa_other_totals {
                     *total = GraphGqaOtherClockTotals::default();
                 }
@@ -19192,6 +19595,45 @@ impl GpuDecodeStore {
                 })?);
             graph.mamba2_conv_out_size = conv_dim;
         }
+        if let Some(in_w) = graph.weights.get(in_proj_wid) {
+            if in_w.dtype == 0 {
+                let cols = in_w.cols;
+                let rows = in_w.rows;
+                let candidate_cols = BF16_MAMBA2_IN_PROJ_PREFILL_EQUIV_MIN_COLS;
+                let input_elems = cols.checked_mul(candidate_cols).ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "Mamba2 graph BF16 input size overflow cols={} candidate_cols={}",
+                        cols, candidate_cols
+                    ))
+                })?;
+                let output_elems = rows.checked_mul(candidate_cols).ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "Mamba2 graph BF16 output size overflow rows={} candidate_cols={}",
+                        rows, candidate_cols
+                    ))
+                })?;
+                if graph.mamba2_bf16_graph_input_size < input_elems {
+                    graph.d_mamba2_bf16_graph_input =
+                        Some(self.device.alloc_zeros::<u16>(input_elems).map_err(|e| {
+                            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                "alloc mamba2_bf16_graph_input: {:?}",
+                                e
+                            ))
+                        })?);
+                    graph.mamba2_bf16_graph_input_size = input_elems;
+                }
+                if graph.mamba2_bf16_graph_output_size < output_elems {
+                    graph.d_mamba2_bf16_graph_output =
+                        Some(self.device.alloc_zeros::<u16>(output_elems).map_err(|e| {
+                            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                "alloc mamba2_bf16_graph_output: {:?}",
+                                e
+                            ))
+                        })?);
+                    graph.mamba2_bf16_graph_output_size = output_elems;
+                }
+            }
+        }
         log::info!("GpuDecodeStore: registered Mamba2 layer {} (heads={}, hd={}, state={}, conv_dim={}), total_layers={}",
             layer_idx, num_heads, head_dim, state_size, conv_dim, graph.layers.len());
         Ok(())
@@ -20249,6 +20691,22 @@ impl GpuDecodeStore {
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
         graph.mamba2_n_groups = n_groups;
         log::info!("GpuDecodeStore: set mamba2_n_groups={}", n_groups);
+        Ok(())
+    }
+
+    /// Set Mamba2 SSD chunk size from model config.
+    fn set_mamba2_chunk_size(&mut self, chunk_size: usize) -> PyResult<()> {
+        if chunk_size == 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "Mamba2 chunk_size must be non-zero",
+            ));
+        }
+        let graph = self
+            .graph
+            .as_mut()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
+        graph.mamba2_chunk_size = chunk_size;
+        log::info!("GpuDecodeStore: set mamba2_chunk_size={}", chunk_size);
         Ok(())
     }
 
@@ -23454,6 +23912,7 @@ impl GpuDecodeStore {
             mamba_conv_dim,
             mamba_conv_kernel,
             mamba_n_groups,
+            mamba_chunk_size: graph.mamba2_chunk_size,
             tie_word_embeddings: false,
             embedding_scale: graph.embedding_scale,
             final_logit_softcap: graph.final_logit_softcap,
@@ -26279,7 +26738,13 @@ impl GpuDecodeStore {
                     cuda_sys::lib().cuGraphExecDestroy(exec.0);
                 }
             }
+            if let Some(exec) = graph.hot_hcs_full_graph.take() {
+                unsafe {
+                    cuda_sys::lib().cuGraphExecDestroy(exec.0);
+                }
+            }
             graph.per_layer_graphs_valid = false;
+            graph.captured_hot_hcs_full_graph = false;
             // NOTE: graphs_ever_captured stays true -- we keep the snapshot for diagnostics
         }
     }
@@ -26612,11 +27077,17 @@ impl GpuDecodeStore {
                 cuda_sys::lib().cuGraphExecDestroy(exec.0);
             }
         }
+        if let Some(exec) = graph.hot_hcs_full_graph.take() {
+            unsafe {
+                cuda_sys::lib().cuGraphExecDestroy(exec.0);
+            }
+        }
         if let Some(events) = graph.graph_timing_events.take() {
             events.destroy();
         }
         graph.per_layer_graphs_valid = false;
         graph.captured_gpu_route_sync = false;
+        graph.captured_hot_hcs_full_graph = false;
         graph.captured_route_sync_classifies = 0;
 
         // Identify which layers have MoE data (within our range)
@@ -26647,6 +27118,7 @@ impl GpuDecodeStore {
             && std::env::var("KRASIS_DECODE_GQA_COVERAGE_CLOCKS")
                 .map(|v| v != "0")
                 .unwrap_or(false);
+        let has_graph_moe_target = num_moe > 0;
         let has_gemma4_k4v4_graph_target = graph.kv_format == 9
             && graph
                 .layers
@@ -26685,14 +27157,14 @@ impl GpuDecodeStore {
                 .map(|v| v != "0")
                 .unwrap_or(false);
         graph.graph_moe_route_clock_enabled = graph.graph_internal_timing
-            && has_gemma4_k4v4_graph_target
+            && has_graph_moe_target
             && (std::env::var("KRASIS_DECODE_MOE_ROUTE_CLOCKS")
                 .map(|v| v != "0")
                 .unwrap_or(false)
                 || graph_route_prep_requested
                 || graph_moe_w2_requested);
         graph.graph_moe_w2_clock_enabled =
-            graph.graph_internal_timing && has_gemma4_k4v4_graph_target && graph_moe_w2_requested;
+            graph.graph_internal_timing && has_graph_moe_target && graph_moe_w2_requested;
         graph.graph_moe_w2_preload_clock_enabled =
             graph.graph_moe_w2_clock_enabled && graph_moe_w2_preload_requested;
         graph.graph_moe_w2_clock_slots_per_block = if graph.graph_moe_w2_preload_clock_enabled {
@@ -26708,6 +27180,14 @@ impl GpuDecodeStore {
         graph.graph_route_prep_clock_enabled = graph.graph_internal_timing
             && has_gemma4_k4v4_graph_target
             && graph_route_prep_requested;
+        graph.graph_mamba2_clock_enabled = graph.graph_internal_timing
+            && graph
+                .layers
+                .iter()
+                .any(|layer| matches!(layer.attn, GpuAttnConfig::Mamba2 { .. }))
+            && std::env::var("KRASIS_DECODE_MAMBA2_GRAPH_CLOCKS")
+                .map(|v| v != "0")
+                .unwrap_or(false);
         let has_hd512_k4v4_graph_target = graph.kv_format == 9
             && graph.gqa_tile_size > 0
             && graph.gqa_max_tiles > 1
@@ -26772,6 +27252,7 @@ impl GpuDecodeStore {
             graph.graph_moe_route_active.clear();
             graph.graph_moe_w2_active.clear();
             graph.graph_route_prep_active.clear();
+            graph.graph_mamba2_active.clear();
             graph.graph_gqa_other_meta.clear();
             graph.graph_gqa_other_totals.clear();
             graph.graph_segment_labels.reserve(num_graphs);
@@ -26786,6 +27267,7 @@ impl GpuDecodeStore {
             graph.graph_moe_route_active.resize(num_graphs, false);
             graph.graph_moe_w2_active.resize(num_graphs, false);
             graph.graph_route_prep_active.resize(num_graphs, false);
+            graph.graph_mamba2_active.resize(num_layers, false);
             graph
                 .graph_gqa_other_meta
                 .resize(num_graphs, GraphGqaOtherMeta::default());
@@ -26899,6 +27381,18 @@ impl GpuDecodeStore {
                 graph.d_graph_route_prep_clocks = None;
                 graph.h_graph_route_prep_clocks.clear();
             }
+            if graph.graph_mamba2_clock_enabled {
+                let clock_slots = num_layers * GRAPH_MAMBA2_CLOCK_SLOTS;
+                graph.d_graph_mamba2_clocks = Some(
+                    self.device
+                        .alloc_zeros::<u64>(clock_slots)
+                        .map_err(|e| format!("alloc graph Mamba2 clocks: {:?}", e))?,
+                );
+                graph.h_graph_mamba2_clocks.resize(clock_slots, 0);
+            } else {
+                graph.d_graph_mamba2_clocks = None;
+                graph.h_graph_mamba2_clocks.clear();
+            }
             if graph.graph_final_clock_enabled {
                 let clock_slots = num_graphs * GRAPH_FINAL_CLOCK_SLOTS;
                 graph.d_graph_final_clocks = Some(
@@ -26964,6 +27458,10 @@ impl GpuDecodeStore {
             graph.graph_route_prep_active.clear();
             graph.d_graph_route_prep_clocks = None;
             graph.h_graph_route_prep_clocks.clear();
+            graph.graph_mamba2_clock_enabled = false;
+            graph.graph_mamba2_active.clear();
+            graph.d_graph_mamba2_clocks = None;
+            graph.h_graph_mamba2_clocks.clear();
             graph.graph_final_clock_enabled = false;
             graph.d_graph_final_clocks = None;
             graph.h_graph_final_clocks.clear();
@@ -27054,6 +27552,7 @@ impl GpuDecodeStore {
         }
 
         let mut captured_graphs: Vec<CudaGraphExecPtr> = Vec::with_capacity(num_graphs);
+        let mut captured_hot_hcs_full_graph: Option<CudaGraphExecPtr> = None;
         let mut capture_err: Option<String> = None;
 
         // Helper: begin capture on stream
@@ -27157,6 +27656,77 @@ impl GpuDecodeStore {
             }
         }
 
+        if capture_err.is_none() && graph.gpu_route_sync_hot_full_graph {
+            let label = "hot-hcs-full-decode";
+            let classify_count_before = graph.captured_route_sync_classifies;
+            if let Err(e) = begin_capture(capture_stream) {
+                capture_err = Some(format!("begin[{}]: {}", label, e));
+            } else {
+                for graph_idx in 0..num_graphs {
+                    let seg_result = self.run_graph_segment(
+                        &mut graph,
+                        graph_idx,
+                        &moe_indices,
+                        do_embedding,
+                        do_final,
+                    );
+                    if let Err(e) = seg_result {
+                        let mut dummy: CUgraph = std::ptr::null_mut();
+                        unsafe {
+                            cuda_sys::lib().cuStreamEndCapture(capture_stream, &mut dummy);
+                        }
+                        if !dummy.is_null() {
+                            unsafe {
+                                cuda_sys::lib().cuGraphDestroy(dummy);
+                            }
+                        }
+                        graph.captured_route_sync_classifies = classify_count_before;
+                        capture_err = Some(format!("segment[{}:{}]: {}", label, graph_idx, e));
+                        break;
+                    }
+                }
+
+                if capture_err.is_none() {
+                    let captured_for_full = graph
+                        .captured_route_sync_classifies
+                        .saturating_sub(classify_count_before);
+                    graph.captured_route_sync_classifies = classify_count_before;
+                    if captured_for_full != num_moe {
+                        let mut dummy: CUgraph = std::ptr::null_mut();
+                        unsafe {
+                            cuda_sys::lib().cuStreamEndCapture(capture_stream, &mut dummy);
+                        }
+                        if !dummy.is_null() {
+                            unsafe {
+                                cuda_sys::lib().cuGraphDestroy(dummy);
+                            }
+                        }
+                        capture_err = Some(format!(
+                            "{} captured {} classify launches for {} MoE routing segments",
+                            label, captured_for_full, num_moe
+                        ));
+                    } else {
+                        match end_capture_and_instantiate(capture_stream, label) {
+                            Ok(exec) => {
+                                captured_hot_hcs_full_graph = Some(exec);
+                                trace_emit_global_mark(
+                                    trace_cfg.as_ref(),
+                                    "graph",
+                                    &format!(
+                                        "phase=capture_graph_full_hot_hcs graphs={} moe_layers={}",
+                                        num_graphs, num_moe
+                                    ),
+                                );
+                            }
+                            Err(e) => {
+                                capture_err = Some(e);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Restore original stream, cuBLAS handle, and destroy capture stream
         unsafe {
             *stream_ptr = orig_stream;
@@ -27168,6 +27738,11 @@ impl GpuDecodeStore {
         if let Some(e) = capture_err {
             // Clean up any graphs we did capture
             for exec in captured_graphs {
+                unsafe {
+                    cuda_sys::lib().cuGraphExecDestroy(exec.0);
+                }
+            }
+            if let Some(exec) = captured_hot_hcs_full_graph {
                 unsafe {
                     cuda_sys::lib().cuGraphExecDestroy(exec.0);
                 }
@@ -27191,9 +27766,11 @@ impl GpuDecodeStore {
         }
 
         graph.per_layer_graphs = captured_graphs;
+        graph.hot_hcs_full_graph = captured_hot_hcs_full_graph;
         graph.per_layer_graphs_valid = true;
         graph.graphs_ever_captured = true;
         graph.captured_gpu_route_sync = graph.gpu_route_sync;
+        graph.captured_hot_hcs_full_graph = graph.hot_hcs_full_graph.is_some();
 
         // Snapshot LA and KV pointers at capture time for cross-request reuse verification.
         // If these pointers are stable across requests (they should be: KV is allocated once,
@@ -27541,21 +28118,47 @@ impl GpuDecodeStore {
                 let rsf = moe.routed_scaling_factor;
                 let gated = moe.gated_experts;
                 let is_relu2 = moe.activation_type == 1;
-                if moe.moe_input_size > 0
+                let has_latent = moe.moe_input_size > 0
                     || moe.latent_down_wid.is_some()
-                    || moe.latent_up_wid.is_some()
-                {
-                    return Err(format!(
-                        "graph replay MoE does not support latent expert dimensions at layer {}; use ungraphed decode until graph capture handles latent projections",
-                        layer_idx
-                    ));
+                    || moe.latent_up_wid.is_some();
+                if has_latent {
+                    if moe.moe_input_size == 0
+                        || moe.latent_down_wid.is_none()
+                        || moe.latent_up_wid.is_none()
+                    {
+                        return Err(format!(
+                            "graph replay LatentMoE requires moe_input_size plus latent down/up weights at layer {}; input_size={} down={:?} up={:?}",
+                            layer_idx,
+                            moe.moe_input_size,
+                            moe.latent_down_wid,
+                            moe.latent_up_wid
+                        ));
+                    }
+                    unsafe {
+                        cuda_sys::lib().cuMemcpyDtoDAsync_v2(
+                            *graph.d_expert_out.device_ptr(),
+                            *graph.d_hidden.device_ptr(),
+                            hs * std::mem::size_of::<u16>(),
+                            cu_stream,
+                        );
+                    }
+                    let ld_wid = moe.latent_down_wid.unwrap();
+                    let ld_w = &graph.weights[ld_wid];
+                    self.gemv_bf16_internal(
+                        ld_w,
+                        *graph.d_hidden.device_ptr(),
+                        *graph.d_scratch.device_ptr(),
+                    )
+                    .map_err(|e| format!("graph latent down[{}]: {}", layer_idx, e))?;
                 }
                 let expert_hs = if moe.moe_input_size > 0 {
                     moe.moe_input_size
                 } else {
                     hs
                 };
-                let expert_input_ptr = if gemma4_expert_layer {
+                let expert_input_ptr = if has_latent {
+                    *graph.d_scratch.device_ptr()
+                } else if gemma4_expert_layer {
                     *graph.d_fp32_scratch.device_ptr() as u64
                 } else if graph.moe_input_override_ptr != 0 {
                     graph.moe_input_override_ptr
@@ -27590,42 +28193,87 @@ impl GpuDecodeStore {
                 let d_w2p = d_upload_base + (ptr_stride * 2) as u64;
                 let d_w2s = d_upload_base + (ptr_stride * 3) as u64;
                 let d_wts = d_upload_base + (ptr_stride * 4) as u64;
+                let direct_w13_bf16 =
+                    graph.direct_w13_bf16_enabled_for_moe(moe, expert_bits, w13_ksplits_batched);
+                if direct_w13_bf16 {
+                    if is_int8 || expert_bits != 4 {
+                        return Err(format!(
+                            "KRASIS_DECODE_GRAPH_DIRECT_W13_BF16=1 requires INT4 experts at layer {}; expert_bits={}",
+                            layer_idx, expert_bits
+                        ));
+                    }
+                    if w13_ksplits_batched != 1 {
+                        return Err(format!(
+                            "KRASIS_DECODE_GRAPH_DIRECT_W13_BF16=1 requires w13_ksplits_batched=1 at layer {}; got {}",
+                            layer_idx, w13_ksplits_batched
+                        ));
+                    }
+                }
 
                 // Batched w13 GEMV v2
                 let w13_n_tiles = (w13_n + 15) / 16;
                 let w13_smem = (expert_hs * 2 + 1024 * 4 + 64 * 4 + 16 * 16 * 4) as u32;
-                let w13_kernel = if is_int8 {
-                    k.marlin_gemv_int8_v2_batched.clone()
-                } else {
-                    k.marlin_gemv_int4_v2_batched.clone()
-                };
-                unsafe {
-                    w13_kernel
-                        .launch(
-                            LaunchConfig {
-                                grid_dim: (
-                                    w13_n_tiles as u32,
-                                    w13_ksplits_batched as u32,
-                                    topk as u32,
+                if direct_w13_bf16 {
+                    unsafe {
+                        k.marlin_gemv_int4_v2_batched_bf16_out
+                            .clone()
+                            .launch(
+                                LaunchConfig {
+                                    grid_dim: (w13_n_tiles as u32, 1, topk as u32),
+                                    block_dim: (256, 1, 1),
+                                    shared_mem_bytes: w13_smem,
+                                },
+                                (
+                                    d_w13p,
+                                    d_w13s,
+                                    expert_input_ptr,
+                                    *graph.d_batch_gate_ups.device_ptr(),
+                                    inv_wp,
+                                    inv_sp,
+                                    expert_hs as i32,
+                                    w13_n as i32,
+                                    gs as i32,
+                                    d_wts,
                                 ),
-                                block_dim: (256, 1, 1),
-                                shared_mem_bytes: w13_smem,
-                            },
-                            (
-                                d_w13p,
-                                d_w13s,
-                                expert_input_ptr,
-                                *graph.d_batch_partials.device_ptr(),
-                                inv_wp,
-                                inv_sp,
-                                expert_hs as i32,
-                                w13_n as i32,
-                                gs as i32,
-                                w13_ksplits_batched as i32,
-                                d_wts,
-                            ),
-                        )
-                        .map_err(|e| format!("batched w13 v2[{}]: {:?}", layer_idx, e))?;
+                            )
+                            .map_err(|e| {
+                                format!("direct batched w13 bf16[{}]: {:?}", layer_idx, e)
+                            })?;
+                    }
+                } else {
+                    let w13_kernel = if is_int8 {
+                        k.marlin_gemv_int8_v2_batched.clone()
+                    } else {
+                        k.marlin_gemv_int4_v2_batched.clone()
+                    };
+                    unsafe {
+                        w13_kernel
+                            .launch(
+                                LaunchConfig {
+                                    grid_dim: (
+                                        w13_n_tiles as u32,
+                                        w13_ksplits_batched as u32,
+                                        topk as u32,
+                                    ),
+                                    block_dim: (256, 1, 1),
+                                    shared_mem_bytes: w13_smem,
+                                },
+                                (
+                                    d_w13p,
+                                    d_w13s,
+                                    expert_input_ptr,
+                                    *graph.d_batch_partials.device_ptr(),
+                                    inv_wp,
+                                    inv_sp,
+                                    expert_hs as i32,
+                                    w13_n as i32,
+                                    gs as i32,
+                                    w13_ksplits_batched as i32,
+                                    d_wts,
+                                ),
+                            )
+                            .map_err(|e| format!("batched w13 v2[{}]: {:?}", layer_idx, e))?;
+                    }
                 }
                 if moe_route_clock_active {
                     let clocks = graph.d_graph_moe_route_clocks.as_ref().ok_or_else(|| {
@@ -27640,26 +28288,28 @@ impl GpuDecodeStore {
                 }
 
                 // Batched reduce. Keep the same reduction kernel even when
-                // k_splits == 1 so the graph path stays grouped for small-K
-                // expert shapes instead of falling back or failing capture.
-                unsafe {
-                    k.reduce_ksplits_bf16_batched
-                        .clone()
-                        .launch(
-                            LaunchConfig {
-                                grid_dim: (((w13_n + 255) / 256) as u32, 1, topk as u32),
-                                block_dim: (256, 1, 1),
-                                shared_mem_bytes: 0,
-                            },
-                            (
-                                *graph.d_batch_gate_ups.device_ptr(),
-                                *graph.d_batch_partials.device_ptr(),
-                                w13_n as i32,
-                                w13_ksplits_batched as i32,
-                                d_wts,
-                            ),
-                        )
-                        .map_err(|e| format!("batched reduce[{}]: {:?}", layer_idx, e))?;
+                // k_splits == 1 so the default graph path stays grouped for
+                // small-K expert shapes instead of falling back or failing capture.
+                if !direct_w13_bf16 {
+                    unsafe {
+                        k.reduce_ksplits_bf16_batched
+                            .clone()
+                            .launch(
+                                LaunchConfig {
+                                    grid_dim: (((w13_n + 255) / 256) as u32, 1, topk as u32),
+                                    block_dim: (256, 1, 1),
+                                    shared_mem_bytes: 0,
+                                },
+                                (
+                                    *graph.d_batch_gate_ups.device_ptr(),
+                                    *graph.d_batch_partials.device_ptr(),
+                                    w13_n as i32,
+                                    w13_ksplits_batched as i32,
+                                    d_wts,
+                                ),
+                            )
+                            .map_err(|e| format!("batched reduce[{}]: {:?}", layer_idx, e))?;
+                    }
                 }
                 if moe_route_clock_active {
                     let clocks = graph.d_graph_moe_route_clocks.as_ref().ok_or_else(|| {
@@ -27678,10 +28328,31 @@ impl GpuDecodeStore {
                 let w2_n_tiles = (expert_hs + 15) / 16;
                 // relu2 input is [K] (up_proj only), silu is [2*K] (gate+up)
                 let w2_input_k = if is_relu2 { intermediate } else { intermediate };
-                let w2_smem = (w2_input_k * 2 + 1024 * 4 + 64 * 4) as u32;
+                let relu2_w2_coalesced =
+                    graph.relu2_w2_coalesced_enabled_for_moe(moe, expert_bits, w2_n_tiles);
+                if relu2_w2_coalesced {
+                    if !is_relu2 {
+                        return Err(format!(
+                            "KRASIS_DECODE_GRAPH_RELU2_W2_COALESCED=1 requires ReLU2 routed experts at layer {}",
+                            layer_idx
+                        ));
+                    }
+                    if is_int8 || expert_bits != 4 {
+                        return Err(format!(
+                            "KRASIS_DECODE_GRAPH_RELU2_W2_COALESCED=1 requires INT4 experts at layer {}; expert_bits={}",
+                            layer_idx, expert_bits
+                        ));
+                    }
+                }
+                let w2_smem_base = (w2_input_k * 2 + 1024 * 4 + 64 * 4) as u32;
+                let w2_smem_coalesced = (w2_input_k * 2 + 1024 * 4 + 64 * 4 + 16 * 16 * 4) as u32;
+                let w2_smem = if relu2_w2_coalesced {
+                    w2_smem_coalesced
+                } else {
+                    w2_smem_base
+                };
                 let moe_w2_clock_active = graph.graph_moe_w2_clock_enabled
                     && moe_route_clock_active
-                    && gemma4_expert_layer
                     && gated
                     && !is_relu2
                     && !is_int8
@@ -27746,6 +28417,8 @@ impl GpuDecodeStore {
                     let (w2_kernel, w2_grid_tiles) = if is_relu2 {
                         if is_int8 {
                             (k.relu2_w2_int8_batched.clone(), w2_n_tiles)
+                        } else if relu2_w2_coalesced {
+                            (k.relu2_w2_batched_coalesced.clone(), w2_n_tiles)
                         } else {
                             (k.relu2_w2_batched.clone(), w2_n_tiles)
                         }
@@ -27792,6 +28465,12 @@ impl GpuDecodeStore {
                     )?;
                 }
 
+                let shared_vram_opt = graph
+                    .shared_expert_vram
+                    .get(layer_idx)
+                    .and_then(|s| s.as_ref());
+                let shared_expert_will_run = shared_vram_opt.is_some();
+
                 // Multi-expert weighted add (init_zero=1: fused zero, no separate zero_bf16 needed)
                 unsafe {
                     k.multi_expert_weighted_add_bf16
@@ -27827,14 +28506,46 @@ impl GpuDecodeStore {
                     )?;
                 }
 
-                let shared_vram_opt = graph
-                    .shared_expert_vram
-                    .get(layer_idx)
-                    .and_then(|s| s.as_ref());
-                let shared_expert_will_run = shared_vram_opt.is_some();
+                // LatentMoE routed experts produce latent-width output. Scale
+                // that routed branch before projecting it back to hidden width,
+                // then add any full-width shared expert on top.
+                if has_latent && rsf != 1.0 {
+                    let threads = 256u32;
+                    let blocks = ((expert_hs as u32) + threads - 1) / threads;
+                    unsafe {
+                        k.scale_bf16
+                            .clone()
+                            .launch(
+                                LaunchConfig {
+                                    grid_dim: (blocks, 1, 1),
+                                    block_dim: (threads, 1, 1),
+                                    shared_mem_bytes: 0,
+                                },
+                                (
+                                    *graph.d_moe_out.device_ptr(),
+                                    *graph.d_moe_out.device_ptr(),
+                                    rsf,
+                                    expert_hs as i32,
+                                ),
+                            )
+                            .map_err(|e| {
+                                format!("scale_bf16_latent_routed[{}]: {:?}", layer_idx, e)
+                            })?;
+                    }
+                }
+                if has_latent {
+                    let lu_wid = moe.latent_up_wid.unwrap();
+                    let lu_w = &graph.weights[lu_wid];
+                    self.gemv_bf16_internal(
+                        lu_w,
+                        *graph.d_moe_out.device_ptr(),
+                        *graph.d_hidden.device_ptr(),
+                    )
+                    .map_err(|e| format!("graph latent up[{}]: {}", layer_idx, e))?;
+                }
 
                 // Apply routed_scaling_factor to the routed branch before adding shared expert output.
-                if shared_expert_will_run && rsf != 1.0 {
+                if !has_latent && shared_expert_will_run && rsf != 1.0 {
                     let threads = 256u32;
                     let blocks = ((expert_hs as u32) + threads - 1) / threads;
                     unsafe {
@@ -27861,6 +28572,16 @@ impl GpuDecodeStore {
 
                 // Shared expert (if any)
                 if let Some(ref shared_vram) = shared_vram_opt {
+                    let shared_input_ptr = if has_latent {
+                        *graph.d_expert_out.device_ptr()
+                    } else {
+                        *graph.d_hidden.device_ptr()
+                    };
+                    let shared_accum_ptr = if has_latent {
+                        *graph.d_hidden.device_ptr()
+                    } else {
+                        *graph.d_moe_out.device_ptr()
+                    };
                     let sw13p = shared_vram.w13_packed_ptr();
                     let sw13s = shared_vram.w13_scales_ptr();
                     let sw2p = shared_vram.w2_packed_ptr();
@@ -27884,7 +28605,7 @@ impl GpuDecodeStore {
                                     sg_w.ptr as *const std::ffi::c_void,
                                     cublas_sys::cudaDataType::CUDA_R_16BF,
                                     sg_w.cols as i32,
-                                    *graph.d_hidden.device_ptr() as *const std::ffi::c_void,
+                                    shared_input_ptr as *const std::ffi::c_void,
                                     cublas_sys::cudaDataType::CUDA_R_16BF,
                                     hs as i32,
                                     &beta as *const f32 as *const std::ffi::c_void,
@@ -27915,7 +28636,7 @@ impl GpuDecodeStore {
                         self.launch_marlin_gemv_v2(
                             sw13p,
                             sw13s,
-                            *graph.d_hidden.device_ptr(),
+                            shared_input_ptr,
                             partial_ptr,
                             inv_wp,
                             inv_sp,
@@ -27969,7 +28690,7 @@ impl GpuDecodeStore {
                         self.launch_marlin_gemv_raw(
                             sw13p,
                             sw13s,
-                            *graph.d_hidden.device_ptr(),
+                            shared_input_ptr,
                             *graph.d_expert_gate_up.device_ptr(),
                             inv_wp,
                             inv_sp,
@@ -28016,7 +28737,7 @@ impl GpuDecodeStore {
                         sw2p,
                         sw2s,
                         *graph.d_expert_gate_up.device_ptr(),
-                        *graph.d_moe_out.device_ptr(),
+                        shared_accum_ptr,
                         inv_wp,
                         inv_sp,
                         shared_intermediate,
@@ -28042,7 +28763,7 @@ impl GpuDecodeStore {
                 }
 
                 // Scale by routed_scaling_factor when there is no shared branch.
-                if !shared_expert_will_run && rsf != 1.0 {
+                if !has_latent && !shared_expert_will_run && rsf != 1.0 {
                     let threads = 256u32;
                     let blocks = ((expert_hs as u32) + threads - 1) / threads;
                     unsafe {
@@ -28237,6 +28958,10 @@ impl GpuDecodeStore {
                             }
                         }
                     }
+                } else if has_latent {
+                    // LatentMoE already wrote the full hidden output through
+                    // latent_up above, and any shared expert was accumulated
+                    // into d_hidden.
                 } else {
                     // Copy MoE output to hidden state
                     unsafe {
@@ -28699,7 +29424,7 @@ impl GpuDecodeStore {
                         k_norm_ptr,
                         gated,
                     } => {
-                        if mixed_segment_clock_active && layer_idx == range_end {
+                        if mixed_segment_clock_active && layer_idx == range_end && *num_heads != 0 {
                             let clocks =
                                 graph.d_graph_mixed_segment_clocks.as_ref().ok_or_else(|| {
                                     format!(
@@ -28714,7 +29439,7 @@ impl GpuDecodeStore {
                                 "mixed-gqa-start",
                             )?;
                         }
-                        if moe_route_clock_active && layer_idx == range_end {
+                        if moe_route_clock_active && layer_idx == range_end && *num_heads != 0 {
                             let clocks =
                                 graph.d_graph_moe_route_clocks.as_ref().ok_or_else(|| {
                                     format!(
@@ -28739,6 +29464,11 @@ impl GpuDecodeStore {
                             .get(layer_idx)
                             .map(|buf| *buf.device_ptr())
                             .unwrap_or(d_seq_len_ptr);
+                        if nh == 0 {
+                            // Nemotron MoE-only placeholders carry no attention heads.
+                            // Match non-graph decode by skipping the GQA kernels while
+                            // allowing the layer's routing/post-norm logic to continue.
+                        } else {
                         let gqa_path_clock_active = graph.graph_gqa_path_clock_enabled
                             && expert_layer.is_some()
                             && routing_range.is_some()
@@ -30349,6 +31079,7 @@ impl GpuDecodeStore {
                                 "moe-route-gqa-end",
                             )?;
                         }
+                        }
                     }
 
                     GpuAttnConfig::MLA {
@@ -30722,102 +31453,518 @@ impl GpuDecodeStore {
                         )?;
                     }
 
-                    GpuAttnConfig::Mamba2 { .. } => {
-                        // Mamba2 cannot use CUDA graph capture (SSM state changes per token).
-                        // This arm should not be reached in graph-captured decode.
-                        return Err("Mamba2 layers are not compatible with CUDA graph capture. \
-                            Use non-graph decode path."
-                            .to_string());
+                    GpuAttnConfig::Mamba2 {
+                        in_proj,
+                        out_proj,
+                        conv_weight_ptr,
+                        a_ptr,
+                        d_ptr,
+                        dt_bias_ptr,
+                        norm_weight_ptr,
+                        num_heads,
+                        head_dim,
+                        state_size,
+                        expand: _,
+                        conv_kernel,
+                        conv_dim,
+                        conv_state_ptr,
+                        ssm_state_ptr,
+                    } => {
+                        let in_w = &graph.weights[*in_proj];
+                        let in_proj_dim = in_w.rows;
+                        let d_inner = (*num_heads).checked_mul(*head_dim).ok_or_else(|| {
+                            format!(
+                                "Mamba2 graph d_inner overflow layer={} heads={} head_dim={}",
+                                layer_idx, num_heads, head_dim
+                            )
+                        })?;
+                        let n_groups = graph.mamba2_n_groups.max(1);
+                        let state = *state_size;
+                        let bc_dim = n_groups.checked_mul(state).ok_or_else(|| {
+                            format!(
+                                "Mamba2 graph B/C dim overflow layer={} groups={} state={}",
+                                layer_idx, n_groups, state
+                            )
+                        })?;
+                        let expected_conv_min = d_inner
+                            .checked_add(bc_dim.checked_mul(2).ok_or_else(|| {
+                                format!(
+                                    "Mamba2 graph conv B/C overflow layer={} bc_dim={}",
+                                    layer_idx, bc_dim
+                                )
+                            })?)
+                            .ok_or_else(|| {
+                                format!(
+                                    "Mamba2 graph conv dim overflow layer={} d_inner={} bc_dim={}",
+                                    layer_idx, d_inner, bc_dim
+                                )
+                            })?;
+                        if *conv_dim < expected_conv_min {
+                            return Err(format!(
+                                "Mamba2 graph conv_dim too small layer={} conv_dim={} expected_at_least={}",
+                                layer_idx, conv_dim, expected_conv_min
+                            ));
+                        }
+                        if d_inner == 0 || n_groups == 0 || d_inner % n_groups != 0 {
+                            return Err(format!(
+                                "Mamba2 graph invalid group shape layer={} d_inner={} groups={}",
+                                layer_idx, d_inner, n_groups
+                            ));
+                        }
+
+                        let mamba2_clock_active = graph.graph_mamba2_clock_enabled;
+                        let mamba2_clock_base = layer_idx * GRAPH_MAMBA2_CLOCK_SLOTS;
+                        if mamba2_clock_active {
+                            if let Some(active) = graph.graph_mamba2_active.get_mut(layer_idx) {
+                                *active = true;
+                            }
+                            let clocks = graph.d_graph_mamba2_clocks.as_ref().ok_or_else(|| {
+                                format!("Mamba2 graph clock buffer missing for layer {}", layer_idx)
+                            })?;
+                            launch_graph_clock_marker(
+                                &k,
+                                clocks,
+                                mamba2_clock_base,
+                                "mamba2-graph-start",
+                            )?;
+                        }
+
+                        let graph_fast_inproj = graph.mamba2_decode_graph_fast_inproj_enabled();
+                        if in_w.dtype == 0 && !graph_fast_inproj {
+                            let candidate_cols = BF16_MAMBA2_IN_PROJ_PREFILL_EQUIV_MIN_COLS;
+                            let input_elems =
+                                in_w.cols.checked_mul(candidate_cols).ok_or_else(|| {
+                                    format!(
+                                        "Mamba2 graph BF16 input overflow layer={} cols={} candidate_cols={}",
+                                        layer_idx, in_w.cols, candidate_cols
+                                    )
+                                })?;
+                            let output_elems =
+                                in_w.rows.checked_mul(candidate_cols).ok_or_else(|| {
+                                    format!(
+                                        "Mamba2 graph BF16 output overflow layer={} rows={} candidate_cols={}",
+                                        layer_idx, in_w.rows, candidate_cols
+                                    )
+                                })?;
+                            let graph_input = graph
+                                .d_mamba2_bf16_graph_input
+                                .as_ref()
+                                .ok_or_else(|| {
+                                    format!(
+                                        "Mamba2 graph BF16 input buffer missing for layer {}",
+                                        layer_idx
+                                    )
+                                })?;
+                            let graph_output = graph
+                                .d_mamba2_bf16_graph_output
+                                .as_ref()
+                                .ok_or_else(|| {
+                                    format!(
+                                        "Mamba2 graph BF16 output buffer missing for layer {}",
+                                        layer_idx
+                                    )
+                                })?;
+                            if graph.mamba2_bf16_graph_input_size < input_elems
+                                || graph.mamba2_bf16_graph_output_size < output_elems
+                            {
+                                return Err(format!(
+                                    "Mamba2 graph BF16 buffers too small layer={} input_have={} input_need={} output_have={} output_need={}",
+                                    layer_idx,
+                                    graph.mamba2_bf16_graph_input_size,
+                                    input_elems,
+                                    graph.mamba2_bf16_graph_output_size,
+                                    output_elems
+                                ));
+                            }
+                            let graph_input_ptr = *graph_input.device_ptr();
+                            let graph_output_ptr = *graph_output.device_ptr();
+                            unsafe {
+                                k.duplicate_bf16_vector_columns
+                                    .clone()
+                                    .launch(
+                                        LaunchConfig::for_num_elems(input_elems as u32),
+                                        (
+                                            *graph.d_hidden.device_ptr(),
+                                            graph_input_ptr,
+                                            in_w.cols as i32,
+                                            candidate_cols as i32,
+                                        ),
+                                    )
+                                    .map_err(|e| {
+                                        format!(
+                                            "mamba2 graph duplicate BF16 in-proj input[{}]: {:?}",
+                                            layer_idx, e
+                                        )
+                                    })?;
+                            }
+                            self.gemm_bf16_batch_forced(
+                                in_w,
+                                graph_input_ptr,
+                                graph_output_ptr,
+                                candidate_cols,
+                                in_w.cols,
+                                in_w.rows,
+                            )?;
+                            let last_col_ptr = graph_output_ptr
+                                + ((candidate_cols - 1)
+                                    .saturating_mul(in_w.rows)
+                                    .saturating_mul(std::mem::size_of::<u16>()))
+                                    as u64;
+                            unsafe {
+                                k.duplicate_bf16_vector_columns
+                                    .clone()
+                                    .launch(
+                                        LaunchConfig::for_num_elems(in_w.rows as u32),
+                                        (
+                                            last_col_ptr,
+                                            *graph.d_scratch.device_ptr(),
+                                            in_w.rows as i32,
+                                            1i32,
+                                        ),
+                                    )
+                                    .map_err(|e| {
+                                        format!(
+                                            "mamba2 graph copy BF16 in-proj last column[{}]: {:?}",
+                                            layer_idx, e
+                                        )
+                                    })?;
+                            }
+                        } else {
+                            self.gemv_bf16_internal(
+                                in_w,
+                                *graph.d_hidden.device_ptr(),
+                                *graph.d_scratch.device_ptr(),
+                            )?;
+                        }
+                        if mamba2_clock_active {
+                            let clocks = graph.d_graph_mamba2_clocks.as_ref().ok_or_else(|| {
+                                format!("Mamba2 graph clock buffer missing for layer {}", layer_idx)
+                            })?;
+                            launch_graph_clock_marker(
+                                &k,
+                                clocks,
+                                mamba2_clock_base + 1,
+                                "mamba2-graph-in-proj-end",
+                            )?;
+                        }
+
+                        unsafe {
+                            k.bf16_to_fp32
+                                .clone()
+                                .launch(
+                                    LaunchConfig::for_num_elems(in_proj_dim as u32),
+                                    (
+                                        *graph.d_fp32_scratch.device_ptr(),
+                                        *graph.d_scratch.device_ptr(),
+                                        in_proj_dim as i32,
+                                    ),
+                                )
+                                .map_err(|e| {
+                                    format!("bf16_to_fp32 mamba2 graph in_proj[{}]: {:?}", layer_idx, e)
+                                })?;
+                        }
+                        if mamba2_clock_active {
+                            let clocks = graph.d_graph_mamba2_clocks.as_ref().ok_or_else(|| {
+                                format!("Mamba2 graph clock buffer missing for layer {}", layer_idx)
+                            })?;
+                            launch_graph_clock_marker(
+                                &k,
+                                clocks,
+                                mamba2_clock_base + 2,
+                                "mamba2-graph-to-fp32-end",
+                            )?;
+                        }
+
+                        let fp32_base = *graph.d_fp32_scratch.device_ptr();
+                        let z_ptr = fp32_base;
+                        let xbc_ptr = fp32_base + (d_inner * 4) as u64;
+                        let dt_ptr = fp32_base + ((d_inner + *conv_dim) * 4) as u64;
+                        let conv_out_ptr = graph
+                            .d_mamba2_conv_out
+                            .as_ref()
+                            .map(|b| *b.device_ptr())
+                            .unwrap_or(xbc_ptr);
+                        unsafe {
+                            let conv_bias_ptr = graph
+                                .mamba2_conv_bias_ptrs
+                                .get(&layer_idx)
+                                .copied()
+                                .unwrap_or(0u64);
+                            k.mamba2_conv1d
+                                .clone()
+                                .launch(
+                                    LaunchConfig {
+                                        grid_dim: ((*conv_dim as u32 + 255) / 256, 1, 1),
+                                        block_dim: (256, 1, 1),
+                                        shared_mem_bytes: 0,
+                                    },
+                                    (
+                                        *conv_state_ptr,
+                                        xbc_ptr,
+                                        *conv_weight_ptr,
+                                        conv_bias_ptr,
+                                        conv_out_ptr,
+                                        *conv_dim as i32,
+                                        *conv_kernel as i32,
+                                    ),
+                                )
+                            .map_err(|e| format!("mamba2 graph conv1d[{}]: {:?}", layer_idx, e))?;
+                        }
+                        if mamba2_clock_active {
+                            let clocks = graph.d_graph_mamba2_clocks.as_ref().ok_or_else(|| {
+                                format!("Mamba2 graph clock buffer missing for layer {}", layer_idx)
+                            })?;
+                            launch_graph_clock_marker(
+                                &k,
+                                clocks,
+                                mamba2_clock_base + 3,
+                                "mamba2-graph-conv-end",
+                            )?;
+                        }
+
+                        let x_conv_ptr = conv_out_ptr;
+                        let b_conv_ptr = conv_out_ptr + (d_inner * 4) as u64;
+                        let c_conv_ptr = b_conv_ptr + (bc_dim * 4) as u64;
+                        let scratch_offset = in_proj_dim;
+                        let dt_out_ptr = fp32_base + (scratch_offset * 4) as u64;
+                        let a_bar_ptr = dt_out_ptr + (*num_heads * 4) as u64;
+                        let b_bar_ptr = a_bar_ptr + (*num_heads * 4) as u64;
+                        let y_ptr = dt_out_ptr
+                            + ((*num_heads + *num_heads + *num_heads * state) * 4) as u64;
+                        unsafe {
+                            k.mamba2_discretize
+                                .clone()
+                                .launch(
+                                    LaunchConfig {
+                                        grid_dim: (1, 1, 1),
+                                        block_dim: ((*num_heads as u32).max(1), 1, 1),
+                                        shared_mem_bytes: 0,
+                                    },
+                                    (
+                                        dt_ptr,
+                                        *dt_bias_ptr,
+                                        *a_ptr,
+                                        b_conv_ptr,
+                                        dt_out_ptr,
+                                        a_bar_ptr,
+                                        b_bar_ptr,
+                                        *num_heads as i32,
+                                        state as i32,
+                                        n_groups as i32,
+                                    ),
+                                )
+                                .map_err(|e| {
+                                    format!("mamba2 graph discretize[{}]: {:?}", layer_idx, e)
+                                })?;
+                        }
+                        if mamba2_clock_active {
+                            let clocks = graph.d_graph_mamba2_clocks.as_ref().ok_or_else(|| {
+                                format!("Mamba2 graph clock buffer missing for layer {}", layer_idx)
+                            })?;
+                            launch_graph_clock_marker(
+                                &k,
+                                clocks,
+                                mamba2_clock_base + 4,
+                                "mamba2-graph-discretize-end",
+                            )?;
+                        }
+
+                        unsafe {
+                            k.mamba2_ssm_step
+                                .clone()
+                                .launch(
+                                    LaunchConfig {
+                                        grid_dim: (*num_heads as u32, 1, 1),
+                                        block_dim: ((*head_dim as u32).min(256), 1, 1),
+                                        shared_mem_bytes: 0,
+                                    },
+                                    (
+                                        *ssm_state_ptr,
+                                        x_conv_ptr,
+                                        a_bar_ptr,
+                                        b_bar_ptr,
+                                        c_conv_ptr,
+                                        y_ptr,
+                                        *num_heads as i32,
+                                        *head_dim as i32,
+                                        state as i32,
+                                        n_groups as i32,
+                                    ),
+                                )
+                                .map_err(|e| {
+                                    format!("mamba2 graph ssm_step[{}]: {:?}", layer_idx, e)
+                                })?;
+                        }
+                            if mamba2_clock_active {
+                                let clocks = graph.d_graph_mamba2_clocks.as_ref().ok_or_else(|| {
+                                    format!(
+                                        "Mamba2 graph clock buffer missing for layer {}",
+                                        layer_idx
+                                    )
+                                })?;
+                                launch_graph_clock_marker(
+                                    &k,
+                                    clocks,
+                                    mamba2_clock_base + 5,
+                                    "mamba2-graph-ssm-end",
+                                )?;
+                            }
+
+                        let group_size = d_inner / n_groups;
+                        unsafe {
+                            k.mamba2_gate_output
+                                .clone()
+                                .launch(
+                                    LaunchConfig {
+                                        grid_dim: (n_groups as u32, 1, 1),
+                                        block_dim: (256, 1, 1),
+                                        shared_mem_bytes: (256 + group_size) as u32 * 4,
+                                    },
+                                    (
+                                        z_ptr,
+                                        y_ptr,
+                                        *d_ptr,
+                                        x_conv_ptr,
+                                        *norm_weight_ptr,
+                                        *graph.d_scratch.device_ptr(),
+                                        d_inner as i32,
+                                        *head_dim as i32,
+                                        n_groups as i32,
+                                        eps,
+                                    ),
+                                )
+                                .map_err(|e| {
+                                    format!("mamba2 graph gate_output[{}]: {:?}", layer_idx, e)
+                                })?;
+                        }
+                        if mamba2_clock_active {
+                            let clocks = graph.d_graph_mamba2_clocks.as_ref().ok_or_else(|| {
+                                format!("Mamba2 graph clock buffer missing for layer {}", layer_idx)
+                            })?;
+                            launch_graph_clock_marker(
+                                &k,
+                                clocks,
+                                mamba2_clock_base + 6,
+                                "mamba2-graph-gate-end",
+                            )?;
+                        }
+
+                        let out_w = &graph.weights[*out_proj];
+                        self.gemv_bf16_internal(
+                            out_w,
+                            *graph.d_scratch.device_ptr(),
+                            *graph.d_hidden.device_ptr(),
+                        )?;
+                        if mamba2_clock_active {
+                            let clocks = graph.d_graph_mamba2_clocks.as_ref().ok_or_else(|| {
+                                format!("Mamba2 graph clock buffer missing for layer {}", layer_idx)
+                            })?;
+                            launch_graph_clock_marker(
+                                &k,
+                                clocks,
+                                mamba2_clock_base + 7,
+                                "mamba2-graph-out-proj-end",
+                            )?;
+                        }
                     }
                 }
 
-                // Post-attention norm
-                if route_prep_clock_active {
-                    let clocks = graph.d_graph_route_prep_clocks.as_ref().ok_or_else(|| {
-                        format!("route-prep clock buffer missing for graph {}", graph_idx)
-                    })?;
-                    launch_graph_clock_marker(
-                        &k,
-                        clocks,
-                        route_prep_clock_base + 2,
-                        "route-prep-post-gqa-norm-start",
-                    )?;
-                }
-                {
-                    let smem = (hs as u32) * 4;
-                    let threads = 256u32.min(hs as u32);
-                    if is_gemma4 {
-                        unsafe {
-                            k.rmsnorm
-                                .clone()
-                                .launch(
-                                    LaunchConfig {
-                                        grid_dim: (1, 1, 1),
-                                        block_dim: (threads, 1, 1),
-                                        shared_mem_bytes: smem,
-                                    },
-                                    (
-                                        *graph.d_scratch.device_ptr(),
-                                        *graph.d_hidden.device_ptr(),
-                                        layer.post_attn_norm_ptr,
-                                        eps,
-                                        hs as i32,
-                                    ),
-                                )
-                                .map_err(|e| {
-                                    format!(
-                                        "gemma4 graph post_attn rmsnorm[{}]: {:?}",
-                                        layer_idx, e
+                // Post-attention norm. Nemotron single-sublayer mixer blocks use
+                // post_attn_norm_size==0 and carry the residual add into the next
+                // layer's pre-norm, matching the non-graph decode path.
+                if layer.post_attn_norm_size > 0 {
+                    if route_prep_clock_active {
+                        let clocks = graph.d_graph_route_prep_clocks.as_ref().ok_or_else(|| {
+                            format!("route-prep clock buffer missing for graph {}", graph_idx)
+                        })?;
+                        launch_graph_clock_marker(
+                            &k,
+                            clocks,
+                            route_prep_clock_base + 2,
+                            "route-prep-post-gqa-norm-start",
+                        )?;
+                    }
+                    {
+                        let smem = (hs as u32) * 4;
+                        let threads = 256u32.min(hs as u32);
+                        if is_gemma4 {
+                            unsafe {
+                                k.rmsnorm
+                                    .clone()
+                                    .launch(
+                                        LaunchConfig {
+                                            grid_dim: (1, 1, 1),
+                                            block_dim: (threads, 1, 1),
+                                            shared_mem_bytes: smem,
+                                        },
+                                        (
+                                            *graph.d_scratch.device_ptr(),
+                                            *graph.d_hidden.device_ptr(),
+                                            layer.post_attn_norm_ptr,
+                                            eps,
+                                            hs as i32,
+                                        ),
                                     )
-                                })?;
-                            k.add_bf16
-                                .clone()
-                                .launch(
-                                    LaunchConfig::for_num_elems(hs as u32),
-                                    (
-                                        *graph.d_hidden.device_ptr(),
-                                        *graph.d_residual.device_ptr(),
-                                        *graph.d_scratch.device_ptr(),
-                                        hs as i32,
-                                    ),
-                                )
-                                .map_err(|e| {
-                                    format!("gemma4 graph post_attn add[{}]: {:?}", layer_idx, e)
-                                })?;
-                        }
-                    } else {
-                        unsafe {
-                            k.fused_add_rmsnorm
-                                .clone()
-                                .launch(
-                                    LaunchConfig {
-                                        grid_dim: (1, 1, 1),
-                                        block_dim: (threads, 1, 1),
-                                        shared_mem_bytes: smem,
-                                    },
-                                    (
-                                        *graph.d_hidden.device_ptr(),
-                                        *graph.d_residual.device_ptr(),
-                                        layer.post_attn_norm_ptr,
-                                        eps,
-                                        hs as i32,
-                                        0i32,
-                                    ),
-                                )
-                                .map_err(|e| format!("post_attn_norm[{}]: {:?}", layer_idx, e))?;
+                                    .map_err(|e| {
+                                        format!(
+                                            "gemma4 graph post_attn rmsnorm[{}]: {:?}",
+                                            layer_idx, e
+                                        )
+                                    })?;
+                                k.add_bf16
+                                    .clone()
+                                    .launch(
+                                        LaunchConfig::for_num_elems(hs as u32),
+                                        (
+                                            *graph.d_hidden.device_ptr(),
+                                            *graph.d_residual.device_ptr(),
+                                            *graph.d_scratch.device_ptr(),
+                                            hs as i32,
+                                        ),
+                                    )
+                                    .map_err(|e| {
+                                        format!(
+                                            "gemma4 graph post_attn add[{}]: {:?}",
+                                            layer_idx, e
+                                        )
+                                    })?;
+                            }
+                        } else {
+                            unsafe {
+                                k.fused_add_rmsnorm
+                                    .clone()
+                                    .launch(
+                                        LaunchConfig {
+                                            grid_dim: (1, 1, 1),
+                                            block_dim: (threads, 1, 1),
+                                            shared_mem_bytes: smem,
+                                        },
+                                        (
+                                            *graph.d_hidden.device_ptr(),
+                                            *graph.d_residual.device_ptr(),
+                                            layer.post_attn_norm_ptr,
+                                            eps,
+                                            hs as i32,
+                                            0i32,
+                                        ),
+                                    )
+                                    .map_err(|e| {
+                                        format!("post_attn_norm[{}]: {:?}", layer_idx, e)
+                                    })?;
+                            }
                         }
                     }
-                }
-                if route_prep_clock_active {
-                    let clocks = graph.d_graph_route_prep_clocks.as_ref().ok_or_else(|| {
-                        format!("route-prep clock buffer missing for graph {}", graph_idx)
-                    })?;
-                    launch_graph_clock_marker(
-                        &k,
-                        clocks,
-                        route_prep_clock_base + 3,
-                        "route-prep-post-gqa-norm-end",
-                    )?;
+                    if route_prep_clock_active {
+                        let clocks = graph.d_graph_route_prep_clocks.as_ref().ok_or_else(|| {
+                            format!("route-prep clock buffer missing for graph {}", graph_idx)
+                        })?;
+                        launch_graph_clock_marker(
+                            &k,
+                            clocks,
+                            route_prep_clock_base + 3,
+                            "route-prep-post-gqa-norm-end",
+                        )?;
+                    }
                 }
 
                 // Dense MLP (for non-MoE layers in the routing range)
@@ -31196,10 +32343,32 @@ impl GpuDecodeStore {
                         *graph.d_topk_weights.device_ptr()
                     };
                     {
-                        let smem = (ne as u32) * 4;
+                        let parallel_topk_enabled = graph.parallel_topk_enabled_for_moe(moe);
+                        if parallel_topk_enabled && sf != 1 {
+                            return Err(format!(
+                                "KRASIS_DECODE_PARALLEL_TOPK=1 only supports sigmoid routing; layer {} uses scoring_func={}",
+                                layer_idx, sf
+                            ));
+                        }
+                        if parallel_topk_enabled && ne > 1024 {
+                            return Err(format!(
+                                "KRASIS_DECODE_PARALLEL_TOPK=1 supports at most 1024 experts; layer {} has {}",
+                                layer_idx, ne
+                            ));
+                        }
+                        let smem = if parallel_topk_enabled && sf == 1 {
+                            (ne as u32) * 8
+                        } else {
+                            (ne as u32) * 4
+                        };
+                        let topk_block_dim = if parallel_topk_enabled && sf == 1 {
+                            (ne.min(256).max(1) as u32, 1, 1)
+                        } else {
+                            (1, 1, 1)
+                        };
                         let cfg = LaunchConfig {
                             grid_dim: (1, 1, 1),
-                            block_dim: (1, 1, 1),
+                            block_dim: topk_block_dim,
                             shared_mem_bytes: smem,
                         };
                         if sf == 1 {
@@ -31214,21 +32383,46 @@ impl GpuDecodeStore {
                                 0u64
                             };
                             unsafe {
-                                k.sigmoid_topk
-                                    .clone()
-                                    .launch(
-                                        cfg,
-                                        (
-                                            logits_ptr,
-                                            bias_ptr,
-                                            corr_ptr,
-                                            topk_ids_dptr,
-                                            topk_wts_dptr,
-                                            ne as i32,
-                                            topk as i32,
-                                        ),
-                                    )
-                                    .map_err(|e| format!("sigmoid_topk[{}]: {:?}", layer_idx, e))?;
+                                if parallel_topk_enabled {
+                                    k.sigmoid_topk_parallel_scores
+                                        .clone()
+                                        .launch(
+                                            cfg,
+                                            (
+                                                logits_ptr,
+                                                bias_ptr,
+                                                corr_ptr,
+                                                topk_ids_dptr,
+                                                topk_wts_dptr,
+                                                ne as i32,
+                                                topk as i32,
+                                            ),
+                                        )
+                                        .map_err(|e| {
+                                            format!(
+                                                "sigmoid_topk_parallel_scores[{}]: {:?}",
+                                                layer_idx, e
+                                            )
+                                        })?;
+                                } else {
+                                    k.sigmoid_topk
+                                        .clone()
+                                        .launch(
+                                            cfg,
+                                            (
+                                                logits_ptr,
+                                                bias_ptr,
+                                                corr_ptr,
+                                                topk_ids_dptr,
+                                                topk_wts_dptr,
+                                                ne as i32,
+                                                topk as i32,
+                                            ),
+                                        )
+                                        .map_err(|e| {
+                                            format!("sigmoid_topk[{}]: {:?}", layer_idx, e)
+                                        })?;
+                                }
                             }
                         } else {
                             let norm_flag = if moe.norm_topk_prob { 1i32 } else { 0i32 };
@@ -31811,6 +33005,7 @@ impl GpuDecodeStore {
         let max_ept = graph.max_experts_per_tok;
         let use_pinned = graph.pinned_topk_ids.is_some() && graph.pinned_topk_weights.is_some();
         let mapped_reads = graph.mapped_reads_active;
+        let hot_hcs_nosync = graph.gpu_route_sync_hot_nosync;
 
         let graph_buf_base: Vec<u64> = graph
             .d_graph_expert_bufs
@@ -31854,6 +33049,19 @@ impl GpuDecodeStore {
                     graph.captured_route_sync_classifies, num_moe,
                 ));
             }
+            if hot_hcs_nosync {
+                let (all_resident, resident, total, first_missing) =
+                    graph.hcs_all_moe_experts_resident_for_layers(&moe_indices);
+                if !all_resident {
+                    let missing = first_missing
+                        .map(|(l, e)| format!(" first_missing=L{}E{}", l, e))
+                        .unwrap_or_default();
+                    return Err(format!(
+                        "KRASIS_GPU_ROUTE_SYNC_HOT_NOSYNC=1 requires all MoE experts resident in HCS; resident={}/{}{}",
+                        resident, total, missing
+                    ));
+                }
+            }
         }
         let cold_buf_host = if gpu_rs {
             Some(
@@ -31874,8 +33082,8 @@ impl GpuDecodeStore {
         )
         .max(1);
 
-        // Pre-clear ready flag before the first graph (only needed for non-mapped GPU route sync)
-        if gpu_rs {
+        // Pre-clear ready flag before the first graph only for the polling GPU route path.
+        if gpu_rs && !hot_hcs_nosync {
             unsafe {
                 let cold_ptr = cold_buf_host.unwrap();
                 std::ptr::write_volatile(cold_ptr, 0i32);
@@ -31885,31 +33093,48 @@ impl GpuDecodeStore {
 
         let timing = graph.timing_enabled;
 
-        if mapped_reads {
-            // ═══ MAPPED READS FAST PATH ═══
-            // All experts (hot + cold) have valid pointers in d_expert_ptrs.
-            // The classify kernel writes pointers to d_batch_upload for ALL experts.
-            // No CPU sync, no DMA, no classification between graphs.
-            // Just launch all graphs back-to-back on the same stream.
-            for graph_idx in 0..num_graphs {
-                let exec = &graph.per_layer_graphs[graph_idx];
+        if hot_hcs_nosync {
+            // ═══ HOT-HCS GPU ROUTE FAST PATH ═══
+            // All experts are resident in HCS, so expert_classify_prepare writes
+            // valid VRAM pointers into d_batch_upload for the next graph. Stream
+            // order is sufficient; no CPU route poll or pointer upload is needed.
+            let hot_hcs_selected_per_token =
+                graph.hcs_routed_experts_per_decode_token_for_layers(&moe_indices);
+            let use_full_hot_graph = graph.gpu_route_sync_hot_full_graph;
+            if use_full_hot_graph {
+                let exec = graph.hot_hcs_full_graph.as_ref().ok_or_else(|| {
+                    "KRASIS_GPU_ROUTE_SYNC_HOT_FULL_GRAPH=1 requested but no full hot-HCS graph was captured"
+                        .to_string()
+                })?;
                 if let Some(events) = graph.graph_timing_events.as_ref() {
-                    events.total.record_start(graph_idx, replay_stream)?;
+                    events.total.record_start(0, replay_stream)?;
                 }
                 let err = unsafe { cuda_sys::lib().cuGraphLaunch(exec.0, replay_stream) };
                 if err != cuda_sys::CUresult::CUDA_SUCCESS {
-                    return Err(format!("cuGraphLaunch[{}]: {:?}", graph_idx, err));
+                    return Err(format!("cuGraphLaunch[hot-hcs-full]: {:?}", err));
                 }
                 if let Some(events) = graph.graph_timing_events.as_ref() {
-                    events.total.record_end(graph_idx, replay_stream)?;
+                    events.total.record_end(0, replay_stream)?;
+                }
+            } else {
+                for graph_idx in 0..num_graphs {
+                    let exec = &graph.per_layer_graphs[graph_idx];
+                    if let Some(events) = graph.graph_timing_events.as_ref() {
+                        events.total.record_start(graph_idx, replay_stream)?;
+                    }
+                    let err = unsafe { cuda_sys::lib().cuGraphLaunch(exec.0, replay_stream) };
+                    if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                        return Err(format!("cuGraphLaunch[{}]: {:?}", graph_idx, err));
+                    }
+                    if let Some(events) = graph.graph_timing_events.as_ref() {
+                        events.total.record_end(graph_idx, replay_stream)?;
+                    }
                 }
             }
 
             // Single final sync — all graphs execute sequentially on the stream.
-            // Mapped reads do not synchronize between graph segments, so this
-            // wait cannot be assigned to one prior segment without using CUDA
-            // event proportions; keep it as final-sync wait and rely on the
-            // event breakdown for segment attribution.
+            // This intentionally removes inter-segment CPU route polling; segment
+            // attribution should use CUDA event timing rather than sync waits.
             let t_final_sync_start = if timing {
                 Some(std::time::Instant::now())
             } else {
@@ -31918,42 +33143,52 @@ impl GpuDecodeStore {
             unsafe {
                 let err = cuda_sys::lib().cuStreamSynchronize(replay_stream);
                 if err != cuda_sys::CUresult::CUDA_SUCCESS {
-                    return Err(format!("mapped reads final sync: {:?}", err));
+                    return Err(format!("hot-HCS graph no-sync final sync: {:?}", err));
                 }
             }
             if let Some(t) = t_final_sync_start {
                 graph.t_graph_final_sync_wait += t.elapsed().as_secs_f64();
             }
+            graph.dma_hcs_experts += hot_hcs_selected_per_token as u64;
             if graph.graph_internal_timing {
                 if let Some(events) = graph.graph_timing_events.as_ref() {
-                    let mut total_ms = 0.0f64;
-                    let mut first_ms = 0.0f64;
-                    let mut middle_ms = 0.0f64;
-                    let mut last_ms = 0.0f64;
-                    for idx in 0..num_graphs {
-                        let elapsed = events.total.elapsed_ms(idx)?;
-                        if let Some(slot) = graph.graph_segment_elapsed.get_mut(idx) {
+                    if use_full_hot_graph {
+                        let elapsed = events.total.elapsed_ms(0)?;
+                        graph.t_graph_segment_total += elapsed / 1000.0;
+                        if let Some(slot) = graph.graph_segment_elapsed.get_mut(0) {
                             *slot += elapsed / 1000.0;
                         }
-                        total_ms += elapsed;
-                        if idx == 0 {
-                            first_ms += elapsed;
-                        } else if idx + 1 == num_graphs {
-                            last_ms += elapsed;
-                        } else {
-                            middle_ms += elapsed;
+                    } else {
+                        let mut total_ms = 0.0f64;
+                        let mut first_ms = 0.0f64;
+                        let mut middle_ms = 0.0f64;
+                        let mut last_ms = 0.0f64;
+                        for idx in 0..num_graphs {
+                            let elapsed = events.total.elapsed_ms(idx)?;
+                            if let Some(slot) = graph.graph_segment_elapsed.get_mut(idx) {
+                                *slot += elapsed / 1000.0;
+                            }
+                            total_ms += elapsed;
+                            if idx == 0 {
+                                first_ms += elapsed;
+                            } else if idx + 1 == num_graphs {
+                                last_ms += elapsed;
+                            } else {
+                                middle_ms += elapsed;
+                            }
                         }
+                        graph.t_graph_segment_total += total_ms / 1000.0;
+                        graph.t_graph_segment_routing += first_ms / 1000.0;
+                        graph.t_graph_segment_expert += middle_ms / 1000.0;
+                        graph.t_graph_segment_final += last_ms / 1000.0;
                     }
-                    graph.t_graph_segment_total += total_ms / 1000.0;
-                    graph.t_graph_segment_routing += first_ms / 1000.0;
-                    graph.t_graph_segment_expert += middle_ms / 1000.0;
-                    graph.t_graph_segment_final += last_ms / 1000.0;
                 }
                 accumulate_gqa_k4_split_clocks(graph)?;
                 accumulate_mixed_segment_clocks(graph)?;
                 accumulate_moe_route_clocks(graph)?;
                 accumulate_moe_w2_clocks(graph)?;
                 accumulate_route_prep_clocks(graph)?;
+                accumulate_mamba2_graph_clocks(graph)?;
                 accumulate_gqa_path_clocks(graph)?;
                 accumulate_gqa_boundary_clocks(graph)?;
                 accumulate_gqa_coverage_clocks(graph)?;
@@ -32560,7 +33795,6 @@ impl GpuDecodeStore {
                             batch_count, topk, moe_layer_idx
                         ));
                     }
-
                     let ptr_stride = max_ept * 8;
                     let fill_count = topk.min(max_ept);
                     unsafe {
@@ -32766,6 +34000,7 @@ impl GpuDecodeStore {
                 accumulate_moe_route_clocks(graph)?;
                 accumulate_moe_w2_clocks(graph)?;
                 accumulate_route_prep_clocks(graph)?;
+                accumulate_mamba2_graph_clocks(graph)?;
                 accumulate_gqa_path_clocks(graph)?;
                 accumulate_gqa_boundary_clocks(graph)?;
                 accumulate_gqa_coverage_clocks(graph)?;
@@ -38994,7 +40229,7 @@ impl GpuDecodeStore {
             next_token = target_pred;
 
             let mut text = detok.add(target_pred as u32);
-            let finish_reason = if stop_set.contains(&target_pred) {
+            let finish_reason = if stop_set.contains(&target_pred) && generated >= self.min_new_tokens {
                 Some("stop")
             } else if generated >= max_tokens {
                 Some("length")
@@ -41215,10 +42450,32 @@ impl GpuDecodeStore {
 
             // TopK → per-token topk buffer on GPU
             {
-                let smem = (ne as u32) * 4;
+                let parallel_topk_enabled = graph.parallel_topk_enabled_for_moe(moe);
+                if parallel_topk_enabled && sf != 1 {
+                    return Err(format!(
+                        "KRASIS_DECODE_PARALLEL_TOPK=1 only supports sigmoid routing; layer {} uses scoring_func={}",
+                        layer_idx, sf
+                    ));
+                }
+                if parallel_topk_enabled && ne > 1024 {
+                    return Err(format!(
+                        "KRASIS_DECODE_PARALLEL_TOPK=1 supports at most 1024 experts; layer {} has {}",
+                        layer_idx, ne
+                    ));
+                }
+                let smem = if parallel_topk_enabled && sf == 1 {
+                    (ne as u32) * 8
+                } else {
+                    (ne as u32) * 4
+                };
+                let topk_block_dim = if parallel_topk_enabled && sf == 1 {
+                    (ne.min(256).max(1) as u32, 1, 1)
+                } else {
+                    (1, 1, 1)
+                };
                 let cfg = LaunchConfig {
                     grid_dim: (1, 1, 1),
-                    block_dim: (1, 1, 1),
+                    block_dim: topk_block_dim,
                     shared_mem_bytes: smem,
                 };
                 if sf == 1 {
@@ -41233,23 +42490,46 @@ impl GpuDecodeStore {
                         0u64
                     };
                     unsafe {
-                        k.sigmoid_topk
-                            .clone()
-                            .launch(
-                                cfg,
-                                (
-                                    logits_ptr,
-                                    bias_ptr,
-                                    corr_ptr,
-                                    tk_ids_ptr,
-                                    tk_wts_ptr,
-                                    ne as i32,
-                                    topk as i32,
-                                ),
-                            )
-                            .map_err(|e| {
-                                format!("batch sigmoid_topk[{}][{}]: {:?}", layer_idx, t, e)
-                            })?;
+                        if parallel_topk_enabled {
+                            k.sigmoid_topk_parallel_scores
+                                .clone()
+                                .launch(
+                                    cfg,
+                                    (
+                                        logits_ptr,
+                                        bias_ptr,
+                                        corr_ptr,
+                                        tk_ids_ptr,
+                                        tk_wts_ptr,
+                                        ne as i32,
+                                        topk as i32,
+                                    ),
+                                )
+                                .map_err(|e| {
+                                    format!(
+                                        "batch sigmoid_topk_parallel_scores[{}][{}]: {:?}",
+                                        layer_idx, t, e
+                                    )
+                                })?;
+                        } else {
+                            k.sigmoid_topk
+                                .clone()
+                                .launch(
+                                    cfg,
+                                    (
+                                        logits_ptr,
+                                        bias_ptr,
+                                        corr_ptr,
+                                        tk_ids_ptr,
+                                        tk_wts_ptr,
+                                        ne as i32,
+                                        topk as i32,
+                                    ),
+                                )
+                                .map_err(|e| {
+                                    format!("batch sigmoid_topk[{}][{}]: {:?}", layer_idx, t, e)
+                                })?;
+                        }
                     }
                 } else {
                     unsafe {
@@ -42912,6 +44192,16 @@ impl GpuDecodeStore {
         let target_floor_mb = pressure_floor_mb.max(safety_mb.saturating_add(soft_chunk_guard_mb));
         if observed_free_mb >= target_floor_mb {
             crate::vram_monitor::clear_pressure(device_id);
+            let reload_room_mb = if hcs.soft_slots_per_chunk > 0 && hcs.soft_slot_size > 0 {
+                let chunk_mb =
+                    (hcs.soft_full_chunk_bytes() + (1024 * 1024) - 1) / (1024 * 1024);
+                target_floor_mb.saturating_add(chunk_mb)
+            } else {
+                target_floor_mb
+            };
+            if observed_free_mb >= reload_room_mb {
+                hcs.clear_pressure_cap();
+            }
             return (0, 0.0, observed_free_mb);
         }
 
@@ -42966,10 +44256,22 @@ impl GpuDecodeStore {
             }
         }
 
-        hcs.apply_pressure_cap(hcs.soft_chunks_loaded);
         if final_free_mb >= target_floor_mb {
             crate::vram_monitor::clear_pressure(device_id);
+            let reload_room_mb = if hcs.soft_slots_per_chunk > 0 && hcs.soft_slot_size > 0 {
+                let chunk_mb =
+                    (hcs.soft_full_chunk_bytes() + (1024 * 1024) - 1) / (1024 * 1024);
+                target_floor_mb.saturating_add(chunk_mb)
+            } else {
+                target_floor_mb
+            };
+            if final_free_mb >= reload_room_mb {
+                hcs.clear_pressure_cap();
+            } else {
+                hcs.apply_pressure_cap(hcs.soft_chunks_loaded);
+            }
         } else {
+            hcs.apply_pressure_cap(hcs.soft_chunks_loaded);
             crate::vram_monitor::mark_pressure(device_id, final_free_mb as u64, safety_mb as u64);
         }
 
@@ -44287,11 +45589,13 @@ impl GpuDecodeStore {
                 None,
                 "graph",
                 &format!(
-                    "phase=decode_request_state no_graph={} graphs_valid={} graphs_ever_captured={} gpu_route_sync={} mapped_reads_active={} mapped_reads_available={} hcs_cached={} hcs_soft_cached={} hcs_soft_loaded={} timing={}",
+                    "phase=decode_request_state no_graph={} graphs_valid={} graphs_ever_captured={} gpu_route_sync={} gpu_route_sync_hot_nosync={} gpu_route_sync_hot_full_graph={} mapped_reads_active={} mapped_reads_available={} hcs_cached={} hcs_soft_cached={} hcs_soft_loaded={} timing={}",
                     no_graph,
                     graph.per_layer_graphs_valid,
                     graph.graphs_ever_captured,
                     graph.gpu_route_sync,
+                    graph.gpu_route_sync_hot_nosync,
+                    graph.gpu_route_sync_hot_full_graph,
                     graph.mapped_reads_active,
                     mapped_reads_available,
                     hcs_cached,
@@ -44567,6 +45871,13 @@ impl GpuDecodeStore {
                 g.t_graph_route_prep_dense_down = 0.0;
                 g.t_graph_route_prep_dense_post_norms = 0.0;
                 g.t_graph_route_prep_router_input_norm = 0.0;
+                g.t_graph_mamba2_in_proj = 0.0;
+                g.t_graph_mamba2_to_fp32 = 0.0;
+                g.t_graph_mamba2_conv = 0.0;
+                g.t_graph_mamba2_discretize = 0.0;
+                g.t_graph_mamba2_ssm = 0.0;
+                g.t_graph_mamba2_gate = 0.0;
+                g.t_graph_mamba2_out_proj = 0.0;
                 for total in &mut g.graph_gqa_other_totals {
                     *total = GraphGqaOtherClockTotals::default();
                 }
@@ -44598,7 +45909,7 @@ impl GpuDecodeStore {
 
         if let Some(graph) = self.graph.as_mut() {
             if let Some(hcs) = graph.hcs.as_mut() {
-                hcs.begin_dynamic_request();
+                hcs.begin_dynamic_request(max_tokens);
             }
         }
 
@@ -44894,7 +46205,7 @@ impl GpuDecodeStore {
                     step += 1;
                     next_token = target_pred;
                     let mut text = detok.add(target_pred as u32);
-                    let finish_reason = if stop_set.contains(&target_pred) {
+                    let finish_reason = if stop_set.contains(&target_pred) && generated >= self.min_new_tokens {
                         Some("stop")
                     } else if generated >= max_tokens {
                         Some("length")
@@ -44989,7 +46300,7 @@ impl GpuDecodeStore {
                 let mut stopped = false;
                 {
                     let mut text = detok.add(target_pred as u32);
-                    let finish_reason = if stop_set.contains(&target_pred) {
+                    let finish_reason = if stop_set.contains(&target_pred) && generated >= self.min_new_tokens {
                         Some("stop")
                     } else if generated >= max_tokens {
                         Some("length")
@@ -45055,7 +46366,7 @@ impl GpuDecodeStore {
                             next_token = draft_tokens[i];
 
                             let mut text = detok.add(draft_tokens[i] as u32);
-                            let finish_reason = if stop_set.contains(&draft_tokens[i]) {
+                            let finish_reason = if stop_set.contains(&draft_tokens[i]) && generated >= self.min_new_tokens {
                                 Some("stop")
                             } else if generated >= max_tokens {
                                 Some("length")
@@ -45095,7 +46406,7 @@ impl GpuDecodeStore {
                             step += 1;
 
                             let mut text = detok.add(next_token as u32);
-                            let finish_reason = if stop_set.contains(&next_token) {
+                            let finish_reason = if stop_set.contains(&next_token) && generated >= self.min_new_tokens {
                                 Some("stop")
                             } else if generated >= max_tokens {
                                 Some("length")
@@ -45154,7 +46465,7 @@ impl GpuDecodeStore {
                         step += 1;
 
                         let mut text = detok.add(next_token as u32);
-                        let finish_reason = if stop_set.contains(&next_token) {
+                        let finish_reason = if stop_set.contains(&next_token) && generated >= self.min_new_tokens {
                             Some("stop")
                         } else if generated >= max_tokens {
                             Some("length")
@@ -45527,7 +46838,7 @@ impl GpuDecodeStore {
                 }
 
                 let mut text = detok.add(target_pred as u32);
-                let finish_reason = if stop_set.contains(&target_pred) {
+                let finish_reason = if stop_set.contains(&target_pred) && generated >= self.min_new_tokens {
                     Some("stop")
                 } else if generated >= max_tokens {
                     Some("length")
@@ -45695,7 +47006,7 @@ impl GpuDecodeStore {
                 let avg_dense = graph.t_dense_mlp / n * 1000.0;
                 let avg_lm = graph.t_lm_head / n * 1000.0;
 
-                let graph_mode = avg_attn < 0.001 && avg_moe < 0.001 && avg_lm < 0.001;
+                let graph_mode = graph.validation_per_layer_steps > 0;
                 eprintln!("  \x1b[36m┌─────────────────────────────────────────────────┐\x1b[0m");
                 if graph_mode {
                     eprintln!("  \x1b[36m│\x1b[0m  GPU DECODE TIMING ({} tokens, graph mode)     \x1b[36m│\x1b[0m", graph.timing_step_count);
@@ -45819,6 +47130,67 @@ impl GpuDecodeStore {
                                     mixed_count,
                                 );
                             }
+                            let mamba2_count = graph
+                                .graph_mamba2_active
+                                .iter()
+                                .filter(|&&active| active)
+                                .count();
+                            if graph.graph_mamba2_clock_enabled && mamba2_count > 0 {
+                                let in_proj_ms_tok =
+                                    graph.t_graph_mamba2_in_proj / n * 1000.0;
+                                let to_fp32_ms_tok =
+                                    graph.t_graph_mamba2_to_fp32 / n * 1000.0;
+                                let conv_ms_tok = graph.t_graph_mamba2_conv / n * 1000.0;
+                                let discretize_ms_tok =
+                                    graph.t_graph_mamba2_discretize / n * 1000.0;
+                                let ssm_ms_tok = graph.t_graph_mamba2_ssm / n * 1000.0;
+                                let gate_ms_tok = graph.t_graph_mamba2_gate / n * 1000.0;
+                                let out_proj_ms_tok =
+                                    graph.t_graph_mamba2_out_proj / n * 1000.0;
+                                let total_ms_tok = in_proj_ms_tok
+                                    + to_fp32_ms_tok
+                                    + conv_ms_tok
+                                    + discretize_ms_tok
+                                    + ssm_ms_tok
+                                    + gate_ms_tok
+                                    + out_proj_ms_tok;
+                                let graph_residual_ms_tok = avg_seg_total - total_ms_tok;
+                                eprintln!("  \x1b[36m│\x1b[0m  Mamba2 graph split:                    \x1b[36m│\x1b[0m");
+                                eprintln!(
+                                    "  \x1b[36m│\x1b[0m    In:{:6.2} to-fp32:{:5.2} conv:{:5.2} disc:{:5.2} \x1b[36m│\x1b[0m",
+                                    in_proj_ms_tok,
+                                    to_fp32_ms_tok,
+                                    conv_ms_tok,
+                                    discretize_ms_tok,
+                                );
+                                eprintln!(
+                                    "  \x1b[36m│\x1b[0m    SSM:{:5.2} gate:{:5.2} out:{:5.2} total:{:5.2} \x1b[36m│\x1b[0m",
+                                    ssm_ms_tok,
+                                    gate_ms_tok,
+                                    out_proj_ms_tok,
+                                    total_ms_tok,
+                                );
+                                eprintln!(
+                                    "  \x1b[36m│\x1b[0m    Layers:{} avg/layer:{:5.3} graph residual:{:5.2} \x1b[36m│\x1b[0m",
+                                    mamba2_count,
+                                    total_ms_tok / mamba2_count as f64,
+                                    graph_residual_ms_tok,
+                                );
+                                log::info!(
+                                    "DECODE GRAPH MAMBA2 SPLIT avg_ms_per_tok in_proj={:.3} to_fp32={:.3} conv={:.3} discretize={:.3} ssm={:.3} gate={:.3} out_proj={:.3} total={:.3} avg_per_layer={:.3} graph_residual={:.3} active_layers={}",
+                                    in_proj_ms_tok,
+                                    to_fp32_ms_tok,
+                                    conv_ms_tok,
+                                    discretize_ms_tok,
+                                    ssm_ms_tok,
+                                    gate_ms_tok,
+                                    out_proj_ms_tok,
+                                    total_ms_tok,
+                                    total_ms_tok / mamba2_count as f64,
+                                    graph_residual_ms_tok,
+                                    mamba2_count,
+                                );
+                            }
                             let moe_route_count = graph
                                 .graph_moe_route_active
                                 .iter()
@@ -45909,7 +47281,7 @@ impl GpuDecodeStore {
                                     + tail_ms_tok
                                     + route_residual_ms_tok;
 
-                                eprintln!("  \x1b[36m│\x1b[0m  Gemma MoE/route split:                    \x1b[36m│\x1b[0m");
+                                eprintln!("  \x1b[36m│\x1b[0m  MoE/route split:                          \x1b[36m│\x1b[0m");
                                 eprintln!(
                                     "  \x1b[36m│\x1b[0m    MoE W13:{:6.2} reduce:{:5.2} act+W2:{:5.2} \x1b[36m│\x1b[0m",
                                     w13_ms_tok,
@@ -46037,7 +47409,7 @@ impl GpuDecodeStore {
                                         ((graph.hidden_size + 15) / 16).max(1) as f64;
                                     let avg_topk_est = avg_blocks / output_tiles;
 
-                                    eprintln!("  \x1b[36m│\x1b[0m  Gemma MoE activation/W2 split:          \x1b[36m│\x1b[0m");
+                                    eprintln!("  \x1b[36m│\x1b[0m  MoE activation/W2 split:                \x1b[36m│\x1b[0m");
                                     eprintln!(
                                         "  \x1b[36m│\x1b[0m    Activation:{:5.2} prep:{:5.2} W2:{:5.2} internal:{:5.2} \x1b[36m│\x1b[0m",
                                         moe_w2_activation_ms_tok,
@@ -47048,7 +48420,7 @@ impl GpuDecodeStore {
         let avg_norm = graph.t_norm / n * 1000.0;
         let avg_dense = graph.t_dense_mlp / n * 1000.0;
         let avg_lm = graph.t_lm_head / n * 1000.0;
-        let graph_mode = avg_attn < 0.001 && avg_moe < 0.001 && avg_lm < 0.001;
+        let graph_mode = graph.validation_per_layer_steps > 0;
 
         eprintln!("  \x1b[36m┌─────────────────────────────────────────────────┐\x1b[0m");
         if graph_mode {
@@ -49172,10 +50544,40 @@ impl GpuDecodeStore {
             *graph.d_topk_weights.device_ptr()
         };
         {
-            let smem = (ne as u32) * 4;
+            let parallel_topk_enabled = {
+                let moe = graph.moe_layers[layer_idx].as_ref().ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "MoE layer {} not registered",
+                        layer_idx
+                    ))
+                })?;
+                graph.parallel_topk_enabled_for_moe(moe)
+            };
+            if parallel_topk_enabled && sf != 1 {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "KRASIS_DECODE_PARALLEL_TOPK=1 only supports sigmoid routing; layer {} uses scoring_func={}",
+                    layer_idx, sf
+                )));
+            }
+            if parallel_topk_enabled && ne > 1024 {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "KRASIS_DECODE_PARALLEL_TOPK=1 supports at most 1024 experts; layer {} has {}",
+                    layer_idx, ne
+                )));
+            }
+            let smem = if parallel_topk_enabled && sf == 1 {
+                (ne as u32) * 8
+            } else {
+                (ne as u32) * 4
+            };
+            let topk_block_dim = if parallel_topk_enabled && sf == 1 {
+                (ne.min(256).max(1) as u32, 1, 1)
+            } else {
+                (1, 1, 1)
+            };
             let cfg = LaunchConfig {
                 grid_dim: (1, 1, 1),
-                block_dim: (1, 1, 1),
+                block_dim: topk_block_dim,
                 shared_mem_bytes: smem,
             };
 
@@ -49191,26 +50593,49 @@ impl GpuDecodeStore {
                     0u64
                 };
                 unsafe {
-                    k.sigmoid_topk
-                        .clone()
-                        .launch(
-                            cfg,
-                            (
-                                logits_ptr,
-                                bias_ptr,
-                                corr_ptr,
-                                topk_ids_dptr,
-                                topk_wts_dptr,
-                                ne as i32,
-                                topk as i32,
-                            ),
-                        )
-                        .map_err(|e| {
-                            pyo3::exceptions::PyRuntimeError::new_err(format!(
-                                "sigmoid_topk: {:?}",
-                                e
-                            ))
-                        })?;
+                    if parallel_topk_enabled {
+                        k.sigmoid_topk_parallel_scores
+                            .clone()
+                            .launch(
+                                cfg,
+                                (
+                                    logits_ptr,
+                                    bias_ptr,
+                                    corr_ptr,
+                                    topk_ids_dptr,
+                                    topk_wts_dptr,
+                                    ne as i32,
+                                    topk as i32,
+                                ),
+                            )
+                            .map_err(|e| {
+                                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                    "sigmoid_topk_parallel_scores: {:?}",
+                                    e
+                                ))
+                            })?;
+                    } else {
+                        k.sigmoid_topk
+                            .clone()
+                            .launch(
+                                cfg,
+                                (
+                                    logits_ptr,
+                                    bias_ptr,
+                                    corr_ptr,
+                                    topk_ids_dptr,
+                                    topk_wts_dptr,
+                                    ne as i32,
+                                    topk as i32,
+                                ),
+                            )
+                            .map_err(|e| {
+                                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                    "sigmoid_topk: {:?}",
+                                    e
+                                ))
+                            })?;
+                    }
                 }
             } else {
                 unsafe {
@@ -49670,6 +51095,11 @@ impl GpuDecodeStore {
                     }
 
                     // Spec topk on spec_stream via raw cuLaunchKernel.
+                    if graph.parallel_topk_enabled {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                            "KRASIS_DECODE_PARALLEL_TOPK=1 does not support APFL speculative routing",
+                        ));
+                    }
                     let spec_logits_ptr = output_ptr;
                     let smem = (next_ne as u32) * 4;
                     let spec_stream_raw = self.spec_stream.0;
@@ -52056,8 +53486,8 @@ impl GpuDecodeStore {
                     }));
                 }
             } else {
-                // Fused: silu_mul + w2 GEMV + add to accumulator
-                // When gate_weight_ptr != 0, kernel reads sigmoid(*gate_weight_ptr) as weight
+                // Fused: silu_mul + w2 GEMV + add to accumulator.
+                // When gate_weight_ptr != 0, kernel reads sigmoid(*gate_weight_ptr).
                 self.launch_fused_silu_accum(
                     w2p,
                     w2s,
@@ -53473,15 +54903,24 @@ impl GpuDecodeStore {
             .as_mut()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
 
-        if graph.per_layer_graphs_valid || !graph.per_layer_graphs.is_empty() {
+        if graph.per_layer_graphs_valid
+            || !graph.per_layer_graphs.is_empty()
+            || graph.hot_hcs_full_graph.is_some()
+        {
             let n = graph.per_layer_graphs.len();
             for exec in graph.per_layer_graphs.drain(..) {
                 unsafe {
                     cuda_sys::lib().cuGraphExecDestroy(exec.0);
                 }
             }
+            if let Some(exec) = graph.hot_hcs_full_graph.take() {
+                unsafe {
+                    cuda_sys::lib().cuGraphExecDestroy(exec.0);
+                }
+            }
             graph.per_layer_graphs_valid = false;
             graph.captured_gpu_route_sync = false;
+            graph.captured_hot_hcs_full_graph = false;
             graph.captured_route_sync_classifies = 0;
             log::info!(
                 "HCS pool init invalidated {} pre-HCS CUDA graph segments; next decode will recapture with HCS pointers",
@@ -53732,7 +55171,42 @@ impl GpuDecodeStore {
             ));
         }
 
-        let gpu_rs = env_truthy("KRASIS_GPU_ROUTE_SYNC");
+        let (
+            all_moe_experts_resident,
+            resident_moe_experts,
+            total_moe_experts,
+            first_missing_moe_expert,
+        ) = hcs_moe_expert_residency(&hcs, &graph.moe_layers, None);
+        let auto_hot_hcs_graph = graph.is_nemotron_h_decode_model()
+            && all_moe_experts_resident
+            && !env_false("KRASIS_GPU_ROUTE_SYNC")
+            && !env_false("KRASIS_GPU_ROUTE_SYNC_HOT_NOSYNC")
+            && !env_false("KRASIS_GPU_ROUTE_SYNC_HOT_FULL_GRAPH");
+        let gpu_rs = !env_false("KRASIS_GPU_ROUTE_SYNC")
+            && (env_truthy("KRASIS_GPU_ROUTE_SYNC") || auto_hot_hcs_graph);
+        let gpu_rs_hot_nosync = !env_false("KRASIS_GPU_ROUTE_SYNC_HOT_NOSYNC")
+            && (env_truthy("KRASIS_GPU_ROUTE_SYNC_HOT_NOSYNC") || auto_hot_hcs_graph);
+        let gpu_rs_hot_full_graph = !env_false("KRASIS_GPU_ROUTE_SYNC_HOT_FULL_GRAPH")
+            && (env_truthy("KRASIS_GPU_ROUTE_SYNC_HOT_FULL_GRAPH") || auto_hot_hcs_graph);
+        if gpu_rs_hot_nosync && !gpu_rs {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "KRASIS_GPU_ROUTE_SYNC_HOT_NOSYNC=1 requires KRASIS_GPU_ROUTE_SYNC=1",
+            ));
+        }
+        if gpu_rs_hot_full_graph && !gpu_rs_hot_nosync {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "KRASIS_GPU_ROUTE_SYNC_HOT_FULL_GRAPH=1 requires KRASIS_GPU_ROUTE_SYNC_HOT_NOSYNC=1",
+            ));
+        }
+        if gpu_rs_hot_nosync && !all_moe_experts_resident {
+            let missing = first_missing_moe_expert
+                .map(|(l, e)| format!(" first_missing=L{}E{}", l, e))
+                .unwrap_or_default();
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "KRASIS_GPU_ROUTE_SYNC_HOT_NOSYNC=1 requires all MoE experts resident in HCS; resident={}/{}{}",
+                resident_moe_experts, total_moe_experts, missing,
+            )));
+        }
         if gpu_rs {
             if graph.mapped_cold_buf.is_none() {
                 return Err(pyo3::exceptions::PyRuntimeError::new_err(
@@ -53752,11 +55226,41 @@ impl GpuDecodeStore {
             log::info!(
                 "GPU route sync ACTIVE: metadata-only classification enabled; cold experts still use CPU DMA into VRAM"
             );
+            if gpu_rs_hot_nosync {
+                log::info!(
+                    "GPU route sync hot-HCS no-sync ACTIVE: all MoE experts verified HCS-resident"
+                );
+            }
+            if gpu_rs_hot_full_graph {
+                log::info!(
+                    "GPU route sync hot-HCS full-graph ACTIVE: decode replay will use a single full CUDA graph with verified full HCS residency"
+                );
+            }
+            if auto_hot_hcs_graph {
+                log::info!(
+                    "Nemotron default optimization enabled full-hot graph route sync: resident={}/{} experts",
+                    resident_moe_experts,
+                    total_moe_experts
+                );
+            }
         } else {
+            if graph.is_nemotron_h_decode_model() && total_moe_experts > 0 {
+                let missing = first_missing_moe_expert
+                    .map(|(l, e)| format!(" first_missing=L{}E{}", l, e))
+                    .unwrap_or_default();
+                log::info!(
+                    "Nemotron full-hot graph route sync not auto-enabled: resident={}/{} experts{}",
+                    resident_moe_experts,
+                    total_moe_experts,
+                    missing
+                );
+            }
             log::info!("GPU route sync disabled (set KRASIS_GPU_ROUTE_SYNC=1 to enable metadata-only route sync)");
         }
         graph.hcs = Some(hcs);
         graph.gpu_route_sync = gpu_rs;
+        graph.gpu_route_sync_hot_nosync = gpu_rs_hot_nosync;
+        graph.gpu_route_sync_hot_full_graph = gpu_rs_hot_full_graph;
         if gpu_rs {
             let err = unsafe { cuda_sys::lib().cuCtxSynchronize() };
             if err != cuda_sys::CUresult::CUDA_SUCCESS {
@@ -53765,15 +55269,24 @@ impl GpuDecodeStore {
                     err,
                 )));
             }
-            if graph.per_layer_graphs_valid || !graph.per_layer_graphs.is_empty() {
+            if graph.per_layer_graphs_valid
+                || !graph.per_layer_graphs.is_empty()
+                || graph.hot_hcs_full_graph.is_some()
+            {
                 let n = graph.per_layer_graphs.len();
                 for exec in graph.per_layer_graphs.drain(..) {
                     unsafe {
                         cuda_sys::lib().cuGraphExecDestroy(exec.0);
                     }
                 }
+                if let Some(exec) = graph.hot_hcs_full_graph.take() {
+                    unsafe {
+                        cuda_sys::lib().cuGraphExecDestroy(exec.0);
+                    }
+                }
                 graph.per_layer_graphs_valid = false;
                 graph.captured_gpu_route_sync = false;
+                graph.captured_hot_hcs_full_graph = false;
                 graph.captured_route_sync_classifies = 0;
                 log::info!(
                     "GPU route sync invalidated {} pre-HCS CUDA graph segments; next decode will recapture with classify kernels",

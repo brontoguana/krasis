@@ -1,0 +1,13 @@
+check	status	detail
+benchmark_exit	pass	benchmarks/20260701_0703_nemotron_super_hqq4_k4v4_benchmark.exit contains 0
+summary_json	pass	jq empty benchmarks/20260701_0703_nemotron_super_hqq4_k4v4_benchmark_summary.json
+tsv_shape	pass	Plan and result TSV files have consistent field counts.
+dev_shell_syntax	pass	bash -n dev
+config_shell_syntax	pass	bash -n tests/nemotron-super-4-4-hqq4-k4v4-a16.conf
+public_diff_check	pass	git diff --check passed for corrected config, benchmark index, and corrected Super artifacts.
+internal_diff_check	pass	git diff --check passed for CHANGELOG.md, TRACKING.md, and DEBUGLOG.md.
+protected_configs	pass	git status --short -- testconfigs tests/testconfigs returned no changes.
+tmux_idle	pass	tmux list-sessions returned no server running.
+process_idle	pass	ps -C krasis,python,cargo,rustc,maturin,nvcc returned no matching processes.
+gpu_idle	pass	GPU0 15 MB used / 32105 MB free / 0%; GPU1 11 MB used / 20043 MB free / 0%.
+hcs_observation	recorded	Corrected HQQ4+k4v4 run ended with HCS 2484/20480 and decode min free VRAM 5838 MB against a 600 MB safety margin; follow-up should fix HCS reload/budget use.

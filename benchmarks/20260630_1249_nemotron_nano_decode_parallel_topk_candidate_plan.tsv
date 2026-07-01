@@ -1,0 +1,9 @@
+field	value
+gate	20260630_1249_nemotron_nano_decode_parallel_topk_candidate
+scope	Nano decode route top-k micro-optimization
+baseline	Current accepted Nano decode remains 20260630_0011 timing-off 114.2 tok/s; segmented attribution from 20260630_0614 measured route topk about 0.23 ms/tok with HCS hot.
+target	Add hard opt-in KRASIS_DECODE_PARALLEL_TOPK=1 for sigmoid route top-k only, preserving score formula and deterministic selection order.
+non_targets	Do not change shared expert activation, Mamba2 projection math, HCS policy, default decode behavior, prefill, or protected configs.
+acceptance	./dev build passes; first-token/top-k surface matches accepted control; timing-on request shows no correctness drift; timing-off speed only if correctness holds.
+fallback_policy	No fallback. If env is set with unsupported route mode or dimensions, fail closed rather than silently using the old kernel.
+status	open

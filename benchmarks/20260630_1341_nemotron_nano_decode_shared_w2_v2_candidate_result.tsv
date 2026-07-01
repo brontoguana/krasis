@@ -1,0 +1,14 @@
+field	value
+gate	20260630_1341_nemotron_nano_decode_shared_w2_v2_candidate
+build_exit	0
+control_first_token	1044
+control_first_token_topk	1044:-1.650548,1321:-1.651549,1294:-2.865734,1307:-3.207130,1562:-3.332045,2136:-3.522869,1046:-3.700115,2553:-3.791682,1408:-3.945236,1513:-4.218794,1319:-4.241797,1278:-4.327421
+control_response	104 tokens, finish_reason=stop
+control_server_decode	103 tokens in 0.97s, 106.0 tok/s
+control_internal_decode	8.41 ms/tok, 118.9 tok/s
+control_shared_post_split	gate=0.05 ms/tok, w13=0.67, reduce=0.06, w2=0.73
+candidate_env	KRASIS_DECODE_GRAPH_SHARED_W2_V2=1
+candidate_result	failed_closed_during_graph_capture
+candidate_error	KRASIS_DECODE_GRAPH_SHARED_W2_V2=1 requires shared W2 k_splits > 1 at layer 1; got 1
+decision	rejected_and_removed
+reason	Runtime computed no useful shared-W2 K-split for Nano; forcing a split would be a non-portable magic-number experiment.

@@ -1,0 +1,82 @@
+{
+  "gate": "20260701_1016_nemotron_super_hqq4_policy_final",
+  "model": "NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+  "config": "tests/nemotron-super-4-4-hqq4-k4v4-a16.conf",
+  "decision": "accepted_decode_hcs_policy_fix_prefill_still_open",
+  "final_source_changes": [
+    "Dynamic HCS request promotion budget scales with requested decode tokens and active block slots.",
+    "VRAM pressure drains clear stale pressure caps whenever measured free VRAM can cover the target floor plus a real HCS chunk.",
+    "Live request and benchmark decode paths reload HCS after pre-decode pressure drains, then re-drain against the measured safety margin."
+  ],
+  "baseline": {
+    "run": "20260701_0703_nemotron_super_hqq4_k4v4_benchmark",
+    "prefill_internal_tok_s": 1146.5,
+    "decode_internal_tok_s": 17.56,
+    "http_tok_s": 29.87,
+    "hcs_loaded": "2484/20480",
+    "hcs_coverage_percent": 12.1,
+    "decode_min_free_mb": 5838,
+    "safety_margin_mb": 600
+  },
+  "final_benchmark": {
+    "run": "20260701_1016_nemotron_super_hqq4_policy_final_benchmark",
+    "command": "./dev benchmark tests/nemotron-super-4-4-hqq4-k4v4-a16.conf",
+    "exit_code": 0,
+    "prefill_internal_tok_s": 1197.8,
+    "decode_internal_tok_s": 28.29,
+    "http_tok_s": 45.37,
+    "hcs_loaded": "4278/20480",
+    "hcs_coverage_percent": 20.9,
+    "decode_min_free_mb": 924,
+    "safety_margin_mb": 600,
+    "improvement_vs_baseline": {
+      "prefill_tok_s_delta_percent": 4.5,
+      "decode_tok_s_delta_percent": 61.1,
+      "http_tok_s_delta_percent": 51.9,
+      "hcs_loaded_delta_experts": 1794,
+      "decode_min_free_mb_delta": -4914
+    }
+  },
+  "prefill_diagnosis": {
+    "timing_on_run": "20260701_0826_nemotron_super_hqq4_perf_diag",
+    "representative_5k_total_ms": 4313.2,
+    "representative_5k_tok_s": 1205.0,
+    "mamba2_ssd_ms": 1087.9,
+    "moe_total_ms": 1803.3,
+    "moe_dma_ms": 1148.3,
+    "long_prefill_min_free_mb": 1066,
+    "long_prefill_hcs_budget_mb": 464,
+    "conclusion": "Prefill remains a real compute/DMA problem, mainly Mamba2 SSD scan plus MoE cold DMA/compute. The decode HCS policy fix does not solve long-prompt prefill speed."
+  },
+  "rejected_candidates": [
+    {
+      "run": "20260701_0853_nemotron_super_hqq4_chunk2048_benchmark",
+      "decision": "rejected",
+      "reason": "fixed chunking improved memory low-water but slowed prefill/calibration"
+    },
+    {
+      "run": "20260701_0857_nemotron_super_hqq4_mirror_benchmark",
+      "decision": "rejected",
+      "prefill_internal_tok_s": 1162.7,
+      "decode_internal_tok_s": 11.76,
+      "http_tok_s": 19.29,
+      "reason": "mirror host cache left prefill flat and regressed decode"
+    }
+  ],
+  "validation": {
+    "build": "20260701_1012_super_hqq4_policy_review_build2.log",
+    "build_exit": 0,
+    "benchmark_exit": 0,
+    "validation_checks": "20260701_1016_nemotron_super_hqq4_policy_final_validation_checks.tsv"
+  },
+  "artifacts": {
+    "result": "20260701_1016_nemotron_super_hqq4_policy_final_result.tsv",
+    "summary": "20260701_1016_nemotron_super_hqq4_policy_final_summary.json",
+    "benchmark_report": "20260701_1016_nemotron_super_hqq4_policy_final_benchmark_report.log",
+    "benchmark_stdout": "20260701_1016_nemotron_super_hqq4_policy_final_benchmark_stdout.log",
+    "benchmark_stdout_full": "20260701_1016_nemotron_super_hqq4_policy_final_benchmark_stdout_full.log",
+    "krasis_log": "20260701_1016_nemotron_super_hqq4_policy_final_krasis.log",
+    "mirror_report": "20260701_0857_nemotron_super_hqq4_mirror_benchmark_report.log",
+    "chunk_stdout": "20260701_0853_nemotron_super_hqq4_chunk2048_benchmark_stdout.log"
+  }
+}

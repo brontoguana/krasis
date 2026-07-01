@@ -1,0 +1,14 @@
+field	value
+gate	20260630_1158_nemotron_nano_decode_shared_relu2_candidate
+model	NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+config	tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf
+base_public_commit	71c511c
+base_internal_commit	f76813e
+carry_forward_best_decode	timing-off server decode 114.2 tok/s from 20260630_0011_nemotron_nano_decode_hot_hcs_full_graph
+carry_forward_attribution	20260630_0614 segmented hot-HCS: MoE 3.85 ms/tok, Mamba2 2.19 ms/tok, shared/post 1.61 ms/tok, shared W13 0.67, shared W2 0.73, HCS 138/0, cold DMA 0
+reference_contract	Nano config has mlp_hidden_act=relu2, n_shared_experts=1, moe_shared_expert_intermediate_size=3712; local model code uses NemotronHMLP for shared expert
+current_code_issue	graph and non-graph shared expert INT4 path calls launch_fused_silu_accum instead of relu2 W2 helper
+candidate_env	KRASIS_DECODE_SHARED_RELU2=1
+candidate_scope	hard opt-in shared expert relu2 path for activation_type=1 and ungated shared experts; fail closed if shared gate is present
+non_goals	no default enablement without acceptance, no protected config edits, no HCS/VRAM hardcodes, no Python runtime hot path, no rejected 0614 candidate resurrection
+acceptance	build; first-token/top-k comparison against current graph control; 128-token timing-on attribution; timing-off speed only if correctness surface is acceptable

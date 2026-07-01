@@ -190,6 +190,20 @@ def _env_flag(name: str) -> Optional[bool]:
     return raw.strip() not in ("", "0", "false", "False")
 
 
+def _env_disabled(name: str) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return False
+    return raw.strip().lower() in ("0", "false", "no", "off")
+
+
+def _nemotron_default_optimizations_enabled(model: KrasisModel) -> bool:
+    return (
+        getattr(getattr(model, "cfg", None), "model_type", None) == "nemotron_h"
+        and not _env_disabled("KRASIS_NEMOTRON_DEFAULT_OPTIMIZATIONS")
+    )
+
+
 def _sha256_file(path: str) -> Optional[str]:
     if not os.path.isfile(path):
         return None
@@ -1748,6 +1762,7 @@ def main():
             or _env_flag("KRASIS_MAMBA2_SSD_BLOCK_SCAN_RECURRENT_SUBLOOP_TIMING")
             or _env_flag("KRASIS_MAMBA2_SSD_BLOCK_SCAN_STATE_PARALLEL_RECURRENT")
             or _env_flag("KRASIS_MAMBA2_SSD_PARALLEL_CHUNKED")
+            or _nemotron_default_optimizations_enabled(_model)
         ):
             raise
         logger.warning("Rust prefill warmup failed, continuing without it: %s", e)
@@ -2407,6 +2422,18 @@ def main():
                 long_prefill_post_alloc,
             )
             _dim(cal_msg)
+            _model._benchmark_prefill_calibration = {
+                "short_tokens": int(short_tokens),
+                "long_tokens": int(long_tokens),
+                "prefill_short_free_mb": int(prefill_short_free),
+                "prefill_long_free_mb": int(prefill_long_free),
+                "decode_short_free_mb": int(decode_short_free),
+                "decode_long_free_mb": int(decode_long_free),
+                "baseline_free_mb": int(post_calibration_free_mb),
+                "safety_margin_mb": int(SAFETY_MARGIN_MB),
+                "short_prefill_post_alloc_free_mb": int(short_prefill_post_alloc),
+                "long_prefill_post_alloc_free_mb": int(long_prefill_post_alloc),
+            }
 
             # ── Set decode segment on primary store (for accurate HCS% reporting) ──
             gpu0_layer_end = _multi_gpu_split if _multi_gpu_split > 0 else len(_model.layers)

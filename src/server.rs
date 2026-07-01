@@ -974,6 +974,13 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
         .or_else(|| req.get("max_completion_tokens"))
         .and_then(|v| v.as_u64())
         .unwrap_or(8192) as usize;
+    let min_new_tokens = req
+        .get("min_new_tokens")
+        .or_else(|| req.get("min_completion_tokens"))
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
+        .unwrap_or(0)
+        .min(max_tokens);
     let temperature = req
         .get("temperature")
         .and_then(|v| v.as_f64())
@@ -1712,6 +1719,27 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
             pressure_freed_mb,
             pressure_final_free_mb,
         );
+        let (pressure_reload_activated, pressure_reload_ms) =
+            store.hcs_reload_after_prefill(prompt_len);
+        if pressure_reload_activated > 0 {
+            log::info!(
+                "Request {}: HCS reload after pressure drain: {} experts, {:.1}ms",
+                request_id,
+                pressure_reload_activated,
+                pressure_reload_ms,
+            );
+            let (post_reload_evicted, post_reload_freed_mb, post_reload_final_free_mb) =
+                store.hcs_drain_vram_pressure("request_before_decode_after_pressure_reload", true);
+            if post_reload_evicted > 0 {
+                log::warn!(
+                    "Request {}: post-reload pressure eviction before decode evicted {} soft experts, freed {:.1} MB, final_free={} MB",
+                    request_id,
+                    post_reload_evicted,
+                    post_reload_freed_mb,
+                    post_reload_final_free_mb,
+                );
+            }
+        }
     }
     let reload_ms = t_reload.elapsed().as_secs_f64() * 1000.0;
     {
@@ -1743,20 +1771,26 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
     // When thinking is enabled, the model must generate </think> before it can
     // terminate with <|im_end|>. Without this, the model puts its answer inside
     // the thinking block and bails to EOS, resulting in 0 visible answer tokens.
+    let min_stop_suppress_steps = min_new_tokens.saturating_sub(1);
+    let min_stop_suppress_ids = if min_stop_suppress_steps > 0 {
+        stop_ids.to_vec()
+    } else {
+        vec![]
+    };
     if enable_thinking {
         if let Some(te_id) = state.thinking_end_token {
             // Budget = max 4096 thinking tokens. If the model hasn't produced </think>
             // by then, it's stuck in a loop. 4096 is generous for real reasoning.
             let think_budget = 4096;
             store.set_think_end_suppress(Some(te_id), think_budget);
-            store.set_min_new_tokens_ext(0, stop_ids.to_vec());
+            store.set_min_new_tokens_ext(min_stop_suppress_steps, min_stop_suppress_ids.clone());
         } else {
             store.set_think_end_suppress(None, 0);
-            store.set_min_new_tokens_ext(0, vec![]);
+            store.set_min_new_tokens_ext(min_stop_suppress_steps, min_stop_suppress_ids.clone());
         }
     } else {
         store.set_think_end_suppress(None, 0);
-        store.set_min_new_tokens_ext(0, vec![]);
+        store.set_min_new_tokens_ext(min_stop_suppress_steps, min_stop_suppress_ids);
     }
 
     // ── GPU decode: GIL-free Rust decode via GpuDecodeStore ──
@@ -4716,17 +4750,18 @@ impl RustServer {
         crate::vram_monitor::report_event("hcs_soft_load_end");
 
         // Match the live request path's per-request decode suppression setup.
+        let benchmark_min_stop_suppress_steps = max_new_tokens.saturating_sub(1);
         if enable_thinking {
             if self.thinking_end_token_id > 0 {
                 store.set_think_end_suppress(Some(self.thinking_end_token_id), 4096);
-                store.set_min_new_tokens_ext(0, stop_ids.clone());
+                store.set_min_new_tokens_ext(benchmark_min_stop_suppress_steps, stop_ids.clone());
             } else {
                 store.set_think_end_suppress(None, 0);
-                store.set_min_new_tokens_ext(0, vec![]);
+                store.set_min_new_tokens_ext(benchmark_min_stop_suppress_steps, stop_ids.clone());
             }
         } else {
             store.set_think_end_suppress(None, 0);
-            store.set_min_new_tokens_ext(0, vec![]);
+            store.set_min_new_tokens_ext(benchmark_min_stop_suppress_steps, stop_ids.clone());
         }
 
         // Copy KV cache to aux stores (multi-GPU) — after async reload starts
@@ -4773,6 +4808,28 @@ impl RustServer {
                 pressure_freed_mb,
                 pressure_final_free_mb,
             );
+            let (pressure_reload_activated, pressure_reload_ms) =
+                store.hcs_reload_after_prefill(prompt_len);
+            if pressure_reload_activated > 0 {
+                log::info!(
+                    "Benchmark: HCS reload after pressure drain: {} experts, {:.1}ms",
+                    pressure_reload_activated,
+                    pressure_reload_ms,
+                );
+                let (post_reload_evicted, post_reload_freed_mb, post_reload_final_free_mb) = store
+                    .hcs_drain_vram_pressure(
+                        "benchmark_before_decode_after_pressure_reload",
+                        true,
+                    );
+                if post_reload_evicted > 0 {
+                    log::warn!(
+                        "Benchmark: post-reload pressure eviction before decode evicted {} soft experts, freed {:.1} MB, final_free={} MB",
+                        post_reload_evicted,
+                        post_reload_freed_mb,
+                        post_reload_final_free_mb,
+                    );
+                }
+            }
         }
 
         // Decode (pure Rust, GIL held but unused by decode loop)

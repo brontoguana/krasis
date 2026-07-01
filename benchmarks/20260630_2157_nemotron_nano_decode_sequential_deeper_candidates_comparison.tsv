@@ -1,0 +1,9 @@
+metric	accepted_baseline	weighted_add_nozero	relu2_w2_weighted_accum	fused_routed_scale	mamba2_fused_disc_ssm
+server_decode_tok_s	119.2	121.0	113.0	120.1	116.1
+internal_ms_per_tok	n/a_timing_off	7.29	7.80	7.30	7.61
+first_token_topk_exact	true	true	true	true	true
+generated_tokens_exact	true	false	true	false	false
+first_diff_index	-1	1	-1	1	1
+candidate_token_count	104	128	104	128	128
+candidate_finish_reason	stop	length	stop	length	length
+decision	accepted_current_best	rejected_removed	rejected_removed	rejected_removed	rejected_removed

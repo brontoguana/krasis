@@ -1,0 +1,59 @@
+{
+  "gate": "20260701_0037_nemotron_super_prefill_attribution",
+  "status": "complete",
+  "opened_utc": "2026-07-01T00:37:13Z",
+  "completed_utc": "2026-07-01T00:40:53Z",
+  "model": "NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+  "config": "tests/nemotron-super-bf16kv-a16.conf",
+  "command": "KRASIS_STARTUP_DIAG=1 KRASIS_PREFILL_TIMING=1 KRASIS_STARTUP_EXIT_AFTER_CALIBRATION=1 ./dev run tests/nemotron-super-bf16kv-a16.conf",
+  "measurement_type": "instrumentation_on_attribution_not_speed_benchmark",
+  "exit_code": 0,
+  "prior_speed_benchmark": {
+    "gate": "20260630_2340_nemotron_super_standard_benchmark",
+    "prefill_best_tok_s": 192.9,
+    "timing_instrumentation": false
+  },
+  "model_shape": {
+    "hidden_size": 4096,
+    "mamba_layers": 40,
+    "moe_layers": 40,
+    "gqa_layers": 8,
+    "mamba_heads": 128,
+    "routed_experts": 512,
+    "experts_per_token": 22
+  },
+  "long_prefill_attribution": {
+    "tokens": 8323,
+    "total_ms": 45131.0,
+    "tok_s_timing_on": 184.0,
+    "calibration_reported_tok_s": 183.8,
+    "mixer_bucket_ms": 41863.0,
+    "actual_gqa_ms": 47.7,
+    "mamba2_wall_ms": 41809.0,
+    "mamba2_ssd_scan_ms": 41420.2,
+    "mamba2_ssd_scan_pct_total": 91.8,
+    "moe_ms": 2105.2,
+    "moe_pct_total": 4.7,
+    "moe_dma_ms": 1092.9,
+    "other_ms": 1137.2
+  },
+  "vram": {
+    "long_prefill_min_free_mb": 1974,
+    "long_prefill_transient_delta_mb": 12984,
+    "scratch_reservation_50000_tokens_mb": 38007,
+    "safety_margin_mb": 600
+  },
+  "conclusion": [
+    "The slow Super prefill is not caused by GQA/FlashAttention, HTTP, decode HCS, or CPU idle time.",
+    "During the long probe GPU0 was saturated, and 41.42s of 45.13s was Mamba2 SSD scan.",
+    "The Nano 7765 tok/s result was a guarded startup-diagnostic parallel SSD path with production_enabled=false; it was not enabled in the Super standard benchmark.",
+    "The next speed target is promoting/generalizing the guarded parallel Mamba2 SSD prefill path to the normal request/benchmark path and validating it on Super dimensions."
+  ],
+  "artifacts": {
+    "plan": "benchmarks/20260701_0037_nemotron_super_prefill_attribution_plan.tsv",
+    "result": "benchmarks/20260701_0037_nemotron_super_prefill_attribution_result.tsv",
+    "stdout": "benchmarks/20260701_0037_nemotron_super_prefill_attribution_stdout.log",
+    "exit": "benchmarks/20260701_0037_nemotron_super_prefill_attribution.exit",
+    "validation": "benchmarks/20260701_0037_nemotron_super_prefill_attribution_validation_checks.tsv"
+  }
+}

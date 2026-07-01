@@ -1,0 +1,7 @@
+step	status	data	decision
+open	in_progress	Baseline carried from 0614/1158; no code edited yet.	Pending implementation and measurement.
+build	pass	./dev build exit 0, duration 184s, log benchmarks/20260630_1249_nemotron_nano_decode_parallel_topk_candidate_build.log.	Continue to timing-on correctness request.
+timing_on_control	pass	Same 42-token prompt control without KRASIS_DECODE_PARALLEL_TOPK: 104 response tokens, finish stop, server decode 103 tokens in 1.00s (103.2 tok/s), internal 8.65 ms/tok (115.6 tok/s), route topk 0.23 ms/tok, HCS 138/0, min free 8732 MB.	Use as same-payload correctness and timing control.
+timing_on_candidate	pass	Same payload with KRASIS_DECODE_PARALLEL_TOPK=1: 104 response tokens, finish stop, first-token top-k and generated text exact vs control, server decode 103 tokens in 0.97s (105.9 tok/s), internal 8.40 ms/tok (119.0 tok/s), route topk 0.15 ms/tok, HCS 138/0, min free 8732 MB.	Correctness accepted for candidate; speed delta small.
+timing_off_candidate	pass	Full hot-HCS graph stack with KRASIS_DECODE_PARALLEL_TOPK=1 and timing disabled: 104 response tokens, finish stop, server decode 103 tokens in 0.89s (115.2 tok/s), response decode_ms 894.4, HCS 100%, min free 8730 MB.	Accept gated micro-optimization; prior accepted timing-off baseline was 114.2 tok/s.
+close	accepted	Small speed gain only: timing-on same-payload route topk 0.23 -> 0.15 ms/tok and timing-off candidate 115.2 tok/s vs prior accepted 114.2 tok/s.	Keep behind KRASIS_DECODE_PARALLEL_TOPK=1; defaults unchanged.

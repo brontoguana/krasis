@@ -1,0 +1,95 @@
+{
+  "gate": "20260701_0703_nemotron_super_hqq4_k4v4_benchmark",
+  "decision": "valid_corrected_config_with_hcs_followup",
+  "reason": "The previous Super benchmark used the BF16 attention/KV bring-up config. This run uses the intended production-style HQQ4 attention plus k4v4 KV config.",
+  "config": {
+    "path": "tests/nemotron-super-4-4-hqq4-k4v4-a16.conf",
+    "model_path": "/home/main/.krasis/models/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+    "selected_gpus": "0",
+    "pp_partition": "88",
+    "layer_group_size": 2,
+    "gpu_expert_bits": 4,
+    "cpu_expert_bits": 4,
+    "attention_quant": "hqq4",
+    "kv_dtype": "k4v4",
+    "shared_expert_quant": "int8",
+    "dense_mlp_quant": "int8",
+    "lm_head_quant": "int8",
+    "vram_safety_margin_mb": 600
+  },
+  "command": "./dev benchmark tests/nemotron-super-4-4-hqq4-k4v4-a16.conf",
+  "exit_code": 0,
+  "benchmark_log_dir": "logs/dev-benchmark_20260701_080510",
+  "quantization_confirmed_from_log": {
+    "experts": "GPU INT4 g128 (amax)",
+    "attention": "hqq4",
+    "kv": "k4v4",
+    "hqq_attention_artifacts_mb": 234,
+    "kv_cache": "8 layers x 25600 pages x 16 tokens = 1000 MB (gqa, gqa-k4v4)"
+  },
+  "prefill_internal": {
+    "best_tok_s": 1146.5,
+    "best_tokens": 5028,
+    "runs": [
+      {"tokens": 1001, "tok_s": 370.4, "ms": 2702.8},
+      {"tokens": 5001, "tok_s": 1142.6, "ms": 4376.8},
+      {"tokens": 5028, "tok_s": 1146.5, "ms": 4385.3}
+    ],
+    "runtime_prefill_cap_tokens": 5027,
+    "long_calibration_min_free_mb": 1066
+  },
+  "decode_internal": {
+    "best_tok_s": 17.56,
+    "runs": [
+      {"target_tokens": 50, "tok_s": 17.56, "ms_per_tok": 57.0},
+      {"target_tokens": 100, "tok_s": 17.39, "ms_per_tok": 57.5},
+      {"target_tokens": 250, "tok_s": 15.95, "ms_per_tok": 62.7}
+    ],
+    "hcs_loaded_experts": "2484/20480",
+    "hcs_coverage_percent": 12.1,
+    "min_free_vram_mb": 5838,
+    "safety_margin_mb": 600
+  },
+  "http_round_trip": {
+    "best_tok_s": 29.87,
+    "runs": [
+      {"target_tokens": 50, "tok_s": 29.87, "total_s": 3.77},
+      {"target_tokens": 100, "tok_s": 21.75, "total_s": 6.56},
+      {"target_tokens": 250, "tok_s": 17.11, "total_s": 16.54}
+    ]
+  },
+  "hcs_and_vram": {
+    "post_startup_free_mb": 12688,
+    "decode_hcs_budget_mb": 11994,
+    "prefill_hcs_budget_short_mb": 5132,
+    "prefill_hcs_budget_long_mb": 464,
+    "startup_pool": "4324/20480",
+    "startup_pool_coverage_percent": 21.1,
+    "startup_pool_soft_mb": 11705.2,
+    "startup_ready_evicted_experts": 46,
+    "startup_ready_free_mb": 924,
+    "final_decode_hcs": "2484/20480",
+    "final_decode_hcs_coverage_percent": 12.1,
+    "decode_min_free_mb": 5838,
+    "decode_min_free_excess_over_safety_mb": 5238,
+    "dynamic_hcs_observation": "Timed internal decode reached budget_skips while copy_failures and no_slot stayed zero. Final decode low-water stayed far above the 600 MB safety margin, indicating an HCS reload/budget-use issue after prefill phases."
+  },
+  "comparison": {
+    "previous_wrong_super_config": "tests/nemotron-super-bf16kv-a16.conf",
+    "previous_wrong_config_attention": "bf16",
+    "previous_wrong_config_kv": "bf16",
+    "previous_wrong_config_prefill_tok_s": 1228.7,
+    "previous_wrong_config_decode_tok_s": 22.15,
+    "previous_wrong_config_hcs": "3358/20480",
+    "previous_wrong_config_decode_min_free_mb": 850,
+    "note": "The BF16 attention/KV run remains a bring-up/control result, not the production-style Super/Q122 comparison."
+  },
+  "artifacts": {
+    "result": "20260701_0703_nemotron_super_hqq4_k4v4_benchmark_result.tsv",
+    "summary": "20260701_0703_nemotron_super_hqq4_k4v4_benchmark_summary.json",
+    "report": "20260701_0703_nemotron_super_hqq4_k4v4_benchmark_report.log",
+    "stdout": "20260701_0703_nemotron_super_hqq4_k4v4_benchmark_stdout.log",
+    "krasis_log": "20260701_0703_nemotron_super_hqq4_k4v4_krasis.log",
+    "validation": "20260701_0703_nemotron_super_hqq4_k4v4_benchmark_validation_checks.tsv"
+  }
+}

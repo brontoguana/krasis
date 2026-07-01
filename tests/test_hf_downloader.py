@@ -157,6 +157,8 @@ class HFDownloaderTests(unittest.TestCase):
             [m.repo_id for m in models],
             [
                 "Qwen/Qwen3-Coder-Next",
+                "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+                "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
                 "Qwen/Qwen3.6-35B-A3B",
                 "Qwen/Qwen3.5-35B-A3B",
                 "Qwen/Qwen3.5-122B-A10B",
@@ -166,8 +168,13 @@ class HFDownloaderTests(unittest.TestCase):
         )
         self.assertEqual(len({m.key for m in models}), len(models))
         self.assertEqual(len({m.local_dir_name for m in models}), len(models))
+        repo_root = os.path.dirname(os.path.dirname(__file__))
         for model in models:
             self.assertRegex(model.revision, r"^[0-9a-f]{40}$")
+            self.assertTrue(
+                os.path.exists(os.path.join(repo_root, model.recommended_config)),
+                model.recommended_config,
+            )
 
     def test_destination_for_supported_model_uses_krasis_model_name(self):
         with tempfile.TemporaryDirectory() as tmp:

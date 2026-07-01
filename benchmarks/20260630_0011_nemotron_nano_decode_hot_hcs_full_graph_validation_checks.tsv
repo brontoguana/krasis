@@ -1,0 +1,9 @@
+check	result	notes
+jq_summary	pass	benchmarks/20260630_0011_nemotron_nano_decode_hot_hcs_full_graph_summary.json parses.
+tsv_shape	pass	Build, decode comparison, and correctness TSV files have consistent per-file field counts.
+source_diff_check	pass	git diff --check passed for src/gpu_decode.rs, src/cuda/decode_kernels.cu, BENCHMARKS.md, and 0011 summary TSV/JSON artifacts.
+internal_diff_check	pass	git diff --check passed for krasis-internal CHANGELOG.md, TRACKING.md, and DEBUGLOG.md.
+dev_syntax	pass	bash -n dev passed.
+protected_configs	pass	No changes under protected testconfigs paths were reported.
+focused_source_review	pass	New decode paths are opt-in, require their parent env gates, and fail closed when full HCS residency or direct-W13 assumptions are not met.
+idle_snapshot	pass	2026-06-30T00:55:17Z: no tmux session, no krasis.server/maturin/cargo/nvcc process; GPU0 15 MB used / 32105 MB free, GPU1 11 MB used / 20043 MB free.

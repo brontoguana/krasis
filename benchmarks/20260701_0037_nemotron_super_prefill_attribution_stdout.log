@@ -1,0 +1,198 @@
+[0;36m[1m=>[0m Waiting for selected GPUs (0) to clear...
+[0;32m[1mOK[0m Selected GPUs (0) clear.
+[0;36m[1m=>[0m Launching from: tests/nemotron-super-bf16kv-a16.conf
+[0;36m[1m=>[0m Run dir: /home/main/Documents/Claude/krasis-nemotron-dev/logs/dev-run_20260701_013758
+[0;36m[1m=>[0m Import origin check:
+krasis: /home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/__init__.py
+krasis.krasis: /home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+Pre-scan: set CUDA_VISIBLE_DEVICES=0
+Loaded config from tests/nemotron-super-bf16kv-a16.conf: {'model_path': '/home/main/.krasis/models/NVIDIA-Nemotron-3-Super-120B-A12B-BF16', 'selected_gpus': '0', 'num_gpus': 1, 'layer_group_size': 2, 'kv_dtype': 'bf16', 'gpu_expert_bits': 4, 'cpu_expert_bits': 4, 'attention_quant': 'bf16', 'shared_expert_quant': 'int8', 'dense_mlp_quant': 'int8', 'lm_head_quant': 'int8', 'krasis_threads': 40, 'host': '0.0.0.0', 'port': 18018, 'enable_thinking': False, 'gpu_prefill_threshold': 300, 'vram_safety_margin': 600, 'force_load': False}
+
+[1m[36m▸ Krasis — NVIDIA-Nemotron-3-Super-120B-A12B-BF16[0m
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 1[0m
+  [32mHCS host cache: source[0m
+  [32mSelected physical GPUs: 0 (config; CUDA_VISIBLE_DEVICES=0)[0m
+  [32mExperts: GPU INT4 g128 (amax)  |  Attention: bf16  |  KV: bf16[0m
+  [32mLayer groups: 2  |  KV cache: 1000 MB  |  Threads: 40[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+  [33mUNVALIDATED BF16 debug path enabled: attention=BF16. This path likely contains unknown bugs and must not be used as a correctness oracle. Use HF Transformers BF16 reference data for validation; production runs must use quantized configs.[0m
+
+[1m[36m▸ Loading model weights[0m
+  [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=518 MB, free=31600 MB, total=32119 MB
+
+[1m[36m▸ Loading GPU weights[0m
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:0: alloc=13290 MB, reserved=13464 MB, used=14080 MB, free=18038 MB, total=32119 MB
+  [0;32mAttention resident on GPU (1841 MB), 18038 MB free[0m
+
+[1m[36m▸ Loading GPU expert weights from cache[0m
+    Loading GPU Marlin cache: 40 layers...
+    GPU Marlin cache loaded: 59.0 GB in 37s
+  [0;32mExpert weights loaded in 37s.[0m
+  [33m[VRAM after-phase2-expert-weights][0m cuda:0: alloc=13290 MB, reserved=13464 MB, used=14080 MB, free=18038 MB, total=32119 MB
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:0: alloc=13290 MB, reserved=13464 MB, used=14080 MB, free=18038 MB, total=32119 MB
+  [33m[VRAM after-kv-cache-init][0m cuda:0: alloc=14290 MB, reserved=14464 MB, used=15080 MB, free=17038 MB, total=32119 MB
+  [33m[VRAM after-full-load][0m cuda:0: alloc=14290 MB, reserved=14464 MB, used=15080 MB, free=17038 MB, total=32119 MB
+
+[1m[36m▸ CUDA runtime warmup[0m
+  [32mcuBLAS + Triton kernel compilation done[0m
+
+[1m[36m▸ Setting up GPU decode store[0m
+  [32mGPU decode store ready (addr=0x949fe120)[0m
+  [32mReleased redundant GPU execution source tensors (832 MB)[0m
+  [2mVRAM monitor started (tracking warmup)[0m
+  [2mcuda:0: 0 MB total[0m
+
+[1m[36m▸ Pre-allocating Rust prefill engine[0m
+[FLA] Loading kernels for H=0 from /home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/libkrasis_fla_sm120.so
+  [32mPrefill engine scratch buffers allocated[0m
+
+[1m[36m▸ Warmup (Rust prefill engine)[0m
+  [32mStartup diag: warmup tokens=300 (default 300, token=52528)[0m
+  [32mStartup diag env: no_graph=unset, mapped_reads=unset, prefill_debug=False, prefill_timing=True, exit_after_calibration=True[0m
+[PREFILL-TIMING] 300 tokens, 2176.2ms total (138 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        2.3ms (  0.1%)
+[PREFILL-TIMING]   attn:     1461.1ms ( 67.1%)  [gqa: 10.6ms, la: 0.0ms]
+[PREFILL-TIMING]     gqa breakdown (8 FA2 calls: 8 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:         0.9ms (  8.6% of gqa)
+[PREFILL-TIMING]       qknorm:       0.1ms (  0.5% of gqa)
+[PREFILL-TIMING]       rope:         0.2ms (  1.4% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.1ms (  0.6% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.1ms over 8 calls
+[PREFILL-TIMING]       fa2         8.8ms ( 82.8% of gqa)  [1.1ms/call avg]
+[PREFILL-TIMING]       gate:         0.0ms (  0.0% of gqa)
+[PREFILL-TIMING]       o_proj:       0.6ms (  5.6% of gqa)
+[PREFILL-TIMING]     gqa queue events:
+[PREFILL-TIMING]         proj         event=     0.9ms wall=     0.9ms wall_minus_event=     0.0ms sync=     0.4ms over 8 calls
+[PREFILL-TIMING]         qkv_norm     event=     0.0ms wall=     0.1ms wall_minus_event=     0.0ms sync=     0.0ms over 8 calls
+[PREFILL-TIMING]         rope         event=     0.1ms wall=     0.2ms wall_minus_event=     0.0ms sync=     0.1ms over 8 calls
+[PREFILL-TIMING]         fa2          event=     8.7ms wall=     8.8ms wall_minus_event=     0.0ms sync=     0.2ms over 8 calls
+[PREFILL-TIMING]         kv_append    event=     0.0ms wall=     0.1ms wall_minus_event=     0.1ms sync=     0.0ms over 0 calls
+[PREFILL-TIMING]         o_proj       event=     0.5ms wall=     0.6ms wall_minus_event=     0.0ms sync=     0.4ms over 8 calls
+[PREFILL-TIMING]     mamba2 breakdown (diagnostic sync-isolated): wall=  1449.4ms ( 66.6% of prefill,  99.2% of mixer) event=  1448.4ms sync=  1325.2ms
+[PREFILL-TIMING]       in_proj          wall=   137.7ms event=   137.5ms sync=    15.4ms wall_minus_event=     0.2ms over 40 calls
+[PREFILL-TIMING]       split_extract    wall=     0.5ms event=     0.3ms sync=     0.3ms wall_minus_event=     0.2ms over 40 calls
+[PREFILL-TIMING]       conv1d_silu      wall=     1.5ms event=     1.3ms sync=     1.2ms wall_minus_event=     0.2ms over 40 calls
+[PREFILL-TIMING]       ssd_scan         wall=  1300.6ms event=  1300.4ms sync=  1300.4ms wall_minus_event=     0.2ms over 40 calls
+[PREFILL-TIMING]       gated_rmsnorm    wall=     1.6ms event=     1.4ms sync=     1.3ms wall_minus_event=     0.2ms over 40 calls
+[PREFILL-TIMING]       out_proj         wall=     7.6ms event=     7.4ms sync=     6.7ms wall_minus_event=     0.2ms over 40 calls
+[PREFILL-TIMING]   moe:       694.9ms ( 31.9%)
+[PREFILL-TIMING]     moe breakdown (48 layers):
+[PREFILL-TIMING]       gate:        53.2ms (  7.7% of moe)
+[PREFILL-TIMING]       dma:        309.2ms ( 44.5% of moe)
+[PREFILL-TIMING]         route_d2h:     1.0ms ptr_alloc:     0.4ms ptr_build:     0.2ms
+[PREFILL-TIMING]         cold_h2d:     22.7ms ptr_upload:     0.5ms dma_wait:   244.4ms
+[PREFILL-TIMING]       w1+act:     296.6ms ( 42.7% of moe)
+[PREFILL-TIMING]       w2:          14.0ms (  2.0% of moe)
+[PREFILL-TIMING]       scatter:      0.7ms (  0.1% of moe)
+[PREFILL-TIMING]       shared:       1.9ms (  0.3% of moe)
+[PREFILL-TIMING]   other:      17.8ms (  0.8%)
+  [32mRust prefill warmed with 300 tokens before HCS budgeting[0m
+  [32mWarmup complete in 2.2s[0m
+  [2mcuda:0 warmup:  peak 19,836 MB used / 32,119 MB total  (min free: 12,282 MB)[0m
+
+[1m[36m▸ VRAM calibration[0m
+  [32mSafety margin: 600 MB[0m
+  [32mFree VRAM after startup: 14,960 MB / 32,119 MB[0m
+  [32mStartup diag: calibration tokens short=500 (default 500), long=39,920 (default 39,920), cap=49,900, forced_long=False[0m
+  [32mShort calibration: probing 500 prompt tokens + 32 decode tokens[0m
+[PREFILL-TIMING] 500 tokens, 4752.2ms total (105 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        3.2ms (  0.1%)
+[PREFILL-TIMING]   attn:     2369.7ms ( 49.9%)  [gqa: 2.9ms, la: 0.0ms]
+[PREFILL-TIMING]     gqa breakdown (8 FA2 calls: 8 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:         1.2ms ( 42.4% of gqa)
+[PREFILL-TIMING]       qknorm:       0.1ms (  1.9% of gqa)
+[PREFILL-TIMING]       rope:         0.2ms (  5.3% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.1ms (  2.5% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.1ms over 8 calls
+[PREFILL-TIMING]       fa2         0.4ms ( 14.1% of gqa)  [0.1ms/call avg]
+[PREFILL-TIMING]       gate:         0.0ms (  0.2% of gqa)
+[PREFILL-TIMING]       o_proj:       0.9ms ( 32.3% of gqa)
+[PREFILL-TIMING]     gqa queue events:
+[PREFILL-TIMING]         proj         event=     1.2ms wall=     1.2ms wall_minus_event=     0.0ms sync=     0.8ms over 8 calls
+[PREFILL-TIMING]         qkv_norm     event=     0.0ms wall=     0.1ms wall_minus_event=     0.0ms sync=     0.0ms over 8 calls
+[PREFILL-TIMING]         rope         event=     0.1ms wall=     0.2ms wall_minus_event=     0.0ms sync=     0.1ms over 8 calls
+[PREFILL-TIMING]         fa2          event=     0.4ms wall=     0.4ms wall_minus_event=     0.0ms sync=     0.3ms over 8 calls
+[PREFILL-TIMING]         kv_append    event=     0.0ms wall=     0.1ms wall_minus_event=     0.1ms sync=     0.0ms over 0 calls
+[PREFILL-TIMING]         o_proj       event=     0.9ms wall=     0.9ms wall_minus_event=     0.0ms sync=     0.8ms over 8 calls
+[PREFILL-TIMING]     mamba2 breakdown (diagnostic sync-isolated): wall=  2364.3ms ( 49.8% of prefill,  99.8% of mixer) event=  2339.9ms sync=  2362.0ms
+[PREFILL-TIMING]       in_proj          wall=    15.9ms event=    15.7ms sync=    15.3ms wall_minus_event=     0.2ms over 40 calls
+[PREFILL-TIMING]       split_extract    wall=     0.6ms event=     0.4ms sync=     0.4ms wall_minus_event=     0.2ms over 40 calls
+[PREFILL-TIMING]       conv1d_silu      wall=     1.9ms event=     1.8ms sync=     1.6ms wall_minus_event=     0.2ms over 40 calls
+[PREFILL-TIMING]       ssd_scan         wall=  2335.2ms event=  2311.6ms sync=  2335.0ms wall_minus_event=    23.6ms over 40 calls
+[PREFILL-TIMING]       gated_rmsnorm    wall=     2.3ms event=     2.1ms sync=     2.0ms wall_minus_event=     0.2ms over 40 calls
+[PREFILL-TIMING]       out_proj         wall=     8.5ms event=     8.3ms sync=     7.7ms wall_minus_event=     0.2ms over 40 calls
+[PREFILL-TIMING]   moe:      1228.1ms ( 25.8%)
+[PREFILL-TIMING]     moe breakdown (48 layers):
+[PREFILL-TIMING]       gate:         7.5ms (  0.6% of moe)
+[PREFILL-TIMING]       dma:       1130.5ms ( 92.1% of moe)
+[PREFILL-TIMING]         route_d2h:     2.0ms ptr_alloc:     0.0ms ptr_build:     1.0ms
+[PREFILL-TIMING]         cold_h2d:   1177.0ms ptr_upload:     0.5ms dma_wait:  1083.5ms
+[PREFILL-TIMING]       w1+act:      56.0ms (  4.6% of moe)
+[PREFILL-TIMING]       w2:          27.3ms (  2.2% of moe)
+[PREFILL-TIMING]       scatter:      0.9ms (  0.1% of moe)
+[PREFILL-TIMING]       shared:       2.4ms (  0.2% of moe)
+[PREFILL-TIMING]   other:    1151.2ms ( 24.2%)
+  [32mdecode: 32 tokens in 2.25s (14.2 tok/s)  VRAM: 14958 MB free now, 14958 MB min free during decode[0m
+  [32mShort calibration: baseline=14,960 MB, prefill post-alloc=13,748 MB, prefill min=8,210 MB, decode min=14,958 MB, post-cleanup=14,958 MB[0m
+  [32mShort calibration: prefill 4.91s (101.9 tok/s), decode 2.82s (11.3 tok/s)[0m
+  [32mAdaptive long calibration: default target=39,920 tokens, target low-water floor=1,200 MB, estimated prefill growth=0.7427 MB/token[0m
+  [32mAdaptive long calibration: next probe 8,323 tokens (model-estimated initial probe (projected 0.7427 MB/token, validation floor 2400 MB))[0m
+  [32mLong calibration: probing 8,323 prompt tokens + 32 decode tokens[0m
+[PREFILL-TIMING] 8323 tokens, 45131.0ms total (184 tok/s)
+[PREFILL-TIMING]   embed:       0.1ms (  0.0%)
+[PREFILL-TIMING]   norm:       25.4ms (  0.1%)
+[PREFILL-TIMING]   attn:    41863.0ms ( 92.8%)  [gqa: 47.7ms, la: 0.0ms]
+[PREFILL-TIMING]     gqa breakdown (8 FA2 calls: 8 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:        12.2ms ( 25.5% of gqa)
+[PREFILL-TIMING]       qknorm:       0.1ms (  0.1% of gqa)
+[PREFILL-TIMING]       rope:         0.8ms (  1.7% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.1ms (  0.3% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.1ms over 8 calls
+[PREFILL-TIMING]       fa2        23.5ms ( 49.3% of gqa)  [2.9ms/call avg]
+[PREFILL-TIMING]       gate:         0.0ms (  0.0% of gqa)
+[PREFILL-TIMING]       o_proj:      11.0ms ( 23.0% of gqa)
+[PREFILL-TIMING]     gqa queue events:
+[PREFILL-TIMING]         proj         event=    12.1ms wall=    12.2ms wall_minus_event=     0.1ms sync=    11.8ms over 8 calls
+[PREFILL-TIMING]         qkv_norm     event=     0.0ms wall=     0.1ms wall_minus_event=     0.1ms sync=     0.0ms over 8 calls
+[PREFILL-TIMING]         rope         event=     0.7ms wall=     0.8ms wall_minus_event=     0.0ms sync=     0.7ms over 8 calls
+[PREFILL-TIMING]         fa2          event=    23.5ms wall=    23.5ms wall_minus_event=     0.1ms sync=    23.3ms over 8 calls
+[PREFILL-TIMING]         kv_append    event=     0.0ms wall=     0.1ms wall_minus_event=     0.1ms sync=     0.1ms over 0 calls
+[PREFILL-TIMING]         o_proj       event=    10.9ms wall=    11.0ms wall_minus_event=     0.1ms sync=    10.8ms over 8 calls
+[PREFILL-TIMING]     mamba2 breakdown (diagnostic sync-isolated): wall= 41809.0ms ( 92.6% of prefill,  99.9% of mixer) event= 41808.0ms sync= 41804.3ms
+[PREFILL-TIMING]       in_proj          wall=   214.6ms event=   214.4ms sync=   214.1ms wall_minus_event=     0.2ms over 40 calls
+[PREFILL-TIMING]       split_extract    wall=    10.9ms event=    10.7ms sync=    10.7ms wall_minus_event=     0.2ms over 40 calls
+[PREFILL-TIMING]       conv1d_silu      wall=    25.7ms event=    25.5ms sync=    25.3ms wall_minus_event=     0.2ms over 40 calls
+[PREFILL-TIMING]       ssd_scan         wall= 41420.2ms event= 41420.0ms sync= 41419.8ms wall_minus_event=     0.2ms over 40 calls
+[PREFILL-TIMING]       gated_rmsnorm    wall=    32.2ms event=    32.1ms sync=    31.3ms wall_minus_event=     0.1ms over 40 calls
+[PREFILL-TIMING]       out_proj         wall=   105.4ms event=   105.2ms sync=   103.1ms wall_minus_event=     0.2ms over 40 calls
+[PREFILL-TIMING]   moe:      2105.2ms (  4.7%)
+[PREFILL-TIMING]     moe breakdown (48 layers):
+[PREFILL-TIMING]       gate:        41.7ms (  2.0% of moe)
+[PREFILL-TIMING]       dma:       1092.9ms ( 51.9% of moe)
+[PREFILL-TIMING]         route_d2h:     2.6ms ptr_alloc:     0.0ms ptr_build:     1.0ms
+[PREFILL-TIMING]         cold_h2d:   1159.3ms ptr_upload:     0.6ms dma_wait:  1044.9ms
+[PREFILL-TIMING]       w1+act:     583.7ms ( 27.7% of moe)
+[PREFILL-TIMING]       w2:         257.0ms ( 12.2% of moe)
+[PREFILL-TIMING]       scatter:     13.0ms (  0.6% of moe)
+[PREFILL-TIMING]       shared:      99.7ms (  4.7% of moe)
+[PREFILL-TIMING]   other:    1137.2ms (  2.5%)
+  [32mdecode: 32 tokens in 2.27s (14.1 tok/s)  VRAM: 14956 MB free now, 14956 MB min free during decode[0m
+  [32mLong calibration: baseline=14,958 MB, prefill post-alloc=7,510 MB, prefill min=1,974 MB, decode min=14,956 MB, post-cleanup=14,956 MB[0m
+  [32mLong calibration: prefill 45.29s (183.8 tok/s), decode 2.82s (11.3 tok/s)[0m
+  [32mAdaptive long calibration: using 8,323 tokens (current low-water 1974 MB leaves no validation reserve above 2400 MB)[0m
+  [32mScratch reservation: max=38,007 MB (at 50,000 tokens)[0m
+
+[1m[36m▸ VRAM calibration complete[0m
+  [32mPost-calibration free VRAM: 14,956 MB[0m
+  [32mTransient deltas: short prefill=6,750 MB, long prefill=12,984 MB, short decode=2 MB, long decode=2 MB[0m
+  [32mGPU0 decode HCS budget: 14,354 MB[0m
+  [32mPrefill HCS budgets: short=7,606 MB, long=1,372 MB[0m
+  [32mWorst-case prefill scratch reservation: 38,007 MB at 50,000 tokens[0m
+
+[1m[36m▸ Startup diagnostic exit[0m
+  [32mExiting after VRAM calibration by request[0m

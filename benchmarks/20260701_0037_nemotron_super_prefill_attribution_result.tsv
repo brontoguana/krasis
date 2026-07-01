@@ -1,0 +1,26 @@
+metric	value	unit	notes
+gate	20260701_0037_nemotron_super_prefill_attribution		Instrumentation-on diagnosis of Super prefill.
+command	KRASIS_STARTUP_DIAG=1 KRASIS_PREFILL_TIMING=1 KRASIS_STARTUP_EXIT_AFTER_CALIBRATION=1 ./dev run tests/nemotron-super-bf16kv-a16.conf		Built command path in tmux.
+exit	0		Exited after startup calibration by request.
+prior_speed_prefill_best	192.9	tok/s	Timing-off benchmark result from 20260630_2340.
+long_probe_tokens	8323	tokens	Runtime-selected long calibration probe.
+long_probe_timing_on_ms	45131.0	ms	Instrumentation-on total; not a speed benchmark.
+long_probe_timing_on_tok_s	184	tok/s	Instrumentation overhead present; close to timing-off 192.9 tok/s.
+long_calibration_prefill_line	183.8	tok/s	45.29s reported by calibration wrapper.
+long_mixer_bucket_attn	41863.0	ms	Top-level attn bucket is broad mixer; actual GQA is separate below.
+long_actual_gqa	47.7	ms	8 FA2 calls; not the bottleneck.
+long_mamba2_wall	41809.0	ms	92.6% of prefill; 40 Mamba2 calls.
+long_mamba2_ssd_scan	41420.2	ms	91.8% of total prefill; dominant bottleneck.
+long_mamba2_in_proj	214.6	ms	Mamba2 projection cost is small versus SSD scan.
+long_mamba2_out_proj	105.4	ms	Mamba2 projection cost is small versus SSD scan.
+long_moe_bucket	2105.2	ms	4.7% of prefill.
+long_moe_dma	1092.9	ms	51.9% of MoE bucket; 2.4% of total prefill.
+long_moe_w1_act	583.7	ms	27.7% of MoE bucket.
+long_moe_w2	257.0	ms	12.2% of MoE bucket.
+long_other	1137.2	ms	2.5% of prefill.
+long_prefill_min_free	1974	MB	Long calibration low-water.
+long_transient_delta	12984	MB	Runtime-measured long prefill transient.
+scratch_reservation_50000	38007	MB	Explains why standard 50K sizing must be capped for Super on this 5090.
+startup_cache_load	37	s	59.0 GB Marlin cache load; startup only, not prefill throughput.
+gpu_observation	100	percent	GPU0 was saturated during the long prefill probe; not a CPU idle/wait issue.
+root_cause	current normal Super prefill is dominated by Mamba2 SSD scan		Nano's fast parallel SSD path is still guarded startup-diagnostic work and was not enabled in the Super benchmark.

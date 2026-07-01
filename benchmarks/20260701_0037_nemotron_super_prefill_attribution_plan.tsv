@@ -1,0 +1,12 @@
+field	value
+gate	20260701_0037_nemotron_super_prefill_attribution
+opened_utc	2026-07-01T00:37:13Z
+model	NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+config	tests/nemotron-super-bf16kv-a16.conf
+question	Explain why Super standard prefill is only 192.9 tok/s on 1x RTX 5090.
+prior_speed_source	benchmarks/20260630_2340_nemotron_super_standard_benchmark_result.tsv
+prior_speed	8324 tokens in 43158.8 ms = 192.9 tok/s, timing disabled.
+measurement_type	Instrumentation-on startup calibration only; not a speed benchmark.
+planned_command	KRASIS_STARTUP_DIAG=1 KRASIS_PREFILL_TIMING=1 KRASIS_STARTUP_EXIT_AFTER_CALIBRATION=1 ./dev run tests/nemotron-super-bf16kv-a16.conf
+planned_stop	Exit after startup calibration before heatmap/server benchmark.
+notes	Use component timing to split Super prefill into Mamba2/GQA/MoE and avoid guessing from Nano.

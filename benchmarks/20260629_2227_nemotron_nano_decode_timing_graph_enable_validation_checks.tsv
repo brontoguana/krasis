@@ -1,0 +1,13 @@
+check	result	details
+build	pass	./dev build exit 0 duration_s=182
+json_parse	pass	summary and response JSON parsed with jq
+tsv_shape	pass	decode_comparison correctness_comparison and build_result TSVs have consistent field counts
+source_diff_check	pass	git diff --check passed for src/gpu_decode.rs src/cuda/decode_kernels.cu BENCHMARKS.md and new summary TSV/JSON artifacts
+internal_diff_check	pass	git -C krasis-internal diff --check passed for CHANGELOG.md TRACKING.md DEBUGLOG.md
+dev_syntax	pass	bash -n dev
+direct_w13_removed	pass	no DECODE_MOE_DIRECT_BF16_W13 or marlin_gemv_int4_v2_batched_bf16_out references remain
+protected_configs	pass	no status entries under testconfigs/tests/testconfigs/krasis/testconfigs
+runtime_cleanup	pass	./dev kill completed after final speed run
+idle_process	pass	no krasis.server/maturin/cargo/nvcc processes at 2026-06-29T23:54:38Z
+idle_tmux	pass	no tmux sessions at 2026-06-29T23:54:38Z
+idle_gpu	pass	GPU0 used=15MB free=32105MB; GPU1 used=11MB free=20043MB

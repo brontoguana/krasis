@@ -1,0 +1,55 @@
+{
+  "gate": "20260630_1249_nemotron_nano_decode_parallel_topk_candidate",
+  "status": "accepted_gated",
+  "scope": "Nano decode route top-k micro-optimization behind KRASIS_DECODE_PARALLEL_TOPK=1",
+  "baseline": {
+    "accepted_decode_timing_off_tok_s": 114.2,
+    "accepted_decode_source": "20260630_0011_nemotron_nano_decode_hot_hcs_full_graph",
+    "attribution_source": "20260630_0614_nemotron_nano_decode_full_graph_compute_attribution",
+    "route_topk_ms_per_token": 0.23
+  },
+  "implementation": {
+    "env": "KRASIS_DECODE_PARALLEL_TOPK=1",
+    "kernel": "sigmoid_topk_parallel_scores",
+    "default_behavior_changed": false,
+    "unsupported_modes": [
+      "softmax routing fails closed when env is set",
+      "APFL speculative routing fails closed when env is set",
+      "num_experts > 1024 fails closed when env is set"
+    ]
+  },
+  "results": {
+    "build": {
+      "exit": 0,
+      "duration_s": 184
+    },
+    "same_payload_correctness": {
+      "first_token_topk_exact": true,
+      "generated_text_exact": true,
+      "response_tokens": 104,
+      "finish_reason": "stop"
+    },
+    "timing_on_control": {
+      "server_decode_tok_s": 103.2,
+      "internal_ms_per_tok": 8.65,
+      "route_topk_ms_per_tok": 0.23,
+      "hcs_hit_miss": "138/0",
+      "min_free_vram_mb": 8732
+    },
+    "timing_on_candidate": {
+      "server_decode_tok_s": 105.9,
+      "internal_ms_per_tok": 8.40,
+      "route_topk_ms_per_token": 0.15,
+      "hcs_hit_miss": "138/0",
+      "min_free_vram_mb": 8732
+    },
+    "timing_off_candidate": {
+      "server_decode_tok_s": 115.2,
+      "response_decode_ms": 894.4,
+      "hcs": "100%",
+      "min_free_vram_mb": 8730
+    },
+    "prior_accepted_timing_off_tok_s": 114.2
+  },
+  "decision": "accepted as a hard opt-in micro-optimization; speed gain is small and defaults are unchanged"
+}

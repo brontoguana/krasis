@@ -1,0 +1,6 @@
+step	target	candidate_env	acceptance	decision
+1	MoE routed weighted-add branch removal	KRASIS_DECODE_WEIGHTED_ADD_NOZERO=1	First-token top-k exact but generated sequence diverged; faster timing-on request 121.0 tok/s	rejected_and_removed
+1b	MoE routed W2 weighted accumulation	KRASIS_DECODE_GRAPH_RELU2_W2_WEIGHTED_ACCUM=1	Generated sequence exact but slower: 113.0 tok/s timing-on	rejected_and_removed
+2	Shared/post routed scale fusion	KRASIS_DECODE_GRAPH_FUSED_ROUTED_SCALE=1	First-token top-k exact but generated sequence diverged; faster timing-on request 120.1 tok/s	rejected_and_removed
+3	Mamba2 discretize+SSM fusion	KRASIS_MAMBA2_DECODE_GRAPH_FUSED_DISC_SSM=1	First-token top-k exact but generated sequence diverged; scratch-preserving compile fix hit launch tuple limit	rejected_and_removed
+4	Larger architecture/format track	analysis_only	No narrow no-new-format backend candidate was started	no_change

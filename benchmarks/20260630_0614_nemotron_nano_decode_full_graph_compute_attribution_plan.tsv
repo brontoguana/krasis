@@ -1,0 +1,12 @@
+field	value
+gate	20260630_0614_nemotron_nano_decode_full_graph_compute_attribution
+model	NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+config	tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf
+baseline_gate	20260630_0011_nemotron_nano_decode_hot_hcs_full_graph
+baseline_timing_off_server_tok_s	114.2
+baseline_timing_on_internal_ms_per_tok	7.77
+baseline_full_graph_event_ms_per_tok	7.43
+scope	attribute and optimize actual full-graph GPU decode compute after HCS/sync/launch/W13 were ruled out
+first_data_run	existing graph clocks with MoE-route, route-prep, W2, GQA, final, and mixed segment clocks enabled
+acceptance	correct first-token/top-k surface preserved; timing-off speed run improves decode or negative result is recorded
+default_behavior_changed	false
