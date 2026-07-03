@@ -106,6 +106,12 @@ HQQ_ATTENTION_CACHE_VERSION = 5
 HQQ4_GLOBAL_STEPS = 65
 HQQ4_LOCAL_STEPS = 33
 HQQ4_SEARCH_ALGORITHM = f"grid{HQQ4_GLOBAL_STEPS}_{HQQ4_LOCAL_STEPS}"
+HQQ4_CACHE_IMPL_CPU_RUST = "cpu_rust_v1"
+HQQ4_CACHE_IMPL_RUST_CUDA_SEARCH = "rust_cuda_search_v1"
+HQQ4_CACHE_IMPL_CHOICES = (
+    HQQ4_CACHE_IMPL_CPU_RUST,
+    HQQ4_CACHE_IMPL_RUST_CUDA_SEARCH,
+)
 HQQ_ATTENTION_CACHE_DIRNAME = f"attention_hqq_v{HQQ_ATTENTION_CACHE_VERSION}_{HQQ4_SEARCH_ALGORITHM}"
 HQQ46_ATTENTION_CACHE_DIRNAME = f"attention_hqq46_v{HQQ_ATTENTION_CACHE_VERSION}_{HQQ4_SEARCH_ALGORITHM}"
 HQQ46_AUTO_ATTENTION_CACHE_DIRNAME = f"attention_hqq46_auto_v{HQQ_ATTENTION_CACHE_VERSION}_{HQQ4_SEARCH_ALGORITHM}"
@@ -355,11 +361,16 @@ def hqq_layout_for_nbits(nbits: int) -> str:
 
 def hqq_cache_algorithm_for_nbits(nbits: int) -> Optional[dict]:
     if nbits in (4, HQQ_MIXED_46_CACHE_NBITS, HQQ_MIXED_46_AUTO_CACHE_NBITS):
-        return {
+        algorithm = {
             "hqq4_search": HQQ4_SEARCH_ALGORITHM,
             "hqq4_global_steps": HQQ4_GLOBAL_STEPS,
             "hqq4_local_steps": HQQ4_LOCAL_STEPS,
         }
+        if nbits == 4:
+            impl = hqq4_cache_impl()
+            if impl != HQQ4_CACHE_IMPL_CPU_RUST:
+                algorithm["hqq4_cache_impl"] = impl
+        return algorithm
     return None
 
 
@@ -390,9 +401,31 @@ def normalize_hqq_attention_group_size(group_size: Optional[int]) -> int:
     return value
 
 
+def hqq4_cache_impl() -> str:
+    raw = os.environ.get("KRASIS_HQQ4_CACHE_IMPL", "").strip().lower()
+    if raw in ("", "cpu", "cpu_rust", HQQ4_CACHE_IMPL_CPU_RUST):
+        return HQQ4_CACHE_IMPL_CPU_RUST
+    if raw in (
+        "cuda",
+        "rust_cuda",
+        "rust-cuda",
+        "rust_cuda_search",
+        "rust-cuda-search",
+        HQQ4_CACHE_IMPL_RUST_CUDA_SEARCH,
+    ):
+        return HQQ4_CACHE_IMPL_RUST_CUDA_SEARCH
+    choices = ", ".join(HQQ4_CACHE_IMPL_CHOICES)
+    raise ValueError(
+        f"Unsupported KRASIS_HQQ4_CACHE_IMPL={raw!r}. Use one of: {choices}."
+    )
+
+
 def _hqq_attention_cache_dirname(nbits: int, group_size: int) -> str:
     if nbits == 4:
         baseline = HQQ_ATTENTION_CACHE_DIRNAME
+        impl = hqq4_cache_impl()
+        if impl != HQQ4_CACHE_IMPL_CPU_RUST:
+            baseline = f"{baseline}_{impl}"
     elif nbits == HQQ_MIXED_46_CACHE_NBITS:
         baseline = HQQ46_ATTENTION_CACHE_DIRNAME
     elif nbits == HQQ_MIXED_46_AUTO_CACHE_NBITS:
@@ -2425,12 +2458,32 @@ def write_hqq_attention_artifact(
         "tensor_name": tensor_name,
     }
     if nbits == 4:
-        tensors = quantize_hqq4_tensor_rust(
-            weight,
-            group_size=normalized_group_size,
-            collect_stats=True,
-            inner_threads=hqq4_inner_threads,
+        cache_impl = (
+            hqq4_cache_impl()
+            if actual_cache_nbits == 4
+            else HQQ4_CACHE_IMPL_CPU_RUST
         )
+        if cache_impl == HQQ4_CACHE_IMPL_RUST_CUDA_SEARCH:
+            if hqq_search_device is None:
+                raise RuntimeError(
+                    "KRASIS_HQQ4_CACHE_IMPL=rust_cuda_search_v1 requested, but no CUDA "
+                    "search device was provided. Refusing to fall back to CPU HQQ4 cache build."
+                )
+            tensors = quantize_hqq_search_cuda_tensor(
+                weight,
+                4,
+                group_size=normalized_group_size,
+                collect_stats=True,
+                device=hqq_search_device,
+                timing_context={**timing_context, "cache_impl": cache_impl},
+            )
+        else:
+            tensors = quantize_hqq4_tensor_rust(
+                weight,
+                group_size=normalized_group_size,
+                collect_stats=True,
+                inner_threads=hqq4_inner_threads,
+            )
     elif nbits == 6:
         tensors = quantize_hqq6_tensor(
             weight,
@@ -2462,6 +2515,8 @@ def write_hqq_attention_artifact(
         "layout": hqq_layout_for_nbits(nbits),
         "dtype": str(weight.dtype).replace("torch.", ""),
     }
+    if nbits == 4 and actual_cache_nbits == 4:
+        metadata["cache_impl"] = hqq4_cache_impl()
     if metadata_started:
         _emit_real_model_timing(
             {
@@ -2509,6 +2564,7 @@ def write_hqq_attention_artifact(
         "tensor_bytes": tensor_bytes,
         "structure": structure,
         "quality": stats,
+        "cache_impl": metadata.get("cache_impl"),
     }
 
 

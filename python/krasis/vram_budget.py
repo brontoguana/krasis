@@ -395,7 +395,11 @@ def _hqq_payload_bytes_for_shape(rows: int, cols: int, nbits: int, group_size: i
     return packed + scales + zeros + metadata
 
 
-def _hqq_attention_tensor_shapes_for_layer(cfg: Dict[str, Any], layer_type: str) -> list[tuple[str, int, int]]:
+def _hqq_attention_tensor_shapes_for_layer(
+    cfg: Dict[str, Any],
+    layer_type: str,
+    layer_idx: Optional[int] = None,
+) -> list[tuple[str, int, int]]:
     hidden = int(cfg["hidden_size"])
     if layer_type == "linear_attention":
         nk = int(cfg.get("linear_num_key_heads", 16))
@@ -433,9 +437,20 @@ def _hqq_attention_tensor_shapes_for_layer(cfg: Dict[str, Any], layer_type: str)
         shapes.append(("o_proj", hidden, n_heads * v_head))
         return shapes
 
-    n_heads = int(cfg["num_attention_heads"])
-    n_kv_heads = int(cfg.get("num_key_value_heads", n_heads))
-    head_dim = int(cfg.get("head_dim", hidden // n_heads))
+    other = cfg.get("attention_other_setting") if layer_type == "sliding_attention" else None
+    if isinstance(other, dict) and str(other.get("attention_type", "")) == "sliding_attention":
+        n_heads = int(other.get("num_attention_heads", cfg["num_attention_heads"]))
+        n_kv_heads = int(
+            other.get(
+                "num_key_value_heads",
+                other.get("num_attention_groups", cfg.get("num_key_value_heads", cfg.get("num_attention_groups", n_heads))),
+            )
+        )
+        head_dim = int(other.get("head_dim", cfg.get("head_dim", hidden // n_heads)))
+    else:
+        n_heads = int(cfg["num_attention_heads"])
+        n_kv_heads = int(cfg.get("num_key_value_heads", cfg.get("num_attention_groups", n_heads)))
+        head_dim = int(cfg.get("head_dim", hidden // n_heads))
     gated_attention = bool(
         cfg.get(
             "attn_output_gate",
@@ -491,6 +506,7 @@ def _estimate_hqq_attention_layer_bytes(
         shapes = _hqq_attention_tensor_shapes_for_layer(
             cfg,
             _layer_type_for_hqq_budget(cfg, layer_idx),
+            layer_idx,
         )
         if not shapes:
             per_layer[layer_idx] = 0

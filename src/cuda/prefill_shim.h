@@ -145,6 +145,8 @@ void krasis_sigmoid_topk(
     void*       topk_weights,   /* float, [M, topk] */
     void*       topk_ids,       /* int32, [M, topk] */
     const void* gate_logits,    /* float, [M, E] */
+    const void* gate_bias,      /* float, [E] or NULL */
+    const void* e_score_correction, /* float, [E] or NULL */
     int         M,
     int         num_experts,
     int         topk,

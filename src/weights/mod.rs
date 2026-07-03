@@ -154,22 +154,26 @@ impl ModelConfig {
                 .and_then(|v| v.as_u64())
                 .ok_or("Missing moe_intermediate_size or intermediate_size")? as usize;
 
-        // n_routed_experts (DeepSeek/Kimi) OR num_experts (Qwen3) OR num_local_experts (GPT OSS)
+        // n_routed_experts (DeepSeek/Kimi) OR num_experts (Qwen3) OR
+        // num_local_experts (GPT OSS/Nemotron) OR moe_num_experts (Step).
         let n_routed_experts = cfg
             .get("n_routed_experts")
             .or_else(|| cfg.get("num_experts"))
             .or_else(|| cfg.get("num_local_experts"))
+            .or_else(|| cfg.get("moe_num_experts"))
             .and_then(|v| v.as_u64())
-            .ok_or("Missing n_routed_experts, num_experts, or num_local_experts")?
+            .ok_or("Missing n_routed_experts, num_experts, num_local_experts, or moe_num_experts")?
             as usize;
 
         // num_experts_per_tok (DeepSeek/Qwen3) OR experts_per_token (GPT OSS)
+        // OR moe_top_k (Step).
         let num_experts_per_tok = cfg
             .get("num_experts_per_tok")
             .or_else(|| cfg.get("experts_per_token"))
             .or_else(|| cfg.get("top_k_experts"))
+            .or_else(|| cfg.get("moe_top_k"))
             .and_then(|v| v.as_u64())
-            .ok_or("Missing num_experts_per_tok, experts_per_token, or top_k_experts")?
+            .ok_or("Missing num_experts_per_tok, experts_per_token, top_k_experts, or moe_top_k")?
             as usize;
 
         let num_hidden_layers = cfg
@@ -196,7 +200,7 @@ impl ModelConfig {
 
         // first_k_dense_replace (DeepSeek/Kimi) OR derive from decoder_sparse_step (Qwen3)
         // Default to 0 when neither field exists (e.g. GPT OSS: all layers are MoE)
-        let first_k_dense_replace = if let Some(v) = cfg.get("first_k_dense_replace") {
+        let mut first_k_dense_replace = if let Some(v) = cfg.get("first_k_dense_replace") {
             v.as_u64().ok_or("first_k_dense_replace not a number")? as usize
         } else if let Some(step) = cfg.get("decoder_sparse_step") {
             let step = step.as_u64().ok_or("decoder_sparse_step not a number")? as usize;
@@ -213,6 +217,49 @@ impl ModelConfig {
             0
         };
 
+        let explicit_moe_layer_indices: Option<Vec<usize>> =
+            if let Some(value) = cfg.get("moe_layers_enum") {
+                let parsed: Vec<usize> = if let Some(s) = value.as_str() {
+                    s.split(',')
+                        .filter_map(|part| {
+                            let trimmed = part.trim();
+                            if trimmed.is_empty() {
+                                None
+                            } else {
+                                Some(
+                                    trimmed
+                                        .parse::<usize>()
+                                        .map_err(|_| format!("invalid moe_layers_enum entry '{trimmed}'")),
+                                )
+                            }
+                        })
+                        .collect::<Result<Vec<_>, _>>()?
+                } else if let Some(arr) = value.as_array() {
+                    arr.iter()
+                        .map(|v| {
+                            v.as_u64()
+                                .map(|n| n as usize)
+                                .ok_or_else(|| "moe_layers_enum contains a non-integer entry".to_string())
+                        })
+                        .collect::<Result<Vec<_>, _>>()?
+                } else {
+                    return Err("moe_layers_enum must be a comma-separated string or array".to_string());
+                };
+                for layer_idx in &parsed {
+                    if *layer_idx >= num_hidden_layers {
+                        return Err(format!(
+                            "moe_layers_enum contains out-of-range layer {layer_idx} for {num_hidden_layers} layers"
+                        ));
+                    }
+                }
+                if let Some(first) = parsed.iter().min().copied() {
+                    first_k_dense_replace = first;
+                }
+                Some(parsed)
+            } else {
+                None
+            };
+
         // Shared experts: n_shared_experts, or infer from shared_expert_intermediate_size > 0
         let mut n_shared_experts = cfg
             .get("n_shared_experts")
@@ -221,6 +268,7 @@ impl ModelConfig {
         if n_shared_experts == 0 {
             let shared_inter = cfg
                 .get("shared_expert_intermediate_size")
+                .or_else(|| cfg.get("share_expert_dim"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0) as usize;
             if shared_inter > 0 {
@@ -234,12 +282,14 @@ impl ModelConfig {
         let shared_expert_intermediate_size = cfg
             .get("moe_shared_expert_intermediate_size")
             .or_else(|| cfg.get("shared_expert_intermediate_size"))
+            .or_else(|| cfg.get("share_expert_dim"))
             .and_then(|v| v.as_u64())
             .map(|v| v as usize)
             .unwrap_or(n_shared_experts * moe_intermediate_size);
 
         let routed_scaling_factor = cfg
             .get("routed_scaling_factor")
+            .or_else(|| cfg.get("moe_router_scaling_factor"))
             .and_then(|v| v.as_f64())
             .unwrap_or(1.0) as f32;
 
@@ -275,7 +325,9 @@ impl ModelConfig {
         // For hybrid models (Nemotron): parse hybrid_override_pattern, MoE layers are 'E'.
         // For standard models: contiguous from first_k_dense_replace.
         let moe_layer_indices =
-            if let Some(pattern) = cfg.get("hybrid_override_pattern").and_then(|v| v.as_str()) {
+            if let Some(indices) = explicit_moe_layer_indices {
+                indices
+            } else if let Some(pattern) = cfg.get("hybrid_override_pattern").and_then(|v| v.as_str()) {
                 pattern
                     .chars()
                     .enumerate()
@@ -2823,14 +2875,16 @@ impl WeightStore {
             // Detect if shared expert has gate_proj
             let shared_has_gate = {
                 let probe_layer = config.moe_abs_layer(start_moe_layer);
-                let probe_key = format!("{layers_prefix}.layers.{probe_layer}.{expert_sublayer}.{shared_name}.gate_proj.weight");
+                let probe_prefix =
+                    shared_expert_prefix(&layers_prefix, probe_layer, expert_sublayer, shared_name);
+                let probe_key = format!("{probe_prefix}.gate_proj.weight");
                 index.weight_map.contains_key(&probe_key)
             };
             let mut shared = Vec::with_capacity(num_moe_layers);
             for moe_idx in start_moe_layer..(start_moe_layer + num_moe_layers) {
                 let layer_idx = config.moe_abs_layer(moe_idx);
                 let prefix =
-                    format!("{layers_prefix}.layers.{layer_idx}.{expert_sublayer}.{shared_name}");
+                    shared_expert_prefix(&layers_prefix, layer_idx, expert_sublayer, shared_name);
                 let (gate, up, down) = if shared_has_gate {
                     load_and_quantize_expert(
                         layer_idx,
@@ -3140,7 +3194,7 @@ impl WeightStore {
         for moe_idx in 0..num_moe_layers {
             let layer_idx = config.moe_abs_layer(moe_idx);
             let prefix =
-                format!("{layers_prefix}.layers.{layer_idx}.{expert_sublayer}.{shared_name}");
+                shared_expert_prefix(&layers_prefix, layer_idx, expert_sublayer, shared_name);
             for proj in shared_projs {
                 let name = format!("{prefix}.{proj}.weight");
                 if let Some(shard) = index.weight_map.get(&name) {
@@ -3168,7 +3222,7 @@ impl WeightStore {
         for moe_idx in 0..num_moe_layers {
             let layer_idx = config.moe_abs_layer(moe_idx);
             let prefix =
-                format!("{layers_prefix}.layers.{layer_idx}.{expert_sublayer}.{shared_name}");
+                shared_expert_prefix(&layers_prefix, layer_idx, expert_sublayer, shared_name);
             let (gate, up, down) = if shared_gated {
                 load_and_quantize_expert(
                     layer_idx,
@@ -3316,7 +3370,7 @@ impl WeightStore {
             for moe_idx in moe_start..(moe_start + num_moe_layers) {
                 let layer_idx = config.moe_abs_layer(moe_idx);
                 let prefix =
-                    format!("{layers_prefix}.layers.{layer_idx}.{expert_sublayer}.{shared_name}");
+                    shared_expert_prefix(&layers_prefix, layer_idx, expert_sublayer, shared_name);
                 let (gate, up, down) = if shared_gated {
                     load_and_quantize_expert(
                         layer_idx,
@@ -3423,7 +3477,9 @@ impl WeightStore {
         let layers_prefix = detect_expert_prefix(&index.weight_map)?;
         let mxfp4 = is_mxfp4(&index.weight_map);
         let stacked = !mxfp4 && is_stacked_experts(&index.weight_map);
-        let prequantized = !mxfp4 && !stacked && is_prequantized(&index.weight_map);
+        let separate_stacked = !mxfp4 && is_separate_stacked_experts(&index.weight_map);
+        let prequantized =
+            !mxfp4 && !stacked && !separate_stacked && is_prequantized(&index.weight_map);
         let experts_gated = has_gate_proj_experts(&index.weight_map);
         let expert_sublayer = detect_expert_sublayer(&index.weight_map);
         log::info!("Cache build: experts gated={experts_gated}, sublayer={expert_sublayer}");
@@ -3458,6 +3514,9 @@ impl WeightStore {
         }
         if stacked {
             log::info!("Detected stacked expert format (Marlin cache build)");
+        }
+        if separate_stacked {
+            log::info!("Detected separate stacked expert format (Marlin cache build)");
         }
 
         // Create cache directory + temp file
@@ -3523,6 +3582,10 @@ impl WeightStore {
             }
             let fmt = if stacked { "stacked" } else { "MXFP4" };
             log::info!("Issued {fmt} prefetch for layer {first_layer_idx} bulk tensors");
+        } else if separate_stacked {
+            log::info!(
+                "Skipping separate-stacked prefetch for layer {first_layer_idx}; layer bulk tensors are loaded on demand"
+            );
         } else {
             log::info!(
                 "Skipping non-stacked per-expert prefetch for layer {first_layer_idx}; parallel expert load already provides demand paging"
@@ -3551,6 +3614,18 @@ impl WeightStore {
                     config,
                     effective_group_size,
                     gpu_bits,
+                )?
+            } else if separate_stacked {
+                load_separate_stacked_layer_experts(
+                    layer_idx,
+                    &layers_prefix,
+                    &index.weight_map,
+                    &shards,
+                    config,
+                    effective_group_size,
+                    gpu_bits,
+                    expert_int4_calib_mode,
+                    expert_int4_calib_data,
                 )?
             } else if stacked {
                 load_stacked_layer_experts(
@@ -3768,7 +3843,7 @@ impl WeightStore {
             for moe_idx in start_moe_layer..(start_moe_layer + num_moe_layers) {
                 let layer_idx = config.moe_abs_layer(moe_idx);
                 let prefix =
-                    format!("{layers_prefix}.layers.{layer_idx}.{expert_sublayer}.{shared_name}");
+                    shared_expert_prefix(&layers_prefix, layer_idx, expert_sublayer, shared_name);
                 let shared_io_start = std::time::Instant::now();
                 let (gate, up, down) = if shared_gated {
                     load_and_quantize_expert(
@@ -4400,7 +4475,9 @@ impl WeightStore {
         let layers_prefix = detect_expert_prefix(&index.weight_map)?;
         let mxfp4 = is_mxfp4(&index.weight_map);
         let stacked = !mxfp4 && is_stacked_experts(&index.weight_map);
-        let prequantized = !mxfp4 && !stacked && is_prequantized(&index.weight_map);
+        let separate_stacked = !mxfp4 && is_separate_stacked_experts(&index.weight_map);
+        let prequantized =
+            !mxfp4 && !stacked && !separate_stacked && is_prequantized(&index.weight_map);
         let experts_gated = has_gate_proj_experts(&index.weight_map);
         let expert_sublayer = detect_expert_sublayer(&index.weight_map);
         log::info!("CPU cache build: experts gated={experts_gated}, sublayer={expert_sublayer}");
@@ -4439,6 +4516,11 @@ impl WeightStore {
         if stacked {
             log::info!(
                 "Detected stacked expert format (gate_up_proj [E, 2*I, H] + down_proj [E, H, I])"
+            );
+        }
+        if separate_stacked {
+            log::info!(
+                "Detected separate stacked expert format (gate/up/down [E, rows, cols])"
             );
         }
 
@@ -4480,6 +4562,18 @@ impl WeightStore {
                     config,
                     effective_group_size,
                     cpu_num_bits,
+                )?
+            } else if separate_stacked {
+                load_separate_stacked_layer_experts(
+                    layer_idx,
+                    &layers_prefix,
+                    &index.weight_map,
+                    &shards,
+                    config,
+                    effective_group_size,
+                    cpu_num_bits,
+                    ExpertInt4CalibMode::Amax,
+                    None,
                 )?
             } else if stacked {
                 load_stacked_layer_experts(
@@ -4636,7 +4730,7 @@ impl WeightStore {
             for moe_idx in start_moe_layer..(start_moe_layer + num_moe_layers) {
                 let layer_idx = config.moe_abs_layer(moe_idx);
                 let prefix =
-                    format!("{layers_prefix}.layers.{layer_idx}.{expert_sublayer}.{shared_name}");
+                    shared_expert_prefix(&layers_prefix, layer_idx, expert_sublayer, shared_name);
                 let (gate, up, down) = if shared_gated {
                     load_and_quantize_expert(
                         layer_idx,
@@ -7135,9 +7229,11 @@ fn detect_expert_prefix(weight_map: &HashMap<String, String>) -> Result<String, 
         if let Some(pos) = key.find(".layers.") {
             // Standard MoE: .mlp.experts.  Nemotron: .mixer.experts.
             // Gemma4 stores stacked routed experts as sibling .experts tensors.
+            // Step stores separate stacked routed tensors under .moe.
             if key.contains(".mlp.experts.")
                 || key.contains(".mixer.experts.")
                 || key.contains(".layers.") && key.contains(".experts.gate_up_proj")
+                || key.contains(".moe.gate_proj.weight")
             {
                 let prefix = &key[..pos];
                 // Skip MTP (multi-token prediction) weights — not real model layers
@@ -7151,11 +7247,14 @@ fn detect_expert_prefix(weight_map: &HashMap<String, String>) -> Result<String, 
     Err("Could not detect expert weight prefix from safetensors index".to_string())
 }
 
-/// Detect expert sublayer: "mlp" (standard) or "mixer" (Nemotron).
+/// Detect expert sublayer: "mlp" (standard), "mixer" (Nemotron), or "moe" (Step).
 fn detect_expert_sublayer(weight_map: &HashMap<String, String>) -> &'static str {
     for key in weight_map.keys() {
         if key.contains(".mixer.experts.") {
             return "mixer";
+        }
+        if key.contains(".moe.gate_proj.weight") {
+            return "moe";
         }
     }
     "mlp"
@@ -7164,7 +7263,9 @@ fn detect_expert_sublayer(weight_map: &HashMap<String, String>) -> &'static str 
 /// Check if experts have gate_proj (standard gated MoE) or just up_proj (Nemotron).
 fn has_gate_proj_experts(weight_map: &HashMap<String, String>) -> bool {
     for key in weight_map.keys() {
-        if key.contains(".experts.") && key.contains("gate_proj") {
+        if (key.contains(".experts.") && key.contains("gate_proj"))
+            || key.contains(".moe.gate_proj.weight")
+        {
             return true;
         }
     }
@@ -7179,9 +7280,10 @@ fn has_gate_proj_experts(weight_map: &HashMap<String, String>) -> bool {
 fn has_shared_gate_proj(weight_map: &HashMap<String, String>, shared_name: &str) -> bool {
     let mlp_gate = format!(".mlp.{shared_name}.gate_proj");
     let mixer_gate = format!(".mixer.{shared_name}.gate_proj");
+    let direct_gate = format!(".{shared_name}.gate_proj");
     weight_map
         .keys()
-        .any(|key| key.contains(&mlp_gate) || key.contains(&mixer_gate))
+        .any(|key| key.contains(&mlp_gate) || key.contains(&mixer_gate) || key.contains(&direct_gate))
 }
 
 /// Detect shared expert naming: "shared_experts" (DeepSeek) vs "shared_expert" (QCN).
@@ -7194,8 +7296,24 @@ fn detect_shared_expert_name(weight_map: &HashMap<String, String>) -> &'static s
         if key.contains(".mlp.shared_expert.") || key.contains(".mixer.shared_expert.") {
             return "shared_expert";
         }
+        if key.contains(".share_expert.") {
+            return "share_expert";
+        }
     }
     "shared_experts" // default to plural (DeepSeek convention)
+}
+
+fn shared_expert_prefix(
+    layers_prefix: &str,
+    layer_idx: usize,
+    expert_sublayer: &str,
+    shared_name: &str,
+) -> String {
+    if shared_name == "share_expert" {
+        format!("{layers_prefix}.layers.{layer_idx}.share_expert")
+    } else {
+        format!("{layers_prefix}.layers.{layer_idx}.{expert_sublayer}.{shared_name}")
+    }
 }
 
 /// Detect whether the model uses BF16 weights or pre-quantized compressed-tensors INT4.
@@ -7268,6 +7386,16 @@ fn is_stacked_experts(weight_map: &HashMap<String, String>) -> bool {
         .any(|k| k.ends_with(".mlp.experts.gate_up_proj") || k.ends_with(".experts.gate_up_proj"))
 }
 
+/// Detect Step-style separate stacked expert tensors:
+///   moe.gate_proj.weight [E, inter, hidden]
+///   moe.up_proj.weight   [E, inter, hidden]
+///   moe.down_proj.weight [E, hidden, inter]
+fn is_separate_stacked_experts(weight_map: &HashMap<String, String>) -> bool {
+    weight_map.keys().any(|k| k.ends_with(".moe.gate_proj.weight"))
+        && weight_map.keys().any(|k| k.ends_with(".moe.up_proj.weight"))
+        && weight_map.keys().any(|k| k.ends_with(".moe.down_proj.weight"))
+}
+
 fn stacked_experts_prefix(
     layers_prefix: &str,
     layer_idx: usize,
@@ -7279,6 +7407,10 @@ fn stacked_experts_prefix(
     } else {
         format!("{layers_prefix}.layers.{layer_idx}.mlp.experts")
     }
+}
+
+fn separate_stacked_experts_prefix(layers_prefix: &str, layer_idx: usize) -> String {
+    format!("{layers_prefix}.layers.{layer_idx}.moe")
 }
 
 /// Detect MXFP4 pre-quantized format (GPT OSS).
@@ -8216,6 +8348,121 @@ fn load_fp8_scale(
     }
 }
 
+/// Load all experts from Step-style separate stacked 3D tensors and quantize.
+///
+/// Separate stacked format:
+///   moe.gate_proj.weight [E, inter, hidden]
+///   moe.up_proj.weight   [E, inter, hidden]
+///   moe.down_proj.weight [E, hidden, inter]
+fn load_separate_stacked_layer_experts(
+    layer_idx: usize,
+    layers_prefix: &str,
+    weight_map: &HashMap<String, String>,
+    shards: &HashMap<String, MmapSafetensors>,
+    config: &ModelConfig,
+    group_size: usize,
+    num_bits: u8,
+    int4_calib_mode: ExpertInt4CalibMode,
+    calib_data: Option<&ExpertInt4CalibData>,
+) -> Result<Vec<ExpertWeights>, String> {
+    let n_experts = config.n_routed_experts;
+    let inter = config.moe_intermediate_size;
+    let hidden = config.hidden_size;
+    let expert_prefix = separate_stacked_experts_prefix(layers_prefix, layer_idx);
+
+    let load_tensor = |proj: &str, expected_shape: [usize; 3]| -> Result<&[u16], String> {
+        let name = format!("{expert_prefix}.{proj}.weight");
+        let shard_name = weight_map
+            .get(&name)
+            .ok_or_else(|| format!("Step separate-stacked tensor not found: {name}"))?;
+        let shard = shards
+            .get(shard_name)
+            .ok_or_else(|| format!("Shard not loaded: {shard_name}"))?;
+        let info = shard
+            .tensor_info(&name)
+            .ok_or_else(|| format!("Tensor not in shard: {name}"))?;
+        if info.shape.as_slice() != expected_shape.as_slice() {
+            return Err(format!(
+                "{name} shape mismatch: expected {:?}, got {:?}",
+                expected_shape, info.shape
+            ));
+        }
+        if info.dtype != Dtype::Bf16 {
+            return Err(format!(
+                "{name} dtype mismatch: Step separate-stacked loader expects BF16, got {:?}",
+                info.dtype
+            ));
+        }
+        shard
+            .tensor_as_slice(&name)
+            .map_err(|e| format!("Failed to read {name}: {e}"))
+    };
+
+    let gate_data = load_tensor("gate_proj", [n_experts, inter, hidden])?;
+    let up_data = load_tensor("up_proj", [n_experts, inter, hidden])?;
+    let down_data = load_tensor("down_proj", [n_experts, hidden, inter])?;
+    let in_stride = inter * hidden;
+    let out_stride = hidden * inter;
+
+    let experts: Vec<ExpertWeights> = (0..n_experts)
+        .into_par_iter()
+        .map(|eidx| {
+            let gate_start = eidx * in_stride;
+            let up_start = eidx * in_stride;
+            let down_start = eidx * out_stride;
+            let gate_slice = &gate_data[gate_start..gate_start + in_stride];
+            let up_slice = &up_data[up_start..up_start + in_stride];
+            let down_slice = &down_data[down_start..down_start + out_stride];
+
+            if num_bits == 4 {
+                ExpertWeights {
+                    gate: QuantWeight::Int4(quantize_int4_expert_calibrated(
+                        gate_slice,
+                        inter,
+                        hidden,
+                        group_size,
+                        int4_calib_mode,
+                        layer_idx,
+                        eidx,
+                        "gate_proj",
+                        calib_data,
+                    )),
+                    up: QuantWeight::Int4(quantize_int4_expert_calibrated(
+                        up_slice,
+                        inter,
+                        hidden,
+                        group_size,
+                        int4_calib_mode,
+                        layer_idx,
+                        eidx,
+                        "up_proj",
+                        calib_data,
+                    )),
+                    down: QuantWeight::Int4(quantize_int4_expert_calibrated(
+                        down_slice,
+                        hidden,
+                        inter,
+                        group_size,
+                        int4_calib_mode,
+                        layer_idx,
+                        eidx,
+                        "down_proj",
+                        calib_data,
+                    )),
+                }
+            } else {
+                ExpertWeights {
+                    gate: QuantWeight::Int8(quantize_int8(gate_slice, inter, hidden, group_size)),
+                    up: QuantWeight::Int8(quantize_int8(up_slice, inter, hidden, group_size)),
+                    down: QuantWeight::Int8(quantize_int8(down_slice, hidden, inter, group_size)),
+                }
+            }
+        })
+        .collect();
+
+    Ok(experts)
+}
+
 /// Load all experts from stacked 3D tensors (Qwen3.5/Mistral 4 format) and quantize.
 ///
 /// Stacked format: experts.gate_up_proj [E, 2*inter, hidden], experts.down_proj [E, hidden, inter]
@@ -8512,6 +8759,38 @@ mod tests {
     }
 
     #[test]
+    fn test_step_separate_stacked_detection() {
+        let mut weight_map = HashMap::new();
+        weight_map.insert(
+            "model.layers.3.moe.gate_proj.weight".to_string(),
+            "model-00001.safetensors".to_string(),
+        );
+        weight_map.insert(
+            "model.layers.3.moe.up_proj.weight".to_string(),
+            "model-00001.safetensors".to_string(),
+        );
+        weight_map.insert(
+            "model.layers.3.moe.down_proj.weight".to_string(),
+            "model-00001.safetensors".to_string(),
+        );
+        weight_map.insert(
+            "model.layers.3.share_expert.gate_proj.weight".to_string(),
+            "model-00001.safetensors".to_string(),
+        );
+
+        assert_eq!(detect_expert_prefix(&weight_map).unwrap(), "model");
+        assert_eq!(detect_expert_sublayer(&weight_map), "moe");
+        assert!(has_gate_proj_experts(&weight_map));
+        assert!(is_separate_stacked_experts(&weight_map));
+        assert_eq!(detect_shared_expert_name(&weight_map), "share_expert");
+        assert!(has_shared_gate_proj(&weight_map, "share_expert"));
+        assert_eq!(
+            shared_expert_prefix("model", 3, "moe", "share_expert"),
+            "model.layers.3.share_expert"
+        );
+    }
+
+    #[test]
     fn test_load_v2_lite() {
         let _ = env_logger::try_init();
         let model_dir = Path::new("/home/main/Documents/Claude/hf-models/DeepSeek-V2-Lite");
@@ -8750,6 +9029,41 @@ mod tests {
         assert_eq!(config.num_moe_layers(), 94);
         assert_eq!(config.moe_abs_layer(0), 0);
         assert_eq!(config.moe_abs_layer(93), 93);
+    }
+
+    #[test]
+    fn test_config_step37_flash_text_config() {
+        let json: serde_json::Value = serde_json::from_str(
+            r#"{
+            "model_type": "step3p7",
+            "text_config": {
+                "model_type": "step3p5",
+                "hidden_size": 4096,
+                "intermediate_size": 11264,
+                "moe_intermediate_size": 1280,
+                "moe_num_experts": 288,
+                "moe_top_k": 8,
+                "moe_layers_enum": "3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44",
+                "num_hidden_layers": 45,
+                "share_expert_dim": 1280,
+                "moe_router_scaling_factor": 3.0
+            }
+        }"#,
+        )
+        .unwrap();
+        let config = ModelConfig::from_json(&json).unwrap();
+        assert_eq!(config.hidden_size, 4096);
+        assert_eq!(config.moe_intermediate_size, 1280);
+        assert_eq!(config.n_routed_experts, 288);
+        assert_eq!(config.num_experts_per_tok, 8);
+        assert_eq!(config.num_hidden_layers, 45);
+        assert_eq!(config.first_k_dense_replace, 3);
+        assert_eq!(config.n_shared_experts, 1);
+        assert_eq!(config.shared_expert_intermediate_size, 1280);
+        assert!((config.routed_scaling_factor - 3.0).abs() < 0.001);
+        assert_eq!(config.num_moe_layers(), 42);
+        assert_eq!(config.moe_abs_layer(0), 3);
+        assert_eq!(config.moe_abs_layer(41), 44);
     }
 
     #[test]

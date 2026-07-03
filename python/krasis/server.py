@@ -1592,7 +1592,8 @@ def main():
     _hf_tok = _model.tokenizer.tokenizer  # unwrap Tokenizer -> HF AutoTokenizer
     _template = getattr(_hf_tok, "chat_template", "") or ""
     template_supports_enable_thinking = "enable_thinking" in _template
-    if args.enable_thinking and not template_supports_enable_thinking:
+    template_has_thinking = "<think>" in _template and "</think>" in _template
+    if args.enable_thinking and not (template_supports_enable_thinking or template_has_thinking):
         logger.info(
             "Model template does not support enable_thinking; forcing server default thinking off"
         )
@@ -2977,17 +2978,16 @@ def main():
     tokenizer_path = os.path.join(args.model_path, "tokenizer.json")
 
     # Look up </think> token ID for thinking budget tracking.
-    # Only activate if the model's chat template actually supports enable_thinking
-    # (i.e. the template contains <think> logic). Without this check, models
-    # without thinking support would never emit </think>, breaking the budget.
+    # Some models expose an enable_thinking template switch; Step-style templates
+    # always open a thinking block and rely on the serving layer to parse/close it.
     think_end_id = 0
-    if template_supports_enable_thinking:
+    if template_supports_enable_thinking or template_has_thinking:
         _raw_id = _hf_tok.convert_tokens_to_ids("</think>")
         if isinstance(_raw_id, int) and _raw_id != _hf_tok.unk_token_id:
             think_end_id = _raw_id
             logger.info("Thinking end token: </think> = %d", think_end_id)
         else:
-            logger.info("Template has enable_thinking but no </think> token")
+            logger.info("Template has thinking blocks but no </think> token")
     else:
         logger.info("Model template does not support enable_thinking — thinking budget disabled")
 
@@ -3072,7 +3072,7 @@ def main():
         _verify_hcs_vram_floor("server_ready")
     _decode_mode = f"{len(all_aux_gpu_store_addrs)+1}-GPU" if all_aux_gpu_store_addrs else "GPU"
     _hcs_str = "on" if args.hcs else "off"
-    _think_str = "on" if think_end_id else "off"
+    _think_str = "on" if args.enable_thinking else "off"
     _client_host = "127.0.0.1" if str(args.host).strip() in ("0.0.0.0", "::", "") else str(args.host).strip()
     _client_base_url = f"http://{_client_host}:{args.port}/v1"
     _client_chat_url = f"{_client_base_url}/chat/completions"

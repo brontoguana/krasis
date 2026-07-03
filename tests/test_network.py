@@ -238,6 +238,80 @@ def test_coherent_response(
                       response_text=text, elapsed=elapsed)
 
 
+def _context_rejection_detail(body: Any) -> Optional[str]:
+    """Return a short detail string if body is a structured context rejection."""
+    parsed = None
+    if isinstance(body, str):
+        try:
+            parsed = json.loads(body)
+        except json.JSONDecodeError:
+            return None
+    elif isinstance(body, dict):
+        parsed = body
+    if not isinstance(parsed, dict):
+        return None
+
+    err = parsed.get("error")
+    if not isinstance(err, dict):
+        return None
+    if err.get("code") != "context_length_exceeded":
+        return None
+
+    prompt_tokens = err.get("prompt_tokens")
+    max_context = err.get("max_context_tokens")
+    if isinstance(prompt_tokens, int) and isinstance(max_context, int):
+        return f"Correctly rejected over-context prompt ({prompt_tokens}>{max_context})"
+    return "Correctly rejected over-context prompt"
+
+
+def test_large_prompt_response(
+    base_url: str, name: str, messages: List[Dict[str, str]],
+    stream: bool = False, max_tokens: int = 128, timeout: int = 120,
+    min_words: int = 3,
+) -> TestResult:
+    """Large-prompt test: generate if in context, pass safe rejection if not."""
+    t0 = time.time()
+    status, body = send_chat_request(
+        base_url, messages, max_tokens=max_tokens,
+        temperature=0.3, stream=stream, timeout=timeout,
+    )
+    elapsed = time.time() - t0
+
+    if status == 413:
+        detail = _context_rejection_detail(body)
+        if detail:
+            return TestResult(name, True, f"{detail} ({elapsed:.1f}s)", elapsed=elapsed)
+
+    if status == 0:
+        return TestResult(name, False, f"Connection error: {body}", elapsed=elapsed)
+    if status != 200:
+        return TestResult(name, False, f"HTTP {status}", elapsed=elapsed)
+
+    if stream:
+        text, finish = parse_sse_content(body)
+    else:
+        text = body.get("choices", [{}])[0].get("message", {}).get("content", "")
+        finish = body.get("choices", [{}])[0].get("finish_reason")
+
+    if is_garbage(text):
+        return TestResult(name, False, f"Garbage output: {text[:100]!r}",
+                          response_text=text, elapsed=elapsed)
+
+    word_count = len(text.split())
+    if word_count < min_words:
+        return TestResult(name, False,
+                          f"Too short ({word_count} words): {text[:100]!r}",
+                          response_text=text, elapsed=elapsed)
+
+    if finish not in ("stop", "length"):
+        return TestResult(name, False,
+                          f"Bad finish_reason: {finish!r}",
+                          response_text=text, elapsed=elapsed)
+
+    return TestResult(name, True, f"OK ({elapsed:.1f}s, {word_count} words)",
+                      response_text=text, elapsed=elapsed)
+
+
 # ═══════════════════════════════════════════════════════════════════
 # Test 4: Multi-prompt validation
 # ═══════════════════════════════════════════════════════════════════
@@ -376,7 +450,7 @@ def run_large_prompt_tests(base_url: str) -> List[TestResult]:
         prompt = f"{text}\n\n{question}"
         print(f" done ({len(prompt)} chars)")
 
-        r = test_coherent_response(base_url, name, [
+        r = test_large_prompt_response(base_url, name, [
             {"role": "user", "content": prompt},
         ], max_tokens=max_tokens, timeout=timeout, stream=True, min_words=3)
         results.append(r)

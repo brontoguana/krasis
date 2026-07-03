@@ -71,7 +71,8 @@ def _collect_eos_ids(raw: dict, cfg: dict, gen_cfg: dict) -> list:
     ids = []
     seen = set()
     # generation_config.json first (authoritative for generation)
-    for source in (gen_cfg, raw, cfg):
+    text_cfg = raw.get("text_config") if isinstance(raw.get("text_config"), dict) else {}
+    for source in (gen_cfg, raw, text_cfg, cfg):
         eos = source.get("eos_token_id")
         if eos is None:
             continue
@@ -92,6 +93,36 @@ def _parse_extra_stop_ids(raw: dict, cfg: dict, gen_cfg: dict) -> tuple:
     """Additional stop token IDs beyond the primary EOS."""
     ids = _collect_eos_ids(raw, cfg, gen_cfg)
     return tuple(ids[1:]) if len(ids) > 1 else ()
+
+
+def _parse_int_list(value: Any, field_name: str, *, max_len: Optional[int] = None) -> Optional[List[int]]:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        items = [part.strip() for part in value.split(",") if part.strip()]
+        parsed = [int(part) for part in items]
+    elif isinstance(value, list):
+        parsed = [int(part) for part in value]
+    else:
+        raise ValueError(f"{field_name} must be a comma-separated string or list")
+    if max_len is not None:
+        for idx in parsed:
+            if idx < 0 or idx >= max_len:
+                raise ValueError(f"{field_name} contains out-of-range layer {idx} for {max_len} layers")
+    return parsed
+
+
+def _parse_float_list(value: Any, field_name: str, *, max_len: Optional[int] = None) -> Optional[List[float]]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return None
+    if not isinstance(value, list):
+        raise ValueError(f"{field_name} must be a scalar or list")
+    parsed = [float(part) for part in value]
+    if max_len is not None and len(parsed) < max_len:
+        raise ValueError(f"{field_name} has {len(parsed)} entries, expected at least {max_len}")
+    return parsed[:max_len] if max_len is not None else parsed
 
 
 def _infer_from_weights(model_path: str, cfg: dict) -> dict:
@@ -441,6 +472,9 @@ class ModelConfig:
     global_head_dim: int = 0              # Gemma4 full-attention head dim
     num_global_key_value_heads: int = 0   # Gemma4 full-attention KV heads
     attention_k_eq_v: bool = False        # Gemma4 full-attention value uses k_proj source
+    gqa_other_num_attention_heads: int = 0  # Step sliding-attention query heads
+    gqa_other_num_key_value_heads: int = 0  # Step sliding-attention KV groups
+    gqa_other_head_dim: int = 0             # Step sliding-attention head dim
 
     # Hybrid model: linear attention (Gated DeltaNet) + full attention
     full_attention_interval: int = 0   # 0 = all full attention; N = every Nth layer is full
@@ -461,6 +495,9 @@ class ModelConfig:
     scoring_func: str = "softmax"         # "sigmoid" or "softmax"
     topk_method: str = "greedy"           # "noaux_tc"
     norm_topk_prob: bool = True
+    moe_layer_indices: Optional[List[int]] = None
+    use_moe_router_bias: bool = False
+    need_fp32_gate: bool = False
 
     # Norm / activation
     rms_norm_eps: float = 1e-6
@@ -471,6 +508,9 @@ class ModelConfig:
     rope_scaling: Dict[str, Any] = field(default_factory=dict)
     max_position_embeddings: int = 262144
     partial_rotary_factor: float = 1.0  # GLM-4.7 uses 0.5 (only half of head_dim gets RoPE)
+    partial_rotary_factors: Optional[List[float]] = None  # Step per-layer partial rotary factors
+    rope_theta_layers: Optional[List[float]] = None       # Step per-layer theta values
+    yarn_only_types: Optional[List[str]] = None            # Step applies scaled RoPE only to these layer types
     rope_interleave: bool = True  # MLA models: True means q_pe/k_pe need de-interleaving before RoPE
 
     # Attention
@@ -480,7 +520,10 @@ class ModelConfig:
     # Pre-quantized experts
     expert_quant_method: str = ""      # "mxfp4" for GPT OSS, "" for standard BF16
     swiglu_limit: float = 0.0         # GPT OSS: 7.0 — clamp SwiGLU output to [-limit, limit]
+    swiglu_limits: Optional[List[float]] = None          # Step per-layer routed clamp
+    swiglu_limits_shared: Optional[List[float]] = None   # Step per-layer shared clamp
     gemma4_text: bool = False          # Gemma4 text tower semantics
+    step3_text: bool = False           # Step text tower semantics
     embedding_scale: float = 1.0       # Gemma text embeddings multiply by sqrt(hidden_size)
     final_logit_softcapping: float = 0.0
 
@@ -502,6 +545,7 @@ class ModelConfig:
     # GQA output gating: q_proj outputs [query, gate], apply sigmoid(gate) before o_proj
     # Qwen3.5 calls this attn_output_gate, Qwen3Next uses it implicitly
     gated_attention: bool = False
+    head_wise_attention_gate: bool = False  # Step separate g_proj attention gate
 
     # Norm convention: Qwen3NextRMSNorm uses (1 + weight) * x, stored weights are ~0
     # Standard RMSNorm uses weight * x, stored weights are ~1
@@ -553,6 +597,10 @@ class ModelConfig:
         # Detect attention type: MLA has kv_lora_rank, GQA does not
         is_mla = "kv_lora_rank" in cfg
 
+        # Model architecture type
+        arch = cfg.get("model_type", "")
+        step3_text = arch in ("step3p5", "step3p7")
+
         # Handle first_k_dense_replace from either field or decoder_sparse_step
         if "first_k_dense_replace" in cfg:
             first_k_dense = cfg["first_k_dense_replace"]
@@ -562,13 +610,13 @@ class ModelConfig:
         else:
             first_k_dense = 0
 
-        # Model architecture type
-        arch = cfg.get("model_type", "")
-
         # Hybrid model: compute layer_types
         full_attn_interval = cfg.get("full_attention_interval", 0)
         num_layers = cfg["num_hidden_layers"]
         layer_types = None
+        moe_layer_indices = _parse_int_list(cfg.get("moe_layers_enum"), "moe_layers_enum", max_len=num_layers)
+        if moe_layer_indices:
+            first_k_dense = min(moe_layer_indices)
         hybrid_pattern = cfg.get("hybrid_override_pattern", "")
         if hybrid_pattern and arch == "nemotron_h":
             # Nemotron-H: parse M=mamba2, E=moe, *=attention from pattern
@@ -578,7 +626,12 @@ class ModelConfig:
                 f"hybrid_override_pattern length {len(layer_types)} != num_hidden_layers {num_layers}")
         elif "layer_types" in cfg:
             # GPT OSS: explicit layer_types array (sliding_attention / full_attention)
-            layer_types = cfg["layer_types"]
+            layer_types = list(cfg["layer_types"])
+            if len(layer_types) > num_layers and step3_text:
+                # Step includes MTP/extra layers after the normal CausalLM text stack.
+                layer_types = layer_types[:num_layers]
+            if len(layer_types) < num_layers:
+                raise ValueError(f"layer_types length {len(layer_types)} < num_hidden_layers {num_layers}")
         elif full_attn_interval > 0:
             # Qwen3-Next: compute from full_attention_interval
             layer_types = [
@@ -590,29 +643,34 @@ class ModelConfig:
         # Norm convention: Qwen3NextRMSNorm uses (1 + weight) * x
         # with weight initialized to zeros, while standard models use weight * x
         # with weight initialized to ones. We add 1.0 to stored weights at load time.
-        norm_bias_one = arch in ("qwen3_next", "qwen3_5_moe_text")
+        norm_bias_one = arch in ("qwen3_next", "qwen3_5_moe_text") or step3_text
 
         # Gated attention: q_proj outputs [query, gate], apply sigmoid(gate) before o_proj
         # Qwen3.5 uses explicit attn_output_gate flag; Qwen3Next always uses it
         gated_attention = cfg.get("attn_output_gate", arch in ("qwen3_next", "qwen3_5_moe_text"))
 
-        # Nemotron-H shared expert intermediate: separate field name
+        # Nemotron-H and Step use separate shared expert field names.
         nemotron_shared_inter = cfg.get("moe_shared_expert_intermediate_size", 0)
+        step_shared_inter = cfg.get("share_expert_dim", 0)
 
         # Shared experts: n_shared_experts or infer from shared_expert_intermediate_size
         n_shared = cfg.get("n_shared_experts", 0)
-        shared_inter = cfg.get("shared_expert_intermediate_size", nemotron_shared_inter)
+        shared_inter = cfg.get("shared_expert_intermediate_size", nemotron_shared_inter or step_shared_inter)
         if n_shared == 0 and shared_inter > 0:
             n_shared = 1  # infer single shared expert
 
-        # Expert count: n_routed_experts (DeepSeek) / num_experts (Qwen3) / num_local_experts (GPT OSS)
+        # Expert count: n_routed_experts (DeepSeek) / num_experts (Qwen3) /
+        # num_local_experts (GPT OSS/Nemotron) / moe_num_experts (Step).
         n_experts = cfg.get("n_routed_experts",
                            cfg.get("num_experts",
-                                  cfg.get("num_local_experts", 0)))
-        # Experts per token: num_experts_per_tok (DeepSeek/Qwen3) / experts_per_token (GPT OSS)
+                                  cfg.get("num_local_experts",
+                                          cfg.get("moe_num_experts", 0))))
+        # Experts per token: num_experts_per_tok (DeepSeek/Qwen3) /
+        # experts_per_token (GPT OSS) / moe_top_k (Step).
         experts_per_tok = cfg.get("num_experts_per_tok",
                                  cfg.get("experts_per_token",
-                                         cfg.get("top_k_experts", 0)))
+                                         cfg.get("top_k_experts",
+                                                 cfg.get("moe_top_k", 0))))
 
         # MoE intermediate size: moe_intermediate_size (Qwen3) / intermediate_size (GPT OSS)
         moe_inter = cfg.get("moe_intermediate_size", cfg.get("intermediate_size", 0))
@@ -624,8 +682,12 @@ class ModelConfig:
         quant_config = cfg.get("quantization_config", {})
         expert_quant_method = quant_config.get("quant_method", "")
 
-        # SwiGLU activation limit (GPT OSS clamps SwiGLU output)
+        # SwiGLU activation limit (GPT OSS scalar; Step has per-layer arrays).
         swiglu_limit = cfg.get("swiglu_limit", 0.0)
+        swiglu_limits = _parse_float_list(cfg.get("swiglu_limits"), "swiglu_limits", max_len=num_layers)
+        swiglu_limits_shared = _parse_float_list(
+            cfg.get("swiglu_limits_shared"), "swiglu_limits_shared", max_len=num_layers
+        )
 
         # RoPE: some models (Qwen3.5) nest rope_theta/partial_rotary_factor inside rope_parameters
         rope_params = cfg.get("rope_parameters", {}) or {}
@@ -633,13 +695,44 @@ class ModelConfig:
             rope_default = rope_params.get("sliding_attention", {})
         else:
             rope_default = rope_params
-        rope_theta = cfg.get("rope_theta", rope_params.get("rope_theta", 10000.0))
+        raw_rope_theta = cfg.get("rope_theta", rope_params.get("rope_theta", 10000.0))
+        rope_theta_layers = _parse_float_list(raw_rope_theta, "rope_theta", max_len=num_layers)
+        rope_theta = rope_theta_layers[0] if rope_theta_layers else raw_rope_theta
         if arch == "gemma4_text":
             rope_theta = cfg.get("rope_theta", rope_default.get("rope_theta", 10000.0))
             partial_rotary = rope_default.get("partial_rotary_factor", 1.0)
+            partial_rotary_factors = None
         else:
-            partial_rotary = cfg.get("partial_rotary_factor",
-                                     rope_params.get("partial_rotary_factor", 1.0))
+            raw_partial_rotary = cfg.get("partial_rotary_factor",
+                                         cfg.get("partial_rotary_factors",
+                                                 rope_params.get("partial_rotary_factor", 1.0)))
+            partial_rotary_factors = _parse_float_list(
+                raw_partial_rotary, "partial_rotary_factors", max_len=num_layers
+            )
+            partial_rotary = partial_rotary_factors[0] if partial_rotary_factors else raw_partial_rotary
+        raw_yarn_only_types = cfg.get("yarn_only_types")
+        yarn_only_types = list(raw_yarn_only_types) if isinstance(raw_yarn_only_types, list) else None
+
+        attention_other = cfg.get("attention_other_setting", {}) or {}
+        other_heads = int(attention_other.get("num_attention_heads", 0) or 0)
+        other_kv_heads = int(
+            attention_other.get("num_key_value_heads",
+                                attention_other.get("num_attention_groups", 0)) or 0
+        )
+        other_head_dim = int(attention_other.get("head_dim", 0) or 0)
+        base_kv_heads = int(cfg.get("num_key_value_heads",
+                                    cfg.get("num_attention_groups", cfg["num_attention_heads"])))
+        router_activation = cfg.get("moe_router_activation", "")
+        scoring_func = cfg.get("scoring_func")
+        if scoring_func is None:
+            scoring_func = "sigmoid" if arch == "nemotron_h" or router_activation == "sigmoid" else "softmax"
+        rms_norm_eps = cfg.get("rms_norm_eps")
+        if rms_norm_eps is None:
+            rms_norm_eps = cfg.get("norm_eps", cfg.get("layer_norm_epsilon"))
+        if rms_norm_eps is None:
+            # Step ships rms_norm_eps as null in config.json, but its local
+            # configuration class defaults this field to 1e-5.
+            rms_norm_eps = 1e-5 if step3_text else 1e-6
 
         return cls(
             model_path=model_path,
@@ -648,7 +741,7 @@ class ModelConfig:
             moe_intermediate_size=moe_inter,
             num_hidden_layers=num_layers,
             num_attention_heads=cfg["num_attention_heads"],
-            num_key_value_heads=cfg.get("num_key_value_heads", cfg["num_attention_heads"]),
+            num_key_value_heads=base_kv_heads,
             vocab_size=cfg["vocab_size"],
             # MLA fields (None for GQA)
             q_lora_rank=cfg.get("q_lora_rank") if is_mla else None,
@@ -661,6 +754,9 @@ class ModelConfig:
             global_head_dim=cfg.get("global_head_dim", 0),
             num_global_key_value_heads=cfg.get("num_global_key_value_heads", 0),
             attention_k_eq_v=bool(cfg.get("attention_k_eq_v", False)),
+            gqa_other_num_attention_heads=other_heads,
+            gqa_other_num_key_value_heads=other_kv_heads,
+            gqa_other_head_dim=other_head_dim,
             # Hybrid model
             full_attention_interval=full_attn_interval,
             layer_types=layer_types,
@@ -675,23 +771,33 @@ class ModelConfig:
             n_shared_experts=n_shared,
             shared_expert_intermediate_size=shared_inter,
             first_k_dense_replace=first_k_dense,
-            routed_scaling_factor=cfg.get("routed_scaling_factor", 1.0),
+            routed_scaling_factor=cfg.get("routed_scaling_factor",
+                                          cfg.get("moe_router_scaling_factor", 1.0)),
             scoring_func=cfg.get("scoring_func",
-                                 "sigmoid" if arch == "nemotron_h" else "softmax"),
+                                 scoring_func),
             topk_method=cfg.get("topk_method", "greedy"),
-            norm_topk_prob=cfg.get("norm_topk_prob", True),
-            rms_norm_eps=cfg.get("rms_norm_eps", cfg.get("norm_eps", cfg.get("layer_norm_epsilon", 1e-6))),
+            norm_topk_prob=cfg.get("norm_topk_prob", cfg.get("norm_expert_weight", True)),
+            moe_layer_indices=moe_layer_indices,
+            use_moe_router_bias=bool(cfg.get("use_moe_router_bias", False)),
+            need_fp32_gate=bool(cfg.get("need_fp32_gate", False)),
+            rms_norm_eps=float(rms_norm_eps),
             hidden_act=cfg.get("hidden_activation", cfg.get("hidden_act", "silu")),
             rope_theta=rope_theta,
             rope_scaling=cfg.get("rope_scaling") or rope_params or {},
             max_position_embeddings=cfg.get("max_position_embeddings", 131072),
             partial_rotary_factor=partial_rotary,
+            partial_rotary_factors=partial_rotary_factors,
+            rope_theta_layers=rope_theta_layers,
+            yarn_only_types=yarn_only_types,
             rope_interleave=cfg.get("rope_interleave", True),
             attention_bias=cfg.get("attention_bias", False),
             sliding_window=sliding_window,
             expert_quant_method=expert_quant_method,
             swiglu_limit=swiglu_limit,
+            swiglu_limits=swiglu_limits,
+            swiglu_limits_shared=swiglu_limits_shared,
             gemma4_text=arch == "gemma4_text",
+            step3_text=step3_text,
             embedding_scale=(cfg["hidden_size"] ** 0.5) if arch == "gemma4_text" else 1.0,
             final_logit_softcapping=float(cfg.get("final_logit_softcapping") or 0.0),
             # Nemotron-H fields
@@ -710,6 +816,7 @@ class ModelConfig:
             mlp_hidden_act=cfg.get("mlp_hidden_act",
                                    cfg.get("hidden_activation", cfg.get("hidden_act", "silu"))),
             gated_attention=gated_attention,
+            head_wise_attention_gate=bool(cfg.get("use_head_wise_attn_gate", False)),
             norm_bias_one=norm_bias_one,
             tie_word_embeddings=tie,
             bos_token_id=raw.get("bos_token_id", cfg.get("bos_token_id", 0)),
@@ -733,6 +840,8 @@ class ModelConfig:
 
     @property
     def num_moe_layers(self) -> int:
+        if self.moe_layer_indices is not None:
+            return len(self.moe_layer_indices)
         if self.hybrid_override_pattern:
             return self.hybrid_override_pattern.count('E')
         return self.num_hidden_layers - self.first_k_dense_replace
@@ -745,11 +854,20 @@ class ModelConfig:
         return self.gqa_head_dim
 
     def gqa_head_dim_for_layer(self, layer_idx: int) -> int:
+        if self.step3_text and self.is_sliding_attention_layer(layer_idx) and self.gqa_other_head_dim:
+            return self.gqa_other_head_dim
         if self.gemma4_text and self.is_full_attention_layer(layer_idx) and not self.is_sliding_attention_layer(layer_idx):
             return self.global_head_dim or self.gqa_head_dim
         return self.gqa_head_dim
 
+    def gqa_num_heads_for_layer(self, layer_idx: int) -> int:
+        if self.step3_text and self.is_sliding_attention_layer(layer_idx) and self.gqa_other_num_attention_heads:
+            return self.gqa_other_num_attention_heads
+        return self.num_attention_heads
+
     def gqa_num_kv_heads_for_layer(self, layer_idx: int) -> int:
+        if self.step3_text and self.is_sliding_attention_layer(layer_idx) and self.gqa_other_num_key_value_heads:
+            return self.gqa_other_num_key_value_heads
         if self.gemma4_text and self.is_full_attention_layer(layer_idx) and not self.is_sliding_attention_layer(layer_idx):
             return self.num_global_key_value_heads or self.num_key_value_heads
         return self.num_key_value_heads
@@ -763,6 +881,8 @@ class ModelConfig:
         )
 
     def rope_theta_for_layer(self, layer_idx: int) -> float:
+        if self.rope_theta_layers is not None:
+            return float(self.rope_theta_layers[layer_idx])
         if self.gemma4_text and isinstance(self.rope_scaling, dict):
             key = "sliding_attention" if self.is_sliding_attention_layer(layer_idx) else "full_attention"
             params = self.rope_scaling.get(key, {})
@@ -772,6 +892,8 @@ class ModelConfig:
 
     def rotary_dim_for_layer(self, layer_idx: int) -> int:
         head_dim = self.gqa_head_dim_for_layer(layer_idx)
+        if self.partial_rotary_factors is not None:
+            return int(head_dim * float(self.partial_rotary_factors[layer_idx]))
         if self.gemma4_text and isinstance(self.rope_scaling, dict):
             key = "sliding_attention" if self.is_sliding_attention_layer(layer_idx) else "full_attention"
             params = self.rope_scaling.get(key, {})
@@ -869,12 +991,24 @@ class ModelConfig:
         return self.mamba_d_inner + 2 * self.mamba_n_groups * self.ssm_state_size
 
     def is_moe_layer(self, layer_idx: int) -> bool:
+        if self.moe_layer_indices is not None:
+            return layer_idx in self.moe_layer_indices
         if self.is_nemotron_h:
             # Nemotron: only MoE layers have experts. Attention and Mamba2 layers do not.
             return self.layer_types[layer_idx] == "moe"
         if self.n_routed_experts <= 0:
             return False
         return layer_idx >= self.first_k_dense_replace
+
+    def swiglu_limit_for_layer(self, layer_idx: int) -> float:
+        if self.swiglu_limits is not None:
+            return float(self.swiglu_limits[layer_idx])
+        return float(self.swiglu_limit)
+
+    def shared_swiglu_limit_for_layer(self, layer_idx: int) -> float:
+        if self.swiglu_limits_shared is not None:
+            return float(self.swiglu_limits_shared[layer_idx])
+        return self.swiglu_limit_for_layer(layer_idx)
 
 
 def compute_pp_partition(

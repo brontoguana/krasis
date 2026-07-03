@@ -1,5 +1,112 @@
 # Krasis Benchmark Results
 
+## QCN HQQ4 Cache Builder and Runtime Staging - 2026-07-03 (RTX 5090)
+
+Hardware: EPYC 7742, 1007 GB RAM, 1x RTX 5090. Standard speed runs used
+`./dev speed-test` with timing instrumentation disabled. CUDA-search cache
+validation used `KRASIS_HQQ4_CACHE_IMPL=rust_cuda_search_v1` and a separate
+cache identity from the default CPU-built HQQ4 artifacts.
+
+| Model | Config | Prefill (internal) | Decode (internal) | Round trip (network) | HCS | Min free VRAM | Status | Logs |
+|-------|--------|-------------------:|------------------:|---------------------:|-----|--------------:|--------|------|
+| Qwen3-Coder-Next | Default HQQ4 cache impl, INT4 experts, HQQ4 attention, k4v4 KV | 6,889.4 tok/s | 90.17 tok/s | 152.20 tok/s | 16281/24576 (66.2%) | 920 MB | BASELINE | [stdout](20260703_qcn_hqq4_default_speedtest_after_cache_impl.log), [report](../logs/dev-benchmark_20260703_144624/benchmark_report.log) |
+| Qwen3-Coder-Next | CUDA-search HQQ4 cache impl, `KRASIS_HQQ4_CACHE_IMPL=rust_cuda_search_v1` | 6,502.9 tok/s | 89.69 tok/s | 154.59 tok/s | 16281/24576 (66.2%) | 920 MB | CACHE-BUILD PASS | [stdout](20260703_qcn_hqq4_cuda_cache_speedtest.log), [report](../logs/dev-benchmark_20260703_145145/benchmark_report.log), [witness](20260703_qcn_hqq4_cuda_cache_witness_compare.log), [probe](20260703_qcn_hqq4_rust_cuda_probe.log) |
+| Qwen3-Coder-Next | Current-tree default HQQ runtime staging rerun | 6,892.2 tok/s | 85.98 tok/s | 148.19 tok/s | 16281/24576 (66.2%) | 920 MB | CURRENT BASELINE | [stdout](20260703_qcn_hqq4_default_rerun_after_pinned_code.log), [report](../logs/dev-benchmark_20260703_155921/benchmark_report.log) |
+| Qwen3-Coder-Next | Pinned HQQ stage host buffers, `KRASIS_HQQ_STAGE_PIN_HOST=1` | 7,723.2 tok/s | 86.44 tok/s | 146.41 tok/s | 16281/24576 (66.2%) | 916 MB | OPT-IN PREFILL WIN | [stdout](20260703_qcn_hqq4_pinned_stage_speedtest.log), [report](../logs/dev-benchmark_20260703_154900/benchmark_report.log), [witness](20260703_qcn_hqq4_pinned_stage_witness_compare.log), [breakdown](20260703_qcn_hqq4_pinned_stage_breakdown.log) |
+
+Notes:
+- CUDA-search HQQ4 cache build completed in `32.0s` for QCN and validated
+  `947 MB` of artifacts from the separate
+  `attention_hqq_v5_grid65_33_rust_cuda_search_v1` cache identity.
+- Witness gate with CUDA-search cache passed: `8 PASS, 0 WARN, 0 FAIL`,
+  prefill argmax `8/8`, prefill top-10 `8/8`, first-token match `8/8`, and
+  average decode top-k `100.0%`.
+- Real-tensor probe before integration measured strong HQQ4 cache-builder
+  speedups on QCN layer 3: `q_proj 9.75x`, `k_proj 16.50x`, `o_proj 17.70x`,
+  with RMSE ratios within `1.000003`.
+- Runtime speed is not promoted from the CUDA-built artifacts: decode stayed
+  within noise (`90.17 -> 89.69 tok/s`), HTTP was similar/slightly higher
+  (`152.20 -> 154.59 tok/s`), and HCS/min-free were unchanged. Prefill was
+  lower in this single speed run (`6,889.4 -> 6,502.9 tok/s`), so the cache
+  builder should be evaluated as a setup-time win, not a prefill/decode runtime
+  optimization.
+- HQQ runtime stage swapping was measured as a real request-boundary cost.
+  Default current-tree startup copied the `947 MB` decode stage in `151.381ms`;
+  `KRASIS_HQQ_STAGE_PIN_HOST=1` copied the same stage in `112.684ms`.
+  Timing-enabled pinned breakdown showed stable prefill/decode `hqq_swap_ms`
+  samples around `115-125ms`, versus the earlier pageable baseline around
+  `150-180ms`.
+- Pinned HQQ stage host buffers passed expanded QCN witness:
+  `8 PASS, 0 WARN, 0 FAIL`, prefill argmax `8/8`, first-token `8/8`, decode
+  top-k `100%`. Current-tree timing-off A/B showed a real prefill win and
+  neutral decode: default rerun `6,892.2 / 85.98 / 148.19 tok/s`; pinned
+  staging `7,723.2 / 86.44 / 146.41 tok/s`. Min free VRAM remained close to
+  the default (`920 MB -> 916 MB`) and HCS stayed `16281/24576`.
+- Pinned staging remains opt-in for now. It registers about `1.9 GB` of HQQ
+  stage host memory with CUDA, so promoting it to default should be a deliberate
+  production decision after considering host pinned-memory limits across boxes.
+- Async HQQ stage copy without pinned host was tested separately via
+  `KRASIS_HQQ_STAGE_ASYNC_COPY=1`; it passed witness but regressed the
+  timing-off speed run (`6,656.2 / 88.68 / 143.83 tok/s`), so it remains
+  rejected as a default optimization.
+
+## Step Benchmarks - 2026-07-03 (HQQ4/k4v4, RTX 5090)
+
+Hardware: EPYC 7742, 1007 GB RAM, 1x RTX 5090. Command:
+`./dev benchmark tests/step37-flash-4-4-hqq4-k4v4-a16.conf`. Timing
+instrumentation disabled. Witness gate passed before benchmarking with
+`./dev witness-compare tests/step37-flash-4-4-hqq4-k4v4-a16.conf --profile greedy_chat_thinking_off --startup-timeout 3600`.
+
+| Model | Config | Prefill (internal) | Decode (internal) | Round trip (network) | HCS | Min free VRAM | Status | Logs |
+|-------|--------|-------------------:|------------------:|---------------------:|-----|--------------:|--------|------|
+| Step-3.7-Flash | INT4 experts, HQQ4 attention, k4v4 KV, INT8 shared/dense/lm_head, LGS=2 | 1,618.2 tok/s | 21.96 tok/s | 36.27 tok/s | 2784/12096 (23.0%) | 854 MB | PASS | [stdout](20260703_step37_hqq4_k4v4_benchmark.log), [report](../logs/dev-benchmark_20260703_080620/benchmark_report.log), [witness](20260703_step37_hqq4_k4v4_witness_compare_startup3600.log) |
+| Step-3.7-Flash | Same plus opt-in prefill pointer-table reuse, `KRASIS_PREFILL_PTR_TABLE_REUSE=1` | 1,531.3 tok/s | 22.47 tok/s | 37.69 tok/s | 2784/12096 (23.0%) | 854 MB | REJECTED | [stdout](20260703_step37_hqq4_k4v4_ptrreuse_benchmark.log), [report](../logs/dev-benchmark_20260703_135707/benchmark_report.log), [witness](20260703_step37_hqq4_k4v4_ptrreuse_ordered_witness_compare.log) |
+| Step-3.7-Flash | Same plus opt-in non-HD512 k4v4 tiled decode, `KRASIS_DECODE_K4V4_TILED_NON_HD512=1` | 1,610.2 tok/s | 22.89 tok/s | 37.52 tok/s | 2784/12096 (23.0%) | 854 MB | DIAGNOSTIC | [stdout](20260703_step37_hqq4_k4v4_k4tiled_cachedflag_benchmark.log), [report](../logs/dev-benchmark_20260703_104823/benchmark_report.log), [witness](20260703_step37_hqq4_k4v4_k4tiled_witness_compare.log) |
+| Step-3.7-Flash | Same plus opt-in graph-replay APFL, `KRASIS_APFL_PREFETCH=8` | 1,594.0 tok/s | 14.40 tok/s | 23.41 tok/s | 2736/12096 (22.6%) | 970 MB | REJECTED | [stdout](20260703_step37_hqq4_k4v4_apfl8_benchmark.log), [report](../logs/dev-benchmark_20260703_094749/benchmark_report.log), [witness](20260703_step37_hqq4_k4v4_apfl8_witness_compare.log) |
+
+Notes:
+- Witness result before benchmark: `8 PASS, 0 WARN, 0 FAIL`, prefill argmax
+  `8/8`, prefill top-10 `8/8`, first-token match `8/8`, average exact run
+  `8.2` tokens, average decode top-k `72.7%`.
+- HQQ4 attention cache build was a one-time startup cost and completed in
+  `1238.6s`; benchmark reused the validated `3726 MB` cached artifacts.
+- Decode min-free stayed above the configured `600 MB` margin but close enough
+  to keep watching during optimization.
+- Prefill pointer-table reuse validation exposed a real ordering issue in the
+  first attempt: removing per-layer `cuMemAlloc_v2` also removed an accidental
+  device-ordering point for reused cold staging. Adding an explicit stream
+  event recovered first-token witness correctness (`8/8`), but metrics remained
+  slightly weaker than baseline (prefill argmax `7/8`, average exact `7.4`,
+  decode top-k `70.3%`). Timing-off benchmark regressed prefill
+  `1,618.2 -> 1,531.3 tok/s` (`-5.4%`) while decode/HTTP only improved
+  modestly (`+2.3%`/`+3.9%`). Default remains off via
+  `KRASIS_PREFILL_PTR_TABLE_REUSE=1`; this candidate is not promoted.
+- Non-HD512 k4v4 tiled decode validation
+  (`KRASIS_DECODE_K4V4_TILED_NON_HD512=1`) formally passed witness
+  (`8 PASS, 0 WARN, 0 FAIL`), but quality metrics weakened versus the baseline:
+  prefill argmax `7/8`, prefill top-10 `8/8`, first-token match `7/8`,
+  average exact run `5.8` tokens, average decode top-k `57.0%`. The final
+  rebuilt-code benchmark after caching the opt-in flag outside the hot path was
+  mixed: prefill `-0.5%`, internal decode `+4.2%`, HTTP round trip `+3.4%`,
+  HCS unchanged, and min-free unchanged. Default remains off; this candidate is
+  not promoted without timing-on attribution and better witness metrics. It may
+  be worth revisiting because the decode/HTTP speed signal is real; any retry
+  must start from witness-equivalent attention math, not a prompt threshold.
+- Follow-up correctness attribution narrowed the opt-in path to non-HD512
+  full-attention layers only, but witness still missed the Count of Monte
+  Cristo first token: prefill argmax `7/8`, first-token `7/8`, average exact
+  `7.0`, decode top-k `63.3%`. A temporary compatibility tiled kernel also
+  missed the same first token and was removed. No follow-up benchmark was run
+  because correctness did not recover.
+- APFL graph-replay candidate validation (`KRASIS_APFL_PREFETCH=8`) formally
+  passed witness (`8 PASS, 0 WARN, 0 FAIL`), but quality metrics weakened:
+  prefill argmax `7/8`, prefill top-10 `8/8`, first-token match `7/8`,
+  average exact run `7.0` tokens, average decode top-k `68.8%`.
+- APFL graph-replay candidate speed regressed versus the baseline: prefill
+  `-1.5%`, internal decode `-34.4%`, HTTP round trip `-35.5%`, and HCS
+  residency dropped `2784 -> 2736` experts. Default remains off; this
+  candidate is not promoted.
+
 ## Bring-up - 2026-06-14 (Nemotron Super runtime stable, raw logits finite)
 
 Hardware: EPYC 7742, 1007 GB RAM, RTX 5090 32 GB selected for Nemotron
@@ -10,6 +117,7 @@ bring-up and INT4 experts.
 
 | Run | Command | Attention | KV | Result | Decision | Logs |
 |-----|---------|-----------|----|--------|----------|------|
+| 2026-07-01 23:10 | Nemotron Super Mamba2 SSD unused c-state scratch removal | HQQ4 attention | k4v4 KV | Completed: prefill `1,782.3 tok/s`, decode `43.43 tok/s`, HTTP `48.66 tok/s`, HCS `7038/20480`, min free `878 MB` | Accepted as a small prefill/memory win after sequential correctness-gated Mamba2 SSD candidates. Reusable SSD temps were rejected from prior evidence because they reduced the calibrated cap and regressed prefill. A local-dA output-scan candidate failed correctness (`40` output mismatches at layer 0, state exact). A Shared-C prior-dot cache passed bitwise self-compare at layers 0 and 86, but regressed timing-off prefill to `1,683.5 tok/s`, so it was removed. The kept change only skips allocating `c_state_total_exact` when the active parallel output kernel cannot read it; fallback/non-parallel paths fail closed if the buffer is missing. Long-prefill transient improved `18,672 -> 18,434 MB`, cap `15,191 -> 15,212`, and best prefill `1,753.7 -> 1,782.3 tok/s` (`+1.6%`). | [result](20260701_2310_super_skip_c_state_result.tsv), [summary](20260701_2310_super_skip_c_state_summary.json), [report](20260701_2310_super_skip_c_state_benchmark_report.log), [stdout](20260701_2310_super_skip_c_state_benchmark_stdout_full.log), [tmux stdout](20260701_2310_super_skip_c_state_benchmark_stdout.log), [server log](20260701_2310_super_skip_c_state_krasis.log), [diagnostic stdout](20260701_2258_super_skip_c_state_diag_stdout.log), [diagnostic server log](20260701_2258_super_skip_c_state_diag_krasis.log), [validation](20260701_2310_super_skip_c_state_validation_checks.tsv) |
 | 2026-07-01 21:10 | Nemotron Super Mamba2 projection INT4 cache | HQQ4 attention | k4v4 KV | Completed: prefill `1,753.7 tok/s`, decode `41.96 tok/s`, HTTP `49.12 tok/s`, HCS `7038/20480`, min free `878 MB` | Accepted for VRAM, HCS residency, and decode. Cached Nemotron Mamba2 `in_proj`/`out_proj` as dense-backbone INT4 artifacts outside HCS and registered them through the existing Marlin/simple INT4 descriptor path. Startup free VRAM improved `14,430 -> 20,232 MB`, calibrated long prefill rose `7,422 -> 15,191` tokens, and the Mamba2 projection bucket changed from BF16 `8,360.0 MB` to INT4 `2,220.6 MB`. Decode improved `28.94 -> 41.96 tok/s` with min-free still close to the `600 MB` safety target. Prefill only improved slightly (`1,733.4 -> 1,753.7 tok/s`), so the remaining prefill target is still Mamba2 SSD/output scan and runtime pressure. Post-review source-signature hardening rebuilt the cache and reached server-ready with the same startup free/HCS state. | [result](20260701_2110_super_mamba2_int4_final_result.tsv), [summary](20260701_2110_super_mamba2_int4_final_summary.json), [report](20260701_2110_super_mamba2_int4_final_benchmark_report.log), [stdout](20260701_2110_super_mamba2_int4_final_benchmark_stdout.log), [server log](20260701_2110_super_mamba2_int4_final_krasis.log), [startup fixed](20260701_2055_super_mamba2_int4_startup2.log), [signature startup](20260701_2130_super_mamba2_int4_signature_startup.log), [validation](20260701_2110_super_mamba2_int4_final_validation_checks.tsv) |
 | 2026-07-01 17:10 | Nemotron Super HQQ4+k4v4 VRAM residency/RoPE fix | HQQ4 attention | k4v4 KV | Completed: prefill `1,733.4 tok/s`, decode `28.94 tok/s`, HTTP `47.39 tok/s`, HCS `4922/20480`, min free `886 MB` | Accepted. Investigated the remaining startup VRAM gap with same-code VRAM ledgers. Fixed two real Super HQQ4 residency losses: GQA BF16 projection tensors in `layer.gqa_weights` were not released when the layer had no attention object, and identical HQQ GQA RoPE tables were allocated per GQA layer plus again for the global Rust RoPE table. Startup free VRAM improved `12,688 -> 14,430 MB`, calibrated long prefill rose `5,088 -> 7,422` tokens, and timing-off prefill improved from the prior accepted `1,464.5 -> 1,733.4 tok/s` (`+18.4%`). Remaining Super/Q122 startup gap is now about `5.2 GB`, mostly structural Mamba2/shared-expert/runtime footprint plus higher Super prefill scratch growth. | [result](20260701_1710_super_vramfix_final_result.tsv), [summary](20260701_1710_super_vramfix_final_summary.json), [report](20260701_1710_super_vramfix_final_benchmark_report.log), [stdout](20260701_1710_super_vramfix_final_benchmark_stdout_full.log), [server log](20260701_1710_super_vramfix_final_krasis.log), [validation](20260701_1710_super_vramfix_final_validation_checks.tsv) |
 | 2026-07-01 13:00 | Nemotron Super HQQ4+k4v4 Mamba2 unzeroed temps | HQQ4 attention | k4v4 KV | Completed: prefill `1,464.5 tok/s`, decode `27.84 tok/s`, HTTP `44.54 tok/s`, HCS `4278/20480`, min free `922 MB` | Accepted. Fixed Super prefill to use the model Mamba2 chunk size and defaulted the production parallel Mamba2 SSD temp buffers to uninitialized allocation where diagnostics/oracle paths do not require zeroed memory. Improves the prior accepted lookahead baseline from `1,370.3 -> 1,464.5 tok/s` (`+6.9%`) with HCS and min-free essentially unchanged. Reusable preallocated SSD temp scratch was tested and rejected (`1,411.0 tok/s`) because it regressed timing-off prefill. | [result](20260701_1052_super_prefill_unzeroed_temps_result.tsv), [summary](20260701_1052_super_prefill_unzeroed_temps_summary.json), [final report](20260701_1300_super_prefill_unzeroed_final_benchmark_report.log), [final stdout](20260701_1300_super_prefill_unzeroed_final_benchmark_stdout.log), [rejected report](20260701_1240_super_prefill_reuse_ssd_temps_benchmark_report.log), [validation](20260701_1052_super_prefill_unzeroed_temps_validation_checks.tsv) |

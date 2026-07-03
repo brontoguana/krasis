@@ -330,9 +330,30 @@ impl ChatTemplateEngine {
             preserve_thinking => false,
         };
 
-        tmpl.render(ctx)
-            .map_err(|e| format!("Template render failed: {}", e))
+        let rendered = tmpl
+            .render(ctx)
+            .map_err(|e| format!("Template render failed: {}", e))?;
+        let rendered = rendered.trim_start_matches(['\n', '\r']).to_string();
+        Ok(close_initial_think_block_if_disabled(
+            rendered,
+            add_generation_prompt,
+            enable_thinking,
+        ))
     }
+}
+
+fn close_initial_think_block_if_disabled(
+    mut rendered: String,
+    add_generation_prompt: bool,
+    enable_thinking: bool,
+) -> String {
+    if add_generation_prompt && !enable_thinking {
+        const OPEN_THINK_SUFFIX: &str = "<|im_start|>assistant\n<think>\n";
+        if rendered.ends_with(OPEN_THINK_SUFFIX) {
+            rendered.push_str("\n</think>\n\n");
+        }
+    }
+    rendered
 }
 
 fn load_sibling_chat_template(tokenizer_config_path: &str) -> Option<String> {
@@ -542,6 +563,33 @@ mod tests {
                 .apply(r#"[{"role":"user","content":"hi"}]"#, true, true)
                 .unwrap(),
             "<think>\n"
+        );
+    }
+
+    #[test]
+    fn always_open_think_template_closes_when_disabled() {
+        let template = concat!(
+            "{{ bos_token }}",
+            "{% for message in messages %}",
+            "{{ '<|im_start|>' + message.role + '\n' + message.content + '<|im_end|>\n' }}",
+            "{% endfor %}",
+            "{% if add_generation_prompt %}",
+            "{{ '<|im_start|>assistant\n<think>\n' }}",
+            "{% endif %}"
+        );
+        let config_path = write_tokenizer_config(template);
+        let engine = ChatTemplateEngine::from_config(&config_path).unwrap();
+        assert_eq!(
+            engine
+                .apply(r#"[{"role":"user","content":"hi"}]"#, true, false)
+                .unwrap(),
+            "<s><|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        );
+        assert_eq!(
+            engine
+                .apply(r#"[{"role":"user","content":"hi"}]"#, true, true)
+                .unwrap(),
+            "<s><|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n<think>\n"
         );
     }
 

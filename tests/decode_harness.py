@@ -126,6 +126,11 @@ class SyntheticDecodeHarness:
         self.cached_fp32_vecs: Dict[Tuple[str, int], torch.Tensor] = {}
         self.cached_fp32_mats: Dict[Tuple[str, int, int], torch.Tensor] = {}
         self.cached_gate_wids: Dict[Tuple[int, int], int] = {}
+        self.cached_rope_tables: Dict[
+            Tuple[int, int, float, int, str], Tuple[torch.Tensor, torch.Tensor]
+        ] = {}
+        self.max_seq = 0
+        self.kv_cache_obj: Optional[PagedKVCache] = None
 
         self.store = GpuDecodeStore(gpu_idx)
         self._setup_store()
@@ -265,6 +270,128 @@ class SyntheticDecodeHarness:
         self.cached_fp32_mats[cache_key] = mat
         return mat
 
+    def _gqa_layer_rope_params(self, layer_idx: int) -> Dict[str, object]:
+        rope_params = self.cfg.rope_scaling if isinstance(self.cfg.rope_scaling, dict) else {}
+        if self.cfg.step3_text and rope_params:
+            layer_type = (
+                "sliding_attention"
+                if self.cfg.is_sliding_attention_layer(layer_idx)
+                else "full_attention"
+            )
+            yarn_only_types = getattr(self.cfg, "yarn_only_types", None)
+            if yarn_only_types and layer_type not in yarn_only_types:
+                return {}
+            return dict(rope_params)
+        if self.cfg.gemma4_text and rope_params:
+            layer_type = (
+                "sliding_attention"
+                if self.cfg.is_sliding_attention_layer(layer_idx)
+                else "full_attention"
+            )
+            return dict(rope_params.get(layer_type, {}) or {})
+        return {}
+
+    def _gqa_inv_freq_for_layer(
+        self,
+        layer_idx: int,
+        head_dim_for_rope: int,
+        rope_half: int,
+        theta: float,
+        layer_rope_params: Dict[str, object],
+    ) -> torch.Tensor:
+        if self.cfg.gemma4_text and layer_rope_params.get("rope_type") == "proportional":
+            rope_proportion = float(layer_rope_params.get("partial_rotary_factor", 1.0))
+            rope_angles = int(rope_proportion * head_dim_for_rope // 2)
+            inv_freq_rotated = 1.0 / (
+                theta
+                ** (
+                    torch.arange(0, 2 * rope_angles, 2, dtype=torch.float32)
+                    / head_dim_for_rope
+                )
+            )
+            nope_angles = head_dim_for_rope // 2 - rope_angles
+            if nope_angles > 0:
+                return torch.cat(
+                    (inv_freq_rotated, torch.zeros(nope_angles, dtype=torch.float32)),
+                    dim=0,
+                )
+            return inv_freq_rotated
+
+        inv_freq = 1.0 / (
+            theta
+            ** (
+                torch.arange(0, rope_half * 2, 2, dtype=torch.float32)
+                / (rope_half * 2)
+            )
+        )
+        rope_type = layer_rope_params.get("rope_type", layer_rope_params.get("type", "default"))
+        if rope_type != "llama3":
+            return inv_freq
+
+        required = ("factor", "original_max_position_embeddings", "low_freq_factor", "high_freq_factor")
+        missing = [name for name in required if name not in layer_rope_params]
+        if missing:
+            raise RuntimeError(f"Llama3 RoPE parameters missing required fields: {missing}")
+
+        factor = float(layer_rope_params["factor"])
+        original_max_position_embeddings = float(layer_rope_params["original_max_position_embeddings"])
+        low_freq_factor = float(layer_rope_params["low_freq_factor"])
+        high_freq_factor = float(layer_rope_params["high_freq_factor"])
+        if factor <= 0.0 or high_freq_factor == low_freq_factor:
+            raise RuntimeError(f"Invalid Llama3 RoPE parameters for layer {layer_idx}: {layer_rope_params}")
+
+        low_freq_wavelen = original_max_position_embeddings / low_freq_factor
+        high_freq_wavelen = original_max_position_embeddings / high_freq_factor
+        wavelen = (2.0 * math.pi) / inv_freq
+        scaled_inv_freq = torch.where(wavelen > low_freq_wavelen, inv_freq / factor, inv_freq)
+        smooth_factor = (
+            (original_max_position_embeddings / wavelen) - low_freq_factor
+        ) / (high_freq_factor - low_freq_factor)
+        smoothed = (1.0 - smooth_factor) * (inv_freq / factor) + smooth_factor * inv_freq
+        is_medium = torch.logical_and(
+            ~(wavelen < high_freq_wavelen),
+            ~(wavelen > low_freq_wavelen),
+        )
+        return torch.where(is_medium, smoothed, scaled_inv_freq)
+
+    def _gqa_rope_table_ptrs(
+        self, layer_idx: int
+    ) -> Tuple[int, int, int, Optional[torch.Tensor], Optional[torch.Tensor]]:
+        layer_rope_params = self._gqa_layer_rope_params(layer_idx)
+        head_dim_for_rope = self.cfg.gqa_head_dim_for_layer(layer_idx)
+        if self.cfg.gemma4_text and layer_rope_params.get("rope_type") == "proportional":
+            rope_half = head_dim_for_rope // 2
+        else:
+            rope_half = int(self.cfg.rotary_dim_for_layer(layer_idx) // 2)
+        if rope_half <= 0:
+            return 0, 0, 0, None, None
+        theta = float(self.cfg.rope_theta_for_layer(layer_idx))
+        cache_key = (
+            int(self.max_seq),
+            rope_half,
+            theta,
+            head_dim_for_rope,
+            repr(sorted(layer_rope_params.items())),
+        )
+        cached = self.cached_rope_tables.get(cache_key)
+        if cached is None:
+            inv_freq = self._gqa_inv_freq_for_layer(
+                layer_idx,
+                head_dim_for_rope,
+                rope_half,
+                theta,
+                layer_rope_params,
+            )
+            t = torch.arange(self.max_seq, dtype=torch.float32)
+            freqs = torch.outer(t, inv_freq)
+            cos_f32 = freqs.cos().contiguous().to(self.device)
+            sin_f32 = freqs.sin().contiguous().to(self.device)
+            self.keepalive.extend([cos_f32, sin_f32])
+            cached = (cos_f32, sin_f32)
+            self.cached_rope_tables[cache_key] = cached
+        cos_f32, sin_f32 = cached
+        return cos_f32.data_ptr(), sin_f32.data_ptr(), rope_half, cos_f32, sin_f32
+
     def _make_dense_mlp(self, layer_idx: int) -> None:
         inter = self.cfg.intermediate_size
         gate_wid = self._register_bf16_weight((inter, self.cfg.hidden_size))
@@ -321,7 +448,7 @@ class SyntheticDecodeHarness:
             w2p, w2pb, w2s, w2sb = self._pack_expert_matrix(se_w2)
             shared_ptrs = (w13p, w13pb, w13s, w13sb, w2p, w2pb, w2s, w2sb)
 
-        scoring_func = 1 if self.cfg.scoring_func == "softmax" else 0
+        scoring_func = 1 if self.cfg.scoring_func == "sigmoid" else 0
         self.store.register_moe_layer(
             layer_idx,
             expert_ptrs,
@@ -344,6 +471,14 @@ class SyntheticDecodeHarness:
                 shared_gate.data_ptr(), shared_gate.shape[0], shared_gate.shape[1], 0
             )
             self.store.set_moe_shared_gate_wid(layer_idx, sg_wid)
+        routed_limit = float(self.cfg.swiglu_limit_for_layer(layer_idx))
+        shared_limit = float(self.cfg.shared_swiglu_limit_for_layer(layer_idx))
+        if routed_limit or shared_limit:
+            self.store.set_moe_swiglu_limits(
+                layer_idx,
+                swiglu_limit=routed_limit,
+                shared_swiglu_limit=shared_limit,
+            )
 
         self.store.register_mlp(layer_idx, "moe")
 
@@ -400,20 +535,26 @@ class SyntheticDecodeHarness:
                 conv_dim=conv_dim,
                 scale=1.0 / math.sqrt(dk),
             )
-        elif layer_type == "full_attention":
-            head_dim = self.cfg.gqa_head_dim or self.cfg.head_dim
-            q_out = self.cfg.num_attention_heads * head_dim * (2 if self.cfg.gated_attention else 1)
-            kv_out = self.cfg.num_key_value_heads * head_dim
+        elif layer_type in ("full_attention", "sliding_attention"):
+            head_dim = self.cfg.gqa_head_dim_for_layer(layer_idx)
+            num_heads = self.cfg.gqa_num_heads_for_layer(layer_idx)
+            num_kv_heads = self.cfg.gqa_num_kv_heads_for_layer(layer_idx)
+            q_out = num_heads * head_dim * (2 if self.cfg.gated_attention else 1)
+            kv_out = num_kv_heads * head_dim
 
             q_wid = self._register_attn_weight((q_out, self.cfg.hidden_size))
             k_wid = self._register_attn_weight((kv_out, self.cfg.hidden_size))
             v_wid = self._register_attn_weight((kv_out, self.cfg.hidden_size))
             o_wid = self._register_attn_weight(
-                (self.cfg.hidden_size, self.cfg.num_attention_heads * head_dim)
+                (self.cfg.hidden_size, num_heads * head_dim)
             )
+            head_gate_wid = None
+            if self.cfg.head_wise_attention_gate:
+                head_gate_wid = self._register_attn_weight((num_heads, self.cfg.hidden_size))
 
             q_norm = self._shared_fp32_vec("gqa_q_norm", head_dim)
             k_norm = self._shared_fp32_vec("gqa_k_norm", head_dim)
+            rope_cos_ptr, rope_sin_ptr, rope_half, _, _ = self._gqa_rope_table_ptrs(layer_idx)
 
             self.store.register_gqa_layer(
                 layer_idx=layer_idx,
@@ -426,14 +567,22 @@ class SyntheticDecodeHarness:
                 v_proj_wid=v_wid,
                 o_proj_wid=o_wid,
                 fused_qkv_wid=None,
-                num_heads=self.cfg.num_attention_heads,
-                num_kv_heads=self.cfg.num_key_value_heads,
+                num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
                 head_dim=head_dim,
                 sm_scale=1.0 / math.sqrt(head_dim),
                 q_norm_ptr=q_norm.data_ptr(),
                 k_norm_ptr=k_norm.data_ptr(),
                 gated=self.cfg.gated_attention,
+                head_gate_proj_wid=head_gate_wid,
+                rope_half_dim=rope_half,
+                rope_cos_ptr=rope_cos_ptr,
+                rope_sin_ptr=rope_sin_ptr,
             )
+            if layer_type == "sliding_attention" and self.cfg.sliding_window:
+                self.store.set_gqa_sliding_window(layer_idx, int(self.cfg.sliding_window))
+            if self.cfg.gemma4_text or self.cfg.step3_text:
+                self.store.set_gqa_rope_half_split(layer_idx, True)
         else:
             raise RuntimeError(f"Unsupported synthetic layer type: {layer_type}")
 
@@ -444,19 +593,27 @@ class SyntheticDecodeHarness:
         else:
             self.store.register_mlp(layer_idx, "none")
 
-    def _setup_kv_cache(self) -> int:
+    def _setup_kv_cache(self, *, register_ptrs: bool = True) -> int:
         full_attn_layers = self.cfg.num_full_attention_layers
         total_tokens = max(self.prompt_len + self.steps + 32, PAGE_SIZE)
         max_pages = (total_tokens + PAGE_SIZE - 1) // PAGE_SIZE
         kv_dtype = torch.float8_e4m3fn if self.kv_format == "fp8" else torch.bfloat16
-        cache = PagedKVCache(
-            self.cfg,
-            full_attn_layers,
-            self.device,
-            max_pages=max_pages,
-            kv_dtype=kv_dtype,
-            kv_format=self.kv_format,
-        )
+        if self.kv_cache_obj is None:
+            cache = PagedKVCache(
+                self.cfg,
+                full_attn_layers,
+                self.device,
+                max_pages=max_pages,
+                kv_dtype=kv_dtype,
+                kv_format=self.kv_format,
+            )
+            self.kv_cache_obj = cache
+            self.keepalive.append(cache)
+        else:
+            cache = self.kv_cache_obj
+
+        if not register_ptrs:
+            return cache.max_pages * cache.page_size
 
         if cache.kv_format == 2 and cache.k_radius_cache is not None:
             polar4_ptrs = []
@@ -481,6 +638,43 @@ class SyntheticDecodeHarness:
             self.store.set_kv_cache_ptrs_polar4(
                 polar4_ptrs, cache.max_pages * cache.page_size, num_blocks
             )
+        elif cache.kv_format in (5, 6, 7, 8, 9) and cache.k_radius_cache is not None:
+            kv_ptrs = []
+            gqa_layers = [
+                idx for idx in range(self.cfg.num_hidden_layers)
+                if (
+                    self.cfg.layer_types[idx]
+                    if self.cfg.layer_types is not None
+                    else "full_attention"
+                ) in ("full_attention", "sliding_attention")
+            ]
+            num_blocks = None
+            for gqa_idx, layer_idx in enumerate(gqa_layers):
+                blocks = (
+                    self.cfg.gqa_num_kv_heads_for_layer(layer_idx)
+                    * self.cfg.gqa_head_dim_for_layer(layer_idx)
+                ) // 16
+                if num_blocks is None:
+                    num_blocks = blocks
+                elif num_blocks != blocks:
+                    raise RuntimeError(
+                        "Synthetic integer KV harness requires uniform KV block geometry; "
+                        f"layer {layer_idx} has {blocks}, expected {num_blocks}."
+                    )
+                kr = cache.k_radius_cache[gqa_idx]
+                ka = cache.k_angles_cache[gqa_idx]
+                vr = cache.v_radius_cache[gqa_idx]
+                va = cache.v_angles_cache[gqa_idx]
+                kv_ptrs.append((layer_idx, kr.data_ptr(), ka.data_ptr(), vr.data_ptr(), va.data_ptr()))
+                self.cache_tensors.extend([kr, ka, vr, va])
+            setter = {
+                5: self.store.set_kv_cache_ptrs_k6v4,
+                6: self.store.set_kv_cache_ptrs_k7v4,
+                7: self.store.set_kv_cache_ptrs_k6v6,
+                8: self.store.set_kv_cache_ptrs_k8v6,
+                9: self.store.set_kv_cache_ptrs_k4v4,
+            }[cache.kv_format]
+            setter(kv_ptrs, cache.max_pages * cache.page_size, int(num_blocks or 0))
         elif cache.k_cache is not None:
             kv_ptrs = []
             gqa_idx = 0
@@ -496,11 +690,13 @@ class SyntheticDecodeHarness:
                     kv_ptrs.append((layer_idx, k_layer.data_ptr(), v_layer.data_ptr()))
                     self.cache_tensors.extend([k_layer, v_layer])
                     gqa_idx += 1
-            self.store.set_kv_cache_ptrs(kv_ptrs, cache.max_pages * cache.page_size)
+            if cache.kv_format == 0 and hasattr(self.store, "set_kv_cache_ptrs_bf16"):
+                self.store.set_kv_cache_ptrs_bf16(kv_ptrs, cache.max_pages * cache.page_size)
+            else:
+                self.store.set_kv_cache_ptrs(kv_ptrs, cache.max_pages * cache.page_size)
         else:
             raise RuntimeError("Unsupported KV cache setup for synthetic harness.")
 
-        self.keepalive.append(cache)
         return cache.max_pages * cache.page_size
 
     def _setup_store(self) -> None:
@@ -548,6 +744,8 @@ class SyntheticDecodeHarness:
             if self.cfg.layer_types is not None
             else ["full_attention"] * self.cfg.num_hidden_layers
         )
+        self.max_seq = self._setup_kv_cache(register_ptrs=False)
+
         for layer_idx, layer_type in enumerate(layer_types):
             if layer_idx == 0 or (layer_idx + 1) % 8 == 0 or layer_idx + 1 == len(layer_types):
                 print(
@@ -556,19 +754,19 @@ class SyntheticDecodeHarness:
                 )
             self._register_layer(layer_idx, layer_type)
 
-        max_seq = self._setup_kv_cache()
-        if any(t == "full_attention" for t in layer_types):
-            rope_half = self.cfg.rotary_dim // 2
-            inv_freq = 1.0 / (
-                self.cfg.rope_theta
-                ** (torch.arange(0, rope_half * 2, 2, dtype=torch.float32) / (rope_half * 2))
-            )
-            t = torch.arange(max_seq, dtype=torch.float32)
-            freqs = torch.outer(t, inv_freq)
-            cos_f32 = freqs.cos().contiguous().to(self.device)
-            sin_f32 = freqs.sin().contiguous().to(self.device)
-            self.keepalive.extend([cos_f32, sin_f32])
-            self.store.set_rope_tables(cos_f32.data_ptr(), sin_f32.data_ptr(), cos_f32.shape[1], max_seq)
+        self._setup_kv_cache(register_ptrs=True)
+
+        first_gqa_layer = next(
+            (
+                idx for idx, layer_type in enumerate(layer_types)
+                if layer_type in ("full_attention", "sliding_attention")
+            ),
+            None,
+        )
+        if first_gqa_layer is not None:
+            cos_ptr, sin_ptr, rope_half, cos_f32, _ = self._gqa_rope_table_ptrs(first_gqa_layer)
+            if cos_f32 is not None:
+                self.store.set_rope_tables(cos_ptr, sin_ptr, rope_half, self.max_seq)
 
         free_mb = int(torch.cuda.mem_get_info(self.device)[0] // (1024 * 1024))
         hcs_budget_mb = max(256, free_mb - 512)
@@ -659,7 +857,11 @@ def main() -> None:
                         help="Synthetic routed experts per token (0 = model default)")
     parser.add_argument("--expert-bits", type=int, choices=[4, 8, 16], default=None)
     parser.add_argument("--attn-mode", choices=["bf16", "int4", "int8"], default=None)
-    parser.add_argument("--kv-format", choices=["fp8", "bf16"], default=None)
+    parser.add_argument(
+        "--kv-format",
+        choices=["fp8", "bf16", "k8v4", "k8v6", "k7v4", "k6v6", "k6v4", "k4v4", "tq4"],
+        default=None,
+    )
     parser.add_argument("--vocab-size", type=int, default=4096)
     parser.add_argument("--timing", action="store_true")
     parser.add_argument("--no-graph", action="store_true",

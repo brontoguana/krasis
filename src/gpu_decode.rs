@@ -3110,6 +3110,7 @@ const KERNEL_NAMES: &[&str] = &[
     "gated_rmsnorm_silu_bf16",
     "gqa_attention_g_bf16",
     "apply_gated_attn_bf16",
+    "apply_head_gated_attn_bf16",
     "gqa_attention_tiled_g",
     "gqa_attention_tiled_bf16_g",
     "gqa_attention_k8v4_tiled_g",
@@ -3412,6 +3413,17 @@ struct ApflState {
     pending_prefetch: bool,
     pending_next_layer: usize,
     pending_spec_count: usize,
+    /// Dedicated graph-replay spec buffers. The non-graph path reuses
+    /// d_fp32_scratch / d_topk_indices between CPU-ordered steps, but graph
+    /// replay runs spec routing on spec_stream concurrently with captured
+    /// segments that own those buffers, so the replay lookahead needs its own.
+    d_spec_hidden: Option<cudarc::driver::CudaSlice<u16>>,
+    d_spec_logits: Option<cudarc::driver::CudaSlice<f32>>,
+    d_spec_topk_ids: Option<cudarc::driver::CudaSlice<i32>>,
+    d_spec_topk_weights: Option<cudarc::driver::CudaSlice<f32>>,
+    /// Recorded on the replay stream after the segment-boundary hidden-state
+    /// snapshot; spec_stream waits on it before running the spec gate GEMV.
+    spec_snapshot_event: Option<CudaEvent>,
 }
 
 impl ApflState {
@@ -3437,6 +3449,26 @@ impl ApflState {
         }
         // Fallback: slot 0 (LRU approximation — could improve with timestamps)
         0
+    }
+
+    /// Graph-replay eviction. Unlike find_evict_slot, this never falls back to
+    /// an arbitrary slot: a slot whose entry matches `in_flight_layer` may be
+    /// referenced by the segment that was just launched (its pointers were
+    /// written into d_batch_upload), and a slot holding `pred_layer` may be a
+    /// still-useful prediction consumed at the next segment boundary.
+    /// Returns None when no safe slot exists; the caller skips the prefetch
+    /// instead of risking a use-after-overwrite.
+    fn find_evict_slot_for_replay(
+        &self,
+        in_flight_layer: usize,
+        pred_layer: usize,
+    ) -> Option<usize> {
+        if let Some(i) = self.slots.iter().position(|s| s.is_empty()) {
+            return Some(i);
+        }
+        self.slots.iter().position(|s| {
+            s.layer_idx != in_flight_layer as i32 && s.layer_idx != pred_layer as i32
+        })
     }
 }
 
@@ -6890,6 +6922,10 @@ struct MoeLayerData {
     activation_type: u8,
     /// Whether experts have a gate projection (w13 = [gate|up]) or just up_proj (w13 = [up]).
     gated_experts: bool,
+    /// Step-style routed SwiGLU clamp. 0.0 means disabled.
+    swiglu_limit: f32,
+    /// Step-style shared-expert SwiGLU clamp. 0.0 means disabled.
+    shared_swiglu_limit: f32,
     /// Latent down projection weight ID (hidden -> latent, e.g. 4096->1024). None for standard MoE.
     latent_down_wid: Option<usize>,
     /// Latent up projection weight ID (latent -> hidden, e.g. 1024->4096). None for standard MoE.
@@ -7127,6 +7163,7 @@ enum HqqLayerMetadata {
         q_norm_ptr: u64,
         k_norm_ptr: u64,
         gated: bool,
+        head_gate_proj: Option<usize>,
     },
     Mla {
         num_heads: usize,
@@ -7323,6 +7360,7 @@ impl GpuDecodeLayer {
                 v_proj: 0,
                 o_proj: 0,
                 fused_qkv: None,
+                head_gate_proj: None,
                 num_heads: 0,
                 num_kv_heads: 0,
                 head_dim: 0,
@@ -7436,6 +7474,7 @@ fn hqq_runtime_format_json(desc: &HqqRuntimeFormatDescriptor) -> serde_json::Val
         "scales_dtype": desc.scales_dtype.clone(),
         "zeros_dtype": desc.zeros_dtype.clone(),
         "host_bytes": desc.host_bytes(),
+        "pinned_host_bytes": desc.pinned_host_bytes(),
         "packed_bytes": desc.packed_bytes(),
         "scales_bytes": desc.scales_bytes(),
         "zeros_bytes": desc.zeros_bytes(),
@@ -8155,10 +8194,11 @@ fn register_hqq_attention_layer_common(
             rope_cos_ptr: metadata_rope_cos_ptr,
             rope_sin_ptr: metadata_rope_sin_ptr,
             sm_scale,
-            q_norm_ptr,
-            k_norm_ptr,
-            gated,
-        } => {
+                q_norm_ptr,
+                k_norm_ptr,
+                gated,
+                head_gate_proj: _head_gate_proj,
+            } => {
             let q_proj = required_hqq_tensor_exec(&tensors, layer_idx, layer_kind, "q_proj")?;
             let k_proj = required_hqq_tensor_exec(&tensors, layer_idx, layer_kind, "k_proj")?;
             let v_proj = required_hqq_tensor_exec(&tensors, layer_idx, layer_kind, "v_proj")?;
@@ -8338,6 +8378,7 @@ fn register_hqq_attention_layer_common(
                 v_proj,
                 o_proj,
                 fused_qkv,
+                head_gate_proj: existing_head_gate_proj,
                 ..
             },
             HqqLayerMetadata::Gqa {
@@ -8351,6 +8392,7 @@ fn register_hqq_attention_layer_common(
                 q_norm_ptr,
                 k_norm_ptr,
                 gated,
+                head_gate_proj: metadata_head_gate_proj,
             },
         ) => GpuAttnConfig::GQA {
             q_proj: *q_proj,
@@ -8358,6 +8400,7 @@ fn register_hqq_attention_layer_common(
             v_proj: *v_proj,
             o_proj: *o_proj,
             fused_qkv: *fused_qkv,
+            head_gate_proj: (*metadata_head_gate_proj).or(*existing_head_gate_proj),
             num_heads: *num_heads,
             num_kv_heads: *num_kv_heads,
             head_dim: *head_dim,
@@ -8472,6 +8515,7 @@ fn register_hqq_attention_layer_common(
                 q_norm_ptr,
                 k_norm_ptr,
                 gated,
+                head_gate_proj,
             },
         ) => GpuAttnConfig::GQA {
             q_proj: 0,
@@ -8483,6 +8527,7 @@ fn register_hqq_attention_layer_common(
                 0
             },
             fused_qkv: None,
+            head_gate_proj: *head_gate_proj,
             num_heads: *num_heads,
             num_kv_heads: *num_kv_heads,
             head_dim: *head_dim,
@@ -8626,6 +8671,7 @@ enum GpuAttnConfig {
         v_proj: usize,
         o_proj: usize,
         fused_qkv: Option<usize>,
+        head_gate_proj: Option<usize>,
         num_heads: usize,
         num_kv_heads: usize,
         head_dim: usize,
@@ -8873,6 +8919,7 @@ struct CachedKernels {
     gated_rmsnorm_silu_bf16: cudarc::driver::CudaFunction,
     gqa_attention_g_bf16: cudarc::driver::CudaFunction,
     apply_gated_attn_bf16: cudarc::driver::CudaFunction,
+    apply_head_gated_attn_bf16: cudarc::driver::CudaFunction,
     // Tiled GQA for CUDA graph capture (reads d_seq_len from GPU pointer)
     gqa_attention_tiled_g: cudarc::driver::CudaFunction,
     gqa_attention_tiled_bf16_g: cudarc::driver::CudaFunction,
@@ -9071,6 +9118,8 @@ struct GpuDecodeGraph {
     d_gqa_tiled_lse: Option<cudarc::driver::CudaSlice<f32>>, // [num_q_heads, max_tiles, 2]
     gqa_tile_size: usize,
     gqa_max_tiles: usize,
+    gqa_k4_tiled_non_hd512_enabled: bool,
+    gqa_k4_tiled_non_hd512_sliding_enabled: bool,
     gqa_num_q_heads: usize,
     gqa_head_dim: usize,
 
@@ -9426,6 +9475,7 @@ struct GpuDecodeGraph {
     debug_decode_hcs_equiv_layer: Option<usize>,
     debug_decode_hcs_equiv_entries: Vec<serde_json::Value>,
     debug_decode_early_trace_active: bool,
+    debug_decode_early_max_steps: u64,
     debug_decode_early_detail_dims: Vec<usize>,
     debug_decode_early_entries: Vec<serde_json::Value>,
     debug_hcs_transition_trace_active: bool,
@@ -9526,13 +9576,13 @@ struct GpuDecodeGraph {
     hot_hcs_full_graph: Option<CudaGraphExecPtr>,
     /// Whether per-layer graphs are valid for replay.
     per_layer_graphs_valid: bool,
-    /// Whether graphs have ever been successfully captured (for cross-request reuse).
-    /// After the first capture, KV cache and LA state buffer addresses are stable
-    /// (KV is allocated once at model load; LA Rust-side FP32 buffers use copy_()
-    /// in-place after first allocation). So graphs can be reused across requests
-    /// without recapture -- only the scalar params (token_id, pos, seq_len) and
-    /// LA state contents change, both handled via GPU-side indirection buffers.
+    /// Whether graphs have ever been successfully captured (for reuse diagnostics).
     graphs_ever_captured: bool,
+    /// Decode request start position used when the current graph set was captured.
+    /// Graph scalar buffers make token/position/seq-len values dynamic, but the CUDA
+    /// graph can still bake request-length-dependent launch geometry and shared-memory
+    /// choices. Reuse is therefore valid only for the same request start position.
+    captured_decode_start_position: Option<usize>,
     /// Whether the currently captured graph set includes metadata-only GPU route sync.
     captured_gpu_route_sync: bool,
     /// Whether a hot-HCS full decode graph was captured for this graph set.
@@ -11115,7 +11165,60 @@ impl HqqRuntimeFormatKind {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
+struct HqqPinnedHostRegistration {
+    ptr: *mut std::ffi::c_void,
+    len: usize,
+    label: String,
+}
+
+impl HqqPinnedHostRegistration {
+    fn register(bytes: &[u8], label: &str) -> Result<Option<Self>, String> {
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        let ptr = bytes.as_ptr() as *mut std::ffi::c_void;
+        let err = unsafe { cuda_sys::lib().cuMemHostRegister_v2(ptr, bytes.len(), 0) };
+        if err != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!(
+                "HQQ pinned host registration failed for {}: bytes={} err={:?}",
+                label,
+                bytes.len(),
+                err
+            ));
+        }
+        Ok(Some(Self {
+            ptr,
+            len: bytes.len(),
+            label: label.to_string(),
+        }))
+    }
+
+    fn as_ptr(&self) -> *const std::ffi::c_void {
+        self.ptr as *const std::ffi::c_void
+    }
+}
+
+impl Drop for HqqPinnedHostRegistration {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() && self.len != 0 {
+            let err = unsafe { cuda_sys::lib().cuMemHostUnregister(self.ptr) };
+            if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                log::warn!(
+                    "HQQ pinned host unregister failed for {}: bytes={} err={:?}",
+                    self.label,
+                    self.len,
+                    err,
+                );
+            }
+        }
+    }
+}
+
+unsafe impl Send for HqqPinnedHostRegistration {}
+unsafe impl Sync for HqqPinnedHostRegistration {}
+
+#[derive(Debug)]
 struct HqqRuntimeFormatDescriptor {
     stage: &'static str,
     kind: HqqRuntimeFormatKind,
@@ -11126,6 +11229,9 @@ struct HqqRuntimeFormatDescriptor {
     packed_host: Vec<u8>,
     scales_host: Vec<u8>,
     zeros_host: Vec<u8>,
+    packed_host_pin: Option<HqqPinnedHostRegistration>,
+    scales_host_pin: Option<HqqPinnedHostRegistration>,
+    zeros_host_pin: Option<HqqPinnedHostRegistration>,
     packed_component_bytes: usize,
     scales_component_bytes: usize,
     zeros_component_bytes: usize,
@@ -11153,6 +11259,43 @@ impl HqqRuntimeFormatDescriptor {
 
     fn zeros_bytes(&self) -> usize {
         self.zeros_host.len()
+    }
+
+    fn pin_host_components(&mut self, label: &str) -> Result<(), String> {
+        if self.packed_host_pin.is_some()
+            || self.scales_host_pin.is_some()
+            || self.zeros_host_pin.is_some()
+        {
+            return Ok(());
+        }
+        self.packed_host_pin = HqqPinnedHostRegistration::register(
+            &self.packed_host,
+            &format!("{} packed", label),
+        )?;
+        self.scales_host_pin = HqqPinnedHostRegistration::register(
+            &self.scales_host,
+            &format!("{} scales", label),
+        )?;
+        self.zeros_host_pin = HqqPinnedHostRegistration::register(
+            &self.zeros_host,
+            &format!("{} zeros", label),
+        )?;
+        Ok(())
+    }
+
+    fn pinned_host_bytes(&self) -> usize {
+        self.packed_host_pin.as_ref().map_or(0, |p| p.len)
+            + self.scales_host_pin.as_ref().map_or(0, |p| p.len)
+            + self.zeros_host_pin.as_ref().map_or(0, |p| p.len)
+    }
+}
+
+impl Drop for HqqRuntimeFormatDescriptor {
+    fn drop(&mut self) {
+        // Drop registrations before the backing Vec allocations are freed.
+        self.packed_host_pin.take();
+        self.scales_host_pin.take();
+        self.zeros_host_pin.take();
     }
 }
 
@@ -11528,6 +11671,26 @@ fn hqq_stage_compaction_enabled() -> bool {
     )
 }
 
+fn hqq_stage_async_copy_enabled() -> bool {
+    matches!(
+        std::env::var("KRASIS_HQQ_STAGE_ASYNC_COPY")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+fn hqq_stage_pinned_host_enabled() -> bool {
+    matches!(
+        std::env::var("KRASIS_HQQ_STAGE_PIN_HOST")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
 impl Default for HqqRuntimeSlotEntry {
     fn default() -> Self {
         Self {
@@ -11554,6 +11717,9 @@ impl Default for HqqRuntimeSlotEntry {
                 packed_host: Vec::new(),
                 scales_host: Vec::new(),
                 zeros_host: Vec::new(),
+                packed_host_pin: None,
+                scales_host_pin: None,
+                zeros_host_pin: None,
                 packed_component_bytes: 0,
                 scales_component_bytes: 0,
                 zeros_component_bytes: 0,
@@ -11575,6 +11741,9 @@ impl Default for HqqRuntimeSlotEntry {
                 packed_host: Vec::new(),
                 scales_host: Vec::new(),
                 zeros_host: Vec::new(),
+                packed_host_pin: None,
+                scales_host_pin: None,
+                zeros_host_pin: None,
                 packed_component_bytes: 0,
                 scales_component_bytes: 0,
                 zeros_component_bytes: 0,
@@ -11717,6 +11886,7 @@ pub struct GpuDecodeStore {
     debug_decode_state_trace_once: bool,
     debug_decode_hcs_equiv_trace_once: Option<usize>,
     debug_decode_early_trace_once: bool,
+    debug_decode_early_max_steps_once: u64,
     debug_decode_early_detail_dims_once: Vec<usize>,
     debug_hcs_transition_trace_once: bool,
 }
@@ -12312,6 +12482,9 @@ impl GpuDecodeStore {
                 packed_host: packed_host.to_vec(),
                 scales_host: scales_host.to_vec(),
                 zeros_host: zeros_host.to_vec(),
+                packed_host_pin: None,
+                scales_host_pin: None,
+                zeros_host_pin: None,
                 packed_component_bytes: packed_cols,
                 scales_component_bytes: groups * std::mem::size_of::<f32>(),
                 zeros_component_bytes: groups * std::mem::size_of::<f32>(),
@@ -12372,6 +12545,9 @@ impl GpuDecodeStore {
                 packed_host,
                 scales_host,
                 zeros_host,
+                packed_host_pin: None,
+                scales_host_pin: None,
+                zeros_host_pin: None,
                 packed_component_bytes: rows * cols / 2,
                 scales_component_bytes: 2 * groups_exact * std::mem::size_of::<u16>(),
                 zeros_component_bytes: groups_exact
@@ -12400,6 +12576,9 @@ impl GpuDecodeStore {
                     packed_host: packed_host.to_vec(),
                     scales_host: scales_host.to_vec(),
                     zeros_host: zeros_host.to_vec(),
+                    packed_host_pin: None,
+                    scales_host_pin: None,
+                    zeros_host_pin: None,
                     packed_component_bytes: packed_cols,
                     scales_component_bytes: groups * std::mem::size_of::<f32>(),
                     zeros_component_bytes: groups * std::mem::size_of::<f32>(),
@@ -12453,6 +12632,9 @@ impl GpuDecodeStore {
                 packed_host,
                 scales_host,
                 zeros_host,
+                packed_host_pin: None,
+                scales_host_pin: None,
+                zeros_host_pin: None,
                 packed_component_bytes: rows * cols,
                 scales_component_bytes: 2 * groups_exact * std::mem::size_of::<u16>(),
                 zeros_component_bytes: groups_exact
@@ -12565,6 +12747,9 @@ impl GpuDecodeStore {
                     packed_host,
                     scales_host,
                     zeros_host,
+                    packed_host_pin: None,
+                    scales_host_pin: None,
+                    zeros_host_pin: None,
                     packed_component_bytes: rows * cols,
                     scales_component_bytes,
                     zeros_component_bytes,
@@ -12601,6 +12786,9 @@ impl GpuDecodeStore {
                     packed_host,
                     scales_host: Self::encode_host_u16(&packed.marlin.scales),
                     zeros_host: Vec::new(),
+                    packed_host_pin: None,
+                    scales_host_pin: None,
+                    zeros_host_pin: None,
                     packed_component_bytes: rows * cols,
                     scales_component_bytes: groups_exact * std::mem::size_of::<u16>(),
                     zeros_component_bytes: 0,
@@ -12645,6 +12833,9 @@ impl GpuDecodeStore {
                 packed_host,
                 scales_host,
                 zeros_host,
+                packed_host_pin: None,
+                scales_host_pin: None,
+                zeros_host_pin: None,
                 packed_component_bytes: rows * cols,
                 scales_component_bytes: 2 * groups_exact * std::mem::size_of::<u16>(),
                 zeros_component_bytes: groups_exact * std::mem::size_of::<f32>(),
@@ -12667,6 +12858,9 @@ impl GpuDecodeStore {
             packed_host: packed_host.to_vec(),
             scales_host: scales_host.to_vec(),
             zeros_host: zeros_host.to_vec(),
+            packed_host_pin: None,
+            scales_host_pin: None,
+            zeros_host_pin: None,
             packed_component_bytes: packed_cols,
             scales_component_bytes: groups * std::mem::size_of::<f32>(),
             zeros_component_bytes: groups * std::mem::size_of::<f32>(),
@@ -12756,6 +12950,9 @@ impl GpuDecodeStore {
             packed_host: packed,
             scales_host: Self::encode_host_f32(&scales_aligned),
             zeros_host: Self::encode_host_f32(&zeros_aligned),
+            packed_host_pin: None,
+            scales_host_pin: None,
+            zeros_host_pin: None,
             packed_component_bytes: packed_row_stride_bytes,
             scales_component_bytes: scales_row_stride_bytes,
             zeros_component_bytes: zeros_row_stride_bytes,
@@ -12797,7 +12994,9 @@ impl GpuDecodeStore {
         slot_ptr: u64,
         slot_bytes: usize,
         host_bytes: &[u8],
+        host_pin: Option<&HqqPinnedHostRegistration>,
         component_name: &str,
+        stream: Option<cuda_sys::CUstream>,
     ) -> Result<usize, String> {
         if host_bytes.len() > slot_bytes {
             return Err(format!(
@@ -12807,13 +13006,35 @@ impl GpuDecodeStore {
                 slot_bytes,
             ));
         }
+        let host_ptr = if let Some(pin) = host_pin {
+            if pin.len != host_bytes.len() {
+                return Err(format!(
+                    "HQQ {} pinned host length mismatch: pin={} host={}",
+                    component_name,
+                    pin.len,
+                    host_bytes.len(),
+                ));
+            }
+            pin.as_ptr()
+        } else {
+            host_bytes.as_ptr() as *const std::ffi::c_void
+        };
         if !host_bytes.is_empty() {
             unsafe {
-                let err = cuda_sys::lib().cuMemcpyHtoD_v2(
-                    slot_ptr,
-                    host_bytes.as_ptr() as *const std::ffi::c_void,
-                    host_bytes.len(),
-                );
+                let err = if let Some(stream) = stream {
+                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                        slot_ptr,
+                        host_ptr,
+                        host_bytes.len(),
+                        stream,
+                    )
+                } else {
+                    cuda_sys::lib().cuMemcpyHtoD_v2(
+                        slot_ptr,
+                        host_ptr,
+                        host_bytes.len(),
+                    )
+                };
                 if err != cuda_sys::CUresult::CUDA_SUCCESS {
                     return Err(format!(
                         "HQQ {} HtoD failed ptr={:#x} bytes={} err={:?}",
@@ -12825,8 +13046,43 @@ impl GpuDecodeStore {
                 }
             }
         }
-        Self::hqq_runtime_zero_slot_tail(slot_ptr, host_bytes.len(), slot_bytes)?;
+        if let Some(stream) = stream {
+            Self::hqq_runtime_zero_slot_tail_async(
+                slot_ptr,
+                host_bytes.len(),
+                slot_bytes,
+                stream,
+            )?;
+        } else {
+            Self::hqq_runtime_zero_slot_tail(slot_ptr, host_bytes.len(), slot_bytes)?;
+        }
         Ok(host_bytes.len())
+    }
+
+    fn hqq_runtime_zero_slot_tail_async(
+        slot_ptr: u64,
+        filled_bytes: usize,
+        slot_bytes: usize,
+        stream: cuda_sys::CUstream,
+    ) -> Result<(), String> {
+        if slot_bytes <= filled_bytes {
+            return Ok(());
+        }
+        unsafe {
+            let err = cuda_sys::lib().cuMemsetD8Async(
+                slot_ptr + filled_bytes as u64,
+                0,
+                (slot_bytes - filled_bytes) as usize,
+                stream,
+            );
+            if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!(
+                    "HQQ async slot tail memset failed ptr={:#x} filled={} slot={} err={:?}",
+                    slot_ptr, filled_bytes, slot_bytes, err
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn hqq_runtime_stage_desc<'a>(
@@ -13758,6 +14014,7 @@ impl GpuDecodeStore {
             v_proj: base_wid + 2,
             o_proj: base_wid + 3,
             fused_qkv: None,
+            head_gate_proj: None,
             num_heads: desc.num_heads,
             num_kv_heads: desc.num_kv_heads,
             head_dim: desc.head_dim,
@@ -14143,6 +14400,7 @@ impl GpuDecodeStore {
             debug_decode_state_trace_once: false,
             debug_decode_hcs_equiv_trace_once: None,
             debug_decode_early_trace_once: false,
+            debug_decode_early_max_steps_once: 3,
             debug_decode_early_detail_dims_once: Vec::new(),
             debug_hcs_transition_trace_once: false,
         })
@@ -14162,6 +14420,10 @@ impl GpuDecodeStore {
 
     pub fn set_debug_decode_early_trace_once(&mut self, enabled: bool) {
         self.debug_decode_early_trace_once = enabled;
+    }
+
+    pub fn set_debug_decode_early_max_steps_once(&mut self, max_steps: u64) {
+        self.debug_decode_early_max_steps_once = max_steps.max(1);
     }
 
     pub fn set_debug_decode_early_detail_dims_once(&mut self, mut dims: Vec<usize>) {
@@ -14756,6 +15018,16 @@ impl GpuDecodeStore {
             d_gqa_tiled_lse: None,
             gqa_tile_size: 0,
             gqa_max_tiles: 0,
+            gqa_k4_tiled_non_hd512_enabled: std::env::var(
+                "KRASIS_DECODE_K4V4_TILED_NON_HD512",
+            )
+            .map(|v| v != "0")
+            .unwrap_or(false),
+            gqa_k4_tiled_non_hd512_sliding_enabled: std::env::var(
+                "KRASIS_DECODE_K4V4_TILED_NON_HD512_SLIDING",
+            )
+            .map(|v| v != "0")
+            .unwrap_or(false),
             gqa_num_q_heads: 0,
             gqa_head_dim: 0,
             d_la_qkvz,
@@ -15042,6 +15314,7 @@ impl GpuDecodeStore {
             debug_decode_hcs_equiv_layer: None,
             debug_decode_hcs_equiv_entries: Vec::new(),
             debug_decode_early_trace_active: false,
+            debug_decode_early_max_steps: 3,
             debug_decode_early_detail_dims: Vec::new(),
             debug_decode_early_entries: Vec::new(),
             debug_hcs_transition_trace_active: false,
@@ -15093,6 +15366,7 @@ impl GpuDecodeStore {
             hot_hcs_full_graph: None,
             per_layer_graphs_valid: false,
             graphs_ever_captured: false,
+            captured_decode_start_position: None,
             captured_gpu_route_sync: false,
             captured_hot_hcs_full_graph: false,
             captured_route_sync_classifies: 0,
@@ -15218,6 +15492,7 @@ impl GpuDecodeStore {
                 gated_rmsnorm_silu_bf16: get("gated_rmsnorm_silu_bf16")?,
                 gqa_attention_g_bf16: get("gqa_attention_g_bf16")?,
                 apply_gated_attn_bf16: get("apply_gated_attn_bf16")?,
+                apply_head_gated_attn_bf16: get("apply_head_gated_attn_bf16")?,
                 gqa_attention_tiled_g: get("gqa_attention_tiled_g")?,
                 gqa_attention_tiled_bf16_g: get("gqa_attention_tiled_bf16_g")?,
                 gqa_attention_k8v4_tiled_g: get("gqa_attention_k8v4_tiled_g")?,
@@ -15738,7 +16013,7 @@ impl GpuDecodeStore {
         let canonical_scales = Self::copy_host_bytes(scales_ptr, scales_bytes, "scales")?;
         let canonical_zeros = Self::copy_host_bytes(zeros_ptr, zeros_bytes, "zeros")?;
 
-        let prefill = Self::build_hqq_prefill_runtime_format(
+        let mut prefill = Self::build_hqq_prefill_runtime_format(
             &canonical_packed,
             &canonical_scales,
             &canonical_zeros,
@@ -15748,7 +16023,7 @@ impl GpuDecodeStore {
             nbits,
         )
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
-        let decode = Self::build_hqq_decode_runtime_format(
+        let mut decode = Self::build_hqq_decode_runtime_format(
             &canonical_packed,
             &canonical_scales,
             &canonical_zeros,
@@ -15758,29 +16033,39 @@ impl GpuDecodeStore {
             nbits,
         )
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        if hqq_stage_pinned_host_enabled() {
+            prefill
+                .pin_host_components(&format!("prefill layer={} tensor={}", layer_idx, tensor_name))
+                .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+            decode
+                .pin_host_components(&format!("decode layer={} tensor={}", layer_idx, tensor_name))
+                .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        }
 
         let max_packed_slot_bytes = prefill.packed_bytes().max(decode.packed_bytes());
         let max_scales_slot_bytes = prefill.scales_bytes().max(decode.scales_bytes());
         let max_zeros_slot_bytes = prefill.zeros_bytes().max(decode.zeros_bytes());
         let total_host_bytes = prefill.host_bytes() + decode.host_bytes();
+        let pinned_host_bytes = prefill.pinned_host_bytes() + decode.pinned_host_bytes();
 
         trace_emit_global_mark(
             self.active_trace(),
             "weights",
             &format!(
-                "phase=hqq_stage_tensor layer={} tensor={} prefill_ms={:.3} decode_ms={:.3} host_mb={:.3} max_slot_kb=({:.1},{:.1},{:.1})",
+                "phase=hqq_stage_tensor layer={} tensor={} prefill_ms={:.3} decode_ms={:.3} host_mb={:.3} pinned_host_mb={:.3} max_slot_kb=({:.1},{:.1},{:.1})",
                 layer_idx,
                 tensor_name,
                 prefill.build_ms,
                 decode.build_ms,
                 total_host_bytes as f64 / 1024.0 / 1024.0,
+                pinned_host_bytes as f64 / 1024.0 / 1024.0,
                 max_packed_slot_bytes as f64 / 1024.0,
                 max_scales_slot_bytes as f64 / 1024.0,
                 max_zeros_slot_bytes as f64 / 1024.0,
             ),
         );
         log::info!(
-            "HQQ runtime staging: layer={} tensor={} prefill(kind={} layout={} ms={:.3} packed={} scales={} zeros={}) decode(kind={} layout={} ms={:.3} packed={} scales={} zeros={}) host_mb={:.3} max_slots=(packed {:.1} KB, scales {:.1} KB, zeros {:.1} KB) backend={} nbits={} format_v{}",
+            "HQQ runtime staging: layer={} tensor={} prefill(kind={} layout={} ms={:.3} packed={} scales={} zeros={}) decode(kind={} layout={} ms={:.3} packed={} scales={} zeros={}) host_mb={:.3} pinned_host_mb={:.3} max_slots=(packed {:.1} KB, scales {:.1} KB, zeros {:.1} KB) backend={} nbits={} format_v{}",
             layer_idx,
             tensor_name,
             prefill.kind.as_str(),
@@ -15796,6 +16081,7 @@ impl GpuDecodeStore {
             decode.scales_bytes(),
             decode.zeros_bytes(),
             total_host_bytes as f64 / 1024.0 / 1024.0,
+            pinned_host_bytes as f64 / 1024.0 / 1024.0,
             max_packed_slot_bytes as f64 / 1024.0,
             max_scales_slot_bytes as f64 / 1024.0,
             max_zeros_slot_bytes as f64 / 1024.0,
@@ -17318,6 +17604,53 @@ impl GpuDecodeStore {
             .max()
             .unwrap_or(10);
 
+        // Graph-replay lookahead buffers. Spec routing during graph replay runs
+        // concurrently with captured segments, which own d_fp32_scratch and the
+        // d_topk buffers, so the replay path gets dedicated buffers sized from
+        // the registered model dimensions.
+        let hs = graph.hidden_size;
+        let max_ne = graph
+            .moe_layers
+            .iter()
+            .filter_map(|m| m.as_ref())
+            .map(|m| m.num_experts)
+            .max()
+            .unwrap_or(0);
+        if hs == 0 || max_ne == 0 {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "init_apfl requires configure and registered MoE layers (hidden_size and num_experts must be known)",
+            ));
+        }
+        let spec_k = graph.max_experts_per_tok.max(topk);
+        let d_spec_hidden = self
+            .device
+            .alloc_zeros::<u16>(hs)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
+        let d_spec_logits = self
+            .device
+            .alloc_zeros::<f32>(max_ne)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
+        let d_spec_topk_ids = self
+            .device
+            .alloc_zeros::<i32>(spec_k)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
+        let d_spec_topk_weights = self
+            .device
+            .alloc_zeros::<f32>(spec_k)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
+        let spec_snapshot_event = unsafe {
+            let mut ev: cuda_sys::CUevent = std::ptr::null_mut();
+            let flags = cuda_sys::CUevent_flags::CU_EVENT_DISABLE_TIMING as u32;
+            let err = cuda_sys::lib().cuEventCreate(&mut ev, flags);
+            if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "cuEventCreate (APFL spec snapshot): {:?}",
+                    err
+                )));
+            }
+            ev
+        };
+
         graph.apfl = Some(ApflState {
             slots,
             layer_stats,
@@ -17329,6 +17662,11 @@ impl GpuDecodeStore {
             pending_prefetch: false,
             pending_next_layer: 0,
             pending_spec_count: 0,
+            d_spec_hidden: Some(d_spec_hidden),
+            d_spec_logits: Some(d_spec_logits),
+            d_spec_topk_ids: Some(d_spec_topk_ids),
+            d_spec_topk_weights: Some(d_spec_topk_weights),
+            spec_snapshot_event: Some(CudaEvent(spec_snapshot_event)),
         });
 
         let total_mb = (slot_size * num_slots) as f64 / (1024.0 * 1024.0);
@@ -17449,6 +17787,45 @@ impl GpuDecodeStore {
             })?;
         moe.shared_gate_wid = Some(wid);
         log::info!("Set shared_gate_wid={} for MoE layer {}", wid, layer_idx);
+        Ok(())
+    }
+
+    /// Set per-layer SwiGLU clamp values. 0.0 disables the clamp.
+    #[pyo3(signature = (layer_idx, swiglu_limit=0.0, shared_swiglu_limit=0.0))]
+    fn set_moe_swiglu_limits(
+        &mut self,
+        layer_idx: usize,
+        swiglu_limit: f32,
+        shared_swiglu_limit: f32,
+    ) -> PyResult<()> {
+        let graph = self
+            .graph
+            .as_mut()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
+        let moe = graph
+            .moe_layers
+            .get_mut(layer_idx)
+            .and_then(|m| m.as_mut())
+            .ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "MoE layer {} not registered",
+                    layer_idx
+                ))
+            })?;
+        if swiglu_limit < 0.0 || shared_swiglu_limit < 0.0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "SwiGLU limits must be non-negative for layer {} (routed={}, shared={})",
+                layer_idx, swiglu_limit, shared_swiglu_limit
+            )));
+        }
+        moe.swiglu_limit = swiglu_limit;
+        moe.shared_swiglu_limit = shared_swiglu_limit;
+        log::info!(
+            "Set SwiGLU limits for MoE layer {}: routed={} shared={}",
+            layer_idx,
+            swiglu_limit,
+            shared_swiglu_limit
+        );
         Ok(())
     }
 
@@ -19338,7 +19715,7 @@ impl GpuDecodeStore {
                         q_proj_wid, k_proj_wid, v_proj_wid, o_proj_wid,
                         fused_qkv_wid,
                         num_heads, num_kv_heads, head_dim, sm_scale,
-                        q_norm_ptr=0, k_norm_ptr=0, gated=false, rope_half_dim=0,
+                        q_norm_ptr=0, k_norm_ptr=0, gated=false, head_gate_proj_wid=None, rope_half_dim=0,
                         rope_cos_ptr=0, rope_sin_ptr=0))]
     #[allow(clippy::too_many_arguments)]
     fn register_gqa_layer(
@@ -19360,6 +19737,7 @@ impl GpuDecodeStore {
         q_norm_ptr: usize,
         k_norm_ptr: usize,
         gated: bool,
+        head_gate_proj_wid: Option<usize>,
         rope_half_dim: usize,
         rope_cos_ptr: usize,
         rope_sin_ptr: usize,
@@ -19385,6 +19763,7 @@ impl GpuDecodeStore {
             v_proj: v_proj_wid,
             o_proj: o_proj_wid,
             fused_qkv: fused_qkv_wid,
+            head_gate_proj: head_gate_proj_wid,
             num_heads,
             num_kv_heads,
             head_dim,
@@ -19669,6 +20048,7 @@ impl GpuDecodeStore {
         q_norm_ptr=0,
         k_norm_ptr=0,
         gated=false,
+        head_gate_proj_wid=None,
         rope_half_dim=0,
         rope_cos_ptr=0,
         rope_sin_ptr=0
@@ -19705,6 +20085,7 @@ impl GpuDecodeStore {
         q_norm_ptr: usize,
         k_norm_ptr: usize,
         gated: bool,
+        head_gate_proj_wid: Option<usize>,
         rope_half_dim: usize,
         rope_cos_ptr: usize,
         rope_sin_ptr: usize,
@@ -19734,6 +20115,7 @@ impl GpuDecodeStore {
             q_norm_ptr,
             k_norm_ptr,
             gated,
+            head_gate_proj_wid,
             input_norm_ptr,
             input_norm_size,
             post_attn_norm_ptr,
@@ -19765,6 +20147,7 @@ impl GpuDecodeStore {
         q_norm_ptr=0,
         k_norm_ptr=0,
         gated=false,
+        head_gate_proj_wid=None,
         rope_half_dim=0,
         rope_cos_ptr=0,
         rope_sin_ptr=0
@@ -19788,6 +20171,7 @@ impl GpuDecodeStore {
         q_norm_ptr: usize,
         k_norm_ptr: usize,
         gated: bool,
+        head_gate_proj_wid: Option<usize>,
         rope_half_dim: usize,
         rope_cos_ptr: usize,
         rope_sin_ptr: usize,
@@ -19817,6 +20201,7 @@ impl GpuDecodeStore {
             q_norm_ptr: q_norm_ptr as u64,
             k_norm_ptr: k_norm_ptr as u64,
             gated,
+            head_gate_proj: head_gate_proj_wid,
         };
         let graph = self
             .graph
@@ -20340,6 +20725,7 @@ impl GpuDecodeStore {
                 q_norm_ptr,
                 k_norm_ptr,
                 gated,
+                head_gate_proj,
             } => serde_json::json!({
                 "kind": "gqa",
                 "num_heads": num_heads,
@@ -20352,6 +20738,7 @@ impl GpuDecodeStore {
                 "q_norm_ptr": q_norm_ptr,
                 "k_norm_ptr": k_norm_ptr,
                 "gated": gated,
+                "head_gate_proj": head_gate_proj,
             }),
             HqqLayerMetadata::Mla {
                 num_heads,
@@ -23058,6 +23445,12 @@ impl GpuDecodeStore {
         let mut zeros_memcpy_bytes = 0usize;
 
         let compact = hqq_stage_compaction_enabled();
+        let async_copy = hqq_stage_async_copy_enabled();
+        let copy_stream = if async_copy {
+            Some(self.copy_stream.0)
+        } else {
+            None
+        };
         let mut remap_indices = Vec::new();
         for slot_idx in 0..self.hqq_runtime_slots.len() {
             let (stage_packed_bytes, stage_scales_bytes, stage_zeros_bytes) = {
@@ -23320,19 +23713,25 @@ impl GpuDecodeStore {
                     slot.packed_slot_ptr,
                     slot.packed_slot_bytes,
                     &desc.packed_host,
+                    desc.packed_host_pin.as_ref(),
                     "packed",
+                    copy_stream,
                 )?;
                 let scales_bytes = Self::hqq_runtime_copy_component(
                     slot.scales_slot_ptr,
                     slot.scales_slot_bytes,
                     &desc.scales_host,
+                    desc.scales_host_pin.as_ref(),
                     "scales",
+                    copy_stream,
                 )?;
                 let zeros_bytes = Self::hqq_runtime_copy_component(
                     slot.zeros_slot_ptr,
                     slot.zeros_slot_bytes,
                     &desc.zeros_host,
+                    desc.zeros_host_pin.as_ref(),
                     "zeros",
+                    copy_stream,
                 )?;
                 (packed_bytes, scales_bytes, zeros_bytes)
             };
@@ -23346,6 +23745,17 @@ impl GpuDecodeStore {
             scales_memcpy_bytes += scales_bytes;
             zeros_memcpy_bytes += zeros_bytes;
             total_host_bytes += packed_bytes + scales_bytes + zeros_bytes;
+        }
+        if let Some(stream) = copy_stream {
+            unsafe {
+                let err = cuda_sys::lib().cuStreamSynchronize(stream);
+                if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(format!(
+                        "HQQ {} async stage copy stream sync failed: {:?}",
+                        stage, err
+                    ));
+                }
+            }
         }
         let total_swap_ms = t0.elapsed().as_secs_f64() * 1000.0;
         for slot in &mut self.hqq_runtime_slots {
@@ -23992,6 +24402,8 @@ impl GpuDecodeStore {
                 v_proj_bf16: None,
                 o_proj_bf16: None,
                 gqa_gated: false,
+                gqa_head_gate_proj: None,
+                gqa_head_gate_proj_bf16: None,
                 mamba2_in_proj: None,
                 mamba2_out_proj: None,
                 mamba2_in_proj_bf16: None,
@@ -24016,6 +24428,8 @@ impl GpuDecodeStore {
                 moe_routed_scaling_factor: 1.0,
                 moe_gated: true,
                 moe_activation: 0,
+                moe_swiglu_limit: 0.0,
+                shared_swiglu_limit: 0.0,
                 moe_input_size: 0,
                 moe_latent_down: None,
                 moe_latent_up: None,
@@ -24114,6 +24528,14 @@ impl GpuDecodeStore {
                         lw.gqa_rope_sin_ptr = desc.rope_sin_ptr;
                         lw.gqa_v_norm_no_scale = l.gqa_v_norm_no_scale;
                         lw.gqa_rope_half_split = l.gqa_rope_half_split;
+                        if let GpuAttnConfig::GQA { head_gate_proj, .. } = &l.attn {
+                            if let Some(head_gate_wid) = head_gate_proj {
+                                lw.gqa_head_gate_proj = extract_marlin(*head_gate_wid);
+                                if lw.gqa_head_gate_proj.is_none() {
+                                    lw.gqa_head_gate_proj_bf16 = extract_bf16(*head_gate_wid);
+                                }
+                            }
+                        }
                         lw.hqq_gqa = Some(crate::gpu_prefill::HqqGqaPrefillDescriptor {
                             backend: desc.backend.clone(),
                             format_version: desc.format_version,
@@ -24318,6 +24740,7 @@ impl GpuDecodeStore {
                         k_proj,
                         v_proj,
                         o_proj,
+                        head_gate_proj,
                         gated,
                         num_heads,
                         num_kv_heads,
@@ -24349,6 +24772,12 @@ impl GpuDecodeStore {
                             }
                             if lw.o_proj.is_none() {
                                 lw.o_proj_bf16 = extract_bf16(*o_proj);
+                            }
+                            if let Some(head_gate_wid) = head_gate_proj {
+                                lw.gqa_head_gate_proj = extract_marlin(*head_gate_wid);
+                                if lw.gqa_head_gate_proj.is_none() {
+                                    lw.gqa_head_gate_proj_bf16 = extract_bf16(*head_gate_wid);
+                                }
                             }
                         }
                         lw.gqa_gated = *gated;
@@ -24481,6 +24910,8 @@ impl GpuDecodeStore {
                     lw.moe_routed_scaling_factor = *rsf;
                     lw.moe_gated = moe_gated;
                     lw.moe_activation = moe_activation;
+                    lw.moe_swiglu_limit = 0.0;
+                    lw.shared_swiglu_limit = 0.0;
                     lw.moe_layer_idx = Some(i);
                     if let Some(wid) = shared_gate_up {
                         lw.shared_w1 = extract_marlin(*wid);
@@ -24491,12 +24922,21 @@ impl GpuDecodeStore {
                 }
                 GpuMlpConfig::Dense {
                     gate_proj,
-                    up_proj: _,
+                    up_proj,
                     down_proj,
                 } => {
-                    // For dense MLP, gate_proj serves as w1 (gate_up)
-                    lw.shared_w1 = extract_marlin(*gate_proj);
-                    lw.shared_w2 = extract_marlin(*down_proj);
+                    lw.dense_gate = extract_marlin(*gate_proj);
+                    lw.dense_up = extract_marlin(*up_proj);
+                    lw.dense_down = extract_marlin(*down_proj);
+                    if lw.dense_gate.is_none() {
+                        lw.dense_gate_bf16 = extract_bf16(*gate_proj);
+                    }
+                    if lw.dense_up.is_none() {
+                        lw.dense_up_bf16 = extract_bf16(*up_proj);
+                    }
+                    if lw.dense_down.is_none() {
+                        lw.dense_down_bf16 = extract_bf16(*down_proj);
+                    }
                 }
                 GpuMlpConfig::Gemma4MoE {
                     dense_gate_proj,
@@ -24517,6 +24957,8 @@ impl GpuDecodeStore {
                         lw.moe_routed_scaling_factor = moe_data.routed_scaling_factor;
                         lw.moe_gated = moe_data.gated_experts;
                         lw.moe_activation = moe_data.activation_type;
+                        lw.moe_swiglu_limit = moe_data.swiglu_limit;
+                        lw.shared_swiglu_limit = moe_data.shared_swiglu_limit;
                         lw.moe_layer_idx = Some(i);
                     }
                     lw.dense_gate = extract_marlin(*dense_gate_proj);
@@ -24557,6 +24999,8 @@ impl GpuDecodeStore {
                         lw.moe_routed_scaling_factor = moe_data.routed_scaling_factor;
                         lw.moe_gated = moe_data.gated_experts;
                         lw.moe_activation = moe_data.activation_type;
+                        lw.moe_swiglu_limit = moe_data.swiglu_limit;
+                        lw.shared_swiglu_limit = moe_data.shared_swiglu_limit;
                         lw.moe_layer_idx = Some(i);
                         // Shared expert gate weight (sigmoid gating of shared expert output)
                         if let Some(sg_wid) = moe_data.shared_gate_wid {
@@ -24741,6 +25185,8 @@ impl GpuDecodeStore {
                 PrefillMoeLayerData {
                     experts,
                     shared,
+                    swiglu_limit: m.swiglu_limit,
+                    shared_swiglu_limit: m.shared_swiglu_limit,
                     bulk_w13p,
                     bulk_w13s,
                     bulk_w2p,
@@ -24771,6 +25217,17 @@ impl GpuDecodeStore {
             );
             if err != cuda_sys::CUresult::CUDA_SUCCESS {
                 return Err(format!("Create DMA event: {:?}", err));
+            }
+            event
+        };
+        let cold_staging_reuse_event = unsafe {
+            let mut event: cuda_sys::CUevent = std::ptr::null_mut();
+            let err = cuda_sys::lib().cuEventCreate(
+                &mut event,
+                cuda_sys::CUevent_flags::CU_EVENT_DISABLE_TIMING as u32,
+            );
+            if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!("Create cold staging reuse event: {:?}", err));
             }
             event
         };
@@ -25104,6 +25561,7 @@ impl GpuDecodeStore {
             hcs_cache_fast,
             hcs_num_experts_per_layer: hcs_ne,
             dma_event,
+            cold_staging_reuse_event,
             compute_event,
             scatter_event,
             shared_launch_event,
@@ -25194,7 +25652,10 @@ impl GpuDecodeStore {
             last_cold_staging_failure: None,
             prefill_runtime_chunk_cap: None,
             active_prefill_prompt_tokens: 0,
+            ptr_table_reuse_ptrs: [[0, 0, 0, 0], [0, 0, 0, 0]],
+            ptr_table_reuse_bytes: [0, 0],
             ptr_prefetch_layer: None,
+            ptr_prefetch_reused: false,
             ptr_prefetch_ptrs: [0, 0, 0, 0],
             ptr_prefetch_hcs_count: 0,
             ptr_prefetch_pinned_count: 0,
@@ -26745,19 +27206,37 @@ impl GpuDecodeStore {
             }
             graph.per_layer_graphs_valid = false;
             graph.captured_hot_hcs_full_graph = false;
+            graph.captured_decode_start_position = None;
             // NOTE: graphs_ever_captured stays true -- we keep the snapshot for diagnostics
         }
     }
 
-    /// Verify that all LA and KV pointers baked into captured CUDA graphs are still valid.
+    /// Verify that captured CUDA graphs are valid for the current request.
+    ///
+    /// Pointer stability is not enough: graphable attention kernels use GPU-side scalar
+    /// buffers for seq-len values, but captured launch structure can still depend on the
+    /// request start position. A graph captured for a short request must not be replayed
+    /// for a long request, even when all device pointers are unchanged.
     /// Returns true if graphs can be safely reused, false if recapture is needed.
-    fn verify_graph_pointers(&self) -> bool {
+    fn verify_graph_reuse(&self, decode_start_position: usize) -> bool {
         let trace_cfg = self.active_trace_owned();
         let graph = match self.graph.as_ref() {
             Some(g) => g,
             None => return false,
         };
         if !graph.graphs_ever_captured || graph.per_layer_graphs.is_empty() {
+            return false;
+        }
+
+        if graph.captured_decode_start_position != Some(decode_start_position) {
+            trace_emit_global_mark(
+                trace_cfg.as_ref(),
+                "graph",
+                &format!(
+                    "phase=graph_reuse_check result=decode_start_changed captured={:?} current={}",
+                    graph.captured_decode_start_position, decode_start_position
+                ),
+            );
             return false;
         }
 
@@ -27019,6 +27498,7 @@ impl GpuDecodeStore {
     /// - gqa_cache_offset: number of GQA layers before the segment start (for multi-GPU).
     fn capture_per_layer_graphs(
         &mut self,
+        decode_start_position: usize,
         layer_range: Option<(usize, usize)>,
         do_embedding: bool,
         do_final: bool,
@@ -27086,6 +27566,7 @@ impl GpuDecodeStore {
             events.destroy();
         }
         graph.per_layer_graphs_valid = false;
+        graph.captured_decode_start_position = None;
         graph.captured_gpu_route_sync = false;
         graph.captured_hot_hcs_full_graph = false;
         graph.captured_route_sync_classifies = 0;
@@ -27769,6 +28250,7 @@ impl GpuDecodeStore {
         graph.hot_hcs_full_graph = captured_hot_hcs_full_graph;
         graph.per_layer_graphs_valid = true;
         graph.graphs_ever_captured = true;
+        graph.captured_decode_start_position = Some(decode_start_position);
         graph.captured_gpu_route_sync = graph.gpu_route_sync;
         graph.captured_hot_hcs_full_graph = graph.hot_hcs_full_graph.is_some();
 
@@ -28378,11 +28860,12 @@ impl GpuDecodeStore {
                         let mut a6 = intermediate as i32;
                         let mut a7 = expert_hs as i32;
                         let mut a8 = gs as i32;
-                        let mut a9 = d_wts;
-                        let mut a10 = *clocks.device_ptr();
-                        let mut a11 = clock_base;
-                        let mut a12 = graph.graph_moe_w2_clock_blocks as i32;
-                        let mut a13 = graph.graph_moe_w2_clock_slots_per_block as i32;
+                        let mut a9 = moe.swiglu_limit;
+                        let mut a10 = d_wts;
+                        let mut a11 = *clocks.device_ptr();
+                        let mut a12 = clock_base;
+                        let mut a13 = graph.graph_moe_w2_clock_blocks as i32;
+                        let mut a14 = graph.graph_moe_w2_clock_slots_per_block as i32;
                         let mut params: Vec<*mut std::ffi::c_void> = vec![
                             &mut a0 as *mut _ as *mut std::ffi::c_void,
                             &mut a1 as *mut _ as *mut std::ffi::c_void,
@@ -28398,6 +28881,7 @@ impl GpuDecodeStore {
                             &mut a11 as *mut _ as *mut std::ffi::c_void,
                             &mut a12 as *mut _ as *mut std::ffi::c_void,
                             &mut a13 as *mut _ as *mut std::ffi::c_void,
+                            &mut a14 as *mut _ as *mut std::ffi::c_void,
                         ];
                         k.fused_silu_w2_batched_timed
                             .clone()
@@ -28414,43 +28898,71 @@ impl GpuDecodeStore {
                             })?;
                     }
                 } else {
-                    let (w2_kernel, w2_grid_tiles) = if is_relu2 {
-                        if is_int8 {
+                    if is_relu2 {
+                        let (w2_kernel, w2_grid_tiles) = if is_int8 {
                             (k.relu2_w2_int8_batched.clone(), w2_n_tiles)
                         } else if relu2_w2_coalesced {
                             (k.relu2_w2_batched_coalesced.clone(), w2_n_tiles)
                         } else {
                             (k.relu2_w2_batched.clone(), w2_n_tiles)
+                        };
+                        unsafe {
+                            w2_kernel
+                                .launch(
+                                    LaunchConfig {
+                                        grid_dim: (w2_grid_tiles as u32, 1, topk as u32),
+                                        block_dim: (256, 1, 1),
+                                        shared_mem_bytes: w2_smem,
+                                    },
+                                    (
+                                        d_w2p,
+                                        d_w2s,
+                                        *graph.d_batch_gate_ups.device_ptr(),
+                                        *graph.d_batch_expert_outs.device_ptr(),
+                                        inv_wp,
+                                        inv_sp,
+                                        intermediate as i32,
+                                        expert_hs as i32,
+                                        gs as i32,
+                                        d_wts,
+                                    ),
+                                )
+                                .map_err(|e| {
+                                    format!("batched relu2_w2[{}]: {:?}", layer_idx, e,)
+                                })?;
                         }
                     } else {
-                        if is_int8 {
-                            (k.fused_silu_w2_int8_batched.clone(), w2_n_tiles)
+                        let w2_kernel = if is_int8 {
+                            k.fused_silu_w2_int8_batched.clone()
                         } else {
-                            (k.fused_silu_w2_batched.clone(), w2_n_tiles)
+                            k.fused_silu_w2_batched.clone()
+                        };
+                        unsafe {
+                            w2_kernel
+                                .launch(
+                                    LaunchConfig {
+                                        grid_dim: (w2_n_tiles as u32, 1, topk as u32),
+                                        block_dim: (256, 1, 1),
+                                        shared_mem_bytes: w2_smem,
+                                    },
+                                    (
+                                        d_w2p,
+                                        d_w2s,
+                                        *graph.d_batch_gate_ups.device_ptr(),
+                                        *graph.d_batch_expert_outs.device_ptr(),
+                                        inv_wp,
+                                        inv_sp,
+                                        intermediate as i32,
+                                        expert_hs as i32,
+                                        gs as i32,
+                                        moe.swiglu_limit,
+                                        d_wts,
+                                    ),
+                                )
+                                .map_err(|e| {
+                                    format!("batched silu_w2[{}]: {:?}", layer_idx, e,)
+                                })?;
                         }
-                    };
-                    unsafe {
-                        w2_kernel
-                            .launch(
-                                LaunchConfig {
-                                    grid_dim: (w2_grid_tiles as u32, 1, topk as u32),
-                                    block_dim: (256, 1, 1),
-                                    shared_mem_bytes: w2_smem,
-                                },
-                                (
-                                    d_w2p,
-                                    d_w2s,
-                                    *graph.d_batch_gate_ups.device_ptr(),
-                                    *graph.d_batch_expert_outs.device_ptr(),
-                                    inv_wp,
-                                    inv_sp,
-                                    intermediate as i32,
-                                    expert_hs as i32,
-                                    gs as i32,
-                                    d_wts,
-                                ),
-                            )
-                            .map_err(|e| format!("batched silu_w2[{}]: {:?}", layer_idx, e,))?;
                     }
                 }
                 if moe_route_clock_active {
@@ -28745,6 +29257,7 @@ impl GpuDecodeStore {
                         gs,
                         1.0,
                         shared_gate_ptr,
+                        moe.shared_swiglu_limit,
                         &k,
                         is_int8,
                     )
@@ -29423,6 +29936,7 @@ impl GpuDecodeStore {
                         q_norm_ptr,
                         k_norm_ptr,
                         gated,
+                        head_gate_proj,
                     } => {
                         if mixed_segment_clock_active && layer_idx == range_end && *num_heads != 0 {
                             let clocks =
@@ -29469,6 +29983,12 @@ impl GpuDecodeStore {
                             // Match non-graph decode by skipping the GQA kernels while
                             // allowing the layer's routing/post-norm logic to continue.
                         } else {
+                        if *gated && head_gate_proj.is_some() {
+                            return Err(format!(
+                                "GQA layer {} has both interleaved gated Q and separate head gate; unsupported mixed gate contract",
+                                layer_idx
+                            ));
+                        }
                         let gqa_path_clock_active = graph.graph_gqa_path_clock_enabled
                             && expert_layer.is_some()
                             && routing_range.is_some()
@@ -29690,6 +30210,17 @@ impl GpuDecodeStore {
                                 *graph.d_gqa_v.device_ptr(),
                             )?;
                         }
+                        let head_gate_ptr = if let Some(head_gate_wid) = head_gate_proj {
+                            let gw = &graph.weights[*head_gate_wid];
+                            self.gemv_bf16_to_f32(
+                                gw,
+                                *graph.d_hidden.device_ptr(),
+                                *graph.d_la_qkvz.device_ptr(),
+                            )?;
+                            *graph.d_la_qkvz.device_ptr()
+                        } else {
+                            0
+                        };
 
                         // Split gated Q: extract Q and gate from interleaved projection.
                         // SAFETY: uses d_gqa_out as temp source instead of aliasing d_gqa_q
@@ -29871,10 +30402,23 @@ impl GpuDecodeStore {
                             )?;
                         }
 
-                        // RoPE
-                        if let Some(ref d_cos) = graph.d_rope_cos {
+                        // RoPE. Step and other mixed-attention models may register
+                        // per-layer tables with different theta/scaling, so graph
+                        // replay must use the same layer-specific pointers as the
+                        // ungraphed decode path.
+                        let layer_rope_cos = if *rope_cos_ptr != 0 {
+                            *rope_cos_ptr
+                        } else {
+                            graph.d_rope_cos.as_ref().map_or(0, |d| *d.device_ptr())
+                        };
+                        let layer_rope_sin = if *rope_sin_ptr != 0 {
+                            *rope_sin_ptr
+                        } else {
+                            graph.d_rope_sin.as_ref().map_or(0, |d| *d.device_ptr())
+                        };
+                        if layer_rope_cos != 0 && layer_rope_sin != 0 {
                             let rope_work_width = if layer.gqa_rope_half_split {
-                                hd
+                                (half_dim * 2).min(hd)
                             } else {
                                 half_dim
                             };
@@ -29897,8 +30441,8 @@ impl GpuDecodeStore {
                                         (
                                             *graph.d_gqa_q.device_ptr(),
                                             *graph.d_gqa_k.device_ptr(),
-                                            *d_cos.device_ptr(),
-                                            *graph.d_rope_sin.as_ref().unwrap().device_ptr(),
+                                            layer_rope_cos,
+                                            layer_rope_sin,
                                             d_rope_pos_ptr,
                                             nh as i32,
                                             nkv as i32,
@@ -30368,11 +30912,32 @@ impl GpuDecodeStore {
                             if is_k4 {
                                 let tile_size = graph.gqa_tile_size;
                                 let max_tiles = graph.gqa_max_tiles;
-                                let use_tiled_k4 = hd == 512
-                                    && tile_size > 0
-                                    && max_tiles > 1
+                                let layer_tile_cap = if tile_size > 0 {
+                                    ((graph.kv_cache_len_for_layer(layer_idx) + tile_size - 1)
+                                        / tile_size)
+                                        .max(1)
+                                        .min(max_tiles)
+                                } else {
+                                    0
+                                };
+                                let tiled_tiles = if hd == 512 {
+                                    max_tiles
+                                } else {
+                                    layer_tile_cap
+                                };
+                                let non_hd512_tiled_layer_allowed = if hd == 512 {
+                                    true
+                                } else if graph.gqa_k4_tiled_non_hd512_enabled {
+                                    graph.layers[layer_idx].gqa_sliding_window == 0
+                                        || graph.gqa_k4_tiled_non_hd512_sliding_enabled
+                                } else {
+                                    false
+                                };
+                                let use_tiled_k4 = tile_size > 0
+                                    && tiled_tiles > 1
                                     && graph.d_gqa_tiled_o.is_some()
-                                    && graph.d_gqa_tiled_lse.is_some();
+                                    && graph.d_gqa_tiled_lse.is_some()
+                                    && non_hd512_tiled_layer_allowed;
 
                                 if use_tiled_k4 {
                                     let tiled_o = graph.d_gqa_tiled_o.as_ref()
@@ -30408,7 +30973,7 @@ impl GpuDecodeStore {
                                             .clone()
                                             .launch(
                                                 LaunchConfig {
-                                                    grid_dim: (nh as u32, max_tiles as u32, 1),
+                                                    grid_dim: (nh as u32, tiled_tiles as u32, 1),
                                                     block_dim: (threads, 1, 1),
                                                     shared_mem_bytes: tile_smem,
                                                 },
@@ -30444,7 +31009,7 @@ impl GpuDecodeStore {
 					                                        ).map_err(|e| format!("record_globaltimer_u64_g[k4v4-reduce-start][{}]: {:?}", layer_idx, e))?;
                                         }
 
-                                        let reduce_smem = ((max_tiles + hd) as u32) * 4;
+                                        let reduce_smem = ((tiled_tiles + hd) as u32) * 4;
                                         k.gqa_attention_polar4_reduce_g
                                             .clone()
                                             .launch(
@@ -30461,7 +31026,7 @@ impl GpuDecodeStore {
                                                     hd as i32,
                                                     d_seq_len_ptr,
                                                     tile_size as i32,
-                                                    max_tiles as i32,
+                                                    tiled_tiles as i32,
                                                 ),
                                             )
                                             .map_err(|e| {
@@ -30947,6 +31512,34 @@ impl GpuDecodeStore {
                                     )
                                     .map_err(|e| {
                                         format!("apply_gated_attn_bf16[{}]: {:?}", layer_idx, e)
+                                    })?;
+                            }
+                        } else if head_gate_ptr != 0 {
+                            let total = attn_out_dim as u32;
+                            let threads = 256u32;
+                            let blocks = (total + threads - 1) / threads;
+                            unsafe {
+                                k.apply_head_gated_attn_bf16
+                                    .clone()
+                                    .launch(
+                                        LaunchConfig {
+                                            grid_dim: (blocks, 1, 1),
+                                            block_dim: (threads, 1, 1),
+                                            shared_mem_bytes: 0,
+                                        },
+                                        (
+                                            *graph.d_scratch.device_ptr(),
+                                            *graph.d_gqa_out.device_ptr(),
+                                            head_gate_ptr,
+                                            nh as i32,
+                                            hd as i32,
+                                        ),
+                                    )
+                                    .map_err(|e| {
+                                        format!(
+                                            "apply_head_gated_attn_bf16[{}]: {:?}",
+                                            layer_idx, e
+                                        )
                                     })?;
                             }
                         } else {
@@ -32914,6 +33507,341 @@ impl GpuDecodeStore {
     /// Replay per-layer CUDA graphs for one decode step.
     /// - do_final: if true, D2H logits after the last graph (single-GPU or final segment).
     ///   If false, skip logits D2H (hidden state will be transferred to next GPU).
+    /// Queue APFL speculative routing for `next_layer` around a graph-segment
+    /// launch. Called at a segment boundary, where d_hidden holds the MoE
+    /// input of the segment about to launch — the same one-layer-stale gate
+    /// input the non-graph APFL path uses. The boundary state is snapshotted
+    /// on the replay stream (ordered after the previous segment and before
+    /// the next segment's kernels mutate d_hidden); spec gate GEMV + top-k
+    /// then run on spec_stream against the snapshot, so nothing here races
+    /// the captured segments or the buffers they own.
+    /// Returns the number of speculative expert IDs queued (0 = none).
+    fn apfl_graph_replay_queue_spec(
+        graph: &GpuDecodeGraph,
+        next_layer: usize,
+        replay_stream: cuda_sys::CUstream,
+        spec_stream: cuda_sys::CUstream,
+        spec_blas: cublas_sys::cublasHandle_t,
+        raw_sigmoid_topk: cuda_sys::CUfunction,
+        raw_softmax_topk: cuda_sys::CUfunction,
+    ) -> Result<usize, String> {
+        let apfl = match graph.apfl.as_ref() {
+            Some(a) => a,
+            None => return Ok(0),
+        };
+        let (d_spec_hidden, d_spec_logits, d_spec_ids, d_spec_weights, snapshot_event) = match (
+            apfl.d_spec_hidden.as_ref(),
+            apfl.d_spec_logits.as_ref(),
+            apfl.d_spec_topk_ids.as_ref(),
+            apfl.d_spec_topk_weights.as_ref(),
+            apfl.spec_snapshot_event.as_ref(),
+        ) {
+            (Some(h), Some(l), Some(i), Some(w), Some(e)) => (
+                *h.device_ptr(),
+                *l.device_ptr(),
+                *i.device_ptr(),
+                *w.device_ptr(),
+                e.0,
+            ),
+            _ => return Ok(0),
+        };
+        let next_moe = match graph.moe_layers.get(next_layer).and_then(|m| m.as_ref()) {
+            Some(m) => m,
+            None => return Ok(0),
+        };
+        let spec_topk = apfl
+            .prefetch_count
+            .min(next_moe.topk * 2)
+            .min(graph.max_experts_per_tok);
+        if spec_topk == 0 {
+            return Ok(0);
+        }
+        if graph.parallel_topk_enabled {
+            return Err(
+                "KRASIS_DECODE_PARALLEL_TOPK=1 does not support APFL speculative routing"
+                    .to_string(),
+            );
+        }
+        let hs = graph.hidden_size;
+        // Snapshot the same buffer the real router reads (LatentMoE-style
+        // configs override the router input away from d_hidden).
+        let router_src = if graph.moe_router_override_ptr != 0 {
+            graph.moe_router_override_ptr
+        } else {
+            *graph.d_hidden.device_ptr()
+        };
+        unsafe {
+            let err = cuda_sys::lib().cuMemcpyDtoDAsync_v2(
+                d_spec_hidden,
+                router_src,
+                hs * 2,
+                replay_stream,
+            );
+            if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!("APFL replay hidden snapshot D2D: {:?}", err));
+            }
+            let err = cuda_sys::lib().cuEventRecord(snapshot_event, replay_stream);
+            if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!("APFL replay snapshot event record: {:?}", err));
+            }
+            let err = cuda_sys::lib().cuStreamWaitEvent(spec_stream, snapshot_event, 0);
+            if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!("APFL replay spec stream wait: {:?}", err));
+            }
+        }
+
+        // Spec gate GEMV on spec_stream via the dedicated cuBLAS handle.
+        {
+            let w = &graph.weights[next_moe.gate_wid];
+            let alpha: f32 = 1.0;
+            let beta: f32 = 0.0;
+            unsafe {
+                cublas_result::gemm_ex(
+                    spec_blas,
+                    cublas_sys::cublasOperation_t::CUBLAS_OP_T,
+                    cublas_sys::cublasOperation_t::CUBLAS_OP_N,
+                    w.rows as i32,
+                    1,
+                    w.cols as i32,
+                    &alpha as *const f32 as *const std::ffi::c_void,
+                    w.ptr as *const std::ffi::c_void,
+                    cublas_sys::cudaDataType::CUDA_R_16BF,
+                    w.cols as i32,
+                    d_spec_hidden as *const std::ffi::c_void,
+                    cublas_sys::cudaDataType::CUDA_R_16BF,
+                    hs as i32,
+                    &beta as *const f32 as *const std::ffi::c_void,
+                    d_spec_logits as *mut std::ffi::c_void,
+                    cublas_sys::cudaDataType::CUDA_R_32F,
+                    w.rows as i32,
+                    cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
+                    cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
+                )
+                .map_err(|e| format!("APFL replay spec gate GEMV: {:?}", e))?;
+            }
+        }
+
+        // Spec top-k on spec_stream, mirroring the non-graph spec launch but
+        // writing into the dedicated spec buffers.
+        let ne = next_moe.num_experts;
+        let smem = (ne as u32) * 4;
+        unsafe {
+            if next_moe.scoring_func == 1 {
+                let mut p0 = d_spec_logits;
+                let mut p1 = next_moe.gate_bias_ptr;
+                let mut p2 = next_moe.e_score_corr_ptr;
+                let mut p3 = d_spec_ids;
+                let mut p4 = d_spec_weights;
+                let mut p5 = ne as i32;
+                let mut p6 = spec_topk as i32;
+                let mut params: [*mut std::ffi::c_void; 7] = [
+                    &mut p0 as *mut _ as *mut std::ffi::c_void,
+                    &mut p1 as *mut _ as *mut std::ffi::c_void,
+                    &mut p2 as *mut _ as *mut std::ffi::c_void,
+                    &mut p3 as *mut _ as *mut std::ffi::c_void,
+                    &mut p4 as *mut _ as *mut std::ffi::c_void,
+                    &mut p5 as *mut _ as *mut std::ffi::c_void,
+                    &mut p6 as *mut _ as *mut std::ffi::c_void,
+                ];
+                let err = cuda_sys::lib().cuLaunchKernel(
+                    raw_sigmoid_topk,
+                    1,
+                    1,
+                    1,
+                    1,
+                    1,
+                    1,
+                    smem,
+                    spec_stream,
+                    params.as_mut_ptr(),
+                    std::ptr::null_mut(),
+                );
+                if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(format!("APFL replay spec sigmoid_topk launch: {:?}", err));
+                }
+            } else {
+                let mut p0 = d_spec_logits;
+                let mut p1 = d_spec_ids;
+                let mut p2 = d_spec_weights;
+                let mut p3 = ne as i32;
+                let mut p4 = spec_topk as i32;
+                let mut p5_norm = if next_moe.norm_topk_prob { 1i32 } else { 0i32 };
+                let mut params: [*mut std::ffi::c_void; 6] = [
+                    &mut p0 as *mut _ as *mut std::ffi::c_void,
+                    &mut p1 as *mut _ as *mut std::ffi::c_void,
+                    &mut p2 as *mut _ as *mut std::ffi::c_void,
+                    &mut p3 as *mut _ as *mut std::ffi::c_void,
+                    &mut p4 as *mut _ as *mut std::ffi::c_void,
+                    &mut p5_norm as *mut _ as *mut std::ffi::c_void,
+                ];
+                let err = cuda_sys::lib().cuLaunchKernel(
+                    raw_softmax_topk,
+                    1,
+                    1,
+                    1,
+                    1,
+                    1,
+                    1,
+                    smem,
+                    spec_stream,
+                    params.as_mut_ptr(),
+                    std::ptr::null_mut(),
+                );
+                if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(format!("APFL replay spec softmax_topk launch: {:?}", err));
+                }
+            }
+        }
+        Ok(spec_topk)
+    }
+
+    /// Consume the speculative routing queued by apfl_graph_replay_queue_spec
+    /// and prefetch predicted cold experts for `pred_layer` on prefetch_stream
+    /// while the just-launched segment computes. Slots holding entries for
+    /// `in_flight_layer` may be referenced by that segment's d_batch_upload and
+    /// are never evicted here. Unlike the non-graph path, consumed slots are
+    /// not invalidated — slot contents stay valid (expert weights are
+    /// immutable), and clearing them would make in-flight slots eligible for
+    /// eviction while the segment still reads them.
+    fn apfl_graph_replay_prefetch(
+        graph: &mut GpuDecodeGraph,
+        in_flight_layer: usize,
+        pred_layer: usize,
+        spec_count: usize,
+        spec_stream: cuda_sys::CUstream,
+        prefetch_stream: cuda_sys::CUstream,
+    ) -> Result<(), String> {
+        // Spec work depends only on the boundary snapshot event, so this sync
+        // completes almost immediately; it does not wait on segment compute.
+        unsafe {
+            let err = cuda_sys::lib().cuStreamSynchronize(spec_stream);
+            if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!("APFL replay spec_stream sync: {:?}", err));
+            }
+        }
+        let d_ids = match graph.apfl.as_ref().and_then(|a| a.d_spec_topk_ids.as_ref()) {
+            Some(b) => *b.device_ptr(),
+            None => return Ok(()),
+        };
+        {
+            let apfl = graph.apfl.as_mut().unwrap();
+            if apfl.h_spec_topk_ids.len() < spec_count {
+                apfl.h_spec_topk_ids.resize(spec_count, 0);
+            }
+            unsafe {
+                let err = cuda_sys::lib().cuMemcpyDtoH_v2(
+                    apfl.h_spec_topk_ids.as_mut_ptr() as *mut std::ffi::c_void,
+                    d_ids,
+                    spec_count * 4,
+                );
+                if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(format!("APFL replay D2H spec_topk: {:?}", err));
+                }
+            }
+        }
+        if pred_layer >= graph.moe_layers.len() {
+            return Ok(());
+        }
+        let apfl = graph.apfl.as_mut().unwrap();
+        if let Some(ref next_moe) = graph.moe_layers[pred_layer] {
+            let next_experts = &next_moe.experts;
+            for s in 0..spec_count {
+                let pred_eid = apfl.h_spec_topk_ids[s];
+                if pred_eid < 0 || pred_eid as usize >= next_experts.len() {
+                    continue;
+                }
+                let pred_eid = pred_eid as usize;
+
+                if apfl.find_slot(pred_layer, pred_eid).is_some() {
+                    continue;
+                }
+
+                if let Some(ref hcs) = graph.hcs {
+                    if hcs.get_fast(pred_layer, pred_eid).is_some() {
+                        continue;
+                    }
+                }
+
+                let slot_idx = match apfl.find_evict_slot_for_replay(in_flight_layer, pred_layer)
+                {
+                    Some(i) => i,
+                    // No safe slot: everything is pinned by the in-flight
+                    // segment or holds live predictions. Skip the rest.
+                    None => break,
+                };
+                let slot = &mut apfl.slots[slot_idx];
+                let pred_expert = &next_experts[pred_eid];
+                let slot_base = *slot.d_buf.device_ptr();
+
+                unsafe {
+                    if pred_expert.contiguous_ptr != 0 {
+                        let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                            slot_base,
+                            pred_expert.contiguous_ptr as *const std::ffi::c_void,
+                            pred_expert.contiguous_bytes,
+                            prefetch_stream,
+                        );
+                        if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                            log::warn!(
+                                "APFL replay DMA contiguous[{}] failed: {:?}",
+                                pred_eid,
+                                err
+                            );
+                            continue;
+                        }
+                    } else {
+                        let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                            slot_base + slot.w13_packed_offset as u64,
+                            pred_expert.w13_packed_ptr as *const std::ffi::c_void,
+                            pred_expert.w13_packed_bytes,
+                            prefetch_stream,
+                        );
+                        if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                            continue;
+                        }
+                        let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                            slot_base + slot.w13_scales_offset as u64,
+                            pred_expert.w13_scales_ptr as *const std::ffi::c_void,
+                            pred_expert.w13_scales_bytes,
+                            prefetch_stream,
+                        );
+                        if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                            continue;
+                        }
+                        let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                            slot_base + slot.w2_packed_offset as u64,
+                            pred_expert.w2_packed_ptr as *const std::ffi::c_void,
+                            pred_expert.w2_packed_bytes,
+                            prefetch_stream,
+                        );
+                        if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                            continue;
+                        }
+                        let err = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                            slot_base + slot.w2_scales_offset as u64,
+                            pred_expert.w2_scales_ptr as *const std::ffi::c_void,
+                            pred_expert.w2_scales_bytes,
+                            prefetch_stream,
+                        );
+                        if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                            continue;
+                        }
+                    }
+                    cuda_sys::lib().cuEventRecord(slot.dma_event.0, prefetch_stream);
+                }
+
+                slot.layer_idx = pred_layer as i32;
+                slot.expert_idx = pred_eid as i32;
+                slot.dma_queued = true;
+                slot.w13_packed_size = pred_expert.w13_packed_bytes;
+                slot.w13_scales_size = pred_expert.w13_scales_bytes;
+                slot.w2_packed_size = pred_expert.w2_packed_bytes;
+                slot.w2_scales_size = pred_expert.w2_scales_bytes;
+            }
+        }
+        Ok(())
+    }
+
     fn replay_per_layer_graphs(
         &mut self,
         token_id: usize,
@@ -32943,6 +33871,18 @@ impl GpuDecodeStore {
         let moe_indices = graph.per_layer_moe_indices.clone();
         let replay_stream: cuda_sys::CUstream = *self.device.cu_stream();
         let copy_stream = self.copy_stream.0;
+        // APFL graph-replay lookahead (enabled via KRASIS_APFL_PREFETCH>0 at
+        // setup): spec-route the next MoE layer at each segment boundary and
+        // prefetch its predicted cold experts while the segment computes.
+        let spec_stream_raw = self.spec_stream.0;
+        let prefetch_stream_raw = self.prefetch_stream.0;
+        let spec_blas_raw = self.spec_blas_handle.0;
+        let raw_sigmoid_topk_fn = self.raw_sigmoid_topk.0;
+        let raw_softmax_topk_fn = self.raw_softmax_topk.0;
+        let apfl_replay = graph
+            .apfl
+            .as_ref()
+            .map_or(false, |a| a.enabled && a.d_spec_hidden.is_some());
 
         // Update scalar params (token_id, pos, seq_len)
         {
@@ -33341,8 +34281,10 @@ impl GpuDecodeStore {
                             }
                             dynamic_promotion_event_pending = false;
                         }
-                        graph.dma_cold_experts += cold_count as u64;
                         let moe_data = graph.moe_layers[moe_layer_idx].as_ref().unwrap();
+                        let mut apfl_hits = 0u32;
+                        let mut apfl_misses = 0u32;
+                        let mut miss_count = 0usize;
 
                         if cold_count > graph_buf_base.len() {
                             return Err(format!(
@@ -33375,6 +34317,41 @@ impl GpuDecodeStore {
                                     moe_layer_idx, ci, batch_slot, topk, max_ept,
                                 ));
                             }
+                            // APFL graph-replay hit check: the lookahead queued at
+                            // the previous segment boundary may have prefetched this
+                            // expert already. cuEventQuery keeps this non-blocking:
+                            // an unfinished prefetch counts as a miss and takes the
+                            // normal cold DMA path.
+                            if apfl_replay {
+                                let apfl_ptrs = graph.apfl.as_ref().and_then(|apfl| {
+                                    apfl.find_slot(moe_layer_idx, eid).and_then(|slot_idx| {
+                                        let slot = &apfl.slots[slot_idx];
+                                        if slot.dma_queued {
+                                            let result = unsafe {
+                                                cuda_sys::lib().cuEventQuery(slot.dma_event.0)
+                                            };
+                                            if result == cuda_sys::CUresult::CUDA_SUCCESS {
+                                                Some((
+                                                    slot.w13_packed_ptr(),
+                                                    slot.w13_scales_ptr(),
+                                                    slot.w2_packed_ptr(),
+                                                    slot.w2_scales_ptr(),
+                                                ))
+                                            } else {
+                                                None
+                                            }
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                });
+                                if let Some((w13p, w13s, w2p, w2s)) = apfl_ptrs {
+                                    cold_bufs.push((w13p, w13s, w2p, w2s, batch_slot));
+                                    apfl_hits += 1;
+                                    continue;
+                                }
+                                apfl_misses += 1;
+                            }
                             let token_idx = graph.validation_decode_steps as usize + 1;
                             validation_record_cold_load(
                                 &mut graph.validation_decode_cold_hist,
@@ -33383,9 +34360,11 @@ impl GpuDecodeStore {
                                 eid,
                                 token_idx,
                             );
+                            graph.dma_cold_experts += 1;
                             let expert = &moe_data.experts[eid];
 
-                            let base = graph_buf_base[ci];
+                            let base = graph_buf_base[miss_count];
+                            miss_count += 1;
                             let (w13p, w13s, w2p, w2s) = (
                                 base + w13p_off as u64,
                                 base + w13s_off as u64,
@@ -33448,16 +34427,31 @@ impl GpuDecodeStore {
                             ));
                         }
 
-                        let err = unsafe {
-                            cuda_sys::lib().cuEventRecord(graph_replay_dma_event, copy_stream)
-                        };
-                        if err != cuda_sys::CUresult::CUDA_SUCCESS {
-                            return Err(format!(
-                                "graph replay mapped cold DMA event record layer={}: {:?}",
-                                moe_layer_idx, err
-                            ));
+                        if miss_count > 0 {
+                            let err = unsafe {
+                                cuda_sys::lib().cuEventRecord(graph_replay_dma_event, copy_stream)
+                            };
+                            if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                                return Err(format!(
+                                    "graph replay mapped cold DMA event record layer={}: {:?}",
+                                    moe_layer_idx, err
+                                ));
+                            }
+                            wait_for_cold_dma = true;
                         }
-                        wait_for_cold_dma = true;
+                        if apfl_replay && (apfl_hits > 0 || apfl_misses > 0) {
+                            let apfl = graph.apfl.as_mut().unwrap();
+                            apfl.total_hits += apfl_hits as u64;
+                            apfl.total_misses += apfl_misses as u64;
+                            if moe_layer_idx < apfl.layer_stats.len() {
+                                for _ in 0..apfl_hits {
+                                    apfl.layer_stats[moe_layer_idx].record_hit();
+                                }
+                                for _ in 0..apfl_misses {
+                                    apfl.layer_stats[moe_layer_idx].record_miss();
+                                }
+                            }
+                        }
 
                         // Update batch_upload slots for all cold experts
                         let d_upload_base = *graph.d_batch_upload.device_ptr();
@@ -33572,9 +34566,11 @@ impl GpuDecodeStore {
                     )?;
                     Self::apply_hcs_cold_swaps(graph, moe_layer_idx, ne, topk)?;
 
-                    // Classify experts: HCS hit vs cold (need DMA)
+                    // Classify experts: HCS hit vs APFL prefetch hit vs cold (need DMA)
                     let mut batch_count = 0usize;
                     let mut cold_experts: Vec<(usize, usize, f32)> = Vec::new();
+                    let mut apfl_hits = 0u32;
+                    let mut apfl_misses = 0u32;
                     let moe_data = graph.moe_layers[moe_layer_idx].as_ref().unwrap();
                     let t_padding_setup = if graph.timing_enabled {
                         Some(std::time::Instant::now())
@@ -33612,19 +34608,78 @@ impl GpuDecodeStore {
                                 graph.dma_hcs_experts += 1;
                             }
                         } else {
-                            let token_idx = graph.validation_decode_steps as usize + 1;
-                            validation_record_cold_load(
-                                &mut graph.validation_decode_cold_hist,
-                                &mut graph.validation_decode_cold_events,
-                                moe_layer_idx,
-                                eid,
-                                token_idx,
-                            );
-                            cold_experts.push((i, eid, weight));
+                            // APFL graph-replay hit check: the lookahead queued at
+                            // the previous segment boundary may have prefetched this
+                            // expert already. cuEventQuery keeps this non-blocking:
+                            // an unfinished prefetch counts as a miss and takes the
+                            // normal cold DMA path.
+                            let apfl_ptrs = if apfl_replay {
+                                graph.apfl.as_ref().and_then(|apfl| {
+                                    apfl.find_slot(moe_layer_idx, eid).and_then(|slot_idx| {
+                                        let slot = &apfl.slots[slot_idx];
+                                        if slot.dma_queued {
+                                            let result = unsafe {
+                                                cuda_sys::lib().cuEventQuery(slot.dma_event.0)
+                                            };
+                                            if result == cuda_sys::CUresult::CUDA_SUCCESS {
+                                                Some((
+                                                    slot.w13_packed_ptr(),
+                                                    slot.w13_scales_ptr(),
+                                                    slot.w2_packed_ptr(),
+                                                    slot.w2_scales_ptr(),
+                                                ))
+                                            } else {
+                                                None
+                                            }
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                })
+                            } else {
+                                None
+                            };
+                            if let Some((w13p, w13s, w2p, w2s)) = apfl_ptrs {
+                                if batch_count < max_ept {
+                                    graph.h_batch_w13_packed_ptrs[batch_count] = w13p;
+                                    graph.h_batch_w13_scales_ptrs[batch_count] = w13s;
+                                    graph.h_batch_w2_packed_ptrs[batch_count] = w2p;
+                                    graph.h_batch_w2_scales_ptrs[batch_count] = w2s;
+                                    graph.h_batch_weights[batch_count] = weight;
+                                    batch_count += 1;
+                                    apfl_hits += 1;
+                                }
+                            } else {
+                                if apfl_replay {
+                                    apfl_misses += 1;
+                                }
+                                let token_idx = graph.validation_decode_steps as usize + 1;
+                                validation_record_cold_load(
+                                    &mut graph.validation_decode_cold_hist,
+                                    &mut graph.validation_decode_cold_events,
+                                    moe_layer_idx,
+                                    eid,
+                                    token_idx,
+                                );
+                                cold_experts.push((i, eid, weight));
+                            }
                         }
                     }
 
                     graph.dma_cold_experts += cold_experts.len() as u64;
+                    if apfl_replay && (apfl_hits > 0 || apfl_misses > 0) {
+                        let apfl = graph.apfl.as_mut().unwrap();
+                        apfl.total_hits += apfl_hits as u64;
+                        apfl.total_misses += apfl_misses as u64;
+                        if moe_layer_idx < apfl.layer_stats.len() {
+                            for _ in 0..apfl_hits {
+                                apfl.layer_stats[moe_layer_idx].record_hit();
+                            }
+                            for _ in 0..apfl_misses {
+                                apfl.layer_stats[moe_layer_idx].record_miss();
+                            }
+                        }
+                    }
 
                     if let Some(t) = t_classify_start {
                         graph.t_graph_classify += t.elapsed().as_secs_f64();
@@ -33842,6 +34897,36 @@ impl GpuDecodeStore {
                 }
             }
 
+            // ── APFL graph-replay lookahead: queue spec routing for the NEXT
+            // MoE layer. The hidden-state snapshot is ordered on replay_stream
+            // before this segment's kernels, so the spec gate sees the exact
+            // segment-boundary state; gate GEMV + top-k run on spec_stream in
+            // parallel with the segment. Skipped for graph_idx 0 (d_hidden
+            // still holds the previous token's state there, matching the
+            // non-graph path, which never prefetches the first MoE layer).
+            let mut apfl_spec_queued = 0usize;
+            let mut apfl_pred_layer = 0usize;
+            if apfl_replay && graph_idx >= 1 && graph_idx + 1 < num_graphs {
+                let t_apfl_start = if timing {
+                    Some(std::time::Instant::now())
+                } else {
+                    None
+                };
+                apfl_pred_layer = moe_indices[graph_idx];
+                apfl_spec_queued = Self::apfl_graph_replay_queue_spec(
+                    graph,
+                    apfl_pred_layer,
+                    replay_stream,
+                    spec_stream_raw,
+                    spec_blas_raw,
+                    raw_sigmoid_topk_fn,
+                    raw_softmax_topk_fn,
+                )?;
+                if let Some(t) = t_apfl_start {
+                    graph.t_moe_apfl += t.elapsed().as_secs_f64();
+                }
+            }
+
             if wait_for_cold_dma {
                 let err = unsafe {
                     cuda_sys::lib().cuStreamWaitEvent(replay_stream, graph_replay_dma_event, 0)
@@ -33883,6 +34968,30 @@ impl GpuDecodeStore {
             }
             if let Some(t) = t_launch_start {
                 graph.t_graph_launch += t.elapsed().as_secs_f64();
+            }
+            // ── APFL graph-replay lookahead: consume the spec results queued
+            // above and prefetch predicted cold experts on prefetch_stream
+            // while this segment computes. The in-flight MoE layer's slots are
+            // pinned against eviction because the just-launched segment may
+            // read them via d_batch_upload.
+            if apfl_spec_queued > 0 {
+                let t_apfl_start = if timing {
+                    Some(std::time::Instant::now())
+                } else {
+                    None
+                };
+                let in_flight_layer = moe_indices[graph_idx - 1];
+                Self::apfl_graph_replay_prefetch(
+                    graph,
+                    in_flight_layer,
+                    apfl_pred_layer,
+                    apfl_spec_queued,
+                    spec_stream_raw,
+                    prefetch_stream_raw,
+                )?;
+                if let Some(t) = t_apfl_start {
+                    graph.t_moe_apfl += t.elapsed().as_secs_f64();
+                }
             }
             if !dynamic_promotions.is_empty() {
                 let mut promoted = 0usize;
@@ -34252,7 +35361,7 @@ impl GpuDecodeStore {
                 hs,
             );
             if graph.debug_decode_early_trace_active
-                && graph.validation_decode_steps <= 2
+                && graph.validation_decode_steps < graph.debug_decode_early_max_steps
                 && seg_start == 0
             {
                 graph.debug_decode_early_entries.push(serde_json::json!({
@@ -34300,7 +35409,8 @@ impl GpuDecodeStore {
                 GpuMlpConfig::None => "none",
             };
             let debug_decode_extended_step =
-                graph.debug_decode_early_trace_active && graph.validation_decode_steps <= 2;
+                graph.debug_decode_early_trace_active
+                    && graph.validation_decode_steps < graph.debug_decode_early_max_steps;
             if debug_decode_extended_step && layer_idx == 2 {
                 graph.debug_decode_early_entries.push(serde_json::json!({
                     "phase": "layer2_input_before_norm",
@@ -35267,6 +36377,7 @@ impl GpuDecodeStore {
                     v_proj,
                     o_proj,
                     fused_qkv,
+                    head_gate_proj,
                     num_heads,
                     num_kv_heads,
                     head_dim,
@@ -35314,6 +36425,12 @@ impl GpuDecodeStore {
                     let nh = *num_heads;
                     let nkv = *num_kv_heads;
                     let hd = *head_dim;
+                    if *gated && head_gate_proj.is_some() {
+                        return Err(format!(
+                            "GQA layer {} has both interleaved gated Q and separate head gate; unsupported mixed gate contract",
+                            layer_idx
+                        ));
+                    }
 
                     // MoE-only layers (Nemotron): 0 heads means skip attention entirely.
                     // The hidden state passes through norm → MoE without attention.
@@ -35483,6 +36600,17 @@ impl GpuDecodeStore {
                                 *graph.d_gqa_v.device_ptr(),
                             )?;
                         }
+                        let head_gate_ptr = if let Some(head_gate_wid) = head_gate_proj {
+                            let gw = &graph.weights[*head_gate_wid];
+                            self.gemv_bf16_to_f32(
+                                gw,
+                                *graph.d_hidden.device_ptr(),
+                                *graph.d_la_qkvz.device_ptr(),
+                            )?;
+                            *graph.d_la_qkvz.device_ptr()
+                        } else {
+                            0
+                        };
                         let gated_q_raw_rows = if *gated {
                             hqq_gqa_exec
                                 .as_ref()
@@ -35700,7 +36828,7 @@ impl GpuDecodeStore {
                             let half_dim = *rope_half_dim;
                             let total_heads = nh + nkv;
                             let rope_work_width = if graph.layers[layer_idx].gqa_rope_half_split {
-                                hd
+                                (half_dim * 2).min(hd)
                             } else {
                                 half_dim
                             };
@@ -36623,6 +37751,34 @@ impl GpuDecodeStore {
                                         format!("apply_gated_attn_bf16[{}]: {:?}", layer_idx, e)
                                     })?;
                             }
+                        } else if head_gate_ptr != 0 {
+                            let total = o_size as u32;
+                            let threads = 256u32;
+                            let blocks = (total + threads - 1) / threads;
+                            unsafe {
+                                k.apply_head_gated_attn_bf16
+                                    .clone()
+                                    .launch(
+                                        LaunchConfig {
+                                            grid_dim: (blocks, 1, 1),
+                                            block_dim: (threads, 1, 1),
+                                            shared_mem_bytes: 0,
+                                        },
+                                        (
+                                            *graph.d_scratch.device_ptr(),
+                                            *graph.d_gqa_out.device_ptr(),
+                                            head_gate_ptr,
+                                            nh as i32,
+                                            hd as i32,
+                                        ),
+                                    )
+                                    .map_err(|e| {
+                                        format!(
+                                            "apply_head_gated_attn_bf16[{}]: {:?}",
+                                            layer_idx, e
+                                        )
+                                    })?;
+                            }
                         } else {
                             // Non-gated: just convert FP32 → BF16
                             unsafe {
@@ -37121,7 +38277,7 @@ impl GpuDecodeStore {
                     let d_inner = num_heads * head_dim;
                     let n_groups = graph.mamba2_n_groups.max(1);
                     let trace_mamba2_detail = graph.debug_decode_early_trace_active
-                        && graph.validation_decode_steps <= 2
+                        && graph.validation_decode_steps < graph.debug_decode_early_max_steps
                         && (layer_idx == 0 || layer_idx == 2);
                     let mamba2_trace_prefix = format!("layer{}_mamba2", layer_idx);
 
@@ -38258,7 +39414,7 @@ impl GpuDecodeStore {
                     hs,
                 );
                 if graph.debug_decode_early_trace_active
-                    && graph.validation_decode_steps <= 2
+                    && graph.validation_decode_steps < graph.debug_decode_early_max_steps
                     && (matches!(layer_idx, 1 | 3)
                         || graph.debug_decode_hcs_equiv_layer == Some(layer_idx))
                 {
@@ -38380,7 +39536,7 @@ impl GpuDecodeStore {
                 }));
             }
             if graph.debug_decode_early_trace_active
-                && graph.validation_decode_steps <= 2
+                && graph.validation_decode_steps < graph.debug_decode_early_max_steps
                 && layer_idx == 0
             {
                 graph.debug_decode_early_entries.push(serde_json::json!({
@@ -38510,7 +39666,9 @@ impl GpuDecodeStore {
             *graph.d_residual.device_ptr(),
             hs,
         );
-        if graph.debug_decode_early_trace_active && graph.validation_decode_steps <= 2 {
+        if graph.debug_decode_early_trace_active
+            && graph.validation_decode_steps < graph.debug_decode_early_max_steps
+        {
             let final_trace_prefix = format!("decode_step{}", graph.validation_decode_steps);
             graph.debug_decode_early_entries.push(serde_json::json!({
                 "phase": format!("{}_final_pre_norm", final_trace_prefix),
@@ -38591,7 +39749,9 @@ impl GpuDecodeStore {
             *graph.d_hidden.device_ptr(),
             hs,
         );
-        if graph.debug_decode_early_trace_active && graph.validation_decode_steps <= 2 {
+        if graph.debug_decode_early_trace_active
+            && graph.validation_decode_steps < graph.debug_decode_early_max_steps
+        {
             let final_trace_prefix = format!("decode_step{}", graph.validation_decode_steps);
             graph.debug_decode_early_entries.push(serde_json::json!({
                 "phase": format!("{}_final_post_norm", final_trace_prefix),
@@ -38702,7 +39862,9 @@ impl GpuDecodeStore {
             }
         }
         apply_logit_softcap_in_place(&mut graph.h_logits, graph.final_logit_softcap);
-        if graph.debug_decode_early_trace_active && graph.validation_decode_steps <= 2 {
+        if graph.debug_decode_early_trace_active
+            && graph.validation_decode_steps < graph.debug_decode_early_max_steps
+        {
             let final_trace_prefix = format!("decode_step{}", graph.validation_decode_steps);
             graph.debug_decode_early_entries.push(serde_json::json!({
                 "phase": format!("{}_logits_after_softcap", final_trace_prefix),
@@ -39676,10 +40838,10 @@ impl GpuDecodeStore {
         );
 
         // CUDA graph reuse: verify pointer stability on all GPUs before reusing.
-        let mut all_reuse = self.verify_graph_pointers();
+        let mut all_reuse = self.verify_graph_reuse(start_position);
         for &addr in aux_store_addrs.iter() {
             let s = unsafe { &mut *(addr as *mut GpuDecodeStore) };
-            if !s.verify_graph_pointers() {
+            if !s.verify_graph_reuse(start_position) {
                 all_reuse = false;
             }
         }
@@ -39688,12 +40850,12 @@ impl GpuDecodeStore {
                 trace_config.as_ref(),
                 "graph",
                 &format!(
-                    "phase=multi_gpu_graph_pointer_check result=reuse gpus={}",
+                    "phase=multi_gpu_graph_reuse_check result=reuse gpus={}",
                     num_gpus
                 ),
             );
         } else {
-            if !self.verify_graph_pointers() {
+            if !self.verify_graph_reuse(start_position) {
                 let was = self
                     .graph
                     .as_ref()
@@ -39703,14 +40865,14 @@ impl GpuDecodeStore {
                     trace_emit_global_mark(
                         trace_config.as_ref(),
                         "graph",
-                        "phase=multi_gpu_graph_pointer_check gpu=0 result=invalidate",
+                            "phase=multi_gpu_graph_reuse_check gpu=0 result=invalidate",
                     );
                 }
                 self.invalidate_cuda_graph();
             }
             for (i, &addr) in aux_store_addrs.iter().enumerate() {
                 let s = unsafe { &mut *(addr as *mut GpuDecodeStore) };
-                if !s.verify_graph_pointers() {
+                if !s.verify_graph_reuse(start_position) {
                     let was = s
                         .graph
                         .as_ref()
@@ -39721,7 +40883,7 @@ impl GpuDecodeStore {
                             trace_config.as_ref(),
                             "graph",
                             &format!(
-                                "phase=multi_gpu_graph_pointer_check gpu={} result=invalidate",
+                                "phase=multi_gpu_graph_reuse_check gpu={} result=invalidate",
                                 i + 1
                             ),
                         );
@@ -40126,6 +41288,7 @@ impl GpuDecodeStore {
                             log::error!("multi-gpu: bind GPU0 for capture: {:?}", e);
                         } else {
                             match self.capture_per_layer_graphs(
+                                start_position,
                                 Some((0, boundaries[1])),
                                 true,
                                 false,
@@ -40153,6 +41316,7 @@ impl GpuDecodeStore {
                                 log::error!("multi-gpu: bind GPU{} for capture: {:?}", i + 1, e);
                             } else {
                                 match s.capture_per_layer_graphs(
+                                    start_position,
                                     Some((boundaries[i + 1], boundaries[i + 2])),
                                     false,
                                     is_last,
@@ -41101,6 +42265,7 @@ impl GpuDecodeStore {
                     q_norm_ptr,
                     k_norm_ptr,
                     gated,
+                    head_gate_proj,
                 } => {
                     let half_dim = *rope_half_dim;
                     if let Some(exec) = &graph.layers[layer_idx].hqq_exec {
@@ -41137,6 +42302,12 @@ impl GpuDecodeStore {
                     let kv_stride = nkv * hd;
                     let o_size = nh * hd;
                     let is_gated = *gated;
+                    if is_gated && head_gate_proj.is_some() {
+                        return Err(format!(
+                            "GQA layer {} has both interleaved gated Q and separate head gate; unsupported mixed gate contract",
+                            layer_idx
+                        ));
+                    }
                     let qnp = *q_norm_ptr;
                     let knp = *k_norm_ptr;
                     let sm_sc = *sm_scale;
@@ -41163,6 +42334,7 @@ impl GpuDecodeStore {
                         // D. Per-token GQA processing
                         for t in 0..batch_size {
                             let position = positions[t];
+                            let hidden_ptr = d_bh_ptr + (t * hs * 2) as u64;
                             let proj_ptr = d_bpa_ptr + (t * fqkv_dim) as u64 * 4;
 
                             // Copy fused QKV output to single-token scratch, extract K/V
@@ -41183,10 +42355,20 @@ impl GpuDecodeStore {
                                     kv_stride * 4,
                                 );
                             }
+                            let head_gate_ptr = if let Some(head_gate_wid) = head_gate_proj {
+                                let gw = &graph.weights[*head_gate_wid];
+                                self.gemv_bf16_to_f32(
+                                    gw,
+                                    hidden_ptr,
+                                    *graph.d_la_qkvz.device_ptr(),
+                                )?;
+                                *graph.d_la_qkvz.device_ptr()
+                            } else {
+                                0
+                            };
                             let diag_raw_gqa = if self.debug_gqa_diag_layer == Some(layer_idx)
                                 && batch_size == 1
                             {
-                                let hidden_ptr = d_bh_ptr + (t * hs * 2) as u64;
                                 Some((
                                     self.download_device_bf16_as_f32(hidden_ptr, hs)?,
                                     self.download_device_f32(*graph.d_gqa_q.device_ptr(), nh * hd)?,
@@ -41576,6 +42758,34 @@ impl GpuDecodeStore {
                                             )
                                         })?;
                                 }
+                            } else if head_gate_ptr != 0 {
+                                let total = o_size as u32;
+                                let threads = 256u32;
+                                let blocks = (total + threads - 1) / threads;
+                                unsafe {
+                                    k.apply_head_gated_attn_bf16
+                                        .clone()
+                                        .launch(
+                                            LaunchConfig {
+                                                grid_dim: (blocks, 1, 1),
+                                                block_dim: (threads, 1, 1),
+                                                shared_mem_bytes: 0,
+                                            },
+                                            (
+                                                out_ptr,
+                                                *graph.d_gqa_out.device_ptr(),
+                                                head_gate_ptr,
+                                                nh as i32,
+                                                hd as i32,
+                                            ),
+                                        )
+                                        .map_err(|e| {
+                                            format!(
+                                                "batch head_gated_attn_bf16[{}][{}]: {:?}",
+                                                layer_idx, t, e
+                                            )
+                                        })?;
+                                }
                             } else {
                                 unsafe {
                                     k.fp32_to_bf16
@@ -41635,6 +42845,17 @@ impl GpuDecodeStore {
                             self.gemv_bf16_to_f32(qw, hidden_ptr, *graph.d_gqa_q.device_ptr())?;
                             self.gemv_bf16_to_f32(kw, hidden_ptr, *graph.d_gqa_k.device_ptr())?;
                             self.gemv_bf16_to_f32(vw, hidden_ptr, *graph.d_gqa_v.device_ptr())?;
+                            let head_gate_ptr = if let Some(head_gate_wid) = head_gate_proj {
+                                let gw = &graph.weights[*head_gate_wid];
+                                self.gemv_bf16_to_f32(
+                                    gw,
+                                    hidden_ptr,
+                                    *graph.d_la_qkvz.device_ptr(),
+                                )?;
+                                *graph.d_la_qkvz.device_ptr()
+                            } else {
+                                0
+                            };
                             if diag_raw_gqa_batch.is_none()
                                 && self.debug_gqa_diag_layer == Some(layer_idx)
                                 && batch_size == 1
@@ -42018,6 +43239,34 @@ impl GpuDecodeStore {
                                         .map_err(|e| {
                                             format!(
                                                 "batch gated_attn_bf16[{}][{}]: {:?}",
+                                                layer_idx, t, e
+                                            )
+                                        })?;
+                                }
+                            } else if head_gate_ptr != 0 {
+                                let total = o_size as u32;
+                                let threads = 256u32;
+                                let blocks = (total + threads - 1) / threads;
+                                unsafe {
+                                    k.apply_head_gated_attn_bf16
+                                        .clone()
+                                        .launch(
+                                            LaunchConfig {
+                                                grid_dim: (blocks, 1, 1),
+                                                block_dim: (threads, 1, 1),
+                                                shared_mem_bytes: 0,
+                                            },
+                                            (
+                                                *graph.d_scratch.device_ptr(),
+                                                *graph.d_gqa_out.device_ptr(),
+                                                head_gate_ptr,
+                                                nh as i32,
+                                                hd as i32,
+                                            ),
+                                        )
+                                        .map_err(|e| {
+                                            format!(
+                                                "batch head_gated_attn_bf16[{}][{}]: {:?}",
                                                 layer_idx, t, e
                                             )
                                         })?;
@@ -42841,6 +44090,7 @@ impl GpuDecodeStore {
                     gs,
                     weight,
                     0u64,
+                    moe.swiglu_limit,
                     k,
                     is_int8,
                 )
@@ -42995,6 +44245,7 @@ impl GpuDecodeStore {
                     gs,
                     shared_weight,
                     gate_weight_ptr,
+                    moe.shared_swiglu_limit,
                     k,
                     is_int8,
                 )
@@ -43488,6 +44739,14 @@ impl GpuDecodeStore {
     /// based on the estimated prompt length.
     /// Returns (evicted_count, freed_mb).
     pub fn hcs_evict_for_prefill(&mut self, estimated_tokens: usize) -> (usize, f64) {
+        self.hcs_evict_for_prefill_with_engine_floor(estimated_tokens, 0)
+    }
+
+    pub fn hcs_evict_for_prefill_with_engine_floor(
+        &mut self,
+        estimated_tokens: usize,
+        external_engine_entry_floor_bytes: usize,
+    ) -> (usize, f64) {
         self.last_soft_evict_experts = 0;
         self.last_soft_evict_freed_mb = 0.0;
         self.last_soft_reload_queued = 0;
@@ -43496,6 +44755,14 @@ impl GpuDecodeStore {
         let cal = self.vram_calibration;
         let trace_cfg = self.active_trace_owned();
         let hqq_prefill_growth_bytes = self.hqq_runtime_prefill_growth_bytes();
+        let engine_entry_floor_base_bytes = self
+            .prefill_engine_slot
+            .as_ref()
+            .map(|engine| engine.minimum_prefill_entry_free_bytes(estimated_tokens))
+            .unwrap_or(0)
+            .max(external_engine_entry_floor_bytes);
+        let engine_entry_floor_bytes =
+            engine_entry_floor_base_bytes.saturating_add(hqq_prefill_growth_bytes);
         let route_sync_device = self.device.clone();
         if let Err(e) = self.device.bind_to_thread() {
             log::warn!(
@@ -43671,18 +44938,20 @@ impl GpuDecodeStore {
         // jitter; the second covers launch-time transients before the next
         // pressure safe point.
         let prefill_entry_guard_bytes = hcs.safety_margin_mb.saturating_mul(2 * 1024 * 1024);
-        let needed_bytes = base_needed_bytes
+        let calibrated_needed_bytes = base_needed_bytes
             .saturating_add(hqq_prefill_growth_bytes)
             .saturating_add(prefill_entry_guard_bytes);
+        let needed_bytes = calibrated_needed_bytes.max(engine_entry_floor_bytes);
         if env_truthy("KRASIS_VRAM_LEDGER") {
             vram_ledger_log!(
-                "VRAM LEDGER hcs_evict_prefill prompt_tokens={} eviction_tokens={} free_mb={:.0} base_needed_mb={:.0} hqq_prefill_growth_mb={:.0} entry_guard_mb={:.0} needed_mb={:.0} soft_cached={} soft_slots={} soft_slot_mb={:.3} soft_chunks_loaded={} soft_total_chunks={} hard_budget_mb={} soft_max_mb={} safety_mb={}",
+                "VRAM LEDGER hcs_evict_prefill prompt_tokens={} eviction_tokens={} free_mb={:.0} base_needed_mb={:.0} hqq_prefill_growth_mb={:.0} entry_guard_mb={:.0} engine_entry_floor_mb={:.0} needed_mb={:.0} soft_cached={} soft_slots={} soft_slot_mb={:.3} soft_chunks_loaded={} soft_total_chunks={} hard_budget_mb={} soft_max_mb={} safety_mb={}",
                 estimated_tokens,
                 eviction_tokens,
                 free_bytes as f64 / (1024.0 * 1024.0),
                 base_needed_bytes as f64 / (1024.0 * 1024.0),
                 hqq_prefill_growth_bytes as f64 / (1024.0 * 1024.0),
                 prefill_entry_guard_bytes as f64 / (1024.0 * 1024.0),
+                engine_entry_floor_bytes as f64 / (1024.0 * 1024.0),
                 needed_bytes as f64 / (1024.0 * 1024.0),
                 hcs.soft_num_cached,
                 hcs.soft_num_slots,
@@ -45299,7 +46568,9 @@ impl GpuDecodeStore {
         position: usize,
         token_id: usize,
     ) {
-        if !graph.debug_decode_early_trace_active || graph.validation_decode_steps > 2 {
+        if !graph.debug_decode_early_trace_active
+            || graph.validation_decode_steps >= graph.debug_decode_early_max_steps
+        {
             return;
         }
 
@@ -45506,6 +46777,12 @@ impl GpuDecodeStore {
         let debug_decode_hcs_equiv_layer = self.debug_decode_hcs_equiv_trace_once.take();
         let debug_decode_early_trace = self.debug_decode_early_trace_once;
         self.debug_decode_early_trace_once = false;
+        let debug_decode_early_max_steps = if debug_decode_early_trace {
+            self.debug_decode_early_max_steps_once
+        } else {
+            3
+        };
+        self.debug_decode_early_max_steps_once = 3;
         let debug_decode_early_detail_dims = if debug_decode_early_trace {
             std::mem::take(&mut self.debug_decode_early_detail_dims_once)
         } else {
@@ -45656,7 +46933,7 @@ impl GpuDecodeStore {
         // buffers use copy_() in-place). Verify pointers match capture-time snapshot.
         // If stable, reuse graphs (skip ~30-40ms recapture overhead per request).
         // If pointers moved (shouldn't happen), fall back to invalidate + recapture.
-        if self.verify_graph_pointers() {
+        if self.verify_graph_reuse(start_position) {
             trace_emit_mark(
                 trace_config.as_ref(),
                 0,
@@ -45664,7 +46941,7 @@ impl GpuDecodeStore {
                 first_token,
                 None,
                 "graph",
-                "phase=graph_pointer_check result=reuse",
+                "phase=graph_reuse_check result=reuse",
             );
         } else {
             let was_captured = self
@@ -45680,7 +46957,7 @@ impl GpuDecodeStore {
                     first_token,
                     None,
                     "graph",
-                    "phase=graph_pointer_check result=invalidate",
+                    "phase=graph_reuse_check result=invalidate",
                 );
             }
             self.invalidate_cuda_graph();
@@ -45714,6 +46991,7 @@ impl GpuDecodeStore {
             g.debug_decode_hcs_equiv_layer = debug_decode_hcs_equiv_layer;
             g.debug_decode_hcs_equiv_entries.clear();
             g.debug_decode_early_trace_active = debug_decode_early_trace;
+            g.debug_decode_early_max_steps = debug_decode_early_max_steps.max(1);
             g.debug_decode_early_detail_dims = debug_decode_early_detail_dims;
             g.debug_decode_early_entries.clear();
             g.debug_hcs_transition_trace_active = debug_hcs_transition_trace;
@@ -46645,7 +47923,7 @@ impl GpuDecodeStore {
                         .map(|g| g.d_graph_token_id.is_some())
                         .unwrap_or(false);
                     if step == 0 && _has_graph_bufs && !no_graph {
-                        match self.capture_per_layer_graphs(None, true, true, 0) {
+                        match self.capture_per_layer_graphs(start_position, None, true, true, 0) {
                             Ok(()) => {
                                 trace_emit_mark(
                                     self.graph.as_ref().and_then(|g| g.decode_trace.as_ref()),
@@ -48641,6 +49919,8 @@ impl GpuDecodeStore {
             shared_gate_wid,
             activation_type: 0,    // silu_gated (default for existing models)
             gated_experts: true,   // existing models have gate_proj+up_proj
+            swiglu_limit: 0.0,
+            shared_swiglu_limit: 0.0,
             latent_down_wid: None, // no latent projections for standard MoE
             latent_up_wid: None,
             moe_input_size: 0, // 0 = use hidden_size (standard MoE)
@@ -48919,6 +50199,7 @@ impl GpuDecodeStore {
         group_size: usize,
         weight: f32,
         weight_ptr: u64, // optional device ptr: if non-zero, kernel reads sigmoid(*weight_ptr) instead of weight
+        swiglu_limit: f32,
         kernels: &CachedKernels,
         is_int8: bool,
     ) -> PyResult<()> {
@@ -48952,6 +50233,7 @@ impl GpuDecodeStore {
                         group_size as i32,
                         weight,
                         weight_ptr,
+                        swiglu_limit,
                     ),
                 )
                 .map_err(|e| {
@@ -49939,6 +51221,7 @@ impl GpuDecodeStore {
         n: usize,
         group_size: usize,
         k_splits: usize,
+        swiglu_limit: f32,
         kernels: &CachedKernels,
         is_int8: bool,
     ) -> PyResult<()> {
@@ -49971,6 +51254,7 @@ impl GpuDecodeStore {
                         n as i32,
                         group_size as i32,
                         k_splits as i32,
+                        swiglu_limit,
                     ),
                 )
                 .map_err(|e| {
@@ -50406,7 +51690,8 @@ impl GpuDecodeStore {
             router_input_ptr
         };
         let early_trace_active =
-            graph.debug_decode_early_trace_active && graph.validation_decode_steps <= 2;
+            graph.debug_decode_early_trace_active
+                && graph.validation_decode_steps < graph.debug_decode_early_max_steps;
         let trace_moe_detail_active = early_trace_active
             && (matches!(layer_idx, 1 | 3)
                 || graph.debug_decode_hcs_equiv_layer == Some(layer_idx));
@@ -50875,7 +52160,7 @@ impl GpuDecodeStore {
             })?;
         let hcs_equiv_trace_active = graph.debug_decode_hcs_equiv_trace_active
             && graph.debug_decode_hcs_equiv_layer == Some(layer_idx)
-            && graph.validation_decode_steps <= 2;
+            && graph.validation_decode_steps < graph.debug_decode_early_max_steps;
         let mut hcs_equiv_sources: Vec<serde_json::Value> = Vec::new();
         let expected_activation = debug_decode_expected_activation_label(act_type);
         let resident_batched_kernel =
@@ -51799,45 +53084,75 @@ impl GpuDecodeStore {
             // For silu (act_type=0): use fused_silu_w2 kernel (gated, SiLU*gate activation)
             let w2_n_tiles = (expert_hs + 15) / 16;
             let w2_smem = (intermediate * 2 + 1024 * 4 + 64 * 4) as u32;
-            let w2_kernel = if act_type == 1 {
-                // relu2: ungated experts
-                if is_int8 {
+            if act_type == 1 {
+                let w2_kernel = if is_int8 {
                     k.relu2_w2_int8_batched.clone()
                 } else {
                     k.relu2_w2_batched.clone()
+                };
+                unsafe {
+                    w2_kernel
+                        .launch(
+                            LaunchConfig {
+                                grid_dim: (w2_n_tiles as u32, 1, hcs_batch_count as u32),
+                                block_dim: (256, 1, 1),
+                                shared_mem_bytes: w2_smem,
+                            },
+                            (
+                                d_w2p,
+                                d_w2s,
+                                *graph.d_batch_gate_ups.device_ptr(),
+                                *graph.d_batch_expert_outs.device_ptr(),
+                                inv_wp,
+                                inv_sp,
+                                intermediate as i32,
+                                expert_hs as i32,
+                                gs as i32,
+                                d_wts,
+                            ),
+                        )
+                        .map_err(|e| {
+                            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                "batched relu2 w2: {:?}",
+                                e
+                            ))
+                        })?;
                 }
             } else {
-                // silu: gated experts
-                if is_int8 {
+                let w2_kernel = if is_int8 {
                     k.fused_silu_w2_int8_batched.clone()
                 } else {
                     k.fused_silu_w2_batched.clone()
+                };
+                unsafe {
+                    w2_kernel
+                        .launch(
+                            LaunchConfig {
+                                grid_dim: (w2_n_tiles as u32, 1, hcs_batch_count as u32),
+                                block_dim: (256, 1, 1),
+                                shared_mem_bytes: w2_smem,
+                            },
+                            (
+                                d_w2p,
+                                d_w2s,
+                                *graph.d_batch_gate_ups.device_ptr(),
+                                *graph.d_batch_expert_outs.device_ptr(),
+                                inv_wp,
+                                inv_sp,
+                                intermediate as i32,
+                                expert_hs as i32,
+                                gs as i32,
+                                moe.swiglu_limit,
+                                d_wts,
+                            ),
+                        )
+                        .map_err(|e| {
+                            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                "batched silu w2: {:?}",
+                                e
+                            ))
+                        })?;
                 }
-            };
-            unsafe {
-                w2_kernel
-                    .launch(
-                        LaunchConfig {
-                            grid_dim: (w2_n_tiles as u32, 1, hcs_batch_count as u32),
-                            block_dim: (256, 1, 1),
-                            shared_mem_bytes: w2_smem,
-                        },
-                        (
-                            d_w2p,
-                            d_w2s,
-                            *graph.d_batch_gate_ups.device_ptr(),
-                            *graph.d_batch_expert_outs.device_ptr(),
-                            inv_wp,
-                            inv_sp,
-                            intermediate as i32,
-                            expert_hs as i32,
-                            gs as i32,
-                            d_wts,
-                        ),
-                    )
-                    .map_err(|e| {
-                        pyo3::exceptions::PyRuntimeError::new_err(format!("batched w2: {:?}", e))
-                    })?;
             }
 
             if let Some(trace_cfg) = graph.decode_trace.as_ref() {
@@ -52412,6 +53727,7 @@ impl GpuDecodeStore {
                         gs,
                         weight,
                         0u64,
+                        moe.swiglu_limit,
                         &k,
                         is_int8,
                     )?;
@@ -52683,6 +53999,7 @@ impl GpuDecodeStore {
                             gs,
                             weight,
                             0u64,
+                            moe.swiglu_limit,
                             &k,
                             is_int8,
                         )?;
@@ -53037,6 +54354,7 @@ impl GpuDecodeStore {
                             gs,
                             weight,
                             0u64,
+                            moe.swiglu_limit,
                             &k,
                             is_int8,
                         )?;
@@ -53500,6 +54818,7 @@ impl GpuDecodeStore {
                     gs,
                     shared_weight,
                     gate_weight_ptr,
+                    moe.shared_swiglu_limit,
                     &k,
                     is_int8,
                 )?;
@@ -56725,6 +58044,7 @@ impl GpuDecodeStore {
                     gs,
                     0.1f32,
                     0u64,
+                    0.0,
                     &k,
                     is_int8,
                 )?;
@@ -56761,6 +58081,7 @@ impl GpuDecodeStore {
                     gs,
                     0.1f32,
                     0u64,
+                    0.0,
                     &k,
                     is_int8,
                 )?;
@@ -56812,6 +58133,7 @@ impl GpuDecodeStore {
                     gs,
                     0.1f32,
                     0u64,
+                    0.0,
                     &k,
                     is_int8,
                 )?;
@@ -56913,6 +58235,7 @@ impl GpuDecodeStore {
                         hs,
                         gs,
                         w2_ksplits,
+                        0.0,
                         k,
                         is_int8,
                     )?;
@@ -56942,6 +58265,7 @@ impl GpuDecodeStore {
                         hs,
                         gs,
                         w2_ksplits,
+                        0.0,
                         k,
                         is_int8,
                     )?;
@@ -57090,6 +58414,7 @@ impl GpuDecodeStore {
                             gs,
                             0.1f32,
                             0u64,
+                            0.0,
                             &k,
                             is_int8,
                         )?;
@@ -57136,6 +58461,7 @@ impl GpuDecodeStore {
                             gs,
                             0.1f32,
                             0u64,
+                            0.0,
                             &k,
                             is_int8,
                         )?;

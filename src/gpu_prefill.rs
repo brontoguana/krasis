@@ -51,6 +51,58 @@ fn prefill_debug_enabled() -> bool {
         .unwrap_or(false)
 }
 
+fn prefill_ptr_table_reuse_enabled() -> bool {
+    std::env::var("KRASIS_PREFILL_PTR_TABLE_REUSE")
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn prefill_sync_debug_enabled() -> bool {
+    std::env::var("KRASIS_PREFILL_SYNC_DEBUG")
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn prefill_sync_debug_min_tokens() -> usize {
+    std::env::var("KRASIS_PREFILL_SYNC_DEBUG_MIN_TOKENS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(0)
+}
+
+fn prefill_diag_sync_stage_enabled(stage: &str, layer_idx: usize, tokens: usize) -> bool {
+    let Ok(raw_stage) = std::env::var("KRASIS_PREFILL_DIAG_SYNC_STAGE") else {
+        return false;
+    };
+    let wanted = raw_stage.trim();
+    if wanted.is_empty() || (wanted != "*" && wanted != stage) {
+        return false;
+    }
+    if let Some(target_layer) = std::env::var("KRASIS_PREFILL_DIAG_SYNC_LAYER")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+    {
+        if target_layer != layer_idx {
+            return false;
+        }
+    }
+    let min_tokens = std::env::var("KRASIS_PREFILL_DIAG_SYNC_MIN_TOKENS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    tokens >= min_tokens
+}
+
 fn prefill_liveness_timing_enabled() -> bool {
     std::env::var("KRASIS_PREFILL_LIVENESS_TIMING")
         .map(|v| {
@@ -5026,10 +5078,12 @@ pub struct PrefillKernels {
     rope_half_split: RawCuFunc,
     rope_mrope: RawCuFunc,
     silu_mul: RawCuFunc,
+    silu_mul_limited: RawCuFunc,
     relu2: RawCuFunc,
     gelu_tanh_mul: RawCuFunc,
     gated_activation_split: RawCuFunc,
     sigmoid_mul: RawCuFunc, // gated GQA: out = attn * sigmoid(gate)
+    sigmoid_head_mul: RawCuFunc, // Step GQA: one sigmoid gate per attention head
     sigmoid_topk: RawCuFunc,
     normalize_topk_weights: RawCuFunc,
     softmax_topk: RawCuFunc,
@@ -5731,6 +5785,8 @@ pub struct PrefillLayerWeights {
     pub v_proj_bf16: Option<Bf16Weight>,
     pub o_proj_bf16: Option<Bf16Weight>,
     pub gqa_gated: bool, // QCN: q_proj outputs [query, gate], apply sigmoid(gate) before o_proj
+    pub gqa_head_gate_proj: Option<MarlinWeight>,
+    pub gqa_head_gate_proj_bf16: Option<Bf16Weight>,
     pub mamba2_in_proj: Option<MarlinWeight>,
     pub mamba2_out_proj: Option<MarlinWeight>,
     pub mamba2_in_proj_bf16: Option<Bf16Weight>,
@@ -5757,6 +5813,8 @@ pub struct PrefillLayerWeights {
     pub moe_routed_scaling_factor: f32,
     pub moe_gated: bool,
     pub moe_activation: u8,    // 0=silu, 1=relu2
+    pub moe_swiglu_limit: f32,
+    pub shared_swiglu_limit: f32,
     pub moe_input_size: usize, // 0 = use hidden_size; otherwise LatentMoE expert width
     pub moe_latent_down: Option<MarlinWeight>,
     pub moe_latent_up: Option<MarlinWeight>,
@@ -5837,6 +5895,8 @@ pub struct ExpertWeightPtrs {
 pub struct PrefillMoeLayerData {
     pub experts: Vec<ExpertWeightPtrs>,
     pub shared: Option<ExpertWeightPtrs>,
+    pub swiglu_limit: f32,
+    pub shared_swiglu_limit: f32,
     /// Per-layer contiguous backing for bulk DMA (pinned host memory).
     /// When set (ptr != 0), enables 4 DMA calls per layer instead of 4*E.
     /// Points into the WeightStore's LayerExpertBacking which is pinned via cuMemHostRegister.
@@ -6037,6 +6097,7 @@ pub struct PrefillEngine {
     pub hcs_num_experts_per_layer: usize,
     // CUDA events for double-buffer expert DMA synchronization
     pub dma_event: cuda_sys::CUevent,
+    pub cold_staging_reuse_event: cuda_sys::CUevent,
     pub compute_event: cuda_sys::CUevent,
     pub scatter_event: cuda_sys::CUevent,
     pub shared_launch_event: cuda_sys::CUevent,
@@ -6110,8 +6171,11 @@ pub struct PrefillEngine {
     pub h_expert_w1s_ptrs: Vec<u64>,
     pub h_expert_w2_ptrs: Vec<u64>,
     pub h_expert_w2s_ptrs: Vec<u64>,
-    // Cold expert staging buffer: small GPU buffer for H2D of non-HCS experts
-    pub d_cold_staging: Option<CudaSlice<u8>>,
+    // Cold expert staging buffer: raw GPU buffer for H2D of non-HCS experts.
+    // This must bypass cudarc's async memory pool because the buffer is grown
+    // during prefill as route demand changes, and resize decisions depend on
+    // the old allocation becoming immediately releasable.
+    pub d_cold_staging: Option<GpuBuf<u8>>,
     pub cold_expert_bytes: usize, // bytes per cold expert slot (w1p + w1s + w2p + w2s)
     pub max_cold_experts: usize,  // max cold experts the staging buffer can hold
     pub last_cold_staging_failure: Option<ColdStagingFailure>,
@@ -6120,7 +6184,10 @@ pub struct PrefillEngine {
     // Dense pointer-table prefetch for current-layer MoE.
     // When active, these raw pointer-table buffers were populated before the
     // layer attention ran, so MoE only waits for the copy-stream event.
+    pub ptr_table_reuse_ptrs: [[u64; 4]; PREFILL_PTR_TABLE_REUSE_SLOTS],
+    pub ptr_table_reuse_bytes: [usize; PREFILL_PTR_TABLE_REUSE_SLOTS],
     pub ptr_prefetch_layer: Option<usize>,
+    pub ptr_prefetch_reused: bool,
     pub ptr_prefetch_ptrs: [u64; 4],
     pub ptr_prefetch_hcs_count: usize,
     pub ptr_prefetch_pinned_count: usize,
@@ -6296,13 +6363,8 @@ unsafe impl Sync for PrefillEngine {}
 
 impl Drop for PrefillEngine {
     fn drop(&mut self) {
+        self.release_reusable_ptr_tables();
         unsafe {
-            for ptr in &mut self.ptr_prefetch_ptrs {
-                if *ptr != 0 {
-                    let _ = cuda_sys::lib().cuMemFree_v2(*ptr);
-                    *ptr = 0;
-                }
-            }
             if !self.shared_event.is_null() {
                 let _ = cuda_sys::lib().cuEventDestroy_v2(self.shared_event);
             }
@@ -6332,6 +6394,9 @@ impl Drop for PrefillEngine {
             }
             if !self.dma_event.is_null() {
                 let _ = cuda_sys::lib().cuEventDestroy_v2(self.dma_event);
+            }
+            if !self.cold_staging_reuse_event.is_null() {
+                let _ = cuda_sys::lib().cuEventDestroy_v2(self.cold_staging_reuse_event);
             }
             if !self.shared_stream.is_null() {
                 let _ = cuda_sys::lib().cuStreamDestroy_v2(self.shared_stream);
@@ -13603,6 +13668,31 @@ impl PrefillEngine {
         }
     }
 
+    pub fn minimum_prefill_entry_free_bytes(&self, prompt_tokens: usize) -> usize {
+        let safety_margin_mb = self.safety_margin_mb.max(PREFILL_SAFETY_MARGIN_MB);
+        let safety_bytes = safety_margin_mb.saturating_mul(1024 * 1024);
+        let scratch_tokens = clean_runtime_chunk_tokens(prompt_tokens, 128);
+        let scratch_bytes = estimate_scratch_vram_for_prompt(
+            &self.config,
+            scratch_tokens,
+            prompt_tokens,
+        )
+        .saturating_add(self.measured_scratch_alloc_overhead_bytes);
+        let mut post_scratch_runtime_reserve_bytes =
+            self.measured_post_scratch_runtime_reserve_bytes(prompt_tokens);
+        let mamba2_runtime_reserve_bytes =
+            estimate_mamba2_ssd_runtime_temp_bytes(&self.config, prompt_tokens);
+        let combined_runtime_reserve_bytes = self
+            .all_expert_cold_staging_bytes()
+            .saturating_add(mamba2_runtime_reserve_bytes);
+        if combined_runtime_reserve_bytes > post_scratch_runtime_reserve_bytes {
+            post_scratch_runtime_reserve_bytes = combined_runtime_reserve_bytes;
+        }
+        scratch_bytes
+            .saturating_add(post_scratch_runtime_reserve_bytes)
+            .saturating_add(safety_bytes)
+    }
+
     fn measured_cold_slots_from_prescan(&self) -> usize {
         if self.cold_expert_bytes == 0 || self.config.n_routed_experts == 0 {
             return 0;
@@ -14104,19 +14194,156 @@ impl PrefillEngine {
     }
 
     fn release_prefetched_ptr_table(&mut self) {
+        if !self.ptr_prefetch_reused {
+            Self::free_raw_ptr_table(&mut self.ptr_prefetch_ptrs);
+        }
+        self.ptr_prefetch_layer = None;
+        self.ptr_prefetch_reused = false;
+        self.ptr_prefetch_ptrs = [0, 0, 0, 0];
+        self.ptr_prefetch_hcs_count = 0;
+        self.ptr_prefetch_pinned_count = 0;
+        self.ptr_prefetch_cold_count = 0;
+        self.ptr_prefetch_total_count = 0;
+    }
+
+    fn free_raw_ptr_table(ptrs: &mut [u64; 4]) {
         unsafe {
-            for ptr in &mut self.ptr_prefetch_ptrs {
+            for ptr in ptrs {
                 if *ptr != 0 {
                     let _ = cuda_sys::lib().cuMemFree_v2(*ptr);
                     *ptr = 0;
                 }
             }
         }
-        self.ptr_prefetch_layer = None;
-        self.ptr_prefetch_hcs_count = 0;
-        self.ptr_prefetch_pinned_count = 0;
-        self.ptr_prefetch_cold_count = 0;
-        self.ptr_prefetch_total_count = 0;
+    }
+
+    fn allocate_raw_ptr_table(
+        &self,
+        ptrs_bytes: usize,
+        label: &str,
+    ) -> Result<[u64; 4], String> {
+        if ptrs_bytes == 0 {
+            return Err(format!("{label} requested with zero bytes"));
+        }
+        let mt_ptr_alloc = if self.gqa_timing_enabled.get() {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        let mut ptrs = [0u64; 4];
+        unsafe {
+            for (idx, dst) in ptrs.iter_mut().enumerate() {
+                let err = cuda_sys::lib().cuMemAlloc_v2(dst, ptrs_bytes);
+                if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                    Self::free_raw_ptr_table(&mut ptrs);
+                    return Err(format!(
+                        "{label} alloc table {} ({} bytes): {:?}",
+                        idx, ptrs_bytes, err
+                    ));
+                }
+            }
+        }
+        if let Some(t) = mt_ptr_alloc {
+            self.t_moe_ptr_alloc
+                .set(self.t_moe_ptr_alloc.get() + t.elapsed().as_secs_f64() * 1000.0);
+        }
+        Ok(ptrs)
+    }
+
+    fn release_reusable_ptr_tables(&mut self) {
+        unsafe {
+            for slot in &mut self.ptr_table_reuse_ptrs {
+                for ptr in slot {
+                    if *ptr != 0 {
+                        let _ = cuda_sys::lib().cuMemFree_v2(*ptr);
+                        *ptr = 0;
+                    }
+                }
+            }
+        }
+        self.ptr_table_reuse_bytes = [0; PREFILL_PTR_TABLE_REUSE_SLOTS];
+        self.release_prefetched_ptr_table();
+    }
+
+    fn ensure_reusable_ptr_table_slot(
+        &mut self,
+        slot_idx: usize,
+        ptrs_bytes: usize,
+    ) -> Result<[u64; 4], String> {
+        if slot_idx >= PREFILL_PTR_TABLE_REUSE_SLOTS {
+            return Err(format!("invalid prefill pointer-table slot {}", slot_idx));
+        }
+        if ptrs_bytes == 0 {
+            return Err("prefill pointer-table slot requested with zero bytes".to_string());
+        }
+
+        let existing = self.ptr_table_reuse_ptrs[slot_idx];
+        if self.ptr_table_reuse_bytes[slot_idx] >= ptrs_bytes && existing.iter().all(|&p| p != 0) {
+            return Ok(existing);
+        }
+
+        let mt_ptr_alloc = if self.gqa_timing_enabled.get() {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        unsafe {
+            for ptr in &mut self.ptr_table_reuse_ptrs[slot_idx] {
+                if *ptr != 0 {
+                    let _ = cuda_sys::lib().cuMemFree_v2(*ptr);
+                    *ptr = 0;
+                }
+            }
+        }
+        self.ptr_table_reuse_bytes[slot_idx] = 0;
+        if slot_idx == 1 {
+            self.release_prefetched_ptr_table();
+        }
+
+        let mut ptrs = [0u64; 4];
+        unsafe {
+            for (idx, dst) in ptrs.iter_mut().enumerate() {
+                let err = cuda_sys::lib().cuMemAlloc_v2(dst, ptrs_bytes);
+                if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                    for prev in ptrs.iter_mut().take(idx) {
+                        if *prev != 0 {
+                            let _ = cuda_sys::lib().cuMemFree_v2(*prev);
+                            *prev = 0;
+                        }
+                    }
+                    return Err(format!(
+                        "prefill pointer-table slot {} alloc table {} ({} bytes): {:?}",
+                        slot_idx, idx, ptrs_bytes, err
+                    ));
+                }
+            }
+        }
+        self.ptr_table_reuse_ptrs[slot_idx] = ptrs;
+        self.ptr_table_reuse_bytes[slot_idx] = ptrs_bytes;
+        if let Some(t) = mt_ptr_alloc {
+            self.t_moe_ptr_alloc
+                .set(self.t_moe_ptr_alloc.get() + t.elapsed().as_secs_f64() * 1000.0);
+        }
+        Ok(ptrs)
+    }
+
+    fn order_copy_stream_after_compute_for_cold_staging(&self) -> Result<(), String> {
+        if self.cold_staging_reuse_event.is_null() {
+            return Err("cold staging reuse event is not initialized".to_string());
+        }
+        unsafe {
+            let err =
+                cuda_sys::lib().cuEventRecord(self.cold_staging_reuse_event, self.stream);
+            if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!("record cold staging reuse event: {:?}", err));
+            }
+            let err =
+                cuda_sys::lib().cuStreamWaitEvent(self.copy_stream, self.cold_staging_reuse_event, 0);
+            if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!("copy stream wait cold staging reuse event: {:?}", err));
+            }
+        }
+        Ok(())
     }
 
     fn ensure_cold_staging_capacity(
@@ -14141,23 +14368,33 @@ impl PrefillEngine {
         unsafe {
             cuda_sys::lib().cuMemGetInfo_v2(&mut free_before, &mut total_before);
         }
-        let max_safe_slots = free_before.saturating_sub(safety_bytes) / self.cold_expert_bytes;
+        let releasable_cold_bytes = if self.d_cold_staging.is_some() {
+            self.max_cold_experts
+                .saturating_mul(self.cold_expert_bytes)
+        } else {
+            0
+        };
+        let effective_free_before = free_before.saturating_add(releasable_cold_bytes);
+        let max_safe_slots =
+            effective_free_before.saturating_sub(safety_bytes) / self.cold_expert_bytes;
         if slots > max_safe_slots {
             self.last_cold_staging_failure = Some(ColdStagingFailure {
                 prompt_tokens: self.active_prefill_prompt_tokens,
                 chunk_tokens,
                 requested_slots: slots,
                 max_safe_slots,
-                free_before_mb: free_before / (1024 * 1024),
+                free_before_mb: effective_free_before / (1024 * 1024),
                 safety_mb,
             });
             if vram_ledger_enabled() {
                 vram_ledger_log!(
-                    "VRAM LEDGER prefill_cold_staging_capacity_block slots={} max_safe_slots={} cold_expert_mb={:.3} free_before_mb={} total_mb={} safety_mb={} chunk_tokens={} scratch_tokens={} prompt_tokens={}",
+                    "VRAM LEDGER prefill_cold_staging_capacity_block slots={} max_safe_slots={} cold_expert_mb={:.3} free_before_mb={} releasable_cold_mb={} effective_free_before_mb={} total_mb={} safety_mb={} chunk_tokens={} scratch_tokens={} prompt_tokens={}",
                     slots,
                     max_safe_slots,
                     self.cold_expert_bytes as f64 / (1024.0 * 1024.0),
                     free_before / (1024 * 1024),
+                    releasable_cold_bytes / (1024 * 1024),
+                    effective_free_before / (1024 * 1024),
                     total_before / (1024 * 1024),
                     safety_mb,
                     chunk_tokens,
@@ -14167,10 +14404,12 @@ impl PrefillEngine {
             }
             if prefill_debug_enabled() || stderr_debug_enabled() {
                 eprintln!(
-                    "[PREFILL-DEBUG] cold staging capacity block: slots={} max_safe_slots={} free_before_mb={} safety_mb={} chunk_tokens={} scratch_tokens={} prompt_tokens={}",
+                    "[PREFILL-DEBUG] cold staging capacity block: slots={} max_safe_slots={} free_before_mb={} releasable_cold_mb={} effective_free_before_mb={} safety_mb={} chunk_tokens={} scratch_tokens={} prompt_tokens={}",
                     slots,
                     max_safe_slots,
                     free_before / (1024 * 1024),
+                    releasable_cold_bytes / (1024 * 1024),
+                    effective_free_before / (1024 * 1024),
                     safety_mb,
                     chunk_tokens,
                     self.scratch.max_tokens,
@@ -14195,7 +14434,7 @@ impl PrefillEngine {
         self.max_cold_experts = 0;
 
         let total_cold = slots.saturating_mul(self.cold_expert_bytes);
-        let buf = match self.device.alloc_zeros::<u8>(total_cold) {
+        let buf = match GpuBuf::<u8>::alloc_uninit(total_cold) {
             Ok(buf) => buf,
             Err(e) => {
                 self.last_cold_staging_failure = Some(ColdStagingFailure {
@@ -14203,7 +14442,7 @@ impl PrefillEngine {
                     chunk_tokens,
                     requested_slots: slots,
                     max_safe_slots,
-                    free_before_mb: free_before / (1024 * 1024),
+                    free_before_mb: effective_free_before / (1024 * 1024),
                     safety_mb,
                 });
                 return Err(format!("alloc cold_staging slots={slots}: {e}"));
@@ -14237,7 +14476,7 @@ impl PrefillEngine {
                 chunk_tokens,
                 requested_slots: slots,
                 max_safe_slots,
-                free_before_mb: free_before / (1024 * 1024),
+                free_before_mb: effective_free_before / (1024 * 1024),
                 safety_mb,
             });
             self.d_cold_staging = None;
@@ -14367,6 +14606,38 @@ impl PrefillEngine {
                 needed_cold_slots += 1;
             }
         }
+
+        // The Marlin MoE pointer-table path is safe for mixed HCS/pinned/cold
+        // absolute pointers, but a dense all-expert cold slab can exceed the
+        // kernel's signed 32-bit internal staging span. In that case use the
+        // exact active pointer-table path built after routing; it stages only
+        // experts selected for the current chunk and avoids the unsafe slab.
+        let dense_cold_staging_span = needed_cold_slots.saturating_mul(self.cold_expert_bytes);
+        let max_dense_cold_staging_span = i32::MAX as usize;
+        if dense_cold_staging_span > max_dense_cold_staging_span {
+            if vram_ledger_enabled() {
+                vram_ledger_log!(
+                    "VRAM LEDGER prefill_ptr_prefetch_skip layer={} moe_layer={} chunk={} needed_cold_slots={} cold_expert_bytes={} cold_staging_span={} limit={} reason=cold_staging_span_i32_limit",
+                    layer_idx,
+                    moe_layer_idx,
+                    chunk_idx,
+                    needed_cold_slots,
+                    self.cold_expert_bytes,
+                    dense_cold_staging_span,
+                    max_dense_cold_staging_span,
+                );
+            }
+            if prefill_debug_enabled() || stderr_debug_enabled() {
+                eprintln!(
+                    "[PTR-PREFETCH] skipping layer {} chunk {}: dense cold staging span {} bytes exceeds Marlin pointer-table span limit {} bytes",
+                    layer_idx,
+                    chunk_idx,
+                    dense_cold_staging_span,
+                    max_dense_cold_staging_span
+                );
+            }
+            return Ok(());
+        }
         if needed_cold_slots > self.max_cold_experts || self.d_cold_staging.is_none() {
             if let Err(err) = self.ensure_cold_staging_capacity(needed_cold_slots, m) {
                 if vram_ledger_enabled() {
@@ -14391,29 +14662,22 @@ impl PrefillEngine {
         if cold_staging_base == 0 || self.max_cold_experts < needed_cold_slots {
             return Ok(());
         }
+        let reuse_ptr_tables = prefill_ptr_table_reuse_enabled();
+        if reuse_ptr_tables && needed_cold_slots > 0 {
+            self.order_copy_stream_after_compute_for_cold_staging()?;
+        }
+        let ptrs_bytes = n_experts * std::mem::size_of::<u64>();
+        let mut ptrs = if reuse_ptr_tables {
+            self.ensure_reusable_ptr_table_slot(1, ptrs_bytes)?
+        } else {
+            self.allocate_raw_ptr_table(ptrs_bytes, "dense pointer-table prefetch")?
+        };
         let Some(moe_data) = self.moe_layers.get(moe_layer_idx).and_then(|o| o.as_ref()) else {
+            if !reuse_ptr_tables {
+                Self::free_raw_ptr_table(&mut ptrs);
+            }
             return Ok(());
         };
-
-        let ptrs_bytes = n_experts * std::mem::size_of::<u64>();
-        let mut ptrs = [0u64; 4];
-        unsafe {
-            for (idx, dst) in ptrs.iter_mut().enumerate() {
-                let err = cuda_sys::lib().cuMemAlloc_v2(dst, ptrs_bytes);
-                if err != cuda_sys::CUresult::CUDA_SUCCESS {
-                    for prev in ptrs.iter_mut().take(idx) {
-                        if *prev != 0 {
-                            let _ = cuda_sys::lib().cuMemFree_v2(*prev);
-                            *prev = 0;
-                        }
-                    }
-                    return Err(format!(
-                        "dense pointer-table prefetch alloc table {} ({} bytes): {:?}",
-                        idx, ptrs_bytes, err
-                    ));
-                }
-            }
-        }
 
         for i in 0..n_experts {
             self.h_expert_w1_ptrs[i] = 0;
@@ -14467,13 +14731,8 @@ impl PrefillEngine {
                 continue;
             }
             if cold_slot >= self.max_cold_experts {
-                unsafe {
-                    for ptr in &mut ptrs {
-                        if *ptr != 0 {
-                            let _ = cuda_sys::lib().cuMemFree_v2(*ptr);
-                            *ptr = 0;
-                        }
-                    }
+                if !reuse_ptr_tables {
+                    Self::free_raw_ptr_table(&mut ptrs);
                 }
                 return Err(format!(
                     "dense pointer-table prefetch cold staging overflow: layer={} cold_slot={} max={}",
@@ -14574,6 +14833,7 @@ impl PrefillEngine {
         }
 
         self.ptr_prefetch_layer = Some(layer_idx);
+        self.ptr_prefetch_reused = reuse_ptr_tables;
         self.ptr_prefetch_ptrs = ptrs;
         self.ptr_prefetch_hcs_count = hcs_count;
         self.ptr_prefetch_pinned_count = pinned_count;
@@ -14902,20 +15162,29 @@ impl PrefillEngine {
         group_size: usize,
         groups: usize,
     ) -> Result<(), String> {
-        if std::env::var("KRASIS_HQQ_PREFILL_CORRECTION")
-            .map(|v| v == "legacy")
-            .unwrap_or(false)
+        match std::env::var("KRASIS_HQQ_PREFILL_CORRECTION")
+            .unwrap_or_else(|_| "scratch_add".to_string())
+            .as_str()
         {
-            return self.hqq_intercept_correction_legacy_bf16(
-                output_ptr,
-                input_ptr,
-                correction_ptr,
-                m,
-                rows,
-                cols,
-                group_size,
-                groups,
-            );
+            "legacy" => {
+                return self.hqq_intercept_correction_legacy_bf16(
+                    output_ptr,
+                    input_ptr,
+                    correction_ptr,
+                    m,
+                    rows,
+                    cols,
+                    group_size,
+                    groups,
+                );
+            }
+            "scratch_add" | "default" | "" => {}
+            other => {
+                return Err(format!(
+                    "Unsupported KRASIS_HQQ_PREFILL_CORRECTION='{}' (expected scratch_add or legacy)",
+                    other
+                ));
+            }
         }
         let correction_elems = m
             .checked_mul(rows)
@@ -17789,6 +18058,7 @@ impl PrefillEngine {
         let old_tokens = self.scratch.max_tokens;
         self.scratch = allocate_scratch(&self.device, &self.config, 0)
             .map_err(|e| format!("alloc empty scratch: {e}"))?;
+        self.release_reusable_ptr_tables();
         self.d_cold_staging = None;
         self.d_shared_bf16_scratch1 = None;
         self.d_shared_bf16_scratch2 = None;
@@ -18481,6 +18751,8 @@ impl PrefillEngine {
         unsafe {
             cuda_sys::lib().cuCtxSynchronize();
         }
+        self.release_pinning_pool();
+        self.release_reusable_ptr_tables();
         // Replace scratch with zero-capacity (drops old, frees VRAM immediately).
         self.scratch = allocate_scratch(&self.device, &self.config, 0)
             .map_err(|e| format!("alloc empty scratch: {e}"))?;
@@ -18522,6 +18794,21 @@ impl PrefillEngine {
             "phase=release_scratch_complete",
         );
         Ok(())
+    }
+
+    fn release_pinning_pool(&mut self) {
+        if self.pinning_pool_ptr != 0 {
+            unsafe {
+                cuda_sys::lib().cuMemFree_v2(self.pinning_pool_ptr);
+            }
+            self.pinning_pool_ptr = 0;
+        }
+        self.pinning_pool_bytes = 0;
+        self.pinning_pool_expert_bytes = 0;
+        self.pinned_expert_offsets.clear();
+        self.pinning_active = false;
+        self.prescan_active_experts.clear();
+        self.prescan_token_count = 0;
     }
 
     pub fn run_prefill(
@@ -18574,6 +18861,8 @@ impl PrefillEngine {
         };
         let diag_moe_detail = std::env::var("KRASIS_PREFILL_DIAG_MOE_DETAIL").is_ok();
         let debug_prefill = prefill_debug_enabled();
+        let sync_debug = prefill_sync_debug_enabled()
+            && total_m >= prefill_sync_debug_min_tokens();
 
         // Dynamic chunk sizing: use the fewest measured-safe chunks, but avoid
         // pathological tiny tails that pay a full prefill pass for almost no
@@ -19186,6 +19475,14 @@ impl PrefillEngine {
             if timing {
                 self.stream_sync()?;
                 t_embed_ms += tc0.elapsed().as_secs_f64() * 1000.0;
+            }
+            if sync_debug {
+                self.stream_sync()
+                    .map_err(|e| format!("sync_debug embedding chunk {}: {}", chunk_idx, e))?;
+                eprintln!(
+                    "[PREFILL-SYNC-DEBUG] chunk={} stage=embedding ok tokens={} start={} end={}",
+                    chunk_idx, m, chunk_start, chunk_end
+                );
             }
 
             if diag && chunk_idx == 0 {
@@ -19930,6 +20227,30 @@ impl PrefillEngine {
                     self.stream_sync()?;
                     t_norm_ms += tn0.elapsed().as_secs_f64() * 1000.0;
                 }
+                if sync_debug {
+                    self.stream_sync().map_err(|e| {
+                        format!(
+                            "sync_debug input_norm chunk {} layer {}: {}",
+                            chunk_idx, layer_idx, e
+                        )
+                    })?;
+                    eprintln!(
+                        "[PREFILL-SYNC-DEBUG] chunk={} layer={} stage=input_norm ok layer_type={} tokens={}",
+                        chunk_idx, layer_idx, layer_name, m
+                    );
+                }
+                if prefill_diag_sync_stage_enabled("input_norm", layer_idx, m) {
+                    self.stream_sync().map_err(|e| {
+                        format!(
+                            "diag_sync input_norm chunk {} layer {}: {}",
+                            chunk_idx, layer_idx, e
+                        )
+                    })?;
+                    eprintln!(
+                        "[PREFILL-DIAG-SYNC] chunk={} layer={} stage=input_norm ok layer_type={} tokens={}",
+                        chunk_idx, layer_idx, layer_name, m
+                    );
+                }
                 self.push_reference_stage_snapshot(
                     "layer_input_residual_last",
                     Some(layer_idx),
@@ -20324,6 +20645,30 @@ impl PrefillEngine {
                         _ => {}
                     }
                 }
+                if sync_debug {
+                    self.stream_sync().map_err(|e| {
+                        format!(
+                            "sync_debug mixer chunk {} layer {} type {}: {}",
+                            chunk_idx, layer_idx, layer_name, e
+                        )
+                    })?;
+                    eprintln!(
+                        "[PREFILL-SYNC-DEBUG] chunk={} layer={} stage=mixer ok layer_type={} tokens={}",
+                        chunk_idx, layer_idx, layer_name, m
+                    );
+                }
+                if prefill_diag_sync_stage_enabled("mixer", layer_idx, m) {
+                    self.stream_sync().map_err(|e| {
+                        format!(
+                            "diag_sync mixer chunk {} layer {} type {}: {}",
+                            chunk_idx, layer_idx, layer_name, e
+                        )
+                    })?;
+                    eprintln!(
+                        "[PREFILL-DIAG-SYNC] chunk={} layer={} stage=mixer ok layer_type={} tokens={}",
+                        chunk_idx, layer_idx, layer_name, m
+                    );
+                }
                 self.push_reference_stage_snapshot(
                     "mixer_out_last",
                     Some(layer_idx),
@@ -20456,6 +20801,30 @@ impl PrefillEngine {
                 if timing {
                     self.stream_sync()?;
                     t_norm_ms += tn1.elapsed().as_secs_f64() * 1000.0;
+                }
+                if sync_debug {
+                    self.stream_sync().map_err(|e| {
+                        format!(
+                            "sync_debug post_attn_norm chunk {} layer {}: {}",
+                            chunk_idx, layer_idx, e
+                        )
+                    })?;
+                    eprintln!(
+                        "[PREFILL-SYNC-DEBUG] chunk={} layer={} stage=post_attn_norm ok layer_type={} tokens={}",
+                        chunk_idx, layer_idx, layer_name, m
+                    );
+                }
+                if prefill_diag_sync_stage_enabled("post_attn_norm", layer_idx, m) {
+                    self.stream_sync().map_err(|e| {
+                        format!(
+                            "diag_sync post_attn_norm chunk {} layer {}: {}",
+                            chunk_idx, layer_idx, e
+                        )
+                    })?;
+                    eprintln!(
+                        "[PREFILL-DIAG-SYNC] chunk={} layer={} stage=post_attn_norm ok layer_type={} tokens={}",
+                        chunk_idx, layer_idx, layer_name, m
+                    );
                 }
                 self.push_reference_stage_snapshot(
                     "post_attn_residual_last",
@@ -20704,6 +21073,18 @@ impl PrefillEngine {
                             self.config.shared_expert_bits,
                         );
                     }
+                    if prefill_diag_sync_stage_enabled("pre_moe", layer_idx, m) {
+                        self.stream_sync().map_err(|e| {
+                            format!(
+                                "diag_sync pre_moe chunk {} layer {}: {}",
+                                chunk_idx, layer_idx, e
+                            )
+                        })?;
+                        eprintln!(
+                            "[PREFILL-DIAG-SYNC] chunk={} layer={} stage=pre_moe ok layer_type={} tokens={}",
+                            chunk_idx, layer_idx, layer_name, m
+                        );
+                    }
                     self.forward_moe(layer_idx, m)
                         .map_err(|e| format!("moe layer {}: {}", layer_idx, e))?;
                     if liveness_timing {
@@ -20717,6 +21098,12 @@ impl PrefillEngine {
                     }
                     // Double-buffer preload is now inside forward_moe_fused itself,
                     // so DMA(N+1) overlaps with compute(N) on the GPU.
+                } else if self.layer_has_split_dense_mlp(layer_idx) {
+                    if diag && Self::diag_layer_enabled(layer_idx) {
+                        eprintln!("[DIAG] layer{:02} -> forward_split_dense_mlp", layer_idx);
+                    }
+                    let hidden_ptr = *self.scratch.d_hidden.device_ptr();
+                    self.forward_split_dense_mlp(layer_idx, hidden_ptr, hidden_ptr, m)?;
                 } else if self.layer_weights[layer_idx].shared_w1.is_some() {
                     if diag && Self::diag_layer_enabled(layer_idx) {
                         eprintln!("[DIAG] layer{:02} -> forward_dense_mlp", layer_idx);
@@ -20731,6 +21118,22 @@ impl PrefillEngine {
                 if timing {
                     self.stream_sync()?;
                     t_moe_ms += tm0.elapsed().as_secs_f64() * 1000.0;
+                }
+                if sync_debug {
+                    self.stream_sync().map_err(|e| {
+                        format!(
+                            "sync_debug mlp chunk {} layer {}: {}",
+                            chunk_idx, layer_idx, e
+                        )
+                    })?;
+                    eprintln!(
+                        "[PREFILL-SYNC-DEBUG] chunk={} layer={} stage=mlp ok layer_type={} moe={} tokens={}",
+                        chunk_idx,
+                        layer_idx,
+                        layer_name,
+                        self.layer_weights[layer_idx].moe_gate_ptr != 0,
+                        m
+                    );
                 }
                 if reference_layer0_to_layer1_handoff_trace && layer_idx == 0 {
                     let sync_after_layer0_mlp = self.stream_sync().is_ok();
@@ -21681,20 +22084,8 @@ impl PrefillEngine {
         // 6. Sync
         self.stream_sync()?;
 
-        // Free pinning pool — VRAM is released for decode HCS allocation
-        if self.pinning_active {
-            if self.pinning_pool_ptr != 0 {
-                unsafe {
-                    cuda_sys::lib().cuMemFree_v2(self.pinning_pool_ptr);
-                }
-                self.pinning_pool_ptr = 0;
-                self.pinning_pool_bytes = 0;
-            }
-            self.pinned_expert_offsets.clear();
-            self.pinning_active = false;
-            self.prescan_active_experts.clear();
-            self.prescan_token_count = 0;
-        }
+        // Free pinning pool — VRAM is released for decode HCS allocation.
+        self.release_pinning_pool();
 
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
         log::info!(
@@ -22667,6 +23058,9 @@ impl PrefillEngine {
                 {
                     self.preload_next_moe_layer(layer_idx, num_hidden_layers)?;
                 }
+            } else if self.layer_has_split_dense_mlp(layer_idx) {
+                let hidden_ptr = *self.scratch.d_hidden.device_ptr();
+                self.forward_split_dense_mlp(layer_idx, hidden_ptr, hidden_ptr, m)?;
             } else if self.layer_weights[layer_idx].shared_w1.is_some() {
                 self.forward_dense_mlp(layer_idx, m)?;
             }
@@ -22683,7 +23077,8 @@ impl PrefillEngine {
                     _ => "?",
                 };
                 let has_moe = self.layer_weights[layer_idx].moe_gate_ptr != 0;
-                let has_mlp = self.layer_weights[layer_idx].shared_w1.is_some();
+                let has_mlp = self.layer_weights[layer_idx].shared_w1.is_some()
+                    || self.layer_has_split_dense_mlp(layer_idx);
                 eprintln!(
                     "[DIAG] L{:02} {} moe={} mlp={} residual_lastpos_norm={:.4}",
                     layer_idx, lt_name, has_moe, has_mlp, last_pos_norm
@@ -23509,25 +23904,66 @@ impl PrefillEngine {
         activation: u8,
         m: usize,
         inter: usize,
+        swiglu_limit: f32,
+    ) -> Result<(), String> {
+        self.launch_gated_activation_on_stream(
+            out,
+            gate_up,
+            activation,
+            m,
+            inter,
+            swiglu_limit,
+            self.stream,
+        )
+    }
+
+    fn launch_gated_activation_on_stream(
+        &self,
+        out: u64,
+        gate_up: u64,
+        activation: u8,
+        m: usize,
+        inter: usize,
+        swiglu_limit: f32,
+        stream: cuda_sys::CUstream,
     ) -> Result<(), String> {
         let t = std::cmp::max(32, ((std::cmp::min(1024, inter) + 31) / 32) * 32) as u32;
         let mut p0 = out;
         let mut p1 = gate_up;
         let mut p2 = inter as i32;
-        let kernel = self.activation_kernel(activation);
-        unsafe {
-            launch(
-                kernel,
-                (m as u32, 1, 1),
-                (t, 1, 1),
-                0,
-                self.stream,
-                &mut [
-                    &mut p0 as *mut _ as *mut std::ffi::c_void,
-                    &mut p1 as *mut _ as *mut std::ffi::c_void,
-                    &mut p2 as *mut _ as *mut std::ffi::c_void,
-                ],
-            )?;
+        if activation == 0 && swiglu_limit > 0.0 {
+            let mut p3 = swiglu_limit;
+            unsafe {
+                launch(
+                    self.kernels.silu_mul_limited,
+                    (m as u32, 1, 1),
+                    (t, 1, 1),
+                    0,
+                    stream,
+                    &mut [
+                        &mut p0 as *mut _ as *mut std::ffi::c_void,
+                        &mut p1 as *mut _ as *mut std::ffi::c_void,
+                        &mut p2 as *mut _ as *mut std::ffi::c_void,
+                        &mut p3 as *mut _ as *mut std::ffi::c_void,
+                    ],
+                )?;
+            }
+        } else {
+            let kernel = self.activation_kernel(activation);
+            unsafe {
+                launch(
+                    kernel,
+                    (m as u32, 1, 1),
+                    (t, 1, 1),
+                    0,
+                    stream,
+                    &mut [
+                        &mut p0 as *mut _ as *mut std::ffi::c_void,
+                        &mut p1 as *mut _ as *mut std::ffi::c_void,
+                        &mut p2 as *mut _ as *mut std::ffi::c_void,
+                    ],
+                )?;
+            }
         }
         Ok(())
     }
@@ -27729,7 +28165,16 @@ impl PrefillEngine {
         }
         let gt0 = Instant::now();
         let gqa_proj_event = self.gqa_timing_event_start("GQA projection")?;
+        if lw.gqa_gated
+            && (lw.gqa_head_gate_proj.is_some() || lw.gqa_head_gate_proj_bf16.is_some())
+        {
+            return Err(format!(
+                "GQA layer {} has both interleaved gated Q and separate head gate; unsupported mixed gate contract",
+                layer_idx
+            ));
+        }
         let gate_ptr: u64;
+        let head_gate_ptr: u64;
         if lw.gqa_gated {
             // Gated attention: q_proj outputs [M, num_q_heads, head_dim * 2]
             // GEMM into scratch1, then split into Q + gate via single kernel
@@ -27769,6 +28214,7 @@ impl PrefillEngine {
                 )?;
             }
             gate_ptr = gate_buf;
+            head_gate_ptr = 0;
         } else {
             self.la_gemm(
                 layer_idx,
@@ -27781,6 +28227,22 @@ impl PrefillEngine {
                 m,
             )?;
             gate_ptr = 0;
+            if lw.gqa_head_gate_proj.is_some() || lw.gqa_head_gate_proj_bf16.is_some() {
+                let head_gate_buf = *self.scratch.d_scratch2.device_ptr();
+                self.la_gemm(
+                    layer_idx,
+                    "g_proj",
+                    hidden,
+                    None,
+                    &lw.gqa_head_gate_proj,
+                    &lw.gqa_head_gate_proj_bf16,
+                    head_gate_buf,
+                    m,
+                )?;
+                head_gate_ptr = head_gate_buf;
+            } else {
+                head_gate_ptr = 0;
+            }
         }
         if gqa_debt_timing {
             self.record_gqa_debt_checkpoint(
@@ -27972,6 +28434,14 @@ impl PrefillEngine {
                 sync_ms,
             );
         }
+        if prefill_diag_sync_stage_enabled("gqa_projection", layer_idx, m) {
+            self.stream_sync()
+                .map_err(|e| format!("diag_sync gqa_projection layer {layer_idx}: {e}"))?;
+            eprintln!(
+                "[PREFILL-DIAG-SYNC] layer={} stage=gqa_projection ok tokens={} q_heads={} kv_heads={} head_dim={} q_dim={} kv_dim={}",
+                layer_idx, m, num_q_heads, num_kv_heads, head_dim, q_dim, kv_dim
+            );
+        }
 
         // QK LayerNorm: per-head RMSNorm on Q and K after projection, before RoPE
         // Q is [m, num_q_heads, head_dim], K is [m, num_kv_heads, head_dim]
@@ -28085,6 +28555,14 @@ impl PrefillEngine {
                 sync_ms,
             );
         }
+        if prefill_diag_sync_stage_enabled("gqa_norm", layer_idx, m) {
+            self.stream_sync()
+                .map_err(|e| format!("diag_sync gqa_norm layer {layer_idx}: {e}"))?;
+            eprintln!(
+                "[PREFILL-DIAG-SYNC] layer={} stage=gqa_norm ok tokens={} q_heads={} kv_heads={} head_dim={} q_dim={} kv_dim={}",
+                layer_idx, m, num_q_heads, num_kv_heads, head_dim, q_dim, kv_dim
+            );
+        }
 
         // Look up per-layer KV cache pointers (needed for both attention and cache append)
         let layer_k_ptr = if layer_idx < self.kv_k_ptrs.len() {
@@ -28142,7 +28620,7 @@ impl PrefillEngine {
         } else if rope_cos_ptr != 0 {
             let half = rope_half_dim;
             let rope_work_width = if lw.gqa_rope_half_split {
-                head_dim
+                (half * 2).min(head_dim)
             } else {
                 half
             };
@@ -28315,6 +28793,14 @@ impl PrefillEngine {
                 sync_ms,
             );
         }
+        if prefill_diag_sync_stage_enabled("gqa_rope", layer_idx, m) {
+            self.stream_sync()
+                .map_err(|e| format!("diag_sync gqa_rope layer {layer_idx}: {e}"))?;
+            eprintln!(
+                "[PREFILL-DIAG-SYNC] layer={} stage=gqa_rope ok tokens={} q_heads={} kv_heads={} head_dim={} rope_half_dim={}",
+                layer_idx, m, num_q_heads, num_kv_heads, head_dim, rope_half_dim
+            );
+        }
 
         // Attention: use vendored FlashAttention-2 when available (start_pos==0),
         // otherwise fall back to custom tiled kernel for cross-chunk KV cache support.
@@ -28322,6 +28808,11 @@ impl PrefillEngine {
         let fa2_supports_head_dim = matches!(head_dim, 64 | 96 | 128 | 192 | 256);
         let sliding_window = lw.gqa_sliding_window;
         let use_sliding_window = sliding_window > 0;
+        let layer_specific_sliding_gqa_shape = use_sliding_window
+            && (num_q_heads != cfg.num_q_heads
+                || num_kv_heads != cfg.num_kv_heads
+                || head_dim != cfg.head_dim
+                || q_dim != cfg.hidden_size);
         let sliding_window_left = sliding_window.saturating_sub(1).min(i32::MAX as usize) as i32;
         let ring_window_decode_layer = self.prefill_kv_active
             && self.decode_kv_max_seq > 0
@@ -28336,7 +28827,9 @@ impl PrefillEngine {
             && fa2_supports_head_dim;
         let use_custom_sliding_prefill = use_sliding_window
             && ((ring_window_decode_layer && !use_ring_fa2_window_prefill)
-                || (self.prefill_kv_active && gemma_custom_window_prefill_enabled()));
+                || (self.prefill_kv_active
+                    && (gemma_custom_window_prefill_enabled()
+                        || layer_specific_sliding_gqa_shape)));
         if use_ring_fa2_window_prefill {
             if start_pos == 0 {
                 attn_path = "fa2_ring_window_initial";
@@ -29830,6 +30323,14 @@ impl PrefillEngine {
         if gqa_debt_timing {
             self.record_gqa_append_gap_checkpoint(GQA_GAP_AFTER_TRACE_SUMMARY_HOOK)?;
         }
+        if prefill_diag_sync_stage_enabled("gqa_attention", layer_idx, m) {
+            self.stream_sync()
+                .map_err(|e| format!("diag_sync gqa_attention layer {layer_idx}: {e}"))?;
+            eprintln!(
+                "[PREFILL-DIAG-SYNC] layer={} stage=gqa_attention ok tokens={} path={} sliding_window={} start_pos={} q_heads={} kv_heads={} head_dim={}",
+                layer_idx, m, attn_path, sliding_window, start_pos, num_q_heads, num_kv_heads, head_dim
+            );
+        }
 
         // KV cache append: BF16 K,V -> cache format into separate per-layer caches
         // Skip if cross-chunk path already stored K/V before attention.
@@ -30184,6 +30685,14 @@ impl PrefillEngine {
                 sync_ms,
             );
         }
+        if prefill_diag_sync_stage_enabled("gqa_kv_append", layer_idx, m) {
+            self.stream_sync()
+                .map_err(|e| format!("diag_sync gqa_kv_append layer {layer_idx}: {e}"))?;
+            eprintln!(
+                "[PREFILL-DIAG-SYNC] layer={} stage=gqa_kv_append ok tokens={} path={} kv_format={} start_pos={} q_heads={} kv_heads={} head_dim={}",
+                layer_idx, m, kv_append_path, self.kv_format, start_pos, num_q_heads, num_kv_heads, head_dim
+            );
+        }
 
         // Gated attention: apply sigmoid(gate) to attention output
         let gt_gate = Instant::now();
@@ -30207,6 +30716,31 @@ impl PrefillEngine {
                         &mut g1 as *mut _ as *mut std::ffi::c_void,
                         &mut g2 as *mut _ as *mut std::ffi::c_void,
                         &mut g3 as *mut _ as *mut std::ffi::c_void,
+                    ],
+                )?;
+            }
+        } else if head_gate_ptr != 0 {
+            let q_dim = (num_q_heads * head_dim) as i32;
+            let gate_threads =
+                std::cmp::max(32, ((std::cmp::min(1024, q_dim as usize) + 31) / 32) * 32) as u32;
+            let mut g0 = attn_out;
+            let mut g1 = attn_out;
+            let mut g2 = head_gate_ptr;
+            let mut g3 = num_q_heads as i32;
+            let mut g4 = head_dim as i32;
+            unsafe {
+                launch(
+                    self.kernels.sigmoid_head_mul,
+                    (m as u32, 1, 1),
+                    (gate_threads, 1, 1),
+                    0,
+                    self.stream,
+                    &mut [
+                        &mut g0 as *mut _ as *mut std::ffi::c_void,
+                        &mut g1 as *mut _ as *mut std::ffi::c_void,
+                        &mut g2 as *mut _ as *mut std::ffi::c_void,
+                        &mut g3 as *mut _ as *mut std::ffi::c_void,
+                        &mut g4 as *mut _ as *mut std::ffi::c_void,
                     ],
                 )?;
             }
@@ -30255,6 +30789,14 @@ impl PrefillEngine {
                 attn_out,
                 trace_last_pos,
                 q_dim,
+            );
+        }
+        if prefill_diag_sync_stage_enabled("gqa_gate", layer_idx, m) {
+            self.stream_sync()
+                .map_err(|e| format!("diag_sync gqa_gate layer {layer_idx}: {e}"))?;
+            eprintln!(
+                "[PREFILL-DIAG-SYNC] layer={} stage=gqa_gate ok tokens={} has_head_gate={} q_heads={} head_dim={}",
+                layer_idx, m, head_gate_ptr != 0, num_q_heads, head_dim
             );
         }
 
@@ -30359,6 +30901,14 @@ impl PrefillEngine {
                     sync_ms,
                 );
             }
+        }
+        if prefill_diag_sync_stage_enabled("gqa_o_proj", layer_idx, m) {
+            self.stream_sync()
+                .map_err(|e| format!("diag_sync gqa_o_proj layer {layer_idx}: {e}"))?;
+            eprintln!(
+                "[PREFILL-DIAG-SYNC] layer={} stage=gqa_o_proj ok tokens={} q_heads={} head_dim={} hidden_size={}",
+                layer_idx, m, num_q_heads, head_dim, cfg.hidden_size
+            );
         }
         trace_emit_prefill_mark(
             self.trace.as_ref(),
@@ -32500,8 +33050,14 @@ impl PrefillEngine {
             };
             let candidate_state = alloc_f32_temp(state_elems, "block-scan candidate state")?;
             let entry_state = alloc_f32_temp(entry_state_elems, "block-scan entry state")?;
-            let c_state_total_exact =
-                alloc_f32_temp(c_state_total_elems, "block-scan c_state_total_exact")?;
+            let c_state_total_exact = if mamba2_ssd_parallel_chunked_requested {
+                None
+            } else {
+                Some(alloc_f32_temp(
+                    c_state_total_elems,
+                    "block-scan c_state_total_exact",
+                )?)
+            };
             let term_probe = if block_scan_oracle_enabled && mamba2_ssd_block_scan_term_target.is_some() {
                 Some(
                     GpuBuf::<f32>::alloc_zeroed(32)
@@ -32986,6 +33542,9 @@ impl PrefillEngine {
                 let mut r4 = c_out;
                 let mut r5 = *candidate_state.device_ptr();
                 let mut r6 = *entry_state.device_ptr();
+                let c_state_total_exact = c_state_total_exact
+                    .as_ref()
+                    .ok_or("Mamba2 SSD c_state_total_exact missing for block-scan recurrent")?;
                 let mut r7 = *c_state_total_exact.device_ptr();
                 let mut r8 = recurrent_subloop_timing
                     .as_ref()
@@ -33464,7 +34023,10 @@ impl PrefillEngine {
                     .as_ref()
                     .ok_or("Mamba2 SSD parallel entry state missing for output")?;
                 let mut p8 = *parallel_entry_state.device_ptr();
-                let mut p9 = *c_state_total_exact.device_ptr();
+                let mut p9 = c_state_total_exact
+                    .as_ref()
+                    .map(|buffer| *buffer.device_ptr())
+                    .unwrap_or(0);
                 let mut p_cb = parallel_cb_tile
                     .as_ref()
                     .map(|buffer| *buffer.device_ptr())
@@ -33625,6 +34187,9 @@ impl PrefillEngine {
                 let mut a5 = c_out;
                 let mut a6 = d_ptr;
                 let mut a7 = *entry_state.device_ptr();
+                let c_state_total_exact = c_state_total_exact
+                    .as_ref()
+                    .ok_or("Mamba2 SSD c_state_total_exact missing for block-scan output")?;
                 let mut a8 = *c_state_total_exact.device_ptr();
                 let mut a9 = term_probe
                     .as_ref()
@@ -34181,13 +34746,13 @@ impl PrefillEngine {
                                 "exact_token_order_f32_recurrence"
                             },
                             "parallel_output_by_chunk_env": mamba2_ssd_parallel_output_by_chunk_requested,
-	                            "parallel_output_state_split_env": mamba2_ssd_parallel_output_state_split_requested,
-	                            "parallel_output_precompute_cb_env": mamba2_ssd_parallel_output_precompute_cb_requested,
-	                            "unzeroed_temps_env": mamba2_ssd_unzeroed_temps_requested,
-	                            "unzeroed_parallel_temps_used": use_unzeroed_parallel_ssd_temps,
-	                            "parallel_output_state_split": if mamba2_ssd_parallel_output_state_split_requested {
-	                                serde_json::json!({
-	                                    "d_tile": parallel_output_state_split_d_tile,
+                            "parallel_output_state_split_env": mamba2_ssd_parallel_output_state_split_requested,
+                            "parallel_output_precompute_cb_env": mamba2_ssd_parallel_output_precompute_cb_requested,
+                            "unzeroed_temps_env": mamba2_ssd_unzeroed_temps_requested,
+                            "unzeroed_parallel_temps_used": use_unzeroed_parallel_ssd_temps,
+                            "parallel_output_state_split": if mamba2_ssd_parallel_output_state_split_requested {
+                                serde_json::json!({
+                                    "d_tile": parallel_output_state_split_d_tile,
                                     "state_lanes": parallel_output_state_split_lanes,
                                     "block_threads": parallel_output_state_split_block.0,
                                     "shared_memory": parallel_output_state_split_shared_mem_bytes,
@@ -40528,7 +41093,14 @@ impl PrefillEngine {
         }
     }
 
-    fn forward_gemma4_dense_mlp(
+    fn layer_has_split_dense_mlp(&self, layer_idx: usize) -> bool {
+        let lw = &self.layer_weights[layer_idx];
+        (lw.dense_gate.is_some() || lw.dense_gate_bf16.is_some())
+            && (lw.dense_up.is_some() || lw.dense_up_bf16.is_some())
+            && (lw.dense_down.is_some() || lw.dense_down_bf16.is_some())
+    }
+
+    fn forward_split_dense_mlp(
         &self,
         layer_idx: usize,
         input: u64,
@@ -40541,16 +41113,16 @@ impl PrefillEngine {
             .as_ref()
             .map(|w| w.n)
             .or_else(|| lw.dense_gate_bf16.as_ref().map(|w| w.n))
-            .ok_or_else(|| format!("Gemma4 dense layer {} missing gate weight", layer_idx))?;
+            .ok_or_else(|| format!("Dense layer {} missing gate weight", layer_idx))?;
         let up_rows = lw
             .dense_up
             .as_ref()
             .map(|w| w.n)
             .or_else(|| lw.dense_up_bf16.as_ref().map(|w| w.n))
-            .ok_or_else(|| format!("Gemma4 dense layer {} missing up weight", layer_idx))?;
+            .ok_or_else(|| format!("Dense layer {} missing up weight", layer_idx))?;
         if gate_rows != up_rows {
             return Err(format!(
-                "Gemma4 dense layer {} gate/up width mismatch: gate={} up={}",
+                "Dense layer {} gate/up width mismatch: gate={} up={}",
                 layer_idx, gate_rows, up_rows
             ));
         }
@@ -40560,7 +41132,7 @@ impl PrefillEngine {
         let act_buf = *self.scratch.d_moe_inter.device_ptr();
 
         self.prefill_weight_gemm(
-            "gemma4_dense_gate",
+            "dense_gate",
             input,
             &lw.dense_gate,
             &lw.dense_gate_bf16,
@@ -40568,7 +41140,7 @@ impl PrefillEngine {
             m,
         )?;
         self.prefill_weight_gemm(
-            "gemma4_dense_up",
+            "dense_up",
             input,
             &lw.dense_up,
             &lw.dense_up_bf16,
@@ -40577,13 +41149,23 @@ impl PrefillEngine {
         )?;
         self.launch_gated_activation_split(act_buf, gate_buf, up_buf, lw.moe_activation, m, inter)?;
         self.prefill_weight_gemm(
-            "gemma4_dense_down",
+            "dense_down",
             act_buf,
             &lw.dense_down,
             &lw.dense_down_bf16,
             output,
             m,
         )
+    }
+
+    fn forward_gemma4_dense_mlp(
+        &self,
+        layer_idx: usize,
+        input: u64,
+        output: u64,
+        m: usize,
+    ) -> Result<(), String> {
+        self.forward_split_dense_mlp(layer_idx, input, output, m)
     }
 
     fn is_gemma4_layer(&self, layer_idx: usize) -> bool {
@@ -40888,6 +41470,7 @@ impl PrefillEngine {
         let scoring_func = self.layer_weights[layer_idx].moe_scoring_func;
         let gated = self.layer_weights[layer_idx].moe_gated;
         let activation = self.layer_weights[layer_idx].moe_activation;
+        let swiglu_limit = self.layer_weights[layer_idx].moe_swiglu_limit;
         let scale_factor = self.layer_weights[layer_idx].moe_routed_scaling_factor;
         let norm_topk_prob = self.layer_weights[layer_idx].moe_norm_topk_prob;
         let gs = self.config.group_size;
@@ -41145,8 +41728,11 @@ impl PrefillEngine {
         // 2. Top-K routing
         let topk_threads =
             std::cmp::max(32, ((std::cmp::min(1024, n_experts) + 31) / 32) * 32) as u32;
-        let topk_smem =
-            (n_experts * 4 + topk * 8 + if scoring_func == 0 { 32 * 4 } else { 0 }) as u32;
+        let topk_smem = if scoring_func == 1 {
+            (n_experts * 8 + topk * 8) as u32
+        } else {
+            (n_experts * 4 + topk * 8 + 32 * 4) as u32
+        };
         if diag_router_topk_enabled {
             self.emit_diag_router_topk_boundary(
                 "before_topk",
@@ -41223,6 +41809,10 @@ impl PrefillEngine {
             let mut p4 = topk as i32;
             unsafe {
                 if scoring_func == 1 {
+                    let mut p3 = self.layer_weights[layer_idx].moe_gate_bias_ptr;
+                    let mut p4 = self.layer_weights[layer_idx].moe_e_score_corr_ptr;
+                    let mut p5 = n_experts as i32;
+                    let mut p6 = topk as i32;
                     launch(
                         self.kernels.sigmoid_topk,
                         (m as u32, 1, 1),
@@ -41235,6 +41825,8 @@ impl PrefillEngine {
                             &mut p2 as *mut _ as *mut std::ffi::c_void,
                             &mut p3 as *mut _ as *mut std::ffi::c_void,
                             &mut p4 as *mut _ as *mut std::ffi::c_void,
+                            &mut p5 as *mut _ as *mut std::ffi::c_void,
+                            &mut p6 as *mut _ as *mut std::ffi::c_void,
                         ],
                     )?;
                 } else {
@@ -42807,6 +43399,7 @@ impl PrefillEngine {
         let mut w1s_ptrs_gpu = 0u64;
         let mut w2_ptrs_gpu = 0u64;
         let mut w2s_ptrs_gpu = 0u64;
+        let mut current_ptrs_reused = false;
 
         if ptr_prefetched {
             w1_ptrs_gpu = self.ptr_prefetch_ptrs[0];
@@ -42824,40 +43417,16 @@ impl PrefillEngine {
                 );
             }
         } else if use_ptr_table {
-            // GPU pointers for the pointer table buffers.
-            // IMPORTANT: Allocate fresh each layer to avoid corruption from cudarc pool
-            // overlapping with HCS raw cuMemAlloc_v2. Only 4 * 4KB = 16KB, negligible.
-            let mt_ptr_alloc = if mt { Some(Instant::now()) } else { None };
-            unsafe {
-                cuda_sys::lib().cuMemAlloc_v2(&mut w1_ptrs_gpu, ptrs_bytes);
-                cuda_sys::lib().cuMemAlloc_v2(&mut w1s_ptrs_gpu, ptrs_bytes);
-                cuda_sys::lib().cuMemAlloc_v2(&mut w2_ptrs_gpu, ptrs_bytes);
-                cuda_sys::lib().cuMemAlloc_v2(&mut w2s_ptrs_gpu, ptrs_bytes);
-            }
-            if w1_ptrs_gpu == 0 || w1s_ptrs_gpu == 0 || w2_ptrs_gpu == 0 || w2s_ptrs_gpu == 0 {
-                unsafe {
-                    if w1_ptrs_gpu != 0 {
-                        let _ = cuda_sys::lib().cuMemFree_v2(w1_ptrs_gpu);
-                    }
-                    if w1s_ptrs_gpu != 0 {
-                        let _ = cuda_sys::lib().cuMemFree_v2(w1s_ptrs_gpu);
-                    }
-                    if w2_ptrs_gpu != 0 {
-                        let _ = cuda_sys::lib().cuMemFree_v2(w2_ptrs_gpu);
-                    }
-                    if w2s_ptrs_gpu != 0 {
-                        let _ = cuda_sys::lib().cuMemFree_v2(w2s_ptrs_gpu);
-                    }
-                }
-                return Err(format!(
-                    "prefill pointer table allocation failed for layer {} ({} bytes/table)",
-                    layer_idx, ptrs_bytes
-                ));
-            }
-            if let Some(t) = mt_ptr_alloc {
-                self.t_moe_ptr_alloc
-                    .set(self.t_moe_ptr_alloc.get() + t.elapsed().as_secs_f64() * 1000.0);
-            }
+            let ptrs = if prefill_ptr_table_reuse_enabled() {
+                current_ptrs_reused = true;
+                self.ensure_reusable_ptr_table_slot(0, ptrs_bytes)?
+            } else {
+                self.allocate_raw_ptr_table(ptrs_bytes, "prefill pointer table")?
+            };
+            w1_ptrs_gpu = ptrs[0];
+            w1s_ptrs_gpu = ptrs[1];
+            w2_ptrs_gpu = ptrs[2];
+            w2s_ptrs_gpu = ptrs[3];
 
             let mt_ptr_build = if mt { Some(Instant::now()) } else { None };
             let mut cold_h2d_ms = 0.0f64;
@@ -44659,25 +45228,14 @@ impl PrefillEngine {
         // w1 writes C at sorted_id positions [0..m*topk), so activation grid = m_topk
         let fused_inter2_ptr = *self.scratch.d_moe_inter.device_ptr();
         if gated {
-            let act_t = std::cmp::max(32, ((std::cmp::min(1024, inter) + 31) / 32) * 32) as u32;
-            let mut ac0 = fused_inter2_ptr;
-            let mut ac1 = fused_inter_ptr;
-            let mut ac2 = inter as i32;
-            let kernel = self.activation_kernel(activation);
-            unsafe {
-                launch(
-                    kernel,
-                    (m_topk as u32, 1, 1),
-                    (act_t, 1, 1),
-                    0,
-                    self.stream,
-                    &mut [
-                        &mut ac0 as *mut _ as *mut std::ffi::c_void,
-                        &mut ac1 as *mut _ as *mut std::ffi::c_void,
-                        &mut ac2 as *mut _ as *mut std::ffi::c_void,
-                    ],
-                )?;
-            }
+            self.launch_gated_activation(
+                fused_inter2_ptr,
+                fused_inter_ptr,
+                activation,
+                m_topk,
+                inter,
+                swiglu_limit,
+            )?;
         } else {
             // Ungated: just apply activation in-place
             let act_t = std::cmp::max(32, ((std::cmp::min(1024, inter) + 31) / 32) * 32) as u32;
@@ -45315,24 +45873,14 @@ impl PrefillEngine {
                 let hidden_row_ptr = expert_input + ((compare_token * expert_h * 2) as u64);
                 self.marlin_gemm(hidden_row_ptr, &orig_w13, ref_c1, 1)?;
                 if gated {
-                    let mut ac0 = ref_act_out;
-                    let mut ac1 = ref_c1;
-                    let mut ac2 = inter as i32;
-                    let kernel = self.activation_kernel(activation);
-                    unsafe {
-                        launch(
-                            kernel,
-                            (1, 1, 1),
-                            (act_t, 1, 1),
-                            0,
-                            self.stream,
-                            &mut [
-                                &mut ac0 as *mut _ as *mut std::ffi::c_void,
-                                &mut ac1 as *mut _ as *mut std::ffi::c_void,
-                                &mut ac2 as *mut _ as *mut std::ffi::c_void,
-                            ],
-                        )?;
-                    }
+                    self.launch_gated_activation(
+                        ref_act_out,
+                        ref_c1,
+                        activation,
+                        1,
+                        inter,
+                        swiglu_limit,
+                    )?;
                 }
                 let orig_w2 = MarlinWeight {
                     packed: orig_w2p,
@@ -48701,17 +49249,13 @@ impl PrefillEngine {
         // Single-chunk prompts have no cross-chunk reuse, so pinning wastes VRAM and fragments
         // the allocator. The fused_pin_queue data is available when rolling-scan is implemented.
 
-        // Free per-layer pointer table GPU buffers (allocated with raw cuMemAlloc_v2),
-        // or release the prefetched table consumed by this layer.
+        // Default pointer tables use per-layer raw buffers. The experimental
+        // reusable-slot variant is opt-in because it benchmarked slower on Step.
         if ptr_prefetched {
             self.release_prefetched_ptr_table();
-        } else if use_ptr_table {
-            unsafe {
-                cuda_sys::lib().cuMemFree_v2(w1_ptrs_gpu);
-                cuda_sys::lib().cuMemFree_v2(w1s_ptrs_gpu);
-                cuda_sys::lib().cuMemFree_v2(w2_ptrs_gpu);
-                cuda_sys::lib().cuMemFree_v2(w2s_ptrs_gpu);
-            }
+        } else if use_ptr_table && !current_ptrs_reused {
+            let mut ptrs = [w1_ptrs_gpu, w1s_ptrs_gpu, w2_ptrs_gpu, w2s_ptrs_gpu];
+            Self::free_raw_ptr_table(&mut ptrs);
         }
         if temp_moe_accum != 0 {
             unsafe {
@@ -48738,6 +49282,8 @@ impl PrefillEngine {
         let scoring_func = lw.moe_scoring_func;
         let gated = lw.moe_gated;
         let activation = lw.moe_activation;
+        let swiglu_limit = lw.moe_swiglu_limit;
+        let shared_swiglu_limit = lw.shared_swiglu_limit;
         let norm_topk = lw.moe_norm_topk_prob;
         let scale_factor = lw.moe_routed_scaling_factor;
         let liveness_detail = prefill_liveness_detail_layer_enabled(layer_idx);
@@ -48807,10 +49353,17 @@ impl PrefillEngine {
             let mut p2 = gate_out;
             let mut p3 = n_experts as i32;
             let mut p4 = topk as i32;
-            let smem =
-                (n_experts * 4 + topk * 8 + if scoring_func == 0 { 32 * 4 } else { 0 }) as u32;
+            let smem = if scoring_func == 1 {
+                (n_experts * 8 + topk * 8) as u32
+            } else {
+                (n_experts * 4 + topk * 8 + 32 * 4) as u32
+            };
             unsafe {
                 if scoring_func == 1 {
+                    let mut p3 = lw.moe_gate_bias_ptr;
+                    let mut p4 = lw.moe_e_score_corr_ptr;
+                    let mut p5 = n_experts as i32;
+                    let mut p6 = topk as i32;
                     launch(
                         self.kernels.sigmoid_topk,
                         (m as u32, 1, 1),
@@ -48823,6 +49376,8 @@ impl PrefillEngine {
                             &mut p2 as *mut _ as *mut std::ffi::c_void,
                             &mut p3 as *mut _ as *mut std::ffi::c_void,
                             &mut p4 as *mut _ as *mut std::ffi::c_void,
+                            &mut p5 as *mut _ as *mut std::ffi::c_void,
+                            &mut p6 as *mut _ as *mut std::ffi::c_void,
                         ],
                     )?;
                 } else {
@@ -50465,6 +51020,7 @@ impl PrefillEngine {
                 num_groups_w2,
                 gated,
                 activation,
+                swiglu_limit,
                 Some(layer_idx),
                 w.eid,
                 trace_row,
@@ -50642,6 +51198,7 @@ impl PrefillEngine {
                             num_groups_w2,
                             gated,
                             activation,
+                            swiglu_limit,
                             Some(layer_idx),
                             cw.eid,
                             trace_row,
@@ -52091,26 +52648,14 @@ impl PrefillEngine {
                 }
 
                 if gated {
-                    let act_t =
-                        std::cmp::max(32, ((std::cmp::min(1024, shared_inter) + 31) / 32) * 32);
-                    let mut ac0 = s2_buf;
-                    let mut ac1 = s1_buf;
-                    let mut ac2 = shared_inter as i32;
-                    let kernel = self.activation_kernel(activation);
-                    unsafe {
-                        launch(
-                            kernel,
-                            (m as u32, 1, 1),
-                            (act_t as u32, 1, 1),
-                            0,
-                            self.stream,
-                            &mut [
-                                &mut ac0 as *mut _ as *mut std::ffi::c_void,
-                                &mut ac1 as *mut _ as *mut std::ffi::c_void,
-                                &mut ac2 as *mut _ as *mut std::ffi::c_void,
-                            ],
-                        )?;
-                    }
+                    self.launch_gated_activation(
+                        s2_buf,
+                        s1_buf,
+                        activation,
+                        m,
+                        shared_inter,
+                        shared_swiglu_limit,
+                    )?;
                     if liveness_detail {
                         let sync_t0 = Instant::now();
                         prefill_liveness!(
@@ -52350,26 +52895,14 @@ impl PrefillEngine {
                         );
                     }
 
-                    let act_t =
-                        std::cmp::max(32, ((std::cmp::min(1024, shared_inter) + 31) / 32) * 32);
-                    let mut ac0 = s2_buf;
-                    let mut ac1 = s1_buf;
-                    let mut ac2 = shared_inter as i32;
-                    let kernel = self.activation_kernel(activation);
-                    unsafe {
-                        launch(
-                            kernel,
-                            (m as u32, 1, 1),
-                            (act_t as u32, 1, 1),
-                            0,
-                            self.stream,
-                            &mut [
-                                &mut ac0 as *mut _ as *mut std::ffi::c_void,
-                                &mut ac1 as *mut _ as *mut std::ffi::c_void,
-                                &mut ac2 as *mut _ as *mut std::ffi::c_void,
-                            ],
-                        )?;
-                    }
+                    self.launch_gated_activation(
+                        s2_buf,
+                        s1_buf,
+                        activation,
+                        m,
+                        shared_inter,
+                        shared_swiglu_limit,
+                    )?;
 
                     if diag && diag_moe_detail && Self::diag_layer_enabled(layer_idx) {
                         let act_norm = self.diag_l2_norm(s2_buf, 0, shared_inter, shared_inter);
@@ -53180,6 +53713,7 @@ impl PrefillEngine {
         let h = self.config.hidden_size;
         let gated = lw.moe_gated;
         let activation = lw.moe_activation;
+        let shared_swiglu_limit = lw.shared_swiglu_limit;
         let hidden = *self.scratch.d_hidden.device_ptr();
         let s1_buf = *self
             .d_shared_bf16_scratch1
@@ -53263,25 +53797,15 @@ impl PrefillEngine {
 
         // Activation on shared_stream
         if gated {
-            let act_t = std::cmp::max(32, ((std::cmp::min(1024, shared_inter) + 31) / 32) * 32);
-            let mut ac0 = s2_buf;
-            let mut ac1 = s1_buf;
-            let mut ac2 = shared_inter as i32;
-            let kernel = self.activation_kernel(activation);
-            unsafe {
-                launch(
-                    kernel,
-                    (m as u32, 1, 1),
-                    (act_t as u32, 1, 1),
-                    0,
-                    self.shared_stream,
-                    &mut [
-                        &mut ac0 as *mut _ as *mut std::ffi::c_void,
-                        &mut ac1 as *mut _ as *mut std::ffi::c_void,
-                        &mut ac2 as *mut _ as *mut std::ffi::c_void,
-                    ],
-                )?;
-            }
+            self.launch_gated_activation_on_stream(
+                s2_buf,
+                s1_buf,
+                activation,
+                m,
+                shared_inter,
+                shared_swiglu_limit,
+                self.shared_stream,
+            )?;
             // Zero workspace + C_tmp before w2 GEMM
             unsafe {
                 cuda_sys::lib().cuMemsetD32Async(shared_ws, 0, shared_ws_len, self.shared_stream);
@@ -53403,6 +53927,7 @@ impl PrefillEngine {
         let lw = &self.layer_weights[layer_idx];
         let gated = lw.moe_gated;
         let activation = lw.moe_activation;
+        let shared_swiglu_limit = lw.shared_swiglu_limit;
         let trace_shared_stages = self.reference_debug_trace_enabled && layer_idx == 1 && m > 0;
         let trace_row = m.saturating_sub(1);
 
@@ -53440,25 +53965,14 @@ impl PrefillEngine {
                 );
             }
             if gated {
-                let act_t = std::cmp::max(32, ((std::cmp::min(1024, shared_inter) + 31) / 32) * 32);
-                let mut ac0 = s2_buf;
-                let mut ac1 = s1_buf;
-                let mut ac2 = shared_inter as i32;
-                let kernel = self.activation_kernel(activation);
-                unsafe {
-                    launch(
-                        kernel,
-                        (m as u32, 1, 1),
-                        (act_t as u32, 1, 1),
-                        0,
-                        self.stream,
-                        &mut [
-                            &mut ac0 as *mut _ as *mut std::ffi::c_void,
-                            &mut ac1 as *mut _ as *mut std::ffi::c_void,
-                            &mut ac2 as *mut _ as *mut std::ffi::c_void,
-                        ],
-                    )?;
-                }
+                self.launch_gated_activation(
+                    s2_buf,
+                    s1_buf,
+                    activation,
+                    m,
+                    shared_inter,
+                    shared_swiglu_limit,
+                )?;
                 if trace_shared_stages {
                     self.push_reference_stage_snapshot(
                         "layer1_shared_act_out_last",
@@ -53587,25 +54101,14 @@ impl PrefillEngine {
             );
         }
         if gated {
-            let act_t = std::cmp::max(32, ((std::cmp::min(1024, shared_inter) + 31) / 32) * 32);
-            let mut ac0 = s2_buf;
-            let mut ac1 = s1_buf;
-            let mut ac2 = shared_inter as i32;
-            let kernel = self.activation_kernel(activation);
-            unsafe {
-                launch(
-                    kernel,
-                    (m as u32, 1, 1),
-                    (act_t as u32, 1, 1),
-                    0,
-                    self.stream,
-                    &mut [
-                        &mut ac0 as *mut _ as *mut std::ffi::c_void,
-                        &mut ac1 as *mut _ as *mut std::ffi::c_void,
-                        &mut ac2 as *mut _ as *mut std::ffi::c_void,
-                    ],
-                )?;
-            }
+            self.launch_gated_activation(
+                s2_buf,
+                s1_buf,
+                activation,
+                m,
+                shared_inter,
+                shared_swiglu_limit,
+            )?;
             if trace_shared_stages {
                 self.push_reference_stage_snapshot(
                     "layer1_shared_act_out_last",
@@ -53705,6 +54208,7 @@ impl PrefillEngine {
         let h = self.config.hidden_size;
         let gated = lw.moe_gated;
         let activation = lw.moe_activation;
+        let shared_swiglu_limit = lw.shared_swiglu_limit;
         let hidden = *self.scratch.d_hidden.device_ptr();
         let s1_buf = *self
             .d_shared_bf16_scratch1
@@ -53802,11 +54306,6 @@ impl PrefillEngine {
 
         // Activation on shared_stream
         if gated {
-            let act_t = std::cmp::max(32, ((std::cmp::min(1024, shared_inter) + 31) / 32) * 32);
-            let mut ac0 = s2_buf;
-            let mut ac1 = s1_buf;
-            let mut ac2 = shared_inter as i32;
-            let kernel = self.activation_kernel(activation);
             if liveness_detail {
                 prefill_liveness!(
                     "shared_async_bf16_act_enqueue_start layer={} tokens={} gated=true activation={} shared_inter={}",
@@ -53816,20 +54315,15 @@ impl PrefillEngine {
                     shared_inter,
                 );
             }
-            unsafe {
-                launch(
-                    kernel,
-                    (m as u32, 1, 1),
-                    (act_t as u32, 1, 1),
-                    0,
-                    self.shared_stream,
-                    &mut [
-                        &mut ac0 as *mut _ as *mut std::ffi::c_void,
-                        &mut ac1 as *mut _ as *mut std::ffi::c_void,
-                        &mut ac2 as *mut _ as *mut std::ffi::c_void,
-                    ],
-                )?;
-            }
+            self.launch_gated_activation_on_stream(
+                s2_buf,
+                s1_buf,
+                activation,
+                m,
+                shared_inter,
+                shared_swiglu_limit,
+                self.shared_stream,
+            )?;
             if liveness_detail {
                 prefill_liveness!(
                     "shared_async_bf16_act_enqueue_return layer={} tokens={} gated=true",
@@ -54348,10 +54842,17 @@ impl PrefillEngine {
                 let mut p2 = gate_out;
                 let mut p3 = n_experts as i32;
                 let mut p4 = topk as i32;
-                let smem =
-                    (n_experts * 4 + topk * 8 + if scoring_func == 0 { 32 * 4 } else { 0 }) as u32;
+                let smem = if scoring_func == 1 {
+                    (n_experts * 8 + topk * 8) as u32
+                } else {
+                    (n_experts * 4 + topk * 8 + 32 * 4) as u32
+                };
                 unsafe {
                     if scoring_func == 1 {
+                        let mut p3 = self.layer_weights[layer_idx].moe_gate_bias_ptr;
+                        let mut p4 = self.layer_weights[layer_idx].moe_e_score_corr_ptr;
+                        let mut p5 = n_experts as i32;
+                        let mut p6 = topk as i32;
                         launch(
                             self.kernels.sigmoid_topk,
                             (total_m as u32, 1, 1),
@@ -54364,6 +54865,8 @@ impl PrefillEngine {
                                 &mut p2 as *mut _ as *mut std::ffi::c_void,
                                 &mut p3 as *mut _ as *mut std::ffi::c_void,
                                 &mut p4 as *mut _ as *mut std::ffi::c_void,
+                                &mut p5 as *mut _ as *mut std::ffi::c_void,
+                                &mut p6 as *mut _ as *mut std::ffi::c_void,
                             ],
                         )?;
                     } else {
@@ -54461,6 +54964,7 @@ impl PrefillEngine {
     /// Allocate expert pinning pool and fill with hottest experts from pre-scan data.
     /// Returns the number of experts pinned per layer.
     fn allocate_pinning_pool(&mut self, prescan_counts: &[Vec<u32>]) -> Result<usize, String> {
+        self.release_pinning_pool();
         if prescan_counts.is_empty() {
             return Ok(0);
         }
@@ -54859,6 +55363,7 @@ impl PrefillEngine {
         let h = self.config.hidden_size;
         let gated = lw.moe_gated;
         let activation = lw.moe_activation;
+        let shared_swiglu_limit = lw.shared_swiglu_limit;
         let hidden = *self.scratch.d_hidden.device_ptr();
         let use_main_scratch =
             std::env::var("KRASIS_PREFILL_SHARED_EXPERT_USE_MAIN_SCRATCH").is_ok();
@@ -54923,25 +55428,15 @@ impl PrefillEngine {
 
         // Activation
         if gated {
-            let act_t = std::cmp::max(32, ((std::cmp::min(1024, shared_inter) + 31) / 32) * 32);
-            let mut ac0 = s2_buf;
-            let mut ac1 = s1_buf;
-            let mut ac2 = shared_inter as i32;
-            let kernel = self.activation_kernel(activation);
-            unsafe {
-                launch(
-                    kernel,
-                    (m as u32, 1, 1),
-                    (act_t as u32, 1, 1),
-                    0,
-                    self.shared_stream,
-                    &mut [
-                        &mut ac0 as *mut _ as *mut std::ffi::c_void,
-                        &mut ac1 as *mut _ as *mut std::ffi::c_void,
-                        &mut ac2 as *mut _ as *mut std::ffi::c_void,
-                    ],
-                )?;
-            }
+            self.launch_gated_activation_on_stream(
+                s2_buf,
+                s1_buf,
+                activation,
+                m,
+                shared_inter,
+                shared_swiglu_limit,
+                self.shared_stream,
+            )?;
             self.marlin_gemm_on_stream(
                 s2_buf,
                 sw2,
@@ -55087,6 +55582,7 @@ impl PrefillEngine {
         num_groups_w2: usize,
         gated: bool,
         activation: u8,
+        swiglu_limit: f32,
         trace_layer_idx: Option<usize>,
         trace_expert_id: usize,
         trace_absolute_position: usize,
@@ -55108,6 +55604,7 @@ impl PrefillEngine {
                 inter,
                 gated,
                 activation,
+                swiglu_limit,
                 trace_layer_idx,
                 trace_expert_id,
                 trace_absolute_position,
@@ -55133,27 +55630,16 @@ impl PrefillEngine {
         )?;
 
         if gated {
-            let act_t = std::cmp::max(32, ((std::cmp::min(1024, inter) + 31) / 32) * 32);
             let inter_slice = inter_buf + (offset * inter * 2) as u64;
             let gate_up_slice = gate_up_buf + (offset * w13_n * 2) as u64;
-            let mut ac0 = inter_slice;
-            let mut ac1 = gate_up_slice;
-            let mut ac2 = inter as i32;
-            let kernel = self.activation_kernel(activation);
-            unsafe {
-                launch(
-                    kernel,
-                    (count as u32, 1, 1),
-                    (act_t as u32, 1, 1),
-                    0,
-                    self.stream,
-                    &mut [
-                        &mut ac0 as *mut _ as *mut std::ffi::c_void,
-                        &mut ac1 as *mut _ as *mut std::ffi::c_void,
-                        &mut ac2 as *mut _ as *mut std::ffi::c_void,
-                    ],
-                )?;
-            }
+            self.launch_gated_activation(
+                inter_slice,
+                gate_up_slice,
+                activation,
+                count,
+                inter,
+                swiglu_limit,
+            )?;
 
             // w2 GEMM: [count, inter] @ w2 -> [count, hidden]
             let w2 = MarlinWeight {
@@ -55223,6 +55709,7 @@ impl PrefillEngine {
         inter: usize,
         gated: bool,
         activation: u8,
+        swiglu_limit: f32,
         trace_layer_idx: Option<usize>,
         trace_expert_id: usize,
         trace_absolute_position: usize,
@@ -55354,27 +55841,16 @@ impl PrefillEngine {
         }
 
         if gated {
-            let act_t = std::cmp::max(32, ((std::cmp::min(1024, inter) + 31) / 32) * 32);
             let inter_slice = inter_buf + (offset * inter * 2) as u64;
             let gate_up_slice = gate_up_buf + (offset * w13_n * 2) as u64;
-            let mut ac0 = inter_slice;
-            let mut ac1 = gate_up_slice;
-            let mut ac2 = inter as i32;
-            let kernel = self.activation_kernel(activation);
-            unsafe {
-                launch(
-                    kernel,
-                    (count as u32, 1, 1),
-                    (act_t as u32, 1, 1),
-                    0,
-                    self.stream,
-                    &mut [
-                        &mut ac0 as *mut _ as *mut std::ffi::c_void,
-                        &mut ac1 as *mut _ as *mut std::ffi::c_void,
-                        &mut ac2 as *mut _ as *mut std::ffi::c_void,
-                    ],
-                )?;
-            }
+            self.launch_gated_activation(
+                inter_slice,
+                gate_up_slice,
+                activation,
+                count,
+                inter,
+                swiglu_limit,
+            )?;
             if trace_bf16_w13_preactivation {
                 self.push_reference_stage_bf16_chunk_snapshot(
                     &format!(
@@ -56140,10 +56616,12 @@ impl PrefillKernels {
                     "rope_batched_half_split_kernel",
                     "rope_batched_mrope_kernel",
                     "silu_mul_batched_kernel",
+                    "silu_mul_limited_batched_kernel",
                     "relu2_batched_kernel",
                     "gelu_tanh_mul_batched_kernel",
                     "gated_activation_split_batched_kernel",
                     "sigmoid_mul_kernel",
+                    "sigmoid_head_mul_kernel",
                     "bf16_to_fp32_kernel",
                     "fp32_to_bf16_kernel",
                     "sigmoid_topk_kernel",
@@ -56547,10 +57025,12 @@ impl PrefillKernels {
             rope_half_split: get("rope_batched_half_split_kernel")?,
             rope_mrope: get("rope_batched_mrope_kernel")?,
             silu_mul: get("silu_mul_batched_kernel")?,
+            silu_mul_limited: get("silu_mul_limited_batched_kernel")?,
             relu2: get("relu2_batched_kernel")?,
             gelu_tanh_mul: get("gelu_tanh_mul_batched_kernel")?,
             gated_activation_split: get("gated_activation_split_batched_kernel")?,
             sigmoid_mul: get("sigmoid_mul_kernel")?,
+            sigmoid_head_mul: get("sigmoid_head_mul_kernel")?,
             sigmoid_topk: get("sigmoid_topk_kernel")?,
             normalize_topk_weights: get("normalize_topk_weights_kernel")?,
             softmax_topk: get("softmax_topk_kernel")?,
@@ -56748,6 +57228,7 @@ impl PrefillKernels {
 /// allocator fragmentation, cuBLAS workspace, and FLA Triton kernel temporaries.
 /// Used by both `prepare_for_prefill` and `hcs_evict_for_prefill` to ensure consistency.
 pub const PREFILL_SAFETY_MARGIN_MB: usize = 600;
+const PREFILL_PTR_TABLE_REUSE_SLOTS: usize = 2;
 
 fn clean_runtime_chunk_tokens(prompt_tokens: usize, max_chunk_tokens: usize) -> usize {
     let max_chunk = max_chunk_tokens.max(128);
@@ -57154,8 +57635,12 @@ pub fn compute_scratch_vram(config: &PrefillModelConfig) -> (usize, usize) {
         // Cold staging is allocated dynamically from actual routed experts after
         // gating, so it is not a fixed prefill allocation.
 
-        // Pointer table buffers: 4 arrays of n_routed * u64
-        fixed += 4 * n_routed * 8;
+        // Optional request-scoped pointer-table slots. The default path still
+        // allocates and frees tiny per-layer tables, matching the measured
+        // faster baseline.
+        if prefill_ptr_table_reuse_enabled() {
+            fixed += PREFILL_PTR_TABLE_REUSE_SLOTS * 4 * n_routed * 8;
+        }
     }
     if has_la {
         let nv = config.la_num_v_heads;
@@ -57206,6 +57691,12 @@ fn estimate_scratch_vram_for_prompt(
     } else {
         max_tokens
     };
+    let max_gqa_q_dim = config
+        .max_gqa_q_dim
+        .max(config.num_q_heads.saturating_mul(config.head_dim));
+    let max_gqa_kv_dim = config
+        .max_gqa_kv_dim
+        .max(config.num_kv_heads.saturating_mul(config.head_dim));
 
     let mut bytes = 0usize;
     let mut add = |elems: usize, elem_bytes: usize| {
@@ -57258,10 +57749,7 @@ fn estimate_scratch_vram_for_prompt(
         max_tokens
             .saturating_mul(inter.max(shared_inter))
             .saturating_mul(2),
-        max_tokens
-            .saturating_mul(config.num_q_heads)
-            .saturating_mul(config.head_dim)
-            .saturating_mul(2),
+        max_tokens.saturating_mul(max_gqa_q_dim).saturating_mul(2),
     );
     if has_la {
         let fla_req = la_max_len
@@ -57286,27 +57774,12 @@ fn estimate_scratch_vram_for_prompt(
     add(max_tokens, 4); // positions
 
     let attn_dim = h
-        .max(config.num_q_heads.saturating_mul(config.head_dim))
+        .max(max_gqa_q_dim)
         .max(config.la_num_v_heads.saturating_mul(config.la_v_head_dim));
     add(max_tokens.saturating_mul(attn_dim), 2); // attn_out
-    add(
-        max_tokens
-            .saturating_mul(config.num_q_heads)
-            .saturating_mul(config.head_dim),
-        2,
-    ); // q
-    add(
-        max_tokens
-            .saturating_mul(config.num_kv_heads)
-            .saturating_mul(config.head_dim),
-        2,
-    ); // k
-    add(
-        max_tokens
-            .saturating_mul(config.num_kv_heads)
-            .saturating_mul(config.head_dim),
-        2,
-    ); // v
+    add(max_tokens.saturating_mul(max_gqa_q_dim), 2); // q
+    add(max_tokens.saturating_mul(max_gqa_kv_dim), 2); // k
+    add(max_tokens.saturating_mul(max_gqa_kv_dim), 2); // v
     add(config.vocab_size, 4); // logits
 
     if has_mamba2 {
@@ -57367,6 +57840,14 @@ fn estimate_scratch_vram_for_prompt(
         add(w13_scales, 2);
         add(w2_bytes, 2);
         add(w2_scales, 2);
+        if prefill_ptr_table_reuse_enabled() {
+            add(
+                PREFILL_PTR_TABLE_REUSE_SLOTS
+                    .saturating_mul(4)
+                    .saturating_mul(config.n_routed_experts),
+                std::mem::size_of::<u64>(),
+            );
+        }
     } else {
         add(8, 1);
     }
@@ -57408,7 +57889,14 @@ fn estimate_scratch_vram_for_prompt(
         add(max_tokens.saturating_mul(qkvz_dim), 2); // la_proj_buf
     }
     if config.num_q_heads > 0 {
-        add(config.num_q_heads.saturating_mul(max_tokens), 4); // fa2_lse
+        let max_q_heads = if config.head_dim > 0 {
+            config
+                .num_q_heads
+                .max(max_gqa_q_dim.div_ceil(config.head_dim))
+        } else {
+            config.num_q_heads
+        };
+        add(max_q_heads.saturating_mul(max_tokens), 4); // fa2_lse
     }
 
     bytes
@@ -59326,8 +59814,10 @@ mod kernel_tests {
                     "rope_batched_kernel",
                     "rope_batched_mrope_kernel",
                     "silu_mul_batched_kernel",
+                    "silu_mul_limited_batched_kernel",
                     "relu2_batched_kernel",
                     "sigmoid_mul_kernel",
+                    "sigmoid_head_mul_kernel",
                     "sigmoid_topk_kernel",
                     "softmax_topk_kernel",
                     "softmax_topk_sum_probe_kernel",
@@ -59931,14 +60421,18 @@ mod kernel_tests {
         unsafe {
             let threads = std::cmp::min(256, e) as u32;
             let threads = ((threads + 31) / 32) * 32;
-            let smem = (e * 4 + topk * 4 + topk * 4) as u32;
+            let smem = (e * 8 + topk * 4 + topk * 4) as u32;
             let mut tw_ptr = *d_tw.device_ptr() as u64;
             let mut ti_ptr = *d_ti.device_ptr() as u64;
             let mut gate_ptr = *d_gate.device_ptr() as u64;
+            let mut gate_bias_ptr = 0u64;
+            let mut e_score_corr_ptr = 0u64;
             let mut params: Vec<*mut std::ffi::c_void> = vec![
                 &mut tw_ptr as *mut _ as *mut _,
                 &mut ti_ptr as *mut _ as *mut _,
                 &mut gate_ptr as *mut _ as *mut _,
+                &mut gate_bias_ptr as *mut _ as *mut _,
+                &mut e_score_corr_ptr as *mut _ as *mut _,
                 &mut e_i32 as *mut _ as *mut _,
                 &mut topk_i32 as *mut _ as *mut _,
             ];

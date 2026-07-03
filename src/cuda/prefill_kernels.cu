@@ -24,6 +24,13 @@ __device__ __forceinline__ __nv_bfloat16 float_to_bf16(float x) {
     return __float2bfloat16(x);
 }
 
+__device__ __forceinline__ void apply_swiglu_limit(float &silu_gate, float &up, float limit) {
+    if (limit > 0.0f) {
+        silu_gate = fminf(silu_gate, limit);
+        up = fminf(fmaxf(up, -limit), limit);
+    }
+}
+
 extern "C" __device__ float __nv_logf(float);
 extern "C" __device__ float __nv_expf(float);
 
@@ -1051,9 +1058,11 @@ extern "C" __global__ void rope_batched_half_split_kernel(
 
     int q_stride = num_q_heads * head_dim;
     __nv_bfloat16* q_row = q + (int64_t)token * q_stride;
+    int rotary_dim = half_dim * 2;
+    if (rotary_dim > head_dim) rotary_dim = head_dim;
     for (int h = 0; h < num_q_heads; h++) {
         __nv_bfloat16* qh = q_row + h * head_dim;
-        for (int i = threadIdx.x; i < head_dim; i += blockDim.x) {
+        for (int i = threadIdx.x; i < rotary_dim; i += blockDim.x) {
             int src = i < half_dim ? i + half_dim : i - half_dim;
             float x = bf16_to_float(qh[i]);
             float r = bf16_to_float(qh[src]);
@@ -1069,7 +1078,7 @@ extern "C" __global__ void rope_batched_half_split_kernel(
     __nv_bfloat16* k_row = k + (int64_t)token * k_stride;
     for (int h = 0; h < num_kv_heads; h++) {
         __nv_bfloat16* kh = k_row + h * head_dim;
-        for (int i = threadIdx.x; i < head_dim; i += blockDim.x) {
+        for (int i = threadIdx.x; i < rotary_dim; i += blockDim.x) {
             int src = i < half_dim ? i + half_dim : i - half_dim;
             float x = bf16_to_float(kh[i]);
             float r = bf16_to_float(kh[src]);
@@ -1167,6 +1176,26 @@ extern "C" __global__ void silu_mul_batched_kernel(
         float gate = bf16_to_float(gu[i]);
         float up = bf16_to_float(gu[N + i]);
         float silu_gate = gate / (1.0f + __expf(-gate));
+        o[i] = float_to_bf16(silu_gate * up);
+    }
+}
+
+extern "C" __global__ void silu_mul_limited_batched_kernel(
+    __nv_bfloat16* __restrict__ out,
+    const __nv_bfloat16* __restrict__ gate_up,
+    int N,
+    float limit)
+{
+    int token = blockIdx.x;
+    int two_N = 2 * N;
+    const __nv_bfloat16* gu = gate_up + (int64_t)token * two_N;
+    __nv_bfloat16* o = out + (int64_t)token * N;
+
+    for (int i = threadIdx.x; i < N; i += blockDim.x) {
+        float gate = bf16_to_float(gu[i]);
+        float up = bf16_to_float(gu[N + i]);
+        float silu_gate = gate / (1.0f + __expf(-gate));
+        apply_swiglu_limit(silu_gate, up, limit);
         o[i] = float_to_bf16(silu_gate * up);
     }
 }
@@ -1317,6 +1346,32 @@ extern "C" __global__ void sigmoid_mul_kernel(
     }
 }
 
+/* Step head-wise GQA attention gate.
+ * gate: [M, H] raw BF16 gate logits from self_attn.g_proj
+ * attn/out: [M, H * D] BF16 attention output
+ */
+extern "C" __global__ void sigmoid_head_mul_kernel(
+    __nv_bfloat16* __restrict__ out,
+    const __nv_bfloat16* __restrict__ attn,
+    const __nv_bfloat16* __restrict__ gate,
+    int H,
+    int D)
+{
+    int token = blockIdx.x;
+    int total = H * D;
+    const __nv_bfloat16* a_row = attn + (int64_t)token * total;
+    const __nv_bfloat16* g_row = gate + (int64_t)token * H;
+    __nv_bfloat16* o_row = out + (int64_t)token * total;
+
+    for (int idx = threadIdx.x; idx < total; idx += blockDim.x) {
+        int head = idx / D;
+        float a = bf16_to_float(a_row[idx]);
+        float g = bf16_to_float(g_row[head]);
+        float sig = 1.0f / (1.0f + __expf(-g));
+        o_row[idx] = float_to_bf16(a * sig);
+    }
+}
+
 /* ── BF16 ↔ FP32 conversion ──────────────────────────────────────────── */
 
 extern "C" __global__ void bf16_to_fp32_kernel(
@@ -1364,11 +1419,18 @@ extern "C" void krasis_fp32_to_bf16(
 /* ── Sigmoid Top-K routing ─────────────────────────────────────────────── */
 
 /* One block per token. Computes sigmoid(gate_logits), then selects top-k.
- * Gate input is FP32 (from cuBLAS GEMM output). */
+ * Gate input is FP32 (from cuBLAS GEMM output).
+ *
+ * gate_bias is a pre-sigmoid logit bias. e_score_correction is a
+ * post-sigmoid selection-only correction: selected weights are gathered from
+ * the raw sigmoid scores, matching Step/Qwen-style router semantics.
+ */
 extern "C" __global__ void sigmoid_topk_kernel(
     float* __restrict__ topk_weights,       /* [M, topk] */
     int* __restrict__ topk_ids,             /* [M, topk] */
     const float* __restrict__ gate,         /* [M, E] FP32 */
+    const float* __restrict__ gate_bias,    /* [E] or NULL */
+    const float* __restrict__ e_score_corr, /* [E] or NULL */
     int E,
     int topk)
 {
@@ -1379,13 +1441,18 @@ extern "C" __global__ void sigmoid_topk_kernel(
 
     /* Initialize top-k with -inf */
     extern __shared__ char smem_raw[];
-    float* scores = (float*)smem_raw;    /* [E] */
-    float* top_vals = scores + E;        /* [topk] */
+    float* scores = (float*)smem_raw;       /* [E] selection scores */
+    float* raw_scores = scores + E;         /* [E] routed weights */
+    float* top_vals = raw_scores + E;       /* [topk] */
     int* top_idxs = (int*)(top_vals + topk); /* [topk] */
 
-    /* Compute sigmoid scores. */
+    /* Compute raw sigmoid weights and selection scores. */
     for (int i = threadIdx.x; i < E; i += blockDim.x) {
-        scores[i] = 1.0f / (1.0f + __expf(-g[i]));
+        float x = g[i];
+        if (gate_bias) x += gate_bias[i];
+        float raw = 1.0f / (1.0f + __expf(-x));
+        raw_scores[i] = raw;
+        scores[i] = raw + (e_score_corr ? e_score_corr[i] : 0.0f);
     }
     __syncthreads();
 
@@ -1410,7 +1477,7 @@ extern "C" __global__ void sigmoid_topk_kernel(
             }
         }
         for (int k = 0; k < topk; k++) {
-            tw[k] = top_vals[k];
+            tw[k] = raw_scores[top_idxs[k]];
             ti[k] = top_idxs[k];
         }
     }
@@ -1418,16 +1485,19 @@ extern "C" __global__ void sigmoid_topk_kernel(
 
 extern "C" void krasis_sigmoid_topk(
     void* topk_weights, void* topk_ids, const void* gate_logits,
+    const void* gate_bias, const void* e_score_correction,
     int M, int num_experts, int topk, void* stream)
 {
     if (M == 0) return;
     int threads = min(256, num_experts);
     threads = ((threads + 31) / 32) * 32;
     if (threads == 0) threads = 32;
-    int smem = num_experts * sizeof(float) + topk * (sizeof(float) + sizeof(int));
+    int smem = 2 * num_experts * sizeof(float) + topk * (sizeof(float) + sizeof(int));
     sigmoid_topk_kernel<<<M, threads, smem, (cudaStream_t)stream>>>(
         (float*)topk_weights, (int*)topk_ids,
         (const float*)gate_logits,
+        (const float*)gate_bias,
+        (const float*)e_score_correction,
         num_experts, topk);
 }
 

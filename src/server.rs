@@ -235,6 +235,19 @@ fn prepare_store_for_rust_prefill(
     Ok(has_hqq)
 }
 
+fn prefill_entry_floor_bytes_for_server(
+    rust_prefill: &Arc<std::sync::Mutex<Option<crate::gpu_prefill::PrefillEngine>>>,
+    prompt_tokens: usize,
+) -> Result<usize, String> {
+    let guard = rust_prefill
+        .lock()
+        .map_err(|e| format!("Prefill engine lock poisoned: {}", e))?;
+    Ok(guard
+        .as_ref()
+        .map(|engine| engine.minimum_prefill_entry_free_bytes(prompt_tokens))
+        .unwrap_or(0))
+}
+
 fn create_prefill_engine_for_server(
     store: &mut GpuDecodeStore,
     max_context_tokens: usize,
@@ -815,6 +828,68 @@ fn json_escape(s: &str) -> String {
         .replace('\t', "\\t")
 }
 
+fn hide_synthetic_think_stop_text(
+    token_id: usize,
+    finish_reason: Option<&str>,
+    hidden_think_stop_id: Option<usize>,
+) -> bool {
+    finish_reason == Some("stop") && hidden_think_stop_id == Some(token_id)
+}
+
+fn push_eos_token_id_from_json(value: &serde_json::Value, ids: &mut Vec<usize>) {
+    let Some(eos) = value.get("eos_token_id") else {
+        return;
+    };
+    match eos {
+        serde_json::Value::Number(n) => {
+            if let Some(id) = n.as_u64() {
+                let id = id as usize;
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for v in arr {
+                if let Some(id) = v.as_u64() {
+                    let id = id as usize;
+                    if !ids.contains(&id) {
+                        ids.push(id);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_eos_stop_ids(tokenizer_path: &str) -> Vec<usize> {
+    let p = std::path::Path::new(tokenizer_path);
+    let model_dir = p.parent().unwrap_or(p);
+    let mut ids = Vec::new();
+
+    // Match Python config parsing order: generation_config.json is
+    // authoritative, then config.json top level, then nested text_config.
+    let gen_cfg_path = model_dir.join("generation_config.json");
+    if let Ok(data) = std::fs::read_to_string(&gen_cfg_path) {
+        if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&data) {
+            push_eos_token_id_from_json(&cfg, &mut ids);
+        }
+    }
+
+    let config_path = model_dir.join("config.json");
+    if let Ok(data) = std::fs::read_to_string(&config_path) {
+        if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&data) {
+            push_eos_token_id_from_json(&cfg, &mut ids);
+            if let Some(text_cfg) = cfg.get("text_config") {
+                push_eos_token_id_from_json(text_cfg, &mut ids);
+            }
+        }
+    }
+
+    ids
+}
+
 fn qwen_image_vram_error_body(err: &str) -> Option<String> {
     let marker = "VRAM is too constrained";
     let start = err.find(marker)?;
@@ -1158,11 +1233,49 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
     };
     let parse_ms = t_request.elapsed().as_secs_f64() * 1000.0;
 
+    if !has_images && estimated_tokens >= state.max_context_tokens {
+        log::warn!(
+            "Request {} rejected before prefill: estimated prompt {} tokens exceeds context {}",
+            request_id,
+            estimated_tokens,
+            state.max_context_tokens,
+        );
+        let _ = send_json(
+            stream,
+            413,
+            &format!(
+                r#"{{"error":{{"message":"Prompt too long: {} tokens exceeds KV cache capacity of {} tokens","type":"invalid_request_error","code":"context_length_exceeded","prompt_tokens":{},"max_context_tokens":{}}}}}"#,
+                estimated_tokens,
+                state.max_context_tokens,
+                estimated_tokens,
+                state.max_context_tokens,
+            ),
+        );
+        return;
+    }
+
     // ── Evict soft HCS before prefill to free VRAM ──
     crate::vram_monitor::report_event("evict_start");
     let t_evict = Instant::now();
+    let prefill_entry_floor_bytes =
+        match prefill_entry_floor_bytes_for_server(&state.rust_prefill, estimated_tokens) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                log::error!("Prefill engine floor unavailable before HCS eviction: {}", e);
+                let _ = send_json(
+                    stream,
+                    500,
+                    &format!(
+                        r#"{{"error":"Prefill engine floor unavailable: {}"}}"#,
+                        json_escape(&e)
+                    ),
+                );
+                return;
+            }
+        };
     let store_for_evict = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
-    let (_evicted, _freed_mb) = store_for_evict.hcs_evict_for_prefill(estimated_tokens);
+    let (_evicted, _freed_mb) = store_for_evict
+        .hcs_evict_for_prefill_with_engine_floor(estimated_tokens, prefill_entry_floor_bytes);
     // NOTE: aux GPU never does prefill, so no eviction needed there
     let evict_ms = t_evict.elapsed().as_secs_f64() * 1000.0;
     crate::vram_monitor::report_event("evict_end");
@@ -1277,7 +1390,7 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                 }
             }
         } else {
-            match state.tokenizer.encode(rendered.as_str(), true) {
+            match state.tokenizer.encode(rendered.as_str(), false) {
                 Ok(e) => e.get_ids().to_vec(),
                 Err(e) => {
                     let _ = send_json(stream, 500, &format!(r#"{{"error":"Tokenize: {}"}}"#, e));
@@ -1326,64 +1439,125 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
 
         engine.set_prefill_hcs_guard_store_addr(state.gpu_store_addr);
 
-        // Dynamically allocate scratch sized for this prompt
-        if let Err(e) = engine.prepare_for_prefill(token_ids.len()) {
-            engine.clear_external_prefill_inputs();
-            engine.clear_prefill_hcs_guard_store_addr();
-            engine.set_optional_pinning_budget_mb(None);
-            let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
-            let _ = store.prepare_runtime_for_decode_rust();
-            if has_images {
-                Python::with_gil(|py| {
-                    let _ = state
-                        .py_model
-                        .call_method0(py, "clear_multimodal_prefill_inputs");
-                });
-            }
-            if has_images {
-                let body = format!(
-                    r#"{{"error":{{"message":"VRAM is too constrained for this Qwen image request. Multimodal prefill scratch allocation failed: {}","type":"insufficient_resources","code":"insufficient_vram"}}}}"#,
-                    json_escape(&e)
+        let mut retry_cap: Option<usize> = None;
+        let mut retry_attempt = 0usize;
+        let result = loop {
+            engine.set_prefill_runtime_chunk_cap(retry_cap);
+
+            // Dynamically allocate scratch sized for this prompt.
+            if let Err(e) = engine.prepare_for_prefill(token_ids.len()) {
+                engine.clear_external_prefill_inputs();
+                engine.clear_prefill_hcs_guard_store_addr();
+                engine.set_optional_pinning_budget_mb(None);
+                engine.clear_prefill_runtime_chunk_cap();
+                let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
+                let _ = store.prepare_runtime_for_decode_rust();
+                if has_images {
+                    Python::with_gil(|py| {
+                        let _ = state
+                            .py_model
+                            .call_method0(py, "clear_multimodal_prefill_inputs");
+                    });
+                }
+                if has_images {
+                    let body = format!(
+                        r#"{{"error":{{"message":"VRAM is too constrained for this Qwen image request. Multimodal prefill scratch allocation failed: {}","type":"insufficient_resources","code":"insufficient_vram"}}}}"#,
+                        json_escape(&e)
+                    );
+                    let _ = send_json(stream, 507, &body);
+                    return;
+                }
+                let _ = send_json(
+                    stream,
+                    500,
+                    &format!(r#"{{"error":"Scratch alloc failed: {}"}}"#, e),
                 );
-                let _ = send_json(stream, 507, &body);
                 return;
             }
-            let _ = send_json(
-                stream,
-                500,
-                &format!(r#"{{"error":"Scratch alloc failed: {}"}}"#, e),
-            );
-            return;
-        }
-        let pinning_budget_mb = {
-            let store = unsafe { &*(state.gpu_store_addr as *const GpuDecodeStore) };
-            store.prefill_optional_pinning_budget_mb(
-                token_ids.len(),
-                engine.last_prepare_post_alloc_free_mb(),
-            )
-        };
-        engine.set_optional_pinning_budget_mb(pinning_budget_mb);
+            let pinning_budget_mb = {
+                let store = unsafe { &*(state.gpu_store_addr as *const GpuDecodeStore) };
+                store.prefill_optional_pinning_budget_mb(
+                    token_ids.len(),
+                    engine.last_prepare_post_alloc_free_mb(),
+                )
+            };
+            engine.set_optional_pinning_budget_mb(pinning_budget_mb);
 
-        let suppress_tokens = {
-            let store = unsafe { &*(state.gpu_store_addr as *const GpuDecodeStore) };
-            store.suppress_tokens_clone()
-        };
-        if let Some(mm) = multimodal_inputs.as_ref() {
-            engine.set_external_prefill_inputs(
-                mm.inputs_embeds_ptr,
-                mm.mrope_cos_ptr,
-                mm.mrope_sin_ptr,
-                mm.mrope_half_dim,
-            );
-        } else {
-            engine.clear_external_prefill_inputs();
-        }
-        let result = match engine.run_prefill(&token_ids, temperature, &suppress_tokens) {
-            Ok(r) => match engine.finalize_stage_exact_prefill_kv(r.prompt_len) {
-                Ok(()) => Ok(r),
-                Err(e) => Err(format!("KV stage export failed: {}", e)),
-            },
-            Err(e) => Err(e),
+            let suppress_tokens = {
+                let store = unsafe { &*(state.gpu_store_addr as *const GpuDecodeStore) };
+                store.suppress_tokens_clone()
+            };
+            if let Some(mm) = multimodal_inputs.as_ref() {
+                engine.set_external_prefill_inputs(
+                    mm.inputs_embeds_ptr,
+                    mm.mrope_cos_ptr,
+                    mm.mrope_sin_ptr,
+                    mm.mrope_half_dim,
+                );
+            } else {
+                engine.clear_external_prefill_inputs();
+            }
+
+            let attempt_result = match engine.run_prefill(&token_ids, temperature, &suppress_tokens) {
+                Ok(r) => match engine.finalize_stage_exact_prefill_kv(r.prompt_len) {
+                    Ok(()) => Ok(r),
+                    Err(e) => Err(format!("KV stage export failed: {}", e)),
+                },
+                Err(e) => Err(e),
+            };
+
+            match attempt_result {
+                Ok(r) => break Ok(r),
+                Err(e) => {
+                    let current_chunk = engine.scratch.max_tokens;
+                    let next_retry_cap = engine.cold_staging_retry_chunk_cap();
+                    if let Some(next_cap) = next_retry_cap {
+                        if next_cap < current_chunk && current_chunk > 128 {
+                            retry_attempt += 1;
+                            if let Some(failure) = engine.last_cold_staging_failure {
+                                log::info!(
+                                    "Retrying chat prefill with measured cold-staging chunk cap: attempt={} prompt_tokens={} failed_chunk={} requested_slots={} max_safe_slots={} free_before_mb={} safety_mb={} current_chunk={} next_chunk_cap={} error={}",
+                                    retry_attempt,
+                                    token_ids.len(),
+                                    failure.chunk_tokens,
+                                    failure.requested_slots,
+                                    failure.max_safe_slots,
+                                    failure.free_before_mb,
+                                    failure.safety_mb,
+                                    current_chunk,
+                                    next_cap,
+                                    e,
+                                );
+                            } else {
+                                log::info!(
+                                    "Retrying chat prefill with measured cold-staging chunk cap: attempt={} prompt_tokens={} current_chunk={} next_chunk_cap={} error={}",
+                                    retry_attempt,
+                                    token_ids.len(),
+                                    current_chunk,
+                                    next_cap,
+                                    e,
+                                );
+                            }
+                            engine.set_optional_pinning_budget_mb(None);
+                            if let Err(release_err) = engine.release_scratch() {
+                                log::error!(
+                                    "Failed to release scratch before chat prefill retry: {}",
+                                    release_err
+                                );
+                                abort_if_cuda_context_poisoned(
+                                    "chat retry release_scratch",
+                                    &release_err,
+                                );
+                                break Err(release_err);
+                            }
+                            engine.clear_external_prefill_inputs();
+                            retry_cap = Some(next_cap);
+                            continue;
+                        }
+                    }
+                    break Err(e);
+                }
+            }
         };
 
         prompt_hcs_snapshot = engine.prompt_hcs_shadow_snapshot();
@@ -1396,6 +1570,7 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
         engine.clear_external_prefill_inputs();
         engine.clear_prefill_hcs_guard_store_addr();
         engine.set_optional_pinning_budget_mb(None);
+        engine.clear_prefill_runtime_chunk_cap();
         if has_images {
             Python::with_gil(|py| {
                 let _ = state
@@ -1409,6 +1584,13 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
         for s in &stop_tokens {
             if let Some(id) = state.tokenizer.token_to_id(s) {
                 let id = id as usize;
+                if !stop_ids.contains(&id) {
+                    stop_ids.push(id);
+                }
+            }
+        }
+        if !enable_thinking {
+            if let Some(id) = state.thinking_end_token {
                 if !stop_ids.contains(&id) {
                     stop_ids.push(id);
                 }
@@ -1902,7 +2084,7 @@ fn handle_prefill_logits(stream: &mut TcpStream, body: &str, state: &mut ServerS
                     return;
                 }
             };
-            match state.tokenizer.encode(rendered.as_str(), true) {
+            match state.tokenizer.encode(rendered.as_str(), false) {
                 Ok(e) => e.get_ids().to_vec(),
                 Err(e) => {
                     let _ = send_json(stream, 500, &format!(r#"{{"error":"Tokenize: {}"}}"#, e));
@@ -1927,8 +2109,28 @@ fn handle_prefill_logits(stream: &mut TcpStream, body: &str, state: &mut ServerS
 
     // Evict soft HCS before diagnostic prefill so this endpoint uses the same
     // conservative VRAM budget as the production and reference-test paths.
+    let prefill_entry_floor_bytes =
+        match prefill_entry_floor_bytes_for_server(&state.rust_prefill, token_ids.len()) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                log::error!(
+                    "Prefill logits engine floor unavailable before HCS eviction: {}",
+                    e
+                );
+                let _ = send_json(
+                    stream,
+                    500,
+                    &format!(
+                        r#"{{"error":"Prefill engine floor unavailable: {}"}}"#,
+                        json_escape(&e)
+                    ),
+                );
+                return;
+            }
+        };
     let store_for_evict = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
-    let (_evicted, _freed_mb) = store_for_evict.hcs_evict_for_prefill(token_ids.len());
+    let (_evicted, _freed_mb) = store_for_evict
+        .hcs_evict_for_prefill_with_engine_floor(token_ids.len(), prefill_entry_floor_bytes);
 
     // Run prefill logits extraction
     let mut engine_guard = state.rust_prefill.lock().unwrap();
@@ -2546,6 +2748,20 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
         .get("debug_decode_early_trace")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let debug_decode_early_trace_max_steps = match req.get("debug_decode_early_trace_max_steps") {
+        Some(value) => match value.as_u64() {
+            Some(steps) if (1..=64).contains(&steps) => steps,
+            _ => {
+                let _ = send_json(
+                    stream,
+                    400,
+                    r#"{"error":"debug_decode_early_trace_max_steps must be an integer from 1 to 64"}"#,
+                );
+                return;
+            }
+        },
+        None => 3,
+    };
     let debug_hcs_transition_trace = req
         .get("debug_hcs_transition_trace")
         .and_then(|v| v.as_bool())
@@ -2596,6 +2812,25 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
     let mut debug_mamba2_state_lifecycle_points: Vec<serde_json::Value> = Vec::new();
 
     // ── Evict soft HCS before prefill ──
+    let prefill_entry_floor_bytes =
+        match prefill_entry_floor_bytes_for_server(&state.rust_prefill, input_token_ids.len()) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                log::error!(
+                    "Reference-test prefill engine floor unavailable before HCS eviction: {}",
+                    e
+                );
+                let _ = send_json(
+                    stream,
+                    500,
+                    &format!(
+                        r#"{{"error":"Prefill engine floor unavailable: {}"}}"#,
+                        json_escape(&e)
+                    ),
+                );
+                return;
+            }
+        };
     let store_for_evict = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
     if debug_mamba2_state_lifecycle_trace {
         debug_mamba2_state_lifecycle_points.push(mamba2_state_lifecycle_point(
@@ -2616,7 +2851,10 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
             })
         }));
     }
-    let (evicted, freed_mb) = store_for_evict.hcs_evict_for_prefill(input_token_ids.len());
+    let (evicted, freed_mb) = store_for_evict.hcs_evict_for_prefill_with_engine_floor(
+        input_token_ids.len(),
+        prefill_entry_floor_bytes,
+    );
     if debug_hcs_transition_trace {
         let raw = store_for_evict.hcs_debug_summary_json("after_hcs_evict_for_prefill");
         let mut value = serde_json::from_str(&raw).unwrap_or_else(|e| {
@@ -2685,30 +2923,6 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
 
     let hqq_prefill_materialized = false;
 
-    // Dynamically allocate scratch for this prompt
-    if let Err(e) = engine.prepare_for_prefill(input_token_ids.len()) {
-        engine.set_optional_pinning_budget_mb(None);
-        let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
-        let _ = store.prepare_runtime_for_decode_rust();
-        let _ = send_json(
-            stream,
-            500,
-            &format!(r#"{{"error":"Scratch alloc failed: {}"}}"#, e),
-        );
-        return;
-    }
-    let pinning_budget_mb = {
-        let store = unsafe { &*(state.gpu_store_addr as *const GpuDecodeStore) };
-        store.prefill_optional_pinning_budget_mb(
-            input_token_ids.len(),
-            engine.last_prepare_post_alloc_free_mb(),
-        )
-    };
-    engine.set_optional_pinning_budget_mb(pinning_budget_mb);
-    let scratch_tokens_after_prepare = engine.scratch.max_tokens;
-    let prefill_chunk_size_after_prepare = engine.config.prefill_chunk_size;
-
-    // Run prefill with temperature=0 (greedy)
     let suppress_tokens = {
         let store = unsafe { &*(state.gpu_store_addr as *const GpuDecodeStore) };
         store.suppress_tokens_clone()
@@ -2716,29 +2930,6 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
     engine.set_reference_debug_trace_enabled(debug_reference_trace);
     engine.set_first_token_margin_projection_request_enabled(true);
     engine.set_read_only_checkpoint_request_enabled(true);
-    if let Err(e) = engine.set_prefill_device_trace_enabled(
-        debug_prefill_device_trace,
-        debug_prefill_device_trace_layer,
-        debug_prefill_device_trace_all_layers,
-        debug_prefill_device_trace_full_pre_out_proj,
-        debug_prefill_device_trace_dims.clone(),
-        debug_prefill_device_trace_rows.clone(),
-        debug_prefill_device_trace_experts.clone(),
-        debug_prefill_device_trace_local_scan_token,
-    ) {
-        engine.set_read_only_checkpoint_request_enabled(false);
-        engine.set_first_token_margin_projection_request_enabled(false);
-        engine.set_reference_debug_trace_enabled(false);
-        engine.set_optional_pinning_budget_mb(None);
-        let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
-        let _ = store.prepare_runtime_for_decode_rust();
-        let _ = send_json(
-            stream,
-            500,
-            &format!(r#"{{"error":"Prefill device trace setup failed: {}"}}"#, e),
-        );
-        return;
-    }
     engine.set_reference_router_variant_override(
         debug_router_variant,
         debug_router_variant_layers.clone(),
@@ -2746,24 +2937,149 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
         debug_router_forced_slot_orders.clone(),
     );
     engine.set_reference_mamba2_gated_norm_replay(debug_mamba2_gated_norm_replay.clone());
-    if debug_mamba2_state_lifecycle_trace {
-        let store = unsafe { &*(state.gpu_store_addr as *const GpuDecodeStore) };
-        debug_mamba2_state_lifecycle_points.push(mamba2_state_lifecycle_point(
-            store,
-            "before_prefill_run",
-            debug_mamba2_state_layer,
-        ));
-    }
-    let prefill_result = match engine.run_prefill(
-        &input_token_ids,
-        0.0, // temperature=0 for greedy
-        &suppress_tokens,
-    ) {
-        Ok(r) => match engine.finalize_stage_exact_prefill_kv(r.prompt_len) {
-            Ok(()) => Ok(r),
-            Err(e) => Err(format!("KV stage export failed: {}", e)),
-        },
-        Err(e) => Err(e),
+
+    engine.set_prefill_hcs_guard_store_addr(state.gpu_store_addr);
+    let mut retry_cap: Option<usize> = None;
+    let mut retry_attempt = 0usize;
+    let mut scratch_tokens_after_prepare = 0usize;
+    let mut prefill_chunk_size_after_prepare = engine.config.prefill_chunk_size;
+
+    let prefill_result = loop {
+        engine.set_prefill_runtime_chunk_cap(retry_cap);
+
+        // Dynamically allocate scratch for this prompt.
+        if let Err(e) = engine.prepare_for_prefill(input_token_ids.len()) {
+            engine.clear_prefill_hcs_guard_store_addr();
+            engine.set_optional_pinning_budget_mb(None);
+            engine.clear_prefill_runtime_chunk_cap();
+            let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
+            let _ = store.prepare_runtime_for_decode_rust();
+            let _ = send_json(
+                stream,
+                500,
+                &format!(r#"{{"error":"Scratch alloc failed: {}"}}"#, e),
+            );
+            return;
+        }
+        let pinning_budget_mb = {
+            let store = unsafe { &*(state.gpu_store_addr as *const GpuDecodeStore) };
+            store.prefill_optional_pinning_budget_mb(
+                input_token_ids.len(),
+                engine.last_prepare_post_alloc_free_mb(),
+            )
+        };
+        engine.set_optional_pinning_budget_mb(pinning_budget_mb);
+        scratch_tokens_after_prepare = engine.scratch.max_tokens;
+        prefill_chunk_size_after_prepare = engine.config.prefill_chunk_size;
+
+        if let Err(e) = engine.set_prefill_device_trace_enabled(
+            debug_prefill_device_trace,
+            debug_prefill_device_trace_layer,
+            debug_prefill_device_trace_all_layers,
+            debug_prefill_device_trace_full_pre_out_proj,
+            debug_prefill_device_trace_dims.clone(),
+            debug_prefill_device_trace_rows.clone(),
+            debug_prefill_device_trace_experts.clone(),
+            debug_prefill_device_trace_local_scan_token,
+        ) {
+            engine.clear_prefill_hcs_guard_store_addr();
+            engine.set_read_only_checkpoint_request_enabled(false);
+            engine.set_first_token_margin_projection_request_enabled(false);
+            engine.set_reference_debug_trace_enabled(false);
+            engine.set_optional_pinning_budget_mb(None);
+            engine.clear_prefill_runtime_chunk_cap();
+            let _ = engine.release_scratch();
+            let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
+            let _ = store.prepare_runtime_for_decode_rust();
+            let _ = send_json(
+                stream,
+                500,
+                &format!(r#"{{"error":"Prefill device trace setup failed: {}"}}"#, e),
+            );
+            return;
+        }
+        if debug_mamba2_state_lifecycle_trace {
+            let store = unsafe { &*(state.gpu_store_addr as *const GpuDecodeStore) };
+            debug_mamba2_state_lifecycle_points.push(mamba2_state_lifecycle_point(
+                store,
+                "before_prefill_run",
+                debug_mamba2_state_layer,
+            ));
+        }
+
+        let attempt_result = match engine.run_prefill(
+            &input_token_ids,
+            0.0, // temperature=0 for greedy
+            &suppress_tokens,
+        ) {
+            Ok(r) => match engine.finalize_stage_exact_prefill_kv(r.prompt_len) {
+                Ok(()) => Ok(r),
+                Err(e) => Err(format!("KV stage export failed: {}", e)),
+            },
+            Err(e) => Err(e),
+        };
+
+        match attempt_result {
+            Ok(r) => break Ok(r),
+            Err(e) => {
+                let current_chunk = engine.scratch.max_tokens;
+                let next_retry_cap = engine.cold_staging_retry_chunk_cap();
+                if let Some(next_cap) = next_retry_cap {
+                    if next_cap < current_chunk && current_chunk > 128 {
+                        retry_attempt += 1;
+                        if let Some(failure) = engine.last_cold_staging_failure {
+                            log::info!(
+                                "Retrying reference_test prefill with measured cold-staging chunk cap: attempt={} prompt_tokens={} failed_chunk={} requested_slots={} max_safe_slots={} free_before_mb={} safety_mb={} current_chunk={} next_chunk_cap={} error={}",
+                                retry_attempt,
+                                input_token_ids.len(),
+                                failure.chunk_tokens,
+                                failure.requested_slots,
+                                failure.max_safe_slots,
+                                failure.free_before_mb,
+                                failure.safety_mb,
+                                current_chunk,
+                                next_cap,
+                                e,
+                            );
+                        } else {
+                            log::info!(
+                                "Retrying reference_test prefill with measured cold-staging chunk cap: attempt={} prompt_tokens={} current_chunk={} next_chunk_cap={} error={}",
+                                retry_attempt,
+                                input_token_ids.len(),
+                                current_chunk,
+                                next_cap,
+                                e,
+                            );
+                        }
+                        let _ = engine.set_prefill_device_trace_enabled(
+                            false,
+                            debug_prefill_device_trace_layer,
+                            false,
+                            false,
+                            Vec::new(),
+                            Vec::new(),
+                            Vec::new(),
+                            None,
+                        );
+                        engine.set_optional_pinning_budget_mb(None);
+                        if let Err(release_err) = engine.release_scratch() {
+                            log::error!(
+                                "reference_test: failed to release scratch before retry: {}",
+                                release_err
+                            );
+                            abort_if_cuda_context_poisoned(
+                                "reference_test retry release_scratch",
+                                &release_err,
+                            );
+                            break Err(release_err);
+                        }
+                        retry_cap = Some(next_cap);
+                        continue;
+                    }
+                }
+                break Err(e);
+            }
+        }
     };
     let debug_prefill_stage_trace = if debug_reference_trace {
         engine.take_reference_debug_trace()
@@ -2816,6 +3132,7 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
         }
         Err(e) => {
             abort_if_cuda_context_poisoned("reference_test prefill", &e);
+            engine.clear_prefill_hcs_guard_store_addr();
             let _ = engine.set_prefill_device_trace_enabled(
                 false,
                 debug_prefill_device_trace_layer,
@@ -2829,6 +3146,7 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
             engine.clear_reference_mamba2_gated_norm_replay();
             let _ = engine.release_scratch();
             engine.set_optional_pinning_budget_mb(None);
+            engine.clear_prefill_runtime_chunk_cap();
             let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
             let _ = store.prepare_runtime_for_decode_rust();
             let _ = send_json(
@@ -2849,6 +3167,8 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
         abort_if_cuda_context_poisoned("reference_test release_scratch", &e);
     }
     engine.set_optional_pinning_budget_mb(None);
+    engine.clear_prefill_hcs_guard_store_addr();
+    engine.clear_prefill_runtime_chunk_cap();
     if debug_mamba2_state_lifecycle_trace {
         let store = unsafe { &*(state.gpu_store_addr as *const GpuDecodeStore) };
         debug_mamba2_state_lifecycle_points.push(mamba2_state_lifecycle_point(
@@ -2965,6 +3285,7 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
     }
     if debug_decode_early_trace {
         store.set_debug_decode_early_trace_once(true);
+        store.set_debug_decode_early_max_steps_once(debug_decode_early_trace_max_steps);
         store.set_debug_decode_early_detail_dims_once(debug_prefill_device_trace_dims.clone());
     }
     if debug_hcs_transition_trace {
@@ -3356,6 +3677,11 @@ fn handle_gpu_decode(
     } else {
         None
     };
+    let hidden_think_stop_id = if enable_thinking {
+        None
+    } else {
+        state.thinking_end_token
+    };
 
     if is_stream {
         if let Err(e) = begin_sse(stream) {
@@ -3516,22 +3842,25 @@ fn handle_gpu_decode(
             } else {
                 None
             };
+            let hide_text =
+                hide_synthetic_think_stop_text(token_id, effective_finish, hidden_think_stop_id);
+            let visible_text = if hide_text { "" } else { text };
 
             if has_tools {
-                tc_all_text.push_str(text);
+                tc_all_text.push_str(visible_text);
                 if let Some(fr) = effective_finish {
                     tc_finish = fr.to_string();
                 }
 
                 if tc_in_tool_call {
                     // Inside a tool call block — buffer silently
-                } else if text.contains("<tool_call>") {
+                } else if visible_text.contains("<tool_call>") {
                     // Entering tool call territory
                     tc_in_tool_call = true;
                     tc_found = true;
                     // Send any content before the marker in this text
-                    if let Some(idx) = text.find("<tool_call>") {
-                        let before = &text[..idx];
+                    if let Some(idx) = visible_text.find("<tool_call>") {
+                        let before = &visible_text[..idx];
                         if !before.is_empty() {
                             let chunk = format_sse_token(
                                 request_id, model_name, before, None, created, None,
@@ -3541,11 +3870,11 @@ fn handle_gpu_decode(
                     }
                 } else {
                     // Normal content — stream it (no finish_reason; handled post-generation)
-                    if !text.is_empty() {
+                    if !visible_text.is_empty() {
                         let chunk = format_sse_token(
                             request_id,
                             model_name,
-                            text,
+                            visible_text,
                             None,
                             created,
                             token_logprobs,
@@ -3566,7 +3895,7 @@ fn handle_gpu_decode(
                 let chunk = format_sse_token(
                     request_id,
                     model_name,
-                    text,
+                    visible_text,
                     effective_finish,
                     created,
                     token_logprobs,
@@ -3765,7 +4094,11 @@ fn handle_gpu_decode(
                                 finish_reason: Option<&str>,
                                 token_logprobs: Option<&[(u32, f32)]>|
              -> bool {
-                all_text.push_str(text);
+                let hide_text =
+                    hide_synthetic_think_stop_text(token_id, finish_reason, hidden_think_stop_id);
+                if !hide_text {
+                    all_text.push_str(text);
+                }
                 total_tokens += 1;
                 if chat_debug_payload.is_some() {
                     debug_output_tokens.push((
@@ -4089,35 +4422,14 @@ impl RustServer {
                 }
             };
 
-            // Load EOS token IDs from generation_config.json (same directory as tokenizer.json).
-            // These are required for the model to stop generating — without them, decode
-            // never terminates (the main branch gets these from Python prefill result).
+            // Load EOS token IDs from generation_config.json and config.json.
+            // Step-family models may ship no generation_config.json and place
+            // the EOS list only under config.json text_config.
             let eos_stop_ids = {
-                let p = std::path::Path::new(&tokenizer_path);
-                let gen_cfg_path = p.parent().unwrap_or(p).join("generation_config.json");
-                let mut ids = Vec::new();
-                if let Ok(data) = std::fs::read_to_string(&gen_cfg_path) {
-                    if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&data) {
-                        match cfg.get("eos_token_id") {
-                            Some(serde_json::Value::Number(n)) => {
-                                if let Some(id) = n.as_u64() {
-                                    ids.push(id as usize);
-                                }
-                            }
-                            Some(serde_json::Value::Array(arr)) => {
-                                for v in arr {
-                                    if let Some(id) = v.as_u64() {
-                                        ids.push(id as usize);
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
+                let ids = collect_eos_stop_ids(&tokenizer_path);
                 if ids.is_empty() {
                     log::warn!(
-                        "No eos_token_id found in generation_config.json — decode may not stop"
+                        "No eos_token_id found in generation_config.json/config.json — decode may not stop"
                     );
                 } else {
                     log::info!("EOS stop tokens: {:?}", ids);
@@ -4403,9 +4715,19 @@ impl RustServer {
         };
 
         // Evict soft HCS before prefill (both stores in multi-GPU)
+        let prefill_entry_floor_bytes =
+            prefill_entry_floor_bytes_for_server(&self.prefill_engine, estimated_tokens).map_err(
+                |e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "Prefill engine floor unavailable before HCS eviction: {}",
+                        e
+                    ))
+                },
+            )?;
         let store = unsafe { &mut *(self.gpu_store_addr as *mut GpuDecodeStore) };
         let t_evict = Instant::now();
-        let (evicted, _) = store.hcs_evict_for_prefill(estimated_tokens);
+        let (evicted, _) =
+            store.hcs_evict_for_prefill_with_engine_floor(estimated_tokens, prefill_entry_floor_bytes);
         // NOTE: aux GPU never does prefill, so no eviction needed there
         let evict_ms = t_evict.elapsed().as_secs_f64() * 1000.0;
 
@@ -4457,7 +4779,7 @@ impl RustServer {
                         e
                     ))
                 })?;
-            let encoding = tokenizer.encode(rendered.as_str(), true).map_err(|e| {
+            let encoding = tokenizer.encode(rendered.as_str(), false).map_err(|e| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!("Tokenizer failed: {}", e))
             })?;
             encoding.get_ids().to_vec()
@@ -4533,31 +4855,7 @@ impl RustServer {
         let prompt_len = prefill_result.prompt_len;
         // Load EOS tokens for benchmark path (same logic as serve_forever)
         let t_phase = Instant::now();
-        let stop_ids: Vec<usize> = {
-            let p = std::path::Path::new(&self.tokenizer_path);
-            let gen_cfg_path = p.parent().unwrap_or(p).join("generation_config.json");
-            let mut ids = Vec::new();
-            if let Ok(data) = std::fs::read_to_string(&gen_cfg_path) {
-                if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&data) {
-                    match cfg.get("eos_token_id") {
-                        Some(serde_json::Value::Number(n)) => {
-                            if let Some(id) = n.as_u64() {
-                                ids.push(id as usize);
-                            }
-                        }
-                        Some(serde_json::Value::Array(arr)) => {
-                            for v in arr {
-                                if let Some(id) = v.as_u64() {
-                                    ids.push(id as usize);
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            ids
-        };
+        let stop_ids: Vec<usize> = collect_eos_stop_ids(&self.tokenizer_path);
         prefill_stop_ids_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
 
         let t_phase = Instant::now();
@@ -5002,7 +5300,9 @@ impl RustServer {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_chat_completions_endpoint, is_models_endpoint};
+    use super::{
+        hide_synthetic_think_stop_text, is_chat_completions_endpoint, is_models_endpoint,
+    };
 
     #[test]
     fn models_endpoint_accepts_openai_base_url_variants() {
@@ -5026,5 +5326,14 @@ mod tests {
         assert!(is_chat_completions_endpoint("/chat/completions?x=1"));
         assert!(!is_chat_completions_endpoint("/v1/models"));
         assert!(!is_chat_completions_endpoint("/foo/chat/completions"));
+    }
+
+    #[test]
+    fn hides_only_synthetic_thinking_stop_text() {
+        assert!(hide_synthetic_think_stop_text(123, Some("stop"), Some(123)));
+        assert!(!hide_synthetic_think_stop_text(123, Some("length"), Some(123)));
+        assert!(!hide_synthetic_think_stop_text(123, Some("stop"), Some(456)));
+        assert!(!hide_synthetic_think_stop_text(123, Some("stop"), None));
+        assert!(!hide_synthetic_think_stop_text(123, None, Some(123)));
     }
 }

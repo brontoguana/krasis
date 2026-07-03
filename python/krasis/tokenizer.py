@@ -82,6 +82,8 @@ class Tokenizer:
             else:
                 self.tokenizer.chat_template = self._DEEPSEEK_CHAT_TEMPLATE
                 logger.info("No chat template found — using DeepSeek format fallback")
+        template = getattr(self.tokenizer, "chat_template", "") or ""
+        self._template_has_thinking = "<think>" in template and "</think>" in template
         logger.info(
             "Tokenizer loaded: vocab=%d, eos=%d, bos=%d",
             self.tokenizer.vocab_size,
@@ -102,6 +104,13 @@ class Tokenizer:
         template = getattr(self.tokenizer, "chat_template", "") or ""
         return "enable_thinking" in template
 
+    @staticmethod
+    def _close_initial_think_block(rendered: str) -> str:
+        suffix = "<|im_start|>assistant\n<think>\n"
+        if rendered.endswith(suffix):
+            return rendered + "\n</think>\n\n"
+        return rendered
+
     def apply_chat_template(
         self,
         messages: List[Dict[str, str]],
@@ -112,17 +121,22 @@ class Tokenizer:
         kwargs = dict(kwargs)
         requested_enable_thinking = kwargs.get("enable_thinking")
         if requested_enable_thinking is not None and not self.chat_template_supports_enable_thinking:
-            if requested_enable_thinking:
+            if requested_enable_thinking and not self._template_has_thinking:
                 raise ValueError(
                     "Model chat template does not support enable_thinking; "
                     "refuse to silently ignore an explicit thinking request"
                 )
             kwargs.pop("enable_thinking", None)
+        force_close_think = (
+            requested_enable_thinking is False
+            and self._template_has_thinking
+            and add_generation_prompt
+        )
         try:
             result = self.tokenizer.apply_chat_template(
                 messages,
                 add_generation_prompt=add_generation_prompt,
-                tokenize=True,
+                tokenize=not force_close_think,
                 **kwargs,
             )
         except (TypeError, Exception) as e:
@@ -132,10 +146,15 @@ class Tokenizer:
                 result = self.tokenizer.apply_chat_template(
                     messages,
                     add_generation_prompt=add_generation_prompt,
-                    tokenize=True,
+                    tokenize=not force_close_think,
                 )
             else:
                 raise
+        if force_close_think:
+            return self.tokenizer.encode(
+                self._close_initial_think_block(result),
+                add_special_tokens=False,
+            )
         return self._ensure_int_list(result)
 
     def _ensure_int_list(self, result) -> List[int]:

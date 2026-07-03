@@ -28,6 +28,13 @@ __device__ __forceinline__ float silu(float x) {
     return x / (1.0f + __expf(-x));
 }
 
+__device__ __forceinline__ void apply_swiglu_limit(float &silu_gate, float &up, float limit) {
+    if (limit > 0.0f) {
+        silu_gate = fminf(silu_gate, limit);
+        up = fminf(fmaxf(up, -limit), limit);
+    }
+}
+
 // ── HQQ4 Dequant ───────────────────────────────────────────────────────
 
 extern "C" __global__ void hqq4_dequant_bf16(
@@ -1858,11 +1865,13 @@ extern "C" __global__ void apply_rope_half_split(
 ) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int total_heads = num_q_heads + num_kv_heads;
-    int total_work = total_heads * head_dim;
+    int rotary_dim = half_dim * 2;
+    if (rotary_dim > head_dim) rotary_dim = head_dim;
+    int total_work = total_heads * rotary_dim;
     if (tid >= total_work) return;
 
-    int head = tid / head_dim;
-    int i = tid - head * head_dim;
+    int head = tid / rotary_dim;
+    int i = tid - head * rotary_dim;
     int ci = i < half_dim ? i : i - half_dim;
     int src = i < half_dim ? i + half_dim : i - half_dim;
 
@@ -2642,6 +2651,25 @@ extern "C" __global__ void apply_gated_attn_bf16(
     }
 }
 
+// Step attention gate: g_proj produces one raw gate value per attention head.
+// Apply sigmoid(gate[head]) to every element in that head, then convert to BF16.
+extern "C" __global__ void apply_head_gated_attn_bf16(
+    unsigned short* __restrict__ output,    // [nh * hd] BF16
+    const float* __restrict__ attn_out,     // [nh * hd] FP32
+    const float* __restrict__ head_gate,    // [nh] FP32
+    int nh,
+    int hd
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = nh * hd;
+    if (idx < total) {
+        int head = idx / hd;
+        float g = 1.0f / (1.0f + __expf(-head_gate[head]));
+        __nv_bfloat16 result = __float2bfloat16(attn_out[idx] * g);
+        output[idx] = *reinterpret_cast<unsigned short*>(&result);
+    }
+}
+
 // FP32 to BF16 conversion
 extern "C" __global__ void fp32_to_bf16_simple(
     unsigned short* __restrict__ output,    // [n] BF16
@@ -3022,7 +3050,8 @@ extern "C" __global__ void marlin_gemv_int4_fused_silu_accum(
     int N,              // hidden_size
     int group_size,
     float weight,       // routing weight for this expert
-    const float* weight_ptr  // optional: if non-NULL, weight = sigmoid(*weight_ptr)
+    const float* weight_ptr, // optional: if non-NULL, weight = sigmoid(*weight_ptr)
+    float swiglu_limit
 ) {
     // If weight_ptr is non-NULL, read the gate logit and apply sigmoid on GPU
     if (weight_ptr != NULL) {
@@ -3041,6 +3070,7 @@ extern "C" __global__ void marlin_gemv_int4_fused_silu_accum(
         float g = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[i]));
         float u = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[K + i]));
         float silu_g = g / (1.0f + __expf(-g));
+        apply_swiglu_limit(silu_g, u, swiglu_limit);
         __nv_bfloat16 val = __float2bfloat16(silu_g * u);
         s_input[i] = *reinterpret_cast<unsigned short*>(&val);
     }
@@ -3156,7 +3186,8 @@ extern "C" __global__ void marlin_gemv_int8_fused_silu_accum(
     const int* __restrict__ inv_scale_perm,
     int K, int N, int group_size,
     float weight,
-    const float* weight_ptr
+    const float* weight_ptr,
+    float swiglu_limit
 ) {
     if (weight_ptr != NULL) {
         weight = 1.0f / (1.0f + __expf(-(*weight_ptr)));
@@ -3173,6 +3204,7 @@ extern "C" __global__ void marlin_gemv_int8_fused_silu_accum(
         float g = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[i]));
         float u = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[K + i]));
         float silu_g = g / (1.0f + __expf(-g));
+        apply_swiglu_limit(silu_g, u, swiglu_limit);
         __nv_bfloat16 val = __float2bfloat16(silu_g * u);
         s_input[i] = *reinterpret_cast<unsigned short*>(&val);
     }
@@ -3863,7 +3895,8 @@ extern "C" __global__ void marlin_gemv_int4_fused_silu_accum_v2(
     float* __restrict__ partial_out,            // [k_splits * N] FP32
     const int* __restrict__ inv_weight_perm,    // [1024]
     const int* __restrict__ inv_scale_perm,     // [64]
-    int K, int N, int group_size, int k_splits
+    int K, int N, int group_size, int k_splits,
+    float swiglu_limit
 ) {
     extern __shared__ char smem_raw[];
     unsigned short* s_input = (unsigned short*)smem_raw;
@@ -3878,6 +3911,7 @@ extern "C" __global__ void marlin_gemv_int4_fused_silu_accum_v2(
         float g = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[i]));
         float u = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[K + i]));
         float silu_g = g / (1.0f + __expf(-g));
+        apply_swiglu_limit(silu_g, u, swiglu_limit);
         __nv_bfloat16 val = __float2bfloat16(silu_g * u);
         s_input[i] = *reinterpret_cast<unsigned short*>(&val);
     }
@@ -3995,7 +4029,8 @@ extern "C" __global__ void marlin_gemv_int8_fused_silu_accum_v2(
     float* __restrict__ partial_out,
     const int* __restrict__ inv_weight_perm,
     const int* __restrict__ inv_scale_perm,
-    int K, int N, int group_size, int k_splits
+    int K, int N, int group_size, int k_splits,
+    float swiglu_limit
 ) {
     extern __shared__ char smem_raw[];
     unsigned short* s_input = (unsigned short*)smem_raw;
@@ -4009,6 +4044,7 @@ extern "C" __global__ void marlin_gemv_int8_fused_silu_accum_v2(
         float g = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[i]));
         float u = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[K + i]));
         float silu_g = g / (1.0f + __expf(-g));
+        apply_swiglu_limit(silu_g, u, swiglu_limit);
         __nv_bfloat16 val = __float2bfloat16(silu_g * u);
         s_input[i] = *reinterpret_cast<unsigned short*>(&val);
     }
@@ -4551,6 +4587,7 @@ extern "C" __global__ void fused_silu_w2_batched(
     const int* __restrict__ inv_weight_perm,
     const int* __restrict__ inv_scale_perm,
     int K, int N, int group_size,
+    float swiglu_limit,
     const float* __restrict__ weights                       // [num_experts] - skip if zero
 ) {
     int expert_idx = blockIdx.z;
@@ -4572,6 +4609,7 @@ extern "C" __global__ void fused_silu_w2_batched(
         float g = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[i]));
         float u = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[K + i]));
         float silu_g = g / (1.0f + __expf(-g));
+        apply_swiglu_limit(silu_g, u, swiglu_limit);
         __nv_bfloat16 val = __float2bfloat16(silu_g * u);
         s_input[i] = *reinterpret_cast<unsigned short*>(&val);
     }
@@ -4678,6 +4716,7 @@ extern "C" __global__ void fused_silu_w2_batched_timed(
     const int* __restrict__ inv_weight_perm,
     const int* __restrict__ inv_scale_perm,
     int K, int N, int group_size,
+    float swiglu_limit,
     const float* __restrict__ weights,
     unsigned long long* __restrict__ debug_clocks,
     int clock_base,
@@ -4731,6 +4770,7 @@ extern "C" __global__ void fused_silu_w2_batched_timed(
         float g = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&g_bits));
         float u = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&u_bits));
         float silu_g = g / (1.0f + __expf(-g));
+        apply_swiglu_limit(silu_g, u, swiglu_limit);
         __nv_bfloat16 val = __float2bfloat16(silu_g * u);
         unsigned long long t_math_end = 0;
         if (sample_iter) {
@@ -4874,6 +4914,7 @@ extern "C" __global__ void fused_silu_w2_int8_batched(
     const int* __restrict__ inv_weight_perm,
     const int* __restrict__ inv_scale_perm,
     int K, int N, int group_size,
+    float swiglu_limit,
     const float* __restrict__ weights                       // [num_experts] — skip if zero
 ) {
     int expert_idx = blockIdx.z;
@@ -4895,6 +4936,7 @@ extern "C" __global__ void fused_silu_w2_int8_batched(
         float g = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[i]));
         float u = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[K + i]));
         float silu_g = g / (1.0f + __expf(-g));
+        apply_swiglu_limit(silu_g, u, swiglu_limit);
         __nv_bfloat16 val = __float2bfloat16(silu_g * u);
         s_input[i] = *reinterpret_cast<unsigned short*>(&val);
     }
@@ -5084,11 +5126,13 @@ extern "C" __global__ void apply_rope_half_split_g(
     int position = *d_position;
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int total_heads = num_q_heads + num_kv_heads;
-    int total_work = total_heads * head_dim;
+    int rotary_dim = half_dim * 2;
+    if (rotary_dim > head_dim) rotary_dim = head_dim;
+    int total_work = total_heads * rotary_dim;
     if (tid >= total_work) return;
 
-    int head = tid / head_dim;
-    int i = tid - head * head_dim;
+    int head = tid / rotary_dim;
+    int i = tid - head * rotary_dim;
     int ci = i < half_dim ? i : i - half_dim;
     int src = i < half_dim ? i + half_dim : i - half_dim;
 

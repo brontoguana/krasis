@@ -236,7 +236,8 @@ def _extract_chat_template(tokenizer_cfg: Dict[str, Any], model_dir: Optional[Pa
 def _collect_eos_ids(config_json: Dict[str, Any], generation_json: Dict[str, Any]) -> List[int]:
     eos_ids: List[int] = []
     seen = set()
-    for source in (generation_json, config_json):
+    text_config = config_json.get("text_config") if isinstance(config_json.get("text_config"), dict) else {}
+    for source in (generation_json, config_json, text_config):
         eos = source.get("eos_token_id")
         if eos is None:
             continue
