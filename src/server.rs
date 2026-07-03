@@ -1403,6 +1403,9 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
         }
         let mut engine_guard = state.rust_prefill.lock().unwrap();
         let engine = engine_guard.as_mut().unwrap();
+        // Warmup/calibration calls disable prefill pinning through the shared engine.
+        // Normal request prefill must not inherit that one-shot state.
+        engine.set_prefill_pinning_disabled(false);
 
         // Update HCS snapshot so prefill can use GPU-resident experts directly
         {
@@ -2899,6 +2902,9 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
         let (cache_fast, ne) = store.export_hcs_snapshot();
         engine.update_hcs_snapshot(cache_fast, ne);
     }
+    // Warmup/calibration calls disable prefill pinning through the shared engine.
+    // Raw prefill-logits requests should use the normal prefill policy.
+    engine.set_prefill_pinning_disabled(false);
 
     let (hcs_snapshot_entries, hcs_num_experts_per_layer) = {
         let store = unsafe { &*(state.gpu_store_addr as *const GpuDecodeStore) };
@@ -4758,6 +4764,9 @@ impl RustServer {
             )
         })?;
         prefill_lock_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
+        // Warmup/calibration calls disable prefill pinning through the shared engine.
+        // Benchmarks should exercise the same normal prefill path as requests.
+        engine.set_prefill_pinning_disabled(false);
 
         // Update HCS snapshot
         let t_phase = Instant::now();

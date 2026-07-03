@@ -632,6 +632,18 @@ fn kv_stage_exact_enabled() -> bool {
     )
 }
 
+fn prefill_gqa_branch_timing_enabled() -> bool {
+    std::env::var("KRASIS_PREFILL_GQA_BRANCH_TIMING")
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
+fn prefill_layer_specific_sliding_fa2_enabled() -> bool {
+    std::env::var("KRASIS_PREFILL_LAYER_SPECIFIC_SLIDING_FA2")
+        .map(|v| !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"))
+        .unwrap_or(true)
+}
+
 pub(crate) const GQA_APPEND_GAP_CHECKPOINTS: usize = 14;
 const GQA_APPEND_GAP_LABELS: [&str; GQA_APPEND_GAP_CHECKPOINTS] = [
     "after_fa2_bookkeeping",
@@ -745,6 +757,81 @@ fn prefill_hd512_q2_bc32_enabled() -> bool {
     std::env::var("KRASIS_PREFILL_HD512_Q2_BC32")
         .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(false)
+}
+
+fn prefill_prescan_accuracy_enabled() -> bool {
+    std::env::var("KRASIS_PREFILL_PRESCAN_ACCURACY")
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
+fn prefill_prescan_accuracy_detail_enabled() -> bool {
+    std::env::var("KRASIS_PREFILL_PRESCAN_ACCURACY_DETAIL")
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
+fn prefill_pinning_policy_enabled() -> bool {
+    std::env::var("KRASIS_ENABLE_PREFILL_PINNING")
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
+fn pct_u64(n: u64, d: u64) -> f64 {
+    if d == 0 {
+        0.0
+    } else {
+        n as f64 * 100.0 / d as f64
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct PrefillPrescanAccuracyLayerStats {
+    model_layer_idx: usize,
+    moe_layer_idx: usize,
+    n_experts: usize,
+    seen: bool,
+    chunks: u64,
+    prescanned_chunks: u64,
+    tokens: u64,
+    routed_slots: u64,
+    slot_hits: u64,
+    token_full_hits: u64,
+    actual_active_sum: u64,
+    predicted_active_sum: u64,
+    active_intersection_sum: u64,
+    missed_active_sum: u64,
+    extra_active_sum: u64,
+    pinned_slot_hits: u64,
+    hcs_slot_hits: u64,
+    actual_cold_active_sum: u64,
+    predicted_cold_active_sum: u64,
+    missed_cold_active_sum: u64,
+    extra_cold_active_sum: u64,
+}
+
+impl PrefillPrescanAccuracyLayerStats {
+    fn new(model_layer_idx: usize, moe_layer_idx: usize, n_experts: usize) -> Self {
+        Self {
+            model_layer_idx,
+            moe_layer_idx,
+            n_experts,
+            seen: true,
+            ..Self::default()
+        }
+    }
+
+    fn active_recall_pct(&self) -> f64 {
+        pct_u64(self.active_intersection_sum, self.actual_active_sum)
+    }
+
+    fn active_precision_pct(&self) -> f64 {
+        pct_u64(self.active_intersection_sum, self.predicted_active_sum)
+    }
+
+    fn slot_hit_pct(&self) -> f64 {
+        pct_u64(self.slot_hits, self.routed_slots)
+    }
 }
 
 fn hd512_q2_dynamic_smem_bytes(
@@ -6181,6 +6268,10 @@ pub struct PrefillEngine {
     pub last_cold_staging_failure: Option<ColdStagingFailure>,
     pub prefill_runtime_chunk_cap: Option<usize>,
     pub active_prefill_prompt_tokens: usize,
+    pub active_prefill_chunk_idx: usize,
+    pub active_prefill_chunk_start: usize,
+    pub(crate) prefill_prescan_accuracy_enabled: bool,
+    pub(crate) prefill_prescan_accuracy_stats: Vec<PrefillPrescanAccuracyLayerStats>,
     // Dense pointer-table prefetch for current-layer MoE.
     // When active, these raw pointer-table buffers were populated before the
     // layer attention ran, so MoE only waits for the copy-stream event.
@@ -6536,6 +6627,386 @@ impl PrefillEngine {
             self.prompt_hcs_num_experts_per_layer,
             self.prompt_hcs_prompt_tokens,
         ))
+    }
+
+    fn reset_prefill_prescan_accuracy_measurement(
+        &mut self,
+        prompt_tokens: usize,
+        chunk_plan: &[usize],
+    ) {
+        self.prefill_prescan_accuracy_enabled = prefill_prescan_accuracy_enabled();
+        self.prefill_prescan_accuracy_stats.clear();
+        if self.prefill_prescan_accuracy_enabled {
+            eprintln!(
+                "[PREFILL-PRESCAN] enabled prompt_tokens={} chunks={} chunk_plan={:?} note=embedding_prescan_vs_real_prefill_routes",
+                prompt_tokens,
+                chunk_plan.len(),
+                chunk_plan
+            );
+        }
+    }
+
+    fn ensure_prefill_prescan_accuracy_stats(
+        &mut self,
+        stats_idx: usize,
+        model_layer_idx: usize,
+        prescan_layer_idx: usize,
+        n_experts: usize,
+    ) {
+        if self.prefill_prescan_accuracy_stats.len() <= stats_idx {
+            self.prefill_prescan_accuracy_stats
+                .resize_with(stats_idx + 1, PrefillPrescanAccuracyLayerStats::default);
+        }
+        if !self.prefill_prescan_accuracy_stats[stats_idx].seen {
+            self.prefill_prescan_accuracy_stats[stats_idx] =
+                PrefillPrescanAccuracyLayerStats::new(
+                    model_layer_idx,
+                    prescan_layer_idx,
+                    n_experts,
+                );
+        }
+    }
+
+    fn moe_ordinal_for_model_layer(&self, model_layer_idx: usize) -> Option<usize> {
+        self.layer_weights
+            .iter()
+            .enumerate()
+            .filter(|(_, layer)| layer.moe_gate_ptr != 0)
+            .position(|(idx, _)| idx == model_layer_idx)
+    }
+
+    fn model_layer_for_moe_ordinal(&self, moe_ordinal: usize) -> Option<usize> {
+        self.layer_weights
+            .iter()
+            .enumerate()
+            .filter(|(_, layer)| layer.moe_gate_ptr != 0)
+            .nth(moe_ordinal)
+            .map(|(idx, _)| idx)
+    }
+
+    fn prefill_prescan_expert_is_pinned_or_hcs(
+        &self,
+        hcs_layer_idx: usize,
+        pinning_layer_idx: usize,
+        eid: usize,
+    ) -> bool {
+        if self.expert_lookup(hcs_layer_idx, eid).is_some() {
+            return true;
+        }
+        self.pinning_active
+            && pinning_layer_idx < self.pinned_expert_offsets.len()
+            && eid < self.pinned_expert_offsets[pinning_layer_idx].len()
+            && self.pinned_expert_offsets[pinning_layer_idx][eid].is_some()
+    }
+
+    fn prefill_prescan_expert_is_pinned(&self, pinning_layer_idx: usize, eid: usize) -> bool {
+        self.pinning_active
+            && pinning_layer_idx < self.pinned_expert_offsets.len()
+            && eid < self.pinned_expert_offsets[pinning_layer_idx].len()
+            && self.pinned_expert_offsets[pinning_layer_idx][eid].is_some()
+    }
+
+    fn record_prefill_prescan_accuracy(
+        &mut self,
+        model_layer_idx: usize,
+        moe_layer_idx: Option<usize>,
+        m: usize,
+        topk: usize,
+        n_experts: usize,
+        topk_ids_ptr: u64,
+        expert_counts: &[i32],
+    ) -> Result<(), String> {
+        if !self.prefill_prescan_accuracy_enabled {
+            return Ok(());
+        }
+        let Some(hcs_layer_idx) = moe_layer_idx else {
+            return Ok(());
+        };
+        let prescan_layer_idx = self
+            .moe_ordinal_for_model_layer(model_layer_idx)
+            .unwrap_or(hcs_layer_idx);
+        if m == 0 || topk == 0 || n_experts == 0 {
+            return Ok(());
+        }
+
+        let chunk_idx = self.active_prefill_chunk_idx;
+        let chunk_start = self.active_prefill_chunk_start;
+        let chunk_end = chunk_start.saturating_add(m);
+        let predicted_list = self
+            .prescan_active_experts
+            .get(prescan_layer_idx)
+            .and_then(|chunks| chunks.get(chunk_idx))
+            .cloned()
+            .unwrap_or_default();
+        let chunk_fully_prescanned = self.prescan_token_count >= chunk_end;
+        let prescan_available = chunk_fully_prescanned && !predicted_list.is_empty();
+
+        let mut predicted_set = vec![false; n_experts];
+        for eid in predicted_list {
+            if eid < n_experts {
+                predicted_set[eid] = true;
+            }
+        }
+        let predicted_active = predicted_set.iter().filter(|&&v| v).count();
+
+        let mut actual_set = vec![false; n_experts];
+        for (eid, &count) in expert_counts.iter().take(n_experts).enumerate() {
+            if count > 0 {
+                actual_set[eid] = true;
+            }
+        }
+        let actual_active = actual_set.iter().filter(|&&v| v).count();
+
+        let mut intersection = 0usize;
+        let mut missed = 0usize;
+        let mut extra = 0usize;
+        let mut missed_sample = Vec::new();
+        let mut extra_sample = Vec::new();
+        for eid in 0..n_experts {
+            match (actual_set[eid], predicted_set[eid]) {
+                (true, true) => intersection += 1,
+                (true, false) => {
+                    missed += 1;
+                    if missed_sample.len() < 8 {
+                        missed_sample.push(eid);
+                    }
+                }
+                (false, true) => {
+                    extra += 1;
+                    if extra_sample.len() < 8 {
+                        extra_sample.push(eid);
+                    }
+                }
+                (false, false) => {}
+            }
+        }
+
+        let total_topk = m
+            .checked_mul(topk)
+            .ok_or_else(|| format!("prescan accuracy topk length overflow m={m} topk={topk}"))?;
+        let mut h_topk_ids = vec![0i32; total_topk];
+        unsafe {
+            let err = cuda_sys::lib().cuMemcpyDtoH_v2(
+                h_topk_ids.as_mut_ptr() as *mut _,
+                topk_ids_ptr,
+                total_topk * std::mem::size_of::<i32>(),
+            );
+            if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!("prescan accuracy topk D2H failed: {:?}", err));
+            }
+        }
+
+        let mut routed_slots = 0usize;
+        let mut slot_hits = 0usize;
+        let mut token_full_hits = 0usize;
+        let mut pinned_slot_hits = 0usize;
+        let mut hcs_slot_hits = 0usize;
+        for token in 0..m {
+            let mut token_valid = 0usize;
+            let mut token_all_hit = true;
+            for k in 0..topk {
+                let raw = h_topk_ids[token * topk + k];
+                if raw < 0 || raw as usize >= n_experts {
+                    token_all_hit = false;
+                    continue;
+                }
+                let eid = raw as usize;
+                token_valid += 1;
+                routed_slots += 1;
+                if predicted_set[eid] {
+                    slot_hits += 1;
+                } else {
+                    token_all_hit = false;
+                }
+                if self.prefill_prescan_expert_is_pinned(prescan_layer_idx, eid) {
+                    pinned_slot_hits += 1;
+                }
+                if self.expert_lookup(hcs_layer_idx, eid).is_some() {
+                    hcs_slot_hits += 1;
+                }
+            }
+            if token_valid == topk && token_all_hit {
+                token_full_hits += 1;
+            }
+        }
+
+        let mut actual_cold = 0usize;
+        let mut predicted_cold = 0usize;
+        let mut missed_cold = 0usize;
+        let mut extra_cold = 0usize;
+        for eid in 0..n_experts {
+            let resident =
+                self.prefill_prescan_expert_is_pinned_or_hcs(hcs_layer_idx, prescan_layer_idx, eid);
+            let actual_is_cold = actual_set[eid] && !resident;
+            let predicted_is_cold = predicted_set[eid] && !resident;
+            if actual_is_cold {
+                actual_cold += 1;
+            }
+            if predicted_is_cold {
+                predicted_cold += 1;
+            }
+            match (actual_is_cold, predicted_is_cold) {
+                (true, false) => missed_cold += 1,
+                (false, true) => extra_cold += 1,
+                _ => {}
+            }
+        }
+
+        self.ensure_prefill_prescan_accuracy_stats(
+            model_layer_idx,
+            model_layer_idx,
+            prescan_layer_idx,
+            n_experts,
+        );
+        let stats = &mut self.prefill_prescan_accuracy_stats[model_layer_idx];
+        stats.chunks += 1;
+        if prescan_available {
+            stats.prescanned_chunks += 1;
+        }
+        stats.tokens += m as u64;
+        stats.routed_slots += routed_slots as u64;
+        stats.slot_hits += slot_hits as u64;
+        stats.token_full_hits += token_full_hits as u64;
+        stats.actual_active_sum += actual_active as u64;
+        stats.predicted_active_sum += predicted_active as u64;
+        stats.active_intersection_sum += intersection as u64;
+        stats.missed_active_sum += missed as u64;
+        stats.extra_active_sum += extra as u64;
+        stats.pinned_slot_hits += pinned_slot_hits as u64;
+        stats.hcs_slot_hits += hcs_slot_hits as u64;
+        stats.actual_cold_active_sum += actual_cold as u64;
+        stats.predicted_cold_active_sum += predicted_cold as u64;
+        stats.missed_cold_active_sum += missed_cold as u64;
+        stats.extra_cold_active_sum += extra_cold as u64;
+
+        if prefill_prescan_accuracy_detail_enabled() {
+            eprintln!(
+                "[PREFILL-PRESCAN] layer={} moe_layer={} chunk={} prescan_available={} tokens={} pred_active={} actual_active={} intersection={} missed={} extra={} active_recall={:.1}% active_precision={:.1}% slot_coverage={:.1}% token_full_hit={:.1}% pinned_slot_coverage={:.1}% hcs_slot_coverage={:.1}% predicted_cold={} actual_cold={} missed_cold={} extra_cold={} missed_sample={:?} extra_sample={:?}",
+                model_layer_idx,
+                prescan_layer_idx,
+                chunk_idx,
+                prescan_available,
+                m,
+                predicted_active,
+                actual_active,
+                intersection,
+                missed,
+                extra,
+                pct_u64(intersection as u64, actual_active as u64),
+                pct_u64(intersection as u64, predicted_active as u64),
+                pct_u64(slot_hits as u64, routed_slots as u64),
+                pct_u64(token_full_hits as u64, m as u64),
+                pct_u64(pinned_slot_hits as u64, routed_slots as u64),
+                pct_u64(hcs_slot_hits as u64, routed_slots as u64),
+                predicted_cold,
+                actual_cold,
+                missed_cold,
+                extra_cold,
+                missed_sample,
+                extra_sample,
+            );
+        }
+
+        Ok(())
+    }
+
+    fn report_prefill_prescan_accuracy(&self, prompt_tokens: usize) {
+        if !self.prefill_prescan_accuracy_enabled {
+            return;
+        }
+        let seen: Vec<&PrefillPrescanAccuracyLayerStats> = self
+            .prefill_prescan_accuracy_stats
+            .iter()
+            .filter(|stats| stats.seen && stats.chunks > 0)
+            .collect();
+        if seen.is_empty() {
+            eprintln!(
+                "[PREFILL-PRESCAN] summary prompt_tokens={} layers=0 routed_slots=0 reason=no_moe_routes_recorded",
+                prompt_tokens
+            );
+            return;
+        }
+
+        let mut total = PrefillPrescanAccuracyLayerStats::default();
+        for stats in &seen {
+            total.chunks += stats.chunks;
+            total.prescanned_chunks += stats.prescanned_chunks;
+            total.tokens += stats.tokens;
+            total.routed_slots += stats.routed_slots;
+            total.slot_hits += stats.slot_hits;
+            total.token_full_hits += stats.token_full_hits;
+            total.actual_active_sum += stats.actual_active_sum;
+            total.predicted_active_sum += stats.predicted_active_sum;
+            total.active_intersection_sum += stats.active_intersection_sum;
+            total.missed_active_sum += stats.missed_active_sum;
+            total.extra_active_sum += stats.extra_active_sum;
+            total.pinned_slot_hits += stats.pinned_slot_hits;
+            total.hcs_slot_hits += stats.hcs_slot_hits;
+            total.actual_cold_active_sum += stats.actual_cold_active_sum;
+            total.predicted_cold_active_sum += stats.predicted_cold_active_sum;
+            total.missed_cold_active_sum += stats.missed_cold_active_sum;
+            total.extra_cold_active_sum += stats.extra_cold_active_sum;
+        }
+
+        let worst_slot = seen.iter().min_by(|a, b| {
+            a.slot_hit_pct()
+                .partial_cmp(&b.slot_hit_pct())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let worst_recall = seen.iter().min_by(|a, b| {
+            a.active_recall_pct()
+                .partial_cmp(&b.active_recall_pct())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let avg_actual_active = total.actual_active_sum as f64 / total.chunks.max(1) as f64;
+        let avg_predicted_active = total.predicted_active_sum as f64 / total.chunks.max(1) as f64;
+        eprintln!(
+            "[PREFILL-PRESCAN] summary prompt_tokens={} layers={} chunks={} prescanned_chunks={} active_recall={:.1}% active_precision={:.1}% slot_coverage={:.1}% token_full_hit={:.1}% pinned_slot_coverage={:.1}% hcs_slot_coverage={:.1}% avg_actual_active={:.1} avg_predicted_active={:.1} missed_active={} extra_active={} actual_cold={} predicted_cold={} missed_cold={} extra_cold={} worst_slot_layer={} worst_slot_coverage={:.1}% worst_recall_layer={} worst_active_recall={:.1}%",
+            prompt_tokens,
+            seen.len(),
+            total.chunks,
+            total.prescanned_chunks,
+            pct_u64(total.active_intersection_sum, total.actual_active_sum),
+            pct_u64(total.active_intersection_sum, total.predicted_active_sum),
+            pct_u64(total.slot_hits, total.routed_slots),
+            pct_u64(total.token_full_hits, total.tokens),
+            pct_u64(total.pinned_slot_hits, total.routed_slots),
+            pct_u64(total.hcs_slot_hits, total.routed_slots),
+            avg_actual_active,
+            avg_predicted_active,
+            total.missed_active_sum,
+            total.extra_active_sum,
+            total.actual_cold_active_sum,
+            total.predicted_cold_active_sum,
+            total.missed_cold_active_sum,
+            total.extra_cold_active_sum,
+            worst_slot.map(|s| s.model_layer_idx).unwrap_or(usize::MAX),
+            worst_slot.map(|s| s.slot_hit_pct()).unwrap_or(0.0),
+            worst_recall.map(|s| s.model_layer_idx).unwrap_or(usize::MAX),
+            worst_recall.map(|s| s.active_recall_pct()).unwrap_or(0.0),
+        );
+
+        for stats in seen {
+            eprintln!(
+                "[PREFILL-PRESCAN] layer_summary layer={} moe_layer={} experts={} chunks={} active_recall={:.1}% active_precision={:.1}% slot_coverage={:.1}% token_full_hit={:.1}% avg_actual_active={:.1} avg_predicted_active={:.1} missed_active={} extra_active={} actual_cold={} predicted_cold={} missed_cold={} extra_cold={}",
+                stats.model_layer_idx,
+                stats.moe_layer_idx,
+                stats.n_experts,
+                stats.chunks,
+                stats.active_recall_pct(),
+                stats.active_precision_pct(),
+                stats.slot_hit_pct(),
+                pct_u64(stats.token_full_hits, stats.tokens),
+                stats.actual_active_sum as f64 / stats.chunks.max(1) as f64,
+                stats.predicted_active_sum as f64 / stats.chunks.max(1) as f64,
+                stats.missed_active_sum,
+                stats.extra_active_sum,
+                stats.actual_cold_active_sum,
+                stats.predicted_cold_active_sum,
+                stats.missed_cold_active_sum,
+                stats.extra_cold_active_sum,
+            );
+        }
     }
 
     pub fn validate_expert_hqq_runtime_diagnostic_availability(
@@ -13699,10 +14170,11 @@ impl PrefillEngine {
         }
         let mut max_cold = 0usize;
         for (mi, layer_chunks) in self.prescan_active_experts.iter().enumerate() {
+            let hcs_layer_idx = self.model_layer_for_moe_ordinal(mi).unwrap_or(mi);
             for active in layer_chunks {
                 let mut cold = 0usize;
                 for &eid in active {
-                    if self.expert_lookup(mi, eid).is_some() {
+                    if self.expert_lookup(hcs_layer_idx, eid).is_some() {
                         continue;
                     }
                     let pinned = self.pinning_active
@@ -14510,7 +14982,7 @@ impl PrefillEngine {
 
     fn should_prefetch_dense_ptr_table(
         &self,
-        moe_layer_idx: usize,
+        prescan_layer_idx: usize,
         chunk_idx: usize,
         chunk_start: usize,
         m: usize,
@@ -14528,7 +15000,7 @@ impl PrefillEngine {
         let chunk_fully_prescanned = self.prescan_token_count >= chunk_end;
         let measured_active = self
             .prescan_active_experts
-            .get(moe_layer_idx)
+            .get(prescan_layer_idx)
             .and_then(|chunks| chunks.get(chunk_idx))
             .map(|active| active.len())
             .filter(|&active| active > 0);
@@ -14563,13 +15035,16 @@ impl PrefillEngine {
         {
             return Ok(());
         }
-        let Some(moe_layer_idx) = self.layer_weights[layer_idx].moe_layer_idx else {
+        let Some(hcs_layer_idx) = self.layer_weights[layer_idx].moe_layer_idx else {
             return Ok(());
         };
+        let prescan_layer_idx = self
+            .moe_ordinal_for_model_layer(layer_idx)
+            .unwrap_or(hcs_layer_idx);
         let n_experts = self.layer_weights[layer_idx].moe_num_experts;
         let topk = self.layer_weights[layer_idx].moe_topk;
         if !self.should_prefetch_dense_ptr_table(
-            moe_layer_idx,
+            prescan_layer_idx,
             chunk_idx,
             chunk_start,
             m,
@@ -14587,7 +15062,7 @@ impl PrefillEngine {
 
         let Some(moe_expert_count) = self
             .moe_layers
-            .get(moe_layer_idx)
+            .get(hcs_layer_idx)
             .and_then(|o| o.as_ref())
             .map(|data| data.experts.len())
         else {
@@ -14595,13 +15070,13 @@ impl PrefillEngine {
         };
         let mut needed_cold_slots = 0usize;
         for eid in 0..n_experts.min(moe_expert_count) {
-            if self.expert_lookup(moe_layer_idx, eid).is_some() {
+            if self.expert_lookup(hcs_layer_idx, eid).is_some() {
                 continue;
             }
             let pinned = self.pinning_active
-                && moe_layer_idx < self.pinned_expert_offsets.len()
-                && eid < self.pinned_expert_offsets[moe_layer_idx].len()
-                && self.pinned_expert_offsets[moe_layer_idx][eid].is_some();
+                && prescan_layer_idx < self.pinned_expert_offsets.len()
+                && eid < self.pinned_expert_offsets[prescan_layer_idx].len()
+                && self.pinned_expert_offsets[prescan_layer_idx][eid].is_some();
             if !pinned {
                 needed_cold_slots += 1;
             }
@@ -14619,7 +15094,7 @@ impl PrefillEngine {
                 vram_ledger_log!(
                     "VRAM LEDGER prefill_ptr_prefetch_skip layer={} moe_layer={} chunk={} needed_cold_slots={} cold_expert_bytes={} cold_staging_span={} limit={} reason=cold_staging_span_i32_limit",
                     layer_idx,
-                    moe_layer_idx,
+                    hcs_layer_idx,
                     chunk_idx,
                     needed_cold_slots,
                     self.cold_expert_bytes,
@@ -14644,7 +15119,7 @@ impl PrefillEngine {
                     vram_ledger_log!(
                         "VRAM LEDGER prefill_ptr_prefetch_skip layer={} moe_layer={} needed_cold_slots={} reason=cold_staging_capacity error={}",
                         layer_idx,
-                        moe_layer_idx,
+                        hcs_layer_idx,
                         needed_cold_slots,
                         err,
                     );
@@ -14672,7 +15147,7 @@ impl PrefillEngine {
         } else {
             self.allocate_raw_ptr_table(ptrs_bytes, "dense pointer-table prefetch")?
         };
-        let Some(moe_data) = self.moe_layers.get(moe_layer_idx).and_then(|o| o.as_ref()) else {
+        let Some(moe_data) = self.moe_layers.get(hcs_layer_idx).and_then(|o| o.as_ref()) else {
             if !reuse_ptr_tables {
                 Self::free_raw_ptr_table(&mut ptrs);
             }
@@ -14696,7 +15171,7 @@ impl PrefillEngine {
         let mut cold_h2d_ms = 0.0f64;
 
         for eid in 0..n_experts {
-            if let Some((hw1p, hw1s, hw2p, hw2s)) = self.expert_lookup(moe_layer_idx, eid) {
+            if let Some((hw1p, hw1s, hw2p, hw2s)) = self.expert_lookup(hcs_layer_idx, eid) {
                 self.h_expert_w1_ptrs[eid] = hw1p;
                 self.h_expert_w1s_ptrs[eid] = hw1s;
                 self.h_expert_w2_ptrs[eid] = hw2p;
@@ -14706,10 +15181,10 @@ impl PrefillEngine {
             }
 
             let pin_offset = if self.pinning_active
-                && moe_layer_idx < self.pinned_expert_offsets.len()
-                && eid < self.pinned_expert_offsets[moe_layer_idx].len()
+                && prescan_layer_idx < self.pinned_expert_offsets.len()
+                && eid < self.pinned_expert_offsets[prescan_layer_idx].len()
             {
-                self.pinned_expert_offsets[moe_layer_idx][eid]
+                self.pinned_expert_offsets[prescan_layer_idx][eid]
             } else {
                 None
             };
@@ -14850,7 +15325,7 @@ impl PrefillEngine {
             vram_ledger_log!(
                 "VRAM LEDGER prefill_ptr_prefetch layer={} moe_layer={} chunk={} hcs={} pinned={} cold={} total={} needed_cold_slots={} max_cold_experts={}",
                 layer_idx,
-                moe_layer_idx,
+                hcs_layer_idx,
                 chunk_idx,
                 hcs_count,
                 pinned_count,
@@ -18776,6 +19251,10 @@ impl PrefillEngine {
         self.d_fla_o = None;
         self.release_prefill_kv_temp();
         self.active_prefill_prompt_tokens = 0;
+        self.active_prefill_chunk_idx = 0;
+        self.active_prefill_chunk_start = 0;
+        self.prefill_prescan_accuracy_enabled = false;
+        self.prefill_prescan_accuracy_stats.clear();
         // Trim cudarc's memory pool so freed memory returns to the OS immediately.
         // Without this, cudarc holds the freed cold_staging/shared_scratch in its pool,
         // and HCS reload can't use that VRAM.
@@ -18797,6 +19276,12 @@ impl PrefillEngine {
     }
 
     fn release_pinning_pool(&mut self) {
+        self.release_pinning_pool_buffers();
+        self.prescan_active_experts.clear();
+        self.prescan_token_count = 0;
+    }
+
+    fn release_pinning_pool_buffers(&mut self) {
         if self.pinning_pool_ptr != 0 {
             unsafe {
                 cuda_sys::lib().cuMemFree_v2(self.pinning_pool_ptr);
@@ -18807,8 +19292,6 @@ impl PrefillEngine {
         self.pinning_pool_expert_bytes = 0;
         self.pinned_expert_offsets.clear();
         self.pinning_active = false;
-        self.prescan_active_experts.clear();
-        self.prescan_token_count = 0;
     }
 
     pub fn run_prefill(
@@ -18875,6 +19358,7 @@ impl PrefillEngine {
         let chunk_plan = build_prefill_chunk_plan(total_m, max_chunk);
         let num_chunks = chunk_plan.len();
         let chunk_size = chunk_plan.iter().copied().max().unwrap_or(0);
+        self.reset_prefill_prescan_accuracy_measurement(total_m, &chunk_plan);
         if liveness_timing {
             prefill_liveness!(
                 "run_start total_tokens={} scratch_max_tokens={} max_chunk={} chunk_size={} num_chunks={} chunk_plan={:?} expert_bits={} shared_expert_bits={} hidden_size={} layers={}",
@@ -19004,7 +19488,11 @@ impl PrefillEngine {
         let pinning_enabled = use_fused
             && self.config.n_routed_experts > 0
             && !self.prefill_pinning_disabled
+            && prefill_pinning_policy_enabled()
             && std::env::var("KRASIS_NO_PINNING").is_err();
+        let prescan_enabled = use_fused
+            && self.config.n_routed_experts > 0
+            && (pinning_enabled || self.prefill_prescan_accuracy_enabled);
         if debug_prefill {
             let hcs_cached_experts = self.hcs_cached_expert_count();
             eprintln!(
@@ -19020,6 +19508,15 @@ impl PrefillEngine {
                 hcs_cached_experts,
                 self.hcs_num_experts_per_layer,
             );
+            if use_fused
+                && self.config.n_routed_experts > 0
+                && !pinning_enabled
+                && !self.prefill_prescan_accuracy_enabled
+            {
+                eprintln!(
+                    "[PREFILL-DEBUG] optional prefill pinning disabled by default; set KRASIS_ENABLE_PREFILL_PINNING=1 to evaluate it"
+                );
+            }
         }
         if vram_ledger_enabled() {
             vram_ledger_log!(
@@ -19041,7 +19538,7 @@ impl PrefillEngine {
             );
         }
 
-        if pinning_enabled {
+        if prescan_enabled {
             // Embed the full prompt (or chunk-by-chunk for pre-scan)
             // We use chunk_size chunks to stay within scratch buffer limits
             let prescan_m = std::cmp::min(total_m, self.scratch.max_tokens);
@@ -19074,7 +19571,9 @@ impl PrefillEngine {
                             >= active_layers
                                 .saturating_mul(self.config.n_routed_experts)
                                 .saturating_mul(3);
-                    let pinned_per_layer = if dense_active {
+                    let pinned_per_layer = if !pinning_enabled {
+                        0
+                    } else if dense_active {
                         if stderr_debug_enabled() || debug_prefill {
                             eprintln!(
                                 "[PREFILL] Skipping optional pinning: pre-scan is dense ({:.1}/{} active experts/layer)",
@@ -19358,6 +19857,8 @@ impl PrefillEngine {
             let chunk_end = std::cmp::min(chunk_start + planned_chunk_tokens, total_m);
             let m = chunk_end.saturating_sub(chunk_start);
             let chunk_tokens = &token_ids[chunk_start..chunk_end];
+            self.active_prefill_chunk_idx = chunk_idx;
+            self.active_prefill_chunk_start = chunk_start;
             let chunk_tok0 = chunk_tokens.first().copied().unwrap_or(0) as usize;
             let chunk_last_pos = chunk_end.saturating_sub(1);
             let chunk_last_tok = chunk_tokens.last().copied().unwrap_or(0) as usize;
@@ -22083,6 +22584,7 @@ impl PrefillEngine {
 
         // 6. Sync
         self.stream_sync()?;
+        self.report_prefill_prescan_accuracy(total_m);
 
         // Free pinning pool — VRAM is released for decode HCS allocation.
         self.release_pinning_pool();
@@ -27660,9 +28162,8 @@ impl PrefillEngine {
             1
         };
         let custom_tiled_timing = timing.filter(|t| {
+            let _ = t.branch_idx;
             self.gqa_timing_enabled.get()
-                && t.branch_idx == GQA_BRANCH_CUSTOM_NO_FA2
-                && !t.fa2_supports_head_dim
         });
         if let Some(timing) = custom_tiled_timing {
             let event = self.gqa_timing_event_start("custom_tiled entry")?;
@@ -28108,7 +28609,9 @@ impl PrefillEngine {
         let q_dim = num_q_heads * head_dim;
         let kv_dim = num_kv_heads * head_dim;
         let reference_layer1_trace = self.reference_debug_trace_enabled && layer_idx == 1;
-        let gqa_debt_timing = gt && self.is_gemma_hqq4_kv_timing_target(layer_idx);
+        let gqa_debt_timing =
+            gt && (prefill_gqa_branch_timing_enabled()
+                || self.is_gemma_hqq4_kv_timing_target(layer_idx));
         let mut attention_branch_idx = GQA_BRANCH_CUSTOM_NO_FA2;
         let mut attention_used_fixed_fa2 = false;
 
@@ -28829,7 +29332,8 @@ impl PrefillEngine {
             && ((ring_window_decode_layer && !use_ring_fa2_window_prefill)
                 || (self.prefill_kv_active
                     && (gemma_custom_window_prefill_enabled()
-                        || layer_specific_sliding_gqa_shape)));
+                        || (layer_specific_sliding_gqa_shape
+                            && !prefill_layer_specific_sliding_fa2_enabled()))));
         if use_ring_fa2_window_prefill {
             if start_pos == 0 {
                 attn_path = "fa2_ring_window_initial";
@@ -29061,7 +29565,15 @@ impl PrefillEngine {
                 head_dim,
                 sm_scale,
                 sliding_window,
-                None,
+                if gqa_debt_timing {
+                    Some(CustomTiledTiming {
+                        layer_idx,
+                        branch_idx: attention_branch_idx,
+                        fa2_supports_head_dim,
+                    })
+                } else {
+                    None
+                },
             )?;
             if gqa_debt_timing {
                 self.record_gqa_attention_branch_debt_checkpoint(attention_branch_idx, false)?;
@@ -30154,7 +30666,15 @@ impl PrefillEngine {
                     head_dim,
                     sm_scale,
                     0,
-                    None,
+                    if gqa_debt_timing {
+                        Some(CustomTiledTiming {
+                            layer_idx,
+                            branch_idx: attention_branch_idx,
+                            fa2_supports_head_dim,
+                        })
+                    } else {
+                        None
+                    },
                 )?;
                 if gqa_debt_timing {
                     self.record_gqa_attention_branch_debt_checkpoint(attention_branch_idx, false)?;
@@ -30186,11 +30706,15 @@ impl PrefillEngine {
                 head_dim,
                 sm_scale,
                 0,
-                Some(CustomTiledTiming {
-                    layer_idx,
-                    branch_idx: attention_branch_idx,
-                    fa2_supports_head_dim,
-                }),
+                if gqa_debt_timing {
+                    Some(CustomTiledTiming {
+                        layer_idx,
+                        branch_idx: attention_branch_idx,
+                        fa2_supports_head_dim,
+                    })
+                } else {
+                    None
+                },
             )?;
             if gqa_debt_timing {
                 self.record_gqa_attention_branch_debt_checkpoint(attention_branch_idx, false)?;
@@ -30526,19 +31050,16 @@ impl PrefillEngine {
             let mut p8 = self.kv_max_seq as i32;
             let mut p9 = start_pos as i32;
             let mut p10 = self.polar4_norm_correction_mode;
-            let time_direct_gemma_hqq4_compressed_kernel = gt
-                && (is_k4 || is_k6v6)
+            let time_direct_compressed_append_kernel = gt
                 && !self.prefill_kv_active
-                && self.is_gemma4_model()
                 && !self.kv_append_timing_start_event.is_null()
-                && !self.kv_append_timing_stop_event.is_null()
-                && lw.hqq_gqa.as_ref().map_or(false, |hqq| hqq.nbits == 4);
+                && !self.kv_append_timing_stop_event.is_null();
             if gqa_debt_timing {
                 self.record_gqa_append_gap_checkpoint(GQA_GAP_DIRECT_K4_ARG_SETUP)?;
                 self.record_gqa_append_gap_checkpoint(GQA_GAP_BEFORE_APPEND_START_EVENT)?;
             }
             unsafe {
-                if time_direct_gemma_hqq4_compressed_kernel {
+                if time_direct_compressed_append_kernel {
                     let err = cuda_sys::lib()
                         .cuEventRecord(self.kv_append_timing_start_event, self.stream);
                     if err != cuda_sys::CUresult::CUDA_SUCCESS {
@@ -30581,7 +31102,7 @@ impl PrefillEngine {
                         &mut p10 as *mut _ as *mut std::ffi::c_void,
                     ],
                 )?;
-                if time_direct_gemma_hqq4_compressed_kernel {
+                if time_direct_compressed_append_kernel {
                     let err = cuda_sys::lib()
                         .cuEventRecord(self.kv_append_timing_stop_event, self.stream);
                     if err != cuda_sys::CUresult::CUDA_SUCCESS {
@@ -30618,15 +31139,13 @@ impl PrefillEngine {
             } else {
                 self.kernels.kv_cache_append
             };
-            let time_stage_exact_gemma_hqq4_k6_fp8_append_kernel = gt
+            let time_stage_exact_fp8_append_kernel = gt
                 && self.kv_format == 1
                 && self.prefill_kv_active
-                && self.decode_kv_format == 7
-                && self.is_gemma_hqq4_kv_timing_target(layer_idx)
                 && !self.kv_append_timing_start_event.is_null()
                 && !self.kv_append_timing_stop_event.is_null();
             unsafe {
-                if time_stage_exact_gemma_hqq4_k6_fp8_append_kernel {
+                if time_stage_exact_fp8_append_kernel {
                     self.record_gqa_append_gap_checkpoint(GQA_GAP_BEFORE_APPEND_START_EVENT)?;
                     let err = cuda_sys::lib()
                         .cuEventRecord(self.kv_append_timing_start_event, self.stream);
@@ -30653,7 +31172,7 @@ impl PrefillEngine {
                         &mut k7 as *mut _ as *mut std::ffi::c_void,
                     ],
                 )?;
-                if time_stage_exact_gemma_hqq4_k6_fp8_append_kernel {
+                if time_stage_exact_fp8_append_kernel {
                     let err = cuda_sys::lib()
                         .cuEventRecord(self.kv_append_timing_stop_event, self.stream);
                     if err != cuda_sys::CUresult::CUDA_SUCCESS {
@@ -43241,6 +43760,15 @@ impl PrefillEngine {
             self.t_moe_route_d2h
                 .set(self.t_moe_route_d2h.get() + t.elapsed().as_secs_f64() * 1000.0);
         }
+        self.record_prefill_prescan_accuracy(
+            layer_idx,
+            moe_layer_idx,
+            m,
+            topk,
+            n_experts,
+            topk_ids_ptr,
+            &h_expert_counts,
+        )?;
         if diag_moe && layer_idx == 0 {
             eprintln!(
                 "[DIAG MoE L0] selective DMA: {}/{} experts active, total_sorted={}",
@@ -43280,7 +43808,10 @@ impl PrefillEngine {
             .enumerate()
             .filter_map(|(eid, &cnt)| if cnt > 0 { Some(eid) } else { None })
             .collect();
-        let mi = moe_layer_idx.unwrap_or(0);
+        let hcs_layer_idx = moe_layer_idx.unwrap_or(layer_idx);
+        let pinning_layer_idx = self
+            .moe_ordinal_for_model_layer(layer_idx)
+            .unwrap_or(hcs_layer_idx);
         let mut cold_slots_needed = 0usize;
         if self.d_expert_w1_ptrs.is_some() && !prefill_disable_ptr_table() {
             let has_moe_data = moe_layer_idx
@@ -43289,14 +43820,14 @@ impl PrefillEngine {
                 .is_some();
             if has_moe_data {
                 for &eid in &active {
-                    if self.expert_lookup(mi, eid).is_some() {
+                    if self.expert_lookup(hcs_layer_idx, eid).is_some() {
                         continue;
                     }
                     let pin_offset = if self.pinning_active
-                        && mi < self.pinned_expert_offsets.len()
-                        && eid < self.pinned_expert_offsets[mi].len()
+                        && pinning_layer_idx < self.pinned_expert_offsets.len()
+                        && eid < self.pinned_expert_offsets[pinning_layer_idx].len()
                     {
-                        self.pinned_expert_offsets[mi][eid]
+                        self.pinned_expert_offsets[pinning_layer_idx][eid]
                     } else {
                         None
                     };
@@ -43452,7 +43983,7 @@ impl PrefillEngine {
 
             for &eid in &active {
                 // Try prefill cache + HCS first (zero copy — point directly into VRAM)
-                if let Some((hw1p, hw1s, hw2p, hw2s)) = self.expert_lookup(mi, eid) {
+                if let Some((hw1p, hw1s, hw2p, hw2s)) = self.expert_lookup(hcs_layer_idx, eid) {
                     self.h_expert_w1_ptrs[eid] = hw1p;
                     self.h_expert_w1s_ptrs[eid] = hw1s;
                     self.h_expert_w2_ptrs[eid] = hw2p;
@@ -43462,10 +43993,10 @@ impl PrefillEngine {
                 }
 
                 let pin_offset = if self.pinning_active
-                    && mi < self.pinned_expert_offsets.len()
-                    && eid < self.pinned_expert_offsets[mi].len()
+                    && pinning_layer_idx < self.pinned_expert_offsets.len()
+                    && eid < self.pinned_expert_offsets[pinning_layer_idx].len()
                 {
-                    self.pinned_expert_offsets[mi][eid]
+                    self.pinned_expert_offsets[pinning_layer_idx][eid]
                 } else {
                     None
                 };
@@ -54964,7 +55495,7 @@ impl PrefillEngine {
     /// Allocate expert pinning pool and fill with hottest experts from pre-scan data.
     /// Returns the number of experts pinned per layer.
     fn allocate_pinning_pool(&mut self, prescan_counts: &[Vec<u32>]) -> Result<usize, String> {
-        self.release_pinning_pool();
+        self.release_pinning_pool_buffers();
         if prescan_counts.is_empty() {
             return Ok(0);
         }
@@ -57579,9 +58110,18 @@ pub fn compute_scratch_vram(config: &PrefillModelConfig) -> (usize, usize) {
         per_token += nv * dv * 2 * 3; // d_fla_u + d_fla_v_new + d_fla_o
         per_token += nv * dk * dv * 2 / 64; // d_fla_h averaged over 64-token chunks
     }
-    // d_fa2_lse: num_q_heads * max_tokens * 4 (FP32)
+    // d_fa2_lse: max per-layer q_heads * max_tokens * 4 (FP32).
+    // Step sliding-attention layers can have more q heads than the base full
+    // attention config, so derive the bound from max_gqa_q_dim when available.
     if config.num_q_heads > 0 {
-        per_token += config.num_q_heads * 4;
+        let max_q_heads = if config.head_dim > 0 {
+            config
+                .num_q_heads
+                .max(config.max_gqa_q_dim.div_ceil(config.head_dim))
+        } else {
+            config.num_q_heads
+        };
+        per_token += max_q_heads * 4;
     }
     // Mamba2 buffers: mostly fixed-size, ignore for per-token estimate
 
@@ -58415,8 +58955,18 @@ pub fn allocate_scratch_for_prompt(
             None
         },
         d_fa2_lse: if config.num_q_heads > 0 {
-            // FA2 softmax_lse: [num_heads, max_tokens] in unpadded format
-            Some(alloc_f32(config.num_q_heads * max_tokens, "fa2_lse")?)
+            // FA2 softmax_lse: [num_heads, max_tokens] in fixed-length mode.
+            // Some hybrid models use per-layer GQA dimensions (e.g. Step
+            // sliding attention), so this must be sized for the max q-head
+            // count seen by any GQA layer.
+            let max_q_heads = if config.head_dim > 0 {
+                config
+                    .num_q_heads
+                    .max(config.max_gqa_q_dim.div_ceil(config.head_dim))
+            } else {
+                config.num_q_heads
+            };
+            Some(alloc_f32(max_q_heads * max_tokens, "fa2_lse")?)
         } else {
             None
         },

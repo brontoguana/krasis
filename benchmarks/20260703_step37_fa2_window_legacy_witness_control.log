@@ -1,0 +1,60 @@
+[0;36m[1m=>[0m Waiting for selected GPUs (0) to clear...
+[0;32m[1mOK[0m Selected GPUs (0) clear.
+[0;36m[1m=>[0m Running reference test: tests/step37-flash-4-4-hqq4-k4v4-a16.conf
+[0;36m[1m=>[0m Run dir: /home/main/Documents/Claude/krasis-nemotron-dev/logs/reference-test_20260703_200148
+[0;36m[1m=>[0m Import origin check:
+krasis: /home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/__init__.py
+krasis.krasis: /home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+Reference test: Step-3.7-Flash
+Config: tests/step37-flash-4-4-hqq4-k4v4-a16.conf
+Reference data: /home/main/Documents/Claude/krasis-internal/reference-outputs/output/Step-3.7-Flash/greedy_chat_thinking_off.json
+Reference artifact state: explicit_valid (format 7, greedy_chat_thinking_off.json)
+
+============================================================
+Config: INT4/HQQ4 (step37-flash-4-4-hqq4-k4v4-a16.conf)
+============================================================
+Starting server...
+Waiting for server on port 18019...
+Server ready.
+  Conv 1: 15 input tokens, prompt: Hi...
+    PASS: first=MATCH, run=10/10, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=8/10 selected_logprob_delta=0.2734200841546155
+  Conv 2: 21 input tokens, prompt: What is 2+2?...
+    PASS: first=MATCH, run=6/6, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=8/10 selected_logprob_delta=0.095387714267343
+  Conv 3: 22 input tokens, prompt: Write a quicksort implementation in Rust...
+    PASS: first=MATCH, run=16/16, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=7/10 selected_logprob_delta=0.03537761529222133
+  Conv 4: 21 input tokens, prompt: Describe the binary chop algorithm in depth...
+    PASS: first=MATCH, run=16/16, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=8/10 selected_logprob_delta=0.14965470214426124
+  Conv 5: 785 input tokens, prompt: Summarize this Moby-Dick excerpt in one sentence:
+
+MOBY-DICK...
+    PASS: first=MATCH, run=2/16, prefill=100%/100%, decode-top-k=25%
+    first-token diagnostic: top_ids_exact=False overlap=7/10 selected_logprob_delta=0.014580843504630292
+  Conv 6: 1039 input tokens, prompt: Extract the main conflict from this War and Peace excerpt:
+
+...
+    PASS: first=MATCH, run=3/16, prefill=100%/100%, decode-top-k=50%
+    first-token diagnostic: top_ids_exact=False overlap=9/10 selected_logprob_delta=0.11627866127388886
+  Conv 7: 1549 input tokens, prompt: List three concrete details from this Les Miserables excerpt...
+    PASS: first=MATCH, run=3/16, prefill=100%/100%, decode-top-k=31%
+    first-token diagnostic: top_ids_exact=False overlap=8/10 selected_logprob_delta=0.13350388473878805
+  Conv 8: 1698 input tokens, prompt: Identify the scene and likely stakes in this Count of Monte ...
+    PASS: first=MATCH, run=3/16, prefill=0%/100%, decode-top-k=50%
+    first-token diagnostic: top_ids_exact=False overlap=7/10 selected_logprob_delta=0.32546335376244606
+Stopping server...
+
+============================================================
+REFERENCE TEST: PASS
+============================================================
+  Prompts: 8 PASS, 0 WARN, 0 FAIL (of 8)
+  Prefill argmax match: 7/8 (88%)
+  Prefill top-10 containment: 8/8 (100%)
+  First-token match: 8/8
+  Avg match run: 7.4 tokens
+  Avg decode top-k: 69.5%
+  Duration: 412.3s
+  Report: /home/main/Documents/Claude/krasis-nemotron-dev/logs/reference-test_20260703_200148/reference_test.html
+  Summary JSON: /home/main/Documents/Claude/krasis-nemotron-dev/logs/reference-test_20260703_200148/reference_test_summary.json

@@ -50,6 +50,135 @@ Notes:
   timing-off speed run (`6,656.2 / 88.68 / 143.83 tok/s`), so it remains
   rejected as a default optimization.
 
+## Prefill Gate-Prescan Accuracy Diagnostics - 2026-07-03 (RTX 5090)
+
+Purpose: measure the current embedding-only prefill gate prescan against the
+real production prefill routes before changing pinning policy. These runs used
+`KRASIS_PREFILL_PRESCAN_ACCURACY=1`; speed rows are diagnostic only and are not
+timing-off regression benchmarks.
+
+| Model | Config | Representative prompt | Active recall | Active precision | Routed slot coverage | Token full hit | Pinned slot coverage | HCS slot coverage | Diagnostic speed | Status | Logs |
+|-------|--------|----------------------:|--------------:|-----------------:|---------------------:|---------------:|---------------------:|------------------:|------------------|--------|------|
+| Qwen3-Coder-Next | `./dev speed-test`, HQQ4/k4v4 | 39,920 tokens | 99.9% | 78.1% | 99.6% | 96.5% | 0.0% | 16.8% | 7,421.4 prefill / 88.84 decode / 219.01 HTTP tok/s | MEASURED | [stdout](20260703_qcn_prefill_prescan_state_fix.log) |
+| Step-3.7-Flash | `tests/step37-flash-4-4-hqq4-k4v4-a16.conf` | 14,473 tokens | 36.6% | 99.2% | 45.5% | 6.0% | 0.9% | 16.3% | 1,304.2 prefill / 22.79 decode / 36.06 HTTP tok/s | MEASURED | [stdout](20260703_step37_prefill_prescan_mapping_fix_rerun.log) |
+
+Findings:
+- The diagnostic exposed two real prefill-state bugs before producing valid
+  data. First, `allocate_pinning_pool()` called the full pinning cleanup path
+  and cleared `prescan_active_experts` immediately after building it. Second,
+  warmup/calibration no-pinning state could remain on the shared Rust server
+  prefill engine and had to be reset before normal requests/benchmarks.
+- Step exposed a model-indexing bug: HCS and `graph.moe_layers` are indexed by
+  physical layer id, but prescan/pinning arrays are compact MoE ordinal arrays.
+  The corrected run maps physical layer `3..44` to compact MoE ordinal `0..41`
+  for prescan/pinning while keeping physical ids for HCS.
+- QCN long prompts are high-recall, but the prescan is nearly dense
+  (`avg_predicted_active=511.3` of 512 experts at 39,920 tokens). This is good
+  coverage, not a selective pinning signal.
+- Step long prompts are the opposite: very high precision but low recall
+  (`36.6%` active recall and `45.5%` routed-slot coverage at 14,473 tokens).
+  Worst layers are late MoE layers (`42/43`), with worst active recall around
+  `2.8%`. Replacing or augmenting embedding-only prescan is still justified for
+  Step-class models, but the replacement should be measurement-driven rather
+  than another statistical HCS predictor.
+
+Clean timing-off policy checks after the measurement fixes:
+
+| Model | Config | Prefill (internal) | Decode (internal) | Round trip (network) | HCS | Min free VRAM | Status | Logs |
+|-------|--------|-------------------:|------------------:|---------------------:|-----|--------------:|--------|------|
+| Qwen3-Coder-Next | Default policy after prescan fixes, current pinning default-off | 6,551.0 tok/s | 88.75 tok/s | 148.67 tok/s | 16281/24576 (66.2%) | 920 MB | DEFAULT CHECK | [stdout](20260703_qcn_prescan_policy_default_speedtest.log), [report](../logs/dev-benchmark_20260703_174636/benchmark_report.log) |
+| Qwen3-Coder-Next | Explicit no-pinning control, `KRASIS_NO_PINNING=1` | 6,863.6 tok/s | 86.56 tok/s | 148.73 tok/s | 16281/24576 (66.2%) | 920 MB | CONTROL | [stdout](20260703_qcn_prescan_fix_nopinning_speedtest.log), [report](../logs/dev-benchmark_20260703_173634/benchmark_report.log) |
+| Qwen3-Coder-Next | Accidental current pinning enabled by server reset before policy split | 6,456.3 tok/s | 87.64 tok/s | 144.49 tok/s | 16281/24576 (66.2%) | 920 MB | REJECTED | [stdout](20260703_qcn_prescan_fix_speedtest.log), [report](../logs/dev-benchmark_20260703_173110/benchmark_report.log) |
+| Step-3.7-Flash | Default policy after prescan fixes, current pinning default-off | 1,572.9 tok/s | 22.19 tok/s | 36.67 tok/s | 2784/12096 (23.0%) | 854 MB | DEFAULT CHECK | [stdout](20260703_step37_prescan_policy_default_benchmark.log), [report](../logs/dev-benchmark_20260703_175203/benchmark_report.log) |
+
+Policy decision:
+- Current embedding-prescan pinning is not promoted as a default optimization.
+  It is now explicit opt-in via `KRASIS_ENABLE_PREFILL_PINNING=1`.
+- The QCN no-pinning control and final default policy have effectively the same
+  long-prompt result at 39,920 tokens (`6,543.3` vs `6,551.0 tok/s`); the
+  difference in best-of-run prefill is from the 35K prompt outlier. The
+  accidental pinning-enabled run is the real regression.
+- Step final default prefill is slightly below the original baseline
+  (`1,572.9` vs `1,618.2 tok/s`), while decode/HTTP are slightly above and
+  HCS/min-free are unchanged. Treat this as a monitor point, not a promotion.
+
+## Step-3.7 HQQ4/k4v4 Timing Attribution - 2026-07-03 (RTX 5090)
+
+Purpose: collect real component timing for Step-3.7 production-style HQQ4/k4v4
+instead of guessing where runtime goes. This run intentionally enabled
+prefill/decode timing instrumentation, so the throughput row is diagnostic and
+not comparable to timing-off speed baselines.
+
+Command:
+
+```text
+KRASIS_PREFILL_TIMING=1 KRASIS_DECODE_GRAPH_INTERNAL_TIMING=1 \
+KRASIS_DECODE_MIXED_SEGMENT_CLOCKS=1 KRASIS_DECODE_MOE_ROUTE_CLOCKS=1 \
+KRASIS_DECODE_MOE_W2_CLOCKS=1 KRASIS_DECODE_MOE_W2_PRELOAD_CLOCKS=1 \
+KRASIS_DECODE_MAMBA2_GRAPH_CLOCKS=1 KRASIS_DECODE_GQA_PATH_CLOCKS=1 \
+KRASIS_DECODE_GQA_BOUNDARY_CLOCKS=1 KRASIS_DECODE_GQA_COVERAGE_CLOCKS=1 \
+KRASIS_DECODE_FINAL_CLOCKS=1 \
+./dev benchmark tests/step37-flash-4-4-hqq4-k4v4-a16.conf --timing
+```
+
+| Model | Config | Prefill (internal) | Decode (internal) | Round trip (network) | HCS | Min free VRAM | Status | Logs |
+|-------|--------|-------------------:|------------------:|---------------------:|-----|--------------:|--------|------|
+| Step-3.7-Flash | INT4 experts, HQQ4 attention, k4v4 KV, timing enabled | 1,458.0 tok/s | 21.17 tok/s | 34.55 tok/s | 2768/12096 (22.9%) | 968 MB | TIMING ATTRIBUTION | [stdout](20260703_step37_hqq4_k4v4_timing_attribution.log), [report](../logs/dev-benchmark_20260703_180724/benchmark_report.log) |
+
+Findings:
+- Long-prompt prefill has shifted away from MoE DMA as the primary bottleneck
+  once HCS is loaded. The 14,473-token timed prefill was `7,716.0ms`:
+  GQA/attention `5,616.0ms` (`72.8%`), MoE `1,940.8ms` (`25.2%`), other
+  `119.3ms`.
+- The biggest single prefill line is GQA KV append: `4,074.7ms` over 45 calls,
+  or `52.8%` of the whole 14,473-token timed prefill. HQQ projection internals
+  were also material but smaller: `marlin_float_zp 1,128.6ms`,
+  `group_sums 21.3ms`, `correction_gemm 38.7ms`, `correction_add 56.6ms`.
+- MoE prefill still matters, but the remaining long-prompt MoE DMA is no
+  longer dominant: MoE DMA `626.4ms` (`32.3%` of MoE, `8.1%` total), with
+  `616.3ms` reported as DMA wait; W1+act was `791.2ms` and W2 was `394.2ms`.
+- Short-prompt prefill behaves differently. The 1K timed prefill was dominated
+  by MoE DMA wait: total `3,179.5ms`, MoE `2,709.5ms`, MoE DMA `2,533.9ms`.
+  This means prompt length matters for optimization priority.
+- Decode with HCS loaded is dominated by exposed graph wait, not direct launch
+  overhead. The 249-token internal decode block measured `50.93ms/tok`:
+  sync wait `46.04ms/tok` (`90.4%`), GPU compute `3.56ms/tok`, cold DMA
+  submit/record `0.86ms/tok`, upload `0.10ms/tok`, launch `0.32ms/tok`.
+- The detailed segment timing for the same 249-token decode was:
+  MoE expert `7.93ms/tok`, GQA path `7.27ms/tok`, route/top-k `2.29ms/tok`,
+  with `42.99ms/tok` attributed to GQA-route sync wait.
+- HCS reduced but did not eliminate cold traffic: `88.7` cold experts/tok,
+  `247.3` HCS experts/tok, and `685.72 MB/tok` cold DMA in the 249-token
+  internal decode block. All-cold calibration was far worse:
+  `336` cold experts/tok, `2,598.75 MB/tok`, and `~135-221ms/tok` depending
+  on context/calibration stage.
+- Min free VRAM was `968 MB` with the `600 MB` safety margin. That is safe but
+  leaves roughly `368 MB` above the safety target, so HCS budgeting is slightly
+  conservative on this run.
+
+Follow-up branch/event attribution showed that the apparent `kv_append`
+bucket was mostly stream debt from the preceding sliding-window attention, not
+KV append kernel work:
+
+```text
+KV append diagnostic:
+  kv_append wall:        4,066.2ms over 45 calls
+  kv_append kernel:          3.6ms over 45 calls
+  pre-append sync debt:   4,062.3ms over 45 calls
+
+GQA branch diagnostic:
+  custom sliding calls:      33
+  full FA2 calls:            12
+  custom sliding event:   4,053.3ms over 33 calls
+  full FA2 event:           193.3ms over 12 calls
+```
+
+The accepted fix is to use FlashAttention-2 window prefill by default for
+eligible layer-specific sliding GQA layers, plus model-shape-derived FA2 LSE
+scratch sizing from the maximum per-layer GQA query dimension. The legacy
+custom tiled sliding path remains available for diagnostics with
+`KRASIS_PREFILL_LAYER_SPECIFIC_SLIDING_FA2=0`.
+
 ## Step Benchmarks - 2026-07-03 (HQQ4/k4v4, RTX 5090)
 
 Hardware: EPYC 7742, 1007 GB RAM, 1x RTX 5090. Command:
@@ -60,6 +189,7 @@ instrumentation disabled. Witness gate passed before benchmarking with
 | Model | Config | Prefill (internal) | Decode (internal) | Round trip (network) | HCS | Min free VRAM | Status | Logs |
 |-------|--------|-------------------:|------------------:|---------------------:|-----|--------------:|--------|------|
 | Step-3.7-Flash | INT4 experts, HQQ4 attention, k4v4 KV, INT8 shared/dense/lm_head, LGS=2 | 1,618.2 tok/s | 21.96 tok/s | 36.27 tok/s | 2784/12096 (23.0%) | 854 MB | PASS | [stdout](20260703_step37_hqq4_k4v4_benchmark.log), [report](../logs/dev-benchmark_20260703_080620/benchmark_report.log), [witness](20260703_step37_hqq4_k4v4_witness_compare_startup3600.log) |
+| Step-3.7-Flash | Same plus default FA2 window prefill for eligible layer-specific sliding GQA | 2,286.5 tok/s | 22.68 tok/s | 34.61 tok/s | 2784/12096 (23.0%) | 886 MB | ACCEPTED DEFAULT | [stdout](20260703_step37_fa2_window_default_benchmark.log), [report](../logs/dev-benchmark_20260703_195216/benchmark_report.log), [witness](20260703_step37_fa2_window_default_witness.log), [legacy witness](20260703_step37_fa2_window_legacy_witness_control.log) |
 | Step-3.7-Flash | Same plus opt-in prefill pointer-table reuse, `KRASIS_PREFILL_PTR_TABLE_REUSE=1` | 1,531.3 tok/s | 22.47 tok/s | 37.69 tok/s | 2784/12096 (23.0%) | 854 MB | REJECTED | [stdout](20260703_step37_hqq4_k4v4_ptrreuse_benchmark.log), [report](../logs/dev-benchmark_20260703_135707/benchmark_report.log), [witness](20260703_step37_hqq4_k4v4_ptrreuse_ordered_witness_compare.log) |
 | Step-3.7-Flash | Same plus opt-in non-HD512 k4v4 tiled decode, `KRASIS_DECODE_K4V4_TILED_NON_HD512=1` | 1,610.2 tok/s | 22.89 tok/s | 37.52 tok/s | 2784/12096 (23.0%) | 854 MB | DIAGNOSTIC | [stdout](20260703_step37_hqq4_k4v4_k4tiled_cachedflag_benchmark.log), [report](../logs/dev-benchmark_20260703_104823/benchmark_report.log), [witness](20260703_step37_hqq4_k4v4_k4tiled_witness_compare.log) |
 | Step-3.7-Flash | Same plus opt-in graph-replay APFL, `KRASIS_APFL_PREFETCH=8` | 1,594.0 tok/s | 14.40 tok/s | 23.41 tok/s | 2736/12096 (22.6%) | 970 MB | REJECTED | [stdout](20260703_step37_hqq4_k4v4_apfl8_benchmark.log), [report](../logs/dev-benchmark_20260703_094749/benchmark_report.log), [witness](20260703_step37_hqq4_k4v4_apfl8_witness_compare.log) |
@@ -72,6 +202,19 @@ Notes:
   `1238.6s`; benchmark reused the validated `3726 MB` cached artifacts.
 - Decode min-free stayed above the configured `600 MB` margin but close enough
   to keep watching during optimization.
+- Default FA2 window prefill improved the 14,473-token prefill best from
+  `1,618.2 -> 2,286.5 tok/s` (`+41.3%`) versus the original Step HQQ4/k4v4
+  baseline, with internal decode `21.96 -> 22.68 tok/s` and unchanged HCS
+  residency. HTTP best moved `36.27 -> 34.61 tok/s`; the standard HTTP prompts
+  are short and dominated by request/setup/decode variance, not the long
+  prefill path this change targets.
+- The promoted default witness passed: `8 PASS, 0 WARN, 0 FAIL`, prefill
+  argmax `7/8`, prefill top-10 `8/8`, first-token `7/8`, average exact run
+  `7.0`, average decode top-k `71.9%`. The prior opt-in FA2 witness passed
+  first-token `8/8` and decode top-k `74.2%`; the legacy custom-sliding
+  control on the same rebuilt tree passed first-token `8/8` but lower decode
+  top-k `69.5%`. Treat the single first-token miss as witness variance to
+  monitor rather than a clear FA2 correctness regression.
 - Prefill pointer-table reuse validation exposed a real ordering issue in the
   first attempt: removing per-layer `cuMemAlloc_v2` also removed an accidental
   device-ordering point for reused cold staging. Adding an explicit stream
