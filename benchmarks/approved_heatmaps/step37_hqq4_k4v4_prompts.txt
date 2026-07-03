@@ -1,0 +1,165 @@
+# Step-3.7 approved HCS route-heatmap seed prompts.
+# Blank-line separated. These prompts are held out from the standard benchmark
+# decode_prompt_* set and are intended for route-prior capture, not reporting.
+
+Design a Rust module that maintains a bounded in-memory cache for parsed source files. Include the public API, eviction behavior, error handling, and a few unit tests.
+
+Review this imaginary pull request: it replaces a lock-protected queue with a channel-based worker pool. Identify likely races, shutdown bugs, and observability gaps.
+
+Write a migration plan for moving a Python request scheduler into Rust without changing external HTTP behavior. Include rollout stages and validation checks.
+
+Explain how to diagnose a CUDA out-of-memory failure that appears only after warmup and not during model loading. Focus on measurements and reproducible evidence.
+
+Create a compact design document for a session replay tool that stores model requests, responses, timing, and selected debug traces for later comparison.
+
+Implement a small TypeScript parser for command-line flags with support for booleans, repeated options, defaults, and useful error messages.
+
+Given a service whose p95 latency regressed after a caching change, propose an investigation plan that separates CPU time, queueing, IO wait, and cache-hit quality.
+
+Write pseudocode for a GPU memory budget calculator that uses runtime calibration measurements instead of constants. Include failure modes and invariants.
+
+Design a CLI command that downloads a versioned artifact, verifies its checksum, stores it in a local cache, and reports clear errors when validation fails.
+
+Explain the difference between throughput and latency in a large-language-model runtime, using prompt prefill and token decode as the example stages.
+
+Draft a debugging checklist for a CUDA graph replay path that sometimes returns numerically different results from the non-graph path.
+
+Write a Python-free Rust implementation sketch for top-k and nucleus sampling over logits, including numerical stability considerations.
+
+Design a benchmark harness that compares two model-runtime configurations while preventing prompt leakage between calibration and measurement.
+
+Analyze a hypothetical HCS expert cache where the hit rate is high but decode speed is still low. List the counters needed to distinguish cold-copy wait from compute.
+
+Write a short code review of a function that silently falls back from a calibrated value to a default constant. Explain why this is risky and how to fail visibly.
+
+Plan a release process for a GPU runtime whose wheels are built by GitHub Actions and attached to GitHub releases rather than uploaded to PyPI.
+
+Implement an algorithm that merges several route-frequency heatmaps into one ranked expert prior while preserving per-layer coverage information.
+
+Explain how to validate that a route heatmap built with one attention quantization setting is safe to reuse with another setting.
+
+Write a compact schema for an artifact manifest that includes model identity, route signature, compatible runtimes, checksums, and benchmark evidence.
+
+Design a telemetry summary for decode requests that reports generated tokens, HCS hits, HCS misses, cold bytes, DMA calls, and minimum free VRAM.
+
+Create a test plan for a launcher UI that serializes model configs, validates incompatible options, and starts a local server process.
+
+Explain how to avoid benchmark contamination when the same model runtime performs calibration, heatmap collection, and timed speed tests.
+
+Write a Rust data structure for a fixed-size ring buffer of timing events. Include how it handles wraparound and how readers obtain a consistent snapshot.
+
+Design a local cache directory layout for model artifacts that may include Marlin expert caches, HQQ attention caches, route heatmaps, and sidecar manifests.
+
+Review a hypothetical patch that moves per-token orchestration from Rust back into Python. Identify performance and correctness risks.
+
+Explain how to instrument a model runtime to attribute time across prefill attention, MoE expert DMA, MoE compute, sampling, and HTTP streaming.
+
+Write an incident report template for a performance regression where the first theory was wrong and the final root cause was stream synchronization debt.
+
+Design a scheduler for running repeated route-capture prompts and periodically writing cumulative checkpoint artifacts without losing partial progress.
+
+Explain how to compare two HCS rankings using hit rate, cold bytes, decode speed, and worst-layer misses instead of just the number of overlapping experts.
+
+Write a concise README section for an experimental feature flag that must remain opt-in until correctness and speed evidence are recorded.
+
+Implement a small JSON normalizer that sorts object keys, strips volatile timestamps, and computes a stable SHA-256 digest for validation.
+
+Describe how to safely shut down a GPU server that may have background copy streams, pending CUDA events, and memory owned by multiple pools.
+
+Design a command that runs a heatmap build for an approved model, benchmarks each checkpoint, and stops only after decode speed plateaus on held-out prompts.
+
+Explain how to decide whether a route-prior artifact should be model-specific, config-specific, or shared across compatible runtime variants.
+
+Write a validation plan for an approved Step-3.7 heatmap captured with INT4 experts, HQQ4 attention, and k4v4 KV cache.
+
+Create a structured log format for route-heatmap capture that records prompt index, prompt tokens, generated tokens, cumulative route records, and artifact path.
+
+Explain why a heatmap artifact should rank experts by observed route usefulness but leave the number of resident experts to local VRAM calibration.
+
+Review a speculative prefetch proposal for a runtime where verification uses a high-latency prefill path. State what data would have to change your decision.
+
+Write an engineering note comparing quick startup heatmaps, long offline heatmaps, and learned route predictors for expert-cache placement.
+
+Design an acceptance gate for promoting a generated heatmap into an approved artifact repository, including checksum, held-out benchmark, and plateau evidence.
+
+# Extension tranche 2026-07-03. Keep these held out from the benchmark prompts.
+
+Design a Rust API for scheduling GPU work across a main stream and two copy streams. Include event ownership, error propagation, and how callers avoid reusing scratch buffers too early.
+
+Review a patch that adds an environment-variable feature flag to a CUDA decode path. Identify what should be measured before promotion and what validation should block default enablement.
+
+Write a debugging plan for a model server whose startup heatmap improves HCS hit rate but makes the first user request slower. Include counters, logs, and comparison runs.
+
+Implement pseudocode for merging route heatmap checkpoints from separate capture runs while preserving prompt-count metadata and rejecting incompatible route signatures.
+
+Explain how to diagnose a decode benchmark where internal engine tok/s improves but HTTP round-trip tok/s gets worse. Separate server timing, streaming overhead, and request length.
+
+Create a migration checklist for replacing a Python artifact downloader with a Rust implementation, including checksum validation, cache layout, retries, and user-visible failures.
+
+Write a test plan for an HQQ cache builder that has both CPU and CUDA search implementations. Cover quality equivalence, determinism, cache identity, and failure behavior.
+
+Analyze a runtime where VRAM min-free stays far above the safety margin during decode. List the measurements needed before changing the HCS budget formula.
+
+Design an offline evaluator that compares quick startup heatmaps against approved route priors using HCS hit rate, request promotions, copy failures, and timing-off decode speed.
+
+Review a hypothetical change that skips warmup calibration when a cached heatmap exists. Explain why heatmap reuse and runtime VRAM calibration must remain separate.
+
+Write a compact incident timeline for a performance regression caused by attributing delayed CUDA stream work to the wrong timing bucket.
+
+Design a config compatibility key for sharing an approved route heatmap across HQQ4, HQQ6, HQQ8, k4v4, and k6v6 variants without hiding mismatched routing behavior.
+
+Implement pseudocode for a strict artifact resume mode that processes only newly appended prompts and refuses to continue if prior prompt text was edited.
+
+Explain how to build a held-out corpus for expert-route capture without leaking the standard benchmark prompts or overfitting to one narrow IDE workflow.
+
+Create a code review checklist for unsafe Rust pointer lifetimes in GPU staging buffers, including ownership, synchronization, and drop ordering.
+
+Design telemetry for a launcher UI that shows model load progress, cache reuse, heatmap validation, HCS budget, and failure causes without exposing internal architecture.
+
+Explain how to decide whether a larger HCS heatmap is saturated when speed is noisy but hit rate continues to climb slowly.
+
+Write a Rust data model for benchmark records that includes prefill speed, decode speed, HTTP speed, HCS hit rate, cold bytes, min free VRAM, and artifact hashes.
+
+Review an optimization proposal that relies on a value measured on one RTX 5090. State how to replace the fixed value with runtime measurement or model-derived calculation.
+
+Design a route-capture job runner that can stop after each checkpoint, resume safely, and produce enough metadata for later artifact approval.
+
+Explain how to separate cold expert DMA wait from graph compute in a CUDA graph decode loop using events and per-stream timing.
+
+Implement a parser for dynamic HCS log lines that extracts hit rate, request promotions, budget skips, no-slot failures, and copy failures into structured JSON.
+
+Write a troubleshooting guide for a user whose approved heatmap fails validation after updating model files. Include what changed, why Krasis refuses it, and how to rebuild.
+
+Design a benchmark comparison report that marks diagnostic timing runs separately from timing-off speed runs and prevents mixing those numbers.
+
+Review a proposed fallback that silently uses a quick heatmap when an approved heatmap download fails. Explain the contract risk and a better explicit failure mode.
+
+Write a plan for testing approved heatmap sharing between two compatible KV cache formats while keeping the same route-prior artifact.
+
+Implement pseudocode for ranking experts per layer by cumulative route count, then selecting a VRAM-bounded resident set after runtime calibration.
+
+Explain how prompt length, decode length, and sampling temperature can change route heatmap quality and what should be fixed for reproducible capture.
+
+Create a release-note entry for a new approved heatmap feature, including explicit limits, validation behavior, and what remains manual.
+
+Design a failure-injection test for corrupt heatmap JSON, wrong model signature, wrong compatible runtime list, and edited prompt prefix metadata.
+
+Review a patch that adds a Python loop inside per-token decode for convenience. Identify the hot-path cost, GIL risk, and how to keep orchestration in Rust.
+
+Write a data retention policy for benchmark logs, approved heatmap artifacts, debug logs, and local tracking files in a private development repo.
+
+Design an experiment to compare static global HCS priors against prompt-conditioned first-chunk priors without changing production behavior during the measurement phase.
+
+Explain how to monitor whether HCS request promotions are falling because the heatmap is better or because fewer decode slots were selected.
+
+Implement pseudocode for a command that evaluates every heatmap checkpoint in a directory, scrapes final HCS metrics, and writes a markdown summary table.
+
+Create a risk assessment for downloading approved model artifacts from GitHub release assets, including checksum verification, offline mode, and version pinning.
+
+Design an observability dashboard for a local LLM runtime focused on GPU memory, HCS residency, cold traffic, prefill throughput, and decode latency.
+
+Explain how to decide whether an approved route heatmap should be superseded when a new Krasis release changes routing-adjacent code but model weights are unchanged.
+
+Review a benchmark where HCS hit rate rises but decode speed is flat. List possible bottlenecks and the extra counters needed before rejecting the heatmap.
+
+Write a short engineering proposal for continuously improving approved route heatmaps with append-only prompt tranches, checkpointed evaluation, and a clear promotion gate.

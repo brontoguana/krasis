@@ -93,6 +93,15 @@ logger = logging.getLogger("krasis.server")
 
 HEATMAP_FORMAT = "krasis_hcs_heatmap"
 HEATMAP_FORMAT_VERSION = 2
+APPROVED_HEATMAP_FORMAT = "krasis_approved_hcs_route_heatmap"
+APPROVED_HEATMAP_FORMAT_VERSION = 1
+APPROVED_HEATMAP_MANIFEST_FORMAT = "krasis_approved_hcs_route_heatmap_manifest"
+APPROVED_HEATMAP_MANIFEST_FORMAT_VERSION = 1
+APPROVED_HEATMAP_MODE_CHOICES = ("auto", "off", "require")
+APPROVED_HEATMAP_DEFAULT_MANIFEST_URL = (
+    "https://raw.githubusercontent.com/brontoguana/krasis/"
+    "nemotron-dev/benchmarks/approved_heatmaps/manifest.json"
+)
 HEATMAP_DEFAULT_TOP_K = 50
 HEATMAP_DEFAULT_TOP_P = 0.95
 HEATMAP_DEFAULT_PRESENCE_PENALTY = 0.0
@@ -266,6 +275,68 @@ def _model_config_fingerprints(model_path: str) -> dict[str, Optional[str]]:
     return {name: _sha256_file(os.path.join(model_path, name)) for name in names}
 
 
+def _heatmap_route_signature(model: KrasisModel, args) -> dict[str, Any]:
+    """Return the routing identity an approved heatmap must match.
+
+    Attention precision and KV-cache format are intentionally excluded: they can
+    be listed as validated-compatible runtimes, but they are not part of the
+    route-prior identity unless measurements prove they must be split.
+    """
+    cfg = model.cfg
+    return {
+        "model": {
+            "model_name": os.path.basename(os.path.abspath(args.model_path)),
+            "model_type": cfg.model_type,
+            "num_hidden_layers": cfg.num_hidden_layers,
+            "num_moe_layers": cfg.num_moe_layers,
+            "n_routed_experts": cfg.n_routed_experts,
+            "num_experts_per_tok": cfg.num_experts_per_tok,
+            "num_full_attention_layers": cfg.num_full_attention_layers,
+            "config_fingerprints": _model_config_fingerprints(args.model_path),
+        },
+        "routing": {
+            "scoring_func": getattr(cfg, "scoring_func", None),
+            "routed_scaling_factor": getattr(cfg, "routed_scaling_factor", None),
+            "norm_topk_prob": bool(getattr(cfg, "norm_topk_prob", False)),
+            "use_moe_router_bias": bool(getattr(cfg, "use_moe_router_bias", False)),
+            "need_fp32_gate": bool(getattr(cfg, "need_fp32_gate", False)),
+            "norm_bias_one": bool(getattr(cfg, "norm_bias_one", False)),
+            "layer_types_sha256": _sha256_jsonable(list(getattr(cfg, "layer_types", []))),
+        },
+        "schema": {
+            "format": APPROVED_HEATMAP_FORMAT,
+            "format_version": APPROVED_HEATMAP_FORMAT_VERSION,
+        },
+    }
+
+
+def _runtime_heatmap_capture_config(args) -> dict[str, Any]:
+    sidecar_manifest = None
+    if args.hqq_sidecar_manifest:
+        manifest_path = os.path.expanduser(args.hqq_sidecar_manifest)
+        sidecar_manifest = {
+            "sha256": _sha256_file(manifest_path),
+            "basename": os.path.basename(manifest_path),
+        }
+    return {
+        "gpu_expert_bits": int(args.gpu_expert_bits),
+        "expert_group_size": int(args.expert_group_size),
+        "gpu_expert_int4_calib": args.gpu_expert_int4_calib,
+        "cpu_expert_bits": int(args.cpu_expert_bits),
+        "attention_quant": args.attention_quant,
+        "hqq_cache_profile": args.hqq_cache_profile,
+        "hqq_group_size": int(args.hqq_group_size),
+        "hqq_auto_budget_pct": args.hqq_auto_budget_pct,
+        "hqq46_auto_budget_mib": args.hqq46_auto_budget_mib,
+        "hqq_sidecar_manifest": sidecar_manifest,
+        "shared_expert_quant": args.shared_expert_quant,
+        "dense_mlp_quant": args.dense_mlp_quant,
+        "lm_head_quant": args.lm_head_quant,
+        "kv_dtype": args.kv_dtype,
+        "layer_group_size": int(args.layer_group_size),
+    }
+
+
 def _load_benchmark_decode_prompt_texts() -> dict[str, str]:
     prompts_dir = os.path.join(os.path.dirname(__file__), "prompts")
     prompts: dict[str, str] = {}
@@ -336,6 +407,7 @@ def _expected_heatmap_metadata(model: KrasisModel, args, prompts: list[str]) -> 
             "num_full_attention_layers": cfg.num_full_attention_layers,
             "config_fingerprints": _model_config_fingerprints(args.model_path),
         },
+        "route_signature": _heatmap_route_signature(model, args),
         "runtime": {
             "num_gpus": resolved_num_gpus,
             "selected_gpus": args.selected_gpus or "",
@@ -359,6 +431,7 @@ def _expected_heatmap_metadata(model: KrasisModel, args, prompts: list[str]) -> 
             "hcs": bool(args.hcs),
             "quant_config": getattr(quant_cfg, "__dict__", {}) if quant_cfg is not None else {},
         },
+        "runtime_compat": _runtime_heatmap_capture_config(args),
         "heatmap_build": {
             "prompt_source": "python/krasis/prompts/heatmap_prompts.txt",
             "prompt_file_sha256": _sha256_file(prompt_file),
@@ -410,6 +483,41 @@ def _load_validated_heatmap(heatmap_path: str, expected_metadata: dict[str, Any]
             f"{heatmap_path}. Rebuild it with the current Krasis server so the "
             "runtime params, heatmap params, prompt hash, and Krasis version can be verified."
         )
+    fmt = meta.get("format")
+    if fmt == APPROVED_HEATMAP_FORMAT:
+        if meta.get("format_version") != APPROVED_HEATMAP_FORMAT_VERSION:
+            raise RuntimeError(
+                "Refusing approved heatmap with unsupported format version: "
+                f"{meta.get('format_version')!r} in {heatmap_path}"
+            )
+        route_mismatches = _metadata_mismatches(
+            expected_metadata.get("route_signature"),
+            meta.get("route_signature"),
+            "route_signature",
+        )
+        if route_mismatches:
+            sample = "\n  - ".join(route_mismatches[:20])
+            extra = "" if len(route_mismatches) <= 20 else f"\n  - ... {len(route_mismatches) - 20} more"
+            raise RuntimeError(
+                "Refusing approved heatmap because the model/router route signature does not match. "
+                f"Path: {heatmap_path}\n"
+                f"Mismatches:\n  - {sample}{extra}"
+            )
+        current_compat = expected_metadata.get("runtime_compat")
+        compatible = meta.get("validated_compatible_runtimes", [])
+        if not isinstance(compatible, list) or current_compat not in compatible:
+            raise RuntimeError(
+                "Refusing approved heatmap because this HQQ/KV runtime has not been validated "
+                "for the artifact. Build or approve a compatible heatmap first.\n"
+                f"Path: {heatmap_path}\n"
+                f"Current runtime: {current_compat!r}\n"
+                f"Validated runtimes: {compatible!r}"
+            )
+        return data
+    if fmt != HEATMAP_FORMAT:
+        raise RuntimeError(
+            f"Refusing heatmap with unsupported format {fmt!r}: {heatmap_path}"
+        )
     mismatches = _metadata_mismatches(expected_metadata, meta)
     if mismatches:
         sample = "\n  - ".join(mismatches[:20])
@@ -425,14 +533,198 @@ def _load_validated_heatmap(heatmap_path: str, expected_metadata: dict[str, Any]
     return data
 
 
-def _load_heatmap_prompts() -> list[str]:
+def _download_url_bytes(url: str, *, timeout_s: float) -> tuple[Optional[bytes], str]:
+    import urllib.error
+    import urllib.request
+
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "krasis-approved-heatmap/1",
+            "Accept": "application/json,*/*",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as response:
+            return response.read(), ""
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None, "not found"
+        return None, f"HTTP {e.code}: {e.reason}"
+    except urllib.error.URLError as e:
+        return None, str(e.reason)
+    except OSError as e:
+        return None, str(e)
+
+
+def _approved_heatmap_download_timeout_s() -> float:
+    raw = os.environ.get("KRASIS_APPROVED_HEATMAP_TIMEOUT_S", "").strip()
+    if not raw:
+        return 5.0
+    try:
+        return max(1.0, float(raw))
+    except ValueError:
+        _warn(f"Ignoring invalid KRASIS_APPROVED_HEATMAP_TIMEOUT_S={raw!r}; using 5.0")
+        return 5.0
+
+
+def _load_approved_heatmap_manifest(manifest_url: str) -> tuple[Optional[dict[str, Any]], str]:
+    payload, error = _download_url_bytes(
+        manifest_url,
+        timeout_s=_approved_heatmap_download_timeout_s(),
+    )
+    if payload is None:
+        return None, error
+    try:
+        manifest = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        return None, f"invalid JSON: {e}"
+    if not isinstance(manifest, dict):
+        return None, "manifest root is not an object"
+    if manifest.get("format") != APPROVED_HEATMAP_MANIFEST_FORMAT:
+        return None, f"unsupported format {manifest.get('format')!r}"
+    if manifest.get("format_version") != APPROVED_HEATMAP_MANIFEST_FORMAT_VERSION:
+        return None, f"unsupported format_version {manifest.get('format_version')!r}"
+    if not isinstance(manifest.get("artifacts"), list):
+        return None, "manifest artifacts field is not a list"
+    return manifest, ""
+
+
+def _select_approved_heatmap_manifest_entry(
+    manifest: dict[str, Any],
+    expected_metadata: dict[str, Any],
+) -> Optional[dict[str, Any]]:
+    route_hash = _sha256_jsonable(expected_metadata.get("route_signature"))
+    runtime_hash = _sha256_jsonable(expected_metadata.get("runtime_compat"))
+    candidates = []
+    for entry in manifest.get("artifacts", []):
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("status") != "approved":
+            continue
+        if entry.get("route_signature_sha256") != route_hash:
+            continue
+        runtime_hashes = entry.get("validated_runtime_sha256s", [])
+        if not isinstance(runtime_hashes, list) or runtime_hash not in runtime_hashes:
+            continue
+        candidates.append(entry)
+    if not candidates:
+        return None
+    candidates.sort(
+        key=lambda item: (
+            int(item.get("priority", 1000)),
+            str(item.get("artifact_id", "")),
+        )
+    )
+    return candidates[0]
+
+
+def _approved_heatmap_cache_path(cache_dir: str, entry: dict[str, Any]) -> str:
+    artifact_id = str(entry.get("artifact_id") or "approved_heatmap")
+    filename = os.path.basename(str(entry.get("filename") or entry.get("download_url") or "heatmap.json"))
+    sha = str(entry.get("sha256") or "")
+    if not sha:
+        raise RuntimeError(f"Approved heatmap manifest entry is missing sha256: {entry!r}")
+    safe_artifact_id = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in artifact_id)
+    safe_filename = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in filename)
+    return os.path.join(
+        cache_dir,
+        "approved_heatmaps",
+        f"{safe_artifact_id}.{sha[:16]}.{safe_filename}",
+    )
+
+
+def _verified_cached_approved_heatmap(cache_dir: str, entry: dict[str, Any]) -> str:
+    download_url = str(entry.get("download_url") or "").strip()
+    expected_sha = str(entry.get("sha256") or "").strip().lower()
+    expected_bytes = entry.get("bytes")
+    if not download_url:
+        raise RuntimeError(f"Approved heatmap manifest entry is missing download_url: {entry!r}")
+    if len(expected_sha) != 64:
+        raise RuntimeError(f"Approved heatmap manifest entry has invalid sha256: {expected_sha!r}")
+
+    cache_path = _approved_heatmap_cache_path(cache_dir, entry)
+    if os.path.isfile(cache_path) and _sha256_file(cache_path) == expected_sha:
+        return cache_path
+
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+    payload, error = _download_url_bytes(
+        download_url,
+        timeout_s=_approved_heatmap_download_timeout_s(),
+    )
+    if payload is None:
+        raise RuntimeError(
+            "Approved heatmap was listed in the manifest but could not be downloaded. "
+            f"URL: {download_url}; error: {error}"
+        )
+    actual_sha = hashlib.sha256(payload).hexdigest()
+    if actual_sha != expected_sha:
+        raise RuntimeError(
+            "Approved heatmap download failed checksum verification. "
+            f"URL: {download_url}; expected {expected_sha}, got {actual_sha}"
+        )
+    if expected_bytes is not None and int(expected_bytes) != len(payload):
+        raise RuntimeError(
+            "Approved heatmap download failed size verification. "
+            f"URL: {download_url}; expected {expected_bytes} bytes, got {len(payload)}"
+        )
+    tmp_path = f"{cache_path}.tmp"
+    with open(tmp_path, "wb") as f:
+        f.write(payload)
+    os.replace(tmp_path, cache_path)
+    return cache_path
+
+
+def _try_load_auto_approved_heatmap(
+    cache_dir: str,
+    expected_metadata: dict[str, Any],
+    args,
+) -> tuple[Optional[str], Optional[dict[str, Any]]]:
+    mode = str(args.approved_heatmap_mode or "auto")
+    if mode == "off":
+        return None, None
+    manifest_url = str(args.approved_heatmap_manifest_url or "").strip()
+    if not manifest_url:
+        if mode == "require":
+            raise RuntimeError("--approved-heatmap-mode=require needs a manifest URL")
+        return None, None
+
+    manifest, error = _load_approved_heatmap_manifest(manifest_url)
+    if manifest is None:
+        message = f"Approved heatmap manifest unavailable from {manifest_url}: {error}"
+        if mode == "require":
+            raise RuntimeError(message)
+        _warn(f"{message}; building quick startup heatmap")
+        return None, None
+
+    entry = _select_approved_heatmap_manifest_entry(manifest, expected_metadata)
+    if entry is None:
+        message = "No approved heatmap artifact matches this model/router signature and validated runtime"
+        if mode == "require":
+            raise RuntimeError(f"{message}; manifest={manifest_url}")
+        _dim(f"{message}; building quick startup heatmap")
+        return None, None
+
+    heatmap_path = _verified_cached_approved_heatmap(cache_dir, entry)
+    validated = _load_validated_heatmap(heatmap_path, expected_metadata)
+    _detail(
+        "Approved route heatmap loaded from cache: "
+        f"{entry.get('artifact_id', os.path.basename(heatmap_path))}"
+    )
+    return heatmap_path, validated
+
+
+def _load_heatmap_prompts(path: Optional[str] = None) -> list[str]:
     """Load heatmap calibration prompts from the prompts directory.
 
     Returns a list of prompt strings.  Users can edit heatmap_prompts.txt to
     match their typical workload.
     """
-    prompts_dir = os.path.join(os.path.dirname(__file__), "prompts")
-    path = os.path.join(prompts_dir, "heatmap_prompts.txt")
+    if path is None:
+        prompts_dir = os.path.join(os.path.dirname(__file__), "prompts")
+        path = os.path.join(prompts_dir, "heatmap_prompts.txt")
+    else:
+        path = os.path.expanduser(path)
     if not os.path.exists(path):
         raise FileNotFoundError(
             f"Heatmap prompt file not found: {path}\n"
@@ -890,6 +1182,326 @@ def _build_heatmap(model: KrasisModel, save_path: str, args) -> str:
                 )
 
 
+def _approved_heatmap_checkpoint_path(save_path: str, prompts_processed: int) -> str:
+    base = Path(save_path)
+    suffix = base.suffix or ".json"
+    stem = base.name[:-len(suffix)] if base.name.endswith(suffix) else base.name
+    return str(base.with_name(f"{stem}.p{prompts_processed:05d}{suffix}"))
+
+
+def _approved_heatmap_metadata(
+    model: KrasisModel,
+    args,
+    prompts: list[str],
+    prompt_path: str,
+    decode_tokens: int,
+    prompts_processed: int,
+    total_decode_tokens: int,
+) -> dict[str, Any]:
+    from krasis import __version__ as krasis_version
+
+    return {
+        "format": APPROVED_HEATMAP_FORMAT,
+        "format_version": APPROVED_HEATMAP_FORMAT_VERSION,
+        "generated_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "krasis": {
+            "version": krasis_version,
+            "runtime_code": _krasis_runtime_code_hash(),
+        },
+        "route_signature": _heatmap_route_signature(model, args),
+        "captured_runtime": _runtime_heatmap_capture_config(args),
+        "validated_compatible_runtimes": [
+            _runtime_heatmap_capture_config(args),
+        ],
+        "heatmap_build": {
+            "prompt_source": os.path.abspath(prompt_path),
+            "prompt_file_sha256": _sha256_file(prompt_path),
+            "prompt_count_total": len(prompts),
+            "prompt_count_processed": prompts_processed,
+            "prompt_set_sha256": _sha256_jsonable(prompts),
+            "prompt_prefix_sha256": _sha256_jsonable(prompts[:prompts_processed]),
+            "benchmark_prompt_overlap": False,
+            "decode_params": {
+                **_heatmap_decode_params(args),
+                "decode_tokens_per_prompt": int(decode_tokens),
+            },
+            "total_decode_tokens": int(total_decode_tokens),
+            "score": "decode_route_topk_count",
+        },
+    }
+
+
+def _write_heatmap_artifact(path: str, heatmap_dict: dict[str, Any]) -> None:
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(heatmap_dict, f, sort_keys=True)
+        f.write("\n")
+
+
+def _approved_heatmap_counts(data: dict[str, Any], path: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for key, value in data.items():
+        if key == "_metadata":
+            continue
+        if not isinstance(key, str) or "," not in key:
+            raise RuntimeError(f"Approved heatmap contains invalid route key {key!r}: {path}")
+        if not isinstance(value, int) or value < 0:
+            raise RuntimeError(f"Approved heatmap contains invalid route count for {key!r}: {path}")
+        counts[key] = value
+    return counts
+
+
+def _validate_approved_heatmap_resume_base(
+    model: KrasisModel,
+    args,
+    resume_path: str,
+    prompts: list[str],
+    decode_tokens: int,
+) -> tuple[dict[str, int], int, int]:
+    expected_metadata = {
+        "route_signature": _heatmap_route_signature(model, args),
+        "runtime_compat": _runtime_heatmap_capture_config(args),
+    }
+    base_data = _load_validated_heatmap(resume_path, expected_metadata)
+    meta = base_data.get("_metadata", {})
+    if meta.get("format") != APPROVED_HEATMAP_FORMAT:
+        raise RuntimeError(f"--approved-heatmap-resume-from must point to an approved heatmap artifact: {resume_path}")
+    build = meta.get("heatmap_build")
+    if not isinstance(build, dict):
+        raise RuntimeError(f"Approved heatmap resume artifact is missing heatmap_build metadata: {resume_path}")
+
+    try:
+        base_prompt_count = int(build["prompt_count_processed"])
+        base_decode_tokens = int(build["total_decode_tokens"])
+    except (KeyError, TypeError, ValueError) as e:
+        raise RuntimeError(f"Approved heatmap resume artifact has invalid prompt/token metadata: {resume_path}") from e
+    if base_prompt_count <= 0:
+        raise RuntimeError(f"Approved heatmap resume artifact has no processed prompts: {resume_path}")
+    if base_prompt_count >= len(prompts):
+        raise RuntimeError(
+            "--approved-heatmap-resume-from has already processed all prompts in the current corpus: "
+            f"{base_prompt_count} processed, {len(prompts)} available"
+        )
+
+    expected_prefix_sha = _sha256_jsonable(prompts[:base_prompt_count])
+    actual_prefix_sha = build.get("prompt_prefix_sha256")
+    if actual_prefix_sha != expected_prefix_sha:
+        raise RuntimeError(
+            "Refusing approved heatmap resume because the current prompt corpus no longer has "
+            "the resume artifact's processed prefix. Append new prompts to the same corpus order; "
+            "do not reorder or edit previously captured prompts."
+        )
+
+    expected_decode_params = {
+        **_heatmap_decode_params(args),
+        "decode_tokens_per_prompt": int(decode_tokens),
+    }
+    if build.get("decode_params") != expected_decode_params:
+        raise RuntimeError(
+            "Refusing approved heatmap resume because decode capture params changed.\n"
+            f"Expected/current: {expected_decode_params!r}\n"
+            f"Artifact: {build.get('decode_params')!r}"
+        )
+
+    return _approved_heatmap_counts(base_data, resume_path), base_prompt_count, base_decode_tokens
+
+
+def _build_approved_heatmap(model: KrasisModel, save_path: str, args) -> str:
+    prompt_path = os.path.expanduser(args.approved_heatmap_prompts) if args.approved_heatmap_prompts else os.path.join(
+        os.path.dirname(__file__),
+        "prompts",
+        "heatmap_prompts.txt",
+    )
+    prompts = _load_heatmap_prompts(prompt_path)
+    _assert_heatmap_prompts_are_held_out(prompts)
+    max_prompts = int(args.approved_heatmap_max_prompts or 0)
+    if max_prompts > 0:
+        prompts = prompts[:max_prompts]
+    if not prompts:
+        raise RuntimeError("Approved heatmap build has no prompts after filtering")
+
+    decode_tokens = int(args.approved_heatmap_decode_tokens)
+    if decode_tokens <= 0:
+        raise RuntimeError("--approved-heatmap-decode-tokens must be positive")
+    checkpoint_every = int(args.approved_heatmap_checkpoint_every or 0)
+    if checkpoint_every < 0:
+        raise RuntimeError("--approved-heatmap-checkpoint-every must be non-negative")
+    resume_path = os.path.expanduser(args.approved_heatmap_resume_from) if args.approved_heatmap_resume_from else None
+
+    gpu_store = getattr(model, "_gpu_decode_store", None)
+    if gpu_store is None:
+        raise RuntimeError("GPU decode store not configured — cannot build approved heatmap")
+
+    cfg = model.cfg
+    stop_ids = _default_stop_ids(model)
+    decode_params = _heatmap_decode_params(args)
+    timing_enabled = _heatmap_substage_timing_enabled()
+    build_t0 = time.perf_counter()
+    base_counts: dict[str, int] = {}
+    resume_start = 0
+    total_decode_tokens = 0
+    if resume_path:
+        base_counts, resume_start, total_decode_tokens = _validate_approved_heatmap_resume_base(
+            model,
+            args,
+            resume_path,
+            prompts,
+            decode_tokens,
+        )
+    heatmap_collection_started = False
+    written_paths: list[str] = []
+
+    try:
+        gpu_store.hcs_init_collection(cfg.num_hidden_layers, cfg.n_routed_experts)
+        gpu_store.hcs_start_collecting()
+        heatmap_collection_started = True
+        _status("Approved HCS route heatmap build")
+        _detail(
+            f"Prompts: {len(prompts):,} from {prompt_path}; "
+            f"decode tokens/prompt: {decode_tokens:,}; checkpoint_every={checkpoint_every}"
+        )
+        if resume_path:
+            _detail(
+                f"Resuming from {resume_start:,} prompts and {total_decode_tokens:,} decode-route tokens: "
+                f"{resume_path}"
+            )
+        logger.info(
+            "APPROVED_HEATMAP build_start prompts=%d resume_start=%d base_decode_tokens=%d "
+            "decode_tokens_per_prompt=%d checkpoint_every=%d out=%s prompt_path=%s resume_from=%s",
+            len(prompts),
+            resume_start,
+            total_decode_tokens,
+            decode_tokens,
+            checkpoint_every,
+            save_path,
+            prompt_path,
+            resume_path or "",
+        )
+
+        def export_checkpoint(prompts_processed: int, final: bool) -> str:
+            export_t0 = time.perf_counter()
+            heatmap_dict = dict(base_counts) if base_counts else {}
+            for key, value in gpu_store.hcs_export_heatmap().items():
+                if key == "_metadata":
+                    continue
+                heatmap_dict[key] = int(heatmap_dict.get(key, 0)) + int(value)
+            heatmap_dict["_metadata"] = _approved_heatmap_metadata(
+                model,
+                args,
+                prompts,
+                prompt_path,
+                decode_tokens,
+                prompts_processed,
+                total_decode_tokens,
+            )
+            checkpoint_path = _approved_heatmap_checkpoint_path(save_path, prompts_processed)
+            out_paths = [save_path] if final else [checkpoint_path]
+            if final and checkpoint_path != save_path:
+                out_paths.append(checkpoint_path)
+            for out_path in out_paths:
+                _write_heatmap_artifact(out_path, heatmap_dict)
+                written_paths.append(out_path)
+            elapsed = time.perf_counter() - build_t0
+            logger.info(
+                "APPROVED_HEATMAP checkpoint final=%s prompts=%d resume_start=%d entries=%d "
+                "decode_tokens=%d elapsed_s=%.3f export_write_s=%.3f path=%s",
+                final,
+                prompts_processed,
+                resume_start,
+                len(heatmap_dict) - 1,
+                total_decode_tokens,
+                elapsed,
+                time.perf_counter() - export_t0,
+                ",".join(out_paths),
+            )
+            _detail(
+                f"Checkpoint {'final' if final else prompts_processed}: "
+                f"{len(heatmap_dict) - 1:,} ranked experts, "
+                f"{total_decode_tokens:,} decode tokens, {elapsed:.1f}s -> {', '.join(out_paths)}"
+            )
+            return out_paths[0]
+
+        for i, prompt_text in enumerate(prompts[resume_start:], start=resume_start + 1):
+            prompt_t0 = time.perf_counter()
+            tokens = _chat_prompt_tokens(
+                model,
+                prompt_text,
+                enable_thinking=decode_params["enable_thinking"],
+            )
+            logger.info(
+                "APPROVED_HEATMAP prompt_start index=%d total=%d prompt_tokens=%d",
+                i,
+                len(prompts),
+                len(tokens),
+            )
+            first_token, prompt_len, kv_overflow = gpu_store.rust_prefill_tokens(
+                tokens,
+                temperature=decode_params["temperature"],
+                disable_pinning=True,
+            )
+            generated_tokens = 0
+            stopped_before_decode = bool(kv_overflow or first_token in stop_ids)
+            if not kv_overflow and first_token not in stop_ids:
+                generated = gpu_store.gpu_generate_batch(
+                    first_token=first_token,
+                    start_position=prompt_len,
+                    max_tokens=decode_tokens,
+                    temperature=decode_params["temperature"],
+                    top_k=decode_params["top_k"],
+                    top_p=decode_params["top_p"],
+                    stop_ids=stop_ids,
+                    presence_penalty=decode_params["presence_penalty"],
+                )
+                generated_tokens = len(generated)
+                total_decode_tokens += 1 + len(generated)
+            else:
+                total_decode_tokens += 1
+            model.server_cleanup()
+            prompt_s = time.perf_counter() - prompt_t0
+            logger.info(
+                "APPROVED_HEATMAP prompt_done index=%d total=%d prompt_len=%d first_token=%d "
+                "kv_overflow=%s stopped_before_decode=%s generated_tokens=%d total_decode_tokens=%d prompt_s=%.3f",
+                i,
+                len(prompts),
+                prompt_len,
+                first_token,
+                bool(kv_overflow),
+                stopped_before_decode,
+                generated_tokens,
+                total_decode_tokens,
+                prompt_s,
+            )
+            if timing_enabled:
+                logger.info(
+                    "HEATMAP_TIMING approved_prompt index=%d prompt_s=%.6f cumulative_s=%.6f",
+                    i,
+                    prompt_s,
+                    time.perf_counter() - build_t0,
+                )
+            if checkpoint_every > 0 and i % checkpoint_every == 0 and i < len(prompts):
+                export_checkpoint(i, final=False)
+
+        final_path = export_checkpoint(len(prompts), final=True)
+        logger.info(
+            "APPROVED_HEATMAP build_complete prompts=%d decode_tokens=%d elapsed_s=%.3f final_path=%s written=%s",
+            len(prompts),
+            total_decode_tokens,
+            time.perf_counter() - build_t0,
+            final_path,
+            ",".join(written_paths),
+        )
+        print("APPROVED HEATMAP BUILD COMPLETE", flush=True)
+        return final_path
+    finally:
+        try:
+            if heatmap_collection_started:
+                gpu_store.hcs_reset()
+        finally:
+            model.server_cleanup()
+
+
 _registry_file: Optional[Path] = None
 
 
@@ -998,6 +1610,8 @@ def main():
             "CFG_GPU_PREFILL_THRESHOLD": "gpu_prefill_threshold",
             "CFG_GGUF_PATH": "gguf_path",
             "CFG_HEATMAP_PATH": "heatmap_path",
+            "CFG_APPROVED_HEATMAP_MODE": "approved_heatmap_mode",
+            "CFG_APPROVED_HEATMAP_MANIFEST_URL": "approved_heatmap_manifest_url",
             "CFG_FORCE_LOAD": "force_load",
             "CFG_FORCE_REBUILD_CACHE": "force_rebuild_cache",
             "CFG_FORCE_REBUILD_HQQ_CACHE": "force_rebuild_hqq_cache",
@@ -1140,6 +1754,25 @@ def main():
                         help="Experimental: cap sliding-attention KV layers to their physical window; requires correctness validation")
     parser.add_argument("--heatmap-path", default=None,
                         help="Path to expert_heatmap.json for HCS init")
+    parser.add_argument("--approved-heatmap-mode",
+                        default=os.environ.get("KRASIS_APPROVED_HEATMAP_MODE", "auto"),
+                        choices=list(APPROVED_HEATMAP_MODE_CHOICES),
+                        help="Approved route-heatmap lookup mode: auto downloads a matching GitHub artifact if available; off always builds the startup heatmap; require errors if no approved artifact matches")
+    parser.add_argument("--approved-heatmap-manifest-url",
+                        default=os.environ.get("KRASIS_APPROVED_HEATMAP_MANIFEST_URL", APPROVED_HEATMAP_DEFAULT_MANIFEST_URL),
+                        help="Manifest URL for approved route-heatmap artifacts")
+    parser.add_argument("--approved-heatmap-build-out", default=None,
+                        help="Build an approved cumulative HCS route heatmap artifact at this path and exit")
+    parser.add_argument("--approved-heatmap-resume-from", default=None,
+                        help="Resume approved heatmap capture from an existing validated approved artifact")
+    parser.add_argument("--approved-heatmap-prompts", default=None,
+                        help="Prompt corpus for --approved-heatmap-build-out; same blank-line separated format as heatmap_prompts.txt")
+    parser.add_argument("--approved-heatmap-decode-tokens", type=int, default=HEATMAP_DECODE_TOKENS,
+                        help="Decode tokens per prompt for approved heatmap capture")
+    parser.add_argument("--approved-heatmap-max-prompts", type=int, default=0,
+                        help="Limit approved heatmap capture to the first N prompts; 0 means all")
+    parser.add_argument("--approved-heatmap-checkpoint-every", type=int, default=0,
+                        help="Write cumulative approved heatmap checkpoints every N prompts; 0 means final artifact only")
     parser.add_argument("--gpu-expert-bits", type=int, default=4, choices=[4, 8, 16],
                         help="Expert weight bits for GPU prefill experts: 4/8 use Marlin cache, 16 uses direct BF16 debug mode")
     parser.add_argument("--expert-group-size", type=int, default=128, choices=[32, 64, 128],
@@ -1241,6 +1874,12 @@ def main():
         parser.error("--dynamic-hcs-tail-blocks must be an integer in 1..5")
     if args.dynamic_hcs_tail_blocks < 1 or args.dynamic_hcs_tail_blocks > 5:
         parser.error("--dynamic-hcs-tail-blocks must be in 1..5")
+    args.approved_heatmap_mode = str(args.approved_heatmap_mode or "auto").strip().lower()
+    if args.approved_heatmap_mode not in APPROVED_HEATMAP_MODE_CHOICES:
+        parser.error(
+            "--approved-heatmap-mode must be one of: "
+            + ", ".join(APPROVED_HEATMAP_MODE_CHOICES)
+        )
     _hcs_host_aliases = {
         "1": "source",
         "true": "source",
@@ -1433,6 +2072,12 @@ def main():
     args.model_path = os.path.expanduser(args.model_path)
     if args.heatmap_path:
         args.heatmap_path = os.path.expanduser(args.heatmap_path)
+    if args.approved_heatmap_build_out:
+        args.approved_heatmap_build_out = os.path.expanduser(args.approved_heatmap_build_out)
+    if args.approved_heatmap_resume_from:
+        args.approved_heatmap_resume_from = os.path.expanduser(args.approved_heatmap_resume_from)
+    if args.approved_heatmap_prompts:
+        args.approved_heatmap_prompts = os.path.expanduser(args.approved_heatmap_prompts)
     if args.gguf_path:
         args.gguf_path = os.path.expanduser(args.gguf_path)
     if args.expert_hqq_diagnostic_cache_spec:
@@ -2121,6 +2766,11 @@ def main():
         logger.info("Startup diagnostic exit after VRAM calibration requested")
         return
 
+    if args.approved_heatmap_build_out:
+        _build_approved_heatmap(_model, args.approved_heatmap_build_out, args)
+        vram_monitor.report_event("approved_heatmap_build_complete")
+        return
+
     # ── Pre-compute multi-GPU layer splits (before HCS, so we can filter rankings) ──
     # Splits are based on total HCS budget (hard+soft) on each GPU, so layers
     # are proportional to where experts can actually live.
@@ -2338,11 +2988,10 @@ def main():
             _warn("Experimental HCS heuristic init enabled: skipping global heatmap build")
             ranking = []
         else:
-            # ── Build heatmap ──
-            # Always rebuild fresh on startup so the heatmap reflects current decode
-            # routing and exact heatmap build parameters. Reuse is only allowed via
-            # explicit --heatmap-path, and that path must validate against the same
-            # runtime params, heatmap params, prompt hash, and Krasis version.
+            # ── Load approved heatmap or build quick startup heatmap ──
+            # Approved heatmaps are route-prior artifacts: they must match the
+            # model/router signature and a validated runtime, but local VRAM
+            # calibration still decides how many experts can be resident.
             heatmap_prompts = _load_heatmap_prompts()
             _assert_heatmap_prompts_are_held_out(heatmap_prompts)
             expected_heatmap_metadata = _expected_heatmap_metadata(_model, args, heatmap_prompts)
@@ -2350,16 +2999,36 @@ def main():
             if args.heatmap_path:
                 _dim(f"Using user-provided heatmap: {os.path.basename(heatmap_path)}")
                 validated_heatmap_data = _load_validated_heatmap(heatmap_path, expected_heatmap_metadata)
-                _detail("Heatmap metadata validated against current runtime and build params")
+                heatmap_meta = validated_heatmap_data.get("_metadata", {})
+                if heatmap_meta.get("format") == APPROVED_HEATMAP_FORMAT:
+                    _detail("Approved route heatmap validated against model/router signature and compatible runtime")
+                else:
+                    _detail("Heatmap metadata validated against current runtime and build params")
             else:
-                _status("Building expert heatmap (decode-weighted calibration)")
-                heatmap_path = _build_heatmap(_model, heatmap_path, args)
-                if heatmap_timing_enabled:
-                    heatmap_to_ready_start_s = time.perf_counter()
-                    logger.info(
-                        "HEATMAP_TIMING post_heatmap_start path=%s",
-                        heatmap_path,
-                    )
+                _status("Checking approved route heatmap cache")
+                approved_path, validated_heatmap_data = _try_load_auto_approved_heatmap(
+                    cache_dir,
+                    expected_heatmap_metadata,
+                    args,
+                )
+                if approved_path:
+                    heatmap_path = approved_path
+                    _detail("Using approved route heatmap; quick startup heatmap collection skipped")
+                    if heatmap_timing_enabled:
+                        heatmap_to_ready_start_s = time.perf_counter()
+                        logger.info(
+                            "HEATMAP_TIMING approved_heatmap_loaded path=%s",
+                            heatmap_path,
+                        )
+                else:
+                    _status("Building expert heatmap (decode-weighted calibration)")
+                    heatmap_path = _build_heatmap(_model, heatmap_path, args)
+                    if heatmap_timing_enabled:
+                        heatmap_to_ready_start_s = time.perf_counter()
+                        logger.info(
+                            "HEATMAP_TIMING post_heatmap_start path=%s",
+                            heatmap_path,
+                        )
 
             # ── Load heatmap and build sorted ranking ──
             ranking_t0 = time.perf_counter()

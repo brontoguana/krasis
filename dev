@@ -17,6 +17,11 @@
 #   ./dev network <port>            Run network tests against a running server
 #   ./dev network <port> --large    Include large-prompt tests
 #   ./dev benchmark <config>        Run standard benchmark (prefill/decode/round trip) and exit
+#   ./dev approved-heatmap-build <config> --out <path>
+#                                    Build approved cumulative HCS route heatmap checkpoints and exit
+#                                    Add --resume-from <json> to append prompts to an existing artifact
+#   ./dev approved-heatmap-eval <config> <heatmap.json>
+#                                    Benchmark a config with an approved heatmap artifact
 #   ./dev speed-test                Run the fixed standard speed benchmark (QCN INT4 HQQ8 k4v4)
 #   ./dev perplexity <config>       Run perplexity eval (WikiText-2 by default) and exit
 #   ./dev release-test <model>      Run full release test (launcher matrix + release config matrix, produces report)
@@ -1190,6 +1195,115 @@ do_benchmark() {
     verify_repo_imports
     cd "$SCRIPT_DIR" && KRASIS_RUN_DIR="$run_dir" KRASIS_RUN_TYPE="dev-benchmark" run_repo_python -m krasis.server --config "$conf" --benchmark-only "$@" 2>&1 | tee "$logfile"
     info "Benchmark log saved: $logfile"
+    summarize_dynamic_hcs_from_log "$logfile"
+}
+
+summarize_dynamic_hcs_from_log() {
+    local logfile="$1"
+    [[ -f "$logfile" ]] || return 0
+
+    local summary
+    summary=$(perl -ne '
+        s/\e\[[0-9;]*m//g;
+        if (/Dynamic HCS: hit=([0-9.]+)% .*?request_promotions=(\d+)\/(\d+) budget_skips=(\d+) no_slot=(\d+) copy_failures=(\d+)/) {
+            ($hit, $promotions, $limit, $budget_skips, $no_slot, $copy_failures) = ($1, $2, $3, $4, $5, $6);
+        }
+        END {
+            if (defined $hit) {
+                print "hit=${hit}% request_promotions=${promotions}/${limit} budget_skips=${budget_skips} no_slot=${no_slot} copy_failures=${copy_failures}\n";
+            }
+        }
+    ' "$logfile")
+
+    if [[ -n "$summary" ]]; then
+        info "Final Dynamic HCS summary: $summary"
+    fi
+}
+
+do_approved_heatmap_build() {
+    [[ $# -lt 1 ]] && err "Usage: ./dev approved-heatmap-build <config> --out <path> [--resume-from <path>] [--prompts <path>] [--decode-tokens N] [--max-prompts N] [--checkpoint-every N]"
+    local conf
+    conf=$(resolve_config "$1")
+    shift
+
+    local out=""
+    local prompts=""
+    local resume_from=""
+    local decode_tokens=""
+    local max_prompts=""
+    local checkpoint_every=""
+    local passthrough=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --out)
+                [[ $# -ge 2 ]] || err "--out requires a path"
+                out="$2"
+                shift 2
+                ;;
+            --prompts)
+                [[ $# -ge 2 ]] || err "--prompts requires a path"
+                prompts="$2"
+                shift 2
+                ;;
+            --resume-from)
+                [[ $# -ge 2 ]] || err "--resume-from requires a path"
+                resume_from="$2"
+                shift 2
+                ;;
+            --decode-tokens)
+                [[ $# -ge 2 ]] || err "--decode-tokens requires a positive integer"
+                decode_tokens="$2"
+                shift 2
+                ;;
+            --max-prompts)
+                [[ $# -ge 2 ]] || err "--max-prompts requires an integer"
+                max_prompts="$2"
+                shift 2
+                ;;
+            --checkpoint-every)
+                [[ $# -ge 2 ]] || err "--checkpoint-every requires an integer"
+                checkpoint_every="$2"
+                shift 2
+                ;;
+            *)
+                passthrough+=("$1")
+                shift
+                ;;
+        esac
+    done
+    [[ -n "$out" ]] || err "--out is required"
+
+    cleanup_gpu "$conf"
+    auto_rebuild
+    local run_dir
+    run_dir=$(create_run_dir "approved-heatmap-build")
+    local logfile
+    logfile="$run_dir/approved_heatmap_build_stdout.log"
+    info "Building approved HCS route heatmap: $conf"
+    info "Run dir: $run_dir"
+    info "Log: $logfile"
+    verify_repo_imports
+
+    local args=("--config" "$conf" "--approved-heatmap-build-out" "$out")
+    [[ -z "$prompts" ]] || args+=("--approved-heatmap-prompts" "$prompts")
+    [[ -z "$resume_from" ]] || args+=("--approved-heatmap-resume-from" "$resume_from")
+    [[ -z "$decode_tokens" ]] || args+=("--approved-heatmap-decode-tokens" "$decode_tokens")
+    [[ -z "$max_prompts" ]] || args+=("--approved-heatmap-max-prompts" "$max_prompts")
+    [[ -z "$checkpoint_every" ]] || args+=("--approved-heatmap-checkpoint-every" "$checkpoint_every")
+    args+=("${passthrough[@]}")
+
+    cd "$SCRIPT_DIR" && KRASIS_RUN_DIR="$run_dir" KRASIS_RUN_TYPE="approved-heatmap-build" run_repo_python -m krasis.server "${args[@]}" 2>&1 | tee "$logfile"
+    info "Approved heatmap build log saved: $logfile"
+}
+
+do_approved_heatmap_eval() {
+    [[ $# -lt 2 ]] && err "Usage: ./dev approved-heatmap-eval <config> <heatmap.json> [extra benchmark args...]"
+    local conf
+    conf=$(resolve_config "$1")
+    local heatmap="$2"
+    shift 2
+    [[ -f "$heatmap" ]] || err "Heatmap file not found: $heatmap"
+    do_benchmark "$conf" --heatmap-path "$heatmap" "$@"
 }
 
 do_speed_test() {
@@ -2970,6 +3084,8 @@ case "$cmd" in
     run)            do_run "$@" ;;
     test)           do_test "$@" ;;
     benchmark)      do_benchmark "$@" ;;
+    approved-heatmap-build) do_approved_heatmap_build "$@" ;;
+    approved-heatmap-eval) do_approved_heatmap_eval "$@" ;;
     speed-test|speedtest) do_speed_test "$@" ;;
     decode-harness) do_decode_harness "$@" ;;
     release-test)   do_release_test "$@" ;;
@@ -3019,6 +3135,10 @@ case "$cmd" in
         echo "  upload-sidecar-bundle          Upload bundle to configured GitHub release"
         echo "  run <config> [flags]           Launch server (add --benchmark or --selected-gpus GPU[,GPU...] as needed)"
         echo "  benchmark <config>             Run standard benchmark and exit"
+        echo "  approved-heatmap-build <config> --out <path>"
+        echo "                                 Build approved cumulative HCS route heatmap checkpoints"
+        echo "  approved-heatmap-eval <config> <heatmap.json>"
+        echo "                                 Benchmark a config with an approved heatmap artifact"
         echo "  speed-test                     Run the fixed standard speed benchmark"
         echo "  decode-harness <config>        Run synthetic GPU decode harness and exit"
         echo "  perplexity <config>            Run perplexity eval (WikiText-2) and exit"

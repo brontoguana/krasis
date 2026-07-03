@@ -1,5 +1,117 @@
 # Krasis Benchmark Results
 
+## Step-3.7 Approved Route Heatmap Pipeline - 2026-07-03 (RTX 5090)
+
+Purpose: build a model-approved HCS route-prior artifact for Step-3.7 on the
+production INT4/HQQ4/k4v4 config, then compare cumulative checkpoints against
+the existing quick startup heatmap. Timing instrumentation was disabled for the
+speed rows below.
+
+Implementation:
+- Added an approved route-heatmap artifact format keyed by model/router/top-k
+  identity, not by every attention/KV implementation detail.
+- Runtime still performs local VRAM calibration and decides HCS residency from
+  measured local budget; the approved artifact is only an expert ranking.
+- Approved artifacts fail closed: route signature and the current
+  HQQ/KV/runtime key must validate before use.
+- Added `./dev approved-heatmap-build` and `./dev approved-heatmap-eval`.
+- Startup now checks the approved heatmap manifest on GitHub when no explicit
+  `--heatmap-path` is provided, downloads a checksum-verified matching artifact
+  into the model cache, validates it, and skips quick startup heatmap collection.
+
+Build command:
+
+```text
+KRASIS_HEATMAP_SUBSTAGE_TIMING=1 ./dev approved-heatmap-build \
+  tests/step37-flash-4-4-hqq4-k4v4-a16.conf \
+  --out benchmarks/approved_heatmaps/step37_hqq4_k4v4_approved_heatmap.json \
+  --prompts benchmarks/approved_heatmaps/step37_hqq4_k4v4_prompts.txt \
+  --decode-tokens 256 \
+  --checkpoint-every 8
+```
+
+Build corpus: initially 40 held-out coding/IDE/runtime prompts, later extended
+to 80 prompts with the first 40 unchanged for strict resume validation. Route
+collection took `1,381.1s` for the first 40 prompts and `1,354.7s` for the
+resumed p48-p80 tranche. The p80 artifact contains `20,304` captured
+decode-route tokens. Build prompts are separate from benchmark prompts.
+
+| Artifact | Prompts | Captured decode-route tokens | Ranked entries | Route collection elapsed | Artifact |
+|----------|--------:|-----------------------------:|---------------:|-------------------------:|----------|
+| p00008 | 8 | 2,056 | 11,334 | 273.6s | [json](approved_heatmaps/step37_hqq4_k4v4_approved_heatmap.p00008.json) |
+| p00016 | 16 | 4,112 | 11,654 | 550.6s | [json](approved_heatmaps/step37_hqq4_k4v4_approved_heatmap.p00016.json) |
+| p00024 | 24 | 6,168 | 11,814 | 827.6s | [json](approved_heatmaps/step37_hqq4_k4v4_approved_heatmap.p00024.json) |
+| p00032 | 32 | 8,224 | 11,864 | 1,104.4s | [json](approved_heatmaps/step37_hqq4_k4v4_approved_heatmap.p00032.json) |
+| p00040/final | 40 | 10,280 | 11,899 | 1,381.1s | overwritten by p80 resume; eval logs retained |
+| p00048 | 48 | 12,080 | 11,918 | 239.9s resume | [json](approved_heatmaps/step37_hqq4_k4v4_approved_heatmap.p00048.json) |
+| p00056 | 56 | 14,136 | 11,963 | 519.1s resume | [json](approved_heatmaps/step37_hqq4_k4v4_approved_heatmap.p00056.json) |
+| p00064 | 64 | 16,192 | 11,981 | 798.4s resume | [json](approved_heatmaps/step37_hqq4_k4v4_approved_heatmap.p00064.json) |
+| p00072 | 72 | 18,248 | 11,991 | 1,076.6s resume | [json](approved_heatmaps/step37_hqq4_k4v4_approved_heatmap.p00072.json) |
+| p00080/final | 80 | 20,304 | 11,995 | 1,354.7s resume | [json](approved_heatmaps/step37_hqq4_k4v4_approved_heatmap.p00080.json) |
+
+Approved upload target: [stable p00048 artifact](approved_heatmaps/step37_hqq4_k4v4_approved_heatmap.json)
+with [manifest](approved_heatmaps/manifest.json). p00048 is selected because HCS
+hit rate is the primary plateau metric and it had the best held-out HCS hit in
+the p00008-p00080 sweep.
+
+Evaluation command shape:
+
+```text
+./dev benchmark tests/step37-flash-4-4-hqq4-k4v4-a16.conf
+./dev approved-heatmap-eval tests/step37-flash-4-4-hqq4-k4v4-a16.conf <artifact.json>
+```
+
+| Heatmap | Prefill (internal) | Decode (internal) | Decode vs quick | Round trip (network) | HTTP vs quick | HCS residency | Final HCS hit | Request promotions | Min free VRAM | Status | Logs |
+|---------|-------------------:|------------------:|----------------:|---------------------:|--------------:|---------------|--------------:|-------------------:|--------------:|--------|------|
+| Quick startup heatmap | 2,524.7 tok/s | 22.26 tok/s | baseline | 37.50 tok/s | baseline | 2784/12096 (23.0%) | 73.80% | 21922/83664 | 886 MB | BASELINE | [stdout](approved_heatmaps/20260703_step37_heatmap_eval_quick.log), [report](../logs/dev-benchmark_20260703_220208/benchmark_report.log) |
+| Approved p00008 | 2,682.2 tok/s | 21.38 tok/s | -4.0% | 37.18 tok/s | -0.9% | 2784/12096 (23.0%) | 74.79% | 21094/83664 | 884 MB | TOO EARLY | [stdout](approved_heatmaps/20260703_step37_heatmap_eval_p00008.log), [report](../logs/dev-benchmark_20260703_221107/benchmark_report.log) |
+| Approved p00016 | 2,620.2 tok/s | 23.13 tok/s | +3.9% | 40.20 tok/s | +7.2% | 2784/12096 (23.0%) | 74.82% | 21065/83664 | 884 MB | WIN | [stdout](approved_heatmaps/20260703_step37_heatmap_eval_p00016.log), [report](../logs/dev-benchmark_20260703_221625/benchmark_report.log) |
+| Approved p00024 | 2,650.6 tok/s | 22.37 tok/s | +0.5% | 39.83 tok/s | +6.2% | 2784/12096 (23.0%) | 75.46% | 20527/83664 | 884 MB | MIXED | [stdout](approved_heatmaps/20260703_step37_heatmap_eval_p00024.log), [report](../logs/dev-benchmark_20260703_222149/benchmark_report.log) |
+| Approved p00032 | 2,057.3 tok/s | 22.96 tok/s | +3.1% | 39.87 tok/s | +6.3% | 2784/12096 (23.0%) | 75.63% | 20385/83664 | 884 MB | WIN, PREFILL OUTLIER | [stdout](approved_heatmaps/20260703_step37_heatmap_eval_p00032.log), [report](../logs/dev-benchmark_20260703_222710/benchmark_report.log) |
+| Approved p00040/final | 2,654.9 tok/s | 23.68 tok/s | +6.4% | 39.97 tok/s | +6.6% | 2784/12096 (23.0%) | 76.17% | 19941/83664 | 884 MB | BEST INTERNAL DECODE | [stdout](approved_heatmaps/20260703_step37_heatmap_eval_p00040.log), [report](../logs/dev-benchmark_20260703_223238/benchmark_report.log) |
+| Approved p00048 | 2,688.0 tok/s | 23.30 tok/s | +4.7% | 39.58 tok/s | +5.5% | 2784/12096 (23.0%) | 76.45% | 19702/83664 | 884 MB | BEST HCS HIT | [stdout](approved_heatmaps/20260703_step37_heatmap_eval_p00048_resume80.log), [report](../logs/dev-benchmark_20260703_232315/benchmark_report.log) |
+| Approved p00056 | 2,667.9 tok/s | 23.88 tok/s | +7.3% | 40.08 tok/s | +6.9% | 2784/12096 (23.0%) | 76.44% | 19713/83664 | 884 MB | HCS TIE, BEST DECODE | [stdout](approved_heatmaps/20260703_step37_heatmap_eval_p00056_resume80.log), [report](../logs/dev-benchmark_20260703_232837/benchmark_report.log) |
+| Approved p00064 | 2,145.8 tok/s | 23.36 tok/s | +4.9% | 40.83 tok/s | +8.9% | 2784/12096 (23.0%) | 74.91% | 20990/83664 | 884 MB | HCS REGRESSION | [stdout](approved_heatmaps/20260703_step37_heatmap_eval_p00064_resume80.log), [report](../logs/dev-benchmark_20260703_233350/benchmark_report.log) |
+| Approved p00072 | 2,684.6 tok/s | 23.80 tok/s | +6.9% | 38.51 tok/s | +2.7% | 2784/12096 (23.0%) | 75.85% | 20206/83664 | 884 MB | BELOW PEAK | [stdout](approved_heatmaps/20260703_step37_heatmap_eval_p00072_resume80.log), [report](../logs/dev-benchmark_20260703_233918/benchmark_report.log) |
+| Approved p00080/final | 2,443.8 tok/s | 22.74 tok/s | +2.2% | 38.27 tok/s | +2.1% | 2784/12096 (23.0%) | 75.64% | 20379/83664 | 884 MB | BELOW PEAK | [stdout](approved_heatmaps/20260703_step37_heatmap_eval_p00080_resume80.log), [report](../logs/dev-benchmark_20260703_234432/benchmark_report.log) |
+
+Findings:
+- The approved artifact path works: each approved eval skipped quick startup
+  heatmap collection, validated the model/router signature and compatible
+  runtime, then loaded the same effective HCS count as the quick baseline.
+- Quick startup heatmap collection in the baseline used 6 held-out prompts and
+  1,542 decode-route tokens; it took about `3.4 min` of startup time. The
+  approved artifact avoids that startup route-collection pass.
+- First sweep did not show a monotonic flatline. p00016 was already useful,
+  p00024 dipped, p00032 recovered, and p00040 was the best initial checkpoint
+  for internal decode.
+- HCS hit rate is the primary flatline metric for future heatmap sweeps because
+  it is more stable than end-to-end speed. The cumulative Dynamic HCS hit rose
+  from `73.80%` quick to `76.45%` at p48, while request promotions fell from
+  `21922/83664` to `19702/83664`.
+- Continuing the same corpus to p80 did not keep improving held-out HCS hit:
+  p48/p56 were effectively tied (`76.45%`/`76.44%`), then p64/p72/p80 fell to
+  `74.91%`/`75.85%`/`75.64%`. This is a plateau/regression signal for this
+  corpus ordering, not a reason to accept the largest artifact.
+- The original p40 final JSON was overwritten by the p80 resume because the
+  first builder implementation only wrote the `--out` path for final artifacts.
+  The p40 eval logs remain reproducible, and the builder is now fixed to mirror
+  future final artifacts to a stable `pNNNNN` checkpoint path. The p80 final was
+  copied to `step37_hqq4_k4v4_approved_heatmap.p00080.json`; the stable approved
+  filename was then promoted back to p48 for GitHub auto-download.
+- Final p00040 improved internal decode `22.26 -> 23.68 tok/s` (`+6.4%`) and
+  HTTP best `37.50 -> 39.97 tok/s` (`+6.6%`) against the quick heatmap, with
+  HCS and min-free effectively unchanged.
+- The 250-token internal decode row did not improve in the final artifact
+  (`21.2` quick versus `20.89` p00040), while the 100-token row improved
+  strongly (`22.3` quick versus `23.68` p00040). This needs a larger eval
+  corpus before declaring the artifact fully approved.
+- This run is enough to validate the pipeline and show real headroom, but not
+  enough to approve the p80 artifact. The best current candidate by HCS quality is
+  p48, with p56 effectively tied and higher internal decode. Next pass should use
+  repeated evals around p40/p48/p56 and improve corpus weighting/selection before
+  adding more prompts blindly.
+
 ## QCN HQQ4 Cache Builder and Runtime Staging - 2026-07-03 (RTX 5090)
 
 Hardware: EPYC 7742, 1007 GB RAM, 1x RTX 5090. Standard speed runs used
