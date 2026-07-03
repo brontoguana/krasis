@@ -179,6 +179,69 @@ scratch sizing from the maximum per-layer GQA query dimension. The legacy
 custom tiled sliding path remains available for diagnostics with
 `KRASIS_PREFILL_LAYER_SPECIFIC_SLIDING_FA2=0`.
 
+### Current Default Timing After FA2 Promotion
+
+Fresh timing run on the committed default FA2 path. This run intentionally
+enabled prefill/decode timing instrumentation plus GQA branch timing, so the
+throughput row is diagnostic and not a timing-off speed baseline.
+
+Command:
+
+```text
+KRASIS_PREFILL_TIMING=1 KRASIS_PREFILL_GQA_BRANCH_TIMING=1 \
+KRASIS_DECODE_GRAPH_INTERNAL_TIMING=1 KRASIS_DECODE_MIXED_SEGMENT_CLOCKS=1 \
+KRASIS_DECODE_MOE_ROUTE_CLOCKS=1 KRASIS_DECODE_MOE_W2_CLOCKS=1 \
+KRASIS_DECODE_MOE_W2_PRELOAD_CLOCKS=1 KRASIS_DECODE_MAMBA2_GRAPH_CLOCKS=1 \
+KRASIS_DECODE_GQA_PATH_CLOCKS=1 KRASIS_DECODE_GQA_BOUNDARY_CLOCKS=1 \
+KRASIS_DECODE_GQA_COVERAGE_CLOCKS=1 KRASIS_DECODE_FINAL_CLOCKS=1 \
+./dev benchmark tests/step37-flash-4-4-hqq4-k4v4-a16.conf --timing
+```
+
+| Model | Config | Prefill (internal) | Decode (internal) | Round trip (network) | HCS | Min free VRAM | Status | Logs |
+|-------|--------|-------------------:|------------------:|---------------------:|-----|--------------:|--------|------|
+| Step-3.7-Flash | Current default FA2 window prefill, timing enabled | 2,145.8 tok/s | 20.55 tok/s | 35.59 tok/s | 2784/12096 (23.0%) | 876 MB | CURRENT TIMING | [stdout](20260703_step37_current_default_timing.log), [report](../logs/dev-benchmark_20260703_202054/benchmark_report.log) |
+
+Current HCS-loaded 14,473-token prefill attribution:
+
+```text
+Total component time: 4,868.9 ms
+GQA/attention:       1,674.9 ms  (34.4%)
+  HQQ marlin_zp:     1,130.9 ms
+  O projection:        552.9 ms
+  FA2:                 291.9 ms
+  KV append:             6.0 ms  (kernel 4.7 ms)
+MoE:                3,027.6 ms  (62.2%)
+  MoE DMA:          1,747.5 ms
+  DMA wait:         1,734.7 ms
+  W1+act:             767.4 ms
+  W2:                 381.8 ms
+Other:                117.2 ms
+```
+
+Current 249-token internal decode attribution:
+
+```text
+Total:              50.40 ms/tok
+Sync wait:          45.52 ms/tok  (90.3%)
+GPU compute:         3.49 ms/tok
+Cold DMA submit:     0.87 ms/tok
+Upload:              0.11 ms/tok
+Launch:              0.35 ms/tok
+
+MoE expert:          7.85 ms/tok
+GQA path:            7.21 ms/tok
+Route/top-k:         2.24 ms/tok
+GQA-route sync:     42.57 ms/tok
+Cold traffic:        87.2 experts/tok, 674.72 MB/tok
+HCS traffic:        248.8 experts/tok
+```
+
+Conclusion: the FA2 promotion removed the former long-prefill sliding-attention
+debt. `kv_append` is no longer material in the current default path. Long
+prefill is now mostly MoE DMA/wait plus HQQ projection work; short prompt
+prefill remains dominated by MoE DMA; decode remains dominated by exposed graph
+sync wait and residual cold expert traffic.
+
 ## Step Benchmarks - 2026-07-03 (HQQ4/k4v4, RTX 5090)
 
 Hardware: EPYC 7742, 1007 GB RAM, 1x RTX 5090. Command:
