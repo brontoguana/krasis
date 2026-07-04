@@ -1619,6 +1619,10 @@ def main():
             "CFG_SHARED_EXPERT_QUANT": "shared_expert_quant",
             "CFG_DENSE_MLP_QUANT": "dense_mlp_quant",
             "CFG_LM_HEAD_QUANT": "lm_head_quant",
+            "CFG_VISION_QUANT": "step_vision_quant",
+            "CFG_VISION_GROUP_SIZE": "step_vision_group_size",
+            "CFG_STEP_VISION_QUANT": "step_vision_quant",
+            "CFG_STEP_VISION_GROUP_SIZE": "step_vision_group_size",
             "CFG_KRASIS_THREADS": "krasis_threads",
             "CFG_HOST": "host",
             "CFG_PORT": "port",
@@ -1818,6 +1822,12 @@ def main():
                         help="Quantization for dense MLP weights")
     parser.add_argument("--lm-head-quant", default="int8", choices=["bf16", "int8"],
                         help="Quantization for lm_head weights")
+    parser.add_argument("--step-vision-quant", "--vision-quant", dest="step_vision_quant",
+                        default="int4", choices=["bf16", "int4"],
+                        help="Lazy vision tower weight precision for image requests; INT4 is the default")
+    parser.add_argument("--step-vision-group-size", "--vision-group-size", dest="step_vision_group_size",
+                        type=int, default=128, choices=[32, 64, 128],
+                        help="Lazy vision INT4 quantization group size")
     parser.add_argument("--gguf-path", default=None,
                         help="Path to GGUF file for CPU experts")
     parser.add_argument("--force-load", action="store_true",
@@ -2083,6 +2093,8 @@ def main():
         cpu_expert_bits=args.cpu_expert_bits,
         kv_cache_format=args.kv_dtype,
         ring_window_kv=args.ring_window_kv,
+        step_vision_quant=args.step_vision_quant,
+        step_vision_group_size=args.step_vision_group_size,
     )
 
     # Expand ~ in paths (config files use ~/.krasis/...)

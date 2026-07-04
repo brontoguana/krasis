@@ -3,7 +3,7 @@ import os
 import unittest
 from types import SimpleNamespace
 
-from krasis.config import ModelConfig
+from krasis.config import ModelConfig, QuantConfig
 from krasis.model import KrasisModel
 from krasis.vram_budget import (
     _hqq_attention_tensor_shapes_for_layer,
@@ -12,6 +12,7 @@ from krasis.vram_budget import (
 
 
 STEP_MODEL_PATH = "/home/main/.krasis/models/Step-3.7-Flash"
+GEMMA4_MODEL_PATH = "/home/main/.krasis/models/gemma-4-26b-a4b-it"
 
 
 def _safetensor_shape_dtype(tensor_name):
@@ -164,6 +165,115 @@ class StepConfigTest(unittest.TestCase):
         self.assertEqual(tuple(batch["pixel_values"].shape), (1, 3, 728, 728))
         self.assertEqual(batch["num_patches"].tolist(), [0])
         self.assertEqual(int((batch["input_ids"] == processor.image_token_id).sum().item()), 169)
+
+    def test_step37_vision_int4_config_validation(self):
+        self.assertEqual(QuantConfig().step_vision_quant, "int4")
+        self.assertEqual(QuantConfig(step_vision_quant="int4").step_vision_quant, "int4")
+        self.assertEqual(QuantConfig(step_vision_group_size="64").step_vision_group_size, 64)
+        with self.assertRaises(ValueError):
+            QuantConfig(step_vision_quant="int8")
+        with self.assertRaises(ValueError):
+            QuantConfig(step_vision_quant="int4", step_vision_group_size=96)
+
+    def test_step37_vision_int4_linear_and_conv_shapes(self):
+        import torch
+
+        from krasis.step_vision_int4 import StepVisionInt4Conv2d, StepVisionInt4Linear
+
+        torch.manual_seed(7)
+        linear = torch.nn.Linear(37, 19, bias=True).to(torch.bfloat16)
+        q_linear = StepVisionInt4Linear.from_linear(linear, group_size=32)
+        x = torch.randn(2, 5, 37, dtype=torch.bfloat16)
+        y = q_linear(x)
+        self.assertEqual(tuple(y.shape), (2, 5, 19))
+        self.assertEqual(q_linear.packed_weight.dtype, torch.uint8)
+        self.assertLess(q_linear.quantized_weight_bytes(), linear.weight.numel() * linear.weight.element_size())
+
+        conv = torch.nn.Conv2d(3, 11, kernel_size=3, stride=2, padding=1, bias=True).to(torch.bfloat16)
+        q_conv = StepVisionInt4Conv2d.from_conv2d(conv, group_size=32)
+        pixels = torch.randn(2, 3, 16, 16, dtype=torch.bfloat16)
+        out = q_conv(pixels)
+        self.assertEqual(tuple(out.shape), (2, 11, 8, 8))
+        self.assertEqual(q_conv.packed_weight.dtype, torch.uint8)
+        self.assertLess(q_conv.quantized_weight_bytes(), conv.weight.numel() * conv.weight.element_size())
+
+
+@unittest.skipUnless(os.path.exists(os.path.join(GEMMA4_MODEL_PATH, "config.json")), "Gemma4 not downloaded")
+class Gemma4VisionConfigTest(unittest.TestCase):
+    def test_gemma4_vision_support_and_dynamic_placeholder_expansion(self):
+        from PIL import Image
+
+        from krasis.gemma4_vision import Gemma4ImagePreprocessor
+
+        model = KrasisModel.__new__(KrasisModel)
+        model.cfg = SimpleNamespace(model_path=GEMMA4_MODEL_PATH, hidden_size=2816)
+        model._qwen_vision_processor = None
+        model._qwen_vision_model = None
+        model._step_vision_modules = None
+        model._step_vision_processor = None
+        model._step_vision_model = None
+        model._step_vision_projector = None
+        model._gemma_vision_raw_config = {
+            "image_token_id": 258880,
+            "boi_token_id": 255999,
+            "eoi_token_id": 258882,
+        }
+
+        self.assertTrue(model.supports_gemma_image_inputs())
+        self.assertTrue(model.supports_image_inputs())
+
+        processor = Gemma4ImagePreprocessor(
+            patch_size=16,
+            pooling_kernel_size=3,
+            max_soft_tokens=280,
+            rescale_factor=1.0 / 255.0,
+        )
+        image = Image.new("RGB", (728, 728), (32, 64, 96))
+        batch = processor([image])
+        self.assertEqual(tuple(batch["pixel_values"].shape), (1, 2520, 768))
+        self.assertEqual(tuple(batch["image_position_ids"].shape), (1, 2520, 2))
+        self.assertEqual(batch["num_soft_tokens_per_image"], [256])
+
+        expanded, block_ids = model._gemma_expand_image_token_ids(
+            [2, 258880, 106],
+            batch["num_soft_tokens_per_image"],
+        )
+        self.assertEqual(expanded[0], 2)
+        self.assertEqual(expanded[1], 255999)
+        self.assertEqual(expanded[-2], 258882)
+        self.assertEqual(expanded[-1], 106)
+        self.assertEqual(expanded.count(258880), 256)
+        self.assertEqual(block_ids.count(0), 256)
+        self.assertEqual(block_ids[0], -1)
+        self.assertEqual(block_ids[1], -1)
+        self.assertEqual(block_ids[-2], -1)
+
+    def test_gemma4_patch_embedder_runs_with_int4_input_projection(self):
+        import torch
+
+        from krasis.gemma4_vision import Gemma4VisionConfig, Gemma4VisionPatchEmbedder
+        from krasis.step_vision_int4 import StepVisionInt4Linear
+
+        cfg = Gemma4VisionConfig(
+            hidden_size=32,
+            intermediate_size=64,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            head_dim=8,
+            patch_size=4,
+            position_embedding_size=8,
+        )
+        embedder = Gemma4VisionPatchEmbedder(cfg).to(dtype=torch.bfloat16)
+        embedder.input_proj = StepVisionInt4Linear.from_linear(embedder.input_proj, group_size=32)
+
+        pixel_values = torch.rand(1, 6, 3 * cfg.patch_size * cfg.patch_size, dtype=torch.float32)
+        pixel_position_ids = torch.zeros(1, 6, 2, dtype=torch.long)
+        padding_positions = torch.zeros(1, 6, dtype=torch.bool)
+
+        hidden = embedder(pixel_values, pixel_position_ids, padding_positions)
+        self.assertEqual(tuple(hidden.shape), (1, 6, 32))
+        self.assertEqual(hidden.dtype, torch.bfloat16)
 
 
 if __name__ == "__main__":

@@ -78,6 +78,8 @@ Config files use `KEY=VALUE` format. CLI flags override config file values.
 | `--shared-expert-quant` | int8 | Shared expert quant: `int8` or `bf16` |
 | `--dense-mlp-quant` | int8 | Dense MLP quant: `int8` or `bf16` |
 | `--lm-head-quant` | int8 | LM head quant: `int8` or `bf16` |
+| `--vision-quant` / `--step-vision-quant` | int4 | Lazy vision tower quantization for image requests: `int4` default, or `bf16` for validation |
+| `--vision-group-size` / `--step-vision-group-size` | 128 | Vision INT4 row group size: `32`, `64`, or `128` |
 | `--kv-dtype` | k6v6 | KV cache format: `k6v6` Quality, `k4v4` Ultra Compact, or `bf16` Full Precision |
 
 AWQ attention and Polar4 KV are deprecated and disabled for new runs. Their
@@ -176,8 +178,9 @@ Krasis lets you quantize each component independently. The defaults are a good s
 | Shared expert | INT8, BF16 | INT8 |
 | Dense MLP | INT8, BF16 | INT8 |
 | LM head | INT8, BF16 | INT8 |
+| Lazy vision towers | INT4, BF16 | INT4 |
 | KV cache | k6v6, k4v4, BF16 | k6v6 |
 
-Embeddings, norms, and routing gates are always kept at BF16.
+Embeddings, norms, routing gates, and vision norms/positional plumbing are always kept at BF16. Vision towers are lazy-loaded on the first image request, staged on GPU only for image embedding generation, then released back to CPU.
 
 HQQ attention artifacts live under the normal model cache tree and the runtime restores staged prefill/decode descriptors from that cache. AWQ attention is deprecated and disabled for new runs; do not use it for production validation. BF16 is full precision with no calibration needed.

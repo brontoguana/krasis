@@ -202,7 +202,7 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
         local_dir_name="gemma-4-26b-a4b-it",
         revision="6e6f6edea8c52db2094dca3086e4b963a0034dfc",
         recommended_config="tests/gemma-4-4-k6v6-a16.conf",
-        notes="Gemma4 text-only path; non-ring k6v6 is the validated fast mode.",
+        notes="Gemma4 text plus lazy image path; non-ring k6v6 is the validated fast text mode.",
     ),
 )
 
