@@ -305,6 +305,8 @@ class QuantConfig:
     hqq_auto_budget_pct: Optional[float] = None  # auto promotion budget as % of base-to-target attention span
     hqq46_auto_budget_mib: Optional[int] = None  # legacy HQQ4/6 auto promotion budget in MiB
     hqq_sidecar_manifest: Optional[str] = None  # explicit HQQ4-only sidecar manifest for switchable correction
+    step_vision_quant: str = "int4"  # "bf16" or "int4"; lazy vision image paths; legacy field name
+    step_vision_group_size: int = 128  # lazy vision INT4 row group size; legacy field name
 
     def __post_init__(self):
         kv_aliases = {
@@ -427,6 +429,22 @@ class QuantConfig:
             raise ValueError(
                 "hqq_sidecar_manifest currently requires hqq_group_size=128 because sidecar manifests "
                 "are tied to source HQQ group boundaries."
+            )
+        self.step_vision_quant = str(self.step_vision_quant or "int4").strip().lower()
+        if self.step_vision_quant not in ("bf16", "int4"):
+            raise ValueError(
+                f"Unsupported vision_quant/step_vision_quant '{self.step_vision_quant}'. Use 'bf16' or 'int4'."
+            )
+        try:
+            self.step_vision_group_size = int(self.step_vision_group_size)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"vision_group_size/step_vision_group_size must be an integer, got {self.step_vision_group_size!r}"
+            ) from exc
+        if self.step_vision_group_size not in (32, 64, 128):
+            raise ValueError(
+                f"Unsupported vision_group_size/step_vision_group_size={self.step_vision_group_size}. "
+                "Use 32, 64, or 128."
             )
         self.gpu_expert_int4_calib = self.gpu_expert_int4_calib.lower()
         if self.gpu_expert_int4_calib not in GPU_EXPERT_INT4_CALIB_CHOICES:

@@ -9133,7 +9133,8 @@ extern "C" __global__ void flash_attn_tiled_kernel(
     const __nv_bfloat16* __restrict__ k_cur,   /* [M, kv_stride] BF16 current chunk */
     const __nv_bfloat16* __restrict__ v_cur,   /* [M, kv_stride] BF16 current chunk */
     int M, int num_q_heads, int num_kv_heads, int head_dim,
-    float softmax_scale, int start_pos, int kv_stride, int sliding_window)
+    float softmax_scale, int start_pos, int kv_stride, int sliding_window,
+    const int* __restrict__ vision_block_ids)
 {
     int q_base = blockIdx.x * FA_BR;
     int qh = blockIdx.y;
@@ -9261,7 +9262,15 @@ extern "C" __global__ void flash_attn_tiled_kernel(
             for (int c = lane; c < FA_BC; c += 32) {
                 int abs_kv = kv_start + c;
                 int row_min_kv = (sliding_window > 0) ? max(0, abs_qi_r - sliding_window + 1) : 0;
-                if (c < tile_size && abs_kv <= abs_qi_r && abs_kv >= row_min_kv) {
+                bool in_tile = c < tile_size;
+                bool causal_allowed = abs_kv <= abs_qi_r;
+                bool same_vision_block = false;
+                if (in_tile && vision_block_ids != nullptr && sliding_window > 0) {
+                    int q_block = vision_block_ids[abs_qi_r];
+                    int k_block = vision_block_ids[abs_kv];
+                    same_vision_block = q_block >= 0 && q_block == k_block;
+                }
+                if (in_tile && abs_kv >= row_min_kv && (causal_allowed || same_vision_block)) {
                     row[c] *= softmax_scale;
                     local_max = fmaxf(local_max, row[c]);
                 } else {

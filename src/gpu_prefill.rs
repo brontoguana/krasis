@@ -6109,6 +6109,7 @@ pub struct PrefillEngine {
     pub external_mrope_cos_ptr: u64,
     pub external_mrope_sin_ptr: u64,
     pub external_mrope_half_dim: usize,
+    pub external_vision_block_ids_ptr: u64,
     pub kv_k_ptrs: Vec<u64>, // per-layer K cache pointers (FP8)
     pub kv_v_ptrs: Vec<u64>, // per-layer V cache pointers (FP8)
     pub kv_max_seq: usize,
@@ -14058,11 +14059,13 @@ impl PrefillEngine {
         mrope_cos_ptr: u64,
         mrope_sin_ptr: u64,
         mrope_half_dim: usize,
+        vision_block_ids_ptr: u64,
     ) {
         self.external_prefill_embeddings_ptr = embeddings_ptr;
         self.external_mrope_cos_ptr = mrope_cos_ptr;
         self.external_mrope_sin_ptr = mrope_sin_ptr;
         self.external_mrope_half_dim = mrope_half_dim;
+        self.external_vision_block_ids_ptr = vision_block_ids_ptr;
     }
 
     pub fn clear_external_prefill_inputs(&mut self) {
@@ -14070,6 +14073,7 @@ impl PrefillEngine {
         self.external_mrope_cos_ptr = 0;
         self.external_mrope_sin_ptr = 0;
         self.external_mrope_half_dim = 0;
+        self.external_vision_block_ids_ptr = 0;
     }
 
     pub fn last_prepare_post_alloc_free_mb(&self) -> usize {
@@ -28304,6 +28308,7 @@ impl PrefillEngine {
         let mut a11;
         let mut a12;
         let mut a13;
+        let mut a14;
         {
             let event = if custom_tiled_timing.is_some() {
                 self.gqa_timing_event_start("custom_tiled arg_pack")?
@@ -28325,6 +28330,14 @@ impl PrefillEngine {
             a11 = start_pos as i32;
             a12 = kv_stride;
             a13 = sliding_window.min(i32::MAX as usize) as i32;
+            a14 = if self.external_vision_block_ids_ptr != 0
+                && sliding_window > 0
+                && self.is_gemma4_layer(layer_idx)
+            {
+                self.external_vision_block_ids_ptr
+            } else {
+                0
+            };
             if let Some(timing) = custom_tiled_timing {
                 self.finish_gqa_custom_tiled_step(
                     GQA_CUSTOM_TILED_ARG_PACK,
@@ -28480,6 +28493,7 @@ impl PrefillEngine {
                         &mut a11 as *mut _ as *mut std::ffi::c_void,
                         &mut a12 as *mut _ as *mut std::ffi::c_void,
                         &mut a13 as *mut _ as *mut std::ffi::c_void,
+                        &mut a14 as *mut _ as *mut std::ffi::c_void,
                     ],
                 )
             }
@@ -29317,11 +29331,15 @@ impl PrefillEngine {
                 || head_dim != cfg.head_dim
                 || q_dim != cfg.hidden_size);
         let sliding_window_left = sliding_window.saturating_sub(1).min(i32::MAX as usize) as i32;
+        let gemma_vision_bidir_sliding = use_sliding_window
+            && self.external_vision_block_ids_ptr != 0
+            && self.is_gemma4_layer(layer_idx);
         let ring_window_decode_layer = self.prefill_kv_active
             && self.decode_kv_max_seq > 0
             && self.decode_kv_max_seq_for_layer(layer_idx) > 0
             && self.decode_kv_max_seq_for_layer(layer_idx) < self.decode_kv_max_seq;
         let use_ring_fa2_window_prefill = use_sliding_window
+            && !gemma_vision_bidir_sliding
             && ring_window_decode_layer
             && self.kv_format == 1
             && layer_k_ptr != 0
@@ -29329,7 +29347,8 @@ impl PrefillEngine {
             && self.kernels.flash_attn_fwd_window.is_some()
             && fa2_supports_head_dim;
         let use_custom_sliding_prefill = use_sliding_window
-            && ((ring_window_decode_layer && !use_ring_fa2_window_prefill)
+            && (gemma_vision_bidir_sliding
+                || (ring_window_decode_layer && !use_ring_fa2_window_prefill)
                 || (self.prefill_kv_active
                     && (gemma_custom_window_prefill_enabled()
                         || (layer_specific_sliding_gqa_shape
@@ -61393,6 +61412,7 @@ mod kernel_tests {
         let mut start_pos_i32: i32 = 0;
         let mut kv_stride_i32 = kv_stride;
         let mut sliding_window_i32: i32 = 0;
+        let mut vision_block_ids_ptr: u64 = 0;
 
         unsafe {
             // FA_BR=16, 1 warp (32 threads)
@@ -61428,6 +61448,7 @@ mod kernel_tests {
                 &mut start_pos_i32 as *mut _ as *mut _,
                 &mut kv_stride_i32 as *mut _ as *mut _,
                 &mut sliding_window_i32 as *mut _ as *mut _,
+                &mut vision_block_ids_ptr as *mut _ as *mut _,
             ];
             launch(
                 kernel,
@@ -61499,6 +61520,7 @@ mod kernel_tests {
         let mut start_pos_i32 = cached_len as i32;
         let mut kv_stride_i32 = kv_stride;
         let mut sliding_window_i32: i32 = 0;
+        let mut vision_block_ids_ptr: u64 = 0;
 
         unsafe {
             let br = 16u32;
@@ -61532,6 +61554,7 @@ mod kernel_tests {
                 &mut start_pos_i32 as *mut _ as *mut _,
                 &mut kv_stride_i32 as *mut _ as *mut _,
                 &mut sliding_window_i32 as *mut _ as *mut _,
+                &mut vision_block_ids_ptr as *mut _ as *mut _,
             ];
             launch(
                 kernel,

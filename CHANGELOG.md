@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+- Added Gemma4 image support with the same lazy architecture as Qwen/Step
+  vision. Gemma4 support is detected from `gemma4` metadata plus
+  `model.vision_tower.*` and `model.embed_vision.*` safetensors entries; image
+  requests load the local Gemma4 preprocessor/vision/embedder slice on demand,
+  stage it on GPU only while image embeddings are generated, then release it
+  back to CPU before text prefill/decode. Vision quantization now defaults to
+  INT4 through `--vision-quant int4`, with BF16 available via
+  `--vision-quant bf16` for validation. Validated on
+  `tests/gemma-4-4-hqq4-k4v4-a16.conf` with the same blue-square image request:
+  BF16 answered `Blue` with `1092.5 MB` resident vision payload and `1170 MB`
+  released after staging; default INT4 also answered `Blue` with `316.0 MB`
+  resident payload and `380 MB` released after staging. Gemma4 sliding
+  attention image-token blocks now pass a vision-block mask into the Rust
+  prefill path so full-attention layers remain causal while image soft-token
+  blocks get the required bidirectional overlay.
+
+- Added explicit Step-3.7 vision INT4 quantization for image requests via
+  `--vision-quant int4` / `--step-vision-quant int4` and
+  `--vision-group-size` / `--step-vision-group-size`. The path keeps the
+  BF16 lazy vision architecture intact, then packs Step vision linears,
+  convolution weights, and attention `in_proj_weight` into signed INT4 plus
+  BF16 scales. The first validation path dequantizes one module at a time during
+  the image forward, so resident VRAM is reduced before fused vision kernels
+  exist. Measured on the 5090: BF16 vision staged `3803.0 MiB` allocated with
+  `4160.2 MiB` peak, while INT4 staged `1024.0 MiB` allocated with `3145.9 MiB`
+  peak in the isolated probe. Full server validation with
+  `tests/step37-flash-4-4-hqq4-k4v4-a16.conf --step-vision-quant int4`
+  answered blue square, red circle, and green triangle image prompts correctly;
+  the server logged `quant=int4`, `vision_resident_mb=1005.1`, and release back
+  to CPU after each request.
+
 - Added the Step-3.7-Flash BF16 vision path using the same lazy architecture as
   Qwen vision: Step image support is detected from local model metadata, the
   vision tower/projector load on first image request, move to GPU only while

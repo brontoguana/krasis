@@ -1009,6 +1009,7 @@ struct MultimodalPrefillInputs {
     mrope_sin_ptr: u64,
     mrope_half_dim: usize,
     rope_delta: i32,
+    vision_block_ids_ptr: u64,
     image_count: usize,
     image_tokens: usize,
 }
@@ -1341,6 +1342,11 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                     .map_err(|e| format!("image prefill rope_delta read failed: {}", e))?
                     .extract()
                     .map_err(|e| format!("image prefill rope_delta extract failed: {}", e))?;
+                let vision_block_ids_ptr: u64 = mm
+                    .get_item("vision_block_ids_ptr")
+                    .map_err(|e| format!("image prefill vision_block_ids_ptr read failed: {}", e))?
+                    .extract()
+                    .map_err(|e| format!("image prefill vision_block_ids_ptr extract failed: {}", e))?;
                 let image_count: usize = mm
                     .get_item("image_count")
                     .map_err(|e| format!("image prefill image_count read failed: {}", e))?
@@ -1358,6 +1364,7 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                     mrope_sin_ptr,
                     mrope_half_dim,
                     rope_delta,
+                    vision_block_ids_ptr,
                     image_count,
                     image_tokens,
                 })
@@ -1496,6 +1503,7 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                     mm.mrope_cos_ptr,
                     mm.mrope_sin_ptr,
                     mm.mrope_half_dim,
+                    mm.vision_block_ids_ptr,
                 );
             } else {
                 engine.clear_external_prefill_inputs();

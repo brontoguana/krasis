@@ -25493,6 +25493,7 @@ impl GpuDecodeStore {
             external_mrope_cos_ptr: 0,
             external_mrope_sin_ptr: 0,
             external_mrope_half_dim: 0,
+            external_vision_block_ids_ptr: 0,
             kv_k_ptrs: graph.kv_k_ptrs.clone(),
             kv_v_ptrs: graph.kv_v_ptrs.clone(),
             kv_max_seq: graph.kv_max_seq,
