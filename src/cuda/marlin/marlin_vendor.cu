@@ -126,11 +126,11 @@ static bool is_valid_config(
 // Template dispatch -- only instantiate what we need:
 // BF16 compute, U4B8/U8B128 no-zp, and U8 with HQQ float zero points.
 #define _GET_IF(W_TYPE, THREAD_M_BLOCKS, THREAD_N_BLOCKS, THREAD_K_BLOCKS, M_BLOCK_SIZE_8, GROUP_BLOCKS, NUM_THREADS, IS_ZP_FLOAT) \
-    else if (q_type == W_TYPE && thread_m_blocks == THREAD_M_BLOCKS && thread_n_blocks == THREAD_N_BLOCKS && \
+    if (q_type == W_TYPE && thread_m_blocks == THREAD_M_BLOCKS && thread_n_blocks == THREAD_N_BLOCKS && \
              thread_k_blocks == THREAD_K_BLOCKS && m_block_size_8 == M_BLOCK_SIZE_8 && group_blocks == GROUP_BLOCKS && \
              num_threads == NUM_THREADS && is_zp_float == IS_ZP_FLOAT) { \
-        kernel = ::marlin::Marlin<scalar_t, W_TYPE.id(), NUM_THREADS, THREAD_M_BLOCKS, THREAD_N_BLOCKS, \
-                                  THREAD_K_BLOCKS, M_BLOCK_SIZE_8, pipe_stages, GROUP_BLOCKS, IS_ZP_FLOAT>; \
+        return ::marlin::Marlin<scalar_t, W_TYPE.id(), NUM_THREADS, THREAD_M_BLOCKS, THREAD_N_BLOCKS, \
+                                THREAD_K_BLOCKS, M_BLOCK_SIZE_8, pipe_stages, GROUP_BLOCKS, IS_ZP_FLOAT>; \
     }
 
 // Common configs for U4B8 and U8B128 (no act order, no zp)
@@ -204,16 +204,13 @@ MarlinFuncPtr get_marlin_kernel(
     int thread_k_blocks, bool m_block_size_8, bool has_act_order, bool has_zp,
     int group_blocks, int num_threads, bool is_zp_float) {
 
-    auto kernel = MarlinDefault;
-    if (false) {}
-
     // U4/U8 are used for native fused HQQ4/HQQ8 prefill with BF16 zero points.
     COMMON_GET_IF(sglang::kU4B8)
     COMMON_GET_IF(sglang::kU8B128)
     COMMON_GET_IF_FLOAT_ZP(sglang::kU4)
     COMMON_GET_IF_FLOAT_ZP(sglang::kU8)
 
-    return kernel;
+    return MarlinDefault;
 }
 
 template <typename scalar_t>

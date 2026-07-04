@@ -197,12 +197,12 @@ static bool moe_is_valid_config(
 
 // MoE _GET_IF uses s_type_id in addition to w_type_id
 #define _MOE_GET_IF(W_TYPE, THREAD_M_BLOCKS, THREAD_N_BLOCKS, THREAD_K_BLOCKS, M_BLOCK_SIZE_8, GROUP_BLOCKS, NUM_THREADS, IS_ZP_FLOAT) \
-    else if (q_type == W_TYPE && thread_m_blocks == THREAD_M_BLOCKS && thread_n_blocks == THREAD_N_BLOCKS && \
+    if (q_type == W_TYPE && thread_m_blocks == THREAD_M_BLOCKS && thread_n_blocks == THREAD_N_BLOCKS && \
              thread_k_blocks == THREAD_K_BLOCKS && m_block_size_8 == M_BLOCK_SIZE_8 && group_blocks == GROUP_BLOCKS && \
              num_threads == NUM_THREADS && is_zp_float == IS_ZP_FLOAT) { \
         constexpr auto S_TYPE = (std::is_same<scalar_t, half>::value ? host::kFloat16 : host::kBFloat16); \
-        kernel = ::device::marlin_moe::Marlin<scalar_t, W_TYPE.id(), S_TYPE.id(), NUM_THREADS, THREAD_M_BLOCKS, THREAD_N_BLOCKS, \
-                                  THREAD_K_BLOCKS, M_BLOCK_SIZE_8, pipe_stages, GROUP_BLOCKS, IS_ZP_FLOAT>; \
+        return ::device::marlin_moe::Marlin<scalar_t, W_TYPE.id(), S_TYPE.id(), NUM_THREADS, THREAD_M_BLOCKS, THREAD_N_BLOCKS, \
+                                            THREAD_K_BLOCKS, M_BLOCK_SIZE_8, pipe_stages, GROUP_BLOCKS, IS_ZP_FLOAT>; \
     }
 
 #define MOE_COMMON_GET_IF_M1(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS) \
@@ -242,13 +242,10 @@ MarlinFuncPtr moe_get_marlin_kernel(
     const sglang::ScalarType q_type, int thread_m_blocks, int thread_n_blocks,
     int thread_k_blocks, bool m_block_size_8, bool has_act_order, bool has_zp,
     int group_blocks, int num_threads, bool is_zp_float) {
-    auto kernel = MarlinDefault;
-    if (false) {}
-
     MOE_COMMON_GET_IF(sglang::kU4B8)
     MOE_COMMON_GET_IF(sglang::kU8B128)
 
-    return kernel;
+    return MarlinDefault;
 }
 
 template <typename scalar_t>

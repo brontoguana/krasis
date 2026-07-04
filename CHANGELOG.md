@@ -17,7 +17,10 @@
   models still require a separate native Windows FLA sidecar port. The Windows
   sidecar build now also passes `-std=c++17` explicitly to nvcc so MSVC-hosted
   CUDA builds accept the C++17 inline-variable and `if constexpr` constructs
-  already used by the Marlin/FlashAttention sources.
+  already used by the Marlin/FlashAttention sources. Marlin sidecar dispatch
+  now returns directly from matching kernel cases instead of expanding one long
+  `else if` ladder, avoiding an MSVC/nvcc compiler nesting limit while
+  preserving the same kernel instantiations.
 
 - Added Gemma4 image support with the same lazy architecture as Qwen/Step
   vision. Gemma4 support is detected from `gemma4` metadata plus
