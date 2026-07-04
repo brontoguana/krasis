@@ -16,6 +16,12 @@
 #include <cstring>
 #include <algorithm>
 
+#ifdef _WIN32
+#define KRASIS_EXPORT extern "C" __declspec(dllexport)
+#else
+#define KRASIS_EXPORT extern "C" __attribute__((visibility("default")))
+#endif
+
 // ── Stub out torch/sglang dependencies ──────────────────────────────────────
 
 // Replace TORCH_CHECK with a no-op for constexpr contexts.

@@ -19,6 +19,12 @@
 #include <cstring>
 #include <stdint.h>
 
+#ifdef _WIN32
+#define KRASIS_EXPORT extern "C" __declspec(dllexport)
+#else
+#define KRASIS_EXPORT extern "C" __attribute__((visibility("default")))
+#endif
+
 #ifndef KRASIS_SIDECAR_BUILD_ID
 #define KRASIS_SIDECAR_BUILD_ID "unknown"
 #endif
@@ -175,18 +181,18 @@ static void set_local_window(flash::Flash_fwd_params &params, int window_size_le
 // Extern "C" entry points for Rust FFI (dlopen + dlsym)
 // ============================================================================
 
-extern "C" uint32_t krasis_sidecar_abi_version() {
+KRASIS_EXPORT uint32_t krasis_sidecar_abi_version() {
     return KRASIS_SIDECAR_ABI_VERSION;
 }
 
-extern "C" const char* krasis_sidecar_build_id() {
+KRASIS_EXPORT const char* krasis_sidecar_build_id() {
     return KRASIS_SIDECAR_BUILD_ID;
 }
 
 // Forward pass: BF16, all head dimensions, causal and non-causal.
 // The head_dim selects which template instantiation to dispatch to.
 // Returns 0 on success, non-zero on error.
-extern "C" int krasis_flash_attn_fwd_bf16(
+KRASIS_EXPORT int krasis_flash_attn_fwd_bf16(
     // Device pointers
     void *q_ptr, void *k_ptr, void *v_ptr, void *out_ptr,
     void *softmax_lse_ptr,
@@ -251,7 +257,7 @@ extern "C" int krasis_flash_attn_fwd_bf16(
     return 0;
 }
 
-extern "C" int krasis_flash_attn_fwd_bf16_window(
+KRASIS_EXPORT int krasis_flash_attn_fwd_bf16_window(
     // Device pointers
     void *q_ptr, void *k_ptr, void *v_ptr, void *out_ptr,
     void *softmax_lse_ptr,
@@ -305,7 +311,7 @@ extern "C" int krasis_flash_attn_fwd_bf16_window(
 // K/V pointers point to FP8 E4M3 data. Strides are in FP8 elements.
 // The kernel loads FP8 from global memory, converts to BF16 in registers,
 // stores BF16 to shared memory, then proceeds with normal FA2 computation.
-extern "C" int krasis_flash_attn_fwd_bf16q_fp8kv(
+KRASIS_EXPORT int krasis_flash_attn_fwd_bf16q_fp8kv(
     // Device pointers (q_ptr = BF16, k_ptr/v_ptr = FP8 E4M3)
     void *q_ptr, void *k_ptr, void *v_ptr, void *out_ptr,
     void *softmax_lse_ptr,

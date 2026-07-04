@@ -1,0 +1,93 @@
+name: Build Windows Installer
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows-installer:
+    runs-on: windows-2022
+    timeout-minutes: 150
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      KRASIS_DEV_SCRIPT: "1"
+      KRASIS_SIDECAR_PLATFORM: windows-x86_64-cuda126
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install CUDA toolkit
+        uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: "12.6.3"
+
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install maturin
+          choco install innosetup -y --no-progress
+
+      - name: Build Windows sidecar DLLs
+        run: |
+          nvcc --version
+          python scripts/build_sidecars.py build --force
+          python scripts/build_sidecars.py verify
+          Get-ChildItem python/krasis -Filter "*.dll" | Format-Table Name,Length
+
+      - name: Build Windows wheel
+        run: |
+          python -m maturin build --release --out dist -i python
+          python scripts/build_sidecars.py verify-wheel --wheel-dir dist
+
+      - name: Build installer wheelhouse
+        run: |
+          New-Item -ItemType Directory -Force -Path wheelhouse | Out-Null
+          $wheel = Get-ChildItem dist -Filter "krasis-*.whl" | Select-Object -First 1
+          if (-not $wheel) {
+            throw "No Krasis wheel found in dist"
+          }
+          python -m pip download --dest wheelhouse $wheel.FullName
+          Get-ChildItem wheelhouse | Format-Table Name,Length
+
+      - name: Download bundled Python installer
+        run: |
+          $pyver = python -c "import sys; print('.'.join(map(str, sys.version_info[:3])))"
+          $url = "https://www.python.org/ftp/python/$pyver/python-$pyver-amd64.exe"
+          Invoke-WebRequest -Uri $url -OutFile python-installer.exe
+          Get-Item python-installer.exe | Format-Table Name,Length
+
+      - name: Build installer
+        run: |
+          $version = python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])"
+          scripts/windows/Build-Installer.ps1 -Wheelhouse wheelhouse -PythonInstaller python-installer.exe -OutputDir dist -Version $version
+          Get-ChildItem dist | Format-Table Name,Length
+
+      - name: Upload CI artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: krasis-windows-installer
+          path: |
+            dist/KrasisSetup-*-win64.exe
+            dist/Krasis-Windows-Package-*.zip
+            dist/*.whl
+
+      - name: Upload release assets
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" dist/KrasisSetup-*-win64.exe dist/*.whl --clobber

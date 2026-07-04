@@ -57,10 +57,22 @@ def _has_nvidia_gpu():
 
 
 def _find_nvidia_smi():
-    """Find nvidia-smi, including the WSL2 driver mount."""
+    """Find nvidia-smi on Linux/WSL/Windows."""
     nvidia_smi = shutil.which("nvidia-smi")
     if nvidia_smi:
         return nvidia_smi
+    if os.name == "nt":
+        roots = [
+            os.environ.get("ProgramFiles"),
+            os.environ.get("ProgramW6432"),
+            r"C:\Program Files",
+        ]
+        for root in roots:
+            if not root:
+                continue
+            candidate = os.path.join(root, "NVIDIA Corporation", "NVSMI", "nvidia-smi.exe")
+            if os.path.isfile(candidate):
+                return candidate
     wsl_smi = "/usr/lib/wsl/lib/nvidia-smi"
     if os.path.isfile(wsl_smi):
         return wsl_smi
@@ -391,6 +403,25 @@ def _show_required_packages():
     """Show what packages are needed without installing anything."""
     print(f"\n{BOLD}Required packages:{NC}\n")
 
+    if platform.system() == "Windows":
+        print("  Native Windows installs use packaged Krasis sidecar DLLs.")
+        print("  No CUDA toolkit, ninja, or Python headers are required at runtime.")
+        torch_probe = _probe_torch_cuda()
+        has_torch = bool(torch_probe.get("installed") and torch_probe.get("cuda_available"))
+        unsupported = _unsupported_torch_devices(torch_probe)
+        if not has_torch or unsupported:
+            cu_tag, cu_ver, error = _select_torch_cuda()
+            if error:
+                print(f"  • torch — {error}")
+            else:
+                print(f"  • torch (CUDA {cu_ver}) — pip install torch --index-url https://download.pytorch.org/whl/{cu_tag}")
+            for item in unsupported:
+                print(f"    unsupported by installed torch: {item}")
+        else:
+            print(f"  {GREEN}CUDA torch already installed.{NC}")
+        print(f"\n  Install these manually, then re-run {BOLD}krasis-setup{NC}.\n")
+        return
+
     nvcc_ver = _get_nvcc_version()
     required_ver = _get_required_cuda_version()
     need_nvcc = nvcc_ver is None or nvcc_ver < required_ver
@@ -717,7 +748,7 @@ def _install_cuda_torch():
 def _install_gpu_packages():
     """GPU packages check (Marlin GEMM kernels are now vendored)."""
     print(f"\n{BOLD}Step 3: GPU Kernels{NC}")
-    print(f"  {GREEN}Marlin GEMM kernels are vendored in libkrasis_marlin.so (no pip install needed).{NC}")
+    print(f"  {GREEN}Marlin GEMM kernels are vendored in Krasis sidecars (no pip install needed).{NC}")
     return True
 
 
@@ -729,9 +760,9 @@ def main():
     print(f"\n{BOLD}{CYAN}Krasis Setup{NC}")
     print(f"{DIM}{'─' * 50}{NC}\n")
 
-    # Check platform
-    if platform.system() != "Linux":
-        print(f"{YELLOW}Krasis GPU support requires Linux (or WSL).{NC}")
+    system = platform.system()
+    if system not in ("Linux", "Windows"):
+        print(f"{YELLOW}Krasis GPU support requires Linux, WSL, or native Windows.{NC}")
         return
 
     # Check for NVIDIA GPU — Krasis requires GPU for prefill
@@ -779,8 +810,14 @@ def main():
 
     results = {}
 
-    # Step 1: CUDA toolkit
-    results["system"] = _install_system_deps()
+    # Step 1: CUDA toolkit/build tools. Native Windows wheels carry sidecar
+    # DLLs, so end users do not need nvcc/ninja/Python headers at runtime.
+    if system == "Windows":
+        print(f"\n{BOLD}Step 1: System Packages{NC}")
+        print(f"  {GREEN}Not required for native Windows wheel installs.{NC}")
+        results["system"] = True
+    else:
+        results["system"] = _install_system_deps()
 
     # Step 2: CUDA torch
     results["torch"] = _install_cuda_torch()

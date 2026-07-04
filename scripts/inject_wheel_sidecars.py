@@ -71,15 +71,17 @@ def main() -> None:
 
     sidecars: list[tuple[Path, str]] = []
     if args.marlin:
-        sidecars.append((Path(args.marlin), "krasis/libkrasis_marlin.so"))
+        marlin = Path(args.marlin)
+        sidecars.append((marlin, f"krasis/{marlin.name}"))
     if args.flash_attn:
-        sidecars.append((Path(args.flash_attn), "krasis/libkrasis_flash_attn.so"))
+        flash_attn = Path(args.flash_attn)
+        sidecars.append((flash_attn, f"krasis/{flash_attn.name}"))
     if args.manifest:
         sidecars.append((Path(args.manifest), "krasis/sidecar_manifest.json"))
     if args.fla_dir:
         fla_dir = Path(args.fla_dir)
-        for fla_so in sorted(fla_dir.glob("libkrasis_fla_sm*.so")):
-            sidecars.append((fla_so, f"krasis/{fla_so.name}"))
+        for fla_sidecar in sorted(list(fla_dir.glob("libkrasis_fla_sm*.so")) + list(fla_dir.glob("krasis_fla_sm*.dll"))):
+            sidecars.append((fla_sidecar, f"krasis/{fla_sidecar.name}"))
     if not sidecars:
         raise SystemExit("no sidecars provided")
 

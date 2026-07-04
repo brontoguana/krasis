@@ -107,12 +107,15 @@ measurement; `HTTP round trip` includes local client/server HTTP overhead.
 ### Requirements
 
 - Linux, including Ubuntu 24.04+ or WSL2 on Windows
+- Native Windows installer builds are available as a preview release target
 - Python 3.10+
 - NVIDIA GPU with CUDA drivers installed
 - Rust is only needed for source builds, not normal wheel installs
 - Enough disk/RAM for the source model and generated Krasis caches
 
 ### 1. Install Krasis
+
+Linux/WSL:
 
 ```bash
 curl -sSf https://raw.githubusercontent.com/brontoguana/krasis/main/install.sh | bash
@@ -121,6 +124,18 @@ curl -sSf https://raw.githubusercontent.com/brontoguana/krasis/main/install.sh |
 This creates a managed environment at `~/.krasis/venv`, installs Krasis,
 symlinks commands into `~/.local/bin`, and updates PATH for the current shell.
 No sudo is required for the Krasis install itself.
+
+Native Windows preview:
+
+Download `KrasisSetup-*-win64.exe` from a GitHub release. The installer creates
+a per-user install under `%LOCALAPPDATA%\Programs\Krasis`, installs a private
+Python runtime and Krasis environment, and adds a Start Menu shortcut. The
+shortcut opens a maximized PowerShell window running the interactive Krasis
+launcher. Models and caches still live under `%USERPROFILE%\.krasis`.
+
+The first native Windows target covers the Marlin/FlashAttention sidecar path.
+FLA/linear-attention models still need a separate native Windows FLA sidecar
+port before they should be treated as supported on Windows.
 
 ### 2. Install CUDA Dependencies
 

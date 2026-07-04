@@ -87,7 +87,7 @@ _marlin_mm_fn = None
 
 
 def _find_vendored_so() -> Optional[str]:
-    """Find libkrasis_marlin.so in known locations."""
+    """Find the vendored Marlin sidecar in known locations."""
     candidates = []
 
     # 1. KRASIS_MARLIN_SO env override
@@ -95,15 +95,23 @@ def _find_vendored_so() -> Optional[str]:
     if env_path:
         candidates.append(env_path)
 
+    names = (
+        ("krasis_marlin.dll", "libkrasis_marlin.so")
+        if os.name == "nt"
+        else ("libkrasis_marlin.so", "krasis_marlin.dll")
+    )
+
     # 2. Next to the krasis Python package (maturin build output)
     pkg_dir = Path(__file__).parent
-    candidates.append(str(pkg_dir / "libkrasis_marlin.so"))
-    candidates.append(str(pkg_dir.parent / "krasis.libs" / "libkrasis_marlin.so"))
+    for name in names:
+        candidates.append(str(pkg_dir / name))
+        candidates.append(str(pkg_dir.parent / "krasis.libs" / name))
 
     # 3. Cargo build output directories
     repo_root = pkg_dir.parent.parent
-    for build_dir in sorted(repo_root.glob("target/release/build/krasis-*/out/libkrasis_marlin.so")):
-        candidates.append(str(build_dir))
+    for name in names:
+        for build_dir in sorted(repo_root.glob(f"target/release/build/krasis-*/out/{name}")):
+            candidates.append(str(build_dir))
 
     for path in candidates:
         if os.path.isfile(path):
@@ -118,8 +126,8 @@ def _load_marlin_lib():
     so_path = _find_vendored_so()
     if so_path is None:
         raise RuntimeError(
-            "Cannot find libkrasis_marlin.so in the installed package or repo build outputs.\n"
-            "Set KRASIS_MARLIN_SO=/path/to/libkrasis_marlin.so to override."
+            "Cannot find the Krasis Marlin sidecar in the installed package or repo build outputs.\n"
+            "Set KRASIS_MARLIN_SO=/path/to/libkrasis_marlin.so or krasis_marlin.dll to override."
         )
 
     _marlin_lib = ctypes.CDLL(so_path)

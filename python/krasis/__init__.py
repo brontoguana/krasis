@@ -4,25 +4,38 @@ from importlib.metadata import version as _pkg_version, PackageNotFoundError
 import os
 from pathlib import Path
 
+_DLL_DIRECTORY_HANDLES = []
+
 
 def _configure_vendored_sidecars() -> None:
     pkg_dir = Path(__file__).resolve().parent
-    sidecars = {
-        "KRASIS_MARLIN_SO": "libkrasis_marlin.so",
-        "KRASIS_LIBKRASIS_FLASH_ATTN_SO": "libkrasis_flash_attn.so",
-        "KRASIS_LIBKRASIS_FLA_SO": "libkrasis_fla.so",
-    }
     search_roots = [
         pkg_dir,
         pkg_dir.parent / "krasis.libs",
     ]
-    for env_key, filename in sidecars.items():
+    if os.name == "nt" and hasattr(os, "add_dll_directory"):
+        for root in search_roots:
+            if root.is_dir():
+                _DLL_DIRECTORY_HANDLES.append(os.add_dll_directory(str(root)))
+
+    sidecars = {
+        "KRASIS_MARLIN_SO": ("krasis_marlin.dll", "libkrasis_marlin.so"),
+        "KRASIS_LIBKRASIS_FLASH_ATTN_SO": (
+            "krasis_flash_attn.dll",
+            "libkrasis_flash_attn.so",
+        ),
+        "KRASIS_LIBKRASIS_FLA_SO": ("krasis_fla.dll", "libkrasis_fla.so"),
+    }
+    for env_key, filenames in sidecars.items():
         if os.environ.get(env_key):
             continue
         for root in search_roots:
-            candidate = root / filename
-            if candidate.is_file():
-                os.environ[env_key] = str(candidate)
+            for filename in filenames:
+                candidate = root / filename
+                if candidate.is_file():
+                    os.environ[env_key] = str(candidate)
+                    break
+            if os.environ.get(env_key):
                 break
 
 
