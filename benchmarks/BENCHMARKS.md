@@ -1,5 +1,95 @@
 # Krasis Benchmark Results
 
+## Supported Model Approved Heatmap Fill - 2026-07-04 (RTX 5090)
+
+Purpose: fill the first-class supported-model surface with downloader entries
+and approved downloadable route heatmaps. This pass added the missing
+Step-3.7-Flash downloader entry and built/evaluated the four missing heatmap
+targets from the supported downloader list: Qwen3-Coder-Next, Nemotron Nano,
+Qwen3.5-35B-A3B, and Qwen3-235B-A22B.
+
+Downloader change:
+
+```text
+Step-3.7-Flash
+repo: stepfun-ai/Step-3.7-Flash
+revision: 5f6244077ac62e04eec3f320501ff8c2b293373a
+local dir: Step-3.7-Flash
+recommended config: tests/step37-flash-4-4-hqq4-k4v4-a16.conf
+```
+
+Build/eval policy: each target used timing-off benchmarks, the held-out
+approved-heatmap prompt corpus, 256 decode tokens per prompt, and p8/p16/p24/
+p32/p40/p48 route-count checkpoints. HCS hit rate and request promotions are
+the primary plateau metric; decode speed is secondary. Locally saturated models
+with `100.00%` hit and zero request promotions are accepted by ranking
+stability instead of redundant checkpoint evals.
+
+Selected artifacts:
+
+| Model | Config | Selected checkpoint | Quick HCS | Selected HCS | Promotions quick -> selected | Decode quick -> selected | HTTP quick -> selected | Artifact SHA256 |
+|-------|--------|--------------------:|----------:|-------------:|-----------------------------:|-------------------------:|----------------------:|----------------|
+| Qwen3-Coder-Next | INT4/HQQ4/k4v4 | p00032 | 99.08% | 99.48% | 1104/119520 -> 621/119520 | 89.91 -> 90.39 tok/s | 152.75 -> 162.41 tok/s | `4fefb381dc57ce28243c4ec554e4d0e75b24d062359d9251c541ff9a15f39839` |
+| Nemotron Nano 30B A3B | INT4/HQQ4/k4v4 | p00048 | 100.00% | 100.00% | 0/34362 -> 0/34362 | 151.25 -> 151.25 tok/s | 352.94 -> 352.94 tok/s | `99b7919c169e549fdbff1167506a9913fb6757cd09c0e22243896c2eb7abc7ee` |
+| Qwen3.5-35B-A3B | INT4/HQQ6/k6v6 | p00048 | 100.00% | 100.00% | 0/79680 -> 0/79680 | 114.15 -> 114.15 tok/s | 235.25 -> 235.25 tok/s | `6a29e7af2b155b121c8124cd9ad5cd93575e5e89c33e0d3cbad49d3ebe0eda01` |
+| Qwen3-235B-A22B | INT4/HQQ6/k4v4 | p00016 | 61.45% | 62.23% | 72183/187248 -> 70729/187248 | 6.76 -> 7.10 tok/s | 11.65 -> 12.71 tok/s | `4790a864b63e588d920dd964e28c89f7df460c2dcb1981195c1b672445b36681` |
+
+QCN held-out checkpoint eval:
+
+| Artifact | Prefill (internal) | Decode (internal) | Round trip (network) | Final HCS hit | Request promotions | Min free VRAM | Status |
+|----------|-------------------:|------------------:|---------------------:|--------------:|-------------------:|--------------:|--------|
+| Quick startup heatmap | 7,114.8 tok/s | 89.91 tok/s | 152.75 tok/s | 99.08% | 1104/119520 | 920 MB | BASELINE |
+| p00008 | 6,740.5 tok/s | 89.79 tok/s | 156.85 tok/s | 99.41% | 710/119520 | 922 MB | CLIMBING |
+| p00016 | 6,941.1 tok/s | 89.43 tok/s | 149.11 tok/s | 99.47% | 628/119520 | 922 MB | NEAR PEAK |
+| p00024 | 6,826.5 tok/s | 88.82 tok/s | 149.89 tok/s | 99.33% | 805/119520 | 922 MB | REGRESSION |
+| p00032 | 7,369.9 tok/s | 90.39 tok/s | 162.41 tok/s | 99.48% | 621/119520 | 922 MB | BEST HCS, SELECTED |
+| p00040 | 6,869.8 tok/s | 89.27 tok/s | 150.91 tok/s | 99.47% | 628/119520 | 922 MB | TIED BELOW PEAK |
+| p00048 | 7,418.2 tok/s | 90.65 tok/s | 163.32 tok/s | 99.42% | 696/119520 | 922 MB | SPEED NOISIER, LOWER HCS |
+
+Q235 held-out checkpoint eval:
+
+| Artifact | Prefill (internal) | Decode (internal) | Round trip (network) | Final HCS hit | Request promotions | Min free VRAM | Status |
+|----------|-------------------:|------------------:|---------------------:|--------------:|-------------------:|--------------:|--------|
+| Quick startup heatmap | 1,317.9 tok/s | 6.76 tok/s | 11.65 tok/s | 61.45% | 72183/187248 | 1306 MB | BASELINE |
+| p00008 | 1,294.6 tok/s | 7.05 tok/s | 12.25 tok/s | 61.74% | 71646/187248 | 1308 MB | CLIMBING |
+| p00016 | 1,227.5 tok/s | 7.10 tok/s | 12.71 tok/s | 62.23% | 70729/187248 | 1308 MB | BEST HCS, SELECTED |
+| p00024 | 1,272.7 tok/s | 6.90 tok/s | 12.05 tok/s | 61.28% | 72497/187248 | 1308 MB | REGRESSION |
+| p00032 | 1,185.0 tok/s | 6.90 tok/s | 12.38 tok/s | 61.91% | 71324/187248 | 1308 MB | BELOW PEAK |
+| p00040 | 1,321.0 tok/s | 6.99 tok/s | 12.02 tok/s | 61.53% | 72034/187248 | 1308 MB | BELOW PEAK |
+| p00048 | 1,351.4 tok/s | 7.06 tok/s | 12.06 tok/s | 62.11% | 70952/187248 | 1308 MB | NEAR PEAK, NOT SELECTED |
+
+Saturated-model build/stability summary:
+
+| Model | Final build | Captured decode-route tokens | Ranked entries | Route collection elapsed | p40->p48 ranking stability | Decision |
+|-------|-------------|-----------------------------:|---------------:|-------------------------:|----------------------------|----------|
+| Nemotron Nano 30B A3B | p00048 | 12,336 | 2,910 | 472.5s | top-128 98.4%, top-512 99.0%, top-2048 99.6% | publish p48; quick HCS already saturated |
+| Qwen3.5-35B-A3B | p00048 | 12,197 | 9,972 | 452.5s | top-512 97.5%, top-2048 97.2%, top-8192 99.1% | publish p48; quick HCS already saturated |
+
+Stable downloadable artifacts now listed in
+`benchmarks/approved_heatmaps/manifest.json`:
+
+```text
+step37_flash_hqq4_k4v4_p00048
+qwen35_122b_hqq6_k4v4_p00032
+nemotron_super_hqq4_k4v4_p00040
+qwen36_35b_hqq4_k4v4_p00048
+gemma4_26b_hqq4_k4v4_p00048
+nemotron_nano_hqq4_k4v4_p00048
+qwen35_35b_hqq6_k6v6_p00048
+qcn_hqq4_k4v4_p00032
+qwen3_235b_hqq6_k4v4_p00016
+```
+
+Implementation notes:
+- Qwen3.5-35B exposed a stale downloader recommendation pointing at disabled
+  `fp8_e4m3` KV. The supported entry now points at the valid
+  `tests/q35b-4-4-hqq6-k6v6-diagnostic.conf` config.
+- Q235 exposed a route-signature bug for configs where `layer_types` is absent.
+  Missing explicit layer-type metadata now hashes as the canonical empty list;
+  explicit layer maps remain strictly hashed and validated.
+- Q235 used the config's `1000 MB` safety margin. The evals stayed near the
+  intended low-water behavior (`1306-1308 MB` min free during decode).
+
 ## Qwen3.6 35B and Gemma-4 Approved Route Heatmap Builds - 2026-07-04 (RTX 5090)
 
 Purpose: build first-pass approved route-heatmap artifacts for Qwen3.6 35B and
