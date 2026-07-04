@@ -19,6 +19,10 @@
 #include <cstring>
 #include <stdint.h>
 
+#ifndef M_LOG2E
+#define M_LOG2E 1.44269504088896340736
+#endif
+
 #ifdef _WIN32
 #define KRASIS_EXPORT extern "C" __declspec(dllexport)
 #else

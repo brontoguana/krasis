@@ -20,7 +20,10 @@
   already used by the Marlin/FlashAttention sources. Marlin sidecar dispatch
   now returns directly from matching kernel cases instead of expanding one long
   `else if` ladder, avoiding an MSVC/nvcc compiler nesting limit while
-  preserving the same kernel instantiations.
+  preserving the same kernel instantiations. FlashAttention's vendored CUTLASS
+  platform shim now treats `_MSVC_LANG` as the C++17 signal for `_v` type-trait
+  aliases, and the vendor entry point defines `M_LOG2E` when MSVC does not
+  expose the POSIX math constant.
 
 - Added Gemma4 image support with the same lazy architecture as Qwen/Step
   vision. Gemma4 support is detected from `gemma4` metadata plus
