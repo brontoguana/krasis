@@ -133,6 +133,15 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
         notes="Current production coding model.",
     ),
     SupportedHFModel(
+        key="step37",
+        display_name="Step-3.7-Flash",
+        repo_id="stepfun-ai/Step-3.7-Flash",
+        local_dir_name="Step-3.7-Flash",
+        revision="5f6244077ac62e04eec3f320501ff8c2b293373a",
+        recommended_config="tests/step37-flash-4-4-hqq4-k4v4-a16.conf",
+        notes="Validated StepFun sparse MoE target with HQQ4 attention and k4v4 KV.",
+    ),
+    SupportedHFModel(
         key="nemotron-nano",
         display_name="NVIDIA Nemotron-3 Nano 30B A3B",
         repo_id="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
@@ -165,7 +174,7 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
         repo_id="Qwen/Qwen3.5-35B-A3B",
         local_dir_name="Qwen3.5-35B-A3B",
         revision="b1fc3d59ae0ab1e4279e04a8dd0fc4dc361fc2b6",
-        recommended_config="tests/q35b-4-4-hqq6-benchmark.conf",
+        recommended_config="tests/q35b-4-4-hqq6-k6v6-diagnostic.conf",
         notes="Validated Qwen 35B-class MoE target.",
     ),
     SupportedHFModel(

@@ -1,0 +1,17 @@
+[0;36m[1m=>[0m Waiting for selected GPUs (0) to clear...
+[0;32m[1mOK[0m Selected GPUs (0) clear.
+[0;36m[1m=>[0m Running standard benchmark: tests/q35b-4-4-hqq6-benchmark.conf
+[0;36m[1m=>[0m Run dir: /home/main/Documents/Claude/krasis-nemotron-dev/logs/dev-benchmark_20260704_112142
+[0;36m[1m=>[0m Log: /home/main/Documents/Claude/krasis-nemotron-dev/logs/dev-benchmark_20260704_112142/benchmark_stdout.log
+[0;36m[1m=>[0m Import origin check:
+krasis: /home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/__init__.py
+krasis.krasis: /home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+Pre-scan: set CUDA_VISIBLE_DEVICES=0
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/server.py", line 3869, in <module>
+    main()
+  File "/home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/server.py", line 1726, in main
+    raise ValueError(
+ValueError: kv_dtype=fp8_e4m3 in tests/q35b-4-4-hqq6-benchmark.conf is deprecated and disabled. Use 'k6v6', 'k4v4', or 'bf16'.

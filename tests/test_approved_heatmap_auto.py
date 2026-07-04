@@ -9,6 +9,26 @@ from krasis import server
 
 
 class ApprovedHeatmapAutoTest(unittest.TestCase):
+    def test_route_signature_accepts_missing_layer_types(self):
+        cfg = SimpleNamespace(
+            model_type="qwen3_moe",
+            num_hidden_layers=94,
+            num_moe_layers=94,
+            n_routed_experts=128,
+            num_experts_per_tok=8,
+            num_full_attention_layers=94,
+            layer_types=None,
+        )
+        model = SimpleNamespace(cfg=cfg)
+        args = SimpleNamespace(model_path=".")
+
+        signature = server._heatmap_route_signature(model, args)
+
+        self.assertEqual(
+            signature["routing"]["layer_types_sha256"],
+            server._sha256_jsonable([]),
+        )
+
     def test_manifest_selection_matches_route_and_runtime_hashes(self):
         expected = {
             "route_signature": {"model": "example", "top_k": 8},

@@ -287,6 +287,8 @@ def _heatmap_route_signature(model: KrasisModel, args) -> dict[str, Any]:
     route-prior identity unless measurements prove they must be split.
     """
     cfg = model.cfg
+    layer_types = getattr(cfg, "layer_types", None)
+    explicit_layer_types = [] if layer_types is None else list(layer_types)
     return {
         "model": {
             "model_name": os.path.basename(os.path.abspath(args.model_path)),
@@ -305,7 +307,7 @@ def _heatmap_route_signature(model: KrasisModel, args) -> dict[str, Any]:
             "use_moe_router_bias": bool(getattr(cfg, "use_moe_router_bias", False)),
             "need_fp32_gate": bool(getattr(cfg, "need_fp32_gate", False)),
             "norm_bias_one": bool(getattr(cfg, "norm_bias_one", False)),
-            "layer_types_sha256": _sha256_jsonable(list(getattr(cfg, "layer_types", []))),
+            "layer_types_sha256": _sha256_jsonable(explicit_layer_types),
         },
         "schema": {
             "format": APPROVED_HEATMAP_FORMAT,

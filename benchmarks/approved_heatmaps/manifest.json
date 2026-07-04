@@ -1,7 +1,7 @@
 {
   "format": "krasis_approved_hcs_route_heatmap_manifest",
   "format_version": 1,
-  "generated_at_utc": "2026-07-04T09:30:16Z",
+  "generated_at_utc": "2026-07-04T14:21:24Z",
   "artifacts": [
     {
       "artifact_id": "step37_flash_hqq4_k4v4_p00048",
@@ -171,6 +171,142 @@
         "http_tok_s": 116.36,
         "quick_http_tok_s": 116.36,
         "notes": "Quick startup HCS is saturated on the RTX 5090 because all experts fit as soft/reclaimable HCS. p00048 is approved as a downloadable route-prior artifact based on p00040->p00048 ranking stability: 98.4% top-256, 98.3% top-1024, 99.5% top-3072 overlap."
+      }
+    },
+    {
+      "artifact_id": "nemotron_nano_hqq4_k4v4_p00048",
+      "status": "approved",
+      "priority": 20,
+      "model_name": "NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+      "source_checkpoint": "p00048",
+      "path": "benchmarks/approved_heatmaps/nemotron_nano_hqq4_k4v4_approved_heatmap.json",
+      "filename": "nemotron_nano_hqq4_k4v4_approved_heatmap.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/nemotron_nano_hqq4_k4v4_approved_heatmap.json",
+      "sha256": "99b7919c169e549fdbff1167506a9913fb6757cd09c0e22243896c2eb7abc7ee",
+      "bytes": 43472,
+      "route_signature_sha256": "feef486bb8767ae239ce03ec4604e4bf945c36bde1e8c3ef36b9280e935c6bce",
+      "validated_runtime_sha256s": [
+        "33e3e1f42cf448262ca66fbad7e2b20c110b4c04503fbade7034520fddc67fe7"
+      ],
+      "capture": {
+        "prompt_count_processed": 48,
+        "captured_decode_route_tokens": 12336,
+        "ranked_entries": 2910,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "quick_startup_heatmap",
+        "final_hcs_hit_pct": 100.00,
+        "quick_hcs_hit_pct": 100.00,
+        "request_promotions": "0/34362",
+        "quick_request_promotions": "0/34362",
+        "internal_decode_tok_s": 151.25,
+        "quick_internal_decode_tok_s": 151.25,
+        "http_tok_s": 352.94,
+        "quick_http_tok_s": 352.94,
+        "notes": "Quick startup HCS is saturated on the RTX 5090 because all experts fit as soft/reclaimable HCS. p00048 is approved as a downloadable route-prior artifact based on p00040->p00048 ranking stability: 98.4% top-128, 99.0% top-512, 99.6% top-2048 overlap."
+      }
+    },
+    {
+      "artifact_id": "qwen35_35b_hqq6_k6v6_p00048",
+      "status": "approved",
+      "priority": 20,
+      "model_name": "Qwen3.5-35B-A3B",
+      "source_checkpoint": "p00048",
+      "path": "benchmarks/approved_heatmaps/qwen35_35b_hqq6_k6v6_approved_heatmap.json",
+      "filename": "qwen35_35b_hqq6_k6v6_approved_heatmap.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/qwen35_35b_hqq6_k6v6_approved_heatmap.json",
+      "sha256": "6a29e7af2b155b121c8124cd9ad5cd93575e5e89c33e0d3cbad49d3ebe0eda01",
+      "bytes": 141748,
+      "route_signature_sha256": "45af6eef344358036a1bfb11752dd33538920434a0062e45d89c81b072eb147a",
+      "validated_runtime_sha256s": [
+        "4128c8d7550c65d31d4fb347fc7de4a73d67a978c5cf1163d8425baa919d15ee"
+      ],
+      "capture": {
+        "prompt_count_processed": 48,
+        "captured_decode_route_tokens": 12197,
+        "ranked_entries": 9972,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "quick_startup_heatmap",
+        "final_hcs_hit_pct": 100.00,
+        "quick_hcs_hit_pct": 100.00,
+        "request_promotions": "0/79680",
+        "quick_request_promotions": "0/79680",
+        "internal_decode_tok_s": 114.15,
+        "quick_internal_decode_tok_s": 114.15,
+        "http_tok_s": 235.25,
+        "quick_http_tok_s": 235.25,
+        "notes": "Quick startup HCS is saturated on the RTX 5090 because all experts fit as soft/reclaimable HCS. p00048 is approved as a downloadable route-prior artifact based on p00040->p00048 ranking stability: 97.5% top-512, 97.2% top-2048, 99.1% top-8192 overlap."
+      }
+    },
+    {
+      "artifact_id": "qcn_hqq4_k4v4_p00032",
+      "status": "approved",
+      "priority": 10,
+      "model_name": "Qwen3-Coder-Next",
+      "source_checkpoint": "p00032",
+      "path": "benchmarks/approved_heatmaps/qcn_hqq4_k4v4_approved_heatmap.json",
+      "filename": "qcn_hqq4_k4v4_approved_heatmap.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/qcn_hqq4_k4v4_approved_heatmap.json",
+      "sha256": "4fefb381dc57ce28243c4ec554e4d0e75b24d062359d9251c541ff9a15f39839",
+      "bytes": 316989,
+      "route_signature_sha256": "c69ef3de0e98767113b8a43cfda86ce759f20415f6572d08b17562bd2bb1ace1",
+      "validated_runtime_sha256s": [
+        "33e3e1f42cf448262ca66fbad7e2b20c110b4c04503fbade7034520fddc67fe7"
+      ],
+      "capture": {
+        "prompt_count_processed": 32,
+        "captured_decode_route_tokens": 8062,
+        "ranked_entries": 22695,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "quick_startup_heatmap",
+        "final_hcs_hit_pct": 99.48,
+        "quick_hcs_hit_pct": 99.08,
+        "request_promotions": "621/119520",
+        "quick_request_promotions": "1104/119520",
+        "internal_decode_tok_s": 90.39,
+        "quick_internal_decode_tok_s": 89.91,
+        "http_tok_s": 162.41,
+        "quick_http_tok_s": 152.75,
+        "notes": "Best HCS hit in the p00008-p00048 QCN sweep. p00048 had slightly higher internal decode, but p00032 is selected by the primary HCS plateau metric and reduced request promotions by 43.8% versus quick."
+      }
+    },
+    {
+      "artifact_id": "qwen3_235b_hqq6_k4v4_p00016",
+      "status": "approved",
+      "priority": 10,
+      "model_name": "Qwen3-235B-A22B",
+      "source_checkpoint": "p00016",
+      "path": "benchmarks/approved_heatmaps/q235_hqq6_k4v4_approved_heatmap.json",
+      "filename": "q235_hqq6_k4v4_approved_heatmap.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/q235_hqq6_k4v4_approved_heatmap.json",
+      "sha256": "4790a864b63e588d920dd964e28c89f7df460c2dcb1981195c1b672445b36681",
+      "bytes": 155234,
+      "route_signature_sha256": "915ef9e692590c52b6d21aa49838dd10b2b9afa0d4ebcbb7e243ad8e9251ca61",
+      "validated_runtime_sha256s": [
+        "e475801d9804e603c754ef0d0628c241d0803dd4006404605646d419f1d98cc3"
+      ],
+      "capture": {
+        "prompt_count_processed": 16,
+        "captured_decode_route_tokens": 4112,
+        "ranked_entries": 11233,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "quick_startup_heatmap",
+        "final_hcs_hit_pct": 62.23,
+        "quick_hcs_hit_pct": 61.45,
+        "request_promotions": "70729/187248",
+        "quick_request_promotions": "72183/187248",
+        "internal_decode_tok_s": 7.10,
+        "quick_internal_decode_tok_s": 6.76,
+        "http_tok_s": 12.71,
+        "quick_http_tok_s": 11.65,
+        "notes": "Best final HCS hit in the p00008-p00048 Q235 sweep. p00048 had comparable decode speed but lower final HCS, so p00016 is selected by the primary plateau metric."
       }
     }
   ]
