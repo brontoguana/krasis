@@ -14,7 +14,10 @@
   wheel, creates an offline wheelhouse, downloads the matching Python
   installer, and packages `KrasisSetup-*-win64.exe` with Inno Setup. The first
   Windows target is Marlin/FlashAttention-backed models; FLA/linear-attention
-  models still require a separate native Windows FLA sidecar port.
+  models still require a separate native Windows FLA sidecar port. The Windows
+  sidecar build now also passes `-std=c++17` explicitly to nvcc so MSVC-hosted
+  CUDA builds accept the C++17 inline-variable and `if constexpr` constructs
+  already used by the Marlin/FlashAttention sources.
 
 - Added Gemma4 image support with the same lazy architecture as Qwen/Step
   vision. Gemma4 support is detected from `gemma4` metadata plus

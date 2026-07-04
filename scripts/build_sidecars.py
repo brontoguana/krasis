@@ -174,6 +174,7 @@ def sidecar_inputs(nvcc: str) -> dict[str, dict[str, object]]:
     cutlass_dir = REPO / "src" / "cuda" / "flash_attn" / "cutlass"
 
     marlin_flags = [
+        "-std=c++17",
         "--expt-relaxed-constexpr",
         "-allow-unsupported-compiler",
         "-arch=sm_80",
@@ -185,6 +186,7 @@ def sidecar_inputs(nvcc: str) -> dict[str, dict[str, object]]:
     ] + nvcc_pic_args() + nvcc_host_compiler_args()
 
     fa_common_flags = [
+        "-std=c++17",
         "--expt-relaxed-constexpr",
         "--expt-extended-lambda",
         "-allow-unsupported-compiler",
@@ -282,6 +284,7 @@ def build_marlin(nvcc: str, build_id: str, force: bool) -> Path:
     out.mkdir(parents=True, exist_ok=True)
 
     common_args = [
+        "-std=c++17",
         "--expt-relaxed-constexpr",
         "-allow-unsupported-compiler",
         "-arch=sm_80",
@@ -310,6 +313,7 @@ def build_flash_attn(nvcc: str, build_id: str, force: bool) -> Path:
     out.mkdir(parents=True, exist_ok=True)
 
     common_args = [
+        "-std=c++17",
         "--expt-relaxed-constexpr",
         "--expt-extended-lambda",
         "-allow-unsupported-compiler",
