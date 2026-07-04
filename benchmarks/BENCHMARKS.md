@@ -1,5 +1,36 @@
 # Krasis Benchmark Results
 
+## Verification - 2026-06-14 (local main QCN and Gemma checks)
+
+Hardware: EPYC 7742, 1007 GB RAM, RTX 5090 32 GB selected. Local `main`
+worktree under test:
+`/home/main/Documents/Claude/krasis-main-merge` at
+`10f0bc2 Add Gemma decode optimizations and timing records`. Accepted decode
+flags `KRASIS_DECODE_ROUTE_PREP_DUAL_NORM=1` and
+`KRASIS_DECODE_FINAL_SOFTCAP_GPU=1` were enabled; attribution and rejected
+candidate envs were explicitly unset.
+
+| Run | Command | Attention | KV | Result | Decision | Logs |
+|-----|---------|-----------|----|--------|----------|------|
+| QCN main correctness/speed | `KRASIS_DECODE_ROUTE_PREP_DUAL_NORM=1 KRASIS_DECODE_FINAL_SOFTCAP_GPU=1 ./dev test tests/qcn-k4v4-hqq4-int4-benchmark.conf` | HQQ4 | k4v4 | Full network suite passed `14/14`, `ALL TESTS PASSED`; benchmark summary `6356.7` prefill, `87.74` internal decode, `150.14` HTTP. HCS `15957/24576`, min free decode VRAM `896 MB`, and every Dynamic HCS row had `copy_failures=0`. | QCN output and speed healthy on local main; accepted Gemma env gates are non-Gemma-neutral in this run | [full log](20260614_1554_main_qcn_hqq4_k4v4_test.log) |
+| Gemma main correctness/speed | `KRASIS_DECODE_ROUTE_PREP_DUAL_NORM=1 KRASIS_DECODE_FINAL_SOFTCAP_GPU=1 ./dev test tests/gemma-4-4-hqq4-k4v4-a16.conf` | HQQ4 | k4v4 | Full network suite passed `14/14`, `ALL TESTS PASSED`; benchmark summary `4936.2` prefill, `92.27` internal decode, `157.84` HTTP. HCS `3840/3840`, min free decode VRAM `11474 MB`, and every Dynamic HCS row had `copy_failures=0`. Startup rebuilt the Gemma GPU Marlin expert cache. | Gemma output/decode healthy; prefill lower than restored `5619.6` marker, so repeated for speed confirmation | [full log](20260614_1554_main_gemma4_hqq4_k4v4_test.log) |
+| Gemma main repeat speed check | `KRASIS_DECODE_ROUTE_PREP_DUAL_NORM=1 KRASIS_DECODE_FINAL_SOFTCAP_GPU=1 ./dev benchmark tests/gemma-4-4-hqq4-k4v4-a16.conf` | HQQ4 | k4v4 | Benchmark-only run exited `0`; summary `5378.2` prefill, `92.43` internal decode, `160.26` HTTP. HCS `3840/3840`, min free decode VRAM `11474 MB`, and every Dynamic HCS row had `copy_failures=0`. Startup again rebuilt the Gemma GPU Marlin expert cache. | Gemma runtime speed is usable and decode is at the accepted marker; repeated cache rebuild remains a follow-up issue | [full log](20260614_1608_main_gemma4_hqq4_k4v4_hotcache_benchmark.log) |
+
+Notes:
+- QCN used the active HQQ4 k4v4 INT4 benchmark config, the same config resolved
+  by `./dev speed-test`; `./dev test` was selected here because output
+  correctness was requested.
+- Gemma correctness and decode speed are good on local main. The repeated
+  startup cache rebuild is not expected: the server prints runtime experts as
+  `GPU INT4 g128 (amax)`, while the persisted expert cache file is
+  `experts_marlin_int4_g64_calamax.bin`. That cache-key/load mismatch should be
+  investigated before treating Gemma startup as healthy.
+- The verification gate and exact commands were recorded in
+  `krasis-internal/DEBUGLOG.md` before launch.
+- `./dev kill` was needed after the QCN and first Gemma test wrappers because
+  their benchmark server processes remained after successful tests. Final
+  cleanup left no tmux/server process and GPUs idle.
+
 ## Verification - 2026-06-14 (Gemma4 k4 restore clean speed after q2-BC32 K/V-alias rejection)
 
 Hardware: EPYC 7742, 1007 GB RAM, RTX 5090 32 GB selected for Gemma.

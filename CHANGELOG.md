@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Verified local `main` at `10f0bc2` with QCN and Gemma through the built
+  command path. QCN ran
+  `./dev test tests/qcn-k4v4-hqq4-int4-benchmark.conf` with only accepted
+  Gemma decode env gates enabled and attribution/rejected-candidate envs unset.
+  It passed `14/14`, `ALL TESTS PASSED`, with `6356.7` prefill, `87.74`
+  internal decode, `150.14` HTTP, HCS `15957/24576`, min free decode VRAM
+  `896 MB`, and zero copy failures. Gemma ran
+  `./dev test tests/gemma-4-4-hqq4-k4v4-a16.conf` and passed `14/14`,
+  `ALL TESTS PASSED`, with `4936.2` prefill, `92.27` internal decode,
+  `157.84` HTTP, HCS `3840/3840`, min free decode VRAM `11474 MB`, and zero
+  copy failures. A follow-up `./dev benchmark` Gemma speed check produced
+  `5378.2` prefill, `92.43` internal decode, and `160.26` HTTP. Both Gemma
+  launches rebuilt the GPU Marlin expert cache, leaving a follow-up cache-reuse
+  issue: runtime reports `GPU INT4 g128 (amax)` while the persisted cache file
+  is `experts_marlin_int4_g64_calamax.bin`.
+
 - Verified the restored Gemma HQQ4 k4v4 clean baseline after rejecting the
   HD512 q2-BC32 K/V-alias prototype. The verification gate was recorded in
   `krasis-internal/DEBUGLOG.md` before launch. Ran
