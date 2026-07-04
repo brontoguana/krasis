@@ -1,5 +1,227 @@
 # Krasis Benchmark Results
 
+## Q122B Approved Route Heatmap Build - 2026-07-04 (RTX 5090)
+
+Purpose: capture a current Qwen3.5-122B-A10B timing-off quick heatmap baseline,
+then build/evaluate approved route-heatmap checkpoints on the same HQQ6/k4v4
+INT4 runtime. HCS hit rate is the primary plateau metric; timing-off decode
+speed is secondary confirmation.
+
+Config:
+
+```text
+tests/q122b-k4v4-hqq6-int4-benchmark.conf
+```
+
+Baseline command:
+
+```text
+./dev benchmark tests/q122b-k4v4-hqq6-int4-benchmark.conf
+```
+
+Build command:
+
+```text
+KRASIS_HEATMAP_SUBSTAGE_TIMING=1 ./dev approved-heatmap-build \
+  tests/q122b-k4v4-hqq6-int4-benchmark.conf \
+  --out benchmarks/approved_heatmaps/q122b_hqq6_k4v4_approved_heatmap.json \
+  --prompts benchmarks/approved_heatmaps/step37_hqq4_k4v4_prompts.txt \
+  --decode-tokens 256 \
+  --checkpoint-every 8 \
+  --max-prompts 48
+```
+
+Eval command:
+
+```text
+./dev approved-heatmap-eval \
+  tests/q122b-k4v4-hqq6-int4-benchmark.conf \
+  benchmarks/approved_heatmaps/q122b_hqq6_k4v4_approved_heatmap.pNNNNN.json
+```
+
+The quick baseline had no matching approved manifest entry for Q122B, logged
+that fact, and correctly fell back to quick startup heatmap generation.
+
+Baseline result:
+
+| Model | Config | Prefill (internal) | Decode (internal) | Round trip (network) | HCS residency | Final HCS hit | Request promotions | Min free VRAM | Status | Logs |
+|-------|--------|-------------------:|------------------:|---------------------:|---------------|--------------:|-------------------:|--------------:|--------|------|
+| Qwen3.5-122B-A10B | INT4/HQQ6/k4v4 | 3,273.2 tok/s | 28.78 tok/s | 49.00 tok/s | 4158/12288 (33.8%) | 77.82% | 21206/95616 | 970 MB | QUICK BASELINE | [stdout](approved_heatmaps/20260704_q122b_heatmap_eval_quick.log), [report](../logs/dev-benchmark_20260704_081903/benchmark_report.log) |
+
+Build output:
+
+| Artifact | Prompts | Captured decode-route tokens | Ranked entries | Route collection elapsed | Artifact |
+|----------|--------:|-----------------------------:|---------------:|-------------------------:|----------|
+| p00008 | 8 | 2,056 | 10,841 | 225.2s | [json](approved_heatmaps/q122b_hqq6_k4v4_approved_heatmap.p00008.json) |
+| p00016 | 16 | 4,112 | 11,326 | 443.6s | [json](approved_heatmaps/q122b_hqq6_k4v4_approved_heatmap.p00016.json) |
+| p00024 | 24 | 6,168 | 11,609 | 659.1s | [json](approved_heatmaps/q122b_hqq6_k4v4_approved_heatmap.p00024.json) |
+| p00032 | 32 | 8,148 | 11,729 | 864.6s | [json](approved_heatmaps/q122b_hqq6_k4v4_approved_heatmap.p00032.json) |
+| p00040 | 40 | 10,204 | 11,776 | 1,080.3s | [json](approved_heatmaps/q122b_hqq6_k4v4_approved_heatmap.p00040.json) |
+| p00048/build final | 48 | 12,260 | 11,794 | 1,295.9s | [json](approved_heatmaps/q122b_hqq6_k4v4_approved_heatmap.p00048.json) |
+
+Checkpoint eval result:
+
+| Artifact | Prefill (internal) | Decode (internal) | Decode vs quick | Round trip (network) | HCS residency | Final HCS hit | Request promotions | Min free VRAM | Status | Logs |
+|----------|-------------------:|------------------:|----------------:|---------------------:|---------------|--------------:|-------------------:|--------------:|--------|------|
+| Quick startup heatmap | 3,273.2 tok/s | 28.78 tok/s | baseline | 49.00 tok/s | 4158/12288 (33.8%) | 77.82% | 21206/95616 | 970 MB | BASELINE | [stdout](approved_heatmaps/20260704_q122b_heatmap_eval_quick.log), [report](../logs/dev-benchmark_20260704_081903/benchmark_report.log) |
+| Approved p00008 | 3,263.2 tok/s | 28.91 tok/s | +0.5% | 55.63 tok/s | 4158/12288 (33.8%) | 78.84% | 20231/95616 | 970 MB | STILL CLIMBING | [stdout](approved_heatmaps/20260704_q122b_heatmap_eval_p00008.log), [report](../logs/dev-benchmark_20260704_090503/benchmark_report.log) |
+| Approved p00016 | 3,275.5 tok/s | 29.60 tok/s | +2.8% | 57.71 tok/s | 4158/12288 (33.8%) | 79.38% | 19717/95616 | 970 MB | STILL CLIMBING | [stdout](approved_heatmaps/20260704_q122b_heatmap_eval_p00016.log), [report](../logs/dev-benchmark_20260704_090952/benchmark_report.log) |
+| Approved p00024 | 3,145.8 tok/s | 29.41 tok/s | +2.2% | 58.66 tok/s | 4158/12288 (33.8%) | 79.46% | 19640/95616 | 970 MB | NEAR PLATEAU | [stdout](approved_heatmaps/20260704_q122b_heatmap_eval_p00024.log), [report](../logs/dev-benchmark_20260704_091437/benchmark_report.log) |
+| Approved p00032 | 3,421.8 tok/s | 30.60 tok/s | +6.3% | 51.66 tok/s | 4158/12288 (33.8%) | 80.04% | 19083/95616 | 970 MB | BEST HCS HIT, BEST SELECTED | [stdout](approved_heatmaps/20260704_q122b_heatmap_eval_p00032.log), [report](../logs/dev-benchmark_20260704_091925/benchmark_report.log) |
+| Approved p00040 | 3,914.8 tok/s | 30.72 tok/s | +6.7% | 58.57 tok/s | 4158/12288 (33.8%) | 79.68% | 19431/95616 | 970 MB | HCS REGRESSION | [stdout](approved_heatmaps/20260704_q122b_heatmap_eval_p00040.log), [report](../logs/dev-benchmark_20260704_092412/benchmark_report.log) |
+| Approved p00048 | 3,274.7 tok/s | 29.94 tok/s | +4.0% | 58.90 tok/s | 4158/12288 (33.8%) | 79.80% | 19318/95616 | 970 MB | BELOW PEAK | [stdout](approved_heatmaps/20260704_q122b_heatmap_eval_p00048.log), [report](../logs/dev-benchmark_20260704_092847/benchmark_report.log) |
+
+Final artifact:
+
+```text
+benchmarks/approved_heatmaps/q122b_hqq6_k4v4_approved_heatmap.json
+sha256: fe2b7c0e229fc73e80d48a63c4a95c826c120ed469348ffd2bd5be4c2dbd363f
+```
+
+Notes:
+- Stable local artifact now contains p00032, not the last-built p00048.
+  p00032 is selected because final Dynamic HCS hit peaked there at `80.04%`
+  and request promotions bottomed at `19083/95616`. p00040 and p00048 both
+  regressed on the primary HCS metric, so the 48-prompt build does not justify
+  a resume run as-is.
+- The stable p00032 artifact is listed in the approved heatmap manifest for
+  checksum-verified GitHub raw download and automatic startup selection when
+  the Q122B route signature and validated HQQ6/k4v4 runtime match.
+- Route capture used 48 held-out approved-heatmap prompts with 256 decode
+  tokens each. One prompt stopped at 180 generated tokens, so the final count
+  is `12,260` captured decode-route tokens rather than `12,336`.
+- Runtime calibration stayed active. The long calibration probe was
+  `20,499` prompt tokens and measured prefill min-free `1,990 MB`, above the
+  600 MB safety margin.
+
+## Nemotron Super Current Prefill Timing - 2026-07-04 (RTX 5090)
+
+Purpose: answer why Nemotron Super prefill remains slower than Step despite a
+very high HCS hit rate. This run used timing instrumentation and is diagnostic,
+not a timing-off speed baseline.
+
+Command:
+
+```text
+KRASIS_PREFILL_TIMING=1 KRASIS_PREFILL_GQA_BRANCH_TIMING=1 \
+./dev benchmark tests/nemotron-super-4-4-hqq4-k4v4-a16.conf --timing
+```
+
+| Model | Config | Prefill (internal) | Decode (internal) | Round trip (network) | HCS | Final HCS hit | Min free VRAM | Status | Logs |
+|-------|--------|-------------------:|------------------:|---------------------:|-----|--------------:|--------------:|--------|------|
+| Nemotron Super | INT4/HQQ4/k4v4 timing-enabled | 1,908.5 tok/s | 42.46 tok/s | 52.91 tok/s | 7038/20480 (34.4%) | 95.26% | 904 MB | CURRENT TIMING | [stdout](20260704_nemotron_super_current_prefill_timing.log), [report](../logs/dev-benchmark_20260704_075736/benchmark_report.log) |
+
+Current 15,201-token prefill attribution:
+
+```text
+Component timing total: 7,432.0 ms
+Attention/mixer:        3,772.8 ms  (50.8%)
+  Mamba2 wall:          3,445.5 ms  (46.4%)
+    SSD scan:           2,701.7 ms
+    in_proj:              436.1 ms
+    out_proj:             181.7 ms
+  Actual GQA:             320.3 ms
+MoE:                    3,612.0 ms  (48.6%)
+  MoE DMA:              1,765.3 ms
+    cold_h2d:             491.6 ms
+    dma_wait:           1,264.2 ms
+  W1+act:               1,071.7 ms
+  W2:                     472.4 ms
+Other:                      3.7 ms
+```
+
+Comparison point: the current Step timing run reported a 14,473-token prefill
+component total of `4,868.9 ms`, with `1,674.9 ms` GQA/attention and
+`3,027.6 ms` MoE. Nemotron's issue is therefore not weak HCS or GQA/KV append;
+it is the extra Mamba2 SSD/mixer path plus substantial MoE staging/compute.
+
+## Nemotron Super Approved Route Heatmap Sweep - 2026-07-04 (RTX 5090)
+
+Purpose: test whether the approved route-heatmap pipeline helps Nemotron Super
+on the production-style INT4/HQQ4/k4v4 config. Timing instrumentation was
+disabled for all speed rows. HCS hit rate and request-promotion pressure are the
+primary quality metrics; decode/HTTP speed are confirmation metrics.
+
+Config:
+
+```text
+tests/nemotron-super-4-4-hqq4-k4v4-a16.conf
+```
+
+Baseline command:
+
+```text
+./dev benchmark tests/nemotron-super-4-4-hqq4-k4v4-a16.conf
+```
+
+Build command:
+
+```text
+KRASIS_HEATMAP_SUBSTAGE_TIMING=1 ./dev approved-heatmap-build \
+  tests/nemotron-super-4-4-hqq4-k4v4-a16.conf \
+  --out benchmarks/approved_heatmaps/nemotron_super_hqq4_k4v4_approved_heatmap.json \
+  --prompts benchmarks/approved_heatmaps/step37_hqq4_k4v4_prompts.txt \
+  --decode-tokens 256 \
+  --checkpoint-every 8 \
+  --max-prompts 48
+```
+
+The quick baseline had no matching approved manifest entry for Nemotron Super,
+logged that fact, and correctly fell back to quick startup heatmap generation.
+The approved checkpoints skipped quick startup route collection and loaded the
+provided artifact after route/runtime validation.
+
+Build output:
+
+| Artifact | Prompts | Captured decode-route tokens | Ranked entries | Route collection elapsed | Artifact |
+|----------|--------:|-----------------------------:|---------------:|-------------------------:|----------|
+| p00008 | 8 | 2,056 | 17,032 | 148.8s | [json](approved_heatmaps/nemotron_super_hqq4_k4v4_approved_heatmap.p00008.json) |
+| p00016 | 16 | 4,112 | 17,921 | 296.2s | [json](approved_heatmaps/nemotron_super_hqq4_k4v4_approved_heatmap.p00016.json) |
+| p00024 | 24 | 6,168 | 18,369 | 442.5s | [json](approved_heatmaps/nemotron_super_hqq4_k4v4_approved_heatmap.p00024.json) |
+| p00032 | 32 | 8,224 | 18,591 | 590.0s | [json](approved_heatmaps/nemotron_super_hqq4_k4v4_approved_heatmap.p00032.json) |
+| p00040 | 40 | 10,280 | 18,759 | 737.5s | [json](approved_heatmaps/nemotron_super_hqq4_k4v4_approved_heatmap.p00040.json) |
+| p00048/final | 48 | 12,336 | 18,893 | 884.9s | [json](approved_heatmaps/nemotron_super_hqq4_k4v4_approved_heatmap.p00048.json) |
+
+Evaluation command shape:
+
+```text
+./dev approved-heatmap-eval tests/nemotron-super-4-4-hqq4-k4v4-a16.conf <artifact.json>
+```
+
+| Heatmap | Prefill (internal) | Decode (internal) | Decode vs quick | Round trip (network) | HTTP vs quick | HCS residency | Final HCS hit | Request promotions | Min free VRAM | Status | Logs |
+|---------|-------------------:|------------------:|----------------:|---------------------:|--------------:|---------------|--------------:|-------------------:|--------------:|--------|------|
+| Quick startup heatmap | 2,011.7 tok/s | 42.68 tok/s | baseline | 63.35 tok/s | baseline | 7038/20480 (34.4%) | 95.26% | 10378/219120 | 904 MB | BASELINE | [stdout](approved_heatmaps/20260703_nemotron_super_heatmap_eval_quick.log), [report](../logs/dev-benchmark_20260704_001545/benchmark_report.log) |
+| Approved p00008 | 1,793.6 tok/s | 43.21 tok/s | +1.2% | 48.64 tok/s | -23.2% | 7038/20480 (34.4%) | 95.48% | 9912/219120 | 906 MB | HCS WIN, HTTP NOISY | [stdout](approved_heatmaps/20260703_nemotron_super_heatmap_eval_p00008.log), [report](../logs/dev-benchmark_20260704_004516/benchmark_report.log) |
+| Approved p00016 | 1,822.4 tok/s | 43.81 tok/s | +2.6% | 62.21 tok/s | -1.8% | 7038/20480 (34.4%) | 95.48% | 9908/219120 | 904 MB | BEST DECODE | [stdout](approved_heatmaps/20260703_nemotron_super_heatmap_eval_p00016.log), [report](../logs/dev-benchmark_20260704_004907/benchmark_report.log) |
+| Approved p00024 | 1,890.0 tok/s | 42.71 tok/s | +0.1% | 54.99 tok/s | -13.2% | 7038/20480 (34.4%) | 95.71% | 9411/219120 | 906 MB | HCS WIN | [stdout](approved_heatmaps/20260703_nemotron_super_heatmap_eval_p00024.log), [report](../logs/dev-benchmark_20260704_005255/benchmark_report.log) |
+| Approved p00032 | 1,961.4 tok/s | 42.51 tok/s | -0.4% | 55.21 tok/s | -12.9% | 7038/20480 (34.4%) | 95.58% | 9693/219120 | 906 MB | BELOW P24 | [stdout](approved_heatmaps/20260703_nemotron_super_heatmap_eval_p00032.log), [report](../logs/dev-benchmark_20260704_005649/benchmark_report.log) |
+| Approved p00040 | 1,861.1 tok/s | 42.78 tok/s | +0.2% | 52.46 tok/s | -17.2% | 7038/20480 (34.4%) | 95.82% | 9165/219120 | 904 MB | BEST HCS HIT | [stdout](approved_heatmaps/20260703_nemotron_super_heatmap_eval_p00040.log), [report](../logs/dev-benchmark_20260704_010037/benchmark_report.log) |
+| Approved p00048 | 1,863.6 tok/s | 42.80 tok/s | +0.3% | 44.14 tok/s | -30.3% | 7038/20480 (34.4%) | 95.61% | 9628/219120 | 906 MB | HCS REGRESSION | [stdout](approved_heatmaps/20260703_nemotron_super_heatmap_eval_p00048.log), [report](../logs/dev-benchmark_20260704_010429/benchmark_report.log) |
+
+Findings:
+- Nemotron Super quick startup heatmap is already strong: `95.26%` final HCS
+  hit with `10378/219120` request promotions.
+- The approved p00040 checkpoint improved HCS quality to `95.82%` and reduced
+  request promotions to `9165/219120`, an `11.7%` reduction in request-promotion
+  pressure versus quick.
+- Decode speed did not materially move. Best decode was p00016 at
+  `43.81 tok/s` (`+2.6%`), while the best HCS checkpoint p00040 was
+  `42.78 tok/s` (`+0.2%`). That is within expected benchmark noise for this
+  small sweep.
+- HTTP rows were noisy and consistently worse than the quick baseline, so they
+  are not a useful acceptance signal here.
+- HCS residency and min-free remained effectively unchanged at
+  `7038/20480` and about `904-906 MB`; this is close to the safety target and
+  does not indicate a VRAM-budget issue.
+- Stable local candidate is p00040:
+  [nemotron_super_hqq4_k4v4_approved_heatmap.json](approved_heatmaps/nemotron_super_hqq4_k4v4_approved_heatmap.json)
+  currently matches p00040 (`sha256=eb07924e1974b9f77b7d005aa62e856b1d8dd8cc05255e6bec8f41ae71e151b0`).
+- The stable p00040 artifact is listed in the approved heatmap manifest for
+  checksum-verified GitHub raw download and automatic startup selection when
+  the Nemotron Super route signature and validated HQQ4/k4v4 runtime match.
+  This is an HCS-pressure win rather than a proven speed win: decode was
+  effectively flat, while request promotions fell by `11.7%`.
+
 ## Step-3.7 Approved Route Heatmap Pipeline - 2026-07-03 (RTX 5090)
 
 Purpose: build a model-approved HCS route-prior artifact for Step-3.7 on the

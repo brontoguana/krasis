@@ -116,9 +116,11 @@ When `--heatmap-path` is not supplied, `--approved-heatmap-mode auto` checks the
 approved heatmap manifest and uses a matching checksum-verified artifact from
 the local cache or GitHub. Approved heatmaps provide only the expert route
 ranking; Krasis still calibrates VRAM locally and sizes HCS residency at
-startup. Use `off` to force the quick local startup heatmap, or `require` to
-fail startup unless an approved artifact is available for the current
-model/router signature and validated runtime.
+startup. If the manifest or listed artifact is not downloadable in `auto` mode,
+Krasis logs the fallback and runs the quick local startup heatmap. Use `off` to
+force the quick local startup heatmap, or `require` to fail startup unless an
+approved artifact is available for the current model/router signature and
+validated runtime.
 
 `--hcs-host-cache-mode source` is the default RAM-saving mode. It skips the
 duplicate soft HCS host mirror and reloads soft HCS chunks from the Marlin host

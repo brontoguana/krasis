@@ -106,6 +106,10 @@ HEATMAP_DEFAULT_TOP_K = 50
 HEATMAP_DEFAULT_TOP_P = 0.95
 HEATMAP_DEFAULT_PRESENCE_PENALTY = 0.0
 
+
+class ApprovedHeatmapDownloadUnavailable(RuntimeError):
+    """Raised when an approved heatmap artifact is absent or unreachable."""
+
 # ANSI formatting for status output
 _BOLD = "\033[1m"
 _CYAN = "\033[36m"
@@ -639,7 +643,9 @@ def _verified_cached_approved_heatmap(cache_dir: str, entry: dict[str, Any]) -> 
     expected_sha = str(entry.get("sha256") or "").strip().lower()
     expected_bytes = entry.get("bytes")
     if not download_url:
-        raise RuntimeError(f"Approved heatmap manifest entry is missing download_url: {entry!r}")
+        raise ApprovedHeatmapDownloadUnavailable(
+            f"manifest entry is missing download_url: {entry.get('artifact_id', '<unknown>')}"
+        )
     if len(expected_sha) != 64:
         raise RuntimeError(f"Approved heatmap manifest entry has invalid sha256: {expected_sha!r}")
 
@@ -653,7 +659,7 @@ def _verified_cached_approved_heatmap(cache_dir: str, entry: dict[str, Any]) -> 
         timeout_s=_approved_heatmap_download_timeout_s(),
     )
     if payload is None:
-        raise RuntimeError(
+        raise ApprovedHeatmapDownloadUnavailable(
             "Approved heatmap was listed in the manifest but could not be downloaded. "
             f"URL: {download_url}; error: {error}"
         )
@@ -682,11 +688,13 @@ def _try_load_auto_approved_heatmap(
 ) -> tuple[Optional[str], Optional[dict[str, Any]]]:
     mode = str(args.approved_heatmap_mode or "auto")
     if mode == "off":
+        _dim("Approved route heatmap lookup disabled; falling back to quick startup heatmap generation")
         return None, None
     manifest_url = str(args.approved_heatmap_manifest_url or "").strip()
     if not manifest_url:
         if mode == "require":
             raise RuntimeError("--approved-heatmap-mode=require needs a manifest URL")
+        _dim("No approved heatmap manifest URL configured; falling back to quick startup heatmap generation")
         return None, None
 
     manifest, error = _load_approved_heatmap_manifest(manifest_url)
@@ -694,7 +702,7 @@ def _try_load_auto_approved_heatmap(
         message = f"Approved heatmap manifest unavailable from {manifest_url}: {error}"
         if mode == "require":
             raise RuntimeError(message)
-        _warn(f"{message}; building quick startup heatmap")
+        _warn(f"{message}; falling back to quick startup heatmap generation")
         return None, None
 
     entry = _select_approved_heatmap_manifest_entry(manifest, expected_metadata)
@@ -702,10 +710,17 @@ def _try_load_auto_approved_heatmap(
         message = "No approved heatmap artifact matches this model/router signature and validated runtime"
         if mode == "require":
             raise RuntimeError(f"{message}; manifest={manifest_url}")
-        _dim(f"{message}; building quick startup heatmap")
+        _dim(f"{message}; falling back to quick startup heatmap generation")
         return None, None
 
-    heatmap_path = _verified_cached_approved_heatmap(cache_dir, entry)
+    try:
+        heatmap_path = _verified_cached_approved_heatmap(cache_dir, entry)
+    except ApprovedHeatmapDownloadUnavailable as e:
+        message = f"Approved heatmap artifact unavailable: {e}"
+        if mode == "require":
+            raise RuntimeError(message) from e
+        _warn(f"{message}; falling back to quick startup heatmap generation")
+        return None, None
     validated = _load_validated_heatmap(heatmap_path, expected_metadata)
     _detail(
         "Approved route heatmap loaded from cache: "

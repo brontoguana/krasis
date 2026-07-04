@@ -1,7 +1,7 @@
 {
   "format": "krasis_approved_hcs_route_heatmap_manifest",
   "format_version": 1,
-  "generated_at_utc": "2026-07-03T22:59:00Z",
+  "generated_at_utc": "2026-07-04T08:45:00Z",
   "artifacts": [
     {
       "artifact_id": "step37_flash_hqq4_k4v4_p00048",
@@ -35,6 +35,74 @@
         "http_tok_s": 39.58,
         "quick_http_tok_s": 37.50,
         "notes": "Best HCS hit in the p00008-p00080 Step-3.7 sweep; p00056 tied HCS quality and had the best internal decode, but p00048 is selected by the primary plateau metric."
+      }
+    },
+    {
+      "artifact_id": "qwen35_122b_hqq6_k4v4_p00032",
+      "status": "approved",
+      "priority": 10,
+      "model_name": "Qwen3.5-122B-A10B",
+      "source_checkpoint": "p00032",
+      "path": "benchmarks/approved_heatmaps/q122b_hqq6_k4v4_approved_heatmap.json",
+      "filename": "q122b_hqq6_k4v4_approved_heatmap.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/nemotron-dev/benchmarks/approved_heatmaps/q122b_hqq6_k4v4_approved_heatmap.json",
+      "sha256": "fe2b7c0e229fc73e80d48a63c4a95c826c120ed469348ffd2bd5be4c2dbd363f",
+      "bytes": 166707,
+      "route_signature_sha256": "468ccad0056dbffcca9fdccbf6e11bdbb1e19bcf2ace7016792c18ddf59e800d",
+      "validated_runtime_sha256s": [
+        "e475801d9804e603c754ef0d0628c241d0803dd4006404605646d419f1d98cc3"
+      ],
+      "capture": {
+        "prompt_count_processed": 32,
+        "captured_decode_route_tokens": 8148,
+        "ranked_entries": 11729,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "quick_startup_heatmap",
+        "final_hcs_hit_pct": 80.04,
+        "quick_hcs_hit_pct": 77.82,
+        "request_promotions": "19083/95616",
+        "quick_request_promotions": "21206/95616",
+        "internal_decode_tok_s": 30.60,
+        "quick_internal_decode_tok_s": 28.78,
+        "http_tok_s": 51.66,
+        "quick_http_tok_s": 49.00,
+        "notes": "Best HCS hit in the p00008-p00048 Q122B sweep. p00040 had slightly higher internal decode but lower HCS hit, so p00032 is selected by the primary plateau metric."
+      }
+    },
+    {
+      "artifact_id": "nemotron_super_hqq4_k4v4_p00040",
+      "status": "approved",
+      "priority": 10,
+      "model_name": "NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+      "source_checkpoint": "p00040",
+      "path": "benchmarks/approved_heatmaps/nemotron_super_hqq4_k4v4_approved_heatmap.json",
+      "filename": "nemotron_super_hqq4_k4v4_approved_heatmap.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/nemotron-dev/benchmarks/approved_heatmaps/nemotron_super_hqq4_k4v4_approved_heatmap.json",
+      "sha256": "eb07924e1974b9f77b7d005aa62e856b1d8dd8cc05255e6bec8f41ae71e151b0",
+      "bytes": 268147,
+      "route_signature_sha256": "89f91d2ef91e25ba2c02e03bf8c40b8e26da57d3945cc3ccc1aaf430e0638b2a",
+      "validated_runtime_sha256s": [
+        "33e3e1f42cf448262ca66fbad7e2b20c110b4c04503fbade7034520fddc67fe7"
+      ],
+      "capture": {
+        "prompt_count_processed": 40,
+        "captured_decode_route_tokens": 10280,
+        "ranked_entries": 18759,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "quick_startup_heatmap",
+        "final_hcs_hit_pct": 95.82,
+        "quick_hcs_hit_pct": 95.26,
+        "request_promotions": "9165/219120",
+        "quick_request_promotions": "10378/219120",
+        "internal_decode_tok_s": 42.78,
+        "quick_internal_decode_tok_s": 42.68,
+        "http_tok_s": 52.46,
+        "quick_http_tok_s": 63.35,
+        "notes": "Best HCS hit in the p00008-p00048 Nemotron Super sweep. Decode speed was effectively flat, but request-promotion pressure fell 11.7%; HTTP rows were noisy and are not used as the acceptance metric."
       }
     }
   ]

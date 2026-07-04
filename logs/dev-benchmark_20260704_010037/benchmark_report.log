@@ -1,0 +1,47 @@
+================================================================
+Krasis Benchmark — 2026-07-04 01:04:15
+================================================================
+Model:            NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+Architecture:     nemotron_h, 88 layers, 512 experts, top-22, 8 GQA + 80 linear
+PP Partition:     [88] (1 GPUs)
+
+Hardware:
+  CPU:            AMD EPYC 7742 64-Core Processor (64 cores)
+  RAM:            1007 GB total, 62.5 GB used by process
+  GPU 0:           NVIDIA GeForce RTX 5090 (32607 MB), 8151 MB allocated
+
+Quantization:
+  GPU experts:    INT4 (Marlin)
+  CPU experts:    INT4
+  Attention:      HQQ4
+  Shared expert:  INT8
+  Dense MLP:      INT8
+  LM head:        INT8
+  KV cache:       k4v4
+
+Strategy:
+  Layer group size: 2 (layer_grouped(2))
+  Prefill threshold: 1
+  Mode:           gpu_decode (layer_grouped(2))
+
+Prefill (internal) — 4 runs at different lengths:
+  Run 1:  486.6 tok/s (1,000 tokens in 2055.3ms)
+  Run 2:  1,497.4 tok/s (5,000 tokens in 3339.1ms)
+  Run 3:  1,811.3 tok/s (10,000 tokens in 5520.9ms)
+  Run 4:  1,861.1 tok/s (15,290 tokens in 8215.5ms)
+  Best:   1,861.1 tok/s (15,290 tokens)
+
+Decode (internal) — 50/100/250 tokens, 3 separate prompts:
+   50 tokens: 39.66 tok/s (25.2ms/tok)
+  100 tokens: 42.38 tok/s (23.6ms/tok)
+  250 tokens: 42.78 tok/s (23.4ms/tok)
+  Best:    42.78 tok/s
+  HCS:     7038/20480 experts (34.4%)
+  Min free VRAM: 904 MB
+
+Round trip (network) — 50/100/250 tokens via HTTP:
+   50 tokens: 49.86 tok/s (3.23s total)
+  100 tokens: 52.46 tok/s (3.97s total)
+  250 tokens: 46.70 tok/s (7.27s total)
+  Best:    52.46 tok/s
+================================================================
