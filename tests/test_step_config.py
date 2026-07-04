@@ -1,8 +1,10 @@
 import json
 import os
 import unittest
+from types import SimpleNamespace
 
 from krasis.config import ModelConfig
+from krasis.model import KrasisModel
 from krasis.vram_budget import (
     _hqq_attention_tensor_shapes_for_layer,
     _read_model_config,
@@ -121,6 +123,47 @@ class StepConfigTest(unittest.TestCase):
         self.assertEqual(sliding_shapes["v_proj"], (1024, 4096))
         self.assertEqual(sliding_shapes["o_proj"], (4096, 12288))
         self.assertEqual(sliding_shapes["fused_qkv"], (14336, 4096))
+
+    def test_step37_vision_support_and_processor_placeholder_expansion(self):
+        from PIL import Image
+        from transformers import AutoTokenizer
+
+        model = KrasisModel.__new__(KrasisModel)
+        model.cfg = SimpleNamespace(model_path=STEP_MODEL_PATH)
+        model._step_vision_modules = None
+
+        self.assertTrue(model.supports_step_image_inputs())
+        self.assertTrue(model.supports_image_inputs())
+
+        _, _, processor_mod = model._ensure_step_vision_modules()
+        tokenizer = AutoTokenizer.from_pretrained(STEP_MODEL_PATH, trust_remote_code=True)
+        template_path = os.path.join(STEP_MODEL_PATH, "chat_template.jinja")
+        if not getattr(tokenizer, "chat_template", None):
+            with open(template_path, encoding="utf-8") as f:
+                tokenizer.chat_template = f.read()
+        processor = processor_mod.Step3VLProcessor(tokenizer=tokenizer)
+
+        rendered = tokenizer.apply_chat_template(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Describe this image."},
+                        {"type": "image", "image": "placeholder"},
+                    ],
+                }
+            ],
+            add_generation_prompt=True,
+            tokenize=False,
+        )
+        self.assertEqual(rendered.count("<im_patch>"), 1)
+
+        image = Image.new("RGB", (728, 728), (32, 64, 96))
+        batch = processor(text=[rendered], images=[image], return_tensors="pt")
+
+        self.assertEqual(tuple(batch["pixel_values"].shape), (1, 3, 728, 728))
+        self.assertEqual(batch["num_patches"].tolist(), [0])
+        self.assertEqual(int((batch["input_ids"] == processor.image_token_id).sum().item()), 169)
 
 
 if __name__ == "__main__":

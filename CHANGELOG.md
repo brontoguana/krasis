@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Added the Step-3.7-Flash BF16 vision path using the same lazy architecture as
+  Qwen vision: Step image support is detected from local model metadata, the
+  vision tower/projector load on first image request, move to GPU only while
+  image embeddings are produced, then return to CPU. OpenAI-style `image_url`
+  parts are normalized for multimodal chat templates, while the original
+  request JSON remains the image source. Validated with `Step-3.7-Flash-vision`
+  on a synthetic image request: the server returned `The square is blue.`,
+  reported `201` prompt tokens and `6` completion tokens, and the release probe
+  measured `4072 MiB` freed after moving BF16 vision back off GPU.
+
 - Opened guarded Nano parallel SSD output bottleneck speed gate
   `20260629_2009_nemotron_nano_parallel_ssd_output_bottleneck_speed`.
   This records the `1818` guarded by-chunk result first: long `39920`

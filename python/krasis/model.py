@@ -12,13 +12,16 @@ Loading sequence:
 
 import gc
 import hashlib
+import importlib
 import logging
 import os
 import json
 import shutil
+import sys
 import threading
 import time
 import base64
+import types
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
 from math import ceil, pi
@@ -90,7 +93,7 @@ MAMBA2_PROJECTION_INT4_CACHE_FORMAT = "krasis_mamba2_projection_marlin_int4"
 
 
 class KrasisVisionVramError(RuntimeError):
-    """Raised when a Qwen image request cannot fit transient vision VRAM."""
+    """Raised when an image request cannot fit transient vision VRAM."""
 
 
 _TQ4_SEED = 42
@@ -828,7 +831,16 @@ class KrasisModel:
         self._qwen_vision_processor = None
         self._qwen_vision_model = None
         self._qwen_vision_config = None
+        self._step_vision_modules = None
+        self._step_vision_processor = None
+        self._step_vision_model = None
+        self._step_vision_projector = None
+        self._step_vision_config = None
         self._last_multimodal_prefill_tensors = None
+
+    def supports_image_inputs(self) -> bool:
+        """Return True when the loaded model directory exposes a supported vision path."""
+        return self.supports_qwen_image_inputs() or self.supports_step_image_inputs()
 
     def supports_qwen_image_inputs(self) -> bool:
         """Return True when the loaded model directory contains Qwen image assets."""
@@ -845,6 +857,35 @@ class KrasisModel:
             with open(index_path) as f:
                 weight_map = json.load(f).get("weight_map", {})
             return any(key.startswith("model.visual.") for key in weight_map)
+        except Exception:
+            return False
+
+    def supports_step_image_inputs(self) -> bool:
+        """Return True when the loaded model directory contains Step-3.7 image assets."""
+        config_path = os.path.join(self.cfg.model_path, "config.json")
+        index_path = os.path.join(self.cfg.model_path, "model.safetensors.index.json")
+        required_code = (
+            "configuration_step3p7.py",
+            "processing_step3.py",
+            "vision_encoder.py",
+        )
+        if not (os.path.exists(config_path) and os.path.exists(index_path)):
+            return False
+        if not all(os.path.exists(os.path.join(self.cfg.model_path, name)) for name in required_code):
+            return False
+        try:
+            with open(config_path) as f:
+                raw = json.load(f)
+            if raw.get("model_type") != "step3p7":
+                return False
+            if not isinstance(raw.get("vision_config"), dict) or not isinstance(raw.get("image_token_id"), int):
+                return False
+            with open(index_path) as f:
+                weight_map = json.load(f).get("weight_map", {})
+            return (
+                any(key.startswith("vision_model.") for key in weight_map)
+                and "vit_large_projector.weight" in weight_map
+            )
         except Exception:
             return False
 
@@ -877,7 +918,7 @@ class KrasisModel:
                     continue
                 ptype = part.get("type")
                 if ptype in ("video", "input_video") or "video" in part:
-                    raise ValueError("Qwen vision support is image-only; video inputs are not supported")
+                    raise ValueError("vision support is image-only; video inputs are not supported")
                 if not (ptype in ("image", "image_url", "input_image") or "image" in part or "image_url" in part):
                     continue
                 source = part.get("image") or part.get("image_url")
@@ -909,6 +950,31 @@ class KrasisModel:
                 raw = resp.read()
             return Image.open(BytesIO(raw)).convert("RGB")
         raise ValueError(f"unsupported image source: {source[:80]}")
+
+    def _ensure_step_vision_modules(self):
+        if self._step_vision_modules is not None:
+            return self._step_vision_modules
+
+        from transformers import AutoTokenizer
+
+        shim_name = "transformers.tokenization_utils_tokenizers"
+        if shim_name not in sys.modules:
+            shim = types.ModuleType(shim_name)
+            shim.TokenizersBackend = AutoTokenizer
+            sys.modules[shim_name] = shim
+
+        model_path = os.path.abspath(self.cfg.model_path)
+        package_name = f"krasis_step3p7_{hashlib.sha1(model_path.encode()).hexdigest()[:12]}"
+        if package_name not in sys.modules:
+            package = types.ModuleType(package_name)
+            package.__path__ = [model_path]
+            sys.modules[package_name] = package
+
+        config_mod = importlib.import_module(f"{package_name}.configuration_step3p7")
+        vision_mod = importlib.import_module(f"{package_name}.vision_encoder")
+        processor_mod = importlib.import_module(f"{package_name}.processing_step3")
+        self._step_vision_modules = (config_mod, vision_mod, processor_mod)
+        return self._step_vision_modules
 
     def _ensure_qwen_vision_model(self):
         if self._qwen_vision_processor is None:
@@ -981,6 +1047,114 @@ class KrasisModel:
         )
         return vision
 
+    def _ensure_step_vision_model(self):
+        if self._step_vision_processor is None:
+            _, _, processor_mod = self._ensure_step_vision_modules()
+            if self.tokenizer is None:
+                from transformers import AutoTokenizer
+
+                tokenizer = AutoTokenizer.from_pretrained(self.cfg.model_path, trust_remote_code=True)
+                template_path = os.path.join(self.cfg.model_path, "chat_template.jinja")
+                if not getattr(tokenizer, "chat_template", None) and os.path.isfile(template_path):
+                    with open(template_path, "r", encoding="utf-8") as f:
+                        tokenizer.chat_template = f.read()
+            else:
+                tokenizer = self.tokenizer.tokenizer
+            self._step_vision_processor = processor_mod.Step3VLProcessor(tokenizer=tokenizer)
+
+        if self._step_vision_model is not None and self._step_vision_projector is not None:
+            return self._step_vision_model, self._step_vision_projector
+
+        config_mod, vision_mod, _ = self._ensure_step_vision_modules()
+        step_cfg = config_mod.Step3p7Config.from_pretrained(self.cfg.model_path)
+        log_ram_ledger("before-step-vision-load")
+        vision = vision_mod.StepRoboticsVisionEncoder(step_cfg.vision_config)
+        text_hidden = int(getattr(step_cfg.text_config, "hidden_size", 0) or self.cfg.hidden_size)
+        projector = torch.nn.Linear(
+            int(step_cfg.vision_config.width) * 4,
+            text_hidden,
+            bias=bool(getattr(step_cfg, "projector_bias", False)),
+        )
+        vision.to(dtype=torch.bfloat16)
+        projector.to(dtype=torch.bfloat16)
+
+        index_path = os.path.join(self.cfg.model_path, "model.safetensors.index.json")
+        if not os.path.exists(index_path):
+            raise RuntimeError("Step vision loading requires model.safetensors.index.json")
+        with open(index_path, "r") as f:
+            weight_map = json.load(f)["weight_map"]
+        shard_to_keys = {}
+        for key, shard in weight_map.items():
+            if key.startswith("vision_model.") or key.startswith("vit_large_projector."):
+                shard_to_keys.setdefault(shard, []).append(key)
+        if not shard_to_keys:
+            raise RuntimeError("No Step vision/projector tensors found in safetensors index")
+
+        vision_state = {}
+        projector_state = {}
+        for shard, keys in shard_to_keys.items():
+            shard_path = os.path.join(self.cfg.model_path, shard)
+            with safe_open(shard_path, framework="pt", device="cpu") as f:
+                for key in keys:
+                    if key.startswith("vision_model."):
+                        vision_state[key.removeprefix("vision_model.")] = f.get_tensor(key)
+                    elif key.startswith("vit_large_projector."):
+                        projector_state[key.removeprefix("vit_large_projector.")] = f.get_tensor(key)
+        state_bytes = (
+            sum(t.numel() * t.element_size() for t in vision_state.values())
+            + sum(t.numel() * t.element_size() for t in projector_state.values())
+        )
+        state_dtypes = sorted(
+            {str(t.dtype) for t in list(vision_state.values()) + list(projector_state.values())}
+        )
+        log_ram_ledger("after-step-vision-state-load", {"vision_state": state_bytes})
+        missing, unexpected = vision.load_state_dict(vision_state, strict=False)
+        if missing or unexpected:
+            raise RuntimeError(
+                f"Step vision state mismatch: missing={list(missing)[:8]} unexpected={list(unexpected)[:8]}"
+            )
+        missing, unexpected = projector.load_state_dict(projector_state, strict=True)
+        if missing or unexpected:
+            raise RuntimeError(
+                f"Step vision projector state mismatch: missing={list(missing)[:8]} unexpected={list(unexpected)[:8]}"
+            )
+        del vision_state, projector_state
+        gc.collect()
+        vision.eval()
+        projector.eval()
+        vision.requires_grad_(False)
+        projector.requires_grad_(False)
+        self._step_vision_model = vision
+        self._step_vision_projector = projector
+        self._step_vision_config = step_cfg
+        param_bytes = (
+            sum(p.numel() * p.element_size() for p in vision.parameters())
+            + sum(p.numel() * p.element_size() for p in projector.parameters())
+        )
+        buffer_bytes = sum(b.numel() * b.element_size() for b in vision.buffers())
+        param_dtypes = sorted(
+            {str(p.dtype) for p in list(vision.parameters()) + list(projector.parameters())}
+        )
+        buffer_dtypes = sorted({str(b.dtype) for b in vision.buffers()})
+        log_ram_ledger(
+            "after-step-vision-load",
+            {
+                "vision_params": param_bytes,
+                "vision_buffers": buffer_bytes,
+            },
+        )
+        logger.info(
+            "Loaded Step vision tower on CPU: params_mb=%.1f buffers_mb=%.1f "
+            "state_mb=%.1f param_dtypes=%s buffer_dtypes=%s state_dtypes=%s",
+            param_bytes / (1024 * 1024),
+            buffer_bytes / (1024 * 1024),
+            state_bytes / (1024 * 1024),
+            param_dtypes,
+            buffer_dtypes,
+            state_dtypes,
+        )
+        return vision, projector
+
     def _release_qwen_vision_gpu(self, vision, device, label: str = "after-qwen-vision-release"):
         if getattr(device, "type", None) != "cuda":
             return
@@ -988,6 +1162,35 @@ class KrasisModel:
             vision.to("cpu")
         finally:
             torch.cuda.empty_cache()
+            log_ram_ledger(label)
+            if _vram_ledger_enabled():
+                _vram_checkpoint(label, [device])
+
+    def _release_step_vision_gpu(self, vision, projector, device, label: str = "after-step-vision-release"):
+        if getattr(device, "type", None) != "cuda":
+            return
+        free_before = None
+        total = None
+        try:
+            free_before, total = torch.cuda.mem_get_info(device)
+        except Exception:
+            pass
+        try:
+            projector.to("cpu")
+            vision.to("cpu")
+        finally:
+            torch.cuda.empty_cache()
+            try:
+                free_after, total_after = torch.cuda.mem_get_info(device)
+                logger.info(
+                    "Released Step vision tower from GPU: freed_mb=%d free_before_mb=%d free_after_mb=%d total_vram_mb=%d",
+                    int(((free_after - free_before) if free_before is not None else 0) // (1024 * 1024)),
+                    int((free_before or 0) // (1024 * 1024)),
+                    int(free_after // (1024 * 1024)),
+                    int((total or total_after) // (1024 * 1024)),
+                )
+            except Exception:
+                logger.info("Released Step vision tower from GPU")
             log_ram_ledger(label)
             if _vram_ledger_enabled():
                 _vram_checkpoint(label, [device])
@@ -1047,7 +1250,7 @@ class KrasisModel:
             freqs_t[:, offset:length:3] = freqs[dim, :, offset:length:3]
         return freqs_t.cos().contiguous(), freqs_t.sin().contiguous()
 
-    def build_multimodal_prefill_inputs(self, messages_json: str, rendered_prompt: str):
+    def _build_qwen_multimodal_prefill_inputs(self, messages_json: str, rendered_prompt: str):
         """Build GPU inputs_embeds for Qwen image prompts.
 
         This method is intentionally called only from the image request path.
@@ -1197,6 +1400,174 @@ class KrasisModel:
             "image_count": int(len(images)),
             "image_tokens": int((input_ids == int(self._qwen_vision_config.image_token_id)).sum().item()),
         }
+
+    def _step_process_image_features(self, image_features: torch.Tensor, projector: torch.nn.Module) -> torch.Tensor:
+        if image_features is None:
+            return None
+        bsz, patches = image_features.shape[:2]
+        hw = int(patches ** 0.5)
+        if hw * hw != int(patches):
+            raise RuntimeError(f"Step vision features must be square, got {patches} patches")
+        image_features = image_features.permute(0, 2, 1).contiguous().view(bsz, -1, hw, hw)
+        image_features = self._step_vision_model.vit_downsampler1(image_features)
+        image_features = self._step_vision_model.vit_downsampler2(image_features)
+        bsz, channels, hw, _ = image_features.shape
+        image_features = image_features.view(bsz, channels, hw * hw).permute(0, 2, 1).contiguous()
+        return projector(image_features)
+
+    def _build_step_multimodal_prefill_inputs(self, messages_json: str, rendered_prompt: str):
+        """Build GPU inputs_embeds for Step image prompts.
+
+        Step uses normal text RoPE, so this returns zero MRoPE pointers.
+        """
+        if self.embedding is None:
+            raise RuntimeError("Model embedding is not loaded")
+        images = self._extract_openai_images(messages_json)
+        vision, projector = self._ensure_step_vision_model()
+        processor = self._step_vision_processor
+        device = self.embedding.device
+        dtype = torch.bfloat16
+
+        batch = processor(
+            text=[rendered_prompt],
+            images=images,
+            return_tensors="pt",
+        )
+        image_token_id = int(self._step_vision_config.image_token_id)
+        input_ids_cpu = batch["input_ids"][0].to(dtype=torch.long)
+        expected_image_tokens = int((input_ids_cpu == image_token_id).sum().item())
+        vision_param_bytes = (
+            sum(p.numel() * p.element_size() for p in vision.parameters())
+            + sum(p.numel() * p.element_size() for p in projector.parameters())
+        )
+        vision_buffer_bytes = sum(b.numel() * b.element_size() for b in vision.buffers())
+        num_patches = batch.get("num_patches", [])
+        if hasattr(num_patches, "detach"):
+            num_patches = [int(x) for x in num_patches.detach().cpu().view(-1).tolist()]
+        else:
+            num_patches = [int(x) for x in num_patches]
+
+        try:
+            if getattr(device, "type", None) == "cuda":
+                free_before, total = torch.cuda.mem_get_info(device)
+                logger.info(
+                    "Step image request staging: images=%d image_tokens=%d patches=%d free_vram_mb=%d total_vram_mb=%d vision_params_mb=%.1f vision_buffers_mb=%.1f",
+                    len(images),
+                    expected_image_tokens,
+                    sum(num_patches),
+                    int(free_before // (1024 * 1024)),
+                    int(total // (1024 * 1024)),
+                    vision_param_bytes / (1024 * 1024),
+                    vision_buffer_bytes / (1024 * 1024),
+                )
+            input_ids = input_ids_cpu.to(device=device, dtype=torch.long)
+            pixel_values = batch["pixel_values"].to(device=device, dtype=dtype)
+            patch_pixel_values = batch.get("patch_pixel_values")
+            if patch_pixel_values is not None and int(patch_pixel_values.shape[0]) > 0:
+                patch_pixel_values = patch_pixel_values.to(device=device, dtype=dtype)
+            else:
+                patch_pixel_values = None
+
+            log_ram_ledger("before-step-vision-to-gpu")
+            if _vram_ledger_enabled():
+                _vram_checkpoint("before-step-vision-to-gpu", [device])
+            vision = vision.to(device=device, dtype=dtype)
+            projector = projector.to(device=device, dtype=dtype)
+            if _vram_ledger_enabled():
+                _vram_checkpoint("after-step-vision-to-gpu", [device])
+            with torch.inference_mode():
+                image_features = vision(pixel_values)
+                image_embeds = self._step_process_image_features(image_features, projector)
+                patch_embeds = None
+                if patch_pixel_values is not None:
+                    patch_features = vision(patch_pixel_values)
+                    patch_embeds = self._step_process_image_features(patch_features, projector)
+
+                merged = []
+                cur_patch_idx = 0
+                for image_idx, num_patch in enumerate(num_patches):
+                    parts = []
+                    if num_patch > 0:
+                        if patch_embeds is None:
+                            raise RuntimeError("Step processor returned patch count without patch pixels")
+                        patch_slice = patch_embeds[cur_patch_idx:cur_patch_idx + num_patch]
+                        parts.append(patch_slice.reshape(-1, patch_slice.shape[-1]))
+                    parts.append(image_embeds[image_idx].reshape(-1, image_embeds.shape[-1]))
+                    cur_patch_idx += num_patch
+                    merged.append(torch.cat(parts, dim=0) if len(parts) > 1 else parts[0])
+                image_embeds = torch.cat(merged, dim=0) if len(merged) > 1 else merged[0]
+                image_embeds = image_embeds.to(device=device, dtype=self.embedding.dtype)
+
+                inputs_embeds = self.embedding[input_ids].clone()
+                image_mask = input_ids == image_token_id
+                if int(image_mask.sum().item()) != int(image_embeds.shape[0]):
+                    raise RuntimeError(
+                        f"Step image feature/token mismatch: tokens={int(image_mask.sum().item())} "
+                        f"features={int(image_embeds.shape[0])}"
+                    )
+                inputs_embeds[image_mask] = image_embeds
+                if getattr(device, "type", None) == "cuda":
+                    torch.cuda.synchronize(device)
+        except (torch.cuda.OutOfMemoryError, torch.OutOfMemoryError) as e:
+            self._last_multimodal_prefill_tensors = None
+            self._release_step_vision_gpu(vision, projector, device, "after-step-vision-oom-release")
+            free_mb = -1
+            total_mb = -1
+            if getattr(device, "type", None) == "cuda":
+                try:
+                    free_after, total = torch.cuda.mem_get_info(device)
+                    free_mb = int(free_after // (1024 * 1024))
+                    total_mb = int(total // (1024 * 1024))
+                except Exception:
+                    pass
+            raise KrasisVisionVramError(
+                "VRAM is too constrained for this Step image request. "
+                f"Transient BF16 vision staging needs about {vision_param_bytes / (1024 * 1024):.1f} MB "
+                f"for vision parameters plus image activations and multimodal prefill scratch; "
+                f"free_vram_mb_after_cleanup={free_mb}, total_vram_mb={total_mb}, "
+                f"images={len(images)}, image_tokens={expected_image_tokens}, patches={sum(num_patches)}. "
+                "Use a smaller/fewer images or run this model on a GPU with more free VRAM."
+            ) from e
+        except RuntimeError as e:
+            if "out of memory" in str(e).lower():
+                self._last_multimodal_prefill_tensors = None
+                self._release_step_vision_gpu(vision, projector, device, "after-step-vision-oom-release")
+                raise KrasisVisionVramError(
+                    "VRAM is too constrained for this Step image request. "
+                    f"Transient BF16 vision staging needs about {vision_param_bytes / (1024 * 1024):.1f} MB "
+                    f"for vision parameters plus image activations and multimodal prefill scratch; "
+                    f"images={len(images)}, image_tokens={expected_image_tokens}, patches={sum(num_patches)}. "
+                    "Use a smaller/fewer images or run this model on a GPU with more free VRAM."
+                ) from e
+            self._release_step_vision_gpu(vision, projector, device)
+            raise
+        except Exception:
+            self._release_step_vision_gpu(vision, projector, device)
+            raise
+
+        self._release_step_vision_gpu(vision, projector, device)
+
+        self._last_multimodal_prefill_tensors = (inputs_embeds,)
+        return {
+            "token_ids": [int(x) for x in input_ids.detach().cpu().tolist()],
+            "prompt_tokens": int(input_ids.numel()),
+            "hidden_size": int(inputs_embeds.shape[-1]),
+            "inputs_embeds_ptr": int(inputs_embeds.data_ptr()),
+            "mrope_cos_ptr": 0,
+            "mrope_sin_ptr": 0,
+            "mrope_half_dim": 0,
+            "rope_delta": 0,
+            "image_count": int(len(images)),
+            "image_tokens": int(expected_image_tokens),
+        }
+
+    def build_multimodal_prefill_inputs(self, messages_json: str, rendered_prompt: str):
+        """Build GPU inputs_embeds for a supported image prompt."""
+        if self.supports_qwen_image_inputs():
+            return self._build_qwen_multimodal_prefill_inputs(messages_json, rendered_prompt)
+        if self.supports_step_image_inputs():
+            return self._build_step_multimodal_prefill_inputs(messages_json, rendered_prompt)
+        raise ValueError("loaded model does not support Krasis image inputs")
 
     def clear_multimodal_prefill_inputs(self):
         self._last_multimodal_prefill_tensors = None

@@ -3695,7 +3695,7 @@ def main():
         args.host, args.port, max_ctx,
         f"s ({len(all_aux_gpu_store_addrs)+1}-GPU)" if all_aux_gpu_store_addrs else "",
     )
-    _vision_supported = bool(getattr(_model, "supports_qwen_image_inputs", lambda: False)())
+    _vision_supported = bool(getattr(_model, "supports_image_inputs", lambda: False)())
     _vision_model_name = f"{_model_name}-vision" if _vision_supported else ""
 
     rust_server = RustServer(

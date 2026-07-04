@@ -170,7 +170,9 @@ impl ChatTemplateEngine {
         // use `arguments|items` which requires a dict/mapping.
         if let Some(msgs) = messages.as_array_mut() {
             for msg in msgs.iter_mut() {
-                if !preserve_multimodal_content {
+                if preserve_multimodal_content {
+                    normalize_multimodal_content_parts_for_templates(msg)?;
+                } else {
                     normalize_text_content_parts(msg)?;
                 }
                 if let Some(tool_calls) = msg.get_mut("tool_calls").and_then(|v| v.as_array_mut()) {
@@ -412,6 +414,41 @@ fn normalize_text_content_parts(message: &mut serde_json::Value) -> Result<(), S
     Ok(())
 }
 
+fn normalize_multimodal_content_parts_for_templates(
+    message: &mut serde_json::Value,
+) -> Result<(), String> {
+    let Some(content) = message.get_mut("content") else {
+        return Ok(());
+    };
+    let serde_json::Value::Array(parts) = content else {
+        return Ok(());
+    };
+
+    for (idx, part) in parts.iter_mut().enumerate() {
+        let obj = part
+            .as_object_mut()
+            .ok_or_else(|| format!("structured content part {} must be an object", idx))?;
+        let part_type = obj.get("type").and_then(|v| v.as_str());
+        let is_image_like = obj.contains_key("image")
+            || obj.contains_key("image_url")
+            || matches!(part_type, Some("image" | "image_url" | "input_image"));
+        if !is_image_like {
+            continue;
+        }
+
+        if !obj.contains_key("image") {
+            if let Some(image_url) = obj.get("image_url").cloned() {
+                obj.insert("image".to_string(), image_url);
+            }
+        }
+        obj.insert(
+            "type".to_string(),
+            serde_json::Value::String("image".to_string()),
+        );
+    }
+    Ok(())
+}
+
 /// raise_exception function for Jinja2 templates.
 fn raise_exception(msg: String) -> Result<String, minijinja::Error> {
     Err(minijinja::Error::new(
@@ -602,6 +639,25 @@ mod tests {
             r#"[{"role":"user","content":[{"type":"text","text":"Hello"},{"text":" world"}]}]"#;
         let rendered = engine.apply(messages, false, false).unwrap();
         assert_eq!(rendered, "Hello world");
+    }
+
+    #[test]
+    fn multimodal_image_url_parts_render_as_image_parts() {
+        let template = concat!(
+            "{% for message in messages %}",
+            "{% for item in message.content %}",
+            "{% if item.type == 'text' %}{{ item.text }}{% endif %}",
+            "{% if item.type == 'image' %}<im_patch>{% endif %}",
+            "{% endfor %}",
+            "{% endfor %}"
+        );
+        let config_path = write_tokenizer_config(template);
+        let engine = ChatTemplateEngine::from_config(&config_path).unwrap();
+        let messages = r#"[{"role":"user","content":[{"type":"text","text":"Look:"},{"type":"image_url","image_url":{"url":"data:image/png;base64,abc"}}]}]"#;
+        let rendered = engine
+            .apply_multimodal_with_tools(messages, "", false, false)
+            .unwrap();
+        assert_eq!(rendered, "Look:<im_patch>");
     }
 
     #[test]
