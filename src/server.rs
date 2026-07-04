@@ -890,7 +890,7 @@ fn collect_eos_stop_ids(tokenizer_path: &str) -> Vec<usize> {
     ids
 }
 
-fn qwen_image_vram_error_body(err: &str) -> Option<String> {
+fn image_vram_error_body(err: &str) -> Option<String> {
     let marker = "VRAM is too constrained";
     let start = err.find(marker)?;
     let message = err[start..].lines().next().unwrap_or(&err[start..]).trim();
@@ -1309,48 +1309,48 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                         "build_multimodal_prefill_inputs",
                         (messages_json.as_str(), rendered.as_str()),
                     )
-                    .map_err(|e| format!("Qwen vision prefill setup failed: {}", e))?;
+                    .map_err(|e| format!("image prefill setup failed: {}", e))?;
                 let mm = obj.bind(py);
                 let token_ids: Vec<u32> = mm
                     .get_item("token_ids")
-                    .map_err(|e| format!("Qwen vision token_ids read failed: {}", e))?
+                    .map_err(|e| format!("image prefill token_ids read failed: {}", e))?
                     .extract()
-                    .map_err(|e| format!("Qwen vision token_ids extract failed: {}", e))?;
+                    .map_err(|e| format!("image prefill token_ids extract failed: {}", e))?;
                 let inputs_embeds_ptr: u64 = mm
                     .get_item("inputs_embeds_ptr")
-                    .map_err(|e| format!("Qwen vision inputs_embeds_ptr read failed: {}", e))?
+                    .map_err(|e| format!("image prefill inputs_embeds_ptr read failed: {}", e))?
                     .extract()
-                    .map_err(|e| format!("Qwen vision inputs_embeds_ptr extract failed: {}", e))?;
+                    .map_err(|e| format!("image prefill inputs_embeds_ptr extract failed: {}", e))?;
                 let mrope_cos_ptr: u64 = mm
                     .get_item("mrope_cos_ptr")
-                    .map_err(|e| format!("Qwen vision mrope_cos_ptr read failed: {}", e))?
+                    .map_err(|e| format!("image prefill mrope_cos_ptr read failed: {}", e))?
                     .extract()
-                    .map_err(|e| format!("Qwen vision mrope_cos_ptr extract failed: {}", e))?;
+                    .map_err(|e| format!("image prefill mrope_cos_ptr extract failed: {}", e))?;
                 let mrope_sin_ptr: u64 = mm
                     .get_item("mrope_sin_ptr")
-                    .map_err(|e| format!("Qwen vision mrope_sin_ptr read failed: {}", e))?
+                    .map_err(|e| format!("image prefill mrope_sin_ptr read failed: {}", e))?
                     .extract()
-                    .map_err(|e| format!("Qwen vision mrope_sin_ptr extract failed: {}", e))?;
+                    .map_err(|e| format!("image prefill mrope_sin_ptr extract failed: {}", e))?;
                 let mrope_half_dim: usize = mm
                     .get_item("mrope_half_dim")
-                    .map_err(|e| format!("Qwen vision mrope_half_dim read failed: {}", e))?
+                    .map_err(|e| format!("image prefill mrope_half_dim read failed: {}", e))?
                     .extract()
-                    .map_err(|e| format!("Qwen vision mrope_half_dim extract failed: {}", e))?;
+                    .map_err(|e| format!("image prefill mrope_half_dim extract failed: {}", e))?;
                 let rope_delta: i32 = mm
                     .get_item("rope_delta")
-                    .map_err(|e| format!("Qwen vision rope_delta read failed: {}", e))?
+                    .map_err(|e| format!("image prefill rope_delta read failed: {}", e))?
                     .extract()
-                    .map_err(|e| format!("Qwen vision rope_delta extract failed: {}", e))?;
+                    .map_err(|e| format!("image prefill rope_delta extract failed: {}", e))?;
                 let image_count: usize = mm
                     .get_item("image_count")
-                    .map_err(|e| format!("Qwen vision image_count read failed: {}", e))?
+                    .map_err(|e| format!("image prefill image_count read failed: {}", e))?
                     .extract()
-                    .map_err(|e| format!("Qwen vision image_count extract failed: {}", e))?;
+                    .map_err(|e| format!("image prefill image_count extract failed: {}", e))?;
                 let image_tokens: usize = mm
                     .get_item("image_tokens")
-                    .map_err(|e| format!("Qwen vision image_tokens read failed: {}", e))?
+                    .map_err(|e| format!("image prefill image_tokens read failed: {}", e))?
                     .extract()
-                    .map_err(|e| format!("Qwen vision image_tokens extract failed: {}", e))?;
+                    .map_err(|e| format!("image prefill image_tokens extract failed: {}", e))?;
                 Ok(MultimodalPrefillInputs {
                     token_ids,
                     inputs_embeds_ptr,
@@ -1365,7 +1365,7 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
             match built {
                 Ok(mm) => {
                     log::info!(
-                        "Request {}: Qwen image prefill inputs ready: images={} image_tokens={} prompt_tokens={} rope_delta={}",
+                        "Request {}: image prefill inputs ready: images={} image_tokens={} prompt_tokens={} rope_delta={}",
                         request_id,
                         mm.image_count,
                         mm.image_tokens,
@@ -1377,7 +1377,7 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                     ids
                 }
                 Err(e) => {
-                    if let Some(body) = qwen_image_vram_error_body(&e) {
+                    if let Some(body) = image_vram_error_body(&e) {
                         let _ = send_json(stream, 507, &body);
                     } else {
                         let _ = send_json(
@@ -1464,7 +1464,7 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                 }
                 if has_images {
                     let body = format!(
-                        r#"{{"error":{{"message":"VRAM is too constrained for this Qwen image request. Multimodal prefill scratch allocation failed: {}","type":"insufficient_resources","code":"insufficient_vram"}}}}"#,
+                        r#"{{"error":{{"message":"VRAM is too constrained for this image request. Multimodal prefill scratch allocation failed: {}","type":"insufficient_resources","code":"insufficient_vram"}}}}"#,
                         json_escape(&e)
                     );
                     let _ = send_json(stream, 507, &body);
@@ -1686,13 +1686,13 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                     ),
                 )
             } else if has_images {
-                if let Some(body) = qwen_image_vram_error_body(&err_str) {
+                if let Some(body) = image_vram_error_body(&err_str) {
                     (507, body)
                 } else if err_str.to_ascii_lowercase().contains("out of memory") {
                     (
                         507,
                         format!(
-                            r#"{{"error":{{"message":"VRAM is too constrained for this Qwen image request. Multimodal prefill failed: {}","type":"insufficient_resources","code":"insufficient_vram"}}}}"#,
+                            r#"{{"error":{{"message":"VRAM is too constrained for this image request. Multimodal prefill failed: {}","type":"insufficient_resources","code":"insufficient_vram"}}}}"#,
                             json_escape(&err_str)
                         ),
                     )

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Added the Step-3.7-Flash BF16 vision path using the same lazy architecture as
+  Qwen vision: Step image support is detected from local model metadata, the
+  vision tower/projector load on first image request, move to GPU only while
+  image embeddings are produced, then return to CPU. OpenAI-style `image_url`
+  parts are normalized for multimodal chat templates, while the original
+  request JSON remains the image source. Validated with `Step-3.7-Flash-vision`
+  on a synthetic image request: the server returned `The square is blue.`,
+  reported `201` prompt tokens and `6` completion tokens, and the release probe
+  measured `4072 MiB` freed after moving BF16 vision back off GPU.
+
 - Verified local `main` at `10f0bc2` with QCN and Gemma through the built
   command path. QCN ran
   `./dev test tests/qcn-k4v4-hqq4-int4-benchmark.conf` with only accepted
