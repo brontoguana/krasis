@@ -1,5 +1,93 @@
 # Krasis Benchmark Results
 
+## Qwen3.6 35B and Gemma-4 Approved Route Heatmap Builds - 2026-07-04 (RTX 5090)
+
+Purpose: build first-pass approved route-heatmap artifacts for Qwen3.6 35B and
+Gemma-4 on the HQQ4/k4v4 INT4 runtime, using the same held-out approved
+route-capture prompt corpus as the Step/Q122B/Nemotron sweeps.
+
+Configs:
+
+```text
+tests/qwen36-35b-5090-hqq4-k4v4-benchmark.conf
+tests/gemma-4-4-hqq4-k4v4-a16.conf
+```
+
+Build shape:
+
+```text
+prompts: 48 held-out approved-heatmap prompts
+decode tokens/prompt: 256
+checkpoint cadence: every 8 prompts
+```
+
+Key result: both models already saturate HCS on this RTX 5090 using the quick
+startup heatmap. The quick baseline loaded every expert as soft/reclaimable HCS,
+so the final Dynamic HCS hit rate was `100.00%` and request promotions were
+zero before the approved artifacts were used. Qwen3.6 p00008 eval was run only
+to confirm this saturated state; the remaining Qwen3.6 evals and all Gemma
+checkpoint evals were skipped to avoid redundant GPU work.
+
+Baseline and confirmation:
+
+| Model | Config | Prefill (internal) | Decode (internal) | Round trip (network) | HCS residency | Final HCS hit | Request promotions | Min free VRAM | Status | Logs |
+|-------|--------|-------------------:|------------------:|---------------------:|---------------|--------------:|-------------------:|--------------:|--------|------|
+| Qwen3.6-35B-A3B | INT4/HQQ4/k4v4 | 10,744.3 tok/s | 117.09 tok/s | 242.08 tok/s | 10240/10240 (100.0%) | 100.00% | 0/79680 | 10186 MB | QUICK SATURATED | [stdout](approved_heatmaps/20260704_qwen36_heatmap_eval_quick.log), [report](../logs/dev-benchmark_20260704_094711/benchmark_report.log) |
+| Qwen3.6 p00008 artifact | INT4/HQQ4/k4v4 | 10,404.8 tok/s | 116.58 tok/s | 232.58 tok/s | 10240/10240 (100.0%) | 100.00% | 0/79680 | 10186 MB | CONFIRMED SATURATED | [stdout](approved_heatmaps/20260704_qwen36_heatmap_eval_p00008.log), [report](../logs/dev-benchmark_20260704_100003/benchmark_report.log) |
+| Gemma-4-26B-A4B-it | INT4/HQQ4/k4v4 | 5,598.0 tok/s | 63.37 tok/s | 116.36 tok/s | 3840/3840 (100.0%) | 100.00% | 0/59760 | 12082 MB | QUICK SATURATED | [stdout](approved_heatmaps/20260704_gemma4_heatmap_eval_quick.log), [report](../logs/dev-benchmark_20260704_100316/benchmark_report.log) |
+
+Build output:
+
+| Model | Artifact | Prompts | Captured decode-route tokens | Ranked entries | Route collection elapsed | Artifact |
+|-------|----------|--------:|-----------------------------:|---------------:|-------------------------:|----------|
+| Qwen3.6-35B-A3B | p00008 | 8 | 2,056 | 8,774 | 73.2s | [json](approved_heatmaps/qwen36_35b_hqq4_k4v4_approved_heatmap.p00008.json) |
+| Qwen3.6-35B-A3B | p00016 | 16 | 4,112 | 9,311 | 146.4s | [json](approved_heatmaps/qwen36_35b_hqq4_k4v4_approved_heatmap.p00016.json) |
+| Qwen3.6-35B-A3B | p00024 | 24 | 6,168 | 9,544 | 219.8s | [json](approved_heatmaps/qwen36_35b_hqq4_k4v4_approved_heatmap.p00024.json) |
+| Qwen3.6-35B-A3B | p00032 | 32 | 8,224 | 9,701 | 292.8s | [json](approved_heatmaps/qwen36_35b_hqq4_k4v4_approved_heatmap.p00032.json) |
+| Qwen3.6-35B-A3B | p00040 | 40 | 10,280 | 9,762 | 366.1s | [json](approved_heatmaps/qwen36_35b_hqq4_k4v4_approved_heatmap.p00040.json) |
+| Qwen3.6-35B-A3B | p00048/final | 48 | 12,336 | 9,799 | 438.2s | [json](approved_heatmaps/qwen36_35b_hqq4_k4v4_approved_heatmap.p00048.json) |
+| Gemma-4-26B-A4B-it | p00008 | 8 | 2,056 | 3,223 | 102.0s | [json](approved_heatmaps/gemma4_26b_hqq4_k4v4_approved_heatmap.p00008.json) |
+| Gemma-4-26B-A4B-it | p00016 | 16 | 4,112 | 3,356 | 204.2s | [json](approved_heatmaps/gemma4_26b_hqq4_k4v4_approved_heatmap.p00016.json) |
+| Gemma-4-26B-A4B-it | p00024 | 24 | 6,168 | 3,449 | 306.6s | [json](approved_heatmaps/gemma4_26b_hqq4_k4v4_approved_heatmap.p00024.json) |
+| Gemma-4-26B-A4B-it | p00032 | 32 | 8,215 | 3,491 | 407.3s | [json](approved_heatmaps/gemma4_26b_hqq4_k4v4_approved_heatmap.p00032.json) |
+| Gemma-4-26B-A4B-it | p00040 | 40 | 10,271 | 3,532 | 510.0s | [json](approved_heatmaps/gemma4_26b_hqq4_k4v4_approved_heatmap.p00040.json) |
+| Gemma-4-26B-A4B-it | p00048/final | 48 | 12,327 | 3,550 | 613.3s | [json](approved_heatmaps/gemma4_26b_hqq4_k4v4_approved_heatmap.p00048.json) |
+
+Ranking stability from existing checkpoints:
+
+| Model | Metric | p08->p16 | p16->p24 | p24->p32 | p32->p40 | p40->p48 |
+|-------|--------|---------:|---------:|---------:|---------:|---------:|
+| Qwen3.6-35B-A3B | top-512 overlap | 88.3% | 94.1% | 97.1% | 95.1% | 97.9% |
+| Qwen3.6-35B-A3B | top-2048 overlap | 93.0% | 95.8% | 96.7% | 97.4% | 98.3% |
+| Qwen3.6-35B-A3B | top-8192 overlap | 96.4% | 97.8% | 98.3% | 99.0% | 99.3% |
+| Gemma-4-26B-A4B-it | top-256 overlap | 87.9% | 94.5% | 96.1% | 94.1% | 98.4% |
+| Gemma-4-26B-A4B-it | top-1024 overlap | 93.8% | 95.7% | 97.9% | 97.2% | 98.3% |
+| Gemma-4-26B-A4B-it | top-3072 overlap | 97.5% | 98.1% | 99.0% | 99.2% | 99.5% |
+
+Stable local artifacts:
+
+```text
+benchmarks/approved_heatmaps/qwen36_35b_hqq4_k4v4_approved_heatmap.json
+sha256: a7c4fd101e5ed96f5c6f219d9626bb5b63d3c402de14476156ac166bfd84c81b
+
+benchmarks/approved_heatmaps/gemma4_26b_hqq4_k4v4_approved_heatmap.json
+sha256: c0ca5214d6aec962752cc65042c4c83f581ff1426d3353ddd98dfbdebe006ed9
+```
+
+Notes:
+- Qwen3.6 first launch built the one-time GPU INT4 Marlin cache: `16.7 GB in
+  42s`. Gemma first launch built its one-time cache: `12.1 GB in 29s`. These
+  are setup costs, not steady benchmark speed.
+- Qwen3.6 quick calibration used a `39,920` token long probe and measured
+  long-prefill min-free `8,372 MB`; Gemma used an `11,824` token long probe and
+  measured long-prefill min-free `19,372 MB`. Both are far above the 600 MB
+  safety margin, which matches the all-experts-soft HCS outcome.
+- These artifacts are listed in the approved GitHub download manifest as route
+  priors. On this 5090 there is no HCS miss pressure to improve because all
+  experts fit, so their acceptance is based on ranking stability rather than a
+  local speed gain. They may become useful on smaller VRAM targets where not all
+  experts fit.
+
 ## Q122B Approved Route Heatmap Build - 2026-07-04 (RTX 5090)
 
 Purpose: capture a current Qwen3.5-122B-A10B timing-off quick heatmap baseline,

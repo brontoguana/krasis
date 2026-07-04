@@ -100,7 +100,7 @@ APPROVED_HEATMAP_MANIFEST_FORMAT_VERSION = 1
 APPROVED_HEATMAP_MODE_CHOICES = ("auto", "off", "require")
 APPROVED_HEATMAP_DEFAULT_MANIFEST_URL = (
     "https://raw.githubusercontent.com/brontoguana/krasis/"
-    "nemotron-dev/benchmarks/approved_heatmaps/manifest.json"
+    "main/benchmarks/approved_heatmaps/manifest.json"
 )
 HEATMAP_DEFAULT_TOP_K = 50
 HEATMAP_DEFAULT_TOP_P = 0.95
