@@ -1,0 +1,65 @@
+[0;36m[1m=>[0m Waiting for selected GPUs (0) to clear...
+[0;32m[1mOK[0m Selected GPUs (0) clear.
+[0;36m[1m=>[0m Launching from: tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf
+[0;36m[1m=>[0m Run dir: /home/main/Documents/Claude/krasis-nemotron-dev/logs/dev-run_20260628_225729
+[0;36m[1m=>[0m Import origin check:
+krasis: /home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/__init__.py
+krasis.krasis: /home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+Pre-scan: set CUDA_VISIBLE_DEVICES=0
+Loaded config from tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf: {'model_path': '/home/main/.krasis/models/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16', 'selected_gpus': '0', 'num_gpus': 1, 'layer_group_size': 2, 'kv_dtype': 'k4v4', 'gpu_expert_bits': 4, 'cpu_expert_bits': 4, 'attention_quant': 'hqq4', 'hqq_group_size': 128, 'shared_expert_quant': 'int8', 'dense_mlp_quant': 'int8', 'lm_head_quant': 'int8', 'krasis_threads': 16, 'host': '0.0.0.0', 'port': 18012, 'enable_thinking': False, 'gpu_prefill_threshold': 300, 'vram_safety_margin': 600, 'force_load': False}
+
+[1m[36m▸ Krasis — NVIDIA-Nemotron-3-Nano-30B-A3B-BF16[0m
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 1[0m
+  [32mHCS host cache: source[0m
+  [32mSelected physical GPUs: 0 (config; CUDA_VISIBLE_DEVICES=0)[0m
+  [32mExperts: GPU INT4 g128 (amax)  |  Attention: hqq4  |  KV: k4v4[0m
+  [32mLayer groups: 2  |  KV cache: 1000 MB  |  Threads: 16[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+
+[1m[36m▸ Loading model weights[0m
+  [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=518 MB, free=31600 MB, total=32119 MB
+
+[1m[36m▸ Loading GPU weights[0m
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:0: alloc=3477 MB, reserved=3562 MB, used=4178 MB, free=27940 MB, total=32119 MB
+  [0;32mHQQ attention artifacts validated (115 MB cached), 27940 MB free[0m
+
+[1m[36m▸ Building GPU INT4 Marlin expert cache (one-time)[0m
+  [2mCache will be saved to /home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 for instant loading next time.[0m
+    Loading GPU Marlin cache: 23 layers...
+    GPU Marlin cache loaded: 15.8 GB in 10s
+  [0;32mExpert cache built in 10s — next launch will be much faster.[0m
+  [33m[VRAM after-phase2-expert-weights][0m cuda:0: alloc=3477 MB, reserved=3562 MB, used=4178 MB, free=27940 MB, total=32119 MB
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:0: alloc=3477 MB, reserved=3562 MB, used=4178 MB, free=27940 MB, total=32119 MB
+  [33m[VRAM after-kv-cache-init][0m cuda:0: alloc=4477 MB, reserved=4562 MB, used=5178 MB, free=26940 MB, total=32119 MB
+  [33m[VRAM after-full-load][0m cuda:0: alloc=4477 MB, reserved=4562 MB, used=5178 MB, free=26940 MB, total=32119 MB
+
+[1m[36m▸ CUDA runtime warmup[0m
+  [32mcuBLAS + Triton kernel compilation done[0m
+
+[1m[36m▸ Setting up GPU decode store[0m
+  [32mGPU decode store ready (addr=0x2e402240)[0m
+  [32mReleased redundant GPU execution source tensors (366 MB)[0m
+  [2mVRAM monitor started (tracking warmup)[0m
+  [2mcuda:0: 0 MB total[0m
+
+[1m[36m▸ Pre-allocating Rust prefill engine[0m
+[FLA] Loading kernels for H=0 from /home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/libkrasis_fla_sm120.so
+  [32mPrefill engine scratch buffers allocated[0m
+
+[1m[36m▸ Warmup (Rust prefill engine)[0m
+  [32mStartup diag: warmup tokens=42 (default 300, token=52528)[0m
+  [32mStartup diag env: no_graph=unset, mapped_reads=unset, prefill_debug=False, prefill_timing=unset, exit_after_calibration=unset[0m
+[MAMBA2-SSD-BLOCK-SCAN-TERM-PROBE] {"available":true,"coefficient_tile":{"compared_pairs_for_target_row":29,"enabled":false,"first_mismatch_kind":"none","first_mismatch_u":-1,"inline_old_at_max_or_first":0.0,"inline_tri_at_max_or_first":0.0,"max_old_coeff_delta":0.0,"max_tri_coeff_delta":0.0,"tiled_old_at_max_or_first":0.0,"tiled_tri_at_max_or_first":0.0},"components":{"D":0.9375,"c_state_total_exact":-0.009339231997728348,"c_state_total_exact_minus_replayed":0.0,"c_state_total_replayed":-0.009339231997728348,"d_skip":-0.027008056640625,"local_hf_chunk_scan":-0.009352654218673706,"local_old_state":0.0,"prior_chunk_state":0.0,"x_target":-0.02880859375,"y_pre_bf16":-0.036360710859298706},"diagnostic":"mamba2_ssd_block_scan_c_state_total_term_probe","dimensions":{"head_dim":64,"m":42,"n_heads":64,"requested_chunk_size":64,"state_size":128},"indexing":{"chunk_idx":0,"chunk_pos":28,"chunk_start":0,"dA_target":-0.36950063705444336,"group":5},"layer":0,"output":{"candidate_bits":"0xbd15","candidate_value":-0.036376953125,"matches":true,"oracle_bits":"0xbd15","oracle_value":-0.036376953125},"target":{"d":50,"flat":117426,"head":42,"row":28}}
+[MAMBA2-SSD-BLOCK-SCAN-ORACLE] {"diagnostic":"mamba2_ssd_block_scan_full_oracle","dimensions":{"d_inner":4096,"head_dim":64,"m":42,"n_heads":64,"output_elems":172032,"state_elems":524288,"state_size":128},"layer":0,"output":{"first_mismatch":null,"max_abs":0.0,"mean_abs":0.0,"mismatches":0},"passed":true,"probes":[],"state":{"first_mismatch":null,"max_abs":0.0,"mean_abs":0.0,"mismatches":0},"timing_ms":{"candidate_output_download":0.228181,"candidate_state_download":1.276885,"comparison":2.279594,"full_buffer_downloads":2.993962,"oracle_output_download":0.244752,"oracle_state_download":1.244144,"output_compare":0.56377,"pre_download_sync":0.0009710000000000001,"probe_build":0.000241,"state_compare":1.7155829999999999}}
+[MAMBA2-SSD-BLOCK-SCAN-TIMING] {"bytes":{"c_state_total":688128,"coefficient_tile_shared":36928,"entry_state":2097152,"output":344064,"parallel_chunk_scalars_each":16384,"parallel_chunk_states":2097152,"parallel_entry_state":2097152,"state":2097152,"state_parallel_recurrent_shared":0},"diagnostic":"mamba2_ssd_block_scan_timing_decomposition","dimensions":{"c_state_total_elems":172032,"d_inner":4096,"entry_state_elems":524288,"head_dim":64,"n_chunks":1,"n_heads":64,"output_elems":172032,"state_elems":524288,"state_size":128},"layer":0,"notes":{"accepted_state_source":"exact_token_order_recurrent_bridge","affine_summaries_used_as_state":false,"coefficient_tile_env":true,"default_path_changed":false,"instrumented_only_under_block_scan_env":true,"local_old_state_source":"not_used_by_parallel_chunked_output","local_output_assembly_separate":true,"output_subloop_timing_env":false,"parallel_chunked_env":true,"recurrent_kernel_variant":"parallel_chunked_ssd","state_parallel_recurrent_env":false,"state_source":"exact_token_order_recurrent_bridge"},"timing_ms":{"block_scan_output_kernel":{"coefficient_tile_enabled":true,"launch_submit":0.003997,"subloop_timing_enabled":false,"sync_wait":6.429156,"total":6.433223},"block_scan_recurrent_kernel":{"launch_submit":0.8347800000000001,"parallel_chunked_phase_ms":{"chunk_cumsum":0.009507999999999999,"chunk_state":0.019566,"exact_state_bridge":0.7771530000000001,"exact_state_bridge_reset":0.008305,"state_passing":0.010879999999999999},"state_parallel_d_tile":0,"state_parallel_shared_memory":0,"state_parallel_threads":0,"subloop_timing_enabled":false,"sync_wait":0.000561,"total":0.8354210000000001,"variant":"parallel_chunked_ssd"},"buffer_alloc_zeroed":0.795016,"commit_copies":{"output":0.014747,"state":0.013275,"total":0.028022},"full_buffer_downloads":{"candidate_output":0.228181,"candidate_state":1.276885,"oracle_output":0.244752,"oracle_state":1.244144,"pre_download_sync":0.0009710000000000001,"total":2.993962},"host_comparison":{"oracle_function_total":5.311806,"output":0.56377,"probe_build":0.000241,"state":1.7155829999999999,"total":2.279594},"major_component_sum":15.581506,"recurrent_subloop_timing_download":0.00004,"residual":0.16113500000000336,"sequential_oracle_kernel":{"launch_submit":0.004628,"sync_wait":2.172947,"total":2.177646},"state_snapshot_copies":{"candidate_state_from_initial":0.008546,"initial_state_from_live":0.021029000000000003,"oracle_state_from_initial":0.009007000000000001,"total":0.038582000000000005},"total_block_scan_path":15.742641000000003},"tokens":42}
+[MAMBA2-SSD-BLOCK-SCAN-CANDIDATE-TIMING] {"bytes":{"c_state_total":688128,"coefficient_tile_shared":36928,"entry_state":2097152,"output":344064,"parallel_chunk_scalars_each":16384,"parallel_chunk_states":2097152,"parallel_entry_state":2097152,"state":2097152,"state_parallel_recurrent_shared":0},"diagnostic":"mamba2_ssd_block_scan_candidate_timing","dimensions":{"c_state_total_elems":172032,"d_inner":4096,"entry_state_elems":524288,"head_dim":64,"n_chunks":1,"n_heads":64,"output_elems":172032,"state_elems":524288,"state_size":128},"layer":0,"measurement_mode":"FULL_ORACLE_VALIDATION_WITH_CANDIDATE_TIMING_ENV","notes":{"accepted_output_kernel":"mamba2_ssd_parallel_chunk_scan_output_kernel","accepted_state_source":"exact_token_order_recurrent_bridge","coefficient_tile_env":true,"default_path_changed":false,"instrumented_only_under_block_scan_candidate_timing_env":true,"optimization_added":false,"oracle_enabled":true,"output_subloop_timing_env":false,"parallel_chunked_env":true,"production_enabled":false,"recurrent_kernel_variant":"parallel_chunked_ssd","recurrent_subloop_timing_env":false,"state_parallel_recurrent_env":false},"skipped_in_clean_no_oracle_mode":{"full_buffer_downloads":false,"host_comparison":false,"output_subloop_timing":false,"recurrent_subloop_timing":false,"sequential_oracle_kernel":false,"term_probe_downloads":false},"timing_ms":{"block_scan_output_coeff_tile_kernel":{"launch_submit":0.003997,"sync_wait":6.429156,"total":6.433223},"block_scan_recurrent_kernel":{"launch_submit":0.8347800000000001,"parallel_chunked_phase_ms":{"chunk_cumsum":0.009507999999999999,"chunk_state":0.019566,"exact_state_bridge":0.7771530000000001,"exact_state_bridge_reset":0.008305,"state_passing":0.010879999999999999},"state_parallel_d_tile":0,"state_parallel_shared_memory":0,"state_parallel_threads":0,"subloop_timing_enabled":false,"sync_wait":0.000561,"total":0.8354210000000001,"variant":"parallel_chunked_ssd"},"buffer_alloc_zeroed":0.795016,"commit_copies":{"output":0.014747,"state":0.013275,"total":0.028022},"live_to_candidate_state_copy":0.008546,"major_component_sum":8.100268,"recurrent_subloop_timing_download":0.00004,"residual":0.0,"total_candidate_path":8.100268},"tokens":42,"visible_no_oracle_timing_mode":false}
+[MAMBA2-SSD-BLOCK-SCAN-TERM-PROBE] {"available":true,"coefficient_tile":{"compared_pairs_for_target_row":29,"enabled":false,"first_mismatch_kind":"none","first_mismatch_u":-1,"inline_old_at_max_or_first":0.0,"inline_tri_at_max_or_first":0.0,"max_old_coeff_delta":0.0,"max_tri_coeff_delta":0.0,"tiled_old_at_max_or_first":0.0,"tiled_tri_at_max_or_first":0.0},"components":{"D":2.9375,"c_state_total_exact":-0.8186975717544556,"c_state_total_exact_minus_replayed":0.0,"c_state_total_replayed":-0.8186975717544556,"d_skip":-0.093231201171875,"local_hf_chunk_scan":-0.8188645839691162,"local_old_state":0.0,"prior_chunk_state":0.0,"x_target":-0.03173828125,"y_pre_bf16":-0.9120957851409912},"diagnostic":"mamba2_ssd_block_scan_c_state_total_term_probe","dimensions":{"head_dim":64,"m":42,"n_heads":64,"requested_chunk_size":64,"state_size":128},"indexing":{"chunk_idx":0,"chunk_pos":28,"chunk_start":0,"dA_target":-6.934633255004883,"group":5},"layer":2,"output":{"candidate_bits":"0xbf69","candidate_value":-0.91015625,"matches":false,"oracle_bits":"0xbf6a","oracle_value":-0.9140625},"target":{"d":50,"flat":117426,"head":42,"row":28}}
+[MAMBA2-SSD-BLOCK-SCAN-ORACLE] {"diagnostic":"mamba2_ssd_block_scan_full_oracle","dimensions":{"d_inner":4096,"head_dim":64,"m":42,"n_heads":64,"output_elems":172032,"state_elems":524288,"state_size":128},"layer":2,"output":{"first_mismatch":{"abs_error":0.00390625,"candidate_bits":"0xbf69","candidate_value":-0.91015625,"d":50,"flat":117426,"head":42,"oracle_bits":"0xbf6a","oracle_value":-0.9140625,"row":28},"max_abs":0.00390625,"mean_abs":2.270653134300595e-8,"mismatches":1},"passed":false,"probes":[],"state":{"first_mismatch":null,"max_abs":0.0,"mean_abs":0.0,"mismatches":0},"timing_ms":{"candidate_output_download":0.22362200000000002,"candidate_state_download":1.305547,"comparison":2.268874,"full_buffer_downloads":3.046668,"oracle_output_download":0.223012,"oracle_state_download":1.294487,"output_compare":0.562828,"pre_download_sync":0.0009220000000000001,"probe_build":0.00023999999999999998,"state_compare":1.705806}}
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/server.py", line 3158, in <module>
+    main()
+  File "/home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/server.py", line 1731, in main
+    gpu_store.rust_prefill_tokens(
+RuntimeError: mamba2 layer 2: Mamba2 SSD v5 oracle mismatch layer 2: output mismatches=1 max_abs=0.003906250 mean_abs=0.000000022706531; state mismatches=0 max_abs=0.000000000 mean_abs=0.000000000000000

@@ -1,0 +1,4 @@
+case	token_ids_match	bf16_token_ids	hqq_token_ids	text_match	bf16_text	hqq_text	finish_reason_match	top_k_token_ids_match	selected_log_prob_abs_diff	top_k_log_prob_max_abs_diff	selected_raw_logit_abs_diff	logsumexp_abs_diff	top_raw_logit_max_abs_diff	bf16_timing_prefill_ms	hqq_timing_prefill_ms
+0	True	1044	1044	True	,	,	True	False	0.09120299999999992	0.13776600000000006	0.12630367279052734	0.035101062592117316	0.1728677749633789	2515.3	32584.0
+1	True	1044	1044	True	,	,	True	False	0.03495599999999999	0.42908800000000014	0.0562896728515625	0.0912464697782962	0.5203342437744141	2579.1	32348.9
+2	False	1044	1321	False	,	 and	True	False	0.20660000000000012	0.32201199999999996	0.27006053924560547	0.06346028424803762	0.38547229766845703	2400.1	26368.8

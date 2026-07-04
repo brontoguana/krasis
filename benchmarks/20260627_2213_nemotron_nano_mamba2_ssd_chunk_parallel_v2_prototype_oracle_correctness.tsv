@@ -1,0 +1,23 @@
+field	value
+result	fail_closed
+layer	0
+tokens	128
+term_preflight_passed	true
+output_mismatches	2
+output_max_abs	0.250000000
+output_mean_abs	0.000000479
+output_first_mismatch_flat	338270
+output_first_mismatch_row	82
+output_first_mismatch_head	37
+output_first_mismatch_d	30
+output_first_mismatch_chunk_start	64
+output_first_mismatch_chunk_pos	18
+state_mismatches	143240
+state_max_abs	0.000244141
+state_mean_abs	0.000000021
+state_first_mismatch_flat	14
+state_first_mismatch_head	0
+state_first_mismatch_d	0
+state_first_mismatch_state	14
+runtime_error	mamba2 layer 0: Mamba2 SSD chunk v2 oracle mismatch
+log_line	57

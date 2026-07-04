@@ -1,0 +1,6 @@
+field	status	path	bytes	mtime
+hqq_attention_manifest	present	/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/attention_hqq_v5_grid65_33/manifest.json	124198	2026-06-27 18:23:27.074673424 +0100
+requested_marlin_g128	final_missing	/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/experts_marlin_int4_g128_calamax.bin	0	
+effective_marlin_g64	present	/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/experts_marlin_int4_g64_calamax.bin	15849200704	2026-06-27 18:24:07.467816558 +0100
+existing_marlin_g64_search_rmse	present	/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/experts_marlin_int4_g64_calsearchrmse.bin	15849200704	2026-06-26 06:56:11.543655273 +0100
+tmp_lock_pending_files	absent			after cleanup

@@ -1,0 +1,15 @@
+check	status	evidence
+record_first_0640	passed	Gemma 5619.6 / 92.43 / 155.69; 92/0; ./dev build passed; HQQ GPU equals KRHQ/HQQ6 offline; no production enablement
+artifact_assertions	passed	payload, rank-change, concentration, decision, and summary artifacts verified
+bash_n_dev	passed	bash -n dev
+py_compile	passed	./dev python -m py_compile python/krasis/*.py
+git_diff_check	passed	git diff --check
+internal_diff_check	passed	git -C krasis-internal diff --check
+cargo_fmt_check	passed	cargo fmt --check
+protected_config_status	passed	only pre-existing untracked tests/nemotron-nano-bf16-experts-a16.conf
+source_changes	not_run	no source changes in this gate
+test_kernels_expert_hqq	not_run	no source changes; carried prior 0640 result 92/0
+dev_build	not_run	no source changes; carried prior 0640 ./dev build passed
+live_server	not_run	existing 0427/0524/0640 artifacts were sufficient
+cleanup	passed	./dev kill reported all GPUs clear
+final_idle_snapshot	passed	no tmux server, no matching process, GPUs 15 MB / 11 MB

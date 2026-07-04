@@ -1,0 +1,10 @@
+component	file	line	evidence
+pre_state_struct	src/gpu_prefill.rs	215	Mamba2SsdV4CastCarryPreState snapshots target entry state and state-flat scalar before the sequential SSD launch.
+diagnostic_helper	src/gpu_prefill.rs	15325	diag_emit_mamba2_ssd_v4_cast_carry computes sequential-style and reference-style chunk0 state accumulation and row64 entry contribution.
+local_tri_target	src/gpu_prefill.rs	16642	Existing local-tri/state-flat env target parser is reused for row/head/d/state_flat.
+pre_launch_snapshot	src/gpu_prefill.rs	31200	SSD path parses local-tri target and gates the v4 diagnostic by KRASIS_MAMBA2_SSD_V4_CAST_CARRY_DIAG.
+pre_launch_state_capture	src/gpu_prefill.rs	31208	V4 diagnostic snapshots target state vector and optional state_flat before the existing sequential kernel mutates ssm_state.
+post_launch_dispatch	src/gpu_prefill.rs	31402	V4 diagnostic emits after the existing local-tri oracle and only when the pre-state snapshot exists.
+sequential_kernel	src/cuda/prefill_kernels.cu	4968	Default SSD kernel remains mamba2_ssd_sequential_kernel.
+sequential_cast	src/cuda/prefill_kernels.cu	5042	Current oracle casts BF16(B*dt) before recurrent decay accumulation.
+sequential_prior	src/cuda/prefill_kernels.cu	5099	Row output prior is c_state_total - local_old_state for prior chunk contribution.

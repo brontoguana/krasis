@@ -1,0 +1,2 @@
+artifact	command	exit	duration_s	notes
+benchmarks/20260628_2104_nemotron_nano_parallel_ssd_token_logit_correctness_build_prefix_order_fix.log	./dev build	0	180	guarded parallel chunk cumsum prefix-order fix

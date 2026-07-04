@@ -1,0 +1,4 @@
+record	state_flat	head	head_dim_index	state_index	group	expected_cpu	expected_bits	sequential_gpu_actual	actual_bits	abs_error	exact_f32_bits_match
+warmup	14	0	0	14	0	-0.0020375510212033987	0xbb05886f	-0.002037550788372755	0xbb05886e	0.00000000023283064365386963	false
+cal_short	14	0	0	14	0	0.004050040151923895	0x3b84b633	0.004050040151923895	0x3b84b633	0	true
+cal_long	14	0	0	14	0	0.004050040151923895	0x3b84b633	0.004050040151923895	0x3b84b633	0	true

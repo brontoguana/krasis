@@ -1,0 +1,5 @@
+step	command	exit	duration_s	result
+build1	./dev build	0	179	pass
+bychunk_server1_startup	./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf --test-endpoints	1	41	fail_closed_cuda_shared_mem_optin
+build2	./dev build	0	173	pass_after_shared_mem_optin_fix
+build3	./dev build	0	174	pass_after_runtime_default_smem_attr_fix

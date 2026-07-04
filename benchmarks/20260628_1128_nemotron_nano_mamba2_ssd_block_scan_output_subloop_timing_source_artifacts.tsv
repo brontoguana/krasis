@@ -1,0 +1,12 @@
+component	file	line	status	note
+timing_helper	src/cuda/prefill_kernels.cu	72	present	mamba2_ssd_timing_add clock64/atomic counter helper
+recurrent_kernel	src/cuda/prefill_kernels.cu	5677	preserved	accepted block-scan recurrent phase and c_state_total_exact path retained
+c_state_total_exact_write	src/cuda/prefill_kernels.cu	5730	preserved	accepted 1022/1113 c_state_total_exact materialization retained
+output_kernel	src/cuda/prefill_kernels.cu	5740	instrumented	block-scan output kernel has null-gated subloop timing pointer
+env_gate	src/gpu_prefill.rs	292	present	KRASIS_MAMBA2_SSD_BLOCK_SCAN_OUTPUT_SUBLOOP_TIMING parser
+env_validation	src/gpu_prefill.rs	31627	present	subloop timing requires block-scan env
+timing_buffer_alloc	src/gpu_prefill.rs	32081	present	u64 timing buffer allocated only under subloop env
+subloop_json	src/gpu_prefill.rs	32317	present	MAMBA2-SSD-BLOCK-SCAN-OUTPUT-SUBLOOP-TIMING JSON emission
+component_json_marker	src/gpu_prefill.rs	32530	present	block_scan_output_kernel subloop_timing_enabled flag
+default_trace_or_sequential_dispatch	src/gpu_prefill.rs	32567	preserved	default path remains trace-or-sequential outside block-scan env
+warmup_fail_closed	python/krasis/server.py	1745	present	subloop timing env participates in diagnostic fail-closed warmup

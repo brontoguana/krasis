@@ -1,0 +1,6 @@
+decision	status	evidence
+exact_row_capture	passed	exact stage count=1, captured_rows=7, selected_contributors=6
+gpu_vs_krhq_math	passed	HQQ GPU output equals KRHQ/HQQ6 dequant math at target and selected routed value
+bf16_vs_hqq6	diverges	worst row abs=3.200000000000000000e1; selected routed abs=9.107767626643180847e0
+root_cause	attributed	hqq_gpu_matches_krhq_dequant_math_at_output; divergence is attributable to HQQ6 dequantized-weight math versus captured BF16 expert output
+production_enablement	not_enabled	guarded diagnostic only; no default behavior change

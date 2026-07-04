@@ -1,0 +1,9 @@
+artifact	value
+config	tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf
+captured_stdout_log	benchmarks/20260627_1720_nemotron_nano_marlin_g128_expert_cache_generation_prerequisite_cache_generation.log
+dev_run_log	logs/dev-run_20260627_182317/krasis.log
+cache_generation_exit	benchmarks/20260627_1720_nemotron_nano_marlin_g128_expert_cache_generation_prerequisite_cache_generation.exit
+prekill_log	benchmarks/20260627_1720_nemotron_nano_marlin_g128_expert_cache_generation_prerequisite_prekill.log
+cleanup_log	benchmarks/20260627_1720_nemotron_nano_marlin_g128_expert_cache_generation_prerequisite_cleanup.log
+effective_cache	/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/experts_marlin_int4_g64_calamax.bin
+hqq_attention_manifest	/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/attention_hqq_v5_grid65_33/manifest.json

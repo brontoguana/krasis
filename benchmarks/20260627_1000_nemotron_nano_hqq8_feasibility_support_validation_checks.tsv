@@ -1,0 +1,22 @@
+check	status	detail
+record_first	passed	Recorded 0929 first: g16 3/3 HTTP 200, 69 consume rows, 0/3 selected-token changes, 3/3 top-k drift, worse aggregate deltas, no production/source changes.
+artifact_assertions	passed	Summary, assumption inventory, size estimate, and root decision assertions passed.
+bash_n_dev	passed	bash -n dev
+git_diff_check_krasis	passed	git diff --check
+git_diff_check_internal	passed	git diff --check
+protected_config_check	passed	Only known pre-existing untracked tests/nemotron-nano-bf16-experts-a16.conf.
+focused_expert_hqq_tests	not_rerun	No HQQ8 source support changes were made; gate stopped at unsupported runtime/reference path.
+dev_build	not_rerun	No HQQ8 source support changes were made; gate stopped at unsupported runtime/reference path.
+cache_generation	passed	Not run.
+live_server	passed	Not run.
+production_hqq	passed	Not enabled.
+speed_benchmark	passed	Not run.
+fallback	passed	None added.
+decode_hcs	passed	No change.
+selected_expert_retargeting	passed	No change.
+int4_hqq4	passed	No work.
+kv_work	passed	No work.
+cleanup_tmux	passed	No tmux server at 2026-06-27T10:05:39Z.
+cleanup_processes	passed	No matching runtime/generator/curl process.
+cleanup_gpu	passed	GPU memory used 15 MB / 11 MB; utilization 0 / 0.
+headroom_final	passed	Disk 645G available; RAM 966Gi available.

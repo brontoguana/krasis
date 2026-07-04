@@ -1,0 +1,9 @@
+component	file	line	status	notes
+cuda_recurrent	src/cuda/prefill_kernels.cu	5667	modified_opt_in_only	Recurrent phase now has runtime-sized local_chunk_state scratch and writes local_old_state_exact[L,n_heads,head_dim].
+cuda_output	src/cuda/prefill_kernels.cu	5738	modified_opt_in_only	Block-scan output assembly consumes local_old_state_exact while keeping D skip, c_state_total_exact, local triangular math, BF16 cast placement, and row/chunk indexing.
+cuda_term_probe	src/cuda/prefill_kernels.cu	5839	extended_opt_in_only	Row term probe now reports recurrent local_old_state_exact versus output-order replayed local_old_state.
+rust_buffers	src/gpu_prefill.rs	32049	modified_opt_in_only	Rust allocates local_chunk_state and local_old_state_exact only inside KRASIS_MAMBA2_SSD_BLOCK_SCAN branch.
+rust_launch	src/gpu_prefill.rs	32145	modified_opt_in_only	Recurrent and output kernel launch arguments include only candidate-local buffers.
+rust_term_probe	src/gpu_prefill.rs	32290	extended_opt_in_only	JSON term probe includes local_old exact/replayed deltas.
+rust_default_dispatch	src/gpu_prefill.rs	32474	preserved	Default trace-or-sequential SSD branch remains outside block-scan env.
+python_fail_closed	python/krasis/server.py	1743	preserved	Existing v5/block-scan warmup re-raise remains; no new Python hot path added.

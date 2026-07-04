@@ -1,0 +1,18 @@
+check	status	details
+record_first_0804	passed	cache/spec generation success recorded: cache bytes 29375326272; tensor records 5888; nbits=6; group_size=32; headroom 707G/966Gi before and 680G/962Gi after; no source changes/live server in 0804; Gemma 5619.6 / 92.43 / 155.69
+no_bf16_server_run	passed	used saved 0427 BF16 baseline responses only
+hqq_g32_live_requests	passed	3/3 HTTP 200; times 35.826555s, 33.244709s, 32.769613s
+consume_gate_scope	passed	69 consume rows; all nbits=6 group_size=32; copied_output_bytes=1029740544; KRASIS_EXPERT_HQQ_PREFILL_CONSUME gate used
+quality_comparison	passed	g32 selected-token changes 0/3 vs g64 1/3; top-k rank drift remains 3/3; avg selected delta worsened 0.110919667->0.125852000; max common top-k delta worsened 0.493397000->0.578915000
+root_decision	passed	HQQ6 g32 selected-token improvement vs g64 but not material Nano quality acceptance
+artifact_assertions	passed	summary, request, consume, quality, top-k, improvement, decision artifacts verified
+bash_n_dev	passed	bash -n dev
+py_compile	passed	./dev python -m py_compile python/krasis/*.py
+cargo_fmt_check	passed	cargo fmt --check
+git_diff_check	passed	git diff --check
+protected_config_status	passed_known_preexisting	only known untracked tests/nemotron-nano-bf16-experts-a16.conf
+cleanup	passed	./dev kill completed
+final_tmux	passed	no tmux server
+final_processes	passed	no matching runtime/generator/analyzer/curl process after filtering command self-match
+final_gpu	passed	GPU0 15 MB used / 32105 MB free; GPU1 11 MB used / 20043 MB free
+final_headroom	passed	disk 680G available; RAM 966Gi available

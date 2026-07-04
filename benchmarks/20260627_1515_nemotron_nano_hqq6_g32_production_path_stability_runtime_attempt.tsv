@@ -1,0 +1,3 @@
+case	variant	http_code	time_total_s	size_download	response_file
+0	hqq6_g32	200	36.553779	4253109	benchmarks/20260627_1515_nemotron_nano_hqq6_g32_production_path_stability_hqq6_g32_case0_response.json
+2	hqq6_g32	200	30.943533	4293738	benchmarks/20260627_1515_nemotron_nano_hqq6_g32_production_path_stability_hqq6_g32_case2_response.json

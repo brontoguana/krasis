@@ -1,0 +1,3 @@
+run	hqq_attention	effective_marlin_g64	cache_write_evidence	temp_lock_files	requests_sent	benchmark_path	evidence
+small_oracle_corrected	reused_validated	loaded	false	none	0	false	HQQ attention artifacts validated; Loading GPU Marlin cache; GPU Marlin cache loaded; no reference_test or benchmark lines
+long_effect	reused_validated	loaded	false	none	0	false	HQQ attention artifacts validated; Loading GPU Marlin cache; GPU Marlin cache loaded; no safetensors Marlin build line

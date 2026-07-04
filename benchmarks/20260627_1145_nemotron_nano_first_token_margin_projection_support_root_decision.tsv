@@ -1,0 +1,12 @@
+key	value	evidence
+status	closed_instrumentation_support	Diagnostic first-token margin projection support implemented and validated.
+production_output_consumption	unchanged	Trace is emitted only under debug_reference_trace plus KRASIS_FIRST_TOKEN_MARGIN_PROJECTION_DIAG; no production HQQ enablement.
+fail_closed_gate	implemented	Projection env without debug_reference_trace=true returns an explicit error.
+target_tokens	required	Missing token A/B or identical tokens fail closed.
+lm_head_requirement	bf16_rows_required	Projection requires LM-head BF16 row access and fails closed if unavailable.
+layer_expert_contributors	available_when_consume_boundary_data_exists	Per-layer/per-expert summaries are generated from existing consume-boundary capture data; no broad dumps added.
+focused_tests	passed	./dev test-kernels expert_hqq: 101/0.
+build	passed	./dev build completed with status 0 and duration_s=168.
+live_server	not_run	Forbidden by gate.
+cache_generation	not_run	Forbidden by gate.
+next_gate	narrow_live_margin_projection_capture	If continuing, run cases 0 and 2 for HQQ6 g64/g32 using existing specs to populate the new trace field.

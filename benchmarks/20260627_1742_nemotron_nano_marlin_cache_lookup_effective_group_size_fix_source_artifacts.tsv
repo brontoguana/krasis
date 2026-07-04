@@ -1,0 +1,8 @@
+source	span	details
+src/weights/mod.rs	1703	Added effective_marlin_group_size_for_dimensions helper
+src/weights/mod.rs	2303	Main HF startup lookup derives effective group before cache_path_marlin
+src/weights/mod.rs	3447	Marlin builder non-prequantized branch uses the helper
+src/weights/mod.rs	4949	detect_group_size_hint accepts requested group size
+src/weights/mod.rs	4962	MXFP4 cache-path hint uses the same requested-group helper
+src/weights/mod.rs	5328	GGUF-hybrid startup lookup derives effective group before cache_path_marlin
+src/weights/mod.rs	8677	Focused helper test covers requested 128 reducing to 64 for 1856 intermediate size

@@ -1,0 +1,154 @@
+{
+  "gate": "20260628_0650_nemotron_nano_mamba2_ssd_v4_cast_carry_diagnostic",
+  "status": "closed",
+  "opened_utc": "2026-06-28T06:50:00Z",
+  "closed_utc": "2026-06-28T07:11:36Z",
+  "scope": "guarded_v4_cast_carry_diagnostic",
+  "record_first": {
+    "source_gate": "20260628_0641_nemotron_nano_mamba2_ssd_2321_v3_first_mismatch_analysis",
+    "static_analysis_only": true,
+    "default_path_changed": false,
+    "runtime_build_done_in_source_gate": false,
+    "target_output_mismatch": {
+      "row": 64,
+      "head": 11,
+      "d": 22,
+      "chunk_idx": 1,
+      "chunk_pos": 0
+    },
+    "target_state_mismatch": {
+      "flat": 0,
+      "head": 0,
+      "d": 0,
+      "state": 0
+    },
+    "strongest_suspect": "chunk0_state_accumulation_feeding_entry_state1",
+    "cast_placement_risk": {
+      "sequential_oracle": "exp_decay * BF16(B*dt) * x",
+      "reference_style": "BF16(B*exp_decay*dt) * x"
+    }
+  },
+  "implementation": {
+    "source_changes": "guarded_diagnostic_only",
+    "optimized_path_added": false,
+    "default_ssd_path_changed": false,
+    "diagnostic_env": "KRASIS_MAMBA2_SSD_V4_CAST_CARRY_DIAG",
+    "requires_existing_local_tri_target": true,
+    "prelaunch_snapshot": [
+      "target entry-state vector for row/head/d lane",
+      "optional state_flat scalar"
+    ]
+  },
+  "commands": {
+    "final_build": {
+      "command": "./dev build",
+      "exit": 0,
+      "duration_s": 170,
+      "log": "20260628_0650_nemotron_nano_mamba2_ssd_v4_cast_carry_diagnostic_build3.log"
+    },
+    "final_startup_diagnostic": {
+      "command": "KRASIS_STARTUP_DIAG=1 KRASIS_PREFILL_TIMING=1 KRASIS_PREFILL_LIVENESS_TIMING=1 KRASIS_STARTUP_EXIT_AFTER_CALIBRATION=1 KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE=1 KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE_LAYER=0 KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE_ROW=64 KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE_HEAD=11 KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE_D=22 KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE_STATE_FLAT=0 KRASIS_MAMBA2_SSD_V4_CAST_CARRY_DIAG=1 ./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+      "exit": 0,
+      "requests": 0,
+      "benchmark_path": false,
+      "log": "20260628_0650_nemotron_nano_mamba2_ssd_v4_cast_carry_diagnostic_startup_diagnostic2.log"
+    },
+    "instrumentation_fix_attempts": {
+      "build1_exit": 1,
+      "build2_exit": 0,
+      "startup_diagnostic1_exit": 1,
+      "reason": "Local diagnostic implementation fixes only: split JSON macro nesting, then make non-target Mamba2 layers no-op for the v4 diagnostic env."
+    }
+  },
+  "diagnostic_result": {
+    "records": [
+      {
+        "tokens": 300,
+        "seq_style_matches_gpu": true,
+        "ref_style_matches_gpu": false,
+        "seq_bits": "0x3bb8",
+        "ref_bits": "0x3bb9",
+        "gpu_bits": "0x3bb8",
+        "prior_seq": -0.005448331590741873,
+        "prior_ref": -0.005416654050350189,
+        "prior_seq_minus_ref": -0.00003167754039168358,
+        "state_flat_entry_seq_minus_ref": 0.000000035390257835388184
+      },
+      {
+        "tokens": 500,
+        "seq_style_matches_gpu": true,
+        "ref_style_matches_gpu": false,
+        "seq_bits": "0xbe11",
+        "ref_bits": "0xbe10",
+        "gpu_bits": "0xbe11",
+        "prior_seq": 0.0056108771823346615,
+        "prior_ref": 0.0057403333485126495,
+        "prior_seq_minus_ref": -0.00012945616617798805,
+        "state_flat_entry_seq_minus_ref": -0.0000007075723260641098
+      },
+      {
+        "tokens": 39920,
+        "seq_style_matches_gpu": true,
+        "ref_style_matches_gpu": false,
+        "seq_bits": "0xbe11",
+        "ref_bits": "0xbe10",
+        "gpu_bits": "0xbe11",
+        "prior_seq": 0.0056108771823346615,
+        "prior_ref": 0.0057403333485126495,
+        "prior_seq_minus_ref": -0.00012945616617798805,
+        "state_flat_entry_seq_minus_ref": -0.0000007075723260641098
+      }
+    ],
+    "row64_local_triangular_preflight": "matched sequential GPU bits for 300, 500, and 39920 token records",
+    "exp_dA_last_initial_carry": "zero for state flat 0 in emitted records",
+    "decision": "A v4 candidate must use the current sequential-oracle-compatible chunk-state cast placement exp_decay * BF16(B*dt) * x unless the default oracle is deliberately changed in a separate gate."
+  },
+  "runtime_observations": {
+    "hqq_attention_cache_reused": true,
+    "effective_marlin_g64_loaded": true,
+    "cache_write_evidence": false,
+    "long_calibration_tokens": 39920,
+    "long_prefill_ms": 118241.8,
+    "long_prefill_tok_s": 336.9,
+    "long_mamba2_ssd_scan_ms": 114430.8,
+    "long_prefill_min_free_mb": 12398,
+    "safety_margin_mb": 600
+  },
+  "artifacts": {
+    "build_result": "20260628_0650_nemotron_nano_mamba2_ssd_v4_cast_carry_diagnostic_build_result.tsv",
+    "runtime_attempt": "20260628_0650_nemotron_nano_mamba2_ssd_v4_cast_carry_diagnostic_runtime_attempt.tsv",
+    "cast_carry_summary": "20260628_0650_nemotron_nano_mamba2_ssd_v4_cast_carry_diagnostic_cast_carry_summary.tsv",
+    "local_tri_preflight": "20260628_0650_nemotron_nano_mamba2_ssd_v4_cast_carry_diagnostic_local_tri_preflight.tsv",
+    "startup_cache_validation": "20260628_0650_nemotron_nano_mamba2_ssd_v4_cast_carry_diagnostic_startup_cache_validation.tsv",
+    "source_artifacts": "20260628_0650_nemotron_nano_mamba2_ssd_v4_cast_carry_diagnostic_source_artifacts.tsv",
+    "root_decision": "20260628_0650_nemotron_nano_mamba2_ssd_v4_cast_carry_diagnostic_root_decision.tsv",
+    "validation_checks": "20260628_0650_nemotron_nano_mamba2_ssd_v4_cast_carry_diagnostic_validation_checks.tsv"
+  },
+  "constraints": {
+    "optimized_path": false,
+    "benchmarks": false,
+    "requests": false,
+    "decode_hcs_changes": false,
+    "production_enablement": false,
+    "default_path_changes": false,
+    "built_commands_only": true
+  },
+  "validation": {
+    "passed": true,
+    "final_snapshot_utc": "2026-06-28T07:11:36Z",
+    "no_tmux_server": true,
+    "no_runtime_build_process": true,
+    "no_nvidia_compute_process": true,
+    "gpu_memory_used_mb": {
+      "gpu0": 15,
+      "gpu1": 11
+    },
+    "disk_free": "587G",
+    "ram_available": "966Gi",
+    "nano_temp_lock_files": 0,
+    "protected_config_status": [
+      "?? tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+      "?? tests/nemotron-nano-bf16-experts-a16.conf"
+    ]
+  }
+}

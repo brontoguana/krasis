@@ -1,0 +1,88 @@
+{
+  "gate": "20260628_1305_nemotron_nano_mamba2_ssd_recurrent_kernel_decomposition_target",
+  "opened_utc": "2026-06-28T13:05:00Z",
+  "status": "closed",
+  "scope": "static_or_measurement_recurrent_kernel_target_selection",
+  "record_first": {
+    "source_gate": "20260628_1242_nemotron_nano_mamba2_ssd_coeff_tile_candidate_timing_measurement",
+    "gemma_baseline": {
+      "prefill_tok_s": 5619.6,
+      "internal_decode_tok_s": 92.43,
+      "network_tok_s": 155.69
+    },
+    "nano_baseline": {
+      "prefill_tok_s": 346.5,
+      "internal_decode_tok_s": 94.48,
+      "network_tok_s": 164.75
+    },
+    "source_result": {
+      "candidate_timing_mode": "KRASIS_MAMBA2_SSD_BLOCK_SCAN_CANDIDATE_TIMING",
+      "long_tokens": 39920,
+      "records": 23,
+      "total_candidate_avg_ms": 1161.9844392173911,
+      "recurrent_avg_ms": 716.0361553913043,
+      "coeff_tile_output_avg_ms": 431.4223819130435,
+      "live_copy_avg_ms": 12.857532391304346,
+      "commit_copy_avg_ms": 0.43593534782608695,
+      "residual_avg_ms": 0.004158608695602,
+      "small_full_oracle_exact": true
+    }
+  },
+  "constraints": [
+    "do not implement optimization",
+    "preserve coeff-tile correctness",
+    "preserve defaults",
+    "preserve full-oracle path",
+    "preserve probes",
+    "preserve candidate-timing mode",
+    "no requests",
+    "no speed benchmark",
+    "no decode/HCS work",
+    "no production enablement",
+    "no default-path changes"
+  ],
+  "planned_work": {
+    "inspect_1242_logs_and_source": true,
+    "determine_existing_recurrent_split_available": true,
+    "if_not_available_record_minimal_guarded_timing_plan": true
+  },
+  "result": {
+    "existing_instrumentation_can_split_recurrent_kernel": false,
+    "measurement_run_performed": false,
+    "reason_no_run": "Existing envs would repeat the 1242 whole recurrent-kernel timing only; no current recurrent subloop timing record exists.",
+    "current_clean_no_oracle_candidate_timing": {
+      "tokens": 39920,
+      "records": 23,
+      "recurrent_avg_ms": 716.0361553913043,
+      "recurrent_min_ms": 713.478429,
+      "recurrent_max_ms": 716.695976,
+      "coeff_tile_output_avg_ms": 431.4223819130435,
+      "total_candidate_avg_ms": 1161.9844392173911
+    },
+    "static_work_counts": {
+      "row_lanes": 163512320,
+      "state_recurrence_elements": 20929576960,
+      "c_state_dot_elements": 20929576960,
+      "entry_snapshot_elements": 327155712,
+      "c_state_total_stores": 163512320,
+      "entry_snapshot_to_state_loop_ratio": 0.015631
+    },
+    "next_target": "Add guarded recurrent-kernel subloop timing before choosing an optimization.",
+    "minimal_next_env": "KRASIS_MAMBA2_SSD_BLOCK_SCAN_RECURRENT_SUBLOOP_TIMING",
+    "optimization_added": false,
+    "requests": 0,
+    "speed_benchmark": false,
+    "decode_hcs_changes": false,
+    "production_enablement": false,
+    "default_path_change": false
+  },
+  "final_state": {
+    "snapshot_utc": "2026-06-28T13:11:29Z",
+    "gpu0_used_mb": 15,
+    "gpu1_used_mb": 11,
+    "active_runtime_processes": 0,
+    "active_tmux_sessions": 0,
+    "nano_temp_lock_files": 0
+  },
+  "closed_utc": "2026-06-28T13:11:29Z"
+}

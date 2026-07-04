@@ -1,0 +1,8 @@
+artifact	path	line	notes
+cuda_recurrent_kernel	src/cuda/prefill_kernels.cu	5682	added optional u64 recurrent_subloop_timing pointer; NULL when disabled
+cuda_timing_slots	src/cuda/prefill_kernels.cu	5774	atomicAdd of 11 timing/count slots after per-thread accumulation
+rust_env_parser	src/gpu_prefill.rs	314	KRASIS_MAMBA2_SSD_BLOCK_SCAN_RECURRENT_SUBLOOP_TIMING parser
+rust_env_guards	src/gpu_prefill.rs	31696	requires block-scan, coeff-tile, and startup diagnostic
+rust_recurrent_launch	src/gpu_prefill.rs	32332	passes timing buffer pointer into recurrent kernel only when env set
+rust_timing_emit	src/gpu_prefill.rs	32420	emits visible recurrent subloop timing JSON
+python_warmup_fail_closed	python/krasis/server.py	1748	adds env to guarded warmup re-raise list

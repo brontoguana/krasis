@@ -1,0 +1,14 @@
+area	status	detail
+record_first	done	recorded 1000 HQQ8 support stop, practical size estimate, CUDA HQQ8 kernel, and no cache/live/source enablement
+generator_manifest	done	HQQ8 accepted only for nbits=8 group_size=64; HQQ6 group sizes remain 16,32,64
+generator_fail_closed	done	nbits outside 6,8 rejected; HQQ8 non-g64 rejected
+safetensors_quantizer	done	HQQ8 affine quantizer emits row-major uint8 payload with qmax=255
+cache_spec	done	row_major_axis1_grouped_uint8 descriptors round-trip through cache/spec metadata
+reference_dequant	done	HQQ8 uint8 qvalue decode added to reference path
+reference_dispatch	done	HQQ8 reference and test dispatch execute ungated W13/W2 fixture
+runtime_diagnostic_launch	done	guarded runtime diagnostic launch validates HQQ8 layout and selects hqq8_prefill_gemm_bf16_kernel
+hqq6_preservation	done	existing HQQ6 g64/g32/g16 generation and HQQ6 tests remain passing
+production_hqq	not_changed	default behavior not enabled or changed
+cache_generation	not_run	HQQ8 cache generation deferred to separate prerequisite gate
+live_server	not_run	no live server in this gate
+benchmark	not_run	no speed or quality benchmark in this gate

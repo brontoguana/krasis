@@ -1,0 +1,15 @@
+component	file	line	evidence
+v5_env_gate	src/gpu_prefill.rs	251	KRASIS_MAMBA2_SSD_CHUNK_PARALLEL_V5 remains opt-in
+v5_oracle_env_gate	src/gpu_prefill.rs	259	KRASIS_MAMBA2_SSD_CHUNK_PARALLEL_V5_ORACLE remains required for the candidate gate
+v5_compare_timing_struct	src/gpu_prefill.rs	229	Mamba2SsdV5CompareTiming stores guarded download and comparison timing fields
+v5_oracle_compare	src/gpu_prefill.rs	14947	diag_compare_mamba2_ssd_v5_oracle emits exact correctness plus timing fields
+default_dispatch_gate	src/gpu_prefill.rs	31527	v5 env is checked after default SSD dimensions are derived
+v5_dispatch_branch	src/gpu_prefill.rs	31649	v5 candidate branch allocates temporary buffers only when requested
+v5_timing_emit	src/gpu_prefill.rs	31842	[MAMBA2-SSD-V5-TIMING] JSON records component timing under v5 envs
+default_sequential_kernel	src/cuda/prefill_kernels.cu	4968	mamba2_ssd_sequential_kernel remains the default non-v5 SSD kernel
+v5_candidate_kernel	src/cuda/prefill_kernels.cu	5535	mamba2_ssd_v5_recurrent_kernel remains opt-in diagnostic candidate
+required_ptx_symbol	src/gpu_prefill.rs	53839	mamba2_ssd_v5_recurrent_kernel remains an explicit PTX symbol
+ptx_load	src/gpu_prefill.rs	54252	mamba2_ssd_v5_recurrent RawCuFunc load remains explicit
+v5_fail_closed_warmup	python/krasis/server.py	1740	warmup re-raises only when v5 candidate/oracle envs are set
+preserved_local_tri_diag	src/gpu_prefill.rs	15228	[MAMBA2-SSD-LOCAL-TRI-ORACLE] diagnostic preserved
+preserved_cast_carry_diag	src/gpu_prefill.rs	15644	[MAMBA2-SSD-V4-CAST-CARRY-DIAG] diagnostic preserved

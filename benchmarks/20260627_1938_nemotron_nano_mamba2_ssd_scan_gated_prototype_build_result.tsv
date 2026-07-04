@@ -1,0 +1,3 @@
+artifact	command	exit_code	status	duration_s	log	notes
+build_initial	./dev build	0	passed	NA	benchmarks/20260627_1938_nemotron_nano_mamba2_ssd_scan_gated_prototype_build.log	Initial build passed but first runtime exposed missing visible PTX symbol for the new kernel.
+build_corrected	./dev build	0	passed	171	benchmarks/20260627_1938_nemotron_nano_mamba2_ssd_scan_gated_prototype_build2.log	Added CUDA host wrapper/required symbol; PTX contains mamba2_ssd_head_shared_kernel.

@@ -1,0 +1,13 @@
+case_id	variant	nbits	group_size	layout	bf16_token	bf16_text	bf16_selected_logprob	variant_token	variant_text	variant_selected_logprob	selected_token_changed	selected_output_logprob_abs_delta	bf16_selected_token_logprob_abs_delta	max_common_topk_logprob_abs_delta	max_rank_aligned_topk_logprob_abs_delta	topk_rank_changed_count	topk_membership_changed	topk_common_count
+0	hqq6_g64	6	64	row_major_axis1_grouped_uint6_packed	1044	,	-2.047513000	1044	,	-1.956310000	false	0.091203000	0.091203000	0.137766000	0.137766000	3	false	10
+0	hqq6_g32	6	32	row_major_axis1_grouped_uint6_packed	1044	,	-2.047513000	1044	,	-1.992760000	false	0.054753000	0.054753000	0.578915000	0.407414000	6	false	10
+0	hqq6_g16	6	16	row_major_axis1_grouped_uint6_packed	1044	,	-2.047513000	1044	,	-1.730870000	false	0.316643000	0.316643000	0.472588000	0.316643000	7	false	10
+0	hqq8_g64	8	64	row_major_axis1_grouped_uint8	1044	,	-2.047513000	1321	 and	-1.777869000	true	0.269644000	0.124528000	0.570168000	0.487529000	8	true	9
+1	hqq6_g64	6	64	row_major_axis1_grouped_uint6_packed	1044	,	-1.954504000	1044	,	-1.919548000	false	0.034956000	0.034956000	0.429088000	0.429088000	4	false	10
+1	hqq6_g32	6	32	row_major_axis1_grouped_uint6_packed	1044	,	-1.954504000	1044	,	-2.107106000	false	0.152602000	0.152602000	0.310593000	0.208814000	5	true	9
+1	hqq6_g16	6	16	row_major_axis1_grouped_uint6_packed	1044	,	-1.954504000	1044	,	-1.525093000	false	0.429411000	0.429411000	0.571293000	0.571293000	3	false	10
+1	hqq8_g64	8	64	row_major_axis1_grouped_uint8	1044	,	-1.954504000	1044	,	-1.465406000	false	0.489098000	0.489098000	0.489098000	0.489098000	4	false	10
+2	hqq6_g64	6	64	row_major_axis1_grouped_uint6_packed	1044	,	-1.646874000	1321	 and	-1.853474000	true	0.206600000	0.448914000	0.493397000	0.322012000	8	true	9
+2	hqq6_g32	6	32	row_major_axis1_grouped_uint6_packed	1044	,	-1.646874000	1044	,	-1.817075000	false	0.170201000	0.170201000	0.417883000	0.390355000	3	true	8
+2	hqq6_g16	6	16	row_major_axis1_grouped_uint6_packed	1044	,	-1.646874000	1044	,	-1.920803000	false	0.273929000	0.273929000	0.273929000	0.273929000	6	true	9
+2	hqq8_g64	8	64	row_major_axis1_grouped_uint8	1044	,	-1.646874000	1321	 and	-1.751568000	true	0.104694000	0.128344000	0.265814000	0.242164000	4	true	9

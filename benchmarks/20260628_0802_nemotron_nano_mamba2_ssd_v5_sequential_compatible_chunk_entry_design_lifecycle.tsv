@@ -1,0 +1,13 @@
+step	phase	action	contract
+1	preflight_gate	Enable only under a future explicit v5 env plus required oracle env; default dispatch remains sequential.	No default-path change and no silent fallback.
+2	snapshot	Copy live `ssm_state` to `initial_state_snapshot`; do not mutate live state during oracle/candidate evaluation.	A mismatch must leave live state untouched.
+3	sequential_oracle	Copy `initial_state_snapshot` to `oracle_state`; run existing `mamba2_ssd_sequential_kernel` into `oracle_output` and `oracle_state`.	Defines exact BF16 output and f32 final-state oracle.
+4	candidate_init	Copy `initial_state_snapshot` to `candidate_state_a`.	Candidate starts from identical state.
+5	chunk_entry	For each chunk, copy current rolling candidate state into `candidate_entry_state` before any chunk update.	`candidate_entry_state` is read-only while output for that chunk is assembled.
+6	output_assembly	For rows in the chunk, compute prior from `candidate_entry_state` with the same prefix scale implied by sequential `c_state_total - local_old_state`; add unchanged D skip and local triangular BF16 chunk-scan term.	Local/output math remains the current sequential-oracle math.
+7	recurrent_update	After or independently from read-only output assembly, update rolling candidate state by replaying tokens `u=chunk_start..chunk_end-1` in order: `dt=softplus(dt+bias)`, `A_bar=exp(A*dt)`, `B_bar=BF16(B*dt)`, `h=A_bar*h+B_bar*x` in f32.	This replaces closed-form chunk-state accumulation and preserves per-token f32 rounding order.
+8	chunk_advance	Use updated rolling state as entry for the next chunk; optionally write `closed_form_entry_diag` for comparison only.	Entry for chunk `c+1` must match sequential recurrent state bits, not the closed-form diagnostic buffer.
+9	probe_gate	Run targeted probes before full compare: row64/state0, row82/state14, and row64 top prior state index 78.	If any targeted probe mismatches, fail closed and skip full timing.
+10	full_oracle_compare	Compare all `candidate_output` BF16 bits and all `candidate_state` f32 bits against `oracle_output` and `oracle_state`.	Exact bit equality required for acceptance in the correctness gate.
+11	commit	On full oracle success only, copy `candidate_output` to real `ssd_out` and `candidate_state` to live `ssm_state`.	Never copy oracle buffers as a fallback result when candidate is requested.
+12	fail_closed	On any probe/full mismatch, return a visible error with first mismatch plus max/mean output/state errors.	No long diagnostic, no benchmark, no production enablement.

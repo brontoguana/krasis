@@ -1,0 +1,98 @@
+{
+  "gate": "20260628_0737_nemotron_nano_mamba2_ssd_v4_failed_cleanup",
+  "status": "closed",
+  "opened_utc": "2026-06-28T07:37:00Z",
+  "closed_utc": "2026-06-28T07:51:51Z",
+  "scope": "cleanup_failed_v4_correctness_prototype",
+  "record_first": {
+    "source_gate": "20260628_0715_nemotron_nano_mamba2_ssd_v4_correctness_prototype",
+    "gemma_baseline": {
+      "prefill_tok_s": 5619.6,
+      "internal_decode_tok_s": 92.43,
+      "network_tok_s": 155.69
+    },
+    "nano_baseline": {
+      "prefill_tok_s": 346.5,
+      "internal_decode_tok_s": 94.48,
+      "network_tok_s": 164.75
+    },
+    "0715_result": {
+      "default_path_remained_sequential": true,
+      "opt_in_candidate_only": true,
+      "build_exit": 0,
+      "startup_diagnostic_exit": 1,
+      "fail_closed": true,
+      "long_diagnostic_run": false,
+      "requests_sent": 0,
+      "benchmark_path": false,
+      "cache_reuse_clean": true,
+      "first_output_mismatch": {
+        "row": 64,
+        "head": 11,
+        "d": 22,
+        "candidate_bits": "0x3bb7",
+        "sequential_bits": "0x3bb8"
+      },
+      "first_state_mismatch": {
+        "flat": 0,
+        "candidate_bits": "0x3b90c25a",
+        "sequential_bits": "0x3b90c258"
+      }
+    }
+  },
+  "cleanup_scope": {
+    "remove_v4_cuda_candidate_kernel": true,
+    "remove_v4_rust_env_gates_temp_buffers_oracle_dispatch_ptx_checks": true,
+    "remove_v4_python_warmup_fail_closed": true,
+    "preserve_1908_substage_timing": true,
+    "preserve_2149_2251_0650_diagnostics": true,
+    "preserve_artifacts": true,
+    "default_path_change": false
+  },
+  "build": {
+    "command": "./dev build",
+    "exit_code": 0,
+    "duration_s": 177
+  },
+  "runtime": {
+    "command": "KRASIS_STARTUP_DIAG=1 KRASIS_PREFILL_TIMING=1 KRASIS_PREFILL_LIVENESS_TIMING=1 KRASIS_STARTUP_EXIT_AFTER_CALIBRATION=1 ./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+    "mode": "startup diagnostic without v4 prototype envs",
+    "exit_code": 0,
+    "requests_sent": 0,
+    "benchmark_path": false,
+    "v4_prototype_envs_set": false,
+    "default_ssd_path": "sequential",
+    "long_prefill_ms": 117306.4,
+    "long_ssd_scan_ms": 114404.3,
+    "long_ssd_scan_calls": 23,
+    "long_prefill_min_free_mb": 12398,
+    "long_decode_min_free_mb": 23714
+  },
+  "cache": {
+    "hqq_attention_reused": true,
+    "effective_marlin_g64_loaded": true,
+    "cache_write_evidence": false,
+    "krasis_temp_lock_files": false
+  },
+  "validation": {
+    "passed": true,
+    "final_snapshot_utc": "2026-06-28T07:51:51Z",
+    "gpu_memory_mb": {
+      "gpu0": 15,
+      "gpu1": 11
+    },
+    "runtime_processes": false,
+    "nvidia_compute_processes": false,
+    "protected_config_status": [
+      "?? tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+      "?? tests/nemotron-nano-bf16-experts-a16.conf"
+    ]
+  },
+  "artifacts": {
+    "build_result": "20260628_0737_nemotron_nano_mamba2_ssd_v4_failed_cleanup_build_result.tsv",
+    "runtime_attempt": "20260628_0737_nemotron_nano_mamba2_ssd_v4_failed_cleanup_runtime_attempt.tsv",
+    "startup_cache_validation": "20260628_0737_nemotron_nano_mamba2_ssd_v4_failed_cleanup_startup_cache_validation.tsv",
+    "source_artifacts": "20260628_0737_nemotron_nano_mamba2_ssd_v4_failed_cleanup_source_artifacts.tsv",
+    "validation": "20260628_0737_nemotron_nano_mamba2_ssd_v4_failed_cleanup_validation_checks.tsv"
+  }
+}

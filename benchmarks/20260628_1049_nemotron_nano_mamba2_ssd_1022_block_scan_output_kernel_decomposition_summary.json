@@ -1,0 +1,64 @@
+{
+  "artifacts": {
+    "correction_plan": "20260628_1049_nemotron_nano_mamba2_ssd_1022_block_scan_output_kernel_decomposition_correction_plan.tsv",
+    "probe_plan": "20260628_1049_nemotron_nano_mamba2_ssd_1022_block_scan_output_kernel_decomposition_probe_plan.tsv",
+    "runtime_not_run": "20260628_1049_nemotron_nano_mamba2_ssd_1022_block_scan_output_kernel_decomposition_runtime_not_run.tsv",
+    "source_audit": "20260628_1049_nemotron_nano_mamba2_ssd_1022_block_scan_output_kernel_decomposition_source_audit.tsv",
+    "static_decomposition": "20260628_1049_nemotron_nano_mamba2_ssd_1022_block_scan_output_kernel_decomposition_static_decomposition.tsv",
+    "validation": "20260628_1049_nemotron_nano_mamba2_ssd_1022_block_scan_output_kernel_decomposition_validation_checks.tsv"
+  },
+  "constraints": {
+    "build": false,
+    "decode_hcs_changes": false,
+    "default_path_change": false,
+    "implementation": false,
+    "production_enablement": false,
+    "requests": false,
+    "runtime": false,
+    "speed_benchmark": false
+  },
+  "gate": "20260628_1049_nemotron_nano_mamba2_ssd_1022_block_scan_output_kernel_decomposition",
+  "opened_utc": "2026-06-28T10:49:00Z",
+  "record_first": {
+    "1022_result": {
+      "correctness": "small and long full oracle exact, 69/69 records each, 0 output/state mismatches",
+      "output_kernel_ms": 100060.325232,
+      "row64_state0_probe": "exact",
+      "row82_state14_probe": "exact",
+      "row97_head48_d24_probe": "exact",
+      "total_block_scan_path_ms": 253940.599995
+    },
+    "gemma_baseline": {
+      "internal_decode_tok_s": 92.43,
+      "network_tok_s": 155.69,
+      "prefill_tok_s": 5619.6
+    },
+    "nano_baseline": {
+      "internal_decode_tok_s": 94.48,
+      "network_tok_s": 164.75,
+      "prefill_tok_s": 346.5
+    },
+    "source_gate": "20260628_1022_nemotron_nano_mamba2_ssd_block_scan_c_state_total_correction_prototype"
+  },
+  "result": {
+    "status": "static_decomposition_complete",
+    "static_decomposition": {
+      "dominant_known_cost": "lower-triangular output loop",
+      "measured_output_kernel_ms": 100060.325232,
+      "subloop_ms_available": false
+    },
+    "decision": {
+      "local_old_state_exact": "next guarded diagnostic/candidate buffer to test, but not statically proven bit-exact because recurrent materialization changes accumulation order risk",
+      "local_triangular_math": "unchanged",
+      "d_skip_prior_cast_indexing": "unchanged"
+    },
+    "next_gate_minimal_instrumentation_if_needed": "Add block-scan-env-only output subloop timing and row97 local_old_state_recurrent-vs-output probe; do not affect default path."
+  },
+  "scope": "static_output_kernel_loop_decomposition",
+  "status": "closed",
+  "validation": {
+    "final_snapshot_utc": "2026-06-28T10:55:58Z",
+    "gpu_idle": "GPU0 15 MB, GPU1 11 MB",
+    "passed": true
+  }
+}

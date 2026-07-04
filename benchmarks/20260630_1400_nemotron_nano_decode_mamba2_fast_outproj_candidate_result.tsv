@@ -1,0 +1,19 @@
+field	value
+gate	20260630_1400_nemotron_nano_decode_mamba2_fast_outproj_candidate
+build_exit	0
+candidate_env	KRASIS_MAMBA2_DECODE_GRAPH_FAST_OUTPROJ=1
+control_response	104 tokens, finish_reason=stop, first_token=1044
+candidate_response	128 tokens, finish_reason=length, first_token=1044
+first_token_topk_exact	true
+generated_tokens_exact	false
+generated_text_exact	false
+control_response_timing	decoded_ms=975.1, total_ms=1634.5
+candidate_response_timing	decoded_ms=1228.7, total_ms=1887.0
+control_server_decode	103 tokens in 0.97s, 106.0 tok/s
+candidate_server_decode	127 tokens in 1.23s, 103.6 tok/s
+control_internal_decode	8.41 ms/tok, 118.9 tok/s
+candidate_internal_decode	8.63 ms/tok, 115.9 tok/s
+control_mamba2_split	in=0.93,to_fp32=0.05,conv=0.09,disc=0.25,ssm=0.39,gate=0.09,out=0.39,total=2.19
+candidate_mamba2_split	in=0.92,to_fp32=0.05,conv=0.09,disc=0.25,ssm=0.39,gate=0.09,out=0.63,total=2.43
+decision	rejected_and_removed
+reason	Fast out-proj changed generated sequence and worsened Mamba2 out-proj plus overall decode speed.

@@ -1,0 +1,9 @@
+area	file	line	evidence	implication
+1313_timing	benchmarks/20260628_1313_nemotron_nano_mamba2_ssd_recurrent_subloop_timing_recurrent_subloop_timing_summary.tsv	1	state update 503.07395095509554ms / 69.301%; C-dot 197.24912640351894ms / 27.172%; setup/snapshot/stores/residual combined under 4%	next target should focus on exact recurrence update first, C-dot second
+current_recurrent_grid	src/gpu_prefill.rs	31565	current SSD launch uses threads from head_dim and grid (n_heads, blocks_d, 1)	current recurrent kernel maps one thread to one d lane and loops serially over state_size
+state_update_loop	src/cuda/prefill_kernels.cu	5746	state update loops s ascending: B_val, B_bar=BF16(B*dt), h[s]=A_bar*h[s]+B_bar*x_val	state slots are independent; token order over t is the exactness-critical dependency
+c_dot_loop	src/cuda/prefill_kernels.cu	5758	C-dot loops s ascending after state update and accumulates c_state_total += C_val*h[s]	C-dot bit identity requires preserving serial s accumulation order unless full oracle proves otherwise
+c_state_store	src/cuda/prefill_kernels.cu	5767	c_state_total_exact[(t,head,d)] is written after the C-dot loop	output correctness depends on this exact f32 value
+coeff_tile_output	src/cuda/prefill_kernels.cu	5994	accepted coeff-tile output kernel consumes c_state_total_exact and keeps D/prior, BF16 cast placement, row/chunk indexing, and output accumulation order unchanged	recurrent optimization must feed the same c_state_total_exact contract
+full_oracle_path	src/gpu_prefill.rs	32173	block-scan branch has separate oracle/candidate mode and commits only after compare	when prototyping, candidate state/output must remain isolated and commit only after full oracle success
+candidate_timing_path	src/gpu_prefill.rs	32995	candidate timing mode emits no-oracle timing only under explicit envs	accepted timing mode can measure candidate cost after separate full-oracle proof

@@ -1,0 +1,3 @@
+run	exit	duration_s	records	result
+token_logit_request	0	0	12_toplogprobs	pass serial_vs_fast_max_delta=0.000000000 control_vs_fast_max_delta=0.000000000
+long39920_no_oracle	0	61	23_long_records	pass prefill=17.99s tok_s=2219.4 total_candidate_avg_ms=656.021773 output_avg_ms=627.435713 recurrent_avg_ms=12.637921 exact_bridge_avg_ms=0.000000

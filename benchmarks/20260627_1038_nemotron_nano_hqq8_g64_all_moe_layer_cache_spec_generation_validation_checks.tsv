@@ -1,0 +1,17 @@
+check	status	value
+generator_exit	passed	0
+generator_status	passed	ok
+metadata_validation	passed	all checks passed
+manifest_template_diff	passed	nbits/group_size/layout/output paths only
+live_server	passed	not run
+production_hqq	passed	not enabled
+speed_benchmark	passed	not run
+decode_hcs	passed	not touched
+selected_expert_routing	passed	not touched
+int4_hqq4	passed	not touched
+kv_work	passed	not touched
+final_tmux	passed	no server running
+final_process_check	passed	no matching runtime/generator/build/curl process
+final_gpu_memory	passed	gpu0=15MB gpu1=11MB
+final_disk_available	passed	614G
+final_ram_available	passed	965Gi

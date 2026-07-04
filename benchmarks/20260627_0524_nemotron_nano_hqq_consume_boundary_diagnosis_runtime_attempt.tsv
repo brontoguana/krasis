@@ -1,0 +1,10 @@
+metric	value
+ready_reached	True
+http_status	200
+request_time_total_s	38.891476
+response_size_bytes	4719777
+long_calibration_prefill_s	343.34
+long_calibration_decode_s	4.26
+long_calibration_prefill_min_free_mb	14070
+consume_rows	23
+consume_copied_output_bytes	330882048

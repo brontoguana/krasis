@@ -1,0 +1,12 @@
+field	value
+gate	20260627_2102_nemotron_nano_mamba2_ssd_chunk_parallel_failed_prototype_cleanup
+command	KRASIS_STARTUP_DIAG=1 KRASIS_PREFILL_TIMING=1 KRASIS_PREFILL_LIVENESS_TIMING=1 KRASIS_STARTUP_WARMUP_TOKENS=128 KRASIS_STARTUP_CAL_SHORT_TOKENS=128 KRASIS_STARTUP_CAL_LONG_TOKENS=128 KRASIS_STARTUP_EXIT_AFTER_CALIBRATION=1 ./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf
+chunk_prototype_envs_unset	true
+exit	0
+requests_sent	0
+benchmark_path	false
+startup_exit_after_calibration	true
+default_sequential_ssd_timing_seen	true
+ssd_scan_ms	293.6
+ssd_scan_calls	23
+log	benchmarks/20260627_2102_nemotron_nano_mamba2_ssd_chunk_parallel_failed_prototype_cleanup_startup_diagnostic.log

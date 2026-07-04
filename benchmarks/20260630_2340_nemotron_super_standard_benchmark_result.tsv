@@ -1,0 +1,29 @@
+metric	value	unit	notes
+gate	20260630_2340_nemotron_super_standard_benchmark		Started 2026-06-30 23:40 UTC; completed 2026-07-01 00:27 UTC.
+model	NVIDIA-Nemotron-3-Super-120B-A12B-BF16		Local model cache under ~/.krasis/models.
+config	tests/nemotron-super-bf16kv-a16.conf		BF16 attention/KV, INT4 routed experts, INT8 shared/dense/LM head, 1x RTX 5090.
+command	KRASIS_DECODE_PARALLEL_TOPK=1 ./dev benchmark tests/nemotron-super-bf16kv-a16.conf		Built command path; timing/trace disabled for final speed run.
+graph_decode	disabled		Super graph attempt failed closed because latent expert dimensions are not supported by graph replay MoE yet.
+prefill_run_1	170.3	tok/s	1001 tokens in 5876.8 ms.
+prefill_run_2	192.8	tok/s	5001 tokens in 25938.6 ms.
+prefill_run_3	192.9	tok/s	8324 tokens in 43158.8 ms.
+prefill_best	192.9	tok/s	Best internal prefill, runtime-calibrated 8323-token cap.
+decode_50	21.86	tok/s	45.8 ms/tok; 49 generated decode tokens.
+decode_100	20.90	tok/s	47.8 ms/tok; 99 generated decode tokens.
+decode_250	20.40	tok/s	49.0 ms/tok; 249 generated decode tokens.
+decode_best_internal	21.86	tok/s	Best internal decode.
+round_trip_50	34.85	tok/s	3.25 s total.
+round_trip_100	25.71	tok/s	5.69 s total.
+round_trip_250	20.56	tok/s	14.06 s total.
+round_trip_best_network	34.85	tok/s	Best HTTP round-trip; do not confuse with internal decode.
+hcs_loaded	3358	experts	Loaded after internal decode benchmark.
+hcs_total	20480	experts	Super has 40 MoE layers * 512 routed experts.
+hcs_coverage	16.4	percent	Dynamic HCS, not full-hot like Nano.
+decode_min_free_vram	5758	MB	Well above 600 MB safety during measured decode.
+startup_ready_free_vram	972	MB	After startup pressure eviction.
+long_calibration_prompt	8323	tokens	Runtime-selected long calibration probe.
+long_calibration_prefill_min_free	1974	MB	Used to cap benchmark prompt lengths.
+scratch_reservation_50000	38007	MB	50K fixed benchmark prompt would exceed available VRAM.
+report	benchmarks/20260630_2340_nemotron_super_fixed_topk_benchmark_report.log		Copied full benchmark report.
+stdout_log	benchmarks/20260630_2340_nemotron_super_fixed_topk_benchmark_stdout.log		Copied dev benchmark stdout.
+command_log	benchmarks/20260630_2340_nemotron_super_fixed_topk_benchmark_command.log		Captured tmux command log.

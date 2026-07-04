@@ -1,0 +1,4 @@
+question	answer	evidence	layer	expert	value
+case2_worst_delta_concentrated_in_layer51_expert60	yes	0524/0629 layer summary ranks layer 51 first; 0640 exact-row attribution proves HQQ GPU equals KRHQ/HQQ6 for layer 51 expert 60 and BF16-vs-HQQ delta is HQQ6 math	51	60	worst expert_out max_abs=32.0; routed selected abs=9.10776762664318
+cases0_1_concentrated_in_layer51_expert60	not_proven_from_existing_artifacts	0427 saved responses contain response/top-k deltas and HQQ consume metadata for all cases, but no BF16-vs-HQQ per-layer boundary deltas for cases 0/1			no live server rerun or new capture in this gate
+implementation_correctness	passed_for_attributed_case2_path	0640 HQQ GPU equals KRHQ/HQQ6 offline exactly for worst row and selected routed value	51	60	HQQ GPU-vs-KRHQ abs=0.0

@@ -1,0 +1,9 @@
+metric	value
+final_snapshot_utc	2026-06-28T11:55:01Z
+gpu0_used_mb	15
+gpu1_used_mb	11
+runtime_processes	none
+build_processes	none
+krasis_cache_temp_locks	none
+hf_download_locks	standing_metadata_only
+protected_config_status	expected_tests_only_nano_configs

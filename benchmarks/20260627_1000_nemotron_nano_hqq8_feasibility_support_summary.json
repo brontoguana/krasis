@@ -1,0 +1,108 @@
+{
+  "gate": "20260627_1000_nemotron_nano_hqq8_feasibility_support",
+  "status": "closed_unsupported_runtime_reference_path",
+  "opened_utc": "2026-06-27T10:00:31Z",
+  "closed_utc": "2026-06-27T10:05:39Z",
+  "recorded_prior_gate": {
+    "gate": "20260627_0929_nemotron_nano_hqq6_g16_quality_proof",
+    "hqq6_g16_http_200": "3/3",
+    "consume_rows": 69,
+    "copied_output_bytes": 1029740544,
+    "selected_token_changes": "0/3",
+    "topk_rank_drift": "3/3",
+    "avg_selected_output_logprob_delta": {
+      "hqq6_g64": 0.110919667,
+      "hqq6_g32": 0.125852,
+      "hqq6_g16": 0.339994333
+    },
+    "max_rank_aligned_topk_logprob_delta": {
+      "hqq6_g64": 0.429088,
+      "hqq6_g32": 0.407414,
+      "hqq6_g16": 0.571293
+    },
+    "material_quality_improvement": false,
+    "production_hqq_enabled": false,
+    "source_changes": false
+  },
+  "inspection_result": {
+    "cache_descriptor_can_represent_nbits_8": true,
+    "component_size_helper_supports_nbits_8": true,
+    "cuda_hqq8_kernel_exists": true,
+    "expert_hqq_generation_supports_hqq8": false,
+    "expert_hqq_reference_execution_supports_hqq8": false,
+    "expert_hqq_runtime_diagnostic_supports_hqq8": false,
+    "path_truly_descriptor_generic": false
+  },
+  "hqq8_size_estimate": {
+    "variant": "hqq8_g64_higher_bitwidth",
+    "nbits": 8,
+    "group_size": 64,
+    "payload_bytes": 33046659072,
+    "estimated_cache_file_bytes": 33047177280,
+    "cache_file_gib": 30.777582228183746,
+    "delta_vs_hqq6_g64_bytes": 7343702016,
+    "disk_available_bytes": 692338946048,
+    "disk_available_human": "645G",
+    "ram_available_bytes": 1037693865984,
+    "ram_available_human": "966Gi",
+    "headroom_sufficient_if_support_existed": true
+  },
+  "root_decision": {
+    "decision": "stop_before_hqq8_generator_enablement",
+    "reason": "HQQ8 is not currently descriptor-generic through the expert-HQQ diagnostic/reference path. Generator-only enablement would produce a cache/spec that reference execution and guarded diagnostic consumption cannot validate or consume.",
+    "required_changes_before_hqq8_generation": [
+      "Add HQQ8 safetensors quantization input builder support with qmax=255 and row-major uint8 payloads.",
+      "Add HQQ8 decode/reference execution support and plan validation.",
+      "Wire Expert-HQQ runtime diagnostic validation and launch to accept row_major_axis1_grouped_uint8 and select hqq8_prefill_gemm_bf16_kernel.",
+      "Extend GPU prototype tests/helpers to load and dispatch hqq8_prefill_gemm_bf16_kernel.",
+      "Only after focused tests/build pass, open a separate HQQ8 cache/spec generation prerequisite gate."
+    ]
+  },
+  "scope_result": {
+    "cache_generation": false,
+    "live_server": false,
+    "production_hqq": false,
+    "speed_benchmark": false,
+    "fallback": false,
+    "decode_hcs": false,
+    "selected_expert_retargeting": false,
+    "int4_hqq4": false,
+    "kv_work": false,
+    "source_hqq8_support_changes": false,
+    "tests_build_rerun": false
+  },
+  "validation": {
+    "artifact_assertions": "passed",
+    "bash_n_dev": "passed",
+    "git_diff_check_krasis": "passed",
+    "git_diff_check_internal": "passed",
+    "protected_config_check": "passed_only_known_preexisting_untracked_nano_bf16_config",
+    "focused_expert_hqq_tests": "not_rerun_no_hqq8_source_changes",
+    "dev_build": "not_rerun_no_hqq8_source_changes",
+    "cache_generation": "not_run",
+    "live_server": "not_run",
+    "cleanup": "passed"
+  },
+  "final_state": {
+    "timestamp_utc": "2026-06-27T10:05:39Z",
+    "tmux": "no server running",
+    "matching_runtime_generator_curl_processes": "none",
+    "gpu_memory_used_mb": {
+      "gpu0": 15,
+      "gpu1": 11
+    },
+    "gpu_utilization_percent": {
+      "gpu0": 0,
+      "gpu1": 0
+    },
+    "disk_available_human": "645G",
+    "ram_available_human": "966Gi"
+  },
+  "artifacts": {
+    "summary": "benchmarks/20260627_1000_nemotron_nano_hqq8_feasibility_support_summary.json",
+    "assumption_inventory": "benchmarks/20260627_1000_nemotron_nano_hqq8_feasibility_support_assumption_inventory.tsv",
+    "size_estimate": "benchmarks/20260627_1000_nemotron_nano_hqq8_feasibility_support_size_estimate.tsv",
+    "decision": "benchmarks/20260627_1000_nemotron_nano_hqq8_feasibility_support_root_decision.tsv",
+    "validation": "benchmarks/20260627_1000_nemotron_nano_hqq8_feasibility_support_validation_checks.tsv"
+  }
+}

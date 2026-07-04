@@ -1,0 +1,2 @@
+layer	row	head	d	flat	m	chunk_start	chunk_pos	cpu_matches_sequential_gpu_bits	cpu_bits	sequential_bits	abs_error	y_pre_bf16	local_bf16_coeff	local_fp32_coeff	state_flat	state_abs_error	state_exact_bits_match	interpretation
+0	82	37	30	338270	256	64	18	false	0xbe4e	0xbe4d	0.0009765625	-0.2006840705871582	-0.07515525817871094	-0.07511226832866669	14	2.3283064365386963e-10	false	Standalone term oracle emitted before v3 full oracle; row 82 remains one BF16 bit off in warmup, so local terms are not exact in this smallest diagnostic.

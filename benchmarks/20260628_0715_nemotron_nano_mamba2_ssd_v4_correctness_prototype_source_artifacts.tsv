@@ -1,0 +1,10 @@
+area	file	line	note
+cuda_v4_kernel	src/cuda/prefill_kernels.cu	5530	opt-in mamba2_ssd_chunk_entry_v4_kernel
+cuda_default_sequential_wrapper	src/cuda/prefill_kernels.cu	5667	default C wrapper still launches mamba2_ssd_sequential_kernel
+rust_secondary_probe_parser	src/gpu_prefill.rs	15772	optional row82/state14 probe parser
+rust_v4_oracle_compare	src/gpu_prefill.rs	15807	full candidate-vs-sequential output/state oracle
+rust_v4_env_gate	src/gpu_prefill.rs	31455	KRASIS_MAMBA2_SSD_CHUNK_PARALLEL_V4 opt-in gate
+rust_default_sequential_launch	src/gpu_prefill.rs	31664	default sequential PTX launch remains before v4 candidate
+rust_v4_candidate_launch	src/gpu_prefill.rs	31743	opt-in candidate buffers/launch/compare/commit-after-pass
+python_fail_closed_warmup	python/krasis/server.py	1740	warmup re-raises only when v4 envs are active
+preserved_cast_carry_diag	src/gpu_prefill.rs	15335	0650 diagnostic retained

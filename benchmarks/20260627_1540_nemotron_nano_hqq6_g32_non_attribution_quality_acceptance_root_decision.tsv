@@ -1,0 +1,2 @@
+decision	status	evidence	next_scope
+hqq6_g32_non_attribution_three_case_smoke_restored	selected_token_stable_only	Case 1 returned HTTP 200 in 36.599477s and selected token 1044 with positive 1044-1321 margin 0.642010. Combined with 1515 cases 0 and 2, all three smoke payloads now select 1044 on the production-compatible non-attribution HQQ consume path.	Do not enable production HQQ: top-k drift remains 3/3, so this is selected-token smoke restoration only, not quality acceptance.

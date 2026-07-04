@@ -1,0 +1,161 @@
+{
+  "gate": "20260627_1846_nemotron_nano_hqq4_k4v4_prefill_instrumented_diagnosis",
+  "status": "closed_diagnosis_completed",
+  "opened_utc": "2026-06-27T18:46:00Z",
+  "closed_utc": "2026-06-27T19:04:49Z",
+  "record_first": {
+    "source_gate": "20260627_1821_nemotron_nano_hqq4_k4v4_baseline_speed_measurement",
+    "nano_hqq4_k4v4": {
+      "prefill_internal_best_tok_s": 346.5,
+      "decode_internal_best_tok_s": 94.48,
+      "round_trip_network_best_tok_s": 164.75
+    },
+    "gemma_reference": {
+      "prefill_tok_s": 5619.6,
+      "decode_internal_tok_s": 92.43,
+      "network_tok_s": 155.69
+    },
+    "cache_reuse_clean": true,
+    "hqq_attention_reused": true,
+    "effective_marlin_g64_loaded": true,
+    "cache_write_detected": false,
+    "tmp_or_lock_files_remaining": false
+  },
+  "scope": {
+    "target_config": "tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+    "goal": "diagnose component-level reason Nano HQQ4+k4v4 prefill is 346.5 tok/s",
+    "built_commands_only": true,
+    "inspect_flags_before_running": true,
+    "instrumentation_enabled": true,
+    "not_speed_benchmark": true,
+    "capture_categories": [
+      "HQQ attention",
+      "Marlin expert prefill",
+      "CPU/GPU transfer",
+      "synchronization",
+      "calibration",
+      "benchmark harness overhead"
+    ],
+    "forbidden_work_observed": {
+      "custom_python_or_script_path": false,
+      "speed_benchmark": false,
+      "cache_generation": false,
+      "source_changes": false,
+      "decode_hcs_changes": false,
+      "production_enablement": false,
+      "requests": false
+    }
+  },
+  "command_resolution": {
+    "ambiguous": false,
+    "selected_command": "KRASIS_STARTUP_DIAG=1 KRASIS_PREFILL_TIMING=1 KRASIS_STARTUP_EXIT_AFTER_CALIBRATION=1 ./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+    "liveness_followup_command": "KRASIS_STARTUP_DIAG=1 KRASIS_PREFILL_TIMING=1 KRASIS_PREFILL_LIVENESS_TIMING=1 KRASIS_STARTUP_EXIT_AFTER_CALIBRATION=1 ./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+    "reason": "The built --timing flag maps to KRASIS_DECODE_TIMING and is decode-only. KRASIS_PREFILL_TIMING is the existing Rust prefill component timing gate. KRASIS_STARTUP_EXIT_AFTER_CALIBRATION exits after warmup/calibration prefill probes before server benchmark or request work. KRASIS_PREFILL_LIVENESS_TIMING is the existing layer-type timing gate needed to split the top-level mixer bucket.",
+    "not_speed_benchmark": true,
+    "source_spans_checked": [
+      "dev:2861",
+      "python/krasis/server.py:1702",
+      "python/krasis/server.py:2089",
+      "src/gpu_prefill.rs:54",
+      "src/gpu_prefill.rs:17314",
+      "src/gpu_prefill.rs:18642",
+      "src/gpu_prefill.rs:18683",
+      "src/gpu_prefill.rs:19631",
+      "src/gpu_prefill.rs:20082"
+    ]
+  },
+  "runtime": {
+    "primary_prefill_timing": {
+      "exit_code": 0,
+      "requests_sent": 0,
+      "run_dir": "logs/dev-run_20260627_194909",
+      "stdout_log": "benchmarks/20260627_1846_nemotron_nano_hqq4_k4v4_prefill_instrumented_diagnosis_diagnostic_stdout.log"
+    },
+    "liveness_layer_timing": {
+      "exit_code": 0,
+      "requests_sent": 0,
+      "run_dir": "logs/dev-run_20260627_195401",
+      "stdout_log": "benchmarks/20260627_1846_nemotron_nano_hqq4_k4v4_prefill_instrumented_diagnosis_liveness_stdout.log"
+    }
+  },
+  "result": {
+    "diagnosis": "Nano HQQ4+k4v4 prefill is dominated by the Mamba2 SSM mixer path, not by HQQ attention or Marlin expert prefill.",
+    "long_prefill": {
+      "tokens": 39920,
+      "total_ms": 117324.8,
+      "tok_s": 340.2,
+      "calibration_line_tok_s": 339.5
+    },
+    "component_timing": {
+      "printed_attn_mixer_ms": 115293.9,
+      "printed_attn_mixer_pct": 98.3,
+      "actual_hqq_gqa_attention_ms": 477.4,
+      "actual_hqq_gqa_attention_pct": 0.407,
+      "moe_marlin_total_ms": 1934.0,
+      "moe_marlin_pct": 1.649,
+      "cpu_gpu_transfer_ms": {
+        "route_d2h": 1.3,
+        "cold_h2d": 29.5,
+        "ptr_upload": 0.3
+      },
+      "sync_or_wait_ms": {
+        "moe_dma_wait": 546.7,
+        "gqa_fa2_queue_sync": 353.6,
+        "long_liveness_layer_end_sync_total": 3.303
+      },
+      "benchmark_harness_overhead": "not involved; ./dev benchmark was not run"
+    },
+    "liveness_layer_type_long": {
+      "mamba2": {
+        "layers": 23,
+        "total_layer_ms": 114836.447,
+        "avg_layer_ms": 4992.889,
+        "pct_of_layer_sum": 97.884
+      },
+      "pass_moe_only": {
+        "layers": 23,
+        "total_layer_ms": 1997.735,
+        "avg_layer_ms": 86.858,
+        "pct_of_layer_sum": 1.703
+      },
+      "gqa": {
+        "layers": 6,
+        "total_layer_ms": 484.371,
+        "avg_layer_ms": 80.729,
+        "pct_of_layer_sum": 0.413
+      }
+    },
+    "instrumentation_gap": {
+      "gap": "Current prefill timing prints the full mixer envelope as attn and does not split Mamba2 substages.",
+      "minimal_next_instrumentation_point": "Add KRASIS_PREFILL_TIMING Mamba2 substage timers inside forward_mamba2 for in_proj, raw split/extract, conv1d+silu, SSD/scan, gated RMSNorm, out_proj, and queue event/sync timing."
+    }
+  },
+  "cache": {
+    "hqq_attention_reused": true,
+    "effective_marlin_g64_loaded": true,
+    "safetensors_cache_write_line": false,
+    "tmp_or_lock_files_remaining": false
+  },
+  "cleanup": {
+    "final_snapshot_utc": "2026-06-27T19:04:49Z",
+    "tmux_server": false,
+    "matching_runtime_process": false,
+    "nvidia_compute_process": false,
+    "gpu0_used_mb": 15,
+    "gpu1_used_mb": 11,
+    "disk_free": "589G",
+    "ram_available": "968Gi",
+    "cache_tmp_lock_files": false
+  },
+  "artifacts": {
+    "runtime_attempt": "benchmarks/20260627_1846_nemotron_nano_hqq4_k4v4_prefill_instrumented_diagnosis_runtime_attempt.tsv",
+    "component_timing": "benchmarks/20260627_1846_nemotron_nano_hqq4_k4v4_prefill_instrumented_diagnosis_prefill_component_timing.tsv",
+    "liveness_layer_type_summary": "benchmarks/20260627_1846_nemotron_nano_hqq4_k4v4_prefill_instrumented_diagnosis_liveness_layer_type_summary.tsv",
+    "startup_cache_validation": "benchmarks/20260627_1846_nemotron_nano_hqq4_k4v4_prefill_instrumented_diagnosis_startup_cache_validation.tsv",
+    "root_decision": "benchmarks/20260627_1846_nemotron_nano_hqq4_k4v4_prefill_instrumented_diagnosis_root_decision.tsv",
+    "source_artifacts": "benchmarks/20260627_1846_nemotron_nano_hqq4_k4v4_prefill_instrumented_diagnosis_source_artifacts.tsv",
+    "primary_stdout": "benchmarks/20260627_1846_nemotron_nano_hqq4_k4v4_prefill_instrumented_diagnosis_diagnostic_stdout.log",
+    "liveness_stdout": "benchmarks/20260627_1846_nemotron_nano_hqq4_k4v4_prefill_instrumented_diagnosis_liveness_stdout.log",
+    "validation": "benchmarks/20260627_1846_nemotron_nano_hqq4_k4v4_prefill_instrumented_diagnosis_validation_checks.tsv"
+  }
+}

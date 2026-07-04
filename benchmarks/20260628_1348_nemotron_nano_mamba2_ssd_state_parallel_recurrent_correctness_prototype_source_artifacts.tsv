@@ -1,0 +1,12 @@
+component	file	line	note
+env_parser	src/gpu_prefill.rs	322	KRASIS_MAMBA2_SSD_BLOCK_SCAN_STATE_PARALLEL_RECURRENT parser
+guard	src/gpu_prefill.rs	31731	requires block-scan env
+guard	src/gpu_prefill.rs	31739	requires coeff-tile env
+guard	src/gpu_prefill.rs	31747	requires startup diagnostic env
+kernel_symbol_struct	src/gpu_prefill.rs	5000	PrefillKernels field for state-parallel recurrent PTX symbol
+cuda_kernel	src/cuda/prefill_kernels.cu	5795	opt-in state-parallel recurrent kernel
+rust_dispatch	src/gpu_prefill.rs	32259	runtime launch sizing and guarded kernel selection
+accepted_output_kernel	src/cuda/prefill_kernels.cu	6147	coeff-tile output kernel preserved
+ptx_symbol_load	src/gpu_prefill.rs	55150	state-parallel recurrent symbol loaded from PTX
+warmup_fail_closed	python/krasis/server.py	1749	state-parallel env re-raises warmup failures
+default_sequential	src/cuda/prefill_kernels.cu	4983	default sequential SSD kernel preserved

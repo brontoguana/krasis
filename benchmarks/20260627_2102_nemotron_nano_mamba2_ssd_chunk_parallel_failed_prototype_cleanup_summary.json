@@ -1,0 +1,97 @@
+{
+  "gate": "20260627_2102_nemotron_nano_mamba2_ssd_chunk_parallel_failed_prototype_cleanup",
+  "status": "closed",
+  "opened_utc": "2026-06-27T21:02:04Z",
+  "closed_utc": "2026-06-27T21:17:14Z",
+  "record_first": {
+    "source_gate": "20260627_2039_nemotron_nano_mamba2_ssd_chunk_parallel_gated_prototype",
+    "build_passed": true,
+    "oracle_failed_closed": true,
+    "failed_layer": 0,
+    "output_max_abs": 2.0,
+    "output_mean_abs": 0.000003399,
+    "state_max_abs": 0.000366211,
+    "state_mean_abs": 0.000000023,
+    "long_diagnostic_run": false
+  },
+  "scope": {
+    "revert_only_2039_prototype_additions": true,
+    "preserve_1908_mamba2_substage_instrumentation": true,
+    "preserve_benchmark_artifacts": true,
+    "remove_cuda_chunk_kernels": true,
+    "remove_rust_chunk_env_scratch_oracle_dispatch_ptx_checks": true,
+    "remove_chunk_specific_python_warmup_fail_closed": true,
+    "run_dev_build": true,
+    "run_minimal_startup_diagnostic_without_chunk_envs": true,
+    "smoke_requests": false,
+    "speed_benchmark": false,
+    "decode_hcs": false,
+    "production_enablement": false,
+    "cache_generation": false
+  },
+  "implementation": {
+    "source_changed": true,
+    "removed_cuda_chunk_kernels": true,
+    "removed_rust_chunk_env_scratch_oracle_dispatch_ptx_checks": true,
+    "removed_chunk_specific_python_warmup_fail_closed": true,
+    "preserved_1908_mamba2_substage_instrumentation": true,
+    "prototype_marker_search_clean": true
+  },
+  "build": {
+    "command": "./dev build",
+    "exit": 0,
+    "passed": true,
+    "total_s": 175,
+    "maturin_phase_s": 170
+  },
+  "startup_diagnostic": {
+    "command": "KRASIS_STARTUP_DIAG=1 KRASIS_PREFILL_TIMING=1 KRASIS_PREFILL_LIVENESS_TIMING=1 KRASIS_STARTUP_WARMUP_TOKENS=128 KRASIS_STARTUP_CAL_SHORT_TOKENS=128 KRASIS_STARTUP_CAL_LONG_TOKENS=128 KRASIS_STARTUP_EXIT_AFTER_CALIBRATION=1 ./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+    "chunk_prototype_envs_unset": true,
+    "exit": 0,
+    "passed": true,
+    "requests_sent": 0,
+    "benchmark_path": false,
+    "hqq_attention_reused": true,
+    "effective_marlin_g64_loaded": true,
+    "cache_write_marker": false,
+    "startup_exit_after_calibration": true,
+    "ssd_scan_ms": 293.6,
+    "ssd_scan_calls": 23
+  },
+  "artifacts": {
+    "build_result": "benchmarks/20260627_2102_nemotron_nano_mamba2_ssd_chunk_parallel_failed_prototype_cleanup_build_result.tsv",
+    "runtime_attempt": "benchmarks/20260627_2102_nemotron_nano_mamba2_ssd_chunk_parallel_failed_prototype_cleanup_runtime_attempt.tsv",
+    "startup_cache": "benchmarks/20260627_2102_nemotron_nano_mamba2_ssd_chunk_parallel_failed_prototype_cleanup_startup_cache_validation.tsv",
+    "source_artifacts": "benchmarks/20260627_2102_nemotron_nano_mamba2_ssd_chunk_parallel_failed_prototype_cleanup_source_artifacts.tsv",
+    "decision": "benchmarks/20260627_2102_nemotron_nano_mamba2_ssd_chunk_parallel_failed_prototype_cleanup_root_decision.tsv",
+    "build_log": "benchmarks/20260627_2102_nemotron_nano_mamba2_ssd_chunk_parallel_failed_prototype_cleanup_build.log",
+    "startup_log": "benchmarks/20260627_2102_nemotron_nano_mamba2_ssd_chunk_parallel_failed_prototype_cleanup_startup_diagnostic.log",
+    "validation": "benchmarks/20260627_2102_nemotron_nano_mamba2_ssd_chunk_parallel_failed_prototype_cleanup_validation_checks.tsv"
+  },
+  "validation": {
+    "passed": true,
+    "artifact_assertions": true,
+    "prototype_markers_removed": true,
+    "mamba2_substage_instrumentation_preserved": true,
+    "build_passed": true,
+    "startup_diagnostic_passed": true,
+    "no_requests": true,
+    "no_benchmark_path": true,
+    "no_cache_write_marker": true,
+    "static_checks_passed": true,
+    "protected_config_status": "expected tests-only Nano HQQ4 config plus known Nano BF16 config",
+    "final_snapshot_utc": "2026-06-27T21:17:14Z"
+  },
+  "cleanup": {
+    "tmux_server": false,
+    "runtime_process": false,
+    "nvidia_compute_process": false,
+    "nano_cache_temp_or_lock_files": false,
+    "gpu_memory_used_mb": {
+      "gpu0": 15,
+      "gpu1": 11
+    },
+    "disk_available": "588G",
+    "ram_available": "967Gi"
+  }
+}

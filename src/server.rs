@@ -21,14 +21,20 @@ pub struct StreamDetokenizer<'a> {
 
 impl<'a> StreamDetokenizer<'a> {
     pub fn new(tokenizer: &'a tokenizers::Tokenizer) -> Self {
-        Self { tokenizer, pending: Vec::new() }
+        Self {
+            tokenizer,
+            pending: Vec::new(),
+        }
     }
 
     /// Add a token. Returns the decoded text if the sequence is complete UTF-8,
     /// or an empty string if we're still buffering incomplete bytes.
     pub fn add(&mut self, token_id: u32) -> String {
         self.pending.push(token_id);
-        let decoded = self.tokenizer.decode(&self.pending, true).unwrap_or_default();
+        let decoded = self
+            .tokenizer
+            .decode(&self.pending, true)
+            .unwrap_or_default();
         if decoded.is_empty() {
             return String::new();
         }
@@ -46,7 +52,10 @@ impl<'a> StreamDetokenizer<'a> {
         if self.pending.is_empty() {
             return String::new();
         }
-        let decoded = self.tokenizer.decode(&self.pending, true).unwrap_or_default();
+        let decoded = self
+            .tokenizer
+            .decode(&self.pending, true)
+            .unwrap_or_default();
         self.pending.clear();
         decoded
     }
@@ -55,9 +64,9 @@ use pyo3::prelude::*;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Instant;
-use std::sync::mpsc;
 
 fn abort_if_cuda_context_poisoned(context: &str, err: &str) {
     if err.contains("CUDA_ERROR_ILLEGAL_ADDRESS")
@@ -174,18 +183,9 @@ fn drain_vram_pressure_for_state(
 }
 
 enum ModelRequest {
-    Chat {
-        stream: TcpStream,
-        body: String,
-    },
-    PrefillLogits {
-        stream: TcpStream,
-        body: String,
-    },
-    ReferenceTest {
-        stream: TcpStream,
-        body: String,
-    },
+    Chat { stream: TcpStream, body: String },
+    PrefillLogits { stream: TcpStream, body: String },
+    ReferenceTest { stream: TcpStream, body: String },
 }
 
 struct VramRequestContextGuard {
@@ -233,6 +233,19 @@ fn prepare_store_for_rust_prefill(
         engine.refresh_hqq_prefill_tensor_pointers(&patches)?;
     }
     Ok(has_hqq)
+}
+
+fn prefill_entry_floor_bytes_for_server(
+    rust_prefill: &Arc<std::sync::Mutex<Option<crate::gpu_prefill::PrefillEngine>>>,
+    prompt_tokens: usize,
+) -> Result<usize, String> {
+    let guard = rust_prefill
+        .lock()
+        .map_err(|e| format!("Prefill engine lock poisoned: {}", e))?;
+    Ok(guard
+        .as_ref()
+        .map(|engine| engine.minimum_prefill_entry_free_bytes(prompt_tokens))
+        .unwrap_or(0))
 }
 
 fn create_prefill_engine_for_server(
@@ -440,7 +453,11 @@ fn handle_front_connection(
                     log::error!("Model worker is not available for /v1/internal/prefill_logits");
                 }
             } else {
-                let _ = send_json(&mut tcp_stream, 404, r#"{"error":"Test endpoints not enabled. Start server with --test-endpoints"}"#);
+                let _ = send_json(
+                    &mut tcp_stream,
+                    404,
+                    r#"{"error":"Test endpoints not enabled. Start server with --test-endpoints"}"#,
+                );
             }
         }
 
@@ -456,7 +473,11 @@ fn handle_front_connection(
                     log::error!("Model worker is not available for /v1/internal/reference_test");
                 }
             } else {
-                let _ = send_json(&mut tcp_stream, 404, r#"{"error":"Test endpoints not enabled. Start server with --test-endpoints"}"#);
+                let _ = send_json(
+                    &mut tcp_stream,
+                    404,
+                    r#"{"error":"Test endpoints not enabled. Start server with --test-endpoints"}"#,
+                );
             }
         }
 
@@ -475,6 +496,23 @@ fn fnv1a_token_hash(token_ids: &[u32]) -> u64 {
         }
     }
     hash
+}
+
+fn mamba2_state_lifecycle_point(
+    store: &GpuDecodeStore,
+    phase: &str,
+    layer_idx: usize,
+) -> serde_json::Value {
+    let raw = store.mamba2_state_debug_summary_json(phase, layer_idx);
+    serde_json::from_str(&raw).unwrap_or_else(|e| {
+        serde_json::json!({
+            "phase": phase,
+            "layer": layer_idx,
+            "available": false,
+            "error": format!("parse_failed: {}", e),
+            "raw": raw,
+        })
+    })
 }
 
 fn reference_logit_trace_json(
@@ -539,7 +577,8 @@ fn reference_logit_trace_json(
         if top_logits.len() < top_n {
             top_logits.push((idx, value));
             if top_logits.len() == top_n {
-                top_logits.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                top_logits
+                    .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             }
         } else if top_n > 0 && value > top_logits[top_n - 1].1 {
             top_logits[top_n - 1] = (idx, value);
@@ -618,8 +657,12 @@ fn format_sse_token(
     let delta = if text.is_empty() {
         "{}".to_string()
     } else {
-        let escaped = text.replace('\\', "\\\\").replace('"', "\\\"")
-            .replace('\n', "\\n").replace('\r', "\\r").replace('\t', "\\t");
+        let escaped = text
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r")
+            .replace('\t', "\\t");
         format!(r#"{{"content":"{}"}}"#, escaped)
     };
     let fr = match finish_reason {
@@ -635,7 +678,10 @@ fn format_sse_token(
         let top_str = top_entries.join(",");
         // The first entry is the selected token
         let selected_lp = if !lps.is_empty() { lps[0].1 } else { 0.0 };
-        format!(r#","logprobs":{{"content":[{{"logprob":{:.6},"top_logprobs":[{}]}}]}}"#, selected_lp, top_str)
+        format!(
+            r#","logprobs":{{"content":[{{"logprob":{:.6},"top_logprobs":[{}]}}]}}"#,
+            selected_lp, top_str
+        )
     } else {
         String::new()
     };
@@ -655,12 +701,22 @@ fn format_completion(
     finish_reason: &str,
     created: u64,
 ) -> String {
-    let escaped = text.replace('\\', "\\\\").replace('"', "\\\"")
-        .replace('\n', "\\n").replace('\r', "\\r").replace('\t', "\\t");
+    let escaped = text
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t");
     format!(
         r#"{{"id":"{}","object":"chat.completion","created":{},"model":"{}","choices":[{{"index":0,"message":{{"role":"assistant","content":"{}"}},"finish_reason":"{}"}}],"usage":{{"prompt_tokens":{},"completion_tokens":{},"total_tokens":{}}}}}"#,
-        request_id, created, model_name, escaped, finish_reason,
-        prompt_tokens, completion_tokens, prompt_tokens + completion_tokens
+        request_id,
+        created,
+        model_name,
+        escaped,
+        finish_reason,
+        prompt_tokens,
+        completion_tokens,
+        prompt_tokens + completion_tokens
     )
 }
 
@@ -717,8 +773,9 @@ fn parse_tool_calls(text: &str) -> (String, Vec<ParsedToolCall>) {
                                     .trim_start_matches('\n')
                                     .trim_end_matches('\n');
                                 // Try JSON parse (objects, arrays, numbers, bools)
-                                let json_value = serde_json::from_str(value)
-                                    .unwrap_or_else(|_| serde_json::Value::String(value.to_string()));
+                                let json_value = serde_json::from_str(value).unwrap_or_else(|_| {
+                                    serde_json::Value::String(value.to_string())
+                                });
                                 args.insert(param_name, json_value);
                                 param_rem = &value_text[p_end + "</parameter>".len()..];
                             } else {
@@ -771,14 +828,72 @@ fn json_escape(s: &str) -> String {
         .replace('\t', "\\t")
 }
 
+fn hide_synthetic_think_stop_text(
+    token_id: usize,
+    finish_reason: Option<&str>,
+    hidden_think_stop_id: Option<usize>,
+) -> bool {
+    finish_reason == Some("stop") && hidden_think_stop_id == Some(token_id)
+}
+
+fn push_eos_token_id_from_json(value: &serde_json::Value, ids: &mut Vec<usize>) {
+    let Some(eos) = value.get("eos_token_id") else {
+        return;
+    };
+    match eos {
+        serde_json::Value::Number(n) => {
+            if let Some(id) = n.as_u64() {
+                let id = id as usize;
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for v in arr {
+                if let Some(id) = v.as_u64() {
+                    let id = id as usize;
+                    if !ids.contains(&id) {
+                        ids.push(id);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_eos_stop_ids(tokenizer_path: &str) -> Vec<usize> {
+    let p = std::path::Path::new(tokenizer_path);
+    let model_dir = p.parent().unwrap_or(p);
+    let mut ids = Vec::new();
+
+    // Match Python config parsing order: generation_config.json is
+    // authoritative, then config.json top level, then nested text_config.
+    let gen_cfg_path = model_dir.join("generation_config.json");
+    if let Ok(data) = std::fs::read_to_string(&gen_cfg_path) {
+        if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&data) {
+            push_eos_token_id_from_json(&cfg, &mut ids);
+        }
+    }
+
+    let config_path = model_dir.join("config.json");
+    if let Ok(data) = std::fs::read_to_string(&config_path) {
+        if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&data) {
+            push_eos_token_id_from_json(&cfg, &mut ids);
+            if let Some(text_cfg) = cfg.get("text_config") {
+                push_eos_token_id_from_json(text_cfg, &mut ids);
+            }
+        }
+    }
+
+    ids
+}
+
 fn qwen_image_vram_error_body(err: &str) -> Option<String> {
     let marker = "VRAM is too constrained";
     let start = err.find(marker)?;
-    let message = err[start..]
-        .lines()
-        .next()
-        .unwrap_or(&err[start..])
-        .trim();
+    let message = err[start..].lines().next().unwrap_or(&err[start..]).trim();
     Some(format!(
         r#"{{"error":{{"message":"{}","type":"insufficient_resources","code":"insufficient_vram"}}}}"#,
         json_escape(message)
@@ -840,8 +955,14 @@ fn format_completion_with_tool_calls(
     };
     format!(
         r#"{{"id":"{}","object":"chat.completion","created":{},"model":"{}","choices":[{{"index":0,"message":{{"role":"assistant","content":{},"tool_calls":[{}]}},"finish_reason":"tool_calls"}}],"usage":{{"prompt_tokens":{},"completion_tokens":{},"total_tokens":{}}}}}"#,
-        request_id, created, model_name, content_field, tc_parts.join(","),
-        prompt_tokens, completion_tokens, prompt_tokens + completion_tokens
+        request_id,
+        created,
+        model_name,
+        content_field,
+        tc_parts.join(","),
+        prompt_tokens,
+        completion_tokens,
+        prompt_tokens + completion_tokens
     )
 }
 
@@ -852,6 +973,33 @@ struct RequestOverhead {
     prefill_ms: f64,         // GIL acquire + Python prefill
     reload_ms: f64,          // HCS soft-tier reload (wall-clock, includes sync if enabled)
     real_reload_dma_ms: f64, // Actual DMA time when sync is on (0.0 if async)
+}
+
+fn format_completion_with_debug(
+    request_id: &str,
+    model_name: &str,
+    text: &str,
+    prompt_tokens: usize,
+    completion_tokens: usize,
+    finish_reason: &str,
+    created: u64,
+    debug: Option<&serde_json::Value>,
+) -> String {
+    let mut response = format_completion(
+        request_id,
+        model_name,
+        text,
+        prompt_tokens,
+        completion_tokens,
+        finish_reason,
+        created,
+    );
+    if let Some(debug_value) = debug {
+        response.pop();
+        response.push_str(&format!(r#","krasis_debug":{}"#, debug_value));
+        response.push('}');
+    }
+    response
 }
 
 struct MultimodalPrefillInputs {
@@ -866,11 +1014,7 @@ struct MultimodalPrefillInputs {
 }
 
 /// Handle /v1/chat/completions request.
-fn handle_chat_completion(
-    stream: &mut TcpStream,
-    body: &str,
-    state: &mut ServerState,
-) {
+fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut ServerState) {
     let t_request = Instant::now();
 
     // Parse request
@@ -905,21 +1049,49 @@ fn handle_chat_completion(
         .or_else(|| req.get("max_completion_tokens"))
         .and_then(|v| v.as_u64())
         .unwrap_or(8192) as usize;
-    let temperature = req.get("temperature").and_then(|v| v.as_f64()).unwrap_or(0.6) as f32;
+    let min_new_tokens = req
+        .get("min_new_tokens")
+        .or_else(|| req.get("min_completion_tokens"))
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
+        .unwrap_or(0)
+        .min(max_tokens);
+    let temperature = req
+        .get("temperature")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.6) as f32;
     let top_k = req.get("top_k").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
     let top_p = req.get("top_p").and_then(|v| v.as_f64()).unwrap_or(0.95) as f32;
-    let presence_penalty = req.get("presence_penalty").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-    let req_logprobs = req.get("logprobs").and_then(|v| v.as_bool()).unwrap_or(false);
-    let req_top_logprobs = req.get("top_logprobs").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
+    let presence_penalty = req
+        .get("presence_penalty")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0) as f32;
+    let req_logprobs = req
+        .get("logprobs")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let req_top_logprobs = req
+        .get("top_logprobs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(5) as usize;
     let logprobs_top_n = if req_logprobs { req_top_logprobs } else { 0 };
-    let enable_thinking = req.get("enable_thinking").and_then(|v| v.as_bool()).unwrap_or(state.default_enable_thinking);
+    let enable_thinking = req
+        .get("enable_thinking")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(state.default_enable_thinking);
+    let debug_first_token_boundary = req
+        .get("debug_first_token_boundary")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     let request_id = format!("chatcmpl-{:016x}", {
         let mut s = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos() as u64;
-        s ^= s << 13; s ^= s >> 7; s ^= s << 17;
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
         s
     });
     crate::vram_monitor::begin_request_context(&format!(
@@ -966,9 +1138,10 @@ fn handle_chat_completion(
     // Custom stop tokens
     let stop_tokens: Vec<String> = match req.get("stop") {
         Some(serde_json::Value::String(s)) => vec![s.clone()],
-        Some(serde_json::Value::Array(arr)) => {
-            arr.iter().filter_map(|v| v.as_str().map(String::from)).collect()
-        }
+        Some(serde_json::Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect(),
         _ => vec![],
     };
 
@@ -980,7 +1153,7 @@ fn handle_chat_completion(
         Some(t) if t.is_array() => {
             let is_none = match req.get("tool_choice") {
                 Some(serde_json::Value::String(s)) => s == "none",
-                _ => false,  // object form or missing = allow tools
+                _ => false, // object form or missing = allow tools
             };
             if is_none {
                 String::new()
@@ -1001,12 +1174,9 @@ fn handle_chat_completion(
             enable_thinking,
         )
     } else {
-        state.chat_template.apply_with_tools(
-            &messages_json,
-            &tools_json,
-            true,
-            enable_thinking,
-        )
+        state
+            .chat_template
+            .apply_with_tools(&messages_json, &tools_json, true, enable_thinking)
     };
     let rendered = match rendered_result {
         Ok(r) => r,
@@ -1015,7 +1185,10 @@ fn handle_chat_completion(
             let _ = send_json(
                 stream,
                 500,
-                &format!(r#"{{"error":"Chat template failed: {}. This indicates a broken model setup."}}"#, e),
+                &format!(
+                    r#"{{"error":"Chat template failed: {}. This indicates a broken model setup."}}"#,
+                    e
+                ),
             );
             return;
         }
@@ -1039,12 +1212,19 @@ fn handle_chat_completion(
                 let _ = send_json(
                     stream,
                     500,
-                    &format!(r#"{{"error":"Tokenizer failed: {}. This indicates a broken model setup."}}"#, e),
+                    &format!(
+                        r#"{{"error":"Tokenizer failed: {}. This indicates a broken model setup."}}"#,
+                        e
+                    ),
                 );
                 return;
             }
         };
-        log::info!("Soft HCS: estimated {} tokens (rendered_len={})", token_count, rendered.len());
+        log::info!(
+            "Soft HCS: estimated {} tokens (rendered_len={})",
+            token_count,
+            rendered.len()
+        );
         crate::vram_monitor::update_request_context(&format!(
             "route=/v1/chat/completions request_id={} model={} estimated_prompt_tokens={} rendered_len={} max_new={} stream={} phase=prefill_setup",
             request_id, state.model_name, token_count, rendered.len(), max_tokens, is_stream,
@@ -1053,17 +1233,58 @@ fn handle_chat_completion(
     };
     let parse_ms = t_request.elapsed().as_secs_f64() * 1000.0;
 
+    if !has_images && estimated_tokens >= state.max_context_tokens {
+        log::warn!(
+            "Request {} rejected before prefill: estimated prompt {} tokens exceeds context {}",
+            request_id,
+            estimated_tokens,
+            state.max_context_tokens,
+        );
+        let _ = send_json(
+            stream,
+            413,
+            &format!(
+                r#"{{"error":{{"message":"Prompt too long: {} tokens exceeds KV cache capacity of {} tokens","type":"invalid_request_error","code":"context_length_exceeded","prompt_tokens":{},"max_context_tokens":{}}}}}"#,
+                estimated_tokens,
+                state.max_context_tokens,
+                estimated_tokens,
+                state.max_context_tokens,
+            ),
+        );
+        return;
+    }
+
     // ── Evict soft HCS before prefill to free VRAM ──
     crate::vram_monitor::report_event("evict_start");
     let t_evict = Instant::now();
+    let prefill_entry_floor_bytes =
+        match prefill_entry_floor_bytes_for_server(&state.rust_prefill, estimated_tokens) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                log::error!("Prefill engine floor unavailable before HCS eviction: {}", e);
+                let _ = send_json(
+                    stream,
+                    500,
+                    &format!(
+                        r#"{{"error":"Prefill engine floor unavailable: {}"}}"#,
+                        json_escape(&e)
+                    ),
+                );
+                return;
+            }
+        };
     let store_for_evict = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
-    let (_evicted, _freed_mb) = store_for_evict.hcs_evict_for_prefill(estimated_tokens);
+    let (_evicted, _freed_mb) = store_for_evict
+        .hcs_evict_for_prefill_with_engine_floor(estimated_tokens, prefill_entry_floor_bytes);
     // NOTE: aux GPU never does prefill, so no eviction needed there
     let evict_ms = t_evict.elapsed().as_secs_f64() * 1000.0;
     crate::vram_monitor::report_event("evict_end");
 
     // ── Snapshot VRAM before prefill ──
-    log::info!("VRAM before prefill: {} MB free", store_for_evict.query_vram_free_mb());
+    log::info!(
+        "VRAM before prefill: {} MB free",
+        store_for_evict.query_vram_free_mb()
+    );
 
     // ── Prefill: Rust path (text-only token IDs, or image embeddings handoff) ──
     crate::vram_monitor::report_event("prefill_start");
@@ -1071,47 +1292,62 @@ fn handle_chat_completion(
     let t_prefill_gil = Instant::now();
 
     let mut prompt_hcs_snapshot: Option<(Vec<u64>, usize, usize, usize)> = None;
-    let prefill_result: Result<(usize, usize, Vec<usize>, bool), String> = {
+    let mut chat_debug_input_token_ids: Option<Vec<u32>> = None;
+    let prefill_result: Result<
+        (usize, usize, Vec<usize>, bool, Option<serde_json::Value>),
+        String,
+    > = {
         // ── Rust prefill: text requests stay token-id only; image requests
         // build BF16 inputs_embeds once before the Rust prefill run.
         let mut multimodal_inputs: Option<MultimodalPrefillInputs> = None;
         let token_ids: Vec<u32> = if has_images {
             let built = Python::with_gil(|py| -> Result<MultimodalPrefillInputs, String> {
-                let obj = state.py_model.call_method1(
-                    py,
-                    "build_multimodal_prefill_inputs",
-                    (messages_json.as_str(), rendered.as_str()),
-                ).map_err(|e| format!("Qwen vision prefill setup failed: {}", e))?;
+                let obj = state
+                    .py_model
+                    .call_method1(
+                        py,
+                        "build_multimodal_prefill_inputs",
+                        (messages_json.as_str(), rendered.as_str()),
+                    )
+                    .map_err(|e| format!("Qwen vision prefill setup failed: {}", e))?;
                 let mm = obj.bind(py);
-                let token_ids: Vec<u32> = mm.get_item("token_ids")
+                let token_ids: Vec<u32> = mm
+                    .get_item("token_ids")
                     .map_err(|e| format!("Qwen vision token_ids read failed: {}", e))?
                     .extract()
                     .map_err(|e| format!("Qwen vision token_ids extract failed: {}", e))?;
-                let inputs_embeds_ptr: u64 = mm.get_item("inputs_embeds_ptr")
+                let inputs_embeds_ptr: u64 = mm
+                    .get_item("inputs_embeds_ptr")
                     .map_err(|e| format!("Qwen vision inputs_embeds_ptr read failed: {}", e))?
                     .extract()
                     .map_err(|e| format!("Qwen vision inputs_embeds_ptr extract failed: {}", e))?;
-                let mrope_cos_ptr: u64 = mm.get_item("mrope_cos_ptr")
+                let mrope_cos_ptr: u64 = mm
+                    .get_item("mrope_cos_ptr")
                     .map_err(|e| format!("Qwen vision mrope_cos_ptr read failed: {}", e))?
                     .extract()
                     .map_err(|e| format!("Qwen vision mrope_cos_ptr extract failed: {}", e))?;
-                let mrope_sin_ptr: u64 = mm.get_item("mrope_sin_ptr")
+                let mrope_sin_ptr: u64 = mm
+                    .get_item("mrope_sin_ptr")
                     .map_err(|e| format!("Qwen vision mrope_sin_ptr read failed: {}", e))?
                     .extract()
                     .map_err(|e| format!("Qwen vision mrope_sin_ptr extract failed: {}", e))?;
-                let mrope_half_dim: usize = mm.get_item("mrope_half_dim")
+                let mrope_half_dim: usize = mm
+                    .get_item("mrope_half_dim")
                     .map_err(|e| format!("Qwen vision mrope_half_dim read failed: {}", e))?
                     .extract()
                     .map_err(|e| format!("Qwen vision mrope_half_dim extract failed: {}", e))?;
-                let rope_delta: i32 = mm.get_item("rope_delta")
+                let rope_delta: i32 = mm
+                    .get_item("rope_delta")
                     .map_err(|e| format!("Qwen vision rope_delta read failed: {}", e))?
                     .extract()
                     .map_err(|e| format!("Qwen vision rope_delta extract failed: {}", e))?;
-                let image_count: usize = mm.get_item("image_count")
+                let image_count: usize = mm
+                    .get_item("image_count")
                     .map_err(|e| format!("Qwen vision image_count read failed: {}", e))?
                     .extract()
                     .map_err(|e| format!("Qwen vision image_count extract failed: {}", e))?;
-                let image_tokens: usize = mm.get_item("image_tokens")
+                let image_tokens: usize = mm
+                    .get_item("image_tokens")
                     .map_err(|e| format!("Qwen vision image_tokens read failed: {}", e))?
                     .extract()
                     .map_err(|e| format!("Qwen vision image_tokens extract failed: {}", e))?;
@@ -1144,13 +1380,17 @@ fn handle_chat_completion(
                     if let Some(body) = qwen_image_vram_error_body(&e) {
                         let _ = send_json(stream, 507, &body);
                     } else {
-                        let _ = send_json(stream, 500, &format!(r#"{{"error":"{}"}}"#, json_escape(&e)));
+                        let _ = send_json(
+                            stream,
+                            500,
+                            &format!(r#"{{"error":"{}"}}"#, json_escape(&e)),
+                        );
                     }
                     return;
                 }
             }
         } else {
-            match state.tokenizer.encode(rendered.as_str(), true) {
+            match state.tokenizer.encode(rendered.as_str(), false) {
                 Ok(e) => e.get_ids().to_vec(),
                 Err(e) => {
                     let _ = send_json(stream, 500, &format!(r#"{{"error":"Tokenize: {}"}}"#, e));
@@ -1158,8 +1398,14 @@ fn handle_chat_completion(
                 }
             }
         };
+        if debug_first_token_boundary {
+            chat_debug_input_token_ids = Some(token_ids.clone());
+        }
         let mut engine_guard = state.rust_prefill.lock().unwrap();
         let engine = engine_guard.as_mut().unwrap();
+        // Warmup/calibration calls disable prefill pinning through the shared engine.
+        // Normal request prefill must not inherit that one-shot state.
+        engine.set_prefill_pinning_disabled(false);
 
         // Update HCS snapshot so prefill can use GPU-resident experts directly
         {
@@ -1179,10 +1425,16 @@ fn handle_chat_completion(
                     engine.clear_external_prefill_inputs();
                     if has_images {
                         Python::with_gil(|py| {
-                            let _ = state.py_model.call_method0(py, "clear_multimodal_prefill_inputs");
+                            let _ = state
+                                .py_model
+                                .call_method0(py, "clear_multimodal_prefill_inputs");
                         });
                     }
-                    let _ = send_json(stream, 500, &format!(r#"{{"error":"Prefill prepare failed: {}"}}"#, e));
+                    let _ = send_json(
+                        stream,
+                        500,
+                        &format!(r#"{{"error":"Prefill prepare failed: {}"}}"#, e),
+                    );
                     return;
                 }
             }
@@ -1190,62 +1442,125 @@ fn handle_chat_completion(
 
         engine.set_prefill_hcs_guard_store_addr(state.gpu_store_addr);
 
-        // Dynamically allocate scratch sized for this prompt
-        if let Err(e) = engine.prepare_for_prefill(token_ids.len()) {
-            engine.clear_external_prefill_inputs();
-            engine.clear_prefill_hcs_guard_store_addr();
-            engine.set_optional_pinning_budget_mb(None);
-            let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
-            let _ = store.prepare_runtime_for_decode_rust();
-            if has_images {
-                Python::with_gil(|py| {
-                    let _ = state.py_model.call_method0(py, "clear_multimodal_prefill_inputs");
-                });
-            }
-            if has_images {
-                let body = format!(
-                    r#"{{"error":{{"message":"VRAM is too constrained for this Qwen image request. Multimodal prefill scratch allocation failed: {}","type":"insufficient_resources","code":"insufficient_vram"}}}}"#,
-                    json_escape(&e)
+        let mut retry_cap: Option<usize> = None;
+        let mut retry_attempt = 0usize;
+        let result = loop {
+            engine.set_prefill_runtime_chunk_cap(retry_cap);
+
+            // Dynamically allocate scratch sized for this prompt.
+            if let Err(e) = engine.prepare_for_prefill(token_ids.len()) {
+                engine.clear_external_prefill_inputs();
+                engine.clear_prefill_hcs_guard_store_addr();
+                engine.set_optional_pinning_budget_mb(None);
+                engine.clear_prefill_runtime_chunk_cap();
+                let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
+                let _ = store.prepare_runtime_for_decode_rust();
+                if has_images {
+                    Python::with_gil(|py| {
+                        let _ = state
+                            .py_model
+                            .call_method0(py, "clear_multimodal_prefill_inputs");
+                    });
+                }
+                if has_images {
+                    let body = format!(
+                        r#"{{"error":{{"message":"VRAM is too constrained for this Qwen image request. Multimodal prefill scratch allocation failed: {}","type":"insufficient_resources","code":"insufficient_vram"}}}}"#,
+                        json_escape(&e)
+                    );
+                    let _ = send_json(stream, 507, &body);
+                    return;
+                }
+                let _ = send_json(
+                    stream,
+                    500,
+                    &format!(r#"{{"error":"Scratch alloc failed: {}"}}"#, e),
                 );
-                let _ = send_json(stream, 507, &body);
                 return;
             }
-            let _ = send_json(stream, 500, &format!(r#"{{"error":"Scratch alloc failed: {}"}}"#, e));
-            return;
-        }
-        let pinning_budget_mb = {
-            let store = unsafe { &*(state.gpu_store_addr as *const GpuDecodeStore) };
-            store.prefill_optional_pinning_budget_mb(
-                token_ids.len(),
-                engine.last_prepare_post_alloc_free_mb(),
-            )
-        };
-        engine.set_optional_pinning_budget_mb(pinning_budget_mb);
+            let pinning_budget_mb = {
+                let store = unsafe { &*(state.gpu_store_addr as *const GpuDecodeStore) };
+                store.prefill_optional_pinning_budget_mb(
+                    token_ids.len(),
+                    engine.last_prepare_post_alloc_free_mb(),
+                )
+            };
+            engine.set_optional_pinning_budget_mb(pinning_budget_mb);
 
-        let suppress_tokens = {
-            let store = unsafe { &*(state.gpu_store_addr as *const GpuDecodeStore) };
-            store.suppress_tokens_clone()
-        };
-        if let Some(mm) = multimodal_inputs.as_ref() {
-            engine.set_external_prefill_inputs(
-                mm.inputs_embeds_ptr,
-                mm.mrope_cos_ptr,
-                mm.mrope_sin_ptr,
-                mm.mrope_half_dim,
-            );
-        } else {
-            engine.clear_external_prefill_inputs();
-        }
-        let result = match engine.run_prefill(
-            &token_ids,
-            temperature,
-            &suppress_tokens,
-        ) {
-            Ok(r) => match engine.finalize_stage_exact_prefill_kv(r.prompt_len) {
-                Ok(()) => Ok(r),
-                Err(e) => Err(format!("KV stage export failed: {}", e)),
-            },
-            Err(e) => Err(e),
+            let suppress_tokens = {
+                let store = unsafe { &*(state.gpu_store_addr as *const GpuDecodeStore) };
+                store.suppress_tokens_clone()
+            };
+            if let Some(mm) = multimodal_inputs.as_ref() {
+                engine.set_external_prefill_inputs(
+                    mm.inputs_embeds_ptr,
+                    mm.mrope_cos_ptr,
+                    mm.mrope_sin_ptr,
+                    mm.mrope_half_dim,
+                );
+            } else {
+                engine.clear_external_prefill_inputs();
+            }
+
+            let attempt_result = match engine.run_prefill(&token_ids, temperature, &suppress_tokens) {
+                Ok(r) => match engine.finalize_stage_exact_prefill_kv(r.prompt_len) {
+                    Ok(()) => Ok(r),
+                    Err(e) => Err(format!("KV stage export failed: {}", e)),
+                },
+                Err(e) => Err(e),
+            };
+
+            match attempt_result {
+                Ok(r) => break Ok(r),
+                Err(e) => {
+                    let current_chunk = engine.scratch.max_tokens;
+                    let next_retry_cap = engine.cold_staging_retry_chunk_cap();
+                    if let Some(next_cap) = next_retry_cap {
+                        if next_cap < current_chunk && current_chunk > 128 {
+                            retry_attempt += 1;
+                            if let Some(failure) = engine.last_cold_staging_failure {
+                                log::info!(
+                                    "Retrying chat prefill with measured cold-staging chunk cap: attempt={} prompt_tokens={} failed_chunk={} requested_slots={} max_safe_slots={} free_before_mb={} safety_mb={} current_chunk={} next_chunk_cap={} error={}",
+                                    retry_attempt,
+                                    token_ids.len(),
+                                    failure.chunk_tokens,
+                                    failure.requested_slots,
+                                    failure.max_safe_slots,
+                                    failure.free_before_mb,
+                                    failure.safety_mb,
+                                    current_chunk,
+                                    next_cap,
+                                    e,
+                                );
+                            } else {
+                                log::info!(
+                                    "Retrying chat prefill with measured cold-staging chunk cap: attempt={} prompt_tokens={} current_chunk={} next_chunk_cap={} error={}",
+                                    retry_attempt,
+                                    token_ids.len(),
+                                    current_chunk,
+                                    next_cap,
+                                    e,
+                                );
+                            }
+                            engine.set_optional_pinning_budget_mb(None);
+                            if let Err(release_err) = engine.release_scratch() {
+                                log::error!(
+                                    "Failed to release scratch before chat prefill retry: {}",
+                                    release_err
+                                );
+                                abort_if_cuda_context_poisoned(
+                                    "chat retry release_scratch",
+                                    &release_err,
+                                );
+                                break Err(release_err);
+                            }
+                            engine.clear_external_prefill_inputs();
+                            retry_cap = Some(next_cap);
+                            continue;
+                        }
+                    }
+                    break Err(e);
+                }
+            }
         };
 
         prompt_hcs_snapshot = engine.prompt_hcs_shadow_snapshot();
@@ -1258,9 +1573,12 @@ fn handle_chat_completion(
         engine.clear_external_prefill_inputs();
         engine.clear_prefill_hcs_guard_store_addr();
         engine.set_optional_pinning_budget_mb(None);
+        engine.clear_prefill_runtime_chunk_cap();
         if has_images {
             Python::with_gil(|py| {
-                let _ = state.py_model.call_method0(py, "clear_multimodal_prefill_inputs");
+                let _ = state
+                    .py_model
+                    .call_method0(py, "clear_multimodal_prefill_inputs");
             });
         }
 
@@ -1274,24 +1592,70 @@ fn handle_chat_completion(
                 }
             }
         }
+        if !enable_thinking {
+            if let Some(id) = state.thinking_end_token {
+                if !stop_ids.contains(&id) {
+                    stop_ids.push(id);
+                }
+            }
+        }
 
         match result {
             Ok(r) => {
+                let debug_payload = if debug_first_token_boundary {
+                    let debug_ids = chat_debug_input_token_ids.clone().unwrap_or_default();
+                    let selected_token_text = state
+                        .tokenizer
+                        .decode(&[r.first_token], true)
+                        .unwrap_or_default();
+                    Some(serde_json::json!({
+                        "schema": "krasis_chat_first_token_boundary_debug_v1",
+                        "route": "/v1/chat/completions",
+                        "rendered_prompt": rendered.as_str(),
+                        "rendered_len": rendered.len(),
+                        "enable_thinking": enable_thinking,
+                        "has_tools": has_tools,
+                        "input_token_count": debug_ids.len(),
+                        "input_token_hash_fnv1a64": format!("0x{:016x}", fnv1a_token_hash(&debug_ids)),
+                        "input_token_ids": debug_ids,
+                        "selected_token_id": r.first_token as usize,
+                        "selected_token_text": selected_token_text,
+                        "first_token_logits": reference_logit_trace_json(
+                            &engine.h_logits,
+                            engine.h_logits.len(),
+                            r.first_token as usize,
+                            req_top_logprobs,
+                        ),
+                    }))
+                } else {
+                    None
+                };
                 // Set KV cache position on decode store so decode knows where to continue
                 let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
                 if let Err(e) = restore_store_after_rust_prefill(store, r.prompt_len) {
                     log::error!("Failed to restore decode runtime after prefill: {}", e);
                 }
                 store.set_rope_position_delta(
-                    multimodal_inputs.as_ref().map(|mm| mm.rope_delta).unwrap_or(0),
+                    multimodal_inputs
+                        .as_ref()
+                        .map(|mm| mm.rope_delta)
+                        .unwrap_or(0),
                 );
-                Ok((r.first_token as usize, r.prompt_len, stop_ids, kv_overflow))
+                Ok((
+                    r.first_token as usize,
+                    r.prompt_len,
+                    stop_ids,
+                    kv_overflow,
+                    debug_payload,
+                ))
             }
             Err(e) => {
                 engine.clear_external_prefill_inputs();
                 if has_images {
                     Python::with_gil(|py| {
-                        let _ = state.py_model.call_method0(py, "clear_multimodal_prefill_inputs");
+                        let _ = state
+                            .py_model
+                            .call_method0(py, "clear_multimodal_prefill_inputs");
                     });
                 }
                 let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
@@ -1305,7 +1669,8 @@ fn handle_chat_completion(
     let prefill_gil_ms = t_prefill_gil.elapsed().as_secs_f64() * 1000.0;
     crate::vram_monitor::report_event("prefill_end");
 
-    let (first_token, prompt_len, stop_ids, kv_overflow) = match prefill_result {
+    let (first_token, prompt_len, stop_ids, kv_overflow, chat_debug_payload) = match prefill_result
+    {
         Ok(v) => v,
         Err(e) => {
             let err_str = e.to_string();
@@ -1313,23 +1678,41 @@ fn handle_chat_completion(
             abort_if_cuda_context_poisoned("chat prefill", &err_str);
             // Return 413 with structured error for KV cache exhaustion
             let (status, body) = if err_str.contains("KV cache exhausted") {
-                (413, format!(
-                    r#"{{"error":{{"message":"Context length exceeds KV cache capacity ({} tokens max). Reduce context or start a new conversation.","type":"invalid_request_error","code":"context_length_exceeded","max_context_tokens":{}}}}}"#,
-                    state.max_context_tokens, state.max_context_tokens
-                ))
+                (
+                    413,
+                    format!(
+                        r#"{{"error":{{"message":"Context length exceeds KV cache capacity ({} tokens max). Reduce context or start a new conversation.","type":"invalid_request_error","code":"context_length_exceeded","max_context_tokens":{}}}}}"#,
+                        state.max_context_tokens, state.max_context_tokens
+                    ),
+                )
             } else if has_images {
                 if let Some(body) = qwen_image_vram_error_body(&err_str) {
                     (507, body)
                 } else if err_str.to_ascii_lowercase().contains("out of memory") {
-                    (507, format!(
-                        r#"{{"error":{{"message":"VRAM is too constrained for this Qwen image request. Multimodal prefill failed: {}","type":"insufficient_resources","code":"insufficient_vram"}}}}"#,
-                        json_escape(&err_str)
-                    ))
+                    (
+                        507,
+                        format!(
+                            r#"{{"error":{{"message":"VRAM is too constrained for this Qwen image request. Multimodal prefill failed: {}","type":"insufficient_resources","code":"insufficient_vram"}}}}"#,
+                            json_escape(&err_str)
+                        ),
+                    )
                 } else {
-                    (500, format!(r#"{{"error":{{"message":"Prefill failed: {}","type":"server_error"}}}}"#, err_str))
+                    (
+                        500,
+                        format!(
+                            r#"{{"error":{{"message":"Prefill failed: {}","type":"server_error"}}}}"#,
+                            err_str
+                        ),
+                    )
                 }
             } else {
-                (500, format!(r#"{{"error":{{"message":"Prefill failed: {}","type":"server_error"}}}}"#, err_str))
+                (
+                    500,
+                    format!(
+                        r#"{{"error":{{"message":"Prefill failed: {}","type":"server_error"}}}}"#,
+                        err_str
+                    ),
+                )
             };
             let _ = send_json(stream, status, &body);
             // Cleanup on error
@@ -1342,8 +1725,11 @@ fn handle_chat_completion(
 
     // If prompt exceeded Rust KV cache, return error (not a silent 200 with truncated output)
     if kv_overflow {
-        log::error!("Request {}: prompt {} tokens exceeds Rust KV cache capacity",
-            request_id, prompt_len);
+        log::error!(
+            "Request {}: prompt {} tokens exceeds Rust KV cache capacity",
+            request_id,
+            prompt_len
+        );
         let _ = send_json(
             stream,
             507,
@@ -1410,7 +1796,10 @@ fn handle_chat_completion(
 
     log::info!(
         "Request {}: {} prompt tokens, max_new={}, stream={}, decode=gpu",
-        request_id, prompt_len, max_tokens, is_stream
+        request_id,
+        prompt_len,
+        max_tokens,
+        is_stream
     );
     crate::vram_monitor::update_request_context(&format!(
         "route=/v1/chat/completions request_id={} model={} prompt_tokens={} max_new={} stream={} phase=decode_setup",
@@ -1435,7 +1824,10 @@ fn handle_chat_completion(
         );
         store.install_prompt_hcs_counts(counts.clone(), *layers, *experts, *prompt_tokens);
     } else {
-        log::warn!("Request {}: prompt-HCS snapshot missing before reload", request_id);
+        log::warn!(
+            "Request {}: prompt-HCS snapshot missing before reload",
+            request_id
+        );
         store.clear_prompt_hcs_counts();
     }
     // Decode must never begin with an incomplete HCS.  Use the bounded
@@ -1444,8 +1836,12 @@ fn handle_chat_completion(
     // drain gets a chance to run.
     let (activated, real_reload_ms) = store.hcs_reload_after_prefill(prompt_len);
     if activated > 0 {
-        log::info!("Request {}: HCS reload complete: {} experts, {:.1}ms",
-            request_id, activated, real_reload_ms);
+        log::info!(
+            "Request {}: HCS reload complete: {} experts, {:.1}ms",
+            request_id,
+            activated,
+            real_reload_ms
+        );
     }
     if let Some((counts, layers, experts, prompt_tokens)) = prompt_hcs_snapshot.as_ref() {
         store.install_prompt_hcs_shadow(counts.clone(), *layers, *experts, *prompt_tokens);
@@ -1461,17 +1857,42 @@ fn handle_chat_completion(
         for i in 0..num_aux {
             let aux_store = unsafe { &mut *(state.aux_gpu_store_addrs[i] as *mut GpuDecodeStore) };
             let layer_start = state.multi_gpu_split_layers[i];
-            let layer_end = if i + 1 < num_aux { state.multi_gpu_split_layers[i + 1] } else { num_layers };
-            if let Err(e) = store.copy_kv_to_aux(aux_store, layer_start, layer_end, state.multi_gpu_gqa_offsets[i], prompt_len) {
-                log::error!("Request {}: KV cache copy to aux GPU{} failed: {}", request_id, i + 1, e);
+            let layer_end = if i + 1 < num_aux {
+                state.multi_gpu_split_layers[i + 1]
+            } else {
+                num_layers
+            };
+            if let Err(e) = store.copy_kv_to_aux(
+                aux_store,
+                layer_start,
+                layer_end,
+                state.multi_gpu_gqa_offsets[i],
+                prompt_len,
+            ) {
+                log::error!(
+                    "Request {}: KV cache copy to aux GPU{} failed: {}",
+                    request_id,
+                    i + 1,
+                    e
+                );
             }
             // Copy LA recurrent state (conv_state + recur_state) for linear attention layers
             if let Err(e) = store.copy_la_states_to_aux(aux_store, layer_start, layer_end) {
-                log::error!("Request {}: LA state copy to aux GPU{} failed: {}", request_id, i + 1, e);
+                log::error!(
+                    "Request {}: LA state copy to aux GPU{} failed: {}",
+                    request_id,
+                    i + 1,
+                    e
+                );
             }
         }
         let kvcopy_ms = t_kvcopy.elapsed().as_secs_f64() * 1000.0;
-        log::info!("Request {}: KV+LA state copied to {} aux GPUs in {:.1}ms", request_id, num_aux, kvcopy_ms);
+        log::info!(
+            "Request {}: KV+LA state copied to {} aux GPUs in {:.1}ms",
+            request_id,
+            num_aux,
+            kvcopy_ms
+        );
     }
     let (pressure_evicted, pressure_freed_mb, pressure_final_free_mb) =
         store.hcs_drain_vram_pressure("request_before_decode", true);
@@ -1483,6 +1904,27 @@ fn handle_chat_completion(
             pressure_freed_mb,
             pressure_final_free_mb,
         );
+        let (pressure_reload_activated, pressure_reload_ms) =
+            store.hcs_reload_after_prefill(prompt_len);
+        if pressure_reload_activated > 0 {
+            log::info!(
+                "Request {}: HCS reload after pressure drain: {} experts, {:.1}ms",
+                request_id,
+                pressure_reload_activated,
+                pressure_reload_ms,
+            );
+            let (post_reload_evicted, post_reload_freed_mb, post_reload_final_free_mb) =
+                store.hcs_drain_vram_pressure("request_before_decode_after_pressure_reload", true);
+            if post_reload_evicted > 0 {
+                log::warn!(
+                    "Request {}: post-reload pressure eviction before decode evicted {} soft experts, freed {:.1} MB, final_free={} MB",
+                    request_id,
+                    post_reload_evicted,
+                    post_reload_freed_mb,
+                    post_reload_final_free_mb,
+                );
+            }
+        }
     }
     let reload_ms = t_reload.elapsed().as_secs_f64() * 1000.0;
     {
@@ -1506,7 +1948,7 @@ fn handle_chat_completion(
         parse_ms,
         evict_ms,
         prefill_ms: prefill_gil_ms,
-        reload_ms, // includes sync wait
+        reload_ms,                          // includes sync wait
         real_reload_dma_ms: real_reload_ms, // actual DMA time (0 if async)
     };
 
@@ -1514,30 +1956,52 @@ fn handle_chat_completion(
     // When thinking is enabled, the model must generate </think> before it can
     // terminate with <|im_end|>. Without this, the model puts its answer inside
     // the thinking block and bails to EOS, resulting in 0 visible answer tokens.
+    let min_stop_suppress_steps = min_new_tokens.saturating_sub(1);
+    let min_stop_suppress_ids = if min_stop_suppress_steps > 0 {
+        stop_ids.to_vec()
+    } else {
+        vec![]
+    };
     if enable_thinking {
         if let Some(te_id) = state.thinking_end_token {
             // Budget = max 4096 thinking tokens. If the model hasn't produced </think>
             // by then, it's stuck in a loop. 4096 is generous for real reasoning.
             let think_budget = 4096;
             store.set_think_end_suppress(Some(te_id), think_budget);
-            store.set_min_new_tokens_ext(0, stop_ids.to_vec());
+            store.set_min_new_tokens_ext(min_stop_suppress_steps, min_stop_suppress_ids.clone());
         } else {
             store.set_think_end_suppress(None, 0);
-            store.set_min_new_tokens_ext(0, vec![]);
+            store.set_min_new_tokens_ext(min_stop_suppress_steps, min_stop_suppress_ids.clone());
         }
     } else {
         store.set_think_end_suppress(None, 0);
-        store.set_min_new_tokens_ext(0, vec![]);
+        store.set_min_new_tokens_ext(min_stop_suppress_steps, min_stop_suppress_ids);
     }
 
     // ── GPU decode: GIL-free Rust decode via GpuDecodeStore ──
     crate::vram_monitor::report_event("decode_start");
     handle_gpu_decode(
-        stream, is_stream, state, store, tokenizer,
-        first_token, prompt_len, max_tokens, temperature,
-        top_k, top_p, presence_penalty, &stop_ids,
-        &request_id, &state.model_name, created,
-        &overhead, has_tools, enable_thinking, logprobs_top_n,
+        stream,
+        is_stream,
+        state,
+        store,
+        tokenizer,
+        first_token,
+        prompt_len,
+        max_tokens,
+        temperature,
+        top_k,
+        top_p,
+        presence_penalty,
+        &stop_ids,
+        &request_id,
+        &state.model_name,
+        created,
+        &overhead,
+        has_tools,
+        enable_thinking,
+        logprobs_top_n,
+        chat_debug_payload,
     );
     crate::vram_monitor::report_event("decode_end");
 
@@ -1569,69 +2033,118 @@ fn handle_chat_completion(
 
 /// Handle /v1/internal/prefill_logits endpoint.
 /// Runs a full prefill pass and extracts top-k logprobs at sampled positions.
-fn handle_prefill_logits(
-    stream: &mut TcpStream,
-    body: &str,
-    state: &mut ServerState,
-) {
+fn handle_prefill_logits(stream: &mut TcpStream, body: &str, state: &mut ServerState) {
     // Parse request
     let req: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
         Err(e) => {
-            let _ = send_json(stream, 400, &format!(r#"{{"error":"Invalid JSON: {}"}}"#, e));
+            let _ = send_json(
+                stream,
+                400,
+                &format!(r#"{{"error":"Invalid JSON: {}"}}"#, e),
+            );
             return;
         }
     };
 
     let top_k = req.get("top_k").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
-    let sample_every = req.get("sample_every").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+    let sample_every = req
+        .get("sample_every")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(50) as usize;
 
     // Accept either raw input_token_ids or messages (with chat template + tokenization)
-    let token_ids: Vec<u32> = if let Some(serde_json::Value::Array(arr)) = req.get("input_token_ids") {
-        arr.iter().filter_map(|v| v.as_u64().map(|x| x as u32)).collect()
-    } else if let Some(messages) = req.get("messages") {
-        if let Err(e) = crate::text_only_messages::validate_text_only_messages(messages) {
+    let token_ids: Vec<u32> =
+        if let Some(serde_json::Value::Array(arr)) = req.get("input_token_ids") {
+            arr.iter()
+                .filter_map(|v| v.as_u64().map(|x| x as u32))
+                .collect()
+        } else if let Some(messages) = req.get("messages") {
+            if let Err(e) = crate::text_only_messages::validate_text_only_messages(messages) {
+                let _ = send_json(
+                    stream,
+                    400,
+                    &format!(r#"{{"error":"{}"}}"#, json_escape(&e)),
+                );
+                return;
+            }
+            let messages_json = messages.to_string();
+            let enable_thinking = req
+                .get("enable_thinking")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let rendered = match state
+                .chat_template
+                .apply(&messages_json, true, enable_thinking)
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = send_json(
+                        stream,
+                        500,
+                        &format!(r#"{{"error":"Chat template: {}"}}"#, e),
+                    );
+                    return;
+                }
+            };
+            match state.tokenizer.encode(rendered.as_str(), false) {
+                Ok(e) => e.get_ids().to_vec(),
+                Err(e) => {
+                    let _ = send_json(stream, 500, &format!(r#"{{"error":"Tokenize: {}"}}"#, e));
+                    return;
+                }
+            }
+        } else {
             let _ = send_json(
                 stream,
                 400,
-                &format!(r#"{{"error":"{}"}}"#, json_escape(&e)),
+                r#"{"error":"Missing input_token_ids or messages"}"#,
             );
             return;
-        }
-        let messages_json = messages.to_string();
-        let enable_thinking = req.get("enable_thinking").and_then(|v| v.as_bool()).unwrap_or(false);
-        let rendered = match state.chat_template.apply(&messages_json, true, enable_thinking) {
-            Ok(r) => r,
-            Err(e) => {
-                let _ = send_json(stream, 500, &format!(r#"{{"error":"Chat template: {}"}}"#, e));
-                return;
-            }
         };
-        match state.tokenizer.encode(rendered.as_str(), true) {
-            Ok(e) => e.get_ids().to_vec(),
-            Err(e) => {
-                let _ = send_json(stream, 500, &format!(r#"{{"error":"Tokenize: {}"}}"#, e));
-                return;
-            }
-        }
-    } else {
-        let _ = send_json(stream, 400, r#"{"error":"Missing input_token_ids or messages"}"#);
-        return;
-    };
 
-    log::info!("prefill_logits: {} tokens, top_k={}, sample_every={}", token_ids.len(), top_k, sample_every);
+    log::info!(
+        "prefill_logits: {} tokens, top_k={}, sample_every={}",
+        token_ids.len(),
+        top_k,
+        sample_every
+    );
 
     // Evict soft HCS before diagnostic prefill so this endpoint uses the same
     // conservative VRAM budget as the production and reference-test paths.
+    let prefill_entry_floor_bytes =
+        match prefill_entry_floor_bytes_for_server(&state.rust_prefill, token_ids.len()) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                log::error!(
+                    "Prefill logits engine floor unavailable before HCS eviction: {}",
+                    e
+                );
+                let _ = send_json(
+                    stream,
+                    500,
+                    &format!(
+                        r#"{{"error":"Prefill engine floor unavailable: {}"}}"#,
+                        json_escape(&e)
+                    ),
+                );
+                return;
+            }
+        };
     let store_for_evict = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
-    let (_evicted, _freed_mb) = store_for_evict.hcs_evict_for_prefill(token_ids.len());
+    let (_evicted, _freed_mb) = store_for_evict
+        .hcs_evict_for_prefill_with_engine_floor(token_ids.len(), prefill_entry_floor_bytes);
 
     // Run prefill logits extraction
     let mut engine_guard = state.rust_prefill.lock().unwrap();
     let engine = match engine_guard.as_mut() {
         Some(e) => e,
         None => {
-            let _ = send_json(stream, 500, r#"{"error":"Rust prefill engine not available"}"#);
+            let _ = send_json(
+                stream,
+                500,
+                r#"{"error":"Rust prefill engine not available"}"#,
+            );
             return;
         }
     };
@@ -1648,7 +2161,11 @@ fn handle_prefill_logits(
         match prepare_store_for_rust_prefill(store, engine, token_ids.len()) {
             Ok(has_hqq) => has_hqq,
             Err(e) => {
-                let _ = send_json(stream, 500, &format!(r#"{{"error":"Prefill prepare failed: {}"}}"#, e));
+                let _ = send_json(
+                    stream,
+                    500,
+                    &format!(r#"{{"error":"Prefill prepare failed: {}"}}"#, e),
+                );
                 return;
             }
         }
@@ -1660,8 +2177,14 @@ fn handle_prefill_logits(
         let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
         let _ = store.prepare_runtime_for_decode_rust();
         store.invalidate_cuda_graph();
-        log::info!("prefill_logits: invalidated CUDA graphs after failed scratch allocation restore");
-        let _ = send_json(stream, 500, &format!(r#"{{"error":"Scratch alloc failed: {}"}}"#, e));
+        log::info!(
+            "prefill_logits: invalidated CUDA graphs after failed scratch allocation restore"
+        );
+        let _ = send_json(
+            stream,
+            500,
+            &format!(r#"{{"error":"Scratch alloc failed: {}"}}"#, e),
+        );
         return;
     }
 
@@ -1674,11 +2197,17 @@ fn handle_prefill_logits(
             let _ = store.prepare_runtime_for_decode_rust();
             let _ = store.hcs_reload_after_prefill(token_ids.len());
             store.invalidate_cuda_graph();
-            log::info!("prefill_logits: invalidated CUDA graphs after failed diagnostic prefill restore");
+            log::info!(
+                "prefill_logits: invalidated CUDA graphs after failed diagnostic prefill restore"
+            );
             Python::with_gil(|py| {
                 let _ = state.py_model.call_method0(py, "server_cleanup");
             });
-            let _ = send_json(stream, 500, &format!(r#"{{"error":"Prefill logits: {}"}}"#, e));
+            let _ = send_json(
+                stream,
+                500,
+                &format!(r#"{{"error":"Prefill logits: {}"}}"#, e),
+            );
             return;
         }
     };
@@ -1722,11 +2251,7 @@ fn handle_prefill_logits(
 /// Handle /v1/internal/reference_test endpoint.
 /// Accepts raw input_token_ids, runs greedy prefill + decode, returns output tokens with logprobs.
 /// Used for comparing engine output against BF16 reference data.
-fn handle_reference_test(
-    stream: &mut TcpStream,
-    body: &str,
-    state: &mut ServerState,
-) {
+fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerState) {
     let t_start = Instant::now();
     state.reference_test_request_order = state.reference_test_request_order.saturating_add(1);
     let reference_request_order = state.reference_test_request_order;
@@ -1735,28 +2260,534 @@ fn handle_reference_test(
     let req: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
         Err(e) => {
-            let _ = send_json(stream, 400, &format!(r#"{{"error":"Invalid JSON: {}"}}"#, e));
+            let _ = send_json(
+                stream,
+                400,
+                &format!(r#"{{"error":"Invalid JSON: {}"}}"#, e),
+            );
             return;
         }
     };
 
     // Required: input_token_ids (raw token IDs, no tokenization or template applied)
     let input_token_ids: Vec<u32> = match req.get("input_token_ids") {
-        Some(serde_json::Value::Array(arr)) => {
-            arr.iter().filter_map(|v| v.as_u64().map(|x| x as u32)).collect()
-        }
+        Some(serde_json::Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|v| v.as_u64().map(|x| x as u32))
+            .collect(),
         _ => {
-            let _ = send_json(stream, 400, r#"{"error":"Missing or invalid input_token_ids array"}"#);
+            let _ = send_json(
+                stream,
+                400,
+                r#"{"error":"Missing or invalid input_token_ids array"}"#,
+            );
             return;
         }
     };
 
-    let max_tokens = req.get("max_tokens").and_then(|v| v.as_u64()).unwrap_or(200) as usize;
-    let top_logprobs = req.get("top_logprobs").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+    let max_tokens = req
+        .get("max_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(200) as usize;
+    let top_logprobs = req
+        .get("top_logprobs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(10) as usize;
     let debug_reference_trace = req
         .get("debug_reference_trace")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let debug_prompt_trace = req
+        .get("debug_prompt_trace")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let debug_prefill_device_trace = req
+        .get("debug_prefill_device_trace")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let debug_prefill_device_trace_all_layers = req
+        .get("debug_prefill_device_trace_all_layers")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let debug_prefill_device_trace_full_pre_out_proj =
+        match req.get("debug_prefill_device_trace_full_pre_out_proj") {
+            Some(serde_json::Value::Bool(value)) => *value,
+            Some(_) => {
+                let _ = send_json(
+                    stream,
+                    400,
+                    r#"{"error":"debug_prefill_device_trace_full_pre_out_proj must be a boolean"}"#,
+                );
+                return;
+            }
+            None => false,
+        };
+    let debug_prefill_device_trace_layer = req
+        .get("debug_prefill_device_trace_layer")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
+        .unwrap_or(if debug_prefill_device_trace_all_layers {
+            crate::gpu_prefill::PREFILL_DEVICE_TRACE_NO_SELECTED_LAYER
+        } else {
+            4usize
+        });
+    let debug_prefill_device_trace_dims: Vec<usize> = match req
+        .get("debug_prefill_device_trace_dims")
+    {
+        Some(serde_json::Value::Array(values)) => {
+            let mut dims = Vec::with_capacity(values.len());
+            for value in values {
+                let Some(dim) = value.as_u64() else {
+                    let _ = send_json(
+                        stream,
+                        400,
+                        r#"{"error":"debug_prefill_device_trace_dims must contain only unsigned integer dimensions"}"#,
+                    );
+                    return;
+                };
+                dims.push(dim as usize);
+            }
+            dims
+        }
+        Some(_) => {
+            let _ = send_json(
+                stream,
+                400,
+                r#"{"error":"debug_prefill_device_trace_dims must be an array of unsigned integer dimensions"}"#,
+            );
+            return;
+        }
+        None => Vec::new(),
+    };
+    let debug_prefill_device_trace_rows: Vec<usize> = match req
+        .get("debug_prefill_device_trace_rows")
+    {
+        Some(serde_json::Value::Array(values)) => {
+            let mut rows = Vec::with_capacity(values.len());
+            for value in values {
+                let Some(row) = value.as_u64() else {
+                    let _ = send_json(
+                        stream,
+                        400,
+                        r#"{"error":"debug_prefill_device_trace_rows must contain only unsigned integer row indices"}"#,
+                    );
+                    return;
+                };
+                rows.push(row as usize);
+            }
+            rows
+        }
+        Some(_) => {
+            let _ = send_json(
+                stream,
+                400,
+                r#"{"error":"debug_prefill_device_trace_rows must be an array of unsigned integer row indices"}"#,
+            );
+            return;
+        }
+        None => Vec::new(),
+    };
+    let debug_prefill_device_trace_local_scan_token = match req
+        .get("debug_prefill_device_trace_local_scan_token")
+    {
+        Some(value) => match value.as_u64() {
+            Some(token) => Some(token as usize),
+            None => {
+                let _ = send_json(
+                    stream,
+                    400,
+                    r#"{"error":"debug_prefill_device_trace_local_scan_token must be an unsigned integer"}"#,
+                );
+                return;
+            }
+        },
+        None => None,
+    };
+    let debug_prefill_device_trace_experts: Vec<usize> = match req
+        .get("debug_prefill_device_trace_experts")
+    {
+        Some(serde_json::Value::Array(values)) => {
+            let mut experts = Vec::with_capacity(values.len());
+            for value in values {
+                let Some(expert) = value.as_u64() else {
+                    let _ = send_json(
+                        stream,
+                        400,
+                        r#"{"error":"debug_prefill_device_trace_experts must contain only unsigned integer expert IDs"}"#,
+                    );
+                    return;
+                };
+                experts.push(expert as usize);
+            }
+            experts
+        }
+        Some(_) => {
+            let _ = send_json(
+                stream,
+                400,
+                r#"{"error":"debug_prefill_device_trace_experts must be an array of unsigned integer expert IDs"}"#,
+            );
+            return;
+        }
+        None => Vec::new(),
+    };
+    let debug_router_variant_requested = req.get("debug_router_variant").is_some();
+    let debug_router_variant = match req.get("debug_router_variant") {
+        Some(serde_json::Value::String(value)) => {
+            match crate::gpu_prefill::ReferenceRouterVariant::from_request_str(value) {
+                Some(variant) => variant,
+                None => {
+                    let _ = send_json(
+                        stream,
+                        400,
+                        r#"{"error":"debug_router_variant must be one of: raw, corrected_hf_unsorted, corrected_sorted, corrected_set_raw_slot_weights"}"#,
+                    );
+                    return;
+                }
+            }
+        }
+        Some(_) => {
+            let _ = send_json(
+                stream,
+                400,
+                r#"{"error":"debug_router_variant must be a string"}"#,
+            );
+            return;
+        }
+        None => crate::gpu_prefill::ReferenceRouterVariant::RawBaseline,
+    };
+    let debug_router_variant_layers: Vec<usize> = match req.get("debug_router_variant_layers") {
+        Some(serde_json::Value::Array(values)) => {
+            let mut layers = Vec::with_capacity(values.len());
+            for value in values {
+                let Some(layer_idx) = value.as_u64() else {
+                    let _ = send_json(
+                        stream,
+                        400,
+                        r#"{"error":"debug_router_variant_layers must contain only unsigned integer layer indices"}"#,
+                    );
+                    return;
+                };
+                layers.push(layer_idx as usize);
+            }
+            layers.sort_unstable();
+            layers.dedup();
+            layers
+        }
+        Some(_) => {
+            let _ = send_json(
+                stream,
+                400,
+                r#"{"error":"debug_router_variant_layers must be an array of unsigned integer layer indices"}"#,
+            );
+            return;
+        }
+        None => Vec::new(),
+    };
+    let debug_router_e_score_corr_by_layer: Vec<Option<Vec<f32>>> = match req
+        .get("debug_router_e_score_correction_by_layer")
+    {
+        Some(serde_json::Value::Array(layers)) => {
+            let mut parsed = Vec::with_capacity(layers.len());
+            for (layer_idx, layer_value) in layers.iter().enumerate() {
+                match layer_value {
+                    serde_json::Value::Null => parsed.push(None),
+                    serde_json::Value::Array(values) => {
+                        let mut layer_values = Vec::with_capacity(values.len());
+                        for value in values {
+                            let Some(v) = value.as_f64() else {
+                                let _ = send_json(
+                                    stream,
+                                    400,
+                                    &format!(
+                                        r#"{{"error":"debug_router_e_score_correction_by_layer[{}] must contain only numbers"}}"#,
+                                        layer_idx,
+                                    ),
+                                );
+                                return;
+                            };
+                            layer_values.push(v as f32);
+                        }
+                        parsed.push(Some(layer_values));
+                    }
+                    _ => {
+                        let _ = send_json(
+                            stream,
+                            400,
+                            &format!(
+                                r#"{{"error":"debug_router_e_score_correction_by_layer[{}] must be null or an array of numbers"}}"#,
+                                layer_idx,
+                            ),
+                        );
+                        return;
+                    }
+                }
+            }
+            parsed
+        }
+        Some(_) => {
+            let _ = send_json(
+                stream,
+                400,
+                r#"{"error":"debug_router_e_score_correction_by_layer must be an array"}"#,
+            );
+            return;
+        }
+        None => Vec::new(),
+    };
+    let debug_router_forced_slot_orders_requested =
+        req.get("debug_router_forced_slot_orders").is_some();
+    let debug_router_forced_slot_orders: Vec<crate::gpu_prefill::ReferenceRouterForcedSlotOrder> =
+        match req.get("debug_router_forced_slot_orders") {
+            Some(serde_json::Value::Array(entries)) => {
+                let mut parsed = Vec::with_capacity(entries.len());
+                for (entry_idx, entry) in entries.iter().enumerate() {
+                    let serde_json::Value::Object(obj) = entry else {
+                        let _ = send_json(
+                            stream,
+                            400,
+                            &format!(
+                                r#"{{"error":"debug_router_forced_slot_orders[{}] must be an object"}}"#,
+                                entry_idx,
+                            ),
+                        );
+                        return;
+                    };
+                    let Some(layer_idx) = obj.get("layer").and_then(|v| v.as_u64()) else {
+                        let _ = send_json(
+                            stream,
+                            400,
+                            &format!(
+                                r#"{{"error":"debug_router_forced_slot_orders[{}].layer must be an unsigned integer"}}"#,
+                                entry_idx,
+                            ),
+                        );
+                        return;
+                    };
+                    let Some(row_idx) = obj.get("row").and_then(|v| v.as_u64()) else {
+                        let _ = send_json(
+                            stream,
+                            400,
+                            &format!(
+                                r#"{{"error":"debug_router_forced_slot_orders[{}].row must be an unsigned integer"}}"#,
+                                entry_idx,
+                            ),
+                        );
+                        return;
+                    };
+                    let expert_values = obj
+                        .get("expert_ids")
+                        .or_else(|| obj.get("slot_order"))
+                        .or_else(|| obj.get("slot_expert_ids"));
+                    let Some(serde_json::Value::Array(expert_values)) = expert_values else {
+                        let _ = send_json(
+                            stream,
+                            400,
+                            &format!(
+                                r#"{{"error":"debug_router_forced_slot_orders[{}] must include expert_ids as an array"}}"#,
+                                entry_idx,
+                            ),
+                        );
+                        return;
+                    };
+                    let mut expert_ids = Vec::with_capacity(expert_values.len());
+                    for (slot_idx, value) in expert_values.iter().enumerate() {
+                        let Some(expert_id) = value.as_u64() else {
+                            let _ = send_json(
+                                stream,
+                                400,
+                                &format!(
+                                    r#"{{"error":"debug_router_forced_slot_orders[{}].expert_ids[{}] must be an unsigned integer"}}"#,
+                                    entry_idx, slot_idx,
+                                ),
+                            );
+                            return;
+                        };
+                        expert_ids.push(expert_id as usize);
+                    }
+                    if parsed.iter().any(
+                        |existing: &crate::gpu_prefill::ReferenceRouterForcedSlotOrder| {
+                            existing.layer_idx == layer_idx as usize
+                                && existing.row_idx == row_idx as usize
+                        },
+                    ) {
+                        let _ = send_json(
+                            stream,
+                            400,
+                            &format!(
+                                r#"{{"error":"duplicate debug_router_forced_slot_orders entry for layer {} row {}"}}"#,
+                                layer_idx, row_idx,
+                            ),
+                        );
+                        return;
+                    }
+                    parsed.push(crate::gpu_prefill::ReferenceRouterForcedSlotOrder {
+                        layer_idx: layer_idx as usize,
+                        row_idx: row_idx as usize,
+                        expert_ids,
+                    });
+                }
+                parsed
+            }
+            Some(_) => {
+                let _ = send_json(
+                    stream,
+                    400,
+                    r#"{"error":"debug_router_forced_slot_orders must be an array"}"#,
+                );
+                return;
+            }
+            None => Vec::new(),
+        };
+    let debug_mamba2_gated_norm_replay_requested =
+        req.get("debug_mamba2_gated_norm_replay").is_some();
+    let debug_mamba2_gated_norm_replay: Vec<crate::gpu_prefill::ReferenceMamba2GatedNormReplay> =
+        match req.get("debug_mamba2_gated_norm_replay") {
+            Some(serde_json::Value::Array(entries)) => {
+                let mut parsed = Vec::with_capacity(entries.len());
+                for (entry_idx, entry) in entries.iter().enumerate() {
+                    let serde_json::Value::Object(obj) = entry else {
+                        let _ = send_json(
+                            stream,
+                            400,
+                            &format!(
+                                r#"{{"error":"debug_mamba2_gated_norm_replay[{}] must be an object"}}"#,
+                                entry_idx,
+                            ),
+                        );
+                        return;
+                    };
+                    let Some(layer_idx) = obj.get("layer").and_then(|v| v.as_u64()) else {
+                        let _ = send_json(
+                            stream,
+                            400,
+                            &format!(
+                                r#"{{"error":"debug_mamba2_gated_norm_replay[{}].layer must be an unsigned integer"}}"#,
+                                entry_idx,
+                            ),
+                        );
+                        return;
+                    };
+                    let Some(row_idx) = obj.get("row").and_then(|v| v.as_u64()) else {
+                        let _ = send_json(
+                            stream,
+                            400,
+                            &format!(
+                                r#"{{"error":"debug_mamba2_gated_norm_replay[{}].row must be an unsigned integer"}}"#,
+                                entry_idx,
+                            ),
+                        );
+                        return;
+                    };
+                    let mode = match obj.get("mode").and_then(|v| v.as_str()) {
+                        Some(value) => {
+                            match crate::gpu_prefill::ReferenceMamba2GatedNormReplayMode::from_request_str(value) {
+                                Some(mode) => mode,
+                                None => {
+                                    let _ = send_json(
+                                        stream,
+                                        400,
+                                        r#"{"error":"debug_mamba2_gated_norm_replay mode must be sqrt_approx_div_rn"}"#,
+                                    );
+                                    return;
+                                }
+                            }
+                        }
+                        None => {
+                            let _ = send_json(
+                                stream,
+                                400,
+                                &format!(
+                                    r#"{{"error":"debug_mamba2_gated_norm_replay[{}].mode is required"}}"#,
+                                    entry_idx,
+                                ),
+                            );
+                            return;
+                        }
+                    };
+                    if parsed.iter().any(
+                        |existing: &crate::gpu_prefill::ReferenceMamba2GatedNormReplay| {
+                            existing.layer_idx == layer_idx as usize
+                                && existing.row_idx == row_idx as usize
+                        },
+                    ) {
+                        let _ = send_json(
+                            stream,
+                            400,
+                            &format!(
+                                r#"{{"error":"duplicate debug_mamba2_gated_norm_replay entry for layer {} row {}"}}"#,
+                                layer_idx, row_idx,
+                            ),
+                        );
+                        return;
+                    }
+                    parsed.push(crate::gpu_prefill::ReferenceMamba2GatedNormReplay {
+                        layer_idx: layer_idx as usize,
+                        row_idx: row_idx as usize,
+                        mode,
+                    });
+                }
+                parsed
+            }
+            Some(_) => {
+                let _ = send_json(
+                    stream,
+                    400,
+                    r#"{"error":"debug_mamba2_gated_norm_replay must be an array"}"#,
+                );
+                return;
+            }
+            None => Vec::new(),
+        };
+    let debug_decode_state_trace_requested = req
+        .get("debug_decode_state_trace")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let debug_decode_hcs_equiv_trace = req
+        .get("debug_decode_hcs_equiv_trace")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let debug_decode_early_trace = req
+        .get("debug_decode_early_trace")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let debug_decode_early_trace_max_steps = match req.get("debug_decode_early_trace_max_steps") {
+        Some(value) => match value.as_u64() {
+            Some(steps) if (1..=64).contains(&steps) => steps,
+            _ => {
+                let _ = send_json(
+                    stream,
+                    400,
+                    r#"{"error":"debug_decode_early_trace_max_steps must be an integer from 1 to 64"}"#,
+                );
+                return;
+            }
+        },
+        None => 3,
+    };
+    let debug_hcs_transition_trace = req
+        .get("debug_hcs_transition_trace")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let debug_mamba2_state_lifecycle_trace = req
+        .get("debug_mamba2_state_lifecycle_trace")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let debug_decode_hcs_equiv_layer = req
+        .get("debug_decode_hcs_equiv_layer")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
+        .unwrap_or(1usize);
+    let debug_mamba2_state_layer = req
+        .get("debug_mamba2_state_layer")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
+        .unwrap_or(0usize);
+    let debug_decode_state_trace = debug_decode_state_trace_requested
+        || debug_decode_hcs_equiv_trace
+        || debug_decode_early_trace
+        || debug_hcs_transition_trace
+        || debug_mamba2_state_lifecycle_trace;
     let client_request_id = req
         .get("debug_request_id")
         .and_then(|v| v.as_str())
@@ -1765,25 +2796,102 @@ fn handle_reference_test(
 
     // Stop token IDs (from reference data's eos_token_ids)
     let stop_ids: Vec<usize> = match req.get("stop_token_ids") {
-        Some(serde_json::Value::Array(arr)) => {
-            arr.iter().filter_map(|v| v.as_u64().map(|x| x as usize)).collect()
-        }
+        Some(serde_json::Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|v| v.as_u64().map(|x| x as usize))
+            .collect(),
         _ => state.eos_stop_ids.clone(),
     };
 
-    log::info!("reference_test: {} input tokens, max_tokens={}, top_logprobs={}, stop_ids={:?}",
-        input_token_ids.len(), max_tokens, top_logprobs, stop_ids);
+    log::info!(
+        "reference_test: {} input tokens, max_tokens={}, top_logprobs={}, stop_ids={:?}",
+        input_token_ids.len(),
+        max_tokens,
+        top_logprobs,
+        stop_ids
+    );
+
+    let mut debug_hcs_transition_points: Vec<serde_json::Value> = Vec::new();
+    let mut debug_mamba2_state_lifecycle_points: Vec<serde_json::Value> = Vec::new();
 
     // ── Evict soft HCS before prefill ──
+    let prefill_entry_floor_bytes =
+        match prefill_entry_floor_bytes_for_server(&state.rust_prefill, input_token_ids.len()) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                log::error!(
+                    "Reference-test prefill engine floor unavailable before HCS eviction: {}",
+                    e
+                );
+                let _ = send_json(
+                    stream,
+                    500,
+                    &format!(
+                        r#"{{"error":"Prefill engine floor unavailable: {}"}}"#,
+                        json_escape(&e)
+                    ),
+                );
+                return;
+            }
+        };
     let store_for_evict = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
-    let (evicted, freed_mb) = store_for_evict.hcs_evict_for_prefill(input_token_ids.len());
+    if debug_mamba2_state_lifecycle_trace {
+        debug_mamba2_state_lifecycle_points.push(mamba2_state_lifecycle_point(
+            store_for_evict,
+            "request_start_before_hcs_evict_for_prefill",
+            debug_mamba2_state_layer,
+        ));
+    }
+    if debug_hcs_transition_trace {
+        let raw =
+            store_for_evict.hcs_debug_summary_json("request_start_before_hcs_evict_for_prefill");
+        debug_hcs_transition_points.push(serde_json::from_str(&raw).unwrap_or_else(|e| {
+            serde_json::json!({
+                "phase": "request_start_before_hcs_evict_for_prefill",
+                "available": false,
+                "error": format!("parse_failed: {}", e),
+                "raw": raw,
+            })
+        }));
+    }
+    let (evicted, freed_mb) = store_for_evict.hcs_evict_for_prefill_with_engine_floor(
+        input_token_ids.len(),
+        prefill_entry_floor_bytes,
+    );
+    if debug_hcs_transition_trace {
+        let raw = store_for_evict.hcs_debug_summary_json("after_hcs_evict_for_prefill");
+        let mut value = serde_json::from_str(&raw).unwrap_or_else(|e| {
+            serde_json::json!({
+                "phase": "after_hcs_evict_for_prefill",
+                "available": false,
+                "error": format!("parse_failed: {}", e),
+                "raw": raw,
+            })
+        });
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert("evicted".to_string(), serde_json::json!(evicted));
+            obj.insert("freed_mb".to_string(), serde_json::json!(freed_mb));
+        }
+        debug_hcs_transition_points.push(value);
+    }
+    if debug_mamba2_state_lifecycle_trace {
+        debug_mamba2_state_lifecycle_points.push(mamba2_state_lifecycle_point(
+            store_for_evict,
+            "after_hcs_evict_for_prefill",
+            debug_mamba2_state_layer,
+        ));
+    }
 
     // ── Prefill with raw token IDs (no tokenization, no chat template) ──
     let mut engine_guard = state.rust_prefill.lock().unwrap();
     let engine = match engine_guard.as_mut() {
         Some(e) => e,
         None => {
-            let _ = send_json(stream, 500, r#"{"error":"Rust prefill engine not available"}"#);
+            let _ = send_json(
+                stream,
+                500,
+                r#"{"error":"Rust prefill engine not available"}"#,
+            );
             return;
         }
     };
@@ -1794,6 +2902,9 @@ fn handle_reference_test(
         let (cache_fast, ne) = store.export_hcs_snapshot();
         engine.update_hcs_snapshot(cache_fast, ne);
     }
+    // Warmup/calibration calls disable prefill pinning through the shared engine.
+    // Raw prefill-logits requests should use the normal prefill policy.
+    engine.set_prefill_pinning_disabled(false);
 
     let (hcs_snapshot_entries, hcs_num_experts_per_layer) = {
         let store = unsafe { &*(state.gpu_store_addr as *const GpuDecodeStore) };
@@ -1806,7 +2917,11 @@ fn handle_reference_test(
         match prepare_store_for_rust_prefill(store, engine, input_token_ids.len()) {
             Ok(has_hqq) => has_hqq,
             Err(e) => {
-                let _ = send_json(stream, 500, &format!(r#"{{"error":"Prefill prepare failed: {}"}}"#, e));
+                let _ = send_json(
+                    stream,
+                    500,
+                    &format!(r#"{{"error":"Prefill prepare failed: {}"}}"#, e),
+                );
                 return;
             }
         }
@@ -1814,54 +2929,197 @@ fn handle_reference_test(
 
     let hqq_prefill_materialized = false;
 
-    // Dynamically allocate scratch for this prompt
-    if let Err(e) = engine.prepare_for_prefill(input_token_ids.len()) {
-        engine.set_optional_pinning_budget_mb(None);
-        let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
-        let _ = store.prepare_runtime_for_decode_rust();
-        let _ = send_json(stream, 500, &format!(r#"{{"error":"Scratch alloc failed: {}"}}"#, e));
-        return;
-    }
-    let pinning_budget_mb = {
-        let store = unsafe { &*(state.gpu_store_addr as *const GpuDecodeStore) };
-        store.prefill_optional_pinning_budget_mb(
-            input_token_ids.len(),
-            engine.last_prepare_post_alloc_free_mb(),
-        )
-    };
-    engine.set_optional_pinning_budget_mb(pinning_budget_mb);
-    let scratch_tokens_after_prepare = engine.scratch.max_tokens;
-    let prefill_chunk_size_after_prepare = engine.config.prefill_chunk_size;
-
-    // Run prefill with temperature=0 (greedy)
     let suppress_tokens = {
         let store = unsafe { &*(state.gpu_store_addr as *const GpuDecodeStore) };
         store.suppress_tokens_clone()
     };
     engine.set_reference_debug_trace_enabled(debug_reference_trace);
-    let prefill_result = match engine.run_prefill(
-        &input_token_ids,
-        0.0, // temperature=0 for greedy
-        &suppress_tokens,
-    ) {
-        Ok(r) => match engine.finalize_stage_exact_prefill_kv(r.prompt_len) {
-            Ok(()) => Ok(r),
-            Err(e) => Err(format!("KV stage export failed: {}", e)),
-        },
-        Err(e) => Err(e),
+    engine.set_first_token_margin_projection_request_enabled(true);
+    engine.set_read_only_checkpoint_request_enabled(true);
+    engine.set_reference_router_variant_override(
+        debug_router_variant,
+        debug_router_variant_layers.clone(),
+        debug_router_e_score_corr_by_layer.clone(),
+        debug_router_forced_slot_orders.clone(),
+    );
+    engine.set_reference_mamba2_gated_norm_replay(debug_mamba2_gated_norm_replay.clone());
+
+    engine.set_prefill_hcs_guard_store_addr(state.gpu_store_addr);
+    let mut retry_cap: Option<usize> = None;
+    let mut retry_attempt = 0usize;
+    let mut scratch_tokens_after_prepare = 0usize;
+    let mut prefill_chunk_size_after_prepare = engine.config.prefill_chunk_size;
+
+    let prefill_result = loop {
+        engine.set_prefill_runtime_chunk_cap(retry_cap);
+
+        // Dynamically allocate scratch for this prompt.
+        if let Err(e) = engine.prepare_for_prefill(input_token_ids.len()) {
+            engine.clear_prefill_hcs_guard_store_addr();
+            engine.set_optional_pinning_budget_mb(None);
+            engine.clear_prefill_runtime_chunk_cap();
+            let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
+            let _ = store.prepare_runtime_for_decode_rust();
+            let _ = send_json(
+                stream,
+                500,
+                &format!(r#"{{"error":"Scratch alloc failed: {}"}}"#, e),
+            );
+            return;
+        }
+        let pinning_budget_mb = {
+            let store = unsafe { &*(state.gpu_store_addr as *const GpuDecodeStore) };
+            store.prefill_optional_pinning_budget_mb(
+                input_token_ids.len(),
+                engine.last_prepare_post_alloc_free_mb(),
+            )
+        };
+        engine.set_optional_pinning_budget_mb(pinning_budget_mb);
+        scratch_tokens_after_prepare = engine.scratch.max_tokens;
+        prefill_chunk_size_after_prepare = engine.config.prefill_chunk_size;
+
+        if let Err(e) = engine.set_prefill_device_trace_enabled(
+            debug_prefill_device_trace,
+            debug_prefill_device_trace_layer,
+            debug_prefill_device_trace_all_layers,
+            debug_prefill_device_trace_full_pre_out_proj,
+            debug_prefill_device_trace_dims.clone(),
+            debug_prefill_device_trace_rows.clone(),
+            debug_prefill_device_trace_experts.clone(),
+            debug_prefill_device_trace_local_scan_token,
+        ) {
+            engine.clear_prefill_hcs_guard_store_addr();
+            engine.set_read_only_checkpoint_request_enabled(false);
+            engine.set_first_token_margin_projection_request_enabled(false);
+            engine.set_reference_debug_trace_enabled(false);
+            engine.set_optional_pinning_budget_mb(None);
+            engine.clear_prefill_runtime_chunk_cap();
+            let _ = engine.release_scratch();
+            let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
+            let _ = store.prepare_runtime_for_decode_rust();
+            let _ = send_json(
+                stream,
+                500,
+                &format!(r#"{{"error":"Prefill device trace setup failed: {}"}}"#, e),
+            );
+            return;
+        }
+        if debug_mamba2_state_lifecycle_trace {
+            let store = unsafe { &*(state.gpu_store_addr as *const GpuDecodeStore) };
+            debug_mamba2_state_lifecycle_points.push(mamba2_state_lifecycle_point(
+                store,
+                "before_prefill_run",
+                debug_mamba2_state_layer,
+            ));
+        }
+
+        let attempt_result = match engine.run_prefill(
+            &input_token_ids,
+            0.0, // temperature=0 for greedy
+            &suppress_tokens,
+        ) {
+            Ok(r) => match engine.finalize_stage_exact_prefill_kv(r.prompt_len) {
+                Ok(()) => Ok(r),
+                Err(e) => Err(format!("KV stage export failed: {}", e)),
+            },
+            Err(e) => Err(e),
+        };
+
+        match attempt_result {
+            Ok(r) => break Ok(r),
+            Err(e) => {
+                let current_chunk = engine.scratch.max_tokens;
+                let next_retry_cap = engine.cold_staging_retry_chunk_cap();
+                if let Some(next_cap) = next_retry_cap {
+                    if next_cap < current_chunk && current_chunk > 128 {
+                        retry_attempt += 1;
+                        if let Some(failure) = engine.last_cold_staging_failure {
+                            log::info!(
+                                "Retrying reference_test prefill with measured cold-staging chunk cap: attempt={} prompt_tokens={} failed_chunk={} requested_slots={} max_safe_slots={} free_before_mb={} safety_mb={} current_chunk={} next_chunk_cap={} error={}",
+                                retry_attempt,
+                                input_token_ids.len(),
+                                failure.chunk_tokens,
+                                failure.requested_slots,
+                                failure.max_safe_slots,
+                                failure.free_before_mb,
+                                failure.safety_mb,
+                                current_chunk,
+                                next_cap,
+                                e,
+                            );
+                        } else {
+                            log::info!(
+                                "Retrying reference_test prefill with measured cold-staging chunk cap: attempt={} prompt_tokens={} current_chunk={} next_chunk_cap={} error={}",
+                                retry_attempt,
+                                input_token_ids.len(),
+                                current_chunk,
+                                next_cap,
+                                e,
+                            );
+                        }
+                        let _ = engine.set_prefill_device_trace_enabled(
+                            false,
+                            debug_prefill_device_trace_layer,
+                            false,
+                            false,
+                            Vec::new(),
+                            Vec::new(),
+                            Vec::new(),
+                            None,
+                        );
+                        engine.set_optional_pinning_budget_mb(None);
+                        if let Err(release_err) = engine.release_scratch() {
+                            log::error!(
+                                "reference_test: failed to release scratch before retry: {}",
+                                release_err
+                            );
+                            abort_if_cuda_context_poisoned(
+                                "reference_test retry release_scratch",
+                                &release_err,
+                            );
+                            break Err(release_err);
+                        }
+                        retry_cap = Some(next_cap);
+                        continue;
+                    }
+                }
+                break Err(e);
+            }
+        }
     };
     let debug_prefill_stage_trace = if debug_reference_trace {
         engine.take_reference_debug_trace()
     } else {
         None
     };
+    let debug_prefill_device_trace_json = if debug_prefill_device_trace {
+        engine.take_prefill_device_trace()
+    } else {
+        None
+    };
+    engine.set_read_only_checkpoint_request_enabled(false);
+    engine.set_first_token_margin_projection_request_enabled(false);
     engine.set_reference_debug_trace_enabled(false);
+    engine.clear_reference_router_variant_override();
+    engine.clear_reference_mamba2_gated_norm_replay();
+    if debug_mamba2_state_lifecycle_trace {
+        let store = unsafe { &*(state.gpu_store_addr as *const GpuDecodeStore) };
+        debug_mamba2_state_lifecycle_points.push(mamba2_state_lifecycle_point(
+            store,
+            "after_prefill_before_result_handling",
+            debug_mamba2_state_layer,
+        ));
+    }
 
     let (first_token, prompt_len, first_token_top_k, debug_prefill_logits) = match prefill_result {
         Ok(r) => {
             let first_token = r.first_token as usize;
-            let first_token_top_k = crate::decode::extract_top_logprobs(&engine.h_logits, engine.h_logits.len(), top_logprobs);
-            let debug_prefill_logits = if debug_reference_trace {
+            let first_token_top_k = crate::decode::extract_top_logprobs(
+                &engine.h_logits,
+                engine.h_logits.len(),
+                top_logprobs,
+            );
+            let debug_prefill_logits = if debug_reference_trace || debug_prompt_trace {
                 Some(reference_logit_trace_json(
                     &engine.h_logits,
                     engine.h_logits.len(),
@@ -1871,15 +3129,37 @@ fn handle_reference_test(
             } else {
                 None
             };
-            (first_token, r.prompt_len, first_token_top_k, debug_prefill_logits)
-        },
+            (
+                first_token,
+                r.prompt_len,
+                first_token_top_k,
+                debug_prefill_logits,
+            )
+        }
         Err(e) => {
             abort_if_cuda_context_poisoned("reference_test prefill", &e);
+            engine.clear_prefill_hcs_guard_store_addr();
+            let _ = engine.set_prefill_device_trace_enabled(
+                false,
+                debug_prefill_device_trace_layer,
+                false,
+                false,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                None,
+            );
+            engine.clear_reference_mamba2_gated_norm_replay();
             let _ = engine.release_scratch();
             engine.set_optional_pinning_budget_mb(None);
+            engine.clear_prefill_runtime_chunk_cap();
             let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
             let _ = store.prepare_runtime_for_decode_rust();
-            let _ = send_json(stream, 500, &format!(r#"{{"error":"Prefill failed: {}"}}"#, e));
+            let _ = send_json(
+                stream,
+                500,
+                &format!(r#"{{"error":"Prefill failed: {}"}}"#, e),
+            );
             Python::with_gil(|py| {
                 let _ = state.py_model.call_method0(py, "server_cleanup");
             });
@@ -1893,6 +3173,16 @@ fn handle_reference_test(
         abort_if_cuda_context_poisoned("reference_test release_scratch", &e);
     }
     engine.set_optional_pinning_budget_mb(None);
+    engine.clear_prefill_hcs_guard_store_addr();
+    engine.clear_prefill_runtime_chunk_cap();
+    if debug_mamba2_state_lifecycle_trace {
+        let store = unsafe { &*(state.gpu_store_addr as *const GpuDecodeStore) };
+        debug_mamba2_state_lifecycle_points.push(mamba2_state_lifecycle_point(
+            store,
+            "after_prefill_scratch_release_before_decode_restore",
+            debug_mamba2_state_layer,
+        ));
+    }
 
     let prompt_hcs_snapshot = engine.prompt_hcs_shadow_snapshot();
 
@@ -1925,12 +3215,40 @@ fn handle_reference_test(
     let queued = activated;
     let alloc_mb = store.last_soft_reload_alloc_mb();
     if activated > 0 {
-        log::info!("reference_test: HCS reload complete: {} experts, {:.1}ms", activated, dma_ms);
+        log::info!(
+            "reference_test: HCS reload complete: {} experts, {:.1}ms",
+            activated,
+            dma_ms
+        );
+    }
+    if debug_hcs_transition_trace {
+        let raw = store.hcs_debug_summary_json("after_hcs_reload_after_prefill_before_decode");
+        let mut value = serde_json::from_str(&raw).unwrap_or_else(|e| {
+            serde_json::json!({
+                "phase": "after_hcs_reload_after_prefill_before_decode",
+                "available": false,
+                "error": format!("parse_failed: {}", e),
+                "raw": raw,
+            })
+        });
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert("reload_activated".to_string(), serde_json::json!(activated));
+            obj.insert("reload_dma_ms".to_string(), serde_json::json!(dma_ms));
+            obj.insert("reload_alloc_mb".to_string(), serde_json::json!(alloc_mb));
+        }
+        debug_hcs_transition_points.push(value);
     }
     if let Some((counts, layers, experts, prompt_tokens)) = prompt_hcs_snapshot.as_ref() {
         store.install_prompt_hcs_shadow(counts.clone(), *layers, *experts, *prompt_tokens);
     } else {
         store.clear_prompt_hcs_shadow();
+    }
+    if debug_mamba2_state_lifecycle_trace {
+        debug_mamba2_state_lifecycle_points.push(mamba2_state_lifecycle_point(
+            store,
+            "after_hcs_reload_before_decode",
+            debug_mamba2_state_layer,
+        ));
     }
 
     // Disable thinking suppression for reference test (greedy, no thinking budget logic)
@@ -1941,7 +3259,10 @@ fn handle_reference_test(
         .and_then(|v| v.parse::<usize>().ok());
     if let Some(layer_idx) = gqa_diag_layer {
         store.set_debug_gqa_diag_layer(Some(layer_idx));
-        log::info!("reference_test: enabled GQA decode diagnostic capture for layer {}", layer_idx);
+        log::info!(
+            "reference_test: enabled GQA decode diagnostic capture for layer {}",
+            layer_idx
+        );
     }
 
     // ── Greedy decode with logprobs collection ──
@@ -1954,14 +3275,35 @@ fn handle_reference_test(
     let mut finish_reason = "length".to_string();
 
     // First token
-    let first_text = tokenizer.decode(&[first_token as u32], true).unwrap_or_default();
+    let first_text = tokenizer
+        .decode(&[first_token as u32], true)
+        .unwrap_or_default();
     all_text.push_str(&first_text);
     output_tokens.push((first_token, first_token_top_k.clone()));
 
     let decode_budget = max_tokens.saturating_sub(1);
+    let reload_pending_at_decode_start = store.hcs_soft_reload_pending();
+    if debug_decode_state_trace {
+        store.set_debug_decode_state_trace_once(true);
+    }
+    if debug_decode_hcs_equiv_trace {
+        store.set_debug_decode_hcs_equiv_trace_once(Some(debug_decode_hcs_equiv_layer));
+    }
+    if debug_decode_early_trace {
+        store.set_debug_decode_early_trace_once(true);
+        store.set_debug_decode_early_max_steps_once(debug_decode_early_trace_max_steps);
+        store.set_debug_decode_early_detail_dims_once(debug_prefill_device_trace_dims.clone());
+    }
+    if debug_hcs_transition_trace {
+        store.set_debug_hcs_transition_trace_once(true);
+    }
 
     {
-        let mut on_token = |token_id: usize, text: &str, fr: Option<&str>, token_logprobs: Option<&[(u32, f32)]>| -> bool {
+        let mut on_token = |token_id: usize,
+                            text: &str,
+                            fr: Option<&str>,
+                            token_logprobs: Option<&[(u32, f32)]>|
+         -> bool {
             all_text.push_str(text);
             let lps = token_logprobs.map(|s| s.to_vec()).unwrap_or_default();
             output_tokens.push((token_id, lps));
@@ -1975,25 +3317,55 @@ fn handle_reference_test(
             first_token,
             prompt_len,
             decode_budget,
-            0.0,  // temperature=0 (greedy)
-            1,    // top_k=1 (greedy)
-            1.0,  // top_p=1.0
+            0.0, // temperature=0 (greedy)
+            1,   // top_k=1 (greedy)
+            1.0, // top_p=1.0
             &stop_ids,
             tokenizer,
-            0.0,  // no presence penalty
+            0.0, // no presence penalty
             top_logprobs,
             Some("reference_test".to_string()),
             on_token,
         );
     }
+    if debug_mamba2_state_lifecycle_trace {
+        debug_mamba2_state_lifecycle_points.push(mamba2_state_lifecycle_point(
+            store,
+            "after_decode_before_cleanup",
+            debug_mamba2_state_layer,
+        ));
+    }
 
     let decode_ms = t_decode.elapsed().as_secs_f64() * 1000.0;
+    let mut debug_decode_state = if debug_decode_state_trace {
+        let raw =
+            store.config_validation_snapshot_json(prompt_len, true, reload_pending_at_decode_start);
+        match serde_json::from_str::<serde_json::Value>(&raw) {
+            Ok(value) => Some(value),
+            Err(e) => Some(serde_json::json!({
+                "available": false,
+                "error": format!("decode state trace parse failed: {}", e),
+                "raw": raw,
+            })),
+        }
+    } else {
+        None
+    };
+    if debug_hcs_transition_trace {
+        if let Some(value) = debug_decode_state.as_mut() {
+            value["server_hcs_transition_points"] = serde_json::json!(debug_hcs_transition_points);
+        }
+    }
     if gqa_diag_layer.is_some() {
         if let Ok(path) = std::env::var("KRASIS_GQA_DIAG_DUMP") {
             match store.debug_gqa_diag_json() {
                 Ok(payload) => {
                     if let Err(e) = std::fs::write(&path, payload) {
-                        log::error!("reference_test: failed to write GQA diagnostic {}: {}", path, e);
+                        log::error!(
+                            "reference_test: failed to write GQA diagnostic {}: {}",
+                            path,
+                            e
+                        );
                     } else {
                         log::info!("reference_test: wrote GQA diagnostic {}", path);
                     }
@@ -2011,6 +3383,21 @@ fn handle_reference_test(
         let _ = state.py_model.call_method0(py, "server_cleanup");
     });
     let server_cleanup_called = true;
+    if debug_mamba2_state_lifecycle_trace {
+        debug_mamba2_state_lifecycle_points.push(mamba2_state_lifecycle_point(
+            store,
+            "after_server_cleanup",
+            debug_mamba2_state_layer,
+        ));
+        if let Some(value) = debug_decode_state.as_mut() {
+            value["mamba2_state_lifecycle_trace"] = serde_json::json!({
+                "active": true,
+                "layer": debug_mamba2_state_layer,
+                "entry_count": debug_mamba2_state_lifecycle_points.len(),
+                "entries": debug_mamba2_state_lifecycle_points,
+            });
+        }
+    }
 
     let total_ms = t_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -2019,16 +3406,22 @@ fn handle_reference_test(
     for (tid, logprobs) in &output_tokens {
         let mut tk_json = Vec::new();
         for &(lp_tid, lp_val) in logprobs {
-            tk_json.push(format!(r#"{{"token_id":{},"log_prob":{:.6}}}"#, lp_tid, lp_val));
+            tk_json.push(format!(
+                r#"{{"token_id":{},"log_prob":{:.6}}}"#,
+                lp_tid, lp_val
+            ));
         }
         // Get log_prob for the selected token (first in top-k if available)
-        let selected_lp = logprobs.iter()
+        let selected_lp = logprobs
+            .iter()
             .find(|&&(t, _)| t == *tid as u32)
             .map(|&(_, lp)| lp)
             .unwrap_or(0.0);
         per_token_json.push(format!(
             r#"{{"token_id":{},"log_prob":{:.6},"top_k":[{}]}}"#,
-            tid, selected_lp, tk_json.join(",")
+            tid,
+            selected_lp,
+            tk_json.join(",")
         ));
     }
 
@@ -2037,10 +3430,130 @@ fn handle_reference_test(
 
     let mut first_topk_json = Vec::new();
     for &(lp_tid, lp_val) in &first_token_top_k {
-        first_topk_json.push(format!(r#"{{"token_id":{},"log_prob":{:.6}}}"#, lp_tid, lp_val));
+        first_topk_json.push(format!(
+            r#"{{"token_id":{},"log_prob":{:.6}}}"#,
+            lp_tid, lp_val
+        ));
     }
 
-    let debug_json_suffix = if debug_reference_trace {
+    let reference_prompt_debug = if debug_prompt_trace {
+        Some(serde_json::json!({
+            "schema": "krasis_reference_first_token_boundary_debug_v1",
+            "route": "/v1/internal/reference_test",
+            "input_source": "input_token_ids",
+            "input_token_count": input_token_ids.len(),
+            "input_token_hash_fnv1a64": format!("0x{:016x}", input_token_hash),
+            "input_token_ids": input_token_ids.clone(),
+            "selected_token_id": first_token,
+            "selected_token_text": tokenizer.decode(&[first_token as u32], true).unwrap_or_default(),
+            "prompt_len": prompt_len,
+            "debug_reference_trace_enabled": debug_reference_trace,
+            "first_token_logits": debug_prefill_logits
+                .clone()
+                .unwrap_or_else(|| serde_json::json!({"available": false})),
+        }))
+    } else {
+        None
+    };
+
+    let debug_router_variant_json = if debug_router_variant_requested {
+        let override_layer_count = debug_router_e_score_corr_by_layer
+            .iter()
+            .filter(|entry| entry.is_some())
+            .count();
+        Some(serde_json::json!({
+            "schema": "krasis_reference_test_router_variant_v1",
+            "scope": "/v1/internal/reference_test",
+            "variant": debug_router_variant.as_str(),
+            "layer_scope": if debug_router_variant_layers.is_empty() {
+                serde_json::json!("all")
+            } else {
+                serde_json::json!(debug_router_variant_layers)
+            },
+            "production_default": "raw",
+            "enabled_by_default": false,
+            "e_score_correction_override_layers": override_layer_count,
+            "e_score_correction_override_source": if override_layer_count > 0 {
+                "request_fp32_by_layer"
+            } else {
+                "registered_graph_ptr"
+            },
+        }))
+    } else {
+        None
+    };
+    let debug_router_forced_slot_orders_json = if debug_router_forced_slot_orders_requested {
+        let entries = debug_router_forced_slot_orders
+            .iter()
+            .map(|entry| {
+                serde_json::json!({
+                    "layer": entry.layer_idx,
+                    "row": entry.row_idx,
+                    "expert_ids": entry.expert_ids,
+                    "weight_source": "raw_sigmoid_score_for_forced_expert",
+                })
+            })
+            .collect::<Vec<_>>();
+        Some(serde_json::json!({
+            "schema": "krasis_reference_test_router_forced_slot_orders_v1",
+            "scope": "/v1/internal/reference_test",
+            "enabled_by_default": false,
+            "production_default": "raw",
+            "entries": entries,
+        }))
+    } else {
+        None
+    };
+    let debug_mamba2_gated_norm_replay_json = if debug_mamba2_gated_norm_replay_requested {
+        let entries = debug_mamba2_gated_norm_replay
+            .iter()
+            .map(|entry| {
+                serde_json::json!({
+                    "layer": entry.layer_idx,
+                    "row": entry.row_idx,
+                    "mode": entry.mode.as_str(),
+                    "operation": "sqrt.approx.ftz.f32 + div.rn.f32",
+                })
+            })
+            .collect::<Vec<_>>();
+        Some(serde_json::json!({
+            "schema": "krasis_reference_test_mamba2_gated_norm_replay_v1",
+            "scope": "/v1/internal/reference_test",
+            "enabled_by_default": false,
+            "production_default": "mamba2_gated_group_rmsnorm_kernel",
+            "entries": entries,
+        }))
+    } else {
+        None
+    };
+
+    let mut debug_json_suffix = String::new();
+    if let Some(prompt_debug) = reference_prompt_debug.as_ref() {
+        debug_json_suffix.push_str(&format!(r#","debug_prompt_trace":{}"#, prompt_debug));
+    }
+    if let Some(router_variant) = debug_router_variant_json.as_ref() {
+        debug_json_suffix.push_str(&format!(r#","debug_router_variant":{}"#, router_variant));
+    }
+    if let Some(forced_slots) = debug_router_forced_slot_orders_json.as_ref() {
+        debug_json_suffix.push_str(&format!(
+            r#","debug_router_forced_slot_orders":{}"#,
+            forced_slots
+        ));
+    }
+    if let Some(replay) = debug_mamba2_gated_norm_replay_json.as_ref() {
+        debug_json_suffix.push_str(&format!(r#","debug_mamba2_gated_norm_replay":{}"#, replay));
+    }
+    if let Some(prefill_device_trace) = debug_prefill_device_trace_json.as_ref() {
+        debug_json_suffix.push_str(&format!(
+            r#","debug_prefill_device_trace":{}"#,
+            prefill_device_trace
+        ));
+    }
+    if let Some(decode_state) = debug_decode_state.as_ref() {
+        debug_json_suffix.push_str(&format!(r#","debug_decode_state_trace":{}"#, decode_state));
+    }
+
+    if debug_reference_trace {
         let final_top_logprobs: Vec<serde_json::Value> = first_token_top_k
             .iter()
             .enumerate()
@@ -2065,6 +3578,7 @@ fn handle_reference_test(
             "max_tokens": max_tokens,
             "top_logprobs": top_logprobs,
             "stop_token_ids": stop_ids,
+            "debug_router_variant": debug_router_variant_json.clone().unwrap_or_else(|| serde_json::json!({"available": false})),
             "selected_token_id": first_token,
             "prompt_len": prompt_len,
             "state_reset_proof": {
@@ -2092,6 +3606,7 @@ fn handle_reference_test(
             },
             "prefill_stage_trace": debug_prefill_stage_trace.unwrap_or_else(|| serde_json::json!({"available": false})),
             "prefill_logits": debug_prefill_logits.unwrap_or_else(|| serde_json::json!({"available": false})),
+            "prompt_debug": reference_prompt_debug.clone().unwrap_or_else(|| serde_json::json!({"available": false})),
             "final_top_logprobs": final_top_logprobs,
             "selected_logprob_from_endpoint": selected_logprob_from_endpoint,
             "timing": {
@@ -2101,25 +3616,36 @@ fn handle_reference_test(
                 "prompt_tokens": prompt_len
             }
         });
-        format!(r#","debug_reference_trace":{}"#, trace)
-    } else {
-        String::new()
-    };
+        debug_json_suffix.push_str(&format!(r#","debug_reference_trace":{}"#, trace));
+    }
 
     let response = format!(
         r#"{{"token_ids":[{}],"text":{},"num_tokens":{},"per_token_data":[{}],"first_token_top_k":[{}],"finish_reason":"{}","timing":{{"prefill_ms":{:.1},"decode_ms":{:.1},"total_ms":{:.1},"prompt_tokens":{}}}{}}}"#,
-        output_tokens.iter().map(|(t, _)| t.to_string()).collect::<Vec<_>>().join(","),
+        output_tokens
+            .iter()
+            .map(|(t, _)| t.to_string())
+            .collect::<Vec<_>>()
+            .join(","),
         text_escaped,
         output_tokens.len(),
         per_token_json.join(","),
         first_topk_json.join(","),
         finish_reason,
-        prefill_ms, decode_ms, total_ms, prompt_len,
+        prefill_ms,
+        decode_ms,
+        total_ms,
+        prompt_len,
         debug_json_suffix
     );
 
-    log::info!("reference_test: {} output tokens in {:.0}ms (prefill={:.0}ms decode={:.0}ms), finish={}",
-        output_tokens.len(), total_ms, prefill_ms, decode_ms, finish_reason);
+    log::info!(
+        "reference_test: {} output tokens in {:.0}ms (prefill={:.0}ms decode={:.0}ms), finish={}",
+        output_tokens.len(),
+        total_ms,
+        prefill_ms,
+        decode_ms,
+        finish_reason
+    );
 
     let _ = send_json(stream, 200, &response);
 }
@@ -2148,9 +3674,20 @@ fn handle_gpu_decode(
     has_tools: bool,
     enable_thinking: bool,
     logprobs_top_n: usize,
+    chat_debug_payload: Option<serde_json::Value>,
 ) {
+    let mut chat_debug_payload = chat_debug_payload;
     // Resolve thinking end token early — used by both streaming and non-streaming paths
-    let think_end_id = if enable_thinking { state.thinking_end_token } else { None };
+    let think_end_id = if enable_thinking {
+        state.thinking_end_token
+    } else {
+        None
+    };
+    let hidden_think_stop_id = if enable_thinking {
+        None
+    } else {
+        state.thinking_end_token
+    };
 
     if is_stream {
         if let Err(e) = begin_sse(stream) {
@@ -2158,13 +3695,16 @@ fn handle_gpu_decode(
             return;
         }
 
-        let first_text = tokenizer.decode(&[first_token as u32], true).unwrap_or_default();
+        let first_text = tokenizer
+            .decode(&[first_token as u32], true)
+            .unwrap_or_default();
 
         // When thinking is enabled, inject <think> at start of stream.
         // The prompt already includes <think>, but the client needs it in the
         // output to know this is a thinking block (for display suppression).
         if think_end_id.is_some() {
-            let think_chunk = format_sse_token(request_id, model_name, "<think>", None, created, None);
+            let think_chunk =
+                format_sse_token(request_id, model_name, "<think>", None, created, None);
             let _ = send_sse_chunk(stream, &think_chunk);
         }
 
@@ -2266,18 +3806,24 @@ fn handle_gpu_decode(
                 if let Some(idx) = first_text.find("<tool_call>") {
                     let before = &first_text[..idx];
                     if !before.is_empty() {
-                        let chunk = format_sse_token(request_id, model_name, before, None, created, None);
+                        let chunk =
+                            format_sse_token(request_id, model_name, before, None, created, None);
                         let _ = tx.send(format!("data: {}\n\n", chunk));
                     }
                 }
             } else if !first_text.is_empty() {
-                let chunk = format_sse_token(request_id, model_name, &first_text, None, created, None);
+                let chunk =
+                    format_sse_token(request_id, model_name, &first_text, None, created, None);
                 let _ = tx.send(format!("data: {}\n\n", chunk));
             }
         }
 
         // Shared callback for both single-GPU and multi-GPU decode
-        let mut on_token = |token_id: usize, text: &str, finish_reason: Option<&str>, token_logprobs: Option<&[(u32, f32)]>| -> bool {
+        let mut on_token = |token_id: usize,
+                            text: &str,
+                            finish_reason: Option<&str>,
+                            token_logprobs: Option<&[(u32, f32)]>|
+         -> bool {
             decode_token_count += 1;
 
             // ── Track thinking state ──
@@ -2302,22 +3848,25 @@ fn handle_gpu_decode(
             } else {
                 None
             };
+            let hide_text =
+                hide_synthetic_think_stop_text(token_id, effective_finish, hidden_think_stop_id);
+            let visible_text = if hide_text { "" } else { text };
 
             if has_tools {
-                tc_all_text.push_str(text);
+                tc_all_text.push_str(visible_text);
                 if let Some(fr) = effective_finish {
                     tc_finish = fr.to_string();
                 }
 
                 if tc_in_tool_call {
                     // Inside a tool call block — buffer silently
-                } else if text.contains("<tool_call>") {
+                } else if visible_text.contains("<tool_call>") {
                     // Entering tool call territory
                     tc_in_tool_call = true;
                     tc_found = true;
                     // Send any content before the marker in this text
-                    if let Some(idx) = text.find("<tool_call>") {
-                        let before = &text[..idx];
+                    if let Some(idx) = visible_text.find("<tool_call>") {
+                        let before = &visible_text[..idx];
                         if !before.is_empty() {
                             let chunk = format_sse_token(
                                 request_id, model_name, before, None, created, None,
@@ -2327,9 +3876,14 @@ fn handle_gpu_decode(
                     }
                 } else {
                     // Normal content — stream it (no finish_reason; handled post-generation)
-                    if !text.is_empty() {
+                    if !visible_text.is_empty() {
                         let chunk = format_sse_token(
-                            request_id, model_name, text, None, created, token_logprobs,
+                            request_id,
+                            model_name,
+                            visible_text,
+                            None,
+                            created,
+                            token_logprobs,
                         );
                         let _ = tx.send(format!("data: {}\n\n", chunk));
                     }
@@ -2345,12 +3899,15 @@ fn handle_gpu_decode(
             } else {
                 // Original non-tool path
                 let chunk = format_sse_token(
-                    request_id, model_name, text, effective_finish, created, token_logprobs,
+                    request_id,
+                    model_name,
+                    visible_text,
+                    effective_finish,
+                    created,
+                    token_logprobs,
                 );
                 let formatted = format!("data: {}\n\n", chunk);
-                if tx.send(formatted).is_err()
-                    || writer_disconnected.load(Ordering::Acquire)
-                {
+                if tx.send(formatted).is_err() || writer_disconnected.load(Ordering::Acquire) {
                     return false;
                 }
                 // Stop if answer limit reached
@@ -2421,24 +3978,37 @@ fn handle_gpu_decode(
                     );
                     let _ = tx.send(format!("data: {}\n\n", start_chunk));
                     let args_chunk = format_sse_tool_call_args(
-                        request_id, model_name, i, &tc.arguments_json, created,
+                        request_id,
+                        model_name,
+                        i,
+                        &tc.arguments_json,
+                        created,
                     );
                     let _ = tx.send(format!("data: {}\n\n", args_chunk));
                 }
                 let finish_chunk = format_sse_token(
-                    request_id, model_name, "", Some("tool_calls"), created, None,
+                    request_id,
+                    model_name,
+                    "",
+                    Some("tool_calls"),
+                    created,
+                    None,
                 );
                 let _ = tx.send(format!("data: {}\n\n", finish_chunk));
                 log::info!(
                     "Request {}: {} tool call(s) detected",
-                    request_id, tool_calls.len()
+                    request_id,
+                    tool_calls.len()
                 );
             } else {
                 // No tool calls — send finish with original reason
-                let fr = if tc_finish.is_empty() { "stop" } else { &tc_finish };
-                let finish_chunk = format_sse_token(
-                    request_id, model_name, "", Some(fr), created, None,
-                );
+                let fr = if tc_finish.is_empty() {
+                    "stop"
+                } else {
+                    &tc_finish
+                };
+                let finish_chunk =
+                    format_sse_token(request_id, model_name, "", Some(fr), created, None);
                 let _ = tx.send(format!("data: {}\n\n", finish_chunk));
             }
         }
@@ -2456,15 +4026,26 @@ fn handle_gpu_decode(
         } else {
             0.0
         };
-        let overhead_total_ms = overhead.parse_ms + overhead.evict_ms + overhead.prefill_ms + overhead.reload_ms;
+        let overhead_total_ms =
+            overhead.parse_ms + overhead.evict_ms + overhead.prefill_ms + overhead.reload_ms;
         let timing_chunk = format!(
             r#"{{"id":"{}","object":"chat.completion.chunk","created":{},"model":"{}","choices":[],"krasis_timing":{{"decode_tokens":{},"decode_time_ms":{:.1},"decode_tok_s":{:.2},"thinking_tokens":{},"answer_tokens":{},"total_generated":{},"prompt_tokens":{},"prefill_tok_s":{:.1},"overhead_ms":{:.1},"overhead":{{"parse_ms":{:.1},"evict_ms":{:.1},"prefill_ms":{:.1},"reload_ms":{:.1},"real_reload_dma_ms":{:.1}}}}}}}"#,
-            request_id, created, model_name,
-            decode_token_count, decode_ms, decode_tok_s,
-            thinking_token_count, answer_token_count,
-            total_gen, prompt_len, prefill_tok_s,
+            request_id,
+            created,
+            model_name,
+            decode_token_count,
+            decode_ms,
+            decode_tok_s,
+            thinking_token_count,
+            answer_token_count,
+            total_gen,
+            prompt_len,
+            prefill_tok_s,
             overhead_total_ms,
-            overhead.parse_ms, overhead.evict_ms, overhead.prefill_ms, overhead.reload_ms,
+            overhead.parse_ms,
+            overhead.evict_ms,
+            overhead.prefill_ms,
+            overhead.reload_ms,
             overhead.real_reload_dma_ms
         );
         let _ = tx.send(format!("data: {}\n\n", timing_chunk));
@@ -2484,13 +4065,23 @@ fn handle_gpu_decode(
         if enable_thinking && state.thinking_end_token.is_some() {
             all_text.push_str("<think>");
         }
-        let first_text = tokenizer.decode(&[first_token as u32], true).unwrap_or_default();
+        let first_text = tokenizer
+            .decode(&[first_token as u32], true)
+            .unwrap_or_default();
         all_text.push_str(&first_text);
         let mut total_tokens = 1usize;
         let mut finish = "length".to_string();
+        let mut debug_output_tokens: Vec<(usize, Vec<(u32, f32)>)> = Vec::new();
+        if chat_debug_payload.is_some() {
+            debug_output_tokens.push((first_token, Vec::new()));
+        }
 
         // Thinking budget for non-streaming
-        let ns_think_end_id = if enable_thinking { state.thinking_end_token } else { None };
+        let ns_think_end_id = if enable_thinking {
+            state.thinking_end_token
+        } else {
+            None
+        };
         let mut ns_in_thinking = ns_think_end_id.is_some();
         let mut ns_answer_tokens = 0usize;
         if ns_in_thinking && Some(first_token) == ns_think_end_id {
@@ -2504,9 +4095,23 @@ fn handle_gpu_decode(
         };
 
         {
-            let mut on_token = |token_id: usize, text: &str, finish_reason: Option<&str>, _logprobs: Option<&[(u32, f32)]>| -> bool {
-                all_text.push_str(text);
+            let mut on_token = |token_id: usize,
+                                text: &str,
+                                finish_reason: Option<&str>,
+                                token_logprobs: Option<&[(u32, f32)]>|
+             -> bool {
+                let hide_text =
+                    hide_synthetic_think_stop_text(token_id, finish_reason, hidden_think_stop_id);
+                if !hide_text {
+                    all_text.push_str(text);
+                }
                 total_tokens += 1;
+                if chat_debug_payload.is_some() {
+                    debug_output_tokens.push((
+                        token_id,
+                        token_logprobs.map(|s| s.to_vec()).unwrap_or_default(),
+                    ));
+                }
 
                 // Track thinking state
                 if ns_think_end_id.is_some() {
@@ -2567,29 +4172,97 @@ fn handle_gpu_decode(
             }
         }
 
+        if let Some(serde_json::Value::Object(debug)) = chat_debug_payload.as_mut() {
+            let token_ids: Vec<usize> = debug_output_tokens.iter().map(|(tid, _)| *tid).collect();
+            let per_token: Vec<serde_json::Value> = debug_output_tokens
+                .iter()
+                .enumerate()
+                .map(|(step, (token_id, logprobs))| {
+                    let token_text = tokenizer
+                        .decode(&[*token_id as u32], true)
+                        .unwrap_or_default();
+                    let top_k: Vec<serde_json::Value> = logprobs
+                        .iter()
+                        .map(|&(tid, lp)| {
+                            serde_json::json!({
+                                "token_id": tid,
+                                "log_prob": lp as f64,
+                            })
+                        })
+                        .collect();
+                    let selected_log_prob = logprobs
+                        .iter()
+                        .find(|&&(tid, _)| tid == *token_id as u32)
+                        .map(|&(_, lp)| lp as f64);
+                    serde_json::json!({
+                        "step": step,
+                        "source": if step == 0 { "prefill_first_token" } else { "decode" },
+                        "token_id": token_id,
+                        "token_text": token_text,
+                        "selected_log_prob": selected_log_prob,
+                        "top_k": top_k,
+                    })
+                })
+                .collect();
+            debug.insert(
+                "completion_token_ids".to_string(),
+                serde_json::json!(token_ids),
+            );
+            debug.insert(
+                "completion_token_count".to_string(),
+                serde_json::json!(total_tokens),
+            );
+            debug.insert(
+                "completion_finish_reason".to_string(),
+                serde_json::json!(finish),
+            );
+            debug.insert(
+                "completion_decode_trace".to_string(),
+                serde_json::json!(per_token),
+            );
+        }
+
         if has_tools {
             let (content, tool_calls) = parse_tool_calls(&all_text);
             if !tool_calls.is_empty() {
                 let response = format_completion_with_tool_calls(
-                    request_id, model_name, &content, &tool_calls,
-                    prompt_len, total_tokens, created,
+                    request_id,
+                    model_name,
+                    &content,
+                    &tool_calls,
+                    prompt_len,
+                    total_tokens,
+                    created,
                 );
                 let _ = send_json(stream, 200, &response);
                 log::info!(
                     "Request {}: {} tool call(s) (non-streaming)",
-                    request_id, tool_calls.len()
+                    request_id,
+                    tool_calls.len()
                 );
             } else {
-                let response = format_completion(
-                    request_id, model_name, &all_text, prompt_len,
-                    total_tokens, &finish, created,
+                let response = format_completion_with_debug(
+                    request_id,
+                    model_name,
+                    &all_text,
+                    prompt_len,
+                    total_tokens,
+                    &finish,
+                    created,
+                    chat_debug_payload.as_ref(),
                 );
                 let _ = send_json(stream, 200, &response);
             }
         } else {
-            let response = format_completion(
-                request_id, model_name, &all_text, prompt_len,
-                total_tokens, &finish, created,
+            let response = format_completion_with_debug(
+                request_id,
+                model_name,
+                &all_text,
+                prompt_len,
+                total_tokens,
+                &finish,
+                created,
+                chat_debug_payload.as_ref(),
             );
             let _ = send_json(stream, 200, &response);
         }
@@ -2657,7 +4330,10 @@ impl RustServer {
                     log::warn!("RustServer: no pre-allocated prefill engine, creating on demand");
                     match create_prefill_engine_for_server(store, max_context_tokens) {
                         Ok(engine) => {
-                            log::info!("RustServer: prefill engine created on demand (max_tokens={})", max_context_tokens);
+                            log::info!(
+                                "RustServer: prefill engine created on demand (max_tokens={})",
+                                max_context_tokens
+                            );
                             Some(engine)
                         }
                         Err(e) => {
@@ -2752,34 +4428,15 @@ impl RustServer {
                 }
             };
 
-            // Load EOS token IDs from generation_config.json (same directory as tokenizer.json).
-            // These are required for the model to stop generating — without them, decode
-            // never terminates (the main branch gets these from Python prefill result).
+            // Load EOS token IDs from generation_config.json and config.json.
+            // Step-family models may ship no generation_config.json and place
+            // the EOS list only under config.json text_config.
             let eos_stop_ids = {
-                let p = std::path::Path::new(&tokenizer_path);
-                let gen_cfg_path = p.parent().unwrap_or(p).join("generation_config.json");
-                let mut ids = Vec::new();
-                if let Ok(data) = std::fs::read_to_string(&gen_cfg_path) {
-                    if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&data) {
-                        match cfg.get("eos_token_id") {
-                            Some(serde_json::Value::Number(n)) => {
-                                if let Some(id) = n.as_u64() {
-                                    ids.push(id as usize);
-                                }
-                            }
-                            Some(serde_json::Value::Array(arr)) => {
-                                for v in arr {
-                                    if let Some(id) = v.as_u64() {
-                                        ids.push(id as usize);
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
+                let ids = collect_eos_stop_ids(&tokenizer_path);
                 if ids.is_empty() {
-                    log::warn!("No eos_token_id found in generation_config.json — decode may not stop");
+                    log::warn!(
+                        "No eos_token_id found in generation_config.json/config.json — decode may not stop"
+                    );
                 } else {
                     log::info!("EOS stop tokens: {:?}", ids);
                 }
@@ -2792,7 +4449,7 @@ impl RustServer {
                 p.parent().unwrap_or(p).join("tokenizer_config.json")
             };
             let chat_template = match crate::chat_template::ChatTemplateEngine::from_config(
-                tokenizer_config_path.to_str().unwrap_or("")
+                tokenizer_config_path.to_str().unwrap_or(""),
             ) {
                 Ok(t) => t,
                 Err(e) => {
@@ -2823,7 +4480,10 @@ impl RustServer {
                 log::info!("GIL timing enabled (KRASIS_GIL_TIMING=1)");
             }
 
-            let log_requests_dir = if std::env::var("KRASIS_LOG_REQUESTS").map(|v| v == "1").unwrap_or(false) {
+            let log_requests_dir = if std::env::var("KRASIS_LOG_REQUESTS")
+                .map(|v| v == "1")
+                .unwrap_or(false)
+            {
                 let dir = "logs/requests".to_string();
                 std::fs::create_dir_all(&dir).ok();
                 log::info!("Request logging enabled → {}/", dir);
@@ -2853,7 +4513,9 @@ impl RustServer {
                     let store = unsafe { &mut *(gpu_store_addr as *mut GpuDecodeStore) };
                     match store.take_prefill_engine() {
                         Some(engine) => {
-                            log::info!("Rust prefill engine taken from decode store pre-allocated slot");
+                            log::info!(
+                                "Rust prefill engine taken from decode store pre-allocated slot"
+                            );
                             let arc = Arc::new(std::sync::Mutex::new(Some(engine)));
                             arc
                         }
@@ -2861,7 +4523,10 @@ impl RustServer {
                             log::warn!("No pre-allocated prefill engine — creating on demand");
                             match create_prefill_engine_for_server(store, max_context_tokens) {
                                 Ok(engine) => {
-                                    log::info!("Rust prefill engine created on demand (max_tokens={})", max_context_tokens);
+                                    log::info!(
+                                        "Rust prefill engine created on demand (max_tokens={})",
+                                        max_context_tokens
+                                    );
                                     Arc::new(std::sync::Mutex::new(Some(engine)))
                                 }
                                 Err(e) => {
@@ -3013,39 +4678,62 @@ impl RustServer {
             std::env::var("KRASIS_BENCHMARK_PREFILL_BREAKDOWN").is_ok();
 
         // Load tokenizer and chat template (same as server path)
-        let tokenizer = tokenizers::Tokenizer::from_file(&self.tokenizer_path)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
-                format!("Failed to load tokenizer: {}", e)))?;
+        let tokenizer = tokenizers::Tokenizer::from_file(&self.tokenizer_path).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to load tokenizer: {}", e))
+        })?;
         let tokenizer_config_path = {
             let p = std::path::Path::new(&self.tokenizer_path);
             p.parent().unwrap_or(p).join("tokenizer_config.json")
         };
         let chat_template = crate::chat_template::ChatTemplateEngine::from_config(
-            tokenizer_config_path.to_str().unwrap_or("")
-        ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
-            format!("Failed to load chat template: {}", e)))?;
+            tokenizer_config_path.to_str().unwrap_or(""),
+        )
+        .map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "Failed to load chat template: {}",
+                e
+            ))
+        })?;
 
-        let messages_value: serde_json::Value = serde_json::from_str(&messages_json)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
-                format!("Invalid messages JSON: {}", e)))?;
+        let messages_value: serde_json::Value =
+            serde_json::from_str(&messages_json).map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("Invalid messages JSON: {}", e))
+            })?;
         crate::text_only_messages::validate_text_only_messages(&messages_value)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
 
         // Estimate tokens by applying the same chat template mode the request will use.
         let estimated_tokens = {
-            let rendered = chat_template.apply(&messages_json, true, enable_thinking)
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
-                    format!("Chat template failed: {}", e)))?;
-            tokenizer.encode(rendered.as_str(), false)
+            let rendered = chat_template
+                .apply(&messages_json, true, enable_thinking)
+                .map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "Chat template failed: {}",
+                        e
+                    ))
+                })?;
+            tokenizer
+                .encode(rendered.as_str(), false)
                 .map(|e| e.len())
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
-                    format!("Tokenizer failed: {}", e)))?
+                .map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!("Tokenizer failed: {}", e))
+                })?
         };
 
         // Evict soft HCS before prefill (both stores in multi-GPU)
+        let prefill_entry_floor_bytes =
+            prefill_entry_floor_bytes_for_server(&self.prefill_engine, estimated_tokens).map_err(
+                |e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "Prefill engine floor unavailable before HCS eviction: {}",
+                        e
+                    ))
+                },
+            )?;
         let store = unsafe { &mut *(self.gpu_store_addr as *mut GpuDecodeStore) };
         let t_evict = Instant::now();
-        let (evicted, _) = store.hcs_evict_for_prefill(estimated_tokens);
+        let (evicted, _) =
+            store.hcs_evict_for_prefill_with_engine_floor(estimated_tokens, prefill_entry_floor_bytes);
         // NOTE: aux GPU never does prefill, so no eviction needed there
         let evict_ms = t_evict.elapsed().as_secs_f64() * 1000.0;
 
@@ -3065,12 +4753,20 @@ impl RustServer {
 
         let t_phase = Instant::now();
         let mut engine_guard = self.prefill_engine.lock().map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!("Prefill engine lock poisoned: {}", e))
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "Prefill engine lock poisoned: {}",
+                e
+            ))
         })?;
         let engine = engine_guard.as_mut().ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err("Rust prefill engine not available for benchmark")
+            pyo3::exceptions::PyRuntimeError::new_err(
+                "Rust prefill engine not available for benchmark",
+            )
         })?;
         prefill_lock_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
+        // Warmup/calibration calls disable prefill pinning through the shared engine.
+        // Benchmarks should exercise the same normal prefill path as requests.
+        engine.set_prefill_pinning_disabled(false);
 
         // Update HCS snapshot
         let t_phase = Instant::now();
@@ -3084,12 +4780,17 @@ impl RustServer {
         // Tokenize using Rust tokenizer (always with generation prompt)
         let t_phase = Instant::now();
         let token_ids: Vec<u32> = {
-            let rendered = chat_template.apply(&messages_json, true, enable_thinking)
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
-                    format!("Chat template failed: {}", e)))?;
-            let encoding = tokenizer.encode(rendered.as_str(), true)
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
-                format!("Tokenizer failed: {}", e)))?;
+            let rendered = chat_template
+                .apply(&messages_json, true, enable_thinking)
+                .map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "Chat template failed: {}",
+                        e
+                    ))
+                })?;
+            let encoding = tokenizer.encode(rendered.as_str(), false).map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("Tokenizer failed: {}", e))
+            })?;
             encoding.get_ids().to_vec()
         };
         prefill_tokenize_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
@@ -3098,8 +4799,12 @@ impl RustServer {
 
         let t_phase = Instant::now();
         let _has_hqq_runtime_slots = prepare_store_for_rust_prefill(store, engine, token_ids.len())
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
-                format!("Failed to prepare runtime for prefill: {}", e)))?;
+            .map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "Failed to prepare runtime for prefill: {}",
+                    e
+                ))
+            })?;
         prefill_prepare_runtime_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
 
         engine.set_prefill_hcs_guard_store_addr(self.gpu_store_addr);
@@ -3110,8 +4815,10 @@ impl RustServer {
             engine.clear_prefill_hcs_guard_store_addr();
             engine.set_optional_pinning_budget_mb(None);
             let _ = store.prepare_runtime_for_decode_rust();
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                format!("Scratch alloc failed: {}", e)));
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "Scratch alloc failed: {}",
+                e
+            )));
         }
         prefill_scratch_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
         let pinning_budget_mb = store.prefill_optional_pinning_budget_mb(
@@ -3122,24 +4829,20 @@ impl RustServer {
 
         let suppress_tokens = store.suppress_tokens_clone();
         let t_phase = Instant::now();
-        let prefill_result = match engine.run_prefill(
-            &token_ids,
-            temperature,
-            &suppress_tokens,
-        ) {
+        let prefill_result = match engine.run_prefill(&token_ids, temperature, &suppress_tokens) {
             Ok(r) => match engine.finalize_stage_exact_prefill_kv(r.prompt_len) {
                 Ok(()) => Ok(r),
                 Err(e) => Err(format!("KV stage export failed: {}", e)),
             },
             Err(e) => Err(e),
-        }.map_err(|e| {
+        }
+        .map_err(|e| {
             abort_if_cuda_context_poisoned("benchmark prefill", &e);
             engine.clear_prefill_hcs_guard_store_addr();
             engine.set_optional_pinning_budget_mb(None);
             let _ = engine.release_scratch();
             let _ = store.prepare_runtime_for_decode_rust();
-            pyo3::exceptions::PyRuntimeError::new_err(
-                format!("Rust prefill failed: {}", e))
+            pyo3::exceptions::PyRuntimeError::new_err(format!("Rust prefill failed: {}", e))
         })?;
         prefill_run_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
 
@@ -3161,27 +4864,7 @@ impl RustServer {
         let prompt_len = prefill_result.prompt_len;
         // Load EOS tokens for benchmark path (same logic as serve_forever)
         let t_phase = Instant::now();
-        let stop_ids: Vec<usize> = {
-            let p = std::path::Path::new(&self.tokenizer_path);
-            let gen_cfg_path = p.parent().unwrap_or(p).join("generation_config.json");
-            let mut ids = Vec::new();
-            if let Ok(data) = std::fs::read_to_string(&gen_cfg_path) {
-                if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&data) {
-                    match cfg.get("eos_token_id") {
-                        Some(serde_json::Value::Number(n)) => {
-                            if let Some(id) = n.as_u64() { ids.push(id as usize); }
-                        }
-                        Some(serde_json::Value::Array(arr)) => {
-                            for v in arr {
-                                if let Some(id) = v.as_u64() { ids.push(id as usize); }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            ids
-        };
+        let stop_ids: Vec<usize> = collect_eos_stop_ids(&self.tokenizer_path);
         prefill_stop_ids_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
 
         let t_phase = Instant::now();
@@ -3289,7 +4972,11 @@ impl RustServer {
             let (min_free_vram_mb, mut hcs_loaded, mut hcs_total, _) = store.benchmark_stats();
             let safety_margin_mb = store.hcs_safety_margin_mb();
             if !self.aux_gpu_store_addrs.is_empty() {
-                log::info!("  GPU0: min_free={} MB, HCS {} loaded", min_free_vram_mb, hcs_loaded);
+                log::info!(
+                    "  GPU0: min_free={} MB, HCS {} loaded",
+                    min_free_vram_mb,
+                    hcs_loaded
+                );
             }
             for (i, &aux_addr) in self.aux_gpu_store_addrs.iter().enumerate() {
                 let aux_store = unsafe { &*(aux_addr as *const GpuDecodeStore) };
@@ -3297,11 +4984,21 @@ impl RustServer {
                 hcs_loaded += aux_loaded;
                 hcs_total += aux_total;
                 if !self.aux_gpu_store_addrs.is_empty() {
-                    log::info!("  GPU{}: min_free={} MB, HCS {}/{} ({:.1}%)",
-                        i + 1, aux_min_free, aux_loaded, aux_total, aux_pct);
+                    log::info!(
+                        "  GPU{}: min_free={} MB, HCS {}/{} ({:.1}%)",
+                        i + 1,
+                        aux_min_free,
+                        aux_loaded,
+                        aux_total,
+                        aux_pct
+                    );
                 }
             }
-            let hcs_pct = if hcs_total > 0 { hcs_loaded as f64 / hcs_total as f64 * 100.0 } else { 0.0 };
+            let hcs_pct = if hcs_total > 0 {
+                hcs_loaded as f64 / hcs_total as f64 * 100.0
+            } else {
+                0.0
+            };
 
             let mut result = serde_json::json!({
                 "prefill_ms": prefill_ms,
@@ -3343,8 +5040,11 @@ impl RustServer {
         }
         let (activated, real_reload_dma_ms) = store.hcs_reload_after_prefill(prompt_len);
         if activated > 0 {
-            log::info!("Benchmark: HCS reload complete: {} experts, {:.1}ms",
-                activated, real_reload_dma_ms);
+            log::info!(
+                "Benchmark: HCS reload complete: {} experts, {:.1}ms",
+                activated,
+                real_reload_dma_ms
+            );
         }
         if let Some((counts, layers, experts, prompt_tokens)) = prompt_hcs_snapshot.as_ref() {
             store.install_prompt_hcs_shadow(counts.clone(), *layers, *experts, *prompt_tokens);
@@ -3357,17 +5057,18 @@ impl RustServer {
         crate::vram_monitor::report_event("hcs_soft_load_end");
 
         // Match the live request path's per-request decode suppression setup.
+        let benchmark_min_stop_suppress_steps = max_new_tokens.saturating_sub(1);
         if enable_thinking {
             if self.thinking_end_token_id > 0 {
                 store.set_think_end_suppress(Some(self.thinking_end_token_id), 4096);
-                store.set_min_new_tokens_ext(0, stop_ids.clone());
+                store.set_min_new_tokens_ext(benchmark_min_stop_suppress_steps, stop_ids.clone());
             } else {
                 store.set_think_end_suppress(None, 0);
-                store.set_min_new_tokens_ext(0, vec![]);
+                store.set_min_new_tokens_ext(benchmark_min_stop_suppress_steps, stop_ids.clone());
             }
         } else {
             store.set_think_end_suppress(None, 0);
-            store.set_min_new_tokens_ext(0, vec![]);
+            store.set_min_new_tokens_ext(benchmark_min_stop_suppress_steps, stop_ids.clone());
         }
 
         // Copy KV cache to aux stores (multi-GPU) — after async reload starts
@@ -3375,14 +5076,33 @@ impl RustServer {
             let num_aux = self.aux_gpu_store_addrs.len();
             let num_layers = store.num_layers();
             for i in 0..num_aux {
-                let aux_store = unsafe { &mut *(self.aux_gpu_store_addrs[i] as *mut GpuDecodeStore) };
+                let aux_store =
+                    unsafe { &mut *(self.aux_gpu_store_addrs[i] as *mut GpuDecodeStore) };
                 let layer_start = self.multi_gpu_split_layers[i];
-                let layer_end = if i + 1 < num_aux { self.multi_gpu_split_layers[i + 1] } else { num_layers };
-                if let Err(e) = store.copy_kv_to_aux(aux_store, layer_start, layer_end, self.multi_gpu_gqa_offsets[i], prompt_len) {
-                    log::error!("benchmark_request: KV copy to aux GPU{} failed: {}", i + 1, e);
+                let layer_end = if i + 1 < num_aux {
+                    self.multi_gpu_split_layers[i + 1]
+                } else {
+                    num_layers
+                };
+                if let Err(e) = store.copy_kv_to_aux(
+                    aux_store,
+                    layer_start,
+                    layer_end,
+                    self.multi_gpu_gqa_offsets[i],
+                    prompt_len,
+                ) {
+                    log::error!(
+                        "benchmark_request: KV copy to aux GPU{} failed: {}",
+                        i + 1,
+                        e
+                    );
                 }
                 if let Err(e) = store.copy_la_states_to_aux(aux_store, layer_start, layer_end) {
-                    log::error!("benchmark_request: LA state copy to aux GPU{} failed: {}", i + 1, e);
+                    log::error!(
+                        "benchmark_request: LA state copy to aux GPU{} failed: {}",
+                        i + 1,
+                        e
+                    );
                 }
             }
         }
@@ -3395,6 +5115,28 @@ impl RustServer {
                 pressure_freed_mb,
                 pressure_final_free_mb,
             );
+            let (pressure_reload_activated, pressure_reload_ms) =
+                store.hcs_reload_after_prefill(prompt_len);
+            if pressure_reload_activated > 0 {
+                log::info!(
+                    "Benchmark: HCS reload after pressure drain: {} experts, {:.1}ms",
+                    pressure_reload_activated,
+                    pressure_reload_ms,
+                );
+                let (post_reload_evicted, post_reload_freed_mb, post_reload_final_free_mb) = store
+                    .hcs_drain_vram_pressure(
+                        "benchmark_before_decode_after_pressure_reload",
+                        true,
+                    );
+                if post_reload_evicted > 0 {
+                    log::warn!(
+                        "Benchmark: post-reload pressure eviction before decode evicted {} soft experts, freed {:.1} MB, final_free={} MB",
+                        post_reload_evicted,
+                        post_reload_freed_mb,
+                        post_reload_final_free_mb,
+                    );
+                }
+            }
         }
 
         // Decode (pure Rust, GIL held but unused by decode loop)
@@ -3410,14 +5152,17 @@ impl RustServer {
                 prompt_len,
                 max_new_tokens.saturating_sub(1),
                 temperature,
-                50,     // top_k
-                0.95,   // top_p
+                50,   // top_k
+                0.95, // top_p
                 &stop_ids,
                 &tokenizer,
-                0.0,    // presence_penalty
-                0,      // logprobs_top_n
+                0.0, // presence_penalty
+                0,   // logprobs_top_n
                 Some("benchmark".to_string()),
-                |_token_id: usize, _text: &str, _finish_reason: Option<&str>, _logprobs: Option<&[(u32, f32)]>| {
+                |_token_id: usize,
+                 _text: &str,
+                 _finish_reason: Option<&str>,
+                 _logprobs: Option<&[(u32, f32)]>| {
                     count += 1;
                     true
                 },
@@ -3428,12 +5173,12 @@ impl RustServer {
                 prompt_len,
                 max_new_tokens.saturating_sub(1),
                 temperature,
-                50,     // top_k
-                0.95,   // top_p
+                50,   // top_k
+                0.95, // top_p
                 &stop_ids,
                 &tokenizer,
-                0.0,    // presence_penalty
-                0,      // logprobs_top_n
+                0.0, // presence_penalty
+                0,   // logprobs_top_n
                 Some("benchmark".to_string()),
                 |_token_id, _text, _finish_reason, _logprobs: Option<&[(u32, f32)]>| {
                     count += 1;
@@ -3468,7 +5213,11 @@ impl RustServer {
         // Aggregate HCS stats from all aux stores (multi-GPU)
         // Also log per-GPU VRAM stats
         if !self.aux_gpu_store_addrs.is_empty() {
-            log::info!("  GPU0: min_free={} MB, HCS {} loaded", min_free_vram_mb, hcs_loaded);
+            log::info!(
+                "  GPU0: min_free={} MB, HCS {} loaded",
+                min_free_vram_mb,
+                hcs_loaded
+            );
         }
         for (i, &aux_addr) in self.aux_gpu_store_addrs.iter().enumerate() {
             let aux_store = unsafe { &*(aux_addr as *const GpuDecodeStore) };
@@ -3476,11 +5225,21 @@ impl RustServer {
             hcs_loaded += aux_loaded;
             hcs_total += aux_total;
             if !self.aux_gpu_store_addrs.is_empty() {
-                log::info!("  GPU{}: min_free={} MB, HCS {}/{} ({:.1}%)",
-                    i + 1, aux_min_free, aux_loaded, aux_total, aux_pct);
+                log::info!(
+                    "  GPU{}: min_free={} MB, HCS {}/{} ({:.1}%)",
+                    i + 1,
+                    aux_min_free,
+                    aux_loaded,
+                    aux_total,
+                    aux_pct
+                );
             }
         }
-        let hcs_pct = if hcs_total > 0 { hcs_loaded as f64 / hcs_total as f64 * 100.0 } else { 0.0 };
+        let hcs_pct = if hcs_total > 0 {
+            hcs_loaded as f64 / hcs_total as f64 * 100.0
+        } else {
+            0.0
+        };
         let state_validation_env = std::env::var("KRASIS_STATE_VALIDATION").ok();
         let config_validation_env = std::env::var("KRASIS_CONFIG_VALIDATION").ok();
         let state_validation_enabled = state_validation_env
@@ -3550,7 +5309,9 @@ impl RustServer {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_chat_completions_endpoint, is_models_endpoint};
+    use super::{
+        hide_synthetic_think_stop_text, is_chat_completions_endpoint, is_models_endpoint,
+    };
 
     #[test]
     fn models_endpoint_accepts_openai_base_url_variants() {
@@ -3574,5 +5335,14 @@ mod tests {
         assert!(is_chat_completions_endpoint("/chat/completions?x=1"));
         assert!(!is_chat_completions_endpoint("/v1/models"));
         assert!(!is_chat_completions_endpoint("/foo/chat/completions"));
+    }
+
+    #[test]
+    fn hides_only_synthetic_thinking_stop_text() {
+        assert!(hide_synthetic_think_stop_text(123, Some("stop"), Some(123)));
+        assert!(!hide_synthetic_think_stop_text(123, Some("length"), Some(123)));
+        assert!(!hide_synthetic_think_stop_text(123, Some("stop"), Some(456)));
+        assert!(!hide_synthetic_think_stop_text(123, Some("stop"), None));
+        assert!(!hide_synthetic_think_stop_text(123, None, Some(123)));
     }
 }

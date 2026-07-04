@@ -1,0 +1,902 @@
+[0;36m[1m=>[0m Waiting for selected GPUs (0) to clear...
+[0;32m[1mOK[0m Selected GPUs (0) clear.
+[0;36m[1m=>[0m Launching from: tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf
+[0;36m[1m=>[0m Run dir: /home/main/Documents/Claude/krasis-nemotron-dev/logs/dev-run_20260627_230231
+[0;36m[1m=>[0m Import origin check:
+krasis: /home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/__init__.py
+krasis.krasis: /home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+Pre-scan: set CUDA_VISIBLE_DEVICES=0
+Loaded config from tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf: {'model_path': '/home/main/.krasis/models/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16', 'selected_gpus': '0', 'num_gpus': 1, 'layer_group_size': 2, 'kv_dtype': 'k4v4', 'gpu_expert_bits': 4, 'cpu_expert_bits': 4, 'attention_quant': 'hqq4', 'hqq_group_size': 128, 'shared_expert_quant': 'int8', 'dense_mlp_quant': 'int8', 'lm_head_quant': 'int8', 'krasis_threads': 16, 'host': '0.0.0.0', 'port': 18012, 'enable_thinking': False, 'gpu_prefill_threshold': 300, 'vram_safety_margin': 600, 'force_load': False}
+
+[1m[36m▸ Krasis — NVIDIA-Nemotron-3-Nano-30B-A3B-BF16[0m
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 1[0m
+  [32mHCS host cache: source[0m
+  [32mSelected physical GPUs: 0 (config; CUDA_VISIBLE_DEVICES=0)[0m
+  [32mExperts: GPU INT4 g128 (amax)  |  Attention: hqq4  |  KV: k4v4[0m
+  [32mLayer groups: 2  |  KV cache: 1000 MB  |  Threads: 16[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+
+[1m[36m▸ Loading model weights[0m
+  [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=518 MB, free=31600 MB, total=32119 MB
+
+[1m[36m▸ Loading GPU weights[0m
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:0: alloc=3477 MB, reserved=3562 MB, used=4178 MB, free=27940 MB, total=32119 MB
+  [0;32mHQQ attention artifacts validated (115 MB cached), 27940 MB free[0m
+
+[1m[36m▸ Building GPU INT4 Marlin expert cache (one-time)[0m
+  [2mCache will be saved to /home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 for instant loading next time.[0m
+    Loading GPU Marlin cache: 23 layers...
+    GPU Marlin cache loaded: 15.8 GB in 10s
+  [0;32mExpert cache built in 10s — next launch will be much faster.[0m
+  [33m[VRAM after-phase2-expert-weights][0m cuda:0: alloc=3477 MB, reserved=3562 MB, used=4178 MB, free=27940 MB, total=32119 MB
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:0: alloc=3477 MB, reserved=3562 MB, used=4178 MB, free=27940 MB, total=32119 MB
+  [33m[VRAM after-kv-cache-init][0m cuda:0: alloc=4477 MB, reserved=4562 MB, used=5178 MB, free=26940 MB, total=32119 MB
+  [33m[VRAM after-full-load][0m cuda:0: alloc=4477 MB, reserved=4562 MB, used=5178 MB, free=26940 MB, total=32119 MB
+
+[1m[36m▸ CUDA runtime warmup[0m
+  [32mcuBLAS + Triton kernel compilation done[0m
+
+[1m[36m▸ Setting up GPU decode store[0m
+  [32mGPU decode store ready (addr=0x4e9958a0)[0m
+  [32mReleased redundant GPU execution source tensors (366 MB)[0m
+  [2mVRAM monitor started (tracking warmup)[0m
+  [2mcuda:0: 0 MB total[0m
+
+[1m[36m▸ Pre-allocating Rust prefill engine[0m
+[FLA] Loading kernels for H=0 from /home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/libkrasis_fla_sm120.so
+  [32mPrefill engine scratch buffers allocated[0m
+
+[1m[36m▸ Warmup (Rust prefill engine)[0m
+  [32mStartup diag: warmup tokens=300 (default 300, token=52528)[0m
+  [32mStartup diag env: no_graph=unset, mapped_reads=unset, prefill_debug=False, prefill_timing=True, exit_after_calibration=True[0m
+[PREFILL-LIVENESS] run_start total_tokens=300 scratch_max_tokens=300 max_chunk=300 chunk_size=300 num_chunks=1 chunk_plan=[300] expert_bits=4 shared_expert_bits=4 hidden_size=2688 layers=52
+[PREFILL-LIVENESS] chunk_start chunk=0 total_chunks=1 start=0 end=300 tokens=300 tok0=52528 last_pos=299 last_tok=52528
+[PREFILL-LIVENESS] chunk_after_hcs_guard chunk=0 tokens=300 elapsed_ms=0.080
+[PREFILL-LIVENESS] layer_start chunk=0 layer=0 layer_type=mamba2 tokens=300 has_residual=false moe_gate=false shared_bf16=false shared_marlin=false
+[MAMBA2-SSD-LOCAL-TRI-ORACLE] {"available":true,"components":{"D":0.44140625,"c_state_total":-6.592087268829346,"cpu_matches_sequential_gpu_bits":true,"cpu_y_bf16_bits":"0xc0d6","cpu_y_bf16_value":-6.6875,"d_x":-0.10560989379882812,"local_hf_chunk_scan_bf16_coeff":-1.0794639587402344,"local_hf_chunk_scan_fp32_coeff":-1.077743411064148,"local_old_state":-1.0740360021591187,"prior_chunk_state":-5.5180511474609375,"sequential_gpu_y_bf16_bits":"0xc0d6","sequential_gpu_y_bf16_value":-6.6875,"x_target":-0.2392578125,"x_target_bits":"0xbe75","y_pre_bf16":-6.703125},"diagnostic":"mamba2_ssd_local_triangular_oracle","dimensions":{"chunk_pos":6,"chunk_start":64,"d_inner":4096,"effective_chunk_size":64,"head_dim":64,"heads_per_group":8,"inside_chunk_zero":false,"m":300,"n_groups":8,"n_heads":64,"requested_chunk_size":64,"state_size":128},"interpretation":"CPU local-triangular recompute matches the existing sequential GPU oracle at the target coordinate; corrected chunk candidate must reproduce these exact terms before optimizing.","layer":0,"local_triangular_terms":[{"accum_bf16_coeff_after":-0.1457977294921875,"accum_fp32_coeff_after":-0.14552995562553406,"cb_forward":0.07300420105457306,"cb_forward_minus_reverse":-2.2351741790771484e-8,"cb_reverse":0.07300422340631485,"cb_scaled_bf16":0.609375,"cb_scaled_bf16_bits":"0x3f1c","cb_scaled_pre_bf16":0.6082558035850525,"chunk_position":0,"dA_after":-1.2056331634521484,"dA_before":-1.1870849132537842,"dA_increment":-0.01854819804430008,"dA_target":-1.3169223070144653,"decay":0.8946800231933594,"decay_arg":-0.1112891435623169,"dt_after_softplus":9.312590599060059,"dt_plus_bias":9.3125,"dt_times_x":-2.2281100749969482,"included_by_lower_triangle":true,"raw_dt":4.5,"raw_dt_bits":"0x4090","scale_decay_times_dt":8.331789016723633,"self_sample":false,"term_bf16_coeff_times_x":-0.1457977294921875,"term_fp32_coeff_times_x":-0.14552995562553406,"top_state_contrib":-0.1549224853515625,"top_state_index":100,"u":64,"x":-0.2392578125,"x_bits":"0xbe75"},{"accum_bf16_coeff_after":-0.2943992614746094,"accum_fp32_coeff_after":-0.2937844395637512,"cb_forward":0.07300420105457306,"cb_forward_minus_reverse":-2.2351741790771484e-8,"cb_reverse":0.07300422340631485,"cb_scaled_bf16":0.62109375,"cb_scaled_bf16_bits":"0x3f1f","cb_scaled_pre_bf16":0.6196431517601013,"chunk_position":1,"dA_after":-1.2241814136505127,"dA_before":-1.2056331634521484,"dA_increment":-0.01854819804430008,"dA_target":-1.3169223070144653,"decay":0.9114296436309814,"decay_arg":-0.09274089336395264,"dt_after_softplus":9.312590599060059,"dt_plus_bias":9.3125,"dt_times_x":-2.2281100749969482,"included_by_lower_triangle":true,"raw_dt":4.5,"raw_dt_bits":"0x4090","scale_decay_times_dt":8.487771034240723,"self_sample":false,"term_bf16_coeff_times_x":-0.14860153198242188,"term_fp32_coeff_times_x":-0.14825446903705597,"top_state_contrib":-0.1549224853515625,"top_state_index":100,"u":65,"x":-0.2392578125,"x_bits":"0xbe75"},{"accum_bf16_coeff_after":-0.4458045959472656,"accum_fp32_coeff_after":-0.44481441378593445,"cb_forward":0.07300420105457306,"cb_forward_minus_reverse":-2.2351741790771484e-8,"cb_reverse":0.07300422340631485,"cb_scaled_bf16":0.6328125,"cb_scaled_bf16_bits":"0x3f22","cb_scaled_pre_bf16":0.6312436461448669,"chunk_position":2,"dA_after":-1.242729663848877,"dA_before":-1.2241814136505127,"dA_increment":-0.01854819804430008,"dA_target":-1.3169223070144653,"decay":0.9284927845001221,"decay_arg":-0.07419264316558838,"dt_after_softplus":9.312590599060059,"dt_plus_bias":9.3125,"dt_times_x":-2.2281100749969482,"included_by_lower_triangle":true,"raw_dt":4.5,"raw_dt_bits":"0x4090","scale_decay_times_dt":8.646673202514648,"self_sample":false,"term_bf16_coeff_times_x":-0.15140533447265625,"term_fp32_coeff_times_x":-0.15102997422218323,"top_state_contrib":-0.1549224853515625,"top_state_index":100,"u":66,"x":-0.2392578125,"x_bits":"0xbe75"},{"accum_bf16_coeff_after":-0.6000137329101562,"accum_fp32_coeff_after":-0.5986719131469727,"cb_forward":0.07300420105457306,"cb_forward_minus_reverse":-2.2351741790771484e-8,"cb_reverse":0.07300422340631485,"cb_scaled_bf16":0.64453125,"cb_scaled_bf16_bits":"0x3f25","cb_scaled_pre_bf16":0.6430613994598389,"chunk_position":3,"dA_after":-1.2612779140472412,"dA_before":-1.242729663848877,"dA_increment":-0.01854819804430008,"dA_target":-1.3169223070144653,"decay":0.9458754658699036,"decay_arg":-0.05564439296722412,"dt_after_softplus":9.312590599060059,"dt_plus_bias":9.3125,"dt_times_x":-2.2281100749969482,"included_by_lower_triangle":true,"raw_dt":4.5,"raw_dt_bits":"0x4090","scale_decay_times_dt":8.808550834655762,"self_sample":false,"term_bf16_coeff_times_x":-0.15420913696289062,"term_fp32_coeff_times_x":-0.15385746955871582,"top_state_contrib":-0.1549224853515625,"top_state_index":100,"u":67,"x":-0.2392578125,"x_bits":"0xbe75"},{"accum_bf16_coeff_after":-0.7570266723632812,"accum_fp32_coeff_after":-0.7554097771644592,"cb_forward":0.07300420105457306,"cb_forward_minus_reverse":-2.2351741790771484e-8,"cb_reverse":0.07300422340631485,"cb_scaled_bf16":0.65625,"cb_scaled_bf16_bits":"0x3f28","cb_scaled_pre_bf16":0.6551003456115723,"chunk_position":4,"dA_after":-1.2798261642456055,"dA_before":-1.2612779140472412,"dA_increment":-0.01854819804430008,"dA_target":-1.3169223070144653,"decay":0.9635834693908691,"decay_arg":-0.03709614276885986,"dt_after_softplus":9.312590599060059,"dt_plus_bias":9.3125,"dt_times_x":-2.2281100749969482,"included_by_lower_triangle":true,"raw_dt":4.5,"raw_dt_bits":"0x4090","scale_decay_times_dt":8.973458290100098,"self_sample":false,"term_bf16_coeff_times_x":-0.157012939453125,"term_fp32_coeff_times_x":-0.15673787891864777,"top_state_contrib":-0.1549224853515625,"top_state_index":100,"u":68,"x":-0.2392578125,"x_bits":"0xbe75"},{"accum_bf16_coeff_after":-0.9168434143066406,"accum_fp32_coeff_after":-0.9150819778442383,"cb_forward":0.07300420105457306,"cb_forward_minus_reverse":-2.2351741790771484e-8,"cb_reverse":0.07300422340631485,"cb_scaled_bf16":0.66796875,"cb_scaled_bf16_bits":"0x3f2b","cb_scaled_pre_bf16":0.6673647165298462,"chunk_position":5,"dA_after":-1.2983744144439697,"dA_before":-1.2798261642456055,"dA_increment":-0.01854819804430008,"dA_target":-1.3169223070144653,"decay":0.9816230535507202,"decay_arg":-0.018547892570495605,"dt_after_softplus":9.312590599060059,"dt_plus_bias":9.3125,"dt_times_x":-2.2281100749969482,"included_by_lower_triangle":true,"raw_dt":4.5,"raw_dt_bits":"0x4090","scale_decay_times_dt":9.141453742980957,"self_sample":false,"term_bf16_coeff_times_x":-0.15981674194335938,"term_fp32_coeff_times_x":-0.15967221558094025,"top_state_contrib":-0.1549224853515625,"top_state_index":100,"u":69,"x":-0.2392578125,"x_bits":"0xbe75"},{"accum_bf16_coeff_after":-1.0794639587402344,"accum_fp32_coeff_after":-1.077743411064148,"cb_forward":0.07300420105457306,"cb_forward_minus_reverse":-2.2351741790771484e-8,"cb_reverse":0.07300422340631485,"cb_scaled_bf16":0.6796875,"cb_scaled_bf16_bits":"0x3f2e","cb_scaled_pre_bf16":0.6798584461212158,"chunk_position":6,"dA_after":-1.316922664642334,"dA_before":-1.2983744144439697,"dA_increment":-0.01854819804430008,"dA_target":-1.3169223070144653,"decay":1.0,"decay_arg":0.0,"dt_after_softplus":9.312590599060059,"dt_plus_bias":9.3125,"dt_times_x":-2.2281100749969482,"included_by_lower_triangle":true,"raw_dt":4.5,"raw_dt_bits":"0x4090","scale_decay_times_dt":9.312590599060059,"self_sample":true,"term_bf16_coeff_times_x":-0.16262054443359375,"term_fp32_coeff_times_x":-0.16266144812107086,"top_state_contrib":-0.1549224853515625,"top_state_index":100,"u":70,"x":-0.2392578125,"x_bits":"0xbe75"}],"prefix":{"a_log":-6.21875,"a_value_neg_exp":-0.001991733442991972,"dA_chunk_base":-1.1870849132537842,"dA_target":-1.3169223070144653,"dt_bias":4.8125,"local_dA_increments":[-0.01854819804430008,-0.01854819804430008,-0.01854819804430008,-0.01854819804430008,-0.01854819804430008,-0.01854819804430008,-0.01854819804430008],"local_dA_prefix_cumulative":[-1.2056331634521484,-1.2241812944412231,-1.2427295446395874,-1.261277675628662,-1.2798259258270264,-1.298374056816101,-1.3169223070144653]},"target":{"dim_index":2418,"flat_index":289138,"group":4,"head":37,"head_dim_index":50,"row":70}}
+[PREFILL-LIVENESS] mamba2_substages layer=0 tokens=300 total_ms=149.256 in_proj_ms=98.725 split_extract_ms=0.015 conv1d_silu_ms=0.031 ssd_scan_ms=32.699 gated_rmsnorm_ms=0.024 out_proj_ms=17.762
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=0 layer_type=mamba2 tokens=300 elapsed_before_sync_ms=151.436
+[PREFILL-LIVENESS] layer_end chunk=0 layer=0 layer_type=mamba2 tokens=300 layer_ms=151.496 sync_ms=0.060
+[PREFILL-LIVENESS] layer_start chunk=0 layer=1 layer_type=pass tokens=300 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=1 tokens=300 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=1 tokens=300 elapsed_ms=320.330
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=1 layer_type=pass tokens=300 elapsed_before_sync_ms=320.550
+[PREFILL-LIVENESS] layer_end chunk=0 layer=1 layer_type=pass tokens=300 layer_ms=320.609 sync_ms=0.060
+[PREFILL-LIVENESS] layer_start chunk=0 layer=2 layer_type=mamba2 tokens=300 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=2 tokens=300 total_ms=32.984 in_proj_ms=0.188 split_extract_ms=0.012 conv1d_silu_ms=0.029 ssd_scan_ms=32.658 gated_rmsnorm_ms=0.018 out_proj_ms=0.079
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=2 layer_type=mamba2 tokens=300 elapsed_before_sync_ms=33.263
+[PREFILL-LIVENESS] layer_end chunk=0 layer=2 layer_type=mamba2 tokens=300 layer_ms=33.322 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=3 layer_type=pass tokens=300 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=3 tokens=300 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=3 tokens=300 elapsed_ms=2.478
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=3 layer_type=pass tokens=300 elapsed_before_sync_ms=2.646
+[PREFILL-LIVENESS] layer_end chunk=0 layer=3 layer_type=pass tokens=300 layer_ms=2.704 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=4 layer_type=mamba2 tokens=300 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=4 tokens=300 total_ms=32.988 in_proj_ms=0.153 split_extract_ms=0.010 conv1d_silu_ms=0.027 ssd_scan_ms=32.707 gated_rmsnorm_ms=0.018 out_proj_ms=0.072
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=4 layer_type=mamba2 tokens=300 elapsed_before_sync_ms=33.250
+[PREFILL-LIVENESS] layer_end chunk=0 layer=4 layer_type=mamba2 tokens=300 layer_ms=33.309 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=5 layer_type=gqa tokens=300 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=5 layer_type=gqa tokens=300 elapsed_before_sync_ms=8.887
+[PREFILL-LIVENESS] layer_end chunk=0 layer=5 layer_type=gqa tokens=300 layer_ms=8.951 sync_ms=0.064
+[PREFILL-LIVENESS] layer_start chunk=0 layer=6 layer_type=pass tokens=300 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=6 tokens=300 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=6 tokens=300 elapsed_ms=3.272
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=6 layer_type=pass tokens=300 elapsed_before_sync_ms=3.440
+[PREFILL-LIVENESS] layer_end chunk=0 layer=6 layer_type=pass tokens=300 layer_ms=3.498 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=7 layer_type=mamba2 tokens=300 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=7 tokens=300 total_ms=32.932 in_proj_ms=0.153 split_extract_ms=0.011 conv1d_silu_ms=0.027 ssd_scan_ms=32.649 gated_rmsnorm_ms=0.018 out_proj_ms=0.073
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=7 layer_type=mamba2 tokens=300 elapsed_before_sync_ms=33.189
+[PREFILL-LIVENESS] layer_end chunk=0 layer=7 layer_type=mamba2 tokens=300 layer_ms=33.255 sync_ms=0.066
+[PREFILL-LIVENESS] layer_start chunk=0 layer=8 layer_type=pass tokens=300 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=8 tokens=300 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=8 tokens=300 elapsed_ms=4.300
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=8 layer_type=pass tokens=300 elapsed_before_sync_ms=4.490
+[PREFILL-LIVENESS] layer_end chunk=0 layer=8 layer_type=pass tokens=300 layer_ms=4.548 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=9 layer_type=mamba2 tokens=300 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=9 tokens=300 total_ms=32.966 in_proj_ms=0.159 split_extract_ms=0.010 conv1d_silu_ms=0.029 ssd_scan_ms=32.674 gated_rmsnorm_ms=0.019 out_proj_ms=0.074
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=9 layer_type=mamba2 tokens=300 elapsed_before_sync_ms=33.224
+[PREFILL-LIVENESS] layer_end chunk=0 layer=9 layer_type=mamba2 tokens=300 layer_ms=33.288 sync_ms=0.064
+[PREFILL-LIVENESS] layer_start chunk=0 layer=10 layer_type=pass tokens=300 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=10 tokens=300 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=10 tokens=300 elapsed_ms=3.974
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=10 layer_type=pass tokens=300 elapsed_before_sync_ms=4.139
+[PREFILL-LIVENESS] layer_end chunk=0 layer=10 layer_type=pass tokens=300 layer_ms=4.197 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=11 layer_type=mamba2 tokens=300 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=11 tokens=300 total_ms=32.865 in_proj_ms=0.150 split_extract_ms=0.015 conv1d_silu_ms=0.027 ssd_scan_ms=32.584 gated_rmsnorm_ms=0.018 out_proj_ms=0.071
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=11 layer_type=mamba2 tokens=300 elapsed_before_sync_ms=33.123
+[PREFILL-LIVENESS] layer_end chunk=0 layer=11 layer_type=mamba2 tokens=300 layer_ms=33.181 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=12 layer_type=gqa tokens=300 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=12 layer_type=gqa tokens=300 elapsed_before_sync_ms=0.760
+[PREFILL-LIVENESS] layer_end chunk=0 layer=12 layer_type=gqa tokens=300 layer_ms=0.817 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=13 layer_type=pass tokens=300 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=13 tokens=300 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=13 tokens=300 elapsed_ms=3.634
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=13 layer_type=pass tokens=300 elapsed_before_sync_ms=3.801
+[PREFILL-LIVENESS] layer_end chunk=0 layer=13 layer_type=pass tokens=300 layer_ms=3.859 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=14 layer_type=mamba2 tokens=300 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=14 tokens=300 total_ms=32.888 in_proj_ms=0.151 split_extract_ms=0.010 conv1d_silu_ms=0.029 ssd_scan_ms=32.607 gated_rmsnorm_ms=0.018 out_proj_ms=0.073
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=14 layer_type=mamba2 tokens=300 elapsed_before_sync_ms=33.146
+[PREFILL-LIVENESS] layer_end chunk=0 layer=14 layer_type=mamba2 tokens=300 layer_ms=33.204 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=15 layer_type=pass tokens=300 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=15 tokens=300 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=15 tokens=300 elapsed_ms=3.621
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=15 layer_type=pass tokens=300 elapsed_before_sync_ms=3.787
+[PREFILL-LIVENESS] layer_end chunk=0 layer=15 layer_type=pass tokens=300 layer_ms=3.845 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=16 layer_type=mamba2 tokens=300 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=16 tokens=300 total_ms=32.867 in_proj_ms=0.151 split_extract_ms=0.011 conv1d_silu_ms=0.027 ssd_scan_ms=32.588 gated_rmsnorm_ms=0.018 out_proj_ms=0.072
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=16 layer_type=mamba2 tokens=300 elapsed_before_sync_ms=33.123
+[PREFILL-LIVENESS] layer_end chunk=0 layer=16 layer_type=mamba2 tokens=300 layer_ms=33.182 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=17 layer_type=pass tokens=300 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=17 tokens=300 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=17 tokens=300 elapsed_ms=4.788
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=17 layer_type=pass tokens=300 elapsed_before_sync_ms=5.090
+[PREFILL-LIVENESS] layer_end chunk=0 layer=17 layer_type=pass tokens=300 layer_ms=5.148 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=18 layer_type=mamba2 tokens=300 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=18 tokens=300 total_ms=32.855 in_proj_ms=0.153 split_extract_ms=0.010 conv1d_silu_ms=0.028 ssd_scan_ms=32.574 gated_rmsnorm_ms=0.018 out_proj_ms=0.072
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=18 layer_type=mamba2 tokens=300 elapsed_before_sync_ms=33.112
+[PREFILL-LIVENESS] layer_end chunk=0 layer=18 layer_type=mamba2 tokens=300 layer_ms=33.170 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=19 layer_type=gqa tokens=300 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=19 layer_type=gqa tokens=300 elapsed_before_sync_ms=0.751
+[PREFILL-LIVENESS] layer_end chunk=0 layer=19 layer_type=gqa tokens=300 layer_ms=0.808 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=20 layer_type=pass tokens=300 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=20 tokens=300 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=20 tokens=300 elapsed_ms=3.677
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=20 layer_type=pass tokens=300 elapsed_before_sync_ms=3.841
+[PREFILL-LIVENESS] layer_end chunk=0 layer=20 layer_type=pass tokens=300 layer_ms=3.899 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=21 layer_type=mamba2 tokens=300 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=21 tokens=300 total_ms=32.845 in_proj_ms=0.150 split_extract_ms=0.010 conv1d_silu_ms=0.028 ssd_scan_ms=32.566 gated_rmsnorm_ms=0.018 out_proj_ms=0.073
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=21 layer_type=mamba2 tokens=300 elapsed_before_sync_ms=33.102
+[PREFILL-LIVENESS] layer_end chunk=0 layer=21 layer_type=mamba2 tokens=300 layer_ms=33.160 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=22 layer_type=pass tokens=300 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=22 tokens=300 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=22 tokens=300 elapsed_ms=5.342
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=22 layer_type=pass tokens=300 elapsed_before_sync_ms=5.510
+[PREFILL-LIVENESS] layer_end chunk=0 layer=22 layer_type=pass tokens=300 layer_ms=5.574 sync_ms=0.064
+[PREFILL-LIVENESS] layer_start chunk=0 layer=23 layer_type=mamba2 tokens=300 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=23 tokens=300 total_ms=32.849 in_proj_ms=0.151 split_extract_ms=0.010 conv1d_silu_ms=0.028 ssd_scan_ms=32.568 gated_rmsnorm_ms=0.019 out_proj_ms=0.073
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=23 layer_type=mamba2 tokens=300 elapsed_before_sync_ms=33.108
+[PREFILL-LIVENESS] layer_end chunk=0 layer=23 layer_type=mamba2 tokens=300 layer_ms=33.166 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=24 layer_type=pass tokens=300 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=24 tokens=300 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=24 tokens=300 elapsed_ms=6.564
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=24 layer_type=pass tokens=300 elapsed_before_sync_ms=6.730
+[PREFILL-LIVENESS] layer_end chunk=0 layer=24 layer_type=pass tokens=300 layer_ms=6.788 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=25 layer_type=mamba2 tokens=300 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=25 tokens=300 total_ms=32.867 in_proj_ms=0.151 split_extract_ms=0.010 conv1d_silu_ms=0.027 ssd_scan_ms=32.579 gated_rmsnorm_ms=0.022 out_proj_ms=0.077
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=25 layer_type=mamba2 tokens=300 elapsed_before_sync_ms=33.133
+[PREFILL-LIVENESS] layer_end chunk=0 layer=25 layer_type=mamba2 tokens=300 layer_ms=33.192 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=26 layer_type=gqa tokens=300 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=26 layer_type=gqa tokens=300 elapsed_before_sync_ms=0.756
+[PREFILL-LIVENESS] layer_end chunk=0 layer=26 layer_type=gqa tokens=300 layer_ms=0.813 sync_ms=0.057
+[PREFILL-LIVENESS] layer_start chunk=0 layer=27 layer_type=pass tokens=300 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=27 tokens=300 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=27 tokens=300 elapsed_ms=7.837
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=27 layer_type=pass tokens=300 elapsed_before_sync_ms=8.005
+[PREFILL-LIVENESS] layer_end chunk=0 layer=27 layer_type=pass tokens=300 layer_ms=8.063 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=28 layer_type=mamba2 tokens=300 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=28 tokens=300 total_ms=32.865 in_proj_ms=0.152 split_extract_ms=0.010 conv1d_silu_ms=0.031 ssd_scan_ms=32.580 gated_rmsnorm_ms=0.018 out_proj_ms=0.073
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=28 layer_type=mamba2 tokens=300 elapsed_before_sync_ms=33.123
+[PREFILL-LIVENESS] layer_end chunk=0 layer=28 layer_type=mamba2 tokens=300 layer_ms=33.181 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=29 layer_type=pass tokens=300 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=29 tokens=300 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=29 tokens=300 elapsed_ms=6.230
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=29 layer_type=pass tokens=300 elapsed_before_sync_ms=6.395
+[PREFILL-LIVENESS] layer_end chunk=0 layer=29 layer_type=pass tokens=300 layer_ms=6.453 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=30 layer_type=mamba2 tokens=300 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=30 tokens=300 total_ms=32.856 in_proj_ms=0.151 split_extract_ms=0.010 conv1d_silu_ms=0.027 ssd_scan_ms=32.576 gated_rmsnorm_ms=0.018 out_proj_ms=0.073
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=30 layer_type=mamba2 tokens=300 elapsed_before_sync_ms=33.113
+[PREFILL-LIVENESS] layer_end chunk=0 layer=30 layer_type=mamba2 tokens=300 layer_ms=33.171 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=31 layer_type=pass tokens=300 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=31 tokens=300 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=31 tokens=300 elapsed_ms=8.243
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=31 layer_type=pass tokens=300 elapsed_before_sync_ms=8.410
+[PREFILL-LIVENESS] layer_end chunk=0 layer=31 layer_type=pass tokens=300 layer_ms=8.489 sync_ms=0.079
+[PREFILL-LIVENESS] layer_start chunk=0 layer=32 layer_type=mamba2 tokens=300 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=32 tokens=300 total_ms=35.004 in_proj_ms=0.152 split_extract_ms=0.010 conv1d_silu_ms=0.029 ssd_scan_ms=32.576 gated_rmsnorm_ms=2.159 out_proj_ms=0.077
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=32 layer_type=mamba2 tokens=300 elapsed_before_sync_ms=35.265
+[PREFILL-LIVENESS] layer_end chunk=0 layer=32 layer_type=mamba2 tokens=300 layer_ms=35.323 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=33 layer_type=gqa tokens=300 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=33 layer_type=gqa tokens=300 elapsed_before_sync_ms=0.756
+[PREFILL-LIVENESS] layer_end chunk=0 layer=33 layer_type=gqa tokens=300 layer_ms=0.813 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=34 layer_type=pass tokens=300 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=34 tokens=300 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=34 tokens=300 elapsed_ms=8.671
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=34 layer_type=pass tokens=300 elapsed_before_sync_ms=8.839
+[PREFILL-LIVENESS] layer_end chunk=0 layer=34 layer_type=pass tokens=300 layer_ms=8.897 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=35 layer_type=mamba2 tokens=300 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=35 tokens=300 total_ms=32.850 in_proj_ms=0.152 split_extract_ms=0.010 conv1d_silu_ms=0.029 ssd_scan_ms=32.568 gated_rmsnorm_ms=0.018 out_proj_ms=0.072
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=35 layer_type=mamba2 tokens=300 elapsed_before_sync_ms=33.107
+[PREFILL-LIVENESS] layer_end chunk=0 layer=35 layer_type=mamba2 tokens=300 layer_ms=33.165 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=36 layer_type=pass tokens=300 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=36 tokens=300 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=36 tokens=300 elapsed_ms=6.234
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=36 layer_type=pass tokens=300 elapsed_before_sync_ms=6.399
+[PREFILL-LIVENESS] layer_end chunk=0 layer=36 layer_type=pass tokens=300 layer_ms=6.483 sync_ms=0.084
+[PREFILL-LIVENESS] layer_start chunk=0 layer=37 layer_type=mamba2 tokens=300 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=37 tokens=300 total_ms=32.857 in_proj_ms=0.150 split_extract_ms=0.010 conv1d_silu_ms=0.027 ssd_scan_ms=32.580 gated_rmsnorm_ms=0.018 out_proj_ms=0.072
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=37 layer_type=mamba2 tokens=300 elapsed_before_sync_ms=33.114
+[PREFILL-LIVENESS] layer_end chunk=0 layer=37 layer_type=mamba2 tokens=300 layer_ms=33.172 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=38 layer_type=pass tokens=300 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=38 tokens=300 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=38 tokens=300 elapsed_ms=6.297
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=38 layer_type=pass tokens=300 elapsed_before_sync_ms=6.461
+[PREFILL-LIVENESS] layer_end chunk=0 layer=38 layer_type=pass tokens=300 layer_ms=6.519 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=39 layer_type=mamba2 tokens=300 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=39 tokens=300 total_ms=32.842 in_proj_ms=0.150 split_extract_ms=0.010 conv1d_silu_ms=0.028 ssd_scan_ms=32.563 gated_rmsnorm_ms=0.018 out_proj_ms=0.072
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=39 layer_type=mamba2 tokens=300 elapsed_before_sync_ms=33.121
+[PREFILL-LIVENESS] layer_end chunk=0 layer=39 layer_type=mamba2 tokens=300 layer_ms=33.179 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=40 layer_type=pass tokens=300 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=40 tokens=300 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=40 tokens=300 elapsed_ms=4.085
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=40 layer_type=pass tokens=300 elapsed_before_sync_ms=4.249
+[PREFILL-LIVENESS] layer_end chunk=0 layer=40 layer_type=pass tokens=300 layer_ms=4.307 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=41 layer_type=mamba2 tokens=300 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=41 tokens=300 total_ms=32.853 in_proj_ms=0.151 split_extract_ms=0.011 conv1d_silu_ms=0.029 ssd_scan_ms=32.572 gated_rmsnorm_ms=0.018 out_proj_ms=0.072
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=41 layer_type=mamba2 tokens=300 elapsed_before_sync_ms=33.109
+[PREFILL-LIVENESS] layer_end chunk=0 layer=41 layer_type=mamba2 tokens=300 layer_ms=33.167 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=42 layer_type=gqa tokens=300 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=42 layer_type=gqa tokens=300 elapsed_before_sync_ms=0.750
+[PREFILL-LIVENESS] layer_end chunk=0 layer=42 layer_type=gqa tokens=300 layer_ms=0.808 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=43 layer_type=pass tokens=300 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=43 tokens=300 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=43 tokens=300 elapsed_ms=3.770
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=43 layer_type=pass tokens=300 elapsed_before_sync_ms=3.934
+[PREFILL-LIVENESS] layer_end chunk=0 layer=43 layer_type=pass tokens=300 layer_ms=3.992 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=44 layer_type=mamba2 tokens=300 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=44 tokens=300 total_ms=32.844 in_proj_ms=0.150 split_extract_ms=0.012 conv1d_silu_ms=0.029 ssd_scan_ms=32.563 gated_rmsnorm_ms=0.018 out_proj_ms=0.071
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=44 layer_type=mamba2 tokens=300 elapsed_before_sync_ms=33.101
+[PREFILL-LIVENESS] layer_end chunk=0 layer=44 layer_type=mamba2 tokens=300 layer_ms=33.159 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=45 layer_type=pass tokens=300 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=45 tokens=300 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=45 tokens=300 elapsed_ms=4.093
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=45 layer_type=pass tokens=300 elapsed_before_sync_ms=4.256
+[PREFILL-LIVENESS] layer_end chunk=0 layer=45 layer_type=pass tokens=300 layer_ms=4.315 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=46 layer_type=mamba2 tokens=300 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=46 tokens=300 total_ms=32.847 in_proj_ms=0.151 split_extract_ms=0.011 conv1d_silu_ms=0.027 ssd_scan_ms=32.568 gated_rmsnorm_ms=0.018 out_proj_ms=0.073
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=46 layer_type=mamba2 tokens=300 elapsed_before_sync_ms=33.105
+[PREFILL-LIVENESS] layer_end chunk=0 layer=46 layer_type=mamba2 tokens=300 layer_ms=33.163 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=47 layer_type=pass tokens=300 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=47 tokens=300 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=47 tokens=300 elapsed_ms=4.106
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=47 layer_type=pass tokens=300 elapsed_before_sync_ms=4.270
+[PREFILL-LIVENESS] layer_end chunk=0 layer=47 layer_type=pass tokens=300 layer_ms=4.333 sync_ms=0.063
+[PREFILL-LIVENESS] layer_start chunk=0 layer=48 layer_type=mamba2 tokens=300 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=48 tokens=300 total_ms=32.842 in_proj_ms=0.152 split_extract_ms=0.010 conv1d_silu_ms=0.027 ssd_scan_ms=32.562 gated_rmsnorm_ms=0.018 out_proj_ms=0.073
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=48 layer_type=mamba2 tokens=300 elapsed_before_sync_ms=33.099
+[PREFILL-LIVENESS] layer_end chunk=0 layer=48 layer_type=mamba2 tokens=300 layer_ms=33.158 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=49 layer_type=pass tokens=300 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=49 tokens=300 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=49 tokens=300 elapsed_ms=3.116
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=49 layer_type=pass tokens=300 elapsed_before_sync_ms=3.280
+[PREFILL-LIVENESS] layer_end chunk=0 layer=49 layer_type=pass tokens=300 layer_ms=3.338 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=50 layer_type=mamba2 tokens=300 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=50 tokens=300 total_ms=32.829 in_proj_ms=0.151 split_extract_ms=0.010 conv1d_silu_ms=0.029 ssd_scan_ms=32.547 gated_rmsnorm_ms=0.018 out_proj_ms=0.072
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=50 layer_type=mamba2 tokens=300 elapsed_before_sync_ms=33.082
+[PREFILL-LIVENESS] layer_end chunk=0 layer=50 layer_type=mamba2 tokens=300 layer_ms=33.140 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=51 layer_type=pass tokens=300 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=51 tokens=300 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=51 tokens=300 elapsed_ms=3.164
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=51 layer_type=pass tokens=300 elapsed_before_sync_ms=3.334
+[PREFILL-LIVENESS] layer_end chunk=0 layer=51 layer_type=pass tokens=300 layer_ms=3.392 sync_ms=0.058
+[PREFILL-LIVENESS] chunk_end chunk=0 tokens=300 elapsed_ms=1334.163
+[PREFILL-TIMING] 300 tokens, 1351.4ms total (222 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        1.4ms (  0.1%)
+[PREFILL-TIMING]   attn:      892.4ms ( 66.0%)  [gqa: 12.1ms, la: 0.0ms]
+[PREFILL-TIMING]     gqa breakdown (6 FA2 calls: 6 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:         2.8ms ( 23.5% of gqa)
+[PREFILL-TIMING]       qknorm:       0.0ms (  0.4% of gqa)
+[PREFILL-TIMING]       rope:         0.1ms (  0.9% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.1ms (  0.4% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.1ms over 6 calls
+[PREFILL-TIMING]       fa2         8.1ms ( 66.8% of gqa)  [1.3ms/call avg]
+[PREFILL-TIMING]       gate:         0.0ms (  0.0% of gqa)
+[PREFILL-TIMING]       o_proj:       0.9ms (  7.6% of gqa)
+[PREFILL-TIMING]     gqa queue events:
+[PREFILL-TIMING]         proj         event=     2.8ms wall=     2.8ms wall_minus_event=     0.0ms sync=     0.0ms over 6 calls
+[PREFILL-TIMING]         qkv_norm     event=     0.0ms wall=     0.0ms wall_minus_event=     0.0ms sync=     0.0ms over 6 calls
+[PREFILL-TIMING]         rope         event=     0.1ms wall=     0.1ms wall_minus_event=     0.0ms sync=     0.1ms over 6 calls
+[PREFILL-TIMING]         fa2          event=     8.0ms wall=     8.1ms wall_minus_event=     0.0ms sync=     0.2ms over 6 calls
+[PREFILL-TIMING]         kv_append    event=     0.0ms wall=     0.1ms wall_minus_event=     0.1ms sync=     0.0ms over 0 calls
+[PREFILL-TIMING]         o_proj       event=     0.9ms wall=     0.9ms wall_minus_event=     0.0ms sync=     0.0ms over 6 calls
+[PREFILL-TIMING]     hqq projection internals:
+[PREFILL-TIMING]       marlin_float_zp:      2.5ms over 24 calls
+[PREFILL-TIMING]       group_sums:           0.2ms over 24 calls
+[PREFILL-TIMING]       correction_gemm:      0.5ms over 24 calls
+[PREFILL-TIMING]       correction_add:       0.2ms over 24 calls
+[PREFILL-TIMING]     mamba2 breakdown (diagnostic sync-isolated): wall=   874.7ms ( 64.7% of prefill,  98.0% of mixer) event=   872.0ms sync=   757.0ms
+[PREFILL-TIMING]       in_proj          wall=   102.1ms event=   102.0ms sync=     3.1ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]       split_extract    wall=     0.3ms event=     0.2ms sync=     0.1ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]       conv1d_silu      wall=     0.7ms event=     0.6ms sync=     0.5ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]       ssd_scan         wall=   749.7ms event=   749.6ms sync=   749.6ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]       gated_rmsnorm    wall=     2.6ms event=     0.3ms sync=     2.4ms wall_minus_event=     2.2ms over 23 calls
+[PREFILL-TIMING]       out_proj         wall=    19.4ms event=    19.3ms sync=     1.2ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]   moe:       429.1ms ( 31.8%)
+[PREFILL-TIMING]     moe breakdown (48 layers):
+[PREFILL-TIMING]       gate:        49.8ms ( 11.6% of moe)
+[PREFILL-TIMING]       dma:         92.9ms ( 21.7% of moe)
+[PREFILL-TIMING]         route_d2h:     0.5ms ptr_alloc:     0.3ms ptr_build:     0.0ms
+[PREFILL-TIMING]         cold_h2d:      3.9ms ptr_upload:     0.2ms dma_wait:    82.1ms
+[PREFILL-TIMING]       w1+act:     276.9ms ( 64.5% of moe)
+[PREFILL-TIMING]       w2:           6.0ms (  1.4% of moe)
+[PREFILL-TIMING]       scatter:      0.3ms (  0.1% of moe)
+[PREFILL-TIMING]       shared:       0.4ms (  0.1% of moe)
+[PREFILL-TIMING]   other:      28.5ms (  2.1%)
+  [32mRust prefill warmed with 300 tokens before HCS budgeting[0m
+  [32mWarmup complete in 1.4s[0m
+  [2mcuda:0 warmup:  peak 8,804 MB used / 32,119 MB total  (min free: 23,314 MB)[0m
+
+[1m[36m▸ VRAM calibration[0m
+  [32mSafety margin: 600 MB[0m
+  [32mFree VRAM after startup: 23,716 MB / 32,119 MB[0m
+  [32mStartup diag: calibration tokens short=500 (default 500), long=39,920 (default 39,920), cap=49,900, forced_long=False[0m
+  [32mShort calibration: probing 500 prompt tokens + 32 decode tokens[0m
+[PREFILL-LIVENESS] run_start total_tokens=500 scratch_max_tokens=500 max_chunk=500 chunk_size=500 num_chunks=1 chunk_plan=[500] expert_bits=4 shared_expert_bits=4 hidden_size=2688 layers=52
+[PREFILL-LIVENESS] chunk_start chunk=0 total_chunks=1 start=0 end=500 tokens=500 tok0=10 last_pos=499 last_tok=1010
+[PREFILL-LIVENESS] chunk_after_hcs_guard chunk=0 tokens=500 elapsed_ms=0.082
+[PREFILL-LIVENESS] layer_start chunk=0 layer=0 layer_type=mamba2 tokens=500 has_residual=false moe_gate=false shared_bf16=false shared_marlin=false
+[MAMBA2-SSD-LOCAL-TRI-ORACLE] {"available":true,"components":{"D":0.44140625,"c_state_total":7.7314453125,"cpu_matches_sequential_gpu_bits":true,"cpu_y_bf16_bits":"0x40f5","cpu_y_bf16_value":7.65625,"d_x":-0.07974624633789062,"local_hf_chunk_scan_bf16_coeff":-0.27187108993530273,"local_hf_chunk_scan_fp32_coeff":-0.2723931074142456,"local_old_state":-0.26835575699806213,"prior_chunk_state":7.999801158905029,"sequential_gpu_y_bf16_bits":"0x40f5","sequential_gpu_y_bf16_value":7.65625,"x_target":-0.1806640625,"x_target_bits":"0xbe39","y_pre_bf16":7.648183822631836},"diagnostic":"mamba2_ssd_local_triangular_oracle","dimensions":{"chunk_pos":6,"chunk_start":64,"d_inner":4096,"effective_chunk_size":64,"head_dim":64,"heads_per_group":8,"inside_chunk_zero":false,"m":500,"n_groups":8,"n_heads":64,"requested_chunk_size":64,"state_size":128},"interpretation":"CPU local-triangular recompute matches the existing sequential GPU oracle at the target coordinate; corrected chunk candidate must reproduce these exact terms before optimizing.","layer":0,"local_triangular_terms":[{"accum_bf16_coeff_after":-0.2000885009765625,"accum_fp32_coeff_after":-0.200163334608078,"cb_forward":0.21903395652770996,"cb_forward_minus_reverse":4.470348358154297e-8,"cb_reverse":0.21903391182422638,"cb_scaled_bf16":1.1015625,"cb_scaled_bf16_bits":"0x3f8d","cb_scaled_pre_bf16":1.1019744873046875,"chunk_position":0,"dA_after":-0.6334859728813171,"dA_before":-0.6229221820831299,"dA_increment":-0.01056378148496151,"dA_target":-0.6862797141075134,"decay":0.9485756158828735,"decay_arg":-0.05279374122619629,"dt_after_softplus":5.3038129806518555,"dt_plus_bias":5.298828125,"dt_times_x":-0.9633879065513611,"included_by_lower_triangle":true,"raw_dt":0.486328125,"raw_dt_bits":"0x3ef9","scale_decay_times_dt":5.031067848205566,"self_sample":false,"term_bf16_coeff_times_x":-0.2000885009765625,"term_fp32_coeff_times_x":-0.200163334608078,"top_state_contrib":-0.15167236328125,"top_state_index":100,"u":64,"x":-0.181640625,"x_bits":"0xbe3a"},{"accum_bf16_coeff_after":-0.0988616943359375,"accum_fp32_coeff_after":-0.0988905131816864,"cb_forward":0.15783925354480743,"cb_forward_minus_reverse":1.4901161193847656e-8,"cb_reverse":0.15783923864364624,"cb_scaled_bf16":1.9375,"cb_scaled_bf16_bits":"0x3ff8","cb_scaled_pre_bf16":1.9383807182312012,"chunk_position":1,"dA_after":-0.6586316227912903,"dA_before":-0.6334859728813171,"dA_increment":-0.0251456405967474,"dA_target":-0.6862797141075134,"decay":0.9727306365966797,"decay_arg":-0.027648091316223145,"dt_after_softplus":12.62500286102295,"dt_plus_bias":12.625,"dt_times_x":0.6596071124076843,"included_by_lower_triangle":true,"raw_dt":7.8125,"raw_dt_bits":"0x40fa","scale_decay_times_dt":12.28072738647461,"self_sample":false,"term_bf16_coeff_times_x":0.101226806640625,"term_fp32_coeff_times_x":0.1012728214263916,"top_state_contrib":-0.15167236328125,"top_state_index":100,"u":65,"x":0.05224609375,"x_bits":"0x3d56"},{"accum_bf16_coeff_after":-0.395904541015625,"accum_fp32_coeff_after":-0.3962450623512268,"cb_forward":0.5857030749320984,"cb_forward_minus_reverse":0.0,"cb_reverse":0.5857030749320984,"cb_scaled_bf16":1.609375,"cb_scaled_bf16_bits":"0x3fce","cb_scaled_pre_bf16":1.611063838005066,"chunk_position":2,"dA_after":-0.6642323136329651,"dA_before":-0.6586316227912903,"dA_increment":-0.00560068991035223,"dA_target":-0.6862797141075134,"decay":0.9781938791275024,"decay_arg":-0.02204740047454834,"dt_after_softplus":2.811967611312866,"dt_plus_bias":2.75,"dt_times_x":-0.5190057158470154,"included_by_lower_triangle":true,"raw_dt":-2.0625,"raw_dt_bits":"0xc004","scale_decay_times_dt":2.7506494522094727,"self_sample":false,"term_bf16_coeff_times_x":-0.2970428466796875,"term_fp32_coeff_times_x":-0.2973545491695404,"top_state_contrib":-0.15167236328125,"top_state_index":100,"u":66,"x":-0.1845703125,"x_bits":"0xbe3d"},{"accum_bf16_coeff_after":-0.4632530212402344,"accum_fp32_coeff_after":-0.4635993540287018,"cb_forward":0.6447319388389587,"cb_forward_minus_reverse":5.960464477539063e-8,"cb_reverse":0.644731879234314,"cb_scaled_bf16":0.322265625,"cb_scaled_bf16_bits":"0x3ea5","cb_scaled_pre_bf16":0.32229340076446533,"chunk_position":3,"dA_after":-0.6652491092681885,"dA_before":-0.6642323136329651,"dA_increment":-0.0010168033186346292,"dA_target":-0.6862797141075134,"decay":0.9791889786720276,"decay_arg":-0.02103060483932495,"dt_after_softplus":0.5105117559432983,"dt_plus_bias":-0.40625,"dt_times_x":-0.1066889837384224,"included_by_lower_triangle":true,"raw_dt":-5.21875,"raw_dt_bits":"0xc0a7","scale_decay_times_dt":0.49988749623298645,"self_sample":false,"term_bf16_coeff_times_x":-0.06734848022460938,"term_fp32_coeff_times_x":-0.06735428422689438,"top_state_contrib":-0.15167236328125,"top_state_index":100,"u":67,"x":-0.208984375,"x_bits":"0xbe56"},{"accum_bf16_coeff_after":-0.4768643379211426,"accum_fp32_coeff_after":-0.4772036671638489,"cb_forward":0.19592151045799255,"cb_forward_minus_reverse":1.4901161193847656e-8,"cb_reverse":0.19592149555683136,"cb_scaled_bf16":0.08447265625,"cb_scaled_bf16_bits":"0x3dad","cb_scaled_pre_bf16":0.08442915976047516,"chunk_position":4,"dA_after":-0.6661248803138733,"dA_before":-0.6652491092681885,"dA_increment":-0.0008757793693803251,"dA_target":-0.6862797141075134,"decay":0.9800469279289246,"decay_arg":-0.020154833793640137,"dt_after_softplus":0.4397071301937103,"dt_plus_bias":-0.59375,"dt_times_x":-0.07085124403238297,"included_by_lower_triangle":true,"raw_dt":-5.40625,"raw_dt_bits":"0xc0ad","scale_decay_times_dt":0.4309336245059967,"self_sample":false,"term_bf16_coeff_times_x":-0.013611316680908203,"term_fp32_coeff_times_x":-0.013604307547211647,"top_state_contrib":-0.15167236328125,"top_state_index":100,"u":68,"x":-0.1611328125,"x_bits":"0xbe25"},{"accum_bf16_coeff_after":-0.3119206428527832,"accum_fp32_coeff_after":-0.3123997151851654,"cb_forward":0.13150763511657715,"cb_forward_minus_reverse":1.4901161193847656e-8,"cb_reverse":0.13150762021541595,"cb_scaled_bf16":0.83203125,"cb_scaled_bf16_bits":"0x3f55","cb_scaled_pre_bf16":0.8313263654708862,"chunk_position":5,"dA_after":-0.6788100600242615,"dA_before":-0.6661248803138733,"dA_increment":-0.012685157358646393,"dA_target":-0.6862797141075134,"decay":0.9925581812858582,"decay_arg":-0.007469654083251953,"dt_after_softplus":6.368903160095215,"dt_plus_bias":6.3671875,"dt_times_x":1.2625852823257446,"included_by_lower_triangle":true,"raw_dt":1.5546875,"raw_dt_bits":"0x3fc7","scale_decay_times_dt":6.321506977081299,"self_sample":false,"term_bf16_coeff_times_x":0.16494369506835938,"term_fp32_coeff_times_x":0.16480395197868347,"top_state_contrib":-0.15167236328125,"top_state_index":100,"u":69,"x":0.1982421875,"x_bits":"0x3e4b"},{"accum_bf16_coeff_after":-0.27187108993530273,"accum_fp32_coeff_after":-0.2723931074142456,"cb_forward":-0.059045642614364624,"cb_forward_minus_reverse":1.4901161193847656e-8,"cb_reverse":-0.05904565751552582,"cb_scaled_bf16":-0.2216796875,"cb_scaled_bf16_bits":"0xbe63","cb_scaled_pre_bf16":-0.22144204378128052,"chunk_position":6,"dA_after":-0.6862797737121582,"dA_before":-0.6788100600242615,"dA_increment":-0.007469702512025833,"dA_target":-0.6862797141075134,"decay":1.0,"decay_arg":0.0,"dt_after_softplus":3.750352621078491,"dt_plus_bias":3.7265625,"dt_times_x":-0.6775539517402649,"included_by_lower_triangle":true,"raw_dt":-1.0859375,"raw_dt_bits":"0xbf8b","scale_decay_times_dt":3.750352621078491,"self_sample":true,"term_bf16_coeff_times_x":0.04004955291748047,"term_fp32_coeff_times_x":0.040006618946790695,"top_state_contrib":-0.15167236328125,"top_state_index":100,"u":70,"x":-0.1806640625,"x_bits":"0xbe39"}],"prefix":{"a_log":-6.21875,"a_value_neg_exp":-0.001991733442991972,"dA_chunk_base":-0.6229221820831299,"dA_target":-0.6862797141075134,"dt_bias":4.8125,"local_dA_increments":[-0.01056378148496151,-0.0251456405967474,-0.00560068991035223,-0.0010168033186346292,-0.0008757793693803251,-0.012685157358646393,-0.007469702512025833],"local_dA_prefix_cumulative":[-0.6334859728813171,-0.6586316227912903,-0.6642323136329651,-0.6652491092681885,-0.6661248803138733,-0.6788100600242615,-0.6862797141075134]},"target":{"dim_index":2418,"flat_index":289138,"group":4,"head":37,"head_dim_index":50,"row":70}}
+[PREFILL-LIVENESS] mamba2_substages layer=0 tokens=500 total_ms=59.064 in_proj_ms=0.298 split_extract_ms=0.014 conv1d_silu_ms=0.036 ssd_scan_ms=58.160 gated_rmsnorm_ms=0.025 out_proj_ms=0.532
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=0 layer_type=mamba2 tokens=500 elapsed_before_sync_ms=61.010
+[PREFILL-LIVENESS] layer_end chunk=0 layer=0 layer_type=mamba2 tokens=500 layer_ms=61.068 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=1 layer_type=pass tokens=500 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=1 tokens=500 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=1 tokens=500 elapsed_ms=30.187
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=1 layer_type=pass tokens=500 elapsed_before_sync_ms=30.360
+[PREFILL-LIVENESS] layer_end chunk=0 layer=1 layer_type=pass tokens=500 layer_ms=30.422 sync_ms=0.062
+[PREFILL-LIVENESS] layer_start chunk=0 layer=2 layer_type=mamba2 tokens=500 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=2 tokens=500 total_ms=58.421 in_proj_ms=0.160 split_extract_ms=0.013 conv1d_silu_ms=0.035 ssd_scan_ms=58.032 gated_rmsnorm_ms=0.022 out_proj_ms=0.156
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=2 layer_type=mamba2 tokens=500 elapsed_before_sync_ms=58.692
+[PREFILL-LIVENESS] layer_end chunk=0 layer=2 layer_type=mamba2 tokens=500 layer_ms=58.750 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=3 layer_type=pass tokens=500 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=3 tokens=500 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=3 tokens=500 elapsed_ms=26.482
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=3 layer_type=pass tokens=500 elapsed_before_sync_ms=27.966
+[PREFILL-LIVENESS] layer_end chunk=0 layer=3 layer_type=pass tokens=500 layer_ms=28.024 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=4 layer_type=mamba2 tokens=500 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=4 tokens=500 total_ms=58.537 in_proj_ms=0.158 split_extract_ms=0.013 conv1d_silu_ms=0.035 ssd_scan_ms=58.153 gated_rmsnorm_ms=0.023 out_proj_ms=0.155
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=4 layer_type=mamba2 tokens=500 elapsed_before_sync_ms=58.793
+[PREFILL-LIVENESS] layer_end chunk=0 layer=4 layer_type=mamba2 tokens=500 layer_ms=58.851 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=5 layer_type=gqa tokens=500 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=5 layer_type=gqa tokens=500 elapsed_before_sync_ms=1.036
+[PREFILL-LIVENESS] layer_end chunk=0 layer=5 layer_type=gqa tokens=500 layer_ms=1.098 sync_ms=0.061
+[PREFILL-LIVENESS] layer_start chunk=0 layer=6 layer_type=pass tokens=500 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=6 tokens=500 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=6 tokens=500 elapsed_ms=26.598
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=6 layer_type=pass tokens=500 elapsed_before_sync_ms=28.067
+[PREFILL-LIVENESS] layer_end chunk=0 layer=6 layer_type=pass tokens=500 layer_ms=28.125 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=7 layer_type=mamba2 tokens=500 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=7 tokens=500 total_ms=58.390 in_proj_ms=0.158 split_extract_ms=0.012 conv1d_silu_ms=0.035 ssd_scan_ms=58.004 gated_rmsnorm_ms=0.022 out_proj_ms=0.158
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=7 layer_type=mamba2 tokens=500 elapsed_before_sync_ms=58.662
+[PREFILL-LIVENESS] layer_end chunk=0 layer=7 layer_type=mamba2 tokens=500 layer_ms=58.721 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=8 layer_type=pass tokens=500 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=8 tokens=500 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=8 tokens=500 elapsed_ms=26.462
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=8 layer_type=pass tokens=500 elapsed_before_sync_ms=27.976
+[PREFILL-LIVENESS] layer_end chunk=0 layer=8 layer_type=pass tokens=500 layer_ms=28.034 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=9 layer_type=mamba2 tokens=500 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=9 tokens=500 total_ms=58.506 in_proj_ms=0.158 split_extract_ms=0.013 conv1d_silu_ms=0.036 ssd_scan_ms=58.120 gated_rmsnorm_ms=0.023 out_proj_ms=0.156
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=9 layer_type=mamba2 tokens=500 elapsed_before_sync_ms=58.766
+[PREFILL-LIVENESS] layer_end chunk=0 layer=9 layer_type=mamba2 tokens=500 layer_ms=58.825 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=10 layer_type=pass tokens=500 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=10 tokens=500 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=10 tokens=500 elapsed_ms=26.788
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=10 layer_type=pass tokens=500 elapsed_before_sync_ms=28.302
+[PREFILL-LIVENESS] layer_end chunk=0 layer=10 layer_type=pass tokens=500 layer_ms=28.360 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=11 layer_type=mamba2 tokens=500 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=11 tokens=500 total_ms=58.198 in_proj_ms=0.156 split_extract_ms=0.013 conv1d_silu_ms=0.036 ssd_scan_ms=57.815 gated_rmsnorm_ms=0.023 out_proj_ms=0.156
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=11 layer_type=mamba2 tokens=500 elapsed_before_sync_ms=58.461
+[PREFILL-LIVENESS] layer_end chunk=0 layer=11 layer_type=mamba2 tokens=500 layer_ms=58.519 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=12 layer_type=gqa tokens=500 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=12 layer_type=gqa tokens=500 elapsed_before_sync_ms=0.881
+[PREFILL-LIVENESS] layer_end chunk=0 layer=12 layer_type=gqa tokens=500 layer_ms=0.937 sync_ms=0.057
+[PREFILL-LIVENESS] layer_start chunk=0 layer=13 layer_type=pass tokens=500 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=13 tokens=500 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=13 tokens=500 elapsed_ms=26.431
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=13 layer_type=pass tokens=500 elapsed_before_sync_ms=27.944
+[PREFILL-LIVENESS] layer_end chunk=0 layer=13 layer_type=pass tokens=500 layer_ms=28.002 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=14 layer_type=mamba2 tokens=500 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=14 tokens=500 total_ms=58.207 in_proj_ms=0.156 split_extract_ms=0.012 conv1d_silu_ms=0.037 ssd_scan_ms=57.823 gated_rmsnorm_ms=0.023 out_proj_ms=0.155
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=14 layer_type=mamba2 tokens=500 elapsed_before_sync_ms=58.465
+[PREFILL-LIVENESS] layer_end chunk=0 layer=14 layer_type=mamba2 tokens=500 layer_ms=58.523 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=15 layer_type=pass tokens=500 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=15 tokens=500 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=15 tokens=500 elapsed_ms=26.493
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=15 layer_type=pass tokens=500 elapsed_before_sync_ms=27.996
+[PREFILL-LIVENESS] layer_end chunk=0 layer=15 layer_type=pass tokens=500 layer_ms=28.054 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=16 layer_type=mamba2 tokens=500 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=16 tokens=500 total_ms=58.188 in_proj_ms=0.157 split_extract_ms=0.013 conv1d_silu_ms=0.036 ssd_scan_ms=57.803 gated_rmsnorm_ms=0.023 out_proj_ms=0.155
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=16 layer_type=mamba2 tokens=500 elapsed_before_sync_ms=58.448
+[PREFILL-LIVENESS] layer_end chunk=0 layer=16 layer_type=mamba2 tokens=500 layer_ms=58.506 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=17 layer_type=pass tokens=500 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=17 tokens=500 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=17 tokens=500 elapsed_ms=27.644
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=17 layer_type=pass tokens=500 elapsed_before_sync_ms=29.180
+[PREFILL-LIVENESS] layer_end chunk=0 layer=17 layer_type=pass tokens=500 layer_ms=29.248 sync_ms=0.068
+[PREFILL-LIVENESS] layer_start chunk=0 layer=18 layer_type=mamba2 tokens=500 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=18 tokens=500 total_ms=58.215 in_proj_ms=0.163 split_extract_ms=0.012 conv1d_silu_ms=0.036 ssd_scan_ms=57.822 gated_rmsnorm_ms=0.022 out_proj_ms=0.159
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=18 layer_type=mamba2 tokens=500 elapsed_before_sync_ms=58.474
+[PREFILL-LIVENESS] layer_end chunk=0 layer=18 layer_type=mamba2 tokens=500 layer_ms=58.532 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=19 layer_type=gqa tokens=500 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=19 layer_type=gqa tokens=500 elapsed_before_sync_ms=0.882
+[PREFILL-LIVENESS] layer_end chunk=0 layer=19 layer_type=gqa tokens=500 layer_ms=0.939 sync_ms=0.057
+[PREFILL-LIVENESS] layer_start chunk=0 layer=20 layer_type=pass tokens=500 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=20 tokens=500 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=20 tokens=500 elapsed_ms=26.736
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=20 layer_type=pass tokens=500 elapsed_before_sync_ms=28.266
+[PREFILL-LIVENESS] layer_end chunk=0 layer=20 layer_type=pass tokens=500 layer_ms=28.324 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=21 layer_type=mamba2 tokens=500 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=21 tokens=500 total_ms=58.198 in_proj_ms=0.155 split_extract_ms=0.013 conv1d_silu_ms=0.036 ssd_scan_ms=57.810 gated_rmsnorm_ms=0.025 out_proj_ms=0.160
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=21 layer_type=mamba2 tokens=500 elapsed_before_sync_ms=58.452
+[PREFILL-LIVENESS] layer_end chunk=0 layer=21 layer_type=mamba2 tokens=500 layer_ms=58.506 sync_ms=0.054
+[PREFILL-LIVENESS] layer_start chunk=0 layer=22 layer_type=pass tokens=500 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=22 tokens=500 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=22 tokens=500 elapsed_ms=26.457
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=22 layer_type=pass tokens=500 elapsed_before_sync_ms=27.973
+[PREFILL-LIVENESS] layer_end chunk=0 layer=22 layer_type=pass tokens=500 layer_ms=28.026 sync_ms=0.053
+[PREFILL-LIVENESS] layer_start chunk=0 layer=23 layer_type=mamba2 tokens=500 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=23 tokens=500 total_ms=58.196 in_proj_ms=0.156 split_extract_ms=0.013 conv1d_silu_ms=0.037 ssd_scan_ms=57.811 gated_rmsnorm_ms=0.023 out_proj_ms=0.156
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=23 layer_type=mamba2 tokens=500 elapsed_before_sync_ms=58.439
+[PREFILL-LIVENESS] layer_end chunk=0 layer=23 layer_type=mamba2 tokens=500 layer_ms=58.493 sync_ms=0.054
+[PREFILL-LIVENESS] layer_start chunk=0 layer=24 layer_type=pass tokens=500 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=24 tokens=500 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=24 tokens=500 elapsed_ms=26.503
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=24 layer_type=pass tokens=500 elapsed_before_sync_ms=28.012
+[PREFILL-LIVENESS] layer_end chunk=0 layer=24 layer_type=pass tokens=500 layer_ms=28.066 sync_ms=0.053
+[PREFILL-LIVENESS] layer_start chunk=0 layer=25 layer_type=mamba2 tokens=500 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=25 tokens=500 total_ms=58.239 in_proj_ms=0.156 split_extract_ms=0.012 conv1d_silu_ms=0.035 ssd_scan_ms=57.856 gated_rmsnorm_ms=0.022 out_proj_ms=0.157
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=25 layer_type=mamba2 tokens=500 elapsed_before_sync_ms=58.489
+[PREFILL-LIVENESS] layer_end chunk=0 layer=25 layer_type=mamba2 tokens=500 layer_ms=58.544 sync_ms=0.055
+[PREFILL-LIVENESS] layer_start chunk=0 layer=26 layer_type=gqa tokens=500 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=26 layer_type=gqa tokens=500 elapsed_before_sync_ms=0.879
+[PREFILL-LIVENESS] layer_end chunk=0 layer=26 layer_type=gqa tokens=500 layer_ms=0.933 sync_ms=0.054
+[PREFILL-LIVENESS] layer_start chunk=0 layer=27 layer_type=pass tokens=500 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=27 tokens=500 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=27 tokens=500 elapsed_ms=26.294
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=27 layer_type=pass tokens=500 elapsed_before_sync_ms=27.809
+[PREFILL-LIVENESS] layer_end chunk=0 layer=27 layer_type=pass tokens=500 layer_ms=27.864 sync_ms=0.055
+[PREFILL-LIVENESS] layer_start chunk=0 layer=28 layer_type=mamba2 tokens=500 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=28 tokens=500 total_ms=58.228 in_proj_ms=0.156 split_extract_ms=0.013 conv1d_silu_ms=0.035 ssd_scan_ms=57.842 gated_rmsnorm_ms=0.022 out_proj_ms=0.160
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=28 layer_type=mamba2 tokens=500 elapsed_before_sync_ms=58.475
+[PREFILL-LIVENESS] layer_end chunk=0 layer=28 layer_type=mamba2 tokens=500 layer_ms=58.530 sync_ms=0.055
+[PREFILL-LIVENESS] layer_start chunk=0 layer=29 layer_type=pass tokens=500 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=29 tokens=500 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=29 tokens=500 elapsed_ms=26.315
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=29 layer_type=pass tokens=500 elapsed_before_sync_ms=27.839
+[PREFILL-LIVENESS] layer_end chunk=0 layer=29 layer_type=pass tokens=500 layer_ms=27.894 sync_ms=0.055
+[PREFILL-LIVENESS] layer_start chunk=0 layer=30 layer_type=mamba2 tokens=500 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=30 tokens=500 total_ms=58.203 in_proj_ms=0.157 split_extract_ms=0.013 conv1d_silu_ms=0.037 ssd_scan_ms=57.819 gated_rmsnorm_ms=0.022 out_proj_ms=0.155
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=30 layer_type=mamba2 tokens=500 elapsed_before_sync_ms=58.450
+[PREFILL-LIVENESS] layer_end chunk=0 layer=30 layer_type=mamba2 tokens=500 layer_ms=58.505 sync_ms=0.055
+[PREFILL-LIVENESS] layer_start chunk=0 layer=31 layer_type=pass tokens=500 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=31 tokens=500 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=31 tokens=500 elapsed_ms=26.160
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=31 layer_type=pass tokens=500 elapsed_before_sync_ms=27.615
+[PREFILL-LIVENESS] layer_end chunk=0 layer=31 layer_type=pass tokens=500 layer_ms=27.670 sync_ms=0.055
+[PREFILL-LIVENESS] layer_start chunk=0 layer=32 layer_type=mamba2 tokens=500 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=32 tokens=500 total_ms=58.197 in_proj_ms=0.156 split_extract_ms=0.012 conv1d_silu_ms=0.037 ssd_scan_ms=57.809 gated_rmsnorm_ms=0.023 out_proj_ms=0.159
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=32 layer_type=mamba2 tokens=500 elapsed_before_sync_ms=58.449
+[PREFILL-LIVENESS] layer_end chunk=0 layer=32 layer_type=mamba2 tokens=500 layer_ms=58.504 sync_ms=0.055
+[PREFILL-LIVENESS] layer_start chunk=0 layer=33 layer_type=gqa tokens=500 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=33 layer_type=gqa tokens=500 elapsed_before_sync_ms=0.874
+[PREFILL-LIVENESS] layer_end chunk=0 layer=33 layer_type=gqa tokens=500 layer_ms=0.940 sync_ms=0.066
+[PREFILL-LIVENESS] layer_start chunk=0 layer=34 layer_type=pass tokens=500 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=34 tokens=500 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=34 tokens=500 elapsed_ms=26.426
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=34 layer_type=pass tokens=500 elapsed_before_sync_ms=27.947
+[PREFILL-LIVENESS] layer_end chunk=0 layer=34 layer_type=pass tokens=500 layer_ms=28.006 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=35 layer_type=mamba2 tokens=500 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=35 tokens=500 total_ms=58.206 in_proj_ms=0.156 split_extract_ms=0.013 conv1d_silu_ms=0.037 ssd_scan_ms=57.820 gated_rmsnorm_ms=0.023 out_proj_ms=0.157
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=35 layer_type=mamba2 tokens=500 elapsed_before_sync_ms=58.465
+[PREFILL-LIVENESS] layer_end chunk=0 layer=35 layer_type=mamba2 tokens=500 layer_ms=58.523 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=36 layer_type=pass tokens=500 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=36 tokens=500 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=36 tokens=500 elapsed_ms=25.758
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=36 layer_type=pass tokens=500 elapsed_before_sync_ms=27.274
+[PREFILL-LIVENESS] layer_end chunk=0 layer=36 layer_type=pass tokens=500 layer_ms=27.332 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=37 layer_type=mamba2 tokens=500 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=37 tokens=500 total_ms=58.213 in_proj_ms=0.156 split_extract_ms=0.012 conv1d_silu_ms=0.036 ssd_scan_ms=57.830 gated_rmsnorm_ms=0.023 out_proj_ms=0.155
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=37 layer_type=mamba2 tokens=500 elapsed_before_sync_ms=58.472
+[PREFILL-LIVENESS] layer_end chunk=0 layer=37 layer_type=mamba2 tokens=500 layer_ms=58.530 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=38 layer_type=pass tokens=500 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=38 tokens=500 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=38 tokens=500 elapsed_ms=25.894
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=38 layer_type=pass tokens=500 elapsed_before_sync_ms=27.431
+[PREFILL-LIVENESS] layer_end chunk=0 layer=38 layer_type=pass tokens=500 layer_ms=27.489 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=39 layer_type=mamba2 tokens=500 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=39 tokens=500 total_ms=58.227 in_proj_ms=0.158 split_extract_ms=0.012 conv1d_silu_ms=0.036 ssd_scan_ms=57.842 gated_rmsnorm_ms=0.023 out_proj_ms=0.156
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=39 layer_type=mamba2 tokens=500 elapsed_before_sync_ms=58.490
+[PREFILL-LIVENESS] layer_end chunk=0 layer=39 layer_type=mamba2 tokens=500 layer_ms=58.548 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=40 layer_type=pass tokens=500 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=40 tokens=500 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=40 tokens=500 elapsed_ms=25.549
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=40 layer_type=pass tokens=500 elapsed_before_sync_ms=27.079
+[PREFILL-LIVENESS] layer_end chunk=0 layer=40 layer_type=pass tokens=500 layer_ms=27.138 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=41 layer_type=mamba2 tokens=500 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=41 tokens=500 total_ms=58.208 in_proj_ms=0.158 split_extract_ms=0.013 conv1d_silu_ms=0.035 ssd_scan_ms=57.823 gated_rmsnorm_ms=0.022 out_proj_ms=0.157
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=41 layer_type=mamba2 tokens=500 elapsed_before_sync_ms=58.474
+[PREFILL-LIVENESS] layer_end chunk=0 layer=41 layer_type=mamba2 tokens=500 layer_ms=58.533 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=42 layer_type=gqa tokens=500 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=42 layer_type=gqa tokens=500 elapsed_before_sync_ms=0.884
+[PREFILL-LIVENESS] layer_end chunk=0 layer=42 layer_type=gqa tokens=500 layer_ms=0.941 sync_ms=0.057
+[PREFILL-LIVENESS] layer_start chunk=0 layer=43 layer_type=pass tokens=500 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=43 tokens=500 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=43 tokens=500 elapsed_ms=25.854
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=43 layer_type=pass tokens=500 elapsed_before_sync_ms=27.388
+[PREFILL-LIVENESS] layer_end chunk=0 layer=43 layer_type=pass tokens=500 layer_ms=27.447 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=44 layer_type=mamba2 tokens=500 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=44 tokens=500 total_ms=58.211 in_proj_ms=0.158 split_extract_ms=0.012 conv1d_silu_ms=0.037 ssd_scan_ms=57.823 gated_rmsnorm_ms=0.024 out_proj_ms=0.157
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=44 layer_type=mamba2 tokens=500 elapsed_before_sync_ms=58.467
+[PREFILL-LIVENESS] layer_end chunk=0 layer=44 layer_type=mamba2 tokens=500 layer_ms=58.531 sync_ms=0.064
+[PREFILL-LIVENESS] layer_start chunk=0 layer=45 layer_type=pass tokens=500 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=45 tokens=500 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=45 tokens=500 elapsed_ms=25.728
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=45 layer_type=pass tokens=500 elapsed_before_sync_ms=27.241
+[PREFILL-LIVENESS] layer_end chunk=0 layer=45 layer_type=pass tokens=500 layer_ms=27.299 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=46 layer_type=mamba2 tokens=500 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=46 tokens=500 total_ms=58.221 in_proj_ms=0.157 split_extract_ms=0.012 conv1d_silu_ms=0.036 ssd_scan_ms=57.836 gated_rmsnorm_ms=0.022 out_proj_ms=0.156
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=46 layer_type=mamba2 tokens=500 elapsed_before_sync_ms=58.478
+[PREFILL-LIVENESS] layer_end chunk=0 layer=46 layer_type=mamba2 tokens=500 layer_ms=58.542 sync_ms=0.064
+[PREFILL-LIVENESS] layer_start chunk=0 layer=47 layer_type=pass tokens=500 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=47 tokens=500 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=47 tokens=500 elapsed_ms=25.503
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=47 layer_type=pass tokens=500 elapsed_before_sync_ms=26.997
+[PREFILL-LIVENESS] layer_end chunk=0 layer=47 layer_type=pass tokens=500 layer_ms=27.056 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=48 layer_type=mamba2 tokens=500 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=48 tokens=500 total_ms=58.198 in_proj_ms=0.156 split_extract_ms=0.013 conv1d_silu_ms=0.035 ssd_scan_ms=57.815 gated_rmsnorm_ms=0.023 out_proj_ms=0.156
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=48 layer_type=mamba2 tokens=500 elapsed_before_sync_ms=58.455
+[PREFILL-LIVENESS] layer_end chunk=0 layer=48 layer_type=mamba2 tokens=500 layer_ms=58.513 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=49 layer_type=pass tokens=500 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=49 tokens=500 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=49 tokens=500 elapsed_ms=25.473
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=49 layer_type=pass tokens=500 elapsed_before_sync_ms=26.999
+[PREFILL-LIVENESS] layer_end chunk=0 layer=49 layer_type=pass tokens=500 layer_ms=27.058 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=50 layer_type=mamba2 tokens=500 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=50 tokens=500 total_ms=58.194 in_proj_ms=0.157 split_extract_ms=0.013 conv1d_silu_ms=0.037 ssd_scan_ms=57.807 gated_rmsnorm_ms=0.022 out_proj_ms=0.157
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=50 layer_type=mamba2 tokens=500 elapsed_before_sync_ms=58.455
+[PREFILL-LIVENESS] layer_end chunk=0 layer=50 layer_type=mamba2 tokens=500 layer_ms=58.514 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=51 layer_type=pass tokens=500 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=51 tokens=500 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=51 tokens=500 elapsed_ms=25.847
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=51 layer_type=pass tokens=500 elapsed_before_sync_ms=27.359
+[PREFILL-LIVENESS] layer_end chunk=0 layer=51 layer_type=pass tokens=500 layer_ms=27.417 sync_ms=0.058
+[PREFILL-LIVENESS] chunk_end chunk=0 tokens=500 elapsed_ms=2001.717
+[PREFILL-TIMING] 500 tokens, 2002.7ms total (250 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        2.2ms (  0.1%)
+[PREFILL-TIMING]   attn:     1351.7ms ( 67.5%)  [gqa: 4.8ms, la: 0.0ms]
+[PREFILL-TIMING]     gqa breakdown (6 FA2 calls: 6 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:         3.1ms ( 65.2% of gqa)
+[PREFILL-TIMING]       qknorm:       0.0ms (  0.8% of gqa)
+[PREFILL-TIMING]       rope:         0.1ms (  2.3% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.1ms (  1.1% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.1ms over 6 calls
+[PREFILL-TIMING]       fa2         0.3ms (  5.8% of gqa)  [0.0ms/call avg]
+[PREFILL-TIMING]       gate:         0.0ms (  0.1% of gqa)
+[PREFILL-TIMING]       o_proj:       1.2ms ( 24.1% of gqa)
+[PREFILL-TIMING]     gqa queue events:
+[PREFILL-TIMING]         proj         event=     3.1ms wall=     3.1ms wall_minus_event=     0.0ms sync=     0.0ms over 6 calls
+[PREFILL-TIMING]         qkv_norm     event=     0.0ms wall=     0.0ms wall_minus_event=     0.0ms sync=     0.0ms over 6 calls
+[PREFILL-TIMING]         rope         event=     0.1ms wall=     0.1ms wall_minus_event=     0.0ms sync=     0.1ms over 6 calls
+[PREFILL-TIMING]         fa2          event=     0.2ms wall=     0.3ms wall_minus_event=     0.0ms sync=     0.2ms over 6 calls
+[PREFILL-TIMING]         kv_append    event=     0.0ms wall=     0.1ms wall_minus_event=     0.1ms sync=     0.0ms over 0 calls
+[PREFILL-TIMING]         o_proj       event=     1.1ms wall=     1.2ms wall_minus_event=     0.0ms sync=     0.0ms over 6 calls
+[PREFILL-TIMING]     hqq projection internals:
+[PREFILL-TIMING]       marlin_float_zp:      3.0ms over 24 calls
+[PREFILL-TIMING]       group_sums:           0.2ms over 24 calls
+[PREFILL-TIMING]       correction_gemm:      0.6ms over 24 calls
+[PREFILL-TIMING]       correction_add:       0.2ms over 24 calls
+[PREFILL-TIMING]     mamba2 breakdown (diagnostic sync-isolated): wall=  1340.7ms ( 66.9% of prefill,  99.2% of mixer) event=  1340.1ms sync=  1339.0ms
+[PREFILL-TIMING]       in_proj          wall=     3.8ms event=     3.7ms sync=     3.3ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]       split_extract    wall=     0.3ms event=     0.2ms sync=     0.2ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]       conv1d_silu      wall=     0.8ms event=     0.7ms sync=     0.7ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]       ssd_scan         wall=  1331.3ms event=  1331.2ms sync=  1331.2ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]       gated_rmsnorm    wall=     0.5ms event=     0.4ms sync=     0.4ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]       out_proj         wall=     4.0ms event=     3.9ms sync=     3.3ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]   moe:       608.8ms ( 30.4%)
+[PREFILL-TIMING]     moe breakdown (48 layers):
+[PREFILL-TIMING]       gate:         3.4ms (  0.6% of moe)
+[PREFILL-TIMING]       dma:        568.1ms ( 93.3% of moe)
+[PREFILL-TIMING]         route_d2h:     1.2ms ptr_alloc:     0.0ms ptr_build:     0.1ms
+[PREFILL-TIMING]         cold_h2d:     28.6ms ptr_upload:     0.2ms dma_wait:   563.7ms
+[PREFILL-TIMING]       w1+act:      18.7ms (  3.1% of moe)
+[PREFILL-TIMING]       w2:          15.2ms (  2.5% of moe)
+[PREFILL-TIMING]       scatter:      0.4ms (  0.1% of moe)
+[PREFILL-TIMING]       shared:       0.4ms (  0.1% of moe)
+[PREFILL-TIMING]   other:      39.9ms (  2.0%)
+  [32mdecode: 32 tokens in 1.22s (26.3 tok/s)  VRAM: 23718 MB free now, 23718 MB min free during decode[0m
+  [32mShort calibration: baseline=23,716 MB, prefill post-alloc=23,440 MB, prefill min=22,800 MB, decode min=23,718 MB, post-cleanup=23,718 MB[0m
+  [32mShort calibration: prefill 2.17s (230.7 tok/s), decode 1.80s (17.8 tok/s)[0m
+  [32mAdaptive long calibration: default target=39,920 tokens, target low-water floor=1,200 MB, estimated prefill growth=0.2356 MB/token[0m
+  [32mAdaptive long calibration: next probe 39,920 tokens (model-estimated initial probe (projected 0.2356 MB/token, validation floor 2400 MB))[0m
+  [32mLong calibration: probing 39,920 prompt tokens + 32 decode tokens[0m
+[PREFILL-LIVENESS] run_start total_tokens=39920 scratch_max_tokens=39920 max_chunk=39920 chunk_size=39920 num_chunks=1 chunk_plan=[39920] expert_bits=4 shared_expert_bits=4 hidden_size=2688 layers=52
+[PREFILL-LIVENESS] chunk_start chunk=0 total_chunks=1 start=0 end=39920 tokens=39920 tok0=10 last_pos=39919 last_tok=1010
+[PREFILL-LIVENESS] chunk_after_hcs_guard chunk=0 tokens=39920 elapsed_ms=0.085
+[PREFILL-LIVENESS] layer_start chunk=0 layer=0 layer_type=mamba2 tokens=39920 has_residual=false moe_gate=false shared_bf16=false shared_marlin=false
+[MAMBA2-SSD-LOCAL-TRI-ORACLE] {"available":true,"components":{"D":0.44140625,"c_state_total":7.7314453125,"cpu_matches_sequential_gpu_bits":true,"cpu_y_bf16_bits":"0x40f5","cpu_y_bf16_value":7.65625,"d_x":-0.07974624633789062,"local_hf_chunk_scan_bf16_coeff":-0.27187108993530273,"local_hf_chunk_scan_fp32_coeff":-0.2723931074142456,"local_old_state":-0.26835575699806213,"prior_chunk_state":7.999801158905029,"sequential_gpu_y_bf16_bits":"0x40f5","sequential_gpu_y_bf16_value":7.65625,"x_target":-0.1806640625,"x_target_bits":"0xbe39","y_pre_bf16":7.648183822631836},"diagnostic":"mamba2_ssd_local_triangular_oracle","dimensions":{"chunk_pos":6,"chunk_start":64,"d_inner":4096,"effective_chunk_size":64,"head_dim":64,"heads_per_group":8,"inside_chunk_zero":false,"m":39920,"n_groups":8,"n_heads":64,"requested_chunk_size":64,"state_size":128},"interpretation":"CPU local-triangular recompute matches the existing sequential GPU oracle at the target coordinate; corrected chunk candidate must reproduce these exact terms before optimizing.","layer":0,"local_triangular_terms":[{"accum_bf16_coeff_after":-0.2000885009765625,"accum_fp32_coeff_after":-0.200163334608078,"cb_forward":0.21903395652770996,"cb_forward_minus_reverse":4.470348358154297e-8,"cb_reverse":0.21903391182422638,"cb_scaled_bf16":1.1015625,"cb_scaled_bf16_bits":"0x3f8d","cb_scaled_pre_bf16":1.1019744873046875,"chunk_position":0,"dA_after":-0.6334859728813171,"dA_before":-0.6229221820831299,"dA_increment":-0.01056378148496151,"dA_target":-0.6862797141075134,"decay":0.9485756158828735,"decay_arg":-0.05279374122619629,"dt_after_softplus":5.3038129806518555,"dt_plus_bias":5.298828125,"dt_times_x":-0.9633879065513611,"included_by_lower_triangle":true,"raw_dt":0.486328125,"raw_dt_bits":"0x3ef9","scale_decay_times_dt":5.031067848205566,"self_sample":false,"term_bf16_coeff_times_x":-0.2000885009765625,"term_fp32_coeff_times_x":-0.200163334608078,"top_state_contrib":-0.15167236328125,"top_state_index":100,"u":64,"x":-0.181640625,"x_bits":"0xbe3a"},{"accum_bf16_coeff_after":-0.0988616943359375,"accum_fp32_coeff_after":-0.0988905131816864,"cb_forward":0.15783925354480743,"cb_forward_minus_reverse":1.4901161193847656e-8,"cb_reverse":0.15783923864364624,"cb_scaled_bf16":1.9375,"cb_scaled_bf16_bits":"0x3ff8","cb_scaled_pre_bf16":1.9383807182312012,"chunk_position":1,"dA_after":-0.6586316227912903,"dA_before":-0.6334859728813171,"dA_increment":-0.0251456405967474,"dA_target":-0.6862797141075134,"decay":0.9727306365966797,"decay_arg":-0.027648091316223145,"dt_after_softplus":12.62500286102295,"dt_plus_bias":12.625,"dt_times_x":0.6596071124076843,"included_by_lower_triangle":true,"raw_dt":7.8125,"raw_dt_bits":"0x40fa","scale_decay_times_dt":12.28072738647461,"self_sample":false,"term_bf16_coeff_times_x":0.101226806640625,"term_fp32_coeff_times_x":0.1012728214263916,"top_state_contrib":-0.15167236328125,"top_state_index":100,"u":65,"x":0.05224609375,"x_bits":"0x3d56"},{"accum_bf16_coeff_after":-0.395904541015625,"accum_fp32_coeff_after":-0.3962450623512268,"cb_forward":0.5857030749320984,"cb_forward_minus_reverse":0.0,"cb_reverse":0.5857030749320984,"cb_scaled_bf16":1.609375,"cb_scaled_bf16_bits":"0x3fce","cb_scaled_pre_bf16":1.611063838005066,"chunk_position":2,"dA_after":-0.6642323136329651,"dA_before":-0.6586316227912903,"dA_increment":-0.00560068991035223,"dA_target":-0.6862797141075134,"decay":0.9781938791275024,"decay_arg":-0.02204740047454834,"dt_after_softplus":2.811967611312866,"dt_plus_bias":2.75,"dt_times_x":-0.5190057158470154,"included_by_lower_triangle":true,"raw_dt":-2.0625,"raw_dt_bits":"0xc004","scale_decay_times_dt":2.7506494522094727,"self_sample":false,"term_bf16_coeff_times_x":-0.2970428466796875,"term_fp32_coeff_times_x":-0.2973545491695404,"top_state_contrib":-0.15167236328125,"top_state_index":100,"u":66,"x":-0.1845703125,"x_bits":"0xbe3d"},{"accum_bf16_coeff_after":-0.4632530212402344,"accum_fp32_coeff_after":-0.4635993540287018,"cb_forward":0.6447319388389587,"cb_forward_minus_reverse":5.960464477539063e-8,"cb_reverse":0.644731879234314,"cb_scaled_bf16":0.322265625,"cb_scaled_bf16_bits":"0x3ea5","cb_scaled_pre_bf16":0.32229340076446533,"chunk_position":3,"dA_after":-0.6652491092681885,"dA_before":-0.6642323136329651,"dA_increment":-0.0010168033186346292,"dA_target":-0.6862797141075134,"decay":0.9791889786720276,"decay_arg":-0.02103060483932495,"dt_after_softplus":0.5105117559432983,"dt_plus_bias":-0.40625,"dt_times_x":-0.1066889837384224,"included_by_lower_triangle":true,"raw_dt":-5.21875,"raw_dt_bits":"0xc0a7","scale_decay_times_dt":0.49988749623298645,"self_sample":false,"term_bf16_coeff_times_x":-0.06734848022460938,"term_fp32_coeff_times_x":-0.06735428422689438,"top_state_contrib":-0.15167236328125,"top_state_index":100,"u":67,"x":-0.208984375,"x_bits":"0xbe56"},{"accum_bf16_coeff_after":-0.4768643379211426,"accum_fp32_coeff_after":-0.4772036671638489,"cb_forward":0.19592151045799255,"cb_forward_minus_reverse":1.4901161193847656e-8,"cb_reverse":0.19592149555683136,"cb_scaled_bf16":0.08447265625,"cb_scaled_bf16_bits":"0x3dad","cb_scaled_pre_bf16":0.08442915976047516,"chunk_position":4,"dA_after":-0.6661248803138733,"dA_before":-0.6652491092681885,"dA_increment":-0.0008757793693803251,"dA_target":-0.6862797141075134,"decay":0.9800469279289246,"decay_arg":-0.020154833793640137,"dt_after_softplus":0.4397071301937103,"dt_plus_bias":-0.59375,"dt_times_x":-0.07085124403238297,"included_by_lower_triangle":true,"raw_dt":-5.40625,"raw_dt_bits":"0xc0ad","scale_decay_times_dt":0.4309336245059967,"self_sample":false,"term_bf16_coeff_times_x":-0.013611316680908203,"term_fp32_coeff_times_x":-0.013604307547211647,"top_state_contrib":-0.15167236328125,"top_state_index":100,"u":68,"x":-0.1611328125,"x_bits":"0xbe25"},{"accum_bf16_coeff_after":-0.3119206428527832,"accum_fp32_coeff_after":-0.3123997151851654,"cb_forward":0.13150763511657715,"cb_forward_minus_reverse":1.4901161193847656e-8,"cb_reverse":0.13150762021541595,"cb_scaled_bf16":0.83203125,"cb_scaled_bf16_bits":"0x3f55","cb_scaled_pre_bf16":0.8313263654708862,"chunk_position":5,"dA_after":-0.6788100600242615,"dA_before":-0.6661248803138733,"dA_increment":-0.012685157358646393,"dA_target":-0.6862797141075134,"decay":0.9925581812858582,"decay_arg":-0.007469654083251953,"dt_after_softplus":6.368903160095215,"dt_plus_bias":6.3671875,"dt_times_x":1.2625852823257446,"included_by_lower_triangle":true,"raw_dt":1.5546875,"raw_dt_bits":"0x3fc7","scale_decay_times_dt":6.321506977081299,"self_sample":false,"term_bf16_coeff_times_x":0.16494369506835938,"term_fp32_coeff_times_x":0.16480395197868347,"top_state_contrib":-0.15167236328125,"top_state_index":100,"u":69,"x":0.1982421875,"x_bits":"0x3e4b"},{"accum_bf16_coeff_after":-0.27187108993530273,"accum_fp32_coeff_after":-0.2723931074142456,"cb_forward":-0.059045642614364624,"cb_forward_minus_reverse":1.4901161193847656e-8,"cb_reverse":-0.05904565751552582,"cb_scaled_bf16":-0.2216796875,"cb_scaled_bf16_bits":"0xbe63","cb_scaled_pre_bf16":-0.22144204378128052,"chunk_position":6,"dA_after":-0.6862797737121582,"dA_before":-0.6788100600242615,"dA_increment":-0.007469702512025833,"dA_target":-0.6862797141075134,"decay":1.0,"decay_arg":0.0,"dt_after_softplus":3.750352621078491,"dt_plus_bias":3.7265625,"dt_times_x":-0.6775539517402649,"included_by_lower_triangle":true,"raw_dt":-1.0859375,"raw_dt_bits":"0xbf8b","scale_decay_times_dt":3.750352621078491,"self_sample":true,"term_bf16_coeff_times_x":0.04004955291748047,"term_fp32_coeff_times_x":0.040006618946790695,"top_state_contrib":-0.15167236328125,"top_state_index":100,"u":70,"x":-0.1806640625,"x_bits":"0xbe39"}],"prefix":{"a_log":-6.21875,"a_value_neg_exp":-0.001991733442991972,"dA_chunk_base":-0.6229221820831299,"dA_target":-0.6862797141075134,"dt_bias":4.8125,"local_dA_increments":[-0.01056378148496151,-0.0251456405967474,-0.00560068991035223,-0.0010168033186346292,-0.0008757793693803251,-0.012685157358646393,-0.007469702512025833],"local_dA_prefix_cumulative":[-0.6334859728813171,-0.6586316227912903,-0.6642323136329651,-0.6652491092681885,-0.6661248803138733,-0.6788100600242615,-0.6862797141075134]},"target":{"dim_index":2418,"flat_index":289138,"group":4,"head":37,"head_dim_index":50,"row":70}}
+[PREFILL-LIVENESS] mamba2_substages layer=0 tokens=39920 total_ms=5005.637 in_proj_ms=9.386 split_extract_ms=0.802 conv1d_silu_ms=1.819 ssd_scan_ms=4988.574 gated_rmsnorm_ms=1.093 out_proj_ms=3.963
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=0 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=5008.992
+[PREFILL-LIVENESS] layer_end chunk=0 layer=0 layer_type=mamba2 tokens=39920 layer_ms=5009.052 sync_ms=0.060
+[PREFILL-LIVENESS] layer_start chunk=0 layer=1 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=1 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=1 tokens=39920 elapsed_ms=88.805
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=1 layer_type=pass tokens=39920 elapsed_before_sync_ms=90.243
+[PREFILL-LIVENESS] layer_end chunk=0 layer=1 layer_type=pass tokens=39920 layer_ms=90.301 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=2 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=2 tokens=39920 total_ms=4992.014 in_proj_ms=9.304 split_extract_ms=0.801 conv1d_silu_ms=1.824 ssd_scan_ms=4975.057 gated_rmsnorm_ms=1.092 out_proj_ms=3.936
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=2 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=4993.299
+[PREFILL-LIVENESS] layer_end chunk=0 layer=2 layer_type=mamba2 tokens=39920 layer_ms=4993.359 sync_ms=0.060
+[PREFILL-LIVENESS] layer_start chunk=0 layer=3 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=3 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=3 tokens=39920 elapsed_ms=83.802
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=3 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.650
+[PREFILL-LIVENESS] layer_end chunk=0 layer=3 layer_type=pass tokens=39920 layer_ms=86.708 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=4 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=4 tokens=39920 total_ms=5002.973 in_proj_ms=9.290 split_extract_ms=0.802 conv1d_silu_ms=1.824 ssd_scan_ms=4985.958 gated_rmsnorm_ms=1.107 out_proj_ms=3.992
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=4 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=5004.308
+[PREFILL-LIVENESS] layer_end chunk=0 layer=4 layer_type=mamba2 tokens=39920 layer_ms=5004.369 sync_ms=0.062
+[PREFILL-LIVENESS] layer_start chunk=0 layer=5 layer_type=gqa tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=5 layer_type=gqa tokens=39920 elapsed_before_sync_ms=81.126
+[PREFILL-LIVENESS] layer_end chunk=0 layer=5 layer_type=gqa tokens=39920 layer_ms=81.195 sync_ms=0.069
+[PREFILL-LIVENESS] layer_start chunk=0 layer=6 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=6 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=6 tokens=39920 elapsed_ms=83.565
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=6 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.471
+[PREFILL-LIVENESS] layer_end chunk=0 layer=6 layer_type=pass tokens=39920 layer_ms=86.530 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=7 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=7 tokens=39920 total_ms=5013.745 in_proj_ms=9.289 split_extract_ms=0.803 conv1d_silu_ms=1.822 ssd_scan_ms=4996.764 gated_rmsnorm_ms=1.101 out_proj_ms=3.965
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=7 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=5015.048
+[PREFILL-LIVENESS] layer_end chunk=0 layer=7 layer_type=mamba2 tokens=39920 layer_ms=5015.108 sync_ms=0.060
+[PREFILL-LIVENESS] layer_start chunk=0 layer=8 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=8 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=8 tokens=39920 elapsed_ms=83.711
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=8 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.785
+[PREFILL-LIVENESS] layer_end chunk=0 layer=8 layer_type=pass tokens=39920 layer_ms=86.843 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=9 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=9 tokens=39920 total_ms=5023.899 in_proj_ms=9.284 split_extract_ms=0.809 conv1d_silu_ms=1.822 ssd_scan_ms=5006.899 gated_rmsnorm_ms=1.104 out_proj_ms=3.981
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=9 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=5025.227
+[PREFILL-LIVENESS] layer_end chunk=0 layer=9 layer_type=mamba2 tokens=39920 layer_ms=5025.287 sync_ms=0.060
+[PREFILL-LIVENESS] layer_start chunk=0 layer=10 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=10 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=10 tokens=39920 elapsed_ms=83.781
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=10 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.822
+[PREFILL-LIVENESS] layer_end chunk=0 layer=10 layer_type=pass tokens=39920 layer_ms=86.880 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=11 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=11 tokens=39920 total_ms=4995.827 in_proj_ms=9.294 split_extract_ms=0.803 conv1d_silu_ms=1.827 ssd_scan_ms=4978.780 gated_rmsnorm_ms=1.114 out_proj_ms=4.010
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=11 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=4997.157
+[PREFILL-LIVENESS] layer_end chunk=0 layer=11 layer_type=mamba2 tokens=39920 layer_ms=4997.218 sync_ms=0.061
+[PREFILL-LIVENESS] layer_start chunk=0 layer=12 layer_type=gqa tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=12 layer_type=gqa tokens=39920 elapsed_before_sync_ms=80.565
+[PREFILL-LIVENESS] layer_end chunk=0 layer=12 layer_type=gqa tokens=39920 layer_ms=80.623 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=13 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=13 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=13 tokens=39920 elapsed_ms=83.660
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=13 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.818
+[PREFILL-LIVENESS] layer_end chunk=0 layer=13 layer_type=pass tokens=39920 layer_ms=86.872 sync_ms=0.054
+[PREFILL-LIVENESS] layer_start chunk=0 layer=14 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=14 tokens=39920 total_ms=4995.464 in_proj_ms=9.293 split_extract_ms=0.809 conv1d_silu_ms=1.828 ssd_scan_ms=4978.417 gated_rmsnorm_ms=1.104 out_proj_ms=4.013
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=14 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=4996.751
+[PREFILL-LIVENESS] layer_end chunk=0 layer=14 layer_type=mamba2 tokens=39920 layer_ms=4996.807 sync_ms=0.055
+[PREFILL-LIVENESS] layer_start chunk=0 layer=15 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=15 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=15 tokens=39920 elapsed_ms=83.672
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=15 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.725
+[PREFILL-LIVENESS] layer_end chunk=0 layer=15 layer_type=pass tokens=39920 layer_ms=86.778 sync_ms=0.053
+[PREFILL-LIVENESS] layer_start chunk=0 layer=16 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=16 tokens=39920 total_ms=4994.369 in_proj_ms=9.299 split_extract_ms=0.808 conv1d_silu_ms=1.828 ssd_scan_ms=4977.346 gated_rmsnorm_ms=1.114 out_proj_ms=3.973
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=16 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=4995.682
+[PREFILL-LIVENESS] layer_end chunk=0 layer=16 layer_type=mamba2 tokens=39920 layer_ms=4995.738 sync_ms=0.056
+[PREFILL-LIVENESS] layer_start chunk=0 layer=17 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=17 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=17 tokens=39920 elapsed_ms=83.704
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=17 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.910
+[PREFILL-LIVENESS] layer_end chunk=0 layer=17 layer_type=pass tokens=39920 layer_ms=86.964 sync_ms=0.054
+[PREFILL-LIVENESS] layer_start chunk=0 layer=18 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=18 tokens=39920 total_ms=4993.793 in_proj_ms=9.292 split_extract_ms=0.809 conv1d_silu_ms=1.824 ssd_scan_ms=4976.830 gated_rmsnorm_ms=1.088 out_proj_ms=3.950
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=18 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=4995.045
+[PREFILL-LIVENESS] layer_end chunk=0 layer=18 layer_type=mamba2 tokens=39920 layer_ms=4995.119 sync_ms=0.074
+[PREFILL-LIVENESS] layer_start chunk=0 layer=19 layer_type=gqa tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=19 layer_type=gqa tokens=39920 elapsed_before_sync_ms=80.712
+[PREFILL-LIVENESS] layer_end chunk=0 layer=19 layer_type=gqa tokens=39920 layer_ms=80.771 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=20 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=20 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=20 tokens=39920 elapsed_ms=83.745
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=20 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.552
+[PREFILL-LIVENESS] layer_end chunk=0 layer=20 layer_type=pass tokens=39920 layer_ms=86.607 sync_ms=0.056
+[PREFILL-LIVENESS] layer_start chunk=0 layer=21 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=21 tokens=39920 total_ms=4993.102 in_proj_ms=9.288 split_extract_ms=0.803 conv1d_silu_ms=1.831 ssd_scan_ms=4976.199 gated_rmsnorm_ms=1.083 out_proj_ms=3.898
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=21 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=4994.348
+[PREFILL-LIVENESS] layer_end chunk=0 layer=21 layer_type=mamba2 tokens=39920 layer_ms=4994.405 sync_ms=0.057
+[PREFILL-LIVENESS] layer_start chunk=0 layer=22 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=22 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=22 tokens=39920 elapsed_ms=83.805
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=22 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.597
+[PREFILL-LIVENESS] layer_end chunk=0 layer=22 layer_type=pass tokens=39920 layer_ms=86.652 sync_ms=0.055
+[PREFILL-LIVENESS] layer_start chunk=0 layer=23 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=23 tokens=39920 total_ms=4992.708 in_proj_ms=9.288 split_extract_ms=0.803 conv1d_silu_ms=1.819 ssd_scan_ms=4975.809 gated_rmsnorm_ms=1.084 out_proj_ms=3.905
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=23 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=4993.956
+[PREFILL-LIVENESS] layer_end chunk=0 layer=23 layer_type=mamba2 tokens=39920 layer_ms=4994.013 sync_ms=0.057
+[PREFILL-LIVENESS] layer_start chunk=0 layer=24 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=24 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=24 tokens=39920 elapsed_ms=83.642
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=24 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.429
+[PREFILL-LIVENESS] layer_end chunk=0 layer=24 layer_type=pass tokens=39920 layer_ms=86.484 sync_ms=0.056
+[PREFILL-LIVENESS] layer_start chunk=0 layer=25 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=25 tokens=39920 total_ms=4991.729 in_proj_ms=9.279 split_extract_ms=0.802 conv1d_silu_ms=1.825 ssd_scan_ms=4974.844 gated_rmsnorm_ms=1.081 out_proj_ms=3.897
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=25 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=4992.969
+[PREFILL-LIVENESS] layer_end chunk=0 layer=25 layer_type=mamba2 tokens=39920 layer_ms=4993.026 sync_ms=0.057
+[PREFILL-LIVENESS] layer_start chunk=0 layer=26 layer_type=gqa tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=26 layer_type=gqa tokens=39920 elapsed_before_sync_ms=80.590
+[PREFILL-LIVENESS] layer_end chunk=0 layer=26 layer_type=gqa tokens=39920 layer_ms=80.670 sync_ms=0.080
+[PREFILL-LIVENESS] layer_start chunk=0 layer=27 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=27 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=27 tokens=39920 elapsed_ms=83.858
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=27 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.662
+[PREFILL-LIVENESS] layer_end chunk=0 layer=27 layer_type=pass tokens=39920 layer_ms=86.720 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=28 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=28 tokens=39920 total_ms=4991.313 in_proj_ms=9.330 split_extract_ms=0.803 conv1d_silu_ms=1.830 ssd_scan_ms=4974.369 gated_rmsnorm_ms=1.083 out_proj_ms=3.899
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=28 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=4992.559
+[PREFILL-LIVENESS] layer_end chunk=0 layer=28 layer_type=mamba2 tokens=39920 layer_ms=4992.614 sync_ms=0.055
+[PREFILL-LIVENESS] layer_start chunk=0 layer=29 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=29 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=29 tokens=39920 elapsed_ms=83.756
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=29 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.547
+[PREFILL-LIVENESS] layer_end chunk=0 layer=29 layer_type=pass tokens=39920 layer_ms=86.601 sync_ms=0.054
+[PREFILL-LIVENESS] layer_start chunk=0 layer=30 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=30 tokens=39920 total_ms=4991.003 in_proj_ms=9.291 split_extract_ms=0.803 conv1d_silu_ms=1.819 ssd_scan_ms=4974.107 gated_rmsnorm_ms=1.084 out_proj_ms=3.901
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=30 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=4992.238
+[PREFILL-LIVENESS] layer_end chunk=0 layer=30 layer_type=mamba2 tokens=39920 layer_ms=4992.293 sync_ms=0.055
+[PREFILL-LIVENESS] layer_start chunk=0 layer=31 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=31 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=31 tokens=39920 elapsed_ms=83.584
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=31 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.366
+[PREFILL-LIVENESS] layer_end chunk=0 layer=31 layer_type=pass tokens=39920 layer_ms=86.419 sync_ms=0.054
+[PREFILL-LIVENESS] layer_start chunk=0 layer=32 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=32 tokens=39920 total_ms=4990.788 in_proj_ms=9.294 split_extract_ms=0.802 conv1d_silu_ms=1.828 ssd_scan_ms=4973.884 gated_rmsnorm_ms=1.084 out_proj_ms=3.897
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=32 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=4992.023
+[PREFILL-LIVENESS] layer_end chunk=0 layer=32 layer_type=mamba2 tokens=39920 layer_ms=4992.078 sync_ms=0.055
+[PREFILL-LIVENESS] layer_start chunk=0 layer=33 layer_type=gqa tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=33 layer_type=gqa tokens=39920 elapsed_before_sync_ms=80.621
+[PREFILL-LIVENESS] layer_end chunk=0 layer=33 layer_type=gqa tokens=39920 layer_ms=80.679 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=34 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=34 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=34 tokens=39920 elapsed_ms=83.733
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=34 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.512
+[PREFILL-LIVENESS] layer_end chunk=0 layer=34 layer_type=pass tokens=39920 layer_ms=86.568 sync_ms=0.056
+[PREFILL-LIVENESS] layer_start chunk=0 layer=35 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=35 tokens=39920 total_ms=4991.279 in_proj_ms=9.334 split_extract_ms=0.802 conv1d_silu_ms=1.832 ssd_scan_ms=4974.328 gated_rmsnorm_ms=1.083 out_proj_ms=3.900
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=35 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=4992.522
+[PREFILL-LIVENESS] layer_end chunk=0 layer=35 layer_type=mamba2 tokens=39920 layer_ms=4992.578 sync_ms=0.056
+[PREFILL-LIVENESS] layer_start chunk=0 layer=36 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=36 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=36 tokens=39920 elapsed_ms=83.610
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=36 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.402
+[PREFILL-LIVENESS] layer_end chunk=0 layer=36 layer_type=pass tokens=39920 layer_ms=86.457 sync_ms=0.055
+[PREFILL-LIVENESS] layer_start chunk=0 layer=37 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=37 tokens=39920 total_ms=4990.554 in_proj_ms=9.288 split_extract_ms=0.802 conv1d_silu_ms=1.821 ssd_scan_ms=4973.665 gated_rmsnorm_ms=1.082 out_proj_ms=3.896
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=37 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=4991.799
+[PREFILL-LIVENESS] layer_end chunk=0 layer=37 layer_type=mamba2 tokens=39920 layer_ms=4991.856 sync_ms=0.057
+[PREFILL-LIVENESS] layer_start chunk=0 layer=38 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=38 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=38 tokens=39920 elapsed_ms=83.563
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=38 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.356
+[PREFILL-LIVENESS] layer_end chunk=0 layer=38 layer_type=pass tokens=39920 layer_ms=86.411 sync_ms=0.055
+[PREFILL-LIVENESS] layer_start chunk=0 layer=39 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=39 tokens=39920 total_ms=4990.270 in_proj_ms=9.302 split_extract_ms=0.802 conv1d_silu_ms=1.821 ssd_scan_ms=4973.362 gated_rmsnorm_ms=1.083 out_proj_ms=3.900
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=39 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=4991.518
+[PREFILL-LIVENESS] layer_end chunk=0 layer=39 layer_type=mamba2 tokens=39920 layer_ms=4991.575 sync_ms=0.056
+[PREFILL-LIVENESS] layer_start chunk=0 layer=40 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=40 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=40 tokens=39920 elapsed_ms=83.647
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=40 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.446
+[PREFILL-LIVENESS] layer_end chunk=0 layer=40 layer_type=pass tokens=39920 layer_ms=86.501 sync_ms=0.055
+[PREFILL-LIVENESS] layer_start chunk=0 layer=41 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=41 tokens=39920 total_ms=4990.544 in_proj_ms=9.329 split_extract_ms=0.803 conv1d_silu_ms=1.826 ssd_scan_ms=4973.604 gated_rmsnorm_ms=1.084 out_proj_ms=3.898
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=41 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=4991.786
+[PREFILL-LIVENESS] layer_end chunk=0 layer=41 layer_type=mamba2 tokens=39920 layer_ms=4991.862 sync_ms=0.076
+[PREFILL-LIVENESS] layer_start chunk=0 layer=42 layer_type=gqa tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=42 layer_type=gqa tokens=39920 elapsed_before_sync_ms=80.605
+[PREFILL-LIVENESS] layer_end chunk=0 layer=42 layer_type=gqa tokens=39920 layer_ms=80.667 sync_ms=0.062
+[PREFILL-LIVENESS] layer_start chunk=0 layer=43 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=43 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=43 tokens=39920 elapsed_ms=83.498
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=43 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.309
+[PREFILL-LIVENESS] layer_end chunk=0 layer=43 layer_type=pass tokens=39920 layer_ms=86.368 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=44 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=44 tokens=39920 total_ms=4990.390 in_proj_ms=9.340 split_extract_ms=0.803 conv1d_silu_ms=1.824 ssd_scan_ms=4973.438 gated_rmsnorm_ms=1.083 out_proj_ms=3.902
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=44 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=4991.633
+[PREFILL-LIVENESS] layer_end chunk=0 layer=44 layer_type=mamba2 tokens=39920 layer_ms=4991.688 sync_ms=0.055
+[PREFILL-LIVENESS] layer_start chunk=0 layer=45 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=45 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=45 tokens=39920 elapsed_ms=83.594
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=45 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.387
+[PREFILL-LIVENESS] layer_end chunk=0 layer=45 layer_type=pass tokens=39920 layer_ms=86.440 sync_ms=0.054
+[PREFILL-LIVENESS] layer_start chunk=0 layer=46 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=46 tokens=39920 total_ms=4990.364 in_proj_ms=9.332 split_extract_ms=0.801 conv1d_silu_ms=1.827 ssd_scan_ms=4973.419 gated_rmsnorm_ms=1.083 out_proj_ms=3.901
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=46 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=4991.599
+[PREFILL-LIVENESS] layer_end chunk=0 layer=46 layer_type=mamba2 tokens=39920 layer_ms=4991.654 sync_ms=0.055
+[PREFILL-LIVENESS] layer_start chunk=0 layer=47 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=47 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=47 tokens=39920 elapsed_ms=83.693
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=47 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.487
+[PREFILL-LIVENESS] layer_end chunk=0 layer=47 layer_type=pass tokens=39920 layer_ms=86.541 sync_ms=0.054
+[PREFILL-LIVENESS] layer_start chunk=0 layer=48 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=48 tokens=39920 total_ms=4989.389 in_proj_ms=9.336 split_extract_ms=0.803 conv1d_silu_ms=1.826 ssd_scan_ms=4972.435 gated_rmsnorm_ms=1.085 out_proj_ms=3.905
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=48 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=4990.628
+[PREFILL-LIVENESS] layer_end chunk=0 layer=48 layer_type=mamba2 tokens=39920 layer_ms=4990.683 sync_ms=0.055
+[PREFILL-LIVENESS] layer_start chunk=0 layer=49 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=49 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=49 tokens=39920 elapsed_ms=83.648
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=49 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.434
+[PREFILL-LIVENESS] layer_end chunk=0 layer=49 layer_type=pass tokens=39920 layer_ms=86.496 sync_ms=0.062
+[PREFILL-LIVENESS] layer_start chunk=0 layer=50 layer_type=mamba2 tokens=39920 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=50 tokens=39920 total_ms=4989.712 in_proj_ms=9.339 split_extract_ms=0.803 conv1d_silu_ms=1.830 ssd_scan_ms=4972.735 gated_rmsnorm_ms=1.087 out_proj_ms=3.919
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=50 layer_type=mamba2 tokens=39920 elapsed_before_sync_ms=4990.961
+[PREFILL-LIVENESS] layer_end chunk=0 layer=50 layer_type=mamba2 tokens=39920 layer_ms=4991.017 sync_ms=0.057
+[PREFILL-LIVENESS] layer_start chunk=0 layer=51 layer_type=pass tokens=39920 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=51 tokens=39920 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=51 tokens=39920 elapsed_ms=83.477
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=51 layer_type=pass tokens=39920 elapsed_before_sync_ms=86.275
+[PREFILL-LIVENESS] layer_end chunk=0 layer=51 layer_type=pass tokens=39920 layer_ms=86.330 sync_ms=0.055
+[PREFILL-LIVENESS] chunk_end chunk=0 tokens=39920 elapsed_ms=117407.753
+[PREFILL-TIMING] 39920 tokens, 117409.6ms total (340 tok/s)
+[PREFILL-TIMING]   embed:       0.4ms (  0.0%)
+[PREFILL-TIMING]   norm:       53.3ms (  0.0%)
+[PREFILL-TIMING]   attn:   115381.5ms ( 98.3%)  [gqa: 477.6ms, la: 0.0ms]
+[PREFILL-TIMING]     gqa breakdown (6 FA2 calls: 6 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:        63.2ms ( 13.2% of gqa)
+[PREFILL-TIMING]       qknorm:       0.0ms (  0.0% of gqa)
+[PREFILL-TIMING]       rope:         2.9ms (  0.6% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.3ms (  0.1% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.3ms over 6 calls
+[PREFILL-TIMING]       fa2       353.6ms ( 74.0% of gqa)  [58.9ms/call avg]
+[PREFILL-TIMING]       gate:         0.0ms (  0.0% of gqa)
+[PREFILL-TIMING]       o_proj:      57.3ms ( 12.0% of gqa)
+[PREFILL-TIMING]     gqa queue events:
+[PREFILL-TIMING]         proj         event=    63.2ms wall=    63.2ms wall_minus_event=     0.0ms sync=     0.0ms over 6 calls
+[PREFILL-TIMING]         qkv_norm     event=     0.0ms wall=     0.0ms wall_minus_event=     0.0ms sync=     0.0ms over 6 calls
+[PREFILL-TIMING]         rope         event=     2.9ms wall=     2.9ms wall_minus_event=     0.0ms sync=     2.9ms over 6 calls
+[PREFILL-TIMING]         fa2          event=   353.6ms wall=   353.6ms wall_minus_event=     0.0ms sync=   353.5ms over 6 calls
+[PREFILL-TIMING]         kv_append    event=     0.0ms wall=     0.3ms wall_minus_event=     0.3ms sync=     0.3ms over 0 calls
+[PREFILL-TIMING]         o_proj       event=    57.3ms wall=    57.3ms wall_minus_event=     0.0ms sync=     1.7ms over 6 calls
+[PREFILL-TIMING]     hqq projection internals:
+[PREFILL-TIMING]       marlin_float_zp:    100.9ms over 24 calls
+[PREFILL-TIMING]       group_sums:           3.9ms over 24 calls
+[PREFILL-TIMING]       correction_gemm:      5.2ms over 24 calls
+[PREFILL-TIMING]       correction_add:       8.6ms over 24 calls
+[PREFILL-TIMING]     mamba2 breakdown (diagnostic sync-isolated): wall=114890.9ms ( 97.9% of prefill,  99.6% of mixer) event=114891.4ms sync=114888.2ms
+[PREFILL-TIMING]       in_proj          wall=   214.1ms event=   214.0ms sync=   213.6ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]       split_extract    wall=    18.5ms event=    18.4ms sync=    18.3ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]       conv1d_silu      wall=    42.0ms event=    41.9ms sync=    41.8ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]       ssd_scan         wall=114500.8ms event=114501.9ms sync=114500.6ms wall_minus_event=     0.0ms over 23 calls
+[PREFILL-TIMING]       gated_rmsnorm    wall=    25.1ms event=    25.0ms sync=    24.7ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]       out_proj         wall=    90.4ms event=    90.3ms sync=    89.3ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]   moe:      1930.8ms (  1.6%)
+[PREFILL-TIMING]     moe breakdown (48 layers):
+[PREFILL-TIMING]       gate:        13.4ms (  0.7% of moe)
+[PREFILL-TIMING]       dma:        549.8ms ( 28.5% of moe)
+[PREFILL-TIMING]         route_d2h:     1.5ms ptr_alloc:     0.0ms ptr_build:     0.1ms
+[PREFILL-TIMING]         cold_h2d:     29.9ms ptr_upload:     0.3ms dma_wait:   544.7ms
+[PREFILL-TIMING]       w1+act:     702.8ms ( 36.4% of moe)
+[PREFILL-TIMING]       w2:         497.4ms ( 25.8% of moe)
+[PREFILL-TIMING]       scatter:     31.9ms (  1.7% of moe)
+[PREFILL-TIMING]       shared:     132.6ms (  6.9% of moe)
+[PREFILL-TIMING]   other:      43.6ms (  0.0%)
+  [32mdecode: 32 tokens in 2.30s (13.9 tok/s)  VRAM: 23714 MB free now, 23714 MB min free during decode[0m
+  [32mLong calibration: baseline=23,718 MB, prefill post-alloc=13,072 MB, prefill min=12,362 MB, decode min=23,714 MB, post-cleanup=23,714 MB[0m
+  [32mLong calibration: prefill 117.67s (339.2 tok/s), decode 2.88s (11.1 tok/s)[0m
+  [32mScratch reservation: max=11,786 MB (at 50,000 tokens)[0m
+
+[1m[36m▸ VRAM calibration complete[0m
+  [32mPost-calibration free VRAM: 23,714 MB[0m
+  [32mTransient deltas: short prefill=916 MB, long prefill=11,356 MB, short decode=0 MB, long decode=4 MB[0m
+  [32mGPU0 decode HCS budget: 23,114 MB[0m
+  [32mPrefill HCS budgets: short=22,198 MB, long=11,758 MB[0m
+  [32mWorst-case prefill scratch reservation: 11,786 MB at 50,000 tokens[0m
+
+[1m[36m▸ Startup diagnostic exit[0m
+  [32mExiting after VRAM calibration by request[0m

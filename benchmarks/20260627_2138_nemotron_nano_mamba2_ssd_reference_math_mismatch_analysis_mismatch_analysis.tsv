@@ -1,0 +1,24 @@
+field	value	interpretation
+source_gate	20260627_2039_nemotron_nano_mamba2_ssd_chunk_parallel_gated_prototype	Failed candidate artifacts inspected statically.
+oracle_result	fail_closed	Failure was visible and did not silently fallback.
+failed_layer	0	First Mamba2 layer failed.
+tokens	256	Small diagnostic only; no long diagnostic was run.
+output_mismatches	27	Sparse BF16 output mismatches.
+output_max_abs	2.000000000	At least one output BF16 value was materially wrong, not only a 1-ulp drift.
+output_mean_abs	0.000003399	Most output elements still matched or were near-zero error.
+output_first_mismatch_flat	289138	Flat output index in [tokens, n_heads, head_dim].
+output_first_mismatch_coord	t=70,head=37,d=50	First output mismatch is inside chunk 0 for chunk_size 128, so cross-chunk carry cannot be the sole cause.
+state_mismatches	134008	Many final-state entries differed.
+state_max_abs	0.000366211	State drift was small compared with output max error.
+state_mean_abs	0.000000023	State drift looks like precision/order drift, not catastrophic indexing.
+state_first_mismatch_flat	14	Flat state index in [n_heads, head_dim, d_state].
+state_first_mismatch_coord	head=0,d=0,state=14	First state mismatch occurs in the first head/d lane.
+candidate_source_available	false	The 2039 candidate source was reverted in 2102 as requested.
+candidate_intermediate_artifacts_available	false	Artifacts contain aggregate oracle metrics and first flat indices, not candidate CB/prefix/local-term/state intermediates.
+exact_faulty_2039_line_known	false	Post-cleanup source cannot prove which removed candidate line caused the mismatch.
+chunk_carry_as_primary_cause	false	First output mismatch is in the first chunk before inter-chunk carry contributes.
+likely_output_fault_domain	local_triangular_output	For chunk 0, output is D*x plus local lower-triangular emission; prior state is zero.
+local_triangular_subdomains	CB orientation/order; dt/prefix decay indexing; lower-triangular mask; BF16(CB*decay*dt) cast placement	These must be instrumented in a future candidate oracle if output mismatch recurs.
+state_fault_domain	chunk_state_or_state_update_precision	State mismatch likely comes from chunk-state formula or B_bar BF16 cast/order, but exact removed-line attribution is unavailable.
+design_gap_found	true	The 2025/2039 plan did not explicitly include reference-style chunk_state and state_passing as separate stages with entry_states scratch.
+corrected_design_available	true	Use chunk_cumsum, chunk_state, state_passing, cb_matrix, chunk_scan_output, and final state copy, with sequential oracle comparison.

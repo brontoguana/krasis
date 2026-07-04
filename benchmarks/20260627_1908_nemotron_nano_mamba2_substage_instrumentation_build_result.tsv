@@ -1,0 +1,7 @@
+field	value
+command	./dev build
+exit_code	0
+duration_s	172
+build_log	benchmarks/20260627_1908_nemotron_nano_mamba2_substage_instrumentation_build.log
+result	pass
+notes	Built Rust extension after adding guarded Mamba2 substage instrumentation; existing warnings only.

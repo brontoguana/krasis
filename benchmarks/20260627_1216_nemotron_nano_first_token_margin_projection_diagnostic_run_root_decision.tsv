@@ -1,0 +1,19 @@
+decision	field	value
+blocked	result	first-token margin projection diagnostic run failed closed before serving requests
+blocked_scope	first_attempt	hqq6_g32
+blocked_scope	not_run	hqq6_g64
+blocked_scope	requests_sent	0
+blocked_scope	cache_generation	false
+blocked_scope	hqq8	false
+blocked_scope	new_variants	false
+blocked_scope	production_enablement	false
+blocked_scope	speed_benchmark	false
+blocked_scope	decode_hcs	false
+blocked_scope	selected_expert_retargeting	false
+root_cause	error	KRASIS_FIRST_TOKEN_MARGIN_PROJECTION_DIAG requires debug_reference_trace=true
+root_cause	phase	startup short VRAM calibration calls Rust prefill without reference-debug request context
+root_cause	why_gate_failed	The env-gated projection target is global, but startup warmup/calibration are non-request prefill calls; fail-closed debug-reference requirement triggers before /v1/internal/reference_test can be served.
+required_fix	scope	next narrow instrumentation fix gate
+required_fix	change	Make first-token margin projection activation request-scoped for reference-test requests, or explicitly suppress the projection target during startup warmup/calibration while preserving fail-closed behavior for actual reference-test requests that set the diagnostic env without debug_reference_trace=true.
+required_fix	must_preserve	Diagnostic-only behavior, no production HQQ enablement, no cache generation, no variant changes, no decode/HCS changes, no selected-expert retargeting.
+next_gate	recommendation	implement request-scoped projection activation/fail-closed calibration separation, run focused tests/build, then rerun this diagnostic capture.

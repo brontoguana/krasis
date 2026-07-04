@@ -1,0 +1,129 @@
+{
+  "artifacts": {
+    "consume_report": "benchmarks/20260627_0826_nemotron_nano_hqq6_g32_quality_proof_consume_report.tsv",
+    "g32_vs_g64_improvement": "benchmarks/20260627_0826_nemotron_nano_hqq6_g32_quality_proof_g32_vs_g64_improvement.tsv",
+    "hqq_g32_requests": "benchmarks/20260627_0826_nemotron_nano_hqq6_g32_quality_proof_hqq_g32_requests.tsv",
+    "hqq_g32_server_log": "benchmarks/20260627_0826_nemotron_nano_hqq6_g32_quality_proof_hqq_g32_server.log",
+    "payload_quality_summary": "benchmarks/20260627_0826_nemotron_nano_hqq6_g32_quality_proof_payload_quality_summary.tsv",
+    "root_decision": "benchmarks/20260627_0826_nemotron_nano_hqq6_g32_quality_proof_root_decision.tsv",
+    "runtime_attempt": "benchmarks/20260627_0826_nemotron_nano_hqq6_g32_quality_proof_runtime_attempt.tsv",
+    "topk_rank_changes": "benchmarks/20260627_0826_nemotron_nano_hqq6_g32_quality_proof_topk_rank_changes.tsv",
+    "validation": "benchmarks/20260627_0826_nemotron_nano_hqq6_g32_quality_proof_validation_checks.tsv"
+  },
+  "closed_utc": "2026-06-27T08:49:50Z",
+  "consume": {
+    "all_rows_group_size_32": true,
+    "all_rows_nbits_6": true,
+    "artifact": "benchmarks/20260627_0826_nemotron_nano_hqq6_g32_quality_proof_consume_report.tsv",
+    "cases": [
+      0,
+      1,
+      2
+    ],
+    "expected_rows": 69,
+    "group_size": [
+      32
+    ],
+    "nbits": [
+      6
+    ],
+    "rows": 69,
+    "total_copied_output_bytes": 1029740544
+  },
+  "final_state": {
+    "cleanup_command": "./dev kill",
+    "disk_available_human": "680G",
+    "gpu_memory_free_mb": [
+      32105,
+      20043
+    ],
+    "gpu_memory_used_mb": [
+      15,
+      11
+    ],
+    "matching_processes": "none after filtering command self-match",
+    "ram_available_human": "966Gi",
+    "tmux": "no server running on /tmp/tmux-1000/default"
+  },
+  "forbidden_scope": {
+    "decode_hcs": "forbidden",
+    "fallback": "forbidden",
+    "int4_hqq4": "forbidden",
+    "production_hqq": "forbidden",
+    "selected_expert_retargeting": "forbidden",
+    "speed_benchmark": "forbidden"
+  },
+  "gate": "guarded HQQ6 g32 quality proof",
+  "label": "20260627_0826_nemotron_nano_hqq6_g32_quality_proof",
+  "opened_utc": "2026-06-27T08:26:00Z",
+  "quality_result": {
+    "avg_selected_output_logprob_delta_g32": 0.12585199999999994,
+    "avg_selected_output_logprob_delta_g64": 0.11091966666666668,
+    "decision_artifact": "benchmarks/20260627_0826_nemotron_nano_hqq6_g32_quality_proof_root_decision.tsv",
+    "g32_selected_token_changed_cases": 0,
+    "g32_topk_rank_drift_cases": 3,
+    "g64_selected_token_changed_cases": 1,
+    "g64_topk_rank_drift_cases": 3,
+    "improvement_artifact": "benchmarks/20260627_0826_nemotron_nano_hqq6_g32_quality_proof_g32_vs_g64_improvement.tsv",
+    "material_improvement": "no",
+    "max_common_topk_logprob_delta_g32": 0.5789149999999998,
+    "max_common_topk_logprob_delta_g64": 0.49339699999999986,
+    "max_rank_aligned_topk_logprob_delta_g32": 0.4074139999999997,
+    "max_rank_aligned_topk_logprob_delta_g64": 0.42908800000000014,
+    "payload_quality_artifact": "benchmarks/20260627_0826_nemotron_nano_hqq6_g32_quality_proof_payload_quality_summary.tsv",
+    "root_decision": "hqq6_g32_not_material_quality_acceptance",
+    "topk_rank_artifact": "benchmarks/20260627_0826_nemotron_nano_hqq6_g32_quality_proof_topk_rank_changes.tsv"
+  },
+  "record_first": {
+    "cache_file_bytes": 29375326272,
+    "cache_spec_generation_status": "succeeded",
+    "gemma_speeds": "5619.6 / 92.43 / 155.69",
+    "group_size": 32,
+    "headroom_after_generation": {
+      "disk_available_human": "680G",
+      "final_cleanup_ram_available_human": "965Gi",
+      "ram_available_human": "962Gi"
+    },
+    "headroom_before_generation": {
+      "disk_available_human": "707G",
+      "ram_available_human": "966Gi"
+    },
+    "live_server_in_0804": "not_run",
+    "nbits": 6,
+    "previous_gate": "0804",
+    "source_changes_in_0804": "none",
+    "tensor_records": 5888
+  },
+  "runtime": {
+    "bf16_server_run": false,
+    "hqq_g32_server_run": true,
+    "http_200_count": 3,
+    "long_calibration_decode_s": 4.22,
+    "long_calibration_min_free_mb": 14070,
+    "long_calibration_prefill_s": 343.23,
+    "request_count": 3,
+    "request_times_s": [
+      35.826555,
+      33.244709,
+      32.769613
+    ],
+    "request_tsv": "benchmarks/20260627_0826_nemotron_nano_hqq6_g32_quality_proof_hqq_g32_requests.tsv",
+    "runtime_idle_free_after_hcs_mb": 847,
+    "safety_margin_mb": 600,
+    "server_log": "benchmarks/20260627_0826_nemotron_nano_hqq6_g32_quality_proof_hqq_g32_server.log"
+  },
+  "scope": {
+    "bf16_baseline": "reuse_saved_1023_responses",
+    "bf16_server": "do_not_run",
+    "compare": [
+      "selected_token",
+      "top_k_rank_changes",
+      "selected_logprob_delta",
+      "top_k_logprob_delta",
+      "material_improvement_vs_hqq6_g64"
+    ],
+    "hqq_live_pass": "one_guarded_hqq_consume_run_with_g32_diagnostic_spec_for_three_1023_payloads"
+  },
+  "status": "closed_not_material_quality_acceptance",
+  "validation_artifact": "benchmarks/20260627_0826_nemotron_nano_hqq6_g32_quality_proof_validation_checks.tsv"
+}

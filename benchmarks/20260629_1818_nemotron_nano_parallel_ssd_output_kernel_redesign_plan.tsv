@@ -1,0 +1,6 @@
+item	status	detail
+record_first	done	Carry forward 1408 token/logit-correct timing: prefill 17.99s / 2219.4 tok/s, output 627.436ms of 656.022ms.
+guarding	done	Added `KRASIS_MAMBA2_SSD_PARALLEL_OUTPUT_BY_CHUNK=1`, requiring `KRASIS_MAMBA2_SSD_PARALLEL_CHUNKED=1`, so the 1408 correct path remains available while iterating.
+kernel_target	done	Added a by-chunk output kernel that launches one CTA per `(head, d-tile, chunk)` instead of serially walking chunks inside one CTA per `(head, d-tile)`.
+correctness	done	Token/logit parity passed after build3 against the accepted guarded control: token `1044`, text `,`, `12/12` top-logprobs exact, max delta `0.000000000`.
+timing	done	Long no-oracle 39920-token candidate timing passed after build3: prefill `7.01s` / `5693.8 tok/s`, total candidate `177.279ms`, output `148.531ms`.

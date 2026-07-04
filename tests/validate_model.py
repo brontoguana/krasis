@@ -193,14 +193,25 @@ def extract_port(config_path: str) -> int:
 def is_quantized_model(config_path: str) -> bool:
     """Check if the model uses quantized weights (INT4/INT8).
 
-    All Krasis models use Marlin INT4/INT8 for MoE experts, which causes
-    token-level drift vs BF16 reference. This is true even with BF16 attention.
+    Most Krasis configs use Marlin INT4/INT8 routed experts, which causes
+    token-level drift vs BF16 reference even with BF16 attention. The direct
+    BF16 expert debug path uses CFG_GPU_EXPERT_BITS=16 and all BF16 dense
+    surfaces, so it should be judged against the stricter BF16 threshold.
     """
     config = parse_config(config_path)
-    # Check weight quant — if set to anything other than bf16, model is quantized
-    weight_quant = config.get("CFG_WEIGHT_QUANT", "4").lower()
-    attn_quant = config.get("CFG_ATTENTION_QUANT", "bf16").lower()
-    return weight_quant != "bf16" or attn_quant != "bf16"
+    legacy_weight_quant = config.get("CFG_WEIGHT_QUANT")
+    if legacy_weight_quant is not None:
+        return legacy_weight_quant.lower() != "bf16"
+
+    gpu_expert_bits = config.get("CFG_GPU_EXPERT_BITS", "4")
+    expert_bf16 = str(gpu_expert_bits).strip() == "16"
+    return not (
+        expert_bf16
+        and config.get("CFG_ATTENTION_QUANT", "bf16").lower() == "bf16"
+        and config.get("CFG_SHARED_EXPERT_QUANT", "int8").lower() == "bf16"
+        and config.get("CFG_DENSE_MLP_QUANT", "int8").lower() == "bf16"
+        and config.get("CFG_LM_HEAD_QUANT", "int8").lower() == "bf16"
+    )
 
 
 def _resolve_reference_dir(model_name: str, profile_id: Optional[str] = None) -> Optional[Path]:

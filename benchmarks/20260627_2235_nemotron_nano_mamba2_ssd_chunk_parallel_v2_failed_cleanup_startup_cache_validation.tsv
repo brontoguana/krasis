@@ -1,0 +1,10 @@
+check	value	evidence
+hqq_attention_cache	reused_validated	startup_diagnostic.log:24 HQQ attention artifacts validated (115 MB cached), 27940 MB free
+marlin_cache	reused_effective_g64	startup_diagnostic.log:28-29 Loading GPU Marlin cache: 23 layers; GPU Marlin cache loaded: 15.8 GB in 10s
+marlin_write_path	no_real_write_detected	generic Python phase header appeared, but no "Building GPU INT4 Marlin cache:" safetensors write line was present
+default_ssd_short	293.5ms_over_23_calls	startup_diagnostic.log:593
+default_ssd_long	674.3ms_over_23_calls	startup_diagnostic.log:870
+v2_runtime_markers	absent	rg MAMBA2-SSD-CHUNK-V2 startup log returned no matches
+startup_exit_after_calibration	yes	startup_diagnostic.log:896
+requests	none	no reference_test/chat request markers
+benchmark_path	none	no benchmark-only markers

@@ -1,0 +1,10 @@
+component	file	line	status	details
+target_env_parser	src/gpu_prefill.rs	230	implemented	Parses KRASIS_FIRST_TOKEN_MARGIN_PROJECTION_DIAG plus token A/B and bounded TOPN; missing/same tokens fail closed.
+projection_trace_builder	src/gpu_prefill.rs	1616	implemented	Builds first_token_margin_projection JSON from selected hidden row, target LM-head rows, downloaded logits, layer deltas, and expert contributor deltas.
+consume_boundary_layer_delta	src/gpu_prefill.rs	1549	implemented	Uses existing HQQ consume-boundary capture to build selected-row BF16-vs-HQQ routed deltas and per-expert contributor deltas.
+request_debug_gate	src/gpu_prefill.rs	16676	implemented	Fails closed when projection env is requested without debug_reference_trace=true.
+per_request_delta_state	src/gpu_prefill.rs	5530	implemented	Stores request-local first-token margin projection layer deltas; reset with reference debug trace state.
+runtime_constructor	src/gpu_decode.rs	24620	implemented	Initializes first_token_margin_projection_layer_deltas for PrefillEngine construction.
+lm_head_trace_emit	src/gpu_prefill.rs	51154	implemented	Downloads target LM-head BF16 rows and emits first_token_margin_projection under debug_reference_trace only.
+trace_json_insertion	src/gpu_prefill.rs	51448	implemented	Adds the trace field to reference-debug responses without consuming or changing production logits.
+focused_tests	src/gpu_prefill.rs	54163	implemented	Adds fail-closed env parsing, projection JSON, and consume-boundary layer-delta tests.

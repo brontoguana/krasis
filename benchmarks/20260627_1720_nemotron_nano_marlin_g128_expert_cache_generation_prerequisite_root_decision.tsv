@@ -1,0 +1,9 @@
+field	value
+result	exact_g128_artifact_not_created
+requested_path	/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/experts_marlin_int4_g128_calamax.bin
+requested_path_present	false
+effective_path	/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/experts_marlin_int4_g64_calamax.bin
+effective_header_group_size	64
+reason	Nano moe_intermediate_size=1856 is not divisible by requested expert_group_size=128; runtime Marlin builder reduces to effective group_size=64 and renames the completed cache to the effective g64 path.
+quality_smoke_run	false
+next_gate	Use the effective g64 Marlin expert cache as the startup-reuse prerequisite for HQQ4+k4v4 smoke, or fix reporting/validation first so the prerequisite and config display do not expect an impossible exact g128 artifact.

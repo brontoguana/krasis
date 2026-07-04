@@ -1,0 +1,11 @@
+step	target	status
+1	record 1818 baseline and constraints	complete
+2	inspect by-chunk output kernel loops and launch geometry	complete
+3	try state-split output branch behind explicit env	rejected_slower_not_promoted
+4	implement CB precompute behind KRASIS_MAMBA2_SSD_PARALLEL_OUTPUT_PRECOMPUTE_CB=1	complete
+5	measure precompute-CB long 39920 no-oracle timing	complete
+6	add ordered loop unroll in precompute-CB output kernel only	complete
+7	run ./dev build after final candidate	complete
+8	validate selected-token smoke on 462-token reference payload	complete
+9	run clean long 39920 no-oracle startup timing	complete
+10	update changelog/debuglog/tracking/benchmark artifacts and close	complete

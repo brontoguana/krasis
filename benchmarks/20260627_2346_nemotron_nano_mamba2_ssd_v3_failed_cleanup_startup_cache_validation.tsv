@@ -1,0 +1,7 @@
+item	status	value	evidence
+hqq_attention_cache	pass	reused	HQQ attention artifacts validated (115 MB cached), 27940 MB free
+marlin_expert_cache	pass	reused	Loading GPU Marlin cache: 23 layers; GPU Marlin cache loaded: 15.8 GB in 10s
+marlin_cache_write	pass	absent	no Building GPU INT4 Marlin cache line in startup diagnostic log
+cache_generation_flags	pass	absent	no build-cache or force-rebuild flags used
+cache_temp_lock_files	pre_validation_pending	pending	final cleanup snapshot recorded in validation_checks.tsv
+startup_exit	pass	exit 0	startup diagnostic exit marker

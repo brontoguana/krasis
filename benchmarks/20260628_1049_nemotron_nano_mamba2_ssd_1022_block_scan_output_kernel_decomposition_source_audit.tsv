@@ -1,0 +1,10 @@
+artifact	result	path	line	evidence
+1022_component_timing	read	benchmarks/20260628_1022_nemotron_nano_mamba2_ssd_block_scan_c_state_total_correction_prototype_component_timing.tsv	1	Long block-scan output kernel total is 100060.325232ms across 23 layers; recurrent kernel is 16487.771138ms.
+1022_term_probe	read	benchmarks/20260628_1022_nemotron_nano_mamba2_ssd_block_scan_c_state_total_correction_prototype_term_probe.tsv	1	Row97/head48/d24 term probe matched output bits in small and long runs; max abs c_state_total_exact-minus-replayed was 0.000003814697265625.
+sequential_state_update	reviewed	src/cuda/prefill_kernels.cu	5036	Sequential oracle updates h with exact token-order f32 recurrence using BF16(B*dt) before output assembly.
+sequential_output	reviewed	src/cuda/prefill_kernels.cu	5053	Sequential output computes c_state_total, local_old_state, local_hf_chunk_scan, D skip, and BF16 final store in one per-token kernel.
+block_scan_recurrent	reviewed	src/cuda/prefill_kernels.cu	5667	Opt-in recurrent phase preserves exact token-order f32 state and materializes c_state_total_exact.
+block_scan_output	reviewed	src/cuda/prefill_kernels.cu	5730	Output phase consumes c_state_total_exact but still recomputes local_old_state and local_hf_chunk_scan through the lower-triangular loop.
+row97_probe	reviewed	src/cuda/prefill_kernels.cu	5838	Existing term probe captures c_state_total_exact, replayed c_state_total, local_old_state, prior, local_hf, D skip, y, indexing, and bits.
+block_scan_dispatch	reviewed	src/gpu_prefill.rs	32044	Block-scan temp buffers and candidate/oracle launches are allocated only under opt-in envs.
+timing_log	reviewed	src/gpu_prefill.rs	32368	Existing timing records split recurrent and output kernels but do not split loops inside block_scan_output_kernel.

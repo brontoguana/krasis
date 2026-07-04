@@ -1,0 +1,2 @@
+decision	status	evidence	next_scope
+hqq6_g32_non_attribution_selected_token_behavior_restored	selected_token_stable_only	Both case 0 and case 2 returned HTTP 200 and selected token 1044 with positive 1044-1321 margins; projection, consume-boundary, and read-only checkpoint traces were unavailable as intended.	This does not make HQQ6 g32 quality-acceptable; top-k drift remains and production HQQ remains disabled.

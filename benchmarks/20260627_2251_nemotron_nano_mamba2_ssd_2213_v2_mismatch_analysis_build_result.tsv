@@ -1,0 +1,6 @@
+field	value
+command	./dev build
+exit	0
+duration_s	169
+log	benchmarks/20260627_2251_nemotron_nano_mamba2_ssd_2213_v2_mismatch_analysis_build.log
+reason	source change required only for guarded state-flat local-tri diagnostic coverage

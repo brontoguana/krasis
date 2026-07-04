@@ -1,0 +1,21 @@
+check	result	detail
+summary_json	pass	status closed, build/startup exit 0, no request/benchmark/cache-write marker, validation true
+tsv_column_counts	pass	all 2102 TSV artifacts have stable tab column counts
+build_exit	pass	./dev build exit file is 0
+startup_diagnostic_exit	pass	startup diagnostic exit file is 0
+prototype_marker_absence	pass	no 2039 chunk env, oracle, CUDA symbol, scratch, or dispatch markers remain in active source files
+mamba2_substage_instrumentation_preserved	pass	mamba2_substages source print and runtime ssd_scan timing remain
+no_request_or_benchmark	pass	startup diagnostic log has no reference_test, /v1/internal, KrasisBenchmark, or benchmark-only marker
+no_cache_write_marker	pass	startup diagnostic log has no concrete safetensors Marlin cache build/write marker or build-cache flag
+cache_reuse_lines	pass	HQQ attention validated and GPU Marlin cache loaded from existing cache
+bash_n_dev	pass	dev shell syntax is valid
+git_diff_check_krasis	pass	git diff --check passed in krasis-nemotron-dev
+git_diff_check_internal	pass	git diff --check passed in krasis-internal
+protected_config_status	pass	only tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf and known tests/nemotron-nano-bf16-experts-a16.conf are untracked
+cleanup_command	pass	./dev kill completed and reported all GPUs clear
+cache_temp_lock_files	pass	no Nano cache .tmp/.lock/.pending files remain
+tmux_idle	pass	no tmux server remains
+runtime_process_idle	pass	no krasis/dev run/benchmark/build process remains
+nvidia_compute_idle	pass	no NVIDIA compute process remains
+gpu_idle	pass	GPU0 15 MB used, GPU1 11 MB used at 2026-06-27T21:17:14Z
+disk_ram_snapshot	pass	disk 588G available, RAM 967Gi available

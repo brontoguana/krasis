@@ -1,0 +1,85 @@
+{
+  "artifacts": {
+    "correction_plan": "20260628_1014_nemotron_nano_mamba2_ssd_0957_block_scan_output_mismatch_analysis_correction_plan.tsv",
+    "mismatch_attribution": "20260628_1014_nemotron_nano_mamba2_ssd_0957_block_scan_output_mismatch_analysis_mismatch_attribution.tsv",
+    "probe_plan": "20260628_1014_nemotron_nano_mamba2_ssd_0957_block_scan_output_mismatch_analysis_probe_plan.tsv",
+    "runtime_not_run": "20260628_1014_nemotron_nano_mamba2_ssd_0957_block_scan_output_mismatch_analysis_runtime_not_run.tsv",
+    "source_audit": "20260628_1014_nemotron_nano_mamba2_ssd_0957_block_scan_output_mismatch_analysis_source_audit.tsv",
+    "validation_checks": "20260628_1014_nemotron_nano_mamba2_ssd_0957_block_scan_output_mismatch_analysis_validation_checks.tsv"
+  },
+  "closed_utc": "2026-06-28T10:19:12Z",
+  "constraints": {
+    "build": false,
+    "cleanup": false,
+    "decode_hcs_changes": false,
+    "default_path_change": false,
+    "implementation": false,
+    "production_enablement": false,
+    "requests": false,
+    "runtime_diagnostic": false,
+    "speed_benchmark": false
+  },
+  "gate": "20260628_1014_nemotron_nano_mamba2_ssd_0957_block_scan_output_mismatch_analysis",
+  "opened_utc": "2026-06-28T10:14:00Z",
+  "record_first": {
+    "0957_result": {
+      "first_output_mismatch": {
+        "abs_error": 0.25,
+        "candidate_bits": "0xc233",
+        "candidate_value": -44.75,
+        "d": 24,
+        "flat": 400408,
+        "head": 48,
+        "oracle_bits": "0xc234",
+        "oracle_value": -45.0,
+        "row": 97
+      },
+      "output_max_abs": 0.25,
+      "output_mean_abs": 0.00000024959444999694824,
+      "output_mismatches": 3,
+      "row64_state0_probe": "exact",
+      "row82_state14_probe": "exact",
+      "state_max_abs": 0.0,
+      "state_mean_abs": 0.0,
+      "state_mismatches": 0
+    },
+    "gemma_baseline": {
+      "internal_decode_tok_s": 92.43,
+      "network_tok_s": 155.69,
+      "prefill_tok_s": 5619.6
+    },
+    "nano_baseline": {
+      "internal_decode_tok_s": 94.48,
+      "network_tok_s": 164.75,
+      "prefill_tok_s": 346.5
+    },
+    "source_gate": "20260628_0957_nemotron_nano_mamba2_ssd_block_scan_correctness_prototype"
+  },
+  "result": {
+    "attribution": {
+      "primary_static_suspect": "block-scan output kernel recomputes c_state_total from entry_state and then cancels local_old_state, instead of using the sequential kernel's live post-update c_state_total",
+      "ruled_down": [
+        "final_state_writeback",
+        "accepted recurrent state propagation",
+        "known 0650 BF16 cast placement issue",
+        "broad row/chunk indexing"
+      ],
+      "unproven_without_next_probe": "0957 artifacts do not include row97 D/prior/local term breakdown, so the exact subterm crossing the BF16 boundary remains to be proven by a row97 term probe"
+    },
+    "correction_plan": "materialize c_state_total_exact in the exact recurrent phase and feed that f32 buffer to the output assembly kernel; keep local triangular math unchanged and require exact full oracle before commit",
+    "status": "static_plan_recorded"
+  },
+  "scope": "static_block_scan_output_mismatch_analysis",
+  "status": "closed",
+  "validation": {
+    "final_gpu_memory_mb": {
+      "0": 15,
+      "1": 11
+    },
+    "final_snapshot_utc": "2026-06-28T10:19:12Z",
+    "krasis_temp_lock_files_excluding_hf_download_metadata": 0,
+    "nvidia_compute_processes": 0,
+    "passed": true,
+    "runtime_processes": 0
+  }
+}

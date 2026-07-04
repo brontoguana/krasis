@@ -1,0 +1,155 @@
+{
+  "gate": "20260630_2340_nemotron_super_standard_benchmark",
+  "status": "complete",
+  "completed_utc": "2026-07-01T00:27:57Z",
+  "model": "NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+  "config": "tests/nemotron-super-bf16kv-a16.conf",
+  "hardware": {
+    "gpu": "NVIDIA GeForce RTX 5090",
+    "gpu_count": 1,
+    "gpu_vram_mb": 32607,
+    "cpu": "AMD EPYC 7742 64-Core Processor",
+    "cpu_cores": 64,
+    "ram_gb": 1007
+  },
+  "quantization": {
+    "gpu_experts": "INT4 Marlin",
+    "cpu_experts": "INT4",
+    "attention": "BF16",
+    "kv_cache": "BF16",
+    "shared_expert": "INT8",
+    "dense_mlp": "INT8",
+    "lm_head": "INT8"
+  },
+  "final_command": "KRASIS_DECODE_PARALLEL_TOPK=1 ./dev benchmark tests/nemotron-super-bf16kv-a16.conf",
+  "timing_instrumentation": false,
+  "trace_instrumentation": false,
+  "final_env": [
+    "KRASIS_DECODE_PARALLEL_TOPK=1"
+  ],
+  "code_changes_required": [
+    "Store startup VRAM calibration on the model so benchmark prompt sizing can use measured runtime limits.",
+    "Cap benchmark prefill warmup and timed prompt lengths from runtime calibration when standard 25K/50K prompts exceed the measured safe range.",
+    "Add benchmark min-new stop suppression so benchmark decode runs generate the requested 50/100/250-token targets instead of stopping early on EOS."
+  ],
+  "attempts": [
+    {
+      "attempt": 1,
+      "result": "failed_before_benchmark",
+      "command": "./dev benchmark tests/nemotron-super-bf16kv-a16.conf",
+      "env": "KRASIS_MAMBA2_DECODE_GRAPH=1 KRASIS_MAMBA2_DECODE_GRAPH_FAST_INPROJ=1 KRASIS_DECODE_PARALLEL_TOPK=1 KRASIS_DECODE_GRAPH_RELU2_W2_COALESCED=1",
+      "reason": "Super latent expert dimensions are not supported by graph replay MoE yet."
+    },
+    {
+      "attempt": 2,
+      "result": "interrupted_invalid",
+      "command": "./dev benchmark tests/nemotron-super-bf16kv-a16.conf",
+      "reason": "Fixed 25K/50K benchmark prompt sizing was outside the measured Super prefill calibration envelope on this 5090."
+    },
+    {
+      "attempt": 3,
+      "result": "prefill_valid_decode_invalid",
+      "command": "KRASIS_DECODE_PARALLEL_TOPK=1 ./dev benchmark tests/nemotron-super-bf16kv-a16.conf",
+      "prefill_best_tok_s": 192.8,
+      "reason": "Decode and HTTP benchmark prompts stopped early before the target token counts."
+    },
+    {
+      "attempt": 4,
+      "result": "invalid_duplicate_launch",
+      "command": "KRASIS_DECODE_PARALLEL_TOPK=1 ./dev benchmark tests/nemotron-super-bf16kv-a16.conf",
+      "reason": "Two Super benchmark wrappers overlapped and OOMed during startup; no result used."
+    },
+    {
+      "attempt": 5,
+      "result": "complete_valid",
+      "command": "KRASIS_DECODE_PARALLEL_TOPK=1 ./dev benchmark tests/nemotron-super-bf16kv-a16.conf"
+    }
+  ],
+  "benchmark": {
+    "architecture": "nemotron_h, 88 layers, 512 experts, top-22, 8 GQA + 80 linear",
+    "strategy": "gpu_decode layer_grouped(2)",
+    "prefill_internal": {
+      "runs": [
+        {
+          "label": "1K",
+          "tokens": 1001,
+          "milliseconds": 5876.8,
+          "tok_s": 170.3
+        },
+        {
+          "label": "5K",
+          "tokens": 5001,
+          "milliseconds": 25938.6,
+          "tok_s": 192.8
+        },
+        {
+          "label": "8323",
+          "tokens": 8324,
+          "milliseconds": 43158.8,
+          "tok_s": 192.9
+        }
+      ],
+      "best_tok_s": 192.9
+    },
+    "decode_internal": {
+      "runs": [
+        {
+          "label": "50",
+          "tok_s": 21.86,
+          "ms_per_tok": 45.8
+        },
+        {
+          "label": "100",
+          "tok_s": 20.90,
+          "ms_per_tok": 47.8
+        },
+        {
+          "label": "250",
+          "tok_s": 20.40,
+          "ms_per_tok": 49.0
+        }
+      ],
+      "best_tok_s": 21.86
+    },
+    "round_trip_network": {
+      "runs": [
+        {
+          "label": "50",
+          "tok_s": 34.85,
+          "total_seconds": 3.25
+        },
+        {
+          "label": "100",
+          "tok_s": 25.71,
+          "total_seconds": 5.69
+        },
+        {
+          "label": "250",
+          "tok_s": 20.56,
+          "total_seconds": 14.06
+        }
+      ],
+      "best_tok_s": 34.85
+    },
+    "hcs": {
+      "loaded_experts": 3358,
+      "total_experts": 20480,
+      "coverage_percent": 16.4,
+      "mode": "dynamic"
+    },
+    "vram": {
+      "safety_margin_mb": 600,
+      "decode_min_free_mb": 5758,
+      "startup_ready_free_mb": 972,
+      "long_calibration_prefill_min_free_mb": 1974,
+      "scratch_reservation_at_50000_tokens_mb": 38007
+    }
+  },
+  "logs": {
+    "benchmark_report": "benchmarks/20260630_2340_nemotron_super_fixed_topk_benchmark_report.log",
+    "benchmark_stdout": "benchmarks/20260630_2340_nemotron_super_fixed_topk_benchmark_stdout.log",
+    "command_log": "benchmarks/20260630_2340_nemotron_super_fixed_topk_benchmark_command.log",
+    "build_log": "benchmarks/20260630_2340_nemotron_super_minnew_build.log"
+  },
+  "decision": "Super now has a valid standard benchmark on the supported ungraphed decode path with the portable parallel top-k gate. Graph decode optimizations remain disabled until graph replay supports latent expert dimensions."
+}

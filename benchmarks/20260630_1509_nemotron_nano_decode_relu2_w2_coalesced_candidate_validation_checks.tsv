@@ -1,0 +1,15 @@
+check	status	detail
+summary_json	pass	jq empty passed for 20260630_1509_nemotron_nano_decode_relu2_w2_coalesced_candidate_summary.json
+tsv_shapes	pass	plan/result/comparison TSV files have consistent per-file column counts
+build_initial	pass	./dev build passed before initial candidate request; exit 0
+build_fixed	pass	./dev build passed after reduction-order fix; exit 0
+build_final	pass	./dev build passed after post-review tail-lane safety patch; exit 0
+timing_on_correctness	pass	fixed candidate matched same-payload control on first-token top-k, generated text, token ids, and finish reason
+timing_off_speed	pass	fixed candidate timing-off request measured 103 decode tokens in 0.86s, 119.2 tok/s
+hcs_state	pass	HCS hit/miss 138/0, cold DMA 0, min free VRAM 8730 MB
+public_diff_check	pass	git diff --check passed for touched source and 1509 benchmark artifacts
+internal_diff_check	pass	git diff --check passed for krasis-internal CHANGELOG/TRACKING/DEBUGLOG
+shell_syntax	pass	bash -n dev passed
+protected_configs	pass	git status --short -- testconfigs tests/testconfigs produced no changes
+expected_symbols	pass	KRASIS_DECODE_GRAPH_RELU2_W2_COALESCED and relu2_w2_batched_coalesced found only in expected source files
+runtime_idle	pass	no tmux/runtime/build process after validation; GPUs idle at 15 MB and 11 MB

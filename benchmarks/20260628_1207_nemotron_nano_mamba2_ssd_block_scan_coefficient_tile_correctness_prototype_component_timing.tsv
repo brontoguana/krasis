@@ -1,0 +1,2 @@
+scope	records	avg_total_block_scan_path_ms	avg_sequential_oracle_ms	avg_recurrent_ms	avg_output_kernel_ms	avg_downloads_ms	avg_host_compare_ms	avg_commit_ms	avg_state_snapshot_ms	avg_alloc_ms	avg_residual_ms	coefficient_tile_shared_bytes
+long_39920_avg	23	7179.206093739131	4960.68509326087	715.7697665652174	500.6286002173913	391.73525113043473	537.3217927391304	0.48902200000000007	13.178852391304346	1.0791346086956524	58.31858082608719	12992

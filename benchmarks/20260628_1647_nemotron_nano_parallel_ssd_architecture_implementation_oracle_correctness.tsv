@@ -1,0 +1,2 @@
+run	layer	passed	output_mismatches	output_max_abs	output_mean_abs	first_output_row	first_output_head	first_output_d	first_output_candidate_bits	first_output_oracle_bits	state_mismatches	state_max_abs	state_mean_abs	first_state_flat	first_state_head	first_state_d	first_state_state	first_state_candidate_bits	first_state_oracle_bits
+small_full_oracle	0	false	73071	16.0	0.0020988934409373883	64	1	5	0xbdef	0xbdee	524273	10.61376953125	0.0012460283959495207	0	0	0	0	0x3b90c20e	0x3b90c258

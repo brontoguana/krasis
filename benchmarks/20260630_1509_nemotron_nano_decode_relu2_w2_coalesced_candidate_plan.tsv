@@ -1,0 +1,13 @@
+field	value
+gate	20260630_1509_nemotron_nano_decode_relu2_w2_coalesced_candidate
+opened_utc	2026-06-30T15:09:57Z
+model	NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+config	tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf
+baseline_best_timing_off_tok_s	115.2
+baseline_source	20260630_1249_nemotron_nano_decode_parallel_topk_candidate
+measured_target	routed ReLU2 activation+W2 around 1.08-1.09 ms/tok in segmented graph timing
+candidate_env	KRASIS_DECODE_GRAPH_RELU2_W2_COALESCED=1
+candidate_scope	Graph routed INT4 ReLU2 W2 batched kernel only
+same_math_contract	Preserve W13 BF16 output, ReLU2 BF16 activation, W2 BF16 output, separate ordered weighted add
+fail_closed	INT4 experts only, ReLU2 routed experts only, graph path only
+validation_plan	Build; same-payload timing-on control/candidate first-token top-k and generated text; timing-off only if correctness holds

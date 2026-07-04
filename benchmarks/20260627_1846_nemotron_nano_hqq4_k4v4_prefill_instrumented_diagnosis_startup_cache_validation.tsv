@@ -1,0 +1,13 @@
+run	evidence_type	evidence	result
+prefill_component_timing	hqq_attention_cache	HQQ attention artifacts validated (115 MB cached), 27940 MB free	reused
+prefill_component_timing.marlin_expert_cache	loading_line	Loading GPU Marlin cache: 23 layers...	reused
+prefill_component_timing.marlin_expert_cache	loaded_line	GPU Marlin cache loaded: 15.8 GB in 10s	reused
+prefill_component_timing.cache_write_check	Building GPU INT4 Marlin cache: 23 layers from safetensors	absent
+prefill_component_timing.requests	reference_test lines	absent
+prefill_component_timing.ready	KRASIS SERVER READY	absent because startup diagnostic exited after calibration
+liveness_layer_type_timing	hqq_attention_cache	HQQ attention artifacts validated (115 MB cached), 27940 MB free	reused
+liveness_layer_type_timing.marlin_expert_cache	loading_line	Loading GPU Marlin cache: 23 layers...	reused
+liveness_layer_type_timing.marlin_expert_cache	loaded_line	GPU Marlin cache loaded: 15.8 GB in 10s	reused
+liveness_layer_type_timing.cache_write_check	Building GPU INT4 Marlin cache: 23 layers from safetensors	absent
+liveness_layer_type_timing.requests	reference_test lines	absent
+liveness_layer_type_timing.ready	KRASIS SERVER READY	absent because startup diagnostic exited after calibration

@@ -1,0 +1,53 @@
+[0;36m[1m=>[0m Waiting for selected GPUs (0) to clear...
+[0;32m[1mOK[0m Selected GPUs (0) clear.
+[0;36m[1m=>[0m Launching from: tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf
+[0;36m[1m=>[0m Run dir: /home/main/Documents/Claude/krasis-nemotron-dev/logs/dev-run_20260627_204939
+[0;36m[1m=>[0m Import origin check:
+krasis: /home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/__init__.py
+krasis.krasis: /home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+Pre-scan: set CUDA_VISIBLE_DEVICES=0
+Loaded config from tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf: {'model_path': '/home/main/.krasis/models/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16', 'selected_gpus': '0', 'num_gpus': 1, 'layer_group_size': 2, 'kv_dtype': 'k4v4', 'gpu_expert_bits': 4, 'cpu_expert_bits': 4, 'attention_quant': 'hqq4', 'hqq_group_size': 128, 'shared_expert_quant': 'int8', 'dense_mlp_quant': 'int8', 'lm_head_quant': 'int8', 'krasis_threads': 16, 'host': '0.0.0.0', 'port': 18012, 'enable_thinking': False, 'gpu_prefill_threshold': 300, 'vram_safety_margin': 600, 'force_load': False}
+
+[1m[36m▸ Krasis — NVIDIA-Nemotron-3-Nano-30B-A3B-BF16[0m
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 1[0m
+  [32mHCS host cache: source[0m
+  [32mSelected physical GPUs: 0 (config; CUDA_VISIBLE_DEVICES=0)[0m
+  [32mExperts: GPU INT4 g128 (amax)  |  Attention: hqq4  |  KV: k4v4[0m
+  [32mLayer groups: 2  |  KV cache: 1000 MB  |  Threads: 16[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+
+[1m[36m▸ Loading model weights[0m
+  [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=518 MB, free=31600 MB, total=32119 MB
+
+[1m[36m▸ Loading GPU weights[0m
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:0: alloc=3477 MB, reserved=3562 MB, used=4178 MB, free=27940 MB, total=32119 MB
+  [0;32mHQQ attention artifacts validated (115 MB cached), 27940 MB free[0m
+
+[1m[36m▸ Building GPU INT4 Marlin expert cache (one-time)[0m
+  [2mCache will be saved to /home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 for instant loading next time.[0m
+    Loading GPU Marlin cache: 23 layers...
+    GPU Marlin cache loaded: 15.8 GB in 10s
+  [0;32mExpert cache built in 10s — next launch will be much faster.[0m
+  [33m[VRAM after-phase2-expert-weights][0m cuda:0: alloc=3477 MB, reserved=3562 MB, used=4178 MB, free=27940 MB, total=32119 MB
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:0: alloc=3477 MB, reserved=3562 MB, used=4178 MB, free=27940 MB, total=32119 MB
+  [33m[VRAM after-kv-cache-init][0m cuda:0: alloc=4477 MB, reserved=4562 MB, used=5178 MB, free=26940 MB, total=32119 MB
+  [33m[VRAM after-full-load][0m cuda:0: alloc=4477 MB, reserved=4562 MB, used=5178 MB, free=26940 MB, total=32119 MB
+
+[1m[36m▸ CUDA runtime warmup[0m
+  [32mcuBLAS + Triton kernel compilation done[0m
+
+[1m[36m▸ Setting up GPU decode store[0m
+  [32mGPU decode store ready (addr=0x27351da0)[0m
+  [32mReleased redundant GPU execution source tensors (366 MB)[0m
+  [2mVRAM monitor started (tracking warmup)[0m
+  [2mcuda:0: 0 MB total[0m
+
+[1m[36m▸ Pre-allocating Rust prefill engine[0m
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/server.py", line 3147, in <module>
+    main()
+  File "/home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/server.py", line 1677, in main
+    gpu_store.allocate_prefill_engine(_model.cfg.max_position_embeddings)
+RuntimeError: Failed to allocate prefill engine: Kernel mamba2_ssd_head_shared_kernel not found

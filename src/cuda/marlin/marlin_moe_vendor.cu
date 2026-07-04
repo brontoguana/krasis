@@ -116,12 +116,14 @@ typedef struct {
 
 static moe_thread_config_t moe_small_batch_thread_configs[] = {
     {128, 128, 256},
-    {64, 128, 128}
+    {64, 128, 128},
+    {128, 64, 128}
 };
 
 static moe_thread_config_t moe_large_batch_thread_configs[] = {
     {64, 256, 256},
-    {64, 128, 128}
+    {64, 128, 128},
+    {128, 64, 128}
 };
 
 typedef struct {
@@ -229,8 +231,10 @@ static bool moe_is_valid_config(
 
 #define MOE_COMMON_GET_IF(W_TYPE) \
     MOE_COMMON_GET_IF_M1(W_TYPE, 8, 8, 256) \
+    MOE_COMMON_GET_IF_M1(W_TYPE, 4, 8, 128) \
     MOE_COMMON_GET_IF_M1(W_TYPE, 8, 4, 128) \
     MOE_COMMON_GET_IF_M234(W_TYPE, 16, 4, 256) \
+    MOE_COMMON_GET_IF_M234(W_TYPE, 4, 8, 128) \
     MOE_COMMON_GET_IF_M234(W_TYPE, 8, 4, 128)
 
 template <typename scalar_t>
@@ -431,6 +435,46 @@ void moe_marlin_mm_impl(
 
 // ── Extern "C" entry point ──────────────────────────────────────────────────
 
+extern "C" int krasis_marlin_moe_w2_lane_diag_config(
+    int enabled, int target_row, const int* target_dims, int dim_count) {
+    int clean_dims[4] = {-1, -1, -1, -1};
+    int clean_count = 0;
+    if (target_dims != nullptr && dim_count > 0) {
+        clean_count = dim_count > 4 ? 4 : dim_count;
+        for (int i = 0; i < clean_count; i++) clean_dims[i] = target_dims[i];
+    }
+    int clean_enabled = enabled && clean_count > 0 ? 1 : 0;
+    int zero = 0;
+    cudaError_t err = cudaMemcpyToSymbol(device::marlin_moe::krasis_moe_w2_lane_diag_enabled, &clean_enabled, sizeof(int));
+    if (err != cudaSuccess) return static_cast<int>(err);
+    err = cudaMemcpyToSymbol(device::marlin_moe::krasis_moe_w2_lane_diag_target_row, &target_row, sizeof(int));
+    if (err != cudaSuccess) return static_cast<int>(err);
+    err = cudaMemcpyToSymbol(device::marlin_moe::krasis_moe_w2_lane_diag_dim_count, &clean_count, sizeof(int));
+    if (err != cudaSuccess) return static_cast<int>(err);
+    err = cudaMemcpyToSymbol(device::marlin_moe::krasis_moe_w2_lane_diag_dims, clean_dims, sizeof(clean_dims));
+    if (err != cudaSuccess) return static_cast<int>(err);
+    err = cudaMemcpyToSymbol(device::marlin_moe::krasis_moe_w2_lane_diag_count, &zero, sizeof(int));
+    return static_cast<int>(err);
+}
+
+extern "C" int krasis_marlin_moe_w2_lane_diag_fetch(
+    device::marlin_moe::KrasisMoeW2LaneDiagEntry* out, int max_entries, int* out_count) {
+    int count = 0;
+    cudaError_t err = cudaMemcpyFromSymbol(&count, device::marlin_moe::krasis_moe_w2_lane_diag_count, sizeof(int));
+    if (err != cudaSuccess) return static_cast<int>(err);
+    int copied = count;
+    if (copied < 0) copied = 0;
+    if (copied > 128) copied = 128;
+    if (copied > max_entries) copied = max_entries;
+    if (out != nullptr && copied > 0) {
+        err = cudaMemcpyFromSymbol(out, device::marlin_moe::krasis_moe_w2_lane_diag_entries,
+                                   copied * sizeof(device::marlin_moe::KrasisMoeW2LaneDiagEntry));
+        if (err != cudaSuccess) return static_cast<int>(err);
+    }
+    if (out_count != nullptr) *out_count = copied;
+    return 0;
+}
+
 extern "C" void krasis_marlin_moe_mm_bf16(
     const void* A, const void* B, void* C, void* C_tmp,
     void* b_bias, void* s, void* s2, void* zp, void* g_idx,
@@ -469,16 +513,20 @@ __global__ void moe_scatter_weighted_runtime_kernel(
     int M,
     int topk,
     float scale_factor) {
-    int row = blockIdx.x;
-    int m_topk = M * topk;
-    if (row >= m_topk) return;
-    int token = row / topk;
-    float w = topk_weights[row] * scale_factor;
-    if (w == 0.0f) return;
-    for (int i = threadIdx.x; i < hidden; i += blockDim.x) {
-        float val = __bfloat162float(src[row * hidden + i]) * w;
-        atomicAdd(&accum[token * hidden + i], val);
+    int token = blockIdx.x;
+    int col = blockIdx.y * blockDim.x + threadIdx.x;
+    if (token >= M || col >= hidden) return;
+
+    float sum = 0.0f;
+    int base = token * topk;
+    for (int slot = 0; slot < topk; slot++) {
+        int row = base + slot;
+        float w = topk_weights[row] * scale_factor;
+        if (w != 0.0f) {
+            sum += __bfloat162float(src[(int64_t)row * hidden + col]) * w;
+        }
     }
+    accum[(int64_t)token * hidden + col] = sum;
 }
 
 extern "C" void krasis_moe_zero_and_scatter_weighted_bf16(
@@ -492,12 +540,12 @@ extern "C" void krasis_moe_zero_and_scatter_weighted_bf16(
     void* stream_ptr) {
     cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
     int m_topk = M * topk;
-    if (M <= 0 || hidden <= 0) return;
-    cudaMemsetAsync(accum, 0, (size_t)M * (size_t)hidden * sizeof(float), stream);
+    if (M <= 0 || hidden <= 0 || topk <= 0) return;
     if (m_topk <= 0) return;
-    int threads = min(1024, hidden);
+    int threads = min(256, hidden);
     threads = ((threads + 31) / 32) * 32;
-    moe_scatter_weighted_runtime_kernel<<<m_topk, threads, 0, stream>>>(
+    int hidden_tiles = (hidden + threads - 1) / threads;
+    moe_scatter_weighted_runtime_kernel<<<dim3(M, hidden_tiles, 1), threads, 0, stream>>>(
         reinterpret_cast<float*>(accum),
         reinterpret_cast<const nv_bfloat16*>(src),
         reinterpret_cast<const float*>(topk_weights),

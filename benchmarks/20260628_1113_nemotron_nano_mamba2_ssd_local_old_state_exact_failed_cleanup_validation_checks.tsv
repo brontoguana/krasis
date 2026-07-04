@@ -1,0 +1,18 @@
+check	result	detail
+summary_json	pass	Closed summary is valid JSON and records gate label/status/result.
+artifact_shape	pass	Build/runtime/oracle/term/cache/source TSV artifacts have tabular fields.
+source_cleanup	pass	No local_old_state_exact/local_chunk_state/exact-recurrent local-old markers remain in src/cuda/prefill_kernels.cu or src/gpu_prefill.rs.
+c_state_total_exact_preserved	pass	Accepted 1022 c_state_total_exact materialization/read remains in CUDA and Rust block-scan path.
+default_path	pass	Production sequential SSD kernel and non-env trace-or-sequential dispatch remain present.
+build	pass	./dev build exit 0, duration 177s.
+startup_diagnostic	pass	Smallest block-scan full-oracle startup diagnostic exit 0, duration 47s.
+oracle	pass	69/69 block-scan oracle records exact; output/state mismatches 0/0; probe failures 0.
+row97_probe	pass	69/69 row97/head48/d24 term probes exact; max abs c_state_total_exact-minus-replayed 0.000003814697265625.
+row64_regression	pass	row64/head11/d22 output and state flat0 probes exact.
+row82_regression	pass	row82/head37/d30 output and state flat14 probes exact.
+long_diagnostic	pass	No separate long 39920-token diagnostic was run.
+requests_benchmarks	pass	No /v1 request, speed-test, or benchmark evidence in diagnostic log.
+cache_temp_files	pass	No Nano Krasis temp/lock/partial files found outside standing HF download metadata.
+protected_configs	pass	Protected-config status unchanged; expected tests-only Nano config remains untracked.
+diff_checks	pass	git diff --check, bash -n dev, and krasis-internal diff --check passed.
+idle_state	pass	Final snapshot 2026-06-28T11:26:20Z; no tmux/runtime/build/GPU compute process; GPUs 15 MB / 11 MB.

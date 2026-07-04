@@ -1,0 +1,2 @@
+case	variant	http_code	time_total_s	size_download	curl_exit	started_utc	finished_utc	response_file
+2	hqq6_g64	200	31.267936	4299184	0	2026-06-27T16:30:44Z	2026-06-27T16:31:16Z	benchmarks/20260627_1603_nemotron_nano_hqq6_g64_non_attribution_quality_smoke_hqq6_g64_case2_response.json

@@ -1,0 +1,13 @@
+check	status	detail
+manifest_group_size	pass	group_size=16
+manifest_nbits	pass	nbits=6
+manifest_layer_count	pass	layers=23
+manifest_expert_count	pass	experts=128
+manifest_tensor_count	pass	tensors=5888
+spec_requirement_count	pass	requirements=23
+spec_group_size	pass	unique group_sizes=[16]
+spec_nbits	pass	unique nbits=[6]
+spec_layer_expert_refs	pass	expert refs=2944
+spec_cache_path	pass	20260627_0909_nemotron_nano_hqq6_g16_all_moe_layer_cache_spec_generation_hqq6_g16_all_moe_layers.krhq
+cache_size	pass	36719028288 bytes
+generator_exit	pass	exit status 0

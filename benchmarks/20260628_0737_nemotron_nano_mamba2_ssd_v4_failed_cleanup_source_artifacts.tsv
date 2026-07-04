@@ -1,0 +1,10 @@
+artifact	status	path	line	note
+cuda_sequential_kernel_preserved	pass	src/cuda/prefill_kernels.cu	4968	mamba2_ssd_sequential_kernel remains the default SSD kernel
+cuda_v4_candidate_removed	pass	src/cuda/prefill_kernels.cu	5530	v4 candidate kernel removed; next symbol is krasis_mamba2_ssd_fwd wrapper
+rust_v4_raw_func_removed	pass	src/gpu_prefill.rs	4898	PrefillKernels fields go from mamba2_ssd_trace to mamba2_extract with no v4 field
+rust_sequential_dispatch_preserved	pass	src/gpu_prefill.rs	31345	non-trace branch launches self.kernels.mamba2_ssd
+rust_local_tri_diag_preserved	pass	src/gpu_prefill.rs	31380	local-tri/state-flat diagnostic still runs after SSD when enabled
+rust_cast_carry_diag_preserved	pass	src/gpu_prefill.rs	15325	0650 cast/carry diagnostic function remains guarded by env
+rust_v4_symbol_load_removed	pass	src/gpu_prefill.rs	53643	kernel load contains mamba2_ssd and mamba2_ssd_trace only
+python_v4_warmup_reraise_removed	pass	python/krasis/server.py	1740	warmup catch restored to generic warning path after CUDA-poison check
+v4_source_markers_absent	pass	src/gpu_prefill.rs;src/cuda/prefill_kernels.cu;python/krasis/server.py	0	rg found no KRASIS_MAMBA2_SSD_CHUNK_PARALLEL_V4, mamba2_ssd_chunk_entry_v4, or MAMBA2-SSD-CHUNK-V4-ORACLE markers

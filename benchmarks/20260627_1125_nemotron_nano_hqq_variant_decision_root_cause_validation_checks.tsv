@@ -1,0 +1,17 @@
+check	status	detail
+record_first_1058	passed	1058 HQQ8 g64 quality result recorded before consolidation
+artifact_assertions	passed	summary and consolidated payload/aggregate/pattern/decision artifacts present and non-empty
+aggregate_assertions	passed	hqq6_g32 0/3 selected flips, hqq6_g64 1/3, hqq8_g64 2/3; all variants 3/3 top-k drift
+bash_n_dev	passed	dev syntax check passed
+git_diff_check_krasis	passed	git diff --check passed in krasis-nemotron-dev
+git_diff_check_internal	passed	git diff --check passed in krasis-internal
+protected_config_status	passed	only known pre-existing untracked tests/nemotron-nano-bf16-experts-a16.conf
+focused_tests	not_run	no source code changes in this gate
+./dev_build	not_run	no source code changes in this gate
+server_run	not_run	forbidden by gate; existing saved artifacts only
+cache_generation	not_run	forbidden by gate; existing saved artifacts only
+tmux_idle	passed	no tmux server running
+runtime_process_idle	passed	no matching Krasis runtime/generator/curl/build process
+nvidia_compute_processes	passed	none
+gpu_idle	passed	GPU memory used 15 MB / 11 MB, utilization 0 / 0
+final_headroom	passed	disk 614G available, RAM 966Gi available at 2026-06-27T11:31:13Z

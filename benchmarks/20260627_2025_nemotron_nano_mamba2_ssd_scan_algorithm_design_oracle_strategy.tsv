@@ -1,0 +1,11 @@
+step	requirement	detail
+gate	New path is opt-in	Proposed env name: KRASIS_MAMBA2_SSD_CHUNK_PARALLEL=1. Default dispatch remains sequential.
+oracle_gate	Oracle is mandatory for first diagnostic	Proposed env name: KRASIS_MAMBA2_SSD_CHUNK_PARALLEL_ORACLE=1. Prototype requested without oracle in the first implementation gate should fail closed.
+input_state	Use identical inputs	Copy or duplicate initial ssm_state before SSD so sequential and chunk paths see the same h0.
+sequential_oracle	Run existing mamba2_ssd_sequential_kernel	Keep it as the correctness oracle; do not remove or alter it.
+candidate	Run chunk-parallel kernels	Write candidate output/state into separate diagnostic buffers when oracle is active.
+comparison	Compare output and state	Capture output BF16 bit mismatches, output max/mean abs error, state max/mean abs error, first mismatch coordinates, and hashes.
+failure	Fail closed	If any required symbol/buffer/env is missing or comparison exceeds the selected tolerance, return an error and do not continue to long diagnostics.
+small_run	First runtime check	Use built startup diagnostic with 128 warmup/short/long calibration tokens, no requests, no benchmark path, and cache rebuild flags absent.
+long_run	Only after small oracle passes	Run one long startup diagnostic with timing/liveness to compare old/new ssd_scan. No speed benchmark.
+diagnostics	Reuse existing trace helpers	On mismatch, use existing output/local-scan/shadow-context trace helpers to identify cast/order/index errors.

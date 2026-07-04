@@ -1,0 +1,13 @@
+field	value
+gate	0629
+status	blocked_for_exact_offline_math_from_existing_artifacts
+live_server_rerun	not_run
+source_changes	none
+localized_boundary	HQQ expert_out vs BF16 expert_out before scatter
+consume_scatter_sync_output_conversion	excluded_by_0524_synced_capture
+worst_global_expert_out	layer=51 expert=60 sorted_row=1837 col=1599 abs_delta=32.0 BF16=1072.0 HQQ=1104.0 gather_src=431 gather_weight=0.31420233845710754
+worst_selected_row_routed	layer=51 col=1599 abs_delta=9.1077880859375 BF16=485.826904296875 HQQ=494.9346923828125
+exact_inherent_quantization_vs_cache_bug_result	not provable from 0524 artifacts alone because exact HQQ-consumed input/activation rows and routed contributor decomposition were not exported
+supporting_evidence_against_layout_or_cache_read_bug	0327 full all-layer offline comparator passed KRHQ/HQQ6 GPU-vs-dequant contract on 5870 blocks; 0524 synced scatter and output conversion are exact/roundoff
+next_gate	add targeted diagnostic export of top-N exact input rows and selected-row contributor decomposition, then run offline analyzer against original BF16 safetensors and KRHQ/HQQ6 dequant
+forbidden_scope_preserved	no tolerance change, production HQQ, speed benchmark, INT4/HQQ4, fallback, decode/HCS

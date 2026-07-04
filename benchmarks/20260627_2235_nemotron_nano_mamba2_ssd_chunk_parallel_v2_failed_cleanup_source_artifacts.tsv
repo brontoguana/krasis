@@ -1,0 +1,9 @@
+component	status	source
+cuda_v2_kernels	removed	src/cuda/prefill_kernels.cu no mamba2_ssd_chunk_v2 symbols
+rust_v2_env_dispatch_oracle	removed	src/gpu_prefill.rs no KRASIS_MAMBA2_SSD_CHUNK_PARALLEL_V2 or mamba2_ssd_chunk_v2 markers
+python_v2_warmup_fail_closed	removed	python/krasis/server.py:1740 restored generic warmup warning path
+sequential_ssd_kernel	preserved	src/cuda/prefill_kernels.cu:4968
+sequential_ssd_dispatch	preserved	src/gpu_prefill.rs:30740, src/gpu_prefill.rs:30788
+trace_ssd_dispatch	preserved	src/gpu_prefill.rs:30746
+local_triangular_diagnostic	preserved	src/gpu_prefill.rs:16125
+mamba2_substage_instrumentation	preserved	src/gpu_prefill.rs:31678

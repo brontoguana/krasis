@@ -1,0 +1,12 @@
+check	result	detail
+summary_json	pass	Closed summary asserts build exit 0, runtime exit 0, zero requests, no benchmark path, oracle match, chunk_start 64, chunk_pos 6, and no default-path change.
+tsv_shape	pass	All gate TSV artifacts have stable tab-separated field counts and no blank rows.
+build_log	pass	Build exit file is 0 and build log contains dev build total status=0.
+startup_diagnostic_log	pass	Startup diagnostic exit file is 0, log contains Startup diagnostic exit, and exactly 3 local-triangular oracle JSON rows.
+no_request_or_benchmark	pass	Diagnostic log contains no reference_test, KrasisBenchmark, benchmark-only path, build-cache, force-rebuild, or BUILD CACHE COMPLETE evidence.
+no_cache_write	pass	Diagnostic log contains HQQ attention validation and Marlin cache load lines, but no safetensors Marlin build line.
+static_checks	pass	bash -n dev and git diff --check passed in krasis-nemotron-dev; git diff --check passed in krasis-internal.
+protected_config	pass	Protected config scope unchanged: tests-only Nano HQQ4 config plus known Nano BF16 config are the only untracked items.
+temp_lock_files	pass	No Nano cache .tmp or .lock files remain outside Hugging Face download locks.
+cleanup	pass	./dev kill exit 0; no tmux server, no matching Krasis/runtime/build process, and no NVIDIA compute process remains.
+gpu_idle	pass	Final GPUs idle at 15 MB / 11 MB used.

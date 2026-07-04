@@ -1,0 +1,4 @@
+attempt	command	exit	status	duration_s	notes
+build1	./dev build	1	failed	unknown	Diagnostic JSON record was too deeply nested for serde_json::json macro expansion; no runtime attempted from this build.
+build2	./dev build	0	passed	164	Split diagnostic JSON into smaller objects; runtime then exposed layer-scoping issue in diagnostic env handling.
+build3	./dev build	0	passed	170	Final build after target-layer no-op fix for non-target Mamba2 layers.

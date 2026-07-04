@@ -1,0 +1,139 @@
+{
+  "gate": "20260627_1216_nemotron_nano_first_token_margin_projection_diagnostic_run",
+  "status": "blocked_fail_closed_before_requests",
+  "opened_utc": "2026-06-27T12:16:00Z",
+  "closed_utc": "2026-06-27T12:24:27Z",
+  "record_first": {
+    "source_gate": "20260627_1145_nemotron_nano_first_token_margin_projection_support",
+    "gemma_speeds": {
+      "prefill_tokens_per_second": 5619.6,
+      "decode_tokens_per_second": 92.43,
+      "combined_tokens_per_second": 155.69
+    },
+    "projection_support": {
+      "implemented": true,
+      "diagnostic_only": true,
+      "gate_env": "KRASIS_FIRST_TOKEN_MARGIN_PROJECTION_DIAG",
+      "request_requirement": "debug_reference_trace=true",
+      "target_token_env": [
+        "KRASIS_FIRST_TOKEN_MARGIN_PROJECTION_TOKEN_A",
+        "KRASIS_FIRST_TOKEN_MARGIN_PROJECTION_TOKEN_B"
+      ],
+      "trace_field": "debug_reference_trace.first_token_margin_projection"
+    },
+    "validation": {
+      "test_kernels_expert_hqq": {
+        "passed": 101,
+        "failed": 0
+      },
+      "build": "passed"
+    },
+    "final_clean_state": {
+      "tmux_server": "none",
+      "matching_runtime_generator_build_processes": "none",
+      "nvidia_compute_processes": "none",
+      "gpu_memory_used_mb": {
+        "gpu0": 15,
+        "gpu1": 11
+      }
+    }
+  },
+  "planned_run": {
+    "bf16_server": "not_run",
+    "variants": [
+      "hqq6_g32",
+      "hqq6_g64"
+    ],
+    "cases": [
+      0,
+      2
+    ],
+    "endpoint": "/v1/internal/reference_test",
+    "target_tokens": {
+      "token_a": 1044,
+      "token_b": 1321
+    },
+    "required_request_flag": "debug_reference_trace=true",
+    "required_env": {
+      "KRASIS_FIRST_TOKEN_MARGIN_PROJECTION_DIAG": "1",
+      "KRASIS_FIRST_TOKEN_MARGIN_PROJECTION_TOKEN_A": "1044",
+      "KRASIS_FIRST_TOKEN_MARGIN_PROJECTION_TOKEN_B": "1321"
+    },
+    "capture": [
+      "first_token_margin_projection",
+      "token margins",
+      "LM-head row-difference projection",
+      "per-layer routed-delta projections",
+      "per-expert contributor projections where present",
+      "selected/top-k movement",
+      "HTTP status/timing"
+    ],
+    "forbidden": [
+      "cache generation",
+      "HQQ8",
+      "new variants",
+      "production enablement",
+      "speed benchmark",
+      "decode/HCS",
+      "selected-expert retargeting"
+    ]
+  },
+  "runtime_result": {
+    "server_started": true,
+    "ready_reached": false,
+    "first_attempted_variant": "hqq6_g32",
+    "not_run_variants": [
+      "hqq6_g64"
+    ],
+    "request_count": 0,
+    "http_200_count": 0,
+    "projection_trace_emitted": false,
+    "server_exit_status": 1,
+    "failure_phase": "startup_vram_calibration_short_probe",
+    "fail_closed_error": "KRASIS_FIRST_TOKEN_MARGIN_PROJECTION_DIAG requires debug_reference_trace=true",
+    "server_log": "benchmarks/20260627_1216_nemotron_nano_first_token_margin_projection_diagnostic_run_hqq6_g32_server.log",
+    "runtime_attempt": "benchmarks/20260627_1216_nemotron_nano_first_token_margin_projection_diagnostic_run_runtime_attempt.tsv"
+  },
+  "decision": {
+    "result": "blocked_fail_closed_before_requests",
+    "root_cause": "Projection diagnostic env is global, while startup warmup/VRAM calibration call Rust prefill without reference-debug request context; the intended fail-closed debug_reference_trace requirement triggers before /v1/internal/reference_test can serve requests.",
+    "required_fix": "Make projection activation request-scoped for reference-test requests, or suppress the projection target during non-request startup warmup/calibration while preserving fail-closed behavior for actual diagnostic requests without debug_reference_trace=true.",
+    "next_gate": "request-scoped projection activation/fail-closed calibration separation, focused tests/build, then rerun this diagnostic capture",
+    "no_workaround_used": true,
+    "scope_not_done": [
+      "no request submitted",
+      "no HQQ6 g64 run",
+      "no cache generation",
+      "no HQQ8",
+      "no new variants",
+      "no production enablement",
+      "no speed benchmark",
+      "no decode/HCS",
+      "no selected-expert retargeting"
+    ]
+  },
+  "validation": {
+    "summary_json_assertion": "passed",
+    "runtime_attempt_assertion": "passed",
+    "root_decision_assertion": "passed",
+    "bash_n_dev": "passed",
+    "git_diff_check_krasis": "passed",
+    "git_diff_check_internal": "passed",
+    "protected_config_check": "passed_known_untracked_tests_nemotron_nano_bf16_experts_a16_conf",
+    "focused_tests": "not_run_no_source_changes",
+    "build": "not_run_no_source_changes",
+    "cleanup": "passed"
+  },
+  "final_state": {
+    "timestamp_utc": "2026-06-27T12:24:27Z",
+    "tmux_server": "none",
+    "matching_runtime_generator_build_processes": "none",
+    "nvidia_compute_processes": "none",
+    "gpu_memory_used_mb": {
+      "gpu0": 15,
+      "gpu1": 11
+    },
+    "disk_available": "614G",
+    "ram_available": "965Gi"
+  }
+}

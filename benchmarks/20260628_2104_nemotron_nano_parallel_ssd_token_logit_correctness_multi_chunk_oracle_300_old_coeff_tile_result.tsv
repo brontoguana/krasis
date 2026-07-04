@@ -1,0 +1,2 @@
+gate	attempt	command	exit_code	duration_s	warmup_tokens	output_mismatches	state_mismatches	first_output	output_max_abs	output_mean_abs	probe_status	result
+20260628_2104_nemotron_nano_parallel_ssd_token_logit_correctness	attempt_7_parallel_output_old_coeff_tile	./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf --test-endpoints	1	42	300	8	0	row161/head32/d39 0xbff8 vs 0xbff7	0.0078125	0.000000016690853	row97 exact; row64/state0 exact; row82/state14 exact	failed_output_only

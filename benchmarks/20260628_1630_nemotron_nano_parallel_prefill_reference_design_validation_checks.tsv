@@ -1,0 +1,14 @@
+check	status	detail
+summary_json	valid	jq parsed public summary
+internal_reference_sources	valid	internal TSV written
+internal_current_gap	valid	internal TSV written
+internal_architecture_plan	valid	internal TSV written
+internal_token_correctness_plan	valid	internal TSV written
+internal_next_gate	valid	internal TSV written
+runtime_artifacts	none	no build/startup/request/speed artifacts for this gate
+public_architecture_detail	checked	public Krasis records kept minimal; detailed plan lives in krasis-internal
+default_path_change	none	static gate only
+diff_check	pass	git diff --check passed in krasis-nemotron-dev and krasis-internal; bash -n dev passed
+protected_config_status	unchanged	expected tests-only Nano config remains untracked
+nano_cache_locks	standing_hf_locks	download .lock files exist under HF cache; no Krasis runtime temp/lock file created by this gate
+final_idle	pass	2026-06-28T16:39:11Z GPUs 15 MB / 11 MB; no tmux or Krasis/build/GPU compute process

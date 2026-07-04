@@ -1,0 +1,19 @@
+field	value
+gate	20260628_0737_nemotron_nano_mamba2_ssd_v4_failed_cleanup
+command	KRASIS_STARTUP_DIAG=1 KRASIS_PREFILL_TIMING=1 KRASIS_PREFILL_LIVENESS_TIMING=1 KRASIS_STARTUP_EXIT_AFTER_CALIBRATION=1 ./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf
+exit_code	0
+mode	startup_diagnostic_without_v4_prototype_envs
+requests_sent	0
+benchmark_path	false
+v4_prototype_envs_set	false
+default_ssd_path	sequential
+long_prefill_tokens	39920
+long_prefill_wall_ms	117306.4
+long_prefill_tok_s	340
+long_ssd_scan_wall_ms	114404.3
+long_ssd_scan_calls	23
+long_prefill_min_free_mb	12398
+long_decode_min_free_mb	23714
+startup_exit_after_calibration	true
+runtime_log	20260628_0737_nemotron_nano_mamba2_ssd_v4_failed_cleanup_startup_diagnostic.log
+result	passed

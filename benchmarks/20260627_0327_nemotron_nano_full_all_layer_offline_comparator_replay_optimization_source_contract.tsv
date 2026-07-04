@@ -1,0 +1,6 @@
+path	scope	contract
+src/weights/expert_hqq.rs	comparator_profile	Opt-in profiling is gated by KRASIS_EXPERT_HQQ_TRACE_COMPARE_PROFILE and only reports offline comparator phase timing.
+src/weights/expert_hqq.rs	trace_parse	Comparator reads the existing full trace through BufReader plus serde_json::from_reader; comparison semantics and fail-closed parsing are unchanged.
+src/weights/expert_hqq.rs	block_compare	Comparator groups the same full-buffer trace stages and compares independent blocks in parallel inside each request using rayon; every block still uses the existing CPU oracle and exact/full-buffer contracts.
+src/weights/expert_hqq.rs	activation_contract	Activation may pass with nonzero deltas only when mismatch details prove actual BF16 zero versus positive BF16 subnormal references; normal activation deltas and reverse/negative cases still fail.
+src/weights/expert_hqq.rs	forbidden	No runtime launch path, production HQQ output path, fallback behavior, decode/HCS path, selected-expert retargeting, or speed benchmark path changed.

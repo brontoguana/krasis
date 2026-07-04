@@ -1,0 +1,9 @@
+item	status	value	evidence
+decision	pass	failed v3 prototype removed	final source marker scan has no v3 symbols
+default_path	pass	sequential SSD preserved	startup diagnostic without v3 envs exited 0 and logged sequential ssd_scan timing
+keep_1908	pass	preserved	Mamba2 substage timing markers and diagnostic output remain
+keep_2149_2251	pass	preserved	local-tri and state-flat diagnostics remain in source
+long_diagnostic	pass	not a speed benchmark	startup diagnostic uses instrumentation and exit-after-calibration only
+requests	pass	none	no smoke or HTTP request path used
+benchmarks	pass	none	no benchmark path used
+next_step	pass	do not optimize until new corrected design is introduced	v3 removed because 2321 correctness failed

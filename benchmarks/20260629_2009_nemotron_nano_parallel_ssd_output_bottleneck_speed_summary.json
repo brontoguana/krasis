@@ -1,0 +1,109 @@
+{
+  "gate": "20260629_2009_nemotron_nano_parallel_ssd_output_bottleneck_speed",
+  "status": "closed",
+  "opened_utc": "2026-06-29T20:10:07Z",
+  "closed_utc": "2026-06-29T21:30:35Z",
+  "scope": "Continue optimizing the guarded Nano parallel SSD output/chunk-scan bottleneck after the by-chunk output redesign.",
+  "record_first_from": "20260629_1818_nemotron_nano_parallel_ssd_output_kernel_redesign",
+  "baseline_models": {
+    "gemma": "5619.6 / 92.43 / 155.69",
+    "nano": "346.5 / 94.48 / 164.75"
+  },
+  "carry_forward_1818_long_39920": {
+    "prefill_s": 7.01,
+    "prefill_tok_s": 5693.8,
+    "records": 23,
+    "total_candidate_ms": 177.27893352173913,
+    "output_kernel_ms": 148.53118626086956,
+    "recurrent_total_ms": 12.645583347826086,
+    "exact_state_bridge_ms": 0.0,
+    "chunk_cumsum_ms": 0.10116321739130436,
+    "chunk_state_ms": 10.76252652173913,
+    "state_passing_ms": 1.780577826086957
+  },
+  "accepted_changes": {
+    "parallel_output_precompute_cb_env": "KRASIS_MAMBA2_SSD_PARALLEL_OUTPUT_PRECOMPUTE_CB=1",
+    "precompute_cb_kernel": "mamba2_ssd_parallel_precompute_cb_kernel",
+    "output_kernel": "mamba2_ssd_parallel_chunk_scan_output_precomputed_cb_kernel",
+    "ordered_loop_unroll": {
+      "target": "precompute-CB output kernel only",
+      "state_dot_unroll": 4,
+      "local_scan_unroll": 4,
+      "accumulation_order_changed": false
+    }
+  },
+  "rejected_or_diagnostic_branches": {
+    "state_split": "Failed closed for this gate: selected token stayed stable, but top-k comparison remained noisy and the 462-token candidate timing was slower than by-chunk control.",
+    "first_no_test_endpoints_request": "Setup error only: server was started without --test-endpoints and /v1/internal/reference_test returned 404."
+  },
+  "correctness": {
+    "reference_payload_tokens": 462,
+    "selected_token": 1044,
+    "selected_text": ",",
+    "top_k_rows": 12,
+    "comparison_note": "Separate-process top-logprob comparisons are noisy on this diagnostic payload; control-vs-control drift reached 0.126997 in this gate. The accepted unroll preserves arithmetic order and selected token remained stable.",
+    "precompute_cb_vs_unroll_topk_max_abs_delta": 0.114579,
+    "precompute_cb_vs_unroll_rank_position_differences": 4
+  },
+  "builds": {
+    "build1_state_split": {
+      "exit": 0
+    },
+    "build2_state_split_exact_prior": {
+      "exit": 0
+    },
+    "build3_state_split_exact_loops": {
+      "exit": 0
+    },
+    "build4_precompute_cb": {
+      "exit": 0
+    },
+    "build5_precompute_cb_unroll": {
+      "exit": 0,
+      "duration_s": 181
+    }
+  },
+  "final_long_39920_no_oracle": {
+    "exit": 0,
+    "duration_s": 49,
+    "records": 23,
+    "prefill_s": 5.14,
+    "prefill_tok_s": 7765.1,
+    "total_candidate_avg_ms": 98.162166,
+    "output_avg_ms": 66.309823,
+    "cb_precompute_avg_ms": 3.001623,
+    "recurrent_avg_ms": 12.791758,
+    "chunk_cumsum_avg_ms": 0.222242,
+    "chunk_state_avg_ms": 10.78584,
+    "state_passing_avg_ms": 1.782461,
+    "buffer_alloc_avg_ms": 1.374739,
+    "residual_avg_ms": 14.249968,
+    "parallel_cb_tile_bytes": 41533440,
+    "n_chunks": 624
+  },
+  "comparison": {
+    "prefill_tok_s_vs_1818_bychunk": "+36.4%",
+    "prefill_tok_s_vs_precompute_cb": "+19.7%",
+    "total_candidate_ms_vs_1818_bychunk": "-44.6%",
+    "output_ms_vs_1818_bychunk": "-55.4%",
+    "output_ms_vs_precompute_cb": "-39.9%"
+  },
+  "constraints": {
+    "default_sequential_ssd_changed": false,
+    "production_enabled": false,
+    "decode_hcs_changed": false,
+    "protected_configs_changed": false,
+    "direct_python_scripts_or_oneliners": false
+  },
+  "remaining_bottleneck": "Output/chunk-scan remains the largest measured candidate component at 66.310ms of 98.162ms; reaching 10k likely needs a deeper parallel prior/local scan redesign plus attention to the 14.250ms residual."
+  ,
+  "final_validation": {
+    "validation_artifact": "benchmarks/20260629_2009_nemotron_nano_parallel_ssd_output_bottleneck_speed_validation_checks.tsv",
+    "final_snapshot_utc": "2026-06-29T21:30:35Z",
+    "tmux_or_runtime_process": false,
+    "gpu_memory_used_mb": {
+      "gpu0": 15,
+      "gpu1": 11
+    }
+  }
+}

@@ -41,8 +41,8 @@ impl ChatTemplateEngine {
     pub fn from_config(tokenizer_config_path: &str) -> Result<Self, String> {
         let data = std::fs::read_to_string(tokenizer_config_path)
             .map_err(|e| format!("Failed to read {}: {}", tokenizer_config_path, e))?;
-        let config: serde_json::Value = serde_json::from_str(&data)
-            .map_err(|e| format!("Failed to parse JSON: {}", e))?;
+        let config: serde_json::Value =
+            serde_json::from_str(&data).map_err(|e| format!("Failed to parse JSON: {}", e))?;
 
         // Extract chat_template — can be a string or a list of {name, template} objects.
         // Some model snapshots keep tokenizer_config.json at chat_template=null
@@ -66,7 +66,8 @@ impl ChatTemplateEngine {
                             }
                         }
                     }
-                    default_tmpl.or(first_tmpl)
+                    default_tmpl
+                        .or(first_tmpl)
                         .unwrap_or_else(|| DEEPSEEK_CHAT_TEMPLATE.to_string())
                 }
                 _ => load_sibling_chat_template(tokenizer_config_path)
@@ -85,7 +86,9 @@ impl ChatTemplateEngine {
 
         log::info!(
             "ChatTemplateEngine: loaded template ({} chars), bos={:?}, eos={:?}",
-            template_source.len(), bos_token, eos_token
+            template_source.len(),
+            bos_token,
+            eos_token
         );
 
         Ok(ChatTemplateEngine {
@@ -156,8 +159,7 @@ impl ChatTemplateEngine {
         let tools: serde_json::Value = if tools_json.is_empty() {
             serde_json::Value::Array(vec![])
         } else {
-            serde_json::from_str(tools_json)
-                .unwrap_or(serde_json::Value::Array(vec![]))
+            serde_json::from_str(tools_json).unwrap_or(serde_json::Value::Array(vec![]))
         };
 
         // Pre-process messages before rendering. Keep plain string content unchanged.
@@ -180,8 +182,13 @@ impl ChatTemplateEngine {
                         } else {
                             &mut *tc
                         };
-                        if let Some(args_str) = fn_obj.get("arguments").and_then(|v| v.as_str()).map(String::from) {
-                            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&args_str) {
+                        if let Some(args_str) = fn_obj
+                            .get("arguments")
+                            .and_then(|v| v.as_str())
+                            .map(String::from)
+                        {
+                            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&args_str)
+                            {
                                 fn_obj["arguments"] = parsed;
                             }
                         }
@@ -210,85 +217,107 @@ impl ChatTemplateEngine {
         env.add_function("strftime_now", strftime_now);
 
         // Handle Python string methods used by HuggingFace templates
-        env.set_unknown_method_callback(|_state, value, method, args| {
-            match method {
-                "startswith" => {
-                    let s = value.as_str().ok_or_else(|| {
-                        minijinja::Error::new(minijinja::ErrorKind::InvalidOperation, "startswith requires a string")
-                    })?;
-                    let prefix = args.first()
-                        .and_then(|a| a.as_str())
-                        .ok_or_else(|| {
-                            minijinja::Error::new(minijinja::ErrorKind::InvalidOperation, "startswith requires a string argument")
-                        })?;
-                    Ok(minijinja::Value::from(s.starts_with(prefix)))
-                }
-                "endswith" => {
-                    let s = value.as_str().ok_or_else(|| {
-                        minijinja::Error::new(minijinja::ErrorKind::InvalidOperation, "endswith requires a string")
-                    })?;
-                    let suffix = args.first()
-                        .and_then(|a| a.as_str())
-                        .ok_or_else(|| {
-                            minijinja::Error::new(minijinja::ErrorKind::InvalidOperation, "endswith requires a string argument")
-                        })?;
-                    Ok(minijinja::Value::from(s.ends_with(suffix)))
-                }
-                "strip" => {
-                    let s = value.as_str().ok_or_else(|| {
-                        minijinja::Error::new(minijinja::ErrorKind::InvalidOperation, "strip requires a string")
-                    })?;
-                    Ok(minijinja::Value::from(s.trim()))
-                }
-                "lstrip" => {
-                    let s = value.as_str().ok_or_else(|| {
-                        minijinja::Error::new(minijinja::ErrorKind::InvalidOperation, "lstrip requires a string")
-                    })?;
-                    let chars = args.first().and_then(|a| a.as_str());
-                    Ok(minijinja::Value::from(match chars {
-                        Some(c) => s.trim_start_matches(|ch: char| c.contains(ch)),
-                        None => s.trim_start(),
-                    }))
-                }
-                "rstrip" => {
-                    let s = value.as_str().ok_or_else(|| {
-                        minijinja::Error::new(minijinja::ErrorKind::InvalidOperation, "rstrip requires a string")
-                    })?;
-                    let chars = args.first().and_then(|a| a.as_str());
-                    Ok(minijinja::Value::from(match chars {
-                        Some(c) => s.trim_end_matches(|ch: char| c.contains(ch)),
-                        None => s.trim_end(),
-                    }))
-                }
-                "split" => {
-                    let s = value.as_str().ok_or_else(|| {
-                        minijinja::Error::new(minijinja::ErrorKind::InvalidOperation, "split requires a string")
-                    })?;
-                    let sep = args.first().and_then(|a| a.as_str());
-                    let parts: Vec<minijinja::Value> = match sep {
-                        Some(sep) => s.split(sep).map(minijinja::Value::from).collect(),
-                        None => s.split_whitespace().map(minijinja::Value::from).collect(),
-                    };
-                    Ok(minijinja::Value::from(parts))
-                }
-                "get" => {
-                    let key = args.first().ok_or_else(|| {
-                        minijinja::Error::new(minijinja::ErrorKind::InvalidOperation, "get requires a key argument")
-                    })?;
-                    match value.get_item(key) {
-                        Ok(item) if !item.is_undefined() => Ok(item),
-                        Ok(_) => Ok(args.get(1).cloned().unwrap_or(minijinja::Value::UNDEFINED)),
-                        Err(_) => Ok(args.get(1).cloned().unwrap_or(minijinja::Value::UNDEFINED)),
-                    }
-                }
-                _ => Err(minijinja::Error::new(
-                    minijinja::ErrorKind::UnknownMethod,
-                    format!("unknown method: {}", method),
-                ))
+        env.set_unknown_method_callback(|_state, value, method, args| match method {
+            "startswith" => {
+                let s = value.as_str().ok_or_else(|| {
+                    minijinja::Error::new(
+                        minijinja::ErrorKind::InvalidOperation,
+                        "startswith requires a string",
+                    )
+                })?;
+                let prefix = args.first().and_then(|a| a.as_str()).ok_or_else(|| {
+                    minijinja::Error::new(
+                        minijinja::ErrorKind::InvalidOperation,
+                        "startswith requires a string argument",
+                    )
+                })?;
+                Ok(minijinja::Value::from(s.starts_with(prefix)))
             }
+            "endswith" => {
+                let s = value.as_str().ok_or_else(|| {
+                    minijinja::Error::new(
+                        minijinja::ErrorKind::InvalidOperation,
+                        "endswith requires a string",
+                    )
+                })?;
+                let suffix = args.first().and_then(|a| a.as_str()).ok_or_else(|| {
+                    minijinja::Error::new(
+                        minijinja::ErrorKind::InvalidOperation,
+                        "endswith requires a string argument",
+                    )
+                })?;
+                Ok(minijinja::Value::from(s.ends_with(suffix)))
+            }
+            "strip" => {
+                let s = value.as_str().ok_or_else(|| {
+                    minijinja::Error::new(
+                        minijinja::ErrorKind::InvalidOperation,
+                        "strip requires a string",
+                    )
+                })?;
+                Ok(minijinja::Value::from(s.trim()))
+            }
+            "lstrip" => {
+                let s = value.as_str().ok_or_else(|| {
+                    minijinja::Error::new(
+                        minijinja::ErrorKind::InvalidOperation,
+                        "lstrip requires a string",
+                    )
+                })?;
+                let chars = args.first().and_then(|a| a.as_str());
+                Ok(minijinja::Value::from(match chars {
+                    Some(c) => s.trim_start_matches(|ch: char| c.contains(ch)),
+                    None => s.trim_start(),
+                }))
+            }
+            "rstrip" => {
+                let s = value.as_str().ok_or_else(|| {
+                    minijinja::Error::new(
+                        minijinja::ErrorKind::InvalidOperation,
+                        "rstrip requires a string",
+                    )
+                })?;
+                let chars = args.first().and_then(|a| a.as_str());
+                Ok(minijinja::Value::from(match chars {
+                    Some(c) => s.trim_end_matches(|ch: char| c.contains(ch)),
+                    None => s.trim_end(),
+                }))
+            }
+            "split" => {
+                let s = value.as_str().ok_or_else(|| {
+                    minijinja::Error::new(
+                        minijinja::ErrorKind::InvalidOperation,
+                        "split requires a string",
+                    )
+                })?;
+                let sep = args.first().and_then(|a| a.as_str());
+                let parts: Vec<minijinja::Value> = match sep {
+                    Some(sep) => s.split(sep).map(minijinja::Value::from).collect(),
+                    None => s.split_whitespace().map(minijinja::Value::from).collect(),
+                };
+                Ok(minijinja::Value::from(parts))
+            }
+            "get" => {
+                let key = args.first().ok_or_else(|| {
+                    minijinja::Error::new(
+                        minijinja::ErrorKind::InvalidOperation,
+                        "get requires a key argument",
+                    )
+                })?;
+                match value.get_item(key) {
+                    Ok(item) if !item.is_undefined() => Ok(item),
+                    Ok(_) => Ok(args.get(1).cloned().unwrap_or(minijinja::Value::UNDEFINED)),
+                    Err(_) => Ok(args.get(1).cloned().unwrap_or(minijinja::Value::UNDEFINED)),
+                }
+            }
+            _ => Err(minijinja::Error::new(
+                minijinja::ErrorKind::UnknownMethod,
+                format!("unknown method: {}", method),
+            )),
         });
 
-        let tmpl = env.get_template("chat")
+        let tmpl = env
+            .get_template("chat")
             .map_err(|e| format!("Failed to get template: {}", e))?;
 
         let ctx = minijinja::context! {
@@ -301,9 +330,30 @@ impl ChatTemplateEngine {
             preserve_thinking => false,
         };
 
-        tmpl.render(ctx)
-            .map_err(|e| format!("Template render failed: {}", e))
+        let rendered = tmpl
+            .render(ctx)
+            .map_err(|e| format!("Template render failed: {}", e))?;
+        let rendered = rendered.trim_start_matches(['\n', '\r']).to_string();
+        Ok(close_initial_think_block_if_disabled(
+            rendered,
+            add_generation_prompt,
+            enable_thinking,
+        ))
     }
+}
+
+fn close_initial_think_block_if_disabled(
+    mut rendered: String,
+    add_generation_prompt: bool,
+    enable_thinking: bool,
+) -> String {
+    if add_generation_prompt && !enable_thinking {
+        const OPEN_THINK_SUFFIX: &str = "<|im_start|>assistant\n<think>\n";
+        if rendered.ends_with(OPEN_THINK_SUFFIX) {
+            rendered.push_str("\n</think>\n\n");
+        }
+    }
+    rendered
 }
 
 fn load_sibling_chat_template(tokenizer_config_path: &str) -> Option<String> {
@@ -323,9 +373,10 @@ fn load_sibling_chat_template(tokenizer_config_path: &str) -> Option<String> {
 fn extract_token(config: &serde_json::Value, key: &str) -> Option<String> {
     match config.get(key)? {
         serde_json::Value::String(s) => Some(s.clone()),
-        serde_json::Value::Object(obj) => {
-            obj.get("content").and_then(|v| v.as_str()).map(String::from)
-        }
+        serde_json::Value::Object(obj) => obj
+            .get("content")
+            .and_then(|v| v.as_str())
+            .map(String::from),
         _ => None,
     }
 }
@@ -340,18 +391,22 @@ fn normalize_text_content_parts(message: &mut serde_json::Value) -> Result<(), S
 
     let mut text = String::new();
     for (idx, part) in parts.iter().enumerate() {
-        let obj = part.as_object().ok_or_else(|| {
-            format!("structured content part {} must be an object", idx)
-        })?;
+        let obj = part
+            .as_object()
+            .ok_or_else(|| format!("structured content part {} must be an object", idx))?;
         let part_type = obj.get("type").and_then(|v| v.as_str());
         if part_type == Some("text") || obj.contains_key("text") {
-            let part_text = obj.get("text")
+            let part_text = obj
+                .get("text")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| format!("structured content part {} text must be a string", idx))?;
             text.push_str(part_text);
             continue;
         }
-        return Err(format!("unsupported non-text structured content part {}", idx));
+        return Err(format!(
+            "unsupported non-text structured content part {}",
+            idx
+        ));
     }
     *content = serde_json::Value::String(text);
     Ok(())
@@ -399,7 +454,8 @@ fn minijinja_value_to_json(value: &minijinja::Value) -> serde_json::Value {
     } else if let Ok(n) = f64::try_from(value.clone()) {
         serde_json::json!(n)
     } else if value.kind() == minijinja::value::ValueKind::Seq {
-        let items: Vec<serde_json::Value> = value.try_iter()
+        let items: Vec<serde_json::Value> = value
+            .try_iter()
             .map(|iter| iter.map(|v| minijinja_value_to_json(&v)).collect())
             .unwrap_or_default();
         serde_json::Value::Array(items)
@@ -497,12 +553,43 @@ mod tests {
         let config_path = write_tokenizer_config(template);
         let engine = ChatTemplateEngine::from_config(&config_path).unwrap();
         assert_eq!(
-            engine.apply(r#"[{"role":"user","content":"hi"}]"#, true, false).unwrap(),
+            engine
+                .apply(r#"[{"role":"user","content":"hi"}]"#, true, false)
+                .unwrap(),
             "<think>\n\n</think>\n\n"
         );
         assert_eq!(
-            engine.apply(r#"[{"role":"user","content":"hi"}]"#, true, true).unwrap(),
+            engine
+                .apply(r#"[{"role":"user","content":"hi"}]"#, true, true)
+                .unwrap(),
             "<think>\n"
+        );
+    }
+
+    #[test]
+    fn always_open_think_template_closes_when_disabled() {
+        let template = concat!(
+            "{{ bos_token }}",
+            "{% for message in messages %}",
+            "{{ '<|im_start|>' + message.role + '\n' + message.content + '<|im_end|>\n' }}",
+            "{% endfor %}",
+            "{% if add_generation_prompt %}",
+            "{{ '<|im_start|>assistant\n<think>\n' }}",
+            "{% endif %}"
+        );
+        let config_path = write_tokenizer_config(template);
+        let engine = ChatTemplateEngine::from_config(&config_path).unwrap();
+        assert_eq!(
+            engine
+                .apply(r#"[{"role":"user","content":"hi"}]"#, true, false)
+                .unwrap(),
+            "<s><|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        );
+        assert_eq!(
+            engine
+                .apply(r#"[{"role":"user","content":"hi"}]"#, true, true)
+                .unwrap(),
+            "<s><|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n<think>\n"
         );
     }
 
@@ -511,7 +598,8 @@ mod tests {
         let template = "{% for message in messages %}{{ message.content }}{% endfor %}";
         let config_path = write_tokenizer_config(template);
         let engine = ChatTemplateEngine::from_config(&config_path).unwrap();
-        let messages = r#"[{"role":"user","content":[{"type":"text","text":"Hello"},{"text":" world"}]}]"#;
+        let messages =
+            r#"[{"role":"user","content":[{"type":"text","text":"Hello"},{"text":" world"}]}]"#;
         let rendered = engine.apply(messages, false, false).unwrap();
         assert_eq!(rendered, "Hello world");
     }

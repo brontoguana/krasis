@@ -1,0 +1,14 @@
+check	status	details
+record_first	pass	0327 carry-forward recorded before source/runtime work
+focused_tests	pass	./dev test-kernels expert_hqq 83/0
+build	pass	./dev build passed after final guard patch
+artifact_assertions	pass	summary/comparison/consume artifacts validated
+syntax	pass	bash -n dev and ./dev python -m py_compile python/krasis/*.py
+format	pass	cargo fmt --check
+diff_check	pass	git diff --check in krasis and krasis-internal
+protected_config	pass	only pre-existing untracked tests/nemotron-nano-bf16-experts-a16.conf present
+live_bf16	pass	3/3 HTTP 200
+live_hqq_consume	pass	3/3 HTTP 200; 69 consume stages
+bf16_vs_hqq_contract	fail_closed	comparison executed and failed output contract: case 2 token 1044->1321
+production_output_default	pass	BF16 default remains unless explicit consume env and debug request context
+cleanup	pass	2026-06-27T05:21:48Z no tmux server, no matching runtime/comparator/generator/curl process, GPUs 15 MB / 11 MB

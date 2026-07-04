@@ -1,0 +1,13 @@
+item	value
+gate_status	closed_static_design_only
+recorded_first	20260627_2251_nemotron_nano_mamba2_ssd_2213_v2_mismatch_analysis
+local_triangular_primary_cause	no
+state_flat14_sequential_formula_clean	yes
+runtime_diagnostic_needed	no
+implementation_done	no
+default_path_changed	no
+corrected_v3_direction	explicit chunk_state plus state_passing with entry_state scratch and delayed final_state commit
+suspected_v2_failure_area	candidate chunk-entry state/carry or state-update/writeback semantics
+critical_v3_guard	default sequential path remains active unless v3 env is explicitly set; v3 oracle is mandatory in first implementation gate
+critical_v3_probe	row82 prior_chunk_state and entry_state[1] plus state flat14 chunk0 contribution/entry/final state
+next_gate	revert nothing; implement v3 opt-in candidate only after this design, with small oracle before any long diagnostic

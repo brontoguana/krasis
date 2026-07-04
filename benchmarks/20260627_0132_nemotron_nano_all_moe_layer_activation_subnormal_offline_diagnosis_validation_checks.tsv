@@ -1,0 +1,19 @@
+check	result	notes
+record_first	passed	2239 facts recorded before source changes
+full_offline_comparator_attempt	stopped	full 9GB trace replay became impractical and was terminated before artifacts; no server rerun
+filtered_offline_comparator	expected_exit_1	status=ok; passes_contract=false; mismatch details written
+mismatch_detail_assertions	passed	9/9 activation zero-vs-positive-subnormal details
+./dev test-kernels expert_hqq	passed	77/0
+./dev build	passed	maturin build completed
+artifact_assertions	passed	summary, details, classification, and expected bit patterns validated
+bash -n dev	passed	shell syntax clean
+./dev python -m py_compile python/krasis/*.py	passed	python compile clean
+cargo fmt --check	passed	rust formatting clean
+git diff --check	passed	krasis whitespace clean
+krasis-internal git diff --check	passed	internal whitespace clean
+protected_config_status	observed	pre-existing untracked tests/nemotron-nano-bf16-experts-a16.conf; not edited
+./dev kill	passed	all GPUs clear
+final_tmux	passed	no server running on /tmp/tmux-1000/default
+final_process_snapshot	passed	no Krasis runtime/comparator/generator process
+final_gpu_snapshot	passed	GPU0 15 MB / 32607 MB, GPU1 11 MB / 20470 MB, util 0
+closed_utc	passed	2026-06-27T03:02:06Z

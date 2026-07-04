@@ -1,0 +1,8 @@
+artifact	file	line	note
+target_struct	src/gpu_prefill.rs	206	Diagnostic-only target coordinate struct.
+env_parse_helper	src/gpu_prefill.rs	251	Required usize env parser for fail-closed coordinate envs.
+single_bf16_download	src/gpu_prefill.rs	745	Single-value BF16 device download helper.
+single_f32_download	src/gpu_prefill.rs	2313	Single-value FP32 device download helper.
+local_tri_oracle	src/gpu_prefill.rs	14903	CPU recompute/logging of selected local triangular SSD terms.
+env_target_gate	src/gpu_prefill.rs	16121	KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE and coordinate env gate.
+post_ssd_callsite	src/gpu_prefill.rs	30820	Diagnostic runs after sequential SSD produces the oracle output.

@@ -1,0 +1,228 @@
+{
+  "artifacts": {
+    "bf16_requests": "benchmarks/20260627_0427_nemotron_nano_guarded_hqq_prefill_output_consumption_proof_bf16_requests.tsv",
+    "bf16_server_log": "benchmarks/20260627_0427_nemotron_nano_guarded_hqq_prefill_output_consumption_proof_bf16_server.log",
+    "comparison": "benchmarks/20260627_0427_nemotron_nano_guarded_hqq_prefill_output_consumption_proof_bf16_vs_hqq_consumed_response_comparison.tsv",
+    "comparison_summary": "benchmarks/20260627_0427_nemotron_nano_guarded_hqq_prefill_output_consumption_proof_bf16_vs_hqq_consumed_response_comparison_summary.json",
+    "consume_report": "benchmarks/20260627_0427_nemotron_nano_guarded_hqq_prefill_output_consumption_proof_hqq_consume_report.tsv",
+    "consume_summary": "benchmarks/20260627_0427_nemotron_nano_guarded_hqq_prefill_output_consumption_proof_hqq_consume_summary.json",
+    "hqq_requests": "benchmarks/20260627_0427_nemotron_nano_guarded_hqq_prefill_output_consumption_proof_hqq_requests.tsv",
+    "hqq_server_log": "benchmarks/20260627_0427_nemotron_nano_guarded_hqq_prefill_output_consumption_proof_hqq_server.log",
+    "root_decision": "benchmarks/20260627_0427_nemotron_nano_guarded_hqq_prefill_output_consumption_proof_root_decision.tsv",
+    "runtime_attempt": "benchmarks/20260627_0427_nemotron_nano_guarded_hqq_prefill_output_consumption_proof_runtime_attempt.tsv",
+    "source_contract": "benchmarks/20260627_0427_nemotron_nano_guarded_hqq_prefill_output_consumption_proof_source_contract.tsv",
+    "summary": "benchmarks/20260627_0427_nemotron_nano_guarded_hqq_prefill_output_consumption_proof_summary.json",
+    "validation": "benchmarks/20260627_0427_nemotron_nano_guarded_hqq_prefill_output_consumption_proof_validation_checks.tsv"
+  },
+  "closed_at_utc": "2026-06-27T05:21:48Z",
+  "final_state": {
+    "gpus": [
+      {
+        "index": 0,
+        "memory_total_mb": 32607,
+        "memory_used_mb": 15,
+        "utilization_gpu_pct": 0
+      },
+      {
+        "index": 1,
+        "memory_total_mb": 20470,
+        "memory_used_mb": 11,
+        "utilization_gpu_pct": 0
+      }
+    ],
+    "runtime_processes": "none matching python -m krasis.server, ./dev run, expert_hqq_trace_compare, expert_hqq_cache_generate, curl",
+    "timestamp_utc": "2026-06-27T05:21:48Z",
+    "tmux": "no server running on /tmp/tmux-1000/default"
+  },
+  "forbidden": {
+    "decode_hcs": true,
+    "default_behavior_change": true,
+    "fallback": true,
+    "int4_hqq4": true,
+    "selected_expert_retargeting": true,
+    "speed_benchmark": true
+  },
+  "implementation": {
+    "decode_hcs_changed": false,
+    "default_bf16_preserved": true,
+    "diagnostic_spec": "benchmarks/20260626_2208_nemotron_nano_diagnostic_hqq_prefill_all_moe_layers_correctness_diagnostic_cache_spec.json",
+    "explicit_gate": "KRASIS_EXPERT_HQQ_PREFILL_CONSUME truthy plus existing reference/debug request context",
+    "fallback_added": false,
+    "guarded_hqq_prefill_output_consumption": true,
+    "hqq_contract": "HQQ6 g64 all-MoE-layer KRHQ cache/spec",
+    "int4_hqq4_changed": false,
+    "layer_scope_gate": "KRASIS_EXPERT_HQQ_PREFILL_CONSUME_LAYERS optional, default all layers",
+    "production_default_changed": false,
+    "speed_benchmark_run": false
+  },
+  "label": "20260627_0427_nemotron_nano_guarded_hqq_prefill_output_consumption_proof",
+  "next_gate_recommendation": "diagnose whether HQQ6-vs-BF16 final-logit delta is expected quantization error or a consumption/scatter contract mismatch; do not wire production until BF16 comparison policy is explicit.",
+  "opened_utc": "2026-06-27T04:28:05Z",
+  "planned_work": {
+    "bf16_default_reference_preserved": true,
+    "dev_build_required": true,
+    "explicit_diagnostic_gate_required": true,
+    "fail_closed_on_incomplete_cache_spec": true,
+    "focused_tests_required": true,
+    "inspect_runtime_accumulation": true,
+    "minimal_live_correctness_proof_required": true
+  },
+  "record_first": {
+    "dev_build": "passed",
+    "focused_expert_hqq_tests": "81/0",
+    "full_all_layer_offline_comparator": {
+      "blocks": 5870,
+      "cases": 3,
+      "elapsed": "30:15.09",
+      "max_rss_kb": 81839016,
+      "passes_contract": true,
+      "status": "ok"
+    },
+    "gemma": "5619.6 / 92.43 / 155.69",
+    "numeric_totals": {
+      "activation": "accepted only by zero-vs-positive-BF16-subnormal FTZ rule",
+      "input": "exact",
+      "output": "exact",
+      "w13": "within existing tolerance"
+    },
+    "production_output_consumed": false,
+    "source_gate": "20260627_0327_nemotron_nano_full_all_layer_offline_comparator_replay_optimization"
+  },
+  "result": {
+    "bf16_vs_hqq_output_contract": "failed",
+    "case0_token_match": true,
+    "case1_token_match": true,
+    "case2_bf16_token": 1044,
+    "case2_hqq_token": 1321,
+    "case2_token_match": false,
+    "consume_executed": true,
+    "consume_layer_request_groups": {
+      "2676": 23,
+      "2694": 23,
+      "2958": 23
+    },
+    "consume_rows": 69,
+    "max_abs_selected_log_prob_diff": 0.20660000000000012,
+    "max_abs_selected_raw_logit_diff": 0.27006053924560547,
+    "max_abs_top_k_log_prob_diff": 0.42908800000000014,
+    "passes_output_contract": false,
+    "reason": "HQQ-consumed prefill changed final response probabilities and case 2 selected token versus BF16 baseline",
+    "registration_succeeded": true
+  },
+  "runtime_proof": {
+    "bf16_http_200": 3,
+    "bf16_long_calibration": {
+      "baseline_free_mb": 24628,
+      "decode_min_free_mb": 24624,
+      "decode_s": 4.24,
+      "decode_tok_s": 7.5,
+      "post_cleanup_free_mb": 24624,
+      "prefill_min_free_mb": 14070,
+      "prefill_post_alloc_free_mb": 14070,
+      "prefill_s": 343.37,
+      "prefill_tok_s": 116.3
+    },
+    "bf16_ready": true,
+    "bf16_requests": [
+      {
+        "case": "0",
+        "response_file": "benchmarks/20260627_0427_nemotron_nano_guarded_hqq_prefill_output_consumption_proof_bf16_case0_response.json",
+        "size_download": "4238120",
+        "status": "200",
+        "time_total_s": "2.744629"
+      },
+      {
+        "case": "1",
+        "response_file": "benchmarks/20260627_0427_nemotron_nano_guarded_hqq_prefill_output_consumption_proof_bf16_case1_response.json",
+        "size_download": "4563726",
+        "status": "200",
+        "time_total_s": "2.791143"
+      },
+      {
+        "case": "2",
+        "response_file": "benchmarks/20260627_0427_nemotron_nano_guarded_hqq_prefill_output_consumption_proof_bf16_case2_response.json",
+        "size_download": "4279972",
+        "status": "200",
+        "time_total_s": "2.612373"
+      }
+    ],
+    "comparison_summary": {
+      "all_exact_string_fields": false,
+      "cases": 3,
+      "finish_reason_match": true,
+      "max_abs_logsumexp_diff": 0.0912464697782962,
+      "max_abs_selected_log_prob_diff": 0.20660000000000012,
+      "max_abs_selected_raw_logit_diff": 0.27006053924560547,
+      "max_abs_top_k_log_prob_diff": 0.42908800000000014,
+      "max_abs_top_raw_logit_diff": 0.5203342437744141,
+      "passes_output_contract": false,
+      "text_match": false,
+      "token_ids_match": false,
+      "top_k_token_ids_match": false
+    },
+    "consume_summary": {
+      "consume_log_rows": 69,
+      "group_size": [
+        64
+      ],
+      "layers_per_rows": {
+        "2676": 23,
+        "2694": 23,
+        "2958": 23
+      },
+      "nbits": [
+        6
+      ],
+      "rows_groups": {
+        "2676": 23,
+        "2694": 23,
+        "2958": 23
+      },
+      "total_copied_output_bytes": 1029740544
+    },
+    "hqq_http_200": 3,
+    "hqq_long_calibration": {
+      "baseline_free_mb": 24628,
+      "decode_min_free_mb": 24624,
+      "decode_s": 4.27,
+      "decode_tok_s": 7.5,
+      "post_cleanup_free_mb": 24624,
+      "prefill_min_free_mb": 14070,
+      "prefill_post_alloc_free_mb": 14070,
+      "prefill_s": 343.4,
+      "prefill_tok_s": 116.3
+    },
+    "hqq_ready": true,
+    "hqq_requests": [
+      {
+        "case": "0",
+        "response_file": "benchmarks/20260627_0427_nemotron_nano_guarded_hqq_prefill_output_consumption_proof_hqq_case0_response.json",
+        "size_download": "4256982",
+        "status": "200",
+        "time_total_s": "32.802286"
+      },
+      {
+        "case": "1",
+        "response_file": "benchmarks/20260627_0427_nemotron_nano_guarded_hqq_prefill_output_consumption_proof_hqq_case1_response.json",
+        "size_download": "4582812",
+        "status": "200",
+        "time_total_s": "32.572722"
+      },
+      {
+        "case": "2",
+        "response_file": "benchmarks/20260627_0427_nemotron_nano_guarded_hqq_prefill_output_consumption_proof_hqq_case2_response.json",
+        "size_download": "4298999",
+        "status": "200",
+        "time_total_s": "26.580369"
+      }
+    ],
+    "safety_margin_mb": 600
+  },
+  "scope": "guarded HQQ6 g64 prefill output-consumption proof for Nemotron Nano, preserving BF16 default/reference behavior",
+  "status": "closed_fail_closed_correctness_mismatch",
+  "validation": {
+    "cargo_fmt_check": "passed before live proof",
+    "dev_build": "passed",
+    "focused_expert_hqq_tests": "83/0"
+  }
+}

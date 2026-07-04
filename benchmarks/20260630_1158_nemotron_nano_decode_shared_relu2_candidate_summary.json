@@ -1,0 +1,51 @@
+{
+  "schema": "krasis_benchmark_summary_v1",
+  "gate": "20260630_1158_nemotron_nano_decode_shared_relu2_candidate",
+  "model": "NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+  "config": "tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+  "scope": "Nano decode candidate targeting shared/post MoE bucket after 0614 attribution",
+  "decision": "rejected",
+  "default_behavior_changed": false,
+  "candidate_env_removed": true,
+  "candidate_env": "KRASIS_DECODE_SHARED_RELU2=1",
+  "builds": {
+    "candidate_int8_build": {
+      "exit": 0,
+      "log": "benchmarks/20260630_1158_nemotron_nano_decode_shared_relu2_candidate_int8_build.log"
+    },
+    "cleanup_build_after_rejection": {
+      "exit": 0,
+      "log": "benchmarks/20260630_1158_nemotron_nano_decode_shared_relu2_candidate_cleanup_build.log"
+    }
+  },
+  "request_result": {
+    "server_decode_tok_s": 115.9,
+    "server_decode_tokens": 127,
+    "server_decode_seconds": 1.10,
+    "internal_ms_per_tok": 7.64,
+    "internal_tok_s": 131.0,
+    "graph_event_ms_per_tok": 7.30,
+    "graph_middle_ms_per_tok": 6.57,
+    "graph_final_ms_per_tok": 0.60,
+    "hcs_hit_per_tok": 138,
+    "hcs_miss_per_tok": 0,
+    "cold_dma": 0,
+    "min_free_mb": 8738,
+    "response": "benchmarks/20260630_1158_nemotron_nano_decode_shared_relu2_candidate_int8_decode128_response.json",
+    "server_log": "benchmarks/20260630_1158_nemotron_nano_decode_shared_relu2_candidate_int8_timing2_server.log"
+  },
+  "correctness": {
+    "first_token": 1044,
+    "candidate_top2": [
+      {"token_id": 1044, "log_prob": -1.650548},
+      {"token_id": 1321, "log_prob": -1.651549}
+    ],
+    "control_top2": [
+      {"token_id": 1044, "log_prob": -1.552999},
+      {"token_id": 1321, "log_prob": -1.858330}
+    ],
+    "accepted": false,
+    "reason": "First-token top-logprob surface drifted from the accepted segmented control."
+  },
+  "next": "Continue from accepted 0011/0614 graph decode attribution; do not use the rejected shared relu2 env/path."
+}

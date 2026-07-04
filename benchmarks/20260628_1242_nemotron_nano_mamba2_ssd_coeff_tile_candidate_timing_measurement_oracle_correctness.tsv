@@ -1,0 +1,2 @@
+records	passed	failed	output_mismatch_sum	state_mismatch_sum	output_max_abs_error	state_max_abs_error	notes
+69	69	0	0	0	0	0	small full-oracle coeff-tile candidate timing correctness proof

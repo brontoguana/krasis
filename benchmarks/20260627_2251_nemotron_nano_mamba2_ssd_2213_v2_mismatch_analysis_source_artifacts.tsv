@@ -1,0 +1,11 @@
+source	span	purpose
+src/gpu_prefill.rs	206	Mamba2SsdLocalTriOracleTarget now carries optional diagnostic state_flat target
+src/gpu_prefill.rs	14904	local-triangular oracle helper; default path unchanged and helper runs only after env target is parsed
+src/gpu_prefill.rs	14987	guarded state_probe recomputes one final SSM state scalar from runtime dimensions
+src/gpu_prefill.rs	15046	state_probe reads sequential GPU ssm_state at requested flat slot for comparison
+src/gpu_prefill.rs	16199	local-triangular oracle env parser remains opt-in
+src/gpu_prefill.rs	16241	optional KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE_STATE_FLAT parser
+src/gpu_prefill.rs	30904	diagnostic helper called after the sequential SSD dispatch and timing bucket
+src/gpu_prefill.rs	30872	default non-trace SSD dispatch remains self.kernels.mamba2_ssd
+src/cuda/prefill_kernels.cu	4968	default CUDA SSD implementation remains mamba2_ssd_sequential_kernel
+src/gpu_prefill.rs	53144	PTX symbol loading remains sequential and trace kernels only; no v2 markers present

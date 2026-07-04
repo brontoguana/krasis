@@ -1,0 +1,16 @@
+field	value
+command	./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf --build-cache
+exit_code	0
+build_cache_complete	true
+requests_sent	0
+server_ready	false
+hqq_attention_cache_validated	true
+hqq_attention_rebuild_requested	false
+hqq_attention_validation_line	HQQ attention artifacts validated (115 MB cached), 27940 MB free
+marlin_build_line	GPU INT4 Marlin cache built: 15.8 GB in 42s
+requested_final_g128_path	/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/experts_marlin_int4_g128_calamax.bin
+requested_final_g128_present	false
+effective_final_path	/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/experts_marlin_int4_g64_calamax.bin
+effective_final_bytes	15849200704
+effective_header_group_size	64
+tmp_or_lock_files_remaining	false

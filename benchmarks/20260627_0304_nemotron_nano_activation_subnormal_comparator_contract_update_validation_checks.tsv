@@ -1,0 +1,12 @@
+check	result
+record_first	passed_0132_facts_recorded_before_source_change
+focused_tests	passed_./dev_test-kernels_expert_hqq_81_0
+dev_build	passed
+filtered_offline_comparator	passed_status_ok_passes_contract_true_blocks_4
+bash_n_dev	passed
+py_compile	passed
+cargo_fmt_check	passed
+git_diff_check	passed
+protected_config_status	pre-existing_untracked_tests/nemotron-nano-bf16-experts-a16.conf_not_edited
+cleanup	passed_no_tmux_no_runtime_or_comparator_process
+final_gpu_snapshot	GPU0_15MB_of_32607MB_util0;GPU1_11MB_of_20470MB_util0

@@ -1,0 +1,2 @@
+artifact	status	exit_code	duration_s	output_mismatches	output_max_abs	output_mean_abs	state_mismatches	state_max_abs	state_mean_abs	first_state_candidate	first_state_oracle	notes
+small_oracle_42_exact_bridge	fail_state_only	1	35	0	0.0	0.0	332283	213.221740723	0.109919830651973	0xbd1c222c	0xbd1c222a	output exact but final state not exact because bridge started from candidate_state after parallel state-passing mutation

@@ -1,0 +1,14 @@
+metric	value	unit	notes
+server_command	KRASIS_STARTUP_DIAG=1 KRASIS_PREFILL_TIMING=1 KRASIS_VRAM_LEDGER=1 KRASIS_EXPERT_HQQ_PREFILL_CONSUME=1 KRASIS_EXPERT_HQQ_PREFILL_EXACT_ROW_DIAG=1 KRASIS_EXPERT_HQQ_PREFILL_EXACT_ROW_LAYER=51 KRASIS_EXPERT_HQQ_PREFILL_EXACT_ROW_EXPERT=60 KRASIS_EXPERT_HQQ_PREFILL_EXACT_ROW_SORTED_ROW=1837 KRASIS_EXPERT_HQQ_PREFILL_EXACT_ROW_COL=1599 KRASIS_EXPERT_HQQ_PREFILL_EXACT_ROW_TRACE_ROW=445 ./dev run tests/nemotron-nano-bf16-experts-a16.conf --test-endpoints --expert-hqq-diagnostic-cache-spec benchmarks/20260626_2208_nemotron_nano_diagnostic_hqq_prefill_all_moe_layers_correctness_diagnostic_cache_spec.json	argv	built command in tmux
+ready_reached	True	bool	KRASIS SERVER READY in log
+http_status	200	code	one saved case-2 request
+request_time_total_s	31.198272	seconds	curl total
+response_size_bytes	5020888	bytes	curl size_download
+long_calibration_prefill_s	343.21	seconds	startup calibration
+long_calibration_decode_s	4.3	seconds	startup calibration
+long_calibration_prefill_min_free_mb	14070	MB	low-water VRAM
+consume_rows	23	count	23 MoE consume rows for one request
+consume_copied_output_bytes	330882048	bytes	sum of EXPERT-HQQ-CONSUME copied_output_bytes
+selected_token_id	1321	token	HQQ consumed result
+selected_text	 and	text	HQQ consumed result
+exact_row_capture_stages	1	count	must be 1

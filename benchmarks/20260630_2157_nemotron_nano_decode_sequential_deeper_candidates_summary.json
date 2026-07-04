@@ -1,0 +1,69 @@
+{
+  "gate": "20260630_2157_nemotron_nano_decode_sequential_deeper_candidates",
+  "model": "NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+  "config": "tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+  "baseline": {
+    "source_gate": "20260630_1509_nemotron_nano_decode_relu2_w2_coalesced_candidate",
+    "accepted_timing_off_decode_tok_s": 119.2,
+    "accepted_stack": [
+      "KRASIS_MAMBA2_DECODE_GRAPH=1",
+      "KRASIS_MAMBA2_DECODE_GRAPH_FAST_INPROJ=1",
+      "KRASIS_GPU_ROUTE_SYNC=1",
+      "KRASIS_GPU_ROUTE_SYNC_HOT_NOSYNC=1",
+      "KRASIS_GPU_ROUTE_SYNC_HOT_FULL_GRAPH=1",
+      "KRASIS_DECODE_GRAPH_DIRECT_W13_BF16=1",
+      "KRASIS_DECODE_PARALLEL_TOPK=1",
+      "KRASIS_DECODE_GRAPH_RELU2_W2_COALESCED=1"
+    ]
+  },
+  "accepted_speed_change": false,
+  "current_best_decode_tok_s": 119.2,
+  "candidate_results": [
+    {
+      "candidate": "weighted_add_nozero",
+      "env": "KRASIS_DECODE_WEIGHTED_ADD_NOZERO=1",
+      "build_exit": 0,
+      "server_decode_tok_s": 121.0,
+      "internal_ms_per_tok": 7.29,
+      "first_token_topk_exact": true,
+      "full_generation_exact": false,
+      "reason": "generated sequence diverged at token index 1 and ran to length"
+    },
+    {
+      "candidate": "relu2_w2_weighted_accum",
+      "env": "KRASIS_DECODE_GRAPH_RELU2_W2_WEIGHTED_ACCUM=1",
+      "build_exit": 0,
+      "server_decode_tok_s": 113.0,
+      "internal_ms_per_tok": 7.80,
+      "first_token_topk_exact": true,
+      "full_generation_exact": true,
+      "reason": "exact but slower than accepted 119.2 tok/s path"
+    },
+    {
+      "candidate": "fused_routed_scale",
+      "env": "KRASIS_DECODE_GRAPH_FUSED_ROUTED_SCALE=1",
+      "build_exit": 0,
+      "server_decode_tok_s": 120.1,
+      "internal_ms_per_tok": 7.30,
+      "first_token_topk_exact": true,
+      "full_generation_exact": false,
+      "reason": "generated sequence diverged at token index 1 and ran to length"
+    },
+    {
+      "candidate": "mamba2_fused_disc_ssm",
+      "env": "KRASIS_MAMBA2_DECODE_GRAPH_FUSED_DISC_SSM=1",
+      "build_exit": 0,
+      "server_decode_tok_s": 116.1,
+      "internal_ms_per_tok": 7.61,
+      "first_token_topk_exact": true,
+      "full_generation_exact": false,
+      "reason": "generated sequence diverged at token index 1; scratch-preserving compile fix exceeded cudarc launch tuple support"
+    }
+  ],
+  "final_source_state": {
+    "rejected_candidate_envs_present": false,
+    "cleanup_build_exit": 0,
+    "defaults_changed": false,
+    "protected_configs_changed": false
+  }
+}

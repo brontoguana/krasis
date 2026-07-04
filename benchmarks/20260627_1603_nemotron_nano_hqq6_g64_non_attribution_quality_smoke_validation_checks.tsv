@@ -1,0 +1,12 @@
+check	status	detail
+summary_json	pass	status closed; case2 g64 selected 1321; production_hqq_enabled=false
+token_margin_tsv	pass	hqq6_g64_nonattr_1603 case2 selected 1321 with negative margin -0.242314
+topk_comparison_tsv	pass	BF16 vs 1603 selected_changed=true; rank_changed_count=8; membership_changed=true
+bash_n_dev	pass	dev shell syntax valid
+git_diff_check_krasis	pass	no whitespace errors
+git_diff_check_internal	pass	no whitespace errors
+protected_config_check	pass	only known untracked tests/nemotron-nano-bf16-experts-a16.conf
+cleanup_tmux	pass	no tmux server
+cleanup_process	pass	no matching runtime/curl/generator/build process
+cleanup_gpu	pass	GPUs idle at 15 MB / 11 MB
+final_snapshot	pass	2026-06-27T16:36:23Z disk 613G RAM 966Gi

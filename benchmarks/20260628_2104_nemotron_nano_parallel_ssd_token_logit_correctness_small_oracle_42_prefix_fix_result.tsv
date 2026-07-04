@@ -1,0 +1,2 @@
+diagnostic	status	output_mismatches	state_mismatches	first_output	first_state	max_output_abs	max_state_abs
+warmup42_prefix_fix	failed_state_only	0	155231	null	flat=192 head=0 d=1 state=64 cand=0x3b3e2993 oracle=0x3b3e2992	0.0	0.000244140625

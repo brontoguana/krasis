@@ -1,0 +1,7 @@
+field	value
+decision	hqq4_k4v4_non_attribution_selected_token_smoke_passed
+quality_acceptance	false
+reason	All three cases selected BF16/g32 token 1044 with positive 1044-1321 margins, but top-k membership/rank drift remains 3/3 versus both BF16 and accepted g32.
+case2_result	passed_first_stop_condition
+production_enablement	no
+next_gate	Only if continuing: broader quality investigation or acceptance criteria for top-k drift; do not treat this gate as production approval.

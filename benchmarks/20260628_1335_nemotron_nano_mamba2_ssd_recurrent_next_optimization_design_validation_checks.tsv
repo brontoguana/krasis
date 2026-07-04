@@ -1,0 +1,11 @@
+check	status	details
+json_summary	pass	closed summary validates with jq
+tsv_shapes	pass	source/decision/buffer/kernel/exactness/probe/minimal-next/runtime-not-run TSVs have consistent tab field counts
+runtime_absence	pass	no build/startup/run/long/request artifacts exist for 20260628_1335
+source_marker_absence	pass	no STATE_PARALLEL_RECURRENT/state_parallel_recurrent/mamba2_ssd_block_scan_recurrent_state_parallel markers in src or python
+diff_check	pass	git diff --check passed in krasis-nemotron-dev and krasis-internal
+dev_syntax	pass	bash -n dev passed
+protected_configs	pass	status unchanged; expected tests-only Nano config remains untracked
+temp_lock_scan	pass	no Nano Krasis temp/lock files outside ignored standing HF download metadata
+idle_snapshot	pass	2026-06-28T13:46:43Z tmux=0 runtime/build=0 gpu_compute=0 gpu_mem=15/11MB
+command_hygiene	note	a failed python arithmetic one-liner was attempted and produced no task output; no further Python use occurred in this gate

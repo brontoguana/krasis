@@ -1,0 +1,4 @@
+probe	output_match	state_match	candidate_output_bits	oracle_output_bits	candidate_state_bits	oracle_state_bits	note
+row97_head48_d24	false	NA	0xc233	0xc234	NA	NA	term probe output still differs by one BF16 bin; c_state_total_exact_minus_replayed was 0.0
+row64_head11_d22_state0	true	true	0x3bb8	0x3bb8	0x3b90c258	0x3b90c258	regression exact
+row82_head37_d30_state14	false	false	0xbe4e	0xbe4d	0xbb05886f	0xbb05886e	regression failed; first output and first state mismatch surface

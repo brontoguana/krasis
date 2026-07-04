@@ -1,0 +1,13 @@
+artifact	result	path	line	detail
+default_sequential_kernel	preserved	src/cuda/prefill_kernels.cu	4968	Production sequential Mamba2 SSD kernel remains present and unchanged by this cleanup gate.
+block_scan_recurrent_kernel	preserved	src/cuda/prefill_kernels.cu	5667	Opt-in block-scan recurrent kernel remains present.
+c_state_total_exact	preserved	src/cuda/prefill_kernels.cu	5720	Accepted 1022 c_state_total_exact materialization remains in recurrent phase.
+block_scan_output_kernel	preserved	src/cuda/prefill_kernels.cu	5730	Opt-in block-scan output kernel remains present.
+c_state_total_exact_read	preserved	src/cuda/prefill_kernels.cu	5793	Output kernel still consumes c_state_total_exact.
+local_old_state_exact	removed	src/cuda/prefill_kernels.cu	n/a	Failed 1058 local_old_state_exact materialization and output-kernel consumption removed.
+block_scan_buffers	cleaned	src/gpu_prefill.rs	32053	Only accepted block-scan buffers remain: output/state snapshots, entry_state, c_state_total_exact, and term_probe.
+block_scan_dispatch	preserved	src/gpu_prefill.rs	32143	Recurrent launch still passes c_state_total_exact; failed local-old buffer arguments removed.
+term_probe_fields	cleaned	src/gpu_prefill.rs	32294	Term probe reports c_state_total_exact, output-order local_old_state, local HF scan, D skip, indexing, and output bits only.
+block_scan_timing	preserved	src/gpu_prefill.rs	32371	Block-scan timing instrumentation remains guarded under block-scan envs.
+warmup_fail_closed	preserved	python/krasis/server.py	1743	Block-scan warmup fail-closed handling remains opt-in under block-scan envs.
+v5_diagnostics	preserved	src/gpu_prefill.rs	17014	V5 probe parsing and oracle comparison remain available.

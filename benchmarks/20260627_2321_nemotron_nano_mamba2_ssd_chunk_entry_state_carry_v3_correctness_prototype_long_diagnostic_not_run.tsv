@@ -1,0 +1,2 @@
+reason	baseline_reference
+Small v3 oracle failed closed on layer 0; per gate scope, no long startup diagnostic or 1908 timing comparison was run.	1908 baseline ssd_scan=114449.4ms

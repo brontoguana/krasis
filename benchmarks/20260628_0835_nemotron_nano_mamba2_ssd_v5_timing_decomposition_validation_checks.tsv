@@ -1,0 +1,17 @@
+check	status	evidence
+summary_json	pass	status closed; validation passed; final snapshot 2026-06-28T08:57:14Z
+tsv_shape	pass	all timing-decomposition TSV artifacts have consistent tab-separated field counts
+build_exit	pass	./dev build exit 0; duration 169s
+startup_diagnostic	pass	reached KRASIS SERVER READY at line 908; stopped with ./dev kill after capture because no exit file was produced
+oracle_exactness	pass	207 v5 oracle records; failed=0; output_mismatches=0; state_mismatches=0
+timing_records	pass	207 v5 timing records; long 39920-token group has 23 records
+long_decomposition	pass	39920-token ssd_scan 251443.8ms; sequential oracle 114292.932890ms; v5 candidate 114293.155150ms; downloads 9043.142551ms; comparison 12390.200665ms; commit copies 11.745775ms
+no_requests	pass	no POST, Received request, or request_id evidence; endpoint advertisement ignored
+no_benchmark_path	pass	no speed-test, release-test, reference_test, Benchmarking, Running benchmark, or benchmark path evidence
+source_markers	pass	v5 env gate, v5 timing emission, v5 candidate kernel, default sequential kernel, and preserved diagnostics present
+diff_check	pass	git diff --check passed in krasis-nemotron-dev and krasis-internal
+dev_syntax	pass	bash -n dev passed
+protected_configs	pass	unchanged expected untracked tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf and tests/nemotron-nano-bf16-experts-a16.conf
+final_cleanup	pass	./dev kill exit 0
+temp_lock_files	pass	0 Krasis temp/lock/partial files outside standing Hugging Face download metadata
+idle_state	pass	no tmux/runtime/build process; no NVIDIA compute process; GPUs 15 MB / 11 MB

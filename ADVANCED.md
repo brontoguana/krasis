@@ -102,6 +102,8 @@ When BF16 is selected for experts or major components, treat that run as validat
 | `--force-rebuild-cache` | — | Delete existing expert caches and rebuild from safetensors |
 | `--build-cache` | — | Build expert caches (if missing) and exit without starting server |
 | `--heatmap-path PATH` | — | Path to expert_heatmap.json for HCS init |
+| `--approved-heatmap-mode MODE` | auto | Approved route-heatmap lookup: `auto`, `off`, or `require` |
+| `--approved-heatmap-manifest-url URL` | GitHub manifest | Override the approved route-heatmap manifest URL |
 
 Dynamic HCS uses the same physical HCS residency table as the heatmap cache.
 It does not create a second cache or allow duplicate expert residency across a
@@ -109,6 +111,16 @@ heatmap region and a recency region. The default keeps the heatmap prefix and
 reserves two activated-expert blocks for recency promotion; use
 `--dynamic-hcs-tail-blocks 1..5` for model-specific tuning, or
 `--no-dynamic-hcs` to run static heatmap HCS only.
+
+When `--heatmap-path` is not supplied, `--approved-heatmap-mode auto` checks the
+approved heatmap manifest and uses a matching checksum-verified artifact from
+the local cache or GitHub. Approved heatmaps provide only the expert route
+ranking; Krasis still calibrates VRAM locally and sizes HCS residency at
+startup. If the manifest or listed artifact is not downloadable in `auto` mode,
+Krasis logs the fallback and runs the quick local startup heatmap. Use `off` to
+force the quick local startup heatmap, or `require` to fail startup unless an
+approved artifact is available for the current model/router signature and
+validated runtime.
 
 `--hcs-host-cache-mode source` is the default RAM-saving mode. It skips the
 duplicate soft HCS host mirror and reloads soft HCS chunks from the Marlin host

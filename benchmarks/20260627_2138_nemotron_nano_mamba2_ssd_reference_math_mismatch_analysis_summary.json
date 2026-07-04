@@ -1,0 +1,105 @@
+{
+  "gate": "20260627_2138_nemotron_nano_mamba2_ssd_reference_math_mismatch_analysis",
+  "status": "closed",
+  "opened_utc": "2026-06-27T21:39:20Z",
+  "closed_utc": "2026-06-27T21:46:29Z",
+  "record_first": {
+    "source_gate": "20260627_2102_nemotron_nano_mamba2_ssd_chunk_parallel_failed_prototype_cleanup",
+    "failed_chunk_prototype_reverted": true,
+    "dev_build_passed": true,
+    "startup_diagnostic_passed": true,
+    "default_sequential_ssd_loads": true,
+    "cache_reuse_clean": true,
+    "mamba2_substage_instrumentation_1908_preserved": true
+  },
+  "resume_check": {
+    "partial_gate_records_found": false,
+    "action": "opened fresh without duplication"
+  },
+  "scope": {
+    "static_analysis_only": true,
+    "inspect_sequential_kernel": true,
+    "inspect_trace_path": true,
+    "inspect_2025_design_artifacts": true,
+    "inspect_2039_mismatch_artifacts": true,
+    "inspect_local_reference_implementations": true,
+    "implementation": false,
+    "benchmarks": false,
+    "requests": false,
+    "decode_hcs": false,
+    "production_enablement": false,
+    "default_path_changes": false
+  },
+  "required_math_coverage": [
+    "chunk_entry_state",
+    "a_dt_prefix",
+    "bc_group_indexing",
+    "local_triangular_output",
+    "chunk_carry_final_state",
+    "d_skip",
+    "z_norm_placement",
+    "bf16_conversion"
+  ],
+  "analysis": {
+    "sequential_kernel_is_oracle": true,
+    "trace_path_is_sequential_with_diagnostics": true,
+    "local_reference_found": "/home/main/Documents/Claude/krasisx/python/krasis/mamba2_ops",
+    "first_output_mismatch_coord": {
+      "t": 70,
+      "head": 37,
+      "d": 50,
+      "inside_chunk": 0
+    },
+    "first_state_mismatch_coord": {
+      "head": 0,
+      "d": 0,
+      "state": 14
+    },
+    "cross_chunk_carry_sole_cause": false,
+    "exact_2039_faulty_line_known": false,
+    "reason_exact_line_unknown": "2039 candidate was reverted in 2102 and artifacts did not capture candidate intermediate terms"
+  },
+  "corrected_design": {
+    "pipeline": [
+      "chunk_cumsum",
+      "chunk_state",
+      "state_passing",
+      "cb_matrix",
+      "chunk_scan_output",
+      "final_state_commit",
+      "sequential_oracle_compare"
+    ],
+    "default_path_remains_sequential": true,
+    "mandatory_oracle_before_long_run": true,
+    "first_mismatch_intermediate_diagnostics_required": true
+  },
+  "artifacts": {
+    "source_audit": "benchmarks/20260627_2138_nemotron_nano_mamba2_ssd_reference_math_mismatch_analysis_source_audit.tsv",
+    "reference_impls": "benchmarks/20260627_2138_nemotron_nano_mamba2_ssd_reference_math_mismatch_analysis_reference_impls.tsv",
+    "mismatch_analysis": "benchmarks/20260627_2138_nemotron_nano_mamba2_ssd_reference_math_mismatch_analysis_mismatch_analysis.tsv",
+    "corrected_design": "benchmarks/20260627_2138_nemotron_nano_mamba2_ssd_reference_math_mismatch_analysis_corrected_design.tsv",
+    "math_coverage": "benchmarks/20260627_2138_nemotron_nano_mamba2_ssd_reference_math_mismatch_analysis_math_coverage.tsv",
+    "runtime_not_run": "benchmarks/20260627_2138_nemotron_nano_mamba2_ssd_reference_math_mismatch_analysis_runtime_not_run.tsv",
+    "decision": "benchmarks/20260627_2138_nemotron_nano_mamba2_ssd_reference_math_mismatch_analysis_root_decision.tsv",
+    "validation": "benchmarks/20260627_2138_nemotron_nano_mamba2_ssd_reference_math_mismatch_analysis_validation_checks.tsv"
+  },
+  "validation": {
+    "passed": true,
+    "json_assertions": true,
+    "tsv_assertions": true,
+    "no_runtime_artifacts": true,
+    "bash_n_dev": true,
+    "diff_check_krasis": true,
+    "diff_check_internal": true,
+    "protected_config_status_expected": true,
+    "no_temp_lock_files": true,
+    "idle_state_clean": true,
+    "final_snapshot_utc": "2026-06-27T21:46:29Z",
+    "gpu_memory_used_mb": {
+      "gpu0": 15,
+      "gpu1": 11
+    },
+    "disk_available": "588G",
+    "ram_available": "968Gi"
+  }
+}

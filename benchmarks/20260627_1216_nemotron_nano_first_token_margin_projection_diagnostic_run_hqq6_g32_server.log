@@ -1,0 +1,101 @@
+[0;36m[1m=>[0m Waiting for selected GPUs (0) to clear...
+[0;32m[1mOK[0m Selected GPUs (0) clear.
+[0;36m[1m=>[0m Launching from: tests/nemotron-nano-bf16-experts-a16.conf
+[0;36m[1m=>[0m Run dir: /home/main/Documents/Claude/krasis-nemotron-dev/logs/dev-run_20260627_131956
+[0;36m[1m=>[0m Import origin check:
+krasis: /home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/__init__.py
+krasis.krasis: /home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+Pre-scan: set CUDA_VISIBLE_DEVICES=0
+Loaded config from tests/nemotron-nano-bf16-experts-a16.conf: {'model_path': '/home/main/.krasis/models/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16', 'selected_gpus': '0', 'num_gpus': 1, 'layer_group_size': 2, 'kv_dtype': 'bf16', 'gpu_expert_bits': 16, 'cpu_expert_bits': 8, 'attention_quant': 'bf16', 'shared_expert_quant': 'bf16', 'dense_mlp_quant': 'bf16', 'lm_head_quant': 'bf16', 'krasis_threads': 16, 'host': '0.0.0.0', 'port': 18021, 'enable_thinking': False, 'gpu_prefill_threshold': 300, 'vram_safety_margin': 600, 'force_load': False}
+
+[1m[36m▸ Krasis — NVIDIA-Nemotron-3-Nano-30B-A3B-BF16[0m
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 1[0m
+  [32mHCS host cache: source[0m
+  [32mSelected physical GPUs: 0 (config; CUDA_VISIBLE_DEVICES=0)[0m
+  [32mExperts: GPU BF16  |  Attention: bf16  |  KV: bf16[0m
+  [32mLayer groups: 2  |  KV cache: 1000 MB  |  Threads: 16[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+  [33mUNVALIDATED BF16 debug path enabled: GPU experts=BF16, attention=BF16, shared expert=BF16, dense MLP=BF16, lm head=BF16. This path likely contains unknown bugs and must not be used as a correctness oracle. Use HF Transformers BF16 reference data for validation; production runs must use quantized configs.[0m
+
+[1m[36m▸ Loading model weights[0m
+  [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=518 MB, free=31600 MB, total=32119 MB
+
+[1m[36m▸ Loading GPU weights[0m
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:0: alloc=4271 MB, reserved=4350 MB, used=4966 MB, free=27152 MB, total=32119 MB
+  [0;32mAttention resident on GPU (890 MB), 27152 MB free[0m
+
+[1m[36m▸ Loading BF16 expert weights from safetensors (UNVALIDATED debug path only; not for validation or production)[0m
+  [1;33m▸ Loading BF16 experts directly from safetensors (validation mode)[0m
+    Layer 1/23: 128 experts, 2436 MB BF16, 3.2s
+    Layer 2/23: 128 experts, 2436 MB BF16, 3.2s
+    Layer 3/23: 128 experts, 2436 MB BF16, 3.2s
+    Layer 4/23: 128 experts, 2436 MB BF16, 3.1s
+    Layer 5/23: 128 experts, 2436 MB BF16, 3.1s
+    Layer 6/23: 128 experts, 2436 MB BF16, 3.1s
+    Layer 7/23: 128 experts, 2436 MB BF16, 3.1s
+    Layer 8/23: 128 experts, 2436 MB BF16, 3.1s
+    Layer 9/23: 128 experts, 2436 MB BF16, 3.1s
+    Layer 10/23: 128 experts, 2436 MB BF16, 3.1s
+    Layer 11/23: 128 experts, 2436 MB BF16, 3.1s
+    Layer 12/23: 128 experts, 2436 MB BF16, 3.2s
+    Layer 13/23: 128 experts, 2436 MB BF16, 3.1s
+    Layer 14/23: 128 experts, 2436 MB BF16, 3.1s
+    Layer 15/23: 128 experts, 2436 MB BF16, 3.2s
+    Layer 16/23: 128 experts, 2436 MB BF16, 3.1s
+    Layer 17/23: 128 experts, 2436 MB BF16, 3.2s
+    Layer 18/23: 128 experts, 2436 MB BF16, 3.1s
+    Layer 19/23: 128 experts, 2436 MB BF16, 3.2s
+    Layer 20/23: 128 experts, 2436 MB BF16, 3.2s
+    Layer 21/23: 128 experts, 2436 MB BF16, 3.2s
+    Layer 22/23: 128 experts, 2436 MB BF16, 3.2s
+    Layer 23/23: 128 experts, 2436 MB BF16, 3.2s
+  [0;32mLoaded 2944 experts + 23 shared in 73.5s (BF16 direct)[0m
+  [0;32mUNVALIDATED BF16 debug weights loaded in 115s. Do not use this path for validation; use HF BF16 as the oracle.[0m
+  [33m[VRAM after-phase2-expert-weights][0m cuda:0: alloc=4271 MB, reserved=4350 MB, used=4966 MB, free=27152 MB, total=32119 MB
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:0: alloc=4271 MB, reserved=4350 MB, used=4966 MB, free=27152 MB, total=32119 MB
+  [33m[VRAM after-kv-cache-init][0m cuda:0: alloc=5271 MB, reserved=5350 MB, used=5966 MB, free=26152 MB, total=32119 MB
+  [33m[VRAM after-full-load][0m cuda:0: alloc=5271 MB, reserved=5350 MB, used=5966 MB, free=26152 MB, total=32119 MB
+
+[1m[36m▸ CUDA runtime warmup[0m
+  [32mcuBLAS + Triton kernel compilation done[0m
+
+[1m[36m▸ Setting up GPU decode store[0m
+  [32mGPU decode store ready (addr=0x75c44d8ca6e0)[0m
+  [32mReleased redundant GPU execution source tensors (30 MB)[0m
+  [2mVRAM monitor started (tracking warmup)[0m
+  [2mcuda:0: 0 MB total[0m
+
+[1m[36m▸ Pre-allocating Rust prefill engine[0m
+[FLA] Loading kernels for H=0 from /home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/libkrasis_fla_sm120.so
+  [32mPrefill engine scratch buffers allocated[0m
+
+[1m[36m▸ Warmup (Rust prefill engine)[0m
+  [32mStartup diag: warmup tokens=300 (default 300, token=52528)[0m
+  [32mStartup diag env: no_graph=unset, mapped_reads=unset, prefill_debug=False, prefill_timing=True, exit_after_calibration=unset[0m
+VRAM LEDGER prefill_prepare_budget prompt_tokens=300 free_mb=24658 total_mb=32119 safety_mb=600 fixed_scratch_mb=183.0 per_tok_kb=238.2 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=0.0 all_expert_cold_reserve_mb=2455.4 measured_cold_slots=0 post_scratch_runtime_reserve_mb=0.0 scratch_budget_mb=24058.6 target_tokens=300 max_by_vram=300 runtime_chunk_cap=None chosen_scratch_tokens=300 hcs_cached_experts=0 hcs_stride=0 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=300 prompt_tokens=300 pre_alloc_free_mb=24658 post_alloc_free_mb=24446 actual_alloc_mb=212.0 estimated_scratch_mb=262.3 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=4.2 shared_fp32_mb=4.2 fp32_scratch_mb=10.6 kv_cross_floor_mb=0.3
+VRAM LEDGER prefill_ready prompt_tokens=300 scratch_tokens=300 scratch_mb=262.3 post_alloc_free_mb=24446 safety_mb=600 optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0
+  [33mRust prefill warmup failed: KRASIS_FIRST_TOKEN_MARGIN_PROJECTION_DIAG requires debug_reference_trace=true[0m
+  [32mWarmup complete in 0.0s[0m
+  [2mcuda:0 warmup:  peak 7,382 MB used / 32,119 MB total  (min free: 24,736 MB)[0m
+
+[1m[36m▸ VRAM calibration[0m
+  [32mSafety margin: 600 MB[0m
+  [32mFree VRAM after startup: 24,654 MB / 32,119 MB[0m
+  [32mStartup diag: calibration tokens short=500 (default 500), long=39,920 (default 39,920), cap=49,900, forced_long=False[0m
+  [32mShort calibration: probing 500 prompt tokens + 32 decode tokens[0m
+VRAM LEDGER prefill_prepare_budget prompt_tokens=500 free_mb=24658 total_mb=32119 safety_mb=600 fixed_scratch_mb=183.0 per_tok_kb=238.2 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=0.0 all_expert_cold_reserve_mb=2455.4 measured_cold_slots=0 post_scratch_runtime_reserve_mb=0.0 scratch_budget_mb=24058.6 target_tokens=500 max_by_vram=500 runtime_chunk_cap=None chosen_scratch_tokens=500 hcs_cached_experts=0 hcs_stride=0 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=500 prompt_tokens=500 pre_alloc_free_mb=24658 post_alloc_free_mb=24374 actual_alloc_mb=284.0 estimated_scratch_mb=313.1 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=7.1 shared_fp32_mb=7.1 fp32_scratch_mb=15.7 kv_cross_floor_mb=0.5
+VRAM LEDGER prefill_ready prompt_tokens=500 scratch_tokens=500 scratch_mb=313.1 post_alloc_free_mb=24374 safety_mb=600 optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/server.py", line 3145, in <module>
+    main()
+  File "/home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/server.py", line 1919, in main
+    short_tokens, short_baseline_free, short_prefill_post_alloc, short_prefill_min, short_decode_min = _measure_vram_probe(
+                                                                                                       ^^^^^^^^^^^^^^^^^^^^
+  File "/home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/server.py", line 1840, in _measure_vram_probe
+    first_token, prompt_len, kv_overflow = gpu_store.rust_prefill_tokens(
+                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: KRASIS_FIRST_TOKEN_MARGIN_PROJECTION_DIAG requires debug_reference_trace=true

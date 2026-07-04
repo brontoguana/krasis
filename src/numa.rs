@@ -104,19 +104,31 @@ extern "C" {
 
 // Stubs when libnuma is not available at build time
 #[cfg(no_numa)]
-unsafe fn numa_available() -> libc::c_int { -1 }
+unsafe fn numa_available() -> libc::c_int {
+    -1
+}
 #[cfg(no_numa)]
-unsafe fn numa_max_node() -> libc::c_int { 0 }
+unsafe fn numa_max_node() -> libc::c_int {
+    0
+}
 #[cfg(no_numa)]
-unsafe fn numa_alloc_onnode(_size: libc::size_t, _node: libc::c_int) -> *mut libc::c_void { std::ptr::null_mut() }
+unsafe fn numa_alloc_onnode(_size: libc::size_t, _node: libc::c_int) -> *mut libc::c_void {
+    std::ptr::null_mut()
+}
 #[cfg(no_numa)]
 unsafe fn numa_free(_start: *mut libc::c_void, _size: libc::size_t) {}
 #[cfg(no_numa)]
-unsafe fn numa_node_of_cpu(_cpu: libc::c_int) -> libc::c_int { 0 }
+unsafe fn numa_node_of_cpu(_cpu: libc::c_int) -> libc::c_int {
+    0
+}
 #[cfg(no_numa)]
-unsafe fn numa_num_configured_cpus() -> libc::c_int { 1 }
+unsafe fn numa_num_configured_cpus() -> libc::c_int {
+    1
+}
 #[cfg(no_numa)]
-unsafe fn numa_run_on_node(_node: libc::c_int) -> libc::c_int { -1 }
+unsafe fn numa_run_on_node(_node: libc::c_int) -> libc::c_int {
+    -1
+}
 
 /// Check if libnuma is available and functional.
 fn numa_is_available() -> bool {
@@ -163,10 +175,7 @@ impl NumaTopology {
             }
         }
 
-        log::info!(
-            "NUMA: {} nodes, {} total CPUs",
-            num_nodes, num_cpus,
-        );
+        log::info!("NUMA: {} nodes, {} total CPUs", num_nodes, num_cpus,);
         for (i, cpus) in node_cpus.iter().enumerate() {
             log::info!(
                 "  Node {}: {} CPUs, {:.1} GB free",
@@ -234,11 +243,7 @@ impl NumaExpertMap {
     /// Expert i in each layer goes to node (i % num_nodes).
     pub fn round_robin(num_moe_layers: usize, num_experts: usize, num_nodes: usize) -> Self {
         let assignments: Vec<Vec<usize>> = (0..num_moe_layers)
-            .map(|_| {
-                (0..num_experts)
-                    .map(|eidx| eidx % num_nodes)
-                    .collect()
-            })
+            .map(|_| (0..num_experts).map(|eidx| eidx % num_nodes).collect())
             .collect();
 
         NumaExpertMap {
@@ -264,7 +269,11 @@ impl NumaExpertMap {
 
     /// Sort expert indices by NUMA node, returning (expert_idx, node) pairs.
     /// This enables running all node-0 experts first, then node-1, etc.
-    pub fn sort_by_node(&self, moe_layer_idx: usize, expert_indices: &[usize]) -> Vec<(usize, usize)> {
+    pub fn sort_by_node(
+        &self,
+        moe_layer_idx: usize,
+        expert_indices: &[usize],
+    ) -> Vec<(usize, usize)> {
         let mut pairs: Vec<(usize, usize)> = expert_indices
             .iter()
             .map(|&eidx| (eidx, self.node_for(moe_layer_idx, eidx)))
@@ -424,7 +433,10 @@ pub fn build_numa_thread_pool(num_threads: usize) -> NumaTopology {
         let _ = rayon::ThreadPoolBuilder::new()
             .num_threads(num_threads)
             .build_global();
-        log::info!("NUMA: single node, rayon pool: {} threads (no pinning)", num_threads);
+        log::info!(
+            "NUMA: single node, rayon pool: {} threads (no pinning)",
+            num_threads
+        );
         return topo;
     }
 
@@ -460,11 +472,17 @@ pub fn build_numa_thread_pool(num_threads: usize) -> NumaTopology {
 
     log::info!(
         "NUMA: {} nodes, rayon pool: {} threads (pinned round-robin)",
-        num_nodes, num_threads,
+        num_nodes,
+        num_threads,
     );
     for (i, cpus) in topo.node_cpus.iter().enumerate() {
         let thread_count = (0..num_threads).filter(|t| t % num_nodes == i).count();
-        log::info!("  Node {}: {} threads, {} CPUs available", i, thread_count, cpus.len());
+        log::info!(
+            "  Node {}: {} threads, {} CPUs available",
+            i,
+            thread_count,
+            cpus.len()
+        );
     }
 
     topo
@@ -485,7 +503,9 @@ mod tests {
         assert!(total_cpus > 0);
         eprintln!(
             "  {} nodes, {} total CPUs, is_numa={}",
-            topo.num_nodes, total_cpus, topo.is_numa(),
+            topo.num_nodes,
+            total_cpus,
+            topo.is_numa(),
         );
     }
 

@@ -1,0 +1,9 @@
+field	value
+gate	20260627_2039_nemotron_nano_mamba2_ssd_chunk_parallel_gated_prototype
+command	./dev build
+exit	0
+passed	true
+maturin_phase_s	169
+total_s	174
+log	benchmarks/20260627_2039_nemotron_nano_mamba2_ssd_chunk_parallel_gated_prototype_build.log
+notes	Built command only; no direct Python invocation.

@@ -1,0 +1,85 @@
+{
+  "gate": "20260630_1509_nemotron_nano_decode_relu2_w2_coalesced_candidate",
+  "status": "accepted_gated_micro_optimization",
+  "model": "NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+  "config": "tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+  "candidate_env": "KRASIS_DECODE_GRAPH_RELU2_W2_COALESCED=1",
+  "candidate_scope": "graph routed INT4 ReLU2 W2 batched kernel only",
+  "default_behavior_changed": false,
+  "baseline": {
+    "source": "20260630_1249_nemotron_nano_decode_parallel_topk_candidate",
+    "timing_off_server_decode_tok_s": 115.2
+  },
+  "same_payload_control": {
+    "source": "20260630_1341_nemotron_nano_decode_shared_w2_v2_candidate_control_response.json",
+    "server_decode_tok_s": 106.0,
+    "internal_ms_tok": 8.41,
+    "generated_tokens": 104,
+    "finish_reason": "stop",
+    "first_token": 1044,
+    "first_logprob": -1.650548
+  },
+  "initial_candidate": {
+    "status": "rejected_subcase",
+    "server_decode_tok_s": 118.1,
+    "internal_ms_tok": 7.42,
+    "generated_tokens": 128,
+    "first_token_topk_exact": true,
+    "generated_output_exact": false,
+    "first_token_diff_index": 3,
+    "decision": "keep gated and fix reduction order because speed was promising"
+  },
+  "fixed_candidate_timing_on": {
+    "status": "accepted_correctness",
+    "server_decode_tok_s": 117.4,
+    "internal_ms_tok": 7.37,
+    "internal_tok_s": 135.6,
+    "generated_tokens": 104,
+    "finish_reason": "stop",
+    "first_token": 1044,
+    "first_logprob": -1.650548,
+    "first_token_topk_exact": true,
+    "generated_output_exact": true,
+    "hcs_hit_miss": "138/0",
+    "cold_dma": 0,
+    "min_free_vram_mb": 8730
+  },
+  "fixed_candidate_timing_off": {
+    "status": "accepted_speed",
+    "server_decode_tokens": 103,
+    "server_decode_seconds": 0.86,
+    "server_decode_tok_s": 119.2,
+    "generated_tokens": 104,
+    "finish_reason": "stop",
+    "first_token": 1044,
+    "first_logprob": -1.650548,
+    "generated_output_exact": true,
+    "hcs_hit_rate_pct": 100.0,
+    "hcs_hit_miss": "138/0",
+    "cold_dma": 0,
+    "min_free_vram_mb": 8730
+  },
+  "speed_delta": {
+    "timing_off_tok_s_delta": 4.0,
+    "timing_off_percent_change": 3.47
+  },
+  "implementation": {
+    "cuda_kernel": "relu2_w2_batched_coalesced",
+    "rust_gate": "KRASIS_DECODE_GRAPH_RELU2_W2_COALESCED",
+    "correctness_fix": "match the accepted width-16 W2 reduction tree order before BF16 output",
+    "post_review_fix": "tail n-lanes now skip reads/writes but still participate in the block reduction and sync for non-multiple-of-16 output widths",
+    "fail_closed": [
+      "requires graph routed ReLU2 experts",
+      "requires INT4 experts"
+    ]
+  },
+  "artifacts": {
+    "plan": "20260630_1509_nemotron_nano_decode_relu2_w2_coalesced_candidate_plan.tsv",
+    "result": "20260630_1509_nemotron_nano_decode_relu2_w2_coalesced_candidate_result.tsv",
+    "comparison": "20260630_1509_nemotron_nano_decode_relu2_w2_coalesced_candidate_comparison.tsv",
+    "initial_log": "20260630_1509_nemotron_nano_decode_relu2_w2_coalesced_candidate_timing_server.log",
+    "fixed_timing_log": "20260630_1509_nemotron_nano_decode_relu2_w2_coalesced_candidate_fix_timing_server.log",
+    "speed_log": "20260630_1509_nemotron_nano_decode_relu2_w2_coalesced_candidate_speed_server.log",
+    "final_build_log": "20260630_1509_nemotron_nano_decode_relu2_w2_coalesced_candidate_final_build.log"
+  }
+}

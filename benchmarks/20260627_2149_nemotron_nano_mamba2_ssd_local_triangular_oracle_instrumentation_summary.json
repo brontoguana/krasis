@@ -1,0 +1,144 @@
+{
+  "gate": "20260627_2149_nemotron_nano_mamba2_ssd_local_triangular_oracle_instrumentation",
+  "status": "closed",
+  "opened_utc": "2026-06-27T21:49:46Z",
+  "closed_utc": "2026-06-27T22:10:14Z",
+  "record_first": {
+    "source_gate": "20260627_2138_nemotron_nano_mamba2_ssd_reference_math_mismatch_analysis",
+    "gemma_baseline": {
+      "prefill_tok_s": 5619.6,
+      "decode_tok_s": 92.43,
+      "network_tok_s": 155.69
+    },
+    "nano_baseline": {
+      "prefill_tok_s": 346.5,
+      "internal_decode_tok_s": 94.48,
+      "network_tok_s": 164.75
+    },
+    "first_2039_output_mismatch": {
+      "t": 70,
+      "head": 37,
+      "d": 50,
+      "chunk": 0
+    }
+  },
+  "scope": {
+    "diagnostic_instrumentation_only": true,
+    "disabled_by_default": true,
+    "new_optimized_path": false,
+    "benchmarks": false,
+    "smoke_requests": false,
+    "decode_hcs": false,
+    "production_enablement": false,
+    "cache_generation": false,
+    "default_path_changes": false
+  },
+  "required_terms": [
+    "a_dt_prefix",
+    "lower_triangle_mask",
+    "self_decay_identity",
+    "reverse_c_at_b",
+    "bf16_cast_point",
+    "dt_times_x",
+    "local_accumulation"
+  ],
+  "planned_commands": [
+    "./dev build",
+    "KRASIS_STARTUP_DIAG=1 KRASIS_PREFILL_TIMING=1 KRASIS_PREFILL_LIVENESS_TIMING=1 KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE=1 KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE_LAYER=0 KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE_ROW=70 KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE_HEAD=37 KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE_D=50 KRASIS_STARTUP_EXIT_AFTER_CALIBRATION=1 ./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf"
+  ],
+  "implementation": {
+    "diagnostic_env": "KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE",
+    "coordinate_envs": [
+      "KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE_LAYER",
+      "KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE_ROW",
+      "KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE_HEAD",
+      "KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE_D"
+    ],
+    "default_path_changed": false,
+    "optimized_path_added": false,
+    "source_refs": {
+      "target_struct": "src/gpu_prefill.rs:206",
+      "local_tri_oracle": "src/gpu_prefill.rs:14903",
+      "env_target_gate": "src/gpu_prefill.rs:16121",
+      "post_ssd_callsite": "src/gpu_prefill.rs:30820"
+    }
+  },
+  "build": {
+    "command": "./dev build",
+    "exit": 0,
+    "duration_s": 170,
+    "log": "benchmarks/20260627_2149_nemotron_nano_mamba2_ssd_local_triangular_oracle_instrumentation_build.log"
+  },
+  "runtime": {
+    "command": "KRASIS_STARTUP_DIAG=1 KRASIS_PREFILL_TIMING=1 KRASIS_PREFILL_LIVENESS_TIMING=1 KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE=1 KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE_LAYER=0 KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE_ROW=70 KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE_HEAD=37 KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE_D=50 KRASIS_STARTUP_EXIT_AFTER_CALIBRATION=1 ./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+    "exit": 0,
+    "requests_sent": 0,
+    "benchmark_path": false,
+    "startup_diagnostic_exit": true,
+    "cache_reuse": {
+      "hqq_attention_validated": true,
+      "effective_marlin_g64_loaded": true,
+      "cache_write_evidence": false
+    },
+    "log": "benchmarks/20260627_2149_nemotron_nano_mamba2_ssd_local_triangular_oracle_instrumentation_startup_diagnostic.log"
+  },
+  "oracle_result": {
+    "records": 3,
+    "tokens": [300, 500, 39920],
+    "all_cpu_recompute_matches_sequential_gpu_bits": true,
+    "target": {
+      "layer": 0,
+      "row": 70,
+      "head": 37,
+      "d": 50,
+      "flat_index": 289138,
+      "group": 4,
+      "dim_index": 2418
+    },
+    "production_chunk": {
+      "chunk_start": 64,
+      "chunk_pos": 6,
+      "inside_chunk_zero": false,
+      "mamba_chunk_size": 64
+    },
+    "long_diagnostic": {
+      "cpu_y_bf16_bits": "0x40f5",
+      "sequential_gpu_y_bf16_bits": "0x40f5",
+      "cpu_y_bf16_value": 7.65625,
+      "y_pre_bf16": 7.648183822631836,
+      "local_scan_bf16_coeff": -0.27187108993530273,
+      "local_scan_fp32_coeff": -0.2723931074142456,
+      "included_u": "64..70",
+      "self_sample_u": 70,
+      "self_sample_decay": 1.0
+    }
+  },
+  "decision": {
+    "result": "corrected_patch_plan_recorded",
+    "finding": "The previous chunk-0 label was prototype-relative; the production sequential runtime uses mamba_chunk_size=64, so row 70 is chunk_start=64/chunk_pos=6. The existing sequential local-triangular math matches CPU recompute exactly at the target coordinate.",
+    "corrected_patch_plan": "The next chunk-parallel candidate must first preserve runtime chunk-start semantics or prove larger candidate chunks algebraically equivalent through state passing, then compare chunk_start/chunk_pos, BF16 coefficient bits, dt*x, and local accumulation against this oracle before any performance run."
+  },
+  "validation": {
+    "passed": true,
+    "final_snapshot_utc": "2026-06-27T22:10:14Z",
+    "disk_free": "588G",
+    "ram_available": "967Gi",
+    "gpu_used_mb": [15, 11],
+    "tmux_runtime_processes": false,
+    "nvidia_compute_processes": false,
+    "cache_temp_or_lock_files": false,
+    "protected_config_status": "unchanged: tests-only Nano HQQ4 config plus known Nano BF16 config"
+  },
+  "artifacts": {
+    "build_result": "benchmarks/20260627_2149_nemotron_nano_mamba2_ssd_local_triangular_oracle_instrumentation_build_result.tsv",
+    "runtime_attempt": "benchmarks/20260627_2149_nemotron_nano_mamba2_ssd_local_triangular_oracle_instrumentation_runtime_attempt.tsv",
+    "oracle_summary": "benchmarks/20260627_2149_nemotron_nano_mamba2_ssd_local_triangular_oracle_instrumentation_oracle_summary.tsv",
+    "local_terms": "benchmarks/20260627_2149_nemotron_nano_mamba2_ssd_local_triangular_oracle_instrumentation_local_triangular_terms.tsv",
+    "source_artifacts": "benchmarks/20260627_2149_nemotron_nano_mamba2_ssd_local_triangular_oracle_instrumentation_source_artifacts.tsv",
+    "decision": "benchmarks/20260627_2149_nemotron_nano_mamba2_ssd_local_triangular_oracle_instrumentation_root_decision.tsv",
+    "validation": "benchmarks/20260627_2149_nemotron_nano_mamba2_ssd_local_triangular_oracle_instrumentation_validation_checks.tsv",
+    "build_log": "benchmarks/20260627_2149_nemotron_nano_mamba2_ssd_local_triangular_oracle_instrumentation_build.log",
+    "startup_diagnostic_log": "benchmarks/20260627_2149_nemotron_nano_mamba2_ssd_local_triangular_oracle_instrumentation_startup_diagnostic.log",
+    "final_cleanup_log": "benchmarks/20260627_2149_nemotron_nano_mamba2_ssd_local_triangular_oracle_instrumentation_final_cleanup.log"
+  }
+}

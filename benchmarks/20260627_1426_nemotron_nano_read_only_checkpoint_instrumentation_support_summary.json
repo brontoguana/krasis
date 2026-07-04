@@ -1,0 +1,67 @@
+{
+  "gate": "20260627_1426_nemotron_nano_read_only_checkpoint_instrumentation_support",
+  "status": "closed",
+  "opened_utc": "2026-06-27T14:26:00Z",
+  "closed_utc": "2026-06-27T14:49:40Z",
+  "record_first": {
+    "source_gate": "20260627_1418_nemotron_nano_combined_diagnostic_read_only_root_cause",
+    "gemma_carried_speeds": "5619.6 / 92.43 / 155.69",
+    "source_or_live_changes_in_source_gate": false,
+    "combined_only_mutation_found_by_audit": false,
+    "combined_projection_plus_consume_boundary_quality_decision_allowed": false
+  },
+  "implementation": {
+    "status": "implemented",
+    "diagnostic_gate": "KRASIS_READ_ONLY_CHECKPOINT_DIAG",
+    "request_scoped": true,
+    "requires_debug_reference_trace": true,
+    "non_request_prefill_ignores_env": true,
+    "production_behavior_changed": false,
+    "trace_schema": "krasis_read_only_checkpoint_trace_v1",
+    "layer_delta_schema": "krasis_read_only_checkpoint_layer_delta_v1",
+    "emitted_trace_path": "debug_reference_trace.read_only_checkpoints",
+    "hashes": [
+      "route/top-k/gather hashes",
+      "selected expert/output state hashes",
+      "routed output selected-row hashes",
+      "final-hidden-before-LM hash",
+      "pre/post hashes around consume-boundary layer-delta construction"
+    ]
+  },
+  "validation": {
+    "focused_trace_test": "1/0",
+    "focused_trace_command": "./dev test-kernels read_only_checkpoint",
+    "expert_hqq_tests": "108/0",
+    "expert_hqq_command": "./dev test-kernels expert_hqq",
+    "build": "passed",
+    "build_command": "./dev build",
+    "live_server_run": false,
+    "cache_generation": false,
+    "new_variants": false,
+    "production_hqq_enablement": false,
+    "speed_benchmark": false,
+    "decode_hcs": false,
+    "selected_expert_retargeting": false
+  },
+  "artifacts": {
+    "implementation_inventory": "20260627_1426_nemotron_nano_read_only_checkpoint_instrumentation_support_implementation_inventory.tsv",
+    "root_decision": "20260627_1426_nemotron_nano_read_only_checkpoint_instrumentation_support_root_decision.tsv",
+    "validation": "20260627_1426_nemotron_nano_read_only_checkpoint_instrumentation_support_validation_checks.tsv",
+    "focused_trace_test_log": "20260627_1426_nemotron_nano_read_only_checkpoint_instrumentation_support_trace_tests_rerun.log",
+    "expert_hqq_test_log": "20260627_1426_nemotron_nano_read_only_checkpoint_instrumentation_support_test_kernels.log",
+    "build_log": "20260627_1426_nemotron_nano_read_only_checkpoint_instrumentation_support_build.log"
+  },
+  "decision": {
+    "status": "support_ready_for_next_live_check",
+    "combined_projection_plus_consume_boundary_quality_decision_allowed": false,
+    "next_gate": "run minimal combined-diagnostic read-only checkpoint live confirmation before using combined attribution for quality decisions"
+  },
+  "final_state": {
+    "snapshot_utc": "2026-06-27T14:49:40Z",
+    "tmux_server": "none",
+    "matching_runtime_process": "none",
+    "gpu_memory_used_mb": [15, 11],
+    "disk_available": "613G",
+    "ram_available": "965Gi"
+  }
+}

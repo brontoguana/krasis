@@ -1,0 +1,10 @@
+stage	wall_ms	event_ms	sync_ms	wall_minus_event_ms	calls	pct_of_prefill_wall	pct_of_mamba2_wall	diagnosis
+total_mamba2	114839.1	114838.9	114836.4	0.2	23	97.855	100.000	broad mixer bucket is Mamba2 dominated
+in_proj	213.9	213.8	213.4	0.1	23	0.182	0.186	not primary
+split_extract	18.5	18.4	18.3	0.1	23	0.016	0.016	not primary
+conv1d_silu	41.9	41.8	41.7	0.1	23	0.036	0.036	not primary
+ssd_scan	114449.4	114449.7	114449.2	0.0	23	97.523	99.661	dominant bottleneck
+gated_rmsnorm	25.1	25.0	24.7	0.1	23	0.021	0.022	not primary
+out_proj	90.3	90.2	89.2	0.1	23	0.077	0.079	not primary
+gqa_hqq_attention	476.8	NA	NA	NA	6	0.406	NA	not the prefill bottleneck
+moe_marlin	1931.6	NA	NA	NA	48	1.646	NA	not the prefill bottleneck

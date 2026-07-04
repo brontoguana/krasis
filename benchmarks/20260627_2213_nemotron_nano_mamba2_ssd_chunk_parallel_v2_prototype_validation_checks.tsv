@@ -1,0 +1,17 @@
+check	result	detail
+summary_json	pass	status closed, build exit 0, small oracle exit 1 fail-closed, term preflight passed, full oracle failed, long diagnostic not run
+exit_files	pass	build.exit=0, small_oracle.exit=1, final_cleanup.exit=0, post_validation_cleanup.exit=0
+oracle_log	pass	local term oracle emitted and v2 full oracle emitted output_mismatches=2
+no_requests	pass	no reference_test evidence in small oracle log
+no_benchmark_path	pass	no KrasisBenchmark or benchmark-only evidence in small oracle log
+no_cache_build	pass	no BUILD CACHE COMPLETE or safetensors Marlin build line in small oracle log
+tsv_shape	pass	all 2213 TSV artifacts have at least two tab-separated fields per row
+source_markers	pass	v2 env gates, Rust dispatch/oracle, CUDA kernels, and Python fail-closed marker present
+build_static	pass	bash -n dev and git diff --check passed in krasis-nemotron-dev
+internal_static	pass	git diff --check passed in krasis-internal
+protected_configs	pass	only expected tests-only Nano configs are untracked in protected config scope
+cleanup	pass	./dev kill post-validation cleanup exited 0
+cache_temp_lock	pass	no Nano .tmp/.lock/.pending cache files outside HF download locks
+process_idle	pass	no tmux server and no matching krasis/dev/build process
+gpu_idle	pass	gpu0/gpu1 memory 15 MB / 11 MB; no NVIDIA compute process
+final_snapshot	pass	2026-06-27T22:33:03Z disk 588G RAM 967Gi

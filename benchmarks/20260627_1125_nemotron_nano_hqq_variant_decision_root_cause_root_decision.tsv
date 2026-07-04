@@ -1,0 +1,6 @@
+decision_key	value	rationale
+least_bad_for_selected_token_stability	hqq6_g32	Only HQQ6 g32 and HQQ6 g16 have 0/3 selected-token flips; g32 has much lower average selected-output delta than g16 (0.125852000 vs 0.339994333).
+least_bad_for_logprob_distance	hqq6_g64	HQQ6 g64 has the lowest average selected-output delta (0.110919667) and best max-common-top-k aggregate, but it flips the selected token on case 2.
+overall_least_bad_candidate	hqq6_g32_for_any_future_quality_diagnostic_only	HQQ6 g32 is the only candidate that keeps selected token stable while avoiding the much larger aggregate degradation seen in g16/HQQ8; it still fails acceptance because top-k rank drift is 3/3 and aggregate deltas are not materially better than g64.
+further_hqq_bit_group_sweeps	not_justified_from_current_evidence	Tested variants cover HQQ6 g64/g32/g16 and HQQ8 g64; quality is non-monotonic and the same top-2/token-boundary failure persists. Additional blind bit/group sweeps would be low-value.
+next_gate_if_continuing	targeted_first_token_margin_attribution_not_variant_sweep	Use saved BF16/HQQ response evidence to target cases 0 and 2, tokens 1044 vs 1321, and compare final-logit/top-2 margin contributions by layer for HQQ6 g32 and HQQ6 g64 only. No new cache generation; only run a live diagnostic if existing traces lack final-logit contribution data.

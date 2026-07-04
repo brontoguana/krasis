@@ -1,0 +1,2 @@
+token_logit_result	serial_vs_fast_count	serial_vs_fast_max_delta	control_vs_fast_count	control_vs_fast_max_delta	request_duration_s
+PASS	12	0.000000000	12	0.000000000	0

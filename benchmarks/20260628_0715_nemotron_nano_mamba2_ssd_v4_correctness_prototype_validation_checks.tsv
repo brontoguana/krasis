@@ -1,0 +1,21 @@
+check	result	evidence
+summary_json_valid	pass	jq parsed closed summary
+result_tsv_shapes	pass	all result TSV rows have stable field counts
+source_markers	pass	v4 candidate/oracle markers present; 0650 diagnostic marker preserved
+default_sequential_path	pass	C wrapper still launches mamba2_ssd_sequential_kernel; v4 path requires env gate
+build_log	pass	./dev build exit 0, duration 176s
+startup_diagnostic_log	pass	exit 1 by fail-closed oracle mismatch
+requests_absent	pass	no reference_test or chat completion request lines
+benchmark_absent	pass	no benchmark-only path
+long_diagnostic_absent	pass	not run because oracle failed
+cache_reuse	pass	HQQ attention artifacts validated; GPU Marlin cache loaded
+cache_write_evidence_absent	pass	no concrete cache-write lines
+dev_syntax	pass	bash -n dev
+krasis_diff_whitespace	pass	git diff --check
+internal_diff_whitespace	pass	git diff --check
+protected_config_status	pass	only expected tests-only Nano configs untracked
+cleanup	pass	./dev kill completed before final snapshot
+runtime_processes_absent	pass	no tmux/runtime/build process in final snapshot
+nvidia_compute_processes_absent	pass	no NVIDIA compute process in final snapshot
+nano_temp_lock_files_absent	pass	model and cache temp/lock scans returned zero
+final_gpu_state	pass	GPU0 15 MB, GPU1 11 MB at 2026-06-28T07:35:19Z

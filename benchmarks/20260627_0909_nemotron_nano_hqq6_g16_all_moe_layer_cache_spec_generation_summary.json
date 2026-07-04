@@ -1,0 +1,122 @@
+{
+  "gate": "20260627_0909_nemotron_nano_hqq6_g16_all_moe_layer_cache_spec_generation",
+  "status": "closed_passed",
+  "opened_utc": "2026-06-27T09:09:58Z",
+  "record_first": {
+    "source_gate": "20260627_0853_nemotron_nano_hqq6_g16_feasibility_support",
+    "expert_hqq_tests": "94/0",
+    "dev_build": "passed",
+    "hqq6_g16_feasible": true,
+    "generation_allowlist": [
+      16,
+      32,
+      64
+    ],
+    "hqq8_rejected": true,
+    "estimated_cache_bytes": 36719028288,
+    "estimated_cache_gib": 34.19,
+    "final_0853_disk_headroom": "680G",
+    "final_0853_ram_headroom": "965Gi",
+    "live_server_in_0853": false,
+    "cache_generation_in_0853": false
+  },
+  "scope": {
+    "candidate": {
+      "nbits": 6,
+      "group_size": 16
+    },
+    "actions": [
+      "re-check current disk/RAM before generation",
+      "derive g16 manifest from existing all-layer g32/g64 template changing only group_size and output paths",
+      "run only ./dev expert-hqq-cache-generate <g16-manifest>",
+      "capture generator log, cache/spec paths, exact bytes, tensor/block counts, nbits, group_size, and before/after disk/RAM",
+      "run lightweight metadata/spec validation unless source changes are required"
+    ],
+    "forbidden": [
+      "live server",
+      "production HQQ",
+      "speed benchmark",
+      "fallback",
+      "decode/HCS",
+      "selected-expert retargeting",
+      "HQQ8",
+      "INT4/HQQ4"
+    ]
+  },
+  "closed_utc": "2026-06-27T09:26:40Z",
+  "generation": {
+    "command": "./dev expert-hqq-cache-generate benchmarks/20260627_0909_nemotron_nano_hqq6_g16_all_moe_layer_cache_spec_generation_all_layer_generation_manifest.json",
+    "exit_status": 0,
+    "status": "ok",
+    "manifest": "/home/main/Documents/Claude/krasis-nemotron-dev/benchmarks/20260627_0909_nemotron_nano_hqq6_g16_all_moe_layer_cache_spec_generation_all_layer_generation_manifest.json",
+    "cache": "/home/main/Documents/Claude/krasis-nemotron-dev/benchmarks/20260627_0909_nemotron_nano_hqq6_g16_all_moe_layer_cache_spec_generation_hqq6_g16_all_moe_layers.krhq",
+    "diagnostic_spec": "/home/main/Documents/Claude/krasis-nemotron-dev/benchmarks/20260627_0909_nemotron_nano_hqq6_g16_all_moe_layer_cache_spec_generation_diagnostic_cache_spec.json",
+    "moe_layers": 23,
+    "experts_per_layer": 128,
+    "layer_expert_refs": 2944,
+    "tensor_records": 5888,
+    "total_payload_bytes": 36718510080,
+    "cache_file_bytes": 36719028288,
+    "nbits": 6,
+    "group_size": 16,
+    "diagnostic_spec_bytes": 39563
+  },
+  "headroom": {
+    "before": {
+      "timestamp_utc": "2026-06-27T09:11:07Z",
+      "disk_available_bytes": 729209229312,
+      "disk_available_human": "680G",
+      "ram_available_bytes": 1037168275456,
+      "ram_available_human": "965Gi"
+    },
+    "after": {
+      "timestamp_utc": "2026-06-27T09:23:37Z",
+      "disk_available_bytes": 692363886592,
+      "disk_available_human": "645G",
+      "ram_available_bytes": 1035812372480,
+      "ram_available_human": "964Gi"
+    }
+  },
+  "metadata_validation": {
+    "manifest_group_size": "pass",
+    "manifest_nbits": "pass",
+    "manifest_layer_count": "pass",
+    "manifest_expert_count": "pass",
+    "manifest_tensor_count": "pass",
+    "spec_requirement_count": "pass",
+    "spec_group_size": "pass",
+    "spec_nbits": "pass",
+    "spec_layer_expert_refs": "pass",
+    "spec_cache_path": "pass",
+    "cache_size": "pass",
+    "generator_exit": "pass"
+  },
+  "decision": {
+    "root_decision": "hqq6_g16_all_moe_cache_spec_generation_passed",
+    "source_changes_required": false,
+    "tests_build_rerun": false,
+    "live_server": false,
+    "production_hqq": false,
+    "speed_benchmark": false,
+    "fallback": false,
+    "decode_hcs": false,
+    "selected_expert_retargeting": false,
+    "hqq8": false,
+    "int4_hqq4": false
+  },
+  "final_state": {
+    "timestamp_utc": "2026-06-27T09:26:40Z",
+    "tmux_server": false,
+    "matching_runtime_or_generator_process": false,
+    "gpu_memory_used_mb": [
+      15,
+      11
+    ],
+    "gpu_utilization_percent": [
+      0,
+      0
+    ],
+    "disk_available_human": "645G",
+    "ram_available_human": "965Gi"
+  }
+}

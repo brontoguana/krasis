@@ -1,0 +1,8 @@
+field	value
+result	request_scoping_fixed
+recorded_prior_failure	1216 failed closed before requests with KRASIS_FIRST_TOKEN_MARGIN_PROJECTION_DIAG requires debug_reference_trace=true during startup short VRAM calibration
+startup_calibration_fix	projection target parsing is disabled unless request scope is explicitly enabled
+request_fail_closed_preserved	/v1/internal/reference_test enables request scope, so projection env without debug_reference_trace=true still fails closed in Rust
+production_behavior_changed	false
+live_diagnostic_rerun	false
+next_gate	rerun the first-token margin projection diagnostic for HQQ6 g32/g64 cases 0/2 using existing specs/caches

@@ -1,0 +1,4 @@
+decision	result	evidence	next_action
+correctness	accepted_for_opt_in_diagnostic_candidate	small and long startup full-oracle runs produced 69/69 passed records each, with 0 output and 0 state mismatches	keep v5 as correctness seed only unless user chooses cleanup
+performance	not_optimization_accepted	long startup diagnostic ssd_scan 244701.0ms versus 1908 baseline 114449.4ms, +130251.6ms / +113.807%; timed path includes sequential oracle, candidate, and host compare	do not treat as speed result or production improvement
+default_path	unchanged	v5 only runs with KRASIS_MAMBA2_SSD_CHUNK_PARALLEL_V5=1 plus required ORACLE env; default dispatch remains sequential	no production enablement

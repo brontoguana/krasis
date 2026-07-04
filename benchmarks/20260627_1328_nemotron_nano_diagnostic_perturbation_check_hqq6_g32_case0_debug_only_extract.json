@@ -1,0 +1,49 @@
+{
+  "selected_token": 1044,
+  "selected_text": ",",
+  "top_k": [
+    {
+      "token_id": 1044,
+      "log_prob": -1.927179
+    },
+    {
+      "token_id": 1321,
+      "log_prob": -2.197941
+    },
+    {
+      "token_id": 1294,
+      "log_prob": -2.467020
+    },
+    {
+      "token_id": 1307,
+      "log_prob": -3.394687
+    },
+    {
+      "token_id": 5355,
+      "log_prob": -3.476044
+    },
+    {
+      "token_id": 1562,
+      "log_prob": -3.496766
+    },
+    {
+      "token_id": 1046,
+      "log_prob": -3.959761
+    },
+    {
+      "token_id": 1513,
+      "log_prob": -4.142549
+    },
+    {
+      "token_id": 1408,
+      "log_prob": -4.166492
+    },
+    {
+      "token_id": 2553,
+      "log_prob": -4.187067
+    }
+  ],
+  "margin_1044_minus_1321": 0.27076244354248047,
+  "projection_available": false,
+  "consume_diag_rows": 0
+}

@@ -1,0 +1,12 @@
+component	file	line	evidence
+0957_oracle_summary	benchmarks/20260628_0957_nemotron_nano_mamba2_ssd_block_scan_correctness_prototype_oracle_correctness.tsv	2	First retained mismatch is row=97 head=48 d=24 flat=400408; candidate 0xc233 vs oracle 0xc234; state mismatches are 0.
+0957_oracle_log	benchmarks/20260628_0957_nemotron_nano_mamba2_ssd_block_scan_correctness_prototype_startup_diagnostic.log	52	Raw block-scan oracle JSON confirms dimensions m=256 n_heads=64 head_dim=64 state_size=128 and exact row64/state0 plus row82/state14 probes.
+sequential_state_update	src/cuda/prefill_kernels.cu	5036	Sequential oracle updates live h in token order before output assembly.
+sequential_c_state_total	src/cuda/prefill_kernels.cu	5053	Sequential oracle computes c_state_total from live post-update h for the current row.
+sequential_local_scan	src/cuda/prefill_kernels.cu	5061	Sequential oracle computes local_old_state and local_hf_chunk_scan with lower-triangle u loop, reverse CB dot, and BF16(CB*decay*dt) cast.
+sequential_output_store	src/cuda/prefill_kernels.cu	5099	Sequential oracle assembles y = D*x + c_state_total - local_old_state + local_hf_chunk_scan and stores BF16.
+block_scan_recurrent_kernel	src/cuda/prefill_kernels.cu	5667	Block-scan phase 1 preserves exact token-order recurrent final state and writes chunk entry snapshots; 0957 final state matched exactly.
+block_scan_output_replay	src/cuda/prefill_kernels.cu	5778	Block-scan phase 2 recomputes c_state_total by replaying recurrence from entry_state inside the output kernel.
+block_scan_local_scan	src/cuda/prefill_kernels.cu	5797	Block-scan phase 2 mirrors the sequential local_old_state/local_hf_chunk_scan loop and cast placement.
+block_scan_output_store	src/cuda/prefill_kernels.cu	5834	Block-scan phase 2 assembles the same formula but uses replayed c_state_total rather than the live sequential post-update h.
+block_scan_dispatch	src/gpu_prefill.rs	31952	Block-scan path is opt-in and runs separate oracle, recurrent, output, exact compare, then commit only after success.

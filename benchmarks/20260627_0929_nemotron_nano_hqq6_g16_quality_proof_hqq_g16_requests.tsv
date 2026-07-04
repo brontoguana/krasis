@@ -1,0 +1,4 @@
+case	http_code	time_total_s	size_download_bytes	response_path
+case0	200	45.838927	4257061	benchmarks/20260627_0929_nemotron_nano_hqq6_g16_quality_proof_hqq_g16_case0_response.json
+case1	200	41.239853	4574334	benchmarks/20260627_0929_nemotron_nano_hqq6_g16_quality_proof_hqq_g16_case1_response.json
+case2	200	42.874451	4287361	benchmarks/20260627_0929_nemotron_nano_hqq6_g16_quality_proof_hqq_g16_case2_response.json

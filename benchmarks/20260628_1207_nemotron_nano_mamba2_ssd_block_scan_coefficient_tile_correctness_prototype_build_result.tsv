@@ -1,0 +1,5 @@
+item	value
+command	./dev build
+exit_code	0
+duration_s	8
+note	incremental verification build after coefficient-tile source change; prior diagnostic source was unchanged

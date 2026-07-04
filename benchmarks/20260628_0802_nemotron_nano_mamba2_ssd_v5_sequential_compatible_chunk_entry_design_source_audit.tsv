@@ -1,0 +1,15 @@
+area	file	line	evidence	relevance
+0753_next_plan	benchmarks/20260628_0753_nemotron_nano_mamba2_ssd_v4_full_oracle_mismatch_analysis_next_correction_plan.tsv	1	Next correction explicitly requires recurrent-entry-state buffers that replay sequential `A_bar*h + BF16(B*dt)*x` f32 update order.	Primary input for v5 design.
+0753_probe_plan	benchmarks/20260628_0753_nemotron_nano_mamba2_ssd_v4_full_oracle_mismatch_analysis_probe_plan.tsv	1	Probe contract requires state flat0 recurrent entry to match sequential `0x3b90c258`, closed-form diagnostic to expose prior `0x3b90c25a`, plus row64/row82/state14 checks.	Defines exact known-risk probes.
+0715_oracle	benchmarks/20260628_0715_nemotron_nano_mamba2_ssd_v4_correctness_prototype_oracle_correctness.tsv	1	V4 first output mismatch row=64 head=11 d=22, candidate `0x3bb7` vs sequential `0x3bb8`; state flat0 candidate `0x3b90c25a` vs sequential `0x3b90c258`.	Primary failure coordinates for v5 probes.
+0715_local_tri	benchmarks/20260628_0715_nemotron_nano_mamba2_ssd_v4_correctness_prototype_local_tri_preflight.tsv	1	Row64 local-tri CPU recompute matched sequential GPU output bits and state flat0 sequential bits.	Rules out changing local triangular math.
+0715_cast_carry	benchmarks/20260628_0715_nemotron_nano_mamba2_ssd_v4_correctness_prototype_cast_carry_preflight.tsv	1	Sequential-compatible cast placement matched row64 output bits; reference-style cast did not.	Confirms v5 keeps `exp_decay * BF16(B*dt) * x` semantics.
+0650_cast_carry	benchmarks/20260628_0650_nemotron_nano_mamba2_ssd_v4_cast_carry_diagnostic_cast_carry_summary.tsv	1	Across 300/500/39920 records, sequential-style cast matched GPU bits and reference-style did not.	Separates cast-order risk from recurrent-state lifecycle risk.
+sequential_kernel	src/cuda/prefill_kernels.cu	4968	Current default oracle kernel is `mamba2_ssd_sequential_kernel`.	Default path and oracle source.
+sequential_loop	src/cuda/prefill_kernels.cu	5002	Sequential scan iterates tokens in time order inside each `(head,d)` lane.	v5 entry propagation must preserve token order.
+sequential_state_update	src/cuda/prefill_kernels.cu	5041	Kernel casts `B*dt` to BF16 then updates `h[s] = A_bar * h[s] + B_bar * x_val` in f32.	Exact recurrent state update for v5 candidate.
+sequential_output_assembly	src/cuda/prefill_kernels.cu	5099	Kernel assembles `D*x + prior_chunk_state + local_hf_chunk_scan` and stores BF16.	v5 keeps output/local math unchanged.
+sequential_trace	src/cuda/prefill_kernels.cu	5111	Trace kernel mirrors the sequential state/output path.	Diagnostic oracle source remains available.
+rust_cpu_oracle	src/gpu_prefill.rs	15762	Host recompute helper mirrors sequential scan and produces output/state comparisons.	Oracle/probe semantics for v5 diagnostics.
+rust_current_dispatch	src/gpu_prefill.rs	31345	Default non-trace dispatch launches `self.kernels.mamba2_ssd`.	v5 must remain opt-in and leave this default branch unchanged.
+preserved_cast_diag	src/gpu_prefill.rs	15325	`KRASIS_MAMBA2_SSD_V4_CAST_CARRY_DIAG` diagnostic remains available.	v5 can reuse it for preflight evidence; do not remove.

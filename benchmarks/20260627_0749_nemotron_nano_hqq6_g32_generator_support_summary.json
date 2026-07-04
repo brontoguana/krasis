@@ -1,0 +1,113 @@
+{
+  "gate": "HQQ6 g32 generator support",
+  "label": "20260627_0749_nemotron_nano_hqq6_g32_generator_support",
+  "opened_utc": "2026-06-27T07:49:40Z",
+  "closed_utc": "2026-06-27T07:59:40Z",
+  "status": "closed_passed_generator_support",
+  "record_first": {
+    "previous_gate": "0737",
+    "next_candidate": "HQQ6 g32",
+    "hqq6_g64_quality": "implementation_correct_but_quality_failing_for_nano",
+    "hqq6_g32_previous_probe": "rejected: expert-HQQ cache generation manifest requires group_size=64, got 32",
+    "hqq8_g64_previous_probe": "rejected: expert-HQQ cache generation manifest requires nbits=6 for HQQ6, got 8",
+    "hqq6_g32_estimated_cache_file_bytes": 29375326272,
+    "hqq6_g32_estimated_cache_file_gib": 27.357904493808746,
+    "previous_disk_headroom": "707G",
+    "previous_ram_headroom": "965Gi",
+    "live_server": "not_run",
+    "large_cache_generation": "not_run",
+    "production_enablement": "none"
+  },
+  "implementation": {
+    "source_files_changed": [
+      "src/weights/expert_hqq.rs"
+    ],
+    "generator_group_size_contract": "HQQ6 cache generation accepts group_size 32 or 64 only",
+    "nbits_contract": "nbits != 6 remains fail-closed",
+    "g64_behavior": "preserved",
+    "runtime_hqq6_dequant_path": "metadata-driven; no g64 hardcode found",
+    "cache_spec_writer_reader": "already descriptor-driven; no change required",
+    "diagnostic_spec_writer_reader": "already records and validates requirement group_size",
+    "cuda_hqq6_prefill_gemm": "receives group_size and row strides as kernel parameters"
+  },
+  "tests": {
+    "focused_test_command": "./dev test-kernels expert_hqq",
+    "focused_test_result": "93/0",
+    "new_or_updated_coverage": [
+      "HQQ6 g32 generation manifest accepted",
+      "HQQ6 g32 cache write/readback preserves group_size=32",
+      "HQQ6 g32 diagnostic spec preserves group_size=32",
+      "HQQ6 g64 generation remains unchanged",
+      "invalid generation group sizes 0 and 16 rejected",
+      "HQQ8 generation rejected by nbits=6 contract"
+    ],
+    "build_command": "./dev build",
+    "build_result": "passed"
+  },
+  "headroom_after_tests_build": {
+    "recorded_utc": "2026-06-27T07:59:28Z",
+    "disk": {
+      "filesystem": "/dev/nvme1n1p1",
+      "size": "11T",
+      "used": "11T",
+      "available": "707G",
+      "use_percent": "94%"
+    },
+    "ram": {
+      "total": "1.0Ti",
+      "used": "41Gi",
+      "free": "819Gi",
+      "available": "965Gi",
+      "swap": "0B"
+    },
+    "gpu_memory_used_mb": [
+      15,
+      11
+    ],
+    "gpu_memory_free_mb": [
+      32105,
+      20043
+    ]
+  },
+  "artifacts": {
+    "summary": "benchmarks/20260627_0749_nemotron_nano_hqq6_g32_generator_support_summary.json",
+    "assumption_inventory": "benchmarks/20260627_0749_nemotron_nano_hqq6_g32_generator_support_group_size_assumption_inventory.tsv",
+    "root_decision": "benchmarks/20260627_0749_nemotron_nano_hqq6_g32_generator_support_root_decision.tsv",
+    "validation": "benchmarks/20260627_0749_nemotron_nano_hqq6_g32_generator_support_validation_checks.tsv",
+    "test_kernels_log": "benchmarks/20260627_0749_nemotron_nano_hqq6_g32_generator_support_test_kernels.log",
+    "build_log": "benchmarks/20260627_0749_nemotron_nano_hqq6_g32_generator_support_build.log"
+  },
+  "decision": {
+    "status": "passed_generator_support",
+    "meaning": "HQQ6 g32 is now accepted by the generator contract and covered by focused cache/spec readback tests",
+    "full_all_layer_cache_generated": "no",
+    "live_server": "not_run",
+    "next_gate": "generate all-MoE-layer HQQ6 g32 cache/spec prerequisite using the existing all-layer manifest shape"
+  },
+  "forbidden_scope_observed": {
+    "live_server": "not_run",
+    "full_all_layer_cache_generation": "not_run",
+    "production_hqq": "not_enabled",
+    "speed_benchmark": "not_run",
+    "fallback": "not_added",
+    "decode_hcs": "not_touched",
+    "selected_expert_retargeting": "not_added"
+  },
+  "final_state": {
+    "recorded_utc": "2026-06-27T08:02:12Z",
+    "tmux": "no server running on /tmp/tmux-1000/default",
+    "matching_processes": "none",
+    "gpu_memory_used_mb": [
+      15,
+      11
+    ],
+    "gpu_memory_free_mb": [
+      32105,
+      20043
+    ],
+    "gpu_utilization_percent": [
+      0,
+      0
+    ]
+  }
+}

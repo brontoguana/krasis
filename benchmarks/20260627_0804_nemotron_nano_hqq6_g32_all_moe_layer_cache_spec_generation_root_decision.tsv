@@ -1,0 +1,13 @@
+field	value
+status	passed_cache_spec_generation
+record_first	0749 recorded first: 93/0, ./dev build passed, HQQ6 group_size 32|64, HQQ8 rejected, no live server/cache generation in 0749
+built_command	./dev expert-hqq-cache-generate benchmarks/20260627_0804_nemotron_nano_hqq6_g32_all_moe_layer_cache_spec_generation_all_layer_generation_manifest.json
+cache_file_bytes	29375326272
+total_payload_bytes	29374808064
+tensor_records	5888
+layer_expert_refs	2944
+nbits	6
+group_size	32
+live_server	not_run
+production_hqq	not_enabled
+next_gate	run diagnostic proof/comparator using HQQ6 g32 cache/spec if requested

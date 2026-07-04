@@ -1,0 +1,7 @@
+check	status	detail
+hqq_attention_reused	pass	HQQ attention artifacts validated (115 MB cached), 27940 MB free
+marlin_effective_g64_reused	pass	Loading GPU Marlin cache: 23 layers; GPU Marlin cache loaded: 15.8 GB in 10s
+marlin_safetensors_build_line_absent	pass	No "Building GPU INT4 Marlin cache: 23 layers from safetensors" line was present.
+cache_rebuild_flags_absent	pass	Command did not include --build-cache or --force-rebuild-hqq-cache.
+decode_timing_disabled	pass	Command did not include --timing and KRASIS_DECODE_TIMING was unset by the launch wrapper.
+cache_temp_lock_absent	pass	No .tmp/.lock/.pending files remained under the Nano cache directory.

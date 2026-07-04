@@ -1,0 +1,15 @@
+check	status	details
+jq_summary	pass	jq empty benchmarks/20260701_0055_nemotron_default_optimizations_summary.json
+tsv_shape	pass	Plan/result/Super result/Nano result TSV files have stable field counts per file.
+trailing_whitespace	pass	No trailing whitespace in changed source, benchmark records, or internal records.
+git_diff_check_public	pass	git diff --check passed for changed public source/docs.
+git_diff_check_internal	pass	git diff --check passed for internal CHANGELOG/TRACKING/DEBUGLOG.
+shell_syntax	pass	bash -n dev
+protected_configs	pass	git status --short -- testconfigs tests/testconfigs returned no changes.
+rejected_symbols	pass	Rejected candidate env symbols are absent from src.
+build	pass	./dev build exit 0; log 20260701_0055_nemotron_default_optimizations_build3.log.
+super_noenv_benchmark	pass	./dev benchmark tests/nemotron-super-bf16kv-a16.conf exit 0.
+nano_noenv_benchmark	pass	./dev benchmark tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf exit 0.
+tmux_idle	pass	no server running on /tmp/tmux-1000/default.
+runtime_processes_idle	pass	No krasis/python/maturin/cargo/rustc/nvcc process listed by ps -C.
+gpu_idle	pass	GPU0 15 MB used / 32105 MB free / 0% util; GPU1 11 MB used / 20043 MB free / 0% util.

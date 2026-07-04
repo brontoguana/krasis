@@ -1,0 +1,10 @@
+field	value
+implementation	false
+build	false
+startup_diagnostic	false
+benchmark	false
+requests	false
+decode_hcs_changes	false
+production_enablement	false
+default_path_change	false
+reason	User requested static design only; existing `0753`/`0715`/`0650` artifacts and sequential source were sufficient.

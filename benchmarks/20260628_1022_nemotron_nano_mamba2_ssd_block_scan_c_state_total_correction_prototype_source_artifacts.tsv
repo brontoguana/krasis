@@ -1,0 +1,14 @@
+artifact	result	path	line	detail
+default_sequential_kernel	preserved	src/cuda/prefill_kernels.cu	4968	Production sequential Mamba2 SSD kernel remains present.
+block_scan_recurrent_kernel	added_opt_in	src/cuda/prefill_kernels.cu	5667	Opt-in recurrent phase keeps exact token-order f32 state propagation.
+c_state_total_exact_materialization	added_opt_in	src/cuda/prefill_kernels.cu	5714	Recurrent phase materializes c_state_total_exact after exact state update.
+block_scan_output_kernel	updated_opt_in	src/cuda/prefill_kernels.cu	5730	Opt-in output assembly consumes c_state_total_exact.
+c_state_total_exact_read	updated_opt_in	src/cuda/prefill_kernels.cu	5792	Output phase reads c_state_total_exact instead of recomputing accepted value.
+row97_term_probe	added_opt_in	src/cuda/prefill_kernels.cu	5838	Guarded term probe records exact/replayed c_state, local terms, D skip, indexing, and BF16 output bits.
+term_probe_env	added_opt_in	src/gpu_prefill.rs	17048	KRASIS_MAMBA2_SSD_BLOCK_SCAN_TERM_PROBE parses row:head:d.
+block_scan_buffers	updated_opt_in	src/gpu_prefill.rs	32053	Allocates c_state_total_exact only under block-scan env.
+block_scan_dispatch	updated_opt_in	src/gpu_prefill.rs	32143	Passes c_state_total_exact from recurrent phase to output phase.
+term_probe_log	added_opt_in	src/gpu_prefill.rs	32274	Emits [MAMBA2-SSD-BLOCK-SCAN-TERM-PROBE] JSON.
+default_dispatch	preserved	src/gpu_prefill.rs	32448	Non-env path remains trace-or-sequential SSD dispatch.
+ptx_symbol_checks	preserved	src/gpu_prefill.rs	54379	Block-scan PTX symbols are explicitly loaded; default sequential symbol remains required.
+warmup_fail_closed	preserved	python/krasis/server.py	1743	Block-scan envs re-raise warmup failures; default warmup handling unchanged.

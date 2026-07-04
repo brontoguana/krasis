@@ -1,0 +1,105 @@
+{
+  "label": "20260627_0304_nemotron_nano_activation_subnormal_comparator_contract_update",
+  "status": "closed_filtered_offline_contract_update_passed",
+  "opened_utc": "2026-06-27T03:04:00Z",
+  "closed_utc": "2026-06-27T03:24:45Z",
+  "scope": "diagnostic comparator contract update for activation zero-vs-positive-BF16-subnormal mismatches",
+  "record_first": {
+    "source_gate": "20260627_0132_nemotron_nano_all_moe_layer_activation_subnormal_offline_diagnosis",
+    "gemma": "5619.6 / 92.43 / 155.69",
+    "focused_expert_hqq_tests": "77/0",
+    "dev_build": "passed",
+    "activation_mismatch_count": 9,
+    "observed_bits": {
+      "0x0000": 9
+    },
+    "reference_bits": {
+      "0x0001": 6,
+      "0x0002": 1,
+      "0x0005": 1,
+      "0x000f": 1
+    },
+    "classification": "bf16_zero_vs_positive_subnormal_flush_to_zero_candidate",
+    "normal_activation_mismatches": 0,
+    "production_output_consumed": false
+  },
+  "implementation": {
+    "source_changes_made": true,
+    "runtime_output_changed": false,
+    "production_output_consumed": false,
+    "live_server_rerun": false,
+    "rule": "activation exact-contract may pass only when every activation mismatch is observed BF16 0x0000 versus positive BF16 subnormal reference with positive subnormal raw value",
+    "w13_tolerance_broadened": false,
+    "normal_activation_delta_tolerated": false,
+    "stage_scope": "activation only"
+  },
+  "tests": {
+    "focused_expert_hqq_tests": "81/0",
+    "dev_build": "passed",
+    "added_cases": [
+      "valid activation zero-vs-positive-subnormal contract passes",
+      "normal activation mismatch fails closed",
+      "wrong output-stage subnormal mismatch fails closed",
+      "negative subnormal reference is rejected"
+    ]
+  },
+  "offline_result": {
+    "mode": "filtered failure-row comparator against existing 2239 trace/cache",
+    "full_all_layer_replay": "not rerun; prior 0132 full replay attempt was stopped as impractical at >45m and approximately 90GB RSS before artifacts",
+    "status": "ok",
+    "exit_code": 0,
+    "passes_contract": true,
+    "cases": 3,
+    "blocks": 4,
+    "input_sum_abs": "0.000000000000000000e0",
+    "input_max_abs": "0.000000000000000000e0",
+    "w13_sum_abs": "8.276655724139726344e-35",
+    "w13_max_abs": "7.523163845262640051e-37",
+    "activation_sum_abs": "2.571393892423753924e-39",
+    "activation_max_abs": "1.377532442369868173e-39",
+    "activation_mismatch_count": 9,
+    "output_sum_abs": "0.000000000000000000e0",
+    "output_max_abs": "0.000000000000000000e0",
+    "detail_rows": 9,
+    "observed_bits": {
+      "0x0000": 9
+    },
+    "reference_bits": {
+      "0x0001": 6,
+      "0x0002": 1,
+      "0x0005": 1,
+      "0x000f": 1
+    }
+  },
+  "forbidden": {
+    "broaden_w13_tolerance": false,
+    "normal_activation_delta_tolerance": false,
+    "runtime_output_change": false,
+    "live_server": false,
+    "production_hqq_wiring": false,
+    "production_output_consumption": false,
+    "fallback": false,
+    "decode_hcs": false,
+    "selected_expert_retargeting": false,
+    "speed_benchmark": false
+  },
+  "validation": {
+    "artifact_assertions": "passed",
+    "bash_n_dev": "passed",
+    "py_compile": "passed",
+    "cargo_fmt_check": "passed",
+    "git_diff_check": "passed",
+    "protected_config_status": "pre-existing untracked tests/nemotron-nano-bf16-experts-a16.conf; not edited",
+    "cleanup": "passed",
+    "final_gpu_snapshot": "GPU0 15 MB / 32607 MB, GPU1 11 MB / 20470 MB, util 0"
+  },
+  "artifacts": {
+    "filtered_metrics": "benchmarks/20260627_0304_nemotron_nano_activation_subnormal_comparator_contract_update_filtered_comparator_metrics.tsv",
+    "mismatch_details": "benchmarks/20260627_0304_nemotron_nano_activation_subnormal_comparator_contract_update_mismatch_details.tsv",
+    "filtered_log": "benchmarks/20260627_0304_nemotron_nano_activation_subnormal_comparator_contract_update_filtered_comparator.log",
+    "root_decision": "benchmarks/20260627_0304_nemotron_nano_activation_subnormal_comparator_contract_update_root_decision.tsv",
+    "source_contract": "benchmarks/20260627_0304_nemotron_nano_activation_subnormal_comparator_contract_update_source_contract.tsv",
+    "validation": "benchmarks/20260627_0304_nemotron_nano_activation_subnormal_comparator_contract_update_validation_checks.tsv"
+  },
+  "next_gate": "run full all-layer offline comparator only after comparator memory/runtime is made practical, or proceed to next diagnostic correctness gate with the filtered exact failure-row proof explicitly recorded"
+}

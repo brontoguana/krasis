@@ -1,0 +1,9 @@
+field	value
+result	corrected_patch_plan_recorded
+exact_divergence_identified	Production sequential chunk boundary differs from the prior chunk-0 label: t=70 uses runtime chunk_start=64 and chunk_pos=6 with mamba_chunk_size=64.
+oracle_match	CPU local triangular recompute matched existing sequential GPU output bits for 300, 500, and 39920 token diagnostics.
+bf16_cast_point	For each included u, the oracle rounds cb_reverse * decay * dt to BF16 before multiplying by x, matching sequential GPU output.
+self_decay	At u=70, self_sample=true and decay=1.0.
+lower_triangle_mask	Only u=64..70 are included for this production runtime chunk.
+corrected_patch_plan	The next chunk-parallel candidate must first use the runtime mamba_chunk_size/chunk_start semantics, or implement state passing that makes larger candidate chunks algebraically identical to the production boundary. Its oracle should compare chunk_start/chunk_pos plus per-term BF16 coefficient, dt*x, and accumulation before any performance run.
+optimized_path_implemented	false

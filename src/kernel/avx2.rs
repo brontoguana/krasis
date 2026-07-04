@@ -53,7 +53,7 @@ pub fn matmul_bf16_scalar(
 pub fn matmul_int4_scalar(
     q: &QuantizedInt4,
     activation: &[u16], // [K] BF16
-    output: &mut [f32],  // [N]
+    output: &mut [f32], // [N]
 ) {
     assert_eq!(activation.len(), q.cols);
     assert_eq!(output.len(), q.rows);
@@ -254,8 +254,16 @@ pub fn quantize_activation_int16(
         }
 
         // Compute scale (handle zero group)
-        let scale = if max_abs > 0.0 { max_abs / 32767.0 } else { 1.0 };
-        let inv_scale = if max_abs > 0.0 { 32767.0 / max_abs } else { 0.0 };
+        let scale = if max_abs > 0.0 {
+            max_abs / 32767.0
+        } else {
+            1.0
+        };
+        let inv_scale = if max_abs > 0.0 {
+            32767.0 / max_abs
+        } else {
+            0.0
+        };
         output_scales[g] = scale;
 
         // Quantize to INT16
@@ -292,8 +300,16 @@ pub fn quantize_activation_int16_f32(
             max_abs = max_abs.max(activation_f32[start + i].abs());
         }
 
-        let scale = if max_abs > 0.0 { max_abs / 32767.0 } else { 1.0 };
-        let inv_scale = if max_abs > 0.0 { 32767.0 / max_abs } else { 0.0 };
+        let scale = if max_abs > 0.0 {
+            max_abs / 32767.0
+        } else {
+            1.0
+        };
+        let inv_scale = if max_abs > 0.0 {
+            32767.0 / max_abs
+        } else {
+            0.0
+        };
         output_scales[g] = scale;
 
         for i in 0..group_size {
@@ -438,7 +454,10 @@ pub fn matmul_int4_integer(
     assert_eq!(act_int16.len(), q.cols);
     assert_eq!(act_scales.len(), q.cols / q.group_size);
     assert_eq!(output.len(), q.rows);
-    assert!(q.group_size % 16 == 0, "Integer kernel requires group_size divisible by 16");
+    assert!(
+        q.group_size % 16 == 0,
+        "Integer kernel requires group_size divisible by 16"
+    );
 
     if !is_x86_feature_detected!("avx2") || !is_x86_feature_detected!("fma") {
         panic!("AVX2 + FMA required");
@@ -474,7 +493,10 @@ pub fn matmul_int4_integer_parallel(
     assert_eq!(act_int16.len(), q.cols);
     assert_eq!(act_scales.len(), q.cols / q.group_size);
     assert_eq!(output.len(), q.rows);
-    assert!(q.group_size % 16 == 0, "Integer kernel requires group_size divisible by 16");
+    assert!(
+        q.group_size % 16 == 0,
+        "Integer kernel requires group_size divisible by 16"
+    );
 
     if !is_x86_feature_detected!("avx2") || !is_x86_feature_detected!("fma") {
         panic!("AVX2 + FMA required");
@@ -509,23 +531,26 @@ pub fn matmul_int4_integer_parallel(
     let cols = q.cols;
     let group_size = q.group_size;
 
-    output.par_chunks_mut(chunk_size).enumerate().for_each(|(chunk_idx, chunk)| {
-        let start_row = chunk_idx * chunk_size;
-        let chunk_rows = chunk.len();
+    output
+        .par_chunks_mut(chunk_size)
+        .enumerate()
+        .for_each(|(chunk_idx, chunk)| {
+            let start_row = chunk_idx * chunk_size;
+            let chunk_rows = chunk.len();
 
-        unsafe {
-            expert_matmul_int4_integer(
-                (packed_addr as *const u32).add(start_row * packed_k),
-                (scales_addr as *const u16).add(start_row * num_groups),
-                act_addr as *const i16,
-                act_scales_addr as *const f32,
-                chunk.as_mut_ptr(),
-                cols,
-                chunk_rows,
-                group_size,
-            );
-        }
-    });
+            unsafe {
+                expert_matmul_int4_integer(
+                    (packed_addr as *const u32).add(start_row * packed_k),
+                    (scales_addr as *const u16).add(start_row * num_groups),
+                    act_addr as *const i16,
+                    act_scales_addr as *const f32,
+                    chunk.as_mut_ptr(),
+                    cols,
+                    chunk_rows,
+                    group_size,
+                );
+            }
+        });
 }
 
 /// Parallel AVX2 INT4 matmul — splits output rows across rayon threads.
@@ -576,22 +601,25 @@ pub fn matmul_int4_parallel(q: &QuantizedInt4, activation: &[u16], output: &mut 
     let cols = q.cols;
     let group_size = q.group_size;
 
-    output.par_chunks_mut(chunk_size).enumerate().for_each(|(chunk_idx, chunk)| {
-        let start_row = chunk_idx * chunk_size;
-        let chunk_rows = chunk.len();
+    output
+        .par_chunks_mut(chunk_size)
+        .enumerate()
+        .for_each(|(chunk_idx, chunk)| {
+            let start_row = chunk_idx * chunk_size;
+            let chunk_rows = chunk.len();
 
-        unsafe {
-            expert_matmul_int4(
-                (packed_addr as *const u32).add(start_row * packed_k),
-                (scales_addr as *const u16).add(start_row * num_groups),
-                act_addr as *const u16,
-                chunk.as_mut_ptr(),
-                cols,
-                chunk_rows,
-                group_size,
-            );
-        }
-    });
+            unsafe {
+                expert_matmul_int4(
+                    (packed_addr as *const u32).add(start_row * packed_k),
+                    (scales_addr as *const u16).add(start_row * num_groups),
+                    act_addr as *const u16,
+                    chunk.as_mut_ptr(),
+                    cols,
+                    chunk_rows,
+                    group_size,
+                );
+            }
+        });
 }
 
 // ── INT8 integer kernel (INT16 × INT8 → INT32 accumulation) ──────────
@@ -714,7 +742,10 @@ pub fn matmul_int8_integer(
     assert_eq!(act_int16.len(), q.cols);
     assert_eq!(act_scales.len(), q.cols / q.group_size);
     assert_eq!(output.len(), q.rows);
-    assert!(q.group_size % 16 == 0, "Integer kernel requires group_size divisible by 16");
+    assert!(
+        q.group_size % 16 == 0,
+        "Integer kernel requires group_size divisible by 16"
+    );
 
     if !is_x86_feature_detected!("avx2") || !is_x86_feature_detected!("fma") {
         panic!("AVX2 + FMA required");
@@ -746,7 +777,10 @@ pub fn matmul_int8_integer_parallel(
     assert_eq!(act_int16.len(), q.cols);
     assert_eq!(act_scales.len(), q.cols / q.group_size);
     assert_eq!(output.len(), q.rows);
-    assert!(q.group_size % 16 == 0, "Integer kernel requires group_size divisible by 16");
+    assert!(
+        q.group_size % 16 == 0,
+        "Integer kernel requires group_size divisible by 16"
+    );
 
     if !is_x86_feature_detected!("avx2") || !is_x86_feature_detected!("fma") {
         panic!("AVX2 + FMA required");
@@ -779,23 +813,26 @@ pub fn matmul_int8_integer_parallel(
     let cols = q.cols;
     let group_size = q.group_size;
 
-    output.par_chunks_mut(chunk_size).enumerate().for_each(|(chunk_idx, chunk)| {
-        let start_row = chunk_idx * chunk_size;
-        let chunk_rows = chunk.len();
+    output
+        .par_chunks_mut(chunk_size)
+        .enumerate()
+        .for_each(|(chunk_idx, chunk)| {
+            let start_row = chunk_idx * chunk_size;
+            let chunk_rows = chunk.len();
 
-        unsafe {
-            expert_matmul_int8_integer(
-                (data_addr as *const i8).add(start_row * cols),
-                (scales_addr as *const u16).add(start_row * num_groups),
-                act_addr as *const i16,
-                act_scales_addr as *const f32,
-                chunk.as_mut_ptr(),
-                cols,
-                chunk_rows,
-                group_size,
-            );
-        }
-    });
+            unsafe {
+                expert_matmul_int8_integer(
+                    (data_addr as *const i8).add(start_row * cols),
+                    (scales_addr as *const u16).add(start_row * num_groups),
+                    act_addr as *const i16,
+                    act_scales_addr as *const f32,
+                    chunk.as_mut_ptr(),
+                    cols,
+                    chunk_rows,
+                    group_size,
+                );
+            }
+        });
 }
 
 // ── Transposed layout INT4 kernels (for unified weight format) ────────
@@ -816,10 +853,10 @@ pub fn matmul_int8_integer_parallel(
 /// Weight layout: packed[K/8, N], scales[K/group_size, N].
 /// Computes output[n] = sum_k(activation[k] * weight[k, n]) for each n.
 pub fn matmul_int4_transposed_scalar(
-    packed: &[u32],      // [K/8, N]
-    scales: &[u16],      // [K/group_size, N]
-    activation: &[u16],  // [K] BF16
-    output: &mut [f32],  // [N]
+    packed: &[u32],     // [K/8, N]
+    scales: &[u16],     // [K/group_size, N]
+    activation: &[u16], // [K] BF16
+    output: &mut [f32], // [N]
     k: usize,
     n: usize,
     group_size: usize,
@@ -891,9 +928,7 @@ pub unsafe fn expert_matmul_int4_transposed(
 
         for g in 0..num_groups {
             // Load 8 BF16 scales for this group → f32
-            let scales_bf16 = _mm_loadu_si128(
-                scales.add(g * n_stride + n_base) as *const __m128i,
-            );
+            let scales_bf16 = _mm_loadu_si128(scales.add(g * n_stride + n_base) as *const __m128i);
             let scales_u32 = _mm256_cvtepu16_epi32(scales_bf16);
             let scale_vec = _mm256_castsi256_ps(_mm256_slli_epi32(scales_u32, 16));
 
@@ -904,14 +939,11 @@ pub unsafe fn expert_matmul_int4_transposed(
                 let k_base = k_row * 8;
 
                 // Load 8 packed u32s (8 N positions, each containing 8 K-dim INT4 values)
-                let words = _mm256_loadu_si256(
-                    packed.add(k_row * n_stride + n_base) as *const __m256i,
-                );
+                let words =
+                    _mm256_loadu_si256(packed.add(k_row * n_stride + n_base) as *const __m256i);
 
                 // Pre-load 8 BF16 activations for k_base..k_base+8 → f32
-                let act_bf16 = _mm_loadu_si128(
-                    activation.add(k_base) as *const __m128i,
-                );
+                let act_bf16 = _mm_loadu_si128(activation.add(k_base) as *const __m128i);
                 let act_u32 = _mm256_cvtepu16_epi32(act_bf16);
                 let act_f32_all = _mm256_castsi256_ps(_mm256_slli_epi32(act_u32, 16));
 
@@ -990,8 +1022,15 @@ pub fn matmul_int4_transposed_avx2(
 
     unsafe {
         expert_matmul_int4_transposed(
-            packed.as_ptr(), scales.as_ptr(), activation.as_ptr(),
-            output.as_mut_ptr(), k, n, 0, n, group_size,
+            packed.as_ptr(),
+            scales.as_ptr(),
+            activation.as_ptr(),
+            output.as_mut_ptr(),
+            k,
+            n,
+            0,
+            n,
+            group_size,
         );
     }
 }
@@ -1020,8 +1059,15 @@ pub fn matmul_int4_transposed_parallel(
     if n <= 64 {
         unsafe {
             expert_matmul_int4_transposed(
-                packed.as_ptr(), scales.as_ptr(), activation.as_ptr(),
-                output.as_mut_ptr(), k, n, 0, n, group_size,
+                packed.as_ptr(),
+                scales.as_ptr(),
+                activation.as_ptr(),
+                output.as_mut_ptr(),
+                k,
+                n,
+                0,
+                n,
+                group_size,
             );
         }
         return;
@@ -1032,20 +1078,27 @@ pub fn matmul_int4_transposed_parallel(
     let scales_addr = scales.as_ptr() as usize;
     let act_addr = activation.as_ptr() as usize;
 
-    output.par_chunks_mut(chunk_n).enumerate().for_each(|(chunk_idx, chunk)| {
-        let n_start = chunk_idx * chunk_n;
-        let n_count = chunk.len();
+    output
+        .par_chunks_mut(chunk_n)
+        .enumerate()
+        .for_each(|(chunk_idx, chunk)| {
+            let n_start = chunk_idx * chunk_n;
+            let n_count = chunk.len();
 
-        unsafe {
-            expert_matmul_int4_transposed(
-                packed_addr as *const u32,
-                scales_addr as *const u16,
-                act_addr as *const u16,
-                chunk.as_mut_ptr(),
-                k, n, n_start, n_count, group_size,
-            );
-        }
-    });
+            unsafe {
+                expert_matmul_int4_transposed(
+                    packed_addr as *const u32,
+                    scales_addr as *const u16,
+                    act_addr as *const u16,
+                    chunk.as_mut_ptr(),
+                    k,
+                    n,
+                    n_start,
+                    n_count,
+                    group_size,
+                );
+            }
+        });
 }
 
 /// AVX2 integer transposed INT4 matmul using paired `_mm256_madd_epi16`.
@@ -1107,7 +1160,8 @@ pub unsafe fn expert_matmul_int4_transposed_integer(
             let nib_hi = _mm256_sub_epi32(_mm256_and_si256(w_hi, mask_0f), offset_8);
             let w_pair = _mm256_or_si256(
                 _mm256_and_si256(nib_lo, mask_ffff),
-                _mm256_slli_epi32(nib_hi, 16));
+                _mm256_slli_epi32(nib_hi, 16),
+            );
             $acc = _mm256_add_epi32($acc, _mm256_madd_epi16(w_pair, $act_pair));
         }};
     }
@@ -1146,12 +1200,11 @@ pub unsafe fn expert_matmul_int4_transposed_integer(
 
             // Sequential scan across all N-blocks for this K-row
             for nb in 0..n_blocks {
-                let words = _mm256_loadu_si256(
-                    packed.add(row_off + nb * 8) as *const __m256i);
+                let words = _mm256_loadu_si256(packed.add(row_off + nb * 8) as *const __m256i);
                 let mut acc = int_scratch[nb];
 
-                nibble_pair_acc!(words,  0, ap0, acc);
-                nibble_pair_acc!(words,  8, ap1, acc);
+                nibble_pair_acc!(words, 0, ap0, acc);
+                nibble_pair_acc!(words, 8, ap1, acc);
                 nibble_pair_acc!(words, 16, ap2, acc);
                 nibble_pair_acc!(words, 24, ap3, acc);
 
@@ -1164,15 +1217,17 @@ pub unsafe fn expert_matmul_int4_transposed_integer(
         for nb in 0..n_blocks {
             let n_base = n_start + nb * 8;
             let group_f32 = _mm256_cvtepi32_ps(int_scratch[nb]);
-            let w_scales_bf16 = _mm_loadu_si128(
-                weight_scales.add(g * n_stride + n_base) as *const __m128i);
+            let w_scales_bf16 =
+                _mm_loadu_si128(weight_scales.add(g * n_stride + n_base) as *const __m128i);
             let w_scales_u32 = _mm256_cvtepu16_epi32(w_scales_bf16);
             let w_scale_vec = _mm256_castsi256_ps(_mm256_slli_epi32(w_scales_u32, 16));
             let combined = _mm256_mul_ps(w_scale_vec, a_scale_vec);
 
             let cur = _mm256_loadu_ps(output.add(nb * 8));
-            _mm256_storeu_ps(output.add(nb * 8),
-                _mm256_fmadd_ps(group_f32, combined, cur));
+            _mm256_storeu_ps(
+                output.add(nb * 8),
+                _mm256_fmadd_ps(group_f32, combined, cur),
+            );
         }
     }
 
@@ -1237,9 +1292,16 @@ pub fn matmul_int4_transposed_integer(
         let tile_n = (n - n_done).min(TILE_N);
         unsafe {
             expert_matmul_int4_transposed_integer(
-                packed.as_ptr(), scales.as_ptr(), act_int16.as_ptr(),
-                act_scales.as_ptr(), output.as_mut_ptr().add(n_done),
-                k, n, n_done, tile_n, group_size,
+                packed.as_ptr(),
+                scales.as_ptr(),
+                act_int16.as_ptr(),
+                act_scales.as_ptr(),
+                output.as_mut_ptr().add(n_done),
+                k,
+                n,
+                n_done,
+                tile_n,
+                group_size,
             );
         }
         n_done += tile_n;
@@ -1272,9 +1334,16 @@ pub fn matmul_int4_transposed_integer_parallel(
     if n <= 64 {
         unsafe {
             expert_matmul_int4_transposed_integer(
-                packed.as_ptr(), scales.as_ptr(), act_int16.as_ptr(),
-                act_scales.as_ptr(), output.as_mut_ptr(),
-                k, n, 0, n, group_size,
+                packed.as_ptr(),
+                scales.as_ptr(),
+                act_int16.as_ptr(),
+                act_scales.as_ptr(),
+                output.as_mut_ptr(),
+                k,
+                n,
+                0,
+                n,
+                group_size,
             );
         }
         return;
@@ -1286,21 +1355,28 @@ pub fn matmul_int4_transposed_integer_parallel(
     let act_addr = act_int16.as_ptr() as usize;
     let act_scales_addr = act_scales.as_ptr() as usize;
 
-    output.par_chunks_mut(chunk_n).enumerate().for_each(|(chunk_idx, chunk)| {
-        let n_start = chunk_idx * chunk_n;
-        let n_count = chunk.len();
+    output
+        .par_chunks_mut(chunk_n)
+        .enumerate()
+        .for_each(|(chunk_idx, chunk)| {
+            let n_start = chunk_idx * chunk_n;
+            let n_count = chunk.len();
 
-        unsafe {
-            expert_matmul_int4_transposed_integer(
-                packed_addr as *const u32,
-                scales_addr as *const u16,
-                act_addr as *const i16,
-                act_scales_addr as *const f32,
-                chunk.as_mut_ptr(),
-                k, n, n_start, n_count, group_size,
-            );
-        }
-    });
+            unsafe {
+                expert_matmul_int4_transposed_integer(
+                    packed_addr as *const u32,
+                    scales_addr as *const u16,
+                    act_addr as *const i16,
+                    act_scales_addr as *const f32,
+                    chunk.as_mut_ptr(),
+                    k,
+                    n,
+                    n_start,
+                    n_count,
+                    group_size,
+                );
+            }
+        });
 }
 
 // ── Tiled transposed INT4 layout ────────────────────────────────────────
@@ -1394,7 +1470,11 @@ pub fn matmul_int4_transposed_integer_tiled(
                 act_int16.as_ptr(),
                 act_scales.as_ptr(),
                 output.as_mut_ptr().add(n_done),
-                k, TILE_N, 0, tile_n, group_size,
+                k,
+                TILE_N,
+                0,
+                tile_n,
+                group_size,
             );
         }
         n_done += tile_n;
@@ -1426,7 +1506,9 @@ pub fn matmul_int4_transposed_integer_parallel_tiled(
     }
 
     if n <= 64 {
-        matmul_int4_transposed_integer_tiled(packed, scales, act_int16, act_scales, output, k, n, group_size);
+        matmul_int4_transposed_integer_tiled(
+            packed, scales, act_int16, act_scales, output, k, n, group_size,
+        );
         return;
     }
 
@@ -1439,20 +1521,27 @@ pub fn matmul_int4_transposed_integer_parallel_tiled(
     let act_addr = act_int16.as_ptr() as usize;
     let act_scales_addr = act_scales.as_ptr() as usize;
 
-    output.par_chunks_mut(TILE_N).enumerate().for_each(|(tile_idx, chunk)| {
-        let n_count = chunk.len();
+    output
+        .par_chunks_mut(TILE_N)
+        .enumerate()
+        .for_each(|(tile_idx, chunk)| {
+            let n_count = chunk.len();
 
-        unsafe {
-            expert_matmul_int4_transposed_integer(
-                (packed_addr as *const u32).add(tile_idx * packed_tile_size),
-                (scales_addr as *const u16).add(tile_idx * scales_tile_size),
-                act_addr as *const i16,
-                act_scales_addr as *const f32,
-                chunk.as_mut_ptr(),
-                k, TILE_N, 0, n_count, group_size,
-            );
-        }
-    });
+            unsafe {
+                expert_matmul_int4_transposed_integer(
+                    (packed_addr as *const u32).add(tile_idx * packed_tile_size),
+                    (scales_addr as *const u16).add(tile_idx * scales_tile_size),
+                    act_addr as *const i16,
+                    act_scales_addr as *const f32,
+                    chunk.as_mut_ptr(),
+                    k,
+                    TILE_N,
+                    0,
+                    n_count,
+                    group_size,
+                );
+            }
+        });
 }
 
 // ── Transposed layout INT8 kernels (for CPU-optimized weight format) ────
@@ -1520,18 +1609,15 @@ pub unsafe fn expert_matmul_int8_transposed_integer(
             // Pre-compute activation pair broadcast (same for all N-blocks)
             let a0 = *act_int16.add(k0) as u16;
             let a1 = *act_int16.add(k1) as u16;
-            let act_pair = _mm256_set1_epi32(
-                ((a0 as u32) | ((a1 as u32) << 16)) as i32);
+            let act_pair = _mm256_set1_epi32(((a0 as u32) | ((a1 as u32) << 16)) as i32);
 
             let row0_off = k0 * n_stride + n_start;
             let row1_off = k1 * n_stride + n_start;
 
             // Sequential scan across all N-blocks for this K-pair
             for nb in 0..n_blocks {
-                let row0 = _mm_loadl_epi64(
-                    data.add(row0_off + nb * 8) as *const __m128i);
-                let row1 = _mm_loadl_epi64(
-                    data.add(row1_off + nb * 8) as *const __m128i);
+                let row0 = _mm_loadl_epi64(data.add(row0_off + nb * 8) as *const __m128i);
+                let row1 = _mm_loadl_epi64(data.add(row1_off + nb * 8) as *const __m128i);
                 let interleaved = _mm_unpacklo_epi8(row0, row1);
                 let w16 = _mm256_cvtepi8_epi16(interleaved);
                 let dot = _mm256_madd_epi16(w16, act_pair);
@@ -1544,15 +1630,17 @@ pub unsafe fn expert_matmul_int8_transposed_integer(
         for nb in 0..n_blocks {
             let n_base = n_start + nb * 8;
             let group_f32 = _mm256_cvtepi32_ps(int_scratch[nb]);
-            let w_scales_bf16 = _mm_loadu_si128(
-                weight_scales.add(g * n_stride + n_base) as *const __m128i);
+            let w_scales_bf16 =
+                _mm_loadu_si128(weight_scales.add(g * n_stride + n_base) as *const __m128i);
             let w_scales_u32 = _mm256_cvtepu16_epi32(w_scales_bf16);
             let w_scale_vec = _mm256_castsi256_ps(_mm256_slli_epi32(w_scales_u32, 16));
             let combined = _mm256_mul_ps(w_scale_vec, a_scale_vec);
 
             let cur = _mm256_loadu_ps(output.add(nb * 8));
-            _mm256_storeu_ps(output.add(nb * 8),
-                _mm256_fmadd_ps(group_f32, combined, cur));
+            _mm256_storeu_ps(
+                output.add(nb * 8),
+                _mm256_fmadd_ps(group_f32, combined, cur),
+            );
         }
     }
 
@@ -1586,11 +1674,11 @@ pub unsafe fn expert_matmul_int8_transposed_integer(
 /// The u32 vec is just a byte container — actual data is i8.
 /// For large N, tiles the N dimension to keep scratch buffer in L1.
 pub fn matmul_int8_transposed_integer(
-    data_u32: &[u32],     // [K, N] as i8 packed into u32 (byte container)
-    scales: &[u16],        // [K/group_size, N] BF16
-    act_int16: &[i16],     // [K]
-    act_scales: &[f32],    // [K/group_size]
-    output: &mut [f32],    // [N]
+    data_u32: &[u32],   // [K, N] as i8 packed into u32 (byte container)
+    scales: &[u16],     // [K/group_size, N] BF16
+    act_int16: &[i16],  // [K]
+    act_scales: &[f32], // [K/group_size]
+    output: &mut [f32], // [N]
     k: usize,
     n: usize,
     group_size: usize,
@@ -1599,10 +1687,19 @@ pub fn matmul_int8_transposed_integer(
     assert_eq!(act_scales.len(), k / group_size);
     assert_eq!(output.len(), n);
     // INT8: K*N bytes = K*N/4 u32s
-    assert_eq!(data_u32.len(), (k * n + 3) / 4, "data_u32 len mismatch: expected {}, got {}", (k * n + 3) / 4, data_u32.len());
+    assert_eq!(
+        data_u32.len(),
+        (k * n + 3) / 4,
+        "data_u32 len mismatch: expected {}, got {}",
+        (k * n + 3) / 4,
+        data_u32.len()
+    );
     assert_eq!(scales.len(), (k / group_size) * n);
     assert!(k % group_size == 0);
-    assert!(group_size % 2 == 0, "Transposed INT8 kernel requires even group_size");
+    assert!(
+        group_size % 2 == 0,
+        "Transposed INT8 kernel requires even group_size"
+    );
 
     if !is_x86_feature_detected!("avx2") || !is_x86_feature_detected!("fma") {
         panic!("AVX2 + FMA required");
@@ -1615,9 +1712,15 @@ pub fn matmul_int8_transposed_integer(
         unsafe {
             expert_matmul_int8_transposed_integer(
                 data_u32.as_ptr() as *const i8,
-                scales.as_ptr(), act_int16.as_ptr(),
-                act_scales.as_ptr(), output.as_mut_ptr().add(n_done),
-                k, n, n_done, tile_n, group_size,
+                scales.as_ptr(),
+                act_int16.as_ptr(),
+                act_scales.as_ptr(),
+                output.as_mut_ptr().add(n_done),
+                k,
+                n,
+                n_done,
+                tile_n,
+                group_size,
             );
         }
         n_done += tile_n;
@@ -1653,9 +1756,15 @@ pub fn matmul_int8_transposed_integer_parallel(
         unsafe {
             expert_matmul_int8_transposed_integer(
                 data_u32.as_ptr() as *const i8,
-                scales.as_ptr(), act_int16.as_ptr(),
-                act_scales.as_ptr(), output.as_mut_ptr(),
-                k, n, 0, n, group_size,
+                scales.as_ptr(),
+                act_int16.as_ptr(),
+                act_scales.as_ptr(),
+                output.as_mut_ptr(),
+                k,
+                n,
+                0,
+                n,
+                group_size,
             );
         }
         return;
@@ -1667,21 +1776,28 @@ pub fn matmul_int8_transposed_integer_parallel(
     let act_addr = act_int16.as_ptr() as usize;
     let act_scales_addr = act_scales.as_ptr() as usize;
 
-    output.par_chunks_mut(chunk_n).enumerate().for_each(|(chunk_idx, chunk)| {
-        let n_start = chunk_idx * chunk_n;
-        let n_count = chunk.len();
+    output
+        .par_chunks_mut(chunk_n)
+        .enumerate()
+        .for_each(|(chunk_idx, chunk)| {
+            let n_start = chunk_idx * chunk_n;
+            let n_count = chunk.len();
 
-        unsafe {
-            expert_matmul_int8_transposed_integer(
-                data_addr as *const i8,
-                scales_addr as *const u16,
-                act_addr as *const i16,
-                act_scales_addr as *const f32,
-                chunk.as_mut_ptr(),
-                k, n, n_start, n_count, group_size,
-            );
-        }
-    });
+            unsafe {
+                expert_matmul_int8_transposed_integer(
+                    data_addr as *const i8,
+                    scales_addr as *const u16,
+                    act_addr as *const i16,
+                    act_scales_addr as *const f32,
+                    chunk.as_mut_ptr(),
+                    k,
+                    n,
+                    n_start,
+                    n_count,
+                    group_size,
+                );
+            }
+        });
 }
 
 // ── Tiled transposed INT8 layout ────────────────────────────────────────
@@ -1750,7 +1866,11 @@ pub fn matmul_int8_transposed_integer_tiled(
                 act_int16.as_ptr(),
                 act_scales.as_ptr(),
                 output.as_mut_ptr().add(n_done),
-                k, TILE_N, 0, tile_n, group_size,
+                k,
+                TILE_N,
+                0,
+                tile_n,
+                group_size,
             );
         }
         n_done += tile_n;
@@ -1782,7 +1902,9 @@ pub fn matmul_int8_transposed_integer_parallel_tiled(
     }
 
     if n <= 64 {
-        matmul_int8_transposed_integer_tiled(data_u32, scales, act_int16, act_scales, output, k, n, group_size);
+        matmul_int8_transposed_integer_tiled(
+            data_u32, scales, act_int16, act_scales, output, k, n, group_size,
+        );
         return;
     }
 
@@ -1795,20 +1917,27 @@ pub fn matmul_int8_transposed_integer_parallel_tiled(
     let act_addr = act_int16.as_ptr() as usize;
     let act_scales_addr = act_scales.as_ptr() as usize;
 
-    output.par_chunks_mut(TILE_N).enumerate().for_each(|(tile_idx, chunk)| {
-        let n_count = chunk.len();
+    output
+        .par_chunks_mut(TILE_N)
+        .enumerate()
+        .for_each(|(tile_idx, chunk)| {
+            let n_count = chunk.len();
 
-        unsafe {
-            expert_matmul_int8_transposed_integer(
-                (data_addr + tile_idx * data_tile_size_u32 * 4) as *const i8,
-                (scales_addr + tile_idx * scales_tile_size * 2) as *const u16,
-                act_addr as *const i16,
-                act_scales_addr as *const f32,
-                chunk.as_mut_ptr(),
-                k, TILE_N, 0, n_count, group_size,
-            );
-        }
-    });
+            unsafe {
+                expert_matmul_int8_transposed_integer(
+                    (data_addr + tile_idx * data_tile_size_u32 * 4) as *const i8,
+                    (scales_addr + tile_idx * scales_tile_size * 2) as *const u16,
+                    act_addr as *const i16,
+                    act_scales_addr as *const f32,
+                    chunk.as_mut_ptr(),
+                    k,
+                    TILE_N,
+                    0,
+                    n_count,
+                    group_size,
+                );
+            }
+        });
 }
 
 // ============================================================================
@@ -1846,9 +1975,9 @@ pub fn build_marlin_tile_map() -> MarlinTileMap {
     };
     for i in 0..1024 {
         let p = perm[i];
-        let nt_local = p / 256;        // which N-tile (0..3)
-        let tk = (p % 256) / 16;       // K-offset in tile (0..15)
-        let tn = p % 16;               // N-offset in N-tile (0..15)
+        let nt_local = p / 256; // which N-tile (0..3)
+        let tk = (p % 256) / 16; // K-offset in tile (0..15)
+        let tn = p % 16; // N-offset in N-tile (0..15)
         map.k_off[i] = tk as u8;
         map.n_off[i] = (nt_local * 16 + tn) as u8;
     }
@@ -1870,7 +1999,13 @@ pub fn build_marlin_scale_map() -> MarlinScaleMap {
 ///
 /// Scales are stored as flat `[K/gs, N]` with 64-element permutation chunks.
 #[inline]
-fn read_marlin_scale(scales: &[u16], group: usize, n_pos: usize, n_total: usize, inv_sperm: &[usize; 64]) -> f32 {
+fn read_marlin_scale(
+    scales: &[u16],
+    group: usize,
+    n_pos: usize,
+    n_total: usize,
+    inv_sperm: &[usize; 64],
+) -> f32 {
     let flat = group * n_total + n_pos;
     let chunk = flat / 64;
     let local = flat % 64;
@@ -1882,11 +2017,11 @@ fn read_marlin_scale(scales: &[u16], group: usize, n_pos: usize, n_total: usize,
 /// Reads Marlin-packed `[K/16, 2*N]` weights and Marlin-permuted `[K/gs, N]` scales.
 /// Computes output[n] = Σ_k weight[k,n] × act[k] with per-group scaling.
 pub fn matmul_int4_marlin_scalar(
-    packed: &[u32],        // [K/16, 2*N] Marlin-packed
-    scales: &[u16],        // [K/gs, N] Marlin-permuted BF16
-    act_int16: &[i16],     // [K] INT16 activations
-    act_scales: &[f32],    // [K/gs] activation scales
-    output: &mut [f32],    // [N]
+    packed: &[u32],     // [K/16, 2*N] Marlin-packed
+    scales: &[u16],     // [K/gs, N] Marlin-permuted BF16
+    act_int16: &[i16],  // [K] INT16 activations
+    act_scales: &[f32], // [K/gs] activation scales
+    output: &mut [f32], // [N]
     k: usize,
     n: usize,
     group_size: usize,
@@ -1898,12 +2033,15 @@ pub fn matmul_int4_marlin_scalar(
     assert!(n % 64 == 0, "N must be divisible by 64 (Marlin constraint)");
     assert!(group_size % 16 == 0);
 
-    assert!(group_size < k, "Channelwise (group_size == K) not supported; Marlin uses different scale permutation");
+    assert!(
+        group_size < k,
+        "Channelwise (group_size == K) not supported; Marlin uses different scale permutation"
+    );
 
     let tile_map = build_marlin_tile_map();
     let scale_map = build_marlin_scale_map();
 
-    let out_cols = 2 * n;  // packed row width in u32
+    let out_cols = 2 * n; // packed row width in u32
     let n_chunks = n / 64;
     let tiles_per_group = group_size / 16;
     let num_groups = k / group_size;
@@ -2118,9 +2256,18 @@ pub fn matmul_int4_marlin(
 
     unsafe {
         expert_matmul_int4_marlin(
-            packed.as_ptr(), scales.as_ptr(), act_int16.as_ptr(),
-            act_scales.as_ptr(), output.as_mut_ptr(),
-            k, n, 0, n, group_size, tile_map, scale_map,
+            packed.as_ptr(),
+            scales.as_ptr(),
+            act_int16.as_ptr(),
+            act_scales.as_ptr(),
+            output.as_mut_ptr(),
+            k,
+            n,
+            0,
+            n,
+            group_size,
+            tile_map,
+            scale_map,
         );
     }
 }
@@ -2154,9 +2301,18 @@ pub fn matmul_int4_marlin_parallel(
     if n <= 64 {
         unsafe {
             expert_matmul_int4_marlin(
-                packed.as_ptr(), scales.as_ptr(), act_int16.as_ptr(),
-                act_scales.as_ptr(), output.as_mut_ptr(),
-                k, n, 0, n, group_size, tile_map, scale_map,
+                packed.as_ptr(),
+                scales.as_ptr(),
+                act_int16.as_ptr(),
+                act_scales.as_ptr(),
+                output.as_mut_ptr(),
+                k,
+                n,
+                0,
+                n,
+                group_size,
+                tile_map,
+                scale_map,
             );
         }
         return;
@@ -2168,24 +2324,32 @@ pub fn matmul_int4_marlin_parallel(
     let act_addr = act_int16.as_ptr() as usize;
     let act_scales_addr = act_scales.as_ptr() as usize;
 
-    output.par_chunks_mut(chunk_n).enumerate().for_each(|(chunk_idx, chunk)| {
-        let n_start = chunk_idx * chunk_n;
-        let n_count = chunk.len();
-        // n_count should always be multiple of 64 since N % 64 == 0 and chunk_n % 64 == 0
-        assert!(n_count % 64 == 0);
+    output
+        .par_chunks_mut(chunk_n)
+        .enumerate()
+        .for_each(|(chunk_idx, chunk)| {
+            let n_start = chunk_idx * chunk_n;
+            let n_count = chunk.len();
+            // n_count should always be multiple of 64 since N % 64 == 0 and chunk_n % 64 == 0
+            assert!(n_count % 64 == 0);
 
-        unsafe {
-            expert_matmul_int4_marlin(
-                packed_addr as *const u32,
-                scales_addr as *const u16,
-                act_addr as *const i16,
-                act_scales_addr as *const f32,
-                chunk.as_mut_ptr(),
-                k, n, n_start, n_count, group_size,
-                tile_map, scale_map,
-            );
-        }
-    });
+            unsafe {
+                expert_matmul_int4_marlin(
+                    packed_addr as *const u32,
+                    scales_addr as *const u16,
+                    act_addr as *const i16,
+                    act_scales_addr as *const f32,
+                    chunk.as_mut_ptr(),
+                    k,
+                    n,
+                    n_start,
+                    n_count,
+                    group_size,
+                    tile_map,
+                    scale_map,
+                );
+            }
+        });
 }
 
 /// Transpose a QuantizedInt4 from [N, K/8] layout to [K/8, N] layout.
@@ -2261,8 +2425,7 @@ unsafe fn fast_exp_avx2(x: __m256) -> __m256 {
     let poly = _mm256_fmadd_ps(poly, f, one);
 
     // 2^n via exponent bit manipulation
-    let exp_bits = _mm256_slli_epi32(
-        _mm256_add_epi32(ni, _mm256_set1_epi32(127)), 23);
+    let exp_bits = _mm256_slli_epi32(_mm256_add_epi32(ni, _mm256_set1_epi32(127)), 23);
     let pow2n = _mm256_castsi256_ps(exp_bits);
 
     _mm256_mul_ps(poly, pow2n)
@@ -2279,7 +2442,8 @@ unsafe fn fast_sigmoid_avx2(x: __m256) -> __m256 {
     let neg_x = _mm256_sub_ps(_mm256_setzero_ps(), x);
     let clamped = _mm256_max_ps(
         _mm256_min_ps(neg_x, _mm256_set1_ps(20.0)),
-        _mm256_set1_ps(-20.0));
+        _mm256_set1_ps(-20.0),
+    );
 
     let exp_neg_x = fast_exp_avx2(clamped);
     let denom = _mm256_add_ps(_mm256_set1_ps(1.0), exp_neg_x);
@@ -2343,8 +2507,16 @@ pub unsafe fn silu_quantize_int16_avx2(
         // Horizontal max
         let max_val = hmax_avx2(max_abs_vec);
 
-        let scale = if max_val > 0.0 { max_val / 32767.0 } else { 1.0 };
-        let inv_scale = if max_val > 0.0 { 32767.0 / max_val } else { 0.0 };
+        let scale = if max_val > 0.0 {
+            max_val / 32767.0
+        } else {
+            1.0
+        };
+        let inv_scale = if max_val > 0.0 {
+            32767.0 / max_val
+        } else {
+            0.0
+        };
         *hidden_scales.add(g) = scale;
 
         let inv_scale_vec = _mm256_set1_ps(inv_scale);
@@ -2626,7 +2798,10 @@ mod tests {
             max_diff = max_diff.max((serial_out[i] - parallel_out[i]).abs());
         }
         eprintln!("Parallel vs serial max_diff: {max_diff:.8}");
-        assert!(max_diff == 0.0, "Parallel should be bit-identical to serial");
+        assert!(
+            max_diff == 0.0,
+            "Parallel should be bit-identical to serial"
+        );
     }
 
     // ── Integer kernel tests ──────────────────────────────────────────
@@ -2659,7 +2834,10 @@ mod tests {
         }
         eprintln!("INT16 activation round-trip max error: {max_err:.8}");
         // INT16 has 15 bits of precision, BF16 has 7 — so error should be tiny
-        assert!(max_err < 0.001, "INT16 round-trip error too large: {max_err}");
+        assert!(
+            max_err < 0.001,
+            "INT16 round-trip error too large: {max_err}"
+        );
     }
 
     #[test]
@@ -2702,7 +2880,10 @@ mod tests {
             max_diff = max_diff.max(diff);
         }
         eprintln!("Integer scalar vs AVX2 [{n}×{k}]: max_diff={max_diff:.8}");
-        assert!(max_diff < 1e-3, "Integer scalar vs AVX2 diverged: {max_diff}");
+        assert!(
+            max_diff < 1e-3,
+            "Integer scalar vs AVX2 diverged: {max_diff}"
+        );
     }
 
     #[test]
@@ -2754,7 +2935,10 @@ mod tests {
 
         eprintln!("Integer vs FMA [{n}×{k}]: max_diff={max_diff:.6}, relative RMSE={rel_err:.6}");
         // Both use same INT4 weights; difference is only from activation quantization
-        assert!(rel_err < 0.01, "Integer vs FMA relative error too large: {rel_err}");
+        assert!(
+            rel_err < 0.01,
+            "Integer vs FMA relative error too large: {rel_err}"
+        );
     }
 
     #[test]
@@ -2792,7 +2976,10 @@ mod tests {
             max_diff = max_diff.max((serial_out[i] - parallel_out[i]).abs());
         }
         eprintln!("Integer parallel vs serial max_diff: {max_diff:.8}");
-        assert!(max_diff == 0.0, "Integer parallel should be bit-identical to serial");
+        assert!(
+            max_diff == 0.0,
+            "Integer parallel should be bit-identical to serial"
+        );
     }
 
     #[test]
@@ -2869,8 +3056,14 @@ mod tests {
         eprintln!("║  FMA parallel:          {fma_par_us:>6.0} μs  {fma_par_gb:>5.1} GB/s ║");
         eprintln!("║  Integer parallel:      {int_par_us:>6.0} μs  {int_par_gb:>5.1} GB/s ║");
         eprintln!("╠══════════════════════════════════════════════════╣");
-        eprintln!("║  Integer speedup (ST): {:.2}x                      ║", fma_st_us / int_st_us);
-        eprintln!("║  Integer speedup (MT): {:.2}x                      ║", fma_par_us / int_par_us);
+        eprintln!(
+            "║  Integer speedup (ST): {:.2}x                      ║",
+            fma_st_us / int_st_us
+        );
+        eprintln!(
+            "║  Integer speedup (MT): {:.2}x                      ║",
+            fma_par_us / int_par_us
+        );
         eprintln!("╚══════════════════════════════════════════════════╝");
     }
 
@@ -2906,7 +3099,13 @@ mod tests {
         let (t_packed, t_scales) = transpose_int4(&q);
         let mut trans_output = vec![0.0f32; n];
         matmul_int4_transposed_scalar(
-            &t_packed, &t_scales, &activation, &mut trans_output, k, n, group_size,
+            &t_packed,
+            &t_scales,
+            &activation,
+            &mut trans_output,
+            k,
+            n,
+            group_size,
         );
 
         let mut max_diff: f32 = 0.0;
@@ -2914,7 +3113,10 @@ mod tests {
             max_diff = max_diff.max((orig_output[i] - trans_output[i]).abs());
         }
         eprintln!("Transposed scalar vs original scalar [{n}×{k}]: max_diff={max_diff:.8}");
-        assert!(max_diff == 0.0, "Transposed scalar should be bit-identical: max_diff={max_diff}");
+        assert!(
+            max_diff == 0.0,
+            "Transposed scalar should be bit-identical: max_diff={max_diff}"
+        );
     }
 
     #[test]
@@ -2940,12 +3142,24 @@ mod tests {
 
         let mut scalar_out = vec![0.0f32; n];
         matmul_int4_transposed_scalar(
-            &t_packed, &t_scales, &activation, &mut scalar_out, k, n, group_size,
+            &t_packed,
+            &t_scales,
+            &activation,
+            &mut scalar_out,
+            k,
+            n,
+            group_size,
         );
 
         let mut avx2_out = vec![0.0f32; n];
         matmul_int4_transposed_avx2(
-            &t_packed, &t_scales, &activation, &mut avx2_out, k, n, group_size,
+            &t_packed,
+            &t_scales,
+            &activation,
+            &mut avx2_out,
+            k,
+            n,
+            group_size,
         );
 
         let mut max_diff: f32 = 0.0;
@@ -2953,7 +3167,10 @@ mod tests {
             max_diff = max_diff.max((scalar_out[i] - avx2_out[i]).abs());
         }
         eprintln!("Transposed AVX2 vs scalar [{n}×{k}]: max_diff={max_diff:.8}");
-        assert!(max_diff < 1e-3, "Transposed AVX2 vs scalar diverged: {max_diff}");
+        assert!(
+            max_diff < 1e-3,
+            "Transposed AVX2 vs scalar diverged: {max_diff}"
+        );
     }
 
     #[test]
@@ -2983,7 +3200,13 @@ mod tests {
 
         let mut trans_out = vec![0.0f32; n];
         matmul_int4_transposed_avx2(
-            &t_packed, &t_scales, &activation, &mut trans_out, k, n, group_size,
+            &t_packed,
+            &t_scales,
+            &activation,
+            &mut trans_out,
+            k,
+            n,
+            group_size,
         );
 
         let mut max_diff: f32 = 0.0;
@@ -2991,7 +3214,10 @@ mod tests {
             max_diff = max_diff.max((orig_out[i] - trans_out[i]).abs());
         }
         eprintln!("Transposed AVX2 vs original AVX2 [{n}×{k}]: max_diff={max_diff:.8}");
-        assert!(max_diff < 0.01, "Transposed vs original diverged: {max_diff}");
+        assert!(
+            max_diff < 0.01,
+            "Transposed vs original diverged: {max_diff}"
+        );
     }
 
     #[test]
@@ -3018,7 +3244,13 @@ mod tests {
         // FMA transposed
         let mut fma_out = vec![0.0f32; n];
         matmul_int4_transposed_avx2(
-            &t_packed, &t_scales, &activation, &mut fma_out, k, n, group_size,
+            &t_packed,
+            &t_scales,
+            &activation,
+            &mut fma_out,
+            k,
+            n,
+            group_size,
         );
 
         // Integer transposed
@@ -3028,7 +3260,14 @@ mod tests {
 
         let mut int_out = vec![0.0f32; n];
         matmul_int4_transposed_integer(
-            &t_packed, &t_scales, &act_int16, &act_scales, &mut int_out, k, n, group_size,
+            &t_packed,
+            &t_scales,
+            &act_int16,
+            &act_scales,
+            &mut int_out,
+            k,
+            n,
+            group_size,
         );
 
         let mut max_diff: f32 = 0.0;
@@ -3047,7 +3286,10 @@ mod tests {
         eprintln!(
             "Transposed integer vs FMA [{n}×{k}]: max_diff={max_diff:.6}, rel_err={rel_err:.6}"
         );
-        assert!(rel_err < 0.01, "Transposed integer vs FMA relative error too large: {rel_err}");
+        assert!(
+            rel_err < 0.01,
+            "Transposed integer vs FMA relative error too large: {rel_err}"
+        );
     }
 
     #[test]
@@ -3076,17 +3318,32 @@ mod tests {
         let mut parallel_out = vec![0.0f32; n];
 
         matmul_int4_transposed_avx2(
-            &t_packed, &t_scales, &activation, &mut serial_out, k, n, group_size,
+            &t_packed,
+            &t_scales,
+            &activation,
+            &mut serial_out,
+            k,
+            n,
+            group_size,
         );
         matmul_int4_transposed_parallel(
-            &t_packed, &t_scales, &activation, &mut parallel_out, k, n, group_size,
+            &t_packed,
+            &t_scales,
+            &activation,
+            &mut parallel_out,
+            k,
+            n,
+            group_size,
         );
 
         let max_diff: f32 = (0..n)
             .map(|i| (serial_out[i] - parallel_out[i]).abs())
             .fold(0.0f32, f32::max);
         eprintln!("Transposed FMA parallel vs serial: max_diff={max_diff:.8}");
-        assert!(max_diff == 0.0, "Transposed parallel should be bit-identical");
+        assert!(
+            max_diff == 0.0,
+            "Transposed parallel should be bit-identical"
+        );
 
         // Integer: serial vs parallel
         let mut act_int16 = vec![0i16; k];
@@ -3097,17 +3354,34 @@ mod tests {
         let mut parallel_int = vec![0.0f32; n];
 
         matmul_int4_transposed_integer(
-            &t_packed, &t_scales, &act_int16, &act_scales, &mut serial_int, k, n, group_size,
+            &t_packed,
+            &t_scales,
+            &act_int16,
+            &act_scales,
+            &mut serial_int,
+            k,
+            n,
+            group_size,
         );
         matmul_int4_transposed_integer_parallel(
-            &t_packed, &t_scales, &act_int16, &act_scales, &mut parallel_int, k, n, group_size,
+            &t_packed,
+            &t_scales,
+            &act_int16,
+            &act_scales,
+            &mut parallel_int,
+            k,
+            n,
+            group_size,
         );
 
         let max_diff_int: f32 = (0..n)
             .map(|i| (serial_int[i] - parallel_int[i]).abs())
             .fold(0.0f32, f32::max);
         eprintln!("Transposed integer parallel vs serial: max_diff={max_diff_int:.8}");
-        assert!(max_diff_int == 0.0, "Transposed integer parallel should be bit-identical");
+        assert!(
+            max_diff_int == 0.0,
+            "Transposed integer parallel should be bit-identical"
+        );
     }
 
     #[test]
@@ -3172,8 +3446,14 @@ mod tests {
 
         let mut transposed_out = vec![0.0f32; n];
         matmul_int8_transposed_integer(
-            &data_u32, &transposed_scales, &act_int16, &act_scales,
-            &mut transposed_out, k, n, group_size,
+            &data_u32,
+            &transposed_scales,
+            &act_int16,
+            &act_scales,
+            &mut transposed_out,
+            k,
+            n,
+            group_size,
         );
 
         let mut max_diff: f32 = 0.0;
@@ -3181,11 +3461,12 @@ mod tests {
             let diff = (nontransposed_out[i] - transposed_out[i]).abs();
             max_diff = max_diff.max(diff);
         }
-        eprintln!(
-            "Transposed INT8 vs non-transposed [{n}×{k}]: max_diff={max_diff:.8}"
-        );
+        eprintln!("Transposed INT8 vs non-transposed [{n}×{k}]: max_diff={max_diff:.8}");
         // Small difference expected from different FMA accumulation ordering
-        assert!(max_diff < 0.001, "Transposed INT8 should match non-transposed closely: {max_diff}");
+        assert!(
+            max_diff < 0.001,
+            "Transposed INT8 should match non-transposed closely: {max_diff}"
+        );
     }
 
     #[test]
@@ -3240,21 +3521,36 @@ mod tests {
 
         let mut serial_out = vec![0.0f32; n];
         matmul_int8_transposed_integer(
-            &data_u32, &transposed_scales, &act_int16, &act_scales,
-            &mut serial_out, k, n, group_size,
+            &data_u32,
+            &transposed_scales,
+            &act_int16,
+            &act_scales,
+            &mut serial_out,
+            k,
+            n,
+            group_size,
         );
 
         let mut parallel_out = vec![0.0f32; n];
         matmul_int8_transposed_integer_parallel(
-            &data_u32, &transposed_scales, &act_int16, &act_scales,
-            &mut parallel_out, k, n, group_size,
+            &data_u32,
+            &transposed_scales,
+            &act_int16,
+            &act_scales,
+            &mut parallel_out,
+            k,
+            n,
+            group_size,
         );
 
         let max_diff: f32 = (0..n)
             .map(|i| (serial_out[i] - parallel_out[i]).abs())
             .fold(0.0f32, f32::max);
         eprintln!("Transposed INT8 parallel vs serial [{n}×{k}]: max_diff={max_diff:.8}");
-        assert!(max_diff == 0.0, "Transposed INT8 parallel should be bit-identical");
+        assert!(
+            max_diff == 0.0,
+            "Transposed INT8 parallel should be bit-identical"
+        );
     }
 
     #[test]
@@ -3290,7 +3586,14 @@ mod tests {
 
         let mut transposed_out = vec![0.0f32; n];
         matmul_int4_transposed_integer(
-            &t_packed, &t_scales, &act_int16, &act_scales_vec, &mut transposed_out, k, n, group_size,
+            &t_packed,
+            &t_scales,
+            &act_int16,
+            &act_scales_vec,
+            &mut transposed_out,
+            k,
+            n,
+            group_size,
         );
 
         // Scalar Marlin kernel (simpler, for debugging)
@@ -3298,8 +3601,14 @@ mod tests {
 
         let mut scalar_out = vec![0.0f32; n];
         matmul_int4_marlin_scalar(
-            &m.packed, &m.scales, &act_int16, &act_scales_vec,
-            &mut scalar_out, k, n, group_size,
+            &m.packed,
+            &m.scales,
+            &act_int16,
+            &act_scales_vec,
+            &mut scalar_out,
+            k,
+            n,
+            group_size,
         );
 
         eprintln!("ref[0..5]:    {:?}", &transposed_out[0..5]);
@@ -3311,7 +3620,10 @@ mod tests {
             max_diff_scalar = max_diff_scalar.max(diff);
         }
         eprintln!("Marlin SCALAR vs transposed [{n}×{k}]: max_diff={max_diff_scalar:.8}");
-        assert!(max_diff_scalar < 0.001, "Scalar Marlin should match transposed: max_diff={max_diff_scalar}");
+        assert!(
+            max_diff_scalar < 0.001,
+            "Scalar Marlin should match transposed: max_diff={max_diff_scalar}"
+        );
     }
 
     #[test]
@@ -3347,15 +3659,29 @@ mod tests {
         // Scalar Marlin
         let mut scalar_out = vec![0.0f32; n];
         matmul_int4_marlin_scalar(
-            &m.packed, &m.scales, &act_int16, &act_scales_vec,
-            &mut scalar_out, k, n, group_size,
+            &m.packed,
+            &m.scales,
+            &act_int16,
+            &act_scales_vec,
+            &mut scalar_out,
+            k,
+            n,
+            group_size,
         );
 
         // AVX2 Marlin
         let mut avx2_out = vec![0.0f32; n];
         matmul_int4_marlin(
-            &m.packed, &m.scales, &act_int16, &act_scales_vec,
-            &mut avx2_out, k, n, group_size, &tile_map, &scale_map,
+            &m.packed,
+            &m.scales,
+            &act_int16,
+            &act_scales_vec,
+            &mut avx2_out,
+            k,
+            n,
+            group_size,
+            &tile_map,
+            &scale_map,
         );
 
         let mut max_diff: f32 = 0.0;
@@ -3367,7 +3693,10 @@ mod tests {
         eprintln!("Marlin scalar vs AVX2 [{n}×{k}]: max_diff={max_diff:.8}");
         // Precision difference from FMA ordering: scalar does (x * ws) * as,
         // AVX2 does x * (ws * as) + acc via FMA. ~0.0003 is expected.
-        assert!(max_diff < 0.001, "Marlin AVX2 should match scalar closely: max_diff={max_diff}");
+        assert!(
+            max_diff < 0.001,
+            "Marlin AVX2 should match scalar closely: max_diff={max_diff}"
+        );
     }
 
     #[test]
@@ -3401,7 +3730,14 @@ mod tests {
 
         let mut ref_out = vec![0.0f32; n];
         matmul_int4_transposed_integer(
-            &t_packed, &t_scales, &act_int16, &act_scales_vec, &mut ref_out, k, n, group_size,
+            &t_packed,
+            &t_scales,
+            &act_int16,
+            &act_scales_vec,
+            &mut ref_out,
+            k,
+            n,
+            group_size,
         );
 
         // Marlin kernel
@@ -3411,8 +3747,16 @@ mod tests {
 
         let mut marlin_out = vec![0.0f32; n];
         matmul_int4_marlin(
-            &m.packed, &m.scales, &act_int16, &act_scales_vec,
-            &mut marlin_out, k, n, group_size, &tile_map, &scale_map,
+            &m.packed,
+            &m.scales,
+            &act_int16,
+            &act_scales_vec,
+            &mut marlin_out,
+            k,
+            n,
+            group_size,
+            &tile_map,
+            &scale_map,
         );
 
         let mut max_diff: f32 = 0.0;
@@ -3422,7 +3766,10 @@ mod tests {
         }
 
         eprintln!("Marlin kernel large [{n}×{k}]: max_diff={max_diff:.8}");
-        assert!(max_diff == 0.0, "Marlin kernel large should match transposed exactly: max_diff={max_diff}");
+        assert!(
+            max_diff == 0.0,
+            "Marlin kernel large should match transposed exactly: max_diff={max_diff}"
+        );
     }
 
     #[test]
@@ -3457,20 +3804,39 @@ mod tests {
 
         let mut serial_out = vec![0.0f32; n];
         matmul_int4_marlin(
-            &m.packed, &m.scales, &act_int16, &act_scales_vec,
-            &mut serial_out, k, n, group_size, &tile_map, &scale_map,
+            &m.packed,
+            &m.scales,
+            &act_int16,
+            &act_scales_vec,
+            &mut serial_out,
+            k,
+            n,
+            group_size,
+            &tile_map,
+            &scale_map,
         );
 
         let mut parallel_out = vec![0.0f32; n];
         matmul_int4_marlin_parallel(
-            &m.packed, &m.scales, &act_int16, &act_scales_vec,
-            &mut parallel_out, k, n, group_size, &tile_map, &scale_map,
+            &m.packed,
+            &m.scales,
+            &act_int16,
+            &act_scales_vec,
+            &mut parallel_out,
+            k,
+            n,
+            group_size,
+            &tile_map,
+            &scale_map,
         );
 
         let max_diff: f32 = (0..n)
             .map(|i| (serial_out[i] - parallel_out[i]).abs())
             .fold(0.0f32, f32::max);
         eprintln!("Marlin parallel vs serial [{n}×{k}]: max_diff={max_diff:.8}");
-        assert!(max_diff == 0.0, "Marlin parallel should be bit-identical to serial");
+        assert!(
+            max_diff == 0.0,
+            "Marlin parallel should be bit-identical to serial"
+        );
     }
 }

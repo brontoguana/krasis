@@ -1,0 +1,110 @@
+{
+  "gate": "20260628_1335_nemotron_nano_mamba2_ssd_recurrent_next_optimization_design",
+  "opened_utc": "2026-06-28T13:35:00Z",
+  "closed_utc": "2026-06-28T13:46:43Z",
+  "status": "closed",
+  "scope": "static_next_optimization_design",
+  "record_first": {
+    "source_gate": "20260628_1313_nemotron_nano_mamba2_ssd_recurrent_subloop_timing",
+    "gemma_baseline": {
+      "prefill_tok_s": 5619.6,
+      "internal_decode_tok_s": 92.43,
+      "network_tok_s": 155.69
+    },
+    "nano_baseline": {
+      "prefill_tok_s": 346.5,
+      "internal_decode_tok_s": 94.48,
+      "network_tok_s": 164.75
+    },
+    "source_result": {
+      "long_tokens": 39920,
+      "records": 23,
+      "total_candidate_avg_ms": 1171.691221826087,
+      "recurrent_kernel_avg_ms": 725.9238615217391,
+      "coeff_tile_output_avg_ms": 431.1865319565218,
+      "state_update_avg_ms": 503.07395095509554,
+      "state_update_share": 0.6930120196956466,
+      "c_dot_avg_ms": 197.24912640351894,
+      "c_dot_share": 0.2717214913311926,
+      "dt_a_x_setup_avg_ms": 16.021774023215823,
+      "entry_snapshot_avg_ms": 4.759648871751271,
+      "stores_avg_ms": 0.47148738392734385,
+      "residual_avg_ms": 4.347873884230188
+    }
+  },
+  "constraints": [
+    "static analysis only",
+    "no optimization implementation",
+    "no build",
+    "no startup run",
+    "no requests",
+    "no speed benchmark",
+    "no decode/HCS work",
+    "no production enablement",
+    "no default-path change",
+    "preserve current recurrence order",
+    "preserve c_state_total_exact",
+    "preserve coeff-tile correctness",
+    "preserve candidate-timing mode",
+    "preserve full-oracle path",
+    "preserve row/chunk indexing",
+    "preserve BF16 cast placement",
+    "preserve default sequential SSD"
+  ],
+  "analysis": {
+    "primary_cost": "state_update",
+    "primary_cost_avg_ms": 503.07395095509554,
+    "primary_cost_share": 0.6930120196956466,
+    "secondary_cost": "c_dot",
+    "secondary_cost_avg_ms": 197.24912640351894,
+    "secondary_cost_share": 0.2717214913311926,
+    "static_conclusion": "The state update is the exact token-order recurrence and must not be replaced with affine or closed-form summaries. The next plausible exactness-preserving target is to parallelize independent state slots across s while preserving token order for each (head,d,s), keeping C-dot as a serial ascending-s accumulation for c_state_total_exact."
+  },
+  "decision": {
+    "next_target": "guarded state-parallel recurrent kernel with serial exact C-dot",
+    "next_env": "KRASIS_MAMBA2_SSD_BLOCK_SCAN_STATE_PARALLEL_RECURRENT",
+    "new_default_path": false,
+    "optimization_implemented_this_gate": false,
+    "state_source": "exact token-order f32 recurrence",
+    "c_dot_source": "serial ascending-s f32 accumulation",
+    "output_path": "existing coeff-tile block-scan output kernel",
+    "requires_next_prototype": true,
+    "reason_next_prototype_required": "Static analysis proves the dependency shape but cannot prove CUDA register/shared-memory scheduling and compiler choices preserve exact bits; full oracle must prove output and state exactness."
+  },
+  "artifacts": {
+    "source_analysis": "benchmarks/20260628_1335_nemotron_nano_mamba2_ssd_recurrent_next_optimization_design_source_analysis.tsv",
+    "target_decision": "benchmarks/20260628_1335_nemotron_nano_mamba2_ssd_recurrent_next_optimization_design_target_decision.tsv",
+    "buffer_plan": "benchmarks/20260628_1335_nemotron_nano_mamba2_ssd_recurrent_next_optimization_design_buffer_plan.tsv",
+    "kernel_plan": "benchmarks/20260628_1335_nemotron_nano_mamba2_ssd_recurrent_next_optimization_design_kernel_plan.tsv",
+    "exactness_plan": "benchmarks/20260628_1335_nemotron_nano_mamba2_ssd_recurrent_next_optimization_design_exactness_plan.tsv",
+    "probe_plan": "benchmarks/20260628_1335_nemotron_nano_mamba2_ssd_recurrent_next_optimization_design_probe_plan.tsv",
+    "minimal_next_gate": "benchmarks/20260628_1335_nemotron_nano_mamba2_ssd_recurrent_next_optimization_design_minimal_next_gate.tsv",
+    "runtime_not_run": "benchmarks/20260628_1335_nemotron_nano_mamba2_ssd_recurrent_next_optimization_design_runtime_not_run.tsv",
+    "validation_checks": "benchmarks/20260628_1335_nemotron_nano_mamba2_ssd_recurrent_next_optimization_design_validation_checks.tsv"
+  },
+  "validation": {
+    "json_valid": true,
+    "tsv_shapes_valid": true,
+    "build_run": false,
+    "startup_run": false,
+    "benchmark_run": false,
+    "requests": 0,
+    "source_markers_added": false,
+    "default_path_changed": false,
+    "diff_check_passed": true,
+    "dev_syntax_check_passed": true,
+    "protected_config_status": "unchanged; expected tests-only Nano config present",
+    "command_hygiene_note": "one attempted python arithmetic command failed before execution of any task logic; subsequent arithmetic used shell/static artifacts"
+  },
+  "final_state": {
+    "snapshot_utc": "2026-06-28T13:46:43Z",
+    "tmux_sessions": 0,
+    "runtime_or_build_processes": 0,
+    "gpu_compute_processes": 0,
+    "gpu_memory_used_mb": [
+      15,
+      11
+    ],
+    "nano_temp_or_lock_files": 0
+  }
+}

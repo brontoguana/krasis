@@ -1,0 +1,10 @@
+probe	target	fields	purpose
+row64_local_preflight	row=64 head=11 d=22 chunk_idx=1 chunk_pos=0	D*x, self CB, dt, BF16 coefficient bits, y_pre_bf16, sequential bits	Rule out the only local term at the first output mismatch coordinate.
+row64_prior_entry_dot	row=64 head=11 d=22	C64 group1 vector checksum, entry_state1 lane checksum, C dot entry_state1, exp(dA_prefix0), prior term	Directly test whether chunk-entry state feeding row64 is wrong.
+row64_component_delta	row=64 head=11 d=22	candidate vs sequential D*x, local_self, prior, y_pre_bf16, final BF16 bits	Attribute the first output mismatch to one component.
+flat0_initial	state flat0 head0 d0 state0	initial_state bits/value, candidate initial bits/value, sequential initial bits/value	Check whether carry over initial state can contribute.
+flat0_chunk0_state	state flat0	chunk_state0 contribution, per-term checksum/hash, top contributing u positions, BF16(B*dt) bits, decay factor	Identify chunk-state accumulation/cast-order drift.
+flat0_carry	state flat0	dA_last0, exp(dA_last0), carry0=exp(dA_last0)*initial, chunk_state0, entry_state1	Separate carry scalar from chunk-state contribution.
+flat0_final	state flat0	candidate final bits, sequential final bits, max/mean state errors, first state mismatch	Confirm whether state drift remains after row64 correction.
+cast_order_ab_probe	row64 lane and flat0	B*dt BF16 bits, B*dt*decay BF16 bits, contribution under both formulas	Explicitly test the suspected cast-placement difference without changing default behavior.
+first_mismatch_dump	first output/state mismatch from oracle	row/head/d/chunk/pos, candidate/seq bits, all component deltas, relevant state probe values	Ensure a failed v4 candidate leaves enough data for cleanup/design decisions.

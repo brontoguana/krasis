@@ -28,6 +28,13 @@ __device__ __forceinline__ float silu(float x) {
     return x / (1.0f + __expf(-x));
 }
 
+__device__ __forceinline__ void apply_swiglu_limit(float &silu_gate, float &up, float limit) {
+    if (limit > 0.0f) {
+        silu_gate = fminf(silu_gate, limit);
+        up = fminf(fmaxf(up, -limit), limit);
+    }
+}
+
 // ── HQQ4 Dequant ───────────────────────────────────────────────────────
 
 extern "C" __global__ void hqq4_dequant_bf16(
@@ -304,6 +311,19 @@ extern "C" __global__ void gelu_tanh_mul(
     }
 }
 
+extern "C" __global__ void relu2_bf16(
+    __nv_bfloat16* __restrict__ output,
+    const __nv_bfloat16* __restrict__ input,
+    int intermediate_size
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < intermediate_size) {
+        float u = bf16_to_f32(input[i]);
+        float r = fmaxf(u, 0.0f);
+        output[i] = f32_to_bf16(r * r);
+    }
+}
+
 extern "C" __global__ void apply_logit_softcap_f32(
     float* __restrict__ logits,
     float softcap,
@@ -321,7 +341,8 @@ extern "C" __global__ void apply_logit_softcap_f32(
 // ── Sigmoid + TopK for MoE Routing ────────────────────────────────────
 
 // Apply sigmoid to gate logits, optionally add bias and e_score_correction,
-// then find topk expert indices and weights.
+// then find topk expert indices and raw weights. Normalization is a separate
+// post-scale step so decode matches prefill's sigmoid routing order.
 // This is a single-block kernel since num_experts is small (64-512).
 extern "C" __global__ void sigmoid_topk(
     const float* __restrict__ logits,           // [num_experts]
@@ -336,13 +357,14 @@ extern "C" __global__ void sigmoid_topk(
     // This is NOT the bottleneck — gate matmul is.
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
-    // Compute sigmoid scores
+    // Compute selection scores. e_score_correction_bias affects top-k
+    // selection only; routed weights are gathered from the raw sigmoid score.
     extern __shared__ float scores[];
     for (int i = 0; i < num_experts; i++) {
         float x = logits[i];
         if (bias) x += bias[i];
-        scores[i] = 1.0f / (1.0f + __expf(-x));
-        if (e_score_corr) scores[i] += e_score_corr[i];
+        float raw = 1.0f / (1.0f + __expf(-x));
+        scores[i] = raw + (e_score_corr ? e_score_corr[i] : 0.0f);
     }
 
     // Simple selection sort for topk (small k)
@@ -356,15 +378,67 @@ extern "C" __global__ void sigmoid_topk(
             }
         }
         topk_indices[t] = best_idx;
-        topk_weights[t] = best_val;
+        float raw_x = logits[best_idx];
+        if (bias) raw_x += bias[best_idx];
+        topk_weights[t] = 1.0f / (1.0f + __expf(-raw_x));
         scores[best_idx] = -1e30f; // mask out selected
     }
 
-    // Normalize weights
+}
+
+extern "C" __global__ void sigmoid_topk_parallel_scores(
+    const float* __restrict__ logits,           // [num_experts]
+    const float* __restrict__ bias,             // [num_experts] or NULL
+    const float* __restrict__ e_score_corr,     // [num_experts] or NULL
+    int* __restrict__ topk_indices,             // [topk]
+    float* __restrict__ topk_weights,           // [topk]
+    int num_experts,
+    int topk
+) {
+    extern __shared__ float smem[];
+    float* scores = smem;
+    float* raw_scores = smem + num_experts;
+
+    for (int i = threadIdx.x; i < num_experts; i += blockDim.x) {
+        float x = logits[i];
+        if (bias) x += bias[i];
+        float raw = 1.0f / (1.0f + __expf(-x));
+        raw_scores[i] = raw;
+        scores[i] = raw + (e_score_corr ? e_score_corr[i] : 0.0f);
+    }
+    __syncthreads();
+
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        for (int t = 0; t < topk; t++) {
+            int best_idx = -1;
+            float best_val = -1e30f;
+            for (int i = 0; i < num_experts; i++) {
+                if (scores[i] > best_val) {
+                    best_val = scores[i];
+                    best_idx = i;
+                }
+            }
+            topk_indices[t] = best_idx;
+            topk_weights[t] = raw_scores[best_idx];
+            scores[best_idx] = -1e30f;
+        }
+    }
+}
+
+extern "C" __global__ void normalize_topk_weights(
+    float* __restrict__ topk_weights,           // [topk]
+    int topk
+) {
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
     float sum = 0.0f;
-    for (int t = 0; t < topk; t++) sum += topk_weights[t];
+    for (int t = 0; t < topk; t++) {
+        sum += topk_weights[t];
+    }
     if (sum > 0.0f) {
-        for (int t = 0; t < topk; t++) topk_weights[t] /= sum;
+        float inv = 1.0f / sum;
+        for (int t = 0; t < topk; t++) {
+            topk_weights[t] *= inv;
+        }
     }
 }
 
@@ -663,6 +737,21 @@ extern "C" __global__ void weighted_add_bf16(
     }
 }
 
+extern "C" __global__ void weighted_add_bf16_sigmoid_f32(
+    __nv_bfloat16* __restrict__ output,      // [size]
+    const __nv_bfloat16* __restrict__ input,  // [size]
+    const float* __restrict__ gate_logit_ptr, // [1] FP32
+    int size
+) {
+    float weight = gate_logit_ptr ? 1.0f / (1.0f + __expf(-gate_logit_ptr[0])) : 1.0f;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < size) {
+        float o = bf16_to_f32(output[i]);
+        float x = bf16_to_f32(input[i]);
+        output[i] = f32_to_bf16(o + weight * x);
+    }
+}
+
 // Zero a BF16 buffer
 extern "C" __global__ void zero_bf16(
     __nv_bfloat16* __restrict__ buf,
@@ -739,20 +828,6 @@ extern "C" __global__ void scale_bf16_by_ptr(
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < size) {
         output[i] = f32_to_bf16(bf16_to_f32(input[i]) * scale);
-    }
-}
-
-extern "C" __global__ void apply_topk_per_expert_scale(
-    float* __restrict__ topk_weights,
-    const int* __restrict__ topk_ids,
-    const __nv_bfloat16* __restrict__ per_expert_scale,
-    int topk
-) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= topk || per_expert_scale == nullptr) return;
-    int eid = topk_ids[i];
-    if (eid >= 0) {
-        topk_weights[i] *= bf16_to_f32(per_expert_scale[eid]);
     }
 }
 
@@ -1790,11 +1865,13 @@ extern "C" __global__ void apply_rope_half_split(
 ) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int total_heads = num_q_heads + num_kv_heads;
-    int total_work = total_heads * head_dim;
+    int rotary_dim = half_dim * 2;
+    if (rotary_dim > head_dim) rotary_dim = head_dim;
+    int total_work = total_heads * rotary_dim;
     if (tid >= total_work) return;
 
-    int head = tid / head_dim;
-    int i = tid - head * head_dim;
+    int head = tid / rotary_dim;
+    int i = tid - head * rotary_dim;
     int ci = i < half_dim ? i : i - half_dim;
     int src = i < half_dim ? i + half_dim : i - half_dim;
 
@@ -2574,6 +2651,25 @@ extern "C" __global__ void apply_gated_attn_bf16(
     }
 }
 
+// Step attention gate: g_proj produces one raw gate value per attention head.
+// Apply sigmoid(gate[head]) to every element in that head, then convert to BF16.
+extern "C" __global__ void apply_head_gated_attn_bf16(
+    unsigned short* __restrict__ output,    // [nh * hd] BF16
+    const float* __restrict__ attn_out,     // [nh * hd] FP32
+    const float* __restrict__ head_gate,    // [nh] FP32
+    int nh,
+    int hd
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = nh * hd;
+    if (idx < total) {
+        int head = idx / hd;
+        float g = 1.0f / (1.0f + __expf(-head_gate[head]));
+        __nv_bfloat16 result = __float2bfloat16(attn_out[idx] * g);
+        output[idx] = *reinterpret_cast<unsigned short*>(&result);
+    }
+}
+
 // FP32 to BF16 conversion
 extern "C" __global__ void fp32_to_bf16_simple(
     unsigned short* __restrict__ output,    // [n] BF16
@@ -2598,6 +2694,22 @@ extern "C" __global__ void bf16_to_fp32(
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < size) {
         output[i] = bf16_to_f32(input[i]);
+    }
+}
+
+// Duplicate one BF16 vector into column-major repeated columns:
+// dst[col * width + row] = src[row].
+extern "C" __global__ void duplicate_bf16_vector_columns(
+    const __nv_bfloat16* __restrict__ src,
+    __nv_bfloat16* __restrict__ dst,
+    int width,
+    int columns
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = width * columns;
+    if (idx < total) {
+        int row = idx % width;
+        dst[idx] = src[row];
     }
 }
 
@@ -2938,7 +3050,8 @@ extern "C" __global__ void marlin_gemv_int4_fused_silu_accum(
     int N,              // hidden_size
     int group_size,
     float weight,       // routing weight for this expert
-    const float* weight_ptr  // optional: if non-NULL, weight = sigmoid(*weight_ptr)
+    const float* weight_ptr, // optional: if non-NULL, weight = sigmoid(*weight_ptr)
+    float swiglu_limit
 ) {
     // If weight_ptr is non-NULL, read the gate logit and apply sigmoid on GPU
     if (weight_ptr != NULL) {
@@ -2957,6 +3070,7 @@ extern "C" __global__ void marlin_gemv_int4_fused_silu_accum(
         float g = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[i]));
         float u = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[K + i]));
         float silu_g = g / (1.0f + __expf(-g));
+        apply_swiglu_limit(silu_g, u, swiglu_limit);
         __nv_bfloat16 val = __float2bfloat16(silu_g * u);
         s_input[i] = *reinterpret_cast<unsigned short*>(&val);
     }
@@ -3072,7 +3186,8 @@ extern "C" __global__ void marlin_gemv_int8_fused_silu_accum(
     const int* __restrict__ inv_scale_perm,
     int K, int N, int group_size,
     float weight,
-    const float* weight_ptr
+    const float* weight_ptr,
+    float swiglu_limit
 ) {
     if (weight_ptr != NULL) {
         weight = 1.0f / (1.0f + __expf(-(*weight_ptr)));
@@ -3089,6 +3204,7 @@ extern "C" __global__ void marlin_gemv_int8_fused_silu_accum(
         float g = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[i]));
         float u = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[K + i]));
         float silu_g = g / (1.0f + __expf(-g));
+        apply_swiglu_limit(silu_g, u, swiglu_limit);
         __nv_bfloat16 val = __float2bfloat16(silu_g * u);
         s_input[i] = *reinterpret_cast<unsigned short*>(&val);
     }
@@ -3779,7 +3895,8 @@ extern "C" __global__ void marlin_gemv_int4_fused_silu_accum_v2(
     float* __restrict__ partial_out,            // [k_splits * N] FP32
     const int* __restrict__ inv_weight_perm,    // [1024]
     const int* __restrict__ inv_scale_perm,     // [64]
-    int K, int N, int group_size, int k_splits
+    int K, int N, int group_size, int k_splits,
+    float swiglu_limit
 ) {
     extern __shared__ char smem_raw[];
     unsigned short* s_input = (unsigned short*)smem_raw;
@@ -3794,6 +3911,7 @@ extern "C" __global__ void marlin_gemv_int4_fused_silu_accum_v2(
         float g = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[i]));
         float u = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[K + i]));
         float silu_g = g / (1.0f + __expf(-g));
+        apply_swiglu_limit(silu_g, u, swiglu_limit);
         __nv_bfloat16 val = __float2bfloat16(silu_g * u);
         s_input[i] = *reinterpret_cast<unsigned short*>(&val);
     }
@@ -3911,7 +4029,8 @@ extern "C" __global__ void marlin_gemv_int8_fused_silu_accum_v2(
     float* __restrict__ partial_out,
     const int* __restrict__ inv_weight_perm,
     const int* __restrict__ inv_scale_perm,
-    int K, int N, int group_size, int k_splits
+    int K, int N, int group_size, int k_splits,
+    float swiglu_limit
 ) {
     extern __shared__ char smem_raw[];
     unsigned short* s_input = (unsigned short*)smem_raw;
@@ -3925,6 +4044,7 @@ extern "C" __global__ void marlin_gemv_int8_fused_silu_accum_v2(
         float g = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[i]));
         float u = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[K + i]));
         float silu_g = g / (1.0f + __expf(-g));
+        apply_swiglu_limit(silu_g, u, swiglu_limit);
         __nv_bfloat16 val = __float2bfloat16(silu_g * u);
         s_input[i] = *reinterpret_cast<unsigned short*>(&val);
     }
@@ -4181,6 +4301,130 @@ extern "C" __global__ void marlin_gemv_int4_v2_batched(
     }
 }
 
+// INT4 batched GEMV variant for the graph hot path when k_splits == 1.
+// It preserves the same accumulation order as marlin_gemv_int4_v2_batched
+// and reduce_ksplits_bf16_batched, but writes the final BF16 output directly.
+extern "C" __global__ void marlin_gemv_int4_v2_batched_bf16_out(
+    const unsigned long long* __restrict__ packed_ptrs,  // [num_experts] device ptrs to packed weights
+    const unsigned long long* __restrict__ scales_ptrs,  // [num_experts] device ptrs to scale weights
+    const unsigned short* __restrict__ input,            // [K] BF16 (shared across experts)
+    unsigned short* __restrict__ output,                 // [num_experts * N] BF16
+    const int* __restrict__ inv_weight_perm,             // [1024]
+    const int* __restrict__ inv_scale_perm,              // [64]
+    int K, int N, int group_size,
+    const float* __restrict__ weights                    // [num_experts] — skip if zero
+) {
+    int expert_idx = blockIdx.z;
+    if (weights[expert_idx] == 0.0f) return;
+    const unsigned int* packed = (const unsigned int*)packed_ptrs[expert_idx];
+    const unsigned short* scales = (const unsigned short*)scales_ptrs[expert_idx];
+    unsigned short* my_output = output + expert_idx * N;
+
+    extern __shared__ char smem_raw[];
+    unsigned short* s_input = (unsigned short*)smem_raw;
+    int* s_inv_wperm = (int*)(smem_raw + K * 2);
+    int* s_inv_sperm = (int*)(smem_raw + K * 2 + 1024 * 4);
+    float* s_reduce = (float*)(smem_raw + K * 2 + 1024 * 4 + 64 * 4);
+
+    int tid = threadIdx.x;
+
+    for (int i = tid; i < K; i += 256) s_input[i] = input[i];
+    for (int i = tid; i < 1024; i += 256) s_inv_wperm[i] = inv_weight_perm[i];
+    if (tid < 64) s_inv_sperm[tid] = inv_scale_perm[tid];
+    __syncthreads();
+
+    int tn = tid & 15;
+    int k_slice = tid >> 4;
+    int n_tile = blockIdx.x;
+    int n = n_tile * 16 + tn;
+
+    if (n >= N) return;
+
+    int k_tiles_total = K >> 4;
+    int out_cols = N << 1;
+    int split_start = 0;
+    int split_end = k_tiles_total;
+    int split_tiles = split_end - split_start;
+    int tiles_per_slice = split_tiles / 16;
+    int kt_start = split_start + k_slice * tiles_per_slice;
+    int kt_end = (k_slice == 15) ? split_end : kt_start + tiles_per_slice;
+
+    int tile_base = (n_tile << 8) + tn;
+    int perm_u32_col[16];
+    int perm_shift[16];
+    #pragma unroll
+    for (int tk = 0; tk < 16; tk++) {
+        int tile_pos = tile_base + (tk << 4);
+        int chunk = tile_pos >> 10;
+        int local_idx = tile_pos & 1023;
+        int perm_pos = (chunk << 10) + s_inv_wperm[local_idx];
+        perm_u32_col[tk] = perm_pos >> 3;
+        perm_shift[tk] = (perm_pos & 7) << 2;
+    }
+
+    float acc = 0.0f;
+    int cur_scale_group = -1;
+    float cached_scale = 0.0f;
+
+    for (int kt = kt_start; kt < kt_end; kt++) {
+        int k_base = kt << 4;
+        int row_base = kt * out_cols;
+        int sg_start = k_base / group_size;
+        int sg_end = (k_base + 15) / group_size;
+
+        if (sg_start != cur_scale_group) {
+            cur_scale_group = sg_start;
+            int scale_flat = sg_start * N + n;
+            int schunk = scale_flat >> 6;
+            int slocal = scale_flat & 63;
+            int sperm_pos = (schunk << 6) + s_inv_sperm[slocal];
+            unsigned short scale_bits = scales[sperm_pos];
+            cached_scale = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&scale_bits));
+        }
+
+        if (sg_start == sg_end) {
+            #pragma unroll
+            for (int tk = 0; tk < 16; tk++) {
+                unsigned int word = packed[row_base + perm_u32_col[tk]];
+                int raw = (word >> perm_shift[tk]) & 0xF;
+                float w_val = (float)(raw - 8);
+                float x = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&s_input[k_base + tk]));
+                acc += w_val * cached_scale * x;
+            }
+        } else {
+            #pragma unroll
+            for (int tk = 0; tk < 16; tk++) {
+                int k = k_base + tk;
+                int sg = k / group_size;
+                if (sg != cur_scale_group) {
+                    cur_scale_group = sg;
+                    int scale_flat = sg * N + n;
+                    int schunk = scale_flat >> 6;
+                    int slocal = scale_flat & 63;
+                    int sperm_pos = (schunk << 6) + s_inv_sperm[slocal];
+                    unsigned short scale_bits = scales[sperm_pos];
+                    cached_scale = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&scale_bits));
+                }
+                unsigned int word = packed[row_base + perm_u32_col[tk]];
+                int raw = (word >> perm_shift[tk]) & 0xF;
+                float w_val = (float)(raw - 8);
+                float x = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&s_input[k]));
+                acc += w_val * cached_scale * x;
+            }
+        }
+    }
+
+    s_reduce[k_slice * 16 + tn] = acc;
+    __syncthreads();
+
+    if (k_slice == 0) {
+        float sum = 0.0f;
+        for (int ks = 0; ks < 16; ks++) sum += s_reduce[ks * 16 + tn];
+        __nv_bfloat16 result = __float2bfloat16(sum);
+        my_output[n] = *reinterpret_cast<unsigned short*>(&result);
+    }
+}
+
 // ── Batched Marlin INT8 GEMV v2 (analogous to INT4 batched above) ────
 // Differences from INT4: out_cols = N*4, perm >>2 / <<3, mask 0xFF, offset -128
 extern "C" __global__ void marlin_gemv_int8_v2_batched(
@@ -4343,7 +4587,8 @@ extern "C" __global__ void fused_silu_w2_batched(
     const int* __restrict__ inv_weight_perm,
     const int* __restrict__ inv_scale_perm,
     int K, int N, int group_size,
-    const float* __restrict__ weights                       // [num_experts] — skip if zero
+    float swiglu_limit,
+    const float* __restrict__ weights                       // [num_experts] - skip if zero
 ) {
     int expert_idx = blockIdx.z;
     if (weights[expert_idx] == 0.0f) return;
@@ -4364,6 +4609,7 @@ extern "C" __global__ void fused_silu_w2_batched(
         float g = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[i]));
         float u = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[K + i]));
         float silu_g = g / (1.0f + __expf(-g));
+        apply_swiglu_limit(silu_g, u, swiglu_limit);
         __nv_bfloat16 val = __float2bfloat16(silu_g * u);
         s_input[i] = *reinterpret_cast<unsigned short*>(&val);
     }
@@ -4470,6 +4716,7 @@ extern "C" __global__ void fused_silu_w2_batched_timed(
     const int* __restrict__ inv_weight_perm,
     const int* __restrict__ inv_scale_perm,
     int K, int N, int group_size,
+    float swiglu_limit,
     const float* __restrict__ weights,
     unsigned long long* __restrict__ debug_clocks,
     int clock_base,
@@ -4523,6 +4770,7 @@ extern "C" __global__ void fused_silu_w2_batched_timed(
         float g = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&g_bits));
         float u = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&u_bits));
         float silu_g = g / (1.0f + __expf(-g));
+        apply_swiglu_limit(silu_g, u, swiglu_limit);
         __nv_bfloat16 val = __float2bfloat16(silu_g * u);
         unsigned long long t_math_end = 0;
         if (sample_iter) {
@@ -4666,6 +4914,7 @@ extern "C" __global__ void fused_silu_w2_int8_batched(
     const int* __restrict__ inv_weight_perm,
     const int* __restrict__ inv_scale_perm,
     int K, int N, int group_size,
+    float swiglu_limit,
     const float* __restrict__ weights                       // [num_experts] — skip if zero
 ) {
     int expert_idx = blockIdx.z;
@@ -4687,6 +4936,7 @@ extern "C" __global__ void fused_silu_w2_int8_batched(
         float g = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[i]));
         float u = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&gate_up[K + i]));
         float silu_g = g / (1.0f + __expf(-g));
+        apply_swiglu_limit(silu_g, u, swiglu_limit);
         __nv_bfloat16 val = __float2bfloat16(silu_g * u);
         s_input[i] = *reinterpret_cast<unsigned short*>(&val);
     }
@@ -4876,11 +5126,13 @@ extern "C" __global__ void apply_rope_half_split_g(
     int position = *d_position;
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int total_heads = num_q_heads + num_kv_heads;
-    int total_work = total_heads * head_dim;
+    int rotary_dim = half_dim * 2;
+    if (rotary_dim > head_dim) rotary_dim = head_dim;
+    int total_work = total_heads * rotary_dim;
     if (tid >= total_work) return;
 
-    int head = tid / head_dim;
-    int i = tid - head * head_dim;
+    int head = tid / rotary_dim;
+    int i = tid - head * rotary_dim;
     int ci = i < half_dim ? i : i - half_dim;
     int src = i < half_dim ? i + half_dim : i - half_dim;
 
@@ -7064,6 +7316,157 @@ extern "C" __global__ void relu2_w2_batched(
 
     if (k_slice == 0) {
         __nv_bfloat16 result = __float2bfloat16(acc);
+        out[n] = *reinterpret_cast<unsigned short*>(&result);
+    }
+}
+
+// INT4 ReLU2 W2 variant with the coalesced v2-style thread mapping used by
+// the accepted direct W13 BF16 path. It preserves the same ReLU2 BF16 input
+// and W2 BF16 output boundary as relu2_w2_batched.
+extern "C" __global__ void relu2_w2_batched_coalesced(
+    const unsigned long long* __restrict__ w2_packed_ptrs,
+    const unsigned long long* __restrict__ w2_scales_ptrs,
+    const unsigned short* __restrict__ up_outs,
+    unsigned short* __restrict__ expert_outs,
+    const int* __restrict__ inv_weight_perm,
+    const int* __restrict__ inv_scale_perm,
+    int K, int N, int group_size,
+    const float* __restrict__ weights                       // [num_experts] — skip if zero
+) {
+    int expert_idx = blockIdx.z;
+    if (weights[expert_idx] == 0.0f) return;
+    const unsigned int* packed = (const unsigned int*)w2_packed_ptrs[expert_idx];
+    const unsigned short* w2_scales = (const unsigned short*)w2_scales_ptrs[expert_idx];
+    const unsigned short* up_out = up_outs + expert_idx * K;
+    unsigned short* out = expert_outs + expert_idx * N;
+
+    extern __shared__ char smem_raw[];
+    unsigned short* s_input = (unsigned short*)smem_raw;
+    int* s_inv_wperm = (int*)(smem_raw + K * 2);
+    int* s_inv_sperm = (int*)(smem_raw + K * 2 + 1024 * 4);
+    float* s_reduce = (float*)(smem_raw + K * 2 + 1024 * 4 + 64 * 4);
+
+    int tid = threadIdx.x;
+
+    for (int i = tid; i < K; i += 256) {
+        float u = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&up_out[i]));
+        float relu_u = fmaxf(u, 0.0f);
+        float relu2_u = relu_u * relu_u;
+        __nv_bfloat16 val = __float2bfloat16(relu2_u);
+        s_input[i] = *reinterpret_cast<unsigned short*>(&val);
+    }
+    for (int i = tid; i < 1024; i += 256) s_inv_wperm[i] = inv_weight_perm[i];
+    if (tid < 64) s_inv_sperm[tid] = inv_scale_perm[tid];
+    __syncthreads();
+
+    int tn = tid & 15;
+    int k_slice = tid >> 4;
+    int n_tile = blockIdx.x;
+    int n = n_tile * 16 + tn;
+    bool valid_n = n < N;
+
+    int k_tiles_total = K >> 4;
+    int out_cols = N << 1;
+    int tiles_per_slice = k_tiles_total >> 4;
+    int kt_start = k_slice * tiles_per_slice;
+    int kt_end = (k_slice == 15) ? k_tiles_total : (kt_start + tiles_per_slice);
+
+    int tile_base = (n_tile << 8) + tn;
+    int perm_u32_col[16];
+    int perm_shift[16];
+    if (valid_n) {
+        #pragma unroll
+        for (int tk = 0; tk < 16; tk++) {
+            int tile_pos = tile_base + (tk << 4);
+            int chunk = tile_pos >> 10;
+            int local_idx = tile_pos & 1023;
+            int perm_pos = (chunk << 10) + s_inv_wperm[local_idx];
+            perm_u32_col[tk] = perm_pos >> 3;
+            perm_shift[tk] = (perm_pos & 7) << 2;
+        }
+    }
+
+    float acc = 0.0f;
+    int cur_scale_group = -1;
+    float cached_scale = 0.0f;
+
+    for (int kt = kt_start; valid_n && kt < kt_end; kt++) {
+        int k_base = kt << 4;
+        int row_base = kt * out_cols;
+        int sg_start = k_base / group_size;
+        int sg_end = (k_base + 15) / group_size;
+
+        if (sg_start != cur_scale_group) {
+            cur_scale_group = sg_start;
+            int scale_flat = sg_start * N + n;
+            int schunk = scale_flat >> 6;
+            int slocal = scale_flat & 63;
+            int sperm_pos = (schunk << 6) + s_inv_sperm[slocal];
+            unsigned short scale_bits = w2_scales[sperm_pos];
+            cached_scale = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&scale_bits));
+        }
+
+        if (sg_start == sg_end) {
+            #pragma unroll
+            for (int tk = 0; tk < 16; tk++) {
+                unsigned int word = packed[row_base + perm_u32_col[tk]];
+                int raw = (word >> perm_shift[tk]) & 0xF;
+                float w_val = (float)(raw - 8);
+                float x = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&s_input[k_base + tk]));
+                acc += w_val * cached_scale * x;
+            }
+        } else {
+            #pragma unroll
+            for (int tk = 0; tk < 16; tk++) {
+                int k = k_base + tk;
+                int sg = k / group_size;
+                if (sg != cur_scale_group) {
+                    cur_scale_group = sg;
+                    int scale_flat = sg * N + n;
+                    int schunk = scale_flat >> 6;
+                    int slocal = scale_flat & 63;
+                    int sperm_pos = (schunk << 6) + s_inv_sperm[slocal];
+                    unsigned short scale_bits = w2_scales[sperm_pos];
+                    cached_scale = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&scale_bits));
+                }
+                unsigned int word = packed[row_base + perm_u32_col[tk]];
+                int raw = (word >> perm_shift[tk]) & 0xF;
+                float w_val = (float)(raw - 8);
+                float x = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&s_input[k]));
+                acc += w_val * cached_scale * x;
+            }
+        }
+    }
+
+    s_reduce[k_slice * 16 + tn] = acc;
+    __syncthreads();
+
+    if (k_slice == 0 && valid_n) {
+        // Match relu2_w2_batched's width-16 warp-shuffle reduction tree.
+        float sum = s_reduce[0 * 16 + tn];
+        sum += s_reduce[8 * 16 + tn];
+        float t4 = s_reduce[4 * 16 + tn];
+        t4 += s_reduce[12 * 16 + tn];
+        sum += t4;
+        float t2 = s_reduce[2 * 16 + tn];
+        t2 += s_reduce[10 * 16 + tn];
+        float t6 = s_reduce[6 * 16 + tn];
+        t6 += s_reduce[14 * 16 + tn];
+        t2 += t6;
+        sum += t2;
+        float t1 = s_reduce[1 * 16 + tn];
+        t1 += s_reduce[9 * 16 + tn];
+        float t5 = s_reduce[5 * 16 + tn];
+        t5 += s_reduce[13 * 16 + tn];
+        t1 += t5;
+        float t3 = s_reduce[3 * 16 + tn];
+        t3 += s_reduce[11 * 16 + tn];
+        float t7 = s_reduce[7 * 16 + tn];
+        t7 += s_reduce[15 * 16 + tn];
+        t3 += t7;
+        t1 += t3;
+        sum += t1;
+        __nv_bfloat16 result = __float2bfloat16(sum);
         out[n] = *reinterpret_cast<unsigned short*>(&result);
     }
 }

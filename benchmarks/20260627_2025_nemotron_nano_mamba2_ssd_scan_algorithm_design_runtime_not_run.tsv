@@ -1,0 +1,9 @@
+field	value
+runtime_executed	false
+reason	Design gate only; source/math inspection did not require runtime confirmation.
+benchmarks_executed	false
+requests_sent	0
+cache_generation	false
+source_runtime_changes	false
+decode_hcs_changes	false
+production_enablement	false

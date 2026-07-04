@@ -1,0 +1,3 @@
+attempt	command	build_or_cache_flags	test_endpoints	server_ready	http_status	requests_sent	result	note
+first	./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf	false	false	true	404	0_model_requests	stopped_and_retried	/v1/internal/reference_test requires --test-endpoints; cache reuse was clean.
+second	./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf --test-endpoints	false	true	true	200,200,200	3	completed	--test-endpoints is required for the requested endpoint and is not a build/cache flag.

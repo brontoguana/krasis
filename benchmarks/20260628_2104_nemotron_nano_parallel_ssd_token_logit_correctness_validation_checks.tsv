@@ -1,0 +1,12 @@
+check	result	detail
+summary_json	pass	jq validated benchmarks/20260628_2104_nemotron_nano_parallel_ssd_token_logit_correctness_summary.json
+tsv_shapes	pass	all 20260628_2104 TSV artifacts have consistent field counts
+benchmark_links	pass	all 20260628_2104 links in BENCHMARKS.md resolve
+oracle_records	pass	69 oracle records, 0 failed records
+token_logit	pass	token 1044 text comma; 12 tracked top-logprobs exact; serial/control max_delta 0.000000
+git_diff_check	pass	krasis-nemotron-dev and krasis-internal
+dev_syntax	pass	bash -n dev
+protected_configs	pass	testconfigs unchanged; expected untracked tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf remains
+runtime_idle	pass	2026-06-28T22:36:34Z no tmux session and no runtime/build/GPU compute process
+gpu_memory	pass	GPU0 15 MB used, GPU1 11 MB used
+nano_temp_locks	pass	no gate-created temp/lock files; standing Hugging Face download locks only

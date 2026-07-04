@@ -1,0 +1,74 @@
+{
+  "gate": "20260627_2011_nemotron_nano_mamba2_ssd_rejected_prototype_cleanup",
+  "status": "closed",
+  "opened_utc": "2026-06-27T20:11:00Z",
+  "closed_utc": "2026-06-27T20:23:18Z",
+  "record_first": {
+    "source_gate": "20260627_1938_nemotron_nano_mamba2_ssd_scan_gated_prototype",
+    "oracle_correctness_passed": true,
+    "oracle_rows": 69,
+    "output_mismatches": 0,
+    "state_mismatches": 0,
+    "max_mean_error": 0.0,
+    "baseline_ssd_scan_ms": 114449.4,
+    "prototype_ssd_scan_ms": 120711.931,
+    "ssd_scan_regression_ms": 6262.531,
+    "ssd_scan_regression_pct": 5.472,
+    "baseline_prefill_ms": 117356.0,
+    "prototype_prefill_ms": 123870.0,
+    "prefill_regression_pct": 5.551,
+    "decision": "prototype is not worth keeping"
+  },
+  "implementation": {
+    "reverted_only_1938_prototype_additions": true,
+    "preserved_1908_mamba2_substage_instrumentation": true,
+    "preserved_existing_benchmark_artifacts": true,
+    "removed_cuda_prototype_kernel_and_wrapper": true,
+    "removed_rust_prototype_env_gates_oracle_dispatch_symbol_checks": true,
+    "removed_python_prototype_warmup_fail_closed_handling": true,
+    "prototype_markers_remaining": 0
+  },
+  "build": {
+    "command": "./dev build",
+    "exit_code": 0,
+    "duration_s": 169,
+    "log": "benchmarks/20260627_2011_nemotron_nano_mamba2_ssd_rejected_prototype_cleanup_build.log"
+  },
+  "startup_diagnostic": {
+    "command": "env -u KRASIS_MAMBA2_SSD_REUSE_PROTO -u KRASIS_MAMBA2_SSD_REUSE_PROTO_ORACLE KRASIS_STARTUP_DIAG=1 KRASIS_PREFILL_TIMING=1 KRASIS_PREFILL_LIVENESS_TIMING=1 KRASIS_STARTUP_WARMUP_TOKENS=128 KRASIS_STARTUP_CAL_SHORT_TOKENS=128 KRASIS_STARTUP_CAL_LONG_TOKENS=128 KRASIS_STARTUP_EXIT_AFTER_CALIBRATION=1 ./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+    "exit_code": 0,
+    "tokens": 128,
+    "requests_sent": 0,
+    "benchmark_path": false,
+    "prototype_envs": false,
+    "cache_rebuild_flags": false,
+    "hqq_attention_reused": true,
+    "effective_marlin_g64_loaded": true,
+    "cache_write_evidence": false,
+    "startup_exit_after_calibration": true,
+    "long_calibration_prefill_s": 0.85,
+    "long_calibration_prefill_tps": 149.9,
+    "mamba2_ssd_scan_ms": 293.5,
+    "mamba2_ssd_calls": 23,
+    "log": "benchmarks/20260627_2011_nemotron_nano_mamba2_ssd_rejected_prototype_cleanup_startup_diagnostic.log"
+  },
+  "cleanup": {
+    "final_snapshot_utc": "2026-06-27T20:23:18Z",
+    "gpu_memory_mb": {
+      "0": 15,
+      "1": 11
+    },
+    "disk_free": "588G",
+    "ram_available": "967Gi",
+    "tmux_or_runtime_processes": false,
+    "nvidia_compute_processes": false,
+    "cache_temp_lock_files": false
+  },
+  "artifacts": {
+    "build_result": "benchmarks/20260627_2011_nemotron_nano_mamba2_ssd_rejected_prototype_cleanup_build_result.tsv",
+    "runtime_attempt": "benchmarks/20260627_2011_nemotron_nano_mamba2_ssd_rejected_prototype_cleanup_runtime_attempt.tsv",
+    "startup_cache_validation": "benchmarks/20260627_2011_nemotron_nano_mamba2_ssd_rejected_prototype_cleanup_startup_cache_validation.tsv",
+    "source_artifacts": "benchmarks/20260627_2011_nemotron_nano_mamba2_ssd_rejected_prototype_cleanup_source_artifacts.tsv",
+    "validation": "benchmarks/20260627_2011_nemotron_nano_mamba2_ssd_rejected_prototype_cleanup_validation_checks.tsv"
+  }
+}

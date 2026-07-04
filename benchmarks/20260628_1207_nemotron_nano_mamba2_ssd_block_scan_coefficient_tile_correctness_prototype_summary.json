@@ -1,0 +1,129 @@
+{
+  "gate": "20260628_1207_nemotron_nano_mamba2_ssd_block_scan_coefficient_tile_correctness_prototype",
+  "opened_utc": "2026-06-28T12:07:56Z",
+  "closed_utc": "2026-06-28T12:30:21Z",
+  "status": "closed",
+  "scope": "opt_in_coefficient_tile_correctness_prototype",
+  "record_first": {
+    "source_gate": "20260628_1157_nemotron_nano_mamba2_ssd_block_scan_next_optimization_design",
+    "gemma_baseline": {
+      "prefill_tok_s": 5619.6,
+      "internal_decode_tok_s": 92.43,
+      "network_tok_s": 155.69
+    },
+    "nano_baseline": {
+      "prefill_tok_s": 346.5,
+      "internal_decode_tok_s": 94.48,
+      "network_tok_s": 164.75
+    },
+    "selected_target": "guarded per-pair coefficient tiling inside opt-in block-scan output",
+    "preserve": [
+      "default sequential SSD",
+      "v5 diagnostics and timing",
+      "accepted 1022/1113 block-scan correctness surface",
+      "c_state_total_exact",
+      "D/prior assembly",
+      "BF16 cast placement",
+      "row/chunk indexing",
+      "output accumulation order"
+    ],
+    "forbidden": [
+      "local_old_state_exact",
+      "affine summaries",
+      "production enablement",
+      "default-path changes",
+      "requests",
+      "speed benchmark",
+      "decode/HCS work",
+      "unrelated cleanup"
+    ]
+  },
+  "implementation": {
+    "opt_in_envs": [
+      "KRASIS_MAMBA2_SSD_BLOCK_SCAN=1",
+      "KRASIS_MAMBA2_SSD_BLOCK_SCAN_ORACLE=1",
+      "KRASIS_MAMBA2_SSD_BLOCK_SCAN_COEFF_TILE=1"
+    ],
+    "cuda_kernel": "mamba2_ssd_block_scan_output_coeff_tile_kernel",
+    "accepted_state_source": "exact_token_order_f32_recurrent_state",
+    "accepted_c_state_source": "c_state_total_exact from 1022 correction",
+    "output_accumulation_order": "unchanged increasing-u order",
+    "default_path_changed": false,
+    "local_old_state_exact_reintroduced": false,
+    "affine_summaries_used_as_state": false
+  },
+  "validation": {
+    "build_exit": 0,
+    "small_startup_exit": 0,
+    "long_startup_exit": 0,
+    "small_oracle_records": 69,
+    "long_oracle_records": 23,
+    "total_oracle_records": 138,
+    "oracle_passed": 138,
+    "output_mismatches": 0,
+    "state_mismatches": 0,
+    "probe_failures": 0,
+    "row97_term_probe_failures": 0,
+    "row64_state0_probe": "exact",
+    "row82_state14_probe": "exact",
+    "requests": 0,
+    "speed_benchmark": false,
+    "decode_hcs_changes": false
+  },
+  "long_39920_timing_ms": {
+    "records": 23,
+    "total_block_scan_path": 7179.206093739131,
+    "sequential_oracle_kernel": 4960.68509326087,
+    "block_scan_recurrent_kernel": 715.7697665652174,
+    "block_scan_output_kernel": 500.6286002173913,
+    "full_buffer_downloads": 391.73525113043473,
+    "host_comparison": 537.3217927391304,
+    "commit_copies": 0.48902200000000007,
+    "state_snapshot_copies": 13.178852391304346,
+    "buffer_alloc_zeroed": 1.0791346086956524,
+    "residual": 58.31858082608719
+  },
+  "long_39920_output_subloop_ms": {
+    "records": 23,
+    "output_kernel_total": 500.6286002173913,
+    "coefficient_tile_build": 231.7402035922308,
+    "d_prior_setup": 14.49149378453301,
+    "local_old_cancellation": 5.320889522431779,
+    "local_triangular_accumulation": 8.424741743850314,
+    "cast_store": 0.719855600959571,
+    "unattributed_sync_or_loop_residual": 239.93141597338578,
+    "valid_output_elements": 163512320,
+    "local_loop_iterations": 5312577536,
+    "coefficient_pairs": 83009024,
+    "coefficient_tile_shared_bytes": 12992
+  },
+  "comparison_to_1128": {
+    "old_total_block_scan_path_ms": 10998.269984217393,
+    "new_total_block_scan_path_ms": 7179.206093739131,
+    "total_delta_ms": -3819.0638904782627,
+    "total_delta_pct": -34.724223863922695,
+    "old_output_kernel_ms": 4318.312474739131,
+    "new_output_kernel_ms": 500.6286002173913,
+    "output_delta_ms": -3817.68387452174,
+    "output_delta_pct": -88.40684635153379,
+    "old_local_old_ms": 1845.641363228634,
+    "new_local_old_ms": 5.320889522431779,
+    "local_old_delta_pct": -99.71170512167522,
+    "old_local_tri_ms": 2158.5134908488967,
+    "new_local_tri_ms": 8.424741743850314,
+    "local_tri_delta_pct": -99.60969705403429
+  },
+  "decision": {
+    "correctness_accepted": true,
+    "timing_improved_vs_1128": true,
+    "production_enabled": false,
+    "next_focus": "coefficient tile build and residual/synchronization cost are now the main candidate-side output-kernel costs"
+  },
+  "final_state": {
+    "snapshot_utc": "2026-06-28T12:30:21Z",
+    "gpu_idle": "GPU0 15 MB, GPU1 11 MB",
+    "runtime_processes": "none",
+    "nvidia_compute_processes": "none",
+    "krasis_temp_locks": "none"
+  }
+}

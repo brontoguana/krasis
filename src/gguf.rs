@@ -59,8 +59,12 @@ impl GgmlType {
             GgmlType::Q4_0 | GgmlType::Q4_1 => 32,
             GgmlType::Q5_0 | GgmlType::Q5_1 => 32,
             GgmlType::Q8_0 | GgmlType::Q8_1 => 32,
-            GgmlType::Q2_K | GgmlType::Q3_K | GgmlType::Q4_K |
-            GgmlType::Q5_K | GgmlType::Q6_K | GgmlType::Q8_K => 256,
+            GgmlType::Q2_K
+            | GgmlType::Q3_K
+            | GgmlType::Q4_K
+            | GgmlType::Q5_K
+            | GgmlType::Q6_K
+            | GgmlType::Q8_K => 256,
         }
     }
 
@@ -69,18 +73,18 @@ impl GgmlType {
         match self {
             GgmlType::F32 => 4,
             GgmlType::F16 | GgmlType::BF16 => 2,
-            GgmlType::Q4_0 => 2 + 16,       // 18: fp16 scale + 16 bytes (32 nibbles)
-            GgmlType::Q4_1 => 2 + 2 + 16,   // 20: fp16 d + fp16 m + 16 bytes
-            GgmlType::Q5_0 => 2 + 4 + 16,   // 22: fp16 d + 4 bytes qh + 16 bytes qs
+            GgmlType::Q4_0 => 2 + 16, // 18: fp16 scale + 16 bytes (32 nibbles)
+            GgmlType::Q4_1 => 2 + 2 + 16, // 20: fp16 d + fp16 m + 16 bytes
+            GgmlType::Q5_0 => 2 + 4 + 16, // 22: fp16 d + 4 bytes qh + 16 bytes qs
             GgmlType::Q5_1 => 2 + 2 + 4 + 16, // 24
-            GgmlType::Q8_0 => 2 + 32,       // 34: fp16 d + 32 bytes
-            GgmlType::Q8_1 => 4 + 4 + 32,   // 40: fp32 d + fp32 s + 32 bytes
+            GgmlType::Q8_0 => 2 + 32, // 34: fp16 d + 32 bytes
+            GgmlType::Q8_1 => 4 + 4 + 32, // 40: fp32 d + fp32 s + 32 bytes
             GgmlType::Q2_K => 2 + 2 + 16 + 64, // 84
             GgmlType::Q3_K => 2 + 32 + 12 + 64, // 110
             GgmlType::Q4_K => 2 + 2 + 12 + 128, // 144
             GgmlType::Q5_K => 2 + 2 + 12 + 32 + 128, // 176
             GgmlType::Q6_K => 128 + 64 + 16 + 2, // 210
-            GgmlType::Q8_K => 4 + 256 + 16,  // 276: fp32 d + 256 bytes qs + 16 fp16 bsums
+            GgmlType::Q8_K => 4 + 256 + 16, // 276: fp32 d + 256 bytes qs + 16 fp16 bsums
         }
     }
 
@@ -283,15 +287,33 @@ impl<'a> Reader<'a> {
     /// Skip a metadata value based on its type.
     fn skip_value(&mut self, vtype: u32) -> Result<(), String> {
         match vtype {
-            0 => { self.pos += 1; } // u8
-            1 => { self.pos += 1; } // i8
-            2 => { self.pos += 2; } // u16
-            3 => { self.pos += 2; } // i16
-            4 => { self.pos += 4; } // u32
-            5 => { self.pos += 4; } // i32
-            6 => { self.pos += 4; } // f32
-            7 => { self.pos += 1; } // bool
-            8 => { let _ = self.read_string()?; } // string
+            0 => {
+                self.pos += 1;
+            } // u8
+            1 => {
+                self.pos += 1;
+            } // i8
+            2 => {
+                self.pos += 2;
+            } // u16
+            3 => {
+                self.pos += 2;
+            } // i16
+            4 => {
+                self.pos += 4;
+            } // u32
+            5 => {
+                self.pos += 4;
+            } // i32
+            6 => {
+                self.pos += 4;
+            } // f32
+            7 => {
+                self.pos += 1;
+            } // bool
+            8 => {
+                let _ = self.read_string()?;
+            } // string
             9 => {
                 // Array: element_type (u32) + count (u64) + elements
                 let elem_type = self.read_u32()?;
@@ -300,9 +322,15 @@ impl<'a> Reader<'a> {
                     self.skip_value(elem_type)?;
                 }
             }
-            10 => { self.pos += 8; } // u64
-            11 => { self.pos += 8; } // i64
-            12 => { self.pos += 8; } // f64
+            10 => {
+                self.pos += 8;
+            } // u64
+            11 => {
+                self.pos += 8;
+            } // i64
+            12 => {
+                self.pos += 8;
+            } // f64
             _ => return Err(format!("Unknown metadata value type: {vtype}")),
         }
         if self.pos > self.data.len() {
@@ -318,10 +346,10 @@ const GGUF_DEFAULT_ALIGNMENT: usize = 32;
 impl GgufFile {
     /// Open and parse a GGUF file.
     pub fn open(path: &Path) -> Result<Self, String> {
-        let file = std::fs::File::open(path)
-            .map_err(|e| format!("Failed to open GGUF file: {e}"))?;
-        let mmap = unsafe { Mmap::map(&file) }
-            .map_err(|e| format!("Failed to mmap GGUF file: {e}"))?;
+        let file =
+            std::fs::File::open(path).map_err(|e| format!("Failed to open GGUF file: {e}"))?;
+        let mmap =
+            unsafe { Mmap::map(&file) }.map_err(|e| format!("Failed to mmap GGUF file: {e}"))?;
 
         if mmap.len() < 24 {
             return Err("GGUF file too small for header".into());
@@ -339,7 +367,9 @@ impl GgufFile {
 
         let version = r.read_u32()?;
         if version < 2 || version > 3 {
-            return Err(format!("Unsupported GGUF version: {version} (supported: 2-3)"));
+            return Err(format!(
+                "Unsupported GGUF version: {version} (supported: 2-3)"
+            ));
         }
 
         let tensor_count = r.read_u64()? as usize;
@@ -407,13 +437,16 @@ impl GgufFile {
             let n_elements: u64 = dims.iter().product();
 
             tensor_names.push(name.clone());
-            tensors.insert(name, GgufTensorInfo {
-                name: tensor_names.last().unwrap().clone(),
-                dims,
-                dtype,
-                offset,
-                n_elements,
-            });
+            tensors.insert(
+                name,
+                GgufTensorInfo {
+                    name: tensor_names.last().unwrap().clone(),
+                    dims,
+                    dtype,
+                    offset,
+                    n_elements,
+                },
+            );
         }
 
         // Compute data section offset (aligned)
@@ -436,7 +469,11 @@ impl GgufFile {
         type_summary.sort_by_key(|(_, c)| std::cmp::Reverse(**c));
         log::info!(
             "GGUF tensor types: {}",
-            type_summary.iter().map(|(t, c)| format!("{t}={c}")).collect::<Vec<_>>().join(", "),
+            type_summary
+                .iter()
+                .map(|(t, c)| format!("{t}={c}"))
+                .collect::<Vec<_>>()
+                .join(", "),
         );
 
         Ok(GgufFile {
@@ -456,7 +493,8 @@ impl GgufFile {
         if end > self.mmap.len() {
             return Err(format!(
                 "Tensor '{}' data [{start}..{end}) exceeds file size {}",
-                info.name, self.mmap.len(),
+                info.name,
+                self.mmap.len(),
             ));
         }
         Ok(&self.mmap[start..end])
@@ -477,7 +515,10 @@ impl GgufFile {
             GgmlType::Q5_K => dequant_q5_k(data, n_elements),
             GgmlType::Q6_K => dequant_q6_k(data, n_elements),
             GgmlType::Q8_0 => dequant_q8_0(data, n_elements),
-            other => Err(format!("Dequantization not implemented for {}", other.name())),
+            other => Err(format!(
+                "Dequantization not implemented for {}",
+                other.name()
+            )),
         }
     }
 
@@ -485,7 +526,11 @@ impl GgufFile {
     ///
     /// Returns (gate_name, up_name, down_name) or None if not found.
     /// Supports both merged (`ffn_gate_exps`) and per-expert (`ffn_gate.{E}`) naming.
-    pub fn find_expert_tensors(&self, layer: usize, expert: usize) -> Option<(String, String, String)> {
+    pub fn find_expert_tensors(
+        &self,
+        layer: usize,
+        expert: usize,
+    ) -> Option<(String, String, String)> {
         // Try per-expert naming first: blk.{L}.ffn_gate.{E}.weight
         let gate_per = format!("blk.{layer}.ffn_gate.{expert}.weight");
         let up_per = format!("blk.{layer}.ffn_up.{expert}.weight");
@@ -510,7 +555,9 @@ impl GgufFile {
 
     /// Check if this GGUF uses merged expert tensors (ffn_gate_exps).
     pub fn has_merged_experts(&self) -> bool {
-        self.tensor_names.iter().any(|n| n.contains("ffn_gate_exps"))
+        self.tensor_names
+            .iter()
+            .any(|n| n.contains("ffn_gate_exps"))
     }
 
     /// Find shared expert tensor names for a given layer.
@@ -527,7 +574,10 @@ impl GgufFile {
 
     /// Evict all pages from page cache. Call after all data has been copied out.
     pub fn evict_page_cache(&self) {
-        let _ = unsafe { self.mmap.unchecked_advise(memmap2::UncheckedAdvice::DontNeed) };
+        let _ = unsafe {
+            self.mmap
+                .unchecked_advise(memmap2::UncheckedAdvice::DontNeed)
+        };
     }
 }
 
@@ -576,14 +626,16 @@ fn dequant_q8_0(data: &[u8], n: usize) -> Result<Vec<f32>, String> {
     const BLOCK_BYTES: usize = 2 + 32; // 34 bytes per block
     let nb = n / QK;
     if data.len() < nb * BLOCK_BYTES {
-        return Err(format!("Q8_0 data too short: {} < {}", data.len(), nb * BLOCK_BYTES));
+        return Err(format!(
+            "Q8_0 data too short: {} < {}",
+            data.len(),
+            nb * BLOCK_BYTES
+        ));
     }
     let mut out = vec![0.0f32; n];
     for i in 0..nb {
         let block = &data[i * BLOCK_BYTES..];
-        let d = half::f16::from_bits(
-            u16::from_le_bytes(block[0..2].try_into().unwrap())
-        ).to_f32();
+        let d = half::f16::from_bits(u16::from_le_bytes(block[0..2].try_into().unwrap())).to_f32();
         let qs = &block[2..2 + QK];
         for j in 0..QK {
             out[i * QK + j] = d * (qs[j] as i8) as f32;
@@ -601,14 +653,16 @@ fn dequant_q5_0(data: &[u8], n: usize) -> Result<Vec<f32>, String> {
     const BLOCK_BYTES: usize = 22; // fp16 d (2) + qh (4) + qs (16)
     let nb = n / QK;
     if data.len() < nb * BLOCK_BYTES {
-        return Err(format!("Q5_0 data too short: {} < {}", data.len(), nb * BLOCK_BYTES));
+        return Err(format!(
+            "Q5_0 data too short: {} < {}",
+            data.len(),
+            nb * BLOCK_BYTES
+        ));
     }
     let mut out = vec![0.0f32; n];
     for i in 0..nb {
         let block = &data[i * BLOCK_BYTES..];
-        let d = half::f16::from_bits(
-            u16::from_le_bytes(block[0..2].try_into().unwrap())
-        ).to_f32();
+        let d = half::f16::from_bits(u16::from_le_bytes(block[0..2].try_into().unwrap())).to_f32();
         let qh = u32::from_le_bytes(block[2..6].try_into().unwrap());
         let qs = &block[6..6 + 16];
 
@@ -637,14 +691,16 @@ fn dequant_q4_0(data: &[u8], n: usize) -> Result<Vec<f32>, String> {
     const BLOCK_BYTES: usize = 18; // fp16 d (2) + qs (16)
     let nb = n / QK;
     if data.len() < nb * BLOCK_BYTES {
-        return Err(format!("Q4_0 data too short: {} < {}", data.len(), nb * BLOCK_BYTES));
+        return Err(format!(
+            "Q4_0 data too short: {} < {}",
+            data.len(),
+            nb * BLOCK_BYTES
+        ));
     }
     let mut out = vec![0.0f32; n];
     for i in 0..nb {
         let block = &data[i * BLOCK_BYTES..];
-        let d = half::f16::from_bits(
-            u16::from_le_bytes(block[0..2].try_into().unwrap())
-        ).to_f32();
+        let d = half::f16::from_bits(u16::from_le_bytes(block[0..2].try_into().unwrap())).to_f32();
         let qs = &block[2..2 + 16];
 
         for j in 0..QK {
@@ -683,7 +739,11 @@ fn dequant_q4_k(data: &[u8], n: usize) -> Result<Vec<f32>, String> {
     const BLOCK_BYTES: usize = 144;
     let nb = n / QK;
     if data.len() < nb * BLOCK_BYTES {
-        return Err(format!("Q4_K data too short: {} < {}", data.len(), nb * BLOCK_BYTES));
+        return Err(format!(
+            "Q4_K data too short: {} < {}",
+            data.len(),
+            nb * BLOCK_BYTES
+        ));
     }
 
     let mut out = vec![0.0f32; n];
@@ -691,15 +751,12 @@ fn dequant_q4_k(data: &[u8], n: usize) -> Result<Vec<f32>, String> {
     for i in 0..nb {
         let block = &data[i * BLOCK_BYTES..];
 
-        let d = half::f16::from_bits(
-            u16::from_le_bytes(block[0..2].try_into().unwrap())
-        ).to_f32();
-        let dmin = half::f16::from_bits(
-            u16::from_le_bytes(block[2..4].try_into().unwrap())
-        ).to_f32();
+        let d = half::f16::from_bits(u16::from_le_bytes(block[0..2].try_into().unwrap())).to_f32();
+        let dmin =
+            half::f16::from_bits(u16::from_le_bytes(block[2..4].try_into().unwrap())).to_f32();
 
         let scales = &block[4..16]; // 12 bytes
-        let qs = &block[16..144];   // 128 bytes
+        let qs = &block[16..144]; // 128 bytes
 
         let base = i * QK;
         let mut is = 0usize;
@@ -742,7 +799,11 @@ fn dequant_q5_k(data: &[u8], n: usize) -> Result<Vec<f32>, String> {
     const BLOCK_BYTES: usize = 176;
     let nb = n / QK;
     if data.len() < nb * BLOCK_BYTES {
-        return Err(format!("Q5_K data too short: {} < {}", data.len(), nb * BLOCK_BYTES));
+        return Err(format!(
+            "Q5_K data too short: {} < {}",
+            data.len(),
+            nb * BLOCK_BYTES
+        ));
     }
 
     let mut out = vec![0.0f32; n];
@@ -750,16 +811,13 @@ fn dequant_q5_k(data: &[u8], n: usize) -> Result<Vec<f32>, String> {
     for i in 0..nb {
         let block = &data[i * BLOCK_BYTES..];
 
-        let d = half::f16::from_bits(
-            u16::from_le_bytes(block[0..2].try_into().unwrap())
-        ).to_f32();
-        let dmin = half::f16::from_bits(
-            u16::from_le_bytes(block[2..4].try_into().unwrap())
-        ).to_f32();
+        let d = half::f16::from_bits(u16::from_le_bytes(block[0..2].try_into().unwrap())).to_f32();
+        let dmin =
+            half::f16::from_bits(u16::from_le_bytes(block[2..4].try_into().unwrap())).to_f32();
 
-        let scales = &block[4..16];   // 12 bytes
-        let qh = &block[16..48];      // 32 bytes (256 bits)
-        let qs = &block[48..176];     // 128 bytes
+        let scales = &block[4..16]; // 12 bytes
+        let qh = &block[16..48]; // 32 bytes (256 bits)
+        let qs = &block[48..176]; // 128 bytes
 
         let base = i * QK;
         let mut is = 0usize;
@@ -815,7 +873,11 @@ fn dequant_q6_k(data: &[u8], n: usize) -> Result<Vec<f32>, String> {
     const BLOCK_BYTES: usize = 210;
     let nb = n / QK;
     if data.len() < nb * BLOCK_BYTES {
-        return Err(format!("Q6_K data too short: {} < {}", data.len(), nb * BLOCK_BYTES));
+        return Err(format!(
+            "Q6_K data too short: {} < {}",
+            data.len(),
+            nb * BLOCK_BYTES
+        ));
     }
 
     let mut out = vec![0.0f32; n];
@@ -823,12 +885,11 @@ fn dequant_q6_k(data: &[u8], n: usize) -> Result<Vec<f32>, String> {
     for i in 0..nb {
         let block = &data[i * BLOCK_BYTES..];
 
-        let ql_all = &block[0..128];     // lower 4 bits
-        let qh_all = &block[128..192];   // upper 2 bits
-        let sc_all = &block[192..208];   // int8 scales
-        let d = half::f16::from_bits(
-            u16::from_le_bytes(block[208..210].try_into().unwrap())
-        ).to_f32();
+        let ql_all = &block[0..128]; // lower 4 bits
+        let qh_all = &block[128..192]; // upper 2 bits
+        let sc_all = &block[192..208]; // int8 scales
+        let d =
+            half::f16::from_bits(u16::from_le_bytes(block[208..210].try_into().unwrap())).to_f32();
 
         let base = i * QK;
         let mut out_offset = 0usize;
@@ -869,7 +930,11 @@ fn dequant_q6_k(data: &[u8], n: usize) -> Result<Vec<f32>, String> {
 ///
 /// Accepts raw byte data + GGML type + element count. Used by the GGUF→AVX2
 /// cache builder to dequantize individual expert tensors from already-loaded data.
-pub fn dequantize_raw_data(dtype: GgmlType, data: &[u8], n_elements: usize) -> Result<Vec<f32>, String> {
+pub fn dequantize_raw_data(
+    dtype: GgmlType,
+    data: &[u8],
+    n_elements: usize,
+) -> Result<Vec<f32>, String> {
     match dtype {
         GgmlType::F32 => dequant_f32(data, n_elements),
         GgmlType::F16 => dequant_f16(data, n_elements),
@@ -880,7 +945,10 @@ pub fn dequantize_raw_data(dtype: GgmlType, data: &[u8], n_elements: usize) -> R
         GgmlType::Q5_K => dequant_q5_k(data, n_elements),
         GgmlType::Q6_K => dequant_q6_k(data, n_elements),
         GgmlType::Q8_0 => dequant_q8_0(data, n_elements),
-        other => Err(format!("Dequantization not implemented for {}", other.name())),
+        other => Err(format!(
+            "Dequantization not implemented for {}",
+            other.name()
+        )),
     }
 }
 

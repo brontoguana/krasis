@@ -1,0 +1,16 @@
+check	status	details
+record_first_0524	passed	86/0, ./dev build passed, case-2 HTTP 200, 23 consume rows, 330882048 bytes, token 1044->1321 recorded
+live_server_rerun	passed	not run
+source_changes	passed	none
+focused_expert_hqq_tests	skipped	no source changes in this gate
+dev_build	skipped	no source changes in this gate
+artifact_assertions	passed	summary and generated TSVs validated
+bash_n_dev	passed	bash -n dev
+py_compile	passed	./dev python -m py_compile python/krasis/*.py
+git_diff_check	passed	git diff --check
+internal_git_diff_check	passed	git -C krasis-internal diff --check
+protected_config_check	passed	only pre-existing untracked tests/nemotron-nano-bf16-experts-a16.conf
+cleanup	passed	./dev kill returned all GPUs clear
+final_tmux	passed	no tmux server
+final_process_check	passed	no matching runtime/comparator/generator/curl process
+final_gpu_snapshot	passed	0:15MB used, 1:11MB used

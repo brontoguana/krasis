@@ -1,0 +1,18 @@
+check	status	detail
+artifact_assertions	passed	summary, quality TSV, consume TSV, request TSV assertions passed
+bash_n_dev	passed	bash -n dev
+cargo_fmt_check	skipped_unavailable	cargo not on raw shell PATH; no source changes in this gate
+git_diff_check_krasis	passed	git diff --check
+git_diff_check_internal	passed	git diff --check
+protected_config_check	passed	only known pre-existing untracked tests/nemotron-nano-bf16-experts-a16.conf
+bf16_server_rerun	passed	false
+production_hqq	passed	not enabled; guarded diagnostic consume only
+speed_benchmark	passed	not run
+decode_hcs_change	passed	none
+fallback	passed	none added
+selected_expert_retargeting	passed	none
+hqq8	passed	not touched
+int4_hqq4	passed	not touched
+cleanup_tmux	passed	no tmux server
+cleanup_gpu	passed	GPU memory used 15 MB / 11 MB, utilization 0 / 0
+cleanup_processes	passed	no matching non-zombie runtime/generator/curl processes; defunct entries reaped by final snapshot

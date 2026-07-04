@@ -1,0 +1,7 @@
+probe	target	fields	expected_use
+row97_output_terms	row=97 head=48 d=24 state_flat=none	D_skip,c_state_total_exact,c_state_total_replayed,local_old_state,prior_chunk_state,local_hf_chunk_scan,y_pre_bf16,candidate_bits,oracle_bits,chunk_idx,chunk_start,chunk_pos,group,dA_target	Primary mismatch probe; identifies whether the one-BF16-bin drift comes from prior cancellation or local triangular assembly.
+row97_c_state_buffer	row=97 head=48 d=24	c_state_total_written_by_recurrent,c_state_total_used_by_output,c_state_total_replay_delta	Validates the proposed c_state_total buffer correction.
+row97_local_loop	row=97 head=48 d=24	first_u,last_u,local_old_state_sum,local_hf_sum,largest_abs_u_contributor,cb_scaled_bf16_for_largest,decay_for_largest	Secondary probe if c_state_total buffer does not fully fix output.
+row64_regression	row=64 head=11 d=22 state_flat=0	output_bits,state_bits,chunk_idx,chunk_pos	Must remain exact; catches chunk-entry/state0 regression from the earlier v4 failure.
+row82_regression	row=82 head=37 d=30 state_flat=14	output_bits,state_bits,chunk_idx,chunk_pos	Must remain exact; catches local triangular regression from the 2213/2251 investigation.
+full_oracle	all output/state buffers	output_mismatches,first_output_mismatch,output_max_abs,output_mean_abs,state_mismatches,first_state_mismatch,state_max_abs,state_mean_abs	Required pass condition before any long diagnostic or commit.

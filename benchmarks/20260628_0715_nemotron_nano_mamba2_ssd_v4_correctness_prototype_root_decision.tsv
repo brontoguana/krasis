@@ -1,0 +1,8 @@
+decision	value
+prototype_status	not_correct
+default_path_changed	false
+correctness_result	full_oracle_failed
+first_output_mismatch	row=64 head=11 d=22 flat=262870 candidate=0x3bb7 sequential=0x3bb8 abs=0.000030517578125
+first_state_mismatch	flat=0 head=0 d=0 state=0 candidate=0x3b90c25a sequential=0x3b90c258 abs=0.0000000009313225746154785
+why_no_long_timing	full oracle failed; timing would be invalid
+next_gate	revert or further diagnose opt-in v4 candidate before any performance measurement

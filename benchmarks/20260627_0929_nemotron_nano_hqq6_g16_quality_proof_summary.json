@@ -1,0 +1,338 @@
+{
+  "gate": "20260627_0929_nemotron_nano_hqq6_g16_quality_proof",
+  "status": "closed_quality_not_material_improvement",
+  "opened_utc": "2026-06-27T09:29:21Z",
+  "record_first": {
+    "source_gate": "20260627_0909_nemotron_nano_hqq6_g16_all_moe_layer_cache_spec_generation",
+    "cache_spec_generation_status": "ok",
+    "cache_file_bytes": 36719028288,
+    "tensor_records": 5888,
+    "nbits": 6,
+    "group_size": 16,
+    "post_generation_disk_headroom": "645G",
+    "post_generation_ram_headroom": "964Gi",
+    "live_server_in_0909": false,
+    "source_changes_in_0909": false
+  },
+  "scope": {
+    "actions": [
+      "reuse saved BF16 1023 baseline responses",
+      "run one guarded HQQ-consume live pass with the g16 diagnostic spec for the same three payloads",
+      "compare g16 against BF16, HQQ6 g64, and HQQ6 g32 for selected token changes, top-k rank drift, selected/top-k logprob deltas, consume rows, copied bytes, and material quality improvement"
+    ],
+    "forbidden": [
+      "BF16 server",
+      "production HQQ",
+      "speed benchmark",
+      "fallback",
+      "decode/HCS",
+      "selected-expert retargeting",
+      "HQQ8",
+      "INT4/HQQ4"
+    ]
+  },
+  "runtime": {
+    "bf16_server_run": false,
+    "hqq_g16_server_run": true,
+    "corrected_endpoint": "/v1/internal/reference_test",
+    "chat_endpoint_attempt_preserved": true,
+    "http_200_count": 3,
+    "request_count": 3,
+    "request_times_s": [
+      45.838927,
+      41.239853,
+      42.874451
+    ],
+    "response_paths": [
+      "benchmarks/20260627_0929_nemotron_nano_hqq6_g16_quality_proof_hqq_g16_case0_response.json",
+      "benchmarks/20260627_0929_nemotron_nano_hqq6_g16_quality_proof_hqq_g16_case1_response.json",
+      "benchmarks/20260627_0929_nemotron_nano_hqq6_g16_quality_proof_hqq_g16_case2_response.json"
+    ],
+    "long_calibration_prefill_s": 343.32,
+    "long_calibration_decode_s": 4.28,
+    "long_calibration_prefill_min_free_mb": 14070,
+    "vram_safety_margin_mb": 600
+  },
+  "consume": {
+    "rows": 69,
+    "copied_output_bytes": 1029740544,
+    "nbits": 6,
+    "group_size": 16,
+    "bad_nbits_rows": 0,
+    "bad_group_size_rows": 0
+  },
+  "quality": {
+    "selected_token_changed_cases": {
+      "g64": 1,
+      "g32": 0,
+      "g16": 0
+    },
+    "topk_rank_drift_cases": {
+      "g64": 3,
+      "g32": 3,
+      "g16": 3
+    },
+    "avg_selected_output_logprob_delta": {
+      "g64": 0.110919667,
+      "g32": 0.125852,
+      "g16": 0.339994333
+    },
+    "max_common_topk_logprob_delta": {
+      "g64": 0.493397,
+      "g32": 0.578915,
+      "g16": 0.571293
+    },
+    "max_rank_aligned_topk_logprob_delta": {
+      "g64": 0.429088,
+      "g32": 0.407414,
+      "g16": 0.571293
+    },
+    "total_rank_changed_count": {
+      "g64": 16,
+      "g32": 17,
+      "g16": 17
+    },
+    "topk_membership_changed_cases": {
+      "g64": 1,
+      "g32": 2,
+      "g16": 1
+    },
+    "per_case": [
+      {
+        "case": "0",
+        "bf16_token": "1044",
+        "bf16_text": ",",
+        "bf16_selected_logprob": "-2.047513000",
+        "g64_token": "1044",
+        "g64_text": ",",
+        "g64_selected_logprob": "-1.956310000",
+        "g64_token_changed": "false",
+        "g64_selected_output_logprob_delta": "0.091203000",
+        "g64_bf16_selected_token_logprob_delta": "0.091203000",
+        "g64_max_common_topk_logprob_delta": "0.137766000",
+        "g64_max_rank_aligned_topk_logprob_delta": "0.137766000",
+        "g64_topk_rank_changed_count": "3",
+        "g64_topk_membership_changed": "false",
+        "g64_topk_common_count": "10",
+        "g32_token": "1044",
+        "g32_text": ",",
+        "g32_selected_logprob": "-1.992760000",
+        "g32_token_changed": "false",
+        "g32_selected_output_logprob_delta": "0.054753000",
+        "g32_bf16_selected_token_logprob_delta": "0.054753000",
+        "g32_max_common_topk_logprob_delta": "0.578915000",
+        "g32_max_rank_aligned_topk_logprob_delta": "0.407414000",
+        "g32_topk_rank_changed_count": "6",
+        "g32_topk_membership_changed": "false",
+        "g32_topk_common_count": "10",
+        "g16_token": "1044",
+        "g16_text": ",",
+        "g16_selected_logprob": "-1.730870000",
+        "g16_token_changed": "false",
+        "g16_selected_output_logprob_delta": "0.316643000",
+        "g16_bf16_selected_token_logprob_delta": "0.316643000",
+        "g16_max_common_topk_logprob_delta": "0.472588000",
+        "g16_max_rank_aligned_topk_logprob_delta": "0.316643000",
+        "g16_topk_rank_changed_count": "7",
+        "g16_topk_membership_changed": "false",
+        "g16_topk_common_count": "10",
+        "g16_selected_delta_minus_g64": "0.225440000",
+        "g16_selected_delta_minus_g32": "0.261890000",
+        "g16_common_topk_delta_minus_g64": "0.334822000",
+        "g16_common_topk_delta_minus_g32": "-0.106327000"
+      },
+      {
+        "case": "1",
+        "bf16_token": "1044",
+        "bf16_text": ",",
+        "bf16_selected_logprob": "-1.954504000",
+        "g64_token": "1044",
+        "g64_text": ",",
+        "g64_selected_logprob": "-1.919548000",
+        "g64_token_changed": "false",
+        "g64_selected_output_logprob_delta": "0.034956000",
+        "g64_bf16_selected_token_logprob_delta": "0.034956000",
+        "g64_max_common_topk_logprob_delta": "0.429088000",
+        "g64_max_rank_aligned_topk_logprob_delta": "0.429088000",
+        "g64_topk_rank_changed_count": "4",
+        "g64_topk_membership_changed": "false",
+        "g64_topk_common_count": "10",
+        "g32_token": "1044",
+        "g32_text": ",",
+        "g32_selected_logprob": "-2.107106000",
+        "g32_token_changed": "false",
+        "g32_selected_output_logprob_delta": "0.152602000",
+        "g32_bf16_selected_token_logprob_delta": "0.152602000",
+        "g32_max_common_topk_logprob_delta": "0.310593000",
+        "g32_max_rank_aligned_topk_logprob_delta": "0.208814000",
+        "g32_topk_rank_changed_count": "6",
+        "g32_topk_membership_changed": "true",
+        "g32_topk_common_count": "9",
+        "g16_token": "1044",
+        "g16_text": ",",
+        "g16_selected_logprob": "-1.525093000",
+        "g16_token_changed": "false",
+        "g16_selected_output_logprob_delta": "0.429411000",
+        "g16_bf16_selected_token_logprob_delta": "0.429411000",
+        "g16_max_common_topk_logprob_delta": "0.571293000",
+        "g16_max_rank_aligned_topk_logprob_delta": "0.571293000",
+        "g16_topk_rank_changed_count": "3",
+        "g16_topk_membership_changed": "false",
+        "g16_topk_common_count": "10",
+        "g16_selected_delta_minus_g64": "0.394455000",
+        "g16_selected_delta_minus_g32": "0.276809000",
+        "g16_common_topk_delta_minus_g64": "0.142205000",
+        "g16_common_topk_delta_minus_g32": "0.260700000"
+      },
+      {
+        "case": "2",
+        "bf16_token": "1044",
+        "bf16_text": ",",
+        "bf16_selected_logprob": "-1.646874000",
+        "g64_token": "1321",
+        "g64_text": " and",
+        "g64_selected_logprob": "-1.853474000",
+        "g64_token_changed": "true",
+        "g64_selected_output_logprob_delta": "0.206600000",
+        "g64_bf16_selected_token_logprob_delta": "0.448914000",
+        "g64_max_common_topk_logprob_delta": "0.493397000",
+        "g64_max_rank_aligned_topk_logprob_delta": "0.322012000",
+        "g64_topk_rank_changed_count": "9",
+        "g64_topk_membership_changed": "true",
+        "g64_topk_common_count": "9",
+        "g32_token": "1044",
+        "g32_text": ",",
+        "g32_selected_logprob": "-1.817075000",
+        "g32_token_changed": "false",
+        "g32_selected_output_logprob_delta": "0.170201000",
+        "g32_bf16_selected_token_logprob_delta": "0.170201000",
+        "g32_max_common_topk_logprob_delta": "0.417883000",
+        "g32_max_rank_aligned_topk_logprob_delta": "0.390355000",
+        "g32_topk_rank_changed_count": "5",
+        "g32_topk_membership_changed": "true",
+        "g32_topk_common_count": "8",
+        "g16_token": "1044",
+        "g16_text": ",",
+        "g16_selected_logprob": "-1.920803000",
+        "g16_token_changed": "false",
+        "g16_selected_output_logprob_delta": "0.273929000",
+        "g16_bf16_selected_token_logprob_delta": "0.273929000",
+        "g16_max_common_topk_logprob_delta": "0.273929000",
+        "g16_max_rank_aligned_topk_logprob_delta": "0.273929000",
+        "g16_topk_rank_changed_count": "7",
+        "g16_topk_membership_changed": "true",
+        "g16_topk_common_count": "9",
+        "g16_selected_delta_minus_g64": "0.067329000",
+        "g16_selected_delta_minus_g32": "0.103728000",
+        "g16_common_topk_delta_minus_g64": "-0.219468000",
+        "g16_common_topk_delta_minus_g32": "-0.143954000"
+      }
+    ]
+  },
+  "decision": {
+    "root_decision": "hqq6_g16_guarded_quality_not_material_improvement_for_nano",
+    "material_quality_improvement": false,
+    "production_hqq_enabled": false,
+    "reason": "Selected-token stability matches g32, but top-k rank drift remains 3/3 and aggregate selected/rank-aligned logprob deltas are worse than g64 and g32.",
+    "forbidden_scope_touched": false,
+    "source_changes_required": false,
+    "tests_build_rerun": false
+  },
+  "artifacts": {
+    "payload_quality_summary": "/home/main/Documents/Claude/krasis-nemotron-dev/benchmarks/20260627_0929_nemotron_nano_hqq6_g16_quality_proof_payload_quality_summary.tsv",
+    "topk_rank_changes": "/home/main/Documents/Claude/krasis-nemotron-dev/benchmarks/20260627_0929_nemotron_nano_hqq6_g16_quality_proof_topk_rank_changes.tsv",
+    "g16_vs_g64_g32_improvement": "/home/main/Documents/Claude/krasis-nemotron-dev/benchmarks/20260627_0929_nemotron_nano_hqq6_g16_quality_proof_g16_vs_g64_g32_improvement.tsv",
+    "consume_report": "/home/main/Documents/Claude/krasis-nemotron-dev/benchmarks/20260627_0929_nemotron_nano_hqq6_g16_quality_proof_consume_report.tsv",
+    "runtime_attempt": "/home/main/Documents/Claude/krasis-nemotron-dev/benchmarks/20260627_0929_nemotron_nano_hqq6_g16_quality_proof_runtime_attempt.tsv",
+    "root_decision": "/home/main/Documents/Claude/krasis-nemotron-dev/benchmarks/20260627_0929_nemotron_nano_hqq6_g16_quality_proof_root_decision.tsv",
+    "server_log": "/home/main/Documents/Claude/krasis-nemotron-dev/benchmarks/20260627_0929_nemotron_nano_hqq6_g16_quality_proof_hqq_g16_server.log"
+  },
+  "closed_utc": "2026-06-27T09:56:13Z",
+  "validation": {
+    "artifact_assertions": {
+      "status": "passed",
+      "detail": "summary, quality TSV, consume TSV, request TSV assertions passed"
+    },
+    "bash_n_dev": {
+      "status": "passed",
+      "detail": "bash -n dev"
+    },
+    "cargo_fmt_check": {
+      "status": "skipped_unavailable",
+      "detail": "cargo not on raw shell PATH; no source changes in this gate"
+    },
+    "git_diff_check_krasis": {
+      "status": "passed",
+      "detail": "git diff --check"
+    },
+    "git_diff_check_internal": {
+      "status": "passed",
+      "detail": "git diff --check"
+    },
+    "protected_config_check": {
+      "status": "passed",
+      "detail": "only known pre-existing untracked tests/nemotron-nano-bf16-experts-a16.conf"
+    },
+    "bf16_server_rerun": {
+      "status": "passed",
+      "detail": "false"
+    },
+    "production_hqq": {
+      "status": "passed",
+      "detail": "not enabled; guarded diagnostic consume only"
+    },
+    "speed_benchmark": {
+      "status": "passed",
+      "detail": "not run"
+    },
+    "decode_hcs_change": {
+      "status": "passed",
+      "detail": "none"
+    },
+    "fallback": {
+      "status": "passed",
+      "detail": "none added"
+    },
+    "selected_expert_retargeting": {
+      "status": "passed",
+      "detail": "none"
+    },
+    "hqq8": {
+      "status": "passed",
+      "detail": "not touched"
+    },
+    "int4_hqq4": {
+      "status": "passed",
+      "detail": "not touched"
+    },
+    "cleanup_tmux": {
+      "status": "passed",
+      "detail": "no tmux server"
+    },
+    "cleanup_gpu": {
+      "status": "passed",
+      "detail": "GPU memory used 15 MB / 11 MB, utilization 0 / 0"
+    },
+    "cleanup_processes": {
+      "status": "passed",
+      "detail": "no matching non-zombie runtime/generator/curl processes; defunct entries reaped by final snapshot"
+    }
+  },
+  "final_state": {
+    "timestamp_utc": "2026-06-27T09:56:13Z",
+    "tmux_server": false,
+    "matching_non_zombie_runtime_or_generator_process": false,
+    "defunct_python_entries_reaped": true,
+    "gpu_memory_used_mb": [
+      15,
+      11
+    ],
+    "gpu_utilization_percent": [
+      0,
+      0
+    ],
+    "source_changes_in_gate": false,
+    "tests_build_rerun": false,
+    "cargo_fmt_check": "skipped_unavailable_raw_shell_no_source_changes"
+  }
+}

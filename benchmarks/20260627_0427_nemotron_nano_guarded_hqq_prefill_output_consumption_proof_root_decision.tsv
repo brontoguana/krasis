@@ -1,0 +1,8 @@
+decision	result	evidence
+guarded_output_consumption	implemented	explicit env gate plus debug request context; BF16 default preserved
+focused_tests	passed	./dev test-kernels expert_hqq 83/0
+build	passed	./dev build passed after final guard patch
+runtime_consume	executed	69 consume rows, 23 layers for each of three requests
+bf16_equivalence	failed	case 2 token changed 1044->1321; top-k/logprob deltas recorded
+production_wiring	not_enabled	gate remains diagnostic and explicit only
+next_gate	diagnose_delta	determine expected HQQ6 quantization divergence vs consumption/scatter mismatch

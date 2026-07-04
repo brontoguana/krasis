@@ -1,0 +1,2 @@
+variant	cases_sent	consume_rows	copied_output_bytes	nbits	group_size	long_prefill_min_free_mb	safety_margin_mb	note
+hqq6_g64	case2_only	23	330882048	6	64	14070	600	case2 failed first; cases 0/1 not sent

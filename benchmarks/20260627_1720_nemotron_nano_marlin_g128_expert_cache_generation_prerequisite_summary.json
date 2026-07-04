@@ -1,0 +1,104 @@
+{
+  "gate": "20260627_1720_nemotron_nano_marlin_g128_expert_cache_generation_prerequisite",
+  "status": "closed_exact_g128_not_created_effective_g64_built",
+  "opened_utc": "2026-06-27T17:21:15Z",
+  "closed_utc": "2026-06-27T17:30:47Z",
+  "record_first": {
+    "source_gate": "20260627_1711_nemotron_nano_marlin_expert_cache_reuse_prerequisite",
+    "gemma_carried": "5619.6 / 92.43 / 155.69",
+    "tests_only_config": "tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+    "hqq_attention_cache_reuse_validated": true,
+    "hqq_attention_validation_line": "HQQ attention artifacts validated (115 MB cached), 27940 MB free",
+    "missing_final_marlin_g128_artifact": "/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/experts_marlin_int4_g128_calamax.bin",
+    "cache_write_detected_before_ready": true,
+    "cache_write_lines": [
+      "Building GPU INT4 Marlin expert cache (one-time)",
+      "Building GPU INT4 Marlin cache: 23 layers from safetensors"
+    ],
+    "requests_sent": 0,
+    "partial_tmp_and_lock_recorded": true,
+    "partial_tmp_and_lock_removed": true,
+    "previous_final_cleanup_no_tmp_or_lock": true
+  },
+  "scope": {
+    "use_built_cache_path_only": true,
+    "create_exact_final_marlin_g128_expert_cache": true,
+    "verify_required_by_config": "tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+    "capture_full_log": true,
+    "capture_artifact_path": true,
+    "capture_final_size": true,
+    "verify_no_tmp_or_lock_files": true,
+    "record_hqq_attention_reuse_without_rebuild": true,
+    "send_smoke_requests": false,
+    "forbidden_work": [
+      "source_changes",
+      "benchmarks",
+      "decode_hcs",
+      "production_enablement",
+      "smoke_requests"
+    ]
+  },
+  "pre_gate_snapshot": {
+    "utc": "2026-06-27T17:21:15Z",
+    "disk_available": "589G",
+    "ram_available": "966Gi",
+    "gpu_memory": "15 MB / 11 MB"
+  },
+  "runtime": {
+    "command": "./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf --build-cache",
+    "tmux_session": "nano_marlin_g128_gen",
+    "exit_code": 0,
+    "requests_sent": 0,
+    "server_ready": false,
+    "build_cache_complete": true,
+    "hqq_attention_cache_validated": true,
+    "hqq_attention_rebuild_requested": false,
+    "hqq_attention_validation_line": "HQQ attention artifacts validated (115 MB cached), 27940 MB free",
+    "marlin_build_line": "GPU INT4 Marlin cache built: 15.8 GB in 42s"
+  },
+  "artifact_result": {
+    "requested_final_g128_path": "/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/experts_marlin_int4_g128_calamax.bin",
+    "requested_final_g128_present": false,
+    "effective_final_path": "/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/experts_marlin_int4_g64_calamax.bin",
+    "effective_final_bytes": 15849200704,
+    "effective_header_group_size": 64,
+    "hqq_attention_manifest": "/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/attention_hqq_v5_grid65_33/manifest.json",
+    "hqq_attention_manifest_bytes": 124198,
+    "tmp_or_lock_files_remaining": false
+  },
+  "root_cause": {
+    "requested_expert_group_size": 128,
+    "hidden_size": 2688,
+    "moe_intermediate_size": 1856,
+    "hidden_size_mod_128": 0,
+    "moe_intermediate_size_mod_128": 64,
+    "moe_intermediate_size_mod_64": 0,
+    "runtime_effective_group_size": 64,
+    "source_behavior": "Marlin cache builder reduces group_size when model dimensions are not divisible by the requested group size, then renames the completed cache to the effective group-size path."
+  },
+  "decision": {
+    "result": "exact_g128_artifact_not_created",
+    "reason": "The built cache path succeeded but produced the runtime-valid effective g64 Marlin expert cache. The exact requested g128 cache remains absent because Nano's MoE intermediate dimension is not divisible by 128.",
+    "smoke_requests_allowed_from_this_gate": false,
+    "required_next_gate": "Use the effective g64 Marlin cache as the expected prerequisite for the Nano HQQ4+k4v4 smoke, or first fix reporting/validation so the config and prerequisite name reflect runtime effective group-size selection."
+  },
+  "validation": {
+    "cache_generation_exit": "pass",
+    "build_cache_complete": "pass",
+    "no_requests": "pass",
+    "requested_g128_absent": "pass",
+    "effective_g64_present": "pass",
+    "effective_header_group_size": "pass",
+    "no_tmp_or_lock_files": "pass"
+  },
+  "cleanup": {
+    "final_snapshot_utc": "2026-06-27T17:30:47Z",
+    "tmux_server": "none",
+    "matching_runtime_process": "none",
+    "nvidia_compute_process": "none",
+    "gpu_memory": "15 MB / 11 MB",
+    "disk_available": "589G",
+    "ram_available": "966Gi",
+    "cache_tmp_files_remaining": false
+  }
+}

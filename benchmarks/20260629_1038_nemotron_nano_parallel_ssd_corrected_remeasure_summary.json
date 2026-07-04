@@ -1,0 +1,136 @@
+{
+  "gate": "20260629_1038_nemotron_nano_parallel_ssd_corrected_remeasure",
+  "opened_utc": "2026-06-29T10:40:12Z",
+  "recorded_prior_gate_first": "2104",
+  "baselines": {
+    "gemma": "5619.6 / 92.43 / 155.69",
+    "nano": "346.5 / 94.48 / 164.75"
+  },
+  "prior_gate_result": {
+    "gate": "20260628_2104_nemotron_nano_parallel_ssd_token_logit_correctness",
+    "status": "correctness_fixed_for_guarded_parallel_ssd_surface",
+    "oracle_records": 69,
+    "failed_oracle_records": 0,
+    "output_mismatches": 0,
+    "state_mismatches": 0,
+    "tracked_probes": "row97/head48/d24 exact, row64/state0 exact, row82/state14 exact",
+    "token_logit": "first token 1044 text comma; 12/12 tracked top-logprobs exact; max delta 0.000000"
+  },
+  "scope": {
+    "mode": "measurement_only_corrected_parallel_ssd_no_oracle_candidate_timing",
+    "code_change": false,
+    "build": false,
+    "request": false,
+    "speed_benchmark": false,
+    "decode_hcs": false,
+    "production_enablement": false,
+    "default_path_change": false,
+    "python_script_or_one_liner": false
+  },
+  "measurement_plan": {
+    "config": "tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+    "command": "./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+    "tmux": true,
+    "env": {
+      "KRASIS_STARTUP_DIAG": "1",
+      "KRASIS_STARTUP_EXIT_AFTER_CALIBRATION": "1",
+      "KRASIS_STARTUP_WARMUP_TOKENS": "256",
+      "KRASIS_STARTUP_CAL_SHORT_TOKENS": "256",
+      "KRASIS_STARTUP_CAL_LONG_TOKENS": "39920",
+      "KRASIS_MAMBA2_SSD_BLOCK_SCAN": "1",
+      "KRASIS_MAMBA2_SSD_BLOCK_SCAN_COEFF_TILE": "1",
+      "KRASIS_MAMBA2_SSD_BLOCK_SCAN_CANDIDATE_TIMING": "1",
+      "KRASIS_MAMBA2_SSD_PARALLEL_CHUNKED": "1"
+    },
+    "clean_timing_absent_envs": [
+      "KRASIS_MAMBA2_SSD_BLOCK_SCAN_ORACLE",
+      "KRASIS_MAMBA2_SSD_BLOCK_SCAN_OUTPUT_SUBLOOP_TIMING",
+      "KRASIS_MAMBA2_SSD_BLOCK_SCAN_RECURRENT_SUBLOOP_TIMING",
+      "KRASIS_MAMBA2_SSD_V5_PROBES",
+      "KRASIS_MAMBA2_SSD_BLOCK_SCAN_TERM_PROBE"
+    ]
+  },
+  "comparison_baseline": {
+    "gate": "20260628_1647_nemotron_nano_parallel_ssd_architecture_implementation",
+    "tokens": 39920,
+    "records": 23,
+    "avg_total_candidate_path_ms": 555.7752003913043,
+    "avg_recurrent_total_ms": 14.889626260869564,
+    "avg_output_kernel_ms": 525.5645138260868,
+    "avg_chunk_cumsum_ms": 0.5805520869565216,
+    "avg_chunk_state_ms": 12.971289,
+    "avg_state_passing_ms": 1.3365486956521742,
+    "avg_live_state_copy_ms": 13.14796604347826,
+    "avg_commit_copies_ms": 0.42401539130434784,
+    "avg_alloc_zeroed_ms": 1.747610956521739,
+    "avg_residual_ms": 0.001422739130451033
+  },
+  "runtime_result": {
+    "closed_measurement_utc": "2026-06-29T10:48:00Z",
+    "exit_code": 0,
+    "duration_s": 276,
+    "candidate_records": 69,
+    "long_records": 23,
+    "oracle_records": 0,
+    "recurrent_subloop_records": 0,
+    "output_subloop_records": 0,
+    "http_requests": 0,
+    "long_timing": {
+      "tokens": 39920,
+      "records": 23,
+      "avg_total_candidate_path_ms": 9827.873299217,
+      "avg_recurrent_total_ms": 735.990116783,
+      "avg_output_kernel_ms": 9075.657243348,
+      "avg_chunk_cumsum_ms": 0.040033261,
+      "avg_chunk_state_ms": 10.705218739,
+      "avg_state_passing_ms": 1.783393609,
+      "avg_exact_state_bridge_ms": 723.447891217,
+      "avg_exact_state_bridge_reset_ms": 0.010850043,
+      "avg_live_state_copy_ms": 0.196215913,
+      "avg_commit_copies_ms": 0.454597565,
+      "avg_alloc_zeroed_ms": 1.407197609,
+      "avg_residual_ms": 14.16787313
+    },
+    "clean_timing_invariants": {
+      "accepted_state_source": "exact_token_order_recurrent_bridge",
+      "accepted_output_kernel": "mamba2_ssd_parallel_chunk_scan_output_kernel",
+      "oracle_enabled": false,
+      "output_subloop_timing_env": false,
+      "recurrent_subloop_timing_env": false,
+      "visible_no_oracle_timing_mode": true
+    },
+    "comparison_vs_1647": {
+      "total_candidate_path_delta_pct": 1668.318,
+      "recurrent_total_delta_pct": 4842.972,
+      "output_kernel_delta_pct": 1626.84,
+      "chunk_cumsum_delta_pct": -93.104,
+      "chunk_state_delta_pct": -17.47,
+      "state_passing_delta_pct": 33.433,
+      "exact_state_bridge_new_ms": 723.447891217
+    },
+    "vram": {
+      "safety_margin_mb": 600,
+      "baseline_free_mb": 23714,
+      "long_prefill_post_alloc_mb": 13072,
+      "long_prefill_min_free_mb": 7694,
+      "long_decode_min_free_mb": 23714,
+      "post_cleanup_free_mb": 23714,
+      "long_prefill_delta_mb": 16020,
+      "prefill_long_hcs_budget_mb": 7094,
+      "note": "startup diagnostic calibration did not run as a request/HCS packing benchmark; long min free is far above safety, so this run measures candidate timing rather than max-HCS runtime packing efficiency"
+    },
+    "decision": "Correctness-fixed guarded path is exact but not fast. Output/chunk-scan is now the dominant measured cost, and the exact recurrent bridge is the second blocker. Next work should make the true chunked state handoff and output path token-logit correct without the bridge, then redesign the output kernel for GPU parallelism."
+  },
+  "final_validation": {
+    "timestamp_utc": "2026-06-29T10:52:11Z",
+    "json_tsv_shapes": "passed",
+    "log_invariants": "passed",
+    "diff_check": "passed",
+    "dev_syntax": "passed",
+    "protected_configs": "unchanged; expected untracked tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+    "tmux_sessions": 0,
+    "runtime_or_build_processes": 0,
+    "gpu_memory": "GPU0 15 MB / 32607 MB, GPU1 11 MB / 20470 MB",
+    "gpu_compute_processes": 0
+  }
+}

@@ -1,0 +1,157 @@
+{
+  "artifacts": {
+    "decision": "benchmarks/20260627_0640_nemotron_nano_hqq6_exact_row_quantization_attribution_root_decision.tsv",
+    "response": "benchmarks/20260627_0640_nemotron_nano_hqq6_exact_row_quantization_attribution_case2_response.json",
+    "row_attribution_log": "benchmarks/20260627_0640_nemotron_nano_hqq6_exact_row_quantization_attribution_row_attribution.log",
+    "row_details": "benchmarks/20260627_0640_nemotron_nano_hqq6_exact_row_quantization_attribution_row_details.json",
+    "row_metrics": "benchmarks/20260627_0640_nemotron_nano_hqq6_exact_row_quantization_attribution_row_metrics.tsv",
+    "row_summary": "benchmarks/20260627_0640_nemotron_nano_hqq6_exact_row_quantization_attribution_row_attribution_summary.tsv",
+    "runtime_attempt": "benchmarks/20260627_0640_nemotron_nano_hqq6_exact_row_quantization_attribution_runtime_attempt.tsv",
+    "server_log": "benchmarks/20260627_0640_nemotron_nano_hqq6_exact_row_quantization_attribution_server.log",
+    "source_contract": "benchmarks/20260627_0640_nemotron_nano_hqq6_exact_row_quantization_attribution_source_contract.tsv",
+    "summary": "benchmarks/20260627_0640_nemotron_nano_hqq6_exact_row_quantization_attribution_summary.json",
+    "validation": "benchmarks/20260627_0640_nemotron_nano_hqq6_exact_row_quantization_attribution_validation_checks.tsv"
+  },
+  "attribution": {
+    "captured_rows": 7,
+    "layer_idx": 51,
+    "requested_col": 1599,
+    "requested_expert_idx": 60,
+    "requested_sorted_row": 1837,
+    "root": "hqq_gpu_matches_krhq_dequant_math_at_output; divergence is attributable to HQQ6 dequantized-weight math versus captured BF16 expert output",
+    "selected_contributors": 6,
+    "selected_routed": {
+      "bf16_value": 485.82693196833134,
+      "bf16_vs_hqq_gpu_abs": 9.10776762664318,
+      "hqq_gpu_value": 494.9346995949745,
+      "hqq_gpu_vs_krhq_abs": 0.0,
+      "krhq_value": 494.9346995949745
+    },
+    "status": "ok",
+    "worst_row": {
+      "bf16_value_at_col": 1072.0,
+      "bf16_vs_hqq_gpu_abs_at_col": 32.0,
+      "hqq_gpu_value_at_col": 1104.0,
+      "hqq_gpu_vs_krhq_abs_at_col": 0.0,
+      "krhq_value_at_col": 1104.0
+    }
+  },
+  "closed_utc": "2026-06-27T07:25:34Z",
+  "final_state": {
+    "gpu_memory_free_mb": [
+      32105,
+      20043
+    ],
+    "gpu_memory_used_mb": [
+      15,
+      11
+    ],
+    "gpu_utilization_percent": [
+      0,
+      0
+    ],
+    "matching_processes": "none",
+    "tmux": "no server running on /tmp/tmux-1000/default"
+  },
+  "forbidden": {
+    "broad_dumps": true,
+    "decode_hcs": true,
+    "fallback": true,
+    "int4_hqq4": true,
+    "production_hqq": true,
+    "selected_expert_retargeting": true,
+    "speed_benchmark": true,
+    "tolerance_changes": true
+  },
+  "gate": "targeted exact-row HQQ6 quantization attribution",
+  "label": "20260627_0640_nemotron_nano_hqq6_exact_row_quantization_attribution",
+  "opened_utc": "2026-06-27T06:40:00Z",
+  "planned_work": {
+    "capture_required": [
+      "gathered input row",
+      "W13 output row",
+      "activation output row",
+      "W2/output row",
+      "routing/contributor mapping for selected row",
+      "matching KRHQ/HQQ6 dequant values"
+    ],
+    "diagnostic_capture": "smallest env-gated case-2 exact-row capture",
+    "fail_closed_if_absent": true,
+    "target": {
+      "case": 2,
+      "col": 1599,
+      "expert": 60,
+      "layer": 51,
+      "sorted_row": 1837
+    },
+    "validation_after_source_changes": [
+      "./dev test-kernels expert_hqq",
+      "./dev build",
+      "one live case-2 capture",
+      "offline original-BF16-vs-KRHQ/HQQ6 comparison"
+    ]
+  },
+  "record_first": {
+    "blocker": "0524 exported summaries/top-N only; exact HQQ-consumed gathered input rows/intermediates and contributor decomposition were missing",
+    "gemma_speed": "5619.6 / 92.43 / 155.69",
+    "previous_gate": "0629",
+    "production_enablement": "none",
+    "selected_row_routed_delta": {
+      "abs_delta": 9.1077880859375,
+      "bf16": 485.826904296875,
+      "col": 1599,
+      "hqq": 494.9346923828125,
+      "layer": 51,
+      "trace_row": 445
+    },
+    "worst_global_coordinate": {
+      "abs_delta": 32.0,
+      "bf16": 1072.0,
+      "col": 1599,
+      "expert": 60,
+      "hqq": 1104.0,
+      "layer": 51,
+      "sorted_row": 1837
+    }
+  },
+  "runtime": {
+    "consume_copied_output_bytes": 330882048,
+    "consume_rows": 23,
+    "exact_row_capture_stages": 1,
+    "hcs_after_init_free_mb": 846,
+    "http_time_total_s": 31.198272,
+    "long_calibration_decode_s": 4.3,
+    "long_calibration_prefill_min_free_mb": 14070,
+    "long_calibration_prefill_s": 343.21,
+    "ready_reached": true,
+    "response_size_bytes": 5020888,
+    "safety_margin_mb": 600,
+    "selected_text": " and",
+    "selected_token_id": 1321
+  },
+  "source_changes": {
+    "decode_hcs_changed": false,
+    "fallback_added": false,
+    "int4_hqq4_changed": false,
+    "offline_analyzer": "./dev expert-hqq-row-attribution",
+    "production_behavior_changed": false,
+    "runtime_capture": "env-gated exact-row diagnostic capture only",
+    "speed_benchmark_run": false
+  },
+  "status": "closed",
+  "validation": {
+    "artifact_assertions": "passed",
+    "bash_n_dev": "passed",
+    "cargo_fmt_check": "passed",
+    "cleanup": "passed",
+    "dev_build": "passed",
+    "final_idle_snapshot": "passed",
+    "git_diff_check": "passed",
+    "internal_diff_check": "passed",
+    "live_case2_http_status": "200",
+    "offline_analyzer_status": "ok",
+    "protected_config_status": "pre-existing untracked tests/nemotron-nano-bf16-experts-a16.conf only",
+    "py_compile": "passed",
+    "test_kernels_expert_hqq": "92/0"
+  }
+}

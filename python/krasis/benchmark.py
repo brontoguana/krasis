@@ -389,6 +389,48 @@ class KrasisBenchmark:
             content_texts.append(content)
         return prompts, content_texts
 
+    def _length_label(self, tokens: int) -> str:
+        if tokens >= 1000 and tokens % 1000 == 0:
+            return f"{tokens // 1000}K"
+        return f"{tokens:,}"
+
+    def _runtime_prefill_plan(self) -> tuple[int, List[int], Optional[str]]:
+        """Choose benchmark prefill lengths from runtime calibration when needed.
+
+        The standard benchmark uses fixed 25K warmup and 1K..50K timed prompts.
+        Some larger models calibrate a smaller measured long-prefill limit on a
+        given GPU. In that case, use the measured calibration length as the max
+        benchmark prefill size instead of driving unmeasured 25K/50K prompts.
+        """
+        default_warmup = 25000
+        default_lengths = list(self.PREFILL_LENGTHS)
+        calibration = getattr(self.model, "_benchmark_prefill_calibration", None)
+        if not isinstance(calibration, dict):
+            return default_warmup, default_lengths, None
+
+        try:
+            long_tokens = int(calibration.get("long_tokens", 0))
+            prefill_long_free = int(calibration.get("prefill_long_free_mb", 0))
+            safety = int(calibration.get("safety_margin_mb", 0))
+        except (TypeError, ValueError):
+            return default_warmup, default_lengths, None
+
+        standard_max = max(default_lengths)
+        if long_tokens <= 0 or long_tokens >= standard_max:
+            return default_warmup, default_lengths, None
+
+        min_standard = min(default_lengths)
+        cap = max(min_standard, long_tokens)
+        adapted = [length for length in default_lengths if length <= cap]
+        if not adapted or adapted[-1] != cap:
+            adapted.append(cap)
+
+        note = (
+            f"runtime-calibrated prefill cap {cap:,} tokens "
+            f"(long probe low-water {prefill_long_free:,} MB, safety {safety:,} MB)"
+        )
+        return min(default_warmup, cap), adapted, note
+
     # ──────────────────────────────────────────────────────────
     # Engine request (direct Rust, no HTTP/SSE)
     # ──────────────────────────────────────────────────────────
@@ -430,6 +472,7 @@ class KrasisBenchmark:
         req_body = {
             "messages": [{"role": "user", "content": content_text}],
             "max_tokens": max_tokens,
+            "min_new_tokens": max_tokens,
             "temperature": self.BENCHMARK_TEMPERATURE,
             "stream": True,
             "enable_thinking": False,
@@ -805,13 +848,17 @@ class KrasisBenchmark:
         print(f"  Strategy: {model_info['decode_mode']}")
 
         # 2. Build prompts
-        n_timed_prefill = len(self.PREFILL_LENGTHS)
-        lengths_str = "/".join(f"{l//1000}K" for l in self.PREFILL_LENGTHS)
+        warmup_prefill_target, prefill_lengths, prefill_plan_note = self._runtime_prefill_plan()
+        n_timed_prefill = len(prefill_lengths)
+        lengths_str = "/".join(self._length_label(l) for l in prefill_lengths)
         print(_section(f"Loading benchmark prompts (warmup + timed at {lengths_str})"))
+        if prefill_plan_note:
+            print(f"  Prefill sizing:  {YELLOW}{prefill_plan_note}{NC}")
 
-        warmup_prefill_tokens, warmup_prefill_texts = self._make_prefill_prompts(self.n_runs, max_tokens_override=25000)
+        warmup_prefill_tokens, warmup_prefill_texts = self._make_prefill_prompts(
+            self.n_runs, max_tokens_override=warmup_prefill_target)
         timed_prefill_tokens, timed_prefill_texts = self._make_prefill_prompts_at_lengths(
-            self.PREFILL_LENGTHS, file_offset=self.n_runs)
+            prefill_lengths, file_offset=self.n_runs)
         n_decode_prompts = len(self.DECODE_LENGTHS) * 2  # warmup + timed
         decode_tokens_all, decode_texts_all = self._make_decode_prompts(n_decode_prompts)
 
@@ -829,7 +876,10 @@ class KrasisBenchmark:
         print(_section(f"Warmup ({self.n_runs} prefill + {len(self.DECODE_LENGTHS)} decode via engine)"))
         self._warmup_engine()
         t0 = time.perf_counter()
-        print(f"  Prefill warmup ({self.n_runs} runs, ~25K tokens each)...")
+        print(
+            f"  Prefill warmup ({self.n_runs} runs, "
+            f"~{len(warmup_prefill_tokens[0]):,} tokens each)..."
+        )
         for i, (tokens, text) in enumerate(zip(warmup_prefill_tokens, warmup_prefill_texts)):
             self._engine_request(text, max_new_tokens=1)
             print(f"    [{i+1}/{self.n_runs}] {len(tokens):,} tokens")

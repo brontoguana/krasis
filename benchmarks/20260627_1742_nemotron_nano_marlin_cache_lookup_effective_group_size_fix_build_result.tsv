@@ -1,0 +1,8 @@
+check	status	details
+command	pass	./dev build
+exit_code	pass	0
+release_build	pass	Finished release profile in 2m 41s
+wheel_build	pass	krasis-1.0.15-cp311-cp311-linux_x86_64.whl
+extension_build	pass	python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+total_duration	pass	169s
+warnings	info	existing warnings only; build completed successfully

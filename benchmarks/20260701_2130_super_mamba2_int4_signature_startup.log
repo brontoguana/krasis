@@ -1,0 +1,960 @@
+[0;36m[1m=>[0m Waiting for selected GPUs (0) to clear...
+[0;32m[1mOK[0m Selected GPUs (0) clear.
+[0;36m[1m=>[0m Launching from: tests/nemotron-super-4-4-hqq4-k4v4-a16.conf
+[0;36m[1m=>[0m Run dir: /home/main/Documents/Claude/krasis-nemotron-dev/logs/dev-run_20260701_211400
+[0;36m[1m=>[0m Import origin check:
+krasis: /home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/__init__.py
+krasis.krasis: /home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+Pre-scan: set CUDA_VISIBLE_DEVICES=0
+Loaded config from tests/nemotron-super-4-4-hqq4-k4v4-a16.conf: {'model_path': '/home/main/.krasis/models/NVIDIA-Nemotron-3-Super-120B-A12B-BF16', 'selected_gpus': '0', 'num_gpus': 1, 'layer_group_size': 2, 'kv_dtype': 'k4v4', 'gpu_expert_bits': 4, 'cpu_expert_bits': 4, 'attention_quant': 'hqq4', 'hqq_group_size': 128, 'shared_expert_quant': 'int8', 'dense_mlp_quant': 'int8', 'lm_head_quant': 'int8', 'krasis_threads': 40, 'host': '0.0.0.0', 'port': 18018, 'enable_thinking': False, 'gpu_prefill_threshold': 300, 'vram_safety_margin': 600, 'force_load': False}
+
+[1m[36m▸ Krasis — NVIDIA-Nemotron-3-Super-120B-A12B-BF16[0m
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 1[0m
+  [32mHCS host cache: source[0m
+  [32mSelected physical GPUs: 0 (config; CUDA_VISIBLE_DEVICES=0)[0m
+  [32mExperts: GPU INT4 g128 (amax)  |  Attention: hqq4  |  KV: k4v4[0m
+  [32mLayer groups: 2  |  KV cache: 1000 MB  |  Threads: 40[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+
+[1m[36m▸ Loading model weights[0m
+  [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=518 MB, free=31600 MB, total=32119 MB
+
+[1m[36m▸ Loading GPU weights[0m
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:0: alloc=13290 MB, reserved=13464 MB, used=14080 MB, free=18038 MB, total=32119 MB
+VRAM LEDGER residency label=after-phase1-gpu-weights device=0 free_mb=18038 total_mb=32119 driver_used_mb=14080 torch_allocated_mb=13290 torch_reserved_mb=13464 inventoried_cuda_mb=13246.3 untracked_driver_mb=834.6 untracked_reserved_mb=217.7 duplicate_refs=0 duplicate_storage_mb=0.0 gqa_weight_refs_mb=544.0 latent_proj_mb=640.0 layer_norms_mb=0.7 mamba2_weight_refs_mb=8364.6 router_fp32_mirrors_mb=320.1 router_weights_mb=160.0 shared_expert_mb=1680.7 top_embedding_mb=1024.0 top_final_norm_mb=0.0 top_lm_head_mb=512.2
+  [0;32mHQQ attention artifacts validated (234 MB cached), 18038 MB free[0m
+
+[1m[36m▸ Loading GPU expert weights from cache[0m
+    Loading GPU Marlin cache: 40 layers...
+    GPU Marlin cache loaded: 59.0 GB in 36s
+  [0;32mExpert weights loaded in 37s.[0m
+  [33m[VRAM after-phase2-expert-weights][0m cuda:0: alloc=13290 MB, reserved=13464 MB, used=14080 MB, free=18038 MB, total=32119 MB
+VRAM LEDGER residency label=after-phase2-expert-weights device=0 free_mb=18038 total_mb=32119 driver_used_mb=14080 torch_allocated_mb=13290 torch_reserved_mb=13464 inventoried_cuda_mb=13246.3 untracked_driver_mb=834.6 untracked_reserved_mb=217.7 duplicate_refs=0 duplicate_storage_mb=0.0 gqa_weight_refs_mb=544.0 latent_proj_mb=640.0 layer_norms_mb=0.7 mamba2_weight_refs_mb=8364.6 router_fp32_mirrors_mb=320.1 router_weights_mb=160.0 shared_expert_mb=1680.7 top_embedding_mb=1024.0 top_final_norm_mb=0.0 top_lm_head_mb=512.2
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:0: alloc=13290 MB, reserved=13464 MB, used=14080 MB, free=18038 MB, total=32119 MB
+VRAM LEDGER residency label=after-phase3-prefill-managers device=0 free_mb=18038 total_mb=32119 driver_used_mb=14080 torch_allocated_mb=13290 torch_reserved_mb=13464 inventoried_cuda_mb=13246.3 untracked_driver_mb=834.6 untracked_reserved_mb=217.7 duplicate_refs=0 duplicate_storage_mb=0.0 gqa_weight_refs_mb=544.0 latent_proj_mb=640.0 layer_norms_mb=0.7 mamba2_weight_refs_mb=8364.6 router_fp32_mirrors_mb=320.1 router_weights_mb=160.0 shared_expert_mb=1680.7 top_embedding_mb=1024.0 top_final_norm_mb=0.0 top_lm_head_mb=512.2
+  [33m[VRAM after-kv-cache-init][0m cuda:0: alloc=14290 MB, reserved=14364 MB, used=14980 MB, free=17138 MB, total=32119 MB
+VRAM LEDGER residency label=after-kv-cache-init device=0 free_mb=17138 total_mb=32119 driver_used_mb=14980 torch_allocated_mb=14290 torch_reserved_mb=14364 inventoried_cuda_mb=14246.3 untracked_driver_mb=734.6 untracked_reserved_mb=117.7 duplicate_refs=0 duplicate_storage_mb=0.0 gqa_weight_refs_mb=544.0 kv_cache_mb=1000.0 latent_proj_mb=640.0 layer_norms_mb=0.7 mamba2_weight_refs_mb=8364.6 router_fp32_mirrors_mb=320.1 router_weights_mb=160.0 shared_expert_mb=1680.7 top_embedding_mb=1024.0 top_final_norm_mb=0.0 top_lm_head_mb=512.2
+  [33m[VRAM after-full-load][0m cuda:0: alloc=14290 MB, reserved=14364 MB, used=14980 MB, free=17138 MB, total=32119 MB
+VRAM LEDGER residency label=after-full-load device=0 free_mb=17138 total_mb=32119 driver_used_mb=14980 torch_allocated_mb=14290 torch_reserved_mb=14364 inventoried_cuda_mb=14246.3 untracked_driver_mb=734.6 untracked_reserved_mb=117.7 duplicate_refs=0 duplicate_storage_mb=0.0 gqa_weight_refs_mb=544.0 kv_cache_mb=1000.0 latent_proj_mb=640.0 layer_norms_mb=0.7 mamba2_weight_refs_mb=8364.6 router_fp32_mirrors_mb=320.1 router_weights_mb=160.0 shared_expert_mb=1680.7 top_embedding_mb=1024.0 top_final_norm_mb=0.0 top_lm_head_mb=512.2
+
+[1m[36m▸ CUDA runtime warmup[0m
+  [32mcuBLAS + Triton kernel compilation done[0m
+
+[1m[36m▸ Setting up GPU decode store[0m
+  [32mGPU decode store ready (addr=0xb04b18a0)[0m
+VRAM LEDGER residency label=after-decode-store-setup-before-release device=0 free_mb=19816 total_mb=32119 driver_used_mb=12302 torch_allocated_mb=8984 torch_reserved_mb=9802 inventoried_cuda_mb=8962.3 untracked_driver_mb=3340.6 untracked_reserved_mb=839.7 duplicate_refs=329 duplicate_storage_mb=3060.7 kv_cache_mb=1000.0 layer_norms_mb=0.6 mamba2_weight_refs_mb=4.6 marlin_workspace_mb=0.0 router_fp32_mirrors_mb=320.1 router_weights_mb=160.0 rust_keepalive_hqq_attention_meta_mb=0.1 rust_keepalive_hqq_rope_tables_mb=200.0 rust_keepalive_mamba2_conv_bias_fp32_mb=1.6 rust_keepalive_mamba2_conv_fp32_mb=6.2 rust_keepalive_mamba2_params_fp32_mb=1.3 rust_keepalive_mamba2_projection_int4_mb=2220.6 rust_keepalive_mamba2_state_fp32_mb=166.2 rust_keepalive_nemotron_latent_projection_bf16_mb=640.0 rust_lm_head_bf16_mb=1024.0 shared_expert_mb=1680.7 top_embedding_mb=1024.0 top_final_norm_mb=0.0 top_lm_head_mb=512.2
+  [32mReleased redundant GPU execution source tensors (832 MB)[0m
+VRAM LEDGER residency label=after-decode-store-setup device=0 free_mb=20328 total_mb=32119 driver_used_mb=11790 torch_allocated_mb=8151 torch_reserved_mb=9290 inventoried_cuda_mb=8130.0 untracked_driver_mb=3660.9 untracked_reserved_mb=1160.0 duplicate_refs=329 duplicate_storage_mb=3060.7 kv_cache_mb=1000.0 layer_norms_mb=0.6 mamba2_weight_refs_mb=4.6 marlin_workspace_mb=0.0 router_weights_mb=160.0 rust_keepalive_hqq_attention_meta_mb=0.1 rust_keepalive_hqq_rope_tables_mb=200.0 rust_keepalive_mamba2_conv_bias_fp32_mb=1.6 rust_keepalive_mamba2_conv_fp32_mb=6.2 rust_keepalive_mamba2_params_fp32_mb=1.3 rust_keepalive_mamba2_projection_int4_mb=2220.6 rust_keepalive_mamba2_state_fp32_mb=166.2 rust_keepalive_nemotron_latent_projection_bf16_mb=640.0 rust_lm_head_bf16_mb=1024.0 shared_expert_mb=1680.7 top_embedding_mb=1024.0 top_final_norm_mb=0.0
+  [2mVRAM monitor started (tracking warmup)[0m
+  [2mcuda:0: 0 MB total[0m
+
+[1m[36m▸ Pre-allocating Rust prefill engine[0m
+[FLA] Loading kernels for H=0 from /home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/libkrasis_fla_sm120.so
+  [32mPrefill engine scratch buffers allocated[0m
+VRAM LEDGER residency label=after-prefill-engine-allocate device=0 free_mb=20234 total_mb=32119 driver_used_mb=11884 torch_allocated_mb=8151 torch_reserved_mb=9290 inventoried_cuda_mb=8130.0 untracked_driver_mb=3754.9 untracked_reserved_mb=1160.0 duplicate_refs=329 duplicate_storage_mb=3060.7 kv_cache_mb=1000.0 layer_norms_mb=0.6 mamba2_weight_refs_mb=4.6 marlin_workspace_mb=0.0 router_weights_mb=160.0 rust_keepalive_hqq_attention_meta_mb=0.1 rust_keepalive_hqq_rope_tables_mb=200.0 rust_keepalive_mamba2_conv_bias_fp32_mb=1.6 rust_keepalive_mamba2_conv_fp32_mb=6.2 rust_keepalive_mamba2_params_fp32_mb=1.3 rust_keepalive_mamba2_projection_int4_mb=2220.6 rust_keepalive_mamba2_state_fp32_mb=166.2 rust_keepalive_nemotron_latent_projection_bf16_mb=640.0 rust_lm_head_bf16_mb=1024.0 shared_expert_mb=1680.7 top_embedding_mb=1024.0 top_final_norm_mb=0.0
+
+[1m[36m▸ Warmup (Rust prefill engine)[0m
+VRAM LEDGER prefill_prepare_budget prompt_tokens=300 free_mb=20232 total_mb=32119 safety_mb=600 fixed_scratch_mb=874.5 per_tok_kb=760.5 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=0.0 all_expert_cold_reserve_mb=5544.0 mamba2_runtime_reserve_mb=54.5 measured_cold_slots=0 post_scratch_runtime_reserve_mb=5598.5 scratch_budget_mb=14034.1 target_tokens=300 max_by_vram=300 runtime_chunk_cap=None chosen_scratch_tokens=300 hcs_cached_experts=0 hcs_stride=0 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=300 prompt_tokens=300 pre_alloc_free_mb=20232 post_alloc_free_mb=19122 actual_alloc_mb=1110.0 estimated_scratch_mb=1142.8 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=6.2 shared_fp32_mb=6.2 fp32_scratch_mb=42.5 kv_cross_floor_mb=0.3
+VRAM LEDGER prefill_ready prompt_tokens=300 scratch_tokens=300 scratch_mb=1142.8 post_alloc_free_mb=19122 safety_mb=600 optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=false pinning_disabled=true optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0 prescan_layers=0 hcs_cached_experts=0 hcs_stride=0 scratch_tokens=300 chunk_size=300 num_chunks=1 chunk_plan=[300]
+VRAM LEDGER prefill_route_cold_demand layer=1 moe_layer=Some(1) active_experts=26 cold_slots_needed=26 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=281.5
+VRAM LEDGER prefill_cold_staging_alloc slots=26 bytes=295206912 mb=281.5 free_after_mb=18834 total_mb=32119 safety_mb=600
+VRAM LEDGER prefill_cold_staging_alloc slots=512 bytes=5813305344 mb=5544.0 free_after_mb=13554 total_mb=32119 safety_mb=600
+VRAM LEDGER prefill_ptr_prefetch layer=3 moe_layer=3 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=3 moe_layer=Some(3) active_experts=27 cold_slots_needed=27 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=292.4
+VRAM LEDGER prefill_ptr_prefetch layer=5 moe_layer=5 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=5 moe_layer=Some(5) active_experts=43 cold_slots_needed=43 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=465.6
+VRAM LEDGER prefill_ptr_prefetch layer=8 moe_layer=8 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=8 moe_layer=Some(8) active_experts=60 cold_slots_needed=60 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=649.7
+VRAM LEDGER prefill_ptr_prefetch layer=10 moe_layer=10 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=10 moe_layer=Some(10) active_experts=56 cold_slots_needed=56 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=606.4
+VRAM LEDGER prefill_ptr_prefetch layer=12 moe_layer=12 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=12 moe_layer=Some(12) active_experts=57 cold_slots_needed=57 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=617.2
+VRAM LEDGER prefill_ptr_prefetch layer=14 moe_layer=14 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=14 moe_layer=Some(14) active_experts=53 cold_slots_needed=53 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=573.9
+VRAM LEDGER prefill_ptr_prefetch layer=17 moe_layer=17 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=17 moe_layer=Some(17) active_experts=54 cold_slots_needed=54 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=584.7
+VRAM LEDGER prefill_ptr_prefetch layer=19 moe_layer=19 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=19 moe_layer=Some(19) active_experts=66 cold_slots_needed=66 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=714.7
+VRAM LEDGER prefill_ptr_prefetch layer=21 moe_layer=21 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=21 moe_layer=Some(21) active_experts=68 cold_slots_needed=68 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=736.3
+VRAM LEDGER prefill_ptr_prefetch layer=23 moe_layer=23 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=23 moe_layer=Some(23) active_experts=77 cold_slots_needed=77 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=833.8
+VRAM LEDGER prefill_ptr_prefetch layer=26 moe_layer=26 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=26 moe_layer=Some(26) active_experts=64 cold_slots_needed=64 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=693.0
+VRAM LEDGER prefill_ptr_prefetch layer=28 moe_layer=28 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=28 moe_layer=Some(28) active_experts=76 cold_slots_needed=76 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=822.9
+VRAM LEDGER prefill_ptr_prefetch layer=30 moe_layer=30 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=30 moe_layer=Some(30) active_experts=81 cold_slots_needed=81 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=877.1
+VRAM LEDGER prefill_ptr_prefetch layer=32 moe_layer=32 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=32 moe_layer=Some(32) active_experts=91 cold_slots_needed=91 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=985.4
+VRAM LEDGER prefill_ptr_prefetch layer=34 moe_layer=34 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=34 moe_layer=Some(34) active_experts=96 cold_slots_needed=96 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1039.5
+VRAM LEDGER prefill_ptr_prefetch layer=37 moe_layer=37 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=37 moe_layer=Some(37) active_experts=75 cold_slots_needed=75 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=812.1
+VRAM LEDGER prefill_ptr_prefetch layer=39 moe_layer=39 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=39 moe_layer=Some(39) active_experts=67 cold_slots_needed=67 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=725.5
+VRAM LEDGER prefill_ptr_prefetch layer=41 moe_layer=41 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=41 moe_layer=Some(41) active_experts=68 cold_slots_needed=68 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=736.3
+VRAM LEDGER prefill_ptr_prefetch layer=43 moe_layer=43 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=43 moe_layer=Some(43) active_experts=64 cold_slots_needed=64 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=693.0
+VRAM LEDGER prefill_ptr_prefetch layer=45 moe_layer=45 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=45 moe_layer=Some(45) active_experts=58 cold_slots_needed=58 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=628.0
+VRAM LEDGER prefill_ptr_prefetch layer=48 moe_layer=48 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=48 moe_layer=Some(48) active_experts=78 cold_slots_needed=78 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=844.6
+VRAM LEDGER prefill_ptr_prefetch layer=50 moe_layer=50 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=50 moe_layer=Some(50) active_experts=70 cold_slots_needed=70 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=758.0
+VRAM LEDGER prefill_ptr_prefetch layer=52 moe_layer=52 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=52 moe_layer=Some(52) active_experts=72 cold_slots_needed=72 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=779.6
+VRAM LEDGER prefill_ptr_prefetch layer=54 moe_layer=54 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=54 moe_layer=Some(54) active_experts=65 cold_slots_needed=65 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=703.8
+VRAM LEDGER prefill_ptr_prefetch layer=56 moe_layer=56 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=56 moe_layer=Some(56) active_experts=64 cold_slots_needed=64 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=693.0
+VRAM LEDGER prefill_ptr_prefetch layer=59 moe_layer=59 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=59 moe_layer=Some(59) active_experts=53 cold_slots_needed=53 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=573.9
+VRAM LEDGER prefill_ptr_prefetch layer=61 moe_layer=61 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=61 moe_layer=Some(61) active_experts=50 cold_slots_needed=50 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=541.4
+VRAM LEDGER prefill_ptr_prefetch layer=63 moe_layer=63 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=63 moe_layer=Some(63) active_experts=44 cold_slots_needed=44 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=476.4
+VRAM LEDGER prefill_ptr_prefetch layer=65 moe_layer=65 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=65 moe_layer=Some(65) active_experts=39 cold_slots_needed=39 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=422.3
+VRAM LEDGER prefill_ptr_prefetch layer=67 moe_layer=67 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=67 moe_layer=Some(67) active_experts=35 cold_slots_needed=35 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=379.0
+VRAM LEDGER prefill_ptr_prefetch layer=70 moe_layer=70 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=70 moe_layer=Some(70) active_experts=36 cold_slots_needed=36 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=389.8
+VRAM LEDGER prefill_ptr_prefetch layer=72 moe_layer=72 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=72 moe_layer=Some(72) active_experts=27 cold_slots_needed=27 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=292.4
+VRAM LEDGER prefill_ptr_prefetch layer=74 moe_layer=74 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=74 moe_layer=Some(74) active_experts=30 cold_slots_needed=30 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=324.8
+VRAM LEDGER prefill_ptr_prefetch layer=76 moe_layer=76 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=76 moe_layer=Some(76) active_experts=28 cold_slots_needed=28 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=303.2
+VRAM LEDGER prefill_ptr_prefetch layer=79 moe_layer=79 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=79 moe_layer=Some(79) active_experts=26 cold_slots_needed=26 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=281.5
+VRAM LEDGER prefill_ptr_prefetch layer=81 moe_layer=81 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=81 moe_layer=Some(81) active_experts=24 cold_slots_needed=24 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=259.9
+VRAM LEDGER prefill_ptr_prefetch layer=83 moe_layer=83 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=83 moe_layer=Some(83) active_experts=30 cold_slots_needed=30 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=324.8
+VRAM LEDGER prefill_ptr_prefetch layer=85 moe_layer=85 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=85 moe_layer=Some(85) active_experts=25 cold_slots_needed=25 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=270.7
+VRAM LEDGER prefill_ptr_prefetch layer=87 moe_layer=87 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=87 moe_layer=Some(87) active_experts=22 cold_slots_needed=22 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=238.2
+  [32mRust prefill warmed with 300 tokens before HCS budgeting[0m
+  [32mWarmup complete in 3.6s[0m
+VRAM LEDGER residency label=after-rust-prefill-warmup device=0 free_mb=14632 total_mb=32119 driver_used_mb=17486 torch_allocated_mb=8151 torch_reserved_mb=9290 inventoried_cuda_mb=8130.0 untracked_driver_mb=9356.9 untracked_reserved_mb=1160.0 duplicate_refs=329 duplicate_storage_mb=3060.7 kv_cache_mb=1000.0 layer_norms_mb=0.6 mamba2_weight_refs_mb=4.6 marlin_workspace_mb=0.0 router_weights_mb=160.0 rust_keepalive_hqq_attention_meta_mb=0.1 rust_keepalive_hqq_rope_tables_mb=200.0 rust_keepalive_mamba2_conv_bias_fp32_mb=1.6 rust_keepalive_mamba2_conv_fp32_mb=6.2 rust_keepalive_mamba2_params_fp32_mb=1.3 rust_keepalive_mamba2_projection_int4_mb=2220.6 rust_keepalive_mamba2_state_fp32_mb=166.2 rust_keepalive_nemotron_latent_projection_bf16_mb=640.0 rust_lm_head_bf16_mb=1024.0 shared_expert_mb=1680.7 top_embedding_mb=1024.0 top_final_norm_mb=0.0
+  [2mcuda:0 warmup:  peak 18,624 MB used / 32,119 MB total  (min free: 13,494 MB)[0m
+
+[1m[36m▸ VRAM calibration[0m
+  [32mSafety margin: 600 MB[0m
+  [32mFree VRAM after startup: 20,232 MB / 32,119 MB[0m
+VRAM LEDGER residency label=calibration-baseline device=0 free_mb=20232 total_mb=32119 driver_used_mb=11886 torch_allocated_mb=8151 torch_reserved_mb=9290 inventoried_cuda_mb=8130.0 untracked_driver_mb=3756.9 untracked_reserved_mb=1160.0 duplicate_refs=329 duplicate_storage_mb=3060.7 kv_cache_mb=1000.0 layer_norms_mb=0.6 mamba2_weight_refs_mb=4.6 marlin_workspace_mb=0.0 router_weights_mb=160.0 rust_keepalive_hqq_attention_meta_mb=0.1 rust_keepalive_hqq_rope_tables_mb=200.0 rust_keepalive_mamba2_conv_bias_fp32_mb=1.6 rust_keepalive_mamba2_conv_fp32_mb=6.2 rust_keepalive_mamba2_params_fp32_mb=1.3 rust_keepalive_mamba2_projection_int4_mb=2220.6 rust_keepalive_mamba2_state_fp32_mb=166.2 rust_keepalive_nemotron_latent_projection_bf16_mb=640.0 rust_lm_head_bf16_mb=1024.0 shared_expert_mb=1680.7 top_embedding_mb=1024.0 top_final_norm_mb=0.0
+  [32mShort calibration: probing 500 prompt tokens + 32 decode tokens[0m
+VRAM LEDGER prefill_prepare_budget prompt_tokens=500 free_mb=20232 total_mb=32119 safety_mb=600 fixed_scratch_mb=874.5 per_tok_kb=760.5 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=0.0 all_expert_cold_reserve_mb=5544.0 mamba2_runtime_reserve_mb=73.1 measured_cold_slots=0 post_scratch_runtime_reserve_mb=5617.1 scratch_budget_mb=14015.4 target_tokens=500 max_by_vram=500 runtime_chunk_cap=None chosen_scratch_tokens=500 hcs_cached_experts=0 hcs_stride=0 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=500 prompt_tokens=500 pre_alloc_free_mb=20232 post_alloc_free_mb=18988 actual_alloc_mb=1244.0 estimated_scratch_mb=1293.3 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=10.3 shared_fp32_mb=10.3 fp32_scratch_mb=42.5 kv_cross_floor_mb=0.5
+VRAM LEDGER prefill_ready prompt_tokens=500 scratch_tokens=500 scratch_mb=1293.3 post_alloc_free_mb=18988 safety_mb=600 optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=false pinning_disabled=true optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0 prescan_layers=0 hcs_cached_experts=0 hcs_stride=0 scratch_tokens=500 chunk_size=500 num_chunks=1 chunk_plan=[500]
+VRAM LEDGER prefill_route_cold_demand layer=1 moe_layer=Some(1) active_experts=512 cold_slots_needed=512 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=5544.0
+VRAM LEDGER prefill_cold_staging_alloc slots=512 bytes=5813305344 mb=5544.0 free_after_mb=13450 total_mb=32119 safety_mb=600
+VRAM LEDGER prefill_ptr_prefetch layer=3 moe_layer=3 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=3 moe_layer=Some(3) active_experts=382 cold_slots_needed=382 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=4136.3
+VRAM LEDGER prefill_ptr_prefetch layer=5 moe_layer=5 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=5 moe_layer=Some(5) active_experts=475 cold_slots_needed=475 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=5143.4
+VRAM LEDGER prefill_ptr_prefetch layer=8 moe_layer=8 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=8 moe_layer=Some(8) active_experts=402 cold_slots_needed=402 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=4352.9
+VRAM LEDGER prefill_ptr_prefetch layer=10 moe_layer=10 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=10 moe_layer=Some(10) active_experts=388 cold_slots_needed=388 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=4201.3
+VRAM LEDGER prefill_ptr_prefetch layer=12 moe_layer=12 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=12 moe_layer=Some(12) active_experts=386 cold_slots_needed=386 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=4179.7
+VRAM LEDGER prefill_ptr_prefetch layer=14 moe_layer=14 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=14 moe_layer=Some(14) active_experts=257 cold_slots_needed=257 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2782.8
+VRAM LEDGER prefill_ptr_prefetch layer=17 moe_layer=17 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=17 moe_layer=Some(17) active_experts=292 cold_slots_needed=292 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=3161.8
+VRAM LEDGER prefill_ptr_prefetch layer=19 moe_layer=19 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=19 moe_layer=Some(19) active_experts=300 cold_slots_needed=300 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=3248.4
+VRAM LEDGER prefill_ptr_prefetch layer=21 moe_layer=21 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=21 moe_layer=Some(21) active_experts=304 cold_slots_needed=304 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=3291.8
+VRAM LEDGER prefill_ptr_prefetch layer=23 moe_layer=23 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=23 moe_layer=Some(23) active_experts=324 cold_slots_needed=324 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=3508.3
+VRAM LEDGER prefill_ptr_prefetch layer=26 moe_layer=26 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=26 moe_layer=Some(26) active_experts=192 cold_slots_needed=192 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2079.0
+VRAM LEDGER prefill_ptr_prefetch layer=28 moe_layer=28 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=28 moe_layer=Some(28) active_experts=293 cold_slots_needed=293 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=3172.6
+VRAM LEDGER prefill_ptr_prefetch layer=30 moe_layer=30 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=30 moe_layer=Some(30) active_experts=241 cold_slots_needed=241 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2609.6
+VRAM LEDGER prefill_ptr_prefetch layer=32 moe_layer=32 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=32 moe_layer=Some(32) active_experts=214 cold_slots_needed=214 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2317.2
+VRAM LEDGER prefill_ptr_prefetch layer=34 moe_layer=34 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=34 moe_layer=Some(34) active_experts=190 cold_slots_needed=190 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2057.3
+VRAM LEDGER prefill_ptr_prefetch layer=37 moe_layer=37 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=37 moe_layer=Some(37) active_experts=168 cold_slots_needed=168 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1819.1
+VRAM LEDGER prefill_ptr_prefetch layer=39 moe_layer=39 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=39 moe_layer=Some(39) active_experts=143 cold_slots_needed=143 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1548.4
+VRAM LEDGER prefill_ptr_prefetch layer=41 moe_layer=41 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=41 moe_layer=Some(41) active_experts=148 cold_slots_needed=148 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1602.6
+VRAM LEDGER prefill_ptr_prefetch layer=43 moe_layer=43 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=43 moe_layer=Some(43) active_experts=136 cold_slots_needed=136 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1472.6
+VRAM LEDGER prefill_ptr_prefetch layer=45 moe_layer=45 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=45 moe_layer=Some(45) active_experts=123 cold_slots_needed=123 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1331.9
+VRAM LEDGER prefill_ptr_prefetch layer=48 moe_layer=48 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=48 moe_layer=Some(48) active_experts=165 cold_slots_needed=165 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1786.6
+VRAM LEDGER prefill_ptr_prefetch layer=50 moe_layer=50 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=50 moe_layer=Some(50) active_experts=153 cold_slots_needed=153 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1656.7
+VRAM LEDGER prefill_ptr_prefetch layer=52 moe_layer=52 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=52 moe_layer=Some(52) active_experts=148 cold_slots_needed=148 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1602.6
+VRAM LEDGER prefill_ptr_prefetch layer=54 moe_layer=54 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=54 moe_layer=Some(54) active_experts=121 cold_slots_needed=121 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1310.2
+VRAM LEDGER prefill_ptr_prefetch layer=56 moe_layer=56 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=56 moe_layer=Some(56) active_experts=96 cold_slots_needed=96 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1039.5
+VRAM LEDGER prefill_ptr_prefetch layer=59 moe_layer=59 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=59 moe_layer=Some(59) active_experts=80 cold_slots_needed=80 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=866.2
+VRAM LEDGER prefill_ptr_prefetch layer=61 moe_layer=61 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=61 moe_layer=Some(61) active_experts=61 cold_slots_needed=61 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=660.5
+VRAM LEDGER prefill_ptr_prefetch layer=63 moe_layer=63 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=63 moe_layer=Some(63) active_experts=61 cold_slots_needed=61 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=660.5
+VRAM LEDGER prefill_ptr_prefetch layer=65 moe_layer=65 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=65 moe_layer=Some(65) active_experts=49 cold_slots_needed=49 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=530.6
+VRAM LEDGER prefill_ptr_prefetch layer=67 moe_layer=67 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=67 moe_layer=Some(67) active_experts=44 cold_slots_needed=44 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=476.4
+VRAM LEDGER prefill_ptr_prefetch layer=70 moe_layer=70 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=70 moe_layer=Some(70) active_experts=37 cold_slots_needed=37 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=400.6
+VRAM LEDGER prefill_ptr_prefetch layer=72 moe_layer=72 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=72 moe_layer=Some(72) active_experts=30 cold_slots_needed=30 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=324.8
+VRAM LEDGER prefill_ptr_prefetch layer=74 moe_layer=74 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=74 moe_layer=Some(74) active_experts=35 cold_slots_needed=35 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=379.0
+VRAM LEDGER prefill_ptr_prefetch layer=76 moe_layer=76 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=76 moe_layer=Some(76) active_experts=32 cold_slots_needed=32 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=346.5
+VRAM LEDGER prefill_ptr_prefetch layer=79 moe_layer=79 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=79 moe_layer=Some(79) active_experts=27 cold_slots_needed=27 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=292.4
+VRAM LEDGER prefill_ptr_prefetch layer=81 moe_layer=81 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=81 moe_layer=Some(81) active_experts=27 cold_slots_needed=27 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=292.4
+VRAM LEDGER prefill_ptr_prefetch layer=83 moe_layer=83 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=83 moe_layer=Some(83) active_experts=33 cold_slots_needed=33 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=357.3
+VRAM LEDGER prefill_ptr_prefetch layer=85 moe_layer=85 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=85 moe_layer=Some(85) active_experts=27 cold_slots_needed=27 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=292.4
+VRAM LEDGER prefill_ptr_prefetch layer=87 moe_layer=87 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=87 moe_layer=Some(87) active_experts=22 cold_slots_needed=22 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=238.2
+  [32mdecode: 32 tokens in 3.75s (8.5 tok/s)  VRAM: 20184 MB free now, 20184 MB min free during decode[0m
+  [32mShort calibration: baseline=20,232 MB, prefill post-alloc=18,988 MB, prefill min=13,368 MB, decode min=20,184 MB, post-cleanup=20,184 MB[0m
+  [32mAdaptive long calibration: default target=39,920 tokens, target low-water floor=1,200 MB, estimated prefill growth=0.7466 MB/token[0m
+  [32mAdaptive long calibration: next probe 15,191 tokens (model-estimated initial probe (projected 0.7466 MB/token, validation floor 2400 MB))[0m
+  [32mLong calibration: probing 15,191 prompt tokens + 32 decode tokens[0m
+VRAM LEDGER prefill_prepare_budget prompt_tokens=15191 free_mb=20120 total_mb=32119 safety_mb=600 fixed_scratch_mb=874.5 per_tok_kb=760.5 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=5620.0 all_expert_cold_reserve_mb=5544.0 mamba2_runtime_reserve_mb=1955.6 measured_cold_slots=0 post_scratch_runtime_reserve_mb=7499.6 scratch_budget_mb=12021.0 target_tokens=15191 max_by_vram=14041 runtime_chunk_cap=None chosen_scratch_tokens=14041 hcs_cached_experts=0 hcs_stride=0 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=14041 prompt_tokens=15191 pre_alloc_free_mb=20120 post_alloc_free_mb=8158 actual_alloc_mb=11962.0 estimated_scratch_mb=12020.2 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=288.0 shared_fp32_mb=288.0 fp32_scratch_mb=577.6 kv_cross_floor_mb=14.8
+VRAM LEDGER prefill_ready prompt_tokens=15191 scratch_tokens=14041 scratch_mb=12020.2 post_alloc_free_mb=8158 safety_mb=600 optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=false pinning_disabled=true optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0 prescan_layers=0 hcs_cached_experts=0 hcs_stride=0 scratch_tokens=14041 chunk_size=7596 num_chunks=2 chunk_plan=[7596, 7595]
+VRAM LEDGER prefill_route_cold_demand layer=1 moe_layer=Some(1) active_experts=512 cold_slots_needed=512 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=5544.0
+VRAM LEDGER prefill_cold_staging_alloc slots=512 bytes=5813305344 mb=5544.0 free_after_mb=2622 total_mb=32119 safety_mb=600
+VRAM LEDGER prefill_ptr_prefetch layer=3 moe_layer=3 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=3 moe_layer=Some(3) active_experts=511 cold_slots_needed=511 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=5533.2
+VRAM LEDGER prefill_ptr_prefetch layer=5 moe_layer=5 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=5 moe_layer=Some(5) active_experts=512 cold_slots_needed=512 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=5544.0
+VRAM LEDGER prefill_ptr_prefetch layer=8 moe_layer=8 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=8 moe_layer=Some(8) active_experts=502 cold_slots_needed=502 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=5435.7
+VRAM LEDGER prefill_ptr_prefetch layer=10 moe_layer=10 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=10 moe_layer=Some(10) active_experts=494 cold_slots_needed=494 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=5349.1
+VRAM LEDGER prefill_ptr_prefetch layer=12 moe_layer=12 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=12 moe_layer=Some(12) active_experts=493 cold_slots_needed=493 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=5338.3
+VRAM LEDGER prefill_ptr_prefetch layer=14 moe_layer=14 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=14 moe_layer=Some(14) active_experts=385 cold_slots_needed=385 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=4168.8
+VRAM LEDGER prefill_ptr_prefetch layer=17 moe_layer=17 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=17 moe_layer=Some(17) active_experts=403 cold_slots_needed=403 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=4363.7
+VRAM LEDGER prefill_ptr_prefetch layer=19 moe_layer=19 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=19 moe_layer=Some(19) active_experts=405 cold_slots_needed=405 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=4385.4
+VRAM LEDGER prefill_ptr_prefetch layer=21 moe_layer=21 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=21 moe_layer=Some(21) active_experts=395 cold_slots_needed=395 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=4277.1
+VRAM LEDGER prefill_ptr_prefetch layer=23 moe_layer=23 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=23 moe_layer=Some(23) active_experts=410 cold_slots_needed=410 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=4439.5
+VRAM LEDGER prefill_ptr_prefetch layer=26 moe_layer=26 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=26 moe_layer=Some(26) active_experts=263 cold_slots_needed=263 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2847.8
+VRAM LEDGER prefill_ptr_prefetch layer=28 moe_layer=28 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=28 moe_layer=Some(28) active_experts=335 cold_slots_needed=335 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=3627.4
+VRAM LEDGER prefill_ptr_prefetch layer=30 moe_layer=30 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=30 moe_layer=Some(30) active_experts=276 cold_slots_needed=276 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2988.6
+VRAM LEDGER prefill_ptr_prefetch layer=32 moe_layer=32 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=32 moe_layer=Some(32) active_experts=247 cold_slots_needed=247 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2674.5
+VRAM LEDGER prefill_ptr_prefetch layer=34 moe_layer=34 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=34 moe_layer=Some(34) active_experts=210 cold_slots_needed=210 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2273.9
+VRAM LEDGER prefill_ptr_prefetch layer=37 moe_layer=37 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=37 moe_layer=Some(37) active_experts=196 cold_slots_needed=196 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2122.3
+VRAM LEDGER prefill_ptr_prefetch layer=39 moe_layer=39 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=39 moe_layer=Some(39) active_experts=171 cold_slots_needed=171 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1851.6
+VRAM LEDGER prefill_ptr_prefetch layer=41 moe_layer=41 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=41 moe_layer=Some(41) active_experts=166 cold_slots_needed=166 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1797.5
+VRAM LEDGER prefill_ptr_prefetch layer=43 moe_layer=43 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=43 moe_layer=Some(43) active_experts=169 cold_slots_needed=169 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1830.0
+VRAM LEDGER prefill_ptr_prefetch layer=45 moe_layer=45 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=45 moe_layer=Some(45) active_experts=151 cold_slots_needed=151 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1635.0
+VRAM LEDGER prefill_ptr_prefetch layer=48 moe_layer=48 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=48 moe_layer=Some(48) active_experts=198 cold_slots_needed=198 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2144.0
+VRAM LEDGER prefill_ptr_prefetch layer=50 moe_layer=50 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=50 moe_layer=Some(50) active_experts=189 cold_slots_needed=189 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2046.5
+VRAM LEDGER prefill_ptr_prefetch layer=52 moe_layer=52 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=52 moe_layer=Some(52) active_experts=174 cold_slots_needed=174 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1884.1
+VRAM LEDGER prefill_ptr_prefetch layer=54 moe_layer=54 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=54 moe_layer=Some(54) active_experts=151 cold_slots_needed=151 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1635.0
+VRAM LEDGER prefill_ptr_prefetch layer=56 moe_layer=56 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=56 moe_layer=Some(56) active_experts=106 cold_slots_needed=106 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1147.8
+VRAM LEDGER prefill_ptr_prefetch layer=59 moe_layer=59 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=59 moe_layer=Some(59) active_experts=99 cold_slots_needed=99 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1072.0
+VRAM LEDGER prefill_ptr_prefetch layer=61 moe_layer=61 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=61 moe_layer=Some(61) active_experts=71 cold_slots_needed=71 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=768.8
+VRAM LEDGER prefill_ptr_prefetch layer=63 moe_layer=63 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=63 moe_layer=Some(63) active_experts=68 cold_slots_needed=68 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=736.3
+VRAM LEDGER prefill_ptr_prefetch layer=65 moe_layer=65 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=65 moe_layer=Some(65) active_experts=56 cold_slots_needed=56 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=606.4
+VRAM LEDGER prefill_ptr_prefetch layer=67 moe_layer=67 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=67 moe_layer=Some(67) active_experts=49 cold_slots_needed=49 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=530.6
+VRAM LEDGER prefill_ptr_prefetch layer=70 moe_layer=70 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=70 moe_layer=Some(70) active_experts=40 cold_slots_needed=40 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=433.1
+VRAM LEDGER prefill_ptr_prefetch layer=72 moe_layer=72 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=72 moe_layer=Some(72) active_experts=33 cold_slots_needed=33 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=357.3
+VRAM LEDGER prefill_ptr_prefetch layer=74 moe_layer=74 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=74 moe_layer=Some(74) active_experts=37 cold_slots_needed=37 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=400.6
+VRAM LEDGER prefill_ptr_prefetch layer=76 moe_layer=76 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=76 moe_layer=Some(76) active_experts=39 cold_slots_needed=39 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=422.3
+VRAM LEDGER prefill_ptr_prefetch layer=79 moe_layer=79 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=79 moe_layer=Some(79) active_experts=28 cold_slots_needed=28 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=303.2
+VRAM LEDGER prefill_ptr_prefetch layer=81 moe_layer=81 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=81 moe_layer=Some(81) active_experts=31 cold_slots_needed=31 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=335.7
+VRAM LEDGER prefill_ptr_prefetch layer=83 moe_layer=83 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=83 moe_layer=Some(83) active_experts=35 cold_slots_needed=35 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=379.0
+VRAM LEDGER prefill_ptr_prefetch layer=85 moe_layer=85 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=85 moe_layer=Some(85) active_experts=28 cold_slots_needed=28 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=303.2
+VRAM LEDGER prefill_ptr_prefetch layer=87 moe_layer=87 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=87 moe_layer=Some(87) active_experts=25 cold_slots_needed=25 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=270.7
+VRAM LEDGER prefill_ptr_prefetch layer=1 moe_layer=1 chunk=1 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=1 moe_layer=Some(1) active_experts=512 cold_slots_needed=512 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=5544.0
+VRAM LEDGER prefill_ptr_prefetch layer=3 moe_layer=3 chunk=1 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=3 moe_layer=Some(3) active_experts=510 cold_slots_needed=510 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=5522.3
+VRAM LEDGER prefill_ptr_prefetch layer=5 moe_layer=5 chunk=1 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=5 moe_layer=Some(5) active_experts=512 cold_slots_needed=512 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=5544.0
+VRAM LEDGER prefill_ptr_prefetch layer=8 moe_layer=8 chunk=1 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=8 moe_layer=Some(8) active_experts=494 cold_slots_needed=494 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=5349.1
+VRAM LEDGER prefill_ptr_prefetch layer=10 moe_layer=10 chunk=1 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=10 moe_layer=Some(10) active_experts=485 cold_slots_needed=485 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=5251.6
+VRAM LEDGER prefill_ptr_prefetch layer=12 moe_layer=12 chunk=1 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=12 moe_layer=Some(12) active_experts=482 cold_slots_needed=482 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=5219.2
+VRAM LEDGER prefill_ptr_prefetch layer=14 moe_layer=14 chunk=1 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=14 moe_layer=Some(14) active_experts=361 cold_slots_needed=361 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=3909.0
+VRAM LEDGER prefill_ptr_prefetch layer=17 moe_layer=17 chunk=1 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=17 moe_layer=Some(17) active_experts=375 cold_slots_needed=375 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=4060.5
+VRAM LEDGER prefill_ptr_prefetch layer=19 moe_layer=19 chunk=1 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=19 moe_layer=Some(19) active_experts=377 cold_slots_needed=377 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=4082.2
+VRAM LEDGER prefill_ptr_prefetch layer=21 moe_layer=21 chunk=1 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=21 moe_layer=Some(21) active_experts=347 cold_slots_needed=347 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=3757.4
+VRAM LEDGER prefill_ptr_prefetch layer=23 moe_layer=23 chunk=1 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=23 moe_layer=Some(23) active_experts=359 cold_slots_needed=359 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=3887.3
+VRAM LEDGER prefill_ptr_prefetch layer=26 moe_layer=26 chunk=1 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=26 moe_layer=Some(26) active_experts=223 cold_slots_needed=223 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2414.7
+VRAM LEDGER prefill_ptr_prefetch layer=28 moe_layer=28 chunk=1 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=28 moe_layer=Some(28) active_experts=282 cold_slots_needed=282 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=3053.5
+VRAM LEDGER prefill_ptr_prefetch layer=30 moe_layer=30 chunk=1 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=30 moe_layer=Some(30) active_experts=209 cold_slots_needed=209 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2263.1
+VRAM LEDGER prefill_ptr_prefetch layer=32 moe_layer=32 chunk=1 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=32 moe_layer=Some(32) active_experts=170 cold_slots_needed=170 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1840.8
+VRAM LEDGER prefill_ptr_prefetch layer=34 moe_layer=34 chunk=1 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=34 moe_layer=Some(34) active_experts=148 cold_slots_needed=148 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1602.6
+VRAM LEDGER prefill_ptr_prefetch layer=37 moe_layer=37 chunk=1 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=37 moe_layer=Some(37) active_experts=154 cold_slots_needed=154 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1667.5
+VRAM LEDGER prefill_ptr_prefetch layer=39 moe_layer=39 chunk=1 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=39 moe_layer=Some(39) active_experts=143 cold_slots_needed=143 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1548.4
+VRAM LEDGER prefill_ptr_prefetch layer=41 moe_layer=41 chunk=1 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=41 moe_layer=Some(41) active_experts=130 cold_slots_needed=130 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1407.7
+VRAM LEDGER prefill_ptr_prefetch layer=43 moe_layer=43 chunk=1 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=43 moe_layer=Some(43) active_experts=137 cold_slots_needed=137 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1483.5
+VRAM LEDGER prefill_ptr_prefetch layer=45 moe_layer=45 chunk=1 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=45 moe_layer=Some(45) active_experts=128 cold_slots_needed=128 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1386.0
+VRAM LEDGER prefill_ptr_prefetch layer=48 moe_layer=48 chunk=1 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=48 moe_layer=Some(48) active_experts=169 cold_slots_needed=169 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1830.0
+VRAM LEDGER prefill_ptr_prefetch layer=50 moe_layer=50 chunk=1 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=50 moe_layer=Some(50) active_experts=163 cold_slots_needed=163 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1765.0
+VRAM LEDGER prefill_ptr_prefetch layer=52 moe_layer=52 chunk=1 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=52 moe_layer=Some(52) active_experts=149 cold_slots_needed=149 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1613.4
+VRAM LEDGER prefill_ptr_prefetch layer=54 moe_layer=54 chunk=1 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=54 moe_layer=Some(54) active_experts=129 cold_slots_needed=129 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1396.8
+VRAM LEDGER prefill_ptr_prefetch layer=56 moe_layer=56 chunk=1 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=56 moe_layer=Some(56) active_experts=95 cold_slots_needed=95 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1028.7
+VRAM LEDGER prefill_ptr_prefetch layer=59 moe_layer=59 chunk=1 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=59 moe_layer=Some(59) active_experts=79 cold_slots_needed=79 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=855.4
+VRAM LEDGER prefill_ptr_prefetch layer=61 moe_layer=61 chunk=1 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=61 moe_layer=Some(61) active_experts=59 cold_slots_needed=59 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=638.9
+VRAM LEDGER prefill_ptr_prefetch layer=63 moe_layer=63 chunk=1 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=63 moe_layer=Some(63) active_experts=56 cold_slots_needed=56 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=606.4
+VRAM LEDGER prefill_ptr_prefetch layer=65 moe_layer=65 chunk=1 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=65 moe_layer=Some(65) active_experts=53 cold_slots_needed=53 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=573.9
+VRAM LEDGER prefill_ptr_prefetch layer=67 moe_layer=67 chunk=1 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=67 moe_layer=Some(67) active_experts=43 cold_slots_needed=43 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=465.6
+VRAM LEDGER prefill_ptr_prefetch layer=70 moe_layer=70 chunk=1 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=70 moe_layer=Some(70) active_experts=40 cold_slots_needed=40 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=433.1
+VRAM LEDGER prefill_ptr_prefetch layer=72 moe_layer=72 chunk=1 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=72 moe_layer=Some(72) active_experts=30 cold_slots_needed=30 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=324.8
+VRAM LEDGER prefill_ptr_prefetch layer=74 moe_layer=74 chunk=1 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=74 moe_layer=Some(74) active_experts=37 cold_slots_needed=37 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=400.6
+VRAM LEDGER prefill_ptr_prefetch layer=76 moe_layer=76 chunk=1 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=76 moe_layer=Some(76) active_experts=34 cold_slots_needed=34 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=368.2
+VRAM LEDGER prefill_ptr_prefetch layer=79 moe_layer=79 chunk=1 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=79 moe_layer=Some(79) active_experts=28 cold_slots_needed=28 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=303.2
+VRAM LEDGER prefill_ptr_prefetch layer=81 moe_layer=81 chunk=1 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=81 moe_layer=Some(81) active_experts=28 cold_slots_needed=28 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=303.2
+VRAM LEDGER prefill_ptr_prefetch layer=83 moe_layer=83 chunk=1 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=83 moe_layer=Some(83) active_experts=33 cold_slots_needed=33 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=357.3
+VRAM LEDGER prefill_ptr_prefetch layer=85 moe_layer=85 chunk=1 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=85 moe_layer=Some(85) active_experts=27 cold_slots_needed=27 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=292.4
+VRAM LEDGER prefill_ptr_prefetch layer=87 moe_layer=87 chunk=1 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=87 moe_layer=Some(87) active_experts=23 cold_slots_needed=23 hcs_cached_experts=0 hcs_stride=0 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=249.0
+  [32mdecode: 32 tokens in 4.34s (7.4 tok/s)  VRAM: 20180 MB free now, 20180 MB min free during decode[0m
+  [32mLong calibration: baseline=20,184 MB, prefill post-alloc=8,158 MB, prefill min=1,512 MB, decode min=20,180 MB, post-cleanup=20,180 MB[0m
+  [32mAdaptive long calibration: using 15,191 tokens (current low-water 1512 MB leaves no validation reserve above 2400 MB)[0m
+  [32mScratch reservation: max=38,007 MB (at 50,000 tokens)[0m
+
+[1m[36m▸ VRAM calibration complete[0m
+  [32mPost-calibration free VRAM: 20,180 MB[0m
+  [32mTransient deltas: short prefill=6,864 MB, long prefill=18,672 MB, short decode=48 MB, long decode=4 MB[0m
+  [32mGPU0 decode HCS budget: 19,532 MB[0m
+  [32mPrefill HCS budgets: short=12,716 MB, long=908 MB[0m
+  [32mWorst-case prefill scratch reservation: 38,007 MB at 50,000 tokens[0m
+
+[1m[36m▸ Calculating HCS budget[0m
+
+[1m[36m▸ Building expert heatmap (decode-weighted calibration)[0m
+VRAM LEDGER prefill_prepare_budget prompt_tokens=39 free_mb=20180 total_mb=32119 safety_mb=600 fixed_scratch_mb=874.5 per_tok_kb=760.5 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=6646.0 all_expert_cold_reserve_mb=5544.0 mamba2_runtime_reserve_mb=21.6 measured_cold_slots=0 post_scratch_runtime_reserve_mb=6646.0 scratch_budget_mb=12934.6 target_tokens=39 max_by_vram=128 runtime_chunk_cap=None chosen_scratch_tokens=128 hcs_cached_experts=0 hcs_stride=512 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=128 prompt_tokens=39 pre_alloc_free_mb=20180 post_alloc_free_mb=19236 actual_alloc_mb=944.0 estimated_scratch_mb=1013.3 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=2.6 shared_fp32_mb=2.6 fp32_scratch_mb=42.5 kv_cross_floor_mb=0.0
+VRAM LEDGER prefill_ready prompt_tokens=39 scratch_tokens=128 scratch_mb=1013.3 post_alloc_free_mb=19236 safety_mb=600 optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=false pinning_disabled=true optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0 prescan_layers=0 hcs_cached_experts=0 hcs_stride=512 scratch_tokens=128 chunk_size=39 num_chunks=1 chunk_plan=[39]
+VRAM LEDGER prefill_route_cold_demand layer=1 moe_layer=Some(1) active_experts=390 cold_slots_needed=390 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=4223.0
+VRAM LEDGER prefill_cold_staging_alloc slots=390 bytes=4428103680 mb=4223.0 free_after_mb=15012 total_mb=32119 safety_mb=600
+VRAM LEDGER prefill_cold_staging_alloc slots=512 bytes=5813305344 mb=5544.0 free_after_mb=13668 total_mb=32119 safety_mb=600
+VRAM LEDGER prefill_ptr_prefetch layer=3 moe_layer=3 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=3 moe_layer=Some(3) active_experts=188 cold_slots_needed=188 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2035.7
+VRAM LEDGER prefill_ptr_prefetch layer=5 moe_layer=5 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=5 moe_layer=Some(5) active_experts=270 cold_slots_needed=270 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2923.6
+VRAM LEDGER prefill_ptr_prefetch layer=8 moe_layer=8 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=8 moe_layer=Some(8) active_experts=190 cold_slots_needed=190 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2057.3
+VRAM LEDGER prefill_ptr_prefetch layer=10 moe_layer=10 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=10 moe_layer=Some(10) active_experts=183 cold_slots_needed=183 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1981.5
+VRAM LEDGER prefill_ptr_prefetch layer=12 moe_layer=12 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=12 moe_layer=Some(12) active_experts=189 cold_slots_needed=189 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2046.5
+VRAM LEDGER prefill_ptr_prefetch layer=14 moe_layer=14 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=14 moe_layer=Some(14) active_experts=149 cold_slots_needed=149 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1613.4
+VRAM LEDGER prefill_ptr_prefetch layer=17 moe_layer=17 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=17 moe_layer=Some(17) active_experts=151 cold_slots_needed=151 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1635.0
+VRAM LEDGER prefill_ptr_prefetch layer=19 moe_layer=19 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=19 moe_layer=Some(19) active_experts=170 cold_slots_needed=170 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1840.8
+VRAM LEDGER prefill_ptr_prefetch layer=21 moe_layer=21 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=21 moe_layer=Some(21) active_experts=159 cold_slots_needed=159 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1721.7
+VRAM LEDGER prefill_ptr_prefetch layer=23 moe_layer=23 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=23 moe_layer=Some(23) active_experts=176 cold_slots_needed=176 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1905.8
+VRAM LEDGER prefill_ptr_prefetch layer=26 moe_layer=26 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=26 moe_layer=Some(26) active_experts=135 cold_slots_needed=135 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1461.8
+VRAM LEDGER prefill_ptr_prefetch layer=28 moe_layer=28 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=28 moe_layer=Some(28) active_experts=190 cold_slots_needed=190 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2057.3
+VRAM LEDGER prefill_ptr_prefetch layer=30 moe_layer=30 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=30 moe_layer=Some(30) active_experts=155 cold_slots_needed=155 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1678.4
+VRAM LEDGER prefill_ptr_prefetch layer=32 moe_layer=32 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=32 moe_layer=Some(32) active_experts=130 cold_slots_needed=130 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1407.7
+VRAM LEDGER prefill_ptr_prefetch layer=34 moe_layer=34 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=34 moe_layer=Some(34) active_experts=126 cold_slots_needed=126 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1364.3
+VRAM LEDGER prefill_ptr_prefetch layer=37 moe_layer=37 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=37 moe_layer=Some(37) active_experts=110 cold_slots_needed=110 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1191.1
+VRAM LEDGER prefill_ptr_prefetch layer=39 moe_layer=39 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=39 moe_layer=Some(39) active_experts=83 cold_slots_needed=83 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=898.7
+VRAM LEDGER prefill_ptr_prefetch layer=41 moe_layer=41 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=41 moe_layer=Some(41) active_experts=82 cold_slots_needed=82 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=887.9
+VRAM LEDGER prefill_ptr_prefetch layer=43 moe_layer=43 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=43 moe_layer=Some(43) active_experts=73 cold_slots_needed=73 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=790.5
+VRAM LEDGER prefill_ptr_prefetch layer=45 moe_layer=45 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=45 moe_layer=Some(45) active_experts=75 cold_slots_needed=75 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=812.1
+VRAM LEDGER prefill_ptr_prefetch layer=48 moe_layer=48 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=48 moe_layer=Some(48) active_experts=85 cold_slots_needed=85 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=920.4
+VRAM LEDGER prefill_ptr_prefetch layer=50 moe_layer=50 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=50 moe_layer=Some(50) active_experts=82 cold_slots_needed=82 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=887.9
+VRAM LEDGER prefill_ptr_prefetch layer=52 moe_layer=52 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=52 moe_layer=Some(52) active_experts=85 cold_slots_needed=85 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=920.4
+VRAM LEDGER prefill_ptr_prefetch layer=54 moe_layer=54 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=54 moe_layer=Some(54) active_experts=78 cold_slots_needed=78 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=844.6
+VRAM LEDGER prefill_ptr_prefetch layer=56 moe_layer=56 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=56 moe_layer=Some(56) active_experts=65 cold_slots_needed=65 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=703.8
+VRAM LEDGER prefill_ptr_prefetch layer=59 moe_layer=59 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=59 moe_layer=Some(59) active_experts=59 cold_slots_needed=59 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=638.9
+VRAM LEDGER prefill_ptr_prefetch layer=61 moe_layer=61 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=61 moe_layer=Some(61) active_experts=52 cold_slots_needed=52 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=563.1
+VRAM LEDGER prefill_ptr_prefetch layer=63 moe_layer=63 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=63 moe_layer=Some(63) active_experts=49 cold_slots_needed=49 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=530.6
+VRAM LEDGER prefill_ptr_prefetch layer=65 moe_layer=65 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=65 moe_layer=Some(65) active_experts=37 cold_slots_needed=37 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=400.6
+VRAM LEDGER prefill_ptr_prefetch layer=67 moe_layer=67 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=67 moe_layer=Some(67) active_experts=37 cold_slots_needed=37 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=400.6
+VRAM LEDGER prefill_ptr_prefetch layer=70 moe_layer=70 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=70 moe_layer=Some(70) active_experts=30 cold_slots_needed=30 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=324.8
+VRAM LEDGER prefill_ptr_prefetch layer=72 moe_layer=72 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=72 moe_layer=Some(72) active_experts=27 cold_slots_needed=27 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=292.4
+VRAM LEDGER prefill_ptr_prefetch layer=74 moe_layer=74 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=74 moe_layer=Some(74) active_experts=30 cold_slots_needed=30 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=324.8
+VRAM LEDGER prefill_ptr_prefetch layer=76 moe_layer=76 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=76 moe_layer=Some(76) active_experts=30 cold_slots_needed=30 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=324.8
+VRAM LEDGER prefill_ptr_prefetch layer=79 moe_layer=79 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=79 moe_layer=Some(79) active_experts=25 cold_slots_needed=25 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=270.7
+VRAM LEDGER prefill_ptr_prefetch layer=81 moe_layer=81 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=81 moe_layer=Some(81) active_experts=25 cold_slots_needed=25 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=270.7
+VRAM LEDGER prefill_ptr_prefetch layer=83 moe_layer=83 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=83 moe_layer=Some(83) active_experts=31 cold_slots_needed=31 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=335.7
+VRAM LEDGER prefill_ptr_prefetch layer=85 moe_layer=85 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=85 moe_layer=Some(85) active_experts=25 cold_slots_needed=25 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=270.7
+VRAM LEDGER prefill_ptr_prefetch layer=87 moe_layer=87 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=87 moe_layer=Some(87) active_experts=22 cold_slots_needed=22 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=238.2
+VRAM LEDGER prefill_prepare_budget prompt_tokens=47 free_mb=20182 total_mb=32119 safety_mb=600 fixed_scratch_mb=874.5 per_tok_kb=760.5 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=6646.0 all_expert_cold_reserve_mb=5544.0 mamba2_runtime_reserve_mb=21.8 measured_cold_slots=0 post_scratch_runtime_reserve_mb=6646.0 scratch_budget_mb=12936.6 target_tokens=47 max_by_vram=128 runtime_chunk_cap=None chosen_scratch_tokens=128 hcs_cached_experts=0 hcs_stride=512 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=128 prompt_tokens=47 pre_alloc_free_mb=20182 post_alloc_free_mb=19236 actual_alloc_mb=946.0 estimated_scratch_mb=1013.3 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=2.6 shared_fp32_mb=2.6 fp32_scratch_mb=42.5 kv_cross_floor_mb=0.0
+VRAM LEDGER prefill_ready prompt_tokens=47 scratch_tokens=128 scratch_mb=1013.3 post_alloc_free_mb=19236 safety_mb=600 optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=false pinning_disabled=true optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0 prescan_layers=0 hcs_cached_experts=0 hcs_stride=512 scratch_tokens=128 chunk_size=47 num_chunks=1 chunk_plan=[47]
+VRAM LEDGER prefill_route_cold_demand layer=1 moe_layer=Some(1) active_experts=427 cold_slots_needed=427 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=4623.6
+VRAM LEDGER prefill_cold_staging_alloc slots=427 bytes=4848205824 mb=4623.6 free_after_mb=14596 total_mb=32119 safety_mb=600
+VRAM LEDGER prefill_cold_staging_alloc slots=512 bytes=5813305344 mb=5544.0 free_after_mb=13668 total_mb=32119 safety_mb=600
+VRAM LEDGER prefill_ptr_prefetch layer=3 moe_layer=3 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=3 moe_layer=Some(3) active_experts=247 cold_slots_needed=247 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2674.5
+VRAM LEDGER prefill_ptr_prefetch layer=5 moe_layer=5 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=5 moe_layer=Some(5) active_experts=328 cold_slots_needed=328 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=3551.6
+VRAM LEDGER prefill_ptr_prefetch layer=8 moe_layer=8 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=8 moe_layer=Some(8) active_experts=207 cold_slots_needed=207 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2241.4
+VRAM LEDGER prefill_ptr_prefetch layer=10 moe_layer=10 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=10 moe_layer=Some(10) active_experts=197 cold_slots_needed=197 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2133.1
+VRAM LEDGER prefill_ptr_prefetch layer=12 moe_layer=12 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=12 moe_layer=Some(12) active_experts=196 cold_slots_needed=196 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2122.3
+VRAM LEDGER prefill_ptr_prefetch layer=14 moe_layer=14 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=14 moe_layer=Some(14) active_experts=179 cold_slots_needed=179 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1938.2
+VRAM LEDGER prefill_ptr_prefetch layer=17 moe_layer=17 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=17 moe_layer=Some(17) active_experts=168 cold_slots_needed=168 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1819.1
+VRAM LEDGER prefill_ptr_prefetch layer=19 moe_layer=19 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=19 moe_layer=Some(19) active_experts=188 cold_slots_needed=188 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2035.7
+VRAM LEDGER prefill_ptr_prefetch layer=21 moe_layer=21 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=21 moe_layer=Some(21) active_experts=170 cold_slots_needed=170 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1840.8
+VRAM LEDGER prefill_ptr_prefetch layer=23 moe_layer=23 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=23 moe_layer=Some(23) active_experts=193 cold_slots_needed=193 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2089.8
+VRAM LEDGER prefill_ptr_prefetch layer=26 moe_layer=26 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=26 moe_layer=Some(26) active_experts=145 cold_slots_needed=145 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1570.1
+VRAM LEDGER prefill_ptr_prefetch layer=28 moe_layer=28 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=28 moe_layer=Some(28) active_experts=206 cold_slots_needed=206 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2230.6
+VRAM LEDGER prefill_ptr_prefetch layer=30 moe_layer=30 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=30 moe_layer=Some(30) active_experts=173 cold_slots_needed=173 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1873.3
+VRAM LEDGER prefill_ptr_prefetch layer=32 moe_layer=32 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=32 moe_layer=Some(32) active_experts=149 cold_slots_needed=149 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1613.4
+VRAM LEDGER prefill_ptr_prefetch layer=34 moe_layer=34 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=34 moe_layer=Some(34) active_experts=130 cold_slots_needed=130 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1407.7
+VRAM LEDGER prefill_ptr_prefetch layer=37 moe_layer=37 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=37 moe_layer=Some(37) active_experts=118 cold_slots_needed=118 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1277.7
+VRAM LEDGER prefill_ptr_prefetch layer=39 moe_layer=39 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=39 moe_layer=Some(39) active_experts=83 cold_slots_needed=83 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=898.7
+VRAM LEDGER prefill_ptr_prefetch layer=41 moe_layer=41 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=41 moe_layer=Some(41) active_experts=92 cold_slots_needed=92 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=996.2
+VRAM LEDGER prefill_ptr_prefetch layer=43 moe_layer=43 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=43 moe_layer=Some(43) active_experts=80 cold_slots_needed=80 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=866.2
+VRAM LEDGER prefill_ptr_prefetch layer=45 moe_layer=45 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=45 moe_layer=Some(45) active_experts=81 cold_slots_needed=81 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=877.1
+VRAM LEDGER prefill_ptr_prefetch layer=48 moe_layer=48 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=48 moe_layer=Some(48) active_experts=102 cold_slots_needed=102 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1104.5
+VRAM LEDGER prefill_ptr_prefetch layer=50 moe_layer=50 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=50 moe_layer=Some(50) active_experts=92 cold_slots_needed=92 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=996.2
+VRAM LEDGER prefill_ptr_prefetch layer=52 moe_layer=52 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=52 moe_layer=Some(52) active_experts=95 cold_slots_needed=95 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1028.7
+VRAM LEDGER prefill_ptr_prefetch layer=54 moe_layer=54 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=54 moe_layer=Some(54) active_experts=81 cold_slots_needed=81 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=877.1
+VRAM LEDGER prefill_ptr_prefetch layer=56 moe_layer=56 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=56 moe_layer=Some(56) active_experts=70 cold_slots_needed=70 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=758.0
+VRAM LEDGER prefill_ptr_prefetch layer=59 moe_layer=59 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=59 moe_layer=Some(59) active_experts=62 cold_slots_needed=62 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=671.3
+VRAM LEDGER prefill_ptr_prefetch layer=61 moe_layer=61 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=61 moe_layer=Some(61) active_experts=53 cold_slots_needed=53 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=573.9
+VRAM LEDGER prefill_ptr_prefetch layer=63 moe_layer=63 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=63 moe_layer=Some(63) active_experts=49 cold_slots_needed=49 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=530.6
+VRAM LEDGER prefill_ptr_prefetch layer=65 moe_layer=65 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=65 moe_layer=Some(65) active_experts=39 cold_slots_needed=39 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=422.3
+VRAM LEDGER prefill_ptr_prefetch layer=67 moe_layer=67 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=67 moe_layer=Some(67) active_experts=34 cold_slots_needed=34 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=368.2
+VRAM LEDGER prefill_ptr_prefetch layer=70 moe_layer=70 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=70 moe_layer=Some(70) active_experts=30 cold_slots_needed=30 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=324.8
+VRAM LEDGER prefill_ptr_prefetch layer=72 moe_layer=72 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=72 moe_layer=Some(72) active_experts=28 cold_slots_needed=28 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=303.2
+VRAM LEDGER prefill_ptr_prefetch layer=74 moe_layer=74 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=74 moe_layer=Some(74) active_experts=30 cold_slots_needed=30 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=324.8
+VRAM LEDGER prefill_ptr_prefetch layer=76 moe_layer=76 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=76 moe_layer=Some(76) active_experts=29 cold_slots_needed=29 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=314.0
+VRAM LEDGER prefill_ptr_prefetch layer=79 moe_layer=79 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=79 moe_layer=Some(79) active_experts=25 cold_slots_needed=25 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=270.7
+VRAM LEDGER prefill_ptr_prefetch layer=81 moe_layer=81 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=81 moe_layer=Some(81) active_experts=26 cold_slots_needed=26 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=281.5
+VRAM LEDGER prefill_ptr_prefetch layer=83 moe_layer=83 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=83 moe_layer=Some(83) active_experts=31 cold_slots_needed=31 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=335.7
+VRAM LEDGER prefill_ptr_prefetch layer=85 moe_layer=85 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=85 moe_layer=Some(85) active_experts=24 cold_slots_needed=24 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=259.9
+VRAM LEDGER prefill_ptr_prefetch layer=87 moe_layer=87 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=87 moe_layer=Some(87) active_experts=22 cold_slots_needed=22 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=238.2
+VRAM LEDGER prefill_prepare_budget prompt_tokens=40 free_mb=20182 total_mb=32119 safety_mb=600 fixed_scratch_mb=874.5 per_tok_kb=760.5 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=6646.0 all_expert_cold_reserve_mb=5544.0 mamba2_runtime_reserve_mb=21.6 measured_cold_slots=0 post_scratch_runtime_reserve_mb=6646.0 scratch_budget_mb=12936.6 target_tokens=40 max_by_vram=128 runtime_chunk_cap=None chosen_scratch_tokens=128 hcs_cached_experts=0 hcs_stride=512 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=128 prompt_tokens=40 pre_alloc_free_mb=20182 post_alloc_free_mb=19236 actual_alloc_mb=946.0 estimated_scratch_mb=1013.3 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=2.6 shared_fp32_mb=2.6 fp32_scratch_mb=42.5 kv_cross_floor_mb=0.0
+VRAM LEDGER prefill_ready prompt_tokens=40 scratch_tokens=128 scratch_mb=1013.3 post_alloc_free_mb=19236 safety_mb=600 optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=false pinning_disabled=true optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0 prescan_layers=0 hcs_cached_experts=0 hcs_stride=512 scratch_tokens=128 chunk_size=40 num_chunks=1 chunk_plan=[40]
+VRAM LEDGER prefill_route_cold_demand layer=1 moe_layer=Some(1) active_experts=384 cold_slots_needed=384 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=4158.0
+VRAM LEDGER prefill_cold_staging_alloc slots=384 bytes=4359979008 mb=4158.0 free_after_mb=15076 total_mb=32119 safety_mb=600
+VRAM LEDGER prefill_cold_staging_alloc slots=512 bytes=5813305344 mb=5544.0 free_after_mb=13668 total_mb=32119 safety_mb=600
+VRAM LEDGER prefill_ptr_prefetch layer=3 moe_layer=3 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=3 moe_layer=Some(3) active_experts=201 cold_slots_needed=201 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2176.5
+VRAM LEDGER prefill_ptr_prefetch layer=5 moe_layer=5 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=5 moe_layer=Some(5) active_experts=270 cold_slots_needed=270 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2923.6
+VRAM LEDGER prefill_ptr_prefetch layer=8 moe_layer=8 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=8 moe_layer=Some(8) active_experts=204 cold_slots_needed=204 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2208.9
+VRAM LEDGER prefill_ptr_prefetch layer=10 moe_layer=10 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=10 moe_layer=Some(10) active_experts=190 cold_slots_needed=190 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2057.3
+VRAM LEDGER prefill_ptr_prefetch layer=12 moe_layer=12 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=12 moe_layer=Some(12) active_experts=191 cold_slots_needed=191 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2068.2
+VRAM LEDGER prefill_ptr_prefetch layer=14 moe_layer=14 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=14 moe_layer=Some(14) active_experts=165 cold_slots_needed=165 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1786.6
+VRAM LEDGER prefill_ptr_prefetch layer=17 moe_layer=17 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=17 moe_layer=Some(17) active_experts=167 cold_slots_needed=167 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1808.3
+VRAM LEDGER prefill_ptr_prefetch layer=19 moe_layer=19 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=19 moe_layer=Some(19) active_experts=182 cold_slots_needed=182 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1970.7
+VRAM LEDGER prefill_ptr_prefetch layer=21 moe_layer=21 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=21 moe_layer=Some(21) active_experts=174 cold_slots_needed=174 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1884.1
+VRAM LEDGER prefill_ptr_prefetch layer=23 moe_layer=23 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=23 moe_layer=Some(23) active_experts=189 cold_slots_needed=189 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2046.5
+VRAM LEDGER prefill_ptr_prefetch layer=26 moe_layer=26 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=26 moe_layer=Some(26) active_experts=141 cold_slots_needed=141 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1526.8
+VRAM LEDGER prefill_ptr_prefetch layer=28 moe_layer=28 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=28 moe_layer=Some(28) active_experts=196 cold_slots_needed=196 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2122.3
+VRAM LEDGER prefill_ptr_prefetch layer=30 moe_layer=30 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=30 moe_layer=Some(30) active_experts=165 cold_slots_needed=165 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1786.6
+VRAM LEDGER prefill_ptr_prefetch layer=32 moe_layer=32 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=32 moe_layer=Some(32) active_experts=150 cold_slots_needed=150 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1624.2
+VRAM LEDGER prefill_ptr_prefetch layer=34 moe_layer=34 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=34 moe_layer=Some(34) active_experts=128 cold_slots_needed=128 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1386.0
+VRAM LEDGER prefill_ptr_prefetch layer=37 moe_layer=37 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=37 moe_layer=Some(37) active_experts=114 cold_slots_needed=114 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1234.4
+VRAM LEDGER prefill_ptr_prefetch layer=39 moe_layer=39 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=39 moe_layer=Some(39) active_experts=84 cold_slots_needed=84 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=909.6
+VRAM LEDGER prefill_ptr_prefetch layer=41 moe_layer=41 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=41 moe_layer=Some(41) active_experts=90 cold_slots_needed=90 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=974.5
+VRAM LEDGER prefill_ptr_prefetch layer=43 moe_layer=43 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=43 moe_layer=Some(43) active_experts=71 cold_slots_needed=71 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=768.8
+VRAM LEDGER prefill_ptr_prefetch layer=45 moe_layer=45 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=45 moe_layer=Some(45) active_experts=70 cold_slots_needed=70 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=758.0
+VRAM LEDGER prefill_ptr_prefetch layer=48 moe_layer=48 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=48 moe_layer=Some(48) active_experts=90 cold_slots_needed=90 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=974.5
+VRAM LEDGER prefill_ptr_prefetch layer=50 moe_layer=50 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=50 moe_layer=Some(50) active_experts=86 cold_slots_needed=86 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=931.2
+VRAM LEDGER prefill_ptr_prefetch layer=52 moe_layer=52 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=52 moe_layer=Some(52) active_experts=91 cold_slots_needed=91 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=985.4
+VRAM LEDGER prefill_ptr_prefetch layer=54 moe_layer=54 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=54 moe_layer=Some(54) active_experts=74 cold_slots_needed=74 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=801.3
+VRAM LEDGER prefill_ptr_prefetch layer=56 moe_layer=56 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=56 moe_layer=Some(56) active_experts=67 cold_slots_needed=67 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=725.5
+VRAM LEDGER prefill_ptr_prefetch layer=59 moe_layer=59 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=59 moe_layer=Some(59) active_experts=58 cold_slots_needed=58 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=628.0
+VRAM LEDGER prefill_ptr_prefetch layer=61 moe_layer=61 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=61 moe_layer=Some(61) active_experts=52 cold_slots_needed=52 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=563.1
+VRAM LEDGER prefill_ptr_prefetch layer=63 moe_layer=63 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=63 moe_layer=Some(63) active_experts=49 cold_slots_needed=49 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=530.6
+VRAM LEDGER prefill_ptr_prefetch layer=65 moe_layer=65 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=65 moe_layer=Some(65) active_experts=37 cold_slots_needed=37 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=400.6
+VRAM LEDGER prefill_ptr_prefetch layer=67 moe_layer=67 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=67 moe_layer=Some(67) active_experts=33 cold_slots_needed=33 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=357.3
+VRAM LEDGER prefill_ptr_prefetch layer=70 moe_layer=70 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=70 moe_layer=Some(70) active_experts=31 cold_slots_needed=31 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=335.7
+VRAM LEDGER prefill_ptr_prefetch layer=72 moe_layer=72 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=72 moe_layer=Some(72) active_experts=27 cold_slots_needed=27 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=292.4
+VRAM LEDGER prefill_ptr_prefetch layer=74 moe_layer=74 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=74 moe_layer=Some(74) active_experts=30 cold_slots_needed=30 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=324.8
+VRAM LEDGER prefill_ptr_prefetch layer=76 moe_layer=76 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=76 moe_layer=Some(76) active_experts=30 cold_slots_needed=30 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=324.8
+VRAM LEDGER prefill_ptr_prefetch layer=79 moe_layer=79 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=79 moe_layer=Some(79) active_experts=25 cold_slots_needed=25 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=270.7
+VRAM LEDGER prefill_ptr_prefetch layer=81 moe_layer=81 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=81 moe_layer=Some(81) active_experts=24 cold_slots_needed=24 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=259.9
+VRAM LEDGER prefill_ptr_prefetch layer=83 moe_layer=83 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=83 moe_layer=Some(83) active_experts=29 cold_slots_needed=29 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=314.0
+VRAM LEDGER prefill_ptr_prefetch layer=85 moe_layer=85 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=85 moe_layer=Some(85) active_experts=24 cold_slots_needed=24 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=259.9
+VRAM LEDGER prefill_ptr_prefetch layer=87 moe_layer=87 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=87 moe_layer=Some(87) active_experts=22 cold_slots_needed=22 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=238.2
+VRAM LEDGER prefill_prepare_budget prompt_tokens=35 free_mb=20184 total_mb=32119 safety_mb=600 fixed_scratch_mb=874.5 per_tok_kb=760.5 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=6646.0 all_expert_cold_reserve_mb=5544.0 mamba2_runtime_reserve_mb=21.5 measured_cold_slots=0 post_scratch_runtime_reserve_mb=6646.0 scratch_budget_mb=12938.6 target_tokens=35 max_by_vram=128 runtime_chunk_cap=None chosen_scratch_tokens=128 hcs_cached_experts=0 hcs_stride=512 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=128 prompt_tokens=35 pre_alloc_free_mb=20184 post_alloc_free_mb=19238 actual_alloc_mb=946.0 estimated_scratch_mb=1013.3 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=2.6 shared_fp32_mb=2.6 fp32_scratch_mb=42.5 kv_cross_floor_mb=0.0
+VRAM LEDGER prefill_ready prompt_tokens=35 scratch_tokens=128 scratch_mb=1013.3 post_alloc_free_mb=19238 safety_mb=600 optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=false pinning_disabled=true optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0 prescan_layers=0 hcs_cached_experts=0 hcs_stride=512 scratch_tokens=128 chunk_size=35 num_chunks=1 chunk_plan=[35]
+VRAM LEDGER prefill_route_cold_demand layer=1 moe_layer=Some(1) active_experts=362 cold_slots_needed=362 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=3919.8
+VRAM LEDGER prefill_cold_staging_alloc slots=362 bytes=4110188544 mb=3919.8 free_after_mb=15302 total_mb=32119 safety_mb=600
+VRAM LEDGER prefill_cold_staging_alloc slots=512 bytes=5813305344 mb=5544.0 free_after_mb=13670 total_mb=32119 safety_mb=600
+VRAM LEDGER prefill_ptr_prefetch layer=3 moe_layer=3 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=3 moe_layer=Some(3) active_experts=179 cold_slots_needed=179 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1938.2
+VRAM LEDGER prefill_ptr_prefetch layer=5 moe_layer=5 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=5 moe_layer=Some(5) active_experts=246 cold_slots_needed=246 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2663.7
+VRAM LEDGER prefill_ptr_prefetch layer=8 moe_layer=8 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=8 moe_layer=Some(8) active_experts=168 cold_slots_needed=168 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1819.1
+VRAM LEDGER prefill_ptr_prefetch layer=10 moe_layer=10 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=10 moe_layer=Some(10) active_experts=167 cold_slots_needed=167 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1808.3
+VRAM LEDGER prefill_ptr_prefetch layer=12 moe_layer=12 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=12 moe_layer=Some(12) active_experts=168 cold_slots_needed=168 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1819.1
+VRAM LEDGER prefill_ptr_prefetch layer=14 moe_layer=14 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=14 moe_layer=Some(14) active_experts=143 cold_slots_needed=143 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1548.4
+VRAM LEDGER prefill_ptr_prefetch layer=17 moe_layer=17 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=17 moe_layer=Some(17) active_experts=154 cold_slots_needed=154 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1667.5
+VRAM LEDGER prefill_ptr_prefetch layer=19 moe_layer=19 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=19 moe_layer=Some(19) active_experts=158 cold_slots_needed=158 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1710.8
+VRAM LEDGER prefill_ptr_prefetch layer=21 moe_layer=21 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=21 moe_layer=Some(21) active_experts=152 cold_slots_needed=152 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1645.9
+VRAM LEDGER prefill_ptr_prefetch layer=23 moe_layer=23 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=23 moe_layer=Some(23) active_experts=171 cold_slots_needed=171 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1851.6
+VRAM LEDGER prefill_ptr_prefetch layer=26 moe_layer=26 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=26 moe_layer=Some(26) active_experts=121 cold_slots_needed=121 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1310.2
+VRAM LEDGER prefill_ptr_prefetch layer=28 moe_layer=28 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=28 moe_layer=Some(28) active_experts=168 cold_slots_needed=168 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1819.1
+VRAM LEDGER prefill_ptr_prefetch layer=30 moe_layer=30 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=30 moe_layer=Some(30) active_experts=152 cold_slots_needed=152 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1645.9
+VRAM LEDGER prefill_ptr_prefetch layer=32 moe_layer=32 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=32 moe_layer=Some(32) active_experts=142 cold_slots_needed=142 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1537.6
+VRAM LEDGER prefill_ptr_prefetch layer=34 moe_layer=34 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=34 moe_layer=Some(34) active_experts=118 cold_slots_needed=118 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1277.7
+VRAM LEDGER prefill_ptr_prefetch layer=37 moe_layer=37 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=37 moe_layer=Some(37) active_experts=101 cold_slots_needed=101 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1093.6
+VRAM LEDGER prefill_ptr_prefetch layer=39 moe_layer=39 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=39 moe_layer=Some(39) active_experts=78 cold_slots_needed=78 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=844.6
+VRAM LEDGER prefill_ptr_prefetch layer=41 moe_layer=41 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=41 moe_layer=Some(41) active_experts=77 cold_slots_needed=77 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=833.8
+VRAM LEDGER prefill_ptr_prefetch layer=43 moe_layer=43 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=43 moe_layer=Some(43) active_experts=67 cold_slots_needed=67 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=725.5
+VRAM LEDGER prefill_ptr_prefetch layer=45 moe_layer=45 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=45 moe_layer=Some(45) active_experts=72 cold_slots_needed=72 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=779.6
+VRAM LEDGER prefill_ptr_prefetch layer=48 moe_layer=48 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=48 moe_layer=Some(48) active_experts=81 cold_slots_needed=81 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=877.1
+VRAM LEDGER prefill_ptr_prefetch layer=50 moe_layer=50 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=50 moe_layer=Some(50) active_experts=77 cold_slots_needed=77 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=833.8
+VRAM LEDGER prefill_ptr_prefetch layer=52 moe_layer=52 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=52 moe_layer=Some(52) active_experts=80 cold_slots_needed=80 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=866.2
+VRAM LEDGER prefill_ptr_prefetch layer=54 moe_layer=54 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=54 moe_layer=Some(54) active_experts=73 cold_slots_needed=73 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=790.5
+VRAM LEDGER prefill_ptr_prefetch layer=56 moe_layer=56 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=56 moe_layer=Some(56) active_experts=66 cold_slots_needed=66 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=714.7
+VRAM LEDGER prefill_ptr_prefetch layer=59 moe_layer=59 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=59 moe_layer=Some(59) active_experts=54 cold_slots_needed=54 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=584.7
+VRAM LEDGER prefill_ptr_prefetch layer=61 moe_layer=61 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=61 moe_layer=Some(61) active_experts=48 cold_slots_needed=48 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=519.8
+VRAM LEDGER prefill_ptr_prefetch layer=63 moe_layer=63 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=63 moe_layer=Some(63) active_experts=46 cold_slots_needed=46 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=498.1
+VRAM LEDGER prefill_ptr_prefetch layer=65 moe_layer=65 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=65 moe_layer=Some(65) active_experts=37 cold_slots_needed=37 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=400.6
+VRAM LEDGER prefill_ptr_prefetch layer=67 moe_layer=67 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=67 moe_layer=Some(67) active_experts=33 cold_slots_needed=33 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=357.3
+VRAM LEDGER prefill_ptr_prefetch layer=70 moe_layer=70 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=70 moe_layer=Some(70) active_experts=30 cold_slots_needed=30 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=324.8
+VRAM LEDGER prefill_ptr_prefetch layer=72 moe_layer=72 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=72 moe_layer=Some(72) active_experts=28 cold_slots_needed=28 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=303.2
+VRAM LEDGER prefill_ptr_prefetch layer=74 moe_layer=74 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=74 moe_layer=Some(74) active_experts=30 cold_slots_needed=30 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=324.8
+VRAM LEDGER prefill_ptr_prefetch layer=76 moe_layer=76 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=76 moe_layer=Some(76) active_experts=29 cold_slots_needed=29 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=314.0
+VRAM LEDGER prefill_ptr_prefetch layer=79 moe_layer=79 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=79 moe_layer=Some(79) active_experts=26 cold_slots_needed=26 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=281.5
+VRAM LEDGER prefill_ptr_prefetch layer=81 moe_layer=81 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=81 moe_layer=Some(81) active_experts=24 cold_slots_needed=24 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=259.9
+VRAM LEDGER prefill_ptr_prefetch layer=83 moe_layer=83 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=83 moe_layer=Some(83) active_experts=30 cold_slots_needed=30 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=324.8
+VRAM LEDGER prefill_ptr_prefetch layer=85 moe_layer=85 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=85 moe_layer=Some(85) active_experts=25 cold_slots_needed=25 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=270.7
+VRAM LEDGER prefill_ptr_prefetch layer=87 moe_layer=87 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=87 moe_layer=Some(87) active_experts=22 cold_slots_needed=22 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=238.2
+VRAM LEDGER prefill_prepare_budget prompt_tokens=46 free_mb=20184 total_mb=32119 safety_mb=600 fixed_scratch_mb=874.5 per_tok_kb=760.5 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=6646.0 all_expert_cold_reserve_mb=5544.0 mamba2_runtime_reserve_mb=21.8 measured_cold_slots=0 post_scratch_runtime_reserve_mb=6646.0 scratch_budget_mb=12938.6 target_tokens=46 max_by_vram=128 runtime_chunk_cap=None chosen_scratch_tokens=128 hcs_cached_experts=0 hcs_stride=512 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=128 prompt_tokens=46 pre_alloc_free_mb=20184 post_alloc_free_mb=19236 actual_alloc_mb=948.0 estimated_scratch_mb=1013.3 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=2.6 shared_fp32_mb=2.6 fp32_scratch_mb=42.5 kv_cross_floor_mb=0.0
+VRAM LEDGER prefill_ready prompt_tokens=46 scratch_tokens=128 scratch_mb=1013.3 post_alloc_free_mb=19236 safety_mb=600 optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=false pinning_disabled=true optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0 prescan_layers=0 hcs_cached_experts=0 hcs_stride=512 scratch_tokens=128 chunk_size=46 num_chunks=1 chunk_plan=[46]
+VRAM LEDGER prefill_route_cold_demand layer=1 moe_layer=Some(1) active_experts=419 cold_slots_needed=419 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=4537.0
+VRAM LEDGER prefill_cold_staging_alloc slots=419 bytes=4757372928 mb=4537.0 free_after_mb=14692 total_mb=32119 safety_mb=600
+VRAM LEDGER prefill_cold_staging_alloc slots=512 bytes=5813305344 mb=5544.0 free_after_mb=13668 total_mb=32119 safety_mb=600
+VRAM LEDGER prefill_ptr_prefetch layer=3 moe_layer=3 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=3 moe_layer=Some(3) active_experts=214 cold_slots_needed=214 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2317.2
+VRAM LEDGER prefill_ptr_prefetch layer=5 moe_layer=5 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=5 moe_layer=Some(5) active_experts=277 cold_slots_needed=277 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2999.4
+VRAM LEDGER prefill_ptr_prefetch layer=8 moe_layer=8 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=8 moe_layer=Some(8) active_experts=192 cold_slots_needed=192 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2079.0
+VRAM LEDGER prefill_ptr_prefetch layer=10 moe_layer=10 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=10 moe_layer=Some(10) active_experts=187 cold_slots_needed=187 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2024.9
+VRAM LEDGER prefill_ptr_prefetch layer=12 moe_layer=12 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=12 moe_layer=Some(12) active_experts=194 cold_slots_needed=194 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2100.7
+VRAM LEDGER prefill_ptr_prefetch layer=14 moe_layer=14 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=14 moe_layer=Some(14) active_experts=170 cold_slots_needed=170 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1840.8
+VRAM LEDGER prefill_ptr_prefetch layer=17 moe_layer=17 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=17 moe_layer=Some(17) active_experts=174 cold_slots_needed=174 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1884.1
+VRAM LEDGER prefill_ptr_prefetch layer=19 moe_layer=19 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=19 moe_layer=Some(19) active_experts=182 cold_slots_needed=182 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1970.7
+VRAM LEDGER prefill_ptr_prefetch layer=21 moe_layer=21 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=21 moe_layer=Some(21) active_experts=186 cold_slots_needed=186 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2014.0
+VRAM LEDGER prefill_ptr_prefetch layer=23 moe_layer=23 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=23 moe_layer=Some(23) active_experts=216 cold_slots_needed=216 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2338.9
+VRAM LEDGER prefill_ptr_prefetch layer=26 moe_layer=26 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=26 moe_layer=Some(26) active_experts=136 cold_slots_needed=136 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1472.6
+VRAM LEDGER prefill_ptr_prefetch layer=28 moe_layer=28 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=28 moe_layer=Some(28) active_experts=190 cold_slots_needed=190 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2057.3
+VRAM LEDGER prefill_ptr_prefetch layer=30 moe_layer=30 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=30 moe_layer=Some(30) active_experts=166 cold_slots_needed=166 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1797.5
+VRAM LEDGER prefill_ptr_prefetch layer=32 moe_layer=32 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=32 moe_layer=Some(32) active_experts=140 cold_slots_needed=140 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1515.9
+VRAM LEDGER prefill_ptr_prefetch layer=34 moe_layer=34 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=34 moe_layer=Some(34) active_experts=130 cold_slots_needed=130 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1407.7
+VRAM LEDGER prefill_ptr_prefetch layer=37 moe_layer=37 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=37 moe_layer=Some(37) active_experts=114 cold_slots_needed=114 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1234.4
+VRAM LEDGER prefill_ptr_prefetch layer=39 moe_layer=39 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=39 moe_layer=Some(39) active_experts=84 cold_slots_needed=84 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=909.6
+VRAM LEDGER prefill_ptr_prefetch layer=41 moe_layer=41 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=41 moe_layer=Some(41) active_experts=91 cold_slots_needed=91 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=985.4
+VRAM LEDGER prefill_ptr_prefetch layer=43 moe_layer=43 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=43 moe_layer=Some(43) active_experts=79 cold_slots_needed=79 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=855.4
+VRAM LEDGER prefill_ptr_prefetch layer=45 moe_layer=45 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=45 moe_layer=Some(45) active_experts=76 cold_slots_needed=76 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=822.9
+VRAM LEDGER prefill_ptr_prefetch layer=48 moe_layer=48 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=48 moe_layer=Some(48) active_experts=95 cold_slots_needed=95 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1028.7
+VRAM LEDGER prefill_ptr_prefetch layer=50 moe_layer=50 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=50 moe_layer=Some(50) active_experts=89 cold_slots_needed=89 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=963.7
+VRAM LEDGER prefill_ptr_prefetch layer=52 moe_layer=52 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=52 moe_layer=Some(52) active_experts=87 cold_slots_needed=87 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=942.0
+VRAM LEDGER prefill_ptr_prefetch layer=54 moe_layer=54 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=54 moe_layer=Some(54) active_experts=75 cold_slots_needed=75 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=812.1
+VRAM LEDGER prefill_ptr_prefetch layer=56 moe_layer=56 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=56 moe_layer=Some(56) active_experts=70 cold_slots_needed=70 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=758.0
+VRAM LEDGER prefill_ptr_prefetch layer=59 moe_layer=59 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=59 moe_layer=Some(59) active_experts=59 cold_slots_needed=59 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=638.9
+VRAM LEDGER prefill_ptr_prefetch layer=61 moe_layer=61 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=61 moe_layer=Some(61) active_experts=51 cold_slots_needed=51 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=552.2
+VRAM LEDGER prefill_ptr_prefetch layer=63 moe_layer=63 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=63 moe_layer=Some(63) active_experts=47 cold_slots_needed=47 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=508.9
+VRAM LEDGER prefill_ptr_prefetch layer=65 moe_layer=65 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=65 moe_layer=Some(65) active_experts=38 cold_slots_needed=38 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=411.5
+VRAM LEDGER prefill_ptr_prefetch layer=67 moe_layer=67 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=67 moe_layer=Some(67) active_experts=35 cold_slots_needed=35 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=379.0
+VRAM LEDGER prefill_ptr_prefetch layer=70 moe_layer=70 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=70 moe_layer=Some(70) active_experts=32 cold_slots_needed=32 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=346.5
+VRAM LEDGER prefill_ptr_prefetch layer=72 moe_layer=72 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=72 moe_layer=Some(72) active_experts=28 cold_slots_needed=28 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=303.2
+VRAM LEDGER prefill_ptr_prefetch layer=74 moe_layer=74 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=74 moe_layer=Some(74) active_experts=30 cold_slots_needed=30 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=324.8
+VRAM LEDGER prefill_ptr_prefetch layer=76 moe_layer=76 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=76 moe_layer=Some(76) active_experts=29 cold_slots_needed=29 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=314.0
+VRAM LEDGER prefill_ptr_prefetch layer=79 moe_layer=79 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=79 moe_layer=Some(79) active_experts=25 cold_slots_needed=25 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=270.7
+VRAM LEDGER prefill_ptr_prefetch layer=81 moe_layer=81 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=81 moe_layer=Some(81) active_experts=25 cold_slots_needed=25 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=270.7
+VRAM LEDGER prefill_ptr_prefetch layer=83 moe_layer=83 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=83 moe_layer=Some(83) active_experts=30 cold_slots_needed=30 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=324.8
+VRAM LEDGER prefill_ptr_prefetch layer=85 moe_layer=85 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=85 moe_layer=Some(85) active_experts=24 cold_slots_needed=24 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=259.9
+VRAM LEDGER prefill_ptr_prefetch layer=87 moe_layer=87 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=87 moe_layer=Some(87) active_experts=22 cold_slots_needed=22 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=238.2
+VRAM LEDGER prefill_prepare_budget prompt_tokens=50 free_mb=20184 total_mb=32119 safety_mb=600 fixed_scratch_mb=874.5 per_tok_kb=760.5 measured_alloc_overhead_mb=0.0 measured_runtime_overhead_mb=6646.0 all_expert_cold_reserve_mb=5544.0 mamba2_runtime_reserve_mb=21.9 measured_cold_slots=0 post_scratch_runtime_reserve_mb=6646.0 scratch_budget_mb=12938.6 target_tokens=50 max_by_vram=128 runtime_chunk_cap=None chosen_scratch_tokens=128 hcs_cached_experts=0 hcs_stride=512 old_scratch_tokens=0
+VRAM LEDGER prefill_alloc attempt=1 scratch_tokens=128 prompt_tokens=50 pre_alloc_free_mb=20184 post_alloc_free_mb=19236 actual_alloc_mb=948.0 estimated_scratch_mb=1013.3 observed_alloc_overhead_mb=0.0 safety_mb=600 shared_bf16_mb=2.6 shared_fp32_mb=2.6 fp32_scratch_mb=42.5 kv_cross_floor_mb=0.0
+VRAM LEDGER prefill_ready prompt_tokens=50 scratch_tokens=128 scratch_mb=1013.3 post_alloc_free_mb=19236 safety_mb=600 optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0
+VRAM LEDGER prefill_moe_setup fused=true pointer_table=true pinning_enabled=false pinning_disabled=true optional_pinning_budget_mb=Some(0) pinning_active=false pinning_pool_mb=0.0 prescan_layers=0 hcs_cached_experts=0 hcs_stride=512 scratch_tokens=128 chunk_size=50 num_chunks=1 chunk_plan=[50]
+VRAM LEDGER prefill_route_cold_demand layer=1 moe_layer=Some(1) active_experts=410 cold_slots_needed=410 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=4439.5
+VRAM LEDGER prefill_cold_staging_alloc slots=410 bytes=4655185920 mb=4439.5 free_after_mb=14788 total_mb=32119 safety_mb=600
+VRAM LEDGER prefill_cold_staging_alloc slots=512 bytes=5813305344 mb=5544.0 free_after_mb=13668 total_mb=32119 safety_mb=600
+VRAM LEDGER prefill_ptr_prefetch layer=3 moe_layer=3 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=3 moe_layer=Some(3) active_experts=237 cold_slots_needed=237 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2566.3
+VRAM LEDGER prefill_ptr_prefetch layer=5 moe_layer=5 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=5 moe_layer=Some(5) active_experts=315 cold_slots_needed=315 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=3410.9
+VRAM LEDGER prefill_ptr_prefetch layer=8 moe_layer=8 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=8 moe_layer=Some(8) active_experts=228 cold_slots_needed=228 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2468.8
+VRAM LEDGER prefill_ptr_prefetch layer=10 moe_layer=10 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=10 moe_layer=Some(10) active_experts=212 cold_slots_needed=212 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2295.6
+VRAM LEDGER prefill_ptr_prefetch layer=12 moe_layer=12 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=12 moe_layer=Some(12) active_experts=214 cold_slots_needed=214 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2317.2
+VRAM LEDGER prefill_ptr_prefetch layer=14 moe_layer=14 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=14 moe_layer=Some(14) active_experts=184 cold_slots_needed=184 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1992.4
+VRAM LEDGER prefill_ptr_prefetch layer=17 moe_layer=17 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=17 moe_layer=Some(17) active_experts=177 cold_slots_needed=177 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1916.6
+VRAM LEDGER prefill_ptr_prefetch layer=19 moe_layer=19 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=19 moe_layer=Some(19) active_experts=198 cold_slots_needed=198 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2144.0
+VRAM LEDGER prefill_ptr_prefetch layer=21 moe_layer=21 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=21 moe_layer=Some(21) active_experts=198 cold_slots_needed=198 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2144.0
+VRAM LEDGER prefill_ptr_prefetch layer=23 moe_layer=23 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=23 moe_layer=Some(23) active_experts=205 cold_slots_needed=205 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2219.8
+VRAM LEDGER prefill_ptr_prefetch layer=26 moe_layer=26 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=26 moe_layer=Some(26) active_experts=143 cold_slots_needed=143 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1548.4
+VRAM LEDGER prefill_ptr_prefetch layer=28 moe_layer=28 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=28 moe_layer=Some(28) active_experts=205 cold_slots_needed=205 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2219.8
+VRAM LEDGER prefill_ptr_prefetch layer=30 moe_layer=30 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=30 moe_layer=Some(30) active_experts=185 cold_slots_needed=185 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=2003.2
+VRAM LEDGER prefill_ptr_prefetch layer=32 moe_layer=32 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=32 moe_layer=Some(32) active_experts=155 cold_slots_needed=155 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1678.4
+VRAM LEDGER prefill_ptr_prefetch layer=34 moe_layer=34 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=34 moe_layer=Some(34) active_experts=135 cold_slots_needed=135 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1461.8
+VRAM LEDGER prefill_ptr_prefetch layer=37 moe_layer=37 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=37 moe_layer=Some(37) active_experts=123 cold_slots_needed=123 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1331.9
+VRAM LEDGER prefill_ptr_prefetch layer=39 moe_layer=39 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=39 moe_layer=Some(39) active_experts=98 cold_slots_needed=98 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1061.2
+VRAM LEDGER prefill_ptr_prefetch layer=41 moe_layer=41 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=41 moe_layer=Some(41) active_experts=93 cold_slots_needed=93 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1007.0
+VRAM LEDGER prefill_ptr_prefetch layer=43 moe_layer=43 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=43 moe_layer=Some(43) active_experts=84 cold_slots_needed=84 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=909.6
+VRAM LEDGER prefill_ptr_prefetch layer=45 moe_layer=45 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=45 moe_layer=Some(45) active_experts=86 cold_slots_needed=86 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=931.2
+VRAM LEDGER prefill_ptr_prefetch layer=48 moe_layer=48 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=48 moe_layer=Some(48) active_experts=109 cold_slots_needed=109 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=1180.3
+VRAM LEDGER prefill_ptr_prefetch layer=50 moe_layer=50 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=50 moe_layer=Some(50) active_experts=92 cold_slots_needed=92 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=996.2
+VRAM LEDGER prefill_ptr_prefetch layer=52 moe_layer=52 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=52 moe_layer=Some(52) active_experts=92 cold_slots_needed=92 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=996.2
+VRAM LEDGER prefill_ptr_prefetch layer=54 moe_layer=54 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=54 moe_layer=Some(54) active_experts=81 cold_slots_needed=81 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=877.1
+VRAM LEDGER prefill_ptr_prefetch layer=56 moe_layer=56 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=56 moe_layer=Some(56) active_experts=70 cold_slots_needed=70 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=758.0
+VRAM LEDGER prefill_ptr_prefetch layer=59 moe_layer=59 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=59 moe_layer=Some(59) active_experts=63 cold_slots_needed=63 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=682.2
+VRAM LEDGER prefill_ptr_prefetch layer=61 moe_layer=61 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=61 moe_layer=Some(61) active_experts=54 cold_slots_needed=54 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=584.7
+VRAM LEDGER prefill_ptr_prefetch layer=63 moe_layer=63 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=63 moe_layer=Some(63) active_experts=50 cold_slots_needed=50 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=541.4
+VRAM LEDGER prefill_ptr_prefetch layer=65 moe_layer=65 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=65 moe_layer=Some(65) active_experts=43 cold_slots_needed=43 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=465.6
+VRAM LEDGER prefill_ptr_prefetch layer=67 moe_layer=67 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=67 moe_layer=Some(67) active_experts=33 cold_slots_needed=33 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=357.3
+VRAM LEDGER prefill_ptr_prefetch layer=70 moe_layer=70 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=70 moe_layer=Some(70) active_experts=33 cold_slots_needed=33 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=357.3
+VRAM LEDGER prefill_ptr_prefetch layer=72 moe_layer=72 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=72 moe_layer=Some(72) active_experts=28 cold_slots_needed=28 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=303.2
+VRAM LEDGER prefill_ptr_prefetch layer=74 moe_layer=74 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=74 moe_layer=Some(74) active_experts=30 cold_slots_needed=30 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=324.8
+VRAM LEDGER prefill_ptr_prefetch layer=76 moe_layer=76 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=76 moe_layer=Some(76) active_experts=30 cold_slots_needed=30 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=324.8
+VRAM LEDGER prefill_ptr_prefetch layer=79 moe_layer=79 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=79 moe_layer=Some(79) active_experts=26 cold_slots_needed=26 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=281.5
+VRAM LEDGER prefill_ptr_prefetch layer=81 moe_layer=81 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=81 moe_layer=Some(81) active_experts=25 cold_slots_needed=25 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=270.7
+VRAM LEDGER prefill_ptr_prefetch layer=83 moe_layer=83 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=83 moe_layer=Some(83) active_experts=32 cold_slots_needed=32 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=346.5
+VRAM LEDGER prefill_ptr_prefetch layer=85 moe_layer=85 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=85 moe_layer=Some(85) active_experts=25 cold_slots_needed=25 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=270.7
+VRAM LEDGER prefill_ptr_prefetch layer=87 moe_layer=87 chunk=0 hcs=0 pinned=0 cold=512 total=512 needed_cold_slots=512 max_cold_experts=512
+VRAM LEDGER prefill_route_cold_demand layer=87 moe_layer=Some(87) active_experts=22 cold_slots_needed=22 hcs_cached_experts=0 hcs_stride=512 pinning_active=false cold_expert_mb=10.828 cold_reserve_mb=238.2
+  [32mHeatmap: 16,580 experts ranked from 16,580 entries[0m
+  [2mVRAM calibration: baseline 20180 MB | prefill 823.0 KB/tok, decode -3.1 KB/tok | HCS allowance prefill: short 12716 MB, long 908 MB | decode: short 19532 MB, long 19576 MB | idle floors prefill=7464 MB decode=648 MB | decode-resident HCS budget=19532 MB[0m
+  [2mGPU0 HCS: 20480 experts (16580 ranked + 3900 unranked), reclaimable: 19,532 MB[0m
+
+[1m[36m▸ Loading GPU0 HCS pool (fully reclaimable)[0m
+
+[1m[36m▸ HCS pool loaded[0m
+  [32mHCS pool: 0/20480 experts loaded in 0.00s (0.0% coverage), 0.0 MB VRAM, 0 free slots, gpu_route_sync=false, mapped_reads=false | soft: 7084 experts in 0.97s (19176.6 MB, host_mode=source) | total: 7084/20480 (34.6%) coverage[0m
+  [2mLoaded in 1.0s[0m
+VRAM LEDGER residency label=after-hcs-init device=0 free_mb=780 total_mb=32119 driver_used_mb=31338 torch_allocated_mb=8151 torch_reserved_mb=9290 inventoried_cuda_mb=8130.0 untracked_driver_mb=23208.9 untracked_reserved_mb=1160.0 duplicate_refs=329 duplicate_storage_mb=3060.7 kv_cache_mb=1000.0 layer_norms_mb=0.6 mamba2_weight_refs_mb=4.6 marlin_workspace_mb=0.0 router_weights_mb=160.0 rust_keepalive_hqq_attention_meta_mb=0.1 rust_keepalive_hqq_rope_tables_mb=200.0 rust_keepalive_mamba2_conv_bias_fp32_mb=1.6 rust_keepalive_mamba2_conv_fp32_mb=6.2 rust_keepalive_mamba2_params_fp32_mb=1.3 rust_keepalive_mamba2_projection_int4_mb=2220.6 rust_keepalive_mamba2_state_fp32_mb=166.2 rust_keepalive_nemotron_latent_projection_bf16_mb=640.0 rust_lm_head_bf16_mb=1024.0 shared_expert_mb=1680.7 top_embedding_mb=1024.0 top_final_norm_mb=0.0
+
+[1m[36m▸ Decode validation[0m
+  [32mSkipped: Rust prefill already warmed before HCS budgeting[0m
+
+[1m[36m▸ VRAM monitor: runtime warnings enabled[0m
+  [32mSafety margin: 600 MB — warnings on every new low below this[0m
+VRAM pressure: evicted 46 soft HCS experts / 1 chunks; free=906 MB after eviction (safety=600 MB, target=850 MB)
+  [33mVRAM pressure eviction at startup_ready: evicted 46 soft HCS experts, freed 124.5 MB, final free 906 MB[0m
+
+[1m[32mKRASIS SERVER READY[0m
+  [32mModel:[0m    [1mNVIDIA-Nemotron-3-Super-120B-A12B-BF16[0m
+  [32mAddress:[0m  [1m0.0.0.0:18018[0m
+  [32mContext:[0m  409,600 tokens  |  KV cache: 1,000 MB
+  [32mDecode:[0m   GPU  |  HCS: on  |  Think: on
+  [32mClient setup:[0m
+    Base URL:      [1mhttp://127.0.0.1:18018/v1[0m
+    Chat endpoint: http://127.0.0.1:18018/v1/chat/completions
+    Models:        http://127.0.0.1:18018/v1/models
+    API key:       [1mX[0m [2m(any value)[0m
+    Model name:    [1mNVIDIA-Nemotron-3-Super-120B-A12B-BF16[0m
+  [2mPress Q or Ctrl-C to stop[0m

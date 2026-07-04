@@ -1,0 +1,8 @@
+quantity	formula	nano_39920_observed_from_1128	notes
+output_elements	L * n_heads * head_dim	163512320	Observed in 1128 timing JSON; not a hardcoded design value.
+valid_output_elements	L * n_heads * head_dim	163512320	Subloop timing counted every output element.
+local_loop_iterations	sum_over_chunks(n_heads * head_dim * chunk_len * (chunk_len + 1) / 2)	5312577536	Current output repeats coefficient work for every d lane.
+pair_count_per_head	sum_over_chunks(chunk_len * (chunk_len + 1) / 2)	1297016	Derived from L=39920 and chunk_size=64 in 1128; future code must compute at runtime.
+pair_count_all_heads	pair_count_per_head * n_heads	83009024	Number of per-pair/head coefficients if globally materialized; shared tiling avoids persistent global coefficient buffers.
+global_coeff_bytes_if_used	pair_count_all_heads * (sizeof(bf16) + sizeof(f32))	498054144	Approx 475 MiB; this is diagnostic sizing only, not the preferred design.
+shared_coeff_bytes_per_full_chunk	(chunk_size*(chunk_size+1)/2) * (sizeof(bf16)+sizeof(f32))	12480	For chunk_size=64 plus dA prefix/padding; actual kernel must compute dynamic shared bytes.

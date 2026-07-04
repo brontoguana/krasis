@@ -1,0 +1,70 @@
+{
+  "gate": "20260627_1418_nemotron_nano_combined_diagnostic_read_only_root_cause",
+  "status": "closed",
+  "opened_utc": "2026-06-27T14:18:01Z",
+  "closed_utc": "2026-06-27T14:24:02Z",
+  "record_first": {
+    "source_gate": "20260627_1328_nemotron_nano_diagnostic_perturbation_check",
+    "gemma_carried_speeds": "5619.6 / 92.43 / 155.69",
+    "isolated_interaction": "HQQ6 g32 case 0 flips only when first-token margin projection and consume-boundary diagnostics are enabled together",
+    "old_g32_quality_selected_token": 1044,
+    "debug_trace_only_selected_token": 1044,
+    "projection_only_selected_token": 1044,
+    "consume_boundary_only_selected_token": 1044,
+    "combined_projection_plus_consume_boundary_selected_token": 1321,
+    "combined_attribution_quality_decision_allowed": false
+  },
+  "scope": {
+    "source_audit_first": true,
+    "inspect_paths": [
+      "first-token margin projection",
+      "consume-boundary diagnostics"
+    ],
+    "priorities": [
+      "diagnostic mutation of live buffers",
+      "ordering or synchronization changes",
+      "scratch reuse",
+      "selected expert or output state changes"
+    ],
+    "live_server_before_concrete_hypothesis": false
+  },
+  "source_audit_result": {
+    "real_side_effect_found": false,
+    "production_behavior_changed": false,
+    "source_changed": false,
+    "live_server_run": false,
+    "combined_only_code_path": "CPU construction of FirstTokenMarginProjectionLayerDelta from consume-boundary BF16/HQQ downloaded vectors after post-scatter sync",
+    "diagnostic_gpu_write_found": "none beyond the expected HQQ consume DtoD expert_out overwrite shared by all HQQ consume runs",
+    "ordering_or_sync_change_found": "no combined-only stream sync; consume-boundary-only already performs the same post-scatter/post-output syncs",
+    "scratch_reuse_issue_found": "not exposed by source audit",
+    "selected_expert_state_mutation_found": "none found",
+    "artifact_note": "One-flag g32 case-0 runs already show substantial margin/logit variation; separate-run artifacts cannot prove the combined condition mutates output without same-request read-only checkpoints."
+  },
+  "decision": {
+    "status": "blocked_missing_read_only_checkpoint_instrumentation",
+    "quality_decision_allowed_from_combined_attribution": false,
+    "next_required_action": "Add narrow checkpoint instrumentation for route/top-k/gather hashes, final-hidden-before-LM hash, and pre/post combined-only layer-delta GPU hashes before another live confirmation."
+  },
+  "artifacts": {
+    "source_audit": "benchmarks/20260627_1418_nemotron_nano_combined_diagnostic_read_only_root_cause_source_audit.tsv",
+    "missing_instrumentation": "benchmarks/20260627_1418_nemotron_nano_combined_diagnostic_read_only_root_cause_missing_instrumentation.tsv",
+    "decision": "benchmarks/20260627_1418_nemotron_nano_combined_diagnostic_read_only_root_cause_root_decision.tsv"
+  },
+  "final_state": {
+    "timestamp_utc": "2026-06-27T14:24:02Z",
+    "tmux_server": "none",
+    "matching_runtime_processes": "none",
+    "gpu_memory_used_mb": [15, 11],
+    "disk_available": "613G",
+    "ram_available": "965Gi"
+  },
+  "forbidden": [
+    "cache_generation",
+    "new_hqq_variants",
+    "hqq6_g64_run_unless_needed_after_fix",
+    "production_hqq_enablement",
+    "speed_benchmark",
+    "decode_hcs",
+    "selected_expert_retargeting"
+  ]
+}

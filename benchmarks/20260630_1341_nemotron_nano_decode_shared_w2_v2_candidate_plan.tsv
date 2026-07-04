@@ -1,0 +1,10 @@
+field	value
+gate	20260630_1341_nemotron_nano_decode_shared_w2_v2_candidate
+baseline	accepted timing-off Nano decode 115.2 tok/s from 20260630_1249
+target	shared/post MoE bucket: post/shared 1.61 ms/tok; shared W13 0.67; shared reduce 0.06; shared W2 0.72
+candidate_env	KRASIS_DECODE_GRAPH_SHARED_W2_V2=1
+implementation_plan	use existing fused SiLU W2 v2 partial kernel for graph shared expert W2; add graph-safe reduce-by-device-gate kernel
+correctness_plan	same-payload control/candidate first-token top-k and generated text comparison
+timing_plan	timing-on control/candidate first; timing-off speed only if correctness is acceptable
+default_behavior	defaults unchanged; candidate hard opt-in
+guardrails	no shared relu2 rebaseline; no Python decode path; fail closed for unsupported modes

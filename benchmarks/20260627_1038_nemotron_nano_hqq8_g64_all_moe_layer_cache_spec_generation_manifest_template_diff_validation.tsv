@@ -1,0 +1,3 @@
+check	status	details
+template_match_after_allowed_deletions	passed	deleted nbits, group_size, layout, output_cache_path, diagnostic_spec_path before comparing
+layout_change_reason	passed	manifest validator requires row_major_axis1_grouped_uint8 when nbits=8

@@ -1,0 +1,9 @@
+phase	kernel_or_step	launch_shape	inputs	outputs	notes
+0	dispatch_gate	Rust branch at forward_mamba2 SSD launch	x/B/C/dt/A/D/state/config	env-selected path	Default sequential remains active unless a new explicit env gate requests chunk-parallel.
+1	prepare_prefix_kernel	per chunk: grid=(n_heads), block=next_pow2(chunk_len)	dt, dt_bias, A_log, chunk_start, chunk_len	dt_softplus_chunk, dA_prefix_chunk	Small scratch; tail chunk guarded by chunk_len.
+2	cb_matrix_kernel	per chunk: grid=(n_groups, chunk_len, chunk_len), block over state reduction	B_mat, C_mat, chunk_start, chunk_len	cb_chunk	Only lower triangle u<=t is required; compute C dot B in the same reverse state order as sequential.
+3	output_kernel	per chunk: grid=(n_heads, chunk_len, ceil(head_dim/tile_d)), block tiled over d/state	x, D_vec, C_mat, ssm_state h0, dt_softplus_chunk, dA_prefix_chunk, cb_chunk	out	Computes D*x, prior chunk term, and local triangular emission. Reads but does not mutate ssm_state.
+4	state_update_kernel	per chunk: grid=(n_heads, ceil(head_dim*state_size/tile)), block tiled over d/state	x, B_mat, ssm_state h0, dt_softplus_chunk, dA_prefix_chunk	ssm_state h_end	Runs after output_kernel; writes final state for the next chunk.
+5	host_chunk_loop	Rust loop c=0..ceil(L/chunk_size)-1	config chunk_size and L	ordered kernel launches	Sequential between chunks is intentional for first patch; within each chunk work is parallel.
+6	oracle_compare_kernel	diagnostic only: flat reductions over output/state	sequential out/state, chunk out/state	max_abs, mean_abs, mismatch counts	Fail closed on mismatch; never silently fallback to sequential when new path is requested.
+7	timing_summary	existing Mamba2 timing bucket	existing KRASIS_PREFILL_TIMING/KRASIS_PREFILL_LIVENESS_TIMING logs	old/new SSD timing	Use startup diagnostics, not speed benchmark, for implementation validation.

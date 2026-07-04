@@ -1,0 +1,13 @@
+surface	path	finding	decision
+generation manifest validation	src/weights/expert_hqq.rs	Previous HQQ6 generation allowlist accepted only group_size 32 and 64.	extended allowlist to 16,32,64 after runtime inspection
+generation nbits validation	src/weights/expert_hqq.rs	Generation remains intentionally scoped to HQQ6.	nbits != 6 still fails closed, including HQQ8
+cache component sizing	src/weights/expert_hqq.rs	packed/scales/zeros byte counts derive from descriptor rows/cols/nbits/group_size through group_count and padded_cols.	no runtime change required
+cache descriptor writer	src/weights/expert_hqq.rs	descriptor serializes group_size as a u64 field.	no change required
+cache descriptor reader	src/weights/expert_hqq.rs	descriptor reads group_size and validates payload byte counts from descriptor dimensions.	no change required
+diagnostic spec writer	src/weights/expert_hqq.rs	generated spec writes plan.group_size into each requirement.	no change required
+diagnostic spec reader	src/weights/expert_hqq.rs	spec accepts nonzero group_size and validates cache descriptor equality.	no change required
+reference dequant	src/weights/expert_hqq.rs	dequantization computes group_count and padded columns from descriptor group_size.	no change required
+runtime diagnostic contract	src/gpu_prefill.rs	runtime reads nbits/group_size from cache descriptors and checks W13/W2 equality.	no change required
+runtime HQQ6 GEMM launch	src/gpu_prefill.rs	launch computes padded cols and packed/scales/zeros row strides from descriptor group_size and passes group_size as a kernel argument.	no change required
+CUDA HQQ6 dequant/GEMM	src/cuda/prefill_kernels.cu	kernel receives group_size and row strides; only group_size 128 has a shift fast path, all other values including 16 use division.	no change required
+remaining group_size_64 assertions	src/weights/expert_hqq.rs	remaining g64 assertions are real-artifact/proof tests for existing HQQ6 g64 artifacts.	preserved

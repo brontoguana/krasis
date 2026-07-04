@@ -1,0 +1,125 @@
+{
+  "gate": "20260627_1515_nemotron_nano_hqq6_g32_production_path_stability",
+  "status": "closed",
+  "opened_utc": "2026-06-27T15:16:26Z",
+  "closed_utc": "2026-06-27T15:38:20Z",
+  "record_first": {
+    "source_gate": "20260627_1452_nemotron_nano_live_read_only_checkpoint_confirmation",
+    "checkpoint_pre_post_matches": "23/23",
+    "checkpoint_selected_token": 1044,
+    "checkpoint_selected_text": ",",
+    "mutation_point_exposed": false,
+    "old_1244_flip_reproduced": false,
+    "caveat": "The checkpointed combined diagnostic run did not reproduce the older uncheckpointed 1244 case-0 flip."
+  },
+  "scope": {
+    "variant": "HQQ6 g32",
+    "cases": [0, 2],
+    "endpoint": "/v1/internal/reference_test",
+    "existing_cache_spec_only": true,
+    "debug_reference_trace": true,
+    "hqq_consume": true,
+    "projection_diag": false,
+    "consume_boundary_diag": false,
+    "read_only_checkpoint_diag": false,
+    "no_g64": true,
+    "no_cache_generation": true,
+    "no_new_variants": true,
+    "no_production_enablement": true,
+    "no_speed_benchmark": true,
+    "no_decode_hcs": true,
+    "no_selected_expert_retargeting": true
+  },
+  "runtime": {
+    "server_command": "./dev run tests/nemotron-nano-bf16-experts-a16.conf --test-endpoints --expert-hqq-diagnostic-cache-spec benchmarks/20260627_0804_nemotron_nano_hqq6_g32_all_moe_layer_cache_spec_generation_diagnostic_cache_spec.json",
+    "env": {
+      "KRASIS_EXPERT_HQQ_PREFILL_CONSUME": "1",
+      "KRASIS_FIRST_TOKEN_MARGIN_PROJECTION_DIAG": "unset",
+      "KRASIS_EXPERT_HQQ_PREFILL_CONSUME_DIAG": "unset",
+      "KRASIS_READ_ONLY_CHECKPOINT_DIAG": "unset"
+    },
+    "calibration": {
+      "safety_margin_mb": 600,
+      "long_prefill_min_free_mb": 14070,
+      "post_calibration_free_mb": 24624,
+      "note": "Long-prefill low-water remained far above the safety margin in this run."
+    },
+    "requests": [
+      {
+        "case": 0,
+        "http_code": 200,
+        "time_total_s": 36.553779,
+        "response_bytes": 4253109,
+        "response_file": "benchmarks/20260627_1515_nemotron_nano_hqq6_g32_production_path_stability_hqq6_g32_case0_response.json"
+      },
+      {
+        "case": 2,
+        "http_code": 200,
+        "time_total_s": 30.943533,
+        "response_bytes": 4293738,
+        "response_file": "benchmarks/20260627_1515_nemotron_nano_hqq6_g32_production_path_stability_hqq6_g32_case2_response.json"
+      }
+    ]
+  },
+  "result": {
+    "http_success": "2/2",
+    "selected_token_changes_vs_bf16": "0/2",
+    "selected_token_changes_vs_old_g32_quality": "0/2",
+    "cases": [
+      {
+        "case": 0,
+        "selected_token": 1044,
+        "selected_text": ",",
+        "margin_1044_minus_1321": 0.585973,
+        "bf16_margin": 0.300524,
+        "old_g32_quality_margin": 0.474478,
+        "topk_tokens": [1044, 1321, 1294, 1307, 1562, 1408, 1046, 2136, 1513, 2553],
+        "projection_available": false,
+        "consume_boundary_diag": false,
+        "read_only_checkpoint_available": false
+      },
+      {
+        "case": 2,
+        "selected_token": 1044,
+        "selected_text": ",",
+        "margin_1044_minus_1321": 0.253093,
+        "bf16_margin": 0.370508,
+        "old_g32_quality_margin": 0.069721,
+        "topk_tokens": [1044, 1321, 1294, 1307, 1562, 1408, 1046, 2136, 1513, 1278],
+        "projection_available": false,
+        "consume_boundary_diag": false,
+        "read_only_checkpoint_available": false
+      }
+    ],
+    "consume": {
+      "rows": 46,
+      "copied_output_bytes": 663989760,
+      "nbits": 6,
+      "group_size": 32
+    },
+    "quality_caveat": "Top-k rank/membership drift versus BF16 and old g32 remains; this gate only restores the selected-token non-attribution path behavior."
+  },
+  "decision": {
+    "status": "hqq6_g32_non_attribution_selected_token_behavior_restored",
+    "hqq_consume_nondeterminism_or_selected_flip_reproduced": false,
+    "reason": "Both production-compatible HQQ consume requests selected token 1044, and both 1044-1321 margins stayed positive versus BF16 and old g32 quality rows.",
+    "not_a_quality_acceptance": true
+  },
+  "artifacts": {
+    "runtime_attempt": "20260627_1515_nemotron_nano_hqq6_g32_production_path_stability_runtime_attempt.tsv",
+    "token_margin": "20260627_1515_nemotron_nano_hqq6_g32_production_path_stability_token_margin_summary.tsv",
+    "topk_comparison": "20260627_1515_nemotron_nano_hqq6_g32_production_path_stability_topk_comparison.tsv",
+    "consume_summary": "20260627_1515_nemotron_nano_hqq6_g32_production_path_stability_consume_summary.tsv",
+    "source_artifacts": "20260627_1515_nemotron_nano_hqq6_g32_production_path_stability_source_artifacts.tsv",
+    "root_decision": "20260627_1515_nemotron_nano_hqq6_g32_production_path_stability_root_decision.tsv",
+    "validation": "20260627_1515_nemotron_nano_hqq6_g32_production_path_stability_validation_checks.tsv"
+  },
+  "cleanup": {
+    "dev_kill_warning": "Initial ./dev kill reported zombie/GPU-reset warning after terminating the server.",
+    "settled_state_clean": true,
+    "final_snapshot_utc": "2026-06-27T15:38:20Z",
+    "gpu_memory_used_mb": [15, 11],
+    "disk_available": "613G",
+    "ram_available": "965Gi"
+  }
+}

@@ -9,6 +9,7 @@ Expert weights are loaded by the Krasis Rust engine (INT4, CPU RAM).
 
 import json
 import logging
+import math
 import os
 import struct
 import time
@@ -213,8 +214,6 @@ class WeightLoader:
         """Read a weight tensor and place on GPU as BF16."""
         w = self._read_and_dequant(name)
         return w.to(device)
-
-
 
     def load_embedding(self, device: torch.device) -> torch.Tensor:
         """Load embedding table (BF16, ~2.2 GB for Kimi K2.5)."""
@@ -431,6 +430,8 @@ class WeightLoader:
         projections = ["q_proj", "k_proj", "o_proj"]
         if self.cfg.gqa_has_v_proj_for_layer(layer_idx):
             projections.insert(2, "v_proj")
+        if self.cfg.head_wise_attention_gate:
+            projections.append("g_proj")
         for proj in projections:
             weights[proj] = _timed_bf16_load(
                 self,
@@ -549,13 +550,18 @@ class WeightLoader:
         - "mlp.gate" (DeepSeek/Kimi/Qwen3)
         - "mlp.router" (GPT OSS)
         - "router.proj" (Gemma4 text)
+        - "moe.gate" + "moe.router_bias" (Step)
         """
         # Detect naming: "gate" vs "router"
         prefix_gate = f"{self.cfg.layers_prefix}.layers.{layer_idx}.mlp.gate"
         prefix_router = f"{self.cfg.layers_prefix}.layers.{layer_idx}.mlp.router"
         prefix_gemma_router = f"{self.cfg.layers_prefix}.layers.{layer_idx}.router"
+        prefix_step_gate = f"{self.cfg.layers_prefix}.layers.{layer_idx}.moe.gate"
         if f"{prefix_gate}.weight" in self._weight_map:
             prefix = prefix_gate
+            weight_name = f"{prefix}.weight"
+        elif f"{prefix_step_gate}.weight" in self._weight_map:
+            prefix = prefix_step_gate
             weight_name = f"{prefix}.weight"
         elif f"{prefix_gemma_router}.proj.weight" in self._weight_map:
             prefix = prefix_gemma_router
@@ -574,6 +580,9 @@ class WeightLoader:
         corr_name = f"{prefix}.e_score_correction_bias"
         if corr_name in self._weight_map:
             result["e_score_correction_bias"] = self._load_bf16(corr_name, device)
+        step_router_bias = f"{self.cfg.layers_prefix}.layers.{layer_idx}.moe.router_bias"
+        if step_router_bias in self._weight_map:
+            result["e_score_correction_bias"] = self._load_bf16(step_router_bias, device)
         if self.cfg.gemma4_text:
             scale_name = f"{prefix}.scale"
             per_expert_scale_name = f"{prefix}.per_expert_scale"
@@ -592,12 +601,16 @@ class WeightLoader:
         Handles both naming conventions:
         - "shared_experts" (plural, DeepSeek/Kimi)
         - "shared_expert" (singular, Qwen3-Next)
+        - "share_expert" (Step sibling of "moe")
         """
         # Detect naming convention from weight map
         prefix_plural = f"{self.cfg.layers_prefix}.layers.{layer_idx}.mlp.shared_experts"
         prefix_singular = f"{self.cfg.layers_prefix}.layers.{layer_idx}.mlp.shared_expert"
+        prefix_step = f"{self.cfg.layers_prefix}.layers.{layer_idx}.share_expert"
         if f"{prefix_plural}.gate_proj.weight" in self._weight_map:
             prefix = prefix_plural
+        elif f"{prefix_step}.gate_proj.weight" in self._weight_map:
+            prefix = prefix_step
         else:
             prefix = prefix_singular
 
@@ -695,7 +708,17 @@ class WeightLoader:
 
         # Large projections (quantizable via Marlin for decode)
         weights["in_proj"] = self._load_bf16(f"{prefix}.in_proj.weight", device)
-        weights["out_proj"] = self._load_bf16(f"{prefix}.out_proj.weight", device)
+        out_proj = self._load_bf16(f"{prefix}.out_proj.weight", device)
+        if self.cfg.rescale_prenorm_residual:
+            scale = 1.0 / math.sqrt(float(self.cfg.num_hidden_layers))
+            out_proj = out_proj.float().mul_(scale).to(torch.bfloat16).contiguous()
+            logger.info(
+                "Applied Nemotron-H Mamba2 out_proj residual scale: layer=%d scale=%.9f num_hidden_layers=%d",
+                layer_idx,
+                scale,
+                self.cfg.num_hidden_layers,
+            )
+        weights["out_proj"] = out_proj
 
         # Small SSM parameters — always FP32 for numerical precision
         weights["conv1d_weight"] = self._load_bf16(f"{prefix}.conv1d.weight", device)

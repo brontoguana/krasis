@@ -1,0 +1,2 @@
+artifact	status	exit_code	duration_s	notes
+build_exact_state_bridge	pass	0	174	./dev build completed through tmux k2104_build_exact_bridge; guarded exact-state bridge source compiled

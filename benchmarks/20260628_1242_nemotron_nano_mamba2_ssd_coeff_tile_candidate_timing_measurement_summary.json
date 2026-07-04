@@ -1,0 +1,107 @@
+{
+  "gate": "20260628_1242_nemotron_nano_mamba2_ssd_coeff_tile_candidate_timing_measurement",
+  "opened_utc": "2026-06-28T12:42:42Z",
+  "status": "closed",
+  "scope": "opt_in_candidate_timing_measurement",
+  "record_first": {
+    "source_gate": "20260628_1233_nemotron_nano_mamba2_ssd_coeff_tile_no_oracle_candidate_cost",
+    "gemma_baseline": {
+      "prefill_tok_s": 5619.6,
+      "internal_decode_tok_s": 92.43,
+      "network_tok_s": 155.69
+    },
+    "nano_baseline": {
+      "prefill_tok_s": 346.5,
+      "internal_decode_tok_s": 94.48,
+      "network_tok_s": 164.75
+    },
+    "source_finding": "Existing envs cannot measure the accepted coeff-tile block-scan candidate without oracle overhead; KRASIS_MAMBA2_SSD_BLOCK_SCAN currently requires KRASIS_MAMBA2_SSD_BLOCK_SCAN_ORACLE=1.",
+    "accepted_coeff_tile_surface_from_1207": {
+      "oracle_records": 138,
+      "output_mismatches": 0,
+      "state_mismatches": 0,
+      "long_total_block_scan_path_ms": 7179.206093739131,
+      "long_recurrent_kernel_ms": 715.7697665652174,
+      "long_coeff_tile_output_kernel_ms": 500.6286002173913
+    }
+  },
+  "planned_change": {
+    "env": "KRASIS_MAMBA2_SSD_BLOCK_SCAN_CANDIDATE_TIMING",
+    "type": "measurement_only",
+    "requirements": [
+      "KRASIS_MAMBA2_SSD_BLOCK_SCAN=1",
+      "KRASIS_MAMBA2_SSD_BLOCK_SCAN_COEFF_TILE=1"
+    ],
+    "must_emit_visible_no_oracle_record": true,
+    "preserve_full_oracle_path": true,
+    "preserve_defaults": true,
+    "no_optimization": true
+  },
+  "constraints": [
+    "no requests",
+    "no speed benchmark",
+    "no decode/HCS work",
+    "no production enablement",
+    "no default-path change"
+  ],
+  "result": {
+    "build": {
+      "command": "./dev build",
+      "exit_code": 0,
+      "duration_s": 172
+    },
+    "small_full_oracle": {
+      "exit_code": 0,
+      "duration_s": 45,
+      "correctness": {
+        "records": 69,
+        "passed": 69,
+        "failed": 0,
+        "output_mismatches": 0,
+        "state_mismatches": 0,
+        "output_max_abs_error": 0,
+        "state_max_abs_error": 0
+      },
+      "candidate_timing_env": true
+    },
+    "long_no_oracle_candidate_timing": {
+      "exit_code": 0,
+      "duration_s": 73,
+      "timing": {
+        "records": 23,
+        "tokens": 39920,
+        "mode": "NO_ORACLE_TIMING_MODE",
+        "visible_no_oracle_all": true,
+        "oracle_enabled_any": false,
+        "output_subloop_timing_any": false,
+        "total_candidate_sum_ms": 26725.642101999998,
+        "total_candidate_avg_ms": 1161.9844392173911,
+        "recurrent_sum_ms": 16468.831574,
+        "recurrent_avg_ms": 716.0361553913043,
+        "coeff_tile_output_sum_ms": 9922.714784000002,
+        "coeff_tile_output_avg_ms": 431.4223819130435,
+        "live_to_candidate_copy_sum_ms": 295.72324499999996,
+        "live_to_candidate_copy_avg_ms": 12.857532391304346,
+        "commit_copy_sum_ms": 10.026513,
+        "commit_copy_avg_ms": 0.43593534782608695,
+        "residual_sum_ms": 0.09564799999884599,
+        "residual_avg_ms": 0.004158608695602
+      }
+    },
+    "requests": 0,
+    "speed_benchmark": false,
+    "decode_hcs_changes": false,
+    "production_enablement": false,
+    "default_path_change": false,
+    "note": "Candidate timing mode is guarded and measurement-only; long run disabled oracle, host comparison, term probes, and subloop timing."
+  },
+  "final_state": {
+    "snapshot_utc": "2026-06-28T13:03:26Z",
+    "gpu0_used_mb": 15,
+    "gpu1_used_mb": 11,
+    "active_runtime_processes": 0,
+    "active_tmux_sessions": 0,
+    "nano_temp_lock_files": 0
+  },
+  "closed_utc": "2026-06-28T13:01:30Z"
+}

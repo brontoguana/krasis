@@ -1,0 +1,121 @@
+{
+  "gate": "20260627_1145_nemotron_nano_first_token_margin_projection_support",
+  "status": "closed_instrumentation_support",
+  "opened_utc": "2026-06-27T11:45:00Z",
+  "closed_utc": "2026-06-27T12:13:37Z",
+  "record_first": {
+    "source_gate": "20260627_1134_nemotron_nano_first_token_margin_attribution",
+    "gemma_speeds": {
+      "prefill_tokens_per_second": 5619.6,
+      "decode_tokens_per_second": 92.43,
+      "combined_tokens_per_second": 155.69
+    },
+    "analysis_type": "data_only_existing_artifacts",
+    "live_rerun": "not_run",
+    "case_0_margin_1044_minus_1321": {
+      "bf16": 0.300523758,
+      "hqq6_g64": 0.472423553,
+      "hqq6_g32": 0.474477768
+    },
+    "case_2_margin_1044_minus_1321": {
+      "bf16": 0.370508194,
+      "hqq6_g64": -0.242314339,
+      "hqq6_g64_shift_vs_bf16": -0.612822533,
+      "hqq6_g64_selected_token": 1321,
+      "hqq6_g32": 0.069721222,
+      "hqq6_g32_shift_vs_bf16": -0.300786972,
+      "hqq6_g32_selected_token": 1044
+    },
+    "missing_instrumentation": [
+      "LM-head row difference for target tokens 1044 and 1321",
+      "full selected-row hidden vector at final LM-head input",
+      "per-layer BF16-vs-HQQ selected-row hidden deltas for target cases and variants",
+      "routing/contributor metadata tied to the same deltas",
+      "projection of each delta onto the 1044-vs-1321 margin"
+    ]
+  },
+  "implementation": {
+    "source_changed": true,
+    "diagnostic_only": true,
+    "production_output_consumption_changed": false,
+    "live_server_run": false,
+    "cache_generation": false,
+    "benchmark": false,
+    "decode_hcs_changed": false,
+    "selected_expert_retargeting": false,
+    "hqq_variant_changed": false,
+    "gate_env": "KRASIS_FIRST_TOKEN_MARGIN_PROJECTION_DIAG",
+    "required_env": [
+      "KRASIS_FIRST_TOKEN_MARGIN_PROJECTION_TOKEN_A",
+      "KRASIS_FIRST_TOKEN_MARGIN_PROJECTION_TOKEN_B"
+    ],
+    "optional_env": [
+      "KRASIS_FIRST_TOKEN_MARGIN_PROJECTION_TOPN"
+    ],
+    "request_requirement": "debug_reference_trace=true",
+    "trace_field": "debug_reference_trace.first_token_margin_projection",
+    "captures": [
+      "LM-head token row difference for the requested token pair",
+      "selected-position hidden BF16 row at final LM-head input",
+      "downloaded target logits and projected raw/softcapped margin",
+      "per-layer BF16-vs-HQQ selected-row routed deltas from consume-boundary data",
+      "per-expert contributor summaries when consume-boundary contributor data is present"
+    ],
+    "fail_closed_conditions": [
+      "projection gate set without debug_reference_trace=true",
+      "missing token A or token B env",
+      "same token requested for both sides",
+      "LM-head BF16 rows unavailable",
+      "selected hidden row or target logits unavailable",
+      "layer delta vector length mismatch"
+    ]
+  },
+  "validation": {
+    "test_kernels_expert_hqq": {
+      "command": "./dev test-kernels expert_hqq",
+      "status": "passed",
+      "passed": 101,
+      "failed": 0,
+      "ignored": 0,
+      "filtered_out": 125,
+      "log": "benchmarks/20260627_1145_nemotron_nano_first_token_margin_projection_support_test_kernels.log"
+    },
+    "build": {
+      "command": "./dev build",
+      "status": "passed",
+      "duration_seconds": 168,
+      "log": "benchmarks/20260627_1145_nemotron_nano_first_token_margin_projection_support_build.log"
+    },
+    "static_checks": {
+      "cargo_fmt_check": "passed",
+      "bash_n_dev": "passed",
+      "git_diff_check_krasis": "passed",
+      "git_diff_check_internal": "passed",
+      "protected_config_check": "passed_known_untracked_tests_nemotron_nano_bf16_experts_a16_conf"
+    }
+  },
+  "decision": {
+    "result": "diagnostic_first_token_margin_projection_support_ready",
+    "next_gate": "run a narrow live diagnostic capture for cases 0 and 2, tokens 1044 vs 1321, using existing HQQ6 g64/g32 specs only if requested",
+    "scope_not_done": [
+      "no server run",
+      "no cache generation",
+      "no speed benchmark",
+      "no HQQ variant change",
+      "no decode/HCS change",
+      "no selected-expert retargeting"
+    ]
+  },
+  "final_state": {
+    "timestamp_utc": "2026-06-27T12:13:37Z",
+    "tmux_server": "none",
+    "matching_runtime_generator_build_processes": "none",
+    "nvidia_compute_processes": "none",
+    "gpu_memory_used_mb": {
+      "gpu0": 15,
+      "gpu1": 11
+    },
+    "disk_available": "614G",
+    "ram_available": "966Gi"
+  }
+}

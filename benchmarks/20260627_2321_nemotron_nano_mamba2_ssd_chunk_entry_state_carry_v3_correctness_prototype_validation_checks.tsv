@@ -1,0 +1,17 @@
+check	status	evidence
+summary_json	pass	status closed; final build exit 0; small diagnostic exit 1; v3 oracle passed=false; requests 0; long diagnostic run=false
+tsv_shape	pass	all gate TSV artifacts have at least two tab-separated columns on every row
+final_build_log	pass	build2 log contains OK Build complete and dev build total status=0 duration_s=170; build2 exit marker normalized to 0
+small_diagnostic_log	pass	diagnostic2 exit marker normalized to 1; log contains local-tri oracle, v3 oracle, and fail-closed RuntimeError
+no_requests_or_benchmark	pass	final diagnostic log contains no reference_test, chat completions, benchmark-only, or READY serving path
+cache_reuse	pass	HQQ attention validated; effective Marlin g64 loaded; no concrete "Building GPU INT4 Marlin cache:" line
+source_markers	pass	v3 source markers present; stale v2 markers absent
+static_krasis	pass	git diff --check and bash -n dev passed in krasis-nemotron-dev
+static_internal	pass	git diff --check passed in krasis-internal
+cleanup	pass	./dev kill exit marker normalized to 0
+protected_config	pass	only expected tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf is untracked in protected config scope
+cache_temp_lock	pass	no Nano .tmp/.lock cache files found outside HF download locks
+tmux_idle	pass	no tmux server running
+runtime_idle	pass	no matching krasis/runtime/build process after cleanup
+nvidia_idle	pass	no NVIDIA compute process after cleanup; GPU memory 15 MB / 11 MB
+final_snapshot	pass	2026-06-27T23:44:44Z disk free 588G; RAM available 967Gi

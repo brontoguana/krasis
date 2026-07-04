@@ -1,0 +1,17 @@
+metric	value
+exit	0
+duration_s	50
+prefill_seconds	6.16
+prefill_tok_per_s	6485.2
+records	23
+total_candidate_avg_ms	142.144658
+output_avg_ms	110.330955
+cb_precompute_avg_ms	3.002978
+recurrent_avg_ms	12.772272
+chunk_cumsum_avg_ms	0.221165
+chunk_state_avg_ms	10.766867
+state_passing_avg_ms	1.783054
+buffer_alloc_avg_ms	1.413118
+residual_avg_ms	14.188281
+parallel_cb_tile_bytes	41533440
+n_chunks	624

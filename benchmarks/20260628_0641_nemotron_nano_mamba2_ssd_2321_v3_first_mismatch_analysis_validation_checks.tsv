@@ -1,0 +1,12 @@
+check	result	detail
+summary_json	pass	status closed, validation passed, static-only constraints preserved
+tsv_shape	pass	all new TSV artifacts have consistent column counts
+runtime_scope	pass	no build, startup diagnostic, benchmark, request, or decode/HCS command was run for this gate
+source_marker_scope	pass	no v4 implementation/source markers present in src or python/krasis
+source_static_checks	pass	git diff --check passed in krasis-nemotron-dev
+internal_static_checks	pass	git diff --check passed in krasis-internal
+protected_config_status	pass	unchanged expected tests-only Nano configs only
+nano_temp_lock_files	pass	no Nano model/cache temp, lock, or partial files found
+idle_state	pass	no tmux server, no matching runtime/build process, no NVIDIA compute process
+gpu_state	pass	GPUs idle at 15 MB / 11 MB
+final_snapshot	pass	2026-06-28T06:46:52Z disk 587G RAM 968Gi

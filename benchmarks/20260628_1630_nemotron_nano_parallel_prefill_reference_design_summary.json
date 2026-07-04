@@ -1,0 +1,36 @@
+{
+  "gate": "20260628_1630_nemotron_nano_parallel_prefill_reference_design",
+  "opened_utc": "2026-06-28T16:31:16Z",
+  "recorded_prior_gate_first": "1348",
+  "baselines": {
+    "gemma": "5619.6 / 92.43 / 155.69",
+    "nano": "346.5 / 94.48 / 164.75"
+  },
+  "prior_gate_result": {
+    "state_parallel_recurrent_accepted": false,
+    "output_mismatches": 5,
+    "state_mismatches": 134008,
+    "long_timing_run": false
+  },
+  "scope": {
+    "mode": "static_reference_design",
+    "implementation": false,
+    "build": false,
+    "runtime_diagnostic": false,
+    "requests": false,
+    "speed_benchmark": false,
+    "decode_hcs": false,
+    "production_enablement": false,
+    "default_path_change": false
+  },
+  "objective": "Internal static reference-design analysis; detailed design records are kept in krasis-internal.",
+  "closed_utc": "2026-06-28T16:37:12Z",
+  "result": "closed_static_only",
+  "public_detail_policy": "architecture details recorded only in krasis-internal",
+  "final_snapshot": {
+    "utc": "2026-06-28T16:39:11Z",
+    "gpu_memory_mb": "15 / 11",
+    "runtime_processes": false,
+    "tmux_sessions": false
+  }
+}

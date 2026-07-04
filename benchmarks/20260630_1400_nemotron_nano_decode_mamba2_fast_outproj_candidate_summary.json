@@ -1,0 +1,54 @@
+{
+  "schema": "krasis_decode_candidate_summary_v1",
+  "model": "NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+  "config": "tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+  "baseline_best_timing_off_tok_s": 115.2,
+  "control": {
+    "source": "20260630_1341 timing-on control",
+    "server_decode_tokens": 103,
+    "server_decode_seconds": 0.97,
+    "server_decode_tok_s": 106.0,
+    "internal_ms_per_tok": 8.41,
+    "response_tokens": 104,
+    "finish_reason": "stop",
+    "first_token": 1044,
+    "mamba2_out_proj_ms_per_tok": 0.39,
+    "mamba2_total_ms_per_tok": 2.19
+  },
+  "candidates": [
+    {
+      "name": "shared_w2_v2",
+      "env": "KRASIS_DECODE_GRAPH_SHARED_W2_V2=1",
+      "result": "failed_closed_during_graph_capture",
+      "error": "requires shared W2 k_splits > 1 at layer 1; got 1",
+      "decision": "rejected_and_removed"
+    },
+    {
+      "name": "mamba2_fast_outproj",
+      "env": "KRASIS_MAMBA2_DECODE_GRAPH_FAST_OUTPROJ=1",
+      "result": "measured",
+      "first_token_topk_exact": true,
+      "generated_tokens_exact": false,
+      "generated_text_exact": false,
+      "server_decode_tokens": 127,
+      "server_decode_seconds": 1.23,
+      "server_decode_tok_s": 103.6,
+      "internal_ms_per_tok": 8.63,
+      "response_tokens": 128,
+      "finish_reason": "length",
+      "mamba2_out_proj_ms_per_tok": 0.63,
+      "mamba2_total_ms_per_tok": 2.43,
+      "decision": "rejected_and_removed"
+    }
+  ],
+  "cleanup": {
+    "rejected_envs_removed": [
+      "KRASIS_DECODE_GRAPH_SHARED_W2_V2",
+      "KRASIS_MAMBA2_DECODE_GRAPH_FAST_OUTPROJ"
+    ],
+    "cleanup_build_exit": 0,
+    "cleanup_build_log": "benchmarks/20260630_1400_nemotron_nano_decode_mamba2_fast_outproj_candidate_cleanup_build.log"
+  },
+  "decision": "no_new_speed_path_accepted",
+  "current_best_decode_tok_s": 115.2
+}

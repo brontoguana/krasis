@@ -1,0 +1,4 @@
+tokens	chunk_start	chunk_pos	inside_chunk_zero	cpu_matches_gpu_bits	cpu_y_bf16_bits	sequential_gpu_y_bf16_bits	y_pre_bf16	local_scan_bf16_coeff	local_scan_fp32_coeff
+300	64	6	false	true	0xc0d6	0xc0d6	-6.703125	-1.0794639587402344	-1.077743411064148
+500	64	6	false	true	0x40f5	0x40f5	7.648183822631836	-0.27187108993530273	-0.2723931074142456
+39920	64	6	false	true	0x40f5	0x40f5	7.648183822631836	-0.27187108993530273	-0.2723931074142456

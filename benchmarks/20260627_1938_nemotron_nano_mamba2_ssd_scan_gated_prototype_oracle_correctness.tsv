@@ -1,0 +1,2 @@
+run	tokens	oracle_rows	layers_per_prefill	output_mismatch_sum	state_mismatch_sum	output_max_abs	output_mean_abs_avg	state_max_abs	state_mean_abs_avg	result
+small_oracle_corrected	128	69	23	0	0	0.00000000	0.00000000	0.00000000	0.00000000	pass

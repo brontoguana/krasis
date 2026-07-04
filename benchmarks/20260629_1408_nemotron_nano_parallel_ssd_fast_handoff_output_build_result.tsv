@@ -1,0 +1,4 @@
+attempt	exit	duration_s	result	notes
+build1	0	179	pass	Initial fast-handoff patch built successfully; follow-up old-serial oracle diagnostic failed with large output mismatch due absolute entry-prior decay.
+build2	0	174	not_accepted	Build command exited 0 but nvcc failed and prefill kernels were disabled; follow-up runtime failed before warmup with prefill kernels not compiled.
+build3	0	181	pass	Prefill PTX compiled after defining dA_local_target in the second output loop.

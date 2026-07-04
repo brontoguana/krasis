@@ -1,0 +1,11 @@
+check	status	evidence
+record_first	passed	0835 decomposition and Gemma/Nano baselines recorded before analysis artifacts.
+json_summary	passed	Summary JSON parsed and was closed with validation passed.
+tsv_shape	passed	All 0944 TSV artifacts have consistent tab-separated field counts.
+runtime_artifacts_absent	passed	No 0944 log or exit files exist; no build/startup/runtime diagnostic was run.
+source_implementation_absent	passed	No new block-scan/v6/source markers were added under src or python.
+default_path_unchanged	passed	No source implementation patch occurred in this gate.
+diff_check	passed	`git diff --check` passed in krasis-nemotron-dev and krasis-internal; `bash -n dev` passed.
+protected_configs	passed	Protected-config status unchanged; expected tests-only Nano configs remain untracked.
+krasis_temp_lock_scan	passed	No Nano Krasis temp/lock/partial files outside standing Hugging Face download lock metadata.
+idle_state	passed	Final snapshot 2026-06-28T09:55:58Z: no runtime/build process, no NVIDIA compute process, GPUs 15 MB / 11 MB.

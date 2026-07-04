@@ -1,0 +1,7 @@
+metric	class	best_tok_s	best_length_or_tokens	detail	source
+prefill	internal_engine	346.5	1001	Best of 1K/5K/10K/20K/35K/50K; Rust engine timing, no HTTP.	benchmark_report.log
+decode	internal_engine	94.48	100	Best of 50/100/250 decode-token runs; Rust engine timing, no HTTP.	benchmark_report.log
+round_trip	network_http	164.75	50	HTTP/SSE client wall-clock timing; recorded separately and not used as internal decode.	benchmark_report.log
+hcs	internal_engine	100.0	2944/2944	HCS experts loaded during decode benchmark.	benchmark_report.log
+decode_min_free_vram	internal_engine	8716	600_safety_margin	Minimum free VRAM during internal decode benchmark.	benchmark_report.log
+startup_long_prefill_min_free	startup_calibration	12398	600_safety_margin	Long-prefill calibration low-water remained above safety margin.	benchmark_stdout.log

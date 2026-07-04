@@ -1,0 +1,20 @@
+component	file	line	evidence	relevance
+2321_oracle	benchmarks/20260627_2321_nemotron_nano_mamba2_ssd_chunk_entry_state_carry_v3_correctness_prototype_oracle_correctness.tsv	2	First output mismatch row=64 head=11 d=22 chunk=1 pos=0; first state mismatch flat=0 head=0 d=0 state=0.	Target evidence for this analysis gate.
+2321_oracle_json	benchmarks/20260627_2321_nemotron_nano_mamba2_ssd_chunk_entry_state_carry_v3_correctness_prototype_startup_diagnostic2.log	57	Candidate row64 bits 0x3bb7 vs sequential 0x3bb8; state flat0 bits 0x3b90c25a vs 0x3b90c258; output mismatches 57; state mismatches 506267.	Shows row64 is the first output mismatch and broad state drift exists.
+sequential_kernel	src/cuda/prefill_kernels.cu	4968	Current default/oracle kernel is mamba2_ssd_sequential_kernel.	Default path and oracle to match.
+sequential_group	src/cuda/prefill_kernels.cu	4991	group = head / (n_heads / n_groups).	B/C group indexing for row64 head11 uses group1 with Nano 64 heads/8 groups.
+sequential_state_update	src/cuda/prefill_kernels.cu	5041	Sequential oracle computes B_bar = BF16(B * dt), then h = A_bar * h + B_bar * x.	Critical cast placement for state contribution.
+sequential_prior_output	src/cuda/prefill_kernels.cu	5098	For nonzero chunk_start, prior_chunk_state = c_state_total - local_old_state.	At row64 this is equivalent to C64 dot exp(dA64) * entry_state[1].
+sequential_output_store	src/cuda/prefill_kernels.cu	5100	y = D*x + prior_chunk_state + local_hf_chunk_scan, then BF16 store.	Output mismatch must occur before final-state writeback.
+rust_default_dispatch	src/gpu_prefill.rs	30872	Current dispatch launches self.kernels.mamba2_ssd for default path.	Confirms default path remained sequential after cleanup.
+local_tri_diag	src/gpu_prefill.rs	30904	Preserved local-tri/state-flat diagnostic runs after default SSD.	Available diagnostic cannot inspect removed v3 candidate intermediates.
+reference_combined	python/krasis/mamba2_ops/ssd_combined.py	96	Reference pipeline: chunk_cumsum, chunk_state, state_passing, CB, chunk_scan.	Defines v4 stage order.
+reference_chunk_state	python/krasis/mamba2_ops/ssd_chunk_state.py	231	Reference chunk_state uses scale = exp(dA_last - dA_k) * dt_k.	Reference chunk-state accumulation semantics.
+reference_chunk_state_cast	python/krasis/mamba2_ops/ssd_chunk_state.py	238	Reference casts B*scale to x dtype before accumulation.	This differs from current sequential oracle's BF16(B*dt) then decay.
+reference_state_entry	python/krasis/mamba2_ops/ssd_state_passing.py	95	State-passing stores current state to out before processing chunks.	entry_state[0] semantics.
+reference_state_update	python/krasis/mamba2_ops/ssd_state_passing.py	160	State-passing updates states = exp(dA_last) * states + new_states.	Carry plus chunk-state semantics.
+reference_next_entry	python/krasis/mamba2_ops/ssd_state_passing.py	162	After chunk c, stores updated states to out for c < nchunks - 1.	entry_state[1] should be post-chunk0 state.
+reference_chunk_scan_prior	python/krasis/mamba2_ops/ssd_chunk_scan.py	286	Chunk scan loads prev_states and computes C dot prev_states scaled by exp(dA prefix).	Row64 prior path reads entry_state[1].
+reference_chunk_scan_local	python/krasis/mamba2_ops/ssd_chunk_scan.py	328	Local CB scan applies lower triangle, decay, dt, BF16 cast before x dot.	Used for row64 self local term and later rows.
+reference_D_skip	python/krasis/mamba2_ops/ssd_chunk_scan.py	360	D*x residual is added inside chunk scan.	D skip placement.
+reference_output_store	python/krasis/mamba2_ops/ssd_chunk_scan.py	415	Chunk scan stores final output tensor.	Final BF16 store site in reference path.

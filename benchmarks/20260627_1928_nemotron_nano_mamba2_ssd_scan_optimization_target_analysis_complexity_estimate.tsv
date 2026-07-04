@@ -1,0 +1,16 @@
+metric	value	derivation
+tokens	39920	1908 long diagnostic prefill
+chunk_size	128	config chunk_size
+chunks	312	ceil(39920 / 128)
+heads	64	config mamba_num_heads
+head_dim	64	config mamba_head_dim
+d_inner	4096	heads * head_dim
+state_size	128	config ssm_state_size
+local_pairs_per_head	2573944	311 full chunks * 128*129/2 + final 112*113/2
+output_elements_per_layer	163512320	tokens * heads * head_dim
+cb_terms_recomputed_across_d_per_layer	10542874624	local_pairs_per_head * heads * head_dim
+cb_state_mul_per_layer	1349487951872	cb_terms * state_size
+old_state_mul_per_layer	1345159430144	(local_pairs minus first chunk pairs) * heads * head_dim * state_size
+total_inner_state_mul_per_layer	2694647382016	cb_state_mul_per_layer + old_state_mul_per_layer
+total_inner_state_mul_23_layers	61976889786368	total_inner_state_mul_per_layer * measured Mamba2 layers
+dominant_redundancy	CB/old-state scalar terms recomputed across head_dim lanes	CB, decay, and old_state_source depend on head/group/t/u, not on d

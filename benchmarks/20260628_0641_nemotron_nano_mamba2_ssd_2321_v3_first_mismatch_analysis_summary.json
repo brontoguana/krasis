@@ -1,0 +1,141 @@
+{
+  "gate": "20260628_0641_nemotron_nano_mamba2_ssd_2321_v3_first_mismatch_analysis",
+  "status": "closed",
+  "opened_utc": "2026-06-28T06:41:00Z",
+  "closed_utc": "2026-06-28T06:46:52Z",
+  "scope": "static_v3_first_mismatch_analysis",
+  "record_first": {
+    "source_gate": "20260627_2346_nemotron_nano_mamba2_ssd_v3_failed_cleanup",
+    "failed_v3_prototype_reverted": true,
+    "final_build_passed": true,
+    "final_build_duration_s": 169,
+    "startup_diagnostic_passed": true,
+    "default_sequential_ssd_confirmed": true,
+    "hqq_attention_cache_reused": true,
+    "effective_marlin_g64_loaded": true,
+    "temp_lock_files": 0,
+    "preserved_1908_substage_instrumentation": true,
+    "preserved_2149_2251_local_tri_state_flat_diagnostics": true,
+    "long_calibration_ssd_scan_ms": 114464.9
+  },
+  "baselines": {
+    "gemma": {
+      "prefill_tok_s": 5619.6,
+      "internal_decode_tok_s": 92.43,
+      "network_round_trip_tok_s": 155.69
+    },
+    "nano": {
+      "prefill_tok_s": 346.5,
+      "internal_decode_tok_s": 94.48,
+      "network_round_trip_tok_s": 164.75
+    }
+  },
+  "target_mismatch": {
+    "source_gate": "20260627_2321_nemotron_nano_mamba2_ssd_chunk_entry_state_carry_v3_correctness_prototype",
+    "first_output_mismatch": {
+      "row": 64,
+      "head": 11,
+      "d": 22,
+      "chunk_idx": 1,
+      "chunk_pos": 0,
+      "candidate_bf16_bits": "0x3bb7",
+      "sequential_bf16_bits": "0x3bb8"
+    },
+    "output_error": {
+      "mismatches": 57,
+      "max_abs": 2.0,
+      "mean_abs": 0.000009420193521236797
+    },
+    "first_state_mismatch": {
+      "flat": 0,
+      "head": 0,
+      "d": 0,
+      "state": 0,
+      "candidate_f32_bits": "0x3b90c25a",
+      "sequential_f32_bits": "0x3b90c258"
+    },
+    "state_error": {
+      "mismatches": 506267,
+      "max_abs": 0.0048828125,
+      "mean_abs": 0.000001652099002238201
+    }
+  },
+  "analysis_result": {
+    "row64_direct_cause": "chunk_entry_prior_path",
+    "ruled_out_for_row64": [
+      "final_state_writeback"
+    ],
+    "unlikely_for_startup_diagnostic": [
+      "exp_dA_last_carry_over_initial_state"
+    ],
+    "strongest_static_suspect": "chunk_state0_accumulation_cast_order_feeding_entry_state1",
+    "specific_suspect": "candidate must match current sequential oracle cast placement: exp(dA_last-dA_u) * BF16(B*dt) * x, not reference-style BF16(B*exp_decay*dt) * x unless default oracle is changed in a separate gate",
+    "exact_removed_v3_faulty_line_known": false,
+    "why_not_known": "2321 artifacts did not capture row64 candidate D*x, local self, prior, entry_state1, chunk_state0, dA_last0, or flat0 intermediate terms, and the v3 source was reverted in 2346"
+  },
+  "v4_plan": {
+    "default_path_changed": false,
+    "new_prototype_implemented": false,
+    "required_buffers": [
+      "initial_state_copy",
+      "seq_out",
+      "seq_state",
+      "cand_out",
+      "cand_final_state",
+      "dt_softplus",
+      "dA_prefix",
+      "dA_last",
+      "chunk_state",
+      "entry_state",
+      "CB"
+    ],
+    "required_probes": [
+      "row64_local_preflight",
+      "row64_prior_entry_dot",
+      "row64_component_delta",
+      "flat0_initial",
+      "flat0_chunk0_state",
+      "flat0_carry",
+      "flat0_final",
+      "cast_order_ab_probe",
+      "first_mismatch_dump"
+    ],
+    "correctness_gate": "full sequential oracle must pass before any long diagnostic timing"
+  },
+  "artifacts": {
+    "source_audit": "20260628_0641_nemotron_nano_mamba2_ssd_2321_v3_first_mismatch_analysis_source_audit.tsv",
+    "mismatch_attribution": "20260628_0641_nemotron_nano_mamba2_ssd_2321_v3_first_mismatch_analysis_mismatch_attribution.tsv",
+    "v4_correction_plan": "20260628_0641_nemotron_nano_mamba2_ssd_2321_v3_first_mismatch_analysis_v4_correction_plan.tsv",
+    "v4_probe_plan": "20260628_0641_nemotron_nano_mamba2_ssd_2321_v3_first_mismatch_analysis_v4_probe_plan.tsv",
+    "root_decision": "20260628_0641_nemotron_nano_mamba2_ssd_2321_v3_first_mismatch_analysis_root_decision.tsv",
+    "runtime_not_run": "20260628_0641_nemotron_nano_mamba2_ssd_2321_v3_first_mismatch_analysis_runtime_not_run.tsv",
+    "validation_checks": "20260628_0641_nemotron_nano_mamba2_ssd_2321_v3_first_mismatch_analysis_validation_checks.tsv"
+  },
+  "constraints": {
+    "static_analysis_only": true,
+    "new_prototype": false,
+    "benchmarks": false,
+    "requests": false,
+    "decode_hcs_changes": false,
+    "production_enablement": false,
+    "default_path_changes": false
+  },
+  "validation": {
+    "passed": true,
+    "final_snapshot_utc": "2026-06-28T06:46:52Z",
+    "no_tmux_server": true,
+    "no_runtime_build_process": true,
+    "no_nvidia_compute_process": true,
+    "gpu_memory_used_mb": {
+      "gpu0": 15,
+      "gpu1": 11
+    },
+    "disk_free": "587G",
+    "ram_available": "968Gi",
+    "nano_temp_lock_files": 0,
+    "protected_config_status": [
+      "?? tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+      "?? tests/nemotron-nano-bf16-experts-a16.conf"
+    ]
+  }
+}

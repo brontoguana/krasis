@@ -1,0 +1,11 @@
+field	value
+gate_result	cleanup_passed
+prototype_v2_status	removed_from_source
+default_path	sequential_ssd
+build	pass
+startup_diagnostic	pass
+requests_sent	0
+benchmark_path	no
+cache_reuse	clean
+temp_lock_files	none_observed_before_validation
+next_step	analyze or redesign the SSD candidate before any future opt-in prototype; default sequential path remains valid

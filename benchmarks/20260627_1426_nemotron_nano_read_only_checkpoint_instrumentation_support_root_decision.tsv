@@ -1,0 +1,8 @@
+decision	status	detail
+gate	closed	Read-only checkpoint instrumentation support is implemented and build/test validated.
+quality_decision	still_blocked	Combined projection plus consume-boundary attribution remains invalid for quality decisions until a live read-only checkpoint confirmation proves the combined path does not perturb output.
+implementation	diagnostic_only	Instrumentation is request-scoped behind KRASIS_READ_ONLY_CHECKPOINT_DIAG and requires debug_reference_trace=true.
+production_behavior	unchanged	Production paths remain untouched; non-request startup/warmup/calibration do not parse the checkpoint env.
+fail_closed	preserved	Reference-test diagnostic requests with checkpoint env but without debug_reference_trace fail closed.
+next_gate	minimal_live_confirmation	Run the smallest combined diagnostic live check with read-only checkpoints to compare pre/post hashes before using combined attribution evidence.
+forbidden	observed	No live server, cache generation, HQQ8/new variants, production enablement, speed benchmark, decode/HCS, or selected-expert retargeting occurred.

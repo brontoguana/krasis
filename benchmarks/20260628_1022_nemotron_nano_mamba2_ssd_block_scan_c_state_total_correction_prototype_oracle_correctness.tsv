@@ -1,0 +1,3 @@
+run	exit	oracle_records	passed_records	output_mismatches	state_mismatches	output_max_abs	output_mean_abs_max	state_max_abs	state_mean_abs_max	probe_failures	row97_term_matches	row64_state0_probe	row82_state14_probe	result
+small_startup	0	69	69	0	0	0.0	0.0	0.0	0.0	0	69	exact	exact	pass
+long_startup	0	69	69	0	0	0.0	0.0	0.0	0.0	0	69	exact	exact	pass

@@ -1,0 +1,118 @@
+{
+  "gate": "20260701_0055_nemotron_default_optimizations",
+  "decision": "accepted",
+  "scope": "Promote accepted Nano/Nemotron optimizations into guarded default benchmark and production paths for Nemotron models.",
+  "default_disable_env": "KRASIS_NEMOTRON_DEFAULT_OPTIMIZATIONS=0",
+  "defaults_promoted": {
+    "decode": [
+      "Mamba2 CUDA graph decode for Nemotron-H unless disabled",
+      "Mamba2 graph fast BF16 in-proj for Nemotron-H unless disabled",
+      "parallel sigmoid top-k for Nemotron-H sigmoid routing with <=1024 experts",
+      "direct W13 BF16 for ungated ReLU2 INT4 shapes with one W13 split",
+      "coalesced ReLU2 W2 graph kernel for ungated ReLU2 INT4 graph decode",
+      "hot-HCS no-sync/full-graph route sync only when every MoE expert is resident"
+    ],
+    "prefill": [
+      "Mamba2 SSD block scan",
+      "Mamba2 SSD coefficient tiling",
+      "parallel chunked SSD state computation",
+      "parallel output by chunk",
+      "precomputed CB output path"
+    ]
+  },
+  "individual_disable_envs": [
+    "KRASIS_MAMBA2_DECODE_GRAPH=0",
+    "KRASIS_MAMBA2_DECODE_GRAPH_FAST_INPROJ=0",
+    "KRASIS_DECODE_PARALLEL_TOPK=0",
+    "KRASIS_DECODE_GRAPH_RELU2_W2_COALESCED=0",
+    "KRASIS_DECODE_GRAPH_DIRECT_W13_BF16=0",
+    "KRASIS_MAMBA2_SSD_BLOCK_SCAN=0",
+    "KRASIS_MAMBA2_SSD_BLOCK_SCAN_COEFF_TILE=0",
+    "KRASIS_MAMBA2_SSD_PARALLEL_CHUNKED=0",
+    "KRASIS_MAMBA2_SSD_PARALLEL_OUTPUT_BY_CHUNK=0",
+    "KRASIS_MAMBA2_SSD_PARALLEL_OUTPUT_PRECOMPUTE_CB=0"
+  ],
+  "guards": {
+    "nemotron_detection": "Runtime model semantics: Mamba2 layers plus ungated ReLU2 MoE; not hardcoded to Nano.",
+    "latent_moe_graph": "Super latent MoE graph replay remains unsupported and fails closed; Super benchmark uses the supported dynamic-HCS non-graph MoE decode path while portable defaults still apply.",
+    "hot_hcs_graph": "Hot-HCS no-sync/full-graph route sync is auto-enabled only when loaded HCS experts cover the model's full MoE expert set; this applies to Nano but not Super on the measured 5090 run.",
+    "no_rejected_candidates": "Rejected shared relu2, weighted-accum, fused routed scale, fast out-proj, and fused discretize+SSM candidates remain removed."
+  },
+  "build": {
+    "command": "./dev build",
+    "exit_code": 0,
+    "log": "20260701_0055_nemotron_default_optimizations_build3.log"
+  },
+  "super_noenv_benchmark": {
+    "command": "./dev benchmark tests/nemotron-super-bf16kv-a16.conf",
+    "exit_code": 0,
+    "prefill_internal_best_tok_s": 1228.7,
+    "decode_internal_best_tok_s": 22.15,
+    "http_round_trip_best_tok_s": 35.24,
+    "prefill_runs": [
+      {"tokens": 1001, "tok_s": 793.6, "ms": 1261.3},
+      {"tokens": 5001, "tok_s": 1228.7, "ms": 4070.3},
+      {"tokens": 8151, "tok_s": 1082.7, "ms": 7528.6}
+    ],
+    "decode_runs": [
+      {"target_tokens": 50, "tok_s": 22.15, "ms_per_tok": 45.2},
+      {"target_tokens": 100, "tok_s": 21.28, "ms_per_tok": 47.0},
+      {"target_tokens": 250, "tok_s": 19.83, "ms_per_tok": 50.4}
+    ],
+    "hcs_loaded_experts": "3358/20480",
+    "hcs_coverage_percent": 16.4,
+    "startup_hcs_pool": "5152/20480",
+    "startup_hcs_coverage_percent": 25.2,
+    "startup_ready_free_mb": 958,
+    "decode_min_free_mb": 850,
+    "safety_margin_mb": 600,
+    "prefill_cap_tokens": 8150
+  },
+  "nano_noenv_benchmark": {
+    "command": "./dev benchmark tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+    "exit_code": 0,
+    "prefill_internal_best_tok_s": 8317.6,
+    "decode_internal_best_tok_s": 135.33,
+    "http_round_trip_best_tok_s": 325.13,
+    "prefill_runs": [
+      {"tokens": 1001, "tok_s": 4428.4, "ms": 226.0},
+      {"tokens": 5001, "tok_s": 7158.4, "ms": 698.6},
+      {"tokens": 10001, "tok_s": 8263.6, "ms": 1210.3},
+      {"tokens": 20001, "tok_s": 8317.6, "ms": 2404.7},
+      {"tokens": 35001, "tok_s": 7960.5, "ms": 4396.8},
+      {"tokens": 39921, "tok_s": 7879.9, "ms": 5066.2}
+    ],
+    "decode_runs": [
+      {"target_tokens": 50, "tok_s": 133.79, "ms_per_tok": 7.5},
+      {"target_tokens": 100, "tok_s": 133.44, "ms_per_tok": 7.5},
+      {"target_tokens": 250, "tok_s": 135.33, "ms_per_tok": 7.4}
+    ],
+    "hcs_loaded_experts": "2944/2944",
+    "hcs_coverage_percent": 100.0,
+    "decode_min_free_mb": 8708,
+    "safety_margin_mb": 600,
+    "prefill_cap_tokens": 39920
+  },
+  "comparison": {
+    "previous_super_prefill_internal_best_tok_s": 192.9,
+    "previous_super_decode_internal_best_tok_s": 21.86,
+    "previous_super_http_round_trip_best_tok_s": 34.85,
+    "super_prefill_speedup_x": 6.37,
+    "super_decode_delta_tok_s": 0.29,
+    "super_http_delta_tok_s": 0.39,
+    "previous_nano_gated_request_decode_tok_s": 119.2,
+    "nano_noenv_standard_benchmark_decode_tok_s": 135.33
+  },
+  "artifacts": {
+    "plan": "20260701_0055_nemotron_default_optimizations_plan.tsv",
+    "result": "20260701_0055_nemotron_default_optimizations_result.tsv",
+    "super_result": "20260701_0055_nemotron_default_optimizations_super_noenv_result.tsv",
+    "nano_result": "20260701_0055_nemotron_default_optimizations_nano_noenv_result.tsv",
+    "super_report": "20260701_0055_nemotron_default_optimizations_super_noenv_benchmark_report.log",
+    "super_stdout": "20260701_0055_nemotron_default_optimizations_super_noenv_benchmark_stdout.log",
+    "nano_report": "20260701_0055_nemotron_default_optimizations_nano_noenv_benchmark_report.log",
+    "nano_stdout": "20260701_0055_nemotron_default_optimizations_nano_noenv_benchmark_stdout.log",
+    "build_log": "20260701_0055_nemotron_default_optimizations_build3.log",
+    "validation": "20260701_0055_nemotron_default_optimizations_validation_checks.tsv"
+  }
+}

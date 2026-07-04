@@ -1,0 +1,2 @@
+command	exit	duration_s	log
+./dev build	0	178	benchmarks/20260628_1647_nemotron_nano_parallel_ssd_architecture_implementation_build.log

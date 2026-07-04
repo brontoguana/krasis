@@ -1,0 +1,17 @@
+field	value
+command	./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf
+tmux_session	nano_marlin_reuse
+forbidden_flags_absent	true
+attribution_checkpoint_envs_off	true
+server_log	benchmarks/20260627_1711_nemotron_nano_marlin_expert_cache_reuse_prerequisite_server.log
+exit_code	137
+server_ready	false
+requests_sent	0
+case_2_sent	false
+hqq_attention_cache_validated	true
+cache_write_detected	true
+cache_write_first_line	26: Building GPU INT4 Marlin expert cache (one-time)
+cache_write_detail_line	28: Building GPU INT4 Marlin cache: 23 layers from safetensors
+partial_tmp_created	true
+partial_tmp_removed	true
+result	stopped_before_ready_before_requests

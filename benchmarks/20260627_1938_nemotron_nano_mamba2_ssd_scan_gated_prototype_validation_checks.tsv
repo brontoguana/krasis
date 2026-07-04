@@ -1,0 +1,14 @@
+check	status	evidence
+summary_json	pass	jq parsed summary and asserted closed status, build exit 0, zero oracle mismatches, long ssd_scan 120711.931ms, production disabled
+oracle_artifact	pass	oracle TSV row shows tokens 128, oracle rows 69, output/state mismatch sums 0, result pass
+timing_artifact	pass	long substage TSV row shows ssd_scan 120711.931ms across 23 calls and performance-negative diagnosis
+decision_artifact	pass	root decision TSV marks correctness passed, performance failed, production path preserved, prototype rejected as optimization
+runtime_forbidden_evidence	pass	no reference_test requests, benchmark completion, ./dev benchmark, build-cache flags, force-rebuild flags, or safetensors Marlin build line in successful diagnostic logs
+cache_reuse_evidence	pass	successful logs contain HQQ attention artifacts validated and GPU Marlin cache loaded
+initial_fail_closed_recorded	pass	first oracle attempt recorded missing visible PTX symbol before corrected build and rerun
+krasis_static	pass	bash -n dev and git diff --check passed in krasis-nemotron-dev
+internal_static	pass	git diff --check passed in krasis-internal
+protected_configs	pass	only tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf and the known tests/nemotron-nano-bf16-experts-a16.conf are untracked in config scope
+cleanup	pass	./dev kill completed successfully
+cache_temp_lock	pass	no .tmp/.pending/.lock files under the Nano Krasis cache, excluding Hugging Face download locks
+idle_state	pass	final snapshot 2026-06-27T20:08:59Z: no tmux server, no matching runtime/build process, no NVIDIA compute process, GPUs 15 MB / 11 MB, disk 588G, RAM 966Gi

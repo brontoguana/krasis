@@ -1,0 +1,11 @@
+metric	value
+target	row=97 head=48 d=24 flat=400408
+term_probe_records	69
+failed_term_probe_records	0
+candidate_oracle_output_matches	69
+last_candidate_bits	0x3d01
+last_oracle_bits	0x3d01
+max_abs_c_state_total_exact_minus_replayed	0.000003814697265625
+local_old_state_source	output_kernel_order
+removed_fields	local_old_state_exact; local_old_state_exact_minus_replayed; prior_chunk_state_from_replayed_old; y_pre_bf16_from_replayed_old; y_replayed_old_bf16_value; y_exact_minus_replayed_old
+result	row97_probe_exact_after_cleanup

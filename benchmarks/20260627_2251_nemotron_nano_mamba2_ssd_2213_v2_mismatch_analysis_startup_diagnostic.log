@@ -1,0 +1,900 @@
+[0;36m[1m=>[0m Waiting for selected GPUs (0) to clear...
+[0;32m[1mOK[0m Selected GPUs (0) clear.
+[0;36m[1m=>[0m Launching from: tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf
+[0;36m[1m=>[0m Run dir: /home/main/Documents/Claude/krasis-nemotron-dev/logs/dev-run_20260627_235432
+[0;36m[1m=>[0m Import origin check:
+krasis: /home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/__init__.py
+krasis.krasis: /home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+Pre-scan: set CUDA_VISIBLE_DEVICES=0
+Loaded config from tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf: {'model_path': '/home/main/.krasis/models/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16', 'selected_gpus': '0', 'num_gpus': 1, 'layer_group_size': 2, 'kv_dtype': 'k4v4', 'gpu_expert_bits': 4, 'cpu_expert_bits': 4, 'attention_quant': 'hqq4', 'hqq_group_size': 128, 'shared_expert_quant': 'int8', 'dense_mlp_quant': 'int8', 'lm_head_quant': 'int8', 'krasis_threads': 16, 'host': '0.0.0.0', 'port': 18012, 'enable_thinking': False, 'gpu_prefill_threshold': 300, 'vram_safety_margin': 600, 'force_load': False}
+
+[1m[36m▸ Krasis — NVIDIA-Nemotron-3-Nano-30B-A3B-BF16[0m
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 1[0m
+  [32mHCS host cache: source[0m
+  [32mSelected physical GPUs: 0 (config; CUDA_VISIBLE_DEVICES=0)[0m
+  [32mExperts: GPU INT4 g128 (amax)  |  Attention: hqq4  |  KV: k4v4[0m
+  [32mLayer groups: 2  |  KV cache: 1000 MB  |  Threads: 16[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+
+[1m[36m▸ Loading model weights[0m
+  [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=518 MB, free=31600 MB, total=32119 MB
+
+[1m[36m▸ Loading GPU weights[0m
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:0: alloc=3477 MB, reserved=3562 MB, used=4178 MB, free=27940 MB, total=32119 MB
+  [0;32mHQQ attention artifacts validated (115 MB cached), 27940 MB free[0m
+
+[1m[36m▸ Building GPU INT4 Marlin expert cache (one-time)[0m
+  [2mCache will be saved to /home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 for instant loading next time.[0m
+    Loading GPU Marlin cache: 23 layers...
+    GPU Marlin cache loaded: 15.8 GB in 10s
+  [0;32mExpert cache built in 10s — next launch will be much faster.[0m
+  [33m[VRAM after-phase2-expert-weights][0m cuda:0: alloc=3477 MB, reserved=3562 MB, used=4178 MB, free=27940 MB, total=32119 MB
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:0: alloc=3477 MB, reserved=3562 MB, used=4178 MB, free=27940 MB, total=32119 MB
+  [33m[VRAM after-kv-cache-init][0m cuda:0: alloc=4477 MB, reserved=4562 MB, used=5178 MB, free=26940 MB, total=32119 MB
+  [33m[VRAM after-full-load][0m cuda:0: alloc=4477 MB, reserved=4562 MB, used=5178 MB, free=26940 MB, total=32119 MB
+
+[1m[36m▸ CUDA runtime warmup[0m
+  [32mcuBLAS + Triton kernel compilation done[0m
+
+[1m[36m▸ Setting up GPU decode store[0m
+  [32mGPU decode store ready (addr=0x477671c0)[0m
+  [32mReleased redundant GPU execution source tensors (366 MB)[0m
+  [2mVRAM monitor started (tracking warmup)[0m
+  [2mcuda:0: 0 MB total[0m
+
+[1m[36m▸ Pre-allocating Rust prefill engine[0m
+[FLA] Loading kernels for H=0 from /home/main/Documents/Claude/krasis-nemotron-dev/python/krasis/libkrasis_fla_sm120.so
+  [32mPrefill engine scratch buffers allocated[0m
+
+[1m[36m▸ Warmup (Rust prefill engine)[0m
+  [32mStartup diag: warmup tokens=128 (default 300, token=52528)[0m
+  [32mStartup diag env: no_graph=unset, mapped_reads=unset, prefill_debug=False, prefill_timing=True, exit_after_calibration=True[0m
+[PREFILL-LIVENESS] run_start total_tokens=128 scratch_max_tokens=128 max_chunk=128 chunk_size=128 num_chunks=1 chunk_plan=[128] expert_bits=4 shared_expert_bits=4 hidden_size=2688 layers=52
+[PREFILL-LIVENESS] chunk_start chunk=0 total_chunks=1 start=0 end=128 tokens=128 tok0=52528 last_pos=127 last_tok=52528
+[PREFILL-LIVENESS] chunk_after_hcs_guard chunk=0 tokens=128 elapsed_ms=0.080
+[PREFILL-LIVENESS] layer_start chunk=0 layer=0 layer_type=mamba2 tokens=128 has_residual=false moe_gate=false shared_bf16=false shared_marlin=false
+[MAMBA2-SSD-LOCAL-TRI-ORACLE] {"available":true,"components":{"D":0.44140625,"c_state_total":-0.19736528396606445,"cpu_matches_sequential_gpu_bits":false,"cpu_y_bf16_bits":"0xbe4e","cpu_y_bf16_value":-0.201171875,"d_x":-0.003017425537109375,"local_hf_chunk_scan_bf16_coeff":-0.07515525817871094,"local_hf_chunk_scan_fp32_coeff":-0.07511226832866669,"local_old_state":-0.07485388964414597,"prior_chunk_state":-0.12251139432191849,"sequential_gpu_y_bf16_bits":"0xbe4d","sequential_gpu_y_bf16_value":-0.2001953125,"x_target":-0.0068359375,"x_target_bits":"0xbbe0","y_pre_bf16":-0.2006840705871582},"diagnostic":"mamba2_ssd_local_triangular_oracle","dimensions":{"chunk_pos":18,"chunk_start":64,"d_inner":4096,"effective_chunk_size":64,"head_dim":64,"heads_per_group":8,"inside_chunk_zero":false,"m":128,"n_groups":8,"n_heads":64,"requested_chunk_size":64,"state_size":128},"interpretation":"CPU local-triangular recompute does not match existing sequential GPU output; inspect logged terms before any optimized candidate work.","layer":0,"local_triangular_terms":[{"accum_bf16_coeff_after":-0.0033245086669921875,"accum_fp32_coeff_after":-0.0033282795920968056,"cb_forward":0.07300420105457306,"cb_forward_minus_reverse":-2.2351741790771484e-8,"cb_reverse":0.07300422340631485,"cb_scaled_bf16":0.486328125,"cb_scaled_bf16_bits":"0x3ef9","cb_scaled_pre_bf16":0.48687976598739624,"chunk_position":0,"dA_after":-1.2056331634521484,"dA_before":-1.1870849132537842,"dA_increment":-0.01854819804430008,"dA_target":-1.5395005941390991,"decay":0.7161487340927124,"decay_arg":-0.3338674306869507,"dt_after_softplus":9.312590599060059,"dt_plus_bias":9.3125,"dt_times_x":-0.06366028636693954,"included_by_lower_triangle":true,"raw_dt":4.5,"raw_dt_bits":"0x4090","scale_decay_times_dt":6.6691999435424805,"self_sample":false,"term_bf16_coeff_times_x":-0.0033245086669921875,"term_fp32_coeff_times_x":-0.0033282795920968056,"top_state_contrib":-0.1549224853515625,"top_state_index":100,"u":64,"x":-0.0068359375,"x_bits":"0xbbe0"},{"accum_bf16_coeff_after":-0.0067157745361328125,"accum_fp32_coeff_after":-0.006718868855386972,"cb_forward":0.07300420105457306,"cb_forward_minus_reverse":-2.2351741790771484e-8,"cb_reverse":0.07300422340631485,"cb_scaled_bf16":0.49609375,"cb_scaled_bf16_bits":"0x3efe","cb_scaled_pre_bf16":0.49599477648735046,"chunk_position":1,"dA_after":-1.2241814136505127,"dA_before":-1.2056331634521484,"dA_increment":-0.01854819804430008,"dA_target":-1.5395005941390991,"decay":0.7295559644699097,"decay_arg":-0.3153191804885864,"dt_after_softplus":9.312590599060059,"dt_plus_bias":9.3125,"dt_times_x":-0.06366028636693954,"included_by_lower_triangle":true,"raw_dt":4.5,"raw_dt_bits":"0x4090","scale_decay_times_dt":6.794055938720703,"self_sample":false,"term_bf16_coeff_times_x":-0.003391265869140625,"term_fp32_coeff_times_x":-0.003390589263290167,"top_state_contrib":-0.1549224853515625,"top_state_index":100,"u":65,"x":-0.0068359375,"x_bits":"0xbbe0"},{"accum_bf16_coeff_after":-0.010160446166992188,"accum_fp32_coeff_after":-0.010172935202717781,"cb_forward":0.07300420105457306,"cb_forward_minus_reverse":-2.2351741790771484e-8,"cb_reverse":0.07300422340631485,"cb_scaled_bf16":0.50390625,"cb_scaled_bf16_bits":"0x3f01","cb_scaled_pre_bf16":0.5052804946899414,"chunk_position":2,"dA_after":-1.242729663848877,"dA_before":-1.2241814136505127,"dA_increment":-0.01854819804430008,"dA_target":-1.5395005941390991,"decay":0.7432142496109009,"decay_arg":-0.29677093029022217,"dt_after_softplus":9.312590599060059,"dt_plus_bias":9.3125,"dt_times_x":-0.06366028636693954,"included_by_lower_triangle":true,"raw_dt":4.5,"raw_dt_bits":"0x4090","scale_decay_times_dt":6.921249866485596,"self_sample":false,"term_bf16_coeff_times_x":-0.003444671630859375,"term_fp32_coeff_times_x":-0.0034540658816695213,"top_state_contrib":-0.1549224853515625,"top_state_index":100,"u":66,"x":-0.0068359375,"x_bits":"0xbbe0"},{"accum_bf16_coeff_after":-0.013685226440429688,"accum_fp32_coeff_after":-0.013691665604710579,"cb_forward":0.07300420105457306,"cb_forward_minus_reverse":-2.2351741790771484e-8,"cb_reverse":0.07300422340631485,"cb_scaled_bf16":0.515625,"cb_scaled_bf16_bits":"0x3f04","cb_scaled_pre_bf16":0.514739990234375,"chunk_position":3,"dA_after":-1.2612779140472412,"dA_before":-1.242729663848877,"dA_increment":-0.01854819804430008,"dA_target":-1.5395005941390991,"decay":0.7571281790733337,"decay_arg":-0.2782226800918579,"dt_after_softplus":9.312590599060059,"dt_plus_bias":9.3125,"dt_times_x":-0.06366028636693954,"included_by_lower_triangle":true,"raw_dt":4.5,"raw_dt_bits":"0x4090","scale_decay_times_dt":7.0508246421813965,"self_sample":false,"term_bf16_coeff_times_x":-0.0035247802734375,"term_fp32_coeff_times_x":-0.003518730401992798,"top_state_contrib":-0.1549224853515625,"top_state_index":100,"u":67,"x":-0.0068359375,"x_bits":"0xbbe0"},{"accum_bf16_coeff_after":-0.017263412475585938,"accum_fp32_coeff_after":-0.017276272177696228,"cb_forward":0.07300420105457306,"cb_forward_minus_reverse":-2.2351741790771484e-8,"cb_reverse":0.07300422340631485,"cb_scaled_bf16":0.5234375,"cb_scaled_bf16_bits":"0x3f06","cb_scaled_pre_bf16":0.524376630783081,"chunk_position":4,"dA_after":-1.2798261642456055,"dA_before":-1.2612779140472412,"dA_increment":-0.01854819804430008,"dA_target":-1.5395005941390991,"decay":0.7713026404380798,"decay_arg":-0.25967442989349365,"dt_after_softplus":9.312590599060059,"dt_plus_bias":9.3125,"dt_times_x":-0.06366028636693954,"included_by_lower_triangle":true,"raw_dt":4.5,"raw_dt_bits":"0x4090","scale_decay_times_dt":7.182825565338135,"self_sample":false,"term_bf16_coeff_times_x":-0.00357818603515625,"term_fp32_coeff_times_x":-0.003584605874493718,"top_state_contrib":-0.1549224853515625,"top_state_index":100,"u":68,"x":-0.0068359375,"x_bits":"0xbbe0"},{"accum_bf16_coeff_after":-0.020921707153320312,"accum_fp32_coeff_after":-0.02092798613011837,"cb_forward":0.07300420105457306,"cb_forward_minus_reverse":-2.2351741790771484e-8,"cb_reverse":0.07300422340631485,"cb_scaled_bf16":0.53515625,"cb_scaled_bf16_bits":"0x3f09","cb_scaled_pre_bf16":0.5341936349868774,"chunk_position":5,"dA_after":-1.2983744144439697,"dA_before":-1.2798261642456055,"dA_increment":-0.01854819804430008,"dA_target":-1.5395005941390991,"decay":0.785742461681366,"decay_arg":-0.2411261796951294,"dt_after_softplus":9.312590599060059,"dt_plus_bias":9.3125,"dt_times_x":-0.06366028636693954,"included_by_lower_triangle":true,"raw_dt":4.5,"raw_dt_bits":"0x4090","scale_decay_times_dt":7.31729793548584,"self_sample":false,"term_bf16_coeff_times_x":-0.003658294677734375,"term_fp32_coeff_times_x":-0.0036517144180834293,"top_state_contrib":-0.1549224853515625,"top_state_index":100,"u":69,"x":-0.0068359375,"x_bits":"0xbbe0"},{"accum_bf16_coeff_after":-0.024633407592773438,"accum_fp32_coeff_after":-0.024648066610097885,"cb_forward":0.07300420105457306,"cb_forward_minus_reverse":-2.2351741790771484e-8,"cb_reverse":0.07300422340631485,"cb_scaled_bf16":0.54296875,"cb_scaled_bf16_bits":"0x3f0b","cb_scaled_pre_bf16":0.5441945195198059,"chunk_position":6,"dA_after":-1.316922664642334,"dA_before":-1.2983744144439697,"dA_increment":-0.01854819804430008,"dA_target":-1.5395005941390991,"decay":0.8004526495933533,"decay_arg":-0.22257792949676514,"dt_after_softplus":9.312590599060059,"dt_plus_bias":9.3125,"dt_times_x":-0.06366028636693954,"included_by_lower_triangle":true,"raw_dt":4.5,"raw_dt_bits":"0x4090","scale_decay_times_dt":7.454288005828857,"self_sample":false,"term_bf16_coeff_times_x":-0.003711700439453125,"term_fp32_coeff_times_x":-0.003720079781487584,"top_state_contrib":-0.1549224853515625,"top_state_index":100,"u":70,"x":-0.0068359375,"x_bits":"0xbbe0"},{"accum_bf16_coeff_after":-0.028425216674804688,"accum_fp32_coeff_after":-0.028437791392207146,"cb_forward":0.07300420105457306,"cb_forward_minus_reverse":-2.2351741790771484e-8,"cb_reverse":0.07300422340631485,"cb_scaled_bf16":0.5546875,"cb_scaled_bf16_bits":"0x3f0e","cb_scaled_pre_bf16":0.5543825030326843,"chunk_position":7,"dA_after":-1.3354709148406982,"dA_before":-1.316922664642334,"dA_increment":-0.01854819804430008,"dA_target":-1.5395005941390991,"decay":0.8154381513595581,"decay_arg":-0.20402967929840088,"dt_after_softplus":9.312590599060059,"dt_plus_bias":9.3125,"dt_times_x":-0.06366028636693954,"included_by_lower_triangle":true,"raw_dt":4.5,"raw_dt_bits":"0x4090","scale_decay_times_dt":7.593841552734375,"self_sample":false,"term_bf16_coeff_times_x":-0.00379180908203125,"term_fp32_coeff_times_x":-0.0037897240836173296,"top_state_contrib":-0.1549224853515625,"top_state_index":100,"u":71,"x":-0.0068359375,"x_bits":"0xbbe0"},{"accum_bf16_coeff_after":-0.03229713439941406,"accum_fp32_coeff_after":-0.03229846432805061,"cb_forward":0.07300420105457306,"cb_forward_minus_reverse":-2.2351741790771484e-8,"cb_reverse":0.07300422340631485,"cb_scaled_bf16":0.56640625,"cb_scaled_bf16_bits":"0x3f11","cb_scaled_pre_bf16":0.5647612810134888,"chunk_position":8,"dA_after":-1.3540191650390625,"dA_before":-1.3354709148406982,"dA_increment":-0.01854819804430008,"dA_target":-1.5395005941390991,"decay":0.8307042717933655,"decay_arg":-0.18548142910003662,"dt_after_softplus":9.312590599060059,"dt_plus_bias":9.3125,"dt_times_x":-0.06366028636693954,"included_by_lower_triangle":true,"raw_dt":4.5,"raw_dt_bits":"0x4090","scale_decay_times_dt":7.736008644104004,"self_sample":false,"term_bf16_coeff_times_x":-0.003871917724609375,"term_fp32_coeff_times_x":-0.0038606729358434677,"top_state_contrib":-0.1549224853515625,"top_state_index":100,"u":72,"x":-0.0068359375,"x_bits":"0xbbe0"},{"accum_bf16_coeff_after":-0.03622245788574219,"accum_fp32_coeff_after":-0.03623141348361969,"cb_forward":0.07300420105457306,"cb_forward_minus_reverse":-2.2351741790771484e-8,"cb_reverse":0.07300422340631485,"cb_scaled_bf16":0.57421875,"cb_scaled_bf16_bits":"0x3f13","cb_scaled_pre_bf16":0.575334370136261,"chunk_position":9,"dA_after":-1.3725674152374268,"dA_before":-1.3540191650390625,"dA_increment":-0.01854819804430008,"dA_target":-1.5395005941390991,"decay":0.8462561368942261,"decay_arg":-0.16693317890167236,"dt_after_softplus":9.312590599060059,"dt_plus_bias":9.3125,"dt_times_x":-0.06366028636693954,"included_by_lower_triangle":true,"raw_dt":4.5,"raw_dt_bits":"0x4090","scale_decay_times_dt":7.8808369636535645,"self_sample":false,"term_bf16_coeff_times_x":-0.003925323486328125,"term_fp32_coeff_times_x":-0.003932949621230364,"top_state_contrib":-0.1549224853515625,"top_state_index":100,"u":73,"x":-0.0068359375,"x_bits":"0xbbe0"},{"accum_bf16_coeff_after":-0.04022789001464844,"accum_fp32_coeff_after":-0.040237993001937866,"cb_forward":0.07300420105457306,"cb_forward_minus_reverse":-2.2351741790771484e-8,"cb_reverse":0.07300422340631485,"cb_scaled_bf16":0.5859375,"cb_scaled_bf16_bits":"0x3f16","cb_scaled_pre_bf16":0.586105465888977,"chunk_position":10,"dA_after":-1.391115665435791,"dA_before":-1.3725674152374268,"dA_increment":-0.01854819804430008,"dA_target":-1.5395005941390991,"decay":0.8620992302894592,"decay_arg":-0.1483849287033081,"dt_after_softplus":9.312590599060059,"dt_plus_bias":9.3125,"dt_times_x":-0.06366028636693954,"included_by_lower_triangle":true,"raw_dt":4.5,"raw_dt_bits":"0x4090","scale_decay_times_dt":8.028377532958984,"self_sample":false,"term_bf16_coeff_times_x":-0.00400543212890625,"term_fp32_coeff_times_x":-0.004006580449640751,"top_state_contrib":-0.1549224853515625,"top_state_index":100,"u":74,"x":-0.0068359375,"x_bits":"0xbbe0"},{"accum_bf16_coeff_after":-0.04431343078613281,"accum_fp32_coeff_after":-0.04431958124041557,"cb_forward":0.07300420105457306,"cb_forward_minus_reverse":-2.2351741790771484e-8,"cb_reverse":0.07300422340631485,"cb_scaled_bf16":0.59765625,"cb_scaled_bf16_bits":"0x3f19","cb_scaled_pre_bf16":0.5970780849456787,"chunk_position":11,"dA_after":-1.4096639156341553,"dA_before":-1.391115665435791,"dA_increment":-0.01854819804430008,"dA_target":-1.5395005941390991,"decay":0.87823885679245,"decay_arg":-0.12983667850494385,"dt_after_softplus":9.312590599060059,"dt_plus_bias":9.3125,"dt_times_x":-0.06366028636693954,"included_by_lower_triangle":true,"raw_dt":4.5,"raw_dt_bits":"0x4090","scale_decay_times_dt":8.178678512573242,"self_sample":false,"term_bf16_coeff_times_x":-0.004085540771484375,"term_fp32_coeff_times_x":-0.004081588238477707,"top_state_contrib":-0.1549224853515625,"top_state_index":100,"u":75,"x":-0.0068359375,"x_bits":"0xbbe0"},{"accum_bf16_coeff_after":-0.04847908020019531,"accum_fp32_coeff_after":-0.04847758263349533,"cb_forward":0.07300420105457306,"cb_forward_minus_reverse":-2.2351741790771484e-8,"cb_reverse":0.07300422340631485,"cb_scaled_bf16":0.609375,"cb_scaled_bf16_bits":"0x3f1c","cb_scaled_pre_bf16":0.6082562208175659,"chunk_position":12,"dA_after":-1.4282121658325195,"dA_before":-1.4096639156341553,"dA_increment":-0.01854819804430008,"dA_target":-1.5395005941390991,"decay":0.8946806788444519,"decay_arg":-0.11128842830657959,"dt_after_softplus":9.312590599060059,"dt_plus_bias":9.3125,"dt_times_x":-0.06366028636693954,"included_by_lower_triangle":true,"raw_dt":4.5,"raw_dt_bits":"0x4090","scale_decay_times_dt":8.331794738769531,"self_sample":false,"term_bf16_coeff_times_x":-0.0041656494140625,"term_fp32_coeff_times_x":-0.004158001393079758,"top_state_contrib":-0.1549224853515625,"top_state_index":100,"u":76,"x":-0.0068359375,"x_bits":"0xbbe0"},{"accum_bf16_coeff_after":-0.05272483825683594,"accum_fp32_coeff_after":-0.05271342769265175,"cb_forward":0.07300420105457306,"cb_forward_minus_reverse":-2.2351741790771484e-8,"cb_reverse":0.07300422340631485,"cb_scaled_bf16":0.62109375,"cb_scaled_bf16_bits":"0x3f1f","cb_scaled_pre_bf16":0.6196436285972595,"chunk_position":13,"dA_after":-1.4467604160308838,"dA_before":-1.4282121658325195,"dA_increment":-0.01854819804430008,"dA_target":-1.5395005941390991,"decay":0.911430299282074,"decay_arg":-0.09274017810821533,"dt_after_softplus":9.312590599060059,"dt_plus_bias":9.3125,"dt_times_x":-0.06366028636693954,"included_by_lower_triangle":true,"raw_dt":4.5,"raw_dt_bits":"0x4090","scale_decay_times_dt":8.487777709960938,"self_sample":false,"term_bf16_coeff_times_x":-0.004245758056640625,"term_fp32_coeff_times_x":-0.004235845059156418,"top_state_contrib":-0.1549224853515625,"top_state_index":100,"u":77,"x":-0.0068359375,"x_bits":"0xbbe0"},{"accum_bf16_coeff_after":-0.05705070495605469,"accum_fp32_coeff_after":-0.057028573006391525,"cb_forward":0.07300420105457306,"cb_forward_minus_reverse":-2.2351741790771484e-8,"cb_reverse":0.07300422340631485,"cb_scaled_bf16":0.6328125,"cb_scaled_bf16_bits":"0x3f22","cb_scaled_pre_bf16":0.6312441229820251,"chunk_position":14,"dA_after":-1.465308666229248,"dA_before":-1.4467604160308838,"dA_increment":-0.01854819804430008,"dA_target":-1.5395005941390991,"decay":0.9284934997558594,"decay_arg":-0.07419192790985107,"dt_after_softplus":9.312590599060059,"dt_plus_bias":9.3125,"dt_times_x":-0.06366028636693954,"included_by_lower_triangle":true,"raw_dt":4.5,"raw_dt_bits":"0x4090","scale_decay_times_dt":8.646679878234863,"self_sample":false,"term_bf16_coeff_times_x":-0.00432586669921875,"term_fp32_coeff_times_x":-0.004315145313739777,"top_state_contrib":-0.1549224853515625,"top_state_index":100,"u":78,"x":-0.0068359375,"x_bits":"0xbbe0"},{"accum_bf16_coeff_after":-0.06145668029785156,"accum_fp32_coeff_after":-0.06142450496554375,"cb_forward":0.07300420105457306,"cb_forward_minus_reverse":-2.2351741790771484e-8,"cb_reverse":0.07300422340631485,"cb_scaled_bf16":0.64453125,"cb_scaled_bf16_bits":"0x3f25","cb_scaled_pre_bf16":0.6430618762969971,"chunk_position":15,"dA_after":-1.4838569164276123,"dA_before":-1.465308666229248,"dA_increment":-0.01854819804430008,"dA_target":-1.5395005941390991,"decay":0.9458761215209961,"decay_arg":-0.055643677711486816,"dt_after_softplus":9.312590599060059,"dt_plus_bias":9.3125,"dt_times_x":-0.06366028636693954,"included_by_lower_triangle":true,"raw_dt":4.5,"raw_dt_bits":"0x4090","scale_decay_times_dt":8.808557510375977,"self_sample":false,"term_bf16_coeff_times_x":-0.004405975341796875,"term_fp32_coeff_times_x":-0.004395931027829647,"top_state_contrib":-0.1549224853515625,"top_state_index":100,"u":79,"x":-0.0068359375,"x_bits":"0xbbe0"},{"accum_bf16_coeff_after":-0.06594276428222656,"accum_fp32_coeff_after":-0.06590273231267929,"cb_forward":0.07300420105457306,"cb_forward_minus_reverse":-2.2351741790771484e-8,"cb_reverse":0.07300422340631485,"cb_scaled_bf16":0.65625,"cb_scaled_bf16_bits":"0x3f28","cb_scaled_pre_bf16":0.6551008224487305,"chunk_position":16,"dA_after":-1.5024051666259766,"dA_before":-1.4838569164276123,"dA_increment":-0.01854819804430008,"dA_target":-1.5395005941390991,"decay":0.9635841846466064,"decay_arg":-0.03709542751312256,"dt_after_softplus":9.312590599060059,"dt_plus_bias":9.3125,"dt_times_x":-0.06366028636693954,"included_by_lower_triangle":true,"raw_dt":4.5,"raw_dt_bits":"0x4090","scale_decay_times_dt":8.973464965820312,"self_sample":false,"term_bf16_coeff_times_x":-0.004486083984375,"term_fp32_coeff_times_x":-0.0044782282784581184,"top_state_contrib":-0.1549224853515625,"top_state_index":100,"u":80,"x":-0.0068359375,"x_bits":"0xbbe0"},{"accum_bf16_coeff_after":-0.07050895690917969,"accum_fp32_coeff_after":-0.07046479731798172,"cb_forward":0.07300420105457306,"cb_forward_minus_reverse":-2.2351741790771484e-8,"cb_reverse":0.07300422340631485,"cb_scaled_bf16":0.66796875,"cb_scaled_bf16_bits":"0x3f2b","cb_scaled_pre_bf16":0.6673651933670044,"chunk_position":17,"dA_after":-1.5209534168243408,"dA_before":-1.5024051666259766,"dA_increment":-0.01854819804430008,"dA_target":-1.5395005941390991,"decay":0.9816237688064575,"decay_arg":-0.0185471773147583,"dt_after_softplus":9.312590599060059,"dt_plus_bias":9.3125,"dt_times_x":-0.06366028636693954,"included_by_lower_triangle":true,"raw_dt":4.5,"raw_dt_bits":"0x4090","scale_decay_times_dt":9.141460418701172,"self_sample":false,"term_bf16_coeff_times_x":-0.004566192626953125,"term_fp32_coeff_times_x":-0.004562066867947578,"top_state_contrib":-0.1549224853515625,"top_state_index":100,"u":81,"x":-0.0068359375,"x_bits":"0xbbe0"},{"accum_bf16_coeff_after":-0.07515525817871094,"accum_fp32_coeff_after":-0.07511226832866669,"cb_forward":0.07300420105457306,"cb_forward_minus_reverse":-2.2351741790771484e-8,"cb_reverse":0.07300422340631485,"cb_scaled_bf16":0.6796875,"cb_scaled_bf16_bits":"0x3f2e","cb_scaled_pre_bf16":0.6798584461212158,"chunk_position":18,"dA_after":-1.539501667022705,"dA_before":-1.5209534168243408,"dA_increment":-0.01854819804430008,"dA_target":-1.5395005941390991,"decay":1.0,"decay_arg":0.0,"dt_after_softplus":9.312590599060059,"dt_plus_bias":9.3125,"dt_times_x":-0.06366028636693954,"included_by_lower_triangle":true,"raw_dt":4.5,"raw_dt_bits":"0x4090","scale_decay_times_dt":9.312590599060059,"self_sample":true,"term_bf16_coeff_times_x":-0.00464630126953125,"term_fp32_coeff_times_x":-0.004647470079362392,"top_state_contrib":-0.1549224853515625,"top_state_index":100,"u":82,"x":-0.0068359375,"x_bits":"0xbbe0"}],"prefix":{"a_log":-6.21875,"a_value_neg_exp":-0.001991733442991972,"dA_chunk_base":-1.1870849132537842,"dA_target":-1.5395005941390991,"dt_bias":4.8125,"local_dA_increments":[-0.01854819804430008,-0.01854819804430008,-0.01854819804430008,-0.01854819804430008,-0.01854819804430008,-0.01854819804430008,-0.01854819804430008,-0.01854819804430008,-0.01854819804430008,-0.01854819804430008,-0.01854819804430008,-0.01854819804430008,-0.01854819804430008,-0.01854819804430008,-0.01854819804430008,-0.01854819804430008,-0.01854819804430008,-0.01854819804430008,-0.01854819804430008],"local_dA_prefix_cumulative":[-1.2056331634521484,-1.2241812944412231,-1.2427295446395874,-1.261277675628662,-1.2798259258270264,-1.298374056816101,-1.3169223070144653,-1.33547043800354,-1.3540186882019043,-1.3725669384002686,-1.3911150693893433,-1.409663200378418,-1.4282114505767822,-1.4467597007751465,-1.4653078317642212,-1.483855962753296,-1.5024042129516602,-1.5209524631500244,-1.5395005941390991]},"target":{"dim_index":2398,"flat_index":338270,"group":4,"head":37,"head_dim_index":30,"row":82}}
+[PREFILL-LIVENESS] mamba2_substages layer=0 tokens=128 total_ms=149.163 in_proj_ms=118.738 split_extract_ms=0.013 conv1d_silu_ms=0.023 ssd_scan_ms=12.851 gated_rmsnorm_ms=0.018 out_proj_ms=17.519
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=0 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=151.779
+[PREFILL-LIVENESS] layer_end chunk=0 layer=0 layer_type=mamba2 tokens=128 layer_ms=151.838 sync_ms=0.060
+[PREFILL-LIVENESS] layer_start chunk=0 layer=1 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=1 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=1 tokens=128 elapsed_ms=319.342
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=1 layer_type=pass tokens=128 elapsed_before_sync_ms=319.550
+[PREFILL-LIVENESS] layer_end chunk=0 layer=1 layer_type=pass tokens=128 layer_ms=319.609 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=2 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=2 tokens=128 total_ms=13.004 in_proj_ms=0.098 split_extract_ms=0.012 conv1d_silu_ms=0.023 ssd_scan_ms=12.815 gated_rmsnorm_ms=0.014 out_proj_ms=0.041
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=2 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.281
+[PREFILL-LIVENESS] layer_end chunk=0 layer=2 layer_type=mamba2 tokens=128 layer_ms=13.339 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=3 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=3 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=3 tokens=128 elapsed_ms=2.230
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=3 layer_type=pass tokens=128 elapsed_before_sync_ms=2.389
+[PREFILL-LIVENESS] layer_end chunk=0 layer=3 layer_type=pass tokens=128 layer_ms=2.447 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=4 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=4 tokens=128 total_ms=12.964 in_proj_ms=0.060 split_extract_ms=0.010 conv1d_silu_ms=0.020 ssd_scan_ms=12.822 gated_rmsnorm_ms=0.015 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=4 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.223
+[PREFILL-LIVENESS] layer_end chunk=0 layer=4 layer_type=mamba2 tokens=128 layer_ms=13.282 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=5 layer_type=gqa tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=5 layer_type=gqa tokens=128 elapsed_before_sync_ms=8.531
+[PREFILL-LIVENESS] layer_end chunk=0 layer=5 layer_type=gqa tokens=128 layer_ms=8.595 sync_ms=0.064
+[PREFILL-LIVENESS] layer_start chunk=0 layer=6 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=6 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=6 tokens=128 elapsed_ms=2.936
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=6 layer_type=pass tokens=128 elapsed_before_sync_ms=3.100
+[PREFILL-LIVENESS] layer_end chunk=0 layer=6 layer_type=pass tokens=128 layer_ms=3.158 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=7 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=7 tokens=128 total_ms=12.944 in_proj_ms=0.061 split_extract_ms=0.010 conv1d_silu_ms=0.021 ssd_scan_ms=12.800 gated_rmsnorm_ms=0.014 out_proj_ms=0.038
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=7 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.200
+[PREFILL-LIVENESS] layer_end chunk=0 layer=7 layer_type=mamba2 tokens=128 layer_ms=13.258 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=8 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=8 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=8 tokens=128 elapsed_ms=3.816
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=8 layer_type=pass tokens=128 elapsed_before_sync_ms=3.977
+[PREFILL-LIVENESS] layer_end chunk=0 layer=8 layer_type=pass tokens=128 layer_ms=4.035 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=9 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=9 tokens=128 total_ms=12.979 in_proj_ms=0.063 split_extract_ms=0.010 conv1d_silu_ms=0.021 ssd_scan_ms=12.834 gated_rmsnorm_ms=0.013 out_proj_ms=0.037
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=9 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.234
+[PREFILL-LIVENESS] layer_end chunk=0 layer=9 layer_type=mamba2 tokens=128 layer_ms=13.297 sync_ms=0.063
+[PREFILL-LIVENESS] layer_start chunk=0 layer=10 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=10 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=10 tokens=128 elapsed_ms=3.624
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=10 layer_type=pass tokens=128 elapsed_before_sync_ms=3.783
+[PREFILL-LIVENESS] layer_end chunk=0 layer=10 layer_type=pass tokens=128 layer_ms=3.841 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=11 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=11 tokens=128 total_ms=12.887 in_proj_ms=0.063 split_extract_ms=0.010 conv1d_silu_ms=0.021 ssd_scan_ms=12.744 gated_rmsnorm_ms=0.013 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=11 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.154
+[PREFILL-LIVENESS] layer_end chunk=0 layer=11 layer_type=mamba2 tokens=128 layer_ms=13.212 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=12 layer_type=gqa tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=12 layer_type=gqa tokens=128 elapsed_before_sync_ms=0.529
+[PREFILL-LIVENESS] layer_end chunk=0 layer=12 layer_type=gqa tokens=128 layer_ms=0.586 sync_ms=0.057
+[PREFILL-LIVENESS] layer_start chunk=0 layer=13 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=13 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=13 tokens=128 elapsed_ms=3.406
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=13 layer_type=pass tokens=128 elapsed_before_sync_ms=3.571
+[PREFILL-LIVENESS] layer_end chunk=0 layer=13 layer_type=pass tokens=128 layer_ms=3.629 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=14 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=14 tokens=128 total_ms=12.892 in_proj_ms=0.060 split_extract_ms=0.011 conv1d_silu_ms=0.020 ssd_scan_ms=12.750 gated_rmsnorm_ms=0.013 out_proj_ms=0.038
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=14 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.149
+[PREFILL-LIVENESS] layer_end chunk=0 layer=14 layer_type=mamba2 tokens=128 layer_ms=13.207 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=15 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=15 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=15 tokens=128 elapsed_ms=2.936
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=15 layer_type=pass tokens=128 elapsed_before_sync_ms=3.098
+[PREFILL-LIVENESS] layer_end chunk=0 layer=15 layer_type=pass tokens=128 layer_ms=3.156 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=16 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=16 tokens=128 total_ms=12.891 in_proj_ms=0.061 split_extract_ms=0.010 conv1d_silu_ms=0.021 ssd_scan_ms=12.750 gated_rmsnorm_ms=0.012 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=16 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.146
+[PREFILL-LIVENESS] layer_end chunk=0 layer=16 layer_type=mamba2 tokens=128 layer_ms=13.212 sync_ms=0.066
+[PREFILL-LIVENESS] layer_start chunk=0 layer=17 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=17 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=17 tokens=128 elapsed_ms=3.254
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=17 layer_type=pass tokens=128 elapsed_before_sync_ms=3.412
+[PREFILL-LIVENESS] layer_end chunk=0 layer=17 layer_type=pass tokens=128 layer_ms=3.470 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=18 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=18 tokens=128 total_ms=12.884 in_proj_ms=0.059 split_extract_ms=0.010 conv1d_silu_ms=0.022 ssd_scan_ms=12.742 gated_rmsnorm_ms=0.013 out_proj_ms=0.037
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=18 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.149
+[PREFILL-LIVENESS] layer_end chunk=0 layer=18 layer_type=mamba2 tokens=128 layer_ms=13.207 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=19 layer_type=gqa tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=19 layer_type=gqa tokens=128 elapsed_before_sync_ms=0.525
+[PREFILL-LIVENESS] layer_end chunk=0 layer=19 layer_type=gqa tokens=128 layer_ms=0.583 sync_ms=0.057
+[PREFILL-LIVENESS] layer_start chunk=0 layer=20 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=20 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=20 tokens=128 elapsed_ms=3.681
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=20 layer_type=pass tokens=128 elapsed_before_sync_ms=3.839
+[PREFILL-LIVENESS] layer_end chunk=0 layer=20 layer_type=pass tokens=128 layer_ms=3.897 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=21 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=21 tokens=128 total_ms=12.892 in_proj_ms=0.059 split_extract_ms=0.010 conv1d_silu_ms=0.021 ssd_scan_ms=12.751 gated_rmsnorm_ms=0.013 out_proj_ms=0.037
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=21 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.151
+[PREFILL-LIVENESS] layer_end chunk=0 layer=21 layer_type=mamba2 tokens=128 layer_ms=13.209 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=22 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=22 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=22 tokens=128 elapsed_ms=3.120
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=22 layer_type=pass tokens=128 elapsed_before_sync_ms=3.276
+[PREFILL-LIVENESS] layer_end chunk=0 layer=22 layer_type=pass tokens=128 layer_ms=3.334 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=23 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=23 tokens=128 total_ms=12.892 in_proj_ms=0.059 split_extract_ms=0.011 conv1d_silu_ms=0.021 ssd_scan_ms=12.752 gated_rmsnorm_ms=0.013 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=23 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.145
+[PREFILL-LIVENESS] layer_end chunk=0 layer=23 layer_type=mamba2 tokens=128 layer_ms=13.204 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=24 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=24 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=24 tokens=128 elapsed_ms=4.919
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=24 layer_type=pass tokens=128 elapsed_before_sync_ms=5.091
+[PREFILL-LIVENESS] layer_end chunk=0 layer=24 layer_type=pass tokens=128 layer_ms=5.169 sync_ms=0.078
+[PREFILL-LIVENESS] layer_start chunk=0 layer=25 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=25 tokens=128 total_ms=12.894 in_proj_ms=0.061 split_extract_ms=0.010 conv1d_silu_ms=0.021 ssd_scan_ms=12.754 gated_rmsnorm_ms=0.012 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=25 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.148
+[PREFILL-LIVENESS] layer_end chunk=0 layer=25 layer_type=mamba2 tokens=128 layer_ms=13.206 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=26 layer_type=gqa tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=26 layer_type=gqa tokens=128 elapsed_before_sync_ms=0.529
+[PREFILL-LIVENESS] layer_end chunk=0 layer=26 layer_type=gqa tokens=128 layer_ms=0.594 sync_ms=0.065
+[PREFILL-LIVENESS] layer_start chunk=0 layer=27 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=27 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=27 tokens=128 elapsed_ms=6.062
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=27 layer_type=pass tokens=128 elapsed_before_sync_ms=6.221
+[PREFILL-LIVENESS] layer_end chunk=0 layer=27 layer_type=pass tokens=128 layer_ms=6.279 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=28 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=28 tokens=128 total_ms=12.890 in_proj_ms=0.061 split_extract_ms=0.010 conv1d_silu_ms=0.022 ssd_scan_ms=12.746 gated_rmsnorm_ms=0.012 out_proj_ms=0.037
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=28 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.144
+[PREFILL-LIVENESS] layer_end chunk=0 layer=28 layer_type=mamba2 tokens=128 layer_ms=13.202 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=29 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=29 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=29 tokens=128 elapsed_ms=6.504
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=29 layer_type=pass tokens=128 elapsed_before_sync_ms=6.663
+[PREFILL-LIVENESS] layer_end chunk=0 layer=29 layer_type=pass tokens=128 layer_ms=6.721 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=30 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=30 tokens=128 total_ms=12.898 in_proj_ms=0.061 split_extract_ms=0.011 conv1d_silu_ms=0.021 ssd_scan_ms=12.755 gated_rmsnorm_ms=0.013 out_proj_ms=0.038
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=30 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.154
+[PREFILL-LIVENESS] layer_end chunk=0 layer=30 layer_type=mamba2 tokens=128 layer_ms=13.212 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=31 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=31 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=31 tokens=128 elapsed_ms=7.771
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=31 layer_type=pass tokens=128 elapsed_before_sync_ms=7.929
+[PREFILL-LIVENESS] layer_end chunk=0 layer=31 layer_type=pass tokens=128 layer_ms=7.987 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=32 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=32 tokens=128 total_ms=12.886 in_proj_ms=0.063 split_extract_ms=0.010 conv1d_silu_ms=0.022 ssd_scan_ms=12.742 gated_rmsnorm_ms=0.013 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=32 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.151
+[PREFILL-LIVENESS] layer_end chunk=0 layer=32 layer_type=mamba2 tokens=128 layer_ms=13.215 sync_ms=0.064
+[PREFILL-LIVENESS] layer_start chunk=0 layer=33 layer_type=gqa tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=33 layer_type=gqa tokens=128 elapsed_before_sync_ms=0.524
+[PREFILL-LIVENESS] layer_end chunk=0 layer=33 layer_type=gqa tokens=128 layer_ms=0.582 sync_ms=0.057
+[PREFILL-LIVENESS] layer_start chunk=0 layer=34 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=34 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=34 tokens=128 elapsed_ms=6.690
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=34 layer_type=pass tokens=128 elapsed_before_sync_ms=6.847
+[PREFILL-LIVENESS] layer_end chunk=0 layer=34 layer_type=pass tokens=128 layer_ms=6.905 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=35 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=35 tokens=128 total_ms=12.886 in_proj_ms=0.059 split_extract_ms=0.010 conv1d_silu_ms=0.021 ssd_scan_ms=12.746 gated_rmsnorm_ms=0.013 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=35 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.138
+[PREFILL-LIVENESS] layer_end chunk=0 layer=35 layer_type=mamba2 tokens=128 layer_ms=13.196 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=36 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=36 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=36 tokens=128 elapsed_ms=5.023
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=36 layer_type=pass tokens=128 elapsed_before_sync_ms=5.182
+[PREFILL-LIVENESS] layer_end chunk=0 layer=36 layer_type=pass tokens=128 layer_ms=5.240 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=37 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=37 tokens=128 total_ms=12.888 in_proj_ms=0.059 split_extract_ms=0.010 conv1d_silu_ms=0.020 ssd_scan_ms=12.747 gated_rmsnorm_ms=0.014 out_proj_ms=0.037
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=37 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.142
+[PREFILL-LIVENESS] layer_end chunk=0 layer=37 layer_type=mamba2 tokens=128 layer_ms=13.200 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=38 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=38 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=38 tokens=128 elapsed_ms=5.421
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=38 layer_type=pass tokens=128 elapsed_before_sync_ms=5.577
+[PREFILL-LIVENESS] layer_end chunk=0 layer=38 layer_type=pass tokens=128 layer_ms=5.635 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=39 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=39 tokens=128 total_ms=12.892 in_proj_ms=0.060 split_extract_ms=0.011 conv1d_silu_ms=0.021 ssd_scan_ms=12.753 gated_rmsnorm_ms=0.013 out_proj_ms=0.035
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=39 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.146
+[PREFILL-LIVENESS] layer_end chunk=0 layer=39 layer_type=mamba2 tokens=128 layer_ms=13.204 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=40 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=40 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=40 tokens=128 elapsed_ms=2.938
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=40 layer_type=pass tokens=128 elapsed_before_sync_ms=3.093
+[PREFILL-LIVENESS] layer_end chunk=0 layer=40 layer_type=pass tokens=128 layer_ms=3.151 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=41 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=41 tokens=128 total_ms=12.899 in_proj_ms=0.061 split_extract_ms=0.011 conv1d_silu_ms=0.023 ssd_scan_ms=12.755 gated_rmsnorm_ms=0.013 out_proj_ms=0.037
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=41 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.153
+[PREFILL-LIVENESS] layer_end chunk=0 layer=41 layer_type=mamba2 tokens=128 layer_ms=13.218 sync_ms=0.065
+[PREFILL-LIVENESS] layer_start chunk=0 layer=42 layer_type=gqa tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=42 layer_type=gqa tokens=128 elapsed_before_sync_ms=0.516
+[PREFILL-LIVENESS] layer_end chunk=0 layer=42 layer_type=gqa tokens=128 layer_ms=0.573 sync_ms=0.057
+[PREFILL-LIVENESS] layer_start chunk=0 layer=43 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=43 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=43 tokens=128 elapsed_ms=3.001
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=43 layer_type=pass tokens=128 elapsed_before_sync_ms=3.158
+[PREFILL-LIVENESS] layer_end chunk=0 layer=43 layer_type=pass tokens=128 layer_ms=3.216 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=44 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=44 tokens=128 total_ms=12.896 in_proj_ms=0.061 split_extract_ms=0.010 conv1d_silu_ms=0.021 ssd_scan_ms=12.753 gated_rmsnorm_ms=0.014 out_proj_ms=0.037
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=44 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.150
+[PREFILL-LIVENESS] layer_end chunk=0 layer=44 layer_type=mamba2 tokens=128 layer_ms=13.208 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=45 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=45 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=45 tokens=128 elapsed_ms=3.415
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=45 layer_type=pass tokens=128 elapsed_before_sync_ms=3.571
+[PREFILL-LIVENESS] layer_end chunk=0 layer=45 layer_type=pass tokens=128 layer_ms=3.629 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=46 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=46 tokens=128 total_ms=12.885 in_proj_ms=0.059 split_extract_ms=0.011 conv1d_silu_ms=0.020 ssd_scan_ms=12.746 gated_rmsnorm_ms=0.013 out_proj_ms=0.037
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=46 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.139
+[PREFILL-LIVENESS] layer_end chunk=0 layer=46 layer_type=mamba2 tokens=128 layer_ms=13.197 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=47 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=47 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=47 tokens=128 elapsed_ms=2.696
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=47 layer_type=pass tokens=128 elapsed_before_sync_ms=2.852
+[PREFILL-LIVENESS] layer_end chunk=0 layer=47 layer_type=pass tokens=128 layer_ms=2.910 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=48 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=48 tokens=128 total_ms=12.891 in_proj_ms=0.059 split_extract_ms=0.011 conv1d_silu_ms=0.021 ssd_scan_ms=12.751 gated_rmsnorm_ms=0.013 out_proj_ms=0.037
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=48 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.156
+[PREFILL-LIVENESS] layer_end chunk=0 layer=48 layer_type=mamba2 tokens=128 layer_ms=13.214 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=49 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=49 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=49 tokens=128 elapsed_ms=2.515
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=49 layer_type=pass tokens=128 elapsed_before_sync_ms=2.672
+[PREFILL-LIVENESS] layer_end chunk=0 layer=49 layer_type=pass tokens=128 layer_ms=2.730 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=50 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=50 tokens=128 total_ms=12.894 in_proj_ms=0.059 split_extract_ms=0.010 conv1d_silu_ms=0.021 ssd_scan_ms=12.753 gated_rmsnorm_ms=0.013 out_proj_ms=0.037
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=50 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.147
+[PREFILL-LIVENESS] layer_end chunk=0 layer=50 layer_type=mamba2 tokens=128 layer_ms=13.205 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=51 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=51 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=51 tokens=128 elapsed_ms=2.892
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=51 layer_type=pass tokens=128 elapsed_before_sync_ms=3.050
+[PREFILL-LIVENESS] layer_end chunk=0 layer=51 layer_type=pass tokens=128 layer_ms=3.108 sync_ms=0.058
+[PREFILL-LIVENESS] chunk_end chunk=0 tokens=128 elapsed_ms=871.580
+[PREFILL-TIMING] 128 tokens, 888.7ms total (144 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        1.1ms (  0.1%)
+[PREFILL-TIMING]   attn:      449.8ms ( 50.6%)  [gqa: 10.6ms, la: 0.0ms]
+[PREFILL-TIMING]     gqa breakdown (6 FA2 calls: 6 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:         1.9ms ( 18.1% of gqa)
+[PREFILL-TIMING]       qknorm:       0.0ms (  0.4% of gqa)
+[PREFILL-TIMING]       rope:         0.1ms (  1.0% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.0ms (  0.5% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.0ms over 6 calls
+[PREFILL-TIMING]       fa2         7.9ms ( 74.3% of gqa)  [1.3ms/call avg]
+[PREFILL-TIMING]       gate:         0.0ms (  0.0% of gqa)
+[PREFILL-TIMING]       o_proj:       0.6ms (  5.4% of gqa)
+[PREFILL-TIMING]     gqa queue events:
+[PREFILL-TIMING]         proj         event=     1.9ms wall=     1.9ms wall_minus_event=     0.0ms sync=     0.0ms over 6 calls
+[PREFILL-TIMING]         qkv_norm     event=     0.0ms wall=     0.0ms wall_minus_event=     0.0ms sync=     0.0ms over 6 calls
+[PREFILL-TIMING]         rope         event=     0.1ms wall=     0.1ms wall_minus_event=     0.0ms sync=     0.1ms over 6 calls
+[PREFILL-TIMING]         fa2          event=     7.8ms wall=     7.9ms wall_minus_event=     0.0ms sync=     0.1ms over 6 calls
+[PREFILL-TIMING]         kv_append    event=     0.0ms wall=     0.0ms wall_minus_event=     0.0ms sync=     0.0ms over 0 calls
+[PREFILL-TIMING]         o_proj       event=     0.5ms wall=     0.6ms wall_minus_event=     0.0ms sync=     0.0ms over 6 calls
+[PREFILL-TIMING]     hqq projection internals:
+[PREFILL-TIMING]       marlin_float_zp:      1.4ms over 24 calls
+[PREFILL-TIMING]       group_sums:           0.2ms over 24 calls
+[PREFILL-TIMING]       correction_gemm:      0.5ms over 24 calls
+[PREFILL-TIMING]       correction_add:       0.2ms over 24 calls
+[PREFILL-TIMING]     mamba2 breakdown (diagnostic sync-isolated): wall=   433.1ms ( 48.7% of prefill,  96.3% of mixer) event=   432.5ms sync=   295.6ms
+[PREFILL-TIMING]       in_proj          wall=   120.1ms event=   120.0ms sync=     1.0ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]       split_extract    wall=     0.2ms event=     0.2ms sync=     0.1ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]       conv1d_silu      wall=     0.5ms event=     0.4ms sync=     0.3ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]       ssd_scan         wall=   293.6ms event=   293.5ms sync=   293.5ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]       gated_rmsnorm    wall=     0.3ms event=     0.2ms sync=     0.2ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]       out_proj         wall=    18.3ms event=    18.2ms sync=     0.4ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]   moe:       409.5ms ( 46.1%)
+[PREFILL-TIMING]     moe breakdown (48 layers):
+[PREFILL-TIMING]       gate:        49.1ms ( 12.0% of moe)
+[PREFILL-TIMING]       dma:         79.5ms ( 19.4% of moe)
+[PREFILL-TIMING]         route_d2h:     0.5ms ptr_alloc:     0.3ms ptr_build:     0.0ms
+[PREFILL-TIMING]         cold_h2d:      3.4ms ptr_upload:     0.2ms dma_wait:    70.5ms
+[PREFILL-TIMING]       w1+act:     273.8ms ( 66.9% of moe)
+[PREFILL-TIMING]       w2:           3.7ms (  0.9% of moe)
+[PREFILL-TIMING]       scatter:      0.3ms (  0.1% of moe)
+[PREFILL-TIMING]       shared:       0.3ms (  0.1% of moe)
+[PREFILL-TIMING]   other:      28.3ms (  3.2%)
+  [32mRust prefill warmed with 128 tokens before HCS budgeting[0m
+  [32mWarmup complete in 1.0s[0m
+  [2mcuda:0 warmup:  peak 8,762 MB used / 32,119 MB total  (min free: 23,356 MB)[0m
+
+[1m[36m▸ VRAM calibration[0m
+  [32mSafety margin: 600 MB[0m
+  [32mFree VRAM after startup: 23,716 MB / 32,119 MB[0m
+  [32mStartup diag: calibration tokens short=128 (default 500), long=128 (default 39,920), cap=49,900, forced_long=True[0m
+  [32mShort calibration: probing 128 prompt tokens + 32 decode tokens[0m
+[PREFILL-LIVENESS] run_start total_tokens=128 scratch_max_tokens=128 max_chunk=128 chunk_size=128 num_chunks=1 chunk_plan=[128] expert_bits=4 shared_expert_bits=4 hidden_size=2688 layers=52
+[PREFILL-LIVENESS] chunk_start chunk=0 total_chunks=1 start=0 end=128 tokens=128 tok0=10 last_pos=127 last_tok=1010
+[PREFILL-LIVENESS] chunk_after_hcs_guard chunk=0 tokens=128 elapsed_ms=0.082
+[PREFILL-LIVENESS] layer_start chunk=0 layer=0 layer_type=mamba2 tokens=128 has_residual=false moe_gate=false shared_bf16=false shared_marlin=false
+[MAMBA2-SSD-LOCAL-TRI-ORACLE] {"available":true,"components":{"D":0.44140625,"c_state_total":0.01690692827105522,"cpu_matches_sequential_gpu_bits":true,"cpu_y_bf16_bits":"0x3d04","cpu_y_bf16_value":0.0322265625,"d_x":0.015625953674316406,"local_hf_chunk_scan_bf16_coeff":0.07652278244495392,"local_hf_chunk_scan_fp32_coeff":0.07649809867143631,"local_old_state":0.07690715044736862,"prior_chunk_state":-0.0600002221763134,"sequential_gpu_y_bf16_bits":"0x3d04","sequential_gpu_y_bf16_value":0.0322265625,"x_target":0.035400390625,"x_target_bits":"0x3d11","y_pre_bf16":0.032148513942956924},"diagnostic":"mamba2_ssd_local_triangular_oracle","dimensions":{"chunk_pos":18,"chunk_start":64,"d_inner":4096,"effective_chunk_size":64,"head_dim":64,"heads_per_group":8,"inside_chunk_zero":false,"m":128,"n_groups":8,"n_heads":64,"requested_chunk_size":64,"state_size":128},"interpretation":"CPU local-triangular recompute matches the existing sequential GPU oracle at the target coordinate; corrected chunk candidate must reproduce these exact terms before optimizing.","layer":0,"local_triangular_terms":[{"accum_bf16_coeff_after":0.0071277618408203125,"accum_fp32_coeff_after":0.00713772140443325,"cb_forward":-0.0853070616722107,"cb_forward_minus_reverse":-5.960464477539063e-8,"cb_reverse":-0.08530700206756592,"cb_scaled_bf16":-0.39453125,"cb_scaled_bf16_bits":"0xbeca","cb_scaled_pre_bf16":-0.3950825333595276,"chunk_position":0,"dA_after":-0.6334859728813171,"dA_before":-0.6229221820831299,"dA_increment":-0.01056378148496151,"dA_target":-0.7690738439559937,"decay":0.8732024431228638,"decay_arg":-0.1355878710746765,"dt_after_softplus":5.3038129806518555,"dt_plus_bias":5.298828125,"dt_times_x":-0.0958208367228508,"included_by_lower_triangle":true,"raw_dt":0.486328125,"raw_dt_bits":"0x3ef9","scale_decay_times_dt":4.631302356719971,"self_sample":false,"term_bf16_coeff_times_x":0.0071277618408203125,"term_fp32_coeff_times_x":0.00713772140443325,"top_state_contrib":-0.149505615234375,"top_state_index":100,"u":64,"x":-0.01806640625,"x_bits":"0xbc94"},{"accum_bf16_coeff_after":0.010866165161132812,"accum_fp32_coeff_after":0.01086745411157608,"cb_forward":0.027578726410865784,"cb_forward_minus_reverse":-2.2351741790771484e-8,"cb_reverse":0.027578748762607574,"cb_scaled_bf16":0.3125,"cb_scaled_bf16_bits":"0x3ea0","cb_scaled_pre_bf16":0.31177520751953125,"chunk_position":1,"dA_after":-0.6586316227912903,"dA_before":-0.6334859728813171,"dA_increment":-0.0251456405967474,"dA_target":-0.7690738439559937,"decay":0.8954380750656128,"decay_arg":-0.11044222116470337,"dt_after_softplus":12.62500286102295,"dt_plus_bias":12.625,"dt_times_x":0.1510315239429474,"included_by_lower_triangle":true,"raw_dt":7.8125,"raw_dt_bits":"0x40fa","scale_decay_times_dt":11.30490779876709,"self_sample":false,"term_bf16_coeff_times_x":0.0037384033203125,"term_fp32_coeff_times_x":0.00372973270714283,"top_state_contrib":-0.149505615234375,"top_state_index":100,"u":65,"x":0.011962890625,"x_bits":"0x3c44"},{"accum_bf16_coeff_after":0.009695112705230713,"accum_fp32_coeff_after":0.009697673842310905,"cb_forward":0.06819038093090057,"cb_forward_minus_reverse":-7.450580596923828e-9,"cb_reverse":0.06819038838148117,"cb_scaled_bf16":0.1728515625,"cb_scaled_bf16_bits":"0x3e31","cb_scaled_pre_bf16":0.1726638376712799,"chunk_position":2,"dA_after":-0.6642323136329651,"dA_before":-0.6586316227912903,"dA_increment":-0.00560068991035223,"dA_target":-0.7690738439559937,"decay":0.9004672169685364,"decay_arg":-0.10484153032302856,"dt_after_softplus":2.811967611312866,"dt_plus_bias":2.75,"dt_times_x":-0.019050806760787964,"included_by_lower_triangle":true,"raw_dt":-2.0625,"raw_dt_bits":"0xc004","scale_decay_times_dt":2.5320847034454346,"self_sample":false,"term_bf16_coeff_times_x":-0.0011710524559020996,"term_fp32_coeff_times_x":-0.0011697806185111403,"top_state_contrib":-0.149505615234375,"top_state_index":100,"u":66,"x":-0.00677490234375,"x_bits":"0xbbde"},{"accum_bf16_coeff_after":0.006882011890411377,"accum_fp32_coeff_after":0.006878163665533066,"cb_forward":0.293529748916626,"cb_forward_minus_reverse":-5.960464477539063e-8,"cb_reverse":0.29352980852127075,"cb_scaled_bf16":0.134765625,"cb_scaled_bf16_bits":"0x3e0a","cb_scaled_pre_bf16":0.13507266342639923,"chunk_position":3,"dA_after":-0.6652491092681885,"dA_before":-0.6642323136329651,"dA_increment":-0.0010168033186346292,"dA_target":-0.7690738439559937,"decay":0.9013832807540894,"decay_arg":-0.10382473468780518,"dt_after_softplus":0.5105117559432983,"dt_plus_bias":-0.40625,"dt_times_x":-0.01065643411129713,"included_by_lower_triangle":true,"raw_dt":-5.21875,"raw_dt_bits":"0xc0a7","scale_decay_times_dt":0.4601667523384094,"self_sample":false,"term_bf16_coeff_times_x":-0.002813100814819336,"term_fp32_coeff_times_x":-0.002819509943947196,"top_state_contrib":-0.149505615234375,"top_state_index":100,"u":67,"x":-0.0208740234375,"x_bits":"0xbcab"},{"accum_bf16_coeff_after":0.006897110491991043,"accum_fp32_coeff_after":0.006893254350870848,"cb_forward":0.05167003720998764,"cb_forward_minus_reverse":0.0,"cb_reverse":0.05167003720998764,"cb_scaled_bf16":0.0205078125,"cb_scaled_bf16_bits":"0x3ca8","cb_scaled_pre_bf16":0.02049708552658558,"chunk_position":4,"dA_after":-0.6661248803138733,"dA_before":-0.6652491092681885,"dA_increment":-0.0008757793693803251,"dA_target":-0.7690738439559937,"decay":0.9021730422973633,"decay_arg":-0.10294896364212036,"dt_after_softplus":0.4397071301937103,"dt_plus_bias":-0.59375,"dt_times_x":0.0003237284836359322,"included_by_lower_triangle":true,"raw_dt":-5.40625,"raw_dt_bits":"0xc0ad","scale_decay_times_dt":0.3966919183731079,"self_sample":false,"term_bf16_coeff_times_x":0.000015098601579666138,"term_fp32_coeff_times_x":0.000015090704437170643,"top_state_contrib":-0.149505615234375,"top_state_index":100,"u":68,"x":0.000736236572265625,"x_bits":"0x3a41"},{"accum_bf16_coeff_after":0.023455757647752762,"accum_fp32_coeff_after":0.023493517190217972,"cb_forward":0.1305534392595291,"cb_forward_minus_reverse":0.0,"cb_reverse":0.1305534392595291,"cb_scaled_bf16":0.7578125,"cb_scaled_bf16_bits":"0x3f42","cb_scaled_pre_bf16":0.7597170472145081,"chunk_position":5,"dA_after":-0.6788100600242615,"dA_before":-0.6661248803138733,"dA_increment":-0.012685157358646393,"dA_target":-0.7690738439559937,"decay":0.9136901497840881,"decay_arg":-0.09026378393173218,"dt_after_softplus":6.368903160095215,"dt_plus_bias":6.3671875,"dt_times_x":0.1391642689704895,"included_by_lower_triangle":true,"raw_dt":1.5546875,"raw_dt_bits":"0x3fc7","scale_decay_times_dt":5.819203853607178,"self_sample":false,"term_bf16_coeff_times_x":0.01655864715576172,"term_fp32_coeff_times_x":0.016600262373685837,"top_state_contrib":-0.149505615234375,"top_state_index":100,"u":69,"x":0.0218505859375,"x_bits":"0x3cb3"},{"accum_bf16_coeff_after":0.023683901876211166,"accum_fp32_coeff_after":0.02372121997177601,"cb_forward":-0.09994199872016907,"cb_forward_minus_reverse":0.0,"cb_reverse":-0.09994199872016907,"cb_scaled_bf16":-0.345703125,"cb_scaled_bf16_bits":"0xbeb1","cb_scaled_pre_bf16":-0.34503498673439026,"chunk_position":6,"dA_after":-0.6862797737121582,"dA_before":-0.6788100600242615,"dA_increment":-0.007469702512025833,"dA_target":-0.7690738439559937,"decay":0.9205406904220581,"decay_arg":-0.08279407024383545,"dt_after_softplus":3.750352621078491,"dt_plus_bias":3.7265625,"dt_times_x":-0.002475017448887229,"included_by_lower_triangle":true,"raw_dt":-1.0859375,"raw_dt_bits":"0xbf8b","scale_decay_times_dt":3.452352285385132,"self_sample":false,"term_bf16_coeff_times_x":0.00022814422845840454,"term_fp32_coeff_times_x":0.0002277032908750698,"top_state_contrib":-0.149505615234375,"top_state_index":100,"u":70,"x":-0.000659942626953125,"x_bits":"0xba2d"},{"accum_bf16_coeff_after":0.01728784665465355,"accum_fp32_coeff_after":0.01733679324388504,"cb_forward":0.11043854057788849,"cb_forward_minus_reverse":-1.4901161193847656e-8,"cb_reverse":0.11043855547904968,"cb_scaled_bf16":0.376953125,"cb_scaled_bf16_bits":"0x3ec1","cb_scaled_pre_bf16":0.37626782059669495,"chunk_position":7,"dA_after":-0.693597674369812,"dA_before":-0.6862797737121582,"dA_increment":-0.007317899726331234,"dA_target":-0.7690738439559937,"decay":0.927301824092865,"decay_arg":-0.07547616958618164,"dt_after_softplus":3.674136161804199,"dt_plus_bias":3.6484375,"dt_times_x":-0.06234190985560417,"included_by_lower_triangle":true,"raw_dt":-1.1640625,"raw_dt_bits":"0xbf95","scale_decay_times_dt":3.4070332050323486,"self_sample":false,"term_bf16_coeff_times_x":-0.006396055221557617,"term_fp32_coeff_times_x":-0.006384427193552256,"top_state_contrib":-0.149505615234375,"top_state_index":100,"u":71,"x":-0.0169677734375,"x_bits":"0xbc8b"},{"accum_bf16_coeff_after":0.01712065562605858,"accum_fp32_coeff_after":0.01716911606490612,"cb_forward":0.26350539922714233,"cb_forward_minus_reverse":-2.9802322387695312e-8,"cb_reverse":0.2635054290294647,"cb_scaled_bf16":0.08056640625,"cb_scaled_bf16_bits":"0x3da5","cb_scaled_pre_bf16":0.08080032467842102,"chunk_position":8,"dA_after":-0.6942558884620667,"dA_before":-0.693597674369812,"dA_increment":-0.0006581846391782165,"dA_target":-0.7690738439559937,"decay":0.9279124140739441,"decay_arg":-0.074817955493927,"dt_after_softplus":0.3304581940174103,"dt_plus_bias":-0.9375,"dt_times_x":-0.0006857652915641665,"included_by_lower_triangle":true,"raw_dt":-5.75,"raw_dt_bits":"0xc0b8","scale_decay_times_dt":0.3066362738609314,"self_sample":false,"term_bf16_coeff_times_x":-0.0001671910285949707,"term_fp32_coeff_times_x":-0.00016767645138315856,"top_state_contrib":-0.149505615234375,"top_state_index":100,"u":72,"x":-0.0020751953125,"x_bits":"0xbb08"},{"accum_bf16_coeff_after":0.013818319886922836,"accum_fp32_coeff_after":0.013863305561244488,"cb_forward":0.3094520568847656,"cb_forward_minus_reverse":-2.9802322387695312e-8,"cb_reverse":0.309452086687088,"cb_scaled_bf16":0.2373046875,"cb_scaled_bf16_bits":"0x3e73","cb_scaled_pre_bf16":0.2375543713569641,"chunk_position":9,"dA_after":-0.6959009170532227,"dA_before":-0.6942558884620667,"dA_increment":-0.0016450511757284403,"dA_target":-0.7690738439559937,"decay":0.9294400811195374,"decay_arg":-0.073172926902771,"dt_after_softplus":0.825939416885376,"dt_plus_bias":0.25,"dt_times_x":-0.011493786238133907,"included_by_lower_triangle":true,"raw_dt":-4.5625,"raw_dt_bits":"0xc092","scale_decay_times_dt":0.7676612138748169,"self_sample":false,"term_bf16_coeff_times_x":-0.003302335739135742,"term_fp32_coeff_times_x":-0.003305810270830989,"top_state_contrib":-0.149505615234375,"top_state_index":100,"u":73,"x":-0.013916015625,"x_bits":"0xbc64"},{"accum_bf16_coeff_after":0.0210835300385952,"accum_fp32_coeff_after":0.02111520804464817,"cb_forward":-0.04676322638988495,"cb_forward_minus_reverse":-1.862645149230957e-8,"cb_reverse":-0.046763207763433456,"cb_scaled_bf16":-0.2333984375,"cb_scaled_bf16_bits":"0xbe6f","cb_scaled_pre_bf16":-0.23297090828418732,"chunk_position":10,"dA_after":-0.7064647078514099,"dA_before":-0.6959009170532227,"dA_increment":-0.01056378148496151,"dA_target":-0.7690738439559937,"decay":0.9393105506896973,"decay_arg":-0.06260913610458374,"dt_after_softplus":5.3038129806518555,"dt_plus_bias":5.298828125,"dt_times_x":-0.165096715092659,"included_by_lower_triangle":true,"raw_dt":0.486328125,"raw_dt_bits":"0x3ef9","scale_decay_times_dt":4.981927394866943,"self_sample":false,"term_bf16_coeff_times_x":0.007265210151672363,"term_fp32_coeff_times_x":0.007251902017742395,"top_state_contrib":-0.149505615234375,"top_state_index":100,"u":74,"x":-0.0311279296875,"x_bits":"0xbcff"},{"accum_bf16_coeff_after":0.026206906884908676,"accum_fp32_coeff_after":0.026239469647407532,"cb_forward":0.0559014230966568,"cb_forward_minus_reverse":-1.4901161193847656e-8,"cb_reverse":0.05590143799781799,"cb_scaled_bf16":0.6796875,"cb_scaled_bf16_bits":"0x3f2e","cb_scaled_pre_bf16":0.6798048615455627,"chunk_position":11,"dA_after":-0.7316103577613831,"dA_before":-0.7064647078514099,"dA_increment":-0.0251456405967474,"dA_target":-0.7690738439559937,"decay":0.9632295966148376,"decay_arg":-0.037463486194610596,"dt_after_softplus":12.62500286102295,"dt_plus_bias":12.625,"dt_times_x":0.09516527503728867,"included_by_lower_triangle":true,"raw_dt":7.8125,"raw_dt_bits":"0x40fa","scale_decay_times_dt":12.160776138305664,"self_sample":false,"term_bf16_coeff_times_x":0.0051233768463134766,"term_fp32_coeff_times_x":0.005124261602759361,"top_state_contrib":-0.149505615234375,"top_state_index":100,"u":75,"x":0.007537841796875,"x_bits":"0x3bf7"},{"accum_bf16_coeff_after":0.024493690580129623,"accum_fp32_coeff_after":0.024529118090867996,"cb_forward":0.07194442301988602,"cb_forward_minus_reverse":3.725290298461914e-8,"cb_reverse":0.07194438576698303,"cb_scaled_bf16":0.1962890625,"cb_scaled_bf16_bits":"0x3e49","cb_scaled_pre_bf16":0.1959608793258667,"chunk_position":12,"dA_after":-0.7372110486030579,"dA_before":-0.7316103577613831,"dA_increment":-0.00560068991035223,"dA_target":-0.7690738439559937,"decay":0.9686394929885864,"decay_arg":-0.03186279535293579,"dt_after_softplus":2.811967611312866,"dt_plus_bias":2.75,"dt_times_x":-0.024542929604649544,"included_by_lower_triangle":true,"raw_dt":-2.0625,"raw_dt_bits":"0xc004","scale_decay_times_dt":2.723782777786255,"self_sample":false,"term_bf16_coeff_times_x":-0.0017132163047790527,"term_fp32_coeff_times_x":-0.001710351905785501,"top_state_contrib":-0.149505615234375,"top_state_index":100,"u":76,"x":-0.00872802734375,"x_bits":"0xbc0f"},{"accum_bf16_coeff_after":0.023161407560110092,"accum_fp32_coeff_after":0.02319585718214512,"cb_forward":0.3333631157875061,"cb_forward_minus_reverse":-5.960464477539063e-8,"cb_reverse":0.3333631753921509,"cb_scaled_bf16":0.0859375,"cb_scaled_bf16_bits":"0x3db0","cb_scaled_pre_bf16":0.08600061386823654,"chunk_position":13,"dA_after":-0.737741231918335,"dA_before":-0.7372110486030579,"dA_increment":-0.0005301792407408357,"dA_target":-0.7690738439559937,"decay":0.9691531658172607,"decay_arg":-0.03133261203765869,"dt_after_softplus":0.266189843416214,"dt_plus_bias":-1.1875,"dt_times_x":-0.0041267224587500095,"included_by_lower_triangle":true,"raw_dt":-6.0,"raw_dt_bits":"0xc0c0","scale_decay_times_dt":0.25797873735427856,"self_sample":false,"term_bf16_coeff_times_x":-0.0013322830200195312,"term_fp32_coeff_times_x":-0.0013332614907994866,"top_state_contrib":-0.149505615234375,"top_state_index":100,"u":77,"x":-0.0155029296875,"x_bits":"0xbc7e"},{"accum_bf16_coeff_after":0.023274611681699753,"accum_fp32_coeff_after":0.0233088880777359,"cb_forward":0.06115353852510452,"cb_forward_minus_reverse":-5.21540641784668e-8,"cb_reverse":0.0611535906791687,"cb_scaled_bf16":0.026123046875,"cb_scaled_bf16_bits":"0x3cd6","cb_scaled_pre_bf16":0.026083040982484818,"chunk_position":14,"dA_after":-0.7386170029640198,"dA_before":-0.737741231918335,"dA_increment":-0.0008757793693803251,"dA_target":-0.7690738439559937,"decay":0.970002293586731,"decay_arg":-0.030456840991973877,"dt_after_softplus":0.4397071301937103,"dt_plus_bias":-0.59375,"dt_times_x":0.0019054691074416041,"included_by_lower_triangle":true,"raw_dt":-5.40625,"raw_dt_bits":"0xc0ad","scale_decay_times_dt":0.42651692032814026,"self_sample":false,"term_bf16_coeff_times_x":0.00011320412158966064,"term_fp32_coeff_times_x":0.0001130307573475875,"top_state_contrib":-0.149505615234375,"top_state_index":100,"u":78,"x":0.00433349609375,"x_bits":"0x3b8e"},{"accum_bf16_coeff_after":0.04403991624712944,"accum_fp32_coeff_after":0.04407186061143875,"cb_forward":0.14233097434043884,"cb_forward_minus_reverse":-2.9802322387695312e-8,"cb_reverse":0.14233100414276123,"cb_scaled_bf16":0.890625,"cb_scaled_bf16_bits":"0x3f64","cb_scaled_pre_bf16":0.8905248641967773,"chunk_position":15,"dA_after":-0.751302182674408,"dA_before":-0.7386170029640198,"dA_increment":-0.012685157358646393,"dA_target":-0.7690738439559937,"decay":0.9823853373527527,"decay_arg":-0.017771661281585693,"dt_after_softplus":6.368903160095215,"dt_plus_bias":6.3671875,"dt_times_x":0.1484937071800232,"included_by_lower_triangle":true,"raw_dt":1.5546875,"raw_dt_bits":"0x3fc7","scale_decay_times_dt":6.256717205047607,"self_sample":false,"term_bf16_coeff_times_x":0.020765304565429688,"term_fp32_coeff_times_x":0.0207629706710577,"top_state_contrib":-0.149505615234375,"top_state_index":100,"u":79,"x":0.0233154296875,"x_bits":"0x3cbf"},{"accum_bf16_coeff_after":0.042552899569272995,"accum_fp32_coeff_after":0.042580489069223404,"cb_forward":-0.11211352050304413,"cb_forward_minus_reverse":4.470348358154297e-8,"cb_reverse":-0.11211356520652771,"cb_scaled_bf16":-0.30078125,"cb_scaled_bf16_bits":"0xbe9a","cb_scaled_pre_bf16":-0.30166181921958923,"chunk_position":16,"dA_after":-0.7567278742790222,"dA_before":-0.751302182674408,"dA_increment":-0.005425692535936832,"dA_target":-0.7690738439559937,"decay":0.9877299070358276,"decay_arg":-0.012345969676971436,"dt_after_softplus":2.7241058349609375,"dt_plus_bias":2.65625,"dt_times_x":0.01346756424754858,"included_by_lower_triangle":true,"raw_dt":-2.15625,"raw_dt_bits":"0xc00a","scale_decay_times_dt":2.690680742263794,"self_sample":false,"term_bf16_coeff_times_x":-0.0014870166778564453,"term_fp32_coeff_times_x":-0.0014913700288161635,"top_state_contrib":-0.149505615234375,"top_state_index":100,"u":80,"x":0.00494384765625,"x_bits":"0x3ba2"},{"accum_bf16_coeff_after":0.0671195536851883,"accum_fp32_coeff_after":0.06708940118551254,"cb_forward":0.2557319402694702,"cb_forward_minus_reverse":5.960464477539063e-8,"cb_reverse":0.25573188066482544,"cb_scaled_bf16":1.2578125,"cb_scaled_bf16_bits":"0x3fa1","cb_scaled_pre_bf16":1.2548563480377197,"chunk_position":17,"dA_after":-0.7665261030197144,"dA_before":-0.7567278742790222,"dA_increment":-0.009798211976885796,"dA_target":-0.7690738439559937,"decay":0.9974554777145386,"decay_arg":-0.002547740936279297,"dt_after_softplus":4.919439315795898,"dt_plus_bias":4.912109375,"dt_times_x":0.09608279913663864,"included_by_lower_triangle":true,"raw_dt":0.099609375,"raw_dt_bits":"0x3dcc","scale_decay_times_dt":4.906921863555908,"self_sample":false,"term_bf16_coeff_times_x":0.024566650390625,"term_fp32_coeff_times_x":0.02450891211628914,"top_state_contrib":-0.149505615234375,"top_state_index":100,"u":81,"x":0.01953125,"x_bits":"0x3ca0"},{"accum_bf16_coeff_after":0.07652278244495392,"accum_fp32_coeff_after":0.07649809867143631,"cb_forward":0.20776832103729248,"cb_forward_minus_reverse":0.0,"cb_reverse":0.20776832103729248,"cb_scaled_bf16":0.265625,"cb_scaled_bf16_bits":"0x3e88","cb_scaled_pre_bf16":0.2657794952392578,"chunk_position":18,"dA_after":-0.7690739631652832,"dA_before":-0.7665261030197144,"dA_increment":-0.002547847107052803,"dA_target":-0.7690738439559937,"decay":1.0,"decay_arg":0.0,"dt_after_softplus":1.2792109251022339,"dt_plus_bias":0.953125,"dt_times_x":0.045284565538167953,"included_by_lower_triangle":true,"raw_dt":-3.859375,"raw_dt_bits":"0xc077","scale_decay_times_dt":1.2792109251022339,"self_sample":true,"term_bf16_coeff_times_x":0.009403228759765625,"term_fp32_coeff_times_x":0.009408697485923767,"top_state_contrib":-0.149505615234375,"top_state_index":100,"u":82,"x":0.035400390625,"x_bits":"0x3d11"}],"prefix":{"a_log":-6.21875,"a_value_neg_exp":-0.001991733442991972,"dA_chunk_base":-0.6229221820831299,"dA_target":-0.7690738439559937,"dt_bias":4.8125,"local_dA_increments":[-0.01056378148496151,-0.0251456405967474,-0.00560068991035223,-0.0010168033186346292,-0.0008757793693803251,-0.012685157358646393,-0.007469702512025833,-0.007317899726331234,-0.0006581846391782165,-0.0016450511757284403,-0.01056378148496151,-0.0251456405967474,-0.00560068991035223,-0.0005301792407408357,-0.0008757793693803251,-0.012685157358646393,-0.005425692535936832,-0.009798211976885796,-0.002547847107052803],"local_dA_prefix_cumulative":[-0.6334859728813171,-0.6586316227912903,-0.6642323136329651,-0.6652491092681885,-0.6661248803138733,-0.6788100600242615,-0.6862797141075134,-0.6935976147651672,-0.6942558288574219,-0.6959008574485779,-0.7064646482467651,-0.7316102981567383,-0.7372109889984131,-0.7377411723136902,-0.738616943359375,-0.7513021230697632,-0.7567278146743774,-0.7665259838104248,-0.7690738439559937]},"target":{"dim_index":2398,"flat_index":338270,"group":4,"head":37,"head_dim_index":30,"row":82}}
+[PREFILL-LIVENESS] mamba2_substages layer=0 tokens=128 total_ms=13.052 in_proj_ms=0.103 split_extract_ms=0.011 conv1d_silu_ms=0.021 ssd_scan_ms=12.857 gated_rmsnorm_ms=0.017 out_proj_ms=0.043
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=0 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=15.520
+[PREFILL-LIVENESS] layer_end chunk=0 layer=0 layer_type=mamba2 tokens=128 layer_ms=15.588 sync_ms=0.068
+[PREFILL-LIVENESS] layer_start chunk=0 layer=1 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=1 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=1 tokens=128 elapsed_ms=28.532
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=1 layer_type=pass tokens=128 elapsed_before_sync_ms=28.695
+[PREFILL-LIVENESS] layer_end chunk=0 layer=1 layer_type=pass tokens=128 layer_ms=28.754 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=2 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=2 tokens=128 total_ms=13.008 in_proj_ms=0.062 split_extract_ms=0.011 conv1d_silu_ms=0.021 ssd_scan_ms=12.859 gated_rmsnorm_ms=0.014 out_proj_ms=0.041
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=2 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.269
+[PREFILL-LIVENESS] layer_end chunk=0 layer=2 layer_type=mamba2 tokens=128 layer_ms=13.328 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=3 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=3 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=3 tokens=128 elapsed_ms=25.445
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=3 layer_type=pass tokens=128 elapsed_before_sync_ms=25.603
+[PREFILL-LIVENESS] layer_end chunk=0 layer=3 layer_type=pass tokens=128 layer_ms=25.661 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=4 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=4 tokens=128 total_ms=12.939 in_proj_ms=0.060 split_extract_ms=0.010 conv1d_silu_ms=0.020 ssd_scan_ms=12.798 gated_rmsnorm_ms=0.013 out_proj_ms=0.037
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=4 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.194
+[PREFILL-LIVENESS] layer_end chunk=0 layer=4 layer_type=mamba2 tokens=128 layer_ms=13.252 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=5 layer_type=gqa tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=5 layer_type=gqa tokens=128 elapsed_before_sync_ms=0.560
+[PREFILL-LIVENESS] layer_end chunk=0 layer=5 layer_type=gqa tokens=128 layer_ms=0.623 sync_ms=0.063
+[PREFILL-LIVENESS] layer_start chunk=0 layer=6 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=6 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=6 tokens=128 elapsed_ms=24.546
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=6 layer_type=pass tokens=128 elapsed_before_sync_ms=24.703
+[PREFILL-LIVENESS] layer_end chunk=0 layer=6 layer_type=pass tokens=128 layer_ms=24.762 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=7 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=7 tokens=128 total_ms=12.972 in_proj_ms=0.058 split_extract_ms=0.010 conv1d_silu_ms=0.020 ssd_scan_ms=12.834 gated_rmsnorm_ms=0.013 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=7 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.231
+[PREFILL-LIVENESS] layer_end chunk=0 layer=7 layer_type=mamba2 tokens=128 layer_ms=13.289 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=8 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=8 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=8 tokens=128 elapsed_ms=25.456
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=8 layer_type=pass tokens=128 elapsed_before_sync_ms=25.615
+[PREFILL-LIVENESS] layer_end chunk=0 layer=8 layer_type=pass tokens=128 layer_ms=25.673 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=9 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=9 tokens=128 total_ms=13.004 in_proj_ms=0.059 split_extract_ms=0.010 conv1d_silu_ms=0.022 ssd_scan_ms=12.861 gated_rmsnorm_ms=0.013 out_proj_ms=0.037
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=9 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.259
+[PREFILL-LIVENESS] layer_end chunk=0 layer=9 layer_type=mamba2 tokens=128 layer_ms=13.317 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=10 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=10 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=10 tokens=128 elapsed_ms=23.928
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=10 layer_type=pass tokens=128 elapsed_before_sync_ms=24.085
+[PREFILL-LIVENESS] layer_end chunk=0 layer=10 layer_type=pass tokens=128 layer_ms=24.143 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=11 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=11 tokens=128 total_ms=12.893 in_proj_ms=0.060 split_extract_ms=0.010 conv1d_silu_ms=0.021 ssd_scan_ms=12.752 gated_rmsnorm_ms=0.013 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=11 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.157
+[PREFILL-LIVENESS] layer_end chunk=0 layer=11 layer_type=mamba2 tokens=128 layer_ms=13.215 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=12 layer_type=gqa tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=12 layer_type=gqa tokens=128 elapsed_before_sync_ms=0.521
+[PREFILL-LIVENESS] layer_end chunk=0 layer=12 layer_type=gqa tokens=128 layer_ms=0.578 sync_ms=0.057
+[PREFILL-LIVENESS] layer_start chunk=0 layer=13 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=13 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=13 tokens=128 elapsed_ms=22.866
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=13 layer_type=pass tokens=128 elapsed_before_sync_ms=23.022
+[PREFILL-LIVENESS] layer_end chunk=0 layer=13 layer_type=pass tokens=128 layer_ms=23.080 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=14 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=14 tokens=128 total_ms=12.897 in_proj_ms=0.059 split_extract_ms=0.010 conv1d_silu_ms=0.022 ssd_scan_ms=12.756 gated_rmsnorm_ms=0.013 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=14 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.151
+[PREFILL-LIVENESS] layer_end chunk=0 layer=14 layer_type=mamba2 tokens=128 layer_ms=13.209 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=15 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=15 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=15 tokens=128 elapsed_ms=22.689
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=15 layer_type=pass tokens=128 elapsed_before_sync_ms=22.845
+[PREFILL-LIVENESS] layer_end chunk=0 layer=15 layer_type=pass tokens=128 layer_ms=22.903 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=16 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=16 tokens=128 total_ms=12.882 in_proj_ms=0.059 split_extract_ms=0.010 conv1d_silu_ms=0.020 ssd_scan_ms=12.742 gated_rmsnorm_ms=0.013 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=16 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.144
+[PREFILL-LIVENESS] layer_end chunk=0 layer=16 layer_type=mamba2 tokens=128 layer_ms=13.203 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=17 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=17 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=17 tokens=128 elapsed_ms=22.461
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=17 layer_type=pass tokens=128 elapsed_before_sync_ms=22.617
+[PREFILL-LIVENESS] layer_end chunk=0 layer=17 layer_type=pass tokens=128 layer_ms=22.675 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=18 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=18 tokens=128 total_ms=12.884 in_proj_ms=0.059 split_extract_ms=0.011 conv1d_silu_ms=0.021 ssd_scan_ms=12.744 gated_rmsnorm_ms=0.013 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=18 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.137
+[PREFILL-LIVENESS] layer_end chunk=0 layer=18 layer_type=mamba2 tokens=128 layer_ms=13.196 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=19 layer_type=gqa tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=19 layer_type=gqa tokens=128 elapsed_before_sync_ms=0.528
+[PREFILL-LIVENESS] layer_end chunk=0 layer=19 layer_type=gqa tokens=128 layer_ms=0.585 sync_ms=0.057
+[PREFILL-LIVENESS] layer_start chunk=0 layer=20 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=20 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=20 tokens=128 elapsed_ms=21.255
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=20 layer_type=pass tokens=128 elapsed_before_sync_ms=21.421
+[PREFILL-LIVENESS] layer_end chunk=0 layer=20 layer_type=pass tokens=128 layer_ms=21.479 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=21 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=21 tokens=128 total_ms=12.865 in_proj_ms=0.058 split_extract_ms=0.010 conv1d_silu_ms=0.020 ssd_scan_ms=12.726 gated_rmsnorm_ms=0.013 out_proj_ms=0.037
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=21 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.117
+[PREFILL-LIVENESS] layer_end chunk=0 layer=21 layer_type=mamba2 tokens=128 layer_ms=13.175 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=22 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=22 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=22 tokens=128 elapsed_ms=21.339
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=22 layer_type=pass tokens=128 elapsed_before_sync_ms=21.495
+[PREFILL-LIVENESS] layer_end chunk=0 layer=22 layer_type=pass tokens=128 layer_ms=21.554 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=23 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=23 tokens=128 total_ms=12.882 in_proj_ms=0.060 split_extract_ms=0.010 conv1d_silu_ms=0.021 ssd_scan_ms=12.742 gated_rmsnorm_ms=0.011 out_proj_ms=0.037
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=23 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.134
+[PREFILL-LIVENESS] layer_end chunk=0 layer=23 layer_type=mamba2 tokens=128 layer_ms=13.193 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=24 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=24 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=24 tokens=128 elapsed_ms=20.251
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=24 layer_type=pass tokens=128 elapsed_before_sync_ms=20.407
+[PREFILL-LIVENESS] layer_end chunk=0 layer=24 layer_type=pass tokens=128 layer_ms=20.465 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=25 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=25 tokens=128 total_ms=12.881 in_proj_ms=0.059 split_extract_ms=0.011 conv1d_silu_ms=0.021 ssd_scan_ms=12.742 gated_rmsnorm_ms=0.012 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=25 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.133
+[PREFILL-LIVENESS] layer_end chunk=0 layer=25 layer_type=mamba2 tokens=128 layer_ms=13.191 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=26 layer_type=gqa tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=26 layer_type=gqa tokens=128 elapsed_before_sync_ms=0.518
+[PREFILL-LIVENESS] layer_end chunk=0 layer=26 layer_type=gqa tokens=128 layer_ms=0.581 sync_ms=0.063
+[PREFILL-LIVENESS] layer_start chunk=0 layer=27 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=27 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=27 tokens=128 elapsed_ms=16.492
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=27 layer_type=pass tokens=128 elapsed_before_sync_ms=16.649
+[PREFILL-LIVENESS] layer_end chunk=0 layer=27 layer_type=pass tokens=128 layer_ms=16.707 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=28 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=28 tokens=128 total_ms=12.874 in_proj_ms=0.059 split_extract_ms=0.011 conv1d_silu_ms=0.021 ssd_scan_ms=12.734 gated_rmsnorm_ms=0.013 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=28 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.132
+[PREFILL-LIVENESS] layer_end chunk=0 layer=28 layer_type=mamba2 tokens=128 layer_ms=13.190 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=29 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=29 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=29 tokens=128 elapsed_ms=15.679
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=29 layer_type=pass tokens=128 elapsed_before_sync_ms=15.835
+[PREFILL-LIVENESS] layer_end chunk=0 layer=29 layer_type=pass tokens=128 layer_ms=15.898 sync_ms=0.063
+[PREFILL-LIVENESS] layer_start chunk=0 layer=30 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=30 tokens=128 total_ms=12.874 in_proj_ms=0.057 split_extract_ms=0.010 conv1d_silu_ms=0.021 ssd_scan_ms=12.736 gated_rmsnorm_ms=0.014 out_proj_ms=0.035
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=30 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.128
+[PREFILL-LIVENESS] layer_end chunk=0 layer=30 layer_type=mamba2 tokens=128 layer_ms=13.186 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=31 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=31 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=31 tokens=128 elapsed_ms=18.616
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=31 layer_type=pass tokens=128 elapsed_before_sync_ms=18.775
+[PREFILL-LIVENESS] layer_end chunk=0 layer=31 layer_type=pass tokens=128 layer_ms=18.833 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=32 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=32 tokens=128 total_ms=12.884 in_proj_ms=0.062 split_extract_ms=0.010 conv1d_silu_ms=0.021 ssd_scan_ms=12.740 gated_rmsnorm_ms=0.013 out_proj_ms=0.037
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=32 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.139
+[PREFILL-LIVENESS] layer_end chunk=0 layer=32 layer_type=mamba2 tokens=128 layer_ms=13.197 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=33 layer_type=gqa tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=33 layer_type=gqa tokens=128 elapsed_before_sync_ms=0.529
+[PREFILL-LIVENESS] layer_end chunk=0 layer=33 layer_type=gqa tokens=128 layer_ms=0.586 sync_ms=0.057
+[PREFILL-LIVENESS] layer_start chunk=0 layer=34 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=34 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=34 tokens=128 elapsed_ms=15.472
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=34 layer_type=pass tokens=128 elapsed_before_sync_ms=15.629
+[PREFILL-LIVENESS] layer_end chunk=0 layer=34 layer_type=pass tokens=128 layer_ms=15.687 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=35 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=35 tokens=128 total_ms=12.877 in_proj_ms=0.058 split_extract_ms=0.011 conv1d_silu_ms=0.021 ssd_scan_ms=12.737 gated_rmsnorm_ms=0.013 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=35 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.157
+[PREFILL-LIVENESS] layer_end chunk=0 layer=35 layer_type=mamba2 tokens=128 layer_ms=13.215 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=36 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=36 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=36 tokens=128 elapsed_ms=8.142
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=36 layer_type=pass tokens=128 elapsed_before_sync_ms=8.299
+[PREFILL-LIVENESS] layer_end chunk=0 layer=36 layer_type=pass tokens=128 layer_ms=8.357 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=37 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=37 tokens=128 total_ms=12.894 in_proj_ms=0.061 split_extract_ms=0.010 conv1d_silu_ms=0.022 ssd_scan_ms=12.752 gated_rmsnorm_ms=0.013 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=37 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.147
+[PREFILL-LIVENESS] layer_end chunk=0 layer=37 layer_type=mamba2 tokens=128 layer_ms=13.205 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=38 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=38 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=38 tokens=128 elapsed_ms=7.766
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=38 layer_type=pass tokens=128 elapsed_before_sync_ms=7.947
+[PREFILL-LIVENESS] layer_end chunk=0 layer=38 layer_type=pass tokens=128 layer_ms=8.005 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=39 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=39 tokens=128 total_ms=12.876 in_proj_ms=0.059 split_extract_ms=0.010 conv1d_silu_ms=0.021 ssd_scan_ms=12.734 gated_rmsnorm_ms=0.013 out_proj_ms=0.037
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=39 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.129
+[PREFILL-LIVENESS] layer_end chunk=0 layer=39 layer_type=mamba2 tokens=128 layer_ms=13.187 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=40 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=40 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=40 tokens=128 elapsed_ms=5.455
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=40 layer_type=pass tokens=128 elapsed_before_sync_ms=5.612
+[PREFILL-LIVENESS] layer_end chunk=0 layer=40 layer_type=pass tokens=128 layer_ms=5.676 sync_ms=0.064
+[PREFILL-LIVENESS] layer_start chunk=0 layer=41 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=41 tokens=128 total_ms=12.874 in_proj_ms=0.061 split_extract_ms=0.010 conv1d_silu_ms=0.021 ssd_scan_ms=12.732 gated_rmsnorm_ms=0.013 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=41 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.126
+[PREFILL-LIVENESS] layer_end chunk=0 layer=41 layer_type=mamba2 tokens=128 layer_ms=13.185 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=42 layer_type=gqa tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=42 layer_type=gqa tokens=128 elapsed_before_sync_ms=0.516
+[PREFILL-LIVENESS] layer_end chunk=0 layer=42 layer_type=gqa tokens=128 layer_ms=0.573 sync_ms=0.057
+[PREFILL-LIVENESS] layer_start chunk=0 layer=43 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=43 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=43 tokens=128 elapsed_ms=5.030
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=43 layer_type=pass tokens=128 elapsed_before_sync_ms=5.194
+[PREFILL-LIVENESS] layer_end chunk=0 layer=43 layer_type=pass tokens=128 layer_ms=5.252 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=44 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=44 tokens=128 total_ms=12.882 in_proj_ms=0.061 split_extract_ms=0.010 conv1d_silu_ms=0.021 ssd_scan_ms=12.740 gated_rmsnorm_ms=0.013 out_proj_ms=0.037
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=44 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.136
+[PREFILL-LIVENESS] layer_end chunk=0 layer=44 layer_type=mamba2 tokens=128 layer_ms=13.194 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=45 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=45 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=45 tokens=128 elapsed_ms=5.007
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=45 layer_type=pass tokens=128 elapsed_before_sync_ms=5.164
+[PREFILL-LIVENESS] layer_end chunk=0 layer=45 layer_type=pass tokens=128 layer_ms=5.222 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=46 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=46 tokens=128 total_ms=12.870 in_proj_ms=0.058 split_extract_ms=0.010 conv1d_silu_ms=0.021 ssd_scan_ms=12.730 gated_rmsnorm_ms=0.013 out_proj_ms=0.037
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=46 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.130
+[PREFILL-LIVENESS] layer_end chunk=0 layer=46 layer_type=mamba2 tokens=128 layer_ms=13.189 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=47 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=47 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=47 tokens=128 elapsed_ms=3.957
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=47 layer_type=pass tokens=128 elapsed_before_sync_ms=4.134
+[PREFILL-LIVENESS] layer_end chunk=0 layer=47 layer_type=pass tokens=128 layer_ms=4.192 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=48 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=48 tokens=128 total_ms=12.840 in_proj_ms=0.061 split_extract_ms=0.010 conv1d_silu_ms=0.020 ssd_scan_ms=12.698 gated_rmsnorm_ms=0.014 out_proj_ms=0.037
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=48 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.094
+[PREFILL-LIVENESS] layer_end chunk=0 layer=48 layer_type=mamba2 tokens=128 layer_ms=13.152 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=49 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=49 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=49 tokens=128 elapsed_ms=3.547
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=49 layer_type=pass tokens=128 elapsed_before_sync_ms=3.703
+[PREFILL-LIVENESS] layer_end chunk=0 layer=49 layer_type=pass tokens=128 layer_ms=3.761 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=50 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=50 tokens=128 total_ms=12.835 in_proj_ms=0.058 split_extract_ms=0.009 conv1d_silu_ms=0.021 ssd_scan_ms=12.697 gated_rmsnorm_ms=0.013 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=50 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.097
+[PREFILL-LIVENESS] layer_end chunk=0 layer=50 layer_type=mamba2 tokens=128 layer_ms=13.156 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=51 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=51 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=51 tokens=128 elapsed_ms=3.325
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=51 layer_type=pass tokens=128 elapsed_before_sync_ms=3.480
+[PREFILL-LIVENESS] layer_end chunk=0 layer=51 layer_type=pass tokens=128 layer_ms=3.538 sync_ms=0.058
+[PREFILL-LIVENESS] chunk_end chunk=0 tokens=128 elapsed_ms=686.044
+[PREFILL-TIMING] 128 tokens, 687.0ms total (186 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        1.0ms (  0.2%)
+[PREFILL-TIMING]   attn:      305.3ms ( 44.4%)  [gqa: 2.6ms, la: 0.0ms]
+[PREFILL-TIMING]     gqa breakdown (6 FA2 calls: 6 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:         1.7ms ( 66.2% of gqa)
+[PREFILL-TIMING]       qknorm:       0.0ms (  1.4% of gqa)
+[PREFILL-TIMING]       rope:         0.1ms (  3.9% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.0ms (  1.8% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.0ms over 6 calls
+[PREFILL-TIMING]       fa2         0.1ms (  5.6% of gqa)  [0.0ms/call avg]
+[PREFILL-TIMING]       gate:         0.0ms (  0.1% of gqa)
+[PREFILL-TIMING]       o_proj:       0.5ms ( 20.0% of gqa)
+[PREFILL-TIMING]     gqa queue events:
+[PREFILL-TIMING]         proj         event=     1.7ms wall=     1.7ms wall_minus_event=     0.0ms sync=     0.0ms over 6 calls
+[PREFILL-TIMING]         qkv_norm     event=     0.0ms wall=     0.0ms wall_minus_event=     0.0ms sync=     0.0ms over 6 calls
+[PREFILL-TIMING]         rope         event=     0.1ms wall=     0.1ms wall_minus_event=     0.0ms sync=     0.1ms over 6 calls
+[PREFILL-TIMING]         fa2          event=     0.1ms wall=     0.1ms wall_minus_event=     0.0ms sync=     0.1ms over 6 calls
+[PREFILL-TIMING]         kv_append    event=     0.0ms wall=     0.0ms wall_minus_event=     0.0ms sync=     0.0ms over 0 calls
+[PREFILL-TIMING]         o_proj       event=     0.5ms wall=     0.5ms wall_minus_event=     0.0ms sync=     0.0ms over 6 calls
+[PREFILL-TIMING]     hqq projection internals:
+[PREFILL-TIMING]       marlin_float_zp:      1.3ms over 24 calls
+[PREFILL-TIMING]       group_sums:           0.2ms over 24 calls
+[PREFILL-TIMING]       correction_gemm:      0.4ms over 24 calls
+[PREFILL-TIMING]       correction_add:       0.2ms over 24 calls
+[PREFILL-TIMING]     mamba2 breakdown (diagnostic sync-isolated): wall=   296.7ms ( 43.2% of prefill,  97.2% of mixer) event=   296.2ms sync=   295.5ms
+[PREFILL-TIMING]       in_proj          wall=     1.4ms event=     1.3ms sync=     1.0ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]       split_extract    wall=     0.2ms event=     0.2ms sync=     0.1ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]       conv1d_silu      wall=     0.5ms event=     0.4ms sync=     0.3ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]       ssd_scan         wall=   293.4ms event=   293.4ms sync=   293.3ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]       gated_rmsnorm    wall=     0.3ms event=     0.2ms sync=     0.2ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]       out_proj         wall=     0.9ms event=     0.8ms sync=     0.5ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]   moe:       368.5ms ( 53.6%)
+[PREFILL-TIMING]     moe breakdown (48 layers):
+[PREFILL-TIMING]       gate:         1.3ms (  0.3% of moe)
+[PREFILL-TIMING]       dma:        341.9ms ( 92.8% of moe)
+[PREFILL-TIMING]         route_d2h:     0.4ms ptr_alloc:     0.3ms ptr_build:     0.1ms
+[PREFILL-TIMING]         cold_h2d:     14.7ms ptr_upload:     0.2ms dma_wait:   324.3ms
+[PREFILL-TIMING]       w1+act:      12.4ms (  3.4% of moe)
+[PREFILL-TIMING]       w2:           9.6ms (  2.6% of moe)
+[PREFILL-TIMING]       scatter:      0.3ms (  0.1% of moe)
+[PREFILL-TIMING]       shared:       0.3ms (  0.1% of moe)
+[PREFILL-TIMING]   other:      12.1ms (  1.8%)
+  [32mdecode: 32 tokens in 1.18s (27.0 tok/s)  VRAM: 23714 MB free now, 23714 MB min free during decode[0m
+  [32mShort calibration: baseline=23,716 MB, prefill post-alloc=23,548 MB, prefill min=22,940 MB, decode min=23,714 MB, post-cleanup=23,714 MB[0m
+  [32mShort calibration: prefill 0.85s (150.2 tok/s), decode 1.79s (17.9 tok/s)[0m
+  [32mLong calibration: probing 128 prompt tokens + 32 decode tokens[0m
+[PREFILL-LIVENESS] run_start total_tokens=128 scratch_max_tokens=128 max_chunk=128 chunk_size=128 num_chunks=1 chunk_plan=[128] expert_bits=4 shared_expert_bits=4 hidden_size=2688 layers=52
+[PREFILL-LIVENESS] chunk_start chunk=0 total_chunks=1 start=0 end=128 tokens=128 tok0=10 last_pos=127 last_tok=1010
+[PREFILL-LIVENESS] chunk_after_hcs_guard chunk=0 tokens=128 elapsed_ms=0.083
+[PREFILL-LIVENESS] layer_start chunk=0 layer=0 layer_type=mamba2 tokens=128 has_residual=false moe_gate=false shared_bf16=false shared_marlin=false
+[MAMBA2-SSD-LOCAL-TRI-ORACLE] {"available":true,"components":{"D":0.44140625,"c_state_total":0.01690692827105522,"cpu_matches_sequential_gpu_bits":true,"cpu_y_bf16_bits":"0x3d04","cpu_y_bf16_value":0.0322265625,"d_x":0.015625953674316406,"local_hf_chunk_scan_bf16_coeff":0.07652278244495392,"local_hf_chunk_scan_fp32_coeff":0.07649809867143631,"local_old_state":0.07690715044736862,"prior_chunk_state":-0.0600002221763134,"sequential_gpu_y_bf16_bits":"0x3d04","sequential_gpu_y_bf16_value":0.0322265625,"x_target":0.035400390625,"x_target_bits":"0x3d11","y_pre_bf16":0.032148513942956924},"diagnostic":"mamba2_ssd_local_triangular_oracle","dimensions":{"chunk_pos":18,"chunk_start":64,"d_inner":4096,"effective_chunk_size":64,"head_dim":64,"heads_per_group":8,"inside_chunk_zero":false,"m":128,"n_groups":8,"n_heads":64,"requested_chunk_size":64,"state_size":128},"interpretation":"CPU local-triangular recompute matches the existing sequential GPU oracle at the target coordinate; corrected chunk candidate must reproduce these exact terms before optimizing.","layer":0,"local_triangular_terms":[{"accum_bf16_coeff_after":0.0071277618408203125,"accum_fp32_coeff_after":0.00713772140443325,"cb_forward":-0.0853070616722107,"cb_forward_minus_reverse":-5.960464477539063e-8,"cb_reverse":-0.08530700206756592,"cb_scaled_bf16":-0.39453125,"cb_scaled_bf16_bits":"0xbeca","cb_scaled_pre_bf16":-0.3950825333595276,"chunk_position":0,"dA_after":-0.6334859728813171,"dA_before":-0.6229221820831299,"dA_increment":-0.01056378148496151,"dA_target":-0.7690738439559937,"decay":0.8732024431228638,"decay_arg":-0.1355878710746765,"dt_after_softplus":5.3038129806518555,"dt_plus_bias":5.298828125,"dt_times_x":-0.0958208367228508,"included_by_lower_triangle":true,"raw_dt":0.486328125,"raw_dt_bits":"0x3ef9","scale_decay_times_dt":4.631302356719971,"self_sample":false,"term_bf16_coeff_times_x":0.0071277618408203125,"term_fp32_coeff_times_x":0.00713772140443325,"top_state_contrib":-0.149505615234375,"top_state_index":100,"u":64,"x":-0.01806640625,"x_bits":"0xbc94"},{"accum_bf16_coeff_after":0.010866165161132812,"accum_fp32_coeff_after":0.01086745411157608,"cb_forward":0.027578726410865784,"cb_forward_minus_reverse":-2.2351741790771484e-8,"cb_reverse":0.027578748762607574,"cb_scaled_bf16":0.3125,"cb_scaled_bf16_bits":"0x3ea0","cb_scaled_pre_bf16":0.31177520751953125,"chunk_position":1,"dA_after":-0.6586316227912903,"dA_before":-0.6334859728813171,"dA_increment":-0.0251456405967474,"dA_target":-0.7690738439559937,"decay":0.8954380750656128,"decay_arg":-0.11044222116470337,"dt_after_softplus":12.62500286102295,"dt_plus_bias":12.625,"dt_times_x":0.1510315239429474,"included_by_lower_triangle":true,"raw_dt":7.8125,"raw_dt_bits":"0x40fa","scale_decay_times_dt":11.30490779876709,"self_sample":false,"term_bf16_coeff_times_x":0.0037384033203125,"term_fp32_coeff_times_x":0.00372973270714283,"top_state_contrib":-0.149505615234375,"top_state_index":100,"u":65,"x":0.011962890625,"x_bits":"0x3c44"},{"accum_bf16_coeff_after":0.009695112705230713,"accum_fp32_coeff_after":0.009697673842310905,"cb_forward":0.06819038093090057,"cb_forward_minus_reverse":-7.450580596923828e-9,"cb_reverse":0.06819038838148117,"cb_scaled_bf16":0.1728515625,"cb_scaled_bf16_bits":"0x3e31","cb_scaled_pre_bf16":0.1726638376712799,"chunk_position":2,"dA_after":-0.6642323136329651,"dA_before":-0.6586316227912903,"dA_increment":-0.00560068991035223,"dA_target":-0.7690738439559937,"decay":0.9004672169685364,"decay_arg":-0.10484153032302856,"dt_after_softplus":2.811967611312866,"dt_plus_bias":2.75,"dt_times_x":-0.019050806760787964,"included_by_lower_triangle":true,"raw_dt":-2.0625,"raw_dt_bits":"0xc004","scale_decay_times_dt":2.5320847034454346,"self_sample":false,"term_bf16_coeff_times_x":-0.0011710524559020996,"term_fp32_coeff_times_x":-0.0011697806185111403,"top_state_contrib":-0.149505615234375,"top_state_index":100,"u":66,"x":-0.00677490234375,"x_bits":"0xbbde"},{"accum_bf16_coeff_after":0.006882011890411377,"accum_fp32_coeff_after":0.006878163665533066,"cb_forward":0.293529748916626,"cb_forward_minus_reverse":-5.960464477539063e-8,"cb_reverse":0.29352980852127075,"cb_scaled_bf16":0.134765625,"cb_scaled_bf16_bits":"0x3e0a","cb_scaled_pre_bf16":0.13507266342639923,"chunk_position":3,"dA_after":-0.6652491092681885,"dA_before":-0.6642323136329651,"dA_increment":-0.0010168033186346292,"dA_target":-0.7690738439559937,"decay":0.9013832807540894,"decay_arg":-0.10382473468780518,"dt_after_softplus":0.5105117559432983,"dt_plus_bias":-0.40625,"dt_times_x":-0.01065643411129713,"included_by_lower_triangle":true,"raw_dt":-5.21875,"raw_dt_bits":"0xc0a7","scale_decay_times_dt":0.4601667523384094,"self_sample":false,"term_bf16_coeff_times_x":-0.002813100814819336,"term_fp32_coeff_times_x":-0.002819509943947196,"top_state_contrib":-0.149505615234375,"top_state_index":100,"u":67,"x":-0.0208740234375,"x_bits":"0xbcab"},{"accum_bf16_coeff_after":0.006897110491991043,"accum_fp32_coeff_after":0.006893254350870848,"cb_forward":0.05167003720998764,"cb_forward_minus_reverse":0.0,"cb_reverse":0.05167003720998764,"cb_scaled_bf16":0.0205078125,"cb_scaled_bf16_bits":"0x3ca8","cb_scaled_pre_bf16":0.02049708552658558,"chunk_position":4,"dA_after":-0.6661248803138733,"dA_before":-0.6652491092681885,"dA_increment":-0.0008757793693803251,"dA_target":-0.7690738439559937,"decay":0.9021730422973633,"decay_arg":-0.10294896364212036,"dt_after_softplus":0.4397071301937103,"dt_plus_bias":-0.59375,"dt_times_x":0.0003237284836359322,"included_by_lower_triangle":true,"raw_dt":-5.40625,"raw_dt_bits":"0xc0ad","scale_decay_times_dt":0.3966919183731079,"self_sample":false,"term_bf16_coeff_times_x":0.000015098601579666138,"term_fp32_coeff_times_x":0.000015090704437170643,"top_state_contrib":-0.149505615234375,"top_state_index":100,"u":68,"x":0.000736236572265625,"x_bits":"0x3a41"},{"accum_bf16_coeff_after":0.023455757647752762,"accum_fp32_coeff_after":0.023493517190217972,"cb_forward":0.1305534392595291,"cb_forward_minus_reverse":0.0,"cb_reverse":0.1305534392595291,"cb_scaled_bf16":0.7578125,"cb_scaled_bf16_bits":"0x3f42","cb_scaled_pre_bf16":0.7597170472145081,"chunk_position":5,"dA_after":-0.6788100600242615,"dA_before":-0.6661248803138733,"dA_increment":-0.012685157358646393,"dA_target":-0.7690738439559937,"decay":0.9136901497840881,"decay_arg":-0.09026378393173218,"dt_after_softplus":6.368903160095215,"dt_plus_bias":6.3671875,"dt_times_x":0.1391642689704895,"included_by_lower_triangle":true,"raw_dt":1.5546875,"raw_dt_bits":"0x3fc7","scale_decay_times_dt":5.819203853607178,"self_sample":false,"term_bf16_coeff_times_x":0.01655864715576172,"term_fp32_coeff_times_x":0.016600262373685837,"top_state_contrib":-0.149505615234375,"top_state_index":100,"u":69,"x":0.0218505859375,"x_bits":"0x3cb3"},{"accum_bf16_coeff_after":0.023683901876211166,"accum_fp32_coeff_after":0.02372121997177601,"cb_forward":-0.09994199872016907,"cb_forward_minus_reverse":0.0,"cb_reverse":-0.09994199872016907,"cb_scaled_bf16":-0.345703125,"cb_scaled_bf16_bits":"0xbeb1","cb_scaled_pre_bf16":-0.34503498673439026,"chunk_position":6,"dA_after":-0.6862797737121582,"dA_before":-0.6788100600242615,"dA_increment":-0.007469702512025833,"dA_target":-0.7690738439559937,"decay":0.9205406904220581,"decay_arg":-0.08279407024383545,"dt_after_softplus":3.750352621078491,"dt_plus_bias":3.7265625,"dt_times_x":-0.002475017448887229,"included_by_lower_triangle":true,"raw_dt":-1.0859375,"raw_dt_bits":"0xbf8b","scale_decay_times_dt":3.452352285385132,"self_sample":false,"term_bf16_coeff_times_x":0.00022814422845840454,"term_fp32_coeff_times_x":0.0002277032908750698,"top_state_contrib":-0.149505615234375,"top_state_index":100,"u":70,"x":-0.000659942626953125,"x_bits":"0xba2d"},{"accum_bf16_coeff_after":0.01728784665465355,"accum_fp32_coeff_after":0.01733679324388504,"cb_forward":0.11043854057788849,"cb_forward_minus_reverse":-1.4901161193847656e-8,"cb_reverse":0.11043855547904968,"cb_scaled_bf16":0.376953125,"cb_scaled_bf16_bits":"0x3ec1","cb_scaled_pre_bf16":0.37626782059669495,"chunk_position":7,"dA_after":-0.693597674369812,"dA_before":-0.6862797737121582,"dA_increment":-0.007317899726331234,"dA_target":-0.7690738439559937,"decay":0.927301824092865,"decay_arg":-0.07547616958618164,"dt_after_softplus":3.674136161804199,"dt_plus_bias":3.6484375,"dt_times_x":-0.06234190985560417,"included_by_lower_triangle":true,"raw_dt":-1.1640625,"raw_dt_bits":"0xbf95","scale_decay_times_dt":3.4070332050323486,"self_sample":false,"term_bf16_coeff_times_x":-0.006396055221557617,"term_fp32_coeff_times_x":-0.006384427193552256,"top_state_contrib":-0.149505615234375,"top_state_index":100,"u":71,"x":-0.0169677734375,"x_bits":"0xbc8b"},{"accum_bf16_coeff_after":0.01712065562605858,"accum_fp32_coeff_after":0.01716911606490612,"cb_forward":0.26350539922714233,"cb_forward_minus_reverse":-2.9802322387695312e-8,"cb_reverse":0.2635054290294647,"cb_scaled_bf16":0.08056640625,"cb_scaled_bf16_bits":"0x3da5","cb_scaled_pre_bf16":0.08080032467842102,"chunk_position":8,"dA_after":-0.6942558884620667,"dA_before":-0.693597674369812,"dA_increment":-0.0006581846391782165,"dA_target":-0.7690738439559937,"decay":0.9279124140739441,"decay_arg":-0.074817955493927,"dt_after_softplus":0.3304581940174103,"dt_plus_bias":-0.9375,"dt_times_x":-0.0006857652915641665,"included_by_lower_triangle":true,"raw_dt":-5.75,"raw_dt_bits":"0xc0b8","scale_decay_times_dt":0.3066362738609314,"self_sample":false,"term_bf16_coeff_times_x":-0.0001671910285949707,"term_fp32_coeff_times_x":-0.00016767645138315856,"top_state_contrib":-0.149505615234375,"top_state_index":100,"u":72,"x":-0.0020751953125,"x_bits":"0xbb08"},{"accum_bf16_coeff_after":0.013818319886922836,"accum_fp32_coeff_after":0.013863305561244488,"cb_forward":0.3094520568847656,"cb_forward_minus_reverse":-2.9802322387695312e-8,"cb_reverse":0.309452086687088,"cb_scaled_bf16":0.2373046875,"cb_scaled_bf16_bits":"0x3e73","cb_scaled_pre_bf16":0.2375543713569641,"chunk_position":9,"dA_after":-0.6959009170532227,"dA_before":-0.6942558884620667,"dA_increment":-0.0016450511757284403,"dA_target":-0.7690738439559937,"decay":0.9294400811195374,"decay_arg":-0.073172926902771,"dt_after_softplus":0.825939416885376,"dt_plus_bias":0.25,"dt_times_x":-0.011493786238133907,"included_by_lower_triangle":true,"raw_dt":-4.5625,"raw_dt_bits":"0xc092","scale_decay_times_dt":0.7676612138748169,"self_sample":false,"term_bf16_coeff_times_x":-0.003302335739135742,"term_fp32_coeff_times_x":-0.003305810270830989,"top_state_contrib":-0.149505615234375,"top_state_index":100,"u":73,"x":-0.013916015625,"x_bits":"0xbc64"},{"accum_bf16_coeff_after":0.0210835300385952,"accum_fp32_coeff_after":0.02111520804464817,"cb_forward":-0.04676322638988495,"cb_forward_minus_reverse":-1.862645149230957e-8,"cb_reverse":-0.046763207763433456,"cb_scaled_bf16":-0.2333984375,"cb_scaled_bf16_bits":"0xbe6f","cb_scaled_pre_bf16":-0.23297090828418732,"chunk_position":10,"dA_after":-0.7064647078514099,"dA_before":-0.6959009170532227,"dA_increment":-0.01056378148496151,"dA_target":-0.7690738439559937,"decay":0.9393105506896973,"decay_arg":-0.06260913610458374,"dt_after_softplus":5.3038129806518555,"dt_plus_bias":5.298828125,"dt_times_x":-0.165096715092659,"included_by_lower_triangle":true,"raw_dt":0.486328125,"raw_dt_bits":"0x3ef9","scale_decay_times_dt":4.981927394866943,"self_sample":false,"term_bf16_coeff_times_x":0.007265210151672363,"term_fp32_coeff_times_x":0.007251902017742395,"top_state_contrib":-0.149505615234375,"top_state_index":100,"u":74,"x":-0.0311279296875,"x_bits":"0xbcff"},{"accum_bf16_coeff_after":0.026206906884908676,"accum_fp32_coeff_after":0.026239469647407532,"cb_forward":0.0559014230966568,"cb_forward_minus_reverse":-1.4901161193847656e-8,"cb_reverse":0.05590143799781799,"cb_scaled_bf16":0.6796875,"cb_scaled_bf16_bits":"0x3f2e","cb_scaled_pre_bf16":0.6798048615455627,"chunk_position":11,"dA_after":-0.7316103577613831,"dA_before":-0.7064647078514099,"dA_increment":-0.0251456405967474,"dA_target":-0.7690738439559937,"decay":0.9632295966148376,"decay_arg":-0.037463486194610596,"dt_after_softplus":12.62500286102295,"dt_plus_bias":12.625,"dt_times_x":0.09516527503728867,"included_by_lower_triangle":true,"raw_dt":7.8125,"raw_dt_bits":"0x40fa","scale_decay_times_dt":12.160776138305664,"self_sample":false,"term_bf16_coeff_times_x":0.0051233768463134766,"term_fp32_coeff_times_x":0.005124261602759361,"top_state_contrib":-0.149505615234375,"top_state_index":100,"u":75,"x":0.007537841796875,"x_bits":"0x3bf7"},{"accum_bf16_coeff_after":0.024493690580129623,"accum_fp32_coeff_after":0.024529118090867996,"cb_forward":0.07194442301988602,"cb_forward_minus_reverse":3.725290298461914e-8,"cb_reverse":0.07194438576698303,"cb_scaled_bf16":0.1962890625,"cb_scaled_bf16_bits":"0x3e49","cb_scaled_pre_bf16":0.1959608793258667,"chunk_position":12,"dA_after":-0.7372110486030579,"dA_before":-0.7316103577613831,"dA_increment":-0.00560068991035223,"dA_target":-0.7690738439559937,"decay":0.9686394929885864,"decay_arg":-0.03186279535293579,"dt_after_softplus":2.811967611312866,"dt_plus_bias":2.75,"dt_times_x":-0.024542929604649544,"included_by_lower_triangle":true,"raw_dt":-2.0625,"raw_dt_bits":"0xc004","scale_decay_times_dt":2.723782777786255,"self_sample":false,"term_bf16_coeff_times_x":-0.0017132163047790527,"term_fp32_coeff_times_x":-0.001710351905785501,"top_state_contrib":-0.149505615234375,"top_state_index":100,"u":76,"x":-0.00872802734375,"x_bits":"0xbc0f"},{"accum_bf16_coeff_after":0.023161407560110092,"accum_fp32_coeff_after":0.02319585718214512,"cb_forward":0.3333631157875061,"cb_forward_minus_reverse":-5.960464477539063e-8,"cb_reverse":0.3333631753921509,"cb_scaled_bf16":0.0859375,"cb_scaled_bf16_bits":"0x3db0","cb_scaled_pre_bf16":0.08600061386823654,"chunk_position":13,"dA_after":-0.737741231918335,"dA_before":-0.7372110486030579,"dA_increment":-0.0005301792407408357,"dA_target":-0.7690738439559937,"decay":0.9691531658172607,"decay_arg":-0.03133261203765869,"dt_after_softplus":0.266189843416214,"dt_plus_bias":-1.1875,"dt_times_x":-0.0041267224587500095,"included_by_lower_triangle":true,"raw_dt":-6.0,"raw_dt_bits":"0xc0c0","scale_decay_times_dt":0.25797873735427856,"self_sample":false,"term_bf16_coeff_times_x":-0.0013322830200195312,"term_fp32_coeff_times_x":-0.0013332614907994866,"top_state_contrib":-0.149505615234375,"top_state_index":100,"u":77,"x":-0.0155029296875,"x_bits":"0xbc7e"},{"accum_bf16_coeff_after":0.023274611681699753,"accum_fp32_coeff_after":0.0233088880777359,"cb_forward":0.06115353852510452,"cb_forward_minus_reverse":-5.21540641784668e-8,"cb_reverse":0.0611535906791687,"cb_scaled_bf16":0.026123046875,"cb_scaled_bf16_bits":"0x3cd6","cb_scaled_pre_bf16":0.026083040982484818,"chunk_position":14,"dA_after":-0.7386170029640198,"dA_before":-0.737741231918335,"dA_increment":-0.0008757793693803251,"dA_target":-0.7690738439559937,"decay":0.970002293586731,"decay_arg":-0.030456840991973877,"dt_after_softplus":0.4397071301937103,"dt_plus_bias":-0.59375,"dt_times_x":0.0019054691074416041,"included_by_lower_triangle":true,"raw_dt":-5.40625,"raw_dt_bits":"0xc0ad","scale_decay_times_dt":0.42651692032814026,"self_sample":false,"term_bf16_coeff_times_x":0.00011320412158966064,"term_fp32_coeff_times_x":0.0001130307573475875,"top_state_contrib":-0.149505615234375,"top_state_index":100,"u":78,"x":0.00433349609375,"x_bits":"0x3b8e"},{"accum_bf16_coeff_after":0.04403991624712944,"accum_fp32_coeff_after":0.04407186061143875,"cb_forward":0.14233097434043884,"cb_forward_minus_reverse":-2.9802322387695312e-8,"cb_reverse":0.14233100414276123,"cb_scaled_bf16":0.890625,"cb_scaled_bf16_bits":"0x3f64","cb_scaled_pre_bf16":0.8905248641967773,"chunk_position":15,"dA_after":-0.751302182674408,"dA_before":-0.7386170029640198,"dA_increment":-0.012685157358646393,"dA_target":-0.7690738439559937,"decay":0.9823853373527527,"decay_arg":-0.017771661281585693,"dt_after_softplus":6.368903160095215,"dt_plus_bias":6.3671875,"dt_times_x":0.1484937071800232,"included_by_lower_triangle":true,"raw_dt":1.5546875,"raw_dt_bits":"0x3fc7","scale_decay_times_dt":6.256717205047607,"self_sample":false,"term_bf16_coeff_times_x":0.020765304565429688,"term_fp32_coeff_times_x":0.0207629706710577,"top_state_contrib":-0.149505615234375,"top_state_index":100,"u":79,"x":0.0233154296875,"x_bits":"0x3cbf"},{"accum_bf16_coeff_after":0.042552899569272995,"accum_fp32_coeff_after":0.042580489069223404,"cb_forward":-0.11211352050304413,"cb_forward_minus_reverse":4.470348358154297e-8,"cb_reverse":-0.11211356520652771,"cb_scaled_bf16":-0.30078125,"cb_scaled_bf16_bits":"0xbe9a","cb_scaled_pre_bf16":-0.30166181921958923,"chunk_position":16,"dA_after":-0.7567278742790222,"dA_before":-0.751302182674408,"dA_increment":-0.005425692535936832,"dA_target":-0.7690738439559937,"decay":0.9877299070358276,"decay_arg":-0.012345969676971436,"dt_after_softplus":2.7241058349609375,"dt_plus_bias":2.65625,"dt_times_x":0.01346756424754858,"included_by_lower_triangle":true,"raw_dt":-2.15625,"raw_dt_bits":"0xc00a","scale_decay_times_dt":2.690680742263794,"self_sample":false,"term_bf16_coeff_times_x":-0.0014870166778564453,"term_fp32_coeff_times_x":-0.0014913700288161635,"top_state_contrib":-0.149505615234375,"top_state_index":100,"u":80,"x":0.00494384765625,"x_bits":"0x3ba2"},{"accum_bf16_coeff_after":0.0671195536851883,"accum_fp32_coeff_after":0.06708940118551254,"cb_forward":0.2557319402694702,"cb_forward_minus_reverse":5.960464477539063e-8,"cb_reverse":0.25573188066482544,"cb_scaled_bf16":1.2578125,"cb_scaled_bf16_bits":"0x3fa1","cb_scaled_pre_bf16":1.2548563480377197,"chunk_position":17,"dA_after":-0.7665261030197144,"dA_before":-0.7567278742790222,"dA_increment":-0.009798211976885796,"dA_target":-0.7690738439559937,"decay":0.9974554777145386,"decay_arg":-0.002547740936279297,"dt_after_softplus":4.919439315795898,"dt_plus_bias":4.912109375,"dt_times_x":0.09608279913663864,"included_by_lower_triangle":true,"raw_dt":0.099609375,"raw_dt_bits":"0x3dcc","scale_decay_times_dt":4.906921863555908,"self_sample":false,"term_bf16_coeff_times_x":0.024566650390625,"term_fp32_coeff_times_x":0.02450891211628914,"top_state_contrib":-0.149505615234375,"top_state_index":100,"u":81,"x":0.01953125,"x_bits":"0x3ca0"},{"accum_bf16_coeff_after":0.07652278244495392,"accum_fp32_coeff_after":0.07649809867143631,"cb_forward":0.20776832103729248,"cb_forward_minus_reverse":0.0,"cb_reverse":0.20776832103729248,"cb_scaled_bf16":0.265625,"cb_scaled_bf16_bits":"0x3e88","cb_scaled_pre_bf16":0.2657794952392578,"chunk_position":18,"dA_after":-0.7690739631652832,"dA_before":-0.7665261030197144,"dA_increment":-0.002547847107052803,"dA_target":-0.7690738439559937,"decay":1.0,"decay_arg":0.0,"dt_after_softplus":1.2792109251022339,"dt_plus_bias":0.953125,"dt_times_x":0.045284565538167953,"included_by_lower_triangle":true,"raw_dt":-3.859375,"raw_dt_bits":"0xc077","scale_decay_times_dt":1.2792109251022339,"self_sample":true,"term_bf16_coeff_times_x":0.009403228759765625,"term_fp32_coeff_times_x":0.009408697485923767,"top_state_contrib":-0.149505615234375,"top_state_index":100,"u":82,"x":0.035400390625,"x_bits":"0x3d11"}],"prefix":{"a_log":-6.21875,"a_value_neg_exp":-0.001991733442991972,"dA_chunk_base":-0.6229221820831299,"dA_target":-0.7690738439559937,"dt_bias":4.8125,"local_dA_increments":[-0.01056378148496151,-0.0251456405967474,-0.00560068991035223,-0.0010168033186346292,-0.0008757793693803251,-0.012685157358646393,-0.007469702512025833,-0.007317899726331234,-0.0006581846391782165,-0.0016450511757284403,-0.01056378148496151,-0.0251456405967474,-0.00560068991035223,-0.0005301792407408357,-0.0008757793693803251,-0.012685157358646393,-0.005425692535936832,-0.009798211976885796,-0.002547847107052803],"local_dA_prefix_cumulative":[-0.6334859728813171,-0.6586316227912903,-0.6642323136329651,-0.6652491092681885,-0.6661248803138733,-0.6788100600242615,-0.6862797141075134,-0.6935976147651672,-0.6942558288574219,-0.6959008574485779,-0.7064646482467651,-0.7316102981567383,-0.7372109889984131,-0.7377411723136902,-0.738616943359375,-0.7513021230697632,-0.7567278146743774,-0.7665259838104248,-0.7690738439559937]},"target":{"dim_index":2398,"flat_index":338270,"group":4,"head":37,"head_dim_index":30,"row":82}}
+[PREFILL-LIVENESS] mamba2_substages layer=0 tokens=128 total_ms=12.999 in_proj_ms=0.101 split_extract_ms=0.012 conv1d_silu_ms=0.022 ssd_scan_ms=12.804 gated_rmsnorm_ms=0.017 out_proj_ms=0.043
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=0 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=15.492
+[PREFILL-LIVENESS] layer_end chunk=0 layer=0 layer_type=mamba2 tokens=128 layer_ms=15.551 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=1 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=1 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=1 tokens=128 elapsed_ms=28.479
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=1 layer_type=pass tokens=128 elapsed_before_sync_ms=28.643
+[PREFILL-LIVENESS] layer_end chunk=0 layer=1 layer_type=pass tokens=128 layer_ms=28.701 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=2 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=2 tokens=128 total_ms=12.928 in_proj_ms=0.061 split_extract_ms=0.010 conv1d_silu_ms=0.022 ssd_scan_ms=12.783 gated_rmsnorm_ms=0.013 out_proj_ms=0.038
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=2 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.183
+[PREFILL-LIVENESS] layer_end chunk=0 layer=2 layer_type=mamba2 tokens=128 layer_ms=13.242 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=3 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=3 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=3 tokens=128 elapsed_ms=39.584
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=3 layer_type=pass tokens=128 elapsed_before_sync_ms=39.770
+[PREFILL-LIVENESS] layer_end chunk=0 layer=3 layer_type=pass tokens=128 layer_ms=39.829 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=4 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=4 tokens=128 total_ms=13.032 in_proj_ms=0.093 split_extract_ms=0.011 conv1d_silu_ms=0.021 ssd_scan_ms=12.854 gated_rmsnorm_ms=0.014 out_proj_ms=0.039
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=4 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.308
+[PREFILL-LIVENESS] layer_end chunk=0 layer=4 layer_type=mamba2 tokens=128 layer_ms=13.367 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=5 layer_type=gqa tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=5 layer_type=gqa tokens=128 elapsed_before_sync_ms=0.640
+[PREFILL-LIVENESS] layer_end chunk=0 layer=5 layer_type=gqa tokens=128 layer_ms=0.698 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=6 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=6 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=6 tokens=128 elapsed_ms=24.817
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=6 layer_type=pass tokens=128 elapsed_before_sync_ms=25.007
+[PREFILL-LIVENESS] layer_end chunk=0 layer=6 layer_type=pass tokens=128 layer_ms=25.065 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=7 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=7 tokens=128 total_ms=12.924 in_proj_ms=0.058 split_extract_ms=0.011 conv1d_silu_ms=0.021 ssd_scan_ms=12.787 gated_rmsnorm_ms=0.012 out_proj_ms=0.035
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=7 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.179
+[PREFILL-LIVENESS] layer_end chunk=0 layer=7 layer_type=mamba2 tokens=128 layer_ms=13.242 sync_ms=0.064
+[PREFILL-LIVENESS] layer_start chunk=0 layer=8 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=8 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=8 tokens=128 elapsed_ms=25.320
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=8 layer_type=pass tokens=128 elapsed_before_sync_ms=25.477
+[PREFILL-LIVENESS] layer_end chunk=0 layer=8 layer_type=pass tokens=128 layer_ms=25.535 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=9 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=9 tokens=128 total_ms=12.975 in_proj_ms=0.058 split_extract_ms=0.010 conv1d_silu_ms=0.022 ssd_scan_ms=12.834 gated_rmsnorm_ms=0.013 out_proj_ms=0.037
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=9 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.226
+[PREFILL-LIVENESS] layer_end chunk=0 layer=9 layer_type=mamba2 tokens=128 layer_ms=13.290 sync_ms=0.064
+[PREFILL-LIVENESS] layer_start chunk=0 layer=10 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=10 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=10 tokens=128 elapsed_ms=23.976
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=10 layer_type=pass tokens=128 elapsed_before_sync_ms=24.133
+[PREFILL-LIVENESS] layer_end chunk=0 layer=10 layer_type=pass tokens=128 layer_ms=24.191 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=11 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=11 tokens=128 total_ms=12.892 in_proj_ms=0.060 split_extract_ms=0.011 conv1d_silu_ms=0.021 ssd_scan_ms=12.750 gated_rmsnorm_ms=0.013 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=11 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.144
+[PREFILL-LIVENESS] layer_end chunk=0 layer=11 layer_type=mamba2 tokens=128 layer_ms=13.202 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=12 layer_type=gqa tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=12 layer_type=gqa tokens=128 elapsed_before_sync_ms=0.534
+[PREFILL-LIVENESS] layer_end chunk=0 layer=12 layer_type=gqa tokens=128 layer_ms=0.591 sync_ms=0.057
+[PREFILL-LIVENESS] layer_start chunk=0 layer=13 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=13 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=13 tokens=128 elapsed_ms=23.085
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=13 layer_type=pass tokens=128 elapsed_before_sync_ms=23.241
+[PREFILL-LIVENESS] layer_end chunk=0 layer=13 layer_type=pass tokens=128 layer_ms=23.299 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=14 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=14 tokens=128 total_ms=12.892 in_proj_ms=0.060 split_extract_ms=0.009 conv1d_silu_ms=0.021 ssd_scan_ms=12.750 gated_rmsnorm_ms=0.013 out_proj_ms=0.037
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=14 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.155
+[PREFILL-LIVENESS] layer_end chunk=0 layer=14 layer_type=mamba2 tokens=128 layer_ms=13.214 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=15 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=15 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=15 tokens=128 elapsed_ms=22.725
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=15 layer_type=pass tokens=128 elapsed_before_sync_ms=22.888
+[PREFILL-LIVENESS] layer_end chunk=0 layer=15 layer_type=pass tokens=128 layer_ms=22.946 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=16 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=16 tokens=128 total_ms=12.892 in_proj_ms=0.059 split_extract_ms=0.010 conv1d_silu_ms=0.020 ssd_scan_ms=12.754 gated_rmsnorm_ms=0.013 out_proj_ms=0.035
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=16 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.181
+[PREFILL-LIVENESS] layer_end chunk=0 layer=16 layer_type=mamba2 tokens=128 layer_ms=13.254 sync_ms=0.073
+[PREFILL-LIVENESS] layer_start chunk=0 layer=17 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=17 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=17 tokens=128 elapsed_ms=22.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=17 layer_type=pass tokens=128 elapsed_before_sync_ms=22.192
+[PREFILL-LIVENESS] layer_end chunk=0 layer=17 layer_type=pass tokens=128 layer_ms=22.250 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=18 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=18 tokens=128 total_ms=12.895 in_proj_ms=0.058 split_extract_ms=0.010 conv1d_silu_ms=0.022 ssd_scan_ms=12.756 gated_rmsnorm_ms=0.013 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=18 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.149
+[PREFILL-LIVENESS] layer_end chunk=0 layer=18 layer_type=mamba2 tokens=128 layer_ms=13.207 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=19 layer_type=gqa tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=19 layer_type=gqa tokens=128 elapsed_before_sync_ms=0.514
+[PREFILL-LIVENESS] layer_end chunk=0 layer=19 layer_type=gqa tokens=128 layer_ms=0.571 sync_ms=0.057
+[PREFILL-LIVENESS] layer_start chunk=0 layer=20 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=20 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=20 tokens=128 elapsed_ms=21.674
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=20 layer_type=pass tokens=128 elapsed_before_sync_ms=21.829
+[PREFILL-LIVENESS] layer_end chunk=0 layer=20 layer_type=pass tokens=128 layer_ms=21.887 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=21 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=21 tokens=128 total_ms=12.874 in_proj_ms=0.059 split_extract_ms=0.010 conv1d_silu_ms=0.020 ssd_scan_ms=12.734 gated_rmsnorm_ms=0.013 out_proj_ms=0.037
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=21 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.127
+[PREFILL-LIVENESS] layer_end chunk=0 layer=21 layer_type=mamba2 tokens=128 layer_ms=13.185 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=22 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=22 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=22 tokens=128 elapsed_ms=21.517
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=22 layer_type=pass tokens=128 elapsed_before_sync_ms=21.673
+[PREFILL-LIVENESS] layer_end chunk=0 layer=22 layer_type=pass tokens=128 layer_ms=21.731 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=23 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=23 tokens=128 total_ms=12.882 in_proj_ms=0.057 split_extract_ms=0.011 conv1d_silu_ms=0.021 ssd_scan_ms=12.744 gated_rmsnorm_ms=0.013 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=23 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.134
+[PREFILL-LIVENESS] layer_end chunk=0 layer=23 layer_type=mamba2 tokens=128 layer_ms=13.192 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=24 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=24 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=24 tokens=128 elapsed_ms=20.112
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=24 layer_type=pass tokens=128 elapsed_before_sync_ms=20.268
+[PREFILL-LIVENESS] layer_end chunk=0 layer=24 layer_type=pass tokens=128 layer_ms=20.326 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=25 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=25 tokens=128 total_ms=12.873 in_proj_ms=0.060 split_extract_ms=0.011 conv1d_silu_ms=0.022 ssd_scan_ms=12.730 gated_rmsnorm_ms=0.013 out_proj_ms=0.037
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=25 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.145
+[PREFILL-LIVENESS] layer_end chunk=0 layer=25 layer_type=mamba2 tokens=128 layer_ms=13.203 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=26 layer_type=gqa tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=26 layer_type=gqa tokens=128 elapsed_before_sync_ms=0.524
+[PREFILL-LIVENESS] layer_end chunk=0 layer=26 layer_type=gqa tokens=128 layer_ms=0.581 sync_ms=0.057
+[PREFILL-LIVENESS] layer_start chunk=0 layer=27 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=27 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=27 tokens=128 elapsed_ms=17.118
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=27 layer_type=pass tokens=128 elapsed_before_sync_ms=17.274
+[PREFILL-LIVENESS] layer_end chunk=0 layer=27 layer_type=pass tokens=128 layer_ms=17.332 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=28 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=28 tokens=128 total_ms=12.874 in_proj_ms=0.059 split_extract_ms=0.010 conv1d_silu_ms=0.020 ssd_scan_ms=12.734 gated_rmsnorm_ms=0.013 out_proj_ms=0.037
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=28 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.127
+[PREFILL-LIVENESS] layer_end chunk=0 layer=28 layer_type=mamba2 tokens=128 layer_ms=13.185 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=29 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=29 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=29 tokens=128 elapsed_ms=16.112
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=29 layer_type=pass tokens=128 elapsed_before_sync_ms=16.268
+[PREFILL-LIVENESS] layer_end chunk=0 layer=29 layer_type=pass tokens=128 layer_ms=16.337 sync_ms=0.068
+[PREFILL-LIVENESS] layer_start chunk=0 layer=30 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=30 tokens=128 total_ms=12.864 in_proj_ms=0.057 split_extract_ms=0.010 conv1d_silu_ms=0.021 ssd_scan_ms=12.728 gated_rmsnorm_ms=0.012 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=30 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.118
+[PREFILL-LIVENESS] layer_end chunk=0 layer=30 layer_type=mamba2 tokens=128 layer_ms=13.176 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=31 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=31 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=31 tokens=128 elapsed_ms=18.463
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=31 layer_type=pass tokens=128 elapsed_before_sync_ms=18.620
+[PREFILL-LIVENESS] layer_end chunk=0 layer=31 layer_type=pass tokens=128 layer_ms=18.678 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=32 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=32 tokens=128 total_ms=12.871 in_proj_ms=0.059 split_extract_ms=0.010 conv1d_silu_ms=0.022 ssd_scan_ms=12.732 gated_rmsnorm_ms=0.013 out_proj_ms=0.035
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=32 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.124
+[PREFILL-LIVENESS] layer_end chunk=0 layer=32 layer_type=mamba2 tokens=128 layer_ms=13.182 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=33 layer_type=gqa tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=33 layer_type=gqa tokens=128 elapsed_before_sync_ms=0.521
+[PREFILL-LIVENESS] layer_end chunk=0 layer=33 layer_type=gqa tokens=128 layer_ms=0.577 sync_ms=0.057
+[PREFILL-LIVENESS] layer_start chunk=0 layer=34 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=34 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=34 tokens=128 elapsed_ms=14.845
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=34 layer_type=pass tokens=128 elapsed_before_sync_ms=15.003
+[PREFILL-LIVENESS] layer_end chunk=0 layer=34 layer_type=pass tokens=128 layer_ms=15.061 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=35 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=35 tokens=128 total_ms=12.869 in_proj_ms=0.057 split_extract_ms=0.010 conv1d_silu_ms=0.021 ssd_scan_ms=12.732 gated_rmsnorm_ms=0.013 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=35 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.121
+[PREFILL-LIVENESS] layer_end chunk=0 layer=35 layer_type=mamba2 tokens=128 layer_ms=13.179 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=36 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=36 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=36 tokens=128 elapsed_ms=9.009
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=36 layer_type=pass tokens=128 elapsed_before_sync_ms=9.165
+[PREFILL-LIVENESS] layer_end chunk=0 layer=36 layer_type=pass tokens=128 layer_ms=9.223 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=37 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=37 tokens=128 total_ms=12.875 in_proj_ms=0.059 split_extract_ms=0.010 conv1d_silu_ms=0.020 ssd_scan_ms=12.736 gated_rmsnorm_ms=0.013 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=37 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.138
+[PREFILL-LIVENESS] layer_end chunk=0 layer=37 layer_type=mamba2 tokens=128 layer_ms=13.202 sync_ms=0.065
+[PREFILL-LIVENESS] layer_start chunk=0 layer=38 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=38 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=38 tokens=128 elapsed_ms=7.532
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=38 layer_type=pass tokens=128 elapsed_before_sync_ms=7.689
+[PREFILL-LIVENESS] layer_end chunk=0 layer=38 layer_type=pass tokens=128 layer_ms=7.747 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=39 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=39 tokens=128 total_ms=12.869 in_proj_ms=0.061 split_extract_ms=0.010 conv1d_silu_ms=0.021 ssd_scan_ms=12.728 gated_rmsnorm_ms=0.013 out_proj_ms=0.035
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=39 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.134
+[PREFILL-LIVENESS] layer_end chunk=0 layer=39 layer_type=mamba2 tokens=128 layer_ms=13.192 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=40 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=40 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=40 tokens=128 elapsed_ms=5.249
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=40 layer_type=pass tokens=128 elapsed_before_sync_ms=5.405
+[PREFILL-LIVENESS] layer_end chunk=0 layer=40 layer_type=pass tokens=128 layer_ms=5.463 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=41 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=41 tokens=128 total_ms=12.879 in_proj_ms=0.061 split_extract_ms=0.011 conv1d_silu_ms=0.020 ssd_scan_ms=12.736 gated_rmsnorm_ms=0.014 out_proj_ms=0.037
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=41 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.132
+[PREFILL-LIVENESS] layer_end chunk=0 layer=41 layer_type=mamba2 tokens=128 layer_ms=13.190 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=42 layer_type=gqa tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=42 layer_type=gqa tokens=128 elapsed_before_sync_ms=0.518
+[PREFILL-LIVENESS] layer_end chunk=0 layer=42 layer_type=gqa tokens=128 layer_ms=0.574 sync_ms=0.057
+[PREFILL-LIVENESS] layer_start chunk=0 layer=43 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=43 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=43 tokens=128 elapsed_ms=5.261
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=43 layer_type=pass tokens=128 elapsed_before_sync_ms=5.417
+[PREFILL-LIVENESS] layer_end chunk=0 layer=43 layer_type=pass tokens=128 layer_ms=5.475 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=44 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=44 tokens=128 total_ms=12.862 in_proj_ms=0.059 split_extract_ms=0.010 conv1d_silu_ms=0.021 ssd_scan_ms=12.724 gated_rmsnorm_ms=0.013 out_proj_ms=0.035
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=44 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.114
+[PREFILL-LIVENESS] layer_end chunk=0 layer=44 layer_type=mamba2 tokens=128 layer_ms=13.172 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=45 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=45 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=45 tokens=128 elapsed_ms=4.973
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=45 layer_type=pass tokens=128 elapsed_before_sync_ms=5.140
+[PREFILL-LIVENESS] layer_end chunk=0 layer=45 layer_type=pass tokens=128 layer_ms=5.198 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=46 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=46 tokens=128 total_ms=12.872 in_proj_ms=0.059 split_extract_ms=0.010 conv1d_silu_ms=0.021 ssd_scan_ms=12.732 gated_rmsnorm_ms=0.013 out_proj_ms=0.037
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=46 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.125
+[PREFILL-LIVENESS] layer_end chunk=0 layer=46 layer_type=mamba2 tokens=128 layer_ms=13.183 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=47 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=47 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=47 tokens=128 elapsed_ms=4.133
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=47 layer_type=pass tokens=128 elapsed_before_sync_ms=4.295
+[PREFILL-LIVENESS] layer_end chunk=0 layer=47 layer_type=pass tokens=128 layer_ms=4.353 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=48 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=48 tokens=128 total_ms=12.835 in_proj_ms=0.061 split_extract_ms=0.010 conv1d_silu_ms=0.021 ssd_scan_ms=12.695 gated_rmsnorm_ms=0.013 out_proj_ms=0.035
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=48 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.089
+[PREFILL-LIVENESS] layer_end chunk=0 layer=48 layer_type=mamba2 tokens=128 layer_ms=13.147 sync_ms=0.058
+[PREFILL-LIVENESS] layer_start chunk=0 layer=49 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=49 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=49 tokens=128 elapsed_ms=3.974
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=49 layer_type=pass tokens=128 elapsed_before_sync_ms=4.130
+[PREFILL-LIVENESS] layer_end chunk=0 layer=49 layer_type=pass tokens=128 layer_ms=4.189 sync_ms=0.059
+[PREFILL-LIVENESS] layer_start chunk=0 layer=50 layer_type=mamba2 tokens=128 has_residual=true moe_gate=false shared_bf16=false shared_marlin=false
+[PREFILL-LIVENESS] mamba2_substages layer=50 tokens=128 total_ms=12.830 in_proj_ms=0.059 split_extract_ms=0.011 conv1d_silu_ms=0.021 ssd_scan_ms=12.689 gated_rmsnorm_ms=0.014 out_proj_ms=0.036
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=50 layer_type=mamba2 tokens=128 elapsed_before_sync_ms=13.083
+[PREFILL-LIVENESS] layer_end chunk=0 layer=50 layer_type=mamba2 tokens=128 layer_ms=13.146 sync_ms=0.064
+[PREFILL-LIVENESS] layer_start chunk=0 layer=51 layer_type=pass tokens=128 has_residual=true moe_gate=true shared_bf16=false shared_marlin=true
+[PREFILL-LIVENESS] moe_call_start chunk=0 layer=51 tokens=128 expert_bits=4 shared_expert_bits=4
+[PREFILL-LIVENESS] moe_call_return chunk=0 layer=51 tokens=128 elapsed_ms=3.558
+[PREFILL-LIVENESS] layer_sync_start chunk=0 layer=51 layer_type=pass tokens=128 elapsed_before_sync_ms=3.719
+[PREFILL-LIVENESS] layer_end chunk=0 layer=51 layer_type=pass tokens=128 layer_ms=3.777 sync_ms=0.058
+[PREFILL-LIVENESS] chunk_end chunk=0 tokens=128 elapsed_ms=702.287
+[PREFILL-TIMING] 128 tokens, 703.3ms total (182 tok/s)
+[PREFILL-TIMING]   embed:       0.0ms (  0.0%)
+[PREFILL-TIMING]   norm:        1.0ms (  0.1%)
+[PREFILL-TIMING]   attn:      305.3ms ( 43.4%)  [gqa: 2.7ms, la: 0.0ms]
+[PREFILL-TIMING]     gqa breakdown (6 FA2 calls: 6 bf16, 0 fp8):
+[PREFILL-TIMING]       proj:         1.8ms ( 66.4% of gqa)
+[PREFILL-TIMING]       qknorm:       0.0ms (  1.4% of gqa)
+[PREFILL-TIMING]       rope:         0.1ms (  4.2% of gqa)
+[PREFILL-TIMING]       kv_prep:      0.0ms (  1.8% of gqa)
+[PREFILL-TIMING]         kv_cross_stage:      0.0ms over 0 calls (current_tokens=0 total_kv_tokens=0)
+[PREFILL-TIMING]         kv_append:           0.0ms over 6 calls
+[PREFILL-TIMING]       fa2         0.1ms (  5.4% of gqa)  [0.0ms/call avg]
+[PREFILL-TIMING]       gate:         0.0ms (  0.1% of gqa)
+[PREFILL-TIMING]       o_proj:       0.5ms ( 19.7% of gqa)
+[PREFILL-TIMING]     gqa queue events:
+[PREFILL-TIMING]         proj         event=     1.7ms wall=     1.8ms wall_minus_event=     0.0ms sync=     0.0ms over 6 calls
+[PREFILL-TIMING]         qkv_norm     event=     0.0ms wall=     0.0ms wall_minus_event=     0.0ms sync=     0.0ms over 6 calls
+[PREFILL-TIMING]         rope         event=     0.1ms wall=     0.1ms wall_minus_event=     0.0ms sync=     0.1ms over 6 calls
+[PREFILL-TIMING]         fa2          event=     0.1ms wall=     0.1ms wall_minus_event=     0.0ms sync=     0.1ms over 6 calls
+[PREFILL-TIMING]         kv_append    event=     0.0ms wall=     0.0ms wall_minus_event=     0.0ms sync=     0.0ms over 0 calls
+[PREFILL-TIMING]         o_proj       event=     0.5ms wall=     0.5ms wall_minus_event=     0.0ms sync=     0.0ms over 6 calls
+[PREFILL-TIMING]     hqq projection internals:
+[PREFILL-TIMING]       marlin_float_zp:      1.3ms over 24 calls
+[PREFILL-TIMING]       group_sums:           0.2ms over 24 calls
+[PREFILL-TIMING]       correction_gemm:      0.4ms over 24 calls
+[PREFILL-TIMING]       correction_add:       0.2ms over 24 calls
+[PREFILL-TIMING]     mamba2 breakdown (diagnostic sync-isolated): wall=   296.6ms ( 42.2% of prefill,  97.1% of mixer) event=   296.0ms sync=   295.3ms
+[PREFILL-TIMING]       in_proj          wall=     1.4ms event=     1.3ms sync=     1.0ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]       split_extract    wall=     0.2ms event=     0.2ms sync=     0.1ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]       conv1d_silu      wall=     0.5ms event=     0.4ms sync=     0.3ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]       ssd_scan         wall=   293.2ms event=   293.2ms sync=   293.1ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]       gated_rmsnorm    wall=     0.3ms event=     0.2ms sync=     0.2ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]       out_proj         wall=     0.8ms event=     0.8ms sync=     0.5ms wall_minus_event=     0.1ms over 23 calls
+[PREFILL-TIMING]   moe:       384.8ms ( 54.7%)
+[PREFILL-TIMING]     moe breakdown (48 layers):
+[PREFILL-TIMING]       gate:         1.2ms (  0.3% of moe)
+[PREFILL-TIMING]       dma:        358.0ms ( 93.0% of moe)
+[PREFILL-TIMING]         route_d2h:     0.4ms ptr_alloc:     0.3ms ptr_build:     0.1ms
+[PREFILL-TIMING]         cold_h2d:     14.9ms ptr_upload:     0.2ms dma_wait:   340.2ms
+[PREFILL-TIMING]       w1+act:      12.5ms (  3.3% of moe)
+[PREFILL-TIMING]       w2:           9.7ms (  2.5% of moe)
+[PREFILL-TIMING]       scatter:      0.3ms (  0.1% of moe)
+[PREFILL-TIMING]       shared:       0.3ms (  0.1% of moe)
+[PREFILL-TIMING]   other:      12.1ms (  1.7%)
+  [32mdecode: 32 tokens in 1.20s (26.7 tok/s)  VRAM: 23714 MB free now, 23714 MB min free during decode[0m
+  [32mLong calibration: baseline=23,714 MB, prefill post-alloc=23,516 MB, prefill min=22,908 MB, decode min=23,714 MB, post-cleanup=23,714 MB[0m
+  [32mLong calibration: prefill 0.87s (147.4 tok/s), decode 1.71s (18.7 tok/s)[0m
+  [32mScratch reservation: max=11,786 MB (at 50,000 tokens)[0m
+
+[1m[36m▸ VRAM calibration complete[0m
+  [32mPost-calibration free VRAM: 23,714 MB[0m
+  [32mTransient deltas: short prefill=776 MB, long prefill=806 MB, short decode=2 MB, long decode=0 MB[0m
+  [32mGPU0 decode HCS budget: 23,112 MB[0m
+  [32mPrefill HCS budgets: short=22,338 MB, long=22,308 MB[0m
+  [32mWorst-case prefill scratch reservation: 11,786 MB at 50,000 tokens[0m
+
+[1m[36m▸ Startup diagnostic exit[0m
+  [32mExiting after VRAM calibration by request[0m

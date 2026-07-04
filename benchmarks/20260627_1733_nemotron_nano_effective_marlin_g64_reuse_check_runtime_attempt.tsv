@@ -1,0 +1,15 @@
+item	value	detail
+command	./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf	no build/cache flags
+tmux_session	nano_effective_g64_reuse	startup-only run
+exit_code	137	stopped after first cache-write evidence
+server_ready	false	no KRASIS SERVER READY line
+requests_sent	0	no reference_test matches in server log
+attribution_checkpoint_envs_off	true	projection/consume-boundary/read-only checkpoint/expert-HQQ envs unset
+hqq_attention_reused	true	log line 24 validates cached HQQ attention artifacts
+effective_marlin_g64_present_before_run	true	15849200704 byte final artifact present
+effective_marlin_g64_loaded	false	no Loaded GPU Marlin cache line before stop
+cache_write_detected	true	log lines 26 and 28 entered Marlin build path before READY
+write_target_tmp	/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/experts_marlin_int4_g128_calamax.bin.tmp	2711326528 bytes recorded before removal
+write_target_lock	/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/experts_marlin_int4_g128_calamax.bin.lock	7 bytes recorded before removal
+effective_marlin_g64_after_stop	unchanged	mtime still 2026-06-27 18:24:07.467816558 +0100
+tmp_or_lock_files_after_cleanup	false	partial g128 tmp/lock removed

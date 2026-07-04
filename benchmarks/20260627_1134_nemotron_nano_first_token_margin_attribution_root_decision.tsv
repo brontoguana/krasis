@@ -1,0 +1,14 @@
+field	value
+status	stopped_after_existing_artifact_analysis
+live_server_run	not_run
+cache_generation	not_run
+source_changes	none
+token_margin_available	true
+per_layer_per_expert_margin_attribution_available	false
+least_bad_variant_for_stability	hqq6_g32
+least_bad_variant_for_logprob_distance	hqq6_g64
+case0_margin_pattern	HQQ6 g64 and g32 both widen the 1044-over-1321 boundary versus BF16; no selected-token flip.
+case2_margin_pattern	BF16 margin is +0.370508194 for 1044 over 1321; HQQ6 g64 shifts by -0.612822533 to -0.242314339 and flips to 1321; HQQ6 g32 shifts by -0.300786972 but remains +0.069721222 and keeps 1044.
+why_no_live_rerun	Existing saved responses already expose the required target-token margins; the missing part is instrumentation for exact per-layer/per-expert margin attribution, which an unmodified live rerun would not provide.
+missing_instrumentation	Need env-gated capture of target tokens 1044/1321 that records LM-head row difference, full selected-row hidden state at final LM-head input, per-layer selected-row hidden deltas for BF16-vs-HQQ consumed paths, routing/contributor metadata, and projection of each delta onto the 1044-vs-1321 margin.
+next_gate_if_continuing	Implement targeted margin-attribution instrumentation only, then run cases 0 and 2 for HQQ6 g32 and HQQ6 g64 against /v1/internal/reference_test using existing diagnostic specs/caches.

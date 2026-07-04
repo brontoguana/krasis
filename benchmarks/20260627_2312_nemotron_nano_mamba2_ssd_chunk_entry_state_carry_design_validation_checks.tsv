@@ -1,0 +1,17 @@
+check	status	details
+summary_json	pass	closed summary parses and records runtime_diagnostic_needed=false and implementation_done=false
+tsv_shape	pass	all 2312 TSV artifacts have no blank rows
+source_markers	pass	no v3 candidate markers exist in Rust/CUDA/Python
+runtime_artifacts_absent	pass	no 2312 .log or .exit runtime/build artifacts were created
+requests_absent	pass	static design gate sent no requests
+benchmark_absent	pass	static design gate ran no benchmark
+cache_generation_absent	pass	static design gate ran no cache generation
+dev_syntax	pass	bash -n dev passed
+nemotron_diff_check	pass	git diff --check passed in krasis-nemotron-dev
+internal_diff_check	pass	git diff --check passed in krasis-internal
+protected_config	pass	only expected tests-only Nano configs are untracked
+tmux_idle	pass	no tmux server running
+runtime_idle	pass	no matching Krasis runtime/build processes
+nvidia_idle	pass	no NVIDIA compute process
+cache_temp_lock	pass	no Nano cache .tmp/.lock/.pending files outside HF download locks
+final_snapshot	pass	2026-06-27T23:19:23Z GPUs 15 MB / 11 MB, disk 588G, RAM 967Gi

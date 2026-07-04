@@ -150,6 +150,7 @@ def gptq_marlin_gemm(
     size_k: int,
     is_k_full: bool,
     use_fp32_reduce: bool = True,
+    c_tmp: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Call vendored Marlin GEMM kernel via ctypes.
 
@@ -159,9 +160,11 @@ def gptq_marlin_gemm(
     if _marlin_mm_fn is None:
         _load_marlin_lib()
 
-    # Allocate output if not provided
+    # Allocate output if not provided.
     if c is None:
         c = torch.empty(size_m, size_n, dtype=torch.bfloat16, device=a.device)
+    if use_fp32_reduce and c_tmp is None:
+        c_tmp = torch.empty(size_m, size_n, dtype=torch.float32, device=a.device)
 
     def _ptr(t):
         """Get raw CUDA pointer from tensor, or NULL."""
@@ -218,7 +221,7 @@ def gptq_marlin_gemm(
         _ptr(a),                           # A
         _ptr(b_q_weight),                  # B
         _ptr(c),                           # C
-        ctypes.c_void_p(0),                # C_tmp
+        _ptr(c_tmp),                       # C_tmp
         _ptr(b_scales),                    # s (scales)
         ctypes.c_void_p(0),                # s2 (scale2, not used)
         _ptr(b_zeros),                     # zp (zeros)

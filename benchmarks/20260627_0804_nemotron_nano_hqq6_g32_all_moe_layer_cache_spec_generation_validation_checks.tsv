@@ -1,0 +1,28 @@
+check	status	detail
+record_first	pass	0749 recorded first with 93/0, ./dev build passed, HQQ6 group_size 32|64, HQQ8 rejected, disk 707G, RAM 966Gi, and no live server/cache generation
+headroom_before_generation	pass	disk 707G available; RAM 966Gi available
+generator_entrypoint	pass	used built command ./dev expert-hqq-cache-generate benchmarks/20260627_0804_nemotron_nano_hqq6_g32_all_moe_layer_cache_spec_generation_all_layer_generation_manifest.json
+generator_exit	pass	exit status 0; status=ok
+cache_file_exists	pass	benchmarks/20260627_0804_nemotron_nano_hqq6_g32_all_moe_layer_cache_spec_generation_hqq6_g32_all_moe_layers.krhq exists
+cache_file_size	pass	29375326272 bytes
+diagnostic_spec_exists	pass	benchmarks/20260627_0804_nemotron_nano_hqq6_g32_all_moe_layer_cache_spec_generation_diagnostic_cache_spec.json exists
+manifest_metadata	pass	nbits=6; group_size=32; layers=23; experts/layer=128; tensors=5888
+spec_metadata	pass	nbits=[6]; group_size=[32]; requirements=23; layer-expert refs=2944
+generator_counts	pass	payload bytes=29374808064; cache bytes=29375326272; tensor records=5888
+headroom_after_generation	pass	disk 680G available; RAM 962Gi available; GPUs 15 MB / 11 MB
+artifact_assertions	pass	summary/result/spec/cache/metadata assertions passed
+bash_syntax	pass	bash -n dev
+python_compile	pass	./dev python -m py_compile python/krasis/*.py
+cargo_format	pass	cargo fmt --check
+diff_whitespace	pass	git diff --check in krasis-nemotron-dev and krasis-internal
+protected_configs	pass	only known pre-existing untracked tests/nemotron-nano-bf16-experts-a16.conf
+source_changes_required	pass	no source changes were required in this gate; focused tests/build not rerun
+live_server_scope	pass	no live server run
+production_hqq_scope	pass	production HQQ not enabled
+speed_benchmark_scope	pass	no speed benchmark run
+fallback_scope	pass	no fallback added
+decode_hcs_scope	pass	decode/HCS not touched
+selected_expert_retargeting_scope	pass	no selected-expert retargeting
+int4_hqq4_scope	pass	no INT4/HQQ4 work
+cleanup	pass	./dev kill completed; no matching runtime/generator/analyzer process
+final_state	pass	2026-06-27T08:24:22Z; no tmux server; GPUs 15 MB / 11 MB; disk 680G available; RAM 965Gi available

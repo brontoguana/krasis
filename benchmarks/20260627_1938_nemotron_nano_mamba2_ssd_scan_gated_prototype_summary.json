@@ -1,0 +1,124 @@
+{
+  "gate": "20260627_1938_nemotron_nano_mamba2_ssd_scan_gated_prototype",
+  "status": "closed_prototype_rejected_performance_negative",
+  "opened_utc": "2026-06-27T19:38:34Z",
+  "closed_utc": "2026-06-27T20:08:59Z",
+  "record_first": {
+    "source_gate": "20260627_1928_nemotron_nano_mamba2_ssd_scan_optimization_target_analysis",
+    "ssd_scan_ms": 114449.4,
+    "ssd_scan_pct_of_mamba2_wall": 99.661,
+    "ssd_scan_pct_of_total_prefill_wall": 97.523,
+    "gqa_hqq_attention_ruled_out": true,
+    "moe_marlin_ruled_out": true,
+    "root_cause": "correctness-first Rust/CUDA sequential SSD scan with duplicate scalar work across head_dim lanes"
+  },
+  "scope": {
+    "target_config": "tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+    "default_behavior": "existing sequential kernel remains default",
+    "prototype_gate": "KRASIS_MAMBA2_SSD_REUSE_PROTO",
+    "oracle_gate": "KRASIS_MAMBA2_SSD_REUSE_PROTO_ORACLE",
+    "silent_fallback_allowed": false,
+    "correctness_oracle_required": true,
+    "dimension_source": "config/runtime tensors only",
+    "build_command": "./dev build",
+    "smoke_requests": false,
+    "speed_benchmark": false,
+    "decode_hcs_changes": false,
+    "production_enablement": false
+  },
+  "implementation": {
+    "default_path_changed": false,
+    "prototype_path": "head-shared local scalar reuse within the existing sequential SSD algorithm",
+    "prototype_enabled_by_default": false,
+    "fail_closed_conditions": [
+      "oracle requested without prototype gate",
+      "prototype requested without prefill timing/liveness diagnostics",
+      "prototype combined with prefill device trace SSD detail",
+      "oracle output/state mismatch"
+    ],
+    "source_spans": {
+      "env_helpers": "src/gpu_prefill.rs:66",
+      "oracle_diff": "src/gpu_prefill.rs:2305",
+      "launch_helper": "src/gpu_prefill.rs:22141",
+      "gate_checks": "src/gpu_prefill.rs:30383",
+      "prototype_dispatch": "src/gpu_prefill.rs:30565",
+      "oracle_mismatch_fail_closed": "src/gpu_prefill.rs:30670",
+      "required_ptx_symbol": "src/gpu_prefill.rs:52519",
+      "kernel_loader": "src/gpu_prefill.rs:52932",
+      "cuda_kernel": "src/cuda/prefill_kernels.cu:5115",
+      "cuda_host_wrapper": "src/cuda/prefill_kernels.cu:5699",
+      "warmup_fail_closed": "python/krasis/server.py:1740"
+    }
+  },
+  "build": {
+    "command": "./dev build",
+    "exit_code": 0,
+    "duration_s": 171,
+    "log": "benchmarks/20260627_1938_nemotron_nano_mamba2_ssd_scan_gated_prototype_build2.log",
+    "ptx_symbol_present": true
+  },
+  "correctness_oracle": {
+    "command": "KRASIS_STARTUP_DIAG=1 KRASIS_PREFILL_TIMING=1 KRASIS_PREFILL_LIVENESS_TIMING=1 KRASIS_MAMBA2_SSD_REUSE_PROTO=1 KRASIS_MAMBA2_SSD_REUSE_PROTO_ORACLE=1 KRASIS_STARTUP_WARMUP_TOKENS=128 KRASIS_STARTUP_CAL_SHORT_TOKENS=128 KRASIS_STARTUP_CAL_LONG_TOKENS=128 KRASIS_STARTUP_EXIT_AFTER_CALIBRATION=1 ./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+    "exit_code": 0,
+    "tokens": 128,
+    "oracle_rows": 69,
+    "output_mismatch_sum": 0,
+    "state_mismatch_sum": 0,
+    "output_max_abs": 0.0,
+    "output_mean_abs_avg": 0.0,
+    "state_max_abs": 0.0,
+    "state_mean_abs_avg": 0.0,
+    "log": "benchmarks/20260627_1938_nemotron_nano_mamba2_ssd_scan_gated_prototype_small_oracle2.log"
+  },
+  "long_diagnostic": {
+    "command": "KRASIS_STARTUP_DIAG=1 KRASIS_PREFILL_TIMING=1 KRASIS_PREFILL_LIVENESS_TIMING=1 KRASIS_MAMBA2_SSD_REUSE_PROTO=1 KRASIS_STARTUP_WARMUP_TOKENS=128 KRASIS_STARTUP_CAL_SHORT_TOKENS=128 KRASIS_STARTUP_CAL_LONG_TOKENS=39920 KRASIS_STARTUP_EXIT_AFTER_CALIBRATION=1 ./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+    "exit_code": 0,
+    "tokens": 39920,
+    "prefill_wall_ms": 123870.0,
+    "prefill_tokens_per_second": 322.3,
+    "mamba2_total_ms": 121117.22,
+    "ssd_scan_ms": 120711.931,
+    "ssd_scan_delta_vs_1908_ms": 6262.531,
+    "ssd_scan_delta_vs_1908_pct": 5.472,
+    "prefill_delta_vs_1908_ms": 6514.0,
+    "prefill_delta_vs_1908_pct": 5.551,
+    "log": "benchmarks/20260627_1938_nemotron_nano_mamba2_ssd_scan_gated_prototype_long_effect.log"
+  },
+  "cache_and_runtime": {
+    "hqq_attention_reused": true,
+    "effective_marlin_g64_loaded": true,
+    "cache_write_evidence": false,
+    "requests_sent": 0,
+    "benchmark_path": false,
+    "temp_lock_files": "none"
+  },
+  "decision": {
+    "correctness": "passed exact oracle comparison",
+    "performance": "failed; prototype is slower than the existing sequential kernel on the long diagnostic",
+    "keep_or_revert": "not worth keeping as an optimization; keep disabled only as recorded prototype evidence or revert/replace with a real chunk-parallel design in a follow-up gate",
+    "production_enabled": false
+  },
+  "cleanup": {
+    "final_snapshot_utc": "2026-06-27T20:08:59Z",
+    "gpu_memory_mb": {
+      "0": 15,
+      "1": 11
+    },
+    "disk_free": "588G",
+    "ram_available": "966Gi",
+    "tmux_or_runtime_processes": false,
+    "nvidia_compute_processes": false,
+    "cache_temp_lock_files": false
+  },
+  "artifacts": {
+    "build_result": "benchmarks/20260627_1938_nemotron_nano_mamba2_ssd_scan_gated_prototype_build_result.tsv",
+    "runtime_attempt": "benchmarks/20260627_1938_nemotron_nano_mamba2_ssd_scan_gated_prototype_runtime_attempt.tsv",
+    "oracle_correctness": "benchmarks/20260627_1938_nemotron_nano_mamba2_ssd_scan_gated_prototype_oracle_correctness.tsv",
+    "long_substage_timing": "benchmarks/20260627_1938_nemotron_nano_mamba2_ssd_scan_gated_prototype_long_substage_timing.tsv",
+    "timing_comparison": "benchmarks/20260627_1938_nemotron_nano_mamba2_ssd_scan_gated_prototype_timing_comparison.tsv",
+    "startup_cache_validation": "benchmarks/20260627_1938_nemotron_nano_mamba2_ssd_scan_gated_prototype_startup_cache_validation.tsv",
+    "source_artifacts": "benchmarks/20260627_1938_nemotron_nano_mamba2_ssd_scan_gated_prototype_source_artifacts.tsv",
+    "decision": "benchmarks/20260627_1938_nemotron_nano_mamba2_ssd_scan_gated_prototype_root_decision.tsv",
+    "validation": "benchmarks/20260627_1938_nemotron_nano_mamba2_ssd_scan_gated_prototype_validation_checks.tsv"
+  }
+}

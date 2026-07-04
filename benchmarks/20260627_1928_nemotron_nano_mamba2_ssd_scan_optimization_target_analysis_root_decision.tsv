@@ -1,0 +1,9 @@
+decision	status	evidence	next_step
+root_cause_identified	yes	Current SSD prefill kernel is a correctness-first sequential scan, explicitly documented as equivalent to running decode N times.	Do not optimize HQQ attention or Marlin for the Nano prefill symptom.
+what_is_slow	kernel_algorithm	src/cuda/prefill_kernels.cu:4965 and src/cuda/prefill_kernels.cu:5002 show sequential L scan; src/cuda/prefill_kernels.cu:5063 shows per-token local chunk scan.	Replace or augment the SSD kernel algorithm.
+launch_count_not_primary	yes	Normal path launches one SSD kernel per Mamba2 layer with 64 CTAs; measured per-layer spread is only 0.6184% of mean.	Do not spend next gate on launch overhead.
+layout_transfer_not_primary	yes	Inputs are contiguous row-major GPU buffers; event/sync/wall all align; no D2H/H2D path in SSD hot substage.	Do not spend next gate on CPU/GPU transfer.
+torch_python_fallback	no	SSD is Rust-launched CUDA PTX RawCuFunc, not Torch/Python.	Keep fix in Rust/CUDA.
+proposed_patch	recorded	Add a gated alternative chunk-parallel/reuse SSD prefill kernel that precomputes or shares per-head/group/t/u CB, decay, and old-state scalar terms across head_dim lanes, then vector-applies to x; retain current sequential kernel as correctness oracle until validated.	Next gate should implement the alternative under a diagnostic/feature gate with output hash comparison and the same startup diagnostic.
+expected_measurable_effect	recorded	The largest redundant term is dimension-derived: CB/old-state scalar loops are repeated across 64 head_dim lanes; eliminating that duplication plus chunk-parallelizing local scan should make SSD/scan no longer dominate 97.523% of long prefill.	Measure with KRASIS_PREFILL_TIMING/KRASIS_PREFILL_LIVENESS_TIMING first, then a timing-disabled speed run only after correctness is proven.
+optimization_attempt_this_gate	no	User requested analysis first; no source optimization was applied.	Close gate after records and validation.

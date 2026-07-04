@@ -1,0 +1,22 @@
+metric	value	notes
+command	./dev benchmark tests/nemotron-super-bf16kv-a16.conf	No Nano optimization env stack; corrected-source build.
+exit_code	0	Benchmark completed.
+model	NVIDIA-Nemotron-3-Super-120B-A12B-BF16	1x RTX 5090.
+config	tests/nemotron-super-bf16kv-a16.conf	INT4 routed experts, INT4 CPU experts, INT8 shared expert, BF16 attention/KV.
+prefill_internal_best_tok_s	1228.7	Best of 1K/5K/8150 token internal prefill runs.
+prefill_run_1_tok_s	793.6	1001 tokens in 1261.3 ms.
+prefill_run_2_tok_s	1228.7	5001 tokens in 4070.3 ms.
+prefill_run_3_tok_s	1082.7	8151 tokens in 7528.6 ms.
+decode_internal_best_tok_s	22.15	Best of 50/100/250 token internal decode runs.
+decode_50_tok_s	22.15	45.2 ms/tok.
+decode_100_tok_s	21.28	47.0 ms/tok.
+decode_250_tok_s	19.83	50.4 ms/tok.
+http_round_trip_best_tok_s	35.24	Best of 50/100/250 token HTTP runs.
+hcs_loaded_experts	3358/20480	16.4% after benchmark decode.
+hcs_startup_pool	5152/20480	25.2% soft pool at startup ready.
+startup_ready_free_mb	958	After startup pressure eviction; safety margin 600 MB.
+decode_min_free_mb	850	Benchmark decode low-water; safety margin 600 MB.
+prefill_cap_tokens	8150	Runtime-calibrated cap from long probe low-water.
+previous_super_prefill_tok_s	192.9	Prior standard Super benchmark before default parallel SSD promotion.
+previous_super_decode_tok_s	21.86	Prior standard Super benchmark.
+decision	accepted	Promoted Nemotron defaults produced large Super prefill speedup without explicit env stack; decode stayed comparable.

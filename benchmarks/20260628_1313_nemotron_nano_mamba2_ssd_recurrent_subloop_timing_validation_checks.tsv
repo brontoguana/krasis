@@ -1,0 +1,13 @@
+check	status	details
+summary_json	pass	status closed; build exit 0; small full-oracle exact; long no-oracle oracle/output-subloop counts zero
+artifact_tsv_shapes	pass	build/runtime/oracle/recurrent/candidate/source/cache TSV field counts stable
+small_full_oracle	pass	69/69 exact; output mismatches 0; state mismatches 0; row97,row64,row82 probes exact
+long_no_oracle_candidate_timing	pass	23 long recurrent records and 23 long candidate records at 39920 tokens; no oracle records; no output-subloop records
+source_markers	pass	recurrent timing env, CUDA optional timing buffer, Rust JSON emit, and Python fail-closed env present
+default_path	pass	default sequential SSD markers preserved; block-scan coeff-tile and candidate timing remain opt-in
+failed_local_old_state_marker_absent	pass	local_old_state_exact not present in CUDA/Rust sources
+diff_checks	pass	git diff --check, bash -n dev, and krasis-internal diff check passed
+protected_configs	pass	unchanged expected tests-only Nano config status: ?? tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf
+runtime_requests	pass	no request markers in small or long startup diagnostic logs
+speed_benchmark	pass	no speed benchmark run for this gate
+idle_state	pass	2026-06-28T13:33:15Z no tmux session, runtime/build/GPU compute process; GPU memory 15 MB / 11 MB; no Nano Krasis temp/lock files

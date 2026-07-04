@@ -1,0 +1,13 @@
+check	status	details
+record_first	done	1244 recorded before live runs, including old g32 0/3 selected flips versus 1244 g32 case0 flip
+existing_artifact_comparison	done	0826 g32 quality and 1244 projection rerun compared before live checks
+live_scope	pass	HQQ6 g32 case0 only, existing g32 cache/spec, endpoint /v1/internal/reference_test
+debug_only_http	pass	HTTP 200, 36.943106s, selected token 1044
+projection_only_http	pass	HTTP 200, 36.428060s, selected token 1044
+consume_diag_only_http	pass	HTTP 200, 44.020051s, selected token 1044
+isolation_result	pass	neither projection nor consume-boundary diagnostics alone flipped output; 1244 flip requires combined diagnostics
+forbidden_g64	pass	no HQQ6 g64 run in this gate
+forbidden_cache_generation	pass	no cache generation
+forbidden_new_variants	pass	no new variants, HQQ8, INT4/HQQ4, or k/v work
+forbidden_production	pass	no production HQQ enablement
+cleanup	pass	final snapshot 2026-06-27T14:15:26Z no tmux server, no matching runtime process, GPUs 15 MB / 11 MB, disk 614G, RAM 965Gi

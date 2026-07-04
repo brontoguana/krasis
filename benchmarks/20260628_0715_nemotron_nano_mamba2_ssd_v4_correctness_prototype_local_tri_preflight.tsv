@@ -1,0 +1,12 @@
+probe	field	value
+primary	target	row=64 head=11 d=22 state_flat=0
+primary	flat_index	262870
+primary	chunk_start	64
+primary	chunk_pos	0
+primary	cpu_matches_sequential_gpu_bits	true
+primary	cpu_y_bf16_bits	0x3bb8
+primary	sequential_gpu_y_bf16_bits	0x3bb8
+primary	state_flat_expected_cpu_bits	0x3b90c258
+primary	state_flat_gpu_bits	0x3b90c258
+primary	state_flat_abs_error	0.0
+primary	interpretation	local triangular and state-flat preflight matched existing sequential GPU oracle

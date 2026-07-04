@@ -1,0 +1,12 @@
+check	status	value
+manifest_layer_count	passed	23
+manifest_expert_count	passed	128
+manifest_tensor_records	passed	5888
+manifest_nbits	passed	8
+manifest_group_size	passed	64
+manifest_layout	passed	row_major_axis1_grouped_uint8
+spec_requirement_count	passed	23
+spec_nbits_unique	passed	[8]
+spec_group_size_unique	passed	[64]
+spec_experts_per_requirement	passed	128
+cache_stat_matches_log	passed	33047177280

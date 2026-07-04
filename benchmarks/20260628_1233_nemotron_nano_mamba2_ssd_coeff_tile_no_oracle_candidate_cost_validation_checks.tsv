@@ -1,0 +1,11 @@
+check	status	evidence
+record_first	pass	Opened public/internal changelog, TRACKING, DEBUGLOG, and summary before final analysis artifacts.
+json_shape	pass	jq parsed summary and confirmed gate id before closeout.
+tsv_shape	pass	All 1233 TSV artifacts use stable tab-separated field counts.
+existing_env_support	pass	Source audit confirms block-scan candidate requires KRASIS_MAMBA2_SSD_BLOCK_SCAN_ORACLE=1, so no-oracle timing is not supported.
+runtime_not_run	pass	No build, startup, long diagnostic, request, speed benchmark, decode/HCS, production enablement, or default-path change occurred.
+source_marker_state	pass	Accepted coeff-tile markers remain; proposed KRASIS_MAMBA2_SSD_BLOCK_SCAN_CANDIDATE_TIMING marker is absent from source.
+diff_check	pass	git diff --check, bash -n dev, and krasis-internal diff check passed.
+protected_configs	pass	Protected config status unchanged with expected tests-only Nano configs.
+temp_files	pass	No Nano Krasis temp/lock files found outside standing Hugging Face download metadata.
+idle_state	pass	2026-06-28T12:40:12Z: GPUs 15 MB / 11 MB, no runtime/build/GPU compute process.

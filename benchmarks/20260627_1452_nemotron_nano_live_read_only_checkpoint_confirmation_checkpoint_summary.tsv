@@ -1,0 +1,2 @@
+case	variant	checkpoint_available	schema	selected_token	final_hidden_hash	layer_delta_checkpoint_count	all_pre_post_match	mismatch_count	mismatch_layers
+0	hqq6_g32	true	krasis_read_only_checkpoint_trace_v1	1044	0xc0317cde307060bf	23	true	0	

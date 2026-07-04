@@ -1,0 +1,2 @@
+target	layer	output_matches	candidate_bits	oracle_bits	candidate_value	oracle_value	c_state_total_exact	local_hf_chunk_scan	local_old_state	d_skip
+row=97 head=48 d=24	0	false	0xc233	0xc234	-44.75	-45.0	-44.84210205078125	-17.792999267578125	0.0	0.003001570701599121

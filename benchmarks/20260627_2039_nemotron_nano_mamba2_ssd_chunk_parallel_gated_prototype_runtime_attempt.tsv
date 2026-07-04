@@ -1,0 +1,14 @@
+field	value
+gate	20260627_2039_nemotron_nano_mamba2_ssd_chunk_parallel_gated_prototype
+command	KRASIS_STARTUP_DIAG=1 KRASIS_PREFILL_TIMING=1 KRASIS_PREFILL_LIVENESS_TIMING=1 KRASIS_MAMBA2_SSD_CHUNK_PARALLEL=1 KRASIS_MAMBA2_SSD_CHUNK_PARALLEL_ORACLE=1 KRASIS_STARTUP_WARMUP_TOKENS=256 KRASIS_STARTUP_CAL_SHORT_TOKENS=256 KRASIS_STARTUP_CAL_LONG_TOKENS=256 KRASIS_STARTUP_EXIT_AFTER_CALIBRATION=1 ./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf
+exit	1
+result	fail_closed_oracle_mismatch
+tokens	256
+failed_layer	0
+requests_sent	0
+benchmark_path	false
+speed_benchmark	false
+decode_hcs	false
+production_enablement	false
+long_diagnostic_run	false
+log	benchmarks/20260627_2039_nemotron_nano_mamba2_ssd_chunk_parallel_gated_prototype_small_oracle.log

@@ -1,0 +1,3 @@
+run	target_row	target_head	target_d	target_flat	records	matching_outputs	max_abs_c_state_total_exact_minus_replayed	last_candidate_bits	last_oracle_bits	last_candidate_value	last_oracle_value	last_y_pre_bf16	result
+small_startup	97	48	24	400408	69	69	0.000003814697265625	0x3c86	0x3c86	0.016357421875	0.016357421875	0.01632504351437092	pass
+long_startup	97	48	24	400408	69	69	0.000003814697265625	0x3cba	0x3cba	0.022705078125	0.022705078125	0.02265973947942257	pass

@@ -1,0 +1,9 @@
+field	value	evidence
+root_decision	hqq6_g16_all_moe_cache_spec_generation_passed	Built-command generator exited 0 with status=ok and wrote complete cache/spec artifacts.
+cache_file_bytes	36719028288	Generator log and stat agree on exact cache file size.
+total_payload_bytes	36718510080	Generator log.
+metadata_validation	passed	Manifest/spec/cache metadata validation all pass.
+source_changes_required	no	Existing g16 generator support from 0853 was sufficient.
+tests_build_rerun	no	No source changes were made in this gate; only lightweight metadata/spec validation was required.
+live_server	no	No live server was launched.
+production_hqq	no	No production HQQ enablement or runtime semantic change.

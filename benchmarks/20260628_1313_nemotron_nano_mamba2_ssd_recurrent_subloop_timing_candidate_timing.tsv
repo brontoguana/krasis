@@ -1,0 +1,2 @@
+scope	tokens	records	total_candidate_avg_ms	total_candidate_sum_ms	recurrent_kernel_avg_ms	coeff_tile_output_avg_ms	live_state_copy_avg_ms	commit_copies_avg_ms	buffer_alloc_avg_ms	recurrent_timing_download_avg_ms	residual_avg_ms	oracle_enabled	output_subloop_timing_env	recurrent_subloop_timing_env
+long_no_oracle_candidate	39920	23	1171.691221826087	26948.898102	725.9238615217391	431.1865319565218	12.886277869565221	0.42840569565217396	1.2044510869565217	0.016051	0.04564269565214644	false	false	true

@@ -1,0 +1,20 @@
+{
+  "consume_log_rows": 69,
+  "group_size": [
+    64
+  ],
+  "layers_per_rows": {
+    "2676": 23,
+    "2694": 23,
+    "2958": 23
+  },
+  "nbits": [
+    6
+  ],
+  "rows_groups": {
+    "2676": 23,
+    "2694": 23,
+    "2958": 23
+  },
+  "total_copied_output_bytes": 1029740544
+}

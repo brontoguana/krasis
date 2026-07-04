@@ -1,0 +1,8 @@
+item	status	value	detail
+hqq_attention_manifest	pass	/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/attention_hqq_v5_grid65_33/manifest.json	complete HQQ4 g128 manifest from 1648
+hqq_attention_validation_line	pass	HQQ attention artifacts validated (115 MB cached), 27940 MB free	line 24 of server log
+server_config	pass	tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf	port 18012; attention hqq4; KV k4v4
+forbidden_flags_absent	pass	true	no --build-cache or --force-rebuild-hqq-cache in runtime command
+server_ready	fail	false	server stopped before READY
+marlin_expert_cache_build	unexpected	GPU INT4 Marlin cache built: 15.8 GB in 42s	line 35 of server log; violates existing-cache-only smoke condition
+requests_sent	pass	0	no smoke payloads sent

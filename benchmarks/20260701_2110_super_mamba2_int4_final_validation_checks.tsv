@@ -1,0 +1,16 @@
+check	status	command_or_artifact	notes
+build	pass	./dev build	Build passed after adding cached Mamba2 projection INT4 support and the Mamba2 SSD runtime-temp reserve.
+py_compile	pass	./dev python -m py_compile python/krasis/model.py python/krasis/server.py	Compile check passed after artifact/internal updates.
+startup_diagnostic_cache_build	rejected_expected	KRASIS_VRAM_LEDGER=1 KRASIS_DECODE_KEEPALIVE_LEDGER=1 KRASIS_STARTUP_EXIT_AFTER_CALIBRATION=1 ./dev run tests/nemotron-super-4-4-hqq4-k4v4-a16.conf	First startup run built 80/80 Mamba2 projection INT4 artifacts and proved BF16 projection residency was removed, then OOMed during long calibration because Mamba2 SSD runtime temps were not reserved.
+startup_diagnostic_runtime_reserve	pass	benchmarks/20260701_2055_super_mamba2_int4_startup2.log	After the config-derived Mamba2 runtime-temp reserve fix, startup calibration passed at 15191 tokens and loaded 7084/20480 soft HCS experts before pressure eviction.
+source_signature_cache_contract	pass	benchmarks/20260701_2130_super_mamba2_int4_signature_startup.log	Post-review diagnostic rebuilt the cache after adding source_signature to the manifest, reached KRASIS SERVER READY, and reproduced startup free 20232 MB plus HCS 7084/20480 before pressure eviction.
+source_signature_manifest	pass	/home/main/.krasis/cache/NVIDIA-Nemotron-3-Super-120B-A12B-BF16/mamba2_projection_marlin_int4_v1_g128/manifest.json	Manifest now includes model_path, rescale_prenorm_residual, source_files, and source_signature e8fc857ad12b271c221f52cdd0e8a9ee574f79a7a85125f142064a3cdcc1489f.
+final_benchmark	pass	./dev benchmark tests/nemotron-super-4-4-hqq4-k4v4-a16.conf	Final timing-off benchmark exited 0 with prefill 1753.7 tok/s, decode 41.96 tok/s, HTTP 49.12 tok/s, HCS 7038/20480, min free 878 MB.
+summary_json	pass	benchmarks/20260701_2110_super_mamba2_int4_final_summary.json	jq parse check passed.
+result_tsv	pass	benchmarks/20260701_2110_super_mamba2_int4_final_result.tsv	Tab field-count check passed.
+benchmark_logs	pass	benchmarks/20260701_2110_super_mamba2_int4_final_benchmark_report.log	Copied report/stdout/server log from logs/dev-benchmark_20260701_205958.
+source_whitespace	pass	git diff --check	No whitespace errors in Krasis worktree.
+dev_shell_syntax	pass	bash -n dev	Development entrypoint shell syntax passed.
+internal_whitespace	pass	git -C /home/main/Documents/Claude/krasis-internal diff --check	No whitespace errors in internal record files.
+protected_configs	pass	git status --short -- testconfigs tests/nemotron-super-4-4-hqq4-k4v4-a16.conf	No protected testconfigs modified; Super HQQ4+k4v4 test config remains an expected untracked tests/ file from earlier work.
+gpu_idle	pass	tmux/nvidia-smi/ps	No benchmark/server tmux session or Krasis GPU process remained after closeout.

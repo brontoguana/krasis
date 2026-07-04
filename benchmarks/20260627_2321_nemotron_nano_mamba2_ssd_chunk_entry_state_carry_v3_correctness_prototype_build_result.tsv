@@ -1,0 +1,3 @@
+phase	command	exit	duration_s	log	notes
+initial_build	./dev build	0	176	20260627_2321_nemotron_nano_mamba2_ssd_chunk_entry_state_carry_v3_correctness_prototype_build.log	Passed before diagnostic-order correction; superseded by final build after moving local-tri oracle before v3 full oracle.
+final_build	./dev build	0	170	20260627_2321_nemotron_nano_mamba2_ssd_chunk_entry_state_carry_v3_correctness_prototype_build2.log	Passed after source ordering correction; used for final startup diagnostic.

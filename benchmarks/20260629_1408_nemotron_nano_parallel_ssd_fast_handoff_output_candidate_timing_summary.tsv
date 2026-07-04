@@ -1,0 +1,12 @@
+metric	count	sum_ms	avg_ms	min_ms	max_ms
+timing_ms.total_candidate_path	23	15088.500784999998	656.0217732608695	655.743801	656.6692750000001
+timing_ms.block_scan_recurrent_kernel.total	23	290.67218499999996	12.63792108695652	12.469275	12.785171
+timing_ms.block_scan_recurrent_kernel.parallel_chunked_phase_ms.chunk_cumsum	23	3.5972809999999997	0.1564035217391304	0.037689	0.220919
+timing_ms.block_scan_recurrent_kernel.parallel_chunked_phase_ms.chunk_state	23	246.04452199999997	10.697587913043478	10.647719	10.773492000000001
+timing_ms.block_scan_recurrent_kernel.parallel_chunked_phase_ms.state_passing	23	41.000477	1.7826294347826086	1.7733079999999999	1.791431
+timing_ms.block_scan_recurrent_kernel.parallel_chunked_phase_ms.exact_state_bridge	23	0	0	0.0	0.0
+timing_ms.block_scan_output_coeff_tile_kernel.total	23	14431.021399	627.435713	627.198072	627.835153
+timing_ms.buffer_alloc_zeroed	23	31.531097000000003	1.3709172608695652	1.275214	2.8985130000000003
+timing_ms.live_to_candidate_state_copy	23	13.248851	0.576037	0.195192	0.78221
+timing_ms.commit_copies.total	23	9.624516999999999	0.4184572608695652	0.41358700000000004	0.44472399999999995
+timing_ms.residual	23	312.401876	13.582690260869565	11.503491999999824	14.387251000000106

@@ -1,0 +1,99 @@
+{
+  "gate": "20260627_1640_nemotron_nano_hqq_k4v4_inventory_non_attribution_smoke",
+  "status": "closed_missing_k4v4_asset",
+  "opened_utc": "2026-06-27T16:40:25Z",
+  "closed_utc": "2026-06-27T16:44:38Z",
+  "record_first": {
+    "source_gate": "20260627_1603_nemotron_nano_hqq6_g64_non_attribution_quality_smoke",
+    "gemma_carried_speeds": "5619.6 / 92.43 / 155.69",
+    "hqq6_g32_non_attribution_selected_token_changes": "0/3",
+    "hqq6_g32_topk_drift": "3/3",
+    "hqq6_g64_case2_quality_failure": {
+      "selected_token": 1321,
+      "bf16_selected_token": 1044,
+      "margin_1044_minus_1321": -0.242314,
+      "bf16_margin_1044_minus_1321": 0.370508,
+      "decision": "quality_failing_no_more_runs_without_concrete_fix_hypothesis"
+    }
+  },
+  "scope": {
+    "target": "Nemotron Nano HQQ k4v4",
+    "use_existing_artifacts_first": true,
+    "run_only_if_valid_cache_spec_exists": true,
+    "endpoint": "/v1/internal/reference_test",
+    "debug_reference_trace": true,
+    "hqq_consume": true,
+    "projection_diag": false,
+    "consume_boundary_diag": false,
+    "read_only_checkpoint_diag": false,
+    "send_case2_first": true,
+    "send_cases_0_and_1_only_if_case2_passes": true,
+    "no_cache_generation": true,
+    "no_source_changes": true,
+    "no_speed_benchmark": true,
+    "no_decode_hcs": true,
+    "no_production_enablement": true,
+    "no_new_variants": true
+  },
+  "planned_artifacts": {
+    "inventory": "20260627_1640_nemotron_nano_hqq_k4v4_inventory_non_attribution_smoke_inventory.tsv",
+    "runtime_attempt": "20260627_1640_nemotron_nano_hqq_k4v4_inventory_non_attribution_smoke_runtime_attempt.tsv",
+    "token_margin": "20260627_1640_nemotron_nano_hqq_k4v4_inventory_non_attribution_smoke_token_margin_summary.tsv",
+    "topk_comparison": "20260627_1640_nemotron_nano_hqq_k4v4_inventory_non_attribution_smoke_topk_comparison.tsv",
+    "consume_summary": "20260627_1640_nemotron_nano_hqq_k4v4_inventory_non_attribution_smoke_consume_summary.tsv",
+    "decision": "20260627_1640_nemotron_nano_hqq_k4v4_inventory_non_attribution_smoke_root_decision.tsv",
+    "validation": "20260627_1640_nemotron_nano_hqq_k4v4_inventory_non_attribution_smoke_validation_checks.tsv"
+  },
+  "inventory_result": {
+    "valid_existing_k4v4_cache_spec": false,
+    "runtime_run": false,
+    "reason": "No unambiguous existing Nemotron Nano HQQ+k4v4 config plus attention-HQQ cache/manifest exists. Existing Nano configs are bf16 attention with fp8_e4m3 or k6v6 KV; existing expert-HQQ diagnostic specs are not k4v4 target assets by themselves.",
+    "missing_assets": [
+      "Nemotron Nano HQQ+k4v4 tests config",
+      "Nano attention-HQQ cache directory/manifest for the k4v4 target path",
+      "unambiguous cache/spec wrapper tying the k4v4 target path to the accepted HQQ6 g32 expert diagnostic cache"
+    ],
+    "present_assets": {
+      "nano_configs": [
+        "tests/nemotron-nano-4-4-a16.conf",
+        "tests/nemotron-nano-4-4-k6v6-a16.conf",
+        "tests/nemotron-nano-4-4-k6v6-a16-search-rmse.conf"
+      ],
+      "expert_hqq_specs": [
+        "benchmarks/20260626_2208_nemotron_nano_diagnostic_hqq_prefill_all_moe_layers_correctness_diagnostic_cache_spec.json",
+        "benchmarks/20260627_0804_nemotron_nano_hqq6_g32_all_moe_layer_cache_spec_generation_diagnostic_cache_spec.json",
+        "benchmarks/20260627_0909_nemotron_nano_hqq6_g16_all_moe_layer_cache_spec_generation_diagnostic_cache_spec.json",
+        "benchmarks/20260627_1038_nemotron_nano_hqq8_g64_all_moe_layer_cache_spec_generation_diagnostic_cache_spec.json"
+      ],
+      "model_cache_contents": [
+        "auto_heatmap.json",
+        "experts_marlin_int4_g64_calamax.bin",
+        "experts_marlin_int4_g64_calsearchrmse.bin"
+      ]
+    }
+  },
+  "proposed_next_gate": {
+    "name": "Nemotron Nano HQQ4 k4v4 cache/config prerequisite",
+    "intent": "Create an explicit tests/ Nano HQQ4+k4v4 config and build/validate the attention-HQQ cache through the built ./dev run path before any smoke requests.",
+    "config_template": "tests/nemotron-nano-4-4-k6v6-a16.conf",
+    "config_changes": [
+      "CFG_KV_DTYPE=\"k4v4\"",
+      "CFG_ATTENTION_QUANT=\"hqq4\"",
+      "CFG_HQQ_GROUP_SIZE=\"128\""
+    ],
+    "built_command_scope": "./dev run <new-nano-hqq4-k4v4-config> --test-endpoints --force-rebuild-hqq-cache",
+    "optional_final_smoke_spec_after_cache_exists": "benchmarks/20260627_0804_nemotron_nano_hqq6_g32_all_moe_layer_cache_spec_generation_diagnostic_cache_spec.json"
+  },
+  "cleanup": {
+    "final_snapshot_utc": "2026-06-27T16:44:38Z",
+    "tmux_server": "none",
+    "matching_runtime_process": "none",
+    "gpu_memory_used_mb": [
+      15,
+      11
+    ],
+    "disk_available": "613G",
+    "ram_available": "966Gi",
+    "protected_config_status": "unchanged: known untracked tests/nemotron-nano-bf16-experts-a16.conf only"
+  }
+}

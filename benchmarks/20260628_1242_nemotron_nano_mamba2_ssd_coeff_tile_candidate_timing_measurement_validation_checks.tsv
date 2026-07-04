@@ -1,0 +1,14 @@
+check	status	evidence
+build_exit	pass	0
+small_exit	pass	0
+small_oracle_exact	pass	69/69 passed, output/state mismatches 0/0
+row97_probe	pass	69/69 term probe records matched
+row64_row82_regressions	pass	covered by small full oracle and probe env
+long_exit	pass	0
+long_no_oracle_records	pass	23 records at 39920 tokens in NO_ORACLE_TIMING_MODE
+long_oracle_records_absent	pass	0
+long_subloop_records_absent	pass	0
+long_full_blockscan_timing_absent	pass	0
+requests_absent	pass	0
+default_path	pass	guarded env only, no default path change
+final_idle	pass	2026-06-28T13:03:26Z gpu0=15MB gpu1=11MB processes=0 tmux=0; HF download lock metadata only

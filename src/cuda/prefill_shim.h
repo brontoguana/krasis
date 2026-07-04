@@ -137,20 +137,22 @@ void krasis_fp32_to_bf16(
 /* ── MoE routing ───────────────────────────────────────────────────────── */
 
 /* Sigmoid routing with top-k selection.
- * gate_logits: [M, num_experts] bf16 (from gate projection)
+ * gate_logits: [M, num_experts] float (from gate projection)
  * topk_weights: [M, topk] float (output)
  * topk_ids: [M, topk] int32 (output)
  */
 void krasis_sigmoid_topk(
     void*       topk_weights,   /* float, [M, topk] */
     void*       topk_ids,       /* int32, [M, topk] */
-    const void* gate_logits,    /* bf16, [M, E] */
+    const void* gate_logits,    /* float, [M, E] */
+    const void* gate_bias,      /* float, [E] or NULL */
+    const void* e_score_correction, /* float, [E] or NULL */
     int         M,
     int         num_experts,
     int         topk,
     krasis_stream_t stream);
 
-/* Softmax routing with top-k selection (same signature as sigmoid variant). */
+/* Softmax routing with top-k selection. */
 void krasis_softmax_topk(
     void*       topk_weights,
     void*       topk_ids,
@@ -352,7 +354,7 @@ void krasis_mamba2_ssd_fwd(
     int         n_groups,
     int         chunk_size,     /* typically 128 */
     const void* dt_bias,        /* float, [n_heads] or NULL */
-    float       dt_softplus,    /* 1.0 to apply softplus to dt, 0.0 to skip */
+    float       dt_softplus_flag, /* 1.0 to apply softplus to dt, 0.0 to skip */
     krasis_stream_t stream);
 
 /* ── Memory management helpers ─────────────────────────────────────────── */

@@ -1,0 +1,24 @@
+check	status	evidence
+summary_json	pass	status closed; build exit 0; startup diagnostic exit 0; no requests; no benchmark path
+tsv_shape	pass	all gate TSV artifacts have at least two tab-separated fields per row
+build_exit	pass	exit marker normalized to numeric 0; build log has dev build total status=0 duration_s=175
+startup_diagnostic_exit	pass	exit marker normalized to numeric 0; startup diagnostic exit line present
+source_v2_markers_absent	pass	no v2 source markers in src/gpu_prefill.rs, src/cuda/prefill_kernels.cu, or python/krasis/server.py
+local_triangular_diagnostic_preserved	pass	KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE remains in src/gpu_prefill.rs
+mamba2_substage_instrumentation_preserved	pass	mamba2_substages timing print remains in src/gpu_prefill.rs
+cache_reuse	pass	HQQ attention artifacts validated; GPU Marlin cache loaded
+cache_write_absent	pass	no "Building GPU INT4 Marlin cache:" safetensors write line in startup diagnostic log
+requests_absent	pass	no reference_test or chat request markers in startup diagnostic log
+benchmark_absent	pass	no benchmark-only marker in startup diagnostic log
+v2_runtime_markers_absent	pass	no MAMBA2-SSD-CHUNK-V2 markers in startup diagnostic log
+bash_n_dev	pass	bash -n dev
+git_diff_check_krasis	pass	git diff --check
+git_diff_check_internal	pass	git diff --check in krasis-internal
+protected_config_status	pass	only expected tests-only Nano HQQ4 config and known Nano BF16 config are untracked
+post_validation_cleanup	pass	./dev kill exit 0
+nano_temp_lock_check	pass	no Nano .tmp/.lock/.pending files outside ignored HF download cache
+tmux_idle	pass	no tmux server
+runtime_process_idle	pass	no matching krasis/dev/build process
+nvidia_compute_idle	pass	no NVIDIA compute process
+gpu_idle	pass	gpu0 15 MB used; gpu1 11 MB used
+final_snapshot	pass	2026-06-27T22:49:22Z; disk 588G; RAM 966Gi

@@ -1,0 +1,2 @@
+gate	safety_margin_mb	baseline_free_mb	long_prefill_post_alloc_mb	long_prefill_min_free_mb	long_decode_min_free_mb	post_cleanup_free_mb	long_prefill_delta_mb	prefill_long_hcs_budget_mb	note
+20260629_1038_nemotron_nano_parallel_ssd_corrected_remeasure	600	23714	13072	7694	23714	23714	16020	7094	startup diagnostic calibration did not run as a request/HCS packing benchmark; long min free is far above safety, so this run measures candidate timing rather than max-HCS runtime packing efficiency

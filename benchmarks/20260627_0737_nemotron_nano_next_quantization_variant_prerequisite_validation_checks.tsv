@@ -1,0 +1,18 @@
+check	result	details
+record_first_0728	passed	HQQ6 g64 quality-failing, case2 1044->1321, 3/3 top-k rank drift, no production enablement recorded
+artifact_assertions	passed	summary/support matrix/size estimate/decision artifacts consistent
+hqq6_g32_generator_probe	expected_fail_closed	./dev expert-hqq-cache-generate rejected group_size=32 before cache generation
+hqq8_g64_generator_probe	expected_fail_closed	./dev expert-hqq-cache-generate rejected nbits=8 before cache generation
+large_cache_generated	not_run	no large cache/spec generated in this gate
+live_server	not_run	not allowed in this gate
+source_changes	not_run	no source implementation changes in this gate
+test_kernels_expert_hqq	not_run	not run because no source implementation changed and current generator is unsupported
+dev_build	not_run	not run because no source implementation changed and current generator is unsupported
+bash_n_dev	passed	dev syntax valid
+py_compile	passed	python/krasis/*.py compiled via ./dev python
+cargo_fmt_check	passed	cargo fmt --check passed
+git_diff_check	passed	krasis-nemotron-dev diff whitespace check passed
+internal_diff_check	passed	krasis-internal diff whitespace check passed
+protected_config_status	passed	only known pre-existing untracked tests/nemotron-nano-bf16-experts-a16.conf
+cleanup	passed	./dev kill reported all GPUs clear
+final_idle_snapshot	passed	no tmux server, no matching runtime/analyzer/generator/curl process, GPUs 15 MB / 11 MB

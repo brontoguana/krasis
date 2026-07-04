@@ -1,0 +1,15 @@
+field	value	unit	notes
+variant_attempted	hqq6_g32	string	first variant requested by gate
+variant_not_run	hqq6_g64	string	not run because g32 failed closed before serving requests
+server_command	KRASIS_STARTUP_DIAG=1 KRASIS_PREFILL_TIMING=1 KRASIS_VRAM_LEDGER=1 KRASIS_EXPERT_HQQ_PREFILL_CONSUME=1 KRASIS_EXPERT_HQQ_PREFILL_CONSUME_DIAG=1 KRASIS_EXPERT_HQQ_PREFILL_CONSUME_DIAG_TOPN=8 KRASIS_FIRST_TOKEN_MARGIN_PROJECTION_DIAG=1 KRASIS_FIRST_TOKEN_MARGIN_PROJECTION_TOKEN_A=1044 KRASIS_FIRST_TOKEN_MARGIN_PROJECTION_TOKEN_B=1321 KRASIS_FIRST_TOKEN_MARGIN_PROJECTION_TOPN=8 ./dev run tests/nemotron-nano-bf16-experts-a16.conf --test-endpoints --expert-hqq-diagnostic-cache-spec benchmarks/20260627_0804_nemotron_nano_hqq6_g32_all_moe_layer_cache_spec_generation_diagnostic_cache_spec.json	argv	built command in tmux
+endpoint	/v1/internal/reference_test	path	requests not sent because server did not reach READY
+ready_reached	false	bool	startup failed before READY
+server_exit_status	1	code	recorded in hqq6_g32_server_exit_status.txt
+request_count	0	count	no case payload was submitted
+http_200_count	0	count	no HTTP request was sent
+projection_trace_emitted	false	bool	no response existed
+failure_phase	startup_vram_calibration_short_probe	string	warmup logged warning first, short calibration raised RuntimeError
+fail_closed_error	KRASIS_FIRST_TOKEN_MARGIN_PROJECTION_DIAG requires debug_reference_trace=true	string	Rust prefill returned fail-closed error during non-request calibration prefill
+stack_entry	python/krasis/server.py:_measure_vram_probe -> gpu_store.rust_prefill_tokens	string	short calibration path
+server_log	benchmarks/20260627_1216_nemotron_nano_first_token_margin_projection_diagnostic_run_hqq6_g32_server.log	path	full captured log
+cleanup_log	benchmarks/20260627_1216_nemotron_nano_first_token_margin_projection_diagnostic_run_cleanup.log	path	./dev kill after fail-closed stop

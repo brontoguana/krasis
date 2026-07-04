@@ -1,0 +1,57 @@
+{
+  "gate": "20260627_2312_nemotron_nano_mamba2_ssd_chunk_entry_state_carry_design",
+  "status": "closed",
+  "opened_utc": "2026-06-27T23:12:00Z",
+  "closed_utc": "2026-06-27T23:15:06Z",
+  "scope": "static_analysis_design_only",
+  "record_first": {
+    "source_gate": "20260627_2251_nemotron_nano_mamba2_ssd_2213_v2_mismatch_analysis",
+    "local_triangular_row82_effectively_clean": true,
+    "state_flat14_sequential_recompute_clean": true,
+    "next_suspected_failure_area": "candidate chunk-entry state/carry or state-update/writeback semantics"
+  },
+  "constraints": {
+    "benchmarks": false,
+    "requests": false,
+    "decode_hcs_changes": false,
+    "production_enablement": false,
+    "default_path_change": false,
+    "optimized_prototype": false
+  },
+  "planned_inputs": [
+    "sequential SSD state update math",
+    "2025 chunk-parallel design notes",
+    "2138 reference-math/mismatch-analysis notes",
+    "2213 v2 mismatch artifacts",
+    "2251 local-triangular/state-probe artifacts"
+  ],
+  "analysis_result": {
+    "runtime_diagnostic_needed": false,
+    "local_triangular_primary_cause": false,
+    "state_flat14_sequential_formula_clean": true,
+    "suspected_failure_area": "candidate chunk-entry state/carry or state-update/writeback semantics",
+    "corrected_v3_direction": "explicit chunk_state plus state_passing with entry_state scratch and delayed final_state commit",
+    "implementation_done": false
+  },
+  "deliverable": "concrete v3 patch plan: candidate buffers, chunk-entry state source, per-chunk update order, final state commit semantics, oracle probes for row 82 and state flat 14",
+  "artifacts": {
+    "source_audit": "benchmarks/20260627_2312_nemotron_nano_mamba2_ssd_chunk_entry_state_carry_design_source_audit.tsv",
+    "state_carry_analysis": "benchmarks/20260627_2312_nemotron_nano_mamba2_ssd_chunk_entry_state_carry_design_state_carry_analysis.tsv",
+    "v3_patch_plan": "benchmarks/20260627_2312_nemotron_nano_mamba2_ssd_chunk_entry_state_carry_design_v3_patch_plan.tsv",
+    "oracle_probe_plan": "benchmarks/20260627_2312_nemotron_nano_mamba2_ssd_chunk_entry_state_carry_design_oracle_probe_plan.tsv",
+    "root_decision": "benchmarks/20260627_2312_nemotron_nano_mamba2_ssd_chunk_entry_state_carry_design_root_decision.tsv",
+    "runtime_not_run": "benchmarks/20260627_2312_nemotron_nano_mamba2_ssd_chunk_entry_state_carry_design_runtime_not_run.tsv",
+    "validation": "benchmarks/20260627_2312_nemotron_nano_mamba2_ssd_chunk_entry_state_carry_design_validation_checks.tsv"
+  },
+  "validation": {
+    "passed": true,
+    "final_snapshot_utc": "2026-06-27T23:19:23Z",
+    "gpu_memory_mb": "15 / 11",
+    "disk_available": "588G",
+    "ram_available": "967Gi",
+    "tmux_server": false,
+    "runtime_processes": false,
+    "nvidia_compute_processes": false,
+    "cache_temp_lock_files": false
+  }
+}

@@ -14,6 +14,7 @@ from krasis.attention_backend import (
     HQQ46_LAYOUT,
     HQQ68_AUTO_ATTENTION_CACHE_DIRNAME,
     HQQ68_LAYOUT,
+    HQQ4_CACHE_IMPL_RUST_CUDA_SEARCH,
     HQQ_MIXED_46_AUTO_CACHE_NBITS,
     HQQ_MIXED_46_CACHE_NBITS,
     HQQ_MIXED_68_AUTO_CACHE_NBITS,
@@ -26,6 +27,7 @@ from krasis.attention_backend import (
     _unpack_hqq_quant,
     hqq_attention_cache_dir,
     hqq_attention_manifest_path,
+    hqq_cache_algorithm_for_nbits,
     normalize_hqq_attention_cache_profile,
     hqq_auto_budget_bytes_from_pct,
     hqq_auto_direct_edge_nbits,
@@ -116,6 +118,35 @@ def test_profile_path_resolution() -> None:
         assert auto68_dir == home / ".krasis" / "cache" / "TinyModel" / HQQ68_AUTO_ATTENTION_CACHE_DIRNAME
         assert normalize_hqq_attention_cache_profile(None) == HQQ_CACHE_PROFILE_BASELINE
         assert normalize_hqq_attention_cache_profile("SELFCAL_V1") == HQQ_CACHE_PROFILE_SELFCAL_V1
+
+
+def test_hqq4_cuda_search_cache_identity_is_explicit() -> None:
+    with isolated_home() as home:
+        model_path = home / "models" / "TinyModel"
+        default_dir = Path(hqq_attention_cache_dir(str(model_path)))
+        default_quantizer = hqq_cache_algorithm_for_nbits(4)
+
+        old_impl = os.environ.get("KRASIS_HQQ4_CACHE_IMPL")
+        os.environ["KRASIS_HQQ4_CACHE_IMPL"] = HQQ4_CACHE_IMPL_RUST_CUDA_SEARCH
+        try:
+            cuda_dir = Path(hqq_attention_cache_dir(str(model_path)))
+            cuda_quantizer = hqq_cache_algorithm_for_nbits(4)
+        finally:
+            if old_impl is None:
+                os.environ.pop("KRASIS_HQQ4_CACHE_IMPL", None)
+            else:
+                os.environ["KRASIS_HQQ4_CACHE_IMPL"] = old_impl
+
+        assert default_dir == home / ".krasis" / "cache" / "TinyModel" / HQQ_ATTENTION_CACHE_DIRNAME
+        assert cuda_dir == (
+            home
+            / ".krasis"
+            / "cache"
+            / "TinyModel"
+            / f"{HQQ_ATTENTION_CACHE_DIRNAME}_{HQQ4_CACHE_IMPL_RUST_CUDA_SEARCH}"
+        )
+        assert "hqq4_cache_impl" not in default_quantizer
+        assert cuda_quantizer["hqq4_cache_impl"] == HQQ4_CACHE_IMPL_RUST_CUDA_SEARCH
 
 
 def test_quant_config_profile_validation() -> None:

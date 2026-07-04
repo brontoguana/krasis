@@ -1,0 +1,17 @@
+check	result	detail
+summary_json	pass	jq parsed summary JSON
+build_result_shape	pass	5 TSV fields on every row
+runtime_result_shape	pass	3 TSV fields on every row
+candidate_timing_after_build3_summary_shape	pass	5 TSV fields on every row
+candidate_timing_after_build3_records_shape	pass	14 TSV fields on every row
+comparison_after_build3_shape	pass	5 TSV fields on every row
+correctness_after_build3_shape	pass	4 TSV fields on every row
+vram_summary_shape	pass	3 TSV fields on every row
+benchmark_index_link	pass	benchmark row and artifact links present
+git_diff_check_public	pass	git diff --check passed in krasis-nemotron-dev
+git_diff_check_internal	pass	git diff --check passed in krasis-internal
+dev_syntax	pass	bash -n dev passed
+protected_configs	pass	no protected testconfigs changes reported
+runtime_processes_idle	pass	no tmux, Krasis, build, cargo, rustc, nvcc, dev run, or dev build process in standalone final snapshot
+gpu_idle	pass	final standalone snapshot GPUs 15 MB / 11 MB
+final_snapshot_utc	pass	2026-06-29T18:59:19Z

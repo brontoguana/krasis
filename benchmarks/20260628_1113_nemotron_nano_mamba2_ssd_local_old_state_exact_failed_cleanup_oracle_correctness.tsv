@@ -1,0 +1,15 @@
+metric	value
+oracle_records	69
+passed_records	69
+failed_records	0
+output_mismatches	0
+state_mismatches	0
+probe_failures	0
+row64_state0	output exact; state exact
+row82_state14	output exact; state exact
+first_mismatch	none
+max_output_abs	0.0
+mean_output_abs	0.0
+max_state_abs	0.0
+mean_state_abs	0.0
+decision	accepted_1022_correctness_surface_restored

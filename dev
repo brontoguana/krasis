@@ -17,6 +17,11 @@
 #   ./dev network <port>            Run network tests against a running server
 #   ./dev network <port> --large    Include large-prompt tests
 #   ./dev benchmark <config>        Run standard benchmark (prefill/decode/round trip) and exit
+#   ./dev approved-heatmap-build <config> --out <path>
+#                                    Build approved cumulative HCS route heatmap checkpoints and exit
+#                                    Add --resume-from <json> to append prompts to an existing artifact
+#   ./dev approved-heatmap-eval <config> <heatmap.json>
+#                                    Benchmark a config with an approved heatmap artifact
 #   ./dev speed-test                Run the fixed standard speed benchmark (QCN INT4 HQQ8 k4v4)
 #   ./dev perplexity <config>       Run perplexity eval (WikiText-2 by default) and exit
 #   ./dev release-test <model>      Run full release test (launcher matrix + release config matrix, produces report)
@@ -38,6 +43,8 @@
 #   ./dev hqq-attn-diff <model>     Offline HQQ attention artifact diff against BF16 source
 #   ./dev hqq-self-calibrate <config>  Capture self-calibration evidence / candidates only
 #   ./dev hqq-gpu-search-probe       Prototype GPU HQQ candidate-search timing/quality
+#   ./dev expert-hqq-cache-generate <manifest.json>  Generate KRHQ cache from explicit manifest
+#   ./dev expert-hqq-trace-compare <trace.json> <spec.json> <metrics.tsv>  Compare diagnostic HQQ trace export offline
 #   ./dev capture-box <subcommand>  ARCHIVED HF capture wrapper; requires explicit override
 #   ./dev capture-preflight         ARCHIVED HF capture host preflight; requires explicit override
 #   ./dev reference-prep <model>    ARCHIVED HF dependency/model prep; requires explicit override
@@ -1188,6 +1195,115 @@ do_benchmark() {
     verify_repo_imports
     cd "$SCRIPT_DIR" && KRASIS_RUN_DIR="$run_dir" KRASIS_RUN_TYPE="dev-benchmark" run_repo_python -m krasis.server --config "$conf" --benchmark-only "$@" 2>&1 | tee "$logfile"
     info "Benchmark log saved: $logfile"
+    summarize_dynamic_hcs_from_log "$logfile"
+}
+
+summarize_dynamic_hcs_from_log() {
+    local logfile="$1"
+    [[ -f "$logfile" ]] || return 0
+
+    local summary
+    summary=$(perl -ne '
+        s/\e\[[0-9;]*m//g;
+        if (/Dynamic HCS: hit=([0-9.]+)% .*?request_promotions=(\d+)\/(\d+) budget_skips=(\d+) no_slot=(\d+) copy_failures=(\d+)/) {
+            ($hit, $promotions, $limit, $budget_skips, $no_slot, $copy_failures) = ($1, $2, $3, $4, $5, $6);
+        }
+        END {
+            if (defined $hit) {
+                print "hit=${hit}% request_promotions=${promotions}/${limit} budget_skips=${budget_skips} no_slot=${no_slot} copy_failures=${copy_failures}\n";
+            }
+        }
+    ' "$logfile")
+
+    if [[ -n "$summary" ]]; then
+        info "Final Dynamic HCS summary: $summary"
+    fi
+}
+
+do_approved_heatmap_build() {
+    [[ $# -lt 1 ]] && err "Usage: ./dev approved-heatmap-build <config> --out <path> [--resume-from <path>] [--prompts <path>] [--decode-tokens N] [--max-prompts N] [--checkpoint-every N]"
+    local conf
+    conf=$(resolve_config "$1")
+    shift
+
+    local out=""
+    local prompts=""
+    local resume_from=""
+    local decode_tokens=""
+    local max_prompts=""
+    local checkpoint_every=""
+    local passthrough=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --out)
+                [[ $# -ge 2 ]] || err "--out requires a path"
+                out="$2"
+                shift 2
+                ;;
+            --prompts)
+                [[ $# -ge 2 ]] || err "--prompts requires a path"
+                prompts="$2"
+                shift 2
+                ;;
+            --resume-from)
+                [[ $# -ge 2 ]] || err "--resume-from requires a path"
+                resume_from="$2"
+                shift 2
+                ;;
+            --decode-tokens)
+                [[ $# -ge 2 ]] || err "--decode-tokens requires a positive integer"
+                decode_tokens="$2"
+                shift 2
+                ;;
+            --max-prompts)
+                [[ $# -ge 2 ]] || err "--max-prompts requires an integer"
+                max_prompts="$2"
+                shift 2
+                ;;
+            --checkpoint-every)
+                [[ $# -ge 2 ]] || err "--checkpoint-every requires an integer"
+                checkpoint_every="$2"
+                shift 2
+                ;;
+            *)
+                passthrough+=("$1")
+                shift
+                ;;
+        esac
+    done
+    [[ -n "$out" ]] || err "--out is required"
+
+    cleanup_gpu "$conf"
+    auto_rebuild
+    local run_dir
+    run_dir=$(create_run_dir "approved-heatmap-build")
+    local logfile
+    logfile="$run_dir/approved_heatmap_build_stdout.log"
+    info "Building approved HCS route heatmap: $conf"
+    info "Run dir: $run_dir"
+    info "Log: $logfile"
+    verify_repo_imports
+
+    local args=("--config" "$conf" "--approved-heatmap-build-out" "$out")
+    [[ -z "$prompts" ]] || args+=("--approved-heatmap-prompts" "$prompts")
+    [[ -z "$resume_from" ]] || args+=("--approved-heatmap-resume-from" "$resume_from")
+    [[ -z "$decode_tokens" ]] || args+=("--approved-heatmap-decode-tokens" "$decode_tokens")
+    [[ -z "$max_prompts" ]] || args+=("--approved-heatmap-max-prompts" "$max_prompts")
+    [[ -z "$checkpoint_every" ]] || args+=("--approved-heatmap-checkpoint-every" "$checkpoint_every")
+    args+=("${passthrough[@]}")
+
+    cd "$SCRIPT_DIR" && KRASIS_RUN_DIR="$run_dir" KRASIS_RUN_TYPE="approved-heatmap-build" run_repo_python -m krasis.server "${args[@]}" 2>&1 | tee "$logfile"
+    info "Approved heatmap build log saved: $logfile"
+}
+
+do_approved_heatmap_eval() {
+    [[ $# -lt 2 ]] && err "Usage: ./dev approved-heatmap-eval <config> <heatmap.json> [extra benchmark args...]"
+    local conf
+    conf=$(resolve_config "$1")
+    local heatmap="$2"
+    shift 2
+    [[ -f "$heatmap" ]] || err "Heatmap file not found: $heatmap"
+    do_benchmark "$conf" --heatmap-path "$heatmap" "$@"
 }
 
 do_speed_test() {
@@ -1269,10 +1385,106 @@ do_test_kernels() {
     cd "$SCRIPT_DIR"
     if [[ $# -gt 0 ]]; then
         local filter="kernel_tests::test_$1"
+        if [[ "$1" == "expert_hqq" ]]; then
+            filter="expert_hqq"
+        fi
         info "Filter: $filter"
-        cargo test --release --lib "$filter" -- --nocapture 2>&1
+        PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
+            cargo test --release --lib "$filter" -- --nocapture 2>&1
     else
-        cargo test --release --lib kernel_tests -- --nocapture 2>&1
+        PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
+            cargo test --release --lib kernel_tests -- --nocapture 2>&1
+    fi
+}
+
+do_expert_hqq_cache_generate() {
+    if [[ $# -ne 1 || "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        echo "Usage: ./dev expert-hqq-cache-generate <manifest.json>"
+        echo "  Generates an expert-HQQ KRHQ cache from an explicit validated manifest."
+        echo "  This is a data-generation command only; it does not launch runtime GPU HQQ kernels."
+        return 0
+    fi
+    local manifest="$1"
+    [[ -f "$manifest" ]] || err "Manifest not found: $manifest"
+
+    local pyver
+    pyver=$("$PYTHON" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+    local pylibdir
+    pylibdir=$("$PYTHON" -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")
+    export PYO3_PYTHON="$PYTHON"
+    export LD_LIBRARY_PATH="$pylibdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    export RUSTFLAGS="${RUSTFLAGS:-} -L $pylibdir -l python${pyver}"
+
+    cd "$SCRIPT_DIR"
+    PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
+        cargo run --release --bin expert_hqq_cache_generate -- "$manifest"
+}
+
+do_expert_hqq_trace_compare() {
+    if [[ $# -lt 3 || $# -gt 5 || "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        echo "Usage: ./dev expert-hqq-trace-compare <trace_outputs.json> <diagnostic_spec.json> <metrics.tsv> [mismatch_details.tsv [failure_rows.tsv]]"
+        echo "  Compares diagnostic expert-HQQ full-buffer trace export against the BF16-path oracle offline."
+        echo "  If mismatch_details.tsv is provided, writes exact BF16 mismatch locations and bit patterns."
+        echo "  If failure_rows.tsv is provided, compares only those failing activation blocks."
+        echo "  This command does not launch runtime GPU kernels or consume model outputs."
+        return 0
+    fi
+    local trace_path="$1"
+    local spec_path="$2"
+    local metrics_path="$3"
+    [[ -f "$trace_path" ]] || err "Trace outputs not found: $trace_path"
+    [[ -f "$spec_path" ]] || err "Diagnostic spec not found: $spec_path"
+
+    local pyver
+    pyver=$("$PYTHON" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+    local pylibdir
+    pylibdir=$("$PYTHON" -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")
+    export PYO3_PYTHON="$PYTHON"
+    export LD_LIBRARY_PATH="$pylibdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    export RUSTFLAGS="${RUSTFLAGS:-} -L $pylibdir -l python${pyver}"
+
+    cd "$SCRIPT_DIR"
+    if [[ $# -eq 5 ]]; then
+        [[ -f "$5" ]] || err "Failure rows TSV not found: $5"
+        PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
+            cargo run --release --bin expert_hqq_trace_compare -- "$trace_path" "$spec_path" "$metrics_path" "$4" "$5"
+    elif [[ $# -eq 4 ]]; then
+        PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
+            cargo run --release --bin expert_hqq_trace_compare -- "$trace_path" "$spec_path" "$metrics_path" "$4"
+    else
+        PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
+            cargo run --release --bin expert_hqq_trace_compare -- "$trace_path" "$spec_path" "$metrics_path"
+    fi
+}
+
+do_expert_hqq_row_attribution() {
+    if [[ $# -lt 3 || $# -gt 4 || "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        echo "Usage: ./dev expert-hqq-row-attribution <response.json> <diagnostic_spec.json> <metrics.tsv> [details.json]"
+        echo "  Attributes a targeted expert-HQQ exact-row capture against KRHQ/HQQ dequant math offline."
+        echo "  This command does not launch runtime GPU kernels or consume model outputs."
+        return 0
+    fi
+    local response_path="$1"
+    local spec_path="$2"
+    local metrics_path="$3"
+    [[ -f "$response_path" ]] || err "Response JSON not found: $response_path"
+    [[ -f "$spec_path" ]] || err "Diagnostic spec not found: $spec_path"
+
+    local pyver
+    pyver=$("$PYTHON" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+    local pylibdir
+    pylibdir=$("$PYTHON" -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")
+    export PYO3_PYTHON="$PYTHON"
+    export LD_LIBRARY_PATH="$pylibdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    export RUSTFLAGS="${RUSTFLAGS:-} -L $pylibdir -l python${pyver}"
+
+    cd "$SCRIPT_DIR"
+    if [[ $# -eq 4 ]]; then
+        PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
+            cargo run --release --bin expert_hqq_row_attribution -- "$response_path" "$spec_path" "$metrics_path" "$4"
+    else
+        PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
+            cargo run --release --bin expert_hqq_row_attribution -- "$response_path" "$spec_path" "$metrics_path"
     fi
 }
 
@@ -1381,9 +1593,25 @@ witness_model_paths() {
             echo "$SCRIPT_DIR/../krasis-internal/reference-outputs/output/Qwen3-235B-A22B/greedy_reference.json"
             echo "$HOME/.krasis/witness-gguf/Qwen3-235B-A22B-bf16.gguf"
             ;;
+        step37|step3.7|step3p7|step-3.7-flash|step-3.7-flash-bf16)
+            echo "$HOME/.krasis/models/Step-3.7-Flash"
+            echo "$SCRIPT_DIR/../krasis-internal/reference-outputs/input-sources/Step-3.7-Flash/step37_witness_thinking_off_input_tokens.json"
+            echo "$HOME/.krasis/witness-gguf/Step-3.7-Flash-bf16.gguf"
+            ;;
         *)
             err "Unknown witness model: $model
-  Available: qcn, qwen35, q122b, q235"
+  Available: qcn, qwen35, q122b, q235, step37"
+            ;;
+    esac
+}
+
+is_step_witness_model() {
+    case "${1,,}" in
+        step37|step3.7|step3p7|step-3.7-flash|step-3.7-flash-bf16)
+            return 0
+            ;;
+        *)
+            return 1
             ;;
     esac
 }
@@ -1392,7 +1620,7 @@ do_witness_model_check() {
     if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
         echo "Usage: ./dev witness-model-check <model> [--hash]"
         echo "  Checks local readiness for BF16 llama-witness capture."
-        echo "  Models: qcn, qwen35, q122b, q235"
+        echo "  Models: qcn, qwen35, q122b, q235, step37"
         echo "  --hash computes the GGUF SHA-256 when the expected BF16 file exists."
         return 0
     fi
@@ -1409,7 +1637,7 @@ do_witness_model_check() {
             --help|-h)
                 echo "Usage: ./dev witness-model-check <model> [--hash]"
                 echo "  Checks local readiness for BF16 llama-witness capture."
-                echo "  Models: qcn, qwen35, q122b, q235"
+                echo "  Models: qcn, qwen35, q122b, q235, step37"
                 return 0
                 ;;
             *)
@@ -1428,9 +1656,16 @@ do_witness_model_check() {
     echo "model_dir=$model_dir"
     if [[ -d "$model_dir" ]]; then
         ok "model_dir exists"
+        local config_eos_present=false
+        if is_step_witness_model "$model" && [[ -f "$model_dir/config.json" ]] \
+            && jq -e '(.eos_token_id // .text_config.eos_token_id // empty) | if type == "array" then length > 0 else type == "number" end' "$model_dir/config.json" >/dev/null; then
+            config_eos_present=true
+        fi
         for required in config.json tokenizer.json tokenizer_config.json generation_config.json; do
             if [[ -f "$model_dir/$required" ]]; then
                 stat -c "  $required: %s bytes" "$model_dir/$required"
+            elif [[ "$required" == "generation_config.json" && "$config_eos_present" == "true" ]]; then
+                echo "  generation_config.json: not present; Step EOS ids are in config.json text_config"
             else
                 echo "  MISSING: $required"
                 status=1
@@ -1793,7 +2028,7 @@ do_witness_gguf_preflight() {
         echo "Usage: ./dev witness-gguf-preflight <model> [--output PATH] [--outtype bf16]"
         echo "  Preflights BF16 GGUF witness conversion without starting conversion."
         echo "  Records source files, expected output, resource estimates, converter command, and support gates."
-        echo "  Models: qwen35, q122b, q235"
+        echo "  Models: qwen35, q122b, q235, step37"
         return 0
     fi
     [[ $# -lt 1 ]] && err "Usage: ./dev witness-gguf-preflight <model> [--output PATH] [--outtype bf16]"
@@ -1816,7 +2051,7 @@ do_witness_gguf_preflight() {
             --help|-h)
                 echo "Usage: ./dev witness-gguf-preflight <model> [--output PATH] [--outtype bf16]"
                 echo "  Preflights BF16 GGUF witness conversion without starting conversion."
-                echo "  Models: qwen35, q122b, q235"
+                echo "  Models: qwen35, q122b, q235, step37"
                 return 0
                 ;;
             *)
@@ -1865,6 +2100,11 @@ do_witness_gguf_preflight() {
 
     local expected_arch expected_model_type expected_text_model_type
     case "$model_key" in
+        step37|step3.7|step3p7|step-3.7-flash|step-3.7-flash-bf16)
+            expected_arch="Step3p7ForConditionalGeneration"
+            expected_model_type="step3p7"
+            expected_text_model_type="step3p5"
+            ;;
         q235|qwen235|qwen3-235b-a22b)
             expected_arch="Qwen3MoeForCausalLM"
             expected_model_type="qwen3_moe"
@@ -1885,6 +2125,26 @@ do_witness_gguf_preflight() {
 
     local converter_supported=false gguf_supported=false runtime_supported=false
     case "$model_key" in
+        step37|step3.7|step3p7|step-3.7-flash|step-3.7-flash-bf16)
+            if rg -q 'Step3p5ForCausalLM' "$converter" \
+                && rg -q 'MODEL_ARCH.STEP35' "$converter"; then
+                converter_supported=true
+            else
+                status=1
+            fi
+            if rg -q 'STEP35' "$WITNESS_REPO/gguf-py/gguf/constants.py"; then
+                gguf_supported=true
+            else
+                status=1
+            fi
+            if rg -q 'LLM_ARCH_STEP35' "$WITNESS_REPO/src/llama-arch.h" \
+                && rg -q 'llm_build_step35' "$WITNESS_REPO/src/llama-model.cpp" \
+                && [[ -f "$WITNESS_REPO/src/models/step35-iswa.cpp" ]]; then
+                runtime_supported=true
+            else
+                status=1
+            fi
+            ;;
         q235|qwen235|qwen3-235b-a22b)
             if rg -q 'Qwen3MoeForCausalLM' "$converter" \
                 && rg -q 'MODEL_ARCH.QWEN3MOE' "$converter"; then
@@ -1930,10 +2190,19 @@ do_witness_gguf_preflight() {
 
     local required_missing=()
     local required_file
+    local config_eos_present=false
+    if is_step_witness_model "$model" && [[ -f "$config" ]] \
+        && jq -e '(.eos_token_id // .text_config.eos_token_id // empty) | if type == "array" then length > 0 else type == "number" end' "$config" >/dev/null; then
+        config_eos_present=true
+    fi
     for required_file in "$config" "$tokenizer" "$tokenizer_config" "$generation_config" "$index_json"; do
         if [[ ! -f "$required_file" ]]; then
-            required_missing+=("$required_file")
-            status=1
+            if [[ "$required_file" == "$generation_config" && "$config_eos_present" == "true" ]]; then
+                :
+            else
+                required_missing+=("$required_file")
+                status=1
+            fi
         fi
     done
 
@@ -2007,6 +2276,9 @@ do_witness_gguf_preflight() {
                     "$(json_escape "$required_file")" \
                     "$(stat -c '%s' "$required_file")" \
                     "$(sha256sum "$required_file" | awk '{print $1}')"
+            elif [[ "$required_file" == "$generation_config" && "$config_eos_present" == "true" ]]; then
+                printf '    {"path": "%s", "exists": false, "accepted_missing": true, "reason": "Step EOS ids are provided by config.json text_config.eos_token_id"}' \
+                    "$(json_escape "$required_file")"
             else
                 printf '    {"path": "%s", "exists": false}' "$(json_escape "$required_file")"
             fi
@@ -2056,7 +2328,7 @@ do_witness_gguf_convert() {
         echo "  Converts a local safetensors model to BF16 GGUF only after the built preflight gate passes."
         echo "  Writes logs and conversion manifest under logs/witness-gguf-convert_*."
         echo "  Refuses to overwrite an existing expected output unless --force is supplied."
-        echo "  Models: qwen35, q122b, q235"
+        echo "  Models: qwen35, q122b, q235, step37"
         return 0
     fi
     [[ $# -lt 1 ]] && err "Usage: ./dev witness-gguf-convert <model> [--output PATH] [--outtype bf16] [--force]"
@@ -2084,7 +2356,7 @@ do_witness_gguf_convert() {
             --help|-h)
                 echo "Usage: ./dev witness-gguf-convert <model> [--output PATH] [--outtype bf16] [--force]"
                 echo "  Converts a local safetensors model to BF16 GGUF only after the built preflight gate passes."
-                echo "  Models: qwen35, q122b, q235"
+                echo "  Models: qwen35, q122b, q235, step37"
                 return 0
                 ;;
             *)
@@ -2216,7 +2488,7 @@ do_witness_capture() {
     if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
         echo "Usage: ./dev witness-capture <model> [--output PATH] [--reference PATH] [--profile ID] [--max-cases N] [validator args...]"
         echo "  Captures llama-witness JSON from stored input_token_ids only."
-        echo "  Models: qcn, qwen35, q122b, q235"
+        echo "  Models: qcn, qwen35, q122b, q235, step37"
         return 0
     fi
     [[ $# -lt 1 ]] && err "Usage: ./dev witness-capture <model> [--output PATH] [--reference PATH] [--profile ID] [--max-cases N] [validator args...]
@@ -2233,7 +2505,7 @@ do_witness_capture() {
             --help|-h)
                 echo "Usage: ./dev witness-capture <model> [--output PATH] [--reference PATH] [--profile ID] [--max-cases N] [validator args...]"
                 echo "  Captures llama-witness JSON from stored input_token_ids only."
-                echo "  Models: qcn, qwen35, q122b, q235"
+                echo "  Models: qcn, qwen35, q122b, q235, step37"
                 return 0
                 ;;
             --reference)
@@ -2303,7 +2575,7 @@ do_witness_inputs() {
         echo "Usage: ./dev witness-inputs <model> --prompt-source PATH --output PATH [--profile ID] [validator args...]"
         echo "  Tokenizes fixed prompt-source JSON into a stored llama-witness input_token_ids artifact."
         echo "  Qwen3.5 models require proven chat-template enable_thinking=false application."
-        echo "  Models: qcn, qwen35, q122b, q235"
+        echo "  Models: qcn, qwen35, q122b, q235, step37"
         return 0
     fi
     [[ $# -lt 1 ]] && err "Usage: ./dev witness-inputs <model> --prompt-source PATH --output PATH [--profile ID] [validator args...]"
@@ -2319,7 +2591,7 @@ do_witness_inputs() {
                 echo "Usage: ./dev witness-inputs <model> --prompt-source PATH --output PATH [--profile ID] [validator args...]"
                 echo "  Tokenizes fixed prompt-source JSON into a stored llama-witness input_token_ids artifact."
                 echo "  Qwen3.5 models require proven chat-template enable_thinking=false application."
-                echo "  Models: qcn, qwen35, q122b, q235"
+                echo "  Models: qcn, qwen35, q122b, q235, step37"
                 return 0
                 ;;
             --prompt-source)
@@ -2353,6 +2625,25 @@ do_witness_inputs() {
     local model_gguf="${paths[2]}"
     [[ -d "$model_dir" ]] || err "witness model dir not found: $model_dir"
     [[ -f "$prompt_source" ]] || err "prompt source not found: $prompt_source"
+    if is_step_witness_model "$model"; then
+        local run_dir
+        run_dir=$(create_run_dir "witness-inputs")
+        mkdir -p "$(dirname "$output")"
+
+        info "Building Step llama-witness input-token source with Krasis tokenizer"
+        info "Run dir: $run_dir"
+        info "Output: $output"
+        KRASIS_DEV_SCRIPT=1 KRASIS_RUN_DIR="$run_dir" KRASIS_RUN_TYPE="witness-inputs" \
+            run_repo_python "$SCRIPT_DIR/tests/step37_witness_inputs.py" \
+                --model-dir "$model_dir" \
+                --prompt-source "$prompt_source" \
+                --output "$output" \
+                --profile "$profile" \
+                "${validator_args[@]}" \
+            2>&1 | tee "$run_dir/witness_inputs.log"
+        ok "Witness input-token source complete: $output"
+        return 0
+    fi
     [[ -f "$model_gguf" ]] || err "witness GGUF not found: $model_gguf"
     case "${model,,}" in
         qwen35|q35b|qwen3.5-35b-a3b|q122b|qwen122|qwen3.5-122b-a10b|q235|qwen235|qwen3-235b-a22b)
@@ -2453,7 +2744,7 @@ do_reference_prep() {
 }
 
 do_generate_reference() {
-    [[ $# -lt 1 ]] && err "Usage: ./dev generate-reference <model> [--max-tokens N] [--profile PROFILE] [--conversation-index N [--turn-index N|--turn-start-index N --turn-end-index N] | --first-stored-turns N] [--attn-implementation eager|sdpa|flash_attention_2] [--use-cache auto|on|off] [--generate-use-cache auto|on|off] [--diagnostic-use-cache auto|on|off] [--diagnostic-scope all|final|postponed] [--between-turn-cleanup none|gc|reset] [--diagnose-pre-post-forward] [--reload-model-between-turns] [--diagnostic-only] [--output PATH]
+    [[ $# -lt 1 ]] && err "Usage: ./dev generate-reference <model> [--max-tokens N] [--profile PROFILE] [--conversation-index N [--turn-index N|--turn-start-index N --turn-end-index N] | --first-stored-turns N | --raw-input-json PATH] [--attn-implementation eager|sdpa|flash_attention_2] [--use-cache auto|on|off] [--generate-use-cache auto|on|off] [--diagnostic-use-cache auto|on|off] [--diagnostic-scope all|final|postponed] [--between-turn-cleanup none|gc|reset] [--diagnose-pre-post-forward] [--diagnose-hidden-summaries] [--diagnose-layer0-internals] [--diagnose-layer0-element-dims CSV] [--diagnose-layer1-internals] [--diagnose-layer1-element-dims CSV] [--reload-model-between-turns] [--diagnostic-only] [--output PATH]
   ARCHIVED: HF/Transformers reference capture is no longer trusted by default.
   Generates a BF16 HuggingFace greedy reference with full contract metadata only when explicitly unarchived for forensic evidence.
   Subset captures write a diagnostic non-canonical filename unless --output is supplied.
@@ -2467,6 +2758,7 @@ do_generate_reference() {
     ./dev generate-reference qwen35 --profile greedy_chat_thinking_off --conversation-index 0 --turn-index 0 --diag-steps 1 --diag-topk 10 --attn-implementation eager
     ./dev generate-reference qwen35 --profile greedy_chat_thinking_off --conversation-index 0 --turn-start-index 0 --turn-end-index 1 --diag-steps 1 --diag-topk 10 --attn-implementation sdpa --diagnostic-scope final --diagnostic-only
     ./dev generate-reference qwen35 --profile greedy_chat_thinking_off --first-stored-turns 4 --diag-steps 1 --diag-topk 10 --attn-implementation sdpa --diagnostic-scope postponed --diagnostic-only
+	    ./dev generate-reference nemotron-super --raw-input-json benchmarks/exact_payload.json --max-tokens 2 --diag-steps 2 --diag-topk 12 --diagnose-pre-post-forward --diagnose-hidden-summaries --diagnose-layer0-internals --diagnose-layer0-element-dims 3265,739,1067,445 --diagnose-layer1-internals --diagnose-layer1-element-dims 3265,739,1067,445 --output benchmarks/exact_oracle.json
     ./dev generate-reference qwen35 --profile greedy_chat_thinking_off --conversation-index 0 --turn-start-index 0 --turn-end-index 1 --diag-steps 1 --diag-topk 10 --attn-implementation sdpa --generate-use-cache auto --diagnostic-use-cache off --diagnose-pre-post-forward --diagnostic-only"
     require_archived_hf_reference_override "./dev generate-reference"
     cleanup_gpu
@@ -2792,6 +3084,8 @@ case "$cmd" in
     run)            do_run "$@" ;;
     test)           do_test "$@" ;;
     benchmark)      do_benchmark "$@" ;;
+    approved-heatmap-build) do_approved_heatmap_build "$@" ;;
+    approved-heatmap-eval) do_approved_heatmap_eval "$@" ;;
     speed-test|speedtest) do_speed_test "$@" ;;
     decode-harness) do_decode_harness "$@" ;;
     release-test)   do_release_test "$@" ;;
@@ -2808,6 +3102,9 @@ case "$cmd" in
     hqq-self-calibrate) do_hqq_self_calibrate "$@" ;;
     hqq-self-calibrate-test) do_hqq_self_calibrate_test "$@" ;;
     hqq-gpu-search-probe) do_hqq_gpu_search_probe "$@" ;;
+    expert-hqq-cache-generate) do_expert_hqq_cache_generate "$@" ;;
+    expert-hqq-trace-compare) do_expert_hqq_trace_compare "$@" ;;
+    expert-hqq-row-attribution) do_expert_hqq_row_attribution "$@" ;;
     reference-inventory) do_reference_inventory "$@" ;;
     capture-box)    do_capture_box "$@" ;;
     capture-preflight) do_capture_preflight "$@" ;;
@@ -2838,6 +3135,10 @@ case "$cmd" in
         echo "  upload-sidecar-bundle          Upload bundle to configured GitHub release"
         echo "  run <config> [flags]           Launch server (add --benchmark or --selected-gpus GPU[,GPU...] as needed)"
         echo "  benchmark <config>             Run standard benchmark and exit"
+        echo "  approved-heatmap-build <config> --out <path>"
+        echo "                                 Build approved cumulative HCS route heatmap checkpoints"
+        echo "  approved-heatmap-eval <config> <heatmap.json>"
+        echo "                                 Benchmark a config with an approved heatmap artifact"
         echo "  speed-test                     Run the fixed standard speed benchmark"
         echo "  decode-harness <config>        Run synthetic GPU decode harness and exit"
         echo "  perplexity <config>            Run perplexity eval (WikiText-2) and exit"
@@ -2860,6 +3161,9 @@ case "$cmd" in
         echo "  witness-compare <config>       Compare Krasis against llama-witness JSON"
         echo "  hqq-attn-diff <model>          Offline HQQ attention artifact diff against BF16 source"
         echo "  hqq-self-calibrate <config>    Capture HQQ self-calibration evidence/candidates"
+        echo "  expert-hqq-cache-generate <manifest.json> Generate KRHQ cache from explicit manifest"
+        echo "  expert-hqq-trace-compare <trace.json> <spec.json> <metrics.tsv> Compare HQQ trace export offline"
+        echo "  expert-hqq-row-attribution <response.json> <spec.json> <metrics.tsv> Attribute exact HQQ row capture"
         echo "  capture-box <subcommand>      ARCHIVED HF capture wrapper; requires explicit override"
         echo "  capture-preflight             ARCHIVED HF capture host preflight; requires explicit override"
         echo "  reference-prep <model>         ARCHIVED HF dependency/model prep; requires explicit override"
@@ -2935,6 +3239,10 @@ case "$cmd" in
         echo "    --diagnostic-use-cache MODE  Cache mode for diagnostic forward only: auto, on, off"
         echo "    --diagnostic-scope MODE      all, final, or postponed diagnostics for selected turns"
         echo "    --diagnose-pre-post-forward  Capture diagnostic forward before and after generate"
+        echo "    --diagnose-hidden-summaries  Capture per-hidden-state summaries during diagnostic forward"
+        echo "    --diagnose-layer0-internals Capture layer-0 internal summaries during diagnostic forward"
+        echo "    --diagnose-layer1-internals Capture layer-1 MoE internal summaries during diagnostic forward"
+        echo "    --diagnose-layer1-element-dims CSV  Limit layer-1 exact element details to these hidden dims"
         echo "    --between-turn-cleanup MODE  none, gc, or reset before turns after the first"
         echo "    --reload-model-between-turns Reload HF model before turns after the first"
         echo "    --diagnostic-only            Write diagnostic/failure manifest only, not a reference artifact"

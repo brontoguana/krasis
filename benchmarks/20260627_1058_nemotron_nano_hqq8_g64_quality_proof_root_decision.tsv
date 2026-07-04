@@ -1,0 +1,14 @@
+field	value	notes
+status	closed_quality_proof	HQQ8 g64 guarded consume quality proof completed
+material_quality_improvement	false	not acceptable for Nano production quality
+bf16_server_run	false	reused saved 1023 BF16 baselines
+hqq8_http_200	3/3	all requests used /v1/internal/reference_test
+consume_rows	69	expected 23 MoE layers x 3 requests
+copied_output_bytes	1029740544	diagnostic HQQ output copied into expert_out
+nbits_group_layout	8 / 64 / row_major_axis1_grouped_uint8	all consume rows matched
+selected_token_changes_hqq8	2/3	case0 and case2 changed BF16 token 1044 to 1321
+topk_rank_drift_hqq8	3/3	rank drift remains on every saved payload
+avg_selected_output_delta_hqq8	0.287812	worse than HQQ6 g64/g32, better than g16
+max_common_topk_delta_hqq8	0.5701680000000002	not a material improvement
+max_rank_aligned_topk_delta_hqq8	0.48909800000000003	worse than HQQ6 g64/g32
+production_hqq_enabled	false	diagnostic gate only

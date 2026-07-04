@@ -1,0 +1,11 @@
+field	value
+status	passed_generator_support
+record_first	0737 recorded first: HQQ6 g32 selected, prior generator rejected group_size=32, HQQ8 rejected, no production enablement
+hqq6_g32_generator_support	implemented
+generator_group_size_contract	HQQ6 cache generation accepts group_size 32 or 64 only
+hqq6_g64_behavior	preserved
+hqq8_behavior	rejected by nbits=6 generation contract
+runtime_g64_hardcode_found	no
+full_all_layer_cache_generated	no
+live_server	not_run
+next_gate	generate all-MoE-layer HQQ6 g32 cache/spec prerequisite after this support gate

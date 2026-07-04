@@ -1,0 +1,10 @@
+field	value
+gate_result	offline diagnosis completed
+live_server_rerun	false
+comparator_status	ok
+passes_contract	false
+contract_relaxed_in_this_gate	false
+classification	all 9 activation mismatches are observed +0 BF16 versus positive BF16 subnormals
+bit_patterns	actual 0x0000 for all; expected 0x0001 x6, 0x0002 x1, 0x0005 x1, 0x000f x1
+diagnosis	flush-to-zero/subnormal behavior candidate; no normal-value activation mismatch found
+next_gate	justified diagnostic comparator contract/tolerance change for activation zero-vs-positive-subnormal classification, not a production HQQ wiring gate

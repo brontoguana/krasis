@@ -1,0 +1,11 @@
+metric	value
+recorded_utc	2026-06-27T08:06:14Z
+disk_filesystem	/dev/nvme1n1p1
+disk_size_bytes	12001220059136
+disk_used_bytes	11238550491136
+disk_available_bytes	758914199552
+disk_use_percent	94%
+ram_total_bytes	1082021437440
+ram_used_bytes	44644315136
+ram_free_bytes	880420265984
+ram_available_bytes	1037377122304

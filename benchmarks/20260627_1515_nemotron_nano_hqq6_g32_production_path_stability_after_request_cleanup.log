@@ -1,0 +1,11 @@
+[0;36m[1m=>[0m Killing all krasis processes and freeing GPU memory...
+[1;33m[1m!![0m   Killing PID 3061194: /home/main/miniconda3/envs/ktransformers/bin/python -m krasis.server --config tests/nemotron-nano-bf16-experts-a16.conf --test-endpoints --expert-hqq-diagnostic-cache-spec benchmarks/20260627_0804_nemotron_nano_hqq6_g32_all_moe_layer_cache_spec_generation_diagnostic_cache_spec.json
+[1;33m[1m!![0m Found zombie processes — killing their parents:
+[1;33m[1m!![0m   Zombie PID 3061194, killing parent PID 3061192
+[1;33m[1m!![0m   Zombie PID 3062890, killing parent PID 3061194
+[1;33m[1m!![0m   GPU process PID 3061194: [python] <defunct>
+[1;33m[1m!![0m GPUs still not clear after 10s. Attempting nvidia-smi --gpu-reset...
+sudo: a terminal is required to read the password; either use the -S option to read from standard input or configure an askpass helper
+sudo: a password is required
+[0;31m[1mERROR[0m GPU reset failed. You may need to reboot.
+  To reboot: sudo reboot

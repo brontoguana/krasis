@@ -1,0 +1,10 @@
+buffer	scope	type	shape	formula_or_lifecycle	exactness_requirement
+candidate_out	existing_global	u16	[L,n_heads,head_dim]	Unchanged block-scan candidate output buffer allocated only under block-scan env.	Commit only after full oracle success.
+candidate_state	existing_global	f32	[n_heads,head_dim,state_size]	Unchanged exact token-order recurrent candidate state.	Must match oracle f32 bits before commit.
+entry_state	existing_global	f32	[n_chunks,n_heads,head_dim,state_size]	Unchanged per-chunk entry snapshots from exact recurrent phase.	Read-only for output phase.
+c_state_total_exact	existing_global	f32	[L,n_heads,head_dim]	Accepted 1022 buffer materialized after exact recurrent update for each row/head/d.	Preserved unchanged; output prior remains c_state_total_exact - local_old_state.
+dA_prefix_tile	new_dynamic_shared	f32	[2,chunk_len]	Same ping-pong prefix storage pattern as current mamba2_ssd_build_da_prefix_scan, sized from runtime chunk_len.	Must produce the same dA_prefix bits used by current output kernel.
+tri_coeff_tile	new_dynamic_shared	bf16_or_u16	[pair_count]	pair_count = chunk_len * (chunk_len + 1) / 2; stores BF16(cb_reverse(C[t],B[u]) * decay(t,u) * dt_u_scale).	BF16 bits must equal inline current cb_scaled_bf16 for each t,u.
+old_coeff_tile	new_dynamic_shared	f32	[pair_count]	Stores old_state_source_forward(C[t],BF16(B[u]*dt_u)) * decay(t,u), computed in the same scalar order as current output kernel.	F32 bits must equal the inline first multiply result used before multiplying by x[u,d].
+coeff_probe	new_optional_global	f32/u32	implementation_defined	Allocated only under future coefficient-probe env; records max coefficient deltas, first mismatching pair, row terms, and output bits for requested probes.	Diagnostic only; no fallback or acceptance without full oracle.
+shared_memory_bytes	runtime_check	bytes	derived	2*chunk_len*sizeof(f32) + pair_count*sizeof(bf16) + pair_count*sizeof(f32) plus any padding.	If required dynamic shared memory exceeds device limit, the opt-in candidate must fail closed rather than silently falling back.

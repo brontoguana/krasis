@@ -1,0 +1,15 @@
+area	status	file	line	detail
+record_first	pass	benchmarks/20260627_1426_nemotron_nano_read_only_checkpoint_instrumentation_support_summary.json	1	Recorded 1418 carry-forward, Gemma 5619.6 / 92.43 / 155.69, no source/live changes in 1418, no combined-only mutation found, and combined attribution still invalid for quality decisions.
+diagnostic_gate	implemented	src/gpu_prefill.rs	290	Added request-scoped KRASIS_READ_ONLY_CHECKPOINT_DIAG parser that requires debug_reference_trace=true when active.
+hash_helpers	implemented	src/gpu_prefill.rs	739	Added compact BF16/F32/I32 FNV-1a JSON hash helpers without broad tensor dumps.
+state_hashes	implemented	src/gpu_prefill.rs	1663	Added route/top-k/gather, selected expert/output, and routed selected-row checkpoint hashes from consume-boundary capture.
+request_state	implemented	src/gpu_prefill.rs	5769	Added request-scoped checkpoint record storage on PrefillEngine.
+request_setter	implemented	src/gpu_prefill.rs	6907	Added set_read_only_checkpoint_request_enabled with record clearing on disable.
+runtime_fail_closed	implemented	src/gpu_prefill.rs	15752	run_prefill validates checkpoint config; request env without debug_reference_trace fails closed.
+layer_delta_pre_post	implemented	src/gpu_prefill.rs	47361	Added pre/post checkpoint hash capture around first-token margin projection layer-delta construction.
+trace_output	implemented	src/gpu_prefill.rs	51543	Added debug_reference_trace.read_only_checkpoints with final-hidden-before-LM hash and layer-delta checkpoint records.
+server_scope	implemented	src/server.rs	2682	Reference-test requests enable checkpoint request scope only around request prefill and clear it afterward.
+default_scope	implemented	src/gpu_decode.rs	24618	PrefillEngine initializes checkpoint request scope disabled and records empty.
+focused_tests	implemented	src/gpu_prefill.rs	54638	Added tests for non-request suppression, missing-debug fail-closed behavior, debug-enabled hashes, and pre/post hash stability.
+focused_filter	implemented	src/gpu_prefill.rs	54890	Added kernel_tests wrapper so ./dev test-kernels read_only_checkpoint runs the focused checkpoint tests.
+forbidden_scope	preserved	benchmarks/20260627_1426_nemotron_nano_read_only_checkpoint_instrumentation_support_summary.json	1	No live server, cache generation, new variant, production HQQ enablement, speed benchmark, decode/HCS, or selected-expert retargeting.

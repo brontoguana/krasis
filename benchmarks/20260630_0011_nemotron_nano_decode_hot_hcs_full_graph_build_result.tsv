@@ -1,0 +1,4 @@
+step	command	exit_code	duration_s	notes
+build_hot_hcs_nosync	./dev build	0	175	Added gated hot-HCS no-sync graph replay support.
+build_hot_hcs_full_graph	./dev build	0	175	Added gated single full hot-HCS decode graph capture/replay.
+build_direct_w13	./dev build	0	182	Added gated direct BF16 W13 graph kernel for INT4 single-split W13.

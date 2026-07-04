@@ -1,0 +1,94 @@
+{
+  "gate": "20260627_1007_nemotron_nano_hqq8_diagnostic_support_implementation",
+  "status": "closed_diagnostic_support_implemented",
+  "opened_utc": "2026-06-27T10:08:27Z",
+  "closed_utc": "2026-06-27T10:35:34Z",
+  "recorded_prior_gate": {
+    "gate": "20260627_1000_nemotron_nano_hqq8_feasibility_support",
+    "status": "closed_unsupported_runtime_reference_path",
+    "hqq8_support_stop": true,
+    "estimated_hqq8_g64_cache_bytes": 33047177280,
+    "estimated_hqq8_g64_cache_gib": 30.777582228183746,
+    "disk_available_human": "645G",
+    "ram_available_human": "966Gi",
+    "cuda_hqq8_kernel_exists": true,
+    "source_hqq8_support_changes": false,
+    "cache_generation": false,
+    "live_server": false,
+    "production_hqq_enabled": false
+  },
+  "scope": {
+    "implement_generator_manifest_acceptance": true,
+    "implement_safetensors_cache_spec_quantizer_path": true,
+    "implement_reference_dequant_dispatch": true,
+    "implement_guarded_runtime_launch_plumbing": true,
+    "preserve_hqq6_behavior": true,
+    "keep_production_hqq_disabled": true,
+    "fail_closed_for_unsupported_nbits_groups": true
+  },
+  "implementation": {
+    "generator_manifest_hqq8_g64_accepted": true,
+    "generator_hqq6_group_sizes_preserved": [16, 32, 64],
+    "generator_hqq8_group_sizes": [64],
+    "safetensors_quantizer_hqq8": "affine_uint8_qmax_255_row_major",
+    "reference_dequant_hqq8": true,
+    "reference_dispatch_hqq8": true,
+    "guarded_runtime_diagnostic_hqq8_launch": true,
+    "runtime_hqq8_kernel": "hqq8_prefill_gemm_bf16_kernel",
+    "production_hqq_default_changed": false
+  },
+  "validation": {
+    "focused_expert_hqq_tests": "98/0",
+    "test_command": "./dev test-kernels expert_hqq",
+    "test_exit": 0,
+    "dev_build": "passed",
+    "build_command": "./dev build",
+    "build_exit": 0,
+    "cargo_fmt_check": "passed",
+    "bash_n_dev": "passed",
+    "git_diff_check_krasis": "passed",
+    "git_diff_check_internal": "passed",
+    "protected_config_check": "passed_only_known_preexisting_untracked_nano_bf16_config"
+  },
+  "decision": {
+    "hqq8_diagnostic_support": "implemented",
+    "next_gate": "HQQ8 g64 cache/spec generation prerequisite",
+    "cache_generation_in_this_gate": false,
+    "live_server_in_this_gate": false,
+    "production_hqq_enabled": false
+  },
+  "forbidden": {
+    "hqq8_cache_generation": false,
+    "live_server": false,
+    "benchmark": false,
+    "production_hqq": false,
+    "fallback": false,
+    "decode_hcs": false,
+    "selected_expert_routing": false,
+    "int4_hqq4": false,
+    "kv_work": false
+  },
+  "final_state": {
+    "timestamp_utc": "2026-06-27T10:35:34Z",
+    "tmux": "no server running",
+    "matching_runtime_generator_build_processes": "none",
+    "gpu_memory_used_mb": {
+      "gpu0": 15,
+      "gpu1": 11
+    },
+    "gpu_utilization_percent": {
+      "gpu0": 0,
+      "gpu1": 0
+    },
+    "disk_available_human": "645G",
+    "ram_available_human": "965Gi"
+  },
+  "artifacts": {
+    "summary": "benchmarks/20260627_1007_nemotron_nano_hqq8_diagnostic_support_implementation_summary.json",
+    "implementation_inventory": "benchmarks/20260627_1007_nemotron_nano_hqq8_diagnostic_support_implementation_implementation_inventory.tsv",
+    "root_decision": "benchmarks/20260627_1007_nemotron_nano_hqq8_diagnostic_support_implementation_root_decision.tsv",
+    "validation": "benchmarks/20260627_1007_nemotron_nano_hqq8_diagnostic_support_implementation_validation_checks.tsv",
+    "test_log": "benchmarks/20260627_1007_nemotron_nano_hqq8_diagnostic_support_implementation_test_kernels.log",
+    "build_log": "benchmarks/20260627_1007_nemotron_nano_hqq8_diagnostic_support_implementation_build.log"
+  }
+}

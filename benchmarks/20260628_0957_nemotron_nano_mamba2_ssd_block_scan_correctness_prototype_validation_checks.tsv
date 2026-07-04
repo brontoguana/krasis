@@ -1,0 +1,15 @@
+check	result	evidence
+record_first	passed	Opened summary, changelog, TRACKING, and DEBUGLOG recorded 0944 before source edits
+build	passed	./dev build exit 0, duration_s 173
+small_startup_diagnostic	failed_closed_expected	Exit 1 from exact full oracle mismatch; no long diagnostic run
+oracle_artifact	passed	Layer 0 oracle record captured first output mismatch and exact state pass
+requests_absent	passed	No request or benchmark evidence in startup diagnostic log
+long_diagnostic_absent	passed	No long diagnostic artifact or timing run created after mismatch
+default_path_preserved	passed	Default branch remains trace-or-sequential when block-scan env is absent
+v5_diagnostics_preserved	passed	V5 env gates, v5 recurrent kernel, v5 oracle, and V5 timing instrumentation remain present
+prior_guarded_probes_preserved	passed	Local-tri/state-flat and 0650 cast/carry diagnostics remain present
+diff_check	passed	git diff --check and krasis-internal diff --check passed
+dev_syntax	passed	bash -n dev passed
+protected_configs	passed	Only expected tests-only Nano configs are untracked in protected scope
+temp_lock_files	passed	No Nano Krasis temp/lock/partial files outside HF download metadata
+final_idle	passed	2026-06-28T10:12:50Z no runtime/build/GPU compute process; GPUs 15 MB / 11 MB

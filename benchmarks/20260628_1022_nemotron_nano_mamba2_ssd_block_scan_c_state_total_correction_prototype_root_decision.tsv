@@ -1,0 +1,5 @@
+decision	status	evidence	next_step
+correctness	accepted_opt_in	Small and long startup diagnostics both produced 69/69 exact oracle records, 0 output mismatches, 0 state mismatches, exact row97 term probe output, and exact row64/state0 plus row82/state14 regression probes.	Keep as opt-in correctness seed only.
+performance	not_production_accepted	Long diagnostic total block-scan path was 253940.599995ms; sequential oracle 114284.518733ms, recurrent 16487.771138ms, output kernel 100060.325232ms, downloads 9055.823995ms, host comparison 12359.669588ms.	Next optimization should target output assembly cost; do not production-enable this diagnostic path.
+default_path	unchanged	Non-env SSD dispatch remains trace-or-sequential; block-scan path requires KRASIS_MAMBA2_SSD_BLOCK_SCAN=1 and KRASIS_MAMBA2_SSD_BLOCK_SCAN_ORACLE=1.	No default-path change.
+row97_correction	supported	Materialized c_state_total_exact removed the prior row97 mismatch; term probe target row=97 head=48 d=24 matched oracle bits in all 69 small and 69 long records.	Use c_state_total_exact as accepted output prior source in future block-scan prototypes.

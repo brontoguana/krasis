@@ -1,0 +1,10 @@
+metric	value	note
+http_success	3/3	All corrected /v1/internal/reference_test requests returned HTTP 200.
+selected_token_matches_bf16	3/3	All cases selected token 1044 ",".
+selected_token_matches_accepted_g32	3/3	All cases match accepted HQQ6 g32 non-attribution selected-token behavior.
+positive_1044_minus_1321_margin	3/3	Margins: case0 0.149701, case1 0.313407, case2 0.198773.
+case2_first_stop_condition	passed	Case 2 selected 1044 and margin remained positive versus BF16/g32 references.
+topk_drift_vs_bf16	3/3	Top-k membership/rank drift remains for all cases.
+topk_drift_vs_accepted_g32	3/3	Top-k membership/rank drift remains for all cases.
+expert_hqq_consume_rows	n/a	This HQQ4+k4v4 config is attention-HQQ, not the expert-HQQ diagnostic consume path.
+quality_acceptance	false	Selected-token smoke passes, but top-k drift remains and production enablement is out of scope.

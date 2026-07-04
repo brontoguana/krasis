@@ -1,0 +1,9 @@
+field	status	evidence
+hqq_attention_reused	pass	HQQ attention artifacts validated (115 MB cached), 27940 MB free
+marlin_cache_reused	pass	Loading GPU Marlin cache: 23 layers...; GPU Marlin cache loaded: 15.8 GB in 10s
+marlin_safetensors_build_absent	pass	No "Building GPU INT4 Marlin cache: 23 layers from safetensors" line in corrected server log
+cache_write_evidence_absent	pass	No "GPU INT4 Marlin cache built" line and no cache temp/lock files
+server_ready	pass	KRASIS SERVER READY at corrected server log line 93
+long_prefill_min_free_mb	info	12398 MB versus 600 MB safety margin
+manifest_path	info	/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/attention_hqq_v5_grid65_33/manifest.json
+effective_marlin_path	info	/home/main/.krasis/cache/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/experts_marlin_int4_g64_calamax.bin

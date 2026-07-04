@@ -1,0 +1,10 @@
+item	value
+root_decision	Divergence is attributable to HQQ6 g64 quantization/local expert-output numeric deltas, not to the consume DtoD copy, scatter layout, scatter sync, or final BF16 conversion in the corrected diagnostic proof.
+evidence_hqq_vs_bf16_expert_out	max_abs=32.0 sum_abs_across_layers=10178743.488197472
+evidence_selected_routed_cpu_delta	max_abs=9.1077880859375 sum_abs_across_layers=3966.7455259748385
+evidence_scatter_layout_sync	synced_gpu_vs_cpu_scatter_max_abs=7.62939453125e-06 sum_abs_across_layers=0.006416842260478006
+evidence_output_conversion	output_vs_rounded_accum_max_abs=0.0 sum_abs_across_layers=0.0
+response_effect	case2 BF16 token 1044 ',' -> HQQ token 1321 ' and'; selected_log_prob_delta=-0.20660000000000012
+diagnostic_capture_bug_found	first live capture lacked explicit stream sync before post-scatter/post-output downloads; sync patch fixed diagnostic evidence only
+not_root_cause	consume DtoD copy, scatter layout, stream sync after patch, and final BF16 output conversion
+next_gate	decide HQQ6 quality/quantization contract or improve quantization before any production enablement; INT4/HQQ4 remains separate

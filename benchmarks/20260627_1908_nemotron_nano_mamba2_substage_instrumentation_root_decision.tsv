@@ -1,0 +1,9 @@
+decision	status	evidence
+instrumentation_scope	pass	Added minimal guarded Rust instrumentation only around Mamba2 prefill substages; no model-specific constants.
+build	pass	./dev build exited 0 after instrumentation.
+diagnostic_run	pass	Startup diagnostic command exited 0, sent 0 requests, and exited after VRAM calibration.
+cache_reuse	pass	HQQ attention cache validated and effective Marlin g64 loaded; no safetensors cache-write evidence.
+root_cause	diagnosed	Mamba2 SSD/scan dominated long prefill: 114449.4ms of 117356.0ms prefill wall, 99.661% of Mamba2 wall.
+non_causes	recorded	GQA/HQQ attention was 476.8ms; MoE/Marlin was 1931.6ms; CPU/GPU transfer and queue overhead were not primary.
+next_action	proposed	Inspect/optimize Mamba2 SSD/scan implementation in a separate gate, using data from this instrumentation.
+scope_stop	pass	No optimization attempt, smoke requests, benchmark, decode/HCS change, cache generation, or production enablement in this gate.

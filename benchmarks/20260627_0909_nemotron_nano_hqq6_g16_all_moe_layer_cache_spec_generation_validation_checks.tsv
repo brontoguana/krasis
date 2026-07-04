@@ -1,0 +1,18 @@
+check	status	detail
+record_first_0853	pass	94/0, ./dev build passed, g16 feasible, allowlist [16,32,64], HQQ8 rejected, estimated cache 36719028288 bytes, final headroom 680G/965Gi, no live server/cache generation in 0853
+headroom_before	pass	680G disk / 965Gi RAM available before generation
+manifest_template_delta	pass	g16 manifest differs from g32 template only by group_size and output cache/spec paths
+built_command_only	pass	./dev expert-hqq-cache-generate benchmarks/20260627_0909_nemotron_nano_hqq6_g16_all_moe_layer_cache_spec_generation_all_layer_generation_manifest.json
+generator_exit	pass	exit status 0, status=ok
+metadata_validation	pass	manifest/spec/cache checks all pass
+generator_result	pass	23 layers, 128 experts, 2944 layer-expert refs, 5888 tensor records, nbits=6, group_size=16
+headroom_after	pass	645G disk / 964Gi RAM available after generation
+source_changes_required	pass	no source changes in this gate; focused tests/build not rerun
+live_server_forbidden	pass	no live server launched
+production_forbidden_scope	pass	no production HQQ, speed benchmark, fallback, decode/HCS, selected-expert retargeting, HQQ8, or INT4/HQQ4 work
+protected_config_status	pass	only known pre-existing untracked tests/nemotron-nano-bf16-experts-a16.conf
+git_diff_check_krasis	pass	git diff --check passed
+git_diff_check_internal	pass	git diff --check passed
+final_tmux	pass	no tmux server at 2026-06-27T09:26:40Z
+final_processes	pass	no matching runtime/generator/analyzer/curl process at 2026-06-27T09:26:40Z
+final_gpu	pass	GPU memory 15 MB / 11 MB, 0% utilization at 2026-06-27T09:26:40Z

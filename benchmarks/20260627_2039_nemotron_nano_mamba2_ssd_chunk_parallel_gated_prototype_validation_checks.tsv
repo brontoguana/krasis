@@ -1,0 +1,20 @@
+check	result	detail
+summary_json	pass	Closed summary asserts build exit 0, small oracle exit 1, fail_closed true, long diagnostic not run, and worth_keeping false.
+tsv_schemas	pass	All 2039 TSV artifacts have consistent column counts per file.
+build_exit	pass	build.exit exists and equals 0.
+small_oracle_exit	pass	small_oracle.exit exists and equals 1.
+oracle_mismatch_recorded	pass	Oracle log records layer 0 mismatch with output_mismatches=27 and state_mismatches=134008.
+long_not_run	pass	No long diagnostic log exists and long_diagnostic_not_run artifact records the stop reason.
+no_requests	pass	Small oracle log contains no reference_test or internal request endpoint evidence.
+no_benchmark_path	pass	Small oracle log contains no benchmark-only/KrasisBenchmark evidence.
+no_cache_generation	pass	Small oracle log contains no safetensors Marlin build line, no --build-cache, and no BUILD CACHE COMPLETE.
+bash_n_dev	pass	bash -n dev exited 0.
+git_diff_check_krasis	pass	git diff --check passed in krasis-nemotron-dev.
+git_diff_check_internal	pass	git diff --check passed in krasis-internal.
+protected_config_status	pass	Only expected untracked tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf appears in protected-config scope.
+cache_temp_lock	pass	No Nano .tmp/.lock/.pending cache files remain outside HF download locks.
+tmux_idle	pass	tmux ls reports no server.
+runtime_process_idle	pass	No matching krasis/dev/benchmark/build process remains.
+nvidia_compute_idle	pass	nvidia-smi compute-app query is empty.
+gpu_idle	pass	GPU memory is 15 MB / 11 MB.
+final_snapshot	pass	2026-06-27T20:57:39Z; disk 588G; RAM 968Gi.

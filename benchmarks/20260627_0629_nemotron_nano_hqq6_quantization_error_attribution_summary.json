@@ -1,0 +1,98 @@
+{
+  "label": "20260627_0629_nemotron_nano_hqq6_quantization_error_attribution",
+  "opened_utc": "2026-06-27T06:29:00Z",
+  "record_first": {
+    "source_gate": "0524",
+    "gemma": "5619.6 / 92.43 / 155.69",
+    "focused_expert_hqq_tests": "86/0",
+    "dev_build": "passed",
+    "case_2_http_200": true,
+    "hqq_consume_rows": 23,
+    "hqq_copied_output_bytes": 330882048,
+    "synced_gpu_scatter_vs_cpu_max_abs": "7.63e-6",
+    "post_output_conversion_exact": true,
+    "bf16_token_id": 1044,
+    "hqq_token_id": 1321,
+    "production_hqq_enabled": false
+  },
+  "planned_work": {
+    "live_server_first": false,
+    "reuse_0524_synced_boundary_artifacts": true,
+    "identify_worst_layers_rows_columns_and_active_experts": true,
+    "compare_exact_rows_against_bf16_expert_math": true,
+    "compare_exact_rows_against_krhq_hqq6_dequant_math": true,
+    "add_focused_offline_analyzer_only_if_needed": true
+  },
+  "forbidden": {
+    "tolerance_change": true,
+    "production_hqq": true,
+    "speed_benchmark": true,
+    "int4_hqq4": true,
+    "fallback": true,
+    "decode_hcs": true
+  },
+  "status": "closed_blocked_for_exact_offline_math",
+  "closed_utc": "2026-06-27T06:37:35Z",
+  "analysis": {
+    "live_server_rerun": "not_run",
+    "source_changes": "none",
+    "worst_global_expert_out": {
+      "layer": 51,
+      "expert": 60,
+      "sorted_row": 1837,
+      "col": 1599,
+      "abs_delta": 32.0,
+      "bf16_value": 1072.0,
+      "hqq_value": 1104.0,
+      "gather_src": 431,
+      "gather_weight": 0.31420233845710754
+    },
+    "worst_selected_row_routed": {
+      "layer": 51,
+      "col": 1599,
+      "abs_delta": 9.1077880859375,
+      "bf16_value": 485.826904296875,
+      "hqq_value": 494.9346923828125,
+      "trace_row": 445
+    },
+    "existing_artifacts_sufficient_for": [
+      "localize divergence to HQQ-vs-BF16 expert_out boundary",
+      "exclude consume DtoD/scatter/layout/sync/output-conversion defect via 0524 synced capture",
+      "identify worst global expert-output layers/rows/columns/experts",
+      "identify worst selected-row routed output dimensions"
+    ],
+    "existing_artifacts_insufficient_for": [
+      "exact offline recomputation of original BF16 expert math for the same HQQ-consumed input rows",
+      "exact offline recomputation of KRHQ/HQQ6 dequant math for the same HQQ-consumed input rows",
+      "selected-row routed contributor decomposition by active expert"
+    ],
+    "decision": "blocked before exact inherent-quantization-vs-cache-generation proof because the 0524 capture intentionally emitted summaries/top-N only, not exact HQQ-consumed input/activation rows. Current evidence excludes consume/scatter/sync/output conversion and broad KRHQ/GPU layout defects, but exact row-level attribution requires a targeted next capture."
+  },
+  "artifacts": {
+    "worst_layer_summary": "20260627_0629_nemotron_nano_hqq6_quantization_error_attribution_worst_layer_summary.tsv",
+    "worst_delta_inventory": "20260627_0629_nemotron_nano_hqq6_quantization_error_attribution_worst_delta_inventory.tsv",
+    "artifact_inventory": "20260627_0629_nemotron_nano_hqq6_quantization_error_attribution_artifact_inventory.tsv",
+    "missing_exact_math_requirements": "20260627_0629_nemotron_nano_hqq6_quantization_error_attribution_missing_exact_math_requirements.tsv",
+    "root_decision": "20260627_0629_nemotron_nano_hqq6_quantization_error_attribution_root_decision.tsv",
+    "validation": "20260627_0629_nemotron_nano_hqq6_quantization_error_attribution_validation_checks.tsv"
+  },
+  "validation": {
+    "source_changes": "none",
+    "live_server_rerun": "not_run",
+    "focused_expert_hqq_tests": "not_run_no_source_changes",
+    "dev_build": "not_run_no_source_changes",
+    "artifact_assertions": "passed",
+    "bash_n_dev": "passed",
+    "py_compile": "passed",
+    "git_diff_check": "passed",
+    "internal_git_diff_check": "passed",
+    "protected_config_check": "passed_preexisting_untracked_tests/nemotron-nano-bf16-experts-a16.conf",
+    "cleanup": "passed"
+  },
+  "final_state": {
+    "timestamp_utc": "2026-06-27T06:37:35Z",
+    "tmux": "none",
+    "runtime_process": "none",
+    "gpu_memory_used_mb": "15 / 11"
+  }
+}

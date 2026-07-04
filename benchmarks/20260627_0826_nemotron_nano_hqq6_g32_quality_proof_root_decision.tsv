@@ -1,0 +1,6 @@
+decision	value	evidence
+root_decision	hqq6_g32_not_material_quality_acceptance	g32 removed the g64 case-2 selected-token flip, but all 3 payloads still have top-k rank drift; avg selected-output logprob delta worsened 0.110919667 -> 0.125852000; max common top-k delta worsened 0.493397000 -> 0.578915000
+selected_token_result	improved_vs_g64	g64 selected token changed in 1/3 cases; g32 selected token changed in 0/3 cases
+topk_rank_result	still_quality_drift	g64 rank drift 3/3 cases; g32 rank drift 3/3 cases
+production_enablement	no	guarded diagnostic consume only; BF16 remains default/reference
+next_gate	test_next_higher_quality_variant_or_define_acceptance_threshold	g32 is better for selected-token stability but not a material quality pass on saved 1023 top-k evidence

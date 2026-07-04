@@ -1,0 +1,13 @@
+component	file	line	note
+oracle_summary	src/gpu_prefill.rs	214	Mamba2SsdChunkV2OracleSummary records full output/state comparison.
+env_gate	src/gpu_prefill.rs	15256	KRASIS_MAMBA2_SSD_CHUNK_PARALLEL_V2 opt-in gate.
+oracle_compare	src/gpu_prefill.rs	15272	Compares candidate output/state against sequential oracle and fails closed on mismatch.
+candidate_launcher	src/gpu_prefill.rs	15356	Launches v2 prefix/output/state-update kernels using runtime chunk size.
+candidate_oracle_dispatch	src/gpu_prefill.rs	15532	Runs term preflight, sequential oracle, candidate, and full comparison.
+ssd_dispatch	src/gpu_prefill.rs	31294	Uses v2 candidate only when the opt-in env is set; default remains sequential.
+ptx_required_symbols	src/gpu_prefill.rs	53220	Requires v2 PTX symbols at load when extension is built.
+ptx_load	src/gpu_prefill.rs	53635	Loads v2 PTX function handles.
+prefix_kernel	src/cuda/prefill_kernels.cu	5111	Computes dt softplus and runtime-chunk dA prefix.
+output_kernel	src/cuda/prefill_kernels.cu	5154	Computes local triangular output for runtime chunk.
+state_update_kernel	src/cuda/prefill_kernels.cu	5233	Computes final state update for runtime chunk.
+python_fail_closed	python/krasis/server.py	1740	Re-raises warmup exception only when v2 diagnostic env is active.

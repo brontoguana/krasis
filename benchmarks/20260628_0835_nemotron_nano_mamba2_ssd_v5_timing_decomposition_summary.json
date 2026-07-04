@@ -1,0 +1,92 @@
+{
+  "artifacts": {
+    "build_result": "20260628_0835_nemotron_nano_mamba2_ssd_v5_timing_decomposition_build_result.tsv",
+    "component_timing": "20260628_0835_nemotron_nano_mamba2_ssd_v5_timing_decomposition_component_timing.tsv",
+    "long_detail": "20260628_0835_nemotron_nano_mamba2_ssd_v5_timing_decomposition_long_detail.tsv",
+    "oracle_correctness": "20260628_0835_nemotron_nano_mamba2_ssd_v5_timing_decomposition_oracle_correctness.tsv",
+    "root_decision": "20260628_0835_nemotron_nano_mamba2_ssd_v5_timing_decomposition_root_decision.tsv",
+    "runtime_attempt": "20260628_0835_nemotron_nano_mamba2_ssd_v5_timing_decomposition_runtime_attempt.tsv",
+    "source_artifacts": "20260628_0835_nemotron_nano_mamba2_ssd_v5_timing_decomposition_source_artifacts.tsv",
+    "startup_cache_validation": "20260628_0835_nemotron_nano_mamba2_ssd_v5_timing_decomposition_startup_cache_validation.tsv",
+    "validation_checks": "20260628_0835_nemotron_nano_mamba2_ssd_v5_timing_decomposition_validation_checks.tsv"
+  },
+  "constraints": {
+    "decode_hcs_changes": false,
+    "default_path_change": false,
+    "production_enablement": false,
+    "requests": false,
+    "speed_benchmark": false,
+    "v5_opt_in_only": true
+  },
+  "gate": "20260628_0835_nemotron_nano_mamba2_ssd_v5_timing_decomposition",
+  "opened_utc": "2026-06-28T08:35:00Z",
+  "closed_utc": "2026-06-28T08:57:14Z",
+  "record_first": {
+    "0810_result": {
+      "baseline_1908_ssd_scan_ms": 114449.4,
+      "correctness": "passed_exact_oracle",
+      "default_ssd_path": "sequential_without_v5_envs",
+      "long_ssd_scan_ms": 244701.0,
+      "long_timing_note": "combined path includes sequential oracle, v5 candidate, full host-side compare, and commit/copy work"
+    },
+    "gemma_baseline": {
+      "internal_decode_tok_s": 92.43,
+      "network_tok_s": 155.69,
+      "prefill_tok_s": 5619.6
+    },
+    "nano_baseline": {
+      "internal_decode_tok_s": 94.48,
+      "network_tok_s": 164.75,
+      "prefill_tok_s": 346.5
+    },
+    "source_gate": "20260628_0810_nemotron_nano_mamba2_ssd_v5_correctness_prototype"
+  },
+  "result": {
+    "build": {
+      "command": "./dev build",
+      "duration_s": 169,
+      "exit": 0
+    },
+    "correctness": {
+      "failed_records": 0,
+      "output_mismatches": 0,
+      "records": 207,
+      "state_mismatches": 0,
+      "status": "passed_exact_oracle"
+    },
+    "diagnostic": {
+      "exit_mode": "manual_stop_after_ready_no_exit_file",
+      "ready_line": 908,
+      "requests_sent": 0,
+      "benchmark_path": false,
+      "timing_records": 207
+    },
+    "long_decomposition_39920": {
+      "buffer_alloc_zeroed_ms": 15.456477,
+      "commit_copies_ms": 11.745775,
+      "full_buffer_downloads_ms": 9043.142551,
+      "host_comparison_ms": 12390.200665,
+      "prefill_ssd_scan_ms": 251443.8,
+      "residual_ms": 1334.067326,
+      "sequential_oracle_ms": 114292.93289,
+      "state_snapshot_copies_ms": 5.407559,
+      "total_v5_path_ms": 251386.108393,
+      "v5_candidate_ms": 114293.15515
+    },
+    "interpretation": "The v5 diagnostic overhead is dominated by double kernel execution: sequential oracle plus v5 candidate. Full-buffer downloads and host comparison are material but secondary; commit copies are negligible."
+  },
+  "scope": "guarded_v5_timing_decomposition",
+  "status": "closed",
+  "validation": {
+    "final_cleanup_exit": 0,
+    "final_gpu_memory_mb": {
+      "0": 15,
+      "1": 11
+    },
+    "final_snapshot_utc": "2026-06-28T08:57:14Z",
+    "krasis_temp_lock_files": 0,
+    "nvidia_compute_processes": 0,
+    "passed": true,
+    "runtime_processes": 0
+  }
+}

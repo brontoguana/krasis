@@ -1,0 +1,14 @@
+check	status	details
+record_first	passed	Recorded 1134 first with Gemma 5619.6 / 92.43 / 155.69, data-only margin result, no live rerun, and exact missing instrumentation.
+source_scope	passed	Only diagnostic trace support was added; no production HQQ, variant, decode/HCS, cache, server, benchmark, or retargeting work.
+focused_tests	passed	./dev test-kernels expert_hqq: 101 passed, 0 failed, 0 ignored, 125 filtered out.
+build	passed	./dev build passed; KRASIS_BUILD_TIMING phase="dev build total" status=0 duration_s=168.
+cargo_fmt_check	passed	PATH="$HOME/.cargo/bin:/home/main/miniconda3/envs/ktransformers/bin:$PATH" cargo fmt --check passed.
+bash_n_dev	passed	bash -n dev passed.
+git_diff_check_krasis	passed	git diff --check passed in krasis-nemotron-dev.
+git_diff_check_internal	passed	git diff --check passed in krasis-internal.
+protected_config_check	passed	Only known pre-existing untracked tests/nemotron-nano-bf16-experts-a16.conf appears.
+server_run_absent	passed	No live server was run in this gate.
+cache_generation_absent	passed	No cache generation was run in this gate.
+benchmark_absent	passed	No speed benchmark was run in this gate.
+final_idle_state	passed	Final snapshot 2026-06-27T12:13:37Z: no tmux server, no matching runtime/generator/build process, no NVIDIA compute process; GPUs 15 MB / 11 MB; disk 614G; RAM 966Gi.

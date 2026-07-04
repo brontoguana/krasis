@@ -1,0 +1,2 @@
+scope	layer	tokens	passed	output_mismatches	output_max_abs	output_mean_abs	first_output_row	first_output_head	first_output_d	first_output_flat	candidate_bits	candidate_value	oracle_bits	oracle_value	first_output_abs_error	state_mismatches	state_max_abs	state_mean_abs	first_state_mismatch	row64_state0_output	row64_state0_state	row82_state14_output	row82_state14_state
+small_startup	0	256	false	10	0.00390625	0.000000007927155820652843	82	37	30	338270	0xbe4e	-0.201171875	0xbe4d	-0.2001953125	0.0009765625	0	0.0	0.0	none	exact	exact	mismatch	exact

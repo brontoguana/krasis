@@ -1,0 +1,4 @@
+decision	evidence	next_action
+local_old_state_exact_not_accepted	Small full oracle failed closed: output mismatches=10, first row=82 head=37 d=30, output max/mean=0.00390625/0.000000007927155820652843; state exact.	Do not run long timing and do not production-enable; next gate should analyze or clean up the failed opt-in change.
+row97_fixed_but_regression_found	Row97/head48/d24 term probe matched candidate/oracle 0xc234 and showed only small exact-vs-replayed old-state deltas, but row82/state14 output regressed.	Focus next analysis on why recurrent local_old_state_exact changes row82 local/prior assembly while state remains exact.
+state_path_still_exact	State mismatches=0, row64/state0 state exact, row82/state14 state exact.	Do not alter exact recurrent state/final-state propagation based on this failure.

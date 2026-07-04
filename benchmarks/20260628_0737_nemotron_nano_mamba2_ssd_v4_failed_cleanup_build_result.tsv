@@ -1,0 +1,8 @@
+field	value
+gate	20260628_0737_nemotron_nano_mamba2_ssd_v4_failed_cleanup
+command	./dev build
+exit_code	0
+duration_s	177
+build_log	20260628_0737_nemotron_nano_mamba2_ssd_v4_failed_cleanup_build.log
+build_timing_line	KRASIS_BUILD_TIMING phase="dev build total" status=0 duration_s=177
+result	passed

@@ -1,0 +1,16 @@
+check	status	evidence
+summary_closed	pass	status=closed validation.passed=true
+record_first_0715	pass	Gemma 5619.6/92.43/155.69; Nano 346.5/94.48/164.75; 0715 fail-closed recorded
+v4_source_markers_absent	pass	rg found no v4 prototype env/kernel/oracle markers in source
+preserved_diagnostics	pass	local-tri/state-flat and 0650 cast/carry diagnostics still present
+build_passed	pass	./dev build exit 0, duration_s=177
+startup_diagnostic_passed	pass	startup diagnostic exit 0 without v4 prototype envs
+requests_absent	pass	no POST /v1 request lines
+benchmark_absent	pass	no benchmark-only/KrasisBenchmark lines
+cache_reuse_clean	pass	HQQ attention cache validated; GPU Marlin cache loaded from cache
+krasis_temp_lock_absent	pass	no Krasis temp/lock files outside Hugging Face download lock metadata
+diff_check_krasis	pass	git diff --check passed
+diff_check_internal	pass	git diff --check passed
+dev_shell_syntax	pass	bash -n dev passed
+protected_configs_unchanged	pass	only expected tests-only Nano HQQ4 and known Nano BF16 configs are untracked
+idle_state	pass	no tmux/runtime/build/GPU compute process; GPUs 15 MB / 11 MB at 2026-06-28T07:51:51Z

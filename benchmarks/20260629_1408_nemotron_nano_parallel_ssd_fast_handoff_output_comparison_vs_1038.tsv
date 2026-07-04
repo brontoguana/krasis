@@ -1,0 +1,8 @@
+metric	old_1038_avg_ms	new_1408_avg_ms	delta_ms	percent_change
+timing_ms.total_candidate_path	9827.873	656.022	-9171.851	-93.3%
+timing_ms.block_scan_recurrent_kernel.total	735.990	12.638	-723.352	-98.3%
+timing_ms.block_scan_recurrent_kernel.parallel_chunked_phase_ms.chunk_cumsum	0.040	0.156	0.116	291.0%
+timing_ms.block_scan_recurrent_kernel.parallel_chunked_phase_ms.chunk_state	10.705	10.698	-0.007	-0.1%
+timing_ms.block_scan_recurrent_kernel.parallel_chunked_phase_ms.state_passing	1.783	1.783	-0.000	-0.0%
+timing_ms.block_scan_recurrent_kernel.parallel_chunked_phase_ms.exact_state_bridge	723.448	0.000	-723.448	-100.0%
+timing_ms.block_scan_output_coeff_tile_kernel.total	9075.657	627.436	-8448.221	-93.1%

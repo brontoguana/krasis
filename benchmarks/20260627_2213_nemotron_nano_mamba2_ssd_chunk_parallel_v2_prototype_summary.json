@@ -1,0 +1,147 @@
+{
+  "gate": "20260627_2213_nemotron_nano_mamba2_ssd_chunk_parallel_v2_prototype",
+  "status": "closed",
+  "opened_utc": "2026-06-27T22:14:22Z",
+  "closed_utc": "2026-06-27T22:29:30Z",
+  "record_first": {
+    "source_gate": "20260627_2149_nemotron_nano_mamba2_ssd_local_triangular_oracle_instrumentation",
+    "gemma_baseline": {
+      "prefill_tok_s": 5619.6,
+      "decode_tok_s": 92.43,
+      "network_tok_s": 155.69
+    },
+    "nano_baseline": {
+      "prefill_tok_s": 346.5,
+      "internal_decode_tok_s": 94.48,
+      "network_tok_s": 164.75
+    },
+    "local_triangular_oracle": {
+      "matched_sequential_gpu_bits": true,
+      "token_rows": [300, 500, 39920],
+      "target": {
+        "layer": 0,
+        "row": 70,
+        "head": 37,
+        "d": 50,
+        "production_chunk_start": 64,
+        "production_chunk_pos": 6,
+        "runtime_mamba_chunk_size": 64
+      }
+    }
+  },
+  "scope": {
+    "opt_in_candidate_only": true,
+    "preserve_runtime_mamba_chunk_size": true,
+    "term_oracle_preflight_required": true,
+    "full_sequential_oracle_required": true,
+    "default_path_remains_sequential": true,
+    "silent_fallback": false,
+    "smoke_requests": false,
+    "speed_benchmark": false,
+    "decode_hcs": false,
+    "production_enablement": false
+  },
+  "implementation": {
+    "env": "KRASIS_MAMBA2_SSD_CHUNK_PARALLEL_V2",
+    "oracle_env": "KRASIS_MAMBA2_SSD_CHUNK_PARALLEL_V2_ORACLE",
+    "term_oracle_env": "KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE",
+    "cuda_stages": [
+      "mamba2_ssd_chunk_v2_prefix_kernel",
+      "mamba2_ssd_chunk_v2_output_kernel",
+      "mamba2_ssd_chunk_v2_state_update_kernel"
+    ],
+    "runtime_chunk_size_preserved": true,
+    "default_path_changed": false
+  },
+  "build": {
+    "command": "./dev build",
+    "exit": 0,
+    "duration_s": 175,
+    "log": "20260627_2213_nemotron_nano_mamba2_ssd_chunk_parallel_v2_prototype_build.log"
+  },
+  "small_oracle": {
+    "command": "KRASIS_STARTUP_DIAG=1 KRASIS_PREFILL_TIMING=1 KRASIS_PREFILL_LIVENESS_TIMING=1 KRASIS_STARTUP_WARMUP_TOKENS=128 KRASIS_STARTUP_CAL_SHORT_TOKENS=128 KRASIS_STARTUP_CAL_LONG_TOKENS=256 KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE=1 KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE_LAYER=0 KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE_ROW=70 KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE_HEAD=37 KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE_D=50 KRASIS_MAMBA2_SSD_CHUNK_PARALLEL_V2=1 KRASIS_MAMBA2_SSD_CHUNK_PARALLEL_V2_ORACLE=1 KRASIS_STARTUP_EXIT_AFTER_CALIBRATION=1 ./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf",
+    "exit": 1,
+    "result": "failed_closed",
+    "requests_sent": 0,
+    "benchmark_path": false,
+    "cache_reuse": {
+      "hqq_attention": "validated_from_cache",
+      "marlin": "effective_g64_loaded",
+      "cache_write_evidence": false
+    },
+    "term_preflight": {
+      "passed": true,
+      "layer": 0,
+      "tokens": 128,
+      "row": 70,
+      "head": 37,
+      "d": 50,
+      "chunk_start": 64,
+      "chunk_pos": 6,
+      "cpu_matches_sequential_gpu_bits": true,
+      "bf16_bits": "0xc0d6"
+    },
+    "full_oracle": {
+      "passed": false,
+      "layer": 0,
+      "tokens": 128,
+      "output_mismatches": 2,
+      "output_max_abs": 0.25,
+      "output_mean_abs": 0.000000479,
+      "output_first_mismatch_flat": 338270,
+      "output_first_mismatch": {
+        "row": 82,
+        "head": 37,
+        "d": 30,
+        "chunk_start": 64,
+        "chunk_pos": 18
+      },
+      "state_mismatches": 143240,
+      "state_max_abs": 0.000244141,
+      "state_mean_abs": 0.000000021,
+      "state_first_mismatch_flat": 14,
+      "state_first_mismatch": {
+        "head": 0,
+        "d": 0,
+        "state": 14
+      }
+    }
+  },
+  "long_diagnostic": {
+    "run": false,
+    "reason": "small_oracle_failed_closed",
+    "baseline_1908_ssd_scan_ms": 114449.4
+  },
+  "decision": {
+    "prototype_v2_worth_keeping": false,
+    "reason": "term preflight passed but full sequential output/state oracle mismatched on layer 0",
+    "next_step": "analyze or replace the v2 state/update math before any performance run; default sequential path remains the only valid path"
+  },
+  "artifacts": {
+    "build_result": "20260627_2213_nemotron_nano_mamba2_ssd_chunk_parallel_v2_prototype_build_result.tsv",
+    "runtime_attempt": "20260627_2213_nemotron_nano_mamba2_ssd_chunk_parallel_v2_prototype_runtime_attempt.tsv",
+    "local_triangular_preflight": "20260627_2213_nemotron_nano_mamba2_ssd_chunk_parallel_v2_prototype_local_triangular_preflight.tsv",
+    "oracle_correctness": "20260627_2213_nemotron_nano_mamba2_ssd_chunk_parallel_v2_prototype_oracle_correctness.tsv",
+    "long_diagnostic_not_run": "20260627_2213_nemotron_nano_mamba2_ssd_chunk_parallel_v2_prototype_long_diagnostic_not_run.tsv",
+    "source_artifacts": "20260627_2213_nemotron_nano_mamba2_ssd_chunk_parallel_v2_prototype_source_artifacts.tsv",
+    "decision": "20260627_2213_nemotron_nano_mamba2_ssd_chunk_parallel_v2_prototype_root_decision.tsv",
+    "validation": "20260627_2213_nemotron_nano_mamba2_ssd_chunk_parallel_v2_prototype_validation_checks.tsv",
+    "build_log": "20260627_2213_nemotron_nano_mamba2_ssd_chunk_parallel_v2_prototype_build.log",
+    "small_oracle_log": "20260627_2213_nemotron_nano_mamba2_ssd_chunk_parallel_v2_prototype_small_oracle.log"
+  },
+  "final_state": {
+    "snapshot_utc": "2026-06-27T22:33:03Z",
+    "disk_free": "588G",
+    "ram_available": "967Gi",
+    "gpu0_used_mb": 15,
+    "gpu1_used_mb": 11,
+    "runtime_processes": false,
+    "nvidia_compute_processes": false,
+    "cache_temp_lock_files": false
+  },
+  "validation": {
+    "passed": true,
+    "final_snapshot_utc": "2026-06-27T22:33:03Z"
+  }
+}

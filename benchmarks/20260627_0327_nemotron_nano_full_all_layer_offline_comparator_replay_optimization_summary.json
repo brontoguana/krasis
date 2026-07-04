@@ -1,0 +1,169 @@
+{
+  "label": "20260627_0327_nemotron_nano_full_all_layer_offline_comparator_replay_optimization",
+  "status": "closed",
+  "opened_utc": "2026-06-27T03:27:55Z",
+  "closed_utc": "2026-06-27T04:25:00Z",
+  "scope": "make existing 2239 full all-layer offline expert-HQQ comparator replay practical without changing runtime semantics",
+  "record_first": {
+    "source_gate": "20260627_0304_nemotron_nano_activation_subnormal_comparator_contract_update",
+    "gemma": "5619.6 / 92.43 / 155.69",
+    "focused_expert_hqq_tests": "81/0",
+    "dev_build": "passed",
+    "filtered_comparator": {
+      "status": "ok",
+      "passes_contract": true,
+      "cases": 3,
+      "blocks": 4
+    },
+    "activation_mismatch_count": 9,
+    "observed_bits": {
+      "0x0000": 9
+    },
+    "reference_bits": {
+      "0x0001": 6,
+      "0x0002": 1,
+      "0x0005": 1,
+      "0x000f": 1
+    },
+    "classification": "observed_zero_vs_positive_bf16_subnormal",
+    "full_all_layer_replay_rerun": false,
+    "production_output_consumed": false
+  },
+  "inputs": {
+    "live_server_rerun": false,
+    "trace": "benchmarks/20260626_2239_nemotron_nano_all_moe_layer_diagnostic_hqq_runtime_proof_trace_outputs.json",
+    "diagnostic_spec": "benchmarks/20260626_2208_nemotron_nano_diagnostic_hqq_prefill_all_moe_layers_correctness_diagnostic_cache_spec.json",
+    "cache": "benchmarks/20260626_2208_nemotron_nano_diagnostic_hqq_prefill_all_moe_layers_correctness_hqq6_g64_all_moe_layers.krhq"
+  },
+  "implementation": {
+    "runtime_semantics_changed": false,
+    "production_output_consumed": false,
+    "production_hqq_wiring": false,
+    "comparator_side_only": true,
+    "changes": [
+      "added opt-in comparator phase profiling under KRASIS_EXPERT_HQQ_TRACE_COMPARE_PROFILE",
+      "changed trace JSON parse from read_to_string plus from_str to BufReader plus serde_json::from_reader, preserving full JSON semantics while avoiding an extra raw trace string copy",
+      "parallelized independent per-block CPU oracle comparisons within each request using rayon while preserving exact full-buffer comparison, activation FTZ/subnormal rule, and fail-closed result handling"
+    ],
+    "execution_controls": {
+      "full_comparator_rayon_threads": 4,
+      "reason": "bound offline CPU oracle RSS during full replay; source code does not hardcode a thread count"
+    }
+  },
+  "baseline_filtered_existing_code": {
+    "command": "/usr/bin/time -v ./dev expert-hqq-trace-compare <2239 trace> <2208 spec> <filtered metrics> <filtered details> <2239 failures>",
+    "status": "ok",
+    "passes_contract": true,
+    "cases": 3,
+    "blocks": 4,
+    "elapsed": "5:45.78",
+    "max_rss_kb": 91022804,
+    "observation": "even four filtered blocks paid whole-cache/whole-trace materialization cost before this gate"
+  },
+  "full_offline_comparator": {
+    "command": "/usr/bin/time -v env KRASIS_EXPERT_HQQ_TRACE_COMPARE_PROFILE=1 RAYON_NUM_THREADS=4 ./dev expert-hqq-trace-compare <2239 trace> <2208 spec> <full metrics> <full details>",
+    "status": "ok",
+    "passes_contract": true,
+    "exit_status": 0,
+    "cases": 3,
+    "blocks": 5870,
+    "metric_rows": 23576,
+    "mismatch_detail_rows": 9,
+    "elapsed": "30:15.09",
+    "user_seconds": 5843.44,
+    "system_seconds": 207.76,
+    "cpu_percent": 333,
+    "max_rss_kb": 81839016,
+    "profile": {
+      "load_spec_ms": 2,
+      "load_cache_ms": 31844,
+      "parse_trace_ms": 97685,
+      "compare_case_0_ms": 474190,
+      "compare_case_0_blocks": 1979,
+      "compare_case_1_ms": 505541,
+      "compare_case_1_blocks": 1965,
+      "compare_case_2_ms": 459047,
+      "compare_case_2_blocks": 1926,
+      "compare_all_cases_ms": 1438780,
+      "write_metrics_ms": 36,
+      "write_metrics_rows": 23576,
+      "write_mismatch_details_ms": 0,
+      "write_mismatch_details_rows": 9,
+      "total_profile_ms": 1568350
+    },
+    "totals": {
+      "input": {
+        "count": 514870272,
+        "sum_abs": "0.000000000000000000e0",
+        "max_abs": "0.000000000000000000e0",
+        "mismatch_count": 0,
+        "passes": true
+      },
+      "w13": {
+        "count": 355505664,
+        "sum_abs": "5.041435275203618233e-32",
+        "max_abs": "7.523163845262640051e-37",
+        "l2": "6.588660104017730965e-35",
+        "mismatch_count": 1041988,
+        "passes": true
+      },
+      "activation": {
+        "count": 355505664,
+        "sum_abs": "2.571393892423753924e-39",
+        "max_abs": "1.377532442369868173e-39",
+        "l2": "1.480802880937212897e-39",
+        "mismatch_count": 9,
+        "passes": true,
+        "contract_rule": "all activation mismatches are observed BF16 zero versus positive BF16 subnormal references"
+      },
+      "output": {
+        "count": 514870272,
+        "sum_abs": "0.000000000000000000e0",
+        "max_abs": "0.000000000000000000e0",
+        "mismatch_count": 0,
+        "passes": true
+      }
+    }
+  },
+  "artifacts": {
+    "baseline_filtered_log": "benchmarks/20260627_0327_nemotron_nano_full_all_layer_offline_comparator_replay_optimization_baseline_filtered.log",
+    "baseline_filtered_metrics": "benchmarks/20260627_0327_nemotron_nano_full_all_layer_offline_comparator_replay_optimization_baseline_filtered_metrics.tsv",
+    "baseline_filtered_mismatch_details": "benchmarks/20260627_0327_nemotron_nano_full_all_layer_offline_comparator_replay_optimization_baseline_filtered_mismatch_details.tsv",
+    "full_comparator_log": "benchmarks/20260627_0327_nemotron_nano_full_all_layer_offline_comparator_replay_optimization_full_comparator.log",
+    "full_comparator_metrics": "benchmarks/20260627_0327_nemotron_nano_full_all_layer_offline_comparator_replay_optimization_full_comparator_metrics.tsv",
+    "full_mismatch_details": "benchmarks/20260627_0327_nemotron_nano_full_all_layer_offline_comparator_replay_optimization_full_mismatch_details.tsv",
+    "profile": "benchmarks/20260627_0327_nemotron_nano_full_all_layer_offline_comparator_replay_optimization_profile.tsv",
+    "decision": "benchmarks/20260627_0327_nemotron_nano_full_all_layer_offline_comparator_replay_optimization_root_decision.tsv",
+    "source_contract": "benchmarks/20260627_0327_nemotron_nano_full_all_layer_offline_comparator_replay_optimization_source_contract.tsv",
+    "validation": "benchmarks/20260627_0327_nemotron_nano_full_all_layer_offline_comparator_replay_optimization_validation_checks.tsv"
+  },
+  "forbidden": {
+    "live_server": true,
+    "production_hqq_wiring": true,
+    "fallback": true,
+    "decode_hcs": true,
+    "selected_expert_retargeting": true,
+    "speed_benchmark": true,
+    "runtime_semantics_change": true
+  },
+  "final_state": {
+    "pending_final_validation": false,
+    "validation_utc": "2026-06-27T04:25:00Z",
+    "tmux": "no server running on /tmp/tmux-1000/default",
+    "matching_runtime_processes": "none",
+    "gpu": [
+      {
+        "index": 0,
+        "memory_used_mb": 15,
+        "memory_total_mb": 32607,
+        "utilization_percent": 0
+      },
+      {
+        "index": 1,
+        "memory_used_mb": 11,
+        "memory_total_mb": 20470,
+        "utilization_percent": 0
+      }
+    ]
+  }
+}

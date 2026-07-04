@@ -1,0 +1,124 @@
+{
+  "gate": "20260629_1818_nemotron_nano_parallel_ssd_output_kernel_redesign",
+  "status": "closed",
+  "opened_utc": "2026-06-29T18:18:54Z",
+  "scope": "Redesign the remaining guarded Nano parallel SSD output/chunk-scan kernel for GPU-parallel execution while preserving token/logit correctness.",
+  "baseline_models": {
+    "gemma": "5619.6 / 92.43 / 155.69",
+    "nano": "346.5 / 94.48 / 164.75"
+  },
+  "record_first_from": "20260629_1408_nemotron_nano_parallel_ssd_fast_handoff_output",
+  "carry_forward_1408_long_39920": {
+    "prefill_s": 17.99,
+    "prefill_tok_s": 2219.4,
+    "records": 23,
+    "total_candidate_ms": 656.021773,
+    "output_kernel_ms": 627.435713,
+    "recurrent_total_ms": 12.637921,
+    "exact_state_bridge_ms": 0.0,
+    "chunk_cumsum_ms": 0.156404,
+    "chunk_state_ms": 10.697588,
+    "state_passing_ms": 1.782629
+  },
+  "guard": "New output redesign remains opt-in inside KRASIS_MAMBA2_SSD_PARALLEL_CHUNKED=1 and the existing startup diagnostic/block-scan/coeff-tile/candidate-timing gates.",
+  "constraints": {
+    "default_sequential_ssd_changed": false,
+    "production_enabled": false,
+    "decode_hcs_changed": false,
+    "protected_configs_changed": false,
+    "direct_python_scripts_or_oneliners": false
+  },
+  "acceptance_target": "Token/logit parity against the accepted serial/control Krasis path; old serial internal-state bit identity remains diagnostic only for the parallel architecture.",
+  "implementation": {
+    "env": "KRASIS_MAMBA2_SSD_PARALLEL_OUTPUT_BY_CHUNK=1",
+    "kernel": "mamba2_ssd_parallel_chunk_scan_output_by_chunk_kernel",
+    "design": "Launch one CTA per (head, d-tile, chunk) instead of one CTA per (head, d-tile) serially walking chunks; preserve the 1408 per-chunk output arithmetic and keep the old guarded output kernel available when the env is unset.",
+    "shared_memory_fix": "The by-chunk kernel uses the requested triangular-tile dynamic shared memory instead of requesting the device maximum opt-in size."
+  },
+  "builds": {
+    "build1": {
+      "command": "./dev build",
+      "exit": 0,
+      "duration_s": 179
+    },
+    "startup_failure_before_fix": {
+      "exit": 1,
+      "duration_s": 41,
+      "reason": "cuFuncSetAttribute(MAX_DYNAMIC_SHARED_SIZE_BYTES=101376) returned CUDA_ERROR_INVALID_VALUE for the new by-chunk kernel"
+    },
+    "build2": {
+      "command": "./dev build",
+      "exit": 0,
+      "duration_s": 173
+    },
+    "build3": {
+      "command": "./dev build",
+      "exit": 0,
+      "duration_s": 174,
+      "reason": "Rebuilt after replacing the literal shared-memory threshold with CUDA runtime device attributes"
+    }
+  },
+  "correctness": {
+    "comparison": "by-chunk vs accepted guarded parallel chunked control",
+    "bychunk_http": 200,
+    "control_http": 200,
+    "token_id": 1044,
+    "text": ",",
+    "tracked_toplogprobs_exact": "12/12",
+    "max_toplogprob_delta": 0.0,
+    "result": "pass"
+  },
+  "long_39920_bychunk_no_oracle_after_build3": {
+    "exit": 0,
+    "duration_s": 51,
+    "prefill_s": 7.01,
+    "prefill_tok_s": 5693.8,
+    "candidate_records_total": 69,
+    "long_records": 23,
+    "oracle_records": 0,
+    "output_subloop_records": 0,
+    "recurrent_subloop_records": 0,
+    "accepted_output_kernel": "mamba2_ssd_parallel_chunk_scan_output_by_chunk_kernel",
+    "output_kernel_variant": "parallel_chunk_scan_by_chunk",
+    "accepted_state_source": "parallel_chunked_state_passing",
+    "averages_ms": {
+      "total_candidate": 177.27893352173913,
+      "output_kernel": 148.53118626086956,
+      "recurrent_total": 12.645583347826086,
+      "chunk_cumsum": 0.10116321739130436,
+      "chunk_state": 10.76252652173913,
+      "state_passing": 1.780577826086957,
+      "exact_state_bridge": 0.0
+    }
+  },
+  "comparison_vs_1408": {
+    "prefill_tok_s": {
+      "baseline": 2219.4,
+      "bychunk": 5693.8,
+      "speedup": 2.5663692889970263
+    },
+    "total_candidate_ms_delta_pct": -73.0,
+    "output_kernel_ms_delta_pct": -76.3,
+    "recurrent_total_ms_delta_pct": 0.1
+  },
+  "vram_check": {
+    "baseline_free_mb": 23716,
+    "prefill_min_free_mb": 7694,
+    "post_cleanup_free_mb": 23714,
+    "long_prefill_transient_delta_mb": 16022,
+    "configured_safety_margin_mb": 600,
+    "note": "Startup calibration/diagnostic was not close to the safety margin; record for later production HCS/budget review."
+  },
+  "validation": {
+    "artifact_shapes": "pass",
+    "git_diff_check_public": "pass",
+    "git_diff_check_internal": "pass",
+    "bash_n_dev": "pass",
+    "protected_configs": "unchanged",
+    "final_gpu_mb": "15 / 11",
+    "runtime_processes_idle": true,
+    "final_snapshot_utc": "2026-06-29T18:59:19Z"
+  },
+  "closed_utc": "2026-06-29T18:59:19Z",
+  "status_note": "Implemented, validated, and measured. Path remains guarded and not production-enabled."
+}

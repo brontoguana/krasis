@@ -1,0 +1,16 @@
+check	result	details
+record_first_0737	passed	HQQ6 g32 next candidate, HQQ6 g64 quality-failed, previous g32 generator rejection, HQQ8 rejection, no production enablement
+group_size_assumption_scan	passed	generator hard gate replaced; cache/spec/runtime/kernel paths are descriptor-driven
+focused_tests	passed	./dev test-kernels expert_hqq -> 93/0
+dev_build	passed	./dev build completed and import origin check passed
+disk_headroom_recorded	passed	707G available on /dev/nvme1n1p1
+ram_headroom_recorded	passed	965Gi available RAM
+full_all_layer_cache_generation	not_run	not part of this support gate
+live_server	not_run	not part of this support gate
+production_hqq	not_enabled	no production behavior change
+speed_benchmark	not_run	forbidden in this gate
+fallback	not_added	narrow allowlist only; no fallback path
+decode_hcs	not_touched	no decode/HCS source touched
+selected_expert_retargeting	not_added	no selected-expert path change
+cleanup	passed	./dev kill completed with all GPUs clear
+final_idle_snapshot	passed	no tmux server, no matching runtime/analyzer/generator/curl process, GPUs 15 MB / 11 MB

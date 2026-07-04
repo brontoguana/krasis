@@ -1,0 +1,8 @@
+field	value	evidence
+root_decision	hqq6_g16_generator_support_passed	Runtime/cache/spec path is descriptor-driven for HQQ6 group_size; only generator allowlist needed narrow expansion.
+runtime_kernel_blocker_found	no	CUDA HQQ6 receives group_size/strides as args and only special-cases 128; g16 uses generic division path.
+generation_allowlist	16,32,64	HQQ6 generation allowlist updated from 32,64 to 16,32,64.
+hqq8_status	still_rejected	Manifest nbits contract remains nbits=6; focused tests cover rejection.
+cache_generation_attempted	no	Gate explicitly stopped before full g16 cache generation.
+production_enablement	no	No runtime default/production HQQ behavior changed.
+next_gate	all_moe_hqq6_g16_cache_spec_generation_prerequisite	Generate g16 cache/spec only after this passed tests/build and recorded headroom.

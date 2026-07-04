@@ -1,0 +1,7 @@
+field	value	evidence
+command	./dev build	benchmarks/20260627_2011_nemotron_nano_mamba2_ssd_rejected_prototype_cleanup_build.log
+exit_code	0	benchmarks/20260627_2011_nemotron_nano_mamba2_ssd_rejected_prototype_cleanup_build.exit
+release_compile_duration	2m 47s	build.log:958
+maturin_duration_s	169	build.log:963
+wheel	krasis-1.0.15-cp311-cp311-linux_x86_64.whl	build.log:962
+extension	python/krasis/krasis.cpython-311-x86_64-linux-gnu.so	build.log:971

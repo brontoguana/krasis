@@ -1,0 +1,2 @@
+artifact	status	exit_code	duration_s	notes
+build_parallel_initial_snapshot	pass	0	172	./dev build completed after allocating initial_state for parallel chunked mode and restoring it before exact-state bridge

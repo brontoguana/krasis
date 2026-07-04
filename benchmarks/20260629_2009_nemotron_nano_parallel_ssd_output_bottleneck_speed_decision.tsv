@@ -1,0 +1,27 @@
+item	value
+gate	20260629_2009_nemotron_nano_parallel_ssd_output_bottleneck_speed
+record_first_from	20260629_1818_nemotron_nano_parallel_ssd_output_kernel_redesign
+baseline_gemma	5619.6 / 92.43 / 155.69
+baseline_nano	346.5 / 94.48 / 164.75
+carry_forward_prefill_tok_s	5693.8
+carry_forward_total_candidate_ms	177.27893352173913
+carry_forward_output_kernel_ms	148.53118626086956
+carry_forward_recurrent_total_ms	12.645583347826086
+primary_target	output/chunk-scan kernel
+guard_policy	new work remains opt-in inside KRASIS_MAMBA2_SSD_PARALLEL_CHUNKED=1 and preserves the 1818 by-chunk kernel as control
+correctness_surface	token/logit parity against accepted guarded control before timing acceptance
+default_sequential_ssd_changed	false
+production_enabled	false
+decode_hcs_changed	false
+direct_python_scripts_or_oneliners	false
+state_split_branch	rejected_slow_not_promoted
+accepted_env	KRASIS_MAMBA2_SSD_PARALLEL_OUTPUT_PRECOMPUTE_CB=1
+accepted_output_kernel	mamba2_ssd_parallel_chunk_scan_output_precomputed_cb_kernel
+accepted_support_kernel	mamba2_ssd_parallel_precompute_cb_kernel
+ordered_unroll_accumulation_order_changed	false
+final_prefill_tok_s	7765.1
+final_total_candidate_ms	98.162166
+final_output_ms	66.309823
+final_vs_1818_prefill_delta	+36.4%
+final_vs_1818_output_delta	-55.4%
+remaining_bottleneck	output 66.310ms and residual 14.250ms

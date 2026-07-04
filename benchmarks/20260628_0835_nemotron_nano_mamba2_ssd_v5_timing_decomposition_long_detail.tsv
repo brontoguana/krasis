@@ -1,0 +1,11 @@
+component	ms	pct_of_ssd_scan	detail
+prefill_ssd_scan_wall	251443.800000	100.000000	PREFILL_TIMING_39920_tokens_ssd_scan_wall
+total_v5_path	251386.108393	99.977056	sum_of_v5_layer_total_path_records
+sequential_oracle_kernel	114292.932890	45.454663	existing_sequential_kernel_on_oracle_output_and_state_buffers
+v5_candidate_kernel	114293.155150	45.454752	v5_recurrent_candidate_kernel_on_candidate_output_and_state_buffers
+full_buffer_downloads	9043.142551	3.596487	candidate_output_4515.079992; oracle_output_4498.233352; candidate_state_15.278361; oracle_state_14.550846; pre_download_sync_0.201307
+host_comparison	12390.200665	4.927622	output_compare_12348.889560; state_compare_39.501882; probe_build_1.809223
+commit_copies	11.745775	0.004671	output_11.229900; state_0.515875
+buffer_alloc_zeroed	15.456477	0.006147	temporary_v5_buffers_only_under_v5_env
+state_snapshot_copies	5.407559	0.002151	initial_from_live_plus_oracle_and_candidate_state_copies
+residual	1334.067326	0.530563	total_v5_path_minus_recorded_major_components

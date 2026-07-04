@@ -1,0 +1,12 @@
+check	status	detail
+summary_json	pass	status closed, HTTP 2/2, selected-token changes 0/2, projection/read-only checkpoint unavailable, decision restored
+token_margin_tsv	pass	all BF16/old/new rows selected token 1044 for cases 0 and 2
+topk_comparison_tsv	pass	all selected_changed fields false; top-k drift remains recorded
+consume_summary_tsv	pass	46 HQQ consume rows, 663989760 copied bytes, nbits 6, group_size 32, diagnostic attribution gates unavailable
+bash_n_dev	pass	dev shell syntax valid
+git_diff_check_krasis	pass	no whitespace errors in krasis-nemotron-dev
+git_diff_check_internal	pass	no whitespace errors in krasis-internal
+protected_config_check	pass	only known pre-existing untracked tests/nemotron-nano-bf16-experts-a16.conf
+focused_tests	not_run	no source changed in this gate
+dev_build	not_run	no source changed in this gate
+cleanup	pass	final snapshot 2026-06-27T15:38:20Z: no tmux server, no matching runtime/curl/generator/build/test process, no NVIDIA compute process, GPUs 15 MB / 11 MB, disk 613G, RAM 965Gi

@@ -1,0 +1,12 @@
+component	long_ms	percent_of_total	notes
+total_block_scan_path	253940.599995	100.000000	Aggregate across 23 long 39920-token block-scan timing records.
+sequential_oracle_kernel	114284.518733	45.004430	Oracle execution kept enabled for correctness gate.
+block_scan_recurrent_kernel	16487.771138	6.492767	Exact token-order f32 recurrence plus c_state_total_exact materialization.
+block_scan_output_kernel	100060.325232	39.403044	Separate candidate output assembly consuming c_state_total_exact.
+full_buffer_downloads	9055.823995	3.566119	Oracle/candidate output and state downloads for exact host comparison.
+host_comparison	12359.669588	4.867150	Exact BF16 output and exact f32 state comparison plus probes.
+commit_copies	11.014996	0.004338	Candidate output/state copied to live buffers after oracle success.
+state_snapshot_copies	306.799563	0.120815	Initial/oracle/candidate state snapshots.
+buffer_alloc_zeroed	22.977102	0.009048	Temporary opt-in buffers only under block-scan env.
+residual	1351.699648	0.532290	Unattributed wrapper overhead across timing records.
+candidate_recurrent_plus_output	116548.096370	45.895810	Candidate-side kernels without oracle, downloads, comparison, or commit.

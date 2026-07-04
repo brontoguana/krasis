@@ -1,0 +1,6 @@
+case	server_decode_tok_s	internal_ms_per_tok	graph_event_ms_per_tok	moe_ms_per_tok	mamba2_ms_per_tok	hcs_hit_miss	cold_dma	decision
+baseline_0011_full_graph_speed	114.2	7.77	7.43	NA	NA	100%	0	current_best
+segmented_moe_clock_control	98.5	9.10	8.51	3.85	2.19	138/0	0	attribution_control_timing_on
+custom_bf16_gemv	99.5	9.04	8.45	NA	2.53	138/0	0	rejected_toplogprob_drift_mamba2_slower
+relu2_w2_2tiles	100.0	8.97	8.35	4.09	2.18	138/0	0	rejected_output_diverged_w2_slower
+relu2_w2_preactivation	102.1	8.73	8.11	3.85	2.19	138/0	0	rejected_toplogprob_drift_early_stop_no_w2_gain

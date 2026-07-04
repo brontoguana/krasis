@@ -1,0 +1,18 @@
+field	value
+result	pass
+layer	0
+tokens	128
+target_row	70
+target_head	37
+target_d	50
+runtime_mamba_chunk_size	64
+chunk_start	64
+chunk_pos	6
+inside_chunk_zero	false
+cpu_matches_sequential_gpu_bits	true
+sequential_gpu_y_bf16_bits	0xc0d6
+cpu_y_bf16_bits	0xc0d6
+local_lower_triangle	u=64..70
+self_sample	u=70 decay=1.0
+bf16_cast_point	BF16(CB*decay*dt) before multiply by x
+log_line	56

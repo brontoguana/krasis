@@ -1,0 +1,100 @@
+{
+  "gate": "20260628_1233_nemotron_nano_mamba2_ssd_coeff_tile_no_oracle_candidate_cost",
+  "opened_utc": "2026-06-28T12:35:11Z",
+  "closed_utc": "2026-06-28T12:38:09Z",
+  "status": "closed",
+  "scope": "static_or_measurement_no_oracle_candidate_cost",
+  "record_first": {
+    "source_gate": "20260628_1207_nemotron_nano_mamba2_ssd_block_scan_coefficient_tile_correctness_prototype",
+    "gemma_baseline": {
+      "prefill_tok_s": 5619.6,
+      "internal_decode_tok_s": 92.43,
+      "network_tok_s": 155.69
+    },
+    "nano_baseline": {
+      "prefill_tok_s": 346.5,
+      "internal_decode_tok_s": 94.48,
+      "network_tok_s": 164.75
+    },
+    "accepted_coeff_tile_surface": {
+      "oracle_records": 138,
+      "output_mismatches": 0,
+      "state_mismatches": 0,
+      "long_total_block_scan_path_ms": 7179.206093739131,
+      "long_sequential_oracle_ms": 4960.68509326087,
+      "long_recurrent_kernel_ms": 715.7697665652174,
+      "long_coeff_tile_output_kernel_ms": 500.6286002173913,
+      "long_downloads_ms": 391.73525113043473,
+      "long_host_compare_ms": 537.3217927391304,
+      "long_commit_copies_ms": 0.48902200000000007
+    },
+    "constraints": [
+      "no new optimization implementation",
+      "preserve accepted coeff-tile path",
+      "preserve default sequential SSD",
+      "preserve v5 diagnostics/timing and prior probes",
+      "no requests",
+      "no speed benchmark",
+      "no decode/HCS work",
+      "no production enablement",
+      "no default-path change"
+    ]
+  },
+  "initial_findings": {
+    "existing_no_oracle_candidate_run_supported": false,
+    "reason_if_not_supported": "src/gpu_prefill.rs currently requires KRASIS_MAMBA2_SSD_BLOCK_SCAN_ORACLE=1 whenever KRASIS_MAMBA2_SSD_BLOCK_SCAN=1; timing JSON is emitted only after sequential oracle, full buffer downloads, host comparison, and commit copies."
+  },
+  "result": {
+    "type": "static_plan_no_runtime",
+    "build_run": false,
+    "startup_diagnostic_run": false,
+    "long_diagnostic_run": false,
+    "requests": 0,
+    "speed_benchmark": false,
+    "decode_hcs_changes": false,
+    "production_enabled": false,
+    "default_path_changed": false,
+    "source_changed": false,
+    "decision": "Existing envs cannot establish no-oracle coeff-tile candidate cost; next gate needs an explicit guarded timing-only env."
+  },
+  "static_bound_from_1207_ms": {
+    "oracle_download_compare_removed_sum": 5889.742137130435,
+    "oracle_inclusive_candidate_subtotal_upper_bound": 1289.4639566086957,
+    "notes": "This is not a clean candidate-side measurement because it still includes oracle-oriented allocations/copies, subloop timing overhead in the output kernel, commit copies, and residual from the oracle-inclusive path."
+  },
+  "minimal_next_change": {
+    "new_env": "KRASIS_MAMBA2_SSD_BLOCK_SCAN_CANDIDATE_TIMING",
+    "required_existing_envs": [
+      "KRASIS_MAMBA2_SSD_BLOCK_SCAN=1",
+      "KRASIS_MAMBA2_SSD_BLOCK_SCAN_COEFF_TILE=1"
+    ],
+    "preserve_oracle_guard": "Keep the existing oracle requirement unless the explicit candidate timing env is set.",
+    "clean_timing_mode": {
+      "skip_sequential_oracle": true,
+      "skip_oracle_buffers": true,
+      "skip_full_buffer_downloads": true,
+      "skip_host_compare": true,
+      "skip_term_probe_downloads": true,
+      "skip_output_subloop_timing": true,
+      "emit": "MAMBA2-SSD-BLOCK-SCAN-CANDIDATE-TIMING"
+    },
+    "candidate_components_to_emit": [
+      "buffer_alloc_zeroed",
+      "live_to_candidate_state_copy",
+      "block_scan_recurrent_kernel",
+      "block_scan_output_coeff_tile_kernel",
+      "commit_output_copy",
+      "commit_state_copy",
+      "total_candidate_path",
+      "residual"
+    ],
+    "coefficient_build_residual_note": "The clean no-overhead run can time only the whole coeff-tile output kernel. Coefficient-build versus residual split is inside one CUDA kernel and requires a separate instrumented run or future kernel-stage design."
+  },
+  "final_state": {
+    "snapshot_utc": "2026-06-28T12:40:12Z",
+    "gpu_idle": "GPU0 15 MB, GPU1 11 MB",
+    "runtime_processes": "none",
+    "nvidia_compute_processes": "none",
+    "krasis_temp_locks": "none"
+  }
+}

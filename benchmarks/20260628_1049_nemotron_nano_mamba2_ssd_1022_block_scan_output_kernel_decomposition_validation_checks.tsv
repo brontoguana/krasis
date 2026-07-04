@@ -1,0 +1,9 @@
+check	result	detail
+summary_json	pass	Closed summary JSON is valid and records static-only constraints.
+tsv_shape	pass	Source audit, static decomposition, correction plan, probe plan, runtime-not-run, and validation TSVs have consistent tab field counts.
+runtime_absent	pass	No build, startup diagnostic, request, benchmark, speed-test, or release-test artifact was created under the 1049 prefix.
+source_markers	pass	No 1049 source markers, local_old_state_recurrent implementation, or new env gates were added.
+static_diff_checks	pass	git diff --check in krasis-nemotron-dev and krasis-internal passed; bash -n dev passed.
+protected_configs	pass	Protected config status unchanged; only expected tests/nemotron-nano configs are untracked.
+temp_lock_scan	pass	No Nano Krasis .tmp/.partial/.lock files outside standing Hugging Face download metadata.
+idle_state	pass	Final snapshot 2026-06-28T10:55:58Z: no tmux/runtime/build/GPU compute process; GPUs 15 MB / 11 MB.

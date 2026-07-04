@@ -1,0 +1,11 @@
+check	status	details
+summary_assertion	pass	closed_cache_reuse_failed_before_ready; cache_write_detected=true; requests_sent=0; server_ready=false
+runtime_tsv_assertion	pass	cache_write_detected=true and requests_sent=0
+startup_cache_tsv_assertion	pass	HQQ attention reused and Marlin expert-cache write detected
+no_request_evidence	pass	grep reference_test count was 0
+cache_tmp_cleanup	pass	No *.tmp/*.pending/*.lock files remain under the Nano cache directory after cleanup
+bash_n_dev	pass	bash -n dev
+git_diff_check_krasis	pass	git diff --check
+git_diff_check_internal	pass	git diff --check
+protected_config_check	pass	Only tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf and known tests/nemotron-nano-bf16-experts-a16.conf are untracked in protected-config check
+cleanup_idle	pass	2026-06-27T17:16:54Z; no tmux server; no matching runtime/curl process; no NVIDIA compute process; GPUs 15 MB / 11 MB; disk 589G; RAM 966Gi

@@ -1,0 +1,8 @@
+item	status	reason
+build	not_run	static design gate only
+startup_diagnostic	not_run	static design gate only
+benchmark	not_run	prohibited by gate scope
+requests	not_sent	prohibited by gate scope
+decode_hcs	not_touched	prohibited by gate scope
+production_enablement	not_done	prohibited by gate scope
+default_path_change	not_done	no source implementation in this gate

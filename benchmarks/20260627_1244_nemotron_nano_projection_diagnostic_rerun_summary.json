@@ -1,0 +1,175 @@
+{
+  "gate": "20260627_1244_nemotron_nano_projection_diagnostic_rerun",
+  "status": "closed",
+  "opened_utc": "2026-06-27T12:45:19Z",
+  "closed_utc": "2026-06-27T13:24:58Z",
+  "record_first": {
+    "source_gate": "20260627_1227_nemotron_nano_projection_request_scoping_fix",
+    "request_scoped_fix_implemented": true,
+    "startup_warmup_no_longer_trips_projection_env": true,
+    "reference_test_missing_debug_still_fails_closed": true,
+    "test_kernels_expert_hqq": {
+      "passed": 104,
+      "failed": 0
+    },
+    "dev_build": "passed",
+    "final_state": "clean"
+  },
+  "endpoint": "/v1/internal/reference_test",
+  "request_requirements": {
+    "debug_reference_trace": true,
+    "target_tokens": [1044, 1321],
+    "projection_env": "KRASIS_FIRST_TOKEN_MARGIN_PROJECTION_DIAG=1",
+    "hqq_consume_diag": true
+  },
+  "runtime_result": {
+    "bf16_server_rerun": false,
+    "hqq6_g32": {
+      "cases": [0, 2],
+      "http_200": 2,
+      "http_total": 2,
+      "request_time_seconds": [44.551525, 37.67945],
+      "consume_rows": 46,
+      "copied_output_bytes": 663989760,
+      "nbits": 6,
+      "group_size": 32,
+      "projection_trace_present": true,
+      "captured_layer_count_per_case": 23
+    },
+    "hqq6_g64": {
+      "cases": [0, 2],
+      "http_200": 2,
+      "http_total": 2,
+      "request_time_seconds": [40.736316, 39.777005],
+      "consume_rows": 46,
+      "copied_output_bytes": 663989760,
+      "nbits": 6,
+      "group_size": 64,
+      "projection_trace_present": true,
+      "captured_layer_count_per_case": 23
+    }
+  },
+  "margin_result": [
+    {
+      "case": 0,
+      "variant": "hqq6_g32",
+      "selected_token": 1321,
+      "selected_text": " and",
+      "bf16_margin_1044_minus_1321": 0.300523758,
+      "observed_margin_1044_minus_1321": -0.08793926239013672,
+      "margin_shift_vs_bf16": -0.3884630203901367,
+      "selected_token_changed": true,
+      "topk_rank_changed_count": 9,
+      "topk_membership_changed": true,
+      "max_common_topk_logprob_abs_delta": 0.7008350000000001
+    },
+    {
+      "case": 2,
+      "variant": "hqq6_g32",
+      "selected_token": 1044,
+      "selected_text": ",",
+      "bf16_margin_1044_minus_1321": 0.370508194,
+      "observed_margin_1044_minus_1321": 0.15535640716552734,
+      "margin_shift_vs_bf16": -0.21515178683447267,
+      "selected_token_changed": false,
+      "topk_rank_changed_count": 4,
+      "topk_membership_changed": true,
+      "max_common_topk_logprob_abs_delta": 0.3242449999999999
+    },
+    {
+      "case": 0,
+      "variant": "hqq6_g64",
+      "selected_token": 1044,
+      "selected_text": ",",
+      "bf16_margin_1044_minus_1321": 0.300523758,
+      "observed_margin_1044_minus_1321": 0.4724235534667969,
+      "margin_shift_vs_bf16": 0.1718997954667969,
+      "selected_token_changed": false,
+      "topk_rank_changed_count": 3,
+      "topk_membership_changed": false,
+      "max_common_topk_logprob_abs_delta": 0.13776600000000006
+    },
+    {
+      "case": 2,
+      "variant": "hqq6_g64",
+      "selected_token": 1321,
+      "selected_text": " and",
+      "bf16_margin_1044_minus_1321": 0.370508194,
+      "observed_margin_1044_minus_1321": -0.24231433868408203,
+      "margin_shift_vs_bf16": -0.612822532684082,
+      "selected_token_changed": true,
+      "topk_rank_changed_count": 9,
+      "topk_membership_changed": true,
+      "max_common_topk_logprob_abs_delta": 0.49339699999999986
+    }
+  ],
+  "top_projection_findings": {
+    "hqq6_g32_case0_flip": {
+      "largest_layers": [
+        {"layer": 40, "raw_margin_projection": -0.2923920260297237},
+        {"layer": 51, "raw_margin_projection": -0.21036926111406729},
+        {"layer": 36, "raw_margin_projection": 0.20132761072473926}
+      ],
+      "largest_experts": [
+        {"layer": 40, "expert": 37, "raw_margin_projection": -0.1490669171012565},
+        {"layer": 40, "expert": 3, "raw_margin_projection": -0.13561228858485413},
+        {"layer": 51, "expert": 70, "raw_margin_projection": -0.09439403466900154},
+        {"layer": 51, "expert": 60, "raw_margin_projection": -0.08048306029810348}
+      ]
+    },
+    "hqq6_g64_case2_flip": {
+      "largest_layers": [
+        {"layer": 38, "raw_margin_projection": -0.3824445933639993},
+        {"layer": 49, "raw_margin_projection": 0.21913189441276515},
+        {"layer": 36, "raw_margin_projection": 0.1783518075199595},
+        {"layer": 51, "raw_margin_projection": -0.1498680585600738}
+      ],
+      "largest_experts": [
+        {"layer": 49, "expert": 72, "raw_margin_projection": 0.1868408836443345},
+        {"layer": 40, "expert": 11, "raw_margin_projection": 0.12947742170254817},
+        {"layer": 45, "expert": 88, "raw_margin_projection": -0.12579825937262656},
+        {"layer": 51, "expert": 60, "raw_margin_projection": 0.10214764244288532}
+      ]
+    }
+  },
+  "decision": {
+    "status": "completed",
+    "projection_trace_valid": true,
+    "hqq6_g32_result": "valid projection trace; flips case 0 and keeps case 2 under this diagnostic run",
+    "hqq6_g64_result": "valid projection trace; keeps case 0 and flips case 2",
+    "common_boundary": "token 1044 comma vs token 1321 ' and'",
+    "attribution_note": "per-layer/per-expert projections are immediate selected-row routed deltas through the final LM-head row difference, not a full nonlinear downstream causal decomposition",
+    "root_pattern": "margin movement is distributed across layers/experts; layer 51 is involved but is not sufficient as the sole final-token-margin cause"
+  },
+  "artifacts": {
+    "runtime": "benchmarks/20260627_1244_nemotron_nano_projection_diagnostic_rerun_runtime_attempt.tsv",
+    "consume": "benchmarks/20260627_1244_nemotron_nano_projection_diagnostic_rerun_consume_summary.tsv",
+    "margins": "benchmarks/20260627_1244_nemotron_nano_projection_diagnostic_rerun_projection_margin_summary.tsv",
+    "topk": "benchmarks/20260627_1244_nemotron_nano_projection_diagnostic_rerun_topk_movement.tsv",
+    "top_layers": "benchmarks/20260627_1244_nemotron_nano_projection_diagnostic_rerun_top_layer_projection_summary.tsv",
+    "top_experts": "benchmarks/20260627_1244_nemotron_nano_projection_diagnostic_rerun_top_expert_projection_summary.tsv"
+  },
+  "validation": {
+    "source_changes": false,
+    "focused_tests_rerun": false,
+    "dev_build_rerun": false,
+    "reason": "diagnostic rerun and artifact extraction only; no source changes in this gate"
+  },
+  "forbidden_scope": {
+    "cache_generation": false,
+    "HQQ8": false,
+    "new_variants": false,
+    "production_enablement": false,
+    "speed_benchmark": false,
+    "decode_HCS": false,
+    "selected_expert_retargeting": false
+  },
+  "final_state": {
+    "timestamp_utc": "2026-06-27T13:24:58Z",
+    "tmux_server": "none",
+    "matching_runtime_process": "none",
+    "gpu_memory_used_mb": [15, 11],
+    "disk_available": "614G",
+    "ram_available": "966Gi"
+  }
+}

@@ -1,0 +1,16 @@
+field	value
+root_decision	hqq6_g16_guarded_quality_not_material_improvement_for_nano
+selected_token_changed_cases_g16	0
+topk_rank_drift_cases_g16	3
+avg_selected_output_logprob_delta_g16	0.339994333
+max_common_topk_logprob_delta_g16	0.571293000
+max_rank_aligned_topk_logprob_delta_g16	0.571293000
+material_quality_improvement	no
+reason	selected-token stability matches g32 but top-k rank drift remains 3/3 and aggregate selected/rank-aligned logprob deltas are worse than g64 and g32
+production_hqq_enabled	false
+speed_benchmark	false
+fallback	false
+decode_hcs_changed	false
+selected_expert_retargeting	false
+hqq8	false
+int4_hqq4	false

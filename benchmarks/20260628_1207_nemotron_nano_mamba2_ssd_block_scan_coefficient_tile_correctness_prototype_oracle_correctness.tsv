@@ -1,0 +1,4 @@
+scope	records	passed	output_mismatches	state_mismatches	max_output_abs	max_state_abs	probe_failures	row97_failures	row64_state0	row82_state14
+small_256	69	69	0	0	0.0	0.0	0	0	exact	exact
+long_39920	23	23	0	0	0.0	0.0	0	0	exact	exact
+all_records	138	138	0	0	0.0	0.0	0	0	exact	exact

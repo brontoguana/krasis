@@ -1,0 +1,10 @@
+check	result	detail
+summary_json	pass	jq empty benchmarks/20260630_1158_nemotron_nano_decode_shared_relu2_candidate_summary.json
+tsv_shape	pass	plan/result TSV files have consistent field counts
+source_diff_check	pass	git diff --check -- src/gpu_decode.rs src/cuda/decode_kernels.cu benchmarks/BENCHMARKS.md
+dev_syntax	pass	bash -n dev
+rejected_symbols_absent	pass	no KRASIS_DECODE_SHARED_RELU2/direct shared relu2 kernel references remain
+protected_configs	pass	no testconfigs protected-config changes reported
+cleanup_build	pass	benchmarks/20260630_1158_nemotron_nano_decode_shared_relu2_candidate_cleanup_build.exit = 0
+runtime_processes	pass	no tmux/krasis/build process in standalone final scan
+gpu_idle	pass	GPU0 15 MB used / 32105 MB free; GPU1 11 MB used / 20043 MB free

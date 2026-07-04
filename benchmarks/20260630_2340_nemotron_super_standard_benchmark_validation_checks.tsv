@@ -1,0 +1,19 @@
+check	status	detail
+timestamp	pass	2026-07-01T00:32:31Z
+final_command	pass	KRASIS_DECODE_PARALLEL_TOPK=1 ./dev benchmark tests/nemotron-super-bf16kv-a16.conf
+final_exit	pass	benchmarks/20260630_2340_nemotron_super_fixed_topk_benchmark.exit contains 0
+build	pass	benchmarks/20260630_2340_nemotron_super_minnew_build.log completed after min_new_tokens stop fix
+benchmark_result	pass	best internal prefill 192.9 tok/s; best internal decode 21.86 tok/s; best HTTP round trip 34.85 tok/s
+hcs_record	pass	3358/20480 experts resident; dynamic HCS not full-hot
+vram_record	pass	startup ready free 972 MB; decode min free 5758 MB; safety margin 600 MB
+graph_gate_decision	pass	Nano graph env stack failed closed on Super latent expert dimensions and was excluded from final benchmark
+json_shape	pass	jq empty passed for standard and optimized Super summary JSON files
+tsv_shape	pass	standard result, standard attempts, and optimized attempts TSV files have consistent column counts
+shell_syntax	pass	bash -n dev passed
+source_diff_check	pass	git diff --check passed for Super source and benchmark artifacts
+internal_diff_check	pass	git diff --check passed for krasis-internal CHANGELOG.md TRACKING.md DEBUGLOG.md
+protected_configs	pass	git status --short -- testconfigs tests/testconfigs produced no changes
+benchmark_logs	pass	report and stdout copied into benchmarks as fixed_topk benchmark artifacts
+tmux_idle	pass	tmux list-sessions reported no tmux server
+process_idle	pass	no krasis, python, maturin, cargo, rustc, or nvcc process matched the final process scan
+gpu_idle	pass	GPU0 15 MB used and GPU1 11 MB used with 0 percent utilization

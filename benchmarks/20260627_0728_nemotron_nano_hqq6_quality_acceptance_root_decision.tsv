@@ -1,0 +1,6 @@
+decision	status	evidence
+quality_contract	fail	all 3/3 payloads changed top-k ordering/ranks; 1/3 changed top-k token set; 1/3 changed selected token; max selected-logprob abs delta=0.20660000000000012; max 0427 top-k abs delta=0.42908800000000014; max common-top-k delta from JSON=0.493397
+case2_corrected_boundary	fail	corrected 0524 case2 token 1044 -> 1321; selected delta=-0.20660000000000012; max common top-k delta=0.49339699999999986
+implementation_correctness	pass	0640 proves HQQ GPU equals KRHQ/HQQ6 offline exactly at the attributed worst row and selected routed value
+hqq6_acceptance_for_nano	reject	implementation-correct but quality-failing on saved 1023 proof set; do not chase BF16 exactness for HQQ6 g64
+next_quantization_variant	recommended	skip Nano HQQ6 g64 for production and move to the next quantization variant; no INT4/HQQ4 code was added in this gate

@@ -1,0 +1,15 @@
+buffer	purpose	shape_or_size	lifetime	bit_exact_contract
+initial_state_snapshot	Preserve live state before any diagnostic candidate/oracle work.	`n_heads * head_dim * state_size` f32	Per opt-in request/layer.	Copied from live state once; live state is not mutated before oracle success.
+oracle_output	Sequential oracle output.	`L * n_heads * head_dim` BF16	Diagnostic correctness gate only.	Existing sequential kernel remains oracle for exact compare.
+oracle_state	Sequential oracle final state.	`n_heads * head_dim * state_size` f32	Diagnostic correctness gate only.	Existing sequential kernel final state remains exact f32 compare target.
+candidate_output	Candidate output assembled from exact block entries plus unchanged local/output math.	`L * n_heads * head_dim` BF16	Opt-in candidate only.	Copied to real `ssd_out` only after full oracle success.
+candidate_final_state	Candidate final recurrent state.	`n_heads * head_dim * state_size` f32	Opt-in candidate only.	Copied to live `ssm_state` only after full oracle success.
+dt_eff	Runtime dt after optional bias and softplus.	`L * n_heads` f32	Optional per-layer scratch.	Must match `mamba2_ssd_dt_value` exactly; probe compares selected bits/values against sequential diagnostic.
+a_bar	Token recurrence multiplier.	`L * n_heads` f32	Optional per-layer scratch.	Computed as `exp(A*dt_eff)` with the same CUDA operation used by sequential recurrence.
+b_bar	Sequential-compatible scaled B.	`L * n_groups * state_size` f32 or BF16-bits-plus-f32-view scratch.	Optional per-layer scratch.	Represents `BF16(B*dt_eff)` converted to f32; never `BF16(B*exp_decay*dt)`.
+dA_prefix	Per-chunk prefix for local decay.	`n_chunks * n_heads * chunk_size` f32	Optional per-layer scratch.	Must match the existing shared-memory prefix scan for each runtime chunk.
+entry_state_window	Read-only exact chunk-entry states.	`window_chunks * n_heads * head_dim * state_size` f32, where `window_chunks` is selected from runtime scratch budget.	Opt-in candidate only.	Each entry is produced by exact token-order recurrent propagation, not affine summary composition.
+rolling_state	Exact current state propagated chunk by chunk.	`n_heads * head_dim * state_size` f32	Opt-in candidate only.	Updated only by the sequential-compatible token recurrence in chunk order.
+local_output_no_prior	Optional local/D contribution.	`L * n_heads * head_dim` BF16 or f32 scratch depending on prototype.	Optional candidate scratch.	If stored, it must be produced by unchanged local triangular math and verified by row64/row82 probes.
+summary_diag	Diagnostic-only block summaries such as zero-state exit or affine P/Q.	Derived from runtime `n_chunks`, `n_heads`, `head_dim`, `state_size`.	Diagnostic only.	Never feeds accepted output/state; records delta against exact recurrent entry.
+device_compare_summary	Device-side mismatch counters for future performance-shaped oracle.	Small counters plus first-mismatch records.	Diagnostic/prototype only.	Used to avoid full host downloads before speed measurement; exact full host compare can remain in correctness gate.

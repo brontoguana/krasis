@@ -1,0 +1,8 @@
+check	result	evidence
+hqq_attention_cache_reused	true	HQQ attention artifacts validated (115 MB cached), 27940 MB free
+marlin_cache_loaded	true	Loading GPU Marlin cache: 23 layers; GPU Marlin cache loaded: 15.8 GB in 10s
+cache_write_evidence	false	only generic "Building GPU INT4 Marlin expert cache" section heading appeared; concrete lines show cache load
+server_ready	false	fail-closed before READY
+requests_sent	0	no reference_test or chat completion lines
+benchmark_path	false	no benchmark-only line
+temp_lock_files	false	final Nano model/cache temp-lock scans empty

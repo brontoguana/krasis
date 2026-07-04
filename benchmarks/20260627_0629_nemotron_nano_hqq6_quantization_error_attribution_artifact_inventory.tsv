@@ -1,0 +1,12 @@
+item	available	evidence	impact
+0524 synced response	true	benchmarks/20260627_0524_nemotron_nano_hqq_consume_boundary_diagnosis_hqq_sync_case2_response.json	source artifact used for all boundary metadata
+per-layer BF16-vs-HQQ expert_out top deltas	true	benchmarks/20260627_0524_nemotron_nano_hqq_consume_boundary_diagnosis_sync_top_deltas.tsv	identifies global active sorted rows/layers/experts/columns
+per-layer selected-row routed top deltas	true	benchmarks/20260627_0524_nemotron_nano_hqq_consume_boundary_diagnosis_sync_top_deltas.tsv	identifies selected-row output dimensions with largest BF16-vs-HQQ scatter delta
+full BF16 expert_out buffer	false	0524 capture stores count/hash/samples/top-N only	cannot recompute arbitrary exact deltas offline
+full HQQ expert_out buffer	false	0524 capture stores count/hash/samples/top-N only	cannot recompute arbitrary exact deltas offline
+full HQQ-consumed gathered input rows	false	not emitted by 0524 consume-boundary capture	required to recompute original BF16 expert math and KRHQ/HQQ6 dequant math for exact rows
+full HQQ-consumed W13 activation rows	false	not emitted by 0524 consume-boundary capture	required to separate W13/activation/W2 contribution for exact output columns
+selected-row routed contributor decomposition	false	0524 routed summary has top output dimensions but no per-expert contributor list	required to map selected token shift dimensions back to active experts
+KRHQ all-layer cache/spec	true	20260626_2208 all-layer cache/spec	sufficient for future offline analyzer once exact input rows are captured
+original BF16 safetensors weights	true	manifest/model shards from 2208 generator inputs	sufficient for future offline analyzer once exact input rows are captured
+prior all-layer HQQ GPU vs KRHQ dequant comparator	true	20260627_0327 full comparator passed	excludes broad KRHQ/GPU layout bug on BF16-reference trace, but not exact HQQ-consumed rows without inputs

@@ -6,32 +6,30 @@
 //!   3. For each selected expert: gate+up matmul → SiLU → down matmul
 //!   4. Weighted sum of expert outputs returned to SGLang
 
+use crate::gguf_kernels::{expert_forward_gguf, GgufScratch};
 #[allow(unused_imports)]
 use crate::kernel::avx2::{
-    matmul_int4_integer, matmul_int4_integer_parallel,
-    matmul_int8_integer, matmul_int8_integer_parallel,
-    matmul_int4_marlin, matmul_int4_marlin_parallel,
-    matmul_int4_transposed_integer, matmul_int4_transposed_integer_parallel,
-    matmul_int4_transposed_integer_tiled, matmul_int4_transposed_integer_parallel_tiled,
+    build_marlin_scale_map, build_marlin_tile_map, expert_matmul_int4_transposed_integer,
+    expert_matmul_int8_transposed_integer, matmul_int4_integer, matmul_int4_integer_parallel,
+    matmul_int4_marlin, matmul_int4_marlin_parallel, matmul_int4_transposed_integer,
+    matmul_int4_transposed_integer_parallel, matmul_int4_transposed_integer_parallel_tiled,
+    matmul_int4_transposed_integer_tiled, matmul_int8_integer, matmul_int8_integer_parallel,
     matmul_int8_transposed_integer, matmul_int8_transposed_integer_parallel,
-    matmul_int8_transposed_integer_tiled, matmul_int8_transposed_integer_parallel_tiled,
-    expert_matmul_int4_transposed_integer, expert_matmul_int8_transposed_integer,
-    build_marlin_tile_map, build_marlin_scale_map,
-    MarlinTileMap, MarlinScaleMap,
-    quantize_activation_int16,
-    quantize_activation_int16_f32,
-    silu_quantize_int16_avx2,
+    matmul_int8_transposed_integer_parallel_tiled, matmul_int8_transposed_integer_tiled,
+    quantize_activation_int16, quantize_activation_int16_f32, silu_quantize_int16_avx2,
+    MarlinScaleMap, MarlinTileMap,
 };
-use crate::gguf_kernels::{expert_forward_gguf, GgufScratch};
 use crate::weights::marlin::{bf16_to_f32, f32_to_bf16, DEFAULT_GROUP_SIZE};
-use crate::weights::{ExpertWeights, GgufExpertWeights, QuantWeight, UnifiedExpertWeights, WeightStore};
+use crate::weights::{
+    ExpertWeights, GgufExpertWeights, QuantWeight, UnifiedExpertWeights, WeightStore,
+};
+#[cfg(target_os = "linux")]
+use libc;
 use pyo3::prelude::*;
 use pyo3::types::{PyByteArray, PyBytes};
 use std::path::Path;
-use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
-#[cfg(target_os = "linux")]
-use libc;
 
 /// Lazily-initialized Marlin tile map (kept for GPU prefill path and debugging).
 #[allow(dead_code)]
@@ -101,17 +99,26 @@ fn matmul_integer(weight: &QuantWeight, act_int16: &[i16], act_scales: &[f32], o
     match weight {
         QuantWeight::Int4(q) => matmul_int4_integer(q, act_int16, act_scales, output),
         QuantWeight::Int8(q) => matmul_int8_integer(q, act_int16, act_scales, output),
-        QuantWeight::Bf16(_) => panic!("BF16 experts are GPU-only (validation mode), not supported in CPU decode"),
+        QuantWeight::Bf16(_) => {
+            panic!("BF16 experts are GPU-only (validation mode), not supported in CPU decode")
+        }
     }
 }
 
 /// Dispatch integer matmul to INT4 or INT8 kernel based on weight type (parallel).
 #[inline]
-fn matmul_integer_parallel(weight: &QuantWeight, act_int16: &[i16], act_scales: &[f32], output: &mut [f32]) {
+fn matmul_integer_parallel(
+    weight: &QuantWeight,
+    act_int16: &[i16],
+    act_scales: &[f32],
+    output: &mut [f32],
+) {
     match weight {
         QuantWeight::Int4(q) => matmul_int4_integer_parallel(q, act_int16, act_scales, output),
         QuantWeight::Int8(q) => matmul_int8_integer_parallel(q, act_int16, act_scales, output),
-        QuantWeight::Bf16(_) => panic!("BF16 experts are GPU-only (validation mode), not supported in CPU decode"),
+        QuantWeight::Bf16(_) => {
+            panic!("BF16 experts are GPU-only (validation mode), not supported in CPU decode")
+        }
     }
 }
 
@@ -134,7 +141,11 @@ pub fn expert_forward_integer(
     scratch: &mut ExpertScratch,
     parallel: bool,
 ) {
-    let matmul_fn = if parallel { matmul_integer_parallel } else { matmul_integer };
+    let matmul_fn = if parallel {
+        matmul_integer_parallel
+    } else {
+        matmul_integer
+    };
 
     // gate_out = integer_matmul(gate_proj, act_int16) → f32 [intermediate_size]
     matmul_fn(&expert.gate, act_int16, act_scales, &mut scratch.gate_out);
@@ -171,7 +182,12 @@ pub fn expert_forward_integer(
     }
 
     // expert_out = integer_matmul(down_proj, hidden_int16) → f32 [hidden_size]
-    matmul_fn(&expert.down, &scratch.hidden_int16, &scratch.hidden_scales, &mut scratch.expert_out);
+    matmul_fn(
+        &expert.down,
+        &scratch.hidden_int16,
+        &scratch.hidden_scales,
+        &mut scratch.expert_out,
+    );
 }
 
 /// Compute a single expert's output using the CPU transposed format.
@@ -212,10 +228,14 @@ pub fn expert_forward_unified(
                 matmul_int4_transposed_integer_tiled
             };
             matmul_fn(
-                &expert.w13_packed, &expert.w13_scales,
-                act_int16, act_scales,
+                &expert.w13_packed,
+                &expert.w13_scales,
+                act_int16,
+                act_scales,
                 &mut scratch.w13_out,
-                k, w13_out_n, gs,
+                k,
+                w13_out_n,
+                gs,
             );
         }
         (4, false) => {
@@ -225,10 +245,14 @@ pub fn expert_forward_unified(
                 matmul_int4_transposed_integer
             };
             matmul_fn(
-                &expert.w13_packed, &expert.w13_scales,
-                act_int16, act_scales,
+                &expert.w13_packed,
+                &expert.w13_scales,
+                act_int16,
+                act_scales,
                 &mut scratch.w13_out,
-                k, w13_out_n, gs,
+                k,
+                w13_out_n,
+                gs,
             );
         }
         (8, true) => {
@@ -238,10 +262,14 @@ pub fn expert_forward_unified(
                 matmul_int8_transposed_integer_tiled
             };
             matmul_fn(
-                &expert.w13_packed, &expert.w13_scales,
-                act_int16, act_scales,
+                &expert.w13_packed,
+                &expert.w13_scales,
+                act_int16,
+                act_scales,
                 &mut scratch.w13_out,
-                k, w13_out_n, gs,
+                k,
+                w13_out_n,
+                gs,
             );
         }
         (8, false) => {
@@ -251,10 +279,14 @@ pub fn expert_forward_unified(
                 matmul_int8_transposed_integer
             };
             matmul_fn(
-                &expert.w13_packed, &expert.w13_scales,
-                act_int16, act_scales,
+                &expert.w13_packed,
+                &expert.w13_scales,
+                act_int16,
+                act_scales,
                 &mut scratch.w13_out,
-                k, w13_out_n, gs,
+                k,
+                w13_out_n,
+                gs,
             );
         }
         _ => panic!("Unsupported num_bits: {}", expert.num_bits),
@@ -275,68 +307,72 @@ pub fn expert_forward_unified(
     }
     // Gated activations below (standard MoE)
     else {
+        // Apply gate/up biases if present (GPT OSS)
+        if let Some(ref gate_bias) = expert.gate_bias {
+            for i in 0..n {
+                scratch.w13_out[i] += gate_bias[i];
+            }
+        }
+        if let Some(ref up_bias) = expert.up_bias {
+            for i in 0..n {
+                scratch.w13_out[n + i] += up_bias[i];
+            }
+        }
 
-    // Apply gate/up biases if present (GPT OSS)
-    if let Some(ref gate_bias) = expert.gate_bias {
-        for i in 0..n {
-            scratch.w13_out[i] += gate_bias[i];
-        }
-    }
-    if let Some(ref up_bias) = expert.up_bias {
-        for i in 0..n {
-            scratch.w13_out[n + i] += up_bias[i];
-        }
-    }
-
-    // Split w13_out into gate[N] and up[N], apply activation + quantize
-    if swiglu_limit > 0.0 {
-        // GPT OSS activation: gate*sigmoid(gate*alpha)*(up+1) with clamping
-        // Write f32 directly to w13_out[0..n], skip BF16 intermediate
-        let alpha = activation_alpha;
-        for i in 0..n {
-            let mut gate = scratch.w13_out[i];
-            let mut up = scratch.w13_out[n + i];
-            if gate > swiglu_limit { gate = swiglu_limit; }
-            if up > swiglu_limit { up = swiglu_limit; }
-            if up < -swiglu_limit { up = -swiglu_limit; }
-            let glu = gate * fast_sigmoid(gate * alpha);
-            scratch.w13_out[i] = (up + 1.0) * glu;
-        }
-        // Quantize from f32 directly (no BF16 round-trip)
-        quantize_activation_int16_f32(
-            &scratch.w13_out[..n],
-            gs,
-            &mut scratch.hidden_int16,
-            &mut scratch.hidden_scales,
-        );
-    } else if n % 8 == 0 && gs % 8 == 0 {
-        // Standard SiLU: fused AVX2 SiLU + quantize (no BF16 intermediate)
-        let w13_ptr = scratch.w13_out.as_mut_ptr();
-        unsafe {
-            silu_quantize_int16_avx2(
-                w13_ptr,
-                w13_ptr.add(n) as *const f32,
-                scratch.hidden_int16.as_mut_ptr(),
-                scratch.hidden_scales.as_mut_ptr(),
-                n,
+        // Split w13_out into gate[N] and up[N], apply activation + quantize
+        if swiglu_limit > 0.0 {
+            // GPT OSS activation: gate*sigmoid(gate*alpha)*(up+1) with clamping
+            // Write f32 directly to w13_out[0..n], skip BF16 intermediate
+            let alpha = activation_alpha;
+            for i in 0..n {
+                let mut gate = scratch.w13_out[i];
+                let mut up = scratch.w13_out[n + i];
+                if gate > swiglu_limit {
+                    gate = swiglu_limit;
+                }
+                if up > swiglu_limit {
+                    up = swiglu_limit;
+                }
+                if up < -swiglu_limit {
+                    up = -swiglu_limit;
+                }
+                let glu = gate * fast_sigmoid(gate * alpha);
+                scratch.w13_out[i] = (up + 1.0) * glu;
+            }
+            // Quantize from f32 directly (no BF16 round-trip)
+            quantize_activation_int16_f32(
+                &scratch.w13_out[..n],
                 gs,
+                &mut scratch.hidden_int16,
+                &mut scratch.hidden_scales,
+            );
+        } else if n % 8 == 0 && gs % 8 == 0 {
+            // Standard SiLU: fused AVX2 SiLU + quantize (no BF16 intermediate)
+            let w13_ptr = scratch.w13_out.as_mut_ptr();
+            unsafe {
+                silu_quantize_int16_avx2(
+                    w13_ptr,
+                    w13_ptr.add(n) as *const f32,
+                    scratch.hidden_int16.as_mut_ptr(),
+                    scratch.hidden_scales.as_mut_ptr(),
+                    n,
+                    gs,
+                );
+            }
+        } else {
+            // Scalar fallback for non-8-aligned sizes
+            for i in 0..n {
+                let gate = scratch.w13_out[i];
+                let up = scratch.w13_out[n + i];
+                scratch.w13_out[i] = gate * fast_sigmoid(gate) * up;
+            }
+            quantize_activation_int16_f32(
+                &scratch.w13_out[..n],
+                gs,
+                &mut scratch.hidden_int16,
+                &mut scratch.hidden_scales,
             );
         }
-    } else {
-        // Scalar fallback for non-8-aligned sizes
-        for i in 0..n {
-            let gate = scratch.w13_out[i];
-            let up = scratch.w13_out[n + i];
-            scratch.w13_out[i] = gate * fast_sigmoid(gate) * up;
-        }
-        quantize_activation_int16_f32(
-            &scratch.w13_out[..n],
-            gs,
-            &mut scratch.hidden_int16,
-            &mut scratch.hidden_scales,
-        );
-    }
-
     } // end of gated activation else block
 
     // w2 matmul: expert_out[hidden_size] = hidden[N] @ w2[N, hidden_size]
@@ -349,10 +385,14 @@ pub fn expert_forward_unified(
                 matmul_int4_transposed_integer_tiled
             };
             matmul_fn(
-                &expert.w2_packed, &expert.w2_scales,
-                &scratch.hidden_int16, &scratch.hidden_scales,
+                &expert.w2_packed,
+                &expert.w2_scales,
+                &scratch.hidden_int16,
+                &scratch.hidden_scales,
                 &mut scratch.expert_out,
-                n, k, gs,
+                n,
+                k,
+                gs,
             );
         }
         (4, false) => {
@@ -362,10 +402,14 @@ pub fn expert_forward_unified(
                 matmul_int4_transposed_integer
             };
             matmul_fn(
-                &expert.w2_packed, &expert.w2_scales,
-                &scratch.hidden_int16, &scratch.hidden_scales,
+                &expert.w2_packed,
+                &expert.w2_scales,
+                &scratch.hidden_int16,
+                &scratch.hidden_scales,
                 &mut scratch.expert_out,
-                n, k, gs,
+                n,
+                k,
+                gs,
             );
         }
         (8, true) => {
@@ -375,10 +419,14 @@ pub fn expert_forward_unified(
                 matmul_int8_transposed_integer_tiled
             };
             matmul_fn(
-                &expert.w2_packed, &expert.w2_scales,
-                &scratch.hidden_int16, &scratch.hidden_scales,
+                &expert.w2_packed,
+                &expert.w2_scales,
+                &scratch.hidden_int16,
+                &scratch.hidden_scales,
                 &mut scratch.expert_out,
-                n, k, gs,
+                n,
+                k,
+                gs,
             );
         }
         (8, false) => {
@@ -388,10 +436,14 @@ pub fn expert_forward_unified(
                 matmul_int8_transposed_integer
             };
             matmul_fn(
-                &expert.w2_packed, &expert.w2_scales,
-                &scratch.hidden_int16, &scratch.hidden_scales,
+                &expert.w2_packed,
+                &expert.w2_scales,
+                &scratch.hidden_int16,
+                &scratch.hidden_scales,
                 &mut scratch.expert_out,
-                n, k, gs,
+                n,
+                k,
+                gs,
             );
         }
         _ => panic!("Unsupported w2_bits: {}", expert.w2_bits),
@@ -493,11 +545,14 @@ pub fn moe_forward(
                     pool_slices.par_iter().for_each(|&(pos, eidx)| {
                         crate::numa::pin_thread_to_node(target_node);
                         let expert = store.get_expert(moe_layer_idx, eidx);
-                        let local_scratch = unsafe {
-                            &mut *(pool_base as *mut ExpertScratch).add(pos)
-                        };
+                        let local_scratch =
+                            unsafe { &mut *(pool_base as *mut ExpertScratch).add(pos) };
                         expert_forward_integer(
-                            expert, &act_int16, &act_scales, local_scratch, true,
+                            expert,
+                            &act_int16,
+                            &act_scales,
+                            local_scratch,
+                            true,
                         );
                         crate::numa::unpin_thread();
                     });
@@ -521,11 +576,13 @@ pub fn moe_forward(
 
         // Non-NUMA parallel path: run all experts concurrently
         let pool = &mut scratch_pool[..n];
-        pool.par_iter_mut().enumerate().for_each(|(i, local_scratch)| {
-            let eidx = expert_indices[i];
-            let expert = store.get_expert(moe_layer_idx, eidx);
-            expert_forward_integer(expert, &act_int16, &act_scales, local_scratch, true);
-        });
+        pool.par_iter_mut()
+            .enumerate()
+            .for_each(|(i, local_scratch)| {
+                let eidx = expert_indices[i];
+                let expert = store.get_expert(moe_layer_idx, eidx);
+                expert_forward_integer(expert, &act_int16, &act_scales, local_scratch, true);
+            });
 
         // Weighted sum (sequential — fast since it's just addition)
         for i in 0..n {
@@ -650,20 +707,29 @@ pub fn moe_forward_unified(
                     pool_slices.par_iter().for_each(|&(pos, eidx)| {
                         crate::numa::pin_thread_to_node(target_node);
                         let expert = store.get_expert_unified(moe_layer_idx, eidx);
-                        let local_scratch = unsafe {
-                            &mut *(pool_base as *mut ExpertScratch).add(pos)
-                        };
+                        let local_scratch =
+                            unsafe { &mut *(pool_base as *mut ExpertScratch).add(pos) };
                         expert_forward_unified(
-                            expert, &act_int16, &act_scales, local_scratch, true,
-                            store.config.swiglu_limit, store.config.activation_alpha,
+                            expert,
+                            &act_int16,
+                            &act_scales,
+                            local_scratch,
+                            true,
+                            store.config.swiglu_limit,
+                            store.config.activation_alpha,
                         );
                         // Inline PFL: read predicted next-layer experts into local L3
                         if let Some(pfl) = pfl_prefetch {
                             loop {
-                                let idx = pfl.claim.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                if idx >= pfl.predicted.len() { break; }
+                                let idx =
+                                    pfl.claim.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                if idx >= pfl.predicted.len() {
+                                    break;
+                                }
                                 let pred_expert = store.get_expert_unified(
-                                    pfl.next_moe_layer, pfl.predicted[idx] as usize);
+                                    pfl.next_moe_layer,
+                                    pfl.predicted[idx] as usize,
+                                );
                                 prefetch_expert_configurable(pred_expert, pfl.stride, pfl.hint);
                             }
                         }
@@ -688,22 +754,33 @@ pub fn moe_forward_unified(
 
         // Non-NUMA parallel path with unified weights
         let pool = &mut scratch_pool[..n];
-        pool.par_iter_mut().enumerate().for_each(|(i, local_scratch)| {
-            let eidx = expert_indices[i];
-            let expert = store.get_expert_unified(moe_layer_idx, eidx);
-            expert_forward_unified(expert, &act_int16, &act_scales, local_scratch, true,
-                store.config.swiglu_limit, store.config.activation_alpha);
-            // Inline PFL: non-blocking prefetch predicted next-layer experts into local L3
-            if let Some(pfl) = pfl_prefetch {
-                loop {
-                    let idx = pfl.claim.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if idx >= pfl.predicted.len() { break; }
-                    let pred_expert = store.get_expert_unified(
-                        pfl.next_moe_layer, pfl.predicted[idx] as usize);
-                    prefetch_expert_configurable(pred_expert, pfl.stride, pfl.hint);
+        pool.par_iter_mut()
+            .enumerate()
+            .for_each(|(i, local_scratch)| {
+                let eidx = expert_indices[i];
+                let expert = store.get_expert_unified(moe_layer_idx, eidx);
+                expert_forward_unified(
+                    expert,
+                    &act_int16,
+                    &act_scales,
+                    local_scratch,
+                    true,
+                    store.config.swiglu_limit,
+                    store.config.activation_alpha,
+                );
+                // Inline PFL: non-blocking prefetch predicted next-layer experts into local L3
+                if let Some(pfl) = pfl_prefetch {
+                    loop {
+                        let idx = pfl.claim.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if idx >= pfl.predicted.len() {
+                            break;
+                        }
+                        let pred_expert = store
+                            .get_expert_unified(pfl.next_moe_layer, pfl.predicted[idx] as usize);
+                        prefetch_expert_configurable(pred_expert, pfl.stride, pfl.hint);
+                    }
                 }
-            }
-        });
+            });
 
         for i in 0..n {
             let weight = expert_weights[i];
@@ -724,8 +801,15 @@ pub fn moe_forward_unified(
                 prefetch_expert_unified_nta(next_expert);
             }
 
-            expert_forward_unified(expert, &act_int16, &act_scales, scratch, false,
-                store.config.swiglu_limit, store.config.activation_alpha);
+            expert_forward_unified(
+                expert,
+                &act_int16,
+                &act_scales,
+                scratch,
+                false,
+                store.config.swiglu_limit,
+                store.config.activation_alpha,
+            );
 
             for j in 0..output.len() {
                 output[j] += weight * scratch.expert_out[j];
@@ -734,8 +818,7 @@ pub fn moe_forward_unified(
         // Sequential PFL: non-blocking prefetch predicted next-layer experts
         if let Some(pfl) = pfl_prefetch {
             for &eid in pfl.predicted {
-                let pred_expert = store.get_expert_unified(
-                    pfl.next_moe_layer, eid as usize);
+                let pred_expert = store.get_expert_unified(pfl.next_moe_layer, eid as usize);
                 prefetch_expert_configurable(pred_expert, pfl.stride, pfl.hint);
             }
         }
@@ -752,8 +835,15 @@ pub fn moe_forward_unified(
             ss_act_scales.clear();
             ss_act_scales.extend_from_slice(&act_scales);
 
-            expert_forward_unified(shared_expert, &ss_act_int16, &ss_act_scales, ss, parallel,
-                store.config.swiglu_limit, store.config.activation_alpha);
+            expert_forward_unified(
+                shared_expert,
+                &ss_act_int16,
+                &ss_act_scales,
+                ss,
+                parallel,
+                store.config.swiglu_limit,
+                store.config.activation_alpha,
+            );
 
             let scale = store.config.routed_scaling_factor;
             for j in 0..hidden {
@@ -799,7 +889,11 @@ pub fn moe_forward_flattened(
     let mut act_int16 = std::mem::take(&mut scratch.input_act_int16);
     let mut act_scales = std::mem::take(&mut scratch.input_act_scales);
     quantize_activation_int16(
-        activation, scratch.group_size, &mut act_int16, &mut act_scales);
+        activation,
+        scratch.group_size,
+        &mut act_int16,
+        &mut act_scales,
+    );
 
     output.fill(0.0);
 
@@ -818,8 +912,15 @@ pub fn moe_forward_flattened(
             let eidx = expert_indices[i];
             let weight = expert_weights[i];
             let expert = store.get_expert_unified(moe_layer_idx, eidx);
-            expert_forward_unified(expert, &act_int16, &act_scales, scratch, false,
-                store.config.swiglu_limit, store.config.activation_alpha);
+            expert_forward_unified(
+                expert,
+                &act_int16,
+                &act_scales,
+                scratch,
+                false,
+                store.config.swiglu_limit,
+                store.config.activation_alpha,
+            );
             for j in 0..hidden {
                 output[j] += weight * scratch.expert_out[j];
             }
@@ -833,7 +934,8 @@ pub fn moe_forward_flattened(
     let activation_alpha = store.config.activation_alpha;
 
     // Gather expert refs
-    let experts: Vec<&UnifiedExpertWeights> = expert_indices.iter()
+    let experts: Vec<&UnifiedExpertWeights> = expert_indices
+        .iter()
         .map(|&eidx| store.get_expert_unified(moe_layer_idx, eidx))
         .collect();
 
@@ -845,10 +947,18 @@ pub fn moe_forward_flattened(
     // Extract pointers as usize for Send+Sync in rayon closures.
     // Safety: each expert's scratch buffers are non-overlapping, and within an expert,
     // Phase 1/3 chunks write to non-overlapping output ranges.
-    let w13_addrs: Vec<usize> = (0..n_exp).map(|i| scratch_pool[i].w13_out.as_mut_ptr() as usize).collect();
-    let h_int16_addrs: Vec<usize> = (0..n_exp).map(|i| scratch_pool[i].hidden_int16.as_mut_ptr() as usize).collect();
-    let h_scales_addrs: Vec<usize> = (0..n_exp).map(|i| scratch_pool[i].hidden_scales.as_mut_ptr() as usize).collect();
-    let expert_out_addrs: Vec<usize> = (0..n_exp).map(|i| scratch_pool[i].expert_out.as_mut_ptr() as usize).collect();
+    let w13_addrs: Vec<usize> = (0..n_exp)
+        .map(|i| scratch_pool[i].w13_out.as_mut_ptr() as usize)
+        .collect();
+    let h_int16_addrs: Vec<usize> = (0..n_exp)
+        .map(|i| scratch_pool[i].hidden_int16.as_mut_ptr() as usize)
+        .collect();
+    let h_scales_addrs: Vec<usize> = (0..n_exp)
+        .map(|i| scratch_pool[i].hidden_scales.as_mut_ptr() as usize)
+        .collect();
+    let expert_out_addrs: Vec<usize> = (0..n_exp)
+        .map(|i| scratch_pool[i].expert_out.as_mut_ptr() as usize)
+        .collect();
 
     let act_addr = act_int16.as_ptr() as usize;
     let act_sc_addr = act_scales.as_ptr() as usize;
@@ -878,16 +988,30 @@ pub fn moe_forward_flattened(
                         expert_matmul_int4_transposed_integer(
                             expert.w13_packed.as_ptr().add(ci * packed_tile_size),
                             expert.w13_scales.as_ptr().add(ci * scales_tile_size),
-                            act_addr as *const i16, act_sc_addr as *const f32,
-                            out, hidden, chunk_n, 0, n_count, gs);
+                            act_addr as *const i16,
+                            act_sc_addr as *const f32,
+                            out,
+                            hidden,
+                            chunk_n,
+                            0,
+                            n_count,
+                            gs,
+                        );
                     }
                     8 => {
                         let packed_tile_bytes = hidden * chunk_n; // bytes per tile
                         expert_matmul_int8_transposed_integer(
                             (expert.w13_packed.as_ptr() as *const i8).add(ci * packed_tile_bytes),
                             expert.w13_scales.as_ptr().add(ci * scales_tile_size),
-                            act_addr as *const i16, act_sc_addr as *const f32,
-                            out, hidden, chunk_n, 0, n_count, gs);
+                            act_addr as *const i16,
+                            act_sc_addr as *const f32,
+                            out,
+                            hidden,
+                            chunk_n,
+                            0,
+                            n_count,
+                            gs,
+                        );
                     }
                     _ => {}
                 }
@@ -896,13 +1020,27 @@ pub fn moe_forward_flattened(
                     4 => expert_matmul_int4_transposed_integer(
                         expert.w13_packed.as_ptr(),
                         expert.w13_scales.as_ptr(),
-                        act_addr as *const i16, act_sc_addr as *const f32,
-                        out, hidden, two_n, n_start, n_count, gs),
+                        act_addr as *const i16,
+                        act_sc_addr as *const f32,
+                        out,
+                        hidden,
+                        two_n,
+                        n_start,
+                        n_count,
+                        gs,
+                    ),
                     8 => expert_matmul_int8_transposed_integer(
                         expert.w13_packed.as_ptr() as *const i8,
                         expert.w13_scales.as_ptr(),
-                        act_addr as *const i16, act_sc_addr as *const f32,
-                        out, hidden, two_n, n_start, n_count, gs),
+                        act_addr as *const i16,
+                        act_sc_addr as *const f32,
+                        out,
+                        hidden,
+                        two_n,
+                        n_start,
+                        n_count,
+                        gs,
+                    ),
                     _ => {}
                 }
             }
@@ -921,10 +1059,14 @@ pub fn moe_forward_flattened(
 
             // Apply biases if present
             if let Some(ref gb) = expert.gate_bias {
-                for j in 0..n { *w13.add(j) += gb[j]; }
+                for j in 0..n {
+                    *w13.add(j) += gb[j];
+                }
             }
             if let Some(ref ub) = expert.up_bias {
-                for j in 0..n { *w13.add(n + j) += ub[j]; }
+                for j in 0..n {
+                    *w13.add(n + j) += ub[j];
+                }
             }
 
             if swiglu_limit > 0.0 {
@@ -932,20 +1074,26 @@ pub fn moe_forward_flattened(
                 for j in 0..n {
                     let mut gate = *w13.add(j);
                     let mut up = *w13.add(n + j);
-                    if gate > swiglu_limit { gate = swiglu_limit; }
-                    if up > swiglu_limit { up = swiglu_limit; }
-                    if up < -swiglu_limit { up = -swiglu_limit; }
+                    if gate > swiglu_limit {
+                        gate = swiglu_limit;
+                    }
+                    if up > swiglu_limit {
+                        up = swiglu_limit;
+                    }
+                    if up < -swiglu_limit {
+                        up = -swiglu_limit;
+                    }
                     let glu = gate * fast_sigmoid(gate * alpha);
                     *w13.add(j) = (up + 1.0) * glu;
                 }
                 quantize_activation_int16_f32(
-                    std::slice::from_raw_parts(w13, n), gs,
+                    std::slice::from_raw_parts(w13, n),
+                    gs,
                     std::slice::from_raw_parts_mut(h16, n),
-                    std::slice::from_raw_parts_mut(hsc, n / gs));
+                    std::slice::from_raw_parts_mut(hsc, n / gs),
+                );
             } else if n % 8 == 0 && gs % 8 == 0 {
-                silu_quantize_int16_avx2(
-                    w13, w13.add(n) as *const f32,
-                    h16, hsc, n, gs);
+                silu_quantize_int16_avx2(w13, w13.add(n) as *const f32, h16, hsc, n, gs);
             } else {
                 for j in 0..n {
                     let gate = *w13.add(j);
@@ -953,9 +1101,11 @@ pub fn moe_forward_flattened(
                     *w13.add(j) = gate * fast_sigmoid(gate) * up;
                 }
                 quantize_activation_int16_f32(
-                    std::slice::from_raw_parts(w13, n), gs,
+                    std::slice::from_raw_parts(w13, n),
+                    gs,
                     std::slice::from_raw_parts_mut(h16, n),
-                    std::slice::from_raw_parts_mut(hsc, n / gs));
+                    std::slice::from_raw_parts_mut(hsc, n / gs),
+                );
             }
         }
     });
@@ -987,16 +1137,30 @@ pub fn moe_forward_flattened(
                         expert_matmul_int4_transposed_integer(
                             expert.w2_packed.as_ptr().add(ci * packed_tile_size_w2),
                             expert.w2_scales.as_ptr().add(ci * scales_tile_size_w2),
-                            h16, hsc, out,
-                            k_down, chunk_n, 0, n_count, gs);
+                            h16,
+                            hsc,
+                            out,
+                            k_down,
+                            chunk_n,
+                            0,
+                            n_count,
+                            gs,
+                        );
                     }
                     8 => {
                         let packed_tile_bytes_w2 = k_down * chunk_n;
                         expert_matmul_int8_transposed_integer(
                             (expert.w2_packed.as_ptr() as *const i8).add(ci * packed_tile_bytes_w2),
                             expert.w2_scales.as_ptr().add(ci * scales_tile_size_w2),
-                            h16, hsc, out,
-                            k_down, chunk_n, 0, n_count, gs);
+                            h16,
+                            hsc,
+                            out,
+                            k_down,
+                            chunk_n,
+                            0,
+                            n_count,
+                            gs,
+                        );
                     }
                     _ => {}
                 }
@@ -1005,13 +1169,27 @@ pub fn moe_forward_flattened(
                     4 => expert_matmul_int4_transposed_integer(
                         expert.w2_packed.as_ptr(),
                         expert.w2_scales.as_ptr(),
-                        h16, hsc, out,
-                        k_down, w2_n, n_start, n_count, gs),
+                        h16,
+                        hsc,
+                        out,
+                        k_down,
+                        w2_n,
+                        n_start,
+                        n_count,
+                        gs,
+                    ),
                     8 => expert_matmul_int8_transposed_integer(
                         expert.w2_packed.as_ptr() as *const i8,
                         expert.w2_scales.as_ptr(),
-                        h16, hsc, out,
-                        k_down, w2_n, n_start, n_count, gs),
+                        h16,
+                        hsc,
+                        out,
+                        k_down,
+                        w2_n,
+                        n_start,
+                        n_count,
+                        gs,
+                    ),
                     _ => {}
                 }
             }
@@ -1086,12 +1264,9 @@ pub fn moe_forward_gguf(
                     pool_slices.par_iter().for_each(|&(pos, eidx)| {
                         crate::numa::pin_thread_to_node(target_node);
                         let expert = store.get_expert_gguf(moe_layer_idx, eidx);
-                        let local_scratch = unsafe {
-                            &mut *(pool_base as *mut GgufScratch).add(pos)
-                        };
-                        expert_forward_gguf(
-                            expert, activation, local_scratch,
-                        );
+                        let local_scratch =
+                            unsafe { &mut *(pool_base as *mut GgufScratch).add(pos) };
+                        expert_forward_gguf(expert, activation, local_scratch);
                         crate::numa::unpin_thread();
                     });
                 }
@@ -1111,13 +1286,13 @@ pub fn moe_forward_gguf(
 
         // Non-NUMA parallel path
         let pool = &mut scratch_pool[..n];
-        pool.par_iter_mut().enumerate().for_each(|(i, local_scratch)| {
-            let eidx = expert_indices[i];
-            let expert = store.get_expert_gguf(moe_layer_idx, eidx);
-            expert_forward_gguf(
-                expert, activation, local_scratch,
-            );
-        });
+        pool.par_iter_mut()
+            .enumerate()
+            .for_each(|(i, local_scratch)| {
+                let eidx = expert_indices[i];
+                let expert = store.get_expert_gguf(moe_layer_idx, eidx);
+                expert_forward_gguf(expert, activation, local_scratch);
+            });
 
         // Weighted sum
         for i in 0..n {
@@ -1139,9 +1314,7 @@ pub fn moe_forward_gguf(
                 prefetch_gguf_expert_nta(next_expert);
             }
 
-            expert_forward_gguf(
-                expert, activation, scratch,
-            );
+            expert_forward_gguf(expert, activation, scratch);
 
             for j in 0..output.len() {
                 output[j] += weight * scratch.expert_out[j];
@@ -1152,9 +1325,7 @@ pub fn moe_forward_gguf(
     // Apply shared expert if present (GGUF format)
     if let Some(shared_expert) = store.get_shared_expert_gguf(moe_layer_idx) {
         if let Some(ss) = shared_scratch.as_mut() {
-            expert_forward_gguf(
-                shared_expert, activation, ss,
-            );
+            expert_forward_gguf(shared_expert, activation, ss);
 
             let scale = store.config.routed_scaling_factor;
             for j in 0..hidden {
@@ -1222,13 +1393,28 @@ fn prefetch_expert_bufs_nta(expert: &UnifiedExpertWeights, stride: usize) {
     use std::arch::x86_64::{_mm_prefetch, _MM_HINT_NTA};
     unsafe {
         for &(ptr, len) in &[
-            (expert.w13_packed.as_ptr() as *const i8, expert.w13_packed.len() * 4),
-            (expert.w13_scales.as_ptr() as *const i8, expert.w13_scales.len() * 2),
-            (expert.w2_packed.as_ptr() as *const i8, expert.w2_packed.len() * 4),
-            (expert.w2_scales.as_ptr() as *const i8, expert.w2_scales.len() * 2),
+            (
+                expert.w13_packed.as_ptr() as *const i8,
+                expert.w13_packed.len() * 4,
+            ),
+            (
+                expert.w13_scales.as_ptr() as *const i8,
+                expert.w13_scales.len() * 2,
+            ),
+            (
+                expert.w2_packed.as_ptr() as *const i8,
+                expert.w2_packed.len() * 4,
+            ),
+            (
+                expert.w2_scales.as_ptr() as *const i8,
+                expert.w2_scales.len() * 2,
+            ),
         ] {
             let mut off = 0;
-            while off < len { _mm_prefetch(ptr.add(off), _MM_HINT_NTA); off += stride; }
+            while off < len {
+                _mm_prefetch(ptr.add(off), _MM_HINT_NTA);
+                off += stride;
+            }
         }
     }
 }
@@ -1238,13 +1424,28 @@ fn prefetch_expert_bufs_t1(expert: &UnifiedExpertWeights, stride: usize) {
     use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T1};
     unsafe {
         for &(ptr, len) in &[
-            (expert.w13_packed.as_ptr() as *const i8, expert.w13_packed.len() * 4),
-            (expert.w13_scales.as_ptr() as *const i8, expert.w13_scales.len() * 2),
-            (expert.w2_packed.as_ptr() as *const i8, expert.w2_packed.len() * 4),
-            (expert.w2_scales.as_ptr() as *const i8, expert.w2_scales.len() * 2),
+            (
+                expert.w13_packed.as_ptr() as *const i8,
+                expert.w13_packed.len() * 4,
+            ),
+            (
+                expert.w13_scales.as_ptr() as *const i8,
+                expert.w13_scales.len() * 2,
+            ),
+            (
+                expert.w2_packed.as_ptr() as *const i8,
+                expert.w2_packed.len() * 4,
+            ),
+            (
+                expert.w2_scales.as_ptr() as *const i8,
+                expert.w2_scales.len() * 2,
+            ),
         ] {
             let mut off = 0;
-            while off < len { _mm_prefetch(ptr.add(off), _MM_HINT_T1); off += stride; }
+            while off < len {
+                _mm_prefetch(ptr.add(off), _MM_HINT_T1);
+                off += stride;
+            }
         }
     }
 }
@@ -1254,13 +1455,28 @@ fn prefetch_expert_bufs_t0(expert: &UnifiedExpertWeights, stride: usize) {
     use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
     unsafe {
         for &(ptr, len) in &[
-            (expert.w13_packed.as_ptr() as *const i8, expert.w13_packed.len() * 4),
-            (expert.w13_scales.as_ptr() as *const i8, expert.w13_scales.len() * 2),
-            (expert.w2_packed.as_ptr() as *const i8, expert.w2_packed.len() * 4),
-            (expert.w2_scales.as_ptr() as *const i8, expert.w2_scales.len() * 2),
+            (
+                expert.w13_packed.as_ptr() as *const i8,
+                expert.w13_packed.len() * 4,
+            ),
+            (
+                expert.w13_scales.as_ptr() as *const i8,
+                expert.w13_scales.len() * 2,
+            ),
+            (
+                expert.w2_packed.as_ptr() as *const i8,
+                expert.w2_packed.len() * 4,
+            ),
+            (
+                expert.w2_scales.as_ptr() as *const i8,
+                expert.w2_scales.len() * 2,
+            ),
         ] {
             let mut off = 0;
-            while off < len { _mm_prefetch(ptr.add(off), _MM_HINT_T0); off += stride; }
+            while off < len {
+                _mm_prefetch(ptr.add(off), _MM_HINT_T0);
+                off += stride;
+            }
         }
     }
 }
@@ -1289,10 +1505,22 @@ pub fn read_expert_into_cache(expert: &UnifiedExpertWeights) {
     let mut sink: u64 = 0;
     unsafe {
         let bufs: [(*const u8, usize); 4] = [
-            (expert.w13_packed.as_ptr() as *const u8, expert.w13_packed.len() * 4),
-            (expert.w13_scales.as_ptr() as *const u8, expert.w13_scales.len() * 2),
-            (expert.w2_packed.as_ptr() as *const u8, expert.w2_packed.len() * 4),
-            (expert.w2_scales.as_ptr() as *const u8, expert.w2_scales.len() * 2),
+            (
+                expert.w13_packed.as_ptr() as *const u8,
+                expert.w13_packed.len() * 4,
+            ),
+            (
+                expert.w13_scales.as_ptr() as *const u8,
+                expert.w13_scales.len() * 2,
+            ),
+            (
+                expert.w2_packed.as_ptr() as *const u8,
+                expert.w2_packed.len() * 4,
+            ),
+            (
+                expert.w2_scales.as_ptr() as *const u8,
+                expert.w2_scales.len() * 2,
+            ),
         ];
         for &(ptr, len) in &bufs {
             let mut off = 0;
@@ -1330,7 +1558,9 @@ fn prefetch_expert_nta(expert: &ExpertWeights) {
                 q.scales.as_ptr() as *const i8,
                 q.scales.len() * 2,
             ),
-            QuantWeight::Bf16(_) => panic!("BF16 experts are GPU-only (validation mode), not supported in CPU decode"),
+            QuantWeight::Bf16(_) => {
+                panic!("BF16 experts are GPU-only (validation mode), not supported in CPU decode")
+            }
         };
         let mut off = 0;
         while off < data_bytes {
@@ -1369,7 +1599,9 @@ fn fast_sigmoid(x: f32) -> f32 {
     let n = t.floor();
     let f = t - n;
     // Degree-5 minimax polynomial for 2^f on [0, 1)
-    let pow2f = 1.0 + f * (0.6931472 + f * (0.2402265 + f * (0.0555041 + f * (0.009618129 + f * 0.0013333558))));
+    let pow2f = 1.0
+        + f * (0.6931472
+            + f * (0.2402265 + f * (0.0555041 + f * (0.009618129 + f * 0.0013333558))));
     let exp_neg_x = pow2f * f32::from_bits(((n as i32 + 127) as u32) << 23);
     1.0 / (1.0 + exp_neg_x)
 }
@@ -1459,27 +1691,46 @@ fn moe_worker(
             output_f32.fill(0.0);
             if use_gguf {
                 moe_forward_gguf(
-                    &store, work.moe_layer_idx, act,
-                    &expert_indices, &expert_weights,
-                    &mut output_f32, &mut gguf_scratch, &mut gguf_scratch_pool,
+                    &store,
+                    work.moe_layer_idx,
+                    act,
+                    &expert_indices,
+                    &expert_weights,
+                    &mut output_f32,
+                    &mut gguf_scratch,
+                    &mut gguf_scratch_pool,
                     &mut gguf_shared_scratch,
-                    parallel, numa_map.as_ref(),
+                    parallel,
+                    numa_map.as_ref(),
                 );
             } else if store.has_unified() {
                 moe_forward_unified(
-                    &store, work.moe_layer_idx, act,
-                    &expert_indices, &expert_weights,
-                    &mut output_f32, &mut scratch, &mut scratch_pool,
+                    &store,
+                    work.moe_layer_idx,
+                    act,
+                    &expert_indices,
+                    &expert_weights,
+                    &mut output_f32,
+                    &mut scratch,
+                    &mut scratch_pool,
                     &mut shared_scratch,
-                    parallel, numa_map.as_ref(), None,
+                    parallel,
+                    numa_map.as_ref(),
+                    None,
                 );
             } else {
                 moe_forward(
-                    &store, work.moe_layer_idx, act,
-                    &expert_indices, &expert_weights,
-                    &mut output_f32, &mut scratch, &mut scratch_pool,
+                    &store,
+                    work.moe_layer_idx,
+                    act,
+                    &expert_indices,
+                    &expert_weights,
+                    &mut output_f32,
+                    &mut scratch,
+                    &mut scratch_pool,
                     &mut shared_scratch,
-                    parallel, numa_map.as_ref(),
+                    parallel,
+                    numa_map.as_ref(),
                 );
             }
 
@@ -1515,7 +1766,7 @@ struct LayerRouting {
 /// Routing config shared across all layers.
 #[derive(Clone)]
 struct RoutingConfig {
-    scoring_func: String,    // "sigmoid" or "softmax"
+    scoring_func: String, // "sigmoid" or "softmax"
     norm_topk_prob: bool,
     topk: usize,
     n_experts: usize,
@@ -1580,19 +1831,33 @@ impl KrasisEngine {
     }
 
     /// Get routing config for GPU decode setup.
-    pub(crate) fn get_routing_config(&self) -> Option<(/*scoring*/ &str, /*norm_topk*/ bool, /*topk*/ usize, /*n_experts*/ usize, /*hidden*/ usize)> {
-        self.routing_config.as_ref().map(|rc| (
-            rc.scoring_func.as_str(),
-            rc.norm_topk_prob,
-            rc.topk,
-            rc.n_experts,
-            rc.hidden_size,
-        ))
+    pub(crate) fn get_routing_config(
+        &self,
+    ) -> Option<(
+        /*scoring*/ &str,
+        /*norm_topk*/ bool,
+        /*topk*/ usize,
+        /*n_experts*/ usize,
+        /*hidden*/ usize,
+    )> {
+        self.routing_config.as_ref().map(|rc| {
+            (
+                rc.scoring_func.as_str(),
+                rc.norm_topk_prob,
+                rc.topk,
+                rc.n_experts,
+                rc.hidden_size,
+            )
+        })
     }
 
     /// Get gate weight data (BF16) and optional correction bias (FP32) for a MoE layer.
-    pub(crate) fn get_routing_weights(&self, moe_layer_idx: usize) -> Option<(&[u16], Option<&[f32]>)> {
-        self.layer_routing.get(moe_layer_idx)
+    pub(crate) fn get_routing_weights(
+        &self,
+        moe_layer_idx: usize,
+    ) -> Option<(&[u16], Option<&[f32]>)> {
+        self.layer_routing
+            .get(moe_layer_idx)
             .and_then(|lr| lr.as_ref())
             .map(|lr| {
                 let gate = lr.gate_weight.as_slice();
@@ -1612,19 +1877,27 @@ impl KrasisEngine {
     /// Repack all expert weights to tiled layout for better memory bandwidth.
     /// Must be called before the weight store is shared with CpuDecodeStore.
     pub fn repack_experts_to_tiled(&mut self) -> pyo3::PyResult<()> {
-        use crate::kernel::avx2::{repack_tiled_int4_packed, repack_tiled_int8_packed, repack_tiled_scales};
+        use crate::kernel::avx2::{
+            repack_tiled_int4_packed, repack_tiled_int8_packed, repack_tiled_scales,
+        };
         let t0 = std::time::Instant::now();
 
-        let arc = self.store.as_mut()
+        let arc = self
+            .store
+            .as_mut()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No weight store loaded"))?;
-        let ws = std::sync::Arc::get_mut(arc)
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(
-                "Cannot repack: weight store has multiple owners (call before set_moe_store)"))?;
+        let ws = std::sync::Arc::get_mut(arc).ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err(
+                "Cannot repack: weight store has multiple owners (call before set_moe_store)",
+            )
+        })?;
 
         let mut n_experts = 0usize;
         for layer in ws.experts_cpu.iter_mut() {
             for expert in layer.iter_mut() {
-                if expert.tiled { continue; }
+                if expert.tiled {
+                    continue;
+                }
                 let h = expert.hidden_size;
                 let m = expert.intermediate_size;
                 let gs = expert.group_size;
@@ -1649,7 +1922,11 @@ impl KrasisEngine {
             }
         }
 
-        log::info!("Repacked {} experts to tiled layout in {:.1}s", n_experts, t0.elapsed().as_secs_f64());
+        log::info!(
+            "Repacked {} experts to tiled layout in {:.1}s",
+            n_experts,
+            t0.elapsed().as_secs_f64()
+        );
         Ok(())
     }
 
@@ -1671,7 +1948,10 @@ impl KrasisEngine {
         // Configure NUMA-aware rayon thread pool (once, globally)
         if let Some(n) = num_threads {
             let topo = crate::numa::build_numa_thread_pool(n);
-            log::info!("Rayon thread pool: {n} threads, {} NUMA nodes", topo.num_nodes);
+            log::info!(
+                "Rayon thread pool: {n} threads, {} NUMA nodes",
+                topo.num_nodes
+            );
         }
         if skip_shared_experts {
             log::info!("Shared expert computation disabled (handled by host framework)");
@@ -1710,22 +1990,37 @@ impl KrasisEngine {
     ///              building from safetensors. GPU Marlin cache still from safetensors.
     /// `gguf_native`: If true, use raw GGUF blocks for CPU decode (slower but no conversion).
     ///                 Default false: dequant GGUF → re-quantize to fast AVX2 transposed format.
-    #[pyo3(signature = (model_dir, group_size=None, max_layers=None, start_layer=None, num_bits=None, cpu_num_bits=None, gpu_num_bits=None, expert_int4_calib=None, gguf_path=None, gguf_native=false, gpu_only=None))]
-    pub fn load(&mut self, model_dir: &str, group_size: Option<usize>, max_layers: Option<usize>, start_layer: Option<usize>, num_bits: Option<u8>, cpu_num_bits: Option<u8>, gpu_num_bits: Option<u8>, expert_int4_calib: Option<&str>, gguf_path: Option<&str>, gguf_native: bool, gpu_only: Option<bool>) -> PyResult<()> {
+    #[pyo3(signature = (model_dir, group_size=None, max_layers=None, start_layer=None, num_bits=None, cpu_num_bits=None, gpu_num_bits=None, expert_int4_calib=None, gguf_path=None, gguf_native=false, gpu_only=None, expert_hqq_diagnostic_cache_spec=None))]
+    pub fn load(
+        &mut self,
+        model_dir: &str,
+        group_size: Option<usize>,
+        max_layers: Option<usize>,
+        start_layer: Option<usize>,
+        num_bits: Option<u8>,
+        cpu_num_bits: Option<u8>,
+        gpu_num_bits: Option<u8>,
+        expert_int4_calib: Option<&str>,
+        gguf_path: Option<&str>,
+        gguf_native: bool,
+        gpu_only: Option<bool>,
+        expert_hqq_diagnostic_cache_spec: Option<&str>,
+    ) -> PyResult<()> {
         let cpu_bits = cpu_num_bits.or(num_bits).unwrap_or(4);
         let gpu_bits = gpu_num_bits.unwrap_or(4);
         let expert_int4_calib_mode = crate::weights::ExpertInt4CalibMode::from_config_value(
-            expert_int4_calib.unwrap_or("amax")
-        ).map_err(pyo3::exceptions::PyValueError::new_err)?;
+            expert_int4_calib.unwrap_or("amax"),
+        )
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
         if cpu_bits != 4 && cpu_bits != 8 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                format!("cpu_num_bits must be 4 or 8, got {cpu_bits}")
-            ));
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "cpu_num_bits must be 4 or 8, got {cpu_bits}"
+            )));
         }
         if gpu_bits != 4 && gpu_bits != 8 && gpu_bits != 16 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                format!("gpu_num_bits must be 4, 8, or 16 (BF16 validation), got {gpu_bits}")
-            ));
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "gpu_num_bits must be 4, 8, or 16 (BF16 validation), got {gpu_bits}"
+            )));
         }
         let bits = cpu_bits; // For backward-compat logging and memory estimation
         log::info!(
@@ -1757,11 +2052,13 @@ impl KrasisEngine {
                     } else if bits == 4 {
                         // INT4 packed: (h/8)*m*4 + (h/gs)*m*2 per gate/up, similar for down
                         (m * (h / 8.0) * 4.0 + m * (h / gs as f64) * 2.0) * 2.0
-                            + h * (m / 8.0) * 4.0 + h * (m / gs as f64) * 2.0
+                            + h * (m / 8.0) * 4.0
+                            + h * (m / gs as f64) * 2.0
                     } else {
                         // INT8: m*h + (h/gs)*m*2 per gate/up, similar for down
                         (m * h + m * (h / gs as f64) * 2.0) * 2.0
-                            + h * m + h * (m / gs as f64) * 2.0
+                            + h * m
+                            + h * (m / gs as f64) * 2.0
                     };
                     let total_gb = num_layers as f64 * n_exp * per_expert_bytes / 1e9;
 
@@ -1772,12 +2069,24 @@ impl KrasisEngine {
 
         // Load weights: either from GGUF (CPU experts) or from HF safetensors (both)
         let mut store = if let Some(gguf) = gguf_path {
-            log::info!("[DIAG-RUST] Loading CPU experts from GGUF: {} (native={})", gguf, gguf_native);
+            log::info!(
+                "[DIAG-RUST] Loading CPU experts from GGUF: {} (native={})",
+                gguf,
+                gguf_native
+            );
             crate::syscheck::log_memory_usage("[DIAG-RUST] before load_from_gguf");
             let s = WeightStore::load_from_gguf(
-                path, Path::new(gguf), gs, max_layers, start_layer, cpu_bits, gpu_bits,
-                expert_int4_calib_mode, gguf_native,
-            ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+                path,
+                Path::new(gguf),
+                gs,
+                max_layers,
+                start_layer,
+                cpu_bits,
+                gpu_bits,
+                expert_int4_calib_mode,
+                gguf_native,
+            )
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
             log::info!("[DIAG-RUST] WeightStore::load_from_gguf completed OK");
             crate::syscheck::log_memory_usage("[DIAG-RUST] after load_from_gguf");
             s
@@ -1795,11 +2104,47 @@ impl KrasisEngine {
                 expert_int4_calib_mode,
                 skip_cpu,
             )
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
             log::info!("[DIAG-RUST] WeightStore::load_from_hf completed OK");
             crate::syscheck::log_memory_usage("[DIAG-RUST] after load_from_hf");
             s
         };
+
+        if let Some(spec_path_raw) = expert_hqq_diagnostic_cache_spec {
+            let spec_path_raw = spec_path_raw.trim();
+            if spec_path_raw.is_empty() {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "expert_hqq_diagnostic_cache_spec must not be empty",
+                ));
+            }
+            let config_bytes = std::fs::read(&config_path).map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "Failed to read config.json for expert-HQQ diagnostic cache hash: {e}"
+                ))
+            })?;
+            let expert_hqq_config_hash =
+                crate::weights::expert_hqq::expert_hqq_config_hash(&config_bytes);
+            store
+                .register_expert_hqq_diagnostic_cache_from_spec_path(
+                    Path::new(spec_path_raw),
+                    expert_hqq_config_hash,
+                )
+                .map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "expert-HQQ diagnostic cache registration failed: {e}"
+                    ))
+                })?;
+            let tensor_records = store
+                .expert_hqq_cache
+                .as_ref()
+                .map(|cache| cache.tensors.len())
+                .unwrap_or(0);
+            log::info!(
+                "Registered expert-HQQ diagnostic cache from spec {} ({} tensor records)",
+                spec_path_raw,
+                tensor_records
+            );
+        }
 
         // Use the effective group_size from the loaded store (may differ for pre-quantized models)
         let effective_gs = store.group_size;
@@ -1811,21 +2156,29 @@ impl KrasisEngine {
         // Pre-allocate scratch pool for expert-level parallelism
         let top_k = store.config.num_experts_per_tok;
         let scratch_pool: Vec<ExpertScratch> = (0..top_k)
-            .map(|_| ExpertScratch::new(
-                store.config.hidden_size,
-                store.config.moe_intermediate_size,
-                effective_gs,
-            ))
+            .map(|_| {
+                ExpertScratch::new(
+                    store.config.hidden_size,
+                    store.config.moe_intermediate_size,
+                    effective_gs,
+                )
+            })
             .collect();
 
         // Shared expert scratch (different intermediate size)
         let shared_scratch = if store.config.n_shared_experts > 0 {
-            let shared_intermediate = store.config.n_shared_experts * store.config.moe_intermediate_size;
+            let shared_intermediate =
+                store.config.n_shared_experts * store.config.moe_intermediate_size;
             log::info!(
                 "Shared expert scratch: intermediate_size={}, routed_scaling_factor={}",
-                shared_intermediate, store.config.routed_scaling_factor,
+                shared_intermediate,
+                store.config.routed_scaling_factor,
             );
-            Some(ExpertScratch::new(store.config.hidden_size, shared_intermediate, effective_gs))
+            Some(ExpertScratch::new(
+                store.config.hidden_size,
+                shared_intermediate,
+                effective_gs,
+            ))
         } else {
             None
         };
@@ -1834,11 +2187,17 @@ impl KrasisEngine {
         let (gguf_scratch, gguf_scratch_pool, gguf_shared_scratch) = if store.has_gguf() {
             let gs = GgufScratch::new(store.config.hidden_size, store.config.moe_intermediate_size);
             let pool: Vec<GgufScratch> = (0..top_k)
-                .map(|_| GgufScratch::new(store.config.hidden_size, store.config.moe_intermediate_size))
+                .map(|_| {
+                    GgufScratch::new(store.config.hidden_size, store.config.moe_intermediate_size)
+                })
                 .collect();
             let shared = if store.config.n_shared_experts > 0 {
-                let shared_intermediate = store.config.n_shared_experts * store.config.moe_intermediate_size;
-                Some(GgufScratch::new(store.config.hidden_size, shared_intermediate))
+                let shared_intermediate =
+                    store.config.n_shared_experts * store.config.moe_intermediate_size;
+                Some(GgufScratch::new(
+                    store.config.hidden_size,
+                    shared_intermediate,
+                ))
             } else {
                 None
             };
@@ -1857,7 +2216,9 @@ impl KrasisEngine {
             let num_moe_layers = store.num_moe_layers();
             let num_experts = store.config.n_routed_experts;
             let map = crate::numa::NumaExpertMap::round_robin(
-                num_moe_layers, num_experts, topo.num_nodes,
+                num_moe_layers,
+                num_experts,
+                topo.num_nodes,
             );
             let migrated = if store.has_unified() {
                 store.migrate_numa_unified(&map)
@@ -1866,7 +2227,9 @@ impl KrasisEngine {
             };
             log::info!(
                 "NUMA: {} nodes, migrated {}/{} experts",
-                topo.num_nodes, migrated, num_moe_layers * num_experts,
+                topo.num_nodes,
+                migrated,
+                num_moe_layers * num_experts,
             );
             Some(map)
         } else {
@@ -1879,12 +2242,16 @@ impl KrasisEngine {
 
         // Repack expert weights to tiled layout (256-wide tiles for sequential memory access)
         {
-            use crate::kernel::avx2::{repack_tiled_int4_packed, repack_tiled_int8_packed, repack_tiled_scales};
+            use crate::kernel::avx2::{
+                repack_tiled_int4_packed, repack_tiled_int8_packed, repack_tiled_scales,
+            };
             let t0 = std::time::Instant::now();
             let mut n_experts = 0usize;
             for layer in store.experts_cpu.iter_mut() {
                 for expert in layer.iter_mut() {
-                    if expert.tiled { continue; }
+                    if expert.tiled {
+                        continue;
+                    }
                     let h = expert.hidden_size;
                     let m = expert.intermediate_size;
                     let gs = expert.group_size;
@@ -1908,7 +2275,11 @@ impl KrasisEngine {
                     n_experts += 1;
                 }
             }
-            log::info!("Repacked {} experts to tiled layout in {:.1}s", n_experts, t0.elapsed().as_secs_f64());
+            log::info!(
+                "Repacked {} experts to tiled layout in {:.1}s",
+                n_experts,
+                t0.elapsed().as_secs_f64()
+            );
         }
 
         // Wrap store in Arc for sharing with worker thread
@@ -1932,11 +2303,18 @@ impl KrasisEngine {
         let handle = std::thread::Builder::new()
             .name("krasis-moe-worker".to_string())
             .spawn(move || {
-                moe_worker(worker_store, work_rx, result_tx, worker_parallel, worker_numa, worker_skip_shared);
+                moe_worker(
+                    worker_store,
+                    work_rx,
+                    result_tx,
+                    worker_parallel,
+                    worker_numa,
+                    worker_skip_shared,
+                );
             })
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
-                format!("Failed to spawn worker: {e}")
-            ))?;
+            .map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to spawn worker: {e}"))
+            })?;
 
         log::info!("[DIAG-RUST] Async MoE worker thread started");
         crate::syscheck::log_memory_usage("[DIAG-RUST] after worker spawn");
@@ -1973,42 +2351,43 @@ impl KrasisEngine {
         expert_indices: Vec<usize>,
         expert_weights: Vec<f32>,
     ) -> PyResult<Bound<'py, PyBytes>> {
-        let store = self.store.as_ref()
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(
-                "Model not loaded — call load() first"))?;
+        let store = self.store.as_ref().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("Model not loaded — call load() first")
+        })?;
 
         let hidden_size = store.config.hidden_size;
 
         // Validate activation size
         if activation_bf16.len() != hidden_size * 2 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                format!("Expected {} bytes (hidden_size={} × 2), got {}",
-                    hidden_size * 2, hidden_size, activation_bf16.len())
-            ));
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Expected {} bytes (hidden_size={} × 2), got {}",
+                hidden_size * 2,
+                hidden_size,
+                activation_bf16.len()
+            )));
         }
 
         // Validate expert args
         if expert_indices.len() != expert_weights.len() {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                format!("expert_indices len ({}) != expert_weights len ({})",
-                    expert_indices.len(), expert_weights.len())
-            ));
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "expert_indices len ({}) != expert_weights len ({})",
+                expert_indices.len(),
+                expert_weights.len()
+            )));
         }
 
         // Reinterpret BF16 bytes as &[u16]
         let activation: &[u16] = unsafe {
-            std::slice::from_raw_parts(
-                activation_bf16.as_ptr() as *const u16,
-                hidden_size,
-            )
+            std::slice::from_raw_parts(activation_bf16.as_ptr() as *const u16, hidden_size)
         };
 
         let parallel = self.parallel;
 
         if store.has_gguf() {
             // Native GGUF path — no INT16 quantization needed
-            let gguf_scratch = self.gguf_scratch.as_mut()
-                .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("GGUF scratch not initialized"))?;
+            let gguf_scratch = self.gguf_scratch.as_mut().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("GGUF scratch not initialized")
+            })?;
 
             let gguf_shared_ref = if self.skip_shared_experts {
                 &mut None
@@ -2017,15 +2396,23 @@ impl KrasisEngine {
             };
 
             moe_forward_gguf(
-                store, moe_layer_idx, activation,
-                &expert_indices, &expert_weights,
-                &mut self.output_buf, gguf_scratch,
-                &mut self.gguf_scratch_pool, gguf_shared_ref,
-                parallel, self.numa_map.as_ref(),
+                store,
+                moe_layer_idx,
+                activation,
+                &expert_indices,
+                &expert_weights,
+                &mut self.output_buf,
+                gguf_scratch,
+                &mut self.gguf_scratch_pool,
+                gguf_shared_ref,
+                parallel,
+                self.numa_map.as_ref(),
             );
         } else {
             // INT16-quantized path (unified or legacy)
-            let scratch = self.scratch.as_mut()
+            let scratch = self
+                .scratch
+                .as_mut()
                 .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Model not loaded"))?;
 
             let shared_scratch_ref = if self.skip_shared_experts {
@@ -2036,19 +2423,32 @@ impl KrasisEngine {
 
             if store.has_unified() {
                 moe_forward_unified(
-                    store, moe_layer_idx, activation,
-                    &expert_indices, &expert_weights,
-                    &mut self.output_buf, scratch,
-                    &mut self.scratch_pool, shared_scratch_ref,
-                    parallel, self.numa_map.as_ref(), None,
+                    store,
+                    moe_layer_idx,
+                    activation,
+                    &expert_indices,
+                    &expert_weights,
+                    &mut self.output_buf,
+                    scratch,
+                    &mut self.scratch_pool,
+                    shared_scratch_ref,
+                    parallel,
+                    self.numa_map.as_ref(),
+                    None,
                 );
             } else {
                 moe_forward(
-                    store, moe_layer_idx, activation,
-                    &expert_indices, &expert_weights,
-                    &mut self.output_buf, scratch,
-                    &mut self.scratch_pool, shared_scratch_ref,
-                    parallel, self.numa_map.as_ref(),
+                    store,
+                    moe_layer_idx,
+                    activation,
+                    &expert_indices,
+                    &expert_weights,
+                    &mut self.output_buf,
+                    scratch,
+                    &mut self.scratch_pool,
+                    shared_scratch_ref,
+                    parallel,
+                    self.numa_map.as_ref(),
                 );
             }
         }
@@ -2065,42 +2465,54 @@ impl KrasisEngine {
 
     /// Number of MoE layers loaded.
     pub fn num_moe_layers(&self) -> PyResult<usize> {
-        let store = self.store.as_ref()
+        let store = self
+            .store
+            .as_ref()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Model not loaded"))?;
         Ok(store.num_moe_layers())
     }
 
     /// CPU expert quantization bit width (4 or 8).
     pub fn cpu_num_bits(&self) -> PyResult<u8> {
-        let store = self.store.as_ref()
+        let store = self
+            .store
+            .as_ref()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Model not loaded"))?;
         Ok(store.cpu_num_bits)
     }
 
     /// GPU expert quantization bit width (4 for Marlin).
     pub fn gpu_num_bits(&self) -> PyResult<u8> {
-        let store = self.store.as_ref()
+        let store = self
+            .store
+            .as_ref()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Model not loaded"))?;
         Ok(store.gpu_num_bits)
     }
 
     /// Hidden size of the model.
     pub fn hidden_size(&self) -> PyResult<usize> {
-        let store = self.store.as_ref()
+        let store = self
+            .store
+            .as_ref()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Model not loaded"))?;
         Ok(store.config.hidden_size)
     }
 
     /// Total number of routed experts per layer.
     pub fn num_experts(&self) -> PyResult<usize> {
-        let store = self.store.as_ref()
+        let store = self
+            .store
+            .as_ref()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Model not loaded"))?;
         Ok(store.config.n_routed_experts)
     }
 
     /// Number of experts selected per token (top-k).
     pub fn top_k(&self) -> PyResult<usize> {
-        let store = self.store.as_ref()
+        let store = self
+            .store
+            .as_ref()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Model not loaded"))?;
         Ok(store.config.num_experts_per_tok)
     }
@@ -2113,35 +2525,45 @@ impl KrasisEngine {
     /// Whether GPU-native Marlin weights are loaded.
     /// When true, GPU prefill can DMA copy weights directly — no repacking needed.
     pub fn is_marlin_format(&self) -> PyResult<bool> {
-        let store = self.store.as_ref()
+        let store = self
+            .store
+            .as_ref()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Model not loaded"))?;
         Ok(store.has_gpu_weights())
     }
 
     /// Whether unified weights are loaded.
     pub fn has_unified(&self) -> PyResult<bool> {
-        let store = self.store.as_ref()
+        let store = self
+            .store
+            .as_ref()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Model not loaded"))?;
         Ok(store.has_unified())
     }
 
     /// Whether native GGUF weights are loaded (for CPU decode).
     pub fn has_gguf(&self) -> PyResult<bool> {
-        let store = self.store.as_ref()
+        let store = self
+            .store
+            .as_ref()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Model not loaded"))?;
         Ok(store.has_gguf())
     }
 
     /// Group size used for quantization.
     pub fn group_size(&self) -> PyResult<usize> {
-        let store = self.store.as_ref()
+        let store = self
+            .store
+            .as_ref()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Model not loaded"))?;
         Ok(store.group_size)
     }
 
     /// Intermediate size (per expert).
     pub fn intermediate_size(&self) -> PyResult<usize> {
-        let store = self.store.as_ref()
+        let store = self
+            .store
+            .as_ref()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Model not loaded"))?;
         Ok(store.config.moe_intermediate_size)
     }
@@ -2149,7 +2571,9 @@ impl KrasisEngine {
     /// Padded hidden size for Marlin w2 (down_proj) kernel compatibility.
     /// Returns hidden_size if no padding needed, otherwise padded value.
     pub fn marlin_w2_padded_n(&self) -> PyResult<usize> {
-        let store = self.store.as_ref()
+        let store = self
+            .store
+            .as_ref()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Model not loaded"))?;
         Ok(crate::weights::marlin_w2_padded_n(
             store.config.hidden_size,
@@ -2164,14 +2588,20 @@ impl KrasisEngine {
     /// If start/end are None, returns all experts.
     #[pyo3(signature = (moe_layer_idx, start=None, end=None))]
     pub fn get_expert_w13_packed<'py>(
-        &self, py: Python<'py>, moe_layer_idx: usize,
-        start: Option<usize>, end: Option<usize>,
+        &self,
+        py: Python<'py>,
+        moe_layer_idx: usize,
+        start: Option<usize>,
+        end: Option<usize>,
     ) -> PyResult<Bound<'py, PyBytes>> {
-        let store = self.store.as_ref()
+        let store = self
+            .store
+            .as_ref()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Model not loaded"))?;
         if !store.has_gpu_weights() {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                "GPU weights not available"));
+                "GPU weights not available",
+            ));
         }
         let layer = &store.experts_gpu[moe_layer_idx];
         let s = start.unwrap_or(0);
@@ -2196,14 +2626,20 @@ impl KrasisEngine {
     /// Get w13 (gate+up) scales for a range of experts in a layer.
     #[pyo3(signature = (moe_layer_idx, start=None, end=None))]
     pub fn get_expert_w13_scales<'py>(
-        &self, py: Python<'py>, moe_layer_idx: usize,
-        start: Option<usize>, end: Option<usize>,
+        &self,
+        py: Python<'py>,
+        moe_layer_idx: usize,
+        start: Option<usize>,
+        end: Option<usize>,
     ) -> PyResult<Bound<'py, PyBytes>> {
-        let store = self.store.as_ref()
+        let store = self
+            .store
+            .as_ref()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Model not loaded"))?;
         if !store.has_gpu_weights() {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                "GPU weights not available"));
+                "GPU weights not available",
+            ));
         }
         let layer = &store.experts_gpu[moe_layer_idx];
         let s = start.unwrap_or(0);
@@ -2228,14 +2664,20 @@ impl KrasisEngine {
     /// Get w2 (down) packed INT4 data for a range of experts in a layer.
     #[pyo3(signature = (moe_layer_idx, start=None, end=None))]
     pub fn get_expert_w2_packed<'py>(
-        &self, py: Python<'py>, moe_layer_idx: usize,
-        start: Option<usize>, end: Option<usize>,
+        &self,
+        py: Python<'py>,
+        moe_layer_idx: usize,
+        start: Option<usize>,
+        end: Option<usize>,
     ) -> PyResult<Bound<'py, PyBytes>> {
-        let store = self.store.as_ref()
+        let store = self
+            .store
+            .as_ref()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Model not loaded"))?;
         if !store.has_gpu_weights() {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                "GPU weights not available"));
+                "GPU weights not available",
+            ));
         }
         let layer = &store.experts_gpu[moe_layer_idx];
         let s = start.unwrap_or(0);
@@ -2260,14 +2702,20 @@ impl KrasisEngine {
     /// Get w2 (down) scales for a range of experts in a layer.
     #[pyo3(signature = (moe_layer_idx, start=None, end=None))]
     pub fn get_expert_w2_scales<'py>(
-        &self, py: Python<'py>, moe_layer_idx: usize,
-        start: Option<usize>, end: Option<usize>,
+        &self,
+        py: Python<'py>,
+        moe_layer_idx: usize,
+        start: Option<usize>,
+        end: Option<usize>,
     ) -> PyResult<Bound<'py, PyBytes>> {
-        let store = self.store.as_ref()
+        let store = self
+            .store
+            .as_ref()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Model not loaded"))?;
         if !store.has_gpu_weights() {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                "GPU weights not available"));
+                "GPU weights not available",
+            ));
         }
         let layer = &store.experts_gpu[moe_layer_idx];
         let s = start.unwrap_or(0);
@@ -2303,15 +2751,20 @@ impl KrasisEngine {
     /// Returns: bytes containing [len(expert_ids), ...] contiguous data
     #[pyo3(signature = (moe_layer_idx, expert_ids, weight_type))]
     pub fn get_experts_batch<'py>(
-        &self, py: Python<'py>, moe_layer_idx: usize,
+        &self,
+        py: Python<'py>,
+        moe_layer_idx: usize,
         expert_ids: Vec<usize>,
         weight_type: &str,
     ) -> PyResult<Bound<'py, PyBytes>> {
-        let store = self.store.as_ref()
+        let store = self
+            .store
+            .as_ref()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Model not loaded"))?;
         if !store.has_gpu_weights() {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                "GPU weights not available"));
+                "GPU weights not available",
+            ));
         }
         let layer = &store.experts_gpu[moe_layer_idx];
         let count = expert_ids.len();
@@ -2393,13 +2846,24 @@ impl KrasisEngine {
     /// Saves 3 FFI round-trips vs calling get_experts_batch 4 times.
     #[pyo3(signature = (moe_layer_idx, expert_ids))]
     pub fn get_experts_all_batch<'py>(
-        &self, py: Python<'py>, moe_layer_idx: usize,
+        &self,
+        py: Python<'py>,
+        moe_layer_idx: usize,
         expert_ids: Vec<usize>,
-    ) -> PyResult<(Bound<'py, PyBytes>, Bound<'py, PyBytes>, Bound<'py, PyBytes>, Bound<'py, PyBytes>)> {
-        let store = self.store.as_ref()
+    ) -> PyResult<(
+        Bound<'py, PyBytes>,
+        Bound<'py, PyBytes>,
+        Bound<'py, PyBytes>,
+        Bound<'py, PyBytes>,
+    )> {
+        let store = self
+            .store
+            .as_ref()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Model not loaded"))?;
         if !store.has_gpu_weights() {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err("GPU weights not available"));
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "GPU weights not available",
+            ));
         }
         let layer = &store.experts_gpu[moe_layer_idx];
         let count = expert_ids.len();
@@ -2411,28 +2875,42 @@ impl KrasisEngine {
 
         let w13p = PyBytes::new_with(py, count * w13p_per, |buf| {
             for (i, &eid) in expert_ids.iter().enumerate() {
-                let src = unsafe { std::slice::from_raw_parts(layer[eid].w13_packed.as_ptr() as *const u8, w13p_per) };
+                let src = unsafe {
+                    std::slice::from_raw_parts(
+                        layer[eid].w13_packed.as_ptr() as *const u8,
+                        w13p_per,
+                    )
+                };
                 buf[i * w13p_per..(i + 1) * w13p_per].copy_from_slice(src);
             }
             Ok(())
         })?;
         let w13s = PyBytes::new_with(py, count * w13s_per, |buf| {
             for (i, &eid) in expert_ids.iter().enumerate() {
-                let src = unsafe { std::slice::from_raw_parts(layer[eid].w13_scales.as_ptr() as *const u8, w13s_per) };
+                let src = unsafe {
+                    std::slice::from_raw_parts(
+                        layer[eid].w13_scales.as_ptr() as *const u8,
+                        w13s_per,
+                    )
+                };
                 buf[i * w13s_per..(i + 1) * w13s_per].copy_from_slice(src);
             }
             Ok(())
         })?;
         let w2p = PyBytes::new_with(py, count * w2p_per, |buf| {
             for (i, &eid) in expert_ids.iter().enumerate() {
-                let src = unsafe { std::slice::from_raw_parts(layer[eid].w2_packed.as_ptr() as *const u8, w2p_per) };
+                let src = unsafe {
+                    std::slice::from_raw_parts(layer[eid].w2_packed.as_ptr() as *const u8, w2p_per)
+                };
                 buf[i * w2p_per..(i + 1) * w2p_per].copy_from_slice(src);
             }
             Ok(())
         })?;
         let w2s = PyBytes::new_with(py, count * w2s_per, |buf| {
             for (i, &eid) in expert_ids.iter().enumerate() {
-                let src = unsafe { std::slice::from_raw_parts(layer[eid].w2_scales.as_ptr() as *const u8, w2s_per) };
+                let src = unsafe {
+                    std::slice::from_raw_parts(layer[eid].w2_scales.as_ptr() as *const u8, w2s_per)
+                };
                 buf[i * w2s_per..(i + 1) * w2s_per].copy_from_slice(src);
             }
             Ok(())
@@ -2450,16 +2928,22 @@ impl KrasisEngine {
     /// Expected speedup: ~1430ms → ~100-150ms per layer (eliminates allocation overhead).
     #[pyo3(signature = (moe_layer_idx, w13p_buf, w13s_buf, w2p_buf, w2s_buf))]
     pub fn write_experts_all_into(
-        &self, py: Python<'_>, moe_layer_idx: usize,
+        &self,
+        py: Python<'_>,
+        moe_layer_idx: usize,
         w13p_buf: &Bound<'_, PyByteArray>,
         w13s_buf: &Bound<'_, PyByteArray>,
         w2p_buf: &Bound<'_, PyByteArray>,
         w2s_buf: &Bound<'_, PyByteArray>,
     ) -> PyResult<()> {
-        let store = self.store.as_ref()
+        let store = self
+            .store
+            .as_ref()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Model not loaded"))?;
         if !store.has_gpu_weights() {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err("GPU weights not available"));
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "GPU weights not available",
+            ));
         }
         let layer = &store.experts_gpu[moe_layer_idx];
         let num_experts = layer.len();
@@ -2476,20 +2960,32 @@ impl KrasisEngine {
 
         // Verify buffer sizes
         if w13p_buf.len() < w13p_total {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                format!("w13p_buf too small: {} < {}", w13p_buf.len(), w13p_total)));
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "w13p_buf too small: {} < {}",
+                w13p_buf.len(),
+                w13p_total
+            )));
         }
         if w13s_buf.len() < w13s_total {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                format!("w13s_buf too small: {} < {}", w13s_buf.len(), w13s_total)));
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "w13s_buf too small: {} < {}",
+                w13s_buf.len(),
+                w13s_total
+            )));
         }
         if w2p_buf.len() < w2p_total {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                format!("w2p_buf too small: {} < {}", w2p_buf.len(), w2p_total)));
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "w2p_buf too small: {} < {}",
+                w2p_buf.len(),
+                w2p_total
+            )));
         }
         if w2s_buf.len() < w2s_total {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                format!("w2s_buf too small: {} < {}", w2s_buf.len(), w2s_total)));
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "w2s_buf too small: {} < {}",
+                w2s_buf.len(),
+                w2s_total
+            )));
         }
 
         // Extract raw pointers as usize while GIL is held (usize is Send+Sync
@@ -2505,28 +3001,41 @@ impl KrasisEngine {
         };
 
         // Collect expert source pointers as usize (immutable store data)
-        let expert_srcs: Vec<_> = layer.iter().map(|e| {
-            (
-                e.w13_packed.as_ptr() as usize,
-                e.w13_scales.as_ptr() as usize,
-                e.w2_packed.as_ptr() as usize,
-                e.w2_scales.as_ptr() as usize,
-            )
-        }).collect();
+        let expert_srcs: Vec<_> = layer
+            .iter()
+            .map(|e| {
+                (
+                    e.w13_packed.as_ptr() as usize,
+                    e.w13_scales.as_ptr() as usize,
+                    e.w2_packed.as_ptr() as usize,
+                    e.w2_scales.as_ptr() as usize,
+                )
+            })
+            .collect();
 
         // Release GIL during the heavy memcpy loop
-        py.allow_threads(|| {
-            unsafe {
-                for (i, (w13p_src, w13s_src, w2p_src, w2s_src)) in expert_srcs.iter().enumerate() {
-                    std::ptr::copy_nonoverlapping(
-                        *w13p_src as *const u8, (w13p_dst as *mut u8).add(i * w13p_per), w13p_per);
-                    std::ptr::copy_nonoverlapping(
-                        *w13s_src as *const u8, (w13s_dst as *mut u8).add(i * w13s_per), w13s_per);
-                    std::ptr::copy_nonoverlapping(
-                        *w2p_src as *const u8, (w2p_dst as *mut u8).add(i * w2p_per), w2p_per);
-                    std::ptr::copy_nonoverlapping(
-                        *w2s_src as *const u8, (w2s_dst as *mut u8).add(i * w2s_per), w2s_per);
-                }
+        py.allow_threads(|| unsafe {
+            for (i, (w13p_src, w13s_src, w2p_src, w2s_src)) in expert_srcs.iter().enumerate() {
+                std::ptr::copy_nonoverlapping(
+                    *w13p_src as *const u8,
+                    (w13p_dst as *mut u8).add(i * w13p_per),
+                    w13p_per,
+                );
+                std::ptr::copy_nonoverlapping(
+                    *w13s_src as *const u8,
+                    (w13s_dst as *mut u8).add(i * w13s_per),
+                    w13s_per,
+                );
+                std::ptr::copy_nonoverlapping(
+                    *w2p_src as *const u8,
+                    (w2p_dst as *mut u8).add(i * w2p_per),
+                    w2p_per,
+                );
+                std::ptr::copy_nonoverlapping(
+                    *w2s_src as *const u8,
+                    (w2s_dst as *mut u8).add(i * w2s_per),
+                    w2s_per,
+                );
             }
         });
 
@@ -2537,22 +3046,33 @@ impl KrasisEngine {
     /// Used for parallel PCIe streaming in EP architecture where each GPU fetches a slice.
     #[pyo3(signature = (moe_layer_idx, start, end, w13p_buf, w13s_buf, w2p_buf, w2s_buf))]
     pub fn write_experts_range_into(
-        &self, py: Python<'_>, moe_layer_idx: usize,
-        start: usize, end: usize,
+        &self,
+        py: Python<'_>,
+        moe_layer_idx: usize,
+        start: usize,
+        end: usize,
         w13p_buf: &Bound<'_, PyByteArray>,
         w13s_buf: &Bound<'_, PyByteArray>,
         w2p_buf: &Bound<'_, PyByteArray>,
         w2s_buf: &Bound<'_, PyByteArray>,
     ) -> PyResult<()> {
-        let store = self.store.as_ref()
+        let store = self
+            .store
+            .as_ref()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Model not loaded"))?;
         if !store.has_gpu_weights() {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err("GPU weights not available"));
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "GPU weights not available",
+            ));
         }
         let layer = &store.experts_gpu[moe_layer_idx];
         if start >= end || end > layer.len() {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                format!("Invalid range [{}, {}), layer has {} experts", start, end, layer.len())));
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Invalid range [{}, {}), layer has {} experts",
+                start,
+                end,
+                layer.len()
+            )));
         }
         let num_to_write = end - start;
 
@@ -2568,16 +3088,24 @@ impl KrasisEngine {
 
         // Verify buffer sizes
         if w13p_buf.len() < w13p_total {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!("w13p_buf too small")));
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "w13p_buf too small"
+            )));
         }
         if w13s_buf.len() < w13s_total {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!("w13s_buf too small")));
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "w13s_buf too small"
+            )));
         }
         if w2p_buf.len() < w2p_total {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!("w2p_buf too small")));
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "w2p_buf too small"
+            )));
         }
         if w2s_buf.len() < w2s_total {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!("w2s_buf too small")));
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "w2s_buf too small"
+            )));
         }
 
         // Extract raw pointers as usize (Send+Sync for allow_threads)
@@ -2590,28 +3118,41 @@ impl KrasisEngine {
             )
         };
 
-        let expert_srcs: Vec<_> = layer[start..end].iter().map(|e| {
-            (
-                e.w13_packed.as_ptr() as usize,
-                e.w13_scales.as_ptr() as usize,
-                e.w2_packed.as_ptr() as usize,
-                e.w2_scales.as_ptr() as usize,
-            )
-        }).collect();
+        let expert_srcs: Vec<_> = layer[start..end]
+            .iter()
+            .map(|e| {
+                (
+                    e.w13_packed.as_ptr() as usize,
+                    e.w13_scales.as_ptr() as usize,
+                    e.w2_packed.as_ptr() as usize,
+                    e.w2_scales.as_ptr() as usize,
+                )
+            })
+            .collect();
 
         // Release GIL during the heavy memcpy loop
-        py.allow_threads(|| {
-            unsafe {
-                for (i, (w13p_src, w13s_src, w2p_src, w2s_src)) in expert_srcs.iter().enumerate() {
-                    std::ptr::copy_nonoverlapping(
-                        *w13p_src as *const u8, (w13p_dst as *mut u8).add(i * w13p_per), w13p_per);
-                    std::ptr::copy_nonoverlapping(
-                        *w13s_src as *const u8, (w13s_dst as *mut u8).add(i * w13s_per), w13s_per);
-                    std::ptr::copy_nonoverlapping(
-                        *w2p_src as *const u8, (w2p_dst as *mut u8).add(i * w2p_per), w2p_per);
-                    std::ptr::copy_nonoverlapping(
-                        *w2s_src as *const u8, (w2s_dst as *mut u8).add(i * w2s_per), w2s_per);
-                }
+        py.allow_threads(|| unsafe {
+            for (i, (w13p_src, w13s_src, w2p_src, w2s_src)) in expert_srcs.iter().enumerate() {
+                std::ptr::copy_nonoverlapping(
+                    *w13p_src as *const u8,
+                    (w13p_dst as *mut u8).add(i * w13p_per),
+                    w13p_per,
+                );
+                std::ptr::copy_nonoverlapping(
+                    *w13s_src as *const u8,
+                    (w13s_dst as *mut u8).add(i * w13s_per),
+                    w13s_per,
+                );
+                std::ptr::copy_nonoverlapping(
+                    *w2p_src as *const u8,
+                    (w2p_dst as *mut u8).add(i * w2p_per),
+                    w2p_per,
+                );
+                std::ptr::copy_nonoverlapping(
+                    *w2s_src as *const u8,
+                    (w2s_dst as *mut u8).add(i * w2s_per),
+                    w2s_per,
+                );
             }
         });
 
@@ -2623,22 +3164,37 @@ impl KrasisEngine {
     /// Releases the GIL during the memcpy so other threads can run in parallel.
     #[pyo3(signature = (moe_layer_idx, start, end, w13p_ptr, w13p_len, w13s_ptr, w13s_len, w2p_ptr, w2p_len, w2s_ptr, w2s_len))]
     pub fn write_experts_range_into_pinned(
-        &self, py: Python<'_>, moe_layer_idx: usize,
-        start: usize, end: usize,
-        w13p_ptr: usize, w13p_len: usize,
-        w13s_ptr: usize, w13s_len: usize,
-        w2p_ptr: usize, w2p_len: usize,
-        w2s_ptr: usize, w2s_len: usize,
+        &self,
+        py: Python<'_>,
+        moe_layer_idx: usize,
+        start: usize,
+        end: usize,
+        w13p_ptr: usize,
+        w13p_len: usize,
+        w13s_ptr: usize,
+        w13s_len: usize,
+        w2p_ptr: usize,
+        w2p_len: usize,
+        w2s_ptr: usize,
+        w2s_len: usize,
     ) -> PyResult<()> {
-        let store = self.store.as_ref()
+        let store = self
+            .store
+            .as_ref()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Model not loaded"))?;
         if !store.has_gpu_weights() {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err("GPU weights not available"));
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "GPU weights not available",
+            ));
         }
         let layer = &store.experts_gpu[moe_layer_idx];
         if start >= end || end > layer.len() {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                format!("Invalid range [{}, {}), layer has {} experts", start, end, layer.len())));
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Invalid range [{}, {}), layer has {} experts",
+                start,
+                end,
+                layer.len()
+            )));
         }
         let num_to_write = end - start;
 
@@ -2648,45 +3204,68 @@ impl KrasisEngine {
         let w2s_per = layer[0].w2_scales.len() * 2;
 
         if w13p_len < num_to_write * w13p_per {
-            return Err(pyo3::exceptions::PyValueError::new_err("w13p buffer too small"));
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "w13p buffer too small",
+            ));
         }
         if w13s_len < num_to_write * w13s_per {
-            return Err(pyo3::exceptions::PyValueError::new_err("w13s buffer too small"));
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "w13s buffer too small",
+            ));
         }
         if w2p_len < num_to_write * w2p_per {
-            return Err(pyo3::exceptions::PyValueError::new_err("w2p buffer too small"));
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "w2p buffer too small",
+            ));
         }
         if w2s_len < num_to_write * w2s_per {
-            return Err(pyo3::exceptions::PyValueError::new_err("w2s buffer too small"));
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "w2s buffer too small",
+            ));
         }
 
         // All pointers already usize (from function args) — Send+Sync safe
-        let expert_srcs: Vec<_> = layer[start..end].iter().map(|e| {
-            (
-                e.w13_packed.as_ptr() as usize,
-                e.w13_scales.as_ptr() as usize,
-                e.w2_packed.as_ptr() as usize,
-                e.w2_scales.as_ptr() as usize,
-            )
-        }).collect();
+        let expert_srcs: Vec<_> = layer[start..end]
+            .iter()
+            .map(|e| {
+                (
+                    e.w13_packed.as_ptr() as usize,
+                    e.w13_scales.as_ptr() as usize,
+                    e.w2_packed.as_ptr() as usize,
+                    e.w2_scales.as_ptr() as usize,
+                )
+            })
+            .collect();
 
         py.allow_threads(|| {
             use rayon::prelude::*;
             // Parallel memcpy: each expert writes to a unique offset in each buffer,
             // so there are no data races. Rayon spreads across NUMA nodes for
             // aggregate memory bandwidth >> single-core (~40 GB/s vs ~9 GB/s).
-            expert_srcs.par_iter().enumerate().for_each(|(i, (w13p_src, w13s_src, w2p_src, w2s_src))| {
-                unsafe {
+            expert_srcs.par_iter().enumerate().for_each(
+                |(i, (w13p_src, w13s_src, w2p_src, w2s_src))| unsafe {
                     std::ptr::copy_nonoverlapping(
-                        *w13p_src as *const u8, (w13p_ptr as *mut u8).add(i * w13p_per), w13p_per);
+                        *w13p_src as *const u8,
+                        (w13p_ptr as *mut u8).add(i * w13p_per),
+                        w13p_per,
+                    );
                     std::ptr::copy_nonoverlapping(
-                        *w13s_src as *const u8, (w13s_ptr as *mut u8).add(i * w13s_per), w13s_per);
+                        *w13s_src as *const u8,
+                        (w13s_ptr as *mut u8).add(i * w13s_per),
+                        w13s_per,
+                    );
                     std::ptr::copy_nonoverlapping(
-                        *w2p_src as *const u8, (w2p_ptr as *mut u8).add(i * w2p_per), w2p_per);
+                        *w2p_src as *const u8,
+                        (w2p_ptr as *mut u8).add(i * w2p_per),
+                        w2p_per,
+                    );
                     std::ptr::copy_nonoverlapping(
-                        *w2s_src as *const u8, (w2s_ptr as *mut u8).add(i * w2s_per), w2s_per);
-                }
-            });
+                        *w2s_src as *const u8,
+                        (w2s_ptr as *mut u8).add(i * w2s_per),
+                        w2s_per,
+                    );
+                },
+            );
         });
 
         Ok(())
@@ -2700,7 +3279,8 @@ impl KrasisEngine {
     ///   output_ptr: Raw pointer to result buffer [M, hidden_size]
     ///   num_elements: M * hidden_size
     pub fn reduce_sum_bf16(
-        &self, _py: Python<'_>,
+        &self,
+        _py: Python<'_>,
         input_ptrs: Vec<usize>,
         output_ptr: usize,
         num_elements: usize,
@@ -2709,14 +3289,12 @@ impl KrasisEngine {
             return Ok(());
         }
 
-        let output = unsafe {
-            std::slice::from_raw_parts_mut(output_ptr as *mut u16, num_elements)
-        };
+        let output =
+            unsafe { std::slice::from_raw_parts_mut(output_ptr as *mut u16, num_elements) };
 
         if input_ptrs.len() == 1 {
-            let input = unsafe {
-                std::slice::from_raw_parts(input_ptrs[0] as *const u16, num_elements)
-            };
+            let input =
+                unsafe { std::slice::from_raw_parts(input_ptrs[0] as *const u16, num_elements) };
             output.copy_from_slice(input);
             return Ok(());
         }
@@ -2750,7 +3328,7 @@ impl KrasisEngine {
                 // FP32 -> BF16
                 let mut results = [0.0f32; 8];
                 _mm256_storeu_ps(results.as_mut_ptr(), sum0);
-                
+
                 let cur_out_ptr = (out_ptr as *mut u16).add(offset);
                 for i in 0..8 {
                     *cur_out_ptr.add(i) = f32_to_bf16(results[i]);
@@ -2777,16 +3355,22 @@ impl KrasisEngine {
     /// Write shared expert weights for a layer into pre-allocated PyByteArray buffers.
     #[pyo3(signature = (moe_layer_idx, w13p_buf, w13s_buf, w2p_buf, w2s_buf))]
     pub fn write_shared_expert_into(
-        &self, py: Python<'_>, moe_layer_idx: usize,
+        &self,
+        py: Python<'_>,
+        moe_layer_idx: usize,
         w13p_buf: &Bound<'_, PyByteArray>,
         w13s_buf: &Bound<'_, PyByteArray>,
         w2p_buf: &Bound<'_, PyByteArray>,
         w2s_buf: &Bound<'_, PyByteArray>,
     ) -> PyResult<()> {
-        let store = self.store.as_ref()
+        let store = self
+            .store
+            .as_ref()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Model not loaded"))?;
         if store.shared_experts_gpu.is_empty() {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err("No shared experts"));
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "No shared experts",
+            ));
         }
         let expert = &store.shared_experts_gpu[moe_layer_idx];
 
@@ -2810,13 +3394,11 @@ impl KrasisEngine {
         let w2s_s = expert.w2_scales.as_ptr() as usize;
 
         // Release GIL during memcpy
-        py.allow_threads(|| {
-            unsafe {
-                std::ptr::copy_nonoverlapping(w13p_s as *const u8, w13p_d as *mut u8, w13p_bytes);
-                std::ptr::copy_nonoverlapping(w13s_s as *const u8, w13s_d as *mut u8, w13s_bytes);
-                std::ptr::copy_nonoverlapping(w2p_s as *const u8, w2p_d as *mut u8, w2p_bytes);
-                std::ptr::copy_nonoverlapping(w2s_s as *const u8, w2s_d as *mut u8, w2s_bytes);
-            }
+        py.allow_threads(|| unsafe {
+            std::ptr::copy_nonoverlapping(w13p_s as *const u8, w13p_d as *mut u8, w13p_bytes);
+            std::ptr::copy_nonoverlapping(w13s_s as *const u8, w13s_d as *mut u8, w13s_bytes);
+            std::ptr::copy_nonoverlapping(w2p_s as *const u8, w2p_d as *mut u8, w2p_bytes);
+            std::ptr::copy_nonoverlapping(w2s_s as *const u8, w2s_d as *mut u8, w2s_bytes);
         });
 
         Ok(())
@@ -2826,16 +3408,26 @@ impl KrasisEngine {
     /// Releases the GIL during memcpy for true parallel DMA.
     #[pyo3(signature = (moe_layer_idx, w13p_ptr, w13p_len, w13s_ptr, w13s_len, w2p_ptr, w2p_len, w2s_ptr, w2s_len))]
     pub fn write_shared_expert_into_pinned(
-        &self, py: Python<'_>, moe_layer_idx: usize,
-        w13p_ptr: usize, w13p_len: usize,
-        w13s_ptr: usize, w13s_len: usize,
-        w2p_ptr: usize, w2p_len: usize,
-        w2s_ptr: usize, w2s_len: usize,
+        &self,
+        py: Python<'_>,
+        moe_layer_idx: usize,
+        w13p_ptr: usize,
+        w13p_len: usize,
+        w13s_ptr: usize,
+        w13s_len: usize,
+        w2p_ptr: usize,
+        w2p_len: usize,
+        w2s_ptr: usize,
+        w2s_len: usize,
     ) -> PyResult<()> {
-        let store = self.store.as_ref()
+        let store = self
+            .store
+            .as_ref()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Model not loaded"))?;
         if store.shared_experts_gpu.is_empty() {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err("No shared experts"));
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "No shared experts",
+            ));
         }
         let expert = &store.shared_experts_gpu[moe_layer_idx];
 
@@ -2844,9 +3436,14 @@ impl KrasisEngine {
         let w2p_bytes = expert.w2_packed.len() * 4;
         let w2s_bytes = expert.w2_scales.len() * 2;
 
-        if w13p_len < w13p_bytes || w13s_len < w13s_bytes
-            || w2p_len < w2p_bytes || w2s_len < w2s_bytes {
-            return Err(pyo3::exceptions::PyValueError::new_err("Shared expert buffer too small"));
+        if w13p_len < w13p_bytes
+            || w13s_len < w13s_bytes
+            || w2p_len < w2p_bytes
+            || w2s_len < w2s_bytes
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "Shared expert buffer too small",
+            ));
         }
 
         // Use usize for all pointers (Send+Sync for allow_threads)
@@ -2855,13 +3452,11 @@ impl KrasisEngine {
         let w2p_s = expert.w2_packed.as_ptr() as usize;
         let w2s_s = expert.w2_scales.as_ptr() as usize;
 
-        py.allow_threads(|| {
-            unsafe {
-                std::ptr::copy_nonoverlapping(w13p_s as *const u8, w13p_ptr as *mut u8, w13p_bytes);
-                std::ptr::copy_nonoverlapping(w13s_s as *const u8, w13s_ptr as *mut u8, w13s_bytes);
-                std::ptr::copy_nonoverlapping(w2p_s as *const u8, w2p_ptr as *mut u8, w2p_bytes);
-                std::ptr::copy_nonoverlapping(w2s_s as *const u8, w2s_ptr as *mut u8, w2s_bytes);
-            }
+        py.allow_threads(|| unsafe {
+            std::ptr::copy_nonoverlapping(w13p_s as *const u8, w13p_ptr as *mut u8, w13p_bytes);
+            std::ptr::copy_nonoverlapping(w13s_s as *const u8, w13s_ptr as *mut u8, w13s_bytes);
+            std::ptr::copy_nonoverlapping(w2p_s as *const u8, w2p_ptr as *mut u8, w2p_bytes);
+            std::ptr::copy_nonoverlapping(w2s_s as *const u8, w2s_ptr as *mut u8, w2s_bytes);
         });
 
         Ok(())
@@ -2873,22 +3468,30 @@ impl KrasisEngine {
     /// These point directly into the LayerExpertBacking — zero-copy, already pinned by decode.
     /// Used by prefill to create torch tensor views without allocating duplicate pinned memory.
     pub fn get_layer_buffer_ptrs(
-        &self, moe_layer_idx: usize,
+        &self,
+        moe_layer_idx: usize,
     ) -> PyResult<(usize, usize, usize, usize, usize, usize, usize, usize)> {
-        let store = self.store.as_ref()
+        let store = self
+            .store
+            .as_ref()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Model not loaded"))?;
         if moe_layer_idx >= store.layer_backings_gpu.len() {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "MoE layer {} out of range (have {} layer backings)",
-                moe_layer_idx, store.layer_backings_gpu.len(),
+                moe_layer_idx,
+                store.layer_backings_gpu.len(),
             )));
         }
         let backing = &store.layer_backings_gpu[moe_layer_idx];
         Ok((
-            backing.w13_packed.as_ptr() as usize, backing.w13_packed.len(),
-            backing.w13_scales.as_ptr() as usize, backing.w13_scales.len(),
-            backing.w2_packed.as_ptr() as usize, backing.w2_packed.len(),
-            backing.w2_scales.as_ptr() as usize, backing.w2_scales.len(),
+            backing.w13_packed.as_ptr() as usize,
+            backing.w13_packed.len(),
+            backing.w13_scales.as_ptr() as usize,
+            backing.w13_scales.len(),
+            backing.w2_packed.as_ptr() as usize,
+            backing.w2_packed.len(),
+            backing.w2_scales.as_ptr() as usize,
+            backing.w2_scales.len(),
         ))
     }
 
@@ -2897,32 +3500,44 @@ impl KrasisEngine {
     /// Returns (w13p_ptr, w13p_len, w13s_ptr, w13s_len, w2p_ptr, w2p_len, w2s_ptr, w2s_len).
     /// Points directly into the shared expert's data (which has its own contiguous_backing).
     pub fn get_shared_expert_ptrs(
-        &self, moe_layer_idx: usize,
+        &self,
+        moe_layer_idx: usize,
     ) -> PyResult<(usize, usize, usize, usize, usize, usize, usize, usize)> {
-        let store = self.store.as_ref()
+        let store = self
+            .store
+            .as_ref()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Model not loaded"))?;
         if store.shared_experts_gpu.is_empty() {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err("No shared experts"));
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "No shared experts",
+            ));
         }
         if moe_layer_idx >= store.shared_experts_gpu.len() {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "Shared expert layer {} out of range (have {})",
-                moe_layer_idx, store.shared_experts_gpu.len(),
+                moe_layer_idx,
+                store.shared_experts_gpu.len(),
             )));
         }
         let expert = &store.shared_experts_gpu[moe_layer_idx];
         Ok((
-            expert.w13_packed.as_ptr() as usize, expert.w13_packed.len() * 4,
-            expert.w13_scales.as_ptr() as usize, expert.w13_scales.len() * 2,
-            expert.w2_packed.as_ptr() as usize, expert.w2_packed.len() * 4,
-            expert.w2_scales.as_ptr() as usize, expert.w2_scales.len() * 2,
+            expert.w13_packed.as_ptr() as usize,
+            expert.w13_packed.len() * 4,
+            expert.w13_scales.as_ptr() as usize,
+            expert.w13_scales.len() * 2,
+            expert.w2_packed.as_ptr() as usize,
+            expert.w2_packed.len() * 4,
+            expert.w2_scales.as_ptr() as usize,
+            expert.w2_scales.len() * 2,
         ))
     }
 
     /// Check whether per-layer expert backings are available.
     /// Returns true if layer_backings_gpu is populated (i.e. experts use per-layer storage).
     pub fn has_layer_backings(&self) -> PyResult<bool> {
-        let store = self.store.as_ref()
+        let store = self
+            .store
+            .as_ref()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Model not loaded"))?;
         Ok(!store.layer_backings_gpu.is_empty())
     }
@@ -2930,12 +3545,23 @@ impl KrasisEngine {
     /// Get shared expert w13 packed + scales + w2 packed + scales for a layer.
     /// Returns (w13_packed, w13_scales, w2_packed, w2_scales) bytes.
     pub fn get_shared_expert_weights<'py>(
-        &self, py: Python<'py>, moe_layer_idx: usize,
-    ) -> PyResult<(Bound<'py, PyBytes>, Bound<'py, PyBytes>, Bound<'py, PyBytes>, Bound<'py, PyBytes>)> {
-        let store = self.store.as_ref()
+        &self,
+        py: Python<'py>,
+        moe_layer_idx: usize,
+    ) -> PyResult<(
+        Bound<'py, PyBytes>,
+        Bound<'py, PyBytes>,
+        Bound<'py, PyBytes>,
+        Bound<'py, PyBytes>,
+    )> {
+        let store = self
+            .store
+            .as_ref()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Model not loaded"))?;
         if store.shared_experts_gpu.is_empty() {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err("No shared experts"));
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "No shared experts",
+            ));
         }
         let expert = &store.shared_experts_gpu[moe_layer_idx];
         let w13p = PyBytes::new(py, unsafe {
@@ -2986,21 +3612,23 @@ impl KrasisEngine {
         topk_weights_f32: &[u8],
         batch_size: usize,
     ) -> PyResult<()> {
-        let store = self.store.as_ref()
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(
-                "Model not loaded — call load() first"))?;
-        let work_tx = self.work_tx.as_ref()
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(
-                "Worker not started"))?;
+        let store = self.store.as_ref().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("Model not loaded — call load() first")
+        })?;
+        let work_tx = self
+            .work_tx
+            .as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Worker not started"))?;
 
         let hidden = store.config.hidden_size;
 
         // Validate input sizes
         let expected_act = batch_size * hidden * 2;
         if activation_bf16.len() != expected_act {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                format!("Expected {expected_act} activation bytes, got {}", activation_bf16.len())
-            ));
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Expected {expected_act} activation bytes, got {}",
+                activation_bf16.len()
+            )));
         }
         if topk_ids_i32.len() % 4 != 0 || topk_weights_f32.len() % 4 != 0 {
             return Err(pyo3::exceptions::PyValueError::new_err(
@@ -3010,16 +3638,10 @@ impl KrasisEngine {
 
         // Reinterpret bytes to typed slices (safe: x86_64 is little-endian)
         let activations: &[u16] = unsafe {
-            std::slice::from_raw_parts(
-                activation_bf16.as_ptr() as *const u16,
-                batch_size * hidden,
-            )
+            std::slice::from_raw_parts(activation_bf16.as_ptr() as *const u16, batch_size * hidden)
         };
         let topk_ids: &[i32] = unsafe {
-            std::slice::from_raw_parts(
-                topk_ids_i32.as_ptr() as *const i32,
-                topk_ids_i32.len() / 4,
-            )
+            std::slice::from_raw_parts(topk_ids_i32.as_ptr() as *const i32, topk_ids_i32.len() / 4)
         };
         let topk_weights: &[f32] = unsafe {
             std::slice::from_raw_parts(
@@ -3029,16 +3651,17 @@ impl KrasisEngine {
         };
 
         if topk_ids.len() != topk_weights.len() {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                format!("topk_ids ({}) and topk_weights ({}) count mismatch",
-                    topk_ids.len(), topk_weights.len())
-            ));
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "topk_ids ({}) and topk_weights ({}) count mismatch",
+                topk_ids.len(),
+                topk_weights.len()
+            )));
         }
         if batch_size == 0 || topk_ids.len() % batch_size != 0 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                format!("topk_ids len ({}) not divisible by batch_size ({batch_size})",
-                    topk_ids.len())
-            ));
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "topk_ids len ({}) not divisible by batch_size ({batch_size})",
+                topk_ids.len()
+            )));
         }
 
         let topk = topk_ids.len() / batch_size;
@@ -3052,7 +3675,8 @@ impl KrasisEngine {
             topk,
         };
 
-        work_tx.send(work)
+        work_tx
+            .send(work)
             .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Worker thread died"))?;
 
         Ok(())
@@ -3064,23 +3688,23 @@ impl KrasisEngine {
     ///
     /// Returns: BF16 output as bytes [batch_size × hidden_size × 2]
     pub fn sync_forward<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
-        let rx_mutex = self.result_rx.as_ref()
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(
-                "Worker not started"))?;
+        let rx_mutex = self
+            .result_rx
+            .as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Worker not started"))?;
 
-        let rx = rx_mutex.lock()
+        let rx = rx_mutex
+            .lock()
             .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Worker mutex poisoned"))?;
 
-        let output_bf16 = rx.recv()
+        let output_bf16 = rx
+            .recv()
             .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Worker thread died"))?;
 
         drop(rx); // release mutex before creating PyBytes
 
         let output_bytes: &[u8] = unsafe {
-            std::slice::from_raw_parts(
-                output_bf16.as_ptr() as *const u8,
-                output_bf16.len() * 2,
-            )
+            std::slice::from_raw_parts(output_bf16.as_ptr() as *const u8, output_bf16.len() * 2)
         };
 
         Ok(PyBytes::new(py, output_bytes))
@@ -3101,16 +3725,16 @@ impl KrasisEngine {
         &mut self,
         _py: Python<'_>,
         moe_layer_idx: usize,
-        activation_ptr: usize,  // *const u16, BF16 [batch_size, hidden]
-        topk_ids_ptr: usize,    // *const i32, [batch_size, topk]
+        activation_ptr: usize,   // *const u16, BF16 [batch_size, hidden]
+        topk_ids_ptr: usize,     // *const i32, [batch_size, topk]
         topk_weights_ptr: usize, // *const f32, [batch_size, topk]
-        output_ptr: usize,      // *mut u16, BF16 [batch_size, hidden]
+        output_ptr: usize,       // *mut u16, BF16 [batch_size, hidden]
         batch_size: usize,
         topk: usize,
     ) -> PyResult<()> {
-        let store = self.store.as_ref()
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(
-                "Model not loaded — call load() first"))?;
+        let store = self.store.as_ref().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("Model not loaded — call load() first")
+        })?;
 
         let hidden = store.config.hidden_size;
         let use_gguf = store.has_gguf();
@@ -3119,24 +3743,22 @@ impl KrasisEngine {
         let activations: &[u16] = unsafe {
             std::slice::from_raw_parts(activation_ptr as *const u16, batch_size * hidden)
         };
-        let topk_ids: &[i32] = unsafe {
-            std::slice::from_raw_parts(topk_ids_ptr as *const i32, batch_size * topk)
-        };
+        let topk_ids: &[i32] =
+            unsafe { std::slice::from_raw_parts(topk_ids_ptr as *const i32, batch_size * topk) };
         let topk_weights: &[f32] = unsafe {
             std::slice::from_raw_parts(topk_weights_ptr as *const f32, batch_size * topk)
         };
-        let output_bf16: &mut [u16] = unsafe {
-            std::slice::from_raw_parts_mut(output_ptr as *mut u16, batch_size * hidden)
-        };
+        let output_bf16: &mut [u16] =
+            unsafe { std::slice::from_raw_parts_mut(output_ptr as *mut u16, batch_size * hidden) };
 
         // Zero output
         output_bf16.fill(0);
 
         // Get mutable refs to scratch buffers on self
         let output_f32 = &mut self.output_buf;
-        let scratch = self.scratch.as_mut()
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(
-                "Scratch buffer not initialized"))?;
+        let scratch = self.scratch.as_mut().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("Scratch buffer not initialized")
+        })?;
         let scratch_pool = &mut self.scratch_pool;
         let shared_scratch = &mut self.shared_scratch;
         let mut gguf_scratch = self.gguf_scratch.as_mut();
@@ -3154,7 +3776,12 @@ impl KrasisEngine {
             // Filter masked experts (id == -1 means GPU-handled)
             // Stack arrays avoid Vec allocation overhead (~1-2μs per layer)
             const MAX_TOPK: usize = 32;
-            assert!(topk <= MAX_TOPK, "topk {} exceeds MAX_TOPK {}", topk, MAX_TOPK);
+            assert!(
+                topk <= MAX_TOPK,
+                "topk {} exceeds MAX_TOPK {}",
+                topk,
+                MAX_TOPK
+            );
             let mut expert_indices = [0usize; MAX_TOPK];
             let mut expert_weights = [0.0f32; MAX_TOPK];
             let mut n_experts = 0;
@@ -3176,28 +3803,47 @@ impl KrasisEngine {
             if use_gguf {
                 if let Some(ref mut gs) = gguf_scratch {
                     moe_forward_gguf(
-                        store, moe_layer_idx, act,
-                        ei, ew,
-                        output_f32, gs, gguf_scratch_pool,
+                        store,
+                        moe_layer_idx,
+                        act,
+                        ei,
+                        ew,
+                        output_f32,
+                        gs,
+                        gguf_scratch_pool,
                         gguf_shared_scratch,
-                        parallel, numa_map,
+                        parallel,
+                        numa_map,
                     );
                 }
             } else if store.has_unified() {
                 moe_forward_unified(
-                    store, moe_layer_idx, act,
-                    ei, ew,
-                    output_f32, scratch, scratch_pool,
+                    store,
+                    moe_layer_idx,
+                    act,
+                    ei,
+                    ew,
+                    output_f32,
+                    scratch,
+                    scratch_pool,
                     shared_scratch,
-                    parallel, numa_map, None,
+                    parallel,
+                    numa_map,
+                    None,
                 );
             } else {
                 moe_forward(
-                    store, moe_layer_idx, act,
-                    ei, ew,
-                    output_f32, scratch, scratch_pool,
+                    store,
+                    moe_layer_idx,
+                    act,
+                    ei,
+                    ew,
+                    output_f32,
+                    scratch,
+                    scratch_pool,
                     shared_scratch,
-                    parallel, numa_map,
+                    parallel,
+                    numa_map,
                 );
             }
 
@@ -3235,7 +3881,11 @@ impl KrasisEngine {
         self.routing_scores = vec![0.0f32; n_experts];
         log::info!(
             "Routing config set: scoring={}, norm_topk={}, topk={}, n_experts={}, hidden={}",
-            scoring_func, norm_topk_prob, topk, n_experts, hidden_size,
+            scoring_func,
+            norm_topk_prob,
+            topk,
+            n_experts,
+            hidden_size,
         );
         Ok(())
     }
@@ -3251,15 +3901,17 @@ impl KrasisEngine {
         gate_weight_bf16: &[u8],
         correction_bias_f32: Option<&[u8]>,
     ) -> PyResult<()> {
-        let rcfg = self.routing_config.as_ref()
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(
-                "Call set_routing_config first"))?;
+        let rcfg = self.routing_config.as_ref().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("Call set_routing_config first")
+        })?;
 
         let expected = rcfg.n_experts * rcfg.hidden_size * 2;
         if gate_weight_bf16.len() != expected {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                format!("Expected {} gate bytes, got {}", expected, gate_weight_bf16.len())
-            ));
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Expected {} gate bytes, got {}",
+                expected,
+                gate_weight_bf16.len()
+            )));
         }
 
         let gate: &[u16] = unsafe {
@@ -3272,15 +3924,14 @@ impl KrasisEngine {
         let bias = if let Some(bias_bytes) = correction_bias_f32 {
             let expected_bias = rcfg.n_experts * 4;
             if bias_bytes.len() != expected_bias {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    format!("Expected {} bias bytes, got {}", expected_bias, bias_bytes.len())
-                ));
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "Expected {} bias bytes, got {}",
+                    expected_bias,
+                    bias_bytes.len()
+                )));
             }
             let b: &[f32] = unsafe {
-                std::slice::from_raw_parts(
-                    bias_bytes.as_ptr() as *const f32,
-                    rcfg.n_experts,
-                )
+                std::slice::from_raw_parts(bias_bytes.as_ptr() as *const f32, rcfg.n_experts)
             };
             Some(b.to_vec())
         } else {
@@ -3288,9 +3939,11 @@ impl KrasisEngine {
         };
 
         if moe_layer_idx >= self.layer_routing.len() {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                format!("moe_layer_idx {} >= num_moe_layers {}", moe_layer_idx, self.layer_routing.len())
-            ));
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "moe_layer_idx {} >= num_moe_layers {}",
+                moe_layer_idx,
+                self.layer_routing.len()
+            )));
         }
 
         self.layer_routing[moe_layer_idx] = Some(LayerRouting {
@@ -3308,32 +3961,38 @@ impl KrasisEngine {
         &mut self,
         _py: Python<'_>,
         moe_layer_idx: usize,
-        activation_ptr: usize,  // *const u16, BF16 [1, hidden]
-        output_ptr: usize,      // *mut u16, BF16 [1, hidden]
+        activation_ptr: usize, // *const u16, BF16 [1, hidden]
+        output_ptr: usize,     // *mut u16, BF16 [1, hidden]
     ) -> PyResult<()> {
-        let store = self.store.as_ref()
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(
-                "Model not loaded"))?;
-        let rcfg = self.routing_config.as_ref()
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(
-                "Routing config not set"))?
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Model not loaded"))?;
+        let rcfg = self
+            .routing_config
+            .as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Routing config not set"))?
             .clone();
 
-        let routing = self.layer_routing.get(moe_layer_idx)
+        let routing = self
+            .layer_routing
+            .get(moe_layer_idx)
             .and_then(|r| r.as_ref())
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(
-                format!("Routing weights not set for layer {}", moe_layer_idx)))?;
+            .ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "Routing weights not set for layer {}",
+                    moe_layer_idx
+                ))
+            })?;
 
         let hidden = rcfg.hidden_size;
         let n_experts = rcfg.n_experts;
         let topk = rcfg.topk;
 
-        let activation: &[u16] = unsafe {
-            std::slice::from_raw_parts(activation_ptr as *const u16, hidden)
-        };
-        let output_bf16: &mut [u16] = unsafe {
-            std::slice::from_raw_parts_mut(output_ptr as *mut u16, hidden)
-        };
+        let activation: &[u16] =
+            unsafe { std::slice::from_raw_parts(activation_ptr as *const u16, hidden) };
+        let output_bf16: &mut [u16] =
+            unsafe { std::slice::from_raw_parts_mut(output_ptr as *mut u16, hidden) };
 
         // ── Gate matmul: [1, hidden] × [n_experts, hidden]^T → [n_experts] ──
         // Convert activation BF16 → F32
@@ -3400,9 +4059,9 @@ impl KrasisEngine {
             // ── MoE forward (inline, same as standard path below) ──
             output_bf16.fill(0);
             let output_f32 = &mut self.output_buf;
-            let scratch = self.scratch.as_mut()
-                .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(
-                    "Scratch not initialized"))?;
+            let scratch = self.scratch.as_mut().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("Scratch not initialized")
+            })?;
             let scratch_pool = &mut self.scratch_pool;
             let shared_scratch = &mut self.shared_scratch;
             let use_gguf = store.has_gguf();
@@ -3413,28 +4072,47 @@ impl KrasisEngine {
             if use_gguf {
                 if let Some(ref mut gs) = self.gguf_scratch {
                     moe_forward_gguf(
-                        store, moe_layer_idx, activation,
-                        &top_indices, &top_weights,
-                        output_f32, gs, &mut self.gguf_scratch_pool,
+                        store,
+                        moe_layer_idx,
+                        activation,
+                        &top_indices,
+                        &top_weights,
+                        output_f32,
+                        gs,
+                        &mut self.gguf_scratch_pool,
                         &mut self.gguf_shared_scratch,
-                        parallel, numa_map,
+                        parallel,
+                        numa_map,
                     );
                 }
             } else if store.has_unified() {
                 moe_forward_unified(
-                    store, moe_layer_idx, activation,
-                    &top_indices, &top_weights,
-                    output_f32, scratch, scratch_pool,
+                    store,
+                    moe_layer_idx,
+                    activation,
+                    &top_indices,
+                    &top_weights,
+                    output_f32,
+                    scratch,
+                    scratch_pool,
                     shared_scratch,
-                    parallel, numa_map, None,
+                    parallel,
+                    numa_map,
+                    None,
                 );
             } else {
                 moe_forward(
-                    store, moe_layer_idx, activation,
-                    &top_indices, &top_weights,
-                    output_f32, scratch, scratch_pool,
+                    store,
+                    moe_layer_idx,
+                    activation,
+                    &top_indices,
+                    &top_weights,
+                    output_f32,
+                    scratch,
+                    scratch_pool,
                     shared_scratch,
-                    parallel, numa_map,
+                    parallel,
+                    numa_map,
                 );
             }
 
@@ -3452,7 +4130,10 @@ impl KrasisEngine {
             }
         } else {
             // Softmax
-            let max_val = logits[..n_experts].iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let max_val = logits[..n_experts]
+                .iter()
+                .cloned()
+                .fold(f32::NEG_INFINITY, f32::max);
             let mut sum_exp = 0.0f32;
             for e in 0..n_experts {
                 scores[e] = (logits[e] - max_val).exp();
@@ -3505,9 +4186,10 @@ impl KrasisEngine {
         // ── MoE forward ──
         output_bf16.fill(0);
         let output_f32 = &mut self.output_buf;
-        let scratch = self.scratch.as_mut()
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(
-                "Scratch not initialized"))?;
+        let scratch = self
+            .scratch
+            .as_mut()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Scratch not initialized"))?;
         let scratch_pool = &mut self.scratch_pool;
         let shared_scratch = &mut self.shared_scratch;
         let use_gguf = store.has_gguf();
@@ -3518,28 +4200,47 @@ impl KrasisEngine {
         if use_gguf {
             if let Some(ref mut gs) = self.gguf_scratch {
                 moe_forward_gguf(
-                    store, moe_layer_idx, activation,
-                    &top_indices, &top_weights,
-                    output_f32, gs, &mut self.gguf_scratch_pool,
+                    store,
+                    moe_layer_idx,
+                    activation,
+                    &top_indices,
+                    &top_weights,
+                    output_f32,
+                    gs,
+                    &mut self.gguf_scratch_pool,
                     &mut self.gguf_shared_scratch,
-                    parallel, numa_map,
+                    parallel,
+                    numa_map,
                 );
             }
         } else if store.has_unified() {
             moe_forward_unified(
-                store, moe_layer_idx, activation,
-                &top_indices, &top_weights,
-                output_f32, scratch, scratch_pool,
+                store,
+                moe_layer_idx,
+                activation,
+                &top_indices,
+                &top_weights,
+                output_f32,
+                scratch,
+                scratch_pool,
                 shared_scratch,
-                parallel, numa_map, None,
+                parallel,
+                numa_map,
+                None,
             );
         } else {
             moe_forward(
-                store, moe_layer_idx, activation,
-                &top_indices, &top_weights,
-                output_f32, scratch, scratch_pool,
+                store,
+                moe_layer_idx,
+                activation,
+                &top_indices,
+                &top_weights,
+                output_f32,
+                scratch,
+                scratch_pool,
                 shared_scratch,
-                parallel, numa_map,
+                parallel,
+                numa_map,
             );
         }
 
@@ -3603,7 +4304,9 @@ mod tests {
         let mut sum_sq: f64 = 0.0;
         let mut nonzero = 0;
         for &v in &scratch.expert_out {
-            if v != 0.0 { nonzero += 1; }
+            if v != 0.0 {
+                nonzero += 1;
+            }
             sum_sq += (v as f64).powi(2);
         }
         let rms = (sum_sq / scratch.expert_out.len() as f64).sqrt();
@@ -3658,7 +4361,15 @@ mod tests {
 
         // Run transposed kernel (CPU decode path)
         let mut scratch_transposed = ExpertScratch::new(hidden, intermediate, group_size);
-        expert_forward_unified(&transposed, &act_int16, &act_scales, &mut scratch_transposed, false, 0.0, 0.0);
+        expert_forward_unified(
+            &transposed,
+            &act_int16,
+            &act_scales,
+            &mut scratch_transposed,
+            false,
+            0.0,
+            0.0,
+        );
 
         // Compare outputs
         let mut max_diff: f32 = 0.0;
@@ -3672,13 +4383,14 @@ mod tests {
             max_rel_err = max_rel_err.max((diff / denom) as f64);
         }
 
-        eprintln!(
-            "Transposed vs integer: max_diff={max_diff:.6}, max_rel_err={max_rel_err:.6}"
-        );
+        eprintln!("Transposed vs integer: max_diff={max_diff:.6}, max_rel_err={max_rel_err:.6}");
         // Different kernel implementations (transposed vs non-transposed integer),
         // same quantized data — should be very close.
         assert!(max_diff < 0.01, "Max diff too large: {max_diff}");
-        assert!(max_rel_err < 0.01, "Max relative error too large: {max_rel_err}");
+        assert!(
+            max_rel_err < 0.01,
+            "Max relative error too large: {max_rel_err}"
+        );
     }
 
     #[test]
@@ -3722,7 +4434,15 @@ mod tests {
 
         // Run Marlin forward
         let mut scratch = ExpertScratch::new(hidden, intermediate, group_size);
-        expert_forward_unified(&marlin, &act_int16, &act_scales, &mut scratch, false, 0.0, 0.0);
+        expert_forward_unified(
+            &marlin,
+            &act_int16,
+            &act_scales,
+            &mut scratch,
+            false,
+            0.0,
+            0.0,
+        );
 
         // Verify output is non-trivial
         let mut rms: f64 = 0.0;
@@ -3747,8 +4467,17 @@ mod tests {
         }
 
         // Load just enough to test one expert
-        let store = WeightStore::load_from_hf(model_dir, DEFAULT_GROUP_SIZE, None, None, 4, 4, crate::weights::ExpertInt4CalibMode::Amax, false)
-            .expect("Failed to load");
+        let store = WeightStore::load_from_hf(
+            model_dir,
+            DEFAULT_GROUP_SIZE,
+            None,
+            None,
+            4,
+            4,
+            crate::weights::ExpertInt4CalibMode::Amax,
+            false,
+        )
+        .expect("Failed to load");
 
         let hidden = store.config.hidden_size;
         let intermediate = store.config.moe_intermediate_size;
@@ -3765,20 +4494,44 @@ mod tests {
         // Quantize activation to INT16 for unified kernel
         let mut act_int16 = vec![0i16; hidden];
         let mut act_scales = vec![0.0f32; hidden / group_size];
-        crate::kernel::avx2::quantize_activation_int16(&activation_bf16, group_size, &mut act_int16, &mut act_scales);
+        crate::kernel::avx2::quantize_activation_int16(
+            &activation_bf16,
+            group_size,
+            &mut act_int16,
+            &mut act_scales,
+        );
 
-        assert!(store.has_unified(), "Store should have unified format after load");
+        assert!(
+            store.has_unified(),
+            "Store should have unified format after load"
+        );
         let expert = store.get_expert_unified(0, 0);
 
         // Test single expert forward (serial)
         let start = std::time::Instant::now();
-        expert_forward_unified(expert, &act_int16, &act_scales, &mut scratch, false, 0.0, 0.0);
+        expert_forward_unified(
+            expert,
+            &act_int16,
+            &act_scales,
+            &mut scratch,
+            false,
+            0.0,
+            0.0,
+        );
         let serial_us = start.elapsed().as_micros();
         let output_serial: Vec<f32> = scratch.expert_out.clone();
 
         // Test single expert forward (parallel)
         let start = std::time::Instant::now();
-        expert_forward_unified(expert, &act_int16, &act_scales, &mut scratch, true, 0.0, 0.0);
+        expert_forward_unified(
+            expert,
+            &act_int16,
+            &act_scales,
+            &mut scratch,
+            true,
+            0.0,
+            0.0,
+        );
         let parallel_us = start.elapsed().as_micros();
         let output_parallel: Vec<f32> = scratch.expert_out.clone();
 
@@ -3796,7 +4549,10 @@ mod tests {
 
         eprintln!("V2-Lite expert 0 forward (unified):");
         eprintln!("  Serial:   {serial_us} μs");
-        eprintln!("  Parallel: {parallel_us} μs ({:.1}x speedup)", serial_us as f64 / parallel_us as f64);
+        eprintln!(
+            "  Parallel: {parallel_us} μs ({:.1}x speedup)",
+            serial_us as f64 / parallel_us as f64
+        );
         eprintln!("  Output RMS: {rms:.6}, serial vs parallel max_diff: {max_diff:.8}");
 
         assert!(rms > 1e-4, "Output too small");
@@ -3810,8 +4566,17 @@ mod tests {
             return;
         }
 
-        let store = WeightStore::load_from_hf(model_dir, DEFAULT_GROUP_SIZE, None, None, 4, 4, crate::weights::ExpertInt4CalibMode::Amax, false)
-            .expect("Failed to load");
+        let store = WeightStore::load_from_hf(
+            model_dir,
+            DEFAULT_GROUP_SIZE,
+            None,
+            None,
+            4,
+            4,
+            crate::weights::ExpertInt4CalibMode::Amax,
+            false,
+        )
+        .expect("Failed to load");
 
         let hidden = store.config.hidden_size;
         let intermediate = store.config.moe_intermediate_size;
@@ -3834,7 +4599,8 @@ mod tests {
         let expert_weights: Vec<f32> = vec![1.0 / top_k as f32; top_k];
 
         // Shared expert scratch for V2-Lite (2 shared experts)
-        let shared_intermediate = store.config.n_shared_experts * store.config.moe_intermediate_size;
+        let shared_intermediate =
+            store.config.n_shared_experts * store.config.moe_intermediate_size;
         let mut shared_scratch = if store.config.n_shared_experts > 0 {
             Some(ExpertScratch::new(hidden, shared_intermediate, group_size))
         } else {
@@ -3845,13 +4611,32 @@ mod tests {
         let start = std::time::Instant::now();
         if store.has_unified() {
             moe_forward_unified(
-                &store, 0, &activation, &expert_indices, &expert_weights,
-                &mut output, &mut scratch, &mut scratch_pool, &mut shared_scratch, true, None, None,
+                &store,
+                0,
+                &activation,
+                &expert_indices,
+                &expert_weights,
+                &mut output,
+                &mut scratch,
+                &mut scratch_pool,
+                &mut shared_scratch,
+                true,
+                None,
+                None,
             );
         } else {
             moe_forward(
-                &store, 0, &activation, &expert_indices, &expert_weights,
-                &mut output, &mut scratch, &mut scratch_pool, &mut shared_scratch, true, None,
+                &store,
+                0,
+                &activation,
+                &expert_indices,
+                &expert_weights,
+                &mut output,
+                &mut scratch,
+                &mut scratch_pool,
+                &mut shared_scratch,
+                true,
+                None,
             );
         }
         let moe_us = start.elapsed().as_micros();
@@ -3862,7 +4647,11 @@ mod tests {
         }
         rms = (rms / hidden as f64).sqrt();
 
-        eprintln!("V2-Lite MoE forward (layer 0, top-{top_k}, shared={}, unified={}):", store.config.n_shared_experts, store.has_unified());
+        eprintln!(
+            "V2-Lite MoE forward (layer 0, top-{top_k}, shared={}, unified={}):",
+            store.config.n_shared_experts,
+            store.has_unified()
+        );
         eprintln!("  Time: {moe_us} μs ({:.1} ms)", moe_us as f64 / 1000.0);
         eprintln!("  Output RMS: {rms:.6}");
         eprintln!(
@@ -3886,8 +4675,17 @@ mod tests {
             return;
         }
 
-        let store = WeightStore::load_from_hf(model_dir, DEFAULT_GROUP_SIZE, None, None, 4, 4, crate::weights::ExpertInt4CalibMode::Amax, false)
-            .expect("Failed to load");
+        let store = WeightStore::load_from_hf(
+            model_dir,
+            DEFAULT_GROUP_SIZE,
+            None,
+            None,
+            4,
+            4,
+            crate::weights::ExpertInt4CalibMode::Amax,
+            false,
+        )
+        .expect("Failed to load");
 
         assert!(store.has_unified(), "Store should have unified format");
 
@@ -3917,9 +4715,18 @@ mod tests {
         };
         let mut output1 = vec![0.0f32; hidden];
         moe_forward_unified(
-            &store, 0, &activation, &expert_indices, &expert_weights,
-            &mut output1, &mut scratch1, &mut pool1, &mut shared1,
-            true, None, None,
+            &store,
+            0,
+            &activation,
+            &expert_indices,
+            &expert_weights,
+            &mut output1,
+            &mut scratch1,
+            &mut pool1,
+            &mut shared1,
+            true,
+            None,
+            None,
         );
 
         // Forward pass 2 (should be identical with same inputs)
@@ -3934,9 +4741,18 @@ mod tests {
         };
         let mut output2 = vec![0.0f32; hidden];
         moe_forward_unified(
-            &store, 0, &activation, &expert_indices, &expert_weights,
-            &mut output2, &mut scratch2, &mut pool2, &mut shared2,
-            true, None, None,
+            &store,
+            0,
+            &activation,
+            &expert_indices,
+            &expert_weights,
+            &mut output2,
+            &mut scratch2,
+            &mut pool2,
+            &mut shared2,
+            true,
+            None,
+            None,
         );
 
         // Compare: two identical forward passes should match exactly
@@ -3953,7 +4769,10 @@ mod tests {
 
         assert!(rms > 1e-5, "Output too small: {rms}");
         // Parallel FP ordering may cause tiny diffs
-        assert!(max_diff < 0.001, "Two identical forward passes should match: {max_diff}");
+        assert!(
+            max_diff < 0.001,
+            "Two identical forward passes should match: {max_diff}"
+        );
     }
 
     #[test]
@@ -3965,8 +4784,17 @@ mod tests {
         }
 
         // Load just 1 MoE layer (384 experts × 1 layer ≈ 9.5 GB)
-        let store = WeightStore::load_from_hf(model_dir, DEFAULT_GROUP_SIZE, Some(1), None, 4, 4, crate::weights::ExpertInt4CalibMode::Amax, false)
-            .expect("Failed to load Kimi K2.5");
+        let store = WeightStore::load_from_hf(
+            model_dir,
+            DEFAULT_GROUP_SIZE,
+            Some(1),
+            None,
+            4,
+            4,
+            crate::weights::ExpertInt4CalibMode::Amax,
+            false,
+        )
+        .expect("Failed to load Kimi K2.5");
 
         assert_eq!(store.num_moe_layers(), 1);
         assert_eq!(store.config.n_routed_experts, 384);
@@ -4005,13 +4833,32 @@ mod tests {
         let start = std::time::Instant::now();
         if store.has_unified() {
             moe_forward_unified(
-                &store, 0, &activation, &expert_indices, &expert_weights,
-                &mut output, &mut scratch, &mut scratch_pool, &mut shared_scratch, true, None, None,
+                &store,
+                0,
+                &activation,
+                &expert_indices,
+                &expert_weights,
+                &mut output,
+                &mut scratch,
+                &mut scratch_pool,
+                &mut shared_scratch,
+                true,
+                None,
+                None,
             );
         } else {
             moe_forward(
-                &store, 0, &activation, &expert_indices, &expert_weights,
-                &mut output, &mut scratch, &mut scratch_pool, &mut shared_scratch, true, None,
+                &store,
+                0,
+                &activation,
+                &expert_indices,
+                &expert_weights,
+                &mut output,
+                &mut scratch,
+                &mut scratch_pool,
+                &mut shared_scratch,
+                true,
+                None,
             );
         }
         let moe_us = start.elapsed().as_micros();
@@ -4019,8 +4866,10 @@ mod tests {
         let rms = (output.iter().map(|&v| (v as f64).powi(2)).sum::<f64>() / hidden as f64).sqrt();
         let nonzero = output.iter().filter(|&&v| v.abs() > 1e-10).count();
 
-        eprintln!("Kimi K2.5 MoE forward (1 layer, top-{top_k}, group_size={group_size}, unified={}):",
-            store.has_unified());
+        eprintln!(
+            "Kimi K2.5 MoE forward (1 layer, top-{top_k}, group_size={group_size}, unified={}):",
+            store.has_unified()
+        );
         eprintln!("  Time: {moe_us} μs ({:.1} ms)", moe_us as f64 / 1000.0);
         eprintln!("  Output RMS: {rms:.6}, nonzero: {nonzero}/{hidden}");
         eprintln!("  Per-expert: {:.0} μs", moe_us as f64 / top_k as f64);
@@ -4039,8 +4888,17 @@ mod tests {
             return;
         }
 
-        let store = WeightStore::load_from_hf(model_dir, DEFAULT_GROUP_SIZE, None, None, 4, 4, crate::weights::ExpertInt4CalibMode::Amax, false)
-            .expect("Failed to load");
+        let store = WeightStore::load_from_hf(
+            model_dir,
+            DEFAULT_GROUP_SIZE,
+            None,
+            None,
+            4,
+            4,
+            crate::weights::ExpertInt4CalibMode::Amax,
+            false,
+        )
+        .expect("Failed to load");
 
         let hidden = store.config.hidden_size;
         let top_k = store.config.num_experts_per_tok;
@@ -4054,11 +4912,13 @@ mod tests {
         let expert_indices: Vec<usize> = (0..top_k).collect();
         let expert_weights: Vec<f32> = vec![1.0 / top_k as f32; top_k];
 
-        let mut scratch = ExpertScratch::new(hidden, store.config.moe_intermediate_size, group_size);
+        let mut scratch =
+            ExpertScratch::new(hidden, store.config.moe_intermediate_size, group_size);
         let mut scratch_pool: Vec<ExpertScratch> = (0..top_k)
             .map(|_| ExpertScratch::new(hidden, store.config.moe_intermediate_size, group_size))
             .collect();
-        let shared_intermediate = store.config.n_shared_experts * store.config.moe_intermediate_size;
+        let shared_intermediate =
+            store.config.n_shared_experts * store.config.moe_intermediate_size;
         let mut shared_scratch = if store.config.n_shared_experts > 0 {
             Some(ExpertScratch::new(hidden, shared_intermediate, group_size))
         } else {
@@ -4067,13 +4927,32 @@ mod tests {
         let mut ref_output = vec![0.0f32; hidden];
         if store.has_unified() {
             moe_forward_unified(
-                &store, 0, &activation, &expert_indices, &expert_weights,
-                &mut ref_output, &mut scratch, &mut scratch_pool, &mut shared_scratch, true, None, None,
+                &store,
+                0,
+                &activation,
+                &expert_indices,
+                &expert_weights,
+                &mut ref_output,
+                &mut scratch,
+                &mut scratch_pool,
+                &mut shared_scratch,
+                true,
+                None,
+                None,
             );
         } else {
             moe_forward(
-                &store, 0, &activation, &expert_indices, &expert_weights,
-                &mut ref_output, &mut scratch, &mut scratch_pool, &mut shared_scratch, true, None,
+                &store,
+                0,
+                &activation,
+                &expert_indices,
+                &expert_weights,
+                &mut ref_output,
+                &mut scratch,
+                &mut scratch_pool,
+                &mut shared_scratch,
+                true,
+                None,
             );
         }
 
@@ -4121,17 +5000,30 @@ mod tests {
         }
 
         eprintln!("Async submit/sync test (V2-Lite, batch=1, top-{top_k}):");
-        eprintln!("  Round-trip: {async_us} μs ({:.1} ms)", async_us as f64 / 1000.0);
+        eprintln!(
+            "  Round-trip: {async_us} μs ({:.1} ms)",
+            async_us as f64 / 1000.0
+        );
         eprintln!("  Max diff vs sync: {max_diff:.8}");
-        assert!(max_diff < 0.01, "Async/sync output mismatch: max_diff={max_diff}");
+        assert!(
+            max_diff < 0.01,
+            "Async/sync output mismatch: max_diff={max_diff}"
+        );
 
         // Test batch=2 (two identical tokens → should get identical outputs)
         let mut batch_act = vec![0u16; 2 * hidden];
         batch_act[..hidden].copy_from_slice(&activation);
         batch_act[hidden..].copy_from_slice(&activation);
-        let batch_ids: Vec<i32> = expert_indices.iter().map(|&e| e as i32)
-            .chain(expert_indices.iter().map(|&e| e as i32)).collect();
-        let batch_weights: Vec<f32> = expert_weights.iter().chain(expert_weights.iter()).cloned().collect();
+        let batch_ids: Vec<i32> = expert_indices
+            .iter()
+            .map(|&e| e as i32)
+            .chain(expert_indices.iter().map(|&e| e as i32))
+            .collect();
+        let batch_weights: Vec<f32> = expert_weights
+            .iter()
+            .chain(expert_weights.iter())
+            .cloned()
+            .collect();
 
         let work2 = MoeWork {
             moe_layer_idx: 0,
@@ -4154,7 +5046,10 @@ mod tests {
             })
             .fold(0.0f32, f32::max);
         eprintln!("  Batch=2 inter-token diff: {max_inter_diff:.8}");
-        assert!(max_inter_diff < 1e-6, "Batch tokens should be identical: diff={max_inter_diff}");
+        assert!(
+            max_inter_diff < 1e-6,
+            "Batch tokens should be identical: diff={max_inter_diff}"
+        );
 
         // Test with masked experts (id=-1)
         let masked_ids: Vec<i32> = vec![-1; top_k]; // All masked
@@ -4170,7 +5065,10 @@ mod tests {
         let masked_output = result_rx.recv().expect("Recv failed");
         let masked_nonzero = masked_output.iter().filter(|&&v| v != 0).count();
         eprintln!("  Masked experts: {masked_nonzero}/{hidden} nonzero (should be 0)");
-        assert_eq!(masked_nonzero, 0, "All-masked experts should produce zero output");
+        assert_eq!(
+            masked_nonzero, 0,
+            "All-masked experts should produce zero output"
+        );
 
         // Clean up
         drop(work_tx);
@@ -4187,8 +5085,17 @@ mod tests {
             return;
         }
 
-        let store = WeightStore::load_from_hf(model_dir, DEFAULT_GROUP_SIZE, None, None, 4, 4, crate::weights::ExpertInt4CalibMode::Amax, false)
-            .expect("Failed to load");
+        let store = WeightStore::load_from_hf(
+            model_dir,
+            DEFAULT_GROUP_SIZE,
+            None,
+            None,
+            4,
+            4,
+            crate::weights::ExpertInt4CalibMode::Amax,
+            false,
+        )
+        .expect("Failed to load");
 
         // V2-Lite has 2 shared experts with routed_scaling_factor=1.0
         assert_eq!(store.config.n_shared_experts, 2);
@@ -4203,7 +5110,9 @@ mod tests {
         // Check shared expert availability via unified format
         if store.has_unified() {
             assert_eq!(store.shared_experts_gpu.len(), store.num_moe_layers());
-            let shared_exp = store.get_shared_expert_unified(0).expect("Should have shared expert");
+            let shared_exp = store
+                .get_shared_expert_unified(0)
+                .expect("Should have shared expert");
             assert_eq!(shared_exp.hidden_size, hidden);
             assert_eq!(shared_exp.intermediate_size, shared_intermediate);
         } else {
@@ -4233,15 +5142,32 @@ mod tests {
         let mut no_shared: Option<ExpertScratch> = None;
         if store.has_unified() {
             moe_forward_unified(
-                &store, 0, &activation, &expert_indices, &expert_weights,
-                &mut output_no_shared, &mut scratch, &mut scratch_pool,
-                &mut no_shared, true, None, None,
+                &store,
+                0,
+                &activation,
+                &expert_indices,
+                &expert_weights,
+                &mut output_no_shared,
+                &mut scratch,
+                &mut scratch_pool,
+                &mut no_shared,
+                true,
+                None,
+                None,
             );
         } else {
             moe_forward(
-                &store, 0, &activation, &expert_indices, &expert_weights,
-                &mut output_no_shared, &mut scratch, &mut scratch_pool,
-                &mut no_shared, true, None,
+                &store,
+                0,
+                &activation,
+                &expert_indices,
+                &expert_weights,
+                &mut output_no_shared,
+                &mut scratch,
+                &mut scratch_pool,
+                &mut no_shared,
+                true,
+                None,
             );
         }
 
@@ -4250,15 +5176,32 @@ mod tests {
         let mut shared_scratch = Some(ExpertScratch::new(hidden, shared_intermediate, group_size));
         if store.has_unified() {
             moe_forward_unified(
-                &store, 0, &activation, &expert_indices, &expert_weights,
-                &mut output_with_shared, &mut scratch, &mut scratch_pool,
-                &mut shared_scratch, true, None, None,
+                &store,
+                0,
+                &activation,
+                &expert_indices,
+                &expert_weights,
+                &mut output_with_shared,
+                &mut scratch,
+                &mut scratch_pool,
+                &mut shared_scratch,
+                true,
+                None,
+                None,
             );
         } else {
             moe_forward(
-                &store, 0, &activation, &expert_indices, &expert_weights,
-                &mut output_with_shared, &mut scratch, &mut scratch_pool,
-                &mut shared_scratch, true, None,
+                &store,
+                0,
+                &activation,
+                &expert_indices,
+                &expert_weights,
+                &mut output_with_shared,
+                &mut scratch,
+                &mut scratch_pool,
+                &mut shared_scratch,
+                true,
+                None,
             );
         }
 
@@ -4268,16 +5211,35 @@ mod tests {
             max_diff = max_diff.max((output_with_shared[j] - output_no_shared[j]).abs());
         }
 
-        let rms_no_shared = (output_no_shared.iter().map(|&v| (v as f64).powi(2)).sum::<f64>() / hidden as f64).sqrt();
-        let rms_with_shared = (output_with_shared.iter().map(|&v| (v as f64).powi(2)).sum::<f64>() / hidden as f64).sqrt();
+        let rms_no_shared = (output_no_shared
+            .iter()
+            .map(|&v| (v as f64).powi(2))
+            .sum::<f64>()
+            / hidden as f64)
+            .sqrt();
+        let rms_with_shared = (output_with_shared
+            .iter()
+            .map(|&v| (v as f64).powi(2))
+            .sum::<f64>()
+            / hidden as f64)
+            .sqrt();
 
-        eprintln!("V2-Lite shared expert test (unified={}):", store.has_unified());
-        eprintln!("  n_shared={}, shared_intermediate={}", store.config.n_shared_experts, shared_intermediate);
+        eprintln!(
+            "V2-Lite shared expert test (unified={}):",
+            store.has_unified()
+        );
+        eprintln!(
+            "  n_shared={}, shared_intermediate={}",
+            store.config.n_shared_experts, shared_intermediate
+        );
         eprintln!("  RMS without shared: {rms_no_shared:.6}");
         eprintln!("  RMS with shared:    {rms_with_shared:.6}");
         eprintln!("  Max diff:           {max_diff:.6}");
 
-        assert!(max_diff > 1e-4, "Shared expert should change output (max_diff={max_diff})");
+        assert!(
+            max_diff > 1e-4,
+            "Shared expert should change output (max_diff={max_diff})"
+        );
         assert!(rms_with_shared > 1e-5, "Output with shared too small");
     }
 }

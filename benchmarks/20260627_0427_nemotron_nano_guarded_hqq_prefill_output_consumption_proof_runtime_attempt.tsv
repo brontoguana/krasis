@@ -1,0 +1,17 @@
+field	value	unit	notes
+bf16_command	KRASIS_STARTUP_DIAG=1 KRASIS_PREFILL_TIMING=1 KRASIS_VRAM_LEDGER=1 ./dev run tests/nemotron-nano-bf16-experts-a16.conf --test-endpoints	argv	built command in tmux
+hqq_command	KRASIS_STARTUP_DIAG=1 KRASIS_PREFILL_TIMING=1 KRASIS_VRAM_LEDGER=1 KRASIS_EXPERT_HQQ_PREFILL_CONSUME=1 ./dev run tests/nemotron-nano-bf16-experts-a16.conf --test-endpoints --expert-hqq-diagnostic-cache-spec benchmarks/20260626_2208_nemotron_nano_diagnostic_hqq_prefill_all_moe_layers_correctness_diagnostic_cache_spec.json	argv	built command in tmux
+bf16_ready	true	bool	READY reached
+hqq_ready	true	bool	READY reached
+bf16_long_prefill_s	343.37	seconds	long calibration
+bf16_long_decode_s	4.24	seconds	long calibration
+bf16_long_prefill_min_free_mb	14070	MB	low-water VRAM
+hqq_long_prefill_s	343.4	seconds	long calibration
+hqq_long_decode_s	4.27	seconds	long calibration
+hqq_long_prefill_min_free_mb	14070	MB	low-water VRAM
+safety_margin_mb	600	MB	configured
+bf16_http_200	3	count	3 expected
+hqq_http_200	3	count	3 expected
+consume_rows	69	count	23 MoE layers per request * 3 requests
+total_copied_output_bytes	1029740544	bytes	diagnostic HQQ output copied into expert_out
+output_contract	failed	status	case 2 selected token changed

@@ -1,0 +1,10 @@
+field	value
+gate	20260627_2149_nemotron_nano_mamba2_ssd_local_triangular_oracle_instrumentation
+command	KRASIS_STARTUP_DIAG=1 KRASIS_PREFILL_TIMING=1 KRASIS_PREFILL_LIVENESS_TIMING=1 KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE=1 KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE_LAYER=0 KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE_ROW=70 KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE_HEAD=37 KRASIS_MAMBA2_SSD_LOCAL_TRI_ORACLE_D=50 KRASIS_STARTUP_EXIT_AFTER_CALIBRATION=1 ./dev run tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf
+exit	0
+requests_sent	0
+benchmark_path	false
+startup_diagnostic_exit	true
+cache_reuse	HQQ attention validated; effective Marlin g64 loaded from cache
+cache_write_evidence	false
+log	benchmarks/20260627_2149_nemotron_nano_mamba2_ssd_local_triangular_oracle_instrumentation_startup_diagnostic.log

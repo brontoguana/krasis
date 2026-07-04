@@ -1,0 +1,5 @@
+area	current_cost_ms	target	action	acceptance
+exact_recurrent_bridge	723.448	remove_from_fast_path	use true chunked state handoff for entry/final state and c_state source	full-oracle and token/logit parity remain exact
+output_replay	9075.657	replace_with_parallel_output	use chunked state handoff plus GPU-shaped chunk scan/output instead of replay/cancellation	full-oracle and token/logit parity remain exact
+chunked_state_phases	12.528	preserve_low_cost	keep cumsum/chunk_state/state_passing small and instrument if they regress	clean timing shows phases remain small
+defaults	0	no_change	keep all new behavior opt-in	default run path unchanged

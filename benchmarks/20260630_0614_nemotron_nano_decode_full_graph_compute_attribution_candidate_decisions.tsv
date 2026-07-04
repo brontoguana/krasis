@@ -1,0 +1,5 @@
+candidate	env	build_exit	request_result	timing_result	decision
+mamba2_custom_bf16_gemv	KRASIS_MAMBA2_DECODE_GRAPH_CUSTOM_BF16_GEMV=1	0	first token stayed 1044 but top-logprobs drifted	Mamba2 projection worsened to 2.53 ms/tok from 2.19	rejected_and_removed
+relu2_w2_two_tiles	KRASIS_DECODE_GRAPH_RELU2_W2_TWO_TILES=1	0	128-token request diverged and stopped after 103 generated tokens	routed activation+W2 worsened to 1.33 ms/tok	rejected_and_removed
+relu2_w2_preactivation	KRASIS_DECODE_GRAPH_RELU2_W2_PREACT=1	0	first token stayed 1044 but top-logprobs drifted; request stopped after 104 generated tokens	routed activation+W2 stayed 1.09 ms/tok and graph event stayed 8.11 ms/tok	rejected_and_removed
+shared_expert_relu2_audit	none	NA	HF/NVIDIA model uses relu2 shared MLP; current Krasis graph shared INT4 path uses silu accumulator	shared branch is 1.61 ms/tok, but changing activation changes logits	needs_reference_decision_before_patch

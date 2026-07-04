@@ -1,0 +1,4 @@
+decision	status	evidence	next_action
+stop_before_smoke	cache_generation_before_ready	The existing HQQ4 attention cache validated, but the regular run built/wrote the Marlin INT4 expert cache before READY; no requests were sent.	Do not treat this as a quality smoke. Open a prerequisite cache-reuse/stability gate to prove the Marlin expert cache is complete and reused, then rerun smoke without cache writes.
+hqq_consume_path	not_enabled	The only consume env in scope is KRASIS_EXPERT_HQQ_PREFILL_CONSUME, which is expert-HQQ diagnostic consumption and requires an expert-HQQ diagnostic cache spec; this k4v4 target config is attention-HQQ and did not expose that path.	Capture consume rows/bytes only if a matching HQQ consume path is actually loaded.
+quality_result	absent	Case 2 was not sent because the gate stopped before READY.	No selected-token/top-k/margin conclusion for HQQ4+k4v4 from this gate.

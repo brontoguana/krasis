@@ -1,0 +1,11 @@
+probe	buffer_or_value	coordinate	expected_contract
+state_flat0_recurrent_entry1	recurrent_entry_state	state flat=0 after chunk0 / entry_state[1]	Must equal sequential recurrent state bits 0x3b90c258 for the 0715 small diagnostic, not closed-form 0x3b90c25a.
+state_flat0_closed_form	entry_state_closed_form_diag	state flat=0 after chunk0	Expected to reproduce the previous v4 drift value 0x3b90c25a; record delta to recurrent.
+row64_prior_recurrent	C[row64] dot recurrent_entry_state[1]	row=64 head=11 d=22	Must reproduce the sequential local-tri prior component before BF16 output store.
+row64_prior_closed_form	C[row64] dot closed_form_entry_state[1]	row=64 head=11 d=22	Diagnostic-only; should explain the one-BF16-bit candidate output drift if it differs from recurrent prior.
+row64_output_assembly	y_pre and BF16 output bits	row=64 head=11 d=22	Record D*x, prior, local_self, y_pre, candidate bits, sequential bits; require 0x3bb8 before full oracle.
+row82_output_assembly	y_pre and BF16 output bits	row=82 head=37 d=30	Secondary probe from prior failed prototypes; must not regress while fixing row64.
+state_flat14_lifecycle	recurrent/closed_form/final state	state flat=14	Secondary state probe from 2251/0715; record entry and final bits.
+top_prior_state_index_78	recurrent/closed_form entry state	row64 head11 d22 state index 78	0650 identified this as top prior delta index; record value and C contribution.
+final_state_full	candidate_final_state vs sequential_state	all state elements	Require exact f32 bits for acceptance; otherwise record first mismatch and max/mean error.
+output_full	candidate_output vs sequential_output	all output elements	Require exact BF16 bits for acceptance; otherwise record first mismatch and max/mean error.

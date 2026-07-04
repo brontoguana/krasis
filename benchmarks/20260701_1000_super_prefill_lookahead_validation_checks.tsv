@@ -1,0 +1,12 @@
+check	status	command_or_source	notes
+build	pass	./dev build	Final post-gating build exited 0; log benchmarks/20260701_1120_super_prefill_lookahead_build.log.
+final_benchmark	pass	./dev benchmark tests/nemotron-super-4-4-hqq4-k4v4-a16.conf	Final no-env production-default benchmark exited 0; prefill 1370.3 tok/s, decode 28.10 tok/s, HTTP 44.59 tok/s.
+timing_attribution	pass	KRASIS_PREFILL_TIMING=1 KRASIS_VRAM_LEDGER=1 ./dev benchmark tests/nemotron-super-4-4-hqq4-k4v4-a16.conf --timing	Timing-on attribution exited 0 and showed MoE DMA wait reduced from 1099.9 ms to 28.6 ms on the representative 5K prompt.
+state_split_candidate	pass_rejected	KRASIS_MAMBA2_SSD_PARALLEL_OUTPUT_PRECOMPUTE_CB=0 KRASIS_MAMBA2_SSD_PARALLEL_OUTPUT_STATE_SPLIT=1 ./dev benchmark tests/nemotron-super-4-4-hqq4-k4v4-a16.conf	Candidate exited 0 but was rejected because prefill regressed to 1056.7 tok/s.
+summary_json	pass	jq '.' benchmarks/20260701_1000_super_prefill_lookahead_summary.json	JSON parsed successfully.
+result_tsv	pass	awk NF check on benchmarks/20260701_1000_super_prefill_lookahead_result.tsv	All data rows have 13 tab-separated fields.
+source_whitespace	pass	git diff --check	Checked source, benchmark artifacts, and Super config paths touched by this gate.
+dev_shell_syntax	pass	bash -n dev	Dev wrapper syntax passed.
+protected_configs	pass	git status --short -- testconfigs krasis/testconfigs	No protected testconfigs were modified.
+internal_records	pass	git -C /home/main/Documents/Claude/krasis-internal diff --check -- CHANGELOG.md TRACKING.md DEBUGLOG.md	Internal record whitespace check passed.
+runtime_idle	pass	tmux/process/nvidia-smi snapshot	No benchmark/build/server tmux sessions remained; GPUs idle at 15 MB / 11 MB used.

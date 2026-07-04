@@ -1,0 +1,13 @@
+check	status	detail
+summary_json	pass	jq -e succeeded for 20260629_1038_nemotron_nano_parallel_ssd_corrected_remeasure_summary.json
+tsv_shapes	pass	all 20260629_1038 corrected remeasure TSV rows matched header field counts
+runtime_exit	pass	long no-oracle timing exit file recorded 0
+long_records	pass	23 records with tokens=39920
+clean_timing	pass	0 oracle, recurrent-subloop, output-subloop, and request records
+startup_exit	pass	log contains Startup diagnostic exit
+diff_check	pass	git diff --check passed in krasis-nemotron-dev and krasis-internal
+dev_syntax	pass	bash -n dev passed
+protected_configs	pass	protected config status unchanged; expected untracked tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf
+tmux_idle	pass	no tmux sessions at 2026-06-29T10:52:11Z
+process_idle	pass	no krasis/build/cargo/rustc/nvcc/dev process at 2026-06-29T10:52:11Z
+gpu_idle	pass	GPU0 15 MB / 32607 MB, GPU1 11 MB / 20470 MB; no NVIDIA compute process listed

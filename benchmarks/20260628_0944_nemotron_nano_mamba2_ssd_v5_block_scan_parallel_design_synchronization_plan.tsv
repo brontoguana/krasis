@@ -1,0 +1,8 @@
+item	requirement	rationale
+single_stream_order	Use existing stream order between coefficient, local, entry propagation, output assembly, oracle compare, and commit in the first prototype.	Keeps correctness deterministic and avoids hidden CPU/GPU races.
+chunk_boundary_order	Entry for chunk `c+1` must not be read until exact recurrent propagation for chunk `c` completes.	This is the state dependency that preserves sequential-compatible f32 bits.
+no_unbounded_waiting_grid	A persistent inter-chunk kernel must not launch all future chunks as spinning CTAs unless occupancy/deadlock is proven.	Waiting CTAs can occupy SMs and prevent predecessor chunks from running.
+first_safe_sync_shape	Use host-launched chunk or window steps for the first correctness prototype, selected from runtime dimensions and scratch budget.	More launches are acceptable in correctness gate; no speed claim until measured.
+windowed_entries	If all chunk entries do not fit the measured scratch budget, use a runtime-sized entry-state window and process windows sequentially.	Avoids hardcoded VRAM assumptions and keeps the design adaptable.
+all_entries_fast_path	Only if runtime scratch budget proves enough, store all chunk entries and run output assembly across all chunks.	This is a measured optimization mode, not a hardcoded assumption.
+oracle_is_out_of_timed_path_later	Correctness gate may keep full oracle; performance gate must isolate candidate timing from oracle/download/host compare.	0835 showed oracle/download/compare dominate diagnostic timing.

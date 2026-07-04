@@ -1,0 +1,8 @@
+field	value
+gate	20260630_1400_nemotron_nano_decode_mamba2_fast_outproj_candidate
+baseline	20260630_1341 timing-on control: first token 1044, 103 decode tokens in 0.97s, internal 8.41 ms/tok, Mamba2 out-proj about 0.38-0.39 ms/tok
+candidate_env	KRASIS_MAMBA2_DECODE_GRAPH_FAST_OUTPROJ=1
+implementation	Extend Mamba2 BF16 graph buffers to cover out-proj dimensions and reuse the accepted forced-BF16-GEMM pattern from fast in-proj for graph out-proj
+guardrails	Hard opt-in; BF16 out-proj only; fail closed for non-BF16 or undersized buffers; defaults unchanged
+rejected_prior	Do not reintroduce custom Mamba2 BF16 GEMV, which drifted top-logprobs and slowed projection in 20260630_0614
+acceptance	Same-payload timing-on correctness against control first; timing-off speed only if correctness is acceptable

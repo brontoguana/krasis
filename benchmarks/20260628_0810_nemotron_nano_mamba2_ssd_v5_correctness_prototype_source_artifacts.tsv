@@ -1,0 +1,19 @@
+component	file	line	status	notes
+env_gate	src/gpu_prefill.rs	239	added	KRASIS_MAMBA2_SSD_CHUNK_PARALLEL_V5 opt-in only
+oracle_env_gate	src/gpu_prefill.rs	247	added	KRASIS_MAMBA2_SSD_CHUNK_PARALLEL_V5_ORACLE required when candidate requested
+v5_kernel_binding	src/gpu_prefill.rs	4923	added	RawCuFunc field for required PTX symbol
+full_oracle_compare	src/gpu_prefill.rs	14935	added	exact BF16 output bits and exact f32 state compare
+probe_parser	src/gpu_prefill.rs	16938	added	KRASIS_MAMBA2_SSD_V5_PROBES row:head:d:state_flat list
+dispatch_gate	src/gpu_prefill.rs	31481	added	fail closed on missing/stray v5 oracle env
+temporary_buffers	src/gpu_prefill.rs	31625	added	allocated only under v5 envs
+candidate_launch	src/gpu_prefill.rs	31703	added	launches v5 recurrent candidate into separate buffers
+oracle_then_commit	src/gpu_prefill.rs	31730	added	commits output/state only after full oracle success
+default_sequential_dispatch	src/gpu_prefill.rs	31786	preserved	non-v5 path remains trace-or-sequential kernel dispatch
+substage_timing	src/gpu_prefill.rs	32703	preserved	1908 Mamba2 substage timing remains
+ptx_symbol_check	src/gpu_prefill.rs	53674	added	v5 kernel is required if code is built
+ptx_symbol_load	src/gpu_prefill.rs	54087	added	v5 kernel loaded explicitly
+cuda_v5_kernel	src/cuda/prefill_kernels.cu	5535	added	sequential-compatible per-token f32 recurrence candidate
+sequential_kernel	src/cuda/prefill_kernels.cu	4968	preserved	existing oracle/default kernel unchanged
+local_tri_diag	src/gpu_prefill.rs	15181	preserved	2149/2251 local-tri/state-flat diagnostic remains
+cast_carry_diag	src/gpu_prefill.rs	15597	preserved	0650 cast/carry diagnostic remains
+python_fail_closed	python/krasis/server.py	1740	added	v5-only warmup re-raise so mismatch is not swallowed

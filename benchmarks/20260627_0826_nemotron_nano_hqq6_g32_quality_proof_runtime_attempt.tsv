@@ -1,0 +1,9 @@
+metric	value
+server_command	KRASIS_STARTUP_DIAG=1 KRASIS_PREFILL_TIMING=1 KRASIS_VRAM_LEDGER=1 KRASIS_EXPERT_HQQ_PREFILL_CONSUME=1 ./dev run tests/nemotron-nano-bf16-experts-a16.conf --test-endpoints --expert-hqq-diagnostic-cache-spec benchmarks/20260627_0804_nemotron_nano_hqq6_g32_all_moe_layer_cache_spec_generation_diagnostic_cache_spec.json
+bf16_server_run	false
+hqq_server_run	true
+http_200_count	3
+request_count	3
+case0_http_time_s	35.826555
+case1_http_time_s	33.244709
+case2_http_time_s	32.769613

@@ -1,0 +1,6 @@
+artifact	value
+gate	20260628_2017_nemotron_nano_parallel_ssd_correctness_debug
+command	./dev build
+exit	0
+duration_s	178
+log	benchmarks/20260628_2017_nemotron_nano_parallel_ssd_correctness_debug_build4.log

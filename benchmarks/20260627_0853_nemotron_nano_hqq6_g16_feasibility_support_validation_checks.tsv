@@ -1,0 +1,15 @@
+check	status	detail
+record_0826_first	pass	Gemma 5619.6 / 92.43 / 155.69; g32 3/3 HTTP 200; 69 consume rows; 0/3 selected-token changes; 3/3 top-k rank drift; aggregate deltas worsened versus g64; no production enablement.
+runtime_kernel_inspection	pass	No HQQ6 g16 blocker found; descriptor group_size drives cache/spec/reference/runtime/CUDA paths.
+size_headroom_estimate	pass	Estimated g16 cache 36,719,028,288 bytes; final headroom 680G disk and 965Gi RAM.
+source_scope	pass	Only src/weights/expert_hqq.rs changed for generator allowlist/tests in this gate.
+test_kernels_expert_hqq	pass	./dev test-kernels expert_hqq passed 94/0.
+dev_build	pass	./dev build passed.
+bash_n_dev	pass	bash -n dev passed.
+py_compile	pass	./dev python -m py_compile python/krasis/*.py passed.
+cargo_fmt_check	pass	cargo fmt --check passed.
+git_diff_check_krasis	pass	git diff --check passed in krasis-nemotron-dev.
+git_diff_check_internal	pass	git diff --check passed in krasis-internal.
+protected_configs	pass	Only known pre-existing untracked tests/nemotron-nano-bf16-experts-a16.conf shown.
+cleanup	pass	./dev kill completed; final 2026-06-27T09:07:02Z snapshot had no tmux server, no matching runtime/generator/analyzer/build/curl process, GPUs 15 MB / 11 MB, disk 680G, RAM 965Gi.
+forbidden_scope	pass	No live server, cache generation, HQQ8 work, production HQQ, speed benchmark, fallback, or decode/HCS change.

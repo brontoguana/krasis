@@ -1,0 +1,86 @@
+{
+  "gate": "20260627_2025_nemotron_nano_mamba2_ssd_scan_algorithm_design",
+  "status": "closed",
+  "opened_utc": "2026-06-27T20:26:25Z",
+  "closed_utc": "2026-06-27T20:35:16Z",
+  "record_first": {
+    "source_gate": "20260627_2011_nemotron_nano_mamba2_ssd_rejected_prototype_cleanup",
+    "source_fix_or_cleanup": "rejected scalar-reuse prototype removed; default sequential path preserved",
+    "build_exit_code": 0,
+    "startup_diagnostic_exit_code": 0,
+    "hqq_attention_cache_reused": true,
+    "effective_marlin_g64_loaded": true,
+    "cache_temp_lock_files": false,
+    "gemma_baseline": {
+      "prefill_tok_s": 5619.6,
+      "internal_decode_tok_s": 92.43,
+      "network_round_trip_tok_s": 155.69
+    },
+    "nano_hqq4_k4v4_baseline": {
+      "prefill_tok_s": 346.5,
+      "internal_decode_tok_s": 94.48,
+      "network_round_trip_tok_s": 164.75
+    },
+    "rejected_1938_prototype": {
+      "ssd_scan_regression_ms": 6262.531,
+      "ssd_scan_regression_pct": 5.472
+    }
+  },
+  "scope": {
+    "inspect_sequential_ssd_kernel": true,
+    "inspect_trace_path": true,
+    "inspect_prefix_scan_helpers": true,
+    "inspect_mamba2_math": true,
+    "produce_algorithm_design": true,
+    "implement_in_this_gate": false,
+    "benchmarks": false,
+    "requests": false,
+    "decode_hcs": false,
+    "production_enablement": false,
+    "default_path_changes": false
+  },
+  "audit": {
+    "current_path": "Rust launches CUDA PTX sequential SSD kernel",
+    "trace_path": "same sequential math with request-gated trace writes",
+    "primary_bottleneck": "sequential decode-equivalent SSD scan, not HQQ attention or Marlin",
+    "chunk_parallel_design_coherent": true,
+    "safe_to_implement_same_gate": false,
+    "reason": "requires new scratch buffers, multiple CUDA kernels, Rust symbol/dispatch plumbing, and oracle comparison"
+  },
+  "proposed_design": {
+    "default_path": "unchanged sequential mamba2_ssd_sequential_kernel",
+    "gate": "KRASIS_MAMBA2_SSD_CHUNK_PARALLEL",
+    "oracle_gate": "KRASIS_MAMBA2_SSD_CHUNK_PARALLEL_ORACLE",
+    "kernels": [
+      "prepare_prefix",
+      "cb_matrix",
+      "output",
+      "state_update",
+      "oracle_compare"
+    ],
+    "state_carry": "sequential host loop over chunks; each chunk output reads h0 before state_update writes h_end",
+    "oracle": "run existing sequential kernel and candidate on identical inputs, compare output/state, fail closed on mismatch"
+  },
+  "cleanup": {
+    "final_snapshot_utc": "2026-06-27T20:35:16Z",
+    "gpu_memory_mb": {
+      "0": 15,
+      "1": 11
+    },
+    "disk_free": "588G",
+    "ram_available": "968Gi",
+    "tmux_or_runtime_processes": false,
+    "nvidia_compute_processes": false,
+    "cache_temp_lock_files": false
+  },
+  "artifacts": {
+    "source_audit": "benchmarks/20260627_2025_nemotron_nano_mamba2_ssd_scan_algorithm_design_source_audit.tsv",
+    "tensor_shapes": "benchmarks/20260627_2025_nemotron_nano_mamba2_ssd_scan_algorithm_design_tensor_shapes.tsv",
+    "state_semantics": "benchmarks/20260627_2025_nemotron_nano_mamba2_ssd_scan_algorithm_design_state_semantics.tsv",
+    "kernel_plan": "benchmarks/20260627_2025_nemotron_nano_mamba2_ssd_scan_algorithm_design_kernel_plan.tsv",
+    "oracle_strategy": "benchmarks/20260627_2025_nemotron_nano_mamba2_ssd_scan_algorithm_design_oracle_strategy.tsv",
+    "decision": "benchmarks/20260627_2025_nemotron_nano_mamba2_ssd_scan_algorithm_design_root_decision.tsv",
+    "runtime_not_run": "benchmarks/20260627_2025_nemotron_nano_mamba2_ssd_scan_algorithm_design_runtime_not_run.tsv",
+    "validation": "benchmarks/20260627_2025_nemotron_nano_mamba2_ssd_scan_algorithm_design_validation_checks.tsv"
+  }
+}
