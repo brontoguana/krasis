@@ -435,7 +435,7 @@ void moe_marlin_mm_impl(
 
 // ── Extern "C" entry point ──────────────────────────────────────────────────
 
-extern "C" int krasis_marlin_moe_w2_lane_diag_config(
+KRASIS_EXPORT int krasis_marlin_moe_w2_lane_diag_config(
     int enabled, int target_row, const int* target_dims, int dim_count) {
     int clean_dims[4] = {-1, -1, -1, -1};
     int clean_count = 0;
@@ -457,7 +457,7 @@ extern "C" int krasis_marlin_moe_w2_lane_diag_config(
     return static_cast<int>(err);
 }
 
-extern "C" int krasis_marlin_moe_w2_lane_diag_fetch(
+KRASIS_EXPORT int krasis_marlin_moe_w2_lane_diag_fetch(
     device::marlin_moe::KrasisMoeW2LaneDiagEntry* out, int max_entries, int* out_count) {
     int count = 0;
     cudaError_t err = cudaMemcpyFromSymbol(&count, device::marlin_moe::krasis_moe_w2_lane_diag_count, sizeof(int));
@@ -475,7 +475,7 @@ extern "C" int krasis_marlin_moe_w2_lane_diag_fetch(
     return 0;
 }
 
-extern "C" void krasis_marlin_moe_mm_bf16(
+KRASIS_EXPORT void krasis_marlin_moe_mm_bf16(
     const void* A, const void* B, void* C, void* C_tmp,
     void* b_bias, void* s, void* s2, void* zp, void* g_idx,
     void* perm, void* a_tmp, void* sorted_token_ids, void* expert_ids,
@@ -529,7 +529,7 @@ __global__ void moe_scatter_weighted_runtime_kernel(
     accum[(int64_t)token * hidden + col] = sum;
 }
 
-extern "C" void krasis_moe_zero_and_scatter_weighted_bf16(
+KRASIS_EXPORT void krasis_moe_zero_and_scatter_weighted_bf16(
     void* accum,
     const void* src,
     const void* topk_weights,

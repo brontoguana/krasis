@@ -10,7 +10,8 @@
 //!
 //! Zero Python, zero GIL, zero PyTorch allocator.
 //! All memory managed via cudarc (CUDA driver API).
-//! Kernels loaded from PTX (simple ops) or dlopen'd from vendored libkrasis_marlin.so (Marlin).
+//! Kernels loaded from PTX (simple ops) or dynamically loaded sidecars
+//! such as vendored Marlin/FlashAttention/FLA libraries.
 
 use std::cell::{Cell, RefCell};
 use std::io::Write;
@@ -5314,12 +5315,12 @@ pub struct PrefillKernels {
     moe_scatter_fused: RawCuFunc,
     moe_scatter_weighted: RawCuFunc,
 
-    // Marlin GEMM functions (loaded via dlopen from vendored libkrasis_marlin.so)
+    // Marlin GEMM functions (loaded from vendored sidecars)
     marlin_mm: Option<MarlinMmFn>,
-    // Fused MoE: vendored MarlinDefault (dlopen from libkrasis_marlin.so)
+    // Fused MoE: vendored MarlinDefault sidecar
     pub fused_moe_fn: Option<FusedMoeFn>,
     pub fused_moe_scatter_fn: Option<FusedMoeScatterFn>,
-    // FlashAttention-2: vendored (dlopen from libkrasis_flash_attn.so)
+    // FlashAttention-2: vendored sidecar
     pub flash_attn_fwd: Option<FlashAttnFwdFn>,
     pub flash_attn_fwd_window: Option<FlashAttnFwdWindowFn>,
     // FlashAttention-2 FP8 KV: BF16 Q with FP8 E4M3 K/V (for cross-chunk FP8 KV cache)
@@ -59000,6 +59001,70 @@ pub fn allocate_scratch_for_prompt(
 type SidecarAbiVersionFn = unsafe extern "C" fn() -> u32;
 type SidecarBuildIdFn = unsafe extern "C" fn() -> *const libc::c_char;
 
+unsafe fn open_sidecar_library(
+    path: &str,
+    label: &str,
+) -> Option<&'static libloading::Library> {
+    match libloading::Library::new(path) {
+        Ok(lib) => Some(Box::leak(Box::new(lib))),
+        Err(err) => {
+            log::warn!("loading {label} sidecar failed: path={} error={}", path, err);
+            None
+        }
+    }
+}
+
+unsafe fn sidecar_symbol<T: Copy>(
+    lib: &'static libloading::Library,
+    symbol: &[u8],
+) -> Option<T> {
+    lib.get::<T>(symbol).ok().map(|sym| *sym)
+}
+
+unsafe fn sidecar_symbol_named<T: Copy>(
+    lib: &'static libloading::Library,
+    symbol_name: &str,
+) -> Option<T> {
+    let symbol = std::ffi::CString::new(symbol_name).ok()?;
+    sidecar_symbol::<T>(lib, symbol.as_bytes_with_nul())
+}
+
+unsafe fn sidecar_symbol_for_h<T: Copy>(
+    lib: &'static libloading::Library,
+    base_name: &str,
+    nv: usize,
+    path: &str,
+) -> Result<T, String> {
+    let h_name = format!("{base_name}_h{nv}");
+    if let Some(sym) = sidecar_symbol_named::<T>(lib, &h_name) {
+        eprintln!("[FLA] loaded {base_name} (H={nv})");
+        return Ok(sym);
+    }
+    if let Some(sym) = sidecar_symbol_named::<T>(lib, base_name) {
+        eprintln!("[FLA] loaded {base_name} (generic)");
+        return Ok(sym);
+    }
+    Err(format!("{base_name} (H={nv}) not found in {path}"))
+}
+
+fn platform_sidecar_name(name: &str) -> String {
+    if cfg!(windows) && name.ends_with(".so") {
+        let stem = name.trim_end_matches(".so").trim_start_matches("lib");
+        format!("{stem}.dll")
+    } else {
+        name.to_string()
+    }
+}
+
+fn sidecar_name_candidates(name: &str) -> Vec<String> {
+    let platform = platform_sidecar_name(name);
+    if platform == name {
+        vec![name.to_string()]
+    } else {
+        vec![platform, name.to_string()]
+    }
+}
+
 fn expected_sidecar_abi_version() -> u32 {
     env!("KRASIS_SIDECAR_ABI_VERSION")
         .parse::<u32>()
@@ -59067,20 +59132,21 @@ fn manifest_build_id_for_sidecar(path: &str, manifest_key: &str) -> Result<Strin
 }
 
 unsafe fn verify_sidecar_abi(
-    lib: *mut libc::c_void,
+    lib: &'static libloading::Library,
     path: &str,
     label: &str,
     manifest_key: &str,
 ) -> bool {
-    let abi_sym = libc::dlsym(
+    let abi_fn = match sidecar_symbol::<SidecarAbiVersionFn>(
         lib,
-        b"krasis_sidecar_abi_version\0".as_ptr() as *const libc::c_char,
-    );
-    if abi_sym.is_null() {
-        log::error!("{label} sidecar missing krasis_sidecar_abi_version: {path}");
-        return false;
-    }
-    let abi_fn: SidecarAbiVersionFn = std::mem::transmute(abi_sym);
+        b"krasis_sidecar_abi_version\0",
+    ) {
+        Some(v) => v,
+        None => {
+            log::error!("{label} sidecar missing krasis_sidecar_abi_version: {path}");
+            return false;
+        }
+    };
     let abi = abi_fn();
     let expected_abi = expected_sidecar_abi_version();
     if abi != expected_abi {
@@ -59093,15 +59159,16 @@ unsafe fn verify_sidecar_abi(
         return false;
     }
 
-    let build_sym = libc::dlsym(
+    let build_fn = match sidecar_symbol::<SidecarBuildIdFn>(
         lib,
-        b"krasis_sidecar_build_id\0".as_ptr() as *const libc::c_char,
-    );
-    if build_sym.is_null() {
-        log::error!("{label} sidecar missing krasis_sidecar_build_id: {path}");
-        return false;
-    }
-    let build_fn: SidecarBuildIdFn = std::mem::transmute(build_sym);
+        b"krasis_sidecar_build_id\0",
+    ) {
+        Some(v) => v,
+        None => {
+            log::error!("{label} sidecar missing krasis_sidecar_build_id: {path}");
+            return false;
+        }
+    };
     let build_id_ptr = build_fn();
     let build_id = if build_id_ptr.is_null() {
         "<null>".into()
@@ -59138,28 +59205,14 @@ unsafe fn verify_sidecar_abi(
 fn load_marlin_mm() -> Option<MarlinMmFn> {
     let path = find_marlin_so()?;
     unsafe {
-        let lib = libc::dlopen(
-            std::ffi::CString::new(path.as_str()).ok()?.as_ptr(),
-            libc::RTLD_NOW | libc::RTLD_LOCAL,
-        );
-        if lib.is_null() {
-            let err = libc::dlerror();
-            if !err.is_null() {
-                log::warn!(
-                    "dlopen failed: {}",
-                    std::ffi::CStr::from_ptr(err).to_string_lossy()
-                );
-            }
-            return None;
-        }
+        let lib = open_sidecar_library(&path, "Marlin")?;
         if !verify_sidecar_abi(lib, &path, "Marlin", "marlin") {
             return None;
         }
 
-        let sym = libc::dlsym(lib, b"krasis_marlin_mm_bf16\0".as_ptr() as *const _);
-        if !sym.is_null() {
+        if let Some(sym) = sidecar_symbol::<MarlinMmFn>(lib, b"krasis_marlin_mm_bf16\0") {
             log::info!("Loaded vendored krasis_marlin_mm_bf16 from {}", path);
-            return Some(std::mem::transmute(sym));
+            return Some(sym);
         }
         log::warn!("krasis_marlin_mm_bf16 not found in {}", path);
     }
@@ -59175,22 +59228,14 @@ fn load_fused_moe() -> Option<FusedMoeFn> {
         }
     };
     unsafe {
-        let lib = libc::dlopen(
-            std::ffi::CString::new(path.as_str()).ok()?.as_ptr(),
-            libc::RTLD_NOW | libc::RTLD_LOCAL,
-        );
-        if lib.is_null() {
-            log::warn!("Fused MoE dlopen({}) failed", path);
-            return None;
-        }
+        let lib = open_sidecar_library(&path, "Marlin")?;
         if !verify_sidecar_abi(lib, &path, "Marlin", "marlin") {
             return None;
         }
 
-        let sym = libc::dlsym(lib, b"krasis_marlin_moe_mm_bf16\0".as_ptr() as *const _);
-        if !sym.is_null() {
+        if let Some(sym) = sidecar_symbol::<FusedMoeFn>(lib, b"krasis_marlin_moe_mm_bf16\0") {
             log::info!("Loaded fused MoE from {}", path);
-            return Some(std::mem::transmute(sym));
+            return Some(sym);
         }
         log::warn!("Fused MoE symbol not found in {}", path);
     }
@@ -59200,25 +59245,17 @@ fn load_fused_moe() -> Option<FusedMoeFn> {
 fn load_fused_moe_scatter() -> Option<FusedMoeScatterFn> {
     let path = find_marlin_so()?;
     unsafe {
-        let lib = libc::dlopen(
-            std::ffi::CString::new(path.as_str()).ok()?.as_ptr(),
-            libc::RTLD_NOW | libc::RTLD_LOCAL,
-        );
-        if lib.is_null() {
-            log::warn!("Fused MoE scatter dlopen({}) failed", path);
-            return None;
-        }
+        let lib = open_sidecar_library(&path, "Marlin")?;
         if !verify_sidecar_abi(lib, &path, "Marlin", "marlin") {
             return None;
         }
 
-        let sym = libc::dlsym(
+        if let Some(sym) = sidecar_symbol::<FusedMoeScatterFn>(
             lib,
-            b"krasis_moe_zero_and_scatter_weighted_bf16\0".as_ptr() as *const _,
-        );
-        if !sym.is_null() {
+            b"krasis_moe_zero_and_scatter_weighted_bf16\0",
+        ) {
             log::info!("Loaded fused MoE scatter from {}", path);
-            return Some(std::mem::transmute(sym));
+            return Some(sym);
         }
         log::warn!("Fused MoE scatter symbol not found in {}", path);
     }
@@ -59228,34 +59265,24 @@ fn load_fused_moe_scatter() -> Option<FusedMoeScatterFn> {
 fn load_moe_w2_lane_diag() -> Option<(MoeW2LaneDiagConfigFn, MoeW2LaneDiagFetchFn)> {
     let path = find_marlin_so()?;
     unsafe {
-        let lib = libc::dlopen(
-            std::ffi::CString::new(path.as_str()).ok()?.as_ptr(),
-            libc::RTLD_NOW | libc::RTLD_LOCAL,
-        );
-        if lib.is_null() {
-            log::warn!("MoE W2 lane diagnostic dlopen({}) failed", path);
-            return None;
-        }
+        let lib = open_sidecar_library(&path, "Marlin")?;
         if !verify_sidecar_abi(lib, &path, "Marlin", "marlin") {
             return None;
         }
 
-        let config_sym = libc::dlsym(
+        let config_sym = sidecar_symbol::<MoeW2LaneDiagConfigFn>(
             lib,
-            b"krasis_marlin_moe_w2_lane_diag_config\0".as_ptr() as *const _,
+            b"krasis_marlin_moe_w2_lane_diag_config\0",
         );
-        let fetch_sym = libc::dlsym(
+        let fetch_sym = sidecar_symbol::<MoeW2LaneDiagFetchFn>(
             lib,
-            b"krasis_marlin_moe_w2_lane_diag_fetch\0".as_ptr() as *const _,
+            b"krasis_marlin_moe_w2_lane_diag_fetch\0",
         );
-        if config_sym.is_null() || fetch_sym.is_null() {
+        if config_sym.is_none() || fetch_sym.is_none() {
             log::warn!("MoE W2 lane diagnostic symbols not found in {}", path);
             return None;
         }
-        Some((
-            std::mem::transmute(config_sym),
-            std::mem::transmute(fetch_sym),
-        ))
+        Some((config_sym.unwrap(), fetch_sym.unwrap()))
     }
 }
 
@@ -59271,31 +59298,17 @@ fn load_flash_attn() -> Option<FlashAttnFwdFn> {
         }
     };
     unsafe {
-        let lib = libc::dlopen(
-            std::ffi::CString::new(path.as_str()).ok()?.as_ptr(),
-            libc::RTLD_NOW | libc::RTLD_LOCAL,
-        );
-        if lib.is_null() {
-            let err = libc::dlerror();
-            if !err.is_null() {
-                log::warn!(
-                    "dlopen({}) failed: {}",
-                    path,
-                    std::ffi::CStr::from_ptr(err).to_string_lossy()
-                );
-            } else {
-                log::warn!("dlopen({}) failed", path);
-            }
-            return None;
-        }
+        let lib = open_sidecar_library(&path, "FlashAttention")?;
         if !verify_sidecar_abi(lib, &path, "FlashAttention", "flash_attn") {
             return None;
         }
 
-        let sym = libc::dlsym(lib, b"krasis_flash_attn_fwd_bf16\0".as_ptr() as *const _);
-        if !sym.is_null() {
+        if let Some(sym) = sidecar_symbol::<FlashAttnFwdFn>(
+            lib,
+            b"krasis_flash_attn_fwd_bf16\0",
+        ) {
             log::info!("Loaded FlashAttention-2 from {}", path);
-            return Some(std::mem::transmute(sym));
+            return Some(sym);
         }
         log::warn!("krasis_flash_attn_fwd_bf16 symbol not found in {}", path);
     }
@@ -59305,24 +59318,17 @@ fn load_flash_attn() -> Option<FlashAttnFwdFn> {
 fn load_flash_attn_window() -> Option<FlashAttnFwdWindowFn> {
     let path = find_vendor_so("libkrasis_flash_attn.so")?;
     unsafe {
-        let lib = libc::dlopen(
-            std::ffi::CString::new(path.as_str()).ok()?.as_ptr(),
-            libc::RTLD_NOW | libc::RTLD_LOCAL,
-        );
-        if lib.is_null() {
-            return None;
-        }
+        let lib = open_sidecar_library(&path, "FlashAttention")?;
         if !verify_sidecar_abi(lib, &path, "FlashAttention", "flash_attn") {
             return None;
         }
 
-        let sym = libc::dlsym(
+        if let Some(sym) = sidecar_symbol::<FlashAttnFwdWindowFn>(
             lib,
-            b"krasis_flash_attn_fwd_bf16_window\0".as_ptr() as *const _,
-        );
-        if !sym.is_null() {
+            b"krasis_flash_attn_fwd_bf16_window\0",
+        ) {
             log::info!("Loaded FlashAttention-2 windowed BF16 from {}", path);
-            return Some(std::mem::transmute(sym));
+            return Some(sym);
         }
         log::warn!(
             "krasis_flash_attn_fwd_bf16_window symbol not found in {}",
@@ -59337,24 +59343,17 @@ fn load_flash_attn_window() -> Option<FlashAttnFwdWindowFn> {
 fn load_flash_attn_fp8kv() -> Option<FlashAttnFwdFn> {
     let path = find_vendor_so("libkrasis_flash_attn.so")?;
     unsafe {
-        let lib = libc::dlopen(
-            std::ffi::CString::new(path.as_str()).ok()?.as_ptr(),
-            libc::RTLD_NOW | libc::RTLD_LOCAL,
-        );
-        if lib.is_null() {
-            return None;
-        }
+        let lib = open_sidecar_library(&path, "FlashAttention")?;
         if !verify_sidecar_abi(lib, &path, "FlashAttention", "flash_attn") {
             return None;
         }
 
-        let sym = libc::dlsym(
+        if let Some(sym) = sidecar_symbol::<FlashAttnFwdFn>(
             lib,
-            b"krasis_flash_attn_fwd_bf16q_fp8kv\0".as_ptr() as *const _,
-        );
-        if !sym.is_null() {
+            b"krasis_flash_attn_fwd_bf16q_fp8kv\0",
+        ) {
             log::info!("Loaded FlashAttention-2 FP8 KV from {}", path);
-            return Some(std::mem::transmute(sym));
+            return Some(sym);
         }
         log::warn!(
             "krasis_flash_attn_fwd_bf16q_fp8kv symbol not found in {}",
@@ -59368,24 +59367,33 @@ fn load_flash_attn_fp8kv() -> Option<FlashAttnFwdFn> {
 /// Searches: 1) env var, 2) installed package, 3) next to executable.
 fn find_vendor_so(name: &str) -> Option<String> {
     // 1. Look in env var (uppercase, dots/hyphens → underscore)
-    let env_name = name.replace('.', "_").replace('-', "_").to_uppercase();
-    let env_key = format!("KRASIS_{}", env_name);
-    if let Ok(p) = std::env::var(&env_key) {
-        if std::path::Path::new(&p).exists() {
-            return Some(p);
+    for candidate_name in sidecar_name_candidates(name) {
+        let env_name = candidate_name
+            .replace('.', "_")
+            .replace('-', "_")
+            .to_uppercase();
+        let env_key = format!("KRASIS_{}", env_name);
+        if let Ok(p) = std::env::var(&env_key) {
+            if std::path::Path::new(&p).exists() {
+                return Some(p);
+            }
         }
     }
 
-    if let Some(p) = installed_package_sidecar(name) {
-        return Some(p);
+    for candidate_name in sidecar_name_candidates(name) {
+        if let Some(p) = installed_package_sidecar(&candidate_name) {
+            return Some(p);
+        }
     }
 
     // 2. Look next to the current executable
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let p = dir.join(name);
-            if p.exists() {
-                return Some(p.to_string_lossy().to_string());
+            for candidate_name in sidecar_name_candidates(name) {
+                let p = dir.join(candidate_name);
+                if p.exists() {
+                    return Some(p.to_string_lossy().to_string());
+                }
             }
         }
     }
@@ -59531,66 +59539,31 @@ Set KRASIS_NO_FLA=1 only if you explicitly want the slower custom LA path."
             }
         }
     };
-    let path_cstr = match std::ffi::CString::new(path.as_str()) {
-        Ok(v) => v,
-        Err(_) => return fail_or_warn(format!("invalid FLA library path: {}", path)),
-    };
     unsafe {
-        let lib = libc::dlopen(path_cstr.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL);
-        if lib.is_null() {
-            let err = libc::dlerror();
-            if !err.is_null() {
-                let detail = std::ffi::CStr::from_ptr(err).to_string_lossy();
-                return fail_or_warn(format!("dlopen({}) failed: {}", path, detail));
-            } else {
-                return fail_or_warn(format!("dlopen({}) failed", path));
-            }
-        }
+        let lib = match open_sidecar_library(&path, "FLA") {
+            Some(lib) => lib,
+            None => return fail_or_warn(format!("loading FLA sidecar failed: {}", path)),
+        };
 
         // Initialize FLA modules (loads cubins into CUDA context)
-        let init_sym = libc::dlsym(lib, b"krasis_fla_init\0".as_ptr() as *const _);
-        if init_sym.is_null() {
-            let _ = libc::dlclose(lib);
-            return fail_or_warn(format!("krasis_fla_init not found in {}", path));
-        }
-        let init_fn: FlaInitFn = std::mem::transmute(init_sym);
+        let init_fn = match sidecar_symbol::<FlaInitFn>(lib, b"krasis_fla_init\0") {
+            Some(sym) => sym,
+            None => return fail_or_warn(format!("krasis_fla_init not found in {}", path)),
+        };
         let rc = init_fn();
         if rc != 0 {
-            let _ = libc::dlclose(lib);
             return fail_or_warn(format!("krasis_fla_init() failed with rc={}", rc));
         }
 
         // Load all 6 kernel function pointers.
         // FLA kernels have H (num_v_heads) baked in as a Triton constexpr.
         // Try H-specific symbols first (e.g. _h64), fall back to generic.
-        let h_suffix = format!("_h{}", nv);
         eprintln!("[FLA] Loading kernels for H={} from {}", nv, path);
-        let load_sym_for = |base_name: &str| -> Result<*mut std::ffi::c_void, String> {
-            // Try H-specific first (using CString for safe null termination)
-            let h_name_str = format!("{}{}", base_name, h_suffix);
-            let h_cstr = std::ffi::CString::new(h_name_str.clone())
-                .map_err(|_| format!("invalid symbol name: {}", h_name_str))?;
-            let sym = libc::dlsym(lib, h_cstr.as_ptr());
-            if !sym.is_null() {
-                eprintln!("[FLA] loaded {} (H={})", base_name, nv);
-                return Ok(sym);
-            }
-            // Fall back to generic (for H-independent kernels)
-            let generic_cstr = std::ffi::CString::new(base_name.to_string())
-                .map_err(|_| format!("invalid symbol name: {}", base_name))?;
-            let sym = libc::dlsym(lib, generic_cstr.as_ptr());
-            if !sym.is_null() {
-                eprintln!("[FLA] loaded {} (generic)", base_name);
-                return Ok(sym);
-            }
-            Err(format!("{} (H={}) not found in {}", base_name, nv, path))
-        };
         macro_rules! load_fla_sym {
-            ($name:expr) => {{
-                match load_sym_for($name) {
-                    Ok(sym) => std::mem::transmute(sym),
+            ($name:expr, $ty:ty) => {{
+                match sidecar_symbol_for_h::<$ty>(lib, $name, nv, &path) {
+                    Ok(sym) => sym,
                     Err(msg) => {
-                        let _ = libc::dlclose(lib);
                         return fail_or_warn(msg);
                     }
                 }
@@ -59599,33 +59572,48 @@ Set KRASIS_NO_FLA=1 only if you explicitly want the slower custom LA path."
 
         let use_state_bv64 = std::env::var("KRASIS_FLA_STATE_BV64").ok().as_deref() == Some("1");
         let state_recurrence_bv64 = if use_state_bv64 {
-            let sym = match load_sym_for(
+            let sym = match sidecar_symbol_for_h::<FlaStateRecurrenceFn>(
+                lib,
                 "krasis_fla_chunk_gated_delta_rule_fwd_kernel_h_blockdim64_bv64",
+                nv,
+                &path,
             ) {
                 Ok(sym) => sym,
                 Err(msg) => {
-                    let _ = libc::dlclose(lib);
                     return fail_or_warn(format!(
                         "{msg}; KRASIS_FLA_STATE_BV64=1 requires the BV64 FLA sidecar variant"
                     ));
                 }
             };
-            Some(std::mem::transmute(sym))
+            Some(sym)
         } else {
             None
         };
 
         let kernels = FlaKernels {
-            cumsum: load_fla_sym!("krasis_fla_chunk_local_cumsum_scalar_kernel"),
-            kkt: load_fla_sym!("krasis_fla_chunk_scaled_dot_kkt_fwd_kernel"),
-            solve_tril: load_fla_sym!("krasis_fla_merge_16x16_to_64x64_inverse_kernel"),
-            wy_repr: load_fla_sym!("krasis_fla_recompute_w_u_fwd_kernel"),
+            cumsum: load_fla_sym!(
+                "krasis_fla_chunk_local_cumsum_scalar_kernel",
+                FlaScalarKernelFn
+            ),
+            kkt: load_fla_sym!(
+                "krasis_fla_chunk_scaled_dot_kkt_fwd_kernel",
+                FlaKktKernelFn
+            ),
+            solve_tril: load_fla_sym!(
+                "krasis_fla_merge_16x16_to_64x64_inverse_kernel",
+                FlaSolveTrilFn
+            ),
+            wy_repr: load_fla_sym!(
+                "krasis_fla_recompute_w_u_fwd_kernel",
+                FlaWyReprFn
+            ),
             state_recurrence: load_fla_sym!(
-                "krasis_fla_chunk_gated_delta_rule_fwd_kernel_h_blockdim64"
+                "krasis_fla_chunk_gated_delta_rule_fwd_kernel_h_blockdim64",
+                FlaStateRecurrenceFn
             ),
             state_recurrence_bv64,
             state_recurrence_bv64_enabled: use_state_bv64,
-            output: load_fla_sym!("krasis_fla_chunk_fwd_kernel_o"),
+            output: load_fla_sym!("krasis_fla_chunk_fwd_kernel_o", FlaOutputFn),
         };
 
         log::info!("Loaded FLA (Flash Linear Attention) kernels from {}", path);
@@ -65158,18 +65146,8 @@ fn find_marlin_so() -> Option<String> {
         }
     }
 
-    if let Some(p) = installed_package_sidecar("libkrasis_marlin.so") {
+    if let Some(p) = find_vendor_so("libkrasis_marlin.so") {
         return Some(p);
-    }
-
-    // 2. Look next to the current executable / shared library
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let p = dir.join("libkrasis_marlin.so");
-            if p.exists() {
-                return Some(p.to_string_lossy().to_string());
-            }
-        }
     }
 
     log::warn!("libkrasis_marlin.so not found — Marlin GEMM will be unavailable");

@@ -21,6 +21,7 @@ safetensors = "0.4"
 rayon = "1.10"
 half = { version = "2.4", features = ["std", "num-traits"] }
 libc = "0.2"
+libloading = "0.8"
 log = "0.4"
 env_logger = "0.11"
 thiserror = "2"

@@ -363,7 +363,7 @@ void marlin_mm_impl(
 
 // ── Extern "C" entry point ──────────────────────────────────────────────────
 
-extern "C" void krasis_marlin_mm_bf16(
+KRASIS_EXPORT void krasis_marlin_mm_bf16(
     const void* A, const void* B, void* C, void* C_tmp,
     void* s, void* s2, void* zp, void* g_idx, void* perm, void* a_tmp,
     int prob_m, int prob_n, int prob_k, int lda,
@@ -387,14 +387,14 @@ extern "C" void krasis_marlin_mm_bf16(
 }
 
 // Version info
-extern "C" const char* krasis_marlin_version() {
+KRASIS_EXPORT const char* krasis_marlin_version() {
     return "vendored-from-sglang-0.4.0";
 }
 
-extern "C" uint32_t krasis_sidecar_abi_version() {
+KRASIS_EXPORT uint32_t krasis_sidecar_abi_version() {
     return KRASIS_SIDECAR_ABI_VERSION;
 }
 
-extern "C" const char* krasis_sidecar_build_id() {
+KRASIS_EXPORT const char* krasis_sidecar_build_id() {
     return KRASIS_SIDECAR_BUILD_ID;
 }

@@ -50,8 +50,9 @@ def read_sidecar_abi_version() -> int:
 
 SIDECAR_ABI_VERSION = read_sidecar_abi_version()
 
-MARLIN_SO = "libkrasis_marlin.so"
-FLASH_ATTN_SO = "libkrasis_flash_attn.so"
+IS_WINDOWS = os.name == "nt"
+MARLIN_SO = "krasis_marlin.dll" if IS_WINDOWS else "libkrasis_marlin.so"
+FLASH_ATTN_SO = "krasis_flash_attn.dll" if IS_WINDOWS else "libkrasis_flash_attn.so"
 
 MARLIN_SYMBOLS = [
     "krasis_sidecar_abi_version",
@@ -68,7 +69,8 @@ FLASH_ATTN_SYMBOLS = [
     "krasis_flash_attn_fwd_bf16q_fp8kv",
 ]
 
-BUNDLE_PLATFORM = os.environ.get("KRASIS_SIDECAR_PLATFORM", "linux-x86_64-cuda126")
+DEFAULT_BUNDLE_PLATFORM = "windows-x86_64-cuda126" if IS_WINDOWS else "linux-x86_64-cuda126"
+BUNDLE_PLATFORM = os.environ.get("KRASIS_SIDECAR_PLATFORM", DEFAULT_BUNDLE_PLATFORM)
 GITHUB_TIMEOUT_SECONDS = int(os.environ.get("KRASIS_GITHUB_TIMEOUT_SECONDS", "15"))
 GITHUB_RELEASE_SEARCH_LIMIT = int(os.environ.get("KRASIS_SIDECAR_RELEASE_SEARCH_LIMIT", "25"))
 
@@ -93,9 +95,10 @@ def find_nvcc() -> str:
     for var in ("CUDA_HOME", "CUDA_PATH"):
         root = os.environ.get(var)
         if root:
-            candidate = Path(root) / "bin" / "nvcc"
-            if candidate.exists():
-                return str(candidate)
+            for exe in ("nvcc.exe", "nvcc"):
+                candidate = Path(root) / "bin" / exe
+                if candidate.exists():
+                    return str(candidate)
     for candidate in (
         Path("/usr/local/cuda/bin/nvcc"),
         Path("/usr/local/cuda-12.6/bin/nvcc"),
@@ -119,6 +122,14 @@ def command_output(args: list[str]) -> str:
 def nvcc_host_compiler_args() -> list[str]:
     ccbin = os.environ.get("KRASIS_NVCC_CCBIN", "").strip()
     return ["-ccbin", ccbin] if ccbin else []
+
+
+def nvcc_pic_args() -> list[str]:
+    return [] if IS_WINDOWS else ["-Xcompiler", "-fPIC"]
+
+
+def object_suffix() -> str:
+    return ".obj" if IS_WINDOWS else ".o"
 
 
 def timed_run(args: list[str], label: str) -> None:
@@ -165,22 +176,18 @@ def sidecar_inputs(nvcc: str) -> dict[str, dict[str, object]]:
     marlin_flags = [
         "--expt-relaxed-constexpr",
         "-allow-unsupported-compiler",
-        "-Xcompiler",
-        "-fPIC",
         "-arch=sm_80",
         "-O3",
         "--use_fast_math",
         "-I",
         "src/cuda/marlin",
         f"-DKRASIS_SIDECAR_ABI_VERSION={SIDECAR_ABI_VERSION}",
-    ] + nvcc_host_compiler_args()
+    ] + nvcc_pic_args() + nvcc_host_compiler_args()
 
     fa_common_flags = [
         "--expt-relaxed-constexpr",
         "--expt-extended-lambda",
         "-allow-unsupported-compiler",
-        "-Xcompiler",
-        "-fPIC",
         "-O3",
         "--use_fast_math",
         "-DKRASIS_FA_VENDOR",
@@ -190,7 +197,7 @@ def sidecar_inputs(nvcc: str) -> dict[str, dict[str, object]]:
         "-Isrc/cuda/flash_attn/fa2",
         "-Isrc/cuda/flash_attn/cutlass",
         f"-DKRASIS_SIDECAR_ABI_VERSION={SIDECAR_ABI_VERSION}",
-    ] + nvcc_host_compiler_args()
+    ] + nvcc_pic_args() + nvcc_host_compiler_args()
 
     env_contract = {
         "nvcc": nvcc,
@@ -277,8 +284,6 @@ def build_marlin(nvcc: str, build_id: str, force: bool) -> Path:
     common_args = [
         "--expt-relaxed-constexpr",
         "-allow-unsupported-compiler",
-        "-Xcompiler",
-        "-fPIC",
         "-arch=sm_80",
         "-O3",
         "--use_fast_math",
@@ -286,10 +291,11 @@ def build_marlin(nvcc: str, build_id: str, force: bool) -> Path:
         "src/cuda/marlin",
         f"-DKRASIS_SIDECAR_ABI_VERSION={SIDECAR_ABI_VERSION}",
         f"-DKRASIS_SIDECAR_BUILD_ID=\\\"{build_id}\\\"",
-    ] + nvcc_host_compiler_args()
+    ] + nvcc_pic_args() + nvcc_host_compiler_args()
 
-    obj_regular = out / "marlin_vendor.o"
-    obj_moe = out / "marlin_moe_vendor.o"
+    suffix = object_suffix()
+    obj_regular = out / f"marlin_vendor{suffix}"
+    obj_moe = out / f"marlin_moe_vendor{suffix}"
     so_path = out / MARLIN_SO
     timed_run([nvcc, "-c", "-o", str(obj_regular), *common_args, "src/cuda/marlin/marlin_vendor.cu"], "sidecar Marlin regular compile")
     timed_run([nvcc, "-c", "-o", str(obj_moe), *common_args, "src/cuda/marlin/marlin_moe_vendor.cu"], "sidecar Marlin MoE compile")
@@ -307,8 +313,6 @@ def build_flash_attn(nvcc: str, build_id: str, force: bool) -> Path:
         "--expt-relaxed-constexpr",
         "--expt-extended-lambda",
         "-allow-unsupported-compiler",
-        "-Xcompiler",
-        "-fPIC",
         "-O3",
         "--use_fast_math",
         "-DKRASIS_FA_VENDOR",
@@ -319,11 +323,11 @@ def build_flash_attn(nvcc: str, build_id: str, force: bool) -> Path:
         f"-DKRASIS_SIDECAR_BUILD_ID=\\\"{build_id}\\\"",
         "-Isrc/cuda/flash_attn/fa2",
         "-Isrc/cuda/flash_attn/cutlass",
-    ] + nvcc_host_compiler_args()
+    ] + nvcc_pic_args() + nvcc_host_compiler_args()
 
     obj_files: list[Path] = []
     for cu_file in flash_attn_cu_files():
-        obj_path = out / f"fa2_{cu_file.replace('.cu', '.o')}"
+        obj_path = out / f"fa2_{cu_file.replace('.cu', object_suffix())}"
         timed_run(
             [
                 nvcc,
@@ -350,6 +354,8 @@ def read_manifest(path: Path = MANIFEST_PATH) -> dict[str, object] | None:
 
 
 def nm_symbols(path: Path) -> set[str]:
+    if IS_WINDOWS:
+        return set()
     out = command_output(["nm", "-D", "--defined-only", str(path)])
     symbols: set[str] = set()
     for line in out.splitlines():
@@ -360,6 +366,12 @@ def nm_symbols(path: Path) -> set[str]:
 
 
 def verify_symbols(path: Path, required: list[str]) -> list[str]:
+    if IS_WINDOWS:
+        try:
+            lib = ctypes.CDLL(str(path))
+        except Exception as exc:
+            return [f"<load failed: {exc}>"]
+        return [sym for sym in required if not hasattr(lib, sym)]
     symbols = nm_symbols(path)
     return [sym for sym in required if sym not in symbols]
 
@@ -387,6 +399,20 @@ def copy_to_package(path: Path) -> Path:
     dst = PACKAGE_DIR / path.name
     shutil.copy2(path, dst)
     return dst
+
+
+def copy_windows_cuda_runtime(nvcc: str) -> list[str]:
+    if not IS_WINDOWS:
+        return []
+    cuda_bin = Path(nvcc).resolve().parent
+    candidates = sorted(cuda_bin.glob("cudart64*.dll"))
+    if not candidates:
+        raise SystemExit(f"ERROR: Windows CUDA runtime DLL not found next to nvcc: {cuda_bin}")
+    copied: list[str] = []
+    for src in candidates:
+        dst = copy_to_package(src)
+        copied.append(dst.name)
+    return copied
 
 
 def manifest_matches(manifest: dict[str, object], contracts: dict[str, dict[str, object]]) -> bool:
@@ -454,7 +480,8 @@ def extract_bundle(path: Path, contracts: dict[str, dict[str, object]]) -> None:
                 if missing:
                     raise SystemExit(f"ERROR: sidecar bundle {path.name} missing {', '.join(missing)}")
                 for member in members:
-                    if member.name not in expected_names:
+                    is_windows_runtime = IS_WINDOWS and member.name.startswith("krasis/cudart64") and member.name.endswith(".dll")
+                    if member.name not in expected_names and not is_windows_runtime:
                         raise SystemExit(f"ERROR: sidecar bundle {path.name} contains unexpected entry {member.name}")
                     if not member.isfile():
                         raise SystemExit(f"ERROR: sidecar bundle {path.name} contains non-file entry {member.name}")
@@ -463,7 +490,10 @@ def extract_bundle(path: Path, contracts: dict[str, dict[str, object]]) -> None:
             raise SystemExit(f"ERROR: sidecar bundle {path.name} is not a valid tar.gz archive: {exc}") from exc
 
         PACKAGE_DIR.mkdir(parents=True, exist_ok=True)
-        for name in expected_names:
+        copy_names = list(expected_names)
+        if IS_WINDOWS:
+            copy_names.extend(name for name in names if name.startswith("krasis/cudart64") and name.endswith(".dll"))
+        for name in copy_names:
             src = tmp / name
             dst = PACKAGE_DIR / Path(name).name
             shutil.copy2(src, dst)
@@ -487,6 +517,9 @@ def create_bundle(path: Path) -> None:
             if not src.exists():
                 raise SystemExit(f"ERROR: cannot bundle missing sidecar artifact {src}")
             tf.add(src, arcname=arcname)
+        if IS_WINDOWS:
+            for src in sorted(PACKAGE_DIR.glob("cudart64*.dll")):
+                tf.add(src, arcname=f"krasis/{src.name}")
     tmp_path.replace(path)
 
 
@@ -662,6 +695,7 @@ def build(args: argparse.Namespace) -> None:
 
     marlin_so = copy_to_package(build_marlin(nvcc, marlin_hash[:24], args.force))
     flash_so = copy_to_package(build_flash_attn(nvcc, flash_hash[:24], args.force))
+    windows_runtime_dlls = copy_windows_cuda_runtime(nvcc)
 
     for name, path, contract, contract_hash in (
         ("marlin", marlin_so, contracts["marlin"], marlin_hash),
@@ -686,6 +720,7 @@ def build(args: argparse.Namespace) -> None:
         "generator": "scripts/build_sidecars.py",
         "nvcc": contracts["marlin"]["env"],  # same env contract for both sidecars
         "sidecars": entries,
+        "windows_runtime_dlls": windows_runtime_dlls,
     }
     MANIFEST_PATH.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     current_manifest = read_manifest()
@@ -727,6 +762,12 @@ def verify_wheel(args: argparse.Namespace) -> None:
             missing = sorted(required - names)
             if missing:
                 raise SystemExit(f"ERROR: {wheel.name} missing {', '.join(missing)}")
+            windows_runtime_names = sorted(
+                name for name in names
+                if name.startswith("krasis/cudart64") and name.endswith(".dll")
+            )
+            if IS_WINDOWS and not windows_runtime_names:
+                raise SystemExit(f"ERROR: {wheel.name} missing bundled cudart64*.dll")
             manifest = json.loads(zf.read("krasis/sidecar_manifest.json").decode("utf-8"))
             if manifest.get("schema_version") != 1:
                 raise SystemExit(f"ERROR: {wheel.name} manifest schema_version mismatch")
@@ -747,6 +788,9 @@ def verify_wheel(args: argparse.Namespace) -> None:
                 with tempfile.TemporaryDirectory(dir=wheel_dir) as tmpdir:
                     extracted = Path(tmpdir) / so_name
                     extracted.write_bytes(data)
+                    for runtime_name in windows_runtime_names:
+                        runtime_path = Path(tmpdir) / Path(runtime_name).name
+                        runtime_path.write_bytes(zf.read(runtime_name))
                     lib = ctypes.CDLL(str(extracted))
                     abi_fn = lib.krasis_sidecar_abi_version
                     abi_fn.restype = ctypes.c_uint32

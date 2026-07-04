@@ -48,5 +48,6 @@ module-name = "krasis.krasis"
 include = [
     {path = "python/krasis/prompts/*", format = "wheel"},
     {path = "python/krasis/libkrasis*.so", format = "wheel"},
+    {path = "python/krasis/*.dll", format = "wheel"},
     {path = "python/krasis/sidecar_manifest.json", format = "wheel"},
 ]

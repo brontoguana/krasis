@@ -373,12 +373,24 @@ def _ensure_wsl_cuda_env():
 
 
 def _find_nvidia_smi() -> Optional[str]:
-    """Find nvidia-smi, including the WSL2 driver mount."""
+    """Find nvidia-smi on Linux/WSL/Windows."""
     import shutil
 
     nvidia_smi = shutil.which("nvidia-smi")
     if nvidia_smi:
         return nvidia_smi
+    if os.name == "nt":
+        roots = [
+            os.environ.get("ProgramFiles"),
+            os.environ.get("ProgramW6432"),
+            r"C:\Program Files",
+        ]
+        for root in roots:
+            if not root:
+                continue
+            candidate = os.path.join(root, "NVIDIA Corporation", "NVSMI", "nvidia-smi.exe")
+            if os.path.isfile(candidate):
+                return candidate
     wsl_smi = os.path.join(_wsl_cuda_dir(), "nvidia-smi")
     if os.path.isfile(wsl_smi):
         return wsl_smi
@@ -2774,6 +2786,23 @@ def _check_gpu_deps():
             print(f"  NVIDIA driver with WSL CUDA support, then run: wsl --shutdown")
             print(f"  Do not install a Linux nvidia-driver package inside WSL.")
         sys.exit(1)
+
+    if os.name == "nt":
+        problems = []
+        try:
+            import torch
+            torch.set_float32_matmul_precision('high')
+            if not torch.cuda.is_available():
+                problems.append("CUDA-enabled PyTorch")
+        except ImportError:
+            problems.append("PyTorch")
+
+        if problems:
+            print(f"{RED}Missing GPU dependencies: {', '.join(problems)}{NC}")
+            print(f"Run: {BOLD}krasis-setup{NC}")
+            print()
+            sys.exit(1)
+        return
 
     # Find nvcc: try multiple common locations so it works even if
     # the user's PATH doesn't include the CUDA toolkit yet.

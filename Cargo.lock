@@ -423,6 +423,7 @@ dependencies = [
  "env_logger",
  "half",
  "libc",
+ "libloading",
  "log",
  "memmap2",
  "minijinja",

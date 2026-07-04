@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Added the first native Windows installer/build path. Windows wheels can now
+  include Krasis sidecar DLLs, bundled CUDA runtime DLLs, and resolve them via
+  `os.add_dll_directory`; Rust prefill sidecar loading now uses a
+  cross-platform dynamic loader instead of Unix-only `dlopen`/`dlsym`. Added
+  PowerShell installer/launcher scripts that create a per-user install under
+  `%LOCALAPPDATA%\Programs\Krasis`, install a bundled private Python runtime
+  and Krasis environment, and create a Start Menu shortcut that opens a
+  maximized PowerShell window running the interactive launcher. Added a Windows
+  installer GitHub workflow that builds sidecar DLLs, builds/verifies a Windows
+  wheel, creates an offline wheelhouse, downloads the matching Python
+  installer, and packages `KrasisSetup-*-win64.exe` with Inno Setup. The first
+  Windows target is Marlin/FlashAttention-backed models; FLA/linear-attention
+  models still require a separate native Windows FLA sidecar port.
+
 - Added Gemma4 image support with the same lazy architecture as Qwen/Step
   vision. Gemma4 support is detected from `gemma4` metadata plus
   `model.vision_tower.*` and `model.embed_vision.*` safetensors entries; image

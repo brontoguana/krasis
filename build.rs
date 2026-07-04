@@ -25,7 +25,13 @@ fn main() {
     //
     // When libnuma is NOT found (e.g. CI manylinux containers), we set
     // cfg(no_numa) so numa.rs can stub out the FFI calls.
-    let has_numa = timed_value("probe libnuma", || probe_lib("numa"));
+    let has_numa = timed_value("probe libnuma", || {
+        if cfg!(windows) {
+            false
+        } else {
+            probe_lib("numa")
+        }
+    });
     if has_numa {
         println!("cargo:rustc-link-lib=numa");
     } else {
@@ -301,9 +307,11 @@ fn find_nvcc() -> Option<String> {
     // Check CUDA_HOME / CUDA_PATH
     for var in ["CUDA_HOME", "CUDA_PATH"] {
         if let Ok(cuda_dir) = std::env::var(var) {
-            let nvcc = format!("{cuda_dir}/bin/nvcc");
-            if std::path::Path::new(&nvcc).exists() {
-                return Some(nvcc);
+            for exe in ["nvcc", "nvcc.exe"] {
+                let nvcc = std::path::Path::new(&cuda_dir).join("bin").join(exe);
+                if nvcc.exists() {
+                    return Some(nvcc.to_string_lossy().to_string());
+                }
             }
         }
     }
