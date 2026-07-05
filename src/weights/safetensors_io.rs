@@ -129,7 +129,8 @@ impl MmapSafetensors {
             tensors.insert(name, info);
         }
 
-        // Advise sequential access for optimal kernel readahead
+        // Advise sequential access for optimal kernel readahead.
+        #[cfg(unix)]
         let _ = mmap.advise(memmap2::Advice::Sequential);
 
         log::info!(
@@ -202,14 +203,18 @@ impl MmapSafetensors {
         if let Some(info) = self.tensors.get(name) {
             let start = self.data_start + info.data_offsets[0];
             let len = info.data_offsets[1] - info.data_offsets[0];
+            #[cfg(unix)]
             let _ = self
                 .mmap
                 .advise_range(memmap2::Advice::WillNeed, start, len);
+            #[cfg(not(unix))]
+            let _ = (start, len);
         }
     }
 
     /// Evict all pages from page cache. Call after all data has been copied out.
     pub fn evict_page_cache(&self) {
+        #[cfg(unix)]
         let _ = unsafe {
             self.mmap
                 .unchecked_advise(memmap2::UncheckedAdvice::DontNeed)

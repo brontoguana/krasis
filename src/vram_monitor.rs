@@ -5,8 +5,9 @@
 //! 2. Warn at runtime when free VRAM hits new lows below safety margin
 //! 3. Record VRAM report (periodic samples + named events) when enabled
 //!
-//! CUDA functions are loaded via dlsym at runtime — no link-time dependency
-//! on libcudart. PyTorch always loads it, so it's available.
+//! CUDA functions are loaded at runtime — no link-time dependency on
+//! libcudart. PyTorch normally loads it first, but native Windows builds may
+//! resolve the bundled CUDA runtime DLL from the package directory.
 
 use pyo3::prelude::*;
 use std::io::Write;
@@ -95,17 +96,21 @@ pub fn fatal_cuda_context_error(context: &str, err: &str) -> ! {
         context,
         err,
     );
+    #[cfg(unix)]
     unsafe {
         libc::_exit(CUDA_CONTEXT_POISONED_EXIT_CODE);
     }
+    #[cfg(not(unix))]
+    std::process::exit(CUDA_CONTEXT_POISONED_EXIT_CODE);
 }
 
-// CUDA runtime function signatures (resolved via dlsym)
+// CUDA runtime function signatures (resolved dynamically)
 type CudaSetDeviceFn = unsafe extern "C" fn(i32) -> i32;
 type CudaMemGetInfoFn = unsafe extern "C" fn(*mut usize, *mut usize) -> i32;
 
 /// Load cudaSetDevice + cudaMemGetInfo from the already-loaded libcudart.
 /// Returns None if the library isn't loaded or symbols aren't found.
+#[cfg(unix)]
 fn load_cuda_fns() -> Option<(CudaSetDeviceFn, CudaMemGetInfoFn)> {
     unsafe {
         // Try common names — RTLD_NOLOAD means "only find already-loaded lib"
@@ -137,6 +142,27 @@ fn load_cuda_fns() -> Option<(CudaSetDeviceFn, CudaMemGetInfoFn)> {
             std::mem::transmute(mem_get_info),
         ))
     }
+}
+
+/// Load cudaSetDevice + cudaMemGetInfo from the CUDA runtime DLL.
+/// The Library is intentionally leaked after symbol resolution because the
+/// returned function pointers must remain valid for the process lifetime.
+#[cfg(windows)]
+fn load_cuda_fns() -> Option<(CudaSetDeviceFn, CudaMemGetInfoFn)> {
+    let lib_names = ["cudart64_12.dll", "cudart64_110.dll"];
+    for name in lib_names {
+        let Ok(lib) = (unsafe { libloading::Library::new(name) }) else {
+            continue;
+        };
+        let funcs = unsafe {
+            let set_device = lib.get::<CudaSetDeviceFn>(b"cudaSetDevice\0").ok()?;
+            let mem_get_info = lib.get::<CudaMemGetInfoFn>(b"cudaMemGetInfo\0").ok()?;
+            (*set_device, *mem_get_info)
+        };
+        std::mem::forget(lib);
+        return Some(funcs);
+    }
+    None
 }
 
 /// Query free VRAM in bytes for a specific device.

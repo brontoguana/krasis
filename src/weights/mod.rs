@@ -3085,6 +3085,7 @@ impl WeightStore {
 
         // Evict page cache — data is now copied into heap Vecs
         let cache_bytes = mmap.len();
+        #[cfg(unix)]
         let _ = unsafe { mmap.unchecked_advise(memmap2::UncheckedAdvice::DontNeed) };
         drop(mmap);
         drop(file);
@@ -4363,6 +4364,7 @@ impl WeightStore {
         }
 
         // Evict page cache — data is now copied into heap Vecs
+        #[cfg(unix)]
         let _ = unsafe { mmap.unchecked_advise(memmap2::UncheckedAdvice::DontNeed) };
         drop(mmap);
         drop(file);
@@ -5014,6 +5016,7 @@ impl WeightStore {
         }
 
         // Evict page cache — data is now copied into heap Vecs
+        #[cfg(unix)]
         let _ = unsafe { mmap.unchecked_advise(memmap2::UncheckedAdvice::DontNeed) };
         drop(mmap);
         drop(file);
@@ -6372,6 +6375,7 @@ impl WeightStore {
         }
 
         // Evict page cache — data is now copied into heap Vecs
+        #[cfg(unix)]
         let _ = unsafe { mmap.unchecked_advise(memmap2::UncheckedAdvice::DontNeed) };
         drop(mmap);
         drop(file);

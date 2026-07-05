@@ -574,6 +574,7 @@ impl GgufFile {
 
     /// Evict all pages from page cache. Call after all data has been copied out.
     pub fn evict_page_cache(&self) {
+        #[cfg(unix)]
         let _ = unsafe {
             self.mmap
                 .unchecked_advise(memmap2::UncheckedAdvice::DontNeed)
