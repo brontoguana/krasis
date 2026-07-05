@@ -749,6 +749,53 @@ def verify(args: argparse.Namespace) -> None:
     print("[sidecars] verified package sidecars and manifest")
 
 
+def probe_sidecar_library(path: Path, required_symbols: list[str]) -> dict[str, object]:
+    """Load a sidecar in a child process so Windows can delete it afterwards."""
+    probe_code = r"""
+import ctypes
+import json
+import os
+import sys
+
+path = sys.argv[1]
+required_symbols = json.loads(sys.argv[2])
+dll_dir = os.path.dirname(path)
+if hasattr(os, "add_dll_directory"):
+    os.add_dll_directory(dll_dir)
+if os.name == "nt":
+    os.environ["PATH"] = dll_dir + os.pathsep + os.environ.get("PATH", "")
+
+lib = ctypes.CDLL(path)
+abi_fn = lib.krasis_sidecar_abi_version
+abi_fn.restype = ctypes.c_uint32
+build_id_fn = lib.krasis_sidecar_build_id
+build_id_fn.restype = ctypes.c_char_p
+missing = []
+for symbol in required_symbols:
+    try:
+        getattr(lib, symbol)
+    except AttributeError:
+        missing.append(symbol)
+print(json.dumps({
+    "abi": int(abi_fn()),
+    "build_id": build_id_fn().decode("utf-8"),
+    "missing": missing,
+}))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", probe_code, str(path), json.dumps(required_symbols)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        stdout = result.stdout.strip()
+        detail = stderr or stdout or f"exit code {result.returncode}"
+        raise RuntimeError(f"failed to load {path.name}: {detail}")
+    return json.loads(result.stdout)
+
+
 def verify_wheel(args: argparse.Namespace) -> None:
     wheel_dir = Path(args.wheel_dir)
     wheels = sorted(wheel_dir.glob("*.whl"))
@@ -795,31 +842,26 @@ def verify_wheel(args: argparse.Namespace) -> None:
                     for runtime_name in windows_runtime_names:
                         runtime_path = Path(tmpdir) / Path(runtime_name).name
                         runtime_path.write_bytes(zf.read(runtime_name))
-                    lib = ctypes.CDLL(str(extracted))
-                    abi_fn = lib.krasis_sidecar_abi_version
-                    abi_fn.restype = ctypes.c_uint32
-                    actual_abi = int(abi_fn())
+                    required_symbols = MARLIN_SYMBOLS if sidecar_name == "marlin" else FLASH_ATTN_SYMBOLS
+                    probe = probe_sidecar_library(extracted, required_symbols)
+                    actual_abi = int(probe["abi"])
                     if actual_abi != SIDECAR_ABI_VERSION:
                         raise SystemExit(
                             f"ERROR: {wheel.name} {so_name} ABI mismatch: "
                             f"expected {SIDECAR_ABI_VERSION}, got {actual_abi}"
                         )
-                    build_id_fn = lib.krasis_sidecar_build_id
-                    build_id_fn.restype = ctypes.c_char_p
-                    actual_build_id = build_id_fn().decode("utf-8")
+                    actual_build_id = str(probe["build_id"])
                     if entry.get("build_id") != actual_build_id:
                         raise SystemExit(
                             f"ERROR: {wheel.name} {so_name} build_id mismatch: "
                             f"manifest={entry.get('build_id')} so={actual_build_id}"
                         )
-                    required_symbols = MARLIN_SYMBOLS if sidecar_name == "marlin" else FLASH_ATTN_SYMBOLS
-                    for symbol in required_symbols:
-                        try:
-                            getattr(lib, symbol)
-                        except AttributeError as exc:
-                            raise SystemExit(
-                                f"ERROR: {wheel.name} {so_name} missing required symbol {symbol}"
-                            ) from exc
+                    missing_symbols = probe.get("missing", [])
+                    if missing_symbols:
+                        raise SystemExit(
+                            f"ERROR: {wheel.name} {so_name} missing required symbol "
+                            f"{', '.join(str(symbol) for symbol in missing_symbols)}"
+                        )
         print(f"[sidecars] verified wheel {wheel.name}")
 
 
