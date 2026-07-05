@@ -35,7 +35,9 @@
   shortcut now relies on PowerShell's `-WindowStyle Maximized` flag rather than
   an unsupported Inno Setup `[Icons]` parameter; CI had already passed sidecar
   DLL build, Windows wheel build, wheel verification, and wheelhouse assembly
-  before failing at that installer-script parse step.
+  before failing at that installer-script parse step. The shortcut working
+  directory now uses `{app}` instead of unsupported `{userprofile}` so the
+  Inno script relies only on built-in constants.
 
 - Added Gemma4 image support with the same lazy architecture as Qwen/Step
   vision. Gemma4 support is detected from `gemma4` metadata plus
