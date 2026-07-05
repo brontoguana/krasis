@@ -29,7 +29,9 @@
   CUDA DLL path instead of Unix `dlopen`. CPU decode weight consolidation now
   uses owned contiguous backing buffers on non-Unix platforms instead of
   anonymous `mmap`, and NUMA policy/CPU-affinity calls are Unix-gated with a
-  single-node fallback on Windows.
+  single-node fallback on Windows. Windows wheel verification now probes
+  extracted sidecar DLLs in a short child process so the DLL handle is released
+  before the temporary extraction directory is deleted.
 
 - Added Gemma4 image support with the same lazy architecture as Qwen/Step
   vision. Gemma4 support is detected from `gemma4` metadata plus
