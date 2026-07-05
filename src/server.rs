@@ -80,13 +80,16 @@ fn abort_if_cuda_context_poisoned(context: &str, err: &str) {
 /// can set it to `false` without going through Python's signal mechanism.
 /// This is only written once (before the accept loop) and read from the
 /// signal handler, so the raw pointer is safe in practice.
+#[cfg(unix)]
 static SIGINT_RUNNING: AtomicBool = AtomicBool::new(false);
+#[cfg(unix)]
 static SIGNAL_FLAG_PTR: std::sync::atomic::AtomicPtr<AtomicBool> =
     std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 
 /// Raw signal handler for SIGINT and SIGTERM.  Sets the server's `running`
 /// flag to false so the accept loop exits cleanly, even when the GIL is
 /// released (Python signal handlers can't run during allow_threads).
+#[cfg(unix)]
 extern "C" fn shutdown_signal_handler(_sig: libc::c_int) {
     let ptr = SIGNAL_FLAG_PTR.load(Ordering::Acquire);
     if !ptr.is_null() {
@@ -4402,12 +4405,17 @@ impl RustServer {
         // SIGTERM is needed because the release test (and systemd) send
         // SIGTERM for clean shutdown; without a raw handler, the server
         // never stops and gets SIGKILL'd, skipping VRAM report CSV write.
+        #[cfg(unix)]
         let running_ptr = Arc::as_ptr(&self.running) as *mut AtomicBool;
+        #[cfg(unix)]
         SIGNAL_FLAG_PTR.store(running_ptr, Ordering::Release);
 
         // Save previous handlers so we can restore them
+        #[cfg(unix)]
         let prev_sigint;
+        #[cfg(unix)]
         let prev_sigterm;
+        #[cfg(unix)]
         unsafe {
             let mut sa: libc::sigaction = std::mem::zeroed();
             sa.sa_sigaction = shutdown_signal_handler as *const () as usize;
@@ -4659,7 +4667,9 @@ impl RustServer {
         });
 
         // Restore previous signal handlers and clear global pointer
+        #[cfg(unix)]
         SIGNAL_FLAG_PTR.store(std::ptr::null_mut(), Ordering::Release);
+        #[cfg(unix)]
         unsafe {
             libc::sigaction(libc::SIGINT, &prev_sigint, std::ptr::null_mut());
             libc::sigaction(libc::SIGTERM, &prev_sigterm, std::ptr::null_mut());

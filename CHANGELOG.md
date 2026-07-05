@@ -23,7 +23,10 @@
   preserving the same kernel instantiations. FlashAttention's vendored CUTLASS
   platform shim now treats `_MSVC_LANG` as the C++17 signal for `_v` type-trait
   aliases, and the FlashAttention vendor/header path defines `M_LOG2E` when
-  MSVC does not expose the POSIX math constant.
+  MSVC does not expose the POSIX math constant. Windows wheel builds now gate
+  Unix-only mmap advice and raw POSIX signal handlers behind `cfg(unix)`, and
+  the VRAM monitor resolves CUDA runtime symbols through the bundled Windows
+  CUDA DLL path instead of Unix `dlopen`.
 
 - Added Gemma4 image support with the same lazy architecture as Qwen/Step
   vision. Gemma4 support is detected from `gemma4` metadata plus
