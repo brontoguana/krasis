@@ -659,6 +659,9 @@ pub struct CpuDecodeStore {
     /// Each entry is (base_ptr as usize, byte_len) for munmap on drop.
     /// Stored as usize instead of *mut u8 to satisfy Send/Sync requirements.
     mmap_regions: Vec<(usize, usize)>,
+    /// Owned contiguous backing regions for platforms without Unix mmap.
+    /// Weight Vecs may point into these regions and are defused before drop.
+    owned_regions: Vec<Vec<u8>>,
     /// Cancellation flag — checked each iteration in generate_stream.
     cancel_flag: Arc<AtomicBool>,
     /// Last decode elapsed time (seconds), measured by Rust Instant timer inside generate_batch.
@@ -685,6 +688,7 @@ impl CpuDecodeStore {
             route_corrected: Vec::new(),
             decode_graph: None,
             mmap_regions: Vec::new(),
+            owned_regions: Vec::new(),
             last_decode_elapsed_s: 0.0,
             cancel_flag: Arc::new(AtomicBool::new(false)),
         }
@@ -1603,13 +1607,14 @@ impl CpuDecodeStore {
 
 impl Drop for CpuDecodeStore {
     fn drop(&mut self) {
-        if !self.mmap_regions.is_empty() {
+        if !self.mmap_regions.is_empty() || !self.owned_regions.is_empty() {
             // Defuse mmap-backed weight Vecs to prevent dealloc on mmap'd memory
             for w in self.weights.iter_mut() {
                 std::mem::forget(std::mem::take(&mut w.packed));
                 std::mem::forget(std::mem::take(&mut w.scales));
             }
             // Unmap the contiguous regions
+            #[cfg(unix)]
             for &(base_usize, len) in &self.mmap_regions {
                 unsafe {
                     libc::munmap(base_usize as *mut libc::c_void, len);
@@ -3088,9 +3093,9 @@ impl CpuDecodeStore {
         if self.weights.is_empty() {
             return Ok(());
         }
-        if !self.mmap_regions.is_empty() {
+        if !self.mmap_regions.is_empty() || !self.owned_regions.is_empty() {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                "Weights already consolidated into mmap",
+                "Weights already consolidated into contiguous backing storage",
             ));
         }
 
@@ -3120,7 +3125,8 @@ impl CpuDecodeStore {
             false
         };
 
-        // Allocate contiguous mmap regions
+        // Allocate contiguous backing regions.
+        #[cfg(unix)]
         let packed_base = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
@@ -3131,6 +3137,11 @@ impl CpuDecodeStore {
                 0,
             )
         };
+        #[cfg(not(unix))]
+        let mut packed_region = vec![0u8; total_packed_bytes];
+        #[cfg(not(unix))]
+        let packed_base = packed_region.as_mut_ptr() as *mut libc::c_void;
+        #[cfg(unix)]
         if packed_base == libc::MAP_FAILED {
             if interleaved {
                 crate::numa::reset_mempolicy();
@@ -3140,6 +3151,7 @@ impl CpuDecodeStore {
             ));
         }
 
+        #[cfg(unix)]
         let scales_base = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
@@ -3150,6 +3162,11 @@ impl CpuDecodeStore {
                 0,
             )
         };
+        #[cfg(not(unix))]
+        let mut scales_region = vec![0u8; total_scales_bytes];
+        #[cfg(not(unix))]
+        let scales_base = scales_region.as_mut_ptr() as *mut libc::c_void;
+        #[cfg(unix)]
         if scales_base == libc::MAP_FAILED {
             unsafe {
                 libc::munmap(packed_base, total_packed_bytes);
@@ -3163,6 +3180,7 @@ impl CpuDecodeStore {
         }
 
         // Request huge pages
+        #[cfg(unix)]
         unsafe {
             libc::madvise(packed_base, total_packed_bytes, libc::MADV_HUGEPAGE);
             libc::madvise(scales_base, total_scales_bytes, libc::MADV_HUGEPAGE);
@@ -3222,14 +3240,26 @@ impl CpuDecodeStore {
             );
         }
 
-        // Track mmap regions for cleanup (stored as usize for Send/Sync)
+        // Track backing regions for cleanup (stored as usize for Send/Sync)
+        #[cfg(unix)]
         self.mmap_regions
             .push((packed_base as usize, total_packed_bytes));
+        #[cfg(unix)]
         self.mmap_regions
             .push((scales_base as usize, total_scales_bytes));
+        #[cfg(not(unix))]
+        {
+            self.owned_regions.push(packed_region);
+            self.owned_regions.push(scales_region);
+        }
 
+        #[cfg(unix)]
+        let backing_kind = "mmap with MADV_HUGEPAGE";
+        #[cfg(not(unix))]
+        let backing_kind = "owned contiguous buffers";
         log::info!(
-            "Consolidated weights into mmap with MADV_HUGEPAGE in {:.1}ms",
+            "Consolidated weights into {} in {:.1}ms",
+            backing_kind,
             t0.elapsed().as_secs_f64() * 1000.0
         );
         Ok(())

@@ -26,7 +26,10 @@
   MSVC does not expose the POSIX math constant. Windows wheel builds now gate
   Unix-only mmap advice and raw POSIX signal handlers behind `cfg(unix)`, and
   the VRAM monitor resolves CUDA runtime symbols through the bundled Windows
-  CUDA DLL path instead of Unix `dlopen`.
+  CUDA DLL path instead of Unix `dlopen`. CPU decode weight consolidation now
+  uses owned contiguous backing buffers on non-Unix platforms instead of
+  anonymous `mmap`, and NUMA policy/CPU-affinity calls are Unix-gated with a
+  single-node fallback on Windows.
 
 - Added Gemma4 image support with the same lazy architecture as Qwen/Step
   vision. Gemma4 support is detected from `gemma4` metadata plus
