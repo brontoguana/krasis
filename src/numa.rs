@@ -194,7 +194,12 @@ impl NumaTopology {
 
     /// Fallback for systems without NUMA or with only 1 node.
     fn single_node() -> Self {
+        #[cfg(unix)]
         let num_cpus = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) } as usize;
+        #[cfg(not(unix))]
+        let num_cpus = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
         NumaTopology {
             num_nodes: 1,
             node_cpus: vec![(0..num_cpus).collect()],
@@ -300,6 +305,7 @@ impl NumaExpertMap {
 
 // ── Memory policy via set_mempolicy / mbind ─────────────────────────
 
+#[cfg(unix)]
 extern "C" {
     fn mbind(
         addr: *mut libc::c_void,
@@ -317,15 +323,26 @@ extern "C" {
     ) -> libc::c_int;
 }
 
+#[cfg(unix)]
 const MPOL_DEFAULT: libc::c_int = 0;
+#[cfg(unix)]
 const MPOL_BIND: libc::c_int = 2;
+#[cfg(unix)]
 const MPOL_INTERLEAVE: libc::c_int = 3;
+#[cfg(unix)]
 const MPOL_MF_MOVE: libc::c_uint = 2;
 
 /// Set process memory policy to MPOL_INTERLEAVE across all NUMA nodes.
 /// New allocations (mmap, page faults) will spread pages round-robin.
 /// Returns true on success, false if NUMA unavailable or syscall fails.
 pub fn set_interleave_all(num_nodes: usize) -> bool {
+    #[cfg(not(unix))]
+    {
+        let _ = num_nodes;
+        return false;
+    }
+    #[cfg(unix)]
+    {
     if !numa_is_available() || num_nodes <= 1 {
         return false;
     }
@@ -344,10 +361,12 @@ pub fn set_interleave_all(num_nodes: usize) -> bool {
         return false;
     }
     true
+    }
 }
 
 /// Reset process memory policy to MPOL_DEFAULT (local allocation).
 pub fn reset_mempolicy() {
+    #[cfg(unix)]
     unsafe {
         set_mempolicy(MPOL_DEFAULT, std::ptr::null(), 0);
     }
@@ -357,6 +376,13 @@ pub fn reset_mempolicy() {
 /// Works on any allocated memory — aligns to page boundaries automatically.
 /// Returns true on success.
 pub fn migrate_to_node(ptr: *mut u8, len: usize, node: usize) -> bool {
+    #[cfg(not(unix))]
+    {
+        let _ = (ptr, len, node);
+        return false;
+    }
+    #[cfg(unix)]
+    {
     if !numa_is_available() || len == 0 || node >= 64 {
         return false;
     }
@@ -386,6 +412,7 @@ pub fn migrate_to_node(ptr: *mut u8, len: usize, node: usize) -> bool {
         return false;
     }
     true
+    }
 }
 
 /// Migrate a Vec's backing memory to a specific NUMA node.
@@ -457,6 +484,7 @@ pub fn build_numa_thread_pool(num_threads: usize) -> NumaTopology {
             let cpu = cpus[cpu_idx];
 
             // Use sched_setaffinity to pin to specific CPU
+            #[cfg(unix)]
             unsafe {
                 let mut cpuset: libc::cpu_set_t = std::mem::zeroed();
                 libc::CPU_ZERO(&mut cpuset);
@@ -467,6 +495,8 @@ pub fn build_numa_thread_pool(num_threads: usize) -> NumaTopology {
                     &cpuset,
                 );
             }
+            #[cfg(not(unix))]
+            let _ = cpu;
         })
         .build_global();
 
