@@ -31,7 +31,11 @@
   anonymous `mmap`, and NUMA policy/CPU-affinity calls are Unix-gated with a
   single-node fallback on Windows. Windows wheel verification now probes
   extracted sidecar DLLs in a short child process so the DLL handle is released
-  before the temporary extraction directory is deleted.
+  before the temporary extraction directory is deleted. The Windows installer
+  shortcut now relies on PowerShell's `-WindowStyle Maximized` flag rather than
+  an unsupported Inno Setup `[Icons]` parameter; CI had already passed sidecar
+  DLL build, Windows wheel build, wheel verification, and wheelhouse assembly
+  before failing at that installer-script parse step.
 
 - Added Gemma4 image support with the same lazy architecture as Qwen/Step
   vision. Gemma4 support is detected from `gemma4` metadata plus
