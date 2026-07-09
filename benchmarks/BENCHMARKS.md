@@ -1,5 +1,74 @@
 # Krasis Benchmark Results
 
+## Qwen3.5-397B-A17B First 5090 Benchmark - 2026-07-09
+
+Purpose: first standard benchmark of Qwen3.5-397B-A17B on a single local RTX
+5090 using current non-AWQ quantization: INT4 routed experts, HQQ6 attention,
+k4v4 KV, INT8 shared/dense/lm-head, and the default 600 MiB VRAM safety margin.
+
+Config:
+
+```text
+tests/q397-k4v4-hqq6-int4-benchmark.conf
+```
+
+Result:
+
+| GPU | Prefill internal | Decode internal | Round trip network | HCS coverage | Min free VRAM | Logs |
+|-----|-----------------:|----------------:|-------------------:|-------------:|--------------:|------|
+| RTX 5090 32 GB | 808.7 tok/s | 9.57 tok/s | 16.52 tok/s | 2420/30720 (7.9%) | 894 MB | [stdout](20260709_5090_qwen35_397b_hqq6_k4v4_benchmark_stdout.log), [report](20260709_5090_qwen35_397b_hqq6_k4v4_benchmark_report.log) |
+
+Timed detail:
+
+| Phase | 50/1K | 100/5K | 250/9,729 |
+|-------|------:|-------:|----------:|
+| Prefill internal | 88.1 tok/s at 1,000 tokens | 486.2 tok/s at 5,000 tokens | 808.7 tok/s at 9,729 tokens |
+| Decode internal | 9.57 tok/s | 9.34 tok/s | 9.04 tok/s |
+| HTTP round trip | 16.52 tok/s | 11.82 tok/s | 9.87 tok/s |
+
+Approved heatmap build/eval:
+
+```text
+./dev approved-heatmap-build tests/q397-k4v4-hqq6-int4-benchmark.conf \
+  --out benchmarks/approved_heatmaps/q397_hqq6_k4v4_approved_heatmap.json \
+  --prompts benchmarks/approved_heatmaps/step37_hqq4_k4v4_prompts.txt \
+  --decode-tokens 256 \
+  --checkpoint-every 8
+
+./dev approved-heatmap-eval tests/q397-k4v4-hqq6-int4-benchmark.conf \
+  benchmarks/approved_heatmaps/q397_hqq6_k4v4_approved_heatmap.json
+```
+
+The p00080 approved heatmap captured 80 held-out route prompts, 20,535
+decode-route tokens, and 28,721 ranked experts in 4,082.0s. Artifact SHA256:
+`4c7f642b03881c197e367759dfd2d905ecfffbb00bc4df5ad2357352745794c1`.
+
+| Run | Prefill internal | Decode internal best | Decode internal 250 | HTTP best | HTTP 250 | HCS hit 250 | Request promotions 250 | Min free VRAM | Logs |
+|-----|-----------------:|---------------------:|--------------------:|----------:|---------:|------------:|-----------------------:|--------------:|------|
+| Quick startup heatmap | 808.7 tok/s | 9.57 tok/s | 9.04 tok/s | 16.52 tok/s | 9.87 tok/s | 50.15% | 74476/149400 | 894 MB | [stdout](20260709_5090_qwen35_397b_hqq6_k4v4_benchmark_stdout.log), [report](20260709_5090_qwen35_397b_hqq6_k4v4_benchmark_report.log) |
+| Approved p00080 heatmap | 714.6 tok/s | 9.98 tok/s | 9.42 tok/s | 18.57 tok/s | 10.27 tok/s | 53.03% | 70175/149400 | 892 MB | [stdout](20260709_5090_qwen35_397b_hqq6_k4v4_approved_heatmap_eval_stdout.log), [report](20260709_5090_qwen35_397b_hqq6_k4v4_approved_heatmap_eval_report.log) |
+
+Approved heatmap artifacts:
+- [final heatmap](approved_heatmaps/q397_hqq6_k4v4_approved_heatmap.json)
+- [build log](approved_heatmaps/20260709_q397_approved_heatmap_build_p80.log)
+- [eval log](approved_heatmaps/20260709_q397_heatmap_eval_p80.log)
+
+Startup/build notes:
+- First run rebuilt local dev sidecars, built the current-format
+  `experts_marlin_int4_g128_calamax.bin` cache (`199.7 GB` in `485s`), loaded
+  that cache in `175s`, and validated the HQQ6 attention cache (`6160 MB`).
+- Runtime calibration selected a `9,729` token long-prefill cap for this 32 GB
+  card. Long calibration low-water was `1,758 MB`; steady decode low-water was
+  `894 MB`, close to the 600 MiB safety margin.
+- The first benchmark run had no approved Q397 heatmap yet, so it used quick
+  startup heatmap generation. HCS hit rate during timed decode was roughly
+  50-54%, with many request promotions and evictions.
+- The approved p00080 route heatmap improved the 250-token timed HCS hit rate
+  from `50.15%` to `53.03%`, reduced request promotions by `4301`, and raised
+  best internal decode from `9.57` to `9.98 tok/s`. The improvement is real but
+  modest because the 32 GB 5090 can still keep only `2420/30720` experts
+  resident as soft HCS.
+
 ## Supported Model Approved Heatmap Fill - 2026-07-04 (RTX 5090)
 
 Purpose: fill the first-class supported-model surface with downloader entries

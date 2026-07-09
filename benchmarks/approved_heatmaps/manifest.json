@@ -1,7 +1,7 @@
 {
   "format": "krasis_approved_hcs_route_heatmap_manifest",
   "format_version": 1,
-  "generated_at_utc": "2026-07-04T14:21:24Z",
+  "generated_at_utc": "2026-07-09T07:25:42Z",
   "artifacts": [
     {
       "artifact_id": "step37_flash_hqq4_k4v4_p00048",
@@ -69,6 +69,40 @@
         "http_tok_s": 51.66,
         "quick_http_tok_s": 49.00,
         "notes": "Best HCS hit in the p00008-p00048 Q122B sweep. p00040 had slightly higher internal decode but lower HCS hit, so p00032 is selected by the primary plateau metric."
+      }
+    },
+    {
+      "artifact_id": "qwen35_397b_hqq6_k4v4_p00080",
+      "status": "approved",
+      "priority": 10,
+      "model_name": "Qwen3.5-397B-A17B",
+      "source_checkpoint": "p00080",
+      "path": "benchmarks/approved_heatmaps/q397_hqq6_k4v4_approved_heatmap.json",
+      "filename": "q397_hqq6_k4v4_approved_heatmap.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/q397_hqq6_k4v4_approved_heatmap.json",
+      "sha256": "4c7f642b03881c197e367759dfd2d905ecfffbb00bc4df5ad2357352745794c1",
+      "bytes": 411556,
+      "route_signature_sha256": "48eea8e46c8df3157424fbece7bfe1cdb36337229afe9b7c6a321d3b44909c63",
+      "validated_runtime_sha256s": [
+        "e475801d9804e603c754ef0d0628c241d0803dd4006404605646d419f1d98cc3"
+      ],
+      "capture": {
+        "prompt_count_processed": 80,
+        "captured_decode_route_tokens": 20535,
+        "ranked_entries": 28721,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "quick_startup_heatmap",
+        "final_hcs_hit_pct": 53.03,
+        "quick_hcs_hit_pct": 50.15,
+        "request_promotions": "70175/149400",
+        "quick_request_promotions": "74476/149400",
+        "internal_decode_tok_s": 9.98,
+        "quick_internal_decode_tok_s": 9.57,
+        "http_tok_s": 18.57,
+        "quick_http_tok_s": 16.52,
+        "notes": "Final p00080 artifact from the 80-prompt approved corpus. It improved the timed 250-token HCS hit rate from 50.15% to 53.03%, reduced request promotions by 4301, raised 250-token internal decode from 9.04 to 9.42 tok/s, and raised 250-token HTTP from 9.87 to 10.27 tok/s. Best internal decode improved from 9.57 to 9.98 tok/s. Improvement is modest because the 32 GB 5090 can keep only 2420/30720 experts resident."
       }
     },
     {
