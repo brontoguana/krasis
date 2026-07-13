@@ -343,6 +343,50 @@ def _runtime_heatmap_capture_config(args) -> dict[str, Any]:
     }
 
 
+def _runtime_matches_approved_heatmap_policy(
+    current: dict[str, Any],
+    validated_runtimes: Any,
+    policy: Any,
+) -> tuple[bool, str]:
+    if not isinstance(current, dict):
+        return False, "current runtime compatibility metadata is not an object"
+    if isinstance(validated_runtimes, list) and current in validated_runtimes:
+        return True, "exact validated runtime"
+    if not isinstance(policy, dict):
+        return False, "no compatible runtime policy"
+
+    accepted_attention = policy.get("accepted_attention_quants")
+    if isinstance(accepted_attention, list):
+        current_attention = current.get("attention_quant")
+        if current_attention not in accepted_attention:
+            return False, f"attention_quant={current_attention!r} is not accepted"
+
+    accepted_kv = policy.get("accepted_kv_dtypes")
+    if isinstance(accepted_kv, list):
+        current_kv = current.get("kv_dtype")
+        if current_kv not in accepted_kv:
+            return False, f"kv_dtype={current_kv!r} is not accepted"
+
+    ignored = policy.get("ignored_runtime_fields", [])
+    if not isinstance(ignored, list) or not all(isinstance(item, str) for item in ignored):
+        return False, "invalid ignored_runtime_fields policy"
+    ignored_fields = set(ignored)
+
+    comparable_current = {
+        key: value for key, value in current.items() if key not in ignored_fields
+    }
+    for runtime in validated_runtimes if isinstance(validated_runtimes, list) else []:
+        if not isinstance(runtime, dict):
+            continue
+        comparable_runtime = {
+            key: value for key, value in runtime.items() if key not in ignored_fields
+        }
+        if comparable_current == comparable_runtime:
+            return True, str(policy.get("reason") or "manifest-approved compatible runtime policy")
+
+    return False, "no validated runtime matches after applying compatibility policy"
+
+
 def _load_benchmark_decode_prompt_texts() -> dict[str, str]:
     prompts_dir = os.path.join(os.path.dirname(__file__), "prompts")
     prompts: dict[str, str] = {}
@@ -511,13 +555,31 @@ def _load_validated_heatmap(heatmap_path: str, expected_metadata: dict[str, Any]
             )
         current_compat = expected_metadata.get("runtime_compat")
         compatible = meta.get("validated_compatible_runtimes", [])
-        if not isinstance(compatible, list) or current_compat not in compatible:
+        policy = expected_metadata.get("runtime_compat_policy")
+        compatible_ok, compatible_reason = _runtime_matches_approved_heatmap_policy(
+            current_compat,
+            compatible,
+            policy,
+        )
+        if not compatible_ok:
             raise RuntimeError(
                 "Refusing approved heatmap because this HQQ/KV runtime has not been validated "
                 "for the artifact. Build or approve a compatible heatmap first.\n"
                 f"Path: {heatmap_path}\n"
                 f"Current runtime: {current_compat!r}\n"
-                f"Validated runtimes: {compatible!r}"
+                f"Validated runtimes: {compatible!r}\n"
+                f"Compatibility policy: {policy!r}\n"
+                f"Reason: {compatible_reason}"
+            )
+        if compatible_reason != "exact validated runtime":
+            logger.info(
+                "APPROVED_HEATMAP runtime compatibility policy accepted artifact=%s reason=%s "
+                "current_attention=%s current_kv=%s captured_runtime=%s",
+                heatmap_path,
+                compatible_reason,
+                current_compat.get("attention_quant") if isinstance(current_compat, dict) else None,
+                current_compat.get("kv_dtype") if isinstance(current_compat, dict) else None,
+                compatible[0] if isinstance(compatible, list) and compatible else None,
             )
         return data
     if fmt != HEATMAP_FORMAT:
@@ -602,6 +664,7 @@ def _select_approved_heatmap_manifest_entry(
 ) -> Optional[dict[str, Any]]:
     route_hash = _sha256_jsonable(expected_metadata.get("route_signature"))
     runtime_hash = _sha256_jsonable(expected_metadata.get("runtime_compat"))
+    current_compat = expected_metadata.get("runtime_compat")
     candidates = []
     for entry in manifest.get("artifacts", []):
         if not isinstance(entry, dict):
@@ -611,7 +674,14 @@ def _select_approved_heatmap_manifest_entry(
         if entry.get("route_signature_sha256") != route_hash:
             continue
         runtime_hashes = entry.get("validated_runtime_sha256s", [])
-        if not isinstance(runtime_hashes, list) or runtime_hash not in runtime_hashes:
+        runtime_matches = isinstance(runtime_hashes, list) and runtime_hash in runtime_hashes
+        if not runtime_matches:
+            runtime_matches, _ = _runtime_matches_approved_heatmap_policy(
+                current_compat,
+                entry.get("validated_compatible_runtimes", []),
+                entry.get("runtime_compatibility"),
+            )
+        if not runtime_matches:
             continue
         candidates.append(entry)
     if not candidates:
@@ -723,10 +793,16 @@ def _try_load_auto_approved_heatmap(
             raise RuntimeError(message) from e
         _warn(f"{message}; falling back to quick startup heatmap generation")
         return None, None
-    validated = _load_validated_heatmap(heatmap_path, expected_metadata)
+    validation_metadata = dict(expected_metadata)
+    if entry.get("runtime_compatibility"):
+        validation_metadata["runtime_compat_policy"] = entry.get("runtime_compatibility")
+    validated = _load_validated_heatmap(heatmap_path, validation_metadata)
+    policy_note = ""
+    if entry.get("runtime_compatibility"):
+        policy_note = " (manifest-approved canonical runtime compatibility)"
     _detail(
         "Approved route heatmap loaded from cache: "
-        f"{entry.get('artifact_id', os.path.basename(heatmap_path))}"
+        f"{entry.get('artifact_id', os.path.basename(heatmap_path))}{policy_note}"
     )
     return heatmap_path, validated
 

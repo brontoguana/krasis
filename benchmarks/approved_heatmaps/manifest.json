@@ -1,7 +1,7 @@
 {
   "format": "krasis_approved_hcs_route_heatmap_manifest",
   "format_version": 1,
-  "generated_at_utc": "2026-07-09T07:25:42Z",
+  "generated_at_utc": "2026-07-13T10:11:33Z",
   "artifacts": [
     {
       "artifact_id": "step37_flash_hqq4_k4v4_p00048",
@@ -140,37 +140,75 @@
       }
     },
     {
-      "artifact_id": "qwen36_35b_hqq4_k4v4_p00048",
+      "artifact_id": "qwen36_35b_hqq8_canonical_p00006",
       "status": "approved",
       "priority": 20,
       "model_name": "Qwen3.6-35B-A3B",
-      "source_checkpoint": "p00048",
-      "path": "benchmarks/approved_heatmaps/qwen36_35b_hqq4_k4v4_approved_heatmap.json",
-      "filename": "qwen36_35b_hqq4_k4v4_approved_heatmap.json",
-      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/qwen36_35b_hqq4_k4v4_approved_heatmap.json",
-      "sha256": "a7c4fd101e5ed96f5c6f219d9626bb5b63d3c402de14476156ac166bfd84c81b",
-      "bytes": 139224,
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/qwen36_35b_hqq8_canonical_approved_heatmap.json",
+      "filename": "qwen36_35b_hqq8_canonical_approved_heatmap.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/qwen36_35b_hqq8_canonical_approved_heatmap.json",
+      "sha256": "971439faf1985e04c3cac3ac5a7a0e39e3769af0049d56482d5b2853cf5e4e31",
+      "bytes": 125158,
       "route_signature_sha256": "053350ef9663d7cefdd558fcb499f9423771c47f467538034361e630951f7cdc",
       "validated_runtime_sha256s": [
-        "33e3e1f42cf448262ca66fbad7e2b20c110b4c04503fbade7034520fddc67fe7"
+        "a79c8fae3e55f3234ec03767a02ad66d0ac0500f1b1966b72e822087c3f47f7b"
       ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq8",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "qwen36_35b_canonical_hqq8_all_hqq_all_kv",
+        "canonical_attention_quant": "hqq8",
+        "ignored_runtime_fields": [
+          "attention_quant",
+          "kv_dtype",
+          "hqq_auto_budget_pct",
+          "hqq46_auto_budget_mib"
+        ],
+        "accepted_attention_quants": [
+          "hqq4",
+          "hqq46",
+          "hqq46_auto",
+          "hqq6",
+          "hqq68_auto",
+          "hqq8"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Measured Qwen3.6-35B route matrix on 2026-07-12: HQQ8 had the lowest average loss versus matched heatmaps at 3k, 5k, and 7.5k constrained HCS capacities; KV differences were below the threshold for separate artifacts."
+      },
       "capture": {
-        "prompt_count_processed": 48,
-        "captured_decode_route_tokens": 12336,
-        "ranked_entries": 9799,
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 9222,
         "decode_tokens_per_prompt": 256
       },
       "acceptance": {
-        "baseline": "quick_startup_heatmap",
-        "final_hcs_hit_pct": 100.00,
-        "quick_hcs_hit_pct": 100.00,
-        "request_promotions": "0/79680",
-        "quick_request_promotions": "0/79680",
-        "internal_decode_tok_s": 116.58,
-        "quick_internal_decode_tok_s": 117.09,
-        "http_tok_s": 232.58,
-        "quick_http_tok_s": 242.08,
-        "notes": "Quick startup HCS is saturated on the RTX 5090 because all experts fit as soft/reclaimable HCS. p00048 is approved as a downloadable route-prior artifact based on p00040->p00048 ranking stability: 97.9% top-512, 98.3% top-2048, 99.3% top-8192 overlap."
+        "baseline": "matched-profile route heatmaps and quick startup heatmap corpus",
+        "hcs_capacity_reference": "5000 experts",
+        "avg_loss_vs_matched_pct_points": 0.639,
+        "max_loss_vs_matched_pct_points": 1.032,
+        "notes": "Selected as the canonical Qwen3.6 35B heatmap after comparing HQQ4, HQQ6, HQQ8, HQQ46+10%, and HQQ68+10%. The HQQ8 heatmap was best at 3k, 5k, and 7.5k constrained capacities. Manifest policy intentionally reuses it for all approved HQQ attention modes and KV dtypes."
       }
     },
     {

@@ -165,8 +165,8 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
         repo_id="Qwen/Qwen3.6-35B-A3B",
         local_dir_name="Qwen3.6-35B-A3B",
         revision="995ad96eacd98c81ed38be0c5b274b04031597b0",
-        recommended_config="tests/qwen36-35b-5090-hqq6-k6v6-benchmark.conf",
-        notes="Qwen 35B-class MoE target.",
+        recommended_config="tests/qwen36-35b-5090-hqq4-k4v4-benchmark.conf",
+        notes="Qwen 35B-class MoE target with canonical HQQ8 heatmap reused across HQQ/KV profiles.",
     ),
     SupportedHFModel(
         key="qwen35-35b",
