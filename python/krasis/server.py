@@ -799,7 +799,7 @@ def _try_load_auto_approved_heatmap(
     validated = _load_validated_heatmap(heatmap_path, validation_metadata)
     policy_note = ""
     if entry.get("runtime_compatibility"):
-        policy_note = " (manifest-approved canonical runtime compatibility)"
+        policy_note = " (manifest-approved runtime compatibility)"
     _detail(
         "Approved route heatmap loaded from cache: "
         f"{entry.get('artifact_id', os.path.basename(heatmap_path))}{policy_note}"

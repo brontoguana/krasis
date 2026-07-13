@@ -118,6 +118,57 @@ class ApprovedHeatmapAutoTest(unittest.TestCase):
         self.assertIsNotNone(entry)
         self.assertEqual(entry["artifact_id"], "qwen36-canonical-hqq8")
 
+    def test_manifest_selection_prefers_matching_hqq_and_ignores_kv(self):
+        route_signature = {"model": "step37", "top_k": 8}
+        expected = {
+            "route_signature": route_signature,
+            "runtime_compat": {
+                "attention_quant": "hqq6",
+                "kv_dtype": "k6v6",
+                "hqq_auto_budget_pct": None,
+                "hqq46_auto_budget_mib": None,
+                "gpu_expert_bits": 4,
+                "cpu_expert_bits": 4,
+            },
+        }
+        route_hash = server._sha256_jsonable(route_signature)
+
+        def entry_for(attention_quant):
+            runtime = {
+                "attention_quant": attention_quant,
+                "kv_dtype": "k4v4",
+                "hqq_auto_budget_pct": None,
+                "hqq46_auto_budget_mib": None,
+                "gpu_expert_bits": 4,
+                "cpu_expert_bits": 4,
+            }
+            return {
+                "artifact_id": f"step37-{attention_quant}",
+                "status": "approved",
+                "priority": 10,
+                "route_signature_sha256": route_hash,
+                "validated_runtime_sha256s": [server._sha256_jsonable(runtime)],
+                "validated_compatible_runtimes": [runtime],
+                "runtime_compatibility": {
+                    "ignored_runtime_fields": ["kv_dtype"],
+                    "accepted_attention_quants": [attention_quant],
+                    "accepted_kv_dtypes": ["k4v4", "k6v6", "bf16"],
+                },
+            }
+
+        manifest = {
+            "artifacts": [
+                entry_for("hqq4"),
+                entry_for("hqq6"),
+                entry_for("hqq8"),
+            ],
+        }
+
+        entry = server._select_approved_heatmap_manifest_entry(manifest, expected)
+
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry["artifact_id"], "step37-hqq6")
+
     def test_approved_heatmap_validation_accepts_manifest_runtime_policy(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
