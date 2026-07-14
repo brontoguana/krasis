@@ -1,7 +1,7 @@
 {
   "format": "krasis_approved_hcs_route_heatmap_manifest",
   "format_version": 1,
-  "generated_at_utc": "2026-07-13T21:47:51Z",
+  "generated_at_utc": "2026-07-14T22:22:48Z",
   "artifacts": [
     {
       "artifact_id": "step37_flash_hqq4_p00006",
@@ -651,6 +651,384 @@
         "http_tok_s": 12.71,
         "quick_http_tok_s": 11.65,
         "notes": "Best final HCS hit in the p00008-p00048 Q235 sweep. p00048 had comparable decode speed but lower final HCS, so p00016 is selected by the primary plateau metric."
+      }
+    },
+    {
+      "artifact_id": "nemotron_super_hqq4_p00006",
+      "status": "approved",
+      "priority": 5,
+      "model_name": "NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/nemotron_super_hqq4_p00006_approved_heatmap.json",
+      "filename": "nemotron_super_hqq4_p00006_approved_heatmap.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/nemotron_super_hqq4_p00006_approved_heatmap.json",
+      "sha256": "64617e800f5f83ce986746379ff2c1633c5b62768c8c182b96d61bf8a02b22e7",
+      "bytes": 230346,
+      "route_signature_sha256": "89f91d2ef91e25ba2c02e03bf8c40b8e26da57d3945cc3ccc1aaf430e0638b2a",
+      "validated_runtime_sha256s": [
+        "33e3e1f42cf448262ca66fbad7e2b20c110b4c04503fbade7034520fddc67fe7"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq4",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Nemotron-3-Super-120B-A12B_matched_hqq4_all_kv",
+        "matched_attention_quant": "hqq4",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq4"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored under the measured per-HQQ route-heatmap policy."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 16807,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ4 quick startup heatmap corpus",
+        "hqq_profile": "hqq4",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured locally on 2026-07-14 from the p00006 startup heatmap corpus and published as the matched per-HQQ Nemotron artifact."
+      }
+    },
+    {
+      "artifact_id": "nemotron_super_hqq6_p00006",
+      "status": "approved",
+      "priority": 5,
+      "model_name": "NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/nemotron_super_hqq6_p00006_approved_heatmap.json",
+      "filename": "nemotron_super_hqq6_p00006_approved_heatmap.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/nemotron_super_hqq6_p00006_approved_heatmap.json",
+      "sha256": "7636275cfbb4eb5ff7e95e2e92647d9eb1309c53a5110d0496a9ed9a023e73e7",
+      "bytes": 230646,
+      "route_signature_sha256": "89f91d2ef91e25ba2c02e03bf8c40b8e26da57d3945cc3ccc1aaf430e0638b2a",
+      "validated_runtime_sha256s": [
+        "e475801d9804e603c754ef0d0628c241d0803dd4006404605646d419f1d98cc3"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq6",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Nemotron-3-Super-120B-A12B_matched_hqq6_all_kv",
+        "matched_attention_quant": "hqq6",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq6"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored under the measured per-HQQ route-heatmap policy."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 16826,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ6 quick startup heatmap corpus",
+        "hqq_profile": "hqq6",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured locally on 2026-07-14 from the p00006 startup heatmap corpus and published as the matched per-HQQ Nemotron artifact."
+      }
+    },
+    {
+      "artifact_id": "nemotron_super_hqq8_p00006",
+      "status": "approved",
+      "priority": 5,
+      "model_name": "NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/nemotron_super_hqq8_p00006_approved_heatmap.json",
+      "filename": "nemotron_super_hqq8_p00006_approved_heatmap.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/nemotron_super_hqq8_p00006_approved_heatmap.json",
+      "sha256": "ee085c7a67463a53827f5e278ab7ca109404315ee43870fa16fcb07f71d6a234",
+      "bytes": 228749,
+      "route_signature_sha256": "89f91d2ef91e25ba2c02e03bf8c40b8e26da57d3945cc3ccc1aaf430e0638b2a",
+      "validated_runtime_sha256s": [
+        "a79c8fae3e55f3234ec03767a02ad66d0ac0500f1b1966b72e822087c3f47f7b"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq8",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Nemotron-3-Super-120B-A12B_matched_hqq8_all_kv",
+        "matched_attention_quant": "hqq8",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq8"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored under the measured per-HQQ route-heatmap policy."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1434,
+        "ranked_entries": 16710,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ8 quick startup heatmap corpus",
+        "hqq_profile": "hqq8",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured locally on 2026-07-14 from the p00006 startup heatmap corpus and published as the matched per-HQQ Nemotron artifact."
+      }
+    },
+    {
+      "artifact_id": "nemotron_nano_hqq4_p00006",
+      "status": "approved",
+      "priority": 5,
+      "model_name": "NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/nemotron_nano_hqq4_p00006_approved_heatmap.json",
+      "filename": "nemotron_nano_hqq4_p00006_approved_heatmap.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/nemotron_nano_hqq4_p00006_approved_heatmap.json",
+      "sha256": "8af95d7f359d3f48ab680d3911d5c3f7d6f0eb5fbd4ad3d8061456f032f3828c",
+      "bytes": 39840,
+      "route_signature_sha256": "feef486bb8767ae239ce03ec4604e4bf945c36bde1e8c3ef36b9280e935c6bce",
+      "validated_runtime_sha256s": [
+        "33e3e1f42cf448262ca66fbad7e2b20c110b4c04503fbade7034520fddc67fe7"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq4",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Nemotron-3-Nano-30B-A3B_matched_hqq4_all_kv",
+        "matched_attention_quant": "hqq4",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq4"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored under the measured per-HQQ route-heatmap policy."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 2821,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ4 quick startup heatmap corpus",
+        "hqq_profile": "hqq4",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured locally on 2026-07-14 from the p00006 startup heatmap corpus and published as the matched per-HQQ Nemotron artifact."
+      }
+    },
+    {
+      "artifact_id": "nemotron_nano_hqq6_p00006",
+      "status": "approved",
+      "priority": 5,
+      "model_name": "NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/nemotron_nano_hqq6_p00006_approved_heatmap.json",
+      "filename": "nemotron_nano_hqq6_p00006_approved_heatmap.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/nemotron_nano_hqq6_p00006_approved_heatmap.json",
+      "sha256": "e1a8601bbccc4b1926409f78f34d115f55018abb340accc0415e690dfbe5c1f4",
+      "bytes": 40152,
+      "route_signature_sha256": "feef486bb8767ae239ce03ec4604e4bf945c36bde1e8c3ef36b9280e935c6bce",
+      "validated_runtime_sha256s": [
+        "e475801d9804e603c754ef0d0628c241d0803dd4006404605646d419f1d98cc3"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq6",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Nemotron-3-Nano-30B-A3B_matched_hqq6_all_kv",
+        "matched_attention_quant": "hqq6",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq6"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored under the measured per-HQQ route-heatmap policy."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 2840,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ6 quick startup heatmap corpus",
+        "hqq_profile": "hqq6",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured locally on 2026-07-14 from the p00006 startup heatmap corpus and published as the matched per-HQQ Nemotron artifact."
+      }
+    },
+    {
+      "artifact_id": "nemotron_nano_hqq8_p00006",
+      "status": "approved",
+      "priority": 5,
+      "model_name": "NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/nemotron_nano_hqq8_p00006_approved_heatmap.json",
+      "filename": "nemotron_nano_hqq8_p00006_approved_heatmap.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/nemotron_nano_hqq8_p00006_approved_heatmap.json",
+      "sha256": "a91cd127fb2f7125f77b4a2c197e548023b229127bc9bf79a36e770ad2571a5a",
+      "bytes": 40045,
+      "route_signature_sha256": "feef486bb8767ae239ce03ec4604e4bf945c36bde1e8c3ef36b9280e935c6bce",
+      "validated_runtime_sha256s": [
+        "a79c8fae3e55f3234ec03767a02ad66d0ac0500f1b1966b72e822087c3f47f7b"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq8",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Nemotron-3-Nano-30B-A3B_matched_hqq8_all_kv",
+        "matched_attention_quant": "hqq8",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq8"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored under the measured per-HQQ route-heatmap policy."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 2834,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ8 quick startup heatmap corpus",
+        "hqq_profile": "hqq8",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured locally on 2026-07-14 from the p00006 startup heatmap corpus and published as the matched per-HQQ Nemotron artifact."
       }
     }
   ]
