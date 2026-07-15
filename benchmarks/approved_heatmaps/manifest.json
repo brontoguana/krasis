@@ -1607,7 +1607,7 @@
       "path": "benchmarks/approved_heatmaps/qwen35_122b_hqq4_p00006_approved_heatmap.json",
       "filename": "qwen35_122b_hqq4_p00006_approved_heatmap.json",
       "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/qwen35_122b_hqq4_p00006_approved_heatmap.json",
-      "sha256": "ce7184653b09d372fa0fc6220cca298d51a9dbc6fd855753e249437fa87aa027",
+      "sha256": "bfa9223fde80cda1b4677790346c2aa4362917a33647e0255b5bacad8992620f",
       "bytes": 156369,
       "route_signature_sha256": "468ccad0056dbffcca9fdccbf6e11bdbb1e19bcf2ace7016792c18ddf59e800d",
       "validated_runtime_sha256s": [
@@ -1670,7 +1670,7 @@
       "path": "benchmarks/approved_heatmaps/qwen35_122b_hqq6_p00006_approved_heatmap.json",
       "filename": "qwen35_122b_hqq6_p00006_approved_heatmap.json",
       "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/qwen35_122b_hqq6_p00006_approved_heatmap.json",
-      "sha256": "3607cbf4855e895b781b7bc3581baefa5cdb6cf40b2bb4060a9b778ad26ff6aa",
+      "sha256": "cd13625543d667c5d7ee0cfc56c7f86149c3f51a40dd7dffd66057e31e570cce",
       "bytes": 156689,
       "route_signature_sha256": "468ccad0056dbffcca9fdccbf6e11bdbb1e19bcf2ace7016792c18ddf59e800d",
       "validated_runtime_sha256s": [
@@ -1733,7 +1733,7 @@
       "path": "benchmarks/approved_heatmaps/qwen35_122b_hqq8_p00006_approved_heatmap.json",
       "filename": "qwen35_122b_hqq8_p00006_approved_heatmap.json",
       "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/qwen35_122b_hqq8_p00006_approved_heatmap.json",
-      "sha256": "9cae1e39c4bea6de80316f26b627c1702466cb7724784227698d340f49ee3f9e",
+      "sha256": "7b357dcc48032f0703967261348a9dccc7de2ed619df445545779e6f5db71849",
       "bytes": 157242,
       "route_signature_sha256": "468ccad0056dbffcca9fdccbf6e11bdbb1e19bcf2ace7016792c18ddf59e800d",
       "validated_runtime_sha256s": [
@@ -1796,7 +1796,7 @@
       "path": "benchmarks/approved_heatmaps/qwen3_235b_hqq4_p00006_approved_heatmap.json",
       "filename": "qwen3_235b_hqq4_p00006_approved_heatmap.json",
       "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/qwen3_235b_hqq4_p00006_approved_heatmap.json",
-      "sha256": "cb8322ca95d735301b5258cdc8ee426b4657effb92628cbbd9b9c4f8feb642f8",
+      "sha256": "fec6219553c5ee5e6de923796d7483c96c2205f09304fb704ca379709b4ba42e",
       "bytes": 156664,
       "route_signature_sha256": "915ef9e692590c52b6d21aa49838dd10b2b9afa0d4ebcbb7e243ad8e9251ca61",
       "validated_runtime_sha256s": [
@@ -1859,7 +1859,7 @@
       "path": "benchmarks/approved_heatmaps/qwen3_235b_hqq6_p00006_approved_heatmap.json",
       "filename": "qwen3_235b_hqq6_p00006_approved_heatmap.json",
       "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/qwen3_235b_hqq6_p00006_approved_heatmap.json",
-      "sha256": "540d576ed144d0e87bcda3765a432b7dbd76152a5d36192e8b39e72fe2d5c2b3",
+      "sha256": "8e39be7d20d02f8a995a23d87ad2b927720283612ea346261ca4b5e04e7ac89c",
       "bytes": 156505,
       "route_signature_sha256": "915ef9e692590c52b6d21aa49838dd10b2b9afa0d4ebcbb7e243ad8e9251ca61",
       "validated_runtime_sha256s": [
@@ -1922,7 +1922,7 @@
       "path": "benchmarks/approved_heatmaps/qwen3_235b_hqq8_p00006_approved_heatmap.json",
       "filename": "qwen3_235b_hqq8_p00006_approved_heatmap.json",
       "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/qwen3_235b_hqq8_p00006_approved_heatmap.json",
-      "sha256": "bd592154ef7a24cbdbb1aeb9d87e8b7547d8adea8a6e45f50d2d1a6c078b5aac",
+      "sha256": "281e5afd07e592f4f3c45109e31c4558f02b0a094864cebe166341eb0cf0445a",
       "bytes": 156786,
       "route_signature_sha256": "915ef9e692590c52b6d21aa49838dd10b2b9afa0d4ebcbb7e243ad8e9251ca61",
       "validated_runtime_sha256s": [
