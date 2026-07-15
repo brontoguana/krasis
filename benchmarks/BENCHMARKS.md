@@ -158,20 +158,23 @@ Quality/PPL artifacts:
   HQQ4 [server](20260715_gemma_hqq4_reference_probe_server.log), and HQQ6
   [server](20260715_gemma_hqq6_reference_probe_server.log).
   Chat-continuation PPL fixes the Gemma PPL measurement by scoring BF16
-  continuations instead of raw WikiText-2 text: BF16
-  [client](20260715_gemma_bf16_chat_continuation_quality_ppl.log) /
-  [server](20260715_gemma_bf16_chat_continuation_server.log) /
-  [json](../perplexity/results/gemma-4-26b-a4b-it_quality-chat-v1_chat_continuation_bf16_bf16_20260715_191431.json),
-  HQQ4 [client](20260715_gemma_hqq4_chat_continuation_aligned_quality_ppl.log) /
-  [server](20260715_gemma_hqq4_chat_continuation_aligned_server.log) /
-  [json](../perplexity/results/gemma-4-26b-a4b-it_quality-chat-v1_chat_continuation_hqq4_k4v4_20260715_191625.json),
-  and HQQ6 [client](20260715_gemma_hqq6_chat_continuation_aligned_quality_ppl.log) /
-  [server](20260715_gemma_hqq6_chat_continuation_aligned_server.log) /
-  [json](../perplexity/results/gemma-4-26b-a4b-it_quality-chat-v1_chat_continuation_hqq6_k6v6_20260715_191809.json).
+  continuations instead of raw WikiText-2 text. The Krasis-BF16 diagnostic rerun
+  also stores BF16 top-k distributions in the reference artifact so the public
+  table can report BF16-vs-HQQ top-k drift and containment: BF16
+  [client](20260715_gemma_bf16_chat_continuation_krasisbf16_quality_ppl.log) /
+  [server](20260715_gemma_bf16_chat_continuation_krasisbf16_server.log) /
+  [json](../perplexity/results/gemma-4-26b-a4b-it_quality-chat-v1_chat_continuation_bf16_bf16_20260715_202209.json),
+  HQQ4 [client](20260715_gemma_hqq4_chat_continuation_krasisbf16_quality_ppl.log) /
+  [server](20260715_gemma_hqq4_chat_continuation_krasisbf16_server.log) /
+  [json](../perplexity/results/gemma-4-26b-a4b-it_quality-chat-v1_chat_continuation_hqq4_k4v4_20260715_202340.json),
+  and HQQ6 [client](20260715_gemma_hqq6_chat_continuation_krasisbf16_quality_ppl.log) /
+  [server](20260715_gemma_hqq6_chat_continuation_krasisbf16_server.log) /
+  [json](../perplexity/results/gemma-4-26b-a4b-it_quality-chat-v1_chat_continuation_hqq6_k6v6_20260715_202511.json).
   The BF16 continuation reference is
-  [json](20260715_gemma_chat_continuation_bf16_reference.json). Results:
-  BF16 PPL `1.0743`; HQQ4 PPL `1.1708` (`+8.98%`); HQQ6 PPL `1.0793`
-  (`+0.46%`), with `197/197` top-10 containment for both HQQ rows.
+  [json](20260715_gemma_chat_continuation_bf16_reference_krasisdiag.json).
+  Results: BF16 PPL `1.0753`; HQQ4 PPL `1.1736` (`+9.14%`), BF16 top-1
+  `187/197`, top-10 `197/197`, top-k JS avg `1.969%`; HQQ6 PPL `1.0792`
+  (`+0.36%`), BF16 top-1 `193/197`, top-10 `197/197`, top-k JS avg `0.279%`.
   The original BF16 [PPL](20260715_gemma4_bf16_bf16kv_quality_rust_ppl.log),
   HQQ4 [PPL](20260715_gemma4_hqq4_k4v4_quality_rust_ppl.log), and HQQ6
   [PPL](20260715_gemma4_hqq6_k6v6_quality_rust_ppl.log) logs are retained as

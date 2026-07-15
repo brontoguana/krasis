@@ -167,6 +167,102 @@ def _load_chat_reference(path: Path) -> dict[str, Any]:
     return data
 
 
+def _position_rows_by_index(response: dict[str, Any]) -> dict[int, dict[str, Any]]:
+    positions = response.get("positions")
+    if not isinstance(positions, list):
+        raise RuntimeError(f"Bad prefill_logits response: {response}")
+    return {int(row["position"]): row for row in positions}
+
+
+def _normalize_top_k(top_k: Any) -> list[dict[str, float | int]]:
+    if not isinstance(top_k, list):
+        return []
+    normalized: list[dict[str, float | int]] = []
+    for rank, entry in enumerate(top_k, 1):
+        if not isinstance(entry, dict):
+            continue
+        token_id = entry.get("token_id")
+        logprob = entry.get("logprob")
+        if token_id is None or logprob is None:
+            continue
+        normalized.append(
+            {
+                "rank": int(entry.get("rank", rank)),
+                "token_id": int(token_id),
+                "logprob": float(logprob),
+            }
+        )
+    return normalized
+
+
+def _top_k_distribution(top_k: list[dict[str, float | int]]) -> dict[int, float]:
+    probs: dict[int, float] = {}
+    for entry in top_k:
+        token_id = int(entry["token_id"])
+        probs[token_id] = math.exp(float(entry["logprob"]))
+    return probs
+
+
+def _normalized_js_divergence(
+    left_top_k: list[dict[str, float | int]],
+    right_top_k: list[dict[str, float | int]],
+) -> float | None:
+    """Return Jensen-Shannon divergence over the top-k union, normalized to [0, 1]."""
+    left = _top_k_distribution(left_top_k)
+    right = _top_k_distribution(right_top_k)
+    ids = set(left) | set(right)
+    if not ids:
+        return None
+    left_mass = sum(left.values())
+    right_mass = sum(right.values())
+    if left_mass <= 0.0 or right_mass <= 0.0:
+        return None
+    for token_id in list(left):
+        left[token_id] /= left_mass
+    for token_id in list(right):
+        right[token_id] /= right_mass
+
+    js = 0.0
+    for token_id in ids:
+        p = left.get(token_id, 0.0)
+        q = right.get(token_id, 0.0)
+        m = 0.5 * (p + q)
+        if p > 0.0:
+            js += 0.5 * p * math.log(p / m)
+        if q > 0.0:
+            js += 0.5 * q * math.log(q / m)
+    return js / math.log(2.0)
+
+
+def _extract_reference_token_diagnostics(
+    port: int,
+    prompt_ids: list[int],
+    continuation: list[int],
+    timeout: int,
+) -> list[dict[str, Any]]:
+    full = prompt_ids + continuation
+    targets = full[1:] + [0]
+    response = _post_prefill_logits(port, full, targets, timeout, top_k=10)
+    rows = _position_rows_by_index(response)
+    diagnostics: list[dict[str, Any]] = []
+    first_pos = len(prompt_ids) - 1
+    for rel_idx, token_id in enumerate(continuation):
+        pos = first_pos + rel_idx
+        row = rows.get(pos)
+        if row is None:
+            raise RuntimeError(f"Missing BF16 reference logprob row for position={pos}")
+        top_k = _normalize_top_k(row.get("top_k", []))
+        diagnostics.append(
+            {
+                "position": pos,
+                "token_id": int(token_id),
+                "target_logprob": float(row["target_logprob"]),
+                "top_k": top_k,
+            }
+        )
+    return diagnostics
+
+
 def _build_chat_reference(
     args: argparse.Namespace,
     conf: dict[str, str],
@@ -194,6 +290,12 @@ def _build_chat_reference(
         continuation = [int(tid) for tid in response.get("token_ids", [])]
         if not continuation:
             raise RuntimeError(f"Reference generation case {case_idx} returned no tokens")
+        token_diagnostics = _extract_reference_token_diagnostics(
+            port,
+            [int(tid) for tid in input_token_ids],
+            continuation,
+            args.request_timeout,
+        )
         cases.append(
             {
                 "case_index": case_idx,
@@ -201,6 +303,7 @@ def _build_chat_reference(
                 "input_token_ids": [int(tid) for tid in input_token_ids],
                 "continuation_token_ids": continuation,
                 "continuation_text": response.get("text", ""),
+                "reference_token_diagnostics": token_diagnostics,
             }
         )
         print(
@@ -275,10 +378,28 @@ def measure_chat_continuation(args: argparse.Namespace) -> dict[str, Any]:
     total_scored = 0
     total_top1 = 0
     total_top10 = 0
+    total_ref_top1 = 0
+    total_ref_top10 = 0
+    total_ref_compared = 0
+    total_js = 0.0
+    total_js_count = 0
+    max_js: float | None = None
     case_results: list[dict[str, Any]] = []
     t_start = time.perf_counter()
     cases = reference["cases"]
+    has_reference_diagnostics = any(
+        isinstance(case.get("reference_token_diagnostics"), list)
+        and bool(case["reference_token_diagnostics"])
+        for case in cases
+        if isinstance(case, dict)
+    )
     print("\n  Scoring chat continuations...")
+    if not has_reference_diagnostics:
+        print(
+            "  WARNING: reference JSON has no BF16 top-k diagnostics; "
+            "BF16 top-k comparison fields will be unavailable.",
+            flush=True,
+        )
     for case_idx, case in enumerate(cases, 1):
         prompt_ids = [int(tid) for tid in case["input_token_ids"]]
         continuation = [int(tid) for tid in case["continuation_token_ids"]]
@@ -291,15 +412,21 @@ def measure_chat_continuation(args: argparse.Namespace) -> dict[str, Any]:
             args.request_timeout,
             top_k=10,
         )
-        positions = response.get("positions")
-        if not isinstance(positions, list):
-            raise RuntimeError(f"Bad prefill_logits response: {response}")
-        rows = {int(row["position"]): row for row in positions}
+        rows = _position_rows_by_index(response)
+        ref_diagnostics = {
+            int(row["position"]): row
+            for row in case.get("reference_token_diagnostics", [])
+            if isinstance(row, dict) and row.get("position") is not None
+        }
 
         case_nll = 0.0
         case_scored = 0
         case_top1 = 0
         case_top10 = 0
+        case_ref_top1 = 0
+        case_ref_top10 = 0
+        case_ref_compared = 0
+        case_js_values: list[float] = []
         first_pos = len(prompt_ids) - 1
         for rel_idx, token_id in enumerate(continuation):
             pos = first_pos + rel_idx
@@ -319,11 +446,31 @@ def measure_chat_continuation(args: argparse.Namespace) -> dict[str, Any]:
             case_top1 += int(bool(top_ids) and top_ids[0] == token_id)
             case_top10 += int(token_id in top_ids)
 
+            ref_diag = ref_diagnostics.get(pos)
+            if ref_diag is not None:
+                ref_top_k = _normalize_top_k(ref_diag.get("top_k", []))
+                our_top_k = _normalize_top_k(row.get("top_k", []))
+                if ref_top_k and our_top_k:
+                    ref_top_id = int(ref_top_k[0]["token_id"])
+                    our_top_ids = [int(entry["token_id"]) for entry in our_top_k]
+                    case_ref_top1 += int(our_top_ids[0] == ref_top_id)
+                    case_ref_top10 += int(ref_top_id in our_top_ids)
+                    case_ref_compared += 1
+                    js = _normalized_js_divergence(ref_top_k, our_top_k)
+                    if js is not None:
+                        case_js_values.append(js)
+                        total_js += js
+                        total_js_count += 1
+                        max_js = js if max_js is None else max(max_js, js)
+
         case_ppl = math.exp(case_nll / case_scored)
         total_nll += case_nll
         total_scored += case_scored
         total_top1 += case_top1
         total_top10 += case_top10
+        total_ref_top1 += case_ref_top1
+        total_ref_top10 += case_ref_top10
+        total_ref_compared += case_ref_compared
         case_results.append(
             {
                 "case_index": case_idx,
@@ -334,13 +481,27 @@ def measure_chat_continuation(args: argparse.Namespace) -> dict[str, Any]:
                 "perplexity": case_ppl,
                 "top1": case_top1,
                 "top10": case_top10,
+                "bf16_top1": case_ref_top1,
+                "bf16_top10": case_ref_top10,
+                "bf16_positions_compared": case_ref_compared,
+                "bf16_top_k_js_avg": (
+                    sum(case_js_values) / len(case_js_values)
+                    if case_js_values else None
+                ),
+                "bf16_top_k_js_max": max(case_js_values) if case_js_values else None,
             }
         )
         running_ppl = math.exp(total_nll / total_scored)
+        ref_text = (
+            f" | bf16_top1={case_ref_top1}/{case_ref_compared} "
+            f"bf16_top10={case_ref_top10}/{case_ref_compared}"
+            if case_ref_compared
+            else ""
+        )
         print(
             f"  Case {case_idx:02d}/{len(cases)} | scored {case_scored:3d} | "
             f"PPL={case_ppl:.4f} | top1={case_top1}/{case_scored} | "
-            f"running={running_ppl:.4f}",
+            f"running={running_ppl:.4f}{ref_text}",
             flush=True,
         )
 
@@ -370,6 +531,14 @@ def measure_chat_continuation(args: argparse.Namespace) -> dict[str, Any]:
         "bits_per_token": mean_loss / math.log(2),
         "top1": total_top1,
         "top10": total_top10,
+        "bf16_top1": total_ref_top1,
+        "bf16_top10": total_ref_top10,
+        "bf16_positions_compared": total_ref_compared,
+        "bf16_top_k_js_avg": (
+            total_js / total_js_count if total_js_count else None
+        ),
+        "bf16_top_k_js_max": max_js,
+        "bf16_reference_diagnostics": total_ref_compared > 0,
         "elapsed_s": elapsed,
         "throughput_tok_s": total_scored / elapsed,
         "cases": case_results,
@@ -400,6 +569,14 @@ def measure_chat_continuation(args: argparse.Namespace) -> dict[str, Any]:
                 f"Tokens scored: {results['num_tokens_scored']}",
                 f"Top-1:         {results['top1']} / {results['num_tokens_scored']}",
                 f"Top-10:        {results['top10']} / {results['num_tokens_scored']}",
+                f"BF16 top-1:    {results['bf16_top1']} / {results['bf16_positions_compared']}",
+                f"BF16 top-10:   {results['bf16_top10']} / {results['bf16_positions_compared']}",
+                (
+                    f"BF16 top-k JS: avg {results['bf16_top_k_js_avg']:.6f}, "
+                    f"max {results['bf16_top_k_js_max']:.6f}"
+                    if results["bf16_top_k_js_avg"] is not None
+                    else "BF16 top-k JS: n/a"
+                ),
                 f"Cases:         {results['num_cases']}",
                 f"Elapsed:       {results['elapsed_s']:.1f}s",
                 f"Throughput:    {results['throughput_tok_s']:.0f} tok/s",
@@ -420,6 +597,13 @@ def measure_chat_continuation(args: argparse.Namespace) -> dict[str, Any]:
     print(f"  Tokens scored: {total_scored:,}")
     print(f"  Top-1:         {total_top1:,} / {total_scored:,}")
     print(f"  Top-10:        {total_top10:,} / {total_scored:,}")
+    if total_ref_compared:
+        print(f"  BF16 top-1:    {total_ref_top1:,} / {total_ref_compared:,}")
+        print(f"  BF16 top-10:   {total_ref_top10:,} / {total_ref_compared:,}")
+        print(
+            f"  BF16 top-k JS: avg {results['bf16_top_k_js_avg']:.6f}, "
+            f"max {results['bf16_top_k_js_max']:.6f}"
+        )
     print(f"  Elapsed:       {elapsed:.1f}s ({results['throughput_tok_s']:.0f} tok/s)")
     print(f"  Log:           {log_path}")
     print("=" * 56)

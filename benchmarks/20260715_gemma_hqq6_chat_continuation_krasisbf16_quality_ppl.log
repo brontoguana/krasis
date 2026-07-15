@@ -1,0 +1,42 @@
+Krasis Chat-Continuation Perplexity
+==================================================
+Config:       tests/gemma-4-4-hqq6-k6v6-a16.conf
+Model:        /home/main/.krasis/models/gemma-4-26b-a4b-it
+Prompt suite: quality-chat-v1
+Port:         18016
+Attention:    hqq6
+KV dtype:     k6v6
+Max new toks: 16
+Reference:    benchmarks/20260715_gemma_chat_continuation_bf16_reference_krasisdiag.json
+
+  Scoring chat continuations...
+  Case 01/14 | scored  10 | PPL=1.0000 | top1=10/10 | running=1.0000 | bf16_top1=10/10 bf16_top10=10/10
+  Case 02/14 | scored   8 | PPL=1.0028 | top1=8/8 | running=1.0012 | bf16_top1=8/8 bf16_top10=8/8
+  Case 03/14 | scored  11 | PPL=1.1216 | top1=10/11 | running=1.0453 | bf16_top1=11/11 bf16_top10=11/11
+  Case 04/14 | scored   8 | PPL=1.0000 | top1=8/8 | running=1.0353 | bf16_top1=8/8 bf16_top10=8/8
+  Case 05/14 | scored  16 | PPL=1.1221 | top1=15/16 | running=1.0608 | bf16_top1=15/16 bf16_top10=16/16
+  Case 06/14 | scored  16 | PPL=1.2158 | top1=16/16 | running=1.0949 | bf16_top1=16/16 bf16_top10=16/16
+  Case 07/14 | scored  16 | PPL=1.0058 | top1=16/16 | running=1.0775 | bf16_top1=16/16 bf16_top10=16/16
+  Case 08/14 | scored  16 | PPL=1.0053 | top1=16/16 | running=1.0657 | bf16_top1=16/16 bf16_top10=16/16
+  Case 09/14 | scored  16 | PPL=1.0398 | top1=16/16 | running=1.0621 | bf16_top1=16/16 bf16_top10=16/16
+  Case 10/14 | scored  16 | PPL=1.1361 | top1=15/16 | running=1.0708 | bf16_top1=15/16 bf16_top10=16/16
+  Case 11/14 | scored  16 | PPL=1.0245 | top1=16/16 | running=1.0657 | bf16_top1=16/16 bf16_top10=16/16
+  Case 12/14 | scored  16 | PPL=1.1923 | top1=14/16 | running=1.0774 | bf16_top1=14/16 bf16_top10=16/16
+  Case 13/14 | scored  16 | PPL=1.1341 | top1=16/16 | running=1.0823 | bf16_top1=16/16 bf16_top10=16/16
+  Case 14/14 | scored  16 | PPL=1.0445 | top1=16/16 | running=1.0792 | bf16_top1=16/16 bf16_top10=16/16
+
+========================================================
+  CHAT-CONTINUATION PPL COMPLETE - quality-chat-v1
+========================================================
+  Perplexity:    1.0792
+  Bits/token:    0.1099
+  Tokens scored: 197
+  Top-1:         192 / 197
+  Top-10:        197 / 197
+  BF16 top-1:    193 / 197
+  BF16 top-10:   197 / 197
+  BF16 top-k JS: avg 0.002791, max 0.105150
+  Elapsed:       10.2s (19 tok/s)
+  Log:           perplexity/results/gemma-4-26b-a4b-it_quality-chat-v1_chat_continuation_hqq6_k6v6_20260715_202511.log
+========================================================
+EXIT:0

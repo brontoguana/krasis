@@ -24,8 +24,8 @@ Detailed quality logs and artifacts are indexed in [benchmarks/BENCHMARKS.md](be
 | Qwen3.5-397B-A17B | 397B class | 17B class | INT4/HQQ6/k6v6 | Krasis BF16 | n/a | 2.8806 | -0.14% | n/a | n/a | n/a | n/a | PASS |
 | Step-3.7-Flash | 201.4B total / 199.4B text | 13.9B | INT4/HQQ4/k4v4 | llama-witness BF16 | 8 | 1.7671 | +3.80% | avg 3.655%, max 7.582% | 7/8 | 8/8 | 8/8 | PASS |
 | Step-3.7-Flash | 201.4B total / 199.4B text | 13.9B | INT4/HQQ6/k6v6 | llama-witness BF16 | 8 | 1.7016 | -0.04% | avg 2.206%, max 3.997% | 8/8 | 8/8 | 8/8 | PASS |
-| Gemma-4-26B-A4B-it | 26B class | 4B class | INT4/HQQ4/k4v4 | Krasis BF16 | 14 | 1.1708 | +8.98% chat | n/a | n/a | n/a | 14/14 | PASS |
-| Gemma-4-26B-A4B-it | 26B class | 4B class | INT4/HQQ6/k6v6 | Krasis BF16 | 14 | 1.0793 | +0.46% chat | n/a | n/a | n/a | 14/14 | PASS |
+| Gemma-4-26B-A4B-it | 26B class | 4B class | INT4/HQQ4/k4v4 | Krasis BF16 | 14 | 1.1736 | +9.14% chat | avg 1.969%, max 39.239% | 187/197 | 197/197 | 14/14 | PASS |
+| Gemma-4-26B-A4B-it | 26B class | 4B class | INT4/HQQ6/k6v6 | Krasis BF16 | 14 | 1.0792 | +0.36% chat | avg 0.279%, max 10.515% | 193/197 | 197/197 | 14/14 | PASS |
 | Nemotron-3-Super-120B-A12B | 123.6B total | 12.4B | INT4/HQQ4/k4v4 | Krasis BF16 | n/a | 379,305.2043 | +16.30% diagnostic | n/a | n/a | n/a | n/a | BLOCKED |
 | Nemotron-3-Super-120B-A12B | 123.6B total | 12.4B | INT4/HQQ6/k6v6 | Krasis BF16 | n/a | 337,774.3820 | +3.56% diagnostic | n/a | n/a | n/a | n/a | BLOCKED |
 | Nemotron-3-Nano-30B-A3B | 31.6B total | 3.2B | INT4/HQQ4/k4v4 | Krasis BF16 | n/a | 35,918.9461 | -2.89% diagnostic | n/a | n/a | n/a | n/a | BLOCKED |
@@ -49,14 +49,20 @@ Column notes:
 - Gemma rows use chat-continuation PPL because raw WikiText-2 PPL is
   pathological for this instruction/vision model. Krasis BF16 generated 14 chat
   continuations, and BF16/HQQ runs scored the same 197 continuation tokens
-  through `/v1/internal/prefill_logits`. The BF16 baseline was PPL `1.0743`.
+  through `/v1/internal/prefill_logits`. The BF16 baseline was PPL `1.0753`.
   HQQ4 and HQQ6 kept the BF16 continuation token in the top 10 for `197/197`
   scored tokens.
 - Nemotron rows are `BLOCKED` because there is no Nemotron BF16 llama-witness
   reference yet, and the Krasis BF16 diagnostic PPL path produced pathological
   absolute PPL values. The measured PPL deltas are retained only as raw
   diagnostics from the run.
-- `BF16 top-k drift` is normalized Jensen-Shannon divergence over the
-  first-token BF16/Krasis top-10 union from llama-witness diagnostics. Lower is
-  closer to BF16. This is a top-k diagnostic, not full-vocabulary forced-token
-  drift.
+- `BF16 top-k drift` is normalized Jensen-Shannon divergence over the BF16/HQQ
+  top-10 union. For `llama-witness BF16` rows it is measured on first-token
+  witness diagnostics; for `Krasis BF16` chat-continuation rows it is measured
+  over the scored continuation-token positions from `/v1/internal/prefill_logits`.
+  Lower is closer to BF16. This is a top-k diagnostic, not full-vocabulary
+  forced-token drift.
+- `Prefill argmax` and `Prefill top-10` are BF16 top-1/top-10 containment counts
+  over the measured comparison positions. For llama-witness rows those positions
+  are one first-token diagnostic per prompt; for chat-continuation rows they are
+  scored continuation tokens.
