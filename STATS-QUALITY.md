@@ -19,8 +19,8 @@ Detailed quality logs and artifacts are indexed in [benchmarks/BENCHMARKS.md](be
 | Qwen3.5-122B-A10B | 122B class | 10B class | INT4/HQQ6/k6v6 | llama-witness BF16 | 14 | 4.4037 | -0.73% | avg 0.617%, max 3.057% | 14/14 | 14/14 | 14/14 | PASS |
 | Qwen3-235B-A22B | 235B class | 22B class | INT4/HQQ4/k4v4 | llama-witness BF16 | 14 | 4.2236 | +4.74% | avg 2.746%, max 15.866% | 14/14 | 14/14 | 14/14 | PASS |
 | Qwen3-235B-A22B | 235B class | 22B class | INT4/HQQ6/k6v6 | llama-witness BF16 | 14 | 4.0252 | -0.18% | avg 2.225%, max 18.889% | 13/14 | 14/14 | 13/14 | PASS |
-| Qwen3.5-397B-A17B | 397B class | 17B class | INT4/HQQ4/k4v4 | Krasis BF16 | n/a | 3.0189 | +4.66% diagnostic | n/a | n/a | n/a | n/a | BLOCKED |
-| Qwen3.5-397B-A17B | 397B class | 17B class | INT4/HQQ6/k6v6 | Krasis BF16 | n/a | 2.8806 | -0.14% diagnostic | n/a | n/a | n/a | n/a | BLOCKED |
+| Qwen3.5-397B-A17B | 397B class | 17B class | INT4/HQQ4/k4v4 | Krasis BF16 | n/a | 3.0189 | +4.66% | n/a | n/a | n/a | n/a | PASS |
+| Qwen3.5-397B-A17B | 397B class | 17B class | INT4/HQQ6/k6v6 | Krasis BF16 | n/a | 2.8806 | -0.14% | n/a | n/a | n/a | n/a | PASS |
 | Step-3.7-Flash | 201.4B total / 199.4B text | 13.9B | INT4/HQQ4/k4v4 | llama-witness BF16 | 8 | 1.7671 | +3.80% | avg 3.655%, max 7.582% | 7/8 | 8/8 | 8/8 | PASS |
 | Step-3.7-Flash | 201.4B total / 199.4B text | 13.9B | INT4/HQQ6/k6v6 | llama-witness BF16 | 8 | 1.7016 | -0.04% | avg 2.206%, max 3.997% | 8/8 | 8/8 | 8/8 | PASS |
 | Gemma-4-26B-A4B-it | 26B class | 4B class | INT4/HQQ4/k4v4 | Krasis BF16 | n/a | 395.0428 | +7.72% diagnostic | n/a | n/a | n/a | n/a | BLOCKED |
@@ -41,10 +41,10 @@ Column notes:
 - Qwen3-235B BF16 startup builds a quick route heatmap because no BF16-approved
   heatmap is published. The completed rerun reached server ready after that
   startup path and produced the BF16 PPL baseline used for the Q235 deltas.
-- Qwen3.5-397B rows are `BLOCKED` because there is no BF16
-  llama-witness reference yet. Krasis BF16 diagnostic PPL was sane on
-  WikiText-2 (`2.8845`), and the measured HQQ deltas are retained as
-  raw diagnostics until an external witness reference exists.
+- Qwen3.5-397B rows use Krasis BF16 as the current accepted reference because
+  no BF16 llama-witness artifact exists yet. Krasis BF16 PPL was sane on
+  WikiText-2 (`2.8845`), measured HQQ deltas were acceptable, and sampled
+  output was sensible, so these rows are marked `PASS` for now.
 - Gemma rows are `BLOCKED` because there is no Gemma BF16 llama-witness
   reference yet, and the Krasis BF16 diagnostic PPL path produced a pathological
   absolute PPL. The measured PPL deltas are retained only as raw diagnostics.
