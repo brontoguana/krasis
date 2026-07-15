@@ -1,0 +1,106 @@
+[0;36m[1m=>[0m Waiting for selected GPUs (0) to clear...
+[0;32m[1mOK[0m Selected GPUs (0) clear.
+[0;36m[1m=>[0m Launching from: tests/nemotron-super-4-4-hqq6-k6v6-a16.conf
+[0;36m[1m=>[0m Run dir: /home/main/Documents/Claude/krasis-main-merge/logs/dev-run_20260714_144803
+[0;36m[1m=>[0m Import origin check:
+krasis: /home/main/Documents/Claude/krasis-main-merge/python/krasis/__init__.py
+krasis.krasis: /home/main/Documents/Claude/krasis-main-merge/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+Pre-scan: set CUDA_VISIBLE_DEVICES=0
+Loaded config from tests/nemotron-super-4-4-hqq6-k6v6-a16.conf: {'model_path': '/home/main/.krasis/models/NVIDIA-Nemotron-3-Super-120B-A12B-BF16', 'selected_gpus': '0', 'num_gpus': 1, 'layer_group_size': 2, 'kv_dtype': 'k6v6', 'gpu_expert_bits': 4, 'cpu_expert_bits': 4, 'attention_quant': 'hqq6', 'hqq_group_size': 128, 'shared_expert_quant': 'int8', 'dense_mlp_quant': 'int8', 'lm_head_quant': 'int8', 'krasis_threads': 40, 'host': '0.0.0.0', 'port': 18018, 'enable_thinking': False, 'gpu_prefill_threshold': 300, 'vram_safety_margin': 600, 'force_load': False}
+
+[1m[36m▸ Krasis — NVIDIA-Nemotron-3-Super-120B-A12B-BF16[0m
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 1[0m
+  [32mHCS host cache: source[0m
+  [32mSelected physical GPUs: 0 (config; CUDA_VISIBLE_DEVICES=0)[0m
+  [32mExperts: GPU INT4 g128 (amax)  |  Attention: hqq6  |  KV: k6v6[0m
+  [32mLayer groups: 2  |  KV cache: 1000 MB  |  Threads: 40[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+
+[1m[36m▸ Loading model weights[0m
+  [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=518 MB, free=31600 MB, total=32119 MB
+
+[1m[36m▸ Loading GPU weights[0m
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:0: alloc=13290 MB, reserved=13464 MB, used=14080 MB, free=18038 MB, total=32119 MB
+  [0;32mHQQ attention artifacts validated (338 MB cached), 18038 MB free[0m
+
+[1m[36m▸ Loading GPU expert weights from cache[0m
+    Loading GPU Marlin cache: 40 layers...
+    GPU Marlin cache loaded: 59.0 GB in 37s
+  [0;32mExpert weights loaded in 37s.[0m
+  [33m[VRAM after-phase2-expert-weights][0m cuda:0: alloc=13290 MB, reserved=13464 MB, used=14080 MB, free=18038 MB, total=32119 MB
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:0: alloc=13290 MB, reserved=13464 MB, used=14080 MB, free=18038 MB, total=32119 MB
+  [33m[VRAM after-kv-cache-init][0m cuda:0: alloc=14290 MB, reserved=14396 MB, used=15012 MB, free=17106 MB, total=32119 MB
+  [33m[VRAM after-full-load][0m cuda:0: alloc=14290 MB, reserved=14396 MB, used=15012 MB, free=17106 MB, total=32119 MB
+
+[1m[36m▸ CUDA runtime warmup[0m
+  [32mcuBLAS + Triton kernel compilation done[0m
+
+[1m[36m▸ Setting up GPU decode store[0m
+  [32mGPU decode store ready (addr=0x9db9a190)[0m
+  [32mReleased redundant GPU execution source tensors (832 MB)[0m
+  [2mVRAM monitor started (tracking warmup)[0m
+  [2mcuda:0: 0 MB total[0m
+
+[1m[36m▸ Pre-allocating Rust prefill engine[0m
+[FLA] Loading kernels for H=0 from /home/main/Documents/Claude/krasis-main-merge/python/krasis/libkrasis_fla_sm120.so
+  [32mPrefill engine scratch buffers allocated[0m
+
+[1m[36m▸ Warmup (Rust prefill engine)[0m
+  [32mRust prefill warmed with 300 tokens before HCS budgeting[0m
+  [32mWarmup complete in 1.1s[0m
+  [2mcuda:0 warmup:  peak 19,878 MB used / 32,119 MB total  (min free: 12,240 MB)[0m
+
+[1m[36m▸ VRAM calibration[0m
+  [32mSafety margin: 600 MB[0m
+  [32mFree VRAM after startup: 14,422 MB / 32,119 MB[0m
+  [32mShort calibration: probing 500 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 3.85s (8.3 tok/s)  VRAM: 14376 MB free now, 14376 MB min free during decode[0m
+  [32mShort calibration: baseline=14,422 MB, prefill post-alloc=13,082 MB, prefill min=7,472 MB, decode min=14,376 MB, post-cleanup=14,376 MB[0m
+  [32mAdaptive long calibration: default target=39,920 tokens, target low-water floor=1,200 MB, estimated prefill growth=0.7466 MB/token[0m
+  [32mAdaptive long calibration: next probe 7,293 tokens (model-estimated initial probe (projected 0.7466 MB/token, validation floor 2400 MB))[0m
+  [32mLong calibration: probing 7,293 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 3.87s (8.3 tok/s)  VRAM: 14374 MB free now, 14374 MB min free during decode[0m
+  [32mLong calibration: baseline=14,376 MB, prefill post-alloc=7,650 MB, prefill min=1,276 MB, decode min=14,374 MB, post-cleanup=14,374 MB[0m
+  [32mAdaptive long calibration: using 7,293 tokens (current low-water 1276 MB leaves no validation reserve above 2400 MB)[0m
+  [32mScratch reservation: max=38,007 MB (at 50,000 tokens)[0m
+
+[1m[36m▸ VRAM calibration complete[0m
+  [32mPost-calibration free VRAM: 14,374 MB[0m
+  [32mTransient deltas: short prefill=6,950 MB, long prefill=13,100 MB, short decode=46 MB, long decode=2 MB[0m
+  [32mGPU0 decode HCS budget: 13,728 MB[0m
+  [32mPrefill HCS budgets: short=6,824 MB, long=674 MB[0m
+  [32mWorst-case prefill scratch reservation: 38,007 MB at 50,000 tokens[0m
+
+[1m[36m▸ Calculating HCS budget[0m
+
+[1m[36m▸ Checking approved route heatmap cache[0m
+  [32mApproved route heatmap loaded from cache: nemotron_super_hqq6_p00006_local (manifest-approved runtime compatibility)[0m
+  [32mUsing approved route heatmap; quick startup heatmap collection skipped[0m
+  [32mHeatmap: 16,826 experts ranked from 16,826 entries[0m
+  [2mVRAM calibration: baseline 14374 MB | prefill 927.1 KB/tok, decode -6.6 KB/tok | HCS allowance prefill: short 6824 MB, long 674 MB | decode: short 13728 MB, long 13772 MB | idle floors prefill=7550 MB decode=646 MB | decode-resident HCS budget=13728 MB[0m
+  [2mGPU0 HCS: 20480 experts (16826 ranked + 3654 unranked), reclaimable: 13,728 MB[0m
+
+[1m[36m▸ Loading GPU0 HCS pool (fully reclaimable)[0m
+
+[1m[36m▸ HCS pool loaded[0m
+  [32mHCS pool: 0/20480 experts loaded in 0.00s (0.0% coverage), 0.0 MB VRAM, 0 free slots, gpu_route_sync=false, mapped_reads=false | soft: 4922 experts in 0.67s (13324.0 MB, host_mode=source) | total: 4922/20480 (24.0%) coverage[0m
+  [2mLoaded in 0.7s[0m
+
+[1m[36m▸ Decode validation[0m
+  [32mSkipped: Rust prefill already warmed before HCS budgeting[0m
+
+[1m[36m▸ VRAM monitor: runtime warnings enabled[0m
+  [32mSafety margin: 600 MB — warnings on every new low below this[0m
+
+[1m[32mKRASIS SERVER READY[0m
+  [32mModel:[0m    [1mNVIDIA-Nemotron-3-Super-120B-A12B-BF16[0m
+  [32mAddress:[0m  [1m0.0.0.0:18018[0m
+  [32mContext:[0m  292,560 tokens  |  KV cache: 1,000 MB
+  [32mDecode:[0m   GPU  |  HCS: on  |  Think: off
+  [32mClient setup:[0m
+    Base URL:      [1mhttp://127.0.0.1:18018/v1[0m
+    Chat endpoint: http://127.0.0.1:18018/v1/chat/completions
+    Models:        http://127.0.0.1:18018/v1/models
+    API key:       [1mX[0m [2m(any value)[0m
+    Model name:    [1mNVIDIA-Nemotron-3-Super-120B-A12B-BF16[0m
+  [2mPress Q or Ctrl-C to stop[0m

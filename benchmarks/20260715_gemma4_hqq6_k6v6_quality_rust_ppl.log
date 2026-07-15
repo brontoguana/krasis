@@ -1,0 +1,67 @@
+Krasis Rust Prefill Perplexity
+==================================================
+Config:      tests/gemma-4-4-hqq6-k6v6-a16.conf
+Model:       /home/main/.krasis/models/gemma-4-26b-a4b-it
+Dataset:     wikitext-2
+Port:        18016
+Attention:   hqq6
+KV dtype:    k6v6
+Window:      2048, stride=1024
+Max tokens:  20000
+
+  Loading dataset...
+  Tokenizing...
+  Tokens: 20,000
+  [  5.0%] Window 1/20 | scored 2047 this, 2047/20000 total | PPL=271.5931 | 105 tok/s
+  [ 10.0%] Window 2/20 | scored 1024 this, 3071/20000 total | PPL=272.1899 | 80 tok/s
+  [ 15.0%] Window 3/20 | scored 1024 this, 4095/20000 total | PPL=458.6612 | 71 tok/s
+  [ 20.0%] Window 4/20 | scored 1024 this, 5119/20000 total | PPL=553.6744 | 66 tok/s
+  [ 25.0%] Window 5/20 | scored 1024 this, 6143/20000 total | PPL=595.0940 | 63 tok/s
+  [ 30.0%] Window 6/20 | scored 1024 this, 7167/20000 total | PPL=425.2532 | 61 tok/s
+  [ 35.0%] Window 7/20 | scored 1024 this, 8191/20000 total | PPL=468.0252 | 60 tok/s
+  [ 40.0%] Window 8/20 | scored 1024 this, 9215/20000 total | PPL=433.5983 | 59 tok/s
+  [ 45.0%] Window 9/20 | scored 1024 this, 10239/20000 total | PPL=434.2065 | 58 tok/s
+  [ 50.0%] Window 10/20 | scored 1024 this, 11263/20000 total | PPL=372.9417 | 58 tok/s
+  [ 55.0%] Window 11/20 | scored 1024 this, 12287/20000 total | PPL=343.5917 | 57 tok/s
+  [ 60.0%] Window 12/20 | scored 1024 this, 13311/20000 total | PPL=294.1508 | 57 tok/s
+  [ 65.0%] Window 13/20 | scored 1024 this, 14335/20000 total | PPL=260.7536 | 57 tok/s
+  [ 70.0%] Window 14/20 | scored 1024 this, 15359/20000 total | PPL=256.6392 | 57 tok/s
+  [ 75.0%] Window 15/20 | scored 1024 this, 16383/20000 total | PPL=239.8213 | 57 tok/s
+  [ 80.0%] Window 16/20 | scored 1024 this, 17407/20000 total | PPL=246.2442 | 57 tok/s
+  [ 85.0%] Window 17/20 | scored 1024 this, 18431/20000 total | PPL=249.5125 | 56 tok/s
+  [ 90.0%] Window 18/20 | scored 1024 this, 19455/20000 total | PPL=293.5149 | 56 tok/s
+  [ 95.0%] Window 19/20 | scored 544 this, 19999/20000 total | PPL=293.7475 | 56 tok/s
+  [100.0%] Window 20/20 | scored 0 this, 19999/20000 total | PPL=293.7475 | 55 tok/s
+
+========================================================
+  RUST PREFILL PPL COMPLETE - wikitext-2
+========================================================
+  Perplexity:    293.7475
+  BPC:           8.1984
+  Tokens scored: 19,999
+  Elapsed:       365.3s (55 tok/s)
+  Log:           perplexity/results/gemma-4-26b-a4b-it_wikitext-2_hqq6_k6v6_rust_prefill_20260715_042424.log
+========================================================
+	Command being timed: "env PYTHONUNBUFFERED=1 ./dev quality-ppl tests/gemma-4-4-hqq6-k6v6-a16.conf --max-tokens 20000"
+	User time (seconds): 11.62
+	System time (seconds): 1.09
+	Percent of CPU this job got: 3%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 6:10.27
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 1058168
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 293806
+	Voluntary context switches: 245
+	Involuntary context switches: 193
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 600
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

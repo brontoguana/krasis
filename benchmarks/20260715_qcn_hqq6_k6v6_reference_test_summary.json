@@ -1,0 +1,2223 @@
+{
+  "model": "Qwen3-Coder-Next",
+  "config": "tests/qcn-stats-hqq6-k6v6.conf",
+  "reference_path": "/home/main/Documents/Claude/krasis-internal/reference-outputs/output/Qwen3-Coder-Next/llama_witness_stage3_qcn_expanded.json",
+  "overall": "PASS",
+  "prompt_results": [
+    {
+      "conv_idx": 0,
+      "turn": 1,
+      "multi_turn": false,
+      "prompt": "Hi",
+      "trace_input_row": {
+        "case_key": "0:0",
+        "conv_idx": 0,
+        "turn_idx": 0,
+        "layer": 0,
+        "tensor": "la_input_row_for_qkvz_last",
+        "requested_layers": "0",
+        "requested_tensors": "la_input_row_for_qkvz_last",
+        "pos": 8,
+        "positions": [
+          8
+        ],
+        "input_tokens_count": 9,
+        "prompt_prefix": "Hi"
+      },
+      "verdict": "PASS",
+      "metrics": {
+        "first_match": true,
+        "match_run": 1,
+        "ref_tokens_count": 1,
+        "our_tokens_count": 1,
+        "containment_rate": 1.0,
+        "containment_hits": 1,
+        "containment_total": 1,
+        "first_token_diagnostic": {
+          "available": true,
+          "ref_first_token": 9707,
+          "our_first_token": 9707,
+          "first_token_match": true,
+          "ref_top_ids": [
+            9707,
+            13048,
+            18665,
+            21927,
+            14990,
+            68012,
+            79497,
+            23913,
+            39,
+            21018
+          ],
+          "our_top_ids": [
+            9707,
+            13048,
+            18665,
+            21927,
+            14990,
+            23913,
+            79497,
+            68012,
+            21018,
+            96724
+          ],
+          "ref_top_k": [
+            {
+              "rank": 1,
+              "token_id": 9707,
+              "logprob": -0.010232976533309568
+            },
+            {
+              "rank": 2,
+              "token_id": 13048,
+              "logprob": -4.597646764375106
+            },
+            {
+              "rank": 3,
+              "token_id": 18665,
+              "logprob": -10.195093206025497
+            },
+            {
+              "rank": 4,
+              "token_id": 21927,
+              "logprob": -10.327325872041122
+            },
+            {
+              "rank": 5,
+              "token_id": 14990,
+              "logprob": -11.690343907929794
+            },
+            {
+              "rank": 6,
+              "token_id": 68012,
+              "logprob": -12.20097546920909
+            },
+            {
+              "rank": 7,
+              "token_id": 79497,
+              "logprob": -12.459904721833603
+            },
+            {
+              "rank": 8,
+              "token_id": 23913,
+              "logprob": -12.72700314865245
+            },
+            {
+              "rank": 9,
+              "token_id": 39,
+              "logprob": -13.275882772065536
+            },
+            {
+              "rank": 10,
+              "token_id": 21018,
+              "logprob": -13.275896123505966
+            }
+          ],
+          "our_top_k": [
+            {
+              "rank": 1,
+              "token_id": 9707,
+              "logprob": -0.024492
+            },
+            {
+              "rank": 2,
+              "token_id": 13048,
+              "logprob": -3.727886
+            },
+            {
+              "rank": 3,
+              "token_id": 18665,
+              "logprob": -9.968569
+            },
+            {
+              "rank": 4,
+              "token_id": 21927,
+              "logprob": -10.077164
+            },
+            {
+              "rank": 5,
+              "token_id": 14990,
+              "logprob": -11.155422
+            },
+            {
+              "rank": 6,
+              "token_id": 23913,
+              "logprob": -11.710266
+            },
+            {
+              "rank": 7,
+              "token_id": 79497,
+              "logprob": -12.113808
+            },
+            {
+              "rank": 8,
+              "token_id": 68012,
+              "logprob": -12.165341
+            },
+            {
+              "rank": 9,
+              "token_id": 21018,
+              "logprob": -12.368618
+            },
+            {
+              "rank": 10,
+              "token_id": 96724,
+              "logprob": -12.835713
+            }
+          ],
+          "top_ids_exact": false,
+          "top_overlap_count": 9,
+          "top_overlap_ids": [
+            9707,
+            13048,
+            18665,
+            21927,
+            14990,
+            68012,
+            79497,
+            23913,
+            21018
+          ],
+          "ref_top1_top2_logprob_margin": 4.587413787841797,
+          "our_top1_top2_logprob_margin": 3.703394,
+          "ref_token_rank_in_ref_topk": 1,
+          "ref_token_rank_in_our_topk": 1,
+          "our_token_rank_in_our_topk": 1,
+          "our_token_rank_in_ref_topk": 1,
+          "selected_token_stayed_rank1": true,
+          "selected_ref_logprob": -0.010232976533309568,
+          "selected_our_logprob": -0.024492,
+          "selected_logprob_delta": 0.014259023466690432,
+          "common_logprob_deltas": [
+            {
+              "token_id": 9707,
+              "ref_logprob": -0.010232976533309568,
+              "our_logprob": -0.024492,
+              "abs_delta": 0.014259023466690432
+            },
+            {
+              "token_id": 13048,
+              "ref_logprob": -4.597646764375106,
+              "our_logprob": -3.727886,
+              "abs_delta": 0.8697607643751066
+            },
+            {
+              "token_id": 18665,
+              "ref_logprob": -10.195093206025497,
+              "our_logprob": -9.968569,
+              "abs_delta": 0.2265242060254966
+            },
+            {
+              "token_id": 21927,
+              "ref_logprob": -10.327325872041122,
+              "our_logprob": -10.077164,
+              "abs_delta": 0.2501618720411223
+            },
+            {
+              "token_id": 14990,
+              "ref_logprob": -11.690343907929794,
+              "our_logprob": -11.155422,
+              "abs_delta": 0.5349219079297942
+            },
+            {
+              "token_id": 68012,
+              "ref_logprob": -12.20097546920909,
+              "our_logprob": -12.165341,
+              "abs_delta": 0.03563446920909108
+            },
+            {
+              "token_id": 79497,
+              "ref_logprob": -12.459904721833603,
+              "our_logprob": -12.113808,
+              "abs_delta": 0.34609672183360196
+            },
+            {
+              "token_id": 23913,
+              "ref_logprob": -12.72700314865245,
+              "our_logprob": -11.710266,
+              "abs_delta": 1.0167371486524495
+            },
+            {
+              "token_id": 21018,
+              "ref_logprob": -13.275896123505966,
+              "our_logprob": -12.368618,
+              "abs_delta": 0.9072781235059661
+            }
+          ],
+          "mean_common_logprob_delta": 0.4668193596710355,
+          "max_common_logprob_delta": 1.0167371486524495
+        },
+        "divergence_pos": null,
+        "divergence_info": null,
+        "token_table": [
+          {
+            "pos": 0,
+            "ref_token": 9707,
+            "our_token": 9707,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -0.010232976533309568,
+            "our_logprob": -0.024492
+          }
+        ],
+        "ref_text": "Hello",
+        "our_text": "Hello"
+      },
+      "prefill_metrics": {
+        "prefill_available": true,
+        "prefill_argmax_match": 1,
+        "prefill_top10_hits": 1,
+        "prefill_total": 1,
+        "prefill_argmax_rate": 1.0,
+        "prefill_containment": 1.0
+      },
+      "timing": {
+        "prefill_ms": 607.1,
+        "decode_ms": 0.4,
+        "total_ms": 833.1,
+        "prompt_tokens": 9
+      }
+    },
+    {
+      "conv_idx": 1,
+      "turn": 1,
+      "multi_turn": false,
+      "prompt": "What is 2+2?",
+      "trace_input_row": {
+        "case_key": "1:0",
+        "conv_idx": 1,
+        "turn_idx": 0,
+        "layer": 0,
+        "tensor": "la_input_row_for_qkvz_last",
+        "requested_layers": "0",
+        "requested_tensors": "la_input_row_for_qkvz_last",
+        "pos": 14,
+        "positions": [
+          14
+        ],
+        "input_tokens_count": 15,
+        "prompt_prefix": "What is 2+2?"
+      },
+      "verdict": "PASS",
+      "metrics": {
+        "first_match": true,
+        "match_run": 1,
+        "ref_tokens_count": 1,
+        "our_tokens_count": 1,
+        "containment_rate": 1.0,
+        "containment_hits": 1,
+        "containment_total": 1,
+        "first_token_diagnostic": {
+          "available": true,
+          "ref_first_token": 17,
+          "our_first_token": 17,
+          "first_token_match": true,
+          "ref_top_ids": [
+            17,
+            44292,
+            785,
+            19,
+            334,
+            3,
+            31807,
+            14085,
+            63,
+            18
+          ],
+          "our_top_ids": [
+            17,
+            785,
+            44292,
+            334,
+            19,
+            31807,
+            3,
+            14085,
+            63,
+            11613
+          ],
+          "ref_top_k": [
+            {
+              "rank": 1,
+              "token_id": 17,
+              "logprob": -0.0017247408054643643
+            },
+            {
+              "rank": 2,
+              "token_id": 44292,
+              "logprob": -7.190353891196089
+            },
+            {
+              "rank": 3,
+              "token_id": 785,
+              "logprob": -7.3888077943943316
+            },
+            {
+              "rank": 4,
+              "token_id": 19,
+              "logprob": -9.237994691672164
+            },
+            {
+              "rank": 5,
+              "token_id": 334,
+              "logprob": -9.36361934834941
+            },
+            {
+              "rank": 6,
+              "token_id": 3,
+              "logprob": -10.019167444052535
+            },
+            {
+              "rank": 7,
+              "token_id": 31807,
+              "logprob": -10.047924539389449
+            },
+            {
+              "rank": 8,
+              "token_id": 14085,
+              "logprob": -10.831827661337691
+            },
+            {
+              "rank": 9,
+              "token_id": 63,
+              "logprob": -11.713999292197066
+            },
+            {
+              "rank": 10,
+              "token_id": 18,
+              "logprob": -12.473292848410445
+            }
+          ],
+          "our_top_k": [
+            {
+              "rank": 1,
+              "token_id": 17,
+              "logprob": -0.002822
+            },
+            {
+              "rank": 2,
+              "token_id": 785,
+              "logprob": -6.812964
+            },
+            {
+              "rank": 3,
+              "token_id": 44292,
+              "logprob": -6.913859
+            },
+            {
+              "rank": 4,
+              "token_id": 334,
+              "logprob": -8.521153
+            },
+            {
+              "rank": 5,
+              "token_id": 19,
+              "logprob": -8.936624
+            },
+            {
+              "rank": 6,
+              "token_id": 31807,
+              "logprob": -9.217269
+            },
+            {
+              "rank": 7,
+              "token_id": 3,
+              "logprob": -9.435762
+            },
+            {
+              "rank": 8,
+              "token_id": 14085,
+              "logprob": -10.275603
+            },
+            {
+              "rank": 9,
+              "token_id": 63,
+              "logprob": -10.69891
+            },
+            {
+              "rank": 10,
+              "token_id": 11613,
+              "logprob": -11.504268
+            }
+          ],
+          "top_ids_exact": false,
+          "top_overlap_count": 9,
+          "top_overlap_ids": [
+            17,
+            44292,
+            785,
+            19,
+            334,
+            3,
+            31807,
+            14085,
+            63
+          ],
+          "ref_top1_top2_logprob_margin": 7.188629150390625,
+          "our_top1_top2_logprob_margin": 6.810142,
+          "ref_token_rank_in_ref_topk": 1,
+          "ref_token_rank_in_our_topk": 1,
+          "our_token_rank_in_our_topk": 1,
+          "our_token_rank_in_ref_topk": 1,
+          "selected_token_stayed_rank1": true,
+          "selected_ref_logprob": -0.0017247408054643643,
+          "selected_our_logprob": -0.002822,
+          "selected_logprob_delta": 0.0010972591945356356,
+          "common_logprob_deltas": [
+            {
+              "token_id": 17,
+              "ref_logprob": -0.0017247408054643643,
+              "our_logprob": -0.002822,
+              "abs_delta": 0.0010972591945356356
+            },
+            {
+              "token_id": 44292,
+              "ref_logprob": -7.190353891196089,
+              "our_logprob": -6.913859,
+              "abs_delta": 0.27649489119608894
+            },
+            {
+              "token_id": 785,
+              "ref_logprob": -7.3888077943943316,
+              "our_logprob": -6.812964,
+              "abs_delta": 0.5758437943943315
+            },
+            {
+              "token_id": 19,
+              "ref_logprob": -9.237994691672164,
+              "our_logprob": -8.936624,
+              "abs_delta": 0.30137069167216346
+            },
+            {
+              "token_id": 334,
+              "ref_logprob": -9.36361934834941,
+              "our_logprob": -8.521153,
+              "abs_delta": 0.8424663483494097
+            },
+            {
+              "token_id": 3,
+              "ref_logprob": -10.019167444052535,
+              "our_logprob": -9.435762,
+              "abs_delta": 0.5834054440525342
+            },
+            {
+              "token_id": 31807,
+              "ref_logprob": -10.047924539389449,
+              "our_logprob": -9.217269,
+              "abs_delta": 0.8306555393894488
+            },
+            {
+              "token_id": 14085,
+              "ref_logprob": -10.831827661337691,
+              "our_logprob": -10.275603,
+              "abs_delta": 0.5562246613376907
+            },
+            {
+              "token_id": 63,
+              "ref_logprob": -11.713999292197066,
+              "our_logprob": -10.69891,
+              "abs_delta": 1.0150892921970662
+            }
+          ],
+          "mean_common_logprob_delta": 0.5536275468648078,
+          "max_common_logprob_delta": 1.0150892921970662
+        },
+        "divergence_pos": null,
+        "divergence_info": null,
+        "token_table": [
+          {
+            "pos": 0,
+            "ref_token": 17,
+            "our_token": 17,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -0.0017247408054643643,
+            "our_logprob": -0.002822
+          }
+        ],
+        "ref_text": "2",
+        "our_text": "2"
+      },
+      "prefill_metrics": {
+        "prefill_available": true,
+        "prefill_argmax_match": 1,
+        "prefill_top10_hits": 1,
+        "prefill_total": 1,
+        "prefill_argmax_rate": 1.0,
+        "prefill_containment": 1.0
+      },
+      "timing": {
+        "prefill_ms": 592.0,
+        "decode_ms": 0.2,
+        "total_ms": 815.3,
+        "prompt_tokens": 15
+      }
+    },
+    {
+      "conv_idx": 2,
+      "turn": 1,
+      "multi_turn": false,
+      "prompt": "Write a quicksort implementation in Rust",
+      "trace_input_row": {
+        "case_key": "2:0",
+        "conv_idx": 2,
+        "turn_idx": 0,
+        "layer": 0,
+        "tensor": "la_input_row_for_qkvz_last",
+        "requested_layers": "0",
+        "requested_tensors": "la_input_row_for_qkvz_last",
+        "pos": 14,
+        "positions": [
+          14
+        ],
+        "input_tokens_count": 15,
+        "prompt_prefix": "Write a quicksort implementation in Rust"
+      },
+      "verdict": "PASS",
+      "metrics": {
+        "first_match": true,
+        "match_run": 1,
+        "ref_tokens_count": 1,
+        "our_tokens_count": 1,
+        "containment_rate": 1.0,
+        "containment_hits": 1,
+        "containment_total": 1,
+        "first_token_diagnostic": {
+          "available": true,
+          "ref_first_token": 8420,
+          "our_first_token": 8420,
+          "first_token_match": true,
+          "ref_top_ids": [
+            8420,
+            73594,
+            5692,
+            1588,
+            99817,
+            22464,
+            6739,
+            39814,
+            63,
+            14374
+          ],
+          "our_top_ids": [
+            8420,
+            5692,
+            73594,
+            1588,
+            99817,
+            6739,
+            22464,
+            63,
+            39814,
+            131337
+          ],
+          "ref_top_k": [
+            {
+              "rank": 1,
+              "token_id": 8420,
+              "logprob": -4.826430508231283e-05
+            },
+            {
+              "rank": 2,
+              "token_id": 73594,
+              "logprob": -10.632652863304106
+            },
+            {
+              "rank": 3,
+              "token_id": 5692,
+              "logprob": -11.30799256209561
+            },
+            {
+              "rank": 4,
+              "token_id": 1588,
+              "logprob": -12.781246765891996
+            },
+            {
+              "rank": 5,
+              "token_id": 99817,
+              "logprob": -13.132050141136137
+            },
+            {
+              "rank": 6,
+              "token_id": 22464,
+              "logprob": -13.558262451927153
+            },
+            {
+              "rank": 7,
+              "token_id": 6739,
+              "logprob": -14.181114777366606
+            },
+            {
+              "rank": 8,
+              "token_id": 39814,
+              "logprob": -14.253000839988676
+            },
+            {
+              "rank": 9,
+              "token_id": 63,
+              "logprob": -14.38976918105313
+            },
+            {
+              "rank": 10,
+              "token_id": 14374,
+              "logprob": -15.433340653221098
+            }
+          ],
+          "our_top_k": [
+            {
+              "rank": 1,
+              "token_id": 8420,
+              "logprob": -2.7e-05
+            },
+            {
+              "rank": 2,
+              "token_id": 5692,
+              "logprob": -11.227811
+            },
+            {
+              "rank": 3,
+              "token_id": 73594,
+              "logprob": -12.433104
+            },
+            {
+              "rank": 4,
+              "token_id": 1588,
+              "logprob": -12.765254
+            },
+            {
+              "rank": 5,
+              "token_id": 99817,
+              "logprob": -13.094011
+            },
+            {
+              "rank": 6,
+              "token_id": 6739,
+              "logprob": -14.185227
+            },
+            {
+              "rank": 7,
+              "token_id": 22464,
+              "logprob": -14.458687
+            },
+            {
+              "rank": 8,
+              "token_id": 63,
+              "logprob": -15.325632
+            },
+            {
+              "rank": 9,
+              "token_id": 39814,
+              "logprob": -15.549417
+            },
+            {
+              "rank": 10,
+              "token_id": 131337,
+              "logprob": -15.576363
+            }
+          ],
+          "top_ids_exact": false,
+          "top_overlap_count": 9,
+          "top_overlap_ids": [
+            8420,
+            73594,
+            5692,
+            1588,
+            99817,
+            22464,
+            6739,
+            39814,
+            63
+          ],
+          "ref_top1_top2_logprob_margin": 10.632604598999023,
+          "our_top1_top2_logprob_margin": 11.227784000000002,
+          "ref_token_rank_in_ref_topk": 1,
+          "ref_token_rank_in_our_topk": 1,
+          "our_token_rank_in_our_topk": 1,
+          "our_token_rank_in_ref_topk": 1,
+          "selected_token_stayed_rank1": true,
+          "selected_ref_logprob": -4.826430508231283e-05,
+          "selected_our_logprob": -2.7e-05,
+          "selected_logprob_delta": 2.126430508231283e-05,
+          "common_logprob_deltas": [
+            {
+              "token_id": 8420,
+              "ref_logprob": -4.826430508231283e-05,
+              "our_logprob": -2.7e-05,
+              "abs_delta": 2.126430508231283e-05
+            },
+            {
+              "token_id": 73594,
+              "ref_logprob": -10.632652863304106,
+              "our_logprob": -12.433104,
+              "abs_delta": 1.8004511366958944
+            },
+            {
+              "token_id": 5692,
+              "ref_logprob": -11.30799256209561,
+              "our_logprob": -11.227811,
+              "abs_delta": 0.08018156209560878
+            },
+            {
+              "token_id": 1588,
+              "ref_logprob": -12.781246765891996,
+              "our_logprob": -12.765254,
+              "abs_delta": 0.01599276589199583
+            },
+            {
+              "token_id": 99817,
+              "ref_logprob": -13.132050141136137,
+              "our_logprob": -13.094011,
+              "abs_delta": 0.038039141136136934
+            },
+            {
+              "token_id": 22464,
+              "ref_logprob": -13.558262451927153,
+              "our_logprob": -14.458687,
+              "abs_delta": 0.9004245480728468
+            },
+            {
+              "token_id": 6739,
+              "ref_logprob": -14.181114777366606,
+              "our_logprob": -14.185227,
+              "abs_delta": 0.004112222633393614
+            },
+            {
+              "token_id": 39814,
+              "ref_logprob": -14.253000839988676,
+              "our_logprob": -15.549417,
+              "abs_delta": 1.296416160011324
+            },
+            {
+              "token_id": 63,
+              "ref_logprob": -14.38976918105313,
+              "our_logprob": -15.325632,
+              "abs_delta": 0.9358628189468714
+            }
+          ],
+          "mean_common_logprob_delta": 0.5635001799765726,
+          "max_common_logprob_delta": 1.8004511366958944
+        },
+        "divergence_pos": null,
+        "divergence_info": null,
+        "token_table": [
+          {
+            "pos": 0,
+            "ref_token": 8420,
+            "our_token": 8420,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -4.826430508231283e-05,
+            "our_logprob": -2.7e-05
+          }
+        ],
+        "ref_text": "Here",
+        "our_text": "Here"
+      },
+      "prefill_metrics": {
+        "prefill_available": true,
+        "prefill_argmax_match": 1,
+        "prefill_top10_hits": 1,
+        "prefill_total": 1,
+        "prefill_argmax_rate": 1.0,
+        "prefill_containment": 1.0
+      },
+      "timing": {
+        "prefill_ms": 568.9,
+        "decode_ms": 0.2,
+        "total_ms": 792.4,
+        "prompt_tokens": 15
+      }
+    },
+    {
+      "conv_idx": 3,
+      "turn": 1,
+      "multi_turn": false,
+      "prompt": "Describe the binary chop algorithm in depth",
+      "trace_input_row": {
+        "case_key": "3:0",
+        "conv_idx": 3,
+        "turn_idx": 0,
+        "layer": 0,
+        "tensor": "la_input_row_for_qkvz_last",
+        "requested_layers": "0",
+        "requested_tensors": "la_input_row_for_qkvz_last",
+        "pos": 14,
+        "positions": [
+          14
+        ],
+        "input_tokens_count": 15,
+        "prompt_prefix": "Describe the binary chop algorithm in depth"
+      },
+      "verdict": "PASS",
+      "metrics": {
+        "first_match": true,
+        "match_run": 1,
+        "ref_tokens_count": 1,
+        "our_tokens_count": 1,
+        "containment_rate": 1.0,
+        "containment_hits": 1,
+        "containment_total": 1,
+        "first_token_diagnostic": {
+          "available": true,
+          "ref_first_token": 785,
+          "our_first_token": 785,
+          "first_token_match": true,
+          "ref_top_ids": [
+            785,
+            334,
+            2,
+            565,
+            14374,
+            21338,
+            95456,
+            8420,
+            2073,
+            10061
+          ],
+          "our_top_ids": [
+            785,
+            334,
+            2,
+            565,
+            21338,
+            14374,
+            95456,
+            8420,
+            2073,
+            10061
+          ],
+          "ref_top_k": [
+            {
+              "rank": 1,
+              "token_id": 785,
+              "logprob": -0.015302403297098977
+            },
+            {
+              "rank": 2,
+              "token_id": 334,
+              "logprob": -4.9514443710705365
+            },
+            {
+              "rank": 3,
+              "token_id": 2,
+              "logprob": -5.88330434116331
+            },
+            {
+              "rank": 4,
+              "token_id": 565,
+              "logprob": -6.21844838413206
+            },
+            {
+              "rank": 5,
+              "token_id": 14374,
+              "logprob": -6.4758279159924115
+            },
+            {
+              "rank": 6,
+              "token_id": 21338,
+              "logprob": -6.811044438209208
+            },
+            {
+              "rank": 7,
+              "token_id": 95456,
+              "logprob": -7.7068154648205365
+            },
+            {
+              "rank": 8,
+              "token_id": 8420,
+              "logprob": -9.975201351966533
+            },
+            {
+              "rank": 9,
+              "token_id": 2073,
+              "logprob": -10.234916432227763
+            },
+            {
+              "rank": 10,
+              "token_id": 10061,
+              "logprob": -10.816405995216044
+            }
+          ],
+          "our_top_k": [
+            {
+              "rank": 1,
+              "token_id": 785,
+              "logprob": -0.03597
+            },
+            {
+              "rank": 2,
+              "token_id": 334,
+              "logprob": -4.115665
+            },
+            {
+              "rank": 3,
+              "token_id": 2,
+              "logprob": -5.245475
+            },
+            {
+              "rank": 4,
+              "token_id": 565,
+              "logprob": -5.312225
+            },
+            {
+              "rank": 5,
+              "token_id": 21338,
+              "logprob": -5.477392
+            },
+            {
+              "rank": 6,
+              "token_id": 14374,
+              "logprob": -5.785869
+            },
+            {
+              "rank": 7,
+              "token_id": 95456,
+              "logprob": -6.797809
+            },
+            {
+              "rank": 8,
+              "token_id": 8420,
+              "logprob": -9.433122
+            },
+            {
+              "rank": 9,
+              "token_id": 2073,
+              "logprob": -9.547998
+            },
+            {
+              "rank": 10,
+              "token_id": 10061,
+              "logprob": -9.951389
+            }
+          ],
+          "top_ids_exact": false,
+          "top_overlap_count": 10,
+          "top_overlap_ids": [
+            785,
+            334,
+            2,
+            565,
+            14374,
+            21338,
+            95456,
+            8420,
+            2073,
+            10061
+          ],
+          "ref_top1_top2_logprob_margin": 4.9361419677734375,
+          "our_top1_top2_logprob_margin": 4.079695,
+          "ref_token_rank_in_ref_topk": 1,
+          "ref_token_rank_in_our_topk": 1,
+          "our_token_rank_in_our_topk": 1,
+          "our_token_rank_in_ref_topk": 1,
+          "selected_token_stayed_rank1": true,
+          "selected_ref_logprob": -0.015302403297098977,
+          "selected_our_logprob": -0.03597,
+          "selected_logprob_delta": 0.020667596702901025,
+          "common_logprob_deltas": [
+            {
+              "token_id": 785,
+              "ref_logprob": -0.015302403297098977,
+              "our_logprob": -0.03597,
+              "abs_delta": 0.020667596702901025
+            },
+            {
+              "token_id": 334,
+              "ref_logprob": -4.9514443710705365,
+              "our_logprob": -4.115665,
+              "abs_delta": 0.8357793710705366
+            },
+            {
+              "token_id": 2,
+              "ref_logprob": -5.88330434116331,
+              "our_logprob": -5.245475,
+              "abs_delta": 0.63782934116331
+            },
+            {
+              "token_id": 565,
+              "ref_logprob": -6.21844838413206,
+              "our_logprob": -5.312225,
+              "abs_delta": 0.9062233841320602
+            },
+            {
+              "token_id": 14374,
+              "ref_logprob": -6.4758279159924115,
+              "our_logprob": -5.785869,
+              "abs_delta": 0.6899589159924115
+            },
+            {
+              "token_id": 21338,
+              "ref_logprob": -6.811044438209208,
+              "our_logprob": -5.477392,
+              "abs_delta": 1.3336524382092083
+            },
+            {
+              "token_id": 95456,
+              "ref_logprob": -7.7068154648205365,
+              "our_logprob": -6.797809,
+              "abs_delta": 0.9090064648205365
+            },
+            {
+              "token_id": 8420,
+              "ref_logprob": -9.975201351966533,
+              "our_logprob": -9.433122,
+              "abs_delta": 0.5420793519665335
+            },
+            {
+              "token_id": 2073,
+              "ref_logprob": -10.234916432227763,
+              "our_logprob": -9.547998,
+              "abs_delta": 0.6869184322277633
+            },
+            {
+              "token_id": 10061,
+              "ref_logprob": -10.816405995216044,
+              "our_logprob": -9.951389,
+              "abs_delta": 0.8650169952160436
+            }
+          ],
+          "mean_common_logprob_delta": 0.7427132291501304,
+          "max_common_logprob_delta": 1.3336524382092083
+        },
+        "divergence_pos": null,
+        "divergence_info": null,
+        "token_table": [
+          {
+            "pos": 0,
+            "ref_token": 785,
+            "our_token": 785,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -0.015302403297098977,
+            "our_logprob": -0.03597
+          }
+        ],
+        "ref_text": "The",
+        "our_text": "The"
+      },
+      "prefill_metrics": {
+        "prefill_available": true,
+        "prefill_argmax_match": 1,
+        "prefill_top10_hits": 1,
+        "prefill_total": 1,
+        "prefill_argmax_rate": 1.0,
+        "prefill_containment": 1.0
+      },
+      "timing": {
+        "prefill_ms": 565.6,
+        "decode_ms": 0.2,
+        "total_ms": 789.1,
+        "prompt_tokens": 15
+      }
+    },
+    {
+      "conv_idx": 4,
+      "turn": 1,
+      "multi_turn": false,
+      "prompt": "Summarize this Moby-Dick excerpt in one sentence:\n\nMOBY-DICK;\r\n\r\nor, THE WHALE.\r\n\r\nBy Herman Melville\r\n\r\n\r\n\r\nCONTENTS\r\n\r\nETYMOLOGY.\r\n\r\nEXTRACTS (Supplied by a Sub-Sub-Librarian).\r\n\r\nCHAPTER 1. Loomings.\r\n\r\nCHAPTER 2. The Carpet-Bag.\r\n\r\nCHAPTER 3. The Spouter-Inn.\r\n\r\nCHAPTER 4. The Counterpane.\r\n\r\nCHAPTER 5. Breakfast.\r\n\r\nCHAPTER 6. The Street.\r\n\r\nCHAPTER 7. The Chapel.\r\n\r\nCHAPTER 8. The Pulpit.\r\n\r\nCHAPTER 9. The Sermon.\r\n\r\nCHAPTER 10. A Bosom Friend.\r\n\r\nCHAPTER 11. Nightgown.\r\n\r\nCHAPTER 12. Biographical.\r\n\r\nCHAPTER 13. Wheelbarrow.\r\n\r\nCHAPTER 14. Nantucket.\r\n\r\nCHAPTER 15. Chowder.\r\n\r\nCHAPTER 16. The Ship.\r\n\r\nCHAPTER 17. The Ramadan.\r\n\r\nCHAPTER 18. His Mark.\r\n\r\nCHAPTER 19. The Prophet.\r\n\r\nCHAPTER 20. All Astir.\r\n\r\nCHAPTER 21. Going Aboard.\r\n\r\nCHAPTER 22. Merry Christmas.\r\n\r\nCHAPTER 23. The Lee Shore.\r\n\r\nCHAPTER 24. The Advocate.\r\n\r\nCHAPTER 25. Postscript.\r\n\r\nCHAPTER 26. Knights and Squires.\r\n\r\nCHAPTER 27. Knights and Squires.\r\n\r\nCHAPTER 28. Ahab.\r\n\r\nCHAPTER 29. Enter Ahab; to Him, Stubb.\r\n\r\nCHAPTER 30. The Pipe.\r\n\r\nCHAPTER 31. Queen Mab.\r\n\r\nCHAPTER 32. Cetology.\r\n\r\nCHAPTER 33. The Specksnyder.\r\n\r\nCHAPTER 34. The Cabin-Table.\r\n\r\nCHAPTER 35. The Mast-Head.\r\n\r\nCHAPTER 36. The Quarter-Deck.\r\n\r\nCHAPTER 37. Sunset.\r\n\r\nCHAPTER 38. Dusk.\r\n\r\nCHAPTER 39. First Night-Watch.\r\n\r\nCHAPTER 40. Midnight, Forecastle.\r\n\r\nCHAPTER 41. Moby Dick.\r\n\r\nCHAPTER 42. The Whiteness of the Whale.\r\n\r\nCHAPTER 43. Hark!\r\n\r\nCHAPTER 44. The Chart.\r\n\r\nCHAPTER 45. The Affidavit.\r\n\r\nCHAPTER 46. Surmises.\r\n\r\nCHAPTER 47. The Mat-Maker.\r\n\r\nCHAPTER 48. The First Lowering.\r\n\r\nCHAPTER 49. The Hyena.\r\n\r\nCHAPTER 50. Ahab\u2019s Boat and Crew. Fedallah.\r\n\r\nCHAPTER 51. The Spirit-Spout.\r\n\r\nCHAPTER 52. The Albatross.\r\n\r\nCHAPTER 53. The Gam.\r\n\r\nCHAPTER 54. The Town-Ho\u2019s Story.\r\n\r\nCHAPTER 55. Of the Monstrous Pictures of Whales.\r\n\r\nCHAPTER 56. Of the Less Erroneous Pictures o",
+      "trace_input_row": {
+        "case_key": "4:0",
+        "conv_idx": 4,
+        "turn_idx": 0,
+        "layer": 0,
+        "tensor": "la_input_row_for_qkvz_last",
+        "requested_layers": "0",
+        "requested_tensors": "la_input_row_for_qkvz_last",
+        "pos": 582,
+        "positions": [
+          582
+        ],
+        "input_tokens_count": 583,
+        "prompt_prefix": "Summarize this Moby-Dick excerpt in one sentence:\n\nMOBY-DICK;\r\n\r\nor, THE WHALE.\r\n\r\nBy Herman Melville\r\n\r\n\r\n\r\nCONTENTS\r\n\r"
+      },
+      "verdict": "PASS",
+      "metrics": {
+        "first_match": true,
+        "match_run": 1,
+        "ref_tokens_count": 1,
+        "our_tokens_count": 1,
+        "containment_rate": 1.0,
+        "containment_hits": 1,
+        "containment_total": 1,
+        "first_token_diagnostic": {
+          "available": true,
+          "ref_first_token": 1986,
+          "our_first_token": 1986,
+          "first_token_match": true,
+          "ref_top_ids": [
+            1986,
+            785,
+            28715,
+            8420,
+            37,
+            1096,
+            7983,
+            25020,
+            26733,
+            9
+          ],
+          "our_top_ids": [
+            1986,
+            785,
+            28715,
+            7983,
+            8420,
+            15802,
+            1096,
+            9,
+            26733,
+            641
+          ],
+          "ref_top_k": [
+            {
+              "rank": 1,
+              "token_id": 1986,
+              "logprob": -0.015118555391456567
+            },
+            {
+              "rank": 2,
+              "token_id": 785,
+              "logprob": -4.233620600069191
+            },
+            {
+              "rank": 3,
+              "token_id": 28715,
+              "logprob": -9.906481699312355
+            },
+            {
+              "rank": 4,
+              "token_id": 8420,
+              "logprob": -9.984057382906105
+            },
+            {
+              "rank": 5,
+              "token_id": 37,
+              "logprob": -10.117755846346046
+            },
+            {
+              "rank": 6,
+              "token_id": 1096,
+              "logprob": -10.202972368562843
+            },
+            {
+              "rank": 7,
+              "token_id": 7983,
+              "logprob": -10.347333864534523
+            },
+            {
+              "rank": 8,
+              "token_id": 25020,
+              "logprob": -11.020598368013527
+            },
+            {
+              "rank": 9,
+              "token_id": 26733,
+              "logprob": -11.041880564058449
+            },
+            {
+              "rank": 10,
+              "token_id": 9,
+              "logprob": -11.105016664827492
+            }
+          ],
+          "our_top_k": [
+            {
+              "rank": 1,
+              "token_id": 1986,
+              "logprob": -0.010824
+            },
+            {
+              "rank": 2,
+              "token_id": 785,
+              "logprob": -4.628719
+            },
+            {
+              "rank": 3,
+              "token_id": 28715,
+              "logprob": -9.187648
+            },
+            {
+              "rank": 4,
+              "token_id": 7983,
+              "logprob": -9.27523
+            },
+            {
+              "rank": 5,
+              "token_id": 8420,
+              "logprob": -9.613517
+            },
+            {
+              "rank": 6,
+              "token_id": 15802,
+              "logprob": -9.812008
+            },
+            {
+              "rank": 7,
+              "token_id": 1096,
+              "logprob": -9.861603
+            },
+            {
+              "rank": 8,
+              "token_id": 9,
+              "logprob": -9.884975
+            },
+            {
+              "rank": 9,
+              "token_id": 26733,
+              "logprob": -10.043195
+            },
+            {
+              "rank": 10,
+              "token_id": 641,
+              "logprob": -10.264652
+            }
+          ],
+          "top_ids_exact": false,
+          "top_overlap_count": 8,
+          "top_overlap_ids": [
+            1986,
+            785,
+            28715,
+            8420,
+            1096,
+            7983,
+            26733,
+            9
+          ],
+          "ref_top1_top2_logprob_margin": 4.218502044677734,
+          "our_top1_top2_logprob_margin": 4.617895,
+          "ref_token_rank_in_ref_topk": 1,
+          "ref_token_rank_in_our_topk": 1,
+          "our_token_rank_in_our_topk": 1,
+          "our_token_rank_in_ref_topk": 1,
+          "selected_token_stayed_rank1": true,
+          "selected_ref_logprob": -0.015118555391456567,
+          "selected_our_logprob": -0.010824,
+          "selected_logprob_delta": 0.004294555391456567,
+          "common_logprob_deltas": [
+            {
+              "token_id": 1986,
+              "ref_logprob": -0.015118555391456567,
+              "our_logprob": -0.010824,
+              "abs_delta": 0.004294555391456567
+            },
+            {
+              "token_id": 785,
+              "ref_logprob": -4.233620600069191,
+              "our_logprob": -4.628719,
+              "abs_delta": 0.3950983999308093
+            },
+            {
+              "token_id": 28715,
+              "ref_logprob": -9.906481699312355,
+              "our_logprob": -9.187648,
+              "abs_delta": 0.7188336993123556
+            },
+            {
+              "token_id": 8420,
+              "ref_logprob": -9.984057382906105,
+              "our_logprob": -9.613517,
+              "abs_delta": 0.37054038290610514
+            },
+            {
+              "token_id": 1096,
+              "ref_logprob": -10.202972368562843,
+              "our_logprob": -9.861603,
+              "abs_delta": 0.3413693685628427
+            },
+            {
+              "token_id": 7983,
+              "ref_logprob": -10.347333864534523,
+              "our_logprob": -9.27523,
+              "abs_delta": 1.0721038645345224
+            },
+            {
+              "token_id": 26733,
+              "ref_logprob": -11.041880564058449,
+              "our_logprob": -10.043195,
+              "abs_delta": 0.998685564058448
+            },
+            {
+              "token_id": 9,
+              "ref_logprob": -11.105016664827492,
+              "our_logprob": -9.884975,
+              "abs_delta": 1.220041664827491
+            }
+          ],
+          "mean_common_logprob_delta": 0.6401209374405039,
+          "max_common_logprob_delta": 1.220041664827491
+        },
+        "divergence_pos": null,
+        "divergence_info": null,
+        "token_table": [
+          {
+            "pos": 0,
+            "ref_token": 1986,
+            "our_token": 1986,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -0.015118555391456567,
+            "our_logprob": -0.010824
+          }
+        ],
+        "ref_text": "This",
+        "our_text": "This"
+      },
+      "prefill_metrics": {
+        "prefill_available": true,
+        "prefill_argmax_match": 1,
+        "prefill_top10_hits": 1,
+        "prefill_total": 1,
+        "prefill_argmax_rate": 1.0,
+        "prefill_containment": 1.0
+      },
+      "timing": {
+        "prefill_ms": 1237.7,
+        "decode_ms": 0.2,
+        "total_ms": 1462.0,
+        "prompt_tokens": 583
+      }
+    },
+    {
+      "conv_idx": 5,
+      "turn": 1,
+      "multi_turn": false,
+      "prompt": "Extract the main conflict from this War and Peace excerpt:\n\nWAR AND PEACE\r\n\r\n\r\nBy Leo Tolstoy/Tolstoi\r\n\r\n\r\n    Contents\r\n\r\n    BOOK ONE: 1805\r\n\r\n    CHAPTER I\r\n\r\n    CHAPTER II\r\n\r\n    CHAPTER III\r\n\r\n    CHAPTER IV\r\n\r\n    CHAPTER V\r\n\r\n    CHAPTER VI\r\n\r\n    CHAPTER VII\r\n\r\n    CHAPTER VIII\r\n\r\n    CHAPTER IX\r\n\r\n    CHAPTER X\r\n\r\n    CHAPTER XI\r\n\r\n    CHAPTER XII\r\n\r\n    CHAPTER XIII\r\n\r\n    CHAPTER XIV\r\n\r\n    CHAPTER XV\r\n\r\n    CHAPTER XVI\r\n\r\n    CHAPTER XVII\r\n\r\n    CHAPTER XVIII\r\n\r\n    CHAPTER XIX\r\n\r\n    CHAPTER XX\r\n\r\n    CHAPTER XXI\r\n\r\n    CHAPTER XXII\r\n\r\n    CHAPTER XXIII\r\n\r\n    CHAPTER XXIV\r\n\r\n    CHAPTER XXV\r\n\r\n    CHAPTER XXVI\r\n\r\n    CHAPTER XXVII\r\n\r\n    CHAPTER XXVIII\r\n\r\n\r\n    BOOK TWO: 1805\r\n\r\n    CHAPTER I\r\n\r\n    CHAPTER II\r\n\r\n    CHAPTER III\r\n\r\n    CHAPTER IV\r\n\r\n    CHAPTER V\r\n\r\n    CHAPTER VI\r\n\r\n    CHAPTER VII\r\n\r\n    CHAPTER VIII\r\n\r\n    CHAPTER IX\r\n\r\n    CHAPTER X\r\n\r\n    CHAPTER XI\r\n\r\n    CHAPTER XII\r\n\r\n    CHAPTER XIII\r\n\r\n    CHAPTER XIV\r\n\r\n    CHAPTER XV\r\n\r\n    CHAPTER XVI\r\n\r\n    CHAPTER XVII\r\n\r\n    CHAPTER XVIII\r\n\r\n    CHAPTER XIX\r\n\r\n    CHAPTER XX\r\n\r\n    CHAPTER XXI\r\n\r\n\r\n    BOOK THREE: 1805\r\n\r\n    CHAPTER I\r\n\r\n    CHAPTER II\r\n\r\n    CHAPTER III\r\n\r\n    CHAPTER IV\r\n\r\n    CHAPTER V\r\n\r\n    CHAPTER VI\r\n\r\n    CHAPTER VII\r\n\r\n    CHAPTER VIII\r\n\r\n    CHAPTER IX\r\n\r\n    CHAPTER X\r\n\r\n    CHAPTER XI\r\n\r\n    CHAPTER XII\r\n\r\n    CHAPTER XIII\r\n\r\n    CHAPTER XIV\r\n\r\n    CHAPTER XV\r\n\r\n    CHAPTER XVI\r\n\r\n    CHAPTER XVII\r\n\r\n    CHAPTER XVIII\r\n\r\n    CHAPTER XIX\r\n\r\n\r\n    BOOK FOUR: 1806\r\n\r\n    CHAPTER I\r\n\r\n    CHAPTER II\r\n\r\n    CHAPTER III\r\n\r\n    CHAPTER IV\r\n\r\n    CHAPTER V\r\n\r\n    CHAPTER VI\r\n\r\n    CHAPTER VII\r\n\r\n    CHAPTER VIII\r\n\r\n    CHAPTER IX\r\n\r\n    CHAPTER X\r\n\r\n    CHAPTER XI\r\n\r\n    CHAPTER XII\r\n\r\n    CHAPTER XIII\r\n\r\n    CHAPTER XIV\r\n\r\n    CHAPTER XV\r\n\r\n    CHAPTER XVI\r\n\r\n\r\n    BOOK FIVE: 1806 - 07\r\n\r\n    CHAPTER I\r\n\r\n    CHAPTER II\r\n\r\n    CHAPTER III\r\n\r\n    CHAPTER IV\r\n\r\n    CHAPTER V\r\n\r\n    CHAPTER VI\r\n\r\n    CHAPTER VII\r\n\r\n    CHAPTER VIII\r\n\r\n    CHAPTER IX\r\n\r\n    CHAPTER X\r\n\r\n    CHAPTER XI\r\n\r\n    CHAPTER XII\r\n\r\n    CHAPTER XIII\r\n\r\n    CHAPTER XIV\r\n\r\n    CHAPTER XV\r\n\r\n    CHAPTER XVI\r\n\r\n    CHAPTER XVII\r\n\r\n    CHAPTER XVIII\r\n\r\n    CHAPTER XIX\r\n\r\n    CHAPTER XX\r\n\r\n    CHAPTER XXI\r\n\r\n    CHAPTER XXII\r\n\r\n\r\n    BOOK SIX: 1808 - 10\r\n\r\n    CHAPTER I\r\n\r\n    CHAPTER II\r\n\r\n    CHAPTER III\r\n\r\n    CHAPTER IV\r\n\r\n    CHAPTER V\r\n\r\n    CHAPTER VI\r\n\r\n    CHAPTER VII\r\n\r\n    CHAPTER VIII\r\n\r\n    CHAPTER IX\r\n\r\n    CHAPTER X\r\n\r\n    CHAPTER XI\r\n\r\n    CHAPTER XII\r\n\r\n    CHAPTER XIII\r\n\r\n    CHAPTER XIV\r\n\r\n    CHAPTER XV\r\n\r\n    CHAPTER XVI\r\n\r\n    CHAPTER XVII\r\n\r\n    CHAPTER XVIII\r\n\r\n    CHAPTER XIX\r\n\r\n    CHAPTER XX\r\n\r\n    CHAPTER XXI\r\n\r\n    CH",
+      "trace_input_row": {
+        "case_key": "5:0",
+        "conv_idx": 5,
+        "turn_idx": 0,
+        "layer": 0,
+        "tensor": "la_input_row_for_qkvz_last",
+        "requested_layers": "0",
+        "requested_tensors": "la_input_row_for_qkvz_last",
+        "pos": 643,
+        "positions": [
+          643
+        ],
+        "input_tokens_count": 644,
+        "prompt_prefix": "Extract the main conflict from this War and Peace excerpt:\n\nWAR AND PEACE\r\n\r\n\r\nBy Leo Tolstoy/Tolstoi\r\n\r\n\r\n    Contents\r"
+      },
+      "verdict": "PASS",
+      "metrics": {
+        "first_match": true,
+        "match_run": 1,
+        "ref_tokens_count": 1,
+        "our_tokens_count": 1,
+        "containment_rate": 1.0,
+        "containment_hits": 1,
+        "containment_total": 1,
+        "first_token_diagnostic": {
+          "available": true,
+          "ref_first_token": 785,
+          "our_first_token": 785,
+          "first_token_match": true,
+          "ref_top_ids": [
+            785,
+            2132,
+            2610,
+            7771,
+            1986,
+            28715,
+            3862,
+            87026,
+            3838,
+            13060
+          ],
+          "our_top_ids": [
+            785,
+            2610,
+            2132,
+            7771,
+            1986,
+            28715,
+            87026,
+            3862,
+            51,
+            3838
+          ],
+          "ref_top_k": [
+            {
+              "rank": 1,
+              "token_id": 785,
+              "logprob": -0.07576102926151052
+            },
+            {
+              "rank": 2,
+              "token_id": 2132,
+              "logprob": -3.0185176820935418
+            },
+            {
+              "rank": 3,
+              "token_id": 2610,
+              "logprob": -3.9255516023816277
+            },
+            {
+              "rank": 4,
+              "token_id": 7771,
+              "logprob": -6.24985999776737
+            },
+            {
+              "rank": 5,
+              "token_id": 1986,
+              "logprob": -7.360036084193151
+            },
+            {
+              "rank": 6,
+              "token_id": 28715,
+              "logprob": -7.573155591029089
+            },
+            {
+              "rank": 7,
+              "token_id": 3862,
+              "logprob": -7.632394024866979
+            },
+            {
+              "rank": 8,
+              "token_id": 87026,
+              "logprob": -7.831335255640905
+            },
+            {
+              "rank": 9,
+              "token_id": 3838,
+              "logprob": -9.831505963343542
+            },
+            {
+              "rank": 10,
+              "token_id": 13060,
+              "logprob": -9.855519482630651
+            }
+          ],
+          "our_top_k": [
+            {
+              "rank": 1,
+              "token_id": 785,
+              "logprob": -0.041119
+            },
+            {
+              "rank": 2,
+              "token_id": 2610,
+              "logprob": -3.663086
+            },
+            {
+              "rank": 3,
+              "token_id": 2132,
+              "logprob": -4.824306
+            },
+            {
+              "rank": 4,
+              "token_id": 7771,
+              "logprob": -6.025244
+            },
+            {
+              "rank": 5,
+              "token_id": 1986,
+              "logprob": -6.495665
+            },
+            {
+              "rank": 6,
+              "token_id": 28715,
+              "logprob": -7.154973
+            },
+            {
+              "rank": 7,
+              "token_id": 87026,
+              "logprob": -7.503783
+            },
+            {
+              "rank": 8,
+              "token_id": 3862,
+              "logprob": -7.588764
+            },
+            {
+              "rank": 9,
+              "token_id": 51,
+              "logprob": -8.08192
+            },
+            {
+              "rank": 10,
+              "token_id": 3838,
+              "logprob": -9.615059
+            }
+          ],
+          "top_ids_exact": false,
+          "top_overlap_count": 9,
+          "top_overlap_ids": [
+            785,
+            2132,
+            2610,
+            7771,
+            1986,
+            28715,
+            3862,
+            87026,
+            3838
+          ],
+          "ref_top1_top2_logprob_margin": 2.9427566528320312,
+          "our_top1_top2_logprob_margin": 3.6219669999999997,
+          "ref_token_rank_in_ref_topk": 1,
+          "ref_token_rank_in_our_topk": 1,
+          "our_token_rank_in_our_topk": 1,
+          "our_token_rank_in_ref_topk": 1,
+          "selected_token_stayed_rank1": true,
+          "selected_ref_logprob": -0.07576102926151052,
+          "selected_our_logprob": -0.041119,
+          "selected_logprob_delta": 0.03464202926151051,
+          "common_logprob_deltas": [
+            {
+              "token_id": 785,
+              "ref_logprob": -0.07576102926151052,
+              "our_logprob": -0.041119,
+              "abs_delta": 0.03464202926151051
+            },
+            {
+              "token_id": 2132,
+              "ref_logprob": -3.0185176820935418,
+              "our_logprob": -4.824306,
+              "abs_delta": 1.8057883179064582
+            },
+            {
+              "token_id": 2610,
+              "ref_logprob": -3.9255516023816277,
+              "our_logprob": -3.663086,
+              "abs_delta": 0.26246560238162786
+            },
+            {
+              "token_id": 7771,
+              "ref_logprob": -6.24985999776737,
+              "our_logprob": -6.025244,
+              "abs_delta": 0.22461599776737007
+            },
+            {
+              "token_id": 1986,
+              "ref_logprob": -7.360036084193151,
+              "our_logprob": -6.495665,
+              "abs_delta": 0.8643710841931513
+            },
+            {
+              "token_id": 28715,
+              "ref_logprob": -7.573155591029089,
+              "our_logprob": -7.154973,
+              "abs_delta": 0.4181825910290886
+            },
+            {
+              "token_id": 3862,
+              "ref_logprob": -7.632394024866979,
+              "our_logprob": -7.588764,
+              "abs_delta": 0.04363002486697898
+            },
+            {
+              "token_id": 87026,
+              "ref_logprob": -7.831335255640905,
+              "our_logprob": -7.503783,
+              "abs_delta": 0.32755225564090473
+            },
+            {
+              "token_id": 3838,
+              "ref_logprob": -9.831505963343542,
+              "our_logprob": -9.615059,
+              "abs_delta": 0.2164469633435413
+            }
+          ],
+          "mean_common_logprob_delta": 0.46641054071007015,
+          "max_common_logprob_delta": 1.8057883179064582
+        },
+        "divergence_pos": null,
+        "divergence_info": null,
+        "token_table": [
+          {
+            "pos": 0,
+            "ref_token": 785,
+            "our_token": 785,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -0.07576102926151052,
+            "our_logprob": -0.041119
+          }
+        ],
+        "ref_text": "The",
+        "our_text": "The"
+      },
+      "prefill_metrics": {
+        "prefill_available": true,
+        "prefill_argmax_match": 1,
+        "prefill_top10_hits": 1,
+        "prefill_total": 1,
+        "prefill_argmax_rate": 1.0,
+        "prefill_containment": 1.0
+      },
+      "timing": {
+        "prefill_ms": 1241.1,
+        "decode_ms": 0.2,
+        "total_ms": 1465.2,
+        "prompt_tokens": 644
+      }
+    },
+    {
+      "conv_idx": 6,
+      "turn": 1,
+      "multi_turn": false,
+      "prompt": "List three concrete details from this Les Miserables excerpt:\n\nLES MIS\u00c9RABLES\r\n\r\nBy Victor Hugo\r\n\r\n\r\nTranslated by Isabel F. Hapgood\r\n\r\n\r\nThomas Y. Crowell & Co.\r\n No. 13, Astor Place\r\n\r\nNew York\r\nCopyright 1887\r\n\r\n\r\n\r\n[Illustration: Bookshelf  spines]\r\n\r\n[Illustration: Bookcover]\r\n\r\n[Illustration: Frontpapers]\r\n\r\n[Illustration: Frontispiece]\r\n\r\n[Illustration: Titlepage Volume One]\r\n\r\n[Illustration: Titlepage Verso]\r\n\r\n\r\n\r\n\r\nContents\r\n\r\n LES MIS\u00c9RABLES\r\n\r\n PREFACE\r\n\r\n\r\n VOLUME I\u2014FANTINE\r\n\r\n\r\n BOOK FIRST\u2014A JUST MAN\r\n\r\n CHAPTER I\u2014M. MYRIEL\r\n\r\n CHAPTER II\u2014M. MYRIEL BECOMES M. WELCOME\r\n\r\n CHAPTER III\u2014A HARD BISHOPRIC FOR A GOOD BISHOP\r\n\r\n CHAPTER IV\u2014WORKS CORRESPONDING TO WORDS\r\n\r\n CHAPTER V\u2014MONSEIGNEUR BIENVENU MADE HIS CASSOCKS LAST TOO LONG\r\n\r\n CHAPTER VI\u2014WHO GUARDED HIS HOUSE FOR HIM\r\n\r\n CHAPTER VII\u2014CRAVATTE\r\n\r\n CHAPTER VIII\u2014PHILOSOPHY AFTER DRINKING\r\n\r\n CHAPTER IX\u2014THE BROTHER AS DEPICTED BY THE SISTER\r\n\r\n CHAPTER X\u2014THE BISHOP IN THE PRESENCE OF AN UNKNOWN LIGHT\r\n\r\n CHAPTER XI\u2014A RESTRICTION\r\n\r\n CHAPTER XII\u2014THE SOLITUDE OF MONSEIGNEUR WELCOME\r\n\r\n CHAPTER XIII\u2014WHAT HE BELIEVED\r\n\r\n CHAPTER XIV\u2014WHAT HE THOUGHT\r\n\r\n\r\n BOOK SECOND\u2014THE FALL\r\n\r\n CHAPTER I\u2014THE EVENING OF A DAY OF WALKING\r\n\r\n CHAPTER II\u2014PRUDENCE COUNSELLED TO WISDOM\r\n\r\n CHAPTER III\u2014THE HEROISM OF PASSIVE OBEDIENCE\r\n\r\n CHAPTER IV\u2014DETAILS CONCERNING THE CHEESE-DAIRIES OF PONTARLIER\r\n\r\n CHAPTER V\u2014TRANQUILLITY\r\n\r\n CHAPTER VI\u2014JEAN VALJEAN\r\n\r\n CHAPTER VII\u2014THE INTERIOR OF DESPAIR\r\n\r\n CHAPTER VIII\u2014BILLOWS AND SHADOWS\r\n\r\n CHAPTER IX\u2014NEW TROUBLES\r\n\r\n CHAPTER X\u2014THE MAN AROUSED\r\n\r\n CHAPTER XI\u2014WHAT HE DOES\r\n\r\n CHAPTER XII\u2014THE BISHOP WORKS\r\n\r\n CHAPTER XIII\u2014LITTLE GERVAIS\r\n\r\n\r\n BOOK THIRD\u2014IN THE YEAR 1817\r\n\r\n CHAPTER I\u2014THE YEAR 1817\r\n\r\n CHAPTER II\u2014A DOUBLE QUARTETTE\r\n\r\n CHAPTER III\u2014FOUR AND FOUR\r\n\r\n CHAPTER IV\u2014THOLOMY\u00c8S IS SO MERRY THAT HE SINGS A SPANISH DITTY\r\n\r\n CHAPTER V\u2014AT BOMBARDA\u2019S\r\n\r\n CHAPTER VI\u2014A CHAPTER IN WHICH THEY ADORE EACH OTHER\r\n\r\n CHAPTER VII\u2014THE WISDOM OF THOLOMY\u00c8S\r\n\r\n CHAPTER VIII\u2014THE DEATH OF A HORSE\r\n\r\n CHAPTER IX\u2014A MERRY END TO MIRTH\r\n\r\n\r\n BOOK FOURTH\u2014TO CONFIDE IS SOMETIMES TO DELIVER INTO A PERSON\u2019S POWER\r\n\r\n CHAPTER I\u2014ONE MOTHER MEETS ANOTHER MOTHER\r\n\r\n CHAPTER II\u2014FIRST SKETCH OF TWO UNPREPOSSESSING FIGURES\r\n\r\n CHAPTER III\u2014THE LARK\r\n\r\n\r\n BOOK FIFTH\u2014THE DESCENT\r\n\r\n CHAPTER I\u2014THE HISTORY OF A PROGRESS IN BLACK GLASS TRINKETS\r\n\r\n CHAPTER II\u2014MADELEINE\r\n\r\n CHAPTER III\u2014SUMS DEPOSITED WITH LAFFITTE\r\n\r\n CHAPTER IV\u2014M. MADELEINE IN MOURNING\r\n\r\n CHAPTER V\u2014VAGUE FLASHES ON THE HORIZON\r\n\r\n CHAPTER VI\u2014FATHER FAUCHELEVENT\r\n\r\n CHAPTER VII\u2014FAUCHELEVENT BECOMES A GARDENER IN PARIS\r\n\r\n CHAPTER VIII\u2014MADAME VICTURNIEN EXPENDS THIRTY FRANCS ON MORALITY\r\n\r\n CHAPTER IX\u2014MADAME VICTURNIEN\u2019S SUCCESS\r\n\r\n CHAPTER X\u2014RESULT OF THE SUCCESS\r\n\r\n CHAPTER XI\u2014CHRISTUS NOS LIBERAVIT\r\n\r\n CHAPTER XII\u2014M. BAMATABOIS\u2019S INACTIVITY\r\n\r\n CHAPTER XIII\u2014THE SOLUTION OF SOME QUESTIONS CONNECTED WITH THE\r\n MUNICIPAL POLICE\r\n\r\n\r\n BOOK SIXTH\u2014JAVERT\r\n\r\n CHAPTER I\u2014THE BEGINNING OF REPOSE\r\n\r\n CHAPTER II\u2014HOW JEAN MAY BECOME CHAMP\r\n\r\n\r\n BOOK SEVENTH\u2014THE CHAMPMATHIEU AFFAIR\r\n\r\n CHAPTER I\u2014SISTER SIMPLICE\r\n\r\n CHAPTER II\u2014THE PERSPICACITY OF MASTER SCAUFFLAIRE\r\n\r\n CHAPTER III\u2014A TEMPEST IN A SKULL\r\n\r\n CHAPTER IV\u2014FORMS ASSUMED BY SUFFERING DURING SLEEP\r\n\r\n CHAPTER V\u2014HINDRANCES\r\n\r\n CHAPTER VI\u2014SISTER SIMPLICE PUT TO THE PROOF\r\n\r\n CHAPTER VII\u2014THE TRAVELLER ON HIS ARRIVAL TAKES PRECAUTIONS FOR\r\n DEPARTURE\r\n\r\n CHAPTER VIII\u2014AN ENTRANCE BY FAVOR\r\n\r\n CHAPTER IX\u2014A PLACE WHERE CONVICTIONS ARE IN PROCESS OF FORMATION\r\n\r\n CHAPTER X\u2014THE SYSTEM OF DENIALS\r\n\r\n CHAPTER XI\u2014CHAMPMATHIEU MORE AND MORE ASTONISHED\r\n\r\n\r\n BOOK EIGHTH\u2014A COUNTER-BLOW\r\n\r\n CHAPTER I\u2014IN WHAT MIRROR M. MADELEINE CONTEMPLATES HIS HAIR\r\n\r\n CHAPTER II\u2014FANTINE HAPPY\r\n\r\n CHAPTER III\u2014JAVERT SATISFIED\r\n\r\n CHAPTER IV\u2014AUTHORITY REASSERTS ITS RIGHTS\r\n\r\n CHAPTER V\u2014A SUITABLE TOMB\r\n\r\n\r\n\r\n VOLUME II\u2014COSETTE\r\n\r\n BOOK FIRST\u2014WATERLOO\r\n\r\n CHAPTER I\u2014WHAT",
+      "trace_input_row": {
+        "case_key": "6:0",
+        "conv_idx": 6,
+        "turn_idx": 0,
+        "layer": 0,
+        "tensor": "la_input_row_for_qkvz_last",
+        "requested_layers": "0",
+        "requested_tensors": "la_input_row_for_qkvz_last",
+        "pos": 1166,
+        "positions": [
+          1166
+        ],
+        "input_tokens_count": 1167,
+        "prompt_prefix": "List three concrete details from this Les Miserables excerpt:\n\nLES MIS\u00c9RABLES\r\n\r\nBy Victor Hugo\r\n\r\n\r\nTranslated by Isabe"
+      },
+      "verdict": "PASS",
+      "metrics": {
+        "first_match": true,
+        "match_run": 1,
+        "ref_tokens_count": 1,
+        "our_tokens_count": 1,
+        "containment_rate": 1.0,
+        "containment_hits": 1,
+        "containment_total": 1,
+        "first_token_diagnostic": {
+          "available": true,
+          "ref_first_token": 8420,
+          "our_first_token": 8420,
+          "first_token_match": true,
+          "ref_top_ids": [
+            8420,
+            28715,
+            19641,
+            785,
+            22464,
+            3830,
+            1986,
+            7983,
+            5692,
+            16
+          ],
+          "our_top_ids": [
+            8420,
+            28715,
+            19641,
+            785,
+            22464,
+            3830,
+            1986,
+            7983,
+            5692,
+            641
+          ],
+          "ref_top_k": [
+            {
+              "rank": 1,
+              "token_id": 8420,
+              "logprob": -0.002829040563764096
+            },
+            {
+              "rank": 2,
+              "token_id": 28715,
+              "logprob": -6.3048271789914985
+            },
+            {
+              "rank": 3,
+              "token_id": 19641,
+              "logprob": -7.73110433963603
+            },
+            {
+              "rank": 4,
+              "token_id": 785,
+              "logprob": -8.178835357702436
+            },
+            {
+              "rank": 5,
+              "token_id": 22464,
+              "logprob": -9.270175422704877
+            },
+            {
+              "rank": 6,
+              "token_id": 3830,
+              "logprob": -9.516684021032514
+            },
+            {
+              "rank": 7,
+              "token_id": 1986,
+              "logprob": -10.881475891149702
+            },
+            {
+              "rank": 8,
+              "token_id": 7983,
+              "logprob": -11.125662292516889
+            },
+            {
+              "rank": 9,
+              "token_id": 5692,
+              "logprob": -12.039532150304975
+            },
+            {
+              "rank": 10,
+              "token_id": 16,
+              "logprob": -12.050321067846479
+            }
+          ],
+          "our_top_k": [
+            {
+              "rank": 1,
+              "token_id": 8420,
+              "logprob": -0.005161
+            },
+            {
+              "rank": 2,
+              "token_id": 28715,
+              "logprob": -5.648014
+            },
+            {
+              "rank": 3,
+              "token_id": 19641,
+              "logprob": -7.289144
+            },
+            {
+              "rank": 4,
+              "token_id": 785,
+              "logprob": -7.587108
+            },
+            {
+              "rank": 5,
+              "token_id": 22464,
+              "logprob": -8.729391
+            },
+            {
+              "rank": 6,
+              "token_id": 3830,
+              "logprob": -9.426609
+            },
+            {
+              "rank": 7,
+              "token_id": 1986,
+              "logprob": -10.092095
+            },
+            {
+              "rank": 8,
+              "token_id": 7983,
+              "logprob": -10.674264
+            },
+            {
+              "rank": 9,
+              "token_id": 5692,
+              "logprob": -11.664145
+            },
+            {
+              "rank": 10,
+              "token_id": 641,
+              "logprob": -11.880101
+            }
+          ],
+          "top_ids_exact": false,
+          "top_overlap_count": 9,
+          "top_overlap_ids": [
+            8420,
+            28715,
+            19641,
+            785,
+            22464,
+            3830,
+            1986,
+            7983,
+            5692
+          ],
+          "ref_top1_top2_logprob_margin": 6.301998138427734,
+          "our_top1_top2_logprob_margin": 5.642853,
+          "ref_token_rank_in_ref_topk": 1,
+          "ref_token_rank_in_our_topk": 1,
+          "our_token_rank_in_our_topk": 1,
+          "our_token_rank_in_ref_topk": 1,
+          "selected_token_stayed_rank1": true,
+          "selected_ref_logprob": -0.002829040563764096,
+          "selected_our_logprob": -0.005161,
+          "selected_logprob_delta": 0.002331959436235904,
+          "common_logprob_deltas": [
+            {
+              "token_id": 8420,
+              "ref_logprob": -0.002829040563764096,
+              "our_logprob": -0.005161,
+              "abs_delta": 0.002331959436235904
+            },
+            {
+              "token_id": 28715,
+              "ref_logprob": -6.3048271789914985,
+              "our_logprob": -5.648014,
+              "abs_delta": 0.6568131789914986
+            },
+            {
+              "token_id": 19641,
+              "ref_logprob": -7.73110433963603,
+              "our_logprob": -7.289144,
+              "abs_delta": 0.44196033963602943
+            },
+            {
+              "token_id": 785,
+              "ref_logprob": -8.178835357702436,
+              "our_logprob": -7.587108,
+              "abs_delta": 0.5917273577024362
+            },
+            {
+              "token_id": 22464,
+              "ref_logprob": -9.270175422704877,
+              "our_logprob": -8.729391,
+              "abs_delta": 0.5407844227048777
+            },
+            {
+              "token_id": 3830,
+              "ref_logprob": -9.516684021032514,
+              "our_logprob": -9.426609,
+              "abs_delta": 0.09007502103251497
+            },
+            {
+              "token_id": 1986,
+              "ref_logprob": -10.881475891149702,
+              "our_logprob": -10.092095,
+              "abs_delta": 0.7893808911497011
+            },
+            {
+              "token_id": 7983,
+              "ref_logprob": -11.125662292516889,
+              "our_logprob": -10.674264,
+              "abs_delta": 0.45139829251688823
+            },
+            {
+              "token_id": 5692,
+              "ref_logprob": -12.039532150304975,
+              "our_logprob": -11.664145,
+              "abs_delta": 0.3753871503049755
+            }
+          ],
+          "mean_common_logprob_delta": 0.43776206816390645,
+          "max_common_logprob_delta": 0.7893808911497011
+        },
+        "divergence_pos": null,
+        "divergence_info": null,
+        "token_table": [
+          {
+            "pos": 0,
+            "ref_token": 8420,
+            "our_token": 8420,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -0.002829040563764096,
+            "our_logprob": -0.005161
+          }
+        ],
+        "ref_text": "Here",
+        "our_text": "Here"
+      },
+      "prefill_metrics": {
+        "prefill_available": true,
+        "prefill_argmax_match": 1,
+        "prefill_top10_hits": 1,
+        "prefill_total": 1,
+        "prefill_argmax_rate": 1.0,
+        "prefill_containment": 1.0
+      },
+      "timing": {
+        "prefill_ms": 1277.2,
+        "decode_ms": 0.2,
+        "total_ms": 1500.8,
+        "prompt_tokens": 1167
+      }
+    },
+    {
+      "conv_idx": 7,
+      "turn": 1,
+      "multi_turn": false,
+      "prompt": "Identify the scene and likely stakes in this Count of Monte Cristo excerpt:\n\nTHE COUNT OF MONTE CRISTO\r\n\r\nby Alexandre Dumas [p\u00e8re]\r\n\r\n\r\n\r\n\r\nContents\r\n\r\n\r\n VOLUME ONE\r\nChapter 1. Marseilles\u2014The Arrival\r\nChapter 2. Father and Son\r\nChapter 3. The Catalans\r\nChapter 4. Conspiracy\r\nChapter 5. The Marriage Feast\r\nChapter 6. The Deputy Procureur du Roi\r\nChapter 7. The Examination\r\nChapter 8. The Ch\u00e2teau d\u2019If\r\nChapter 9. The Evening of the Betrothal\r\nChapter 10. The King\u2019s Closet at the Tuileries\r\nChapter 11. The Corsican Ogre\r\nChapter 12. Father and Son\r\nChapter 13. The Hundred Days\r\nChapter 14. The Two Prisoners\r\nChapter 15. Number 34 and Number 27\r\nChapter 16. A Learned Italian\r\nChapter 17. The Abb\u00e9\u2019s Chamber\r\nChapter 18. The Treasure\r\nChapter 19. The Third Attack\r\nChapter 20. The Cemetery of the Ch\u00e2teau d\u2019If\r\nChapter 21. The Island of Tiboulen\r\nChapter 22. The Smugglers\r\nChapter 23. The Island of Monte Cristo\r\nChapter 24. The Secret Cave\r\nChapter 25. The Unknown\r\nChapter 26. The Pont du Gard Inn\r\nChapter 27. The Story\r\n\r\n VOLUME TWO\r\nChapter 28. The Prison Register\r\nChapter 29. The House of Morrel & Son\r\nChapter 30. The Fifth of September\r\nChapter 31. Italy: Sinbad the Sailor\r\nChapter 32. The Waking\r\nChapter 33. Roman Bandits\r\nChapter 34. The Colosseum\r\nChapter 35. La Mazzolata\r\nChapter 36. The Carnival at Rome.\r\nChapter 37. The Catacombs of Saint Sebastian\r\nChapter 38. The Rendezvous\r\nChapter 39. The Guests\r\nChapter 40. The Breakfast\r\nChapter 41. The Presentation\r\nChapter 42. Monsieur Bertuccio\r\nChapter 43. The House at Auteuil\r\nChapter 44. The Vendetta\r\nChapter 45. The Rain of Blood\r\nChapter 46. Unlimited Credit\r\nChapter 47. The Dappled Grays\r\n\r\n VOLUME THREE\r\nChapter 48. Ideology\r\nChapter 49. Hayd\u00e9e\r\nChapter 50. The Morrel Family\r\nChapter 51. Pyramus and Thisbe\r\nChapter 52. Toxicology\r\nChapter 53. Robert le Diable\r\nChapter 54. A Flurry in Stocks\r\nChapter 55. Major Cavalcanti\r\nChapter 56. Andrea Cavalcanti\r\nChapter 57. In the Lucern Patch\r\nChapter 58. M. Noirtier de Villefort\r\nChapter 59. The Will\r\nChapter 60. The Telegraph\r\nChapter 61. How a Gardener May Get Rid of the Dormice\r\nChapter 62. Ghosts\r\nChapter 63. The Dinner\r\nChapter 64. The Beggar\r\nChapter 65. A Conjugal Scene\r\nChapter 66. Matrimonial Projects\r\nChapter 67. The Office of the King\u2019s Attorney\r\nChapter 68. A Summer Ball\r\nChapter 69. The Inquiry\r\nChapter 70. The Ball\r\nChapter 71. Bread and Salt\r\nChapter 72. Madame de Saint-M\u00e9ran\r\nChapter 73. The Promise\r\n\r\nVOLUME FOUR\r\nChapter 74. The Villefort Family Vault\r\nChapter 75. A Signed Statement\r\nChapter 76. Progress of Cavalcanti the Younger\r\nChapter 77. Hayd\u00e9e\r\nChapter 78. We hear From Yanina\r\nChapter 79. The Lemonade\r\nChapter 80. The Accusation\r\nChapter 81. The Room of the Retired Baker\r\nChapter 82. The Burglary\r\nChapter 83. The Hand of God\r\nChapter 84. Beauchamp\r\nChapter 85. The Journey\r\nChapter 86. The Trial\r\nChapter 87. The Challenge\r\nChapter 88. The Insult\r\nChapter 89. The Night\r\nChapter 90. The Meeting\r\nChapter 91. Mother and Son\r\nChapter 92. The Suicide\r\nChapter 93. Valentine\r\nChapter 94. Maximilian\u2019s Avowal\r\nChapter 95. Father and Daughter\r\n\r\nVOLUME FIVE\r\nChapter 96. The Contract\r\nChapter 97. The Departure for Belgium\r\nChapter 98. The Bell and Bottle Tavern\r\nChapter 99. The Law\r\nChapter 100. The Apparition\r\nChapter 101. Locusta\r\nChapter 102. Valentine\r\nChapter 103. Maximilian\r\nChapter 104. Danglars\u2019 Signature\r\nChapter 105. The Cemetery of P\u00e8re-Lachaise\r\nChapter 106. Dividing the Proceeds\r\nChapter 107. The Lions\u2019 Den\r\nChapter 108. The Judge\r\nChapter 109. The Assizes\r\nChapter 110. The Indictment\r\nChapter 111. Expiation\r\nChapter 112. The Departure\r\nChapter 113. The Past\r\nChapter 114. Peppino\r\nChapter 115. Luigi Vampa\u2019s Bill of Fare\r\nChapter 116. The Pardon\r\nChapter 117. The Fifth of October\r\n\r\n\r\n\r\nVOLUME ONE\r\n\r\n\r\n\r\n Chapter 1. Marseilles\u2014The Arrival\r\n\r\nOn the 24th of February, 1815, the look-out at Notre-Dame de la Garde\r\nsignalled the three-master, the _Pharaon_ from Smyrna, Trieste, and\r\nNaples.\r\n\r\nAs usual, a pilot put off immediately, and rounding the Ch\u00e2teau d\u2019If,\r\ngot on board the vessel between Cape Morgiou and Rion island.\r\n\r\nImmediately, and according to custom, the ramparts of Fort Saint-Jean\r\nwere covered with spectators; it is always an event at Marseilles for a\r\nship to come into port, especially when this ship, like the _Pharaon_,\r\nhas been built, rigged, and laden at the old Phocee docks, and belongs\r\nto an owner of the city.\r\n\r\nThe ship drew on and had safely passed the strait, which some volcanic\r\nshock has made between the Calasareigne and Jaros islands; had doubled\r\nPom\u00e8gue, and approached the harbor under topsails, jib, and spanker,\r\nbut so slowly and sedately that the idlers, with that instinct which is\r\nthe forerunner of evil, asked one another what misfortune could have\r\nhappened on board. However, those experienced in navigation saw plainly\r\nthat if any accident had occurred, it was not to the vessel herself,\r\nfor she bore down with all the evidence of being skilfully handled, the\r\nanchor a-cockbill, the jib-boom guys already eased off, and standing by\r\nthe side of the pilot, who was steering the _Pharaon_ towards the\r\nnarrow entrance of the inner port, was a young man, who, with activity\r\nand vigilant eye, watched every motion of the ship, and rep",
+      "trace_input_row": {
+        "case_key": "7:0",
+        "conv_idx": 7,
+        "turn_idx": 0,
+        "layer": 0,
+        "tensor": "la_input_row_for_qkvz_last",
+        "requested_layers": "0",
+        "requested_tensors": "la_input_row_for_qkvz_last",
+        "pos": 1621,
+        "positions": [
+          1621
+        ],
+        "input_tokens_count": 1622,
+        "prompt_prefix": "Identify the scene and likely stakes in this Count of Monte Cristo excerpt:\n\nTHE COUNT OF MONTE CRISTO\r\n\r\nby Alexandre D"
+      },
+      "verdict": "PASS",
+      "metrics": {
+        "first_match": true,
+        "match_run": 1,
+        "ref_tokens_count": 1,
+        "our_tokens_count": 1,
+        "containment_rate": 1.0,
+        "containment_hits": 1,
+        "containment_total": 1,
+        "first_token_diagnostic": {
+          "available": true,
+          "ref_first_token": 1986,
+          "our_first_token": 1986,
+          "first_token_match": true,
+          "ref_top_ids": [
+            1986,
+            785,
+            28715,
+            14374,
+            334,
+            3830,
+            2610,
+            10019,
+            3838,
+            7771
+          ],
+          "our_top_ids": [
+            1986,
+            785,
+            28715,
+            14374,
+            334,
+            3830,
+            2610,
+            10019,
+            7771,
+            3838
+          ],
+          "ref_top_k": [
+            {
+              "rank": 1,
+              "token_id": 1986,
+              "logprob": -0.0646179622886578
+            },
+            {
+              "rank": 2,
+              "token_id": 785,
+              "logprob": -2.8832844204185406
+            },
+            {
+              "rank": 3,
+              "token_id": 28715,
+              "logprob": -5.291191906380455
+            },
+            {
+              "rank": 4,
+              "token_id": 14374,
+              "logprob": -6.897951931404869
+            },
+            {
+              "rank": 5,
+              "token_id": 334,
+              "logprob": -8.36322006647567
+            },
+            {
+              "rank": 6,
+              "token_id": 3830,
+              "logprob": -9.027256817269127
+            },
+            {
+              "rank": 7,
+              "token_id": 2610,
+              "logprob": -9.70974049036483
+            },
+            {
+              "rank": 8,
+              "token_id": 10019,
+              "logprob": -10.810718388008873
+            },
+            {
+              "rank": 9,
+              "token_id": 3838,
+              "logprob": -10.933910221504966
+            },
+            {
+              "rank": 10,
+              "token_id": 7771,
+              "logprob": -11.136109203743736
+            }
+          ],
+          "our_top_k": [
+            {
+              "rank": 1,
+              "token_id": 1986,
+              "logprob": -0.086728
+            },
+            {
+              "rank": 2,
+              "token_id": 785,
+              "logprob": -2.890365
+            },
+            {
+              "rank": 3,
+              "token_id": 28715,
+              "logprob": -3.927241
+            },
+            {
+              "rank": 4,
+              "token_id": 14374,
+              "logprob": -5.378669
+            },
+            {
+              "rank": 5,
+              "token_id": 334,
+              "logprob": -6.195422
+            },
+            {
+              "rank": 6,
+              "token_id": 3830,
+              "logprob": -7.757542
+            },
+            {
+              "rank": 7,
+              "token_id": 2610,
+              "logprob": -8.797002
+            },
+            {
+              "rank": 8,
+              "token_id": 10019,
+              "logprob": -9.416261
+            },
+            {
+              "rank": 9,
+              "token_id": 7771,
+              "logprob": -9.714805
+            },
+            {
+              "rank": 10,
+              "token_id": 3838,
+              "logprob": -10.084571
+            }
+          ],
+          "top_ids_exact": false,
+          "top_overlap_count": 10,
+          "top_overlap_ids": [
+            1986,
+            785,
+            28715,
+            14374,
+            334,
+            3830,
+            2610,
+            10019,
+            3838,
+            7771
+          ],
+          "ref_top1_top2_logprob_margin": 2.818666458129883,
+          "our_top1_top2_logprob_margin": 2.803637,
+          "ref_token_rank_in_ref_topk": 1,
+          "ref_token_rank_in_our_topk": 1,
+          "our_token_rank_in_our_topk": 1,
+          "our_token_rank_in_ref_topk": 1,
+          "selected_token_stayed_rank1": true,
+          "selected_ref_logprob": -0.0646179622886578,
+          "selected_our_logprob": -0.086728,
+          "selected_logprob_delta": 0.022110037711342206,
+          "common_logprob_deltas": [
+            {
+              "token_id": 1986,
+              "ref_logprob": -0.0646179622886578,
+              "our_logprob": -0.086728,
+              "abs_delta": 0.022110037711342206
+            },
+            {
+              "token_id": 785,
+              "ref_logprob": -2.8832844204185406,
+              "our_logprob": -2.890365,
+              "abs_delta": 0.007080579581459467
+            },
+            {
+              "token_id": 28715,
+              "ref_logprob": -5.291191906380455,
+              "our_logprob": -3.927241,
+              "abs_delta": 1.3639509063804547
+            },
+            {
+              "token_id": 14374,
+              "ref_logprob": -6.897951931404869,
+              "our_logprob": -5.378669,
+              "abs_delta": 1.5192829314048684
+            },
+            {
+              "token_id": 334,
+              "ref_logprob": -8.36322006647567,
+              "our_logprob": -6.195422,
+              "abs_delta": 2.1677980664756697
+            },
+            {
+              "token_id": 3830,
+              "ref_logprob": -9.027256817269127,
+              "our_logprob": -7.757542,
+              "abs_delta": 1.2697148172691266
+            },
+            {
+              "token_id": 2610,
+              "ref_logprob": -9.70974049036483,
+              "our_logprob": -8.797002,
+              "abs_delta": 0.9127384903648288
+            },
+            {
+              "token_id": 10019,
+              "ref_logprob": -10.810718388008873,
+              "our_logprob": -9.416261,
+              "abs_delta": 1.3944573880088722
+            },
+            {
+              "token_id": 3838,
+              "ref_logprob": -10.933910221504966,
+              "our_logprob": -10.084571,
+              "abs_delta": 0.849339221504966
+            },
+            {
+              "token_id": 7771,
+              "ref_logprob": -11.136109203743736,
+              "our_logprob": -9.714805,
+              "abs_delta": 1.4213042037437358
+            }
+          ],
+          "mean_common_logprob_delta": 1.0927776642445326,
+          "max_common_logprob_delta": 2.1677980664756697
+        },
+        "divergence_pos": null,
+        "divergence_info": null,
+        "token_table": [
+          {
+            "pos": 0,
+            "ref_token": 1986,
+            "our_token": 1986,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -0.0646179622886578,
+            "our_logprob": -0.086728
+          }
+        ],
+        "ref_text": "This",
+        "our_text": "This"
+      },
+      "prefill_metrics": {
+        "prefill_available": true,
+        "prefill_argmax_match": 1,
+        "prefill_top10_hits": 1,
+        "prefill_total": 1,
+        "prefill_argmax_rate": 1.0,
+        "prefill_containment": 1.0
+      },
+      "timing": {
+        "prefill_ms": 1301.7,
+        "decode_ms": 0.2,
+        "total_ms": 1525.1,
+        "prompt_tokens": 1622
+      }
+    }
+  ]
+}

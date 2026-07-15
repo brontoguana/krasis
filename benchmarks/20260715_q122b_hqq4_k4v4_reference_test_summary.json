@@ -1,0 +1,3844 @@
+{
+  "model": "Qwen3.5-122B-A10B",
+  "config": "tests/q122b-stats-hqq4-k4v4.conf",
+  "reference_path": "/home/main/Documents/Claude/krasis-internal/reference-outputs/output/Qwen3.5-122B-A10B/llama_witness_q122b_expanded.json",
+  "overall": "PASS",
+  "prompt_results": [
+    {
+      "conv_idx": 0,
+      "turn": 1,
+      "multi_turn": false,
+      "prompt": "Hi",
+      "trace_input_row": {
+        "case_key": "0:0",
+        "conv_idx": 0,
+        "turn_idx": 0,
+        "layer": 0,
+        "tensor": "la_input_row_for_qkvz_last",
+        "requested_layers": "0",
+        "requested_tensors": "la_input_row_for_qkvz_last",
+        "pos": 12,
+        "positions": [
+          12
+        ],
+        "input_tokens_count": 13,
+        "prompt_prefix": "Hi"
+      },
+      "verdict": "PASS",
+      "metrics": {
+        "first_match": true,
+        "match_run": 1,
+        "ref_tokens_count": 1,
+        "our_tokens_count": 1,
+        "containment_rate": 1.0,
+        "containment_hits": 1,
+        "containment_total": 1,
+        "first_token_diagnostic": {
+          "available": true,
+          "ref_first_token": 9419,
+          "our_first_token": 9419,
+          "first_token_match": true,
+          "ref_top_ids": [
+            9419,
+            12675,
+            21251,
+            109266,
+            18103,
+            14556,
+            76759,
+            23066,
+            39,
+            75403
+          ],
+          "our_top_ids": [
+            9419,
+            12675,
+            21251,
+            109266,
+            18103,
+            14556,
+            76759,
+            39,
+            77264,
+            75403
+          ],
+          "ref_top_k": [
+            {
+              "rank": 1,
+              "token_id": 9419,
+              "logprob": -0.0029894328422486183
+            },
+            {
+              "rank": 2,
+              "token_id": 12675,
+              "logprob": -5.818873069316858
+            },
+            {
+              "rank": 3,
+              "token_id": 21251,
+              "logprob": -11.758486411602014
+            },
+            {
+              "rank": 4,
+              "token_id": 109266,
+              "logprob": -12.776533744365686
+            },
+            {
+              "rank": 5,
+              "token_id": 18103,
+              "logprob": -14.166390082866663
+            },
+            {
+              "rank": 6,
+              "token_id": 14556,
+              "logprob": -14.175459525615686
+            },
+            {
+              "rank": 7,
+              "token_id": 76759,
+              "logprob": -14.371857306987756
+            },
+            {
+              "rank": 8,
+              "token_id": 23066,
+              "logprob": -15.26364388230514
+            },
+            {
+              "rank": 9,
+              "token_id": 39,
+              "logprob": -15.584570548564905
+            },
+            {
+              "rank": 10,
+              "token_id": 75403,
+              "logprob": -16.02955498460006
+            }
+          ],
+          "our_top_k": [
+            {
+              "rank": 1,
+              "token_id": 9419,
+              "logprob": -0.012752
+            },
+            {
+              "rank": 2,
+              "token_id": 12675,
+              "logprob": -4.36989
+            },
+            {
+              "rank": 3,
+              "token_id": 21251,
+              "logprob": -12.126084
+            },
+            {
+              "rank": 4,
+              "token_id": 109266,
+              "logprob": -12.234694
+            },
+            {
+              "rank": 5,
+              "token_id": 18103,
+              "logprob": -13.016072
+            },
+            {
+              "rank": 6,
+              "token_id": 14556,
+              "logprob": -13.717771
+            },
+            {
+              "rank": 7,
+              "token_id": 76759,
+              "logprob": -14.188029
+            },
+            {
+              "rank": 8,
+              "token_id": 39,
+              "logprob": -14.675439
+            },
+            {
+              "rank": 9,
+              "token_id": 77264,
+              "logprob": -14.723115
+            },
+            {
+              "rank": 10,
+              "token_id": 75403,
+              "logprob": -14.943288
+            }
+          ],
+          "top_ids_exact": false,
+          "top_overlap_count": 9,
+          "top_overlap_ids": [
+            9419,
+            12675,
+            21251,
+            109266,
+            18103,
+            14556,
+            76759,
+            39,
+            75403
+          ],
+          "ref_top1_top2_logprob_margin": 5.815883636474609,
+          "our_top1_top2_logprob_margin": 4.357138,
+          "ref_token_rank_in_ref_topk": 1,
+          "ref_token_rank_in_our_topk": 1,
+          "our_token_rank_in_our_topk": 1,
+          "our_token_rank_in_ref_topk": 1,
+          "selected_token_stayed_rank1": true,
+          "selected_ref_logprob": -0.0029894328422486183,
+          "selected_our_logprob": -0.012752,
+          "selected_logprob_delta": 0.009762567157751381,
+          "common_logprob_deltas": [
+            {
+              "token_id": 9419,
+              "ref_logprob": -0.0029894328422486183,
+              "our_logprob": -0.012752,
+              "abs_delta": 0.009762567157751381
+            },
+            {
+              "token_id": 12675,
+              "ref_logprob": -5.818873069316858,
+              "our_logprob": -4.36989,
+              "abs_delta": 1.4489830693168582
+            },
+            {
+              "token_id": 21251,
+              "ref_logprob": -11.758486411602014,
+              "our_logprob": -12.126084,
+              "abs_delta": 0.3675975883979863
+            },
+            {
+              "token_id": 109266,
+              "ref_logprob": -12.776533744365686,
+              "our_logprob": -12.234694,
+              "abs_delta": 0.5418397443656868
+            },
+            {
+              "token_id": 18103,
+              "ref_logprob": -14.166390082866663,
+              "our_logprob": -13.016072,
+              "abs_delta": 1.1503180828666633
+            },
+            {
+              "token_id": 14556,
+              "ref_logprob": -14.175459525615686,
+              "our_logprob": -13.717771,
+              "abs_delta": 0.4576885256156853
+            },
+            {
+              "token_id": 76759,
+              "ref_logprob": -14.371857306987756,
+              "our_logprob": -14.188029,
+              "abs_delta": 0.1838283069877562
+            },
+            {
+              "token_id": 39,
+              "ref_logprob": -15.584570548564905,
+              "our_logprob": -14.675439,
+              "abs_delta": 0.9091315485649041
+            },
+            {
+              "token_id": 75403,
+              "ref_logprob": -16.02955498460006,
+              "our_logprob": -14.943288,
+              "abs_delta": 1.0862669846000603
+            }
+          ],
+          "mean_common_logprob_delta": 0.6839351575414835,
+          "max_common_logprob_delta": 1.4489830693168582
+        },
+        "divergence_pos": null,
+        "divergence_info": null,
+        "token_table": [
+          {
+            "pos": 0,
+            "ref_token": 9419,
+            "our_token": 9419,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -0.0029894328422486183,
+            "our_logprob": -0.012752
+          }
+        ],
+        "ref_text": "Hello",
+        "our_text": "Hello"
+      },
+      "prefill_metrics": {
+        "prefill_available": true,
+        "prefill_argmax_match": 1,
+        "prefill_top10_hits": 1,
+        "prefill_total": 1,
+        "prefill_argmax_rate": 1.0,
+        "prefill_containment": 1.0
+      },
+      "timing": {
+        "prefill_ms": 1055.3,
+        "decode_ms": 0.3,
+        "total_ms": 1198.7,
+        "prompt_tokens": 13
+      }
+    },
+    {
+      "conv_idx": 1,
+      "turn": 1,
+      "multi_turn": false,
+      "prompt": "What's your name?",
+      "trace_input_row": {
+        "case_key": "1:0",
+        "conv_idx": 1,
+        "turn_idx": 0,
+        "layer": 0,
+        "tensor": "la_input_row_for_qkvz_last",
+        "requested_layers": "0",
+        "requested_tensors": "la_input_row_for_qkvz_last",
+        "pos": 36,
+        "positions": [
+          36
+        ],
+        "input_tokens_count": 37,
+        "prompt_prefix": "What's your name?"
+      },
+      "verdict": "PASS",
+      "metrics": {
+        "first_match": true,
+        "match_run": 1,
+        "ref_tokens_count": 1,
+        "our_tokens_count": 1,
+        "containment_rate": 1.0,
+        "containment_hits": 1,
+        "containment_total": 1,
+        "first_token_diagnostic": {
+          "available": true,
+          "ref_first_token": 40,
+          "our_first_token": 40,
+          "first_token_match": true,
+          "ref_top_ids": [
+            40,
+            4888,
+            9419,
+            12675,
+            2523,
+            2665,
+            4639,
+            2053,
+            7525,
+            43478
+          ],
+          "our_top_ids": [
+            40,
+            4888,
+            9419,
+            12675,
+            2523,
+            2665,
+            109266,
+            43478,
+            4639,
+            7525
+          ],
+          "ref_top_k": [
+            {
+              "rank": 1,
+              "token_id": 40,
+              "logprob": -0.7648196374125114
+            },
+            {
+              "rank": 2,
+              "token_id": 4888,
+              "logprob": -0.777863994712316
+            },
+            {
+              "rank": 3,
+              "token_id": 9419,
+              "logprob": -2.88633300411173
+            },
+            {
+              "rank": 4,
+              "token_id": 12675,
+              "logprob": -4.29263068782755
+            },
+            {
+              "rank": 5,
+              "token_id": 2523,
+              "logprob": -5.1775889550394645
+            },
+            {
+              "rank": 6,
+              "token_id": 2665,
+              "logprob": -11.093993679160558
+            },
+            {
+              "rank": 7,
+              "token_id": 4639,
+              "logprob": -11.753589168662511
+            },
+            {
+              "rank": 8,
+              "token_id": 2053,
+              "logprob": -11.800620571250402
+            },
+            {
+              "rank": 9,
+              "token_id": 7525,
+              "logprob": -11.864850536460363
+            },
+            {
+              "rank": 10,
+              "token_id": 43478,
+              "logprob": -12.050811306113683
+            }
+          ],
+          "our_top_k": [
+            {
+              "rank": 1,
+              "token_id": 40,
+              "logprob": -0.851799
+            },
+            {
+              "rank": 2,
+              "token_id": 4888,
+              "logprob": -1.08905
+            },
+            {
+              "rank": 3,
+              "token_id": 9419,
+              "logprob": -1.608429
+            },
+            {
+              "rank": 4,
+              "token_id": 12675,
+              "logprob": -3.5188
+            },
+            {
+              "rank": 5,
+              "token_id": 2523,
+              "logprob": -4.991486
+            },
+            {
+              "rank": 6,
+              "token_id": 2665,
+              "logprob": -10.328083
+            },
+            {
+              "rank": 7,
+              "token_id": 109266,
+              "logprob": -11.040329
+            },
+            {
+              "rank": 8,
+              "token_id": 43478,
+              "logprob": -11.255079
+            },
+            {
+              "rank": 9,
+              "token_id": 4639,
+              "logprob": -11.463778
+            },
+            {
+              "rank": 10,
+              "token_id": 7525,
+              "logprob": -11.707279
+            }
+          ],
+          "top_ids_exact": false,
+          "top_overlap_count": 9,
+          "top_overlap_ids": [
+            40,
+            4888,
+            9419,
+            12675,
+            2523,
+            2665,
+            4639,
+            7525,
+            43478
+          ],
+          "ref_top1_top2_logprob_margin": 0.013044357299804688,
+          "our_top1_top2_logprob_margin": 0.2372510000000001,
+          "ref_token_rank_in_ref_topk": 1,
+          "ref_token_rank_in_our_topk": 1,
+          "our_token_rank_in_our_topk": 1,
+          "our_token_rank_in_ref_topk": 1,
+          "selected_token_stayed_rank1": true,
+          "selected_ref_logprob": -0.7648196374125114,
+          "selected_our_logprob": -0.851799,
+          "selected_logprob_delta": 0.08697936258748862,
+          "common_logprob_deltas": [
+            {
+              "token_id": 40,
+              "ref_logprob": -0.7648196374125114,
+              "our_logprob": -0.851799,
+              "abs_delta": 0.08697936258748862
+            },
+            {
+              "token_id": 4888,
+              "ref_logprob": -0.777863994712316,
+              "our_logprob": -1.08905,
+              "abs_delta": 0.31118600528768403
+            },
+            {
+              "token_id": 9419,
+              "ref_logprob": -2.88633300411173,
+              "our_logprob": -1.608429,
+              "abs_delta": 1.27790400411173
+            },
+            {
+              "token_id": 12675,
+              "ref_logprob": -4.29263068782755,
+              "our_logprob": -3.5188,
+              "abs_delta": 0.7738306878275503
+            },
+            {
+              "token_id": 2523,
+              "ref_logprob": -5.1775889550394645,
+              "our_logprob": -4.991486,
+              "abs_delta": 0.1861029550394644
+            },
+            {
+              "token_id": 2665,
+              "ref_logprob": -11.093993679160558,
+              "our_logprob": -10.328083,
+              "abs_delta": 0.7659106791605588
+            },
+            {
+              "token_id": 4639,
+              "ref_logprob": -11.753589168662511,
+              "our_logprob": -11.463778,
+              "abs_delta": 0.2898111686625118
+            },
+            {
+              "token_id": 7525,
+              "ref_logprob": -11.864850536460363,
+              "our_logprob": -11.707279,
+              "abs_delta": 0.15757153646036315
+            },
+            {
+              "token_id": 43478,
+              "ref_logprob": -12.050811306113683,
+              "our_logprob": -11.255079,
+              "abs_delta": 0.795732306113683
+            }
+          ],
+          "mean_common_logprob_delta": 0.5161143005834483,
+          "max_common_logprob_delta": 1.27790400411173
+        },
+        "divergence_pos": null,
+        "divergence_info": null,
+        "token_table": [
+          {
+            "pos": 0,
+            "ref_token": 40,
+            "our_token": 40,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -0.7648196374125114,
+            "our_logprob": -0.851799
+          }
+        ],
+        "ref_text": "I",
+        "our_text": "I"
+      },
+      "prefill_metrics": {
+        "prefill_available": true,
+        "prefill_argmax_match": 1,
+        "prefill_top10_hits": 1,
+        "prefill_total": 1,
+        "prefill_argmax_rate": 1.0,
+        "prefill_containment": 1.0
+      },
+      "timing": {
+        "prefill_ms": 2311.2,
+        "decode_ms": 0.2,
+        "total_ms": 2486.3,
+        "prompt_tokens": 37
+      }
+    },
+    {
+      "conv_idx": 2,
+      "turn": 1,
+      "multi_turn": false,
+      "prompt": "Who trained you?",
+      "trace_input_row": {
+        "case_key": "2:0",
+        "conv_idx": 2,
+        "turn_idx": 0,
+        "layer": 0,
+        "tensor": "la_input_row_for_qkvz_last",
+        "requested_layers": "0",
+        "requested_tensors": "la_input_row_for_qkvz_last",
+        "pos": 76,
+        "positions": [
+          76
+        ],
+        "input_tokens_count": 77,
+        "prompt_prefix": "Who trained you?"
+      },
+      "verdict": "PASS",
+      "metrics": {
+        "first_match": true,
+        "match_run": 1,
+        "ref_tokens_count": 1,
+        "our_tokens_count": 1,
+        "containment_rate": 1.0,
+        "containment_hits": 1,
+        "containment_total": 1,
+        "first_token_diagnostic": {
+          "available": true,
+          "ref_first_token": 40,
+          "our_first_token": 40,
+          "first_token_match": true,
+          "ref_top_ids": [
+            40,
+            2523,
+            4888,
+            9419,
+            353,
+            31248,
+            332,
+            48,
+            18103,
+            760
+          ],
+          "our_top_ids": [
+            40,
+            2523,
+            4888,
+            332,
+            9419,
+            31248,
+            48,
+            760,
+            2053,
+            14749
+          ],
+          "ref_top_k": [
+            {
+              "rank": 1,
+              "token_id": 40,
+              "logprob": -2.082018723470469e-05
+            },
+            {
+              "rank": 2,
+              "token_id": 2523,
+              "logprob": -11.417291480587625
+            },
+            {
+              "rank": 3,
+              "token_id": 4888,
+              "logprob": -13.269159156368875
+            },
+            {
+              "rank": 4,
+              "token_id": 9419,
+              "logprob": -13.353059608029032
+            },
+            {
+              "rank": 5,
+              "token_id": 353,
+              "logprob": -13.702300864742899
+            },
+            {
+              "rank": 6,
+              "token_id": 31248,
+              "logprob": -13.826825934933328
+            },
+            {
+              "rank": 7,
+              "token_id": 332,
+              "logprob": -13.872321921871805
+            },
+            {
+              "rank": 8,
+              "token_id": 48,
+              "logprob": -14.508760291622782
+            },
+            {
+              "rank": 9,
+              "token_id": 18103,
+              "logprob": -14.904744941280985
+            },
+            {
+              "rank": 10,
+              "token_id": 760,
+              "logprob": -15.305810767697
+            }
+          ],
+          "our_top_k": [
+            {
+              "rank": 1,
+              "token_id": 40,
+              "logprob": -6.8e-05
+            },
+            {
+              "rank": 2,
+              "token_id": 2523,
+              "logprob": -10.486518
+            },
+            {
+              "rank": 3,
+              "token_id": 4888,
+              "logprob": -11.534534
+            },
+            {
+              "rank": 4,
+              "token_id": 332,
+              "logprob": -12.231795
+            },
+            {
+              "rank": 5,
+              "token_id": 9419,
+              "logprob": -12.392436
+            },
+            {
+              "rank": 6,
+              "token_id": 31248,
+              "logprob": -12.737052
+            },
+            {
+              "rank": 7,
+              "token_id": 48,
+              "logprob": -12.7471
+            },
+            {
+              "rank": 8,
+              "token_id": 760,
+              "logprob": -13.017379
+            },
+            {
+              "rank": 9,
+              "token_id": 2053,
+              "logprob": -13.465514
+            },
+            {
+              "rank": 10,
+              "token_id": 14749,
+              "logprob": -13.961862
+            }
+          ],
+          "top_ids_exact": false,
+          "top_overlap_count": 8,
+          "top_overlap_ids": [
+            40,
+            2523,
+            4888,
+            9419,
+            31248,
+            332,
+            48,
+            760
+          ],
+          "ref_top1_top2_logprob_margin": 11.41727066040039,
+          "our_top1_top2_logprob_margin": 10.48645,
+          "ref_token_rank_in_ref_topk": 1,
+          "ref_token_rank_in_our_topk": 1,
+          "our_token_rank_in_our_topk": 1,
+          "our_token_rank_in_ref_topk": 1,
+          "selected_token_stayed_rank1": true,
+          "selected_ref_logprob": -2.082018723470469e-05,
+          "selected_our_logprob": -6.8e-05,
+          "selected_logprob_delta": 4.717981276529531e-05,
+          "common_logprob_deltas": [
+            {
+              "token_id": 40,
+              "ref_logprob": -2.082018723470469e-05,
+              "our_logprob": -6.8e-05,
+              "abs_delta": 4.717981276529531e-05
+            },
+            {
+              "token_id": 2523,
+              "ref_logprob": -11.417291480587625,
+              "our_logprob": -10.486518,
+              "abs_delta": 0.9307734805876251
+            },
+            {
+              "token_id": 4888,
+              "ref_logprob": -13.269159156368875,
+              "our_logprob": -11.534534,
+              "abs_delta": 1.7346251563688746
+            },
+            {
+              "token_id": 9419,
+              "ref_logprob": -13.353059608029032,
+              "our_logprob": -12.392436,
+              "abs_delta": 0.9606236080290316
+            },
+            {
+              "token_id": 31248,
+              "ref_logprob": -13.826825934933328,
+              "our_logprob": -12.737052,
+              "abs_delta": 1.0897739349333282
+            },
+            {
+              "token_id": 332,
+              "ref_logprob": -13.872321921871805,
+              "our_logprob": -12.231795,
+              "abs_delta": 1.640526921871805
+            },
+            {
+              "token_id": 48,
+              "ref_logprob": -14.508760291622782,
+              "our_logprob": -12.7471,
+              "abs_delta": 1.761660291622782
+            },
+            {
+              "token_id": 760,
+              "ref_logprob": -15.305810767697,
+              "our_logprob": -13.017379,
+              "abs_delta": 2.2884317676970003
+            }
+          ],
+          "mean_common_logprob_delta": 1.3008077926154014,
+          "max_common_logprob_delta": 2.2884317676970003
+        },
+        "divergence_pos": null,
+        "divergence_info": null,
+        "token_table": [
+          {
+            "pos": 0,
+            "ref_token": 40,
+            "our_token": 40,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -2.082018723470469e-05,
+            "our_logprob": -6.8e-05
+          }
+        ],
+        "ref_text": "I",
+        "our_text": "I"
+      },
+      "prefill_metrics": {
+        "prefill_available": true,
+        "prefill_argmax_match": 1,
+        "prefill_top10_hits": 1,
+        "prefill_total": 1,
+        "prefill_argmax_rate": 1.0,
+        "prefill_containment": 1.0
+      },
+      "timing": {
+        "prefill_ms": 2313.0,
+        "decode_ms": 0.2,
+        "total_ms": 2455.2,
+        "prompt_tokens": 77
+      }
+    },
+    {
+      "conv_idx": 3,
+      "turn": 1,
+      "multi_turn": false,
+      "prompt": "What is 2+2?",
+      "trace_input_row": {
+        "case_key": "3:0",
+        "conv_idx": 3,
+        "turn_idx": 0,
+        "layer": 0,
+        "tensor": "la_input_row_for_qkvz_last",
+        "requested_layers": "0",
+        "requested_tensors": "la_input_row_for_qkvz_last",
+        "pos": 18,
+        "positions": [
+          18
+        ],
+        "input_tokens_count": 19,
+        "prompt_prefix": "What is 2+2?"
+      },
+      "verdict": "PASS",
+      "metrics": {
+        "first_match": true,
+        "match_run": 1,
+        "ref_tokens_count": 1,
+        "our_tokens_count": 1,
+        "containment_rate": 1.0,
+        "containment_hits": 1,
+        "containment_total": 1,
+        "first_token_diagnostic": {
+          "available": true,
+          "ref_first_token": 17,
+          "our_first_token": 17,
+          "first_token_match": true,
+          "ref_top_ids": [
+            17,
+            760,
+            332,
+            3,
+            623,
+            19,
+            1206,
+            15893,
+            11280,
+            8549
+          ],
+          "our_top_ids": [
+            17,
+            760,
+            332,
+            623,
+            3,
+            19,
+            1206,
+            15893,
+            11280,
+            3733
+          ],
+          "ref_top_k": [
+            {
+              "rank": 1,
+              "token_id": 17,
+              "logprob": -1.061838637806538
+            },
+            {
+              "rank": 2,
+              "token_id": 760,
+              "logprob": -1.0864033808485303
+            },
+            {
+              "rank": 3,
+              "token_id": 332,
+              "logprob": -1.21361399791396
+            },
+            {
+              "rank": 4,
+              "token_id": 3,
+              "logprob": -4.547422896839741
+            },
+            {
+              "rank": 5,
+              "token_id": 623,
+              "logprob": -5.088770400501851
+            },
+            {
+              "rank": 6,
+              "token_id": 19,
+              "logprob": -7.6766419520155225
+            },
+            {
+              "rank": 7,
+              "token_id": 1206,
+              "logprob": -7.719084273792866
+            },
+            {
+              "rank": 8,
+              "token_id": 15893,
+              "logprob": -7.957439910389546
+            },
+            {
+              "rank": 9,
+              "token_id": 11280,
+              "logprob": -8.099104415394429
+            },
+            {
+              "rank": 10,
+              "token_id": 8549,
+              "logprob": -8.48497630260146
+            }
+          ],
+          "our_top_k": [
+            {
+              "rank": 1,
+              "token_id": 17,
+              "logprob": -0.58424
+            },
+            {
+              "rank": 2,
+              "token_id": 760,
+              "logprob": -1.369856
+            },
+            {
+              "rank": 3,
+              "token_id": 332,
+              "logprob": -1.706911
+            },
+            {
+              "rank": 4,
+              "token_id": 623,
+              "logprob": -5.461367
+            },
+            {
+              "rank": 5,
+              "token_id": 3,
+              "logprob": -7.369938
+            },
+            {
+              "rank": 6,
+              "token_id": 19,
+              "logprob": -7.511633
+            },
+            {
+              "rank": 7,
+              "token_id": 1206,
+              "logprob": -7.766985
+            },
+            {
+              "rank": 8,
+              "token_id": 15893,
+              "logprob": -8.629677
+            },
+            {
+              "rank": 9,
+              "token_id": 11280,
+              "logprob": -8.797043
+            },
+            {
+              "rank": 10,
+              "token_id": 3733,
+              "logprob": -9.27294
+            }
+          ],
+          "top_ids_exact": false,
+          "top_overlap_count": 9,
+          "top_overlap_ids": [
+            17,
+            760,
+            332,
+            3,
+            623,
+            19,
+            1206,
+            15893,
+            11280
+          ],
+          "ref_top1_top2_logprob_margin": 0.024564743041992188,
+          "our_top1_top2_logprob_margin": 0.785616,
+          "ref_token_rank_in_ref_topk": 1,
+          "ref_token_rank_in_our_topk": 1,
+          "our_token_rank_in_our_topk": 1,
+          "our_token_rank_in_ref_topk": 1,
+          "selected_token_stayed_rank1": true,
+          "selected_ref_logprob": -1.061838637806538,
+          "selected_our_logprob": -0.58424,
+          "selected_logprob_delta": 0.4775986378065381,
+          "common_logprob_deltas": [
+            {
+              "token_id": 17,
+              "ref_logprob": -1.061838637806538,
+              "our_logprob": -0.58424,
+              "abs_delta": 0.4775986378065381
+            },
+            {
+              "token_id": 760,
+              "ref_logprob": -1.0864033808485303,
+              "our_logprob": -1.369856,
+              "abs_delta": 0.2834526191514697
+            },
+            {
+              "token_id": 332,
+              "ref_logprob": -1.21361399791396,
+              "our_logprob": -1.706911,
+              "abs_delta": 0.4932970020860401
+            },
+            {
+              "token_id": 3,
+              "ref_logprob": -4.547422896839741,
+              "our_logprob": -7.369938,
+              "abs_delta": 2.822515103160259
+            },
+            {
+              "token_id": 623,
+              "ref_logprob": -5.088770400501851,
+              "our_logprob": -5.461367,
+              "abs_delta": 0.3725965994981495
+            },
+            {
+              "token_id": 19,
+              "ref_logprob": -7.6766419520155225,
+              "our_logprob": -7.511633,
+              "abs_delta": 0.16500895201552268
+            },
+            {
+              "token_id": 1206,
+              "ref_logprob": -7.719084273792866,
+              "our_logprob": -7.766985,
+              "abs_delta": 0.047900726207133815
+            },
+            {
+              "token_id": 15893,
+              "ref_logprob": -7.957439910389546,
+              "our_logprob": -8.629677,
+              "abs_delta": 0.6722370896104533
+            },
+            {
+              "token_id": 11280,
+              "ref_logprob": -8.099104415394429,
+              "our_logprob": -8.797043,
+              "abs_delta": 0.6979385846055717
+            }
+          ],
+          "mean_common_logprob_delta": 0.6702828126823487,
+          "max_common_logprob_delta": 2.822515103160259
+        },
+        "divergence_pos": null,
+        "divergence_info": null,
+        "token_table": [
+          {
+            "pos": 0,
+            "ref_token": 17,
+            "our_token": 17,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -1.061838637806538,
+            "our_logprob": -0.58424
+          }
+        ],
+        "ref_text": "2",
+        "our_text": "2"
+      },
+      "prefill_metrics": {
+        "prefill_available": true,
+        "prefill_argmax_match": 1,
+        "prefill_top10_hits": 1,
+        "prefill_total": 1,
+        "prefill_argmax_rate": 1.0,
+        "prefill_containment": 1.0
+      },
+      "timing": {
+        "prefill_ms": 1103.9,
+        "decode_ms": 0.2,
+        "total_ms": 1246.0,
+        "prompt_tokens": 19
+      }
+    },
+    {
+      "conv_idx": 4,
+      "turn": 1,
+      "multi_turn": false,
+      "prompt": "Now multiply that by 10",
+      "trace_input_row": {
+        "case_key": "4:0",
+        "conv_idx": 4,
+        "turn_idx": 0,
+        "layer": 0,
+        "tensor": "la_input_row_for_qkvz_last",
+        "requested_layers": "0",
+        "requested_tensors": "la_input_row_for_qkvz_last",
+        "pos": 47,
+        "positions": [
+          47
+        ],
+        "input_tokens_count": 48,
+        "prompt_prefix": "Now multiply that by 10"
+      },
+      "verdict": "PASS",
+      "metrics": {
+        "first_match": true,
+        "match_run": 1,
+        "ref_tokens_count": 1,
+        "our_tokens_count": 1,
+        "containment_rate": 1.0,
+        "containment_hits": 1,
+        "containment_total": 1,
+        "first_token_diagnostic": {
+          "available": true,
+          "ref_first_token": 55334,
+          "our_first_token": 55334,
+          "first_token_match": true,
+          "ref_top_ids": [
+            55334,
+            2592,
+            19,
+            48412,
+            12189,
+            1206,
+            2523,
+            760,
+            91871,
+            5170
+          ],
+          "our_top_ids": [
+            55334,
+            2592,
+            19,
+            4639,
+            12189,
+            760,
+            48412,
+            2523,
+            1206,
+            17
+          ],
+          "ref_top_k": [
+            {
+              "rank": 1,
+              "token_id": 55334,
+              "logprob": -0.5145835011158297
+            },
+            {
+              "rank": 2,
+              "token_id": 2592,
+              "logprob": -1.0875853626880954
+            },
+            {
+              "rank": 3,
+              "token_id": 19,
+              "logprob": -3.2229079334888766
+            },
+            {
+              "rank": 4,
+              "token_id": 48412,
+              "logprob": -5.276012334123642
+            },
+            {
+              "rank": 5,
+              "token_id": 12189,
+              "logprob": -5.666574391618759
+            },
+            {
+              "rank": 6,
+              "token_id": 1206,
+              "logprob": -6.012559804216416
+            },
+            {
+              "rank": 7,
+              "token_id": 2523,
+              "logprob": -6.116744908586533
+            },
+            {
+              "rank": 8,
+              "token_id": 760,
+              "logprob": -6.198236378923447
+            },
+            {
+              "rank": 9,
+              "token_id": 91871,
+              "logprob": -6.610229405656845
+            },
+            {
+              "rank": 10,
+              "token_id": 5170,
+              "logprob": -6.635900410905869
+            }
+          ],
+          "our_top_k": [
+            {
+              "rank": 1,
+              "token_id": 55334,
+              "logprob": -0.393987
+            },
+            {
+              "rank": 2,
+              "token_id": 2592,
+              "logprob": -1.489057
+            },
+            {
+              "rank": 3,
+              "token_id": 19,
+              "logprob": -3.134931
+            },
+            {
+              "rank": 4,
+              "token_id": 4639,
+              "logprob": -4.655463
+            },
+            {
+              "rank": 5,
+              "token_id": 12189,
+              "logprob": -4.687123
+            },
+            {
+              "rank": 6,
+              "token_id": 760,
+              "logprob": -4.692101
+            },
+            {
+              "rank": 7,
+              "token_id": 48412,
+              "logprob": -4.772578
+            },
+            {
+              "rank": 8,
+              "token_id": 2523,
+              "logprob": -5.831824
+            },
+            {
+              "rank": 9,
+              "token_id": 1206,
+              "logprob": -5.851905
+            },
+            {
+              "rank": 10,
+              "token_id": 17,
+              "logprob": -6.450519
+            }
+          ],
+          "top_ids_exact": false,
+          "top_overlap_count": 8,
+          "top_overlap_ids": [
+            55334,
+            2592,
+            19,
+            48412,
+            12189,
+            1206,
+            2523,
+            760
+          ],
+          "ref_top1_top2_logprob_margin": 0.5730018615722656,
+          "our_top1_top2_logprob_margin": 1.0950700000000002,
+          "ref_token_rank_in_ref_topk": 1,
+          "ref_token_rank_in_our_topk": 1,
+          "our_token_rank_in_our_topk": 1,
+          "our_token_rank_in_ref_topk": 1,
+          "selected_token_stayed_rank1": true,
+          "selected_ref_logprob": -0.5145835011158297,
+          "selected_our_logprob": -0.393987,
+          "selected_logprob_delta": 0.12059650111582976,
+          "common_logprob_deltas": [
+            {
+              "token_id": 55334,
+              "ref_logprob": -0.5145835011158297,
+              "our_logprob": -0.393987,
+              "abs_delta": 0.12059650111582976
+            },
+            {
+              "token_id": 2592,
+              "ref_logprob": -1.0875853626880954,
+              "our_logprob": -1.489057,
+              "abs_delta": 0.4014716373119047
+            },
+            {
+              "token_id": 19,
+              "ref_logprob": -3.2229079334888766,
+              "our_logprob": -3.134931,
+              "abs_delta": 0.0879769334888767
+            },
+            {
+              "token_id": 48412,
+              "ref_logprob": -5.276012334123642,
+              "our_logprob": -4.772578,
+              "abs_delta": 0.503434334123642
+            },
+            {
+              "token_id": 12189,
+              "ref_logprob": -5.666574391618759,
+              "our_logprob": -4.687123,
+              "abs_delta": 0.9794513916187597
+            },
+            {
+              "token_id": 1206,
+              "ref_logprob": -6.012559804216416,
+              "our_logprob": -5.851905,
+              "abs_delta": 0.16065480421641531
+            },
+            {
+              "token_id": 2523,
+              "ref_logprob": -6.116744908586533,
+              "our_logprob": -5.831824,
+              "abs_delta": 0.28492090858653274
+            },
+            {
+              "token_id": 760,
+              "ref_logprob": -6.198236378923447,
+              "our_logprob": -4.692101,
+              "abs_delta": 1.5061353789234468
+            }
+          ],
+          "mean_common_logprob_delta": 0.505580236173176,
+          "max_common_logprob_delta": 1.5061353789234468
+        },
+        "divergence_pos": null,
+        "divergence_info": null,
+        "token_table": [
+          {
+            "pos": 0,
+            "ref_token": 55334,
+            "our_token": 55334,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -0.5145835011158297,
+            "our_logprob": -0.393987
+          }
+        ],
+        "ref_text": "Multip",
+        "our_text": "Multip"
+      },
+      "prefill_metrics": {
+        "prefill_available": true,
+        "prefill_argmax_match": 1,
+        "prefill_top10_hits": 1,
+        "prefill_total": 1,
+        "prefill_argmax_rate": 1.0,
+        "prefill_containment": 1.0
+      },
+      "timing": {
+        "prefill_ms": 2302.3,
+        "decode_ms": 0.2,
+        "total_ms": 2444.3,
+        "prompt_tokens": 48
+      }
+    },
+    {
+      "conv_idx": 5,
+      "turn": 1,
+      "multi_turn": false,
+      "prompt": "And divide the result by 5",
+      "trace_input_row": {
+        "case_key": "5:0",
+        "conv_idx": 5,
+        "turn_idx": 0,
+        "layer": 0,
+        "tensor": "la_input_row_for_qkvz_last",
+        "requested_layers": "0",
+        "requested_tensors": "la_input_row_for_qkvz_last",
+        "pos": 77,
+        "positions": [
+          77
+        ],
+        "input_tokens_count": 78,
+        "prompt_prefix": "And divide the result by 5"
+      },
+      "verdict": "PASS",
+      "metrics": {
+        "first_match": true,
+        "match_run": 1,
+        "ref_tokens_count": 1,
+        "our_tokens_count": 1,
+        "containment_rate": 1.0,
+        "containment_hits": 1,
+        "containment_total": 1,
+        "first_token_diagnostic": {
+          "available": true,
+          "ref_first_token": 12151,
+          "our_first_token": 12151,
+          "first_token_match": true,
+          "ref_top_ids": [
+            12151,
+            1206,
+            19,
+            760,
+            23,
+            55334,
+            48030,
+            8500,
+            24,
+            48412
+          ],
+          "our_top_ids": [
+            12151,
+            19,
+            760,
+            1206,
+            48412,
+            23,
+            55334,
+            4350,
+            2592,
+            3
+          ],
+          "ref_top_k": [
+            {
+              "rank": 1,
+              "token_id": 12151,
+              "logprob": -0.0003034279803522111
+            },
+            {
+              "rank": 2,
+              "token_id": 1206,
+              "logprob": -9.488870780275274
+            },
+            {
+              "rank": 3,
+              "token_id": 19,
+              "logprob": -9.577551047609258
+            },
+            {
+              "rank": 4,
+              "token_id": 760,
+              "logprob": -10.111913840578008
+            },
+            {
+              "rank": 5,
+              "token_id": 23,
+              "logprob": -10.174505393312383
+            },
+            {
+              "rank": 6,
+              "token_id": 55334,
+              "logprob": -10.819387595460821
+            },
+            {
+              "rank": 7,
+              "token_id": 48030,
+              "logprob": -11.672287146852423
+            },
+            {
+              "rank": 8,
+              "token_id": 8500,
+              "logprob": -12.039877097413946
+            },
+            {
+              "rank": 9,
+              "token_id": 24,
+              "logprob": -12.275354544923712
+            },
+            {
+              "rank": 10,
+              "token_id": 48412,
+              "logprob": -12.371282737062383
+            }
+          ],
+          "our_top_k": [
+            {
+              "rank": 1,
+              "token_id": 12151,
+              "logprob": -0.001851
+            },
+            {
+              "rank": 2,
+              "token_id": 19,
+              "logprob": -7.365546
+            },
+            {
+              "rank": 3,
+              "token_id": 760,
+              "logprob": -7.681439
+            },
+            {
+              "rank": 4,
+              "token_id": 1206,
+              "logprob": -8.442733
+            },
+            {
+              "rank": 5,
+              "token_id": 48412,
+              "logprob": -8.903253
+            },
+            {
+              "rank": 6,
+              "token_id": 23,
+              "logprob": -9.035407
+            },
+            {
+              "rank": 7,
+              "token_id": 55334,
+              "logprob": -9.388274
+            },
+            {
+              "rank": 8,
+              "token_id": 4350,
+              "logprob": -10.723208
+            },
+            {
+              "rank": 9,
+              "token_id": 2592,
+              "logprob": -10.884767
+            },
+            {
+              "rank": 10,
+              "token_id": 3,
+              "logprob": -11.421142
+            }
+          ],
+          "top_ids_exact": false,
+          "top_overlap_count": 7,
+          "top_overlap_ids": [
+            12151,
+            1206,
+            19,
+            760,
+            23,
+            55334,
+            48412
+          ],
+          "ref_top1_top2_logprob_margin": 9.488567352294922,
+          "our_top1_top2_logprob_margin": 7.363695,
+          "ref_token_rank_in_ref_topk": 1,
+          "ref_token_rank_in_our_topk": 1,
+          "our_token_rank_in_our_topk": 1,
+          "our_token_rank_in_ref_topk": 1,
+          "selected_token_stayed_rank1": true,
+          "selected_ref_logprob": -0.0003034279803522111,
+          "selected_our_logprob": -0.001851,
+          "selected_logprob_delta": 0.001547572019647789,
+          "common_logprob_deltas": [
+            {
+              "token_id": 12151,
+              "ref_logprob": -0.0003034279803522111,
+              "our_logprob": -0.001851,
+              "abs_delta": 0.001547572019647789
+            },
+            {
+              "token_id": 1206,
+              "ref_logprob": -9.488870780275274,
+              "our_logprob": -8.442733,
+              "abs_delta": 1.0461377802752736
+            },
+            {
+              "token_id": 19,
+              "ref_logprob": -9.577551047609258,
+              "our_logprob": -7.365546,
+              "abs_delta": 2.2120050476092583
+            },
+            {
+              "token_id": 760,
+              "ref_logprob": -10.111913840578008,
+              "our_logprob": -7.681439,
+              "abs_delta": 2.4304748405780083
+            },
+            {
+              "token_id": 23,
+              "ref_logprob": -10.174505393312383,
+              "our_logprob": -9.035407,
+              "abs_delta": 1.1390983933123842
+            },
+            {
+              "token_id": 55334,
+              "ref_logprob": -10.819387595460821,
+              "our_logprob": -9.388274,
+              "abs_delta": 1.4311135954608218
+            },
+            {
+              "token_id": 48412,
+              "ref_logprob": -12.371282737062383,
+              "our_logprob": -8.903253,
+              "abs_delta": 3.468029737062384
+            }
+          ],
+          "mean_common_logprob_delta": 1.6754867094739683,
+          "max_common_logprob_delta": 3.468029737062384
+        },
+        "divergence_pos": null,
+        "divergence_info": null,
+        "token_table": [
+          {
+            "pos": 0,
+            "ref_token": 12151,
+            "our_token": 12151,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -0.0003034279803522111,
+            "our_logprob": -0.001851
+          }
+        ],
+        "ref_text": "Div",
+        "our_text": "Div"
+      },
+      "prefill_metrics": {
+        "prefill_available": true,
+        "prefill_argmax_match": 1,
+        "prefill_top10_hits": 1,
+        "prefill_total": 1,
+        "prefill_argmax_rate": 1.0,
+        "prefill_containment": 1.0
+      },
+      "timing": {
+        "prefill_ms": 2314.2,
+        "decode_ms": 0.2,
+        "total_ms": 2456.1,
+        "prompt_tokens": 78
+      }
+    },
+    {
+      "conv_idx": 6,
+      "turn": 1,
+      "multi_turn": false,
+      "prompt": "What is the largest animal in the world?",
+      "trace_input_row": {
+        "case_key": "6:0",
+        "conv_idx": 6,
+        "turn_idx": 0,
+        "layer": 0,
+        "tensor": "la_input_row_for_qkvz_last",
+        "requested_layers": "0",
+        "requested_tensors": "la_input_row_for_qkvz_last",
+        "pos": 20,
+        "positions": [
+          20
+        ],
+        "input_tokens_count": 21,
+        "prompt_prefix": "What is the largest animal in the world?"
+      },
+      "verdict": "PASS",
+      "metrics": {
+        "first_match": true,
+        "match_run": 1,
+        "ref_tokens_count": 1,
+        "our_tokens_count": 1,
+        "containment_rate": 1.0,
+        "containment_hits": 1,
+        "containment_total": 1,
+        "first_token_diagnostic": {
+          "available": true,
+          "ref_first_token": 760,
+          "our_first_token": 760,
+          "first_token_match": true,
+          "ref_top_ids": [
+            760,
+            4350,
+            561,
+            7732,
+            623,
+            3733,
+            32597,
+            43,
+            27775,
+            1206
+          ],
+          "our_top_ids": [
+            760,
+            4350,
+            7732,
+            3733,
+            623,
+            27775,
+            43,
+            561,
+            25208,
+            332
+          ],
+          "ref_top_k": [
+            {
+              "rank": 1,
+              "token_id": 760,
+              "logprob": -1.0605186879786288e-05
+            },
+            {
+              "rank": 2,
+              "token_id": 4350,
+              "logprob": -12.370474930138052
+            },
+            {
+              "rank": 3,
+              "token_id": 561,
+              "logprob": -13.866839523643911
+            },
+            {
+              "rank": 4,
+              "token_id": 7732,
+              "logprob": -14.316872711510122
+            },
+            {
+              "rank": 5,
+              "token_id": 623,
+              "logprob": -14.380972977013052
+            },
+            {
+              "rank": 6,
+              "token_id": 3733,
+              "logprob": -14.441187973350942
+            },
+            {
+              "rank": 7,
+              "token_id": 32597,
+              "logprob": -14.888091202110708
+            },
+            {
+              "rank": 8,
+              "token_id": 43,
+              "logprob": -15.262795563072622
+            },
+            {
+              "rank": 9,
+              "token_id": 27775,
+              "logprob": -15.341569061607778
+            },
+            {
+              "rank": 10,
+              "token_id": 1206,
+              "logprob": -15.415496940941274
+            }
+          ],
+          "our_top_k": [
+            {
+              "rank": 1,
+              "token_id": 760,
+              "logprob": -1.4e-05
+            },
+            {
+              "rank": 2,
+              "token_id": 4350,
+              "logprob": -12.901746
+            },
+            {
+              "rank": 3,
+              "token_id": 7732,
+              "logprob": -13.467048
+            },
+            {
+              "rank": 4,
+              "token_id": 3733,
+              "logprob": -13.598239
+            },
+            {
+              "rank": 5,
+              "token_id": 623,
+              "logprob": -13.718989
+            },
+            {
+              "rank": 6,
+              "token_id": 27775,
+              "logprob": -14.377307
+            },
+            {
+              "rank": 7,
+              "token_id": 43,
+              "logprob": -14.520288
+            },
+            {
+              "rank": 8,
+              "token_id": 561,
+              "logprob": -14.520667
+            },
+            {
+              "rank": 9,
+              "token_id": 25208,
+              "logprob": -14.543504
+            },
+            {
+              "rank": 10,
+              "token_id": 332,
+              "logprob": -14.715157
+            }
+          ],
+          "top_ids_exact": false,
+          "top_overlap_count": 8,
+          "top_overlap_ids": [
+            760,
+            4350,
+            561,
+            7732,
+            623,
+            3733,
+            43,
+            27775
+          ],
+          "ref_top1_top2_logprob_margin": 12.370464324951172,
+          "our_top1_top2_logprob_margin": 12.901731999999999,
+          "ref_token_rank_in_ref_topk": 1,
+          "ref_token_rank_in_our_topk": 1,
+          "our_token_rank_in_our_topk": 1,
+          "our_token_rank_in_ref_topk": 1,
+          "selected_token_stayed_rank1": true,
+          "selected_ref_logprob": -1.0605186879786288e-05,
+          "selected_our_logprob": -1.4e-05,
+          "selected_logprob_delta": 3.3948131202137117e-06,
+          "common_logprob_deltas": [
+            {
+              "token_id": 760,
+              "ref_logprob": -1.0605186879786288e-05,
+              "our_logprob": -1.4e-05,
+              "abs_delta": 3.3948131202137117e-06
+            },
+            {
+              "token_id": 4350,
+              "ref_logprob": -12.370474930138052,
+              "our_logprob": -12.901746,
+              "abs_delta": 0.5312710698619476
+            },
+            {
+              "token_id": 561,
+              "ref_logprob": -13.866839523643911,
+              "our_logprob": -14.520667,
+              "abs_delta": 0.6538274763560885
+            },
+            {
+              "token_id": 7732,
+              "ref_logprob": -14.316872711510122,
+              "our_logprob": -13.467048,
+              "abs_delta": 0.8498247115101218
+            },
+            {
+              "token_id": 623,
+              "ref_logprob": -14.380972977013052,
+              "our_logprob": -13.718989,
+              "abs_delta": 0.6619839770130511
+            },
+            {
+              "token_id": 3733,
+              "ref_logprob": -14.441187973350942,
+              "our_logprob": -13.598239,
+              "abs_delta": 0.8429489733509428
+            },
+            {
+              "token_id": 43,
+              "ref_logprob": -15.262795563072622,
+              "our_logprob": -14.520288,
+              "abs_delta": 0.7425075630726212
+            },
+            {
+              "token_id": 27775,
+              "ref_logprob": -15.341569061607778,
+              "our_logprob": -14.377307,
+              "abs_delta": 0.9642620616077782
+            }
+          ],
+          "mean_common_logprob_delta": 0.655828653448209,
+          "max_common_logprob_delta": 0.9642620616077782
+        },
+        "divergence_pos": null,
+        "divergence_info": null,
+        "token_table": [
+          {
+            "pos": 0,
+            "ref_token": 760,
+            "our_token": 760,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -1.0605186879786288e-05,
+            "our_logprob": -1.4e-05
+          }
+        ],
+        "ref_text": "The",
+        "our_text": "The"
+      },
+      "prefill_metrics": {
+        "prefill_available": true,
+        "prefill_argmax_match": 1,
+        "prefill_top10_hits": 1,
+        "prefill_total": 1,
+        "prefill_argmax_rate": 1.0,
+        "prefill_containment": 1.0
+      },
+      "timing": {
+        "prefill_ms": 1117.4,
+        "decode_ms": 0.2,
+        "total_ms": 1259.2,
+        "prompt_tokens": 21
+      }
+    },
+    {
+      "conv_idx": 7,
+      "turn": 1,
+      "multi_turn": false,
+      "prompt": "What is the largest body of water in the world?",
+      "trace_input_row": {
+        "case_key": "7:0",
+        "conv_idx": 7,
+        "turn_idx": 0,
+        "layer": 0,
+        "tensor": "la_input_row_for_qkvz_last",
+        "requested_layers": "0",
+        "requested_tensors": "la_input_row_for_qkvz_last",
+        "pos": 22,
+        "positions": [
+          22
+        ],
+        "input_tokens_count": 23,
+        "prompt_prefix": "What is the largest body of water in the world?"
+      },
+      "verdict": "PASS",
+      "metrics": {
+        "first_match": true,
+        "match_run": 1,
+        "ref_tokens_count": 1,
+        "our_tokens_count": 1,
+        "containment_rate": 1.0,
+        "containment_hits": 1,
+        "containment_total": 1,
+        "first_token_diagnostic": {
+          "available": true,
+          "ref_first_token": 760,
+          "our_first_token": 760,
+          "first_token_match": true,
+          "ref_top_ids": [
+            760,
+            4350,
+            3733,
+            248068,
+            1206,
+            7732,
+            623,
+            2592,
+            2064,
+            27775
+          ],
+          "our_top_ids": [
+            760,
+            4350,
+            248068,
+            7732,
+            3733,
+            623,
+            332,
+            1206,
+            2064,
+            27775
+          ],
+          "ref_top_k": [
+            {
+              "rank": 1,
+              "token_id": 760,
+              "logprob": -0.0018997771702125021
+            },
+            {
+              "rank": 2,
+              "token_id": 4350,
+              "logprob": -6.350858746286423
+            },
+            {
+              "rank": 3,
+              "token_id": 3733,
+              "logprob": -10.43612295221904
+            },
+            {
+              "rank": 4,
+              "token_id": 248068,
+              "logprob": -10.714962063547166
+            },
+            {
+              "rank": 5,
+              "token_id": 1206,
+              "logprob": -11.034751950021775
+            },
+            {
+              "rank": 6,
+              "token_id": 7732,
+              "logprob": -11.128526745554002
+            },
+            {
+              "rank": 7,
+              "token_id": 623,
+              "logprob": -11.610363064523728
+            },
+            {
+              "rank": 8,
+              "token_id": 2592,
+              "logprob": -11.615907726999314
+            },
+            {
+              "rank": 9,
+              "token_id": 2064,
+              "logprob": -11.743833599802048
+            },
+            {
+              "rank": 10,
+              "token_id": 27775,
+              "logprob": -12.175731716867478
+            }
+          ],
+          "our_top_k": [
+            {
+              "rank": 1,
+              "token_id": 760,
+              "logprob": -0.000326
+            },
+            {
+              "rank": 2,
+              "token_id": 4350,
+              "logprob": -8.47477
+            },
+            {
+              "rank": 3,
+              "token_id": 248068,
+              "logprob": -10.802504
+            },
+            {
+              "rank": 4,
+              "token_id": 7732,
+              "logprob": -11.018061
+            },
+            {
+              "rank": 5,
+              "token_id": 3733,
+              "logprob": -11.14226
+            },
+            {
+              "rank": 6,
+              "token_id": 623,
+              "logprob": -11.861185
+            },
+            {
+              "rank": 7,
+              "token_id": 332,
+              "logprob": -11.964615
+            },
+            {
+              "rank": 8,
+              "token_id": 1206,
+              "logprob": -12.029991
+            },
+            {
+              "rank": 9,
+              "token_id": 2064,
+              "logprob": -12.203781
+            },
+            {
+              "rank": 10,
+              "token_id": 27775,
+              "logprob": -12.328276
+            }
+          ],
+          "top_ids_exact": false,
+          "top_overlap_count": 9,
+          "top_overlap_ids": [
+            760,
+            4350,
+            3733,
+            248068,
+            1206,
+            7732,
+            623,
+            2064,
+            27775
+          ],
+          "ref_top1_top2_logprob_margin": 6.348958969116211,
+          "our_top1_top2_logprob_margin": 8.474444,
+          "ref_token_rank_in_ref_topk": 1,
+          "ref_token_rank_in_our_topk": 1,
+          "our_token_rank_in_our_topk": 1,
+          "our_token_rank_in_ref_topk": 1,
+          "selected_token_stayed_rank1": true,
+          "selected_ref_logprob": -0.0018997771702125021,
+          "selected_our_logprob": -0.000326,
+          "selected_logprob_delta": 0.0015737771702125022,
+          "common_logprob_deltas": [
+            {
+              "token_id": 760,
+              "ref_logprob": -0.0018997771702125021,
+              "our_logprob": -0.000326,
+              "abs_delta": 0.0015737771702125022
+            },
+            {
+              "token_id": 4350,
+              "ref_logprob": -6.350858746286423,
+              "our_logprob": -8.47477,
+              "abs_delta": 2.123911253713576
+            },
+            {
+              "token_id": 3733,
+              "ref_logprob": -10.43612295221904,
+              "our_logprob": -11.14226,
+              "abs_delta": 0.7061370477809596
+            },
+            {
+              "token_id": 248068,
+              "ref_logprob": -10.714962063547166,
+              "our_logprob": -10.802504,
+              "abs_delta": 0.08754193645283515
+            },
+            {
+              "token_id": 1206,
+              "ref_logprob": -11.034751950021775,
+              "our_logprob": -12.029991,
+              "abs_delta": 0.9952390499782258
+            },
+            {
+              "token_id": 7732,
+              "ref_logprob": -11.128526745554002,
+              "our_logprob": -11.018061,
+              "abs_delta": 0.11046574555400213
+            },
+            {
+              "token_id": 623,
+              "ref_logprob": -11.610363064523728,
+              "our_logprob": -11.861185,
+              "abs_delta": 0.25082193547627263
+            },
+            {
+              "token_id": 2064,
+              "ref_logprob": -11.743833599802048,
+              "our_logprob": -12.203781,
+              "abs_delta": 0.4599474001979509
+            },
+            {
+              "token_id": 27775,
+              "ref_logprob": -12.175731716867478,
+              "our_logprob": -12.328276,
+              "abs_delta": 0.15254428313252255
+            }
+          ],
+          "mean_common_logprob_delta": 0.5431313810507287,
+          "max_common_logprob_delta": 2.123911253713576
+        },
+        "divergence_pos": null,
+        "divergence_info": null,
+        "token_table": [
+          {
+            "pos": 0,
+            "ref_token": 760,
+            "our_token": 760,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -0.0018997771702125021,
+            "our_logprob": -0.000326
+          }
+        ],
+        "ref_text": "The",
+        "our_text": "The"
+      },
+      "prefill_metrics": {
+        "prefill_available": true,
+        "prefill_argmax_match": 1,
+        "prefill_top10_hits": 1,
+        "prefill_total": 1,
+        "prefill_argmax_rate": 1.0,
+        "prefill_containment": 1.0
+      },
+      "timing": {
+        "prefill_ms": 1142.6,
+        "decode_ms": 0.2,
+        "total_ms": 1284.5,
+        "prompt_tokens": 23
+      }
+    },
+    {
+      "conv_idx": 8,
+      "turn": 1,
+      "multi_turn": false,
+      "prompt": "Describe the binary chop algorithm in depth",
+      "trace_input_row": {
+        "case_key": "8:0",
+        "conv_idx": 8,
+        "turn_idx": 0,
+        "layer": 0,
+        "tensor": "la_input_row_for_qkvz_last",
+        "requested_layers": "0",
+        "requested_tensors": "la_input_row_for_qkvz_last",
+        "pos": 18,
+        "positions": [
+          18
+        ],
+        "input_tokens_count": 19,
+        "prompt_prefix": "Describe the binary chop algorithm in depth"
+      },
+      "verdict": "PASS",
+      "metrics": {
+        "first_match": true,
+        "match_run": 1,
+        "ref_tokens_count": 1,
+        "our_tokens_count": 1,
+        "containment_rate": 1.0,
+        "containment_hits": 1,
+        "containment_total": 1,
+        "first_token_diagnostic": {
+          "available": true,
+          "ref_first_token": 760,
+          "our_first_token": 760,
+          "first_token_match": true,
+          "ref_top_ids": [
+            760,
+            2,
+            13962,
+            550,
+            332,
+            20682,
+            623,
+            2064,
+            8160,
+            12189
+          ],
+          "our_top_ids": [
+            760,
+            2,
+            13962,
+            550,
+            332,
+            20682,
+            12189,
+            623,
+            8160,
+            2064
+          ],
+          "ref_top_k": [
+            {
+              "rank": 1,
+              "token_id": 760,
+              "logprob": -0.09971293427701511
+            },
+            {
+              "rank": 2,
+              "token_id": 2,
+              "logprob": -2.851463880321937
+            },
+            {
+              "rank": 3,
+              "token_id": 13962,
+              "logprob": -4.051205243847328
+            },
+            {
+              "rank": 4,
+              "token_id": 550,
+              "logprob": -4.063133802196937
+            },
+            {
+              "rank": 5,
+              "token_id": 332,
+              "logprob": -6.0314508340572885
+            },
+            {
+              "rank": 6,
+              "token_id": 20682,
+              "logprob": -10.62071856477018
+            },
+            {
+              "rank": 7,
+              "token_id": 623,
+              "logprob": -10.869106855175453
+            },
+            {
+              "rank": 8,
+              "token_id": 2064,
+              "logprob": -11.141018476269203
+            },
+            {
+              "rank": 9,
+              "token_id": 8160,
+              "logprob": -11.393082227489906
+            },
+            {
+              "rank": 10,
+              "token_id": 12189,
+              "logprob": -11.59028300263639
+            }
+          ],
+          "our_top_k": [
+            {
+              "rank": 1,
+              "token_id": 760,
+              "logprob": -0.040573
+            },
+            {
+              "rank": 2,
+              "token_id": 2,
+              "logprob": -4.191946
+            },
+            {
+              "rank": 3,
+              "token_id": 13962,
+              "logprob": -4.410982
+            },
+            {
+              "rank": 4,
+              "token_id": 550,
+              "logprob": -4.75772
+            },
+            {
+              "rank": 5,
+              "token_id": 332,
+              "logprob": -5.575496
+            },
+            {
+              "rank": 6,
+              "token_id": 20682,
+              "logprob": -10.286358
+            },
+            {
+              "rank": 7,
+              "token_id": 12189,
+              "logprob": -11.614227
+            },
+            {
+              "rank": 8,
+              "token_id": 623,
+              "logprob": -11.65406
+            },
+            {
+              "rank": 9,
+              "token_id": 8160,
+              "logprob": -11.770119
+            },
+            {
+              "rank": 10,
+              "token_id": 2064,
+              "logprob": -11.913214
+            }
+          ],
+          "top_ids_exact": false,
+          "top_overlap_count": 10,
+          "top_overlap_ids": [
+            760,
+            2,
+            13962,
+            550,
+            332,
+            20682,
+            623,
+            2064,
+            8160,
+            12189
+          ],
+          "ref_top1_top2_logprob_margin": 2.751750946044922,
+          "our_top1_top2_logprob_margin": 4.1513729999999995,
+          "ref_token_rank_in_ref_topk": 1,
+          "ref_token_rank_in_our_topk": 1,
+          "our_token_rank_in_our_topk": 1,
+          "our_token_rank_in_ref_topk": 1,
+          "selected_token_stayed_rank1": true,
+          "selected_ref_logprob": -0.09971293427701511,
+          "selected_our_logprob": -0.040573,
+          "selected_logprob_delta": 0.05913993427701511,
+          "common_logprob_deltas": [
+            {
+              "token_id": 760,
+              "ref_logprob": -0.09971293427701511,
+              "our_logprob": -0.040573,
+              "abs_delta": 0.05913993427701511
+            },
+            {
+              "token_id": 2,
+              "ref_logprob": -2.851463880321937,
+              "our_logprob": -4.191946,
+              "abs_delta": 1.3404821196780627
+            },
+            {
+              "token_id": 13962,
+              "ref_logprob": -4.051205243847328,
+              "our_logprob": -4.410982,
+              "abs_delta": 0.35977675615267213
+            },
+            {
+              "token_id": 550,
+              "ref_logprob": -4.063133802196937,
+              "our_logprob": -4.75772,
+              "abs_delta": 0.694586197803063
+            },
+            {
+              "token_id": 332,
+              "ref_logprob": -6.0314508340572885,
+              "our_logprob": -5.575496,
+              "abs_delta": 0.4559548340572883
+            },
+            {
+              "token_id": 20682,
+              "ref_logprob": -10.62071856477018,
+              "our_logprob": -10.286358,
+              "abs_delta": 0.3343605647701793
+            },
+            {
+              "token_id": 623,
+              "ref_logprob": -10.869106855175453,
+              "our_logprob": -11.65406,
+              "abs_delta": 0.7849531448245468
+            },
+            {
+              "token_id": 2064,
+              "ref_logprob": -11.141018476269203,
+              "our_logprob": -11.913214,
+              "abs_delta": 0.7721955237307974
+            },
+            {
+              "token_id": 8160,
+              "ref_logprob": -11.393082227489906,
+              "our_logprob": -11.770119,
+              "abs_delta": 0.3770367725100936
+            },
+            {
+              "token_id": 12189,
+              "ref_logprob": -11.59028300263639,
+              "our_logprob": -11.614227,
+              "abs_delta": 0.023943997363609526
+            }
+          ],
+          "mean_common_logprob_delta": 0.5202429845167328,
+          "max_common_logprob_delta": 1.3404821196780627
+        },
+        "divergence_pos": null,
+        "divergence_info": null,
+        "token_table": [
+          {
+            "pos": 0,
+            "ref_token": 760,
+            "our_token": 760,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -0.09971293427701511,
+            "our_logprob": -0.040573
+          }
+        ],
+        "ref_text": "The",
+        "our_text": "The"
+      },
+      "prefill_metrics": {
+        "prefill_available": true,
+        "prefill_argmax_match": 1,
+        "prefill_top10_hits": 1,
+        "prefill_total": 1,
+        "prefill_argmax_rate": 1.0,
+        "prefill_containment": 1.0
+      },
+      "timing": {
+        "prefill_ms": 1068.8,
+        "decode_ms": 0.2,
+        "total_ms": 1210.5,
+        "prompt_tokens": 19
+      }
+    },
+    {
+      "conv_idx": 9,
+      "turn": 1,
+      "multi_turn": false,
+      "prompt": "If it takes 4 hours for 4 towels to dry on a clothesline in the sun, how long does it take for 20 towels to dry under the exact same conditions?",
+      "trace_input_row": {
+        "case_key": "9:0",
+        "conv_idx": 9,
+        "turn_idx": 0,
+        "layer": 0,
+        "tensor": "la_input_row_for_qkvz_last",
+        "requested_layers": "0",
+        "requested_tensors": "la_input_row_for_qkvz_last",
+        "pos": 49,
+        "positions": [
+          49
+        ],
+        "input_tokens_count": 50,
+        "prompt_prefix": "If it takes 4 hours for 4 towels to dry on a clothesline in the sun, how long does it take for 20 towels to dry under th"
+      },
+      "verdict": "PASS",
+      "metrics": {
+        "first_match": true,
+        "match_run": 1,
+        "ref_tokens_count": 1,
+        "our_tokens_count": 1,
+        "containment_rate": 1.0,
+        "containment_hits": 1,
+        "containment_total": 1,
+        "first_token_diagnostic": {
+          "available": true,
+          "ref_first_token": 13962,
+          "our_first_token": 13962,
+          "first_token_match": true,
+          "ref_top_ids": [
+            13962,
+            1919,
+            760,
+            27775,
+            1206,
+            623,
+            8160,
+            332,
+            2064,
+            12189
+          ],
+          "our_top_ids": [
+            13962,
+            1919,
+            760,
+            27775,
+            1206,
+            2064,
+            623,
+            12189,
+            8160,
+            332
+          ],
+          "ref_top_k": [
+            {
+              "rank": 1,
+              "token_id": 13962,
+              "logprob": -0.14076876975778774
+            },
+            {
+              "rank": 2,
+              "token_id": 1919,
+              "logprob": -2.091408494489233
+            },
+            {
+              "rank": 3,
+              "token_id": 760,
+              "logprob": -5.126801255719702
+            },
+            {
+              "rank": 4,
+              "token_id": 27775,
+              "logprob": -6.848305467145483
+            },
+            {
+              "rank": 5,
+              "token_id": 1206,
+              "logprob": -7.726120713727514
+            },
+            {
+              "rank": 6,
+              "token_id": 623,
+              "logprob": -9.348103288190405
+            },
+            {
+              "rank": 7,
+              "token_id": 8160,
+              "logprob": -9.985506776349585
+            },
+            {
+              "rank": 8,
+              "token_id": 332,
+              "logprob": -10.075896028058569
+            },
+            {
+              "rank": 9,
+              "token_id": 2064,
+              "logprob": -10.13501239158396
+            },
+            {
+              "rank": 10,
+              "token_id": 12189,
+              "logprob": -10.368061784284155
+            }
+          ],
+          "our_top_k": [
+            {
+              "rank": 1,
+              "token_id": 13962,
+              "logprob": -0.065388
+            },
+            {
+              "rank": 2,
+              "token_id": 1919,
+              "logprob": -3.029114
+            },
+            {
+              "rank": 3,
+              "token_id": 760,
+              "logprob": -4.398815
+            },
+            {
+              "rank": 4,
+              "token_id": 27775,
+              "logprob": -6.190142
+            },
+            {
+              "rank": 5,
+              "token_id": 1206,
+              "logprob": -7.940502
+            },
+            {
+              "rank": 6,
+              "token_id": 2064,
+              "logprob": -10.161129
+            },
+            {
+              "rank": 7,
+              "token_id": 623,
+              "logprob": -10.240379
+            },
+            {
+              "rank": 8,
+              "token_id": 12189,
+              "logprob": -10.369396
+            },
+            {
+              "rank": 9,
+              "token_id": 8160,
+              "logprob": -10.425583
+            },
+            {
+              "rank": 10,
+              "token_id": 332,
+              "logprob": -10.732765
+            }
+          ],
+          "top_ids_exact": false,
+          "top_overlap_count": 10,
+          "top_overlap_ids": [
+            13962,
+            1919,
+            760,
+            27775,
+            1206,
+            623,
+            8160,
+            332,
+            2064,
+            12189
+          ],
+          "ref_top1_top2_logprob_margin": 1.9506397247314453,
+          "our_top1_top2_logprob_margin": 2.963726,
+          "ref_token_rank_in_ref_topk": 1,
+          "ref_token_rank_in_our_topk": 1,
+          "our_token_rank_in_our_topk": 1,
+          "our_token_rank_in_ref_topk": 1,
+          "selected_token_stayed_rank1": true,
+          "selected_ref_logprob": -0.14076876975778774,
+          "selected_our_logprob": -0.065388,
+          "selected_logprob_delta": 0.07538076975778774,
+          "common_logprob_deltas": [
+            {
+              "token_id": 13962,
+              "ref_logprob": -0.14076876975778774,
+              "our_logprob": -0.065388,
+              "abs_delta": 0.07538076975778774
+            },
+            {
+              "token_id": 1919,
+              "ref_logprob": -2.091408494489233,
+              "our_logprob": -3.029114,
+              "abs_delta": 0.9377055055107668
+            },
+            {
+              "token_id": 760,
+              "ref_logprob": -5.126801255719702,
+              "our_logprob": -4.398815,
+              "abs_delta": 0.7279862557197019
+            },
+            {
+              "token_id": 27775,
+              "ref_logprob": -6.848305467145483,
+              "our_logprob": -6.190142,
+              "abs_delta": 0.6581634671454832
+            },
+            {
+              "token_id": 1206,
+              "ref_logprob": -7.726120713727514,
+              "our_logprob": -7.940502,
+              "abs_delta": 0.2143812862724861
+            },
+            {
+              "token_id": 623,
+              "ref_logprob": -9.348103288190405,
+              "our_logprob": -10.240379,
+              "abs_delta": 0.8922757118095959
+            },
+            {
+              "token_id": 8160,
+              "ref_logprob": -9.985506776349585,
+              "our_logprob": -10.425583,
+              "abs_delta": 0.440076223650415
+            },
+            {
+              "token_id": 332,
+              "ref_logprob": -10.075896028058569,
+              "our_logprob": -10.732765,
+              "abs_delta": 0.6568689719414316
+            },
+            {
+              "token_id": 2064,
+              "ref_logprob": -10.13501239158396,
+              "our_logprob": -10.161129,
+              "abs_delta": 0.02611660841604113
+            },
+            {
+              "token_id": 12189,
+              "ref_logprob": -10.368061784284155,
+              "our_logprob": -10.369396,
+              "abs_delta": 0.0013342157158451329
+            }
+          ],
+          "mean_common_logprob_delta": 0.4630289015939555,
+          "max_common_logprob_delta": 0.9377055055107668
+        },
+        "divergence_pos": null,
+        "divergence_info": null,
+        "token_table": [
+          {
+            "pos": 0,
+            "ref_token": 13962,
+            "our_token": 13962,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -0.14076876975778774,
+            "our_logprob": -0.065388
+          }
+        ],
+        "ref_text": "###",
+        "our_text": "###"
+      },
+      "prefill_metrics": {
+        "prefill_available": true,
+        "prefill_argmax_match": 1,
+        "prefill_top10_hits": 1,
+        "prefill_total": 1,
+        "prefill_argmax_rate": 1.0,
+        "prefill_containment": 1.0
+      },
+      "timing": {
+        "prefill_ms": 2304.0,
+        "decode_ms": 0.2,
+        "total_ms": 2446.0,
+        "prompt_tokens": 50
+      }
+    },
+    {
+      "conv_idx": 10,
+      "turn": 1,
+      "multi_turn": false,
+      "prompt": "Tell me facts about the blue whale",
+      "trace_input_row": {
+        "case_key": "10:0",
+        "conv_idx": 10,
+        "turn_idx": 0,
+        "layer": 0,
+        "tensor": "la_input_row_for_qkvz_last",
+        "requested_layers": "0",
+        "requested_tensors": "la_input_row_for_qkvz_last",
+        "pos": 18,
+        "positions": [
+          18
+        ],
+        "input_tokens_count": 19,
+        "prompt_prefix": "Tell me facts about the blue whale"
+      },
+      "verdict": "PASS",
+      "metrics": {
+        "first_match": true,
+        "match_run": 1,
+        "ref_tokens_count": 1,
+        "our_tokens_count": 1,
+        "containment_rate": 1.0,
+        "containment_hits": 1,
+        "containment_total": 1,
+        "first_token_diagnostic": {
+          "available": true,
+          "ref_first_token": 8160,
+          "our_first_token": 8160,
+          "first_token_match": true,
+          "ref_top_ids": [
+            8160,
+            760,
+            10025,
+            5514,
+            1532,
+            6527,
+            19205,
+            4639,
+            38493,
+            2064
+          ],
+          "our_top_ids": [
+            8160,
+            760,
+            10025,
+            5514,
+            4639,
+            19205,
+            7732,
+            6527,
+            1532,
+            2064
+          ],
+          "ref_top_k": [
+            {
+              "rank": 1,
+              "token_id": 8160,
+              "logprob": -0.10287817084165951
+            },
+            {
+              "rank": 2,
+              "token_id": 760,
+              "logprob": -2.3253894623455658
+            },
+            {
+              "rank": 3,
+              "token_id": 10025,
+              "logprob": -11.342679577702011
+            },
+            {
+              "rank": 4,
+              "token_id": 5514,
+              "logprob": -13.026246624821152
+            },
+            {
+              "rank": 5,
+              "token_id": 1532,
+              "logprob": -14.62936742865416
+            },
+            {
+              "rank": 6,
+              "token_id": 6527,
+              "logprob": -14.999856549137558
+            },
+            {
+              "rank": 7,
+              "token_id": 19205,
+              "logprob": -15.135968762272324
+            },
+            {
+              "rank": 8,
+              "token_id": 4639,
+              "logprob": -15.32040746771666
+            },
+            {
+              "rank": 9,
+              "token_id": 38493,
+              "logprob": -15.78112180792662
+            },
+            {
+              "rank": 10,
+              "token_id": 2064,
+              "logprob": -15.809624272221054
+            }
+          ],
+          "our_top_k": [
+            {
+              "rank": 1,
+              "token_id": 8160,
+              "logprob": -0.240937
+            },
+            {
+              "rank": 2,
+              "token_id": 760,
+              "logprob": -1.541352
+            },
+            {
+              "rank": 3,
+              "token_id": 10025,
+              "logprob": -11.746881
+            },
+            {
+              "rank": 4,
+              "token_id": 5514,
+              "logprob": -13.331674
+            },
+            {
+              "rank": 5,
+              "token_id": 4639,
+              "logprob": -14.013707
+            },
+            {
+              "rank": 6,
+              "token_id": 19205,
+              "logprob": -14.166215
+            },
+            {
+              "rank": 7,
+              "token_id": 7732,
+              "logprob": -14.815838
+            },
+            {
+              "rank": 8,
+              "token_id": 6527,
+              "logprob": -14.960036
+            },
+            {
+              "rank": 9,
+              "token_id": 1532,
+              "logprob": -14.974292
+            },
+            {
+              "rank": 10,
+              "token_id": 2064,
+              "logprob": -15.1582
+            }
+          ],
+          "top_ids_exact": false,
+          "top_overlap_count": 9,
+          "top_overlap_ids": [
+            8160,
+            760,
+            10025,
+            5514,
+            1532,
+            6527,
+            19205,
+            4639,
+            2064
+          ],
+          "ref_top1_top2_logprob_margin": 2.2225112915039062,
+          "our_top1_top2_logprob_margin": 1.300415,
+          "ref_token_rank_in_ref_topk": 1,
+          "ref_token_rank_in_our_topk": 1,
+          "our_token_rank_in_our_topk": 1,
+          "our_token_rank_in_ref_topk": 1,
+          "selected_token_stayed_rank1": true,
+          "selected_ref_logprob": -0.10287817084165951,
+          "selected_our_logprob": -0.240937,
+          "selected_logprob_delta": 0.1380588291583405,
+          "common_logprob_deltas": [
+            {
+              "token_id": 8160,
+              "ref_logprob": -0.10287817084165951,
+              "our_logprob": -0.240937,
+              "abs_delta": 0.1380588291583405
+            },
+            {
+              "token_id": 760,
+              "ref_logprob": -2.3253894623455658,
+              "our_logprob": -1.541352,
+              "abs_delta": 0.7840374623455657
+            },
+            {
+              "token_id": 10025,
+              "ref_logprob": -11.342679577702011,
+              "our_logprob": -11.746881,
+              "abs_delta": 0.40420142229798905
+            },
+            {
+              "token_id": 5514,
+              "ref_logprob": -13.026246624821152,
+              "our_logprob": -13.331674,
+              "abs_delta": 0.3054273751788479
+            },
+            {
+              "token_id": 1532,
+              "ref_logprob": -14.62936742865416,
+              "our_logprob": -14.974292,
+              "abs_delta": 0.34492457134584065
+            },
+            {
+              "token_id": 6527,
+              "ref_logprob": -14.999856549137558,
+              "our_logprob": -14.960036,
+              "abs_delta": 0.03982054913755739
+            },
+            {
+              "token_id": 19205,
+              "ref_logprob": -15.135968762272324,
+              "our_logprob": -14.166215,
+              "abs_delta": 0.9697537622723242
+            },
+            {
+              "token_id": 4639,
+              "ref_logprob": -15.32040746771666,
+              "our_logprob": -14.013707,
+              "abs_delta": 1.3067004677166594
+            },
+            {
+              "token_id": 2064,
+              "ref_logprob": -15.809624272221054,
+              "our_logprob": -15.1582,
+              "abs_delta": 0.6514242722210533
+            }
+          ],
+          "mean_common_logprob_delta": 0.5493720790749087,
+          "max_common_logprob_delta": 1.3067004677166594
+        },
+        "divergence_pos": null,
+        "divergence_info": null,
+        "token_table": [
+          {
+            "pos": 0,
+            "ref_token": 8160,
+            "our_token": 8160,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -0.10287817084165951,
+            "our_logprob": -0.240937
+          }
+        ],
+        "ref_text": "Here",
+        "our_text": "Here"
+      },
+      "prefill_metrics": {
+        "prefill_available": true,
+        "prefill_argmax_match": 1,
+        "prefill_top10_hits": 1,
+        "prefill_total": 1,
+        "prefill_argmax_rate": 1.0,
+        "prefill_containment": 1.0
+      },
+      "timing": {
+        "prefill_ms": 1100.0,
+        "decode_ms": 0.2,
+        "total_ms": 1242.2,
+        "prompt_tokens": 19
+      }
+    },
+    {
+      "conv_idx": 11,
+      "turn": 1,
+      "multi_turn": false,
+      "prompt": "Tell me more about whales in general",
+      "trace_input_row": {
+        "case_key": "11:0",
+        "conv_idx": 11,
+        "turn_idx": 0,
+        "layer": 0,
+        "tensor": "la_input_row_for_qkvz_last",
+        "requested_layers": "0",
+        "requested_tensors": "la_input_row_for_qkvz_last",
+        "pos": 235,
+        "positions": [
+          235
+        ],
+        "input_tokens_count": 236,
+        "prompt_prefix": "Tell me more about whales in general"
+      },
+      "verdict": "PASS",
+      "metrics": {
+        "first_match": true,
+        "match_run": 1,
+        "ref_tokens_count": 1,
+        "our_tokens_count": 1,
+        "containment_rate": 1.0,
+        "containment_hits": 1,
+        "containment_total": 1,
+        "first_token_diagnostic": {
+          "available": true,
+          "ref_first_token": 1582,
+          "our_first_token": 1582,
+          "first_token_match": true,
+          "ref_top_ids": [
+            1582,
+            7732,
+            4350,
+            29149,
+            38416,
+            53483,
+            4639,
+            8160,
+            12189,
+            2064
+          ],
+          "our_top_ids": [
+            1582,
+            7732,
+            4350,
+            29149,
+            4639,
+            53483,
+            12189,
+            38416,
+            8160,
+            2064
+          ],
+          "ref_top_k": [
+            {
+              "rank": 1,
+              "token_id": 1582,
+              "logprob": -0.3752673603039298
+            },
+            {
+              "rank": 2,
+              "token_id": 7732,
+              "logprob": -1.4188102222424064
+            },
+            {
+              "rank": 3,
+              "token_id": 4350,
+              "logprob": -3.6426471210461173
+            },
+            {
+              "rank": 4,
+              "token_id": 29149,
+              "logprob": -4.462223384473852
+            },
+            {
+              "rank": 5,
+              "token_id": 38416,
+              "logprob": -4.708423945997289
+            },
+            {
+              "rank": 6,
+              "token_id": 53483,
+              "logprob": -4.9639037586193595
+            },
+            {
+              "rank": 7,
+              "token_id": 4639,
+              "logprob": -4.9781154132824454
+            },
+            {
+              "rank": 8,
+              "token_id": 8160,
+              "logprob": -5.985088679884008
+            },
+            {
+              "rank": 9,
+              "token_id": 12189,
+              "logprob": -6.561167094801
+            },
+            {
+              "rank": 10,
+              "token_id": 2064,
+              "logprob": -6.778698299024633
+            }
+          ],
+          "our_top_k": [
+            {
+              "rank": 1,
+              "token_id": 1582,
+              "logprob": -0.616115
+            },
+            {
+              "rank": 2,
+              "token_id": 7732,
+              "logprob": -0.976932
+            },
+            {
+              "rank": 3,
+              "token_id": 4350,
+              "logprob": -3.020742
+            },
+            {
+              "rank": 4,
+              "token_id": 29149,
+              "logprob": -4.490732
+            },
+            {
+              "rank": 5,
+              "token_id": 4639,
+              "logprob": -5.090122
+            },
+            {
+              "rank": 6,
+              "token_id": 53483,
+              "logprob": -5.206148
+            },
+            {
+              "rank": 7,
+              "token_id": 12189,
+              "logprob": -5.777966
+            },
+            {
+              "rank": 8,
+              "token_id": 38416,
+              "logprob": -5.956343
+            },
+            {
+              "rank": 9,
+              "token_id": 8160,
+              "logprob": -6.461361
+            },
+            {
+              "rank": 10,
+              "token_id": 2064,
+              "logprob": -7.401939
+            }
+          ],
+          "top_ids_exact": false,
+          "top_overlap_count": 10,
+          "top_overlap_ids": [
+            1582,
+            7732,
+            4350,
+            29149,
+            38416,
+            53483,
+            4639,
+            8160,
+            12189,
+            2064
+          ],
+          "ref_top1_top2_logprob_margin": 1.0435428619384766,
+          "our_top1_top2_logprob_margin": 0.36081700000000005,
+          "ref_token_rank_in_ref_topk": 1,
+          "ref_token_rank_in_our_topk": 1,
+          "our_token_rank_in_our_topk": 1,
+          "our_token_rank_in_ref_topk": 1,
+          "selected_token_stayed_rank1": true,
+          "selected_ref_logprob": -0.3752673603039298,
+          "selected_our_logprob": -0.616115,
+          "selected_logprob_delta": 0.24084763969607015,
+          "common_logprob_deltas": [
+            {
+              "token_id": 1582,
+              "ref_logprob": -0.3752673603039298,
+              "our_logprob": -0.616115,
+              "abs_delta": 0.24084763969607015
+            },
+            {
+              "token_id": 7732,
+              "ref_logprob": -1.4188102222424064,
+              "our_logprob": -0.976932,
+              "abs_delta": 0.44187822224240636
+            },
+            {
+              "token_id": 4350,
+              "ref_logprob": -3.6426471210461173,
+              "our_logprob": -3.020742,
+              "abs_delta": 0.6219051210461175
+            },
+            {
+              "token_id": 29149,
+              "ref_logprob": -4.462223384473852,
+              "our_logprob": -4.490732,
+              "abs_delta": 0.028508615526148695
+            },
+            {
+              "token_id": 38416,
+              "ref_logprob": -4.708423945997289,
+              "our_logprob": -5.956343,
+              "abs_delta": 1.2479190540027112
+            },
+            {
+              "token_id": 53483,
+              "ref_logprob": -4.9639037586193595,
+              "our_logprob": -5.206148,
+              "abs_delta": 0.24224424138064027
+            },
+            {
+              "token_id": 4639,
+              "ref_logprob": -4.9781154132824454,
+              "our_logprob": -5.090122,
+              "abs_delta": 0.11200658671755459
+            },
+            {
+              "token_id": 8160,
+              "ref_logprob": -5.985088679884008,
+              "our_logprob": -6.461361,
+              "abs_delta": 0.4762723201159922
+            },
+            {
+              "token_id": 12189,
+              "ref_logprob": -6.561167094801,
+              "our_logprob": -5.777966,
+              "abs_delta": 0.783201094801
+            },
+            {
+              "token_id": 2064,
+              "ref_logprob": -6.778698299024633,
+              "our_logprob": -7.401939,
+              "abs_delta": 0.6232407009753667
+            }
+          ],
+          "mean_common_logprob_delta": 0.4818023596504008,
+          "max_common_logprob_delta": 1.2479190540027112
+        },
+        "divergence_pos": null,
+        "divergence_info": null,
+        "token_table": [
+          {
+            "pos": 0,
+            "ref_token": 1582,
+            "our_token": 1582,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -0.3752673603039298,
+            "our_logprob": -0.616115
+          }
+        ],
+        "ref_text": "Wh",
+        "our_text": "Wh"
+      },
+      "prefill_metrics": {
+        "prefill_available": true,
+        "prefill_argmax_match": 1,
+        "prefill_top10_hits": 1,
+        "prefill_total": 1,
+        "prefill_argmax_rate": 1.0,
+        "prefill_containment": 1.0
+      },
+      "timing": {
+        "prefill_ms": 2349.7,
+        "decode_ms": 0.2,
+        "total_ms": 2492.1,
+        "prompt_tokens": 236
+      }
+    },
+    {
+      "conv_idx": 12,
+      "turn": 1,
+      "multi_turn": false,
+      "prompt": "Where do whales live geographically?",
+      "trace_input_row": {
+        "case_key": "12:0",
+        "conv_idx": 12,
+        "turn_idx": 0,
+        "layer": 0,
+        "tensor": "la_input_row_for_qkvz_last",
+        "requested_layers": "0",
+        "requested_tensors": "la_input_row_for_qkvz_last",
+        "pos": 451,
+        "positions": [
+          451
+        ],
+        "input_tokens_count": 452,
+        "prompt_prefix": "Where do whales live geographically?"
+      },
+      "verdict": "PASS",
+      "metrics": {
+        "first_match": true,
+        "match_run": 1,
+        "ref_tokens_count": 1,
+        "our_tokens_count": 1,
+        "containment_rate": 1.0,
+        "containment_hits": 1,
+        "containment_total": 1,
+        "first_token_diagnostic": {
+          "available": true,
+          "ref_first_token": 1582,
+          "our_first_token": 1582,
+          "first_token_match": true,
+          "ref_top_ids": [
+            1582,
+            10025,
+            9219,
+            41657,
+            17413,
+            3833,
+            760,
+            8791,
+            7732,
+            19205
+          ],
+          "our_top_ids": [
+            1582,
+            9219,
+            3833,
+            41657,
+            760,
+            10025,
+            8791,
+            7732,
+            332,
+            17413
+          ],
+          "ref_top_k": [
+            {
+              "rank": 1,
+              "token_id": 1582,
+              "logprob": -0.0007370478643977663
+            },
+            {
+              "rank": 2,
+              "token_id": 10025,
+              "logprob": -8.854164934827288
+            },
+            {
+              "rank": 3,
+              "token_id": 9219,
+              "logprob": -8.936430788709124
+            },
+            {
+              "rank": 4,
+              "token_id": 41657,
+              "logprob": -9.534005022717913
+            },
+            {
+              "rank": 5,
+              "token_id": 17413,
+              "logprob": -9.559349871350726
+            },
+            {
+              "rank": 6,
+              "token_id": 3833,
+              "logprob": -9.832180834485492
+            },
+            {
+              "rank": 7,
+              "token_id": 760,
+              "logprob": -9.989270067883929
+            },
+            {
+              "rank": 8,
+              "token_id": 8791,
+              "logprob": -10.62144551344057
+            },
+            {
+              "rank": 9,
+              "token_id": 7732,
+              "logprob": -11.101313448621234
+            },
+            {
+              "rank": 10,
+              "token_id": 19205,
+              "logprob": -11.403006411267718
+            }
+          ],
+          "our_top_k": [
+            {
+              "rank": 1,
+              "token_id": 1582,
+              "logprob": -0.00176
+            },
+            {
+              "rank": 2,
+              "token_id": 9219,
+              "logprob": -7.251351
+            },
+            {
+              "rank": 3,
+              "token_id": 3833,
+              "logprob": -8.703542
+            },
+            {
+              "rank": 4,
+              "token_id": 41657,
+              "logprob": -8.81593
+            },
+            {
+              "rank": 5,
+              "token_id": 760,
+              "logprob": -9.043916
+            },
+            {
+              "rank": 6,
+              "token_id": 10025,
+              "logprob": -9.074191
+            },
+            {
+              "rank": 7,
+              "token_id": 8791,
+              "logprob": -9.504605
+            },
+            {
+              "rank": 8,
+              "token_id": 7732,
+              "logprob": -10.360837
+            },
+            {
+              "rank": 9,
+              "token_id": 332,
+              "logprob": -10.377927
+            },
+            {
+              "rank": 10,
+              "token_id": 17413,
+              "logprob": -10.697953
+            }
+          ],
+          "top_ids_exact": false,
+          "top_overlap_count": 9,
+          "top_overlap_ids": [
+            1582,
+            10025,
+            9219,
+            41657,
+            17413,
+            3833,
+            760,
+            8791,
+            7732
+          ],
+          "ref_top1_top2_logprob_margin": 8.85342788696289,
+          "our_top1_top2_logprob_margin": 7.249591,
+          "ref_token_rank_in_ref_topk": 1,
+          "ref_token_rank_in_our_topk": 1,
+          "our_token_rank_in_our_topk": 1,
+          "our_token_rank_in_ref_topk": 1,
+          "selected_token_stayed_rank1": true,
+          "selected_ref_logprob": -0.0007370478643977663,
+          "selected_our_logprob": -0.00176,
+          "selected_logprob_delta": 0.0010229521356022338,
+          "common_logprob_deltas": [
+            {
+              "token_id": 1582,
+              "ref_logprob": -0.0007370478643977663,
+              "our_logprob": -0.00176,
+              "abs_delta": 0.0010229521356022338
+            },
+            {
+              "token_id": 10025,
+              "ref_logprob": -8.854164934827288,
+              "our_logprob": -9.074191,
+              "abs_delta": 0.2200260651727124
+            },
+            {
+              "token_id": 9219,
+              "ref_logprob": -8.936430788709124,
+              "our_logprob": -7.251351,
+              "abs_delta": 1.6850797887091247
+            },
+            {
+              "token_id": 41657,
+              "ref_logprob": -9.534005022717913,
+              "our_logprob": -8.81593,
+              "abs_delta": 0.7180750227179136
+            },
+            {
+              "token_id": 17413,
+              "ref_logprob": -9.559349871350726,
+              "our_logprob": -10.697953,
+              "abs_delta": 1.1386031286492742
+            },
+            {
+              "token_id": 3833,
+              "ref_logprob": -9.832180834485492,
+              "our_logprob": -8.703542,
+              "abs_delta": 1.128638834485491
+            },
+            {
+              "token_id": 760,
+              "ref_logprob": -9.989270067883929,
+              "our_logprob": -9.043916,
+              "abs_delta": 0.9453540678839296
+            },
+            {
+              "token_id": 8791,
+              "ref_logprob": -10.62144551344057,
+              "our_logprob": -9.504605,
+              "abs_delta": 1.11684051344057
+            },
+            {
+              "token_id": 7732,
+              "ref_logprob": -11.101313448621234,
+              "our_logprob": -10.360837,
+              "abs_delta": 0.7404764486212336
+            }
+          ],
+          "mean_common_logprob_delta": 0.8549018690906501,
+          "max_common_logprob_delta": 1.6850797887091247
+        },
+        "divergence_pos": null,
+        "divergence_info": null,
+        "token_table": [
+          {
+            "pos": 0,
+            "ref_token": 1582,
+            "our_token": 1582,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -0.0007370478643977663,
+            "our_logprob": -0.00176
+          }
+        ],
+        "ref_text": "Wh",
+        "our_text": "Wh"
+      },
+      "prefill_metrics": {
+        "prefill_available": true,
+        "prefill_argmax_match": 1,
+        "prefill_top10_hits": 1,
+        "prefill_total": 1,
+        "prefill_argmax_rate": 1.0,
+        "prefill_containment": 1.0
+      },
+      "timing": {
+        "prefill_ms": 2364.4,
+        "decode_ms": 0.2,
+        "total_ms": 2506.9,
+        "prompt_tokens": 452
+      }
+    },
+    {
+      "conv_idx": 13,
+      "turn": 1,
+      "multi_turn": false,
+      "prompt": "Write me a quicksort implementation in Rust",
+      "trace_input_row": {
+        "case_key": "13:0",
+        "conv_idx": 13,
+        "turn_idx": 0,
+        "layer": 0,
+        "tensor": "la_input_row_for_qkvz_last",
+        "requested_layers": "0",
+        "requested_tensors": "la_input_row_for_qkvz_last",
+        "pos": 19,
+        "positions": [
+          19
+        ],
+        "input_tokens_count": 20,
+        "prompt_prefix": "Write me a quicksort implementation in Rust"
+      },
+      "verdict": "PASS",
+      "metrics": {
+        "first_match": true,
+        "match_run": 1,
+        "ref_tokens_count": 1,
+        "our_tokens_count": 1,
+        "containment_rate": 1.0,
+        "containment_hits": 1,
+        "containment_total": 1,
+        "first_token_diagnostic": {
+          "available": true,
+          "ref_first_token": 8160,
+          "our_first_token": 8160,
+          "first_token_match": true,
+          "ref_top_ids": [
+            8160,
+            2114,
+            71093,
+            760,
+            623,
+            13962,
+            1206,
+            2,
+            6527,
+            5514
+          ],
+          "our_top_ids": [
+            8160,
+            2114,
+            71093,
+            760,
+            1206,
+            623,
+            13962,
+            32,
+            12189,
+            3733
+          ],
+          "ref_top_k": [
+            {
+              "rank": 1,
+              "token_id": 8160,
+              "logprob": -0.00017987773014738195
+            },
+            {
+              "rank": 2,
+              "token_id": 2114,
+              "logprob": -9.316036811323897
+            },
+            {
+              "rank": 3,
+              "token_id": 71093,
+              "logprob": -10.30160008952214
+            },
+            {
+              "rank": 4,
+              "token_id": 760,
+              "logprob": -11.691227546187179
+            },
+            {
+              "rank": 5,
+              "token_id": 623,
+              "logprob": -11.718330970259444
+            },
+            {
+              "rank": 6,
+              "token_id": 13962,
+              "logprob": -12.15384732768132
+            },
+            {
+              "rank": 7,
+              "token_id": 1206,
+              "logprob": -12.384518256636397
+            },
+            {
+              "rank": 8,
+              "token_id": 2,
+              "logprob": -12.76370488688542
+            },
+            {
+              "rank": 9,
+              "token_id": 6527,
+              "logprob": -13.051215758772628
+            },
+            {
+              "rank": 10,
+              "token_id": 5514,
+              "logprob": -13.212833991499679
+            }
+          ],
+          "our_top_k": [
+            {
+              "rank": 1,
+              "token_id": 8160,
+              "logprob": -0.000137
+            },
+            {
+              "rank": 2,
+              "token_id": 2114,
+              "logprob": -10.07279
+            },
+            {
+              "rank": 3,
+              "token_id": 71093,
+              "logprob": -10.501455
+            },
+            {
+              "rank": 4,
+              "token_id": 760,
+              "logprob": -11.296663
+            },
+            {
+              "rank": 5,
+              "token_id": 1206,
+              "logprob": -11.726604
+            },
+            {
+              "rank": 6,
+              "token_id": 623,
+              "logprob": -11.860691
+            },
+            {
+              "rank": 7,
+              "token_id": 13962,
+              "logprob": -12.693201
+            },
+            {
+              "rank": 8,
+              "token_id": 32,
+              "logprob": -12.83334
+            },
+            {
+              "rank": 9,
+              "token_id": 12189,
+              "logprob": -12.867889
+            },
+            {
+              "rank": 10,
+              "token_id": 3733,
+              "logprob": -12.876109
+            }
+          ],
+          "top_ids_exact": false,
+          "top_overlap_count": 7,
+          "top_overlap_ids": [
+            8160,
+            2114,
+            71093,
+            760,
+            623,
+            13962,
+            1206
+          ],
+          "ref_top1_top2_logprob_margin": 9.31585693359375,
+          "our_top1_top2_logprob_margin": 10.072652999999999,
+          "ref_token_rank_in_ref_topk": 1,
+          "ref_token_rank_in_our_topk": 1,
+          "our_token_rank_in_our_topk": 1,
+          "our_token_rank_in_ref_topk": 1,
+          "selected_token_stayed_rank1": true,
+          "selected_ref_logprob": -0.00017987773014738195,
+          "selected_our_logprob": -0.000137,
+          "selected_logprob_delta": 4.287773014738196e-05,
+          "common_logprob_deltas": [
+            {
+              "token_id": 8160,
+              "ref_logprob": -0.00017987773014738195,
+              "our_logprob": -0.000137,
+              "abs_delta": 4.287773014738196e-05
+            },
+            {
+              "token_id": 2114,
+              "ref_logprob": -9.316036811323897,
+              "our_logprob": -10.07279,
+              "abs_delta": 0.7567531886761021
+            },
+            {
+              "token_id": 71093,
+              "ref_logprob": -10.30160008952214,
+              "our_logprob": -10.501455,
+              "abs_delta": 0.19985491047786041
+            },
+            {
+              "token_id": 760,
+              "ref_logprob": -11.691227546187179,
+              "our_logprob": -11.296663,
+              "abs_delta": 0.39456454618717807
+            },
+            {
+              "token_id": 623,
+              "ref_logprob": -11.718330970259444,
+              "our_logprob": -11.860691,
+              "abs_delta": 0.14236002974055495
+            },
+            {
+              "token_id": 13962,
+              "ref_logprob": -12.15384732768132,
+              "our_logprob": -12.693201,
+              "abs_delta": 0.5393536723186809
+            },
+            {
+              "token_id": 1206,
+              "ref_logprob": -12.384518256636397,
+              "our_logprob": -11.726604,
+              "abs_delta": 0.6579142566363974
+            }
+          ],
+          "mean_common_logprob_delta": 0.3844062116809887,
+          "max_common_logprob_delta": 0.7567531886761021
+        },
+        "divergence_pos": null,
+        "divergence_info": null,
+        "token_table": [
+          {
+            "pos": 0,
+            "ref_token": 8160,
+            "our_token": 8160,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -0.00017987773014738195,
+            "our_logprob": -0.000137
+          }
+        ],
+        "ref_text": "Here",
+        "our_text": "Here"
+      },
+      "prefill_metrics": {
+        "prefill_available": true,
+        "prefill_argmax_match": 1,
+        "prefill_top10_hits": 1,
+        "prefill_total": 1,
+        "prefill_argmax_rate": 1.0,
+        "prefill_containment": 1.0
+      },
+      "timing": {
+        "prefill_ms": 1130.8,
+        "decode_ms": 0.2,
+        "total_ms": 1272.9,
+        "prompt_tokens": 20
+      }
+    }
+  ]
+}

@@ -1,0 +1,683 @@
+===== START qcn_bf16_bf16kv tests/qcn-stats-bf16-bf16kv-ppl.conf 2026-07-15T02:40:03+01:00 =====
+[0;36m[1m=>[0m Killing all krasis processes and freeing GPU memory...
+[0;32m[1mOK[0m All GPUs clear.
+Server PID 1484516, log benchmarks/20260715_qcn_bf16_bf16kv_quality_server.log
+Server ready for qcn_bf16_bf16kv
+Krasis Rust Prefill Perplexity
+==================================================
+Config:      tests/qcn-stats-bf16-bf16kv-ppl.conf
+Model:       /home/main/.krasis/models/Qwen3-Coder-Next
+Dataset:     wikitext-2
+Port:        18191
+Attention:   bf16
+KV dtype:    bf16
+Window:      2048, stride=1024
+Max tokens:  20000
+
+  Loading dataset...
+  Tokenizing...
+  Tokens: 20,000
+  [  5.0%] Window 1/20 | scored 2047 this, 2047/20000 total | PPL=4.5904 | 342 tok/s
+  [ 10.0%] Window 2/20 | scored 1024 this, 3071/20000 total | PPL=4.3369 | 255 tok/s
+  [ 15.0%] Window 3/20 | scored 1024 this, 4095/20000 total | PPL=4.3047 | 227 tok/s
+  [ 20.0%] Window 4/20 | scored 1024 this, 5119/20000 total | PPL=4.4138 | 213 tok/s
+  [ 25.0%] Window 5/20 | scored 1024 this, 6143/20000 total | PPL=4.5823 | 204 tok/s
+  [ 30.0%] Window 6/20 | scored 1024 this, 7167/20000 total | PPL=5.1182 | 198 tok/s
+  [ 35.0%] Window 7/20 | scored 1024 this, 8191/20000 total | PPL=5.4060 | 194 tok/s
+  [ 40.0%] Window 8/20 | scored 1024 this, 9215/20000 total | PPL=5.3742 | 191 tok/s
+  [ 45.0%] Window 9/20 | scored 1024 this, 10239/20000 total | PPL=5.5375 | 189 tok/s
+  [ 50.0%] Window 10/20 | scored 1024 this, 11263/20000 total | PPL=5.5336 | 187 tok/s
+  [ 55.0%] Window 11/20 | scored 1024 this, 12287/20000 total | PPL=5.2373 | 185 tok/s
+  [ 60.0%] Window 12/20 | scored 1024 this, 13311/20000 total | PPL=5.0621 | 184 tok/s
+  [ 65.0%] Window 13/20 | scored 1024 this, 14335/20000 total | PPL=4.8743 | 183 tok/s
+  [ 70.0%] Window 14/20 | scored 1024 this, 15359/20000 total | PPL=4.9038 | 182 tok/s
+  [ 75.0%] Window 15/20 | scored 1024 this, 16383/20000 total | PPL=4.9537 | 181 tok/s
+  [ 80.0%] Window 16/20 | scored 1024 this, 17407/20000 total | PPL=4.9809 | 180 tok/s
+  [ 85.0%] Window 17/20 | scored 1024 this, 18431/20000 total | PPL=5.1397 | 180 tok/s
+  [ 90.0%] Window 18/20 | scored 1024 this, 19455/20000 total | PPL=5.2929 | 179 tok/s
+  [ 95.0%] Window 19/20 | scored 544 this, 19999/20000 total | PPL=5.3307 | 176 tok/s
+  [100.0%] Window 20/20 | scored 0 this, 19999/20000 total | PPL=5.3307 | 173 tok/s
+
+========================================================
+  RUST PREFILL PPL COMPLETE - wikitext-2
+========================================================
+  Perplexity:    5.3307
+  BPC:           2.4143
+  Tokens scored: 19,999
+  Elapsed:       115.8s (173 tok/s)
+  Log:           perplexity/results/Qwen3-Coder-Next_wikitext-2_bf16_bf16_rust_prefill_20260715_024423.log
+========================================================
+	Command being timed: "env PYTHONUNBUFFERED=1 ./dev quality-ppl tests/qcn-stats-bf16-bf16kv-ppl.conf --max-tokens 20000"
+	User time (seconds): 10.97
+	System time (seconds): 0.84
+	Percent of CPU this job got: 9%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:59.83
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 857884
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 198477
+	Voluntary context switches: 245
+	Involuntary context switches: 192
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 392
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+===== END qcn_bf16_bf16kv status=OK 2026-07-15T02:44:23+01:00 =====
+[0;36m[1m=>[0m Killing all krasis processes and freeing GPU memory...
+[1;33m[1m!![0m   Killing PID 1484516: /home/main/miniconda3/envs/ktransformers/bin/python -m krasis.server --config tests/qcn-stats-bf16-bf16kv-ppl.conf --test-endpoints
+[1;33m[1m!![0m Found zombie processes — killing their parents:
+[1;33m[1m!![0m   Zombie PID 1484516, killing parent PID 1484420
+[1;33m[1m!![0m   Zombie PID 1485059, killing parent PID 1484516
+===== RESUME remaining PPL 2026-07-15T02:46:06+01:00 =====
+===== START qcn_hqq4_k4v4 tests/qcn-stats-hqq4-k4v4.conf 2026-07-15T02:46:06+01:00 =====
+[0;36m[1m=>[0m Killing all krasis processes and freeing GPU memory...
+[0;32m[1mOK[0m All GPUs clear.
+Server PID 1487668, log benchmarks/20260715_qcn_hqq4_k4v4_quality_server.log
+Server ready for qcn_hqq4_k4v4
+Krasis Rust Prefill Perplexity
+==================================================
+Config:      tests/qcn-stats-hqq4-k4v4.conf
+Model:       /home/main/.krasis/models/Qwen3-Coder-Next
+Dataset:     wikitext-2
+Port:        18151
+Attention:   hqq4
+KV dtype:    k4v4
+Window:      2048, stride=1024
+Max tokens:  20000
+
+  Loading dataset...
+  Tokenizing...
+  Tokens: 20,000
+  [  5.0%] Window 1/20 | scored 2047 this, 2047/20000 total | PPL=4.7315 | 323 tok/s
+  [ 10.0%] Window 2/20 | scored 1024 this, 3071/20000 total | PPL=4.5497 | 244 tok/s
+  [ 15.0%] Window 3/20 | scored 1024 this, 4095/20000 total | PPL=4.5901 | 217 tok/s
+  [ 20.0%] Window 4/20 | scored 1024 this, 5119/20000 total | PPL=4.7490 | 204 tok/s
+  [ 25.0%] Window 5/20 | scored 1024 this, 6143/20000 total | PPL=4.9404 | 195 tok/s
+  [ 30.0%] Window 6/20 | scored 1024 this, 7167/20000 total | PPL=5.4747 | 188 tok/s
+  [ 35.0%] Window 7/20 | scored 1024 this, 8191/20000 total | PPL=5.7532 | 182 tok/s
+  [ 40.0%] Window 8/20 | scored 1024 this, 9215/20000 total | PPL=5.6823 | 177 tok/s
+  [ 45.0%] Window 9/20 | scored 1024 this, 10239/20000 total | PPL=5.8714 | 173 tok/s
+  [ 50.0%] Window 10/20 | scored 1024 this, 11263/20000 total | PPL=5.8580 | 172 tok/s
+  [ 55.0%] Window 11/20 | scored 1024 this, 12287/20000 total | PPL=5.5308 | 171 tok/s
+  [ 60.0%] Window 12/20 | scored 1024 this, 13311/20000 total | PPL=5.3319 | 170 tok/s
+  [ 65.0%] Window 13/20 | scored 1024 this, 14335/20000 total | PPL=5.1282 | 170 tok/s
+  [ 70.0%] Window 14/20 | scored 1024 this, 15359/20000 total | PPL=5.1580 | 169 tok/s
+  [ 75.0%] Window 15/20 | scored 1024 this, 16383/20000 total | PPL=5.2090 | 169 tok/s
+  [ 80.0%] Window 16/20 | scored 1024 this, 17407/20000 total | PPL=5.2417 | 168 tok/s
+  [ 85.0%] Window 17/20 | scored 1024 this, 18431/20000 total | PPL=5.4045 | 168 tok/s
+  [ 90.0%] Window 18/20 | scored 1024 this, 19455/20000 total | PPL=5.5735 | 168 tok/s
+  [ 95.0%] Window 19/20 | scored 544 this, 19999/20000 total | PPL=5.6149 | 165 tok/s
+  [100.0%] Window 20/20 | scored 0 this, 19999/20000 total | PPL=5.6149 | 162 tok/s
+
+========================================================
+  RUST PREFILL PPL COMPLETE - wikitext-2
+========================================================
+  Perplexity:    5.6149
+  BPC:           2.4893
+  Tokens scored: 19,999
+  Elapsed:       123.5s (162 tok/s)
+  Log:           perplexity/results/Qwen3-Coder-Next_wikitext-2_hqq4_k4v4_rust_prefill_20260715_024933.log
+========================================================
+	Command being timed: "env PYTHONUNBUFFERED=1 ./dev quality-ppl tests/qcn-stats-hqq4-k4v4.conf --max-tokens 20000"
+	User time (seconds): 10.92
+	System time (seconds): 0.90
+	Percent of CPU this job got: 9%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 2:07.55
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 858972
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 198447
+	Voluntary context switches: 245
+	Involuntary context switches: 220
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 392
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+===== END qcn_hqq4_k4v4 status=OK 2026-07-15T02:49:34+01:00 =====
+[0;36m[1m=>[0m Killing all krasis processes and freeing GPU memory...
+[0;32m[1mOK[0m All GPUs clear.
+===== START qcn_hqq6_k6v6 tests/qcn-stats-hqq6-k6v6.conf 2026-07-15T02:49:43+01:00 =====
+[0;36m[1m=>[0m Killing all krasis processes and freeing GPU memory...
+[0;32m[1mOK[0m All GPUs clear.
+Server PID 1489823, log benchmarks/20260715_qcn_hqq6_k6v6_quality_server.log
+Server ready for qcn_hqq6_k6v6
+Krasis Rust Prefill Perplexity
+==================================================
+Config:      tests/qcn-stats-hqq6-k6v6.conf
+Model:       /home/main/.krasis/models/Qwen3-Coder-Next
+Dataset:     wikitext-2
+Port:        18154
+Attention:   hqq6
+KV dtype:    k6v6
+Window:      2048, stride=1024
+Max tokens:  20000
+
+  Loading dataset...
+  Tokenizing...
+  Tokens: 20,000
+  [  5.0%] Window 1/20 | scored 2047 this, 2047/20000 total | PPL=4.5900 | 310 tok/s
+  [ 10.0%] Window 2/20 | scored 1024 this, 3071/20000 total | PPL=4.3435 | 234 tok/s
+  [ 15.0%] Window 3/20 | scored 1024 this, 4095/20000 total | PPL=4.3172 | 208 tok/s
+  [ 20.0%] Window 4/20 | scored 1024 this, 5119/20000 total | PPL=4.4147 | 195 tok/s
+  [ 25.0%] Window 5/20 | scored 1024 this, 6143/20000 total | PPL=4.5763 | 188 tok/s
+  [ 30.0%] Window 6/20 | scored 1024 this, 7167/20000 total | PPL=5.1137 | 183 tok/s
+  [ 35.0%] Window 7/20 | scored 1024 this, 8191/20000 total | PPL=5.4078 | 178 tok/s
+  [ 40.0%] Window 8/20 | scored 1024 this, 9215/20000 total | PPL=5.3719 | 174 tok/s
+  [ 45.0%] Window 9/20 | scored 1024 this, 10239/20000 total | PPL=5.5393 | 170 tok/s
+  [ 50.0%] Window 10/20 | scored 1024 this, 11263/20000 total | PPL=5.5318 | 167 tok/s
+  [ 55.0%] Window 11/20 | scored 1024 this, 12287/20000 total | PPL=5.2342 | 166 tok/s
+  [ 60.0%] Window 12/20 | scored 1024 this, 13311/20000 total | PPL=5.0548 | 165 tok/s
+  [ 65.0%] Window 13/20 | scored 1024 this, 14335/20000 total | PPL=4.8672 | 164 tok/s
+  [ 70.0%] Window 14/20 | scored 1024 this, 15359/20000 total | PPL=4.8973 | 164 tok/s
+  [ 75.0%] Window 15/20 | scored 1024 this, 16383/20000 total | PPL=4.9501 | 163 tok/s
+  [ 80.0%] Window 16/20 | scored 1024 this, 17407/20000 total | PPL=4.9781 | 163 tok/s
+  [ 85.0%] Window 17/20 | scored 1024 this, 18431/20000 total | PPL=5.1391 | 163 tok/s
+  [ 90.0%] Window 18/20 | scored 1024 this, 19455/20000 total | PPL=5.2930 | 162 tok/s
+  [ 95.0%] Window 19/20 | scored 544 this, 19999/20000 total | PPL=5.3326 | 160 tok/s
+  [100.0%] Window 20/20 | scored 0 this, 19999/20000 total | PPL=5.3326 | 156 tok/s
+
+========================================================
+  RUST PREFILL PPL COMPLETE - wikitext-2
+========================================================
+  Perplexity:    5.3326
+  BPC:           2.4148
+  Tokens scored: 19,999
+  Elapsed:       127.9s (156 tok/s)
+  Log:           perplexity/results/Qwen3-Coder-Next_wikitext-2_hqq6_k6v6_rust_prefill_20260715_025315.log
+========================================================
+	Command being timed: "env PYTHONUNBUFFERED=1 ./dev quality-ppl tests/qcn-stats-hqq6-k6v6.conf --max-tokens 20000"
+	User time (seconds): 10.97
+	System time (seconds): 0.86
+	Percent of CPU this job got: 8%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 2:11.97
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 857788
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 198339
+	Voluntary context switches: 260
+	Involuntary context switches: 197
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 392
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+===== END qcn_hqq6_k6v6 status=OK 2026-07-15T02:53:16+01:00 =====
+[0;36m[1m=>[0m Killing all krasis processes and freeing GPU memory...
+[0;32m[1mOK[0m All GPUs clear.
+===== START q35b_bf16_bf16kv tests/q35b-stats-bf16-bf16kv-ppl.conf 2026-07-15T02:53:25+01:00 =====
+[0;36m[1m=>[0m Killing all krasis processes and freeing GPU memory...
+[0;32m[1mOK[0m All GPUs clear.
+Server PID 1491966, log benchmarks/20260715_q35b_bf16_bf16kv_quality_server.log
+Server ready for q35b_bf16_bf16kv
+Krasis Rust Prefill Perplexity
+==================================================
+Config:      tests/q35b-stats-bf16-bf16kv-ppl.conf
+Model:       /home/main/.krasis/models/Qwen3.5-35B-A3B
+Dataset:     wikitext-2
+Port:        18192
+Attention:   bf16
+KV dtype:    bf16
+Window:      2048, stride=1024
+Max tokens:  20000
+
+  Loading dataset...
+  Tokenizing...
+  Tokens: 20,000
+  [  5.0%] Window 1/20 | scored 2047 this, 2047/20000 total | PPL=4.8734 | 246 tok/s
+  [ 10.0%] Window 2/20 | scored 1024 this, 3071/20000 total | PPL=5.6641 | 185 tok/s
+  [ 15.0%] Window 3/20 | scored 1024 this, 4095/20000 total | PPL=6.1333 | 164 tok/s
+  [ 20.0%] Window 4/20 | scored 1024 this, 5119/20000 total | PPL=6.7867 | 154 tok/s
+  [ 25.0%] Window 5/20 | scored 1024 this, 6143/20000 total | PPL=6.9347 | 148 tok/s
+  [ 30.0%] Window 6/20 | scored 1024 this, 7167/20000 total | PPL=7.1508 | 144 tok/s
+  [ 35.0%] Window 7/20 | scored 1024 this, 8191/20000 total | PPL=7.3012 | 141 tok/s
+  [ 40.0%] Window 8/20 | scored 1024 this, 9215/20000 total | PPL=6.9384 | 139 tok/s
+  [ 45.0%] Window 9/20 | scored 1024 this, 10239/20000 total | PPL=6.9389 | 138 tok/s
+  [ 50.0%] Window 10/20 | scored 1024 this, 11263/20000 total | PPL=6.7093 | 136 tok/s
+  [ 55.0%] Window 11/20 | scored 1024 this, 12287/20000 total | PPL=6.2470 | 135 tok/s
+  [ 60.0%] Window 12/20 | scored 1024 this, 13311/20000 total | PPL=5.8703 | 134 tok/s
+  [ 65.0%] Window 13/20 | scored 1024 this, 14335/20000 total | PPL=5.5807 | 133 tok/s
+  [ 70.0%] Window 14/20 | scored 1024 this, 15359/20000 total | PPL=5.5396 | 132 tok/s
+  [ 75.0%] Window 15/20 | scored 1024 this, 16383/20000 total | PPL=5.5325 | 132 tok/s
+  [ 80.0%] Window 16/20 | scored 1024 this, 17407/20000 total | PPL=5.5725 | 131 tok/s
+  [ 85.0%] Window 17/20 | scored 1024 this, 18431/20000 total | PPL=5.7304 | 131 tok/s
+  [ 90.0%] Window 18/20 | scored 1024 this, 19455/20000 total | PPL=5.7962 | 130 tok/s
+  [ 95.0%] Window 19/20 | scored 544 this, 19999/20000 total | PPL=5.8038 | 129 tok/s
+  [100.0%] Window 20/20 | scored 0 this, 19999/20000 total | PPL=5.8038 | 127 tok/s
+
+========================================================
+  RUST PREFILL PPL COMPLETE - wikitext-2
+========================================================
+  Perplexity:    5.8038
+  BPC:           2.5370
+  Tokens scored: 19,999
+  Elapsed:       157.8s (127 tok/s)
+  Log:           perplexity/results/Qwen3.5-35B-A3B_wikitext-2_bf16_bf16_rust_prefill_20260715_025742.log
+========================================================
+	Command being timed: "env PYTHONUNBUFFERED=1 ./dev quality-ppl tests/q35b-stats-bf16-bf16kv-ppl.conf --max-tokens 20000"
+	User time (seconds): 11.14
+	System time (seconds): 0.83
+	Percent of CPU this job got: 7%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 2:41.99
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 870420
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 195528
+	Voluntary context switches: 242
+	Involuntary context switches: 201
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 496
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+===== END q35b_bf16_bf16kv status=OK 2026-07-15T02:57:43+01:00 =====
+[0;36m[1m=>[0m Killing all krasis processes and freeing GPU memory...
+[0;32m[1mOK[0m All GPUs clear.
+===== START q35b_hqq4_k4v4 tests/q35b-stats-hqq4-k4v4.conf 2026-07-15T02:57:48+01:00 =====
+[0;36m[1m=>[0m Killing all krasis processes and freeing GPU memory...
+[0;32m[1mOK[0m All GPUs clear.
+Server PID 1494441, log benchmarks/20260715_q35b_hqq4_k4v4_quality_server.log
+Server ready for q35b_hqq4_k4v4
+Krasis Rust Prefill Perplexity
+==================================================
+Config:      tests/q35b-stats-hqq4-k4v4.conf
+Model:       /home/main/.krasis/models/Qwen3.5-35B-A3B
+Dataset:     wikitext-2
+Port:        18155
+Attention:   hqq4
+KV dtype:    k4v4
+Window:      2048, stride=1024
+Max tokens:  20000
+
+  Loading dataset...
+  Tokenizing...
+  Tokens: 20,000
+  [  5.0%] Window 1/20 | scored 2047 this, 2047/20000 total | PPL=5.1169 | 238 tok/s
+  [ 10.0%] Window 2/20 | scored 1024 this, 3071/20000 total | PPL=5.9665 | 179 tok/s
+  [ 15.0%] Window 3/20 | scored 1024 this, 4095/20000 total | PPL=6.4637 | 159 tok/s
+  [ 20.0%] Window 4/20 | scored 1024 this, 5119/20000 total | PPL=7.2040 | 148 tok/s
+  [ 25.0%] Window 5/20 | scored 1024 this, 6143/20000 total | PPL=7.3562 | 142 tok/s
+  [ 30.0%] Window 6/20 | scored 1024 this, 7167/20000 total | PPL=7.5887 | 137 tok/s
+  [ 35.0%] Window 7/20 | scored 1024 this, 8191/20000 total | PPL=7.7305 | 134 tok/s
+  [ 40.0%] Window 8/20 | scored 1024 this, 9215/20000 total | PPL=7.3391 | 132 tok/s
+  [ 45.0%] Window 9/20 | scored 1024 this, 10239/20000 total | PPL=7.3148 | 130 tok/s
+  [ 50.0%] Window 10/20 | scored 1024 this, 11263/20000 total | PPL=7.0632 | 128 tok/s
+  [ 55.0%] Window 11/20 | scored 1024 this, 12287/20000 total | PPL=6.5859 | 127 tok/s
+  [ 60.0%] Window 12/20 | scored 1024 this, 13311/20000 total | PPL=6.1745 | 126 tok/s
+  [ 65.0%] Window 13/20 | scored 1024 this, 14335/20000 total | PPL=5.8630 | 125 tok/s
+  [ 70.0%] Window 14/20 | scored 1024 this, 15359/20000 total | PPL=5.8140 | 125 tok/s
+  [ 75.0%] Window 15/20 | scored 1024 this, 16383/20000 total | PPL=5.8091 | 125 tok/s
+  [ 80.0%] Window 16/20 | scored 1024 this, 17407/20000 total | PPL=5.8503 | 124 tok/s
+  [ 85.0%] Window 17/20 | scored 1024 this, 18431/20000 total | PPL=6.0156 | 124 tok/s
+  [ 90.0%] Window 18/20 | scored 1024 this, 19455/20000 total | PPL=6.0776 | 124 tok/s
+  [ 95.0%] Window 19/20 | scored 544 this, 19999/20000 total | PPL=6.0853 | 122 tok/s
+  [100.0%] Window 20/20 | scored 0 this, 19999/20000 total | PPL=6.0853 | 120 tok/s
+
+========================================================
+  RUST PREFILL PPL COMPLETE - wikitext-2
+========================================================
+  Perplexity:    6.0853
+  BPC:           2.6053
+  Tokens scored: 19,999
+  Elapsed:       166.2s (120 tok/s)
+  Log:           perplexity/results/Qwen3.5-35B-A3B_wikitext-2_hqq4_k4v4_rust_prefill_20260715_030133.log
+========================================================
+	Command being timed: "env PYTHONUNBUFFERED=1 ./dev quality-ppl tests/q35b-stats-hqq4-k4v4.conf --max-tokens 20000"
+	User time (seconds): 11.14
+	System time (seconds): 0.83
+	Percent of CPU this job got: 7%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 2:50.42
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 870340
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 195595
+	Voluntary context switches: 289
+	Involuntary context switches: 215
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 408
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+===== END q35b_hqq4_k4v4 status=OK 2026-07-15T03:01:33+01:00 =====
+[0;36m[1m=>[0m Killing all krasis processes and freeing GPU memory...
+[0;32m[1mOK[0m All GPUs clear.
+===== START q35b_hqq6_k6v6 tests/q35b-stats-hqq6-k6v6.conf 2026-07-15T03:01:38+01:00 =====
+[0;36m[1m=>[0m Killing all krasis processes and freeing GPU memory...
+[0;32m[1mOK[0m All GPUs clear.
+Server PID 1497486, log benchmarks/20260715_q35b_hqq6_k6v6_quality_server.log
+Server ready for q35b_hqq6_k6v6
+Krasis Rust Prefill Perplexity
+==================================================
+Config:      tests/q35b-stats-hqq6-k6v6.conf
+Model:       /home/main/.krasis/models/Qwen3.5-35B-A3B
+Dataset:     wikitext-2
+Port:        18158
+Attention:   hqq6
+KV dtype:    k6v6
+Window:      2048, stride=1024
+Max tokens:  20000
+
+  Loading dataset...
+  Tokenizing...
+  Tokens: 20,000
+  [  5.0%] Window 1/20 | scored 2047 this, 2047/20000 total | PPL=4.8802 | 238 tok/s
+  [ 10.0%] Window 2/20 | scored 1024 this, 3071/20000 total | PPL=5.6899 | 179 tok/s
+  [ 15.0%] Window 3/20 | scored 1024 this, 4095/20000 total | PPL=6.1825 | 159 tok/s
+  [ 20.0%] Window 4/20 | scored 1024 this, 5119/20000 total | PPL=6.8488 | 149 tok/s
+  [ 25.0%] Window 5/20 | scored 1024 this, 6143/20000 total | PPL=6.9850 | 143 tok/s
+  [ 30.0%] Window 6/20 | scored 1024 this, 7167/20000 total | PPL=7.2239 | 139 tok/s
+  [ 35.0%] Window 7/20 | scored 1024 this, 8191/20000 total | PPL=7.3686 | 136 tok/s
+  [ 40.0%] Window 8/20 | scored 1024 this, 9215/20000 total | PPL=7.0066 | 134 tok/s
+  [ 45.0%] Window 9/20 | scored 1024 this, 10239/20000 total | PPL=7.0058 | 132 tok/s
+  [ 50.0%] Window 10/20 | scored 1024 this, 11263/20000 total | PPL=6.7655 | 131 tok/s
+  [ 55.0%] Window 11/20 | scored 1024 this, 12287/20000 total | PPL=6.3054 | 130 tok/s
+  [ 60.0%] Window 12/20 | scored 1024 this, 13311/20000 total | PPL=5.9256 | 129 tok/s
+  [ 65.0%] Window 13/20 | scored 1024 this, 14335/20000 total | PPL=5.6314 | 128 tok/s
+  [ 70.0%] Window 14/20 | scored 1024 this, 15359/20000 total | PPL=5.5933 | 128 tok/s
+  [ 75.0%] Window 15/20 | scored 1024 this, 16383/20000 total | PPL=5.5805 | 127 tok/s
+  [ 80.0%] Window 16/20 | scored 1024 this, 17407/20000 total | PPL=5.6231 | 127 tok/s
+  [ 85.0%] Window 17/20 | scored 1024 this, 18431/20000 total | PPL=5.7797 | 126 tok/s
+  [ 90.0%] Window 18/20 | scored 1024 this, 19455/20000 total | PPL=5.8459 | 126 tok/s
+  [ 95.0%] Window 19/20 | scored 544 this, 19999/20000 total | PPL=5.8505 | 124 tok/s
+  [100.0%] Window 20/20 | scored 0 this, 19999/20000 total | PPL=5.8505 | 122 tok/s
+
+========================================================
+  RUST PREFILL PPL COMPLETE - wikitext-2
+========================================================
+  Perplexity:    5.8505
+  BPC:           2.5486
+  Tokens scored: 19,999
+  Elapsed:       163.9s (122 tok/s)
+  Log:           perplexity/results/Qwen3.5-35B-A3B_wikitext-2_hqq6_k6v6_rust_prefill_20260715_030521.log
+========================================================
+	Command being timed: "env PYTHONUNBUFFERED=1 ./dev quality-ppl tests/q35b-stats-hqq6-k6v6.conf --max-tokens 20000"
+	User time (seconds): 11.15
+	System time (seconds): 0.84
+	Percent of CPU this job got: 7%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 2:48.11
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 871508
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 195380
+	Voluntary context switches: 243
+	Involuntary context switches: 238
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 560
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+===== END q35b_hqq6_k6v6 status=OK 2026-07-15T03:05:22+01:00 =====
+[0;36m[1m=>[0m Killing all krasis processes and freeing GPU memory...
+[0;32m[1mOK[0m All GPUs clear.
+===== START q122b_bf16_bf16kv tests/q122b-stats-bf16-bf16kv-ppl.conf 2026-07-15T03:05:26+01:00 =====
+[0;36m[1m=>[0m Killing all krasis processes and freeing GPU memory...
+[0;32m[1mOK[0m All GPUs clear.
+Server PID 1499823, log benchmarks/20260715_q122b_bf16_bf16kv_quality_server.log
+Server ready for q122b_bf16_bf16kv
+Krasis Rust Prefill Perplexity
+==================================================
+Config:      tests/q122b-stats-bf16-bf16kv-ppl.conf
+Model:       /home/main/.krasis/models/Qwen3.5-122B-A10B
+Dataset:     wikitext-2
+Port:        18193
+Attention:   bf16
+KV dtype:    bf16
+Window:      2048, stride=1024
+Max tokens:  20000
+
+  Loading dataset...
+  Tokenizing...
+  Tokens: 20,000
+  [  5.0%] Window 1/20 | scored 2047 this, 2047/20000 total | PPL=3.5223 | 185 tok/s
+  [ 10.0%] Window 2/20 | scored 1024 this, 3071/20000 total | PPL=3.7451 | 138 tok/s
+  [ 15.0%] Window 3/20 | scored 1024 this, 4095/20000 total | PPL=3.8524 | 122 tok/s
+  [ 20.0%] Window 4/20 | scored 1024 this, 5119/20000 total | PPL=4.1267 | 115 tok/s
+  [ 25.0%] Window 5/20 | scored 1024 this, 6143/20000 total | PPL=4.0952 | 110 tok/s
+  [ 30.0%] Window 6/20 | scored 1024 this, 7167/20000 total | PPL=4.4145 | 107 tok/s
+  [ 35.0%] Window 7/20 | scored 1024 this, 8191/20000 total | PPL=4.6175 | 105 tok/s
+  [ 40.0%] Window 8/20 | scored 1024 this, 9215/20000 total | PPL=4.5870 | 104 tok/s
+  [ 45.0%] Window 9/20 | scored 1024 this, 10239/20000 total | PPL=4.6932 | 103 tok/s
+  [ 50.0%] Window 10/20 | scored 1024 this, 11263/20000 total | PPL=4.6677 | 102 tok/s
+  [ 55.0%] Window 11/20 | scored 1024 this, 12287/20000 total | PPL=4.4263 | 101 tok/s
+  [ 60.0%] Window 12/20 | scored 1024 this, 13311/20000 total | PPL=4.2343 | 100 tok/s
+  [ 65.0%] Window 13/20 | scored 1024 this, 14335/20000 total | PPL=4.0506 | 99 tok/s
+  [ 70.0%] Window 14/20 | scored 1024 this, 15359/20000 total | PPL=4.0843 | 99 tok/s
+  [ 75.0%] Window 15/20 | scored 1024 this, 16383/20000 total | PPL=4.1096 | 98 tok/s
+  [ 80.0%] Window 16/20 | scored 1024 this, 17407/20000 total | PPL=4.1593 | 98 tok/s
+  [ 85.0%] Window 17/20 | scored 1024 this, 18431/20000 total | PPL=4.3143 | 98 tok/s
+  [ 90.0%] Window 18/20 | scored 1024 this, 19455/20000 total | PPL=4.4025 | 97 tok/s
+  [ 95.0%] Window 19/20 | scored 544 this, 19999/20000 total | PPL=4.4362 | 96 tok/s
+  [100.0%] Window 20/20 | scored 0 this, 19999/20000 total | PPL=4.4362 | 94 tok/s
+
+========================================================
+  RUST PREFILL PPL COMPLETE - wikitext-2
+========================================================
+  Perplexity:    4.4362
+  BPC:           2.1493
+  Tokens scored: 19,999
+  Elapsed:       213.3s (94 tok/s)
+  Log:           perplexity/results/Qwen3.5-122B-A10B_wikitext-2_bf16_bf16_rust_prefill_20260715_031309.log
+========================================================
+	Command being timed: "env PYTHONUNBUFFERED=1 ./dev quality-ppl tests/q122b-stats-bf16-bf16kv-ppl.conf --max-tokens 20000"
+	User time (seconds): 11.27
+	System time (seconds): 0.88
+	Percent of CPU this job got: 5%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 3:37.61
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 870556
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 214320
+	Voluntary context switches: 285
+	Involuntary context switches: 229
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 544
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+===== END q122b_bf16_bf16kv status=OK 2026-07-15T03:13:10+01:00 =====
+[0;36m[1m=>[0m Killing all krasis processes and freeing GPU memory...
+[0;32m[1mOK[0m All GPUs clear.
+===== START q122b_hqq4_k4v4 tests/q122b-stats-hqq4-k4v4.conf 2026-07-15T03:13:24+01:00 =====
+[0;36m[1m=>[0m Killing all krasis processes and freeing GPU memory...
+[0;32m[1mOK[0m All GPUs clear.
+Server PID 1504447, log benchmarks/20260715_q122b_hqq4_k4v4_quality_server.log
+Server ready for q122b_hqq4_k4v4
+Krasis Rust Prefill Perplexity
+==================================================
+Config:      tests/q122b-stats-hqq4-k4v4.conf
+Model:       /home/main/.krasis/models/Qwen3.5-122B-A10B
+Dataset:     wikitext-2
+Port:        18159
+Attention:   hqq4
+KV dtype:    k4v4
+Window:      2048, stride=1024
+Max tokens:  20000
+
+  Loading dataset...
+  Tokenizing...
+  Tokens: 20,000
+  [  5.0%] Window 1/20 | scored 2047 this, 2047/20000 total | PPL=3.6550 | 175 tok/s
+  [ 10.0%] Window 2/20 | scored 1024 this, 3071/20000 total | PPL=3.9555 | 130 tok/s
+  [ 15.0%] Window 3/20 | scored 1024 this, 4095/20000 total | PPL=4.1277 | 115 tok/s
+  [ 20.0%] Window 4/20 | scored 1024 this, 5119/20000 total | PPL=4.4069 | 106 tok/s
+  [ 25.0%] Window 5/20 | scored 1024 this, 6143/20000 total | PPL=4.3831 | 100 tok/s
+  [ 30.0%] Window 6/20 | scored 1024 this, 7167/20000 total | PPL=4.6936 | 96 tok/s
+  [ 35.0%] Window 7/20 | scored 1024 this, 8191/20000 total | PPL=4.8831 | 93 tok/s
+  [ 40.0%] Window 8/20 | scored 1024 this, 9215/20000 total | PPL=4.8112 | 91 tok/s
+  [ 45.0%] Window 9/20 | scored 1024 this, 10239/20000 total | PPL=4.9211 | 89 tok/s
+  [ 50.0%] Window 10/20 | scored 1024 this, 11263/20000 total | PPL=4.8773 | 88 tok/s
+  [ 55.0%] Window 11/20 | scored 1024 this, 12287/20000 total | PPL=4.6144 | 87 tok/s
+  [ 60.0%] Window 12/20 | scored 1024 this, 13311/20000 total | PPL=4.3994 | 86 tok/s
+  [ 65.0%] Window 13/20 | scored 1024 this, 14335/20000 total | PPL=4.2064 | 85 tok/s
+  [ 70.0%] Window 14/20 | scored 1024 this, 15359/20000 total | PPL=4.2335 | 85 tok/s
+  [ 75.0%] Window 15/20 | scored 1024 this, 16383/20000 total | PPL=4.2537 | 84 tok/s
+  [ 80.0%] Window 16/20 | scored 1024 this, 17407/20000 total | PPL=4.2997 | 84 tok/s
+  [ 85.0%] Window 17/20 | scored 1024 this, 18431/20000 total | PPL=4.4588 | 84 tok/s
+  [ 90.0%] Window 18/20 | scored 1024 this, 19455/20000 total | PPL=4.5482 | 84 tok/s
+  [ 95.0%] Window 19/20 | scored 544 this, 19999/20000 total | PPL=4.5805 | 82 tok/s
+  [100.0%] Window 20/20 | scored 0 this, 19999/20000 total | PPL=4.5805 | 80 tok/s
+
+========================================================
+  RUST PREFILL PPL COMPLETE - wikitext-2
+========================================================
+  Perplexity:    4.5805
+  BPC:           2.1955
+  Tokens scored: 19,999
+  Elapsed:       249.8s (80 tok/s)
+  Log:           perplexity/results/Qwen3.5-122B-A10B_wikitext-2_hqq4_k4v4_rust_prefill_20260715_031943.log
+========================================================
+	Command being timed: "env PYTHONUNBUFFERED=1 ./dev quality-ppl tests/q122b-stats-hqq4-k4v4.conf --max-tokens 20000"
+	User time (seconds): 11.28
+	System time (seconds): 0.87
+	Percent of CPU this job got: 4%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 4:14.16
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 869552
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 212220
+	Voluntary context switches: 244
+	Involuntary context switches: 191
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 512
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+===== END q122b_hqq4_k4v4 status=OK 2026-07-15T03:19:44+01:00 =====
+[0;36m[1m=>[0m Killing all krasis processes and freeing GPU memory...
+[0;32m[1mOK[0m All GPUs clear.
+===== START q122b_hqq6_k6v6 tests/q122b-stats-hqq6-k6v6.conf 2026-07-15T03:19:58+01:00 =====
+[0;36m[1m=>[0m Killing all krasis processes and freeing GPU memory...
+[0;32m[1mOK[0m All GPUs clear.
+Server PID 1507936, log benchmarks/20260715_q122b_hqq6_k6v6_quality_server.log
+Server ready for q122b_hqq6_k6v6
+Krasis Rust Prefill Perplexity
+==================================================
+Config:      tests/q122b-stats-hqq6-k6v6.conf
+Model:       /home/main/.krasis/models/Qwen3.5-122B-A10B
+Dataset:     wikitext-2
+Port:        18162
+Attention:   hqq6
+KV dtype:    k6v6
+Window:      2048, stride=1024
+Max tokens:  20000
+
+  Loading dataset...
+  Tokenizing...
+  Tokens: 20,000
+  [  5.0%] Window 1/20 | scored 2047 this, 2047/20000 total | PPL=3.5205 | 159 tok/s
+  [ 10.0%] Window 2/20 | scored 1024 this, 3071/20000 total | PPL=3.7251 | 120 tok/s
+  [ 15.0%] Window 3/20 | scored 1024 this, 4095/20000 total | PPL=3.8478 | 109 tok/s
+  [ 20.0%] Window 4/20 | scored 1024 this, 5119/20000 total | PPL=4.1003 | 104 tok/s
+  [ 25.0%] Window 5/20 | scored 1024 this, 6143/20000 total | PPL=4.0745 | 100 tok/s
+  [ 30.0%] Window 6/20 | scored 1024 this, 7167/20000 total | PPL=4.3913 | 98 tok/s
+  [ 35.0%] Window 7/20 | scored 1024 this, 8191/20000 total | PPL=4.5765 | 95 tok/s
+  [ 40.0%] Window 8/20 | scored 1024 this, 9215/20000 total | PPL=4.5522 | 92 tok/s
+  [ 45.0%] Window 9/20 | scored 1024 this, 10239/20000 total | PPL=4.6643 | 89 tok/s
+  [ 50.0%] Window 10/20 | scored 1024 this, 11263/20000 total | PPL=4.6400 | 87 tok/s
+  [ 55.0%] Window 11/20 | scored 1024 this, 12287/20000 total | PPL=4.3956 | 86 tok/s
+  [ 60.0%] Window 12/20 | scored 1024 this, 13311/20000 total | PPL=4.2084 | 84 tok/s
+  [ 65.0%] Window 13/20 | scored 1024 this, 14335/20000 total | PPL=4.0250 | 84 tok/s
+  [ 70.0%] Window 14/20 | scored 1024 this, 15359/20000 total | PPL=4.0575 | 83 tok/s
+  [ 75.0%] Window 15/20 | scored 1024 this, 16383/20000 total | PPL=4.0802 | 83 tok/s
+  [ 80.0%] Window 16/20 | scored 1024 this, 17407/20000 total | PPL=4.1303 | 82 tok/s
+  [ 85.0%] Window 17/20 | scored 1024 this, 18431/20000 total | PPL=4.2813 | 81 tok/s
+  [ 90.0%] Window 18/20 | scored 1024 this, 19455/20000 total | PPL=4.3689 | 81 tok/s
+  [ 95.0%] Window 19/20 | scored 544 this, 19999/20000 total | PPL=4.4037 | 80 tok/s
+  [100.0%] Window 20/20 | scored 0 this, 19999/20000 total | PPL=4.4037 | 78 tok/s
+
+========================================================
+  RUST PREFILL PPL COMPLETE - wikitext-2
+========================================================
+  Perplexity:    4.4037
+  BPC:           2.1387
+  Tokens scored: 19,999
+  Elapsed:       258.0s (78 tok/s)
+  Log:           perplexity/results/Qwen3.5-122B-A10B_wikitext-2_hqq6_k6v6_rust_prefill_20260715_032636.log
+========================================================
+	Command being timed: "env PYTHONUNBUFFERED=1 ./dev quality-ppl tests/q122b-stats-hqq6-k6v6.conf --max-tokens 20000"
+	User time (seconds): 11.31
+	System time (seconds): 0.81
+	Percent of CPU this job got: 4%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 4:22.34
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 870388
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 215344
+	Voluntary context switches: 256
+	Involuntary context switches: 218
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 352
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+===== END q122b_hqq6_k6v6 status=OK 2026-07-15T03:26:36+01:00 =====
+[0;36m[1m=>[0m Killing all krasis processes and freeing GPU memory...
+[0;32m[1mOK[0m All GPUs clear.
+===== START q235_bf16_bf16kv tests/q235-stats-bf16-bf16kv-ppl.conf 2026-07-15T03:26:51+01:00 =====
+[0;36m[1m=>[0m Killing all krasis processes and freeing GPU memory...
+[0;32m[1mOK[0m All GPUs clear.
+Server PID 1511398, log benchmarks/20260715_q235_bf16_bf16kv_quality_server.log

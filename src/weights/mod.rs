@@ -23,6 +23,41 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
+fn advise_consumed_mmap_range_dontneed(mmap: &Mmap, start: usize, end: usize) {
+    if end <= start || start >= mmap.len() {
+        return;
+    }
+
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if page_size <= 0 {
+        return;
+    }
+    let page_size = page_size as usize;
+    let start = start.min(mmap.len());
+    let end = end.min(mmap.len());
+    let aligned_start = start - (start % page_size);
+    let rem = end % page_size;
+    let aligned_end = if rem == 0 {
+        end
+    } else {
+        end.saturating_add(page_size - rem)
+    }
+    .min(mmap.len());
+
+    if aligned_end <= aligned_start {
+        return;
+    }
+
+    unsafe {
+        let ptr = mmap.as_ptr().add(aligned_start) as *mut libc::c_void;
+        let _ = libc::madvise(ptr, aligned_end - aligned_start, libc::MADV_DONTNEED);
+    }
+}
+
+#[cfg(not(unix))]
+fn advise_consumed_mmap_range_dontneed(_mmap: &Mmap, _start: usize, _end: usize) {}
+
 /// Map GGUF quantization type to target CPU bit width for AVX2 transposed format.
 ///
 /// Returns (target_bits, is_exact) where is_exact indicates whether the conversion
@@ -4292,6 +4327,7 @@ impl WeightStore {
         let mut experts_gpu = Vec::with_capacity(num_layers_to_load);
         let mut layer_backings_gpu = Vec::with_capacity(num_layers_to_load);
         for layer_idx in 0..num_layers_to_load {
+            let layer_start = offset;
             let (backing, layer_experts) = read_marlin_layer(
                 &mmap,
                 &mut offset,
@@ -4302,6 +4338,7 @@ impl WeightStore {
                 config.n_routed_experts,
                 config.experts_gated,
             );
+            advise_consumed_mmap_range_dontneed(&mmap, layer_start, offset);
             layer_backings_gpu.push(backing);
             experts_gpu.push(layer_experts);
 
@@ -4339,6 +4376,7 @@ impl WeightStore {
                 + (start_moe_layer + num_layers_to_load) * per_shared;
 
             for _i in 0..num_layers_to_load {
+                let shared_start = offset;
                 shared_experts_gpu.push(read_marlin_expert_gated(
                     &mmap,
                     &mut offset,
@@ -4348,6 +4386,7 @@ impl WeightStore {
                     gpu_bits,
                     shared_gated,
                 ));
+                advise_consumed_mmap_range_dontneed(&mmap, shared_start, offset);
             }
             log::info!("  Loaded {} shared experts (Marlin)", num_layers_to_load);
         }
@@ -4944,6 +4983,7 @@ impl WeightStore {
         // Load routed experts
         let mut experts_cpu = Vec::with_capacity(num_layers_to_load);
         for layer_idx in 0..num_layers_to_load {
+            let layer_start = offset;
             let mut layer_experts = Vec::with_capacity(config.n_routed_experts);
             for _eidx in 0..config.n_routed_experts {
                 layer_experts.push(read_unified_expert_cpu_gated(
@@ -4956,6 +4996,7 @@ impl WeightStore {
                     config.experts_gated,
                 ));
             }
+            advise_consumed_mmap_range_dontneed(&mmap, layer_start, offset);
             experts_cpu.push(layer_experts);
 
             if (layer_idx + 1) % 10 == 0 || layer_idx + 1 == num_layers_to_load {
@@ -4998,6 +5039,7 @@ impl WeightStore {
             offset = shared_base;
 
             for _i in 0..num_layers_to_load {
+                let shared_start = offset;
                 shared_experts_cpu.push(read_unified_expert_cpu_gated(
                     &mmap,
                     &mut offset,
@@ -5007,6 +5049,7 @@ impl WeightStore {
                     expected_bits,
                     shared_gated,
                 ));
+                advise_consumed_mmap_range_dontneed(&mmap, shared_start, offset);
             }
             log::info!(
                 "  Loaded {} shared experts (CPU INT{})",
@@ -6316,6 +6359,7 @@ impl WeightStore {
         // Load routed experts
         let mut experts_cpu = Vec::with_capacity(num_layers_to_load);
         for layer_idx in 0..num_layers_to_load {
+            let layer_start = offset;
             let mut layer_experts = Vec::with_capacity(config.n_routed_experts);
             for _eidx in 0..config.n_routed_experts {
                 layer_experts.push(read_unified_expert_cpu_mixed_gated(
@@ -6329,6 +6373,7 @@ impl WeightStore {
                     config.experts_gated,
                 ));
             }
+            advise_consumed_mmap_range_dontneed(&mmap, layer_start, offset);
             experts_cpu.push(layer_experts);
 
             if (layer_idx + 1) % 10 == 0 || layer_idx + 1 == num_layers_to_load {
@@ -6360,6 +6405,7 @@ impl WeightStore {
             offset = shared_base;
 
             for _i in 0..num_layers_to_load {
+                let shared_start = offset;
                 shared_experts_cpu.push(read_unified_expert_cpu_mixed_gated(
                     &mmap,
                     &mut offset,
@@ -6370,6 +6416,7 @@ impl WeightStore {
                     h_w2_bits,
                     config.experts_gated,
                 ));
+                advise_consumed_mmap_range_dontneed(&mmap, shared_start, offset);
             }
             log::info!("  Loaded {} shared experts (GGUF→AVX2)", num_layers_to_load);
         }

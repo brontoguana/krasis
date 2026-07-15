@@ -37,11 +37,37 @@ _script_dir = Path(__file__).resolve().parent
 _krasis_root = _script_dir.parent
 sys.path.insert(0, str(_krasis_root / "python"))
 
-from krasis.config import QuantConfig
+from krasis.config import (
+    ATTENTION_QUANT_CHOICES,
+    DEPRECATED_KV_CACHE_FORMAT_CHOICES,
+    KV_CACHE_FORMAT_CHOICES,
+    QuantConfig,
+)
 from krasis.model import KrasisModel
 from krasis.kv_cache import SequenceKVState
 
 logger = logging.getLogger(__name__)
+
+
+def kv_torch_dtype_for_format(kv_format: str) -> torch.dtype:
+    """Return the backing torch dtype for a configured Krasis KV cache format."""
+    normalized = "bf16" if kv_format == "bfloat16" else kv_format
+    if normalized in DEPRECATED_KV_CACHE_FORMAT_CHOICES:
+        raise ValueError(
+            f"kv_dtype={kv_format!r} is deprecated and disabled. "
+            "Use 'k6v6', 'k4v4', or 'bf16'."
+        )
+    if normalized not in KV_CACHE_FORMAT_CHOICES:
+        raise ValueError(
+            f"Unsupported kv_dtype={kv_format!r}. "
+            f"Use one of: {', '.join(KV_CACHE_FORMAT_CHOICES)}."
+        )
+    if normalized == "bf16":
+        return torch.bfloat16
+    # Compact Krasis KV formats allocate their own packed tensors while using
+    # the FP8 backing dtype for shared cache sizing and setup.
+    return torch.float8_e4m3fn
+
 
 # ---------------------------------------------------------------------------
 # Dataset registry
@@ -440,7 +466,8 @@ def parse_args():
     # Quantization
     p.add_argument("--gpu-expert-bits", type=int, default=None, help="GPU Marlin expert bits (default: 4)")
     p.add_argument("--cpu-expert-bits", type=int, default=None, help="CPU expert bits (default: 4)")
-    p.add_argument("--attention-quant", default=None, choices=["bf16", "adaptive_fp8"], help="Attention quantization")
+    p.add_argument("--attention-quant", default=None, choices=list(ATTENTION_QUANT_CHOICES), help="Attention quantization")
+    p.add_argument("--kv-dtype", default=None, choices=list(KV_CACHE_FORMAT_CHOICES), help="KV cache format")
     p.add_argument("--lm-head-quant", default=None, choices=["bf16", "int8"], help="LM head quantization")
 
     # Paths
@@ -468,6 +495,8 @@ def parse_args():
             args.cpu_expert_bits = cfg.get("cpu_expert_bits", 4)
         if args.attention_quant is None:
             args.attention_quant = cfg.get("attention_quant", "bf16")
+        if args.kv_dtype is None:
+            args.kv_dtype = cfg.get("kv_dtype", "k6v6")
         if args.lm_head_quant is None:
             args.lm_head_quant = cfg.get("lm_head_quant", "int8")
         if args.layer_group_size is None:
@@ -487,6 +516,8 @@ def parse_args():
         args.cpu_expert_bits = 4
     if args.attention_quant is None:
         args.attention_quant = "bf16"
+    if args.kv_dtype is None:
+        args.kv_dtype = "k6v6"
     if args.lm_head_quant is None:
         args.lm_head_quant = "int8"
     if args.layer_group_size is None:
@@ -608,6 +639,8 @@ def main():
     print(f"Mode:        {'CPU-only' if args.cpu_only else 'GPU prefill (Marlin)'}")
     print(f"GPU bits:    {args.gpu_expert_bits}")
     print(f"CPU bits:    {args.cpu_expert_bits}")
+    print(f"Attention:   {args.attention_quant}")
+    print(f"KV dtype:    {args.kv_dtype}")
     print(f"Window:      {args.window_size}, stride={stride}")
     if args.max_tokens:
         print(f"Max tokens:  {args.max_tokens}")
@@ -616,6 +649,7 @@ def main():
     print("\nLoading model...")
     quant_cfg = QuantConfig(
         attention=args.attention_quant,
+        kv_cache_format=args.kv_dtype,
         shared_expert="int8",
         dense_mlp="int8",
         lm_head=args.lm_head_quant,
@@ -627,7 +661,7 @@ def main():
         model_path=args.model_path,
         num_gpus=args.num_gpus,
         layer_group_size=args.layer_group_size,
-        kv_dtype=torch.float8_e4m3fn,
+        kv_dtype=kv_torch_dtype_for_format(args.kv_dtype),
         quant_cfg=quant_cfg,
         krasis_threads=args.krasis_threads,
         gpu_prefill=not args.cpu_only,
@@ -642,6 +676,7 @@ def main():
         "gpu_expert_bits": args.gpu_expert_bits,
         "cpu_expert_bits": args.cpu_expert_bits,
         "attention_quant": args.attention_quant,
+        "kv_dtype": args.kv_dtype,
         "lm_head_quant": args.lm_head_quant,
         "layer_group_size": args.layer_group_size,
         "krasis_threads": args.krasis_threads,

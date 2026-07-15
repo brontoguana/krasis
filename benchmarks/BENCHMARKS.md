@@ -1,5 +1,442 @@
 # Krasis Benchmark Results
 
+## Remaining Supported Models RTX 5090 HQQ4/HQQ6 Stats Benchmark - 2026-07-15
+
+Purpose: public stats-table benchmark for Qwen3-Coder-Next, Qwen3.5-35B-A3B,
+Qwen3.5-122B-A10B, Qwen3-235B-A22B, and Gemma-4-26B-A4B-it after per-HQQ
+approved route heatmaps were built and uploaded. Runs used external
+`/usr/bin/time -v` for peak process RSS and required matched approved heatmaps.
+
+Configs:
+
+```text
+tests/qcn-stats-hqq4-k4v4.conf
+tests/qcn-stats-hqq6-k6v6.conf
+tests/q35b-stats-hqq4-k4v4.conf
+tests/q35b-stats-hqq6-k6v6.conf
+tests/q122b-stats-hqq4-k4v4.conf
+tests/q122b-stats-hqq6-k6v6.conf
+tests/q235-stats-hqq4-k4v4.conf
+tests/q235-stats-hqq6-k6v6.conf
+tests/gemma-4-4-hqq4-k4v4-a16.conf
+tests/gemma-4-4-hqq6-k6v6-a16.conf
+```
+
+Result:
+
+| Model | Quant | Prefill internal | Decode internal | Round trip network | HCS coverage | Min free VRAM | Peak system RAM | Logs |
+|-------|-------|-----------------:|----------------:|-------------------:|-------------:|--------------:|----------------:|------|
+| Qwen3-Coder-Next | INT4/HQQ4/k4v4 | 7,028.5 tok/s | 87.90 tok/s | 150.75 tok/s | 16362/24576 (66.6%) | 878 MB | 44.1 GB max RSS | [stdout](20260715_qcn_hqq4_k4v4_stats_benchmark_stdout.log), [report](20260715_qcn_hqq4_k4v4_stats_benchmark_report.log), [peak](20260715_remaining_stats_benchmark_hqq4_hqq6.log) |
+| Qwen3-Coder-Next | INT4/HQQ6/k6v6 | 6,628.4 tok/s | 88.22 tok/s | 201.94 tok/s | 16119/24576 (65.6%) | 856 MB | 45.8 GB max RSS | [stdout](20260715_qcn_hqq6_k6v6_stats_benchmark_stdout.log), [report](20260715_qcn_hqq6_k6v6_stats_benchmark_report.log), [peak](20260715_remaining_stats_benchmark_hqq4_hqq6.log) |
+| Qwen3.5-35B-A3B | INT4/HQQ4/k4v4 | 10,700.7 tok/s | 116.43 tok/s | 259.67 tok/s | 10240/10240 (100.0%) | 10,186 MB | 23.8 GB max RSS | [stdout](20260715_q35b_hqq4_k4v4_stats_benchmark_stdout.log), [report](20260715_q35b_hqq4_k4v4_stats_benchmark_report.log), [peak](20260715_remaining_stats_benchmark_hqq4_hqq6.log) |
+| Qwen3.5-35B-A3B | INT4/HQQ6/k6v6 | 9,314.5 tok/s | 113.61 tok/s | 225.17 tok/s | 10240/10240 (100.0%) | 9,882 MB | 23.9 GB max RSS | [stdout](20260715_q35b_hqq6_k6v6_stats_benchmark_stdout.log), [report](20260715_q35b_hqq6_k6v6_stats_benchmark_report.log), [peak](20260715_remaining_stats_benchmark_hqq4_hqq6.log) |
+| Qwen3.5-122B-A10B | INT4/HQQ4/k4v4 | 3,692.5 tok/s | 31.80 tok/s | 53.15 tok/s | 4428/12288 (36.0%) | 856 MB | 78.2 GB max RSS | [stdout](20260715_q122b_hqq4_k4v4_stats_benchmark_stdout.log), [report](20260715_q122b_hqq4_k4v4_stats_benchmark_report.log), [peak](20260715_remaining_stats_benchmark_hqq4_hqq6.log) |
+| Qwen3.5-122B-A10B | INT4/HQQ6/k6v6 | 3,389.2 tok/s | 28.83 tok/s | 53.45 tok/s | 4185/12288 (34.1%) | 862 MB | 82.9 GB max RSS | [stdout](20260715_q122b_hqq6_k6v6_stats_benchmark_stdout.log), [report](20260715_q122b_hqq6_k6v6_stats_benchmark_report.log), [peak](20260715_remaining_stats_benchmark_hqq4_hqq6.log) |
+| Qwen3-235B-A22B | INT4/HQQ4/k4v4 | 1,385.3 tok/s | 5.64 tok/s | 9.91 tok/s | 2080/12032 (17.3%) | 946 MB | 134.2 GB max RSS | [stdout](20260715_q235_hqq4_k4v4_stats_benchmark_stdout.log), [report](20260715_q235_hqq4_k4v4_stats_benchmark_report.log), [peak](20260715_remaining_stats_benchmark_hqq4_hqq6.log) |
+| Qwen3-235B-A22B | INT4/HQQ6/k6v6 | 768.8 tok/s | 5.16 tok/s | 9.38 tok/s | 1820/12032 (15.1%) | 936 MB | 144.3 GB max RSS | [stdout](20260715_q235_hqq6_k6v6_stats_benchmark_stdout.log), [report](20260715_q235_hqq6_k6v6_stats_benchmark_report.log), [peak](20260715_remaining_stats_benchmark_hqq4_hqq6.log) |
+| Gemma-4-26B-A4B-it | INT4/HQQ4/k4v4 | 5,598.9 tok/s | 63.57 tok/s | 119.90 tok/s | 3840/3840 (100.0%) | 12,084 MB | 21.3 GB max RSS | [stdout](20260715_gemma4_hqq4_k4v4_cached_stats_benchmark_stdout.log), [report](20260715_gemma4_hqq4_k4v4_cached_stats_benchmark_report.log), [peak](20260715_gemma4_cached_rerun_benchmark_hqq4_hqq6.log) |
+| Gemma-4-26B-A4B-it | INT4/HQQ6/k6v6 | 1,610.0 tok/s | 62.16 tok/s | 114.42 tok/s | 3840/3840 (100.0%) | 11,788 MB | 21.3 GB max RSS | [stdout](20260715_gemma4_hqq6_k6v6_cached_stats_benchmark_stdout.log), [report](20260715_gemma4_hqq6_k6v6_cached_stats_benchmark_report.log), [peak](20260715_gemma4_cached_rerun_benchmark_hqq4_hqq6.log) |
+
+Quality/PPL artifacts:
+- Combined PPL logs:
+  [QCN/Q35/Q122/Q235 start](20260715_remaining_quality_ppl_hqq4_hqq6.log),
+  [Q235/Gemma tail](20260715_remaining_quality_ppl_tail_hqq4_hqq6.log).
+- Combined witness log:
+  [QCN/Q35/Q122/Q235](20260715_remaining_witness_hqq4_hqq6.log).
+- QCN: BF16 [PPL](20260715_qcn_bf16_bf16kv_quality_rust_ppl.log),
+  HQQ4 [PPL](20260715_qcn_hqq4_k4v4_quality_rust_ppl.log) /
+  [witness](20260715_qcn_hqq4_k4v4_witness_compare.log) /
+  [summary](20260715_qcn_hqq4_k4v4_reference_test_summary.json),
+  HQQ6 [PPL](20260715_qcn_hqq6_k6v6_quality_rust_ppl.log) /
+  [witness](20260715_qcn_hqq6_k6v6_witness_compare.log) /
+  [summary](20260715_qcn_hqq6_k6v6_reference_test_summary.json).
+- Qwen3.5-35B: BF16 [PPL](20260715_q35b_bf16_bf16kv_quality_rust_ppl.log),
+  HQQ4 [PPL](20260715_q35b_hqq4_k4v4_quality_rust_ppl.log) /
+  [witness](20260715_q35b_hqq4_k4v4_witness_compare.log) /
+  [summary](20260715_q35b_hqq4_k4v4_reference_test_summary.json),
+  HQQ6 [PPL](20260715_q35b_hqq6_k6v6_quality_rust_ppl.log) /
+  [witness](20260715_q35b_hqq6_k6v6_witness_compare.log) /
+  [summary](20260715_q35b_hqq6_k6v6_reference_test_summary.json).
+- Qwen3.5-122B: BF16 [PPL](20260715_q122b_bf16_bf16kv_quality_rust_ppl.log),
+  HQQ4 [PPL](20260715_q122b_hqq4_k4v4_quality_rust_ppl.log) /
+  [witness](20260715_q122b_hqq4_k4v4_witness_compare.log) /
+  [summary](20260715_q122b_hqq4_k4v4_reference_test_summary.json),
+  HQQ6 [PPL](20260715_q122b_hqq6_k6v6_quality_rust_ppl.log) /
+  [witness](20260715_q122b_hqq6_k6v6_witness_compare.log) /
+  [summary](20260715_q122b_hqq6_k6v6_reference_test_summary.json).
+- Qwen3-235B: BF16
+  [PPL](20260715_q235_bf16_bf16kv_quality_rerun_ppl.log) /
+  [server](20260715_q235_bf16_bf16kv_quality_rerun_server.log),
+  HQQ4
+  [PPL](20260715_q235_hqq4_k4v4_quality_rust_ppl.log) /
+  [witness](20260715_q235_hqq4_k4v4_witness_compare.log) /
+  [summary](20260715_q235_hqq4_k4v4_reference_test_summary.json),
+  HQQ6 [PPL](20260715_q235_hqq6_k6v6_quality_rust_ppl.log) /
+  [witness](20260715_q235_hqq6_k6v6_witness_compare.log) /
+  [summary](20260715_q235_hqq6_k6v6_reference_test_summary.json).
+- Gemma4 quality is blocked/diagnostic-only: BF16 diagnostic
+  [PPL](20260715_gemma4_bf16_bf16kv_quality_rust_ppl.log), HQQ4
+  [PPL](20260715_gemma4_hqq4_k4v4_quality_rust_ppl.log), HQQ6
+  [PPL](20260715_gemma4_hqq6_k6v6_quality_rust_ppl.log).
+
+Startup/build notes:
+- Hardware: local Linux workstation, AMD EPYC 7742, 1x RTX 5090 selected for
+  the benchmark.
+- `KRASIS_APPROVED_HEATMAP_MODE=require` and a local manifest URL were used for
+  every row. Each row loaded the matched per-HQQ approved heatmap and skipped
+  quick startup heatmap collection.
+- QCN/Qwen3.5-35B/Gemma heatmaps were uploaded in commit `9dc6ae5`; Qwen3.5
+  122B and Qwen3 235B heatmaps were uploaded in commit `a5a7577`.
+- QCN, Qwen3.5-122B, and Qwen3-235B decode min free VRAM stayed close to the
+  default 600 MB safety margin after HCS pressure eviction, showing HCS budget
+  pressure is active. Qwen3.5-35B and Gemma4 fit all routed experts on the RTX
+  5090, so min free VRAM is much higher.
+- Gemma4 still logged `Building GPU INT4 Marlin expert cache (one-time)` on
+  repeated launches despite an existing cache file. The benchmark rows remain
+  valid, but Gemma4 cache reuse is a follow-up startup issue.
+
+## Qwen3.6-35B-A3B RTX 5090 HQQ4/HQQ6 Stats Benchmark - 2026-07-14
+
+Purpose: public stats-table benchmark for Qwen3.6-35B-A3B, using matched
+per-HQQ approved route heatmaps and recording external peak process RSS for
+`STATS-BENCHMARKS.md`. These rows were rerun after incremental mmap cache-page
+eviction landed to update peak RSS.
+
+Configs:
+
+```text
+tests/qwen36-35b-5090-hqq4-k4v4-benchmark.conf
+tests/qwen36-35b-5090-hqq6-k6v6-benchmark.conf
+```
+
+Result:
+
+| GPU | Quant | Prefill internal | Decode internal | Round trip network | HCS coverage | Min free VRAM | Peak system RAM | Logs |
+|-----|-------|-----------------:|----------------:|-------------------:|-------------:|--------------:|----------------:|------|
+| RTX 5090 32 GB | INT4/HQQ4/k4v4 | 10,670.1 tok/s | 117.20 tok/s | 241.78 tok/s | 10240/10240 (100.0%) | 10,186 MB | 23.5 GB max RSS | [stdout](20260714_qwen36_hqq4_k4v4_mmap_evict_benchmark_stdout.log), [report](20260714_qwen36_hqq4_k4v4_mmap_evict_benchmark_report.log), [peak](20260714_qwen36_step37_mmap_evict_rerun_peak_benchmark_hqq4_hqq6.log) |
+| RTX 5090 32 GB | INT4/HQQ6/k6v6 | 9,693.6 tok/s | 115.50 tok/s | 234.29 tok/s | 10240/10240 (100.0%) | 9,882 MB | 23.7 GB max RSS | [stdout](20260714_qwen36_hqq6_k6v6_mmap_evict_benchmark_stdout.log), [report](20260714_qwen36_hqq6_k6v6_mmap_evict_benchmark_report.log), [peak](20260714_qwen36_step37_mmap_evict_rerun_peak_benchmark_hqq4_hqq6.log) |
+
+Timed detail:
+
+| Quant | 1K prefill | 5K prefill | 10K prefill | 20K prefill | 35K prefill | 39,920 prefill | Best decode | Best HTTP |
+|-------|-----------:|------------:|-------------:|-------------:|-------------:|---------------:|------------:|----------:|
+| INT4/HQQ4/k4v4 | 2,545.2 tok/s | 7,415.5 tok/s | 9,503.5 tok/s | 10,670.1 tok/s | 10,660.5 tok/s | 10,233.3 tok/s | 117.20 tok/s | 241.78 tok/s |
+| INT4/HQQ6/k6v6 | 1,977.2 tok/s | 6,226.3 tok/s | 8,360.2 tok/s | 9,693.6 tok/s | 9,339.4 tok/s | 9,076.5 tok/s | 115.50 tok/s | 234.29 tok/s |
+
+Startup/build notes:
+- Hardware: local Linux workstation, AMD EPYC 7742, 1x RTX 5090 selected for the
+  benchmark.
+- Separate Qwen3.6 HQQ4/HQQ6/HQQ8 approved heatmaps exist. These benchmark
+  rows loaded matched approved heatmaps `qwen36_35b_hqq4_p00006` and
+  `qwen36_35b_hqq6_p00006`; quick startup heatmap collection was skipped.
+- `/usr/bin/time -v` peak RSS was `23,537,332 kB` for HQQ4 and
+  `23,680,280 kB` for HQQ6 after incremental mmap cache-page eviction. The
+  superseded pre-fix peak RSS values were `35,438,556 kB` and
+  `35,440,756 kB`.
+- Decode free VRAM remained far above the default 600 MiB safety margin because
+  this 5090 run fits all 10,240 routed experts in HCS.
+- A preliminary same-config run without external peak-RSS measurement is
+  retained as [combined log](20260713_qwen36_benchmark_hqq4_hqq6.log),
+  [HQQ4 stdout](20260713_qwen36_hqq4_k4v4_benchmark_stdout.log),
+  [HQQ4 report](20260713_qwen36_hqq4_k4v4_benchmark_report.log),
+  [HQQ6 stdout](20260713_qwen36_hqq6_k6v6_benchmark_stdout.log), and
+  [HQQ6 report](20260713_qwen36_hqq6_k6v6_benchmark_report.log). The root stats
+  table uses the latest peak-RSS rerun above.
+
+## Step-3.7-Flash RTX 5090 HQQ4/HQQ6 Stats Benchmark - 2026-07-14
+
+Purpose: public stats-table benchmark for Step-3.7-Flash, using matched
+per-HQQ approved route heatmaps and recording external peak process RSS for the
+root-level `STATS-BENCHMARKS.md` table.
+
+Configs:
+
+```text
+tests/step37-flash-4-4-hqq4-k4v4-a16.conf
+tests/step37-flash-4-4-hqq6-k6v6-a16.conf
+```
+
+Result:
+
+| GPU | Quant | Prefill internal | Decode internal | Round trip network | HCS coverage | Min free VRAM | Peak system RAM | Logs |
+|-----|-------|-----------------:|----------------:|-------------------:|-------------:|--------------:|----------------:|------|
+| RTX 5090 32 GB | INT4/HQQ4/k4v4 | 2,618.4 tok/s | 23.05 tok/s | 36.11 tok/s | 2784/12096 (23.0%) | 884 MB | 108.4 GB max RSS | [stdout](20260714_step37_hqq4_k4v4_mmap_evict_benchmark_stdout.log), [report](20260714_step37_hqq4_k4v4_mmap_evict_benchmark_report.log), [peak](20260714_qwen36_step37_mmap_evict_rerun_peak_benchmark_hqq4_hqq6.log) |
+| RTX 5090 32 GB | INT4/HQQ6/k6v6 | 1,874.5 tok/s | 20.93 tok/s | 32.82 tok/s | 2624/12096 (21.7%) | 956 MB | 112.8 GB max RSS | [stdout](20260714_step37_hqq6_k6v6_mmap_evict_benchmark_stdout.log), [report](20260714_step37_hqq6_k6v6_mmap_evict_benchmark_report.log), [peak](20260714_qwen36_step37_mmap_evict_rerun_peak_benchmark_hqq4_hqq6.log) |
+
+Timed detail:
+
+| Quant | 1K prefill | 5K prefill | 10K prefill | Long prefill | Best decode | Best HTTP |
+|-------|-----------:|------------:|-------------:|-------------:|------------:|----------:|
+| INT4/HQQ4/k4v4 | 260.5 tok/s | 1,163.6 tok/s | 2,040.4 tok/s | 2,618.4 tok/s at 14,473 tokens | 23.05 tok/s | 36.11 tok/s |
+| INT4/HQQ6/k6v6 | 234.5 tok/s | 1,057.1 tok/s | 1,852.2 tok/s | 1,874.5 tok/s at 10,313 tokens | 20.93 tok/s | 32.82 tok/s |
+
+Quality/PPL artifacts:
+- BF16 diagnostic PPL: [log](20260714_step37_quality_rust_ppl_bf16_bf16kv.log),
+  [server](20260714_step37_quality_rust_ppl_bf16_bf16kv_server.log).
+- HQQ4 PPL: [log](20260714_step37_quality_rust_ppl_hqq4_k4v4.log),
+  [server](20260714_step37_quality_rust_ppl_hqq4_k4v4_server.log).
+- HQQ6 PPL: [log](20260714_step37_quality_rust_ppl_hqq6_k6v6.log),
+  [server](20260714_step37_quality_rust_ppl_hqq6_k6v6_server.log).
+- Witness quality: [combined log](20260714_step37_quality_witness_hqq4_hqq6.log),
+  [HQQ4 summary](20260714_step37_hqq4_k4v4_reference_test_summary.json),
+  [HQQ6 summary](20260714_step37_hqq6_k6v6_reference_test_summary.json).
+
+Startup/build notes:
+- Hardware: local Linux workstation, AMD EPYC 7742, 1x RTX 5090 selected for the
+  benchmark.
+- Separate Step-3.7 HQQ4/HQQ6/HQQ8 approved heatmaps exist and were uploaded in
+  commit `61a175f`. These benchmark rows loaded matched approved heatmaps
+  `step37_flash_hqq4_p00006` and `step37_flash_hqq6_p00006`; quick startup
+  heatmap collection was skipped.
+- `/usr/bin/time -v` peak RSS was `108,432,732 kB` for HQQ4 and
+  `112,752,860 kB` for HQQ6 after incremental mmap cache-page eviction. The
+  superseded pre-fix peak RSS values were `195,347,768 kB` and
+  `195,352,908 kB`.
+- Decode min free VRAM remained above the default 600 MiB safety margin but
+  close enough to show HCS budget pressure is active: `884 MB` for HQQ4 and
+  `956 MB` for HQQ6.
+
+## Nemotron Super/Nano RTX 5090 HQQ4/HQQ6 Stats Benchmark - 2026-07-14
+
+Purpose: public stats-table benchmark for Nemotron-3-Super-120B-A12B and
+Nemotron-3-Nano-30B-A3B, using locally built per-HQQ route heatmaps and
+recording external peak process RSS for `STATS-BENCHMARKS.md`. The current
+table rows are the rerun after incremental mmap cache-page eviction in the
+Marlin/CPU/GGUF cache loaders.
+
+Configs:
+
+```text
+tests/nemotron-super-4-4-hqq4-k4v4-a16.conf
+tests/nemotron-super-4-4-hqq6-k6v6-a16.conf
+tests/nemotron-nano-4-4-hqq4-k4v4-a16.conf
+tests/nemotron-nano-4-4-hqq6-k6v6-a16.conf
+```
+
+Result:
+
+| Model | Quant | Prefill internal | Decode internal | Round trip network | HCS coverage | Min free VRAM | Peak system RAM | Logs |
+|-------|-------|-----------------:|----------------:|-------------------:|-------------:|--------------:|----------------:|------|
+| Nemotron-3-Super-120B-A12B | INT4/HQQ4/k4v4 | 1,852.2 tok/s | 41.87 tok/s | 50.76 tok/s | 7038/20480 (34.4%) | 906 MB | 65.7 GB max RSS | [stdout](20260714_nemotron_super_hqq4_k4v4_local_heatmap_mmap_evict_benchmark_stdout.log), [report](20260714_nemotron_super_hqq4_k4v4_local_heatmap_mmap_evict_benchmark_report.log), [peak](20260714_nemotron_super_nano_local_heatmap_mmap_evict_rerun_peak_benchmark_hqq4_hqq6.log) |
+| Nemotron-3-Super-120B-A12B | INT4/HQQ6/k6v6 | 1,899.8 tok/s | 30.47 tok/s | 50.96 tok/s | 4922/20480 (24.0%) | 894 MB | 63.1 GB max RSS | [stdout](20260714_nemotron_super_hqq6_k6v6_local_heatmap_mmap_evict_benchmark_stdout.log), [report](20260714_nemotron_super_hqq6_k6v6_local_heatmap_mmap_evict_benchmark_report.log), [peak](20260714_nemotron_super_nano_local_heatmap_mmap_evict_rerun_peak_benchmark_hqq4_hqq6.log) |
+| Nemotron-3-Nano-30B-A3B | INT4/HQQ4/k4v4 | 8,583.9 tok/s | 151.76 tok/s | 325.36 tok/s | 2944/2944 (100.0%) | 11,722 MB | 19.4 GB max RSS | [stdout](20260714_nemotron_nano_hqq4_k4v4_local_heatmap_mmap_evict_benchmark_stdout.log), [report](20260714_nemotron_nano_hqq4_k4v4_local_heatmap_mmap_evict_benchmark_report.log), [peak](20260714_nemotron_super_nano_local_heatmap_mmap_evict_rerun_peak_benchmark_hqq4_hqq6.log) |
+| Nemotron-3-Nano-30B-A3B | INT4/HQQ6/k6v6 | 8,748.2 tok/s | 127.75 tok/s | 274.83 tok/s | 2944/2944 (100.0%) | 10,454 MB | 19.4 GB max RSS | [stdout](20260714_nemotron_nano_hqq6_k6v6_local_heatmap_mmap_evict_benchmark_stdout.log), [report](20260714_nemotron_nano_hqq6_k6v6_local_heatmap_mmap_evict_benchmark_report.log), [peak](20260714_nemotron_super_nano_local_heatmap_mmap_evict_rerun_peak_benchmark_hqq4_hqq6.log) |
+
+Heatmap artifacts:
+- Super HQQ4/HQQ6/HQQ8:
+  [HQQ4](approved_heatmaps/20260714_nemotron_super_hqq4_k4v4_route_p8_d256.json),
+  [HQQ6](approved_heatmaps/20260714_nemotron_super_hqq6_k4v4_route_p8_d256.json),
+  [HQQ8](approved_heatmaps/20260714_nemotron_super_hqq8_k4v4_route_p8_d256.json).
+- Nano HQQ4/HQQ6/HQQ8:
+  [HQQ4](approved_heatmaps/20260714_nemotron_nano_hqq4_k4v4_route_p8_d256.json),
+  [HQQ6](approved_heatmaps/20260714_nemotron_nano_hqq6_k4v4_route_p8_d256.json),
+  [HQQ8](approved_heatmaps/20260714_nemotron_nano_hqq8_k4v4_route_p8_d256.json).
+- Build log: [combined heatmap log](20260714_nemotron_super_nano_hqq_heatmap_builds.log).
+- Local require-mode manifest used for benchmark/quality runs:
+  [manifest](approved_heatmaps/20260714_nemotron_local_manifest.json).
+
+Quality/PPL artifacts:
+- Super BF16 diagnostic PPL: [log](20260714_nemotron_super_quality_rust_ppl_bf16_bf16kv.log),
+  [stdout](20260714_nemotron_super_bf16_bf16kv_quality_rust_ppl_stdout.log),
+  [server](20260714_nemotron_super_bf16_bf16kv_quality_server.log).
+- Super HQQ4/HQQ6 PPL:
+  [HQQ4 log](20260714_nemotron_super_quality_rust_ppl_hqq4_k4v4.log),
+  [HQQ6 log](20260714_nemotron_super_quality_rust_ppl_hqq6_k6v6.log).
+- Nano BF16 diagnostic PPL: [log](20260714_nemotron_nano_quality_rust_ppl_bf16_bf16kv.log),
+  [stdout](20260714_nemotron_nano_bf16_bf16kv_quality_rust_ppl_stdout.log),
+  [server](20260714_nemotron_nano_bf16_bf16kv_quality_server.log).
+- Nano HQQ4/HQQ6 PPL:
+  [HQQ4 log](20260714_nemotron_nano_quality_rust_ppl_hqq4_k4v4.log),
+  [HQQ6 log](20260714_nemotron_nano_quality_rust_ppl_hqq6_k6v6.log).
+
+Startup/build notes:
+- Hardware: local Linux workstation, AMD EPYC 7742, 1x RTX 5090 selected for
+  the benchmark.
+- HQQ4/HQQ6/HQQ8 route heatmaps were built for both Super and Nano on the
+  default heatmap prompt corpus and uploaded in commit `9a7b8a2`.
+- HQQ4/HQQ6 benchmark and quality runs loaded matched local approved heatmaps
+  (`nemotron_super_hqq4_p00006_local`, `nemotron_super_hqq6_p00006_local`,
+  `nemotron_nano_hqq4_p00006_local`, `nemotron_nano_hqq6_p00006_local`) and
+  skipped quick startup heatmap collection.
+- Rerun environment for the current result table:
+  `KRASIS_APPROVED_HEATMAP_MODE=require` with local manifest
+  `approved_heatmaps/20260714_nemotron_local_manifest.json`.
+- `/usr/bin/time -v` peak RSS after incremental mmap-range eviction was
+  `65,719,444 kB` for Super HQQ4, `63,148,984 kB` for Super HQQ6,
+  `19,418,760 kB` for Nano HQQ4, and `19,426,108 kB` for Nano HQQ6.
+  The superseded pre-fix stats run was `116,112,588 kB`,
+  `116,118,808 kB`, `31,784,972 kB`, and `31,784,620 kB` respectively.
+- Preliminary single-profile loader validation after incremental mmap-range
+  eviction also reran Nano HQQ4/k4v4 with `KRASIS_RAM_LEDGER=1` and
+  `/usr/bin/time -v`. Peak RSS dropped from `31,784,972 kB` to
+  `19,435,264 kB` while steady process RAM remained `17.9 GB`;
+  prefill/decode/HTTP were `8,544.5`, `148.45`, and `312.84` tok/s. Logs:
+  [combined + peak](20260714_nemotron_nano_hqq4_k4v4_mmap_evict_peak_benchmark.log),
+  [stdout](20260714_nemotron_nano_hqq4_k4v4_mmap_evict_peak_benchmark_stdout.log),
+  [report](20260714_nemotron_nano_hqq4_k4v4_mmap_evict_peak_benchmark_report.log).
+- Super decode min free VRAM was close to the default safety margin (`906 MB`
+  HQQ4, `894 MB` HQQ6), showing HCS pressure is active. Nano fits all experts
+  in HCS and therefore has much higher min free VRAM.
+- Nemotron quality rows in `STATS-QUALITY.md` are blocked/diagnostic only:
+  there is no BF16 llama-witness reference yet, and the Krasis BF16 diagnostic
+  PPL endpoint produced pathological absolute PPL values for both models.
+
+## Qwen3.5-35B-A3B Typhon Windows RTX 5080 Native Sidecar Benchmark - 2026-07-11
+
+Purpose: first benchmark of the current Krasis-native sidecar path on Typhon
+native Windows, replacing the old SGLang-dependent Windows checkout path. This
+uses Qwen35 INT4 routed experts, HQQ6 attention, k6v6 KV, one RTX 5080, and
+the default 600 MiB VRAM safety margin.
+
+Config:
+
+```text
+tests/q35b-typhon-windows-hqq6-k6v6.conf
+```
+
+Result:
+
+| GPU | Prefill internal | Decode internal | Round trip network | HCS coverage | Min free VRAM | Logs |
+|-----|-----------------:|----------------:|-------------------:|-------------:|--------------:|------|
+| RTX 5080 16 GB, Windows 11 | 4,815.2 tok/s | 70.00 tok/s | skipped | 5002/10240 (48.8%) | 753 MB | [stdout](20260711_typhon_windows_q35_hqq6_k6v6_benchmark_stdout.log), [report](20260711_typhon_windows_q35_hqq6_k6v6_benchmark_report.log), [witness](20260711_typhon_windows_q35_hqq6_k6v6_witness.log) |
+
+Timed detail:
+
+| Phase | 50/1K | 100/5K | 250/10K | 14,707 |
+|-------|------:|-------:|--------:|-------:|
+| Prefill internal | 918.0 tok/s at 1,000 tokens | 3,232.3 tok/s at 5,000 tokens | 3,913.2 tok/s at 10,000 tokens | 4,815.2 tok/s |
+| Decode internal | 61.87 tok/s | 66.84 tok/s | 70.00 tok/s | - |
+| HTTP round trip | skipped | skipped | skipped | - |
+
+Correctness:
+
+```text
+dev.ps1 witness-compare tests\q35b-typhon-windows-hqq6-k6v6.conf --profile llama_witness_qwen35_expanded_thinking_off --startup-timeout 1200
+REFERENCE TEST: PASS
+Prefill argmax match: 10/10
+Prefill top-10 containment: 10/10
+First-token match: 10/10
+```
+
+Startup/build notes:
+- Hardware: Typhon, Windows 11, 1x RTX 5080, CUDA Toolkit 13.3.
+- Built the Windows wheel and sidecars through `dev.ps1 build`; runtime loaded
+  `krasis.cp313-win_amd64.pyd`, `krasis_marlin.dll`,
+  `krasis_flash_attn.dll`, and `krasis_fla_sm120.dll`.
+- FLA kernels were generated on Linux with `./dev build-fla-windows-source
+  --arch 120` and linked on Windows through `dev.ps1 build-fla`, because the
+  native Windows path should not depend on Triton/SGLang runtime imports.
+- The benchmark skipped HTTP round trip rows because the benchmark-only run
+  reported the server not ready for the network phase. Internal prefill/decode
+  and witness correctness completed successfully.
+- Decode min free VRAM was 753 MB, close to but above the 600 MiB safety
+  margin; the HCS budget is being used effectively on the 16 GB card.
+
+## Qwen3.5-397B-A17B Vast RTX PRO 6000 Max-Q 96GB Benchmark - 2026-07-09
+
+Purpose: first Q397 standard benchmark on rented RTX PRO 6000 Blackwell Max-Q
+96GB hardware, using the committed production-style INT4 routed expert path,
+HQQ6 attention, k4v4 KV, approved Q397 route heatmap, and the default 600 MiB
+VRAM safety margin.
+
+Config:
+
+```text
+tests/q397-k4v4-hqq6-int4-benchmark.conf
+```
+
+Result:
+
+| GPU | Prefill internal | Decode internal | Round trip network | HCS coverage | Min free VRAM | Logs |
+|-----|-----------------:|----------------:|-------------------:|-------------:|--------------:|------|
+| RTX PRO 6000 Blackwell Max-Q 96GB | 1,927.9 tok/s | 23.14 tok/s | 42.42 tok/s | 12792/30720 (41.6%) | 1108 MB | [stdout](20260709_vast_rtxpro6000maxq_q397_hqq6_k4v4_benchmark_stdout.log), [report](20260709_vast_rtxpro6000maxq_q397_hqq6_k4v4_benchmark_report.log) |
+
+Timed detail:
+
+| Phase | 50/1K | 100/5K | 250/10K | 20K | 35K | 39,920 |
+|-------|------:|-------:|--------:|----:|----:|-------:|
+| Prefill internal | 182.9 tok/s at 1,000 tokens | 656.3 tok/s at 5,000 tokens | 1,210.6 tok/s at 10,000 tokens | 1,644.0 tok/s | 1,927.9 tok/s | 1,805.1 tok/s |
+| Decode internal | 23.14 tok/s | 22.40 tok/s | 21.45 tok/s | - | - | - |
+| HTTP round trip | 42.42 tok/s | 29.25 tok/s | 23.17 tok/s | - | - | - |
+
+VRAM cap comparison:
+
+These runs used the same physical GPU0 but held a separate CUDA allocation before
+launch so Krasis calibrated against reduced real free VRAM. The cap runs used
+`--force-load` only to acknowledge the intentional external VRAM reservation;
+runtime VRAM calibration, HCS budgets, and the 600 MiB safety margin remained
+active.
+
+| Effective cap | Free before load | Calibrated prefill cap | Prefill internal | Decode internal | Round trip network | HCS coverage | Min free VRAM | Logs |
+|---------------|-----------------:|-----------------------:|-----------------:|----------------:|-------------------:|-------------:|--------------:|------|
+| Native 96GB | 96690 MB | 39920 tokens | 1,927.9 tok/s | 23.14 tok/s | 42.42 tok/s | 12792/30720 (41.6%) | 1108 MB | [stdout](20260709_vast_rtxpro6000maxq_q397_hqq6_k4v4_benchmark_stdout.log), [report](20260709_vast_rtxpro6000maxq_q397_hqq6_k4v4_benchmark_report.log) |
+| 48GB cap | 48036 MB | 28680 tokens | 1,824.9 tok/s | 15.34 tok/s | 25.91 tok/s | 4961/30720 (16.1%) | 1220 MB | [stdout](20260709_vast_rtxpro6000maxq_q397_hqq6_k4v4_48gbcap_benchmark_stdout.log), [report](20260709_vast_rtxpro6000maxq_q397_hqq6_k4v4_48gbcap_benchmark_report.log) |
+| 32GB cap | 31652 MB | 9357 tokens | 996.5 tok/s | 12.28 tok/s | 19.92 tok/s | 2296/30720 (7.5%) | 1346 MB | [stdout](20260709_vast_rtxpro6000maxq_q397_hqq6_k4v4_32gbcap_benchmark_stdout.log), [report](20260709_vast_rtxpro6000maxq_q397_hqq6_k4v4_32gbcap_benchmark_report.log) |
+
+Cap-run decode detail:
+
+| Effective cap | 50-token decode | 100-token decode | 250-token decode | Final HCS hit |
+|---------------|----------------:|-----------------:|-----------------:|--------------:|
+| 48GB cap | 15.34 tok/s | 14.11 tok/s | 13.53 tok/s | 66.39% |
+| 32GB cap | 12.28 tok/s | 12.01 tok/s | 11.66 tok/s | 52.67% |
+
+Startup/build notes:
+- Hardware: 1x RTX PRO 6000 Blackwell Max-Q Workstation Edition selected from a
+  2-GPU Vast instance, 96GB VRAM, 300W limit, driver 595.58.03.
+- Q397 source checkpoint was downloaded directly on the Vast box to
+  `/root/.krasis/models/Qwen3.5-397B-A17B`; final model-dir size was
+  `933,302,352,499` bytes with `94/94` safetensor shards.
+- The first benchmark built the `199.7 GB` Marlin INT4 expert cache in `134s`
+  and loaded it in `104s`.
+- Runtime calibration selected a `39,920` token long-prefill cap; long
+  calibration low-water was `40,532 MB`, and decode low-water was `1,108 MB`,
+  above the 600 MiB safety margin.
+- Approved heatmap `qwen35_397b_hqq6_k4v4_p00080` was used. Final Dynamic HCS
+  summary: hit `89.14%`, request promotions `16231/149400`, budget skips `0`,
+  no-slot `0`, copy failures `0`.
+
+## Qwen3-235B-A22B Vast RTX PRO 6000 Max-Q 96GB Benchmark - 2026-07-09
+
+Purpose: first Q235 standard benchmark on the same rented RTX PRO 6000
+Blackwell Max-Q 96GB hardware, using the committed INT4 routed expert path,
+HQQ6 attention, k4v4 KV, approved Q235 route heatmap, and the default 600 MiB
+VRAM safety margin.
+
+Config:
+
+```text
+tests/q235-k4v4-hqq6-int4-benchmark.conf
+```
+
+Result:
+
+| GPU | Prefill internal | Decode internal | Round trip network | HCS coverage | Min free VRAM | Logs |
+|-----|-----------------:|----------------:|-------------------:|-------------:|--------------:|------|
+| RTX PRO 6000 Blackwell Max-Q 96GB | 1,366.2 tok/s | 25.11 tok/s | 45.41 tok/s | 8750/12032 (72.7%) | 1202 MB | [stdout](20260709_vast_rtxpro6000maxq_q235_hqq6_k4v4_benchmark_stdout.log), [report](20260709_vast_rtxpro6000maxq_q235_hqq6_k4v4_benchmark_report.log) |
+
+Timed detail:
+
+| Phase | 50/1K | 100/5K | 250/10K | 13,859 |
+|-------|------:|-------:|--------:|-------:|
+| Prefill internal | 131.7 tok/s at 1,000 tokens | 1,031.0 tok/s at 5,000 tokens | 1,332.5 tok/s at 10,000 tokens | 1,366.2 tok/s |
+| Decode internal | 25.11 tok/s | 24.08 tok/s | 23.72 tok/s | - |
+| HTTP round trip | 45.41 tok/s | 31.14 tok/s | 26.11 tok/s | - |
+
+Startup/build notes:
+- Hardware: 1x RTX PRO 6000 Blackwell Max-Q Workstation Edition selected from a
+  2-GPU Vast instance, 96GB VRAM, 300W limit, driver 595.58.03.
+- Q235 source checkpoint was downloaded directly on the Vast box to
+  `/root/.krasis/models/Qwen3-235B-A22B`. The broad HF download stuck at
+  `113/118` shards with no incomplete files; a targeted five-shard `hf download`
+  completed the model directory with `118/118` shards and no incomplete files.
+- The first benchmark built the `117.1 GB` Marlin INT4 expert cache in `82s`
+  and loaded it in `63s`.
+- Runtime calibration selected a `13,859` token long-prefill cap and computed
+  decode HCS budget `82,242 MB`.
+- Approved heatmap `qwen3_235b_hqq6_k4v4_p00016` was used. Final Dynamic HCS
+  summary: hit `98.93%`, request promotions `2005/187248`, budget skips `0`,
+  no-slot `0`, copy failures `0`.
+
 ## Qwen3.5-397B-A17B First 5090 Benchmark - 2026-07-09
 
 Purpose: first standard benchmark of Qwen3.5-397B-A17B on a single local RTX

@@ -1,0 +1,67 @@
+Krasis Rust Prefill Perplexity
+==================================================
+Config:      tests/qcn-stats-hqq6-k6v6.conf
+Model:       /home/main/.krasis/models/Qwen3-Coder-Next
+Dataset:     wikitext-2
+Port:        18154
+Attention:   hqq6
+KV dtype:    k6v6
+Window:      2048, stride=1024
+Max tokens:  20000
+
+  Loading dataset...
+  Tokenizing...
+  Tokens: 20,000
+  [  5.0%] Window 1/20 | scored 2047 this, 2047/20000 total | PPL=4.5900 | 310 tok/s
+  [ 10.0%] Window 2/20 | scored 1024 this, 3071/20000 total | PPL=4.3435 | 234 tok/s
+  [ 15.0%] Window 3/20 | scored 1024 this, 4095/20000 total | PPL=4.3172 | 208 tok/s
+  [ 20.0%] Window 4/20 | scored 1024 this, 5119/20000 total | PPL=4.4147 | 195 tok/s
+  [ 25.0%] Window 5/20 | scored 1024 this, 6143/20000 total | PPL=4.5763 | 188 tok/s
+  [ 30.0%] Window 6/20 | scored 1024 this, 7167/20000 total | PPL=5.1137 | 183 tok/s
+  [ 35.0%] Window 7/20 | scored 1024 this, 8191/20000 total | PPL=5.4078 | 178 tok/s
+  [ 40.0%] Window 8/20 | scored 1024 this, 9215/20000 total | PPL=5.3719 | 174 tok/s
+  [ 45.0%] Window 9/20 | scored 1024 this, 10239/20000 total | PPL=5.5393 | 170 tok/s
+  [ 50.0%] Window 10/20 | scored 1024 this, 11263/20000 total | PPL=5.5318 | 167 tok/s
+  [ 55.0%] Window 11/20 | scored 1024 this, 12287/20000 total | PPL=5.2342 | 166 tok/s
+  [ 60.0%] Window 12/20 | scored 1024 this, 13311/20000 total | PPL=5.0548 | 165 tok/s
+  [ 65.0%] Window 13/20 | scored 1024 this, 14335/20000 total | PPL=4.8672 | 164 tok/s
+  [ 70.0%] Window 14/20 | scored 1024 this, 15359/20000 total | PPL=4.8973 | 164 tok/s
+  [ 75.0%] Window 15/20 | scored 1024 this, 16383/20000 total | PPL=4.9501 | 163 tok/s
+  [ 80.0%] Window 16/20 | scored 1024 this, 17407/20000 total | PPL=4.9781 | 163 tok/s
+  [ 85.0%] Window 17/20 | scored 1024 this, 18431/20000 total | PPL=5.1391 | 163 tok/s
+  [ 90.0%] Window 18/20 | scored 1024 this, 19455/20000 total | PPL=5.2930 | 162 tok/s
+  [ 95.0%] Window 19/20 | scored 544 this, 19999/20000 total | PPL=5.3326 | 160 tok/s
+  [100.0%] Window 20/20 | scored 0 this, 19999/20000 total | PPL=5.3326 | 156 tok/s
+
+========================================================
+  RUST PREFILL PPL COMPLETE - wikitext-2
+========================================================
+  Perplexity:    5.3326
+  BPC:           2.4148
+  Tokens scored: 19,999
+  Elapsed:       127.9s (156 tok/s)
+  Log:           perplexity/results/Qwen3-Coder-Next_wikitext-2_hqq6_k6v6_rust_prefill_20260715_025315.log
+========================================================
+	Command being timed: "env PYTHONUNBUFFERED=1 ./dev quality-ppl tests/qcn-stats-hqq6-k6v6.conf --max-tokens 20000"
+	User time (seconds): 10.97
+	System time (seconds): 0.86
+	Percent of CPU this job got: 8%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 2:11.97
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 857788
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 198339
+	Voluntary context switches: 260
+	Involuntary context switches: 197
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 392
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

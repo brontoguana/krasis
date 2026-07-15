@@ -1,0 +1,44 @@
+Krasis Rust Prefill Perplexity
+==================================================
+Config:      tests/step37-flash-4-4-bf16attn-bf16kv-a16.conf
+Model:       /home/main/.krasis/models/Step-3.7-Flash
+Dataset:     wikitext-2
+Port:        18019
+Attention:   bf16
+KV dtype:    bf16
+Window:      2048, stride=1024
+Max tokens:  20000
+
+  Loading dataset...
+  Tokenizing...
+  Tokens: 20,000
+  [  5.0%] Window 1/20 | scored 2047 this, 2047/20000 total | PPL=1.3619 | 237 tok/s
+  [ 10.0%] Window 2/20 | scored 1024 this, 3071/20000 total | PPL=1.2861 | 177 tok/s
+  [ 15.0%] Window 3/20 | scored 1024 this, 4095/20000 total | PPL=1.2499 | 157 tok/s
+  [ 20.0%] Window 4/20 | scored 1024 this, 5119/20000 total | PPL=1.2326 | 147 tok/s
+  [ 25.0%] Window 5/20 | scored 1024 this, 6143/20000 total | PPL=1.2331 | 141 tok/s
+  [ 30.0%] Window 6/20 | scored 1024 this, 7167/20000 total | PPL=1.2713 | 137 tok/s
+  [ 35.0%] Window 7/20 | scored 1024 this, 8191/20000 total | PPL=1.3679 | 135 tok/s
+  [ 40.0%] Window 8/20 | scored 1024 this, 9215/20000 total | PPL=1.4951 | 132 tok/s
+  [ 45.0%] Window 9/20 | scored 1024 this, 10239/20000 total | PPL=1.5089 | 131 tok/s
+  [ 50.0%] Window 10/20 | scored 1024 this, 11263/20000 total | PPL=1.5432 | 129 tok/s
+  [ 55.0%] Window 11/20 | scored 1024 this, 12287/20000 total | PPL=1.5270 | 128 tok/s
+  [ 60.0%] Window 12/20 | scored 1024 this, 13311/20000 total | PPL=1.5110 | 128 tok/s
+  [ 65.0%] Window 13/20 | scored 1024 this, 14335/20000 total | PPL=1.5215 | 127 tok/s
+  [ 70.0%] Window 14/20 | scored 1024 this, 15359/20000 total | PPL=1.5403 | 126 tok/s
+  [ 75.0%] Window 15/20 | scored 1024 this, 16383/20000 total | PPL=1.5521 | 126 tok/s
+  [ 80.0%] Window 16/20 | scored 1024 this, 17407/20000 total | PPL=1.5813 | 125 tok/s
+  [ 85.0%] Window 17/20 | scored 1024 this, 18431/20000 total | PPL=1.6123 | 125 tok/s
+  [ 90.0%] Window 18/20 | scored 1024 this, 19455/20000 total | PPL=1.6671 | 124 tok/s
+  [ 95.0%] Window 19/20 | scored 544 this, 19999/20000 total | PPL=1.7023 | 122 tok/s
+  [100.0%] Window 20/20 | scored 0 this, 19999/20000 total | PPL=1.7023 | 118 tok/s
+
+========================================================
+  RUST PREFILL PPL COMPLETE - wikitext-2
+========================================================
+  Perplexity:    1.7023
+  BPC:           0.7675
+  Tokens scored: 19,999
+  Elapsed:       169.0s (118 tok/s)
+  Log:           perplexity/results/Step-3.7-Flash_wikitext-2_bf16_bf16_rust_prefill_20260714_121549.log
+========================================================

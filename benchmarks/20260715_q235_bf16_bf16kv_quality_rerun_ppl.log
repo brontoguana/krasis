@@ -1,0 +1,67 @@
+Krasis Rust Prefill Perplexity
+==================================================
+Config:      tests/q235-stats-bf16-bf16kv-ppl.conf
+Model:       /home/main/.krasis/models/Qwen3-235B-A22B
+Dataset:     wikitext-2
+Port:        18194
+Attention:   bf16
+KV dtype:    bf16
+Window:      2048, stride=1024
+Max tokens:  20000
+
+  Loading dataset...
+  Tokenizing...
+  Tokens: 20,000
+  [  5.0%] Window 1/20 | scored 2047 this, 2047/20000 total | PPL=3.5590 | 195 tok/s
+  [ 10.0%] Window 2/20 | scored 1024 this, 3071/20000 total | PPL=3.4672 | 146 tok/s
+  [ 15.0%] Window 3/20 | scored 1024 this, 4095/20000 total | PPL=3.3963 | 130 tok/s
+  [ 20.0%] Window 4/20 | scored 1024 this, 5119/20000 total | PPL=3.5537 | 121 tok/s
+  [ 25.0%] Window 5/20 | scored 1024 this, 6143/20000 total | PPL=3.6232 | 117 tok/s
+  [ 30.0%] Window 6/20 | scored 1024 this, 7167/20000 total | PPL=3.8187 | 113 tok/s
+  [ 35.0%] Window 7/20 | scored 1024 this, 8191/20000 total | PPL=4.0782 | 111 tok/s
+  [ 40.0%] Window 8/20 | scored 1024 this, 9215/20000 total | PPL=4.0668 | 109 tok/s
+  [ 45.0%] Window 9/20 | scored 1024 this, 10239/20000 total | PPL=4.1703 | 108 tok/s
+  [ 50.0%] Window 10/20 | scored 1024 this, 11263/20000 total | PPL=4.1986 | 107 tok/s
+  [ 55.0%] Window 11/20 | scored 1024 this, 12287/20000 total | PPL=3.9815 | 106 tok/s
+  [ 60.0%] Window 12/20 | scored 1024 this, 13311/20000 total | PPL=3.8338 | 105 tok/s
+  [ 65.0%] Window 13/20 | scored 1024 this, 14335/20000 total | PPL=3.6835 | 105 tok/s
+  [ 70.0%] Window 14/20 | scored 1024 this, 15359/20000 total | PPL=3.7041 | 104 tok/s
+  [ 75.0%] Window 15/20 | scored 1024 this, 16383/20000 total | PPL=3.7559 | 104 tok/s
+  [ 80.0%] Window 16/20 | scored 1024 this, 17407/20000 total | PPL=3.7886 | 103 tok/s
+  [ 85.0%] Window 17/20 | scored 1024 this, 18431/20000 total | PPL=3.8954 | 103 tok/s
+  [ 90.0%] Window 18/20 | scored 1024 this, 19455/20000 total | PPL=4.0063 | 103 tok/s
+  [ 95.0%] Window 19/20 | scored 544 this, 19999/20000 total | PPL=4.0326 | 101 tok/s
+  [100.0%] Window 20/20 | scored 0 this, 19999/20000 total | PPL=4.0326 | 98 tok/s
+
+========================================================
+  RUST PREFILL PPL COMPLETE - wikitext-2
+========================================================
+  Perplexity:    4.0326
+  BPC:           2.0117
+  Tokens scored: 19,999
+  Elapsed:       204.5s (98 tok/s)
+  Log:           perplexity/results/Qwen3-235B-A22B_wikitext-2_bf16_bf16_rust_prefill_20260715_070438.log
+========================================================
+	Command being timed: "env PYTHONUNBUFFERED=1 ./dev quality-ppl tests/q235-stats-bf16-bf16kv-ppl.conf --max-tokens 20000"
+	User time (seconds): 11.07
+	System time (seconds): 0.86
+	Percent of CPU this job got: 5%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 3:28.63
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 901804
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 1
+	Minor (reclaiming a frame) page faults: 188833
+	Voluntary context switches: 244
+	Involuntary context switches: 207
+	Swaps: 0
+	File system inputs: 40
+	File system outputs: 376
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

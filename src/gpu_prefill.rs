@@ -6079,6 +6079,8 @@ pub struct PrefillResult {
 pub struct PrefillLogitPosition {
     pub position: usize,
     pub top_k: Vec<(usize, f32)>, // (token_id, logprob)
+    pub target_token_id: Option<usize>,
+    pub target_logprob: Option<f32>,
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -23335,6 +23337,7 @@ impl PrefillEngine {
         token_ids: &[u32],
         top_k: usize,
         sample_every: usize,
+        target_token_ids: Option<&[u32]>,
     ) -> Result<Vec<PrefillLogitPosition>, String> {
         self.bind_cuda_context()?;
 
@@ -23681,11 +23684,29 @@ impl PrefillEngine {
             self.stream_sync()?;
             apply_logit_softcap_in_place(&mut self.h_logits, self.final_logit_softcap);
 
+            let target_token_id = target_token_ids
+                .and_then(|targets| targets.get(pos))
+                .map(|&tid| tid as usize)
+                .filter(|&tid| tid < v);
+            let target_logprob = target_token_id.map(|tid| {
+                let max_logit = self.h_logits[..v]
+                    .iter()
+                    .copied()
+                    .fold(f32::NEG_INFINITY, f32::max) as f64;
+                let sum_exp: f64 = self.h_logits[..v]
+                    .iter()
+                    .map(|&logit| ((logit as f64) - max_logit).exp())
+                    .sum();
+                (self.h_logits[tid] as f64 - max_logit - sum_exp.ln()) as f32
+            });
+
             // Extract top-k logprobs
             let top = crate::decode::extract_top_logprobs(&self.h_logits, v, top_k);
             results.push(PrefillLogitPosition {
                 position: pos,
                 top_k: top.iter().map(|&(tid, lp)| (tid as usize, lp)).collect(),
+                target_token_id,
+                target_logprob,
             });
         }
 

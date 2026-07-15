@@ -1,0 +1,87 @@
+﻿OK Krasis/Python processes under known Krasis paths stopped
+python.exe : C:\Users\stoate\Documents\All Development\Code
+Review\.venv\Lib\site-packages\torch\cuda\__init__.py:64: FutureWarning: The pynvml package is
+deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please
+report this to the maintainers of the package that installed pynvml for you.
+At C:\Users\stoate\Documents\KrasisPort\krasis-main-merge\dev.ps1:117 char:9
++         & $Python @PythonArgs
++         ~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (C:\Users\stoate...pynvml for you.:String) [], Remote
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+
+  import pynvml  # type: ignore[import]
+krasis import ok: C:\Users\stoate\Documents\KrasisPort\krasis-main-merge\python\krasis\krasis.cp313-win_amd64.pyd
+=> Reference test config:
+C:\Users\stoate\Documents\KrasisPort\krasis-main-merge\tests\q35b-typhon-windows-hqq6-k6v6.conf
+=> Run dir:
+C:\Users\stoate\Documents\KrasisPort\krasis-main-merge\logs\reference-test_20260711_174207
+python.exe : C:\Users\stoate\Documents\All Development\Code
+Review\.venv\Lib\site-packages\torch\cuda\__init__.py:64: FutureWarning: The pynvml package is
+deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please
+report this to the maintainers of the package that installed pynvml for you.
+At C:\Users\stoate\Documents\KrasisPort\krasis-main-merge\dev.ps1:117 char:9
++         & $Python @PythonArgs
++         ~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (C:\Users\stoate...pynvml for you.:String) [], Remote
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+
+  import pynvml  # type: ignore[import]
+Reference test: Qwen3.5-35B-A3B
+Config: C:\Users\stoate\Documents\KrasisPort\krasis-main-merge\tests\q35b-typhon-windows-hqq6-k6v6.conf
+Reference data: C:\Users\stoate\Documents\KrasisPort\krasis-internal\reference-outputs\output\Qwen3.5-35B-A3B\llama_witness_qwen35_expanded_thinking_off.json
+Reference artifact state: explicit_valid (format 6, llama_witness_qwen35_expanded_thinking_off.json)
+
+============================================================
+Config: INT4/HQQ6 (q35b-typhon-windows-hqq6-k6v6.conf)
+============================================================
+Starting server...
+Waiting for server on port 18016...
+Server ready.
+  Conv 1: 13 input tokens, prompt: Hi...
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=9/10 selected_logprob_delta=0.002424011478433871
+  Conv 2: 37 input tokens, prompt: What's your name?...
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=10/10 selected_logprob_delta=0.031049382467189912
+  Conv 3: 20 input tokens, prompt: State your model family in one sentence....
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=9/10 selected_logprob_delta=0.0011151016142754502
+  Conv 4: 28 input tokens, prompt: What is 17 times 23? Answer with the number first....
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=9/10 selected_logprob_delta=0.0019129934904402283
+  Conv 5: 28 input tokens, prompt: Write a Rust function signature for binary search over a sli...
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=10/10 selected_logprob_delta=0.15735294588397364
+  Conv 6: 31 input tokens, prompt: In two bullet points, explain why caching a file hash must i...
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=8/10 selected_logprob_delta=0.011638428431207042
+  Conv 7: 510 input tokens, prompt: Read this excerpt and identify its central subject in one se...
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=9/10 selected_logprob_delta=0.020538324437152276
+  Conv 8: 316 input tokens, prompt: Read this excerpt and identify its central subject in one se...
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=10/10 selected_logprob_delta=0.004616757957786474
+  Conv 9: 448 input tokens, prompt: Read this excerpt and identify its central subject in one se...
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=8/10 selected_logprob_delta=0.0046988651954765065
+  Conv 10: 430 input tokens, prompt: Read this excerpt and identify its central subject in one se...
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=9/10 selected_logprob_delta=0.026815428609687553
+Stopping server...
+
+============================================================
+REFERENCE TEST: PASS
+============================================================
+  Prompts: 10 PASS, 0 WARN, 0 FAIL (of 10)
+  Prefill argmax match: 10/10 (100%)
+  Prefill top-10 containment: 10/10 (100%)
+  First-token match: 10/10
+  Avg match run: 1.0 tokens
+  Avg decode top-k: 100.0%
+  Duration: 72.5s
+  Report: C:\Users\stoate\Documents\KrasisPort\krasis-main-merge\logs\reference-test_20260711_174207\reference_test.html
+  Summary JSON: C:\Users\stoate\Documents\KrasisPort\krasis-main-merge\logs\reference-test_20260711_174207\reference_test_summary.json
+
+EXIT_STATUS=0

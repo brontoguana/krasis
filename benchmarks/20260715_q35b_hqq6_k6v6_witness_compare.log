@@ -1,0 +1,86 @@
+[0;36m[1m=>[0m Waiting for selected GPUs (0) to clear...
+[0;32m[1mOK[0m Selected GPUs (0) clear.
+[0;36m[1m=>[0m Running reference test: tests/q35b-stats-hqq6-k6v6.conf
+[0;36m[1m=>[0m Run dir: /home/main/Documents/Claude/krasis-main-merge/logs/reference-test_20260715_043034
+[0;36m[1m=>[0m Import origin check:
+krasis: /home/main/Documents/Claude/krasis-main-merge/python/krasis/__init__.py
+krasis.krasis: /home/main/Documents/Claude/krasis-main-merge/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+Reference test: Qwen3.5-35B-A3B
+Config: tests/q35b-stats-hqq6-k6v6.conf
+Reference data: /home/main/Documents/Claude/krasis-internal/reference-outputs/output/Qwen3.5-35B-A3B/llama_witness_qwen35_expanded_thinking_off.json
+Reference artifact state: explicit_valid (format 6, llama_witness_qwen35_expanded_thinking_off.json)
+
+============================================================
+Config: INT4/HQQ6 (q35b-stats-hqq6-k6v6.conf)
+============================================================
+Starting server...
+Waiting for server on port 18158...
+Server ready.
+  Conv 1: 13 input tokens, prompt: Hi...
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=9/10 selected_logprob_delta=0.004983011478433871
+  Conv 2: 37 input tokens, prompt: What's your name?...
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=10/10 selected_logprob_delta=0.004796382467189886
+  Conv 3: 20 input tokens, prompt: State your model family in one sentence....
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=9/10 selected_logprob_delta=0.0010891016142754503
+  Conv 4: 28 input tokens, prompt: What is 17 times 23? Answer with the number first....
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=9/10 selected_logprob_delta=0.0017239934904402284
+  Conv 5: 28 input tokens, prompt: Write a Rust function signature for binary search over a sli...
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=10/10 selected_logprob_delta=0.20559694588397365
+  Conv 6: 31 input tokens, prompt: In two bullet points, explain why caching a file hash must i...
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=8/10 selected_logprob_delta=0.012472428431207043
+  Conv 7: 510 input tokens, prompt: Read this excerpt and identify its central subject in one se...
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=9/10 selected_logprob_delta=0.026756324437152278
+  Conv 8: 316 input tokens, prompt: Read this excerpt and identify its central subject in one se...
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=10/10 selected_logprob_delta=0.007386757957786472
+  Conv 9: 448 input tokens, prompt: Read this excerpt and identify its central subject in one se...
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=8/10 selected_logprob_delta=0.006102865195476509
+  Conv 10: 430 input tokens, prompt: Read this excerpt and identify its central subject in one se...
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=9/10 selected_logprob_delta=0.024916428609687555
+Stopping server...
+
+============================================================
+REFERENCE TEST: PASS
+============================================================
+  Prompts: 10 PASS, 0 WARN, 0 FAIL (of 10)
+  Prefill argmax match: 10/10 (100%)
+  Prefill top-10 containment: 10/10 (100%)
+  First-token match: 10/10
+  Avg match run: 1.0 tokens
+  Avg decode top-k: 100.0%
+  Duration: 69.4s
+  Report: /home/main/Documents/Claude/krasis-main-merge/logs/reference-test_20260715_043034/reference_test.html
+  Summary JSON: /home/main/Documents/Claude/krasis-main-merge/logs/reference-test_20260715_043034/reference_test_summary.json
+
+	Command being timed: "env KRASIS_APPROVED_HEATMAP_MODE=require KRASIS_APPROVED_HEATMAP_MANIFEST_URL=file:///home/main/Documents/Claude/krasis-main-merge/benchmarks/approved_heatmaps/manifest.json PYTHONUNBUFFERED=1 ./dev witness-compare tests/q35b-stats-hqq6-k6v6.conf --profile llama_witness_qwen35_expanded_thinking_off"
+	User time (seconds): 117.86
+	System time (seconds): 74.38
+	Percent of CPU this job got: 246%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:17.97
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 23927656
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 70
+	Minor (reclaiming a frame) page faults: 11537058
+	Voluntary context switches: 12117
+	Involuntary context switches: 1648
+	Swaps: 0
+	File system inputs: 190688
+	File system outputs: 2032
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

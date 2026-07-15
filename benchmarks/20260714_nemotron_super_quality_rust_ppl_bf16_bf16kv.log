@@ -1,0 +1,17 @@
+Krasis Rust Prefill Perplexity
+==================================================
+Date:          2026-07-14T14:42:12.746545
+Config:        tests/nemotron-super-bf16kv-a16.conf
+Model:         /home/main/.krasis/models/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+Dataset:       wikitext-2
+Attention:     bf16
+KV dtype:      bf16
+Window size:   2048
+Stride:        1024
+Perplexity:    326150.3391
+BPC:           18.3152
+Mean loss:     12.695114
+Tokens scored: 19999 / 20000
+Windows:       20
+Elapsed:       135.9s
+Throughput:    147 tok/s

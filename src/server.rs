@@ -2063,6 +2063,42 @@ fn handle_prefill_logits(stream: &mut TcpStream, body: &str, state: &mut ServerS
         .get("sample_every")
         .and_then(|v| v.as_u64())
         .unwrap_or(50) as usize;
+    if sample_every == 0 {
+        let _ = send_json(
+            stream,
+            400,
+            r#"{"error":"sample_every must be greater than zero"}"#,
+        );
+        return;
+    }
+    let target_token_ids: Option<Vec<u32>> = match req.get("target_token_ids") {
+        Some(serde_json::Value::Array(arr)) => {
+            let mut parsed = Vec::with_capacity(arr.len());
+            for v in arr {
+                match v.as_u64() {
+                    Some(tid) if tid <= u32::MAX as u64 => parsed.push(tid as u32),
+                    Some(_) | None => {
+                        let _ = send_json(
+                            stream,
+                            400,
+                            r#"{"error":"target_token_ids must be an array of non-negative integers"}"#,
+                        );
+                        return;
+                    }
+                }
+            }
+            Some(parsed)
+        }
+        Some(_) => {
+            let _ = send_json(
+                stream,
+                400,
+                r#"{"error":"target_token_ids must be an array"}"#,
+            );
+            return;
+        }
+        None => None,
+    };
 
     // Accept either raw input_token_ids or messages (with chat template + tokenization)
     let token_ids: Vec<u32> =
@@ -2113,12 +2149,23 @@ fn handle_prefill_logits(stream: &mut TcpStream, body: &str, state: &mut ServerS
             );
             return;
         };
+    if let Some(ref targets) = target_token_ids {
+        if targets.len() != token_ids.len() {
+            let _ = send_json(
+                stream,
+                400,
+                r#"{"error":"target_token_ids length must match input token length"}"#,
+            );
+            return;
+        }
+    }
 
     log::info!(
-        "prefill_logits: {} tokens, top_k={}, sample_every={}",
+        "prefill_logits: {} tokens, top_k={}, sample_every={}, target_logprobs={}",
         token_ids.len(),
         top_k,
-        sample_every
+        sample_every,
+        target_token_ids.is_some()
     );
 
     // Evict soft HCS before diagnostic prefill so this endpoint uses the same
@@ -2199,7 +2246,12 @@ fn handle_prefill_logits(stream: &mut TcpStream, body: &str, state: &mut ServerS
         return;
     }
 
-    let positions = match engine.run_prefill_logits(&token_ids, top_k, sample_every) {
+    let positions = match engine.run_prefill_logits(
+        &token_ids,
+        top_k,
+        sample_every,
+        target_token_ids.as_deref(),
+    ) {
         Ok(p) => p,
         Err(e) => {
             // Release scratch even on error
@@ -2242,16 +2294,26 @@ fn handle_prefill_logits(stream: &mut TcpStream, body: &str, state: &mut ServerS
         let _ = state.py_model.call_method0(py, "server_cleanup");
     });
 
-    // Format response: {positions: [{position, top_k: [{token_id, logprob}]}]}
+    // Format response: {positions: [{position, target_token_id, target_logprob, top_k: [...]}]}
     let mut pos_json = Vec::new();
     for p in &positions {
         let mut tk_json = Vec::new();
         for &(tid, lp) in &p.top_k {
             tk_json.push(format!(r#"{{"token_id":{},"logprob":{:.6}}}"#, tid, lp));
         }
+        let target_token_json = match p.target_token_id {
+            Some(tid) => tid.to_string(),
+            None => "null".to_string(),
+        };
+        let target_logprob_json = match p.target_logprob {
+            Some(lp) => format!("{:.9}", lp),
+            None => "null".to_string(),
+        };
         pos_json.push(format!(
-            r#"{{"position":{},"top_k":[{}]}}"#,
+            r#"{{"position":{},"target_token_id":{},"target_logprob":{},"top_k":[{}]}}"#,
             p.position,
+            target_token_json,
+            target_logprob_json,
             tk_json.join(",")
         ));
     }

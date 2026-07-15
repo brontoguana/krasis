@@ -1,0 +1,44 @@
+Krasis Rust Prefill Perplexity
+==================================================
+Config:      tests/nemotron-nano-4-4-bf16attn-bf16kv-a16.conf
+Model:       /home/main/.krasis/models/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+Dataset:     wikitext-2
+Port:        18012
+Attention:   bf16
+KV dtype:    bf16
+Window:      2048, stride=1024
+Max tokens:  20000
+
+  Loading dataset...
+  Tokenizing...
+  Tokens: 20,000
+  [  5.0%] Window 1/20 | scored 2047 this, 2047/20000 total | PPL=42626.0235 | 432 tok/s
+  [ 10.0%] Window 2/20 | scored 1024 this, 3071/20000 total | PPL=32246.5093 | 324 tok/s
+  [ 15.0%] Window 3/20 | scored 1024 this, 4095/20000 total | PPL=30187.7819 | 288 tok/s
+  [ 20.0%] Window 4/20 | scored 1024 this, 5119/20000 total | PPL=29926.6454 | 270 tok/s
+  [ 25.0%] Window 5/20 | scored 1024 this, 6143/20000 total | PPL=30595.5598 | 259 tok/s
+  [ 30.0%] Window 6/20 | scored 1024 this, 7167/20000 total | PPL=33538.3432 | 252 tok/s
+  [ 35.0%] Window 7/20 | scored 1024 this, 8191/20000 total | PPL=35660.0518 | 247 tok/s
+  [ 40.0%] Window 8/20 | scored 1024 this, 9215/20000 total | PPL=36356.6953 | 243 tok/s
+  [ 45.0%] Window 9/20 | scored 1024 this, 10239/20000 total | PPL=37806.1967 | 240 tok/s
+  [ 50.0%] Window 10/20 | scored 1024 this, 11263/20000 total | PPL=38049.5592 | 237 tok/s
+  [ 55.0%] Window 11/20 | scored 1024 this, 12287/20000 total | PPL=38287.3300 | 235 tok/s
+  [ 60.0%] Window 12/20 | scored 1024 this, 13311/20000 total | PPL=38568.3616 | 234 tok/s
+  [ 65.0%] Window 13/20 | scored 1024 this, 14335/20000 total | PPL=39025.7928 | 232 tok/s
+  [ 70.0%] Window 14/20 | scored 1024 this, 15359/20000 total | PPL=38241.8813 | 230 tok/s
+  [ 75.0%] Window 15/20 | scored 1024 this, 16383/20000 total | PPL=37479.4226 | 229 tok/s
+  [ 80.0%] Window 16/20 | scored 1024 this, 17407/20000 total | PPL=37037.5006 | 229 tok/s
+  [ 85.0%] Window 17/20 | scored 1024 this, 18431/20000 total | PPL=36816.5817 | 228 tok/s
+  [ 90.0%] Window 18/20 | scored 1024 this, 19455/20000 total | PPL=37039.9155 | 227 tok/s
+  [ 95.0%] Window 19/20 | scored 544 this, 19999/20000 total | PPL=36988.1497 | 224 tok/s
+  [100.0%] Window 20/20 | scored 0 this, 19999/20000 total | PPL=36988.1497 | 221 tok/s
+
+========================================================
+  RUST PREFILL PPL COMPLETE - wikitext-2
+========================================================
+  Perplexity:    36988.1497
+  BPC:           15.1748
+  Tokens scored: 19,999
+  Elapsed:       90.5s (221 tok/s)
+  Log:           perplexity/results/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16_wikitext-2_bf16_bf16_rust_prefill_20260714_145538.log
+========================================================

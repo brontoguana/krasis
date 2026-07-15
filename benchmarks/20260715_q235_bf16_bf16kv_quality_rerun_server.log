@@ -1,0 +1,109 @@
+[0;36m[1m=>[0m Waiting for selected GPUs (0) to clear...
+[0;32m[1mOK[0m Selected GPUs (0) clear.
+[0;36m[1m=>[0m Launching from: tests/q235-stats-bf16-bf16kv-ppl.conf
+[0;36m[1m=>[0m Run dir: /home/main/Documents/Claude/krasis-main-merge/logs/dev-run_20260715_065010
+[0;36m[1m=>[0m Import origin check:
+krasis: /home/main/Documents/Claude/krasis-main-merge/python/krasis/__init__.py
+krasis.krasis: /home/main/Documents/Claude/krasis-main-merge/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+Pre-scan: set CUDA_VISIBLE_DEVICES=0
+Loaded config from tests/q235-stats-bf16-bf16kv-ppl.conf: {'model_path': '/home/main/.krasis/models/Qwen3-235B-A22B', 'selected_gpus': '0', 'num_gpus': 1, 'layer_group_size': 2, 'kv_cache_mb': 1000, 'kv_dtype': 'bf16', 'gpu_expert_bits': 4, 'cpu_expert_bits': 4, 'attention_quant': 'bf16', 'shared_expert_quant': 'int8', 'dense_mlp_quant': 'int8', 'lm_head_quant': 'int8', 'krasis_threads': 40, 'host': '0.0.0.0', 'port': 18194, 'gpu_prefill_threshold': 300, 'vram_safety_margin': 600, 'force_load': False, 'enable_thinking': False}
+
+[1m[36m▸ Krasis — Qwen3-235B-A22B[0m
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 1[0m
+  [32mHCS host cache: source[0m
+  [32mSelected physical GPUs: 0 (config; CUDA_VISIBLE_DEVICES=0)[0m
+  [32mExperts: GPU INT4 g128 (amax)  |  Attention: bf16  |  KV: bf16[0m
+  [32mLayer groups: 2  |  KV cache: 1000 MB  |  Threads: 40[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+  [33mUNVALIDATED BF16 debug path enabled: attention=BF16. This path likely contains unknown bugs and must not be used as a correctness oracle. Use HF Transformers BF16 reference data for validation; production runs must use quantized configs.[0m
+
+[1m[36m▸ Loading model weights[0m
+  [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=518 MB, free=31600 MB, total=32119 MB
+
+[1m[36m▸ Loading GPU weights[0m
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:0: alloc=14849 MB, reserved=14850 MB, used=15466 MB, free=16652 MB, total=32119 MB
+  [0;32mAttention resident on GPU (95 MB), 16652 MB free[0m
+
+[1m[36m▸ Loading GPU expert weights from cache[0m
+    Loading GPU Marlin cache: 94 layers...
+    GPU Marlin cache loaded: 117.1 GB in 75s
+  [0;32mExpert weights loaded in 75s.[0m
+  [33m[VRAM after-phase2-expert-weights][0m cuda:0: alloc=14849 MB, reserved=14850 MB, used=15466 MB, free=16652 MB, total=32119 MB
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:0: alloc=14849 MB, reserved=14850 MB, used=15466 MB, free=16652 MB, total=32119 MB
+  [33m[VRAM after-kv-cache-init][0m cuda:0: alloc=15849 MB, reserved=15850 MB, used=16466 MB, free=15652 MB, total=32119 MB
+  [33m[VRAM after-full-load][0m cuda:0: alloc=15849 MB, reserved=15850 MB, used=16466 MB, free=15652 MB, total=32119 MB
+
+[1m[36m▸ CUDA runtime warmup[0m
+  [32mcuBLAS + Triton kernel compilation done[0m
+
+[1m[36m▸ Setting up GPU decode store[0m
+  [32mGPU decode store ready (addr=0x3aeb6620)[0m
+  [32mReleased redundant GPU execution source tensors (781 MB)[0m
+  [2mVRAM monitor started (tracking warmup)[0m
+  [2mcuda:0: 0 MB total[0m
+
+[1m[36m▸ Pre-allocating Rust prefill engine[0m
+[FLA] Loading kernels for H=0 from /home/main/Documents/Claude/krasis-main-merge/python/krasis/libkrasis_fla_sm120.so
+  [32mPrefill engine scratch buffers allocated[0m
+
+[1m[36m▸ Warmup (Rust prefill engine)[0m
+  [32mRust prefill warmed with 300 tokens before HCS budgeting[0m
+  [32mWarmup complete in 4.9s[0m
+  [2mcuda:0 warmup:  peak 19,138 MB used / 32,119 MB total  (min free: 12,980 MB)[0m
+
+[1m[36m▸ VRAM calibration[0m
+  [32mSafety margin: 600 MB[0m
+  [32mFree VRAM after startup: 14,478 MB / 32,119 MB[0m
+  [32mShort calibration: probing 500 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 10.11s (3.2 tok/s)  VRAM: 14450 MB free now, 14450 MB min free during decode[0m
+  [32mShort calibration: baseline=14,478 MB, prefill post-alloc=14,112 MB, prefill min=12,924 MB, decode min=14,450 MB, post-cleanup=14,450 MB[0m
+  [32mAdaptive long calibration: default target=4,272 tokens, target low-water floor=1,200 MB, estimated prefill growth=0.4170 MB/token[0m
+  [32mAdaptive long calibration: next probe 4,272 tokens (model-estimated initial probe (projected 0.4170 MB/token, validation floor 2400 MB))[0m
+  [32mLong calibration: probing 4,272 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 10.27s (3.1 tok/s)  VRAM: 14448 MB free now, 14448 MB min free during decode[0m
+  [32mLong calibration: baseline=14,450 MB, prefill post-alloc=12,498 MB, prefill min=11,310 MB, decode min=14,448 MB, post-cleanup=14,448 MB[0m
+  [32mScratch reservation: max=17,294 MB (at 40,960 tokens)[0m
+
+[1m[36m▸ VRAM calibration complete[0m
+  [32mPost-calibration free VRAM: 14,448 MB[0m
+  [32mTransient deltas: short prefill=1,554 MB, long prefill=3,140 MB, short decode=28 MB, long decode=2 MB[0m
+  [32mGPU0 decode HCS budget: 13,820 MB[0m
+  [32mPrefill HCS budgets: short=12,294 MB, long=10,708 MB[0m
+  [32mWorst-case prefill scratch reservation: 17,294 MB at 40,960 tokens[0m
+
+[1m[36m▸ Calculating HCS budget[0m
+
+[1m[36m▸ Checking approved route heatmap cache[0m
+  [2mNo approved heatmap artifact matches this model/router signature and validated runtime; falling back to quick startup heatmap generation[0m
+
+[1m[36m▸ Building expert heatmap (decode-weighted calibration)[0m
+  [32mHeatmap: 11,421 experts ranked from 11,421 entries[0m
+  [2mVRAM calibration: baseline 14448 MB | prefill 430.6 KB/tok, decode -7.1 KB/tok | HCS allowance prefill: short 12294 MB, long 10708 MB | decode: short 13820 MB, long 13846 MB | idle floors prefill=2154 MB decode=628 MB | decode-resident HCS budget=13820 MB[0m
+  [2mGPU0 HCS: 12032 experts (11421 ranked + 611 unranked), reclaimable: 13,820 MB[0m
+
+[1m[36m▸ Loading GPU0 HCS pool (fully reclaimable)[0m
+
+[1m[36m▸ HCS pool loaded[0m
+  [32mHCS pool: 0/12032 experts loaded in 0.00s (0.0% coverage), 0.0 MB VRAM, 0 free slots, gpu_route_sync=false, mapped_reads=false | soft: 1456 experts in 0.57s (13513.5 MB, host_mode=source) | total: 1456/12032 (12.1%) coverage[0m
+  [2mLoaded in 0.6s[0m
+
+[1m[36m▸ Decode validation[0m
+  [32mSkipped: Rust prefill already warmed before HCS budgeting[0m
+
+[1m[36m▸ VRAM monitor: runtime warnings enabled[0m
+  [32mSafety margin: 600 MB — warnings on every new low below this[0m
+VRAM pressure: evicted 13 soft HCS experts / 1 chunks; free=908 MB after eviction (safety=600 MB, target=842 MB)
+  [33mVRAM pressure eviction at startup_ready: evicted 13 soft HCS experts, freed 120.7 MB, final free 908 MB[0m
+
+[1m[32mKRASIS SERVER READY[0m
+  [32mModel:[0m    [1mQwen3-235B-A22B[0m
+  [32mAddress:[0m  [1m0.0.0.0:18194[0m
+  [32mContext:[0m  5,440 tokens  |  KV cache: 1,000 MB
+  [32mDecode:[0m   GPU  |  HCS: on  |  Think: off
+  [32mClient setup:[0m
+    Base URL:      [1mhttp://127.0.0.1:18194/v1[0m
+    Chat endpoint: http://127.0.0.1:18194/v1/chat/completions
+    Models:        http://127.0.0.1:18194/v1/models
+    API key:       [1mX[0m [2m(any value)[0m
+    Model name:    [1mQwen3-235B-A22B[0m
+  [2mPress Q or Ctrl-C to stop[0m

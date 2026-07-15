@@ -1,0 +1,17 @@
+Krasis Rust Prefill Perplexity
+==================================================
+Date:          2026-07-14T14:47:43.850868
+Config:        tests/nemotron-super-4-4-hqq4-k4v4-a16.conf
+Model:         /home/main/.krasis/models/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+Dataset:       wikitext-2
+Attention:     hqq4
+KV dtype:      k4v4
+Window size:   2048
+Stride:        1024
+Perplexity:    379305.2043
+BPC:           18.5330
+Mean loss:     12.846096
+Tokens scored: 19999 / 20000
+Windows:       20
+Elapsed:       150.0s
+Throughput:    133 tok/s

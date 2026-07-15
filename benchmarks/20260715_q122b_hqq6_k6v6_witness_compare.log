@@ -1,0 +1,98 @@
+[0;36m[1m=>[0m Waiting for selected GPUs (0) to clear...
+[0;32m[1mOK[0m Selected GPUs (0) clear.
+[0;36m[1m=>[0m Running reference test: tests/q122b-stats-hqq6-k6v6.conf
+[0;36m[1m=>[0m Run dir: /home/main/Documents/Claude/krasis-main-merge/logs/reference-test_20260715_043505
+[0;36m[1m=>[0m Import origin check:
+krasis: /home/main/Documents/Claude/krasis-main-merge/python/krasis/__init__.py
+krasis.krasis: /home/main/Documents/Claude/krasis-main-merge/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+Reference test: Qwen3.5-122B-A10B
+Config: tests/q122b-stats-hqq6-k6v6.conf
+Reference data: /home/main/Documents/Claude/krasis-internal/reference-outputs/output/Qwen3.5-122B-A10B/llama_witness_q122b_expanded.json
+Reference artifact state: explicit_valid (format 7, llama_witness_q122b_expanded.json)
+
+============================================================
+Config: INT4/HQQ6 (q122b-stats-hqq6-k6v6.conf)
+============================================================
+Starting server...
+Waiting for server on port 18162...
+Server ready.
+  Conv 1: 13 input tokens, prompt: Hi...
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=9/10 selected_logprob_delta=0.0011285671577513819
+  Conv 2: 37 input tokens, prompt: What's your name?...
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=10/10 selected_logprob_delta=0.01465136258748867
+  Conv 3: 77 input tokens, prompt: Who trained you?...
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=9/10 selected_logprob_delta=3.217981276529531e-05
+  Conv 4: 19 input tokens, prompt: What is 2+2?...
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=10/10 selected_logprob_delta=0.40205763780653814
+  Conv 5: 48 input tokens, prompt: Now multiply that by 10...
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=7/10 selected_logprob_delta=0.24432550111582974
+  Conv 6: 78 input tokens, prompt: And divide the result by 5...
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=9/10 selected_logprob_delta=0.0001125720196477889
+  Conv 7: 21 input tokens, prompt: What is the largest animal in the world?...
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=8/10 selected_logprob_delta=6.051868797862872e-07
+  Conv 8: 23 input tokens, prompt: What is the largest body of water in the world?...
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=9/10 selected_logprob_delta=0.0014667771702125021
+  Conv 9: 19 input tokens, prompt: Describe the binary chop algorithm in depth...
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=9/10 selected_logprob_delta=0.02315693427701511
+  Conv 10: 50 input tokens, prompt: If it takes 4 hours for 4 towels to dry on a clothesline in ...
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=9/10 selected_logprob_delta=0.07010276975778773
+  Conv 11: 19 input tokens, prompt: Tell me facts about the blue whale...
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=9/10 selected_logprob_delta=0.0402838291583405
+  Conv 12: 236 input tokens, prompt: Tell me more about whales in general...
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=10/10 selected_logprob_delta=0.13353863969607016
+  Conv 13: 452 input tokens, prompt: Where do whales live geographically?...
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=10/10 selected_logprob_delta=0.0008709521356022338
+  Conv 14: 20 input tokens, prompt: Write me a quicksort implementation in Rust...
+    PASS: first=MATCH, run=1/1, prefill=100%/100%, decode-top-k=100%
+    first-token diagnostic: top_ids_exact=False overlap=10/10 selected_logprob_delta=3.287773014738196e-05
+Stopping server...
+
+============================================================
+REFERENCE TEST: PASS
+============================================================
+  Prompts: 14 PASS, 0 WARN, 0 FAIL (of 14)
+  Prefill argmax match: 14/14 (100%)
+  Prefill top-10 containment: 14/14 (100%)
+  First-token match: 14/14
+  Avg match run: 1.0 tokens
+  Avg decode top-k: 100.0%
+  Duration: 206.6s
+  Report: /home/main/Documents/Claude/krasis-main-merge/logs/reference-test_20260715_043505/reference_test.html
+  Summary JSON: /home/main/Documents/Claude/krasis-main-merge/logs/reference-test_20260715_043505/reference_test_summary.json
+
+	Command being timed: "env KRASIS_APPROVED_HEATMAP_MODE=require KRASIS_APPROVED_HEATMAP_MANIFEST_URL=file:///home/main/Documents/Claude/krasis-main-merge/benchmarks/approved_heatmaps/manifest.json PYTHONUNBUFFERED=1 ./dev witness-compare tests/q122b-stats-hqq6-k6v6.conf --profile llama_witness_q122b_expanded"
+	User time (seconds): 233.56
+	System time (seconds): 160.39
+	Percent of CPU this job got: 183%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 3:35.15
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 82886140
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 162
+	Minor (reclaiming a frame) page faults: 32562179
+	Voluntary context switches: 35112
+	Involuntary context switches: 2749
+	Swaps: 0
+	File system inputs: 117824
+	File system outputs: 2528
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

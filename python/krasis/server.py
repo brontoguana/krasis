@@ -1162,6 +1162,7 @@ def _build_heatmap(model: KrasisModel, save_path: str, args) -> str:
         )
         stop_ids = _default_stop_ids(model)
         for i, prompt_text in enumerate(prompts):
+            prompt_index = i + 1
             prompt_t0 = time.perf_counter()
             tokenize_t0 = time.perf_counter()
             tokens = _chat_prompt_tokens(
@@ -1170,8 +1171,19 @@ def _build_heatmap(model: KrasisModel, save_path: str, args) -> str:
                 enable_thinking=decode_params["enable_thinking"],
             )
             tokenize_s = time.perf_counter() - tokenize_t0
-            logger.info("  Heatmap prompt %d/%d: %d prefill tokens + %d decode tokens",
-                        i + 1, len(prompts), len(tokens), HEATMAP_DECODE_TOKENS)
+            _dim(
+                f"Quick heatmap prompt {prompt_index}/{len(prompts)}: "
+                f"{len(tokens):,} prefill tokens + {HEATMAP_DECODE_TOKENS:,} decode tokens"
+            )
+            logger.info(
+                "HEATMAP prompt_start index=%d total=%d prompt_tokens=%d decode_tokens=%d "
+                "tokenize_s=%.6f",
+                prompt_index,
+                len(prompts),
+                len(tokens),
+                HEATMAP_DECODE_TOKENS,
+                tokenize_s,
+            )
             prefill_t0 = time.perf_counter()
             first_token, prompt_len, kv_overflow = gpu_store.rust_prefill_tokens(
                 tokens,
@@ -1179,10 +1191,27 @@ def _build_heatmap(model: KrasisModel, save_path: str, args) -> str:
                 disable_pinning=True,
             )
             prefill_s = time.perf_counter() - prefill_t0
+            logger.info(
+                "HEATMAP prompt_prefill_done index=%d total=%d prompt_len=%d first_token=%d "
+                "kv_overflow=%s prefill_s=%.3f",
+                prompt_index,
+                len(prompts),
+                prompt_len,
+                first_token,
+                bool(kv_overflow),
+                prefill_s,
+            )
             decode_s = 0.0
             generated_tokens = 0
             stopped_before_decode = bool(kv_overflow or first_token in stop_ids)
             if not kv_overflow and first_token not in stop_ids:
+                logger.info(
+                    "HEATMAP prompt_decode_start index=%d total=%d start_position=%d max_tokens=%d",
+                    prompt_index,
+                    len(prompts),
+                    prompt_len,
+                    HEATMAP_DECODE_TOKENS,
+                )
                 decode_t0 = time.perf_counter()
                 generated = gpu_store.gpu_generate_batch(
                     first_token=first_token,
@@ -1199,12 +1228,43 @@ def _build_heatmap(model: KrasisModel, save_path: str, args) -> str:
                 total_decode_tokens += 1 + len(generated)
             else:
                 total_decode_tokens += 1
+            prompt_s = time.perf_counter() - prompt_t0
+            completed = prompt_index
+            remaining = max(0, len(prompts) - completed)
+            elapsed_s = time.perf_counter() - heatmap_t0
+            avg_prompt_s = elapsed_s / completed
+            eta_s = avg_prompt_s * remaining
+            logger.info(
+                "HEATMAP prompt_done index=%d total=%d prompt_len=%d first_token=%d "
+                "kv_overflow=%s stopped_before_decode=%s generated_tokens=%d "
+                "total_decode_tokens=%d tokenize_s=%.6f prefill_s=%.3f decode_s=%.3f "
+                "prompt_s=%.3f elapsed_s=%.3f eta_s=%.3f",
+                prompt_index,
+                len(prompts),
+                prompt_len,
+                first_token,
+                bool(kv_overflow),
+                stopped_before_decode,
+                generated_tokens,
+                total_decode_tokens,
+                tokenize_s,
+                prefill_s,
+                decode_s,
+                prompt_s,
+                elapsed_s,
+                eta_s,
+            )
+            _dim(
+                f"Quick heatmap prompt {prompt_index}/{len(prompts)} done: "
+                f"{generated_tokens + 1:,} route tokens, {prompt_s:.1f}s "
+                f"(elapsed {elapsed_s:.1f}s, eta {eta_s:.1f}s)"
+            )
             if timing_enabled:
                 logger.info(
                     "HEATMAP_TIMING prompt index=%d total=%d prompt_tokens=%d first_token=%d "
                     "prompt_len=%d kv_overflow=%s stopped_before_decode=%s generated_tokens=%d "
                     "tokenize_s=%.6f prefill_s=%.6f decode_s=%.6f prompt_s=%.6f",
-                    i + 1,
+                    prompt_index,
                     len(prompts),
                     len(tokens),
                     first_token,
@@ -1215,7 +1275,7 @@ def _build_heatmap(model: KrasisModel, save_path: str, args) -> str:
                     tokenize_s,
                     prefill_s,
                     decode_s,
-                    time.perf_counter() - prompt_t0,
+                    prompt_s,
                 )
 
         logger.info("Heatmap collection complete: %d decode tokens across %d prompts",
