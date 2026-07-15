@@ -1,9 +1,10 @@
 # Krasis Quality Stats
 
-Quality comparisons use BF16 llama-witness references and `./dev
-witness-compare` for pass/fail checks. Perplexity deltas use a Krasis BF16
-runtime baseline on WikiText-2 so HQQ profiles are compared against the same
-runtime path.
+Quality comparisons use BF16 llama-witness references where available, and
+Krasis BF16 reference runs for models that do not yet have llama-witness
+artifacts. Perplexity deltas use a Krasis BF16 runtime baseline on WikiText-2
+where that metric is valid for the model, and a chat-continuation BF16
+baseline where raw-token corpus PPL is not valid for the model.
 
 Detailed quality logs and artifacts are indexed in [benchmarks/BENCHMARKS.md](benchmarks/BENCHMARKS.md).
 
@@ -23,8 +24,8 @@ Detailed quality logs and artifacts are indexed in [benchmarks/BENCHMARKS.md](be
 | Qwen3.5-397B-A17B | 397B class | 17B class | INT4/HQQ6/k6v6 | Krasis BF16 | n/a | 2.8806 | -0.14% | n/a | n/a | n/a | n/a | PASS |
 | Step-3.7-Flash | 201.4B total / 199.4B text | 13.9B | INT4/HQQ4/k4v4 | llama-witness BF16 | 8 | 1.7671 | +3.80% | avg 3.655%, max 7.582% | 7/8 | 8/8 | 8/8 | PASS |
 | Step-3.7-Flash | 201.4B total / 199.4B text | 13.9B | INT4/HQQ6/k6v6 | llama-witness BF16 | 8 | 1.7016 | -0.04% | avg 2.206%, max 3.997% | 8/8 | 8/8 | 8/8 | PASS |
-| Gemma-4-26B-A4B-it | 26B class | 4B class | INT4/HQQ4/k4v4 | Krasis BF16 | n/a | 395.0428 | +7.72% diagnostic | n/a | n/a | n/a | n/a | BLOCKED |
-| Gemma-4-26B-A4B-it | 26B class | 4B class | INT4/HQQ6/k6v6 | Krasis BF16 | n/a | 293.7475 | -19.90% diagnostic | n/a | n/a | n/a | n/a | BLOCKED |
+| Gemma-4-26B-A4B-it | 26B class | 4B class | INT4/HQQ4/k4v4 | Krasis BF16 | 14 | 1.1708 | +8.98% chat | n/a | n/a | n/a | 14/14 | PASS |
+| Gemma-4-26B-A4B-it | 26B class | 4B class | INT4/HQQ6/k6v6 | Krasis BF16 | 14 | 1.0793 | +0.46% chat | n/a | n/a | n/a | 14/14 | PASS |
 | Nemotron-3-Super-120B-A12B | 123.6B total | 12.4B | INT4/HQQ4/k4v4 | Krasis BF16 | n/a | 379,305.2043 | +16.30% diagnostic | n/a | n/a | n/a | n/a | BLOCKED |
 | Nemotron-3-Super-120B-A12B | 123.6B total | 12.4B | INT4/HQQ6/k6v6 | Krasis BF16 | n/a | 337,774.3820 | +3.56% diagnostic | n/a | n/a | n/a | n/a | BLOCKED |
 | Nemotron-3-Nano-30B-A3B | 31.6B total | 3.2B | INT4/HQQ4/k4v4 | Krasis BF16 | n/a | 35,918.9461 | -2.89% diagnostic | n/a | n/a | n/a | n/a | BLOCKED |
@@ -45,9 +46,12 @@ Column notes:
   no BF16 llama-witness artifact exists yet. Krasis BF16 PPL was sane on
   WikiText-2 (`2.8845`), measured HQQ deltas were acceptable, and sampled
   output was sensible, so these rows are marked `PASS` for now.
-- Gemma rows are `BLOCKED` because there is no Gemma BF16 llama-witness
-  reference yet, and the Krasis BF16 diagnostic PPL path produced a pathological
-  absolute PPL. The measured PPL deltas are retained only as raw diagnostics.
+- Gemma rows use chat-continuation PPL because raw WikiText-2 PPL is
+  pathological for this instruction/vision model. Krasis BF16 generated 14 chat
+  continuations, and BF16/HQQ runs scored the same 197 continuation tokens
+  through `/v1/internal/prefill_logits`. The BF16 baseline was PPL `1.0743`.
+  HQQ4 and HQQ6 kept the BF16 continuation token in the top 10 for `197/197`
+  scored tokens.
 - Nemotron rows are `BLOCKED` because there is no Nemotron BF16 llama-witness
   reference yet, and the Krasis BF16 diagnostic PPL path produced pathological
   absolute PPL values. The measured PPL deltas are retained only as raw

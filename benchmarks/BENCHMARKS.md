@@ -148,10 +148,35 @@ Quality/PPL artifacts:
   HQQ6 [PPL](20260715_q235_hqq6_k6v6_quality_rust_ppl.log) /
   [witness](20260715_q235_hqq6_k6v6_witness_compare.log) /
   [summary](20260715_q235_hqq6_k6v6_reference_test_summary.json).
-- Gemma4 quality is blocked/diagnostic-only: BF16 diagnostic
-  [PPL](20260715_gemma4_bf16_bf16kv_quality_rust_ppl.log), HQQ4
-  [PPL](20260715_gemma4_hqq4_k4v4_quality_rust_ppl.log), HQQ6
-  [PPL](20260715_gemma4_hqq6_k6v6_quality_rust_ppl.log).
+- Gemma4 quality is accepted by chat-reference checks and chat-continuation PPL
+  rather than raw WikiText-2 PPL. Standard Krasis BF16
+  [TSV](20260715_gemma_manual_reference_all16_standard_bf16.tsv), HQQ4/k4v4
+  [TSV](20260715_gemma_manual_reference_all16_hqq4_k4v4_rerun.tsv), and
+  HQQ6/k6v6 [TSV](20260715_gemma_manual_reference_all16_hqq6_k6v6.tsv) all
+  matched the stored Gemma chat reference on first token for `14/14` prompts.
+  Probe server logs: BF16 [server](20260715_gemma_bf16_standard_reference_probe_server.log),
+  HQQ4 [server](20260715_gemma_hqq4_reference_probe_server.log), and HQQ6
+  [server](20260715_gemma_hqq6_reference_probe_server.log).
+  Chat-continuation PPL fixes the Gemma PPL measurement by scoring BF16
+  continuations instead of raw WikiText-2 text: BF16
+  [client](20260715_gemma_bf16_chat_continuation_quality_ppl.log) /
+  [server](20260715_gemma_bf16_chat_continuation_server.log) /
+  [json](../perplexity/results/gemma-4-26b-a4b-it_quality-chat-v1_chat_continuation_bf16_bf16_20260715_191431.json),
+  HQQ4 [client](20260715_gemma_hqq4_chat_continuation_aligned_quality_ppl.log) /
+  [server](20260715_gemma_hqq4_chat_continuation_aligned_server.log) /
+  [json](../perplexity/results/gemma-4-26b-a4b-it_quality-chat-v1_chat_continuation_hqq4_k4v4_20260715_191625.json),
+  and HQQ6 [client](20260715_gemma_hqq6_chat_continuation_aligned_quality_ppl.log) /
+  [server](20260715_gemma_hqq6_chat_continuation_aligned_server.log) /
+  [json](../perplexity/results/gemma-4-26b-a4b-it_quality-chat-v1_chat_continuation_hqq6_k6v6_20260715_191809.json).
+  The BF16 continuation reference is
+  [json](20260715_gemma_chat_continuation_bf16_reference.json). Results:
+  BF16 PPL `1.0743`; HQQ4 PPL `1.1708` (`+8.98%`); HQQ6 PPL `1.0793`
+  (`+0.46%`), with `197/197` top-10 containment for both HQQ rows.
+  The original BF16 [PPL](20260715_gemma4_bf16_bf16kv_quality_rust_ppl.log),
+  HQQ4 [PPL](20260715_gemma4_hqq4_k4v4_quality_rust_ppl.log), and HQQ6
+  [PPL](20260715_gemma4_hqq6_k6v6_quality_rust_ppl.log) logs are retained as
+  diagnostics only because the raw WikiText-2 PPL path is pathological for this
+  instruction/vision model.
 
 Startup/build notes:
 - Hardware: local Linux workstation, AMD EPYC 7742, 1x RTX 5090 selected for

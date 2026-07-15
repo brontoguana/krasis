@@ -1,0 +1,61 @@
+Krasis Chat-Continuation Perplexity
+==================================================
+Config:       tests/gemma-4-4-hqq4-k4v4-a16.conf
+Model:        /home/main/.krasis/models/gemma-4-26b-a4b-it
+Prompt suite: quality-chat-v1
+Port:         18018
+Attention:    hqq4
+KV dtype:     k4v4
+Max new toks: 16
+Reference:    benchmarks/20260715_gemma_chat_continuation_bf16_reference.json
+
+  Scoring chat continuations...
+  Case 01/14 | scored  10 | PPL=1.0000 | top1=10/10 | running=1.0000
+  Case 02/14 | scored   8 | PPL=1.0922 | top1=8/8 | running=1.0400
+  Case 03/14 | scored  11 | PPL=2.0074 | top1=10/11 | running=1.3346
+  Case 04/14 | scored   8 | PPL=1.0000 | top1=8/8 | running=1.2539
+  Case 05/14 | scored  16 | PPL=1.2575 | top1=14/16 | running=1.2550
+  Case 06/14 | scored  16 | PPL=1.3525 | top1=15/16 | running=1.2769
+  Case 07/14 | scored  16 | PPL=1.0062 | top1=16/16 | running=1.2209
+  Case 08/14 | scored  16 | PPL=1.0123 | top1=16/16 | running=1.1852
+  Case 09/14 | scored  16 | PPL=1.0381 | top1=16/16 | running=1.1639
+  Case 10/14 | scored  16 | PPL=1.3639 | top1=15/16 | running=1.1863
+  Case 11/14 | scored  16 | PPL=1.0066 | top1=16/16 | running=1.1656
+  Case 12/14 | scored  16 | PPL=1.2613 | top1=14/16 | running=1.1745
+  Case 13/14 | scored  16 | PPL=1.2059 | top1=15/16 | running=1.1773
+  Case 14/14 | scored  16 | PPL=1.0994 | top1=15/16 | running=1.1708
+
+========================================================
+  CHAT-CONTINUATION PPL COMPLETE - quality-chat-v1
+========================================================
+  Perplexity:    1.1708
+  Bits/token:    0.2274
+  Tokens scored: 197
+  Top-1:         188 / 197
+  Top-10:        197 / 197
+  Elapsed:       8.8s (22 tok/s)
+  Log:           perplexity/results/gemma-4-26b-a4b-it_quality-chat-v1_chat_continuation_hqq4_k4v4_20260715_191625.log
+========================================================
+	Command being timed: "./dev quality-ppl tests/gemma-4-4-hqq4-k4v4-a16.conf --mode chat-continuation --reference-json benchmarks/20260715_gemma_chat_continuation_bf16_reference.json --max-new-tokens 16"
+	User time (seconds): 10.43
+	System time (seconds): 0.83
+	Percent of CPU this job got: 90%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:12.51
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 795224
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 163456
+	Voluntary context switches: 251
+	Involuntary context switches: 231
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 176
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

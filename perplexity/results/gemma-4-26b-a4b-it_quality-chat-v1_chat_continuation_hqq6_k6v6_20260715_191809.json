@@ -1,0 +1,166 @@
+{
+  "schema": "krasis_chat_continuation_ppl_v1",
+  "date": "2026-07-15T19:18:09.415917",
+  "config_path": "tests/gemma-4-4-hqq6-k6v6-a16.conf",
+  "model_path": "/home/main/.krasis/models/gemma-4-26b-a4b-it",
+  "prompt_suite": "quality-chat-v1",
+  "reference_json": "benchmarks/20260715_gemma_chat_continuation_bf16_reference.json",
+  "written_reference_json": null,
+  "reference_source_attention_quant": "bf16",
+  "reference_source_kv_dtype": "bf16",
+  "attention_quant": "hqq6",
+  "kv_dtype": "k6v6",
+  "max_new_tokens": 16,
+  "num_cases": 14,
+  "num_tokens_scored": 197,
+  "total_nll": 15.033733321000001,
+  "mean_loss": 0.07631336711167513,
+  "perplexity": 1.0793007385247815,
+  "bits_per_token": 0.11009691628555264,
+  "top1": 192,
+  "top10": 197,
+  "elapsed_s": 10.171211607055739,
+  "throughput_tok_s": 19.368390670718295,
+  "cases": [
+    {
+      "case_index": 1,
+      "prompt": "Hi",
+      "num_tokens_scored": 10,
+      "total_nll": 7.368e-06,
+      "mean_loss": 7.368e-07,
+      "perplexity": 1.0000007368002715,
+      "top1": 10,
+      "top10": 10
+    },
+    {
+      "case_index": 2,
+      "prompt": "What's your name?",
+      "num_tokens_scored": 8,
+      "total_nll": 0.022012856,
+      "mean_loss": 0.002751607,
+      "perplexity": 1.002755396145157,
+      "top1": 8,
+      "top10": 8
+    },
+    {
+      "case_index": 3,
+      "prompt": "Who trained you?",
+      "num_tokens_scored": 11,
+      "total_nll": 1.262449668,
+      "mean_loss": 0.11476815163636363,
+      "perplexity": 1.121613363201304,
+      "top1": 10,
+      "top10": 11
+    },
+    {
+      "case_index": 4,
+      "prompt": "What is 2+2?",
+      "num_tokens_scored": 8,
+      "total_nll": 0.00015193799999999998,
+      "mean_loss": 1.8992249999999998e-05,
+      "perplexity": 1.000018992430354,
+      "top1": 8,
+      "top10": 8
+    },
+    {
+      "case_index": 5,
+      "prompt": "Now multiply that by 10",
+      "num_tokens_scored": 16,
+      "total_nll": 1.842591569,
+      "mean_loss": 0.1151619730625,
+      "perplexity": 1.1220551655654818,
+      "top1": 15,
+      "top10": 16
+    },
+    {
+      "case_index": 6,
+      "prompt": "And divide the result by 5",
+      "num_tokens_scored": 16,
+      "total_nll": 3.1283418379999994,
+      "mean_loss": 0.19552136487499996,
+      "perplexity": 1.2159447721527232,
+      "top1": 16,
+      "top10": 16
+    },
+    {
+      "case_index": 7,
+      "prompt": "What is the largest animal in the world?",
+      "num_tokens_scored": 16,
+      "total_nll": 0.08780884300000001,
+      "mean_loss": 0.005488052687500001,
+      "perplexity": 1.005503139635345,
+      "top1": 16,
+      "top10": 16
+    },
+    {
+      "case_index": 8,
+      "prompt": "What is the largest body of water in the world?",
+      "num_tokens_scored": 16,
+      "total_nll": 0.08003189000000001,
+      "mean_loss": 0.0050019931250000005,
+      "perplexity": 1.0050145239769779,
+      "top1": 16,
+      "top10": 16
+    },
+    {
+      "case_index": 9,
+      "prompt": "Describe the binary chop algorithm in depth",
+      "num_tokens_scored": 16,
+      "total_nll": 0.6218097969999999,
+      "mean_loss": 0.038863112312499996,
+      "perplexity": 1.0396281616144096,
+      "top1": 16,
+      "top10": 16
+    },
+    {
+      "case_index": 10,
+      "prompt": "If it takes 4 hours for 4 towels to dry on a clothesline in the sun, how long does it take for 20 towels to dry under the exact same conditions?",
+      "num_tokens_scored": 16,
+      "total_nll": 2.083832988,
+      "mean_loss": 0.13023956175,
+      "perplexity": 1.1391012357262753,
+      "top1": 15,
+      "top10": 16
+    },
+    {
+      "case_index": 11,
+      "prompt": "Tell me facts about the blue whale",
+      "num_tokens_scored": 16,
+      "total_nll": 0.38668618000000005,
+      "mean_loss": 0.024167886250000003,
+      "perplexity": 1.0244622965870287,
+      "top1": 16,
+      "top10": 16
+    },
+    {
+      "case_index": 12,
+      "prompt": "Tell me more about whales in general",
+      "num_tokens_scored": 16,
+      "total_nll": 2.834676825,
+      "mean_loss": 0.1771673015625,
+      "perplexity": 1.1938308061797547,
+      "top1": 14,
+      "top10": 16
+    },
+    {
+      "case_index": 13,
+      "prompt": "Where do whales live geographically?",
+      "num_tokens_scored": 16,
+      "total_nll": 2.013353199,
+      "mean_loss": 0.1258345749375,
+      "perplexity": 1.1340945451036601,
+      "top1": 16,
+      "top10": 16
+    },
+    {
+      "case_index": 14,
+      "prompt": "Write me a quicksort implementation in Rust",
+      "num_tokens_scored": 16,
+      "total_nll": 0.6699783619999999,
+      "mean_loss": 0.041873647624999996,
+      "perplexity": 1.042762714881013,
+      "top1": 16,
+      "top10": 16
+    }
+  ]
+}

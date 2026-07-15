@@ -1,0 +1,14 @@
+01	first=9259/9259	prefix=9/9	prompt=Hi
+02	first=236777/236777	prefix=16/16	prompt=What's your name?
+03	first=236777/236777	prefix=10/10	prompt=Who trained you?
+04	first=236778/236778	prefix=7/7	prompt=What is 2+2?
+05	first=236812/236812	prefix=9/9	prompt=Now multiply that by 10
+06	first=236812/236812	prefix=8/8	prompt=And divide the result by 5
+07	first=818/818	prefix=16/16	prompt=What is the largest animal in the world?
+08	first=818/818	prefix=16/16	prompt=What is the largest body of water in the world?
+09	first=1018/1018	prefix=16/16	prompt=Describe the binary chop algorithm in depth
+10	first=1509/1509	prefix=16/16	prompt=If it takes 4 hours for 4 towels to dry on a clothesline in the sun, how long does it take for 20 towels to dry under the exact same conditions?
+11	first=818/818	prefix=16/16	prompt=Tell me facts about the blue whale
+12	first=2825/2825	prefix=5/16	prompt=Tell me more about whales in general
+13	first=17574/17574	prefix=7/16	prompt=Where do whales live geographically?
+14	first=8291/8291	prefix=16/16	prompt=Write me a quicksort implementation in Rust
