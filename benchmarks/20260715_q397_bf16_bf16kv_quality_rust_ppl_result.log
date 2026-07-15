@@ -1,0 +1,17 @@
+Krasis Rust Prefill Perplexity
+==================================================
+Date:          2026-07-15T14:48:50.648648
+Config:        tests/q397-stats-bf16-bf16kv-ppl.conf
+Model:         /home/main/.krasis/models/Qwen3.5-397B-A17B
+Dataset:       wikitext-2
+Attention:     bf16
+KV dtype:      bf16
+Window size:   2048
+Stride:        1024
+Perplexity:    2.8845
+BPC:           1.5283
+Mean loss:     1.059351
+Tokens scored: 19999 / 20000
+Windows:       20
+Elapsed:       320.0s
+Throughput:    62 tok/s

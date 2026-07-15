@@ -1,0 +1,17 @@
+Krasis Rust Prefill Perplexity
+==================================================
+Date:          2026-07-15T15:01:15.000694
+Config:        tests/q397-stats-hqq4-k4v4.conf
+Model:         /home/main/.krasis/models/Qwen3.5-397B-A17B
+Dataset:       wikitext-2
+Attention:     hqq4
+KV dtype:      k4v4
+Window size:   2048
+Stride:        1024
+Perplexity:    3.0189
+BPC:           1.5940
+Mean loss:     1.104892
+Tokens scored: 19999 / 20000
+Windows:       20
+Elapsed:       356.9s
+Throughput:    56 tok/s

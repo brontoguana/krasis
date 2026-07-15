@@ -1,5 +1,79 @@
 # Krasis Benchmark Results
 
+## Qwen3.5-397B-A17B RTX 5090 HQQ4/HQQ6 Stats Benchmark - 2026-07-15
+
+Purpose: public stats-table benchmark and diagnostic quality rows for
+Qwen3.5-397B-A17B, using newly built per-HQQ approved route heatmaps and
+recording external peak process RSS for `STATS-BENCHMARKS.md`.
+
+Configs:
+
+```text
+tests/q397-stats-hqq4-k4v4.conf
+tests/q397-stats-hqq6-k4v4.conf
+tests/q397-stats-hqq8-k4v4.conf
+tests/q397-stats-hqq6-k6v6.conf
+tests/q397-stats-bf16-bf16kv-ppl.conf
+```
+
+Approved heatmaps:
+- HQQ4: [canonical](approved_heatmaps/qwen35_397b_hqq4_p00006_approved_heatmap.json),
+  [raw](approved_heatmaps/20260715_q397_hqq4_k4v4_route_p8_d256.json),
+  [checkpoint](approved_heatmaps/20260715_q397_hqq4_k4v4_route_p8_d256.p00006.json)
+- HQQ6: [canonical](approved_heatmaps/qwen35_397b_hqq6_p00006_approved_heatmap.json),
+  [raw](approved_heatmaps/20260715_q397_hqq6_k4v4_route_p8_d256.json),
+  [checkpoint](approved_heatmaps/20260715_q397_hqq6_k4v4_route_p8_d256.p00006.json)
+- HQQ8: [canonical](approved_heatmaps/qwen35_397b_hqq8_p00006_approved_heatmap.json),
+  [raw](approved_heatmaps/20260715_q397_hqq8_k4v4_route_p8_d256.json),
+  [checkpoint](approved_heatmaps/20260715_q397_hqq8_k4v4_route_p8_d256.p00006.json)
+- Build log: [combined HQQ4/HQQ6/HQQ8 heatmap build](approved_heatmaps/20260715_q397_stats_heatmaps_hqq4_hqq6_hqq8.log)
+
+Benchmark result:
+
+| Quant | Prefill internal | Decode internal | Round trip network | HCS coverage | Min free VRAM | Peak system RAM | Logs |
+|-------|-----------------:|----------------:|-------------------:|-------------:|--------------:|----------------:|------|
+| INT4/HQQ4/k4v4 | 973.8 tok/s | 10.04 tok/s | 18.71 tok/s | 2720/30720 (8.9%) | 952 MB | 231.5 GB max RSS (215.6 GiB) | [stdout](20260715_q397_hqq4_k4v4_stats_benchmark_stdout.log), [report](20260715_q397_hqq4_k4v4_stats_benchmark_report.log), [time](20260715_q397_hqq4_k4v4_stats_benchmark_time.log) |
+| INT4/HQQ6/k6v6 | 866.0 tok/s | 9.38 tok/s | 16.15 tok/s | 2420/30720 (7.9%) | 896 MB | 239.4 GB max RSS (223.0 GiB) | [stdout](20260715_q397_hqq6_k6v6_stats_benchmark_stdout.log), [report](20260715_q397_hqq6_k6v6_stats_benchmark_report.log), [time](20260715_q397_hqq6_k6v6_stats_benchmark_time.log) |
+
+Quality/PPL artifacts:
+- BF16 diagnostic: [PPL](20260715_q397_bf16_bf16kv_quality_rust_ppl.log),
+  [result](20260715_q397_bf16_bf16kv_quality_rust_ppl_result.log),
+  [JSON](20260715_q397_bf16_bf16kv_quality_rust_ppl.json),
+  [server](20260715_q397_bf16_bf16kv_quality_server.log).
+- HQQ4: [PPL](20260715_q397_hqq4_k4v4_quality_rust_ppl.log),
+  [result](20260715_q397_hqq4_k4v4_quality_rust_ppl_result.log),
+  [JSON](20260715_q397_hqq4_k4v4_quality_rust_ppl.json),
+  [server](20260715_q397_hqq4_k4v4_quality_server.log).
+- HQQ6: [PPL](20260715_q397_hqq6_k6v6_quality_rust_ppl.log),
+  [result](20260715_q397_hqq6_k6v6_quality_rust_ppl_result.log),
+  [JSON](20260715_q397_hqq6_k6v6_quality_rust_ppl.json),
+  [server](20260715_q397_hqq6_k6v6_quality_server.log).
+
+Quality result:
+
+| Quant | PPL | BPC | Tokens scored | Delta vs BF16 | Result |
+|-------|----:|----:|--------------:|---------------:|--------|
+| BF16/bf16 KV diagnostic | 2.8845 | 1.5283 | 19,999 | baseline | diagnostic |
+| INT4/HQQ4/k4v4 | 3.0189 | 1.5940 | 19,999 | +4.66% | BLOCKED - no llama-witness BF16 reference |
+| INT4/HQQ6/k6v6 | 2.8806 | 1.5264 | 19,999 | -0.14% | BLOCKED - no llama-witness BF16 reference |
+
+Startup/build notes:
+- Hardware: local Linux workstation, AMD EPYC 7742, 1x RTX 5090 selected.
+- HQQ benchmark and HQQ PPL runs used
+  `KRASIS_APPROVED_HEATMAP_MODE=require` with a local file manifest until the
+  new heatmaps are published by this commit. Each HQQ run loaded the matched
+  per-HQQ approved heatmap and skipped quick startup heatmap collection.
+- BF16 diagnostic startup had no BF16-approved heatmap and therefore built a
+  quick route heatmap. The progress logging added for quick heatmap startup
+  showed all six prompts and made the several-minute wait visible.
+- Min free VRAM stayed close to the default 600 MB safety margin after startup
+  HCS pressure eviction: 952 MB for HQQ4 and 896 MB for HQQ6 in benchmark
+  runs, 940 MB for BF16 diagnostic startup, 952 MB for HQQ4 PPL startup, and
+  928 MB for HQQ6 PPL startup.
+- Qwen3.5-397B does not currently have a BF16 llama-witness reference in
+  `krasis-internal/reference-outputs`, so quality rows are diagnostic-only even
+  though the Krasis BF16 WikiText-2 PPL baseline is not pathological.
+
 ## Remaining Supported Models RTX 5090 HQQ4/HQQ6 Stats Benchmark - 2026-07-15
 
 Purpose: public stats-table benchmark for Qwen3-Coder-Next, Qwen3.5-35B-A3B,

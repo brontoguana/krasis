@@ -1,0 +1,115 @@
+[0;36m[1m=>[0m Waiting for selected GPUs (0) to clear...
+[0;32m[1mOK[0m Selected GPUs (0) clear.
+[0;36m[1m=>[0m Launching from: tests/q397-stats-hqq6-k6v6.conf
+[0;36m[1m=>[0m Run dir: /home/main/Documents/Claude/krasis-397-stats/logs/dev-run_20260715_150224
+[0;36m[1m=>[0m Import origin check:
+krasis: /home/main/Documents/Claude/krasis-397-stats/python/krasis/__init__.py
+krasis.krasis: /home/main/Documents/Claude/krasis-397-stats/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+Pre-scan: set CUDA_VISIBLE_DEVICES=0
+Loaded config from tests/q397-stats-hqq6-k6v6.conf: {'model_path': '/home/main/.krasis/models/Qwen3.5-397B-A17B', 'selected_gpus': '0', 'num_gpus': 1, 'layer_group_size': 2, 'kv_cache_mb': 1500, 'kv_dtype': 'k6v6', 'gpu_expert_bits': 4, 'cpu_expert_bits': 4, 'attention_quant': 'hqq6', 'hqq_group_size': 128, 'shared_expert_quant': 'int8', 'dense_mlp_quant': 'int8', 'lm_head_quant': 'int8', 'krasis_threads': 40, 'host': '0.0.0.0', 'port': 18198, 'gpu_prefill_threshold': 300, 'vram_safety_margin': 600, 'force_load': False, 'enable_thinking': False}
+
+[1m[36m▸ Krasis — Qwen3.5-397B-A17B[0m
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 1[0m
+  [32mHCS host cache: source[0m
+  [32mSelected physical GPUs: 0 (config; CUDA_VISIBLE_DEVICES=0)[0m
+  [32mExperts: GPU INT4 g128 (amax)  |  Attention: hqq6  |  KV: k6v6[0m
+  [32mLayer groups: 2  |  KV cache: 1500 MB  |  Threads: 40[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+
+[1m[36m▸ Loading model weights[0m
+  [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=518 MB, free=31600 MB, total=32119 MB
+
+[1m[36m▸ Loading GPU weights[0m
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:0: alloc=14481 MB, reserved=14612 MB, used=15298 MB, free=16820 MB, total=32119 MB
+  [0;32mHQQ attention artifacts validated (6160 MB cached), 16820 MB free[0m
+
+[1m[36m▸ Loading GPU expert weights from cache[0m
+    Loading GPU Marlin cache: 60 layers...
+    GPU Marlin cache loaded: 199.7 GB in 130s
+  [0;32mExpert weights loaded in 131s.[0m
+  [33m[VRAM after-phase2-expert-weights][0m cuda:0: alloc=14481 MB, reserved=14612 MB, used=15298 MB, free=16820 MB, total=32119 MB
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:0: alloc=14481 MB, reserved=14612 MB, used=15298 MB, free=16820 MB, total=32119 MB
+  [33m[VRAM after-kv-cache-init][0m cuda:0: alloc=15983 MB, reserved=16116 MB, used=16802 MB, free=15316 MB, total=32119 MB
+  [33m[VRAM after-full-load][0m cuda:0: alloc=15983 MB, reserved=16116 MB, used=16802 MB, free=15316 MB, total=32119 MB
+
+[1m[36m▸ CUDA runtime warmup[0m
+  [32mcuBLAS + Triton kernel compilation done[0m
+
+[1m[36m▸ Setting up GPU decode store[0m
+  [32mGPU decode store ready (addr=0x7d3452f0)[0m
+  [32mReleased redundant GPU execution source tensors (1,450 MB)[0m
+  [2mVRAM monitor started (tracking warmup)[0m
+  [2mcuda:0: 0 MB total[0m
+
+[1m[36m▸ Pre-allocating Rust prefill engine[0m
+[FLA] Loading kernels for H=64 from /home/main/Documents/Claude/krasis-397-stats/python/krasis/libkrasis_fla_sm120.so
+[FLA] loaded krasis_fla_chunk_local_cumsum_scalar_kernel (H=64)
+[FLA] loaded krasis_fla_chunk_scaled_dot_kkt_fwd_kernel (H=64)
+[FLA] loaded krasis_fla_merge_16x16_to_64x64_inverse_kernel (H=64)
+[FLA] loaded krasis_fla_recompute_w_u_fwd_kernel (H=64)
+[FLA] loaded krasis_fla_chunk_gated_delta_rule_fwd_kernel_h_blockdim64 (H=64)
+[FLA] loaded krasis_fla_chunk_fwd_kernel_o (H=64)
+  [32mPrefill engine scratch buffers allocated[0m
+
+[1m[36m▸ Warmup (Rust prefill engine)[0m
+  [32mRust prefill warmed with 300 tokens before HCS budgeting[0m
+  [32mWarmup complete in 2.6s[0m
+  [2mcuda:0 warmup:  peak 19,608 MB used / 32,119 MB total  (min free: 12,510 MB)[0m
+
+[1m[36m▸ VRAM calibration[0m
+  [32mSafety margin: 600 MB[0m
+  [32mFree VRAM after startup: 15,990 MB / 32,119 MB[0m
+  [32mShort calibration: probing 500 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 5.86s (5.5 tok/s)  VRAM: 15936 MB free now, 15936 MB min free during decode[0m
+  [32mShort calibration: baseline=15,990 MB, prefill post-alloc=13,014 MB, prefill min=10,284 MB, decode min=15,936 MB, post-cleanup=15,936 MB[0m
+  [32mAdaptive long calibration: default target=39,920 tokens, target low-water floor=1,200 MB, estimated prefill growth=0.8443 MB/token[0m
+  [32mAdaptive long calibration: next probe 9,838 tokens (model-estimated initial probe (projected 0.8443 MB/token, validation floor 2400 MB))[0m
+  [32mLong calibration: probing 9,838 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 5.96s (5.4 tok/s)  VRAM: 15932 MB free now, 15932 MB min free during decode[0m
+  [32mLong calibration: baseline=15,936 MB, prefill post-alloc=4,902 MB, prefill min=1,734 MB, decode min=15,932 MB, post-cleanup=15,932 MB[0m
+  [32mAdaptive long calibration: using 9,838 tokens (current low-water 1734 MB leaves no validation reserve above 2400 MB)[0m
+  [32mScratch reservation: max=42,208 MB (at 50,000 tokens)[0m
+
+[1m[36m▸ VRAM calibration complete[0m
+  [32mPost-calibration free VRAM: 15,932 MB[0m
+  [32mTransient deltas: short prefill=5,706 MB, long prefill=14,202 MB, short decode=54 MB, long decode=4 MB[0m
+  [32mGPU0 decode HCS budget: 15,278 MB[0m
+  [32mPrefill HCS budgets: short=9,626 MB, long=1,130 MB[0m
+  [32mWorst-case prefill scratch reservation: 42,208 MB at 50,000 tokens[0m
+
+[1m[36m▸ Calculating HCS budget[0m
+
+[1m[36m▸ Checking approved route heatmap cache[0m
+  [32mApproved route heatmap loaded from cache: qwen35_397b_hqq6_p00006 (manifest-approved runtime compatibility)[0m
+  [32mUsing approved route heatmap; quick startup heatmap collection skipped[0m
+  [32mHeatmap: 26,692 experts ranked from 26,692 entries[0m
+  [2mVRAM calibration: baseline 15932 MB | prefill 931.7 KB/tok, decode -5.5 KB/tok | HCS allowance prefill: short 9626 MB, long 1130 MB | decode: short 15278 MB, long 15328 MB | idle floors prefill=6306 MB decode=654 MB | decode-resident HCS budget=15278 MB[0m
+  [2mGPU0 HCS: 30720 experts (26692 ranked + 4028 unranked), reclaimable: 15,278 MB[0m
+
+[1m[36m▸ Loading GPU0 HCS pool (fully reclaimable)[0m
+
+[1m[36m▸ HCS pool loaded[0m
+  [32mHCS pool: 0/30720 experts loaded in 0.00s (0.0% coverage), 0.0 MB VRAM, 0 free slots, gpu_route_sync=false, mapped_reads=false | soft: 2440 experts in 0.68s (15097.5 MB, host_mode=source) | total: 2440/30720 (7.9%) coverage[0m
+  [2mLoaded in 0.7s[0m
+
+[1m[36m▸ Decode validation[0m
+  [32mSkipped: Rust prefill already warmed before HCS budgeting[0m
+
+[1m[36m▸ VRAM monitor: runtime warnings enabled[0m
+  [32mSafety margin: 600 MB — warnings on every new low below this[0m
+VRAM pressure: evicted 20 soft HCS experts / 1 chunks; free=928 MB after eviction (safety=600 MB, target=848 MB)
+  [33mVRAM pressure eviction at startup_ready: evicted 20 soft HCS experts, freed 123.8 MB, final free 928 MB[0m
+
+[1m[32mKRASIS SERVER READY[0m
+  [32mModel:[0m    [1mQwen3.5-397B-A17B[0m
+  [32mAddress:[0m  [1m0.0.0.0:18198[0m
+  [32mContext:[0m  117,024 tokens  |  KV cache: 1,500 MB
+  [32mDecode:[0m   GPU  |  HCS: on  |  Think: off
+  [32mClient setup:[0m
+    Base URL:      [1mhttp://127.0.0.1:18198/v1[0m
+    Chat endpoint: http://127.0.0.1:18198/v1/chat/completions
+    Models:        http://127.0.0.1:18198/v1/models
+    API key:       [1mX[0m [2m(any value)[0m
+    Model name:    [1mQwen3.5-397B-A17B-vision[0m
+                   [2mvision-capable; use this same model for text and images[0m
+  [2mPress Q or Ctrl-C to stop[0m

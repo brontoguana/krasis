@@ -1,0 +1,21 @@
+{
+  "schema": "krasis_rust_prefill_ppl_v1",
+  "date": "2026-07-15T15:01:15.000694",
+  "config_path": "tests/q397-stats-hqq4-k4v4.conf",
+  "model_path": "/home/main/.krasis/models/Qwen3.5-397B-A17B",
+  "dataset": "wikitext-2",
+  "attention_quant": "hqq4",
+  "kv_dtype": "k4v4",
+  "window_size": 2048,
+  "stride": 1024,
+  "max_tokens": 20000,
+  "num_tokens_total": 20000,
+  "num_tokens_scored": 19999,
+  "num_windows": 20,
+  "total_nll": 22096.736075304045,
+  "mean_loss": 1.1048920483676206,
+  "perplexity": 3.0188985561883572,
+  "bits_per_char": 1.5940222788976148,
+  "elapsed_s": 356.8516644430347,
+  "throughput_tok_s": 56.04289398849785
+}

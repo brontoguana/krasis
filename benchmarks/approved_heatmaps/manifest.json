@@ -1,7 +1,7 @@
 {
   "format": "krasis_approved_hcs_route_heatmap_manifest",
   "format_version": 1,
-  "generated_at_utc": "2026-07-15T00:30:10Z",
+  "generated_at_utc": "2026-07-15T13:01:35Z",
   "artifacts": [
     {
       "artifact_id": "step37_flash_hqq4_p00006",
@@ -1974,6 +1974,195 @@
         "hqq_profile": "hqq8",
         "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
         "notes": "Measured on 2026-07-15 as part of the stats heatmap batch. Published as a matched per-HQQ artifact; exact HQQ artifacts are preferred when available."
+      }
+    },
+    {
+      "artifact_id": "qwen35_397b_hqq4_p00006",
+      "status": "approved",
+      "priority": 5,
+      "model_name": "Qwen3.5-397B-A17B",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/qwen35_397b_hqq4_p00006_approved_heatmap.json",
+      "filename": "qwen35_397b_hqq4_p00006_approved_heatmap.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/qwen35_397b_hqq4_p00006_approved_heatmap.json",
+      "sha256": "2591f4cca78a5fa19570d5a3960082cf5d8b82ca4a6158d49c45a8493968c75e",
+      "bytes": 360634,
+      "route_signature_sha256": "48eea8e46c8df3157424fbece7bfe1cdb36337229afe9b7c6a321d3b44909c63",
+      "validated_runtime_sha256s": [
+        "33e3e1f42cf448262ca66fbad7e2b20c110b4c04503fbade7034520fddc67fe7"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq4",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Qwen3.5-397B-A17B_matched_hqq4_all_kv",
+        "matched_attention_quant": "hqq4",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq4"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored because per-HQQ artifacts are captured and KV-only routing is treated as compatible for approved heatmap lookup."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 26689,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ quick startup heatmap corpus",
+        "hqq_profile": "hqq4",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured on 2026-07-15 as part of the Qwen3.5-397B stats heatmap batch. Published as a matched per-HQQ artifact; numeric priority is ahead of the legacy p00080 Q397 HQQ6 artifact so current stats profiles select the p00006 matched-HQQ heatmaps."
+      }
+    },
+    {
+      "artifact_id": "qwen35_397b_hqq6_p00006",
+      "status": "approved",
+      "priority": 5,
+      "model_name": "Qwen3.5-397B-A17B",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/qwen35_397b_hqq6_p00006_approved_heatmap.json",
+      "filename": "qwen35_397b_hqq6_p00006_approved_heatmap.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/qwen35_397b_hqq6_p00006_approved_heatmap.json",
+      "sha256": "ab0ece408d65c3f855adebffe9d86294bc75ba6a1e6be1712829cc8804b559df",
+      "bytes": 360794,
+      "route_signature_sha256": "48eea8e46c8df3157424fbece7bfe1cdb36337229afe9b7c6a321d3b44909c63",
+      "validated_runtime_sha256s": [
+        "e475801d9804e603c754ef0d0628c241d0803dd4006404605646d419f1d98cc3"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq6",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Qwen3.5-397B-A17B_matched_hqq6_all_kv",
+        "matched_attention_quant": "hqq6",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq6"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored because per-HQQ artifacts are captured and KV-only routing is treated as compatible for approved heatmap lookup."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 26692,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ quick startup heatmap corpus",
+        "hqq_profile": "hqq6",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured on 2026-07-15 as part of the Qwen3.5-397B stats heatmap batch. Published as a matched per-HQQ artifact; numeric priority is ahead of the legacy p00080 Q397 HQQ6 artifact so current stats profiles select the p00006 matched-HQQ heatmaps."
+      }
+    },
+    {
+      "artifact_id": "qwen35_397b_hqq8_p00006",
+      "status": "approved",
+      "priority": 5,
+      "model_name": "Qwen3.5-397B-A17B",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/qwen35_397b_hqq8_p00006_approved_heatmap.json",
+      "filename": "qwen35_397b_hqq8_p00006_approved_heatmap.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/qwen35_397b_hqq8_p00006_approved_heatmap.json",
+      "sha256": "d71e6160422a82a5a6b06cf1275ed9af12d3cafed12aa75e2c702adc6ac93d2e",
+      "bytes": 362716,
+      "route_signature_sha256": "48eea8e46c8df3157424fbece7bfe1cdb36337229afe9b7c6a321d3b44909c63",
+      "validated_runtime_sha256s": [
+        "a79c8fae3e55f3234ec03767a02ad66d0ac0500f1b1966b72e822087c3f47f7b"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq8",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Qwen3.5-397B-A17B_matched_hqq8_all_kv",
+        "matched_attention_quant": "hqq8",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq8"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored because per-HQQ artifacts are captured and KV-only routing is treated as compatible for approved heatmap lookup."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 26833,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ quick startup heatmap corpus",
+        "hqq_profile": "hqq8",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured on 2026-07-15 as part of the Qwen3.5-397B stats heatmap batch. Published as a matched per-HQQ artifact; numeric priority is ahead of the legacy p00080 Q397 HQQ6 artifact so current stats profiles select the p00006 matched-HQQ heatmaps."
       }
     }
   ]
