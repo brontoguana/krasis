@@ -157,9 +157,11 @@ class HFDownloaderTests(unittest.TestCase):
             [m.repo_id for m in models],
             [
                 "Qwen/Qwen3-Coder-Next",
+                "stepfun-ai/Step-3.7-Flash",
                 "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
                 "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
                 "Qwen/Qwen3.6-35B-A3B",
+                "deepreinforce-ai/Ornith-1.0-35B",
                 "Qwen/Qwen3.5-35B-A3B",
                 "Qwen/Qwen3.5-122B-A10B",
                 "Qwen/Qwen3-235B-A22B",

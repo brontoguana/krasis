@@ -1,0 +1,67 @@
+Krasis Rust Prefill Perplexity
+==================================================
+Config:      tests/ornith35-stats-bf16-bf16kv-ppl.conf
+Model:       /home/main/.krasis/models/deepreinforce-ai/Ornith-1.0-35B
+Dataset:     wikitext-2
+Port:        18205
+Attention:   bf16
+KV dtype:    bf16
+Window:      2048, stride=1024
+Max tokens:  20000
+
+  Loading dataset...
+  Tokenizing...
+  Tokens: 20,000
+  [  5.0%] Window 1/20 | scored 2047 this, 2047/20000 total | PPL=4.9713 | 250 tok/s
+  [ 10.0%] Window 2/20 | scored 1024 this, 3071/20000 total | PPL=5.5242 | 188 tok/s
+  [ 15.0%] Window 3/20 | scored 1024 this, 4095/20000 total | PPL=6.0610 | 168 tok/s
+  [ 20.0%] Window 4/20 | scored 1024 this, 5119/20000 total | PPL=6.7988 | 157 tok/s
+  [ 25.0%] Window 5/20 | scored 1024 this, 6143/20000 total | PPL=6.9113 | 151 tok/s
+  [ 30.0%] Window 6/20 | scored 1024 this, 7167/20000 total | PPL=7.1915 | 147 tok/s
+  [ 35.0%] Window 7/20 | scored 1024 this, 8191/20000 total | PPL=7.1579 | 144 tok/s
+  [ 40.0%] Window 8/20 | scored 1024 this, 9215/20000 total | PPL=6.7881 | 141 tok/s
+  [ 45.0%] Window 9/20 | scored 1024 this, 10239/20000 total | PPL=6.7807 | 140 tok/s
+  [ 50.0%] Window 10/20 | scored 1024 this, 11263/20000 total | PPL=6.5731 | 138 tok/s
+  [ 55.0%] Window 11/20 | scored 1024 this, 12287/20000 total | PPL=6.1274 | 137 tok/s
+  [ 60.0%] Window 12/20 | scored 1024 this, 13311/20000 total | PPL=5.7727 | 136 tok/s
+  [ 65.0%] Window 13/20 | scored 1024 this, 14335/20000 total | PPL=5.4807 | 135 tok/s
+  [ 70.0%] Window 14/20 | scored 1024 this, 15359/20000 total | PPL=5.4477 | 135 tok/s
+  [ 75.0%] Window 15/20 | scored 1024 this, 16383/20000 total | PPL=5.4370 | 134 tok/s
+  [ 80.0%] Window 16/20 | scored 1024 this, 17407/20000 total | PPL=5.4416 | 134 tok/s
+  [ 85.0%] Window 17/20 | scored 1024 this, 18431/20000 total | PPL=5.6029 | 133 tok/s
+  [ 90.0%] Window 18/20 | scored 1024 this, 19455/20000 total | PPL=5.6912 | 132 tok/s
+  [ 95.0%] Window 19/20 | scored 544 this, 19999/20000 total | PPL=5.7077 | 131 tok/s
+  [100.0%] Window 20/20 | scored 0 this, 19999/20000 total | PPL=5.7077 | 129 tok/s
+
+========================================================
+  RUST PREFILL PPL COMPLETE - wikitext-2
+========================================================
+  Perplexity:    5.7077
+  BPC:           2.5129
+  Tokens scored: 19,999
+  Elapsed:       155.4s (129 tok/s)
+  Log:           perplexity/results/Ornith-1.0-35B_wikitext-2_rust_prefill_bf16_bf16_20260716_173148.log
+========================================================
+	Command being timed: "./dev quality-ppl tests/ornith35-stats-bf16-bf16kv-ppl.conf --max-tokens 20000"
+	User time (seconds): 12.32
+	System time (seconds): 1.26
+	Percent of CPU this job got: 8%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 2:46.62
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 1053604
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 113
+	Minor (reclaiming a frame) page faults: 306217
+	Voluntary context switches: 1172
+	Involuntary context switches: 227
+	Swaps: 0
+	File system inputs: 286568
+	File system outputs: 3176
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

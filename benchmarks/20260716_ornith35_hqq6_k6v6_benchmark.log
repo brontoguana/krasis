@@ -1,0 +1,235 @@
+[0;36m[1m=>[0m Waiting for selected GPUs (0) to clear...
+[0;32m[1mOK[0m Selected GPUs (0) clear.
+[0;36m[1m=>[0m Running standard benchmark: tests/ornith35-stats-hqq6-k6v6.conf
+[0;36m[1m=>[0m Run dir: /tmp/krasis-ornith-stats/logs/dev-benchmark_20260716_172341
+[0;36m[1m=>[0m Log: /tmp/krasis-ornith-stats/logs/dev-benchmark_20260716_172341/benchmark_stdout.log
+[0;36m[1m=>[0m Import origin check:
+krasis: /tmp/krasis-ornith-stats/python/krasis/__init__.py
+krasis.krasis: /tmp/krasis-ornith-stats/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+Pre-scan: set CUDA_VISIBLE_DEVICES=0
+Loaded config from tests/ornith35-stats-hqq6-k6v6.conf: {'model_path': '/home/main/.krasis/models/deepreinforce-ai/Ornith-1.0-35B', 'selected_gpus': '0', 'num_gpus': 1, 'layer_group_size': 2, 'kv_cache_mb': 1000, 'kv_dtype': 'k6v6', 'gpu_expert_bits': 4, 'cpu_expert_bits': 4, 'attention_quant': 'hqq6', 'shared_expert_quant': 'int8', 'dense_mlp_quant': 'int8', 'lm_head_quant': 'int8', 'krasis_threads': 40, 'host': '0.0.0.0', 'port': 18204, 'gpu_prefill_threshold': 300, 'vram_safety_margin': 600, 'force_load': False, 'enable_thinking': False}
+
+[1m[36m▸ Krasis — Ornith-1.0-35B[0m
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 1[0m
+  [32mHCS host cache: source[0m
+  [32mSelected physical GPUs: 0 (config; CUDA_VISIBLE_DEVICES=0)[0m
+  [32mExperts: GPU INT4 g128 (amax)  |  Attention: hqq6  |  KV: k6v6[0m
+  [32mLayer groups: 2  |  KV cache: 1000 MB  |  Threads: 40[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+
+[1m[36m▸ Loading model weights[0m
+  [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=518 MB, free=31600 MB, total=32119 MB
+
+[1m[36m▸ Loading GPU weights[0m
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:0: alloc=3626 MB, reserved=3678 MB, used=4364 MB, free=27754 MB, total=32119 MB
+  [0;32mHQQ attention artifacts validated (1140 MB cached), 27754 MB free[0m
+
+[1m[36m▸ Loading GPU expert weights from cache[0m
+    Loading GPU Marlin cache: 40 layers...
+    GPU Marlin cache loaded: 16.7 GB in 11s
+  [0;32mExpert weights loaded in 11s.[0m
+  [33m[VRAM after-phase2-expert-weights][0m cuda:0: alloc=3626 MB, reserved=3678 MB, used=4364 MB, free=27754 MB, total=32119 MB
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:0: alloc=3626 MB, reserved=3678 MB, used=4364 MB, free=27754 MB, total=32119 MB
+  [33m[VRAM after-kv-cache-init][0m cuda:0: alloc=4627 MB, reserved=4682 MB, used=5368 MB, free=26750 MB, total=32119 MB
+  [33m[VRAM after-full-load][0m cuda:0: alloc=4627 MB, reserved=4682 MB, used=5368 MB, free=26750 MB, total=32119 MB
+
+[1m[36m▸ CUDA runtime warmup[0m
+  [32mcuBLAS + Triton kernel compilation done[0m
+
+[1m[36m▸ Setting up GPU decode store[0m
+  [32mGPU decode store ready (addr=0x4b83bd20)[0m
+  [32mReleased redundant GPU execution source tensors (565 MB)[0m
+  [2mVRAM monitor started (tracking warmup)[0m
+  [2mcuda:0: 0 MB total[0m
+
+[1m[36m▸ Pre-allocating Rust prefill engine[0m
+[FLA] Loading kernels for H=32 from /tmp/krasis-ornith-stats/python/krasis/libkrasis_fla_sm120.so
+[FLA] loaded krasis_fla_chunk_local_cumsum_scalar_kernel (H=32)
+[FLA] loaded krasis_fla_chunk_scaled_dot_kkt_fwd_kernel (H=32)
+[FLA] loaded krasis_fla_merge_16x16_to_64x64_inverse_kernel (H=32)
+[FLA] loaded krasis_fla_recompute_w_u_fwd_kernel (H=32)
+[FLA] loaded krasis_fla_chunk_gated_delta_rule_fwd_kernel_h_blockdim64 (H=32)
+[FLA] loaded krasis_fla_chunk_fwd_kernel_o (H=32)
+  [32mPrefill engine scratch buffers allocated[0m
+
+[1m[36m▸ Warmup (Rust prefill engine)[0m
+  [32mRust prefill warmed with 300 tokens before HCS budgeting[0m
+  [32mWarmup complete in 1.4s[0m
+  [2mcuda:0 warmup:  peak 7,264 MB used / 32,119 MB total  (min free: 24,854 MB)[0m
+
+[1m[36m▸ VRAM calibration[0m
+  [32mSafety margin: 600 MB[0m
+  [32mFree VRAM after startup: 25,900 MB / 32,119 MB[0m
+  [32mShort calibration: probing 500 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 0.97s (32.9 tok/s)  VRAM: 25822 MB free now, 25822 MB min free during decode[0m
+  [32mShort calibration: baseline=25,900 MB, prefill post-alloc=25,158 MB, prefill min=24,762 MB, decode min=25,822 MB, post-cleanup=25,822 MB[0m
+  [32mAdaptive long calibration: default target=39,920 tokens, target low-water floor=1,200 MB, estimated prefill growth=0.4236 MB/token[0m
+  [32mAdaptive long calibration: next probe 39,920 tokens (model-estimated initial probe (projected 0.4236 MB/token, validation floor 2400 MB))[0m
+  [32mLong calibration: probing 39,920 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 1.09s (29.3 tok/s)  VRAM: 25816 MB free now, 25816 MB min free during decode[0m
+  [32mLong calibration: baseline=25,822 MB, prefill post-alloc=8,092 MB, prefill min=7,696 MB, decode min=25,816 MB, post-cleanup=25,816 MB[0m
+  [32mScratch reservation: max=20,879 MB (at 50,000 tokens)[0m
+
+[1m[36m▸ VRAM calibration complete[0m
+  [32mPost-calibration free VRAM: 25,816 MB[0m
+  [32mTransient deltas: short prefill=1,138 MB, long prefill=18,126 MB, short decode=78 MB, long decode=6 MB[0m
+  [32mGPU0 decode HCS budget: 25,138 MB[0m
+  [32mPrefill HCS budgets: short=24,078 MB, long=7,090 MB[0m
+  [32mWorst-case prefill scratch reservation: 20,879 MB at 50,000 tokens[0m
+
+[1m[36m▸ Calculating HCS budget[0m
+
+[1m[36m▸ Checking approved route heatmap cache[0m
+  [32mApproved route heatmap loaded from cache: ornith35_35b_hqq6_p00006 (manifest-approved runtime compatibility)[0m
+  [32mUsing approved route heatmap; quick startup heatmap collection skipped[0m
+  [32mHeatmap: 9,582 experts ranked from 9,582 entries[0m
+  [2mVRAM calibration: baseline 25816 MB | prefill 441.3 KB/tok, decode -1.9 KB/tok | HCS allowance prefill: short 24078 MB, long 7090 MB | decode: short 25138 MB, long 25210 MB | idle floors prefill=1738 MB decode=678 MB | decode-resident HCS budget=25138 MB[0m
+  [2mGPU0 HCS: 10240 experts (9582 ranked + 658 unranked), reclaimable: 25,138 MB[0m
+
+[1m[36m▸ Loading GPU0 HCS pool (fully reclaimable)[0m
+
+[1m[36m▸ HCS pool loaded[0m
+  [32mHCS pool: 0/10240 experts loaded in 0.00s (0.0% coverage), 0.0 MB VRAM, 0 free slots, gpu_route_sync=false, mapped_reads=false | soft: 10240 experts in 0.93s (15840.0 MB, host_mode=source) | total: 10240/10240 (100.0%) coverage[0m
+  [2mLoaded in 1.0s[0m
+
+[1m[36m▸ Decode validation[0m
+  [32mSkipped: Rust prefill already warmed before HCS budgeting[0m
+
+[1m[36m▸ VRAM monitor: runtime warnings enabled[0m
+  [32mSafety margin: 600 MB — warnings on every new low below this[0m
+
+[1m[32mKRASIS SERVER READY[0m
+  [32mModel:[0m    [1mOrnith-1.0-35B[0m
+  [32mAddress:[0m  [1m0.0.0.0:18204[0m
+  [32mContext:[0m  117,024 tokens  |  KV cache: 1,000 MB
+  [32mDecode:[0m   GPU  |  HCS: on  |  Think: off
+  [32mClient setup:[0m
+    Base URL:      [1mhttp://127.0.0.1:18204/v1[0m
+    Chat endpoint: http://127.0.0.1:18204/v1/chat/completions
+    Models:        http://127.0.0.1:18204/v1/models
+    API key:       [1mX[0m [2m(any value)[0m
+    Model name:    [1mOrnith-1.0-35B-vision[0m
+                   [2mvision-capable; use this same model for text and images[0m
+  [2mPress Q or Ctrl-C to stop[0m
+
+
+[1m[36mKRASIS BENCHMARK[0m
+
+[1m[36m▸ Collecting system info[0m
+  Model:    [1mOrnith-1.0-35B[0m
+  GPUs:     1x NVIDIA GeForce RTX 5090
+  Strategy: gpu_decode (layer_grouped(2))
+
+[1m[36m▸ Loading benchmark prompts (warmup + timed at 1K/5K/10K/20K/35K/39,920)[0m
+  Prefill sizing:  [33mruntime-calibrated prefill cap 39,920 tokens (long probe low-water 7,690 MB, safety 600 MB)[0m
+  Warmup prefill:  3 prompts, ~25,000 tokens each
+  Timed prefill:   6 prompts at 1K/5K/10K/20K/35K/39,920 tokens
+    [1] 1,000 tokens
+    [2] 5,000 tokens
+    [3] 10,000 tokens
+    [4] 20,000 tokens
+    [5] 35,000 tokens
+    [6] 39,920 tokens
+  Decode:          6 prompts (50/100/250 tokens, warmup + timed)
+
+[1m[36m▸ Warmup (3 prefill + 3 decode via engine)[0m
+  Warmup: 2 short engine requests...
+  [32mdecode: 7 tokens in 0.06s (108.0 tok/s)  VRAM: 9884 MB free now, 9884 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=640/320 protected=9600 promotions=0 evictions=0 request_promotions=0/2240 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [32mdecode: 7 tokens in 0.06s (108.0 tok/s)  VRAM: 9884 MB free now, 9884 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=640/320 protected=9600 promotions=0 evictions=0 request_promotions=0/2240 budget_skips=0 no_slot=0 copy_failures=0[0m
+  Warmup complete.
+  Prefill warmup (3 runs, ~25,000 tokens each)...
+    [1/3] 25,000 tokens
+    [2/3] 25,000 tokens
+    [3/3] 25,000 tokens
+  Decode warmup (50/100/250 tokens, 3 separate prompts)...
+  [32mdecode: 49 tokens in 0.43s (112.8 tok/s)  VRAM: 9882 MB free now, 9882 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=640/320 protected=9600 promotions=0 evictions=0 request_promotions=0/15680 budget_skips=0 no_slot=0 copy_failures=0[0m
+    50 tokens done
+  [32mdecode: 99 tokens in 0.88s (113.0 tok/s)  VRAM: 9884 MB free now, 9884 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=640/320 protected=9600 promotions=0 evictions=0 request_promotions=0/31680 budget_skips=0 no_slot=0 copy_failures=0[0m
+    100 tokens done
+  [32mdecode: 249 tokens in 2.23s (111.7 tok/s)  VRAM: 9882 MB free now, 9882 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=640/320 protected=9600 promotions=0 evictions=0 request_promotions=0/79680 budget_skips=0 no_slot=0 copy_failures=0[0m
+    250 tokens done
+  Warmup complete (17.1s). All kernels compiled.
+
+[1m[36m▸ Prefill (internal) — 1K/5K/10K/20K/35K/39,920 tokens, 6 runs[0m
+  Run 1: 1,212.7 tok/s (1,000 tokens in 824.6ms)
+  Run 2: 5,457.6 tok/s (5,000 tokens in 916.2ms)
+  Run 3: 7,521.7 tok/s (10,000 tokens in 1329.5ms)
+  Run 4: 8,967.3 tok/s (20,000 tokens in 2230.3ms)
+  Run 5: 9,931.6 tok/s (35,000 tokens in 3524.1ms)
+  Run 6: 9,808.2 tok/s (39,920 tokens in 4070.1ms)
+  [1mBest: 9,931.6 tok/s (35,000 tokens)[0m
+
+[1m[36m▸ Decode (internal) — 50/100/250 tokens, 3 separate prompts[0m
+  [32mdecode: 49 tokens in 0.44s (111.3 tok/s)  VRAM: 9882 MB free now, 9882 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=640/320 protected=9600 promotions=0 evictions=0 request_promotions=0/15680 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [32mdecode: 99 tokens in 0.86s (115.0 tok/s)  VRAM: 9884 MB free now, 9884 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=640/320 protected=9600 promotions=0 evictions=0 request_promotions=0/31680 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [32mdecode: 249 tokens in 2.23s (111.5 tok/s)  VRAM: 9882 MB free now, 9882 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=640/320 protected=9600 promotions=0 evictions=0 request_promotions=0/79680 budget_skips=0 no_slot=0 copy_failures=0[0m
+   50 tokens: 110.56 tok/s (9.0ms/tok)
+  100 tokens: 114.76 tok/s (8.7ms/tok)
+  250 tokens: 111.43 tok/s (9.0ms/tok)
+  [1mBest: 114.76 tok/s[0m
+  HCS:  10240/10240 experts loaded (100.0%)
+  VRAM: 9882 MB min free during decode (safety margin: 600 MB)
+
+[1m[36m▸ Round trip (network) — 50/100/250 tokens via HTTP[0m
+  [32mprefill: 14 tokens in 0.56s (24.8 tok/s)  VRAM: 9884 MB free now, 9322 MB min free during prefill[0m
+  [32mdecode: 7 tokens in 0.07s (105.8 tok/s)  VRAM: 9884 MB free now, 9884 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=640/320 protected=9600 promotions=0 evictions=0 request_promotions=0/2240 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [32mprefill: 61 tokens in 0.39s (155.6 tok/s)  VRAM: 9882 MB free now, 9322 MB min free during prefill[0m
+  [32mdecode: 49 tokens in 0.43s (114.2 tok/s)  VRAM: 9882 MB free now, 9882 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=640/320 protected=9600 promotions=0 evictions=0 request_promotions=0/15680 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [32mprefill: 66 tokens in 0.40s (167.0 tok/s)  VRAM: 9884 MB free now, 9322 MB min free during prefill[0m
+  [32mdecode: 99 tokens in 0.86s (115.5 tok/s)  VRAM: 9884 MB free now, 9884 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=640/320 protected=9600 promotions=0 evictions=0 request_promotions=0/31680 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [32mprefill: 61 tokens in 0.39s (155.1 tok/s)  VRAM: 9884 MB free now, 9574 MB min free during prefill[0m
+  [32mdecode: 249 tokens in 2.22s (112.4 tok/s)  VRAM: 9884 MB free now, 9884 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=640/320 protected=9600 promotions=0 evictions=0 request_promotions=0/79680 budget_skips=0 no_slot=0 copy_failures=0[0m
+   50 tokens: 234.36 tok/s (0.98s total)
+  100 tokens: 155.33 tok/s (1.41s total)
+  250 tokens: 124.72 tok/s (2.77s total)
+  [1mBest: 234.36 tok/s[0m
+
+[1m[36m▸ Writing results[0m
+
+[1m[32mBENCHMARK COMPLETE[0m
+  Model:                 [1mOrnith-1.0-35B[0m
+  Config:                INT4/4 HQQ6 KV=k6v6 1 GPU
+  Prefill (internal):    [32m[1m9,931.6 tok/s[0m  (best of 1K/5K/10K/20K/35K/39,920)
+  Decode (internal):     [32m[1m114.76 tok/s[0m  (best of 50/100/250)
+  Round trip (network):  [32m[1m234.36 tok/s[0m  (best of 50/100/250)
+  HCS coverage:          10240/10240 (100.0%)
+  Min free VRAM:         9882 MB
+  Log:     [2mlogs/dev-benchmark_20260716_172341/benchmark_report.log[0m
+
+[0;36m[1m=>[0m Benchmark log saved: /tmp/krasis-ornith-stats/logs/dev-benchmark_20260716_172341/benchmark_stdout.log
+[0;36m[1m=>[0m Final Dynamic HCS summary: hit=100.00% request_promotions=0/79680 budget_skips=0 no_slot=0 copy_failures=0
+	Command being timed: "./dev benchmark tests/ornith35-stats-hqq6-k6v6.conf --approved-heatmap-mode require --approved-heatmap-manifest-url file:///tmp/ornith35-local-approved-heatmaps.json"
+	User time (seconds): 150.19
+	System time (seconds): 69.39
+	Percent of CPU this job got: 184%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:58.96
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 23014200
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 12353613
+	Voluntary context switches: 27617
+	Involuntary context switches: 1543
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 2144
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

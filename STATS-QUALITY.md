@@ -12,6 +12,8 @@ Detailed quality logs and artifacts are indexed in [benchmarks/BENCHMARKS.md](be
 | --- | ---: | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
 | Qwen3.6-35B-A3B | 35.5B text | 3.0B | INT4/HQQ4/k4v4 | llama-witness BF16 | 8 | 5.8175 | +3.28% | avg 0.254%, max 0.783% | 8/8 | 8/8 | 8/8 | PASS |
 | Qwen3.6-35B-A3B | 35.5B text | 3.0B | INT4/HQQ6/k6v6 | llama-witness BF16 | 8 | 5.6895 | +1.00% | avg 0.200%, max 0.695% | 8/8 | 8/8 | 8/8 | PASS |
+| Ornith-1.0-35B | 35B class | 3B class | INT4/HQQ4/k4v4 | Krasis BF16 | n/a | 5.9170 | +3.67% | n/a | n/a | n/a | n/a | PASS |
+| Ornith-1.0-35B | 35B class | 3B class | INT4/HQQ6/k6v6 | Krasis BF16 | n/a | 5.7069 | -0.01% | n/a | n/a | n/a | n/a | PASS |
 | Qwen3-Coder-Next | 80B class | n/a | INT4/HQQ4/k4v4 | llama-witness BF16 | 8 | 5.6149 | +5.33% | avg 0.382%, max 1.564% | 8/8 | 8/8 | 8/8 | PASS |
 | Qwen3-Coder-Next | 80B class | n/a | INT4/HQQ6/k6v6 | llama-witness BF16 | 8 | 5.3326 | +0.04% | avg 0.297%, max 1.260% | 8/8 | 8/8 | 8/8 | PASS |
 | Qwen3.5-35B-A3B | 35B class | 3B class | INT4/HQQ4/k4v4 | llama-witness BF16 | 10 | 6.0853 | +4.85% | avg 0.545%, max 3.579% | 10/10 | 10/10 | 10/10 | PASS |
@@ -46,6 +48,10 @@ Column notes:
   no BF16 llama-witness artifact exists yet. Krasis BF16 PPL was sane on
   WikiText-2 (`2.8845`), measured HQQ deltas were acceptable, and sampled
   output was sensible, so these rows are marked `PASS` for now.
+- Ornith-1.0-35B rows use Krasis BF16 as the current accepted reference because
+  no BF16 llama-witness artifact exists yet. Krasis BF16 WikiText-2 PPL was
+  sane (`5.7077`), HQQ4 measured `+3.67%`, and HQQ6 measured `-0.01%` against
+  that baseline.
 - Gemma rows use chat-continuation PPL because raw WikiText-2 PPL is
   pathological for this instruction/vision model. Krasis BF16 generated 14 chat
   continuations, and BF16/HQQ runs scored the same 197 continuation tokens

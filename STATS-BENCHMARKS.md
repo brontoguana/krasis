@@ -14,6 +14,8 @@ Detailed benchmark logs and artifacts are indexed in [benchmarks/BENCHMARKS.md](
 |---|---|---:|---:|---|---:|---:|---:|---:|---:|---:|
 | 1x RTX 5090 32GB, AMD EPYC 7742 | Qwen3.6-35B-A3B | 35.5B text | 3.0B | INT4/HQQ4/k4v4 | 10,670.1 tok/s | 117.20 tok/s | 241.78 tok/s | 23.5 GB max RSS (22.4 GiB) | 10240/10240 (100.0%) | 10,186 MB |
 | 1x RTX 5090 32GB, AMD EPYC 7742 | Qwen3.6-35B-A3B | 35.5B text | 3.0B | INT4/HQQ6/k6v6 | 9,693.6 tok/s | 115.50 tok/s | 234.29 tok/s | 23.7 GB max RSS (22.6 GiB) | 10240/10240 (100.0%) | 9,882 MB |
+| 1x RTX 5090 32GB, AMD EPYC 7742 | Ornith-1.0-35B | 35B class | 3B class | INT4/HQQ4/k4v4 | 10,575.7 tok/s | 117.63 tok/s | 240.91 tok/s | 22.9 GB max RSS (21.8 GiB) | 10240/10240 (100.0%) | 10,186 MB |
+| 1x RTX 5090 32GB, AMD EPYC 7742 | Ornith-1.0-35B | 35B class | 3B class | INT4/HQQ6/k6v6 | 9,931.6 tok/s | 114.76 tok/s | 234.36 tok/s | 23.0 GB max RSS (21.9 GiB) | 10240/10240 (100.0%) | 9,882 MB |
 | 1x RTX 5090 32GB, AMD EPYC 7742 | Qwen3-Coder-Next | 80B class | n/a | INT4/HQQ4/k4v4 | 7,028.5 tok/s | 87.90 tok/s | 150.75 tok/s | 44.1 GB max RSS (42.0 GiB) | 16362/24576 (66.6%) | 878 MB |
 | 1x RTX 5090 32GB, AMD EPYC 7742 | Qwen3-Coder-Next | 80B class | n/a | INT4/HQQ6/k6v6 | 6,628.4 tok/s | 88.22 tok/s | 201.94 tok/s | 45.8 GB max RSS (43.7 GiB) | 16119/24576 (65.6%) | 856 MB |
 | 1x RTX 5090 32GB, AMD EPYC 7742 | Qwen3.5-35B-A3B | 35B class | 3B class | INT4/HQQ4/k4v4 | 10,700.7 tok/s | 116.43 tok/s | 259.67 tok/s | 23.8 GB max RSS (22.7 GiB) | 10240/10240 (100.0%) | 10,186 MB |
@@ -42,6 +44,11 @@ Notes:
   and loaded the matched HQQ4/HQQ6 heatmaps
   `qwen36_35b_hqq4_p00006` and `qwen36_35b_hqq6_p00006`; quick startup heatmap
   collection was skipped.
+- Separate Ornith-1.0-35B HQQ4/HQQ6/HQQ8 approved route heatmaps were built on
+  2026-07-16. The HQQ4 row loaded the matched explicit heatmap; the HQQ6/k6v6
+  row loaded the matched HQQ6 heatmap through manifest runtime compatibility
+  with `kv_dtype` ignored, so quick startup heatmap collection was skipped for
+  both benchmark rows.
 - QCN, Qwen3.5-35B, Qwen3.5-122B, Qwen3.5-397B, Qwen3-235B, and Gemma4 rows
   use their model-name parameter scale until exact safetensor-count notes are
   added for those checkpoints. QCN, Qwen3.5-35B, and Gemma4 HQQ4/HQQ6/HQQ8
@@ -53,8 +60,8 @@ Notes:
 - Qwen3-Coder-Next, Qwen3.5-122B, Qwen3.5-397B, and Qwen3-235B min free VRAM stayed close to
   the default 600 MB safety margin after HCS pressure eviction, which indicates
   the measured runs were using their available HCS budget aggressively. Qwen3.5
-  35B and Gemma4 fit all routed experts on the RTX 5090, so their min free VRAM
-  is much higher.
+  35B, Ornith-1.0-35B, and Gemma4 fit all routed experts on the RTX 5090, so
+  their min free VRAM is much higher.
 - Gemma4 still logged `Building GPU INT4 Marlin expert cache (one-time)` on
   repeated launches despite the cache file existing. The stats rows are valid,
   but cache reuse for Gemma4 startup is a follow-up issue.

@@ -169,6 +169,15 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
         notes="Qwen 35B-class MoE target with canonical HQQ8 heatmap reused across HQQ/KV profiles.",
     ),
     SupportedHFModel(
+        key="ornith35",
+        display_name="Ornith-1.0-35B",
+        repo_id="deepreinforce-ai/Ornith-1.0-35B",
+        local_dir_name="deepreinforce-ai/Ornith-1.0-35B",
+        revision="5df2ed3f675c7beaa490328cc70bb573b65fb660",
+        recommended_config="tests/ornith35-stats-hqq6-k6v6.conf",
+        notes="Validated Ornith 35B-class Qwen3.5-MoE target with HQQ6 attention and k6v6 KV.",
+    ),
+    SupportedHFModel(
         key="qwen35-35b",
         display_name="Qwen3.5-35B-A3B",
         repo_id="Qwen/Qwen3.5-35B-A3B",

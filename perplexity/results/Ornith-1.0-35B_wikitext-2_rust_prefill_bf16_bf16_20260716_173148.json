@@ -1,0 +1,22 @@
+{
+  "schema": "krasis_rust_prefill_ppl_v1",
+  "mode": "dataset",
+  "date": "2026-07-16T17:31:48.854020",
+  "config_path": "tests/ornith35-stats-bf16-bf16kv-ppl.conf",
+  "model_path": "/home/main/.krasis/models/deepreinforce-ai/Ornith-1.0-35B",
+  "dataset": "wikitext-2",
+  "attention_quant": "bf16",
+  "kv_dtype": "bf16",
+  "window_size": 2048,
+  "stride": 1024,
+  "max_tokens": 20000,
+  "num_tokens_total": 20000,
+  "num_tokens_scored": 19999,
+  "num_windows": 20,
+  "total_nll": 34834.67483953912,
+  "mean_loss": 1.741820833018607,
+  "perplexity": 5.70772678400914,
+  "bits_per_char": 2.5129162779130274,
+  "elapsed_s": 155.40210014185868,
+  "throughput_tok_s": 128.6919544957496
+}

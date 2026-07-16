@@ -1,5 +1,69 @@
 # Krasis Benchmark Results
 
+## Ornith-1.0-35B RTX 5090 HQQ4/HQQ6 Stats Benchmark - 2026-07-16
+
+Purpose: public stats-table benchmark and quality rows for Ornith-1.0-35B,
+using newly built per-HQQ approved route heatmaps and recording external peak
+process RSS for `STATS-BENCHMARKS.md`.
+
+Configs:
+
+```text
+tests/ornith35-stats-hqq4-k4v4.conf
+tests/ornith35-stats-hqq6-k4v4.conf
+tests/ornith35-stats-hqq8-k4v4.conf
+tests/ornith35-stats-hqq6-k6v6.conf
+tests/ornith35-stats-bf16-bf16kv-ppl.conf
+```
+
+Approved heatmaps:
+- HQQ4: [canonical](approved_heatmaps/ornith35_35b_hqq4_p00006_approved_heatmap.json)
+- HQQ6: [canonical](approved_heatmaps/ornith35_35b_hqq6_p00006_approved_heatmap.json)
+- HQQ8: [canonical](approved_heatmaps/ornith35_35b_hqq8_p00006_approved_heatmap.json)
+
+Benchmark result:
+
+| Quant | Prefill internal | Decode internal | Round trip network | HCS coverage | Min free VRAM | Peak system RAM | Logs |
+|-------|-----------------:|----------------:|-------------------:|-------------:|--------------:|----------------:|------|
+| INT4/HQQ4/k4v4 | 10,575.7 tok/s | 117.63 tok/s | 240.91 tok/s | 10240/10240 (100.0%) | 10,186 MB | 22.9 GB max RSS (21.8 GiB) | [combined](20260716_ornith35_hqq4_k4v4_benchmark.log) |
+| INT4/HQQ6/k6v6 | 9,931.6 tok/s | 114.76 tok/s | 234.36 tok/s | 10240/10240 (100.0%) | 9,882 MB | 23.0 GB max RSS (21.9 GiB) | [combined](20260716_ornith35_hqq6_k6v6_benchmark.log) |
+
+Quality/PPL artifacts:
+- BF16 diagnostic: [PPL](20260716_ornith35_quality_ppl_bf16.log),
+  [server](20260716_ornith35_quality_bf16_server.log),
+  [result](../perplexity/results/Ornith-1.0-35B_wikitext-2_rust_prefill_bf16_bf16_20260716_173148.log),
+  [JSON](../perplexity/results/Ornith-1.0-35B_wikitext-2_rust_prefill_bf16_bf16_20260716_173148.json).
+- HQQ4: [PPL](20260716_ornith35_quality_ppl_hqq4_k4v4.log),
+  [server](20260716_ornith35_quality_hqq4_k4v4_server.log),
+  [result](../perplexity/results/Ornith-1.0-35B_wikitext-2_rust_prefill_hqq4_k4v4_20260716_173650.log),
+  [JSON](../perplexity/results/Ornith-1.0-35B_wikitext-2_rust_prefill_hqq4_k4v4_20260716_173650.json).
+- HQQ6: [PPL](20260716_ornith35_quality_ppl_hqq6_k6v6.log),
+  [server](20260716_ornith35_quality_hqq6_k6v6_server.log),
+  [result](../perplexity/results/Ornith-1.0-35B_wikitext-2_rust_prefill_hqq6_k6v6_20260716_174352.log),
+  [JSON](../perplexity/results/Ornith-1.0-35B_wikitext-2_rust_prefill_hqq6_k6v6_20260716_174352.json).
+
+Quality result:
+
+| Quant | PPL | BPC | Tokens scored | Delta vs BF16 | Result |
+|-------|----:|----:|--------------:|---------------:|--------|
+| BF16/bf16 KV diagnostic | 5.7077 | 2.5129 | 19,999 | baseline | accepted Krasis BF16 reference |
+| INT4/HQQ4/k4v4 | 5.9170 | 2.5649 | 19,999 | +3.67% | PASS |
+| INT4/HQQ6/k6v6 | 5.7069 | 2.5127 | 19,999 | -0.01% | PASS |
+
+Startup/build notes:
+- Hardware: local Linux workstation, AMD EPYC 7742, 1x RTX 5090 selected.
+- Ornith-1.0-35B reports as `qwen3_5_moe_text` and fits all 10,240 routed
+  experts on the RTX 5090. Decode HCS hit rate was 100.00% with zero request
+  promotions in both benchmark rows, so min free VRAM remains far above the
+  default 600 MB safety margin.
+- HQQ4 benchmark and quality runs used the explicit matched HQQ4 heatmap.
+  HQQ6/k6v6 benchmark and quality runs used a local manifest with matched-HQQ
+  runtime compatibility and `kv_dtype` ignored, matching the public manifest
+  policy added with these artifacts. Quick startup heatmap collection was
+  skipped for both HQQ benchmark rows and both HQQ quality rows.
+- BF16 diagnostic startup had no BF16-approved heatmap and therefore built a
+  quick route heatmap before measuring the Krasis BF16 WikiText-2 PPL baseline.
+
 ## Qwen3.5-397B-A17B RTX 5090 HQQ4/HQQ6 Stats Benchmark - 2026-07-15
 
 Purpose: public stats-table benchmark and diagnostic quality rows for
