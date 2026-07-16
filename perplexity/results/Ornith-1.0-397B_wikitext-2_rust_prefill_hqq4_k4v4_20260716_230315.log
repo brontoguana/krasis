@@ -1,0 +1,17 @@
+Krasis Rust Prefill Perplexity
+==================================================
+Date:          2026-07-16T23:03:15.503041
+Config:        tests/ornith397-stats-hqq4-k4v4.conf
+Model:         /home/main/.krasis/models/deepreinforce-ai/Ornith-1.0-397B
+Dataset:       wikitext-2
+Attention:     hqq4
+KV dtype:      k4v4
+Window size:   2048
+Stride:        1024
+Perplexity:    3.2146
+BPC:           1.6846
+Mean loss:     1.167700
+Tokens scored: 19999 / 20000
+Windows:       20
+Elapsed:       444.5s
+Throughput:    45 tok/s

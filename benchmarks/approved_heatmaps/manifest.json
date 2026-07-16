@@ -1410,6 +1410,195 @@
       }
     },
     {
+      "artifact_id": "ornith397_397b_hqq4_p00006",
+      "status": "approved",
+      "priority": 5,
+      "model_name": "Ornith-1.0-397B",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/ornith397_397b_hqq4_p00006_approved_heatmap.json",
+      "filename": "ornith397_397b_hqq4_p00006_approved_heatmap.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/ornith397_397b_hqq4_p00006_approved_heatmap.json",
+      "sha256": "7dc86f410f48464cde11bbb70b90dd124f477de4cb9c78adaa67306c8552a59b",
+      "bytes": 374777,
+      "route_signature_sha256": "314bfa335614dcbb6ea63ab5b4d19ff8fd90791fea24903d56270a6a1226b114",
+      "validated_runtime_sha256s": [
+        "33e3e1f42cf448262ca66fbad7e2b20c110b4c04503fbade7034520fddc67fe7"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq4",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Ornith-1.0-397B_matched_hqq4_all_kv",
+        "matched_attention_quant": "hqq4",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq4"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored because per-HQQ artifacts are captured and KV-only routing is treated as compatible for approved heatmap lookup."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 27712,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ quick startup heatmap corpus",
+        "hqq_profile": "hqq4",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured on 2026-07-16 as part of the Ornith-1.0-397B stats heatmap batch. Published as a matched per-HQQ artifact; exact HQQ artifacts are preferred when available."
+      }
+    },
+    {
+      "artifact_id": "ornith397_397b_hqq6_p00006",
+      "status": "approved",
+      "priority": 5,
+      "model_name": "Ornith-1.0-397B",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/ornith397_397b_hqq6_p00006_approved_heatmap.json",
+      "filename": "ornith397_397b_hqq6_p00006_approved_heatmap.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/ornith397_397b_hqq6_p00006_approved_heatmap.json",
+      "sha256": "240cdaf2dd933d670ce2bffc2374ae78b968a0d69651a0e2ace5cf6d0bd93c49",
+      "bytes": 383075,
+      "route_signature_sha256": "314bfa335614dcbb6ea63ab5b4d19ff8fd90791fea24903d56270a6a1226b114",
+      "validated_runtime_sha256s": [
+        "e475801d9804e603c754ef0d0628c241d0803dd4006404605646d419f1d98cc3"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq6",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Ornith-1.0-397B_matched_hqq6_all_kv",
+        "matched_attention_quant": "hqq6",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq6"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored because per-HQQ artifacts are captured and KV-only routing is treated as compatible for approved heatmap lookup."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 28304,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ quick startup heatmap corpus",
+        "hqq_profile": "hqq6",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured on 2026-07-16 as part of the Ornith-1.0-397B stats heatmap batch. Published as a matched per-HQQ artifact; exact HQQ artifacts are preferred when available."
+      }
+    },
+    {
+      "artifact_id": "ornith397_397b_hqq8_p00006",
+      "status": "approved",
+      "priority": 5,
+      "model_name": "Ornith-1.0-397B",
+      "source_checkpoint": "p00006",
+      "path": "benchmarks/approved_heatmaps/ornith397_397b_hqq8_p00006_approved_heatmap.json",
+      "filename": "ornith397_397b_hqq8_p00006_approved_heatmap.json",
+      "download_url": "https://raw.githubusercontent.com/brontoguana/krasis/main/benchmarks/approved_heatmaps/ornith397_397b_hqq8_p00006_approved_heatmap.json",
+      "sha256": "f637283d5b21fd3ce5057945eeda44d794b05ab7ffa7447b0ac2f5b0026d6905",
+      "bytes": 375716,
+      "route_signature_sha256": "314bfa335614dcbb6ea63ab5b4d19ff8fd90791fea24903d56270a6a1226b114",
+      "validated_runtime_sha256s": [
+        "a79c8fae3e55f3234ec03767a02ad66d0ac0500f1b1966b72e822087c3f47f7b"
+      ],
+      "validated_compatible_runtimes": [
+        {
+          "attention_quant": "hqq8",
+          "cpu_expert_bits": 4,
+          "dense_mlp_quant": "int8",
+          "expert_group_size": 128,
+          "gpu_expert_bits": 4,
+          "gpu_expert_int4_calib": "amax",
+          "hqq46_auto_budget_mib": null,
+          "hqq_auto_budget_pct": null,
+          "hqq_cache_profile": "baseline",
+          "hqq_group_size": 128,
+          "hqq_sidecar_manifest": null,
+          "kv_dtype": "k4v4",
+          "layer_group_size": 2,
+          "lm_head_quant": "int8",
+          "shared_expert_quant": "int8"
+        }
+      ],
+      "runtime_compatibility": {
+        "policy": "Ornith-1.0-397B_matched_hqq8_all_kv",
+        "matched_attention_quant": "hqq8",
+        "ignored_runtime_fields": [
+          "kv_dtype"
+        ],
+        "accepted_attention_quants": [
+          "hqq8"
+        ],
+        "accepted_kv_dtypes": [
+          "k4v4",
+          "k6v6",
+          "bf16"
+        ],
+        "reason": "Matched HQQ approved heatmap; KV dtype is ignored because per-HQQ artifacts are captured and KV-only routing is treated as compatible for approved heatmap lookup."
+      },
+      "capture": {
+        "prompt_count_processed": 6,
+        "captured_decode_route_tokens": 1542,
+        "ranked_entries": 27783,
+        "decode_tokens_per_prompt": 256
+      },
+      "acceptance": {
+        "baseline": "matched HQQ quick startup heatmap corpus",
+        "hqq_profile": "hqq8",
+        "kv_policy": "ignored in approved heatmap lookup; artifact was captured with k4v4",
+        "notes": "Measured on 2026-07-16 as part of the Ornith-1.0-397B stats heatmap batch. Published as a matched per-HQQ artifact; exact HQQ artifacts are preferred when available."
+      }
+    },
+    {
       "artifact_id": "ornith35_35b_hqq4_p00006",
       "status": "approved",
       "priority": 5,

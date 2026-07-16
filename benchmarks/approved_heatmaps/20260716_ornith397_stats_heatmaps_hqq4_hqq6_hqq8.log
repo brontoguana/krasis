@@ -1,0 +1,347 @@
+===== Ornith397 HQQ4/k4v4 heatmap 2026-07-16T20:33:15+01:00 =====
+[0;36m[1m=>[0m Waiting for selected GPUs (0) to clear...
+[0;32m[1mOK[0m Selected GPUs (0) clear.
+[0;36m[1m=>[0m Building approved HCS route heatmap: tests/ornith397-stats-hqq4-k4v4.conf
+[0;36m[1m=>[0m Run dir: /tmp/krasis-ornith-stats/logs/approved-heatmap-build_20260716_203315
+[0;36m[1m=>[0m Log: /tmp/krasis-ornith-stats/logs/approved-heatmap-build_20260716_203315/approved_heatmap_build_stdout.log
+[0;36m[1m=>[0m Import origin check:
+krasis: /tmp/krasis-ornith-stats/python/krasis/__init__.py
+krasis.krasis: /tmp/krasis-ornith-stats/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+Pre-scan: set CUDA_VISIBLE_DEVICES=0
+Loaded config from tests/ornith397-stats-hqq4-k4v4.conf: {'model_path': '/home/main/.krasis/models/deepreinforce-ai/Ornith-1.0-397B', 'selected_gpus': '0', 'num_gpus': 1, 'layer_group_size': 2, 'kv_cache_mb': 1500, 'kv_dtype': 'k4v4', 'gpu_expert_bits': 4, 'cpu_expert_bits': 4, 'attention_quant': 'hqq4', 'hqq_group_size': 128, 'shared_expert_quant': 'int8', 'dense_mlp_quant': 'int8', 'lm_head_quant': 'int8', 'krasis_threads': 40, 'host': '0.0.0.0', 'port': 18211, 'gpu_prefill_threshold': 300, 'vram_safety_margin': 600, 'force_load': False, 'enable_thinking': False}
+
+[1m[36m▸ Krasis — Ornith-1.0-397B[0m
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 1[0m
+  [32mHCS host cache: source[0m
+  [32mSelected physical GPUs: 0 (config; CUDA_VISIBLE_DEVICES=0)[0m
+  [32mExperts: GPU INT4 g128 (amax)  |  Attention: hqq4  |  KV: k4v4[0m
+  [32mLayer groups: 2  |  KV cache: 1500 MB  |  Threads: 40[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+
+[1m[36m▸ Loading model weights[0m
+  [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=518 MB, free=31600 MB, total=32119 MB
+
+[1m[36m▸ Loading GPU weights[0m
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:0: alloc=14481 MB, reserved=14612 MB, used=15298 MB, free=16820 MB, total=32119 MB
+  [0;32mHQQ attention artifacts validated (4265 MB cached), 16820 MB free[0m
+
+[1m[36m▸ Building GPU INT4 Marlin expert cache (one-time)[0m
+  [2mCache will be saved to /home/main/.krasis/cache/Ornith-1.0-397B for instant loading next time.[0m
+  [1;33m▸ Building GPU INT4 Marlin cache: 60 layers from safetensors[0m
+    GPU Marlin: 5/60 layers (37s elapsed, ~405s remaining)
+    GPU Marlin: 10/60 layers (74s elapsed, ~372s remaining)
+    GPU Marlin: 15/60 layers (115s elapsed, ~346s remaining)
+    GPU Marlin: 20/60 layers (157s elapsed, ~314s remaining)
+    GPU Marlin: 25/60 layers (197s elapsed, ~276s remaining)
+    GPU Marlin: 30/60 layers (239s elapsed, ~239s remaining)
+    GPU Marlin: 35/60 layers (285s elapsed, ~203s remaining)
+    GPU Marlin: 40/60 layers (334s elapsed, ~167s remaining)
+    GPU Marlin: 45/60 layers (392s elapsed, ~131s remaining)
+    GPU Marlin: 50/60 layers (443s elapsed, ~89s remaining)
+    GPU Marlin: 55/60 layers (498s elapsed, ~45s remaining)
+    GPU Marlin: 60/60 layers (553s elapsed, ~0s remaining)
+    GPU Marlin: writing shared experts...
+  [0;32m✓ GPU INT4 Marlin cache built: 199.7 GB in 589s[0m
+    Marlin timing: initial_prefetch=0.0s routed io/quant=143.9s prefetch=0.2s repack=135.5s write=238.5s misc=35.1s; shared io/quant=4.6s repack=3.7s write=0.4s; flush=0.0s
+    Loading GPU Marlin cache: 60 layers...
+    GPU Marlin cache loaded: 199.7 GB in 187s
+  [0;32mExpert cache built in 776s — next launch will be much faster.[0m
+  [33m[VRAM after-phase2-expert-weights][0m cuda:0: alloc=14481 MB, reserved=14612 MB, used=15298 MB, free=16820 MB, total=32119 MB
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:0: alloc=14481 MB, reserved=14612 MB, used=15298 MB, free=16820 MB, total=32119 MB
+  [33m[VRAM after-kv-cache-init][0m cuda:0: alloc=15981 MB, reserved=16112 MB, used=16798 MB, free=15320 MB, total=32119 MB
+  [33m[VRAM after-full-load][0m cuda:0: alloc=15981 MB, reserved=16112 MB, used=16798 MB, free=15320 MB, total=32119 MB
+
+[1m[36m▸ CUDA runtime warmup[0m
+  [32mcuBLAS + Triton kernel compilation done[0m
+
+[1m[36m▸ Setting up GPU decode store[0m
+  [32mGPU decode store ready (addr=0x59003a90)[0m
+  [32mReleased redundant GPU execution source tensors (1,450 MB)[0m
+  [2mVRAM monitor started (tracking warmup)[0m
+  [2mcuda:0: 0 MB total[0m
+
+[1m[36m▸ Pre-allocating Rust prefill engine[0m
+[FLA] Loading kernels for H=64 from /tmp/krasis-ornith-stats/python/krasis/libkrasis_fla_sm120.so
+[FLA] loaded krasis_fla_chunk_local_cumsum_scalar_kernel (H=64)
+[FLA] loaded krasis_fla_chunk_scaled_dot_kkt_fwd_kernel (H=64)
+[FLA] loaded krasis_fla_merge_16x16_to_64x64_inverse_kernel (H=64)
+[FLA] loaded krasis_fla_recompute_w_u_fwd_kernel (H=64)
+[FLA] loaded krasis_fla_chunk_gated_delta_rule_fwd_kernel_h_blockdim64 (H=64)
+[FLA] loaded krasis_fla_chunk_fwd_kernel_o (H=64)
+  [32mPrefill engine scratch buffers allocated[0m
+
+[1m[36m▸ Warmup (Rust prefill engine)[0m
+  [32mRust prefill warmed with 300 tokens before HCS budgeting[0m
+  [32mWarmup complete in 4.0s[0m
+  [2mcuda:0 warmup:  peak 15,796 MB used / 32,119 MB total  (min free: 16,322 MB)[0m
+
+[1m[36m▸ VRAM calibration[0m
+  [32mSafety margin: 600 MB[0m
+  [32mFree VRAM after startup: 17,876 MB / 32,119 MB[0m
+  [32mShort calibration: probing 500 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 8.80s (3.6 tok/s)  VRAM: 17822 MB free now, 17822 MB min free during decode[0m
+  [32mShort calibration: baseline=17,876 MB, prefill post-alloc=16,728 MB, prefill min=13,906 MB, decode min=17,822 MB, post-cleanup=17,822 MB[0m
+  [32mAdaptive long calibration: default target=39,920 tokens, target low-water floor=1,200 MB, estimated prefill growth=0.8443 MB/token[0m
+  [32mAdaptive long calibration: next probe 14,128 tokens (model-estimated initial probe (projected 0.8443 MB/token, validation floor 2400 MB))[0m
+  [32mLong calibration: probing 14,128 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 10.52s (3.0 tok/s)  VRAM: 17818 MB free now, 17818 MB min free during decode[0m
+  [32mLong calibration: baseline=17,822 MB, prefill post-alloc=4,938 MB, prefill min=1,770 MB, decode min=17,818 MB, post-cleanup=17,818 MB[0m
+  [32mAdaptive long calibration: using 14,128 tokens (current low-water 1770 MB leaves no validation reserve above 2400 MB)[0m
+  [32mScratch reservation: max=42,208 MB (at 50,000 tokens)[0m
+
+[1m[36m▸ VRAM calibration complete[0m
+  [32mPost-calibration free VRAM: 17,818 MB[0m
+  [32mTransient deltas: short prefill=3,970 MB, long prefill=16,052 MB, short decode=54 MB, long decode=4 MB[0m
+  [32mGPU0 decode HCS budget: 17,164 MB[0m
+  [32mPrefill HCS budgets: short=13,248 MB, long=1,166 MB[0m
+  [32mWorst-case prefill scratch reservation: 42,208 MB at 50,000 tokens[0m
+
+[1m[36m▸ Approved HCS route heatmap build[0m
+  [32mPrompts: 6 from /tmp/krasis-ornith-stats/python/krasis/prompts/heatmap_prompts.txt; decode tokens/prompt: 256; checkpoint_every=6[0m
+  [32mCheckpoint final: 27,712 ranked experts, 1,542 decode tokens, 453.6s -> benchmarks/approved_heatmaps/ornith397_397b_hqq4_p00006_approved_heatmap.json, benchmarks/approved_heatmaps/ornith397_397b_hqq4_p00006_approved_heatmap.p00006.json[0m
+APPROVED HEATMAP BUILD COMPLETE
+[0;36m[1m=>[0m Approved heatmap build log saved: /tmp/krasis-ornith-stats/logs/approved-heatmap-build_20260716_203315/approved_heatmap_build_stdout.log
+	Command being timed: "./dev approved-heatmap-build tests/ornith397-stats-hqq4-k4v4.conf --out benchmarks/approved_heatmaps/ornith397_397b_hqq4_p00006_approved_heatmap.json --max-prompts 6 --decode-tokens 256 --checkpoint-every 6"
+	User time (seconds): 60783.13
+	System time (seconds): 3455.40
+	Percent of CPU this job got: 2220%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 48:13.30
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 525107148
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 176496
+	Minor (reclaiming a frame) page faults: 260673752
+	Voluntary context switches: 2345014
+	Involuntary context switches: 1024934
+	Swaps: 0
+	File system inputs: 1618355264
+	File system outputs: 398843496
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+===== Ornith397 HQQ4/k4v4 heatmap done 2026-07-16T21:21:28+01:00 =====
+===== Ornith397 HQQ6/k4v4 heatmap 2026-07-16T21:21:28+01:00 =====
+[0;36m[1m=>[0m Waiting for selected GPUs (0) to clear...
+[0;32m[1mOK[0m Selected GPUs (0) clear.
+[0;36m[1m=>[0m Building approved HCS route heatmap: tests/ornith397-stats-hqq6-k4v4.conf
+[0;36m[1m=>[0m Run dir: /tmp/krasis-ornith-stats/logs/approved-heatmap-build_20260716_212129
+[0;36m[1m=>[0m Log: /tmp/krasis-ornith-stats/logs/approved-heatmap-build_20260716_212129/approved_heatmap_build_stdout.log
+[0;36m[1m=>[0m Import origin check:
+krasis: /tmp/krasis-ornith-stats/python/krasis/__init__.py
+krasis.krasis: /tmp/krasis-ornith-stats/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+Pre-scan: set CUDA_VISIBLE_DEVICES=0
+Loaded config from tests/ornith397-stats-hqq6-k4v4.conf: {'model_path': '/home/main/.krasis/models/deepreinforce-ai/Ornith-1.0-397B', 'selected_gpus': '0', 'num_gpus': 1, 'layer_group_size': 2, 'kv_cache_mb': 1500, 'kv_dtype': 'k4v4', 'gpu_expert_bits': 4, 'cpu_expert_bits': 4, 'attention_quant': 'hqq6', 'hqq_group_size': 128, 'shared_expert_quant': 'int8', 'dense_mlp_quant': 'int8', 'lm_head_quant': 'int8', 'krasis_threads': 40, 'host': '0.0.0.0', 'port': 18212, 'gpu_prefill_threshold': 300, 'vram_safety_margin': 600, 'force_load': False, 'enable_thinking': False}
+
+[1m[36m▸ Krasis — Ornith-1.0-397B[0m
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 1[0m
+  [32mHCS host cache: source[0m
+  [32mSelected physical GPUs: 0 (config; CUDA_VISIBLE_DEVICES=0)[0m
+  [32mExperts: GPU INT4 g128 (amax)  |  Attention: hqq6  |  KV: k4v4[0m
+  [32mLayer groups: 2  |  KV cache: 1500 MB  |  Threads: 40[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+
+[1m[36m▸ Loading model weights[0m
+  [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=518 MB, free=31600 MB, total=32119 MB
+
+[1m[36m▸ Loading GPU weights[0m
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:0: alloc=14481 MB, reserved=14612 MB, used=15298 MB, free=16820 MB, total=32119 MB
+  [0;32mHQQ attention artifacts validated (6160 MB cached), 16820 MB free[0m
+
+[1m[36m▸ Loading GPU expert weights from cache[0m
+    Loading GPU Marlin cache: 60 layers...
+    GPU Marlin cache loaded: 199.7 GB in 159s
+  [0;32mExpert weights loaded in 159s.[0m
+  [33m[VRAM after-phase2-expert-weights][0m cuda:0: alloc=14481 MB, reserved=14612 MB, used=15298 MB, free=16820 MB, total=32119 MB
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:0: alloc=14481 MB, reserved=14612 MB, used=15298 MB, free=16820 MB, total=32119 MB
+  [33m[VRAM after-kv-cache-init][0m cuda:0: alloc=15981 MB, reserved=16112 MB, used=16798 MB, free=15320 MB, total=32119 MB
+  [33m[VRAM after-full-load][0m cuda:0: alloc=15981 MB, reserved=16112 MB, used=16798 MB, free=15320 MB, total=32119 MB
+
+[1m[36m▸ CUDA runtime warmup[0m
+  [32mcuBLAS + Triton kernel compilation done[0m
+
+[1m[36m▸ Setting up GPU decode store[0m
+  [32mGPU decode store ready (addr=0x654de260)[0m
+  [32mReleased redundant GPU execution source tensors (1,450 MB)[0m
+  [2mVRAM monitor started (tracking warmup)[0m
+  [2mcuda:0: 0 MB total[0m
+
+[1m[36m▸ Pre-allocating Rust prefill engine[0m
+[FLA] Loading kernels for H=64 from /tmp/krasis-ornith-stats/python/krasis/libkrasis_fla_sm120.so
+[FLA] loaded krasis_fla_chunk_local_cumsum_scalar_kernel (H=64)
+[FLA] loaded krasis_fla_chunk_scaled_dot_kkt_fwd_kernel (H=64)
+[FLA] loaded krasis_fla_merge_16x16_to_64x64_inverse_kernel (H=64)
+[FLA] loaded krasis_fla_recompute_w_u_fwd_kernel (H=64)
+[FLA] loaded krasis_fla_chunk_gated_delta_rule_fwd_kernel_h_blockdim64 (H=64)
+[FLA] loaded krasis_fla_chunk_fwd_kernel_o (H=64)
+  [32mPrefill engine scratch buffers allocated[0m
+
+[1m[36m▸ Warmup (Rust prefill engine)[0m
+  [32mRust prefill warmed with 300 tokens before HCS budgeting[0m
+  [32mWarmup complete in 3.2s[0m
+  [2mcuda:0 warmup:  peak 19,576 MB used / 32,119 MB total  (min free: 12,542 MB)[0m
+
+[1m[36m▸ VRAM calibration[0m
+  [32mSafety margin: 600 MB[0m
+  [32mFree VRAM after startup: 15,986 MB / 32,119 MB[0m
+  [32mShort calibration: probing 500 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 8.40s (3.8 tok/s)  VRAM: 15932 MB free now, 15932 MB min free during decode[0m
+  [32mShort calibration: baseline=15,986 MB, prefill post-alloc=12,978 MB, prefill min=10,174 MB, decode min=15,932 MB, post-cleanup=15,932 MB[0m
+  [32mAdaptive long calibration: default target=39,920 tokens, target low-water floor=1,200 MB, estimated prefill growth=0.8443 MB/token[0m
+  [32mAdaptive long calibration: next probe 9,707 tokens (model-estimated initial probe (projected 0.8443 MB/token, validation floor 2400 MB))[0m
+  [32mLong calibration: probing 9,707 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 9.59s (3.3 tok/s)  VRAM: 15930 MB free now, 15930 MB min free during decode[0m
+  [32mLong calibration: baseline=15,932 MB, prefill post-alloc=4,994 MB, prefill min=1,826 MB, decode min=15,930 MB, post-cleanup=15,930 MB[0m
+  [32mAdaptive long calibration: using 9,707 tokens (current low-water 1826 MB leaves no validation reserve above 2400 MB)[0m
+  [32mScratch reservation: max=42,208 MB (at 50,000 tokens)[0m
+
+[1m[36m▸ VRAM calibration complete[0m
+  [32mPost-calibration free VRAM: 15,930 MB[0m
+  [32mTransient deltas: short prefill=5,812 MB, long prefill=14,106 MB, short decode=54 MB, long decode=2 MB[0m
+  [32mGPU0 decode HCS budget: 15,276 MB[0m
+  [32mPrefill HCS budgets: short=9,518 MB, long=1,224 MB[0m
+  [32mWorst-case prefill scratch reservation: 42,208 MB at 50,000 tokens[0m
+
+[1m[36m▸ Approved HCS route heatmap build[0m
+  [32mPrompts: 6 from /tmp/krasis-ornith-stats/python/krasis/prompts/heatmap_prompts.txt; decode tokens/prompt: 256; checkpoint_every=6[0m
+  [32mCheckpoint final: 28,304 ranked experts, 1,542 decode tokens, 437.7s -> benchmarks/approved_heatmaps/ornith397_397b_hqq6_p00006_approved_heatmap.json, benchmarks/approved_heatmaps/ornith397_397b_hqq6_p00006_approved_heatmap.p00006.json[0m
+APPROVED HEATMAP BUILD COMPLETE
+[0;36m[1m=>[0m Approved heatmap build log saved: /tmp/krasis-ornith-stats/logs/approved-heatmap-build_20260716_212129/approved_heatmap_build_stdout.log
+	Command being timed: "./dev approved-heatmap-build tests/ornith397-stats-hqq6-k4v4.conf --out benchmarks/approved_heatmaps/ornith397_397b_hqq6_p00006_approved_heatmap.json --max-prompts 6 --decode-tokens 256 --checkpoint-every 6"
+	User time (seconds): 2242.26
+	System time (seconds): 879.35
+	Percent of CPU this job got: 332%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 15:37.43
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 221227140
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 2283
+	Minor (reclaiming a frame) page faults: 171145397
+	Voluntary context switches: 365547
+	Involuntary context switches: 16625
+	Swaps: 0
+	File system inputs: 77435992
+	File system outputs: 12678312
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+===== Ornith397 HQQ6/k4v4 heatmap done 2026-07-16T21:37:06+01:00 =====
+===== Ornith397 HQQ8/k4v4 heatmap 2026-07-16T21:37:06+01:00 =====
+[0;36m[1m=>[0m Waiting for selected GPUs (0) to clear...
+[0;32m[1mOK[0m Selected GPUs (0) clear.
+[0;36m[1m=>[0m Building approved HCS route heatmap: tests/ornith397-stats-hqq8-k4v4.conf
+[0;36m[1m=>[0m Run dir: /tmp/krasis-ornith-stats/logs/approved-heatmap-build_20260716_213706
+[0;36m[1m=>[0m Log: /tmp/krasis-ornith-stats/logs/approved-heatmap-build_20260716_213706/approved_heatmap_build_stdout.log
+[0;36m[1m=>[0m Import origin check:
+krasis: /tmp/krasis-ornith-stats/python/krasis/__init__.py
+krasis.krasis: /tmp/krasis-ornith-stats/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+Pre-scan: set CUDA_VISIBLE_DEVICES=0
+Loaded config from tests/ornith397-stats-hqq8-k4v4.conf: {'model_path': '/home/main/.krasis/models/deepreinforce-ai/Ornith-1.0-397B', 'selected_gpus': '0', 'num_gpus': 1, 'layer_group_size': 2, 'kv_cache_mb': 1500, 'kv_dtype': 'k4v4', 'gpu_expert_bits': 4, 'cpu_expert_bits': 4, 'attention_quant': 'hqq8', 'hqq_group_size': 128, 'shared_expert_quant': 'int8', 'dense_mlp_quant': 'int8', 'lm_head_quant': 'int8', 'krasis_threads': 40, 'host': '0.0.0.0', 'port': 18213, 'gpu_prefill_threshold': 300, 'vram_safety_margin': 600, 'force_load': False, 'enable_thinking': False}
+
+[1m[36m▸ Krasis — Ornith-1.0-397B[0m
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 1[0m
+  [32mHCS host cache: source[0m
+  [32mSelected physical GPUs: 0 (config; CUDA_VISIBLE_DEVICES=0)[0m
+  [32mExperts: GPU INT4 g128 (amax)  |  Attention: hqq8  |  KV: k4v4[0m
+  [32mLayer groups: 2  |  KV cache: 1500 MB  |  Threads: 40[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+
+[1m[36m▸ Loading model weights[0m
+  [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=518 MB, free=31600 MB, total=32119 MB
+
+[1m[36m▸ Loading GPU weights[0m
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:0: alloc=14481 MB, reserved=14612 MB, used=15298 MB, free=16820 MB, total=32119 MB
+  [0;32mHQQ attention artifacts validated (8056 MB cached), 16820 MB free[0m
+
+[1m[36m▸ Loading GPU expert weights from cache[0m
+    Loading GPU Marlin cache: 60 layers...
+    GPU Marlin cache loaded: 199.7 GB in 147s
+  [0;32mExpert weights loaded in 147s.[0m
+  [33m[VRAM after-phase2-expert-weights][0m cuda:0: alloc=14481 MB, reserved=14612 MB, used=15298 MB, free=16820 MB, total=32119 MB
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:0: alloc=14481 MB, reserved=14612 MB, used=15298 MB, free=16820 MB, total=32119 MB
+  [33m[VRAM after-kv-cache-init][0m cuda:0: alloc=15981 MB, reserved=16112 MB, used=16798 MB, free=15320 MB, total=32119 MB
+  [33m[VRAM after-full-load][0m cuda:0: alloc=15981 MB, reserved=16112 MB, used=16798 MB, free=15320 MB, total=32119 MB
+
+[1m[36m▸ CUDA runtime warmup[0m
+  [32mcuBLAS + Triton kernel compilation done[0m
+
+[1m[36m▸ Setting up GPU decode store[0m
+  [32mGPU decode store ready (addr=0x52f30d60)[0m
+  [32mReleased redundant GPU execution source tensors (1,450 MB)[0m
+  [2mVRAM monitor started (tracking warmup)[0m
+  [2mcuda:0: 0 MB total[0m
+
+[1m[36m▸ Pre-allocating Rust prefill engine[0m
+[FLA] Loading kernels for H=64 from /tmp/krasis-ornith-stats/python/krasis/libkrasis_fla_sm120.so
+[FLA] loaded krasis_fla_chunk_local_cumsum_scalar_kernel (H=64)
+[FLA] loaded krasis_fla_chunk_scaled_dot_kkt_fwd_kernel (H=64)
+[FLA] loaded krasis_fla_merge_16x16_to_64x64_inverse_kernel (H=64)
+[FLA] loaded krasis_fla_recompute_w_u_fwd_kernel (H=64)
+[FLA] loaded krasis_fla_chunk_gated_delta_rule_fwd_kernel_h_blockdim64 (H=64)
+[FLA] loaded krasis_fla_chunk_fwd_kernel_o (H=64)
+  [32mPrefill engine scratch buffers allocated[0m
+
+[1m[36m▸ Warmup (Rust prefill engine)[0m
+  [32mRust prefill warmed with 300 tokens before HCS budgeting[0m
+  [32mWarmup complete in 5.0s[0m
+  [2mcuda:0 warmup:  peak 19,440 MB used / 32,119 MB total  (min free: 12,678 MB)[0m
+
+[1m[36m▸ VRAM calibration[0m
+  [32mSafety margin: 600 MB[0m
+  [32mFree VRAM after startup: 14,126 MB / 32,119 MB[0m
+  [32mShort calibration: probing 500 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 8.08s (4.0 tok/s)  VRAM: 14072 MB free now, 14072 MB min free during decode[0m
+  [32mShort calibration: baseline=14,126 MB, prefill post-alloc=13,128 MB, prefill min=10,330 MB, decode min=14,072 MB, post-cleanup=14,072 MB[0m
+  [32mAdaptive long calibration: default target=39,920 tokens, target low-water floor=1,200 MB, estimated prefill growth=0.8443 MB/token[0m
+  [32mAdaptive long calibration: next probe 9,892 tokens (model-estimated initial probe (projected 0.8443 MB/token, validation floor 2400 MB))[0m
+  [32mLong calibration: probing 9,892 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 9.34s (3.4 tok/s)  VRAM: 14070 MB free now, 14070 MB min free during decode[0m
+  [32mLong calibration: baseline=14,072 MB, prefill post-alloc=4,980 MB, prefill min=1,812 MB, decode min=14,070 MB, post-cleanup=14,070 MB[0m
+  [32mAdaptive long calibration: using 9,892 tokens (current low-water 1812 MB leaves no validation reserve above 2400 MB)[0m
+  [32mScratch reservation: max=42,208 MB (at 50,000 tokens)[0m
+
+[1m[36m▸ VRAM calibration complete[0m
+  [32mPost-calibration free VRAM: 14,070 MB[0m
+  [32mTransient deltas: short prefill=3,796 MB, long prefill=12,260 MB, short decode=54 MB, long decode=2 MB[0m
+  [32mGPU0 decode HCS budget: 13,416 MB[0m
+  [32mPrefill HCS budgets: short=9,674 MB, long=1,210 MB[0m
+  [32mWorst-case prefill scratch reservation: 42,208 MB at 50,000 tokens[0m
+
+[1m[36m▸ Approved HCS route heatmap build[0m
+  [32mPrompts: 6 from /tmp/krasis-ornith-stats/python/krasis/prompts/heatmap_prompts.txt; decode tokens/prompt: 256; checkpoint_every=6[0m
+  [32mCheckpoint final: 27,783 ranked experts, 1,542 decode tokens, 429.4s -> benchmarks/approved_heatmaps/ornith397_397b_hqq8_p00006_approved_heatmap.json, benchmarks/approved_heatmaps/ornith397_397b_hqq8_p00006_approved_heatmap.p00006.json[0m
+APPROVED HEATMAP BUILD COMPLETE
+[0;36m[1m=>[0m Approved heatmap build log saved: /tmp/krasis-ornith-stats/logs/approved-heatmap-build_20260716_213706/approved_heatmap_build_stdout.log
+	Command being timed: "./dev approved-heatmap-build tests/ornith397-stats-hqq8-k4v4.conf --out benchmarks/approved_heatmaps/ornith397_397b_hqq8_p00006_approved_heatmap.json --max-prompts 6 --decode-tokens 256 --checkpoint-every 6"
+	User time (seconds): 2323.52
+	System time (seconds): 826.67
+	Percent of CPU this job got: 349%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 15:00.43
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 224738656
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 482
+	Minor (reclaiming a frame) page faults: 161084534
+	Voluntary context switches: 356087
+	Involuntary context switches: 16395
+	Swaps: 0
+	File system inputs: 35525816
+	File system outputs: 16560688
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+===== Ornith397 HQQ8/k4v4 heatmap done 2026-07-16T21:52:07+01:00 =====

@@ -178,6 +178,15 @@ SUPPORTED_HF_MODELS: Sequence[SupportedHFModel] = (
         notes="Validated Ornith 35B-class Qwen3.5-MoE target with HQQ6 attention and k6v6 KV.",
     ),
     SupportedHFModel(
+        key="ornith397",
+        display_name="Ornith-1.0-397B",
+        repo_id="deepreinforce-ai/Ornith-1.0-397B",
+        local_dir_name="deepreinforce-ai/Ornith-1.0-397B",
+        revision="5e3e761811e804c295c1d3c0ce68b21da6154209",
+        recommended_config="tests/ornith397-stats-hqq6-k6v6.conf",
+        notes="Validated Ornith 397B-class Qwen3.5-MoE target with HQQ6 attention and k6v6 KV.",
+    ),
+    SupportedHFModel(
         key="qwen35-35b",
         display_name="Qwen3.5-35B-A3B",
         repo_id="Qwen/Qwen3.5-35B-A3B",

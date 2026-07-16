@@ -1,0 +1,17 @@
+Krasis Rust Prefill Perplexity
+==================================================
+Date:          2026-07-16T22:48:52.453028
+Config:        tests/ornith397-stats-bf16-bf16kv-ppl.conf
+Model:         /home/main/.krasis/models/deepreinforce-ai/Ornith-1.0-397B
+Dataset:       wikitext-2
+Attention:     bf16
+KV dtype:      bf16
+Window size:   2048
+Stride:        1024
+Perplexity:    3.1034
+BPC:           1.6338
+Mean loss:     1.132498
+Tokens scored: 19999 / 20000
+Windows:       20
+Elapsed:       390.5s
+Throughput:    51 tok/s
