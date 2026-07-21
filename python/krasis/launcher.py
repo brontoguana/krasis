@@ -36,6 +36,12 @@ from krasis.config import (
     HQQ_CACHE_PROFILE_CHOICES,
 )
 from krasis.config import GPU_EXPERT_INT4_CALIB_CHOICES
+from krasis.nvidia_smi import (
+    ensure_wsl_cuda_env as _shared_ensure_wsl_cuda_env,
+    find_nvidia_smi as _shared_find_nvidia_smi,
+    is_wsl as _shared_is_wsl,
+    wsl_cuda_dir as _shared_wsl_cuda_dir,
+)
 
 # Terminal handling imports — graceful fallback for non-Unix
 try:
@@ -61,6 +67,75 @@ NC = "\033[0m"  # reset
 
 import re
 _ANSI_RE = re.compile(r"\033\[[0-9;]*m")
+_PCI_BUS_ID_RE = re.compile(
+    r"^(?:(?:pci|bus):)?(?:(?P<domain>[0-9a-fA-F]{4,8}):)?"
+    r"(?P<bus>[0-9a-fA-F]{2}):(?P<slot>[0-9a-fA-F]{2})\.(?P<func>[0-7])$"
+)
+_GPU_MEMORY_SELECTOR_RE = re.compile(
+    r"^(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>g|gb|gib|m|mb|mib)$",
+    re.IGNORECASE,
+)
+
+
+def _split_gpu_specs(raw: str) -> List[str]:
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def _normalize_pci_bus_id(raw: str) -> Optional[str]:
+    match = _PCI_BUS_ID_RE.match(raw.strip())
+    if not match:
+        return None
+    domain = match.group("domain") or "0"
+    return (
+        f"{int(domain, 16):08X}:"
+        f"{match.group('bus').upper()}:"
+        f"{match.group('slot').upper()}."
+        f"{match.group('func')}"
+    )
+
+
+def _gpu_alias_key(raw: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", raw.lower())
+
+
+def _gpu_vram_mb(gpu: Dict[str, Any]) -> int:
+    value = gpu.get("vram_mb", gpu.get("memory_total_mb", 0))
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _gpu_memory_selector_matches(spec: str, gpu: Dict[str, Any]) -> bool:
+    match = _GPU_MEMORY_SELECTOR_RE.match(spec.strip())
+    if not match:
+        return False
+    value = float(match.group("value"))
+    unit = match.group("unit").lower()
+    target_mb = value * 1024.0 if unit.startswith("g") else value
+    tolerance_mb = max(512.0 if unit.startswith("g") else 64.0, target_mb * 0.01)
+    return abs(float(_gpu_vram_mb(gpu)) - target_mb) <= tolerance_mb
+
+
+def _gpu_alias_matches(spec: str, gpu: Dict[str, Any]) -> bool:
+    if _gpu_memory_selector_matches(spec, gpu):
+        return True
+    needle = _gpu_alias_key(spec)
+    if not needle:
+        return False
+    return needle in _gpu_alias_key(str(gpu.get("name", "")))
+
+
+def _gpu_display(gpu: Dict[str, Any]) -> str:
+    ident = gpu.get("uuid") or gpu.get("pci_bus_id") or f"index {gpu.get('index', '?')}"
+    return f"GPU {gpu.get('index', '?')} {gpu.get('name', 'unknown')} ({ident})"
+
+
+def _unique_gpu_alias_match(spec: str, gpus: List[Dict[str, Any]]) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
+    matches = [gpu for gpu in gpus if _gpu_alias_matches(spec, gpu)]
+    if len(matches) == 1:
+        return matches[0], matches
+    return None, matches
 
 
 INTERACTIVE_ATTENTION_QUANT_CHOICES = ("hqq4", "hqq46_auto", "hqq6", "hqq68_auto")
@@ -246,7 +321,7 @@ def _read_key_timeout(timeout: float) -> Optional[str]:
 def detect_hardware() -> Dict[str, Any]:
     """Detect GPUs, CPU, RAM. Returns dict with hardware info.
 
-    hw["gpus"] is a list of per-GPU dicts: {index, name, vram_mb}.
+    hw["gpus"] is a list of per-GPU dicts: {index, name, vram_mb, uuid, pci_bus_id}.
     hw["gpu_count"], ["gpu_model"], ["gpu_vram_mb"] reflect all GPUs / first GPU.
     """
     hw: Dict[str, Any] = {
@@ -267,7 +342,7 @@ def detect_hardware() -> Dict[str, Any]:
         _ensure_wsl_cuda_env()
         nvidia_smi = _find_nvidia_smi() or "nvidia-smi"
         result = subprocess.run(
-            [nvidia_smi, "--query-gpu=index,name,memory.total,compute_cap",
+            [nvidia_smi, "--query-gpu=index,name,memory.total,compute_cap,uuid,pci.bus_id",
              "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=5,
         )
@@ -282,6 +357,8 @@ def detect_hardware() -> Dict[str, Any]:
                         "name": parts[1],
                         "vram_mb": int(parts[2]),
                         "sm": sm,
+                        "uuid": parts[4] if len(parts) >= 5 else "",
+                        "pci_bus_id": _normalize_pci_bus_id(parts[5]) if len(parts) >= 6 else "",
                     })
                 elif len(parts) >= 3:
                     hw["gpus"].append({
@@ -289,6 +366,8 @@ def detect_hardware() -> Dict[str, Any]:
                         "name": parts[1],
                         "vram_mb": int(parts[2]),
                         "sm": (0, 0),
+                        "uuid": parts[4] if len(parts) >= 5 else "",
+                        "pci_bus_id": _normalize_pci_bus_id(parts[5]) if len(parts) >= 6 else "",
                     })
             hw["gpu_count"] = len(hw["gpus"])
             if hw["gpus"]:
@@ -348,53 +427,21 @@ def detect_hardware() -> Dict[str, Any]:
 
 def _is_wsl() -> bool:
     """Return True when running under WSL/WSL2."""
-    try:
-        with open("/proc/version") as f:
-            return "microsoft" in f.read().lower()
-    except FileNotFoundError:
-        return False
+    return _shared_is_wsl()
 
 
 def _wsl_cuda_dir() -> str:
-    return "/usr/lib/wsl/lib"
+    return _shared_wsl_cuda_dir()
 
 
 def _ensure_wsl_cuda_env():
     """Expose the WSL2 host driver binaries/libraries to subprocesses."""
-    wsl_cuda = _wsl_cuda_dir()
-    if not os.path.isdir(wsl_cuda):
-        return
-    path = os.environ.get("PATH", "")
-    if wsl_cuda not in path.split(":"):
-        os.environ["PATH"] = f"{wsl_cuda}:{path}" if path else wsl_cuda
-    ld_path = os.environ.get("LD_LIBRARY_PATH", "")
-    if wsl_cuda not in ld_path.split(":"):
-        os.environ["LD_LIBRARY_PATH"] = f"{wsl_cuda}:{ld_path}" if ld_path else wsl_cuda
+    _shared_ensure_wsl_cuda_env()
 
 
 def _find_nvidia_smi() -> Optional[str]:
     """Find nvidia-smi on Linux/WSL/Windows."""
-    import shutil
-
-    nvidia_smi = shutil.which("nvidia-smi")
-    if nvidia_smi:
-        return nvidia_smi
-    if os.name == "nt":
-        roots = [
-            os.environ.get("ProgramFiles"),
-            os.environ.get("ProgramW6432"),
-            r"C:\Program Files",
-        ]
-        for root in roots:
-            if not root:
-                continue
-            candidate = os.path.join(root, "NVIDIA Corporation", "NVSMI", "nvidia-smi.exe")
-            if os.path.isfile(candidate):
-                return candidate
-    wsl_smi = os.path.join(_wsl_cuda_dir(), "nvidia-smi")
-    if os.path.isfile(wsl_smi):
-        return wsl_smi
-    return None
+    return _shared_find_nvidia_smi()
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -572,6 +619,7 @@ class LauncherConfig:
     def __init__(self):
         self.model_path: str = ""
         self.selected_gpu_indices: List[int] = []  # empty = all GPUs
+        self.selected_gpu_specs: List[str] = []  # raw CFG_SELECTED_GPUS entries; indices, UUIDs, PCI IDs, or aliases
         self.pp_partition: str = ""
         self.layer_group_size: int = 2  # layers per group (must be even, min 2 for double buffering)
         self.kv_cache_mb: int = 1000
@@ -621,13 +669,9 @@ class LauncherConfig:
         if "MODEL_PATH" in saved and saved["MODEL_PATH"]:
             self.model_path = saved["MODEL_PATH"]
         if "CFG_SELECTED_GPUS" in saved and saved["CFG_SELECTED_GPUS"]:
-            try:
-                self.selected_gpu_indices = [
-                    int(x.strip()) for x in saved["CFG_SELECTED_GPUS"].split(",")
-                    if x.strip()
-                ]
-            except ValueError:
-                pass
+            self.selected_gpu_specs = _split_gpu_specs(saved["CFG_SELECTED_GPUS"])
+            if self.selected_gpu_specs and all(x.isdigit() for x in self.selected_gpu_specs):
+                self.selected_gpu_indices = [int(x) for x in self.selected_gpu_specs]
         if "CFG_PP_PARTITION" in saved:
             self.pp_partition = saved["CFG_PP_PARTITION"]
         if "CFG_LAYER_GROUP_SIZE" in saved:
@@ -838,9 +882,14 @@ class LauncherConfig:
 
     def to_save_dict(self) -> Dict[str, Any]:
         """Convert to dict for saving or launch config serialization."""
+        selected_gpu_value = (
+            ",".join(self.selected_gpu_specs)
+            if self.selected_gpu_specs
+            else ",".join(str(i) for i in self.selected_gpu_indices)
+        )
         values = {
             "MODEL_PATH": self.model_path,
-            "CFG_SELECTED_GPUS": ",".join(str(i) for i in self.selected_gpu_indices),
+            "CFG_SELECTED_GPUS": selected_gpu_value,
             "CFG_PP_PARTITION": self.pp_partition,
             "CFG_LAYER_GROUP_SIZE": str(self.layer_group_size),
             "CFG_KV_CACHE_MB": str(self.kv_cache_mb),
@@ -1345,7 +1394,74 @@ class Launcher:
         return str(num_layers)
 
     def _resolve_selected_gpus(self) -> None:
-        """Resolve selected GPU indices to GPU dicts from hardware info."""
+        """Resolve selected GPU selectors to GPU dicts from hardware info."""
+        if self.cfg.selected_gpu_specs:
+            selected = []
+            unresolved = []
+            ambiguous = []
+            duplicate_specs = []
+            seen_resolved = set()
+            hw_by_index = {g["index"]: g for g in self.hw["gpus"]}
+            hw_by_uuid = {
+                g.get("uuid", ""): g for g in self.hw["gpus"] if g.get("uuid")
+            }
+            hw_by_pci = {
+                g.get("pci_bus_id", ""): g for g in self.hw["gpus"] if g.get("pci_bus_id")
+            }
+            for spec in self.cfg.selected_gpu_specs:
+                match = None
+                if spec.isdigit():
+                    match = hw_by_index.get(int(spec))
+                    if match is None:
+                        match, matches = _unique_gpu_alias_match(spec, self.hw["gpus"])
+                        if not match and matches:
+                            ambiguous.append((spec, matches))
+                elif spec.startswith(("GPU-", "MIG-")):
+                    match = hw_by_uuid.get(spec)
+                else:
+                    pci_bus_id = _normalize_pci_bus_id(spec)
+                    if pci_bus_id:
+                        match = hw_by_pci.get(pci_bus_id)
+                    if match is None:
+                        match, matches = _unique_gpu_alias_match(spec, self.hw["gpus"])
+                        if not match and matches:
+                            ambiguous.append((spec, matches))
+                if match is None:
+                    if not any(spec == item[0] for item in ambiguous):
+                        unresolved.append(spec)
+                else:
+                    resolved_key = (
+                        match.get("uuid")
+                        or match.get("pci_bus_id")
+                        or f"index:{match.get('index')}"
+                    )
+                    if resolved_key in seen_resolved:
+                        duplicate_specs.append(spec)
+                    else:
+                        seen_resolved.add(resolved_key)
+                        selected.append(match)
+            if unresolved or ambiguous or duplicate_specs:
+                messages = []
+                if unresolved:
+                    messages.append("not found: " + ", ".join(unresolved))
+                if duplicate_specs:
+                    messages.append("duplicate resolved GPU: " + ", ".join(duplicate_specs))
+                for spec, matches in ambiguous:
+                    match_text = "; ".join(_gpu_display(gpu) for gpu in matches)
+                    messages.append(f"ambiguous {spec!r}: {match_text}")
+                print(
+                    f"{YELLOW}Warning:{NC} saved GPU selector(s) could not be resolved: "
+                    + " | ".join(messages),
+                    file=sys.stderr,
+                )
+                self.selected_gpus = []
+                self.cfg.selected_gpu_indices = []
+                return
+            elif selected:
+                self.selected_gpus = selected
+                self.cfg.selected_gpu_indices = [g["index"] for g in selected]
+                return
+
         if self.cfg.selected_gpu_indices:
             # Match saved indices against detected GPUs
             hw_indices = {g["index"] for g in self.hw["gpus"]}
@@ -1354,11 +1470,14 @@ class Launcher:
                 self.selected_gpus = [
                     g for g in self.hw["gpus"] if g["index"] in valid
                 ]
+                if not self.cfg.selected_gpu_specs:
+                    self.cfg.selected_gpu_specs = [str(i) for i in valid]
                 return
         # Default: use the GPU with the largest VRAM
         best = max(self.hw["gpus"], key=lambda g: g["vram_mb"])
         self.selected_gpus = [best]
         self.cfg.selected_gpu_indices = [best["index"]]
+        self.cfg.selected_gpu_specs = [str(best["index"])]
 
     def _discover_hqq4sc_manifest(self) -> Optional[str]:
         """Find the current model's explicit INT8-exception HQQ4SC manifest."""
@@ -2212,6 +2331,7 @@ class Launcher:
                 if gpu_indices is None:
                     return False
                 self.cfg.selected_gpu_indices = gpu_indices
+                self.cfg.selected_gpu_specs = [str(i) for i in gpu_indices]
                 self._resolve_selected_gpus()
         if not self.selected_gpus:
             self._resolve_selected_gpus()
@@ -2485,7 +2605,12 @@ class Launcher:
         # Write the full config to a temp file
         config_dict = self.cfg.to_save_dict()
         # Add num_gpus (derived from selected GPUs, not stored in LauncherConfig)
-        num_gpus = len(self.selected_gpus) if self.selected_gpus else self.hw["gpu_count"]
+        selected_specs = self.cfg.selected_gpu_specs
+        num_gpus = (
+            len(selected_specs)
+            if selected_specs
+            else len(self.selected_gpus) if self.selected_gpus else self.hw["gpu_count"]
+        )
         config_dict["CFG_NUM_GPUS"] = str(num_gpus)
 
         fd, config_path = tempfile.mkstemp(prefix="krasis-", suffix=".conf")
@@ -2515,8 +2640,21 @@ class Launcher:
             cmd_args.append("--vram-report")
 
         # Set CUDA_VISIBLE_DEVICES to selected GPUs
-        if self.selected_gpus:
+        cvd = ""
+        if selected_specs:
+            cvd_parts = []
+            for spec, gpu in zip(selected_specs, self.selected_gpus):
+                if gpu.get("uuid"):
+                    cvd_parts.append(gpu["uuid"])
+                elif spec.isdigit() and int(spec) == gpu.get("index"):
+                    cvd_parts.append(str(gpu["index"]))
+                elif spec.startswith(("GPU-", "MIG-")):
+                    cvd_parts.append(spec)
+            if len(cvd_parts) == len(selected_specs):
+                cvd = ",".join(cvd_parts)
+        elif self.selected_gpus:
             cvd = ",".join(str(g["index"]) for g in self.selected_gpus)
+        if cvd:
             os.environ["CUDA_VISIBLE_DEVICES"] = cvd
             print(f"  CUDA_VISIBLE_DEVICES={cvd}")
 
@@ -2586,7 +2724,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-gpus", type=int, default=None,
                         help="Number of GPUs to use")
     parser.add_argument("--selected-gpus", default=None,
-                        help="Comma-separated GPU indices to use (e.g. '0,2')")
+                        help="Comma-separated GPU selectors to use (indices, UUIDs, PCI IDs, or aliases like '6000')")
     parser.add_argument("--layer-group-size", type=int, default=None,
                         help="Layers per streaming group (even number, min 2 for double buffering)")
     parser.add_argument("--kv-cache-mb", type=int, default=None,
@@ -2670,12 +2808,11 @@ def _apply_cli_overrides(cfg: LauncherConfig, args: argparse.Namespace) -> None:
     if args.model_path is not None:
         cfg.model_path = args.model_path
     if args.selected_gpus is not None:
-        try:
-            cfg.selected_gpu_indices = [
-                int(x.strip()) for x in args.selected_gpus.split(",") if x.strip()
-            ]
-        except ValueError:
-            pass
+        cfg.selected_gpu_specs = _split_gpu_specs(args.selected_gpus)
+        if cfg.selected_gpu_specs and all(x.isdigit() for x in cfg.selected_gpu_specs):
+            cfg.selected_gpu_indices = [int(x) for x in cfg.selected_gpu_specs]
+        else:
+            cfg.selected_gpu_indices = []
     if args.pp_partition is not None:
         cfg.pp_partition = args.pp_partition
     if args.layer_group_size is not None:
@@ -3064,7 +3201,7 @@ def main():
     _apply_cli_overrides(launcher.cfg, args)
 
     # Pre-resolve selected GPUs if set via CLI/saved config
-    if launcher.cfg.selected_gpu_indices:
+    if launcher.cfg.selected_gpu_specs or launcher.cfg.selected_gpu_indices:
         launcher._resolve_selected_gpus()
 
     if args.non_interactive:

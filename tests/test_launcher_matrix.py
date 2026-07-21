@@ -12,6 +12,7 @@ import torch
 
 from krasis.attention_backend import quantize_hqq4_tensor_rust
 from krasis import launcher as launcher_mod
+from krasis import nvidia_smi as nvidia_smi_mod
 from krasis.launcher import Launcher, LauncherConfig
 
 
@@ -203,6 +204,35 @@ class LauncherMatrixTest(unittest.TestCase):
             calls[1],
             (["bash", "-s", "--", "prerelease"], b"#!/bin/bash\necho installer\n", False),
         )
+
+    def test_nvidia_smi_discovery_checks_native_windows_install_path(self) -> None:
+        old_os_name = nvidia_smi_mod.os.name
+        old_which = nvidia_smi_mod.shutil.which
+        old_program_files = os.environ.get("ProgramFiles")
+        old_program_w6432 = os.environ.get("ProgramW6432")
+        with tempfile.TemporaryDirectory(prefix="krasis-nvsmi-win-") as root:
+            nvsmi = Path(root) / "NVIDIA Corporation" / "NVSMI" / "nvidia-smi.exe"
+            nvsmi.parent.mkdir(parents=True)
+            nvsmi.write_text("")
+            try:
+                nvidia_smi_mod.os.name = "nt"
+                nvidia_smi_mod.shutil.which = lambda _name: None
+                os.environ["ProgramFiles"] = root
+                os.environ["ProgramW6432"] = ""
+
+                self.assertEqual(nvidia_smi_mod.find_nvidia_smi(), str(nvsmi))
+                self.assertEqual(launcher_mod._find_nvidia_smi(), str(nvsmi))
+            finally:
+                nvidia_smi_mod.os.name = old_os_name
+                nvidia_smi_mod.shutil.which = old_which
+                if old_program_files is None:
+                    os.environ.pop("ProgramFiles", None)
+                else:
+                    os.environ["ProgramFiles"] = old_program_files
+                if old_program_w6432 is None:
+                    os.environ.pop("ProgramW6432", None)
+                else:
+                    os.environ["ProgramW6432"] = old_program_w6432
 
     def test_hf_results_screen_fits_short_terminal_without_wrapping(self) -> None:
         long_summary = " ".join(["very-long-summary"] * 20)
@@ -441,6 +471,212 @@ class LauncherMatrixTest(unittest.TestCase):
         self.assertEqual(launcher.cfg.ssh_tunnel, "alice@example.com:2222")
         self.assertEqual(launcher.cfg.ssh_key_path, os.path.expanduser("~/.ssh/id_ed25519"))
         self.assertFalse(launcher.cfg.enable_thinking)
+
+    def test_stable_gpu_selectors_round_trip_and_resolve(self) -> None:
+        cfg = LauncherConfig()
+        cfg.apply_saved({
+            "CFG_SELECTED_GPUS": "GPU-test-big,00000000:81:00.0",
+        })
+        self.assertEqual(cfg.selected_gpu_specs, ["GPU-test-big", "00000000:81:00.0"])
+        self.assertEqual(cfg.selected_gpu_indices, [])
+        self.assertEqual(cfg.to_save_dict()["CFG_SELECTED_GPUS"], "GPU-test-big,00000000:81:00.0")
+
+        launcher = Launcher.__new__(Launcher)
+        launcher.cfg = cfg
+        launcher.hw = {
+            "gpu_count": 2,
+            "gpus": [
+                {
+                    "index": 0,
+                    "name": "Small GPU",
+                    "vram_mb": 24_000,
+                    "uuid": "GPU-test-small",
+                    "pci_bus_id": "00000000:81:00.0",
+                },
+                {
+                    "index": 1,
+                    "name": "Big GPU",
+                    "vram_mb": 96_000,
+                    "uuid": "GPU-test-big",
+                    "pci_bus_id": "00000000:C5:00.0",
+                },
+            ],
+        }
+        launcher.selected_gpus = []
+        launcher._resolve_selected_gpus()
+
+        self.assertEqual([g["index"] for g in launcher.selected_gpus], [1, 0])
+        self.assertEqual(cfg.selected_gpu_indices, [1, 0])
+        self.assertEqual(cfg.to_save_dict()["CFG_SELECTED_GPUS"], "GPU-test-big,00000000:81:00.0")
+
+    def test_gpu_alias_selectors_resolve_uniquely(self) -> None:
+        cfg = LauncherConfig()
+        cfg.apply_saved({
+            "CFG_SELECTED_GPUS": "6000,20GB",
+        })
+
+        launcher = Launcher.__new__(Launcher)
+        launcher.cfg = cfg
+        launcher.hw = {
+            "gpu_count": 2,
+            "gpus": [
+                {
+                    "index": 0,
+                    "name": "NVIDIA RTX A4500",
+                    "vram_mb": 20_470,
+                    "uuid": "GPU-test-a4500",
+                    "pci_bus_id": "00000000:81:00.0",
+                },
+                {
+                    "index": 1,
+                    "name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+                    "vram_mb": 97_887,
+                    "uuid": "GPU-test-rtx-pro-6000",
+                    "pci_bus_id": "00000000:C5:00.0",
+                },
+            ],
+        }
+        launcher.selected_gpus = []
+        launcher._resolve_selected_gpus()
+
+        self.assertEqual([g["index"] for g in launcher.selected_gpus], [1, 0])
+        self.assertEqual(cfg.selected_gpu_indices, [1, 0])
+        self.assertEqual(cfg.to_save_dict()["CFG_SELECTED_GPUS"], "6000,20GB")
+
+        cfg = LauncherConfig()
+        cfg.apply_saved({
+            "CFG_SELECTED_GPUS": "96GB",
+        })
+        launcher.cfg = cfg
+        launcher.selected_gpus = []
+        launcher._resolve_selected_gpus()
+
+        self.assertEqual([g["index"] for g in launcher.selected_gpus], [1])
+        self.assertEqual(cfg.selected_gpu_indices, [1])
+        self.assertEqual(cfg.to_save_dict()["CFG_SELECTED_GPUS"], "96GB")
+
+    def test_gpu_alias_selector_ambiguity_is_not_silent(self) -> None:
+        cfg = LauncherConfig()
+        cfg.apply_saved({
+            "CFG_SELECTED_GPUS": "6000",
+        })
+
+        launcher = Launcher.__new__(Launcher)
+        launcher.cfg = cfg
+        launcher.hw = {
+            "gpu_count": 2,
+            "gpus": [
+                {
+                    "index": 0,
+                    "name": "NVIDIA RTX A6000",
+                    "vram_mb": 49_140,
+                    "uuid": "GPU-test-a6000",
+                    "pci_bus_id": "00000000:81:00.0",
+                },
+                {
+                    "index": 1,
+                    "name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+                    "vram_mb": 97_887,
+                    "uuid": "GPU-test-rtx-pro-6000",
+                    "pci_bus_id": "00000000:C5:00.0",
+                },
+            ],
+        }
+        launcher.selected_gpus = []
+
+        with contextlib.redirect_stderr(io.StringIO()) as stderr:
+            launcher._resolve_selected_gpus()
+
+        self.assertEqual(launcher.selected_gpus, [])
+        self.assertEqual(cfg.selected_gpu_indices, [])
+        self.assertIn("ambiguous '6000'", stderr.getvalue())
+
+    def test_gpu_alias_duplicate_resolution_is_not_silent(self) -> None:
+        cfg = LauncherConfig()
+        cfg.apply_saved({
+            "CFG_SELECTED_GPUS": "6000,96GB",
+        })
+
+        launcher = Launcher.__new__(Launcher)
+        launcher.cfg = cfg
+        launcher.hw = {
+            "gpu_count": 2,
+            "gpus": [
+                {
+                    "index": 0,
+                    "name": "NVIDIA RTX A4500",
+                    "vram_mb": 20_470,
+                    "uuid": "GPU-test-a4500",
+                    "pci_bus_id": "00000000:81:00.0",
+                },
+                {
+                    "index": 1,
+                    "name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+                    "vram_mb": 97_887,
+                    "uuid": "GPU-test-rtx-pro-6000",
+                    "pci_bus_id": "00000000:C5:00.0",
+                },
+            ],
+        }
+        launcher.selected_gpus = []
+
+        with contextlib.redirect_stderr(io.StringIO()) as stderr:
+            launcher._resolve_selected_gpus()
+
+        self.assertEqual(launcher.selected_gpus, [])
+        self.assertEqual(cfg.selected_gpu_indices, [])
+        self.assertIn("duplicate resolved GPU: 96GB", stderr.getvalue())
+
+    def test_gpu_alias_launch_uses_resolved_uuid(self) -> None:
+        cfg = _base_config()
+        cfg.selected_gpu_specs = ["6000"]
+        cfg.selected_gpu_indices = [1]
+        cfg.attention_quant = "hqq6"
+
+        launcher = Launcher.__new__(Launcher)
+        launcher.cfg = cfg
+        launcher.hw = {
+            "gpu_count": 2,
+            "gpus": [
+                {"index": 0, "name": "NVIDIA RTX A4500", "vram_mb": 20_470},
+                {"index": 1, "name": "NVIDIA RTX PRO 6000 Blackwell", "vram_mb": 97_887},
+            ],
+        }
+        launcher.selected_gpus = [
+            {
+                "index": 1,
+                "name": "NVIDIA RTX PRO 6000 Blackwell",
+                "vram_mb": 97_887,
+                "uuid": "GPU-test-rtx-pro-6000",
+                "pci_bus_id": "00000000:C5:00.0",
+            }
+        ]
+
+        old_execvp = os.execvp
+        old_cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
+
+        def fake_execvp(path: str, argv: list[str]) -> None:
+            raise _ExecIntercept(path, list(argv))
+
+        os.execvp = fake_execvp
+        try:
+            with self.assertRaises(_ExecIntercept) as raised:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    launcher.launch_server(benchmark=True)
+            config_path = Path(raised.exception.args[raised.exception.args.index("--config") + 1])
+            try:
+                values = _parse_key_value_config(config_path)
+                self.assertEqual(values.get("CFG_SELECTED_GPUS"), "6000")
+                self.assertEqual(values.get("CFG_NUM_GPUS"), "1")
+                self.assertEqual(os.environ.get("CUDA_VISIBLE_DEVICES"), "GPU-test-rtx-pro-6000")
+            finally:
+                config_path.unlink(missing_ok=True)
+        finally:
+            os.execvp = old_execvp
+            if old_cvd is None:
+                os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+            else:
+                os.environ["CUDA_VISIBLE_DEVICES"] = old_cvd
 
     def test_launcher_generated_configs_start_server_parse_path(self) -> None:
         scenarios = []

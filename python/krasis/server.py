@@ -11,9 +11,11 @@ import hashlib
 import json
 import logging
 import os
+import re
 import select
 import signal
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -28,7 +30,113 @@ from krasis.attention_backend import (
 )
 from krasis.config import DEPRECATED_ATTENTION_QUANT_CHOICES, DEPRECATED_KV_CACHE_FORMAT_CHOICES, KV_CACHE_FORMAT_CHOICES
 from krasis.config import HQQ_CACHE_PROFILE_BASELINE, HQQ_CACHE_PROFILE_CHOICES
+from krasis.nvidia_smi import ensure_wsl_cuda_env, find_nvidia_smi
 from krasis.run_paths import get_run_dir
+
+_PCI_BUS_ID_RE = re.compile(
+    r"^(?:(?:pci|bus):)?(?:(?P<domain>[0-9a-fA-F]{4,8}):)?"
+    r"(?P<bus>[0-9a-fA-F]{2}):(?P<slot>[0-9a-fA-F]{2})\.(?P<func>[0-7])$"
+)
+_GPU_MEMORY_SELECTOR_RE = re.compile(
+    r"^(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>g|gb|gib|m|mb|mib)$",
+    re.IGNORECASE,
+)
+
+
+def _normalize_pci_bus_id(raw: str) -> Optional[str]:
+    match = _PCI_BUS_ID_RE.match(raw.strip())
+    if not match:
+        return None
+    domain = match.group("domain") or "0"
+    return (
+        f"{int(domain, 16):08X}:"
+        f"{match.group('bus').upper()}:"
+        f"{match.group('slot').upper()}."
+        f"{match.group('func')}"
+    )
+
+
+def _gpu_alias_key(raw: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", raw.lower())
+
+
+def _gpu_memory_selector_matches(spec: str, gpu: dict[str, Any]) -> bool:
+    match = _GPU_MEMORY_SELECTOR_RE.match(spec.strip())
+    if not match:
+        return False
+    value = float(match.group("value"))
+    unit = match.group("unit").lower()
+    target_mb = value * 1024.0 if unit.startswith("g") else value
+    tolerance_mb = max(512.0 if unit.startswith("g") else 64.0, target_mb * 0.01)
+    return abs(float(gpu.get("vram_mb", 0)) - target_mb) <= tolerance_mb
+
+
+def _gpu_alias_matches(spec: str, gpu: dict[str, Any]) -> bool:
+    if _gpu_memory_selector_matches(spec, gpu):
+        return True
+    needle = _gpu_alias_key(spec)
+    if not needle:
+        return False
+    return needle in _gpu_alias_key(str(gpu.get("name", "")))
+
+
+def _gpu_display(gpu: dict[str, Any]) -> str:
+    ident = gpu.get("uuid") or gpu.get("pci_bus_id") or f"index {gpu.get('index', '?')}"
+    return f"GPU {gpu.get('index', '?')} {gpu.get('name', 'unknown')} ({ident})"
+
+
+def _unique_gpu_alias_match(spec: str, gpus: list[dict[str, Any]]) -> tuple[Optional[dict[str, Any]], list[dict[str, Any]]]:
+    matches = [gpu for gpu in gpus if _gpu_alias_matches(spec, gpu)]
+    if len(matches) == 1:
+        return matches[0], matches
+    return None, matches
+
+
+def _nvidia_smi_gpu_inventory(source: str) -> list[dict[str, Any]]:
+    try:
+        ensure_wsl_cuda_env()
+        nvidia_smi = find_nvidia_smi() or "nvidia-smi"
+        proc = subprocess.run(
+            [
+                nvidia_smi,
+                "--query-gpu=index,uuid,pci.bus_id,memory.total,name",
+                "--format=csv,noheader,nounits",
+            ],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=5,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        details = getattr(exc, "stderr", "") or str(exc)
+        raise SystemExit(
+            f"{source} selected GPU list uses a stable GPU selector, but nvidia-smi failed "
+            f"while resolving it: {details.strip()}"
+        ) from exc
+
+    inventory: list[dict[str, Any]] = []
+    for line in proc.stdout.splitlines():
+        fields = [field.strip() for field in line.split(",", 4)]
+        if len(fields) < 5:
+            continue
+        try:
+            index = int(fields[0])
+            vram_mb = int(fields[3])
+        except ValueError:
+            continue
+        uuid = fields[1]
+        pci_bus_id = _normalize_pci_bus_id(fields[2])
+        if pci_bus_id and uuid.startswith(("GPU-", "MIG-")):
+            inventory.append({
+                "index": index,
+                "uuid": uuid,
+                "pci_bus_id": pci_bus_id,
+                "vram_mb": vram_mb,
+                "name": fields[4],
+            })
+    return inventory
+
 
 def _normalize_selected_gpus(raw: Optional[str], source: str) -> str:
     text = (raw or "").strip()
@@ -36,18 +144,99 @@ def _normalize_selected_gpus(raw: Optional[str], source: str) -> str:
         raise SystemExit(f"{source} selected GPU list is empty")
     seen = set()
     values = []
+    gpu_inventory: Optional[list[dict[str, Any]]] = None
+
+    def inventory() -> list[dict[str, Any]]:
+        nonlocal gpu_inventory
+        if gpu_inventory is None:
+            gpu_inventory = _nvidia_smi_gpu_inventory(source)
+        return gpu_inventory
+
     for part in text.split(","):
         gpu = part.strip()
         if not gpu:
             continue
-        if not gpu.isdigit():
-            raise SystemExit(f"{source} selected GPU list contains non-integer entry: {gpu!r}")
-        if gpu in seen:
-            raise SystemExit(f"{source} selected GPU list contains duplicate GPU index: {gpu}")
-        seen.add(gpu)
-        values.append(gpu)
+        if gpu.isdigit():
+            visible_id = str(int(gpu))
+            duplicate_key = f"index:{visible_id}"
+            if len(gpu) >= 3:
+                inv = inventory()
+                if not any(item.get("index") == int(gpu) for item in inv):
+                    match, matches = _unique_gpu_alias_match(gpu, inv)
+                    if match:
+                        visible_id = str(match["uuid"])
+                        duplicate_key = f"uuid:{visible_id}"
+                    elif matches:
+                        match_text = "; ".join(_gpu_display(item) for item in matches)
+                        raise SystemExit(
+                            f"{source} selected GPU selector {gpu!r} is ambiguous: {match_text}"
+                        )
+                    else:
+                        available = "; ".join(_gpu_display(item) for item in inv) or "none"
+                        raise SystemExit(
+                            f"{source} selected GPU selector {gpu!r} did not match any GPU. "
+                            f"Available GPUs: {available}"
+                        )
+        elif gpu.startswith(("GPU-", "MIG-")):
+            visible_id = gpu
+            duplicate_key = f"uuid:{visible_id}"
+        else:
+            pci_bus_id = _normalize_pci_bus_id(gpu)
+            if pci_bus_id:
+                by_pci = {
+                    str(item.get("pci_bus_id")): str(item.get("uuid"))
+                    for item in inventory()
+                    if item.get("pci_bus_id") and item.get("uuid")
+                }
+                visible_id = by_pci.get(pci_bus_id)
+                if not visible_id:
+                    available = ", ".join(sorted(by_pci)) or "none"
+                    raise SystemExit(
+                        f"{source} selected GPU PCI bus ID {pci_bus_id} was not found. "
+                        f"Available PCI bus IDs: {available}"
+                    )
+                duplicate_key = f"uuid:{visible_id}"
+            else:
+                match, matches = _unique_gpu_alias_match(gpu, inventory())
+                if match:
+                    visible_id = str(match["uuid"])
+                    duplicate_key = f"uuid:{visible_id}"
+                elif matches:
+                    match_text = "; ".join(_gpu_display(item) for item in matches)
+                    raise SystemExit(
+                        f"{source} selected GPU selector {gpu!r} is ambiguous: {match_text}"
+                    )
+                else:
+                    available = "; ".join(_gpu_display(item) for item in inventory()) or "none"
+                    raise SystemExit(
+                        f"{source} selected GPU selector {gpu!r} did not match any GPU. "
+                        f"Available GPUs: {available}"
+                    )
+            if not visible_id:
+                raise SystemExit(
+                    f"{source} selected GPU list contains unsupported entry: {gpu!r}. "
+                    "Use physical GPU indices, GPU UUIDs, PCI bus IDs, or unique name/memory aliases."
+                )
+        if duplicate_key in seen:
+            raise SystemExit(f"{source} selected GPU list contains duplicate GPU entry: {gpu}")
+        seen.add(duplicate_key)
+        values.append(visible_id)
     if not values:
         raise SystemExit(f"{source} selected GPU list is empty")
+    if gpu_inventory is not None:
+        index_to_uuid = {
+            str(item.get("index")): str(item.get("uuid"))
+            for item in gpu_inventory
+            if item.get("uuid")
+        }
+        physical_seen = set()
+        for value in values:
+            physical_key = index_to_uuid.get(value, value)
+            if physical_key in physical_seen:
+                raise SystemExit(
+                    f"{source} selected GPU list contains duplicate physical GPU: {value}"
+                )
+            physical_seen.add(physical_key)
     return ",".join(values)
 
 
@@ -1718,8 +1907,8 @@ def main():
                      help="Path to config file (KEY=VALUE format). "
                           "CLI args override config file values.")
     pre.add_argument("--selected-gpus", default=None,
-                     help="Explicit physical GPU indices to expose, overriding CFG_SELECTED_GPUS "
-                          "(comma-separated, e.g. 0 or 0,1).")
+                     help="Explicit physical GPU identifiers to expose, overriding CFG_SELECTED_GPUS "
+                          "(comma-separated indices, UUIDs, PCI bus IDs, or unique aliases like 6000/96GB).")
     pre_args, remaining_argv = pre.parse_known_args()
     explicit_selected_gpus = None
     if pre_args.selected_gpus is not None:
@@ -1737,7 +1926,7 @@ def main():
         # Mapping from CFG_* keys (used in ~/.krasis/config) to argparse dests
         _CFG_KEY_MAP = {
             "MODEL_PATH": "model_path",
-            "CFG_SELECTED_GPUS": "_selected_gpus",  # special: comma list → num_gpus
+            "CFG_SELECTED_GPUS": "_selected_gpus",  # special: comma list -> CUDA_VISIBLE_DEVICES + num_gpus
             "CFG_PP_PARTITION": None,  # not used by server
             "CFG_LAYER_GROUP_SIZE": "layer_group_size",
             "CFG_KV_DTYPE": "kv_dtype",
@@ -1824,7 +2013,7 @@ def main():
                         continue
                     # Handle special cases for CFG_ format
                     if key == "CFG_SELECTED_GPUS":
-                        # Convert comma-separated GPU indices to num_gpus count
+                        # Convert selected physical GPU identifiers to num_gpus count.
                         # CUDA_VISIBLE_DEVICES is set earlier in _prescan_selected_gpus()
                         selected = _normalize_selected_gpus(val, "CFG_SELECTED_GPUS")
                         config_selected_gpus = selected
