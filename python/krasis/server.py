@@ -271,9 +271,11 @@ def _prescan_selected_gpus():
 _prescan_selected_gpus()
 
 from krasis.config import (
+    ADAPTIVE_COLD_MASS_PRUNING_CHOICES,
     GPU_EXPERT_INT4_CALIB_CHOICES,
     QuantConfig,
     cache_dir_for_model,
+    configure_adaptive_cold_mass_pruning,
     marlin_cache_basename,
 )
 from krasis.model import KrasisModel, log_ram_ledger
@@ -1970,6 +1972,7 @@ def main():
             "CFG_VRAM_SAFETY_MARGIN": "vram_safety_margin",
             "CFG_DYNAMIC_HCS": "dynamic_hcs",
             "CFG_DYNAMIC_HCS_TAIL_BLOCKS": "dynamic_hcs_tail_blocks",
+            "CFG_ADAPTIVE_COLD_MASS_PRUNING": "adaptive_cold_mass_pruning",
             "CFG_STREAM_ATTENTION": "stream_attention",
             "CFG_DRAFT_MODEL": "draft_model",
             "CFG_DRAFT_K": "draft_k",
@@ -2175,6 +2178,15 @@ def main():
                         help="Enable dynamic HCS heatmap-prefix + recency-tail cache (default: on)")
     parser.add_argument("--dynamic-hcs-tail-blocks", type=int, default=2, choices=range(1, 6),
                         help="Advanced: recency tail size in activated-expert blocks (1-5, default: 2)")
+    parser.add_argument(
+        "--adaptive-cold-mass-pruning",
+        default=None,
+        choices=list(ADAPTIVE_COLD_MASS_PRUNING_CHOICES),
+        help=(
+            "Approximate demand-cold expert pruning preset (launcher default: off; "
+            "when omitted, existing low-level environment variables are unchanged)"
+        ),
+    )
     # NOTE: --hcs-headroom-mb removed — HCS budget is computed from 4-point VRAM calibration, not a fixed headroom
     parser.add_argument("--vram-safety-margin", type=int, default=600,
                         help="VRAM safety margin in MB — reserved free VRAM for decode kernel intermediates "
@@ -2251,6 +2263,13 @@ def main():
     )
     if args.hcs_host_cache_mode not in ("auto", "mirror", "source"):
         parser.error("--hcs-host-cache-mode must be one of: auto, mirror, source")
+    if args.adaptive_cold_mass_pruning is not None:
+        try:
+            args.adaptive_cold_mass_pruning = configure_adaptive_cold_mass_pruning(
+                args.adaptive_cold_mass_pruning
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
     if str(getattr(args, "ssh_key_path", "") or "").strip():
         args.ssh_key_path = os.path.expanduser(args.ssh_key_path.strip())
     if str(getattr(args, "ssh_tunnel", "") or "").strip():

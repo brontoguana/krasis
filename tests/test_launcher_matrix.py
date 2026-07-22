@@ -11,6 +11,7 @@ import unittest
 import torch
 
 from krasis.attention_backend import quantize_hqq4_tensor_rust
+from krasis.config import configure_adaptive_cold_mass_pruning
 from krasis import launcher as launcher_mod
 from krasis import nvidia_smi as nvidia_smi_mod
 from krasis.launcher import Launcher, LauncherConfig
@@ -167,6 +168,52 @@ class LauncherMatrixTest(unittest.TestCase):
         self.assertIn(launcher_mod.DIM, disabled)
         self.assertIn(launcher_mod.DIM, ssh_disabled)
 
+    def test_adaptive_cold_mass_pruning_launcher_sequence_and_environment(self) -> None:
+        cfg = LauncherConfig()
+        opt = next(
+            item for item in launcher_mod.OPTIONS
+            if item.key == "adaptive_cold_mass_pruning"
+        )
+        self.assertEqual(cfg.adaptive_cold_mass_pruning, "off")
+        self.assertEqual(cfg.to_save_dict()["CFG_ADAPTIVE_COLD_MASS_PRUNING"], "off")
+        self.assertEqual(opt.choices, ["off", "75/3", "75/5", "75/8", "75/10"])
+
+        launcher = Launcher.__new__(Launcher)
+        launcher.cfg = cfg
+        for expected in ("75/3", "75/5", "75/8", "75/10", "off"):
+            launcher._cycle_value(opt, 1)
+            self.assertEqual(cfg.adaptive_cold_mass_pruning, expected)
+        launcher._cycle_value(opt, -1)
+        self.assertEqual(cfg.adaptive_cold_mass_pruning, "75/10")
+
+        off_display = launcher_mod._ANSI_RE.sub("", launcher_mod._format_value(opt, "off"))
+        policy_display = launcher_mod._ANSI_RE.sub("", launcher_mod._format_value(opt, "75/8"))
+        self.assertEqual(off_display, "Off")
+        self.assertEqual(policy_display, "75/8 (approximate)")
+
+        env = {
+            "KRASIS_ADAPTIVE_COLD_DROP": "1",
+            "KRASIS_ADAPTIVE_COLD_DROP_PROTECT_PCT": "50",
+            "KRASIS_ADAPTIVE_COLD_DROP_MASS_PCT": "50",
+            "KRASIS_ADAPTIVE_COLD_DROP_SHADOW_MASS_PCTS": "3,5,8,10",
+        }
+        original_env = dict(env)
+        self.assertIsNone(configure_adaptive_cold_mass_pruning(None, env))
+        self.assertEqual(env, original_env)
+        self.assertEqual(configure_adaptive_cold_mass_pruning("75/8", env), "75/8")
+        self.assertEqual(env["KRASIS_ADAPTIVE_COLD_DROP"], "1")
+        self.assertEqual(env["KRASIS_ADAPTIVE_COLD_DROP_PROTECT_PCT"], "75")
+        self.assertEqual(env["KRASIS_ADAPTIVE_COLD_DROP_MASS_PCT"], "8")
+        self.assertIn("KRASIS_ADAPTIVE_COLD_DROP_SHADOW_MASS_PCTS", env)
+
+        self.assertEqual(configure_adaptive_cold_mass_pruning("off", env), "off")
+        self.assertNotIn("KRASIS_ADAPTIVE_COLD_DROP", env)
+        self.assertNotIn("KRASIS_ADAPTIVE_COLD_DROP_PROTECT_PCT", env)
+        self.assertNotIn("KRASIS_ADAPTIVE_COLD_DROP_MASS_PCT", env)
+        self.assertIn("KRASIS_ADAPTIVE_COLD_DROP_SHADOW_MASS_PCTS", env)
+        with self.assertRaisesRegex(ValueError, "Unsupported adaptive cold-mass pruning policy"):
+            configure_adaptive_cold_mass_pruning("75/12", env)
+
     def test_self_update_channels_use_installer_contract(self) -> None:
         self.assertEqual(launcher_mod._self_update_bash_args("stable"), ["bash", "-s", "--"])
         self.assertEqual(
@@ -319,6 +366,7 @@ class LauncherMatrixTest(unittest.TestCase):
         cfg.multi_gpu_hcs = True
         cfg.dynamic_hcs = False
         cfg.dynamic_hcs_tail_blocks = 5
+        cfg.adaptive_cold_mass_pruning = "75/8"
         cfg.stream_attention = True
         cfg.draft_model = "~/models/draft"
         cfg.draft_k = 5
@@ -367,6 +415,7 @@ class LauncherMatrixTest(unittest.TestCase):
             self.assertEqual(values.get("CFG_MULTI_GPU_HCS"), "1")
             self.assertEqual(values.get("CFG_DYNAMIC_HCS"), "0")
             self.assertEqual(values.get("CFG_DYNAMIC_HCS_TAIL_BLOCKS"), "5")
+            self.assertEqual(values.get("CFG_ADAPTIVE_COLD_MASS_PRUNING"), "75/8")
             self.assertEqual(values.get("CFG_STREAM_ATTENTION"), "1")
             self.assertEqual(values.get("CFG_DRAFT_MODEL"), "~/models/draft")
             self.assertEqual(values.get("CFG_DRAFT_K"), "5")
@@ -410,6 +459,7 @@ class LauncherMatrixTest(unittest.TestCase):
             self.assertTrue(loaded.multi_gpu_hcs)
             self.assertFalse(loaded.dynamic_hcs)
             self.assertEqual(loaded.dynamic_hcs_tail_blocks, 5)
+            self.assertEqual(loaded.adaptive_cold_mass_pruning, "75/8")
             self.assertTrue(loaded.stream_attention)
             self.assertEqual(loaded.draft_model, os.path.expanduser("~/models/draft"))
             self.assertEqual(loaded.draft_k, 5)
@@ -448,6 +498,7 @@ class LauncherMatrixTest(unittest.TestCase):
                     'CFG_KV_DTYPE="k4v4"',
                     'CFG_ATTENTION_QUANT="hqq4"',
                     'CFG_VRAM_SAFETY_MARGIN="900"',
+                    'CFG_ADAPTIVE_COLD_MASS_PRUNING="75/5"',
                     'CFG_SSH_TUNNEL="alice@example.com:2222"',
                     'CFG_SSH_KEY_PATH="~/.ssh/id_ed25519"',
                     'CFG_ENABLE_THINKING="0"',
@@ -468,6 +519,7 @@ class LauncherMatrixTest(unittest.TestCase):
         self.assertEqual(launcher.cfg.kv_dtype, "k4v4")
         self.assertEqual(launcher.cfg.attention_quant, "hqq4")
         self.assertEqual(launcher.cfg.vram_safety_margin, 900)
+        self.assertEqual(launcher.cfg.adaptive_cold_mass_pruning, "75/5")
         self.assertEqual(launcher.cfg.ssh_tunnel, "alice@example.com:2222")
         self.assertEqual(launcher.cfg.ssh_key_path, os.path.expanduser("~/.ssh/id_ed25519"))
         self.assertFalse(launcher.cfg.enable_thinking)
@@ -750,6 +802,7 @@ class LauncherMatrixTest(unittest.TestCase):
         cfg.kv_dtype = "k4v4"
         cfg.dynamic_hcs = False
         cfg.dynamic_hcs_tail_blocks = 5
+        cfg.adaptive_cold_mass_pruning = "75/8"
         cfg.enable_thinking = False
         cfg.force_load = True
         cfg.force_rebuild_cache = True
@@ -762,6 +815,7 @@ class LauncherMatrixTest(unittest.TestCase):
                 "CFG_ATTENTION_QUANT": "bf16",
                 "CFG_DYNAMIC_HCS": "0",
                 "CFG_DYNAMIC_HCS_TAIL_BLOCKS": "5",
+                "CFG_ADAPTIVE_COLD_MASS_PRUNING": "75/8",
                 "CFG_ENABLE_THINKING": "0",
                 "CFG_FORCE_LOAD": "1",
                 "CFG_FORCE_REBUILD_CACHE": "1",
@@ -771,6 +825,7 @@ class LauncherMatrixTest(unittest.TestCase):
             [
                 "attention_quant = 'bf16'",
                 "dynamic_hcs = False",
+                "adaptive_cold_mass_pruning = '75/8'",
                 "enable_thinking = False",
             ],
             {"CFG_HQQ_AUTO_BUDGET_PCT", "CFG_HQQ46_AUTO_BUDGET_MB", "CFG_HQQ_SIDECAR_MANIFEST"},

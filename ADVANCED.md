@@ -140,6 +140,31 @@ mode when the measured available RAM cannot safely hold the soft mirror.
 | `--krasis-threads N` | 40 | CPU threads for expert computation |
 | `--gguf-path PATH` | — | GGUF file for CPU experts (instead of native cache) |
 
+Adaptive cold-mass pruning environment variables (default off):
+
+| Env var | Default | Description |
+|------|---------|-------------|
+| `KRASIS_ADAPTIVE_COLD_DROP=1` | off | Enable approximate demand-cold expert pruning. Only routed experts that would require a demand DMA are eligible; surviving router weights are not renormalized. Requires both percentage variables below. Results depend on runtime HCS residency, so this mode can vary with VRAM and cache state |
+| `KRASIS_ADAPTIVE_COLD_DROP_PROTECT_PCT=N` | — | Protect the leading `N` percent of router ranks in every layer from pruning (for example, `75` protects the leading 75% of a layer's top-k positions) |
+| `KRASIS_ADAPTIVE_COLD_DROP_MASS_PCT=N` | — | Maximum fraction of that layer's total routed weight that may be dropped, expressed as a percentage. Eligible cold routes are considered from lowest weight upward and admitted only while this per-layer cap is respected |
+| `KRASIS_ADAPTIVE_COLD_DROP_SHADOW_PROTECT_PCTS=A,B,...` | off | Shadow-only rank-protection sweep. Requires the shadow mass list below; records projected drops/bytes/mass without changing routes or outputs |
+| `KRASIS_ADAPTIVE_COLD_DROP_SHADOW_MASS_PCTS=A,B,...` | off | Shadow-only per-layer routed-mass sweep. Actual and shadow modes are mutually exclusive |
+
+Adaptive cold drop currently supports normal single-token Rust MoE decode and
+the legacy host-visible route-sync CUDA-graph path. It fails visibly rather
+than silently degrading when combined with GPU route sync or speculative
+decode. This is an explicit quality/performance tradeoff and is never enabled
+automatically.
+
+The interactive launcher exposes this as **Adaptive cold-mass pruning**. It
+defaults to `Off`; Left/Right cycles through `Off`, `75/3`, `75/5`, `75/8`,
+and `75/10`. Saved launcher configs use
+`CFG_ADAPTIVE_COLD_MASS_PRUNING="off|75/3|75/5|75/8|75/10"`. The server
+translates a selected preset into the three Rust environment variables above;
+invalid presets fail during argument parsing. Server launches without this
+high-level config key continue to honor explicitly supplied low-level
+environment variables for diagnostics.
+
 ### Speculative Decoding
 
 | Flag | Default | Description |

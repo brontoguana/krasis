@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- Added an explicit, default-off adaptive cold-mass pruning experiment for
+  fine-grained MoE decode. The Rust runtime can omit only exact demand-cold
+  routes outside a configured protected router-rank head, subject to a
+  per-layer routed-mass cap; surviving weights are not renormalized. A
+  shadow-only sweep reports projected drops, saved DMA bytes, dropped mass,
+  and rank distribution without changing outputs. Normal Rust MoE decode and
+  fixed-shape CUDA-graph replay are supported; GPU route sync and speculative
+  decode reject the approximate mode visibly until equivalent implementations
+  exist. On Ornith-1.0-397B with 42.8% HCS residency, protecting 75% of router
+  ranks with an 8% per-layer mass cap improved 50/100/250-token internal decode
+  from `23.58/21.85/20.40` to `25.73/23.81/22.46` tok/s and passed the 14-test
+  network suite. The disabled path remains the default, and the mode is not
+  classified as production-safe because no Ornith llama-witness artifact is
+  available. Cross-model RTX PRO 6000 checks on fully resident QCN found zero
+  eligible cold routes and zero drops under explicit `75/8` mode; its
+  `90.86` tok/s decode result matched the `90.93` tok/s default-off control.
+  The interactive launcher now presents the experiment as **Adaptive cold-mass
+  pruning**, defaulting to `Off` and cycling through the measured `75/3`,
+  `75/5`, `75/8`, and `75/10` presets. The readable preset is persisted as
+  `CFG_ADAPTIVE_COLD_MASS_PRUNING` and translated at server startup into the
+  existing Rust environment contract.
+
+
 - Added the first native Windows installer/build path. Windows wheels can now
   include Krasis sidecar DLLs, bundled CUDA runtime DLLs, and resolve them via
   `os.add_dll_directory`; Rust prefill sidecar loading now uses a

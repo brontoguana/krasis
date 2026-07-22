@@ -22,6 +22,8 @@ use cudarc::cublas::{sys as cublas_sys, CudaBlas};
 use cudarc::driver::sys as cuda_sys;
 use cudarc::driver::{CudaDevice, CudaSlice, DevicePtr, LaunchAsync, LaunchConfig};
 
+use crate::adaptive_cold_drop::{AdaptiveColdDropRuntime, AdaptiveColdDropShadow};
+
 const GPU_ROUTE_SYNC_DEFAULT_TIMEOUT_MS: u64 = 10_000;
 const PROMPT_HCS_DEFAULT_RETAIN_PCT: usize = 85;
 const ROUTE_LOCALITY_DEFAULT_COVERAGE_PCTS: &[f64] = &[10.0, 15.0, 20.0];
@@ -9481,6 +9483,8 @@ struct GpuDecodeGraph {
     debug_hcs_transition_trace_active: bool,
     route_swap_shadow: RouteSwapShadowStats,
     hcs_cold_swap: HcsColdSwapStats,
+    adaptive_cold_drop: AdaptiveColdDropRuntime,
+    adaptive_cold_drop_shadow: AdaptiveColdDropShadow,
     route_locality: RouteLocalityStats,
     route_shadow_logits: Vec<f32>,
     route_shadow_bias: Vec<f32>,
@@ -14701,6 +14705,18 @@ impl GpuDecodeStore {
         moe_intermediate_size: usize,
         shared_expert_intermediate_size: usize,
     ) -> PyResult<()> {
+        let adaptive_cold_drop_shadow = AdaptiveColdDropShadow::from_env()
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        let adaptive_cold_drop =
+            AdaptiveColdDropRuntime::from_env(adaptive_cold_drop_shadow.enabled())
+                .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        if self.draft.is_some()
+            && (adaptive_cold_drop.enabled() || adaptive_cold_drop_shadow.enabled())
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "adaptive cold drop is not supported with speculative decode; unload the draft model or disable adaptive cold drop",
+            ));
+        }
         let intermediate = if max_intermediate_size > 0 {
             max_intermediate_size
         } else {
@@ -15320,6 +15336,8 @@ impl GpuDecodeStore {
             debug_hcs_transition_trace_active: false,
             route_swap_shadow: RouteSwapShadowStats::from_env(),
             hcs_cold_swap: HcsColdSwapStats::from_env(),
+            adaptive_cold_drop,
+            adaptive_cold_drop_shadow,
             route_locality: RouteLocalityStats::from_env(),
             route_shadow_logits: Vec::new(),
             route_shadow_bias: Vec::new(),
@@ -22144,6 +22162,19 @@ impl GpuDecodeStore {
         if !self.kernels_loaded {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "Decode kernels must be loaded before draft model",
+            ));
+        }
+        if self
+            .graph
+            .as_ref()
+            .map(|graph| {
+                graph.adaptive_cold_drop.enabled()
+                    || graph.adaptive_cold_drop_shadow.enabled()
+            })
+            .unwrap_or(false)
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "speculative decode is not supported with adaptive cold drop; disable adaptive cold drop before loading a draft model",
             ));
         }
         let draft = crate::draft_model::DraftModel::load(&self.device, model_dir, max_seq)
@@ -34671,6 +34702,38 @@ impl GpuDecodeStore {
                         }
                     }
 
+
+                    let adaptive_cold_drop_active = graph.adaptive_cold_drop.enabled();
+                    let mut adaptive_cold_drop_count = 0usize;
+                    if graph.adaptive_cold_drop_shadow.enabled() || adaptive_cold_drop_active {
+                        let mut demand_cold_bytes = vec![0u64; topk];
+                        for &(topk_pos, eid, _) in &cold_experts {
+                            let expert = &moe_data.experts[eid];
+                            demand_cold_bytes[topk_pos] = if expert.contiguous_ptr != 0 {
+                                expert.contiguous_bytes as u64
+                            } else {
+                                (expert.w13_packed_bytes
+                                    + expert.w13_scales_bytes
+                                    + expert.w2_packed_bytes
+                                    + expert.w2_scales_bytes) as u64
+                            };
+                        }
+                        graph.adaptive_cold_drop_shadow.record(
+                            &graph.h_topk_weights[..topk],
+                            &demand_cold_bytes,
+                        );
+                        if adaptive_cold_drop_active {
+                            let plan = graph.adaptive_cold_drop.plan_and_record(
+                                &graph.h_topk_weights[..topk],
+                                &demand_cold_bytes,
+                            );
+                            adaptive_cold_drop_count = plan.positions.len();
+                            cold_experts.retain(|(topk_pos, _, _)| {
+                                plan.positions.binary_search(topk_pos).is_err()
+                            });
+                        }
+                    }
+
                     graph.dma_cold_experts += cold_experts.len() as u64;
                     if apfl_replay && (apfl_hits > 0 || apfl_misses > 0) {
                         let apfl = graph.apfl.as_mut().unwrap();
@@ -34847,6 +34910,31 @@ impl GpuDecodeStore {
                             graph.h_batch_weights[batch_count] = weight;
                             batch_count += 1;
                         }
+                    }
+
+                    // The captured graph has a fixed top-k batch shape. A dropped
+                    // expert is represented by a zero-weight dummy slot: CUDA
+                    // kernels preserve the batch dimensions but contribute no
+                    // expert output and perform no weight GEMV for that slot.
+                    for _ in 0..adaptive_cold_drop_count {
+                        if batch_count >= max_ept {
+                            return Err(format!(
+                                "adaptive cold drop dummy overflow layer={} batch_count={} max_ept={}",
+                                moe_layer_idx, batch_count, max_ept,
+                            ));
+                        }
+                        if graph.h_dummy_ptrs.iter().any(|&ptr| ptr == 0) {
+                            return Err(
+                                "adaptive cold drop requires initialized dummy expert pointers"
+                                    .to_string(),
+                            );
+                        }
+                        graph.h_batch_w13_packed_ptrs[batch_count] = graph.h_dummy_ptrs[0];
+                        graph.h_batch_w13_scales_ptrs[batch_count] = graph.h_dummy_ptrs[1];
+                        graph.h_batch_w2_packed_ptrs[batch_count] = graph.h_dummy_ptrs[2];
+                        graph.h_batch_w2_scales_ptrs[batch_count] = graph.h_dummy_ptrs[3];
+                        graph.h_batch_weights[batch_count] = 0.0;
+                        batch_count += 1;
                     }
 
                     if batch_count != topk {
@@ -47011,6 +47099,8 @@ impl GpuDecodeStore {
             }
             g.route_swap_shadow.reset_counts();
             g.hcs_cold_swap.reset_counts();
+            g.adaptive_cold_drop.reset();
+            g.adaptive_cold_drop_shadow.reset();
             g.route_locality.reset_counts();
             g.prompt_hcs_shadow.reset_counts();
             if g.timing_enabled {
@@ -47203,6 +47293,18 @@ impl GpuDecodeStore {
 
         // ── Speculative decode state ──
         let use_speculative = self.draft.is_some();
+        if use_speculative
+            && self
+                .graph
+                .as_ref()
+                .map(|graph| graph.adaptive_cold_drop.enabled())
+                .unwrap_or(false)
+        {
+            log::error!(
+                "KRASIS_ADAPTIVE_COLD_DROP=1 is not supported with speculative decode; refusing to run an unimplemented approximate path"
+            );
+            return 0;
+        }
         let draft_k = self.draft_k;
         let draft_context_window = self.draft_context_window;
         let mut spec_accepted: u64 = 0;
@@ -48182,11 +48284,16 @@ impl GpuDecodeStore {
             graph
                 .hcs_cold_swap
                 .emit_summary(generated, graph.dma_cold_experts);
+            graph.adaptive_cold_drop.emit_summary(generated);
+            graph.adaptive_cold_drop_shadow.emit_summary(generated);
             graph.route_locality.emit_summary(generated);
             graph.prompt_hcs_shadow.emit_summary(generated);
             if let Some(hcs) = graph.hcs.as_ref() {
                 if hcs.dynamic_enabled {
-                    let total = (graph.dma_cold_experts + graph.dma_hcs_experts).max(1) as f64;
+                    let total = (graph.dma_cold_experts
+                        + graph.dma_hcs_experts
+                        + graph.adaptive_cold_drop.dropped_experts())
+                    .max(1) as f64;
                     let hit_pct = graph.dma_hcs_experts as f64 / total * 100.0;
                     eprintln!(
                         "  \x1b[36mDynamic HCS: hit={:.2}% tail={}/{} protected={} promotions={} evictions={} request_promotions={}/{} budget_skips={} no_slot={} copy_failures={}\x1b[0m",
@@ -52778,6 +52885,55 @@ impl GpuDecodeStore {
             }
         }
 
+        let adaptive_cold_drop_active = graph.adaptive_cold_drop.enabled();
+        let mut adaptive_cold_drop_positions = Vec::new();
+        if graph.adaptive_cold_drop_shadow.enabled() || adaptive_cold_drop_active {
+            let mut demand_cold_bytes = vec![0u64; topk];
+            for &(topk_pos, _) in dma_experts.iter().take(dma_count) {
+                let eid = graph.h_topk_ids[topk_pos] as usize;
+                let expert = &moe.experts[eid];
+                demand_cold_bytes[topk_pos] = if expert.contiguous_ptr != 0 {
+                    expert.contiguous_bytes as u64
+                } else {
+                    (expert.w13_packed_bytes
+                        + expert.w13_scales_bytes
+                        + expert.w2_packed_bytes
+                        + expert.w2_scales_bytes) as u64
+                };
+            }
+            graph.adaptive_cold_drop_shadow.record(
+                &graph.h_topk_weights[..topk],
+                &demand_cold_bytes,
+            );
+            if adaptive_cold_drop_active {
+                let plan = graph.adaptive_cold_drop.plan_and_record(
+                    &graph.h_topk_weights[..topk],
+                    &demand_cold_bytes,
+                );
+                adaptive_cold_drop_positions = plan.positions;
+                let mut write = 0usize;
+                for read in 0..dma_count {
+                    let candidate = dma_experts[read];
+                    if adaptive_cold_drop_positions
+                        .binary_search(&candidate.0)
+                        .is_ok()
+                    {
+                        continue;
+                    }
+                    dma_experts[write] = candidate;
+                    write += 1;
+                }
+                dma_count = write;
+                dma_ids.clear();
+                dma_ids.extend(
+                    dma_experts
+                        .iter()
+                        .take(dma_count)
+                        .map(|&(topk_pos, _)| graph.h_topk_ids[topk_pos] as usize),
+                );
+            }
+        }
+
         if hcs_equiv_trace_active {
             let topk_ids_json: Vec<serde_json::Value> = graph.h_topk_ids[..topk]
                 .iter()
@@ -52808,6 +52964,7 @@ impl GpuDecodeStore {
                 "hcs_hit_ids": hcs_hit_ids.clone(),
                 "apfl_hit_ids": apfl_hit_ids.clone(),
                 "dma_ids": dma_ids.clone(),
+                "adaptive_cold_drop_topk_positions": adaptive_cold_drop_positions.clone(),
                 "topk_ids": topk_ids_json,
                 "topk_weights": topk_weights_json,
                 "sources": hcs_equiv_sources,
@@ -56512,6 +56669,14 @@ impl GpuDecodeStore {
             && (env_truthy("KRASIS_GPU_ROUTE_SYNC_HOT_NOSYNC") || auto_hot_hcs_graph);
         let gpu_rs_hot_full_graph = !env_false("KRASIS_GPU_ROUTE_SYNC_HOT_FULL_GRAPH")
             && (env_truthy("KRASIS_GPU_ROUTE_SYNC_HOT_FULL_GRAPH") || auto_hot_hcs_graph);
+        if gpu_rs
+            && (graph.adaptive_cold_drop.enabled()
+                || graph.adaptive_cold_drop_shadow.enabled())
+        {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "adaptive cold drop is not supported with KRASIS_GPU_ROUTE_SYNC=1 because it requires host-visible router weights",
+            ));
+        }
         if gpu_rs_hot_nosync && !gpu_rs {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "KRASIS_GPU_ROUTE_SYNC_HOT_NOSYNC=1 requires KRASIS_GPU_ROUTE_SYNC=1",

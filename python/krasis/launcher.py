@@ -27,6 +27,7 @@ from krasis.attention_backend import (
     attention_quant_label,
 )
 from krasis.config import (
+    ADAPTIVE_COLD_MASS_PRUNING_CHOICES,
     DEPRECATED_ATTENTION_QUANT_CHOICES,
     DEPRECATED_KV_CACHE_FORMAT_CHOICES,
     cache_dir_for_model,
@@ -570,6 +571,7 @@ CONFIG_KEYS = [
     "CFG_GPU_PREFILL_THRESHOLD", "CFG_GGUF_PATH", "CFG_HEATMAP_PATH",
     "CFG_VRAM_SAFETY_MARGIN",
     "CFG_HCS", "CFG_MULTI_GPU_HCS", "CFG_HCS_HOST_CACHE_MODE", "CFG_DYNAMIC_HCS", "CFG_DYNAMIC_HCS_TAIL_BLOCKS",
+    "CFG_ADAPTIVE_COLD_MASS_PRUNING",
     "CFG_STREAM_ATTENTION", "CFG_DRAFT_MODEL", "CFG_DRAFT_K", "CFG_DRAFT_CONTEXT",
     "CFG_TEMPERATURE",
     "CFG_FORCE_LOAD", "CFG_FORCE_REBUILD_CACHE", "CFG_FORCE_REBUILD_HQQ_CACHE",
@@ -653,6 +655,7 @@ class LauncherConfig:
         self.hcs_host_cache_mode: str = "source"
         self.dynamic_hcs: bool = True
         self.dynamic_hcs_tail_blocks: int = 2
+        self.adaptive_cold_mass_pruning: str = "off"
         self.stream_attention: bool = False
         self.draft_model: str = ""
         self.draft_k: int = 3
@@ -850,6 +853,14 @@ class LauncherConfig:
                     self.dynamic_hcs_tail_blocks = val
             except (ValueError, TypeError):
                 pass
+        if "CFG_ADAPTIVE_COLD_MASS_PRUNING" in saved and saved["CFG_ADAPTIVE_COLD_MASS_PRUNING"]:
+            val = saved["CFG_ADAPTIVE_COLD_MASS_PRUNING"].strip().lower()
+            if val not in ADAPTIVE_COLD_MASS_PRUNING_CHOICES:
+                raise ValueError(
+                    f"Unsupported saved CFG_ADAPTIVE_COLD_MASS_PRUNING={val!r}. "
+                    f"Use one of: {', '.join(ADAPTIVE_COLD_MASS_PRUNING_CHOICES)}."
+                )
+            self.adaptive_cold_mass_pruning = val
         if "CFG_STREAM_ATTENTION" in saved:
             self.stream_attention = saved["CFG_STREAM_ATTENTION"] == "1"
         if "CFG_DRAFT_MODEL" in saved and saved["CFG_DRAFT_MODEL"]:
@@ -918,6 +929,7 @@ class LauncherConfig:
             "CFG_HCS_HOST_CACHE_MODE": self.hcs_host_cache_mode,
             "CFG_DYNAMIC_HCS": "1" if self.dynamic_hcs else "0",
             "CFG_DYNAMIC_HCS_TAIL_BLOCKS": str(self.dynamic_hcs_tail_blocks),
+            "CFG_ADAPTIVE_COLD_MASS_PRUNING": self.adaptive_cold_mass_pruning,
             "CFG_STREAM_ATTENTION": "1" if self.stream_attention else "0",
             "CFG_DRAFT_MODEL": self.draft_model,
             "CFG_DRAFT_K": str(self.draft_k),
@@ -995,6 +1007,8 @@ OPTIONS = [
                  choices=[True, False]),
     ConfigOption("HCS RAM saver", "hcs_host_cache_mode",
                  choices=["source", "mirror", "auto"]),
+    ConfigOption("Adaptive cold-mass pruning", "adaptive_cold_mass_pruning",
+                 choices=list(ADAPTIVE_COLD_MASS_PRUNING_CHOICES)),
     ConfigOption("Dynamic HCS", "dynamic_hcs",
                  choices=[True, False], advanced=True),
     ConfigOption("HCS tail blocks", "dynamic_hcs_tail_blocks",
@@ -1039,6 +1053,10 @@ def _format_value(opt: ConfigOption, val: Any) -> str:
             "mirror": f"{DIM}Off{NC} {DIM}(fast reload){NC}",
         }
         return labels.get(str(val), str(val))
+    if opt.key == "adaptive_cold_mass_pruning":
+        if str(val) == "off":
+            return _format_on_off(False)
+        return f"{YELLOW}{val}{NC} {DIM}(approximate){NC}"
     if opt.key == "attention_quant":
         return _format_attention_quant_value(str(val))
     if opt.key == "ssh_tunnel":
@@ -1066,6 +1084,8 @@ def _is_option_visible(
             return False
     if opt.key == "dynamic_hcs_tail_blocks":
         return cfg is None or bool(cfg.dynamic_hcs)
+    if opt.key == "adaptive_cold_mass_pruning":
+        return model_info is None or bool(model_info.get("experts", 0))
     return True
 
 
@@ -2532,6 +2552,14 @@ class Launcher:
         print(f"  LM head quant:   {self.cfg.lm_head_quant}")
         print(f"  VRAM safety:     {self.cfg.vram_safety_margin:,} MB")
         print(f"  HCS RAM saver:   {_ANSI_RE.sub('', _format_value(ConfigOption('', 'hcs_host_cache_mode'), self.cfg.hcs_host_cache_mode))}")
+        cold_mass_display = _ANSI_RE.sub(
+            "",
+            _format_value(
+                ConfigOption("", "adaptive_cold_mass_pruning"),
+                self.cfg.adaptive_cold_mass_pruning,
+            ),
+        )
+        print(f"  Cold-mass prune: {cold_mass_display}")
         print(f"  Server:          {self.cfg.host}:{self.cfg.port}")
         if self.cfg.ssh_tunnel:
             print(f"  SSH tunnel:      {self.cfg.ssh_tunnel} remote 127.0.0.1:{self.cfg.port}")

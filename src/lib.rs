@@ -1,3 +1,4 @@
+pub mod adaptive_cold_drop;
 pub mod chat_template;
 pub mod decode;
 pub mod draft_model;

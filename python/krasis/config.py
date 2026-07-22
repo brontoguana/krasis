@@ -3,7 +3,7 @@
 import json
 import os
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, MutableMapping, Optional, Union
 
 
 ATTENTION_QUANT_CHOICES = (
@@ -24,6 +24,40 @@ HQQ_CACHE_PROFILE_SELFCAL_V1 = "selfcal_v1"
 HQQ_CACHE_PROFILE_CHOICES = (HQQ_CACHE_PROFILE_BASELINE, HQQ_CACHE_PROFILE_SELFCAL_V1)
 HQQ_ATTENTION_GROUP_SIZE_CHOICES = (32, 64, 128)
 HQQ_ATTENTION_DEFAULT_GROUP_SIZE = 128
+ADAPTIVE_COLD_MASS_PRUNING_CHOICES = ("off", "75/3", "75/5", "75/8", "75/10")
+
+_ADAPTIVE_COLD_MASS_PRUNING_ENV_KEYS = (
+    "KRASIS_ADAPTIVE_COLD_DROP",
+    "KRASIS_ADAPTIVE_COLD_DROP_PROTECT_PCT",
+    "KRASIS_ADAPTIVE_COLD_DROP_MASS_PCT",
+)
+
+
+def configure_adaptive_cold_mass_pruning(
+    policy: Optional[str],
+    environ: Optional[MutableMapping[str, str]] = None,
+) -> Optional[str]:
+    """Apply a launcher/config policy to the Rust adaptive cold-drop env contract."""
+    if policy is None:
+        return None
+    normalized = str(policy).strip().lower()
+    if normalized not in ADAPTIVE_COLD_MASS_PRUNING_CHOICES:
+        raise ValueError(
+            f"Unsupported adaptive cold-mass pruning policy {policy!r}. "
+            f"Use one of: {', '.join(ADAPTIVE_COLD_MASS_PRUNING_CHOICES)}."
+        )
+
+    target = os.environ if environ is None else environ
+    for key in _ADAPTIVE_COLD_MASS_PRUNING_ENV_KEYS:
+        target.pop(key, None)
+
+    if normalized != "off":
+        protect_pct, mass_pct = normalized.split("/", 1)
+        target["KRASIS_ADAPTIVE_COLD_DROP"] = "1"
+        target["KRASIS_ADAPTIVE_COLD_DROP_PROTECT_PCT"] = protect_pct
+        target["KRASIS_ADAPTIVE_COLD_DROP_MASS_PCT"] = mass_pct
+
+    return normalized
 
 
 def cache_dir_for_model(model_path: str) -> str:

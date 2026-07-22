@@ -1396,6 +1396,8 @@ do_test_kernels() {
         local filter="kernel_tests::test_$1"
         if [[ "$1" == "expert_hqq" ]]; then
             filter="expert_hqq"
+        elif [[ "$1" == "adaptive_cold_drop" ]]; then
+            filter="adaptive_cold_drop::tests"
         fi
         info "Filter: $filter"
         PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
