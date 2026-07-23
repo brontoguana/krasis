@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.0.16-rc.1 - 2026-07-23
+
 - Fixed multi-GPU GQA/HQQ auxiliary decode-store setup after the release matrix
   exposed a `NameError` while constructing per-layer RoPE tables. The RoPE table
   builder is now a shared model method used by both primary and auxiliary GPU
