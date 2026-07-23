@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+- Fixed multi-GPU GQA/HQQ auxiliary decode-store setup after the release matrix
+  exposed a `NameError` while constructing per-layer RoPE tables. The RoPE table
+  builder is now a shared model method used by both primary and auxiliary GPU
+  stores, preserving the same model-derived dimensions, scaling parameters, and
+  per-device cache keys.
+
+- Fixed streamed timing metadata when thinking is disabled. Every measured
+  generated token is now reported as an answer token in that mode, including
+  the first token produced by prefill, so clients no longer display a real
+  decode rate beside an incorrect `0t` token count.
+
+- Fixed the active Nemotron-H output-quality collapse by removing an incorrect
+  load-time `1/sqrt(num_hidden_layers)` scaling of trained Mamba2
+  `out_proj.weight` tensors. `rescale_prenorm_residual` is checkpoint
+  initialization metadata; pretrained tensors must be loaded verbatim. Bumped
+  the Mamba2 projection INT4 cache version so scaled caches cannot be reused,
+  and made BF16 routed-expert CUDA graph support fail clearly before capture
+  because that validation-only expert path is not graph-backed. Added
+  llama-witness conversion/capture support for Nemotron Nano and Super,
+  including Super LatentMoE metadata and tensor mappings. The production
+  HQQ4/k4v4 configurations now pass six-prompt llama-witness gates for both
+  models with `6/6` prefill top-10 containment and `4/6` first-token argmax.
+  Public quality stats now mark those two HQQ4 rows `PASS`; HQQ6 rows remain
+  blocked until separately compared.
+
 - Added an explicit, default-off adaptive cold-mass pruning experiment for
   fine-grained MoE decode. The Rust runtime can omit only exact demand-cold
   routes outside a configured protected router-rank head, subject to a
@@ -13,7 +38,16 @@
   exist. On Ornith-1.0-397B with 42.8% HCS residency, protecting 75% of router
   ranks with an 8% per-layer mass cap improved 50/100/250-token internal decode
   from `23.58/21.85/20.40` to `25.73/23.81/22.46` tok/s and passed the 14-test
-  network suite. The disabled path remains the default, and the mode is not
+  network suite. In the steady 250-token block it dropped `4754/19918` demand-
+  cold routed-expert activations (`23.87%`, or `19.092/79.992` per token) and
+  avoided `118.134 MiB/token` of serialized DMA. The `8%` setting is a per-
+  token/per-layer ceiling rather than a target: mean dropped routed mass was
+  only `1.884329%`, while the largest individual routing event reached
+  `7.999461%`. In the matching shadow sample, ranks 9/10 were 20% of router
+  slots but contained `31.15%` of cold routes, and `75/8` admitted `76.93%` of
+  that cold tail for dropping. Only routed experts at ranks 9/10 were dropped;
+  the separately executed, VRAM-pinned shared expert is never eligible. The
+  disabled path remains the default, and the mode is not
   classified as production-safe because no Ornith llama-witness artifact is
   available. Cross-model RTX PRO 6000 checks on fully resident QCN found zero
   eligible cold routes and zero drops under explicit `75/8` mode; its
@@ -24,6 +58,23 @@
   `CFG_ADAPTIVE_COLD_MASS_PRUNING` and translated at server startup into the
   existing Rust environment contract.
 
+- Ran a targeted Ornith-1.0-397B HQQ4/k4v4 prefetch/split smoke matrix on
+  `step-main-port` current main. Gated prefetch still issued zero staged
+  experts (`issued=0`, `budget_dropped=10925`, measured `10.87 GB/s` H2D), so
+  gate-off and prefetch+split were intentionally skipped. Split launch completed
+  cleanly at `10.08` best decode tok/s, but the warmed repeat baseline reached
+  `9.66` tok/s, so the measured split effect is only small/noise-level and not
+  default-worthy. Dynamic HCS remained clean with `budget_skips=0`,
+  `no_slot=0`, and `copy_failures=0`.
+
+- Ran the current-main `step-main-port` baseline validation on the local RTX
+  5090 with all experimental sync-wait flags off. Results: Qwen3-Coder-Next
+  HQQ4/k4v4 `6,880.9` prefill / `88.36` decode tok/s, Step-3.7-Flash
+  HQQ4/k4v4 `2,623.8` prefill / `22.12` decode tok/s, and Ornith-1.0-397B
+  HQQ4/k4v4 `789.7` prefill / `8.26` decode tok/s. Ornith HCS coverage is back
+  to `2720/30720` with `budget_skips=0` and `copy_failures=0`, confirming the
+  earlier `5.24` tok/s result was caused by the stale base rather than the
+  model or config.
 
 - Added the first native Windows installer/build path. Windows wheels can now
   include Krasis sidecar DLLs, bundled CUDA runtime DLLs, and resolve them via

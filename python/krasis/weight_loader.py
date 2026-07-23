@@ -9,7 +9,6 @@ Expert weights are loaded by the Krasis Rust engine (INT4, CPU RAM).
 
 import json
 import logging
-import math
 import os
 import struct
 import time
@@ -708,17 +707,10 @@ class WeightLoader:
 
         # Large projections (quantizable via Marlin for decode)
         weights["in_proj"] = self._load_bf16(f"{prefix}.in_proj.weight", device)
-        out_proj = self._load_bf16(f"{prefix}.out_proj.weight", device)
-        if self.cfg.rescale_prenorm_residual:
-            scale = 1.0 / math.sqrt(float(self.cfg.num_hidden_layers))
-            out_proj = out_proj.float().mul_(scale).to(torch.bfloat16).contiguous()
-            logger.info(
-                "Applied Nemotron-H Mamba2 out_proj residual scale: layer=%d scale=%.9f num_hidden_layers=%d",
-                layer_idx,
-                scale,
-                self.cfg.num_hidden_layers,
-            )
-        weights["out_proj"] = out_proj
+        # rescale_prenorm_residual is an HF initialization rule. from_pretrained
+        # loads trained checkpoint tensors after initialization, so runtime
+        # checkpoint loads must not apply that scale again.
+        weights["out_proj"] = self._load_bf16(f"{prefix}.out_proj.weight", device)
 
         # Small SSM parameters — always FP32 for numerical precision
         weights["conv1d_weight"] = self._load_bf16(f"{prefix}.conv1d.weight", device)

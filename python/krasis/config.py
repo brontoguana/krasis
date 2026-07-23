@@ -272,6 +272,27 @@ def _infer_from_weights(model_path: str, cfg: dict) -> dict:
     return cfg
 
 
+
+def _normalise_layers_block_type(cfg: dict) -> dict:
+    """Derive layer count from Nemotron-H layers_block_type when present."""
+    raw_layer_blocks = cfg.get("layers_block_type")
+    if raw_layer_blocks is None:
+        return cfg
+    if not isinstance(raw_layer_blocks, list) or not raw_layer_blocks:
+        raise ValueError("layers_block_type must be a non-empty list")
+    for idx, label in enumerate(raw_layer_blocks):
+        if not isinstance(label, str):
+            raise ValueError(f"layers_block_type[{idx}] must be a string")
+    if "num_hidden_layers" in cfg and int(cfg["num_hidden_layers"]) != len(raw_layer_blocks):
+        raise ValueError(
+            f"layers_block_type length {len(raw_layer_blocks)} != "
+            f"num_hidden_layers {cfg['num_hidden_layers']}"
+        )
+    cfg = dict(cfg)
+    cfg["num_hidden_layers"] = len(raw_layer_blocks)
+    return cfg
+
+
 def _detect_layers_prefix(model_path: str) -> str:
     """Auto-detect the tensor prefix by scanning the safetensors index.
 
@@ -589,7 +610,8 @@ class ModelConfig:
     mamba_conv_kernel: int = 0         # Mamba2 conv1d kernel size (e.g. 4)
     mamba_n_groups: int = 1            # Mamba2 number of groups for B/C (e.g. 8)
     mamba_chunk_size: int = 128        # Mamba2 SSD chunk size (must be power of 2)
-    rescale_prenorm_residual: bool = False  # Nemotron-H scales Mamba out_proj by 1/sqrt(num_hidden_layers)
+    # Nemotron-H initialization metadata. Loaded checkpoint tensors must remain verbatim.
+    rescale_prenorm_residual: bool = False
     moe_latent_size: int = 0           # LatentMoE: latent projection dim (e.g. 1024)
     moe_shared_expert_intermediate_size: int = 0  # LatentMoE shared expert intermediate
     mlp_hidden_act: str = "silu"       # MLP activation: "silu" or "relu2"
@@ -630,6 +652,7 @@ class ModelConfig:
 
         # Infer missing fields from weight shapes (VL models with incomplete config)
         cfg = _infer_from_weights(model_path, cfg)
+        cfg = _normalise_layers_block_type(cfg)
 
         # tie_word_embeddings may be at top level; infer from weight presence if not set
         tie_default = True
@@ -670,12 +693,29 @@ class ModelConfig:
         if moe_layer_indices:
             first_k_dense = min(moe_layer_indices)
         hybrid_pattern = cfg.get("hybrid_override_pattern", "")
+        layers_block_type = cfg.get("layers_block_type")
         if hybrid_pattern and arch == "nemotron_h":
             # Nemotron-H: parse M=mamba2, E=moe, *=attention from pattern
             type_map = {"M": "mamba2", "E": "moe", "*": "full_attention"}
             layer_types = [type_map.get(c, "full_attention") for c in hybrid_pattern]
             assert len(layer_types) == num_layers, (
                 f"hybrid_override_pattern length {len(layer_types)} != num_hidden_layers {num_layers}")
+        elif layers_block_type and arch == "nemotron_h":
+            # Nemotron-H Ultra: explicit per-block labels.
+            type_map = {
+                "mamba": "mamba2",
+                "mamba2": "mamba2",
+                "moe": "moe",
+                "attention": "full_attention",
+                "full_attention": "full_attention",
+            }
+            layer_types = []
+            for idx, label in enumerate(layers_block_type):
+                if label not in type_map:
+                    raise ValueError(f"Unsupported layers_block_type[{idx}]={label!r}")
+                layer_types.append(type_map[label])
+            assert len(layer_types) == num_layers, (
+                f"layers_block_type length {len(layer_types)} != num_hidden_layers {num_layers}")
         elif "layer_types" in cfg:
             # GPT OSS: explicit layer_types array (sliding_attention / full_attention)
             layer_types = list(cfg["layer_types"])

@@ -40,6 +40,10 @@ BF16 validation policy:
 
 Add `--timing` to `run` or `benchmark` for a per-layer decode timing breakdown. This adds ~30-50% overhead so do not use it for speed benchmarks — only for profiling.
 
+`KRASIS_BENCHMARK_GPU_TELEMETRY=1` enables diagnostic SM-clock,
+temperature, and power sampling during decode rows. It is default-off because
+speed benchmarks must not run with instrumentation enabled.
+
 ## Config Files
 
 The preferred way to run Krasis is with a config file:
@@ -140,10 +144,18 @@ mode when the measured available RAM cannot safely hold the soft mirror.
 | `--krasis-threads N` | 40 | CPU threads for expert computation |
 | `--gguf-path PATH` | — | GGUF file for CPU experts (instead of native cache) |
 
-Adaptive cold-mass pruning environment variables (default off):
+Experimental decode environment variables (default off; single-GPU graph decode
+path, not compatible with `KRASIS_GPU_ROUTE_SYNC`):
 
 | Env var | Default | Description |
 |------|---------|-------------|
+| `KRASIS_PREFETCH=1` | off | Previous-token route prefetch: stages predicted cold experts on a dedicated copy stream one token ahead so demand cold DMA shrinks. Staged experts are consumed only if their copies already completed (consume-if-ready); late slots fall back to demand copies. Issuance is capped per token by a byte budget derived from a measured H2D bandwidth probe and the previous token's wall time and demand traffic |
+| `KRASIS_PREFETCH_DEPTH=N` | 4 | Prefetch lookahead depth in MoE layers (staging VRAM = depth × top-k × expert size) |
+| `KRASIS_PREFETCH_BUDGET_OFF=1` | off | Disable the per-token prefetch byte budget (A/B diagnostics only) |
+| `KRASIS_PREFETCH_GATE=0` | on | Disable the demand-first temporal gate. When the gate is on (default with prefetch), each prefetch issuance waits GPU-side on the boundary's demand cold-DMA event, so prefetch bytes transfer during the segment's compute window instead of contending on the copy engine with the demand copies the graph is waiting on |
+| `KRASIS_SPLIT_EXPERT_LAUNCH=1` | off | Launch hot/staged experts before the cold-DMA wait so hot compute overlaps demand copies |
+| `KRASIS_MARLIN_AUTOTUNE=1` | off | Measure batched w13 GEMV ksplit candidates (median of repeated timed blocks) on the real loaded expert shape at graph capture; overrides the occupancy formula only when a candidate beats the formula's own median by more than the margin |
+| `KRASIS_MARLIN_AUTOTUNE_MARGIN_PCT=N` | 5 | Minimum relative win (percent) over the formula candidate before an autotune override is installed |
 | `KRASIS_ADAPTIVE_COLD_DROP=1` | off | Enable approximate demand-cold expert pruning. Only routed experts that would require a demand DMA are eligible; surviving router weights are not renormalized. Requires both percentage variables below. Results depend on runtime HCS residency, so this mode can vary with VRAM and cache state |
 | `KRASIS_ADAPTIVE_COLD_DROP_PROTECT_PCT=N` | — | Protect the leading `N` percent of router ranks in every layer from pruning (for example, `75` protects the leading 75% of a layer's top-k positions) |
 | `KRASIS_ADAPTIVE_COLD_DROP_MASS_PCT=N` | — | Maximum fraction of that layer's total routed weight that may be dropped, expressed as a percentage. Eligible cold routes are considered from lowest weight upward and admitted only while this per-layer cap is respected |

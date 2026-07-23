@@ -252,48 +252,49 @@ impl ModelConfig {
             0
         };
 
-        let explicit_moe_layer_indices: Option<Vec<usize>> =
-            if let Some(value) = cfg.get("moe_layers_enum") {
-                let parsed: Vec<usize> = if let Some(s) = value.as_str() {
-                    s.split(',')
-                        .filter_map(|part| {
-                            let trimmed = part.trim();
-                            if trimmed.is_empty() {
-                                None
-                            } else {
-                                Some(
-                                    trimmed
-                                        .parse::<usize>()
-                                        .map_err(|_| format!("invalid moe_layers_enum entry '{trimmed}'")),
-                                )
-                            }
+        let explicit_moe_layer_indices: Option<Vec<usize>> = if let Some(value) =
+            cfg.get("moe_layers_enum")
+        {
+            let parsed: Vec<usize> = if let Some(s) = value.as_str() {
+                s.split(',')
+                    .filter_map(|part| {
+                        let trimmed = part.trim();
+                        if trimmed.is_empty() {
+                            None
+                        } else {
+                            Some(
+                                trimmed.parse::<usize>().map_err(|_| {
+                                    format!("invalid moe_layers_enum entry '{trimmed}'")
+                                }),
+                            )
+                        }
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            } else if let Some(arr) = value.as_array() {
+                arr.iter()
+                    .map(|v| {
+                        v.as_u64().map(|n| n as usize).ok_or_else(|| {
+                            "moe_layers_enum contains a non-integer entry".to_string()
                         })
-                        .collect::<Result<Vec<_>, _>>()?
-                } else if let Some(arr) = value.as_array() {
-                    arr.iter()
-                        .map(|v| {
-                            v.as_u64()
-                                .map(|n| n as usize)
-                                .ok_or_else(|| "moe_layers_enum contains a non-integer entry".to_string())
-                        })
-                        .collect::<Result<Vec<_>, _>>()?
-                } else {
-                    return Err("moe_layers_enum must be a comma-separated string or array".to_string());
-                };
-                for layer_idx in &parsed {
-                    if *layer_idx >= num_hidden_layers {
-                        return Err(format!(
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            } else {
+                return Err("moe_layers_enum must be a comma-separated string or array".to_string());
+            };
+            for layer_idx in &parsed {
+                if *layer_idx >= num_hidden_layers {
+                    return Err(format!(
                             "moe_layers_enum contains out-of-range layer {layer_idx} for {num_hidden_layers} layers"
                         ));
-                    }
                 }
-                if let Some(first) = parsed.iter().min().copied() {
-                    first_k_dense_replace = first;
-                }
-                Some(parsed)
-            } else {
-                None
-            };
+            }
+            if let Some(first) = parsed.iter().min().copied() {
+                first_k_dense_replace = first;
+            }
+            Some(parsed)
+        } else {
+            None
+        };
 
         // Shared experts: n_shared_experts, or infer from shared_expert_intermediate_size > 0
         let mut n_shared_experts = cfg
@@ -359,19 +360,18 @@ impl ModelConfig {
         // Build MoE layer indices.
         // For hybrid models (Nemotron): parse hybrid_override_pattern, MoE layers are 'E'.
         // For standard models: contiguous from first_k_dense_replace.
-        let moe_layer_indices =
-            if let Some(indices) = explicit_moe_layer_indices {
-                indices
-            } else if let Some(pattern) = cfg.get("hybrid_override_pattern").and_then(|v| v.as_str()) {
-                pattern
-                    .chars()
-                    .enumerate()
-                    .filter(|(_, c)| *c == 'E')
-                    .map(|(i, _)| i)
-                    .collect()
-            } else {
-                (first_k_dense_replace..num_hidden_layers).collect()
-            };
+        let moe_layer_indices = if let Some(indices) = explicit_moe_layer_indices {
+            indices
+        } else if let Some(pattern) = cfg.get("hybrid_override_pattern").and_then(|v| v.as_str()) {
+            pattern
+                .chars()
+                .enumerate()
+                .filter(|(_, c)| *c == 'E')
+                .map(|(i, _)| i)
+                .collect()
+        } else {
+            (first_k_dense_replace..num_hidden_layers).collect()
+        };
 
         Ok(ModelConfig {
             hidden_size,
@@ -1313,6 +1313,7 @@ pub struct LayerExpertBacking {
 /// Manages loaded expert weights for all MoE layers.
 #[pyclass]
 pub struct WeightStore {
+    pub moe_layer_start: usize,
     /// Expert weights indexed as [moe_layer_index][expert_index].
     /// moe_layer_index is 0-based within MoE layers only (skips dense layers).
     /// Legacy format (separate gate/up/down). Used for INT8 fallback path.
@@ -2197,6 +2198,7 @@ impl WeightStore {
     #[new]
     pub fn new() -> Self {
         WeightStore {
+            moe_layer_start: 0,
             experts: Vec::new(),
             shared_experts: Vec::new(),
             experts_cpu: Vec::new(),
@@ -2430,6 +2432,7 @@ impl WeightStore {
 
             // Skip CPU experts and return
             return Ok(WeightStore {
+                moe_layer_start: moe_start,
                 experts: Vec::new(),
                 shared_experts: Vec::new(),
                 experts_gpu,
@@ -2670,6 +2673,7 @@ impl WeightStore {
 
         // ── Build final WeightStore ──
         let store = WeightStore {
+            moe_layer_start: moe_start,
             experts: Vec::new(),
             shared_experts: Vec::new(),
             experts_cpu,
@@ -3134,6 +3138,7 @@ impl WeightStore {
         );
 
         Ok(WeightStore {
+            moe_layer_start: 0,
             experts,
             shared_experts: Vec::new(), // loaded separately after cache
             experts_cpu: Vec::new(),
@@ -4424,6 +4429,7 @@ impl WeightStore {
         );
 
         Ok(WeightStore {
+            moe_layer_start: start_moe_layer,
             experts: Vec::new(),
             shared_experts: Vec::new(),
             experts_cpu: Vec::new(),
@@ -4560,9 +4566,7 @@ impl WeightStore {
             );
         }
         if separate_stacked {
-            log::info!(
-                "Detected separate stacked expert format (gate/up/down [E, rows, cols])"
-            );
+            log::info!("Detected separate stacked expert format (gate/up/down [E, rows, cols])");
         }
 
         // Create cache directory + temp file
@@ -5824,6 +5828,7 @@ impl WeightStore {
         );
 
         Ok(WeightStore {
+            moe_layer_start: moe_start,
             experts: Vec::new(),
             shared_experts: Vec::new(),
             experts_cpu,
@@ -7332,9 +7337,9 @@ fn has_shared_gate_proj(weight_map: &HashMap<String, String>, shared_name: &str)
     let mlp_gate = format!(".mlp.{shared_name}.gate_proj");
     let mixer_gate = format!(".mixer.{shared_name}.gate_proj");
     let direct_gate = format!(".{shared_name}.gate_proj");
-    weight_map
-        .keys()
-        .any(|key| key.contains(&mlp_gate) || key.contains(&mixer_gate) || key.contains(&direct_gate))
+    weight_map.keys().any(|key| {
+        key.contains(&mlp_gate) || key.contains(&mixer_gate) || key.contains(&direct_gate)
+    })
 }
 
 /// Detect shared expert naming: "shared_experts" (DeepSeek) vs "shared_expert" (QCN).
@@ -7442,9 +7447,15 @@ fn is_stacked_experts(weight_map: &HashMap<String, String>) -> bool {
 ///   moe.up_proj.weight   [E, inter, hidden]
 ///   moe.down_proj.weight [E, hidden, inter]
 fn is_separate_stacked_experts(weight_map: &HashMap<String, String>) -> bool {
-    weight_map.keys().any(|k| k.ends_with(".moe.gate_proj.weight"))
-        && weight_map.keys().any(|k| k.ends_with(".moe.up_proj.weight"))
-        && weight_map.keys().any(|k| k.ends_with(".moe.down_proj.weight"))
+    weight_map
+        .keys()
+        .any(|k| k.ends_with(".moe.gate_proj.weight"))
+        && weight_map
+            .keys()
+            .any(|k| k.ends_with(".moe.up_proj.weight"))
+        && weight_map
+            .keys()
+            .any(|k| k.ends_with(".moe.down_proj.weight"))
 }
 
 fn stacked_experts_prefix(

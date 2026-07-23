@@ -1265,7 +1265,10 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
         match prefill_entry_floor_bytes_for_server(&state.rust_prefill, estimated_tokens) {
             Ok(bytes) => bytes,
             Err(e) => {
-                log::error!("Prefill engine floor unavailable before HCS eviction: {}", e);
+                log::error!(
+                    "Prefill engine floor unavailable before HCS eviction: {}",
+                    e
+                );
                 let _ = send_json(
                     stream,
                     500,
@@ -1324,7 +1327,9 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                     .get_item("inputs_embeds_ptr")
                     .map_err(|e| format!("image prefill inputs_embeds_ptr read failed: {}", e))?
                     .extract()
-                    .map_err(|e| format!("image prefill inputs_embeds_ptr extract failed: {}", e))?;
+                    .map_err(|e| {
+                        format!("image prefill inputs_embeds_ptr extract failed: {}", e)
+                    })?;
                 let mrope_cos_ptr: u64 = mm
                     .get_item("mrope_cos_ptr")
                     .map_err(|e| format!("image prefill mrope_cos_ptr read failed: {}", e))?
@@ -1349,7 +1354,9 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                     .get_item("vision_block_ids_ptr")
                     .map_err(|e| format!("image prefill vision_block_ids_ptr read failed: {}", e))?
                     .extract()
-                    .map_err(|e| format!("image prefill vision_block_ids_ptr extract failed: {}", e))?;
+                    .map_err(|e| {
+                        format!("image prefill vision_block_ids_ptr extract failed: {}", e)
+                    })?;
                 let image_count: usize = mm
                     .get_item("image_count")
                     .map_err(|e| format!("image prefill image_count read failed: {}", e))?
@@ -1512,7 +1519,8 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                 engine.clear_external_prefill_inputs();
             }
 
-            let attempt_result = match engine.run_prefill(&token_ids, temperature, &suppress_tokens) {
+            let attempt_result = match engine.run_prefill(&token_ids, temperature, &suppress_tokens)
+            {
                 Ok(r) => match engine.finalize_stage_exact_prefill_kv(r.prompt_len) {
                     Ok(()) => Ok(r),
                     Err(e) => Err(format!("KV stage export failed: {}", e)),
@@ -2927,10 +2935,8 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
             })
         }));
     }
-    let (evicted, freed_mb) = store_for_evict.hcs_evict_for_prefill_with_engine_floor(
-        input_token_ids.len(),
-        prefill_entry_floor_bytes,
-    );
+    let (evicted, freed_mb) = store_for_evict
+        .hcs_evict_for_prefill_with_engine_floor(input_token_ids.len(), prefill_entry_floor_bytes);
     if debug_hcs_transition_trace {
         let raw = store_for_evict.hcs_debug_summary_json("after_hcs_evict_for_prefill");
         let mut value = serde_json::from_str(&raw).unwrap_or_else(|e| {
@@ -4088,6 +4094,13 @@ fn handle_gpu_decode(
 
         let elapsed = decode_elapsed;
         let total_gen = decode_token_count + 1;
+        let (reported_thinking_tokens, reported_answer_tokens) = if think_end_id.is_some() {
+            (thinking_token_count, answer_token_count)
+        } else {
+            // With thinking disabled every generated token is an answer token.
+            // total_gen includes the first token produced by prefill.
+            (0, total_gen)
+        };
         let decode_tok_s = if elapsed > 0.0 && decode_token_count > 0 {
             decode_token_count as f64 / elapsed
         } else {
@@ -4109,8 +4122,8 @@ fn handle_gpu_decode(
             decode_token_count,
             decode_ms,
             decode_tok_s,
-            thinking_token_count,
-            answer_token_count,
+            reported_thinking_tokens,
+            reported_answer_tokens,
             total_gen,
             prompt_len,
             prefill_tok_s,
@@ -4812,8 +4825,8 @@ impl RustServer {
             )?;
         let store = unsafe { &mut *(self.gpu_store_addr as *mut GpuDecodeStore) };
         let t_evict = Instant::now();
-        let (evicted, _) =
-            store.hcs_evict_for_prefill_with_engine_floor(estimated_tokens, prefill_entry_floor_bytes);
+        let (evicted, _) = store
+            .hcs_evict_for_prefill_with_engine_floor(estimated_tokens, prefill_entry_floor_bytes);
         // NOTE: aux GPU never does prefill, so no eviction needed there
         let evict_ms = t_evict.elapsed().as_secs_f64() * 1000.0;
 
@@ -5204,10 +5217,7 @@ impl RustServer {
                     pressure_reload_ms,
                 );
                 let (post_reload_evicted, post_reload_freed_mb, post_reload_final_free_mb) = store
-                    .hcs_drain_vram_pressure(
-                        "benchmark_before_decode_after_pressure_reload",
-                        true,
-                    );
+                    .hcs_drain_vram_pressure("benchmark_before_decode_after_pressure_reload", true);
                 if post_reload_evicted > 0 {
                     log::warn!(
                         "Benchmark: post-reload pressure eviction before decode evicted {} soft experts, freed {:.1} MB, final_free={} MB",
@@ -5389,9 +5399,7 @@ impl RustServer {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        hide_synthetic_think_stop_text, is_chat_completions_endpoint, is_models_endpoint,
-    };
+    use super::{hide_synthetic_think_stop_text, is_chat_completions_endpoint, is_models_endpoint};
 
     #[test]
     fn models_endpoint_accepts_openai_base_url_variants() {
@@ -5420,8 +5428,16 @@ mod tests {
     #[test]
     fn hides_only_synthetic_thinking_stop_text() {
         assert!(hide_synthetic_think_stop_text(123, Some("stop"), Some(123)));
-        assert!(!hide_synthetic_think_stop_text(123, Some("length"), Some(123)));
-        assert!(!hide_synthetic_think_stop_text(123, Some("stop"), Some(456)));
+        assert!(!hide_synthetic_think_stop_text(
+            123,
+            Some("length"),
+            Some(123)
+        ));
+        assert!(!hide_synthetic_think_stop_text(
+            123,
+            Some("stop"),
+            Some(456)
+        ));
         assert!(!hide_synthetic_think_stop_text(123, Some("stop"), None));
         assert!(!hide_synthetic_think_stop_text(123, None, Some(123)));
     }

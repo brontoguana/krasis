@@ -1,0 +1,8 @@
+# refine_ncmoe36
+# started_utc=2026-07-22T20:41:46Z
+# llama_commit=c5a778891
+# command=CUDA_VISIBLE_DEVICES=GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d /home/main/Documents/Claude/llama/llama.cpp/build/bin/llama-bench -m /home/main/.krasis/models/Ornith-1.0-397B-GGUF/deepreinforce-ai_Ornith-1.0-397B-Q4_K_M/deepreinforce-ai_Ornith-1.0-397B-Q4_K_M-00001-of-00007.gguf -r 3 -o jsonl -t 64 -b 2048 -ub 512 -ngl 999 -mmp 1 -dev CUDA0 -fa 1 -ctk f16 -ctv f16 -p 128 -n 16 -ncmoe 36
+ggml_cuda_init: found 1 CUDA devices:
+  Device 0: NVIDIA RTX PRO 6000 Blackwell Workstation Edition, compute capability 12.0, VMM: yes
+main: error: failed to load model '/home/main/.krasis/models/Ornith-1.0-397B-GGUF/deepreinforce-ai_Ornith-1.0-397B-Q4_K_M/deepreinforce-ai_Ornith-1.0-397B-Q4_K_M-00001-of-00007.gguf'
+# finished_utc=2026-07-22T20:42:25Z

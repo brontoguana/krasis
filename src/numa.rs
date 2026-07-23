@@ -343,24 +343,24 @@ pub fn set_interleave_all(num_nodes: usize) -> bool {
     }
     #[cfg(unix)]
     {
-    if !numa_is_available() || num_nodes <= 1 {
-        return false;
-    }
-    // Build bitmask with bits 0..num_nodes set
-    let nodemask: u64 = (1u64 << num_nodes) - 1;
-    let ret = unsafe {
-        set_mempolicy(
-            MPOL_INTERLEAVE,
-            &nodemask as *const u64 as *const libc::c_ulong,
-            num_nodes as libc::c_ulong + 1,
-        )
-    };
-    if ret != 0 {
-        let err = std::io::Error::last_os_error();
-        log::warn!("set_mempolicy(INTERLEAVE) failed: {err}");
-        return false;
-    }
-    true
+        if !numa_is_available() || num_nodes <= 1 {
+            return false;
+        }
+        // Build bitmask with bits 0..num_nodes set
+        let nodemask: u64 = (1u64 << num_nodes) - 1;
+        let ret = unsafe {
+            set_mempolicy(
+                MPOL_INTERLEAVE,
+                &nodemask as *const u64 as *const libc::c_ulong,
+                num_nodes as libc::c_ulong + 1,
+            )
+        };
+        if ret != 0 {
+            let err = std::io::Error::last_os_error();
+            log::warn!("set_mempolicy(INTERLEAVE) failed: {err}");
+            return false;
+        }
+        true
     }
 }
 
@@ -383,35 +383,35 @@ pub fn migrate_to_node(ptr: *mut u8, len: usize, node: usize) -> bool {
     }
     #[cfg(unix)]
     {
-    if !numa_is_available() || len == 0 || node >= 64 {
-        return false;
-    }
+        if !numa_is_available() || len == 0 || node >= 64 {
+            return false;
+        }
 
-    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
-    // Align down to page boundary
-    let aligned_addr = (ptr as usize) & !(page_size - 1);
-    let offset = (ptr as usize) - aligned_addr;
-    let aligned_len = len + offset;
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+        // Align down to page boundary
+        let aligned_addr = (ptr as usize) & !(page_size - 1);
+        let offset = (ptr as usize) - aligned_addr;
+        let aligned_len = len + offset;
 
-    let nodemask: u64 = 1u64 << node;
+        let nodemask: u64 = 1u64 << node;
 
-    let ret = unsafe {
-        mbind(
-            aligned_addr as *mut libc::c_void,
-            aligned_len,
-            MPOL_BIND,
-            &nodemask as *const u64 as *const libc::c_ulong,
-            64, // maxnode (supports up to 64 nodes)
-            MPOL_MF_MOVE,
-        )
-    };
+        let ret = unsafe {
+            mbind(
+                aligned_addr as *mut libc::c_void,
+                aligned_len,
+                MPOL_BIND,
+                &nodemask as *const u64 as *const libc::c_ulong,
+                64, // maxnode (supports up to 64 nodes)
+                MPOL_MF_MOVE,
+            )
+        };
 
-    if ret != 0 {
-        let err = std::io::Error::last_os_error();
-        log::debug!("mbind to node {node} failed: {err}");
-        return false;
-    }
-    true
+        if ret != 0 {
+            let err = std::io::Error::last_os_error();
+            log::debug!("mbind to node {node} failed: {err}");
+            return false;
+        }
+        true
     }
 }
 

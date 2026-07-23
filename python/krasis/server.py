@@ -157,26 +157,33 @@ def _normalize_selected_gpus(raw: Optional[str], source: str) -> str:
         if not gpu:
             continue
         if gpu.isdigit():
-            visible_id = str(int(gpu))
-            duplicate_key = f"index:{visible_id}"
-            if len(gpu) >= 3:
-                inv = inventory()
-                if not any(item.get("index") == int(gpu) for item in inv):
-                    match, matches = _unique_gpu_alias_match(gpu, inv)
-                    if match:
-                        visible_id = str(match["uuid"])
-                        duplicate_key = f"uuid:{visible_id}"
-                    elif matches:
-                        match_text = "; ".join(_gpu_display(item) for item in matches)
-                        raise SystemExit(
-                            f"{source} selected GPU selector {gpu!r} is ambiguous: {match_text}"
-                        )
-                    else:
-                        available = "; ".join(_gpu_display(item) for item in inv) or "none"
-                        raise SystemExit(
-                            f"{source} selected GPU selector {gpu!r} did not match any GPU. "
-                            f"Available GPUs: {available}"
-                        )
+            inv = inventory()
+            indexed = next((item for item in inv if item.get("index") == int(gpu)), None)
+            if indexed and indexed.get("uuid"):
+                visible_id = str(indexed["uuid"])
+                duplicate_key = f"uuid:{visible_id}"
+            elif len(gpu) >= 3:
+                match, matches = _unique_gpu_alias_match(gpu, inv)
+                if match:
+                    visible_id = str(match["uuid"])
+                    duplicate_key = f"uuid:{visible_id}"
+                elif matches:
+                    match_text = "; ".join(_gpu_display(item) for item in matches)
+                    raise SystemExit(
+                        f"{source} selected GPU selector {gpu!r} is ambiguous: {match_text}"
+                    )
+                else:
+                    available = "; ".join(_gpu_display(item) for item in inv) or "none"
+                    raise SystemExit(
+                        f"{source} selected GPU selector {gpu!r} did not match any GPU. "
+                        f"Available GPUs: {available}"
+                    )
+            else:
+                available = "; ".join(_gpu_display(item) for item in inv) or "none"
+                raise SystemExit(
+                    f"{source} selected GPU index {gpu!r} did not match any GPU. "
+                    f"Available GPUs: {available}"
+                )
         elif gpu.startswith(("GPU-", "MIG-")):
             visible_id = gpu
             duplicate_key = f"uuid:{visible_id}"
@@ -418,6 +425,30 @@ def _sha256_file(path: str) -> Optional[str]:
     return h.hexdigest()
 
 
+def _marlin_digest_cache_path(path: str) -> str:
+    return f"{path}.sha256.json"
+
+
+def _write_marlin_digest_cache(path: str, digest: str) -> None:
+    """Persist a stat-bound digest so compressed launches do not re-read huge caches."""
+    stat = os.stat(path)
+    payload = {
+        "format": "krasis_marlin_sha256_cache",
+        "format_version": 1,
+        "size": int(stat.st_size),
+        "mtime_ns": int(stat.st_mtime_ns),
+        "sha256": digest,
+    }
+    cache_path = _marlin_digest_cache_path(path)
+    tmp_path = f"{cache_path}.{os.getpid()}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp_path, cache_path)
+
+
 def _sha256_jsonable(value: Any) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -470,14 +501,13 @@ def _model_config_fingerprints(model_path: str) -> dict[str, Optional[str]]:
     return {name: _sha256_file(os.path.join(model_path, name)) for name in names}
 
 
-def _heatmap_route_signature(model: KrasisModel, args) -> dict[str, Any]:
+def _heatmap_route_signature_from_cfg(cfg, args) -> dict[str, Any]:
     """Return the routing identity an approved heatmap must match.
 
     Attention precision and KV-cache format are intentionally excluded: they can
     be listed as validated-compatible runtimes, but they are not part of the
     route-prior identity unless measurements prove they must be split.
     """
-    cfg = model.cfg
     layer_types = getattr(cfg, "layer_types", None)
     explicit_layer_types = [] if layer_types is None else list(layer_types)
     return {
@@ -505,6 +535,10 @@ def _heatmap_route_signature(model: KrasisModel, args) -> dict[str, Any]:
             "format_version": APPROVED_HEATMAP_FORMAT_VERSION,
         },
     }
+
+
+def _heatmap_route_signature(model: KrasisModel, args) -> dict[str, Any]:
+    return _heatmap_route_signature_from_cfg(model.cfg, args)
 
 
 def _runtime_heatmap_capture_config(args) -> dict[str, Any]:

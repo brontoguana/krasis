@@ -1,5 +1,192 @@
 # Krasis Benchmark Results
 
+## v1.0.16-rc.1 full QCN release matrix - 2026-07-23
+
+Purpose: validate the exact prerelease source through the built
+`./dev release-test QCN` path after repairing multi-GPU auxiliary RoPE setup
+and streamed answer-token metadata. Timing/trace instrumentation was disabled.
+
+| Configuration | Prefill internal | Decode internal | Round trip network | HCS coverage | Minimum free VRAM | Witness | Sanity | Result |
+|---------------|-----------------:|----------------:|-------------------:|-------------:|------------------:|---------|--------|--------|
+| INT4/HQQ4/k4v4, RTX PRO 6000 96GB | 11,076.9 tok/s | 91.22 tok/s | 161.33 tok/s | 100.0% | 53,232 MB | 4/4 MATCH | 14/14 PASS | PASS |
+| INT4/HQQ6+8/k6v6, RTX PRO 6000 96GB | 10,274.2 tok/s | 89.65 tok/s | 158.49 tok/s | 100.0% | 52,766 MB | 4/4 MATCH | 14/14 PASS | PASS |
+| INT8/HQQ6+8/k6v6 multi-GPU, RTX PRO 6000 96GB + RTX A4500 20GB | 9,006.0 tok/s | 57.72 tok/s | 118.74 tok/s | 100.0% | GPU0 28,334 MB; GPU1 1,166 MB | 4/4 MATCH | 13 PASS, 1 WARN | PASS |
+
+Evidence: [complete wrapper log](20260723_v1016rc1_release_test_qcn_final.log)
+and [generated HTML report](../logs/release-test_20260723_195734/release_test.html).
+
+Notes:
+
+- The 17-case launcher matrix passed before the model configurations.
+- Every configuration passed 14 sanity prompts, except one non-fatal content
+  warning in the multi-GPU row, all 2K/10K/25K canonical Gutenberg checks, and
+  all four llama-witness prompts.
+- The multi-GPU configuration used a measured 40/8 layer split. Auxiliary
+  decode calibration and the 11-token validation both passed; GPU1 reached a
+  1,166 MB decode low-water mark against the default 600 MB safety margin.
+- The final log health scan found no CUDA errors, tracebacks, fatal/hard-floor
+  events, below-safety VRAM warnings, or non-zero HCS copy failures.
+- Stream timing reported measured answer-token counts throughout the final run,
+  including thinking-disabled multi-GPU requests.
+
+## v1.0.16-rc.1 pre-release speed gate - 2026-07-23
+
+Purpose: run the fixed `./dev speed-test` path with timing and benchmark
+telemetry disabled before the prerelease. The fixed config selected physical
+GPU 0, which on this workstation is the 20 GB RTX A4500; this is a constrained
+runtime/release gate and is not compared with the RTX 5090 speed history.
+
+| Hardware | Model/config | Prefill internal | Decode internal | Round trip network | HCS coverage | Min free VRAM | Result | Logs |
+|----------|--------------|-----------------:|----------------:|-------------------:|-------------:|--------------:|--------|------|
+| 1x RTX A4500 20GB, AMD EPYC 7742 | Qwen3-Coder-Next INT4/HQQ4/k4v4 | 1,806.7 tok/s | 37.44 tok/s | 64.92 tok/s | 8700/24576 (35.4%) | 800 MB | PASS | [report](20260723_v1016rc1_a4500_qcn_hqq4_k4v4_benchmark_report.log), [stdout](20260723_v1016rc1_a4500_qcn_hqq4_k4v4_benchmark_stdout.log), [server](20260723_v1016rc1_a4500_qcn_hqq4_k4v4_krasis.log) |
+
+Notes:
+
+- Runtime calibration selected a 24,436-token long-prompt cap. The measured
+  long calibration low-water was 2,130 MB and runtime HCS pressure eviction
+  kept timed decode at 800 MB minimum free VRAM, close to but above the default
+  600 MB safety margin.
+- The final Dynamic HCS summary was `hit=90.03%`,
+  `request_promotions=11911/119520`, `budget_skips=0`, `no_slot=0`, and
+  `copy_failures=0`.
+- The 20 GB A4500 hardware differs from the fixed benchmark's historical RTX
+  5090 host, so these values are retained as a release gate rather than a
+  speed-regression comparison.
+
+## Nemotron Nano and Super llama-witness quality gates - 2026-07-23
+
+Purpose: replace the blocked Krasis-BF16/PPL quality authority for Nemotron
+with independent llama-witness first-token references, then validate the
+production INT4/HQQ4/k4v4 configurations against those references.
+
+| Model/config | Prompt verdicts | Prefill argmax | Prefill top-10 | First token | First-token top-k drift | Result | Logs |
+|--------------|----------------:|---------------:|---------------:|------------:|------------------------:|--------|------|
+| Nemotron-3-Nano-30B-A3B HQQ4/k4v4 | 6/6 PASS | 4/6 | 6/6 | 4/6 | avg 14.185%, max 44.584% | PASS | [server](20260723_nemotron_nano_hqq4_witness_server.log), [comparison](../logs/reference-test_20260723_144324/reference_test_summary.json) |
+| Nemotron-3-Super-120B-A12B HQQ4/k4v4 | 6/6 PASS | 4/6 | 6/6 | 4/6 | avg 18.267%, max 54.409% | PASS | [server](20260723_nemotron_super_hqq4_server.log), [comparison](../logs/reference-test_20260723_164751/reference_test_summary.json) |
+
+Reference artifacts are archived in the private evidence repository under
+`reference-outputs/output/NVIDIA-Nemotron-3-{Nano,Super}-*/`.
+
+Notes:
+
+- Both HQQ4/k4v4 configurations passed all six per-prompt verdicts and retained
+  the llama-witness top-1 token within Krasis' top 10 for every prompt.
+- The normalized Jensen-Shannon drift is included rather than hidden. It is
+  larger than mature Qwen-family rows, so the result is a first-token witness
+  acceptance gate rather than a claim of full-distribution equivalence.
+- The prior Nemotron raw-corpus PPL values were pathological even for the
+  Krasis BF16 diagnostic baseline. They are not used as acceptance evidence.
+- HQQ6/k6v6 remains blocked in `STATS-QUALITY.md` until those exact
+  configurations are run against the new witnesses.
+
+## RTX PRO 6000 96GB Bring-up Benchmarks - 2026-07-21
+
+Purpose: first QCN, Step-3.7, and Ornith-1.0-397B throughput checks on the newly installed RTX
+PRO 6000 Blackwell 96GB using stable `CFG_SELECTED_GPUS="6000"` configs and the
+standard `./dev benchmark` command under tmux. Timing instrumentation was
+disabled.
+
+Hardware: local workstation, AMD EPYC 7742, 1x RTX PRO 6000 selected by GPU
+alias/UUID. Driver: NVIDIA 570.211.01 open kernel module on
+`6.17.0-40-generic`.
+
+Configs:
+
+```text
+tests/qcn-rtx6000-96gb-hqq4-k4v4-int4-benchmark.conf
+tests/step37-flash-rtx6000-96gb-hqq4-k4v4-a16-benchmark.conf
+tests/ornith397-rtx6000-96gb-hqq4-k4v4-benchmark.conf
+```
+
+| Model/config | Prefill internal | Decode internal | Round trip network | HCS coverage | Min free VRAM | Result | Logs |
+|--------------|-----------------:|----------------:|-------------------:|-------------:|--------------:|--------|------|
+| Qwen3-Coder-Next HQQ4/k4v4 | 11,211.1 tok/s | 91.34 tok/s | 161.82 tok/s | 24576/24576 (100.0%) | 53156 MB | PASS | [report](20260721_231445_rtx6000_qcn_hqq4_k4v4_benchmark_report.log), [stdout](20260721_231445_rtx6000_qcn_hqq4_k4v4_benchmark_stdout.log), [server](20260721_231445_rtx6000_qcn_hqq4_k4v4_krasis.log) |
+| Step-3.7-Flash HQQ4/k4v4 | 5,261.0 tok/s | 55.40 tok/s | 112.82 tok/s | 11121/12096 (91.9%) | 1274 MB | PASS | [report](20260721_231856_rtx6000_step37_hqq4_k4v4_benchmark_report.log), [stdout](20260721_231856_rtx6000_step37_hqq4_k4v4_benchmark_stdout.log), [server](20260721_231856_rtx6000_step37_hqq4_k4v4_krasis.log) |
+| Ornith-1.0-397B HQQ4/k4v4 | 2,354.5 tok/s | 23.58 tok/s | 41.73 tok/s | 13161/30720 (42.8%) | 1346 MB | PASS | [report](20260721_233756_rtx6000_ornith397_hqq4_k4v4_benchmark_report.log), [stdout](20260721_233756_rtx6000_ornith397_hqq4_k4v4_benchmark_stdout.log), [server](20260721_233756_rtx6000_ornith397_hqq4_k4v4_krasis.log) |
+
+Notes:
+- QCN fully fits the routed expert working set in the soft HCS pool on the
+  96GB card: final HCS hit `100.00%`, `copy_failures=0`, and very large decode
+  free-VRAM headroom.
+- Step-3.7 used the card aggressively: HCS loaded `11154/12096` experts at
+  startup, settled at `11121/12096`, and kept the runtime low-water at
+  `1274 MB`, above the default `600 MB` safety margin.
+- Step-3.7 final Dynamic HCS summary was `hit=99.89%`,
+  `request_promotions=90/83664`, `budget_skips=0`, `no_slot=0`,
+  `copy_failures=0`.
+- Ornith-1.0-397B loaded the approved `ornith397_397b_hqq4_p00006` heatmap,
+  held `13161/30720` experts after pressure eviction, and kept decode low-water
+  at `1346 MB`, above the default `600 MB` safety margin.
+- Ornith-1.0-397B final Dynamic HCS summary included `copy_failures=0`,
+  `budget_skips=0`, and `no_slot=0`; request promotions were
+  `19520/149400` on the 250-token network decode row.
+- No NVIDIA Xid/GSP/fallen-off-bus errors appeared in the kernel log during the
+  benchmark window. Peak observed power during Step timed prefill was about
+  `600 W`, with observed temperature around `68C`; Ornith timed prefill reached
+  about `431 W` and `75C` in spot checks.
+
+## Ornith-1.0-397B Prefetch/Split Smoke Matrix - 2026-07-21
+
+Purpose: test the default-off decode overlap experiments on current main
+`ffee6bd` after the stale-base regression fix, using the same
+`tests/ornith397-stats-hqq4-k4v4.conf` model/config as the baseline validation.
+All runs used the built `./dev benchmark` entry point under tmux with timing
+disabled and benchmark GPU telemetry disabled.
+
+Hardware: local workstation, 1x RTX 5090 selected.
+
+| Case | Env | Prefill internal | Decode internal | 250-token decode | Round trip network | HCS coverage | Min free VRAM | Result | Logs |
+|------|-----|-----------------:|----------------:|-----------------:|-------------------:|-------------:|--------------:|--------|------|
+| Previous control | all experimental flags off | 789.7 tok/s | 8.26 tok/s | 7.72 tok/s | 14.27 tok/s | 2720/30720 (8.9%) | 954 MB | valid cold/cache-build control | [report](20260721_mainport_ornith397_hqq4_k4v4_benchmark_report.log), [stdout](20260721_mainport_ornith397_hqq4_k4v4_benchmark_stdout.log), [server](20260721_mainport_ornith397_hqq4_k4v4_krasis.log) |
+| Gated prefetch | `KRASIS_PREFETCH=1 KRASIS_PREFETCH_GATE=1` | 954.9 tok/s | 9.68 tok/s | 9.08 tok/s | 16.16 tok/s | 2680/30720 (8.7%) | 946 MB | smoke failed: prefetch issued zero experts | [report](20260721_095624_ornith397_prefetch_prefetch_gate_on_benchmark_report.log), [stdout](20260721_095624_ornith397_prefetch_prefetch_gate_on_benchmark_stdout.log), [server](20260721_095624_ornith397_prefetch_prefetch_gate_on_krasis.log) |
+| Split launch | `KRASIS_SPLIT_EXPERT_LAUNCH=1` | 908.9 tok/s | 10.08 tok/s | 9.40 tok/s | 17.39 tok/s | 2720/30720 (8.9%) | 954 MB | small warmed-state lift only | [report](20260721_095624_ornith397_prefetch_split_benchmark_report.log), [stdout](20260721_095624_ornith397_prefetch_split_benchmark_stdout.log), [server](20260721_095624_ornith397_prefetch_split_krasis.log) |
+| Repeat control | all experimental flags off | 911.3 tok/s | 9.66 tok/s | 9.13 tok/s | 17.00 tok/s | 2720/30720 (8.9%) | 952 MB | warmed control | [report](20260721_095624_ornith397_prefetch_baseline_repeat_benchmark_report.log), [stdout](20260721_095624_ornith397_prefetch_baseline_repeat_benchmark_stdout.log), [server](20260721_095624_ornith397_prefetch_baseline_repeat_krasis.log) |
+
+Notes:
+- The gated prefetch smoke check failed despite the fixed two-pass H2D probe:
+  final summary was `issued=0 hit=0 late=0 wasted=0 budget_dropped=10925`
+  with measured `bw=10.87 GB/s`. The gate-off and prefetch+split cases were
+  not run because they would not answer the overlap question while the budget
+  admits no staged experts.
+- The warmed repeat control reached 9.66 tok/s, so the higher prefetch/split
+  numbers should not be compared against the earlier 8.26 tok/s cold/cache-build
+  control. The split-only row is only a small lift over the warmed control:
+  10.08 vs 9.66 tok/s best decode and 9.40 vs 9.13 tok/s on the 250-token row.
+- Dynamic HCS remained healthy in the completed rows: `budget_skips=0`,
+  `no_slot=0`, and `copy_failures=0`.
+
+## Main-Port Baseline Validation - 2026-07-21
+
+Purpose: verify `step-main-port` on current main `ffee6bd` after the stale-base
+regression diagnosis. All experimental sync-wait flags were off. Commands were
+run through the standard `./dev` entry points under tmux:
+
+```text
+./dev speed-test
+./dev benchmark tests/step37-flash-4-4-hqq4-k4v4-a16.conf
+./dev benchmark tests/ornith397-stats-hqq4-k4v4.conf
+```
+
+Hardware: local workstation, 1x RTX 5090 selected.
+
+| Model/config | Prefill internal | Decode internal | Round trip network | HCS coverage | Min free VRAM | Result | Logs |
+|--------------|-----------------:|----------------:|-------------------:|-------------:|--------------:|--------|------|
+| Qwen3-Coder-Next HQQ4/k4v4 | 6,880.9 tok/s | 88.36 tok/s | 153.23 tok/s | 16281/24576 (66.2%) | 922 MB | PASS | [report](20260721_mainport_qcn_hqq4_k4v4_benchmark_report.log), [stdout](20260721_mainport_qcn_hqq4_k4v4_benchmark_stdout.log), [server](20260721_mainport_qcn_hqq4_k4v4_krasis.log) |
+| Step-3.7-Flash HQQ4/k4v4 | 2,623.8 tok/s | 22.12 tok/s | 36.30 tok/s | 2784/12096 (23.0%) | 884 MB | PASS | [report](20260721_mainport_step37_hqq4_k4v4_benchmark_report.log), [stdout](20260721_mainport_step37_hqq4_k4v4_benchmark_stdout.log), [server](20260721_mainport_step37_hqq4_k4v4_krasis.log) |
+| Ornith-1.0-397B HQQ4/k4v4 | 789.7 tok/s | 8.26 tok/s | 14.27 tok/s | 2720/30720 (8.9%) | 954 MB | PASS | [report](20260721_mainport_ornith397_hqq4_k4v4_benchmark_report.log), [stdout](20260721_mainport_ornith397_hqq4_k4v4_benchmark_stdout.log), [server](20260721_mainport_ornith397_hqq4_k4v4_krasis.log) |
+
+Notes:
+- The stale-base regression is confirmed fixed for Ornith: HCS coverage is
+  back at 2720/30720 and decode is back above the prior 7.89 tok/s published
+  row, instead of the stale-tree 5.24 tok/s result.
+- Dynamic HCS promotion was not throttled in these runs: final rows reported
+  `budget_skips=0`, `no_slot=0`, and `copy_failures=0`.
+- First run on this main-port cache namespace built Marlin caches before the
+  benchmark rows: QCN 39.9 GB in 110s, Step 98.4 GB in 258s, Ornith 199.7 GB
+  in 526s. These startup costs are not part of the throughput rows above.
+- Min free VRAM stayed close to the 600 MB safety margin without crossing it:
+  QCN 922 MB, Step 884 MB, Ornith 954 MB.
+
 ## Ornith-1.0-397B RTX 5090 HQQ4/HQQ6 Stats Benchmark - 2026-07-16
 
 Purpose: public stats-table benchmark and quality rows for Ornith-1.0-397B,

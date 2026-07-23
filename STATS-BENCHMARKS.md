@@ -2,8 +2,9 @@
 
 Benchmarks use `./dev benchmark` with Krasis timing instrumentation disabled. Peak
 system RAM is recorded with external `/usr/bin/time -v` around the benchmark
-command, so it is a process max-RSS measurement. HTTP round trip is the
-client-side HTTP path and should not be confused with internal decode speed.
+command, so it is a process max-RSS measurement unless the row is explicitly
+marked as benchmark-report process RAM. HTTP round trip is the client-side HTTP
+path and should not be confused with internal decode speed.
 
 Initial scope: measured supported models at `INT4/HQQ4/k4v4` and
 `INT4/HQQ6/k6v6`.
@@ -17,6 +18,7 @@ Detailed benchmark logs and artifacts are indexed in [benchmarks/BENCHMARKS.md](
 | 1x RTX 5090 32GB, AMD EPYC 7742 | Ornith-1.0-35B | 35B class | 3B class | INT4/HQQ4/k4v4 | 10,575.7 tok/s | 117.63 tok/s | 240.91 tok/s | 22.9 GB max RSS (21.8 GiB) | 10240/10240 (100.0%) | 10,186 MB |
 | 1x RTX 5090 32GB, AMD EPYC 7742 | Ornith-1.0-35B | 35B class | 3B class | INT4/HQQ6/k6v6 | 9,931.6 tok/s | 114.76 tok/s | 234.36 tok/s | 23.0 GB max RSS (21.9 GiB) | 10240/10240 (100.0%) | 9,882 MB |
 | 1x RTX 5090 32GB, AMD EPYC 7742 | Qwen3-Coder-Next | 80B class | n/a | INT4/HQQ4/k4v4 | 7,028.5 tok/s | 87.90 tok/s | 150.75 tok/s | 44.1 GB max RSS (42.0 GiB) | 16362/24576 (66.6%) | 878 MB |
+| 1x RTX PRO 6000 Blackwell 96GB, AMD EPYC 7742 | Qwen3-Coder-Next | 80B class | n/a | INT4/HQQ4/k4v4 | 11,211.1 tok/s | 91.34 tok/s | 161.82 tok/s | 79.2 GB process RAM (benchmark report) | 24576/24576 (100.0%) | 53,156 MB |
 | 1x RTX 5090 32GB, AMD EPYC 7742 | Qwen3-Coder-Next | 80B class | n/a | INT4/HQQ6/k6v6 | 6,628.4 tok/s | 88.22 tok/s | 201.94 tok/s | 45.8 GB max RSS (43.7 GiB) | 16119/24576 (65.6%) | 856 MB |
 | 1x RTX 5090 32GB, AMD EPYC 7742 | Qwen3.5-35B-A3B | 35B class | 3B class | INT4/HQQ4/k4v4 | 10,700.7 tok/s | 116.43 tok/s | 259.67 tok/s | 23.8 GB max RSS (22.7 GiB) | 10240/10240 (100.0%) | 10,186 MB |
 | 1x RTX 5090 32GB, AMD EPYC 7742 | Qwen3.5-35B-A3B | 35B class | 3B class | INT4/HQQ6/k6v6 | 9,314.5 tok/s | 113.61 tok/s | 225.17 tok/s | 23.9 GB max RSS (22.8 GiB) | 10240/10240 (100.0%) | 9,882 MB |
@@ -27,8 +29,10 @@ Detailed benchmark logs and artifacts are indexed in [benchmarks/BENCHMARKS.md](
 | 1x RTX 5090 32GB, AMD EPYC 7742 | Qwen3.5-397B-A17B | 397B class | 17B class | INT4/HQQ4/k4v4 | 973.8 tok/s | 10.04 tok/s | 18.71 tok/s | 231.5 GB max RSS (215.6 GiB) | 2720/30720 (8.9%) | 952 MB |
 | 1x RTX 5090 32GB, AMD EPYC 7742 | Qwen3.5-397B-A17B | 397B class | 17B class | INT4/HQQ6/k6v6 | 866.0 tok/s | 9.38 tok/s | 16.15 tok/s | 239.4 GB max RSS (223.0 GiB) | 2420/30720 (7.9%) | 896 MB |
 | 1x RTX 5090 32GB, AMD EPYC 7742 | Ornith-1.0-397B | 397B class | 17B class | INT4/HQQ4/k4v4 | 743.7 tok/s | 7.89 tok/s | 13.87 tok/s | 211.7 GB max RSS (201.9 GiB) | 2720/30720 (8.9%) | 952 MB |
+| 1x RTX PRO 6000 Blackwell 96GB, AMD EPYC 7742 | Ornith-1.0-397B | 397B class | 17B class | INT4/HQQ4/k4v4 | 2,354.5 tok/s | 23.58 tok/s | 41.73 tok/s | 201.8 GB process RAM (benchmark report) | 13161/30720 (42.8%) | 1,346 MB |
 | 1x RTX 5090 32GB, AMD EPYC 7742 | Ornith-1.0-397B | 397B class | 17B class | INT4/HQQ6/k6v6 | 557.2 tok/s | 7.44 tok/s | 12.64 tok/s | 219.5 GB max RSS (209.4 GiB) | 2420/30720 (7.9%) | 896 MB |
 | 1x RTX 5090 32GB, AMD EPYC 7742 | Step-3.7-Flash | 201.4B total / 199.4B text | 13.9B | INT4/HQQ4/k4v4 | 2,618.4 tok/s | 23.05 tok/s | 36.11 tok/s | 108.4 GB max RSS (103.4 GiB) | 2784/12096 (23.0%) | 884 MB |
+| 1x RTX PRO 6000 Blackwell 96GB, AMD EPYC 7742 | Step-3.7-Flash | 201.4B total / 199.4B text | 13.9B | INT4/HQQ4/k4v4 | 5,261.0 tok/s | 55.40 tok/s | 112.82 tok/s | 103.4 GB process RAM (benchmark report) | 11121/12096 (91.9%) | 1,274 MB |
 | 1x RTX 5090 32GB, AMD EPYC 7742 | Step-3.7-Flash | 201.4B total / 199.4B text | 13.9B | INT4/HQQ6/k6v6 | 1,874.5 tok/s | 20.93 tok/s | 32.82 tok/s | 112.8 GB max RSS (107.5 GiB) | 2624/12096 (21.7%) | 956 MB |
 | 1x RTX 5090 32GB, AMD EPYC 7742 | Gemma-4-26B-A4B-it | 26B class | 4B class | INT4/HQQ4/k4v4 | 5,598.9 tok/s | 63.57 tok/s | 119.90 tok/s | 21.3 GB max RSS (20.3 GiB) | 3840/3840 (100.0%) | 12,084 MB |
 | 1x RTX 5090 32GB, AMD EPYC 7742 | Gemma-4-26B-A4B-it | 26B class | 4B class | INT4/HQQ6/k6v6 | 1,610.0 tok/s | 62.16 tok/s | 114.42 tok/s | 21.3 GB max RSS (20.3 GiB) | 3840/3840 (100.0%) | 11,788 MB |
@@ -70,6 +74,14 @@ Notes:
   their available HCS budget aggressively. Qwen3.5 35B, Ornith-1.0-35B, and
   Gemma4 fit all routed experts on the RTX 5090, so their min free VRAM is much
   higher.
+- RTX PRO 6000 Blackwell rows were run on 2026-07-21 with
+  `CFG_SELECTED_GPUS="6000"` resolving to the card UUID on NVIDIA
+  `570.211.01-open` and kernel `6.17.0-40-generic`. The QCN row fits all routed
+  experts on the 96GB card, so min free VRAM is high. The Step-3.7 row uses the
+  larger card aggressively with `11121/12096` routed experts resident and a
+  `1274 MB` decode low-water mark. These two rows use the benchmark report's
+  `/proc/self/status` `VmRSS` process-RAM field because the tmux run did not
+  archive external `/usr/bin/time -v` max-RSS output.
 - Gemma4 still logged `Building GPU INT4 Marlin expert cache (one-time)` on
   repeated launches despite the cache file existing. The stats rows are valid,
   but cache reuse for Gemma4 startup is a follow-up issue.

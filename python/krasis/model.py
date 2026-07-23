@@ -95,7 +95,7 @@ from krasis.tokenizer import Tokenizer
 
 logger = logging.getLogger(__name__)
 
-MAMBA2_PROJECTION_INT4_CACHE_VERSION = 1
+MAMBA2_PROJECTION_INT4_CACHE_VERSION = 2
 MAMBA2_PROJECTION_INT4_CACHE_FORMAT = "krasis_mamba2_projection_marlin_int4"
 
 
@@ -3954,6 +3954,60 @@ class KrasisModel:
             ~(wavelen > low_freq_wavelen),
         )
         return torch.where(is_medium, smoothed, scaled_inv_freq)
+
+    def _gqa_rope_table_ptrs(
+        self,
+        layer_idx: int,
+        max_seq: int,
+        target_device: torch.device,
+    ) -> tuple[int, int, int, torch.Tensor | None, torch.Tensor | None]:
+        """Build or reuse the per-layer GQA RoPE tables on a target GPU."""
+        layer_rope_params = self._gqa_layer_rope_params(layer_idx)
+        head_dim_for_rope = self.cfg.gqa_head_dim_for_layer(layer_idx)
+        if self.cfg.gemma4_text and layer_rope_params.get("rope_type") == "proportional":
+            rope_half = head_dim_for_rope // 2
+        else:
+            rope_half = int(self.cfg.rotary_dim_for_layer(layer_idx) // 2)
+        if rope_half <= 0:
+            return 0, 0, 0, None, None
+
+        theta = float(self.cfg.rope_theta_for_layer(layer_idx))
+        key = (
+            int(max_seq),
+            rope_half,
+            theta,
+            str(target_device),
+            json.dumps(layer_rope_params, sort_keys=True, default=str),
+            int(head_dim_for_rope),
+        )
+        rope_tables = getattr(self, "_rust_layer_rope_tables", None)
+        if rope_tables is None:
+            rope_tables = {}
+            self._rust_layer_rope_tables = rope_tables
+        cached = rope_tables.get(key)
+        if cached is None:
+            inv_freq = self._gqa_inv_freq_for_layer(
+                layer_idx,
+                head_dim_for_rope,
+                rope_half,
+                theta,
+                layer_rope_params,
+            )
+            t = torch.arange(max_seq, dtype=torch.float32)
+            freqs = torch.outer(t, inv_freq)
+            cos_f32 = freqs.cos().contiguous().to(target_device)
+            sin_f32 = freqs.sin().contiguous().to(target_device)
+            cached = (cos_f32, sin_f32)
+            rope_tables[key] = cached
+            self._keep_rust_decode_weight("gqa_rope_table", cos_f32, sin_f32)
+        cos_f32, sin_f32 = cached
+        return (
+            int(cos_f32.data_ptr()),
+            int(sin_f32.data_ptr()),
+            rope_half,
+            cos_f32,
+            sin_f32,
+        )
 
     def _keep_rust_decode_weight(self, label: str, *values) -> None:
         keepalive = getattr(self, "_rust_decode_weights", None)
@@ -8549,49 +8603,6 @@ class KrasisModel:
 
         self._prepare_mamba2_projection_int4_cache()
 
-        self._rust_layer_rope_tables = getattr(self, "_rust_layer_rope_tables", {})
-
-        def _gqa_rope_table_ptrs(
-            layer_idx: int,
-            max_seq: int,
-            target_device: torch.device,
-        ) -> tuple[int, int, int, torch.Tensor | None, torch.Tensor | None]:
-            layer_rope_params = self._gqa_layer_rope_params(layer_idx)
-            head_dim_for_rope = self.cfg.gqa_head_dim_for_layer(layer_idx)
-            if self.cfg.gemma4_text and layer_rope_params.get("rope_type") == "proportional":
-                rope_half = head_dim_for_rope // 2
-            else:
-                rope_half = int(self.cfg.rotary_dim_for_layer(layer_idx) // 2)
-            if rope_half <= 0:
-                return 0, 0, 0, None, None
-            theta = float(self.cfg.rope_theta_for_layer(layer_idx))
-            key = (
-                int(max_seq),
-                rope_half,
-                theta,
-                str(target_device),
-                json.dumps(layer_rope_params, sort_keys=True, default=str),
-                int(head_dim_for_rope),
-            )
-            cached = self._rust_layer_rope_tables.get(key)
-            if cached is None:
-                inv_freq = self._gqa_inv_freq_for_layer(
-                    layer_idx,
-                    head_dim_for_rope,
-                    rope_half,
-                    theta,
-                    layer_rope_params,
-                )
-                t = torch.arange(max_seq, dtype=torch.float32)
-                freqs = torch.outer(t, inv_freq)
-                cos_f32 = freqs.cos().contiguous().to(target_device)
-                sin_f32 = freqs.sin().contiguous().to(target_device)
-                cached = (cos_f32, sin_f32)
-                self._rust_layer_rope_tables[key] = cached
-                self._rust_decode_weights.extend([cos_f32, sin_f32])
-            cos_f32, sin_f32 = cached
-            return int(cos_f32.data_ptr()), int(sin_f32.data_ptr()), rope_half, cos_f32, sin_f32
-
         for layer_idx, layer in enumerate(self.layers):
             attn = layer.attention
             inp_norm = layer.input_norm_weight
@@ -9023,7 +9034,7 @@ class KrasisModel:
                 max_seq = max(
                     c.max_context_tokens for c in self.kv_caches if c is not None
                 )
-                _rope_cos_ptr, _rope_sin_ptr, _rope_half, _rope_cos, _rope_sin = _gqa_rope_table_ptrs(layer_idx, max_seq, device)
+                _rope_cos_ptr, _rope_sin_ptr, _rope_half, _rope_cos, _rope_sin = self._gqa_rope_table_ptrs(layer_idx, max_seq, device)
                 store.register_gqa_layer(
                     layer_idx=layer_idx,
                     input_norm_ptr=inp_norm.data_ptr(), input_norm_size=inp_norm.numel(),
@@ -9769,7 +9780,7 @@ class KrasisModel:
                     max_seq = max(
                         c.max_context_tokens for c in self.kv_caches if c is not None
                     )
-                    _rope_cos_ptr, _rope_sin_ptr, _rope_half, _rope_cos, _rope_sin = _gqa_rope_table_ptrs(layer_idx, max_seq, aux_device)
+                    _rope_cos_ptr, _rope_sin_ptr, _rope_half, _rope_cos, _rope_sin = self._gqa_rope_table_ptrs(layer_idx, max_seq, aux_device)
                     store.register_gqa_layer(
                         layer_idx=layer_idx,
                         input_norm_ptr=inp_norm.data_ptr(), input_norm_size=inp_norm.numel(),
@@ -10100,7 +10111,7 @@ class KrasisModel:
                     max_seq = max(
                         c.max_context_tokens for c in self.kv_caches if c is not None
                     )
-                    _rope_cos_ptr, _rope_sin_ptr, _rope_half, _rope_cos, _rope_sin = _gqa_rope_table_ptrs(
+                    _rope_cos_ptr, _rope_sin_ptr, _rope_half, _rope_cos, _rope_sin = self._gqa_rope_table_ptrs(
                         layer_idx, max_seq, aux_device
                     )
 
@@ -10145,7 +10156,7 @@ class KrasisModel:
                     max_seq = max(
                         c.max_context_tokens for c in self.kv_caches if c is not None
                     )
-                    _rope_cos_ptr, _rope_sin_ptr, _rope_half, _rope_cos, _rope_sin = _gqa_rope_table_ptrs(
+                    _rope_cos_ptr, _rope_sin_ptr, _rope_half, _rope_cos, _rope_sin = self._gqa_rope_table_ptrs(
                         layer_idx, max_seq, aux_device
                     )
                     store.register_gqa_layer(

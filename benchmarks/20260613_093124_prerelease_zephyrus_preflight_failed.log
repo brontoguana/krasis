@@ -1,0 +1,4 @@
+== pre-release Zephyrus preflight ==
+Sat Jun 13 09:32:20 UTC 2026
+Command: ssh -o BatchMode=yes -o ConnectTimeout=8 main@192.168.1.228 ...
+ssh: connect to host 192.168.1.228 port 22: No route to host

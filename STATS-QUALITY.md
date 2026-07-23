@@ -30,10 +30,10 @@ Detailed quality logs and artifacts are indexed in [benchmarks/BENCHMARKS.md](be
 | Step-3.7-Flash | 201.4B total / 199.4B text | 13.9B | INT4/HQQ6/k6v6 | llama-witness BF16 | 8 | 1.7016 | -0.04% | avg 2.206%, max 3.997% | 8/8 | 8/8 | 8/8 | PASS |
 | Gemma-4-26B-A4B-it | 26B class | 4B class | INT4/HQQ4/k4v4 | Krasis BF16 | 14 | 1.1736 | +9.14% chat | avg 1.969%, max 39.239% | 187/197 | 197/197 | 14/14 | PASS |
 | Gemma-4-26B-A4B-it | 26B class | 4B class | INT4/HQQ6/k6v6 | Krasis BF16 | 14 | 1.0792 | +0.36% chat | avg 0.279%, max 10.515% | 193/197 | 197/197 | 14/14 | PASS |
-| Nemotron-3-Super-120B-A12B | 123.6B total | 12.4B | INT4/HQQ4/k4v4 | Krasis BF16 | n/a | 379,305.2043 | +16.30% diagnostic | n/a | n/a | n/a | n/a | BLOCKED |
-| Nemotron-3-Super-120B-A12B | 123.6B total | 12.4B | INT4/HQQ6/k6v6 | Krasis BF16 | n/a | 337,774.3820 | +3.56% diagnostic | n/a | n/a | n/a | n/a | BLOCKED |
-| Nemotron-3-Nano-30B-A3B | 31.6B total | 3.2B | INT4/HQQ4/k4v4 | Krasis BF16 | n/a | 35,918.9461 | -2.89% diagnostic | n/a | n/a | n/a | n/a | BLOCKED |
-| Nemotron-3-Nano-30B-A3B | 31.6B total | 3.2B | INT4/HQQ6/k6v6 | Krasis BF16 | n/a | 36,753.1349 | -0.64% diagnostic | n/a | n/a | n/a | n/a | BLOCKED |
+| Nemotron-3-Super-120B-A12B | 123.6B total | 12.4B | INT4/HQQ4/k4v4 | llama-witness BF16 | 6 | n/a | n/a | avg 18.267%, max 54.409% | 4/6 | 6/6 | 4/6 | PASS |
+| Nemotron-3-Super-120B-A12B | 123.6B total | 12.4B | INT4/HQQ6/k6v6 | llama-witness BF16 | n/a | n/a | n/a | n/a | n/a | n/a | n/a | BLOCKED |
+| Nemotron-3-Nano-30B-A3B | 31.6B total | 3.2B | INT4/HQQ4/k4v4 | llama-witness BF16 | 6 | n/a | n/a | avg 14.185%, max 44.584% | 4/6 | 6/6 | 4/6 | PASS |
+| Nemotron-3-Nano-30B-A3B | 31.6B total | 3.2B | INT4/HQQ6/k6v6 | llama-witness BF16 | n/a | n/a | n/a | n/a | n/a | n/a | n/a | BLOCKED |
 
 Column notes:
 
@@ -64,10 +64,17 @@ Column notes:
   through `/v1/internal/prefill_logits`. The BF16 baseline was PPL `1.0753`.
   HQQ4 and HQQ6 kept the BF16 continuation token in the top 10 for `197/197`
   scored tokens.
-- Nemotron rows are `BLOCKED` because there is no Nemotron BF16 llama-witness
-  reference yet, and the Krasis BF16 diagnostic PPL path produced pathological
-  absolute PPL values. The measured PPL deltas are retained only as raw
-  diagnostics from the run.
+- Nemotron Nano and Super now have BF16 llama-witness first-token references.
+  Their HQQ4/k4v4 rows passed all six prompt verdicts with full prefill top-10
+  containment. The first-token drift percentages are reported even though they
+  are materially larger than the mature Qwen rows, because the witness verdict
+  is based on containment and the values should remain visible. HQQ6/k6v6
+  remains `BLOCKED` until those exact configurations are compared against the
+  new witnesses.
+- Nemotron PPL is `n/a`: the prior Krasis BF16 raw-corpus diagnostic produced
+  pathological absolute values and is not a valid quality metric for these
+  rows. Those raw results remain archived as diagnostics but are not used to
+  justify the witness `PASS`.
 - `BF16 top-k drift` is normalized Jensen-Shannon divergence over the BF16/HQQ
   top-10 union. For `llama-witness BF16` rows it is measured on first-token
   witness diagnostics; for `Krasis BF16` chat-continuation rows it is measured

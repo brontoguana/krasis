@@ -16,9 +16,10 @@ import json
 import logging
 import os
 import subprocess
+import threading
 import time
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import torch
 from krasis.run_paths import get_run_dir
@@ -37,6 +38,86 @@ NC = "\033[0m"
 def _section(label: str) -> str:
     """Format a highlighted section header."""
     return f"\n{BOLD}{CYAN}▸ {label}{NC}"
+
+
+class _GpuTelemetrySampler:
+    """Samples SM clock / temperature / power for all GPUs while a benchmark
+    run executes, via nvidia-smi on a background thread (~1.5 s interval).
+
+    Exists to attribute run-to-run decode spread (thermal throttling vs state
+    effects). This is diagnostic instrumentation and is therefore enabled only
+    by KRASIS_BENCHMARK_GPU_TELEMETRY=1; clean speed benchmarks leave it off.
+    """
+
+    _QUERY = [
+        "nvidia-smi",
+        "--query-gpu=index,clocks.sm,temperature.gpu,power.draw",
+        "--format=csv,noheader,nounits",
+    ]
+
+    def __init__(self, interval_s: float = 1.5):
+        self.interval_s = interval_s
+        self.samples: Dict[str, List[Tuple[float, float, float]]] = {}
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def _sample_once(self) -> None:
+        try:
+            out = subprocess.run(
+                self._QUERY, capture_output=True, text=True, timeout=5
+            )
+        except Exception:
+            return
+        if out.returncode != 0:
+            return
+        for line in out.stdout.strip().splitlines():
+            fields = [f.strip() for f in line.split(",")]
+            if len(fields) < 4:
+                continue
+            try:
+                sm, temp, power = (
+                    float(fields[1]),
+                    float(fields[2]),
+                    float(fields[3]),
+                )
+            except ValueError:
+                continue
+            self.samples.setdefault(fields[0], []).append((sm, temp, power))
+
+    def _loop(self) -> None:
+        while not self._stop.wait(self.interval_s):
+            self._sample_once()
+
+    def start(self) -> None:
+        self._stop.clear()
+        self.samples = {}
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> str:
+        """Stop sampling and return a per-GPU summary string ("" if no data)."""
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=10)
+            self._thread = None
+        if not self.samples:
+            # Run shorter than the sampling interval: take one snapshot so
+            # short rows still report clocks/temp instead of nothing.
+            self._sample_once()
+        parts = []
+        for idx in sorted(self.samples):
+            vals = self.samples[idx]
+            sm_min = min(v[0] for v in vals)
+            sm_max = max(v[0] for v in vals)
+            t_max = max(v[1] for v in vals)
+            p_max = max(v[2] for v in vals)
+            sm_str = (
+                f"sm {sm_min:.0f}MHz"
+                if sm_min == sm_max
+                else f"sm {sm_min:.0f}-{sm_max:.0f}MHz"
+            )
+            parts.append(f"gpu{idx} {sm_str} {t_max:.0f}C {p_max:.0f}W")
+        return " | ".join(parts)
 
 
 def _headline(label: str, color: str = CYAN) -> str:
@@ -621,8 +702,17 @@ class KrasisBenchmark:
         hcs_pct = 0.0
         safety_margin_mb = 0
 
+        telemetry_enabled = os.environ.get(
+            "KRASIS_BENCHMARK_GPU_TELEMETRY", ""
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        telemetry = _GpuTelemetrySampler() if telemetry_enabled else None
         for text, target_tokens in zip(prompt_texts, decode_lengths):
-            r = self._engine_request(text, max_new_tokens=target_tokens)
+            if telemetry is not None:
+                telemetry.start()
+            try:
+                r = self._engine_request(text, max_new_tokens=target_tokens)
+            finally:
+                gpu_telemetry = telemetry.stop() if telemetry is not None else ""
 
             generated = r["decode_tokens"]  # includes first_token from prefill
             tok_s = r["decode_tok_s"]
@@ -647,6 +737,7 @@ class KrasisBenchmark:
                     "target_tokens": target_tokens,
                     "actual_tokens": generated,
                     "failed": True,
+                    "gpu_telemetry": gpu_telemetry,
                 })
             else:
                 ms_per_tok = (1000.0 / tok_s) if tok_s > 0 else 0
@@ -656,6 +747,7 @@ class KrasisBenchmark:
                     "target_tokens": target_tokens,
                     "actual_tokens": generated,
                     "failed": False,
+                    "gpu_telemetry": gpu_telemetry,
                 })
 
         successful = [r for r in runs if not r["failed"]]
@@ -783,10 +875,11 @@ class KrasisBenchmark:
         lines.append("")
         lines.append(f"Decode (internal) — {decode_len_str} tokens, 3 separate prompts:")
         for run in decode_result["runs"]:
+            telem = f"  [{run['gpu_telemetry']}]" if run.get("gpu_telemetry") else ""
             if run["failed"]:
-                lines.append(f"  {run['target_tokens']:>3} tokens: FAILED (EOS at {run['actual_tokens']} tokens) -> -1 tok/s")
+                lines.append(f"  {run['target_tokens']:>3} tokens: FAILED (EOS at {run['actual_tokens']} tokens) -> -1 tok/s{telem}")
             else:
-                lines.append(f"  {run['target_tokens']:>3} tokens: {run['tok_s']:.2f} tok/s ({run['ms_per_tok']:.1f}ms/tok)")
+                lines.append(f"  {run['target_tokens']:>3} tokens: {run['tok_s']:.2f} tok/s ({run['ms_per_tok']:.1f}ms/tok){telem}")
         if decode_result["best_tok_s"] > 0:
             lines.append(f"  Best:    {decode_result['best_tok_s']:.2f} tok/s")
         else:
@@ -901,10 +994,11 @@ class KrasisBenchmark:
         print(_section(f"Decode (internal) — {decode_len_str} tokens, 3 separate prompts"))
         decode_result = self._benchmark_decode_engine(timed_decode_texts, self.DECODE_LENGTHS)
         for run in decode_result["runs"]:
+            telem = f"  {DIM}[{run['gpu_telemetry']}]{NC}" if run.get("gpu_telemetry") else ""
             if run["failed"]:
-                print(f"  {run['target_tokens']:>3} tokens: {YELLOW}FAILED (EOS at {run['actual_tokens']} tokens){NC}")
+                print(f"  {run['target_tokens']:>3} tokens: {YELLOW}FAILED (EOS at {run['actual_tokens']} tokens){NC}{telem}")
             else:
-                print(f"  {run['target_tokens']:>3} tokens: {run['tok_s']:.2f} tok/s ({run['ms_per_tok']:.1f}ms/tok)")
+                print(f"  {run['target_tokens']:>3} tokens: {run['tok_s']:.2f} tok/s ({run['ms_per_tok']:.1f}ms/tok){telem}")
         if decode_result["best_tok_s"] > 0:
             print(f"  {BOLD}Best: {decode_result['best_tok_s']:.2f} tok/s{NC}")
         else:

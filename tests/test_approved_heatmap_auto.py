@@ -241,6 +241,23 @@ class ApprovedHeatmapAutoTest(unittest.TestCase):
             self.assertEqual(Path(cached).read_bytes(), payload)
             self.assertIn(expected_sha[:16], Path(cached).name)
 
+    def test_marlin_digest_cache_is_bound_to_file_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "experts_marlin.bin"
+            path.write_bytes(b"exact-marlin-payload")
+            digest = server._sha256_file(str(path))
+
+            server._write_marlin_digest_cache(str(path), digest)
+
+            cache = json.loads(
+                Path(server._marlin_digest_cache_path(str(path))).read_text(encoding="utf-8")
+            )
+            stat = path.stat()
+            self.assertEqual(cache["format"], "krasis_marlin_sha256_cache")
+            self.assertEqual(cache["size"], stat.st_size)
+            self.assertEqual(cache["mtime_ns"], stat.st_mtime_ns)
+            self.assertEqual(cache["sha256"], digest)
+
     def test_auto_mode_falls_back_when_listed_artifact_cannot_download(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

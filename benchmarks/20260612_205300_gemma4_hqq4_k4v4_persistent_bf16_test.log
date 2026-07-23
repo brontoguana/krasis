@@ -1,0 +1,339 @@
+[0;36m[1m=>[0m Waiting for selected GPUs (0) to clear...
+[0;32m[1mOK[0m Selected GPUs (0) clear.
+[0;36m[1m=>[0m === Short Model Test ===
+[0;36m[1m=>[0m Config: tests/gemma-4-4-hqq4-k4v4-a16.conf
+[0;36m[1m=>[0m Port: 18018
+[0;36m[1m=>[0m Run dir: /home/main/Documents/Claude/krasis/logs/dev-test_20260612_204831
+[0;36m[1m=>[0m Step 1: Launching server with --benchmark...
+[0;36m[1m=>[0m Log: /home/main/Documents/Claude/krasis/logs/dev-test_20260612_204831/test_stdout.log
+[0;36m[1m=>[0m Import origin check:
+krasis: /home/main/Documents/Claude/krasis/python/krasis/__init__.py
+krasis.krasis: /home/main/Documents/Claude/krasis/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+Pre-scan: set CUDA_VISIBLE_DEVICES=0
+Loaded config from tests/gemma-4-4-hqq4-k4v4-a16.conf: {'model_path': '/home/main/.krasis/models/gemma-4-26b-a4b-it', 'selected_gpus': '0', 'num_gpus': 1, 'layer_group_size': 2, 'kv_dtype': 'k4v4', 'gpu_expert_bits': 4, 'cpu_expert_bits': 4, 'attention_quant': 'hqq4', 'hqq_group_size': 128, 'shared_expert_quant': 'int8', 'dense_mlp_quant': 'int8', 'lm_head_quant': 'int8', 'host': '0.0.0.0', 'port': 18018, 'enable_thinking': False}
+
+[1m[36m▸ Krasis — gemma-4-26b-a4b-it[0m
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 1[0m
+  [32mHCS host cache: source[0m
+  [32mSelected physical GPUs: 0 (config; CUDA_VISIBLE_DEVICES=0)[0m
+  [32mExperts: GPU INT4 g128 (amax)  |  Attention: hqq4  |  KV: k4v4[0m
+  [32mLayer groups: 2  |  KV cache: 1000 MB  |  Threads: 40[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+
+[1m[36m▸ Loading model weights[0m
+  [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=518 MB, free=31600 MB, total=32119 MB
+
+[1m[36m▸ Loading GPU weights[0m
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:0: alloc=2690 MB, reserved=2742 MB, used=3358 MB, free=28760 MB, total=32119 MB
+  [0;32mHQQ attention artifacts validated (990 MB cached), 28760 MB free[0m
+
+[1m[36m▸ Building GPU INT4 Marlin expert cache (one-time)[0m
+  [2mCache will be saved to /home/main/.krasis/cache/gemma-4-26b-a4b-it for instant loading next time.[0m
+  [1;33m▸ Building GPU INT4 Marlin cache: 30 layers from safetensors[0m
+    GPU Marlin: 5/30 layers (3s elapsed, ~16s remaining)
+    GPU Marlin: 10/30 layers (6s elapsed, ~12s remaining)
+    GPU Marlin: 15/30 layers (9s elapsed, ~9s remaining)
+    GPU Marlin: 20/30 layers (12s elapsed, ~6s remaining)
+    GPU Marlin: 25/30 layers (16s elapsed, ~3s remaining)
+    GPU Marlin: 30/30 layers (19s elapsed, ~0s remaining)
+  [0;32m✓ GPU INT4 Marlin cache built: 12.1 GB in 21s[0m
+    Marlin timing: initial_prefetch=0.0s routed io/quant=3.7s prefetch=0.0s repack=2.5s write=12.4s misc=0.0s; shared io/quant=0.0s repack=0.0s write=0.0s; flush=0.0s
+    Loading GPU Marlin cache: 30 layers...
+    GPU Marlin cache loaded: 12.1 GB in 7s
+  [0;32mExpert cache built in 38s — next launch will be much faster.[0m
+  [33m[VRAM after-phase2-expert-weights][0m cuda:0: alloc=2690 MB, reserved=2742 MB, used=3358 MB, free=28760 MB, total=32119 MB
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:0: alloc=2690 MB, reserved=2742 MB, used=3358 MB, free=28760 MB, total=32119 MB
+  [33m[VRAM after-kv-cache-init][0m cuda:0: alloc=3689 MB, reserved=3826 MB, used=4442 MB, free=27676 MB, total=32119 MB
+  [33m[VRAM after-full-load][0m cuda:0: alloc=3689 MB, reserved=3826 MB, used=4442 MB, free=27676 MB, total=32119 MB
+
+[1m[36m▸ CUDA runtime warmup[0m
+  [32mcuBLAS + Triton kernel compilation done[0m
+
+[1m[36m▸ Setting up GPU decode store[0m
+  [32mGPU decode store ready (addr=0x789282a0)[0m
+  [32mReleased redundant GPU execution source tensors (41 MB)[0m
+  [2mVRAM monitor started (tracking warmup)[0m
+  [2mcuda:0: 0 MB total[0m
+
+[1m[36m▸ Pre-allocating Rust prefill engine[0m
+[FLA] Loading kernels for H=0 from /home/main/Documents/Claude/krasis/python/krasis/libkrasis_fla_sm120.so
+  [32mPrefill engine scratch buffers allocated[0m
+
+[1m[36m▸ Warmup (Rust prefill engine)[0m
+  [32mRust prefill warmed with 300 tokens before HCS budgeting[0m
+  [32mWarmup complete in 0.5s[0m
+  [2mcuda:0 warmup:  peak 11,394 MB used / 32,119 MB total  (min free: 20,724 MB)[0m
+
+[1m[36m▸ VRAM calibration[0m
+  [32mSafety margin: 600 MB[0m
+  [32mFree VRAM after startup: 20,960 MB / 32,119 MB[0m
+  [32mShort calibration: probing 500 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 0.47s (67.9 tok/s)  VRAM: 20964 MB free now, 20964 MB min free during decode[0m
+  [32mShort calibration: baseline=20,960 MB, prefill post-alloc=20,712 MB, prefill min=20,392 MB, decode min=20,964 MB, post-cleanup=20,964 MB[0m
+  [32mAdaptive long calibration: default target=11,824 tokens, target low-water floor=1,200 MB, estimated prefill growth=0.4431 MB/token[0m
+  [32mAdaptive long calibration: next probe 11,824 tokens (model-estimated initial probe (projected 0.4431 MB/token, validation floor 2400 MB))[0m
+  [32mLong calibration: probing 11,824 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 3.88s (8.2 tok/s)  VRAM: 20962 MB free now, 20962 MB min free during decode[0m
+  [32mLong calibration: baseline=20,964 MB, prefill post-alloc=17,010 MB, prefill min=16,658 MB, decode min=20,962 MB, post-cleanup=20,962 MB[0m
+  [32mScratch reservation: max=16,421 MB (at 50,000 tokens)[0m
+
+[1m[36m▸ VRAM calibration complete[0m
+  [32mPost-calibration free VRAM: 20,962 MB[0m
+  [32mTransient deltas: short prefill=568 MB, long prefill=4,306 MB, short decode=0 MB, long decode=2 MB[0m
+  [32mGPU0 decode HCS budget: 20,362 MB[0m
+  [32mPrefill HCS budgets: short=19,794 MB, long=16,056 MB[0m
+  [32mWorst-case prefill scratch reservation: 16,421 MB at 50,000 tokens[0m
+
+[1m[36m▸ Calculating HCS budget[0m
+
+[1m[36m▸ Building expert heatmap (decode-weighted calibration)[0m
+  [32mHeatmap: 25 experts ranked from 25 entries[0m
+  [2mVRAM calibration: baseline 20962 MB | prefill 338.0 KB/tok, decode 0.2 KB/tok | HCS allowance prefill: short 19794 MB, long 16056 MB | decode: short 20362 MB, long 20360 MB | idle floors prefill=1168 MB decode=600 MB | decode-resident HCS budget=20362 MB[0m
+  [2mGPU0 HCS: 3840 experts (25 ranked + 3815 unranked), reclaimable: 20,362 MB[0m
+
+[1m[36m▸ Loading GPU0 HCS pool (fully reclaimable)[0m
+
+[1m[36m▸ HCS pool loaded[0m
+  [32mHCS pool: 0/3840 experts loaded in 0.00s (0.0% coverage), 0.0 MB VRAM, 0 free slots, gpu_route_sync=false, mapped_reads=false | soft: 3840 experts in 0.56s (11570.6 MB, host_mode=source) | total: 3840/3840 (100.0%) coverage[0m
+  [2mLoaded in 0.6s[0m
+
+[1m[36m▸ Decode validation[0m
+  [32mSkipped: Rust prefill already warmed before HCS budgeting[0m
+
+[1m[36m▸ VRAM monitor: runtime warnings enabled[0m
+  [32mSafety margin: 600 MB — warnings on every new low below this[0m
+
+[1m[32mKRASIS SERVER READY[0m
+  [32mModel:[0m    [1mgemma-4-26b-a4b-it[0m
+  [32mAddress:[0m  [1m0.0.0.0:18018[0m
+  [32mContext:[0m  14,880 tokens  |  KV cache: 1,000 MB
+  [32mDecode:[0m   GPU  |  HCS: on  |  Think: off
+  [32mClient setup:[0m
+    Base URL:      [1mhttp://127.0.0.1:18018/v1[0m
+    Chat endpoint: http://127.0.0.1:18018/v1/chat/completions
+    Models:        http://127.0.0.1:18018/v1/models
+    API key:       [1mX[0m [2m(any value)[0m
+    Model name:    [1mgemma-4-26b-a4b-it[0m
+  [2mPress Q or Ctrl-C to stop[0m
+
+
+[1m[36mKRASIS BENCHMARK[0m
+
+[1m[36m▸ Collecting system info[0m
+  Model:    [1mgemma-4-26b-a4b-it[0m
+  GPUs:     1x NVIDIA GeForce RTX 5090
+  Strategy: gpu_decode (layer_grouped(2))
+
+[1m[36m▸ Loading benchmark prompts (warmup + timed at 1K/5K/10K/20K/35K/50K)[0m
+  Warmup prefill:  3 prompts, ~14,780 tokens each
+  Timed prefill:   6 prompts at 1K/5K/10K/20K/35K/50K tokens
+    [1] 1,000 tokens
+    [2] 4,999 tokens
+    [3] 10,000 tokens
+    [4] 14,780 tokens
+    [5] 14,780 tokens
+    [6] 14,779 tokens
+  Decode:          6 prompts (50/100/250 tokens, warmup + timed)
+
+[1m[36m▸ Warmup (3 prefill + 3 decode via engine)[0m
+  Warmup: 2 short engine requests...
+  [32mdecode: 7 tokens in 0.12s (58.7 tok/s)  VRAM: 9336 MB free now, 9336 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=480/240 protected=3360 promotions=0 evictions=0 request_promotions=0/480 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [32mdecode: 7 tokens in 0.10s (68.5 tok/s)  VRAM: 9332 MB free now, 9332 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=480/240 protected=3360 promotions=0 evictions=0 request_promotions=0/480 budget_skips=0 no_slot=0 copy_failures=0[0m
+  Warmup complete.
+  Prefill warmup (3 runs, ~25K tokens each)...
+    [1/3] 14,780 tokens
+    [2/3] 14,780 tokens
+    [3/3] 14,779 tokens
+  Decode warmup (50/100/250 tokens, 3 separate prompts)...
+  [32mdecode: 49 tokens in 0.75s (65.1 tok/s)  VRAM: 9334 MB free now, 9334 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=480/240 protected=3360 promotions=0 evictions=0 request_promotions=0/480 budget_skips=0 no_slot=0 copy_failures=0[0m
+    50 tokens done
+  [32mdecode: 99 tokens in 1.56s (63.5 tok/s)  VRAM: 9332 MB free now, 9332 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=480/240 protected=3360 promotions=0 evictions=0 request_promotions=0/480 budget_skips=0 no_slot=0 copy_failures=0[0m
+    100 tokens done
+  [32mdecode: 249 tokens in 4.07s (61.2 tok/s)  VRAM: 9338 MB free now, 9338 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=480/240 protected=3360 promotions=0 evictions=0 request_promotions=0/480 budget_skips=0 no_slot=0 copy_failures=0[0m
+    250 tokens done
+  Warmup complete (75.1s). All kernels compiled.
+
+[1m[36m▸ Prefill (internal) — 1K/5K/10K/20K/35K/50K tokens, 6 runs[0m
+  Run 1: 1,675.9 tok/s (1,000 tokens in 596.7ms)
+  Run 2: 1,707.7 tok/s (4,999 tokens in 2927.3ms)
+  Run 3: 1,028.1 tok/s (10,000 tokens in 9727.0ms)
+  Run 4: 679.6 tok/s (14,780 tokens in 21748.7ms)
+  Run 5: 674.4 tok/s (14,780 tokens in 21914.5ms)
+  Run 6: 672.5 tok/s (14,779 tokens in 21977.2ms)
+  [1mBest: 1,707.7 tok/s (4,999 tokens)[0m
+
+[1m[36m▸ Decode (internal) — 50/100/250 tokens, 3 separate prompts[0m
+  [32mdecode: 49 tokens in 0.75s (65.5 tok/s)  VRAM: 9330 MB free now, 9330 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=480/240 protected=3360 promotions=0 evictions=0 request_promotions=0/480 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [32mdecode: 99 tokens in 1.55s (63.9 tok/s)  VRAM: 9334 MB free now, 9334 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=480/240 protected=3360 promotions=0 evictions=0 request_promotions=0/480 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [32mdecode: 249 tokens in 4.06s (61.3 tok/s)  VRAM: 9334 MB free now, 9334 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=480/240 protected=3360 promotions=0 evictions=0 request_promotions=0/480 budget_skips=0 no_slot=0 copy_failures=0[0m
+   50 tokens: 65.50 tok/s (15.3ms/tok)
+  100 tokens: 63.88 tok/s (15.7ms/tok)
+  250 tokens: 61.32 tok/s (16.3ms/tok)
+  [1mBest: 65.50 tok/s[0m
+  HCS:  3840/3840 experts loaded (100.0%)
+  VRAM: 9330 MB min free during decode (safety margin: 600 MB)
+
+[1m[36m▸ Round trip (network) — 50/100/250 tokens via HTTP[0m
+  [32mprefill: 15 tokens in 0.48s (31.2 tok/s)  VRAM: 9330 MB free now, 4256 MB min free during prefill[0m
+  [32mdecode: 7 tokens in 0.10s (68.3 tok/s)  VRAM: 9330 MB free now, 9330 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=480/240 protected=3360 promotions=0 evictions=0 request_promotions=0/480 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [32mprefill: 64 tokens in 0.26s (245.2 tok/s)  VRAM: 9334 MB free now, 9176 MB min free during prefill[0m
+  [32mdecode: 49 tokens in 0.75s (65.5 tok/s)  VRAM: 9334 MB free now, 9334 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=480/240 protected=3360 promotions=0 evictions=0 request_promotions=0/480 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [32mprefill: 70 tokens in 0.26s (268.2 tok/s)  VRAM: 9332 MB free now, 9178 MB min free during prefill[0m
+  [32mdecode: 99 tokens in 1.56s (63.5 tok/s)  VRAM: 9332 MB free now, 9332 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=480/240 protected=3360 promotions=0 evictions=0 request_promotions=0/480 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [32mprefill: 63 tokens in 0.40s (158.7 tok/s)  VRAM: 9336 MB free now, 9176 MB min free during prefill[0m
+  [32mdecode: 249 tokens in 4.04s (61.6 tok/s)  VRAM: 9336 MB free now, 9336 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=480/240 protected=3360 promotions=0 evictions=0 request_promotions=0/480 budget_skips=0 no_slot=0 copy_failures=0[0m
+   50 tokens: 117.70 tok/s (1.11s total)
+  100 tokens: 81.00 tok/s (1.92s total)
+  250 tokens: 67.08 tok/s (4.54s total)
+  [1mBest: 117.70 tok/s[0m
+
+[1m[36m▸ Writing results[0m
+
+[1m[32mBENCHMARK COMPLETE[0m
+  Model:                 [1mgemma-4-26b-a4b-it[0m
+  Config:                INT4/4 HQQ4 KV=k4v4 1 GPU
+  Prefill (internal):    [32m[1m1,707.7 tok/s[0m  (best of 1K/5K/10K/20K/35K/50K)
+  Decode (internal):     [32m[1m65.50 tok/s[0m  (best of 50/100/250)
+  Round trip (network):  [32m[1m117.70 tok/s[0m  (best of 50/100/250)
+  HCS coverage:          3840/3840 (100.0%)
+  Min free VRAM:         9330 MB
+  Log:     [2mlogs/dev-test_20260612_204831/benchmark_report.log[0m
+
+
+[1m[32mSERVER READY: 0.0.0.0:18018[0m
+  [2mPress Q or Ctrl-C to stop[0m
+[0;32m[1mOK[0m Server is ready. Benchmark results are in the log.
+[0;36m[1m=>[0m Step 2: Running network multi-prompt tests...
+Checking server health at http://localhost:18018... [0;32mOK[0m
+Sending warmup request...  [32mprefill: 16 tokens in 0.70s (23.0 tok/s)  VRAM: 9332 MB free now, 3956 MB min free during prefill[0m
+  [32mdecode: 7 tokens in 0.11s (65.4 tok/s)  VRAM: 9332 MB free now, 9332 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=480/240 protected=3360 promotions=0 evictions=0 request_promotions=0/480 budget_skips=0 no_slot=0 copy_failures=0[0m
+ done (0.9s)
+  [2m>>> Hello! How can I help you?[0m
+
+[1m[0;36mTest 4: Network Multi-Prompt Validation[0m
+============================================================
+  [32mprefill: 25 tokens in 0.59s (42.5 tok/s)  VRAM: 9334 MB free now, 2226 MB min free during prefill[0m
+  [32mdecode: 1 tokens in 0.02s (64.0 tok/s)  VRAM: 9334 MB free now, 9334 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=480/240 protected=3360 promotions=0 evictions=0 request_promotions=0/480 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [0;32mPASS[0m OK (0.7s) [factual_qa]
+  [32mprefill: 27 tokens in 0.58s (46.2 tok/s)  VRAM: 9334 MB free now, 2154 MB min free during prefill[0m
+  [32mdecode: 2 tokens in 0.03s (66.4 tok/s)  VRAM: 9334 MB free now, 9334 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=480/240 protected=3360 promotions=0 evictions=0 request_promotions=0/480 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [0;32mPASS[0m OK (0.7s) [math_simple]
+  [32mprefill: 33 tokens in 0.60s (54.8 tok/s)  VRAM: 9332 MB free now, 1864 MB min free during prefill[0m
+  [32mdecode: 511 tokens in 8.99s (56.8 tok/s)  VRAM: 9332 MB free now, 9332 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=480/240 protected=3360 promotions=0 evictions=0 request_promotions=0/480 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [0;32mPASS[0m OK (9.7s) [code_gen]
+  [32mprefill: 41 tokens in 0.98s (41.9 tok/s)  VRAM: 9334 MB free now, 1970 MB min free during prefill[0m
+  [32mdecode: 5 tokens in 0.08s (65.3 tok/s)  VRAM: 9334 MB free now, 9334 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=480/240 protected=3360 promotions=0 evictions=0 request_promotions=0/480 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [0;32mPASS[0m OK (1.2s, 4 words) [multi_turn]
+  [32mprefill: 14 tokens in 0.46s (30.3 tok/s)  VRAM: 9330 MB free now, 4622 MB min free during prefill[0m
+  [32mdecode: 9 tokens in 0.14s (63.3 tok/s)  VRAM: 9330 MB free now, 9330 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=480/240 protected=3360 promotions=0 evictions=0 request_promotions=0/480 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [0;32mPASS[0m OK (0.7s, 7 words) [short_prompt]
+  [32mprefill: 25 tokens in 0.58s (43.2 tok/s)  VRAM: 9330 MB free now, 2282 MB min free during prefill[0m
+  [32mdecode: 1 tokens in 0.02s (65.3 tok/s)  VRAM: 9330 MB free now, 9330 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=480/240 protected=3360 promotions=0 evictions=0 request_promotions=0/480 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [0;32mPASS[0m OK (0.7s) [streaming_factual]
+  [32mprefill: 22 tokens in 0.57s (38.8 tok/s)  VRAM: 9330 MB free now, 2512 MB min free during prefill[0m
+  [32mdecode: 27 tokens in 0.42s (64.7 tok/s)  VRAM: 9330 MB free now, 9330 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=480/240 protected=3360 promotions=0 evictions=0 request_promotions=0/480 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [0;32mPASS[0m OK (1.1s) [streaming_code]
+  [32mprefill: 45 tokens in 0.61s (73.6 tok/s)  VRAM: 9332 MB free now, 1754 MB min free during prefill[0m
+  [32mdecode: 13 tokens in 0.20s (65.9 tok/s)  VRAM: 9332 MB free now, 9332 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=480/240 protected=3360 promotions=0 evictions=0 request_promotions=0/480 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [0;32mPASS[0m OK (0.9s) [json_output]
+  [32mprefill: 29 tokens in 0.60s (48.2 tok/s)  VRAM: 9334 MB free now, 2048 MB min free during prefill[0m
+  [32mdecode: 2 tokens in 0.03s (65.9 tok/s)  VRAM: 9334 MB free now, 9334 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=480/240 protected=3360 promotions=0 evictions=0 request_promotions=0/480 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [0;32mPASS[0m OK (0.7s) [blocking_math]
+
+[1m[0;36mTest 6: Multi-Turn Sequential Conversation[0m
+============================================================
+  Turn 1: establishing facts...  [32mprefill: 63 tokens in 0.27s (236.6 tok/s)  VRAM: 9334 MB free now, 9176 MB min free during prefill[0m
+  [32mdecode: 43 tokens in 0.68s (62.9 tok/s)  VRAM: 9334 MB free now, 9334 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=480/240 protected=3360 promotions=0 evictions=0 request_promotions=0/480 budget_skips=0 no_slot=0 copy_failures=0[0m
+ [0;32mPASS[0m OK (1.1s)
+  Turn 2: recalling dog's name...  [32mprefill: 124 tokens in 0.26s (479.3 tok/s)  VRAM: 9334 MB free now, 9178 MB min free during prefill[0m
+  [32mdecode: 9 tokens in 0.14s (63.2 tok/s)  VRAM: 9334 MB free now, 9334 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=480/240 protected=3360 promotions=0 evictions=0 request_promotions=0/480 budget_skips=0 no_slot=0 copy_failures=0[0m
+ [0;32mPASS[0m OK (0.5s)
+  Turn 3: recalling city...  [32mprefill: 148 tokens in 0.25s (601.3 tok/s)  VRAM: 9332 MB free now, 9164 MB min free during prefill[0m
+  [32mdecode: 11 tokens in 0.18s (59.9 tok/s)  VRAM: 9332 MB free now, 9332 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=480/240 protected=3360 promotions=0 evictions=0 request_promotions=0/480 budget_skips=0 no_slot=0 copy_failures=0[0m
+ [0;32mPASS[0m OK (0.5s)
+  Turn 4: recalling number (streaming)...  [32mprefill: 175 tokens in 0.33s (536.8 tok/s)  VRAM: 9328 MB free now, 9164 MB min free during prefill[0m
+  [32mdecode: 8 tokens in 0.13s (59.7 tok/s)  VRAM: 9328 MB free now, 9328 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=480/240 protected=3360 promotions=0 evictions=0 request_promotions=0/480 budget_skips=0 no_slot=0 copy_failures=0[0m
+ [0;32mPASS[0m OK (0.6s)
+  Turn 5: recalling all three facts...  [32mprefill: 219 tokens in 0.26s (833.3 tok/s)  VRAM: 9332 MB free now, 9152 MB min free during prefill[0m
+  [32mdecode: 44 tokens in 0.77s (57.4 tok/s)  VRAM: 9332 MB free now, 9332 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=480/240 protected=3360 promotions=0 evictions=0 request_promotions=0/480 budget_skips=0 no_slot=0 copy_failures=0[0m
+ [0;32mPASS[0m OK (1.1s)
+
+============================================================
+[1mSUMMARY[0m: 14/14 passed, 0 failed, 21.1s total
+
+[1mResponse texts (review for coherence):[0m
+
+  [[0;32mPASS[0m] factual_qa: OK (0.7s)
+  [2m>>> Paris[0m
+
+  [[0;32mPASS[0m] math_simple: OK (0.7s)
+  [2m>>> 56[0m
+
+  [[0;32mPASS[0m] code_gen: OK (9.7s)
+  [2m>>> ```python\ndef fibonacci(n):\n    if n == 0:\n    return 0\n    if n == 1:\n    return 1\n    return n\n    return n - 1\n    return n - 1\n    return n - 1\n    return n - 1\n    return n - 1\n    return n - 1\n    return n - 1\n    return n - 1\n    return n - 1\n    return n - 1\n    return n - 1\n    return n - 1\n    return n - 1\n    return n - 1\n    return n - 1\n    return n - 1\n    return n - 1\n    return n - 1\n    return n - 1\n    return n - 1\n    return n - 1\n    return n - 1\n    return n - 1\n    return n[0m
+
+  [[0;32mPASS[0m] multi_turn: OK (1.2s, 4 words)
+  [2m>>> Your name is Alice.[0m
+
+  [[0;32mPASS[0m] short_prompt: OK (0.7s, 7 words)
+  [2m>>> Hello! How can I help you today?[0m
+
+  [[0;32mPASS[0m] streaming_factual: OK (0.7s)
+  [2m>>> Tokyo[0m
+
+  [[0;32mPASS[0m] streaming_code: OK (1.1s)
+  [2m>>> Here is the one-liner for a "Hello World" in Python:\n\n```python\nprint("Hello, World!")\n```[0m
+
+  [[0;32mPASS[0m] json_output: OK (0.9s)
+  [2m>>> {"name": "Bob", "age": 30}[0m
+
+  [[0;32mPASS[0m] blocking_math: OK (0.7s)
+  [2m>>> 42[0m
+
+  [[0;32mPASS[0m] multi_turn_t1: OK (1.1s)
+  [2m>>> I have noted these three facts:\n\n1. Your dog's name is **Biscuit**.\n2. You live in **Wellington, New Zealand**.\n3. Your favorite number is **42**.[0m
+
+  [[0;32mPASS[0m] multi_turn_t2_dog: OK (0.5s)
+  [2m>>> Your dog's name is **Biscuit**.[0m
+
+  [[0;32mPASS[0m] multi_turn_t3_city: OK (0.5s)
+  [2m>>> You are located in **Wellington, New Zealand**.[0m
+
+  [[0;32mPASS[0m] multi_turn_t4_number: OK (0.6s)
+  [2m>>> Your favorite number is 42.[0m
+
+  [[0;32mPASS[0m] multi_turn_t5_all: OK (1.1s)
+  [2m>>> Here are the three facts you provided:\n\n1. Your dog's name is **Biscuit**.\n2. Your location is **Wellington, New Zealand**.\n3. Your favorite number is **42**.[0m
+
+[0;32m[1mALL TESTS PASSED[0m
+[0;36m[1m=>[0m Stopping server...
+
+[0;32m[1mOK[0m === All tests PASSED ===
+[0;36m[1m=>[0m Full log: /home/main/Documents/Claude/krasis/logs/dev-test_20260612_204831/test_stdout.log

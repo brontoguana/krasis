@@ -1,0 +1,47 @@
+================================================================
+Krasis Benchmark — 2026-07-21 08:42:03
+================================================================
+Model:            Step-3.7-Flash
+Architecture:     step3p5, 45 layers, 288 experts, top-8, 45 GQA + 0 linear
+PP Partition:     [45] (1 GPUs)
+
+Hardware:
+  CPU:            AMD EPYC 7742 64-Core Processor (64 cores)
+  RAM:            1007 GB total, 103.5 GB used by process
+  GPU 0:           NVIDIA GeForce RTX 5090 (32607 MB), 5003 MB allocated
+
+Quantization:
+  GPU experts:    INT4 (Marlin)
+  CPU experts:    INT4
+  Attention:      HQQ4
+  Shared expert:  INT8
+  Dense MLP:      INT8
+  LM head:        INT8
+  KV cache:       k4v4
+
+Strategy:
+  Layer group size: 2 (layer_grouped(2))
+  Prefill threshold: 1
+  Mode:           gpu_decode (layer_grouped(2))
+
+Prefill (internal) — 4 runs at different lengths:
+  Run 1:  265.6 tok/s (1,000 tokens in 3765.6ms)
+  Run 2:  1,173.0 tok/s (5,000 tokens in 4262.6ms)
+  Run 3:  2,074.3 tok/s (10,000 tokens in 4821.0ms)
+  Run 4:  2,623.8 tok/s (14,473 tokens in 5516.0ms)
+  Best:   2,623.8 tok/s (14,473 tokens)
+
+Decode (internal) — 50/100/250 tokens, 3 separate prompts:
+   50 tokens: 20.50 tok/s (48.8ms/tok)
+  100 tokens: 22.12 tok/s (45.2ms/tok)
+  250 tokens: 20.58 tok/s (48.6ms/tok)
+  Best:    22.12 tok/s
+  HCS:     2784/12096 experts (23.0%)
+  Min free VRAM: 884 MB
+
+Round trip (network) — 50/100/250 tokens via HTTP:
+   50 tokens: 36.30 tok/s (6.37s total)
+  100 tokens: 29.31 tok/s (8.27s total)
+  250 tokens: 22.86 tok/s (15.85s total)
+  Best:    36.30 tok/s
+================================================================

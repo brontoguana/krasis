@@ -1609,6 +1609,16 @@ witness_model_paths() {
             echo "$SCRIPT_DIR/../krasis-internal/reference-outputs/output/Qwen3-235B-A22B/greedy_reference.json"
             echo "$HOME/.krasis/witness-gguf/Qwen3-235B-A22B-bf16.gguf"
             ;;
+        nemotron-nano|nemotronnano|nano|nvidia-nemotron-3-nano-30b-a3b-bf16)
+            echo "$HOME/.krasis/models/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
+            echo "$SCRIPT_DIR/../krasis-internal/reference-outputs/input-sources/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/nemotron_nano_witness_input_tokens.json"
+            echo "$HOME/.krasis/witness-gguf/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16-bf16.gguf"
+            ;;
+        nemotron-super|nemotronsuper|super|nvidia-nemotron-3-super-120b-a12b-bf16)
+            echo "$HOME/.krasis/models/NVIDIA-Nemotron-3-Super-120B-A12B-BF16"
+            echo "$SCRIPT_DIR/../krasis-internal/reference-outputs/input-sources/NVIDIA-Nemotron-3-Super-120B-A12B-BF16/nemotron_super_witness_input_tokens.json"
+            echo "$HOME/.krasis/witness-gguf/NVIDIA-Nemotron-3-Super-120B-A12B-BF16-bf16.gguf"
+            ;;
         step37|step3.7|step3p7|step-3.7-flash|step-3.7-flash-bf16)
             echo "$HOME/.krasis/models/Step-3.7-Flash"
             echo "$SCRIPT_DIR/../krasis-internal/reference-outputs/input-sources/Step-3.7-Flash/step37_witness_thinking_off_input_tokens.json"
@@ -1616,7 +1626,7 @@ witness_model_paths() {
             ;;
         *)
             err "Unknown witness model: $model
-  Available: qcn, qwen35, qwen36, q122b, q235, step37"
+  Available: qcn, qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37"
             ;;
     esac
 }
@@ -1636,7 +1646,7 @@ do_witness_model_check() {
     if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
         echo "Usage: ./dev witness-model-check <model> [--hash]"
         echo "  Checks local readiness for BF16 llama-witness capture."
-        echo "  Models: qcn, qwen35, qwen36, q122b, q235, step37"
+        echo "  Models: qcn, qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37"
         echo "  --hash computes the GGUF SHA-256 when the expected BF16 file exists."
         return 0
     fi
@@ -1653,7 +1663,7 @@ do_witness_model_check() {
             --help|-h)
                 echo "Usage: ./dev witness-model-check <model> [--hash]"
                 echo "  Checks local readiness for BF16 llama-witness capture."
-                echo "  Models: qcn, qwen35, qwen36, q122b, q235, step37"
+                echo "  Models: qcn, qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37"
                 return 0
                 ;;
             *)
@@ -2044,7 +2054,7 @@ do_witness_gguf_preflight() {
         echo "Usage: ./dev witness-gguf-preflight <model> [--output PATH] [--outtype bf16]"
         echo "  Preflights BF16 GGUF witness conversion without starting conversion."
         echo "  Records source files, expected output, resource estimates, converter command, and support gates."
-        echo "  Models: qwen35, qwen36, q122b, q235, step37"
+        echo "  Models: qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37"
         return 0
     fi
     [[ $# -lt 1 ]] && err "Usage: ./dev witness-gguf-preflight <model> [--output PATH] [--outtype bf16]"
@@ -2067,7 +2077,7 @@ do_witness_gguf_preflight() {
             --help|-h)
                 echo "Usage: ./dev witness-gguf-preflight <model> [--output PATH] [--outtype bf16]"
                 echo "  Preflights BF16 GGUF witness conversion without starting conversion."
-                echo "  Models: qwen35, qwen36, q122b, q235, step37"
+                echo "  Models: qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37"
                 return 0
                 ;;
             *)
@@ -2126,6 +2136,11 @@ do_witness_gguf_preflight() {
             expected_model_type="qwen3_moe"
             expected_text_model_type=""
             ;;
+        nemotron-nano|nemotronnano|nano|nvidia-nemotron-3-nano-30b-a3b-bf16|nemotron-super|nemotronsuper|super|nvidia-nemotron-3-super-120b-a12b-bf16)
+            expected_arch="NemotronHForCausalLM"
+            expected_model_type="nemotron_h"
+            expected_text_model_type=""
+            ;;
         *)
             expected_arch="Qwen3_5MoeForConditionalGeneration"
             expected_model_type="qwen3_5_moe"
@@ -2176,6 +2191,26 @@ do_witness_gguf_preflight() {
             if rg -q 'LLM_ARCH_QWEN3MOE' "$WITNESS_REPO/src/llama-arch.h" \
                 && rg -q 'llm_build_qwen3moe' "$WITNESS_REPO/src/llama-model.cpp" \
                 && [[ -f "$WITNESS_REPO/src/models/qwen3moe.cpp" ]]; then
+                runtime_supported=true
+            else
+                status=1
+            fi
+            ;;
+        nemotron-nano|nemotronnano|nano|nvidia-nemotron-3-nano-30b-a3b-bf16|nemotron-super|nemotronsuper|super|nvidia-nemotron-3-super-120b-a12b-bf16)
+            if rg -q 'NemotronHForCausalLM' "$converter" \
+                && rg -q 'MODEL_ARCH.NEMOTRON_H_MOE' "$converter"; then
+                converter_supported=true
+            else
+                status=1
+            fi
+            if rg -q 'NEMOTRON_H_MOE' "$WITNESS_REPO/gguf-py/gguf/constants.py"; then
+                gguf_supported=true
+            else
+                status=1
+            fi
+            if rg -q 'LLM_ARCH_NEMOTRON_H_MOE' "$WITNESS_REPO/src/llama-arch.h" \
+                && rg -q 'llm_build_nemotron_h' "$WITNESS_REPO/src/llama-model.cpp" \
+                && [[ -f "$WITNESS_REPO/src/models/nemotron-h.cpp" ]]; then
                 runtime_supported=true
             else
                 status=1
@@ -2344,7 +2379,7 @@ do_witness_gguf_convert() {
         echo "  Converts a local safetensors model to BF16 GGUF only after the built preflight gate passes."
         echo "  Writes logs and conversion manifest under logs/witness-gguf-convert_*."
         echo "  Refuses to overwrite an existing expected output unless --force is supplied."
-        echo "  Models: qwen35, qwen36, q122b, q235, step37"
+        echo "  Models: qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37"
         return 0
     fi
     [[ $# -lt 1 ]] && err "Usage: ./dev witness-gguf-convert <model> [--output PATH] [--outtype bf16] [--force]"
@@ -2372,7 +2407,7 @@ do_witness_gguf_convert() {
             --help|-h)
                 echo "Usage: ./dev witness-gguf-convert <model> [--output PATH] [--outtype bf16] [--force]"
                 echo "  Converts a local safetensors model to BF16 GGUF only after the built preflight gate passes."
-                echo "  Models: qwen35, qwen36, q122b, q235, step37"
+                echo "  Models: qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37"
                 return 0
                 ;;
             *)
@@ -2504,7 +2539,7 @@ do_witness_capture() {
     if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
         echo "Usage: ./dev witness-capture <model> [--output PATH] [--reference PATH] [--profile ID] [--max-cases N] [validator args...]"
         echo "  Captures llama-witness JSON from stored input_token_ids only."
-        echo "  Models: qcn, qwen35, qwen36, q122b, q235, step37"
+        echo "  Models: qcn, qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37"
         return 0
     fi
     [[ $# -lt 1 ]] && err "Usage: ./dev witness-capture <model> [--output PATH] [--reference PATH] [--profile ID] [--max-cases N] [validator args...]
@@ -2521,7 +2556,7 @@ do_witness_capture() {
             --help|-h)
                 echo "Usage: ./dev witness-capture <model> [--output PATH] [--reference PATH] [--profile ID] [--max-cases N] [validator args...]"
                 echo "  Captures llama-witness JSON from stored input_token_ids only."
-                echo "  Models: qcn, qwen35, qwen36, q122b, q235, step37"
+                echo "  Models: qcn, qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37"
                 return 0
                 ;;
             --reference)
@@ -2591,7 +2626,7 @@ do_witness_inputs() {
         echo "Usage: ./dev witness-inputs <model> --prompt-source PATH --output PATH [--profile ID] [validator args...]"
         echo "  Tokenizes fixed prompt-source JSON into a stored llama-witness input_token_ids artifact."
         echo "  Qwen3.5 models require proven chat-template enable_thinking=false application."
-        echo "  Models: qcn, qwen35, qwen36, q122b, q235, step37"
+        echo "  Models: qcn, qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37"
         return 0
     fi
     [[ $# -lt 1 ]] && err "Usage: ./dev witness-inputs <model> --prompt-source PATH --output PATH [--profile ID] [validator args...]"
@@ -2607,7 +2642,7 @@ do_witness_inputs() {
                 echo "Usage: ./dev witness-inputs <model> --prompt-source PATH --output PATH [--profile ID] [validator args...]"
                 echo "  Tokenizes fixed prompt-source JSON into a stored llama-witness input_token_ids artifact."
                 echo "  Qwen3.5 models require proven chat-template enable_thinking=false application."
-                echo "  Models: qcn, qwen35, qwen36, q122b, q235, step37"
+                echo "  Models: qcn, qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37"
                 return 0
                 ;;
             --prompt-source)

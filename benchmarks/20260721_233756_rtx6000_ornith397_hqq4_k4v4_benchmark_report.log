@@ -1,0 +1,49 @@
+================================================================
+Krasis Benchmark — 2026-07-21 23:48:46
+================================================================
+Model:            Ornith-1.0-397B
+Architecture:     qwen3_5_moe_text, 60 layers, 512 experts, top-10, 15 GQA + 45 linear
+PP Partition:     [60] (1 GPUs)
+
+Hardware:
+  CPU:            AMD EPYC 7742 64-Core Processor (64 cores)
+  RAM:            995 GB total, 201.8 GB used by process
+  GPU 0 (physical 1): NVIDIA RTX PRO 6000 Blackwell Workstation Edition (97887 MB), 6592 MB allocated
+
+Quantization:
+  GPU experts:    INT4 (Marlin)
+  CPU experts:    INT4
+  Attention:      HQQ4
+  Shared expert:  INT8
+  Dense MLP:      INT8
+  LM head:        INT8
+  KV cache:       k4v4
+
+Strategy:
+  Layer group size: 2 (layer_grouped(2))
+  Prefill threshold: 1
+  Mode:           gpu_decode (layer_grouped(2))
+
+Prefill (internal) — 6 runs at different lengths:
+  Run 1:  190.6 tok/s (1,000 tokens in 5245.3ms)
+  Run 2:  794.7 tok/s (5,000 tokens in 6291.7ms)
+  Run 3:  1,346.3 tok/s (10,000 tokens in 7427.5ms)
+  Run 4:  1,889.2 tok/s (20,000 tokens in 10586.5ms)
+  Run 5:  2,284.9 tok/s (35,000 tokens in 15318.3ms)
+  Run 6:  2,354.5 tok/s (39,920 tokens in 16954.9ms)
+  Best:   2,354.5 tok/s (39,920 tokens)
+
+Decode (internal) — 50/100/250 tokens, 3 separate prompts:
+   50 tokens: 23.58 tok/s (42.4ms/tok)
+  100 tokens: 21.85 tok/s (45.8ms/tok)
+  250 tokens: 20.40 tok/s (49.0ms/tok)
+  Best:    23.58 tok/s
+  HCS:     13161/30720 experts (42.8%)
+  Min free VRAM: 1346 MB
+
+Round trip (network) — 50/100/250 tokens via HTTP:
+   50 tokens: 41.73 tok/s (7.65s total)
+  100 tokens: 27.55 tok/s (10.17s total)
+  250 tokens: 22.02 tok/s (18.01s total)
+  Best:    41.73 tok/s
+================================================================

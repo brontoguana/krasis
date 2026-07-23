@@ -1,0 +1,46 @@
+== Zephyrus connectivity-only diagnosis ==
+Sat Jun 13 09:35:22 UTC 2026
+Target source: /home/main/Documents/BOX_3070.txt
+Target: main@192.168.1.228
+
+== Local hostname ==
+Loom
+
+== Local addresses ==
+lo               UNKNOWN        127.0.0.1/8 ::1/128 
+enp65s0          UP             192.168.1.181/24 fd2e:ee1:1229:616:de33:897b:7f86:2b6c/64 fd2e:ee1:1229:616:6eef:adb6:756e:d110/64 fd2e:ee1:1229:616:8206:67db:262b:de62/64 fd2e:ee1:1229:616:c110:8e43:6b19:840/64 fd2e:ee1:1229:616:30b9:96b7:d72c:c626/64 fe80::c16c:98dc:e6ae:2d4e/64 
+enp194s0         DOWN           
+
+== Route table ==
+default via 192.168.1.1 dev enp65s0 proto dhcp src 192.168.1.181 metric 100 
+192.168.1.0/24 dev enp65s0 proto kernel scope link src 192.168.1.181 metric 100 
+
+== Route to 192.168.1.228 ==
+192.168.1.228 dev enp65s0 src 192.168.1.181 uid 1000 
+    cache 
+exit=0
+
+== Ping 192.168.1.228 ==
+PING 192.168.1.228 (192.168.1.228) 56(84) bytes of data.
+From 192.168.1.181 icmp_seq=1 Destination Host Unreachable
+From 192.168.1.181 icmp_seq=2 Destination Host Unreachable
+From 192.168.1.181 icmp_seq=3 Destination Host Unreachable
+
+--- 192.168.1.228 ping statistics ---
+3 packets transmitted, 0 received, +3 errors, 100% packet loss, time 2079ms
+pipe 3
+exit=1
+
+== Neighbour entry for 192.168.1.228 ==
+192.168.1.228 dev enp65s0 FAILED 
+exit=0
+
+== ARP table entry for 192.168.1.228 ==
+Address                  HWtype  HWaddress           Flags Mask            Iface
+192.168.1.228                    (incomplete)                              enp65s0
+exit=0
+
+== SSH preflight ==
+Command: ssh -o BatchMode=yes -o ConnectTimeout=8 main@192.168.1.228 'hostname'
+ssh: connect to host 192.168.1.228 port 22: No route to host
+exit=255

@@ -2681,7 +2681,10 @@ class Launcher:
             if len(cvd_parts) == len(selected_specs):
                 cvd = ",".join(cvd_parts)
         elif self.selected_gpus:
-            cvd = ",".join(str(g["index"]) for g in self.selected_gpus)
+            cvd = ",".join(
+                str(g.get("uuid") or g["index"])
+                for g in self.selected_gpus
+            )
         if cvd:
             os.environ["CUDA_VISIBLE_DEVICES"] = cvd
             print(f"  CUDA_VISIBLE_DEVICES={cvd}")

@@ -730,6 +730,39 @@ class LauncherMatrixTest(unittest.TestCase):
             else:
                 os.environ["CUDA_VISIBLE_DEVICES"] = old_cvd
 
+    def test_server_numeric_gpu_selector_resolves_to_uuid(self) -> None:
+        from krasis import server as server_mod
+
+        old_inventory = server_mod._nvidia_smi_gpu_inventory
+        try:
+            server_mod._nvidia_smi_gpu_inventory = lambda source: [
+                {
+                    "index": 0,
+                    "name": "NVIDIA RTX A4500",
+                    "vram_mb": 20_470,
+                    "uuid": "GPU-test-a4500",
+                    "pci_bus_id": "00000000:81:00.0",
+                },
+                {
+                    "index": 1,
+                    "name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+                    "vram_mb": 97_887,
+                    "uuid": "GPU-test-rtx-pro-6000",
+                    "pci_bus_id": "00000000:C5:00.0",
+                },
+            ]
+
+            self.assertEqual(
+                server_mod._normalize_selected_gpus("1", "test"),
+                "GPU-test-rtx-pro-6000",
+            )
+            self.assertEqual(
+                server_mod._normalize_selected_gpus("0,1", "test"),
+                "GPU-test-a4500,GPU-test-rtx-pro-6000",
+            )
+        finally:
+            server_mod._nvidia_smi_gpu_inventory = old_inventory
+
     def test_launcher_generated_configs_start_server_parse_path(self) -> None:
         scenarios = []
 
@@ -873,7 +906,7 @@ class LauncherMatrixTest(unittest.TestCase):
             [
                 "attention_quant = 'hqq8'",
                 "num_gpus = 2",
-                "selected_gpus = '0,1'",
+                "selected_gpus = 'GPU-",
                 "expert_group_size = 64",
                 "ssh_tunnel = 'alice@example.com:2222'",
                 f"ssh_key_path = '{os.path.expanduser('~/.ssh/id_ed25519')}'",

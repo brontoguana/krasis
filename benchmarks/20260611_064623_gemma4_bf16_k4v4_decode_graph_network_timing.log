@@ -1,0 +1,72 @@
+Checking server health at http://localhost:18014... [0;32mOK[0m
+Sending warmup request... done (0.5s)
+  [2m>>> Hi![0m
+
+[1m[0;36mTest 4: Network Multi-Prompt Validation[0m
+============================================================
+  [0;32mPASS[0m OK (0.5s) [factual_qa]
+  [0;32mPASS[0m OK (0.5s) [math_simple]
+  [0;32mPASS[0m OK (1.8s) [code_gen]
+  [0;32mPASS[0m OK (0.6s, 4 words) [multi_turn]
+  [0;32mPASS[0m OK (0.5s, 7 words) [short_prompt]
+  [0;32mPASS[0m OK (0.5s) [streaming_factual]
+  [0;32mPASS[0m OK (0.6s) [streaming_code]
+  [0;32mPASS[0m OK (0.8s) [json_output]
+  [0;32mPASS[0m OK (0.5s) [blocking_math]
+
+[1m[0;36mTest 6: Multi-Turn Sequential Conversation[0m
+============================================================
+  Turn 1: establishing facts... [0;32mPASS[0m OK (1.1s)
+  Turn 2: recalling dog's name... [0;32mPASS[0m OK (0.3s)
+  Turn 3: recalling city... [0;32mPASS[0m OK (0.3s)
+  Turn 4: recalling number (streaming)... [0;32mPASS[0m OK (0.3s)
+  Turn 5: recalling all three facts... [0;32mPASS[0m OK (1.0s)
+
+============================================================
+[1mSUMMARY[0m: 14/14 passed, 0 failed, 9.6s total
+
+[1mResponse texts (review for coherence):[0m
+
+  [[0;32mPASS[0m] factual_qa: OK (0.5s)
+  [2m>>> Paris[0m
+
+  [[0;32mPASS[0m] math_simple: OK (0.5s)
+  [2m>>> 56[0m
+
+  [[0;32mPASS[0m] code_gen: OK (1.8s)
+  [2m>>> ```python\ndef fibonacci(n):\n    if n <= 0:\n        return 0\n    elif n == 1:\n        return 1\n    \n    a, b = 0, 1\n    for _ in range(2, n + 1):\n        a, b = b, a + b\n    return b\n```[0m
+
+  [[0;32mPASS[0m] multi_turn: OK (0.6s, 4 words)
+  [2m>>> Your name is Alice.[0m
+
+  [[0;32mPASS[0m] short_prompt: OK (0.5s, 7 words)
+  [2m>>> Hello! How can I help you today?[0m
+
+  [[0;32mPASS[0m] streaming_factual: OK (0.5s)
+  [2m>>> Tokyo[0m
+
+  [[0;32mPASS[0m] streaming_code: OK (0.6s)
+  [2m>>> ```python\nprint("Hello, World!")\n```[0m
+
+  [[0;32mPASS[0m] json_output: OK (0.8s)
+  [2m>>> {"name": "John Doe", "age": 25}[0m
+
+  [[0;32mPASS[0m] blocking_math: OK (0.5s)
+  [2m>>> 42[0m
+
+  [[0;32mPASS[0m] multi_turn_t1: OK (1.1s)
+  [2m>>> I have noted those three facts:\n\n1. Your dog's name is **Biscuit**.\n2. You live in **Wellington, New Zealand**.\n3. Your favorite number is **42**.\n\nI am ready to proceed! How can I help you today?[0m
+
+  [[0;32mPASS[0m] multi_turn_t2_dog: OK (0.3s)
+  [2m>>> Your dog's name is Biscuit.[0m
+
+  [[0;32mPASS[0m] multi_turn_t3_city: OK (0.3s)
+  [2m>>> You live in Wellington, New Zealand.[0m
+
+  [[0;32mPASS[0m] multi_turn_t4_number: OK (0.3s)
+  [2m>>> Your favorite number is 42.[0m
+
+  [[0;32mPASS[0m] multi_turn_t5_all: OK (1.0s)
+  [2m>>> Here are the three facts you provided:\n\n1. Your dog's name is **Biscuit**.\n2. You live in **Wellington, New Zealand**.\n3. Your favorite number is **42**.[0m
+
+[0;32m[1mALL TESTS PASSED[0m

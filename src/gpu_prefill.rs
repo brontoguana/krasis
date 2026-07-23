@@ -29,6 +29,9 @@ use crate::weights::marlin::{
     generate_weight_perm_int4, MarlinRepacked,
 };
 
+#[cfg(has_decode_kernels)]
+const COLD_EXPERT_HELPERS_PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/decode_kernels.ptx"));
+
 fn stderr_debug_enabled() -> bool {
     std::env::var("KRASIS_DEBUG_STDERR")
         .map(|v| v == "1")
@@ -324,8 +327,7 @@ fn nemotron_default_prefill_optimizations_enabled(config: &PrefillModelConfig) -
         std::env::var("KRASIS_NEMOTRON_DEFAULT_OPTIMIZATIONS")
             .ok()
             .as_deref(),
-    )
-        && config.layer_types.iter().any(|&t| t == 1)
+    ) && config.layer_types.iter().any(|&t| t == 1)
         && config.n_routed_experts > 0
         && config.moe_activation == 1
         && !config.moe_gated
@@ -550,7 +552,9 @@ fn read_only_checkpoint_config_for_scope(
         return Ok(ReadOnlyCheckpointConfig { enabled: false });
     }
     if !reference_debug_trace_enabled {
-        return Err("KRASIS_READ_ONLY_CHECKPOINT_DIAG requires debug_reference_trace=true".to_string());
+        return Err(
+            "KRASIS_READ_ONLY_CHECKPOINT_DIAG requires debug_reference_trace=true".to_string(),
+        );
     }
     Ok(ReadOnlyCheckpointConfig { enabled: true })
 }
@@ -641,7 +645,12 @@ fn prefill_gqa_branch_timing_enabled() -> bool {
 
 fn prefill_layer_specific_sliding_fa2_enabled() -> bool {
     std::env::var("KRASIS_PREFILL_LAYER_SPECIFIC_SLIDING_FA2")
-        .map(|v| !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"))
+        .map(|v| {
+            !matches!(
+                v.to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            )
+        })
         .unwrap_or(true)
 }
 
@@ -5170,7 +5179,7 @@ pub struct PrefillKernels {
     relu2: RawCuFunc,
     gelu_tanh_mul: RawCuFunc,
     gated_activation_split: RawCuFunc,
-    sigmoid_mul: RawCuFunc, // gated GQA: out = attn * sigmoid(gate)
+    sigmoid_mul: RawCuFunc,      // gated GQA: out = attn * sigmoid(gate)
     sigmoid_head_mul: RawCuFunc, // Step GQA: one sigmoid gate per attention head
     sigmoid_topk: RawCuFunc,
     normalize_topk_weights: RawCuFunc,
@@ -5900,7 +5909,7 @@ pub struct PrefillLayerWeights {
     pub moe_norm_topk_prob: bool,
     pub moe_routed_scaling_factor: f32,
     pub moe_gated: bool,
-    pub moe_activation: u8,    // 0=silu, 1=relu2
+    pub moe_activation: u8, // 0=silu, 1=relu2
     pub moe_swiglu_limit: f32,
     pub shared_swiglu_limit: f32,
     pub moe_input_size: usize, // 0 = use hidden_size; otherwise LatentMoE expert width
@@ -6662,12 +6671,11 @@ impl PrefillEngine {
                 .resize_with(stats_idx + 1, PrefillPrescanAccuracyLayerStats::default);
         }
         if !self.prefill_prescan_accuracy_stats[stats_idx].seen {
-            self.prefill_prescan_accuracy_stats[stats_idx] =
-                PrefillPrescanAccuracyLayerStats::new(
-                    model_layer_idx,
-                    prescan_layer_idx,
-                    n_experts,
-                );
+            self.prefill_prescan_accuracy_stats[stats_idx] = PrefillPrescanAccuracyLayerStats::new(
+                model_layer_idx,
+                prescan_layer_idx,
+                n_experts,
+            );
         }
     }
 
@@ -14150,12 +14158,9 @@ impl PrefillEngine {
         let safety_margin_mb = self.safety_margin_mb.max(PREFILL_SAFETY_MARGIN_MB);
         let safety_bytes = safety_margin_mb.saturating_mul(1024 * 1024);
         let scratch_tokens = clean_runtime_chunk_tokens(prompt_tokens, 128);
-        let scratch_bytes = estimate_scratch_vram_for_prompt(
-            &self.config,
-            scratch_tokens,
-            prompt_tokens,
-        )
-        .saturating_add(self.measured_scratch_alloc_overhead_bytes);
+        let scratch_bytes =
+            estimate_scratch_vram_for_prompt(&self.config, scratch_tokens, prompt_tokens)
+                .saturating_add(self.measured_scratch_alloc_overhead_bytes);
         let mut post_scratch_runtime_reserve_bytes =
             self.measured_post_scratch_runtime_reserve_bytes(prompt_tokens);
         let mamba2_runtime_reserve_bytes =
@@ -14696,11 +14701,7 @@ impl PrefillEngine {
         }
     }
 
-    fn allocate_raw_ptr_table(
-        &self,
-        ptrs_bytes: usize,
-        label: &str,
-    ) -> Result<[u64; 4], String> {
+    fn allocate_raw_ptr_table(&self, ptrs_bytes: usize, label: &str) -> Result<[u64; 4], String> {
         if ptrs_bytes == 0 {
             return Err(format!("{label} requested with zero bytes"));
         }
@@ -14811,15 +14812,20 @@ impl PrefillEngine {
             return Err("cold staging reuse event is not initialized".to_string());
         }
         unsafe {
-            let err =
-                cuda_sys::lib().cuEventRecord(self.cold_staging_reuse_event, self.stream);
+            let err = cuda_sys::lib().cuEventRecord(self.cold_staging_reuse_event, self.stream);
             if err != cuda_sys::CUresult::CUDA_SUCCESS {
                 return Err(format!("record cold staging reuse event: {:?}", err));
             }
-            let err =
-                cuda_sys::lib().cuStreamWaitEvent(self.copy_stream, self.cold_staging_reuse_event, 0);
+            let err = cuda_sys::lib().cuStreamWaitEvent(
+                self.copy_stream,
+                self.cold_staging_reuse_event,
+                0,
+            );
             if err != cuda_sys::CUresult::CUDA_SUCCESS {
-                return Err(format!("copy stream wait cold staging reuse event: {:?}", err));
+                return Err(format!(
+                    "copy stream wait cold staging reuse event: {:?}",
+                    err
+                ));
             }
         }
         Ok(())
@@ -14848,8 +14854,7 @@ impl PrefillEngine {
             cuda_sys::lib().cuMemGetInfo_v2(&mut free_before, &mut total_before);
         }
         let releasable_cold_bytes = if self.d_cold_staging.is_some() {
-            self.max_cold_experts
-                .saturating_mul(self.cold_expert_bytes)
+            self.max_cold_experts.saturating_mul(self.cold_expert_bytes)
         } else {
             0
         };
@@ -15944,7 +15949,8 @@ impl PrefillEngine {
         let mut output_max_abs = 0.0f32;
         let mut output_sum_abs = 0.0f64;
         let compare_t0 = Instant::now();
-        for (idx, (&candidate, &oracle)) in candidate_out.iter().zip(oracle_out.iter()).enumerate() {
+        for (idx, (&candidate, &oracle)) in candidate_out.iter().zip(oracle_out.iter()).enumerate()
+        {
             let diff = (bf16_to_f32(candidate) - bf16_to_f32(oracle)).abs();
             output_sum_abs += diff as f64;
             if diff > output_max_abs {
@@ -15964,7 +15970,9 @@ impl PrefillEngine {
         let mut state_max_abs = 0.0f32;
         let mut state_sum_abs = 0.0f64;
         let compare_t0 = Instant::now();
-        for (idx, (&candidate, &oracle)) in candidate_state.iter().zip(oracle_state.iter()).enumerate() {
+        for (idx, (&candidate, &oracle)) in
+            candidate_state.iter().zip(oracle_state.iter()).enumerate()
+        {
             let diff = (candidate - oracle).abs();
             state_sum_abs += diff as f64;
             if diff > state_max_abs {
@@ -16275,25 +16283,15 @@ impl PrefillEngine {
                     .checked_mul(d_state)
                     .and_then(|base| base.checked_add(state_idx))
                     .ok_or("Mamba2 SSD state probe B index overflow")?;
-                let mut dt = bf16_to_f32(download_device_u16_at(
-                    dt_ptr,
-                    dt_idx,
-                    "mamba2 state dt",
-                )?) + state_dt_bias;
+                let mut dt =
+                    bf16_to_f32(download_device_u16_at(dt_ptr, dt_idx, "mamba2 state dt")?)
+                        + state_dt_bias;
                 if use_softplus {
                     dt = (1.0f32 + dt.exp()).ln();
                 }
                 let a_bar = (state_a_val * dt).exp();
-                let x_val = bf16_to_f32(download_device_u16_at(
-                    x_ptr,
-                    x_idx,
-                    "mamba2 state x",
-                )?);
-                let b_val = bf16_to_f32(download_device_u16_at(
-                    b_ptr,
-                    b_idx,
-                    "mamba2 state B",
-                )?);
+                let x_val = bf16_to_f32(download_device_u16_at(x_ptr, x_idx, "mamba2 state x")?);
+                let b_val = bf16_to_f32(download_device_u16_at(b_ptr, b_idx, "mamba2 state B")?);
                 let b_bar = half::bf16::from_f32(b_val * dt).to_f32();
                 expected_state = a_bar * expected_state + b_bar * x_val;
             }
@@ -16420,7 +16418,11 @@ impl PrefillEngine {
             } else {
                 (d_a_target - d_a_running).min(0.0)
             };
-            let decay = if u == target.row { 1.0 } else { decay_arg.exp() };
+            let decay = if u == target.row {
+                1.0
+            } else {
+                decay_arg.exp()
+            };
 
             let mut cb_forward = 0.0f32;
             let mut cb_reverse = 0.0f32;
@@ -16664,7 +16666,9 @@ impl PrefillEngine {
             ));
         }
         let Some(state_flat_initial) = pre_state.state_flat_initial else {
-            return Err("Mamba2 SSD v4 cast/carry missing pre-launch state-flat snapshot".to_string());
+            return Err(
+                "Mamba2 SSD v4 cast/carry missing pre-launch state-flat snapshot".to_string(),
+            );
         };
         let state_group = state_head / heads_per_group;
         let effective_chunk_size = if chunk_size > 0 { chunk_size } else { m };
@@ -16696,7 +16700,8 @@ impl PrefillEngine {
             return Err("Mamba2 SSD v4 cast/carry previous chunk length is zero".to_string());
         }
         let prev_chunk_end_exclusive = prev_chunk_start + prev_chunk_len;
-        let target_a_log = download_device_f32_at(a_log_ptr, target.head, "mamba2 v4 target A_log")?;
+        let target_a_log =
+            download_device_f32_at(a_log_ptr, target.head, "mamba2 v4 target A_log")?;
         let target_a_val = -target_a_log.exp();
         let state_a_log = download_device_f32_at(a_log_ptr, state_head, "mamba2 v4 state A_log")?;
         let state_a_val = -state_a_log.exp();
@@ -17948,7 +17953,12 @@ impl PrefillEngine {
             return Ok(Vec::new());
         }
         let mut probes = Vec::new();
-        for (idx, part) in raw.split(',').map(str::trim).filter(|s| !s.is_empty()).enumerate() {
+        for (idx, part) in raw
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .enumerate()
+        {
             let fields = part.split(':').map(str::trim).collect::<Vec<_>>();
             if fields.len() != 4 {
                 return Err(format!(
@@ -19351,8 +19361,7 @@ impl PrefillEngine {
         };
         let diag_moe_detail = std::env::var("KRASIS_PREFILL_DIAG_MOE_DETAIL").is_ok();
         let debug_prefill = prefill_debug_enabled();
-        let sync_debug = prefill_sync_debug_enabled()
-            && total_m >= prefill_sync_debug_min_tokens();
+        let sync_debug = prefill_sync_debug_enabled() && total_m >= prefill_sync_debug_min_tokens();
 
         // Dynamic chunk sizing: use the fewest measured-safe chunks, but avoid
         // pathological tiny tails that pay a full prefill pass for almost no
@@ -23012,26 +23021,17 @@ impl PrefillEngine {
                     ha, hac
                 );
             }
-            let mamba2_has_data = self
-                .mamba2_stage_calls
-                .iter()
-                .any(|calls| calls.get() > 0);
+            let mamba2_has_data = self.mamba2_stage_calls.iter().any(|calls| calls.get() > 0);
             if mamba2_has_data {
-                let mamba2_wall_total: f64 = self
-                    .t_mamba2_stage_wall
-                    .iter()
-                    .map(|cell| cell.get())
-                    .sum();
+                let mamba2_wall_total: f64 =
+                    self.t_mamba2_stage_wall.iter().map(|cell| cell.get()).sum();
                 let mamba2_event_total: f64 = self
                     .t_mamba2_stage_event
                     .iter()
                     .map(|cell| cell.get())
                     .sum();
-                let mamba2_sync_total: f64 = self
-                    .t_mamba2_stage_sync
-                    .iter()
-                    .map(|cell| cell.get())
-                    .sum();
+                let mamba2_sync_total: f64 =
+                    self.t_mamba2_stage_sync.iter().map(|cell| cell.get()).sum();
                 eprintln!(
                     "[PREFILL-TIMING]     mamba2 breakdown (diagnostic sync-isolated): wall={:>8.1}ms ({:>5.1}% of prefill, {:>5.1}% of mixer) event={:>8.1}ms sync={:>8.1}ms",
                     mamba2_wall_total,
@@ -28645,8 +28645,8 @@ impl PrefillEngine {
         let q_dim = num_q_heads * head_dim;
         let kv_dim = num_kv_heads * head_dim;
         let reference_layer1_trace = self.reference_debug_trace_enabled && layer_idx == 1;
-        let gqa_debt_timing =
-            gt && (prefill_gqa_branch_timing_enabled()
+        let gqa_debt_timing = gt
+            && (prefill_gqa_branch_timing_enabled()
                 || self.is_gemma_hqq4_kv_timing_target(layer_idx));
         let mut attention_branch_idx = GQA_BRANCH_CUSTOM_NO_FA2;
         let mut attention_used_fixed_fa2 = false;
@@ -28704,8 +28704,7 @@ impl PrefillEngine {
         }
         let gt0 = Instant::now();
         let gqa_proj_event = self.gqa_timing_event_start("GQA projection")?;
-        if lw.gqa_gated
-            && (lw.gqa_head_gate_proj.is_some() || lw.gqa_head_gate_proj_bf16.is_some())
+        if lw.gqa_gated && (lw.gqa_head_gate_proj.is_some() || lw.gqa_head_gate_proj_bf16.is_some())
         {
             return Err(format!(
                 "GQA layer {} has both interleaved gated Q and separate head gate; unsupported mixed gate contract",
@@ -31829,7 +31828,7 @@ impl PrefillEngine {
             trace_abs_pos,
             trace_token_id,
             hidden_trace_row_ptr,
-                cfg.hidden_size,
+            cfg.hidden_size,
         )?;
         let mamba2_in_proj_timing = self.mamba2_timing_start("Mamba2 in-proj")?;
         self.prefill_weight_gemm(
@@ -31840,12 +31839,11 @@ impl PrefillEngine {
             in_buf,
             m,
         )?;
-        mamba2_stage_wall_ms[MAMBA2_PREFILL_TIMING_STAGE_IN_PROJ] =
-            self.mamba2_timing_finish(
-                MAMBA2_PREFILL_TIMING_STAGE_IN_PROJ,
-                "Mamba2 in-proj",
-                mamba2_in_proj_timing,
-            )?;
+        mamba2_stage_wall_ms[MAMBA2_PREFILL_TIMING_STAGE_IN_PROJ] = self.mamba2_timing_finish(
+            MAMBA2_PREFILL_TIMING_STAGE_IN_PROJ,
+            "Mamba2 in-proj",
+            mamba2_in_proj_timing,
+        )?;
         self.record_prefill_device_trace_bf16_row(
             PDT_LAYER_MAMBA2_IN_PROJ_LAST,
             layer_idx,
@@ -32061,8 +32059,8 @@ impl PrefillEngine {
                 )?;
             }
         }
-        mamba2_stage_wall_ms[MAMBA2_PREFILL_TIMING_STAGE_SPLIT_EXTRACT] =
-            self.mamba2_timing_finish(
+        mamba2_stage_wall_ms[MAMBA2_PREFILL_TIMING_STAGE_SPLIT_EXTRACT] = self
+            .mamba2_timing_finish(
                 MAMBA2_PREFILL_TIMING_STAGE_SPLIT_EXTRACT,
                 "Mamba2 split/extract",
                 mamba2_split_timing,
@@ -32682,12 +32680,11 @@ impl PrefillEngine {
                 )?;
             }
         }
-        mamba2_stage_wall_ms[MAMBA2_PREFILL_TIMING_STAGE_CONV1D_SILU] =
-            self.mamba2_timing_finish(
-                MAMBA2_PREFILL_TIMING_STAGE_CONV1D_SILU,
-                "Mamba2 conv1d+silu",
-                mamba2_conv_timing,
-            )?;
+        mamba2_stage_wall_ms[MAMBA2_PREFILL_TIMING_STAGE_CONV1D_SILU] = self.mamba2_timing_finish(
+            MAMBA2_PREFILL_TIMING_STAGE_CONV1D_SILU,
+            "Mamba2 conv1d+silu",
+            mamba2_conv_timing,
+        )?;
         self.record_prefill_device_trace_bf16_row(
             PDT_LAYER_MAMBA2_CONV_X_LAST,
             layer_idx,
@@ -32958,8 +32955,7 @@ impl PrefillEngine {
                     .to_string(),
             );
         }
-        if mamba2_ssd_block_scan_output_subloop_timing_requested
-            && !mamba2_ssd_block_scan_requested
+        if mamba2_ssd_block_scan_output_subloop_timing_requested && !mamba2_ssd_block_scan_requested
         {
             return Err(
                 "KRASIS_MAMBA2_SSD_BLOCK_SCAN_OUTPUT_SUBLOOP_TIMING requires KRASIS_MAMBA2_SSD_BLOCK_SCAN=1"
@@ -33284,7 +33280,11 @@ impl PrefillEngine {
             self.stream_sync()?;
             let initial_state_copy_ms = copy_t0.elapsed().as_secs_f64() * 1000.0;
             let copy_t0 = Instant::now();
-            self.memcpy_d2d(*oracle_state.device_ptr(), *initial_state.device_ptr(), state_bytes)?;
+            self.memcpy_d2d(
+                *oracle_state.device_ptr(),
+                *initial_state.device_ptr(),
+                state_bytes,
+            )?;
             self.stream_sync()?;
             let oracle_state_copy_ms = copy_t0.elapsed().as_secs_f64() * 1000.0;
             let copy_t0 = Instant::now();
@@ -33591,15 +33591,15 @@ impl PrefillEngine {
                 .map_err(|e| format!("alloc Mamba2 SSD {label}: {e}"))
             };
             let alloc_t0 = Instant::now();
-            let initial_state = if block_scan_oracle_enabled || mamba2_ssd_parallel_chunked_requested
-            {
-                Some(alloc_f32_temp(
-                    state_elems,
-                    "block-scan initial state snapshot",
-                )?)
-            } else {
-                None
-            };
+            let initial_state =
+                if block_scan_oracle_enabled || mamba2_ssd_parallel_chunked_requested {
+                    Some(alloc_f32_temp(
+                        state_elems,
+                        "block-scan initial state snapshot",
+                    )?)
+                } else {
+                    None
+                };
             let oracle_state = if block_scan_oracle_enabled {
                 Some(
                     GpuBuf::<f32>::alloc_zeroed(state_elems)
@@ -33618,22 +33618,22 @@ impl PrefillEngine {
                     "block-scan c_state_total_exact",
                 )?)
             };
-            let term_probe = if block_scan_oracle_enabled && mamba2_ssd_block_scan_term_target.is_some() {
-                Some(
-                    GpuBuf::<f32>::alloc_zeroed(32)
-                        .map_err(|e| format!("alloc Mamba2 SSD block-scan term probe: {e}"))?,
-                )
-            } else {
-                None
-            };
-            let output_subloop_timing =
-                if mamba2_ssd_block_scan_output_subloop_timing_requested {
-                    Some(GpuBuf::<u64>::alloc_zeroed(10).map_err(|e| {
-                        format!("alloc Mamba2 SSD block-scan output subloop timing: {e}")
-                    })?)
+            let term_probe =
+                if block_scan_oracle_enabled && mamba2_ssd_block_scan_term_target.is_some() {
+                    Some(
+                        GpuBuf::<f32>::alloc_zeroed(32)
+                            .map_err(|e| format!("alloc Mamba2 SSD block-scan term probe: {e}"))?,
+                    )
                 } else {
                     None
                 };
+            let output_subloop_timing = if mamba2_ssd_block_scan_output_subloop_timing_requested {
+                Some(GpuBuf::<u64>::alloc_zeroed(10).map_err(|e| {
+                    format!("alloc Mamba2 SSD block-scan output subloop timing: {e}")
+                })?)
+            } else {
+                None
+            };
             let recurrent_subloop_timing =
                 if mamba2_ssd_block_scan_recurrent_subloop_timing_requested {
                     Some(GpuBuf::<u64>::alloc_zeroed(11).map_err(|e| {
@@ -33752,10 +33752,8 @@ impl PrefillEngine {
                         d_state, max_threads_per_block
                     ));
                 }
-                let d_tile = std::cmp::max(
-                    1,
-                    std::cmp::min(head_dim, max_threads_per_block / d_state),
-                );
+                let d_tile =
+                    std::cmp::max(1, std::cmp::min(head_dim, max_threads_per_block / d_state));
                 let block_threads = d_tile
                     .checked_mul(d_state)
                     .ok_or("Mamba2 SSD state-parallel recurrent block thread count overflow")?;
@@ -33771,7 +33769,9 @@ impl PrefillEngine {
                     .ok_or("Mamba2 SSD state-parallel recurrent shared-float count overflow")?;
                 let shared_bytes = shared_floats
                     .checked_mul(std::mem::size_of::<f32>())
-                    .ok_or("Mamba2 SSD state-parallel recurrent shared-memory byte count overflow")?;
+                    .ok_or(
+                        "Mamba2 SSD state-parallel recurrent shared-memory byte count overflow",
+                    )?;
                 if shared_bytes > u32::MAX as usize {
                     return Err(format!(
                         "Mamba2 SSD state-parallel recurrent requires {} bytes shared memory, exceeding launch u32 range",
@@ -33779,8 +33779,7 @@ impl PrefillEngine {
                     ));
                 }
                 (
-                    self.kernels
-                        .mamba2_ssd_block_scan_recurrent_state_parallel,
+                    self.kernels.mamba2_ssd_block_scan_recurrent_state_parallel,
                     (n_heads as u32, blocks_d_state_parallel as u32, 1),
                     (block_threads as u32, 1, 1),
                     shared_bytes as u32,
@@ -33813,41 +33812,40 @@ impl PrefillEngine {
             let mut initial_state_copy_ms = 0.0;
             let mut oracle_state_copy_ms = 0.0;
             let copy_t0 = Instant::now();
-            let candidate_state_copy_ms = if block_scan_oracle_enabled
-                || mamba2_ssd_parallel_chunked_requested
-            {
-                let initial_state = initial_state
-                    .as_ref()
-                    .ok_or("Mamba2 SSD block-scan initial state missing in snapshot mode")?;
-                self.memcpy_d2d(*initial_state.device_ptr(), ssm_state, state_bytes)?;
-                self.stream_sync()?;
-                initial_state_copy_ms = copy_t0.elapsed().as_secs_f64() * 1000.0;
-                if block_scan_oracle_enabled {
-                    let oracle_state = oracle_state
+            let candidate_state_copy_ms =
+                if block_scan_oracle_enabled || mamba2_ssd_parallel_chunked_requested {
+                    let initial_state = initial_state
                         .as_ref()
-                        .ok_or("Mamba2 SSD block-scan oracle state missing in oracle mode")?;
+                        .ok_or("Mamba2 SSD block-scan initial state missing in snapshot mode")?;
+                    self.memcpy_d2d(*initial_state.device_ptr(), ssm_state, state_bytes)?;
+                    self.stream_sync()?;
+                    initial_state_copy_ms = copy_t0.elapsed().as_secs_f64() * 1000.0;
+                    if block_scan_oracle_enabled {
+                        let oracle_state = oracle_state
+                            .as_ref()
+                            .ok_or("Mamba2 SSD block-scan oracle state missing in oracle mode")?;
+                        let copy_t0 = Instant::now();
+                        self.memcpy_d2d(
+                            *oracle_state.device_ptr(),
+                            *initial_state.device_ptr(),
+                            state_bytes,
+                        )?;
+                        self.stream_sync()?;
+                        oracle_state_copy_ms = copy_t0.elapsed().as_secs_f64() * 1000.0;
+                    }
                     let copy_t0 = Instant::now();
                     self.memcpy_d2d(
-                        *oracle_state.device_ptr(),
+                        *candidate_state.device_ptr(),
                         *initial_state.device_ptr(),
                         state_bytes,
                     )?;
                     self.stream_sync()?;
-                    oracle_state_copy_ms = copy_t0.elapsed().as_secs_f64() * 1000.0;
-                }
-                let copy_t0 = Instant::now();
-                self.memcpy_d2d(
-                    *candidate_state.device_ptr(),
-                    *initial_state.device_ptr(),
-                    state_bytes,
-                )?;
-                self.stream_sync()?;
-                copy_t0.elapsed().as_secs_f64() * 1000.0
-            } else {
-                self.memcpy_d2d(*candidate_state.device_ptr(), ssm_state, state_bytes)?;
-                self.stream_sync()?;
-                copy_t0.elapsed().as_secs_f64() * 1000.0
-            };
+                    copy_t0.elapsed().as_secs_f64() * 1000.0
+                } else {
+                    self.memcpy_d2d(*candidate_state.device_ptr(), ssm_state, state_bytes)?;
+                    self.stream_sync()?;
+                    copy_t0.elapsed().as_secs_f64() * 1000.0
+                };
 
             let mut oracle_launch_submit_ms = 0.0;
             let mut oracle_sync_ms = 0.0;
@@ -34093,7 +34091,6 @@ impl PrefillEngine {
                 }
                 self.stream_sync()?;
                 parallel_state_passing_total_ms = phase_t0.elapsed().as_secs_f64() * 1000.0;
-
             } else {
                 let mut r0 = x_out;
                 let mut r1 = dt_out;
@@ -34155,7 +34152,10 @@ impl PrefillEngine {
             let recurrent_subloop_download_t0 = Instant::now();
             let recurrent_subloop_timing_values =
                 if let Some(recurrent_subloop_timing) = recurrent_subloop_timing.as_ref() {
-                    Some(download_device_u64(*recurrent_subloop_timing.device_ptr(), 11)?)
+                    Some(download_device_u64(
+                        *recurrent_subloop_timing.device_ptr(),
+                        11,
+                    )?)
                 } else {
                     None
                 };
@@ -34319,9 +34319,9 @@ impl PrefillEngine {
                     .checked_mul(std::mem::size_of::<u16>())
                     .ok_or("Mamba2 SSD block-scan coefficient tile tri byte count overflow")?;
                 let old_offset = align_up(
-                    prefix_bytes
-                        .checked_add(tri_bytes)
-                        .ok_or("Mamba2 SSD block-scan coefficient tile shared byte count overflow")?,
+                    prefix_bytes.checked_add(tri_bytes).ok_or(
+                        "Mamba2 SSD block-scan coefficient tile shared byte count overflow",
+                    )?,
                     std::mem::align_of::<f32>(),
                 )
                 .ok_or("Mamba2 SSD block-scan coefficient tile shared alignment overflow")?;
@@ -34329,7 +34329,9 @@ impl PrefillEngine {
                     .checked_add(
                         coeff_pair_count
                             .checked_mul(std::mem::size_of::<f32>())
-                            .ok_or("Mamba2 SSD block-scan coefficient tile old byte count overflow")?,
+                            .ok_or(
+                                "Mamba2 SSD block-scan coefficient tile old byte count overflow",
+                            )?,
                     )
                     .ok_or("Mamba2 SSD block-scan coefficient tile shared byte count overflow")?
             };
@@ -34342,7 +34344,8 @@ impl PrefillEngine {
             let mut parallel_output_state_split_lanes = 1usize;
             let mut parallel_output_state_split_d_tile = head_dim;
             let mut parallel_output_state_split_block = mamba2_ssd_block;
-            let mut parallel_output_state_split_grid = (n_heads as u32, blocks_d as u32, n_chunks as u32);
+            let mut parallel_output_state_split_grid =
+                (n_heads as u32, blocks_d as u32, n_chunks as u32);
             let mut parallel_output_state_split_shared_mem_bytes =
                 parallel_chunk_scan_shared_mem_bytes;
             if mamba2_ssd_parallel_output_state_split_requested {
@@ -34376,7 +34379,10 @@ impl PrefillEngine {
                 }
                 let max_threads_per_block = max_threads_per_block.max(0) as usize;
                 if max_threads_per_block == 0 {
-                    return Err("Mamba2 SSD state-split output saw device max threads per block = 0".to_string());
+                    return Err(
+                        "Mamba2 SSD state-split output saw device max threads per block = 0"
+                            .to_string(),
+                    );
                 }
                 let max_state_lanes_for_full_head =
                     std::cmp::max(1, max_threads_per_block / head_dim);
@@ -34419,21 +34425,22 @@ impl PrefillEngine {
                     (n_heads as u32, blocks_d_state_split as u32, n_chunks as u32);
             }
             let output_shared_mem_bytes = if mamba2_ssd_parallel_chunked_requested {
-                let parallel_chunk_scan_output_func = if mamba2_ssd_parallel_output_state_split_requested {
-                    self.kernels
-                        .mamba2_ssd_parallel_chunk_scan_output_state_split
-                        .0
-                } else if mamba2_ssd_parallel_output_precompute_cb_requested {
-                    self.kernels
-                        .mamba2_ssd_parallel_chunk_scan_output_precomputed_cb
-                        .0
-                } else if mamba2_ssd_parallel_output_by_chunk_requested {
-                    self.kernels
-                        .mamba2_ssd_parallel_chunk_scan_output_by_chunk
-                        .0
-                } else {
-                    self.kernels.mamba2_ssd_parallel_chunk_scan_output.0
-                };
+                let parallel_chunk_scan_output_func =
+                    if mamba2_ssd_parallel_output_state_split_requested {
+                        self.kernels
+                            .mamba2_ssd_parallel_chunk_scan_output_state_split
+                            .0
+                    } else if mamba2_ssd_parallel_output_precompute_cb_requested {
+                        self.kernels
+                            .mamba2_ssd_parallel_chunk_scan_output_precomputed_cb
+                            .0
+                    } else if mamba2_ssd_parallel_output_by_chunk_requested {
+                        self.kernels
+                            .mamba2_ssd_parallel_chunk_scan_output_by_chunk
+                            .0
+                    } else {
+                        self.kernels.mamba2_ssd_parallel_chunk_scan_output.0
+                    };
                 let parallel_output_shared_mem_bytes =
                     if mamba2_ssd_parallel_output_state_split_requested {
                         parallel_output_state_split_shared_mem_bytes
@@ -34823,7 +34830,10 @@ impl PrefillEngine {
             let output_subloop_download_t0 = Instant::now();
             let output_subloop_timing_values =
                 if let Some(output_subloop_timing) = output_subloop_timing.as_ref() {
-                    Some(download_device_u64(*output_subloop_timing.device_ptr(), 10)?)
+                    Some(download_device_u64(
+                        *output_subloop_timing.device_ptr(),
+                        10,
+                    )?)
                 } else {
                     None
                 };
@@ -35022,10 +35032,7 @@ impl PrefillEngine {
                     d_state,
                     &mamba2_ssd_v5_probes,
                 )?;
-                (
-                    compare_timing,
-                    compare_t0.elapsed().as_secs_f64() * 1000.0,
-                )
+                (compare_timing, compare_t0.elapsed().as_secs_f64() * 1000.0)
             } else {
                 (Mamba2SsdV5CompareTiming::default(), 0.0)
             };
@@ -35424,12 +35431,11 @@ impl PrefillEngine {
                 )?;
             }
         }
-        mamba2_stage_wall_ms[MAMBA2_PREFILL_TIMING_STAGE_SSD_SCAN] =
-            self.mamba2_timing_finish(
-                MAMBA2_PREFILL_TIMING_STAGE_SSD_SCAN,
-                "Mamba2 SSD/scan",
-                mamba2_ssd_timing,
-            )?;
+        mamba2_stage_wall_ms[MAMBA2_PREFILL_TIMING_STAGE_SSD_SCAN] = self.mamba2_timing_finish(
+            MAMBA2_PREFILL_TIMING_STAGE_SSD_SCAN,
+            "Mamba2 SSD/scan",
+            mamba2_ssd_timing,
+        )?;
         if let Some(target) = mamba2_ssd_local_tri_target {
             let _ = self.diag_emit_mamba2_ssd_local_tri_oracle(
                 target,
@@ -35916,8 +35922,8 @@ impl PrefillEngine {
                 )?;
             }
         }
-        mamba2_stage_wall_ms[MAMBA2_PREFILL_TIMING_STAGE_GATED_RMSNORM] =
-            self.mamba2_timing_finish(
+        mamba2_stage_wall_ms[MAMBA2_PREFILL_TIMING_STAGE_GATED_RMSNORM] = self
+            .mamba2_timing_finish(
                 MAMBA2_PREFILL_TIMING_STAGE_GATED_RMSNORM,
                 "Mamba2 gated RMSNorm",
                 mamba2_norm_timing,
@@ -36089,12 +36095,11 @@ impl PrefillEngine {
             attn_out,
             m,
         )?;
-        mamba2_stage_wall_ms[MAMBA2_PREFILL_TIMING_STAGE_OUT_PROJ] =
-            self.mamba2_timing_finish(
-                MAMBA2_PREFILL_TIMING_STAGE_OUT_PROJ,
-                "Mamba2 out-proj",
-                mamba2_out_proj_timing,
-            )?;
+        mamba2_stage_wall_ms[MAMBA2_PREFILL_TIMING_STAGE_OUT_PROJ] = self.mamba2_timing_finish(
+            MAMBA2_PREFILL_TIMING_STAGE_OUT_PROJ,
+            "Mamba2 out-proj",
+            mamba2_out_proj_timing,
+        )?;
         self.record_prefill_device_trace_bf16_row(
             PDT_LAYER_MAMBA2_OUT_PROJ_LAST,
             layer_idx,
@@ -52674,13 +52679,14 @@ impl PrefillEngine {
                                     hqq_expert_out,
                                 )?;
                             if let Some(pre_hashes) = checkpoint_pre {
-                                let post_hashes = read_only_checkpoint_layer_delta_state_hashes_json(
-                                    capture,
-                                    &bf16_cpu_routed,
-                                    &hqq_cpu_routed,
-                                    hqq_expert_out,
-                                    "after_first_token_margin_projection_layer_delta_build",
-                                )?;
+                                let post_hashes =
+                                    read_only_checkpoint_layer_delta_state_hashes_json(
+                                        capture,
+                                        &bf16_cpu_routed,
+                                        &hqq_cpu_routed,
+                                        hqq_expert_out,
+                                        "after_first_token_margin_projection_layer_delta_build",
+                                    )?;
                                 let pre_post_hashes_match = pre_hashes
                                     .get("route_topk_gather_hashes")
                                     == post_hashes.get("route_topk_gather_hashes")
@@ -58234,7 +58240,8 @@ pub fn compute_scratch_vram(config: &PrefillModelConfig) -> (usize, usize) {
     }
     if has_mamba2 {
         fixed += config.mamba_conv_dim * config.mamba_conv_kernel.max(1) * 4;
-        let mamba_state_elems = config.mamba_num_heads * config.mamba_head_dim * config.mamba_d_state;
+        let mamba_state_elems =
+            config.mamba_num_heads * config.mamba_head_dim * config.mamba_d_state;
         fixed += mamba_state_elems * 4;
         let dim = 2 * config.mamba_d_inner
             + 2 * config.mamba_n_groups * config.mamba_d_state
@@ -58500,13 +58507,9 @@ fn estimate_mamba2_ssd_runtime_temp_bytes(config: &PrefillModelConfig, tokens: u
     let n_groups = config.mamba_n_groups;
     let chunk_size = config.mamba_chunk_size.max(1);
     let n_chunks = tokens.saturating_add(chunk_size - 1) / chunk_size;
-    let state_elems = n_heads
-        .saturating_mul(head_dim)
-        .saturating_mul(d_state);
+    let state_elems = n_heads.saturating_mul(head_dim).saturating_mul(d_state);
     let entry_state_elems = n_chunks.saturating_mul(state_elems);
-    let output_elems = tokens
-        .saturating_mul(n_heads)
-        .saturating_mul(head_dim);
+    let output_elems = tokens.saturating_mul(n_heads).saturating_mul(head_dim);
 
     let mut f32_elems = 0usize;
     // block-scan candidate_state, entry_state, c_state_total_exact
@@ -58521,9 +58524,7 @@ fn estimate_mamba2_ssd_runtime_temp_bytes(config: &PrefillModelConfig, tokens: u
         f32_elems = f32_elems.saturating_add(state_elems);
     }
     if parallel_chunked_requested {
-        let chunk_scalar_elems = n_chunks
-            .saturating_mul(n_heads)
-            .saturating_mul(chunk_size);
+        let chunk_scalar_elems = n_chunks.saturating_mul(n_heads).saturating_mul(chunk_size);
         // parallel dt_out, dA_cumsum, chunk_states, entry_state
         f32_elems = f32_elems.saturating_add(chunk_scalar_elems.saturating_mul(2));
         f32_elems = f32_elems.saturating_add(entry_state_elems.saturating_mul(2));
@@ -59022,23 +59023,21 @@ pub fn allocate_scratch_for_prompt(
 type SidecarAbiVersionFn = unsafe extern "C" fn() -> u32;
 type SidecarBuildIdFn = unsafe extern "C" fn() -> *const libc::c_char;
 
-unsafe fn open_sidecar_library(
-    path: &str,
-    label: &str,
-) -> Option<&'static libloading::Library> {
+unsafe fn open_sidecar_library(path: &str, label: &str) -> Option<&'static libloading::Library> {
     match libloading::Library::new(path) {
         Ok(lib) => Some(Box::leak(Box::new(lib))),
         Err(err) => {
-            log::warn!("loading {label} sidecar failed: path={} error={}", path, err);
+            log::warn!(
+                "loading {label} sidecar failed: path={} error={}",
+                path,
+                err
+            );
             None
         }
     }
 }
 
-unsafe fn sidecar_symbol<T: Copy>(
-    lib: &'static libloading::Library,
-    symbol: &[u8],
-) -> Option<T> {
+unsafe fn sidecar_symbol<T: Copy>(lib: &'static libloading::Library, symbol: &[u8]) -> Option<T> {
     lib.get::<T>(symbol).ok().map(|sym| *sym)
 }
 
@@ -59158,10 +59157,7 @@ unsafe fn verify_sidecar_abi(
     label: &str,
     manifest_key: &str,
 ) -> bool {
-    let abi_fn = match sidecar_symbol::<SidecarAbiVersionFn>(
-        lib,
-        b"krasis_sidecar_abi_version\0",
-    ) {
+    let abi_fn = match sidecar_symbol::<SidecarAbiVersionFn>(lib, b"krasis_sidecar_abi_version\0") {
         Some(v) => v,
         None => {
             log::error!("{label} sidecar missing krasis_sidecar_abi_version: {path}");
@@ -59180,10 +59176,7 @@ unsafe fn verify_sidecar_abi(
         return false;
     }
 
-    let build_fn = match sidecar_symbol::<SidecarBuildIdFn>(
-        lib,
-        b"krasis_sidecar_build_id\0",
-    ) {
+    let build_fn = match sidecar_symbol::<SidecarBuildIdFn>(lib, b"krasis_sidecar_build_id\0") {
         Some(v) => v,
         None => {
             log::error!("{label} sidecar missing krasis_sidecar_build_id: {path}");
@@ -59271,10 +59264,9 @@ fn load_fused_moe_scatter() -> Option<FusedMoeScatterFn> {
             return None;
         }
 
-        if let Some(sym) = sidecar_symbol::<FusedMoeScatterFn>(
-            lib,
-            b"krasis_moe_zero_and_scatter_weighted_bf16\0",
-        ) {
+        if let Some(sym) =
+            sidecar_symbol::<FusedMoeScatterFn>(lib, b"krasis_moe_zero_and_scatter_weighted_bf16\0")
+        {
             log::info!("Loaded fused MoE scatter from {}", path);
             return Some(sym);
         }
@@ -59295,10 +59287,8 @@ fn load_moe_w2_lane_diag() -> Option<(MoeW2LaneDiagConfigFn, MoeW2LaneDiagFetchF
             lib,
             b"krasis_marlin_moe_w2_lane_diag_config\0",
         );
-        let fetch_sym = sidecar_symbol::<MoeW2LaneDiagFetchFn>(
-            lib,
-            b"krasis_marlin_moe_w2_lane_diag_fetch\0",
-        );
+        let fetch_sym =
+            sidecar_symbol::<MoeW2LaneDiagFetchFn>(lib, b"krasis_marlin_moe_w2_lane_diag_fetch\0");
         if config_sym.is_none() || fetch_sym.is_none() {
             log::warn!("MoE W2 lane diagnostic symbols not found in {}", path);
             return None;
@@ -59324,10 +59314,7 @@ fn load_flash_attn() -> Option<FlashAttnFwdFn> {
             return None;
         }
 
-        if let Some(sym) = sidecar_symbol::<FlashAttnFwdFn>(
-            lib,
-            b"krasis_flash_attn_fwd_bf16\0",
-        ) {
+        if let Some(sym) = sidecar_symbol::<FlashAttnFwdFn>(lib, b"krasis_flash_attn_fwd_bf16\0") {
             log::info!("Loaded FlashAttention-2 from {}", path);
             return Some(sym);
         }
@@ -59344,10 +59331,9 @@ fn load_flash_attn_window() -> Option<FlashAttnFwdWindowFn> {
             return None;
         }
 
-        if let Some(sym) = sidecar_symbol::<FlashAttnFwdWindowFn>(
-            lib,
-            b"krasis_flash_attn_fwd_bf16_window\0",
-        ) {
+        if let Some(sym) =
+            sidecar_symbol::<FlashAttnFwdWindowFn>(lib, b"krasis_flash_attn_fwd_bf16_window\0")
+        {
             log::info!("Loaded FlashAttention-2 windowed BF16 from {}", path);
             return Some(sym);
         }
@@ -59369,10 +59355,9 @@ fn load_flash_attn_fp8kv() -> Option<FlashAttnFwdFn> {
             return None;
         }
 
-        if let Some(sym) = sidecar_symbol::<FlashAttnFwdFn>(
-            lib,
-            b"krasis_flash_attn_fwd_bf16q_fp8kv\0",
-        ) {
+        if let Some(sym) =
+            sidecar_symbol::<FlashAttnFwdFn>(lib, b"krasis_flash_attn_fwd_bf16q_fp8kv\0")
+        {
             log::info!("Loaded FlashAttention-2 FP8 KV from {}", path);
             return Some(sym);
         }
@@ -59616,18 +59601,12 @@ Set KRASIS_NO_FLA=1 only if you explicitly want the slower custom LA path."
                 "krasis_fla_chunk_local_cumsum_scalar_kernel",
                 FlaScalarKernelFn
             ),
-            kkt: load_fla_sym!(
-                "krasis_fla_chunk_scaled_dot_kkt_fwd_kernel",
-                FlaKktKernelFn
-            ),
+            kkt: load_fla_sym!("krasis_fla_chunk_scaled_dot_kkt_fwd_kernel", FlaKktKernelFn),
             solve_tril: load_fla_sym!(
                 "krasis_fla_merge_16x16_to_64x64_inverse_kernel",
                 FlaSolveTrilFn
             ),
-            wy_repr: load_fla_sym!(
-                "krasis_fla_recompute_w_u_fwd_kernel",
-                FlaWyReprFn
-            ),
+            wy_repr: load_fla_sym!("krasis_fla_recompute_w_u_fwd_kernel", FlaWyReprFn),
             state_recurrence: load_fla_sym!(
                 "krasis_fla_chunk_gated_delta_rule_fwd_kernel_h_blockdim64",
                 FlaStateRecurrenceFn
@@ -59688,11 +59667,10 @@ mod expert_hqq_prefill_output_consumption_gate_tests {
         first_token_margin_projection_layer_delta_from_consume_capture,
         first_token_margin_projection_target_for_scope,
         first_token_margin_projection_target_from_values,
-        first_token_margin_projection_trace_json_from_rows, ExpertHqqConsumeBoundaryCapture,
+        first_token_margin_projection_trace_json_from_rows, read_only_checkpoint_config_for_scope,
+        read_only_checkpoint_layer_delta_state_hashes_json, ExpertHqqConsumeBoundaryCapture,
         ExpertHqqConsumeBoundaryExpertRange, FirstTokenMarginProjectionExpertDelta,
         FirstTokenMarginProjectionLayerDelta, FirstTokenMarginProjectionTarget,
-        read_only_checkpoint_config_for_scope,
-        read_only_checkpoint_layer_delta_state_hashes_json,
     };
 
     fn bf16_bits(value: f32) -> u16 {

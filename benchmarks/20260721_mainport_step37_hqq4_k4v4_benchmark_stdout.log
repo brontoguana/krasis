@@ -1,0 +1,238 @@
+Pre-scan: set CUDA_VISIBLE_DEVICES=0
+Loaded config from tests/step37-flash-4-4-hqq4-k4v4-a16.conf: {'model_path': '/home/main/.krasis/models/Step-3.7-Flash', 'selected_gpus': '0', 'num_gpus': 1, 'layer_group_size': 2, 'kv_dtype': 'k4v4', 'gpu_expert_bits': 4, 'cpu_expert_bits': 4, 'attention_quant': 'hqq4', 'shared_expert_quant': 'int8', 'dense_mlp_quant': 'int8', 'lm_head_quant': 'int8', 'krasis_threads': 40, 'host': '0.0.0.0', 'port': 18019, 'enable_thinking': False, 'gpu_prefill_threshold': 300, 'vram_safety_margin': 600, 'force_load': False}
+
+[1m[36m▸ Krasis — Step-3.7-Flash[0m
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 1[0m
+  [32mHCS host cache: source[0m
+  [32mSelected physical GPUs: 0 (config; CUDA_VISIBLE_DEVICES=0)[0m
+  [32mExperts: GPU INT4 g128 (amax)  |  Attention: hqq4  |  KV: k4v4[0m
+  [32mLayer groups: 2  |  KV cache: 1000 MB  |  Threads: 40[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+
+[1m[36m▸ Loading model weights[0m
+  [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=518 MB, free=31600 MB, total=32119 MB
+
+[1m[36m▸ Loading GPU weights[0m
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:0: alloc=2854 MB, reserved=2870 MB, used=3486 MB, free=28632 MB, total=32119 MB
+  [0;32mHQQ attention artifacts validated (3726 MB cached), 28632 MB free[0m
+
+[1m[36m▸ Loading GPU expert weights from cache[0m
+  [1;33m▸ Building GPU INT4 Marlin cache: 42 layers from safetensors[0m
+    GPU Marlin: 5/42 layers (26s elapsed, ~196s remaining)
+    GPU Marlin: 10/42 layers (54s elapsed, ~172s remaining)
+    GPU Marlin: 15/42 layers (82s elapsed, ~148s remaining)
+    GPU Marlin: 20/42 layers (110s elapsed, ~121s remaining)
+    GPU Marlin: 25/42 layers (137s elapsed, ~93s remaining)
+    GPU Marlin: 30/42 layers (163s elapsed, ~65s remaining)
+    GPU Marlin: 35/42 layers (193s elapsed, ~39s remaining)
+    GPU Marlin: 40/42 layers (224s elapsed, ~11s remaining)
+    GPU Marlin: 42/42 layers (236s elapsed, ~0s remaining)
+    GPU Marlin: writing shared experts...
+  [0;32m✓ GPU INT4 Marlin cache built: 98.4 GB in 258s[0m
+    Marlin timing: initial_prefetch=0.0s routed io/quant=84.1s prefetch=0.0s repack=36.4s write=106.1s misc=9.2s; shared io/quant=3.6s repack=2.6s write=0.4s; flush=0.0s
+    Loading GPU Marlin cache: 42 layers...
+    GPU Marlin cache loaded: 98.4 GB in 65s
+  [0;32mExpert weights loaded in 332s.[0m
+  [33m[VRAM after-phase2-expert-weights][0m cuda:0: alloc=2854 MB, reserved=2870 MB, used=3486 MB, free=28632 MB, total=32119 MB
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:0: alloc=2854 MB, reserved=2870 MB, used=3486 MB, free=28632 MB, total=32119 MB
+  [33m[VRAM after-kv-cache-init][0m cuda:0: alloc=3854 MB, reserved=3870 MB, used=4486 MB, free=27632 MB, total=32119 MB
+  [33m[VRAM after-full-load][0m cuda:0: alloc=3854 MB, reserved=3870 MB, used=4486 MB, free=27632 MB, total=32119 MB
+
+[1m[36m▸ CUDA runtime warmup[0m
+  [32mcuBLAS + Triton kernel compilation done[0m
+
+[1m[36m▸ Setting up GPU decode store[0m
+  [32mGPU decode store ready (addr=0x589594b0)[0m
+  [32mReleased redundant GPU execution source tensors (692 MB)[0m
+  [2mVRAM monitor started (tracking warmup)[0m
+  [2mcuda:0: 0 MB total[0m
+
+[1m[36m▸ Pre-allocating Rust prefill engine[0m
+[FLA] Loading kernels for H=0 from /home/main/Documents/Claude/krasis/python/krasis/libkrasis_fla_sm120.so
+  [32mPrefill engine scratch buffers allocated[0m
+
+[1m[36m▸ Warmup (Rust prefill engine)[0m
+  [32mRust prefill warmed with 300 tokens before HCS budgeting[0m
+  [32mWarmup complete in 16.2s[0m
+  [2mcuda:0 warmup:  peak 10,434 MB used / 32,119 MB total  (min free: 21,684 MB)[0m
+
+[1m[36m▸ VRAM calibration[0m
+  [32mSafety margin: 600 MB[0m
+  [32mFree VRAM after startup: 22,480 MB / 32,119 MB[0m
+  [32mShort calibration: probing 500 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 3.97s (8.1 tok/s)  VRAM: 22462 MB free now, 22462 MB min free during decode[0m
+  [32mShort calibration: baseline=22,480 MB, prefill post-alloc=21,704 MB, prefill min=19,792 MB, decode min=22,462 MB, post-cleanup=22,462 MB[0m
+  [32mAdaptive long calibration: default target=14,473 tokens, target low-water floor=1,200 MB, estimated prefill growth=0.5738 MB/token[0m
+  [32mAdaptive long calibration: next probe 14,473 tokens (model-estimated initial probe (projected 0.5738 MB/token, validation floor 2400 MB))[0m
+  [32mLong calibration: probing 14,473 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 7.00s (4.6 tok/s)  VRAM: 22462 MB free now, 22462 MB min free during decode[0m
+  [32mLong calibration: baseline=22,462 MB, prefill post-alloc=13,620 MB, prefill min=11,390 MB, decode min=22,462 MB, post-cleanup=22,462 MB[0m
+  [32mScratch reservation: max=24,737 MB (at 50,000 tokens)[0m
+
+[1m[36m▸ VRAM calibration complete[0m
+  [32mPost-calibration free VRAM: 22,462 MB[0m
+  [32mTransient deltas: short prefill=2,688 MB, long prefill=11,072 MB, short decode=18 MB, long decode=0 MB[0m
+  [32mGPU0 decode HCS budget: 21,844 MB[0m
+  [32mPrefill HCS budgets: short=19,174 MB, long=10,790 MB[0m
+  [32mWorst-case prefill scratch reservation: 24,737 MB at 50,000 tokens[0m
+
+[1m[36m▸ Calculating HCS budget[0m
+
+[1m[36m▸ Checking approved route heatmap cache[0m
+  [32mApproved route heatmap loaded from cache: step37_flash_hqq4_p00006 (manifest-approved runtime compatibility)[0m
+  [32mUsing approved route heatmap; quick startup heatmap collection skipped[0m
+  [32mHeatmap: 11,232 experts ranked from 11,232 entries[0m
+  [2mVRAM calibration: baseline 22462 MB | prefill 614.4 KB/tok, decode -1.3 KB/tok | HCS allowance prefill: short 19174 MB, long 10790 MB | decode: short 21844 MB, long 21862 MB | idle floors prefill=3288 MB decode=618 MB | decode-resident HCS budget=21844 MB[0m
+  [2mGPU0 HCS: 12096 experts (11232 ranked + 864 unranked), reclaimable: 21,844 MB[0m
+
+[1m[36m▸ Loading GPU0 HCS pool (fully reclaimable)[0m
+
+[1m[36m▸ HCS pool loaded[0m
+  [32mHCS pool: 0/12096 experts loaded in 0.00s (0.0% coverage), 0.0 MB VRAM, 0 free slots, gpu_route_sync=false, mapped_reads=false | soft: 2800 experts in 0.92s (21656.2 MB, host_mode=source) | total: 2800/12096 (23.1%) coverage[0m
+  [2mLoaded in 1.0s[0m
+
+[1m[36m▸ Decode validation[0m
+  [32mSkipped: Rust prefill already warmed before HCS budgeting[0m
+
+[1m[36m▸ VRAM monitor: runtime warnings enabled[0m
+  [32mSafety margin: 600 MB — warnings on every new low below this[0m
+VRAM pressure: evicted 16 soft HCS experts / 1 chunks; free=886 MB after eviction (safety=600 MB, target=848 MB)
+  [33mVRAM pressure eviction at startup_ready: evicted 16 soft HCS experts, freed 123.8 MB, final free 886 MB[0m
+
+[1m[32mKRASIS SERVER READY[0m
+  [32mModel:[0m    [1mStep-3.7-Flash[0m
+  [32mAddress:[0m  [1m0.0.0.0:18019[0m
+  [32mContext:[0m  18,192 tokens  |  KV cache: 1,000 MB
+  [32mDecode:[0m   GPU  |  HCS: on  |  Think: off
+  [32mClient setup:[0m
+    Base URL:      [1mhttp://127.0.0.1:18019/v1[0m
+    Chat endpoint: http://127.0.0.1:18019/v1/chat/completions
+    Models:        http://127.0.0.1:18019/v1/models
+    API key:       [1mX[0m [2m(any value)[0m
+    Model name:    [1mStep-3.7-Flash-vision[0m
+                   [2mvision-capable; use this same model for text and images[0m
+  [2mPress Q or Ctrl-C to stop[0m
+
+
+[1m[36mKRASIS BENCHMARK[0m
+
+[1m[36m▸ Collecting system info[0m
+  Model:    [1mStep-3.7-Flash[0m
+  GPUs:     1x NVIDIA GeForce RTX 5090
+  Strategy: gpu_decode (layer_grouped(2))
+
+[1m[36m▸ Loading benchmark prompts (warmup + timed at 1K/5K/10K/14,473)[0m
+  Prefill sizing:  [33mruntime-calibrated prefill cap 14,473 tokens (long probe low-water 11,390 MB, safety 600 MB)[0m
+  Warmup prefill:  3 prompts, ~14,473 tokens each
+  Timed prefill:   4 prompts at 1K/5K/10K/14,473 tokens
+    [1] 1,000 tokens
+    [2] 5,000 tokens
+    [3] 10,000 tokens
+    [4] 14,473 tokens
+  Decode:          6 prompts (50/100/250 tokens, warmup + timed)
+
+[1m[36m▸ Warmup (3 prefill + 3 decode via engine)[0m
+  Warmup: 2 short engine requests...
+VRAM pressure: evicted 16 soft HCS experts / 1 chunks; free=886 MB after eviction (safety=600 MB, target=848 MB)
+VRAM pressure: evicted 16 soft HCS experts / 1 chunks; free=886 MB after eviction (safety=600 MB, target=848 MB)
+  [32mdecode: 7 tokens in 0.37s (19.1 tok/s)  VRAM: 886 MB free now, 886 MB min free during decode[0m
+  [36mDynamic HCS: hit=68.75% tail=672/336 protected=2112 promotions=735 evictions=735 request_promotions=735/2352 budget_skips=0 no_slot=0 copy_failures=0[0m
+VRAM pressure: evicted 16 soft HCS experts / 1 chunks; free=886 MB after eviction (safety=600 MB, target=848 MB)
+VRAM pressure: evicted 16 soft HCS experts / 1 chunks; free=886 MB after eviction (safety=600 MB, target=848 MB)
+  [32mdecode: 7 tokens in 0.46s (15.4 tok/s)  VRAM: 886 MB free now, 886 MB min free during decode[0m
+  [36mDynamic HCS: hit=56.89% tail=672/336 protected=2112 promotions=1749 evictions=1749 request_promotions=1014/2352 budget_skips=0 no_slot=0 copy_failures=0[0m
+  Warmup complete.
+  Prefill warmup (3 runs, ~14,473 tokens each)...
+VRAM pressure: evicted 16 soft HCS experts / 1 chunks; free=2622 MB after eviction (safety=600 MB, target=848 MB)
+    [1/3] 14,473 tokens
+VRAM pressure: evicted 16 soft HCS experts / 1 chunks; free=2622 MB after eviction (safety=600 MB, target=848 MB)
+    [2/3] 14,473 tokens
+VRAM pressure: evicted 16 soft HCS experts / 1 chunks; free=2622 MB after eviction (safety=600 MB, target=848 MB)
+    [3/3] 14,473 tokens
+  Decode warmup (50/100/250 tokens, 3 separate prompts)...
+VRAM pressure: evicted 16 soft HCS experts / 1 chunks; free=884 MB after eviction (safety=600 MB, target=848 MB)
+VRAM pressure: evicted 16 soft HCS experts / 1 chunks; free=884 MB after eviction (safety=600 MB, target=848 MB)
+  [32mdecode: 49 tokens in 2.26s (21.7 tok/s)  VRAM: 884 MB free now, 884 MB min free during decode[0m
+  [36mDynamic HCS: hit=75.05% tail=672/336 protected=2112 promotions=5857 evictions=5857 request_promotions=4108/16464 budget_skips=0 no_slot=0 copy_failures=0[0m
+    50 tokens done
+VRAM pressure: evicted 16 soft HCS experts / 1 chunks; free=884 MB after eviction (safety=600 MB, target=848 MB)
+VRAM pressure: evicted 16 soft HCS experts / 1 chunks; free=884 MB after eviction (safety=600 MB, target=848 MB)
+  [32mdecode: 99 tokens in 4.70s (21.1 tok/s)  VRAM: 884 MB free now, 884 MB min free during decode[0m
+  [36mDynamic HCS: hit=73.60% tail=672/336 protected=2112 promotions=14639 evictions=14639 request_promotions=8782/33264 budget_skips=0 no_slot=0 copy_failures=0[0m
+    100 tokens done
+VRAM pressure: evicted 16 soft HCS experts / 1 chunks; free=884 MB after eviction (safety=600 MB, target=848 MB)
+VRAM pressure: evicted 16 soft HCS experts / 1 chunks; free=884 MB after eviction (safety=600 MB, target=848 MB)
+  [32mdecode: 249 tokens in 11.60s (21.5 tok/s)  VRAM: 884 MB free now, 884 MB min free during decode[0m
+  [36mDynamic HCS: hit=74.75% tail=672/336 protected=2112 promotions=35765 evictions=35765 request_promotions=21126/83664 budget_skips=0 no_slot=0 copy_failures=0[0m
+    250 tokens done
+  Warmup complete (50.1s). All kernels compiled.
+
+[1m[36m▸ Prefill (internal) — 1K/5K/10K/14,473 tokens, 4 runs[0m
+VRAM pressure: evicted 16 soft HCS experts / 1 chunks; free=1008 MB after eviction (safety=600 MB, target=848 MB)
+VRAM pressure: evicted 16 soft HCS experts / 1 chunks; free=1504 MB after eviction (safety=600 MB, target=848 MB)
+VRAM pressure: evicted 16 soft HCS experts / 1 chunks; free=2126 MB after eviction (safety=600 MB, target=848 MB)
+VRAM pressure: evicted 16 soft HCS experts / 1 chunks; free=2622 MB after eviction (safety=600 MB, target=848 MB)
+  Run 1: 265.6 tok/s (1,000 tokens in 3765.6ms)
+  Run 2: 1,173.0 tok/s (5,000 tokens in 4262.6ms)
+  Run 3: 2,074.3 tok/s (10,000 tokens in 4821.0ms)
+  Run 4: 2,623.8 tok/s (14,473 tokens in 5516.0ms)
+  [1mBest: 2,623.8 tok/s (14,473 tokens)[0m
+
+[1m[36m▸ Decode (internal) — 50/100/250 tokens, 3 separate prompts[0m
+VRAM pressure: evicted 16 soft HCS experts / 1 chunks; free=884 MB after eviction (safety=600 MB, target=848 MB)
+VRAM pressure: evicted 16 soft HCS experts / 1 chunks; free=884 MB after eviction (safety=600 MB, target=848 MB)
+  [32mdecode: 49 tokens in 2.39s (20.5 tok/s)  VRAM: 884 MB free now, 884 MB min free during decode[0m
+  [36mDynamic HCS: hit=73.83% tail=672/336 protected=2112 promotions=40073 evictions=40073 request_promotions=4308/16464 budget_skips=0 no_slot=0 copy_failures=0[0m
+VRAM pressure: evicted 16 soft HCS experts / 1 chunks; free=884 MB after eviction (safety=600 MB, target=848 MB)
+VRAM pressure: evicted 16 soft HCS experts / 1 chunks; free=884 MB after eviction (safety=600 MB, target=848 MB)
+  [32mdecode: 99 tokens in 4.47s (22.1 tok/s)  VRAM: 884 MB free now, 884 MB min free during decode[0m
+  [36mDynamic HCS: hit=76.38% tail=672/336 protected=2112 promotions=47931 evictions=47931 request_promotions=7858/33264 budget_skips=0 no_slot=0 copy_failures=0[0m
+VRAM pressure: evicted 16 soft HCS experts / 1 chunks; free=884 MB after eviction (safety=600 MB, target=848 MB)
+VRAM pressure: evicted 16 soft HCS experts / 1 chunks; free=884 MB after eviction (safety=600 MB, target=848 MB)
+  [32mdecode: 249 tokens in 12.10s (20.6 tok/s)  VRAM: 884 MB free now, 884 MB min free during decode[0m
+  [36mDynamic HCS: hit=73.79% tail=672/336 protected=2112 promotions=69862 evictions=69862 request_promotions=21931/83664 budget_skips=0 no_slot=0 copy_failures=0[0m
+   50 tokens: 20.50 tok/s (48.8ms/tok)
+  100 tokens: 22.12 tok/s (45.2ms/tok)
+  250 tokens: 20.58 tok/s (48.6ms/tok)
+  [1mBest: 22.12 tok/s[0m
+  HCS:  2784/12096 experts loaded (23.0%)
+  VRAM: 884 MB min free during decode (safety margin: 600 MB)
+
+[1m[36m▸ Round trip (network) — 50/100/250 tokens via HTTP[0m
+  [32mprefill: 17 tokens in 3.04s (5.6 tok/s)  VRAM: 4604 MB free now, 2868 MB min free during prefill[0m
+VRAM pressure: evicted 16 soft HCS experts / 1 chunks; free=884 MB after eviction (safety=600 MB, target=848 MB)
+VRAM pressure: evicted 16 soft HCS experts / 1 chunks; free=884 MB after eviction (safety=600 MB, target=848 MB)
+  [32mdecode: 7 tokens in 0.40s (17.5 tok/s)  VRAM: 884 MB free now, 884 MB min free during decode[0m
+  [36mDynamic HCS: hit=64.58% tail=672/336 protected=2112 promotions=70695 evictions=70695 request_promotions=833/2352 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [32mprefill: 62 tokens in 3.64s (17.0 tok/s)  VRAM: 4604 MB free now, 2152 MB min free during prefill[0m
+VRAM pressure: evicted 16 soft HCS experts / 1 chunks; free=884 MB after eviction (safety=600 MB, target=848 MB)
+VRAM pressure: evicted 16 soft HCS experts / 1 chunks; free=884 MB after eviction (safety=600 MB, target=848 MB)
+  [32mdecode: 49 tokens in 2.38s (20.6 tok/s)  VRAM: 884 MB free now, 884 MB min free during decode[0m
+  [36mDynamic HCS: hit=72.66% tail=672/336 protected=2112 promotions=75196 evictions=75196 request_promotions=4501/16464 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [32mprefill: 68 tokens in 3.62s (18.8 tok/s)  VRAM: 4604 MB free now, 2152 MB min free during prefill[0m
+VRAM pressure: evicted 16 soft HCS experts / 1 chunks; free=884 MB after eviction (safety=600 MB, target=848 MB)
+VRAM pressure: evicted 16 soft HCS experts / 1 chunks; free=884 MB after eviction (safety=600 MB, target=848 MB)
+  [32mdecode: 99 tokens in 4.31s (23.0 tok/s)  VRAM: 884 MB free now, 884 MB min free during decode[0m
+  [36mDynamic HCS: hit=77.13% tail=672/336 protected=2112 promotions=82805 evictions=82805 request_promotions=7609/33264 budget_skips=0 no_slot=0 copy_failures=0[0m
+  [32mprefill: 61 tokens in 3.62s (16.9 tok/s)  VRAM: 4604 MB free now, 2152 MB min free during prefill[0m
+VRAM pressure: evicted 16 soft HCS experts / 1 chunks; free=884 MB after eviction (safety=600 MB, target=848 MB)
+VRAM pressure: evicted 16 soft HCS experts / 1 chunks; free=884 MB after eviction (safety=600 MB, target=848 MB)
+  [32mdecode: 249 tokens in 11.89s (20.9 tok/s)  VRAM: 884 MB free now, 884 MB min free during decode[0m
+  [36mDynamic HCS: hit=73.92% tail=672/336 protected=2112 promotions=104627 evictions=104627 request_promotions=21822/83664 budget_skips=0 no_slot=0 copy_failures=0[0m
+   50 tokens: 36.30 tok/s (6.37s total)
+  100 tokens: 29.31 tok/s (8.27s total)
+  250 tokens: 22.86 tok/s (15.85s total)
+  [1mBest: 36.30 tok/s[0m
+
+[1m[36m▸ Writing results[0m
+
+[1m[32mBENCHMARK COMPLETE[0m
+  Model:                 [1mStep-3.7-Flash[0m
+  Config:                INT4/4 HQQ4 KV=k4v4 1 GPU
+  Prefill (internal):    [32m[1m2,623.8 tok/s[0m  (best of 1K/5K/10K/14,473)
+  Decode (internal):     [32m[1m22.12 tok/s[0m  (best of 50/100/250)
+  Round trip (network):  [32m[1m36.30 tok/s[0m  (best of 50/100/250)
+  HCS coverage:          2784/12096 (23.0%)
+  Min free VRAM:         884 MB
+  Log:     [2mlogs/dev-benchmark_20260721_083218/benchmark_report.log[0m
+
