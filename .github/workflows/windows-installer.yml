@@ -11,13 +11,17 @@ permissions:
 jobs:
   build-windows-installer:
     runs-on: windows-2022
-    timeout-minutes: 150
+    timeout-minutes: 240
     defaults:
       run:
         shell: pwsh
     env:
       KRASIS_DEV_SCRIPT: "1"
       KRASIS_SIDECAR_PLATFORM: windows-x86_64-cuda126
+      KRASIS_WINDOWS_PYTHON_VERSION: "3.12.10"
+      KRASIS_WINDOWS_TORCH_VERSION: "2.9.1+cu128"
+      KRASIS_WINDOWS_TORCH_CUDA: "12.8"
+      KRASIS_WINDOWS_TORCH_URL: "https://download-r2.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp312-cp312-win_amd64.whl#sha256=3a01f0b64c10a82d444d9fd06b3e8c567b1158b76b2764b8f51bfd8f535064b0"
 
     steps:
       - uses: actions/checkout@v4
@@ -60,21 +64,106 @@ jobs:
           if (-not $wheel) {
             throw "No Krasis wheel found in dist"
           }
-          python -m pip download --dest wheelhouse $wheel.FullName
+          python -m pip download `
+            --dest wheelhouse `
+            --requirement scripts/windows/windows-runtime-requirements.txt `
+            $wheel.FullName
           Get-ChildItem wheelhouse | Format-Table Name,Length
 
       - name: Download bundled Python installer
         run: |
-          $pyver = python -c "import sys; print('.'.join(map(str, sys.version_info[:3])))"
+          $pyver = $env:KRASIS_WINDOWS_PYTHON_VERSION
           $url = "https://www.python.org/ftp/python/$pyver/python-$pyver-amd64.exe"
           Invoke-WebRequest -Uri $url -OutFile python-installer.exe
           Get-Item python-installer.exe | Format-Table Name,Length
 
+      - name: Build private Windows runtime
+        run: |
+          $version = python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])"
+          scripts/windows/Build-Runtime.ps1 `
+            -Wheelhouse wheelhouse `
+            -PythonInstaller python-installer.exe `
+            -RuntimeRequirements scripts/windows/windows-runtime-requirements.txt `
+            -OutputDir runtime-package `
+            -Version $version `
+            -PythonVersion $env:KRASIS_WINDOWS_PYTHON_VERSION `
+            -TorchVersion $env:KRASIS_WINDOWS_TORCH_VERSION `
+            -TorchCuda $env:KRASIS_WINDOWS_TORCH_CUDA `
+            -TorchUrl $env:KRASIS_WINDOWS_TORCH_URL
+          Get-Content runtime-package/runtime-manifest.json
+
       - name: Build installer
         run: |
           $version = python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])"
-          scripts/windows/Build-Installer.ps1 -Wheelhouse wheelhouse -PythonInstaller python-installer.exe -OutputDir dist -Version $version
+          scripts/windows/Build-Installer.ps1 `
+            -RuntimePackage runtime-package `
+            -OutputDir dist `
+            -Version $version
           Get-ChildItem dist | Format-Table Name,Length
+
+      - name: Test clean install, isolation, legacy repair, and uninstall
+        run: |
+          $installer = Get-ChildItem dist -Filter "KrasisSetup-*-win64.exe" | Select-Object -First 1
+          if (-not $installer) {
+            throw "No Krasis Windows installer was built."
+          }
+
+          $testRoot = Join-Path $env:RUNNER_TEMP "krasis-private-runtime-test"
+          Remove-Item -Recurse -Force $testRoot -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path (Join-Path $testRoot "python") | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $testRoot "venv") | Out-Null
+          Set-Content (Join-Path $testRoot "python\legacy-313-runtime.txt") "legacy"
+          Set-Content (Join-Path $testRoot "venv\legacy-313-venv.txt") "legacy"
+
+          Remove-Item -Recurse -Force target, wheelhouse, runtime-package -ErrorAction SilentlyContinue
+          Get-PSDrive C | Format-Table Name,Used,Free
+
+          $installLog = Join-Path $env:RUNNER_TEMP "krasis-installer-test.log"
+          $process = Start-Process `
+            -FilePath $installer.FullName `
+            -ArgumentList @(
+              "/VERYSILENT",
+              "/SUPPRESSMSGBOXES",
+              "/NORESTART",
+              "/DIR=$testRoot",
+              "/LOG=$installLog"
+            ) `
+            -PassThru `
+            -Wait
+          if ($process.ExitCode -ne 0) {
+            if (Test-Path $installLog) {
+              Get-Content $installLog
+            }
+            throw "Private-runtime installer test failed with status $($process.ExitCode)."
+          }
+
+          $env:PYTHONHOME = "C:\definitely-not-krasis-python"
+          $env:PYTHONPATH = "C:\hostile-system-site-packages"
+          scripts/windows/Test-InstalledRuntime.ps1 -InstallRoot $testRoot
+          Remove-Item Env:PYTHONHOME,Env:PYTHONPATH -ErrorAction SilentlyContinue
+
+          if (Test-Path (Join-Path $testRoot "python")) {
+            throw "Installer retained the legacy Python directory."
+          }
+          if (Test-Path (Join-Path $testRoot "venv")) {
+            throw "Installer retained the legacy venv directory."
+          }
+
+          $uninstaller = Join-Path $testRoot "unins000.exe"
+          $uninstall = Start-Process `
+            -FilePath $uninstaller `
+            -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART") `
+            -PassThru `
+            -Wait
+          if ($uninstall.ExitCode -ne 0) {
+            throw "Private-runtime uninstall test failed with status $($uninstall.ExitCode)."
+          }
+          if (Test-Path (Join-Path $testRoot "runtime")) {
+            throw "Uninstall retained the private runtime."
+          }
+
+          Copy-Item -Force $installLog dist/windows-installer-test.log
+          Get-PSDrive C | Format-Table Name,Used,Free
 
       - name: Upload CI artifacts
         uses: actions/upload-artifact@v4
@@ -84,6 +173,7 @@ jobs:
             dist/KrasisSetup-*-win64.exe
             dist/Krasis-Windows-Package-*.zip
             dist/*.whl
+            dist/windows-installer-test.log
 
       - name: Upload release assets
         if: github.event_name == 'release'

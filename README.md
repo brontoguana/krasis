@@ -11,6 +11,24 @@ loading work, while the performance-sensitive runtime path uses Rust/CUDA
 orchestration, CUDA kernels, cached quantized weights, and measured VRAM
 budgeting.
 
+## Install
+
+The current release is the
+[`v1.0.16-rc.3` prerelease](https://github.com/brontoguana/krasis/releases/tag/v1.0.16-rc.3).
+
+**Native Windows:** [Download the Krasis Windows installer](https://github.com/brontoguana/krasis/releases/download/v1.0.16-rc.3/KrasisSetup-1.0.16-rc.3-win64.exe).
+It installs Krasis for the current user, includes its own Python runtime, and
+adds `Krasis`, `Krasis Update`, and `Krasis Prerelease` to the Start Menu.
+
+**Linux or WSL2:**
+
+```bash
+curl -sSf https://raw.githubusercontent.com/brontoguana/krasis/main/install.sh | bash -s -- prerelease
+```
+
+See [all releases](https://github.com/brontoguana/krasis/releases) for older
+versions and individual wheel/source assets.
+
 You can [contact me here](https://forms.gle/ue4nvyvNNHtUZ7MQ7), but for bugs,
 setup problems, model requests, or feature requests please open a GitHub issue.
 
@@ -46,8 +64,8 @@ Krasis release. Highlights:
 - Added full Ampere support for the current production path. HQQ attention and
   compact KV cache modes were built with Ampere compatibility in mind and do
   not require FP8-capable hardware.
-- Added Qwen3.6-35B-A3B support, including HQQ4/`k4v4` RTX 5090/5080
-  benchmark coverage and HQQ6/`k6v6` RTX A4500 Ampere coverage.
+- Expanded validated model coverage across Qwen3-Coder-Next, Qwen3/3.5/3.6,
+  Ornith, Step-3.7-Flash, Gemma 4, and Nemotron MoE families.
 - Added and hardened HCS expert residency management: measured startup
   calibration, prompt-conditioned reload, dynamic recency tail, per-stage
   budgets, soft-tier reload caps, and safe eviction/reload paths.
@@ -56,6 +74,8 @@ Krasis release. Highlights:
   exit protection before CUDA enters an unsafe OOM state.
 - Added full GitHub release wheel packaging for Python 3.10, 3.11, 3.12, and
   3.13, with vendored CUDA sidecars injected into wheels.
+- Added a native Windows installer with a private Python runtime, interactive
+  launcher, and Start Menu entries for stable and prerelease updates.
 - Added `krasis update` and `krasis prerelease` maintenance commands.
 - Added an interactive curated Hugging Face downloader flow in the launcher.
 - Added reverse SSH tunnel support for exposing a local Krasis server to a
@@ -74,16 +94,19 @@ Krasis release. Highlights:
 Selected current timing-disabled results. `Decode` is the internal engine
 measurement; `HTTP round trip` includes local client/server HTTP overhead.
 
-| Hardware | Model | Params | Attention | KV | Prefill | Decode | HTTP round trip |
-|----------|-------|-------:|-----------|----|--------:|-------:|----------------:|
-| RTX 5090 32 GB | Qwen3.6-35B-A3B | 35B | HQQ4 | k4v4 | 10030.3 tok/s | 124.88 tok/s | 267.00 tok/s |
-| RTX 5090 32 GB | Qwen3-Coder-Next | 80B | HQQ8 | k4v4 | 6111.2 tok/s | 88.59 tok/s | 157.00 tok/s |
-| RTX 5090 32 GB | Qwen3.5-122B-A10B | 122B | HQQ6 | k4v4 | 4880.4 tok/s | 25.29 tok/s | 44.95 tok/s |
-| RTX 5090 32 GB | Qwen3-235B-A22B | 235B | HQQ6 | k4v4 | 1459.1 tok/s | 3.54 tok/s | 6.17 tok/s |
-| RTX A4500 20 GB | Qwen3.6-35B-A3B | 35B | HQQ6 | k6v6 | 2235.2 tok/s | 50.98 tok/s | 103.98 tok/s |
-| RTX A4500 20 GB | Qwen3-Coder-Next | 80B | HQQ6 | k4v4 | 1569.5 tok/s | 34.69 tok/s | 60.47 tok/s |
-| RTX 5080 16 GB | Qwen3.6-35B-A3B | 35B | HQQ4 | k4v4 | 3743.5 tok/s | 60.04 tok/s | 128.55 tok/s |
-| RTX 3070 Laptop 8 GB | Qwen3.5-35B-A3B | 35B | HQQ4 | k4v4 | 222.1 tok/s | 12.48 tok/s | 22.00 tok/s |
+| Hardware | Model | Params | Attention + KV | Prefill | Decode | HTTP round trip |
+|---|---|---:|---|---:|---:|---:|
+| RTX PRO 6000 96 GB | Step-3.7-Flash | 201.4B | INT4/HQQ4/k4v4 | 5,261.0 tok/s | 55.40 tok/s | 112.82 tok/s |
+| RTX PRO 6000 96 GB | Ornith-1.0-397B | 397B | INT4/HQQ4/k4v4 | 2,354.5 tok/s | 23.58 tok/s | 41.73 tok/s |
+| RTX PRO 6000 96 GB | Qwen3-Coder-Next | 80B | INT4/HQQ4/k4v4 | 11,211.1 tok/s | 91.34 tok/s | 161.82 tok/s |
+| RTX 5090 32 GB | Nemotron-3-Super-120B-A12B | 123.6B | INT4/HQQ4/k4v4 | 1,852.2 tok/s | 41.87 tok/s | 50.76 tok/s |
+| RTX 5090 32 GB | Qwen3.5-397B-A17B | 397B | INT4/HQQ4/k4v4 | 973.8 tok/s | 10.04 tok/s | 18.71 tok/s |
+| RTX 5090 32 GB | Nemotron-3-Nano-30B-A3B | 31.6B | INT4/HQQ4/k4v4 | 8,583.9 tok/s | 151.76 tok/s | 325.36 tok/s |
+
+See the complete [benchmark table](STATS-BENCHMARKS.md), the associated
+[quality results](STATS-QUALITY.md), and the
+[reproducible benchmark index](benchmarks/BENCHMARKS.md). Approximate
+adaptive-pruning results are not used in this table.
 
 ## Tradeoffs And Requirements
 
@@ -106,9 +129,9 @@ measurement; `HTTP round trip` includes local client/server HTTP overhead.
 
 ### Requirements
 
-- Linux, including Ubuntu 24.04+ or WSL2 on Windows
-- Native Windows installer builds are available as a preview release target
-- Python 3.10+
+- Native x86-64 Windows, Linux (including Ubuntu 24.04+), or WSL2
+- Python 3.10+ on Linux/WSL; native Windows uses the release-pinned private
+  Python included by the installer
 - NVIDIA GPU with CUDA drivers installed
 - Rust is only needed for source builds, not normal wheel installs
 - Enough disk/RAM for the source model and generated Krasis caches
@@ -118,22 +141,26 @@ measurement; `HTTP round trip` includes local client/server HTTP overhead.
 Linux/WSL:
 
 ```bash
-curl -sSf https://raw.githubusercontent.com/brontoguana/krasis/main/install.sh | bash
+curl -sSf https://raw.githubusercontent.com/brontoguana/krasis/main/install.sh | bash -s -- prerelease
 ```
 
 This creates a managed environment at `~/.krasis/venv`, installs Krasis,
 symlinks commands into `~/.local/bin`, and updates PATH for the current shell.
-No sudo is required for the Krasis install itself.
+No sudo is required for the Krasis install itself. Omit `prerelease` when
+installing the latest stable release.
 
-Native Windows preview:
+Native Windows:
 
-Download `KrasisSetup-*-win64.exe` from a GitHub release. The installer creates
-a per-user install under `%LOCALAPPDATA%\Programs\Krasis`, installs a private
-Python runtime and Krasis environment, and adds three entries to the Krasis
-Start Menu folder. `Krasis` opens a maximized PowerShell window running the
-interactive launcher. `Krasis Update` installs the latest stable Windows
-release, while `Krasis Prerelease` installs the latest Windows prerelease.
-Models and caches still live under `%USERPROFILE%\.krasis`.
+[Download `KrasisSetup-1.0.16-rc.3-win64.exe`](https://github.com/brontoguana/krasis/releases/download/v1.0.16-rc.3/KrasisSetup-1.0.16-rc.3-win64.exe).
+The installer creates a per-user install under
+`%LOCALAPPDATA%\Programs\Krasis`, installs and validates a release-pinned
+private Python/Krasis/PyTorch runtime, and adds three entries to the Krasis
+Start Menu folder. It never uses or modifies a system Python. `Krasis` opens a
+maximized PowerShell window running the interactive launcher. `Krasis Update`
+installs the latest stable Windows release, while `Krasis Prerelease` installs
+the latest Windows prerelease. Models and caches still live under
+`%USERPROFILE%\.krasis`. The first install downloads the pinned CUDA PyTorch
+wheel and can take several minutes.
 
 The first native Windows target covers the Marlin/FlashAttention sidecar path.
 FLA/linear-attention models still need a separate native Windows FLA sidecar

@@ -281,11 +281,18 @@ class LauncherMatrixTest(unittest.TestCase):
                 else:
                     os.environ["ProgramW6432"] = old_program_w6432
 
-    def test_windows_installer_exposes_native_update_shortcuts(self) -> None:
+    def test_windows_installer_owns_private_runtime_and_update_shortcuts(self) -> None:
         windows_dir = REPO_ROOT / "scripts" / "windows"
         installer_source = (windows_dir / "KrasisInstaller.iss").read_text()
         build_source = (windows_dir / "Build-Installer.ps1").read_text()
+        runtime_build_source = (windows_dir / "Build-Runtime.ps1").read_text()
+        runtime_manifest_source = (windows_dir / "Runtime-Manifest.ps1").read_text()
+        install_source = (windows_dir / "Install-Krasis.ps1").read_text()
+        launch_source = (windows_dir / "Launch-Krasis.ps1").read_text()
         updater_source = (windows_dir / "Update-Krasis.ps1").read_text()
+        workflow_source = (
+            REPO_ROOT / ".github" / "workflows" / "windows-installer.yml"
+        ).read_text()
 
         self.assertIn(
             r'Name: "{autoprograms}\Krasis\Krasis Update"',
@@ -307,6 +314,54 @@ class LauncherMatrixTest(unittest.TestCase):
             '"Update-Krasis.ps1") (Join-Path $Stage "bin\\Update-Krasis.ps1")',
             build_source,
         )
+        self.assertIn(
+            '"Runtime-Manifest.ps1") (Join-Path $Stage "bin\\Runtime-Manifest.ps1")',
+            build_source,
+        )
+        self.assertIn(
+            r'Source: "{#SourceDir}\runtime-package\*"',
+            installer_source,
+        )
+        self.assertIn("CurStepChanged(CurStep: TSetupStep)", installer_source)
+        self.assertIn("ResultCode <> 0", installer_source)
+        self.assertNotIn(
+            r'Filename: "{app}\bin\python-installer.exe"',
+            installer_source,
+        )
+        self.assertNotIn("TargetDir=", installer_source)
+        self.assertNotIn(r"-Wheelhouse ""{app}", installer_source)
+
+        self.assertIn("Get-KrasisRuntimePayloadHash", runtime_manifest_source)
+        self.assertIn("Assert-KrasisPrivateRuntime", runtime_manifest_source)
+        self.assertIn('"isolated": sys.flags.isolated', runtime_manifest_source)
+        self.assertIn('"ignore_environment": sys.flags.ignore_environment', runtime_manifest_source)
+        self.assertIn("user site-packages", runtime_manifest_source)
+        self.assertIn("Get-KrasisRuntimePayloadHash", runtime_build_source)
+        self.assertIn("$RelocationProbe", runtime_build_source)
+        self.assertIn("runtime-manifest.json", runtime_build_source)
+
+        self.assertIn('$RuntimeRoot = Join-Path $InstallRoot "runtime"', install_source)
+        self.assertIn('$CurrentPath = Join-Path $RuntimeRoot "current.txt"', install_source)
+        self.assertIn("[System.IO.File]::Replace", install_source)
+        self.assertIn("--no-deps", install_source)
+        self.assertIn('"$($StagedManifest.torch_url)"', install_source)
+        self.assertIn("(Join-Path $InstallRoot \"python\")", install_source)
+        self.assertIn("(Join-Path $InstallRoot \"venv\")", install_source)
+        self.assertNotIn("Get-Command py", install_source)
+        self.assertNotIn("Get-Command python", install_source)
+        self.assertNotIn("-m venv", install_source)
+
+        self.assertIn('"runtime\\current.txt"', launch_source)
+        self.assertIn("Assert-KrasisPrivateRuntime", launch_source)
+        self.assertIn("& $Python -I -m krasis.launcher", launch_source)
+        self.assertNotIn(r'venv\Scripts\python.exe', launch_source)
+        self.assertNotIn("Get-Command py", launch_source)
+        self.assertNotIn("Get-Command python", launch_source)
+
+        self.assertIn('KRASIS_WINDOWS_PYTHON_VERSION: "3.12.10"', workflow_source)
+        self.assertIn('KRASIS_WINDOWS_TORCH_VERSION: "2.9.1+cu128"', workflow_source)
+        self.assertIn("Test clean install, isolation, legacy repair, and uninstall", workflow_source)
+        self.assertIn("Test-InstalledRuntime.ps1", workflow_source)
         self.assertIn('[ValidateSet("stable", "prerelease")]', updater_source)
         self.assertIn('"$ApiRoot/releases/latest"', updater_source)
         self.assertIn("$_.prerelease -and -not $_.draft", updater_source)

@@ -5,26 +5,38 @@ param(
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $InstallRoot = Split-Path -Parent $ScriptDir
-$Python = Join-Path $InstallRoot "venv\Scripts\python.exe"
-
-if (-not (Test-Path $Python)) {
-    Write-Host "Krasis private Python environment is missing." -ForegroundColor Red
-    Write-Host "Run the Krasis installer repair action or execute:"
-    Write-Host "  powershell -ExecutionPolicy Bypass -File `"$ScriptDir\Install-Krasis.ps1`""
-    if (-not $NoPause) {
-        Read-Host "Press Enter to close"
-    }
-    exit 1
-}
-
-$env:KRASIS_WINDOWS_NATIVE = "1"
-$env:PYTHONUTF8 = "1"
+. (Join-Path $ScriptDir "Runtime-Manifest.ps1")
 
 try {
-    & $Python -m krasis.launcher
+    $CurrentPath = Join-Path $InstallRoot "runtime\current.txt"
+    if (-not (Test-Path $CurrentPath -PathType Leaf)) {
+        throw "Krasis private-runtime activation pointer is missing."
+    }
+    $CurrentName = (Get-Content -Raw $CurrentPath).Trim()
+    if ($CurrentName -notmatch "^[A-Za-z0-9._-]+$") {
+        throw "Krasis private-runtime activation pointer is invalid."
+    }
+
+    $RuntimeRoot = Join-Path $InstallRoot "runtime\releases\$CurrentName"
+    $Manifest = Read-KrasisRuntimeManifest -RuntimeRoot $RuntimeRoot
+    [void](Assert-KrasisPrivateRuntime `
+        -RuntimeRoot $RuntimeRoot `
+        -Manifest $Manifest `
+        -IncludeTorch)
+    $Python = Join-Path $RuntimeRoot "python.exe"
+
+    Remove-Item Env:PYTHONHOME,Env:PYTHONPATH,Env:PYTHONUSERBASE -ErrorAction SilentlyContinue
+    $env:PYTHONNOUSERSITE = "1"
+    $env:KRASIS_WINDOWS_NATIVE = "1"
+    $env:PYTHONUTF8 = "1"
+
+    & $Python -I -m krasis.launcher
     $status = $LASTEXITCODE
 } catch {
-    Write-Host $_.Exception.Message -ForegroundColor Red
+    Write-Host "Krasis private-runtime validation failed:" -ForegroundColor Red
+    Write-Host "  $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Run Krasis Update or reinstall Krasis to repair the private runtime."
     $status = 1
 }
 

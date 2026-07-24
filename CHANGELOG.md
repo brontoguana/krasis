@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.0.16-rc.3 - 2026-07-24
+
+- Replaced the native Windows installer's overlayed Python/venv lifecycle with
+  a release-built private runtime. Windows CI now builds CPython 3.12.10 and
+  Krasis core dependencies in a clean directory, records a deterministic
+  payload manifest, validates relocation and isolated imports, and packages
+  that immutable core runtime. On installation, Krasis stages a unique
+  side-by-side runtime, verifies its payload hash, Python ABI, 64-bit
+  architecture, regex/SSL standard library, native extension, and exact
+  Krasis version, installs the SHA-256-pinned CUDA PyTorch 2.9.1/cu128 wheel,
+  validates the complete runtime, and only then atomically changes the active
+  runtime pointer. Failed installs keep the previous runtime active. The
+  launcher now invokes only that absolute private interpreter with isolated
+  mode and has no system `py`, `python`, `PATH`, or retained-venv fallback.
+  Successful upgrades remove inactive legacy mixed `{app}\python` and
+  `{app}\venv` trees; if an old server still uses one, it is retained without
+  affecting the newly activated runtime, and uninstall owns all runtime paths.
+  Windows CI now performs a real clean installer run with hostile
+  `PYTHONHOME`/`PYTHONPATH`, legacy-directory repair checks, exact runtime
+  probes, and uninstall cleanup before uploading the installer.
+
+- Refreshed the GitHub front page for the `v1.0.16-rc.2` release line. Added a
+  prominent direct Windows installer link, the prerelease Linux/WSL install
+  command, release navigation, and clear Start Menu update behaviour. Replaced
+  the stale selected benchmark table with current validated headline results
+  linked to the complete speed, quality, and reproducibility records.
+
 ## 1.0.16-rc.2 - 2026-07-24
 
 - Validated the published prerelease from a clean Ubuntu 24.04 Podman

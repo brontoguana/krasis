@@ -1,101 +1,230 @@
 param(
+    [Parameter(Mandatory = $true)]
     [string]$InstallRoot,
-    [string]$Wheelhouse,
-    [switch]$NoShortcut,
-    [switch]$DesktopShortcut,
-    [switch]$Force
+    [Parameter(Mandatory = $true)]
+    [string]$RuntimePackage
 )
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $ScriptDir "Runtime-Manifest.ps1")
 
-if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
-    $InstallRoot = Split-Path -Parent $ScriptDir
+$RuntimePackagePath = (Resolve-Path $RuntimePackage).Path
+$PackageManifest = Read-KrasisRuntimeManifest -RuntimeRoot $RuntimePackagePath
+$VersionPath = Join-Path $InstallRoot "VERSION.txt"
+if (-not (Test-Path $VersionPath -PathType Leaf)) {
+    throw "Krasis installer version marker is missing: $VersionPath"
 }
-if ([string]::IsNullOrWhiteSpace($Wheelhouse)) {
-    $Wheelhouse = Join-Path $ScriptDir "wheelhouse"
+$InstallerVersion = (Get-Content -Raw $VersionPath).Trim()
+if ($InstallerVersion -ne $PackageManifest.release_version) {
+    throw "Installer/runtime version mismatch: installer=$InstallerVersion, runtime=$($PackageManifest.release_version)."
 }
-
-function Find-KrasisPython {
-    $rootBundled = Join-Path $InstallRoot "python\python.exe"
-    if (Test-Path $rootBundled) {
-        return $rootBundled
-    }
-
-    $bundled = Join-Path $ScriptDir "python\python.exe"
-    if (Test-Path $bundled) {
-        return $bundled
-    }
-
-    $py = Get-Command py -ErrorAction SilentlyContinue
-    if ($py) {
-        $candidate = & $py.Source -3.12 -c "import sys; print(sys.executable)" 2>$null
-        if ($LASTEXITCODE -eq 0 -and $candidate -and (Test-Path $candidate.Trim())) {
-            return $candidate.Trim()
-        }
-    }
-
-    $python = Get-Command python -ErrorAction SilentlyContinue
-    if ($python) {
-        $candidate = & $python.Source -c "import sys; print(sys.executable)" 2>$null
-        if ($LASTEXITCODE -eq 0 -and $candidate -and (Test-Path $candidate.Trim())) {
-            return $candidate.Trim()
-        }
-    }
-
-    throw "No suitable Python 3.10+ interpreter found. Install Python 3.12 or use a Krasis installer bundle that includes Python."
+$PackageHash = Get-KrasisRuntimePayloadHash -RuntimeRoot $RuntimePackagePath
+if ($PackageHash -ne $PackageManifest.payload_sha256) {
+    throw "Packaged private-runtime hash mismatch: expected $($PackageManifest.payload_sha256), got $PackageHash."
 }
 
 New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
-$VenvDir = Join-Path $InstallRoot "venv"
-$VenvPython = Join-Path $VenvDir "Scripts\python.exe"
+$RuntimeRoot = Join-Path $InstallRoot "runtime"
+$ReleasesRoot = Join-Path $RuntimeRoot "releases"
+New-Item -ItemType Directory -Force -Path $ReleasesRoot | Out-Null
 
-if ($Force -and (Test-Path $VenvDir)) {
-    Remove-Item -Recurse -Force $VenvDir
+$SafeBundleId = "$($PackageManifest.bundle_id)"
+if ($SafeBundleId -notmatch "^[A-Za-z0-9._-]+$") {
+    throw "Private-runtime bundle ID contains unsafe characters: $SafeBundleId"
+}
+$ActivationName = "$SafeBundleId-$([Guid]::NewGuid().ToString('N'))"
+$NewRuntime = Join-Path $ReleasesRoot $ActivationName
+$CurrentPath = Join-Path $RuntimeRoot "current.txt"
+$CurrentBackupPath = Join-Path $RuntimeRoot "current.txt.rollback"
+$CurrentTempPath = Join-Path $RuntimeRoot "current.txt.new"
+$OldCurrent = $null
+$PointerSwitched = $false
+
+function Test-KrasisPythonTreeInUse {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$TreeRoot
+    )
+
+    try {
+        $PythonProcesses = @(
+            Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" -ErrorAction Stop
+        )
+    } catch {
+        Write-Warning "Could not inspect running Python processes; retaining $TreeRoot."
+        return $true
+    }
+    $ResolvedTree = [System.IO.Path]::GetFullPath($TreeRoot).TrimEnd("\", "/")
+    foreach ($Process in $PythonProcesses) {
+        $Executable = "$($Process.ExecutablePath)"
+        $CommandLine = "$($Process.CommandLine)"
+        if ([string]::IsNullOrWhiteSpace($Executable) -and
+            [string]::IsNullOrWhiteSpace($CommandLine)) {
+            Write-Warning "A Python process could not be inspected; retaining $TreeRoot."
+            return $true
+        }
+        if ($Executable.StartsWith(
+            $ResolvedTree + [System.IO.Path]::DirectorySeparatorChar,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or $CommandLine.IndexOf(
+            $ResolvedTree,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -ge 0) {
+            return $true
+        }
+    }
+    return $false
 }
 
-if (-not (Test-Path $VenvPython)) {
-    $SourcePython = Find-KrasisPython
-    Write-Host "Creating Krasis private Python environment..."
-    & $SourcePython -m venv $VenvDir
+if (Test-Path $CurrentPath -PathType Leaf) {
+    $OldCurrent = (Get-Content -Raw $CurrentPath).Trim()
 }
 
-if (-not (Test-Path $Wheelhouse)) {
-    throw "Wheelhouse not found: $Wheelhouse"
+$SavedEnvironment = @{}
+foreach ($Name in @(
+    "PYTHONHOME",
+    "PYTHONPATH",
+    "PYTHONUSERBASE",
+    "PIP_CONFIG_FILE",
+    "PIP_TARGET",
+    "PIP_PREFIX",
+    "PIP_USER",
+    "PIP_INDEX_URL",
+    "PIP_EXTRA_INDEX_URL",
+    "PYTHONDONTWRITEBYTECODE"
+)) {
+    $SavedEnvironment[$Name] = [Environment]::GetEnvironmentVariable($Name, "Process")
 }
 
-$Wheel = Get-ChildItem -Path $Wheelhouse -Filter "krasis-*.whl" |
-    Sort-Object LastWriteTimeUtc -Descending |
-    Select-Object -First 1
-if (-not $Wheel) {
-    throw "No Krasis wheel found in wheelhouse: $Wheelhouse"
-}
+try {
+    Remove-Item Env:PYTHONHOME,Env:PYTHONPATH,Env:PYTHONUSERBASE -ErrorAction SilentlyContinue
+    Remove-Item Env:PIP_TARGET,Env:PIP_PREFIX,Env:PIP_USER,Env:PIP_INDEX_URL,Env:PIP_EXTRA_INDEX_URL -ErrorAction SilentlyContinue
+    $env:PIP_CONFIG_FILE = "NUL"
+    $env:PYTHONDONTWRITEBYTECODE = "1"
 
-Write-Host "Installing Krasis from $($Wheel.Name)..."
-& $VenvPython -m pip install --upgrade pip --quiet
-& $VenvPython -m pip install --no-index --find-links $Wheelhouse $Wheel.FullName
+    Write-Host "Staging Krasis private Python $($PackageManifest.python_version)..."
+    New-Item -ItemType Directory -Force -Path $NewRuntime | Out-Null
+    Copy-Item -Recurse -Force (Join-Path $RuntimePackagePath "*") $NewRuntime
 
-if (-not $NoShortcut) {
-    $Programs = [Environment]::GetFolderPath("Programs")
-    $KrasisMenu = Join-Path $Programs "Krasis"
-    New-Item -ItemType Directory -Force -Path $KrasisMenu | Out-Null
+    $StagedManifest = Read-KrasisRuntimeManifest -RuntimeRoot $NewRuntime
+    $StagedHash = Get-KrasisRuntimePayloadHash -RuntimeRoot $NewRuntime
+    if ($StagedHash -ne $StagedManifest.payload_sha256) {
+        throw "Staged private-runtime hash mismatch: expected $($StagedManifest.payload_sha256), got $StagedHash."
+    }
+    [void](Assert-KrasisPrivateRuntime -RuntimeRoot $NewRuntime -Manifest $StagedManifest)
 
-    $Launcher = Join-Path $ScriptDir "Launch-Krasis.ps1"
-    $ShortcutPath = Join-Path $KrasisMenu "Krasis.lnk"
-    $Shell = New-Object -ComObject WScript.Shell
-    $Shortcut = $Shell.CreateShortcut($ShortcutPath)
-    $Shortcut.TargetPath = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-    $Shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -NoExit -File `"$Launcher`""
-    $Shortcut.WorkingDirectory = [Environment]::GetFolderPath("UserProfile")
-    $Shortcut.WindowStyle = 3
-    $Shortcut.Description = "Open the Krasis interactive launcher"
-    $Shortcut.Save()
+    $PrivatePython = Join-Path $NewRuntime "python.exe"
+    Write-Host "Installing pinned CUDA PyTorch $($StagedManifest.torch_version)..."
+    Write-Host "This is a large first-install download and can take several minutes."
+    & $PrivatePython -I -B -m pip install `
+        --no-cache-dir `
+        --disable-pip-version-check `
+        --no-deps `
+        --only-binary ":all:" `
+        "$($StagedManifest.torch_url)"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Pinned CUDA PyTorch installation failed with status $LASTEXITCODE."
+    }
 
-    if ($DesktopShortcut) {
-        $Desktop = [Environment]::GetFolderPath("Desktop")
-        $DesktopPath = Join-Path $Desktop "Krasis.lnk"
-        Copy-Item -Force $ShortcutPath $DesktopPath
+    $Probe = Assert-KrasisPrivateRuntime `
+        -RuntimeRoot $NewRuntime `
+        -Manifest $StagedManifest `
+        -IncludeTorch
+    $Activation = [ordered]@{
+        schema_version = 1
+        activated_utc = [DateTime]::UtcNow.ToString("o")
+        release_version = $StagedManifest.release_version
+        bundle_id = $StagedManifest.bundle_id
+        payload_sha256 = $StagedManifest.payload_sha256
+        python_version = $Probe.python_version
+        python_cache_tag = $Probe.python_cache_tag
+        krasis_version = $Probe.krasis_version
+        torch_version = $Probe.torch_version
+        torch_cuda = $Probe.torch_cuda
+    }
+    $Activation |
+        ConvertTo-Json -Depth 4 |
+        Set-Content -Path (Join-Path $NewRuntime "activation.json") -Encoding UTF8
+
+    Set-Content -Path $CurrentTempPath -Value $ActivationName -Encoding ASCII -NoNewline
+    if (Test-Path $CurrentPath -PathType Leaf) {
+        Remove-Item -Force $CurrentBackupPath -ErrorAction SilentlyContinue
+        [System.IO.File]::Replace($CurrentTempPath, $CurrentPath, $CurrentBackupPath, $true)
+    } else {
+        [System.IO.File]::Move($CurrentTempPath, $CurrentPath)
+    }
+    $PointerSwitched = $true
+
+    $ActivatedName = (Get-Content -Raw $CurrentPath).Trim()
+    if ($ActivatedName -ne $ActivationName) {
+        throw "Private-runtime activation pointer did not select the staged release."
+    }
+    [void](Assert-KrasisPrivateRuntime `
+        -RuntimeRoot (Join-Path $ReleasesRoot $ActivatedName) `
+        -Manifest $StagedManifest `
+        -IncludeTorch)
+
+    Remove-Item -Force $CurrentBackupPath -ErrorAction SilentlyContinue
+
+    foreach ($LegacyPath in @(
+        (Join-Path $InstallRoot "python"),
+        (Join-Path $InstallRoot "venv")
+    )) {
+        if (Test-Path $LegacyPath) {
+            if (Test-KrasisPythonTreeInUse -TreeRoot $LegacyPath) {
+                Write-Warning "Legacy runtime is still in use and was retained: $LegacyPath"
+            } else {
+                try {
+                    Remove-Item -Recurse -Force $LegacyPath
+                    Write-Host "Removed legacy runtime: $LegacyPath"
+                } catch {
+                    Write-Warning "Could not remove inactive legacy runtime ${LegacyPath}: $($_.Exception.Message)"
+                }
+            }
+        }
+    }
+
+    Write-Host ""
+    Write-Host "Krasis private runtime is ready." -ForegroundColor Green
+    Write-Host "  Python: $($Probe.python_version) ($($Probe.python_cache_tag))"
+    Write-Host "  Krasis: $($Probe.krasis_version)"
+    Write-Host "  PyTorch: $($Probe.torch_version), CUDA $($Probe.torch_cuda)"
+} catch {
+    $RollbackSucceeded = -not $PointerSwitched
+    if ($PointerSwitched) {
+        try {
+            if (Test-Path $CurrentBackupPath -PathType Leaf) {
+                [System.IO.File]::Replace($CurrentBackupPath, $CurrentPath, $null, $true)
+            } elseif ($null -ne $OldCurrent) {
+                Set-Content -Path $CurrentPath -Value $OldCurrent -Encoding ASCII -NoNewline
+            } else {
+                Remove-Item -Force $CurrentPath -ErrorAction SilentlyContinue
+            }
+            $RollbackValue = if (Test-Path $CurrentPath -PathType Leaf) {
+                (Get-Content -Raw $CurrentPath).Trim()
+            } else {
+                $null
+            }
+            $RollbackSucceeded = $RollbackValue -ne $ActivationName
+        } catch {
+            Write-Warning "Private-runtime activation rollback failed: $($_.Exception.Message)"
+        }
+    }
+    if ($RollbackSucceeded -and (Test-Path $NewRuntime)) {
+        Remove-Item -Recurse -Force $NewRuntime -ErrorAction SilentlyContinue
+    } elseif (Test-Path $NewRuntime) {
+        Write-Warning "The newly activated runtime was retained because rollback could not be confirmed."
+    }
+    throw
+} finally {
+    Remove-Item -Force $CurrentTempPath -ErrorAction SilentlyContinue
+    foreach ($Name in $SavedEnvironment.Keys) {
+        $Value = $SavedEnvironment[$Name]
+        if ($null -eq $Value) {
+            Remove-Item "Env:$Name" -ErrorAction SilentlyContinue
+        } else {
+            [Environment]::SetEnvironmentVariable($Name, $Value, "Process")
+        }
     }
 }
-
-Write-Host "Krasis Windows install complete." -ForegroundColor Green

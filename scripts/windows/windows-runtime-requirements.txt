@@ -1,0 +1,11 @@
+# Dependencies required by the pinned Windows CUDA PyTorch wheel. They are
+# packaged into the private core runtime so the 2.8 GB torch wheel itself can
+# be downloaded with --no-deps and a release-pinned SHA-256 URL.
+filelock==3.25.0
+typing-extensions==4.15.0
+sympy==1.14.0
+networkx==3.6.1
+jinja2==3.1.6
+fsspec==2026.2.0
+markupsafe==2.1.5
+mpmath==1.3.0

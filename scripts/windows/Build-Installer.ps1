@@ -1,32 +1,37 @@
 param(
     [Parameter(Mandatory = $true)]
-    [string]$Wheelhouse,
-    [string]$PythonInstaller,
+    [string]$RuntimePackage,
     [string]$OutputDir = "dist",
     [string]$Version = "0.0.0"
 )
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
-$WheelhousePath = (Resolve-Path $Wheelhouse).Path
+$RuntimePackagePath = (Resolve-Path $RuntimePackage).Path
 $OutputPath = Join-Path $RepoRoot $OutputDir
 $BuildRoot = Join-Path $RepoRoot "target\windows-installer"
 $Stage = Join-Path $BuildRoot "staging"
 
 Remove-Item -Recurse -Force $Stage -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path (Join-Path $Stage "bin") | Out-Null
-New-Item -ItemType Directory -Force -Path (Join-Path $Stage "bin\wheelhouse") | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $Stage "runtime-package") | Out-Null
 New-Item -ItemType Directory -Force -Path $OutputPath | Out-Null
 
 Copy-Item -Force (Join-Path $PSScriptRoot "Launch-Krasis.ps1") (Join-Path $Stage "bin\Launch-Krasis.ps1")
 Copy-Item -Force (Join-Path $PSScriptRoot "Install-Krasis.ps1") (Join-Path $Stage "bin\Install-Krasis.ps1")
 Copy-Item -Force (Join-Path $PSScriptRoot "Update-Krasis.ps1") (Join-Path $Stage "bin\Update-Krasis.ps1")
-Copy-Item -Force (Join-Path $WheelhousePath "*") (Join-Path $Stage "bin\wheelhouse")
-if (-not [string]::IsNullOrWhiteSpace($PythonInstaller)) {
-    $PythonInstallerPath = Resolve-Path $PythonInstaller
-    Copy-Item -Force $PythonInstallerPath (Join-Path $Stage "bin\python-installer.exe")
-}
+Copy-Item -Force (Join-Path $PSScriptRoot "Runtime-Manifest.ps1") (Join-Path $Stage "bin\Runtime-Manifest.ps1")
+Copy-Item -Recurse -Force (Join-Path $RuntimePackagePath "*") (Join-Path $Stage "runtime-package")
 Set-Content -Path (Join-Path $Stage "VERSION.txt") -Value $Version -Encoding ASCII
+
+$ManifestPath = Join-Path $Stage "runtime-package\runtime-manifest.json"
+if (-not (Test-Path $ManifestPath -PathType Leaf)) {
+    throw "Private-runtime package manifest was not staged: $ManifestPath"
+}
+$Manifest = Get-Content -Raw $ManifestPath | ConvertFrom-Json
+if ($Manifest.release_version -ne $Version) {
+    throw "Private-runtime release version $($Manifest.release_version) does not match installer version $Version."
+}
 
 $IsccPath = $null
 $Iscc = Get-Command ISCC.exe -ErrorAction SilentlyContinue
