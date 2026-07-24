@@ -360,6 +360,26 @@ class LauncherMatrixTest(unittest.TestCase):
         self.assertIn("[System.IO.File]::OpenRead", runtime_manifest_source)
         self.assertIn("[System.Security.Cryptography.SHA256]::Create()", runtime_manifest_source)
         self.assertIn("Assert-KrasisPrivateRuntime", runtime_manifest_source)
+        self.assertIn(
+            "$StartInfo.RedirectStandardInput = $true",
+            runtime_manifest_source,
+        )
+        self.assertIn(
+            '$StartInfo.Arguments = "-I -B -"',
+            runtime_manifest_source,
+        )
+        self.assertIn(
+            "$Process.StandardOutput.ReadToEndAsync()",
+            runtime_manifest_source,
+        )
+        self.assertIn(
+            "$Process.StandardError.ReadToEndAsync()",
+            runtime_manifest_source,
+        )
+        self.assertNotIn(
+            "& $Python -I -B -c $ProbeCode",
+            runtime_manifest_source,
+        )
         self.assertIn('"isolated": sys.flags.isolated', runtime_manifest_source)
         self.assertIn('"ignore_environment": sys.flags.ignore_environment', runtime_manifest_source)
         self.assertIn("user site-packages", runtime_manifest_source)

@@ -138,11 +138,46 @@ print("KRASIS_RUNTIME_PROBE=" + json.dumps(data, sort_keys=True))
 '@
 
     $OldProbeTorch = [Environment]::GetEnvironmentVariable("KRASIS_RUNTIME_PROBE_TORCH", "Process")
+    $Process = $null
     try {
         $env:KRASIS_RUNTIME_PROBE_TORCH = if ($IncludeTorch) { "1" } else { "0" }
-        $Output = @(& $Python -I -B -c $ProbeCode 2>&1)
-        $ExitCode = $LASTEXITCODE
+        # Windows PowerShell 5.1 applies legacy native-command quoting to -c
+        # arguments and can corrupt Python source containing quotes. Send the
+        # probe through stdin using .NET so neither PowerShell nor cmd.exe
+        # parses the source text.
+        $StartInfo = New-Object System.Diagnostics.ProcessStartInfo
+        $StartInfo.FileName = (Resolve-Path $Python).Path
+        $StartInfo.Arguments = "-I -B -"
+        $StartInfo.UseShellExecute = $false
+        $StartInfo.CreateNoWindow = $true
+        $StartInfo.RedirectStandardInput = $true
+        $StartInfo.RedirectStandardOutput = $true
+        $StartInfo.RedirectStandardError = $true
+
+        $Process = New-Object System.Diagnostics.Process
+        $Process.StartInfo = $StartInfo
+        if (-not $Process.Start()) {
+            throw "Could not start Krasis private Python runtime probe."
+        }
+        $StandardOutputTask = $Process.StandardOutput.ReadToEndAsync()
+        $StandardErrorTask = $Process.StandardError.ReadToEndAsync()
+        $Process.StandardInput.Write($ProbeCode)
+        $Process.StandardInput.Close()
+        $Process.WaitForExit()
+        $StandardOutput = $StandardOutputTask.Result
+        $StandardError = $StandardErrorTask.Result
+        $ExitCode = $Process.ExitCode
+        $Output = @()
+        if (-not [string]::IsNullOrWhiteSpace($StandardOutput)) {
+            $Output += @($StandardOutput -split "\r?\n")
+        }
+        if (-not [string]::IsNullOrWhiteSpace($StandardError)) {
+            $Output += @($StandardError -split "\r?\n")
+        }
     } finally {
+        if ($null -ne $Process) {
+            $Process.Dispose()
+        }
         if ($null -eq $OldProbeTorch) {
             Remove-Item Env:KRASIS_RUNTIME_PROBE_TORCH -ErrorAction SilentlyContinue
         } else {

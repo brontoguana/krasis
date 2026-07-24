@@ -2,6 +2,13 @@
 
 ## 1.0.16-rc.3 - 2026-07-24
 
+- Fixed the private-runtime validation probe under Windows PowerShell 5.1.
+  PowerShell's legacy native-command argument handling corrupted the quoted
+  multiline Python source passed through `python -c`. The installer now starts
+  the absolute private interpreter through .NET with isolated mode and sends
+  the probe over redirected standard input, avoiding shell parsing while
+  retaining structured output, stderr, and exact process-status checks.
+
 - Fixed private-runtime payload verification on Windows PowerShell 5.1 by
   hashing files directly with .NET SHA-256 instead of depending on the
   unavailable `Get-FileHash` command. The validated runtime is now transported
