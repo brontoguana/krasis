@@ -345,6 +345,10 @@ class LauncherMatrixTest(unittest.TestCase):
         self.assertNotIn(r"-Wheelhouse ""{app}", installer_source)
 
         self.assertIn("Get-KrasisRuntimePayloadHash", runtime_manifest_source)
+        self.assertIn("Get-KrasisFileSha256", runtime_manifest_source)
+        self.assertNotIn("Get-FileHash", runtime_manifest_source)
+        self.assertIn("[System.IO.File]::OpenRead", runtime_manifest_source)
+        self.assertIn("[System.Security.Cryptography.SHA256]::Create()", runtime_manifest_source)
         self.assertIn("Assert-KrasisPrivateRuntime", runtime_manifest_source)
         self.assertIn('"isolated": sys.flags.isolated', runtime_manifest_source)
         self.assertIn('"ignore_environment": sys.flags.ignore_environment', runtime_manifest_source)

@@ -1,3 +1,21 @@
+function Get-KrasisFileSha256 {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $ResolvedPath = (Resolve-Path $Path).Path
+    $Sha256 = [System.Security.Cryptography.SHA256]::Create()
+    $Stream = [System.IO.File]::OpenRead($ResolvedPath)
+    try {
+        $Hash = $Sha256.ComputeHash($Stream)
+        return ([BitConverter]::ToString($Hash)).Replace("-", "").ToLowerInvariant()
+    } finally {
+        $Stream.Dispose()
+        $Sha256.Dispose()
+    }
+}
+
 function Get-KrasisRuntimePayloadHash {
     param(
         [Parameter(Mandatory = $true)]
@@ -26,7 +44,7 @@ function Get-KrasisRuntimePayloadHash {
 
         [string[]]$Records = @(
             foreach ($File in $Files) {
-                $FileHash = (Get-FileHash -Algorithm SHA256 -Path $File.FullName).Hash.ToLowerInvariant()
+                $FileHash = Get-KrasisFileSha256 -Path $File.FullName
                 "$($File.Relative)`t$($File.Length)`t$FileHash`n"
             }
         )

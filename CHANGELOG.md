@@ -2,6 +2,10 @@
 
 ## 1.0.16-rc.3 - 2026-07-24
 
+- Fixed private-runtime payload verification on Windows PowerShell 5.1 by
+  hashing files directly with .NET SHA-256 instead of depending on the
+  unavailable `Get-FileHash` command.
+
 - Replaced the native Windows installer's overlayed Python/venv lifecycle with
   a release-built private runtime. Windows CI now builds CPython 3.12.10 and
   Krasis core dependencies in a clean directory, records a deterministic
