@@ -18,6 +18,9 @@
   Successful upgrades remove inactive legacy mixed `{app}\python` and
   `{app}\venv` trees; if an old server still uses one, it is retained without
   affecting the newly activated runtime, and uninstall owns all runtime paths.
+  The Inno payload remains live through the `ssPostInstall` runtime hook,
+  runtime setup writes a retained diagnostic transcript, and hook failures set
+  a nonzero installer exit code so silent upgrades cannot report success.
   Windows CI now performs a real clean installer run with hostile
   `PYTHONHOME`/`PYTHONPATH`, legacy-directory repair checks, exact runtime
   probes, and uninstall cleanup before uploading the installer.

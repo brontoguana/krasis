@@ -147,6 +147,13 @@ jobs:
           } else {
             Write-Warning "Requested install root does not exist: $testRoot"
           }
+          $runtimeInstallLog = Join-Path $testRoot "runtime-install.log"
+          if (Test-Path $runtimeInstallLog) {
+            Write-Host "Krasis private-runtime install transcript:"
+            Get-Content $runtimeInstallLog
+          } else {
+            Write-Warning "Private-runtime install transcript is missing: $runtimeInstallLog"
+          }
           if ($process.ExitCode -ne 0) {
             throw "Private-runtime installer test failed with status $($process.ExitCode)."
           }
@@ -190,6 +197,7 @@ jobs:
             dist/*.whl
             dist/windows-installer-test.log
             ${{ runner.temp }}/krasis-installer-test.log
+            ${{ runner.temp }}/krasis-private-runtime-test/runtime-install.log
 
       - name: Upload release assets
         if: github.event_name == 'release'

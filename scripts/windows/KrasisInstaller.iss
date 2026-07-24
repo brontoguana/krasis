@@ -22,7 +22,7 @@ UninstallDisplayIcon={app}\bin\Launch-Krasis.ps1
 [Files]
 Source: "{#SourceDir}\bin\*"; DestDir: "{app}\bin"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#SourceDir}\VERSION.txt"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#SourceDir}\runtime-package\*"; DestDir: "{tmp}\KrasisRuntime-{#AppVersion}"; Flags: ignoreversion recursesubdirs createallsubdirs deleteafterinstall
+Source: "{#SourceDir}\runtime-package\*"; DestDir: "{tmp}\KrasisRuntime-{#AppVersion}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{autoprograms}\Krasis\Krasis"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -NoExit -WindowStyle Maximized -File ""{app}\bin\Launch-Krasis.ps1"""; WorkingDir: "{app}"
@@ -37,13 +37,23 @@ Type: filesandordirs; Name: "{app}\bin\wheelhouse"
 Type: filesandordirs; Name: "{app}\runtime"
 Type: filesandordirs; Name: "{app}\python"
 Type: filesandordirs; Name: "{app}\venv"
+Type: files; Name: "{app}\runtime-install.log"
 
 [Code]
+var
+  RuntimeInstallExitCode: Integer;
+
+function GetCustomSetupExitCode: Integer;
+begin
+  Result := RuntimeInstallExitCode;
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   ResultCode: Integer;
   PowerShell: String;
   InstallScript: String;
+  InvokeScript: String;
   RuntimePackage: String;
   Parameters: String;
 begin
@@ -52,16 +62,23 @@ begin
 
   PowerShell := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
   InstallScript := ExpandConstant('{app}\bin\Install-Krasis.ps1');
+  InvokeScript := ExpandConstant('{app}\bin\Invoke-Install-Krasis.ps1');
   RuntimePackage := ExpandConstant('{tmp}\KrasisRuntime-{#AppVersion}');
   Parameters :=
-    '-NoProfile -ExecutionPolicy Bypass -File ' + AddQuotes(InstallScript) +
+    '-NoProfile -ExecutionPolicy Bypass -File ' + AddQuotes(InvokeScript) +
+    ' -InstallScript ' + AddQuotes(InstallScript) +
     ' -InstallRoot ' + AddQuotes(ExpandConstant('{app}')) +
-    ' -RuntimePackage ' + AddQuotes(RuntimePackage);
+    ' -RuntimePackage ' + AddQuotes(RuntimePackage) +
+    ' -LogPath ' + AddQuotes(ExpandConstant('{app}\runtime-install.log'));
 
-  if not Exec(PowerShell, Parameters, '', SW_SHOW, ewWaitUntilTerminated, ResultCode) then
+  if not Exec(PowerShell, Parameters, '', SW_SHOW, ewWaitUntilTerminated, ResultCode) then begin
+    RuntimeInstallExitCode := 1;
     RaiseException('Unable to start Krasis private-runtime installation.');
-  if ResultCode <> 0 then
+  end;
+  if ResultCode <> 0 then begin
+    RuntimeInstallExitCode := ResultCode;
     RaiseException(
       Format('Krasis private-runtime installation failed with status %d.', [ResultCode])
     );
+  end;
 end;

@@ -288,6 +288,7 @@ class LauncherMatrixTest(unittest.TestCase):
         runtime_build_source = (windows_dir / "Build-Runtime.ps1").read_text()
         runtime_manifest_source = (windows_dir / "Runtime-Manifest.ps1").read_text()
         install_source = (windows_dir / "Install-Krasis.ps1").read_text()
+        invoke_install_source = (windows_dir / "Invoke-Install-Krasis.ps1").read_text()
         launch_source = (windows_dir / "Launch-Krasis.ps1").read_text()
         updater_source = (windows_dir / "Update-Krasis.ps1").read_text()
         workflow_source = (
@@ -319,11 +320,23 @@ class LauncherMatrixTest(unittest.TestCase):
             build_source,
         )
         self.assertIn(
+            '"Invoke-Install-Krasis.ps1") '
+            '(Join-Path $Stage "bin\\Invoke-Install-Krasis.ps1")',
+            build_source,
+        )
+        self.assertIn(
             r'Source: "{#SourceDir}\runtime-package\*"',
             installer_source,
         )
         self.assertIn("CurStepChanged(CurStep: TSetupStep)", installer_source)
         self.assertIn("ResultCode <> 0", installer_source)
+        self.assertIn("GetCustomSetupExitCode", installer_source)
+        self.assertIn("RuntimeInstallExitCode := ResultCode", installer_source)
+        self.assertIn("Invoke-Install-Krasis.ps1", installer_source)
+        self.assertNotIn(
+            "createallsubdirs deleteafterinstall",
+            installer_source,
+        )
         self.assertNotIn(
             r'Filename: "{app}\bin\python-installer.exe"',
             installer_source,
@@ -357,6 +370,11 @@ class LauncherMatrixTest(unittest.TestCase):
         self.assertNotIn("Get-Command python", install_source)
         self.assertNotIn("-m venv", install_source)
 
+        self.assertIn("Start-Transcript -Path $LogPath -Force", invoke_install_source)
+        self.assertIn("& $InstallScript", invoke_install_source)
+        self.assertIn("$ExitCode = 1", invoke_install_source)
+        self.assertIn("exit $ExitCode", invoke_install_source)
+
         self.assertIn('"runtime\\current.txt"', launch_source)
         self.assertIn("Assert-KrasisPrivateRuntime", launch_source)
         self.assertIn("& $Python -I -m krasis.launcher", launch_source)
@@ -378,6 +396,7 @@ class LauncherMatrixTest(unittest.TestCase):
         self.assertIn("Test-InstalledRuntime.ps1", workflow_source)
         self.assertIn('Get-Content $installLog', workflow_source)
         self.assertIn("Requested install-root contents:", workflow_source)
+        self.assertIn("Krasis private-runtime install transcript:", workflow_source)
         self.assertIn("if: always()", workflow_source)
         self.assertIn("${{ runner.temp }}/krasis-installer-test.log", workflow_source)
         self.assertIn('[ValidateSet("stable", "prerelease")]', updater_source)
