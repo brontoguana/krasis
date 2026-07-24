@@ -19,6 +19,7 @@ jobs:
       KRASIS_DEV_SCRIPT: "1"
       KRASIS_SIDECAR_PLATFORM: windows-x86_64-cuda126
       KRASIS_WINDOWS_PYTHON_VERSION: "3.12.10"
+      KRASIS_WINDOWS_PYTHON_INSTALLER_SHA256: "67b5635e80ea51072b87941312d00ec8927c4db9ba18938f7ad2d27b328b95fb"
       KRASIS_WINDOWS_TORCH_VERSION: "2.9.1+cu128"
       KRASIS_WINDOWS_TORCH_CUDA: "12.8"
       KRASIS_WINDOWS_TORCH_URL: "https://download-r2.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp312-cp312-win_amd64.whl#sha256=3a01f0b64c10a82d444d9fd06b3e8c567b1158b76b2764b8f51bfd8f535064b0"
@@ -87,6 +88,7 @@ jobs:
             -OutputDir runtime-package `
             -Version $version `
             -PythonVersion $env:KRASIS_WINDOWS_PYTHON_VERSION `
+            -PythonInstallerSha256 $env:KRASIS_WINDOWS_PYTHON_INSTALLER_SHA256 `
             -TorchVersion $env:KRASIS_WINDOWS_TORCH_VERSION `
             -TorchCuda $env:KRASIS_WINDOWS_TORCH_CUDA `
             -TorchUrl $env:KRASIS_WINDOWS_TORCH_URL

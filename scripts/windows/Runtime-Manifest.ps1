@@ -59,6 +59,9 @@ function Read-KrasisRuntimeManifest {
     if ("$($Manifest.payload_sha256)" -notmatch "^[0-9a-f]{64}$") {
         throw "Krasis private-runtime manifest contains an invalid payload SHA-256."
     }
+    if ("$($Manifest.python_installer_sha256)" -notmatch "^[0-9a-f]{64}$") {
+        throw "Krasis private-runtime manifest contains an invalid CPython installer SHA-256."
+    }
     if ("$($Manifest.torch_url)" -notmatch "^https://.+#sha256=[0-9a-f]{64}$") {
         throw "Krasis private-runtime manifest does not contain a hash-bound HTTPS PyTorch wheel URL."
     }

@@ -359,6 +359,11 @@ class LauncherMatrixTest(unittest.TestCase):
         self.assertNotIn("Get-Command python", launch_source)
 
         self.assertIn('KRASIS_WINDOWS_PYTHON_VERSION: "3.12.10"', workflow_source)
+        self.assertIn(
+            'KRASIS_WINDOWS_PYTHON_INSTALLER_SHA256: '
+            '"67b5635e80ea51072b87941312d00ec8927c4db9ba18938f7ad2d27b328b95fb"',
+            workflow_source,
+        )
         self.assertIn('KRASIS_WINDOWS_TORCH_VERSION: "2.9.1+cu128"', workflow_source)
         self.assertIn("Test clean install, isolation, legacy repair, and uninstall", workflow_source)
         self.assertIn("Test-InstalledRuntime.ps1", workflow_source)

@@ -9,11 +9,12 @@
   that immutable core runtime. On installation, Krasis stages a unique
   side-by-side runtime, verifies its payload hash, Python ABI, 64-bit
   architecture, regex/SSL standard library, native extension, and exact
-  Krasis version, installs the SHA-256-pinned CUDA PyTorch 2.9.1/cu128 wheel,
-  validates the complete runtime, and only then atomically changes the active
-  runtime pointer. Failed installs keep the previous runtime active. The
-  launcher now invokes only that absolute private interpreter with isolated
-  mode and has no system `py`, `python`, `PATH`, or retained-venv fallback.
+  Krasis version. Both the CPython source installer used by CI and the CUDA
+  PyTorch 2.9.1/cu128 wheel used on the target are SHA-256 pinned. The complete
+  runtime is validated before the active pointer changes atomically. Failed
+  installs keep the previous runtime active. The launcher now invokes only
+  that absolute private interpreter with isolated mode and has no system
+  `py`, `python`, `PATH`, or retained-venv fallback.
   Successful upgrades remove inactive legacy mixed `{app}\python` and
   `{app}\venv` trees; if an old server still uses one, it is retained without
   affecting the newly activated runtime, and uninstall owns all runtime paths.

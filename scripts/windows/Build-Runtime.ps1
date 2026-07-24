@@ -12,6 +12,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$PythonVersion,
     [Parameter(Mandatory = $true)]
+    [string]$PythonInstallerSha256,
+    [Parameter(Mandatory = $true)]
     [string]$TorchVersion,
     [Parameter(Mandatory = $true)]
     [string]$TorchCuda,
@@ -31,6 +33,13 @@ $RelocationProbe = "$OutputPath-relocation-probe"
 Remove-Item -Recurse -Force $OutputPath -ErrorAction SilentlyContinue
 Remove-Item -Recurse -Force $RelocationProbe -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $OutputPath | Out-Null
+
+$ActualPythonInstallerHash = (
+    Get-FileHash -Algorithm SHA256 -Path $PythonInstallerPath
+).Hash.ToLowerInvariant()
+if ($ActualPythonInstallerHash -ne $PythonInstallerSha256.ToLowerInvariant()) {
+    throw "CPython installer SHA-256 mismatch: expected $PythonInstallerSha256, got $ActualPythonInstallerHash."
+}
 
 $InstallerArgs = @(
     "/quiet",
@@ -120,6 +129,7 @@ try {
         bundle_id = "krasis-$Version-cp$AbiDigits-win_amd64"
         release_version = $Version
         python_version = $PythonVersion
+        python_installer_sha256 = $ActualPythonInstallerHash
         python_cache_tag = "cpython-$AbiDigits"
         architecture = "AMD64"
         krasis_version = $Probe.krasis_version
