@@ -1,6 +1,23 @@
 # Changelog
 
-## Unreleased
+## 1.0.16-rc.2 - 2026-07-24
+
+- Validated the published prerelease from a clean Ubuntu 24.04 Podman
+  environment: the public installer bootstrapped Python 3.12, `krasis-setup`
+  installed CUDA 12.8 and CUDA PyTorch, and the interactive launcher built
+  fresh caches and served Qwen3.5-35B-A3B successfully. The clean-test Podman
+  setup now exposes the host model library read-only, so install tests can run
+  existing models without inheriting host software or copying model weights.
+  Raw benchmark and terminal-transcript files now have a narrow Git whitespace
+  policy so their original logger/TTY formatting is preserved while source and
+  documentation remain covered by normal whitespace checks.
+
+- Added native Windows Start Menu update entries. `Krasis Update` resolves and
+  installs the latest stable GitHub release, while `Krasis Prerelease` resolves
+  and installs the latest published prerelease. Both use the matching
+  `KrasisSetup-*-win64.exe` release asset through a shared packaged PowerShell
+  updater, and Inno Setup owns the shortcuts so upgrades and uninstalls manage
+  them alongside the existing interactive `Krasis` entry.
 
 ## 1.0.16-rc.1 - 2026-07-23
 

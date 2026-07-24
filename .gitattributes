@@ -1,0 +1,2 @@
+benchmarks/*.log whitespace=-trailing-space,cr-at-eol
+benchmarks/*.typescript whitespace=-trailing-space,cr-at-eol

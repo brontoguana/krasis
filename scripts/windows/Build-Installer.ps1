@@ -20,6 +20,7 @@ New-Item -ItemType Directory -Force -Path $OutputPath | Out-Null
 
 Copy-Item -Force (Join-Path $PSScriptRoot "Launch-Krasis.ps1") (Join-Path $Stage "bin\Launch-Krasis.ps1")
 Copy-Item -Force (Join-Path $PSScriptRoot "Install-Krasis.ps1") (Join-Path $Stage "bin\Install-Krasis.ps1")
+Copy-Item -Force (Join-Path $PSScriptRoot "Update-Krasis.ps1") (Join-Path $Stage "bin\Update-Krasis.ps1")
 Copy-Item -Force (Join-Path $WheelhousePath "*") (Join-Path $Stage "bin\wheelhouse")
 if (-not [string]::IsNullOrWhiteSpace($PythonInstaller)) {
     $PythonInstallerPath = Resolve-Path $PythonInstaller

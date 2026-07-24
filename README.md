@@ -129,9 +129,11 @@ Native Windows preview:
 
 Download `KrasisSetup-*-win64.exe` from a GitHub release. The installer creates
 a per-user install under `%LOCALAPPDATA%\Programs\Krasis`, installs a private
-Python runtime and Krasis environment, and adds a Start Menu shortcut. The
-shortcut opens a maximized PowerShell window running the interactive Krasis
-launcher. Models and caches still live under `%USERPROFILE%\.krasis`.
+Python runtime and Krasis environment, and adds three entries to the Krasis
+Start Menu folder. `Krasis` opens a maximized PowerShell window running the
+interactive launcher. `Krasis Update` installs the latest stable Windows
+release, while `Krasis Prerelease` installs the latest Windows prerelease.
+Models and caches still live under `%USERPROFILE%\.krasis`.
 
 The first native Windows target covers the Marlin/FlashAttention sidecar path.
 FLA/linear-attention models still need a separate native Windows FLA sidecar
@@ -175,6 +177,8 @@ options, and server startup. Settings are saved under `~/.krasis/config`.
 
 ## Updating
 
+On Linux or WSL:
+
 ```bash
 # Latest stable release
 krasis update
@@ -185,6 +189,10 @@ krasis prerelease
 # Uninstall Krasis, keeping model files
 curl -sSf https://raw.githubusercontent.com/brontoguana/krasis/main/install.sh | bash -s -- --uninstall
 ```
+
+On native Windows, open `Krasis Update` or `Krasis Prerelease` from the Krasis
+folder in the Start Menu. Each entry downloads and runs the corresponding
+published Windows installer.
 
 ## WSL2
 

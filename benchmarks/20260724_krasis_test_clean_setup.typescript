@@ -1,0 +1,22 @@
+Script started on 2026-07-24 00:38:41+01:00 [COMMAND="./podman/startup.sh" TERM="tmux-256color" TTY="/dev/pts/0" COLUMNS="80" LINES="24"]
+=== Krasis Test Container Setup (Podman) ===
+Container 'krasis-test' already exists. Removing it first...
+krasis-test
+Creating ubuntu:24.04 container 'krasis-test'...
+4724d29993641284dab060ce672efe293c9d10b23b4aaec96b243281c36118af
+Starting container...
+krasis-test
+Installing minimal essentials inside container...
+debconf: delaying package configuration, since apt-utils is not installed
+Creating user 'main' inside container...
+
+=== Container 'krasis-test' is ready ===
+
+Attach with:  ./console.sh
+Shut down with: ./finish.sh
+
+Clean Ubuntu -- no Python, no NVIDIA tooling preinstalled.
+Host models are available read-only through ~/.krasis/models.
+To install krasis inside: follow the Krasis install instructions
+
+Script done on 2026-07-24 00:39:06+01:00 [COMMAND_EXIT_CODE="0"]

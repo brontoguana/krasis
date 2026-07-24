@@ -1,5 +1,42 @@
 # Krasis Benchmark Results
 
+## Step-3.7-Flash RTX PRO 6000 adaptive 75/8 A/B - 2026-07-23
+
+Purpose: measure adaptive cold-mass pruning on the existing RTX PRO 6000
+Step-3.7-Flash HQQ4/k4v4 configuration, then run a same-source, same-config
+exact-mode control. Both runs used release commit `78659b3`, the built
+`./dev benchmark` command under tmux, the approved
+`step37_flash_hqq4_p00006` heatmap, and no timing/trace instrumentation.
+
+Commands:
+
+```text
+./dev benchmark tests/step37-flash-rtx6000-96gb-hqq4-k4v4-a16-benchmark.conf --adaptive-cold-mass-pruning 75/8
+./dev benchmark tests/step37-flash-rtx6000-96gb-hqq4-k4v4-a16-benchmark.conf --adaptive-cold-mass-pruning off
+```
+
+| Mode | Prefill internal | Decode internal best | 50-token decode | 100-token decode | 250-token decode | Round trip best | HCS coverage | Min free VRAM | Logs |
+|------|-----------------:|---------------------:|----------------:|-----------------:|-----------------:|----------------:|-------------:|--------------:|------|
+| Exact control | 5,053.2 tok/s | 55.39 tok/s | 55.39 tok/s | 55.34 tok/s | 53.98 tok/s | 112.87 tok/s | 11121/12096 (91.9%) | 1,274 MB | [report](20260723_215037_rtx6000_step37_hqq4_k4v4_exact_control_benchmark_report.log), [stdout](20260723_215037_rtx6000_step37_hqq4_k4v4_exact_control_benchmark_stdout.log), [server](20260723_215037_rtx6000_step37_hqq4_k4v4_exact_control_krasis.log) |
+| Adaptive 75/8 | 5,028.6 tok/s | 55.83 tok/s | 55.83 tok/s | 55.77 tok/s | 54.02 tok/s | 114.04 tok/s | 11121/12096 (91.9%) | 1,274 MB | [report](20260723_214530_rtx6000_step37_hqq4_k4v4_adaptive75_8_benchmark_report.log), [stdout](20260723_214530_rtx6000_step37_hqq4_k4v4_adaptive75_8_benchmark_stdout.log), [server](20260723_214530_rtx6000_step37_hqq4_k4v4_adaptive75_8_krasis.log) |
+| 75/8 delta | -0.49% | +0.79% | +0.79% | +0.78% | +0.07% | +1.04% | unchanged | unchanged | small/neutral |
+
+Notes:
+
+- The adaptive timed decode requests dropped 64 cold activations across 397
+  generated tokens. Per-request omitted routed mass was only `0.015-0.026%`.
+- Exact HCS was already exceptionally effective: the adaptive timed rows
+  reported `99.84-99.93%` HCS hit, zero budget skips, zero no-slot events, and
+  zero copy failures.
+- The decode advantage was about `0.8%` for the 50- and 100-token rows but only
+  `0.07%` for the 250-token row. This indicates that 75/8 can remove a few
+  early cold transfers, but provides no material sustained-decode gain once
+  bounded exact HCS has warmed for this model/card combination.
+- Prefill is not affected by the pruning mechanism; its `-0.49%` difference is
+  treated as run variance. The official public Step result remains exact mode.
+- Both runs held decode at `1,274 MB` minimum free VRAM against the default
+  `600 MB` safety margin.
+
 ## v1.0.16-rc.1 full QCN release matrix - 2026-07-23
 
 Purpose: validate the exact prerelease source through the built

@@ -1,0 +1,20 @@
+Script started on 2026-07-24 00:56:37+01:00 [COMMAND="podman exec -it --user main -w /home/main krasis-test bash -lc "source ~/.bashrc; exec krasis-chat --url http://127.0.0.1:8012 --max-tokens 128"" TERM="tmux-256color" TTY="/dev/pts/0" COLUMNS="80" LINES="24"]
+[2J[H  [1m╔══════════════════════════════════════════════════╗[0m
+  [1m║  [0;36mKrasis Chat[0m[1m — Qwen3.5-35B-A3B-vision               ║[0m
+  [1m╚══════════════════════════════════════════════════╝[0m
+  [2mServer: 127.0.0.1:8012[0m
+  [2mMax context: 117K tokens[0m
+  [2mCommands: /new (clear history)  /system <msg>  /exit[0m
+
+  [0;32m[1mYou:[0m [?2004hCalculate 17 times 19. Reply with only the number.
+[?2004l
+  [0;36m[1mAssistant:[0m [2m(thinking...) [0m              
+
+323
+  [2m(pp: 25t 474ms 53t/s - tg: 344t>5t 3.3s 106.7t/s)[0m
+
+  [0;32m[1mYou:[0m [?2004h/exit
+[?2004l
+  [2mGoodbye![0m
+
+Script done on 2026-07-24 00:57:30+01:00 [COMMAND_EXIT_CODE="0"]

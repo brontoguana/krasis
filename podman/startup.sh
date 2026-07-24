@@ -3,6 +3,12 @@ set -euo pipefail
 
 CONTAINER="krasis-test"
 IMAGE="ubuntu:24.04"
+HOST_MODELS="/home/$USER/.krasis/models"
+
+if [ ! -d "$HOST_MODELS" ]; then
+    echo "Krasis model directory not found: $HOST_MODELS" >&2
+    exit 1
+fi
 
 echo "=== Krasis Test Container Setup (Podman) ==="
 
@@ -24,6 +30,7 @@ podman create \
     --name "$CONTAINER" \
     --hostname "$CONTAINER" \
     --device nvidia.com/gpu=all \
+    --volume "$HOST_MODELS:/krasis-host-models:ro" \
     -it \
     "$IMAGE" \
     bash
@@ -46,6 +53,8 @@ podman exec "$CONTAINER" bash -c "
         useradd -m -s /bin/bash '$HOST_USER'
     fi
     echo '$HOST_USER ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/$HOST_USER
+    install -d -o '$HOST_USER' -g '$HOST_USER' '/home/$HOST_USER/.krasis'
+    ln -sfn /krasis-host-models '/home/$HOST_USER/.krasis/models'
 "
 
 echo ""
@@ -55,4 +64,5 @@ echo "Attach with:  ./console.sh"
 echo "Shut down with: ./finish.sh"
 echo ""
 echo "Clean Ubuntu -- no Python, no NVIDIA tooling preinstalled."
+echo "Host models are available read-only through ~/.krasis/models."
 echo "To install krasis inside: follow the Krasis install instructions"

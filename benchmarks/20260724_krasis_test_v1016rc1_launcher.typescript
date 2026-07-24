@@ -1,0 +1,848 @@
+Script started on 2026-07-24 00:48:25+01:00 [COMMAND="podman exec -it --user main -w /home/main krasis-test bash -lc "source ~/.bashrc; exec krasis"" TERM="tmux-256color" TTY="/dev/pts/1" COLUMNS="80" LINES="24"]
+Krasis home: /home/main/.krasis
+Models dir:  /home/main/.krasis/models
+(Set KRASIS_HOME to change, caches can grow large)
+
+[?25l[2J[H  [1mModels[0m
+
+  [0;36m▸[0m [1mDownload supported model from Hugging Face[0m
+       [2mChoose a Krasis-supported model and download it to ~/.krasis/models[0m
+    deepreinforce-ai/Ornith-1.0-35B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    deepreinforce-ai/Ornith-1.0-397B[0m
+       [2mqwen3_5_moe_text | 60 layers | 512 experts | ~720 GB[0m
+    deepseek-ai/DeepSeek-V4-Flash[0m
+       [2mdeepseek_v4 | 43 layers | 256 experts (+1 shared) | ~516 GB[0m
+    gemma-4-26b-a4b-it[0m
+       [2mgemma4_text | 30 layers | 128 experts | ~43 GB[0m
+    GLM-4.7-Flash[0m
+       [2mglm4_moe_lite | 47 layers | 64 experts (+1 shared) | ~52 GB[0m
+    GLM-5.2[0m
+       [2mglm_moe_dsa | 78 layers | 256 experts (+1 shared) | ~1350 GB[0m
+    NVIDIA-Nemotron-3-Nano-30B-A3B-BF16[0m
+       [2mnemotron_h | 52 layers | 128 experts (+1 shared) | ~186 GB[0m
+    NVIDIA-Nemotron-3-Super-120B-A12B-BF16[0m
+       [2mnemotron_h | 88 layers | 512 experts (+1 shared) | ~2772 GB[0m
+    Qwen3-0.6B[0m
+       [2mqwen3 | 28 layers | dense[0m
+    Qwen3-1.7B[0m
+       [2mqwen3 | 28 layers | dense[0m
+    Qwen3-8B[0m
+       [2mqwen3 | 36 layers | dense[0m
+    Qwen3-Coder-Next[0m
+       [2mqwen3_next | 48 layers | 512 experts | ~144 GB[0m
+    Qwen3.5-122B-A10B[0m
+       [2mqwen3_5_moe_text | 48 layers | 256 experts | ~216 GB[0m
+    Qwen3.5-35B-A3B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    Qwen3.5-397B-A17B[0m
+       [2mqwen3_5_moe_text | 60 layers | 512 experts | ~720 GB[0m
+    Qwen3.6-35B-A3B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    Step-3.7-Flash[0m
+       [2mstep3p5 | 45 layers | dense[0m
+    z-lab/Qwen3.5-122B-A10B-DFlash[0m
+       [2mqwen3 | 6 layers | dense[0m
+
+  [2m[↑↓] Select  [Enter] Confirm  [Esc] Quit[0m
+[2J[H  [1mModels[0m
+
+    Download supported model from Hugging Face[0m
+       [2mChoose a Krasis-supported model and download it to ~/.krasis/models[0m
+  [0;36m▸[0m [1mdeepreinforce-ai/Ornith-1.0-35B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    deepreinforce-ai/Ornith-1.0-397B[0m
+       [2mqwen3_5_moe_text | 60 layers | 512 experts | ~720 GB[0m
+    deepseek-ai/DeepSeek-V4-Flash[0m
+       [2mdeepseek_v4 | 43 layers | 256 experts (+1 shared) | ~516 GB[0m
+    gemma-4-26b-a4b-it[0m
+       [2mgemma4_text | 30 layers | 128 experts | ~43 GB[0m
+    GLM-4.7-Flash[0m
+       [2mglm4_moe_lite | 47 layers | 64 experts (+1 shared) | ~52 GB[0m
+    GLM-5.2[0m
+       [2mglm_moe_dsa | 78 layers | 256 experts (+1 shared) | ~1350 GB[0m
+    NVIDIA-Nemotron-3-Nano-30B-A3B-BF16[0m
+       [2mnemotron_h | 52 layers | 128 experts (+1 shared) | ~186 GB[0m
+    NVIDIA-Nemotron-3-Super-120B-A12B-BF16[0m
+       [2mnemotron_h | 88 layers | 512 experts (+1 shared) | ~2772 GB[0m
+    Qwen3-0.6B[0m
+       [2mqwen3 | 28 layers | dense[0m
+    Qwen3-1.7B[0m
+       [2mqwen3 | 28 layers | dense[0m
+    Qwen3-8B[0m
+       [2mqwen3 | 36 layers | dense[0m
+    Qwen3-Coder-Next[0m
+       [2mqwen3_next | 48 layers | 512 experts | ~144 GB[0m
+    Qwen3.5-122B-A10B[0m
+       [2mqwen3_5_moe_text | 48 layers | 256 experts | ~216 GB[0m
+    Qwen3.5-35B-A3B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    Qwen3.5-397B-A17B[0m
+       [2mqwen3_5_moe_text | 60 layers | 512 experts | ~720 GB[0m
+    Qwen3.6-35B-A3B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    Step-3.7-Flash[0m
+       [2mstep3p5 | 45 layers | dense[0m
+    z-lab/Qwen3.5-122B-A10B-DFlash[0m
+       [2mqwen3 | 6 layers | dense[0m
+
+  [2m[↑↓] Select  [Enter] Confirm  [Esc] Quit[0m
+[2J[H  [1mModels[0m
+
+    Download supported model from Hugging Face[0m
+       [2mChoose a Krasis-supported model and download it to ~/.krasis/models[0m
+    deepreinforce-ai/Ornith-1.0-35B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+  [0;36m▸[0m [1mdeepreinforce-ai/Ornith-1.0-397B[0m
+       [2mqwen3_5_moe_text | 60 layers | 512 experts | ~720 GB[0m
+    deepseek-ai/DeepSeek-V4-Flash[0m
+       [2mdeepseek_v4 | 43 layers | 256 experts (+1 shared) | ~516 GB[0m
+    gemma-4-26b-a4b-it[0m
+       [2mgemma4_text | 30 layers | 128 experts | ~43 GB[0m
+    GLM-4.7-Flash[0m
+       [2mglm4_moe_lite | 47 layers | 64 experts (+1 shared) | ~52 GB[0m
+    GLM-5.2[0m
+       [2mglm_moe_dsa | 78 layers | 256 experts (+1 shared) | ~1350 GB[0m
+    NVIDIA-Nemotron-3-Nano-30B-A3B-BF16[0m
+       [2mnemotron_h | 52 layers | 128 experts (+1 shared) | ~186 GB[0m
+    NVIDIA-Nemotron-3-Super-120B-A12B-BF16[0m
+       [2mnemotron_h | 88 layers | 512 experts (+1 shared) | ~2772 GB[0m
+    Qwen3-0.6B[0m
+       [2mqwen3 | 28 layers | dense[0m
+    Qwen3-1.7B[0m
+       [2mqwen3 | 28 layers | dense[0m
+    Qwen3-8B[0m
+       [2mqwen3 | 36 layers | dense[0m
+    Qwen3-Coder-Next[0m
+       [2mqwen3_next | 48 layers | 512 experts | ~144 GB[0m
+    Qwen3.5-122B-A10B[0m
+       [2mqwen3_5_moe_text | 48 layers | 256 experts | ~216 GB[0m
+    Qwen3.5-35B-A3B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    Qwen3.5-397B-A17B[0m
+       [2mqwen3_5_moe_text | 60 layers | 512 experts | ~720 GB[0m
+    Qwen3.6-35B-A3B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    Step-3.7-Flash[0m
+       [2mstep3p5 | 45 layers | dense[0m
+    z-lab/Qwen3.5-122B-A10B-DFlash[0m
+       [2mqwen3 | 6 layers | dense[0m
+
+  [2m[↑↓] Select  [Enter] Confirm  [Esc] Quit[0m
+[2J[H  [1mModels[0m
+
+    Download supported model from Hugging Face[0m
+       [2mChoose a Krasis-supported model and download it to ~/.krasis/models[0m
+    deepreinforce-ai/Ornith-1.0-35B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    deepreinforce-ai/Ornith-1.0-397B[0m
+       [2mqwen3_5_moe_text | 60 layers | 512 experts | ~720 GB[0m
+  [0;36m▸[0m [1mdeepseek-ai/DeepSeek-V4-Flash[0m
+       [2mdeepseek_v4 | 43 layers | 256 experts (+1 shared) | ~516 GB[0m
+    gemma-4-26b-a4b-it[0m
+       [2mgemma4_text | 30 layers | 128 experts | ~43 GB[0m
+    GLM-4.7-Flash[0m
+       [2mglm4_moe_lite | 47 layers | 64 experts (+1 shared) | ~52 GB[0m
+    GLM-5.2[0m
+       [2mglm_moe_dsa | 78 layers | 256 experts (+1 shared) | ~1350 GB[0m
+    NVIDIA-Nemotron-3-Nano-30B-A3B-BF16[0m
+       [2mnemotron_h | 52 layers | 128 experts (+1 shared) | ~186 GB[0m
+    NVIDIA-Nemotron-3-Super-120B-A12B-BF16[0m
+       [2mnemotron_h | 88 layers | 512 experts (+1 shared) | ~2772 GB[0m
+    Qwen3-0.6B[0m
+       [2mqwen3 | 28 layers | dense[0m
+    Qwen3-1.7B[0m
+       [2mqwen3 | 28 layers | dense[0m
+    Qwen3-8B[0m
+       [2mqwen3 | 36 layers | dense[0m
+    Qwen3-Coder-Next[0m
+       [2mqwen3_next | 48 layers | 512 experts | ~144 GB[0m
+    Qwen3.5-122B-A10B[0m
+       [2mqwen3_5_moe_text | 48 layers | 256 experts | ~216 GB[0m
+    Qwen3.5-35B-A3B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    Qwen3.5-397B-A17B[0m
+       [2mqwen3_5_moe_text | 60 layers | 512 experts | ~720 GB[0m
+    Qwen3.6-35B-A3B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    Step-3.7-Flash[0m
+       [2mstep3p5 | 45 layers | dense[0m
+    z-lab/Qwen3.5-122B-A10B-DFlash[0m
+       [2mqwen3 | 6 layers | dense[0m
+
+  [2m[↑↓] Select  [Enter] Confirm  [Esc] Quit[0m
+[2J[H  [1mModels[0m
+
+    Download supported model from Hugging Face[0m
+       [2mChoose a Krasis-supported model and download it to ~/.krasis/models[0m
+    deepreinforce-ai/Ornith-1.0-35B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    deepreinforce-ai/Ornith-1.0-397B[0m
+       [2mqwen3_5_moe_text | 60 layers | 512 experts | ~720 GB[0m
+    deepseek-ai/DeepSeek-V4-Flash[0m
+       [2mdeepseek_v4 | 43 layers | 256 experts (+1 shared) | ~516 GB[0m
+  [0;36m▸[0m [1mgemma-4-26b-a4b-it[0m
+       [2mgemma4_text | 30 layers | 128 experts | ~43 GB[0m
+    GLM-4.7-Flash[0m
+       [2mglm4_moe_lite | 47 layers | 64 experts (+1 shared) | ~52 GB[0m
+    GLM-5.2[0m
+       [2mglm_moe_dsa | 78 layers | 256 experts (+1 shared) | ~1350 GB[0m
+    NVIDIA-Nemotron-3-Nano-30B-A3B-BF16[0m
+       [2mnemotron_h | 52 layers | 128 experts (+1 shared) | ~186 GB[0m
+    NVIDIA-Nemotron-3-Super-120B-A12B-BF16[0m
+       [2mnemotron_h | 88 layers | 512 experts (+1 shared) | ~2772 GB[0m
+    Qwen3-0.6B[0m
+       [2mqwen3 | 28 layers | dense[0m
+    Qwen3-1.7B[0m
+       [2mqwen3 | 28 layers | dense[0m
+    Qwen3-8B[0m
+       [2mqwen3 | 36 layers | dense[0m
+    Qwen3-Coder-Next[0m
+       [2mqwen3_next | 48 layers | 512 experts | ~144 GB[0m
+    Qwen3.5-122B-A10B[0m
+       [2mqwen3_5_moe_text | 48 layers | 256 experts | ~216 GB[0m
+    Qwen3.5-35B-A3B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    Qwen3.5-397B-A17B[0m
+       [2mqwen3_5_moe_text | 60 layers | 512 experts | ~720 GB[0m
+    Qwen3.6-35B-A3B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    Step-3.7-Flash[0m
+       [2mstep3p5 | 45 layers | dense[0m
+    z-lab/Qwen3.5-122B-A10B-DFlash[0m
+       [2mqwen3 | 6 layers | dense[0m
+
+  [2m[↑↓] Select  [Enter] Confirm  [Esc] Quit[0m
+[2J[H  [1mModels[0m
+
+    Download supported model from Hugging Face[0m
+       [2mChoose a Krasis-supported model and download it to ~/.krasis/models[0m
+    deepreinforce-ai/Ornith-1.0-35B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    deepreinforce-ai/Ornith-1.0-397B[0m
+       [2mqwen3_5_moe_text | 60 layers | 512 experts | ~720 GB[0m
+    deepseek-ai/DeepSeek-V4-Flash[0m
+       [2mdeepseek_v4 | 43 layers | 256 experts (+1 shared) | ~516 GB[0m
+    gemma-4-26b-a4b-it[0m
+       [2mgemma4_text | 30 layers | 128 experts | ~43 GB[0m
+  [0;36m▸[0m [1mGLM-4.7-Flash[0m
+       [2mglm4_moe_lite | 47 layers | 64 experts (+1 shared) | ~52 GB[0m
+    GLM-5.2[0m
+       [2mglm_moe_dsa | 78 layers | 256 experts (+1 shared) | ~1350 GB[0m
+    NVIDIA-Nemotron-3-Nano-30B-A3B-BF16[0m
+       [2mnemotron_h | 52 layers | 128 experts (+1 shared) | ~186 GB[0m
+    NVIDIA-Nemotron-3-Super-120B-A12B-BF16[0m
+       [2mnemotron_h | 88 layers | 512 experts (+1 shared) | ~2772 GB[0m
+    Qwen3-0.6B[0m
+       [2mqwen3 | 28 layers | dense[0m
+    Qwen3-1.7B[0m
+       [2mqwen3 | 28 layers | dense[0m
+    Qwen3-8B[0m
+       [2mqwen3 | 36 layers | dense[0m
+    Qwen3-Coder-Next[0m
+       [2mqwen3_next | 48 layers | 512 experts | ~144 GB[0m
+    Qwen3.5-122B-A10B[0m
+       [2mqwen3_5_moe_text | 48 layers | 256 experts | ~216 GB[0m
+    Qwen3.5-35B-A3B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    Qwen3.5-397B-A17B[0m
+       [2mqwen3_5_moe_text | 60 layers | 512 experts | ~720 GB[0m
+    Qwen3.6-35B-A3B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    Step-3.7-Flash[0m
+       [2mstep3p5 | 45 layers | dense[0m
+    z-lab/Qwen3.5-122B-A10B-DFlash[0m
+       [2mqwen3 | 6 layers | dense[0m
+
+  [2m[↑↓] Select  [Enter] Confirm  [Esc] Quit[0m
+[2J[H  [1mModels[0m
+
+    Download supported model from Hugging Face[0m
+       [2mChoose a Krasis-supported model and download it to ~/.krasis/models[0m
+    deepreinforce-ai/Ornith-1.0-35B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    deepreinforce-ai/Ornith-1.0-397B[0m
+       [2mqwen3_5_moe_text | 60 layers | 512 experts | ~720 GB[0m
+    deepseek-ai/DeepSeek-V4-Flash[0m
+       [2mdeepseek_v4 | 43 layers | 256 experts (+1 shared) | ~516 GB[0m
+    gemma-4-26b-a4b-it[0m
+       [2mgemma4_text | 30 layers | 128 experts | ~43 GB[0m
+    GLM-4.7-Flash[0m
+       [2mglm4_moe_lite | 47 layers | 64 experts (+1 shared) | ~52 GB[0m
+  [0;36m▸[0m [1mGLM-5.2[0m
+       [2mglm_moe_dsa | 78 layers | 256 experts (+1 shared) | ~1350 GB[0m
+    NVIDIA-Nemotron-3-Nano-30B-A3B-BF16[0m
+       [2mnemotron_h | 52 layers | 128 experts (+1 shared) | ~186 GB[0m
+    NVIDIA-Nemotron-3-Super-120B-A12B-BF16[0m
+       [2mnemotron_h | 88 layers | 512 experts (+1 shared) | ~2772 GB[0m
+    Qwen3-0.6B[0m
+       [2mqwen3 | 28 layers | dense[0m
+    Qwen3-1.7B[0m
+       [2mqwen3 | 28 layers | dense[0m
+    Qwen3-8B[0m
+       [2mqwen3 | 36 layers | dense[0m
+    Qwen3-Coder-Next[0m
+       [2mqwen3_next | 48 layers | 512 experts | ~144 GB[0m
+    Qwen3.5-122B-A10B[0m
+       [2mqwen3_5_moe_text | 48 layers | 256 experts | ~216 GB[0m
+    Qwen3.5-35B-A3B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    Qwen3.5-397B-A17B[0m
+       [2mqwen3_5_moe_text | 60 layers | 512 experts | ~720 GB[0m
+    Qwen3.6-35B-A3B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    Step-3.7-Flash[0m
+       [2mstep3p5 | 45 layers | dense[0m
+    z-lab/Qwen3.5-122B-A10B-DFlash[0m
+       [2mqwen3 | 6 layers | dense[0m
+
+  [2m[↑↓] Select  [Enter] Confirm  [Esc] Quit[0m
+[2J[H  [1mModels[0m
+
+    Download supported model from Hugging Face[0m
+       [2mChoose a Krasis-supported model and download it to ~/.krasis/models[0m
+    deepreinforce-ai/Ornith-1.0-35B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    deepreinforce-ai/Ornith-1.0-397B[0m
+       [2mqwen3_5_moe_text | 60 layers | 512 experts | ~720 GB[0m
+    deepseek-ai/DeepSeek-V4-Flash[0m
+       [2mdeepseek_v4 | 43 layers | 256 experts (+1 shared) | ~516 GB[0m
+    gemma-4-26b-a4b-it[0m
+       [2mgemma4_text | 30 layers | 128 experts | ~43 GB[0m
+    GLM-4.7-Flash[0m
+       [2mglm4_moe_lite | 47 layers | 64 experts (+1 shared) | ~52 GB[0m
+    GLM-5.2[0m
+       [2mglm_moe_dsa | 78 layers | 256 experts (+1 shared) | ~1350 GB[0m
+  [0;36m▸[0m [1mNVIDIA-Nemotron-3-Nano-30B-A3B-BF16[0m
+       [2mnemotron_h | 52 layers | 128 experts (+1 shared) | ~186 GB[0m
+    NVIDIA-Nemotron-3-Super-120B-A12B-BF16[0m
+       [2mnemotron_h | 88 layers | 512 experts (+1 shared) | ~2772 GB[0m
+    Qwen3-0.6B[0m
+       [2mqwen3 | 28 layers | dense[0m
+    Qwen3-1.7B[0m
+       [2mqwen3 | 28 layers | dense[0m
+    Qwen3-8B[0m
+       [2mqwen3 | 36 layers | dense[0m
+    Qwen3-Coder-Next[0m
+       [2mqwen3_next | 48 layers | 512 experts | ~144 GB[0m
+    Qwen3.5-122B-A10B[0m
+       [2mqwen3_5_moe_text | 48 layers | 256 experts | ~216 GB[0m
+    Qwen3.5-35B-A3B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    Qwen3.5-397B-A17B[0m
+       [2mqwen3_5_moe_text | 60 layers | 512 experts | ~720 GB[0m
+    Qwen3.6-35B-A3B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    Step-3.7-Flash[0m
+       [2mstep3p5 | 45 layers | dense[0m
+    z-lab/Qwen3.5-122B-A10B-DFlash[0m
+       [2mqwen3 | 6 layers | dense[0m
+
+  [2m[↑↓] Select  [Enter] Confirm  [Esc] Quit[0m
+[2J[H  [1mModels[0m
+
+    Download supported model from Hugging Face[0m
+       [2mChoose a Krasis-supported model and download it to ~/.krasis/models[0m
+    deepreinforce-ai/Ornith-1.0-35B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    deepreinforce-ai/Ornith-1.0-397B[0m
+       [2mqwen3_5_moe_text | 60 layers | 512 experts | ~720 GB[0m
+    deepseek-ai/DeepSeek-V4-Flash[0m
+       [2mdeepseek_v4 | 43 layers | 256 experts (+1 shared) | ~516 GB[0m
+    gemma-4-26b-a4b-it[0m
+       [2mgemma4_text | 30 layers | 128 experts | ~43 GB[0m
+    GLM-4.7-Flash[0m
+       [2mglm4_moe_lite | 47 layers | 64 experts (+1 shared) | ~52 GB[0m
+    GLM-5.2[0m
+       [2mglm_moe_dsa | 78 layers | 256 experts (+1 shared) | ~1350 GB[0m
+    NVIDIA-Nemotron-3-Nano-30B-A3B-BF16[0m
+       [2mnemotron_h | 52 layers | 128 experts (+1 shared) | ~186 GB[0m
+  [0;36m▸[0m [1mNVIDIA-Nemotron-3-Super-120B-A12B-BF16[0m
+       [2mnemotron_h | 88 layers | 512 experts (+1 shared) | ~2772 GB[0m
+    Qwen3-0.6B[0m
+       [2mqwen3 | 28 layers | dense[0m
+    Qwen3-1.7B[0m
+       [2mqwen3 | 28 layers | dense[0m
+    Qwen3-8B[0m
+       [2mqwen3 | 36 layers | dense[0m
+    Qwen3-Coder-Next[0m
+       [2mqwen3_next | 48 layers | 512 experts | ~144 GB[0m
+    Qwen3.5-122B-A10B[0m
+       [2mqwen3_5_moe_text | 48 layers | 256 experts | ~216 GB[0m
+    Qwen3.5-35B-A3B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    Qwen3.5-397B-A17B[0m
+       [2mqwen3_5_moe_text | 60 layers | 512 experts | ~720 GB[0m
+    Qwen3.6-35B-A3B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    Step-3.7-Flash[0m
+       [2mstep3p5 | 45 layers | dense[0m
+    z-lab/Qwen3.5-122B-A10B-DFlash[0m
+       [2mqwen3 | 6 layers | dense[0m
+
+  [2m[↑↓] Select  [Enter] Confirm  [Esc] Quit[0m
+[2J[H  [1mModels[0m
+
+    Download supported model from Hugging Face[0m
+       [2mChoose a Krasis-supported model and download it to ~/.krasis/models[0m
+    deepreinforce-ai/Ornith-1.0-35B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    deepreinforce-ai/Ornith-1.0-397B[0m
+       [2mqwen3_5_moe_text | 60 layers | 512 experts | ~720 GB[0m
+    deepseek-ai/DeepSeek-V4-Flash[0m
+       [2mdeepseek_v4 | 43 layers | 256 experts (+1 shared) | ~516 GB[0m
+    gemma-4-26b-a4b-it[0m
+       [2mgemma4_text | 30 layers | 128 experts | ~43 GB[0m
+    GLM-4.7-Flash[0m
+       [2mglm4_moe_lite | 47 layers | 64 experts (+1 shared) | ~52 GB[0m
+    GLM-5.2[0m
+       [2mglm_moe_dsa | 78 layers | 256 experts (+1 shared) | ~1350 GB[0m
+    NVIDIA-Nemotron-3-Nano-30B-A3B-BF16[0m
+       [2mnemotron_h | 52 layers | 128 experts (+1 shared) | ~186 GB[0m
+    NVIDIA-Nemotron-3-Super-120B-A12B-BF16[0m
+       [2mnemotron_h | 88 layers | 512 experts (+1 shared) | ~2772 GB[0m
+  [0;36m▸[0m [1mQwen3-0.6B[0m
+       [2mqwen3 | 28 layers | dense[0m
+    Qwen3-1.7B[0m
+       [2mqwen3 | 28 layers | dense[0m
+    Qwen3-8B[0m
+       [2mqwen3 | 36 layers | dense[0m
+    Qwen3-Coder-Next[0m
+       [2mqwen3_next | 48 layers | 512 experts | ~144 GB[0m
+    Qwen3.5-122B-A10B[0m
+       [2mqwen3_5_moe_text | 48 layers | 256 experts | ~216 GB[0m
+    Qwen3.5-35B-A3B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    Qwen3.5-397B-A17B[0m
+       [2mqwen3_5_moe_text | 60 layers | 512 experts | ~720 GB[0m
+    Qwen3.6-35B-A3B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    Step-3.7-Flash[0m
+       [2mstep3p5 | 45 layers | dense[0m
+    z-lab/Qwen3.5-122B-A10B-DFlash[0m
+       [2mqwen3 | 6 layers | dense[0m
+
+  [2m[↑↓] Select  [Enter] Confirm  [Esc] Quit[0m
+[2J[H  [1mModels[0m
+
+    Download supported model from Hugging Face[0m
+       [2mChoose a Krasis-supported model and download it to ~/.krasis/models[0m
+    deepreinforce-ai/Ornith-1.0-35B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    deepreinforce-ai/Ornith-1.0-397B[0m
+       [2mqwen3_5_moe_text | 60 layers | 512 experts | ~720 GB[0m
+    deepseek-ai/DeepSeek-V4-Flash[0m
+       [2mdeepseek_v4 | 43 layers | 256 experts (+1 shared) | ~516 GB[0m
+    gemma-4-26b-a4b-it[0m
+       [2mgemma4_text | 30 layers | 128 experts | ~43 GB[0m
+    GLM-4.7-Flash[0m
+       [2mglm4_moe_lite | 47 layers | 64 experts (+1 shared) | ~52 GB[0m
+    GLM-5.2[0m
+       [2mglm_moe_dsa | 78 layers | 256 experts (+1 shared) | ~1350 GB[0m
+    NVIDIA-Nemotron-3-Nano-30B-A3B-BF16[0m
+       [2mnemotron_h | 52 layers | 128 experts (+1 shared) | ~186 GB[0m
+    NVIDIA-Nemotron-3-Super-120B-A12B-BF16[0m
+       [2mnemotron_h | 88 layers | 512 experts (+1 shared) | ~2772 GB[0m
+    Qwen3-0.6B[0m
+       [2mqwen3 | 28 layers | dense[0m
+  [0;36m▸[0m [1mQwen3-1.7B[0m
+       [2mqwen3 | 28 layers | dense[0m
+    Qwen3-8B[0m
+       [2mqwen3 | 36 layers | dense[0m
+    Qwen3-Coder-Next[0m
+       [2mqwen3_next | 48 layers | 512 experts | ~144 GB[0m
+    Qwen3.5-122B-A10B[0m
+       [2mqwen3_5_moe_text | 48 layers | 256 experts | ~216 GB[0m
+    Qwen3.5-35B-A3B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    Qwen3.5-397B-A17B[0m
+       [2mqwen3_5_moe_text | 60 layers | 512 experts | ~720 GB[0m
+    Qwen3.6-35B-A3B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    Step-3.7-Flash[0m
+       [2mstep3p5 | 45 layers | dense[0m
+    z-lab/Qwen3.5-122B-A10B-DFlash[0m
+       [2mqwen3 | 6 layers | dense[0m
+
+  [2m[↑↓] Select  [Enter] Confirm  [Esc] Quit[0m
+[2J[H  [1mModels[0m
+
+    Download supported model from Hugging Face[0m
+       [2mChoose a Krasis-supported model and download it to ~/.krasis/models[0m
+    deepreinforce-ai/Ornith-1.0-35B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    deepreinforce-ai/Ornith-1.0-397B[0m
+       [2mqwen3_5_moe_text | 60 layers | 512 experts | ~720 GB[0m
+    deepseek-ai/DeepSeek-V4-Flash[0m
+       [2mdeepseek_v4 | 43 layers | 256 experts (+1 shared) | ~516 GB[0m
+    gemma-4-26b-a4b-it[0m
+       [2mgemma4_text | 30 layers | 128 experts | ~43 GB[0m
+    GLM-4.7-Flash[0m
+       [2mglm4_moe_lite | 47 layers | 64 experts (+1 shared) | ~52 GB[0m
+    GLM-5.2[0m
+       [2mglm_moe_dsa | 78 layers | 256 experts (+1 shared) | ~1350 GB[0m
+    NVIDIA-Nemotron-3-Nano-30B-A3B-BF16[0m
+       [2mnemotron_h | 52 layers | 128 experts (+1 shared) | ~186 GB[0m
+    NVIDIA-Nemotron-3-Super-120B-A12B-BF16[0m
+       [2mnemotron_h | 88 layers | 512 experts (+1 shared) | ~2772 GB[0m
+    Qwen3-0.6B[0m
+       [2mqwen3 | 28 layers | dense[0m
+    Qwen3-1.7B[0m
+       [2mqwen3 | 28 layers | dense[0m
+  [0;36m▸[0m [1mQwen3-8B[0m
+       [2mqwen3 | 36 layers | dense[0m
+    Qwen3-Coder-Next[0m
+       [2mqwen3_next | 48 layers | 512 experts | ~144 GB[0m
+    Qwen3.5-122B-A10B[0m
+       [2mqwen3_5_moe_text | 48 layers | 256 experts | ~216 GB[0m
+    Qwen3.5-35B-A3B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    Qwen3.5-397B-A17B[0m
+       [2mqwen3_5_moe_text | 60 layers | 512 experts | ~720 GB[0m
+    Qwen3.6-35B-A3B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    Step-3.7-Flash[0m
+       [2mstep3p5 | 45 layers | dense[0m
+    z-lab/Qwen3.5-122B-A10B-DFlash[0m
+       [2mqwen3 | 6 layers | dense[0m
+
+  [2m[↑↓] Select  [Enter] Confirm  [Esc] Quit[0m
+[2J[H  [1mModels[0m
+
+    Download supported model from Hugging Face[0m
+       [2mChoose a Krasis-supported model and download it to ~/.krasis/models[0m
+    deepreinforce-ai/Ornith-1.0-35B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    deepreinforce-ai/Ornith-1.0-397B[0m
+       [2mqwen3_5_moe_text | 60 layers | 512 experts | ~720 GB[0m
+    deepseek-ai/DeepSeek-V4-Flash[0m
+       [2mdeepseek_v4 | 43 layers | 256 experts (+1 shared) | ~516 GB[0m
+    gemma-4-26b-a4b-it[0m
+       [2mgemma4_text | 30 layers | 128 experts | ~43 GB[0m
+    GLM-4.7-Flash[0m
+       [2mglm4_moe_lite | 47 layers | 64 experts (+1 shared) | ~52 GB[0m
+    GLM-5.2[0m
+       [2mglm_moe_dsa | 78 layers | 256 experts (+1 shared) | ~1350 GB[0m
+    NVIDIA-Nemotron-3-Nano-30B-A3B-BF16[0m
+       [2mnemotron_h | 52 layers | 128 experts (+1 shared) | ~186 GB[0m
+    NVIDIA-Nemotron-3-Super-120B-A12B-BF16[0m
+       [2mnemotron_h | 88 layers | 512 experts (+1 shared) | ~2772 GB[0m
+    Qwen3-0.6B[0m
+       [2mqwen3 | 28 layers | dense[0m
+    Qwen3-1.7B[0m
+       [2mqwen3 | 28 layers | dense[0m
+    Qwen3-8B[0m
+       [2mqwen3 | 36 layers | dense[0m
+  [0;36m▸[0m [1mQwen3-Coder-Next[0m
+       [2mqwen3_next | 48 layers | 512 experts | ~144 GB[0m
+    Qwen3.5-122B-A10B[0m
+       [2mqwen3_5_moe_text | 48 layers | 256 experts | ~216 GB[0m
+    Qwen3.5-35B-A3B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    Qwen3.5-397B-A17B[0m
+       [2mqwen3_5_moe_text | 60 layers | 512 experts | ~720 GB[0m
+    Qwen3.6-35B-A3B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    Step-3.7-Flash[0m
+       [2mstep3p5 | 45 layers | dense[0m
+    z-lab/Qwen3.5-122B-A10B-DFlash[0m
+       [2mqwen3 | 6 layers | dense[0m
+
+  [2m[↑↓] Select  [Enter] Confirm  [Esc] Quit[0m
+[2J[H  [1mModels[0m
+
+    Download supported model from Hugging Face[0m
+       [2mChoose a Krasis-supported model and download it to ~/.krasis/models[0m
+    deepreinforce-ai/Ornith-1.0-35B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    deepreinforce-ai/Ornith-1.0-397B[0m
+       [2mqwen3_5_moe_text | 60 layers | 512 experts | ~720 GB[0m
+    deepseek-ai/DeepSeek-V4-Flash[0m
+       [2mdeepseek_v4 | 43 layers | 256 experts (+1 shared) | ~516 GB[0m
+    gemma-4-26b-a4b-it[0m
+       [2mgemma4_text | 30 layers | 128 experts | ~43 GB[0m
+    GLM-4.7-Flash[0m
+       [2mglm4_moe_lite | 47 layers | 64 experts (+1 shared) | ~52 GB[0m
+    GLM-5.2[0m
+       [2mglm_moe_dsa | 78 layers | 256 experts (+1 shared) | ~1350 GB[0m
+    NVIDIA-Nemotron-3-Nano-30B-A3B-BF16[0m
+       [2mnemotron_h | 52 layers | 128 experts (+1 shared) | ~186 GB[0m
+    NVIDIA-Nemotron-3-Super-120B-A12B-BF16[0m
+       [2mnemotron_h | 88 layers | 512 experts (+1 shared) | ~2772 GB[0m
+    Qwen3-0.6B[0m
+       [2mqwen3 | 28 layers | dense[0m
+    Qwen3-1.7B[0m
+       [2mqwen3 | 28 layers | dense[0m
+    Qwen3-8B[0m
+       [2mqwen3 | 36 layers | dense[0m
+    Qwen3-Coder-Next[0m
+       [2mqwen3_next | 48 layers | 512 experts | ~144 GB[0m
+  [0;36m▸[0m [1mQwen3.5-122B-A10B[0m
+       [2mqwen3_5_moe_text | 48 layers | 256 experts | ~216 GB[0m
+    Qwen3.5-35B-A3B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    Qwen3.5-397B-A17B[0m
+       [2mqwen3_5_moe_text | 60 layers | 512 experts | ~720 GB[0m
+    Qwen3.6-35B-A3B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    Step-3.7-Flash[0m
+       [2mstep3p5 | 45 layers | dense[0m
+    z-lab/Qwen3.5-122B-A10B-DFlash[0m
+       [2mqwen3 | 6 layers | dense[0m
+
+  [2m[↑↓] Select  [Enter] Confirm  [Esc] Quit[0m
+[2J[H  [1mModels[0m
+
+    Download supported model from Hugging Face[0m
+       [2mChoose a Krasis-supported model and download it to ~/.krasis/models[0m
+    deepreinforce-ai/Ornith-1.0-35B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    deepreinforce-ai/Ornith-1.0-397B[0m
+       [2mqwen3_5_moe_text | 60 layers | 512 experts | ~720 GB[0m
+    deepseek-ai/DeepSeek-V4-Flash[0m
+       [2mdeepseek_v4 | 43 layers | 256 experts (+1 shared) | ~516 GB[0m
+    gemma-4-26b-a4b-it[0m
+       [2mgemma4_text | 30 layers | 128 experts | ~43 GB[0m
+    GLM-4.7-Flash[0m
+       [2mglm4_moe_lite | 47 layers | 64 experts (+1 shared) | ~52 GB[0m
+    GLM-5.2[0m
+       [2mglm_moe_dsa | 78 layers | 256 experts (+1 shared) | ~1350 GB[0m
+    NVIDIA-Nemotron-3-Nano-30B-A3B-BF16[0m
+       [2mnemotron_h | 52 layers | 128 experts (+1 shared) | ~186 GB[0m
+    NVIDIA-Nemotron-3-Super-120B-A12B-BF16[0m
+       [2mnemotron_h | 88 layers | 512 experts (+1 shared) | ~2772 GB[0m
+    Qwen3-0.6B[0m
+       [2mqwen3 | 28 layers | dense[0m
+    Qwen3-1.7B[0m
+       [2mqwen3 | 28 layers | dense[0m
+    Qwen3-8B[0m
+       [2mqwen3 | 36 layers | dense[0m
+    Qwen3-Coder-Next[0m
+       [2mqwen3_next | 48 layers | 512 experts | ~144 GB[0m
+    Qwen3.5-122B-A10B[0m
+       [2mqwen3_5_moe_text | 48 layers | 256 experts | ~216 GB[0m
+  [0;36m▸[0m [1mQwen3.5-35B-A3B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    Qwen3.5-397B-A17B[0m
+       [2mqwen3_5_moe_text | 60 layers | 512 experts | ~720 GB[0m
+    Qwen3.6-35B-A3B[0m
+       [2mqwen3_5_moe_text | 40 layers | 256 experts | ~60 GB[0m
+    Step-3.7-Flash[0m
+       [2mstep3p5 | 45 layers | dense[0m
+    z-lab/Qwen3.5-122B-A10B-DFlash[0m
+       [2mqwen3 | 6 layers | dense[0m
+
+  [2m[↑↓] Select  [Enter] Confirm  [Esc] Quit[0m
+[?25h[?25l[2J[H  [1mSelect GPUs to use:[0m
+
+  [0;36m▸[0m [[0;31m✘[0m] [1mGPU 0: NVIDIA RTX A4500[0m  [2m(20,470 MB)[0m
+    [[0;32m✔[0m] GPU 1: NVIDIA RTX PRO 6000 Blackwell Workstation Edition[0m  [2m(97,887 MB)[0m
+
+  Selected: [1m1[0m GPU(s), 97,887 MB total VRAM
+
+  [2m[↑↓] Navigate  [Space] Toggle  [Enter] Confirm  [q] Quit[0m
+[?25h[?25l[2J[H[1m╔══════════════════════════════════════════════════════════════════════════════╗[0m
+[1m║                         [0;36mKrasis[0m[1m MoE Server [2mv1.0.16rc1[0m[1m                         ║[0m
+[1m╚══════════════════════════════════════════════════════════════════════════════╝[0m
+
+  Model: [1mQwen3.5-35B-A3B[0m (qwen3_5_moe_text, 40 layers, 256 experts)
+  GPUs:  1x NVIDIA RTX PRO 6000 Blackwell Workstation Edition (97,887 MB)  [1]
+
+  [2m─── Configuration ─────────────────[0m
+  [0;36m▸[0m [1mLayer group size    [0m2 layers (double-buffered)
+    KV cache (MB)       [0m1,000 MB
+    KV format           [0mk6v6  [2mbf16 → k6v6 — Quality KV, INT6 K + INT6 V[0m
+    Model quantization  [0m4  [2mbf16 → int4 — [1;33mslight loss[0m[2m[0m
+    Attention quant     [0mHQQ6  [2mbf16 → HQQ6 — default HQQ attention[0m
+    VRAM safety margin  [0m600 MB
+    Host/Port           [0m0.0.0.0:8012
+    SSH Tunnel          [0m[2mOff[0m
+    Enable thinking     [0m[0;32mOn[0m
+    HCS RAM saver       [0m[0;32mOn[0m [2m(lower RAM)[0m
+    Adaptive cold-mass pruning[0m[2mOff[0m
+
+  [2m── VRAM Budget ────────────────[0m       [2m── System RAM ───────────────────[0m
+    Experts:     [0;36m   1,584 MB[0m  [2m(INT4)[0m      Expert cache:    [0;32m   15.5 GB[0m
+    Attention:   [0;36m   1,140 MB[0m  [2m(HQQ6)[0m      HQQ staging:     [0;32m    2.2 GB[0m
+    Overhead:    [0;36m   4,212 MB[0m            
+    KV cache:    [0;36m   1,000 MB[0m  [2m(k6v6)[0m    
+    [2m─────────────────────────────[0m         [2m─────────────────────────────[0m
+    Total: [0;36m   7,936[0m / 97,887 MB           Total:   [0;32m   17.7[0m / 995 GB
+    HCS:   [0;36m  91,535 MB[0m [2m(~578% coverage)[0m  
+    Estimated peak: VRAM [0;36m7,937 MB[0m / 97,887 MB, System RAM [0;32m17.7 GB[0m / 995 GB
+    [2mAttention budget: estimated from model dimensions (hqq6, group_size=128)[0m
+    [2m~117K tokens k6v6 KV[0m
+
+  [2m[↑↓] Navigate  [←→] Change  [Enter] Launch  [A] Advanced:[0m[2mOff[0m[2m  [L] Load  [S] Save  [q] Quit[0m
+[?25h[?25l[2J[H  [1mSelect launch mode:[0m
+
+  [0;36m▸[0m [1mLaunch[0m  [2mStart the server immediately[0m
+    Benchmark and Launch[0m  [2mRun prefill + decode benchmark, then start server[0m
+    Benchmark Only[0m  [2mRun benchmark and exit[0m
+    Stress Test[0m  [2mRun diverse prompts to catch edge cases[0m
+    Benchmark Suite[0m  [2mRun all model × config combos from suite config[0m
+
+  [2m[↑↓] Select  [Enter] Confirm  [q] Quit[0m
+[?25h
+[1mKrasis Launch Configuration[0m
+  Krasis home:     /home/main/.krasis
+  Models dir:      /home/main/.krasis/models
+  Model:           Qwen3.5-35B-A3B
+  PP partition:    40
+  Layer group:     2 layers (double-buffered)
+  KV cache:        1,000 MB
+  KV dtype:        k6v6
+  Quantization:    INT4 g128
+  Expert INT4:     amax
+  Attention quant: HQQ6
+  Shared expert:   int8
+  LM head quant:   int8
+  VRAM safety:     600 MB
+  HCS RAM saver:   On (lower RAM)
+  Cold-mass prune: Off
+  Server:          0.0.0.0:8012
+  GPUs:            1x [1]
+
+  Experts:        1,584 MB  (INT4 g128)
+  Attention:      1,140 MB  (HQQ6)
+  Overhead:       4,212 MB
+  Total:    6,937 / 97,887 MB (rank 0)
+  HCS:     91,535 MB  (~578% coverage)
+  KV capacity: ~10.6M tokens (k6v6)
+  Expert cache: 17.7 GB / 995 GB RAM
+  Estimated peak: 7,937 MB VRAM / 17.7 GB system RAM
+  Attention budget: estimated from model dimensions (hqq6, group_size=128)
+
+  CUDA_VISIBLE_DEVICES=GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d
+
+[0;32mStarting Krasis server...[0m
+
+  Config: /tmp/krasis-8oazwro4.conf
+[2m$ /home/main/.krasis/venv/bin/python3.12 -m krasis.server --config /tmp/krasis-8oazwro4.conf[0m
+
+Pre-scan: set CUDA_VISIBLE_DEVICES=GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d
+Loaded config from /tmp/krasis-8oazwro4.conf: {'model_path': '/home/main/.krasis/models/Qwen3.5-35B-A3B', 'selected_gpus': 'GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d', 'num_gpus': 1, 'layer_group_size': 2, 'kv_cache_mb': 1000, 'kv_dtype': 'k6v6', 'gpu_expert_bits': 4, 'expert_group_size': 128, 'gpu_expert_int4_calib': 'amax', 'cpu_expert_bits': 4, 'attention_quant': 'hqq6', 'hqq_cache_profile': 'baseline', 'hqq_group_size': 128, 'shared_expert_quant': 'int8', 'dense_mlp_quant': 'int8', 'lm_head_quant': 'int8', 'krasis_threads': 40, 'host': '0.0.0.0', 'port': 8012, 'gpu_prefill_threshold': 300, 'vram_safety_margin': 600, 'hcs': True, 'multi_gpu_hcs': False, 'hcs_host_cache_mode': 'source', 'dynamic_hcs': True, 'dynamic_hcs_tail_blocks': 2, 'adaptive_cold_mass_pruning': 'off', 'stream_attention': False, 'draft_k': 3, 'draft_context': 512, 'temperature': 0.6, 'force_load': False, 'force_rebuild_cache': False, 'force_rebuild_hqq_cache': False, 'build_cache': False, 'enable_thinking': True}
+
+[1m[36m▸ Krasis — Qwen3.5-35B-A3B[0m
+  [32mDecode: GPU  |  HCS: on  |  GPUs: 1[0m
+  [32mHCS host cache: source[0m
+  [32mSelected physical GPUs: GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d (config; CUDA_VISIBLE_DEVICES=GPU-ece9afbc-ab6b-d1b9-7e7e-ad73769d6b5d)[0m
+  [32mExperts: GPU INT4 g128 (amax)  |  Attention: hqq6  |  KV: k6v6[0m
+  [32mLayer groups: 2  |  KV cache: 1000 MB  |  Threads: 40[0m
+  [2mGPU-only mode: CPU expert weights and CPU decoder skipped[0m
+
+[1m[36m▸ Loading model weights[0m
+  [33m[VRAM before-load][0m cuda:0: alloc=0 MB, reserved=0 MB, used=557 MB, free=96700 MB, total=97258 MB
+
+[1m[36m▸ Loading GPU weights[0m
+  [33m[VRAM after-phase1-gpu-weights][0m cuda:0: alloc=3625 MB, reserved=3694 MB, used=4429 MB, free=92828 MB, total=97258 MB
+  [0;32mHQQ attention artifacts validated (1140 MB cached), 92828 MB free[0m
+
+[1m[36m▸ Building GPU INT4 Marlin expert cache (one-time)[0m
+  [2mCache will be saved to /home/main/.krasis/cache/Qwen3.5-35B-A3B for instant loading next time.[0m
+  [1;33m▸ Building GPU INT4 Marlin cache: 40 layers from safetensors[0m
+    GPU Marlin: 5/40 layers (4s elapsed, ~31s remaining)
+    GPU Marlin: 10/40 layers (8s elapsed, ~25s remaining)
+    GPU Marlin: 15/40 layers (12s elapsed, ~20s remaining)
+    GPU Marlin: 20/40 layers (15s elapsed, ~15s remaining)
+    GPU Marlin: 25/40 layers (19s elapsed, ~11s remaining)
+    GPU Marlin: 30/40 layers (22s elapsed, ~7s remaining)
+    GPU Marlin: 35/40 layers (26s elapsed, ~4s remaining)
+    GPU Marlin: 40/40 layers (29s elapsed, ~0s remaining)
+    GPU Marlin: writing shared experts...
+  [0;32m✓ GPU INT4 Marlin cache built: 16.7 GB in 33s[0m
+    Marlin timing: initial_prefetch=0.0s routed io/quant=5.6s prefetch=0.0s repack=5.5s write=17.9s misc=0.0s; shared io/quant=0.6s repack=0.3s write=0.1s; flush=0.0s
+    Loading GPU Marlin cache: 40 layers...
+    GPU Marlin cache loaded: 16.7 GB in 11s
+  [0;32mExpert cache built in 45s — next launch will be much faster.[0m
+  [33m[VRAM after-phase2-expert-weights][0m cuda:0: alloc=3625 MB, reserved=3694 MB, used=4429 MB, free=92828 MB, total=97258 MB
+  [33m[VRAM after-phase3-prefill-managers][0m cuda:0: alloc=3625 MB, reserved=3694 MB, used=4429 MB, free=92828 MB, total=97258 MB
+  [33m[VRAM after-kv-cache-init][0m cuda:0: alloc=4625 MB, reserved=4694 MB, used=5429 MB, free=91828 MB, total=97258 MB
+  [33m[VRAM after-full-load][0m cuda:0: alloc=4625 MB, reserved=4694 MB, used=5429 MB, free=91828 MB, total=97258 MB
+
+[1m[36m▸ CUDA runtime warmup[0m
+/home/main/.krasis/venv/lib/python3.12/site-packages/torch/_inductor/compile_fx.py:322: UserWarning: TensorFloat32 tensor cores for float32 matrix multiplication available but not enabled. Consider setting `torch.set_float32_matmul_precision('high')` for better performance.
+  warnings.warn(
+  [32mcuBLAS + Triton kernel compilation done[0m
+
+[1m[36m▸ Setting up GPU decode store[0m
+  [32mGPU decode store ready (addr=0x58f28e30)[0m
+  [32mReleased redundant GPU execution source tensors (565 MB)[0m
+  [2mVRAM monitor started (tracking warmup)[0m
+  [2mcuda:0: 0 MB total[0m
+
+[1m[36m▸ Pre-allocating Rust prefill engine[0m
+[FLA] Loading kernels for H=32 from /home/main/.krasis/venv/lib/python3.12/site-packages/krasis/libkrasis_fla_sm120.so
+[FLA] loaded krasis_fla_chunk_local_cumsum_scalar_kernel (H=32)
+[FLA] loaded krasis_fla_chunk_scaled_dot_kkt_fwd_kernel (H=32)
+[FLA] loaded krasis_fla_merge_16x16_to_64x64_inverse_kernel (H=32)
+[FLA] loaded krasis_fla_recompute_w_u_fwd_kernel (H=32)
+[FLA] loaded krasis_fla_chunk_gated_delta_rule_fwd_kernel_h_blockdim64 (H=32)
+[FLA] loaded krasis_fla_chunk_fwd_kernel_o (H=32)
+  [32mPrefill engine scratch buffers allocated[0m
+
+[1m[36m▸ Warmup (Rust prefill engine)[0m
+  [32mRust prefill warmed with 300 tokens before HCS budgeting[0m
+  [32mWarmup complete in 182.9s[0m
+  [2mcuda:0 warmup:  peak 7,547 MB used / 97,258 MB total  (min free: 89,710 MB)[0m
+
+[1m[36m▸ VRAM calibration[0m
+  [32mSafety margin: 600 MB[0m
+  [32mFree VRAM after startup: 90,724 MB / 97,258 MB[0m
+  [32mShort calibration: probing 500 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 1.01s (31.7 tok/s)  VRAM: 90678 MB free now, 90678 MB min free during decode[0m
+  [32mShort calibration: baseline=90,724 MB, prefill post-alloc=90,014 MB, prefill min=89,618 MB, decode min=90,678 MB, post-cleanup=90,678 MB[0m
+  [32mAdaptive long calibration: default target=39,920 tokens, target low-water floor=1,200 MB, estimated prefill growth=0.4236 MB/token[0m
+  [32mAdaptive long calibration: next probe 39,920 tokens (model-estimated initial probe (projected 0.4236 MB/token, validation floor 2400 MB))[0m
+  [32mLong calibration: probing 39,920 prompt tokens + 32 decode tokens[0m
+  [32mdecode: 32 tokens in 1.10s (29.1 tok/s)  VRAM: 90672 MB free now, 90672 MB min free during decode[0m
+  [32mLong calibration: baseline=90,678 MB, prefill post-alloc=72,952 MB, prefill min=72,556 MB, decode min=90,672 MB, post-cleanup=90,672 MB[0m
+  [32mScratch reservation: max=20,879 MB (at 50,000 tokens)[0m
+
+[1m[36m▸ VRAM calibration complete[0m
+  [32mPost-calibration free VRAM: 90,672 MB[0m
+  [32mTransient deltas: short prefill=1,106 MB, long prefill=18,122 MB, short decode=46 MB, long decode=6 MB[0m
+  [32mGPU0 decode HCS budget: 90,026 MB[0m
+  [32mPrefill HCS budgets: short=88,966 MB, long=71,950 MB[0m
+  [32mWorst-case prefill scratch reservation: 20,879 MB at 50,000 tokens[0m
+
+[1m[36m▸ Calculating HCS budget[0m
+
+[1m[36m▸ Checking approved route heatmap cache[0m
+  [32mApproved route heatmap loaded from cache: qwen35_35b_hqq6_p00006 (manifest-approved runtime compatibility)[0m
+  [32mUsing approved route heatmap; quick startup heatmap collection skipped[0m
+  [32mHeatmap: 9,572 experts ranked from 9,572 entries[0m
+  [2mVRAM calibration: baseline 90672 MB | prefill 442.0 KB/tok, decode -1.0 KB/tok | HCS allowance prefill: short 88966 MB, long 71950 MB | decode: short 90026 MB, long 90066 MB | idle floors prefill=1706 MB decode=646 MB | decode-resident HCS budget=90026 MB[0m
+  [2mGPU0 HCS: 10240 experts (9572 ranked + 668 unranked), reclaimable: 90,026 MB[0m
+
+[1m[36m▸ Loading GPU0 HCS pool (fully reclaimable)[0m
+
+[1m[36m▸ HCS pool loaded[0m
+  [32mHCS pool: 0/10240 experts loaded in 0.00s (0.0% coverage), 0.0 MB VRAM, 0 free slots, gpu_route_sync=false, mapped_reads=false | soft: 10240 experts in 1.03s (15840.0 MB, host_mode=source) | total: 10240/10240 (100.0%) coverage[0m
+  [2mLoaded in 1.1s[0m
+
+[1m[36m▸ Decode validation[0m
+  [32mSkipped: Rust prefill already warmed before HCS budgeting[0m
+
+[1m[36m▸ VRAM monitor: runtime warnings enabled[0m
+  [32mSafety margin: 600 MB — warnings on every new low below this[0m
+
+[1m[32mKRASIS SERVER READY[0m
+  [32mModel:[0m    [1mQwen3.5-35B-A3B[0m
+  [32mAddress:[0m  [1m0.0.0.0:8012[0m
+  [32mContext:[0m  117,024 tokens  |  KV cache: 1,000 MB
+  [32mDecode:[0m   GPU  |  HCS: on  |  Think: on
+  [32mClient setup:[0m
+    Base URL:      [1mhttp://127.0.0.1:8012/v1[0m
+    Chat endpoint: http://127.0.0.1:8012/v1/chat/completions
+    Models:        http://127.0.0.1:8012/v1/models
+    API key:       [1mX[0m [2m(any value)[0m
+    Model name:    [1mQwen3.5-35B-A3B-vision[0m
+                   [2mvision-capable; use this same model for text and images[0m
+  [2mPress Q or Ctrl-C to stop[0m
+
+  [32mprefill: 25 tokens in 0.47s (52.8 tok/s)  VRAM: 74780 MB free now, 74562 MB min free during prefill[0m
+  [32mdecode: 348 tokens in 3.26s (106.7 tok/s)  VRAM: 74780 MB free now, 74780 MB min free during decode[0m
+  [36mDynamic HCS: hit=100.00% tail=640/320 protected=9600 promotions=0 evictions=0 request_promotions=0/10526400 budget_skips=0 no_slot=0 copy_failures=0[0m
+^C
+Script done on 2026-07-24 00:57:36+01:00 [COMMAND_EXIT_CODE="0"]

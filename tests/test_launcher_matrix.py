@@ -281,6 +281,39 @@ class LauncherMatrixTest(unittest.TestCase):
                 else:
                     os.environ["ProgramW6432"] = old_program_w6432
 
+    def test_windows_installer_exposes_native_update_shortcuts(self) -> None:
+        windows_dir = REPO_ROOT / "scripts" / "windows"
+        installer_source = (windows_dir / "KrasisInstaller.iss").read_text()
+        build_source = (windows_dir / "Build-Installer.ps1").read_text()
+        updater_source = (windows_dir / "Update-Krasis.ps1").read_text()
+
+        self.assertIn(
+            r'Name: "{autoprograms}\Krasis\Krasis Update"',
+            installer_source,
+        )
+        self.assertIn(
+            r'Name: "{autoprograms}\Krasis\Krasis Prerelease"',
+            installer_source,
+        )
+        self.assertIn(
+            r'-File ""{app}\bin\Update-Krasis.ps1"" -Channel stable',
+            installer_source,
+        )
+        self.assertIn(
+            r'-File ""{app}\bin\Update-Krasis.ps1"" -Channel prerelease',
+            installer_source,
+        )
+        self.assertIn(
+            '"Update-Krasis.ps1") (Join-Path $Stage "bin\\Update-Krasis.ps1")',
+            build_source,
+        )
+        self.assertIn('[ValidateSet("stable", "prerelease")]', updater_source)
+        self.assertIn('"$ApiRoot/releases/latest"', updater_source)
+        self.assertIn("$_.prerelease -and -not $_.draft", updater_source)
+        self.assertIn(r'^KrasisSetup-.+-win64\.exe$', updater_source)
+        self.assertIn("Start-Process", updater_source)
+        self.assertIn("$DownloadedSize -ne [Int64]$Asset.size", updater_source)
+
     def test_hf_results_screen_fits_short_terminal_without_wrapping(self) -> None:
         long_summary = " ".join(["very-long-summary"] * 20)
         candidates = [
