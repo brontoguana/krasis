@@ -2,6 +2,13 @@
 
 ## 1.0.16-rc.3 - 2026-07-24
 
+- Strengthened the Windows installer lifecycle gate after a real preflight
+  proved clean install, private-runtime validation, hostile-environment
+  isolation, and legacy Python/venv repair but retained the runtime after
+  uninstall. The gate still fails closed and now preserves the complete Inno
+  uninstall log plus residual-file, process-owner, and pending-delete
+  diagnostics so deletion failures are corrected from measured evidence.
+
 - Fixed the private-runtime validation probe under Windows PowerShell 5.1.
   PowerShell's legacy native-command argument handling corrupted the quoted
   multiline Python source passed through `python -c`. The installer now starts
