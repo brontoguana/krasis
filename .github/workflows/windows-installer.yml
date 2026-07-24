@@ -96,6 +96,26 @@ jobs:
             -TorchUrl $env:KRASIS_WINDOWS_TORCH_URL
           Get-Content runtime-package/runtime-manifest.json
 
+      - name: Compare payload digest under Windows PowerShell 5.1
+        run: |
+          $manifest = Get-Content -Raw runtime-package/runtime-manifest.json |
+            ConvertFrom-Json
+          $helper = (Resolve-Path scripts/windows/Runtime-Manifest.ps1).Path.Replace("'", "''")
+          $runtime = (Resolve-Path runtime-package).Path.Replace("'", "''")
+          $command = ". '$helper'; Get-KrasisRuntimePayloadHash -RuntimeRoot '$runtime'"
+          $legacyPowerShell = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
+          $actual = (
+            & $legacyPowerShell -NoProfile -ExecutionPolicy Bypass -Command $command |
+              Select-Object -Last 1
+          ).Trim()
+          Write-Host "PowerShell 7 payload digest:   $($manifest.payload_sha256)"
+          Write-Host "PowerShell 5.1 payload digest: $actual"
+          if ($actual -eq $manifest.payload_sha256) {
+            Write-Host "Tree digest is cross-PowerShell stable."
+          } else {
+            Write-Warning "Tree digest differs across PowerShell generations; installer transport uses its independently pinned archive SHA-256."
+          }
+
       - name: Build installer
         run: |
           $version = python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])"

@@ -1,6 +1,7 @@
 #define AppVersion GetEnv("KRASIS_WINDOWS_VERSION")
 #define SourceDir GetEnv("KRASIS_WINDOWS_STAGING")
 #define OutputDir GetEnv("KRASIS_WINDOWS_OUTPUT")
+#define RuntimeArchiveSha256 GetEnv("KRASIS_RUNTIME_ARCHIVE_SHA256")
 
 [Setup]
 AppId={{D8C9713A-4E29-4B86-93E7-D2D6E68C6E22}
@@ -22,7 +23,7 @@ UninstallDisplayIcon={app}\bin\Launch-Krasis.ps1
 [Files]
 Source: "{#SourceDir}\bin\*"; DestDir: "{app}\bin"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#SourceDir}\VERSION.txt"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#SourceDir}\runtime-package\*"; DestDir: "{tmp}\KrasisRuntime-{#AppVersion}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SourceDir}\runtime-package.zip"; DestDir: "{tmp}"; DestName: "KrasisRuntime-{#AppVersion}.zip"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\Krasis\Krasis"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -NoExit -WindowStyle Maximized -File ""{app}\bin\Launch-Krasis.ps1"""; WorkingDir: "{app}"
@@ -54,7 +55,7 @@ var
   PowerShell: String;
   InstallScript: String;
   InvokeScript: String;
-  RuntimePackage: String;
+  RuntimeArchive: String;
   Parameters: String;
 begin
   if CurStep <> ssPostInstall then
@@ -63,12 +64,13 @@ begin
   PowerShell := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
   InstallScript := ExpandConstant('{app}\bin\Install-Krasis.ps1');
   InvokeScript := ExpandConstant('{app}\bin\Invoke-Install-Krasis.ps1');
-  RuntimePackage := ExpandConstant('{tmp}\KrasisRuntime-{#AppVersion}');
+  RuntimeArchive := ExpandConstant('{tmp}\KrasisRuntime-{#AppVersion}.zip');
   Parameters :=
     '-NoProfile -ExecutionPolicy Bypass -File ' + AddQuotes(InvokeScript) +
     ' -InstallScript ' + AddQuotes(InstallScript) +
     ' -InstallRoot ' + AddQuotes(ExpandConstant('{app}')) +
-    ' -RuntimePackage ' + AddQuotes(RuntimePackage) +
+    ' -RuntimeArchive ' + AddQuotes(RuntimeArchive) +
+    ' -RuntimeArchiveSha256 ' + AddQuotes('{#RuntimeArchiveSha256}') +
     ' -LogPath ' + AddQuotes(ExpandConstant('{app}\runtime-install.log'));
 
   if not Exec(PowerShell, Parameters, '', SW_SHOW, ewWaitUntilTerminated, ResultCode) then begin

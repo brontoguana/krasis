@@ -4,7 +4,11 @@
 
 - Fixed private-runtime payload verification on Windows PowerShell 5.1 by
   hashing files directly with .NET SHA-256 instead of depending on the
-  unavailable `Get-FileHash` command.
+  unavailable `Get-FileHash` command. The validated runtime is now transported
+  through Inno as one immutable ZIP whose exact SHA-256 is compiled into the
+  installer. The Windows PowerShell 5.1 hook verifies that archive byte for
+  byte, extracts it with .NET into an inactive side-by-side runtime, and runs
+  the existing ABI/import validation before atomic activation.
 
 - Replaced the native Windows installer's overlayed Python/venv lifecycle with
   a release-built private runtime. Windows CI now builds CPython 3.12.10 and

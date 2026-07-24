@@ -2,39 +2,38 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$InstallRoot,
     [Parameter(Mandatory = $true)]
-    [string]$RuntimePackage
+    [string]$RuntimeArchive,
+    [Parameter(Mandatory = $true)]
+    [string]$RuntimeArchiveSha256
 )
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $ScriptDir "Runtime-Manifest.ps1")
 
-$RuntimePackagePath = (Resolve-Path $RuntimePackage).Path
-$PackageManifest = Read-KrasisRuntimeManifest -RuntimeRoot $RuntimePackagePath
+$RuntimeArchivePath = (Resolve-Path $RuntimeArchive).Path
+if ($RuntimeArchiveSha256 -notmatch "^[0-9a-fA-F]{64}$") {
+    throw "Private-runtime archive SHA-256 is invalid: $RuntimeArchiveSha256"
+}
+$ActualArchiveSha256 = Get-KrasisFileSha256 -Path $RuntimeArchivePath
+if ($ActualArchiveSha256 -ne $RuntimeArchiveSha256.ToLowerInvariant()) {
+    throw "Private-runtime archive SHA-256 mismatch: expected $RuntimeArchiveSha256, got $ActualArchiveSha256."
+}
+
 $VersionPath = Join-Path $InstallRoot "VERSION.txt"
 if (-not (Test-Path $VersionPath -PathType Leaf)) {
     throw "Krasis installer version marker is missing: $VersionPath"
 }
 $InstallerVersion = (Get-Content -Raw $VersionPath).Trim()
-if ($InstallerVersion -ne $PackageManifest.release_version) {
-    throw "Installer/runtime version mismatch: installer=$InstallerVersion, runtime=$($PackageManifest.release_version)."
-}
-$PackageHash = Get-KrasisRuntimePayloadHash -RuntimeRoot $RuntimePackagePath
-if ($PackageHash -ne $PackageManifest.payload_sha256) {
-    throw "Packaged private-runtime hash mismatch: expected $($PackageManifest.payload_sha256), got $PackageHash."
-}
 
 New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
 $RuntimeRoot = Join-Path $InstallRoot "runtime"
 $ReleasesRoot = Join-Path $RuntimeRoot "releases"
 New-Item -ItemType Directory -Force -Path $ReleasesRoot | Out-Null
 
-$SafeBundleId = "$($PackageManifest.bundle_id)"
-if ($SafeBundleId -notmatch "^[A-Za-z0-9._-]+$") {
-    throw "Private-runtime bundle ID contains unsafe characters: $SafeBundleId"
-}
-$ActivationName = "$SafeBundleId-$([Guid]::NewGuid().ToString('N'))"
-$NewRuntime = Join-Path $ReleasesRoot $ActivationName
+$StagingName = ".staging-$([Guid]::NewGuid().ToString('N'))"
+$NewRuntime = Join-Path $ReleasesRoot $StagingName
+$ActivationName = $null
 $CurrentPath = Join-Path $RuntimeRoot "current.txt"
 $CurrentBackupPath = Join-Path $RuntimeRoot "current.txt.rollback"
 $CurrentTempPath = Join-Path $RuntimeRoot "current.txt.new"
@@ -103,15 +102,26 @@ try {
     $env:PIP_CONFIG_FILE = "NUL"
     $env:PYTHONDONTWRITEBYTECODE = "1"
 
-    Write-Host "Staging Krasis private Python $($PackageManifest.python_version)..."
+    Write-Host "Extracting verified Krasis private runtime..."
     New-Item -ItemType Directory -Force -Path $NewRuntime | Out-Null
-    Copy-Item -Recurse -Force (Join-Path $RuntimePackagePath "*") $NewRuntime
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [System.IO.Compression.ZipFile]::ExtractToDirectory(
+        $RuntimeArchivePath,
+        $NewRuntime
+    )
 
     $StagedManifest = Read-KrasisRuntimeManifest -RuntimeRoot $NewRuntime
-    $StagedHash = Get-KrasisRuntimePayloadHash -RuntimeRoot $NewRuntime
-    if ($StagedHash -ne $StagedManifest.payload_sha256) {
-        throw "Staged private-runtime hash mismatch: expected $($StagedManifest.payload_sha256), got $StagedHash."
+    if ($InstallerVersion -ne $StagedManifest.release_version) {
+        throw "Installer/runtime version mismatch: installer=$InstallerVersion, runtime=$($StagedManifest.release_version)."
     }
+    $SafeBundleId = "$($StagedManifest.bundle_id)"
+    if ($SafeBundleId -notmatch "^[A-Za-z0-9._-]+$") {
+        throw "Private-runtime bundle ID contains unsafe characters: $SafeBundleId"
+    }
+    $ActivationName = "$SafeBundleId-$([Guid]::NewGuid().ToString('N'))"
+    $ActivatedRuntime = Join-Path $ReleasesRoot $ActivationName
+    [System.IO.Directory]::Move($NewRuntime, $ActivatedRuntime)
+    $NewRuntime = $ActivatedRuntime
     [void](Assert-KrasisPrivateRuntime -RuntimeRoot $NewRuntime -Manifest $StagedManifest)
 
     $PrivatePython = Join-Path $NewRuntime "python.exe"
@@ -206,7 +216,10 @@ try {
             } else {
                 $null
             }
-            $RollbackSucceeded = $RollbackValue -ne $ActivationName
+            $RollbackSucceeded = (
+                $null -eq $ActivationName -or
+                $RollbackValue -ne $ActivationName
+            )
         } catch {
             Write-Warning "Private-runtime activation rollback failed: $($_.Exception.Message)"
         }

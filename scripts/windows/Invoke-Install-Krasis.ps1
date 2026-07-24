@@ -4,7 +4,9 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$InstallRoot,
     [Parameter(Mandatory = $true)]
-    [string]$RuntimePackage,
+    [string]$RuntimeArchive,
+    [Parameter(Mandatory = $true)]
+    [string]$RuntimeArchiveSha256,
     [Parameter(Mandatory = $true)]
     [string]$LogPath
 )
@@ -22,7 +24,8 @@ try {
     $TranscriptStarted = $true
     & $InstallScript `
         -InstallRoot $InstallRoot `
-        -RuntimePackage $RuntimePackage
+        -RuntimeArchive $RuntimeArchive `
+        -RuntimeArchiveSha256 $RuntimeArchiveSha256
 } catch {
     $ExitCode = 1
     Write-Host "Krasis private-runtime installation failed:" -ForegroundColor Red

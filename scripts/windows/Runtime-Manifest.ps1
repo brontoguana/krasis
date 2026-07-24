@@ -6,12 +6,15 @@ function Get-KrasisFileSha256 {
 
     $ResolvedPath = (Resolve-Path $Path).Path
     $Sha256 = [System.Security.Cryptography.SHA256]::Create()
-    $Stream = [System.IO.File]::OpenRead($ResolvedPath)
+    $Stream = $null
     try {
+        $Stream = [System.IO.File]::OpenRead($ResolvedPath)
         $Hash = $Sha256.ComputeHash($Stream)
         return ([BitConverter]::ToString($Hash)).Replace("-", "").ToLowerInvariant()
     } finally {
-        $Stream.Dispose()
+        if ($null -ne $Stream) {
+            $Stream.Dispose()
+        }
         $Sha256.Dispose()
     }
 }

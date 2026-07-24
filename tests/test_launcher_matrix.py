@@ -325,9 +325,19 @@ class LauncherMatrixTest(unittest.TestCase):
             build_source,
         )
         self.assertIn(
-            r'Source: "{#SourceDir}\runtime-package\*"',
+            "[System.IO.Compression.ZipFile]::CreateFromDirectory",
+            build_source,
+        )
+        self.assertIn(
+            "$env:KRASIS_RUNTIME_ARCHIVE_SHA256 = $RuntimeArchiveSha256",
+            build_source,
+        )
+        self.assertIn(
+            r'Source: "{#SourceDir}\runtime-package.zip"',
             installer_source,
         )
+        self.assertIn("RuntimeArchiveSha256", installer_source)
+        self.assertIn("-RuntimeArchiveSha256", installer_source)
         self.assertIn("CurStepChanged(CurStep: TSetupStep)", installer_source)
         self.assertIn("ResultCode <> 0", installer_source)
         self.assertIn("GetCustomSetupExitCode", installer_source)
@@ -366,6 +376,12 @@ class LauncherMatrixTest(unittest.TestCase):
         self.assertIn('$RuntimeRoot = Join-Path $InstallRoot "runtime"', install_source)
         self.assertIn('$CurrentPath = Join-Path $RuntimeRoot "current.txt"', install_source)
         self.assertIn("[System.IO.File]::Replace", install_source)
+        self.assertIn("Get-KrasisFileSha256 -Path $RuntimeArchivePath", install_source)
+        self.assertIn(
+            "[System.IO.Compression.ZipFile]::ExtractToDirectory",
+            install_source,
+        )
+        self.assertNotIn("Copy-Item -Recurse -Force", install_source)
         self.assertIn("--no-deps", install_source)
         self.assertIn('"$($StagedManifest.torch_url)"', install_source)
         self.assertIn("(Join-Path $InstallRoot \"python\")", install_source)
@@ -376,6 +392,10 @@ class LauncherMatrixTest(unittest.TestCase):
 
         self.assertIn("Start-Transcript -Path $LogPath -Force", invoke_install_source)
         self.assertIn("& $InstallScript", invoke_install_source)
+        self.assertIn(
+            "-RuntimeArchiveSha256 $RuntimeArchiveSha256",
+            invoke_install_source,
+        )
         self.assertIn("$ExitCode = 1", invoke_install_source)
         self.assertIn("exit $ExitCode", invoke_install_source)
 
@@ -397,6 +417,10 @@ class LauncherMatrixTest(unittest.TestCase):
         self.assertNotIn("-PythonInstaller python-installer.exe", workflow_source)
         self.assertIn('KRASIS_WINDOWS_TORCH_VERSION: "2.9.1+cu128"', workflow_source)
         self.assertIn("Test clean install, isolation, legacy repair, and uninstall", workflow_source)
+        self.assertIn(
+            "Compare payload digest under Windows PowerShell 5.1",
+            workflow_source,
+        )
         self.assertIn("Test-InstalledRuntime.ps1", workflow_source)
         self.assertIn('Get-Content $installLog', workflow_source)
         self.assertIn("Requested install-root contents:", workflow_source)
