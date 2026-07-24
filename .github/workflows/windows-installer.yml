@@ -19,7 +19,7 @@ jobs:
       KRASIS_DEV_SCRIPT: "1"
       KRASIS_SIDECAR_PLATFORM: windows-x86_64-cuda126
       KRASIS_WINDOWS_PYTHON_VERSION: "3.12.10"
-      KRASIS_WINDOWS_PYTHON_INSTALLER_SHA256: "67b5635e80ea51072b87941312d00ec8927c4db9ba18938f7ad2d27b328b95fb"
+      KRASIS_WINDOWS_PYTHON_ARCHIVE_SHA256: "4acbed6dd1c744b0376e3b1cf57ce906f9dc9e95e68824584c8099a63025a3c3"
       KRASIS_WINDOWS_TORCH_VERSION: "2.9.1+cu128"
       KRASIS_WINDOWS_TORCH_CUDA: "12.8"
       KRASIS_WINDOWS_TORCH_URL: "https://download-r2.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp312-cp312-win_amd64.whl#sha256=3a01f0b64c10a82d444d9fd06b3e8c567b1158b76b2764b8f51bfd8f535064b0"
@@ -71,24 +71,26 @@ jobs:
             $wheel.FullName
           Get-ChildItem wheelhouse | Format-Table Name,Length
 
-      - name: Download bundled Python installer
+      - name: Download embedded Python runtime
         run: |
           $pyver = $env:KRASIS_WINDOWS_PYTHON_VERSION
-          $url = "https://www.python.org/ftp/python/$pyver/python-$pyver-amd64.exe"
-          Invoke-WebRequest -Uri $url -OutFile python-installer.exe
-          Get-Item python-installer.exe | Format-Table Name,Length
+          $url = "https://www.python.org/ftp/python/$pyver/python-$pyver-embed-amd64.zip"
+          Invoke-WebRequest -Uri $url -OutFile python-runtime.zip
+          Get-Item python-runtime.zip | Format-Table Name,Length
 
       - name: Build private Windows runtime
         run: |
           $version = python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])"
+          $buildPython = (Get-Command python).Source
           scripts/windows/Build-Runtime.ps1 `
             -Wheelhouse wheelhouse `
-            -PythonInstaller python-installer.exe `
+            -PythonRuntimeArchive python-runtime.zip `
+            -BuildPython $buildPython `
             -RuntimeRequirements scripts/windows/windows-runtime-requirements.txt `
             -OutputDir runtime-package `
             -Version $version `
             -PythonVersion $env:KRASIS_WINDOWS_PYTHON_VERSION `
-            -PythonInstallerSha256 $env:KRASIS_WINDOWS_PYTHON_INSTALLER_SHA256 `
+            -PythonRuntimeArchiveSha256 $env:KRASIS_WINDOWS_PYTHON_ARCHIVE_SHA256 `
             -TorchVersion $env:KRASIS_WINDOWS_TORCH_VERSION `
             -TorchCuda $env:KRASIS_WINDOWS_TORCH_CUDA `
             -TorchUrl $env:KRASIS_WINDOWS_TORCH_URL

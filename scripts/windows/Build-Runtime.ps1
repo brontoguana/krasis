@@ -2,7 +2,9 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$Wheelhouse,
     [Parameter(Mandatory = $true)]
-    [string]$PythonInstaller,
+    [string]$PythonRuntimeArchive,
+    [Parameter(Mandatory = $true)]
+    [string]$BuildPython,
     [Parameter(Mandatory = $true)]
     [string]$RuntimeRequirements,
     [Parameter(Mandatory = $true)]
@@ -12,7 +14,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$PythonVersion,
     [Parameter(Mandatory = $true)]
-    [string]$PythonInstallerSha256,
+    [string]$PythonRuntimeArchiveSha256,
     [Parameter(Mandatory = $true)]
     [string]$TorchVersion,
     [Parameter(Mandatory = $true)]
@@ -25,7 +27,8 @@ $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "Runtime-Manifest.ps1")
 
 $WheelhousePath = (Resolve-Path $Wheelhouse).Path
-$PythonInstallerPath = (Resolve-Path $PythonInstaller).Path
+$PythonRuntimeArchivePath = (Resolve-Path $PythonRuntimeArchive).Path
+$BuildPythonPath = (Resolve-Path $BuildPython).Path
 $RuntimeRequirementsPath = (Resolve-Path $RuntimeRequirements).Path
 $OutputPath = [System.IO.Path]::GetFullPath((Join-Path (Get-Location) $OutputDir))
 $RelocationProbe = "$OutputPath-relocation-probe"
@@ -34,30 +37,15 @@ Remove-Item -Recurse -Force $OutputPath -ErrorAction SilentlyContinue
 Remove-Item -Recurse -Force $RelocationProbe -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $OutputPath | Out-Null
 
-$ActualPythonInstallerHash = (
-    Get-FileHash -Algorithm SHA256 -Path $PythonInstallerPath
+$ActualPythonRuntimeArchiveHash = (
+    Get-FileHash -Algorithm SHA256 -Path $PythonRuntimeArchivePath
 ).Hash.ToLowerInvariant()
-if ($ActualPythonInstallerHash -ne $PythonInstallerSha256.ToLowerInvariant()) {
-    throw "CPython installer SHA-256 mismatch: expected $PythonInstallerSha256, got $ActualPythonInstallerHash."
+if ($ActualPythonRuntimeArchiveHash -ne $PythonRuntimeArchiveSha256.ToLowerInvariant()) {
+    throw "CPython runtime archive SHA-256 mismatch: expected $PythonRuntimeArchiveSha256, got $ActualPythonRuntimeArchiveHash."
 }
 
-$InstallerArgs = @(
-    "/quiet",
-    "InstallAllUsers=0",
-    "TargetDir=`"$OutputPath`"",
-    "Include_pip=1",
-    "Include_launcher=0",
-    "Include_doc=0",
-    "Include_test=0",
-    "AssociateFiles=0",
-    "Shortcuts=0",
-    "PrependPath=0"
-)
-Write-Host "Building private CPython $PythonVersion runtime..."
-& $PythonInstallerPath $InstallerArgs
-if ($LASTEXITCODE -ne 0) {
-    throw "CPython staging installer failed with status $LASTEXITCODE."
-}
+Write-Host "Extracting private CPython $PythonVersion embeddable runtime..."
+Expand-Archive -Path $PythonRuntimeArchivePath -DestinationPath $OutputPath -Force
 
 $Python = Join-Path $OutputPath "python.exe"
 if (-not (Test-Path $Python -PathType Leaf)) {
@@ -79,6 +67,8 @@ $PthContent = @(
     "import site"
 )
 Set-Content -Path $PthPath -Value $PthContent -Encoding ASCII
+$PrivateSitePackages = Join-Path $OutputPath "Lib\site-packages"
+New-Item -ItemType Directory -Force -Path $PrivateSitePackages | Out-Null
 
 $Wheel = @(
     Get-ChildItem -Path $WheelhousePath -Filter "krasis-*.whl"
@@ -91,9 +81,11 @@ $OldBytecode = [Environment]::GetEnvironmentVariable("PYTHONDONTWRITEBYTECODE", 
 try {
     $env:PYTHONDONTWRITEBYTECODE = "1"
     Write-Host "Installing Krasis and pinned core dependencies into the private runtime..."
-    & $Python -I -B -m pip install `
+    & $BuildPythonPath -m pip install `
+        --target $PrivateSitePackages `
         --no-index `
         --find-links $WheelhousePath `
+        --only-binary ":all:" `
         --no-compile `
         --no-warn-script-location `
         --disable-pip-version-check `
@@ -106,6 +98,7 @@ try {
     # Console-script wrappers contain build-machine paths and are never used.
     # Krasis and pip are always invoked as modules by the absolute interpreter.
     Remove-Item -Recurse -Force (Join-Path $OutputPath "Scripts") -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force (Join-Path $OutputPath "bin") -ErrorAction SilentlyContinue
 
     $Probe = Get-KrasisRuntimeProbe -Python $Python
     if ($Probe.python_version -ne $PythonVersion) {
@@ -129,7 +122,7 @@ try {
         bundle_id = "krasis-$Version-cp$AbiDigits-win_amd64"
         release_version = $Version
         python_version = $PythonVersion
-        python_installer_sha256 = $ActualPythonInstallerHash
+        python_runtime_archive_sha256 = $ActualPythonRuntimeArchiveHash
         python_cache_tag = "cpython-$AbiDigits"
         architecture = "AMD64"
         krasis_version = $Probe.krasis_version

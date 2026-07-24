@@ -339,6 +339,12 @@ class LauncherMatrixTest(unittest.TestCase):
         self.assertIn("Get-KrasisRuntimePayloadHash", runtime_build_source)
         self.assertIn("$RelocationProbe", runtime_build_source)
         self.assertIn("runtime-manifest.json", runtime_build_source)
+        self.assertIn("Expand-Archive -Path $PythonRuntimeArchivePath", runtime_build_source)
+        self.assertIn("--target $PrivateSitePackages", runtime_build_source)
+        self.assertIn('--only-binary ":all:"', runtime_build_source)
+        self.assertIn("& $BuildPythonPath -m pip install", runtime_build_source)
+        self.assertNotIn("InstallerArgs", runtime_build_source)
+        self.assertNotIn("& $PythonInstallerPath", runtime_build_source)
 
         self.assertIn('$RuntimeRoot = Join-Path $InstallRoot "runtime"', install_source)
         self.assertIn('$CurrentPath = Join-Path $RuntimeRoot "current.txt"', install_source)
@@ -360,10 +366,13 @@ class LauncherMatrixTest(unittest.TestCase):
 
         self.assertIn('KRASIS_WINDOWS_PYTHON_VERSION: "3.12.10"', workflow_source)
         self.assertIn(
-            'KRASIS_WINDOWS_PYTHON_INSTALLER_SHA256: '
-            '"67b5635e80ea51072b87941312d00ec8927c4db9ba18938f7ad2d27b328b95fb"',
+            'KRASIS_WINDOWS_PYTHON_ARCHIVE_SHA256: '
+            '"4acbed6dd1c744b0376e3b1cf57ce906f9dc9e95e68824584c8099a63025a3c3"',
             workflow_source,
         )
+        self.assertIn("python-$pyver-embed-amd64.zip", workflow_source)
+        self.assertIn("-PythonRuntimeArchive python-runtime.zip", workflow_source)
+        self.assertNotIn("-PythonInstaller python-installer.exe", workflow_source)
         self.assertIn('KRASIS_WINDOWS_TORCH_VERSION: "2.9.1+cu128"', workflow_source)
         self.assertIn("Test clean install, isolation, legacy repair, and uninstall", workflow_source)
         self.assertIn("Test-InstalledRuntime.ps1", workflow_source)
