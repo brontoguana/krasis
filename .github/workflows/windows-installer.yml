@@ -134,10 +134,20 @@ jobs:
             ) `
             -PassThru `
             -Wait
+          if (Test-Path $installLog) {
+            Get-Content $installLog
+          } else {
+            Write-Warning "Inno Setup did not create the requested install log: $installLog"
+          }
+          Write-Host "Requested install-root contents:"
+          if (Test-Path $testRoot) {
+            Get-ChildItem -Force -Recurse $testRoot |
+              Select-Object FullName,Length |
+              Format-Table -AutoSize
+          } else {
+            Write-Warning "Requested install root does not exist: $testRoot"
+          }
           if ($process.ExitCode -ne 0) {
-            if (Test-Path $installLog) {
-              Get-Content $installLog
-            }
             throw "Private-runtime installer test failed with status $($process.ExitCode)."
           }
 
@@ -170,6 +180,7 @@ jobs:
           Get-PSDrive C | Format-Table Name,Used,Free
 
       - name: Upload CI artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: krasis-windows-installer
@@ -178,6 +189,7 @@ jobs:
             dist/Krasis-Windows-Package-*.zip
             dist/*.whl
             dist/windows-installer-test.log
+            ${{ runner.temp }}/krasis-installer-test.log
 
       - name: Upload release assets
         if: github.event_name == 'release'
