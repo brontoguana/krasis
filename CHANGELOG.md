@@ -12,7 +12,9 @@
   verifies each is absent. The Windows lifecycle gate now exercises both an
   empty directory and a junction to an external sentinel, proving cleanup
   removes empty nodes without traversing reparse points. It preserves complete
-  Inno logs and still rejects any retained runtime.
+  Inno logs and still rejects any retained runtime. CI now compiles the Inno
+  script against a minimal staged payload before the expensive native build,
+  so installer-language errors fail early.
 
 - Fixed the private-runtime validation probe under Windows PowerShell 5.1.
   PowerShell's legacy native-command argument handling corrupted the quoted

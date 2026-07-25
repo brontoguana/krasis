@@ -449,6 +449,8 @@ class LauncherMatrixTest(unittest.TestCase):
         self.assertIn("empty-cleanup-probe", workflow_source)
         self.assertIn("reparse-cleanup-probe", workflow_source)
         self.assertIn("must-survive.txt", workflow_source)
+        self.assertIn("Compile installer script syntax", workflow_source)
+        self.assertIn("krasis-inno-syntax", workflow_source)
         self.assertIn(
             "Uninstall traversed a runtime reparse point outside the install root.",
             workflow_source,

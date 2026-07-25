@@ -46,6 +46,29 @@ jobs:
           python -m pip install maturin
           choco install innosetup -y --no-progress
 
+      - name: Compile installer script syntax
+        run: |
+          $syntaxRoot = Join-Path $env:RUNNER_TEMP "krasis-inno-syntax"
+          $syntaxStage = Join-Path $syntaxRoot "staging"
+          $syntaxOutput = Join-Path $syntaxRoot "output"
+          Remove-Item -Recurse -Force $syntaxRoot -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path (Join-Path $syntaxStage "bin") | Out-Null
+          New-Item -ItemType Directory -Force -Path $syntaxOutput | Out-Null
+          Copy-Item scripts/windows/*.ps1 (Join-Path $syntaxStage "bin")
+          Set-Content (Join-Path $syntaxStage "VERSION.txt") "syntax-check"
+          Set-Content (Join-Path $syntaxStage "runtime-package.zip") "syntax-check"
+
+          $env:KRASIS_WINDOWS_VERSION = "0.0.0-syntax"
+          $env:KRASIS_WINDOWS_STAGING = $syntaxStage
+          $env:KRASIS_WINDOWS_OUTPUT = $syntaxOutput
+          $env:KRASIS_RUNTIME_ARCHIVE_SHA256 = "0000000000000000000000000000000000000000000000000000000000000000"
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          & $iscc scripts/windows/KrasisInstaller.iss
+          if ($LASTEXITCODE -ne 0) {
+            throw "Inno Setup syntax compilation failed with status $LASTEXITCODE."
+          }
+          Remove-Item -Recurse -Force $syntaxRoot
+
       - name: Build Windows sidecar DLLs
         run: |
           nvcc --version

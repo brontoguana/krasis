@@ -105,9 +105,8 @@ begin
     RaiseException('Unable to start Krasis private-runtime cleanup.');
   if ResultCode <> 0 then
     RaiseException(
-      Format(
-        'Krasis private-runtime cleanup failed with status %d. Close Krasis and retry uninstall.',
-        [ResultCode]
-      )
+      'Krasis private-runtime cleanup failed with status ' +
+      IntToStr(ResultCode) +
+      '. Close Krasis and retry uninstall.'
     );
 end;
