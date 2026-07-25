@@ -1,5 +1,6 @@
 fn main() {
     let total_timer = BuildTimer::start("build.rs total");
+    compile_windows_launcher_resources();
     let sidecar_abi = std::fs::read_to_string("sidecar_abi_version.txt")
         .expect("sidecar_abi_version.txt is required")
         .trim()
@@ -50,6 +51,45 @@ fn main() {
     timed_phase("HQQ search PTX", compile_hqq_search_kernels);
 
     total_timer.finish();
+}
+
+fn compile_windows_launcher_resources() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+
+    let icon_path = std::path::Path::new("assets/windows/krasis.ico");
+    println!("cargo:rerun-if-changed={}", icon_path.display());
+    let absolute_icon = icon_path
+        .canonicalize()
+        .unwrap_or_else(|error| panic!("Windows launcher icon is missing: {error}"));
+    let out_dir = std::path::PathBuf::from(
+        std::env::var_os("OUT_DIR").expect("OUT_DIR is required for Windows resources"),
+    );
+    let rc_path = out_dir.join("krasis-windows-launcher.rc");
+    let res_path = out_dir.join("krasis-windows-launcher.res");
+    let icon_resource_path = absolute_icon.to_string_lossy().replace('\\', "/");
+    std::fs::write(
+        &rc_path,
+        format!("1 ICON \"{icon_resource_path}\"\r\n"),
+    )
+    .expect("failed to write Windows launcher resource script");
+
+    let status = std::process::Command::new("rc.exe")
+        .arg("/nologo")
+        .arg("/fo")
+        .arg(&res_path)
+        .arg(&rc_path)
+        .status()
+        .unwrap_or_else(|error| panic!("failed to start rc.exe for Windows launcher icon: {error}"));
+    assert!(
+        status.success(),
+        "rc.exe failed to compile the Windows launcher icon: {status}"
+    );
+    println!(
+        "cargo:rustc-link-arg-bin=krasis-windows-launcher={}",
+        res_path.display()
+    );
 }
 
 struct BuildTimer {

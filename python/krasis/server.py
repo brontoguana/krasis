@@ -2657,14 +2657,14 @@ def main():
     if not heatmap_path:
         heatmap_path = os.path.join(cache_dir, "auto_heatmap.json")
 
-    # CUDA runtime warmup — triggers cuBLAS + Triton kernel compilation
-    # before any VRAM measurements.
+    # CUDA runtime warmup — triggers cuBLAS allocation and loads the vendored
+    # Marlin kernel on every selected device before any VRAM measurements.
     num_gpus_available = args.num_gpus or torch.cuda.device_count()
     devices = [torch.device(f"cuda:{i}") for i in range(num_gpus_available)]
     device_indices = list(range(num_gpus_available))
     _status("CUDA runtime warmup")
     _model.warmup_cuda_runtime(devices)
-    _detail("cuBLAS + Triton kernel compilation done")
+    _detail("cuBLAS + Marlin runtime warmup done")
     log_ram_ledger("after-cuda-runtime-warmup")
 
     # ── Set decode mode (GPU only) ──

@@ -55,6 +55,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path (Join-Path $syntaxStage "bin") | Out-Null
           New-Item -ItemType Directory -Force -Path $syntaxOutput | Out-Null
           Copy-Item scripts/windows/*.ps1 (Join-Path $syntaxStage "bin")
+          Copy-Item assets/windows/krasis.ico (Join-Path $syntaxStage "bin\Krasis.ico")
           Set-Content (Join-Path $syntaxStage "VERSION.txt") "syntax-check"
           Set-Content (Join-Path $syntaxStage "runtime-package.zip") "syntax-check"
 
@@ -80,6 +81,16 @@ jobs:
         run: |
           python -m maturin build --release --out dist -i python
           python scripts/build_sidecars.py verify-wheel --wheel-dir dist
+
+      - name: Build native Windows launcher
+        run: |
+          cargo test --release --bin krasis-windows-launcher
+          cargo build --release --bin krasis-windows-launcher
+          $launcher = Get-Item target/release/krasis-windows-launcher.exe
+          if ($launcher.Length -le 0) {
+            throw "Native Windows launcher is empty."
+          }
+          $launcher | Format-Table Name,Length
 
       - name: Build installer wheelhouse
         run: |
@@ -144,6 +155,7 @@ jobs:
           $version = python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])"
           scripts/windows/Build-Installer.ps1 `
             -RuntimePackage runtime-package `
+            -LauncherExe target/release/krasis-windows-launcher.exe `
             -OutputDir dist `
             -Version $version
           Get-ChildItem dist | Format-Table Name,Length
@@ -204,6 +216,25 @@ jobs:
           $env:PYTHONHOME = "C:\definitely-not-krasis-python"
           $env:PYTHONPATH = "C:\hostile-system-site-packages"
           scripts/windows/Test-InstalledRuntime.ps1 -InstallRoot $testRoot
+
+          $nativeLauncher = Join-Path $testRoot "bin\Krasis.exe"
+          if (-not (Test-Path $nativeLauncher -PathType Leaf)) {
+            throw "Installed native Krasis launcher is missing: $nativeLauncher"
+          }
+          $launcherProbe = & $nativeLauncher --probe
+          if ($LASTEXITCODE -ne 0) {
+            throw "Installed native Krasis launcher probe failed with status $LASTEXITCODE."
+          }
+          $currentName = (
+            Get-Content -Raw (Join-Path $testRoot "runtime\current.txt")
+          ).Trim()
+          $expectedRuntime = (
+            Resolve-Path (Join-Path $testRoot "runtime\releases\$currentName")
+          ).Path
+          $expectedProbe = "KRASIS_WINDOWS_LAUNCHER_PROBE=$expectedRuntime"
+          if ($launcherProbe -notcontains $expectedProbe) {
+            throw "Native launcher resolved the wrong private runtime: $($launcherProbe -join ' | ')"
+          }
           Remove-Item Env:PYTHONHOME,Env:PYTHONPATH -ErrorAction SilentlyContinue
 
           if (Test-Path (Join-Path $testRoot "python")) {

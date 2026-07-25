@@ -8,6 +8,7 @@ AppId={{D8C9713A-4E29-4B86-93E7-D2D6E68C6E22}
 AppName=Krasis
 AppVersion={#AppVersion}
 AppPublisher=Krasis
+SetupIconFile={#SourceDir}\bin\Krasis.ico
 DefaultDirName={localappdata}\Programs\Krasis
 DefaultGroupName=Krasis
 DisableProgramGroupPage=yes
@@ -18,7 +19,7 @@ SolidCompression=yes
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-UninstallDisplayIcon={app}\bin\Launch-Krasis.ps1
+UninstallDisplayIcon={app}\bin\Krasis.exe
 
 [Files]
 Source: "{#SourceDir}\bin\*"; DestDir: "{app}\bin"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -26,11 +27,12 @@ Source: "{#SourceDir}\VERSION.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\runtime-package.zip"; DestDir: "{tmp}"; DestName: "KrasisRuntime-{#AppVersion}.zip"; Flags: ignoreversion
 
 [Icons]
-Name: "{autoprograms}\Krasis\Krasis"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -NoExit -WindowStyle Maximized -File ""{app}\bin\Launch-Krasis.ps1"""; WorkingDir: "{app}"
+Name: "{autoprograms}\Krasis\Krasis"; Filename: "{app}\bin\Krasis.exe"; WorkingDir: "{app}"
 Name: "{autoprograms}\Krasis\Krasis Update"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -NoExit -WindowStyle Maximized -File ""{app}\bin\Update-Krasis.ps1"" -Channel stable"; WorkingDir: "{app}"
 Name: "{autoprograms}\Krasis\Krasis Prerelease"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -NoExit -WindowStyle Maximized -File ""{app}\bin\Update-Krasis.ps1"" -Channel prerelease"; WorkingDir: "{app}"
 
 [InstallDelete]
+Type: files; Name: "{app}\bin\Launch-Krasis.ps1"
 Type: files; Name: "{app}\bin\python-installer.exe"
 Type: filesandordirs; Name: "{app}\bin\wheelhouse"
 

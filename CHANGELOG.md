@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+- Added a branded rounded-square Krasis logo and a nine-resolution Windows
+  icon. The icon is embedded in the native launcher and used by the installer,
+  Start Menu entry, and uninstall registration.
+
+- Fixed Windows startup failing during CUDA warmup because a retired Python
+  expert module imported an unavailable Triton package. Primary and auxiliary
+  decode already use the Rust/CUDA engine; CUDA warmup now loads the packaged
+  Marlin sidecar on every selected GPU and the duplicate Python expert path has
+  been removed. Warmup derives its expert group size from the validated runtime
+  configuration and model dimensions rather than assuming one model's value.
+
+- Replaced the normal Windows PowerShell host with a native `Krasis.exe`
+  launcher. It resolves only the active sealed private runtime, invokes its
+  absolute Python executable in isolated mode, removes host Python override
+  variables, inherits a normal resizable console, and propagates the runtime's
+  exit status. The Start Menu no longer uses PowerShell, `-NoExit`, or forced
+  maximization for normal Krasis execution.
+
+- Removed all Windows console mouse/QuickEdit mode mutation. Native keyboard
+  input continues to use `msvcrt`, but Krasis no longer calls
+  `GetConsoleMode`/`SetConsoleMode` or changes the terminal's mouse behavior.
+  The installed-runtime gate now rejects the retired Triton expert module,
+  verifies mode-preserving input, builds/tests the native launcher, and probes
+  its active private-runtime resolution after installation.
+
 - Fixed the sealed-runtime validator under Windows PowerShell 5.1 by
   transporting its Python probe as an explicitly UTF-8 temporary script
   instead of code-page encoded redirected standard input.
@@ -12,17 +37,10 @@
   This prevents startup from failing on the em dash in the generated header
   (CP1252 byte `0x97`) or non-ASCII configuration values.
 
-- Prevented Windows QuickEdit/mouse console input from suspending interactive
-  Krasis key and prompt reads. Krasis now preserves the input console's exact
-  original mode, temporarily disables QuickEdit and mouse events only while it
-  owns an interactive read, and restores the original mode even when the read
-  raises. Unix terminal behavior is unchanged.
-
 - Strengthened the sealed Windows runtime gate to execute the generated-config
-  UTF-8 writer with a non-ASCII path and to verify that console mouse/QuickEdit
-  flags are isolated and restored. The locally prepared verification version is
-  `1.0.16-rc.5`; `./dev build` passed in `205s`, the post-build launcher matrix
-  passed `22/22` in `31.379s`, and all nine Windows PowerShell scripts parsed.
+  UTF-8 writer with a non-ASCII path. The locally prepared rc.5 verification
+  build passed `./dev build` in `205s`, the post-build launcher matrix passed
+  `22/22` in `31.379s`, and all nine Windows PowerShell scripts parsed.
 
 - Fixed native Windows interactive launcher and chat input. Windows console
   arrow keys, Enter, Escape, Backspace, character input, and bounded key waits

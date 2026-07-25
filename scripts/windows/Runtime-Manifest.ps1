@@ -103,6 +103,7 @@ function Get-KrasisRuntimeProbe {
     $ProbeCode = @'
 import importlib
 import importlib.metadata
+import importlib.util
 import json
 import os
 import platform
@@ -121,23 +122,6 @@ console_input = importlib.import_module("krasis.console_input")
 def decode_windows_key(chars):
     chars = iter(chars)
     return console_input.read_windows_key(lambda: next(chars))
-
-def probe_console_mode():
-    modes = [0x0010 | 0x0040 | 0x0020]
-    writes = []
-    def set_mode(mode):
-        writes.append(mode)
-        modes[0] = mode
-    with console_input.windows_console_key_mode(
-        get_mode=lambda: modes[0],
-        set_mode=set_mode,
-    ):
-        active = modes[0]
-    return {
-        "active": active,
-        "restored": modes[0],
-        "writes": writes,
-    }
 
 def probe_launch_config():
     fd, path = tempfile.mkstemp(prefix="krasis-runtime-probe-", suffix=".conf")
@@ -166,6 +150,9 @@ data = {
     "sys_path": sys.path,
     "krasis_version": importlib.metadata.version("krasis"),
     "native_module": native.__name__,
+    "retired_expert_module_absent": (
+        importlib.util.find_spec("krasis.triton_moe") is None
+    ),
     "launcher_windows_console": bool(launcher._HAS_WINDOWS_CONSOLE),
     "chat_windows_console": bool(chat._HAS_WINDOWS_CONSOLE),
     "windows_console_key_probe": [
@@ -177,7 +164,10 @@ data = {
         decode_windows_key(("\x1b",)),
         decode_windows_key(("\x08",)),
     ],
-    "windows_console_mode_probe": probe_console_mode(),
+    "windows_console_preserves_modes": not hasattr(
+        console_input,
+        "windows_console_key_mode",
+    ),
     "launch_config_probe": probe_launch_config(),
     "ssl_version": ssl.OPENSSL_VERSION,
     "sre_magic": getattr(importlib.import_module("_sre"), "MAGIC", None),
@@ -285,6 +275,9 @@ function Assert-KrasisPrivateRuntime {
     if ($Probe.native_module -ne "krasis.krasis") {
         throw "Krasis native extension did not import from the private runtime."
     }
+    if (-not [bool]$Probe.retired_expert_module_absent) {
+        throw "Krasis private runtime unexpectedly contains the retired Triton expert path."
+    }
     if (-not [bool]$Probe.launcher_windows_console -or -not [bool]$Probe.chat_windows_console) {
         throw "Krasis launcher/chat did not enable native Windows console input."
     }
@@ -294,13 +287,8 @@ function Assert-KrasisPrivateRuntime {
     if ($ActualKeyProbe -ne $ExpectedKeyProbe) {
         throw "Krasis native Windows console key decoder failed its runtime probe."
     }
-    if (
-        ([int]$Probe.windows_console_mode_probe.active -band 0x0010) -ne 0 -or
-        ([int]$Probe.windows_console_mode_probe.active -band 0x0040) -ne 0 -or
-        ([int]$Probe.windows_console_mode_probe.active -band 0x0080) -eq 0 -or
-        [int]$Probe.windows_console_mode_probe.restored -ne (0x0010 -bor 0x0040 -bor 0x0020)
-    ) {
-        throw "Krasis native Windows console mode isolation/restoration probe failed."
+    if (-not [bool]$Probe.windows_console_preserves_modes) {
+        throw "Krasis native Windows input unexpectedly mutates console modes."
     }
     if (
         -not [bool]$Probe.launch_config_probe.strict_utf8 -or

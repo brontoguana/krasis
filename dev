@@ -32,6 +32,7 @@
 #                                     from the first non-passed model. Without a target, runs
 #                                     all models with no resume capability.
 #   ./dev launcher-test             Validate launcher config serialization and server startup parsing
+#   ./dev windows-launcher-test     Build and test the native Windows launcher logic
 #   ./dev reference-test <config>   Compare against stored non-HF references; HF artifacts require override
 #   ./dev reference-test --compare <model>  Comparison matrix; HF artifacts require override
 #   ./dev reference-inventory       Inventory stored reference artifacts and classify contract state
@@ -3102,6 +3103,15 @@ do_launcher_test() {
     run_launcher_matrix_test "$run_dir" "launcher-test" "$@"
 }
 
+do_windows_launcher_test() {
+    info "Building and testing native Windows launcher logic"
+    (
+        cd "$SCRIPT_DIR"
+        PATH="$HOME/.cargo/bin:$PATH" \
+            cargo test --release --bin krasis-windows-launcher "$@"
+    )
+}
+
 # ── Extract --timing flag ────────────────────────────────────────
 # Can appear anywhere in args. Removes it and sets KRASIS_DECODE_TIMING=1.
 TIMING_FLAG=false
@@ -3142,6 +3152,7 @@ case "$cmd" in
     release-test)   do_release_test "$@" ;;
     release-test-all) do_release_test_all "$@" ;;
     launcher-test)  do_launcher_test "$@" ;;
+    windows-launcher-test) do_windows_launcher_test "$@" ;;
     reference-test) do_reference_test "$@" ;;
     witness-inputs) do_witness_inputs "$@" ;;
     witness-model-check) do_witness_model_check "$@" ;;
@@ -3205,6 +3216,7 @@ case "$cmd" in
         echo "  reference-test <config>        Compare against stored non-HF references; HF artifacts require override"
         echo "  reference-test --compare <model>  Comparison matrix; HF artifacts require override"
         echo "  launcher-test                  Validate launcher config serialization and server startup parsing"
+        echo "  windows-launcher-test          Build and test native Windows launcher logic"
         echo "  reference-inventory            Inventory stored reference artifacts"
         echo "  witness-inputs <model>         Build stored input_token_ids from fixed prompt-source JSON"
         echo "  witness-model-check <model>    Check expected BF16 GGUF witness model readiness"

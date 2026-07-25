@@ -1,6 +1,8 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$RuntimePackage,
+    [Parameter(Mandatory = $true)]
+    [string]$LauncherExe,
     [string]$OutputDir = "dist",
     [string]$Version = "0.0.0"
 )
@@ -9,6 +11,8 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 . (Join-Path $PSScriptRoot "Runtime-Manifest.ps1")
 $RuntimePackagePath = (Resolve-Path $RuntimePackage).Path
+$LauncherExePath = (Resolve-Path $LauncherExe).Path
+$LauncherIconPath = (Resolve-Path (Join-Path $RepoRoot "assets\windows\krasis.ico")).Path
 $OutputPath = Join-Path $RepoRoot $OutputDir
 $BuildRoot = Join-Path $RepoRoot "target\windows-installer"
 $Stage = Join-Path $BuildRoot "staging"
@@ -17,7 +21,8 @@ Remove-Item -Recurse -Force $Stage -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path (Join-Path $Stage "bin") | Out-Null
 New-Item -ItemType Directory -Force -Path $OutputPath | Out-Null
 
-Copy-Item -Force (Join-Path $PSScriptRoot "Launch-Krasis.ps1") (Join-Path $Stage "bin\Launch-Krasis.ps1")
+Copy-Item -Force $LauncherExePath (Join-Path $Stage "bin\Krasis.exe")
+Copy-Item -Force $LauncherIconPath (Join-Path $Stage "bin\Krasis.ico")
 Copy-Item -Force (Join-Path $PSScriptRoot "Install-Krasis.ps1") (Join-Path $Stage "bin\Install-Krasis.ps1")
 Copy-Item -Force (Join-Path $PSScriptRoot "Invoke-Install-Krasis.ps1") (Join-Path $Stage "bin\Invoke-Install-Krasis.ps1")
 Copy-Item -Force (Join-Path $PSScriptRoot "Update-Krasis.ps1") (Join-Path $Stage "bin\Update-Krasis.ps1")

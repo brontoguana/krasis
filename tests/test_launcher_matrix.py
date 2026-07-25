@@ -191,32 +191,19 @@ class LauncherMatrixTest(unittest.TestCase):
             chat_mod._HAS_WINDOWS_CONSOLE = old_chat_flag
             chat_mod._read_windows_key_native = old_chat_reader
 
-    def test_native_windows_console_key_mode_disables_mouse_and_restores(self) -> None:
-        modes = [0x0010 | 0x0040 | 0x0020]
-        writes: list[int] = []
-
-        def set_mode(mode: int) -> None:
-            writes.append(mode)
-            modes[0] = mode
-
-        with console_input_mod.windows_console_key_mode(
-            get_mode=lambda: modes[0],
-            set_mode=set_mode,
+    def test_native_windows_console_input_never_mutates_mouse_modes(self) -> None:
+        self.assertFalse(
+            hasattr(console_input_mod, "windows_console_key_mode"),
+            "native character input must not call SetConsoleMode",
+        )
+        source = (REPO_ROOT / "python" / "krasis" / "console_input.py").read_text()
+        for forbidden in (
+            "SetConsoleMode",
+            "GetConsoleMode",
+            "ENABLE_MOUSE_INPUT",
+            "ENABLE_QUICK_EDIT_MODE",
         ):
-            self.assertEqual(modes[0] & 0x0010, 0)
-            self.assertEqual(modes[0] & 0x0040, 0)
-            self.assertNotEqual(modes[0] & 0x0080, 0)
-        self.assertEqual(modes[0], 0x0010 | 0x0040 | 0x0020)
-        self.assertEqual(len(writes), 2)
-
-        modes[0] = 0x0010 | 0x0040
-        with self.assertRaisesRegex(RuntimeError, "test failure"):
-            with console_input_mod.windows_console_key_mode(
-                get_mode=lambda: modes[0],
-                set_mode=set_mode,
-            ):
-                raise RuntimeError("test failure")
-        self.assertEqual(modes[0], 0x0010 | 0x0040)
+            self.assertNotIn(forbidden, source)
 
     def test_generated_launch_config_is_strict_utf8(self) -> None:
         cfg = _base_config()
@@ -229,6 +216,22 @@ class LauncherMatrixTest(unittest.TestCase):
             self.assertIn(f'MODEL_PATH="{cfg.model_path}"', decoded)
         finally:
             config_path.unlink(missing_ok=True)
+
+    def test_cuda_warmup_uses_packaged_marlin_without_triton(self) -> None:
+        model_source = (REPO_ROOT / "python" / "krasis" / "model.py").read_text()
+        warmup_start = model_source.index("    def warmup_cuda_runtime(")
+        warmup_end = model_source.index("    @staticmethod", warmup_start)
+        warmup_source = model_source[warmup_start:warmup_end]
+        self.assertIn("from krasis.marlin_utils import", warmup_source)
+        self.assertIn("for device in devices:", warmup_source)
+        self.assertIn("self.quant_cfg.expert_group_size", warmup_source)
+        self.assertIn("gptq_marlin_gemm(", warmup_source)
+        self.assertNotIn("gs = 128", warmup_source)
+        self.assertNotIn("from krasis.triton_moe", warmup_source)
+        self.assertNotIn("import triton", warmup_source)
+        self.assertFalse(
+            (REPO_ROOT / "python" / "krasis" / "triton_moe.py").exists()
+        )
 
     def test_launcher_header_fills_terminal_width_and_shows_version(self) -> None:
         lines = launcher_mod._launcher_header_lines("9.8.7-test", width=96)
@@ -376,7 +379,9 @@ class LauncherMatrixTest(unittest.TestCase):
         remove_runtime_source = (
             windows_dir / "Remove-KrasisRuntime.ps1"
         ).read_text()
-        launch_source = (windows_dir / "Launch-Krasis.ps1").read_text()
+        native_launcher_source = (
+            REPO_ROOT / "src" / "bin" / "krasis-windows-launcher.rs"
+        ).read_text()
         updater_source = (windows_dir / "Update-Krasis.ps1").read_text()
         workflow_source = (
             REPO_ROOT / ".github" / "workflows" / "windows-installer.yml"
@@ -391,6 +396,14 @@ class LauncherMatrixTest(unittest.TestCase):
             installer_source,
         )
         self.assertIn(
+            r'Name: "{autoprograms}\Krasis\Krasis"; Filename: "{app}\bin\Krasis.exe"',
+            installer_source,
+        )
+        self.assertNotIn(
+            r'Name: "{autoprograms}\Krasis\Krasis"; Filename: "{sys}\WindowsPowerShell',
+            installer_source,
+        )
+        self.assertIn(
             r'-File ""{app}\bin\Update-Krasis.ps1"" -Channel stable',
             installer_source,
         )
@@ -401,6 +414,24 @@ class LauncherMatrixTest(unittest.TestCase):
         self.assertIn(
             '"Update-Krasis.ps1") (Join-Path $Stage "bin\\Update-Krasis.ps1")',
             build_source,
+        )
+        self.assertIn("[string]$LauncherExe", build_source)
+        self.assertIn(
+            '$LauncherExePath (Join-Path $Stage "bin\\Krasis.exe")',
+            build_source,
+        )
+        self.assertIn(
+            '"assets\\windows\\krasis.ico"',
+            build_source,
+        )
+        self.assertIn(
+            '$LauncherIconPath (Join-Path $Stage "bin\\Krasis.ico")',
+            build_source,
+        )
+        self.assertNotIn("Launch-Krasis.ps1", build_source)
+        self.assertIn(
+            r'Type: files; Name: "{app}\bin\Launch-Krasis.ps1"',
+            installer_source,
         )
         self.assertIn(
             '"Runtime-Manifest.ps1") (Join-Path $Stage "bin\\Runtime-Manifest.ps1")',
@@ -546,12 +577,28 @@ class LauncherMatrixTest(unittest.TestCase):
             workflow_source,
         )
 
-        self.assertIn('"runtime\\current.txt"', launch_source)
-        self.assertIn("Assert-KrasisPrivateRuntime", launch_source)
-        self.assertIn("& $Python -I -m krasis.launcher", launch_source)
-        self.assertNotIn(r'venv\Scripts\python.exe', launch_source)
-        self.assertNotIn("Get-Command py", launch_source)
-        self.assertNotIn("Get-Command python", launch_source)
+        self.assertIn('const ACTIVATION_FILE: &str = "runtime/current.txt"', native_launcher_source)
+        self.assertIn('join("runtime")', native_launcher_source)
+        self.assertIn('join("releases")', native_launcher_source)
+        self.assertIn('join("python.exe")', native_launcher_source)
+        self.assertIn('.args(["-I", "-m", "krasis.launcher"])', native_launcher_source)
+        self.assertIn('.env_remove("PYTHONHOME")', native_launcher_source)
+        self.assertIn('.env_remove("PYTHONPATH")', native_launcher_source)
+        self.assertNotIn("powershell", native_launcher_source.lower())
+        self.assertNotIn(r"venv\Scripts\python.exe", native_launcher_source)
+        self.assertIn("Build native Windows launcher", workflow_source)
+        self.assertIn("cargo test --release --bin krasis-windows-launcher", workflow_source)
+        self.assertIn("-LauncherExe target/release/krasis-windows-launcher.exe", workflow_source)
+        self.assertIn('$nativeLauncher = Join-Path $testRoot "bin\\Krasis.exe"', workflow_source)
+        self.assertIn("& $nativeLauncher --probe", workflow_source)
+        self.assertIn(
+            r"SetupIconFile={#SourceDir}\bin\Krasis.ico",
+            installer_source,
+        )
+        self.assertIn(
+            "cargo:rustc-link-arg-bin=krasis-windows-launcher=",
+            (REPO_ROOT / "build.rs").read_text(),
+        )
 
         self.assertIn('KRASIS_WINDOWS_PYTHON_VERSION: "3.12.10"', workflow_source)
         self.assertIn(

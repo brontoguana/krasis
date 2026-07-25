@@ -2233,14 +2233,17 @@ class KrasisModel:
 
     def warmup_cuda_runtime(self, devices: List[torch.device]):
         """Trigger ALL lazy CUDA runtime allocations on ALL devices before HCS expert loading."""
-        from krasis.triton_moe import triton_moe_decode, inverse_marlin_repack, inverse_scale_permute
+        from krasis.marlin_utils import (
+            get_scalar_type,
+            gptq_marlin_gemm,
+            marlin_make_workspace,
+        )
 
         logger.info("Warming up CUDA runtime on all devices: %s", [str(d) for d in devices])
         free_before = {str(d): torch.cuda.mem_get_info(d)[0] for d in devices}
 
         for device in devices:
             torch.cuda.set_device(device)
-            is_primary = device.index == 0
 
             # ── 1. cuBLAS workspace (for int8 matmuls) ──
             try:
@@ -2269,61 +2272,70 @@ class KrasisModel:
                     "Cannot start without working cuBLAS."
                 ) from e
 
-            # ── 2. Triton/Marlin JIT Compilation ──
+            # ── 2. Vendored Marlin kernel loading/workspace allocation ──
             try:
                 K = self.cfg.moe_latent_size or self.cfg.hidden_size
                 N, bits = self.cfg.moe_intermediate_size, 4
-                # Match the group_size auto-adjustment in the Rust cache builder
-                gs = 128
+                # Start from the configured expert quantization group and apply
+                # the same power-of-two dimensional adjustment used by the
+                # Marlin cache builder. Do not assume one model's group size.
+                gs = int(self.quant_cfg.expert_group_size)
+                while gs > 32 and (K % gs != 0 or N % gs != 0):
+                    gs //= 2
                 if K % gs != 0 or N % gs != 0:
-                    gs = 64
-                nb2 = bits // 2
-                n_dummy = 2
-                # Gated (silu): w13 width = 2*N (gate+up), ungated (relu2): w13 width = N (up only)
+                    raise RuntimeError(
+                        "Marlin warmup cannot derive a dimension-compatible "
+                        f"expert group size from configured group_size="
+                        f"{self.quant_cfg.expert_group_size}: k={K} n={N}"
+                    )
                 gated = self.cfg.mlp_hidden_act != "relu2"
-                w13_n = 2 * N if gated else N
                 logger.info(
                     "Marlin warmup expert shape on %s: k=%d n=%d group_size=%d gated=%s latent_size=%d",
                     device, K, N, gs, gated, self.cfg.moe_latent_size,
                 )
 
-                if is_primary:
-                    # Fused MoE warmup no longer needed — Rust prefill dlopens
-                    # the vendored MarlinDefault kernel directly from libkrasis_marlin.so.
-                    # Just warm up the vendored Marlin GEMM via a small dummy call.
-                    from krasis.marlin_utils import gptq_marlin_gemm, marlin_make_workspace, get_scalar_type
-                    ws = marlin_make_workspace(device, max_blocks_per_sm=4)
-                    st = get_scalar_type(bits)
-                    dummy_a = torch.zeros(1, K, dtype=torch.bfloat16, device=device)
-                    dummy_b = torch.zeros(K // 16, N * (bits // 2), dtype=torch.int32, device=device)
-                    dummy_s = torch.zeros(K // gs, N, dtype=torch.bfloat16, device=device)
-                    gptq_marlin_gemm(
-                        a=dummy_a, c=None, b_q_weight=dummy_b, b_scales=dummy_s,
-                        global_scale=None, b_zeros=None, g_idx=None, perm=None,
-                        workspace=ws, b_q_type=st, size_m=1, size_n=N, size_k=K,
-                        is_k_full=True,
-                    )
-                    torch.cuda.synchronize(device)
-                else:
-                    # Warm up the Triton kernel with dummy standard-GPTQ data
-                    w13_marlin = torch.zeros(n_dummy, K // 16, w13_n * nb2, dtype=torch.int32)
-                    w13s_marlin = torch.zeros(n_dummy, K // gs, w13_n, dtype=torch.bfloat16)
-                    w13_std = inverse_marlin_repack(w13_marlin, K, w13_n, bits).to(device)
-                    w13s_std = inverse_scale_permute(w13s_marlin, K, w13_n, gs).to(device)
-                    # w2 (down projection) has different dimensions: input=N, output=K
-                    w2_marlin = torch.zeros(n_dummy, N // 16, K * nb2, dtype=torch.int32)
-                    w2s_marlin = torch.zeros(n_dummy, N // gs, K, dtype=torch.bfloat16)
-                    w2_std = inverse_marlin_repack(w2_marlin, N, K, bits).to(device)
-                    w2s_std = inverse_scale_permute(w2s_marlin, N, K, gs).to(device)
-                    lookup = torch.tensor([0, 1], dtype=torch.int32, device=device)
-                    x = torch.zeros(1, K, dtype=torch.bfloat16, device=device)
-                    triton_moe_decode(x, [0,1], [0.5,0.5], w13_std, w13s_std, w2_std, w2s_std, lookup, None, None, self.cfg.swiglu_limit, 1.702, gs)
+                # GPU prefill uses the vendored Marlin sidecar, while decode is
+                # already Rust/CUDA through GpuDecodeStore. Warm the real Marlin
+                # dependency on every selected device; there is no Python Triton
+                # expert path in the runtime.
+                workspace = marlin_make_workspace(device, max_blocks_per_sm=4)
+                scalar_type = get_scalar_type(bits)
+                dummy_a = torch.zeros(1, K, dtype=torch.bfloat16, device=device)
+                dummy_b = torch.zeros(
+                    K // 16,
+                    N * (bits // 2),
+                    dtype=torch.int32,
+                    device=device,
+                )
+                dummy_s = torch.zeros(
+                    K // gs,
+                    N,
+                    dtype=torch.bfloat16,
+                    device=device,
+                )
+                gptq_marlin_gemm(
+                    a=dummy_a,
+                    c=None,
+                    b_q_weight=dummy_b,
+                    b_scales=dummy_s,
+                    global_scale=None,
+                    b_zeros=None,
+                    g_idx=None,
+                    perm=None,
+                    workspace=workspace,
+                    b_q_type=scalar_type,
+                    size_m=1,
+                    size_n=N,
+                    size_k=K,
+                    is_k_full=True,
+                )
+                torch.cuda.synchronize(device)
 
             except Exception as e:
                 raise RuntimeError(
-                    f"CUDA warmup (Triton/Marlin) on {device} failed: {e}\n"
+                    f"CUDA warmup (Marlin) on {device} failed: {e}\n"
                     "Marlin kernels are required for expert computation. "
-                    "Cannot start without working Triton/Marlin JIT."
+                    "Cannot start without the packaged Marlin sidecar."
                 ) from e
             
             torch.cuda.synchronize(device)
