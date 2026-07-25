@@ -2,12 +2,17 @@
 
 ## 1.0.16-rc.3 - 2026-07-24
 
-- Strengthened the Windows installer lifecycle gate after a real preflight
-  proved clean install, private-runtime validation, hostile-environment
-  isolation, and legacy Python/venv repair but retained the runtime after
-  uninstall. The gate still fails closed and now preserves the complete Inno
-  uninstall log plus residual-file, process-owner, and pending-delete
-  diagnostics so deletion failures are corrected from measured evidence.
+- Fixed complete Windows uninstall of the private runtime. A real preflight
+  proved Inno's recursive deletion could not enumerate the deepest PyTorch
+  header paths and returned success while retaining that directory chain.
+  Uninstall now runs a packaged, fail-closed extended-length Win32 traversal
+  before normal Inno removal. It refuses to proceed while any installed
+  Krasis Python tree is in use, never follows reparse points, removes only the
+  installer-owned `runtime`, legacy `python`, and legacy `venv` trees, and
+  verifies each is absent. The Windows lifecycle gate now exercises both an
+  empty directory and a junction to an external sentinel, proving cleanup
+  removes empty nodes without traversing reparse points. It preserves complete
+  Inno logs and still rejects any retained runtime.
 
 - Fixed the private-runtime validation probe under Windows PowerShell 5.1.
   PowerShell's legacy native-command argument handling corrupted the quoted

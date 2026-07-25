@@ -84,3 +84,30 @@ begin
     );
   end;
 end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  ResultCode: Integer;
+  PowerShell: String;
+  CleanupScript: String;
+  Parameters: String;
+begin
+  if CurUninstallStep <> usUninstall then
+    exit;
+
+  PowerShell := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
+  CleanupScript := ExpandConstant('{app}\bin\Remove-KrasisRuntime.ps1');
+  Parameters :=
+    '-NoProfile -ExecutionPolicy Bypass -File ' + AddQuotes(CleanupScript) +
+    ' -InstallRoot ' + AddQuotes(ExpandConstant('{app}'));
+
+  if not Exec(PowerShell, Parameters, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    RaiseException('Unable to start Krasis private-runtime cleanup.');
+  if ResultCode <> 0 then
+    RaiseException(
+      Format(
+        'Krasis private-runtime cleanup failed with status %d. Close Krasis and retry uninstall.',
+        [ResultCode]
+      )
+    );
+end;

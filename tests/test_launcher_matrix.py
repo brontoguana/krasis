@@ -289,6 +289,9 @@ class LauncherMatrixTest(unittest.TestCase):
         runtime_manifest_source = (windows_dir / "Runtime-Manifest.ps1").read_text()
         install_source = (windows_dir / "Install-Krasis.ps1").read_text()
         invoke_install_source = (windows_dir / "Invoke-Install-Krasis.ps1").read_text()
+        remove_runtime_source = (
+            windows_dir / "Remove-KrasisRuntime.ps1"
+        ).read_text()
         launch_source = (windows_dir / "Launch-Krasis.ps1").read_text()
         updater_source = (windows_dir / "Update-Krasis.ps1").read_text()
         workflow_source = (
@@ -325,6 +328,11 @@ class LauncherMatrixTest(unittest.TestCase):
             build_source,
         )
         self.assertIn(
+            '"Remove-KrasisRuntime.ps1") '
+            '(Join-Path $Stage "bin\\Remove-KrasisRuntime.ps1")',
+            build_source,
+        )
+        self.assertIn(
             "[System.IO.Compression.ZipFile]::CreateFromDirectory",
             build_source,
         )
@@ -343,6 +351,13 @@ class LauncherMatrixTest(unittest.TestCase):
         self.assertIn("GetCustomSetupExitCode", installer_source)
         self.assertIn("RuntimeInstallExitCode := ResultCode", installer_source)
         self.assertIn("Invoke-Install-Krasis.ps1", installer_source)
+        self.assertIn(
+            "CurUninstallStepChanged(CurUninstallStep: TUninstallStep)",
+            installer_source,
+        )
+        self.assertIn("CurUninstallStep <> usUninstall", installer_source)
+        self.assertIn("Remove-KrasisRuntime.ps1", installer_source)
+        self.assertIn("Krasis private-runtime cleanup failed", installer_source)
         self.assertNotIn(
             "createallsubdirs deleteafterinstall",
             installer_source,
@@ -418,6 +433,26 @@ class LauncherMatrixTest(unittest.TestCase):
         )
         self.assertIn("$ExitCode = 1", invoke_install_source)
         self.assertIn("exit $ExitCode", invoke_install_source)
+
+        self.assertIn("KrasisLongPathDelete", remove_runtime_source)
+        self.assertIn("FindFirstFileW", remove_runtime_source)
+        self.assertIn("GetFileAttributesW", remove_runtime_source)
+        self.assertIn("DeleteFileW", remove_runtime_source)
+        self.assertIn("RemoveDirectoryW", remove_runtime_source)
+        self.assertIn("FILE_ATTRIBUTE_REPARSE_POINT", remove_runtime_source)
+        self.assertIn("Test-KrasisRuntimeInUse", remove_runtime_source)
+        self.assertIn('@("runtime", "python", "venv")', remove_runtime_source)
+        self.assertIn(
+            "refusing to remove the Krasis runtime",
+            remove_runtime_source,
+        )
+        self.assertIn("empty-cleanup-probe", workflow_source)
+        self.assertIn("reparse-cleanup-probe", workflow_source)
+        self.assertIn("must-survive.txt", workflow_source)
+        self.assertIn(
+            "Uninstall traversed a runtime reparse point outside the install root.",
+            workflow_source,
+        )
 
         self.assertIn('"runtime\\current.txt"', launch_source)
         self.assertIn("Assert-KrasisPrivateRuntime", launch_source)

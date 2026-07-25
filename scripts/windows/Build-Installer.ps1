@@ -22,6 +22,7 @@ Copy-Item -Force (Join-Path $PSScriptRoot "Install-Krasis.ps1") (Join-Path $Stag
 Copy-Item -Force (Join-Path $PSScriptRoot "Invoke-Install-Krasis.ps1") (Join-Path $Stage "bin\Invoke-Install-Krasis.ps1")
 Copy-Item -Force (Join-Path $PSScriptRoot "Update-Krasis.ps1") (Join-Path $Stage "bin\Update-Krasis.ps1")
 Copy-Item -Force (Join-Path $PSScriptRoot "Runtime-Manifest.ps1") (Join-Path $Stage "bin\Runtime-Manifest.ps1")
+Copy-Item -Force (Join-Path $PSScriptRoot "Remove-KrasisRuntime.ps1") (Join-Path $Stage "bin\Remove-KrasisRuntime.ps1")
 Set-Content -Path (Join-Path $Stage "VERSION.txt") -Value $Version -Encoding ASCII
 
 $ManifestPath = Join-Path $RuntimePackagePath "runtime-manifest.json"

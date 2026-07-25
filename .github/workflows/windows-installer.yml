@@ -190,6 +190,18 @@ jobs:
             throw "Installer retained the legacy venv directory."
           }
 
+          $emptyCleanupProbe = Join-Path $testRoot "runtime\current\empty-cleanup-probe"
+          New-Item -ItemType Directory -Force -Path $emptyCleanupProbe | Out-Null
+          $outsideCleanupProbe = Join-Path $env:RUNNER_TEMP "krasis-uninstall-reparse-target"
+          Remove-Item -Recurse -Force $outsideCleanupProbe -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $outsideCleanupProbe | Out-Null
+          $outsideSentinel = Join-Path $outsideCleanupProbe "must-survive.txt"
+          Set-Content $outsideSentinel "outside installer-owned runtime"
+          New-Item `
+            -ItemType Junction `
+            -Path (Join-Path $testRoot "runtime\current\reparse-cleanup-probe") `
+            -Target $outsideCleanupProbe | Out-Null
+
           $uninstaller = Join-Path $testRoot "unins000.exe"
           $uninstallLog = Join-Path $env:RUNNER_TEMP "krasis-uninstaller-test.log"
           $uninstall = Start-Process `
@@ -236,6 +248,10 @@ jobs:
               -ErrorAction SilentlyContinue).PendingFileRenameOperations
             throw "Uninstall retained the private runtime."
           }
+          if (-not (Test-Path $outsideSentinel -PathType Leaf)) {
+            throw "Uninstall traversed a runtime reparse point outside the install root."
+          }
+          Remove-Item -Recurse -Force $outsideCleanupProbe
 
           Copy-Item -Force $installLog dist/windows-installer-test.log
           Get-PSDrive C | Format-Table Name,Used,Free
