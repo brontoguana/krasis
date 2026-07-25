@@ -113,6 +113,14 @@ import struct
 import sys
 
 native = importlib.import_module("krasis.krasis")
+launcher = importlib.import_module("krasis.launcher")
+chat = importlib.import_module("krasis.chat")
+console_input = importlib.import_module("krasis.console_input")
+
+def decode_windows_key(chars):
+    chars = iter(chars)
+    return console_input.read_windows_key(lambda: next(chars))
+
 data = {
     "python_version": platform.python_version(),
     "python_cache_tag": sys.implementation.cache_tag,
@@ -126,6 +134,17 @@ data = {
     "sys_path": sys.path,
     "krasis_version": importlib.metadata.version("krasis"),
     "native_module": native.__name__,
+    "launcher_windows_console": bool(launcher._HAS_WINDOWS_CONSOLE),
+    "chat_windows_console": bool(chat._HAS_WINDOWS_CONSOLE),
+    "windows_console_key_probe": [
+        decode_windows_key(("\xe0", "H")),
+        decode_windows_key(("\xe0", "P")),
+        decode_windows_key(("\x00", "K")),
+        decode_windows_key(("\x00", "M")),
+        decode_windows_key(("\r",)),
+        decode_windows_key(("\x1b",)),
+        decode_windows_key(("\x08",)),
+    ],
     "ssl_version": ssl.OPENSSL_VERSION,
     "sre_magic": getattr(importlib.import_module("_sre"), "MAGIC", None),
     "regex_probe": bool(re.fullmatch(r"Krasis-[0-9]+", "Krasis-312")),
@@ -224,6 +243,15 @@ function Assert-KrasisPrivateRuntime {
     }
     if ($Probe.native_module -ne "krasis.krasis") {
         throw "Krasis native extension did not import from the private runtime."
+    }
+    if (-not [bool]$Probe.launcher_windows_console -or -not [bool]$Probe.chat_windows_console) {
+        throw "Krasis launcher/chat did not enable native Windows console input."
+    }
+    $ExpectedKeys = @("UP", "DOWN", "LEFT", "RIGHT", "ENTER", "ESC", "BACKSPACE")
+    $ActualKeyProbe = [string]::Join(",", @($Probe.windows_console_key_probe))
+    $ExpectedKeyProbe = [string]::Join(",", $ExpectedKeys)
+    if ($ActualKeyProbe -ne $ExpectedKeyProbe) {
+        throw "Krasis native Windows console key decoder failed its runtime probe."
     }
     if (-not $Probe.regex_probe) {
         throw "Private Python regex/stdlib validation failed."

@@ -21,6 +21,10 @@ import urllib.error
 import urllib.request
 from typing import Any, Dict, List, Optional
 
+from krasis.console_input import (
+    HAS_WINDOWS_CONSOLE as _HAS_WINDOWS_CONSOLE,
+    read_windows_key as _read_windows_key_native,
+)
 from krasis.run_paths import get_run_dir
 
 # Enable readline for input() — gives arrow keys, history, Ctrl-A/E, etc.
@@ -70,7 +74,7 @@ def _read_input_with_paste() -> str:
     - Ctrl-C raises KeyboardInterrupt, Ctrl-D raises EOFError
     - Basic line editing: backspace works, but no readline features (arrow keys, etc.)
     """
-    if not _HAS_TERMIOS:
+    if _HAS_WINDOWS_CONSOLE or not _HAS_TERMIOS:
         return input()
 
     fd = sys.stdin.fileno()
@@ -175,6 +179,9 @@ def _show_cursor():
 
 def _read_key() -> str:
     """Read a single keypress in raw mode."""
+    if _HAS_WINDOWS_CONSOLE:
+        return _read_windows_key_native()
+
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
     try:
@@ -745,20 +752,10 @@ def chat_loop(
                 sys.stdout.write(f"  Choice: ")
                 sys.stdout.flush()
 
-                choice = ""
-                if _HAS_TERMIOS:
-                    fd = sys.stdin.fileno()
-                    old = termios.tcgetattr(fd)
-                    try:
-                        tty.setcbreak(fd)
-                        ch = sys.stdin.read(1).lower()
-                        choice = ch
-                        sys.stdout.write(ch + "\n")
-                        sys.stdout.flush()
-                    finally:
-                        termios.tcsetattr(fd, termios.TCSADRAIN, old)
-                else:
-                    choice = input().strip().lower()
+                choice_key = _read_key()
+                choice = choice_key.lower() if len(choice_key) == 1 else ""
+                sys.stdout.write(choice + "\n")
+                sys.stdout.flush()
 
                 if choice == "c" or choice == "":
                     print(f"  {DIM}Cancelled.{NC}\n")
@@ -1283,7 +1280,7 @@ def main():
         print(f"  Found: {BOLD}{server['model']}{NC} on :{server['port']} ({status})")
     else:
         # Multiple servers — show selection screen
-        if _HAS_TERMIOS:
+        if _HAS_TERMIOS or _HAS_WINDOWS_CONSOLE:
             _hide_cursor()
             try:
                 server = _server_selection_screen(servers)

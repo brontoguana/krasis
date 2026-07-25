@@ -11,6 +11,8 @@ import unittest
 import torch
 
 from krasis.attention_backend import quantize_hqq4_tensor_rust
+from krasis import chat as chat_mod
+from krasis import console_input as console_input_mod
 from krasis.config import configure_adaptive_cold_mass_pruning
 from krasis import launcher as launcher_mod
 from krasis import nvidia_smi as nvidia_smi_mod
@@ -145,6 +147,49 @@ def _run_server_start_smoke(config_path: Path, scenario: str, expected_fragments
 
 class LauncherMatrixTest(unittest.TestCase):
     maxDiff = None
+
+    def test_native_windows_console_key_decoding(self) -> None:
+        for encoded, expected in (
+            (["\xe0", "H"], launcher_mod.KEY_UP),
+            (["\xe0", "P"], launcher_mod.KEY_DOWN),
+            (["\x00", "K"], launcher_mod.KEY_LEFT),
+            (["\x00", "M"], launcher_mod.KEY_RIGHT),
+            (["\r"], launcher_mod.KEY_ENTER),
+            (["\x1b"], launcher_mod.KEY_ESCAPE),
+            (["\x03"], launcher_mod.KEY_ESCAPE),
+            (["\x08"], launcher_mod.KEY_BACKSPACE),
+            (["q"], launcher_mod.KEY_QUIT),
+        ):
+            chars = iter(encoded)
+            self.assertEqual(
+                console_input_mod.read_windows_key(lambda: next(chars)),
+                expected,
+            )
+
+    def test_native_windows_console_timeout_and_launcher_chat_wiring(self) -> None:
+        self.assertIsNone(
+            console_input_mod.read_windows_key_timeout(
+                0.0,
+                key_available=lambda: False,
+            )
+        )
+
+        old_launcher_flag = launcher_mod._HAS_WINDOWS_CONSOLE
+        old_launcher_reader = launcher_mod._read_windows_key
+        old_chat_flag = chat_mod._HAS_WINDOWS_CONSOLE
+        old_chat_reader = chat_mod._read_windows_key_native
+        try:
+            launcher_mod._HAS_WINDOWS_CONSOLE = True
+            launcher_mod._read_windows_key = lambda: launcher_mod.KEY_RIGHT
+            chat_mod._HAS_WINDOWS_CONSOLE = True
+            chat_mod._read_windows_key_native = lambda: chat_mod.KEY_DOWN
+            self.assertEqual(launcher_mod._read_key(), launcher_mod.KEY_RIGHT)
+            self.assertEqual(chat_mod._read_key(), chat_mod.KEY_DOWN)
+        finally:
+            launcher_mod._HAS_WINDOWS_CONSOLE = old_launcher_flag
+            launcher_mod._read_windows_key = old_launcher_reader
+            chat_mod._HAS_WINDOWS_CONSOLE = old_chat_flag
+            chat_mod._read_windows_key_native = old_chat_reader
 
     def test_launcher_header_fills_terminal_width_and_shows_version(self) -> None:
         lines = launcher_mod._launcher_header_lines("9.8.7-test", width=96)

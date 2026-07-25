@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- Fixed native Windows interactive launcher and chat input. Windows console
+  arrow keys, Enter, Escape, Backspace, character input, and bounded key waits
+  now use the standard-library `msvcrt` console API while Unix retains its
+  existing `termios` behavior. This removes the launcher rejection that made
+  the Windows Start Menu shortcut unusable after a healthy private-runtime
+  install. Chat server selection and single-key prompt-length choices use the
+  same platform path, while normal Windows prompt entry retains the console
+  line editor. The private-runtime lifecycle probe now fails closed unless
+  both launcher and chat enable Windows input and the packaged key decoder
+  passes its semantic probe.
+
 ## 1.0.16-rc.3 - 2026-07-24
 
 - Fixed complete Windows uninstall of the private runtime. A real preflight

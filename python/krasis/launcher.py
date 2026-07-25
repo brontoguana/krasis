@@ -37,6 +37,11 @@ from krasis.config import (
     HQQ_CACHE_PROFILE_CHOICES,
 )
 from krasis.config import GPU_EXPERT_INT4_CALIB_CHOICES
+from krasis.console_input import (
+    HAS_WINDOWS_CONSOLE as _HAS_WINDOWS_CONSOLE,
+    read_windows_key as _read_windows_key,
+    read_windows_key_timeout as _read_windows_key_timeout,
+)
 from krasis.nvidia_smi import (
     ensure_wsl_cuda_env as _shared_ensure_wsl_cuda_env,
     find_nvidia_smi as _shared_find_nvidia_smi,
@@ -258,6 +263,9 @@ def _read_escape_sequence(read_char, wait_readable) -> str:
 
 def _read_key() -> str:
     """Read a single keypress in raw mode. Returns key constant or char."""
+    if _HAS_WINDOWS_CONSOLE:
+        return _read_windows_key()
+
     import select
 
     fd = sys.stdin.fileno()
@@ -286,6 +294,8 @@ def _read_key() -> str:
 
 def _read_key_timeout(timeout: float) -> Optional[str]:
     """Read one keypress if available before timeout, otherwise return None."""
+    if _HAS_WINDOWS_CONSOLE:
+        return _read_windows_key_timeout(timeout)
     if not _HAS_TERMIOS:
         return None
     import select
@@ -2300,8 +2310,8 @@ class Launcher:
 
     def run_interactive(self) -> bool:
         """Run the interactive TUI. Returns True if user chose to launch."""
-        if not _HAS_TERMIOS:
-            print("Error: interactive mode requires a Unix terminal", file=sys.stderr)
+        if not (_HAS_TERMIOS or _HAS_WINDOWS_CONSOLE):
+            print("Error: interactive mode requires a supported terminal", file=sys.stderr)
             return False
 
         print(f"Krasis home: {self.krasis_home}")
