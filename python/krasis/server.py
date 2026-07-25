@@ -265,7 +265,7 @@ def _prescan_selected_gpus():
         print(f"Pre-scan: set CUDA_VISIBLE_DEVICES={_gpus} (--selected-gpus override)")
         return
     if _pre_args.config and os.path.isfile(_pre_args.config):
-        with open(_pre_args.config) as _f:
+        with open(_pre_args.config, encoding="utf-8") as _f:
             for _line in _f:
                 _line = _line.strip()
                 if _line.startswith("CFG_SELECTED_GPUS="):
@@ -2031,7 +2031,7 @@ def main():
             "CFG_STREAM_ATTENTION",
             "CFG_CPU_DECODE",
         }
-        with open(config_path) as f:
+        with open(config_path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line or line.startswith("#"):
@@ -2423,7 +2423,7 @@ def main():
     if pre_args.config:
         logger.info("=== Config file: %s ===", pre_args.config)
         try:
-            with open(pre_args.config) as _cf:
+            with open(pre_args.config, encoding="utf-8") as _cf:
                 for _line in _cf:
                     logger.info("  %s", _line.rstrip())
         except Exception as _e:

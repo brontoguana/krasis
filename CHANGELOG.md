@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- Fixed the Windows launcher's generated configuration encoding. Temporary and
+  saved launcher configs are now written and read as strict UTF-8 instead of
+  mixing the Windows legacy code page with the private runtime's UTF-8 mode.
+  This prevents startup from failing on the em dash in the generated header
+  (CP1252 byte `0x97`) or non-ASCII configuration values.
+
+- Prevented Windows QuickEdit/mouse console input from suspending interactive
+  Krasis key and prompt reads. Krasis now preserves the input console's exact
+  original mode, temporarily disables QuickEdit and mouse events only while it
+  owns an interactive read, and restores the original mode even when the read
+  raises. Unix terminal behavior is unchanged.
+
+- Strengthened the sealed Windows runtime gate to execute the generated-config
+  UTF-8 writer with a non-ASCII path and to verify that console mouse/QuickEdit
+  flags are isolated and restored. The locally prepared verification version is
+  `1.0.16-rc.5`; `./dev build` passed in `205s`, the post-build launcher matrix
+  passed `22/22` in `31.379s`, and all nine Windows PowerShell scripts parsed.
+
 - Fixed native Windows interactive launcher and chat input. Windows console
   arrow keys, Enter, Escape, Backspace, character input, and bounded key waits
   now use the standard-library `msvcrt` console API while Unix retains its

@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional
 from krasis.console_input import (
     HAS_WINDOWS_CONSOLE as _HAS_WINDOWS_CONSOLE,
     read_windows_key as _read_windows_key_native,
+    windows_console_key_mode as _windows_console_key_mode,
 )
 from krasis.run_paths import get_run_dir
 
@@ -74,7 +75,10 @@ def _read_input_with_paste() -> str:
     - Ctrl-C raises KeyboardInterrupt, Ctrl-D raises EOFError
     - Basic line editing: backspace works, but no readline features (arrow keys, etc.)
     """
-    if _HAS_WINDOWS_CONSOLE or not _HAS_TERMIOS:
+    if _HAS_WINDOWS_CONSOLE:
+        with _windows_console_key_mode():
+            return input()
+    if not _HAS_TERMIOS:
         return input()
 
     fd = sys.stdin.fileno()

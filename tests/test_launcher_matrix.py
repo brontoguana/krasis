@@ -25,7 +25,7 @@ NONEXISTENT_MODEL = "/tmp/nonexistent-krasis-launcher-matrix-model"
 
 def _parse_key_value_config(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
-    with path.open() as f:
+    with path.open(encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
@@ -190,6 +190,45 @@ class LauncherMatrixTest(unittest.TestCase):
             launcher_mod._read_windows_key = old_launcher_reader
             chat_mod._HAS_WINDOWS_CONSOLE = old_chat_flag
             chat_mod._read_windows_key_native = old_chat_reader
+
+    def test_native_windows_console_key_mode_disables_mouse_and_restores(self) -> None:
+        modes = [0x0010 | 0x0040 | 0x0020]
+        writes: list[int] = []
+
+        def set_mode(mode: int) -> None:
+            writes.append(mode)
+            modes[0] = mode
+
+        with console_input_mod.windows_console_key_mode(
+            get_mode=lambda: modes[0],
+            set_mode=set_mode,
+        ):
+            self.assertEqual(modes[0] & 0x0010, 0)
+            self.assertEqual(modes[0] & 0x0040, 0)
+            self.assertNotEqual(modes[0] & 0x0080, 0)
+        self.assertEqual(modes[0], 0x0010 | 0x0040 | 0x0020)
+        self.assertEqual(len(writes), 2)
+
+        modes[0] = 0x0010 | 0x0040
+        with self.assertRaisesRegex(RuntimeError, "test failure"):
+            with console_input_mod.windows_console_key_mode(
+                get_mode=lambda: modes[0],
+                set_mode=set_mode,
+            ):
+                raise RuntimeError("test failure")
+        self.assertEqual(modes[0], 0x0010 | 0x0040)
+
+    def test_generated_launch_config_is_strict_utf8(self) -> None:
+        cfg = _base_config()
+        cfg.model_path = f"{NONEXISTENT_MODEL}-\u6a21\u578b"
+        config_path, _args = _capture_launch_config(cfg)
+        try:
+            raw = config_path.read_bytes()
+            decoded = raw.decode("utf-8")
+            self.assertIn("Krasis launch config \u2014", decoded)
+            self.assertIn(f'MODEL_PATH="{cfg.model_path}"', decoded)
+        finally:
+            config_path.unlink(missing_ok=True)
 
     def test_launcher_header_fills_terminal_width_and_shows_version(self) -> None:
         lines = launcher_mod._launcher_header_lines("9.8.7-test", width=96)

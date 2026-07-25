@@ -111,6 +111,7 @@ import site
 import ssl
 import struct
 import sys
+import tempfile
 
 native = importlib.import_module("krasis.krasis")
 launcher = importlib.import_module("krasis.launcher")
@@ -120,6 +121,37 @@ console_input = importlib.import_module("krasis.console_input")
 def decode_windows_key(chars):
     chars = iter(chars)
     return console_input.read_windows_key(lambda: next(chars))
+
+def probe_console_mode():
+    modes = [0x0010 | 0x0040 | 0x0020]
+    writes = []
+    def set_mode(mode):
+        writes.append(mode)
+        modes[0] = mode
+    with console_input.windows_console_key_mode(
+        get_mode=lambda: modes[0],
+        set_mode=set_mode,
+    ):
+        active = modes[0]
+    return {
+        "active": active,
+        "restored": modes[0],
+        "writes": writes,
+    }
+
+def probe_launch_config():
+    fd, path = tempfile.mkstemp(prefix="krasis-runtime-probe-", suffix=".conf")
+    try:
+        launcher._write_launch_config(fd, {"MODEL_PATH": r"C:\Krasis\模型"})
+        raw = open(path, "rb").read()
+        text = raw.decode("utf-8")
+        return {
+            "strict_utf8": True,
+            "has_utf8_dash": b"\xe2\x80\x94" in raw,
+            "has_non_ascii_value": r'MODEL_PATH="C:\Krasis\模型"' in text,
+        }
+    finally:
+        os.unlink(path)
 
 data = {
     "python_version": platform.python_version(),
@@ -145,6 +177,8 @@ data = {
         decode_windows_key(("\x1b",)),
         decode_windows_key(("\x08",)),
     ],
+    "windows_console_mode_probe": probe_console_mode(),
+    "launch_config_probe": probe_launch_config(),
     "ssl_version": ssl.OPENSSL_VERSION,
     "sre_magic": getattr(importlib.import_module("_sre"), "MAGIC", None),
     "regex_probe": bool(re.fullmatch(r"Krasis-[0-9]+", "Krasis-312")),
@@ -252,6 +286,21 @@ function Assert-KrasisPrivateRuntime {
     $ExpectedKeyProbe = [string]::Join(",", $ExpectedKeys)
     if ($ActualKeyProbe -ne $ExpectedKeyProbe) {
         throw "Krasis native Windows console key decoder failed its runtime probe."
+    }
+    if (
+        ([int]$Probe.windows_console_mode_probe.active -band 0x0010) -ne 0 -or
+        ([int]$Probe.windows_console_mode_probe.active -band 0x0040) -ne 0 -or
+        ([int]$Probe.windows_console_mode_probe.active -band 0x0080) -eq 0 -or
+        [int]$Probe.windows_console_mode_probe.restored -ne (0x0010 -bor 0x0040 -bor 0x0020)
+    ) {
+        throw "Krasis native Windows console mode isolation/restoration probe failed."
+    }
+    if (
+        -not [bool]$Probe.launch_config_probe.strict_utf8 -or
+        -not [bool]$Probe.launch_config_probe.has_utf8_dash -or
+        -not [bool]$Probe.launch_config_probe.has_non_ascii_value
+    ) {
+        throw "Krasis launcher generated-config UTF-8 probe failed."
     }
     if (-not $Probe.regex_probe) {
         throw "Private Python regex/stdlib validation failed."
