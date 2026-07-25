@@ -192,18 +192,24 @@ print("KRASIS_RUNTIME_PROBE=" + json.dumps(data, sort_keys=True))
 
     $OldProbeTorch = [Environment]::GetEnvironmentVariable("KRASIS_RUNTIME_PROBE_TORCH", "Process")
     $Process = $null
+    $ProbePath = $null
     try {
         $env:KRASIS_RUNTIME_PROBE_TORCH = if ($IncludeTorch) { "1" } else { "0" }
         # Windows PowerShell 5.1 applies legacy native-command quoting to -c
-        # arguments and can corrupt Python source containing quotes. Send the
-        # probe through stdin using .NET so neither PowerShell nor cmd.exe
-        # parses the source text.
+        # arguments, and its redirected StandardInput defaults to the active
+        # Windows code page. Write an explicit UTF-8 script so the probe source
+        # has the same byte contract under Windows PowerShell 5.1 and pwsh.
+        $ProbePath = Join-Path ([IO.Path]::GetTempPath()) (
+            "krasis-runtime-probe-{0}.py" -f [Guid]::NewGuid().ToString("N")
+        )
+        $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [IO.File]::WriteAllText($ProbePath, $ProbeCode, $Utf8NoBom)
+
         $StartInfo = New-Object System.Diagnostics.ProcessStartInfo
         $StartInfo.FileName = (Resolve-Path $Python).Path
-        $StartInfo.Arguments = "-I -B -"
+        $StartInfo.Arguments = '-I -B "' + $ProbePath + '"'
         $StartInfo.UseShellExecute = $false
         $StartInfo.CreateNoWindow = $true
-        $StartInfo.RedirectStandardInput = $true
         $StartInfo.RedirectStandardOutput = $true
         $StartInfo.RedirectStandardError = $true
 
@@ -214,8 +220,6 @@ print("KRASIS_RUNTIME_PROBE=" + json.dumps(data, sort_keys=True))
         }
         $StandardOutputTask = $Process.StandardOutput.ReadToEndAsync()
         $StandardErrorTask = $Process.StandardError.ReadToEndAsync()
-        $Process.StandardInput.Write($ProbeCode)
-        $Process.StandardInput.Close()
         $Process.WaitForExit()
         $StandardOutput = $StandardOutputTask.Result
         $StandardError = $StandardErrorTask.Result
@@ -230,6 +234,9 @@ print("KRASIS_RUNTIME_PROBE=" + json.dumps(data, sort_keys=True))
     } finally {
         if ($null -ne $Process) {
             $Process.Dispose()
+        }
+        if ($null -ne $ProbePath) {
+            Remove-Item -LiteralPath $ProbePath -Force -ErrorAction SilentlyContinue
         }
         if ($null -eq $OldProbeTorch) {
             Remove-Item Env:KRASIS_RUNTIME_PROBE_TORCH -ErrorAction SilentlyContinue

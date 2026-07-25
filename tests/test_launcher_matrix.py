@@ -460,13 +460,19 @@ class LauncherMatrixTest(unittest.TestCase):
         self.assertIn("[System.Security.Cryptography.SHA256]::Create()", runtime_manifest_source)
         self.assertIn("Assert-KrasisPrivateRuntime", runtime_manifest_source)
         self.assertIn(
-            "$StartInfo.RedirectStandardInput = $true",
+            "[IO.File]::WriteAllText($ProbePath, $ProbeCode, $Utf8NoBom)",
             runtime_manifest_source,
         )
         self.assertIn(
-            '$StartInfo.Arguments = "-I -B -"',
+            "New-Object System.Text.UTF8Encoding($false)",
             runtime_manifest_source,
         )
+        self.assertIn(
+            "$StartInfo.Arguments = '-I -B \"' + $ProbePath + '\"'",
+            runtime_manifest_source,
+        )
+        self.assertNotIn("RedirectStandardInput", runtime_manifest_source)
+        self.assertNotIn("$Process.StandardInput", runtime_manifest_source)
         self.assertIn(
             "$Process.StandardOutput.ReadToEndAsync()",
             runtime_manifest_source,

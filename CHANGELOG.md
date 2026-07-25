@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Fixed the sealed-runtime validator under Windows PowerShell 5.1 by
+  transporting its Python probe as an explicitly UTF-8 temporary script
+  instead of code-page encoded redirected standard input.
+
 - Fixed the Windows launcher's generated configuration encoding. Temporary and
   saved launcher configs are now written and read as strict UTF-8 instead of
   mixing the Windows legacy code page with the private runtime's UTF-8 mode.
