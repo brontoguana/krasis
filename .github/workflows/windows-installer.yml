@@ -215,7 +215,7 @@ jobs:
         id: fla-dll-cache
         uses: actions/cache@v4
         with:
-          path: target/windows-fla-dll-cache
+          path: ${{ runner.temp }}\krasis-windows-fla-dll-cache
           key: ${{ steps.fla-dll-key.outputs.key }}
 
       - name: Install build tools
@@ -257,7 +257,7 @@ jobs:
         run: |
           nvcc --version
           $flaRoot = Join-Path $PWD "target\windows-fla-sources"
-          $flaDllCacheRoot = Join-Path $PWD "target\windows-fla-dll-cache"
+          $flaDllCacheRoot = Join-Path $env:RUNNER_TEMP "krasis-windows-fla-dll-cache"
           $flaManifestPath = Join-Path $flaRoot "windows-fla-manifest.json"
           $flaDllManifestPath = Join-Path $flaDllCacheRoot "windows-fla-dll-manifest.json"
           $flaDllCacheKey = $env:FLA_DLL_CACHE_KEY_SHA256

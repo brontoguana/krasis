@@ -673,6 +673,16 @@ class LauncherMatrixTest(unittest.TestCase):
         self.assertIn("'torch==2.13.0+cpu'", workflow_source)
         self.assertIn("Restore portable Windows FLA source cache", workflow_source)
         self.assertIn("Restore Windows FLA DLL cache", workflow_source)
+        self.assertIn(
+            r"path: ${{ runner.temp }}\krasis-windows-fla-dll-cache",
+            workflow_source,
+        )
+        self.assertIn(
+            '$flaDllCacheRoot = Join-Path $env:RUNNER_TEMP '
+            '"krasis-windows-fla-dll-cache"',
+            workflow_source,
+        )
+        self.assertNotIn("path: target/windows-fla-dll-cache", workflow_source)
         self.assertIn("cache_key_sha256", workflow_source)
         self.assertIn("Get-FileHash -Algorithm SHA256", workflow_source)
         self.assertIn("dumpbin /nologo /exports", workflow_source)
