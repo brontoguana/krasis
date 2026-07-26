@@ -7,30 +7,43 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   generate-windows-fla-sources:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
+      - name: Restore portable Windows FLA source cache
+        id: fla-source-cache
+        uses: actions/cache@v4
+        with:
+          path: target/windows-fla-sources
+          key: krasis-windows-fla-sources-v1-cuda1263-triton351-torch2130-packaging262-${{ hashFiles('src/cuda/fla/**/*.py', 'python/krasis/fla_sidecar_contract.json') }}
+
       - uses: actions/setup-python@v5
+        if: steps.fla-source-cache.outputs.cache-hit != 'true'
         with:
           python-version: "3.12"
 
       - name: Install CUDA toolkit
+        if: steps.fla-source-cache.outputs.cache-hit != 'true'
         uses: Jimver/cuda-toolkit@v0.2.35
         with:
           cuda: "12.6.3"
 
       - name: Install FLA build dependencies
+        if: steps.fla-source-cache.outputs.cache-hit != 'true'
         run: |
           python -m pip install --upgrade pip
-          python -m pip install packaging 'triton>=3.5.1,<3.6'
-          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install 'packaging==26.2' 'triton==3.5.1'
+          python -m pip install 'torch==2.13.0+cpu' --index-url https://download.pytorch.org/whl/cpu
 
       - name: Generate portable Windows FLA sources
+        if: steps.fla-source-cache.outputs.cache-hit != 'true'
         env:
           KRASIS_DEV_SCRIPT: "1"
           KRASIS_FLA_CROSS_COMPILE: "1"
@@ -43,15 +56,82 @@ jobs:
           expected_count=$(python -c 'import json; print(len(json.load(open("python/krasis/fla_sidecar_contract.json"))["architectures"]))')
           test "$(find target/windows-fla-sources -maxdepth 1 -name 'krasis_fla_sm*.cu' -type f | wc -l)" -eq "$expected_count"
 
+      - name: Verify portable Windows FLA sources
+        run: |
+          python - <<'PY'
+          from hashlib import sha256
+          import json
+          from pathlib import Path
+
+          root = Path("target/windows-fla-sources")
+          manifest = json.loads(
+              (root / "windows-fla-manifest.json").read_text(encoding="utf-8")
+          )
+          contract = json.loads(
+              Path("python/krasis/fla_sidecar_contract.json").read_text(
+                  encoding="utf-8"
+              )
+          )
+          if manifest.get("schema_version") != 1:
+              raise SystemExit("invalid portable Windows FLA manifest schema")
+          if manifest.get("target_platform") != "windows":
+              raise SystemExit("portable FLA manifest has the wrong target platform")
+          expected_archs = [int(value) for value in contract["architectures"]]
+          actual_archs = [int(value) for value in manifest["architectures"]]
+          if actual_archs != expected_archs:
+              raise SystemExit(
+                  f"portable FLA architecture mismatch: {actual_archs} != {expected_archs}"
+              )
+          expected_h = [int(value) for value in contract["h_values"]]
+          actual_h = [int(value) for value in manifest["h_values"]]
+          if actual_h != expected_h:
+              raise SystemExit(
+                  f"portable FLA H-value mismatch: {actual_h} != {expected_h}"
+              )
+          contract_record = (
+              f"schema_version={int(contract['schema_version'])}\n"
+              f"architectures={','.join(str(value) for value in expected_archs)}\n"
+              f"h_values={','.join(str(value) for value in expected_h)}\n"
+          ).encode()
+          fingerprint = sha256(contract_record).hexdigest()
+          if manifest.get("sidecar_contract_fingerprint_sha256") != fingerprint:
+              raise SystemExit("portable FLA source contract fingerprint mismatch")
+          sources = manifest.get("sources")
+          if not isinstance(sources, dict) or set(sources) != {
+              str(value) for value in expected_archs
+          }:
+              raise SystemExit("portable FLA source inventory mismatch")
+          expected_files = {"windows-fla-manifest.json"}
+          for arch in expected_archs:
+              entry = sources[str(arch)]
+              path = root / entry["file"]
+              expected_files.add(path.name)
+              data = path.read_bytes()
+              if len(data) != int(entry["size"]):
+                  raise SystemExit(f"portable FLA source size mismatch: {path.name}")
+              if sha256(data).hexdigest() != entry["sha256"]:
+                  raise SystemExit(f"portable FLA source hash mismatch: {path.name}")
+          actual_files = {path.name for path in root.iterdir() if path.is_file()}
+          if actual_files != expected_files:
+              raise SystemExit(
+                  f"portable FLA source file inventory mismatch: {actual_files}"
+              )
+          print(
+              f"Verified {len(expected_archs)} portable Windows FLA sources "
+              f"for architectures {expected_archs}."
+          )
+          PY
+
       - name: Upload portable Windows FLA sources
         uses: actions/upload-artifact@v4
         with:
-          name: krasis-windows-fla-sources
+          name: krasis-windows-fla-sources-${{ github.sha }}
           path: |
             target/windows-fla-sources/krasis_fla_sm*.cu
             target/windows-fla-sources/windows-fla-manifest.json
 
   build-windows-installer:
+    if: github.event_name == 'workflow_dispatch'
     needs: generate-windows-fla-sources
     runs-on: windows-2022
     timeout-minutes: 240
@@ -86,8 +166,57 @@ jobs:
       - name: Download portable Windows FLA sources
         uses: actions/download-artifact@v4
         with:
-          name: krasis-windows-fla-sources
+          name: krasis-windows-fla-sources-${{ github.sha }}
           path: target/windows-fla-sources
+
+      - name: Compute Windows FLA DLL cache key
+        id: fla-dll-key
+        run: |
+          $nvccVersion = (& nvcc --version 2>&1) -join "`n"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not read the NVCC version for the FLA DLL cache key."
+          }
+          $msvcVersion = (& cl 2>&1) -join "`n"
+          $manifestHash = (
+            Get-FileHash `
+              -Algorithm SHA256 `
+              target/windows-fla-sources/windows-fla-manifest.json
+          ).Hash.ToLowerInvariant()
+          $contractHash = (
+            Get-FileHash `
+              -Algorithm SHA256 `
+              python/krasis/fla_sidecar_contract.json
+          ).Hash.ToLowerInvariant()
+          $record = (
+            "schema=1`n" +
+            "runner=windows-2022`n" +
+            "nvcc=$nvccVersion`n" +
+            "msvc=$msvcVersion`n" +
+            "source_manifest_sha256=$manifestHash`n" +
+            "contract_sha256=$contractHash`n" +
+            "flags=--shared|-std=c++17|-O2|-allow-unsupported-compiler|-Xcompiler=/bigobj`n"
+          )
+          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+          $hasher = [System.Security.Cryptography.SHA256]::Create()
+          try {
+            $digest = (
+              [BitConverter]::ToString(
+                $hasher.ComputeHash($utf8NoBom.GetBytes($record))
+              )
+            ).Replace("-", "").ToLowerInvariant()
+          } finally {
+            $hasher.Dispose()
+          }
+          "key=krasis-windows-fla-dlls-v1-$digest" >> $env:GITHUB_OUTPUT
+          "record_sha256=$digest" >> $env:GITHUB_OUTPUT
+          Write-Host "Windows FLA DLL cache key: $digest"
+
+      - name: Restore Windows FLA DLL cache
+        id: fla-dll-cache
+        uses: actions/cache@v4
+        with:
+          path: target/windows-fla-dll-cache
+          key: ${{ steps.fla-dll-key.outputs.key }}
 
       - name: Install build tools
         run: |
@@ -120,10 +249,19 @@ jobs:
           Remove-Item -Recurse -Force $syntaxRoot
 
       - name: Build Windows sidecar DLLs
+        env:
+          FLA_DLL_CACHE_HIT: ${{ steps.fla-dll-cache.outputs.cache-hit }}
+          FLA_DLL_CACHE_KEY_SHA256: ${{ steps.fla-dll-key.outputs.record_sha256 }}
+          GH_TOKEN: ${{ github.token }}
+          KRASIS_GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           nvcc --version
           $flaRoot = Join-Path $PWD "target\windows-fla-sources"
+          $flaDllCacheRoot = Join-Path $PWD "target\windows-fla-dll-cache"
           $flaManifestPath = Join-Path $flaRoot "windows-fla-manifest.json"
+          $flaDllManifestPath = Join-Path $flaDllCacheRoot "windows-fla-dll-manifest.json"
+          $flaDllCacheKey = $env:FLA_DLL_CACHE_KEY_SHA256
+          $flaDllCacheHit = $env:FLA_DLL_CACHE_HIT -eq "true"
           if (-not (Test-Path $flaManifestPath -PathType Leaf)) {
             throw "Generated Windows FLA manifest is missing: $flaManifestPath"
           }
@@ -180,6 +318,70 @@ jobs:
           if (-not (Test-Path $cudaDriverImport -PathType Leaf)) {
             throw "CUDA driver import library is missing: $cudaDriverImport"
           }
+          if ($flaDllCacheHit) {
+            if (-not (Test-Path $flaDllManifestPath -PathType Leaf)) {
+              throw "Restored Windows FLA DLL cache has no manifest."
+            }
+            $flaDllManifest = Get-Content -Raw $flaDllManifestPath |
+              ConvertFrom-Json
+            if (
+              [int]$flaDllManifest.schema_version -ne 1 -or
+              "$($flaDllManifest.cache_key_sha256)" -ne $flaDllCacheKey
+            ) {
+              throw "Restored Windows FLA DLL cache manifest is invalid."
+            }
+            $sourceManifestHash = (
+              Get-FileHash -Algorithm SHA256 $flaManifestPath
+            ).Hash.ToLowerInvariant()
+            if (
+              "$($flaDllManifest.source_manifest_sha256)" -ne
+              $sourceManifestHash
+            ) {
+              throw "Restored Windows FLA DLL cache uses different generated sources."
+            }
+            $cachedArchs = @(
+              $flaDllManifest.architectures | ForEach-Object { [int]$_ }
+            )
+            if (
+              [string]::Join(",", $cachedArchs) -ne
+              [string]::Join(",", $expectedArchs)
+            ) {
+              throw "Restored Windows FLA DLL cache architecture inventory is invalid."
+            }
+            $cachedExports = @(
+              $flaDllManifest.exports | ForEach-Object { "$_" }
+            )
+            $expectedExports = @(
+              $flaManifest.exports | ForEach-Object { "$_" }
+            )
+            if (
+              [string]::Join(",", $cachedExports) -ne
+              [string]::Join(",", $expectedExports)
+            ) {
+              throw "Restored Windows FLA DLL cache export inventory is invalid."
+            }
+            $expectedCacheFiles = @(
+              "windows-fla-dll-manifest.json"
+            ) + @(
+              $expectedArchs | ForEach-Object { "krasis_fla_sm$_.dll" }
+            )
+            $actualCacheFiles = @(
+              Get-ChildItem $flaDllCacheRoot -File |
+                ForEach-Object { $_.Name } |
+                Sort-Object
+            )
+            if (
+              [string]::Join(",", @($expectedCacheFiles | Sort-Object)) -ne
+              [string]::Join(",", $actualCacheFiles)
+            ) {
+              throw "Restored Windows FLA DLL cache file inventory is invalid."
+            }
+            Write-Host "Restored exact-key Windows FLA DLL cache."
+          } else {
+            Remove-Item -Recurse -Force $flaDllCacheRoot -ErrorAction SilentlyContinue
+            New-Item -ItemType Directory -Force -Path $flaDllCacheRoot | Out-Null
+            $flaDllEntries = [ordered]@{}
+          }
           New-Item -ItemType Directory -Force -Path python/krasis | Out-Null
           foreach ($arch in $expectedArchs) {
             $sourceEntry = $flaManifest.sources.PSObject.Properties["$arch"].Value
@@ -194,22 +396,50 @@ jobs:
             if ($source.Length -ne [long]$sourceEntry.size) {
               throw "Generated Windows FLA source size mismatch for sm_$arch."
             }
+            $cachedDll = Join-Path $flaDllCacheRoot "krasis_fla_sm$arch.dll"
             $dll = Join-Path $PWD "python\krasis\krasis_fla_sm$arch.dll"
-            $nvccArgs = @(
-              "--shared",
-              "-std=c++17",
-              "-O2",
-              "-allow-unsupported-compiler",
-              "-Xcompiler=/bigobj",
-              $source.FullName,
-              $cudaDriverImport,
-              "-o",
-              $dll
-            )
-            & nvcc @nvccArgs
-            if ($LASTEXITCODE -ne 0) {
-              throw "Windows FLA DLL compilation failed for sm_$arch with status $LASTEXITCODE."
+            if ($flaDllCacheHit) {
+              $cachedEntry = (
+                $flaDllManifest.dlls.PSObject.Properties["$arch"].Value
+              )
+              if ($null -eq $cachedEntry) {
+                throw "Restored Windows FLA DLL cache has no entry for sm_$arch."
+              }
+              if (
+                -not (Test-Path $cachedDll -PathType Leaf) -or
+                (Get-Item $cachedDll).Length -ne [long]$cachedEntry.size -or
+                (
+                  Get-FileHash -Algorithm SHA256 $cachedDll
+                ).Hash.ToLowerInvariant() -ne "$($cachedEntry.sha256)"
+              ) {
+                throw "Restored Windows FLA DLL cache hash/size mismatch for sm_$arch."
+              }
+            } else {
+              $nvccArgs = @(
+                "--shared",
+                "-std=c++17",
+                "-O2",
+                "-allow-unsupported-compiler",
+                "-Xcompiler=/bigobj",
+                $source.FullName,
+                $cudaDriverImport,
+                "-o",
+                $cachedDll
+              )
+              & nvcc @nvccArgs
+              if ($LASTEXITCODE -ne 0) {
+                throw "Windows FLA DLL compilation failed for sm_$arch with status $LASTEXITCODE."
+              }
+              $cachedDllItem = Get-Item $cachedDll
+              $flaDllEntries["$arch"] = [ordered]@{
+                file = $cachedDllItem.Name
+                size = $cachedDllItem.Length
+                sha256 = (
+                  Get-FileHash -Algorithm SHA256 $cachedDll
+                ).Hash.ToLowerInvariant()
+              }
             }
+            Copy-Item -Force $cachedDll $dll
             if (-not (Test-Path $dll -PathType Leaf) -or (Get-Item $dll).Length -le 0) {
               throw "Windows FLA DLL is missing or empty: $dll"
             }
@@ -223,8 +453,50 @@ jobs:
               }
             }
           }
-          python scripts/build_sidecars.py build --force
+          if (-not $flaDllCacheHit) {
+            $sourceManifestHash = (
+              Get-FileHash -Algorithm SHA256 $flaManifestPath
+            ).Hash.ToLowerInvariant()
+            [ordered]@{
+              schema_version = 1
+              cache_key_sha256 = $flaDllCacheKey
+              source_manifest_sha256 = $sourceManifestHash
+              architectures = $expectedArchs
+              exports = @($flaManifest.exports)
+              dlls = $flaDllEntries
+            } |
+              ConvertTo-Json -Depth 8 |
+              Set-Content -Encoding utf8NoBOM $flaDllManifestPath
+            Write-Host "Built and recorded exact-key Windows FLA DLL cache."
+          }
+
+          python scripts/build_sidecars.py restore-bundle --github
+          $restoreStatus = $LASTEXITCODE
+          if ($restoreStatus -eq 0) {
+            Write-Host "Restored verified Windows Marlin/FlashAttention bundle."
+          } elseif ($restoreStatus -eq 2) {
+            Write-Host "No exact Windows sidecar bundle exists; compiling once."
+            python scripts/build_sidecars.py build
+            if ($LASTEXITCODE -ne 0) {
+              throw "Windows Marlin/FlashAttention sidecar build failed."
+            }
+            $bundle = python scripts/build_sidecars.py bundle-key --json |
+              ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not resolve the built Windows sidecar bundle."
+            }
+            $releaseCache = Join-Path $PWD "target\windows-release-cache"
+            New-Item -ItemType Directory -Force -Path $releaseCache | Out-Null
+            Copy-Item -Force $bundle.bundle_path (
+              Join-Path $releaseCache $bundle.bundle_name
+            )
+          } else {
+            throw "Windows sidecar bundle restore failed with status $restoreStatus."
+          }
           python scripts/build_sidecars.py verify
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows sidecar verification failed."
+          }
           Copy-Item -Force $flaManifestPath windows-fla-build-manifest.json
           Get-ChildItem python/krasis -Filter "*.dll" | Format-Table Name,Length
 
@@ -390,6 +662,70 @@ jobs:
           if ($launcherProbe -notcontains $expectedProbe) {
             throw "Native launcher resolved the wrong private runtime: $($launcherProbe -join ' | ')"
           }
+
+          $updateLaunchers = @(
+            @{
+              Name = "Krasis Update"
+              Path = (Join-Path $testRoot "bin\Krasis Update.exe")
+              Channel = "stable"
+            },
+            @{
+              Name = "Krasis Prerelease"
+              Path = (Join-Path $testRoot "bin\Krasis Prerelease.exe")
+              Channel = "prerelease"
+            }
+          )
+          $activationPointer = Join-Path $testRoot "runtime\current.txt"
+          $activationBackup = "$activationPointer.lifecycle-backup"
+          Move-Item -Force $activationPointer $activationBackup
+          try {
+            foreach ($entry in $updateLaunchers) {
+              if (-not (Test-Path $entry.Path -PathType Leaf)) {
+                throw "Installed native updater is missing: $($entry.Path)"
+              }
+              $updaterProbe = & $entry.Path --probe
+              if ($LASTEXITCODE -ne 0) {
+                throw "$($entry.Name) probe failed with status $LASTEXITCODE."
+              }
+              $expectedUpdaterProbe = (
+                "KRASIS_WINDOWS_UPDATER_PROBE=" +
+                $entry.Channel +
+                ":" +
+                (Join-Path $testRoot "bin\Update-Krasis.ps1")
+              )
+              if ($updaterProbe -notcontains $expectedUpdaterProbe) {
+                throw "$($entry.Name) selected the wrong update contract: $($updaterProbe -join ' | ')"
+              }
+            }
+          } finally {
+            Move-Item -Force $activationBackup $activationPointer
+          }
+
+          $startMenuFolder = Join-Path (
+            [Environment]::GetFolderPath([Environment+SpecialFolder]::Programs)
+          ) "Krasis"
+          $shortcutShell = New-Object -ComObject WScript.Shell
+          $shortcutTargets = @(
+            @{ Name = "Krasis"; Target = $nativeLauncher },
+            @{ Name = "Krasis Update"; Target = $updateLaunchers[0].Path },
+            @{ Name = "Krasis Prerelease"; Target = $updateLaunchers[1].Path }
+          )
+          foreach ($entry in $shortcutTargets) {
+            $shortcutPath = Join-Path $startMenuFolder "$($entry.Name).lnk"
+            if (-not (Test-Path $shortcutPath -PathType Leaf)) {
+              throw "Installed Start Menu shortcut is missing: $shortcutPath"
+            }
+            $shortcut = $shortcutShell.CreateShortcut($shortcutPath)
+            if ($shortcut.TargetPath -ne $entry.Target) {
+              throw "$($entry.Name) shortcut targets '$($shortcut.TargetPath)' instead of '$($entry.Target)'."
+            }
+            if ($shortcut.Arguments) {
+              throw "$($entry.Name) shortcut unexpectedly has arguments: $($shortcut.Arguments)"
+            }
+            if ($shortcut.WindowStyle -ne 3) {
+              throw "$($entry.Name) shortcut is not configured to start maximized."
+            }
+          }
           Remove-Item Env:PYTHONHOME,Env:PYTHONPATH -ErrorAction SilentlyContinue
 
           if (Test-Path (Join-Path $testRoot "python")) {
@@ -466,24 +802,269 @@ jobs:
           Copy-Item -Force windows-fla-build-manifest.json dist/windows-fla-build-manifest.json
           Get-PSDrive C | Format-Table Name,Used,Free
 
-      - name: Upload CI artifacts
+      - name: Create exact-SHA Windows release provenance
+        env:
+          BUILD_COMMIT_SHA: ${{ github.sha }}
+          BUILD_REPOSITORY: ${{ github.repository }}
+          BUILD_WORKFLOW: ${{ github.workflow }}
+          BUILD_WORKFLOW_EVENT: ${{ github.event_name }}
+          BUILD_WORKFLOW_RUN_ID: ${{ github.run_id }}
+        run: |
+          $version = python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])"
+          $installer = @(
+            Get-ChildItem dist -Filter "KrasisSetup-*-win64.exe"
+          )
+          $wheel = @(
+            Get-ChildItem dist -Filter "krasis-*-win_amd64.whl"
+          )
+          if ($installer.Count -ne 1 -or $wheel.Count -ne 1) {
+            throw "Expected exactly one promotable Windows installer and wheel."
+          }
+          $releaseFiles = @(
+            [ordered]@{
+              type = "windows_installer"
+              name = $installer[0].Name
+              size = $installer[0].Length
+              sha256 = (
+                Get-FileHash -Algorithm SHA256 $installer[0].FullName
+              ).Hash.ToLowerInvariant()
+            },
+            [ordered]@{
+              type = "windows_wheel"
+              name = $wheel[0].Name
+              size = $wheel[0].Length
+              sha256 = (
+                Get-FileHash -Algorithm SHA256 $wheel[0].FullName
+              ).Hash.ToLowerInvariant()
+            }
+          )
+          $sidecarBundles = @(
+            Get-ChildItem `
+              target/windows-release-cache `
+              -Filter "krasis-sidecars-windows-*.tar.gz" `
+              -ErrorAction SilentlyContinue
+          )
+          if ($sidecarBundles.Count -gt 1) {
+            throw "Expected at most one new Windows sidecar cache bundle."
+          }
+          if ($sidecarBundles.Count -eq 1) {
+            Copy-Item -Force $sidecarBundles[0].FullName dist
+            $bundle = Get-Item (Join-Path dist $sidecarBundles[0].Name)
+            $releaseFiles += [ordered]@{
+              type = "windows_sidecar_cache"
+              name = $bundle.Name
+              size = $bundle.Length
+              sha256 = (
+                Get-FileHash -Algorithm SHA256 $bundle.FullName
+              ).Hash.ToLowerInvariant()
+            }
+          }
+          [ordered]@{
+            schema_version = 1
+            repository = $env:BUILD_REPOSITORY
+            workflow = $env:BUILD_WORKFLOW
+            workflow_event = $env:BUILD_WORKFLOW_EVENT
+            workflow_run_id = [long]$env:BUILD_WORKFLOW_RUN_ID
+            commit_sha = $env:BUILD_COMMIT_SHA
+            version = $version
+            installer_lifecycle = "passed"
+            release_files = $releaseFiles
+          } |
+            ConvertTo-Json -Depth 8 |
+            Set-Content -Encoding utf8NoBOM dist/windows-release-provenance.json
+          Get-Content dist/windows-release-provenance.json
+
+      - name: Upload promotable exact-SHA Windows release
+        uses: actions/upload-artifact@v4
+        with:
+          name: krasis-windows-release-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            dist/KrasisSetup-*-win64.exe
+            dist/krasis-*-win_amd64.whl
+            dist/krasis-sidecars-windows-*.tar.gz
+            dist/windows-release-provenance.json
+
+      - name: Upload CI diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: krasis-windows-installer
+          name: krasis-windows-diagnostics-${{ github.run_id }}
           path: |
-            dist/KrasisSetup-*-win64.exe
             dist/Krasis-Windows-Package-*.zip
-            dist/*.whl
             dist/windows-fla-build-manifest.json
             dist/windows-installer-test.log
             ${{ runner.temp }}/krasis-installer-test.log
             ${{ runner.temp }}/krasis-uninstaller-test.log
             ${{ runner.temp }}/krasis-private-runtime-test/runtime-install.log
 
-      - name: Upload release assets
-        if: github.event_name == 'release'
+  promote-tested-windows-release:
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve successful exact-SHA preflight artifact
+        id: preflight
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "${{ github.event.release.tag_name }}" dist/KrasisSetup-*-win64.exe dist/*.whl --clobber
+          set -euo pipefail
+          artifact_name="krasis-windows-release-${GITHUB_SHA}"
+          artifact_json=$(
+            gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=${artifact_name}&per_page=100" |
+              jq -c --arg sha "$GITHUB_SHA" '
+                [
+                  .artifacts[]
+                  | select(.expired == false)
+                  | select(.name == ("krasis-windows-release-" + $sha))
+                  | select(.workflow_run.head_sha == $sha)
+                ]
+                | sort_by(.created_at)
+                | last // empty
+              '
+          )
+          if [ -z "$artifact_json" ]; then
+            echo "ERROR: no unexpired exact-SHA Windows preflight artifact exists." >&2
+            exit 1
+          fi
+          artifact_id=$(jq -r '.id' <<<"$artifact_json")
+          run_id=$(jq -r '.workflow_run.id' <<<"$artifact_json")
+          run_json=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}")
+          test "$(jq -r '.head_sha' <<<"$run_json")" = "$GITHUB_SHA"
+          test "$(jq -r '.event' <<<"$run_json")" = "workflow_dispatch"
+          test "$(jq -r '.status' <<<"$run_json")" = "completed"
+          test "$(jq -r '.conclusion' <<<"$run_json")" = "success"
+          test "$(jq -r '.path' <<<"$run_json")" = \
+            ".github/workflows/windows-installer.yml"
+          echo "artifact_id=$artifact_id" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          echo "Promoting successful workflow-dispatch run $run_id for $GITHUB_SHA."
+
+      - name: Download exact-SHA preflight artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download \
+            "${{ steps.preflight.outputs.run_id }}" \
+            --name "${{ steps.preflight.outputs.artifact_name }}" \
+            --dir promoted-windows-release
+
+      - name: Verify tag, provenance, inventory, sizes, and hashes
+        env:
+          PREFLIGHT_RUN_ID: ${{ steps.preflight.outputs.run_id }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-list -n1 "$RELEASE_TAG")" = "$GITHUB_SHA"
+          python - <<'PY'
+          from hashlib import sha256
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import tomllib
+
+          root = Path("promoted-windows-release")
+          provenance_paths = list(root.rglob("windows-release-provenance.json"))
+          if len(provenance_paths) != 1:
+              raise SystemExit(
+                  f"expected one Windows provenance file, found {len(provenance_paths)}"
+              )
+          provenance_path = provenance_paths[0]
+          provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+          version = tomllib.loads(
+              Path("pyproject.toml").read_text(encoding="utf-8")
+          )["project"]["version"]
+          expected = {
+              "schema_version": 1,
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "workflow": "Build Windows Installer",
+              "workflow_event": "workflow_dispatch",
+              "workflow_run_id": int(os.environ["PREFLIGHT_RUN_ID"]),
+              "commit_sha": os.environ["GITHUB_SHA"],
+              "version": version,
+              "installer_lifecycle": "passed",
+          }
+          for key, value in expected.items():
+              if provenance.get(key) != value:
+                  raise SystemExit(
+                      f"Windows provenance {key!r} mismatch: "
+                      f"{provenance.get(key)!r} != {value!r}"
+                  )
+          if os.environ["RELEASE_TAG"] != f"v{version}":
+              raise SystemExit("release tag and package version differ")
+          entries = provenance.get("release_files")
+          if not isinstance(entries, list):
+              raise SystemExit("Windows provenance release_files is invalid")
+          types = [entry.get("type") for entry in entries]
+          required_types = {"windows_installer", "windows_wheel"}
+          if not required_types.issubset(types) or len(types) != len(set(types)):
+              raise SystemExit(f"Windows provenance type inventory is invalid: {types}")
+          if set(types) - required_types - {"windows_sidecar_cache"}:
+              raise SystemExit(f"Windows provenance has unexpected types: {types}")
+          patterns = {
+              "windows_installer": rf"KrasisSetup-{re.escape(version)}-win64\.exe",
+              "windows_wheel": r"krasis-.+-cp312-cp312-win_amd64\.whl",
+              "windows_sidecar_cache": r"krasis-sidecars-windows-.+\.tar\.gz",
+          }
+          release_paths = []
+          expected_names = {"windows-release-provenance.json"}
+          for entry in entries:
+              name = entry.get("name")
+              kind = entry.get("type")
+              if not isinstance(name, str) or Path(name).name != name:
+                  raise SystemExit(f"unsafe Windows release filename: {name!r}")
+              if re.fullmatch(patterns[kind], name) is None:
+                  raise SystemExit(
+                      f"Windows release filename does not match {kind}: {name}"
+                  )
+              matches = list(root.rglob(name))
+              if len(matches) != 1:
+                  raise SystemExit(
+                      f"expected one artifact file named {name}, found {len(matches)}"
+                  )
+              path = matches[0]
+              data = path.read_bytes()
+              if len(data) != int(entry.get("size", -1)):
+                  raise SystemExit(f"Windows release size mismatch: {name}")
+              if sha256(data).hexdigest() != entry.get("sha256"):
+                  raise SystemExit(f"Windows release SHA-256 mismatch: {name}")
+              expected_names.add(name)
+              release_paths.append(path)
+          actual_files = {path.name for path in root.rglob("*") if path.is_file()}
+          if actual_files != expected_names:
+              raise SystemExit(
+                  f"promotable Windows artifact inventory mismatch: "
+                  f"{actual_files} != {expected_names}"
+              )
+          Path("promoted-windows-assets.txt").write_text(
+              "\n".join(str(path) for path in release_paths) + "\n",
+              encoding="utf-8",
+          )
+          print(
+              f"Verified exact-SHA Windows preflight run "
+              f"{os.environ['PREFLIGHT_RUN_ID']} with {len(release_paths)} files."
+          )
+          PY
+
+      - name: Upload exact tested Windows release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          mapfile -t assets < promoted-windows-assets.txt
+          provenance=$(
+            find promoted-windows-release \
+              -type f \
+              -name windows-release-provenance.json \
+              -print
+          )
+          test -n "$provenance"
+          gh release upload "$RELEASE_TAG" "${assets[@]}" "$provenance" --clobber

@@ -155,10 +155,11 @@ Native Windows:
 The installer creates a per-user install under
 `%LOCALAPPDATA%\Programs\Krasis`, installs and validates a release-pinned
 private Python/Krasis/PyTorch runtime, and adds three entries to the Krasis
-Start Menu folder. It never uses or modifies a system Python. `Krasis` opens a
-maximized PowerShell window running the interactive launcher. `Krasis Update`
-installs the latest stable Windows release, while `Krasis Prerelease` installs
-the latest Windows prerelease. Models and caches still live under
+Start Menu folder. It never uses or modifies a system Python. `Krasis` opens
+the native interactive launcher in a maximized, resizable console.
+`Krasis Update` and `Krasis Prerelease` are native executable entries which
+install the latest stable Windows release or prerelease respectively. Models
+and caches still live under
 `%USERPROFILE%\.krasis`. The first install downloads the pinned CUDA PyTorch
 wheel and can take several minutes.
 

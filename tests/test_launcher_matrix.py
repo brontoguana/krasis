@@ -400,28 +400,29 @@ class LauncherMatrixTest(unittest.TestCase):
         )
 
         self.assertIn(
-            r'Name: "{autoprograms}\Krasis\Krasis Update"',
+            r'Name: "{autoprograms}\Krasis\Krasis Update"; Filename: "{app}\bin\Krasis Update.exe"',
             installer_source,
         )
         self.assertIn(
-            r'Name: "{autoprograms}\Krasis\Krasis Prerelease"',
+            r'Name: "{autoprograms}\Krasis\Krasis Prerelease"; Filename: "{app}\bin\Krasis Prerelease.exe"',
             installer_source,
         )
         self.assertIn(
             r'Name: "{autoprograms}\Krasis\Krasis"; Filename: "{app}\bin\Krasis.exe"',
             installer_source,
         )
+        self.assertEqual(installer_source.count("Flags: runmaximized"), 3)
         self.assertNotIn(
-            r'Name: "{autoprograms}\Krasis\Krasis"; Filename: "{sys}\WindowsPowerShell',
+            r'Filename: "{sys}\WindowsPowerShell',
             installer_source,
         )
         self.assertIn(
-            r'-File ""{app}\bin\Update-Krasis.ps1"" -Channel stable',
-            installer_source,
+            '$LauncherExePath (Join-Path $Stage "bin\\Krasis Update.exe")',
+            build_source,
         )
         self.assertIn(
-            r'-File ""{app}\bin\Update-Krasis.ps1"" -Channel prerelease',
-            installer_source,
+            '$LauncherExePath (Join-Path $Stage "bin\\Krasis Prerelease.exe")',
+            build_source,
         )
         self.assertIn(
             '"Update-Krasis.ps1") (Join-Path $Stage "bin\\Update-Krasis.ps1")',
@@ -606,7 +607,11 @@ class LauncherMatrixTest(unittest.TestCase):
         self.assertIn('.args(["-I", "-m", "krasis.launcher"])', native_launcher_source)
         self.assertIn('.env_remove("PYTHONHOME")', native_launcher_source)
         self.assertIn('.env_remove("PYTHONPATH")', native_launcher_source)
-        self.assertNotIn("powershell", native_launcher_source.lower())
+        self.assertIn("fn system_powershell()", native_launcher_source)
+        self.assertIn("GetSystemDirectoryW", native_launcher_source)
+        self.assertIn("Command::new(&paths.python)", native_launcher_source)
+        self.assertNotIn("SetConsoleMode", native_launcher_source)
+        self.assertNotIn("GetConsoleWindow", native_launcher_source)
         self.assertNotIn(r"venv\Scripts\python.exe", native_launcher_source)
         self.assertIn("Build native Windows launcher", workflow_source)
         self.assertIn("cargo test --release --bin krasis-windows-launcher", workflow_source)
@@ -647,11 +652,52 @@ class LauncherMatrixTest(unittest.TestCase):
         self.assertIn("PendingFileRenameOperations", workflow_source)
         self.assertIn("generate-windows-fla-sources:", workflow_source)
         self.assertIn("needs: generate-windows-fla-sources", workflow_source)
+        self.assertGreaterEqual(
+            workflow_source.count("if: github.event_name == 'workflow_dispatch'"),
+            2,
+        )
+        self.assertIn("promote-tested-windows-release:", workflow_source)
+        self.assertIn("if: github.event_name == 'release'", workflow_source)
         self.assertIn("--target-platform windows", workflow_source)
         self.assertIn("KRASIS_FLA_REQUIRE_ALL_ARCHS", workflow_source)
         self.assertIn("windows-fla-manifest.json", workflow_source)
+        self.assertIn("'triton==3.5.1'", workflow_source)
+        self.assertIn("'torch==2.13.0+cpu'", workflow_source)
+        self.assertIn("Restore portable Windows FLA source cache", workflow_source)
+        self.assertIn("Restore Windows FLA DLL cache", workflow_source)
+        self.assertIn("cache_key_sha256", workflow_source)
         self.assertIn("Get-FileHash -Algorithm SHA256", workflow_source)
         self.assertIn("dumpbin /nologo /exports", workflow_source)
+        self.assertIn(
+            "python scripts/build_sidecars.py restore-bundle --github",
+            workflow_source,
+        )
+        self.assertNotIn(
+            "python scripts/build_sidecars.py build --force",
+            workflow_source,
+        )
+        self.assertIn(
+            "krasis-windows-release-${{ github.sha }}",
+            workflow_source,
+        )
+        self.assertIn("windows-release-provenance.json", workflow_source)
+        self.assertIn('"workflow_dispatch"', workflow_source)
+        self.assertIn('installer_lifecycle = "passed"', workflow_source)
+        self.assertIn(
+            'test "$(jq -r \'.conclusion\' <<<"$run_json")" = "success"',
+            workflow_source,
+        )
+        self.assertIn(
+            'test "$(git rev-list -n1 "$RELEASE_TAG")" = "$GITHUB_SHA"',
+            workflow_source,
+        )
+        self.assertNotIn(
+            'if: github.event_name == \'release\'\n        env:\n'
+            '          GH_TOKEN: ${{ github.token }}\n        run: |\n'
+            '          gh release upload "${{ github.event.release.tag_name }}" '
+            'dist/KrasisSetup-*-win64.exe',
+            workflow_source,
+        )
         self.assertIn("FLA_ARCHS = read_fla_architectures()", sidecar_builder_source)
         self.assertIn('f"krasis_fla_sm{arch}.dll"', sidecar_builder_source)
         self.assertIn("fla_sidecar_contract.json", sidecar_builder_source)
@@ -662,6 +708,8 @@ class LauncherMatrixTest(unittest.TestCase):
         self.assertIn("${{ runner.temp }}/krasis-installer-test.log", workflow_source)
         self.assertIn("${{ runner.temp }}/krasis-uninstaller-test.log", workflow_source)
         self.assertIn('[ValidateSet("stable", "prerelease")]', updater_source)
+        self.assertIn("[switch]$PauseOnFailure", updater_source)
+        self.assertIn('Read-Host "Press Enter to close"', updater_source)
         self.assertIn('"$ApiRoot/releases/latest"', updater_source)
         self.assertIn("$_.prerelease -and -not $_.draft", updater_source)
         self.assertIn(r'^KrasisSetup-.+-win64\.exe$', updater_source)

@@ -27,9 +27,9 @@ Source: "{#SourceDir}\VERSION.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\runtime-package.zip"; DestDir: "{tmp}"; DestName: "KrasisRuntime-{#AppVersion}.zip"; Flags: ignoreversion
 
 [Icons]
-Name: "{autoprograms}\Krasis\Krasis"; Filename: "{app}\bin\Krasis.exe"; WorkingDir: "{app}"
-Name: "{autoprograms}\Krasis\Krasis Update"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -NoExit -WindowStyle Maximized -File ""{app}\bin\Update-Krasis.ps1"" -Channel stable"; WorkingDir: "{app}"
-Name: "{autoprograms}\Krasis\Krasis Prerelease"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -NoExit -WindowStyle Maximized -File ""{app}\bin\Update-Krasis.ps1"" -Channel prerelease"; WorkingDir: "{app}"
+Name: "{autoprograms}\Krasis\Krasis"; Filename: "{app}\bin\Krasis.exe"; WorkingDir: "{app}"; Flags: runmaximized
+Name: "{autoprograms}\Krasis\Krasis Update"; Filename: "{app}\bin\Krasis Update.exe"; WorkingDir: "{app}"; Flags: runmaximized
+Name: "{autoprograms}\Krasis\Krasis Prerelease"; Filename: "{app}\bin\Krasis Prerelease.exe"; WorkingDir: "{app}"; Flags: runmaximized
 
 [InstallDelete]
 Type: files; Name: "{app}\bin\Launch-Krasis.ps1"

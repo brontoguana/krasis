@@ -1,6 +1,7 @@
 param(
     [ValidateSet("stable", "prerelease")]
-    [string]$Channel = "stable"
+    [string]$Channel = "stable",
+    [switch]$PauseOnFailure
 )
 
 $ErrorActionPreference = "Stop"
@@ -115,6 +116,13 @@ try {
 } catch {
     Write-Host ""
     Write-Host "Krasis update failed: $($_.Exception.Message)" -ForegroundColor Red
+    if ($PauseOnFailure) {
+        try {
+            [void](Read-Host "Press Enter to close")
+        } catch {
+            # If input is unavailable, preserve the original update failure.
+        }
+    }
     exit 1
 } finally {
     if (Test-Path $TempDir) {

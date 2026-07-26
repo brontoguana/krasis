@@ -22,6 +22,8 @@ New-Item -ItemType Directory -Force -Path (Join-Path $Stage "bin") | Out-Null
 New-Item -ItemType Directory -Force -Path $OutputPath | Out-Null
 
 Copy-Item -Force $LauncherExePath (Join-Path $Stage "bin\Krasis.exe")
+Copy-Item -Force $LauncherExePath (Join-Path $Stage "bin\Krasis Update.exe")
+Copy-Item -Force $LauncherExePath (Join-Path $Stage "bin\Krasis Prerelease.exe")
 Copy-Item -Force $LauncherIconPath (Join-Path $Stage "bin\Krasis.ico")
 Copy-Item -Force (Join-Path $PSScriptRoot "Install-Krasis.ps1") (Join-Path $Stage "bin\Install-Krasis.ps1")
 Copy-Item -Force (Join-Path $PSScriptRoot "Invoke-Install-Krasis.ps1") (Join-Path $Stage "bin\Invoke-Install-Krasis.ps1")
