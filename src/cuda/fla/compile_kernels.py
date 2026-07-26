@@ -425,6 +425,15 @@ def generated_export_symbols(kernels: list[dict]) -> list[str]:
     ]
 
 
+def sidecar_contract_fingerprint() -> str:
+    record = (
+        f"schema_version={SIDECAR_CONTRACT['schema_version']}\n"
+        f"architectures={','.join(str(arch) for arch in TARGET_ARCHS)}\n"
+        f"h_values={','.join(str(value) for value in H_VALUES)}\n"
+    )
+    return hashlib.sha256(record.encode("utf-8")).hexdigest()
+
+
 def generate_c_wrapper(
     kernels: list[dict],
     output_path: str,
@@ -790,10 +799,9 @@ def main():
         manifest = {
             "schema_version": 1,
             "target_platform": "windows",
-            "sidecar_contract_sha256": hashlib.sha256(
-                SIDECAR_CONTRACT_PATH.read_bytes()
-            ).hexdigest(),
+            "sidecar_contract_fingerprint_sha256": sidecar_contract_fingerprint(),
             "architectures": archs,
+            "h_values": H_VALUES,
             "exports": generated_export_symbols(representative_kernels),
             "sources": sources,
         }

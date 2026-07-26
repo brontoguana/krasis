@@ -137,18 +137,44 @@ jobs:
           if ([int]$sourceContract.schema_version -ne 1) {
             throw "Source FLA sidecar contract schema is invalid."
           }
-          $sourceContractHash = (
-            Get-FileHash -Algorithm SHA256 python/krasis/fla_sidecar_contract.json
-          ).Hash.ToLowerInvariant()
-          if ($sourceContractHash -ne "$($flaManifest.sidecar_contract_sha256)") {
-            throw "Generated Windows FLA sources do not match the source-side architecture contract."
-          }
           $expectedArchs = @(
             $sourceContract.architectures | ForEach-Object { [int]$_ }
           )
+          $expectedHValues = @(
+            $sourceContract.h_values | ForEach-Object { [int]$_ }
+          )
+          $contractRecord = (
+            "schema_version=$([int]$sourceContract.schema_version)`n" +
+            "architectures=$([string]::Join(',', $expectedArchs))`n" +
+            "h_values=$([string]::Join(',', $expectedHValues))`n"
+          )
+          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+          $contractHasher = [System.Security.Cryptography.SHA256]::Create()
+          try {
+            $contractBytes = $utf8NoBom.GetBytes($contractRecord)
+            $contractHashBytes = $contractHasher.ComputeHash($contractBytes)
+            $sourceContractFingerprint = (
+              [BitConverter]::ToString($contractHashBytes)
+            ).Replace("-", "").ToLowerInvariant()
+          } finally {
+            $contractHasher.Dispose()
+          }
+          if (
+            $sourceContractFingerprint -ne
+            "$($flaManifest.sidecar_contract_fingerprint_sha256)"
+          ) {
+            throw "Generated Windows FLA sources do not match the source-side architecture contract."
+          }
           $actualArchs = @($flaManifest.architectures | ForEach-Object { [int]$_ })
           if ([string]::Join(",", $actualArchs) -ne [string]::Join(",", $expectedArchs)) {
             throw "Generated Windows FLA architecture inventory is invalid: $($actualArchs -join ',')."
+          }
+          $actualHValues = @($flaManifest.h_values | ForEach-Object { [int]$_ })
+          if (
+            [string]::Join(",", $actualHValues) -ne
+            [string]::Join(",", $expectedHValues)
+          ) {
+            throw "Generated Windows FLA H-value inventory is invalid: $($actualHValues -join ',')."
           }
           $cudaDriverImport = Join-Path $env:CUDA_PATH "lib\x64\cuda.lib"
           if (-not (Test-Path $cudaDriverImport -PathType Leaf)) {
