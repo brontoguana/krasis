@@ -33,6 +33,7 @@
 #                                     all models with no resume capability.
 #   ./dev launcher-test             Validate launcher config serialization and server startup parsing
 #   ./dev windows-launcher-test     Build and test the native Windows launcher logic
+#   ./dev server-test               Build and test Rust HTTP response/server contracts
 #   ./dev reference-test <config>   Compare against stored non-HF references; HF artifacts require override
 #   ./dev reference-test --compare <model>  Comparison matrix; HF artifacts require override
 #   ./dev reference-inventory       Inventory stored reference artifacts and classify contract state
@@ -3179,6 +3180,23 @@ do_windows_launcher_test() {
     )
 }
 
+do_server_test() {
+    info "Building and testing Rust HTTP response/server contracts"
+    local pyver
+    pyver=$("$PYTHON" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+    local pylibdir
+    pylibdir=$("$PYTHON" -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")
+    (
+        cd "$SCRIPT_DIR"
+        PATH="$HOME/.cargo/bin:$PATH" rustfmt --edition 2021 --check src/server.rs
+        PYO3_PYTHON="$PYTHON" \
+        LD_LIBRARY_PATH="$pylibdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+        RUSTFLAGS="${RUSTFLAGS:-} -L $pylibdir -l python${pyver}" \
+        PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
+            cargo test --release --lib server::tests "$@"
+    )
+}
+
 # ── Extract --timing flag ────────────────────────────────────────
 # Can appear anywhere in args. Removes it and sets KRASIS_DECODE_TIMING=1.
 TIMING_FLAG=false
@@ -3221,6 +3239,7 @@ case "$cmd" in
     release-test-all) do_release_test_all "$@" ;;
     launcher-test)  do_launcher_test "$@" ;;
     windows-launcher-test) do_windows_launcher_test "$@" ;;
+    server-test)    do_server_test "$@" ;;
     reference-test) do_reference_test "$@" ;;
     witness-inputs) do_witness_inputs "$@" ;;
     witness-model-check) do_witness_model_check "$@" ;;
@@ -3286,6 +3305,7 @@ case "$cmd" in
         echo "  reference-test --compare <model>  Comparison matrix; HF artifacts require override"
         echo "  launcher-test                  Validate launcher config serialization and server startup parsing"
         echo "  windows-launcher-test          Build and test native Windows launcher logic"
+        echo "  server-test                    Build and test Rust HTTP response/server contracts"
         echo "  reference-inventory            Inventory stored reference artifacts"
         echo "  witness-inputs <model>         Build stored input_token_ids from fixed prompt-source JSON"
         echo "  witness-model-check <model>    Check expected BF16 GGUF witness model readiness"

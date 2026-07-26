@@ -361,6 +361,36 @@ fn is_chat_completions_endpoint(path: &str) -> bool {
     normalized == "/v1/chat/completions" || normalized == "/chat/completions"
 }
 
+fn format_models_response(
+    model_name: &str,
+    max_context_tokens: usize,
+    supports_vision: bool,
+) -> String {
+    let model_id = if supports_vision {
+        format!("{}-vision", model_name)
+    } else {
+        model_name.to_string()
+    };
+    let mut model = serde_json::json!({
+        "id": model_id,
+        "object": "model",
+        "created": 0,
+        "owned_by": "krasis",
+        "max_context_tokens": max_context_tokens,
+        "capabilities": {
+            "vision": supports_vision,
+        },
+    });
+    if supports_vision {
+        model["input_modalities"] = serde_json::json!(["text", "image"]);
+    }
+    serde_json::json!({
+        "object": "list",
+        "data": [model],
+    })
+    .to_string()
+}
+
 fn handle_front_connection(
     mut tcp_stream: TcpStream,
     server_info: ServerInfo,
@@ -415,20 +445,11 @@ fn handle_front_connection(
         }
 
         ("GET", path) if is_models_endpoint(path) => {
-            let data = if server_info.supports_vision {
-                let vision_id = json_escape(&format!("{}-vision", server_info.model_name));
-                format!(
-                    r#"{{"id":"{}","object":"model","created":0,"owned_by":"krasis","max_context_tokens":{},"capabilities":{{"vision":true}},"input_modalities":["text","image"]}}"#,
-                    vision_id, server_info.max_context_tokens
-                )
-            } else {
-                let model_id = json_escape(&server_info.model_name);
-                format!(
-                    r#"{{"id":"{}","object":"model","created":0,"owned_by":"krasis","max_context_tokens":{},"capabilities":{{"vision":false}}}}"#,
-                    model_id, server_info.max_context_tokens
-                )
-            };
-            let body = format!(r#"{{"object":"list","data":[{}]}}"#, data);
+            let body = format_models_response(
+                &server_info.model_name,
+                server_info.max_context_tokens,
+                server_info.supports_vision,
+            );
             let _ = send_json(&mut tcp_stream, 200, &body);
         }
 
@@ -660,16 +681,10 @@ fn format_sse_token(
     let delta = if text.is_empty() {
         "{}".to_string()
     } else {
-        let escaped = text
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('\n', "\\n")
-            .replace('\r', "\\r")
-            .replace('\t', "\\t");
-        format!(r#"{{"content":"{}"}}"#, escaped)
+        format!(r#"{{"content":{}}}"#, json_string(text))
     };
     let fr = match finish_reason {
-        Some(r) => format!(r#""{}""#, r),
+        Some(r) => json_string(r),
         None => "null".to_string(),
     };
     let logprobs_str = if let Some(lps) = logprobs {
@@ -689,8 +704,13 @@ fn format_sse_token(
         String::new()
     };
     format!(
-        r#"{{"id":"{}","object":"chat.completion.chunk","created":{},"model":"{}","choices":[{{"index":0,"delta":{},"finish_reason":{}{}}}]}}"#,
-        request_id, created, model_name, delta, fr, logprobs_str
+        r#"{{"id":{},"object":"chat.completion.chunk","created":{},"model":{},"choices":[{{"index":0,"delta":{},"finish_reason":{}{}}}]}}"#,
+        json_string(request_id),
+        created,
+        json_string(model_name),
+        delta,
+        fr,
+        logprobs_str
     )
 }
 
@@ -704,19 +724,13 @@ fn format_completion(
     finish_reason: &str,
     created: u64,
 ) -> String {
-    let escaped = text
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t");
     format!(
-        r#"{{"id":"{}","object":"chat.completion","created":{},"model":"{}","choices":[{{"index":0,"message":{{"role":"assistant","content":"{}"}},"finish_reason":"{}"}}],"usage":{{"prompt_tokens":{},"completion_tokens":{},"total_tokens":{}}}}}"#,
-        request_id,
+        r#"{{"id":{},"object":"chat.completion","created":{},"model":{},"choices":[{{"index":0,"message":{{"role":"assistant","content":{}}},"finish_reason":{}}}],"usage":{{"prompt_tokens":{},"completion_tokens":{},"total_tokens":{}}}}}"#,
+        json_string(request_id),
         created,
-        model_name,
-        escaped,
-        finish_reason,
+        json_string(model_name),
+        json_string(text),
+        json_string(finish_reason),
         prompt_tokens,
         completion_tokens,
         prompt_tokens + completion_tokens
@@ -822,13 +836,19 @@ fn parse_tool_calls(text: &str) -> (String, Vec<ParsedToolCall>) {
     (content.trim().to_string(), tool_calls)
 }
 
-/// Escape a string for embedding inside a JSON string value.
+/// Serialize a string as a complete JSON string literal, including quotes.
+///
+/// Keeping quoting and escaping together prevents callers from accidentally
+/// embedding raw Windows paths or control characters in response envelopes.
+#[inline]
+fn json_string(s: &str) -> String {
+    serde_json::to_string(s).expect("serializing a Rust string to JSON cannot fail")
+}
+
+/// Escape a string for legacy response templates that provide their own quotes.
 fn json_escape(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t")
+    let quoted = json_string(s);
+    quoted[1..quoted.len() - 1].to_string()
 }
 
 fn hide_synthetic_think_stop_text(
@@ -913,8 +933,13 @@ fn format_sse_tool_call_start(
     created: u64,
 ) -> String {
     format!(
-        r#"{{"id":"{}","object":"chat.completion.chunk","created":{},"model":"{}","choices":[{{"index":0,"delta":{{"tool_calls":[{{"index":{},"id":"{}","type":"function","function":{{"name":"{}","arguments":""}}}}]}},"finish_reason":null}}]}}"#,
-        request_id, created, model_name, call_index, call_id, function_name
+        r#"{{"id":{},"object":"chat.completion.chunk","created":{},"model":{},"choices":[{{"index":0,"delta":{{"tool_calls":[{{"index":{},"id":{},"type":"function","function":{{"name":{},"arguments":""}}}}]}},"finish_reason":null}}]}}"#,
+        json_string(request_id),
+        created,
+        json_string(model_name),
+        call_index,
+        json_string(call_id),
+        json_string(function_name)
     )
 }
 
@@ -926,10 +951,13 @@ fn format_sse_tool_call_args(
     arguments_json: &str,
     created: u64,
 ) -> String {
-    let escaped = json_escape(arguments_json);
     format!(
-        r#"{{"id":"{}","object":"chat.completion.chunk","created":{},"model":"{}","choices":[{{"index":0,"delta":{{"tool_calls":[{{"index":{},"function":{{"arguments":"{}"}}}}]}},"finish_reason":null}}]}}"#,
-        request_id, created, model_name, call_index, escaped
+        r#"{{"id":{},"object":"chat.completion.chunk","created":{},"model":{},"choices":[{{"index":0,"delta":{{"tool_calls":[{{"index":{},"function":{{"arguments":{}}}}}]}},"finish_reason":null}}]}}"#,
+        json_string(request_id),
+        created,
+        json_string(model_name),
+        call_index,
+        json_string(arguments_json)
     )
 }
 
@@ -945,22 +973,23 @@ fn format_completion_with_tool_calls(
 ) -> String {
     let mut tc_parts = Vec::new();
     for tc in tool_calls {
-        let escaped_args = json_escape(&tc.arguments_json);
         tc_parts.push(format!(
-            r#"{{"id":"{}","type":"function","function":{{"name":"{}","arguments":"{}"}}}}"#,
-            tc.id, tc.name, escaped_args
+            r#"{{"id":{},"type":"function","function":{{"name":{},"arguments":{}}}}}"#,
+            json_string(&tc.id),
+            json_string(&tc.name),
+            json_string(&tc.arguments_json)
         ));
     }
     let content_field = if content.is_empty() {
         "null".to_string()
     } else {
-        format!(r#""{}""#, json_escape(content))
+        json_string(content)
     };
     format!(
-        r#"{{"id":"{}","object":"chat.completion","created":{},"model":"{}","choices":[{{"index":0,"message":{{"role":"assistant","content":{},"tool_calls":[{}]}},"finish_reason":"tool_calls"}}],"usage":{{"prompt_tokens":{},"completion_tokens":{},"total_tokens":{}}}}}"#,
-        request_id,
+        r#"{{"id":{},"object":"chat.completion","created":{},"model":{},"choices":[{{"index":0,"message":{{"role":"assistant","content":{},"tool_calls":[{}]}},"finish_reason":"tool_calls"}}],"usage":{{"prompt_tokens":{},"completion_tokens":{},"total_tokens":{}}}}}"#,
+        json_string(request_id),
         created,
-        model_name,
+        json_string(model_name),
         content_field,
         tc_parts.join(","),
         prompt_tokens,
@@ -976,6 +1005,44 @@ struct RequestOverhead {
     prefill_ms: f64,         // GIL acquire + Python prefill
     reload_ms: f64,          // HCS soft-tier reload (wall-clock, includes sync if enabled)
     real_reload_dma_ms: f64, // Actual DMA time when sync is on (0.0 if async)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn format_sse_timing(
+    request_id: &str,
+    model_name: &str,
+    created: u64,
+    decode_tokens: usize,
+    decode_time_ms: f64,
+    decode_tok_s: f64,
+    thinking_tokens: usize,
+    answer_tokens: usize,
+    total_generated: usize,
+    prompt_tokens: usize,
+    prefill_tok_s: f64,
+    overhead_ms: f64,
+    overhead: &RequestOverhead,
+) -> String {
+    format!(
+        r#"{{"id":{},"object":"chat.completion.chunk","created":{},"model":{},"choices":[],"krasis_timing":{{"decode_tokens":{},"decode_time_ms":{:.1},"decode_tok_s":{:.2},"thinking_tokens":{},"answer_tokens":{},"total_generated":{},"prompt_tokens":{},"prefill_tok_s":{:.1},"overhead_ms":{:.1},"overhead":{{"parse_ms":{:.1},"evict_ms":{:.1},"prefill_ms":{:.1},"reload_ms":{:.1},"real_reload_dma_ms":{:.1}}}}}}}"#,
+        json_string(request_id),
+        created,
+        json_string(model_name),
+        decode_tokens,
+        decode_time_ms,
+        decode_tok_s,
+        thinking_tokens,
+        answer_tokens,
+        total_generated,
+        prompt_tokens,
+        prefill_tok_s,
+        overhead_ms,
+        overhead.parse_ms,
+        overhead.evict_ms,
+        overhead.prefill_ms,
+        overhead.reload_ms,
+        overhead.real_reload_dma_ms
+    )
 }
 
 fn format_completion_with_debug(
@@ -4114,11 +4181,10 @@ fn handle_gpu_decode(
         };
         let overhead_total_ms =
             overhead.parse_ms + overhead.evict_ms + overhead.prefill_ms + overhead.reload_ms;
-        let timing_chunk = format!(
-            r#"{{"id":"{}","object":"chat.completion.chunk","created":{},"model":"{}","choices":[],"krasis_timing":{{"decode_tokens":{},"decode_time_ms":{:.1},"decode_tok_s":{:.2},"thinking_tokens":{},"answer_tokens":{},"total_generated":{},"prompt_tokens":{},"prefill_tok_s":{:.1},"overhead_ms":{:.1},"overhead":{{"parse_ms":{:.1},"evict_ms":{:.1},"prefill_ms":{:.1},"reload_ms":{:.1},"real_reload_dma_ms":{:.1}}}}}}}"#,
+        let timing_chunk = format_sse_timing(
             request_id,
-            created,
             model_name,
+            created,
             decode_token_count,
             decode_ms,
             decode_tok_s,
@@ -4128,11 +4194,7 @@ fn handle_gpu_decode(
             prompt_len,
             prefill_tok_s,
             overhead_total_ms,
-            overhead.parse_ms,
-            overhead.evict_ms,
-            overhead.prefill_ms,
-            overhead.reload_ms,
-            overhead.real_reload_dma_ms
+            overhead,
         );
         let _ = tx.send(format!("data: {}\n\n", timing_chunk));
         let _ = tx.send("data: [DONE]\n\n".to_string());
@@ -5399,7 +5461,20 @@ impl RustServer {
 
 #[cfg(test)]
 mod tests {
-    use super::{hide_synthetic_think_stop_text, is_chat_completions_endpoint, is_models_endpoint};
+    use super::{
+        format_completion, format_completion_with_debug, format_completion_with_tool_calls,
+        format_models_response, format_sse_timing, format_sse_token, format_sse_tool_call_args,
+        format_sse_tool_call_start, hide_synthetic_think_stop_text, is_chat_completions_endpoint,
+        is_models_endpoint, ParsedToolCall, RequestOverhead,
+    };
+
+    const WINDOWS_MODEL_PATH: &str = r#"C:\Users\stoate\.krasis\models\Qwen3.6-35B-A3B"#;
+
+    fn parse_response(body: &str) -> serde_json::Value {
+        serde_json::from_str(body).unwrap_or_else(|e| {
+            panic!("response is not valid JSON: {e}\nbody: {body}");
+        })
+    }
 
     #[test]
     fn models_endpoint_accepts_openai_base_url_variants() {
@@ -5440,5 +5515,152 @@ mod tests {
         ));
         assert!(!hide_synthetic_think_stop_text(123, Some("stop"), None));
         assert!(!hide_synthetic_think_stop_text(123, None, Some(123)));
+    }
+
+    #[test]
+    fn windows_model_path_round_trips_in_models_and_completion_responses() {
+        let models = format_models_response(WINDOWS_MODEL_PATH, 32_768, false);
+        let models_json = parse_response(&models);
+        assert_eq!(models_json["data"][0]["id"], WINDOWS_MODEL_PATH);
+        assert!(models.contains(r#""id":"C:\\Users\\stoate\\.krasis\\models\\"#));
+
+        let vision_models = format_models_response(WINDOWS_MODEL_PATH, 32_768, true);
+        let vision_json = parse_response(&vision_models);
+        assert_eq!(
+            vision_json["data"][0]["id"],
+            format!("{}-vision", WINDOWS_MODEL_PATH)
+        );
+
+        let npc_reply = "Elara says, \"Good day.\"\nLooking to buy?";
+        let completion = format_completion(
+            "chatcmpl-test",
+            WINDOWS_MODEL_PATH,
+            npc_reply,
+            17,
+            9,
+            "stop",
+            123,
+        );
+        let completion_json = parse_response(&completion);
+        assert_eq!(completion_json["model"], WINDOWS_MODEL_PATH);
+        assert_eq!(
+            completion_json["choices"][0]["message"]["content"],
+            npc_reply
+        );
+        assert!(
+            completion.contains(r#""model":"C:\\Users\\stoate\\.krasis\\models\\Qwen3.6-35B-A3B""#)
+        );
+
+        let debug = serde_json::json!({"path": WINDOWS_MODEL_PATH});
+        let with_debug = format_completion_with_debug(
+            "chatcmpl-test",
+            WINDOWS_MODEL_PATH,
+            npc_reply,
+            17,
+            9,
+            "stop",
+            123,
+            Some(&debug),
+        );
+        let debug_json = parse_response(&with_debug);
+        assert_eq!(debug_json["model"], WINDOWS_MODEL_PATH);
+        assert_eq!(debug_json["krasis_debug"]["path"], WINDOWS_MODEL_PATH);
+    }
+
+    #[test]
+    fn windows_model_path_round_trips_in_every_stream_chunk_type() {
+        let token = format_sse_token(
+            "chatcmpl-test",
+            WINDOWS_MODEL_PATH,
+            "quoted \"text\" with \\ and \u{0008}",
+            Some("stop"),
+            123,
+            Some(&[(42, -0.25)]),
+        );
+        let token_json = parse_response(&token);
+        assert_eq!(token_json["model"], WINDOWS_MODEL_PATH);
+        assert_eq!(
+            token_json["choices"][0]["delta"]["content"],
+            "quoted \"text\" with \\ and \u{0008}"
+        );
+
+        let start = format_sse_tool_call_start(
+            "chatcmpl-test",
+            WINDOWS_MODEL_PATH,
+            0,
+            "call_\"quoted\"",
+            "inspect\\npc",
+            123,
+        );
+        let start_json = parse_response(&start);
+        assert_eq!(start_json["model"], WINDOWS_MODEL_PATH);
+        assert_eq!(
+            start_json["choices"][0]["delta"]["tool_calls"][0]["function"]["name"],
+            "inspect\\npc"
+        );
+
+        let arguments = r#"{"path":"C:\\Users\\stoate\\npc.json"}"#;
+        let args =
+            format_sse_tool_call_args("chatcmpl-test", WINDOWS_MODEL_PATH, 0, arguments, 123);
+        let args_json = parse_response(&args);
+        assert_eq!(args_json["model"], WINDOWS_MODEL_PATH);
+        assert_eq!(
+            args_json["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"],
+            arguments
+        );
+
+        let overhead = RequestOverhead {
+            parse_ms: 1.0,
+            evict_ms: 2.0,
+            prefill_ms: 3.0,
+            reload_ms: 4.0,
+            real_reload_dma_ms: 5.0,
+        };
+        let timing = format_sse_timing(
+            "chatcmpl-test",
+            WINDOWS_MODEL_PATH,
+            123,
+            7,
+            70.0,
+            100.0,
+            0,
+            8,
+            8,
+            17,
+            200.0,
+            10.0,
+            &overhead,
+        );
+        let timing_json = parse_response(&timing);
+        assert_eq!(timing_json["model"], WINDOWS_MODEL_PATH);
+        assert_eq!(timing_json["krasis_timing"]["decode_tokens"], 7);
+    }
+
+    #[test]
+    fn windows_model_path_round_trips_in_nonstreaming_tool_response() {
+        let tool_calls = vec![ParsedToolCall {
+            id: "call_\"quoted\"".to_string(),
+            name: "inspect\\npc".to_string(),
+            arguments_json: r#"{"path":"C:\\Users\\stoate\\npc.json"}"#.to_string(),
+        }];
+        let response = format_completion_with_tool_calls(
+            "chatcmpl-test",
+            WINDOWS_MODEL_PATH,
+            "Using \"inspect\".",
+            &tool_calls,
+            17,
+            9,
+            123,
+        );
+        let json = parse_response(&response);
+        assert_eq!(json["model"], WINDOWS_MODEL_PATH);
+        assert_eq!(
+            json["choices"][0]["message"]["tool_calls"][0]["function"]["name"],
+            "inspect\\npc"
+        );
+        assert_eq!(
+            json["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"],
+            tool_calls[0].arguments_json
+        );
     }
 }
