@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
 const ACTIVATION_FILE: &str = "runtime/current.txt";
-const UPDATE_SCRIPT: &str = "bin/Update-Krasis.ps1";
+const UPDATE_DIR: &str = "bin";
+const UPDATE_SCRIPT_NAME: &str = "Update-Krasis.ps1";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum UpdateChannel {
@@ -112,7 +113,7 @@ fn resolve_launch_paths(executable: &Path) -> Result<LaunchPaths, String> {
 
 fn resolve_update_script(executable: &Path) -> Result<(PathBuf, PathBuf), String> {
     let install_root = resolve_install_root(executable)?;
-    let script = install_root.join(UPDATE_SCRIPT);
+    let script = install_root.join(UPDATE_DIR).join(UPDATE_SCRIPT_NAME);
     if !script.is_file() {
         return Err(format!(
             "Krasis updater script is missing: {}",

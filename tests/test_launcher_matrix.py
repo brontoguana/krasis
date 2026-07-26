@@ -610,6 +610,14 @@ class LauncherMatrixTest(unittest.TestCase):
         self.assertIn("fn system_powershell()", native_launcher_source)
         self.assertIn("GetSystemDirectoryW", native_launcher_source)
         self.assertIn("Command::new(&paths.python)", native_launcher_source)
+        self.assertIn(
+            "install_root.join(UPDATE_DIR).join(UPDATE_SCRIPT_NAME)",
+            native_launcher_source,
+        )
+        self.assertNotIn(
+            'const UPDATE_SCRIPT: &str = "bin/Update-Krasis.ps1"',
+            native_launcher_source,
+        )
         self.assertNotIn("SetConsoleMode", native_launcher_source)
         self.assertNotIn("GetConsoleWindow", native_launcher_source)
         self.assertNotIn(r"venv\Scripts\python.exe", native_launcher_source)
