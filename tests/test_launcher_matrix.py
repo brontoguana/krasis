@@ -1,6 +1,7 @@
 import argparse
 import contextlib
 import io
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -386,6 +387,17 @@ class LauncherMatrixTest(unittest.TestCase):
         workflow_source = (
             REPO_ROOT / ".github" / "workflows" / "windows-installer.yml"
         ).read_text()
+        fla_compiler_source = (
+            REPO_ROOT / "src" / "cuda" / "fla" / "compile_kernels.py"
+        ).read_text()
+        sidecar_builder_source = (
+            REPO_ROOT / "scripts" / "build_sidecars.py"
+        ).read_text()
+        fla_sidecar_contract = json.loads(
+            (
+                REPO_ROOT / "python" / "krasis" / "fla_sidecar_contract.json"
+            ).read_text(encoding="utf-8")
+        )
 
         self.assertIn(
             r'Name: "{autoprograms}\Krasis\Krasis Update"',
@@ -490,6 +502,16 @@ class LauncherMatrixTest(unittest.TestCase):
         self.assertIn("[System.IO.File]::OpenRead", runtime_manifest_source)
         self.assertIn("[System.Security.Cryptography.SHA256]::Create()", runtime_manifest_source)
         self.assertIn("Assert-KrasisPrivateRuntime", runtime_manifest_source)
+        self.assertEqual(
+            fla_sidecar_contract,
+            {
+                "schema_version": 1,
+                "architectures": [80, 89, 90, 120],
+                "h_values": [32, 64],
+            },
+        )
+        self.assertIn('f"krasis_fla_sm{arch}.dll"', runtime_manifest_source)
+        self.assertIn('"fla_architectures": fla_architectures', runtime_manifest_source)
         self.assertIn(
             "[IO.File]::WriteAllText($ProbePath, $ProbeCode, $Utf8NoBom)",
             runtime_manifest_source,
@@ -623,6 +645,19 @@ class LauncherMatrixTest(unittest.TestCase):
         self.assertIn("Retained private-runtime entries:", workflow_source)
         self.assertIn("Processes executing from the retained runtime:", workflow_source)
         self.assertIn("PendingFileRenameOperations", workflow_source)
+        self.assertIn("generate-windows-fla-sources:", workflow_source)
+        self.assertIn("needs: generate-windows-fla-sources", workflow_source)
+        self.assertIn("--target-platform windows", workflow_source)
+        self.assertIn("KRASIS_FLA_REQUIRE_ALL_ARCHS", workflow_source)
+        self.assertIn("windows-fla-manifest.json", workflow_source)
+        self.assertIn("Get-FileHash -Algorithm SHA256", workflow_source)
+        self.assertIn("dumpbin /nologo /exports", workflow_source)
+        self.assertIn("FLA_ARCHS = read_fla_architectures()", sidecar_builder_source)
+        self.assertIn('f"krasis_fla_sm{arch}.dll"', sidecar_builder_source)
+        self.assertIn("fla_sidecar_contract.json", sidecar_builder_source)
+        self.assertIn("portable_embedded_cubins", fla_compiler_source)
+        self.assertIn('__declspec(dllexport)', fla_compiler_source)
+        self.assertIn('"target_platform": "windows"', fla_compiler_source)
         self.assertIn("if: always()", workflow_source)
         self.assertIn("${{ runner.temp }}/krasis-installer-test.log", workflow_source)
         self.assertIn("${{ runner.temp }}/krasis-uninstaller-test.log", workflow_source)

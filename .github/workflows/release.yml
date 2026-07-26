@@ -93,7 +93,7 @@ jobs:
             krasis_phase_start "release FLA sidecars"
             PATH="/usr/local/cuda-12.6/bin:$PATH" KRASIS_DEV_SCRIPT=1 KRASIS_FLA_CROSS_COMPILE=1 KRASIS_FLA_REQUIRE_ALL_ARCHS=1 KRASIS_NVCC_CCBIN="$KRASIS_NVCC_CCBIN" \
               /opt/python/cp312-cp312/bin/python src/cuda/fla/compile_kernels.py \
-              --output-dir /tmp/fla_build --arch 80 89 90 120
+              --output-dir /tmp/fla_build
             mkdir -p python/krasis
             cp /tmp/fla_build/libkrasis_fla_sm*.so python/krasis/
             ls -la python/krasis/libkrasis_fla_sm*.so
@@ -152,6 +152,7 @@ jobs:
           set +e
           python3 <<'PY'
           from pathlib import Path
+          import json
           import subprocess
           import os
           import zipfile
@@ -164,12 +165,22 @@ jobs:
           required = {
               "krasis/libkrasis_marlin.so",
               "krasis/libkrasis_flash_attn.so",
+              "krasis/fla_sidecar_contract.json",
               "krasis/sidecar_manifest.json",
           }
           # FLA .so files are expected for each target architecture. Release
           # prebuild requires all of these, so missing entries indicate a
           # packaging problem rather than an optional downgrade.
-          fla_archs = [80, 89, 90, 120]
+          fla_contract = json.loads(
+              Path("python/krasis/fla_sidecar_contract.json").read_text(
+                  encoding="utf-8"
+              )
+          )
+          if fla_contract.get("schema_version") != 1:
+              raise SystemExit("invalid FLA sidecar contract schema")
+          fla_archs = [int(arch) for arch in fla_contract["architectures"]]
+          if not fla_archs or len(set(fla_archs)) != len(fla_archs):
+              raise SystemExit("invalid FLA sidecar architecture inventory")
           for arch in fla_archs:
               required.add(f"krasis/libkrasis_fla_sm{arch}.so")
 

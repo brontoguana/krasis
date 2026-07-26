@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Fixed Windows linear-attention startup by building and packaging the complete
+  vendored FLA sidecar set for sm_80, sm_89, sm_90, and sm_120. Release CI
+  cross-compiles the authoritative cubins on Linux, hashes portable embedded
+  CUDA wrapper sources, compiles native DLLs with NVCC/MSVC, verifies every
+  required export, and rejects incomplete wheel, sealed-runtime, or installed
+  runtime inventories. The existing fail-closed FLA runtime contract remains
+  unchanged.
+
 - Added a branded rounded-square Krasis logo and a nine-resolution Windows
   icon. The icon is embedded in the native launcher and used by the installer,
   Start Menu entry, and uninstall registration.

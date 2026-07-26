@@ -106,6 +106,7 @@ import importlib.metadata
 import importlib.util
 import json
 import os
+from pathlib import Path
 import platform
 import re
 import site
@@ -118,6 +119,26 @@ native = importlib.import_module("krasis.krasis")
 launcher = importlib.import_module("krasis.launcher")
 chat = importlib.import_module("krasis.chat")
 console_input = importlib.import_module("krasis.console_input")
+package_root = Path(native.__file__).resolve().parent
+fla_sidecar_contract = json.loads(
+    (package_root / "fla_sidecar_contract.json").read_text(encoding="utf-8")
+)
+if fla_sidecar_contract.get("schema_version") != 1:
+    raise RuntimeError("unsupported packaged FLA sidecar contract schema")
+fla_architectures = [
+    int(arch)
+    for arch in fla_sidecar_contract["architectures"]
+]
+if (
+    not fla_architectures
+    or len(set(fla_architectures)) != len(fla_architectures)
+    or any(arch <= 0 for arch in fla_architectures)
+):
+    raise RuntimeError("invalid packaged FLA sidecar architecture inventory")
+required_fla_sidecars = [
+    f"krasis_fla_sm{arch}.dll"
+    for arch in fla_architectures
+]
 
 def decode_windows_key(chars):
     chars = iter(chars)
@@ -150,6 +171,12 @@ data = {
     "sys_path": sys.path,
     "krasis_version": importlib.metadata.version("krasis"),
     "native_module": native.__name__,
+    "fla_architectures": fla_architectures,
+    "fla_sidecars": {
+        name: (package_root / name).stat().st_size
+        for name in required_fla_sidecars
+        if (package_root / name).is_file()
+    },
     "retired_expert_module_absent": (
         importlib.util.find_spec("krasis.triton_moe") is None
     ),
@@ -274,6 +301,22 @@ function Assert-KrasisPrivateRuntime {
     }
     if ($Probe.native_module -ne "krasis.krasis") {
         throw "Krasis native extension did not import from the private runtime."
+    }
+    $ExpectedFlaSidecars = @(
+        $Probe.fla_architectures |
+            ForEach-Object { "krasis_fla_sm$([int]$_).dll" }
+    )
+    $ActualFlaSidecars = @($Probe.fla_sidecars.PSObject.Properties.Name | Sort-Object)
+    if (
+        [string]::Join(",", @($ActualFlaSidecars | Sort-Object)) -ne
+        [string]::Join(",", @($ExpectedFlaSidecars | Sort-Object))
+    ) {
+        throw "Krasis private runtime has an incomplete Windows FLA sidecar inventory: $($ActualFlaSidecars -join ',')."
+    }
+    foreach ($FlaSidecar in $ExpectedFlaSidecars) {
+        if ([long]$Probe.fla_sidecars.$FlaSidecar -le 0) {
+            throw "Krasis private runtime contains an empty Windows FLA sidecar: $FlaSidecar"
+        }
     }
     if (-not [bool]$Probe.retired_expert_module_absent) {
         throw "Krasis private runtime unexpectedly contains the retired Triton expert path."

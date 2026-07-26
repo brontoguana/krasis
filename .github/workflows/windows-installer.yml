@@ -9,7 +9,50 @@ permissions:
   contents: write
 
 jobs:
+  generate-windows-fla-sources:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install CUDA toolkit
+        uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: "12.6.3"
+
+      - name: Install FLA build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install packaging 'triton>=3.5.1,<3.6'
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Generate portable Windows FLA sources
+        env:
+          KRASIS_DEV_SCRIPT: "1"
+          KRASIS_FLA_CROSS_COMPILE: "1"
+          KRASIS_FLA_REQUIRE_ALL_ARCHS: "1"
+        run: |
+          python src/cuda/fla/compile_kernels.py \
+            --output-dir target/windows-fla-sources \
+            --target-platform windows
+          test -s target/windows-fla-sources/windows-fla-manifest.json
+          expected_count=$(python -c 'import json; print(len(json.load(open("python/krasis/fla_sidecar_contract.json"))["architectures"]))')
+          test "$(find target/windows-fla-sources -maxdepth 1 -name 'krasis_fla_sm*.cu' -type f | wc -l)" -eq "$expected_count"
+
+      - name: Upload portable Windows FLA sources
+        uses: actions/upload-artifact@v4
+        with:
+          name: krasis-windows-fla-sources
+          path: |
+            target/windows-fla-sources/krasis_fla_sm*.cu
+            target/windows-fla-sources/windows-fla-manifest.json
+
   build-windows-installer:
+    needs: generate-windows-fla-sources
     runs-on: windows-2022
     timeout-minutes: 240
     defaults:
@@ -39,6 +82,12 @@ jobs:
         uses: Jimver/cuda-toolkit@v0.2.35
         with:
           cuda: "12.6.3"
+
+      - name: Download portable Windows FLA sources
+        uses: actions/download-artifact@v4
+        with:
+          name: krasis-windows-fla-sources
+          path: target/windows-fla-sources
 
       - name: Install build tools
         run: |
@@ -73,8 +122,84 @@ jobs:
       - name: Build Windows sidecar DLLs
         run: |
           nvcc --version
+          $flaRoot = Join-Path $PWD "target\windows-fla-sources"
+          $flaManifestPath = Join-Path $flaRoot "windows-fla-manifest.json"
+          if (-not (Test-Path $flaManifestPath -PathType Leaf)) {
+            throw "Generated Windows FLA manifest is missing: $flaManifestPath"
+          }
+          $flaManifest = Get-Content -Raw $flaManifestPath | ConvertFrom-Json
+          if ([int]$flaManifest.schema_version -ne 1 -or
+              "$($flaManifest.target_platform)" -ne "windows") {
+            throw "Generated Windows FLA manifest contract is invalid."
+          }
+          $sourceContract = Get-Content -Raw python/krasis/fla_sidecar_contract.json |
+            ConvertFrom-Json
+          if ([int]$sourceContract.schema_version -ne 1) {
+            throw "Source FLA sidecar contract schema is invalid."
+          }
+          $sourceContractHash = (
+            Get-FileHash -Algorithm SHA256 python/krasis/fla_sidecar_contract.json
+          ).Hash.ToLowerInvariant()
+          if ($sourceContractHash -ne "$($flaManifest.sidecar_contract_sha256)") {
+            throw "Generated Windows FLA sources do not match the source-side architecture contract."
+          }
+          $expectedArchs = @(
+            $sourceContract.architectures | ForEach-Object { [int]$_ }
+          )
+          $actualArchs = @($flaManifest.architectures | ForEach-Object { [int]$_ })
+          if ([string]::Join(",", $actualArchs) -ne [string]::Join(",", $expectedArchs)) {
+            throw "Generated Windows FLA architecture inventory is invalid: $($actualArchs -join ',')."
+          }
+          $cudaDriverImport = Join-Path $env:CUDA_PATH "lib\x64\cuda.lib"
+          if (-not (Test-Path $cudaDriverImport -PathType Leaf)) {
+            throw "CUDA driver import library is missing: $cudaDriverImport"
+          }
+          New-Item -ItemType Directory -Force -Path python/krasis | Out-Null
+          foreach ($arch in $expectedArchs) {
+            $sourceEntry = $flaManifest.sources.PSObject.Properties["$arch"].Value
+            if ($null -eq $sourceEntry) {
+              throw "Generated Windows FLA manifest has no source for sm_$arch."
+            }
+            $source = Get-Item (Join-Path $flaRoot "$($sourceEntry.file)")
+            $sourceHash = (Get-FileHash -Algorithm SHA256 $source.FullName).Hash.ToLowerInvariant()
+            if ($sourceHash -ne "$($sourceEntry.sha256)") {
+              throw "Generated Windows FLA source hash mismatch for sm_$arch."
+            }
+            if ($source.Length -ne [long]$sourceEntry.size) {
+              throw "Generated Windows FLA source size mismatch for sm_$arch."
+            }
+            $dll = Join-Path $PWD "python\krasis\krasis_fla_sm$arch.dll"
+            $nvccArgs = @(
+              "--shared",
+              "-std=c++17",
+              "-O2",
+              "-allow-unsupported-compiler",
+              "-Xcompiler=/bigobj",
+              $source.FullName,
+              $cudaDriverImport,
+              "-o",
+              $dll
+            )
+            & nvcc @nvccArgs
+            if ($LASTEXITCODE -ne 0) {
+              throw "Windows FLA DLL compilation failed for sm_$arch with status $LASTEXITCODE."
+            }
+            if (-not (Test-Path $dll -PathType Leaf) -or (Get-Item $dll).Length -le 0) {
+              throw "Windows FLA DLL is missing or empty: $dll"
+            }
+            $exports = (& dumpbin /nologo /exports $dll) -join "`n"
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not inspect Windows FLA exports for sm_$arch."
+            }
+            foreach ($symbol in @($flaManifest.exports)) {
+              if ($exports -notmatch "(?m)\b$([regex]::Escape($symbol))\b") {
+                throw "Windows FLA DLL sm_$arch is missing required export $symbol."
+              }
+            }
+          }
           python scripts/build_sidecars.py build --force
           python scripts/build_sidecars.py verify
+          Copy-Item -Force $flaManifestPath windows-fla-build-manifest.json
           Get-ChildItem python/krasis -Filter "*.dll" | Format-Table Name,Length
 
       - name: Build Windows wheel
@@ -308,6 +433,7 @@ jobs:
           Remove-Item -Recurse -Force $outsideCleanupProbe
 
           Copy-Item -Force $installLog dist/windows-installer-test.log
+          Copy-Item -Force windows-fla-build-manifest.json dist/windows-fla-build-manifest.json
           Get-PSDrive C | Format-Table Name,Used,Free
 
       - name: Upload CI artifacts
@@ -319,6 +445,7 @@ jobs:
             dist/KrasisSetup-*-win64.exe
             dist/Krasis-Windows-Package-*.zip
             dist/*.whl
+            dist/windows-fla-build-manifest.json
             dist/windows-installer-test.log
             ${{ runner.temp }}/krasis-installer-test.log
             ${{ runner.temp }}/krasis-uninstaller-test.log

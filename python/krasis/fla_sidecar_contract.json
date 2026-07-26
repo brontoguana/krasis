@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "architectures": [
+    80,
+    89,
+    90,
+    120
+  ],
+  "h_values": [
+    32,
+    64
+  ]
+}

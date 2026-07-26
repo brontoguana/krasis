@@ -38,6 +38,7 @@ PACKAGE_DIR = REPO / "python" / "krasis"
 BUILD_ROOT = REPO / "target" / "sidecars"
 BUNDLE_DIR = BUILD_ROOT / "bundles"
 MANIFEST_PATH = PACKAGE_DIR / "sidecar_manifest.json"
+FLA_CONTRACT_PATH = PACKAGE_DIR / "fla_sidecar_contract.json"
 
 
 def read_sidecar_abi_version() -> int:
@@ -53,6 +54,29 @@ SIDECAR_ABI_VERSION = read_sidecar_abi_version()
 IS_WINDOWS = os.name == "nt"
 MARLIN_SO = "krasis_marlin.dll" if IS_WINDOWS else "libkrasis_marlin.so"
 FLASH_ATTN_SO = "krasis_flash_attn.dll" if IS_WINDOWS else "libkrasis_flash_attn.so"
+
+
+def read_fla_architectures() -> tuple[int, ...]:
+    try:
+        contract = json.loads(FLA_CONTRACT_PATH.read_text(encoding="utf-8"))
+        architectures = tuple(int(arch) for arch in contract["architectures"])
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise SystemExit(
+            f"ERROR: invalid FLA sidecar contract {FLA_CONTRACT_PATH}: {exc}"
+        ) from exc
+    if (
+        contract.get("schema_version") != 1
+        or not architectures
+        or len(set(architectures)) != len(architectures)
+        or any(arch <= 0 for arch in architectures)
+    ):
+        raise SystemExit(
+            f"ERROR: invalid FLA architecture inventory in {FLA_CONTRACT_PATH}"
+        )
+    return architectures
+
+
+FLA_ARCHS = read_fla_architectures()
 
 MARLIN_SYMBOLS = [
     "krasis_sidecar_abi_version",
@@ -746,6 +770,20 @@ def verify(args: argparse.Namespace) -> None:
         raise SystemExit(f"ERROR: sidecar manifest missing: {MANIFEST_PATH}\nRun ./dev build-sidecars")
     if not manifest_matches(manifest, contracts):
         raise SystemExit("ERROR: sidecars are missing, stale, or have invalid symbols. Run ./dev build-sidecars")
+    missing_fla = [
+        name
+        for name in (
+            f"krasis_fla_sm{arch}.dll" if IS_WINDOWS
+            else f"libkrasis_fla_sm{arch}.so"
+            for arch in FLA_ARCHS
+        )
+        if not (PACKAGE_DIR / name).is_file() or (PACKAGE_DIR / name).stat().st_size <= 0
+    ]
+    if missing_fla:
+        raise SystemExit(
+            "ERROR: package is missing required FLA sidecars: "
+            + ", ".join(missing_fla)
+        )
     print("[sidecars] verified package sidecars and manifest")
 
 
@@ -805,14 +843,27 @@ def verify_wheel(args: argparse.Namespace) -> None:
     required = {
         f"krasis/{MARLIN_SO}",
         f"krasis/{FLASH_ATTN_SO}",
+        "krasis/fla_sidecar_contract.json",
         "krasis/sidecar_manifest.json",
     }
+    required.update(
+        f"krasis/krasis_fla_sm{arch}.dll" if IS_WINDOWS
+        else f"krasis/libkrasis_fla_sm{arch}.so"
+        for arch in FLA_ARCHS
+    )
     for wheel in wheels:
         with zipfile.ZipFile(wheel) as zf:
             names = set(zf.namelist())
             missing = sorted(required - names)
             if missing:
                 raise SystemExit(f"ERROR: {wheel.name} missing {', '.join(missing)}")
+            packaged_fla_contract = zf.read(
+                "krasis/fla_sidecar_contract.json"
+            )
+            if packaged_fla_contract != FLA_CONTRACT_PATH.read_bytes():
+                raise SystemExit(
+                    f"ERROR: {wheel.name} FLA sidecar contract differs from source"
+                )
             windows_runtime_names = sorted(
                 name for name in names
                 if name.startswith("krasis/cudart64") and name.endswith(".dll")

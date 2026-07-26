@@ -630,6 +630,12 @@ extract_selected_gpus_arg() {
 
 # ── Commands ─────────────────────────────────────────────────────────
 
+read_fla_sidecar_architectures() {
+    "$PYTHON" -c \
+        'import json, sys; data=json.load(open(sys.argv[1], encoding="utf-8")); print(*data["architectures"], sep="\n")' \
+        "$SCRIPT_DIR/python/krasis/fla_sidecar_contract.json"
+}
+
 do_build_fla() {
     local phase_start
     phase_start=$(build_timer_start)
@@ -639,7 +645,9 @@ do_build_fla() {
     local fla_script="$SCRIPT_DIR/src/cuda/fla/compile_kernels.py"
     local fla_src_dir="$SCRIPT_DIR/src/cuda/fla"
     local dest="$SCRIPT_DIR/python/krasis"
-    local archs=(80 89 90 120)
+    local archs=()
+    mapfile -t archs < <(read_fla_sidecar_architectures)
+    [[ "${#archs[@]}" -gt 0 ]] || err "FLA sidecar contract has no architectures"
 
     # Check if recompilation is needed: any .so missing or any source newer?
     local needs_rebuild=false
@@ -690,6 +698,65 @@ do_build_fla() {
         count=$((count + 1))
     done
     ok "FLA kernels: $count architectures compiled"
+}
+
+do_build_fla_windows_sources() {
+    local phase_start
+    phase_start=$(build_timer_start)
+    local output_dir="$SCRIPT_DIR/target/windows-fla-sources"
+    local archs=()
+    mapfile -t archs < <(read_fla_sidecar_architectures)
+    [[ "${#archs[@]}" -gt 0 ]] || err "FLA sidecar contract has no architectures"
+    info "Generating portable Windows FLA sources for: ${archs[*]/#/sm_}..."
+    rm -rf "$output_dir"
+
+    set +e
+    KRASIS_DEV_SCRIPT=1 KRASIS_FLA_CROSS_COMPILE=1 KRASIS_FLA_REQUIRE_ALL_ARCHS=1 \
+        "$PYTHON" "$SCRIPT_DIR/src/cuda/fla/compile_kernels.py" \
+        --output-dir "$output_dir" \
+        --target-platform windows \
+        --arch "${archs[@]}"
+    local status=$?
+    set -e
+    build_timer_end "dev Windows FLA source generation" "$phase_start" "$status"
+    [[ "$status" -eq 0 ]] || err "Windows FLA source generation failed"
+
+    local count=0
+    local source
+    for source in "$output_dir"/krasis_fla_sm*.cu; do
+        [[ -f "$source" ]] || continue
+        count=$((count + 1))
+    done
+    [[ "$count" -eq "${#archs[@]}" ]] || \
+        err "Windows FLA source generation produced $count/${#archs[@]} architectures"
+    [[ -f "$output_dir/windows-fla-manifest.json" ]] || \
+        err "Windows FLA source generation omitted windows-fla-manifest.json"
+
+    local nvcc_bin
+    nvcc_bin=$(command -v nvcc 2>/dev/null || true)
+    if [[ -z "$nvcc_bin" && -n "${CUDA_HOME:-}" && -x "$CUDA_HOME/bin/nvcc" ]]; then
+        nvcc_bin="$CUDA_HOME/bin/nvcc"
+    fi
+    if [[ -z "$nvcc_bin" && -n "${CUDA_PATH:-}" && -x "$CUDA_PATH/bin/nvcc" ]]; then
+        nvcc_bin="$CUDA_PATH/bin/nvcc"
+    fi
+    if [[ -z "$nvcc_bin" ]]; then
+        nvcc_bin=$(find /usr/local -maxdepth 4 -path "*/bin/nvcc" -type f -print -quit 2>/dev/null || true)
+    fi
+    [[ -n "$nvcc_bin" && -x "$nvcc_bin" ]] || \
+        err "nvcc not found after Windows FLA source generation"
+    local arch
+    for arch in "${archs[@]}"; do
+        "$nvcc_bin" \
+            -c \
+            -std=c++17 \
+            -allow-unsupported-compiler \
+            -Xcompiler -fPIC \
+            "$output_dir/krasis_fla_sm${arch}.cu" \
+            -o "$output_dir/krasis_fla_sm${arch}.o" || \
+            err "Portable FLA wrapper compile check failed for sm_$arch"
+    done
+    ok "Windows FLA sources: $count architectures generated"
 }
 
 do_build_sidecars() {
@@ -3136,6 +3203,7 @@ shift || true
 
 case "$cmd" in
     build)          do_build ;;
+    build-fla-windows-sources) do_build_fla_windows_sources ;;
     build-sidecars) do_build_sidecars "$@" ;;
     verify-sidecars) do_verify_sidecars ;;
     sidecar-key)    do_sidecar_key "$@" ;;
@@ -3190,6 +3258,7 @@ case "$cmd" in
         echo ""
         echo "Core commands:"
         echo "  build                          Rebuild Rust extension into this repo only"
+        echo "  build-fla-windows-sources      Generate portable FLA CUDA sources for Windows CI"
         echo "  build-sidecars [--force]       Build Marlin/FlashAttention package sidecars"
         echo "  verify-sidecars                Verify sidecar manifest, hashes, and symbols"
         echo "  sidecar-key [--json]           Print sidecar bundle cache key"
@@ -3363,6 +3432,7 @@ case "$cmd" in
         echo ""
         echo "Examples:"
         echo "  ./dev build"
+        echo "  ./dev build-fla-windows-sources"
         echo "  ./dev build-sidecars"
         echo "  ./dev verify-sidecars"
         echo "  ./dev sidecar-key --json"
