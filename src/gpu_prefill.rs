@@ -5176,6 +5176,7 @@ pub struct PrefillKernels {
     rope_mrope: RawCuFunc,
     mla_rmsnorm_prefix_bf16_fp32w: RawCuFunc,
     mla_pack_qkv_rope_bf16: RawCuFunc,
+    mla_cache_append_k4: RawCuFunc,
     silu_mul: RawCuFunc,
     silu_mul_limited: RawCuFunc,
     relu2: RawCuFunc,
@@ -28681,12 +28682,6 @@ impl PrefillEngine {
         if m == 0 {
             return Ok(());
         }
-        if capture_kv_cache {
-            return Err(format!(
-                "HQQ MLA prefill decode-cache capture is not implemented at layer {}; refusing to use an unsupported cache format while compact production MLA cache support is pending",
-                layer_idx
-            ));
-        }
 
         let cfg = &self.config;
         let lw = &self.layer_weights[layer_idx];
@@ -28743,6 +28738,12 @@ impl PrefillEngine {
                 layer_idx, ccd, klr
             ));
         }
+        if capture_kv_cache && (ccd % 16 != 0 || rope % 16 != 0) {
+            return Err(format!(
+                "HQQ MLA layer {} k4 cache requires dimensions divisible by 16, got ckv={} rope={}",
+                layer_idx, ccd, rope
+            ));
+        }
         if qk_dim != vhd {
             return Err(format!(
                 "HQQ MLA layer {} dense prefill requires equal QK/value head dimensions for FA2, got qk={} value={}",
@@ -28796,15 +28797,18 @@ impl PrefillEngine {
             || hqq.w_vc_ptr == 0
             || self.rope_cos_ptr == 0
             || self.rope_sin_ptr == 0
+            || (capture_kv_cache && (hqq.ckv_cache_ptr == 0 || hqq.kpe_cache_ptr == 0))
         {
             return Err(format!(
-                "HQQ MLA layer {} has incomplete native prefill pointers: kv_norm=0x{:x} w_kc=0x{:x} w_vc=0x{:x} rope_cos=0x{:x} rope_sin=0x{:x}",
+                "HQQ MLA layer {} has incomplete native prefill pointers: kv_norm=0x{:x} w_kc=0x{:x} w_vc=0x{:x} rope_cos=0x{:x} rope_sin=0x{:x} ckv_cache=0x{:x} kpe_cache=0x{:x}",
                 layer_idx,
                 hqq.kv_a_norm_ptr,
                 hqq.w_kc_ptr,
                 hqq.w_vc_ptr,
                 self.rope_cos_ptr,
-                self.rope_sin_ptr
+                self.rope_sin_ptr,
+                hqq.ckv_cache_ptr,
+                hqq.kpe_cache_ptr
             ));
         }
         if self.kernels.flash_attn_fwd.is_none() || !matches!(qk_dim, 64 | 96 | 128 | 192 | 256) {
@@ -29111,6 +29115,69 @@ impl PrefillEngine {
                     &mut p16 as *mut _ as *mut std::ffi::c_void,
                 ],
             )?;
+        }
+
+        if capture_kv_cache {
+            let cache_blocks = std::cmp::max(ccd, rope) / 16;
+            if cache_blocks > 1024 {
+                return Err(format!(
+                    "HQQ MLA layer {} k4 cache needs {} CUDA threads per token, exceeding the device launch contract",
+                    layer_idx, cache_blocks
+                ));
+            }
+            let cache_threads = std::cmp::max(32, ((cache_blocks + 31) / 32) * 32) as u32;
+            let mut c0 = hqq.ckv_cache_ptr;
+            let mut c1 = hqq.kpe_cache_ptr;
+            let mut c2 = scratch2;
+            let mut c3 = k;
+            let mut c4 = i32::try_from(start_pos).map_err(|_| {
+                format!(
+                    "HQQ MLA layer {} cache start position exceeds native i32 contract: {}",
+                    layer_idx, start_pos
+                )
+            })?;
+            let mut c5 = token_count_i32;
+            let mut c6 = kv_a_width_i32;
+            let mut c7 = i32::try_from(klr).map_err(|_| {
+                format!(
+                    "HQQ MLA layer {} KV rank exceeds native i32 contract: {}",
+                    layer_idx, klr
+                )
+            })?;
+            let mut c8 = i32::try_from(ccd).map_err(|_| {
+                format!(
+                    "HQQ MLA layer {} cache width exceeds native i32 contract: {}",
+                    layer_idx, ccd
+                )
+            })?;
+            let mut c9 = num_heads_i32;
+            let mut c10 = qk_dim_i32;
+            let mut c11 = nope_i32;
+            let mut c12 = rope_i32;
+            unsafe {
+                launch(
+                    self.kernels.mla_cache_append_k4,
+                    (m as u32, 1, 1),
+                    (cache_threads, 1, 1),
+                    0,
+                    self.stream,
+                    &mut [
+                        &mut c0 as *mut _ as *mut std::ffi::c_void,
+                        &mut c1 as *mut _ as *mut std::ffi::c_void,
+                        &mut c2 as *mut _ as *mut std::ffi::c_void,
+                        &mut c3 as *mut _ as *mut std::ffi::c_void,
+                        &mut c4 as *mut _ as *mut std::ffi::c_void,
+                        &mut c5 as *mut _ as *mut std::ffi::c_void,
+                        &mut c6 as *mut _ as *mut std::ffi::c_void,
+                        &mut c7 as *mut _ as *mut std::ffi::c_void,
+                        &mut c8 as *mut _ as *mut std::ffi::c_void,
+                        &mut c9 as *mut _ as *mut std::ffi::c_void,
+                        &mut c10 as *mut _ as *mut std::ffi::c_void,
+                        &mut c11 as *mut _ as *mut std::ffi::c_void,
+                        &mut c12 as *mut _ as *mut std::ffi::c_void,
+                    ],
+                )?;
+            }
         }
 
         let lse_ptr = self
@@ -57797,6 +57864,7 @@ impl PrefillKernels {
                     "rope_batched_mrope_kernel",
                     "mla_rmsnorm_prefix_bf16_fp32w_kernel",
                     "mla_pack_qkv_rope_bf16_kernel",
+                    "mla_cache_append_k4_kernel",
                     "silu_mul_batched_kernel",
                     "silu_mul_limited_batched_kernel",
                     "relu2_batched_kernel",
@@ -58208,6 +58276,7 @@ impl PrefillKernels {
             rope_mrope: get("rope_batched_mrope_kernel")?,
             mla_rmsnorm_prefix_bf16_fp32w: get("mla_rmsnorm_prefix_bf16_fp32w_kernel")?,
             mla_pack_qkv_rope_bf16: get("mla_pack_qkv_rope_bf16_kernel")?,
+            mla_cache_append_k4: get("mla_cache_append_k4_kernel")?,
             silu_mul: get("silu_mul_batched_kernel")?,
             silu_mul_limited: get("silu_mul_limited_batched_kernel")?,
             relu2: get("relu2_batched_kernel")?,
@@ -60977,6 +61046,7 @@ mod kernel_tests {
                     "rope_batched_mrope_kernel",
                     "mla_rmsnorm_prefix_bf16_fp32w_kernel",
                     "mla_pack_qkv_rope_bf16_kernel",
+                    "mla_cache_append_k4_kernel",
                     "silu_mul_batched_kernel",
                     "silu_mul_limited_batched_kernel",
                     "relu2_batched_kernel",
@@ -61057,6 +61127,10 @@ mod kernel_tests {
                 ))),
                 "decode_kernels",
                 &[
+                    "mla_kv_cache_write_k4_g",
+                    "mla_kv_cache_write_k4",
+                    "mla_attention_k4_g",
+                    "mla_attention_k4",
                     "kv_cache_write_polar4",
                     "kv_cache_write_polar4_g",
                     "gqa_attention_polar4",
@@ -61320,6 +61394,33 @@ mod kernel_tests {
             .collect()
     }
 
+    fn decode_mla_k4_rows(bytes: &[u8], rows: usize, logical_dim: usize) -> Vec<f32> {
+        assert_eq!(logical_dim % 16, 0);
+        let blocks = logical_dim / 16;
+        let row_bytes = blocks * 10;
+        assert_eq!(bytes.len(), rows * row_bytes);
+        let mut output = vec![0.0f32; rows * logical_dim];
+        for row in 0..rows {
+            for block in 0..blocks {
+                let offset = row * row_bytes + block * 10;
+                let scale =
+                    half::bf16::from_bits(u16::from_le_bytes([bytes[offset], bytes[offset + 1]]))
+                        .to_f32();
+                for i in 0..16 {
+                    let packed = bytes[offset + 2 + i / 2];
+                    let code = if i % 2 == 0 {
+                        packed & 0x0f
+                    } else {
+                        packed >> 4
+                    };
+                    output[row * logical_dim + block * 16 + i] =
+                        scale * (i32::from(code) - 8) as f32;
+                }
+            }
+        }
+        output
+    }
+
     fn load_test_fla(nv: usize) -> FlaKernels {
         let mut cc_major: i32 = 0;
         let mut cc_minor: i32 = 0;
@@ -61501,6 +61602,375 @@ mod kernel_tests {
             vec![5.0, 6.0, -40.0, -41.0, 30.0, 31.0, 7.0, 8.0, -40.0, -41.0, 30.0, 31.0]
         );
         assert_eq!(v_values, vec![9.0, 10.0, 11.0, 12.0]);
+
+        let cache_kernel = ctx.get_kernel("mla_cache_append_k4_kernel");
+        let ckv_dim = 32usize;
+        let kv_rank = 16usize;
+        let rope_dim = 16usize;
+        let qk_dim = 32usize;
+        let nope_dim = 16usize;
+        let token_count = 2usize;
+        let num_heads = 1usize;
+        let ckv_row_bytes = (ckv_dim / 16) * 10;
+        let kpe_row_bytes = (rope_dim / 16) * 10;
+        let kv_source: Vec<f32> = (0..token_count)
+            .flat_map(|token| {
+                (0..(kv_rank + rope_dim))
+                    .map(move |d| ((token * (kv_rank + rope_dim) + d) as f32 - 11.0) * 0.125)
+            })
+            .collect();
+        let dense_k: Vec<f32> = (0..token_count)
+            .flat_map(|token| {
+                (0..qk_dim).map(move |d| {
+                    if d < nope_dim {
+                        0.0
+                    } else {
+                        ((token * rope_dim + d - nope_dim) as f32 - 7.0) * 0.2
+                    }
+                })
+            })
+            .collect();
+        let d_kv_source = ctx.upload_bf16(&f32_to_bf16_bytes(&kv_source));
+        let d_dense_k = ctx.upload_bf16(&f32_to_bf16_bytes(&dense_k));
+        let d_ckv_cache = ctx.alloc_u8(token_count * ckv_row_bytes);
+        let d_kpe_cache = ctx.alloc_u8(token_count * kpe_row_bytes);
+        let mut c0 = *d_ckv_cache.device_ptr() as u64;
+        let mut c1 = *d_kpe_cache.device_ptr() as u64;
+        let mut c2 = *d_kv_source.device_ptr() as u64;
+        let mut c3 = *d_dense_k.device_ptr() as u64;
+        let mut c4 = 0i32;
+        let mut c5 = token_count as i32;
+        let mut c6 = (kv_rank + rope_dim) as i32;
+        let mut c7 = kv_rank as i32;
+        let mut c8 = ckv_dim as i32;
+        let mut c9 = num_heads as i32;
+        let mut c10 = qk_dim as i32;
+        let mut c11 = nope_dim as i32;
+        let mut c12 = rope_dim as i32;
+        unsafe {
+            launch(
+                cache_kernel,
+                (token_count as u32, 1, 1),
+                (32, 1, 1),
+                0,
+                ctx.stream(),
+                &mut [
+                    &mut c0 as *mut _ as *mut _,
+                    &mut c1 as *mut _ as *mut _,
+                    &mut c2 as *mut _ as *mut _,
+                    &mut c3 as *mut _ as *mut _,
+                    &mut c4 as *mut _ as *mut _,
+                    &mut c5 as *mut _ as *mut _,
+                    &mut c6 as *mut _ as *mut _,
+                    &mut c7 as *mut _ as *mut _,
+                    &mut c8 as *mut _ as *mut _,
+                    &mut c9 as *mut _ as *mut _,
+                    &mut c10 as *mut _ as *mut _,
+                    &mut c11 as *mut _ as *mut _,
+                    &mut c12 as *mut _ as *mut _,
+                ],
+            )
+            .unwrap();
+        }
+        self::cuda_sync();
+        let ckv_bytes = ctx.download_u8(&d_ckv_cache);
+        let kpe_bytes = ctx.download_u8(&d_kpe_cache);
+        let decoded_ckv = decode_mla_k4_rows(&ckv_bytes, token_count, ckv_dim);
+        let decoded_kpe = decode_mla_k4_rows(&kpe_bytes, token_count, rope_dim);
+        let kv_source_bf16 = bf16_bytes_to_f32(&f32_to_bf16_bytes(&kv_source));
+        let dense_k_bf16 = bf16_bytes_to_f32(&f32_to_bf16_bytes(&dense_k));
+        for token in 0..token_count {
+            for d in 0..kv_rank {
+                let actual = decoded_ckv[token * ckv_dim + d];
+                let expected = kv_source_bf16[token * (kv_rank + rope_dim) + d];
+                let scale_offset = token * ckv_row_bytes + (d / 16) * 10;
+                let scale = half::bf16::from_bits(u16::from_le_bytes([
+                    ckv_bytes[scale_offset],
+                    ckv_bytes[scale_offset + 1],
+                ]))
+                .to_f32();
+                assert!(
+                    (actual - expected).abs() <= scale * 0.55 + 0.01,
+                    "MLA cKV k4 mismatch token={} dim={}: actual={} expected={}",
+                    token,
+                    d,
+                    actual,
+                    expected
+                );
+            }
+            for d in kv_rank..ckv_dim {
+                assert!(
+                    decoded_ckv[token * ckv_dim + d].abs() <= 1e-6,
+                    "MLA cKV padding is nonzero at token={} dim={}",
+                    token,
+                    d
+                );
+            }
+            for d in 0..rope_dim {
+                let actual = decoded_kpe[token * rope_dim + d];
+                let expected = dense_k_bf16[token * qk_dim + nope_dim + d];
+                let scale_offset = token * kpe_row_bytes + (d / 16) * 10;
+                let scale = half::bf16::from_bits(u16::from_le_bytes([
+                    kpe_bytes[scale_offset],
+                    kpe_bytes[scale_offset + 1],
+                ]))
+                .to_f32();
+                assert!(
+                    (actual - expected).abs() <= scale * 0.55 + 0.01,
+                    "MLA kPE k4 mismatch token={} dim={}: actual={} expected={}",
+                    token,
+                    d,
+                    actual,
+                    expected
+                );
+            }
+        }
+
+        #[cfg(has_decode_kernels)]
+        {
+            let write_kernel = ctx.get_decode_kernel("mla_kv_cache_write_k4");
+            let write_graph_kernel = ctx.get_decode_kernel("mla_kv_cache_write_k4_g");
+            let attention_kernel = ctx.get_decode_kernel("mla_attention_k4");
+            let attention_graph_kernel = ctx.get_decode_kernel("mla_attention_k4_g");
+            let decode_ckv_cache = ctx.alloc_u8(token_count * ckv_row_bytes);
+            let decode_kpe_cache = ctx.alloc_u8(token_count * kpe_row_bytes);
+            let graph_ckv_cache = ctx.alloc_u8(token_count * ckv_row_bytes);
+            let graph_kpe_cache = ctx.alloc_u8(token_count * kpe_row_bytes);
+            let decode_ckv_source: Vec<f32> = (0..token_count)
+                .flat_map(|token| {
+                    kv_source_bf16
+                        [token * (kv_rank + rope_dim)..token * (kv_rank + rope_dim) + kv_rank]
+                        .iter()
+                        .copied()
+                })
+                .collect();
+            let decode_kpe_source: Vec<f32> = (0..token_count)
+                .flat_map(|token| {
+                    dense_k_bf16[token * qk_dim + nope_dim..token * qk_dim + qk_dim]
+                        .iter()
+                        .copied()
+                })
+                .collect();
+            let d_decode_ckv_source = ctx.dev.htod_copy(decode_ckv_source).unwrap();
+            let d_decode_kpe_source = ctx.dev.htod_copy(decode_kpe_source).unwrap();
+            let ckv_token_bytes = (kv_rank * std::mem::size_of::<f32>()) as u64;
+            let kpe_token_bytes = (rope_dim * std::mem::size_of::<f32>()) as u64;
+            for token in 0..token_count {
+                let d_position = ctx.dev.htod_copy(vec![token as i32]).unwrap();
+                let mut w0 = *decode_ckv_cache.device_ptr() as u64;
+                let mut w1 = *decode_kpe_cache.device_ptr() as u64;
+                let mut w2 =
+                    *d_decode_ckv_source.device_ptr() as u64 + token as u64 * ckv_token_bytes;
+                let mut w3 =
+                    *d_decode_kpe_source.device_ptr() as u64 + token as u64 * kpe_token_bytes;
+                let mut w4 = token as i32;
+                let mut w5 = kv_rank as i32;
+                let mut w6 = ckv_dim as i32;
+                let mut w7 = rope_dim as i32;
+                unsafe {
+                    launch(
+                        write_kernel,
+                        (1, 1, 1),
+                        (256, 1, 1),
+                        0,
+                        ctx.stream(),
+                        &mut [
+                            &mut w0 as *mut _ as *mut _,
+                            &mut w1 as *mut _ as *mut _,
+                            &mut w2 as *mut _ as *mut _,
+                            &mut w3 as *mut _ as *mut _,
+                            &mut w4 as *mut _ as *mut _,
+                            &mut w5 as *mut _ as *mut _,
+                            &mut w6 as *mut _ as *mut _,
+                            &mut w7 as *mut _ as *mut _,
+                        ],
+                    )
+                    .unwrap();
+                }
+
+                let mut wg0 = *graph_ckv_cache.device_ptr() as u64;
+                let mut wg1 = *graph_kpe_cache.device_ptr() as u64;
+                let mut wg2 = w2;
+                let mut wg3 = w3;
+                let mut wg4 = *d_position.device_ptr() as u64;
+                let mut wg5 = kv_rank as i32;
+                let mut wg6 = ckv_dim as i32;
+                let mut wg7 = rope_dim as i32;
+                unsafe {
+                    launch(
+                        write_graph_kernel,
+                        (1, 1, 1),
+                        (256, 1, 1),
+                        0,
+                        ctx.stream(),
+                        &mut [
+                            &mut wg0 as *mut _ as *mut _,
+                            &mut wg1 as *mut _ as *mut _,
+                            &mut wg2 as *mut _ as *mut _,
+                            &mut wg3 as *mut _ as *mut _,
+                            &mut wg4 as *mut _ as *mut _,
+                            &mut wg5 as *mut _ as *mut _,
+                            &mut wg6 as *mut _ as *mut _,
+                            &mut wg7 as *mut _ as *mut _,
+                        ],
+                    )
+                    .unwrap();
+                }
+            }
+            self::cuda_sync();
+            assert_eq!(
+                ctx.download_u8(&decode_ckv_cache),
+                ckv_bytes,
+                "ordinary decode cKV writer differs from prefill capture"
+            );
+            assert_eq!(
+                ctx.download_u8(&decode_kpe_cache),
+                kpe_bytes,
+                "ordinary decode kPE writer differs from prefill capture"
+            );
+            assert_eq!(
+                ctx.download_u8(&graph_ckv_cache),
+                ckv_bytes,
+                "graph decode cKV writer differs from prefill capture"
+            );
+            assert_eq!(
+                ctx.download_u8(&graph_kpe_cache),
+                kpe_bytes,
+                "graph decode kPE writer differs from prefill capture"
+            );
+
+            let q_absorbed: Vec<f32> = (0..ckv_dim).map(|d| (d as f32 - 9.0) * 0.03).collect();
+            let q_pe: Vec<f32> = (0..rope_dim).map(|d| (d as f32 - 4.0) * -0.04).collect();
+            let d_q_absorbed = ctx.dev.htod_copy(q_absorbed.clone()).unwrap();
+            let d_q_pe = ctx.dev.htod_copy(q_pe.clone()).unwrap();
+            let d_attn_out = ctx.alloc_f32(ckv_dim);
+            let d_attn_graph_out = ctx.alloc_f32(ckv_dim);
+            let d_seq_len = ctx.dev.htod_copy(vec![token_count as i32]).unwrap();
+            let sm_scale = 0.125f32;
+            let mut a0 = *d_attn_out.device_ptr() as u64;
+            let mut a1 = *d_q_absorbed.device_ptr() as u64;
+            let mut a2 = *d_q_pe.device_ptr() as u64;
+            let mut a3 = *d_ckv_cache.device_ptr() as u64;
+            let mut a4 = *d_kpe_cache.device_ptr() as u64;
+            let mut a5 = sm_scale;
+            let mut a6 = 1i32;
+            let mut a7 = ckv_dim as i32;
+            let mut a8 = rope_dim as i32;
+            let mut a9 = token_count as i32;
+            let mut a10 = token_count as i32;
+            let threads = 256u32;
+            let num_warps = threads / 32;
+            let shared_mem = (ckv_dim as u32 + rope_dim as u32 + num_warps + 4096) * 4;
+            unsafe {
+                launch(
+                    attention_kernel,
+                    (1, 1, 1),
+                    (threads, 1, 1),
+                    shared_mem,
+                    ctx.stream(),
+                    &mut [
+                        &mut a0 as *mut _ as *mut _,
+                        &mut a1 as *mut _ as *mut _,
+                        &mut a2 as *mut _ as *mut _,
+                        &mut a3 as *mut _ as *mut _,
+                        &mut a4 as *mut _ as *mut _,
+                        &mut a5 as *mut _ as *mut _,
+                        &mut a6 as *mut _ as *mut _,
+                        &mut a7 as *mut _ as *mut _,
+                        &mut a8 as *mut _ as *mut _,
+                        &mut a9 as *mut _ as *mut _,
+                        &mut a10 as *mut _ as *mut _,
+                    ],
+                )
+                .unwrap();
+            }
+            self::cuda_sync();
+            let actual = ctx.dev.dtoh_sync_copy(&d_attn_out).unwrap();
+
+            let mut ag0 = *d_attn_graph_out.device_ptr() as u64;
+            let mut ag1 = *d_q_absorbed.device_ptr() as u64;
+            let mut ag2 = *d_q_pe.device_ptr() as u64;
+            let mut ag3 = *graph_ckv_cache.device_ptr() as u64;
+            let mut ag4 = *graph_kpe_cache.device_ptr() as u64;
+            let mut ag5 = sm_scale;
+            let mut ag6 = 1i32;
+            let mut ag7 = ckv_dim as i32;
+            let mut ag8 = rope_dim as i32;
+            let mut ag9 = *d_seq_len.device_ptr() as u64;
+            let mut ag10 = token_count as i32;
+            unsafe {
+                launch(
+                    attention_graph_kernel,
+                    (1, 1, 1),
+                    (threads, 1, 1),
+                    shared_mem,
+                    ctx.stream(),
+                    &mut [
+                        &mut ag0 as *mut _ as *mut _,
+                        &mut ag1 as *mut _ as *mut _,
+                        &mut ag2 as *mut _ as *mut _,
+                        &mut ag3 as *mut _ as *mut _,
+                        &mut ag4 as *mut _ as *mut _,
+                        &mut ag5 as *mut _ as *mut _,
+                        &mut ag6 as *mut _ as *mut _,
+                        &mut ag7 as *mut _ as *mut _,
+                        &mut ag8 as *mut _ as *mut _,
+                        &mut ag9 as *mut _ as *mut _,
+                        &mut ag10 as *mut _ as *mut _,
+                    ],
+                )
+                .unwrap();
+            }
+            self::cuda_sync();
+            let graph_actual = ctx.dev.dtoh_sync_copy(&d_attn_graph_out).unwrap();
+            let scores: Vec<f32> = (0..token_count)
+                .map(|token| {
+                    let ckv_score: f32 = q_absorbed
+                        .iter()
+                        .enumerate()
+                        .map(|(d, q)| q * decoded_ckv[token * ckv_dim + d])
+                        .sum();
+                    let kpe_score: f32 = q_pe
+                        .iter()
+                        .enumerate()
+                        .map(|(d, q)| q * decoded_kpe[token * rope_dim + d])
+                        .sum();
+                    (ckv_score + kpe_score) * sm_scale
+                })
+                .collect();
+            let score_max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let weights: Vec<f32> = scores
+                .iter()
+                .map(|score| (score - score_max).exp())
+                .collect();
+            let weight_sum: f32 = weights.iter().sum();
+            let expected: Vec<f32> = (0..ckv_dim)
+                .map(|d| {
+                    (0..token_count)
+                        .map(|token| weights[token] * decoded_ckv[token * ckv_dim + d])
+                        .sum::<f32>()
+                        / weight_sum
+                })
+                .collect();
+            for (d, (actual, expected)) in actual.iter().zip(expected.iter()).enumerate() {
+                assert!(
+                    (actual - expected).abs() <= 2e-4,
+                    "MLA k4 attention mismatch dim={}: actual={} expected={}",
+                    d,
+                    actual,
+                    expected
+                );
+            }
+            for (d, (actual, expected)) in graph_actual.iter().zip(expected.iter()).enumerate() {
+                assert!(
+                    (actual - expected).abs() <= 2e-4,
+                    "MLA graph k4 attention mismatch dim={}: actual={} expected={}",
+                    d,
+                    actual,
+                    expected
+                );
+            }
+        }
     }
 
     #[test]

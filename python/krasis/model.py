@@ -4626,6 +4626,29 @@ class KrasisModel:
                 released_bytes / (1024.0 * 1024.0),
             )
 
+    def _kv_cache_slot_for_layer(self, layer_idx: int):
+        layer_offset = self._kv_layer_offsets.get(layer_idx, -1)
+        if layer_offset < 0:
+            raise RuntimeError(
+                f"Layer {layer_idx} does not own a full-attention KV cache slot."
+            )
+        for cache_idx, (start, end) in enumerate(self._layer_split):
+            if start <= layer_idx < end:
+                cache = self.kv_caches[cache_idx]
+                if cache is None:
+                    raise RuntimeError(
+                        f"Layer {layer_idx} maps to empty KV cache group {cache_idx}."
+                    )
+                if layer_offset >= cache.num_layers:
+                    raise RuntimeError(
+                        f"Layer {layer_idx} KV offset {layer_offset} exceeds cache group "
+                        f"{cache_idx} layer count {cache.num_layers}."
+                    )
+                return cache, layer_offset
+        raise RuntimeError(
+            f"Layer {layer_idx} is not covered by the configured layer split {self._layer_split}."
+        )
+
     def _hqq_layer_meta(
         self,
         layer_idx: int,
@@ -4741,11 +4764,7 @@ class KrasisModel:
             attn._hqq_w_vc = self._move_hqq_tensor_to_device(
                 attn.w_vc.contiguous(), target_device, keepalive
             )
-            cache = self.kv_caches[0]
-            if not hasattr(self, "_hqq_mla_cache_offset"):
-                self._hqq_mla_cache_offset = 0
-            mla_offset = self._hqq_mla_cache_offset
-            self._hqq_mla_cache_offset += 1
+            cache, mla_offset = self._kv_cache_slot_for_layer(layer_idx)
             ckv_layer = cache.ckv_cache[mla_offset]
             kpe_layer = cache.kpe_cache[mla_offset]
             ckv_cache = self._move_hqq_tensor_to_device(
@@ -8864,16 +8883,12 @@ class KrasisModel:
                 attn._rust_w_vc = attn.w_vc.contiguous().to(device)
                 self._rust_decode_weights.extend([attn._rust_w_kc, attn._rust_w_vc])
 
-                # MLA FP8 KV caches: share paged cache directly
-                # For single-sequence decode, paged layout [pages, page_size, dim]
-                # is identical to flat layout [position, dim] in memory.
-                cache = self.kv_caches[0]
-                if not hasattr(self, '_mla_cache_offset'):
-                    self._mla_cache_offset = 0
-                mla_offset = self._mla_cache_offset
-                self._mla_cache_offset += 1
-                ckv_layer = cache.ckv_cache[mla_offset]  # [pages, page_size, kv_lora_rank]
-                kpe_layer = cache.kpe_cache[mla_offset]  # [pages, page_size, qk_rope_dim]
+                # MLA k4v4 KV caches: share the paged byte stores directly.
+                # For single-sequence decode, [pages, page_size, row_bytes] is
+                # identical to flat [position, row_bytes] memory.
+                cache, mla_offset = self._kv_cache_slot_for_layer(layer_idx)
+                ckv_layer = cache.ckv_cache[mla_offset]
+                kpe_layer = cache.kpe_cache[mla_offset]
                 max_seq = cache.max_pages * cache.page_size
 
                 store.register_mla_layer(
@@ -9756,11 +9771,7 @@ class KrasisModel:
                         scale=attn.scale,
                     )
                 elif hasattr(attn, 'kv_a_proj'):
-                    cache = self.kv_caches[0]
-                    if not hasattr(self, '_aux_mla_cache_offset'):
-                        self._aux_mla_cache_offset = 0
-                    mla_offset = self._aux_mla_cache_offset
-                    self._aux_mla_cache_offset += 1
+                    cache, mla_offset = self._kv_cache_slot_for_layer(layer_idx)
                     max_seq = cache.max_pages * cache.page_size
                     store.register_mla_layer(
                         layer_idx=layer_idx,
@@ -9961,11 +9972,7 @@ class KrasisModel:
                         attn._aux_kv_a_norm, attn._aux_w_kc, attn._aux_w_vc])
 
                     # MLA KV cache on aux GPU
-                    cache = self.kv_caches[0]
-                    if not hasattr(self, '_aux_mla_cache_offset'):
-                        self._aux_mla_cache_offset = 0
-                    mla_offset = self._aux_mla_cache_offset
-                    self._aux_mla_cache_offset += 1
+                    cache, mla_offset = self._kv_cache_slot_for_layer(layer_idx)
                     ckv_src = cache.ckv_cache[mla_offset]
                     kpe_src = cache.kpe_cache[mla_offset]
                     ckv_aux = torch.empty_like(ckv_src, device=aux_device)
@@ -10017,11 +10024,7 @@ class KrasisModel:
                 else:
                     # Placeholder MLA (never executed on this GPU)
                     dummy_wid = store.register_weight(0, 1, 1, 0)
-                    cache = self.kv_caches[0]
-                    if not hasattr(self, '_aux_mla_cache_offset'):
-                        self._aux_mla_cache_offset = 0
-                    mla_offset = self._aux_mla_cache_offset
-                    self._aux_mla_cache_offset += 1
+                    cache, mla_offset = self._kv_cache_slot_for_layer(layer_idx)
                     max_seq = cache.max_pages * cache.page_size
                     store.register_mla_layer(
                         layer_idx=layer_idx,

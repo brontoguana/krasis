@@ -104,11 +104,30 @@ class PagedKVCache:
 
         # Compute cache dimensions based on attention type
         if cfg.is_mla:
+            if combined:
+                raise ValueError(
+                    "Native MLA k4v4 cache uses separate compressed and positional stores; "
+                    "the legacy combined cache layout is unsupported."
+                )
             self.ckv_dim = max(cfg.kv_lora_rank, MLA_CKV_KERNEL_MIN_DIM)
             self.kpe_dim = cfg.qk_rope_head_dim
             self.kv_cache_dim = self.ckv_dim + self.kpe_dim
             self.num_kv_heads = None
             self.gqa_head_dim = None
+            if self.kv_format != 9:
+                raise ValueError(
+                    "Native MLA execution currently requires k4v4 KV cache; "
+                    f"got kv_format={self.kv_format_str!r}. No fallback cache format is available."
+                )
+            if self.ckv_dim % 16 != 0 or self.kpe_dim % 16 != 0:
+                raise ValueError(
+                    "Native MLA k4v4 cache requires dimensions divisible by 16; "
+                    f"got compressed_dim={self.ckv_dim}, positional_dim={self.kpe_dim}."
+                )
+            # One BF16 least-squares scale plus eight packed INT4 bytes for
+            # each 16-element block.
+            self.ckv_row_bytes = (self.ckv_dim // 16) * 10
+            self.kpe_row_bytes = (self.kpe_dim // 16) * 10
         else:
             # GQA: standard K/V with head dimension
             self.ckv_dim = None
@@ -385,17 +404,18 @@ class PagedKVCache:
             alloc_mb = self.kv_cache.nbytes / (1024**2)
             layout_str = "mla-combined"
         else:
-            # MLA split format: ckv + kpe caches
+            # MLA k4v4 split format. Each logical 16-element block occupies
+            # 10 bytes: one BF16 scale followed by eight packed INT4 bytes.
             self.ckv_cache = torch.zeros(
-                num_layers, max_pages, page_size, self.ckv_dim,
-                dtype=kv_dtype, device=device,
+                num_layers, max_pages, page_size, self.ckv_row_bytes,
+                dtype=torch.uint8, device=device,
             )
             self.kpe_cache = torch.zeros(
-                num_layers, max_pages, page_size, self.kpe_dim,
-                dtype=kv_dtype, device=device,
+                num_layers, max_pages, page_size, self.kpe_row_bytes,
+                dtype=torch.uint8, device=device,
             )
             alloc_mb = (self.ckv_cache.nbytes + self.kpe_cache.nbytes) / (1024**2)
-            layout_str = "mla-split"
+            layout_str = "mla-k4v4-split"
 
         logger.info(
             "KV cache allocated: %d layers × %d pages × %d tokens = %.0f MB (%s, %s)",
@@ -421,6 +441,10 @@ class PagedKVCache:
         self._free_pages.reverse()  # pop from end
 
     def _bytes_per_page(self) -> int:
+        if self.attention_type == "mla":
+            return self.page_size * (
+                self.ckv_row_bytes + self.kpe_row_bytes
+            ) * self.num_layers
         if getattr(self, "ring_window_gqa", False):
             # Ring-window layers cap their physical storage at sliding_window.
             # max_pages still defines the logical context capacity for full layers.

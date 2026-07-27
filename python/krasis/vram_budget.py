@@ -52,6 +52,7 @@ from krasis.attention_backend import (
     load_hqq_attention_manifest,
     select_hqq_auto_promotions,
 )
+from krasis.kv_cache import MLA_CKV_KERNEL_MIN_DIM
 
 logger = logging.getLogger(__name__)
 
@@ -224,6 +225,14 @@ def _kv_bytes_per_token_per_layer(cfg: Dict[str, Any], kv_cache_dtype: str) -> i
     if _is_mla(cfg):
         kv_lora = cfg["kv_lora_rank"]
         qk_rope = cfg["qk_rope_head_dim"]
+        if kv_cache_dtype == "k4v4":
+            ckv_dim = max(kv_lora, MLA_CKV_KERNEL_MIN_DIM)
+            if ckv_dim % 16 != 0 or qk_rope % 16 != 0:
+                raise ValueError(
+                    "MLA k4v4 cache dimensions must be divisible by 16; "
+                    f"got compressed_dim={ckv_dim}, positional_dim={qk_rope}."
+                )
+            return (ckv_dim // 16) * 10 + (qk_rope // 16) * 10
         return (kv_lora + qk_rope) * dtype_bytes
     else:
         n_kv_heads = cfg["num_key_value_heads"]

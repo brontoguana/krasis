@@ -833,12 +833,104 @@ extern "C" __global__ void scale_bf16_by_ptr(
 
 // ── MLA (Multi-head Latent Attention) Decode Kernels ──────────────────
 
-// Write compressed KV + rope PE to FP8 caches at the current position.
-// ckv_cache: [max_seq, kv_lora_rank], kpe_cache: [max_seq, qk_rope_dim]
-// Input ckv [kv_lora_rank] and kpe [qk_rope_dim] are FP32.
-extern "C" __global__ void mla_kv_cache_write_g(
-    __nv_fp8_e4m3* __restrict__ ckv_cache,
-    __nv_fp8_e4m3* __restrict__ kpe_cache,
+__device__ inline void mla_pack_k4_16(unsigned char* dst, const unsigned char* codes) {
+    #pragma unroll
+    for (int i = 0; i < 8; i++) {
+        dst[i] = (unsigned char)((codes[i * 2 + 1] << 4) | (codes[i * 2] & 0x0f));
+    }
+}
+
+__device__ inline int mla_unpack_k4(const unsigned char* src, int idx) {
+    unsigned char packed = src[idx >> 1];
+    return (idx & 1) ? (int)(packed >> 4) : (int)(packed & 0x0f);
+}
+
+__device__ inline float mla_quantize_k4_one_pass_ls(
+    const float* src,
+    unsigned char* codes
+) {
+    float max_abs = 0.0f;
+    #pragma unroll
+    for (int i = 0; i < 16; i++) {
+        max_abs = fmaxf(max_abs, fabsf(src[i]));
+    }
+
+    float scale = fmaxf(max_abs * (1.0f / 7.0f), 1e-8f);
+    float inv_scale = 1.0f / scale;
+    float ls_num = 0.0f;
+    float ls_den = 0.0f;
+    #pragma unroll
+    for (int i = 0; i < 16; i++) {
+        float scaled = src[i] * inv_scale;
+        int q = (int)(scaled >= 0.0f ? floorf(scaled + 0.5f) : -floorf(-scaled + 0.5f));
+        q = max(-7, min(7, q));
+        codes[i] = (unsigned char)(q + 8);
+        float qf = (float)q;
+        ls_num += src[i] * qf;
+        ls_den += qf * qf;
+    }
+    if (ls_den > 1e-12f) {
+        scale = fmaxf(ls_num / ls_den, 1e-8f);
+    }
+    return scale;
+}
+
+__device__ inline void mla_store_k4_block(
+    unsigned char* dst,
+    const float* values
+) {
+    unsigned char codes[16];
+    float scale = mla_quantize_k4_one_pass_ls(values, codes);
+    __nv_bfloat16 scale_bf16 = __float2bfloat16(scale);
+    *reinterpret_cast<unsigned short*>(dst) =
+        *reinterpret_cast<unsigned short*>(&scale_bf16);
+    mla_pack_k4_16(dst + 2, codes);
+}
+
+__device__ inline float mla_load_k4_value(
+    const unsigned char* cache,
+    int position,
+    int logical_dim,
+    int element
+) {
+    int blocks_per_row = logical_dim / 16;
+    int block = element >> 4;
+    const unsigned char* packed =
+        cache + ((int64_t)position * blocks_per_row + block) * 10;
+    float scale = __bfloat162float(
+        *reinterpret_cast<const __nv_bfloat16*>(packed));
+    return scale * (float)(mla_unpack_k4(packed + 2, element & 15) - 8);
+}
+
+__device__ inline float mla_dot_k4(
+    const unsigned char* cache,
+    int position,
+    int logical_dim,
+    const float* query
+) {
+    int blocks_per_row = logical_dim / 16;
+    const unsigned char* row =
+        cache + (int64_t)position * blocks_per_row * 10;
+    float score = 0.0f;
+    for (int block = 0; block < blocks_per_row; block++) {
+        const unsigned char* packed = row + block * 10;
+        float scale = __bfloat162float(
+            *reinterpret_cast<const __nv_bfloat16*>(packed));
+        #pragma unroll
+        for (int j = 0; j < 16; j++) {
+            score += query[block * 16 + j] * scale *
+                (float)(mla_unpack_k4(packed + 2, j) - 8);
+        }
+    }
+    return score;
+}
+
+// Write compressed KV + rope PE to compact signed-INT4 caches at the current
+// position. Each 16-value block stores one BF16 least-squares scale and eight
+// packed index bytes. Input ckv and kpe are FP32.
+extern "C" __global__ void mla_kv_cache_write_k4_g(
+    unsigned char* __restrict__ ckv_cache,
+    unsigned char* __restrict__ kpe_cache,
     const float* __restrict__ ckv,       // [kv_lora_rank] FP32
     const float* __restrict__ kpe,       // [qk_rope_dim] FP32
     const int* __restrict__ d_position,
@@ -847,21 +939,36 @@ extern "C" __global__ void mla_kv_cache_write_g(
     int qk_rope_dim
 ) {
     int position = *d_position;
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < ckv_cache_dim) {
-        float val = (i < kv_lora_rank) ? ckv[i] : 0.0f;
-        ckv_cache[position * ckv_cache_dim + i] = f32_to_fp8e4m3(val);
+    int cache_block = blockIdx.x * blockDim.x + threadIdx.x;
+    int ckv_blocks = ckv_cache_dim / 16;
+    int kpe_blocks = qk_rope_dim / 16;
+    if (cache_block < ckv_blocks) {
+        float values[16];
+        int base = cache_block * 16;
+        #pragma unroll
+        for (int i = 0; i < 16; i++) {
+            int d = base + i;
+            values[i] = (d < kv_lora_rank) ? ckv[d] : 0.0f;
+        }
+        unsigned char* dst =
+            ckv_cache + ((int64_t)position * ckv_blocks + cache_block) * 10;
+        mla_store_k4_block(dst, values);
     }
-    if (i < qk_rope_dim) {
-        kpe_cache[position * qk_rope_dim + i] = f32_to_fp8e4m3(kpe[i]);
+    if (cache_block < kpe_blocks) {
+        float values[16];
+        int base = cache_block * 16;
+        #pragma unroll
+        for (int i = 0; i < 16; i++) values[i] = kpe[base + i];
+        unsigned char* dst =
+            kpe_cache + ((int64_t)position * kpe_blocks + cache_block) * 10;
+        mla_store_k4_block(dst, values);
     }
 }
 
-// MLA KV cache write (non-graphed: position as immediate)
-// ckv_cache_dim >= kv_lora_rank: elements [kv_lora_rank, ckv_cache_dim) are zero-padded.
-extern "C" __global__ void mla_kv_cache_write(
-    __nv_fp8_e4m3* __restrict__ ckv_cache,
-    __nv_fp8_e4m3* __restrict__ kpe_cache,
+// Compact MLA KV cache write (non-graphed: position as immediate).
+extern "C" __global__ void mla_kv_cache_write_k4(
+    unsigned char* __restrict__ ckv_cache,
+    unsigned char* __restrict__ kpe_cache,
     const float* __restrict__ ckv,
     const float* __restrict__ kpe,
     int position,
@@ -869,13 +976,29 @@ extern "C" __global__ void mla_kv_cache_write(
     int ckv_cache_dim,
     int qk_rope_dim
 ) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < ckv_cache_dim) {
-        float val = (i < kv_lora_rank) ? ckv[i] : 0.0f;
-        ckv_cache[position * ckv_cache_dim + i] = f32_to_fp8e4m3(val);
+    int cache_block = blockIdx.x * blockDim.x + threadIdx.x;
+    int ckv_blocks = ckv_cache_dim / 16;
+    int kpe_blocks = qk_rope_dim / 16;
+    if (cache_block < ckv_blocks) {
+        float values[16];
+        int base = cache_block * 16;
+        #pragma unroll
+        for (int i = 0; i < 16; i++) {
+            int d = base + i;
+            values[i] = (d < kv_lora_rank) ? ckv[d] : 0.0f;
+        }
+        unsigned char* dst =
+            ckv_cache + ((int64_t)position * ckv_blocks + cache_block) * 10;
+        mla_store_k4_block(dst, values);
     }
-    if (i < qk_rope_dim) {
-        kpe_cache[position * qk_rope_dim + i] = f32_to_fp8e4m3(kpe[i]);
+    if (cache_block < kpe_blocks) {
+        float values[16];
+        int base = cache_block * 16;
+        #pragma unroll
+        for (int i = 0; i < 16; i++) values[i] = kpe[base + i];
+        unsigned char* dst =
+            kpe_cache + ((int64_t)position * kpe_blocks + cache_block) * 10;
+        mla_store_k4_block(dst, values);
     }
 }
 
@@ -889,12 +1012,12 @@ extern "C" __global__ void mla_kv_cache_write(
 // Shared memory: (kv_lora_rank + qk_rope_dim + num_warps + MLA_TILE_SIZE) * sizeof(float)
 #define MLA_TILE_SIZE 4096
 
-extern "C" __global__ void mla_attention_g(
+extern "C" __global__ void mla_attention_k4_g(
     float* __restrict__ output,              // [num_heads * kv_lora_rank] FP32
     const float* __restrict__ q_absorbed,    // [num_heads * kv_lora_rank] FP32
     const float* __restrict__ q_pe,          // [num_heads * qk_rope_dim] FP32
-    const __nv_fp8_e4m3* __restrict__ ckv_cache,  // [max_seq * kv_lora_rank] FP8
-    const __nv_fp8_e4m3* __restrict__ kpe_cache,  // [max_seq * qk_rope_dim] FP8
+    const unsigned char* __restrict__ ckv_cache,
+    const unsigned char* __restrict__ kpe_cache,
     float sm_scale,
     int num_heads,
     int kv_lora_rank,
@@ -933,45 +1056,9 @@ extern "C" __global__ void mla_attention_g(
     // Pass 1: find max score
     float local_max = -1e30f;
     for (int pos = tid; pos < seq_len; pos += num_threads) {
-        float score = 0.0f;
-        // Compressed KV dot product (kv_lora_rank dims)
-        const __nv_fp8_e4m3* ckv_vec = ckv_cache + pos * kv_lora_rank;
-        for (int d = 0; d < kv_lora_rank; d += 16) {
-            int remaining = kv_lora_rank - d;
-            int count = remaining < 16 ? remaining : 16;
-            if (count == 16) {
-                uint4 packed = *reinterpret_cast<const uint4*>(ckv_vec + d);
-                const unsigned char* pb = reinterpret_cast<const unsigned char*>(&packed);
-                #pragma unroll
-                for (int j = 0; j < 16; j++) {
-                    score += s_q_abs[d + j] * fp8e4m3_to_f32(
-                        *reinterpret_cast<const __nv_fp8_e4m3*>(&pb[j]));
-                }
-            } else {
-                for (int j = 0; j < count; j++) {
-                    score += s_q_abs[d + j] * fp8e4m3_to_f32(ckv_vec[d + j]);
-                }
-            }
-        }
-        // Rope PE dot product (qk_rope_dim dims)
-        const __nv_fp8_e4m3* kpe_vec = kpe_cache + pos * qk_rope_dim;
-        for (int d = 0; d < qk_rope_dim; d += 16) {
-            int remaining = qk_rope_dim - d;
-            int count = remaining < 16 ? remaining : 16;
-            if (count == 16) {
-                uint4 packed = *reinterpret_cast<const uint4*>(kpe_vec + d);
-                const unsigned char* pb = reinterpret_cast<const unsigned char*>(&packed);
-                #pragma unroll
-                for (int j = 0; j < 16; j++) {
-                    score += s_q_pe[d + j] * fp8e4m3_to_f32(
-                        *reinterpret_cast<const __nv_fp8_e4m3*>(&pb[j]));
-                }
-            } else {
-                for (int j = 0; j < count; j++) {
-                    score += s_q_pe[d + j] * fp8e4m3_to_f32(kpe_vec[d + j]);
-                }
-            }
-        }
+        float score =
+            mla_dot_k4(ckv_cache, pos, kv_lora_rank, s_q_abs) +
+            mla_dot_k4(kpe_cache, pos, qk_rope_dim, s_q_pe);
         score *= sm_scale;
         local_max = fmaxf(local_max, score);
     }
@@ -1002,43 +1089,9 @@ extern "C" __global__ void mla_attention_g(
         // Phase A: compute exp(score - max) for each position
         for (int ti = tid; ti < tile_len; ti += num_threads) {
             int pos = tile_start + ti;
-            float score = 0.0f;
-            const __nv_fp8_e4m3* ckv_vec = ckv_cache + pos * kv_lora_rank;
-            for (int d = 0; d < kv_lora_rank; d += 16) {
-                int remaining = kv_lora_rank - d;
-                int count = remaining < 16 ? remaining : 16;
-                if (count == 16) {
-                    uint4 packed = *reinterpret_cast<const uint4*>(ckv_vec + d);
-                    const unsigned char* pb = reinterpret_cast<const unsigned char*>(&packed);
-                    #pragma unroll
-                    for (int j = 0; j < 16; j++) {
-                        score += s_q_abs[d + j] * fp8e4m3_to_f32(
-                            *reinterpret_cast<const __nv_fp8_e4m3*>(&pb[j]));
-                    }
-                } else {
-                    for (int j = 0; j < count; j++) {
-                        score += s_q_abs[d + j] * fp8e4m3_to_f32(ckv_vec[d + j]);
-                    }
-                }
-            }
-            const __nv_fp8_e4m3* kpe_vec = kpe_cache + pos * qk_rope_dim;
-            for (int d = 0; d < qk_rope_dim; d += 16) {
-                int remaining = qk_rope_dim - d;
-                int count = remaining < 16 ? remaining : 16;
-                if (count == 16) {
-                    uint4 packed = *reinterpret_cast<const uint4*>(kpe_vec + d);
-                    const unsigned char* pb = reinterpret_cast<const unsigned char*>(&packed);
-                    #pragma unroll
-                    for (int j = 0; j < 16; j++) {
-                        score += s_q_pe[d + j] * fp8e4m3_to_f32(
-                            *reinterpret_cast<const __nv_fp8_e4m3*>(&pb[j]));
-                    }
-                } else {
-                    for (int j = 0; j < count; j++) {
-                        score += s_q_pe[d + j] * fp8e4m3_to_f32(kpe_vec[d + j]);
-                    }
-                }
-            }
+            float score =
+                mla_dot_k4(ckv_cache, pos, kv_lora_rank, s_q_abs) +
+                mla_dot_k4(kpe_cache, pos, qk_rope_dim, s_q_pe);
             float w = __expf(score * sm_scale - global_max);
             smem_weights[ti] = w;
             local_sum += w;
@@ -1047,12 +1100,12 @@ extern "C" __global__ void mla_attention_g(
 
         // Phase B: accumulate weighted ckv using stored weights
         // Output dim is kv_lora_rank (not head_dim)
-        const __nv_fp8_e4m3* v_base = ckv_cache + tile_start * kv_lora_rank;
         int di = 0;
         for (int d = tid; d < kv_lora_rank; d += num_threads) {
             float acc = 0.0f;
             for (int ti = 0; ti < tile_len; ti++) {
-                acc += smem_weights[ti] * fp8e4m3_to_f32(v_base[ti * kv_lora_rank + d]);
+                acc += smem_weights[ti] *
+                    mla_load_k4_value(ckv_cache, tile_start + ti, kv_lora_rank, d);
             }
             v_acc[di++] += acc;
         }
@@ -1082,12 +1135,12 @@ extern "C" __global__ void mla_attention_g(
 }
 
 // MLA attention decode kernel (non-graphed: seq_len as immediate)
-extern "C" __global__ void mla_attention(
+extern "C" __global__ void mla_attention_k4(
     float* __restrict__ output,
     const float* __restrict__ q_absorbed,
     const float* __restrict__ q_pe,
-    const __nv_fp8_e4m3* __restrict__ ckv_cache,
-    const __nv_fp8_e4m3* __restrict__ kpe_cache,
+    const unsigned char* __restrict__ ckv_cache,
+    const unsigned char* __restrict__ kpe_cache,
     float sm_scale,
     int num_heads,
     int kv_lora_rank,
@@ -1123,43 +1176,9 @@ extern "C" __global__ void mla_attention(
     // Pass 1: find max score
     float local_max = -1e30f;
     for (int pos = tid; pos < seq_len; pos += num_threads) {
-        float score = 0.0f;
-        const __nv_fp8_e4m3* ckv_vec = ckv_cache + pos * kv_lora_rank;
-        for (int d = 0; d < kv_lora_rank; d += 16) {
-            int remaining = kv_lora_rank - d;
-            int count = remaining < 16 ? remaining : 16;
-            if (count == 16) {
-                uint4 packed = *reinterpret_cast<const uint4*>(ckv_vec + d);
-                const unsigned char* pb = reinterpret_cast<const unsigned char*>(&packed);
-                #pragma unroll
-                for (int j = 0; j < 16; j++) {
-                    score += s_q_abs[d + j] * fp8e4m3_to_f32(
-                        *reinterpret_cast<const __nv_fp8_e4m3*>(&pb[j]));
-                }
-            } else {
-                for (int j = 0; j < count; j++) {
-                    score += s_q_abs[d + j] * fp8e4m3_to_f32(ckv_vec[d + j]);
-                }
-            }
-        }
-        const __nv_fp8_e4m3* kpe_vec = kpe_cache + pos * qk_rope_dim;
-        for (int d = 0; d < qk_rope_dim; d += 16) {
-            int remaining = qk_rope_dim - d;
-            int count = remaining < 16 ? remaining : 16;
-            if (count == 16) {
-                uint4 packed = *reinterpret_cast<const uint4*>(kpe_vec + d);
-                const unsigned char* pb = reinterpret_cast<const unsigned char*>(&packed);
-                #pragma unroll
-                for (int j = 0; j < 16; j++) {
-                    score += s_q_pe[d + j] * fp8e4m3_to_f32(
-                        *reinterpret_cast<const __nv_fp8_e4m3*>(&pb[j]));
-                }
-            } else {
-                for (int j = 0; j < count; j++) {
-                    score += s_q_pe[d + j] * fp8e4m3_to_f32(kpe_vec[d + j]);
-                }
-            }
-        }
+        float score =
+            mla_dot_k4(ckv_cache, pos, kv_lora_rank, s_q_abs) +
+            mla_dot_k4(kpe_cache, pos, qk_rope_dim, s_q_pe);
         score *= sm_scale;
         local_max = fmaxf(local_max, score);
     }
@@ -1187,55 +1206,21 @@ extern "C" __global__ void mla_attention(
 
         for (int ti = tid; ti < tile_len; ti += num_threads) {
             int pos = tile_start + ti;
-            float score = 0.0f;
-            const __nv_fp8_e4m3* ckv_vec = ckv_cache + pos * kv_lora_rank;
-            for (int d = 0; d < kv_lora_rank; d += 16) {
-                int remaining = kv_lora_rank - d;
-                int count = remaining < 16 ? remaining : 16;
-                if (count == 16) {
-                    uint4 packed = *reinterpret_cast<const uint4*>(ckv_vec + d);
-                    const unsigned char* pb = reinterpret_cast<const unsigned char*>(&packed);
-                    #pragma unroll
-                    for (int j = 0; j < 16; j++) {
-                        score += s_q_abs[d + j] * fp8e4m3_to_f32(
-                            *reinterpret_cast<const __nv_fp8_e4m3*>(&pb[j]));
-                    }
-                } else {
-                    for (int j = 0; j < count; j++) {
-                        score += s_q_abs[d + j] * fp8e4m3_to_f32(ckv_vec[d + j]);
-                    }
-                }
-            }
-            const __nv_fp8_e4m3* kpe_vec = kpe_cache + pos * qk_rope_dim;
-            for (int d = 0; d < qk_rope_dim; d += 16) {
-                int remaining = qk_rope_dim - d;
-                int count = remaining < 16 ? remaining : 16;
-                if (count == 16) {
-                    uint4 packed = *reinterpret_cast<const uint4*>(kpe_vec + d);
-                    const unsigned char* pb = reinterpret_cast<const unsigned char*>(&packed);
-                    #pragma unroll
-                    for (int j = 0; j < 16; j++) {
-                        score += s_q_pe[d + j] * fp8e4m3_to_f32(
-                            *reinterpret_cast<const __nv_fp8_e4m3*>(&pb[j]));
-                    }
-                } else {
-                    for (int j = 0; j < count; j++) {
-                        score += s_q_pe[d + j] * fp8e4m3_to_f32(kpe_vec[d + j]);
-                    }
-                }
-            }
+            float score =
+                mla_dot_k4(ckv_cache, pos, kv_lora_rank, s_q_abs) +
+                mla_dot_k4(kpe_cache, pos, qk_rope_dim, s_q_pe);
             float w = __expf(score * sm_scale - global_max);
             smem_weights[ti] = w;
             local_sum += w;
         }
         __syncthreads();
 
-        const __nv_fp8_e4m3* v_base = ckv_cache + tile_start * kv_lora_rank;
         int di = 0;
         for (int d = tid; d < kv_lora_rank; d += num_threads) {
             float acc = 0.0f;
             for (int ti = 0; ti < tile_len; ti++) {
-                acc += smem_weights[ti] * fp8e4m3_to_f32(v_base[ti * kv_lora_rank + d]);
+                acc += smem_weights[ti] *
+                    mla_load_k4_value(ckv_cache, tile_start + ti, kv_lora_rank, d);
             }
             v_acc[di++] += acc;
         }

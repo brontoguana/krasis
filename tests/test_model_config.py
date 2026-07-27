@@ -13,6 +13,7 @@ import torch
 from krasis.config import ModelConfig
 from krasis.kv_cache import MLA_CKV_KERNEL_MIN_DIM
 from krasis.layer import NativeMLAWeights, TransformerLayer
+from krasis.vram_budget import _kv_bytes_per_token_per_layer
 
 
 def _write_config(test_case: unittest.TestCase, config: dict) -> str:
@@ -186,6 +187,18 @@ class ModelConfigContractTests(unittest.TestCase):
             r"native Rust/CUDA runtime",
         ):
             attention.forward(torch.zeros((1, 8), dtype=torch.bfloat16))
+
+    def test_mla_k4_budget_uses_padded_physical_cache_width(self) -> None:
+        raw = _glm_dsa_config()
+        raw["kv_lora_rank"] = 256
+        expected = (
+            (MLA_CKV_KERNEL_MIN_DIM // 16) * 10
+            + (raw["qk_rope_head_dim"] // 16) * 10
+        )
+        self.assertEqual(
+            _kv_bytes_per_token_per_layer(raw, "k4v4"),
+            expected,
+        )
 
 
 if __name__ == "__main__":

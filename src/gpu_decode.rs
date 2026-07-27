@@ -3127,10 +3127,10 @@ const KERNEL_NAMES: &[&str] = &[
     "la_fused_post_proj_f32",
     "expert_classify_prepare",
     // MLA (Multi-head Latent Attention) kernels
-    "mla_kv_cache_write_g",
-    "mla_kv_cache_write",
-    "mla_attention_g",
-    "mla_attention",
+    "mla_kv_cache_write_k4_g",
+    "mla_kv_cache_write_k4",
+    "mla_attention_k4_g",
+    "mla_attention_k4",
     "mla_deinterleave",
     "mla_split_q",
     "mla_absorb_wkc",
@@ -8778,9 +8778,9 @@ enum GpuAttnConfig {
         q_lora_rank: usize, // 0 if direct q_proj
         sm_scale: f32,
         rope_interleave: bool,
-        // MLA KV cache (separate ckv and kpe, FP8)
-        ckv_cache_ptr: u64, // [max_seq, ckv_cache_dim] FP8
-        kpe_cache_ptr: u64, // [max_seq, qk_rope_dim] FP8
+        // MLA KV cache (separate ckv and kpe signed-INT4 block stores)
+        ckv_cache_ptr: u64,
+        kpe_cache_ptr: u64,
     },
     /// Mamba2 selective state space layer (Nemotron-H hybrid models).
     /// O(1) per-token decode, no KV cache. State is always GPU-resident.
@@ -9009,10 +9009,10 @@ struct CachedKernels {
     // GPU-side expert classification (eliminates cuStreamSynchronize in route sync)
     expert_classify_prepare: cudarc::driver::CudaFunction,
     // MLA (Multi-head Latent Attention) kernels
-    mla_kv_cache_write_g: cudarc::driver::CudaFunction,
-    mla_kv_cache_write: cudarc::driver::CudaFunction,
-    mla_attention_g: cudarc::driver::CudaFunction,
-    mla_attention: cudarc::driver::CudaFunction,
+    mla_kv_cache_write_k4_g: cudarc::driver::CudaFunction,
+    mla_kv_cache_write_k4: cudarc::driver::CudaFunction,
+    mla_attention_k4_g: cudarc::driver::CudaFunction,
+    mla_attention_k4: cudarc::driver::CudaFunction,
     mla_deinterleave: cudarc::driver::CudaFunction,
     mla_split_q: cudarc::driver::CudaFunction,
     mla_absorb_wkc: cudarc::driver::CudaFunction,
@@ -15745,10 +15745,10 @@ impl GpuDecodeStore {
                 la_fused_post_proj_f32: get("la_fused_post_proj_f32")?,
                 expert_classify_prepare: get("expert_classify_prepare")?,
                 // MLA kernels
-                mla_kv_cache_write_g: get("mla_kv_cache_write_g")?,
-                mla_kv_cache_write: get("mla_kv_cache_write")?,
-                mla_attention_g: get("mla_attention_g")?,
-                mla_attention: get("mla_attention")?,
+                mla_kv_cache_write_k4_g: get("mla_kv_cache_write_k4_g")?,
+                mla_kv_cache_write_k4: get("mla_kv_cache_write_k4")?,
+                mla_attention_k4_g: get("mla_attention_k4_g")?,
+                mla_attention_k4: get("mla_attention_k4")?,
                 mla_deinterleave: get("mla_deinterleave")?,
                 mla_split_q: get("mla_split_q")?,
                 mla_absorb_wkc: get("mla_absorb_wkc")?,
@@ -25410,9 +25410,7 @@ impl GpuDecodeStore {
         // Build MoE expert data
         let mut moe_layers: Vec<Option<PrefillMoeLayerData>> = Vec::new();
         for ml in &graph.moe_layers {
-            let prefill_layer = ml
-                .as_ref()
-                .map(|m| {
+            let prefill_layer = ml.as_ref().map(|m| {
                 let experts: Vec<ExpertWeightPtrs> = m
                     .experts
                     .iter()
@@ -32445,6 +32443,24 @@ impl GpuDecodeStore {
                         let rope = *qk_rope_dim;
                         let vhd = *v_head_dim;
                         let q_head_dim = nope + rope;
+                        if ccd % 16 != 0 || rope % 16 != 0 {
+                            return Err(format!(
+                                "MLA layer {} k4 cache requires dimensions divisible by 16, got ckv={} rope={}",
+                                layer_idx, ccd, rope
+                            ));
+                        }
+                        if ccd > 1024 {
+                            return Err(format!(
+                                "MLA layer {} compressed dimension {} exceeds the current native k4 attention limit 1024",
+                                layer_idx, ccd
+                            ));
+                        }
+                        if *ckv_cache_ptr == 0 || *kpe_cache_ptr == 0 {
+                            return Err(format!(
+                                "MLA layer {} has incomplete k4 cache pointers: ckv=0x{:x} kpe=0x{:x}",
+                                layer_idx, *ckv_cache_ptr, *kpe_cache_ptr
+                            ));
+                        }
                         let hqq_mla_exec = match graph.layers[layer_idx].hqq_exec.as_ref() {
                             Some(HqqExecutionDescriptor::Mla(desc))
                                 if hqq_mla_decode_ready(
@@ -32778,13 +32794,13 @@ impl GpuDecodeStore {
                             }
                         }
 
-                        // ── MLA Step 7: Write to FP8 cache (graphable) ──
+                        // ── MLA Step 7: Write to compact signed-INT4 cache ──
                         {
-                            let total = (ccd + rope) as u32;
+                            let cache_blocks = std::cmp::max(ccd, rope) / 16;
                             let threads = 256u32;
-                            let blocks = (total + threads - 1) / threads;
+                            let blocks = (cache_blocks as u32 + threads - 1) / threads;
                             unsafe {
-                                k.mla_kv_cache_write_g
+                                k.mla_kv_cache_write_k4_g
                                     .clone()
                                     .launch(
                                         LaunchConfig {
@@ -32804,7 +32820,7 @@ impl GpuDecodeStore {
                                         ),
                                     )
                                     .map_err(|e| {
-                                        format!("mla_kv_cache_write_g[{}]: {:?}", layer_idx, e)
+                                        format!("mla_kv_cache_write_k4_g[{}]: {:?}", layer_idx, e)
                                     })?;
                             }
                         }
@@ -32816,7 +32832,7 @@ impl GpuDecodeStore {
                             let tile_size = 4096u32;
                             let shared_mem = (ccd as u32 + rope as u32 + num_warps + tile_size) * 4;
                             unsafe {
-                                k.mla_attention_g
+                                k.mla_attention_k4_g
                                     .clone()
                                     .launch(
                                         LaunchConfig {
@@ -32839,7 +32855,7 @@ impl GpuDecodeStore {
                                         ),
                                     )
                                     .map_err(|e| {
-                                        format!("mla_attention_g[{}]: {:?}", layer_idx, e)
+                                        format!("mla_attention_k4_g[{}]: {:?}", layer_idx, e)
                                     })?;
                             }
                         }
@@ -35948,7 +35964,6 @@ impl GpuDecodeStore {
                             }
                         }
                     }
-
 
                     let adaptive_cold_drop_active = graph.adaptive_cold_drop.enabled();
                     let mut adaptive_cold_drop_count = 0usize;
@@ -39343,6 +39358,24 @@ impl GpuDecodeStore {
                     let rope = *qk_rope_dim;
                     let vhd = *v_head_dim;
                     let q_head_dim = nope + rope;
+                    if ccd % 16 != 0 || rope % 16 != 0 {
+                        return Err(format!(
+                            "MLA layer {} k4 cache requires dimensions divisible by 16, got ckv={} rope={}",
+                            layer_idx, ccd, rope
+                        ));
+                    }
+                    if ccd > 1024 {
+                        return Err(format!(
+                            "MLA layer {} compressed dimension {} exceeds the current native k4 attention limit 1024",
+                            layer_idx, ccd
+                        ));
+                    }
+                    if *ckv_cache_ptr == 0 || *kpe_cache_ptr == 0 {
+                        return Err(format!(
+                            "MLA layer {} has incomplete k4 cache pointers: ckv=0x{:x} kpe=0x{:x}",
+                            layer_idx, *ckv_cache_ptr, *kpe_cache_ptr
+                        ));
+                    }
                     let hqq_mla_exec = match graph.layers[layer_idx].hqq_exec.as_ref() {
                         Some(HqqExecutionDescriptor::Mla(desc))
                             if hqq_mla_decode_ready(
@@ -39681,14 +39714,15 @@ impl GpuDecodeStore {
                                 .map_err(|e| format!("mla_absorb_wkc[{}]: {:?}", layer_idx, e))?;
                         }
                     }
-                    // ── MLA Step 7: Write to FP8 cache ──
-                    // Cache has ccd-dim entries; real data is klr, rest zero-padded by kernel
+                    // ── MLA Step 7: Write to compact signed-INT4 cache ──
+                    // Cache has ccd logical entries; real data is klr and the
+                    // remaining values are zero-padded before quantization.
                     {
-                        let total = (ccd + rope) as u32; // ccd for ckv, rope for kpe
+                        let cache_blocks = std::cmp::max(ccd, rope) / 16;
                         let threads = 256u32;
-                        let blocks = (total + threads - 1) / threads;
+                        let blocks = (cache_blocks as u32 + threads - 1) / threads;
                         unsafe {
-                            k.mla_kv_cache_write
+                            k.mla_kv_cache_write_k4
                                 .clone()
                                 .launch(
                                     LaunchConfig {
@@ -39708,7 +39742,7 @@ impl GpuDecodeStore {
                                     ),
                                 )
                                 .map_err(|e| {
-                                    format!("mla_kv_cache_write[{}]: {:?}", layer_idx, e)
+                                    format!("mla_kv_cache_write_k4[{}]: {:?}", layer_idx, e)
                                 })?;
                         }
                     }
@@ -39722,7 +39756,7 @@ impl GpuDecodeStore {
                         let shared_mem = (ccd as u32 + rope as u32 + num_warps + tile_size) * 4;
                         let attn_seq_len = (position + 1) as i32;
                         unsafe {
-                            k.mla_attention
+                            k.mla_attention_k4
                                 .clone()
                                 .launch(
                                     LaunchConfig {
@@ -39744,7 +39778,7 @@ impl GpuDecodeStore {
                                         graph.kv_max_seq as i32,
                                     ),
                                 )
-                                .map_err(|e| format!("mla_attention[{}]: {:?}", layer_idx, e))?;
+                                .map_err(|e| format!("mla_attention_k4[{}]: {:?}", layer_idx, e))?;
                         }
                     }
                     // ── MLA Step 9: Apply w_vc (attn_out @ w_vc → BF16) ──
@@ -56840,9 +56874,7 @@ impl GpuDecodeStore {
         let moe_layer_start = store.moe_layer_start;
         let moe_layer_end = moe_layer_start
             .checked_add(num_gpu_layers)
-            .ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err("MoE layer range overflow")
-            })?;
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("MoE layer range overflow"))?;
         if moe_layer_end > num_routing || moe_layer_end > config.num_moe_layers() {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
                 "loaded MoE layer range [{moe_layer_start}, {moe_layer_end}) exceeds routing/config shape ({num_routing}/{} layers)",

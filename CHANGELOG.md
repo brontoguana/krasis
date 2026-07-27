@@ -19,6 +19,20 @@
   or Python fallback was added. The exact-source optimized build, targeted CUDA
   transform test, and existing five model-contract tests pass.
 
+- Added the production compact MLA `k4v4` cache contract for single-sequence
+  native execution. Prefill, ordinary decode, and CUDA-graph decode write
+  compressed content KV and positional K as BF16-scale plus packed signed-INT4
+  blocks; both decode modes read that format directly without FP8, Python, or
+  a fallback. Allocation and VRAM budgeting use the runtime padded latent
+  width, unsupported formats and dimensions fail visibly, and cache ownership
+  follows the actual layer/GPU split rather than mutable `kv_caches[0]`
+  counters. Added a GLM-4.7-Flash HQQ4/k4v4/INT4 development config under
+  `tests/`; `testconfigs/` remains untouched. The final exact-source build
+  passed in 190 seconds, model/config contracts pass 6/6, and the targeted CUDA
+  gate passes byte-identical prefill/ordinary/graph writers plus both attention
+  readers against one CPU reference. Cross-chunk MLA prefill, DSA/IndexShare,
+  sparse attention, and witness validation remain incomplete.
+
 ## 1.0.16 - 2026-07-27
 
 - Fixed invalid OpenAI-compatible JSON responses when a configured model name

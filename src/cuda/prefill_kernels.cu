@@ -1258,6 +1258,104 @@ extern "C" __global__ void mla_pack_qkv_rope_bf16_kernel(
     }
 }
 
+__device__ inline float mla_prefill_quantize_k4_one_pass_ls(
+    const float* src,
+    unsigned char* codes)
+{
+    float max_abs = 0.0f;
+    #pragma unroll
+    for (int i = 0; i < 16; i++) max_abs = fmaxf(max_abs, fabsf(src[i]));
+
+    float scale = fmaxf(max_abs * (1.0f / 7.0f), 1e-8f);
+    float inv_scale = 1.0f / scale;
+    float ls_num = 0.0f;
+    float ls_den = 0.0f;
+    #pragma unroll
+    for (int i = 0; i < 16; i++) {
+        float scaled = src[i] * inv_scale;
+        int q = (int)(scaled >= 0.0f ? floorf(scaled + 0.5f) : -floorf(-scaled + 0.5f));
+        q = max(-7, min(7, q));
+        codes[i] = (unsigned char)(q + 8);
+        float qf = (float)q;
+        ls_num += src[i] * qf;
+        ls_den += qf * qf;
+    }
+    if (ls_den > 1e-12f) scale = fmaxf(ls_num / ls_den, 1e-8f);
+    return scale;
+}
+
+__device__ inline void mla_prefill_store_k4_block(
+    unsigned char* dst,
+    const float* values)
+{
+    unsigned char codes[16];
+    float scale = mla_prefill_quantize_k4_one_pass_ls(values, codes);
+    __nv_bfloat16 scale_bf16 = float_to_bf16(scale);
+    *reinterpret_cast<unsigned short*>(dst) =
+        *reinterpret_cast<unsigned short*>(&scale_bf16);
+    #pragma unroll
+    for (int i = 0; i < 8; i++) {
+        dst[2 + i] =
+            (unsigned char)((codes[i * 2 + 1] << 4) | (codes[i * 2] & 0x0f));
+    }
+}
+
+/*
+ * Capture the normalized latent KV and the already-RoPE-transformed positional
+ * K into the compact MLA signed-INT4 cache. The dense K input is the same BF16
+ * tensor consumed by FlashAttention, so prefill and decode cache state share
+ * an exact source.
+ */
+extern "C" __global__ void mla_cache_append_k4_kernel(
+    unsigned char* __restrict__ ckv_cache,
+    unsigned char* __restrict__ kpe_cache,
+    const __nv_bfloat16* __restrict__ kv_a,
+    const __nv_bfloat16* __restrict__ dense_k,
+    int start_pos,
+    int token_count,
+    int kv_row_stride,
+    int kv_lora_rank,
+    int ckv_cache_dim,
+    int num_heads,
+    int qk_dim,
+    int nope_dim,
+    int rope_dim)
+{
+    int token = blockIdx.x;
+    int cache_block = threadIdx.x;
+    if (token >= token_count) return;
+
+    int ckv_blocks = ckv_cache_dim / 16;
+    int kpe_blocks = rope_dim / 16;
+    int position = start_pos + token;
+
+    if (cache_block < ckv_blocks) {
+        float values[16];
+        int base = cache_block * 16;
+        const __nv_bfloat16* src = kv_a + (int64_t)token * kv_row_stride;
+        #pragma unroll
+        for (int i = 0; i < 16; i++) {
+            int d = base + i;
+            values[i] = d < kv_lora_rank ? bf16_to_float(src[d]) : 0.0f;
+        }
+        unsigned char* dst =
+            ckv_cache + ((int64_t)position * ckv_blocks + cache_block) * 10;
+        mla_prefill_store_k4_block(dst, values);
+    }
+
+    if (cache_block < kpe_blocks) {
+        float values[16];
+        int base = cache_block * 16;
+        const __nv_bfloat16* src =
+            dense_k + ((int64_t)token * num_heads) * qk_dim + nope_dim;
+        #pragma unroll
+        for (int i = 0; i < 16; i++) values[i] = bf16_to_float(src[base + i]);
+        unsigned char* dst =
+            kpe_cache + ((int64_t)position * kpe_blocks + cache_block) * 10;
+        mla_prefill_store_k4_block(dst, values);
+    }
+}
+
 extern "C" void krasis_rope_batched(
     void* q, void* k, const void* positions,
     const void* cos_cache, const void* sin_cache,
