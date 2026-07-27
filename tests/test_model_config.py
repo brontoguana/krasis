@@ -17,7 +17,11 @@ from krasis.layer import (
     NativeMLAWeights,
     TransformerLayer,
 )
-from krasis.model import _apply_max_context_limit, _dsa_owner_layers_for_segment
+from krasis.model import (
+    _apply_max_context_limit,
+    _dsa_owner_layers_for_segment,
+    _dsa_topk_candidate_capacity,
+)
 from krasis.vram_budget import _kv_bytes_per_token_per_layer
 from krasis.weight_loader import WeightLoader
 
@@ -73,6 +77,20 @@ def _glm_dsa_config() -> dict:
 
 
 class ModelConfigContractTests(unittest.TestCase):
+    def test_dsa_topk_candidate_capacity_matches_native_hierarchy(self) -> None:
+        self.assertEqual(_dsa_topk_candidate_capacity(1537, 2048), 0)
+        self.assertEqual(_dsa_topk_candidate_capacity(2049, 2048), 0)
+        self.assertEqual(_dsa_topk_candidate_capacity(5003, 2048), 4096)
+        self.assertEqual(
+            _dsa_topk_candidate_capacity(1_048_576, 2048),
+            256 * 2048,
+        )
+        self.assertEqual(_dsa_topk_candidate_capacity(10_001, 1537), 3 * 1537)
+        for context, topk in ((0, 2048), (2048, 0)):
+            with self.subTest(context=context, topk=topk):
+                with self.assertRaises(ValueError):
+                    _dsa_topk_candidate_capacity(context, topk)
+
     def test_runtime_context_cap_never_extends_model_support(self) -> None:
         cfg = ModelConfig.from_model_path(_write_config(self, _glm_dsa_config()))
         cfg.max_position_embeddings = 4096

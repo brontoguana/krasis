@@ -114,6 +114,19 @@
   passed: exact-source DSA CUDA contracts 5/5 after a 3m48s optimized build,
   exact package build in 199 seconds, model/config 9/9, and launcher 24/24.
 
+- Added exact native GPU top-k selection for GLM DSA owner scores without
+  enabling sparse execution. Runtime-derived shared-memory sort tiles and
+  hierarchical merge passes retain the configured number of candidates in
+  deterministic score/index order; fixed-address owner outputs and
+  store-shared ping-pong workspace avoid per-owner duplication. Setup queries
+  the selected GPU's shared-memory limits, includes the exact candidate
+  workspace in VRAM accounting, and fails visibly when a geometry cannot be
+  supported. CUDA/CPU comparisons pass through the checkpoint's declared
+  1,048,576-token context, including non-power-of-two and tie cases. IndexShare
+  dispatch, sparse attention, graph replay, and serving activation remain
+  fail-closed. Validation passed: exact DSA CUDA contracts 6/6, exact package
+  build in 201 seconds, model/config 10/10, and launcher 24/24.
+
 ## 1.0.16 - 2026-07-27
 
 - Fixed invalid OpenAI-compatible JSON responses when a configured model name

@@ -3024,6 +3024,8 @@ const KERNEL_NAMES: &[&str] = &[
     "dsa_layernorm_rope_key_write",
     "dsa_rope_query_bf16",
     "dsa_reduce_weighted_scores",
+    "dsa_topk_sort_chunks",
+    "dsa_topk_merge_runs",
     "la_conv1d",
     "uninterleave_qkvz",
     "compute_gate_beta",
@@ -7146,12 +7148,80 @@ struct DsaIndexerWorkspace {
     max_context_tokens: usize,
     max_index_n_heads: usize,
     max_index_head_dim: usize,
+    max_topk_candidate_capacity: usize,
+    max_topk_shared_bytes: usize,
     d_raw_key: cudarc::driver::CudaSlice<u16>,
     d_projected_query: cudarc::driver::CudaSlice<u16>,
     d_query_rope: cudarc::driver::CudaSlice<u16>,
     d_head_weights: cudarc::driver::CudaSlice<u16>,
     d_head_scores: cudarc::driver::CudaSlice<f32>,
     d_scores: cudarc::driver::CudaSlice<f32>,
+    d_topk_scores_a: Option<cudarc::driver::CudaSlice<f32>>,
+    d_topk_scores_b: Option<cudarc::driver::CudaSlice<f32>>,
+    d_topk_indices_a: Option<cudarc::driver::CudaSlice<i32>>,
+    d_topk_indices_b: Option<cudarc::driver::CudaSlice<i32>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DsaTopkPlan {
+    context: usize,
+    selected: usize,
+    sort_width: usize,
+    initial_runs: usize,
+    merge_passes: usize,
+    candidate_capacity: usize,
+    shared_bytes: usize,
+}
+
+fn plan_dsa_topk(context: usize, configured_topk: usize) -> Result<DsaTopkPlan, String> {
+    if context == 0 {
+        return Err("DSA top-k requires positive context".to_string());
+    }
+    if configured_topk == 0 {
+        return Err("DSA top-k requires positive configured top-k".to_string());
+    }
+    let selected = configured_topk.min(context);
+    let padded_selected = selected
+        .checked_next_power_of_two()
+        .ok_or_else(|| format!("DSA top-k {} power-of-two overflow", selected))?;
+    let sort_width = if context <= selected {
+        context
+            .checked_next_power_of_two()
+            .ok_or_else(|| format!("DSA context {} power-of-two overflow", context))?
+    } else {
+        padded_selected
+            .checked_mul(2)
+            .ok_or_else(|| format!("DSA top-k {} merge-width overflow", selected))?
+    };
+    let initial_runs = context.div_ceil(sort_width);
+    let candidate_capacity = if initial_runs > 1 {
+        initial_runs.checked_mul(selected).ok_or_else(|| {
+            format!(
+                "DSA top-k candidate capacity overflow: runs={} selected={}",
+                initial_runs, selected
+            )
+        })?
+    } else {
+        0
+    };
+    let mut merge_passes = 0usize;
+    let mut runs = initial_runs;
+    while runs > 1 {
+        runs = runs.div_ceil(2);
+        merge_passes += 1;
+    }
+    let shared_bytes = sort_width
+        .checked_mul(std::mem::size_of::<f32>() + std::mem::size_of::<i32>())
+        .ok_or_else(|| format!("DSA top-k shared-memory overflow: width={}", sort_width))?;
+    Ok(DsaTopkPlan {
+        context,
+        selected,
+        sort_width,
+        initial_runs,
+        merge_passes,
+        candidate_capacity,
+        shared_bytes,
+    })
 }
 
 // GLM DSA defines its index-key LayerNorm independently of the model-wide
@@ -7400,12 +7470,42 @@ fn validate_dsa_exact_prefix_graph(
 
 #[cfg(test)]
 mod dsa_registration_tests {
+    use cudarc::driver::sys as cuda_sys;
     use cudarc::driver::DevicePtr;
 
     use super::{
-        validate_dsa_exact_prefix_limit, validate_dsa_indexer_registration,
-        validate_dsa_owner_weight_contract, DsaIndexerOwnerWeightIds, GpuDecodeStore, GpuWeight,
+        create_decode_timing_event, plan_dsa_topk, validate_dsa_exact_prefix_limit,
+        validate_dsa_indexer_registration, validate_dsa_owner_weight_contract,
+        DsaIndexerOwnerWeightIds, GpuDecodeStore, GpuWeight,
     };
+
+    #[test]
+    fn topk_planning_is_runtime_sized_and_exactly_bounded() {
+        let prefix = plan_dsa_topk(1537, 2048).expect("complete-prefix plan");
+        assert_eq!(prefix.selected, 1537);
+        assert_eq!(prefix.sort_width, 2048);
+        assert_eq!(prefix.initial_runs, 1);
+        assert_eq!(prefix.merge_passes, 0);
+        assert_eq!(prefix.candidate_capacity, 0);
+        assert_eq!(prefix.shared_bytes, 2048 * 8);
+
+        let sparse = plan_dsa_topk(1_048_576, 2048).expect("long-context plan");
+        assert_eq!(sparse.selected, 2048);
+        assert_eq!(sparse.sort_width, 4096);
+        assert_eq!(sparse.initial_runs, 256);
+        assert_eq!(sparse.merge_passes, 8);
+        assert_eq!(sparse.candidate_capacity, 256 * 2048);
+        assert_eq!(sparse.shared_bytes, 4096 * 8);
+
+        let non_power_of_two = plan_dsa_topk(10_001, 1537).expect("generic top-k plan");
+        assert_eq!(non_power_of_two.selected, 1537);
+        assert_eq!(non_power_of_two.sort_width, 4096);
+        assert_eq!(non_power_of_two.initial_runs, 3);
+        assert_eq!(non_power_of_two.merge_passes, 2);
+        assert_eq!(non_power_of_two.candidate_capacity, 3 * 1537);
+        assert!(plan_dsa_topk(0, 2048).is_err());
+        assert!(plan_dsa_topk(2048, 0).is_err());
+    }
 
     #[test]
     fn owner_and_shared_contracts_are_fail_closed() {
@@ -7660,6 +7760,7 @@ mod dsa_registration_tests {
         }
 
         let mut store = GpuDecodeStore::new(0).expect("CUDA decode store");
+        let selector_max_context = 1_048_576usize;
         store
             .configure(4, 1, 8, 1e-6, 2, 4, 8, 4, 4, 8, 8)
             .expect("small graph");
@@ -7701,7 +7802,7 @@ mod dsa_registration_tests {
             )
             .expect("MLA metadata");
         store
-            .register_dsa_indexer_layer(0, 0, true, 4, 4, 2, 2, 4, 0, 4, 4, false)
+            .register_dsa_indexer_layer(0, 0, true, 2048, 4, 2, 2, 4, 0, 4, 4, false)
             .expect("DSA owner metadata");
 
         let mut wq_b_values = identity(8, 4);
@@ -7752,7 +7853,7 @@ mod dsa_registration_tests {
                 weights_proj_wid,
                 k_norm_weight_wid,
                 k_norm_bias_wid,
-                4,
+                selector_max_context,
             )
             .expect("owner resource");
         store
@@ -7872,6 +7973,131 @@ mod dsa_registration_tests {
                 scores[token],
                 expected
             );
+        }
+
+        let mut selector_scores = (0..selector_max_context)
+            .map(|token| {
+                let mixed = ((token as u64 * 7_919 + 104_729) % 1_000_003) as f32;
+                mixed / 1_000_003.0 - (token % 13) as f32 * 0.000_001
+            })
+            .collect::<Vec<_>>();
+        selector_scores[17] = selector_scores[11];
+        let score_ptr = *store
+            .graph
+            .as_ref()
+            .expect("graph")
+            .dsa_indexer_workspace
+            .as_ref()
+            .expect("workspace")
+            .d_scores
+            .device_ptr();
+        for context in [
+            1usize,
+            1537,
+            2048,
+            2049,
+            5003,
+            10_000,
+            100_000,
+            selector_max_context,
+        ] {
+            let copy_result = unsafe {
+                cuda_sys::lib().cuMemcpyHtoD_v2(
+                    score_ptr,
+                    selector_scores.as_ptr() as *const std::ffi::c_void,
+                    selector_scores.len() * std::mem::size_of::<f32>(),
+                )
+            };
+            assert_eq!(
+                copy_result,
+                cuda_sys::CUresult::CUDA_SUCCESS,
+                "selector score upload at context {}",
+                context
+            );
+            let plan = store
+                .execute_dsa_owner_topk(0, context)
+                .expect("GPU DSA top-k");
+            assert_eq!(plan.selected, context.min(2048));
+            let selected = store
+                .device
+                .dtoh_sync_copy(
+                    &store.graph.as_ref().expect("graph").dsa_indexer_owners[0].d_topk_indices,
+                )
+                .expect("top-k indices D2H");
+            let mut expected = (0..context).collect::<Vec<_>>();
+            expected.sort_unstable_by(|left, right| {
+                selector_scores[*right]
+                    .total_cmp(&selector_scores[*left])
+                    .then_with(|| left.cmp(right))
+            });
+            let expected = expected
+                .into_iter()
+                .take(plan.selected)
+                .map(|index| index as i32)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                &selected[..plan.selected],
+                expected.as_slice(),
+                "top-k mismatch at context {} plan {:?}",
+                context,
+                plan
+            );
+        }
+
+        let timed_contexts = [2048usize, 2049, 5003, 10_000, 100_000, selector_max_context];
+        for context in timed_contexts {
+            let iterations = if context >= 100_000 { 5usize } else { 20usize };
+            let copy_result = unsafe {
+                cuda_sys::lib().cuMemcpyHtoD_v2(
+                    score_ptr,
+                    selector_scores.as_ptr() as *const std::ffi::c_void,
+                    selector_scores.len() * std::mem::size_of::<f32>(),
+                )
+            };
+            assert_eq!(
+                copy_result,
+                cuda_sys::CUresult::CUDA_SUCCESS,
+                "timed selector score upload at context {}",
+                context
+            );
+            let start = create_decode_timing_event().expect("top-k start event");
+            let end = create_decode_timing_event().expect("top-k end event");
+            let stream = *store.device.cu_stream();
+            let start_result = unsafe { cuda_sys::lib().cuEventRecord(start.0, stream) };
+            assert_eq!(start_result, cuda_sys::CUresult::CUDA_SUCCESS);
+            let mut plan = None;
+            for _ in 0..iterations {
+                plan = Some(
+                    store
+                        .execute_dsa_owner_topk(0, context)
+                        .expect("timed GPU DSA top-k"),
+                );
+            }
+            let end_result = unsafe { cuda_sys::lib().cuEventRecord(end.0, stream) };
+            assert_eq!(end_result, cuda_sys::CUresult::CUDA_SUCCESS);
+            let sync_result = unsafe { cuda_sys::lib().cuEventSynchronize(end.0) };
+            assert_eq!(sync_result, cuda_sys::CUresult::CUDA_SUCCESS);
+            let mut elapsed_ms = 0.0f32;
+            let elapsed_result =
+                unsafe { cuda_sys::lib().cuEventElapsedTime(&mut elapsed_ms, start.0, end.0) };
+            assert_eq!(elapsed_result, cuda_sys::CUresult::CUDA_SUCCESS);
+            let plan = plan.expect("timed plan");
+            eprintln!(
+                "DSA_TOPK_GPU context={} selected={} sort_width={} initial_runs={} merge_passes={} candidate_capacity={} shared_bytes={} iterations={} mean_ms={:.6}",
+                context,
+                plan.selected,
+                plan.sort_width,
+                plan.initial_runs,
+                plan.merge_passes,
+                plan.candidate_capacity,
+                plan.shared_bytes,
+                iterations,
+                elapsed_ms as f64 / iterations as f64,
+            );
+            unsafe {
+                let _ = cuda_sys::lib().cuEventDestroy_v2(start.0);
+                let _ = cuda_sys::lib().cuEventDestroy_v2(end.0);
+            }
         }
     }
 }
@@ -9688,6 +9914,8 @@ struct CachedKernels {
     dsa_layernorm_rope_key_write: cudarc::driver::CudaFunction,
     dsa_rope_query_bf16: cudarc::driver::CudaFunction,
     dsa_reduce_weighted_scores: cudarc::driver::CudaFunction,
+    dsa_topk_sort_chunks: cudarc::driver::CudaFunction,
+    dsa_topk_merge_runs: cudarc::driver::CudaFunction,
     embedding_lookup: cudarc::driver::CudaFunction,
     marlin_gemv_int4: cudarc::driver::CudaFunction,
     fused_silu_accum: cudarc::driver::CudaFunction,
@@ -16440,6 +16668,8 @@ impl GpuDecodeStore {
                 dsa_layernorm_rope_key_write: get("dsa_layernorm_rope_key_write")?,
                 dsa_rope_query_bf16: get("dsa_rope_query_bf16")?,
                 dsa_reduce_weighted_scores: get("dsa_reduce_weighted_scores")?,
+                dsa_topk_sort_chunks: get("dsa_topk_sort_chunks")?,
+                dsa_topk_merge_runs: get("dsa_topk_merge_runs")?,
                 embedding_lookup: get("embedding_lookup")?,
                 marlin_gemv_int4: get("marlin_gemv_int4")?,
                 fused_silu_accum: get("marlin_gemv_int4_fused_silu_accum")?,
@@ -21179,6 +21409,8 @@ impl GpuDecodeStore {
             max_index_head_dim,
             query_elems,
             head_score_elems,
+            max_topk_candidate_capacity,
+            max_topk_shared_bytes,
         ) = {
             let graph = self
                 .graph
@@ -21254,6 +21486,25 @@ impl GpuDecodeStore {
                         "DSA head-score workspace size overflow",
                     )
                 })?;
+            let mut max_topk_candidate_capacity = 0usize;
+            let mut max_topk_shared_bytes = 0usize;
+            for resource in &graph.dsa_indexer_owners {
+                let registration = active_registrations
+                    .iter()
+                    .copied()
+                    .find(|registration| registration.owner_layer_idx == resource.owner_layer_idx)
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "DSA owner {} has no active registration during workspace planning",
+                            resource.owner_layer_idx
+                        ))
+                    })?;
+                let plan = plan_dsa_topk(resource.max_context_tokens, registration.index_topk)
+                    .map_err(pyo3::exceptions::PyValueError::new_err)?;
+                max_topk_candidate_capacity =
+                    max_topk_candidate_capacity.max(plan.candidate_capacity);
+                max_topk_shared_bytes = max_topk_shared_bytes.max(plan.shared_bytes);
+            }
             (
                 available.len(),
                 max_context_tokens,
@@ -21261,8 +21512,73 @@ impl GpuDecodeStore {
                 max_index_head_dim,
                 query_elems,
                 head_score_elems,
+                max_topk_candidate_capacity,
+                max_topk_shared_bytes,
             )
         };
+
+        let mut default_shared_bytes = 0i32;
+        let mut optin_shared_bytes = 0i32;
+        unsafe {
+            let default_result = cuda_sys::lib().cuDeviceGetAttribute(
+                &mut default_shared_bytes,
+                cuda_sys::CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK,
+                self.device.ordinal() as i32,
+            );
+            let optin_result = cuda_sys::lib().cuDeviceGetAttribute(
+                &mut optin_shared_bytes,
+                cuda_sys::CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN,
+                self.device.ordinal() as i32,
+            );
+            if default_result != cuda_sys::CUresult::CUDA_SUCCESS
+                || optin_result != cuda_sys::CUresult::CUDA_SUCCESS
+            {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "query DSA top-k shared-memory limits: default={:?} optin={:?}",
+                    default_result, optin_result
+                )));
+            }
+        }
+        if max_topk_shared_bytes > optin_shared_bytes.max(0) as usize {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "DSA top-k requires {} shared-memory bytes but GPU {} supports {} opt-in bytes",
+                max_topk_shared_bytes,
+                self.device.ordinal(),
+                optin_shared_bytes.max(0)
+            )));
+        }
+        if max_topk_shared_bytes > default_shared_bytes.max(0) as usize {
+            let graph = self
+                .graph
+                .as_ref()
+                .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
+            let kernels = graph.kernels.as_ref().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("DSA kernels are not cached")
+            })?;
+            for (name, function) in [
+                ("dsa_topk_sort_chunks", &kernels.dsa_topk_sort_chunks),
+                ("dsa_topk_merge_runs", &kernels.dsa_topk_merge_runs),
+            ] {
+                let result = unsafe {
+                    cuda_sys::lib().cuFuncSetAttribute(
+                        extract_cu_function(function),
+                        cuda_sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                        i32::try_from(max_topk_shared_bytes).map_err(|_| {
+                            pyo3::exceptions::PyOverflowError::new_err(format!(
+                                "DSA top-k shared-memory size {} exceeds native i32",
+                                max_topk_shared_bytes
+                            ))
+                        })?,
+                    )
+                };
+                if result != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "configure {} for {} shared-memory bytes: {:?}",
+                        name, max_topk_shared_bytes, result
+                    )));
+                }
+            }
+        }
 
         let alloc_u16 = |elements: usize, name: &str| {
             self.device.alloc_zeros::<u16>(elements).map_err(|error| {
@@ -21284,12 +21600,58 @@ impl GpuDecodeStore {
             max_context_tokens,
             max_index_n_heads,
             max_index_head_dim,
+            max_topk_candidate_capacity,
+            max_topk_shared_bytes,
             d_raw_key: alloc_u16(max_index_head_dim, "raw key")?,
             d_projected_query: alloc_u16(query_elems, "projected query")?,
             d_query_rope: alloc_u16(query_elems, "RoPE query")?,
             d_head_weights: alloc_u16(max_index_n_heads, "head weights")?,
             d_head_scores: alloc_f32(head_score_elems, "per-head scores")?,
             d_scores: alloc_f32(max_context_tokens, "reduced scores")?,
+            d_topk_scores_a: if max_topk_candidate_capacity > 0 {
+                Some(alloc_f32(
+                    max_topk_candidate_capacity,
+                    "top-k candidate scores A",
+                )?)
+            } else {
+                None
+            },
+            d_topk_scores_b: if max_topk_candidate_capacity > 0 {
+                Some(alloc_f32(
+                    max_topk_candidate_capacity,
+                    "top-k candidate scores B",
+                )?)
+            } else {
+                None
+            },
+            d_topk_indices_a: if max_topk_candidate_capacity > 0 {
+                Some(
+                    self.device
+                        .alloc_zeros::<i32>(max_topk_candidate_capacity)
+                        .map_err(|error| {
+                            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                "alloc DSA top-k candidate indices A [{} x i32]: {:?}",
+                                max_topk_candidate_capacity, error
+                            ))
+                        })?,
+                )
+            } else {
+                None
+            },
+            d_topk_indices_b: if max_topk_candidate_capacity > 0 {
+                Some(
+                    self.device
+                        .alloc_zeros::<i32>(max_topk_candidate_capacity)
+                        .map_err(|error| {
+                            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                "alloc DSA top-k candidate indices B [{} x i32]: {:?}",
+                                max_topk_candidate_capacity, error
+                            ))
+                        })?,
+                )
+            } else {
+                None
+            },
         };
         let graph = self
             .graph
@@ -21297,11 +21659,13 @@ impl GpuDecodeStore {
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
         graph.dsa_indexer_workspace = Some(workspace);
         log::info!(
-            "GpuDecodeStore: finalized DSA workspace (context={}, heads={}, head_dim={}, head_scores={})",
+            "GpuDecodeStore: finalized DSA workspace (context={}, heads={}, head_dim={}, head_scores={}, topk_candidates={}, topk_shared_bytes={})",
             max_context_tokens,
             max_index_n_heads,
             max_index_head_dim,
             head_score_elems,
+            max_topk_candidate_capacity,
+            max_topk_shared_bytes,
         );
         Ok(available_count)
     }
@@ -21348,6 +21712,8 @@ impl GpuDecodeStore {
                     workspace.max_index_n_heads,
                     workspace.max_context_tokens,
                 ],
+                "topk_candidate_capacity": workspace.max_topk_candidate_capacity,
+                "topk_shared_bytes": workspace.max_topk_shared_bytes,
             })),
             "resource": resource.map(|resource| serde_json::json!({
                 "owner_layer_idx": resource.owner_layer_idx,
@@ -24861,6 +25227,220 @@ impl GpuDecodeStore {
                 })?;
         }
         Ok(context)
+    }
+
+    fn execute_dsa_owner_topk(
+        &self,
+        owner_layer_idx: usize,
+        context: usize,
+    ) -> Result<DsaTopkPlan, String> {
+        let graph = self.graph.as_ref().ok_or("Call configure first")?;
+        let registration = graph
+            .layers
+            .iter()
+            .filter_map(|layer| layer.dsa_indexer.as_ref())
+            .find(|registration| registration.owner_layer_idx == owner_layer_idx)
+            .ok_or_else(|| {
+                format!(
+                    "DSA owner layer {} has no active registration",
+                    owner_layer_idx
+                )
+            })?;
+        let resource = graph
+            .dsa_indexer_owners
+            .iter()
+            .find(|resource| resource.owner_layer_idx == owner_layer_idx)
+            .ok_or_else(|| format!("DSA owner layer {} resource is absent", owner_layer_idx))?;
+        if context > resource.max_context_tokens {
+            return Err(format!(
+                "DSA owner layer {} top-k context {} exceeds resource context {}",
+                owner_layer_idx, context, resource.max_context_tokens
+            ));
+        }
+        let plan = plan_dsa_topk(context, registration.index_topk)?;
+        if plan.selected > resource.topk_capacity {
+            return Err(format!(
+                "DSA owner layer {} selected count {} exceeds retained top-k capacity {}",
+                owner_layer_idx, plan.selected, resource.topk_capacity
+            ));
+        }
+        let workspace = graph
+            .dsa_indexer_workspace
+            .as_ref()
+            .ok_or("DSA indexer workspace is not finalized")?;
+        if context > workspace.max_context_tokens
+            || plan.candidate_capacity > workspace.max_topk_candidate_capacity
+            || plan.shared_bytes > workspace.max_topk_shared_bytes
+        {
+            return Err(format!(
+                "DSA owner {} top-k plan exceeds finalized workspace: plan=[context={}, candidates={}, shared={}] workspace=[context={}, candidates={}, shared={}]",
+                owner_layer_idx,
+                context,
+                plan.candidate_capacity,
+                plan.shared_bytes,
+                workspace.max_context_tokens,
+                workspace.max_topk_candidate_capacity,
+                workspace.max_topk_shared_bytes,
+            ));
+        }
+        let context_i32 = i32::try_from(context)
+            .map_err(|_| format!("DSA top-k context {} exceeds native i32 range", context))?;
+        let selected_i32 = i32::try_from(plan.selected).map_err(|_| {
+            format!(
+                "DSA selected top-k {} exceeds native i32 range",
+                plan.selected
+            )
+        })?;
+        let sort_width_i32 = i32::try_from(plan.sort_width).map_err(|_| {
+            format!(
+                "DSA top-k sort width {} exceeds native i32 range",
+                plan.sort_width
+            )
+        })?;
+        let initial_runs_u32 = u32::try_from(plan.initial_runs).map_err(|_| {
+            format!(
+                "DSA top-k initial run count {} exceeds native u32 range",
+                plan.initial_runs
+            )
+        })?;
+        let shared_bytes_u32 = u32::try_from(plan.shared_bytes).map_err(|_| {
+            format!(
+                "DSA top-k shared-memory size {} exceeds native u32 range",
+                plan.shared_bytes
+            )
+        })?;
+        let block_threads = u32::try_from(plan.sort_width.min(256).max(1))
+            .map_err(|_| "DSA top-k block width exceeds native u32 range".to_string())?;
+        let kernels = graph.kernels.as_ref().ok_or("kernels not cached")?;
+
+        let (base_scores_ptr, base_indices_ptr) = if plan.initial_runs == 1 {
+            (
+                *workspace.d_scores.device_ptr(),
+                *resource.d_topk_indices.device_ptr(),
+            )
+        } else {
+            let scores = workspace
+                .d_topk_scores_a
+                .as_ref()
+                .ok_or("DSA top-k score workspace A is absent")?;
+            let indices = workspace
+                .d_topk_indices_a
+                .as_ref()
+                .ok_or("DSA top-k index workspace A is absent")?;
+            (*scores.device_ptr(), *indices.device_ptr())
+        };
+        unsafe {
+            kernels
+                .dsa_topk_sort_chunks
+                .clone()
+                .launch(
+                    LaunchConfig {
+                        grid_dim: (initial_runs_u32, 1, 1),
+                        block_dim: (block_threads, 1, 1),
+                        shared_mem_bytes: shared_bytes_u32,
+                    },
+                    (
+                        *workspace.d_scores.device_ptr(),
+                        base_scores_ptr,
+                        base_indices_ptr,
+                        context_i32,
+                        selected_i32,
+                        sort_width_i32,
+                    ),
+                )
+                .map_err(|error| {
+                    format!(
+                        "DSA owner {} top-k base sort (context={}, selected={}, runs={}): {:?}",
+                        owner_layer_idx, context, plan.selected, plan.initial_runs, error
+                    )
+                })?;
+        }
+
+        if plan.initial_runs > 1 {
+            let scores_a = workspace
+                .d_topk_scores_a
+                .as_ref()
+                .ok_or("DSA top-k score workspace A is absent")?;
+            let scores_b = workspace
+                .d_topk_scores_b
+                .as_ref()
+                .ok_or("DSA top-k score workspace B is absent")?;
+            let indices_a = workspace
+                .d_topk_indices_a
+                .as_ref()
+                .ok_or("DSA top-k index workspace A is absent")?;
+            let indices_b = workspace
+                .d_topk_indices_b
+                .as_ref()
+                .ok_or("DSA top-k index workspace B is absent")?;
+            let mut input_runs = plan.initial_runs;
+            let mut input_is_a = true;
+            while input_runs > 1 {
+                let output_runs = input_runs.div_ceil(2);
+                let input_runs_i32 = i32::try_from(input_runs).map_err(|_| {
+                    format!(
+                        "DSA top-k merge run count {} exceeds native i32 range",
+                        input_runs
+                    )
+                })?;
+                let output_runs_u32 = u32::try_from(output_runs).map_err(|_| {
+                    format!(
+                        "DSA top-k output run count {} exceeds native u32 range",
+                        output_runs
+                    )
+                })?;
+                let (input_scores_ptr, input_indices_ptr, output_scores_ptr) = if input_is_a {
+                    (
+                        *scores_a.device_ptr(),
+                        *indices_a.device_ptr(),
+                        *scores_b.device_ptr(),
+                    )
+                } else {
+                    (
+                        *scores_b.device_ptr(),
+                        *indices_b.device_ptr(),
+                        *scores_a.device_ptr(),
+                    )
+                };
+                let output_indices_ptr = if output_runs == 1 {
+                    *resource.d_topk_indices.device_ptr()
+                } else if input_is_a {
+                    *indices_b.device_ptr()
+                } else {
+                    *indices_a.device_ptr()
+                };
+                unsafe {
+                    kernels
+                        .dsa_topk_merge_runs
+                        .clone()
+                        .launch(
+                            LaunchConfig {
+                                grid_dim: (output_runs_u32, 1, 1),
+                                block_dim: (block_threads, 1, 1),
+                                shared_mem_bytes: shared_bytes_u32,
+                            },
+                            (
+                                input_scores_ptr,
+                                input_indices_ptr,
+                                output_scores_ptr,
+                                output_indices_ptr,
+                                input_runs_i32,
+                                selected_i32,
+                                sort_width_i32,
+                            ),
+                        )
+                        .map_err(|error| {
+                            format!(
+                                "DSA owner {} top-k merge (input_runs={}, output_runs={}): {:?}",
+                                owner_layer_idx, input_runs, output_runs, error
+                            )
+                        })?;
+                }
+                input_runs = output_runs;
+                input_is_a = !input_is_a;
+            }
+        }
+        Ok(plan)
     }
 
     /// Set KV cache position after Rust prefill (no GIL needed).

@@ -170,6 +170,21 @@ def _dsa_owner_layers_for_segment(
     return sorted(int(owner) for owner in owners)
 
 
+def _dsa_topk_candidate_capacity(context: int, configured_topk: int) -> int:
+    """Exact shared ping-pong capacity used by the native DSA selector."""
+    if context <= 0 or configured_topk <= 0:
+        raise ValueError(
+            "DSA top-k planning requires positive context and configured top-k"
+        )
+    selected = min(context, configured_topk)
+    if context <= selected:
+        return 0
+    padded_selected = 1 << (selected - 1).bit_length()
+    sort_width = padded_selected * 2
+    initial_runs = (context + sort_width - 1) // sort_width
+    return initial_runs * selected if initial_runs > 1 else 0
+
+
 # GPU-to-GPU P2P transfer may silently fail on some systems (returns zeros).
 # Detect this once at import time and use CPU bounce if needed.
 _p2p_works: Optional[bool] = None
@@ -5083,6 +5098,13 @@ class KrasisModel:
         total += self.cfg.index_n_heads * 2
         total += max_context_tokens * self.cfg.index_n_heads * 4
         total += max_context_tokens * 4
+        # Two FP32-score and two int32-index arrays are ping-ponged across
+        # hierarchical merge passes. They are store-shared, not per owner.
+        topk_candidates = _dsa_topk_candidate_capacity(
+            max_context_tokens,
+            self.cfg.index_topk,
+        )
+        total += topk_candidates * (4 + 4) * 2
         return int(total)
 
     def _register_hqq_attention_layers_on_store(

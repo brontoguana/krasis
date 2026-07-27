@@ -5,6 +5,7 @@
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
+#include <limits.h>
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
@@ -985,6 +986,123 @@ extern "C" __global__ void dsa_reduce_weighted_scores(
         score += bf16_to_f32(head_weights[head]) * fmaxf(dot, 0.0f);
     }
     output[token] = score;
+}
+
+// Exact DSA top-k selection is performed as a hierarchy of shared-memory
+// bitonic sorts. A base block sorts one power-of-two score tile and retains
+// only its local top-k. Pairwise merge blocks then retain top-k from two
+// already-pruned runs until one run remains. Discarding values below a run's
+// local top-k is exact because no global top-k can contain more than top-k
+// values from that run.
+//
+// Score ties are resolved by lower token index so test and trace output is
+// deterministic. Padding uses (-inf, INT_MAX) and therefore always sorts last.
+__device__ inline bool dsa_topk_precedes(
+    float lhs_score,
+    int lhs_index,
+    float rhs_score,
+    int rhs_index
+) {
+    if (lhs_score > rhs_score) return true;
+    if (lhs_score < rhs_score) return false;
+    return lhs_index < rhs_index;
+}
+
+__device__ inline void dsa_topk_bitonic_sort(
+    float* scores,
+    int* indices,
+    int width
+) {
+    for (int sequence = 2; sequence <= width; sequence <<= 1) {
+        for (int stride = sequence >> 1; stride > 0; stride >>= 1) {
+            for (int left = threadIdx.x; left < width; left += blockDim.x) {
+                int right = left ^ stride;
+                if (right <= left) continue;
+                bool descending = (left & sequence) == 0;
+                bool right_precedes = dsa_topk_precedes(
+                    scores[right], indices[right], scores[left], indices[left]);
+                bool left_precedes = dsa_topk_precedes(
+                    scores[left], indices[left], scores[right], indices[right]);
+                bool swap = descending ? right_precedes : left_precedes;
+                if (swap) {
+                    float score = scores[left];
+                    scores[left] = scores[right];
+                    scores[right] = score;
+                    int index = indices[left];
+                    indices[left] = indices[right];
+                    indices[right] = index;
+                }
+            }
+            __syncthreads();
+        }
+    }
+}
+
+extern "C" __global__ void dsa_topk_sort_chunks(
+    const float* __restrict__ input_scores,
+    float* __restrict__ output_scores,
+    int* __restrict__ output_indices,
+    int context,
+    int topk,
+    int sort_width
+) {
+    if (context <= 0 || topk <= 0 || sort_width < topk ||
+        (sort_width & (sort_width - 1)) != 0) {
+        return;
+    }
+    extern __shared__ unsigned char shared_raw[];
+    float* shared_scores = reinterpret_cast<float*>(shared_raw);
+    int* shared_indices = reinterpret_cast<int*>(shared_scores + sort_width);
+    int input_base = blockIdx.x * sort_width;
+    for (int item = threadIdx.x; item < sort_width; item += blockDim.x) {
+        int token = input_base + item;
+        shared_scores[item] = token < context ? input_scores[token] : -INFINITY;
+        shared_indices[item] = token < context ? token : INT_MAX;
+    }
+    __syncthreads();
+    dsa_topk_bitonic_sort(shared_scores, shared_indices, sort_width);
+
+    int output_base = blockIdx.x * topk;
+    for (int item = threadIdx.x; item < topk; item += blockDim.x) {
+        output_scores[output_base + item] = shared_scores[item];
+        output_indices[output_base + item] = shared_indices[item];
+    }
+}
+
+extern "C" __global__ void dsa_topk_merge_runs(
+    const float* __restrict__ input_scores,
+    const int* __restrict__ input_indices,
+    float* __restrict__ output_scores,
+    int* __restrict__ output_indices,
+    int input_runs,
+    int topk,
+    int sort_width
+) {
+    if (input_runs <= 0 || topk <= 0 || sort_width < 2 * topk ||
+        (sort_width & (sort_width - 1)) != 0) {
+        return;
+    }
+    extern __shared__ unsigned char shared_raw[];
+    float* shared_scores = reinterpret_cast<float*>(shared_raw);
+    int* shared_indices = reinterpret_cast<int*>(shared_scores + sort_width);
+    int first_run = blockIdx.x * 2;
+    int second_run = first_run + 1;
+    for (int item = threadIdx.x; item < sort_width; item += blockDim.x) {
+        int source_run = item < topk ? first_run : second_run;
+        int source_item = item < topk ? item : item - topk;
+        bool valid = item < 2 * topk && source_run < input_runs;
+        int source = source_run * topk + source_item;
+        shared_scores[item] = valid ? input_scores[source] : -INFINITY;
+        shared_indices[item] = valid ? input_indices[source] : INT_MAX;
+    }
+    __syncthreads();
+    dsa_topk_bitonic_sort(shared_scores, shared_indices, sort_width);
+
+    int output_base = blockIdx.x * topk;
+    for (int item = threadIdx.x; item < topk; item += blockDim.x) {
+        output_scores[output_base + item] = shared_scores[item];
+        output_indices[output_base + item] = shared_indices[item];
+    }
 }
 
 // ── MLA (Multi-head Latent Attention) Decode Kernels ──────────────────
