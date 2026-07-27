@@ -683,6 +683,18 @@ class LauncherMatrixTest(unittest.TestCase):
             workflow_source,
         )
         self.assertNotIn("path: target/windows-fla-dll-cache", workflow_source)
+        self.assertIn(
+            "Expected Windows FLA DLL cache files:",
+            workflow_source,
+        )
+        self.assertIn(
+            "Actual Windows FLA DLL cache files:",
+            workflow_source,
+        )
+        self.assertIn(
+            "${{ runner.temp }}/krasis-windows-fla-dll-cache/**",
+            workflow_source,
+        )
         self.assertGreaterEqual(
             workflow_source.count(
                 'Join-Path $env:RUNNER_TEMP "krasis-windows-sidecar-release-cache"'

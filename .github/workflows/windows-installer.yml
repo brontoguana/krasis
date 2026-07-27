@@ -370,10 +370,22 @@ jobs:
                 ForEach-Object { $_.Name } |
                 Sort-Object
             )
+            $sortedExpectedCacheFiles = @($expectedCacheFiles | Sort-Object)
             if (
-              [string]::Join(",", @($expectedCacheFiles | Sort-Object)) -ne
+              [string]::Join(",", $sortedExpectedCacheFiles) -ne
               [string]::Join(",", $actualCacheFiles)
             ) {
+              Write-Host (
+                "Expected Windows FLA DLL cache files: " +
+                [string]::Join(",", $sortedExpectedCacheFiles)
+              )
+              Write-Host (
+                "Actual Windows FLA DLL cache files: " +
+                [string]::Join(",", $actualCacheFiles)
+              )
+              Get-ChildItem -Force -Recurse $flaDllCacheRoot |
+                Select-Object FullName,Name,Attributes,Length |
+                Format-Table -AutoSize
               throw "Restored Windows FLA DLL cache file inventory is invalid."
             }
             Write-Host "Restored exact-key Windows FLA DLL cache."
@@ -898,6 +910,7 @@ jobs:
             ${{ runner.temp }}/krasis-installer-test.log
             ${{ runner.temp }}/krasis-uninstaller-test.log
             ${{ runner.temp }}/krasis-private-runtime-test/runtime-install.log
+            ${{ runner.temp }}/krasis-windows-fla-dll-cache/**
 
   promote-tested-windows-release:
     if: github.event_name == 'release'
