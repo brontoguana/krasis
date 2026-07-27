@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Began GLM-5.2 support on an isolated feature branch. Added fail-closed
+  parsing and validation for the model's DSA/IndexShare configuration,
+  restored setup-only MLA tensor ownership for the native runtime, and enabled
+  HQQ MLA projection dispatch in ordinary and CUDA-graph single-sequence
+  decode. Python MLA inference remains unavailable by design; production
+  prefill, sparse attention, IndexShare execution, and long-context validation
+  are not yet implemented.
+
 ## 1.0.16 - 2026-07-27
 
 - Fixed invalid OpenAI-compatible JSON responses when a configured model name

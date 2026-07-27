@@ -27,6 +27,11 @@ PAGE_SIZE = 16  # tokens per page
 # TRTLLM kernel constraint: block_num % (128 / page_size) == 0
 TRTLLM_BLOCK_CONSTRAINT = 128
 
+# Native MLA decode kernels use a 512-wide compressed-KV tile. Models with a
+# smaller learned latent rank are zero-padded to this kernel contract; larger
+# learned ranks retain their actual dimension.
+MLA_CKV_KERNEL_MIN_DIM = 512
+
 
 class PagedKVCache:
     """Manages paged KV cache for a set of layers on one GPU.
@@ -99,10 +104,9 @@ class PagedKVCache:
 
         # Compute cache dimensions based on attention type
         if cfg.is_mla:
-            # MLA decode requires ckv_dim=512. Pad if kv_lora_rank < 512.
-            self.ckv_dim = max(cfg.kv_lora_rank, 512)  # ≥ 512
-            self.kpe_dim = cfg.qk_rope_head_dim    # 64
-            self.kv_cache_dim = self.ckv_dim + self.kpe_dim  # 576
+            self.ckv_dim = max(cfg.kv_lora_rank, MLA_CKV_KERNEL_MIN_DIM)
+            self.kpe_dim = cfg.qk_rope_head_dim
+            self.kv_cache_dim = self.ckv_dim + self.kpe_dim
             self.num_kv_heads = None
             self.gqa_head_dim = None
         else:

@@ -13,6 +13,7 @@ For MoE layers, shared expert and routed experts overlap on GPU and CPU respecti
 
 import json
 import logging
+import math
 import os
 import time
 from typing import Dict, Optional, Tuple
@@ -21,7 +22,11 @@ import numpy as np
 import torch
 
 from krasis.config import ModelConfig
-from krasis.kv_cache import PagedKVCache, SequenceKVState
+from krasis.kv_cache import (
+    MLA_CKV_KERNEL_MIN_DIM,
+    PagedKVCache,
+    SequenceKVState,
+)
 from krasis.weight_loader import int8_linear
 
 logger = logging.getLogger(__name__)
@@ -65,6 +70,71 @@ def _linear(x: torch.Tensor, weight_data) -> torch.Tensor:
     if isinstance(weight_data, tuple):
         return int8_linear(x, *weight_data)
     return torch.nn.functional.linear(x, weight_data)
+
+
+class NativeMLAWeights:
+    """Setup-only MLA tensor contract for the Rust/CUDA runtime.
+
+    This object owns no Python inference path. It retains the projection,
+    normalization, and absorbed KV-B tensors used during one-time Rust prefill
+    and decode registration.
+    """
+
+    def __init__(
+        self,
+        cfg: ModelConfig,
+        layer_idx: int,
+        weights: Dict,
+        device: torch.device,
+    ):
+        self.cfg = cfg
+        self.layer_idx = layer_idx
+        self.device = device
+        self.num_heads = cfg.num_attention_heads
+        self.qk_nope_dim = cfg.qk_nope_head_dim
+        self.qk_rope_dim = cfg.qk_rope_head_dim
+        self.v_head_dim = cfg.v_head_dim
+        self.kv_lora_rank = cfg.kv_lora_rank
+        self.q_lora_rank = cfg.q_lora_rank
+        self.has_q_lora = cfg.has_q_lora
+        self.head_dim = self.qk_nope_dim + self.qk_rope_dim
+
+        self.sm_scale = 1.0 / math.sqrt(self.head_dim)
+        rope_cfg = cfg.rope_scaling if isinstance(cfg.rope_scaling, dict) else {}
+        factor = float(rope_cfg.get("factor", 1.0))
+        if factor > 1.0:
+            mscale_all_dim = float(rope_cfg.get("mscale_all_dim", 0.0))
+            mscale = 0.1 * mscale_all_dim * math.log(factor) + 1.0
+            self.sm_scale *= mscale * mscale
+
+        if self.has_q_lora:
+            self.q_a_proj = weights["q_a_proj"]
+            self.q_b_proj = weights["q_b_proj"]
+            self.q_a_norm_weight = weights["q_a_layernorm"]
+        else:
+            self.q_proj = weights["q_proj"]
+
+        self.kv_a_proj = weights["kv_a_proj_with_mqa"]
+        self.o_proj = weights["o_proj"]
+        self.kv_a_norm_weight = weights["kv_a_layernorm"]
+
+        self.ckv_dim = max(self.kv_lora_rank, MLA_CKV_KERNEL_MIN_DIM)
+        pad_size = self.ckv_dim - self.kv_lora_rank
+        self.w_kc = (
+            torch.nn.functional.pad(weights["w_kc"], (0, pad_size))
+            if pad_size
+            else weights["w_kc"]
+        )
+        self.w_vc = (
+            torch.nn.functional.pad(weights["w_vc"], (0, pad_size))
+            if pad_size
+            else weights["w_vc"]
+        )
+
+    def forward(self, *_args, **_kwargs):
+        raise RuntimeError(
+            "MLA inference must run through the native Rust/CUDA runtime"
+        )
 
 
 class TransformerLayer:
@@ -124,11 +194,13 @@ class TransformerLayer:
             self.gqa_weights = weights.get("attention", {})
             self.mamba2_weights = None
         else:
-            # MLA attention — not currently supported
-            raise NotImplementedError(
-                "MLA attention is not currently supported. "
-                "DeepSeek models require native CUDA MLA kernels (not yet implemented)."
+            self.attention = NativeMLAWeights(
+                cfg,
+                layer_idx,
+                weights["attention"],
+                device,
             )
+            self.mamba2_weights = None
 
         # Latent MoE projections (Nemotron)
         self.latent_proj = weights.get("latent_proj")

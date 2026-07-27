@@ -540,6 +540,17 @@ class ModelConfig:
     qk_rope_head_dim: Optional[int] = None
     v_head_dim: Optional[int] = None
 
+    # DeepSeek Sparse Attention / IndexShare dimensions (GLM-MoE-DSA).
+    # Zero/None means the model does not use DSA.
+    index_topk: int = 0
+    index_head_dim: int = 0
+    index_n_heads: int = 0
+    index_topk_freq: int = 0
+    index_skip_topk_offset: int = 0
+    indexer_types: Optional[List[str]] = None
+    indexer_rope_interleave: bool = False
+    index_share_for_mtp_iteration: bool = False
+
     # GQA dimensions (None for MLA models)
     gqa_head_dim: Optional[int] = None    # per-head dim (e.g. 128 for Qwen3)
     global_head_dim: int = 0              # Gemma4 full-attention head dim
@@ -688,6 +699,61 @@ class ModelConfig:
         # Hybrid model: compute layer_types
         full_attn_interval = cfg.get("full_attention_interval", 0)
         num_layers = cfg["num_hidden_layers"]
+        index_topk = int(cfg.get("index_topk", 0) or 0)
+        index_head_dim = int(cfg.get("index_head_dim", 0) or 0)
+        index_n_heads = int(cfg.get("index_n_heads", 0) or 0)
+        index_topk_freq = int(cfg.get("index_topk_freq", 0) or 0)
+        index_skip_topk_offset = int(cfg.get("index_skip_topk_offset", 0) or 0)
+        raw_indexer_types = cfg.get("indexer_types")
+        if raw_indexer_types is None:
+            indexer_types = None
+        elif isinstance(raw_indexer_types, list):
+            indexer_types = [str(value) for value in raw_indexer_types]
+        else:
+            raise ValueError("indexer_types must be an array when present")
+        indexer_rope_interleave = bool(cfg.get("indexer_rope_interleave", False))
+        index_share_for_mtp_iteration = bool(
+            cfg.get("index_share_for_mtp_iteration", False)
+        )
+        if arch == "glm_moe_dsa":
+            required_positive = {
+                "index_topk": index_topk,
+                "index_head_dim": index_head_dim,
+                "index_n_heads": index_n_heads,
+                "index_topk_freq": index_topk_freq,
+            }
+            for field_name, value in required_positive.items():
+                if value <= 0:
+                    raise ValueError(
+                        f"{arch} requires positive {field_name}, got {value}"
+                    )
+            if index_skip_topk_offset < 0:
+                raise ValueError(
+                    "glm_moe_dsa index_skip_topk_offset must be non-negative"
+                )
+            if indexer_types is None or len(indexer_types) != num_layers:
+                actual_len = 0 if indexer_types is None else len(indexer_types)
+                raise ValueError(
+                    "glm_moe_dsa indexer_types length "
+                    f"{actual_len} != num_hidden_layers {num_layers}"
+                )
+            invalid_indexer_types = sorted(
+                {value for value in indexer_types if value not in ("full", "shared")}
+            )
+            if invalid_indexer_types:
+                raise ValueError(
+                    "glm_moe_dsa indexer_types contains unsupported values: "
+                    + ", ".join(invalid_indexer_types)
+                )
+            full_index_seen = False
+            for layer_idx, indexer_type in enumerate(indexer_types):
+                if indexer_type == "full":
+                    full_index_seen = True
+                elif not full_index_seen:
+                    raise ValueError(
+                        "glm_moe_dsa shared indexer at layer "
+                        f"{layer_idx} has no preceding full indexer"
+                    )
         layer_types = None
         moe_layer_indices = _parse_int_list(cfg.get("moe_layers_enum"), "moe_layers_enum", max_len=num_layers)
         if moe_layer_indices:
@@ -841,6 +907,15 @@ class ModelConfig:
             qk_nope_head_dim=cfg.get("qk_nope_head_dim") if is_mla else None,
             qk_rope_head_dim=cfg.get("qk_rope_head_dim") if is_mla else None,
             v_head_dim=cfg.get("v_head_dim") if is_mla else None,
+            # DSA / IndexShare fields
+            index_topk=index_topk,
+            index_head_dim=index_head_dim,
+            index_n_heads=index_n_heads,
+            index_topk_freq=index_topk_freq,
+            index_skip_topk_offset=index_skip_topk_offset,
+            indexer_types=indexer_types,
+            indexer_rope_interleave=indexer_rope_interleave,
+            index_share_for_mtp_iteration=index_share_for_mtp_iteration,
             # GQA fields (None for MLA)
             gqa_head_dim=cfg.get("head_dim") if not is_mla else None,
             global_head_dim=cfg.get("global_head_dim", 0),
@@ -929,6 +1004,11 @@ class ModelConfig:
     @property
     def is_gqa(self) -> bool:
         return self.kv_lora_rank is None
+
+    @property
+    def is_dsa(self) -> bool:
+        """True when the model uses DSA sparse attention and IndexShare."""
+        return self.model_type == "glm_moe_dsa"
 
     @property
     def num_moe_layers(self) -> int:

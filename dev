@@ -2085,6 +2085,17 @@ do_hqq_self_calibrate_test() {
     KRASIS_DEV_SCRIPT=1 run_repo_python "$SCRIPT_DIR/tests/test_hqq_self_calibrate.py"
 }
 
+do_model_config_test() {
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        echo "Usage: ./dev model-config-test"
+        echo "  Runs no-GPU model configuration contract tests."
+        return 0
+    fi
+    [[ $# -eq 0 ]] || err "model-config-test takes no arguments"
+    verify_repo_imports
+    KRASIS_DEV_SCRIPT=1 run_repo_python "$SCRIPT_DIR/tests/test_model_config.py"
+}
+
 do_hqq_gpu_search_probe() {
     if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
         echo "Usage: ./dev hqq-gpu-search-probe [--model q122b|q35b|qcn] [--layer N]"
@@ -3250,6 +3261,7 @@ case "$cmd" in
     hqq-attn-diff) do_hqq_attn_diff "$@" ;;
     hqq-self-calibrate) do_hqq_self_calibrate "$@" ;;
     hqq-self-calibrate-test) do_hqq_self_calibrate_test "$@" ;;
+    model-config-test) do_model_config_test "$@" ;;
     hqq-gpu-search-probe) do_hqq_gpu_search_probe "$@" ;;
     expert-hqq-cache-generate) do_expert_hqq_cache_generate "$@" ;;
     expert-hqq-trace-compare) do_expert_hqq_trace_compare "$@" ;;
@@ -3297,6 +3309,7 @@ case "$cmd" in
         echo "  awq-calibrate <config>         Deprecated AWQ calibration command (disabled)"
         echo ""
         echo "Test and validation commands:"
+        echo "  model-config-test              Run no-GPU model config contract tests"
         echo "  test <config>                  Short model test (benchmark + network tests)"
         echo "  test <config> --thorough       Thorough test (+ stress + large prompts)"
         echo "  network <port> [--large]       Run network tests against a running server"

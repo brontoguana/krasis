@@ -7707,8 +7707,20 @@ fn hqq_decode_dispatch_error(
             }
         }
         HqqExecutionDescriptor::Mla(desc) => format!(
-            "HQQ decode {} execution is not enabled yet at layer {} (slot-backed HQQ runtime prepared; registered kind=mla backend={} nbits={} format_v{} kv_a_proj_rows={} kv_a_proj_cols={})",
-            expected_kind, layer_idx, desc.backend, desc.nbits, desc.format_version, desc.kv_a_proj_with_mqa.rows, desc.kv_a_proj_with_mqa.cols
+            "HQQ decode {} execution is not ready for the current MLA path at layer {} (slot-backed HQQ runtime prepared; registered kind=mla backend={} nbits={} format_v{} q_lora_rank={} q_a_ready={} q_b_ready={} q_ready={} kv_a_ready={} o_ready={} kv_a_proj_rows={} kv_a_proj_cols={})",
+            expected_kind,
+            layer_idx,
+            desc.backend,
+            desc.nbits,
+            desc.format_version,
+            desc.q_lora_rank,
+            desc.q_a_proj.as_ref().map_or(false, |tensor| tensor.kernel_ready),
+            desc.q_b_proj.as_ref().map_or(false, |tensor| tensor.kernel_ready),
+            desc.q_proj.as_ref().map_or(false, |tensor| tensor.kernel_ready),
+            desc.kv_a_proj_with_mqa.kernel_ready,
+            desc.o_proj.kernel_ready,
+            desc.kv_a_proj_with_mqa.rows,
+            desc.kv_a_proj_with_mqa.cols
         ),
         HqqExecutionDescriptor::LinearAttention(desc) => format!(
             "HQQ decode {} execution is not enabled yet at layer {} (slot-backed HQQ runtime prepared; registered kind=linear_attention backend={} nbits={} format_v{} in_proj_qkvz_rows={} in_proj_qkvz_cols={})",
@@ -7779,6 +7791,63 @@ fn hqq_gqa_fused_decode_ready(
 
 fn hqq_linear_attention_decode_ready(desc: &HqqLinearAttentionExecutionDescriptor) -> bool {
     desc.in_proj_qkvz.kernel_ready && desc.in_proj_ba.kernel_ready && desc.out_proj.kernel_ready
+}
+
+fn hqq_mla_decode_ready(
+    desc: &HqqMlaExecutionDescriptor,
+    hidden_size: usize,
+    num_heads: usize,
+    kv_lora_rank: usize,
+    qk_nope_dim: usize,
+    qk_rope_dim: usize,
+    v_head_dim: usize,
+    q_lora_rank: usize,
+) -> bool {
+    let Some(q_head_dim) = qk_nope_dim.checked_add(qk_rope_dim) else {
+        return false;
+    };
+    let Some(q_rows) = num_heads.checked_mul(q_head_dim) else {
+        return false;
+    };
+    let Some(o_cols) = num_heads.checked_mul(v_head_dim) else {
+        return false;
+    };
+    let Some(kv_rows) = kv_lora_rank.checked_add(qk_rope_dim) else {
+        return false;
+    };
+    let query_ready = if q_lora_rank > 0 {
+        matches!(
+            (desc.q_a_proj.as_ref(), desc.q_b_proj.as_ref()),
+            (Some(q_a), Some(q_b))
+                if q_a.kernel_ready
+                    && q_b.kernel_ready
+                    && q_a.rows == q_lora_rank
+                    && q_a.cols == hidden_size
+                    && q_b.rows == q_rows
+                    && q_b.cols == q_lora_rank
+        )
+    } else {
+        matches!(
+            desc.q_proj.as_ref(),
+            Some(q)
+                if q.kernel_ready
+                    && q.rows == q_rows
+                    && q.cols == hidden_size
+        )
+    };
+    query_ready
+        && desc.kv_a_proj_with_mqa.kernel_ready
+        && desc.kv_a_proj_with_mqa.rows == kv_rows
+        && desc.kv_a_proj_with_mqa.cols == hidden_size
+        && desc.o_proj.kernel_ready
+        && desc.o_proj.rows == hidden_size
+        && desc.o_proj.cols == o_cols
+        && desc.num_heads == num_heads
+        && desc.kv_lora_rank == kv_lora_rank
+        && desc.qk_nope_dim == qk_nope_dim
+        && desc.qk_rope_dim == qk_rope_dim
+        && desc.v_head_dim == v_head_dim
+        && desc.q_lora_rank == q_lora_rank
 }
 
 fn validate_hqq4_tensor_desc(
@@ -32345,9 +32414,93 @@ impl GpuDecodeStore {
                         let rope = *qk_rope_dim;
                         let vhd = *v_head_dim;
                         let q_head_dim = nope + rope;
+                        let hqq_mla_exec = match graph.layers[layer_idx].hqq_exec.as_ref() {
+                            Some(HqqExecutionDescriptor::Mla(desc))
+                                if hqq_mla_decode_ready(
+                                    desc,
+                                    graph.hidden_size,
+                                    nh,
+                                    klr,
+                                    nope,
+                                    rope,
+                                    vhd,
+                                    *q_lora_rank,
+                                ) =>
+                            {
+                                Some(desc.clone())
+                            }
+                            Some(exec) => {
+                                return Err(hqq_decode_dispatch_error(
+                                    layer_idx, "mla", exec, None,
+                                ));
+                            }
+                            None => None,
+                        };
 
                         // ── MLA Step 1: Q projection ──
-                        if let (Some(qa_id), Some(qb_id)) = (q_a_proj, q_b_proj) {
+                        if let Some(hqq_exec) = hqq_mla_exec.as_ref() {
+                            if *q_lora_rank > 0 {
+                                let qa = hqq_exec.q_a_proj.as_ref().ok_or_else(|| {
+                                    format!("HQQ MLA layer {} has no q_a_proj", layer_idx)
+                                })?;
+                                let qb = hqq_exec.q_b_proj.as_ref().ok_or_else(|| {
+                                    format!("HQQ MLA layer {} has no q_b_proj", layer_idx)
+                                })?;
+                                self.launch_hqq_decode_gemv_f32(
+                                    "q_a_proj",
+                                    qa,
+                                    *graph.d_hidden.device_ptr(),
+                                    *graph.d_gqa_q.device_ptr(),
+                                )?;
+                                {
+                                    let threads = 256u32;
+                                    let cfg = LaunchConfig {
+                                        grid_dim: (1, 1, 1),
+                                        block_dim: (threads, 1, 1),
+                                        shared_mem_bytes: 0,
+                                    };
+                                    unsafe {
+                                        k.per_head_rmsnorm
+                                            .clone()
+                                            .launch(
+                                                cfg,
+                                                (
+                                                    *graph.d_gqa_q.device_ptr(),
+                                                    *q_a_norm_ptr,
+                                                    eps,
+                                                    1i32,
+                                                    *q_lora_rank as i32,
+                                                    0i32,
+                                                ),
+                                            )
+                                            .map_err(|e| {
+                                                format!("mla q_a_norm[{}]: {:?}", layer_idx, e)
+                                            })?;
+                                    }
+                                }
+                                self.launch_fp32_to_bf16(
+                                    *graph.d_scratch.device_ptr(),
+                                    *graph.d_gqa_q.device_ptr(),
+                                    *q_lora_rank,
+                                )?;
+                                self.launch_hqq_decode_gemv_f32(
+                                    "q_b_proj",
+                                    qb,
+                                    *graph.d_scratch.device_ptr(),
+                                    *graph.d_gqa_q.device_ptr(),
+                                )?;
+                            } else {
+                                let q = hqq_exec.q_proj.as_ref().ok_or_else(|| {
+                                    format!("HQQ MLA layer {} has no q_proj", layer_idx)
+                                })?;
+                                self.launch_hqq_decode_gemv_f32(
+                                    "q_proj",
+                                    q,
+                                    *graph.d_hidden.device_ptr(),
+                                    *graph.d_gqa_q.device_ptr(),
+                                )?;
+                            }
+                        } else if let (Some(qa_id), Some(qb_id)) = (q_a_proj, q_b_proj) {
                             let qa_w = &graph.weights[*qa_id];
                             self.gemv_bf16_to_f32(
                                 qa_w,
@@ -32413,12 +32566,21 @@ impl GpuDecodeStore {
                         }
 
                         // ── MLA Step 2: KV projection + norm ──
-                        let kva_w = &graph.weights[*kv_a_proj];
-                        self.gemv_bf16_to_f32(
-                            kva_w,
-                            *graph.d_hidden.device_ptr(),
-                            *graph.d_mla_kv.device_ptr(),
-                        )?;
+                        if let Some(hqq_exec) = hqq_mla_exec.as_ref() {
+                            self.launch_hqq_decode_gemv_f32(
+                                "kv_a_proj_with_mqa",
+                                &hqq_exec.kv_a_proj_with_mqa,
+                                *graph.d_hidden.device_ptr(),
+                                *graph.d_mla_kv.device_ptr(),
+                            )?;
+                        } else {
+                            let kva_w = &graph.weights[*kv_a_proj];
+                            self.gemv_bf16_to_f32(
+                                kva_w,
+                                *graph.d_hidden.device_ptr(),
+                                *graph.d_mla_kv.device_ptr(),
+                            )?;
+                        }
                         {
                             let threads = 256u32;
                             let cfg = LaunchConfig {
@@ -32679,12 +32841,21 @@ impl GpuDecodeStore {
                         }
 
                         // ── MLA Step 10: O projection ──
-                        let ow = &graph.weights[*o_proj];
-                        self.gemv_bf16_internal(
-                            ow,
-                            *graph.d_scratch.device_ptr(),
-                            *graph.d_hidden.device_ptr(),
-                        )?;
+                        if let Some(hqq_exec) = hqq_mla_exec.as_ref() {
+                            self.launch_hqq_decode_gemv_bf16(
+                                "o_proj",
+                                &hqq_exec.o_proj,
+                                *graph.d_scratch.device_ptr(),
+                                *graph.d_hidden.device_ptr(),
+                            )?;
+                        } else {
+                            let ow = &graph.weights[*o_proj];
+                            self.gemv_bf16_internal(
+                                ow,
+                                *graph.d_scratch.device_ptr(),
+                                *graph.d_hidden.device_ptr(),
+                            )?;
+                        }
                     }
 
                     GpuAttnConfig::Mamba2 {
@@ -39134,9 +39305,6 @@ impl GpuDecodeStore {
                     ckv_cache_ptr,
                     kpe_cache_ptr,
                 } => {
-                    if let Some(exec) = &graph.layers[layer_idx].hqq_exec {
-                        return Err(hqq_decode_dispatch_error(layer_idx, "mla", exec, None));
-                    }
                     let nh = *num_heads;
                     let klr = *kv_lora_rank; // real kv_lora_rank (e.g. 256 for Mistral)
                     let ccd = *ckv_cache_dim; // padded ckv dim in cache (≥512)
@@ -39144,9 +39312,92 @@ impl GpuDecodeStore {
                     let rope = *qk_rope_dim;
                     let vhd = *v_head_dim;
                     let q_head_dim = nope + rope;
+                    let hqq_mla_exec = match graph.layers[layer_idx].hqq_exec.as_ref() {
+                        Some(HqqExecutionDescriptor::Mla(desc))
+                            if hqq_mla_decode_ready(
+                                desc,
+                                graph.hidden_size,
+                                nh,
+                                klr,
+                                nope,
+                                rope,
+                                vhd,
+                                *q_lora_rank,
+                            ) =>
+                        {
+                            Some(desc.clone())
+                        }
+                        Some(exec) => {
+                            return Err(hqq_decode_dispatch_error(layer_idx, "mla", exec, None));
+                        }
+                        None => None,
+                    };
 
                     // ── MLA Step 1: Q projection ──
-                    if let (Some(qa_id), Some(qb_id)) = (q_a_proj, q_b_proj) {
+                    if let Some(hqq_exec) = hqq_mla_exec.as_ref() {
+                        if *q_lora_rank > 0 {
+                            let qa = hqq_exec.q_a_proj.as_ref().ok_or_else(|| {
+                                format!("HQQ MLA layer {} has no q_a_proj", layer_idx)
+                            })?;
+                            let qb = hqq_exec.q_b_proj.as_ref().ok_or_else(|| {
+                                format!("HQQ MLA layer {} has no q_b_proj", layer_idx)
+                            })?;
+                            self.launch_hqq_decode_gemv_f32(
+                                "q_a_proj",
+                                qa,
+                                *graph.d_hidden.device_ptr(),
+                                *graph.d_gqa_q.device_ptr(),
+                            )?;
+
+                            {
+                                let threads = 256u32;
+                                let cfg = LaunchConfig {
+                                    grid_dim: (1, 1, 1),
+                                    block_dim: (threads, 1, 1),
+                                    shared_mem_bytes: 0,
+                                };
+                                unsafe {
+                                    k.per_head_rmsnorm
+                                        .clone()
+                                        .launch(
+                                            cfg,
+                                            (
+                                                *graph.d_gqa_q.device_ptr(),
+                                                *q_a_norm_ptr,
+                                                eps,
+                                                1i32,
+                                                *q_lora_rank as i32,
+                                                0i32,
+                                            ),
+                                        )
+                                        .map_err(|e| {
+                                            format!("mla q_a_norm[{}]: {:?}", layer_idx, e)
+                                        })?;
+                                }
+                            }
+                            self.launch_fp32_to_bf16(
+                                *graph.d_scratch.device_ptr(),
+                                *graph.d_gqa_q.device_ptr(),
+                                *q_lora_rank,
+                            )?;
+                            self.launch_hqq_decode_gemv_f32(
+                                "q_b_proj",
+                                qb,
+                                *graph.d_scratch.device_ptr(),
+                                *graph.d_gqa_q.device_ptr(),
+                            )?;
+                        } else {
+                            let q = hqq_exec.q_proj.as_ref().ok_or_else(|| {
+                                format!("HQQ MLA layer {} has no q_proj", layer_idx)
+                            })?;
+                            self.launch_hqq_decode_gemv_f32(
+                                "q_proj",
+                                q,
+                                *graph.d_hidden.device_ptr(),
+                                *graph.d_gqa_q.device_ptr(),
+                            )?;
+                        }
+                    } else if let (Some(qa_id), Some(qb_id)) = (q_a_proj, q_b_proj) {
                         // q_lora path: q_a_proj → RMSNorm → q_b_proj
                         let qa_w = &graph.weights[*qa_id];
                         self.gemv_bf16_to_f32(
@@ -39216,12 +39467,21 @@ impl GpuDecodeStore {
                     // d_gqa_q = [num_heads * (nope + rope)] FP32
 
                     // ── MLA Step 2: KV projection ──
-                    let kva_w = &graph.weights[*kv_a_proj];
-                    self.gemv_bf16_to_f32(
-                        kva_w,
-                        *graph.d_hidden.device_ptr(),
-                        *graph.d_mla_kv.device_ptr(),
-                    )?;
+                    if let Some(hqq_exec) = hqq_mla_exec.as_ref() {
+                        self.launch_hqq_decode_gemv_f32(
+                            "kv_a_proj_with_mqa",
+                            &hqq_exec.kv_a_proj_with_mqa,
+                            *graph.d_hidden.device_ptr(),
+                            *graph.d_mla_kv.device_ptr(),
+                        )?;
+                    } else {
+                        let kva_w = &graph.weights[*kv_a_proj];
+                        self.gemv_bf16_to_f32(
+                            kva_w,
+                            *graph.d_hidden.device_ptr(),
+                            *graph.d_mla_kv.device_ptr(),
+                        )?;
+                    }
 
                     // RMSNorm on ckv portion only (first kv_lora_rank elements)
                     {
@@ -39483,12 +39743,21 @@ impl GpuDecodeStore {
                     }
 
                     // ── MLA Step 10: O projection ──
-                    let ow = &graph.weights[*o_proj];
-                    self.gemv_bf16_internal(
-                        ow,
-                        *graph.d_scratch.device_ptr(),
-                        *graph.d_hidden.device_ptr(),
-                    )?;
+                    if let Some(hqq_exec) = hqq_mla_exec.as_ref() {
+                        self.launch_hqq_decode_gemv_bf16(
+                            "o_proj",
+                            &hqq_exec.o_proj,
+                            *graph.d_scratch.device_ptr(),
+                            *graph.d_hidden.device_ptr(),
+                        )?;
+                    } else {
+                        let ow = &graph.weights[*o_proj];
+                        self.gemv_bf16_internal(
+                            ow,
+                            *graph.d_scratch.device_ptr(),
+                            *graph.d_hidden.device_ptr(),
+                        )?;
+                    }
                 }
 
                 GpuAttnConfig::Mamba2 {
