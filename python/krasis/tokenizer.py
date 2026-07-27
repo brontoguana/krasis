@@ -5,9 +5,38 @@ import logging
 import os
 from typing import Dict, List, Optional
 
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizerFast
 
 logger = logging.getLogger(__name__)
+
+
+def _load_hf_tokenizer(model_path: str, cfg: dict, tokenizer_kwargs: dict):
+    """Load the tokenizer declared by the checkpoint without changing its backend."""
+    tokenizer_class = cfg.get("tokenizer_class")
+    if tokenizer_class != "TokenizersBackend":
+        return AutoTokenizer.from_pretrained(model_path, **tokenizer_kwargs)
+
+    backend = cfg.get("backend")
+    if backend != "tokenizers":
+        raise ValueError(
+            "Tokenizer config declares tokenizer_class=TokenizersBackend but "
+            f"backend={backend!r}; only the explicit 'tokenizers' backend is supported"
+        )
+
+    tokenizer_file = os.path.join(model_path, "tokenizer.json")
+    if not os.path.isfile(tokenizer_file):
+        raise FileNotFoundError(
+            "Tokenizer config declares the TokenizersBackend class but the "
+            f"required local tokenizer.json is missing: {tokenizer_file}"
+        )
+
+    logger.info(
+        "Loading tokenizer_class=TokenizersBackend through the equivalent "
+        "PreTrainedTokenizerFast compatibility class"
+    )
+    return PreTrainedTokenizerFast.from_pretrained(
+        model_path, **tokenizer_kwargs
+    )
 
 
 class Tokenizer:
@@ -53,6 +82,7 @@ class Tokenizer:
     def __init__(self, model_path: str):
         tokenizer_kwargs = {"trust_remote_code": True}
         tokenizer_config = os.path.join(model_path, "tokenizer_config.json")
+        cfg = {}
         try:
             with open(tokenizer_config, "r", encoding="utf-8") as f:
                 cfg = json.load(f)
@@ -63,8 +93,8 @@ class Tokenizer:
                 )
         except FileNotFoundError:
             pass
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            model_path, **tokenizer_kwargs
+        self.tokenizer = _load_hf_tokenizer(
+            model_path, cfg, tokenizer_kwargs
         )
         if not getattr(self.tokenizer, "chat_template", None):
             template_path = os.path.join(model_path, "chat_template.jinja")

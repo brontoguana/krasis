@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Added explicit compatibility for checkpoints that declare the Transformers 5
+  `TokenizersBackend` class while Krasis is running Transformers 4.57. The
+  wrapper now selects the equivalent `PreTrainedTokenizerFast` loader only
+  when the checkpoint also declares the standard `tokenizers` backend and has
+  a local `tokenizer.json`; incompatible or incomplete contracts fail visibly.
+  Existing tokenizer classes continue through `AutoTokenizer`. The first
+  instrumented GLM-5.2 exact-prefix launch subsequently reached HTTP readiness
+  and completed both single-token and multi-token smoke generations; this is
+  diagnostic lifecycle evidence, not a speed benchmark or final correctness
+  validation.
+
 - Began GLM-5.2 support on an isolated feature branch. Added fail-closed
   parsing and validation for the model's DSA/IndexShare configuration,
   restored setup-only MLA tensor ownership for the native runtime, and enabled
