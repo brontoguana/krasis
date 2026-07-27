@@ -24898,6 +24898,24 @@ impl GpuDecodeStore {
                         });
                     }
                     HqqExecutionDescriptor::Mla(desc) => {
+                        let q_a_proj = if desc.q_a_proj.is_some() {
+                            Some(self.hqq_runtime_prefill_exec_desc_for_tensor(i, "q_a_proj")?)
+                        } else {
+                            None
+                        };
+                        let q_b_proj = if desc.q_b_proj.is_some() {
+                            Some(self.hqq_runtime_prefill_exec_desc_for_tensor(i, "q_b_proj")?)
+                        } else {
+                            None
+                        };
+                        let q_proj = if desc.q_proj.is_some() {
+                            Some(self.hqq_runtime_prefill_exec_desc_for_tensor(i, "q_proj")?)
+                        } else {
+                            None
+                        };
+                        let kv_a_proj_with_mqa =
+                            self.hqq_runtime_prefill_exec_desc_for_tensor(i, "kv_a_proj_with_mqa")?;
+                        let o_proj = self.hqq_runtime_prefill_exec_desc_for_tensor(i, "o_proj")?;
                         let to_prefill = |tensor: &crate::gpu_decode::HqqTensorExecDescriptor| {
                             crate::gpu_prefill::HqqTensorExecDescriptor {
                                 packed_ptr: tensor.packed_ptr,
@@ -24919,11 +24937,11 @@ impl GpuDecodeStore {
                             backend: desc.backend.clone(),
                             format_version: desc.format_version,
                             nbits: desc.nbits,
-                            q_a_proj: desc.q_a_proj.as_ref().map(|tensor| to_prefill(tensor)),
-                            q_b_proj: desc.q_b_proj.as_ref().map(|tensor| to_prefill(tensor)),
-                            q_proj: desc.q_proj.as_ref().map(|tensor| to_prefill(tensor)),
-                            kv_a_proj_with_mqa: to_prefill(&desc.kv_a_proj_with_mqa),
-                            o_proj: to_prefill(&desc.o_proj),
+                            q_a_proj: q_a_proj.as_ref().map(&to_prefill),
+                            q_b_proj: q_b_proj.as_ref().map(&to_prefill),
+                            q_proj: q_proj.as_ref().map(&to_prefill),
+                            kv_a_proj_with_mqa: to_prefill(&kv_a_proj_with_mqa),
+                            o_proj: to_prefill(&o_proj),
                             num_heads: desc.num_heads,
                             kv_lora_rank: desc.kv_lora_rank,
                             ckv_cache_dim: desc.ckv_cache_dim,

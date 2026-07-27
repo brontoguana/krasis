@@ -33,6 +33,16 @@
   readers against one CPU reference. Cross-chunk MLA prefill, DSA/IndexShare,
   sparse attention, and witness validation remain incomplete.
 
+- Fixed native MLA prefill construction to select each projection's staged
+  prefill execution descriptor instead of reusing its decode-stage HQQ layout.
+  An instrumented GLM-4.7-Flash run now passes 300-token warmup, measured short
+  and 39,920-token long VRAM calibration, compact 62K-token MLA cache setup,
+  heatmap construction, full expert residency, and native HTTP serving. The
+  exact-source build passed in 193 seconds and the network suite completed
+  12/14 checks; the two client timeouts were traced to the existing global
+  thinking-token budget contract rather than MLA execution. Llama-witness
+  correctness validation remains required.
+
 ## 1.0.16 - 2026-07-27
 
 - Fixed invalid OpenAI-compatible JSON responses when a configured model name
