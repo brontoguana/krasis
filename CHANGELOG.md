@@ -61,6 +61,15 @@
   fail-closed future work. The built package gate and eight no-GPU contract
   tests pass, with no existing-model execution path changed.
 
+- Added native, metadata-only DSA registration for HQQ MLA setup. Rust now
+  validates each full/shared owner relationship, all config-derived indexer
+  dimensions, owner-weight presence, graph hidden width, and MLA query rank,
+  and exposes the non-executable registration as JSON for diagnostics.
+  Prefill-engine construction fails before allocating kernels or scratch when
+  any DSA layer is registered, preventing incomplete DSA models from silently
+  running dense MLA. No indexer tensors are moved or executed yet, and existing
+  model hot paths are unchanged.
+
 ## 1.0.16 - 2026-07-27
 
 - Fixed invalid OpenAI-compatible JSON responses when a configured model name

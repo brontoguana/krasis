@@ -4779,7 +4779,7 @@ class KrasisModel:
                     attn.q_a_norm_weight.float().contiguous(), target_device, keepalive
                 )
                 q_a_norm_ptr = attn._hqq_q_a_norm.data_ptr()
-            return {
+            metadata = {
                 "num_heads": int(attn.num_heads),
                 "kv_lora_rank": int(attn.kv_lora_rank),
                 "ckv_cache_dim": int(attn.ckv_dim),
@@ -4796,6 +4796,35 @@ class KrasisModel:
                 "kpe_cache_ptr": int(kpe_cache.data_ptr()),
                 "q_a_norm_ptr": int(q_a_norm_ptr),
             }
+            if self.cfg.is_dsa:
+                owner_layer_idx = attn.dsa_indexer_owner_layer
+                if owner_layer_idx is None:
+                    raise RuntimeError(
+                        f"DSA layer {layer_idx} has no validated IndexShare owner"
+                    )
+                owner_weights_present = attn.dsa_indexer is not None
+                if owner_weights_present != (owner_layer_idx == layer_idx):
+                    raise RuntimeError(
+                        f"DSA layer {layer_idx} owner={owner_layer_idx} has "
+                        f"owner_weights_present={owner_weights_present}"
+                    )
+                metadata["dsa_indexer"] = {
+                    "owner_layer_idx": int(owner_layer_idx),
+                    "owner_weights_present": bool(owner_weights_present),
+                    "index_topk": int(self.cfg.index_topk),
+                    "index_head_dim": int(self.cfg.index_head_dim),
+                    "index_n_heads": int(self.cfg.index_n_heads),
+                    "index_topk_freq": int(self.cfg.index_topk_freq),
+                    "index_skip_topk_offset": int(
+                        self.cfg.index_skip_topk_offset
+                    ),
+                    "q_lora_rank": int(self.cfg.q_lora_rank),
+                    "hidden_size": int(self.cfg.hidden_size),
+                    "rope_interleave": bool(
+                        self.cfg.indexer_rope_interleave
+                    ),
+                }
+            return metadata
 
         if layer_kind == "linear_attention":
             conv_weight = attn.conv1d_weight
@@ -5071,6 +5100,31 @@ class KrasisModel:
                     kpe_cache_ptr=int(layer_meta["kpe_cache_ptr"]),
                     q_a_norm_ptr=int(layer_meta["q_a_norm_ptr"]),
                 )
+                dsa_indexer = layer_meta.get("dsa_indexer")
+                if dsa_indexer is not None:
+                    store.register_dsa_indexer_layer(
+                        layer_idx=int(common_args["layer_idx"]),
+                        owner_layer_idx=int(
+                            dsa_indexer["owner_layer_idx"]
+                        ),
+                        owner_weights_present=bool(
+                            dsa_indexer["owner_weights_present"]
+                        ),
+                        index_topk=int(dsa_indexer["index_topk"]),
+                        index_head_dim=int(dsa_indexer["index_head_dim"]),
+                        index_n_heads=int(dsa_indexer["index_n_heads"]),
+                        index_topk_freq=int(
+                            dsa_indexer["index_topk_freq"]
+                        ),
+                        index_skip_topk_offset=int(
+                            dsa_indexer["index_skip_topk_offset"]
+                        ),
+                        q_lora_rank=int(dsa_indexer["q_lora_rank"]),
+                        hidden_size=int(dsa_indexer["hidden_size"]),
+                        rope_interleave=bool(
+                            dsa_indexer["rope_interleave"]
+                        ),
+                    )
             elif layer_kind == "linear_attention":
                 store.register_hqq_runtime_linear_attention_layer(
                     **common_args,

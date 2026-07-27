@@ -7101,7 +7101,144 @@ struct GpuDecodeLayer {
     hqq: Option<HqqLayerRegistration>,
     hqq_exec: Option<HqqExecutionDescriptor>,
     hqq_prefill_sidecars: Vec<HqqPrefillSidecarRegistration>,
+    dsa_indexer: Option<DsaIndexerRegistration>,
     mlp: GpuMlpConfig,
+}
+
+#[derive(Debug, Clone)]
+struct DsaIndexerRegistration {
+    owner_layer_idx: usize,
+    owner_weights_present: bool,
+    index_topk: usize,
+    index_head_dim: usize,
+    index_n_heads: usize,
+    index_topk_freq: usize,
+    index_skip_topk_offset: usize,
+    q_lora_rank: usize,
+    hidden_size: usize,
+    rope_interleave: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_dsa_indexer_registration(
+    layer_idx: usize,
+    owner_layer_idx: usize,
+    owner_weights_present: bool,
+    index_topk: usize,
+    index_head_dim: usize,
+    index_n_heads: usize,
+    index_topk_freq: usize,
+    index_skip_topk_offset: usize,
+    q_lora_rank: usize,
+    hidden_size: usize,
+    rope_interleave: bool,
+) -> Result<DsaIndexerRegistration, String> {
+    if owner_layer_idx > layer_idx {
+        return Err(format!(
+            "DSA layer {} cannot share future indexer owner {}",
+            layer_idx, owner_layer_idx
+        ));
+    }
+    for (name, value) in [
+        ("index_topk", index_topk),
+        ("index_head_dim", index_head_dim),
+        ("index_n_heads", index_n_heads),
+        ("index_topk_freq", index_topk_freq),
+        ("q_lora_rank", q_lora_rank),
+        ("hidden_size", hidden_size),
+    ] {
+        if value == 0 {
+            return Err(format!(
+                "DSA layer {} requires positive {}, got 0",
+                layer_idx, name
+            ));
+        }
+    }
+    if index_head_dim % 2 != 0 {
+        return Err(format!(
+            "DSA layer {} index_head_dim {} must be even for RoPE",
+            layer_idx, index_head_dim
+        ));
+    }
+    index_n_heads.checked_mul(index_head_dim).ok_or_else(|| {
+        format!(
+            "DSA layer {} index projection width overflow: heads={} head_dim={}",
+            layer_idx, index_n_heads, index_head_dim
+        )
+    })?;
+
+    let is_owner = owner_layer_idx == layer_idx;
+    if owner_weights_present != is_owner {
+        return Err(if is_owner {
+            format!(
+                "DSA indexer owner layer {} has no validated owner weights",
+                layer_idx
+            )
+        } else {
+            format!(
+                "DSA shared layer {} duplicates weights owned by layer {}",
+                layer_idx, owner_layer_idx
+            )
+        });
+    }
+
+    Ok(DsaIndexerRegistration {
+        owner_layer_idx,
+        owner_weights_present,
+        index_topk,
+        index_head_dim,
+        index_n_heads,
+        index_topk_freq,
+        index_skip_topk_offset,
+        q_lora_rank,
+        hidden_size,
+        rope_interleave,
+    })
+}
+
+fn incomplete_dsa_layers(graph: &GpuDecodeGraph) -> Vec<usize> {
+    graph
+        .layers
+        .iter()
+        .enumerate()
+        .filter_map(|(layer_idx, layer)| layer.dsa_indexer.as_ref().map(|_| layer_idx))
+        .collect()
+}
+
+#[cfg(test)]
+mod dsa_registration_tests {
+    use super::validate_dsa_indexer_registration;
+
+    #[test]
+    fn owner_and_shared_contracts_are_fail_closed() {
+        let owner =
+            validate_dsa_indexer_registration(2, 2, true, 2048, 128, 32, 4, 0, 2048, 6144, true)
+                .expect("full owner should validate");
+        assert_eq!(owner.owner_layer_idx, 2);
+        assert!(owner.owner_weights_present);
+
+        let shared =
+            validate_dsa_indexer_registration(5, 2, false, 2048, 128, 32, 4, 0, 2048, 6144, true)
+                .expect("IndexShare layer should validate");
+        assert_eq!(shared.owner_layer_idx, 2);
+        assert!(!shared.owner_weights_present);
+
+        assert!(validate_dsa_indexer_registration(
+            2, 2, false, 2048, 128, 32, 4, 0, 2048, 6144, true,
+        )
+        .unwrap_err()
+        .contains("has no validated owner weights"));
+        assert!(validate_dsa_indexer_registration(
+            5, 2, true, 2048, 128, 32, 4, 0, 2048, 6144, true,
+        )
+        .unwrap_err()
+        .contains("duplicates weights"));
+        assert!(validate_dsa_indexer_registration(
+            5, 6, false, 2048, 128, 32, 4, 0, 2048, 6144, true,
+        )
+        .unwrap_err()
+        .contains("future indexer owner"));
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -7377,6 +7514,7 @@ impl GpuDecodeLayer {
             hqq: None,
             hqq_exec: None,
             hqq_prefill_sidecars: Vec::new(),
+            dsa_indexer: None,
             mlp: GpuMlpConfig::None,
         }
     }
@@ -9045,6 +9183,7 @@ struct GpuDecodeGraph {
     /// Default: [0..num_layers) for single-GPU or primary store, narrowed for aux stores.
     decode_layer_start: usize,
     decode_layer_end: usize,
+    dsa_runtime_incomplete: bool,
     vocab_size: usize,
     eps: f32,
     intermediate_size: usize,     // max intermediate (for buffer allocation)
@@ -15151,6 +15290,7 @@ impl GpuDecodeStore {
             num_layers,
             decode_layer_start: 0,
             decode_layer_end: num_layers,
+            dsa_runtime_incomplete: false,
             vocab_size,
             eps,
             intermediate_size: intermediate,
@@ -20152,6 +20292,140 @@ impl GpuDecodeStore {
         Ok(())
     }
 
+    /// Register the fail-closed DeepSeek Sparse Attention / IndexShare contract.
+    ///
+    /// This records validated ownership and dimensions only. It deliberately
+    /// does not register executable indexer weights or enable dense MLA as a
+    /// substitute for sparse attention.
+    #[pyo3(signature = (
+        layer_idx, owner_layer_idx, owner_weights_present,
+        index_topk, index_head_dim, index_n_heads, index_topk_freq,
+        index_skip_topk_offset, q_lora_rank, hidden_size, rope_interleave
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn register_dsa_indexer_layer(
+        &mut self,
+        layer_idx: usize,
+        owner_layer_idx: usize,
+        owner_weights_present: bool,
+        index_topk: usize,
+        index_head_dim: usize,
+        index_n_heads: usize,
+        index_topk_freq: usize,
+        index_skip_topk_offset: usize,
+        q_lora_rank: usize,
+        hidden_size: usize,
+        rope_interleave: bool,
+    ) -> PyResult<()> {
+        let registration = validate_dsa_indexer_registration(
+            layer_idx,
+            owner_layer_idx,
+            owner_weights_present,
+            index_topk,
+            index_head_dim,
+            index_n_heads,
+            index_topk_freq,
+            index_skip_topk_offset,
+            q_lora_rank,
+            hidden_size,
+            rope_interleave,
+        )
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
+
+        let graph = self
+            .graph
+            .as_mut()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
+        if layer_idx < graph.decode_layer_start || layer_idx >= graph.decode_layer_end {
+            return Ok(());
+        }
+        if hidden_size != graph.hidden_size {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "DSA layer {} hidden_size {} != configured graph hidden_size {}",
+                layer_idx, hidden_size, graph.hidden_size
+            )));
+        }
+        let layer = graph.layers.get_mut(layer_idx).ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "DSA layer {} must be registered after its MLA layer",
+                layer_idx
+            ))
+        })?;
+        match &layer.attn {
+            GpuAttnConfig::MLA {
+                q_lora_rank: mla_q_lora_rank,
+                ..
+            } if *mla_q_lora_rank == q_lora_rank => {}
+            GpuAttnConfig::MLA {
+                q_lora_rank: mla_q_lora_rank,
+                ..
+            } => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "DSA layer {} q_lora_rank {} != registered MLA q_lora_rank {}",
+                    layer_idx, q_lora_rank, mla_q_lora_rank
+                )))
+            }
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "DSA layer {} must attach to an MLA attention layer",
+                    layer_idx
+                )))
+            }
+        }
+        if layer.dsa_indexer.is_some() {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "DSA layer {} indexer contract is already registered",
+                layer_idx
+            )));
+        }
+        layer.dsa_indexer = Some(registration);
+        graph.dsa_runtime_incomplete = true;
+        log::info!(
+            "GpuDecodeStore: registered fail-closed DSA layer {} owner={} kind={} topk={} heads={} head_dim={} topk_freq={} skip_offset={}",
+            layer_idx,
+            owner_layer_idx,
+            if owner_weights_present { "full" } else { "shared" },
+            index_topk,
+            index_n_heads,
+            index_head_dim,
+            index_topk_freq,
+            index_skip_topk_offset,
+        );
+        Ok(())
+    }
+
+    fn dsa_indexer_registration_json(&self, layer_idx: usize) -> PyResult<String> {
+        let graph = self
+            .graph
+            .as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
+        let registration = graph
+            .layers
+            .get(layer_idx)
+            .and_then(|layer| layer.dsa_indexer.as_ref())
+            .ok_or_else(|| {
+                pyo3::exceptions::PyKeyError::new_err(format!(
+                    "No DSA indexer contract registered for layer {}",
+                    layer_idx
+                ))
+            })?;
+        Ok(serde_json::json!({
+            "layer_idx": layer_idx,
+            "owner_layer_idx": registration.owner_layer_idx,
+            "owner_weights_present": registration.owner_weights_present,
+            "index_topk": registration.index_topk,
+            "index_head_dim": registration.index_head_dim,
+            "index_n_heads": registration.index_n_heads,
+            "index_topk_freq": registration.index_topk_freq,
+            "index_skip_topk_offset": registration.index_skip_topk_offset,
+            "q_lora_rank": registration.q_lora_rank,
+            "hidden_size": registration.hidden_size,
+            "rope_interleave": registration.rope_interleave,
+            "executable": false,
+        })
+        .to_string())
+    }
+
     /// Register a Mamba2 SSM layer for GPU decode (Nemotron-H hybrid models).
     /// Mamba2 layers have O(1) per-token state, no KV cache, always GPU-resident.
     #[allow(clippy::too_many_arguments)]
@@ -24345,6 +24619,12 @@ impl GpuDecodeStore {
         use crate::gpu_prefill::*;
 
         let graph = self.graph.as_ref().ok_or("GpuDecodeStore not configured")?;
+        if graph.dsa_runtime_incomplete {
+            return Err(format!(
+                "GLM DSA execution is not implemented; refusing dense MLA prefill for registered DSA layers {:?}",
+                incomplete_dsa_layers(graph)
+            ));
+        }
 
         // Load prefill kernels
         let kernels = PrefillKernels::load(self.device.clone())?;
@@ -42357,7 +42637,6 @@ impl GpuDecodeStore {
             );
             return 0;
         }
-
         // Bind primary GPU context
         if let Err(e) = self.device.bind_to_thread() {
             log::error!(
