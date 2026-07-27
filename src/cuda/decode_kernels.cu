@@ -831,6 +831,162 @@ extern "C" __global__ void scale_bf16_by_ptr(
     }
 }
 
+// ── DSA Indexer Decode Kernels ────────────────────────────────────────
+
+__device__ inline float dsa_bf16_round(float value) {
+    return bf16_to_f32(f32_to_bf16(value));
+}
+
+// LayerNorm one projected DSA key, apply split-half RoPE to only the
+// positional prefix, and write the BF16 owner-local cache row. The normalized
+// values are staged before RoPE so paired reads cannot race paired writes.
+extern "C" __global__ void dsa_layernorm_rope_key_write(
+    __nv_bfloat16* __restrict__ key_cache,
+    const __nv_bfloat16* __restrict__ raw_key,
+    const __nv_bfloat16* __restrict__ norm_weight,
+    const __nv_bfloat16* __restrict__ norm_bias,
+    const float* __restrict__ cos_table,
+    const float* __restrict__ sin_table,
+    int position,
+    int max_context,
+    int head_dim,
+    int rope_dim,
+    float eps
+) {
+    if (position < 0 || position >= max_context || head_dim <= 0 ||
+        rope_dim < 0 || rope_dim > head_dim || (rope_dim & 1) != 0) {
+        return;
+    }
+    int tid = threadIdx.x;
+    int num_threads = blockDim.x;
+    int warp_id = tid / warpSize;
+    int lane_id = tid & (warpSize - 1);
+    int num_warps = (num_threads + warpSize - 1) / warpSize;
+
+    extern __shared__ float shared[];
+    float* normalized = shared;
+    float* warp_sum = normalized + head_dim;
+    float* warp_sq = warp_sum + 32;
+
+    float local_sum = 0.0f;
+    float local_sq = 0.0f;
+    for (int i = tid; i < head_dim; i += num_threads) {
+        float value = bf16_to_f32(raw_key[i]);
+        local_sum += value;
+        local_sq += value * value;
+    }
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+        local_sum += __shfl_down_sync(0xffffffff, local_sum, offset);
+        local_sq += __shfl_down_sync(0xffffffff, local_sq, offset);
+    }
+    if (lane_id == 0) {
+        warp_sum[warp_id] = local_sum;
+        warp_sq[warp_id] = local_sq;
+    }
+    __syncthreads();
+
+    if (tid == 0) {
+        float sum = 0.0f;
+        float sum_sq = 0.0f;
+        for (int warp = 0; warp < num_warps; warp++) {
+            sum += warp_sum[warp];
+            sum_sq += warp_sq[warp];
+        }
+        float mean = sum / (float)head_dim;
+        float variance = fmaxf(sum_sq / (float)head_dim - mean * mean, 0.0f);
+        warp_sum[0] = mean;
+        warp_sq[0] = rsqrtf(variance + eps);
+    }
+    __syncthreads();
+
+    float mean = warp_sum[0];
+    float inv_std = warp_sq[0];
+    for (int i = tid; i < head_dim; i += num_threads) {
+        float value = (bf16_to_f32(raw_key[i]) - mean) * inv_std;
+        value = value * bf16_to_f32(norm_weight[i]) + bf16_to_f32(norm_bias[i]);
+        // torch.nn.LayerNorm returns the BF16 input dtype before RoPE.
+        normalized[i] = dsa_bf16_round(value);
+    }
+    __syncthreads();
+
+    int half_rope = rope_dim / 2;
+    __nv_bfloat16* row = key_cache + (int64_t)position * head_dim;
+    for (int i = tid; i < head_dim; i += num_threads) {
+        float value = normalized[i];
+        if (i < rope_dim) {
+            int pair = i < half_rope ? i + half_rope : i - half_rope;
+            int table_idx = i < half_rope ? i : i - half_rope;
+            float rotated = normalized[pair];
+            if (i < half_rope) rotated = -rotated;
+            float cos_value = dsa_bf16_round(
+                cos_table[(int64_t)position * half_rope + table_idx]);
+            float sin_value = dsa_bf16_round(
+                sin_table[(int64_t)position * half_rope + table_idx]);
+            float direct = dsa_bf16_round(value * cos_value);
+            float cross = dsa_bf16_round(rotated * sin_value);
+            value = dsa_bf16_round(direct + cross);
+        }
+        row[i] = f32_to_bf16(value);
+    }
+}
+
+// Apply split-half RoPE to the positional prefix of projected BF16 DSA
+// queries. Input/output are distinct, avoiding the in-place paired-write race.
+extern "C" __global__ void dsa_rope_query_bf16(
+    __nv_bfloat16* __restrict__ output,
+    const __nv_bfloat16* __restrict__ input,
+    const float* __restrict__ cos_table,
+    const float* __restrict__ sin_table,
+    int position,
+    int num_heads,
+    int head_dim,
+    int rope_dim
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = num_heads * head_dim;
+    if (i >= total || rope_dim < 0 || rope_dim > head_dim || (rope_dim & 1) != 0) {
+        return;
+    }
+    int dim = i % head_dim;
+    float value = bf16_to_f32(input[i]);
+    if (dim < rope_dim) {
+        int half_rope = rope_dim / 2;
+        int head_base = i - dim;
+        int pair = dim < half_rope ? dim + half_rope : dim - half_rope;
+        int table_idx = dim < half_rope ? dim : dim - half_rope;
+        float rotated = bf16_to_f32(input[head_base + pair]);
+        if (dim < half_rope) rotated = -rotated;
+        float cos_value = dsa_bf16_round(
+            cos_table[(int64_t)position * half_rope + table_idx]);
+        float sin_value = dsa_bf16_round(
+            sin_table[(int64_t)position * half_rope + table_idx]);
+        float direct = dsa_bf16_round(value * cos_value);
+        float cross = dsa_bf16_round(rotated * sin_value);
+        value = dsa_bf16_round(direct + cross);
+    }
+    output[i] = f32_to_bf16(value);
+}
+
+// Reduce the BF16-tensor-core QK product [heads, context] into the reference
+// DSA score: sum_h(weight_h * relu(dot_h)) with the two config-derived scales.
+extern "C" __global__ void dsa_reduce_weighted_scores(
+    float* __restrict__ output,
+    const float* __restrict__ head_scores,
+    const __nv_bfloat16* __restrict__ head_weights,
+    int context,
+    int num_heads,
+    float score_scale
+) {
+    int token = blockIdx.x * blockDim.x + threadIdx.x;
+    if (token >= context) return;
+    float score = 0.0f;
+    for (int head = 0; head < num_heads; head++) {
+        float dot = head_scores[(int64_t)head * context + token] * score_scale;
+        score += bf16_to_f32(head_weights[head]) * fmaxf(dot, 0.0f);
+    }
+    output[token] = score;
+}
+
 // ── MLA (Multi-head Latent Attention) Decode Kernels ──────────────────
 
 __device__ inline void mla_pack_k4_16(unsigned char* dst, const unsigned char* codes) {

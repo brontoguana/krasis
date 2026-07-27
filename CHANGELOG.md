@@ -102,6 +102,18 @@
   unaligned-segment allocation, model/config contracts 9/9, and launcher
   contracts 24/24.
 
+- Added the first native GLM DSA owner scoring pipeline without enabling sparse
+  execution. Native metadata now retains the config-derived partial-RoPE width
+  and cross-checks it against MLA. A single store-shared, exactly accounted
+  workspace feeds BF16 owner projections, race-free BF16 LayerNorm/partial
+  split-half RoPE key caching, BF16 tensor-core QK scoring, and FP32 weighted
+  ReLU reduction. A two-position CUDA test proves non-identity RoPE, retained
+  key history, two-head weighting, score layout, and CPU-recomputed outputs.
+  Current startup does not allocate or execute this path; top-k selection,
+  IndexShare dispatch, and sparse attention remain fail-closed. Validation
+  passed: exact-source DSA CUDA contracts 5/5 after a 3m48s optimized build,
+  exact package build in 199 seconds, model/config 9/9, and launcher 24/24.
+
 ## 1.0.16 - 2026-07-27
 
 - Fixed invalid OpenAI-compatible JSON responses when a configured model name

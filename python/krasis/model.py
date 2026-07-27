@@ -4861,6 +4861,7 @@ class KrasisModel:
                     "index_topk": int(self.cfg.index_topk),
                     "index_head_dim": int(self.cfg.index_head_dim),
                     "index_n_heads": int(self.cfg.index_n_heads),
+                    "qk_rope_head_dim": int(self.cfg.qk_rope_head_dim),
                     "index_topk_freq": int(self.cfg.index_topk_freq),
                     "index_skip_topk_offset": int(
                         self.cfg.index_skip_topk_offset
@@ -5073,6 +5074,15 @@ class KrasisModel:
                 total += tensor.numel() * tensor.element_size()
             total += max_context_tokens * self.cfg.index_head_dim * 2
             total += min(self.cfg.index_topk, max_context_tokens) * 4
+        query_elems = self.cfg.index_n_heads * self.cfg.index_head_dim
+        # One graph-stable workspace is reused sequentially by every owner on
+        # this store rather than multiplied by the IndexShare owner count.
+        total += self.cfg.index_head_dim * 2
+        total += query_elems * 2
+        total += query_elems * 2
+        total += self.cfg.index_n_heads * 2
+        total += max_context_tokens * self.cfg.index_n_heads * 4
+        total += max_context_tokens * 4
         return int(total)
 
     def _register_hqq_attention_layers_on_store(
@@ -5320,6 +5330,9 @@ class KrasisModel:
                         index_topk=int(dsa_indexer["index_topk"]),
                         index_head_dim=int(dsa_indexer["index_head_dim"]),
                         index_n_heads=int(dsa_indexer["index_n_heads"]),
+                        qk_rope_head_dim=int(
+                            dsa_indexer["qk_rope_head_dim"]
+                        ),
                         index_topk_freq=int(
                             dsa_indexer["index_topk_freq"]
                         ),

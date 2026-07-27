@@ -3021,6 +3021,9 @@ const KERNEL_NAMES: &[&str] = &[
     "sigmoid_gate_bf16",
     "scale_bf16",
     "scale_bf16_by_ptr",
+    "dsa_layernorm_rope_key_write",
+    "dsa_rope_query_bf16",
+    "dsa_reduce_weighted_scores",
     "la_conv1d",
     "uninterleave_qkvz",
     "compute_gate_beta",
@@ -7112,6 +7115,7 @@ struct DsaIndexerRegistration {
     index_topk: usize,
     index_head_dim: usize,
     index_n_heads: usize,
+    qk_rope_head_dim: usize,
     index_topk_freq: usize,
     index_skip_topk_offset: usize,
     q_lora_rank: usize,
@@ -7137,6 +7141,23 @@ struct DsaIndexerOwnerResource {
     d_key_cache: cudarc::driver::CudaSlice<u16>,
     d_topk_indices: cudarc::driver::CudaSlice<i32>,
 }
+
+struct DsaIndexerWorkspace {
+    max_context_tokens: usize,
+    max_index_n_heads: usize,
+    max_index_head_dim: usize,
+    d_raw_key: cudarc::driver::CudaSlice<u16>,
+    d_projected_query: cudarc::driver::CudaSlice<u16>,
+    d_query_rope: cudarc::driver::CudaSlice<u16>,
+    d_head_weights: cudarc::driver::CudaSlice<u16>,
+    d_head_scores: cudarc::driver::CudaSlice<f32>,
+    d_scores: cudarc::driver::CudaSlice<f32>,
+}
+
+// GLM DSA defines its index-key LayerNorm independently of the model-wide
+// RMSNorm epsilon; the checkpoint architecture source fixes this semantic
+// value at 1e-6 rather than exposing it as a model or hardware tuning knob.
+const DSA_INDEXER_LAYER_NORM_EPS: f32 = 1e-6;
 
 fn validate_dsa_owner_weight_contract(
     weights: &[GpuWeight],
@@ -7237,6 +7258,7 @@ fn validate_dsa_indexer_registration(
     index_topk: usize,
     index_head_dim: usize,
     index_n_heads: usize,
+    qk_rope_head_dim: usize,
     index_topk_freq: usize,
     index_skip_topk_offset: usize,
     q_lora_rank: usize,
@@ -7253,6 +7275,7 @@ fn validate_dsa_indexer_registration(
         ("index_topk", index_topk),
         ("index_head_dim", index_head_dim),
         ("index_n_heads", index_n_heads),
+        ("qk_rope_head_dim", qk_rope_head_dim),
         ("index_topk_freq", index_topk_freq),
         ("q_lora_rank", q_lora_rank),
         ("hidden_size", hidden_size),
@@ -7264,10 +7287,16 @@ fn validate_dsa_indexer_registration(
             ));
         }
     }
-    if index_head_dim % 2 != 0 {
+    if index_head_dim % 2 != 0 || qk_rope_head_dim % 2 != 0 {
         return Err(format!(
-            "DSA layer {} index_head_dim {} must be even for RoPE",
-            layer_idx, index_head_dim
+            "DSA layer {} index_head_dim {} and qk_rope_head_dim {} must be even for RoPE",
+            layer_idx, index_head_dim, qk_rope_head_dim
+        ));
+    }
+    if qk_rope_head_dim > index_head_dim {
+        return Err(format!(
+            "DSA layer {} qk_rope_head_dim {} exceeds index_head_dim {}",
+            layer_idx, qk_rope_head_dim, index_head_dim
         ));
     }
     index_n_heads.checked_mul(index_head_dim).ok_or_else(|| {
@@ -7298,6 +7327,7 @@ fn validate_dsa_indexer_registration(
         index_topk,
         index_head_dim,
         index_n_heads,
+        qk_rope_head_dim,
         index_topk_freq,
         index_skip_topk_offset,
         q_lora_rank,
@@ -7379,43 +7409,57 @@ mod dsa_registration_tests {
 
     #[test]
     fn owner_and_shared_contracts_are_fail_closed() {
-        let owner =
-            validate_dsa_indexer_registration(2, 2, true, 2048, 128, 32, 4, 0, 2048, 6144, true)
-                .expect("full owner should validate");
+        let owner = validate_dsa_indexer_registration(
+            2, 2, true, 2048, 128, 32, 64, 4, 0, 2048, 6144, true,
+        )
+        .expect("full owner should validate");
         assert_eq!(owner.owner_layer_idx, 2);
         assert!(owner.owner_weights_present);
 
-        let shared =
-            validate_dsa_indexer_registration(5, 2, false, 2048, 128, 32, 4, 0, 2048, 6144, true)
-                .expect("IndexShare layer should validate");
+        let shared = validate_dsa_indexer_registration(
+            5, 2, false, 2048, 128, 32, 64, 4, 0, 2048, 6144, true,
+        )
+        .expect("IndexShare layer should validate");
         assert_eq!(shared.owner_layer_idx, 2);
         assert!(!shared.owner_weights_present);
 
         assert!(validate_dsa_indexer_registration(
-            2, 2, false, 2048, 128, 32, 4, 0, 2048, 6144, true,
+            2, 2, false, 2048, 128, 32, 64, 4, 0, 2048, 6144, true,
         )
         .unwrap_err()
         .contains("has no validated owner weights"));
         assert!(validate_dsa_indexer_registration(
-            5, 2, true, 2048, 128, 32, 4, 0, 2048, 6144, true,
+            5, 2, true, 2048, 128, 32, 64, 4, 0, 2048, 6144, true,
         )
         .unwrap_err()
         .contains("duplicates weights"));
         assert!(validate_dsa_indexer_registration(
-            5, 6, false, 2048, 128, 32, 4, 0, 2048, 6144, true,
+            5, 6, false, 2048, 128, 32, 64, 4, 0, 2048, 6144, true,
         )
         .unwrap_err()
         .contains("future indexer owner"));
+        assert!(validate_dsa_indexer_registration(
+            2, 2, true, 2048, 128, 32, 130, 4, 0, 2048, 6144, true,
+        )
+        .unwrap_err()
+        .contains("exceeds index_head_dim"));
+        assert!(validate_dsa_indexer_registration(
+            2, 2, true, 2048, 128, 32, 63, 4, 0, 2048, 6144, true,
+        )
+        .unwrap_err()
+        .contains("must be even for RoPE"));
     }
 
     #[test]
     fn dense_mla_is_allowed_only_when_the_complete_prefix_is_selected() {
-        let owner =
-            validate_dsa_indexer_registration(2, 2, true, 2048, 128, 32, 4, 3, 2048, 6144, true)
-                .expect("full owner should validate");
-        let shared =
-            validate_dsa_indexer_registration(5, 2, false, 2048, 128, 32, 4, 3, 2048, 6144, true)
-                .expect("IndexShare layer should validate");
+        let owner = validate_dsa_indexer_registration(
+            2, 2, true, 2048, 128, 32, 64, 4, 3, 2048, 6144, true,
+        )
+        .expect("full owner should validate");
+        let shared = validate_dsa_indexer_registration(
+            5, 2, false, 2048, 128, 32, 64, 4, 3, 2048, 6144, true,
+        )
+        .expect("IndexShare layer should validate");
         let registrations = [&owner, &shared];
 
         assert_eq!(
@@ -7430,9 +7474,10 @@ mod dsa_registration_tests {
             .unwrap_err()
             .contains("2 of 3 layers registered"));
 
-        let mismatched =
-            validate_dsa_indexer_registration(6, 6, true, 1024, 128, 32, 4, 3, 2048, 6144, true)
-                .expect("standalone owner should validate");
+        let mismatched = validate_dsa_indexer_registration(
+            6, 6, true, 1024, 128, 32, 64, 4, 3, 2048, 6144, true,
+        )
+        .expect("standalone owner should validate");
         assert!(
             validate_dsa_exact_prefix_limit(&[&owner, &mismatched], 2, 1024)
                 .unwrap_err()
@@ -7442,9 +7487,10 @@ mod dsa_registration_tests {
 
     #[test]
     fn owner_resources_require_exact_bf16_shapes_and_runtime_sizing() {
-        let registration =
-            validate_dsa_indexer_registration(2, 2, true, 2048, 128, 32, 4, 0, 2048, 6144, true)
-                .expect("owner metadata");
+        let registration = validate_dsa_indexer_registration(
+            2, 2, true, 2048, 128, 32, 64, 4, 0, 2048, 6144, true,
+        )
+        .expect("owner metadata");
         let mut weights = vec![
             GpuWeight::new(1, 4096, 2048, 0),
             GpuWeight::new(2, 128, 6144, 0),
@@ -7527,7 +7573,7 @@ mod dsa_registration_tests {
                 .expect("MLA metadata");
         }
         store
-            .register_dsa_indexer_layer(1, 0, false, 4, 4, 2, 4, 0, 4, 8, true)
+            .register_dsa_indexer_layer(1, 0, false, 4, 4, 2, 2, 4, 0, 4, 8, true)
             .expect("shared DSA layer");
 
         let wq_b = store.device.alloc_zeros::<u16>(8 * 4).expect("wq_b");
@@ -7583,7 +7629,250 @@ mod dsa_registration_tests {
             serde_json::json!([8, 4])
         );
         assert_eq!(diagnostic["resource"]["topk_capacity"], 4);
+        assert_eq!(diagnostic["workspace_ready"], true);
+        assert_eq!(
+            diagnostic["workspace"]["head_score_shape"],
+            serde_json::json!([2, 8])
+        );
         assert_eq!(diagnostic["executable"], false);
+    }
+
+    #[test]
+    fn owner_score_pipeline_matches_cpu_reference_on_cuda() {
+        fn bf16_bits(values: &[f32]) -> Vec<u16> {
+            values
+                .iter()
+                .map(|value| half::bf16::from_f32(*value).to_bits())
+                .collect()
+        }
+        fn bf16_values(values: &[u16]) -> Vec<f32> {
+            values
+                .iter()
+                .map(|value| half::bf16::from_bits(*value).to_f32())
+                .collect()
+        }
+        fn identity(rows: usize, cols: usize) -> Vec<f32> {
+            let mut values = vec![0.0f32; rows * cols];
+            for i in 0..rows.min(cols) {
+                values[i * cols + i] = 1.0;
+            }
+            values
+        }
+
+        let mut store = GpuDecodeStore::new(0).expect("CUDA decode store");
+        store
+            .configure(4, 1, 8, 1e-6, 2, 4, 8, 4, 4, 8, 8)
+            .expect("small graph");
+
+        let dummy = store
+            .device
+            .htod_copy(bf16_bits(&[0.0]))
+            .expect("dummy weight");
+        let dummy_wid = store
+            .register_weight(*dummy.device_ptr() as usize, 1, 1, 0)
+            .expect("dummy weight registration");
+        store
+            .register_mla_layer(
+                0,
+                1,
+                4,
+                1,
+                4,
+                dummy_wid,
+                dummy_wid,
+                1,
+                1,
+                1,
+                2,
+                4,
+                2,
+                2,
+                2,
+                0.5,
+                true,
+                1,
+                1,
+                Some(dummy_wid),
+                Some(dummy_wid),
+                1,
+                None,
+                4,
+                4,
+            )
+            .expect("MLA metadata");
+        store
+            .register_dsa_indexer_layer(0, 0, true, 4, 4, 2, 2, 4, 0, 4, 4, false)
+            .expect("DSA owner metadata");
+
+        let mut wq_b_values = identity(8, 4);
+        for col in 0..4 {
+            wq_b_values[(4 + col) * 4 + (3 - col)] = 1.0;
+            wq_b_values[col * 4 + col] = 1.0;
+        }
+        let wq_b = store
+            .device
+            .htod_copy(bf16_bits(&wq_b_values))
+            .expect("wq_b");
+        let wk = store
+            .device
+            .htod_copy(bf16_bits(&identity(4, 4)))
+            .expect("wk");
+        let weights_proj = store
+            .device
+            .htod_copy(bf16_bits(&[1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0]))
+            .expect("weights_proj");
+        let k_norm_weight = store
+            .device
+            .htod_copy(bf16_bits(&[1.0, 1.0, 1.0, 1.0]))
+            .expect("k_norm_weight");
+        let k_norm_bias = store
+            .device
+            .htod_copy(bf16_bits(&[0.0, 0.0, 0.0, 0.0]))
+            .expect("k_norm_bias");
+        let wq_b_wid = store
+            .register_weight(*wq_b.device_ptr() as usize, 8, 4, 0)
+            .expect("wq_b weight");
+        let wk_wid = store
+            .register_weight(*wk.device_ptr() as usize, 4, 4, 0)
+            .expect("wk weight");
+        let weights_proj_wid = store
+            .register_weight(*weights_proj.device_ptr() as usize, 2, 4, 0)
+            .expect("weights_proj weight");
+        let k_norm_weight_wid = store
+            .register_weight(*k_norm_weight.device_ptr() as usize, 1, 4, 0)
+            .expect("k_norm_weight");
+        let k_norm_bias_wid = store
+            .register_weight(*k_norm_bias.device_ptr() as usize, 1, 4, 0)
+            .expect("k_norm_bias");
+        store
+            .register_dsa_indexer_owner_resource(
+                0,
+                wq_b_wid,
+                wk_wid,
+                weights_proj_wid,
+                k_norm_weight_wid,
+                k_norm_bias_wid,
+                4,
+            )
+            .expect("owner resource");
+        store
+            .finalize_dsa_indexer_resources()
+            .expect("owner workspace");
+
+        let cos = store
+            .device
+            .htod_copy(vec![1.0f32, 0.0, -1.0, 0.0])
+            .expect("cos table");
+        let sin = store
+            .device
+            .htod_copy(vec![0.0f32, 1.0, 0.0, -1.0])
+            .expect("sin table");
+        store
+            .set_rope_tables(*cos.device_ptr() as usize, *sin.device_ptr() as usize, 1, 4)
+            .expect("RoPE tables");
+
+        let hidden0 = store
+            .device
+            .htod_copy(bf16_bits(&[1.0, 2.0, 3.0, 4.0]))
+            .expect("hidden0");
+        let q_resid0 = store
+            .device
+            .htod_copy(bf16_bits(&[1.0, 0.0, 0.0, -1.0]))
+            .expect("q_resid0");
+        assert_eq!(
+            store
+                .execute_dsa_owner_scores(0, 0, *hidden0.device_ptr(), *q_resid0.device_ptr(),)
+                .expect("position 0 scores"),
+            1
+        );
+
+        let hidden1 = store
+            .device
+            .htod_copy(bf16_bits(&[2.0, 1.0, 0.0, -1.0]))
+            .expect("hidden1");
+        let q_resid1 = store
+            .device
+            .htod_copy(bf16_bits(&[0.5, -0.5, 1.0, -1.0]))
+            .expect("q_resid1");
+        assert_eq!(
+            store
+                .execute_dsa_owner_scores(0, 1, *hidden1.device_ptr(), *q_resid1.device_ptr(),)
+                .expect("position 1 scores"),
+            2
+        );
+
+        let graph = store.graph.as_ref().expect("graph");
+        let resource = &graph.dsa_indexer_owners[0];
+        let workspace = graph.dsa_indexer_workspace.as_ref().expect("workspace");
+        let key_cache = bf16_values(
+            &store
+                .device
+                .dtoh_sync_copy(&resource.d_key_cache)
+                .expect("key cache D2H"),
+        );
+        let query = bf16_values(
+            &store
+                .device
+                .dtoh_sync_copy(&workspace.d_query_rope)
+                .expect("query D2H"),
+        );
+        let head_weights = bf16_values(
+            &store
+                .device
+                .dtoh_sync_copy(&workspace.d_head_weights)
+                .expect("weights D2H"),
+        );
+        let scores = store
+            .device
+            .dtoh_sync_copy(&workspace.d_scores)
+            .expect("scores D2H");
+
+        let mean = 0.5f32;
+        let variance = 1.25f32;
+        let inv_std = 1.0f32 / (variance + 1e-6).sqrt();
+        let normalized = [
+            (2.0 - mean) * inv_std,
+            (1.0 - mean) * inv_std,
+            (0.0 - mean) * inv_std,
+            (-1.0 - mean) * inv_std,
+        ];
+        let expected_key1 = [-normalized[1], normalized[0], normalized[2], normalized[3]];
+        for (actual, expected) in key_cache[4..8].iter().zip(expected_key1.iter()) {
+            assert!(
+                (actual - expected).abs() < 0.015,
+                "key actual={} expected={}",
+                actual,
+                expected
+            );
+        }
+        let expected_query = [0.5, 0.5, 1.0, -1.0, -1.0, -1.0, -0.5, 0.5];
+        for (actual, expected) in query.iter().zip(expected_query.iter()) {
+            assert!(
+                (actual - expected).abs() < 0.01,
+                "query actual={} expected={}",
+                actual,
+                expected
+            );
+        }
+        assert_eq!(head_weights, vec![2.0, 1.0]);
+
+        let scale = 1.0f32 / (4.0f32.sqrt() * 2.0f32.sqrt());
+        for token in 0..2 {
+            let mut expected = 0.0f32;
+            for head in 0..2 {
+                let dot = (0..4)
+                    .map(|dim| query[head * 4 + dim] * key_cache[token * 4 + dim])
+                    .sum::<f32>();
+                expected += head_weights[head] * (dot * scale).max(0.0);
+            }
+            assert!(
+                (scores[token] - expected).abs() < 0.02,
+                "score[{}] actual={} expected={}",
+                token,
+                scores[token],
+                expected
+            );
+        }
     }
 }
 
@@ -9396,6 +9685,9 @@ struct CachedKernels {
     weighted_add_bf16_sigmoid_f32: cudarc::driver::CudaFunction,
     scale_bf16: cudarc::driver::CudaFunction,
     scale_bf16_by_ptr: cudarc::driver::CudaFunction,
+    dsa_layernorm_rope_key_write: cudarc::driver::CudaFunction,
+    dsa_rope_query_bf16: cudarc::driver::CudaFunction,
+    dsa_reduce_weighted_scores: cudarc::driver::CudaFunction,
     embedding_lookup: cudarc::driver::CudaFunction,
     marlin_gemv_int4: cudarc::driver::CudaFunction,
     fused_silu_accum: cudarc::driver::CudaFunction,
@@ -9531,6 +9823,7 @@ struct GpuDecodeGraph {
     decode_layer_end: usize,
     dsa_runtime_incomplete: bool,
     dsa_indexer_owners: Vec<DsaIndexerOwnerResource>,
+    dsa_indexer_workspace: Option<DsaIndexerWorkspace>,
     vocab_size: usize,
     eps: f32,
     intermediate_size: usize,     // max intermediate (for buffer allocation)
@@ -15639,6 +15932,7 @@ impl GpuDecodeStore {
             decode_layer_end: num_layers,
             dsa_runtime_incomplete: false,
             dsa_indexer_owners: Vec::new(),
+            dsa_indexer_workspace: None,
             vocab_size,
             eps,
             intermediate_size: intermediate,
@@ -16143,6 +16437,9 @@ impl GpuDecodeStore {
                 weighted_add_bf16_sigmoid_f32: get("weighted_add_bf16_sigmoid_f32")?,
                 scale_bf16: get("scale_bf16")?,
                 scale_bf16_by_ptr: get("scale_bf16_by_ptr")?,
+                dsa_layernorm_rope_key_write: get("dsa_layernorm_rope_key_write")?,
+                dsa_rope_query_bf16: get("dsa_rope_query_bf16")?,
+                dsa_reduce_weighted_scores: get("dsa_reduce_weighted_scores")?,
                 embedding_lookup: get("embedding_lookup")?,
                 marlin_gemv_int4: get("marlin_gemv_int4")?,
                 fused_silu_accum: get("marlin_gemv_int4_fused_silu_accum")?,
@@ -20647,7 +20944,7 @@ impl GpuDecodeStore {
     /// substitute for sparse attention.
     #[pyo3(signature = (
         layer_idx, owner_layer_idx, owner_weights_present,
-        index_topk, index_head_dim, index_n_heads, index_topk_freq,
+        index_topk, index_head_dim, index_n_heads, qk_rope_head_dim, index_topk_freq,
         index_skip_topk_offset, q_lora_rank, hidden_size, rope_interleave
     ))]
     #[allow(clippy::too_many_arguments)]
@@ -20659,6 +20956,7 @@ impl GpuDecodeStore {
         index_topk: usize,
         index_head_dim: usize,
         index_n_heads: usize,
+        qk_rope_head_dim: usize,
         index_topk_freq: usize,
         index_skip_topk_offset: usize,
         q_lora_rank: usize,
@@ -20672,6 +20970,7 @@ impl GpuDecodeStore {
             index_topk,
             index_head_dim,
             index_n_heads,
+            qk_rope_head_dim,
             index_topk_freq,
             index_skip_topk_offset,
             q_lora_rank,
@@ -20702,15 +21001,17 @@ impl GpuDecodeStore {
         match &layer.attn {
             GpuAttnConfig::MLA {
                 q_lora_rank: mla_q_lora_rank,
+                qk_rope_dim: mla_rope_dim,
                 ..
-            } if *mla_q_lora_rank == q_lora_rank => {}
+            } if *mla_q_lora_rank == q_lora_rank && *mla_rope_dim == qk_rope_head_dim => {}
             GpuAttnConfig::MLA {
                 q_lora_rank: mla_q_lora_rank,
+                qk_rope_dim: mla_rope_dim,
                 ..
             } => {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "DSA layer {} q_lora_rank {} != registered MLA q_lora_rank {}",
-                    layer_idx, q_lora_rank, mla_q_lora_rank
+                    "DSA layer {} q_lora_rank/rope [{}, {}] != registered MLA [{}, {}]",
+                    layer_idx, q_lora_rank, qk_rope_head_dim, mla_q_lora_rank, mla_rope_dim
                 )))
             }
             _ => {
@@ -20729,13 +21030,14 @@ impl GpuDecodeStore {
         layer.dsa_indexer = Some(registration);
         graph.dsa_runtime_incomplete = true;
         log::info!(
-            "GpuDecodeStore: registered fail-closed DSA layer {} owner={} kind={} topk={} heads={} head_dim={} topk_freq={} skip_offset={}",
+            "GpuDecodeStore: registered fail-closed DSA layer {} owner={} kind={} topk={} heads={} head_dim={} rope_dim={} topk_freq={} skip_offset={}",
             layer_idx,
             owner_layer_idx,
             if owner_weights_present { "full" } else { "shared" },
             index_topk,
             index_n_heads,
             index_head_dim,
+            qk_rope_head_dim,
             index_topk_freq,
             index_skip_topk_offset,
         );
@@ -20799,6 +21101,7 @@ impl GpuDecodeStore {
                 if shared.index_topk != registration.index_topk
                     || shared.index_head_dim != registration.index_head_dim
                     || shared.index_n_heads != registration.index_n_heads
+                    || shared.qk_rope_head_dim != registration.qk_rope_head_dim
                     || shared.index_topk_freq != registration.index_topk_freq
                     || shared.index_skip_topk_offset != registration.index_skip_topk_offset
                     || shared.q_lora_rank != registration.q_lora_rank
@@ -20868,45 +21171,139 @@ impl GpuDecodeStore {
         Ok(())
     }
 
-    fn finalize_dsa_indexer_resources(&self) -> PyResult<usize> {
+    fn finalize_dsa_indexer_resources(&mut self) -> PyResult<usize> {
+        let (
+            available_count,
+            max_context_tokens,
+            max_index_n_heads,
+            max_index_head_dim,
+            query_elems,
+            head_score_elems,
+        ) = {
+            let graph = self
+                .graph
+                .as_ref()
+                .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
+            if graph.dsa_indexer_workspace.is_some() {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "DSA indexer workspace is already finalized",
+                ));
+            }
+            let active_registrations = graph
+                .layers
+                .iter()
+                .enumerate()
+                .filter(|(layer_idx, _)| {
+                    graph.decode_layer_start <= *layer_idx && *layer_idx < graph.decode_layer_end
+                })
+                .filter_map(|(_, layer)| layer.dsa_indexer.as_ref())
+                .collect::<Vec<_>>();
+            let required = active_registrations
+                .iter()
+                .map(|registration| registration.owner_layer_idx)
+                .collect::<std::collections::BTreeSet<_>>();
+            let available = graph
+                .dsa_indexer_owners
+                .iter()
+                .map(|resource| resource.owner_layer_idx)
+                .collect::<std::collections::BTreeSet<_>>();
+            let missing = required.difference(&available).copied().collect::<Vec<_>>();
+            if !missing.is_empty() {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "DSA active decode segment [{}, {}) is missing owner resources {:?}",
+                    graph.decode_layer_start, graph.decode_layer_end, missing
+                )));
+            }
+            let unexpected = available.difference(&required).copied().collect::<Vec<_>>();
+            if !unexpected.is_empty() {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "DSA decode store has resources not used by active segment: {:?}",
+                    unexpected
+                )));
+            }
+            if available.is_empty() {
+                return Ok(0);
+            }
+            let max_context_tokens = graph
+                .dsa_indexer_owners
+                .iter()
+                .map(|resource| resource.max_context_tokens)
+                .max()
+                .unwrap_or(0);
+            let max_index_n_heads = active_registrations
+                .iter()
+                .map(|registration| registration.index_n_heads)
+                .max()
+                .unwrap_or(0);
+            let max_index_head_dim = active_registrations
+                .iter()
+                .map(|registration| registration.index_head_dim)
+                .max()
+                .unwrap_or(0);
+            let query_elems = max_index_n_heads
+                .checked_mul(max_index_head_dim)
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyOverflowError::new_err(
+                        "DSA projected-query workspace size overflow",
+                    )
+                })?;
+            let head_score_elems = max_context_tokens
+                .checked_mul(max_index_n_heads)
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyOverflowError::new_err(
+                        "DSA head-score workspace size overflow",
+                    )
+                })?;
+            (
+                available.len(),
+                max_context_tokens,
+                max_index_n_heads,
+                max_index_head_dim,
+                query_elems,
+                head_score_elems,
+            )
+        };
+
+        let alloc_u16 = |elements: usize, name: &str| {
+            self.device.alloc_zeros::<u16>(elements).map_err(|error| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "alloc DSA {} [{} x u16]: {:?}",
+                    name, elements, error
+                ))
+            })
+        };
+        let alloc_f32 = |elements: usize, name: &str| {
+            self.device.alloc_zeros::<f32>(elements).map_err(|error| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "alloc DSA {} [{} x f32]: {:?}",
+                    name, elements, error
+                ))
+            })
+        };
+        let workspace = DsaIndexerWorkspace {
+            max_context_tokens,
+            max_index_n_heads,
+            max_index_head_dim,
+            d_raw_key: alloc_u16(max_index_head_dim, "raw key")?,
+            d_projected_query: alloc_u16(query_elems, "projected query")?,
+            d_query_rope: alloc_u16(query_elems, "RoPE query")?,
+            d_head_weights: alloc_u16(max_index_n_heads, "head weights")?,
+            d_head_scores: alloc_f32(head_score_elems, "per-head scores")?,
+            d_scores: alloc_f32(max_context_tokens, "reduced scores")?,
+        };
         let graph = self
             .graph
-            .as_ref()
+            .as_mut()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
-        let mut required = std::collections::BTreeSet::new();
-        for layer in graph
-            .layers
-            .iter()
-            .enumerate()
-            .filter(|(layer_idx, _)| {
-                graph.decode_layer_start <= *layer_idx && *layer_idx < graph.decode_layer_end
-            })
-            .map(|(_, layer)| layer)
-        {
-            if let Some(registration) = layer.dsa_indexer.as_ref() {
-                required.insert(registration.owner_layer_idx);
-            }
-        }
-        let available = graph
-            .dsa_indexer_owners
-            .iter()
-            .map(|resource| resource.owner_layer_idx)
-            .collect::<std::collections::BTreeSet<_>>();
-        let missing = required.difference(&available).copied().collect::<Vec<_>>();
-        if !missing.is_empty() {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "DSA active decode segment [{}, {}) is missing owner resources {:?}",
-                graph.decode_layer_start, graph.decode_layer_end, missing
-            )));
-        }
-        let unexpected = available.difference(&required).copied().collect::<Vec<_>>();
-        if !unexpected.is_empty() {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "DSA decode store has resources not used by active segment: {:?}",
-                unexpected
-            )));
-        }
-        Ok(available.len())
+        graph.dsa_indexer_workspace = Some(workspace);
+        log::info!(
+            "GpuDecodeStore: finalized DSA workspace (context={}, heads={}, head_dim={}, head_scores={})",
+            max_context_tokens,
+            max_index_n_heads,
+            max_index_head_dim,
+            head_score_elems,
+        );
+        Ok(available_count)
     }
 
     fn dsa_indexer_registration_json(&self, layer_idx: usize) -> PyResult<String> {
@@ -20935,12 +21332,23 @@ impl GpuDecodeStore {
             "index_topk": registration.index_topk,
             "index_head_dim": registration.index_head_dim,
             "index_n_heads": registration.index_n_heads,
+            "qk_rope_head_dim": registration.qk_rope_head_dim,
             "index_topk_freq": registration.index_topk_freq,
             "index_skip_topk_offset": registration.index_skip_topk_offset,
             "q_lora_rank": registration.q_lora_rank,
             "hidden_size": registration.hidden_size,
             "rope_interleave": registration.rope_interleave,
             "resource_ready": resource.is_some(),
+            "workspace_ready": graph.dsa_indexer_workspace.is_some(),
+            "workspace": graph.dsa_indexer_workspace.as_ref().map(|workspace| serde_json::json!({
+                "max_context_tokens": workspace.max_context_tokens,
+                "max_index_n_heads": workspace.max_index_n_heads,
+                "max_index_head_dim": workspace.max_index_head_dim,
+                "head_score_shape": [
+                    workspace.max_index_n_heads,
+                    workspace.max_context_tokens,
+                ],
+            })),
             "resource": resource.map(|resource| serde_json::json!({
                 "owner_layer_idx": resource.owner_layer_idx,
                 "weight_ids": {
@@ -24218,6 +24626,243 @@ impl GpuDecodeStore {
 // ── Pure-Rust methods for GPU decode (no PyO3, used by Rust HTTP server) ──
 
 impl GpuDecodeStore {
+    fn execute_dsa_owner_scores(
+        &self,
+        owner_layer_idx: usize,
+        position: usize,
+        hidden_ptr: u64,
+        q_resid_ptr: u64,
+    ) -> Result<usize, String> {
+        let graph = self.graph.as_ref().ok_or("Call configure first")?;
+        let registration = graph
+            .layers
+            .iter()
+            .filter_map(|layer| layer.dsa_indexer.as_ref())
+            .find(|registration| registration.owner_layer_idx == owner_layer_idx)
+            .ok_or_else(|| {
+                format!(
+                    "DSA owner layer {} has no active registration",
+                    owner_layer_idx
+                )
+            })?;
+        if registration.rope_interleave {
+            return Err(format!(
+                "DSA owner layer {} requires split-half indexer RoPE",
+                owner_layer_idx
+            ));
+        }
+        let resource = graph
+            .dsa_indexer_owners
+            .iter()
+            .find(|resource| resource.owner_layer_idx == owner_layer_idx)
+            .ok_or_else(|| format!("DSA owner layer {} resource is absent", owner_layer_idx))?;
+        let workspace = graph
+            .dsa_indexer_workspace
+            .as_ref()
+            .ok_or("DSA indexer workspace is not finalized")?;
+        if position >= resource.max_context_tokens {
+            return Err(format!(
+                "DSA owner layer {} position {} exceeds resource context {}",
+                owner_layer_idx, position, resource.max_context_tokens
+            ));
+        }
+        let query_elems = registration
+            .index_n_heads
+            .checked_mul(registration.index_head_dim)
+            .ok_or("DSA query width overflow")?;
+        let position_i32 = i32::try_from(position)
+            .map_err(|_| format!("DSA position {} exceeds native i32 range", position))?;
+        let max_context_i32 = i32::try_from(resource.max_context_tokens).map_err(|_| {
+            format!(
+                "DSA resource context {} exceeds native i32 range",
+                resource.max_context_tokens
+            )
+        })?;
+        let index_n_heads_i32 = i32::try_from(registration.index_n_heads).map_err(|_| {
+            format!(
+                "DSA index_n_heads {} exceeds native i32 range",
+                registration.index_n_heads
+            )
+        })?;
+        let index_head_dim_i32 = i32::try_from(registration.index_head_dim).map_err(|_| {
+            format!(
+                "DSA index_head_dim {} exceeds native i32 range",
+                registration.index_head_dim
+            )
+        })?;
+        let qk_rope_head_dim_i32 = i32::try_from(registration.qk_rope_head_dim).map_err(|_| {
+            format!(
+                "DSA qk_rope_head_dim {} exceeds native i32 range",
+                registration.qk_rope_head_dim
+            )
+        })?;
+        let query_elems_u32 = u32::try_from(query_elems)
+            .map_err(|_| format!("DSA query width {} exceeds native u32 range", query_elems))?;
+        if resource.max_context_tokens > workspace.max_context_tokens
+            || registration.index_n_heads > workspace.max_index_n_heads
+            || registration.index_head_dim > workspace.max_index_head_dim
+        {
+            return Err(format!(
+                "DSA owner {} exceeds finalized workspace: resource=[{}, {}, {}] workspace=[{}, {}, {}]",
+                owner_layer_idx,
+                resource.max_context_tokens,
+                registration.index_n_heads,
+                registration.index_head_dim,
+                workspace.max_context_tokens,
+                workspace.max_index_n_heads,
+                workspace.max_index_head_dim,
+            ));
+        }
+        let rope_half_dim = registration.qk_rope_head_dim / 2;
+        if graph.rope_half_dim != rope_half_dim {
+            return Err(format!(
+                "DSA owner {} RoPE table half-dim {} != indexer half-dim {}",
+                owner_layer_idx, graph.rope_half_dim, rope_half_dim
+            ));
+        }
+        let d_cos = graph
+            .d_rope_cos
+            .as_ref()
+            .ok_or("DSA indexer RoPE cosine table is absent")?;
+        let d_sin = graph
+            .d_rope_sin
+            .as_ref()
+            .ok_or("DSA indexer RoPE sine table is absent")?;
+        let kernels = graph.kernels.as_ref().ok_or("kernels not cached")?;
+        let weights = &graph.weights;
+        let wq_b = &weights[resource.weight_ids.wq_b];
+        let wk = &weights[resource.weight_ids.wk];
+        let weights_proj = &weights[resource.weight_ids.weights_proj];
+        let k_norm_weight = &weights[resource.weight_ids.k_norm_weight];
+        let k_norm_bias = &weights[resource.weight_ids.k_norm_bias];
+
+        self.gemv_bf16_internal(wq_b, q_resid_ptr, *workspace.d_projected_query.device_ptr())?;
+        self.gemv_bf16_internal(wk, hidden_ptr, *workspace.d_raw_key.device_ptr())?;
+        self.gemv_bf16_internal(
+            weights_proj,
+            hidden_ptr,
+            *workspace.d_head_weights.device_ptr(),
+        )?;
+
+        let threads = 256u32;
+        unsafe {
+            kernels
+                .dsa_layernorm_rope_key_write
+                .clone()
+                .launch(
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (threads, 1, 1),
+                        shared_mem_bytes: ((registration.index_head_dim + 64) * 4) as u32,
+                    },
+                    (
+                        *resource.d_key_cache.device_ptr(),
+                        *workspace.d_raw_key.device_ptr(),
+                        k_norm_weight.ptr,
+                        k_norm_bias.ptr,
+                        *d_cos.device_ptr(),
+                        *d_sin.device_ptr(),
+                        position_i32,
+                        max_context_i32,
+                        index_head_dim_i32,
+                        qk_rope_head_dim_i32,
+                        DSA_INDEXER_LAYER_NORM_EPS,
+                    ),
+                )
+                .map_err(|error| {
+                    format!(
+                        "DSA owner {} LayerNorm/RoPE key write: {:?}",
+                        owner_layer_idx, error
+                    )
+                })?;
+            kernels
+                .dsa_rope_query_bf16
+                .clone()
+                .launch(
+                    LaunchConfig::for_num_elems(query_elems_u32),
+                    (
+                        *workspace.d_query_rope.device_ptr(),
+                        *workspace.d_projected_query.device_ptr(),
+                        *d_cos.device_ptr(),
+                        *d_sin.device_ptr(),
+                        position_i32,
+                        index_n_heads_i32,
+                        index_head_dim_i32,
+                        qk_rope_head_dim_i32,
+                    ),
+                )
+                .map_err(|error| {
+                    format!(
+                        "DSA owner {} projected-query RoPE: {:?}",
+                        owner_layer_idx, error
+                    )
+                })?;
+        }
+
+        let context = position + 1;
+        let context_i32 = i32::try_from(context)
+            .map_err(|_| format!("DSA context {} exceeds native i32 range", context))?;
+        let context_u32 = u32::try_from(context)
+            .map_err(|_| format!("DSA context {} exceeds native u32 range", context))?;
+        let alpha = 1.0f32;
+        let beta = 0.0f32;
+        unsafe {
+            cublas_result::gemm_ex(
+                *self.blas.handle(),
+                cublas_sys::cublasOperation_t::CUBLAS_OP_T,
+                cublas_sys::cublasOperation_t::CUBLAS_OP_N,
+                context_i32,
+                index_n_heads_i32,
+                index_head_dim_i32,
+                &alpha as *const f32 as *const std::ffi::c_void,
+                *resource.d_key_cache.device_ptr() as *const std::ffi::c_void,
+                cublas_sys::cudaDataType::CUDA_R_16BF,
+                index_head_dim_i32,
+                *workspace.d_query_rope.device_ptr() as *const std::ffi::c_void,
+                cublas_sys::cudaDataType::CUDA_R_16BF,
+                index_head_dim_i32,
+                &beta as *const f32 as *const std::ffi::c_void,
+                *workspace.d_head_scores.device_ptr() as *mut std::ffi::c_void,
+                cublas_sys::cudaDataType::CUDA_R_32F,
+                context_i32,
+                cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
+                cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
+            )
+            .map_err(|error| {
+                format!(
+                    "DSA owner {} BF16 QK score GEMM: {:?}",
+                    owner_layer_idx, error
+                )
+            })?;
+        }
+        let scale = 1.0f32
+            / ((registration.index_head_dim as f32).sqrt()
+                * (registration.index_n_heads as f32).sqrt());
+        unsafe {
+            kernels
+                .dsa_reduce_weighted_scores
+                .clone()
+                .launch(
+                    LaunchConfig::for_num_elems(context_u32),
+                    (
+                        *workspace.d_scores.device_ptr(),
+                        *workspace.d_head_scores.device_ptr(),
+                        *workspace.d_head_weights.device_ptr(),
+                        context_i32,
+                        index_n_heads_i32,
+                        scale,
+                    ),
+                )
+                .map_err(|error| {
+                    format!(
+                        "DSA owner {} weighted score reduction: {:?}",
+                        owner_layer_idx, error
+                    )
+                })?;
+        }
+        Ok(context)
+    }
+
     /// Set KV cache position after Rust prefill (no GIL needed).
     /// Equivalent to the pyo3 `set_kv_position` but callable from Rust directly.
     pub fn set_kv_position_rust(&mut self, seq_len: usize) {
