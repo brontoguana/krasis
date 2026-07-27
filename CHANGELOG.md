@@ -43,6 +43,15 @@
   thinking-token budget contract rather than MLA execution. Llama-witness
   correctness validation remains required.
 
+- Added GLM-4.7-Flash to the built llama-witness model, preflight, conversion,
+  frozen-input, and capture commands, plus a dedicated thinking-off
+  HQQ4/k4v4/INT4 witness config under `tests/`. The 59.9 GB BF16 GGUF and four
+  frozen input cases passed provenance and token-hash checks. Authoritative
+  `./dev witness-compare` validation passes all four cases: 4/4 prefill argmax,
+  4/4 prefill top-10 containment, 4/4 first-token match, and 100% one-token
+  decode top-k containment. The RTX PRO 6000 returned to idle after the run,
+  the A4500 service remained unchanged, and `testconfigs/` was not modified.
+
 ## 1.0.16 - 2026-07-27
 
 - Fixed invalid OpenAI-compatible JSON responses when a configured model name
