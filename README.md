@@ -13,12 +13,12 @@ budgeting.
 
 ## Install
 
-The current release is the
-[`v1.0.16-rc.3` prerelease](https://github.com/brontoguana/krasis/releases/tag/v1.0.16-rc.3).
+The current release is
+[`v1.0.16`](https://github.com/brontoguana/krasis/releases/tag/v1.0.16).
 
-**Native Windows:** [Download the Krasis Windows installer](https://github.com/brontoguana/krasis/releases/download/v1.0.16-rc.3/KrasisSetup-1.0.16-rc.3-win64.exe).
+**Native Windows:** [Download the Krasis Windows installer](https://github.com/brontoguana/krasis/releases/download/v1.0.16/KrasisSetup-1.0.16-win64.exe).
 It installs Krasis for the current user, includes its own Python runtime, and
-adds `Krasis`, `Krasis Update`, and `Krasis Prerelease` to the Start Menu.
+adds `Krasis` to the Start Menu.
 
 **Linux or WSL2:**
 
@@ -75,7 +75,7 @@ Krasis release. Highlights:
 - Added full GitHub release wheel packaging for Python 3.10, 3.11, 3.12, and
   3.13, with vendored CUDA sidecars injected into wheels.
 - Added a native Windows installer with a private Python runtime, interactive
-  launcher, and Start Menu entries for stable and prerelease updates.
+  launcher, and a maximized Start Menu entry.
 - Added `krasis update` and `krasis prerelease` maintenance commands.
 - Added an interactive curated Hugging Face downloader flow in the launcher.
 - Added reverse SSH tunnel support for exposing a local Krasis server to a
@@ -151,21 +151,18 @@ installing the latest stable release.
 
 Native Windows:
 
-[Download `KrasisSetup-1.0.16-rc.3-win64.exe`](https://github.com/brontoguana/krasis/releases/download/v1.0.16-rc.3/KrasisSetup-1.0.16-rc.3-win64.exe).
+[Download `KrasisSetup-1.0.16-win64.exe`](https://github.com/brontoguana/krasis/releases/download/v1.0.16/KrasisSetup-1.0.16-win64.exe).
 The installer creates a per-user install under
 `%LOCALAPPDATA%\Programs\Krasis`, installs and validates a release-pinned
-private Python/Krasis/PyTorch runtime, and adds three entries to the Krasis
-Start Menu folder. It never uses or modifies a system Python. `Krasis` opens
-the native interactive launcher in a maximized, resizable console.
-`Krasis Update` and `Krasis Prerelease` are native executable entries which
-install the latest stable Windows release or prerelease respectively. Models
-and caches still live under
+private Python/Krasis/PyTorch runtime, and adds `Krasis` to the Start Menu
+folder. It never uses or modifies a system Python. `Krasis` opens the native
+interactive launcher in a maximized, resizable console. Models and caches
+still live under
 `%USERPROFILE%\.krasis`. The first install downloads the pinned CUDA PyTorch
 wheel and can take several minutes.
 
-The first native Windows target covers the Marlin/FlashAttention sidecar path.
-FLA/linear-attention models still need a separate native Windows FLA sidecar
-port before they should be treated as supported on Windows.
+Native Windows packages Marlin, FlashAttention, and FLA sidecars for supported
+Ampere and newer NVIDIA architectures.
 
 ### 2. Install CUDA Dependencies
 
@@ -218,9 +215,8 @@ krasis prerelease
 curl -sSf https://raw.githubusercontent.com/brontoguana/krasis/main/install.sh | bash -s -- --uninstall
 ```
 
-On native Windows, open `Krasis Update` or `Krasis Prerelease` from the Krasis
-folder in the Start Menu. Each entry downloads and runs the corresponding
-published Windows installer.
+On native Windows, download and run the desired stable or prerelease installer
+from the [Krasis releases page](https://github.com/brontoguana/krasis/releases).
 
 ## WSL2
 

@@ -22,12 +22,9 @@ New-Item -ItemType Directory -Force -Path (Join-Path $Stage "bin") | Out-Null
 New-Item -ItemType Directory -Force -Path $OutputPath | Out-Null
 
 Copy-Item -Force $LauncherExePath (Join-Path $Stage "bin\Krasis.exe")
-Copy-Item -Force $LauncherExePath (Join-Path $Stage "bin\Krasis Update.exe")
-Copy-Item -Force $LauncherExePath (Join-Path $Stage "bin\Krasis Prerelease.exe")
 Copy-Item -Force $LauncherIconPath (Join-Path $Stage "bin\Krasis.ico")
 Copy-Item -Force (Join-Path $PSScriptRoot "Install-Krasis.ps1") (Join-Path $Stage "bin\Install-Krasis.ps1")
 Copy-Item -Force (Join-Path $PSScriptRoot "Invoke-Install-Krasis.ps1") (Join-Path $Stage "bin\Invoke-Install-Krasis.ps1")
-Copy-Item -Force (Join-Path $PSScriptRoot "Update-Krasis.ps1") (Join-Path $Stage "bin\Update-Krasis.ps1")
 Copy-Item -Force (Join-Path $PSScriptRoot "Runtime-Manifest.ps1") (Join-Path $Stage "bin\Runtime-Manifest.ps1")
 Copy-Item -Force (Join-Path $PSScriptRoot "Remove-KrasisRuntime.ps1") (Join-Path $Stage "bin\Remove-KrasisRuntime.ps1")
 Set-Content -Path (Join-Path $Stage "VERSION.txt") -Value $Version -Encoding ASCII

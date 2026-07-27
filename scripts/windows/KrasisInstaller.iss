@@ -28,12 +28,15 @@ Source: "{#SourceDir}\runtime-package.zip"; DestDir: "{tmp}"; DestName: "KrasisR
 
 [Icons]
 Name: "{autoprograms}\Krasis\Krasis"; Filename: "{app}\bin\Krasis.exe"; WorkingDir: "{app}"; Flags: runmaximized
-Name: "{autoprograms}\Krasis\Krasis Update"; Filename: "{app}\bin\Krasis Update.exe"; WorkingDir: "{app}"; Flags: runmaximized
-Name: "{autoprograms}\Krasis\Krasis Prerelease"; Filename: "{app}\bin\Krasis Prerelease.exe"; WorkingDir: "{app}"; Flags: runmaximized
 
 [InstallDelete]
 Type: files; Name: "{app}\bin\Launch-Krasis.ps1"
 Type: files; Name: "{app}\bin\python-installer.exe"
+Type: files; Name: "{app}\bin\Krasis Update.exe"
+Type: files; Name: "{app}\bin\Krasis Prerelease.exe"
+Type: files; Name: "{app}\bin\Update-Krasis.ps1"
+Type: files; Name: "{autoprograms}\Krasis\Krasis Update.lnk"
+Type: files; Name: "{autoprograms}\Krasis\Krasis Prerelease.lnk"
 Type: filesandordirs; Name: "{app}\bin\wheelhouse"
 
 [UninstallDelete]

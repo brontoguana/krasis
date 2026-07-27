@@ -369,7 +369,7 @@ class LauncherMatrixTest(unittest.TestCase):
                 else:
                     os.environ["ProgramW6432"] = old_program_w6432
 
-    def test_windows_installer_owns_private_runtime_and_update_shortcuts(self) -> None:
+    def test_windows_installer_owns_private_runtime_and_native_launcher(self) -> None:
         windows_dir = REPO_ROOT / "scripts" / "windows"
         installer_source = (windows_dir / "KrasisInstaller.iss").read_text()
         build_source = (windows_dir / "Build-Installer.ps1").read_text()
@@ -383,7 +383,6 @@ class LauncherMatrixTest(unittest.TestCase):
         native_launcher_source = (
             REPO_ROOT / "src" / "bin" / "krasis-windows-launcher.rs"
         ).read_text()
-        updater_source = (windows_dir / "Update-Krasis.ps1").read_text()
         workflow_source = (
             REPO_ROOT / ".github" / "workflows" / "windows-installer.yml"
         ).read_text()
@@ -399,11 +398,11 @@ class LauncherMatrixTest(unittest.TestCase):
             ).read_text(encoding="utf-8")
         )
 
-        self.assertIn(
+        self.assertNotIn(
             r'Name: "{autoprograms}\Krasis\Krasis Update"; Filename: "{app}\bin\Krasis Update.exe"',
             installer_source,
         )
-        self.assertIn(
+        self.assertNotIn(
             r'Name: "{autoprograms}\Krasis\Krasis Prerelease"; Filename: "{app}\bin\Krasis Prerelease.exe"',
             installer_source,
         )
@@ -411,23 +410,32 @@ class LauncherMatrixTest(unittest.TestCase):
             r'Name: "{autoprograms}\Krasis\Krasis"; Filename: "{app}\bin\Krasis.exe"',
             installer_source,
         )
-        self.assertEqual(installer_source.count("Flags: runmaximized"), 3)
+        self.assertEqual(installer_source.count("Flags: runmaximized"), 1)
         self.assertNotIn(
             r'Filename: "{sys}\WindowsPowerShell',
             installer_source,
         )
-        self.assertIn(
+        self.assertNotIn(
             '$LauncherExePath (Join-Path $Stage "bin\\Krasis Update.exe")',
             build_source,
         )
-        self.assertIn(
+        self.assertNotIn(
             '$LauncherExePath (Join-Path $Stage "bin\\Krasis Prerelease.exe")',
             build_source,
         )
-        self.assertIn(
+        self.assertNotIn(
             '"Update-Krasis.ps1") (Join-Path $Stage "bin\\Update-Krasis.ps1")',
             build_source,
         )
+        self.assertFalse((windows_dir / "Update-Krasis.ps1").exists())
+        for retired_path in (
+            r'Type: files; Name: "{app}\bin\Krasis Update.exe"',
+            r'Type: files; Name: "{app}\bin\Krasis Prerelease.exe"',
+            r'Type: files; Name: "{app}\bin\Update-Krasis.ps1"',
+            r'Type: files; Name: "{autoprograms}\Krasis\Krasis Update.lnk"',
+            r'Type: files; Name: "{autoprograms}\Krasis\Krasis Prerelease.lnk"',
+        ):
+            self.assertIn(retired_path, installer_source)
         self.assertIn("[string]$LauncherExe", build_source)
         self.assertIn(
             '$LauncherExePath (Join-Path $Stage "bin\\Krasis.exe")',
@@ -607,17 +615,13 @@ class LauncherMatrixTest(unittest.TestCase):
         self.assertIn('.args(["-I", "-m", "krasis.launcher"])', native_launcher_source)
         self.assertIn('.env_remove("PYTHONHOME")', native_launcher_source)
         self.assertIn('.env_remove("PYTHONPATH")', native_launcher_source)
-        self.assertIn("fn system_powershell()", native_launcher_source)
-        self.assertIn("GetSystemDirectoryW", native_launcher_source)
+        self.assertNotIn("UpdateChannel", native_launcher_source)
+        self.assertNotIn("system_powershell", native_launcher_source)
+        self.assertNotIn("GetSystemDirectoryW", native_launcher_source)
         self.assertIn("Command::new(&paths.python)", native_launcher_source)
-        self.assertIn(
-            "install_root.join(UPDATE_DIR).join(UPDATE_SCRIPT_NAME)",
-            native_launcher_source,
-        )
-        self.assertNotIn(
-            'const UPDATE_SCRIPT: &str = "bin/Update-Krasis.ps1"',
-            native_launcher_source,
-        )
+        self.assertNotIn("Update-Krasis.ps1", native_launcher_source)
+        self.assertNotIn("Krasis Update.exe", native_launcher_source)
+        self.assertNotIn("Krasis Prerelease.exe", native_launcher_source)
         self.assertNotIn("SetConsoleMode", native_launcher_source)
         self.assertNotIn("GetConsoleWindow", native_launcher_source)
         self.assertNotIn(r"venv\Scripts\python.exe", native_launcher_source)
@@ -755,15 +759,6 @@ class LauncherMatrixTest(unittest.TestCase):
         self.assertIn("if: always()", workflow_source)
         self.assertIn("${{ runner.temp }}/krasis-installer-test.log", workflow_source)
         self.assertIn("${{ runner.temp }}/krasis-uninstaller-test.log", workflow_source)
-        self.assertIn('[ValidateSet("stable", "prerelease")]', updater_source)
-        self.assertIn("[switch]$PauseOnFailure", updater_source)
-        self.assertIn('Read-Host "Press Enter to close"', updater_source)
-        self.assertIn('"$ApiRoot/releases/latest"', updater_source)
-        self.assertIn("$_.prerelease -and -not $_.draft", updater_source)
-        self.assertIn(r'^KrasisSetup-.+-win64\.exe$', updater_source)
-        self.assertIn("Start-Process", updater_source)
-        self.assertIn("$DownloadedSize -ne [Int64]$Asset.size", updater_source)
-
     def test_hf_results_screen_fits_short_terminal_without_wrapping(self) -> None:
         long_summary = " ".join(["very-long-summary"] * 20)
         candidates = [

@@ -1,6 +1,24 @@
 # Changelog
 
-## Unreleased
+## 1.0.16 - 2026-07-27
+
+- Fixed invalid OpenAI-compatible JSON responses when a configured model name
+  is a Windows path. Dynamic response fields now use standards-complete JSON
+  serialization across streaming, non-streaming, timing, tool-call, debug, and
+  model-list responses, with exact parse-and-round-trip regression coverage.
+
+- Added verified content-addressed reuse for Windows CUDA sidecars and exact
+  promotion of the installer that passed the full preflight lifecycle. Tagged
+  releases verify source SHA, version, provenance, hashes, sizes, exports, and
+  sidecar inventories before publishing; changed sources, flags, toolchains,
+  or architectures produce a cache miss instead of accepting stale binaries.
+
+- Finalized the native Windows launcher and installer experience. The single
+  branded `Krasis` Start Menu shortcut opens maximized while remaining
+  resizable, without manipulating console input or mouse modes. The temporary
+  stable/prerelease updater shortcuts have been retired; upgrades remove their
+  rc.10 executables, script, and shortcuts, and Windows users update by
+  downloading the desired installer from GitHub Releases.
 
 - Fixed Windows linear-attention startup by building and packaging the complete
   vendored FLA sidecar set for sm_80, sm_89, sm_90, and sm_120. Release CI

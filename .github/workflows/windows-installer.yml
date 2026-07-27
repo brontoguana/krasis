@@ -656,8 +656,25 @@ jobs:
           Remove-Item -Recurse -Force $testRoot -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force -Path (Join-Path $testRoot "python") | Out-Null
           New-Item -ItemType Directory -Force -Path (Join-Path $testRoot "venv") | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $testRoot "bin") | Out-Null
           Set-Content (Join-Path $testRoot "python\legacy-313-runtime.txt") "legacy"
           Set-Content (Join-Path $testRoot "venv\legacy-313-venv.txt") "legacy"
+          Set-Content (Join-Path $testRoot "bin\Krasis Update.exe") "retired updater"
+          Set-Content (Join-Path $testRoot "bin\Krasis Prerelease.exe") "retired updater"
+          Set-Content (Join-Path $testRoot "bin\Update-Krasis.ps1") "retired updater"
+
+          $startMenuFolder = Join-Path (
+            [Environment]::GetFolderPath([Environment+SpecialFolder]::Programs)
+          ) "Krasis"
+          New-Item -ItemType Directory -Force -Path $startMenuFolder | Out-Null
+          $shortcutShell = New-Object -ComObject WScript.Shell
+          foreach ($retiredName in @("Krasis Update", "Krasis Prerelease")) {
+            $retiredShortcut = $shortcutShell.CreateShortcut(
+              (Join-Path $startMenuFolder "$retiredName.lnk")
+            )
+            $retiredShortcut.TargetPath = "C:\Windows\System32\cmd.exe"
+            $retiredShortcut.Save()
+          }
 
           Remove-Item -Recurse -Force target, wheelhouse, runtime-package -ErrorAction SilentlyContinue
           Get-PSDrive C | Format-Table Name,Used,Free
@@ -721,67 +738,29 @@ jobs:
             throw "Native launcher resolved the wrong private runtime: $($launcherProbe -join ' | ')"
           }
 
-          $updateLaunchers = @(
-            @{
-              Name = "Krasis Update"
-              Path = (Join-Path $testRoot "bin\Krasis Update.exe")
-              Channel = "stable"
-            },
-            @{
-              Name = "Krasis Prerelease"
-              Path = (Join-Path $testRoot "bin\Krasis Prerelease.exe")
-              Channel = "prerelease"
-            }
-          )
-          $activationPointer = Join-Path $testRoot "runtime\current.txt"
-          $activationBackup = "$activationPointer.lifecycle-backup"
-          Move-Item -Force $activationPointer $activationBackup
-          try {
-            foreach ($entry in $updateLaunchers) {
-              if (-not (Test-Path $entry.Path -PathType Leaf)) {
-                throw "Installed native updater is missing: $($entry.Path)"
-              }
-              $updaterProbe = & $entry.Path --probe
-              if ($LASTEXITCODE -ne 0) {
-                throw "$($entry.Name) probe failed with status $LASTEXITCODE."
-              }
-              $expectedUpdaterProbe = (
-                "KRASIS_WINDOWS_UPDATER_PROBE=" +
-                $entry.Channel +
-                ":" +
-                (Join-Path $testRoot "bin\Update-Krasis.ps1")
-              )
-              if ($updaterProbe -notcontains $expectedUpdaterProbe) {
-                throw "$($entry.Name) selected the wrong update contract: $($updaterProbe -join ' | ')"
-              }
-            }
-          } finally {
-            Move-Item -Force $activationBackup $activationPointer
+          $shortcutPath = Join-Path $startMenuFolder "Krasis.lnk"
+          if (-not (Test-Path $shortcutPath -PathType Leaf)) {
+            throw "Installed Start Menu shortcut is missing: $shortcutPath"
           }
-
-          $startMenuFolder = Join-Path (
-            [Environment]::GetFolderPath([Environment+SpecialFolder]::Programs)
-          ) "Krasis"
-          $shortcutShell = New-Object -ComObject WScript.Shell
-          $shortcutTargets = @(
-            @{ Name = "Krasis"; Target = $nativeLauncher },
-            @{ Name = "Krasis Update"; Target = $updateLaunchers[0].Path },
-            @{ Name = "Krasis Prerelease"; Target = $updateLaunchers[1].Path }
-          )
-          foreach ($entry in $shortcutTargets) {
-            $shortcutPath = Join-Path $startMenuFolder "$($entry.Name).lnk"
-            if (-not (Test-Path $shortcutPath -PathType Leaf)) {
-              throw "Installed Start Menu shortcut is missing: $shortcutPath"
-            }
-            $shortcut = $shortcutShell.CreateShortcut($shortcutPath)
-            if ($shortcut.TargetPath -ne $entry.Target) {
-              throw "$($entry.Name) shortcut targets '$($shortcut.TargetPath)' instead of '$($entry.Target)'."
-            }
-            if ($shortcut.Arguments) {
-              throw "$($entry.Name) shortcut unexpectedly has arguments: $($shortcut.Arguments)"
-            }
-            if ($shortcut.WindowStyle -ne 3) {
-              throw "$($entry.Name) shortcut is not configured to start maximized."
+          $shortcut = $shortcutShell.CreateShortcut($shortcutPath)
+          if ($shortcut.TargetPath -ne $nativeLauncher) {
+            throw "Krasis shortcut targets '$($shortcut.TargetPath)' instead of '$nativeLauncher'."
+          }
+          if ($shortcut.Arguments) {
+            throw "Krasis shortcut unexpectedly has arguments: $($shortcut.Arguments)"
+          }
+          if ($shortcut.WindowStyle -ne 3) {
+            throw "Krasis shortcut is not configured to start maximized."
+          }
+          foreach ($retiredPath in @(
+            (Join-Path $testRoot "bin\Krasis Update.exe"),
+            (Join-Path $testRoot "bin\Krasis Prerelease.exe"),
+            (Join-Path $testRoot "bin\Update-Krasis.ps1"),
+            (Join-Path $startMenuFolder "Krasis Update.lnk"),
+            (Join-Path $startMenuFolder "Krasis Prerelease.lnk")
+          )) {
+            if (Test-Path $retiredPath) {
+              throw "Installer retained retired updater artifact: $retiredPath"
             }
           }
           Remove-Item Env:PYTHONHOME,Env:PYTHONPATH -ErrorAction SilentlyContinue
