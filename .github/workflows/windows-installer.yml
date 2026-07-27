@@ -207,7 +207,7 @@ jobs:
           } finally {
             $hasher.Dispose()
           }
-          "key=krasis-windows-fla-dlls-v1-$digest" >> $env:GITHUB_OUTPUT
+          "key=krasis-windows-fla-dlls-v2-$digest" >> $env:GITHUB_OUTPUT
           "record_sha256=$digest" >> $env:GITHUB_OUTPUT
           Write-Host "Windows FLA DLL cache key: $digest"
 
@@ -466,6 +466,31 @@ jobs:
             }
           }
           if (-not $flaDllCacheHit) {
+            $expectedLinkerByproducts = @(
+              $expectedArchs | ForEach-Object {
+                "krasis_fla_sm$_.exp"
+                "krasis_fla_sm$_.lib"
+              }
+            )
+            $actualLinkerByproducts = @(
+              Get-ChildItem $flaDllCacheRoot -File |
+                Where-Object { $_.Extension -in @(".exp", ".lib") } |
+                ForEach-Object { $_.Name } |
+                Sort-Object
+            )
+            $unexpectedLinkerByproducts = @(
+              $actualLinkerByproducts |
+                Where-Object { $_ -notin $expectedLinkerByproducts }
+            )
+            if ($unexpectedLinkerByproducts.Count -ne 0) {
+              throw (
+                "Unexpected Windows FLA linker byproducts: " +
+                [string]::Join(",", $unexpectedLinkerByproducts)
+              )
+            }
+            Get-ChildItem $flaDllCacheRoot -File |
+              Where-Object { $_.Name -in $actualLinkerByproducts } |
+              Remove-Item -Force
             $sourceManifestHash = (
               Get-FileHash -Algorithm SHA256 $flaManifestPath
             ).Hash.ToLowerInvariant()
@@ -479,6 +504,27 @@ jobs:
             } |
               ConvertTo-Json -Depth 8 |
               Set-Content -Encoding utf8NoBOM $flaDllManifestPath
+            $expectedBuiltCacheFiles = @(
+              "windows-fla-dll-manifest.json"
+            ) + @(
+              $expectedArchs | ForEach-Object { "krasis_fla_sm$_.dll" }
+            )
+            $actualBuiltCacheFiles = @(
+              Get-ChildItem $flaDllCacheRoot -File |
+                ForEach-Object { $_.Name } |
+                Sort-Object
+            )
+            if (
+              [string]::Join(
+                ",",
+                @($expectedBuiltCacheFiles | Sort-Object)
+              ) -ne [string]::Join(",", $actualBuiltCacheFiles)
+            ) {
+              throw (
+                "Built Windows FLA DLL cache file inventory is invalid: " +
+                [string]::Join(",", $actualBuiltCacheFiles)
+              )
+            }
             Write-Host "Built and recorded exact-key Windows FLA DLL cache."
           }
 

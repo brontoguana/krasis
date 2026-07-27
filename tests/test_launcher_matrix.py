@@ -695,6 +695,13 @@ class LauncherMatrixTest(unittest.TestCase):
             "${{ runner.temp }}/krasis-windows-fla-dll-cache/**",
             workflow_source,
         )
+        self.assertIn("krasis-windows-fla-dlls-v2-", workflow_source)
+        self.assertNotIn("krasis-windows-fla-dlls-v1-", workflow_source)
+        self.assertIn("Unexpected Windows FLA linker byproducts:", workflow_source)
+        self.assertIn(
+            "Built Windows FLA DLL cache file inventory is invalid:",
+            workflow_source,
+        )
         self.assertGreaterEqual(
             workflow_source.count(
                 'Join-Path $env:RUNNER_TEMP "krasis-windows-sidecar-release-cache"'
