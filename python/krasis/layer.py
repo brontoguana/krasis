@@ -72,6 +72,68 @@ def _linear(x: torch.Tensor, weight_data) -> torch.Tensor:
     return torch.nn.functional.linear(x, weight_data)
 
 
+class NativeDsaIndexerWeights:
+    """Setup-only owner for one full GLM DSA indexer's checkpoint tensors."""
+
+    def __init__(
+        self,
+        cfg: ModelConfig,
+        layer_idx: int,
+        weights: Dict[str, torch.Tensor],
+    ):
+        if not cfg.is_dsa_indexer_owner_layer(layer_idx):
+            owner_idx = cfg.dsa_indexer_owner_layer(layer_idx)
+            raise ValueError(
+                f"DSA layer {layer_idx} shares indexer owner {owner_idx}; "
+                "only full owner layers may retain indexer tensors"
+            )
+
+        expected_shapes = {
+            "wq_b": (
+                cfg.index_n_heads * cfg.index_head_dim,
+                cfg.q_lora_rank,
+            ),
+            "wk": (cfg.index_head_dim, cfg.hidden_size),
+            "weights_proj": (cfg.index_n_heads, cfg.hidden_size),
+            "k_norm_weight": (cfg.index_head_dim,),
+            "k_norm_bias": (cfg.index_head_dim,),
+        }
+        missing = sorted(set(expected_shapes) - set(weights))
+        if missing:
+            raise KeyError(
+                f"DSA indexer owner layer {layer_idx} is missing tensors: "
+                + ", ".join(missing)
+            )
+
+        for name, expected_shape in expected_shapes.items():
+            tensor = weights[name]
+            actual_shape = tuple(tensor.shape)
+            if actual_shape != expected_shape:
+                raise ValueError(
+                    f"DSA indexer layer {layer_idx} tensor {name} shape "
+                    f"{actual_shape} != expected {expected_shape}"
+                )
+            if tensor.dtype != torch.bfloat16:
+                raise ValueError(
+                    f"DSA indexer layer {layer_idx} tensor {name} dtype "
+                    f"{tensor.dtype} != torch.bfloat16"
+                )
+            setattr(self, name, tensor)
+
+        self.layer_idx = layer_idx
+        self.n_heads = cfg.index_n_heads
+        self.head_dim = cfg.index_head_dim
+        self.q_lora_rank = cfg.q_lora_rank
+        self.hidden_size = cfg.hidden_size
+        self.topk = cfg.index_topk
+        self.rope_interleave = cfg.indexer_rope_interleave
+
+    def forward(self, *_args, **_kwargs):
+        raise RuntimeError(
+            "DSA indexer inference must run through the native Rust/CUDA runtime"
+        )
+
+
 class NativeMLAWeights:
     """Setup-only MLA tensor contract for the Rust/CUDA runtime.
 
@@ -117,6 +179,22 @@ class NativeMLAWeights:
         self.kv_a_proj = weights["kv_a_proj_with_mqa"]
         self.o_proj = weights["o_proj"]
         self.kv_a_norm_weight = weights["kv_a_layernorm"]
+
+        self.dsa_indexer_owner_layer = cfg.dsa_indexer_owner_layer(layer_idx)
+        if cfg.is_dsa_indexer_owner_layer(layer_idx):
+            indexer_weights = weights.get("dsa_indexer")
+            if indexer_weights is None:
+                raise KeyError(
+                    f"DSA indexer owner layer {layer_idx} has no loaded "
+                    "dsa_indexer tensor set"
+                )
+            self.dsa_indexer = NativeDsaIndexerWeights(
+                cfg,
+                layer_idx,
+                indexer_weights,
+            )
+        else:
+            self.dsa_indexer = None
 
         self.ckv_dim = max(self.kv_lora_rank, MLA_CKV_KERNEL_MIN_DIM)
         pad_size = self.ckv_dim - self.kv_lora_rank

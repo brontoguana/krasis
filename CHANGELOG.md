@@ -52,6 +52,15 @@
   decode top-k containment. The RTX PRO 6000 returned to idle after the run,
   the A4500 service remained unchanged, and `testconfigs/` was not modified.
 
+- Added setup-only GLM-5.2 DSA indexer ownership. The validated IndexShare
+  schedule now resolves every shared layer to its preceding full owner, and
+  only owner layers load the checkpoint's five measured BF16 tensors. Tensor
+  names, config-derived shapes, dtypes, and missing-tensor failures are checked
+  before native setup. This does not execute DSA or sparse attention; indexer
+  scoring, caches, top-k buffers, and Rust/CUDA registration remain
+  fail-closed future work. The built package gate and eight no-GPU contract
+  tests pass, with no existing-model execution path changed.
+
 ## 1.0.16 - 2026-07-27
 
 - Fixed invalid OpenAI-compatible JSON responses when a configured model name

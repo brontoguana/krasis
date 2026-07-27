@@ -717,6 +717,15 @@ class ModelConfig:
         )
         if arch == "glm_moe_dsa":
             required_positive = {
+                "q_lora_rank": int(cfg.get("q_lora_rank", 0) or 0),
+                "kv_lora_rank": int(cfg.get("kv_lora_rank", 0) or 0),
+                "qk_nope_head_dim": int(
+                    cfg.get("qk_nope_head_dim", 0) or 0
+                ),
+                "qk_rope_head_dim": int(
+                    cfg.get("qk_rope_head_dim", 0) or 0
+                ),
+                "v_head_dim": int(cfg.get("v_head_dim", 0) or 0),
                 "index_topk": index_topk,
                 "index_head_dim": index_head_dim,
                 "index_n_heads": index_n_heads,
@@ -727,6 +736,18 @@ class ModelConfig:
                     raise ValueError(
                         f"{arch} requires positive {field_name}, got {value}"
                     )
+            qk_rope_head_dim = required_positive["qk_rope_head_dim"]
+            if index_head_dim < qk_rope_head_dim:
+                raise ValueError(
+                    "glm_moe_dsa index_head_dim "
+                    f"{index_head_dim} is smaller than qk_rope_head_dim "
+                    f"{qk_rope_head_dim}"
+                )
+            if index_head_dim % 2 != 0 or qk_rope_head_dim % 2 != 0:
+                raise ValueError(
+                    "glm_moe_dsa index_head_dim and qk_rope_head_dim "
+                    "must both be even for RoPE"
+                )
             if index_skip_topk_offset < 0:
                 raise ValueError(
                     "glm_moe_dsa index_skip_topk_offset must be non-negative"
@@ -1009,6 +1030,28 @@ class ModelConfig:
     def is_dsa(self) -> bool:
         """True when the model uses DSA sparse attention and IndexShare."""
         return self.model_type == "glm_moe_dsa"
+
+    def dsa_indexer_owner_layer(self, layer_idx: int) -> Optional[int]:
+        """Return the full-indexer layer that owns this layer's IndexShare state."""
+        if layer_idx < 0 or layer_idx >= self.num_hidden_layers:
+            raise IndexError(
+                f"layer_idx {layer_idx} outside [0, {self.num_hidden_layers})"
+            )
+        if not self.is_dsa:
+            return None
+        if self.indexer_types is None:
+            raise RuntimeError("DSA model has no validated indexer_types schedule")
+        for owner_idx in range(layer_idx, -1, -1):
+            if self.indexer_types[owner_idx] == "full":
+                return owner_idx
+        raise RuntimeError(
+            f"DSA layer {layer_idx} has no full indexer owner in its schedule"
+        )
+
+    def is_dsa_indexer_owner_layer(self, layer_idx: int) -> bool:
+        """True when this layer owns indexer weights instead of sharing them."""
+        owner_idx = self.dsa_indexer_owner_layer(layer_idx)
+        return owner_idx is not None and owner_idx == layer_idx
 
     @property
     def num_moe_layers(self) -> int:

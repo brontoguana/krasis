@@ -402,7 +402,58 @@ class WeightLoader:
         weights["w_vc"] = kv_b[:, qk_nope:, :].contiguous()
         del kv_b
 
+        if self.cfg.is_dsa and self.cfg.is_dsa_indexer_owner_layer(layer_idx):
+            weights["dsa_indexer"] = self._load_dsa_indexer_weights(
+                layer_idx,
+                device,
+            )
+
         return weights
+
+    def _load_dsa_indexer_weights(
+        self,
+        layer_idx: int,
+        device: torch.device,
+    ) -> Dict[str, torch.Tensor]:
+        """Load the five checkpoint tensors owned by one full DSA indexer."""
+        if not self.cfg.is_dsa_indexer_owner_layer(layer_idx):
+            owner_idx = self.cfg.dsa_indexer_owner_layer(layer_idx)
+            raise ValueError(
+                f"DSA layer {layer_idx} shares indexer owner {owner_idx}; "
+                "shared layers must not load duplicate indexer tensors"
+            )
+
+        prefix = (
+            f"{self.cfg.layers_prefix}.layers.{layer_idx}.self_attn.indexer"
+        )
+        tensor_names = {
+            "wq_b": f"{prefix}.wq_b.weight",
+            "wk": f"{prefix}.wk.weight",
+            "weights_proj": f"{prefix}.weights_proj.weight",
+            "k_norm_weight": f"{prefix}.k_norm.weight",
+            "k_norm_bias": f"{prefix}.k_norm.bias",
+        }
+        missing = [
+            tensor_name
+            for tensor_name in tensor_names.values()
+            if tensor_name not in self._weight_map
+        ]
+        if missing:
+            raise KeyError(
+                f"DSA indexer owner layer {layer_idx} is missing checkpoint "
+                f"tensors: {', '.join(missing)}"
+            )
+
+        return {
+            key: _timed_bf16_load(
+                self,
+                layer_idx=layer_idx,
+                tensor_name=tensor_name,
+                device=device,
+                step=f"dsa_indexer.{key}",
+            )
+            for key, tensor_name in tensor_names.items()
+        }
 
     def _load_gqa_attention(
         self, layer_idx: int, device: torch.device,

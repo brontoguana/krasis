@@ -12,8 +12,13 @@ import torch
 
 from krasis.config import ModelConfig
 from krasis.kv_cache import MLA_CKV_KERNEL_MIN_DIM
-from krasis.layer import NativeMLAWeights, TransformerLayer
+from krasis.layer import (
+    NativeDsaIndexerWeights,
+    NativeMLAWeights,
+    TransformerLayer,
+)
 from krasis.vram_budget import _kv_bytes_per_token_per_layer
+from krasis.weight_loader import WeightLoader
 
 
 def _write_config(test_case: unittest.TestCase, config: dict) -> str:
@@ -92,6 +97,14 @@ class ModelConfigContractTests(unittest.TestCase):
         )
         self.assertTrue(cfg.indexer_rope_interleave)
         self.assertTrue(cfg.index_share_for_mtp_iteration)
+        self.assertEqual(
+            [cfg.dsa_indexer_owner_layer(i) for i in range(8)],
+            [0, 1, 2, 2, 2, 2, 6, 6],
+        )
+        self.assertEqual(
+            [cfg.is_dsa_indexer_owner_layer(i) for i in range(8)],
+            [True, True, True, False, False, False, True, False],
+        )
         self.assertEqual(cfg.num_moe_layers, 5)
 
     def test_glm_moe_dsa_requires_complete_indexer_schedule(self) -> None:
@@ -109,6 +122,23 @@ class ModelConfigContractTests(unittest.TestCase):
         with self.assertRaisesRegex(
             ValueError,
             r"shared indexer at layer 0 has no preceding full indexer",
+        ):
+            ModelConfig.from_model_path(_write_config(self, raw))
+
+    def test_glm_moe_dsa_requires_indexer_projection_dimensions(self) -> None:
+        raw = _glm_dsa_config()
+        raw.pop("q_lora_rank")
+        with self.assertRaisesRegex(
+            ValueError,
+            r"requires positive q_lora_rank, got 0",
+        ):
+            ModelConfig.from_model_path(_write_config(self, raw))
+
+        raw = _glm_dsa_config()
+        raw["index_head_dim"] = raw["qk_rope_head_dim"] - 2
+        with self.assertRaisesRegex(
+            ValueError,
+            r"index_head_dim 62 is smaller than qk_rope_head_dim 64",
         ):
             ModelConfig.from_model_path(_write_config(self, raw))
 
@@ -130,6 +160,59 @@ class ModelConfigContractTests(unittest.TestCase):
         self.assertFalse(cfg.is_dsa)
         self.assertEqual(cfg.index_topk, 0)
         self.assertIsNone(cfg.indexer_types)
+        self.assertIsNone(cfg.dsa_indexer_owner_layer(0))
+
+    def test_dsa_indexer_loader_uses_owner_only_checkpoint_names(self) -> None:
+        raw = _glm_dsa_config()
+        cfg = ModelConfig.from_model_path(_write_config(self, raw))
+        prefix = f"{cfg.layers_prefix}.layers.0.self_attn.indexer"
+        tensors = {
+            f"{prefix}.wq_b.weight": torch.zeros(
+                (cfg.index_n_heads * cfg.index_head_dim, cfg.q_lora_rank),
+                dtype=torch.bfloat16,
+            ),
+            f"{prefix}.wk.weight": torch.zeros(
+                (cfg.index_head_dim, cfg.hidden_size),
+                dtype=torch.bfloat16,
+            ),
+            f"{prefix}.weights_proj.weight": torch.zeros(
+                (cfg.index_n_heads, cfg.hidden_size),
+                dtype=torch.bfloat16,
+            ),
+            f"{prefix}.k_norm.weight": torch.ones(
+                (cfg.index_head_dim,),
+                dtype=torch.bfloat16,
+            ),
+            f"{prefix}.k_norm.bias": torch.zeros(
+                (cfg.index_head_dim,),
+                dtype=torch.bfloat16,
+            ),
+        }
+
+        loader = WeightLoader.__new__(WeightLoader)
+        loader.cfg = cfg
+        loader._weight_map = {name: "fixture" for name in tensors}
+        loader._load_bf16 = lambda name, _device: tensors[name]
+
+        loaded = loader._load_dsa_indexer_weights(0, torch.device("cpu"))
+        self.assertEqual(
+            set(loaded),
+            {"wq_b", "wk", "weights_proj", "k_norm_weight", "k_norm_bias"},
+        )
+        self.assertIs(loaded["wq_b"], tensors[f"{prefix}.wq_b.weight"])
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"layer 3 shares indexer owner 2",
+        ):
+            loader._load_dsa_indexer_weights(3, torch.device("cpu"))
+
+        del loader._weight_map[f"{prefix}.k_norm.bias"]
+        with self.assertRaisesRegex(
+            KeyError,
+            r"indexer\.k_norm\.bias",
+        ):
+            loader._load_dsa_indexer_weights(0, torch.device("cpu"))
 
     def test_native_mla_setup_contract_pads_only_the_kernel_dimension(self) -> None:
         raw = _glm_dsa_config()
@@ -144,6 +227,9 @@ class ModelConfigContractTests(unittest.TestCase):
                 "qk_nope_head_dim": 2,
                 "qk_rope_head_dim": 2,
                 "v_head_dim": 2,
+                "index_topk": 4,
+                "index_head_dim": 4,
+                "index_n_heads": 2,
             }
         )
         cfg = ModelConfig.from_model_path(_write_config(self, raw))
@@ -156,6 +242,13 @@ class ModelConfigContractTests(unittest.TestCase):
             "kv_a_layernorm": torch.ones((4,), dtype=torch.bfloat16),
             "w_kc": torch.ones((2, 2, 4), dtype=torch.bfloat16),
             "w_vc": torch.ones((2, 2, 4), dtype=torch.bfloat16),
+            "dsa_indexer": {
+                "wq_b": torch.zeros((8, 4), dtype=torch.bfloat16),
+                "wk": torch.zeros((4, 8), dtype=torch.bfloat16),
+                "weights_proj": torch.zeros((2, 8), dtype=torch.bfloat16),
+                "k_norm_weight": torch.ones((4,), dtype=torch.bfloat16),
+                "k_norm_bias": torch.zeros((4,), dtype=torch.bfloat16),
+            },
         }
 
         layer = TransformerLayer(
@@ -177,6 +270,9 @@ class ModelConfigContractTests(unittest.TestCase):
         attention = layer.attention
 
         self.assertIsInstance(attention, NativeMLAWeights)
+        self.assertIsInstance(attention.dsa_indexer, NativeDsaIndexerWeights)
+        self.assertEqual(attention.dsa_indexer_owner_layer, 0)
+        self.assertEqual(attention.dsa_indexer.wq_b.shape, (8, 4))
         self.assertEqual(attention.ckv_dim, MLA_CKV_KERNEL_MIN_DIM)
         self.assertEqual(attention.w_kc.shape, (2, 2, MLA_CKV_KERNEL_MIN_DIM))
         self.assertEqual(attention.w_vc.shape, (2, 2, MLA_CKV_KERNEL_MIN_DIM))
@@ -187,6 +283,41 @@ class ModelConfigContractTests(unittest.TestCase):
             r"native Rust/CUDA runtime",
         ):
             attention.forward(torch.zeros((1, 8), dtype=torch.bfloat16))
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"native Rust/CUDA runtime",
+        ):
+            attention.dsa_indexer.forward(
+                torch.zeros((1, 8), dtype=torch.bfloat16)
+            )
+
+        shared_weights = dict(weights)
+        shared_weights.pop("dsa_indexer")
+        shared_attention = NativeMLAWeights(
+            cfg,
+            3,
+            shared_weights,
+            torch.device("cpu"),
+        )
+        self.assertEqual(shared_attention.dsa_indexer_owner_layer, 2)
+        self.assertIsNone(shared_attention.dsa_indexer)
+
+        invalid_weights = dict(weights)
+        invalid_weights["dsa_indexer"] = dict(weights["dsa_indexer"])
+        invalid_weights["dsa_indexer"]["wk"] = torch.zeros(
+            (3, 8),
+            dtype=torch.bfloat16,
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            r"tensor wk shape \(3, 8\) != expected \(4, 8\)",
+        ):
+            NativeMLAWeights(
+                cfg,
+                0,
+                invalid_weights,
+                torch.device("cpu"),
+            )
 
     def test_mla_k4_budget_uses_padded_physical_cache_width(self) -> None:
         raw = _glm_dsa_config()
