@@ -5174,6 +5174,8 @@ pub struct PrefillKernels {
     rope: RawCuFunc,
     rope_half_split: RawCuFunc,
     rope_mrope: RawCuFunc,
+    mla_rmsnorm_prefix_bf16_fp32w: RawCuFunc,
+    mla_pack_qkv_rope_bf16: RawCuFunc,
     silu_mul: RawCuFunc,
     silu_mul_limited: RawCuFunc,
     relu2: RawCuFunc,
@@ -26489,6 +26491,108 @@ impl PrefillEngine {
         Ok(())
     }
 
+    /// Strided-batched variant for MLA's per-head latent K/V expansion.
+    ///
+    /// A single token-major latent input matrix is shared by every batch
+    /// (stride A = 0), while each head owns a contiguous padded weight slice
+    /// and a contiguous head-major output slice.
+    fn cublas_bf16_gemm_layout_strided_batched(
+        &self,
+        a: u64,
+        a_row_stride: usize,
+        w: u64,
+        w_row_stride: usize,
+        w_batch_stride: usize,
+        c: u64,
+        c_batch_stride: usize,
+        m: usize,
+        n: usize,
+        k: usize,
+        batch_count: usize,
+    ) -> Result<(), String> {
+        if m == 0 || n == 0 || k == 0 || batch_count == 0 {
+            return Ok(());
+        }
+        if a_row_stride < k || w_row_stride < k {
+            return Err(format!(
+                "cuBLAS BF16 strided-batched GEMM invalid row strides: A stride {} W stride {} K {}",
+                a_row_stride, w_row_stride, k
+            ));
+        }
+        let m_i32 = i32::try_from(m)
+            .map_err(|_| format!("cuBLAS BF16 strided-batched GEMM M exceeds i32: {}", m))?;
+        let n_i32 = i32::try_from(n)
+            .map_err(|_| format!("cuBLAS BF16 strided-batched GEMM N exceeds i32: {}", n))?;
+        let k_i32 = i32::try_from(k)
+            .map_err(|_| format!("cuBLAS BF16 strided-batched GEMM K exceeds i32: {}", k))?;
+        let batch_i32 = i32::try_from(batch_count).map_err(|_| {
+            format!(
+                "cuBLAS BF16 strided-batched GEMM batch count exceeds i32: {}",
+                batch_count
+            )
+        })?;
+        let a_stride_i32 = i32::try_from(a_row_stride).map_err(|_| {
+            format!(
+                "cuBLAS BF16 strided-batched GEMM A row stride exceeds i32: {}",
+                a_row_stride
+            )
+        })?;
+        let w_stride_i32 = i32::try_from(w_row_stride).map_err(|_| {
+            format!(
+                "cuBLAS BF16 strided-batched GEMM W row stride exceeds i32: {}",
+                w_row_stride
+            )
+        })?;
+        let w_batch_i64 = i64::try_from(w_batch_stride).map_err(|_| {
+            format!(
+                "cuBLAS BF16 strided-batched GEMM W batch stride exceeds i64: {}",
+                w_batch_stride
+            )
+        })?;
+        let c_batch_i64 = i64::try_from(c_batch_stride).map_err(|_| {
+            format!(
+                "cuBLAS BF16 strided-batched GEMM C batch stride exceeds i64: {}",
+                c_batch_stride
+            )
+        })?;
+        let alpha: f32 = 1.0;
+        let beta: f32 = 0.0;
+        unsafe {
+            use cudarc::cublas::result as cublas_result;
+            use cudarc::cublas::sys as cublas_sys;
+
+            cublas_result::set_stream(self.cublas_handle, self.stream as cublas_sys::cudaStream_t)
+                .map_err(|e| format!("cublas set_stream: {:?}", e))?;
+            cublas_result::gemm_strided_batched_ex(
+                self.cublas_handle,
+                cublas_sys::cublasOperation_t::CUBLAS_OP_T,
+                cublas_sys::cublasOperation_t::CUBLAS_OP_N,
+                n_i32,
+                m_i32,
+                k_i32,
+                &alpha as *const f32 as *const std::ffi::c_void,
+                w as *const std::ffi::c_void,
+                cublas_sys::cudaDataType::CUDA_R_16BF,
+                w_stride_i32,
+                w_batch_i64,
+                a as *const std::ffi::c_void,
+                cublas_sys::cudaDataType::CUDA_R_16BF,
+                a_stride_i32,
+                0,
+                &beta as *const f32 as *const std::ffi::c_void,
+                c as *mut std::ffi::c_void,
+                cublas_sys::cudaDataType::CUDA_R_16BF,
+                n_i32,
+                c_batch_i64,
+                batch_i32,
+                cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
+                cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
+            )
+            .map_err(|e| format!("cublas bf16 strided-batched GEMM: {:?}", e))?;
+        }
+        Ok(())
+    }
+
     fn validate_hqq4_tensor_desc(
         &self,
         tensor_name: &str,
@@ -28561,6 +28665,512 @@ impl PrefillEngine {
         self.forward_gqa_chunked(layer_idx, m, 0, true)
     }
 
+    fn forward_hqq_mla_chunked(
+        &self,
+        layer_idx: usize,
+        m: usize,
+        start_pos: usize,
+        capture_kv_cache: bool,
+    ) -> Result<(), String> {
+        if start_pos != 0 {
+            return Err(format!(
+                "HQQ MLA prefill cross-chunk execution is not implemented at layer {} (start_pos={}, tokens={}); refusing to route compressed MLA cache through a GQA fallback",
+                layer_idx, start_pos, m
+            ));
+        }
+        if m == 0 {
+            return Ok(());
+        }
+        if capture_kv_cache {
+            return Err(format!(
+                "HQQ MLA prefill decode-cache capture is not implemented at layer {}; refusing to use an unsupported cache format while compact production MLA cache support is pending",
+                layer_idx
+            ));
+        }
+
+        let cfg = &self.config;
+        let lw = &self.layer_weights[layer_idx];
+        let hqq = lw
+            .hqq_mla
+            .as_ref()
+            .ok_or_else(|| format!("layer {} has no HQQ MLA descriptor", layer_idx))?;
+        let nh = hqq.num_heads;
+        let klr = hqq.kv_lora_rank;
+        let ccd = hqq.ckv_cache_dim;
+        let nope = hqq.qk_nope_dim;
+        let rope = hqq.qk_rope_dim;
+        let vhd = hqq.v_head_dim;
+        let qlr = hqq.q_lora_rank;
+        let qk_dim = nope.checked_add(rope).ok_or_else(|| {
+            format!(
+                "HQQ MLA layer {} qk dimension overflow: nope={} rope={}",
+                layer_idx, nope, rope
+            )
+        })?;
+        let q_width = nh.checked_mul(qk_dim).ok_or_else(|| {
+            format!(
+                "HQQ MLA layer {} query width overflow: heads={} qk_dim={}",
+                layer_idx, nh, qk_dim
+            )
+        })?;
+        let v_width = nh.checked_mul(vhd).ok_or_else(|| {
+            format!(
+                "HQQ MLA layer {} value width overflow: heads={} value_dim={}",
+                layer_idx, nh, vhd
+            )
+        })?;
+        let kv_a_width = klr.checked_add(rope).ok_or_else(|| {
+            format!(
+                "HQQ MLA layer {} KV-A width overflow: rank={} rope={}",
+                layer_idx, klr, rope
+            )
+        })?;
+        if nh == 0 || klr == 0 || nope == 0 || rope == 0 || vhd == 0 {
+            return Err(format!(
+                "HQQ MLA layer {} has zero execution dimension: heads={} kv_rank={} nope={} rope={} value={}",
+                layer_idx, nh, klr, nope, rope, vhd
+            ));
+        }
+        if rope % 2 != 0 {
+            return Err(format!(
+                "HQQ MLA layer {} requires an even RoPE dimension, got {}",
+                layer_idx, rope
+            ));
+        }
+        if ccd < klr {
+            return Err(format!(
+                "HQQ MLA layer {} compressed-cache width {} is smaller than KV rank {}",
+                layer_idx, ccd, klr
+            ));
+        }
+        if qk_dim != vhd {
+            return Err(format!(
+                "HQQ MLA layer {} dense prefill requires equal QK/value head dimensions for FA2, got qk={} value={}",
+                layer_idx, qk_dim, vhd
+            ));
+        }
+        let token_count_i32 = i32::try_from(m).map_err(|_| {
+            format!(
+                "HQQ MLA layer {} token count exceeds native i32 contract: {}",
+                layer_idx, m
+            )
+        })?;
+        let num_heads_i32 = i32::try_from(nh).map_err(|_| {
+            format!(
+                "HQQ MLA layer {} head count exceeds native i32 contract: {}",
+                layer_idx, nh
+            )
+        })?;
+        let nope_i32 = i32::try_from(nope).map_err(|_| {
+            format!(
+                "HQQ MLA layer {} non-positional head dimension exceeds native i32 contract: {}",
+                layer_idx, nope
+            )
+        })?;
+        let rope_i32 = i32::try_from(rope).map_err(|_| {
+            format!(
+                "HQQ MLA layer {} RoPE dimension exceeds native i32 contract: {}",
+                layer_idx, rope
+            )
+        })?;
+        let value_i32 = i32::try_from(vhd).map_err(|_| {
+            format!(
+                "HQQ MLA layer {} value dimension exceeds native i32 contract: {}",
+                layer_idx, vhd
+            )
+        })?;
+        let kv_a_width_i32 = i32::try_from(kv_a_width).map_err(|_| {
+            format!(
+                "HQQ MLA layer {} KV-A width exceeds native i32 contract: {}",
+                layer_idx, kv_a_width
+            )
+        })?;
+        let qk_dim_i32 = i32::try_from(qk_dim).map_err(|_| {
+            format!(
+                "HQQ MLA layer {} QK dimension exceeds native i32 contract: {}",
+                layer_idx, qk_dim
+            )
+        })?;
+        if hqq.kv_a_norm_ptr == 0
+            || hqq.w_kc_ptr == 0
+            || hqq.w_vc_ptr == 0
+            || self.rope_cos_ptr == 0
+            || self.rope_sin_ptr == 0
+        {
+            return Err(format!(
+                "HQQ MLA layer {} has incomplete native prefill pointers: kv_norm=0x{:x} w_kc=0x{:x} w_vc=0x{:x} rope_cos=0x{:x} rope_sin=0x{:x}",
+                layer_idx,
+                hqq.kv_a_norm_ptr,
+                hqq.w_kc_ptr,
+                hqq.w_vc_ptr,
+                self.rope_cos_ptr,
+                self.rope_sin_ptr
+            ));
+        }
+        if self.kernels.flash_attn_fwd.is_none() || !matches!(qk_dim, 64 | 96 | 128 | 192 | 256) {
+            return Err(format!(
+                "HQQ MLA layer {} requires native BF16 FlashAttention for dense prefill head_dim={}, but it is unavailable",
+                layer_idx, qk_dim
+            ));
+        }
+
+        let validate = |name: &str, desc: &HqqTensorExecDescriptor| -> Result<(), String> {
+            self.validate_hqq_quantized_prefill_tensor_desc(name, desc)
+                .map(|_| ())
+                .map_err(|err| format!("HQQ MLA layer {}: {}", layer_idx, err))
+        };
+        validate("kv_a_proj_with_mqa", &hqq.kv_a_proj_with_mqa)?;
+        validate("o_proj", &hqq.o_proj)?;
+        if hqq.kv_a_proj_with_mqa.rows != kv_a_width
+            || hqq.kv_a_proj_with_mqa.cols != cfg.hidden_size
+        {
+            return Err(format!(
+                "HQQ MLA layer {} KV-A projection shape mismatch: registered {}x{}, expected {}x{}",
+                layer_idx,
+                hqq.kv_a_proj_with_mqa.rows,
+                hqq.kv_a_proj_with_mqa.cols,
+                kv_a_width,
+                cfg.hidden_size
+            ));
+        }
+        if hqq.o_proj.rows != cfg.hidden_size || hqq.o_proj.cols != v_width {
+            return Err(format!(
+                "HQQ MLA layer {} output projection shape mismatch: registered {}x{}, expected {}x{}",
+                layer_idx,
+                hqq.o_proj.rows,
+                hqq.o_proj.cols,
+                cfg.hidden_size,
+                v_width
+            ));
+        }
+        if qlr > 0 {
+            let qa = hqq
+                .q_a_proj
+                .as_ref()
+                .ok_or_else(|| format!("HQQ MLA layer {} is missing q_a_proj", layer_idx))?;
+            let qb = hqq
+                .q_b_proj
+                .as_ref()
+                .ok_or_else(|| format!("HQQ MLA layer {} is missing q_b_proj", layer_idx))?;
+            validate("q_a_proj", qa)?;
+            validate("q_b_proj", qb)?;
+            if qa.rows != qlr
+                || qa.cols != cfg.hidden_size
+                || qb.rows != q_width
+                || qb.cols != qlr
+                || hqq.q_a_norm_ptr == 0
+            {
+                return Err(format!(
+                    "HQQ MLA layer {} Q-LoRA contract mismatch: q_a={}x{} q_b={}x{} q_rank={} q_width={} hidden={} q_norm=0x{:x}",
+                    layer_idx,
+                    qa.rows,
+                    qa.cols,
+                    qb.rows,
+                    qb.cols,
+                    qlr,
+                    q_width,
+                    cfg.hidden_size,
+                    hqq.q_a_norm_ptr
+                ));
+            }
+        } else {
+            let q = hqq
+                .q_proj
+                .as_ref()
+                .ok_or_else(|| format!("HQQ MLA layer {} is missing q_proj", layer_idx))?;
+            validate("q_proj", q)?;
+            if q.rows != q_width || q.cols != cfg.hidden_size {
+                return Err(format!(
+                    "HQQ MLA layer {} Q projection shape mismatch: registered {}x{}, expected {}x{}",
+                    layer_idx, q.rows, q.cols, q_width, cfg.hidden_size
+                ));
+            }
+        }
+
+        let k_expanded_elems = nh
+            .checked_mul(m)
+            .and_then(|value| value.checked_mul(nope))
+            .ok_or_else(|| format!("HQQ MLA layer {} K scratch size overflow", layer_idx))?;
+        let v_expanded_elems = nh
+            .checked_mul(m)
+            .and_then(|value| value.checked_mul(vhd))
+            .ok_or_else(|| format!("HQQ MLA layer {} V scratch size overflow", layer_idx))?;
+        let expanded_elems = k_expanded_elems
+            .checked_add(v_expanded_elems)
+            .ok_or_else(|| format!("HQQ MLA layer {} expanded scratch overflow", layer_idx))?;
+        let kv_a_elems = m
+            .checked_mul(kv_a_width)
+            .ok_or_else(|| format!("HQQ MLA layer {} KV-A scratch overflow", layer_idx))?;
+        let q_lora_elems = m
+            .checked_mul(qlr)
+            .ok_or_else(|| format!("HQQ MLA layer {} Q-LoRA scratch overflow", layer_idx))?;
+        let hidden_elems = m
+            .checked_mul(cfg.hidden_size)
+            .ok_or_else(|| format!("HQQ MLA layer {} hidden scratch overflow", layer_idx))?;
+        let q_elems = m
+            .checked_mul(q_width)
+            .ok_or_else(|| format!("HQQ MLA layer {} query scratch overflow", layer_idx))?;
+        let v_elems = m
+            .checked_mul(v_width)
+            .ok_or_else(|| format!("HQQ MLA layer {} value scratch overflow", layer_idx))?;
+        let scratch1_required = expanded_elems.max(q_lora_elems).max(hidden_elems);
+        let scratch2_required = kv_a_elems.max(q_lora_elems);
+        if self.scratch.d_scratch1.len < scratch1_required
+            || self.scratch.d_scratch2.len < scratch2_required
+            || self.scratch.d_q.len < q_elems
+            || self.scratch.d_k.len < q_elems
+            || self.scratch.d_v.len < v_elems
+        {
+            return Err(format!(
+                "HQQ MLA layer {} scratch contract not met: scratch1={}/{} scratch2={}/{} q={}/{} k={}/{} v={}/{}",
+                layer_idx,
+                self.scratch.d_scratch1.len,
+                scratch1_required,
+                self.scratch.d_scratch2.len,
+                scratch2_required,
+                self.scratch.d_q.len,
+                q_elems,
+                self.scratch.d_k.len,
+                q_elems,
+                self.scratch.d_v.len,
+                v_elems
+            ));
+        }
+
+        let hidden = *self.scratch.d_hidden.device_ptr();
+        let q = *self.scratch.d_q.device_ptr();
+        let k = *self.scratch.d_k.device_ptr();
+        let v = *self.scratch.d_v.device_ptr();
+        let attn_out = *self.scratch.d_attn_out.device_ptr();
+        let q_raw = attn_out;
+        let scratch1 = *self.scratch.d_scratch1.device_ptr();
+        let scratch2 = *self.scratch.d_scratch2.device_ptr();
+        let no_marlin: Option<MarlinWeight> = None;
+        let no_bf16: Option<Bf16Weight> = None;
+
+        if qlr > 0 {
+            let qa = hqq.q_a_proj.as_ref().expect("validated q_a_proj");
+            let qb = hqq.q_b_proj.as_ref().expect("validated q_b_proj");
+            self.la_gemm(
+                layer_idx,
+                "q_a_proj",
+                hidden,
+                Some(qa),
+                &no_marlin,
+                &no_bf16,
+                scratch1,
+                m,
+            )?;
+            self.launch_rmsnorm_fp32w(scratch2, scratch1, hqq.q_a_norm_ptr, m, qlr)?;
+            self.la_gemm(
+                layer_idx,
+                "q_b_proj",
+                scratch2,
+                Some(qb),
+                &no_marlin,
+                &no_bf16,
+                q_raw,
+                m,
+            )?;
+        } else {
+            let q_proj = hqq.q_proj.as_ref().expect("validated q_proj");
+            self.la_gemm(
+                layer_idx,
+                "q_proj",
+                hidden,
+                Some(q_proj),
+                &no_marlin,
+                &no_bf16,
+                q_raw,
+                m,
+            )?;
+        }
+        self.la_gemm(
+            layer_idx,
+            "kv_a_proj_with_mqa",
+            hidden,
+            Some(&hqq.kv_a_proj_with_mqa),
+            &no_marlin,
+            &no_bf16,
+            scratch2,
+            m,
+        )?;
+
+        let norm_threads = std::cmp::max(32, std::cmp::min(1024, klr).next_power_of_two()) as u32;
+        let mut n0 = scratch2;
+        let mut n1 = hqq.kv_a_norm_ptr;
+        let mut n2 = kv_a_width as i32;
+        let mut n3 = klr as i32;
+        let mut n4 = cfg.rms_norm_eps;
+        unsafe {
+            launch(
+                self.kernels.mla_rmsnorm_prefix_bf16_fp32w,
+                (m as u32, 1, 1),
+                (norm_threads, 1, 1),
+                norm_threads * 4,
+                self.stream,
+                &mut [
+                    &mut n0 as *mut _ as *mut std::ffi::c_void,
+                    &mut n1 as *mut _ as *mut std::ffi::c_void,
+                    &mut n2 as *mut _ as *mut std::ffi::c_void,
+                    &mut n3 as *mut _ as *mut std::ffi::c_void,
+                    &mut n4 as *mut _ as *mut std::ffi::c_void,
+                ],
+            )?;
+        }
+
+        let k_expanded_bytes = k_expanded_elems
+            .checked_mul(std::mem::size_of::<u16>())
+            .and_then(|value| u64::try_from(value).ok())
+            .ok_or_else(|| format!("HQQ MLA layer {} K scratch byte overflow", layer_idx))?;
+        let kc_weight_batch_stride = nope
+            .checked_mul(ccd)
+            .ok_or_else(|| format!("HQQ MLA layer {} K weight batch-stride overflow", layer_idx))?;
+        let vc_weight_batch_stride = vhd
+            .checked_mul(ccd)
+            .ok_or_else(|| format!("HQQ MLA layer {} V weight batch-stride overflow", layer_idx))?;
+        let k_output_batch_stride = m
+            .checked_mul(nope)
+            .ok_or_else(|| format!("HQQ MLA layer {} K output batch-stride overflow", layer_idx))?;
+        let v_output_batch_stride = m
+            .checked_mul(vhd)
+            .ok_or_else(|| format!("HQQ MLA layer {} V output batch-stride overflow", layer_idx))?;
+        let k_content = scratch1;
+        let v_content = scratch1
+            .checked_add(k_expanded_bytes)
+            .ok_or_else(|| format!("HQQ MLA layer {} V scratch pointer overflow", layer_idx))?;
+        self.cublas_bf16_gemm_layout_strided_batched(
+            scratch2,
+            kv_a_width,
+            hqq.w_kc_ptr,
+            ccd,
+            kc_weight_batch_stride,
+            k_content,
+            k_output_batch_stride,
+            m,
+            nope,
+            klr,
+            nh,
+        )?;
+        self.cublas_bf16_gemm_layout_strided_batched(
+            scratch2,
+            kv_a_width,
+            hqq.w_vc_ptr,
+            ccd,
+            vc_weight_batch_stride,
+            v_content,
+            v_output_batch_stride,
+            m,
+            vhd,
+            klr,
+            nh,
+        )?;
+
+        let pack_threads = 256u32;
+        let mut p0 = q;
+        let mut p1 = q_raw;
+        let mut p2 = k;
+        let mut p3 = v;
+        let mut p4 = k_content;
+        let mut p5 = v_content;
+        let mut p6 = scratch2;
+        let mut p7 = *self.scratch.d_positions.device_ptr();
+        let mut p8 = self.rope_cos_ptr;
+        let mut p9 = self.rope_sin_ptr;
+        let mut p10 = num_heads_i32;
+        let mut p11 = nope_i32;
+        let mut p12 = rope_i32;
+        let mut p13 = value_i32;
+        let mut p14 = kv_a_width_i32;
+        let mut p15 = token_count_i32;
+        let mut p16 = i32::from(hqq.rope_interleave);
+        unsafe {
+            launch(
+                self.kernels.mla_pack_qkv_rope_bf16,
+                (m as u32, 1, 1),
+                (pack_threads, 1, 1),
+                0,
+                self.stream,
+                &mut [
+                    &mut p0 as *mut _ as *mut std::ffi::c_void,
+                    &mut p1 as *mut _ as *mut std::ffi::c_void,
+                    &mut p2 as *mut _ as *mut std::ffi::c_void,
+                    &mut p3 as *mut _ as *mut std::ffi::c_void,
+                    &mut p4 as *mut _ as *mut std::ffi::c_void,
+                    &mut p5 as *mut _ as *mut std::ffi::c_void,
+                    &mut p6 as *mut _ as *mut std::ffi::c_void,
+                    &mut p7 as *mut _ as *mut std::ffi::c_void,
+                    &mut p8 as *mut _ as *mut std::ffi::c_void,
+                    &mut p9 as *mut _ as *mut std::ffi::c_void,
+                    &mut p10 as *mut _ as *mut std::ffi::c_void,
+                    &mut p11 as *mut _ as *mut std::ffi::c_void,
+                    &mut p12 as *mut _ as *mut std::ffi::c_void,
+                    &mut p13 as *mut _ as *mut std::ffi::c_void,
+                    &mut p14 as *mut _ as *mut std::ffi::c_void,
+                    &mut p15 as *mut _ as *mut std::ffi::c_void,
+                    &mut p16 as *mut _ as *mut std::ffi::c_void,
+                ],
+            )?;
+        }
+
+        let lse_ptr = self
+            .scratch
+            .d_fa2_lse
+            .as_ref()
+            .map(|buffer| *buffer.device_ptr() as *mut std::ffi::c_void)
+            .unwrap_or(std::ptr::null_mut());
+        let fa2 = self
+            .kernels
+            .flash_attn_fwd
+            .expect("validated FlashAttention presence");
+        let ret = unsafe {
+            fa2(
+                q as *const _,
+                k as *const _,
+                v as *const _,
+                attn_out as *mut _,
+                lse_ptr,
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+                token_count_i32,
+                token_count_i32,
+                num_heads_i32,
+                num_heads_i32,
+                qk_dim_i32,
+                token_count_i32,
+                token_count_i32,
+                hqq.sm_scale,
+                1,
+                0,
+                self.stream as *mut _,
+            )
+        };
+        if ret != 0 {
+            return Err(format!(
+                "HQQ MLA layer {} BF16 FlashAttention failed with code {}",
+                layer_idx, ret
+            ));
+        }
+
+        self.la_gemm(
+            layer_idx,
+            "o_proj",
+            attn_out,
+            Some(&hqq.o_proj),
+            &no_marlin,
+            &no_bf16,
+            scratch1,
+            m,
+        )?;
+        self.memcpy_d2d(
+            attn_out,
+            scratch1,
+            (m * cfg.hidden_size * std::mem::size_of::<u16>()) as u64,
+        )?;
+        Ok(())
+    }
+
     fn forward_gqa_chunked(
         &self,
         layer_idx: usize,
@@ -28576,16 +29186,8 @@ impl PrefillEngine {
             self.validate_hqq_quantized_prefill_tensor_desc("v_proj", &hqq.v_proj)?;
             self.validate_hqq_quantized_prefill_tensor_desc("o_proj", &hqq.o_proj)?;
         }
-        if let Some(hqq) = &lw.hqq_mla {
-            return Err(format!(
-                "HQQ prefill MLA execution is not enabled yet at layer {} (slot-backed HQQ runtime prepared; backend={} nbits={} format_v{} kv_a_proj_rows={} kv_a_proj_cols={})",
-                layer_idx,
-                hqq.backend,
-                hqq.nbits,
-                hqq.format_version,
-                hqq.kv_a_proj_with_mqa.rows,
-                hqq.kv_a_proj_with_mqa.cols,
-            ));
+        if lw.hqq_mla.is_some() {
+            return self.forward_hqq_mla_chunked(layer_idx, m, start_pos, capture_kv_cache);
         }
         let gt = self.gqa_timing_enabled.get();
         let trace_step = if self.config.prefill_chunk_size > 0 {
@@ -57193,6 +57795,8 @@ impl PrefillKernels {
                     "rope_batched_kernel",
                     "rope_batched_half_split_kernel",
                     "rope_batched_mrope_kernel",
+                    "mla_rmsnorm_prefix_bf16_fp32w_kernel",
+                    "mla_pack_qkv_rope_bf16_kernel",
                     "silu_mul_batched_kernel",
                     "silu_mul_limited_batched_kernel",
                     "relu2_batched_kernel",
@@ -57602,6 +58206,8 @@ impl PrefillKernels {
             rope: get("rope_batched_kernel")?,
             rope_half_split: get("rope_batched_half_split_kernel")?,
             rope_mrope: get("rope_batched_mrope_kernel")?,
+            mla_rmsnorm_prefix_bf16_fp32w: get("mla_rmsnorm_prefix_bf16_fp32w_kernel")?,
+            mla_pack_qkv_rope_bf16: get("mla_pack_qkv_rope_bf16_kernel")?,
             silu_mul: get("silu_mul_batched_kernel")?,
             silu_mul_limited: get("silu_mul_limited_batched_kernel")?,
             relu2: get("relu2_batched_kernel")?,
@@ -60369,6 +60975,8 @@ mod kernel_tests {
                     "fused_add_rmsnorm_batched_kernel",
                     "rope_batched_kernel",
                     "rope_batched_mrope_kernel",
+                    "mla_rmsnorm_prefix_bf16_fp32w_kernel",
+                    "mla_pack_qkv_rope_bf16_kernel",
                     "silu_mul_batched_kernel",
                     "silu_mul_limited_batched_kernel",
                     "relu2_batched_kernel",
@@ -60751,6 +61359,149 @@ mod kernel_tests {
     }
 
     // ── Test functions ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_mla_prefill_norm_and_race_free_rope_pack() {
+        let ctx = GpuTestCtx::new();
+
+        let norm_kernel = ctx.get_kernel("mla_rmsnorm_prefix_bf16_fp32w_kernel");
+        let norm_input = f32_to_bf16_bytes(&[3.0, 4.0, 91.0, 92.0, 5.0, 12.0, 93.0, 94.0]);
+        let d_norm = ctx.upload_bf16(&norm_input);
+        let weight_bytes: Vec<u8> = [1.0f32, 2.0f32]
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        let d_weight = ctx.upload_f32(&weight_bytes);
+        let mut n0 = *d_norm.device_ptr() as u64;
+        let mut n1 = *d_weight.device_ptr() as u64;
+        let mut n2 = 4i32;
+        let mut n3 = 2i32;
+        let mut n4 = 0.0f32;
+        unsafe {
+            launch(
+                norm_kernel,
+                (2, 1, 1),
+                (32, 1, 1),
+                32 * 4,
+                ctx.stream(),
+                &mut [
+                    &mut n0 as *mut _ as *mut _,
+                    &mut n1 as *mut _ as *mut _,
+                    &mut n2 as *mut _ as *mut _,
+                    &mut n3 as *mut _ as *mut _,
+                    &mut n4 as *mut _ as *mut _,
+                ],
+            )
+            .unwrap();
+        }
+        self::cuda_sync();
+        let norm_values = bf16_bytes_to_f32(&ctx.download_bf16(&d_norm));
+        let row0_inv = (12.5f32).sqrt().recip();
+        let row1_inv = (84.5f32).sqrt().recip();
+        let expected_norm = [
+            3.0 * row0_inv,
+            8.0 * row0_inv,
+            91.0,
+            92.0,
+            5.0 * row1_inv,
+            24.0 * row1_inv,
+            93.0,
+            94.0,
+        ];
+        for (idx, (actual, expected)) in norm_values.iter().zip(expected_norm.iter()).enumerate() {
+            assert!(
+                (actual - expected).abs() <= 0.02,
+                "MLA prefix norm mismatch at {}: actual={} expected={}",
+                idx,
+                actual,
+                expected
+            );
+        }
+
+        let pack_kernel = ctx.get_kernel("mla_pack_qkv_rope_bf16_kernel");
+        let d_q_in = ctx.upload_bf16(&f32_to_bf16_bytes(&[
+            1.0, 2.0, 10.0, 20.0, 11.0, 21.0, 3.0, 4.0, 12.0, 22.0, 13.0, 23.0,
+        ]));
+        let d_q_out = ctx.alloc_bf16(12);
+        let d_k_out = ctx.alloc_bf16(12);
+        let d_v_out = ctx.alloc_bf16(4);
+        let d_k_content = ctx.upload_bf16(&f32_to_bf16_bytes(&[5.0, 6.0, 7.0, 8.0]));
+        let d_v_content = ctx.upload_bf16(&f32_to_bf16_bytes(&[9.0, 10.0, 11.0, 12.0]));
+        let d_kv = ctx.upload_bf16(&f32_to_bf16_bytes(&[100.0, 200.0, 30.0, 40.0, 31.0, 41.0]));
+        let d_positions = ctx
+            .dev
+            .htod_copy(vec![0i32])
+            .expect("upload MLA test positions");
+        let d_cos = ctx
+            .dev
+            .htod_copy(vec![0.0f32, 0.0])
+            .expect("upload MLA test cos");
+        let d_sin = ctx
+            .dev
+            .htod_copy(vec![1.0f32, 1.0])
+            .expect("upload MLA test sin");
+
+        let mut p0 = *d_q_out.device_ptr() as u64;
+        let mut p1 = *d_q_in.device_ptr() as u64;
+        let mut p2 = *d_k_out.device_ptr() as u64;
+        let mut p3 = *d_v_out.device_ptr() as u64;
+        let mut p4 = *d_k_content.device_ptr() as u64;
+        let mut p5 = *d_v_content.device_ptr() as u64;
+        let mut p6 = *d_kv.device_ptr() as u64;
+        let mut p7 = *d_positions.device_ptr() as u64;
+        let mut p8 = *d_cos.device_ptr() as u64;
+        let mut p9 = *d_sin.device_ptr() as u64;
+        let mut p10 = 2i32;
+        let mut p11 = 2i32;
+        let mut p12 = 4i32;
+        let mut p13 = 2i32;
+        let mut p14 = 6i32;
+        let mut p15 = 1i32;
+        let mut p16 = 1i32;
+        unsafe {
+            launch(
+                pack_kernel,
+                (1, 1, 1),
+                (32, 1, 1),
+                0,
+                ctx.stream(),
+                &mut [
+                    &mut p0 as *mut _ as *mut _,
+                    &mut p1 as *mut _ as *mut _,
+                    &mut p2 as *mut _ as *mut _,
+                    &mut p3 as *mut _ as *mut _,
+                    &mut p4 as *mut _ as *mut _,
+                    &mut p5 as *mut _ as *mut _,
+                    &mut p6 as *mut _ as *mut _,
+                    &mut p7 as *mut _ as *mut _,
+                    &mut p8 as *mut _ as *mut _,
+                    &mut p9 as *mut _ as *mut _,
+                    &mut p10 as *mut _ as *mut _,
+                    &mut p11 as *mut _ as *mut _,
+                    &mut p12 as *mut _ as *mut _,
+                    &mut p13 as *mut _ as *mut _,
+                    &mut p14 as *mut _ as *mut _,
+                    &mut p15 as *mut _ as *mut _,
+                    &mut p16 as *mut _ as *mut _,
+                ],
+            )
+            .unwrap();
+        }
+        self::cuda_sync();
+
+        let q_values = bf16_bytes_to_f32(&ctx.download_bf16(&d_q_out));
+        let k_values = bf16_bytes_to_f32(&ctx.download_bf16(&d_k_out));
+        let v_values = bf16_bytes_to_f32(&ctx.download_bf16(&d_v_out));
+        assert_eq!(
+            q_values,
+            vec![1.0, 2.0, -20.0, -21.0, 10.0, 11.0, 3.0, 4.0, -22.0, -23.0, 12.0, 13.0]
+        );
+        assert_eq!(
+            k_values,
+            vec![5.0, 6.0, -40.0, -41.0, 30.0, 31.0, 7.0, 8.0, -40.0, -41.0, 30.0, 31.0]
+        );
+        assert_eq!(v_values, vec![9.0, 10.0, 11.0, 12.0]);
+    }
 
     #[test]
     fn test_rmsnorm_m128_h2048() {

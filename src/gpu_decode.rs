@@ -24512,8 +24512,39 @@ impl GpuDecodeStore {
                     la_cd = *conv_dim;
                     la_scale = *scale;
                 }
-                GpuAttnConfig::MLA { .. } => {
+                GpuAttnConfig::MLA {
+                    num_heads,
+                    qk_nope_dim,
+                    qk_rope_dim,
+                    v_head_dim,
+                    ..
+                } => {
                     layer_types[i] = 0;
+                    let qk_dim = qk_nope_dim.checked_add(*qk_rope_dim).ok_or_else(|| {
+                        format!(
+                            "MLA layer {} qk dimension overflow: nope={} rope={}",
+                            i, qk_nope_dim, qk_rope_dim
+                        )
+                    })?;
+                    let q_width = num_heads.checked_mul(qk_dim).ok_or_else(|| {
+                        format!(
+                            "MLA layer {} query width overflow: heads={} qk_dim={}",
+                            i, num_heads, qk_dim
+                        )
+                    })?;
+                    let v_width = num_heads.checked_mul(*v_head_dim).ok_or_else(|| {
+                        format!(
+                            "MLA layer {} value width overflow: heads={} value_dim={}",
+                            i, num_heads, v_head_dim
+                        )
+                    })?;
+                    max_gqa_q_dim = max_gqa_q_dim.max(q_width);
+                    max_gqa_kv_dim = max_gqa_kv_dim.max(q_width).max(v_width);
+                    if num_q_heads == 0 && num_kv_heads == 0 && head_dim == 0 {
+                        num_q_heads = *num_heads;
+                        num_kv_heads = *num_heads;
+                        head_dim = qk_dim;
+                    }
                 }
             }
         }

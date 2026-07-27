@@ -10,6 +10,15 @@
   prefill, sparse attention, IndexShare execution, and long-context validation
   are not yet implemented.
 
+- Added the first native dense HQQ MLA prefill computation slice: quantized
+  query/KV/output projections, prefix normalization, batched latent K/V
+  expansion, race-free RoPE/layout transforms, and BF16 FlashAttention. All
+  dimensions, strides, and scratch bounds are derived and checked at runtime.
+  Cross-chunk execution and production cache capture remain fail-closed until
+  the supported compact MLA cache is implemented; no deprecated cache format
+  or Python fallback was added. The exact-source optimized build, targeted CUDA
+  transform test, and existing five model-contract tests pass.
+
 ## 1.0.16 - 2026-07-27
 
 - Fixed invalid OpenAI-compatible JSON responses when a configured model name

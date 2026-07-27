@@ -1138,6 +1138,126 @@ extern "C" __global__ void rope_batched_mrope_kernel(
     }
 }
 
+/* ── MLA prefill transforms ───────────────────────────────────────────── */
+
+/*
+ * Normalize only the compressed-latent prefix of each kv_a projection row.
+ * The positional tail is deliberately preserved byte-for-byte for RoPE.
+ *
+ * x layout: [M, kv_lora_rank + qk_rope_dim] BF16
+ * weight:   [kv_lora_rank] FP32
+ */
+extern "C" __global__ void mla_rmsnorm_prefix_bf16_fp32w_kernel(
+    __nv_bfloat16* __restrict__ x,
+    const float* __restrict__ weight,
+    int row_stride,
+    int norm_dim,
+    float eps)
+{
+    int token = blockIdx.x;
+    __nv_bfloat16* row = x + (int64_t)token * row_stride;
+    extern __shared__ float smem[];
+
+    float local_ss = 0.0f;
+    for (int i = threadIdx.x; i < norm_dim; i += blockDim.x) {
+        float v = bf16_to_float(row[i]);
+        local_ss += v * v;
+    }
+    smem[threadIdx.x] = local_ss;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) smem[threadIdx.x] += smem[threadIdx.x + s];
+        __syncthreads();
+    }
+
+    float rms_inv = rsqrtf(smem[0] / (float)norm_dim + eps);
+    for (int i = threadIdx.x; i < norm_dim; i += blockDim.x) {
+        row[i] = float_to_bf16(bf16_to_float(row[i]) * rms_inv * weight[i]);
+    }
+}
+
+/*
+ * Pack head-major content K/V expansions into the token-major FA2 layout,
+ * while applying RoPE to Q's positional tail and the shared positional K.
+ *
+ * q_in/q_out:     [M, H, nope+rope] BF16, separate to make the
+ *                 interleaved-to-half-split transform race-free
+ * k_out:          [M, H, nope+rope] BF16
+ * v_out:          [M, H, v_dim] BF16
+ * k_content:      [H, M, nope] BF16
+ * v_content:      [H, M, v_dim] BF16
+ * kv_a:           [M, kv_lora_rank+rope] BF16; positional tail is unrotated
+ */
+extern "C" __global__ void mla_pack_qkv_rope_bf16_kernel(
+    __nv_bfloat16* __restrict__ q_out,
+    const __nv_bfloat16* __restrict__ q_in,
+    __nv_bfloat16* __restrict__ k_out,
+    __nv_bfloat16* __restrict__ v_out,
+    const __nv_bfloat16* __restrict__ k_content,
+    const __nv_bfloat16* __restrict__ v_content,
+    const __nv_bfloat16* __restrict__ kv_a,
+    const int* __restrict__ positions,
+    const float* __restrict__ cos_cache,
+    const float* __restrict__ sin_cache,
+    int num_heads,
+    int nope_dim,
+    int rope_dim,
+    int value_dim,
+    int kv_row_stride,
+    int token_count,
+    int rope_interleave)
+{
+    int token = blockIdx.x;
+    if (token >= token_count) return;
+
+    int qk_dim = nope_dim + rope_dim;
+    int half = rope_dim / 2;
+    int pos = positions[token];
+    const float* cos_row = cos_cache + (int64_t)pos * half;
+    const float* sin_row = sin_cache + (int64_t)pos * half;
+    const __nv_bfloat16* kv_row = kv_a + (int64_t)token * kv_row_stride;
+    const __nv_bfloat16* kpe = kv_row + (kv_row_stride - rope_dim);
+
+    for (int flat = threadIdx.x; flat < num_heads * nope_dim; flat += blockDim.x) {
+        int head = flat / nope_dim;
+        int d = flat % nope_dim;
+        q_out[((int64_t)token * num_heads + head) * qk_dim + d] =
+            q_in[((int64_t)token * num_heads + head) * qk_dim + d];
+        k_out[((int64_t)token * num_heads + head) * qk_dim + d] =
+            k_content[((int64_t)head * token_count + token) * nope_dim + d];
+    }
+
+    for (int flat = threadIdx.x; flat < num_heads * value_dim; flat += blockDim.x) {
+        int head = flat / value_dim;
+        int d = flat % value_dim;
+        v_out[((int64_t)token * num_heads + head) * value_dim + d] =
+            v_content[((int64_t)head * token_count + token) * value_dim + d];
+    }
+
+    for (int flat = threadIdx.x; flat < num_heads * half; flat += blockDim.x) {
+        int head = flat / half;
+        int d = flat % half;
+        int q_base = ((int64_t)token * num_heads + head) * qk_dim + nope_dim;
+        int q0_idx = rope_interleave ? 2 * d : d;
+        int q1_idx = rope_interleave ? 2 * d + 1 : d + half;
+        float q0 = bf16_to_float(q_in[q_base + q0_idx]);
+        float q1 = bf16_to_float(q_in[q_base + q1_idx]);
+        float c = cos_row[d];
+        float s = sin_row[d];
+        q_out[q_base + d] = float_to_bf16(q0 * c - q1 * s);
+        q_out[q_base + half + d] = float_to_bf16(q1 * c + q0 * s);
+
+        int k0_idx = rope_interleave ? 2 * d : d;
+        int k1_idx = rope_interleave ? 2 * d + 1 : d + half;
+        float k0 = bf16_to_float(kpe[k0_idx]);
+        float k1 = bf16_to_float(kpe[k1_idx]);
+        int k_base = ((int64_t)token * num_heads + head) * qk_dim + nope_dim;
+        k_out[k_base + d] = float_to_bf16(k0 * c - k1 * s);
+        k_out[k_base + half + d] = float_to_bf16(k1 * c + k0 * s);
+    }
+}
+
 extern "C" void krasis_rope_batched(
     void* q, void* k, const void* positions,
     const void* cos_cache, const void* sin_cache,
