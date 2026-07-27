@@ -76,6 +76,14 @@ fn abort_if_cuda_context_poisoned(context: &str, err: &str) {
     }
 }
 
+fn context_window_fits(
+    prompt_tokens: usize,
+    max_output_tokens: usize,
+    max_context_tokens: usize,
+) -> bool {
+    prompt_tokens < max_context_tokens && max_output_tokens <= max_context_tokens - prompt_tokens
+}
+
 /// Global pointer to the server's `running` flag so the raw signal handler
 /// can set it to `false` without going through Python's signal mechanism.
 /// This is only written once (before the accept loop) and read from the
@@ -1304,21 +1312,27 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
     };
     let parse_ms = t_request.elapsed().as_secs_f64() * 1000.0;
 
-    if !has_images && estimated_tokens >= state.max_context_tokens {
+    if !has_images && !context_window_fits(estimated_tokens, max_tokens, state.max_context_tokens) {
+        let requested_total = estimated_tokens.saturating_add(max_tokens);
         log::warn!(
-            "Request {} rejected before prefill: estimated prompt {} tokens exceeds context {}",
+            "Request {} rejected before prefill: estimated prompt {} + max_new {} = {} tokens exceeds context {}",
             request_id,
             estimated_tokens,
+            max_tokens,
+            requested_total,
             state.max_context_tokens,
         );
         let _ = send_json(
             stream,
             413,
             &format!(
-                r#"{{"error":{{"message":"Prompt too long: {} tokens exceeds KV cache capacity of {} tokens","type":"invalid_request_error","code":"context_length_exceeded","prompt_tokens":{},"max_context_tokens":{}}}}}"#,
+                r#"{{"error":{{"message":"Requested prompt and output total {} tokens ({} prompt + {} max output), exceeding context capacity of {} tokens","type":"invalid_request_error","code":"context_length_exceeded","prompt_tokens":{},"max_output_tokens":{},"max_context_tokens":{}}}}}"#,
+                requested_total,
                 estimated_tokens,
+                max_tokens,
                 state.max_context_tokens,
                 estimated_tokens,
+                max_tokens,
                 state.max_context_tokens,
             ),
         );
@@ -1865,13 +1879,20 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
     }
 
     // Check context length
-    if prompt_len >= state.max_context_tokens {
+    if !context_window_fits(prompt_len, max_tokens, state.max_context_tokens) {
+        let requested_total = prompt_len.saturating_add(max_tokens);
         let _ = send_json(
             stream,
             413,
             &format!(
-                r#"{{"error":{{"message":"Prompt too long: {} tokens exceeds KV cache capacity of {} tokens","type":"invalid_request_error","code":"context_length_exceeded","prompt_tokens":{},"max_context_tokens":{}}}}}"#,
-                prompt_len, state.max_context_tokens, prompt_len, state.max_context_tokens
+                r#"{{"error":{{"message":"Requested prompt and output total {} tokens ({} prompt + {} max output), exceeding context capacity of {} tokens","type":"invalid_request_error","code":"context_length_exceeded","prompt_tokens":{},"max_output_tokens":{},"max_context_tokens":{}}}}}"#,
+                requested_total,
+                prompt_len,
+                max_tokens,
+                state.max_context_tokens,
+                prompt_len,
+                max_tokens,
+                state.max_context_tokens,
             ),
         );
         Python::with_gil(|py| {
@@ -4066,11 +4087,16 @@ fn handle_gpu_decode(
 
         // When thinking is enabled, give the decode loop extra budget for thinking tokens.
         // The on_token callback enforces the real max_tokens on answer tokens only.
-        let decode_budget = if think_end_id.is_some() {
+        let requested_decode_budget = if think_end_id.is_some() {
             max_tokens.saturating_add(32768).saturating_sub(1)
         } else {
             max_tokens.saturating_sub(1)
         };
+        let context_decode_budget = state
+            .max_context_tokens
+            .saturating_sub(prompt_len)
+            .saturating_sub(1);
+        let decode_budget = requested_decode_budget.min(context_decode_budget);
 
         if !state.aux_gpu_store_addrs.is_empty() {
             // Multi-GPU decode: pipeline across N GPUs
@@ -4236,11 +4262,16 @@ fn handle_gpu_decode(
             ns_in_thinking = false;
         }
 
-        let ns_decode_budget = if ns_think_end_id.is_some() {
+        let requested_ns_decode_budget = if ns_think_end_id.is_some() {
             max_tokens.saturating_add(32768).saturating_sub(1)
         } else {
             max_tokens.saturating_sub(1)
         };
+        let context_decode_budget = state
+            .max_context_tokens
+            .saturating_sub(prompt_len)
+            .saturating_sub(1);
+        let ns_decode_budget = requested_ns_decode_budget.min(context_decode_budget);
 
         {
             let mut on_token = |token_id: usize,
@@ -5462,10 +5493,11 @@ impl RustServer {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_completion, format_completion_with_debug, format_completion_with_tool_calls,
-        format_models_response, format_sse_timing, format_sse_token, format_sse_tool_call_args,
-        format_sse_tool_call_start, hide_synthetic_think_stop_text, is_chat_completions_endpoint,
-        is_models_endpoint, ParsedToolCall, RequestOverhead,
+        context_window_fits, format_completion, format_completion_with_debug,
+        format_completion_with_tool_calls, format_models_response, format_sse_timing,
+        format_sse_token, format_sse_tool_call_args, format_sse_tool_call_start,
+        hide_synthetic_think_stop_text, is_chat_completions_endpoint, is_models_endpoint,
+        ParsedToolCall, RequestOverhead,
     };
 
     const WINDOWS_MODEL_PATH: &str = r#"C:\Users\stoate\.krasis\models\Qwen3.6-35B-A3B"#;
@@ -5498,6 +5530,15 @@ mod tests {
         assert!(is_chat_completions_endpoint("/chat/completions?x=1"));
         assert!(!is_chat_completions_endpoint("/v1/models"));
         assert!(!is_chat_completions_endpoint("/foo/chat/completions"));
+    }
+
+    #[test]
+    fn context_window_accounts_for_prompt_and_requested_output() {
+        assert!(context_window_fits(2047, 1, 2048));
+        assert!(context_window_fits(1024, 1024, 2048));
+        assert!(!context_window_fits(2048, 0, 2048));
+        assert!(!context_window_fits(2047, 2, 2048));
+        assert!(!context_window_fits(usize::MAX, usize::MAX, 2048));
     }
 
     #[test]

@@ -668,6 +668,26 @@ class CPUHubManager:
             target.view(-1).copy_(self.output_buf[:count], non_blocking=True)
 
 
+def _apply_max_context_limit(
+    cfg: ModelConfig,
+    max_context_tokens: Optional[int],
+) -> None:
+    """Apply an explicit runtime context cap without extending model support."""
+    if max_context_tokens is None:
+        return
+    requested = int(max_context_tokens)
+    if requested <= 0:
+        raise ValueError(
+            f"max_context_tokens must be positive when set, got {requested}"
+        )
+    model_limit = int(cfg.max_position_embeddings)
+    if requested > model_limit:
+        raise ValueError(
+            f"max_context_tokens {requested} exceeds model limit {model_limit}"
+        )
+    cfg.max_position_embeddings = requested
+
+
 class KrasisModel:
     """Full model with streaming attention (GPU0) + EP MoE (all GPUs) + CPU experts."""
 
@@ -697,8 +717,10 @@ class KrasisModel:
         expert_hqq_diagnostic_cache_spec: Optional[str] = None,
         kv_cache_mb: int = 1000,  # MB for KV cache
         stream_attention: bool = False,
+        max_context_tokens: Optional[int] = None,
     ):
         self.cfg = ModelConfig.from_model_path(model_path)
+        _apply_max_context_limit(self.cfg, max_context_tokens)
         self.quant_cfg = quant_cfg or QuantConfig()
         if self.cfg.gemma4_text:
             if self.quant_cfg.gpu_expert_bits != 4 or self.quant_cfg.cpu_expert_bits != 4:
@@ -6691,7 +6713,8 @@ class KrasisModel:
             return 0
         # Bottleneck is the smallest KV cache across GPU splits
         return min(
-            c.max_context_tokens for c in self.kv_caches if c is not None
+            self.cfg.max_position_embeddings,
+            min(c.max_context_tokens for c in self.kv_caches if c is not None),
         )
 
     def _get_rank_for_layer(self, global_layer_idx: int) -> int:

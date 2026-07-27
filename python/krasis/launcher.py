@@ -571,7 +571,7 @@ def scan_gguf_files(search_dir: str) -> List[Dict[str, Any]]:
 
 CONFIG_KEYS = [
     "MODEL_PATH", "CFG_SELECTED_GPUS", "CFG_PP_PARTITION", "CFG_LAYER_GROUP_SIZE",
-    "CFG_KV_CACHE_MB", "CFG_KV_DTYPE", "CFG_RING_WINDOW_KV", "CFG_GPU_EXPERT_BITS",
+    "CFG_KV_CACHE_MB", "CFG_MAX_CONTEXT_TOKENS", "CFG_KV_DTYPE", "CFG_RING_WINDOW_KV", "CFG_GPU_EXPERT_BITS",
     "CFG_EXPERT_GROUP_SIZE", "CFG_CPU_EXPERT_BITS",
     "CFG_GPU_EXPERT_INT4_CALIB",
     "CFG_ATTENTION_QUANT", "CFG_HQQ_CACHE_PROFILE", "CFG_HQQ_GROUP_SIZE", "CFG_HQQ_AUTO_BUDGET_PCT", "CFG_HQQ46_AUTO_BUDGET_MB", "CFG_HQQ_SIDECAR_MANIFEST",
@@ -645,6 +645,7 @@ class LauncherConfig:
         self.pp_partition: str = ""
         self.layer_group_size: int = 2  # layers per group (must be even, min 2 for double buffering)
         self.kv_cache_mb: int = 1000
+        self.max_context_tokens: int = 0  # 0 = model-declared limit
         self.kv_dtype: str = "k6v6"
         self.gpu_expert_bits: int = 4
         self.expert_group_size: int = 128
@@ -719,6 +720,19 @@ class LauncherConfig:
                 self.kv_cache_mb = int(saved["CFG_KV_CACHE_MB"])
             except ValueError:
                 pass
+        if "CFG_MAX_CONTEXT_TOKENS" in saved:
+            try:
+                self.max_context_tokens = int(saved["CFG_MAX_CONTEXT_TOKENS"])
+            except ValueError as exc:
+                raise ValueError(
+                    "CFG_MAX_CONTEXT_TOKENS must be an integer; "
+                    "use 0 for the model-declared limit"
+                ) from exc
+            if self.max_context_tokens < 0:
+                raise ValueError(
+                    "CFG_MAX_CONTEXT_TOKENS must be non-negative; "
+                    "use 0 for the model-declared limit"
+                )
         if "CFG_KV_DTYPE" in saved:
             if saved["CFG_KV_DTYPE"] in DEPRECATED_KV_CACHE_FORMAT_CHOICES:
                 raise ValueError(
@@ -924,6 +938,7 @@ class LauncherConfig:
             "CFG_PP_PARTITION": self.pp_partition,
             "CFG_LAYER_GROUP_SIZE": str(self.layer_group_size),
             "CFG_KV_CACHE_MB": str(self.kv_cache_mb),
+            "CFG_MAX_CONTEXT_TOKENS": str(self.max_context_tokens),
             "CFG_KV_DTYPE": self.kv_dtype,
             "CFG_GPU_EXPERT_BITS": str(self.gpu_expert_bits),
             "CFG_EXPERT_GROUP_SIZE": str(self.expert_group_size),
@@ -1008,6 +1023,9 @@ OPTIONS = [
                  choices=[2, 4, 6, 8, 10, 12], affects_budget=True),
     ConfigOption("KV cache (MB)", "kv_cache_mb",
                  opt_type="number", min_val=200, max_val=65500, step=100, affects_budget=True),
+    ConfigOption("Max context tokens", "max_context_tokens",
+                 opt_type="number", min_val=0, max_val=sys.maxsize, step=256,
+                 affects_budget=True, advanced=True),
     ConfigOption("KV format", "kv_dtype",
                  choices=["k4v4", "k6v6", "bf16"], affects_budget=True),
     ConfigOption("Model quantization", "gpu_expert_bits",
@@ -1061,6 +1079,8 @@ def _format_value(opt: ConfigOption, val: Any) -> str:
         return f"{val} layers (double-buffered)"
     if opt.key == "kv_cache_mb":
         return f"{val:,} MB"
+    if opt.key == "max_context_tokens":
+        return "model limit" if int(val) == 0 else _format_tokens(int(val))
     if opt.key == "vram_safety_margin":
         return f"{val:,} MB"
     if opt.key == "dynamic_hcs_tail_blocks":
@@ -1658,6 +1678,7 @@ class Launcher:
                 gpu_vram_mb=gpu_vram,
                 total_ram_gb=self.hw["total_ram_gb"],
                 kv_cache_mb=self.cfg.kv_cache_mb,
+                max_context_tokens=self.cfg.max_context_tokens,
             )
         except Exception as exc:
             self.budget_error = str(exc)
@@ -1746,7 +1767,13 @@ class Launcher:
                 if kv_dim > 0 and num_kv_layers > 0:
                     kv_bytes_per_token = kv_dim * num_kv_layers
                     alloc_tokens = (self.cfg.kv_cache_mb * 1024 * 1024) // kv_bytes_per_token if kv_bytes_per_token > 0 else 0
-                    suffix = f"  {DIM}(~{_format_tokens(alloc_tokens)} tokens, model max {_format_tokens(max_ctx)}){NC}"
+                    runtime_max = self.cfg.max_context_tokens or max_ctx
+                    alloc_tokens = min(alloc_tokens, runtime_max)
+                    suffix = (
+                        f"  {DIM}(~{_format_tokens(alloc_tokens)} tokens, "
+                        f"runtime max {_format_tokens(runtime_max)}, "
+                        f"model max {_format_tokens(max_ctx)}){NC}"
+                    )
 
             # Build left part (prefix + label + value + annotation)
             label_part = f"{label_style}{opt.label:<20s}{NC}"
@@ -2315,7 +2342,10 @@ class Launcher:
                 self.cfg.cpu_expert_bits = int(new_val)
         elif opt.opt_type == "number":
             new_val = int(val) + direction * opt.step
-            new_val = max(opt.min_val, min(opt.max_val, new_val))
+            max_val = opt.max_val
+            if opt.key == "max_context_tokens" and self.model_info:
+                max_val = int(self.model_info.get("max_context", max_val))
+            new_val = max(opt.min_val, min(max_val, new_val))
             setattr(self.cfg, opt.key, new_val)
 
     def run_interactive(self) -> bool:
@@ -2552,6 +2582,12 @@ class Launcher:
         print(f"  PP partition:    {self.cfg.pp_partition}")
         print(f"  Layer group:     {self.cfg.layer_group_size} layers (double-buffered)")
         print(f"  KV cache:        {self.cfg.kv_cache_mb:,} MB")
+        context_display = (
+            "model limit"
+            if self.cfg.max_context_tokens == 0
+            else f"{self.cfg.max_context_tokens:,} tokens"
+        )
+        print(f"  Max context:     {context_display}")
         print(f"  KV dtype:        {self.cfg.kv_dtype}")
         print(f"  Quantization:    INT{self.cfg.gpu_expert_bits} g{self.cfg.expert_group_size}")
         if self.cfg.gpu_expert_bits == 4:
@@ -2776,6 +2812,8 @@ def parse_args() -> argparse.Namespace:
                         help="Layers per streaming group (even number, min 2 for double buffering)")
     parser.add_argument("--kv-cache-mb", type=int, default=None,
                         help="KV cache size in MB (default: 1000)")
+    parser.add_argument("--max-context-tokens", type=int, default=None,
+                        help="Explicit runtime context cap; 0 uses the model limit")
     parser.add_argument("--vram-safety-margin", type=int, default=None,
                         help="VRAM safety margin in MB (default: 600)")
     parser.add_argument("--kv-dtype", default=None,
@@ -2866,6 +2904,13 @@ def _apply_cli_overrides(cfg: LauncherConfig, args: argparse.Namespace) -> None:
         cfg.layer_group_size = max(2, args.layer_group_size)
     if args.kv_cache_mb is not None:
         cfg.kv_cache_mb = max(200, args.kv_cache_mb)
+    if args.max_context_tokens is not None:
+        if args.max_context_tokens < 0:
+            raise ValueError(
+                "--max-context-tokens must be non-negative; "
+                "use 0 for the model-declared limit"
+            )
+        cfg.max_context_tokens = args.max_context_tokens
     if args.vram_safety_margin is not None:
         cfg.vram_safety_margin = max(500, args.vram_safety_margin)
     if args.kv_dtype is not None:

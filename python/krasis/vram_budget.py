@@ -52,7 +52,8 @@ from krasis.attention_backend import (
     load_hqq_attention_manifest,
     select_hqq_auto_promotions,
 )
-from krasis.kv_cache import MLA_CKV_KERNEL_MIN_DIM
+from krasis.config import ModelConfig
+from krasis.kv_cache import MLA_CKV_KERNEL_MIN_DIM, PAGE_SIZE
 
 logger = logging.getLogger(__name__)
 
@@ -727,6 +728,7 @@ def compute_launcher_budget(
     gpu_vram_mb: int = 0,
     total_ram_gb: int = 0,
     kv_cache_mb: int = 1000,
+    max_context_tokens: int = 0,
     prefill_chunk_size: int = 10000,
 ) -> Dict[str, Any]:
     """Compute VRAM + RAM budget for the launcher TUI.
@@ -737,6 +739,26 @@ def compute_launcher_budget(
     import math
 
     cfg = _read_model_config(model_path)
+    model_context_limit = int(
+        ModelConfig.from_model_path(model_path).max_position_embeddings
+    )
+    if model_context_limit <= 0:
+        raise ValueError(
+            f"Model has invalid max_position_embeddings={model_context_limit}"
+        )
+    if max_context_tokens < 0:
+        raise ValueError(
+            f"max_context_tokens must be non-negative, got {max_context_tokens}"
+        )
+    if max_context_tokens > model_context_limit:
+        raise ValueError(
+            f"max_context_tokens {max_context_tokens} exceeds model limit "
+            f"{model_context_limit}"
+        )
+    effective_context_limit = max_context_tokens or model_context_limit
+    effective_kv_capacity_tokens = (
+        math.ceil(effective_context_limit / PAGE_SIZE) * PAGE_SIZE
+    )
 
     if gpu_vram_mb <= 0:
         gpu_vram_mb = _detect_gpu_vram_bytes() // (1024 * 1024)
@@ -873,7 +895,14 @@ def compute_launcher_budget(
     else:
         total_full_attn = total_model_layers
     kv_total_per_token = kv_ptl * total_full_attn
-    max_kv_tokens = int(kv_cache_mb * 1024 * 1024 // kv_total_per_token) if kv_total_per_token > 0 else 10000
+    max_kv_tokens = (
+        min(
+            int(kv_cache_mb * 1024 * 1024 // kv_total_per_token),
+            effective_context_limit,
+        )
+        if kv_total_per_token > 0
+        else effective_context_limit
+    )
     prefill_chunk = min(prefill_chunk_size, max_kv_tokens)
     prefill_workspace_bytes = 0
     if moe_inter > 0 and top_k > 0:
@@ -969,9 +998,19 @@ def compute_launcher_budget(
         free_bytes = gpu_vram_mb * 1024 * 1024 - total_bytes
         # KV cache only for full attention layers in THIS rank's partition
         kv_per_rank = kv_ptl * rank_full_attn
-        kv_tokens = max(0, int(free_bytes // kv_per_rank)) if kv_per_rank > 0 and free_bytes > 0 else 0
+        kv_tokens = (
+            min(
+                max(0, int(free_bytes // kv_per_rank)),
+                effective_kv_capacity_tokens,
+            )
+            if kv_per_rank > 0 and free_bytes > 0
+            else 0
+        )
         # Tokens for the user-configured KV cache allocation
-        kv_alloc_bytes = kv_cache_mb * 1024 * 1024
+        kv_alloc_bytes = min(
+            kv_cache_mb * 1024 * 1024,
+            effective_kv_capacity_tokens * kv_per_rank,
+        )
         kv_alloc_tokens = max(0, int(kv_alloc_bytes // kv_per_rank)) if kv_per_rank > 0 else 0
         total_with_kv = total_bytes + min(kv_alloc_bytes, max(0, free_bytes))
         free_after_kv = gpu_vram_mb * 1024 * 1024 - total_with_kv
@@ -1041,6 +1080,7 @@ def compute_launcher_budget(
         "worst_rank": worst["rank"],
         "over_budget": over_budget,
         "kv_dtype": kv_dtype,
+        "max_context_tokens": effective_context_limit,
         "hybrid": hybrid,
         "num_full_attention_layers": _num_full_attention_layers(cfg) if hybrid else total_layers,
         "ram_gpu_experts_mb": ram_gpu_experts_mb,

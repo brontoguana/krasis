@@ -549,7 +549,7 @@ def _runtime_heatmap_capture_config(args) -> dict[str, Any]:
             "sha256": _sha256_file(manifest_path),
             "basename": os.path.basename(manifest_path),
         }
-    return {
+    config = {
         "gpu_expert_bits": int(args.gpu_expert_bits),
         "expert_group_size": int(args.expert_group_size),
         "gpu_expert_int4_calib": args.gpu_expert_int4_calib,
@@ -566,6 +566,9 @@ def _runtime_heatmap_capture_config(args) -> dict[str, Any]:
         "kv_dtype": args.kv_dtype,
         "layer_group_size": int(args.layer_group_size),
     }
+    if int(args.max_context_tokens) > 0:
+        config["max_context_tokens"] = int(args.max_context_tokens)
+    return config
 
 
 def _runtime_matches_approved_heatmap_policy(
@@ -664,6 +667,32 @@ def _expected_heatmap_metadata(model: KrasisModel, args, prompts: list[str]) -> 
         resolved_num_gpus = int(args.num_gpus or torch.cuda.device_count())
     except Exception:
         resolved_num_gpus = int(args.num_gpus or 0)
+    runtime_metadata = {
+        "num_gpus": resolved_num_gpus,
+        "selected_gpus": args.selected_gpus or "",
+        "gpu_expert_bits": int(args.gpu_expert_bits),
+        "expert_group_size": int(args.expert_group_size),
+        "gpu_expert_int4_calib": args.gpu_expert_int4_calib,
+        "cpu_expert_bits": int(args.cpu_expert_bits),
+        "attention_quant": args.attention_quant,
+        "hqq_cache_profile": args.hqq_cache_profile,
+        "hqq_group_size": int(args.hqq_group_size),
+        "hqq_auto_budget_pct": args.hqq_auto_budget_pct,
+        "hqq46_auto_budget_mib": args.hqq46_auto_budget_mib,
+        "hqq_sidecar_manifest": os.path.abspath(args.hqq_sidecar_manifest) if args.hqq_sidecar_manifest else None,
+        "shared_expert_quant": args.shared_expert_quant,
+        "dense_mlp_quant": args.dense_mlp_quant,
+        "lm_head_quant": args.lm_head_quant,
+        "kv_dtype": args.kv_dtype,
+        "kv_cache_mb": int(args.kv_cache_mb),
+        "layer_group_size": int(args.layer_group_size),
+        "multi_gpu_hcs": bool(args.multi_gpu_hcs),
+        "hcs": bool(args.hcs),
+        "quant_config": getattr(quant_cfg, "__dict__", {}) if quant_cfg is not None else {},
+    }
+    if int(args.max_context_tokens) > 0:
+        runtime_metadata["max_context_tokens"] = int(args.max_context_tokens)
+
     metadata = {
         "format": HEATMAP_FORMAT,
         "format_version": HEATMAP_FORMAT_VERSION,
@@ -683,29 +712,7 @@ def _expected_heatmap_metadata(model: KrasisModel, args, prompts: list[str]) -> 
             "config_fingerprints": _model_config_fingerprints(args.model_path),
         },
         "route_signature": _heatmap_route_signature(model, args),
-        "runtime": {
-            "num_gpus": resolved_num_gpus,
-            "selected_gpus": args.selected_gpus or "",
-            "gpu_expert_bits": int(args.gpu_expert_bits),
-            "expert_group_size": int(args.expert_group_size),
-            "gpu_expert_int4_calib": args.gpu_expert_int4_calib,
-            "cpu_expert_bits": int(args.cpu_expert_bits),
-            "attention_quant": args.attention_quant,
-            "hqq_cache_profile": args.hqq_cache_profile,
-            "hqq_group_size": int(args.hqq_group_size),
-            "hqq_auto_budget_pct": args.hqq_auto_budget_pct,
-            "hqq46_auto_budget_mib": args.hqq46_auto_budget_mib,
-            "hqq_sidecar_manifest": os.path.abspath(args.hqq_sidecar_manifest) if args.hqq_sidecar_manifest else None,
-            "shared_expert_quant": args.shared_expert_quant,
-            "dense_mlp_quant": args.dense_mlp_quant,
-            "lm_head_quant": args.lm_head_quant,
-            "kv_dtype": args.kv_dtype,
-            "kv_cache_mb": int(args.kv_cache_mb),
-            "layer_group_size": int(args.layer_group_size),
-            "multi_gpu_hcs": bool(args.multi_gpu_hcs),
-            "hcs": bool(args.hcs),
-            "quant_config": getattr(quant_cfg, "__dict__", {}) if quant_cfg is not None else {},
-        },
+        "runtime": runtime_metadata,
         "runtime_compat": _runtime_heatmap_capture_config(args),
         "heatmap_build": {
             "prompt_source": "python/krasis/prompts/heatmap_prompts.txt",
@@ -2002,6 +2009,7 @@ def main():
             "CFG_MULTI_GPU_HCS": "multi_gpu_hcs",
             "CFG_HCS_HOST_CACHE_MODE": "hcs_host_cache_mode",
             "CFG_KV_CACHE_MB": "kv_cache_mb",
+            "CFG_MAX_CONTEXT_TOKENS": "max_context_tokens",
             "CFG_RING_WINDOW_KV": "ring_window_kv",
             "CFG_VRAM_SAFETY_MARGIN": "vram_safety_margin",
             "CFG_DYNAMIC_HCS": "dynamic_hcs",
@@ -2133,6 +2141,8 @@ def main():
                         help="KV cache format: k6v6 Quality default, k4v4 Ultra Compact, bf16 Full Precision, or explicit internal formats; fp8/fp8_e4m3 are deprecated and disabled")
     parser.add_argument("--kv-cache-mb", type=int, default=1000,
                         help="KV cache size in MB (default: 1000)")
+    parser.add_argument("--max-context-tokens", type=int, default=0,
+                        help="Explicit runtime context cap; 0 uses the model limit")
     parser.add_argument("--ring-window-kv", action="store_true",
                         help="Experimental: cap sliding-attention KV layers to their physical window; requires correctness validation")
     parser.add_argument("--heatmap-path", default=None,
@@ -2607,6 +2617,9 @@ def main():
         gpu_prefill_threshold=1 if args.hcs else getattr(args, 'gpu_prefill_threshold', int(os.environ.get("KRASIS_PREFILL_THRESHOLD", "500"))),
         kv_cache_mb=args.kv_cache_mb,
         stream_attention=args.stream_attention,
+        max_context_tokens=(
+            args.max_context_tokens if args.max_context_tokens != 0 else None
+        ),
     )
     log_ram_ledger("after-model-object")
 

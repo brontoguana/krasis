@@ -7205,9 +7205,62 @@ fn incomplete_dsa_layers(graph: &GpuDecodeGraph) -> Vec<usize> {
         .collect()
 }
 
+fn validate_dsa_exact_prefix_limit(
+    registrations: &[&DsaIndexerRegistration],
+    expected_layers: usize,
+    runtime_context_tokens: usize,
+) -> Result<usize, String> {
+    let first = registrations
+        .first()
+        .ok_or_else(|| "DSA graph flag is set but no layer registrations exist".to_string())?;
+    if runtime_context_tokens == 0 {
+        return Err("DSA exact-prefix mode requires a positive runtime context".to_string());
+    }
+    if registrations.len() != expected_layers {
+        return Err(format!(
+            "DSA graph registration is incomplete: {} of {} layers registered",
+            registrations.len(),
+            expected_layers
+        ));
+    }
+    let index_topk = first.index_topk;
+    for registration in registrations.iter().skip(1) {
+        if registration.index_topk != index_topk {
+            return Err(format!(
+                "DSA layers disagree on index_topk: {} != {}",
+                registration.index_topk, index_topk
+            ));
+        }
+    }
+    if runtime_context_tokens > index_topk {
+        return Err(format!(
+            "GLM DSA sparse attention is not implemented: runtime context {} exceeds registered index_topk {}; refusing inexact dense MLA",
+            runtime_context_tokens, index_topk
+        ));
+    }
+    Ok(index_topk)
+}
+
+fn validate_dsa_exact_prefix_graph(
+    graph: &GpuDecodeGraph,
+    max_tokens: usize,
+) -> Result<Option<usize>, String> {
+    if !graph.dsa_runtime_incomplete {
+        return Ok(None);
+    }
+    let registrations = graph
+        .layers
+        .iter()
+        .filter_map(|layer| layer.dsa_indexer.as_ref())
+        .collect::<Vec<_>>();
+    let runtime_context_tokens = max_tokens.max(graph.kv_max_seq);
+    validate_dsa_exact_prefix_limit(&registrations, graph.layers.len(), runtime_context_tokens)
+        .map(Some)
+}
+
 #[cfg(test)]
 mod dsa_registration_tests {
-    use super::validate_dsa_indexer_registration;
+    use super::{validate_dsa_exact_prefix_limit, validate_dsa_indexer_registration};
 
     #[test]
     fn owner_and_shared_contracts_are_fail_closed() {
@@ -7238,6 +7291,38 @@ mod dsa_registration_tests {
         )
         .unwrap_err()
         .contains("future indexer owner"));
+    }
+
+    #[test]
+    fn dense_mla_is_allowed_only_when_the_complete_prefix_is_selected() {
+        let owner =
+            validate_dsa_indexer_registration(2, 2, true, 2048, 128, 32, 4, 3, 2048, 6144, true)
+                .expect("full owner should validate");
+        let shared =
+            validate_dsa_indexer_registration(5, 2, false, 2048, 128, 32, 4, 3, 2048, 6144, true)
+                .expect("IndexShare layer should validate");
+        let registrations = [&owner, &shared];
+
+        assert_eq!(
+            validate_dsa_exact_prefix_limit(&registrations, 2, 2048)
+                .expect("index_topk covers the complete runtime context"),
+            2048
+        );
+        assert!(validate_dsa_exact_prefix_limit(&registrations, 2, 2049)
+            .unwrap_err()
+            .contains("refusing inexact dense MLA"));
+        assert!(validate_dsa_exact_prefix_limit(&registrations, 3, 2048)
+            .unwrap_err()
+            .contains("2 of 3 layers registered"));
+
+        let mismatched =
+            validate_dsa_indexer_registration(6, 6, true, 1024, 128, 32, 4, 3, 2048, 6144, true)
+                .expect("standalone owner should validate");
+        assert!(
+            validate_dsa_exact_prefix_limit(&[&owner, &mismatched], 2, 1024)
+                .unwrap_err()
+                .contains("disagree on index_topk")
+        );
     }
 }
 
@@ -24619,11 +24704,14 @@ impl GpuDecodeStore {
         use crate::gpu_prefill::*;
 
         let graph = self.graph.as_ref().ok_or("GpuDecodeStore not configured")?;
-        if graph.dsa_runtime_incomplete {
-            return Err(format!(
-                "GLM DSA execution is not implemented; refusing dense MLA prefill for registered DSA layers {:?}",
-                incomplete_dsa_layers(graph)
-            ));
+        if let Some(index_topk) = validate_dsa_exact_prefix_graph(graph, max_tokens)? {
+            log::warn!(
+                "GLM DSA exact-prefix mode: runtime context {} and KV capacity {} are both within registered index_topk {}; dense causal MLA selects the same complete prefix for layers {:?}",
+                max_tokens,
+                graph.kv_max_seq,
+                index_topk,
+                incomplete_dsa_layers(graph),
+            );
         }
 
         // Load prefill kernels

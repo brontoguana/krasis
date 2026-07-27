@@ -17,6 +17,7 @@ from krasis.layer import (
     NativeMLAWeights,
     TransformerLayer,
 )
+from krasis.model import _apply_max_context_limit
 from krasis.vram_budget import _kv_bytes_per_token_per_layer
 from krasis.weight_loader import WeightLoader
 
@@ -72,6 +73,30 @@ def _glm_dsa_config() -> dict:
 
 
 class ModelConfigContractTests(unittest.TestCase):
+    def test_runtime_context_cap_never_extends_model_support(self) -> None:
+        cfg = ModelConfig.from_model_path(_write_config(self, _glm_dsa_config()))
+        cfg.max_position_embeddings = 4096
+
+        _apply_max_context_limit(cfg, None)
+        self.assertEqual(cfg.max_position_embeddings, 4096)
+
+        _apply_max_context_limit(cfg, 2048)
+        self.assertEqual(cfg.max_position_embeddings, 2048)
+
+        for invalid in (0, -1):
+            with self.subTest(invalid=invalid):
+                capped = ModelConfig.from_model_path(
+                    _write_config(self, _glm_dsa_config())
+                )
+                capped.max_position_embeddings = 4096
+                with self.assertRaisesRegex(ValueError, r"must be positive"):
+                    _apply_max_context_limit(capped, invalid)
+
+        capped = ModelConfig.from_model_path(_write_config(self, _glm_dsa_config()))
+        capped.max_position_embeddings = 4096
+        with self.assertRaisesRegex(ValueError, r"exceeds model limit 4096"):
+            _apply_max_context_limit(capped, 4097)
+
     def test_glm_moe_dsa_indexshare_contract(self) -> None:
         cfg = ModelConfig.from_model_path(_write_config(self, _glm_dsa_config()))
 

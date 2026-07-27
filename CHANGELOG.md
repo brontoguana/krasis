@@ -65,10 +65,28 @@
   validates each full/shared owner relationship, all config-derived indexer
   dimensions, owner-weight presence, graph hidden width, and MLA query rank,
   and exposes the non-executable registration as JSON for diagnostics.
-  Prefill-engine construction fails before allocating kernels or scratch when
-  any DSA layer is registered, preventing incomplete DSA models from silently
-  running dense MLA. No indexer tensors are moved or executed yet, and existing
-  model hot paths are unchanged.
+  Prefill-engine construction uses this metadata for the exact-prefix gate
+  below and otherwise fails before allocating kernels or scratch, preventing
+  incomplete DSA models from silently running inexact dense MLA. No indexer
+  tensors are moved or executed yet, and existing model hot paths are
+  unchanged.
+
+- Added a fail-closed GLM DSA exact-prefix mode for short-context correctness
+  work. When the configured runtime context and actual KV capacity are both no
+  larger than every registered layer's `index_topk`, dense causal MLA is exact
+  because the sparse selector contains the complete prefix. Startup rejects a
+  longer context, inconsistent top-k values, or partial layer registration.
+  Added the generic `--max-context-tokens` /
+  `CFG_MAX_CONTEXT_TOKENS` cap and applied it before KV, RoPE, scratch,
+  calibration, server, launcher-budget, and heatmap setup. KV page allocation
+  now stops at the effective model limit, and HTTP admission accounts for both
+  prompt and requested output tokens. Default `0` retains each model's
+  declared limit and preserves existing approved-heatmap metadata. Added a
+  2,048-token GLM-5.2 development config under `tests/`; no GLM-5.2 model run
+  is claimed while the checkpoint download and native sparse DSA remain
+  incomplete. Validation passed: model/config `9/9`, launcher/server parsing
+  `24/24`, DSA exact-prefix contracts `2/2`, context admission `1/1`, and the
+  exact-source `./dev build` in 189 seconds with wheel/import verification.
 
 ## 1.0.16 - 2026-07-27
 

@@ -97,6 +97,7 @@ When BF16 is selected for experts or major components, treat that run as validat
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--kv-cache-mb N` | 1000 | KV cache size in MB |
+| `--max-context-tokens N` | 0 | Explicit runtime context cap; `0` uses the model-declared limit. KV allocation, request limits, prefill scratch sizing, and heatmap compatibility use the effective cap. |
 | `--hcs` / `--no-hcs` | on | Hot Cache Strategy for expert pinning |
 | `--multi-gpu-hcs` | off | Pin HCS experts across all GPUs |
 | `--hcs-host-cache-mode MODE` | source | Soft HCS host storage: `source`, `mirror`, or `auto` |

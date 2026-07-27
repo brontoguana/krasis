@@ -194,11 +194,24 @@ class PagedKVCache:
                 max_pages = self._max_pages_for_budget(budget_bytes)
             else:
                 max_pages = max(64, budget_bytes // bytes_per_page)
+            runtime_limit_pages = max(
+                1,
+                math.ceil(cfg.max_position_embeddings / page_size),
+            )
+            max_pages = min(max_pages, runtime_limit_pages)
             logger.info(
-                "KV cache: %d MB → %d pages (%.1fK tokens)",
-                max_mb, max_pages, max_pages * page_size / 1000,
+                "KV cache: %d MB → %d pages (%.1fK tokens, runtime limit %d)",
+                max_mb,
+                max_pages,
+                max_pages * page_size / 1000,
+                cfg.max_position_embeddings,
             )
 
+        runtime_limit_pages = max(
+            1,
+            math.ceil(cfg.max_position_embeddings / page_size),
+        )
+        max_pages = min(max_pages, runtime_limit_pages)
         self.max_pages = max_pages
 
         # GQA caches (separate K and V)

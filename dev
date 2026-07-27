@@ -1469,6 +1469,8 @@ do_test_kernels() {
             filter="adaptive_cold_drop::tests"
         elif [[ "$1" == "dsa_registration" ]]; then
             filter="dsa_registration_tests"
+        elif [[ "$1" == "context_window" ]]; then
+            filter="server::tests::context_window_accounts_for_prompt_and_requested_output"
         fi
         info "Filter: $filter"
         PATH="$HOME/.cargo/bin:$(dirname "$PYTHON"):$PATH" \
