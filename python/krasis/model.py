@@ -145,6 +145,31 @@ def _weight_dtype_code(t: torch.Tensor) -> int:
     return 0  # BF16 (default)
 
 
+def _dsa_owner_layers_for_segment(
+    cfg: ModelConfig,
+    layer_start: int,
+    layer_end: int,
+) -> list[int]:
+    """Return the unique IndexShare owners needed by one decode segment."""
+    if not cfg.is_dsa:
+        return []
+    if layer_start < 0 or layer_end > cfg.num_hidden_layers or layer_start >= layer_end:
+        raise ValueError(
+            f"Invalid DSA decode segment [{layer_start}, {layer_end}) for "
+            f"{cfg.num_hidden_layers} layers"
+        )
+    owners = {
+        cfg.dsa_indexer_owner_layer(layer_idx)
+        for layer_idx in range(layer_start, layer_end)
+    }
+    if None in owners:
+        raise RuntimeError(
+            f"DSA decode segment [{layer_start}, {layer_end}) contains an "
+            "unowned IndexShare layer"
+        )
+    return sorted(int(owner) for owner in owners)
+
+
 # GPU-to-GPU P2P transfer may silently fail on some systems (returns zeros).
 # Detect this once at import time and use CPU bounce if needed.
 _p2p_works: Optional[bool] = None
@@ -4889,6 +4914,166 @@ class KrasisModel:
             }
 
         raise RuntimeError(f"Unsupported HQQ layer kind {layer_kind} for layer {layer_idx}")
+
+    def _stage_dsa_indexer_resources_on_store(
+        self,
+        store,
+        target_device: torch.device,
+        keepalive: list,
+        layer_start: int,
+        layer_end: int,
+    ) -> int:
+        """Stage one fixed-address native DSA resource per owner used by a segment."""
+        owner_layers = _dsa_owner_layers_for_segment(
+            self.cfg, layer_start, layer_end
+        )
+        if not owner_layers:
+            return 0
+
+        segment_contexts = set()
+        for layer_idx in range(layer_start, layer_end):
+            cache, _ = self._kv_cache_slot_for_layer(layer_idx)
+            segment_contexts.add(int(cache.max_pages * cache.page_size))
+        if len(segment_contexts) != 1:
+            raise RuntimeError(
+                f"DSA decode segment [{layer_start}, {layer_end}) has "
+                f"inconsistent KV capacities: {sorted(segment_contexts)}"
+            )
+        max_context_tokens = segment_contexts.pop()
+        if max_context_tokens <= 0:
+            raise RuntimeError(
+                f"DSA decode segment [{layer_start}, {layer_end}) has no "
+                "positive runtime context capacity"
+            )
+
+        tensor_shapes = {
+            "wq_b": (
+                self.cfg.index_n_heads * self.cfg.index_head_dim,
+                self.cfg.q_lora_rank,
+            ),
+            "wk": (self.cfg.index_head_dim, self.cfg.hidden_size),
+            "weights_proj": (
+                self.cfg.index_n_heads,
+                self.cfg.hidden_size,
+            ),
+            "k_norm_weight": (1, self.cfg.index_head_dim),
+            "k_norm_bias": (1, self.cfg.index_head_dim),
+        }
+        staged = 0
+        for owner_layer_idx in owner_layers:
+            owner_attn = self.layers[owner_layer_idx].attention
+            owner = getattr(owner_attn, "dsa_indexer", None)
+            if owner is None or owner.layer_idx != owner_layer_idx:
+                raise RuntimeError(
+                    f"DSA segment [{layer_start}, {layer_end}) requires owner "
+                    f"layer {owner_layer_idx}, but its validated tensors are absent"
+                )
+
+            weight_ids = {}
+            for tensor_name, (rows, cols) in tensor_shapes.items():
+                source = getattr(owner, tensor_name, None)
+                if not isinstance(source, torch.Tensor):
+                    raise RuntimeError(
+                        f"DSA owner layer {owner_layer_idx} has no tensor "
+                        f"{tensor_name}"
+                    )
+                tensor = self._move_hqq_tensor_to_device(
+                    source.contiguous(),
+                    target_device,
+                    keepalive,
+                    "dsa_indexer_owner",
+                )
+                if tensor.dtype != torch.bfloat16:
+                    raise RuntimeError(
+                        f"DSA owner layer {owner_layer_idx} tensor {tensor_name} "
+                        f"dtype {tensor.dtype} != torch.bfloat16"
+                    )
+                if tensor.numel() != rows * cols:
+                    raise RuntimeError(
+                        f"DSA owner layer {owner_layer_idx} tensor {tensor_name} "
+                        f"has {tensor.numel()} elements, expected {rows * cols}"
+                    )
+                weight_ids[tensor_name] = int(
+                    store.register_weight(
+                        tensor.data_ptr(),
+                        rows,
+                        cols,
+                        _weight_dtype_code(tensor),
+                    )
+                )
+
+            store.register_dsa_indexer_owner_resource(
+                owner_layer_idx=int(owner_layer_idx),
+                wq_b_wid=weight_ids["wq_b"],
+                wk_wid=weight_ids["wk"],
+                weights_proj_wid=weight_ids["weights_proj"],
+                k_norm_weight_wid=weight_ids["k_norm_weight"],
+                k_norm_bias_wid=weight_ids["k_norm_bias"],
+                max_context_tokens=max_context_tokens,
+            )
+            staged += 1
+
+        store.finalize_dsa_indexer_resources()
+        logger.info(
+            "DSA owner resources staged on %s: owners=%s layers=[%d,%d) "
+            "max_context=%d",
+            target_device,
+            owner_layers,
+            layer_start,
+            layer_end,
+            max_context_tokens,
+        )
+        return staged
+
+    def _dsa_indexer_resource_bytes_for_segment(
+        self,
+        layer_start: int,
+        layer_end: int,
+    ) -> int:
+        """Return exact persistent owner-weight and decode-state bytes for a segment."""
+        owner_layers = _dsa_owner_layers_for_segment(
+            self.cfg, layer_start, layer_end
+        )
+        if not owner_layers:
+            return 0
+        contexts = set()
+        for layer_idx in range(layer_start, layer_end):
+            cache, _ = self._kv_cache_slot_for_layer(layer_idx)
+            contexts.add(int(cache.max_pages * cache.page_size))
+        if len(contexts) != 1:
+            raise RuntimeError(
+                f"DSA decode segment [{layer_start}, {layer_end}) has "
+                f"inconsistent KV capacities: {sorted(contexts)}"
+            )
+        max_context_tokens = contexts.pop()
+        total = 0
+        for owner_layer_idx in owner_layers:
+            owner = getattr(
+                self.layers[owner_layer_idx].attention,
+                "dsa_indexer",
+                None,
+            )
+            if owner is None:
+                raise RuntimeError(
+                    f"DSA resource sizing requires owner layer {owner_layer_idx}"
+                )
+            for tensor_name in (
+                "wq_b",
+                "wk",
+                "weights_proj",
+                "k_norm_weight",
+                "k_norm_bias",
+            ):
+                tensor = getattr(owner, tensor_name, None)
+                if not isinstance(tensor, torch.Tensor):
+                    raise RuntimeError(
+                        f"DSA resource sizing requires owner {owner_layer_idx} "
+                        f"tensor {tensor_name}"
+                    )
+                total += tensor.numel() * tensor.element_size()
+            total += max_context_tokens * self.cfg.index_head_dim * 2
+            total += min(self.cfg.index_topk, max_context_tokens) * 4
+        return int(total)
 
     def _register_hqq_attention_layers_on_store(
         self,

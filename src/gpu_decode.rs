@@ -7119,6 +7119,116 @@ struct DsaIndexerRegistration {
     rope_interleave: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct DsaIndexerOwnerWeightIds {
+    wq_b: usize,
+    wk: usize,
+    weights_proj: usize,
+    k_norm_weight: usize,
+    k_norm_bias: usize,
+}
+
+struct DsaIndexerOwnerResource {
+    owner_layer_idx: usize,
+    weight_ids: DsaIndexerOwnerWeightIds,
+    max_context_tokens: usize,
+    index_head_dim: usize,
+    topk_capacity: usize,
+    d_key_cache: cudarc::driver::CudaSlice<u16>,
+    d_topk_indices: cudarc::driver::CudaSlice<i32>,
+}
+
+fn validate_dsa_owner_weight_contract(
+    weights: &[GpuWeight],
+    registration: &DsaIndexerRegistration,
+    weight_ids: DsaIndexerOwnerWeightIds,
+    max_context_tokens: usize,
+) -> Result<(usize, usize), String> {
+    if max_context_tokens == 0 {
+        return Err(format!(
+            "DSA owner layer {} requires positive max_context_tokens",
+            registration.owner_layer_idx
+        ));
+    }
+    let query_width = registration
+        .index_n_heads
+        .checked_mul(registration.index_head_dim)
+        .ok_or_else(|| {
+            format!(
+                "DSA owner layer {} query width overflow",
+                registration.owner_layer_idx
+            )
+        })?;
+    let expected = [
+        (
+            "wq_b",
+            weight_ids.wq_b,
+            query_width,
+            registration.q_lora_rank,
+        ),
+        (
+            "wk",
+            weight_ids.wk,
+            registration.index_head_dim,
+            registration.hidden_size,
+        ),
+        (
+            "weights_proj",
+            weight_ids.weights_proj,
+            registration.index_n_heads,
+            registration.hidden_size,
+        ),
+        (
+            "k_norm_weight",
+            weight_ids.k_norm_weight,
+            1,
+            registration.index_head_dim,
+        ),
+        (
+            "k_norm_bias",
+            weight_ids.k_norm_bias,
+            1,
+            registration.index_head_dim,
+        ),
+    ];
+    for (name, wid, rows, cols) in expected {
+        let weight = weights.get(wid).ok_or_else(|| {
+            format!(
+                "DSA owner layer {} {} weight id {} is not registered",
+                registration.owner_layer_idx, name, wid
+            )
+        })?;
+        if weight.ptr == 0 {
+            return Err(format!(
+                "DSA owner layer {} {} has a null device pointer",
+                registration.owner_layer_idx, name
+            ));
+        }
+        if weight.dtype != 0 {
+            return Err(format!(
+                "DSA owner layer {} {} must be BF16, got dtype code {}",
+                registration.owner_layer_idx, name, weight.dtype
+            ));
+        }
+        if weight.rows != rows || weight.cols != cols {
+            return Err(format!(
+                "DSA owner layer {} {} shape [{}, {}] != expected [{}, {}]",
+                registration.owner_layer_idx, name, weight.rows, weight.cols, rows, cols
+            ));
+        }
+    }
+    let key_cache_elems = max_context_tokens
+        .checked_mul(registration.index_head_dim)
+        .ok_or_else(|| {
+            format!(
+                "DSA owner layer {} key-cache size overflow: context={} head_dim={}",
+                registration.owner_layer_idx, max_context_tokens, registration.index_head_dim
+            )
+        })?;
+    let topk_capacity = registration.index_topk.min(max_context_tokens);
+    Ok((key_cache_elems, topk_capacity))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn validate_dsa_indexer_registration(
     layer_idx: usize,
@@ -7260,7 +7370,12 @@ fn validate_dsa_exact_prefix_graph(
 
 #[cfg(test)]
 mod dsa_registration_tests {
-    use super::{validate_dsa_exact_prefix_limit, validate_dsa_indexer_registration};
+    use cudarc::driver::DevicePtr;
+
+    use super::{
+        validate_dsa_exact_prefix_limit, validate_dsa_indexer_registration,
+        validate_dsa_owner_weight_contract, DsaIndexerOwnerWeightIds, GpuDecodeStore, GpuWeight,
+    };
 
     #[test]
     fn owner_and_shared_contracts_are_fail_closed() {
@@ -7323,6 +7438,152 @@ mod dsa_registration_tests {
                 .unwrap_err()
                 .contains("disagree on index_topk")
         );
+    }
+
+    #[test]
+    fn owner_resources_require_exact_bf16_shapes_and_runtime_sizing() {
+        let registration =
+            validate_dsa_indexer_registration(2, 2, true, 2048, 128, 32, 4, 0, 2048, 6144, true)
+                .expect("owner metadata");
+        let mut weights = vec![
+            GpuWeight::new(1, 4096, 2048, 0),
+            GpuWeight::new(2, 128, 6144, 0),
+            GpuWeight::new(3, 32, 6144, 0),
+            GpuWeight::new(4, 1, 128, 0),
+            GpuWeight::new(5, 1, 128, 0),
+        ];
+        let ids = DsaIndexerOwnerWeightIds {
+            wq_b: 0,
+            wk: 1,
+            weights_proj: 2,
+            k_norm_weight: 3,
+            k_norm_bias: 4,
+        };
+        assert_eq!(
+            validate_dsa_owner_weight_contract(&weights, &registration, ids, 4096)
+                .expect("exact owner resource"),
+            (4096 * 128, 2048)
+        );
+
+        weights[1].cols = 6000;
+        assert!(
+            validate_dsa_owner_weight_contract(&weights, &registration, ids, 4096)
+                .unwrap_err()
+                .contains("wk shape")
+        );
+        weights[1].cols = 6144;
+        weights[4].dtype = 1;
+        assert!(
+            validate_dsa_owner_weight_contract(&weights, &registration, ids, 4096)
+                .unwrap_err()
+                .contains("k_norm_bias must be BF16")
+        );
+        assert!(
+            validate_dsa_owner_weight_contract(&weights, &registration, ids, 0)
+                .unwrap_err()
+                .contains("positive max_context_tokens")
+        );
+    }
+
+    #[test]
+    fn shared_layer_can_stage_an_owner_from_before_its_gpu_segment() {
+        let mut store = GpuDecodeStore::new(0).expect("CUDA decode store");
+        store
+            .configure(8, 2, 16, 1e-6, 2, 8, 16, 4, 4, 8, 8)
+            .expect("small graph");
+        store
+            .set_decode_segment(1, 2)
+            .expect("unaligned active segment");
+        let dummy_wid = store.register_weight(1, 1, 1, 0).expect("dummy MLA weight");
+        for layer_idx in 0..2 {
+            store
+                .register_mla_layer(
+                    layer_idx,
+                    1,
+                    8,
+                    1,
+                    8,
+                    dummy_wid,
+                    dummy_wid,
+                    1,
+                    1,
+                    1,
+                    2,
+                    4,
+                    2,
+                    2,
+                    2,
+                    0.5,
+                    true,
+                    1,
+                    1,
+                    Some(dummy_wid),
+                    Some(dummy_wid),
+                    1,
+                    None,
+                    4,
+                    4,
+                )
+                .expect("MLA metadata");
+        }
+        store
+            .register_dsa_indexer_layer(1, 0, false, 4, 4, 2, 4, 0, 4, 8, true)
+            .expect("shared DSA layer");
+
+        let wq_b = store.device.alloc_zeros::<u16>(8 * 4).expect("wq_b");
+        let wk = store.device.alloc_zeros::<u16>(4 * 8).expect("wk");
+        let weights_proj = store
+            .device
+            .alloc_zeros::<u16>(2 * 8)
+            .expect("weights_proj");
+        let k_norm_weight = store.device.alloc_zeros::<u16>(4).expect("k_norm_weight");
+        let k_norm_bias = store.device.alloc_zeros::<u16>(4).expect("k_norm_bias");
+        let wq_b_wid = store
+            .register_weight(*wq_b.device_ptr() as usize, 8, 4, 0)
+            .expect("wq_b weight");
+        let wk_wid = store
+            .register_weight(*wk.device_ptr() as usize, 4, 8, 0)
+            .expect("wk weight");
+        let weights_proj_wid = store
+            .register_weight(*weights_proj.device_ptr() as usize, 2, 8, 0)
+            .expect("weights_proj weight");
+        let k_norm_weight_wid = store
+            .register_weight(*k_norm_weight.device_ptr() as usize, 1, 4, 0)
+            .expect("k_norm_weight");
+        let k_norm_bias_wid = store
+            .register_weight(*k_norm_bias.device_ptr() as usize, 1, 4, 0)
+            .expect("k_norm_bias");
+        store
+            .register_dsa_indexer_owner_resource(
+                0,
+                wq_b_wid,
+                wk_wid,
+                weights_proj_wid,
+                k_norm_weight_wid,
+                k_norm_bias_wid,
+                8,
+            )
+            .expect("cross-segment owner resource");
+        assert_eq!(
+            store
+                .finalize_dsa_indexer_resources()
+                .expect("complete resources"),
+            1
+        );
+        let diagnostic: serde_json::Value = serde_json::from_str(
+            &store
+                .dsa_indexer_registration_json(1)
+                .expect("resource diagnostic"),
+        )
+        .expect("diagnostic JSON");
+        assert_eq!(diagnostic["owner_layer_idx"], 0);
+        assert_eq!(diagnostic["resource_ready"], true);
+        assert_eq!(
+            diagnostic["resource"]["key_cache_shape"],
+            serde_json::json!([8, 4])
+        );
+        assert_eq!(diagnostic["resource"]["topk_capacity"], 4);
+        assert_eq!(diagnostic["executable"], false);
     }
 }
 
@@ -9269,6 +9530,7 @@ struct GpuDecodeGraph {
     decode_layer_start: usize,
     decode_layer_end: usize,
     dsa_runtime_incomplete: bool,
+    dsa_indexer_owners: Vec<DsaIndexerOwnerResource>,
     vocab_size: usize,
     eps: f32,
     intermediate_size: usize,     // max intermediate (for buffer allocation)
@@ -15376,6 +15638,7 @@ impl GpuDecodeStore {
             decode_layer_start: 0,
             decode_layer_end: num_layers,
             dsa_runtime_incomplete: false,
+            dsa_indexer_owners: Vec::new(),
             vocab_size,
             eps,
             intermediate_size: intermediate,
@@ -20479,6 +20742,173 @@ impl GpuDecodeStore {
         Ok(())
     }
 
+    #[pyo3(signature = (
+        owner_layer_idx, wq_b_wid, wk_wid, weights_proj_wid,
+        k_norm_weight_wid, k_norm_bias_wid, max_context_tokens
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn register_dsa_indexer_owner_resource(
+        &mut self,
+        owner_layer_idx: usize,
+        wq_b_wid: usize,
+        wk_wid: usize,
+        weights_proj_wid: usize,
+        k_norm_weight_wid: usize,
+        k_norm_bias_wid: usize,
+        max_context_tokens: usize,
+    ) -> PyResult<()> {
+        let weight_ids = DsaIndexerOwnerWeightIds {
+            wq_b: wq_b_wid,
+            wk: wk_wid,
+            weights_proj: weights_proj_wid,
+            k_norm_weight: k_norm_weight_wid,
+            k_norm_bias: k_norm_bias_wid,
+        };
+        let (registration, key_cache_elems, topk_capacity) = {
+            let graph = self
+                .graph
+                .as_ref()
+                .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
+            if graph
+                .dsa_indexer_owners
+                .iter()
+                .any(|resource| resource.owner_layer_idx == owner_layer_idx)
+            {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "DSA owner layer {} resource is already registered",
+                    owner_layer_idx
+                )));
+            }
+            let mut registrations = graph
+                .layers
+                .iter()
+                .enumerate()
+                .filter(|(layer_idx, _)| {
+                    graph.decode_layer_start <= *layer_idx && *layer_idx < graph.decode_layer_end
+                })
+                .map(|(_, layer)| layer)
+                .filter_map(|layer| layer.dsa_indexer.as_ref())
+                .filter(|registration| registration.owner_layer_idx == owner_layer_idx);
+            let registration = registrations.next().cloned().ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "DSA owner layer {} is not referenced by active decode segment [{}, {})",
+                    owner_layer_idx, graph.decode_layer_start, graph.decode_layer_end
+                ))
+            })?;
+            for shared in registrations {
+                if shared.index_topk != registration.index_topk
+                    || shared.index_head_dim != registration.index_head_dim
+                    || shared.index_n_heads != registration.index_n_heads
+                    || shared.index_topk_freq != registration.index_topk_freq
+                    || shared.index_skip_topk_offset != registration.index_skip_topk_offset
+                    || shared.q_lora_rank != registration.q_lora_rank
+                    || shared.hidden_size != registration.hidden_size
+                    || shared.rope_interleave != registration.rope_interleave
+                {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "DSA owner layer {} has inconsistent active IndexShare registrations",
+                        owner_layer_idx
+                    )));
+                }
+            }
+            let (key_cache_elems, topk_capacity) = validate_dsa_owner_weight_contract(
+                &graph.weights,
+                &registration,
+                weight_ids,
+                max_context_tokens,
+            )
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+            (registration, key_cache_elems, topk_capacity)
+        };
+
+        let d_key_cache = self
+            .device
+            .alloc_zeros::<u16>(key_cache_elems)
+            .map_err(|error| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "alloc DSA owner {} BF16 key cache [{} x {}]: {:?}",
+                    owner_layer_idx, max_context_tokens, registration.index_head_dim, error
+                ))
+            })?;
+        let d_topk_indices = self
+            .device
+            .alloc_zeros::<i32>(topk_capacity)
+            .map_err(|error| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "alloc DSA owner {} top-k buffer [{}]: {:?}",
+                    owner_layer_idx, topk_capacity, error
+                ))
+            })?;
+
+        let graph = self
+            .graph
+            .as_mut()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
+        graph.dsa_indexer_owners.push(DsaIndexerOwnerResource {
+            owner_layer_idx,
+            weight_ids,
+            max_context_tokens,
+            index_head_dim: registration.index_head_dim,
+            topk_capacity,
+            d_key_cache,
+            d_topk_indices,
+        });
+        log::info!(
+            "GpuDecodeStore: staged DSA owner {} resource (context={}, key_dim={}, topk={}, weights=[{},{},{},{},{}])",
+            owner_layer_idx,
+            max_context_tokens,
+            registration.index_head_dim,
+            topk_capacity,
+            wq_b_wid,
+            wk_wid,
+            weights_proj_wid,
+            k_norm_weight_wid,
+            k_norm_bias_wid,
+        );
+        Ok(())
+    }
+
+    fn finalize_dsa_indexer_resources(&self) -> PyResult<usize> {
+        let graph = self
+            .graph
+            .as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
+        let mut required = std::collections::BTreeSet::new();
+        for layer in graph
+            .layers
+            .iter()
+            .enumerate()
+            .filter(|(layer_idx, _)| {
+                graph.decode_layer_start <= *layer_idx && *layer_idx < graph.decode_layer_end
+            })
+            .map(|(_, layer)| layer)
+        {
+            if let Some(registration) = layer.dsa_indexer.as_ref() {
+                required.insert(registration.owner_layer_idx);
+            }
+        }
+        let available = graph
+            .dsa_indexer_owners
+            .iter()
+            .map(|resource| resource.owner_layer_idx)
+            .collect::<std::collections::BTreeSet<_>>();
+        let missing = required.difference(&available).copied().collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "DSA active decode segment [{}, {}) is missing owner resources {:?}",
+                graph.decode_layer_start, graph.decode_layer_end, missing
+            )));
+        }
+        let unexpected = available.difference(&required).copied().collect::<Vec<_>>();
+        if !unexpected.is_empty() {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "DSA decode store has resources not used by active segment: {:?}",
+                unexpected
+            )));
+        }
+        Ok(available.len())
+    }
+
     fn dsa_indexer_registration_json(&self, layer_idx: usize) -> PyResult<String> {
         let graph = self
             .graph
@@ -20494,6 +20924,10 @@ impl GpuDecodeStore {
                     layer_idx
                 ))
             })?;
+        let resource = graph
+            .dsa_indexer_owners
+            .iter()
+            .find(|resource| resource.owner_layer_idx == registration.owner_layer_idx);
         Ok(serde_json::json!({
             "layer_idx": layer_idx,
             "owner_layer_idx": registration.owner_layer_idx,
@@ -20506,6 +20940,24 @@ impl GpuDecodeStore {
             "q_lora_rank": registration.q_lora_rank,
             "hidden_size": registration.hidden_size,
             "rope_interleave": registration.rope_interleave,
+            "resource_ready": resource.is_some(),
+            "resource": resource.map(|resource| serde_json::json!({
+                "owner_layer_idx": resource.owner_layer_idx,
+                "weight_ids": {
+                    "wq_b": resource.weight_ids.wq_b,
+                    "wk": resource.weight_ids.wk,
+                    "weights_proj": resource.weight_ids.weights_proj,
+                    "k_norm_weight": resource.weight_ids.k_norm_weight,
+                    "k_norm_bias": resource.weight_ids.k_norm_bias,
+                },
+                "key_cache_shape": [
+                    resource.max_context_tokens,
+                    resource.index_head_dim,
+                ],
+                "topk_capacity": resource.topk_capacity,
+                "key_cache_ptr": format!("0x{:x}", *resource.d_key_cache.device_ptr()),
+                "topk_indices_ptr": format!("0x{:x}", *resource.d_topk_indices.device_ptr()),
+            })),
             "executable": false,
         })
         .to_string())

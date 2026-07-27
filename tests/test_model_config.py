@@ -17,7 +17,7 @@ from krasis.layer import (
     NativeMLAWeights,
     TransformerLayer,
 )
-from krasis.model import _apply_max_context_limit
+from krasis.model import _apply_max_context_limit, _dsa_owner_layers_for_segment
 from krasis.vram_budget import _kv_bytes_per_token_per_layer
 from krasis.weight_loader import WeightLoader
 
@@ -130,6 +130,8 @@ class ModelConfigContractTests(unittest.TestCase):
             [cfg.is_dsa_indexer_owner_layer(i) for i in range(8)],
             [True, True, True, False, False, False, True, False],
         )
+        self.assertEqual(_dsa_owner_layers_for_segment(cfg, 3, 6), [2])
+        self.assertEqual(_dsa_owner_layers_for_segment(cfg, 5, 8), [2, 6])
         self.assertEqual(cfg.num_moe_layers, 5)
 
     def test_glm_moe_dsa_requires_complete_indexer_schedule(self) -> None:

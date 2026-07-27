@@ -88,6 +88,20 @@
   `24/24`, DSA exact-prefix contracts `2/2`, context admission `1/1`, and the
   exact-source `./dev build` in 189 seconds with wheel/import verification.
 
+- Added a store-local native GLM DSA owner-resource staging contract without
+  enabling sparse execution. It resolves one copy of the five validated BF16
+  tensors per unique IndexShare owner, including owners that precede an
+  unaligned multi-GPU segment, and allocates fixed-address decode key/top-k
+  storage from the actual runtime context and index dimensions. Exact resource
+  byte accounting is available for future split planning. The current
+  exact-prefix runtime deliberately does not stage these unused resources, so
+  existing allocation/HCS behavior is unchanged; registrations remain
+  explicitly non-executable until native scoring and sparse attention are
+  complete. Validation passed: exact-source `./dev build` in 188 seconds,
+  `./dev test-kernels dsa_registration` 4/4 including a real CUDA
+  unaligned-segment allocation, model/config contracts 9/9, and launcher
+  contracts 24/24.
+
 ## 1.0.16 - 2026-07-27
 
 - Fixed invalid OpenAI-compatible JSON responses when a configured model name
