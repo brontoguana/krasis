@@ -485,7 +485,7 @@ jobs:
             if ($LASTEXITCODE -ne 0) {
               throw "Could not resolve the built Windows sidecar bundle."
             }
-            $releaseCache = Join-Path $PWD "target\windows-release-cache"
+            $releaseCache = Join-Path $env:RUNNER_TEMP "krasis-windows-sidecar-release-cache"
             New-Item -ItemType Directory -Force -Path $releaseCache | Out-Null
             Copy-Item -Force $bundle.bundle_path (
               Join-Path $releaseCache $bundle.bundle_name
@@ -840,7 +840,7 @@ jobs:
           )
           $sidecarBundles = @(
             Get-ChildItem `
-              target/windows-release-cache `
+              (Join-Path $env:RUNNER_TEMP "krasis-windows-sidecar-release-cache") `
               -Filter "krasis-sidecars-windows-*.tar.gz" `
               -ErrorAction SilentlyContinue
           )

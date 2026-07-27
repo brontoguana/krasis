@@ -683,6 +683,17 @@ class LauncherMatrixTest(unittest.TestCase):
             workflow_source,
         )
         self.assertNotIn("path: target/windows-fla-dll-cache", workflow_source)
+        self.assertGreaterEqual(
+            workflow_source.count(
+                'Join-Path $env:RUNNER_TEMP "krasis-windows-sidecar-release-cache"'
+            ),
+            2,
+        )
+        self.assertNotIn(
+            'Join-Path $PWD "target\\windows-release-cache"',
+            workflow_source,
+        )
+        self.assertNotIn("target/windows-release-cache", workflow_source)
         self.assertIn("cache_key_sha256", workflow_source)
         self.assertIn("Get-FileHash -Algorithm SHA256", workflow_source)
         self.assertIn("dumpbin /nologo /exports", workflow_source)
