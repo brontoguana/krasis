@@ -2013,6 +2013,8 @@ def main():
             "CFG_DRAFT_CONTEXT": "draft_context",
             "CFG_TEMPERATURE": "temperature",
             "CFG_ENABLE_THINKING": "enable_thinking",
+            "CFG_PREFIX_CACHE": "prefix_cache",
+            "CFG_SSE_TIMING_COMPAT": "sse_timing_compat",
             "CFG_SESSION_ENABLED": None,  # Session messenger integration removed; ignore old saved configs
             "CFG_NUM_GPUS": "num_gpus",
             "CFG_CPU_DECODE": None,  # CPU decode removed, ignore config key
@@ -2024,6 +2026,8 @@ def main():
             "CFG_FORCE_REBUILD_HQQ_CACHE",
             "CFG_BUILD_CACHE",
             "CFG_ENABLE_THINKING",
+            "CFG_PREFIX_CACHE",
+            "CFG_SSE_TIMING_COMPAT",
             "CFG_HCS",
             "CFG_MULTI_GPU_HCS",
             "CFG_DYNAMIC_HCS",
@@ -2260,6 +2264,12 @@ def main():
     parser.add_argument("--enable-thinking", action=argparse.BooleanOptionalAction,
                         default=True,
                         help="Enable thinking/reasoning mode (default: on)")
+    parser.add_argument("--prefix-cache", action=argparse.BooleanOptionalAction,
+                        default=False,
+                        help="Enable experimental exact-prefix KV + recurrent-state reuse (default: off)")
+    parser.add_argument("--sse-timing-compat", action=argparse.BooleanOptionalAction,
+                        default=False,
+                        help="Emit a compatibility choice in the final SSE timing chunk (default: off)")
     parser.add_argument("--test-endpoints", action="store_true", default=False,
                         help="Enable test-only endpoints (/v1/internal/prefill_logits)")
     # Apply config file defaults, then parse CLI (CLI wins over config file)
@@ -4103,6 +4113,8 @@ def main():
         all_multi_gpu_gqa_offsets,
         _vision_supported,
         test_endpoints=getattr(args, 'test_endpoints', False),
+        prefix_cache_enabled=getattr(args, 'prefix_cache', False),
+        sse_timing_compat=getattr(args, 'sse_timing_compat', False),
     )
     ssh_tunnel = None
     if str(getattr(args, "ssh_tunnel", "") or "").strip():

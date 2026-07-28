@@ -18494,6 +18494,32 @@ impl PrefillEngine {
     /// Flow: sync GPU → trim cudarc pool (release HCS soft VRAM) → measure free
     /// VRAM → compute chunk_size → drop old scratch → allocate new scratch.
     pub fn prepare_for_prefill(&mut self, prompt_tokens: usize) -> Result<(), String> {
+        self.prepare_for_prefill_internal(prompt_tokens, false)
+    }
+
+    /// Allocate scratch for an exact-prefix continuation while retaining the
+    /// live decode KV and recurrent state. `total_prompt_tokens` is used for
+    /// attention staging capacity; only `suffix_tokens` will be computed by
+    /// `run_continuation_prefill`.
+    pub fn prepare_for_continuation_prefill(
+        &mut self,
+        total_prompt_tokens: usize,
+        suffix_tokens: usize,
+    ) -> Result<(), String> {
+        if suffix_tokens == 0 || suffix_tokens >= total_prompt_tokens {
+            return Err(format!(
+                "invalid continuation sizes: total_prompt_tokens={} suffix_tokens={}",
+                total_prompt_tokens, suffix_tokens
+            ));
+        }
+        self.prepare_for_prefill_internal(total_prompt_tokens, true)
+    }
+
+    fn prepare_for_prefill_internal(
+        &mut self,
+        prompt_tokens: usize,
+        preserve_sequence_state: bool,
+    ) -> Result<(), String> {
         self.bind_cuda_context()?;
         self.refresh_trace_config();
         trace_emit_prefill_global_mark(
@@ -18613,7 +18639,12 @@ impl PrefillEngine {
                 );
             }
         }
-        if !skip_stage_exact_single_chunk {
+        if preserve_sequence_state {
+            // Continuation prefill must append directly to the decode cache.
+            // A stage-exact temporary cache would hide the retained prefix and
+            // its final export would overwrite prefix positions.
+            self.release_prefill_kv_temp();
+        } else if !skip_stage_exact_single_chunk {
             self.setup_stage_exact_prefill_kv(prompt_tokens)?;
         }
         // Old scratch + prefill buffers now dropped, VRAM is freed.
@@ -19317,17 +19348,70 @@ impl PrefillEngine {
         temperature: f32,
         suppress_tokens: &[u32],
     ) -> Result<PrefillResult, String> {
+        self.run_prefill_internal(token_ids, 0, true, temperature, suppress_tokens)
+    }
+
+    /// Prefill only tokens appended after an exact retained prefix.
+    ///
+    /// Unlike `run_prefill`, this keeps registered KV, convolution, Mamba, and
+    /// linear-attention recurrent state intact and assigns absolute positions
+    /// beginning at `prefix_len`.
+    pub fn run_continuation_prefill(
+        &mut self,
+        suffix_token_ids: &[u32],
+        prefix_len: usize,
+        temperature: f32,
+        suppress_tokens: &[u32],
+    ) -> Result<PrefillResult, String> {
+        if prefix_len == 0 || suffix_token_ids.is_empty() {
+            return Err(format!(
+                "invalid continuation prefill: prefix_len={} suffix_tokens={}",
+                prefix_len,
+                suffix_token_ids.len()
+            ));
+        }
+        self.run_prefill_internal(
+            suffix_token_ids,
+            prefix_len,
+            false,
+            temperature,
+            suppress_tokens,
+        )
+    }
+
+    fn run_prefill_internal(
+        &mut self,
+        token_ids: &[u32],
+        position_offset: usize,
+        reset_sequence_state: bool,
+        temperature: f32,
+        suppress_tokens: &[u32],
+    ) -> Result<PrefillResult, String> {
         // Bind CUDA context to calling thread (needed for cross-thread use)
         self.bind_cuda_context()?;
         self.refresh_trace_config();
 
         let t0 = Instant::now();
         let total_m = token_ids.len();
+        let resulting_prompt_len = position_offset
+            .checked_add(total_m)
+            .ok_or("prefill position overflow")?;
         let h = self.config.hidden_size;
         let num_hidden_layers = self.config.num_hidden_layers;
         let liveness_timing = prefill_liveness_timing_enabled();
         if total_m == 0 {
             return Err("Empty token sequence".to_string());
+        }
+        // Guard the continuation path only: fresh prefill keeps the existing
+        // post-prefill kv_overflow handling and error contract unchanged.
+        if position_offset > 0
+            && self.decode_kv_max_seq > 0
+            && resulting_prompt_len > self.decode_kv_max_seq
+        {
+            return Err(format!(
+                "KV cache exhausted: continuation end {} exceeds max_seq {}",
+                resulting_prompt_len, self.decode_kv_max_seq
+            ));
         }
         let _ = self.first_token_margin_projection_target()?;
         let _ = self.read_only_checkpoint_config()?;
@@ -19422,71 +19506,74 @@ impl PrefillEngine {
             );
         }
 
-        // Zero recurrent state for fresh prefill (each prefill processes a full prompt).
-        if let Some(ref la_state_buf) = self.scratch.d_la_state {
-            let nv = self.config.la_num_v_heads;
-            let dk = self.config.la_k_head_dim;
-            let dv = self.config.la_v_head_dim;
-            let state_elems = nv * dk * dv;
-            unsafe {
-                cuda_sys::lib().cuMemsetD32Async(
-                    *la_state_buf.device_ptr(),
-                    0,
-                    state_elems,
-                    self.stream,
-                );
-            }
-        }
-        for layer_idx in 0..num_hidden_layers {
-            let lw = &self.layer_weights[layer_idx];
-            if lw.mamba2_conv_state_ptr != 0 {
-                let conv_dim = self.config.mamba_conv_dim;
-                let conv_kernel = self.config.mamba_conv_kernel;
-                unsafe {
-                    cuda_sys::lib().cuMemsetD32Async(
-                        lw.mamba2_conv_state_ptr,
-                        0,
-                        conv_dim * conv_kernel,
-                        self.stream,
-                    );
-                }
-            }
-            if lw.mamba2_ssm_state_ptr != 0 {
-                let n_heads = self.config.mamba_num_heads;
-                let head_dim = self.config.mamba_head_dim;
-                let d_state = self.config.mamba_d_state;
-                unsafe {
-                    cuda_sys::lib().cuMemsetD32Async(
-                        lw.mamba2_ssm_state_ptr,
-                        0,
-                        n_heads * head_dim * d_state,
-                        self.stream,
-                    );
-                }
-            }
-            if lw.la_conv_state_ptr != 0 {
-                let conv_dim = self.config.la_conv_dim;
-                let kernel_dim = self.config.la_conv_kernel_dim;
-                unsafe {
-                    cuda_sys::lib().cuMemsetD32Async(
-                        lw.la_conv_state_ptr,
-                        0,
-                        conv_dim * kernel_dim,
-                        self.stream,
-                    );
-                }
-            }
-            if lw.la_recur_state_ptr != 0 {
+        // Fresh prefill resets all sequence state. Exact-prefix continuation
+        // deliberately retains it and appends from `position_offset`.
+        if reset_sequence_state {
+            if let Some(ref la_state_buf) = self.scratch.d_la_state {
                 let nv = self.config.la_num_v_heads;
                 let dk = self.config.la_k_head_dim;
                 let dv = self.config.la_v_head_dim;
+                let state_elems = nv * dk * dv;
                 unsafe {
                     cuda_sys::lib().cuMemsetD32Async(
-                        lw.la_recur_state_ptr,
+                        *la_state_buf.device_ptr(),
                         0,
-                        nv * dk * dv,
+                        state_elems,
                         self.stream,
                     );
+                }
+            }
+            for layer_idx in 0..num_hidden_layers {
+                let lw = &self.layer_weights[layer_idx];
+                if lw.mamba2_conv_state_ptr != 0 {
+                    let conv_dim = self.config.mamba_conv_dim;
+                    let conv_kernel = self.config.mamba_conv_kernel;
+                    unsafe {
+                        cuda_sys::lib().cuMemsetD32Async(
+                            lw.mamba2_conv_state_ptr,
+                            0,
+                            conv_dim * conv_kernel,
+                            self.stream,
+                        );
+                    }
+                }
+                if lw.mamba2_ssm_state_ptr != 0 {
+                    let n_heads = self.config.mamba_num_heads;
+                    let head_dim = self.config.mamba_head_dim;
+                    let d_state = self.config.mamba_d_state;
+                    unsafe {
+                        cuda_sys::lib().cuMemsetD32Async(
+                            lw.mamba2_ssm_state_ptr,
+                            0,
+                            n_heads * head_dim * d_state,
+                            self.stream,
+                        );
+                    }
+                }
+                if lw.la_conv_state_ptr != 0 {
+                    let conv_dim = self.config.la_conv_dim;
+                    let kernel_dim = self.config.la_conv_kernel_dim;
+                    unsafe {
+                        cuda_sys::lib().cuMemsetD32Async(
+                            lw.la_conv_state_ptr,
+                            0,
+                            conv_dim * kernel_dim,
+                            self.stream,
+                        );
+                    }
+                }
+                if lw.la_recur_state_ptr != 0 {
+                    let nv = self.config.la_num_v_heads;
+                    let dk = self.config.la_k_head_dim;
+                    let dv = self.config.la_v_head_dim;
+                    unsafe {
+                        cuda_sys::lib().cuMemsetD32Async(
+                            lw.la_recur_state_ptr,
+                            0,
+                            nv * dk * dv,
+                            self.stream,
+                        );
+                    }
                 }
             }
         }
@@ -19873,10 +19960,16 @@ impl PrefillEngine {
             let chunk_end = std::cmp::min(chunk_start + planned_chunk_tokens, total_m);
             let m = chunk_end.saturating_sub(chunk_start);
             let chunk_tokens = &token_ids[chunk_start..chunk_end];
+            let absolute_chunk_start = position_offset
+                .checked_add(chunk_start)
+                .ok_or("continuation prefill position overflow")?;
+            let absolute_chunk_end = position_offset
+                .checked_add(chunk_end)
+                .ok_or("continuation prefill position overflow")?;
             self.active_prefill_chunk_idx = chunk_idx;
-            self.active_prefill_chunk_start = chunk_start;
+            self.active_prefill_chunk_start = absolute_chunk_start;
             let chunk_tok0 = chunk_tokens.first().copied().unwrap_or(0) as usize;
-            let chunk_last_pos = chunk_end.saturating_sub(1);
+            let chunk_last_pos = absolute_chunk_end.saturating_sub(1);
             let chunk_last_tok = chunk_tokens.last().copied().unwrap_or(0) as usize;
             let chunk_t0 = if debug_prefill {
                 Some(Instant::now())
@@ -19889,8 +19982,8 @@ impl PrefillEngine {
                     "chunk_start chunk={} total_chunks={} start={} end={} tokens={} tok0={} last_pos={} last_tok={}",
                     chunk_idx,
                     num_chunks,
-                    chunk_start,
-                    chunk_end,
+                    absolute_chunk_start,
+                    absolute_chunk_end,
                     m,
                     chunk_tok0,
                     chunk_last_pos,
@@ -19900,13 +19993,13 @@ impl PrefillEngine {
             trace_emit_prefill_mark(
                 self.trace.as_ref(),
                 chunk_idx,
-                chunk_start,
+                absolute_chunk_start,
                 chunk_tok0,
                 None,
                 "prefill_chunk",
                 &format!(
                     "phase=chunk_start chunk_tokens={} chunk_end={} total_chunks={}",
-                    m, chunk_end, num_chunks
+                    m, absolute_chunk_end, num_chunks
                 ),
             );
 
@@ -19929,7 +20022,7 @@ impl PrefillEngine {
 
             // 1. Upload token IDs and positions for this chunk
             let tc0 = Instant::now();
-            self.upload_tokens_with_offset(chunk_tokens, chunk_start)
+            self.upload_tokens_with_offset(chunk_tokens, absolute_chunk_start)
                 .map_err(|e| format!("upload_tokens chunk {}: {}", chunk_idx, e))?;
 
             // 2. Embedding lookup. Image requests provide already-scattered
@@ -20108,7 +20201,7 @@ impl PrefillEngine {
                     } else {
                         (0.0, 0.0, 0.0)
                     };
-                    self.forward_gemma4_layer(layer_idx, m, chunk_idx, chunk_start, true)?;
+                    self.forward_gemma4_layer(layer_idx, m, chunk_idx, absolute_chunk_start, true)?;
                     has_residual = false;
                     if timing {
                         self.stream_sync()?;
@@ -21115,7 +21208,7 @@ impl PrefillEngine {
                 let ta0 = Instant::now();
                 match layer_type {
                     0 => self
-                        .forward_gqa_chunked(layer_idx, m, chunk_start, true)
+                        .forward_gqa_chunked(layer_idx, m, absolute_chunk_start, true)
                         .map_err(|e| format!("gqa layer {}: {}", layer_idx, e))?,
                     1 => self
                         .forward_mamba2(layer_idx, m, chunk_idx, chunk_last_pos, chunk_last_tok)
@@ -21128,7 +21221,7 @@ impl PrefillEngine {
                         )?;
                     }
                     3 => self
-                        .forward_linear_attention(layer_idx, m, chunk_start)
+                        .forward_linear_attention(layer_idx, m, absolute_chunk_start)
                         .map_err(|e| format!("linear_attn layer {}: {}", layer_idx, e))?,
                     _ => {
                         self.memcpy_d2d(
@@ -22195,7 +22288,7 @@ impl PrefillEngine {
                 trace_emit_prefill_mark(
                     self.trace.as_ref(),
                     chunk_idx,
-                    chunk_start,
+                    absolute_chunk_start,
                     chunk_tok0,
                     Some(layer_idx),
                     "prefill_layer",
@@ -22207,8 +22300,8 @@ impl PrefillEngine {
                 eprintln!(
                     "[PREFILL-DEBUG] chunk idx={} start={} end={} tokens={} ms={:.1} tok_per_s={:.1}",
                     chunk_idx,
-                    chunk_start,
-                    chunk_end,
+                    absolute_chunk_start,
+                    absolute_chunk_end,
                     m,
                     chunk_ms,
                     m as f64 / (chunk_ms / 1000.0),
@@ -22225,7 +22318,7 @@ impl PrefillEngine {
             trace_emit_prefill_mark(
                 self.trace.as_ref(),
                 chunk_idx,
-                chunk_start,
+                absolute_chunk_start,
                 chunk_tok0,
                 None,
                 "prefill_chunk",
@@ -23265,7 +23358,7 @@ impl PrefillEngine {
 
         Ok(PrefillResult {
             first_token,
-            prompt_len: total_m,
+            prompt_len: resulting_prompt_len,
             prefill_time_ms: ms,
         })
     }
@@ -37908,8 +38001,10 @@ impl PrefillEngine {
 
                 // DEBUG: sync before FLA to catch conv/gate/repeat kernel errors
 
-                // Zero runtime FLA scratch/state buffers that the vendor recurrence
-                // treats as zero-initialized outputs for each request.
+                // Zero request-local FLA outputs. The initial recurrent state is
+                // zero only for the first prompt chunk; later chunks and exact
+                // prefix continuations begin from the registered FP32 decode
+                // state produced by the preceding prefill/decode work.
                 unsafe {
                     let _ = cuda_sys::lib().cuMemsetD8Async(
                         a_fla,
@@ -37929,12 +38024,45 @@ impl PrefillEngine {
                         (fla_nt * nv * dk * dv * 2) as usize,
                         self.stream,
                     );
-                    let _ = cuda_sys::lib().cuMemsetD8Async(
-                        h0_fla,
-                        0,
-                        (nv * dk * dv * 2) as usize,
-                        self.stream,
-                    );
+                }
+                if chunk_start == 0 {
+                    unsafe {
+                        let _ = cuda_sys::lib().cuMemsetD8Async(
+                            h0_fla,
+                            0,
+                            (nv * dk * dv * 2) as usize,
+                            self.stream,
+                        );
+                    }
+                } else {
+                    if lw.la_recur_state_ptr == 0 {
+                        return Err(format!(
+                            "linear-attention layer {} missing retained recurrent state at position {}",
+                            layer_idx, chunk_start
+                        ));
+                    }
+                    let d = dk
+                        .checked_mul(dv)
+                        .ok_or("linear-attention recurrent row width overflow")?;
+                    let threads =
+                        std::cmp::max(32, ((std::cmp::min(1024, d) + 31) / 32) * 32) as u32;
+                    let mut c0 = h0_fla;
+                    let mut c1 = lw.la_recur_state_ptr;
+                    let mut c2 = d as i32;
+                    unsafe {
+                        launch(
+                            self.kernels.la_fp32_to_bf16,
+                            (nv as u32, 1, 1),
+                            (threads, 1, 1),
+                            0,
+                            self.stream,
+                            &mut [
+                                &mut c0 as *mut _ as *mut std::ffi::c_void,
+                                &mut c1 as *mut _ as *mut std::ffi::c_void,
+                                &mut c2 as *mut _ as *mut std::ffi::c_void,
+                            ],
+                        )?;
+                    }
                 }
 
                 let stream_ptr = self.stream as *mut std::ffi::c_void;
@@ -41035,14 +41163,26 @@ impl PrefillEngine {
                     );
                 }
 
-                // 16. Initialize recurrent state (zero)
-                unsafe {
-                    let _ = cuda_sys::lib().cuMemsetD8Async(
-                        la_state,
-                        0,
-                        (nv * dk * dv * 4) as usize,
-                        self.stream,
-                    );
+                // 16. Initialize recurrent state. A non-zero absolute start
+                // means this is either a later outer prefill chunk or an exact
+                // cached-prefix continuation.
+                if chunk_start == 0 {
+                    unsafe {
+                        let _ = cuda_sys::lib().cuMemsetD8Async(
+                            la_state,
+                            0,
+                            (nv * dk * dv * 4) as usize,
+                            self.stream,
+                        );
+                    }
+                } else {
+                    if lw.la_recur_state_ptr == 0 {
+                        return Err(format!(
+                            "linear-attention layer {} missing retained recurrent state at position {}",
+                            layer_idx, chunk_start
+                        ));
+                    }
+                    self.memcpy_d2d(la_state, lw.la_recur_state_ptr, (nv * dk * dv * 4) as u64)?;
                 }
 
                 // 17. Chunk recurrence loop (zero-copy strided kernels)

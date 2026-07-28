@@ -10760,11 +10760,13 @@ class KrasisModel:
         torch.cuda.synchronize(device)
         logger.info("Uploaded prefill-only attention: ~%.0f MB", uploaded_bytes / 1024 / 1024)
 
-    def server_cleanup(self):
+    def server_cleanup(self, preserve_sequence_state: bool = False):
         """Free server request state (KV cache pages, etc.).
 
         Also handles single-slot AWQ: restore Marlin data into GPU slots
-        for instant prefill on the next request.
+        for instant prefill on the next request. The experimental prefix cache
+        may retain the exact live KV and recurrent state for one continuation;
+        all existing callers keep the full-reset default.
         """
         # Single-slot AWQ: restore Marlin into slots
         gpu_store = getattr(self, '_gpu_decode_store', None)
@@ -10778,18 +10780,19 @@ class KrasisModel:
                     s.free()
             self._server_seq_states = None
 
-        # Request-scoped recurrent state must be reset alongside KV cleanup.
-        # Otherwise an internal test request can leak LA/Mamba decode state into
-        # the next chat request even though the KV pages were freed.
-        if self.cfg.is_hybrid:
-            for layer in self.layers:
-                if layer.layer_type == "linear_attention":
-                    layer.attention.reset_state()
+        if not preserve_sequence_state:
+            # Request-scoped recurrent state must be reset alongside KV cleanup.
+            # Otherwise an internal test request can leak LA/Mamba decode state
+            # into the next chat request even though the KV pages were freed.
+            if self.cfg.is_hybrid:
+                for layer in self.layers:
+                    if layer.layer_type == "linear_attention":
+                        layer.attention.reset_state()
 
-        decode_states = getattr(self, '_mamba2_decode_states', None)
-        if decode_states:
-            for buffers in decode_states.values():
-                buffers['conv_state'].zero_()
-                buffers['ssm_state'].zero_()
+            decode_states = getattr(self, '_mamba2_decode_states', None)
+            if decode_states:
+                for buffers in decode_states.values():
+                    buffers['conv_state'].zero_()
+                    buffers['ssm_state'].zero_()
 
         self._rust_kv_refs = None

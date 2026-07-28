@@ -102,6 +102,7 @@ When BF16 is selected for experts or major components, treat that run as validat
 | `--hcs-host-cache-mode MODE` | source | Soft HCS host storage: `source`, `mirror`, or `auto` |
 | `--dynamic-hcs` / `--no-dynamic-hcs` | on | Dynamic HCS: protect the high-ranked heatmap prefix and reserve a recency-adaptive tail |
 | `--dynamic-hcs-tail-blocks N` | 2 | Advanced dynamic HCS recency-tail size, measured in activated-expert blocks; valid range `1..5` |
+| `--prefix-cache` / `--no-prefix-cache` | off | Experimental single-lineage exact-prefix reuse for KV and recurrent sequence state |
 | `--vram-safety-margin N` | 600 | Reserved VRAM in MB below which warnings fire |
 | `--stream-attention` | off | Stream attention weights from CPU (for very large models) |
 | `--force-load` | — | Override RAM safety checks and load anyway |
@@ -110,6 +111,18 @@ When BF16 is selected for experts or major components, treat that run as validat
 | `--heatmap-path PATH` | — | Path to expert_heatmap.json for HCS init |
 | `--approved-heatmap-mode MODE` | auto | Approved route-heatmap lookup: `auto`, `off`, or `require` |
 | `--approved-heatmap-manifest-url URL` | GitHub manifest | Override the approved route-heatmap manifest URL |
+
+`--prefix-cache` is deliberately opt-in. It reuses a live prefix only when the
+new rendered token sequence is an exact non-empty append and falls back to a
+full prefill on mismatch or uncertain state. Requests that can use a
+speculative draft model are never retained, because draft verification advances
+device state in batches that per-token accounting cannot certify. The
+persistent config key is `CFG_PREFIX_CACHE=1`.
+
+`--sse-timing-compat` is a separate opt-in protocol workaround. It adds a
+neutral empty-delta choice to Krasis's final timing-only SSE chunk for clients
+that reject an empty `choices` array; it does not alter normal content or tool
+chunks. The persistent config key is `CFG_SSE_TIMING_COMPAT=1`.
 
 Dynamic HCS uses the same physical HCS residency table as the heatmap cache.
 It does not create a second cache or allow duplicate expert residency across a

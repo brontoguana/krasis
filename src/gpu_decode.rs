@@ -22354,7 +22354,7 @@ impl GpuDecodeStore {
 
     /// Check if a draft model is loaded.
     #[getter]
-    fn has_draft_model(&self) -> bool {
+    pub fn has_draft_model(&self) -> bool {
         self.draft.is_some()
     }
 
@@ -41913,6 +41913,160 @@ impl GpuDecodeStore {
 
         log::info!(
             "copy_la_states_to_aux: copied {} LA layers, {} bytes total",
+            copied,
+            total_bytes
+        );
+        Ok(())
+    }
+
+    /// Copy Mamba2 recurrent state (conv_state + SSM state) from this store
+    /// to another store for layers within [layer_start..layer_end).
+    ///
+    /// The method is intentionally direction-agnostic despite the historical
+    /// `to_aux` name: the prefix cache also uses it to gather state from each
+    /// owning auxiliary GPU back to the primary store after decode.
+    pub fn copy_mamba2_states_to_aux(
+        &self,
+        aux_store: &mut GpuDecodeStore,
+        layer_start: usize,
+        layer_end: usize,
+    ) -> Result<(), String> {
+        let graph = self.graph.as_ref().ok_or("source graph not configured")?;
+        let aux_graph = aux_store
+            .graph
+            .as_ref()
+            .ok_or("destination graph not configured")?;
+
+        let mut copied = 0usize;
+        let mut total_bytes = 0usize;
+
+        for layer_idx in layer_start..layer_end {
+            let (conv_src, ssm_src, conv_bytes, ssm_bytes) =
+                match &graph.layers[layer_idx].attn {
+                    GpuAttnConfig::Mamba2 {
+                        conv_state_ptr,
+                        ssm_state_ptr,
+                        conv_dim,
+                        conv_kernel,
+                        num_heads,
+                        head_dim,
+                        state_size,
+                        ..
+                    } => (
+                        *conv_state_ptr,
+                        *ssm_state_ptr,
+                        conv_dim.saturating_mul(*conv_kernel).saturating_mul(4),
+                        num_heads
+                            .saturating_mul(*head_dim)
+                            .saturating_mul(*state_size)
+                            .saturating_mul(4),
+                    ),
+                    _ => continue,
+                };
+
+            if conv_src == 0 || ssm_src == 0 {
+                continue;
+            }
+
+            let (conv_dst, ssm_dst) = match &aux_graph.layers[layer_idx].attn {
+                GpuAttnConfig::Mamba2 {
+                    conv_state_ptr,
+                    ssm_state_ptr,
+                    ..
+                } => (*conv_state_ptr, *ssm_state_ptr),
+                _ => {
+                    return Err(format!(
+                        "Destination store layer {} is not Mamba2 but source is",
+                        layer_idx
+                    ))
+                }
+            };
+            if conv_dst == 0 || ssm_dst == 0 {
+                return Err(format!(
+                    "Destination store missing Mamba2 state buffers for layer {}",
+                    layer_idx
+                ));
+            }
+
+            let mut host_buf = vec![0u8; conv_bytes.max(ssm_bytes)];
+            self.device
+                .bind_to_thread()
+                .map_err(|e| format!("bind source GPU for Mamba2 copy: {:?}", e))?;
+            self.device
+                .synchronize()
+                .map_err(|e| format!("sync source GPU before Mamba2 copy: {:?}", e))?;
+
+            unsafe {
+                let err = cuda_sys::lib().cuMemcpyDtoH_v2(
+                    host_buf.as_mut_ptr() as *mut std::ffi::c_void,
+                    conv_src,
+                    conv_bytes,
+                );
+                if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(format!(
+                        "Mamba2 conv_state D2H layer {}: {:?}",
+                        layer_idx, err
+                    ));
+                }
+            }
+            aux_store
+                .device
+                .bind_to_thread()
+                .map_err(|e| format!("bind destination GPU for Mamba2 copy: {:?}", e))?;
+            unsafe {
+                let err = cuda_sys::lib().cuMemcpyHtoD_v2(
+                    conv_dst,
+                    host_buf.as_ptr() as *const std::ffi::c_void,
+                    conv_bytes,
+                );
+                if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(format!(
+                        "Mamba2 conv_state H2D layer {}: {:?}",
+                        layer_idx, err
+                    ));
+                }
+            }
+
+            self.device
+                .bind_to_thread()
+                .map_err(|e| format!("bind source GPU for Mamba2 SSM copy: {:?}", e))?;
+            unsafe {
+                let err = cuda_sys::lib().cuMemcpyDtoH_v2(
+                    host_buf.as_mut_ptr() as *mut std::ffi::c_void,
+                    ssm_src,
+                    ssm_bytes,
+                );
+                if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(format!(
+                        "Mamba2 SSM state D2H layer {}: {:?}",
+                        layer_idx, err
+                    ));
+                }
+            }
+            aux_store
+                .device
+                .bind_to_thread()
+                .map_err(|e| format!("bind destination GPU for Mamba2 SSM copy: {:?}", e))?;
+            unsafe {
+                let err = cuda_sys::lib().cuMemcpyHtoD_v2(
+                    ssm_dst,
+                    host_buf.as_ptr() as *const std::ffi::c_void,
+                    ssm_bytes,
+                );
+                if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(format!(
+                        "Mamba2 SSM state H2D layer {}: {:?}",
+                        layer_idx, err
+                    ));
+                }
+            }
+
+            copied += 1;
+            total_bytes += conv_bytes + ssm_bytes;
+        }
+
+        log::info!(
+            "copy_mamba2_states_to_aux: copied {} Mamba2 layers, {} bytes total",
             copied,
             total_bytes
         );

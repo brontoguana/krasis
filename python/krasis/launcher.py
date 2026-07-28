@@ -585,7 +585,8 @@ CONFIG_KEYS = [
     "CFG_STREAM_ATTENTION", "CFG_DRAFT_MODEL", "CFG_DRAFT_K", "CFG_DRAFT_CONTEXT",
     "CFG_TEMPERATURE",
     "CFG_FORCE_LOAD", "CFG_FORCE_REBUILD_CACHE", "CFG_FORCE_REBUILD_HQQ_CACHE",
-    "CFG_BUILD_CACHE", "CFG_ENABLE_THINKING",
+    "CFG_BUILD_CACHE", "CFG_ENABLE_THINKING", "CFG_PREFIX_CACHE",
+    "CFG_SSE_TIMING_COMPAT",
 ]
 
 
@@ -686,6 +687,8 @@ class LauncherConfig:
         self.force_rebuild_hqq_cache: bool = False
         self.build_cache: bool = False
         self.enable_thinking: bool = True
+        self.prefix_cache: bool = False
+        self.sse_timing_compat: bool = False
 
     def apply_saved(self, saved: Dict[str, str]) -> None:
         """Apply loaded config values."""
@@ -910,6 +913,10 @@ class LauncherConfig:
             self.build_cache = saved["CFG_BUILD_CACHE"] == "1"
         if "CFG_ENABLE_THINKING" in saved:
             self.enable_thinking = saved["CFG_ENABLE_THINKING"] != "0"
+        if "CFG_PREFIX_CACHE" in saved:
+            self.prefix_cache = saved["CFG_PREFIX_CACHE"] == "1"
+        if "CFG_SSE_TIMING_COMPAT" in saved:
+            self.sse_timing_compat = saved["CFG_SSE_TIMING_COMPAT"] == "1"
 
     def to_save_dict(self) -> Dict[str, Any]:
         """Convert to dict for saving or launch config serialization."""
@@ -960,6 +967,8 @@ class LauncherConfig:
             "CFG_FORCE_REBUILD_HQQ_CACHE": "1" if self.force_rebuild_hqq_cache else "",
             "CFG_BUILD_CACHE": "1" if self.build_cache else "",
             "CFG_ENABLE_THINKING": "1" if self.enable_thinking else "0",
+            "CFG_PREFIX_CACHE": "1" if self.prefix_cache else "0",
+            "CFG_SSE_TIMING_COMPAT": "1" if self.sse_timing_compat else "0",
         }
         if self.attention_quant in ("hqq46_auto", "hqq68_auto"):
             values["CFG_HQQ_AUTO_BUDGET_PCT"] = str(self.hqq_auto_budget_pct)
@@ -1025,6 +1034,10 @@ OPTIONS = [
     ConfigOption("SSH Key Path", "ssh_key_path", opt_type="text", advanced=True),
     ConfigOption("Enable thinking", "enable_thinking",
                  choices=[True, False]),
+    ConfigOption("Prefix-state cache", "prefix_cache",
+                 choices=[False, True], advanced=True),
+    ConfigOption("SSE timing compatibility", "sse_timing_compat",
+                 choices=[False, True], advanced=True),
     ConfigOption("HCS RAM saver", "hcs_host_cache_mode",
                  choices=["source", "mirror", "auto"]),
     ConfigOption("Adaptive cold-mass pruning", "adaptive_cold_mass_pruning",
@@ -2823,6 +2836,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dynamic-hcs", action=argparse.BooleanOptionalAction,
                         default=None,
                         help="Enable dynamic HCS heatmap-prefix + recency-tail cache (default: on)")
+    parser.add_argument("--prefix-cache", action=argparse.BooleanOptionalAction,
+                        default=None,
+                        help="Enable experimental exact-prefix KV + recurrent-state reuse (default: off)")
+    parser.add_argument("--sse-timing-compat", action=argparse.BooleanOptionalAction,
+                        default=None,
+                        help="Emit a compatibility choice in the final SSE timing chunk (default: off)")
     parser.add_argument("--dynamic-hcs-tail-blocks", type=int, default=None,
                         choices=[1, 2, 3, 4, 5],
                         help="Advanced: recency tail size in activated-expert blocks (1-5, default: 2)")
@@ -2938,6 +2957,10 @@ def _apply_cli_overrides(cfg: LauncherConfig, args: argparse.Namespace) -> None:
         cfg.gpu_prefill_threshold = args.gpu_prefill_threshold
     if args.dynamic_hcs is not None:
         cfg.dynamic_hcs = bool(args.dynamic_hcs)
+    if args.prefix_cache is not None:
+        cfg.prefix_cache = bool(args.prefix_cache)
+    if args.sse_timing_compat is not None:
+        cfg.sse_timing_compat = bool(args.sse_timing_compat)
     if args.dynamic_hcs_tail_blocks is not None:
         cfg.dynamic_hcs_tail_blocks = int(args.dynamic_hcs_tail_blocks)
     if args.hcs_host_cache_mode is not None:
