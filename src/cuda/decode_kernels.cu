@@ -838,10 +838,11 @@ __device__ inline float dsa_bf16_round(float value) {
     return bf16_to_f32(f32_to_bf16(value));
 }
 
-// LayerNorm one projected DSA key, apply split-half RoPE to only the
-// positional prefix, and write the BF16 owner-local cache row. The normalized
-// values are staged before RoPE so paired reads cannot race paired writes.
-extern "C" __global__ void dsa_layernorm_rope_key_write(
+// LayerNorm one projected GLM DSA key, apply the model's interleaved-input
+// RoPE to only the positional prefix, and write the BF16 owner-local cache
+// row. apply_rotary_pos_emb_interleave consumes adjacent input pairs and emits
+// all rotated even components followed by all rotated odd components.
+__device__ __forceinline__ void dsa_layernorm_rope_key_write_body(
     __nv_bfloat16* __restrict__ key_cache,
     const __nv_bfloat16* __restrict__ raw_key,
     const __nv_bfloat16* __restrict__ norm_weight,
@@ -915,25 +916,64 @@ extern "C" __global__ void dsa_layernorm_rope_key_write(
     for (int i = tid; i < head_dim; i += num_threads) {
         float value = normalized[i];
         if (i < rope_dim) {
-            int pair = i < half_rope ? i + half_rope : i - half_rope;
             int table_idx = i < half_rope ? i : i - half_rope;
-            float rotated = normalized[pair];
-            if (i < half_rope) rotated = -rotated;
+            float even = normalized[2 * table_idx];
+            float odd = normalized[2 * table_idx + 1];
             float cos_value = dsa_bf16_round(
                 cos_table[(int64_t)position * half_rope + table_idx]);
             float sin_value = dsa_bf16_round(
                 sin_table[(int64_t)position * half_rope + table_idx]);
-            float direct = dsa_bf16_round(value * cos_value);
-            float cross = dsa_bf16_round(rotated * sin_value);
-            value = dsa_bf16_round(direct + cross);
+            float direct = dsa_bf16_round(
+                (i < half_rope ? even : odd) * cos_value);
+            float cross = dsa_bf16_round(
+                (i < half_rope ? odd : even) * sin_value);
+            value = dsa_bf16_round(
+                i < half_rope ? direct - cross : direct + cross);
         }
         row[i] = f32_to_bf16(value);
     }
 }
 
-// Apply split-half RoPE to the positional prefix of projected BF16 DSA
-// queries. Input/output are distinct, avoiding the in-place paired-write race.
-extern "C" __global__ void dsa_rope_query_bf16(
+extern "C" __global__ void dsa_layernorm_rope_key_write(
+    __nv_bfloat16* __restrict__ key_cache,
+    const __nv_bfloat16* __restrict__ raw_key,
+    const __nv_bfloat16* __restrict__ norm_weight,
+    const __nv_bfloat16* __restrict__ norm_bias,
+    const float* __restrict__ cos_table,
+    const float* __restrict__ sin_table,
+    int position,
+    int max_context,
+    int head_dim,
+    int rope_dim,
+    float eps
+) {
+    dsa_layernorm_rope_key_write_body(
+        key_cache, raw_key, norm_weight, norm_bias, cos_table, sin_table,
+        position, max_context, head_dim, rope_dim, eps);
+}
+
+extern "C" __global__ void dsa_layernorm_rope_key_write_g(
+    __nv_bfloat16* __restrict__ key_cache,
+    const __nv_bfloat16* __restrict__ raw_key,
+    const __nv_bfloat16* __restrict__ norm_weight,
+    const __nv_bfloat16* __restrict__ norm_bias,
+    const float* __restrict__ cos_table,
+    const float* __restrict__ sin_table,
+    const int* __restrict__ d_position,
+    int max_context,
+    int head_dim,
+    int rope_dim,
+    float eps
+) {
+    if (d_position == nullptr) return;
+    dsa_layernorm_rope_key_write_body(
+        key_cache, raw_key, norm_weight, norm_bias, cos_table, sin_table,
+        *d_position, max_context, head_dim, rope_dim, eps);
+}
+
+// Apply GLM's interleaved-input RoPE to the positional prefix of projected
+// BF16 DSA queries. Input/output are distinct, avoiding paired-write races.
+__device__ __forceinline__ void dsa_rope_query_bf16_body(
     __nv_bfloat16* __restrict__ output,
     const __nv_bfloat16* __restrict__ input,
     const float* __restrict__ cos_table,
@@ -953,19 +993,52 @@ extern "C" __global__ void dsa_rope_query_bf16(
     if (dim < rope_dim) {
         int half_rope = rope_dim / 2;
         int head_base = i - dim;
-        int pair = dim < half_rope ? dim + half_rope : dim - half_rope;
         int table_idx = dim < half_rope ? dim : dim - half_rope;
-        float rotated = bf16_to_f32(input[head_base + pair]);
-        if (dim < half_rope) rotated = -rotated;
+        float even = bf16_to_f32(input[head_base + 2 * table_idx]);
+        float odd = bf16_to_f32(input[head_base + 2 * table_idx + 1]);
         float cos_value = dsa_bf16_round(
             cos_table[(int64_t)position * half_rope + table_idx]);
         float sin_value = dsa_bf16_round(
             sin_table[(int64_t)position * half_rope + table_idx]);
-        float direct = dsa_bf16_round(value * cos_value);
-        float cross = dsa_bf16_round(rotated * sin_value);
-        value = dsa_bf16_round(direct + cross);
+        float direct = dsa_bf16_round(
+            (dim < half_rope ? even : odd) * cos_value);
+        float cross = dsa_bf16_round(
+            (dim < half_rope ? odd : even) * sin_value);
+        value = dsa_bf16_round(
+            dim < half_rope ? direct - cross : direct + cross);
     }
     output[i] = f32_to_bf16(value);
+}
+
+extern "C" __global__ void dsa_rope_query_bf16(
+    __nv_bfloat16* __restrict__ output,
+    const __nv_bfloat16* __restrict__ input,
+    const float* __restrict__ cos_table,
+    const float* __restrict__ sin_table,
+    int position,
+    int num_heads,
+    int head_dim,
+    int rope_dim
+) {
+    dsa_rope_query_bf16_body(
+        output, input, cos_table, sin_table, position, num_heads, head_dim,
+        rope_dim);
+}
+
+extern "C" __global__ void dsa_rope_query_bf16_g(
+    __nv_bfloat16* __restrict__ output,
+    const __nv_bfloat16* __restrict__ input,
+    const float* __restrict__ cos_table,
+    const float* __restrict__ sin_table,
+    const int* __restrict__ d_position,
+    int num_heads,
+    int head_dim,
+    int rope_dim
+) {
+    if (d_position == nullptr) return;
+    dsa_rope_query_bf16_body(
+        output, input, cos_table, sin_table, *d_position, num_heads, head_dim,
+        rope_dim);
 }
 
 // Reduce the BF16-tensor-core QK product [heads, context] into the reference
@@ -986,6 +1059,102 @@ extern "C" __global__ void dsa_reduce_weighted_scores(
         score += bf16_to_f32(head_weights[head]) * fmaxf(dot, 0.0f);
     }
     output[token] = score;
+}
+
+// Graph-addressable reduction. cuBLAS writes one fixed-capacity score matrix
+// during graph replay; the live sequence length masks future cache rows before
+// exact top-k selection.
+extern "C" __global__ void dsa_reduce_weighted_scores_g(
+    float* __restrict__ output,
+    const float* __restrict__ head_scores,
+    const __nv_bfloat16* __restrict__ head_weights,
+    const int* __restrict__ d_seq_len,
+    int score_capacity,
+    int num_heads,
+    float score_scale
+) {
+    int token = blockIdx.x * blockDim.x + threadIdx.x;
+    if (token >= score_capacity || d_seq_len == nullptr) return;
+    int context = min(max(*d_seq_len, 0), score_capacity);
+    if (token >= context) {
+        output[token] = -INFINITY;
+        return;
+    }
+    float score = 0.0f;
+    for (int head = 0; head < num_heads; head++) {
+        float dot =
+            head_scores[(int64_t)head * score_capacity + token] * score_scale;
+        score += bf16_to_f32(head_weights[head]) * fmaxf(dot, 0.0f);
+    }
+    output[token] = score;
+}
+
+// Graph-addressable fused DSA score path. A fixed occupancy-sized grid walks
+// only the live prefix from d_seq_len, so graph addresses and launch geometry
+// remain stable without multiplying work by configured context capacity.
+// Each warp computes one head dot product; a key row is loaded once per block.
+extern "C" __global__ void dsa_fused_live_scores_g(
+    float* __restrict__ output,
+    const __nv_bfloat16* __restrict__ key_cache,
+    const __nv_bfloat16* __restrict__ query,
+    const __nv_bfloat16* __restrict__ head_weights,
+    const int* __restrict__ d_seq_len,
+    int score_capacity,
+    int num_heads,
+    int head_dim,
+    float score_scale
+) {
+    if (d_seq_len == nullptr || score_capacity <= 0 || num_heads <= 0 ||
+        head_dim <= 0 || (blockDim.x & 31) != 0) {
+        return;
+    }
+    int context = min(max(*d_seq_len, 0), score_capacity);
+    int num_warps = blockDim.x >> 5;
+    int warp = threadIdx.x >> 5;
+    int lane = threadIdx.x & 31;
+    extern __shared__ unsigned char shared_raw[];
+    float* shared_key = reinterpret_cast<float*>(shared_raw);
+    float* shared_contributions = shared_key + head_dim;
+
+    for (int token = blockIdx.x; token < context; token += gridDim.x) {
+        for (int dim = threadIdx.x; dim < head_dim; dim += blockDim.x) {
+            shared_key[dim] = bf16_to_f32(
+                key_cache[(int64_t)token * head_dim + dim]);
+        }
+        __syncthreads();
+
+        for (int head = warp; head < num_heads; head += num_warps) {
+            float dot = 0.0f;
+            const __nv_bfloat16* head_query =
+                query + (int64_t)head * head_dim;
+            for (int dim = lane; dim < head_dim; dim += 32) {
+                dot += bf16_to_f32(head_query[dim]) * shared_key[dim];
+            }
+            for (int offset = 16; offset > 0; offset >>= 1) {
+                dot += __shfl_down_sync(0xffffffff, dot, offset);
+            }
+            if (lane == 0) {
+                shared_contributions[head] =
+                    bf16_to_f32(head_weights[head]) *
+                    fmaxf(dot * score_scale, 0.0f);
+            }
+        }
+        __syncthreads();
+
+        if (warp == 0) {
+            float score = 0.0f;
+            for (int head = lane; head < num_heads; head += 32) {
+                score += shared_contributions[head];
+            }
+            for (int offset = 16; offset > 0; offset >>= 1) {
+                score += __shfl_down_sync(0xffffffff, score, offset);
+            }
+            if (lane == 0) {
+                output[token] = score;
+            }
+        }
+        __syncthreads();
+    }
 }
 
 // Exact DSA top-k selection is performed as a hierarchy of shared-memory
@@ -1069,6 +1238,53 @@ extern "C" __global__ void dsa_topk_sort_chunks(
     }
 }
 
+extern "C" __global__ void dsa_topk_sort_chunks_g(
+    const float* __restrict__ input_scores,
+    float* __restrict__ output_scores,
+    int* __restrict__ output_indices,
+    int* __restrict__ final_indices,
+    const int* __restrict__ d_seq_len,
+    int score_capacity,
+    int topk,
+    int sort_width
+) {
+    if (final_indices == nullptr || d_seq_len == nullptr ||
+        score_capacity <= 0 || topk <= 0 ||
+        sort_width < topk || (sort_width & (sort_width - 1)) != 0) {
+        return;
+    }
+    int context = min(max(*d_seq_len, 0), score_capacity);
+    int padded_topk = 1;
+    while (padded_topk < topk) padded_topk <<= 1;
+    int live_sort_width = context <= topk ? padded_topk : sort_width;
+    int active_runs =
+        max((context + live_sort_width - 1) / live_sort_width, 1);
+    if ((int)blockIdx.x >= active_runs) return;
+    extern __shared__ unsigned char shared_raw[];
+    float* shared_scores = reinterpret_cast<float*>(shared_raw);
+    int* shared_indices = reinterpret_cast<int*>(shared_scores + sort_width);
+    int input_base = blockIdx.x * live_sort_width;
+    for (int item = threadIdx.x; item < live_sort_width;
+         item += blockDim.x) {
+        int token = input_base + item;
+        shared_scores[item] =
+            token < context ? input_scores[token] : -INFINITY;
+        shared_indices[item] = token < context ? token : INT_MAX;
+    }
+    __syncthreads();
+    dsa_topk_bitonic_sort(
+        shared_scores, shared_indices, live_sort_width);
+
+    int output_base = blockIdx.x * topk;
+    for (int item = threadIdx.x; item < topk; item += blockDim.x) {
+        output_scores[output_base + item] = shared_scores[item];
+        output_indices[output_base + item] = shared_indices[item];
+        if (active_runs == 1) {
+            final_indices[item] = shared_indices[item];
+        }
+    }
+}
+
 extern "C" __global__ void dsa_topk_merge_runs(
     const float* __restrict__ input_scores,
     const int* __restrict__ input_indices,
@@ -1102,6 +1318,67 @@ extern "C" __global__ void dsa_topk_merge_runs(
     for (int item = threadIdx.x; item < topk; item += blockDim.x) {
         output_scores[output_base + item] = shared_scores[item];
         output_indices[output_base + item] = shared_indices[item];
+    }
+}
+
+// Graph-addressable merge. The graph records the maximum-capacity hierarchy,
+// while each replay derives the live number of input runs from d_seq_len.
+// Inactive blocks and passes return before touching shared memory. The pass
+// that reduces the live hierarchy to one run publishes directly to the stable
+// final output, so later inactive fixed graph nodes cannot overwrite it.
+extern "C" __global__ void dsa_topk_merge_runs_g(
+    const float* __restrict__ input_scores,
+    const int* __restrict__ input_indices,
+    float* __restrict__ output_scores,
+    int* __restrict__ output_indices,
+    int* __restrict__ final_indices,
+    const int* __restrict__ d_seq_len,
+    int score_capacity,
+    int topk,
+    int sort_width,
+    int merge_pass
+) {
+    if (final_indices == nullptr || d_seq_len == nullptr ||
+        score_capacity <= 0 || topk <= 0 || sort_width < 2 * topk ||
+        (sort_width & (sort_width - 1)) != 0 || merge_pass < 0) {
+        return;
+    }
+    int context = min(max(*d_seq_len, 0), score_capacity);
+    int padded_topk = 1;
+    while (padded_topk < topk) padded_topk <<= 1;
+    int base_sort_width = context <= topk ? padded_topk : sort_width;
+    int input_runs =
+        max((context + base_sort_width - 1) / base_sort_width, 1);
+    for (int pass = 0; pass < merge_pass; pass++) {
+        input_runs = (input_runs + 1) / 2;
+    }
+    if (input_runs <= 1) return;
+    int output_runs = (input_runs + 1) / 2;
+    if ((int)blockIdx.x >= output_runs) return;
+
+    extern __shared__ unsigned char shared_raw[];
+    float* shared_scores = reinterpret_cast<float*>(shared_raw);
+    int* shared_indices = reinterpret_cast<int*>(shared_scores + sort_width);
+    int first_run = blockIdx.x * 2;
+    int second_run = first_run + 1;
+    for (int item = threadIdx.x; item < sort_width; item += blockDim.x) {
+        int source_run = item < topk ? first_run : second_run;
+        int source_item = item < topk ? item : item - topk;
+        bool valid = item < 2 * topk && source_run < input_runs;
+        int source = source_run * topk + source_item;
+        shared_scores[item] = valid ? input_scores[source] : -INFINITY;
+        shared_indices[item] = valid ? input_indices[source] : INT_MAX;
+    }
+    __syncthreads();
+    dsa_topk_bitonic_sort(shared_scores, shared_indices, sort_width);
+
+    int output_base = blockIdx.x * topk;
+    for (int item = threadIdx.x; item < topk; item += blockDim.x) {
+        output_scores[output_base + item] = shared_scores[item];
+        output_indices[output_base + item] = shared_indices[item];
+        if (output_runs == 1) {
+            final_indices[item] = shared_indices[item];
+        }
     }
 }
 
@@ -1519,6 +1796,180 @@ extern "C" __global__ void mla_attention_k4(
     for (int d = tid; d < kv_lora_rank; d += num_threads) {
         out_head[d] = v_acc[di++] * inv_sum;
     }
+}
+
+// Sparse MLA attention over the exact token indices selected by one DSA owner.
+// Shared IndexShare layers pass the same owner-local index buffer unchanged.
+__device__ __forceinline__ void mla_sparse_attention_k4_body(
+    float* __restrict__ output,
+    const float* __restrict__ q_absorbed,
+    const float* __restrict__ q_pe,
+    const unsigned char* __restrict__ ckv_cache,
+    const unsigned char* __restrict__ kpe_cache,
+    const int* __restrict__ selected_indices,
+    float sm_scale,
+    int num_heads,
+    int kv_lora_rank,
+    int qk_rope_dim,
+    int selected_count,
+    int seq_len
+) {
+    int h = blockIdx.x;
+    if (h >= num_heads) return;
+
+    int tid = threadIdx.x;
+    int num_threads = blockDim.x;
+    int warp_id = tid / warpSize;
+    int lane_id = tid % warpSize;
+    int num_warps = (num_threads + warpSize - 1) / warpSize;
+
+    extern __shared__ float smem[];
+    float* s_q_abs = smem;
+    float* s_q_pe = smem + kv_lora_rank;
+    float* smem_reduce = s_q_pe + qk_rope_dim;
+    float* smem_weights = smem_reduce + num_warps;
+
+    const float* qa_head = q_absorbed + h * kv_lora_rank;
+    const float* qp_head = q_pe + h * qk_rope_dim;
+    for (int i = tid; i < kv_lora_rank; i += num_threads) {
+        s_q_abs[i] = qa_head[i];
+    }
+    for (int i = tid; i < qk_rope_dim; i += num_threads) {
+        s_q_pe[i] = qp_head[i];
+    }
+    __syncthreads();
+
+    if (selected_count <= 0) {
+        float* out_head = output + h * kv_lora_rank;
+        for (int d = tid; d < kv_lora_rank; d += num_threads) {
+            out_head[d] = 0.0f;
+        }
+        return;
+    }
+
+    float local_max = -1e30f;
+    for (int slot = tid; slot < selected_count; slot += num_threads) {
+        int pos = selected_indices[slot];
+        float score = -1e30f;
+        if (pos >= 0 && pos < seq_len) {
+            score =
+                mla_dot_k4(ckv_cache, pos, kv_lora_rank, s_q_abs) +
+                mla_dot_k4(kpe_cache, pos, qk_rope_dim, s_q_pe);
+            score *= sm_scale;
+        }
+        local_max = fmaxf(local_max, score);
+    }
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+        local_max = fmaxf(local_max, __shfl_down_sync(0xffffffff, local_max, offset));
+    }
+    if (lane_id == 0) smem_reduce[warp_id] = local_max;
+    __syncthreads();
+    if (tid == 0) {
+        float maximum = smem_reduce[0];
+        for (int warp = 1; warp < num_warps; warp++) {
+            maximum = fmaxf(maximum, smem_reduce[warp]);
+        }
+        smem_reduce[0] = maximum;
+    }
+    __syncthreads();
+    float global_max = smem_reduce[0];
+
+    float local_sum = 0.0f;
+    float v_acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    for (int tile_start = 0; tile_start < selected_count; tile_start += MLA_TILE_SIZE) {
+        int tile_end = min(tile_start + MLA_TILE_SIZE, selected_count);
+        int tile_len = tile_end - tile_start;
+
+        for (int ti = tid; ti < tile_len; ti += num_threads) {
+            int pos = selected_indices[tile_start + ti];
+            float weight = 0.0f;
+            if (pos >= 0 && pos < seq_len) {
+                float score =
+                    mla_dot_k4(ckv_cache, pos, kv_lora_rank, s_q_abs) +
+                    mla_dot_k4(kpe_cache, pos, qk_rope_dim, s_q_pe);
+                weight = __expf(score * sm_scale - global_max);
+            }
+            smem_weights[ti] = weight;
+            local_sum += weight;
+        }
+        __syncthreads();
+
+        int di = 0;
+        for (int d = tid; d < kv_lora_rank; d += num_threads) {
+            float acc = 0.0f;
+            for (int ti = 0; ti < tile_len; ti++) {
+                int pos = selected_indices[tile_start + ti];
+                if (pos >= 0 && pos < seq_len) {
+                    acc += smem_weights[ti] *
+                        mla_load_k4_value(ckv_cache, pos, kv_lora_rank, d);
+                }
+            }
+            v_acc[di++] += acc;
+        }
+        __syncthreads();
+    }
+
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+        local_sum += __shfl_down_sync(0xffffffff, local_sum, offset);
+    }
+    if (lane_id == 0) smem_reduce[warp_id] = local_sum;
+    __syncthreads();
+    if (tid == 0) {
+        float sum = 0.0f;
+        for (int warp = 0; warp < num_warps; warp++) {
+            sum += smem_reduce[warp];
+        }
+        smem_reduce[0] = sum;
+    }
+    __syncthreads();
+    float inv_sum = 1.0f / smem_reduce[0];
+
+    float* out_head = output + h * kv_lora_rank;
+    int di = 0;
+    for (int d = tid; d < kv_lora_rank; d += num_threads) {
+        out_head[d] = v_acc[di++] * inv_sum;
+    }
+}
+
+extern "C" __global__ void mla_sparse_attention_k4(
+    float* __restrict__ output,
+    const float* __restrict__ q_absorbed,
+    const float* __restrict__ q_pe,
+    const unsigned char* __restrict__ ckv_cache,
+    const unsigned char* __restrict__ kpe_cache,
+    const int* __restrict__ selected_indices,
+    float sm_scale,
+    int num_heads,
+    int kv_lora_rank,
+    int qk_rope_dim,
+    int selected_count,
+    int seq_len
+) {
+    mla_sparse_attention_k4_body(
+        output, q_absorbed, q_pe, ckv_cache, kpe_cache, selected_indices,
+        sm_scale, num_heads, kv_lora_rank, qk_rope_dim, selected_count, seq_len);
+}
+
+extern "C" __global__ void mla_sparse_attention_k4_g(
+    float* __restrict__ output,
+    const float* __restrict__ q_absorbed,
+    const float* __restrict__ q_pe,
+    const unsigned char* __restrict__ ckv_cache,
+    const unsigned char* __restrict__ kpe_cache,
+    const int* __restrict__ selected_indices,
+    float sm_scale,
+    int num_heads,
+    int kv_lora_rank,
+    int qk_rope_dim,
+    int selected_capacity,
+    const int* __restrict__ d_seq_len
+) {
+    int seq_len = *d_seq_len;
+    int selected_count = min(max(seq_len, 0), max(selected_capacity, 0));
+    mla_sparse_attention_k4_body(
+        output, q_absorbed, q_pe, ckv_cache, kpe_cache, selected_indices,
+        sm_scale, num_heads, kv_lora_rank, qk_rope_dim,
+        selected_count, seq_len);
 }
 
 // MLA de-interleave kernel: [re0, im0, re1, im1, ...] → [re0, re1, ..., im0, im1, ...]

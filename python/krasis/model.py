@@ -170,6 +170,18 @@ def _dsa_owner_layers_for_segment(
     return sorted(int(owner) for owner in owners)
 
 
+def _dsa_resource_layers_for_segment(
+    cfg: ModelConfig,
+    layer_start: int,
+    layer_end: int,
+) -> tuple[list[int], list[int]]:
+    """Split required IndexShare owners into local compute and replica sets."""
+    owners = _dsa_owner_layers_for_segment(cfg, layer_start, layer_end)
+    local = [owner for owner in owners if layer_start <= owner < layer_end]
+    replicas = [owner for owner in owners if owner not in local]
+    return local, replicas
+
+
 def _dsa_topk_candidate_capacity(context: int, configured_topk: int) -> int:
     """Exact shared ping-pong capacity used by the native DSA selector."""
     if context <= 0 or configured_topk <= 0:
@@ -4940,9 +4952,10 @@ class KrasisModel:
         layer_end: int,
     ) -> int:
         """Stage one fixed-address native DSA resource per owner used by a segment."""
-        owner_layers = _dsa_owner_layers_for_segment(
+        local_owner_layers, replica_owner_layers = _dsa_resource_layers_for_segment(
             self.cfg, layer_start, layer_end
         )
+        owner_layers = local_owner_layers + replica_owner_layers
         if not owner_layers:
             return 0
 
@@ -4976,7 +4989,7 @@ class KrasisModel:
             "k_norm_bias": (1, self.cfg.index_head_dim),
         }
         staged = 0
-        for owner_layer_idx in owner_layers:
+        for owner_layer_idx in local_owner_layers:
             owner_attn = self.layers[owner_layer_idx].attention
             owner = getattr(owner_attn, "dsa_indexer", None)
             if owner is None or owner.layer_idx != owner_layer_idx:
@@ -5029,12 +5042,20 @@ class KrasisModel:
             )
             staged += 1
 
+        for owner_layer_idx in replica_owner_layers:
+            store.register_dsa_indexshare_replica(
+                owner_layer_idx=int(owner_layer_idx),
+                max_context_tokens=max_context_tokens,
+            )
+            staged += 1
+
         store.finalize_dsa_indexer_resources()
         logger.info(
-            "DSA owner resources staged on %s: owners=%s layers=[%d,%d) "
-            "max_context=%d",
+            "DSA resources staged on %s: local_owners=%s replicas=%s "
+            "layers=[%d,%d) max_context=%d",
             target_device,
-            owner_layers,
+            local_owner_layers,
+            replica_owner_layers,
             layer_start,
             layer_end,
             max_context_tokens,
@@ -5047,9 +5068,10 @@ class KrasisModel:
         layer_end: int,
     ) -> int:
         """Return exact persistent owner-weight and decode-state bytes for a segment."""
-        owner_layers = _dsa_owner_layers_for_segment(
+        local_owner_layers, replica_owner_layers = _dsa_resource_layers_for_segment(
             self.cfg, layer_start, layer_end
         )
+        owner_layers = local_owner_layers + replica_owner_layers
         if not owner_layers:
             return 0
         contexts = set()
@@ -5063,7 +5085,7 @@ class KrasisModel:
             )
         max_context_tokens = contexts.pop()
         total = 0
-        for owner_layer_idx in owner_layers:
+        for owner_layer_idx in local_owner_layers:
             owner = getattr(
                 self.layers[owner_layer_idx].attention,
                 "dsa_indexer",
@@ -5089,6 +5111,13 @@ class KrasisModel:
                 total += tensor.numel() * tensor.element_size()
             total += max_context_tokens * self.cfg.index_head_dim * 2
             total += min(self.cfg.index_topk, max_context_tokens) * 4
+        total += (
+            len(replica_owner_layers)
+            * min(self.cfg.index_topk, max_context_tokens)
+            * 4
+        )
+        if not local_owner_layers:
+            return int(total)
         query_elems = self.cfg.index_n_heads * self.cfg.index_head_dim
         # One graph-stable workspace is reused sequentially by every owner on
         # this store rather than multiplied by the IndexShare owner count.
@@ -9699,6 +9728,26 @@ class KrasisModel:
                 self._hqq_attention_loaded_tensors,
             )
 
+        if self.cfg.is_dsa:
+            if not hqq_active:
+                raise RuntimeError(
+                    "Native DSA execution requires HQQ attention registration"
+                )
+            staged_dsa = self._stage_dsa_indexer_resources_on_store(
+                store,
+                device,
+                self._rust_decode_weights,
+                0,
+                len(self.layers),
+            )
+            logger.info(
+                "Primary full-prefill DSA resources staged on cuda:%d: %d "
+                "owner/replica resources for layers [0,%d)",
+                gpu_idx,
+                staged_dsa,
+                len(self.layers),
+            )
+
         self._gpu_decode_store = store
 
         # Enable per-component timing if KRASIS_DECODE_TIMING=1
@@ -10760,6 +10809,26 @@ class KrasisModel:
                 "HQQ aux execution descriptors restored after shared decode setup on cuda:%d: %d layers registered.",
                 gpu_idx,
                 registered_layers,
+            )
+        if self.cfg.is_dsa:
+            if not hqq_active:
+                raise RuntimeError(
+                    "Native DSA execution requires HQQ attention registration"
+                )
+            staged_dsa = self._stage_dsa_indexer_resources_on_store(
+                store,
+                aux_device,
+                self._aux_decode_weights,
+                split_layer,
+                layer_end,
+            )
+            logger.info(
+                "Aux decode DSA resources staged on cuda:%d: %d "
+                "owner/replica resources for layers [%d,%d)",
+                gpu_idx,
+                staged_dsa,
+                split_layer,
+                layer_end,
             )
 
         self._aux_decode_weights_all.extend(self._aux_decode_weights)

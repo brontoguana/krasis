@@ -62,68 +62,12 @@ def _load_json(path: Path) -> Dict[str, Any]:
         return json.load(f)
 
 
-def _normalize_extra_special_tokens(raw: Any) -> Optional[Dict[str, Any]]:
-    if isinstance(raw, dict):
-        return raw
-    if not isinstance(raw, list):
-        return None
-
-    normalized: Dict[str, Any] = {}
-    used_keys = set()
-
-    for idx, item in enumerate(raw):
-        if isinstance(item, str):
-            token_value: Any = item
-            key_source = item
-        elif isinstance(item, dict):
-            token_value = item
-            key_source = str(
-                item.get("content")
-                or item.get("token")
-                or item.get("id")
-                or f"extra_special_token_{idx}"
-            )
-        else:
-            token_value = item
-            key_source = f"extra_special_token_{idx}"
-
-        key = re.sub(r"[^a-z0-9]+", "_", key_source.lower()).strip("_")
-        if not key:
-            key = f"extra_special_token_{idx}"
-        if key[0].isdigit():
-            key = f"extra_special_token_{idx}_{key}"
-        if not key.endswith("_token"):
-            key = f"{key}_token"
-        while key in used_keys:
-            key = f"{key}_{idx}"
-        normalized[key] = token_value
-        used_keys.add(key)
-
-    return normalized
-
-
 def load_tokenizer_with_compat(model_path: str):
-    from transformers import AutoTokenizer
+    # Reference validation must use the exact same fail-closed checkpoint
+    # compatibility contract as the production tokenizer path.
+    from krasis.tokenizer import load_hf_tokenizer
 
-    try:
-        return AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-    except AttributeError as exc:
-        if "object has no attribute 'keys'" not in str(exc):
-            raise
-        tokenizer_cfg_path = Path(model_path) / "tokenizer_config.json"
-        if not tokenizer_cfg_path.is_file():
-            raise
-        tokenizer_cfg = _load_json(tokenizer_cfg_path)
-        normalized = _normalize_extra_special_tokens(tokenizer_cfg.get("extra_special_tokens"))
-        if not normalized:
-            raise
-        tokenizer = AutoTokenizer.from_pretrained(
-            model_path,
-            trust_remote_code=True,
-            extra_special_tokens=normalized,
-        )
-        setattr(tokenizer, "_krasis_extra_special_tokens_compat", normalized)
-        return tokenizer
+    return load_hf_tokenizer(model_path)
 
 
 def _sha256_bytes(data: bytes) -> str:

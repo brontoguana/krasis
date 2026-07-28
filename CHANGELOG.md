@@ -2,6 +2,82 @@
 
 ## Unreleased
 
+- Completed the first long-context GLM-5.2 sparse-attention comparison against
+  CPU BF16 llama-witness. On a frozen 2,682-token real-book input, both
+  runtimes selected token `2132` (`It`) at rank one; the selected-token
+  log-probability delta was 0.0341005 and top-10 ID overlap was 6/10. The
+  instrumented 4,096-token Krasis runtime calibrated to 858 MiB minimum free
+  against the configured 600 MiB margin. Reference-test responses now expose
+  measured per-device request VRAM low-water values and the active safety
+  margin, and multi-GPU DSA state handoffs restore a deterministic destination
+  CUDA context even when a transfer fails. This is correctness evidence, not a
+  speed benchmark; long-context multi-token witness validation remains.
+- Activated full-primary GLM-5.2 sparse DSA prefill with request workspace
+  capacity derived from the active prompt and measured live VRAM above the
+  runtime reserve and configured safety floor. The first real checkpoint run
+  staged all 21 owners, measured 804 MiB minimum free against the 600 MiB
+  margin, and passed the frozen llama-witness token `16179` (`Na`) with 9/10
+  top-ID overlap and a 0.0259386 selected-token log-probability delta. Added
+  explicit prompt index-key cache handoff from full-primary prefill ownership
+  to local owners on auxiliary decode stores; transfer geometry is derived from
+  staged owner resources and failures abort visibly. Production sparse decode
+  activation and long-context validation remain incomplete.
+- Added GLM-5.2 to the built llama-witness model, preflight, conversion, input,
+  capture, and comparison workflow. The witness runtime explicitly rejects
+  contexts above the checkpoint-provided DSA top-k until its sparse indexer is
+  implemented, so current dense MLA evidence cannot be mistaken for
+  long-context DSA validation. GGUF preflight memory and disk requirements are
+  now derived from actual source shards and checkpoint expert dimensions for
+  the converter's lazy one-tensor-at-a-time execution rather than total-model
+  RAM multipliers. The RAM gate models the converter's actual MoE merge
+  lifetime: three source expert families, the first stacked output, and an
+  active source shard.
+  Added `./dev witness-build` so witness source changes can be compiled before
+  an expensive model conversion. Frozen witness input generation now opens the
+  GGUF in vocabulary-only mode after completing full-file provenance hashing,
+  so tokenizer/template preparation does not materialize every model tensor.
+  The GLM-5.2 input artifact was regenerated from a full-GGUF SHA-256 cache hit
+  with four independently verified token hashes and mandatory proof that the
+  thinking-disabled template differs from the thinking-enabled variant. The
+  first authoritative exact-prefix comparison now passes against the CPU BF16
+  llama-witness capture: Krasis selected the same token `16179` (`Na`), matched
+  prefill argmax and top-10 containment, retained all 10 witness top-token IDs,
+  and differed by 0.0245144 in selected-token log probability. This validates
+  the 2,048-token dense exact-prefix path only; it is not long-context sparse
+  DSA evidence or a speed benchmark.
+- Corrected GLM-MoE-DSA indexer RoPE to the architecture's interleaved-input
+  layout and added native signed-INT4 sparse MLA attention kernels. IndexShare
+  resources now distinguish a full owner from a runtime-sized selection
+  replica, and multi-GPU pipeline handoffs propagate the selected token list
+  without duplicating owner weights or key caches on shared-only segments.
+  Batched prefill can now initialize a staged owner's key cache with the same
+  BF16 projection, normalization, and positional transform used by iterative
+  decode; an end-to-end CUDA test proves the two writers are bit-identical.
+  Sparse serving remains fail-closed until resource staging is integrated
+  before runtime calibration and graph-safe owner scoring/selection is
+  connected end to end.
+  Graph-addressable owner scoring and exact top-k now read live position and
+  sequence length from fixed GPU scalars and pass real CUDA
+  capture/instantiate/replay tests. Inactive selection tiles and merge passes
+  return from the fixed graph based on live prefix length. Two exact scoring
+  backends are retained explicitly: fixed-capacity BF16 tensor-core scoring
+  and an occupancy-derived fused scorer that scales with live length.
+  Measurements show each wins at different context lengths, so production
+  selection remains fail-closed pending runtime calibration rather than using
+  a hardware-specific threshold. Graph capture can now launch these components
+  against the active graph instance and resolve each layer's retained token
+  list from either its local owner or a cross-GPU IndexShare replica. The
+  graph-stable sparse MLA kernel derives its selected count from live sequence
+  length and the runtime-sized retained-list capacity, removing a redundant
+  device scalar. Focused CUDA gates pass 7/7 for DSA and 1/1 for compact-cache
+  sparse attention. Prefill registration now retains each layer's complete
+  IndexShare geometry and the three owner projections needed for chunk-local
+  scoring. An overflow-checked planner derives retained-index and score-tile
+  storage from the actual chunk, causal context, top-k, and measured score
+  capacity rather than a fixed row count. The focused planner gate, complete
+  DSA gate, and exact 202-second package build pass; production sparse dispatch
+  remains disabled.
+
 - Added explicit compatibility for checkpoints that declare the Transformers 5
   `TokenizersBackend` class while Krasis is running Transformers 4.57. The
   wrapper now selects the equivalent `PreTrainedTokenizerFast` loader only
@@ -11,7 +87,10 @@
   instrumented GLM-5.2 exact-prefix launch subsequently reached HTTP readiness
   and completed both single-token and multi-token smoke generations; this is
   diagnostic lifecycle evidence, not a speed benchmark or final correctness
-  validation.
+  validation. Reference validation now delegates to that same shared loader
+  instead of maintaining a second `AutoTokenizer` path, so GLM-5.2 witness
+  comparison preserves the identical backend and fail-closed tokenizer
+  contract.
 
 - Began GLM-5.2 support on an isolated feature branch. Added fail-closed
   parsing and validation for the model's DSA/IndexShare configuration,

@@ -39,6 +39,24 @@ def _load_hf_tokenizer(model_path: str, cfg: dict, tokenizer_kwargs: dict):
     )
 
 
+def load_hf_tokenizer(model_path: str):
+    """Load the checkpoint tokenizer through Krasis's shared compatibility contract."""
+    tokenizer_kwargs = {"trust_remote_code": True}
+    tokenizer_config = os.path.join(model_path, "tokenizer_config.json")
+    cfg = {}
+    try:
+        with open(tokenizer_config, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        if isinstance(cfg.get("extra_special_tokens"), list):
+            tokenizer_kwargs["extra_special_tokens"] = {}
+            logger.info(
+                "Tokenizer config extra_special_tokens is a list; overriding to empty dict for text-only loading"
+            )
+    except FileNotFoundError:
+        pass
+    return _load_hf_tokenizer(model_path, cfg, tokenizer_kwargs)
+
+
 class Tokenizer:
     """Wraps HuggingFace tokenizer with chat template formatting."""
 
@@ -80,22 +98,7 @@ class Tokenizer:
     )
 
     def __init__(self, model_path: str):
-        tokenizer_kwargs = {"trust_remote_code": True}
-        tokenizer_config = os.path.join(model_path, "tokenizer_config.json")
-        cfg = {}
-        try:
-            with open(tokenizer_config, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-            if isinstance(cfg.get("extra_special_tokens"), list):
-                tokenizer_kwargs["extra_special_tokens"] = {}
-                logger.info(
-                    "Tokenizer config extra_special_tokens is a list; overriding to empty dict for text-only loading"
-                )
-        except FileNotFoundError:
-            pass
-        self.tokenizer = _load_hf_tokenizer(
-            model_path, cfg, tokenizer_kwargs
-        )
+        self.tokenizer = load_hf_tokenizer(model_path)
         if not getattr(self.tokenizer, "chat_template", None):
             template_path = os.path.join(model_path, "chat_template.jinja")
             if os.path.isfile(template_path):

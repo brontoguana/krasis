@@ -1956,11 +1956,13 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
         store.clear_prompt_hcs_shadow();
     }
     // NOTE: aux GPUs have no soft tier (100% hard), no eviction/reload needed
-    // ── Multi-GPU: copy KV+LA state from primary to all aux GPUs after prefill ──
+    // ── Multi-GPU: copy KV, LA, and DSA prompt state after prefill ──
     if !state.aux_gpu_store_addrs.is_empty() {
         let t_kvcopy = Instant::now();
         let num_aux = state.aux_gpu_store_addrs.len();
         let num_layers = store.num_layers();
+        let mut dsa_owner_copies = 0usize;
+        let mut dsa_key_bytes = 0usize;
         for i in 0..num_aux {
             let aux_store = unsafe { &mut *(state.aux_gpu_store_addrs[i] as *mut GpuDecodeStore) };
             let layer_start = state.multi_gpu_split_layers[i];
@@ -1992,13 +1994,42 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                     e
                 );
             }
+            match store.copy_dsa_prompt_keys_to_aux(aux_store, prompt_len) {
+                Ok((owners, bytes)) => {
+                    dsa_owner_copies += owners;
+                    dsa_key_bytes += bytes;
+                }
+                Err(e) => {
+                    let message = format!(
+                        "Request {}: DSA prompt key-cache copy to aux GPU{} failed: {}",
+                        request_id,
+                        i + 1,
+                        e
+                    );
+                    log::error!("{}", message);
+                    let _ = send_json(
+                        stream,
+                        500,
+                        &format!(
+                            r#"{{"error":{{"message":"{}","type":"server_error"}}}}"#,
+                            json_escape(&message)
+                        ),
+                    );
+                    Python::with_gil(|py| {
+                        let _ = state.py_model.call_method0(py, "server_cleanup");
+                    });
+                    return;
+                }
+            }
         }
         let kvcopy_ms = t_kvcopy.elapsed().as_secs_f64() * 1000.0;
         log::info!(
-            "Request {}: KV+LA state copied to {} aux GPUs in {:.1}ms",
+            "Request {}: KV+LA+DSA prompt state copied to {} aux GPUs in {:.1}ms (DSA owners={}, bytes={})",
             request_id,
             num_aux,
-            kvcopy_ms
+            kvcopy_ms,
+            dsa_owner_copies,
+            dsa_key_bytes,
         );
     }
     let (pressure_evicted, pressure_freed_mb, pressure_final_free_mb) =
@@ -2424,6 +2455,16 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
     let t_start = Instant::now();
     state.reference_test_request_order = state.reference_test_request_order.saturating_add(1);
     let reference_request_order = state.reference_test_request_order;
+    crate::vram_monitor::begin_request_context(&format!(
+        "route=/v1/internal/reference_test request_order={} model={} phase=parse",
+        reference_request_order, state.model_name,
+    ));
+    let _vram_context_guard = {
+        let store = unsafe { &*(state.gpu_store_addr as *const GpuDecodeStore) };
+        VramRequestContextGuard {
+            safety_margin_mb: store.hcs_safety_margin_mb() as u64,
+        }
+    };
 
     // Parse request
     let req: serde_json::Value = match serde_json::from_str(body) {
@@ -2979,6 +3020,13 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
         top_logprobs,
         stop_ids
     );
+    crate::vram_monitor::update_request_context(&format!(
+        "route=/v1/internal/reference_test request_order={} model={} prompt_tokens={} max_new={} phase=prefill",
+        reference_request_order,
+        state.model_name,
+        input_token_ids.len(),
+        max_tokens,
+    ));
 
     let mut debug_hcs_transition_points: Vec<serde_json::Value> = Vec::new();
     let mut debug_mamba2_state_lifecycle_points: Vec<serde_json::Value> = Vec::new();
@@ -3117,6 +3165,7 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
     let mut scratch_tokens_after_prepare = 0usize;
     let mut prefill_chunk_size_after_prepare = engine.config.prefill_chunk_size;
 
+    crate::vram_monitor::reset_request_lows();
     let prefill_result = loop {
         engine.set_prefill_runtime_chunk_cap(retry_cap);
 
@@ -3567,6 +3616,22 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
     }
 
     let total_ms = t_start.elapsed().as_secs_f64() * 1000.0;
+    crate::vram_monitor::update_request_context(&format!(
+        "route=/v1/internal/reference_test request_order={} model={} prompt_tokens={} max_new={} phase=complete",
+        reference_request_order, state.model_name, prompt_len, max_tokens,
+    ));
+    let vram_low_water = serde_json::Value::Array(
+        crate::vram_monitor::current_request_lows()
+            .into_iter()
+            .map(|(device, min_free_mb)| {
+                serde_json::json!({
+                    "device": device,
+                    "min_free_mb": min_free_mb,
+                })
+            })
+            .collect(),
+    );
+    let safety_margin_mb = store.hcs_safety_margin_mb();
 
     // ── Format response ──
     let mut per_token_json = Vec::new();
@@ -3780,14 +3845,16 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
                 "prefill_ms": prefill_ms,
                 "decode_ms": decode_ms,
                 "total_ms": total_ms,
-                "prompt_tokens": prompt_len
+                "prompt_tokens": prompt_len,
+                "vram_low_water": vram_low_water.clone(),
+                "safety_margin_mb": safety_margin_mb,
             }
         });
         debug_json_suffix.push_str(&format!(r#","debug_reference_trace":{}"#, trace));
     }
 
     let response = format!(
-        r#"{{"token_ids":[{}],"text":{},"num_tokens":{},"per_token_data":[{}],"first_token_top_k":[{}],"finish_reason":"{}","timing":{{"prefill_ms":{:.1},"decode_ms":{:.1},"total_ms":{:.1},"prompt_tokens":{}}}{}}}"#,
+        r#"{{"token_ids":[{}],"text":{},"num_tokens":{},"per_token_data":[{}],"first_token_top_k":[{}],"finish_reason":"{}","timing":{{"prefill_ms":{:.1},"decode_ms":{:.1},"total_ms":{:.1},"prompt_tokens":{},"vram_low_water":{},"safety_margin_mb":{}}}{}}}"#,
         output_tokens
             .iter()
             .map(|(t, _)| t.to_string())
@@ -3802,6 +3869,8 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
         decode_ms,
         total_ms,
         prompt_len,
+        vram_low_water,
+        safety_margin_mb,
         debug_json_suffix
     );
 
@@ -5290,6 +5359,15 @@ impl RustServer {
                         e
                     );
                 }
+                store
+                    .copy_dsa_prompt_keys_to_aux(aux_store, prompt_len)
+                    .map_err(|e| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "benchmark_request: DSA prompt key-cache copy to aux GPU{} failed: {}",
+                            i + 1,
+                            e
+                        ))
+                    })?;
             }
         }
         let (pressure_evicted, pressure_freed_mb, pressure_final_free_mb) =

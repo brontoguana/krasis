@@ -39,6 +39,7 @@
 #   ./dev reference-inventory       Inventory stored reference artifacts and classify contract state
 #   ./dev witness-inputs <model>    Build stored input_token_ids from fixed prompt-source JSON
 #   ./dev witness-model-check <model>  Check expected BF16 GGUF witness model readiness
+#   ./dev witness-build             Build the pinned llama-witness validator
 #   ./dev witness-gguf-preflight <model>  Preflight BF16 GGUF witness conversion readiness
 #   ./dev witness-gguf-convert <model>  Convert local safetensors to BF16 GGUF after preflight
 #   ./dev witness-capture <model>   Capture llama-witness JSON from stored input_token_ids
@@ -1458,6 +1459,31 @@ do_test_kernels() {
     export LD_LIBRARY_PATH="$pylibdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     # Tell the linker where to find libpython and to link it
     export RUSTFLAGS="${RUSTFLAGS:-} -L $pylibdir -l python${pyver}"
+    # Kernel tests must validate the exact repo sidecars paired with the
+    # current source and manifest, never whichever wheel happens to be
+    # importable by the embedded test interpreter.
+    local sidecar_dir="$SCRIPT_DIR/python/krasis"
+    [[ -f "$sidecar_dir/libkrasis_marlin.so" ]] \
+        || err "Repo Marlin sidecar missing: $sidecar_dir/libkrasis_marlin.so"
+    [[ -f "$sidecar_dir/libkrasis_flash_attn.so" ]] \
+        || err "Repo FlashAttention sidecar missing: $sidecar_dir/libkrasis_flash_attn.so"
+    [[ -f "$sidecar_dir/libkrasis_fla_sm80.so" ]] \
+        || err "Repo FLA sm80 sidecar missing: $sidecar_dir/libkrasis_fla_sm80.so"
+    [[ -f "$sidecar_dir/libkrasis_fla_sm89.so" ]] \
+        || err "Repo FLA sm89 sidecar missing: $sidecar_dir/libkrasis_fla_sm89.so"
+    [[ -f "$sidecar_dir/libkrasis_fla_sm90.so" ]] \
+        || err "Repo FLA sm90 sidecar missing: $sidecar_dir/libkrasis_fla_sm90.so"
+    [[ -f "$sidecar_dir/libkrasis_fla_sm120.so" ]] \
+        || err "Repo FLA sm120 sidecar missing: $sidecar_dir/libkrasis_fla_sm120.so"
+    [[ -f "$sidecar_dir/sidecar_manifest.json" ]] \
+        || err "Repo sidecar manifest missing: $sidecar_dir/sidecar_manifest.json"
+    export KRASIS_LIBKRASIS_MARLIN_SO="$sidecar_dir/libkrasis_marlin.so"
+    export KRASIS_LIBKRASIS_FLASH_ATTN_SO="$sidecar_dir/libkrasis_flash_attn.so"
+    export KRASIS_LIBKRASIS_FLA_SM80_SO="$sidecar_dir/libkrasis_fla_sm80.so"
+    export KRASIS_LIBKRASIS_FLA_SM89_SO="$sidecar_dir/libkrasis_fla_sm89.so"
+    export KRASIS_LIBKRASIS_FLA_SM90_SO="$sidecar_dir/libkrasis_fla_sm90.so"
+    export KRASIS_LIBKRASIS_FLA_SM120_SO="$sidecar_dir/libkrasis_fla_sm120.so"
+    export KRASIS_SIDECAR_MANIFEST="$sidecar_dir/sidecar_manifest.json"
 
     # Build and run kernel tests (lib only, skip other test binaries)
     cd "$SCRIPT_DIR"
@@ -1702,9 +1728,14 @@ witness_model_paths() {
             echo "$SCRIPT_DIR/../krasis-internal/reference-outputs/input-sources/GLM-4.7-Flash/glm47_witness_input_tokens.json"
             echo "$HOME/.krasis/witness-gguf/GLM-4.7-Flash-bf16.gguf"
             ;;
+        glm52|glm5.2|glm-5.2)
+            echo "$HOME/.krasis/models/GLM-5.2"
+            echo "$SCRIPT_DIR/../krasis-internal/reference-outputs/input-sources/GLM-5.2/glm52_witness_input_tokens.json"
+            echo "$HOME/.krasis/witness-gguf/GLM-5.2-bf16.gguf"
+            ;;
         *)
             err "Unknown witness model: $model
-  Available: qcn, qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47"
+  Available: qcn, qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52"
             ;;
     esac
 }
@@ -1724,7 +1755,7 @@ do_witness_model_check() {
     if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
         echo "Usage: ./dev witness-model-check <model> [--hash]"
         echo "  Checks local readiness for BF16 llama-witness capture."
-        echo "  Models: qcn, qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47"
+        echo "  Models: qcn, qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52"
         echo "  --hash computes the GGUF SHA-256 when the expected BF16 file exists."
         return 0
     fi
@@ -1741,7 +1772,7 @@ do_witness_model_check() {
             --help|-h)
                 echo "Usage: ./dev witness-model-check <model> [--hash]"
                 echo "  Checks local readiness for BF16 llama-witness capture."
-                echo "  Models: qcn, qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47"
+                echo "  Models: qcn, qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52"
                 return 0
                 ;;
             *)
@@ -2138,19 +2169,42 @@ sum_file_sizes() {
     echo "$total"
 }
 
-do_witness_gguf_preflight() {
+do_witness_build() {
     if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-        echo "Usage: ./dev witness-gguf-preflight <model> [--output PATH] [--outtype bf16]"
-        echo "  Preflights BF16 GGUF witness conversion without starting conversion."
-        echo "  Records source files, expected output, resource estimates, converter command, and support gates."
-        echo "  Models: qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47"
+        echo "Usage: ./dev witness-build"
+        echo "  Configures and builds the pinned llama-witness validator without loading a model."
         return 0
     fi
-    [[ $# -lt 1 ]] && err "Usage: ./dev witness-gguf-preflight <model> [--output PATH] [--outtype bf16]"
+    [[ $# -eq 0 ]] || err "witness-build takes no arguments"
+    [[ -d "$WITNESS_REPO" ]] || err "llama-witness repo not found: $WITNESS_REPO"
+
+    local run_dir
+    run_dir=$(create_run_dir "witness-build")
+    info "Building pinned llama-witness validator"
+    info "Run dir: $run_dir"
+    (
+        cd "$WITNESS_REPO"
+        cmake -S . -B build
+        cmake --build build --target llama-witness-validate -j "${WITNESS_BUILD_JOBS:-$(nproc)}"
+    ) 2>&1 | tee "$run_dir/witness_build.log"
+    ok "llama-witness validator build complete"
+}
+
+do_witness_gguf_preflight() {
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        echo "Usage: ./dev witness-gguf-preflight <model> [--output PATH] [--outtype bf16] [--converter-dry-run]"
+        echo "  Preflights BF16 GGUF witness conversion without starting conversion."
+        echo "  Records source files, expected output, resource estimates, converter command, and support gates."
+        echo "  --converter-dry-run traverses the converter and tensor mappings without writing output data."
+        echo "  Models: qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52"
+        return 0
+    fi
+    [[ $# -lt 1 ]] && err "Usage: ./dev witness-gguf-preflight <model> [--output PATH] [--outtype bf16] [--converter-dry-run]"
     local model="$1"
     shift
     local output_override=""
     local outtype="bf16"
+    local converter_dry_run=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --output)
@@ -2163,10 +2217,15 @@ do_witness_gguf_preflight() {
                 outtype="$2"
                 shift 2
                 ;;
+            --converter-dry-run)
+                converter_dry_run=1
+                shift
+                ;;
             --help|-h)
-                echo "Usage: ./dev witness-gguf-preflight <model> [--output PATH] [--outtype bf16]"
+                echo "Usage: ./dev witness-gguf-preflight <model> [--output PATH] [--outtype bf16] [--converter-dry-run]"
                 echo "  Preflights BF16 GGUF witness conversion without starting conversion."
-                echo "  Models: qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47"
+                echo "  --converter-dry-run traverses the converter and tensor mappings without writing output data."
+                echo "  Models: qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52"
                 return 0
                 ;;
             *)
@@ -2220,6 +2279,11 @@ do_witness_gguf_preflight() {
             expected_model_type="glm4_moe_lite"
             expected_text_model_type=""
             ;;
+        glm52|glm5.2|glm-5.2)
+            expected_arch="GlmMoeDsaForCausalLM"
+            expected_model_type="glm_moe_dsa"
+            expected_text_model_type=""
+            ;;
         step37|step3.7|step3p7|step-3.7-flash|step-3.7-flash-bf16)
             expected_arch="Step3p7ForConditionalGeneration"
             expected_model_type="step3p7"
@@ -2265,6 +2329,28 @@ do_witness_gguf_preflight() {
             fi
             if rg -q 'LLM_ARCH_DEEPSEEK2' "$WITNESS_REPO/src/llama-arch.h" \
                 && rg -q 'llm_build_deepseek2' "$WITNESS_REPO/src/llama-model.cpp" \
+                && [[ -f "$WITNESS_REPO/src/models/deepseek2.cpp" ]]; then
+                runtime_supported=true
+            else
+                status=1
+            fi
+            ;;
+        glm52|glm5.2|glm-5.2)
+            if rg -q 'GlmMoeDsaForCausalLM' "$converter" \
+                && rg -q 'class GlmMoeDsaModel' "$converter" \
+                && rg -q 'MODEL_ARCH.GLM_DSA' "$converter"; then
+                converter_supported=true
+            else
+                status=1
+            fi
+            if rg -q 'GLM_DSA' "$WITNESS_REPO/gguf-py/gguf/constants.py"; then
+                gguf_supported=true
+            else
+                status=1
+            fi
+            if rg -q 'LLM_ARCH_GLM_DSA' "$WITNESS_REPO/src/llama-arch.h" \
+                && rg -q 'GLM DSA sparse attention is not implemented in this graph' \
+                    "$WITNESS_REPO/src/models/deepseek2.cpp" \
                 && [[ -f "$WITNESS_REPO/src/models/deepseek2.cpp" ]]; then
                 runtime_supported=true
             else
@@ -2373,8 +2459,14 @@ do_witness_gguf_preflight() {
     done
 
     local safetensors=()
+    local largest_shard_bytes=0
     while IFS= read -r shard; do
         safetensors+=("$shard")
+        local shard_bytes
+        shard_bytes=$(stat -c '%s' "$shard")
+        if [[ "$shard_bytes" -gt "$largest_shard_bytes" ]]; then
+            largest_shard_bytes="$shard_bytes"
+        fi
     done < <(find "$model_dir" -maxdepth 1 -type f -name '*.safetensors' | sort)
     local shard_count="${#safetensors[@]}"
     [[ "$shard_count" -gt 0 ]] || status=1
@@ -2388,10 +2480,38 @@ do_witness_gguf_preflight() {
     local ram_available_bytes
     ram_available_bytes=$(awk '/MemAvailable:/ {print $2 * 1024}' /proc/meminfo)
 
-    # The preflight records a conservative workspace estimate; the conversion is still not started here.
+    # The converter is lazy, but its MoE merge waits for all three expert
+    # families (down/gate/up) for one layer before stacking the first output.
+    # Derive that simultaneous set from checkpoint dimensions. Non-expert
+    # conversion may instead hold one source shard and one output copy.
+    local hidden_size moe_intermediate_size routed_experts merged_expert_tensor_bytes
+    hidden_size=$(jq -r '.hidden_size // .text_config.hidden_size // 0' "$config")
+    moe_intermediate_size=$(jq -r '.moe_intermediate_size // .text_config.moe_intermediate_size // 0' "$config")
+    routed_experts=$(jq -r '.n_routed_experts // .num_local_experts // .text_config.n_routed_experts // .text_config.num_local_experts // 0' "$config")
+    merged_expert_tensor_bytes=0
+    if [[ "$routed_experts" -gt 0 ]]; then
+        if [[ "$hidden_size" -le 0 || "$moe_intermediate_size" -le 0 ]]; then
+            status=1
+        else
+            merged_expert_tensor_bytes=$((hidden_size * moe_intermediate_size * routed_experts * 2))
+        fi
+    fi
+    local largest_materialized_tensor_bytes
+    largest_materialized_tensor_bytes="$largest_shard_bytes"
+    if [[ "$merged_expert_tensor_bytes" -gt "$largest_materialized_tensor_bytes" ]]; then
+        largest_materialized_tensor_bytes="$merged_expert_tensor_bytes"
+    fi
+
+    local nonexpert_peak_bytes expert_merge_peak_bytes
+    nonexpert_peak_bytes=$((largest_shard_bytes * 2))
+    expert_merge_peak_bytes=$((merged_expert_tensor_bytes * 4 + largest_shard_bytes))
+
     local disk_required_bytes ram_required_bytes
-    disk_required_bytes=$((source_bytes * 2))
-    ram_required_bytes=$((source_bytes * 3 / 2))
+    disk_required_bytes=$((source_bytes + largest_materialized_tensor_bytes))
+    ram_required_bytes="$nonexpert_peak_bytes"
+    if [[ "$expert_merge_peak_bytes" -gt "$ram_required_bytes" ]]; then
+        ram_required_bytes="$expert_merge_peak_bytes"
+    fi
     local disk_sane=false ram_sane=false
     if [[ "$output_available_bytes" -ge "$disk_required_bytes" ]]; then
         disk_sane=true
@@ -2408,6 +2528,24 @@ do_witness_gguf_preflight() {
     printf -v converter_cmd '%q ' "$PYTHON" "$converter" "$model_dir" --outtype "$outtype" --outfile "$expected_gguf"
     converter_cmd="${converter_cmd% }"
 
+    local converter_dry_run_log=""
+    local converter_dry_run_status=-1
+    if [[ "$converter_dry_run" == "1" ]]; then
+        converter_dry_run_log="$run_dir/converter_dry_run.log"
+        info "Running converter dry-run; no GGUF tensor data will be written"
+        set +e
+        (
+            cd "$WITNESS_REPO"
+            "$PYTHON" "$converter" "$model_dir" --outtype "$outtype" \
+                --outfile "$expected_gguf" --dry-run
+        ) 2>&1 | tee "$converter_dry_run_log"
+        converter_dry_run_status=${PIPESTATUS[0]}
+        set -e
+        if [[ "$converter_dry_run_status" != "0" ]]; then
+            status=1
+        fi
+    fi
+
     {
         printf '{\n'
         printf '  "format": "krasis_witness_gguf_preflight",\n'
@@ -2422,6 +2560,17 @@ do_witness_gguf_preflight() {
         printf '    "script": "%s",\n' "$(json_escape "$converter")"
         printf '    "outtype": "%s",\n' "$(json_escape "$outtype")"
         printf '    "command": "%s"\n' "$(json_escape "$converter_cmd")"
+        printf '  },\n'
+        printf '  "converter_dry_run": {\n'
+        if [[ "$converter_dry_run" == "1" ]]; then
+            printf '    "requested": true,\n'
+            printf '    "exit_status": %s,\n' "$converter_dry_run_status"
+            printf '    "log": "%s"\n' "$(json_escape "$converter_dry_run_log")"
+        else
+            printf '    "requested": false,\n'
+            printf '    "exit_status": null,\n'
+            printf '    "log": null\n'
+        fi
         printf '  },\n'
         printf '  "config": {\n'
         printf '    "architecture": "%s",\n' "$(json_escape "$arch")"
@@ -2457,11 +2606,16 @@ do_witness_gguf_preflight() {
         printf '  "resources": {\n'
         printf '    "disk_available_bytes": %s,\n' "$output_available_bytes"
         printf '    "disk_required_bytes": %s,\n' "$disk_required_bytes"
-        printf '    "disk_estimate_rule": "2x source bytes for BF16 output plus conversion workspace",\n'
+        printf '    "disk_estimate_rule": "source-sized BF16 output plus the largest runtime-derived materialized tensor",\n'
         printf '    "disk_sane": %s,\n' "$disk_sane"
         printf '    "ram_available_bytes": %s,\n' "$ram_available_bytes"
         printf '    "ram_required_bytes": %s,\n' "$ram_required_bytes"
-        printf '    "ram_estimate_rule": "1.5x source bytes for conversion metadata and tensor streaming headroom",\n'
+        printf '    "largest_source_shard_bytes": %s,\n' "$largest_shard_bytes"
+        printf '    "largest_merged_expert_tensor_bytes": %s,\n' "$merged_expert_tensor_bytes"
+        printf '    "largest_materialized_tensor_bytes": %s,\n' "$largest_materialized_tensor_bytes"
+        printf '    "nonexpert_peak_bytes": %s,\n' "$nonexpert_peak_bytes"
+        printf '    "expert_merge_peak_bytes": %s,\n' "$expert_merge_peak_bytes"
+        printf '    "ram_estimate_rule": "maximum of two largest-shard copies or three config-derived BF16 expert families plus one stacked output and one active source shard",\n'
         printf '    "ram_sane": %s\n' "$ram_sane"
         printf '  },\n'
         printf '  "support": {\n'
@@ -2494,7 +2648,7 @@ do_witness_gguf_convert() {
         echo "  Converts a local safetensors model to BF16 GGUF only after the built preflight gate passes."
         echo "  Writes logs and conversion manifest under logs/witness-gguf-convert_*."
         echo "  Refuses to overwrite an existing expected output unless --force is supplied."
-        echo "  Models: qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47"
+        echo "  Models: qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52"
         return 0
     fi
     [[ $# -lt 1 ]] && err "Usage: ./dev witness-gguf-convert <model> [--output PATH] [--outtype bf16] [--force]"
@@ -2522,7 +2676,7 @@ do_witness_gguf_convert() {
             --help|-h)
                 echo "Usage: ./dev witness-gguf-convert <model> [--output PATH] [--outtype bf16] [--force]"
                 echo "  Converts a local safetensors model to BF16 GGUF only after the built preflight gate passes."
-                echo "  Models: qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47"
+                echo "  Models: qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52"
                 return 0
                 ;;
             *)
@@ -2654,7 +2808,7 @@ do_witness_capture() {
     if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
         echo "Usage: ./dev witness-capture <model> [--output PATH] [--reference PATH] [--profile ID] [--max-cases N] [validator args...]"
         echo "  Captures llama-witness JSON from stored input_token_ids only."
-        echo "  Models: qcn, qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47"
+        echo "  Models: qcn, qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52"
         return 0
     fi
     [[ $# -lt 1 ]] && err "Usage: ./dev witness-capture <model> [--output PATH] [--reference PATH] [--profile ID] [--max-cases N] [validator args...]
@@ -2671,7 +2825,7 @@ do_witness_capture() {
             --help|-h)
                 echo "Usage: ./dev witness-capture <model> [--output PATH] [--reference PATH] [--profile ID] [--max-cases N] [validator args...]"
                 echo "  Captures llama-witness JSON from stored input_token_ids only."
-                echo "  Models: qcn, qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47"
+                echo "  Models: qcn, qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52"
                 return 0
                 ;;
             --reference)
@@ -2741,7 +2895,7 @@ do_witness_inputs() {
         echo "Usage: ./dev witness-inputs <model> --prompt-source PATH --output PATH [--profile ID] [validator args...]"
         echo "  Tokenizes fixed prompt-source JSON into a stored llama-witness input_token_ids artifact."
         echo "  Qwen3.5 models require proven chat-template enable_thinking=false application."
-        echo "  Models: qcn, qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47"
+        echo "  Models: qcn, qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52"
         return 0
     fi
     [[ $# -lt 1 ]] && err "Usage: ./dev witness-inputs <model> --prompt-source PATH --output PATH [--profile ID] [validator args...]"
@@ -2757,7 +2911,7 @@ do_witness_inputs() {
                 echo "Usage: ./dev witness-inputs <model> --prompt-source PATH --output PATH [--profile ID] [validator args...]"
                 echo "  Tokenizes fixed prompt-source JSON into a stored llama-witness input_token_ids artifact."
                 echo "  Qwen3.5 models require proven chat-template enable_thinking=false application."
-                echo "  Models: qcn, qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47"
+                echo "  Models: qcn, qwen35, qwen36, q122b, q235, nemotron-nano, nemotron-super, step37, glm47, glm52"
                 return 0
                 ;;
             --prompt-source)
@@ -3289,6 +3443,7 @@ case "$cmd" in
     reference-test) do_reference_test "$@" ;;
     witness-inputs) do_witness_inputs "$@" ;;
     witness-model-check) do_witness_model_check "$@" ;;
+    witness-build) do_witness_build "$@" ;;
     witness-gguf-preflight) do_witness_gguf_preflight "$@" ;;
     witness-gguf-convert) do_witness_gguf_convert "$@" ;;
     witness-capture) do_witness_capture "$@" ;;
@@ -3357,6 +3512,7 @@ case "$cmd" in
         echo "  reference-inventory            Inventory stored reference artifacts"
         echo "  witness-inputs <model>         Build stored input_token_ids from fixed prompt-source JSON"
         echo "  witness-model-check <model>    Check expected BF16 GGUF witness model readiness"
+        echo "  witness-build                  Build the pinned llama-witness validator"
         echo "  witness-gguf-preflight <model> Preflight BF16 GGUF witness conversion readiness"
         echo "  witness-gguf-convert <model>   Convert local safetensors to BF16 GGUF after preflight"
         echo "  witness-capture <model>        Capture llama-witness JSON from stored input_token_ids"

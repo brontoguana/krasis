@@ -20,6 +20,7 @@ from krasis.layer import (
 from krasis.model import (
     _apply_max_context_limit,
     _dsa_owner_layers_for_segment,
+    _dsa_resource_layers_for_segment,
     _dsa_topk_candidate_capacity,
 )
 from krasis.vram_budget import _kv_bytes_per_token_per_layer
@@ -150,7 +151,36 @@ class ModelConfigContractTests(unittest.TestCase):
         )
         self.assertEqual(_dsa_owner_layers_for_segment(cfg, 3, 6), [2])
         self.assertEqual(_dsa_owner_layers_for_segment(cfg, 5, 8), [2, 6])
+        self.assertEqual(
+            _dsa_resource_layers_for_segment(cfg, 3, 6),
+            ([], [2]),
+        )
+        self.assertEqual(
+            _dsa_resource_layers_for_segment(cfg, 5, 8),
+            ([6], [2]),
+        )
+        self.assertEqual(
+            _dsa_resource_layers_for_segment(cfg, 2, 7),
+            ([2, 6], []),
+        )
         self.assertEqual(cfg.num_moe_layers, 5)
+
+        implicit_interleave = _glm_dsa_config()
+        implicit_interleave.pop("indexer_rope_interleave")
+        cfg = ModelConfig.from_model_path(
+            _write_config(self, implicit_interleave)
+        )
+        self.assertTrue(cfg.indexer_rope_interleave)
+
+        invalid_interleave = _glm_dsa_config()
+        invalid_interleave["indexer_rope_interleave"] = False
+        with self.assertRaisesRegex(
+            ValueError,
+            r"indexer requires interleaved RoPE",
+        ):
+            ModelConfig.from_model_path(
+                _write_config(self, invalid_interleave)
+            )
 
     def test_glm_moe_dsa_requires_complete_indexer_schedule(self) -> None:
         raw = _glm_dsa_config()

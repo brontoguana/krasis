@@ -711,11 +711,19 @@ class ModelConfig:
             indexer_types = [str(value) for value in raw_indexer_types]
         else:
             raise ValueError("indexer_types must be an array when present")
-        indexer_rope_interleave = bool(cfg.get("indexer_rope_interleave", False))
+        # GLM-MoE-DSA defines interleaved RoPE for its indexer projections.
+        # Released checkpoints may omit this redundant architecture semantic.
+        indexer_rope_interleave = bool(
+            cfg.get("indexer_rope_interleave", arch == "glm_moe_dsa")
+        )
         index_share_for_mtp_iteration = bool(
             cfg.get("index_share_for_mtp_iteration", False)
         )
         if arch == "glm_moe_dsa":
+            if not indexer_rope_interleave:
+                raise ValueError(
+                    "glm_moe_dsa indexer requires interleaved RoPE"
+                )
             required_positive = {
                 "q_lora_rank": int(cfg.get("q_lora_rank", 0) or 0),
                 "kv_lora_rank": int(cfg.get("kv_lora_rank", 0) or 0),

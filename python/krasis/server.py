@@ -3314,10 +3314,19 @@ def main():
                 layer_start = boundaries[gpu_idx_in_list]
                 layer_end_b = boundaries[gpu_idx_in_list + 1]
                 attn_cost = sum(_layer_vram_mb[j] for j in range(layer_start, layer_end_b))
+                dsa_resource_cost = (
+                    _model._dsa_indexer_resource_bytes_for_segment(
+                        layer_start, layer_end_b
+                    )
+                    / (1024 * 1024)
+                    if cfg.is_dsa
+                    else 0
+                )
                 # Last aux GPU has LM head overhead
                 base_overhead = last_gpu_base_overhead if (i + 1 == num_aux) else 0
                 gpu_hcs_budgets[gpu_idx_in_list] = max(0,
-                    aux_totals[i] - base_overhead - attn_cost - SAFETY_MARGIN_MB)
+                    aux_totals[i] - base_overhead - attn_cost
+                    - dsa_resource_cost - SAFETY_MARGIN_MB)
 
             total_hcs = sum(gpu_hcs_budgets)
             if total_hcs <= 0:
@@ -3358,9 +3367,18 @@ def main():
             layer_start = boundaries[gpu_idx_in_list]
             layer_end_b = boundaries[gpu_idx_in_list + 1]
             attn_cost = sum(_layer_vram_mb[j] for j in range(layer_start, layer_end_b))
+            dsa_resource_cost = (
+                _model._dsa_indexer_resource_bytes_for_segment(
+                    layer_start, layer_end_b
+                )
+                / (1024 * 1024)
+                if cfg.is_dsa
+                else 0
+            )
             base_overhead = last_gpu_base_overhead if (i + 1 == num_aux) else 0
             gpu_hcs_budgets[gpu_idx_in_list] = max(0,
-                aux_totals[i] - base_overhead - attn_cost - SAFETY_MARGIN_MB)
+                aux_totals[i] - base_overhead - attn_cost
+                - dsa_resource_cost - SAFETY_MARGIN_MB)
         total_hcs = sum(gpu_hcs_budgets)
         _detail(f"HCS budgets: " + ", ".join(
             f"GPU{i} {gpu_hcs_budgets[i]:,.0f} MB" for i in range(num_gpus_available)
@@ -3835,6 +3853,8 @@ def main():
                         _multi_gpu_gqa_offsets[i], prompt_len)
                     gpu_store.py_copy_la_states_to_aux(
                         all_aux_gpu_store_addrs[i], seg_start, seg_end)
+                    gpu_store.py_copy_dsa_prompt_keys_to_aux(
+                        all_aux_gpu_store_addrs[i], prompt_len)
 
                 r0, _ = gpu_store.py_hcs_reload_after_prefill(prompt_len)
                 if r0 > 0:
@@ -3944,6 +3964,8 @@ def main():
                     _multi_gpu_gqa_offsets[i], prompt_len)
                 gpu_store.py_copy_la_states_to_aux(
                     all_aux_gpu_store_addrs[i], seg_start, seg_end)
+                gpu_store.py_copy_dsa_prompt_keys_to_aux(
+                    all_aux_gpu_store_addrs[i], prompt_len)
 
             # Reload soft HCS on GPU0 only (aux GPUs have no soft tier)
             r0, _ = gpu_store.py_hcs_reload_after_prefill(prompt_len)

@@ -3022,10 +3022,16 @@ const KERNEL_NAMES: &[&str] = &[
     "scale_bf16",
     "scale_bf16_by_ptr",
     "dsa_layernorm_rope_key_write",
+    "dsa_layernorm_rope_key_write_g",
     "dsa_rope_query_bf16",
+    "dsa_rope_query_bf16_g",
     "dsa_reduce_weighted_scores",
+    "dsa_reduce_weighted_scores_g",
+    "dsa_fused_live_scores_g",
     "dsa_topk_sort_chunks",
+    "dsa_topk_sort_chunks_g",
     "dsa_topk_merge_runs",
+    "dsa_topk_merge_runs_g",
     "la_conv1d",
     "uninterleave_qkvz",
     "compute_gate_beta",
@@ -3136,6 +3142,8 @@ const KERNEL_NAMES: &[&str] = &[
     "mla_kv_cache_write_k4",
     "mla_attention_k4_g",
     "mla_attention_k4",
+    "mla_sparse_attention_k4_g",
+    "mla_sparse_attention_k4",
     "mla_deinterleave",
     "mla_split_q",
     "mla_absorb_wkc",
@@ -7144,12 +7152,28 @@ struct DsaIndexerOwnerResource {
     d_topk_indices: cudarc::driver::CudaSlice<i32>,
 }
 
+struct DsaIndexShareReplicaResource {
+    owner_layer_idx: usize,
+    topk_capacity: usize,
+    d_topk_indices: cudarc::driver::CudaSlice<i32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DsaSelectedIndexView {
+    owner_layer_idx: usize,
+    d_indices_ptr: u64,
+    topk_capacity: usize,
+}
+
 struct DsaIndexerWorkspace {
     max_context_tokens: usize,
     max_index_n_heads: usize,
     max_index_head_dim: usize,
     max_topk_candidate_capacity: usize,
     max_topk_shared_bytes: usize,
+    fused_score_grid_blocks: u32,
+    fused_score_block_threads: u32,
+    fused_score_shared_bytes: u32,
     d_raw_key: cudarc::driver::CudaSlice<u16>,
     d_projected_query: cudarc::driver::CudaSlice<u16>,
     d_query_rope: cudarc::driver::CudaSlice<u16>,
@@ -7162,18 +7186,28 @@ struct DsaIndexerWorkspace {
     d_topk_indices_b: Option<cudarc::driver::CudaSlice<i32>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct DsaTopkPlan {
-    context: usize,
-    selected: usize,
-    sort_width: usize,
-    initial_runs: usize,
-    merge_passes: usize,
-    candidate_capacity: usize,
-    shared_bytes: usize,
+extern "C" fn dsa_zero_dynamic_smem_for_occupancy(_: std::ffi::c_int) -> usize {
+    0
 }
 
-fn plan_dsa_topk(context: usize, configured_topk: usize) -> Result<DsaTopkPlan, String> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DsaTopkPlan {
+    pub(crate) context: usize,
+    pub(crate) selected: usize,
+    pub(crate) sort_width: usize,
+    pub(crate) initial_runs: usize,
+    pub(crate) merge_passes: usize,
+    pub(crate) candidate_capacity: usize,
+    pub(crate) shared_bytes: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DsaGraphScoreBackend {
+    FixedCapacityTensorCore,
+    LiveFused,
+}
+
+pub(crate) fn plan_dsa_topk(context: usize, configured_topk: usize) -> Result<DsaTopkPlan, String> {
     if context == 0 {
         return Err("DSA top-k requires positive context".to_string());
     }
@@ -7406,7 +7440,7 @@ fn validate_dsa_indexer_registration(
     })
 }
 
-fn incomplete_dsa_layers(graph: &GpuDecodeGraph) -> Vec<usize> {
+fn dsa_registered_layers(graph: &GpuDecodeGraph) -> Vec<usize> {
     graph
         .layers
         .iter()
@@ -7415,7 +7449,7 @@ fn incomplete_dsa_layers(graph: &GpuDecodeGraph) -> Vec<usize> {
         .collect()
 }
 
-fn validate_dsa_exact_prefix_limit(
+fn validate_dsa_runtime_registration(
     registrations: &[&DsaIndexerRegistration],
     expected_layers: usize,
     runtime_context_tokens: usize,
@@ -7424,7 +7458,7 @@ fn validate_dsa_exact_prefix_limit(
         .first()
         .ok_or_else(|| "DSA graph flag is set but no layer registrations exist".to_string())?;
     if runtime_context_tokens == 0 {
-        return Err("DSA exact-prefix mode requires a positive runtime context".to_string());
+        return Err("DSA runtime requires a positive context".to_string());
     }
     if registrations.len() != expected_layers {
         return Err(format!(
@@ -7442,20 +7476,14 @@ fn validate_dsa_exact_prefix_limit(
             ));
         }
     }
-    if runtime_context_tokens > index_topk {
-        return Err(format!(
-            "GLM DSA sparse attention is not implemented: runtime context {} exceeds registered index_topk {}; refusing inexact dense MLA",
-            runtime_context_tokens, index_topk
-        ));
-    }
     Ok(index_topk)
 }
 
-fn validate_dsa_exact_prefix_graph(
+fn validate_dsa_runtime_graph(
     graph: &GpuDecodeGraph,
     max_tokens: usize,
-) -> Result<Option<usize>, String> {
-    if !graph.dsa_runtime_incomplete {
+) -> Result<Option<(usize, usize)>, String> {
+    if !graph.dsa_runtime_registered {
         return Ok(None);
     }
     let registrations = graph
@@ -7464,20 +7492,134 @@ fn validate_dsa_exact_prefix_graph(
         .filter_map(|layer| layer.dsa_indexer.as_ref())
         .collect::<Vec<_>>();
     let runtime_context_tokens = max_tokens.max(graph.kv_max_seq);
-    validate_dsa_exact_prefix_limit(&registrations, graph.layers.len(), runtime_context_tokens)
-        .map(Some)
+    let index_topk = validate_dsa_runtime_registration(
+        &registrations,
+        graph.layers.len(),
+        runtime_context_tokens,
+    )?;
+    if !graph.dsa_indexer_resources_finalized {
+        return Err("DSA runtime resources were not finalized before prefill construction".into());
+    }
+    let workspace = graph
+        .dsa_indexer_workspace
+        .as_ref()
+        .ok_or_else(|| "DSA prefill requires a full-primary indexer workspace".to_string())?;
+    if workspace.max_context_tokens < runtime_context_tokens {
+        return Err(format!(
+            "DSA workspace context capacity {} is smaller than runtime context {}",
+            workspace.max_context_tokens, runtime_context_tokens
+        ));
+    }
+
+    let owners = registrations
+        .iter()
+        .filter(|registration| registration.owner_weights_present)
+        .map(|registration| registration.owner_layer_idx)
+        .collect::<std::collections::BTreeSet<_>>();
+    for owner_layer_idx in &owners {
+        let registration = registrations
+            .iter()
+            .copied()
+            .find(|registration| registration.owner_layer_idx == *owner_layer_idx)
+            .ok_or_else(|| format!("DSA owner {} has no registration", owner_layer_idx))?;
+        let matching_resources = graph
+            .dsa_indexer_owners
+            .iter()
+            .filter(|resource| resource.owner_layer_idx == *owner_layer_idx)
+            .collect::<Vec<_>>();
+        if matching_resources.len() != 1 {
+            return Err(format!(
+                "DSA owner {} requires exactly one full-primary resource, found {}",
+                owner_layer_idx,
+                matching_resources.len()
+            ));
+        }
+        let resource = matching_resources[0];
+        if resource.max_context_tokens < runtime_context_tokens {
+            return Err(format!(
+                "DSA owner {} key-cache capacity {} is smaller than runtime context {}",
+                owner_layer_idx, resource.max_context_tokens, runtime_context_tokens
+            ));
+        }
+        let expected_topk_capacity = registration.index_topk.min(resource.max_context_tokens);
+        if resource.topk_capacity != expected_topk_capacity
+            || resource.index_head_dim != registration.index_head_dim
+        {
+            return Err(format!(
+                "DSA owner {} resource geometry [topk={}, head_dim={}] != registered [{}, {}]",
+                owner_layer_idx,
+                resource.topk_capacity,
+                resource.index_head_dim,
+                expected_topk_capacity,
+                registration.index_head_dim
+            ));
+        }
+    }
+    if graph.dsa_indexer_owners.len() != owners.len() {
+        return Err(format!(
+            "DSA full-primary resource count {} != registered owner count {}",
+            graph.dsa_indexer_owners.len(),
+            owners.len()
+        ));
+    }
+    Ok(Some((index_topk, runtime_context_tokens)))
 }
 
 #[cfg(test)]
 mod dsa_registration_tests {
+    use std::sync::Mutex;
+
+    use cudarc::cublas::{result as cublas_result, sys as cublas_sys};
     use cudarc::driver::sys as cuda_sys;
     use cudarc::driver::DevicePtr;
 
     use super::{
-        create_decode_timing_event, plan_dsa_topk, validate_dsa_exact_prefix_limit,
+        create_decode_timing_event, plan_dsa_topk, validate_dsa_runtime_registration,
         validate_dsa_indexer_registration, validate_dsa_owner_weight_contract,
+        validate_stream_probe_outcome, DsaGraphScoreBackend, DsaIndexerOwnerResource,
         DsaIndexerOwnerWeightIds, GpuDecodeStore, GpuWeight,
     };
+
+    static DSA_CUDA_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn dsa_cuda_test_gpu_ordinal() -> usize {
+        if let Ok(raw) = std::env::var("KRASIS_TEST_GPU_ORDINAL") {
+            return raw
+                .parse::<usize>()
+                .expect("KRASIS_TEST_GPU_ORDINAL must be an integer");
+        }
+        assert_eq!(
+            unsafe { cuda_sys::lib().cuInit(0) },
+            cuda_sys::CUresult::CUDA_SUCCESS
+        );
+        let mut device_count = 0i32;
+        assert_eq!(
+            unsafe { cuda_sys::lib().cuDeviceGetCount(&mut device_count as *mut i32) },
+            cuda_sys::CUresult::CUDA_SUCCESS
+        );
+        assert!(device_count > 0, "DSA CUDA tests require a CUDA device");
+        (0..device_count)
+            .map(|ordinal| {
+                let mut device = 0i32;
+                assert_eq!(
+                    unsafe {
+                        cuda_sys::lib().cuDeviceGet(&mut device as *mut cuda_sys::CUdevice, ordinal)
+                    },
+                    cuda_sys::CUresult::CUDA_SUCCESS
+                );
+                let mut total_bytes = 0usize;
+                assert_eq!(
+                    unsafe {
+                        cuda_sys::lib().cuDeviceTotalMem_v2(&mut total_bytes as *mut usize, device)
+                    },
+                    cuda_sys::CUresult::CUDA_SUCCESS
+                );
+                (ordinal as usize, total_bytes)
+            })
+            .max_by_key(|(_, total_bytes)| *total_bytes)
+            .expect("largest CUDA device")
+            .0
+    }
 
     #[test]
     fn topk_planning_is_runtime_sized_and_exactly_bounded() {
@@ -7505,6 +7647,20 @@ mod dsa_registration_tests {
         assert_eq!(non_power_of_two.candidate_capacity, 3 * 1537);
         assert!(plan_dsa_topk(0, 2048).is_err());
         assert!(plan_dsa_topk(2048, 0).is_err());
+    }
+
+    #[test]
+    fn decode_probe_rejects_failed_or_empty_stream_measurements() {
+        assert!(validate_stream_probe_outcome(0, 0, None)
+            .unwrap_err()
+            .contains("requires max_tokens > 0"));
+        assert!(validate_stream_probe_outcome(8, 3, Some("decode_step error: sentinel"))
+            .unwrap_err()
+            .contains("decode_step error: sentinel"));
+        assert!(validate_stream_probe_outcome(8, 0, None)
+            .unwrap_err()
+            .contains("generated zero tokens"));
+        validate_stream_probe_outcome(8, 1, None).expect("one measured decode token is valid");
     }
 
     #[test]
@@ -7551,7 +7707,7 @@ mod dsa_registration_tests {
     }
 
     #[test]
-    fn dense_mla_is_allowed_only_when_the_complete_prefix_is_selected() {
+    fn dsa_registration_accepts_exact_and_sparse_runtime_contexts() {
         let owner = validate_dsa_indexer_registration(
             2, 2, true, 2048, 128, 32, 64, 4, 3, 2048, 6144, true,
         )
@@ -7563,14 +7719,16 @@ mod dsa_registration_tests {
         let registrations = [&owner, &shared];
 
         assert_eq!(
-            validate_dsa_exact_prefix_limit(&registrations, 2, 2048)
+            validate_dsa_runtime_registration(&registrations, 2, 2048)
                 .expect("index_topk covers the complete runtime context"),
             2048
         );
-        assert!(validate_dsa_exact_prefix_limit(&registrations, 2, 2049)
-            .unwrap_err()
-            .contains("refusing inexact dense MLA"));
-        assert!(validate_dsa_exact_prefix_limit(&registrations, 3, 2048)
+        assert_eq!(
+            validate_dsa_runtime_registration(&registrations, 2, 2049)
+                .expect("sparse runtime context exceeds index_topk"),
+            2048
+        );
+        assert!(validate_dsa_runtime_registration(&registrations, 3, 2048)
             .unwrap_err()
             .contains("2 of 3 layers registered"));
 
@@ -7579,7 +7737,7 @@ mod dsa_registration_tests {
         )
         .expect("standalone owner should validate");
         assert!(
-            validate_dsa_exact_prefix_limit(&[&owner, &mismatched], 2, 1024)
+            validate_dsa_runtime_registration(&[&owner, &mismatched], 2, 1024)
                 .unwrap_err()
                 .contains("disagree on index_topk")
         );
@@ -7632,8 +7790,12 @@ mod dsa_registration_tests {
     }
 
     #[test]
-    fn shared_layer_can_stage_an_owner_from_before_its_gpu_segment() {
-        let mut store = GpuDecodeStore::new(0).expect("CUDA decode store");
+    fn shared_layer_uses_a_replica_for_an_owner_before_its_gpu_segment() {
+        let _cuda_test_guard = DSA_CUDA_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut store =
+            GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal()).expect("CUDA decode store");
         store
             .configure(8, 2, 16, 1e-6, 2, 8, 16, 4, 4, 8, 8)
             .expect("small graph");
@@ -7676,40 +7838,9 @@ mod dsa_registration_tests {
             .register_dsa_indexer_layer(1, 0, false, 4, 4, 2, 2, 4, 0, 4, 8, true)
             .expect("shared DSA layer");
 
-        let wq_b = store.device.alloc_zeros::<u16>(8 * 4).expect("wq_b");
-        let wk = store.device.alloc_zeros::<u16>(4 * 8).expect("wk");
-        let weights_proj = store
-            .device
-            .alloc_zeros::<u16>(2 * 8)
-            .expect("weights_proj");
-        let k_norm_weight = store.device.alloc_zeros::<u16>(4).expect("k_norm_weight");
-        let k_norm_bias = store.device.alloc_zeros::<u16>(4).expect("k_norm_bias");
-        let wq_b_wid = store
-            .register_weight(*wq_b.device_ptr() as usize, 8, 4, 0)
-            .expect("wq_b weight");
-        let wk_wid = store
-            .register_weight(*wk.device_ptr() as usize, 4, 8, 0)
-            .expect("wk weight");
-        let weights_proj_wid = store
-            .register_weight(*weights_proj.device_ptr() as usize, 2, 8, 0)
-            .expect("weights_proj weight");
-        let k_norm_weight_wid = store
-            .register_weight(*k_norm_weight.device_ptr() as usize, 1, 4, 0)
-            .expect("k_norm_weight");
-        let k_norm_bias_wid = store
-            .register_weight(*k_norm_bias.device_ptr() as usize, 1, 4, 0)
-            .expect("k_norm_bias");
         store
-            .register_dsa_indexer_owner_resource(
-                0,
-                wq_b_wid,
-                wk_wid,
-                weights_proj_wid,
-                k_norm_weight_wid,
-                k_norm_bias_wid,
-                8,
-            )
-            .expect("cross-segment owner resource");
+            .register_dsa_indexshare_replica(0, 8)
+            .expect("cross-segment selection replica");
         assert_eq!(
             store
                 .finalize_dsa_indexer_resources()
@@ -7724,21 +7855,549 @@ mod dsa_registration_tests {
         .expect("diagnostic JSON");
         assert_eq!(diagnostic["owner_layer_idx"], 0);
         assert_eq!(diagnostic["resource_ready"], true);
-        assert_eq!(
-            diagnostic["resource"]["key_cache_shape"],
-            serde_json::json!([8, 4])
-        );
-        assert_eq!(diagnostic["resource"]["topk_capacity"], 4);
-        assert_eq!(diagnostic["workspace_ready"], true);
-        assert_eq!(
-            diagnostic["workspace"]["head_score_shape"],
-            serde_json::json!([2, 8])
-        );
+        assert_eq!(diagnostic["resource_kind"], "indexshare_replica");
+        assert!(diagnostic["resource"].is_null());
+        assert_eq!(diagnostic["replica"]["topk_capacity"], 4);
+        assert_eq!(diagnostic["workspace_ready"], false);
+        assert_eq!(diagnostic["resources_finalized"], true);
         assert_eq!(diagnostic["executable"], false);
+        let resolved = GpuDecodeStore::resolve_dsa_selected_indices_for_layer(
+            store.graph.as_ref().expect("destination graph"),
+            1,
+        )
+        .expect("shared layer IndexShare result");
+        assert_eq!(resolved.owner_layer_idx, 0);
+        assert_eq!(resolved.topk_capacity, 4);
+        assert_eq!(
+            resolved.d_indices_ptr,
+            *store
+                .graph
+                .as_ref()
+                .expect("destination graph")
+                .dsa_indexshare_replicas[0]
+                .d_topk_indices
+                .device_ptr()
+        );
+
+        let mut source =
+            GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal()).expect("source CUDA decode store");
+        source
+            .configure(8, 2, 16, 1e-6, 2, 8, 16, 4, 4, 8, 8)
+            .expect("source graph");
+        let source_indices = source
+            .device
+            .htod_copy(vec![3i32, 1, 2, 0])
+            .expect("source top-k");
+        let source_key_cache = source
+            .device
+            .htod_copy((1u16..=(8 * 4) as u16).collect::<Vec<_>>())
+            .expect("source key cache");
+        {
+            let graph = source.graph.as_mut().expect("source graph");
+            graph.dsa_indexer_owners.push(DsaIndexerOwnerResource {
+                owner_layer_idx: 0,
+                weight_ids: DsaIndexerOwnerWeightIds {
+                    wq_b: 0,
+                    wk: 0,
+                    weights_proj: 0,
+                    k_norm_weight: 0,
+                    k_norm_bias: 0,
+                },
+                max_context_tokens: 8,
+                index_head_dim: 4,
+                topk_capacity: 4,
+                d_key_cache: source_key_cache,
+                d_topk_indices: source_indices,
+            });
+            graph.dsa_indexer_resources_finalized = true;
+        }
+        assert_eq!(
+            source
+                .copy_dsa_indexshare_to(&mut store)
+                .expect("IndexShare cross-store handoff"),
+            (1, 4 * std::mem::size_of::<i32>())
+        );
+        let copied = store
+            .device
+            .dtoh_sync_copy(
+                &store
+                    .graph
+                    .as_ref()
+                    .expect("destination graph")
+                    .dsa_indexshare_replicas[0]
+                    .d_topk_indices,
+            )
+            .expect("replica D2H");
+        assert_eq!(copied, vec![3, 1, 2, 0]);
+
+        let mut local_destination =
+            GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal()).expect("local destination store");
+        local_destination
+            .configure(8, 2, 16, 1e-6, 2, 8, 16, 4, 4, 8, 8)
+            .expect("local destination graph");
+        let destination_key_cache = local_destination
+            .device
+            .htod_copy(vec![0x7bcdu16; 8 * 4])
+            .expect("destination key cache");
+        let destination_indices = local_destination
+            .device
+            .alloc_zeros::<i32>(4)
+            .expect("destination top-k");
+        {
+            let graph = local_destination
+                .graph
+                .as_mut()
+                .expect("local destination graph");
+            graph.dsa_indexer_owners.push(DsaIndexerOwnerResource {
+                owner_layer_idx: 0,
+                weight_ids: DsaIndexerOwnerWeightIds {
+                    wq_b: 0,
+                    wk: 0,
+                    weights_proj: 0,
+                    k_norm_weight: 0,
+                    k_norm_bias: 0,
+                },
+                max_context_tokens: 8,
+                index_head_dim: 4,
+                topk_capacity: 4,
+                d_key_cache: destination_key_cache,
+                d_topk_indices: destination_indices,
+            });
+            graph.dsa_indexer_resources_finalized = true;
+        }
+        assert_eq!(
+            source
+                .copy_dsa_prompt_keys_to_aux(&mut local_destination, 3)
+                .expect("DSA prompt key-cache handoff"),
+            (1, 3 * 4 * std::mem::size_of::<u16>())
+        );
+        let copied_keys = local_destination
+            .device
+            .dtoh_sync_copy(
+                &local_destination
+                    .graph
+                    .as_ref()
+                    .expect("local destination graph")
+                    .dsa_indexer_owners[0]
+                    .d_key_cache,
+            )
+            .expect("destination key-cache D2H");
+        assert_eq!(
+            &copied_keys[..3 * 4],
+            &(1u16..=(3 * 4) as u16).collect::<Vec<_>>()
+        );
+        assert_eq!(&copied_keys[3 * 4..], &vec![0x7bcdu16; 5 * 4]);
+    }
+
+    #[test]
+    fn dsa_graph_capacity_timing() {
+        let _cuda_test_guard = DSA_CUDA_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        pyo3::prepare_freethreaded_python();
+
+        // This is an evidence fixture for the current GLM-5.2 checkpoint
+        // geometry, not a runtime default. Production allocations continue to
+        // derive all dimensions from the registered model/config contract.
+        let hidden_size = 6144usize;
+        let q_lora_rank = 2048usize;
+        let index_head_dim = 128usize;
+        let index_n_heads = 32usize;
+        let qk_rope_head_dim = 64usize;
+        let max_context_tokens = 1_048_576usize;
+        let index_topk = 2048usize;
+
+        let gpu_ordinal = dsa_cuda_test_gpu_ordinal();
+
+        let mut store = GpuDecodeStore::new(gpu_ordinal).expect("CUDA decode store");
+        store
+            .device
+            .bind_to_thread()
+            .expect("bind capacity timing device");
+        let (free_before, total_vram) =
+            cudarc::driver::result::mem_get_info().expect("pre-allocation CUDA memory");
+        store
+            .configure(
+                hidden_size,
+                1,
+                8,
+                1e-6,
+                1,
+                8,
+                index_n_heads * index_head_dim,
+                4,
+                4,
+                8,
+                8,
+            )
+            .expect("GLM-5.2 geometry graph");
+
+        let bf16_zeros = |elements: usize| vec![0u16; elements];
+        let dummy = store
+            .device
+            .htod_copy(bf16_zeros(1))
+            .expect("dummy MLA weight");
+        let dummy_wid = store
+            .register_weight(*dummy.device_ptr() as usize, 1, 1, 0)
+            .expect("dummy MLA weight registration");
+        store
+            .register_mla_layer(
+                0,
+                1,
+                hidden_size,
+                1,
+                hidden_size,
+                dummy_wid,
+                dummy_wid,
+                1,
+                1,
+                1,
+                1,
+                512,
+                128,
+                qk_rope_head_dim,
+                128,
+                0.08838834764831845,
+                true,
+                1,
+                1,
+                Some(dummy_wid),
+                Some(dummy_wid),
+                1,
+                None,
+                q_lora_rank,
+                512,
+            )
+            .expect("MLA metadata");
+        store
+            .register_dsa_indexer_layer(
+                0,
+                0,
+                true,
+                index_topk,
+                index_head_dim,
+                index_n_heads,
+                qk_rope_head_dim,
+                4,
+                0,
+                q_lora_rank,
+                hidden_size,
+                true,
+            )
+            .expect("DSA owner metadata");
+
+        let wq_b = store
+            .device
+            .htod_copy(bf16_zeros(index_n_heads * index_head_dim * q_lora_rank))
+            .expect("wq_b");
+        let wk = store
+            .device
+            .htod_copy(bf16_zeros(index_head_dim * hidden_size))
+            .expect("wk");
+        let weights_proj = store
+            .device
+            .htod_copy(bf16_zeros(index_n_heads * hidden_size))
+            .expect("weights_proj");
+        let k_norm_weight = store
+            .device
+            .htod_copy(
+                (0..index_head_dim)
+                    .map(|_| half::bf16::from_f32(1.0).to_bits())
+                    .collect::<Vec<_>>(),
+            )
+            .expect("k_norm_weight");
+        let k_norm_bias = store
+            .device
+            .htod_copy(bf16_zeros(index_head_dim))
+            .expect("k_norm_bias");
+        let wq_b_wid = store
+            .register_weight(
+                *wq_b.device_ptr() as usize,
+                index_n_heads * index_head_dim,
+                q_lora_rank,
+                0,
+            )
+            .expect("wq_b weight");
+        let wk_wid = store
+            .register_weight(*wk.device_ptr() as usize, index_head_dim, hidden_size, 0)
+            .expect("wk weight");
+        let weights_proj_wid = store
+            .register_weight(
+                *weights_proj.device_ptr() as usize,
+                index_n_heads,
+                hidden_size,
+                0,
+            )
+            .expect("weights_proj weight");
+        let k_norm_weight_wid = store
+            .register_weight(*k_norm_weight.device_ptr() as usize, 1, index_head_dim, 0)
+            .expect("k_norm_weight");
+        let k_norm_bias_wid = store
+            .register_weight(*k_norm_bias.device_ptr() as usize, 1, index_head_dim, 0)
+            .expect("k_norm_bias");
+
+        let topk_plan = plan_dsa_topk(max_context_tokens, index_topk).expect("capacity top-k plan");
+        let query_elems = index_n_heads * index_head_dim;
+        let owner_runtime_bytes = max_context_tokens * index_head_dim * std::mem::size_of::<u16>()
+            + index_topk * std::mem::size_of::<i32>();
+        let workspace_runtime_bytes = index_head_dim * std::mem::size_of::<u16>()
+            + query_elems * std::mem::size_of::<u16>() * 2
+            + index_n_heads * std::mem::size_of::<u16>()
+            + max_context_tokens * index_n_heads * std::mem::size_of::<f32>()
+            + max_context_tokens * std::mem::size_of::<f32>()
+            + topk_plan.candidate_capacity
+                * (std::mem::size_of::<f32>() + std::mem::size_of::<i32>())
+                * 2;
+        let planned_runtime_bytes = owner_runtime_bytes + workspace_runtime_bytes;
+        let minimum_free_mib = std::env::var("KRASIS_TEST_MIN_FREE_MIB")
+            .ok()
+            .map(|raw| {
+                raw.parse::<usize>()
+                    .expect("KRASIS_TEST_MIN_FREE_MIB must be an integer")
+            })
+            .unwrap_or(600);
+        let minimum_free_bytes = minimum_free_mib * 1024 * 1024;
+        store
+            .device
+            .bind_to_thread()
+            .expect("bind before DSA resource preflight");
+        let (free_before_resources, _) =
+            cudarc::driver::result::mem_get_info().expect("pre-resource CUDA memory");
+        assert!(
+            free_before_resources
+                >= planned_runtime_bytes.saturating_add(minimum_free_bytes),
+            "DSA capacity timing refuses to allocate {} MiB on cuda:{}: free={} MiB would not preserve the configured {} MiB test safety margin",
+            planned_runtime_bytes / (1024 * 1024),
+            gpu_ordinal,
+            free_before_resources / (1024 * 1024),
+            minimum_free_mib,
+        );
+        store
+            .register_dsa_indexer_owner_resource(
+                0,
+                wq_b_wid,
+                wk_wid,
+                weights_proj_wid,
+                k_norm_weight_wid,
+                k_norm_bias_wid,
+                max_context_tokens,
+            )
+            .expect("owner resource");
+        store
+            .finalize_dsa_indexer_resources()
+            .expect("owner workspace");
+        store
+            .device
+            .bind_to_thread()
+            .expect("bind after DSA resource finalize");
+        let (free_after_finalize, _) =
+            cudarc::driver::result::mem_get_info().expect("post-finalize CUDA memory");
+        eprintln!(
+            "DSA_GRAPH_FIXED_CAPACITY_VRAM gpu_ordinal={} total_mib={} free_before_mib={} free_before_resources_mib={} planned_runtime_mib={} free_after_finalize_mib={} allocated_delta_mib={}",
+            gpu_ordinal,
+            total_vram / (1024 * 1024),
+            free_before / (1024 * 1024),
+            free_before_resources / (1024 * 1024),
+            planned_runtime_bytes / (1024 * 1024),
+            free_after_finalize / (1024 * 1024),
+            free_before.saturating_sub(free_after_finalize) / (1024 * 1024),
+        );
+
+        let rope_half_dim = qk_rope_head_dim / 2;
+        let cos = store
+            .device
+            .htod_copy(vec![1.0f32; rope_half_dim])
+            .expect("cos table");
+        let sin = store
+            .device
+            .htod_copy(vec![0.0f32; rope_half_dim])
+            .expect("sin table");
+        store
+            .set_rope_tables(
+                *cos.device_ptr() as usize,
+                *sin.device_ptr() as usize,
+                rope_half_dim,
+                1,
+            )
+            .expect("RoPE tables");
+        store
+            .init_cuda_graph_buffers()
+            .expect("graph scalar buffers and cuBLAS workspace");
+        store
+            .device
+            .bind_to_thread()
+            .expect("bind after DSA graph setup");
+        let (free_after_setup, _) =
+            cudarc::driver::result::mem_get_info().expect("post-setup CUDA memory");
+        eprintln!(
+            "DSA_GRAPH_FIXED_CAPACITY_READY gpu_ordinal={} free_after_setup_mib={} configured_test_safety_mib={}",
+            gpu_ordinal,
+            free_after_setup / (1024 * 1024),
+            minimum_free_mib,
+        );
+
+        let hidden = store
+            .device
+            .htod_copy(bf16_zeros(hidden_size))
+            .expect("hidden");
+        let q_resid = store
+            .device
+            .htod_copy(bf16_zeros(q_lora_rank))
+            .expect("query residual");
+        let (d_position_ptr, d_seq_len_ptr) = {
+            let graph = store.graph.as_ref().expect("graph");
+            (
+                *graph
+                    .d_graph_pos
+                    .as_ref()
+                    .expect("graph position")
+                    .device_ptr(),
+                *graph
+                    .d_graph_seq_len
+                    .as_ref()
+                    .expect("graph sequence length")
+                    .device_ptr(),
+            )
+        };
+        let position = 0i32;
+        unsafe {
+            assert_eq!(
+                cuda_sys::lib().cuMemcpyHtoD_v2(
+                    d_position_ptr,
+                    &position as *const i32 as *const std::ffi::c_void,
+                    std::mem::size_of::<i32>(),
+                ),
+                cuda_sys::CUresult::CUDA_SUCCESS
+            );
+        }
+
+        let run_pipeline = |store: &GpuDecodeStore, backend| {
+            store
+                .execute_dsa_owner_scores_graphable(
+                    0,
+                    d_position_ptr,
+                    d_seq_len_ptr,
+                    *hidden.device_ptr(),
+                    *q_resid.device_ptr(),
+                    backend,
+                )
+                .expect("fixed-capacity owner scores");
+            store
+                .execute_dsa_owner_topk_graphable(0, d_seq_len_ptr)
+                .expect("fixed-capacity owner top-k")
+        };
+        let (base_grid_blocks, block_threads, fused_shared_bytes) = {
+            let workspace = store
+                .graph
+                .as_ref()
+                .expect("graph")
+                .dsa_indexer_workspace
+                .as_ref()
+                .expect("workspace");
+            (
+                workspace.fused_score_grid_blocks,
+                workspace.fused_score_block_threads,
+                workspace.fused_score_shared_bytes,
+            )
+        };
+        eprintln!(
+            "DSA_FUSED_SCORE_OCCUPANCY base_grid_blocks={} block_threads={} shared_bytes={}",
+            base_grid_blocks, block_threads, fused_shared_bytes,
+        );
+        for backend in [
+            DsaGraphScoreBackend::FixedCapacityTensorCore,
+            DsaGraphScoreBackend::LiveFused,
+        ] {
+            for live_context in [2usize, 2048, 2049, 10_000, 100_000, max_context_tokens] {
+                let sequence_length = i32::try_from(live_context).expect("live context fits i32");
+                unsafe {
+                    assert_eq!(
+                        cuda_sys::lib().cuMemcpyHtoD_v2(
+                            d_seq_len_ptr,
+                            &sequence_length as *const i32 as *const std::ffi::c_void,
+                            std::mem::size_of::<i32>(),
+                        ),
+                        cuda_sys::CUresult::CUDA_SUCCESS
+                    );
+                }
+                let warmup_plan = run_pipeline(&store, backend);
+                assert_eq!(warmup_plan.context, max_context_tokens);
+                assert_eq!(warmup_plan.selected, index_topk);
+                store.device.synchronize().expect("timing warmup");
+
+                let iterations = 5usize;
+                let start = create_decode_timing_event().expect("pipeline start event");
+                let end = create_decode_timing_event().expect("pipeline end event");
+                let stream = *store.device.cu_stream();
+                assert_eq!(
+                    unsafe { cuda_sys::lib().cuEventRecord(start.0, stream) },
+                    cuda_sys::CUresult::CUDA_SUCCESS
+                );
+                let mut plan = None;
+                for _ in 0..iterations {
+                    plan = Some(run_pipeline(&store, backend));
+                }
+                assert_eq!(
+                    unsafe { cuda_sys::lib().cuEventRecord(end.0, stream) },
+                    cuda_sys::CUresult::CUDA_SUCCESS
+                );
+                assert_eq!(
+                    unsafe { cuda_sys::lib().cuEventSynchronize(end.0) },
+                    cuda_sys::CUresult::CUDA_SUCCESS
+                );
+                let mut elapsed_ms = 0.0f32;
+                assert_eq!(
+                    unsafe { cuda_sys::lib().cuEventElapsedTime(&mut elapsed_ms, start.0, end.0) },
+                    cuda_sys::CUresult::CUDA_SUCCESS
+                );
+                let plan = plan.expect("timed plan");
+                eprintln!(
+                    "DSA_GRAPH_LIVE_TOPK_GPU backend={:?} capacity={} live_context={} heads={} head_dim={} selected={} iterations={} mean_ms={:.6}",
+                    backend,
+                    max_context_tokens,
+                    live_context,
+                    index_n_heads,
+                    index_head_dim,
+                    plan.selected.min(live_context),
+                    iterations,
+                    elapsed_ms as f64 / iterations as f64,
+                );
+                unsafe {
+                    let _ = cuda_sys::lib().cuEventDestroy_v2(start.0);
+                    let _ = cuda_sys::lib().cuEventDestroy_v2(end.0);
+                }
+
+                let selected = store
+                    .device
+                    .dtoh_sync_copy(
+                        &store.graph.as_ref().expect("graph").dsa_indexer_owners[0].d_topk_indices,
+                    )
+                    .expect("top-k indices D2H");
+                let valid = index_topk.min(live_context);
+                assert_eq!(
+                    &selected[..valid],
+                    &(0..valid as i32).collect::<Vec<_>>(),
+                    "equal scores must retain deterministic ascending token order at context {}",
+                    live_context,
+                );
+                assert!(
+                    selected[valid..index_topk]
+                        .iter()
+                        .all(|index| *index == i32::MAX),
+                    "graph selector padding must remain invalid at context {}",
+                    live_context,
+                );
+            }
+        }
     }
 
     #[test]
     fn owner_score_pipeline_matches_cpu_reference_on_cuda() {
+        let _cuda_test_guard = DSA_CUDA_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        pyo3::prepare_freethreaded_python();
+
         fn bf16_bits(values: &[f32]) -> Vec<u16> {
             values
                 .iter()
@@ -7759,7 +8418,8 @@ mod dsa_registration_tests {
             values
         }
 
-        let mut store = GpuDecodeStore::new(0).expect("CUDA decode store");
+        let mut store =
+            GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal()).expect("CUDA decode store");
         let selector_max_context = 1_048_576usize;
         store
             .configure(4, 1, 8, 1e-6, 2, 4, 8, 4, 4, 8, 8)
@@ -7787,7 +8447,7 @@ mod dsa_registration_tests {
                 2,
                 4,
                 2,
-                2,
+                4,
                 2,
                 0.5,
                 true,
@@ -7802,7 +8462,7 @@ mod dsa_registration_tests {
             )
             .expect("MLA metadata");
         store
-            .register_dsa_indexer_layer(0, 0, true, 2048, 4, 2, 2, 4, 0, 4, 4, false)
+            .register_dsa_indexer_layer(0, 0, true, 2048, 4, 2, 4, 4, 0, 4, 4, true)
             .expect("DSA owner metadata");
 
         let mut wq_b_values = identity(8, 4);
@@ -7862,15 +8522,58 @@ mod dsa_registration_tests {
 
         let cos = store
             .device
-            .htod_copy(vec![1.0f32, 0.0, -1.0, 0.0])
+            .htod_copy(vec![1.0f32, 1.0, 0.0, 0.0, -1.0, -1.0, 0.0, 0.0])
             .expect("cos table");
         let sin = store
             .device
-            .htod_copy(vec![0.0f32, 1.0, 0.0, -1.0])
+            .htod_copy(vec![0.0f32, 0.0, 1.0, 1.0, 0.0, 0.0, -1.0, -1.0])
             .expect("sin table");
         store
-            .set_rope_tables(*cos.device_ptr() as usize, *sin.device_ptr() as usize, 1, 4)
+            .set_rope_tables(*cos.device_ptr() as usize, *sin.device_ptr() as usize, 2, 4)
             .expect("RoPE tables");
+
+        let prefill_hidden = bf16_bits(&[1.0, 2.0, 3.0, 4.0, 2.0, 1.0, 0.0, -1.0]);
+        let q_residual0_values = [1.0f32, 0.0, 0.0, -1.0];
+        let q_residual1_values = [0.5f32, -0.5, 1.0, -1.0];
+        let prefill_q_residuals = bf16_bits(
+            &q_residual0_values
+                .into_iter()
+                .chain(q_residual1_values)
+                .collect::<Vec<_>>(),
+        );
+        let mut prefill = store
+            .create_prefill_engine(4)
+            .expect("DSA-aware prefill engine");
+        let (prefill_registration, wq_b_shape, wk_shape, weights_proj_shape) = prefill
+            .debug_dsa_prefill_contract(0)
+            .expect("prefill selection metadata");
+        assert_eq!(prefill_registration.owner_layer_idx, 0);
+        assert!(prefill_registration.owner_weights_present);
+        assert_eq!(prefill_registration.index_topk, 2048);
+        assert_eq!(prefill_registration.index_n_heads, 2);
+        assert_eq!(prefill_registration.index_head_dim, 4);
+        assert_eq!(prefill_registration.q_lora_rank, 4);
+        assert_eq!(wq_b_shape, (8, 4));
+        assert_eq!(wk_shape, (4, 4));
+        assert_eq!(weights_proj_shape, (2, 4));
+        prefill
+            .debug_populate_dsa_prefill_owner_keys(0, &prefill_hidden, &[0, 1])
+            .expect("prefill owner key initialization");
+        let prefill_selected = prefill
+            .debug_run_dsa_prefill_owner_selection(
+                0,
+                &prefill_hidden,
+                &prefill_q_residuals,
+                &[0, 1],
+            )
+            .expect("batched DSA prefill owner selection");
+        assert_eq!(prefill_selected[0], 0);
+        assert_eq!(prefill_selected[1], i32::MAX);
+        let prefill_key_cache = store
+            .device
+            .dtoh_sync_copy(&store.graph.as_ref().expect("graph").dsa_indexer_owners[0].d_key_cache)
+            .expect("prefill key cache D2H");
+        drop(prefill);
 
         let hidden0 = store
             .device
@@ -7878,7 +8581,7 @@ mod dsa_registration_tests {
             .expect("hidden0");
         let q_resid0 = store
             .device
-            .htod_copy(bf16_bits(&[1.0, 0.0, 0.0, -1.0]))
+            .htod_copy(bf16_bits(&q_residual0_values))
             .expect("q_resid0");
         assert_eq!(
             store
@@ -7893,7 +8596,7 @@ mod dsa_registration_tests {
             .expect("hidden1");
         let q_resid1 = store
             .device
-            .htod_copy(bf16_bits(&[0.5, -0.5, 1.0, -1.0]))
+            .htod_copy(bf16_bits(&q_residual1_values))
             .expect("q_resid1");
         assert_eq!(
             store
@@ -7901,6 +8604,161 @@ mod dsa_registration_tests {
                 .expect("position 1 scores"),
             2
         );
+        let detached_graph = store.graph.take().expect("detached ordinary decode graph");
+        assert_eq!(
+            store
+                .execute_dsa_owner_scores_for_graph(
+                    &detached_graph,
+                    0,
+                    1,
+                    *hidden1.device_ptr(),
+                    *q_resid1.device_ptr(),
+                )
+                .expect("detached ordinary owner scores"),
+            2
+        );
+        let detached_plan = store
+            .execute_dsa_owner_topk_for_graph(&detached_graph, 0, 2)
+            .expect("detached ordinary owner top-k");
+        assert_eq!(detached_plan.selected, 2);
+        store.graph = Some(detached_graph);
+
+        store
+            .init_cuda_graph_buffers()
+            .expect("graph scalar buffers and cuBLAS workspace");
+        let (d_position_ptr, d_seq_len_ptr) = {
+            let graph = store.graph.as_ref().expect("graph");
+            (
+                *graph
+                    .d_graph_pos
+                    .as_ref()
+                    .expect("graph position")
+                    .device_ptr(),
+                *graph
+                    .d_graph_seq_len
+                    .as_ref()
+                    .expect("graph sequence length")
+                    .device_ptr(),
+            )
+        };
+        let position = 1i32;
+        let sequence_length = 2i32;
+        unsafe {
+            assert_eq!(
+                cuda_sys::lib().cuMemcpyHtoD_v2(
+                    d_position_ptr,
+                    &position as *const i32 as *const std::ffi::c_void,
+                    std::mem::size_of::<i32>(),
+                ),
+                cuda_sys::CUresult::CUDA_SUCCESS
+            );
+            assert_eq!(
+                cuda_sys::lib().cuMemcpyHtoD_v2(
+                    d_seq_len_ptr,
+                    &sequence_length as *const i32 as *const std::ffi::c_void,
+                    std::mem::size_of::<i32>(),
+                ),
+                cuda_sys::CUresult::CUDA_SUCCESS
+            );
+        }
+        assert_eq!(
+            store
+                .execute_dsa_owner_scores_graphable(
+                    0,
+                    d_position_ptr,
+                    d_seq_len_ptr,
+                    *hidden1.device_ptr(),
+                    *q_resid1.device_ptr(),
+                    DsaGraphScoreBackend::LiveFused,
+                )
+                .expect("fixed-capacity graph-addressable owner scores"),
+            selector_max_context
+        );
+        let graph_plan = store
+            .execute_dsa_owner_topk_graphable(0, d_seq_len_ptr)
+            .expect("fixed-capacity graph-addressable top-k");
+        assert_eq!(graph_plan.selected, 2048);
+        store.device.synchronize().expect("graph-addressable sync");
+
+        let mut capture_stream: cuda_sys::CUstream = std::ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                cuda_sys::lib().cuStreamCreate(
+                    &mut capture_stream as *mut _,
+                    cuda_sys::CUstream_flags::CU_STREAM_NON_BLOCKING as u32,
+                )
+            },
+            cuda_sys::CUresult::CUDA_SUCCESS
+        );
+        assert!(!capture_stream.is_null());
+        let stream_ptr: *mut cuda_sys::CUstream;
+        let original_stream: cuda_sys::CUstream;
+        unsafe {
+            let stream_ref = store.device.cu_stream();
+            stream_ptr = stream_ref as *const cuda_sys::CUstream as *mut cuda_sys::CUstream;
+            original_stream = *stream_ptr;
+            *stream_ptr = capture_stream;
+            cublas_result::set_stream(
+                *store.blas.handle(),
+                capture_stream as cublas_sys::cudaStream_t,
+            )
+            .expect("bind cuBLAS to DSA capture stream");
+        }
+        let begin = unsafe {
+            cuda_sys::lib().cuStreamBeginCapture_v2(
+                capture_stream,
+                cuda_sys::CUstreamCaptureMode_enum::CU_STREAM_CAPTURE_MODE_RELAXED,
+            )
+        };
+        assert_eq!(begin, cuda_sys::CUresult::CUDA_SUCCESS);
+        store
+            .execute_dsa_owner_scores_graphable(
+                0,
+                d_position_ptr,
+                d_seq_len_ptr,
+                *hidden1.device_ptr(),
+                *q_resid1.device_ptr(),
+                DsaGraphScoreBackend::LiveFused,
+            )
+            .expect("captured owner scores");
+        store
+            .execute_dsa_owner_topk_graphable(0, d_seq_len_ptr)
+            .expect("captured owner top-k");
+        let mut captured_graph: cuda_sys::CUgraph = std::ptr::null_mut();
+        let end = unsafe {
+            cuda_sys::lib().cuStreamEndCapture(capture_stream, &mut captured_graph as *mut _)
+        };
+        assert_eq!(end, cuda_sys::CUresult::CUDA_SUCCESS);
+        assert!(!captured_graph.is_null());
+        let mut graph_exec: cuda_sys::CUgraphExec = std::ptr::null_mut();
+        let instantiate = unsafe {
+            cuda_sys::lib().cuGraphInstantiateWithFlags(
+                &mut graph_exec as *mut _,
+                captured_graph,
+                0,
+            )
+        };
+        assert_eq!(instantiate, cuda_sys::CUresult::CUDA_SUCCESS);
+        assert!(!graph_exec.is_null());
+        assert_eq!(
+            unsafe { cuda_sys::lib().cuGraphLaunch(graph_exec, capture_stream) },
+            cuda_sys::CUresult::CUDA_SUCCESS
+        );
+        assert_eq!(
+            unsafe { cuda_sys::lib().cuStreamSynchronize(capture_stream) },
+            cuda_sys::CUresult::CUDA_SUCCESS
+        );
+        unsafe {
+            *stream_ptr = original_stream;
+            cublas_result::set_stream(
+                *store.blas.handle(),
+                original_stream as cublas_sys::cudaStream_t,
+            )
+            .expect("restore cuBLAS stream after DSA capture");
+            cuda_sys::lib().cuGraphExecDestroy(graph_exec);
+            cuda_sys::lib().cuGraphDestroy(captured_graph);
+            cuda_sys::lib().cuStreamDestroy_v2(capture_stream);
+        }
 
         let graph = store.graph.as_ref().expect("graph");
         let resource = &graph.dsa_indexer_owners[0];
@@ -7910,6 +8768,14 @@ mod dsa_registration_tests {
                 .device
                 .dtoh_sync_copy(&resource.d_key_cache)
                 .expect("key cache D2H"),
+        );
+        assert_eq!(
+            &prefill_key_cache[..8],
+            &store
+                .device
+                .dtoh_sync_copy(&resource.d_key_cache)
+                .expect("decode key cache D2H")[..8],
+            "prefill and decode owner key caches must be bit-identical"
         );
         let query = bf16_values(
             &store
@@ -7927,6 +8793,24 @@ mod dsa_registration_tests {
             .device
             .dtoh_sync_copy(&workspace.d_scores)
             .expect("scores D2H");
+        let graph_selected = store
+            .device
+            .dtoh_sync_copy(&resource.d_topk_indices)
+            .expect("graph top-k D2H");
+        assert!(graph_selected[0] == 0 || graph_selected[0] == 1);
+        assert!(graph_selected[1] == 0 || graph_selected[1] == 1);
+        assert_ne!(graph_selected[0], graph_selected[1]);
+        assert_eq!(
+            &prefill_selected[2..4],
+            &graph_selected[..2],
+            "batched prefill and single-token decode must select the same row-1 indices"
+        );
+        assert!(
+            graph_selected[2..2048]
+                .iter()
+                .all(|index| *index == i32::MAX),
+            "graph top-k must pad tokens outside the live sequence with INT_MAX"
+        );
 
         let mean = 0.5f32;
         let variance = 1.25f32;
@@ -7937,7 +8821,7 @@ mod dsa_registration_tests {
             (0.0 - mean) * inv_std,
             (-1.0 - mean) * inv_std,
         ];
-        let expected_key1 = [-normalized[1], normalized[0], normalized[2], normalized[3]];
+        let expected_key1 = [-normalized[1], -normalized[3], normalized[0], normalized[2]];
         for (actual, expected) in key_cache[4..8].iter().zip(expected_key1.iter()) {
             assert!(
                 (actual - expected).abs() < 0.015,
@@ -7946,7 +8830,7 @@ mod dsa_registration_tests {
                 expected
             );
         }
-        let expected_query = [0.5, 0.5, 1.0, -1.0, -1.0, -1.0, -0.5, 0.5];
+        let expected_query = [0.5, 1.0, 0.5, 1.0, -1.0, -0.5, -1.0, -0.5];
         for (actual, expected) in query.iter().zip(expected_query.iter()) {
             assert!(
                 (actual - expected).abs() < 0.01,
@@ -9912,10 +10796,16 @@ struct CachedKernels {
     scale_bf16: cudarc::driver::CudaFunction,
     scale_bf16_by_ptr: cudarc::driver::CudaFunction,
     dsa_layernorm_rope_key_write: cudarc::driver::CudaFunction,
+    dsa_layernorm_rope_key_write_g: cudarc::driver::CudaFunction,
     dsa_rope_query_bf16: cudarc::driver::CudaFunction,
+    dsa_rope_query_bf16_g: cudarc::driver::CudaFunction,
     dsa_reduce_weighted_scores: cudarc::driver::CudaFunction,
+    dsa_reduce_weighted_scores_g: cudarc::driver::CudaFunction,
+    dsa_fused_live_scores_g: cudarc::driver::CudaFunction,
     dsa_topk_sort_chunks: cudarc::driver::CudaFunction,
+    dsa_topk_sort_chunks_g: cudarc::driver::CudaFunction,
     dsa_topk_merge_runs: cudarc::driver::CudaFunction,
+    dsa_topk_merge_runs_g: cudarc::driver::CudaFunction,
     embedding_lookup: cudarc::driver::CudaFunction,
     marlin_gemv_int4: cudarc::driver::CudaFunction,
     fused_silu_accum: cudarc::driver::CudaFunction,
@@ -10017,6 +10907,8 @@ struct CachedKernels {
     mla_kv_cache_write_k4: cudarc::driver::CudaFunction,
     mla_attention_k4_g: cudarc::driver::CudaFunction,
     mla_attention_k4: cudarc::driver::CudaFunction,
+    mla_sparse_attention_k4_g: cudarc::driver::CudaFunction,
+    mla_sparse_attention_k4: cudarc::driver::CudaFunction,
     mla_deinterleave: cudarc::driver::CudaFunction,
     mla_split_q: cudarc::driver::CudaFunction,
     mla_absorb_wkc: cudarc::driver::CudaFunction,
@@ -10049,9 +10941,11 @@ struct GpuDecodeGraph {
     /// Default: [0..num_layers) for single-GPU or primary store, narrowed for aux stores.
     decode_layer_start: usize,
     decode_layer_end: usize,
-    dsa_runtime_incomplete: bool,
+    dsa_runtime_registered: bool,
     dsa_indexer_owners: Vec<DsaIndexerOwnerResource>,
+    dsa_indexshare_replicas: Vec<DsaIndexShareReplicaResource>,
     dsa_indexer_workspace: Option<DsaIndexerWorkspace>,
+    dsa_indexer_resources_finalized: bool,
     vocab_size: usize,
     eps: f32,
     intermediate_size: usize,     // max intermediate (for buffer allocation)
@@ -12978,6 +13872,26 @@ impl Default for HqqRuntimeSlotEntry {
 
 // ── PyO3 wrapper ───────────────────────────────────────────────────────
 
+fn validate_stream_probe_outcome(
+    max_tokens: usize,
+    generated: usize,
+    stream_failure: Option<&str>,
+) -> Result<(), String> {
+    if max_tokens == 0 {
+        return Err("decode calibration probe requires max_tokens > 0".to_string());
+    }
+    if let Some(failure) = stream_failure {
+        return Err(format!("decode calibration probe failed: {}", failure));
+    }
+    if generated == 0 {
+        return Err(
+            "decode calibration probe generated zero tokens without reporting a native failure"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 #[pyclass]
 pub struct GpuDecodeStore {
     device: Arc<CudaDevice>,
@@ -13024,6 +13938,10 @@ pub struct GpuDecodeStore {
     spec_jaccard_threshold: f32,
     /// Min free VRAM (MB) observed during the most recent decode run.
     last_min_free_vram_mb: usize,
+    /// Hard failure from the most recent single-GPU Rust streaming loop.
+    /// Calibration consumes this so a failed decode cannot become a false
+    /// zero-VRAM measurement.
+    last_stream_failure: Option<String>,
     last_soft_evict_experts: usize,
     last_soft_evict_freed_mb: f64,
     last_soft_reload_queued: usize,
@@ -15571,6 +16489,7 @@ impl GpuDecodeStore {
             draft_context_window: 512,
             spec_jaccard_threshold: 0.15,
             last_min_free_vram_mb: 0,
+            last_stream_failure: None,
             last_soft_evict_experts: 0,
             last_soft_evict_freed_mb: 0.0,
             last_soft_reload_queued: 0,
@@ -16158,9 +17077,11 @@ impl GpuDecodeStore {
             num_layers,
             decode_layer_start: 0,
             decode_layer_end: num_layers,
-            dsa_runtime_incomplete: false,
+            dsa_runtime_registered: false,
             dsa_indexer_owners: Vec::new(),
+            dsa_indexshare_replicas: Vec::new(),
             dsa_indexer_workspace: None,
+            dsa_indexer_resources_finalized: false,
             vocab_size,
             eps,
             intermediate_size: intermediate,
@@ -16666,10 +17587,16 @@ impl GpuDecodeStore {
                 scale_bf16: get("scale_bf16")?,
                 scale_bf16_by_ptr: get("scale_bf16_by_ptr")?,
                 dsa_layernorm_rope_key_write: get("dsa_layernorm_rope_key_write")?,
+                dsa_layernorm_rope_key_write_g: get("dsa_layernorm_rope_key_write_g")?,
                 dsa_rope_query_bf16: get("dsa_rope_query_bf16")?,
+                dsa_rope_query_bf16_g: get("dsa_rope_query_bf16_g")?,
                 dsa_reduce_weighted_scores: get("dsa_reduce_weighted_scores")?,
+                dsa_reduce_weighted_scores_g: get("dsa_reduce_weighted_scores_g")?,
+                dsa_fused_live_scores_g: get("dsa_fused_live_scores_g")?,
                 dsa_topk_sort_chunks: get("dsa_topk_sort_chunks")?,
+                dsa_topk_sort_chunks_g: get("dsa_topk_sort_chunks_g")?,
                 dsa_topk_merge_runs: get("dsa_topk_merge_runs")?,
+                dsa_topk_merge_runs_g: get("dsa_topk_merge_runs_g")?,
                 embedding_lookup: get("embedding_lookup")?,
                 marlin_gemv_int4: get("marlin_gemv_int4")?,
                 fused_silu_accum: get("marlin_gemv_int4_fused_silu_accum")?,
@@ -16764,6 +17691,8 @@ impl GpuDecodeStore {
                 mla_kv_cache_write_k4: get("mla_kv_cache_write_k4")?,
                 mla_attention_k4_g: get("mla_attention_k4_g")?,
                 mla_attention_k4: get("mla_attention_k4")?,
+                mla_sparse_attention_k4_g: get("mla_sparse_attention_k4_g")?,
+                mla_sparse_attention_k4: get("mla_sparse_attention_k4")?,
                 mla_deinterleave: get("mla_deinterleave")?,
                 mla_split_q: get("mla_split_q")?,
                 mla_absorb_wkc: get("mla_absorb_wkc")?,
@@ -21258,9 +22187,9 @@ impl GpuDecodeStore {
             )));
         }
         layer.dsa_indexer = Some(registration);
-        graph.dsa_runtime_incomplete = true;
+        graph.dsa_runtime_registered = true;
         log::info!(
-            "GpuDecodeStore: registered fail-closed DSA layer {} owner={} kind={} topk={} heads={} head_dim={} rope_dim={} topk_freq={} skip_offset={}",
+            "GpuDecodeStore: registered DSA layer {} owner={} kind={} topk={} heads={} head_dim={} rope_dim={} topk_freq={} skip_offset={}",
             layer_idx,
             owner_layer_idx,
             if owner_weights_present { "full" } else { "shared" },
@@ -21301,13 +22230,22 @@ impl GpuDecodeStore {
                 .graph
                 .as_ref()
                 .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
+            if graph.dsa_indexer_resources_finalized {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "DSA IndexShare resources are already finalized",
+                ));
+            }
             if graph
                 .dsa_indexer_owners
                 .iter()
                 .any(|resource| resource.owner_layer_idx == owner_layer_idx)
+                || graph
+                    .dsa_indexshare_replicas
+                    .iter()
+                    .any(|resource| resource.owner_layer_idx == owner_layer_idx)
             {
                 return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "DSA owner layer {} resource is already registered",
+                    "DSA owner layer {} already has a local or replica resource",
                     owner_layer_idx
                 )));
             }
@@ -21401,7 +22339,138 @@ impl GpuDecodeStore {
         Ok(())
     }
 
+    fn register_dsa_indexshare_replica(
+        &mut self,
+        owner_layer_idx: usize,
+        max_context_tokens: usize,
+    ) -> PyResult<()> {
+        let topk_capacity = {
+            let graph = self
+                .graph
+                .as_ref()
+                .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
+            if graph.dsa_indexer_resources_finalized {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "DSA IndexShare resources are already finalized",
+                ));
+            }
+            if graph
+                .dsa_indexer_owners
+                .iter()
+                .any(|resource| resource.owner_layer_idx == owner_layer_idx)
+                || graph
+                    .dsa_indexshare_replicas
+                    .iter()
+                    .any(|resource| resource.owner_layer_idx == owner_layer_idx)
+            {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "DSA owner layer {} already has a local or replica resource",
+                    owner_layer_idx
+                )));
+            }
+            let registration = graph
+                .layers
+                .iter()
+                .enumerate()
+                .filter(|(layer_idx, _)| {
+                    graph.decode_layer_start <= *layer_idx && *layer_idx < graph.decode_layer_end
+                })
+                .filter_map(|(_, layer)| layer.dsa_indexer.as_ref())
+                .find(|registration| registration.owner_layer_idx == owner_layer_idx)
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "DSA owner layer {} is not referenced by active decode segment [{}, {})",
+                        owner_layer_idx, graph.decode_layer_start, graph.decode_layer_end
+                    ))
+                })?;
+            if max_context_tokens == 0 {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "DSA IndexShare replica requires positive runtime context",
+                ));
+            }
+            registration.index_topk.min(max_context_tokens)
+        };
+
+        let d_topk_indices = self
+            .device
+            .alloc_zeros::<i32>(topk_capacity)
+            .map_err(|error| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "alloc DSA IndexShare owner {} replica [{}]: {:?}",
+                    owner_layer_idx, topk_capacity, error
+                ))
+            })?;
+        let graph = self
+            .graph
+            .as_mut()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
+        graph
+            .dsa_indexshare_replicas
+            .push(DsaIndexShareReplicaResource {
+                owner_layer_idx,
+                topk_capacity,
+                d_topk_indices,
+            });
+        log::info!(
+            "GpuDecodeStore: staged DSA IndexShare replica owner={} topk={}",
+            owner_layer_idx,
+            topk_capacity,
+        );
+        Ok(())
+    }
+
     fn finalize_dsa_indexer_resources(&mut self) -> PyResult<usize> {
+        let replica_only_count = {
+            let graph = self
+                .graph
+                .as_ref()
+                .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
+            if graph.dsa_indexer_resources_finalized {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "DSA indexer resources are already finalized",
+                ));
+            }
+            if graph.dsa_indexer_owners.is_empty() && !graph.dsa_indexshare_replicas.is_empty() {
+                let required = graph
+                    .layers
+                    .iter()
+                    .enumerate()
+                    .filter(|(layer_idx, _)| {
+                        graph.decode_layer_start <= *layer_idx
+                            && *layer_idx < graph.decode_layer_end
+                    })
+                    .filter_map(|(_, layer)| layer.dsa_indexer.as_ref())
+                    .map(|registration| registration.owner_layer_idx)
+                    .collect::<std::collections::BTreeSet<_>>();
+                let available = graph
+                    .dsa_indexshare_replicas
+                    .iter()
+                    .map(|resource| resource.owner_layer_idx)
+                    .collect::<std::collections::BTreeSet<_>>();
+                if required != available {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "DSA replica-only segment owner mismatch: required={:?} available={:?}",
+                        required, available
+                    )));
+                }
+                Some(available.len())
+            } else {
+                None
+            }
+        };
+        if let Some(count) = replica_only_count {
+            let graph = self
+                .graph
+                .as_mut()
+                .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
+            graph.dsa_indexer_resources_finalized = true;
+            log::info!(
+                "GpuDecodeStore: finalized replica-only DSA IndexShare resources (owners={})",
+                count
+            );
+            return Ok(count);
+        }
+
         let (
             available_count,
             max_context_tokens,
@@ -21416,11 +22485,6 @@ impl GpuDecodeStore {
                 .graph
                 .as_ref()
                 .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
-            if graph.dsa_indexer_workspace.is_some() {
-                return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                    "DSA indexer workspace is already finalized",
-                ));
-            }
             let active_registrations = graph
                 .layers
                 .iter()
@@ -21438,6 +22502,12 @@ impl GpuDecodeStore {
                 .dsa_indexer_owners
                 .iter()
                 .map(|resource| resource.owner_layer_idx)
+                .chain(
+                    graph
+                        .dsa_indexshare_replicas
+                        .iter()
+                        .map(|resource| resource.owner_layer_idx),
+                )
                 .collect::<std::collections::BTreeSet<_>>();
             let missing = required.difference(&available).copied().collect::<Vec<_>>();
             if !missing.is_empty() {
@@ -21580,6 +22650,85 @@ impl GpuDecodeStore {
             }
         }
 
+        let fused_score_shared_bytes = max_index_head_dim
+            .checked_add(max_index_n_heads)
+            .and_then(|elements| elements.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| {
+                pyo3::exceptions::PyOverflowError::new_err(
+                    "DSA fused score shared-memory size overflow",
+                )
+            })?;
+        if fused_score_shared_bytes > optin_shared_bytes.max(0) as usize {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "DSA fused score requires {} shared-memory bytes but GPU {} supports {} opt-in bytes",
+                fused_score_shared_bytes,
+                self.device.ordinal(),
+                optin_shared_bytes.max(0),
+            )));
+        }
+        let fused_score_shared_bytes_u32 =
+            u32::try_from(fused_score_shared_bytes).map_err(|_| {
+                pyo3::exceptions::PyOverflowError::new_err(format!(
+                    "DSA fused score shared-memory size {} exceeds native u32",
+                    fused_score_shared_bytes
+                ))
+            })?;
+        let (fused_score_grid_blocks, fused_score_block_threads) = {
+            let graph = self
+                .graph
+                .as_ref()
+                .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
+            let kernels = graph.kernels.as_ref().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("DSA kernels are not cached")
+            })?;
+            if fused_score_shared_bytes > default_shared_bytes.max(0) as usize {
+                kernels
+                    .dsa_fused_live_scores_g
+                    .set_attribute(
+                        cudarc::driver::sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                        i32::try_from(fused_score_shared_bytes).map_err(|_| {
+                            pyo3::exceptions::PyOverflowError::new_err(format!(
+                                "DSA fused score shared-memory size {} exceeds native i32",
+                                fused_score_shared_bytes
+                            ))
+                        })?,
+                    )
+                    .map_err(|error| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "configure DSA fused score shared memory: {:?}",
+                            error
+                        ))
+                    })?;
+            }
+            let (minimum_grid, block_threads) = kernels
+                .dsa_fused_live_scores_g
+                .occupancy_max_potential_block_size(
+                    dsa_zero_dynamic_smem_for_occupancy,
+                    fused_score_shared_bytes,
+                    0,
+                    None,
+                )
+                .map_err(|error| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "query DSA fused score occupancy: {:?}",
+                        error
+                    ))
+                })?;
+            if block_threads < 32 || block_threads % 32 != 0 || minimum_grid == 0 {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "DSA fused score occupancy returned invalid grid/block {}/{}",
+                    minimum_grid, block_threads
+                )));
+            }
+            let max_context_u32 = u32::try_from(max_context_tokens).map_err(|_| {
+                pyo3::exceptions::PyOverflowError::new_err(format!(
+                    "DSA context {} exceeds native CUDA grid range",
+                    max_context_tokens
+                ))
+            })?;
+            (minimum_grid.min(max_context_u32).max(1), block_threads)
+        };
+
         let alloc_u16 = |elements: usize, name: &str| {
             self.device.alloc_zeros::<u16>(elements).map_err(|error| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!(
@@ -21602,6 +22751,9 @@ impl GpuDecodeStore {
             max_index_head_dim,
             max_topk_candidate_capacity,
             max_topk_shared_bytes,
+            fused_score_grid_blocks,
+            fused_score_block_threads,
+            fused_score_shared_bytes: fused_score_shared_bytes_u32,
             d_raw_key: alloc_u16(max_index_head_dim, "raw key")?,
             d_projected_query: alloc_u16(query_elems, "projected query")?,
             d_query_rope: alloc_u16(query_elems, "RoPE query")?,
@@ -21658,14 +22810,18 @@ impl GpuDecodeStore {
             .as_mut()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
         graph.dsa_indexer_workspace = Some(workspace);
+        graph.dsa_indexer_resources_finalized = true;
         log::info!(
-            "GpuDecodeStore: finalized DSA workspace (context={}, heads={}, head_dim={}, head_scores={}, topk_candidates={}, topk_shared_bytes={})",
+            "GpuDecodeStore: finalized DSA workspace (context={}, heads={}, head_dim={}, head_scores={}, topk_candidates={}, topk_shared_bytes={}, fused_score_grid={}, fused_score_block={}, fused_score_shared={})",
             max_context_tokens,
             max_index_n_heads,
             max_index_head_dim,
             head_score_elems,
             max_topk_candidate_capacity,
             max_topk_shared_bytes,
+            fused_score_grid_blocks,
+            fused_score_block_threads,
+            fused_score_shared_bytes,
         );
         Ok(available_count)
     }
@@ -21689,6 +22845,10 @@ impl GpuDecodeStore {
             .dsa_indexer_owners
             .iter()
             .find(|resource| resource.owner_layer_idx == registration.owner_layer_idx);
+        let replica = graph
+            .dsa_indexshare_replicas
+            .iter()
+            .find(|resource| resource.owner_layer_idx == registration.owner_layer_idx);
         Ok(serde_json::json!({
             "layer_idx": layer_idx,
             "owner_layer_idx": registration.owner_layer_idx,
@@ -21702,7 +22862,15 @@ impl GpuDecodeStore {
             "q_lora_rank": registration.q_lora_rank,
             "hidden_size": registration.hidden_size,
             "rope_interleave": registration.rope_interleave,
-            "resource_ready": resource.is_some(),
+            "resource_ready": resource.is_some() || replica.is_some(),
+            "resource_kind": if resource.is_some() {
+                Some("local_owner")
+            } else if replica.is_some() {
+                Some("indexshare_replica")
+            } else {
+                None
+            },
+            "resources_finalized": graph.dsa_indexer_resources_finalized,
             "workspace_ready": graph.dsa_indexer_workspace.is_some(),
             "workspace": graph.dsa_indexer_workspace.as_ref().map(|workspace| serde_json::json!({
                 "max_context_tokens": workspace.max_context_tokens,
@@ -21714,6 +22882,9 @@ impl GpuDecodeStore {
                 ],
                 "topk_candidate_capacity": workspace.max_topk_candidate_capacity,
                 "topk_shared_bytes": workspace.max_topk_shared_bytes,
+                "fused_score_grid_blocks": workspace.fused_score_grid_blocks,
+                "fused_score_block_threads": workspace.fused_score_block_threads,
+                "fused_score_shared_bytes": workspace.fused_score_shared_bytes,
             })),
             "resource": resource.map(|resource| serde_json::json!({
                 "owner_layer_idx": resource.owner_layer_idx,
@@ -21730,6 +22901,11 @@ impl GpuDecodeStore {
                 ],
                 "topk_capacity": resource.topk_capacity,
                 "key_cache_ptr": format!("0x{:x}", *resource.d_key_cache.device_ptr()),
+                "topk_indices_ptr": format!("0x{:x}", *resource.d_topk_indices.device_ptr()),
+            })),
+            "replica": replica.map(|resource| serde_json::json!({
+                "owner_layer_idx": resource.owner_layer_idx,
+                "topk_capacity": resource.topk_capacity,
                 "topk_indices_ptr": format!("0x{:x}", *resource.d_topk_indices.device_ptr()),
             })),
             "executable": false,
@@ -24283,6 +25459,11 @@ impl GpuDecodeStore {
         stop_ids: Vec<usize>,
         presence_penalty: f32,
     ) -> PyResult<Vec<usize>> {
+        if max_tokens == 0 {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "decode calibration probe requires max_tokens > 0",
+            ));
+        }
         let tokenizer = tokenizers::Tokenizer::from_file(&tokenizer_path).map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!(
                 "Failed to load tokenizer for decode probe: {}",
@@ -24290,7 +25471,8 @@ impl GpuDecodeStore {
             ))
         })?;
         let mut tokens = Vec::with_capacity(max_tokens);
-        self.gpu_generate_stream(
+        self.last_min_free_vram_mb = 0;
+        let generated = self.gpu_generate_stream(
             first_token,
             start_position,
             max_tokens,
@@ -24307,6 +25489,12 @@ impl GpuDecodeStore {
                 true
             },
         );
+        validate_stream_probe_outcome(
+            max_tokens,
+            generated,
+            self.last_stream_failure.as_deref(),
+        )
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
         Ok(tokens)
     }
 
@@ -24570,6 +25758,19 @@ impl GpuDecodeStore {
         let aux_store = unsafe { &mut *(aux_store_addr as *mut GpuDecodeStore) };
         self.copy_la_states_to_aux(aux_store, layer_start, layer_end)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
+    }
+
+    /// Copy prompt DSA index-key caches from full-primary prefill ownership to
+    /// every local owner staged on one auxiliary decode store.
+    #[pyo3(signature = (aux_store_addr, prompt_len))]
+    fn py_copy_dsa_prompt_keys_to_aux(
+        &self,
+        aux_store_addr: usize,
+        prompt_len: usize,
+    ) -> PyResult<(usize, usize)> {
+        let aux_store = unsafe { &mut *(aux_store_addr as *mut GpuDecodeStore) };
+        self.copy_dsa_prompt_keys_to_aux(aux_store, prompt_len)
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)
     }
 
     /// Fill HCS-resident experts into a GPU buffer for prefill via D2D copy.
@@ -25000,6 +26201,23 @@ impl GpuDecodeStore {
         q_resid_ptr: u64,
     ) -> Result<usize, String> {
         let graph = self.graph.as_ref().ok_or("Call configure first")?;
+        self.execute_dsa_owner_scores_for_graph(
+            graph,
+            owner_layer_idx,
+            position,
+            hidden_ptr,
+            q_resid_ptr,
+        )
+    }
+
+    fn execute_dsa_owner_scores_for_graph(
+        &self,
+        graph: &GpuDecodeGraph,
+        owner_layer_idx: usize,
+        position: usize,
+        hidden_ptr: u64,
+        q_resid_ptr: u64,
+    ) -> Result<usize, String> {
         let registration = graph
             .layers
             .iter()
@@ -25011,9 +26229,9 @@ impl GpuDecodeStore {
                     owner_layer_idx
                 )
             })?;
-        if registration.rope_interleave {
+        if !registration.rope_interleave {
             return Err(format!(
-                "DSA owner layer {} requires split-half indexer RoPE",
+                "GLM DSA owner layer {} requires interleaved indexer RoPE",
                 owner_layer_idx
             ));
         }
@@ -25084,6 +26302,12 @@ impl GpuDecodeStore {
             return Err(format!(
                 "DSA owner {} RoPE table half-dim {} != indexer half-dim {}",
                 owner_layer_idx, graph.rope_half_dim, rope_half_dim
+            ));
+        }
+        if graph.rope_position_delta != 0 {
+            return Err(format!(
+                "DSA owner {} requires separate cache and RoPE positions when rope_position_delta={} (unsupported)",
+                owner_layer_idx, graph.rope_position_delta
             ));
         }
         let d_cos = graph
@@ -25229,12 +26453,854 @@ impl GpuDecodeStore {
         Ok(context)
     }
 
+    fn execute_dsa_owner_scores_graphable(
+        &self,
+        owner_layer_idx: usize,
+        d_position_ptr: u64,
+        d_seq_len_ptr: u64,
+        hidden_ptr: u64,
+        q_resid_ptr: u64,
+        backend: DsaGraphScoreBackend,
+    ) -> Result<usize, String> {
+        let graph = self.graph.as_ref().ok_or("Call configure first")?;
+        self.execute_dsa_owner_scores_graphable_for_graph(
+            graph,
+            owner_layer_idx,
+            d_position_ptr,
+            d_seq_len_ptr,
+            hidden_ptr,
+            q_resid_ptr,
+            backend,
+        )
+    }
+
+    fn execute_dsa_owner_scores_graphable_for_graph(
+        &self,
+        graph: &GpuDecodeGraph,
+        owner_layer_idx: usize,
+        d_position_ptr: u64,
+        d_seq_len_ptr: u64,
+        hidden_ptr: u64,
+        q_resid_ptr: u64,
+        backend: DsaGraphScoreBackend,
+    ) -> Result<usize, String> {
+        if d_position_ptr == 0 || d_seq_len_ptr == 0 {
+            return Err(format!(
+                "DSA owner {} graph scoring requires position and sequence-length pointers",
+                owner_layer_idx
+            ));
+        }
+        let registration = graph
+            .layers
+            .iter()
+            .filter_map(|layer| layer.dsa_indexer.as_ref())
+            .find(|registration| registration.owner_layer_idx == owner_layer_idx)
+            .ok_or_else(|| {
+                format!(
+                    "DSA owner layer {} has no active registration",
+                    owner_layer_idx
+                )
+            })?;
+        if !registration.rope_interleave {
+            return Err(format!(
+                "GLM DSA owner layer {} requires interleaved indexer RoPE",
+                owner_layer_idx
+            ));
+        }
+        let resource = graph
+            .dsa_indexer_owners
+            .iter()
+            .find(|resource| resource.owner_layer_idx == owner_layer_idx)
+            .ok_or_else(|| format!("DSA owner layer {} resource is absent", owner_layer_idx))?;
+        let workspace = graph
+            .dsa_indexer_workspace
+            .as_ref()
+            .ok_or("DSA indexer workspace is not finalized")?;
+        let query_elems = registration
+            .index_n_heads
+            .checked_mul(registration.index_head_dim)
+            .ok_or("DSA graph query width overflow")?;
+        if resource.max_context_tokens > workspace.max_context_tokens
+            || registration.index_n_heads > workspace.max_index_n_heads
+            || registration.index_head_dim > workspace.max_index_head_dim
+        {
+            return Err(format!(
+                "DSA owner {} exceeds finalized graph workspace",
+                owner_layer_idx
+            ));
+        }
+        let capacity_i32 = i32::try_from(resource.max_context_tokens).map_err(|_| {
+            format!(
+                "DSA graph score capacity {} exceeds native i32 range",
+                resource.max_context_tokens
+            )
+        })?;
+        let index_n_heads_i32 = i32::try_from(registration.index_n_heads).map_err(|_| {
+            format!(
+                "DSA index_n_heads {} exceeds native i32 range",
+                registration.index_n_heads
+            )
+        })?;
+        let index_head_dim_i32 = i32::try_from(registration.index_head_dim).map_err(|_| {
+            format!(
+                "DSA index_head_dim {} exceeds native i32 range",
+                registration.index_head_dim
+            )
+        })?;
+        let qk_rope_head_dim_i32 = i32::try_from(registration.qk_rope_head_dim).map_err(|_| {
+            format!(
+                "DSA qk_rope_head_dim {} exceeds native i32 range",
+                registration.qk_rope_head_dim
+            )
+        })?;
+        let query_elems_u32 = u32::try_from(query_elems)
+            .map_err(|_| format!("DSA query width {} exceeds native u32 range", query_elems))?;
+        let rope_half_dim = registration.qk_rope_head_dim / 2;
+        if graph.rope_half_dim != rope_half_dim {
+            return Err(format!(
+                "DSA owner {} RoPE table half-dim {} != indexer half-dim {}",
+                owner_layer_idx, graph.rope_half_dim, rope_half_dim
+            ));
+        }
+        if graph.rope_position_delta != 0 {
+            return Err(format!(
+                "DSA owner {} requires separate graph cache and RoPE positions when rope_position_delta={} (unsupported)",
+                owner_layer_idx, graph.rope_position_delta
+            ));
+        }
+        let d_cos = graph
+            .d_rope_cos
+            .as_ref()
+            .ok_or("DSA indexer RoPE cosine table is absent")?;
+        let d_sin = graph
+            .d_rope_sin
+            .as_ref()
+            .ok_or("DSA indexer RoPE sine table is absent")?;
+        let kernels = graph.kernels.as_ref().ok_or("kernels not cached")?;
+        let weights = &graph.weights;
+        let wq_b = &weights[resource.weight_ids.wq_b];
+        let wk = &weights[resource.weight_ids.wk];
+        let weights_proj = &weights[resource.weight_ids.weights_proj];
+        let k_norm_weight = &weights[resource.weight_ids.k_norm_weight];
+        let k_norm_bias = &weights[resource.weight_ids.k_norm_bias];
+
+        self.gemv_bf16_internal(wq_b, q_resid_ptr, *workspace.d_projected_query.device_ptr())?;
+        self.gemv_bf16_internal(wk, hidden_ptr, *workspace.d_raw_key.device_ptr())?;
+        self.gemv_bf16_internal(
+            weights_proj,
+            hidden_ptr,
+            *workspace.d_head_weights.device_ptr(),
+        )?;
+
+        let threads = 256u32;
+        unsafe {
+            kernels
+                .dsa_layernorm_rope_key_write_g
+                .clone()
+                .launch(
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (threads, 1, 1),
+                        shared_mem_bytes: ((registration.index_head_dim + 64) * 4) as u32,
+                    },
+                    (
+                        *resource.d_key_cache.device_ptr(),
+                        *workspace.d_raw_key.device_ptr(),
+                        k_norm_weight.ptr,
+                        k_norm_bias.ptr,
+                        *d_cos.device_ptr(),
+                        *d_sin.device_ptr(),
+                        d_position_ptr,
+                        capacity_i32,
+                        index_head_dim_i32,
+                        qk_rope_head_dim_i32,
+                        DSA_INDEXER_LAYER_NORM_EPS,
+                    ),
+                )
+                .map_err(|error| {
+                    format!(
+                        "DSA owner {} graph LayerNorm/RoPE key write: {:?}",
+                        owner_layer_idx, error
+                    )
+                })?;
+            kernels
+                .dsa_rope_query_bf16_g
+                .clone()
+                .launch(
+                    LaunchConfig::for_num_elems(query_elems_u32),
+                    (
+                        *workspace.d_query_rope.device_ptr(),
+                        *workspace.d_projected_query.device_ptr(),
+                        *d_cos.device_ptr(),
+                        *d_sin.device_ptr(),
+                        d_position_ptr,
+                        index_n_heads_i32,
+                        index_head_dim_i32,
+                        qk_rope_head_dim_i32,
+                    ),
+                )
+                .map_err(|error| {
+                    format!(
+                        "DSA owner {} graph projected-query RoPE: {:?}",
+                        owner_layer_idx, error
+                    )
+                })?;
+        }
+
+        let scale = 1.0f32
+            / ((registration.index_head_dim as f32).sqrt()
+                * (registration.index_n_heads as f32).sqrt());
+        match backend {
+            DsaGraphScoreBackend::FixedCapacityTensorCore => {
+                let alpha = 1.0f32;
+                let beta = 0.0f32;
+                unsafe {
+                    cublas_result::gemm_ex(
+                        *self.blas.handle(),
+                        cublas_sys::cublasOperation_t::CUBLAS_OP_T,
+                        cublas_sys::cublasOperation_t::CUBLAS_OP_N,
+                        capacity_i32,
+                        index_n_heads_i32,
+                        index_head_dim_i32,
+                        &alpha as *const f32 as *const std::ffi::c_void,
+                        *resource.d_key_cache.device_ptr() as *const std::ffi::c_void,
+                        cublas_sys::cudaDataType::CUDA_R_16BF,
+                        index_head_dim_i32,
+                        *workspace.d_query_rope.device_ptr() as *const std::ffi::c_void,
+                        cublas_sys::cudaDataType::CUDA_R_16BF,
+                        index_head_dim_i32,
+                        &beta as *const f32 as *const std::ffi::c_void,
+                        *workspace.d_head_scores.device_ptr() as *mut std::ffi::c_void,
+                        cublas_sys::cudaDataType::CUDA_R_32F,
+                        capacity_i32,
+                        cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
+                        cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
+                    )
+                    .map_err(|error| {
+                        format!(
+                            "DSA owner {} fixed-capacity graph QK GEMM: {:?}",
+                            owner_layer_idx, error
+                        )
+                    })?;
+                    kernels
+                        .dsa_reduce_weighted_scores_g
+                        .clone()
+                        .launch(
+                            LaunchConfig::for_num_elems(
+                                u32::try_from(resource.max_context_tokens).map_err(|_| {
+                                    format!(
+                                        "DSA graph score capacity {} exceeds native u32",
+                                        resource.max_context_tokens
+                                    )
+                                })?,
+                            ),
+                            (
+                                *workspace.d_scores.device_ptr(),
+                                *workspace.d_head_scores.device_ptr(),
+                                *workspace.d_head_weights.device_ptr(),
+                                d_seq_len_ptr,
+                                capacity_i32,
+                                index_n_heads_i32,
+                                scale,
+                            ),
+                        )
+                        .map_err(|error| {
+                            format!(
+                                "DSA owner {} fixed-capacity graph score reduction: {:?}",
+                                owner_layer_idx, error
+                            )
+                        })?;
+                }
+            }
+            DsaGraphScoreBackend::LiveFused => unsafe {
+                kernels
+                    .dsa_fused_live_scores_g
+                    .clone()
+                    .launch(
+                        LaunchConfig {
+                            grid_dim: (workspace.fused_score_grid_blocks, 1, 1),
+                            block_dim: (workspace.fused_score_block_threads, 1, 1),
+                            shared_mem_bytes: workspace.fused_score_shared_bytes,
+                        },
+                        (
+                            *workspace.d_scores.device_ptr(),
+                            *resource.d_key_cache.device_ptr(),
+                            *workspace.d_query_rope.device_ptr(),
+                            *workspace.d_head_weights.device_ptr(),
+                            d_seq_len_ptr,
+                            capacity_i32,
+                            index_n_heads_i32,
+                            index_head_dim_i32,
+                            scale,
+                        ),
+                    )
+                    .map_err(|error| {
+                        format!(
+                            "DSA owner {} fused live graph scores: {:?}",
+                            owner_layer_idx, error
+                        )
+                    })?;
+            },
+        }
+        Ok(resource.max_context_tokens)
+    }
+
+    fn execute_dsa_owner_topk_graphable(
+        &self,
+        owner_layer_idx: usize,
+        d_seq_len_ptr: u64,
+    ) -> Result<DsaTopkPlan, String> {
+        let graph = self.graph.as_ref().ok_or("Call configure first")?;
+        self.execute_dsa_owner_topk_graphable_for_graph(graph, owner_layer_idx, d_seq_len_ptr)
+    }
+
+    fn execute_dsa_owner_topk_graphable_for_graph(
+        &self,
+        graph: &GpuDecodeGraph,
+        owner_layer_idx: usize,
+        d_seq_len_ptr: u64,
+    ) -> Result<DsaTopkPlan, String> {
+        if d_seq_len_ptr == 0 {
+            return Err(format!(
+                "DSA owner {} graph top-k requires a sequence-length pointer",
+                owner_layer_idx
+            ));
+        }
+        let registration = graph
+            .layers
+            .iter()
+            .filter_map(|layer| layer.dsa_indexer.as_ref())
+            .find(|registration| registration.owner_layer_idx == owner_layer_idx)
+            .ok_or_else(|| {
+                format!(
+                    "DSA owner layer {} has no active registration",
+                    owner_layer_idx
+                )
+            })?;
+        let resource = graph
+            .dsa_indexer_owners
+            .iter()
+            .find(|resource| resource.owner_layer_idx == owner_layer_idx)
+            .ok_or_else(|| format!("DSA owner layer {} resource is absent", owner_layer_idx))?;
+        let plan = plan_dsa_topk(resource.max_context_tokens, registration.index_topk)?;
+        if plan.selected > resource.topk_capacity {
+            return Err(format!(
+                "DSA owner {} graph top-k {} exceeds output capacity {}",
+                owner_layer_idx, plan.selected, resource.topk_capacity
+            ));
+        }
+        let workspace = graph
+            .dsa_indexer_workspace
+            .as_ref()
+            .ok_or("DSA indexer workspace is not finalized")?;
+        if plan.candidate_capacity > workspace.max_topk_candidate_capacity
+            || plan.shared_bytes > workspace.max_topk_shared_bytes
+        {
+            return Err(format!(
+                "DSA owner {} graph top-k plan exceeds finalized workspace",
+                owner_layer_idx
+            ));
+        }
+        let capacity_i32 = i32::try_from(resource.max_context_tokens).map_err(|_| {
+            format!(
+                "DSA graph top-k capacity {} exceeds native i32",
+                resource.max_context_tokens
+            )
+        })?;
+        let selected_i32 = i32::try_from(plan.selected)
+            .map_err(|_| format!("DSA graph top-k {} exceeds native i32", plan.selected))?;
+        let sort_width_i32 = i32::try_from(plan.sort_width).map_err(|_| {
+            format!(
+                "DSA graph top-k sort width {} exceeds native i32",
+                plan.sort_width
+            )
+        })?;
+        let initial_runs_u32 = u32::try_from(plan.initial_runs).map_err(|_| {
+            format!(
+                "DSA graph initial runs {} exceeds native u32",
+                plan.initial_runs
+            )
+        })?;
+        let shared_bytes_u32 = u32::try_from(plan.shared_bytes)
+            .map_err(|_| format!("DSA graph shared bytes {} exceeds u32", plan.shared_bytes))?;
+        let block_threads = u32::try_from(plan.sort_width.min(256).max(1))
+            .map_err(|_| "DSA graph top-k block width exceeds u32".to_string())?;
+        let kernels = graph.kernels.as_ref().ok_or("kernels not cached")?;
+
+        let (base_scores_ptr, base_indices_ptr) = if plan.initial_runs == 1 {
+            (
+                *workspace.d_scores.device_ptr(),
+                *resource.d_topk_indices.device_ptr(),
+            )
+        } else {
+            (
+                *workspace
+                    .d_topk_scores_a
+                    .as_ref()
+                    .ok_or("DSA graph top-k score workspace A is absent")?
+                    .device_ptr(),
+                *workspace
+                    .d_topk_indices_a
+                    .as_ref()
+                    .ok_or("DSA graph top-k index workspace A is absent")?
+                    .device_ptr(),
+            )
+        };
+        unsafe {
+            kernels
+                .dsa_topk_sort_chunks_g
+                .clone()
+                .launch(
+                    LaunchConfig {
+                        grid_dim: (initial_runs_u32, 1, 1),
+                        block_dim: (block_threads, 1, 1),
+                        shared_mem_bytes: shared_bytes_u32,
+                    },
+                    (
+                        *workspace.d_scores.device_ptr(),
+                        base_scores_ptr,
+                        base_indices_ptr,
+                        *resource.d_topk_indices.device_ptr(),
+                        d_seq_len_ptr,
+                        capacity_i32,
+                        selected_i32,
+                        sort_width_i32,
+                    ),
+                )
+                .map_err(|error| {
+                    format!(
+                        "DSA owner {} graph top-k base sort: {:?}",
+                        owner_layer_idx, error
+                    )
+                })?;
+        }
+
+        if plan.initial_runs > 1 {
+            let scores_a = workspace
+                .d_topk_scores_a
+                .as_ref()
+                .ok_or("DSA graph top-k score workspace A is absent")?;
+            let scores_b = workspace
+                .d_topk_scores_b
+                .as_ref()
+                .ok_or("DSA graph top-k score workspace B is absent")?;
+            let indices_a = workspace
+                .d_topk_indices_a
+                .as_ref()
+                .ok_or("DSA graph top-k index workspace A is absent")?;
+            let indices_b = workspace
+                .d_topk_indices_b
+                .as_ref()
+                .ok_or("DSA graph top-k index workspace B is absent")?;
+            let mut input_runs = plan.initial_runs;
+            let mut input_is_a = true;
+            let mut merge_pass = 0usize;
+            while input_runs > 1 {
+                let output_runs = input_runs.div_ceil(2);
+                let output_runs_u32 = u32::try_from(output_runs)
+                    .map_err(|_| format!("DSA graph output runs {} exceeds u32", output_runs))?;
+                let merge_pass_i32 = i32::try_from(merge_pass)
+                    .map_err(|_| format!("DSA graph merge pass {} exceeds i32", merge_pass))?;
+                let (input_scores_ptr, input_indices_ptr, output_scores_ptr) = if input_is_a {
+                    (
+                        *scores_a.device_ptr(),
+                        *indices_a.device_ptr(),
+                        *scores_b.device_ptr(),
+                    )
+                } else {
+                    (
+                        *scores_b.device_ptr(),
+                        *indices_b.device_ptr(),
+                        *scores_a.device_ptr(),
+                    )
+                };
+                let output_indices_ptr = if output_runs == 1 {
+                    *resource.d_topk_indices.device_ptr()
+                } else if input_is_a {
+                    *indices_b.device_ptr()
+                } else {
+                    *indices_a.device_ptr()
+                };
+                unsafe {
+                    kernels
+                        .dsa_topk_merge_runs_g
+                        .clone()
+                        .launch(
+                            LaunchConfig {
+                                grid_dim: (output_runs_u32, 1, 1),
+                                block_dim: (block_threads, 1, 1),
+                                shared_mem_bytes: shared_bytes_u32,
+                            },
+                            (
+                                input_scores_ptr,
+                                input_indices_ptr,
+                                output_scores_ptr,
+                                output_indices_ptr,
+                                *resource.d_topk_indices.device_ptr(),
+                                d_seq_len_ptr,
+                                capacity_i32,
+                                selected_i32,
+                                sort_width_i32,
+                                merge_pass_i32,
+                            ),
+                        )
+                        .map_err(|error| {
+                            format!(
+                                "DSA owner {} graph top-k merge: {:?}",
+                                owner_layer_idx, error
+                            )
+                        })?;
+                }
+                input_runs = output_runs;
+                input_is_a = !input_is_a;
+                merge_pass += 1;
+            }
+        }
+        Ok(plan)
+    }
+
+    fn resolve_dsa_selected_indices_for_layer(
+        graph: &GpuDecodeGraph,
+        layer_idx: usize,
+    ) -> Result<DsaSelectedIndexView, String> {
+        if !graph.dsa_indexer_resources_finalized {
+            return Err(format!(
+                "DSA layer {} cannot resolve IndexShare results before resource finalization",
+                layer_idx
+            ));
+        }
+        let registration = graph
+            .layers
+            .get(layer_idx)
+            .and_then(|layer| layer.dsa_indexer.as_ref())
+            .ok_or_else(|| format!("DSA layer {} has no indexer registration", layer_idx))?;
+        let local_owner = graph
+            .dsa_indexer_owners
+            .iter()
+            .find(|resource| resource.owner_layer_idx == registration.owner_layer_idx);
+        let replica = graph
+            .dsa_indexshare_replicas
+            .iter()
+            .find(|resource| resource.owner_layer_idx == registration.owner_layer_idx);
+        let (d_indices_ptr, topk_capacity) = match (local_owner, replica) {
+            (Some(resource), None) => (
+                *resource.d_topk_indices.device_ptr(),
+                resource.topk_capacity,
+            ),
+            (None, Some(resource)) => (
+                *resource.d_topk_indices.device_ptr(),
+                resource.topk_capacity,
+            ),
+            (Some(_), Some(_)) => {
+                return Err(format!(
+                    "DSA layer {} owner {} has ambiguous local and replica IndexShare results",
+                    layer_idx, registration.owner_layer_idx
+                ))
+            }
+            (None, None) => {
+                return Err(format!(
+                    "DSA layer {} owner {} has no local or replica IndexShare result",
+                    layer_idx, registration.owner_layer_idx
+                ))
+            }
+        };
+        if d_indices_ptr == 0 || topk_capacity == 0 || topk_capacity > registration.index_topk {
+            return Err(format!(
+                "DSA layer {} owner {} has invalid IndexShare result [ptr=0x{:x}, capacity={}, configured_topk={}]",
+                layer_idx,
+                registration.owner_layer_idx,
+                d_indices_ptr,
+                topk_capacity,
+                registration.index_topk,
+            ));
+        }
+        Ok(DsaSelectedIndexView {
+            owner_layer_idx: registration.owner_layer_idx,
+            d_indices_ptr,
+            topk_capacity,
+        })
+    }
+
+    fn launch_mla_sparse_attention_k4_graphable_for_layer(
+        &self,
+        graph: &GpuDecodeGraph,
+        layer_idx: usize,
+        d_seq_len_ptr: u64,
+    ) -> Result<DsaSelectedIndexView, String> {
+        if d_seq_len_ptr == 0 {
+            return Err(format!(
+                "DSA layer {} sparse MLA attention requires a sequence-length pointer",
+                layer_idx
+            ));
+        }
+        let selected = Self::resolve_dsa_selected_indices_for_layer(graph, layer_idx)?;
+        let layer = graph
+            .layers
+            .get(layer_idx)
+            .ok_or_else(|| format!("DSA layer {} is absent from the decode graph", layer_idx))?;
+        let (num_heads, ckv_cache_dim, qk_rope_dim, sm_scale, ckv_cache_ptr, kpe_cache_ptr) =
+            match &layer.attn {
+                GpuAttnConfig::MLA {
+                    num_heads,
+                    ckv_cache_dim,
+                    qk_rope_dim,
+                    sm_scale,
+                    ckv_cache_ptr,
+                    kpe_cache_ptr,
+                    ..
+                } => (
+                    *num_heads,
+                    *ckv_cache_dim,
+                    *qk_rope_dim,
+                    *sm_scale,
+                    *ckv_cache_ptr,
+                    *kpe_cache_ptr,
+                ),
+                _ => {
+                    return Err(format!(
+                        "DSA layer {} sparse attention requires an MLA layer",
+                        layer_idx
+                    ))
+                }
+            };
+        if num_heads == 0
+            || ckv_cache_dim == 0
+            || qk_rope_dim == 0
+            || ckv_cache_ptr == 0
+            || kpe_cache_ptr == 0
+        {
+            return Err(format!(
+                "DSA layer {} has incomplete sparse MLA geometry or cache pointers",
+                layer_idx
+            ));
+        }
+        let num_heads_i32 = i32::try_from(num_heads)
+            .map_err(|_| format!("DSA layer {} head count exceeds i32", layer_idx))?;
+        let ckv_cache_dim_i32 = i32::try_from(ckv_cache_dim)
+            .map_err(|_| format!("DSA layer {} cKV width exceeds i32", layer_idx))?;
+        let qk_rope_dim_i32 = i32::try_from(qk_rope_dim)
+            .map_err(|_| format!("DSA layer {} RoPE width exceeds i32", layer_idx))?;
+        let selected_capacity_i32 = i32::try_from(selected.topk_capacity).map_err(|_| {
+            format!(
+                "DSA layer {} selected capacity {} exceeds i32",
+                layer_idx, selected.topk_capacity
+            )
+        })?;
+        let threads = 256u32;
+        let num_warps = usize::try_from(threads.div_ceil(32))
+            .map_err(|_| "DSA sparse MLA warp count exceeds usize".to_string())?;
+        let shared_floats = ckv_cache_dim
+            .checked_add(qk_rope_dim)
+            .and_then(|value| value.checked_add(num_warps))
+            .and_then(|value| value.checked_add(4096))
+            .ok_or_else(|| format!("DSA layer {} sparse MLA shared-memory overflow", layer_idx))?;
+        let shared_mem_bytes = u32::try_from(
+            shared_floats
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or_else(|| {
+                    format!("DSA layer {} sparse MLA shared-memory overflow", layer_idx)
+                })?,
+        )
+        .map_err(|_| {
+            format!(
+                "DSA layer {} sparse MLA shared memory exceeds u32",
+                layer_idx
+            )
+        })?;
+        let kernels = graph.kernels.as_ref().ok_or("kernels not cached")?;
+        unsafe {
+            kernels
+                .mla_sparse_attention_k4_g
+                .clone()
+                .launch(
+                    LaunchConfig {
+                        grid_dim: (
+                            u32::try_from(num_heads).map_err(|_| {
+                                format!("DSA layer {} head count exceeds u32", layer_idx)
+                            })?,
+                            1,
+                            1,
+                        ),
+                        block_dim: (threads, 1, 1),
+                        shared_mem_bytes,
+                    },
+                    (
+                        *graph.d_mla_attn_out.device_ptr(),
+                        *graph.d_mla_q_absorbed.device_ptr(),
+                        *graph.d_gqa_v.device_ptr(),
+                        ckv_cache_ptr,
+                        kpe_cache_ptr,
+                        selected.d_indices_ptr,
+                        sm_scale,
+                        num_heads_i32,
+                        ckv_cache_dim_i32,
+                        qk_rope_dim_i32,
+                        selected_capacity_i32,
+                        d_seq_len_ptr,
+                    ),
+                )
+                .map_err(|error| {
+                    format!(
+                        "mla_sparse_attention_k4_g[{} owner={}]: {:?}",
+                        layer_idx, selected.owner_layer_idx, error
+                    )
+                })?;
+        }
+        Ok(selected)
+    }
+
+    fn launch_mla_sparse_attention_k4_for_layer(
+        &self,
+        graph: &GpuDecodeGraph,
+        layer_idx: usize,
+        seq_len: usize,
+    ) -> Result<DsaSelectedIndexView, String> {
+        if seq_len == 0 {
+            return Err(format!(
+                "DSA layer {} sparse MLA attention requires a positive sequence length",
+                layer_idx
+            ));
+        }
+        let selected = Self::resolve_dsa_selected_indices_for_layer(graph, layer_idx)?;
+        let layer = graph
+            .layers
+            .get(layer_idx)
+            .ok_or_else(|| format!("DSA layer {} is absent from the decode graph", layer_idx))?;
+        let (num_heads, ckv_cache_dim, qk_rope_dim, sm_scale, ckv_cache_ptr, kpe_cache_ptr) =
+            match &layer.attn {
+                GpuAttnConfig::MLA {
+                    num_heads,
+                    ckv_cache_dim,
+                    qk_rope_dim,
+                    sm_scale,
+                    ckv_cache_ptr,
+                    kpe_cache_ptr,
+                    ..
+                } => (
+                    *num_heads,
+                    *ckv_cache_dim,
+                    *qk_rope_dim,
+                    *sm_scale,
+                    *ckv_cache_ptr,
+                    *kpe_cache_ptr,
+                ),
+                _ => {
+                    return Err(format!(
+                        "DSA layer {} sparse attention requires an MLA layer",
+                        layer_idx
+                    ))
+                }
+            };
+        if num_heads == 0
+            || ckv_cache_dim == 0
+            || qk_rope_dim == 0
+            || ckv_cache_ptr == 0
+            || kpe_cache_ptr == 0
+        {
+            return Err(format!(
+                "DSA layer {} has incomplete sparse MLA geometry or cache pointers",
+                layer_idx
+            ));
+        }
+        let selected_count = seq_len.min(selected.topk_capacity);
+        if selected_count == 0 {
+            return Err(format!(
+                "DSA layer {} resolved no sparse MLA positions for sequence length {}",
+                layer_idx, seq_len
+            ));
+        }
+        let num_heads_i32 = i32::try_from(num_heads)
+            .map_err(|_| format!("DSA layer {} head count exceeds i32", layer_idx))?;
+        let ckv_cache_dim_i32 = i32::try_from(ckv_cache_dim)
+            .map_err(|_| format!("DSA layer {} cKV width exceeds i32", layer_idx))?;
+        let qk_rope_dim_i32 = i32::try_from(qk_rope_dim)
+            .map_err(|_| format!("DSA layer {} RoPE width exceeds i32", layer_idx))?;
+        let selected_count_i32 = i32::try_from(selected_count).map_err(|_| {
+            format!(
+                "DSA layer {} selected count {} exceeds i32",
+                layer_idx, selected_count
+            )
+        })?;
+        let seq_len_i32 = i32::try_from(seq_len)
+            .map_err(|_| format!("DSA layer {} sequence length exceeds i32", layer_idx))?;
+        let threads = 256u32;
+        let num_warps = usize::try_from(threads.div_ceil(32))
+            .map_err(|_| "DSA sparse MLA warp count exceeds usize".to_string())?;
+        let shared_floats = ckv_cache_dim
+            .checked_add(qk_rope_dim)
+            .and_then(|value| value.checked_add(num_warps))
+            .and_then(|value| value.checked_add(4096))
+            .ok_or_else(|| format!("DSA layer {} sparse MLA shared-memory overflow", layer_idx))?;
+        let shared_mem_bytes = u32::try_from(
+            shared_floats
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or_else(|| {
+                    format!("DSA layer {} sparse MLA shared-memory overflow", layer_idx)
+                })?,
+        )
+        .map_err(|_| {
+            format!(
+                "DSA layer {} sparse MLA shared memory exceeds u32",
+                layer_idx
+            )
+        })?;
+        let kernels = graph.kernels.as_ref().ok_or("kernels not cached")?;
+        unsafe {
+            kernels
+                .mla_sparse_attention_k4
+                .clone()
+                .launch(
+                    LaunchConfig {
+                        grid_dim: (
+                            u32::try_from(num_heads).map_err(|_| {
+                                format!("DSA layer {} head count exceeds u32", layer_idx)
+                            })?,
+                            1,
+                            1,
+                        ),
+                        block_dim: (threads, 1, 1),
+                        shared_mem_bytes,
+                    },
+                    (
+                        *graph.d_mla_attn_out.device_ptr(),
+                        *graph.d_mla_q_absorbed.device_ptr(),
+                        *graph.d_gqa_v.device_ptr(),
+                        ckv_cache_ptr,
+                        kpe_cache_ptr,
+                        selected.d_indices_ptr,
+                        sm_scale,
+                        num_heads_i32,
+                        ckv_cache_dim_i32,
+                        qk_rope_dim_i32,
+                        selected_count_i32,
+                        seq_len_i32,
+                    ),
+                )
+                .map_err(|error| {
+                    format!(
+                        "mla_sparse_attention_k4[{} owner={}]: {:?}",
+                        layer_idx, selected.owner_layer_idx, error
+                    )
+                })?;
+        }
+        Ok(selected)
+    }
+
     fn execute_dsa_owner_topk(
         &self,
         owner_layer_idx: usize,
         context: usize,
     ) -> Result<DsaTopkPlan, String> {
         let graph = self.graph.as_ref().ok_or("Call configure first")?;
+        self.execute_dsa_owner_topk_for_graph(graph, owner_layer_idx, context)
+    }
+
+    fn execute_dsa_owner_topk_for_graph(
+        &self,
+        graph: &GpuDecodeGraph,
+        owner_layer_idx: usize,
+        context: usize,
+    ) -> Result<DsaTopkPlan, String> {
         let registration = graph
             .layers
             .iter()
@@ -26381,14 +28447,25 @@ impl GpuDecodeStore {
         use crate::gpu_prefill::*;
 
         let graph = self.graph.as_ref().ok_or("GpuDecodeStore not configured")?;
-        if let Some(index_topk) = validate_dsa_exact_prefix_graph(graph, max_tokens)? {
-            log::warn!(
-                "GLM DSA exact-prefix mode: runtime context {} and KV capacity {} are both within registered index_topk {}; dense causal MLA selects the same complete prefix for layers {:?}",
-                max_tokens,
-                graph.kv_max_seq,
-                index_topk,
-                incomplete_dsa_layers(graph),
-            );
+        if let Some((index_topk, runtime_context_tokens)) =
+            validate_dsa_runtime_graph(graph, max_tokens)?
+        {
+            if runtime_context_tokens <= index_topk {
+                log::info!(
+                    "DSA exact-prefix mode: runtime context {} is within registered index_topk {}; every causal prefix position is retained for layers {:?}",
+                    runtime_context_tokens,
+                    index_topk,
+                    dsa_registered_layers(graph),
+                );
+            } else {
+                log::info!(
+                    "DSA sparse-context mode: runtime context {} exceeds registered index_topk {}; native owner scoring and IndexShare retain at most {} positions for layers {:?}",
+                    runtime_context_tokens,
+                    index_topk,
+                    index_topk,
+                    dsa_registered_layers(graph),
+                );
+            }
         }
 
         // Load prefill kernels
@@ -26821,6 +28898,18 @@ impl GpuDecodeStore {
                 router_per_expert_scale: 0,
                 hqq_gqa: None,
                 hqq_mla: None,
+                dsa_prefill: l.dsa_indexer.as_ref().map(|registration| {
+                    crate::gpu_prefill::DsaPrefillLayerDescriptor {
+                        owner_layer_idx: registration.owner_layer_idx,
+                        owner_weights_present: registration.owner_weights_present,
+                        index_topk: registration.index_topk,
+                        index_head_dim: registration.index_head_dim,
+                        index_n_heads: registration.index_n_heads,
+                        qk_rope_head_dim: registration.qk_rope_head_dim,
+                        q_lora_rank: registration.q_lora_rank,
+                    }
+                }),
+                dsa_prefill_owner: None,
                 hqq_linear_attention: None,
                 hqq_prefill_sidecars: l
                     .hqq_prefill_sidecars
@@ -27209,6 +29298,59 @@ impl GpuDecodeStore {
                     }
                     _ => {} // MLA: TODO
                 }
+            }
+
+            if let Some(resource) = graph
+                .dsa_indexer_owners
+                .iter()
+                .find(|resource| resource.owner_layer_idx == i)
+            {
+                let registration = l.dsa_indexer.as_ref().ok_or_else(|| {
+                    format!(
+                        "DSA owner resource {} has no layer registration during prefill construction",
+                        i
+                    )
+                })?;
+                if !registration.owner_weights_present || registration.owner_layer_idx != i {
+                    return Err(format!(
+                        "DSA owner resource {} does not match its layer registration",
+                        i
+                    ));
+                }
+                let wq_b = extract_bf16(resource.weight_ids.wq_b).ok_or_else(|| {
+                    format!("DSA owner {} prefill wq_b is not registered as BF16", i)
+                })?;
+                let wk = extract_bf16(resource.weight_ids.wk).ok_or_else(|| {
+                    format!("DSA owner {} prefill wk is not registered as BF16", i)
+                })?;
+                let weights_proj =
+                    extract_bf16(resource.weight_ids.weights_proj).ok_or_else(|| {
+                        format!(
+                            "DSA owner {} prefill weights_proj is not registered as BF16",
+                            i
+                        )
+                    })?;
+                let norm_weight = graph
+                    .weights
+                    .get(resource.weight_ids.k_norm_weight)
+                    .ok_or_else(|| format!("DSA owner {} norm-weight id is invalid", i))?;
+                let norm_bias = graph
+                    .weights
+                    .get(resource.weight_ids.k_norm_bias)
+                    .ok_or_else(|| format!("DSA owner {} norm-bias id is invalid", i))?;
+                lw.dsa_prefill_owner = Some(crate::gpu_prefill::DsaPrefillOwnerDescriptor {
+                    owner_layer_idx: i,
+                    wq_b,
+                    wk,
+                    weights_proj,
+                    norm_weight_ptr: norm_weight.ptr,
+                    norm_bias_ptr: norm_bias.ptr,
+                    key_cache_ptr: *resource.d_key_cache.device_ptr(),
+                    max_context_tokens: resource.max_context_tokens,
+                    index_head_dim: registration.index_head_dim,
+                    qk_rope_head_dim: registration.qk_rope_head_dim,
+                    layer_norm_eps: DSA_INDEXER_LAYER_NORM_EPS,
+                });
             }
 
             // MoE config
@@ -28007,6 +30149,7 @@ impl GpuDecodeStore {
             active_prefill_prompt_tokens: 0,
             active_prefill_chunk_idx: 0,
             active_prefill_chunk_start: 0,
+            dsa_prefill_workspace: None,
             prefill_prescan_accuracy_enabled: false,
             prefill_prescan_accuracy_stats: Vec::new(),
             ptr_table_reuse_ptrs: [[0, 0, 0, 0], [0, 0, 0, 0]],
@@ -34524,6 +36667,30 @@ impl GpuDecodeStore {
                                 layer_idx, *ckv_cache_ptr, *kpe_cache_ptr
                             ));
                         }
+                        if let Some(registration) = layer.dsa_indexer.as_ref() {
+                            if registration.owner_weights_present {
+                                if registration.owner_layer_idx != layer_idx {
+                                    return Err(format!(
+                                        "DSA layer {} carries owner weights for owner {}",
+                                        layer_idx, registration.owner_layer_idx
+                                    ));
+                                }
+                                self.execute_dsa_owner_scores_graphable_for_graph(
+                                    graph,
+                                    layer_idx,
+                                    d_pos_ptr,
+                                    d_seq_len_ptr,
+                                    *graph.d_hidden.device_ptr(),
+                                    *graph.d_residual.device_ptr(),
+                                    DsaGraphScoreBackend::LiveFused,
+                                )?;
+                                self.execute_dsa_owner_topk_graphable_for_graph(
+                                    graph,
+                                    layer_idx,
+                                    d_seq_len_ptr,
+                                )?;
+                            }
+                        }
                         let hqq_mla_exec = match graph.layers[layer_idx].hqq_exec.as_ref() {
                             Some(HqqExecutionDescriptor::Mla(desc))
                                 if hqq_mla_decode_ready(
@@ -34889,7 +37056,13 @@ impl GpuDecodeStore {
                         }
 
                         // ── MLA Step 8: Attention (graphable: reads seq_len from GPU buffer) ──
-                        {
+                        if layer.dsa_indexer.is_some() {
+                            self.launch_mla_sparse_attention_k4_graphable_for_layer(
+                                graph,
+                                layer_idx,
+                                d_seq_len_ptr,
+                            )?;
+                        } else {
                             let threads = 256u32;
                             let num_warps = (threads + 31) / 32;
                             let tile_size = 4096u32;
@@ -41439,6 +43612,24 @@ impl GpuDecodeStore {
                             layer_idx, *ckv_cache_ptr, *kpe_cache_ptr
                         ));
                     }
+                    if let Some(registration) = layer.dsa_indexer.as_ref() {
+                        if registration.owner_weights_present {
+                            if registration.owner_layer_idx != layer_idx {
+                                return Err(format!(
+                                    "DSA layer {} carries owner weights for owner {}",
+                                    layer_idx, registration.owner_layer_idx
+                                ));
+                            }
+                            let context = self.execute_dsa_owner_scores_for_graph(
+                                graph,
+                                layer_idx,
+                                position,
+                                *graph.d_hidden.device_ptr(),
+                                *graph.d_residual.device_ptr(),
+                            )?;
+                            self.execute_dsa_owner_topk_for_graph(graph, layer_idx, context)?;
+                        }
+                    }
                     let hqq_mla_exec = match graph.layers[layer_idx].hqq_exec.as_ref() {
                         Some(HqqExecutionDescriptor::Mla(desc))
                             if hqq_mla_decode_ready(
@@ -41811,8 +44002,14 @@ impl GpuDecodeStore {
                     }
 
                     // ── MLA Step 8: MLA attention ──
-                    // Uses ccd (padded) for cache reads and q_absorbed dimensions
-                    {
+                    // Uses ccd (padded) for cache reads and q_absorbed dimensions.
+                    if layer.dsa_indexer.is_some() {
+                        self.launch_mla_sparse_attention_k4_for_layer(
+                            graph,
+                            layer_idx,
+                            position + 1,
+                        )?;
+                    } else {
                         let threads = 256u32;
                         let num_warps = (threads + 31) / 32;
                         let tile_size = 4096u32; // MLA_TILE_SIZE in CUDA
@@ -44316,6 +46513,294 @@ impl GpuDecodeStore {
         Ok(())
     }
 
+    fn copy_dsa_indexshare_to(
+        &self,
+        aux_store: &mut GpuDecodeStore,
+    ) -> Result<(usize, usize), String> {
+        let source_graph = self.graph.as_ref().ok_or("source graph not configured")?;
+        let destination_graph = aux_store
+            .graph
+            .as_ref()
+            .ok_or("destination graph not configured")?;
+        if destination_graph.dsa_indexshare_replicas.is_empty() {
+            return Ok((0, 0));
+        }
+        let replica_count = destination_graph.dsa_indexshare_replicas.len();
+        if !source_graph.dsa_indexer_resources_finalized
+            || !destination_graph.dsa_indexer_resources_finalized
+        {
+            return Err(
+                "DSA IndexShare copy requires finalized source and destination resources"
+                    .to_string(),
+            );
+        }
+
+        let mut copies = Vec::with_capacity(destination_graph.dsa_indexshare_replicas.len());
+        for destination in &destination_graph.dsa_indexshare_replicas {
+            let source = source_graph
+                .dsa_indexer_owners
+                .iter()
+                .find(|resource| resource.owner_layer_idx == destination.owner_layer_idx)
+                .map(|resource| {
+                    (
+                        resource.topk_capacity,
+                        *resource.d_topk_indices.device_ptr(),
+                    )
+                })
+                .or_else(|| {
+                    source_graph
+                        .dsa_indexshare_replicas
+                        .iter()
+                        .find(|resource| resource.owner_layer_idx == destination.owner_layer_idx)
+                        .map(|resource| {
+                            (
+                                resource.topk_capacity,
+                                *resource.d_topk_indices.device_ptr(),
+                            )
+                        })
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "DSA IndexShare handoff cannot find owner {} on preceding store",
+                        destination.owner_layer_idx
+                    )
+                })?;
+            if source.0 != destination.topk_capacity {
+                return Err(format!(
+                    "DSA IndexShare owner {} capacity mismatch: source={} destination={}",
+                    destination.owner_layer_idx, source.0, destination.topk_capacity
+                ));
+            }
+            copies.push((
+                destination.owner_layer_idx,
+                source.0,
+                source.1,
+                *destination.d_topk_indices.device_ptr(),
+            ));
+        }
+
+        let copy_result = (|| -> Result<(usize, usize), String> {
+            self.device
+                .bind_to_thread()
+                .map_err(|error| format!("bind DSA IndexShare source store: {:?}", error))?;
+            self.device
+                .synchronize()
+                .map_err(|error| format!("sync DSA IndexShare source store: {:?}", error))?;
+            let max_capacity = copies
+                .iter()
+                .map(|(_, capacity, _, _)| *capacity)
+                .max()
+                .unwrap_or(0);
+            let mut host_indices = vec![0i32; max_capacity];
+            let mut total_bytes = 0usize;
+            for (owner_layer_idx, capacity, source_ptr, destination_ptr) in copies {
+                let bytes = capacity
+                    .checked_mul(std::mem::size_of::<i32>())
+                    .ok_or_else(|| {
+                        format!(
+                            "DSA IndexShare owner {} transfer byte count overflow",
+                            owner_layer_idx
+                        )
+                    })?;
+                unsafe {
+                    let result = cuda_sys::lib().cuMemcpyDtoH_v2(
+                        host_indices.as_mut_ptr() as *mut std::ffi::c_void,
+                        source_ptr,
+                        bytes,
+                    );
+                    if result != cuda_sys::CUresult::CUDA_SUCCESS {
+                        return Err(format!(
+                            "DSA IndexShare owner {} D2H handoff failed: {:?}",
+                            owner_layer_idx, result
+                        ));
+                    }
+                }
+                aux_store.device.bind_to_thread().map_err(|error| {
+                    format!("bind DSA IndexShare destination store: {:?}", error)
+                })?;
+                unsafe {
+                    let result = cuda_sys::lib().cuMemcpyHtoD_v2(
+                        destination_ptr,
+                        host_indices.as_ptr() as *const std::ffi::c_void,
+                        bytes,
+                    );
+                    if result != cuda_sys::CUresult::CUDA_SUCCESS {
+                        return Err(format!(
+                            "DSA IndexShare owner {} H2D handoff failed: {:?}",
+                            owner_layer_idx, result
+                        ));
+                    }
+                }
+                total_bytes += bytes;
+                self.device.bind_to_thread().map_err(|error| {
+                    format!("rebind DSA IndexShare source store: {:?}", error)
+                })?;
+            }
+            Ok((replica_count, total_bytes))
+        })();
+        let restore_result = aux_store
+            .device
+            .bind_to_thread()
+            .map_err(|error| format!("restore DSA IndexShare destination store: {:?}", error));
+        match (copy_result, restore_result) {
+            (Ok(result), Ok(())) => Ok(result),
+            (Err(copy_error), Ok(())) => Err(copy_error),
+            (Ok(_), Err(restore_error)) => Err(restore_error),
+            (Err(copy_error), Err(restore_error)) => {
+                Err(format!("{}; additionally {}", copy_error, restore_error))
+            }
+        }
+    }
+
+    /// Copy the prompt rows of every DSA owner key cache needed locally by an
+    /// auxiliary decode store. Full-primary prefill owns all source caches;
+    /// replicas carry selected indices only and are intentionally excluded.
+    pub fn copy_dsa_prompt_keys_to_aux(
+        &self,
+        aux_store: &mut GpuDecodeStore,
+        prompt_len: usize,
+    ) -> Result<(usize, usize), String> {
+        if prompt_len == 0 {
+            return Err("DSA prompt key-cache handoff requires a positive prompt length".to_string());
+        }
+        let source_graph = self.graph.as_ref().ok_or("source graph not configured")?;
+        let destination_graph = aux_store
+            .graph
+            .as_ref()
+            .ok_or("destination graph not configured")?;
+        if destination_graph.dsa_indexer_owners.is_empty() {
+            return Ok((0, 0));
+        }
+        if !source_graph.dsa_indexer_resources_finalized
+            || !destination_graph.dsa_indexer_resources_finalized
+        {
+            return Err(
+                "DSA prompt key-cache copy requires finalized source and destination resources"
+                    .to_string(),
+            );
+        }
+
+        let mut copies = Vec::with_capacity(destination_graph.dsa_indexer_owners.len());
+        for destination in &destination_graph.dsa_indexer_owners {
+            let source = source_graph
+                .dsa_indexer_owners
+                .iter()
+                .find(|resource| resource.owner_layer_idx == destination.owner_layer_idx)
+                .ok_or_else(|| {
+                    format!(
+                        "DSA prompt key-cache handoff cannot find owner {} on the full-primary store",
+                        destination.owner_layer_idx
+                    )
+                })?;
+            if source.index_head_dim != destination.index_head_dim {
+                return Err(format!(
+                    "DSA owner {} prompt key width mismatch: source={} destination={}",
+                    destination.owner_layer_idx,
+                    source.index_head_dim,
+                    destination.index_head_dim
+                ));
+            }
+            if prompt_len > source.max_context_tokens
+                || prompt_len > destination.max_context_tokens
+            {
+                return Err(format!(
+                    "DSA owner {} prompt length {} exceeds source/destination capacities {}/{}",
+                    destination.owner_layer_idx,
+                    prompt_len,
+                    source.max_context_tokens,
+                    destination.max_context_tokens
+                ));
+            }
+            let elements = prompt_len
+                .checked_mul(source.index_head_dim)
+                .ok_or_else(|| {
+                    format!(
+                        "DSA owner {} prompt key-cache element count overflow",
+                        destination.owner_layer_idx
+                    )
+                })?;
+            copies.push((
+                destination.owner_layer_idx,
+                elements,
+                *source.d_key_cache.device_ptr(),
+                *destination.d_key_cache.device_ptr(),
+            ));
+        }
+
+        let owner_count = destination_graph.dsa_indexer_owners.len();
+        let copy_result = (|| -> Result<(usize, usize), String> {
+            self.device
+                .bind_to_thread()
+                .map_err(|error| format!("bind DSA prompt-key source store: {:?}", error))?;
+            self.device
+                .synchronize()
+                .map_err(|error| format!("sync DSA prompt-key source store: {:?}", error))?;
+            let max_elements = copies
+                .iter()
+                .map(|(_, elements, _, _)| *elements)
+                .max()
+                .unwrap_or(0);
+            let mut host_keys = vec![0u16; max_elements];
+            let mut total_bytes = 0usize;
+            for (owner_layer_idx, elements, source_ptr, destination_ptr) in copies {
+                let bytes = elements
+                    .checked_mul(std::mem::size_of::<u16>())
+                    .ok_or_else(|| {
+                        format!(
+                            "DSA owner {} prompt key-cache byte count overflow",
+                            owner_layer_idx
+                        )
+                    })?;
+                unsafe {
+                    let result = cuda_sys::lib().cuMemcpyDtoH_v2(
+                        host_keys.as_mut_ptr() as *mut std::ffi::c_void,
+                        source_ptr,
+                        bytes,
+                    );
+                    if result != cuda_sys::CUresult::CUDA_SUCCESS {
+                        return Err(format!(
+                            "DSA owner {} prompt key-cache D2H failed: {:?}",
+                            owner_layer_idx, result
+                        ));
+                    }
+                }
+                aux_store.device.bind_to_thread().map_err(|error| {
+                    format!("bind DSA prompt-key destination store: {:?}", error)
+                })?;
+                unsafe {
+                    let result = cuda_sys::lib().cuMemcpyHtoD_v2(
+                        destination_ptr,
+                        host_keys.as_ptr() as *const std::ffi::c_void,
+                        bytes,
+                    );
+                    if result != cuda_sys::CUresult::CUDA_SUCCESS {
+                        return Err(format!(
+                            "DSA owner {} prompt key-cache H2D failed: {:?}",
+                            owner_layer_idx, result
+                        ));
+                    }
+                }
+                total_bytes += bytes;
+                self.device.bind_to_thread().map_err(|error| {
+                    format!("rebind DSA prompt-key source store: {:?}", error)
+                })?;
+            }
+            Ok((owner_count, total_bytes))
+        })();
+        let restore_result = aux_store
+            .device
+            .bind_to_thread()
+            .map_err(|error| format!("restore DSA prompt-key destination store: {:?}", error));
+        match (copy_result, restore_result) {
+            (Ok(result), Ok(())) => Ok(result),
+            (Err(copy_error), Ok(())) => Err(copy_error),
+            (Ok(_), Err(restore_error)) => Err(restore_error),
+            (Err(copy_error), Err(restore_error)) => {
+                Err(format!("{}; additionally {}", copy_error, restore_error))
+            }
+        }
+    }
+
     /// Decode a segment of layers (for multi-GPU layer split).
     ///
     /// - `do_embedding`: if true, performs embedding lookup for token_id
@@ -44748,6 +47233,26 @@ impl GpuDecodeStore {
                         step_ok = false;
                         break;
                     }
+                    let indexshare_result = if i == 0 {
+                        self.copy_dsa_indexshare_to(aux)
+                    } else {
+                        let previous =
+                            unsafe { &mut *(aux_store_addrs[i - 1] as *mut GpuDecodeStore) };
+                        previous.copy_dsa_indexshare_to(aux)
+                    };
+                    let (indexshare_owners, indexshare_bytes) = match indexshare_result {
+                        Ok(result) => result,
+                        Err(error) => {
+                            log::error!(
+                                "multi-gpu DSA IndexShare handoff GPU{} -> GPU{}: {}",
+                                i,
+                                i + 1,
+                                error
+                            );
+                            step_ok = false;
+                            break;
+                        }
+                    };
                     trace_emit_mark(
                         trace_config.as_ref(),
                         step,
@@ -44756,11 +47261,13 @@ impl GpuDecodeStore {
                         None,
                         "transfer",
                         &format!(
-                            "phase=hidden_handoff mode=graph from_gpu={} to_gpu={} hidden_elems={} residual_elems={}",
+                            "phase=hidden_handoff mode=graph from_gpu={} to_gpu={} hidden_elems={} residual_elems={} indexshare_owners={} indexshare_bytes={}",
                             i,
                             i + 1,
                             h_hidden.len(),
                             h_residual.len(),
+                            indexshare_owners,
+                            indexshare_bytes,
                         ),
                     );
                     t_transfer_total += Instant::now().duration_since(t_xfer_start).as_secs_f64();
@@ -44856,6 +47363,26 @@ impl GpuDecodeStore {
                         step_ok = false;
                         break;
                     }
+                    let indexshare_result = if i == 0 {
+                        self.copy_dsa_indexshare_to(aux)
+                    } else {
+                        let previous =
+                            unsafe { &mut *(aux_store_addrs[i - 1] as *mut GpuDecodeStore) };
+                        previous.copy_dsa_indexshare_to(aux)
+                    };
+                    let (indexshare_owners, indexshare_bytes) = match indexshare_result {
+                        Ok(result) => result,
+                        Err(error) => {
+                            log::error!(
+                                "multi-gpu DSA IndexShare handoff GPU{} -> GPU{}: {}",
+                                i,
+                                i + 1,
+                                error
+                            );
+                            step_ok = false;
+                            break;
+                        }
+                    };
                     trace_emit_mark(
                         trace_config.as_ref(),
                         step,
@@ -44864,11 +47391,13 @@ impl GpuDecodeStore {
                         None,
                         "transfer",
                         &format!(
-                            "phase=hidden_handoff mode=ungraphed from_gpu={} to_gpu={} hidden_elems={} residual_elems={}",
+                            "phase=hidden_handoff mode=ungraphed from_gpu={} to_gpu={} hidden_elems={} residual_elems={} indexshare_owners={} indexshare_bytes={}",
                             i,
                             i + 1,
                             h_hidden.len(),
                             h_residual.len(),
+                            indexshare_owners,
+                            indexshare_bytes,
                         ),
                     );
                     if timing {
@@ -50403,6 +52932,7 @@ impl GpuDecodeStore {
     {
         use std::time::Instant;
 
+        self.last_stream_failure = None;
         self.refresh_trace_config();
         let trace_config = self.active_trace_owned();
         let debug_decode_state_trace = self.debug_decode_state_trace_once;
@@ -50442,14 +52972,18 @@ impl GpuDecodeStore {
         // Bind CUDA context to this thread. Required when called from
         // the server thread (which differs from the setup thread).
         if let Err(e) = self.device.bind_to_thread() {
-            log::error!("gpu_generate_stream: failed to bind CUDA context: {:?}", e);
+            let failure = format!("failed to bind CUDA context: {:?}", e);
+            log::error!("gpu_generate_stream: {}", failure);
+            self.last_stream_failure = Some(failure);
             return 0;
         }
 
         let vocab_size = match self.graph.as_ref() {
             Some(g) => g.vocab_size,
             None => {
-                log::error!("gpu_generate_stream: graph not configured");
+                let failure = "graph not configured".to_string();
+                log::error!("gpu_generate_stream: {}", failure);
+                self.last_stream_failure = Some(failure);
                 return 0;
             }
         };
@@ -50608,10 +53142,9 @@ impl GpuDecodeStore {
         {
             let err = unsafe { cuda_sys::lib().cuStreamSynchronize(self.prefetch_stream.0) };
             if err != cuda_sys::CUresult::CUDA_SUCCESS {
-                log::error!(
-                    "gpu_generate_stream: prefetch stream sync at request reset: {:?}",
-                    err
-                );
+                let failure = format!("prefetch stream sync at request reset: {:?}", err);
+                log::error!("gpu_generate_stream: {}", failure);
+                self.last_stream_failure = Some(failure);
                 return 0;
             }
         }
@@ -50858,9 +53391,9 @@ impl GpuDecodeStore {
                 .map(|graph| graph.adaptive_cold_drop.enabled())
                 .unwrap_or(false)
         {
-            log::error!(
-                "KRASIS_ADAPTIVE_COLD_DROP=1 is not supported with speculative decode; refusing to run an unimplemented approximate path"
-            );
+            let failure = "KRASIS_ADAPTIVE_COLD_DROP=1 is not supported with speculative decode; refusing to run an unimplemented approximate path".to_string();
+            log::error!("{}", failure);
+            self.last_stream_failure = Some(failure);
             return 0;
         }
         let draft_k = self.draft_k;
@@ -51051,7 +53584,9 @@ impl GpuDecodeStore {
                 // 2. If draft failed, fall back to single-token decode
                 if draft_tokens.is_empty() {
                     if let Err(e) = self.gpu_decode_step(next_token, pos) {
-                        log::error!("gpu_generate_stream: decode_step error: {}", e);
+                        let failure = format!("decode_step error: {}", e);
+                        log::error!("gpu_generate_stream: {}", failure);
+                        self.last_stream_failure = Some(failure);
                         break;
                     }
                     let (target_pred, token_logprobs) = {
@@ -51194,7 +53729,9 @@ impl GpuDecodeStore {
                     match self.gpu_decode_step_batched(&batch_tokens, &batch_positions) {
                         Ok(vp) => vp,
                         Err(e) => {
-                            log::error!("speculative: batched decode error: {}", e);
+                            let failure = format!("speculative batched decode error: {}", e);
+                            log::error!("{}", failure);
+                            self.last_stream_failure = Some(failure);
                             let _ = self.restore_la_states();
                             break;
                         }
@@ -51561,10 +54098,10 @@ impl GpuDecodeStore {
                         std::time::Instant::now()
                     };
                     if let Err(e) = self.replay_per_layer_graphs(next_token, pos, true) {
-                        log::error!(
-                            "gpu_generate_stream: graph replay failed (no ungraphed fallback): {}",
-                            e
-                        );
+                        let failure =
+                            format!("graph replay failed (no ungraphed fallback): {}", e);
+                        log::error!("gpu_generate_stream: {}", failure);
+                        self.last_stream_failure = Some(failure);
                         break;
                     } else if timing_enabled {
                         // Accumulate total step time for the timing report.
@@ -51583,7 +54120,9 @@ impl GpuDecodeStore {
                     }
                     // First token (or after invalidation): run ungraphed, then capture per-layer graphs
                     if let Err(e) = self.gpu_decode_step(next_token, pos) {
-                        log::error!("gpu_generate_stream: decode_step error: {}", e);
+                        let failure = format!("decode_step error: {}", e);
+                        log::error!("gpu_generate_stream: {}", failure);
+                        self.last_stream_failure = Some(failure);
                         break;
                     }
                     sample_min_vram(&mut min_vram_free_bytes);
@@ -51609,10 +54148,12 @@ impl GpuDecodeStore {
                                 sample_min_vram(&mut min_vram_free_bytes);
                             }
                             Err(e) => {
-                                log::error!(
-                                    "Per-layer graph capture failed (no ungraphed fallback): {}",
+                                let failure = format!(
+                                    "per-layer graph capture failed (no ungraphed fallback): {}",
                                     e
                                 );
+                                log::error!("{}", failure);
+                                self.last_stream_failure = Some(failure);
                                 break;
                             }
                         }

@@ -21,7 +21,7 @@ use std::time::Instant;
 
 use cudarc::cublas::{result as cublas_result, sys as cublas_sys};
 use cudarc::driver::sys as cuda_sys;
-use cudarc::driver::{CudaDevice, CudaFunction, CudaSlice, DevicePtr};
+use cudarc::driver::{CudaDevice, CudaFunction, CudaSlice, DevicePtr, DeviceSlice};
 use pyo3::prelude::*;
 
 use crate::weights::marlin::{
@@ -5175,8 +5175,16 @@ pub struct PrefillKernels {
     rope_half_split: RawCuFunc,
     rope_mrope: RawCuFunc,
     mla_rmsnorm_prefix_bf16_fp32w: RawCuFunc,
+    dsa_prefill_layernorm_rope_key_write: RawCuFunc,
+    dsa_prefill_rope_query_bf16: RawCuFunc,
+    dsa_prefill_fused_scores: RawCuFunc,
+    dsa_prefill_topk_sort_rows: RawCuFunc,
+    dsa_prefill_topk_merge_rows: RawCuFunc,
     mla_pack_qkv_rope_bf16: RawCuFunc,
     mla_cache_append_k4: RawCuFunc,
+    mla_prefill_absorb_wkc: RawCuFunc,
+    mla_prefill_sparse_attention_k4: RawCuFunc,
+    mla_prefill_apply_wvc: RawCuFunc,
     silu_mul: RawCuFunc,
     silu_mul_limited: RawCuFunc,
     relu2: RawCuFunc,
@@ -5849,6 +5857,964 @@ pub struct HqqMlaPrefillDescriptor {
     pub q_a_norm_ptr: u64,
 }
 
+pub struct DsaPrefillOwnerDescriptor {
+    pub owner_layer_idx: usize,
+    pub wq_b: Bf16Weight,
+    pub wk: Bf16Weight,
+    pub weights_proj: Bf16Weight,
+    pub norm_weight_ptr: u64,
+    pub norm_bias_ptr: u64,
+    pub key_cache_ptr: u64,
+    pub max_context_tokens: usize,
+    pub index_head_dim: usize,
+    pub qk_rope_head_dim: usize,
+    pub layer_norm_eps: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DsaPrefillLayerDescriptor {
+    pub owner_layer_idx: usize,
+    pub owner_weights_present: bool,
+    pub index_topk: usize,
+    pub index_head_dim: usize,
+    pub index_n_heads: usize,
+    pub qk_rope_head_dim: usize,
+    pub q_lora_rank: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DsaPrefillSelectionPlan {
+    chunk_rows: usize,
+    context_end: usize,
+    selected_per_row: usize,
+    selection_elements: usize,
+    selection_bytes: usize,
+    workspace_capacity_bytes: usize,
+    score_row_bytes: usize,
+    candidate_row_elements: usize,
+    candidate_row_bytes: usize,
+    workspace_row_bytes: usize,
+    score_tile_rows: usize,
+    score_tile_elements: usize,
+    candidate_tile_elements: usize,
+    workspace_tile_bytes: usize,
+    score_tile_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DsaPrefillWorkspaceGeometry {
+    index_topk: usize,
+    index_n_heads: usize,
+    index_head_dim: usize,
+    mla_num_heads: usize,
+    mla_ckv_cache_dim: usize,
+}
+
+fn plan_dsa_prefill_selection(
+    chunk_rows: usize,
+    context_end: usize,
+    index_topk: usize,
+    workspace_capacity_bytes: usize,
+) -> Result<DsaPrefillSelectionPlan, String> {
+    if chunk_rows == 0 || context_end == 0 || index_topk == 0 {
+        return Err(format!(
+            "DSA prefill selection requires positive chunk/context/topk, got chunk={} context={} topk={}",
+            chunk_rows, context_end, index_topk
+        ));
+    }
+    if chunk_rows > context_end {
+        return Err(format!(
+            "DSA prefill chunk rows {} exceed causal context end {}",
+            chunk_rows, context_end
+        ));
+    }
+    let topk_plan = crate::gpu_decode::plan_dsa_topk(context_end, index_topk)?;
+    let score_row_bytes = context_end
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "DSA prefill score-row byte size overflow".to_string())?;
+    let candidate_row_bytes = topk_plan
+        .candidate_capacity
+        .checked_mul(std::mem::size_of::<f32>() + std::mem::size_of::<i32>())
+        .and_then(|bytes| bytes.checked_mul(2))
+        .ok_or_else(|| "DSA prefill candidate-row byte size overflow".to_string())?;
+    let workspace_row_bytes = score_row_bytes
+        .checked_add(candidate_row_bytes)
+        .ok_or_else(|| "DSA prefill per-row workspace byte size overflow".to_string())?;
+    if workspace_capacity_bytes < workspace_row_bytes {
+        return Err(format!(
+            "DSA prefill workspace capacity {} bytes cannot hold one causal row requiring {} score bytes and {} candidate bytes",
+            workspace_capacity_bytes, score_row_bytes, candidate_row_bytes
+        ));
+    }
+    let selected_per_row = index_topk.min(context_end);
+    let selection_elements = chunk_rows
+        .checked_mul(selected_per_row)
+        .ok_or_else(|| "DSA prefill selected-index workspace size overflow".to_string())?;
+    let selection_bytes = selection_elements
+        .checked_mul(std::mem::size_of::<i32>())
+        .ok_or_else(|| "DSA prefill selected-index workspace byte size overflow".to_string())?;
+    let score_tile_rows = chunk_rows.min(workspace_capacity_bytes / workspace_row_bytes);
+    let score_tile_elements = score_tile_rows
+        .checked_mul(context_end)
+        .ok_or_else(|| "DSA prefill score-tile size overflow".to_string())?;
+    let candidate_tile_elements = score_tile_rows
+        .checked_mul(topk_plan.candidate_capacity)
+        .ok_or_else(|| "DSA prefill candidate-tile size overflow".to_string())?;
+    let workspace_tile_bytes = score_tile_rows
+        .checked_mul(workspace_row_bytes)
+        .ok_or_else(|| "DSA prefill workspace-tile byte size overflow".to_string())?;
+    let score_tile_count = chunk_rows.div_ceil(score_tile_rows);
+    Ok(DsaPrefillSelectionPlan {
+        chunk_rows,
+        context_end,
+        selected_per_row,
+        selection_elements,
+        selection_bytes,
+        workspace_capacity_bytes,
+        score_row_bytes,
+        candidate_row_elements: topk_plan.candidate_capacity,
+        candidate_row_bytes,
+        workspace_row_bytes,
+        score_tile_rows,
+        score_tile_elements,
+        candidate_tile_elements,
+        workspace_tile_bytes,
+        score_tile_count,
+    })
+}
+
+#[derive(Clone, Copy)]
+struct DsaPrefillSelectionBuffers {
+    scores_ptr: u64,
+    scores_capacity: usize,
+    candidate_scores_a_ptr: u64,
+    candidate_scores_b_ptr: u64,
+    candidate_indices_a_ptr: u64,
+    candidate_indices_b_ptr: u64,
+    candidate_capacity: usize,
+    selected_ptr: u64,
+    selected_capacity: usize,
+}
+
+#[derive(Clone, Copy)]
+struct DsaPrefillSelectionKernels {
+    rope_query_bf16: RawCuFunc,
+    fused_scores: RawCuFunc,
+    topk_sort_rows: RawCuFunc,
+    topk_merge_rows: RawCuFunc,
+}
+
+pub(crate) struct DsaPrefillRequestWorkspace {
+    max_chunk_rows: usize,
+    max_context_end: usize,
+    max_selected_per_row: usize,
+    selection_workspace_capacity_bytes: usize,
+    index_n_heads: usize,
+    index_head_dim: usize,
+    configured_topk: usize,
+    d_rope_queries: GpuBuf<u16>,
+    d_selection_workspace: GpuBuf<u8>,
+    d_selected_indices: GpuBuf<i32>,
+    mla_num_heads: usize,
+    mla_ckv_cache_dim: usize,
+    d_mla_q_absorbed: GpuBuf<f32>,
+    d_mla_attention: GpuBuf<f32>,
+    active_owner_layer_idx: Cell<Option<usize>>,
+    active_chunk_start: Cell<usize>,
+    active_chunk_rows: Cell<usize>,
+    active_context_end: Cell<usize>,
+    active_selected_per_row: Cell<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DsaPrefillSelectedIndexView {
+    owner_layer_idx: usize,
+    ptr: u64,
+    rows: usize,
+    selected_per_row: usize,
+    context_end: usize,
+}
+
+impl DsaPrefillRequestWorkspace {
+    fn allocate(
+        chunk_rows: usize,
+        context_end: usize,
+        configured_topk: usize,
+        index_n_heads: usize,
+        index_head_dim: usize,
+        mla_num_heads: usize,
+        mla_ckv_cache_dim: usize,
+        workspace_capacity_bytes: usize,
+    ) -> Result<Self, String> {
+        if index_n_heads == 0 || index_head_dim == 0 {
+            return Err(format!(
+                "DSA prefill workspace requires positive query geometry, got heads={} head_dim={}",
+                index_n_heads, index_head_dim
+            ));
+        }
+        if (mla_num_heads == 0) != (mla_ckv_cache_dim == 0) {
+            return Err(format!(
+                "DSA prefill MLA workspace requires both heads and cKV width or neither, got heads={} ckv={}",
+                mla_num_heads, mla_ckv_cache_dim
+            ));
+        }
+        let plan = plan_dsa_prefill_selection(
+            chunk_rows,
+            context_end,
+            configured_topk,
+            workspace_capacity_bytes,
+        )?;
+        let query_elements = chunk_rows
+            .checked_mul(index_n_heads)
+            .and_then(|value| value.checked_mul(index_head_dim))
+            .ok_or_else(|| "DSA prefill query workspace size overflow".to_string())?;
+        let mla_elements = chunk_rows
+            .checked_mul(mla_num_heads)
+            .and_then(|value| value.checked_mul(mla_ckv_cache_dim))
+            .ok_or_else(|| "DSA prefill MLA workspace size overflow".to_string())?;
+        Ok(Self {
+            max_chunk_rows: chunk_rows,
+            max_context_end: context_end,
+            max_selected_per_row: plan.selected_per_row,
+            selection_workspace_capacity_bytes: workspace_capacity_bytes,
+            index_n_heads,
+            index_head_dim,
+            configured_topk,
+            d_rope_queries: GpuBuf::alloc_zeroed(query_elements)
+                .map_err(|error| format!("alloc DSA prefill RoPE queries: {error}"))?,
+            d_selection_workspace: GpuBuf::alloc_zeroed(workspace_capacity_bytes)
+                .map_err(|error| format!("alloc DSA prefill selection workspace: {error}"))?,
+            d_selected_indices: GpuBuf::alloc_zeroed(plan.selection_elements)
+                .map_err(|error| format!("alloc DSA prefill selected indices: {error}"))?,
+            mla_num_heads,
+            mla_ckv_cache_dim,
+            d_mla_q_absorbed: GpuBuf::alloc_zeroed(mla_elements)
+                .map_err(|error| format!("alloc DSA prefill absorbed queries: {error}"))?,
+            d_mla_attention: GpuBuf::alloc_zeroed(mla_elements)
+                .map_err(|error| format!("alloc DSA prefill MLA attention: {error}"))?,
+            active_owner_layer_idx: Cell::new(None),
+            active_chunk_start: Cell::new(0),
+            active_chunk_rows: Cell::new(0),
+            active_context_end: Cell::new(0),
+            active_selected_per_row: Cell::new(0),
+        })
+    }
+
+    fn mark_owner_result(
+        &self,
+        owner_layer_idx: usize,
+        chunk_start: usize,
+        chunk_rows: usize,
+        context_end: usize,
+        selected_per_row: usize,
+    ) {
+        self.active_owner_layer_idx.set(Some(owner_layer_idx));
+        self.active_chunk_start.set(chunk_start);
+        self.active_chunk_rows.set(chunk_rows);
+        self.active_context_end.set(context_end);
+        self.active_selected_per_row.set(selected_per_row);
+    }
+
+    fn resolve_for_layer(
+        &self,
+        layer_idx: usize,
+        registration: DsaPrefillLayerDescriptor,
+        chunk_start: usize,
+        chunk_rows: usize,
+        context_end: usize,
+    ) -> Result<DsaPrefillSelectedIndexView, String> {
+        let active_owner = self.active_owner_layer_idx.get().ok_or_else(|| {
+            format!(
+                "DSA prefill layer {} has no active owner selection for this chunk",
+                layer_idx
+            )
+        })?;
+        if active_owner != registration.owner_layer_idx
+            || self.active_chunk_start.get() != chunk_start
+            || self.active_chunk_rows.get() != chunk_rows
+            || self.active_context_end.get() != context_end
+        {
+            return Err(format!(
+                "DSA prefill layer {} IndexShare state mismatch: expected owner={} chunk=[{}, {}) context={}, active owner={} chunk=[{}, {}) context={}",
+                layer_idx,
+                registration.owner_layer_idx,
+                chunk_start,
+                chunk_start.saturating_add(chunk_rows),
+                context_end,
+                active_owner,
+                self.active_chunk_start.get(),
+                self.active_chunk_start
+                    .get()
+                    .saturating_add(self.active_chunk_rows.get()),
+                self.active_context_end.get(),
+            ));
+        }
+        if registration.index_topk != self.configured_topk
+            || registration.index_n_heads != self.index_n_heads
+            || registration.index_head_dim != self.index_head_dim
+        {
+            return Err(format!(
+                "DSA prefill layer {} IndexShare geometry differs from active owner {}",
+                layer_idx, active_owner
+            ));
+        }
+        Ok(DsaPrefillSelectedIndexView {
+            owner_layer_idx: active_owner,
+            ptr: *self.d_selected_indices.device_ptr(),
+            rows: self.active_chunk_rows.get(),
+            selected_per_row: self.active_selected_per_row.get(),
+            context_end: self.active_context_end.get(),
+        })
+    }
+}
+
+extern "C" fn dsa_prefill_zero_dynamic_smem_for_occupancy(_: std::ffi::c_int) -> usize {
+    0
+}
+
+fn dsa_prefill_occupancy_launch(
+    kernel: RawCuFunc,
+    dynamic_shared_bytes: usize,
+    work_items: usize,
+    label: &str,
+) -> Result<(u32, u32), String> {
+    if work_items == 0 {
+        return Err(format!("{label} requires positive work_items"));
+    }
+    let mut minimum_grid = 0i32;
+    let mut block_threads = 0i32;
+    let result = unsafe {
+        cuda_sys::lib().cuOccupancyMaxPotentialBlockSize(
+            &mut minimum_grid,
+            &mut block_threads,
+            kernel.0,
+            Some(dsa_prefill_zero_dynamic_smem_for_occupancy),
+            dynamic_shared_bytes,
+            0,
+        )
+    };
+    if result != cuda_sys::CUresult::CUDA_SUCCESS {
+        return Err(format!(
+            "query {label} occupancy for {} shared bytes: {:?}",
+            dynamic_shared_bytes, result
+        ));
+    }
+    if minimum_grid <= 0 || block_threads <= 0 {
+        return Err(format!(
+            "{label} occupancy returned invalid grid/block {minimum_grid}/{block_threads}"
+        ));
+    }
+    let grid = usize::try_from(minimum_grid)
+        .map_err(|_| format!("{label} minimum grid is negative"))?
+        .min(work_items)
+        .max(1);
+    Ok((
+        u32::try_from(grid).map_err(|_| format!("{label} grid {grid} exceeds u32"))?,
+        u32::try_from(block_threads)
+            .map_err(|_| format!("{label} block {block_threads} exceeds u32"))?,
+    ))
+}
+
+fn dsa_prefill_configure_dynamic_shared(
+    kernel: RawCuFunc,
+    dynamic_shared_bytes: usize,
+    label: &str,
+) -> Result<u32, String> {
+    let mut device = 0;
+    let current_device = unsafe { cuda_sys::lib().cuCtxGetDevice(&mut device) };
+    if current_device != cuda_sys::CUresult::CUDA_SUCCESS {
+        return Err(format!(
+            "query {label} active CUDA device: {:?}",
+            current_device
+        ));
+    }
+    let mut default_limit = 0i32;
+    let default_result = unsafe {
+        cuda_sys::lib().cuDeviceGetAttribute(
+            &mut default_limit,
+            cuda_sys::CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK,
+            device,
+        )
+    };
+    if default_result != cuda_sys::CUresult::CUDA_SUCCESS {
+        return Err(format!(
+            "query {label} default shared-memory limit: {:?}",
+            default_result
+        ));
+    }
+    let mut optin_limit = 0i32;
+    let optin_result = unsafe {
+        cuda_sys::lib().cuDeviceGetAttribute(
+            &mut optin_limit,
+            cuda_sys::CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN,
+            device,
+        )
+    };
+    if optin_result != cuda_sys::CUresult::CUDA_SUCCESS {
+        return Err(format!(
+            "query {label} opt-in shared-memory limit: {:?}",
+            optin_result
+        ));
+    }
+    let default_limit = usize::try_from(default_limit.max(0))
+        .map_err(|_| format!("{label} default shared-memory limit is invalid"))?;
+    let optin_limit = usize::try_from(optin_limit.max(0))
+        .map_err(|_| format!("{label} opt-in shared-memory limit is invalid"))?;
+    if dynamic_shared_bytes > optin_limit {
+        return Err(format!(
+            "{label} requires {dynamic_shared_bytes} shared-memory bytes but active CUDA device {device} supports {optin_limit} opt-in bytes"
+        ));
+    }
+    if dynamic_shared_bytes > default_limit {
+        let requested = i32::try_from(dynamic_shared_bytes)
+            .map_err(|_| format!("{label} shared-memory request exceeds i32"))?;
+        let attribute_result = unsafe {
+            cuda_sys::lib().cuFuncSetAttribute(
+                kernel.0,
+                cuda_sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                requested,
+            )
+        };
+        if attribute_result != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!(
+                "configure {label} for {dynamic_shared_bytes} shared-memory bytes: {:?}",
+                attribute_result
+            ));
+        }
+    }
+    u32::try_from(dynamic_shared_bytes)
+        .map_err(|_| format!("{label} shared-memory bytes exceed u32"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn launch_dsa_prefill_selection_rows(
+    kernels: DsaPrefillSelectionKernels,
+    stream: cuda_sys::CUstream,
+    raw_queries_ptr: u64,
+    rope_queries_ptr: u64,
+    key_cache_ptr: u64,
+    head_weights_ptr: u64,
+    positions_ptr: u64,
+    rope_cos_ptr: u64,
+    rope_sin_ptr: u64,
+    rows: usize,
+    context_end: usize,
+    index_n_heads: usize,
+    index_head_dim: usize,
+    qk_rope_head_dim: usize,
+    configured_topk: usize,
+    buffers: DsaPrefillSelectionBuffers,
+) -> Result<crate::gpu_decode::DsaTopkPlan, String> {
+    if rows == 0 || context_end == 0 {
+        return Err(format!(
+            "DSA prefill selection requires positive rows/context, got {rows}/{context_end}"
+        ));
+    }
+    if index_n_heads == 0
+        || index_head_dim == 0
+        || qk_rope_head_dim == 0
+        || qk_rope_head_dim > index_head_dim
+        || qk_rope_head_dim % 2 != 0
+    {
+        return Err(format!(
+            "DSA prefill selection has invalid geometry: heads={index_n_heads} head_dim={index_head_dim} rope_dim={qk_rope_head_dim}"
+        ));
+    }
+    for (name, ptr) in [
+        ("raw_queries", raw_queries_ptr),
+        ("rope_queries", rope_queries_ptr),
+        ("key_cache", key_cache_ptr),
+        ("head_weights", head_weights_ptr),
+        ("positions", positions_ptr),
+        ("rope_cos", rope_cos_ptr),
+        ("rope_sin", rope_sin_ptr),
+        ("scores", buffers.scores_ptr),
+        ("selected", buffers.selected_ptr),
+    ] {
+        if ptr == 0 {
+            return Err(format!("DSA prefill selection {name} pointer is null"));
+        }
+    }
+
+    let plan = crate::gpu_decode::plan_dsa_topk(context_end, configured_topk)?;
+    let score_elements = rows
+        .checked_mul(context_end)
+        .ok_or_else(|| "DSA prefill score size overflow".to_string())?;
+    let selected_elements = rows
+        .checked_mul(plan.selected)
+        .ok_or_else(|| "DSA prefill selected-index size overflow".to_string())?;
+    let candidate_elements = rows
+        .checked_mul(plan.candidate_capacity)
+        .ok_or_else(|| "DSA prefill candidate size overflow".to_string())?;
+    if score_elements > buffers.scores_capacity {
+        return Err(format!(
+            "DSA prefill score capacity {} < required {}",
+            buffers.scores_capacity, score_elements
+        ));
+    }
+    if selected_elements > buffers.selected_capacity {
+        return Err(format!(
+            "DSA prefill selected-index capacity {} < required {}",
+            buffers.selected_capacity, selected_elements
+        ));
+    }
+    if plan.initial_runs > 1 {
+        for (name, ptr) in [
+            ("candidate_scores_a", buffers.candidate_scores_a_ptr),
+            ("candidate_scores_b", buffers.candidate_scores_b_ptr),
+            ("candidate_indices_a", buffers.candidate_indices_a_ptr),
+            ("candidate_indices_b", buffers.candidate_indices_b_ptr),
+        ] {
+            if ptr == 0 {
+                return Err(format!(
+                    "DSA prefill multi-run selection {name} pointer is null"
+                ));
+            }
+        }
+        if candidate_elements > buffers.candidate_capacity {
+            return Err(format!(
+                "DSA prefill candidate capacity {} < required {}",
+                buffers.candidate_capacity, candidate_elements
+            ));
+        }
+    }
+
+    let rows_i32 =
+        i32::try_from(rows).map_err(|_| format!("DSA prefill rows {rows} exceed i32"))?;
+    let context_i32 = i32::try_from(context_end)
+        .map_err(|_| format!("DSA prefill context {context_end} exceeds i32"))?;
+    let index_n_heads_i32 = i32::try_from(index_n_heads)
+        .map_err(|_| format!("DSA prefill head count {index_n_heads} exceeds i32"))?;
+    let index_head_dim_i32 = i32::try_from(index_head_dim)
+        .map_err(|_| format!("DSA prefill head dimension {index_head_dim} exceeds i32"))?;
+    let qk_rope_head_dim_i32 = i32::try_from(qk_rope_head_dim)
+        .map_err(|_| format!("DSA prefill RoPE dimension {qk_rope_head_dim} exceeds i32"))?;
+
+    let query_elements = rows
+        .checked_mul(index_n_heads)
+        .and_then(|value| value.checked_mul(index_head_dim))
+        .ok_or_else(|| "DSA prefill query element count overflow".to_string())?;
+    let (query_grid, query_block) = dsa_prefill_occupancy_launch(
+        kernels.rope_query_bf16,
+        0,
+        query_elements,
+        "DSA prefill query RoPE",
+    )?;
+    let query_logical_grid = query_elements.div_ceil(query_block as usize);
+    let mut q0 = rope_queries_ptr;
+    let mut q1 = raw_queries_ptr;
+    let mut q2 = rope_cos_ptr;
+    let mut q3 = rope_sin_ptr;
+    let mut q4 = positions_ptr;
+    let mut q5 = rows_i32;
+    let mut q6 = index_n_heads_i32;
+    let mut q7 = index_head_dim_i32;
+    let mut q8 = qk_rope_head_dim_i32;
+    unsafe {
+        launch(
+            kernels.rope_query_bf16,
+            (
+                u32::try_from(query_logical_grid)
+                    .map_err(|_| "DSA prefill query grid exceeds u32".to_string())?
+                    .max(query_grid),
+                1,
+                1,
+            ),
+            (query_block, 1, 1),
+            0,
+            stream,
+            &mut [
+                &mut q0 as *mut _ as *mut _,
+                &mut q1 as *mut _ as *mut _,
+                &mut q2 as *mut _ as *mut _,
+                &mut q3 as *mut _ as *mut _,
+                &mut q4 as *mut _ as *mut _,
+                &mut q5 as *mut _ as *mut _,
+                &mut q6 as *mut _ as *mut _,
+                &mut q7 as *mut _ as *mut _,
+                &mut q8 as *mut _ as *mut _,
+            ],
+        )?;
+    }
+
+    let score_shared_bytes = index_head_dim
+        .checked_add(index_n_heads)
+        .and_then(|elements| elements.checked_mul(std::mem::size_of::<f32>()))
+        .ok_or_else(|| "DSA prefill score shared-memory size overflow".to_string())?;
+    let score_shared_bytes_u32 = dsa_prefill_configure_dynamic_shared(
+        kernels.fused_scores,
+        score_shared_bytes,
+        "DSA prefill fused score",
+    )?;
+    let (score_grid, score_block) = dsa_prefill_occupancy_launch(
+        kernels.fused_scores,
+        score_shared_bytes,
+        context_end,
+        "DSA prefill fused score",
+    )?;
+    let score_scale = 1.0f32 / ((index_head_dim as f32).sqrt() * (index_n_heads as f32).sqrt());
+    let mut s0 = buffers.scores_ptr;
+    let mut s1 = key_cache_ptr;
+    let mut s2 = rope_queries_ptr;
+    let mut s3 = head_weights_ptr;
+    let mut s4 = positions_ptr;
+    let mut s5 = rows_i32;
+    let mut s6 = context_i32;
+    let mut s7 = index_n_heads_i32;
+    let mut s8 = index_head_dim_i32;
+    let mut s9 = score_scale;
+    unsafe {
+        launch(
+            kernels.fused_scores,
+            (
+                score_grid,
+                u32::try_from(rows).map_err(|_| "DSA rows exceed u32")?,
+                1,
+            ),
+            (score_block, 1, 1),
+            score_shared_bytes_u32,
+            stream,
+            &mut [
+                &mut s0 as *mut _ as *mut _,
+                &mut s1 as *mut _ as *mut _,
+                &mut s2 as *mut _ as *mut _,
+                &mut s3 as *mut _ as *mut _,
+                &mut s4 as *mut _ as *mut _,
+                &mut s5 as *mut _ as *mut _,
+                &mut s6 as *mut _ as *mut _,
+                &mut s7 as *mut _ as *mut _,
+                &mut s8 as *mut _ as *mut _,
+                &mut s9 as *mut _ as *mut _,
+            ],
+        )?;
+    }
+
+    let selected_i32 = i32::try_from(plan.selected)
+        .map_err(|_| format!("DSA selected count {} exceeds i32", plan.selected))?;
+    let candidate_stride_i32 = i32::try_from(plan.candidate_capacity).map_err(|_| {
+        format!(
+            "DSA candidate stride {} exceeds i32",
+            plan.candidate_capacity
+        )
+    })?;
+    let initial_runs_i32 = i32::try_from(plan.initial_runs)
+        .map_err(|_| format!("DSA initial run count {} exceeds i32", plan.initial_runs))?;
+    let sort_width_i32 = i32::try_from(plan.sort_width)
+        .map_err(|_| format!("DSA sort width {} exceeds i32", plan.sort_width))?;
+    let block_threads = u32::try_from(plan.sort_width.min(256).max(1))
+        .map_err(|_| "DSA top-k block width exceeds u32".to_string())?;
+    let topk_shared_bytes_u32 = dsa_prefill_configure_dynamic_shared(
+        kernels.topk_sort_rows,
+        plan.shared_bytes,
+        "DSA prefill top-k sort",
+    )?;
+    dsa_prefill_configure_dynamic_shared(
+        kernels.topk_merge_rows,
+        plan.shared_bytes,
+        "DSA prefill top-k merge",
+    )?;
+    let mut t0 = buffers.scores_ptr;
+    let mut t1 = buffers.candidate_scores_a_ptr;
+    let mut t2 = buffers.candidate_indices_a_ptr;
+    let mut t3 = buffers.selected_ptr;
+    let mut t4 = positions_ptr;
+    let mut t5 = rows_i32;
+    let mut t6 = context_i32;
+    let mut t7 = selected_i32;
+    let mut t8 = candidate_stride_i32;
+    let mut t9 = initial_runs_i32;
+    let mut t10 = sort_width_i32;
+    unsafe {
+        launch(
+            kernels.topk_sort_rows,
+            (
+                u32::try_from(plan.initial_runs).map_err(|_| "DSA initial run grid exceeds u32")?,
+                u32::try_from(rows).map_err(|_| "DSA rows exceed u32")?,
+                1,
+            ),
+            (block_threads, 1, 1),
+            topk_shared_bytes_u32,
+            stream,
+            &mut [
+                &mut t0 as *mut _ as *mut _,
+                &mut t1 as *mut _ as *mut _,
+                &mut t2 as *mut _ as *mut _,
+                &mut t3 as *mut _ as *mut _,
+                &mut t4 as *mut _ as *mut _,
+                &mut t5 as *mut _ as *mut _,
+                &mut t6 as *mut _ as *mut _,
+                &mut t7 as *mut _ as *mut _,
+                &mut t8 as *mut _ as *mut _,
+                &mut t9 as *mut _ as *mut _,
+                &mut t10 as *mut _ as *mut _,
+            ],
+        )?;
+    }
+
+    let mut input_runs = plan.initial_runs;
+    let mut input_is_a = true;
+    while input_runs > 1 {
+        let output_runs = input_runs.div_ceil(2);
+        let (input_scores, input_indices, output_scores, output_indices) = if input_is_a {
+            (
+                buffers.candidate_scores_a_ptr,
+                buffers.candidate_indices_a_ptr,
+                buffers.candidate_scores_b_ptr,
+                buffers.candidate_indices_b_ptr,
+            )
+        } else {
+            (
+                buffers.candidate_scores_b_ptr,
+                buffers.candidate_indices_b_ptr,
+                buffers.candidate_scores_a_ptr,
+                buffers.candidate_indices_a_ptr,
+            )
+        };
+        let mut m0 = input_scores;
+        let mut m1 = input_indices;
+        let mut m2 = output_scores;
+        let mut m3 = output_indices;
+        let mut m4 = buffers.selected_ptr;
+        let mut m5 = rows_i32;
+        let mut m6 = selected_i32;
+        let mut m7 = candidate_stride_i32;
+        let mut m8 =
+            i32::try_from(input_runs).map_err(|_| "DSA input runs exceed i32".to_string())?;
+        let mut m9 = sort_width_i32;
+        unsafe {
+            launch(
+                kernels.topk_merge_rows,
+                (
+                    u32::try_from(output_runs).map_err(|_| "DSA output run grid exceeds u32")?,
+                    u32::try_from(rows).map_err(|_| "DSA rows exceed u32")?,
+                    1,
+                ),
+                (block_threads, 1, 1),
+                topk_shared_bytes_u32,
+                stream,
+                &mut [
+                    &mut m0 as *mut _ as *mut _,
+                    &mut m1 as *mut _ as *mut _,
+                    &mut m2 as *mut _ as *mut _,
+                    &mut m3 as *mut _ as *mut _,
+                    &mut m4 as *mut _ as *mut _,
+                    &mut m5 as *mut _ as *mut _,
+                    &mut m6 as *mut _ as *mut _,
+                    &mut m7 as *mut _ as *mut _,
+                    &mut m8 as *mut _ as *mut _,
+                    &mut m9 as *mut _ as *mut _,
+                ],
+            )?;
+        }
+        input_runs = output_runs;
+        input_is_a = !input_is_a;
+    }
+    Ok(plan)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn launch_dsa_prefill_selection_chunk(
+    kernels: DsaPrefillSelectionKernels,
+    stream: cuda_sys::CUstream,
+    owner_layer_idx: usize,
+    chunk_start: usize,
+    chunk_rows: usize,
+    context_end: usize,
+    raw_queries_ptr: u64,
+    key_cache_ptr: u64,
+    head_weights_ptr: u64,
+    positions_ptr: u64,
+    rope_cos_ptr: u64,
+    rope_sin_ptr: u64,
+    qk_rope_head_dim: usize,
+    workspace: &DsaPrefillRequestWorkspace,
+) -> Result<(), String> {
+    if chunk_rows > workspace.max_chunk_rows || context_end > workspace.max_context_end {
+        return Err(format!(
+            "DSA prefill selection request rows/context {}/{} exceed workspace maxima {}/{}",
+            chunk_rows, context_end, workspace.max_chunk_rows, workspace.max_context_end
+        ));
+    }
+    let plan = plan_dsa_prefill_selection(
+        chunk_rows,
+        context_end,
+        workspace.configured_topk,
+        workspace.selection_workspace_capacity_bytes,
+    )?;
+    if plan.selected_per_row > workspace.max_selected_per_row {
+        return Err(format!(
+            "DSA prefill selected width {} exceeds workspace maximum {}",
+            plan.selected_per_row, workspace.max_selected_per_row
+        ));
+    }
+    let query_row_bytes = workspace
+        .index_n_heads
+        .checked_mul(workspace.index_head_dim)
+        .and_then(|elements| elements.checked_mul(std::mem::size_of::<u16>()))
+        .ok_or_else(|| "DSA prefill query row-byte size overflow".to_string())?;
+    let head_weight_row_bytes = workspace
+        .index_n_heads
+        .checked_mul(std::mem::size_of::<u16>())
+        .ok_or_else(|| "DSA prefill head-weight row-byte size overflow".to_string())?;
+    let selected_row_bytes = plan
+        .selected_per_row
+        .checked_mul(std::mem::size_of::<i32>())
+        .ok_or_else(|| "DSA prefill selected row-byte size overflow".to_string())?;
+    let score_bytes = plan
+        .score_tile_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "DSA prefill score-tile byte size overflow".to_string())?;
+    let candidate_component_bytes = plan
+        .candidate_tile_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "DSA prefill candidate-component byte size overflow".to_string())?;
+    let workspace_base = *workspace.d_selection_workspace.device_ptr();
+    let candidate_scores_a_ptr = if plan.candidate_tile_elements == 0 {
+        0
+    } else {
+        workspace_base
+            .checked_add(
+                u64::try_from(score_bytes)
+                    .map_err(|_| "DSA prefill score workspace offset exceeds u64".to_string())?,
+            )
+            .ok_or_else(|| "DSA prefill candidate score A pointer overflow".to_string())?
+    };
+    let candidate_scores_b_ptr = if plan.candidate_tile_elements == 0 {
+        0
+    } else {
+        candidate_scores_a_ptr
+            .checked_add(
+                u64::try_from(candidate_component_bytes).map_err(|_| {
+                    "DSA prefill candidate score component exceeds u64".to_string()
+                })?,
+            )
+            .ok_or_else(|| "DSA prefill candidate score B pointer overflow".to_string())?
+    };
+    let candidate_indices_a_ptr = if plan.candidate_tile_elements == 0 {
+        0
+    } else {
+        candidate_scores_b_ptr
+            .checked_add(
+                u64::try_from(candidate_component_bytes).map_err(|_| {
+                    "DSA prefill candidate index component exceeds u64".to_string()
+                })?,
+            )
+            .ok_or_else(|| "DSA prefill candidate index A pointer overflow".to_string())?
+    };
+    let candidate_indices_b_ptr = if plan.candidate_tile_elements == 0 {
+        0
+    } else {
+        candidate_indices_a_ptr
+            .checked_add(
+                u64::try_from(candidate_component_bytes).map_err(|_| {
+                    "DSA prefill candidate index component exceeds u64".to_string()
+                })?,
+            )
+            .ok_or_else(|| "DSA prefill candidate index B pointer overflow".to_string())?
+    };
+    let workspace_end_bytes = score_bytes
+        .checked_add(
+            candidate_component_bytes
+                .checked_mul(4)
+                .ok_or_else(|| "DSA prefill candidate workspace byte size overflow".to_string())?,
+        )
+        .ok_or_else(|| "DSA prefill workspace partition size overflow".to_string())?;
+    if workspace_end_bytes != plan.workspace_tile_bytes
+        || workspace_end_bytes > workspace.d_selection_workspace.len()
+    {
+        return Err(format!(
+            "DSA prefill workspace partition {} bytes differs from planned {} or exceeds allocation {}",
+            workspace_end_bytes,
+            plan.workspace_tile_bytes,
+            workspace.d_selection_workspace.len()
+        ));
+    }
+    for tile_idx in 0..plan.score_tile_count {
+        let row_start = tile_idx
+            .checked_mul(plan.score_tile_rows)
+            .ok_or_else(|| "DSA prefill tile row offset overflow".to_string())?;
+        let rows = (chunk_rows - row_start).min(plan.score_tile_rows);
+        let raw_queries_tile = raw_queries_ptr
+            .checked_add(
+                u64::try_from(
+                    row_start
+                        .checked_mul(query_row_bytes)
+                        .ok_or_else(|| "DSA prefill query tile offset overflow".to_string())?,
+                )
+                .map_err(|_| "DSA prefill query tile offset exceeds u64".to_string())?,
+            )
+            .ok_or_else(|| "DSA prefill query tile pointer overflow".to_string())?;
+        let head_weights_tile =
+            head_weights_ptr
+                .checked_add(
+                    u64::try_from(row_start.checked_mul(head_weight_row_bytes).ok_or_else(
+                        || "DSA prefill head-weight tile offset overflow".to_string(),
+                    )?)
+                    .map_err(|_| "DSA prefill head-weight tile offset exceeds u64".to_string())?,
+                )
+                .ok_or_else(|| "DSA prefill head-weight tile pointer overflow".to_string())?;
+        let positions_tile = positions_ptr
+            .checked_add(
+                u64::try_from(
+                    row_start
+                        .checked_mul(std::mem::size_of::<i32>())
+                        .ok_or_else(|| "DSA prefill position tile offset overflow".to_string())?,
+                )
+                .map_err(|_| "DSA prefill position tile offset exceeds u64".to_string())?,
+            )
+            .ok_or_else(|| "DSA prefill position tile pointer overflow".to_string())?;
+        let selected_tile = (*workspace.d_selected_indices.device_ptr())
+            .checked_add(
+                u64::try_from(
+                    row_start
+                        .checked_mul(selected_row_bytes)
+                        .ok_or_else(|| "DSA prefill selected tile offset overflow".to_string())?,
+                )
+                .map_err(|_| "DSA prefill selected tile offset exceeds u64".to_string())?,
+            )
+            .ok_or_else(|| "DSA prefill selected tile pointer overflow".to_string())?;
+        let selected_capacity = rows
+            .checked_mul(plan.selected_per_row)
+            .ok_or_else(|| "DSA prefill selected tile capacity overflow".to_string())?;
+        launch_dsa_prefill_selection_rows(
+            kernels,
+            stream,
+            raw_queries_tile,
+            *workspace.d_rope_queries.device_ptr(),
+            key_cache_ptr,
+            head_weights_tile,
+            positions_tile,
+            rope_cos_ptr,
+            rope_sin_ptr,
+            rows,
+            context_end,
+            workspace.index_n_heads,
+            workspace.index_head_dim,
+            qk_rope_head_dim,
+            workspace.configured_topk,
+            DsaPrefillSelectionBuffers {
+                scores_ptr: workspace_base,
+                scores_capacity: plan.score_tile_elements,
+                candidate_scores_a_ptr,
+                candidate_scores_b_ptr,
+                candidate_indices_a_ptr,
+                candidate_indices_b_ptr,
+                candidate_capacity: plan.candidate_tile_elements,
+                selected_ptr: selected_tile,
+                selected_capacity,
+            },
+        )?;
+    }
+    workspace.mark_owner_result(
+        owner_layer_idx,
+        chunk_start,
+        chunk_rows,
+        context_end,
+        plan.selected_per_row,
+    );
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub struct HqqLinearAttentionPrefillDescriptor {
     pub backend: String,
@@ -5973,6 +6939,8 @@ pub struct PrefillLayerWeights {
     pub router_per_expert_scale: u64,
     pub hqq_gqa: Option<HqqGqaPrefillDescriptor>,
     pub hqq_mla: Option<HqqMlaPrefillDescriptor>,
+    pub dsa_prefill: Option<DsaPrefillLayerDescriptor>,
+    pub dsa_prefill_owner: Option<DsaPrefillOwnerDescriptor>,
     pub hqq_linear_attention: Option<HqqLinearAttentionPrefillDescriptor>,
     pub hqq_prefill_sidecars: Vec<HqqPrefillSidecarDescriptor>,
 }
@@ -6286,6 +7254,7 @@ pub struct PrefillEngine {
     pub active_prefill_prompt_tokens: usize,
     pub active_prefill_chunk_idx: usize,
     pub active_prefill_chunk_start: usize,
+    pub(crate) dsa_prefill_workspace: Option<DsaPrefillRequestWorkspace>,
     pub(crate) prefill_prescan_accuracy_enabled: bool,
     pub(crate) prefill_prescan_accuracy_stats: Vec<PrefillPrescanAccuracyLayerStats>,
     // Dense pointer-table prefetch for current-layer MoE.
@@ -18497,6 +19466,14 @@ impl PrefillEngine {
     /// Flow: sync GPU → trim cudarc pool (release HCS soft VRAM) → measure free
     /// VRAM → compute chunk_size → drop old scratch → allocate new scratch.
     pub fn prepare_for_prefill(&mut self, prompt_tokens: usize) -> Result<(), String> {
+        self.prepare_for_prefill_impl(prompt_tokens, true)
+    }
+
+    fn prepare_for_prefill_impl(
+        &mut self,
+        prompt_tokens: usize,
+        configure_dsa_workspace: bool,
+    ) -> Result<(), String> {
         self.bind_cuda_context()?;
         self.refresh_trace_config();
         trace_emit_prefill_global_mark(
@@ -18571,6 +19548,7 @@ impl PrefillEngine {
         self.d_fla_o = None;
         self.prescan_active_experts.clear();
         self.prescan_token_count = 0;
+        self.dsa_prefill_workspace = None;
         self.last_cold_staging_failure = None;
         self.active_prefill_prompt_tokens = prompt_tokens;
         let safety_margin_mb = self.safety_margin_mb.max(PREFILL_SAFETY_MARGIN_MB);
@@ -18638,6 +19616,13 @@ impl PrefillEngine {
             .saturating_sub(post_scratch_runtime_reserve_bytes);
         let mut max_by_vram =
             exact_scratch_token_cap(&self.config, target, prompt_tokens, scratch_budget_bytes);
+        if configure_dsa_workspace {
+            max_by_vram = self.cap_chunk_for_dsa_prefill_workspace(
+                max_by_vram,
+                prompt_tokens,
+                scratch_budget_bytes,
+            )?;
+        }
         let debug_prefill = prefill_debug_enabled();
         let ledger_enabled = vram_ledger_enabled();
         if max_by_vram < prompt_tokens {
@@ -18657,6 +19642,13 @@ impl PrefillEngine {
                     prompt_tokens,
                     scratch_budget_bytes,
                 );
+                if configure_dsa_workspace {
+                    max_by_vram = self.cap_chunk_for_dsa_prefill_workspace(
+                        max_by_vram,
+                        prompt_tokens,
+                        scratch_budget_bytes,
+                    )?;
+                }
                 if debug_prefill {
                     eprintln!(
                         "[PREFILL-DEBUG] multi-chunk cold staging reserve: prompt_tokens={} old_reserve_mb={:.1} new_reserve_mb={:.1} max_by_vram_after={}",
@@ -18699,8 +19691,17 @@ impl PrefillEngine {
             && self.prefill_hcs_store_addr != 0
             && self.hcs_cached_expert_count() > 0
         {
+            let dsa_workspace_bytes = if configure_dsa_workspace {
+                self.minimum_dsa_prefill_workspace_bytes(target, prompt_tokens)?
+            } else {
+                0
+            };
             let single_chunk_scratch_bytes =
-                estimate_scratch_vram_for_prompt(&self.config, target, prompt_tokens);
+                estimate_scratch_vram_for_prompt(&self.config, target, prompt_tokens)
+                    .checked_add(dsa_workspace_bytes)
+                    .ok_or_else(|| {
+                        "single-chunk scratch plus DSA workspace size overflow".to_string()
+                    })?;
             let deficit_bytes = single_chunk_scratch_bytes.saturating_sub(scratch_budget_bytes);
             if deficit_bytes > 0 {
                 let (evicted, freed_mb, cache_fast_snapshot, num_experts_per_layer) = unsafe {
@@ -18727,6 +19728,13 @@ impl PrefillEngine {
                         prompt_tokens,
                         scratch_budget_bytes,
                     );
+                    if configure_dsa_workspace {
+                        max_by_vram = self.cap_chunk_for_dsa_prefill_workspace(
+                            max_by_vram,
+                            prompt_tokens,
+                            scratch_budget_bytes,
+                        )?;
+                    }
                     if ledger_enabled {
                         vram_ledger_log!(
                             "VRAM LEDGER prefill_extra_hcs_evict_for_single_chunk prompt_tokens={} requested_deficit_mb={:.1} evicted={} freed_mb={:.1} free_after_mb={} scratch_budget_after_mb={:.1} max_by_vram_after={} hcs_cached_after={}",
@@ -19058,8 +20066,17 @@ impl PrefillEngine {
                     safety_margin_mb,
                 ),
             );
-            let post_alloc_required_bytes =
-                safety_bytes.saturating_add(post_scratch_runtime_reserve_bytes);
+            let minimum_dsa_workspace_bytes = if configure_dsa_workspace {
+                self.minimum_dsa_prefill_workspace_bytes(
+                    scratch_tokens.min(prompt_tokens),
+                    prompt_tokens,
+                )?
+            } else {
+                0
+            };
+            let post_alloc_required_bytes = safety_bytes
+                .saturating_add(post_scratch_runtime_reserve_bytes)
+                .saturating_add(minimum_dsa_workspace_bytes);
             if post_alloc_free_bytes >= post_alloc_required_bytes {
                 self.config.prefill_chunk_size = scratch_tokens;
                 break;
@@ -19110,12 +20127,13 @@ impl PrefillEngine {
 
             if ledger_enabled {
                 vram_ledger_log!(
-                    "VRAM LEDGER prefill_alloc_shrink attempt={} scratch_tokens={} post_alloc_free_mb={} required_post_alloc_mb={} safety_mb={} deficit_mb={:.1} deficit_tokens={} shrink_tokens={} next_tokens={}",
+                    "VRAM LEDGER prefill_alloc_shrink attempt={} scratch_tokens={} post_alloc_free_mb={} required_post_alloc_mb={} safety_mb={} dsa_min_workspace_mb={:.1} deficit_mb={:.1} deficit_tokens={} shrink_tokens={} next_tokens={}",
                     attempt,
                     scratch_tokens,
                     post_alloc_free_bytes / (1024 * 1024),
                     post_alloc_required_bytes / (1024 * 1024),
                     safety_margin_mb,
+                    minimum_dsa_workspace_bytes as f64 / (1024.0 * 1024.0),
                     deficit_bytes as f64 / (1024.0 * 1024.0),
                     deficit_tokens,
                     shrink_tokens,
@@ -19170,6 +20188,67 @@ impl PrefillEngine {
                 break;
             }
             scratch_tokens = next_tokens;
+        }
+
+        let dsa_required_free_floor_bytes =
+            safety_bytes.saturating_add(post_scratch_runtime_reserve_bytes);
+        let dsa_chunk_rows = scratch_tokens.min(prompt_tokens);
+        let dsa_plan = if configure_dsa_workspace {
+            match self.configure_dsa_prefill_workspace_from_live_vram(
+                dsa_chunk_rows,
+                prompt_tokens,
+                dsa_required_free_floor_bytes,
+            ) {
+                Ok(plan) => plan,
+                Err(error) => {
+                    let cleanup = self.release_scratch();
+                    return Err(match cleanup {
+                        Ok(()) => error,
+                        Err(cleanup_error) => {
+                            format!(
+                                "{error}; additionally failed to release scratch: {cleanup_error}"
+                            )
+                        }
+                    });
+                }
+            }
+        } else {
+            None
+        };
+        if dsa_plan.is_some() {
+            unsafe {
+                cuda_sys::lib().cuCtxSynchronize();
+                cuda_sys::lib().cuMemGetInfo_v2(&mut post_alloc_free_bytes, &mut total_bytes);
+            }
+            self.last_prepare_post_alloc_free_mb = post_alloc_free_bytes / (1024 * 1024);
+        }
+        if let Some(plan) = dsa_plan {
+            log::info!(
+                "DSA prefill request workspace: prompt_tokens={} chunk_rows={} selected_per_row={} score_tile_rows={} score_tiles={} selection_mb={:.3} workspace_mb={:.3} free_after_mb={} required_floor_mb={}",
+                prompt_tokens,
+                dsa_chunk_rows,
+                plan.selected_per_row,
+                plan.score_tile_rows,
+                plan.score_tile_count,
+                plan.selection_bytes as f64 / (1024.0 * 1024.0),
+                plan.workspace_capacity_bytes as f64 / (1024.0 * 1024.0),
+                post_alloc_free_bytes / (1024 * 1024),
+                dsa_required_free_floor_bytes / (1024 * 1024),
+            );
+            if ledger_enabled {
+                vram_ledger_log!(
+                    "VRAM LEDGER dsa_prefill_workspace prompt_tokens={} chunk_rows={} selected_per_row={} score_tile_rows={} score_tiles={} selection_mb={:.3} workspace_capacity_mb={:.3} post_alloc_free_mb={} required_floor_mb={}",
+                    prompt_tokens,
+                    dsa_chunk_rows,
+                    plan.selected_per_row,
+                    plan.score_tile_rows,
+                    plan.score_tile_count,
+                    plan.selection_bytes as f64 / (1024.0 * 1024.0),
+                    plan.workspace_capacity_bytes as f64 / (1024.0 * 1024.0),
+                    post_alloc_free_bytes / (1024 * 1024),
+                    dsa_required_free_floor_bytes / (1024 * 1024),
+                );
+            }
         }
 
         let scratch_mb =
@@ -19270,6 +20349,7 @@ impl PrefillEngine {
         self.d_fla_v_new = None;
         self.d_fla_o = None;
         self.release_prefill_kv_temp();
+        self.dsa_prefill_workspace = None;
         self.active_prefill_prompt_tokens = 0;
         self.active_prefill_chunk_idx = 0;
         self.active_prefill_chunk_start = 0;
@@ -23331,6 +24411,291 @@ impl PrefillEngine {
             }
         }
         Ok(out)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_dsa_prefill_contract(
+        &self,
+        layer_idx: usize,
+    ) -> Result<
+        (
+            DsaPrefillLayerDescriptor,
+            (usize, usize),
+            (usize, usize),
+            (usize, usize),
+        ),
+        String,
+    > {
+        let layer = self
+            .layer_weights
+            .get(layer_idx)
+            .ok_or_else(|| format!("debug DSA prefill layer {} is absent", layer_idx))?;
+        let registration = layer
+            .dsa_prefill
+            .ok_or_else(|| format!("debug DSA prefill layer {} has no registration", layer_idx))?;
+        let owner = layer.dsa_prefill_owner.as_ref().ok_or_else(|| {
+            format!(
+                "debug DSA prefill layer {} has no local owner weights",
+                layer_idx
+            )
+        })?;
+        Ok((
+            registration,
+            (owner.wq_b.n, owner.wq_b.k),
+            (owner.wk.n, owner.wk.k),
+            (owner.weights_proj.n, owner.weights_proj.k),
+        ))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_populate_dsa_prefill_owner_keys(
+        &mut self,
+        layer_idx: usize,
+        hidden_bf16: &[u16],
+        positions: &[i32],
+    ) -> Result<(), String> {
+        if positions.is_empty() {
+            return Err("debug DSA prefill owner keys requires positions".to_string());
+        }
+        if hidden_bf16.len() != positions.len() * self.config.hidden_size {
+            return Err(format!(
+                "debug DSA prefill owner keys expected {} BF16 values, got {}",
+                positions.len() * self.config.hidden_size,
+                hidden_bf16.len()
+            ));
+        }
+        self.prepare_for_prefill_impl(positions.len(), false)?;
+        unsafe {
+            let hidden_copy = cuda_sys::lib().cuMemcpyHtoD_v2(
+                *self.scratch.d_hidden.device_ptr(),
+                hidden_bf16.as_ptr() as *const std::ffi::c_void,
+                hidden_bf16.len() * std::mem::size_of::<u16>(),
+            );
+            if hidden_copy != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!("debug DSA hidden H2D: {:?}", hidden_copy));
+            }
+            let position_copy = cuda_sys::lib().cuMemcpyHtoD_v2(
+                *self.scratch.d_positions.device_ptr(),
+                positions.as_ptr() as *const std::ffi::c_void,
+                positions.len() * std::mem::size_of::<i32>(),
+            );
+            if position_copy != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!("debug DSA positions H2D: {:?}", position_copy));
+            }
+        }
+        self.populate_dsa_prefill_owner_key_cache(layer_idx, positions.len())?;
+        self.stream_sync()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_run_dsa_prefill_owner_selection(
+        &mut self,
+        layer_idx: usize,
+        hidden_bf16: &[u16],
+        q_residual_bf16: &[u16],
+        positions: &[i32],
+    ) -> Result<Vec<i32>, String> {
+        if positions.is_empty() {
+            return Err("debug DSA prefill selection requires positions".to_string());
+        }
+        let rows = positions.len();
+        if hidden_bf16.len() != rows * self.config.hidden_size {
+            return Err(format!(
+                "debug DSA prefill selection expected {} hidden BF16 values, got {}",
+                rows * self.config.hidden_size,
+                hidden_bf16.len()
+            ));
+        }
+        let (registration, wq_b, weights_proj, key_cache_ptr) = {
+            let layer = self
+                .layer_weights
+                .get(layer_idx)
+                .ok_or_else(|| format!("debug DSA prefill layer {} is absent", layer_idx))?;
+            let registration = layer.dsa_prefill.ok_or_else(|| {
+                format!("debug DSA prefill layer {} has no registration", layer_idx)
+            })?;
+            let owner = layer.dsa_prefill_owner.as_ref().ok_or_else(|| {
+                format!("debug DSA prefill layer {} has no local owner", layer_idx)
+            })?;
+            if registration.owner_layer_idx != layer_idx
+                || owner.owner_layer_idx != layer_idx
+                || !registration.owner_weights_present
+            {
+                return Err(format!(
+                    "debug DSA prefill layer {} is not its validated owner",
+                    layer_idx
+                ));
+            }
+            (
+                registration,
+                Bf16Weight {
+                    ptr: owner.wq_b.ptr,
+                    n: owner.wq_b.n,
+                    k: owner.wq_b.k,
+                },
+                Bf16Weight {
+                    ptr: owner.weights_proj.ptr,
+                    n: owner.weights_proj.n,
+                    k: owner.weights_proj.k,
+                },
+                owner.key_cache_ptr,
+            )
+        };
+        let expected_q_residual = rows
+            .checked_mul(registration.q_lora_rank)
+            .ok_or_else(|| "debug DSA q-residual size overflow".to_string())?;
+        if q_residual_bf16.len() != expected_q_residual {
+            return Err(format!(
+                "debug DSA prefill selection expected {} q-residual BF16 values, got {}",
+                expected_q_residual,
+                q_residual_bf16.len()
+            ));
+        }
+        let context_end = positions
+            .iter()
+            .copied()
+            .map(|position| {
+                usize::try_from(position)
+                    .map_err(|_| format!("debug DSA position {} is negative", position))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .max()
+            .and_then(|position| position.checked_add(1))
+            .ok_or_else(|| "debug DSA context end overflow".to_string())?;
+        self.prepare_for_prefill_impl(rows, false)?;
+        unsafe {
+            let hidden_copy = cuda_sys::lib().cuMemcpyHtoD_v2(
+                *self.scratch.d_hidden.device_ptr(),
+                hidden_bf16.as_ptr() as *const std::ffi::c_void,
+                hidden_bf16.len() * std::mem::size_of::<u16>(),
+            );
+            if hidden_copy != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!("debug DSA selection hidden H2D: {:?}", hidden_copy));
+            }
+            let position_copy = cuda_sys::lib().cuMemcpyHtoD_v2(
+                *self.scratch.d_positions.device_ptr(),
+                positions.as_ptr() as *const std::ffi::c_void,
+                positions.len() * std::mem::size_of::<i32>(),
+            );
+            if position_copy != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!(
+                    "debug DSA selection positions H2D: {:?}",
+                    position_copy
+                ));
+            }
+        }
+        self.populate_dsa_prefill_owner_key_cache(layer_idx, rows)?;
+        unsafe {
+            let q_residual_copy = cuda_sys::lib().cuMemcpyHtoD_v2(
+                *self.scratch.d_scratch2.device_ptr(),
+                q_residual_bf16.as_ptr() as *const std::ffi::c_void,
+                q_residual_bf16.len() * std::mem::size_of::<u16>(),
+            );
+            if q_residual_copy != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!(
+                    "debug DSA selection q-residual H2D: {:?}",
+                    q_residual_copy
+                ));
+            }
+        }
+
+        let raw_queries_ptr = *self.scratch.d_q.device_ptr();
+        let head_weights_ptr = *self.scratch.d_scratch1.device_ptr();
+        self.cublas_bf16_gemm(
+            *self.scratch.d_scratch2.device_ptr(),
+            &wq_b,
+            raw_queries_ptr,
+            rows,
+        )?;
+        self.cublas_bf16_gemm(
+            *self.scratch.d_hidden.device_ptr(),
+            &weights_proj,
+            head_weights_ptr,
+            rows,
+        )?;
+
+        let score_row_bytes = context_end
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| "debug DSA score-row byte size overflow".to_string())?;
+        let workspace = DsaPrefillRequestWorkspace::allocate(
+            rows,
+            context_end,
+            registration.index_topk,
+            registration.index_n_heads,
+            registration.index_head_dim,
+            0,
+            0,
+            score_row_bytes,
+        )?;
+        let plan = plan_dsa_prefill_selection(
+            rows,
+            context_end,
+            registration.index_topk,
+            score_row_bytes,
+        )?;
+        if plan.score_tile_rows != 1 || plan.score_tile_count != rows {
+            return Err(format!(
+                "debug DSA expected one-row score tiles, got rows={} tiles={}",
+                plan.score_tile_rows, plan.score_tile_count
+            ));
+        }
+        launch_dsa_prefill_selection_chunk(
+            DsaPrefillSelectionKernels {
+                rope_query_bf16: self.kernels.dsa_prefill_rope_query_bf16,
+                fused_scores: self.kernels.dsa_prefill_fused_scores,
+                topk_sort_rows: self.kernels.dsa_prefill_topk_sort_rows,
+                topk_merge_rows: self.kernels.dsa_prefill_topk_merge_rows,
+            },
+            self.stream,
+            layer_idx,
+            0,
+            rows,
+            context_end,
+            raw_queries_ptr,
+            key_cache_ptr,
+            head_weights_ptr,
+            *self.scratch.d_positions.device_ptr(),
+            self.rope_cos_ptr,
+            self.rope_sin_ptr,
+            registration.qk_rope_head_dim,
+            &workspace,
+        )?;
+        let owner_view =
+            workspace.resolve_for_layer(layer_idx, registration, 0, rows, context_end)?;
+        let shared_registration = DsaPrefillLayerDescriptor {
+            owner_weights_present: false,
+            ..registration
+        };
+        let shared_view = workspace.resolve_for_layer(
+            layer_idx.saturating_add(1),
+            shared_registration,
+            0,
+            rows,
+            context_end,
+        )?;
+        if owner_view != shared_view {
+            return Err(format!(
+                "debug DSA IndexShare view {:?} differs from owner {:?}",
+                shared_view, owner_view
+            ));
+        }
+        self.stream_sync()?;
+        let mut selected = vec![0i32; plan.selection_elements];
+        unsafe {
+            let result = cuda_sys::lib().cuMemcpyDtoH_v2(
+                selected.as_mut_ptr() as *mut std::ffi::c_void,
+                owner_view.ptr,
+                plan.selection_bytes,
+            );
+            if result != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!(
+                    "debug DSA selected indices D2H failed: {:?}",
+                    result
+                ));
+            }
+        }
+        Ok(selected)
     }
 
     /// Run prefill and extract top-k logprobs at sampled positions.
@@ -28666,6 +30031,316 @@ impl PrefillEngine {
         self.forward_gqa_chunked(layer_idx, m, 0, true)
     }
 
+    fn dsa_prefill_workspace_geometry(
+        &self,
+    ) -> Result<Option<DsaPrefillWorkspaceGeometry>, String> {
+        let mut geometry = None;
+        for (layer_idx, layer) in self.layer_weights.iter().enumerate() {
+            let Some(registration) = layer.dsa_prefill else {
+                continue;
+            };
+            let hqq = layer.hqq_mla.as_ref().ok_or_else(|| {
+                format!(
+                    "DSA prefill layer {} has no HQQ MLA execution descriptor",
+                    layer_idx
+                )
+            })?;
+            let current = DsaPrefillWorkspaceGeometry {
+                index_topk: registration.index_topk,
+                index_n_heads: registration.index_n_heads,
+                index_head_dim: registration.index_head_dim,
+                mla_num_heads: hqq.num_heads,
+                mla_ckv_cache_dim: hqq.ckv_cache_dim,
+            };
+            if let Some(expected) = geometry {
+                if expected != current {
+                    return Err(format!(
+                        "DSA prefill layer {} workspace geometry {:?} differs from {:?}",
+                        layer_idx, current, expected
+                    ));
+                }
+            } else {
+                geometry = Some(current);
+            }
+        }
+        Ok(geometry)
+    }
+
+    fn minimum_dsa_prefill_workspace_bytes(
+        &self,
+        chunk_rows: usize,
+        context_end: usize,
+    ) -> Result<usize, String> {
+        let Some(geometry) = self.dsa_prefill_workspace_geometry()? else {
+            return Ok(0);
+        };
+        let one_row_plan =
+            plan_dsa_prefill_selection(1, context_end, geometry.index_topk, usize::MAX)?;
+        let query_bytes = chunk_rows
+            .checked_mul(geometry.index_n_heads)
+            .and_then(|value| value.checked_mul(geometry.index_head_dim))
+            .and_then(|value| value.checked_mul(std::mem::size_of::<u16>()))
+            .ok_or_else(|| "DSA prefill query workspace byte size overflow".to_string())?;
+        let selected_bytes = chunk_rows
+            .checked_mul(geometry.index_topk.min(context_end))
+            .and_then(|value| value.checked_mul(std::mem::size_of::<i32>()))
+            .ok_or_else(|| "DSA prefill selected workspace byte size overflow".to_string())?;
+        let mla_bytes = chunk_rows
+            .checked_mul(geometry.mla_num_heads)
+            .and_then(|value| value.checked_mul(geometry.mla_ckv_cache_dim))
+            .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
+            .and_then(|value| value.checked_mul(2))
+            .ok_or_else(|| "DSA prefill MLA workspace byte size overflow".to_string())?;
+        query_bytes
+            .checked_add(selected_bytes)
+            .and_then(|value| value.checked_add(mla_bytes))
+            .and_then(|value| value.checked_add(one_row_plan.workspace_row_bytes))
+            .ok_or_else(|| "DSA prefill minimum workspace byte size overflow".to_string())
+    }
+
+    fn cap_chunk_for_dsa_prefill_workspace(
+        &self,
+        upper_chunk_rows: usize,
+        prompt_tokens: usize,
+        scratch_and_dsa_budget_bytes: usize,
+    ) -> Result<usize, String> {
+        if self.dsa_prefill_workspace_geometry()?.is_none() {
+            return Ok(upper_chunk_rows);
+        }
+        let mut low = 0usize;
+        let mut high = upper_chunk_rows;
+        while low < high {
+            let candidate = low + (high - low).div_ceil(2);
+            let required = estimate_scratch_vram_for_prompt(
+                &self.config,
+                candidate,
+                prompt_tokens,
+            )
+            .checked_add(self.minimum_dsa_prefill_workspace_bytes(
+                candidate,
+                prompt_tokens,
+            )?)
+            .ok_or_else(|| "DSA prefill combined scratch size overflow".to_string())?;
+            if required <= scratch_and_dsa_budget_bytes {
+                low = candidate;
+            } else {
+                high = candidate - 1;
+            }
+        }
+        Ok(low)
+    }
+
+    fn configure_dsa_prefill_workspace(
+        &mut self,
+        chunk_rows: usize,
+        context_end: usize,
+        score_workspace_capacity_bytes: usize,
+    ) -> Result<DsaPrefillSelectionPlan, String> {
+        self.bind_cuda_context()?;
+        if chunk_rows == 0 || chunk_rows > self.scratch.max_tokens {
+            return Err(format!(
+                "DSA prefill workspace chunk rows {} exceed prepared scratch capacity {}",
+                chunk_rows, self.scratch.max_tokens
+            ));
+        }
+        let geometry = self
+            .dsa_prefill_workspace_geometry()?
+            .ok_or("DSA prefill workspace requested for a graph without DSA layers")?;
+        let plan = plan_dsa_prefill_selection(
+            chunk_rows,
+            context_end,
+            geometry.index_topk,
+            score_workspace_capacity_bytes,
+        )?;
+        let workspace = DsaPrefillRequestWorkspace::allocate(
+            chunk_rows,
+            context_end,
+            geometry.index_topk,
+            geometry.index_n_heads,
+            geometry.index_head_dim,
+            geometry.mla_num_heads,
+            geometry.mla_ckv_cache_dim,
+            score_workspace_capacity_bytes,
+        )?;
+        self.dsa_prefill_workspace = Some(workspace);
+        Ok(plan)
+    }
+
+    fn configure_dsa_prefill_workspace_from_live_vram(
+        &mut self,
+        chunk_rows: usize,
+        context_end: usize,
+        required_free_floor_bytes: usize,
+    ) -> Result<Option<DsaPrefillSelectionPlan>, String> {
+        let Some(geometry) = self.dsa_prefill_workspace_geometry()? else {
+            return Ok(None);
+        };
+        let minimum_plan =
+            plan_dsa_prefill_selection(1, context_end, geometry.index_topk, usize::MAX)?;
+        let minimum_total =
+            self.minimum_dsa_prefill_workspace_bytes(chunk_rows, context_end)?;
+        let fixed_bytes = minimum_total
+            .checked_sub(minimum_plan.workspace_row_bytes)
+            .ok_or_else(|| "DSA prefill fixed workspace size underflow".to_string())?;
+        let mut observed_allocation_overhead = 0usize;
+        loop {
+            self.dsa_prefill_workspace = None;
+            unsafe {
+                cuda_sys::lib().cuCtxSynchronize();
+            }
+            let mut free_before = 0usize;
+            let mut total = 0usize;
+            unsafe {
+                cuda_sys::lib().cuMemGetInfo_v2(&mut free_before, &mut total);
+            }
+            let headroom = free_before.saturating_sub(required_free_floor_bytes);
+            let score_workspace_capacity = headroom
+                .saturating_sub(fixed_bytes)
+                .saturating_sub(observed_allocation_overhead);
+            if score_workspace_capacity < minimum_plan.workspace_row_bytes {
+                return Err(format!(
+                    "DSA prefill workspace cannot preserve measured free-VRAM floor: free={} bytes floor={} bytes fixed={} bytes observed_alloc_overhead={} bytes minimum_score_workspace={} bytes",
+                    free_before,
+                    required_free_floor_bytes,
+                    fixed_bytes,
+                    observed_allocation_overhead,
+                    minimum_plan.workspace_row_bytes,
+                ));
+            }
+            let plan = self.configure_dsa_prefill_workspace(
+                chunk_rows,
+                context_end,
+                score_workspace_capacity,
+            )?;
+            unsafe {
+                cuda_sys::lib().cuCtxSynchronize();
+            }
+            let mut free_after = 0usize;
+            unsafe {
+                cuda_sys::lib().cuMemGetInfo_v2(&mut free_after, &mut total);
+            }
+            if free_after >= required_free_floor_bytes {
+                return Ok(Some(plan));
+            }
+            let theoretical_allocation = fixed_bytes
+                .checked_add(score_workspace_capacity)
+                .ok_or_else(|| "DSA prefill theoretical allocation overflow".to_string())?;
+            let actual_allocation = free_before.saturating_sub(free_after);
+            let next_overhead = actual_allocation.saturating_sub(theoretical_allocation);
+            if next_overhead <= observed_allocation_overhead {
+                return Err(format!(
+                    "DSA prefill workspace allocation did not converge to the measured free-VRAM floor: free_before={} free_after={} floor={} theoretical={} actual={} observed_overhead={}",
+                    free_before,
+                    free_after,
+                    required_free_floor_bytes,
+                    theoretical_allocation,
+                    actual_allocation,
+                    observed_allocation_overhead,
+                ));
+            }
+            observed_allocation_overhead = next_overhead;
+        }
+    }
+
+    fn execute_dsa_prefill_owner_selection(
+        &self,
+        layer_idx: usize,
+        rows: usize,
+        chunk_start: usize,
+        q_lora_residual_ptr: u64,
+    ) -> Result<(), String> {
+        let layer = self
+            .layer_weights
+            .get(layer_idx)
+            .ok_or_else(|| format!("DSA prefill layer {} is absent", layer_idx))?;
+        let registration = layer
+            .dsa_prefill
+            .ok_or_else(|| format!("DSA prefill layer {} has no registration", layer_idx))?;
+        if !registration.owner_weights_present || registration.owner_layer_idx != layer_idx {
+            return Err(format!(
+                "DSA prefill selection requested on non-owner layer {} (owner={})",
+                layer_idx, registration.owner_layer_idx
+            ));
+        }
+        let owner = layer
+            .dsa_prefill_owner
+            .as_ref()
+            .ok_or_else(|| format!("DSA prefill owner {} resources are absent", layer_idx))?;
+        let workspace = self
+            .dsa_prefill_workspace
+            .as_ref()
+            .ok_or("DSA prefill request workspace is not configured")?;
+        let context_end = chunk_start
+            .checked_add(rows)
+            .ok_or_else(|| "DSA prefill context end overflow".to_string())?;
+        if rows > workspace.max_chunk_rows || context_end > workspace.max_context_end {
+            return Err(format!(
+                "DSA prefill owner {} workspace maxima rows/context {}/{}, request requires {}/{}",
+                layer_idx,
+                workspace.max_chunk_rows,
+                workspace.max_context_end,
+                rows,
+                context_end
+            ));
+        }
+        if q_lora_residual_ptr == 0 {
+            return Err(format!(
+                "DSA prefill owner {} Q-LoRA residual pointer is null",
+                layer_idx
+            ));
+        }
+        let raw_query_elements = rows
+            .checked_mul(registration.index_n_heads)
+            .and_then(|value| value.checked_mul(registration.index_head_dim))
+            .ok_or_else(|| "DSA prefill raw-query size overflow".to_string())?;
+        let head_weight_elements = rows
+            .checked_mul(registration.index_n_heads)
+            .ok_or_else(|| "DSA prefill head-weight size overflow".to_string())?;
+        if raw_query_elements > self.scratch.d_q.len()
+            || head_weight_elements > self.scratch.d_scratch1.len()
+        {
+            return Err(format!(
+                "DSA prefill owner {} projection scratch is too small: query={}/{} weights={}/{}",
+                layer_idx,
+                self.scratch.d_q.len(),
+                raw_query_elements,
+                self.scratch.d_scratch1.len(),
+                head_weight_elements,
+            ));
+        }
+        self.populate_dsa_prefill_owner_key_cache(layer_idx, rows)?;
+        let raw_queries_ptr = *self.scratch.d_q.device_ptr();
+        let head_weights_ptr = *self.scratch.d_scratch1.device_ptr();
+        self.cublas_bf16_gemm(q_lora_residual_ptr, &owner.wq_b, raw_queries_ptr, rows)?;
+        self.cublas_bf16_gemm(
+            *self.scratch.d_hidden.device_ptr(),
+            &owner.weights_proj,
+            head_weights_ptr,
+            rows,
+        )?;
+        launch_dsa_prefill_selection_chunk(
+            DsaPrefillSelectionKernels {
+                rope_query_bf16: self.kernels.dsa_prefill_rope_query_bf16,
+                fused_scores: self.kernels.dsa_prefill_fused_scores,
+                topk_sort_rows: self.kernels.dsa_prefill_topk_sort_rows,
+                topk_merge_rows: self.kernels.dsa_prefill_topk_merge_rows,
+            },
+            self.stream,
+            layer_idx,
+            chunk_start,
+            rows,
+            context_end,
+            raw_queries_ptr,
+            owner.key_cache_ptr,
+            head_weights_ptr,
+            *self.scratch.d_positions.device_ptr(),
+            self.rope_cos_ptr,
+            self.rope_sin_ptr,
+            registration.qk_rope_head_dim,
+            workspace,
+        )
+    }
+
     fn forward_hqq_mla_chunked(
         &self,
         layer_idx: usize,
@@ -28673,18 +30348,19 @@ impl PrefillEngine {
         start_pos: usize,
         capture_kv_cache: bool,
     ) -> Result<(), String> {
-        if start_pos != 0 {
-            return Err(format!(
-                "HQQ MLA prefill cross-chunk execution is not implemented at layer {} (start_pos={}, tokens={}); refusing to route compressed MLA cache through a GQA fallback",
-                layer_idx, start_pos, m
-            ));
-        }
         if m == 0 {
             return Ok(());
         }
 
         let cfg = &self.config;
         let lw = &self.layer_weights[layer_idx];
+        let sparse_dsa = lw.dsa_prefill.is_some() && self.dsa_prefill_workspace.is_some();
+        if start_pos != 0 && !sparse_dsa {
+            return Err(format!(
+                "HQQ MLA prefill cross-chunk execution is not implemented at layer {} (start_pos={}, tokens={}); refusing to route compressed MLA cache through a GQA fallback",
+                layer_idx, start_pos, m
+            ));
+        }
         let hqq = lw
             .hqq_mla
             .as_ref()
@@ -28744,7 +30420,7 @@ impl PrefillEngine {
                 layer_idx, ccd, rope
             ));
         }
-        if qk_dim != vhd {
+        if !sparse_dsa && qk_dim != vhd {
             return Err(format!(
                 "HQQ MLA layer {} dense prefill requires equal QK/value head dimensions for FA2, got qk={} value={}",
                 layer_idx, qk_dim, vhd
@@ -28811,7 +30487,10 @@ impl PrefillEngine {
                 hqq.kpe_cache_ptr
             ));
         }
-        if self.kernels.flash_attn_fwd.is_none() || !matches!(qk_dim, 64 | 96 | 128 | 192 | 256) {
+        if !sparse_dsa
+            && (self.kernels.flash_attn_fwd.is_none()
+                || !matches!(qk_dim, 64 | 96 | 128 | 192 | 256))
+        {
             return Err(format!(
                 "HQQ MLA layer {} requires native BF16 FlashAttention for dense prefill head_dim={}, but it is unavailable",
                 layer_idx, qk_dim
@@ -28966,6 +30645,13 @@ impl PrefillEngine {
                 m,
             )?;
             self.launch_rmsnorm_fp32w(scratch2, scratch1, hqq.q_a_norm_ptr, m, qlr)?;
+            if sparse_dsa
+                && lw
+                    .dsa_prefill
+                    .map_or(false, |registration| registration.owner_weights_present)
+            {
+                self.execute_dsa_prefill_owner_selection(layer_idx, m, start_pos, scratch2)?;
+            }
             self.la_gemm(
                 layer_idx,
                 "q_b_proj",
@@ -28977,6 +30663,12 @@ impl PrefillEngine {
                 m,
             )?;
         } else {
+            if sparse_dsa {
+                return Err(format!(
+                    "DSA prefill layer {} requires the registered Q-LoRA residual, but MLA q_lora_rank is zero",
+                    layer_idx
+                ));
+            }
             let q_proj = hqq.q_proj.as_ref().expect("validated q_proj");
             self.la_gemm(
                 layer_idx,
@@ -29180,44 +30872,233 @@ impl PrefillEngine {
             }
         }
 
-        let lse_ptr = self
-            .scratch
-            .d_fa2_lse
-            .as_ref()
-            .map(|buffer| *buffer.device_ptr() as *mut std::ffi::c_void)
-            .unwrap_or(std::ptr::null_mut());
-        let fa2 = self
-            .kernels
-            .flash_attn_fwd
-            .expect("validated FlashAttention presence");
-        let ret = unsafe {
-            fa2(
-                q as *const _,
-                k as *const _,
-                v as *const _,
-                attn_out as *mut _,
-                lse_ptr,
-                std::ptr::null(),
-                std::ptr::null(),
-                1,
-                token_count_i32,
-                token_count_i32,
-                num_heads_i32,
-                num_heads_i32,
-                qk_dim_i32,
-                token_count_i32,
-                token_count_i32,
-                hqq.sm_scale,
-                1,
-                0,
-                self.stream as *mut _,
-            )
-        };
-        if ret != 0 {
-            return Err(format!(
-                "HQQ MLA layer {} BF16 FlashAttention failed with code {}",
-                layer_idx, ret
-            ));
+        if sparse_dsa {
+            if !capture_kv_cache {
+                return Err(format!(
+                    "DSA sparse prefill layer {} requires compact cache capture",
+                    layer_idx
+                ));
+            }
+            let registration = lw
+                .dsa_prefill
+                .ok_or_else(|| format!("DSA prefill layer {} registration is absent", layer_idx))?;
+            let workspace = self
+                .dsa_prefill_workspace
+                .as_ref()
+                .ok_or("DSA prefill request workspace is not configured")?;
+            let context_end = start_pos
+                .checked_add(m)
+                .ok_or_else(|| "DSA prefill context end overflow".to_string())?;
+            let selected = workspace.resolve_for_layer(
+                layer_idx,
+                registration,
+                start_pos,
+                m,
+                context_end,
+            )?;
+            let mla_elements = m
+                .checked_mul(nh)
+                .and_then(|value| value.checked_mul(ccd))
+                .ok_or_else(|| format!("DSA sparse MLA layer {} size overflow", layer_idx))?;
+            if workspace.mla_num_heads != nh
+                || workspace.mla_ckv_cache_dim != ccd
+                || workspace.d_mla_q_absorbed.len() < mla_elements
+                || workspace.d_mla_attention.len() < mla_elements
+            {
+                return Err(format!(
+                    "DSA sparse MLA layer {} workspace mismatch: heads={}/{} ckv={}/{} absorbed={}/{} attention={}/{}",
+                    layer_idx,
+                    workspace.mla_num_heads,
+                    nh,
+                    workspace.mla_ckv_cache_dim,
+                    ccd,
+                    workspace.d_mla_q_absorbed.len(),
+                    mla_elements,
+                    workspace.d_mla_attention.len(),
+                    mla_elements,
+                ));
+            }
+            let threads = 256u32;
+            let mut a0 = *workspace.d_mla_q_absorbed.device_ptr();
+            let mut a1 = q;
+            let mut a2 = hqq.w_kc_ptr;
+            let mut a3 = token_count_i32;
+            let mut a4 = num_heads_i32;
+            let mut a5 = qk_dim_i32;
+            let mut a6 = nope_i32;
+            let mut a7 = i32::try_from(ccd).map_err(|_| {
+                format!("DSA sparse MLA layer {} cKV width exceeds i32", layer_idx)
+            })?;
+            unsafe {
+                launch(
+                    self.kernels.mla_prefill_absorb_wkc,
+                    (
+                        u32::try_from(nh).map_err(|_| "DSA MLA heads exceed u32")?,
+                        u32::try_from(m).map_err(|_| "DSA MLA rows exceed u32")?,
+                        1,
+                    ),
+                    (threads, 1, 1),
+                    0,
+                    self.stream,
+                    &mut [
+                        &mut a0 as *mut _ as *mut _,
+                        &mut a1 as *mut _ as *mut _,
+                        &mut a2 as *mut _ as *mut _,
+                        &mut a3 as *mut _ as *mut _,
+                        &mut a4 as *mut _ as *mut _,
+                        &mut a5 as *mut _ as *mut _,
+                        &mut a6 as *mut _ as *mut _,
+                        &mut a7 as *mut _ as *mut _,
+                    ],
+                )?;
+            }
+
+            let num_warps = usize::try_from(threads.div_ceil(32))
+                .map_err(|_| "DSA sparse MLA warp count exceeds usize".to_string())?;
+            let shared_floats = ccd
+                .checked_add(rope)
+                .and_then(|value| value.checked_add(num_warps))
+                .and_then(|value| value.checked_add(selected.selected_per_row))
+                .ok_or_else(|| {
+                    format!("DSA sparse MLA layer {} shared-memory overflow", layer_idx)
+                })?;
+            let shared_bytes = shared_floats
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or_else(|| {
+                    format!("DSA sparse MLA layer {} shared-memory overflow", layer_idx)
+                })?;
+            let shared_bytes_u32 = dsa_prefill_configure_dynamic_shared(
+                self.kernels.mla_prefill_sparse_attention_k4,
+                shared_bytes,
+                "DSA sparse MLA prefill attention",
+            )?;
+            let mut s0 = *workspace.d_mla_attention.device_ptr();
+            let mut s1 = *workspace.d_mla_q_absorbed.device_ptr();
+            let mut s2 = q;
+            let mut s3 = hqq.ckv_cache_ptr;
+            let mut s4 = hqq.kpe_cache_ptr;
+            let mut s5 = selected.ptr;
+            let mut s6 = *self.scratch.d_positions.device_ptr();
+            let mut s7 = hqq.sm_scale;
+            let mut s8 = token_count_i32;
+            let mut s9 = num_heads_i32;
+            let mut s10 = qk_dim_i32;
+            let mut s11 = nope_i32;
+            let mut s12 = rope_i32;
+            let mut s13 = a7;
+            let mut s14 = i32::try_from(selected.selected_per_row).map_err(|_| {
+                format!(
+                    "DSA sparse MLA layer {} selected width exceeds i32",
+                    layer_idx
+                )
+            })?;
+            let mut s15 = i32::try_from(context_end).map_err(|_| {
+                format!(
+                    "DSA sparse MLA layer {} context exceeds i32",
+                    layer_idx
+                )
+            })?;
+            unsafe {
+                launch(
+                    self.kernels.mla_prefill_sparse_attention_k4,
+                    (
+                        u32::try_from(nh).map_err(|_| "DSA MLA heads exceed u32")?,
+                        u32::try_from(m).map_err(|_| "DSA MLA rows exceed u32")?,
+                        1,
+                    ),
+                    (threads, 1, 1),
+                    shared_bytes_u32,
+                    self.stream,
+                    &mut [
+                        &mut s0 as *mut _ as *mut _,
+                        &mut s1 as *mut _ as *mut _,
+                        &mut s2 as *mut _ as *mut _,
+                        &mut s3 as *mut _ as *mut _,
+                        &mut s4 as *mut _ as *mut _,
+                        &mut s5 as *mut _ as *mut _,
+                        &mut s6 as *mut _ as *mut _,
+                        &mut s7 as *mut _ as *mut _,
+                        &mut s8 as *mut _ as *mut _,
+                        &mut s9 as *mut _ as *mut _,
+                        &mut s10 as *mut _ as *mut _,
+                        &mut s11 as *mut _ as *mut _,
+                        &mut s12 as *mut _ as *mut _,
+                        &mut s13 as *mut _ as *mut _,
+                        &mut s14 as *mut _ as *mut _,
+                        &mut s15 as *mut _ as *mut _,
+                    ],
+                )?;
+            }
+
+            let mut v0 = attn_out;
+            let mut v1 = *workspace.d_mla_attention.device_ptr();
+            let mut v2 = hqq.w_vc_ptr;
+            let mut v3 = token_count_i32;
+            let mut v4 = num_heads_i32;
+            let mut v5 = value_i32;
+            let mut v6 = a7;
+            unsafe {
+                launch(
+                    self.kernels.mla_prefill_apply_wvc,
+                    (
+                        u32::try_from(nh).map_err(|_| "DSA MLA heads exceed u32")?,
+                        u32::try_from(m).map_err(|_| "DSA MLA rows exceed u32")?,
+                        1,
+                    ),
+                    (threads, 1, 1),
+                    0,
+                    self.stream,
+                    &mut [
+                        &mut v0 as *mut _ as *mut _,
+                        &mut v1 as *mut _ as *mut _,
+                        &mut v2 as *mut _ as *mut _,
+                        &mut v3 as *mut _ as *mut _,
+                        &mut v4 as *mut _ as *mut _,
+                        &mut v5 as *mut _ as *mut _,
+                        &mut v6 as *mut _ as *mut _,
+                    ],
+                )?;
+            }
+        } else {
+            let lse_ptr = self
+                .scratch
+                .d_fa2_lse
+                .as_ref()
+                .map(|buffer| *buffer.device_ptr() as *mut std::ffi::c_void)
+                .unwrap_or(std::ptr::null_mut());
+            let fa2 = self
+                .kernels
+                .flash_attn_fwd
+                .expect("validated FlashAttention presence");
+            let ret = unsafe {
+                fa2(
+                    q as *const _,
+                    k as *const _,
+                    v as *const _,
+                    attn_out as *mut _,
+                    lse_ptr,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    1,
+                    token_count_i32,
+                    token_count_i32,
+                    num_heads_i32,
+                    num_heads_i32,
+                    qk_dim_i32,
+                    token_count_i32,
+                    token_count_i32,
+                    hqq.sm_scale,
+                    1,
+                    0,
+                    self.stream as *mut _,
+                )
+            };
+            if ret != 0 {
+                return Err(format!(
+                    "HQQ MLA layer {} BF16 FlashAttention failed with code {}",
+                    layer_idx, ret
+                ));
+            }
         }
 
         self.la_gemm(
@@ -29235,6 +31116,148 @@ impl PrefillEngine {
             scratch1,
             (m * cfg.hidden_size * std::mem::size_of::<u16>()) as u64,
         )?;
+        Ok(())
+    }
+
+    fn populate_dsa_prefill_owner_key_cache(
+        &self,
+        layer_idx: usize,
+        token_count: usize,
+    ) -> Result<(), String> {
+        let Some(owner) = self.layer_weights[layer_idx].dsa_prefill_owner.as_ref() else {
+            return Ok(());
+        };
+        if owner.owner_layer_idx != layer_idx {
+            return Err(format!(
+                "DSA prefill owner descriptor mismatch: layer {} carries owner {}",
+                layer_idx, owner.owner_layer_idx
+            ));
+        }
+        if token_count == 0 {
+            return Ok(());
+        }
+        if token_count > owner.max_context_tokens {
+            return Err(format!(
+                "DSA prefill owner {} token count {} exceeds key-cache capacity {}",
+                layer_idx, token_count, owner.max_context_tokens
+            ));
+        }
+        if owner.index_head_dim == 0
+            || owner.qk_rope_head_dim > owner.index_head_dim
+            || owner.qk_rope_head_dim % 2 != 0
+        {
+            return Err(format!(
+                "DSA prefill owner {} has invalid head geometry: head_dim={} rope_dim={}",
+                layer_idx, owner.index_head_dim, owner.qk_rope_head_dim
+            ));
+        }
+        if owner.wk.n != owner.index_head_dim || owner.wk.k != self.config.hidden_size {
+            return Err(format!(
+                "DSA prefill owner {} wk shape mismatch: {}x{}, expected {}x{}",
+                layer_idx, owner.wk.n, owner.wk.k, owner.index_head_dim, self.config.hidden_size
+            ));
+        }
+        if owner.norm_weight_ptr == 0
+            || owner.norm_bias_ptr == 0
+            || owner.key_cache_ptr == 0
+            || self.rope_cos_ptr == 0
+            || self.rope_sin_ptr == 0
+        {
+            return Err(format!(
+                "DSA prefill owner {} has incomplete pointers: norm_weight=0x{:x} norm_bias=0x{:x} key_cache=0x{:x} rope_cos=0x{:x} rope_sin=0x{:x}",
+                layer_idx,
+                owner.norm_weight_ptr,
+                owner.norm_bias_ptr,
+                owner.key_cache_ptr,
+                self.rope_cos_ptr,
+                self.rope_sin_ptr
+            ));
+        }
+        let raw_key_elems = token_count
+            .checked_mul(owner.index_head_dim)
+            .ok_or_else(|| format!("DSA prefill owner {} raw-key size overflow", layer_idx))?;
+        if self.scratch.d_scratch1.len < raw_key_elems {
+            return Err(format!(
+                "DSA prefill owner {} raw-key scratch too small: {} < {}",
+                layer_idx, self.scratch.d_scratch1.len, raw_key_elems
+            ));
+        }
+
+        let hidden = *self.scratch.d_hidden.device_ptr();
+        let raw_keys = *self.scratch.d_scratch1.device_ptr();
+        self.cublas_bf16_gemm(hidden, &owner.wk, raw_keys, token_count)?;
+
+        let token_count_i32 = i32::try_from(token_count).map_err(|_| {
+            format!(
+                "DSA prefill owner {} token count exceeds native i32: {}",
+                layer_idx, token_count
+            )
+        })?;
+        let max_context_i32 = i32::try_from(owner.max_context_tokens).map_err(|_| {
+            format!(
+                "DSA prefill owner {} context exceeds native i32: {}",
+                layer_idx, owner.max_context_tokens
+            )
+        })?;
+        let head_dim_i32 = i32::try_from(owner.index_head_dim).map_err(|_| {
+            format!(
+                "DSA prefill owner {} head dimension exceeds native i32: {}",
+                layer_idx, owner.index_head_dim
+            )
+        })?;
+        let rope_dim_i32 = i32::try_from(owner.qk_rope_head_dim).map_err(|_| {
+            format!(
+                "DSA prefill owner {} RoPE dimension exceeds native i32: {}",
+                layer_idx, owner.qk_rope_head_dim
+            )
+        })?;
+        let threads = 256u32;
+        let shared_bytes = owner
+            .index_head_dim
+            .checked_add(64)
+            .and_then(|elements| elements.checked_mul(std::mem::size_of::<f32>()))
+            .and_then(|bytes| u32::try_from(bytes).ok())
+            .ok_or_else(|| {
+                format!(
+                    "DSA prefill owner {} shared-memory size overflow for head_dim {}",
+                    layer_idx, owner.index_head_dim
+                )
+            })?;
+        let mut p0 = owner.key_cache_ptr;
+        let mut p1 = raw_keys;
+        let mut p2 = owner.norm_weight_ptr;
+        let mut p3 = owner.norm_bias_ptr;
+        let mut p4 = self.rope_cos_ptr;
+        let mut p5 = self.rope_sin_ptr;
+        let mut p6 = *self.scratch.d_positions.device_ptr();
+        let mut p7 = token_count_i32;
+        let mut p8 = max_context_i32;
+        let mut p9 = head_dim_i32;
+        let mut p10 = rope_dim_i32;
+        let mut p11 = owner.layer_norm_eps;
+        unsafe {
+            launch(
+                self.kernels.dsa_prefill_layernorm_rope_key_write,
+                (token_count as u32, 1, 1),
+                (threads, 1, 1),
+                shared_bytes,
+                self.stream,
+                &mut [
+                    &mut p0 as *mut _ as *mut std::ffi::c_void,
+                    &mut p1 as *mut _ as *mut std::ffi::c_void,
+                    &mut p2 as *mut _ as *mut std::ffi::c_void,
+                    &mut p3 as *mut _ as *mut std::ffi::c_void,
+                    &mut p4 as *mut _ as *mut std::ffi::c_void,
+                    &mut p5 as *mut _ as *mut std::ffi::c_void,
+                    &mut p6 as *mut _ as *mut std::ffi::c_void,
+                    &mut p7 as *mut _ as *mut std::ffi::c_void,
+                    &mut p8 as *mut _ as *mut std::ffi::c_void,
+                    &mut p9 as *mut _ as *mut std::ffi::c_void,
+                    &mut p10 as *mut _ as *mut std::ffi::c_void,
+                    &mut p11 as *mut _ as *mut std::ffi::c_void,
+                ],
+            )?;
+        }
         Ok(())
     }
 
@@ -57863,8 +59886,16 @@ impl PrefillKernels {
                     "rope_batched_half_split_kernel",
                     "rope_batched_mrope_kernel",
                     "mla_rmsnorm_prefix_bf16_fp32w_kernel",
+                    "dsa_prefill_layernorm_rope_key_write_kernel",
+                    "dsa_prefill_rope_query_bf16_kernel",
+                    "dsa_prefill_fused_scores_kernel",
+                    "dsa_prefill_topk_sort_rows_kernel",
+                    "dsa_prefill_topk_merge_rows_kernel",
                     "mla_pack_qkv_rope_bf16_kernel",
                     "mla_cache_append_k4_kernel",
+                    "mla_prefill_absorb_wkc_kernel",
+                    "mla_prefill_sparse_attention_k4_kernel",
+                    "mla_prefill_apply_wvc_kernel",
                     "silu_mul_batched_kernel",
                     "silu_mul_limited_batched_kernel",
                     "relu2_batched_kernel",
@@ -58275,8 +60306,18 @@ impl PrefillKernels {
             rope_half_split: get("rope_batched_half_split_kernel")?,
             rope_mrope: get("rope_batched_mrope_kernel")?,
             mla_rmsnorm_prefix_bf16_fp32w: get("mla_rmsnorm_prefix_bf16_fp32w_kernel")?,
+            dsa_prefill_layernorm_rope_key_write: get(
+                "dsa_prefill_layernorm_rope_key_write_kernel",
+            )?,
+            dsa_prefill_rope_query_bf16: get("dsa_prefill_rope_query_bf16_kernel")?,
+            dsa_prefill_fused_scores: get("dsa_prefill_fused_scores_kernel")?,
+            dsa_prefill_topk_sort_rows: get("dsa_prefill_topk_sort_rows_kernel")?,
+            dsa_prefill_topk_merge_rows: get("dsa_prefill_topk_merge_rows_kernel")?,
             mla_pack_qkv_rope_bf16: get("mla_pack_qkv_rope_bf16_kernel")?,
             mla_cache_append_k4: get("mla_cache_append_k4_kernel")?,
+            mla_prefill_absorb_wkc: get("mla_prefill_absorb_wkc_kernel")?,
+            mla_prefill_sparse_attention_k4: get("mla_prefill_sparse_attention_k4_kernel")?,
+            mla_prefill_apply_wvc: get("mla_prefill_apply_wvc_kernel")?,
             silu_mul: get("silu_mul_batched_kernel")?,
             silu_mul_limited: get("silu_mul_limited_batched_kernel")?,
             relu2: get("relu2_batched_kernel")?,
@@ -61045,8 +63086,16 @@ mod kernel_tests {
                     "rope_batched_kernel",
                     "rope_batched_mrope_kernel",
                     "mla_rmsnorm_prefix_bf16_fp32w_kernel",
+                    "dsa_prefill_layernorm_rope_key_write_kernel",
+                    "dsa_prefill_rope_query_bf16_kernel",
+                    "dsa_prefill_fused_scores_kernel",
+                    "dsa_prefill_topk_sort_rows_kernel",
+                    "dsa_prefill_topk_merge_rows_kernel",
                     "mla_pack_qkv_rope_bf16_kernel",
                     "mla_cache_append_k4_kernel",
+                    "mla_prefill_absorb_wkc_kernel",
+                    "mla_prefill_sparse_attention_k4_kernel",
+                    "mla_prefill_apply_wvc_kernel",
                     "silu_mul_batched_kernel",
                     "silu_mul_limited_batched_kernel",
                     "relu2_batched_kernel",
@@ -61131,6 +63180,8 @@ mod kernel_tests {
                     "mla_kv_cache_write_k4",
                     "mla_attention_k4_g",
                     "mla_attention_k4",
+                    "mla_sparse_attention_k4_g",
+                    "mla_sparse_attention_k4",
                     "kv_cache_write_polar4",
                     "kv_cache_write_polar4_g",
                     "gqa_attention_polar4",
@@ -61462,6 +63513,431 @@ mod kernel_tests {
     // ── Test functions ─────────────────────────────────────────────────
 
     #[test]
+    fn test_dsa_prefill_selection_plan() {
+        let short_row_bytes = 2048 * std::mem::size_of::<f32>();
+        let short = plan_dsa_prefill_selection(2048, 2048, 2048, 2048 * short_row_bytes)
+            .expect("short-context plan");
+        assert_eq!(short.selected_per_row, 2048);
+        assert_eq!(short.selection_elements, 2048 * 2048);
+        assert_eq!(
+            short.selection_bytes,
+            2048 * 2048 * std::mem::size_of::<i32>()
+        );
+        assert_eq!(short.candidate_row_elements, 0);
+        assert_eq!(short.candidate_row_bytes, 0);
+        assert_eq!(short.workspace_row_bytes, short_row_bytes);
+        assert_eq!(short.score_tile_rows, 2048);
+        assert_eq!(short.candidate_tile_elements, 0);
+        assert_eq!(short.score_tile_count, 1);
+
+        let long_context = 1_048_576;
+        let long_candidate_elements = 256 * 2048;
+        let long_score_row_bytes = long_context * std::mem::size_of::<f32>();
+        let long_candidate_row_bytes =
+            long_candidate_elements * (std::mem::size_of::<f32>() + std::mem::size_of::<i32>()) * 2;
+        let long_workspace_row_bytes = long_score_row_bytes + long_candidate_row_bytes;
+        let long =
+            plan_dsa_prefill_selection(2048, long_context, 2048, 4 * long_workspace_row_bytes)
+                .expect("long-context plan");
+        assert_eq!(long.selected_per_row, 2048);
+        assert_eq!(long.selection_elements, 2048 * 2048);
+        assert_eq!(long.score_row_bytes, 4 * 1024 * 1024);
+        assert_eq!(long.candidate_row_elements, long_candidate_elements);
+        assert_eq!(long.candidate_row_bytes, 8 * 1024 * 1024);
+        assert_eq!(long.workspace_row_bytes, 12 * 1024 * 1024);
+        assert_eq!(long.score_tile_rows, 4);
+        assert_eq!(long.score_tile_elements, 4 * long_context);
+        assert_eq!(long.candidate_tile_elements, 4 * long_candidate_elements);
+        assert_eq!(long.workspace_tile_bytes, 48 * 1024 * 1024);
+        assert_eq!(long.score_tile_count, 512);
+
+        let partial_row_bytes = 512 * std::mem::size_of::<f32>();
+        let short_prefix = plan_dsa_prefill_selection(128, 512, 2048, 8 * partial_row_bytes)
+            .expect("partial-topk plan");
+        assert_eq!(short_prefix.selected_per_row, 512);
+        assert_eq!(short_prefix.selection_elements, 128 * 512);
+        assert_eq!(short_prefix.candidate_row_elements, 0);
+        assert_eq!(short_prefix.score_tile_rows, 8);
+        assert_eq!(short_prefix.score_tile_count, 16);
+
+        assert!(
+            plan_dsa_prefill_selection(2048, long_context, 2048, long_workspace_row_bytes - 1)
+                .unwrap_err()
+                .contains("cannot hold one causal row")
+        );
+        assert!(
+            plan_dsa_prefill_selection(513, 512, 2048, partial_row_bytes)
+                .unwrap_err()
+                .contains("exceed causal context")
+        );
+    }
+
+    #[test]
+    fn test_dsa_prefill_causal_selection_matches_cpu() {
+        let ctx = GpuTestCtx::new();
+        let kernels = DsaPrefillSelectionKernels {
+            rope_query_bf16: ctx.get_kernel("dsa_prefill_rope_query_bf16_kernel"),
+            fused_scores: ctx.get_kernel("dsa_prefill_fused_scores_kernel"),
+            topk_sort_rows: ctx.get_kernel("dsa_prefill_topk_sort_rows_kernel"),
+            topk_merge_rows: ctx.get_kernel("dsa_prefill_topk_merge_rows_kernel"),
+        };
+
+        let rows = 4usize;
+        let context_end = 19usize;
+        let num_heads = 2usize;
+        let head_dim = 4usize;
+        let rope_dim = 4usize;
+        let configured_topk = 4usize;
+        let positions_host = vec![2i32, 7, 13, 18];
+        let round_bf16 = |value: f32| half::bf16::from_f32(value).to_f32();
+
+        let raw_queries_host = (0..rows * num_heads * head_dim)
+            .map(|index| {
+                let row = index / (num_heads * head_dim);
+                let within = index % (num_heads * head_dim);
+                round_bf16((row as f32 + 1.0) * 0.21 + (within as f32 - 3.0) * 0.13)
+            })
+            .collect::<Vec<_>>();
+        let key_cache_host = (0..context_end * head_dim)
+            .map(|index| {
+                let token = index / head_dim;
+                let dim = index % head_dim;
+                round_bf16(((token * 17 + dim * 11 + 5) % 29) as f32 / 9.0 - 1.4)
+            })
+            .collect::<Vec<_>>();
+        let head_weights_host = (0..rows * num_heads)
+            .map(|index| {
+                let row = index / num_heads;
+                let head = index % num_heads;
+                round_bf16(0.5 + row as f32 * 0.17 + head as f32 * 0.23)
+            })
+            .collect::<Vec<_>>();
+        let half_rope = rope_dim / 2;
+        let cos_host = (0..context_end * half_rope)
+            .map(|index| {
+                let position = index / half_rope;
+                let pair = index % half_rope;
+                ((position as f32 + 1.0) * (pair as f32 + 1.0) * 0.11).cos()
+            })
+            .collect::<Vec<_>>();
+        let sin_host = (0..context_end * half_rope)
+            .map(|index| {
+                let position = index / half_rope;
+                let pair = index % half_rope;
+                ((position as f32 + 1.0) * (pair as f32 + 1.0) * 0.11).sin()
+            })
+            .collect::<Vec<_>>();
+
+        let d_raw_queries = ctx.upload_bf16(&f32_to_bf16_bytes(&raw_queries_host));
+        let d_rope_queries = ctx.alloc_bf16(raw_queries_host.len());
+        let d_key_cache = ctx.upload_bf16(&f32_to_bf16_bytes(&key_cache_host));
+        let d_head_weights = ctx.upload_bf16(&f32_to_bf16_bytes(&head_weights_host));
+        let d_positions = ctx.upload_i32(
+            &positions_host
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<_>>(),
+        );
+        let d_cos = ctx.upload_f32(
+            &cos_host
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<_>>(),
+        );
+        let d_sin = ctx.upload_f32(
+            &sin_host
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<_>>(),
+        );
+        let d_scores = ctx.alloc_f32(rows * context_end);
+
+        let topk_plan =
+            crate::gpu_decode::plan_dsa_topk(context_end, configured_topk).expect("DSA top-k plan");
+        assert!(topk_plan.initial_runs > 1, "test must exercise merge");
+        let candidate_elements = rows * topk_plan.candidate_capacity;
+        let d_candidate_scores_a = ctx.alloc_f32(candidate_elements);
+        let d_candidate_scores_b = ctx.alloc_f32(candidate_elements);
+        let d_candidate_indices_a = ctx.alloc_i32(candidate_elements);
+        let d_candidate_indices_b = ctx.alloc_i32(candidate_elements);
+        let d_selected = ctx.alloc_i32(rows * topk_plan.selected);
+        let launched_plan = launch_dsa_prefill_selection_rows(
+            kernels,
+            ctx.stream(),
+            *d_raw_queries.device_ptr(),
+            *d_rope_queries.device_ptr(),
+            *d_key_cache.device_ptr(),
+            *d_head_weights.device_ptr(),
+            *d_positions.device_ptr(),
+            *d_cos.device_ptr(),
+            *d_sin.device_ptr(),
+            rows,
+            context_end,
+            num_heads,
+            head_dim,
+            rope_dim,
+            configured_topk,
+            DsaPrefillSelectionBuffers {
+                scores_ptr: *d_scores.device_ptr(),
+                scores_capacity: d_scores.len(),
+                candidate_scores_a_ptr: *d_candidate_scores_a.device_ptr(),
+                candidate_scores_b_ptr: *d_candidate_scores_b.device_ptr(),
+                candidate_indices_a_ptr: *d_candidate_indices_a.device_ptr(),
+                candidate_indices_b_ptr: *d_candidate_indices_b.device_ptr(),
+                candidate_capacity: candidate_elements,
+                selected_ptr: *d_selected.device_ptr(),
+                selected_capacity: d_selected.len(),
+            },
+        )
+        .expect("DSA prefill causal selection dispatcher");
+        assert_eq!(launched_plan, topk_plan);
+        self::cuda_sync();
+
+        let rope_queries = bf16_bytes_to_f32(&ctx.download_bf16(&d_rope_queries));
+        let scores = ctx.dev.dtoh_sync_copy(&d_scores).expect("scores D2H");
+        let selected = ctx.dev.dtoh_sync_copy(&d_selected).expect("selected D2H");
+        let score_scale = 1.0f32 / ((head_dim as f32).sqrt() * (num_heads as f32).sqrt());
+
+        for row in 0..rows {
+            let position = positions_host[row] as usize;
+            for head in 0..num_heads {
+                let base = (row * num_heads + head) * head_dim;
+                for dim in 0..head_dim {
+                    let half = rope_dim / 2;
+                    let table_index = if dim < half { dim } else { dim - half };
+                    let even = raw_queries_host[base + 2 * table_index];
+                    let odd = raw_queries_host[base + 2 * table_index + 1];
+                    let cos_value = round_bf16(cos_host[position * half + table_index]);
+                    let sin_value = round_bf16(sin_host[position * half + table_index]);
+                    let direct = round_bf16((if dim < half { even } else { odd }) * cos_value);
+                    let cross = round_bf16((if dim < half { odd } else { even }) * sin_value);
+                    let expected = round_bf16(if dim < half {
+                        direct - cross
+                    } else {
+                        direct + cross
+                    });
+                    assert_eq!(
+                        rope_queries[base + dim].to_bits(),
+                        expected.to_bits(),
+                        "query RoPE mismatch row={} head={} dim={}",
+                        row,
+                        head,
+                        dim
+                    );
+                }
+            }
+
+            let causal_context = position + 1;
+            let mut expected_scores = Vec::with_capacity(causal_context);
+            for token in 0..causal_context {
+                let mut expected = 0.0f32;
+                for head in 0..num_heads {
+                    let query_base = (row * num_heads + head) * head_dim;
+                    let key_base = token * head_dim;
+                    let dot = (0..head_dim)
+                        .map(|dim| rope_queries[query_base + dim] * key_cache_host[key_base + dim])
+                        .sum::<f32>();
+                    expected +=
+                        head_weights_host[row * num_heads + head] * (dot * score_scale).max(0.0);
+                }
+                let actual = scores[row * context_end + token];
+                assert!(
+                    (actual - expected).abs() < 0.0005,
+                    "score mismatch row={} token={} actual={} expected={}",
+                    row,
+                    token,
+                    actual,
+                    expected
+                );
+                expected_scores.push(expected);
+            }
+            let mut expected_indices = (0..causal_context).collect::<Vec<_>>();
+            expected_indices.sort_unstable_by(|left, right| {
+                expected_scores[*right]
+                    .total_cmp(&expected_scores[*left])
+                    .then_with(|| left.cmp(right))
+            });
+            let mut expected_selected = expected_indices
+                .into_iter()
+                .take(topk_plan.selected)
+                .map(|index| index as i32)
+                .collect::<Vec<_>>();
+            expected_selected.resize(topk_plan.selected, i32::MAX);
+            assert_eq!(
+                &selected[row * topk_plan.selected..(row + 1) * topk_plan.selected],
+                expected_selected.as_slice(),
+                "causal selected indices mismatch at row {}",
+                row
+            );
+        }
+
+        // Exercise the direct one-run publication path independently from the
+        // multi-run merge above.
+        let direct_rows = 2usize;
+        let direct_context = 4usize;
+        let direct_positions_host = [1i32, 3i32];
+        let direct_scores_host = [0.25f32, 0.75, 9.0, 8.0, 1.0, 3.0, 2.0, 4.0];
+        let direct_plan =
+            crate::gpu_decode::plan_dsa_topk(direct_context, 8).expect("direct DSA top-k plan");
+        assert_eq!(direct_plan.initial_runs, 1);
+        assert_eq!(direct_plan.candidate_capacity, 0);
+        let d_direct_scores = ctx.upload_f32(
+            &direct_scores_host
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<_>>(),
+        );
+        let d_direct_positions = ctx.upload_i32(
+            &direct_positions_host
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<_>>(),
+        );
+        let d_direct_selected = ctx.alloc_i32(direct_rows * direct_plan.selected);
+        let d_direct_raw_queries = ctx.alloc_bf16(direct_rows * num_heads * head_dim);
+        let d_direct_rope_queries = ctx.alloc_bf16(direct_rows * num_heads * head_dim);
+        let d_direct_key_cache = ctx.alloc_bf16(direct_context * head_dim);
+        let d_direct_head_weights = ctx.alloc_bf16(direct_rows * num_heads);
+        let direct_launched_plan = launch_dsa_prefill_selection_rows(
+            kernels,
+            ctx.stream(),
+            *d_direct_raw_queries.device_ptr(),
+            *d_direct_rope_queries.device_ptr(),
+            *d_direct_key_cache.device_ptr(),
+            *d_direct_head_weights.device_ptr(),
+            *d_direct_positions.device_ptr(),
+            *d_cos.device_ptr(),
+            *d_sin.device_ptr(),
+            direct_rows,
+            direct_context,
+            num_heads,
+            head_dim,
+            rope_dim,
+            8,
+            DsaPrefillSelectionBuffers {
+                scores_ptr: *d_direct_scores.device_ptr(),
+                scores_capacity: d_direct_scores.len(),
+                candidate_scores_a_ptr: 0,
+                candidate_scores_b_ptr: 0,
+                candidate_indices_a_ptr: 0,
+                candidate_indices_b_ptr: 0,
+                candidate_capacity: 0,
+                selected_ptr: *d_direct_selected.device_ptr(),
+                selected_capacity: d_direct_selected.len(),
+            },
+        )
+        .expect("DSA direct one-run dispatcher");
+        assert_eq!(direct_launched_plan, direct_plan);
+        self::cuda_sync();
+        assert_eq!(
+            ctx.dev
+                .dtoh_sync_copy(&d_direct_selected)
+                .expect("direct selected D2H"),
+            vec![0, 1, i32::MAX, i32::MAX, 0, 1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn test_dsa_prefill_index_key_cache_matches_interleaved_contract() {
+        let ctx = GpuTestCtx::new();
+        let kernel = ctx.get_kernel("dsa_prefill_layernorm_rope_key_write_kernel");
+        let raw_rows = [[2.0f32, 1.0, 0.0, -1.0], [1.0, 2.0, 3.0, 4.0]];
+        let raw = ctx.upload_bf16(&f32_to_bf16_bytes(
+            &raw_rows.iter().flatten().copied().collect::<Vec<_>>(),
+        ));
+        let norm_weight = ctx.upload_bf16(&f32_to_bf16_bytes(&[1.0; 4]));
+        let norm_bias = ctx.upload_bf16(&f32_to_bf16_bytes(&[0.0; 4]));
+        let cos = ctx.upload_f32(
+            &[1.0f32, 1.0, 0.0, 0.0]
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<_>>(),
+        );
+        let sin = ctx.upload_f32(
+            &[0.0f32, 0.0, 1.0, 1.0]
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<_>>(),
+        );
+        let positions = ctx.upload_i32(
+            &[1i32, 0]
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<_>>(),
+        );
+        let key_cache = ctx.alloc_bf16(2 * 4);
+
+        let mut p0 = *key_cache.device_ptr() as u64;
+        let mut p1 = *raw.device_ptr() as u64;
+        let mut p2 = *norm_weight.device_ptr() as u64;
+        let mut p3 = *norm_bias.device_ptr() as u64;
+        let mut p4 = *cos.device_ptr() as u64;
+        let mut p5 = *sin.device_ptr() as u64;
+        let mut p6 = *positions.device_ptr() as u64;
+        let mut p7 = 2i32;
+        let mut p8 = 2i32;
+        let mut p9 = 4i32;
+        let mut p10 = 4i32;
+        let mut p11 = 1e-6f32;
+        unsafe {
+            launch(
+                kernel,
+                (2, 1, 1),
+                (256, 1, 1),
+                (4 + 64) * 4,
+                ctx.stream(),
+                &mut [
+                    &mut p0 as *mut _ as *mut _,
+                    &mut p1 as *mut _ as *mut _,
+                    &mut p2 as *mut _ as *mut _,
+                    &mut p3 as *mut _ as *mut _,
+                    &mut p4 as *mut _ as *mut _,
+                    &mut p5 as *mut _ as *mut _,
+                    &mut p6 as *mut _ as *mut _,
+                    &mut p7 as *mut _ as *mut _,
+                    &mut p8 as *mut _ as *mut _,
+                    &mut p9 as *mut _ as *mut _,
+                    &mut p10 as *mut _ as *mut _,
+                    &mut p11 as *mut _ as *mut _,
+                ],
+            )
+            .unwrap();
+        }
+        self::cuda_sync();
+        let actual = bf16_bytes_to_f32(&ctx.download_bf16(&key_cache));
+
+        let normalize = |row: &[f32; 4]| {
+            let mean = row.iter().sum::<f32>() / 4.0;
+            let variance = row
+                .iter()
+                .map(|value| (value - mean) * (value - mean))
+                .sum::<f32>()
+                / 4.0;
+            row.map(|value| {
+                half::bf16::from_f32((value - mean) / (variance + 1e-6).sqrt()).to_f32()
+            })
+        };
+        let normalized0 = normalize(&raw_rows[1]);
+        let cache0 = [
+            normalized0[0],
+            normalized0[2],
+            normalized0[1],
+            normalized0[3],
+        ];
+        let rotated = normalize(&raw_rows[0]);
+        let cache1 = [-rotated[1], -rotated[3], rotated[0], rotated[2]];
+        for (index, expected) in cache0.iter().chain(cache1.iter()).enumerate() {
+            assert!(
+                (actual[index] - expected).abs() < 0.015,
+                "DSA prefill key mismatch index={} actual={} expected={}",
+                index,
+                actual[index],
+                expected,
+            );
+        }
+    }
+
+    #[test]
     fn test_mla_prefill_norm_and_race_free_rope_pack() {
         let ctx = GpuTestCtx::new();
 
@@ -61732,6 +64208,8 @@ mod kernel_tests {
             let write_graph_kernel = ctx.get_decode_kernel("mla_kv_cache_write_k4_g");
             let attention_kernel = ctx.get_decode_kernel("mla_attention_k4");
             let attention_graph_kernel = ctx.get_decode_kernel("mla_attention_k4_g");
+            let sparse_attention_kernel = ctx.get_decode_kernel("mla_sparse_attention_k4");
+            let sparse_attention_graph_kernel = ctx.get_decode_kernel("mla_sparse_attention_k4_g");
             let decode_ckv_cache = ctx.alloc_u8(token_count * ckv_row_bytes);
             let decode_kpe_cache = ctx.alloc_u8(token_count * kpe_row_bytes);
             let graph_ckv_cache = ctx.alloc_u8(token_count * ckv_row_bytes);
@@ -61969,6 +64447,345 @@ mod kernel_tests {
                     actual,
                     expected
                 );
+            }
+
+            // Select only token 1 and prove both sparse readers consume the
+            // owner-provided list rather than a dense prefix or slot number.
+            let d_selected_indices = ctx.dev.htod_copy(vec![1i32, 0i32]).unwrap();
+            let d_sparse_out = ctx.alloc_f32(ckv_dim);
+            let d_sparse_graph_out = ctx.alloc_f32(ckv_dim);
+            let mut s0 = *d_sparse_out.device_ptr() as u64;
+            let mut s1 = *d_q_absorbed.device_ptr() as u64;
+            let mut s2 = *d_q_pe.device_ptr() as u64;
+            let mut s3 = *d_ckv_cache.device_ptr() as u64;
+            let mut s4 = *d_kpe_cache.device_ptr() as u64;
+            let mut s5 = *d_selected_indices.device_ptr() as u64;
+            let mut s6 = sm_scale;
+            let mut s7 = 1i32;
+            let mut s8 = ckv_dim as i32;
+            let mut s9 = rope_dim as i32;
+            let mut s10 = 1i32;
+            let mut s11 = token_count as i32;
+            unsafe {
+                launch(
+                    sparse_attention_kernel,
+                    (1, 1, 1),
+                    (threads, 1, 1),
+                    shared_mem,
+                    ctx.stream(),
+                    &mut [
+                        &mut s0 as *mut _ as *mut _,
+                        &mut s1 as *mut _ as *mut _,
+                        &mut s2 as *mut _ as *mut _,
+                        &mut s3 as *mut _ as *mut _,
+                        &mut s4 as *mut _ as *mut _,
+                        &mut s5 as *mut _ as *mut _,
+                        &mut s6 as *mut _ as *mut _,
+                        &mut s7 as *mut _ as *mut _,
+                        &mut s8 as *mut _ as *mut _,
+                        &mut s9 as *mut _ as *mut _,
+                        &mut s10 as *mut _ as *mut _,
+                        &mut s11 as *mut _ as *mut _,
+                    ],
+                )
+                .unwrap();
+            }
+
+            let mut sg0 = *d_sparse_graph_out.device_ptr() as u64;
+            let mut sg1 = *d_q_absorbed.device_ptr() as u64;
+            let mut sg2 = *d_q_pe.device_ptr() as u64;
+            let mut sg3 = *graph_ckv_cache.device_ptr() as u64;
+            let mut sg4 = *graph_kpe_cache.device_ptr() as u64;
+            let mut sg5 = *d_selected_indices.device_ptr() as u64;
+            let mut sg6 = sm_scale;
+            let mut sg7 = 1i32;
+            let mut sg8 = ckv_dim as i32;
+            let mut sg9 = rope_dim as i32;
+            let mut sg10 = 1i32;
+            let mut sg11 = *d_seq_len.device_ptr() as u64;
+            unsafe {
+                launch(
+                    sparse_attention_graph_kernel,
+                    (1, 1, 1),
+                    (threads, 1, 1),
+                    shared_mem,
+                    ctx.stream(),
+                    &mut [
+                        &mut sg0 as *mut _ as *mut _,
+                        &mut sg1 as *mut _ as *mut _,
+                        &mut sg2 as *mut _ as *mut _,
+                        &mut sg3 as *mut _ as *mut _,
+                        &mut sg4 as *mut _ as *mut _,
+                        &mut sg5 as *mut _ as *mut _,
+                        &mut sg6 as *mut _ as *mut _,
+                        &mut sg7 as *mut _ as *mut _,
+                        &mut sg8 as *mut _ as *mut _,
+                        &mut sg9 as *mut _ as *mut _,
+                        &mut sg10 as *mut _ as *mut _,
+                        &mut sg11 as *mut _ as *mut _,
+                    ],
+                )
+                .unwrap();
+            }
+            self::cuda_sync();
+            let sparse_actual = ctx.dev.dtoh_sync_copy(&d_sparse_out).unwrap();
+            let sparse_graph_actual = ctx.dev.dtoh_sync_copy(&d_sparse_graph_out).unwrap();
+            let selected_expected = &decoded_ckv[ckv_dim..2 * ckv_dim];
+            for (d, expected) in selected_expected.iter().enumerate() {
+                assert!(
+                    (sparse_actual[d] - expected).abs() <= 2e-4,
+                    "MLA sparse k4 attention mismatch dim={}: actual={} expected={}",
+                    d,
+                    sparse_actual[d],
+                    expected
+                );
+                assert!(
+                    (sparse_graph_actual[d] - expected).abs() <= 2e-4,
+                    "MLA graph sparse k4 attention mismatch dim={}: actual={} expected={}",
+                    d,
+                    sparse_graph_actual[d],
+                    expected
+                );
+            }
+
+            // Exercise the batch-native sparse prefill reader with a distinct
+            // causal retained row for each query. Row zero selects only token
+            // zero; row one selects the complete two-token prefix.
+            let prefill_rows = 2usize;
+            let selected_per_row = 2usize;
+            let prefill_selected = [0i32, i32::MAX, 1, 0];
+            let prefill_positions = [0i32, 1];
+            let mut packed_q = vec![0.0f32; prefill_rows * qk_dim];
+            for row in 0..prefill_rows {
+                packed_q[row * qk_dim + nope_dim..(row + 1) * qk_dim].copy_from_slice(&q_pe);
+            }
+            let packed_q_bf16 = bf16_bytes_to_f32(&f32_to_bf16_bytes(&packed_q));
+            let d_prefill_q = ctx.upload_bf16(&f32_to_bf16_bytes(&packed_q));
+            let d_prefill_q_absorbed = ctx
+                .dev
+                .htod_copy(
+                    q_absorbed
+                        .iter()
+                        .copied()
+                        .cycle()
+                        .take(prefill_rows * ckv_dim)
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap();
+            let d_prefill_selected = ctx.dev.htod_copy(prefill_selected.to_vec()).unwrap();
+            let d_prefill_positions = ctx.dev.htod_copy(prefill_positions.to_vec()).unwrap();
+            let d_prefill_attention = ctx.alloc_f32(prefill_rows * ckv_dim);
+            let prefill_attention_kernel = ctx.get_kernel("mla_prefill_sparse_attention_k4_kernel");
+            let mut pa0 = *d_prefill_attention.device_ptr() as u64;
+            let mut pa1 = *d_prefill_q_absorbed.device_ptr() as u64;
+            let mut pa2 = *d_prefill_q.device_ptr() as u64;
+            let mut pa3 = *d_ckv_cache.device_ptr() as u64;
+            let mut pa4 = *d_kpe_cache.device_ptr() as u64;
+            let mut pa5 = *d_prefill_selected.device_ptr() as u64;
+            let mut pa6 = *d_prefill_positions.device_ptr() as u64;
+            let mut pa7 = sm_scale;
+            let mut pa8 = prefill_rows as i32;
+            let mut pa9 = num_heads as i32;
+            let mut pa10 = qk_dim as i32;
+            let mut pa11 = nope_dim as i32;
+            let mut pa12 = rope_dim as i32;
+            let mut pa13 = ckv_dim as i32;
+            let mut pa14 = selected_per_row as i32;
+            let mut pa15 = token_count as i32;
+            let prefill_shared_mem =
+                ((ckv_dim + rope_dim + threads as usize / 32 + selected_per_row)
+                    * std::mem::size_of::<f32>()) as u32;
+            unsafe {
+                launch(
+                    prefill_attention_kernel,
+                    (num_heads as u32, prefill_rows as u32, 1),
+                    (threads, 1, 1),
+                    prefill_shared_mem,
+                    ctx.stream(),
+                    &mut [
+                        &mut pa0 as *mut _ as *mut _,
+                        &mut pa1 as *mut _ as *mut _,
+                        &mut pa2 as *mut _ as *mut _,
+                        &mut pa3 as *mut _ as *mut _,
+                        &mut pa4 as *mut _ as *mut _,
+                        &mut pa5 as *mut _ as *mut _,
+                        &mut pa6 as *mut _ as *mut _,
+                        &mut pa7 as *mut _ as *mut _,
+                        &mut pa8 as *mut _ as *mut _,
+                        &mut pa9 as *mut _ as *mut _,
+                        &mut pa10 as *mut _ as *mut _,
+                        &mut pa11 as *mut _ as *mut _,
+                        &mut pa12 as *mut _ as *mut _,
+                        &mut pa13 as *mut _ as *mut _,
+                        &mut pa14 as *mut _ as *mut _,
+                        &mut pa15 as *mut _ as *mut _,
+                    ],
+                )
+                .unwrap();
+            }
+            self::cuda_sync();
+            let prefill_attention = ctx.dev.dtoh_sync_copy(&d_prefill_attention).unwrap();
+            for (dim, expected) in decoded_ckv[..ckv_dim].iter().enumerate() {
+                assert!(
+                    (prefill_attention[dim] - expected).abs() <= 2e-4,
+                    "MLA sparse prefill row0 mismatch dim={}: actual={} expected={}",
+                    dim,
+                    prefill_attention[dim],
+                    expected
+                );
+            }
+            let prefill_q_pe = &packed_q_bf16[nope_dim..qk_dim];
+            let prefill_scores: Vec<f32> = (0..token_count)
+                .map(|token| {
+                    let ckv_score: f32 = q_absorbed
+                        .iter()
+                        .enumerate()
+                        .map(|(dim, query)| query * decoded_ckv[token * ckv_dim + dim])
+                        .sum();
+                    let kpe_score: f32 = prefill_q_pe
+                        .iter()
+                        .enumerate()
+                        .map(|(dim, query)| query * decoded_kpe[token * rope_dim + dim])
+                        .sum();
+                    (ckv_score + kpe_score) * sm_scale
+                })
+                .collect();
+            let prefill_score_max = prefill_scores
+                .iter()
+                .copied()
+                .fold(f32::NEG_INFINITY, f32::max);
+            let prefill_weights: Vec<f32> = prefill_scores
+                .iter()
+                .map(|score| (score - prefill_score_max).exp())
+                .collect();
+            let prefill_weight_sum: f32 = prefill_weights.iter().sum();
+            let prefill_expected_row1: Vec<f32> = (0..ckv_dim)
+                .map(|dim| {
+                    (0..token_count)
+                        .map(|token| prefill_weights[token] * decoded_ckv[token * ckv_dim + dim])
+                        .sum::<f32>()
+                        / prefill_weight_sum
+                })
+                .collect();
+            for (dim, expected) in prefill_expected_row1.iter().enumerate() {
+                assert!(
+                    (prefill_attention[ckv_dim + dim] - expected).abs() <= 2e-4,
+                    "MLA sparse prefill row1 mismatch dim={}: actual={} expected={}",
+                    dim,
+                    prefill_attention[ckv_dim + dim],
+                    expected
+                );
+            }
+
+            // Prove the batch absorption and w_vc expansion kernels use the
+            // same row/head layout as sparse attention.
+            let mut absorb_q = vec![0.0f32; prefill_rows * qk_dim];
+            for row in 0..prefill_rows {
+                absorb_q[row * qk_dim..row * qk_dim + nope_dim]
+                    .copy_from_slice(&q_absorbed[..nope_dim]);
+            }
+            let mut identity_wkc = vec![0.0f32; nope_dim * ckv_dim];
+            for dim in 0..nope_dim.min(ckv_dim) {
+                identity_wkc[dim * ckv_dim + dim] = 1.0;
+            }
+            let d_absorb_q = ctx.upload_bf16(&f32_to_bf16_bytes(&absorb_q));
+            let d_identity_wkc = ctx.upload_bf16(&f32_to_bf16_bytes(&identity_wkc));
+            let d_absorbed = ctx.alloc_f32(prefill_rows * ckv_dim);
+            let absorb_kernel = ctx.get_kernel("mla_prefill_absorb_wkc_kernel");
+            let mut ab0 = *d_absorbed.device_ptr() as u64;
+            let mut ab1 = *d_absorb_q.device_ptr() as u64;
+            let mut ab2 = *d_identity_wkc.device_ptr() as u64;
+            let mut ab3 = prefill_rows as i32;
+            let mut ab4 = num_heads as i32;
+            let mut ab5 = qk_dim as i32;
+            let mut ab6 = nope_dim as i32;
+            let mut ab7 = ckv_dim as i32;
+            unsafe {
+                launch(
+                    absorb_kernel,
+                    (num_heads as u32, prefill_rows as u32, 1),
+                    (threads, 1, 1),
+                    0,
+                    ctx.stream(),
+                    &mut [
+                        &mut ab0 as *mut _ as *mut _,
+                        &mut ab1 as *mut _ as *mut _,
+                        &mut ab2 as *mut _ as *mut _,
+                        &mut ab3 as *mut _ as *mut _,
+                        &mut ab4 as *mut _ as *mut _,
+                        &mut ab5 as *mut _ as *mut _,
+                        &mut ab6 as *mut _ as *mut _,
+                        &mut ab7 as *mut _ as *mut _,
+                    ],
+                )
+                .unwrap();
+            }
+
+            let value_head_dim = 4usize;
+            let mut identity_wvc = vec![0.0f32; value_head_dim * ckv_dim];
+            for dim in 0..value_head_dim {
+                identity_wvc[dim * ckv_dim + dim] = 1.0;
+            }
+            let d_identity_wvc = ctx.upload_bf16(&f32_to_bf16_bytes(&identity_wvc));
+            let d_prefill_value = ctx.alloc_bf16(prefill_rows * value_head_dim);
+            let apply_wvc_kernel = ctx.get_kernel("mla_prefill_apply_wvc_kernel");
+            let mut av0 = *d_prefill_value.device_ptr() as u64;
+            let mut av1 = *d_prefill_attention.device_ptr() as u64;
+            let mut av2 = *d_identity_wvc.device_ptr() as u64;
+            let mut av3 = prefill_rows as i32;
+            let mut av4 = num_heads as i32;
+            let mut av5 = value_head_dim as i32;
+            let mut av6 = ckv_dim as i32;
+            unsafe {
+                launch(
+                    apply_wvc_kernel,
+                    (num_heads as u32, prefill_rows as u32, 1),
+                    (threads, 1, 1),
+                    0,
+                    ctx.stream(),
+                    &mut [
+                        &mut av0 as *mut _ as *mut _,
+                        &mut av1 as *mut _ as *mut _,
+                        &mut av2 as *mut _ as *mut _,
+                        &mut av3 as *mut _ as *mut _,
+                        &mut av4 as *mut _ as *mut _,
+                        &mut av5 as *mut _ as *mut _,
+                        &mut av6 as *mut _ as *mut _,
+                    ],
+                )
+                .unwrap();
+            }
+            self::cuda_sync();
+            let absorbed = ctx.dev.dtoh_sync_copy(&d_absorbed).unwrap();
+            let absorb_q_bf16 = bf16_bytes_to_f32(&f32_to_bf16_bytes(&absorb_q));
+            for row in 0..prefill_rows {
+                for dim in 0..ckv_dim {
+                    let expected = if dim < nope_dim {
+                        absorb_q_bf16[row * qk_dim + dim]
+                    } else {
+                        0.0
+                    };
+                    assert!(
+                        (absorbed[row * ckv_dim + dim] - expected).abs() <= 2e-4,
+                        "MLA prefill absorption mismatch row={} dim={}",
+                        row,
+                        dim
+                    );
+                }
+            }
+            let prefill_value = bf16_bytes_to_f32(&ctx.download_bf16(&d_prefill_value));
+            for row in 0..prefill_rows {
+                for dim in 0..value_head_dim {
+                    let expected =
+                        half::bf16::from_f32(prefill_attention[row * ckv_dim + dim]).to_f32();
+                    assert_eq!(
+                        prefill_value[row * value_head_dim + dim],
+                        expected,
+                        "MLA prefill w_vc mismatch row={} dim={}",
+                        row,
+                        dim
+                    );
+                }
             }
         }
     }
