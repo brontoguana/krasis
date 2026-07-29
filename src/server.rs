@@ -1665,6 +1665,19 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
 
         prompt_hcs_snapshot = engine.prompt_hcs_shadow_snapshot();
 
+        let store = unsafe { &*(state.gpu_store_addr as *const GpuDecodeStore) };
+        let primary_device = store.device_ordinal();
+        let free_now_mb = store.query_vram_free_mb();
+        let prefill_min_free_mb = crate::vram_monitor::current_request_lows()
+            .into_iter()
+            .find(|(device, _)| *device == primary_device)
+            .map(|(_, free_mb)| free_mb as usize)
+            .unwrap_or(free_now_mb);
+        engine.update_measured_prefill_runtime_overhead_mb(
+            engine.last_prepare_post_alloc_free_mb(),
+            prefill_min_free_mb,
+        );
+
         // Release scratch to free VRAM for decode/HCS
         if let Err(e) = engine.release_scratch() {
             log::error!("Failed to release scratch: {}", e);
@@ -2519,6 +2532,19 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
         .get("debug_prefill_device_trace_all_layers")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let debug_prefill_device_trace_mla_only =
+        match req.get("debug_prefill_device_trace_mla_only") {
+            Some(serde_json::Value::Bool(value)) => *value,
+            Some(_) => {
+                let _ = send_json(
+                    stream,
+                    400,
+                    r#"{"error":"debug_prefill_device_trace_mla_only must be a boolean"}"#,
+                );
+                return;
+            }
+            None => false,
+        };
     let debug_prefill_device_trace_full_pre_out_proj =
         match req.get("debug_prefill_device_trace_full_pre_out_proj") {
             Some(serde_json::Value::Bool(value)) => *value,
@@ -3196,6 +3222,7 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
 
         if let Err(e) = engine.set_prefill_device_trace_enabled(
             debug_prefill_device_trace,
+            debug_prefill_device_trace_mla_only,
             debug_prefill_device_trace_layer,
             debug_prefill_device_trace_all_layers,
             debug_prefill_device_trace_full_pre_out_proj,
@@ -3275,6 +3302,7 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
                         }
                         let _ = engine.set_prefill_device_trace_enabled(
                             false,
+                            false,
                             debug_prefill_device_trace_layer,
                             false,
                             false,
@@ -3303,6 +3331,20 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
             }
         }
     };
+    if prefill_result.is_ok() {
+        let store = unsafe { &*(state.gpu_store_addr as *const GpuDecodeStore) };
+        let primary_device = store.device_ordinal();
+        let free_now_mb = store.query_vram_free_mb();
+        let prefill_min_free_mb = crate::vram_monitor::current_request_lows()
+            .into_iter()
+            .find(|(device, _)| *device == primary_device)
+            .map(|(_, free_mb)| free_mb as usize)
+            .unwrap_or(free_now_mb);
+        engine.update_measured_prefill_runtime_overhead_mb(
+            engine.last_prepare_post_alloc_free_mb(),
+            prefill_min_free_mb,
+        );
+    }
     let debug_prefill_stage_trace = if debug_reference_trace {
         engine.take_reference_debug_trace()
     } else {
@@ -3356,6 +3398,7 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
             abort_if_cuda_context_poisoned("reference_test prefill", &e);
             engine.clear_prefill_hcs_guard_store_addr();
             let _ = engine.set_prefill_device_trace_enabled(
+                false,
                 false,
                 debug_prefill_device_trace_layer,
                 false,

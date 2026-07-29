@@ -4778,6 +4778,47 @@ const PDT_LAYER_MAMBA2_GATED_NORM_REDUCTION_STEP_DETAIL: u64 = 137;
 const PDT_LAYER_MAMBA2_GATED_NORM_REDUCTION_SUMMARY_DETAIL: u64 = 138;
 const PDT_LAYER_MAMBA2_SSD_LOCAL_SCAN_CB_TERM_DETAIL: u64 = 139;
 const PDT_LAYER_MAMBA2_SSD_LOCAL_SCAN_CB_TERM_SUMMARY_DETAIL: u64 = 140;
+const PDT_LAYER_MLA_Q_LORA_NORM_LAST: u64 = 141;
+const PDT_LAYER_MLA_Q_RAW_LAST: u64 = 142;
+const PDT_LAYER_MLA_CKV_NORM_LAST: u64 = 143;
+const PDT_LAYER_MLA_K_PACKED_LAST: u64 = 144;
+const PDT_LAYER_MLA_DSA_SELECTED_LAST: u64 = 145;
+const PDT_LAYER_MLA_Q_ABSORBED_LAST: u64 = 146;
+const PDT_LAYER_MLA_SPARSE_ATTN_LAST: u64 = 147;
+const PDT_LAYER_MLA_WVC_OUT_LAST: u64 = 148;
+const PDT_LAYER_MLA_O_PROJ_OUT_LAST: u64 = 149;
+const PDT_LAYER_MLA_Q_PACKED_LAST: u64 = 150;
+const PDT_LAYER_MLA_INPUT_FULL: u64 = 151;
+const PDT_LAYER_MLA_Q_LORA_NORM_FULL: u64 = 152;
+const PDT_LAYER_MLA_Q_RAW_FULL: u64 = 153;
+const PDT_LAYER_MLA_CKV_NORM_FULL: u64 = 154;
+const PDT_LAYER_MLA_K_PACKED_FULL: u64 = 155;
+const PDT_LAYER_MLA_Q_PACKED_FULL: u64 = 156;
+const PDT_LAYER_MLA_DSA_SELECTED_FULL: u64 = 157;
+const PDT_LAYER_MLA_Q_ABSORBED_FULL: u64 = 158;
+const PDT_LAYER_MLA_CKV_CACHE_PREFIX_RAW_I32: u64 = 159;
+const PDT_LAYER_MLA_KPE_CACHE_PREFIX_RAW_I32: u64 = 160;
+const PDT_LAYER_MLA_SPARSE_ATTN_FULL: u64 = 161;
+const PDT_LAYER_MLA_SPARSE_ATTN_REPEAT_LAST: u64 = 162;
+const PDT_LAYER_MLA_SPARSE_ATTN_REPEAT_FULL: u64 = 163;
+const PDT_LAYER_MLA_MIXER_OUT_FULL: u64 = 164;
+const PDT_LAYER_MLA_POST_ATTN_RESIDUAL_FULL: u64 = 165;
+const PDT_LAYER_MLA_PRE_MLP_HIDDEN_FULL: u64 = 166;
+const PDT_LAYER_MLA_POST_MLP_HIDDEN_FULL: u64 = 167;
+const PDT_LAYER_MLA_MOE_ROUTER_LOGITS_FULL: u64 = 168;
+const PDT_LAYER_MLA_MOE_TOPK_IDS_FULL: u64 = 169;
+const PDT_LAYER_MLA_MOE_TOPK_WEIGHTS_FULL: u64 = 170;
+const PDT_LAYER_MLA_MOE_EXPERT_INPUT_FULL: u64 = 171;
+const PDT_LAYER_MLA_MOE_W1_OUTPUT_FULL: u64 = 172;
+const PDT_LAYER_MLA_MOE_ACTIVATION_FULL: u64 = 173;
+const PDT_LAYER_MLA_MOE_W2_OUTPUT_FULL: u64 = 174;
+const PDT_LAYER_MLA_MOE_ROUTED_ACCUM_FULL: u64 = 175;
+const PDT_LAYER_MLA_MOE_SHARED_OUTPUT_FULL: u64 = 176;
+const PDT_LAYER_MLA_MOE_OUTPUT_FULL: u64 = 177;
+const PDT_LAYER_MLA_MOE_SORTED_IDS_FULL: u64 = 178;
+const PDT_LAYER_MLA_MOE_EXPERT_BLOCK_IDS_FULL: u64 = 179;
+const PDT_LAYER_MLA_MOE_W1_PTR_TABLE_FULL: u64 = 180;
+const PDT_LAYER_MLA_MOE_W1_SCALE_PTR_TABLE_FULL: u64 = 181;
 const PDT_LAYER_MAMBA2_SSD_OUTPUT_VALUE_DETAIL: u64 = 112;
 const PDT_LAYER_MAMBA2_SSD_OUTPUT_COMPONENT_DETAIL: u64 = 113;
 const PDT_LAYER_MAMBA2_SSD_OUTPUT_SOURCE_DETAIL: u64 = 114;
@@ -4990,6 +5031,51 @@ fn prefill_device_trace_stage_label(stage_id: u64) -> &'static str {
         }
         PDT_LAYER_MAMBA2_SSD_LOCAL_SCAN_CB_TERM_SUMMARY_DETAIL => {
             "layer_mamba2_ssd_local_scan_cb_term_summary_detail"
+        }
+        PDT_LAYER_MLA_Q_LORA_NORM_LAST => "layer_mla_q_lora_norm_last",
+        PDT_LAYER_MLA_Q_RAW_LAST => "layer_mla_q_raw_last",
+        PDT_LAYER_MLA_CKV_NORM_LAST => "layer_mla_ckv_norm_last",
+        PDT_LAYER_MLA_K_PACKED_LAST => "layer_mla_k_packed_last",
+        PDT_LAYER_MLA_DSA_SELECTED_LAST => "layer_mla_dsa_selected_last",
+        PDT_LAYER_MLA_Q_ABSORBED_LAST => "layer_mla_q_absorbed_last",
+        PDT_LAYER_MLA_SPARSE_ATTN_LAST => "layer_mla_sparse_attn_last",
+        PDT_LAYER_MLA_WVC_OUT_LAST => "layer_mla_wvc_out_last",
+        PDT_LAYER_MLA_O_PROJ_OUT_LAST => "layer_mla_o_proj_out_last",
+        PDT_LAYER_MLA_Q_PACKED_LAST => "layer_mla_q_packed_last",
+        PDT_LAYER_MLA_INPUT_FULL => "layer_mla_input_full",
+        PDT_LAYER_MLA_Q_LORA_NORM_FULL => "layer_mla_q_lora_norm_full",
+        PDT_LAYER_MLA_Q_RAW_FULL => "layer_mla_q_raw_full",
+        PDT_LAYER_MLA_CKV_NORM_FULL => "layer_mla_ckv_norm_full",
+        PDT_LAYER_MLA_K_PACKED_FULL => "layer_mla_k_packed_full",
+        PDT_LAYER_MLA_Q_PACKED_FULL => "layer_mla_q_packed_full",
+        PDT_LAYER_MLA_DSA_SELECTED_FULL => "layer_mla_dsa_selected_full",
+        PDT_LAYER_MLA_Q_ABSORBED_FULL => "layer_mla_q_absorbed_full",
+        PDT_LAYER_MLA_CKV_CACHE_PREFIX_RAW_I32 => "layer_mla_ckv_cache_prefix_raw_i32",
+        PDT_LAYER_MLA_KPE_CACHE_PREFIX_RAW_I32 => "layer_mla_kpe_cache_prefix_raw_i32",
+        PDT_LAYER_MLA_SPARSE_ATTN_FULL => "layer_mla_sparse_attn_full",
+        PDT_LAYER_MLA_SPARSE_ATTN_REPEAT_LAST => "layer_mla_sparse_attn_repeat_last",
+        PDT_LAYER_MLA_SPARSE_ATTN_REPEAT_FULL => "layer_mla_sparse_attn_repeat_full",
+        PDT_LAYER_MLA_MIXER_OUT_FULL => "layer_mla_mixer_out_full",
+        PDT_LAYER_MLA_POST_ATTN_RESIDUAL_FULL => "layer_mla_post_attn_residual_full",
+        PDT_LAYER_MLA_PRE_MLP_HIDDEN_FULL => "layer_mla_pre_mlp_hidden_full",
+        PDT_LAYER_MLA_POST_MLP_HIDDEN_FULL => "layer_mla_post_mlp_hidden_full",
+        PDT_LAYER_MLA_MOE_ROUTER_LOGITS_FULL => "layer_mla_moe_router_logits_full",
+        PDT_LAYER_MLA_MOE_TOPK_IDS_FULL => "layer_mla_moe_topk_ids_full",
+        PDT_LAYER_MLA_MOE_TOPK_WEIGHTS_FULL => "layer_mla_moe_topk_weights_full",
+        PDT_LAYER_MLA_MOE_EXPERT_INPUT_FULL => "layer_mla_moe_expert_input_full",
+        PDT_LAYER_MLA_MOE_W1_OUTPUT_FULL => "layer_mla_moe_w1_output_full",
+        PDT_LAYER_MLA_MOE_ACTIVATION_FULL => "layer_mla_moe_activation_full",
+        PDT_LAYER_MLA_MOE_W2_OUTPUT_FULL => "layer_mla_moe_w2_output_full",
+        PDT_LAYER_MLA_MOE_ROUTED_ACCUM_FULL => "layer_mla_moe_routed_accum_full",
+        PDT_LAYER_MLA_MOE_SHARED_OUTPUT_FULL => "layer_mla_moe_shared_output_full",
+        PDT_LAYER_MLA_MOE_OUTPUT_FULL => "layer_mla_moe_output_full",
+        PDT_LAYER_MLA_MOE_SORTED_IDS_FULL => "layer_mla_moe_sorted_ids_full",
+        PDT_LAYER_MLA_MOE_EXPERT_BLOCK_IDS_FULL => {
+            "layer_mla_moe_expert_block_ids_full"
+        }
+        PDT_LAYER_MLA_MOE_W1_PTR_TABLE_FULL => "layer_mla_moe_w1_ptr_table_full",
+        PDT_LAYER_MLA_MOE_W1_SCALE_PTR_TABLE_FULL => {
+            "layer_mla_moe_w1_scale_ptr_table_full"
         }
         PDT_LAYER_MAMBA2_SSD_OUTPUT_VALUE_DETAIL => "layer_mamba2_ssd_output_value_detail",
         PDT_LAYER_MAMBA2_SSD_OUTPUT_COMPONENT_DETAIL => "layer_mamba2_ssd_output_component_detail",
@@ -5328,7 +5414,7 @@ pub struct PrefillKernels {
     moe_build_maps_stable: RawCuFunc,
     // Fused MoE support kernels (for MarlinDefault integration)
     moe_padded_prefix_sum: RawCuFunc,
-    moe_scatter_sorted: RawCuFunc,
+    moe_scatter_sorted_stable: RawCuFunc,
     moe_finalize_sorted: RawCuFunc,
     moe_gather_sorted: RawCuFunc,
     moe_replicate_hidden: RawCuFunc,
@@ -7148,6 +7234,7 @@ pub struct PrefillEngine {
     pub reference_router_forced_slot_orders: RefCell<Vec<ReferenceRouterForcedSlotOrder>>,
     pub reference_mamba2_gated_norm_replay: RefCell<Vec<ReferenceMamba2GatedNormReplay>>,
     pub prefill_device_trace_enabled: Cell<bool>,
+    pub prefill_device_trace_mla_only: Cell<bool>,
     pub prefill_device_trace_layer: Cell<usize>,
     pub prefill_device_trace_all_layers: Cell<bool>,
     pub prefill_device_trace_full_pre_out_proj: Cell<bool>,
@@ -8721,6 +8808,7 @@ impl PrefillEngine {
     pub fn set_prefill_device_trace_enabled(
         &mut self,
         enabled: bool,
+        mla_only: bool,
         layer_idx: usize,
         all_layers: bool,
         full_pre_out_proj: bool,
@@ -8735,7 +8823,9 @@ impl PrefillEngine {
         selected_rows.dedup();
         selected_experts.sort_unstable();
         selected_experts.dedup();
-        self.prefill_device_trace_enabled.set(enabled);
+        self.prefill_device_trace_enabled
+            .set(enabled && !mla_only);
+        self.prefill_device_trace_mla_only.set(enabled && mla_only);
         self.prefill_device_trace_layer.set(layer_idx);
         self.prefill_device_trace_all_layers.set(all_layers);
         self.prefill_device_trace_full_pre_out_proj
@@ -8787,9 +8877,10 @@ impl PrefillEngine {
     }
 
     pub fn take_prefill_device_trace(&mut self) -> Option<serde_json::Value> {
-        if !self.prefill_device_trace_enabled.get() {
+        if !self.prefill_device_trace_enabled.get() && !self.prefill_device_trace_mla_only.get() {
             return None;
         }
+        let mla_only = self.prefill_device_trace_mla_only.get();
         let requested_entries = self
             .prefill_device_trace_next_slot
             .get()
@@ -9972,6 +10063,7 @@ impl PrefillEngine {
                         "schema": "krasis_prefill_device_trace_v1",
                         "available": true,
                         "layer": selected_layer.clone(),
+                        "mla_only": mla_only,
                         "all_layers": self.prefill_device_trace_all_layers.get(),
                         "full_pre_out_proj": self.prefill_device_trace_full_pre_out_proj.get(),
                         "selected_dims": selected_dims.clone(),
@@ -9992,6 +10084,7 @@ impl PrefillEngine {
                     "schema": "krasis_prefill_device_trace_v1",
                     "available": false,
                     "layer": selected_layer.clone(),
+                    "mla_only": mla_only,
                     "all_layers": self.prefill_device_trace_all_layers.get(),
                     "full_pre_out_proj": self.prefill_device_trace_full_pre_out_proj.get(),
                     "selected_dims": selected_dims.clone(),
@@ -10007,6 +10100,7 @@ impl PrefillEngine {
                 "schema": "krasis_prefill_device_trace_v1",
                 "available": false,
                 "layer": selected_layer.clone(),
+                "mla_only": mla_only,
                 "all_layers": self.prefill_device_trace_all_layers.get(),
                 "full_pre_out_proj": self.prefill_device_trace_full_pre_out_proj.get(),
                 "selected_dims": selected_dims.clone(),
@@ -10017,6 +10111,7 @@ impl PrefillEngine {
             })
         };
         self.prefill_device_trace_enabled.set(false);
+        self.prefill_device_trace_mla_only.set(false);
         self.prefill_device_trace_all_layers.set(false);
         self.prefill_device_trace_full_pre_out_proj.set(false);
         self.prefill_device_trace_next_slot.set(0);
@@ -10039,7 +10134,11 @@ impl PrefillEngine {
         row_idx: usize,
         width: usize,
     ) -> Result<(), String> {
-        if !self.prefill_device_trace_enabled.get()
+        let mla_stage =
+            (PDT_LAYER_MLA_Q_LORA_NORM_LAST..=PDT_LAYER_MLA_MOE_W1_SCALE_PTR_TABLE_FULL)
+                .contains(&stage_id);
+        if !(self.prefill_device_trace_enabled.get()
+            || (self.prefill_device_trace_mla_only.get() && mla_stage))
             || self.prefill_device_trace_layer.get() != layer_idx
             || width == 0
         {
@@ -10102,7 +10201,14 @@ impl PrefillEngine {
         let layer_matches = trace_layer == layer_idx
             || (stage_id == PDT_LAYER_OUTPUT_SUM_ELEMENT_DETAIL
                 && trace_layer == layer_idx.saturating_add(1));
-        if !self.prefill_device_trace_enabled.get() || !layer_matches || width == 0 {
+        let mla_stage =
+            (PDT_LAYER_MLA_Q_LORA_NORM_LAST..=PDT_LAYER_MLA_MOE_W1_SCALE_PTR_TABLE_FULL)
+                .contains(&stage_id);
+        if !(self.prefill_device_trace_enabled.get()
+            || (self.prefill_device_trace_mla_only.get() && mla_stage))
+            || !layer_matches
+            || width == 0
+        {
             return Ok(());
         }
         let Some(buf) = self.d_prefill_device_trace.as_ref() else {
@@ -10157,7 +10263,11 @@ impl PrefillEngine {
         logical_row_idx: usize,
         width: usize,
     ) -> Result<(), String> {
-        if !self.prefill_device_trace_enabled.get()
+        let mla_stage =
+            (PDT_LAYER_MLA_Q_LORA_NORM_LAST..=PDT_LAYER_MLA_MOE_W1_SCALE_PTR_TABLE_FULL)
+                .contains(&stage_id);
+        if !(self.prefill_device_trace_enabled.get()
+            || (self.prefill_device_trace_mla_only.get() && mla_stage))
             || self.prefill_device_trace_layer.get() != layer_idx
             || width == 0
         {
@@ -22326,6 +22436,17 @@ impl PrefillEngine {
                     m.saturating_sub(1),
                     h,
                 )?;
+                self.record_prefill_device_trace_bf16_row(
+                    PDT_LAYER_MLA_MIXER_OUT_FULL,
+                    layer_idx,
+                    chunk_idx,
+                    chunk_last_pos,
+                    chunk_last_tok as usize,
+                    *self.scratch.d_attn_out.device_ptr(),
+                    0,
+                    m.checked_mul(h)
+                        .ok_or_else(|| "MLA mixer trace size overflow".to_string())?,
+                )?;
 
                 if diag && chunk_idx == 0 && Self::diag_layer_enabled(layer_idx) {
                     let lt_name = match layer_type {
@@ -22583,6 +22704,29 @@ impl PrefillEngine {
                     *self.scratch.d_hidden.device_ptr(),
                     m.saturating_sub(1),
                     h,
+                )?;
+                let mla_layer_trace_elements = m
+                    .checked_mul(h)
+                    .ok_or_else(|| "MLA post-attention trace size overflow".to_string())?;
+                self.record_prefill_device_trace_bf16_row(
+                    PDT_LAYER_MLA_POST_ATTN_RESIDUAL_FULL,
+                    layer_idx,
+                    chunk_idx,
+                    chunk_last_pos,
+                    chunk_last_tok as usize,
+                    *self.scratch.d_residual.device_ptr(),
+                    0,
+                    mla_layer_trace_elements,
+                )?;
+                self.record_prefill_device_trace_bf16_row(
+                    PDT_LAYER_MLA_PRE_MLP_HIDDEN_FULL,
+                    layer_idx,
+                    chunk_idx,
+                    chunk_last_pos,
+                    chunk_last_tok as usize,
+                    *self.scratch.d_hidden.device_ptr(),
+                    0,
+                    mla_layer_trace_elements,
                 )?;
 
                 // DIAG: d_hidden before MLP (after post-attn-norm = MoE input)
@@ -23133,6 +23277,17 @@ impl PrefillEngine {
                     *self.scratch.d_hidden.device_ptr(),
                     m.saturating_sub(1),
                     h,
+                )?;
+                self.record_prefill_device_trace_bf16_row(
+                    PDT_LAYER_MLA_POST_MLP_HIDDEN_FULL,
+                    layer_idx,
+                    chunk_idx,
+                    chunk_last_pos,
+                    chunk_last_tok as usize,
+                    *self.scratch.d_hidden.device_ptr(),
+                    0,
+                    m.checked_mul(h)
+                        .ok_or_else(|| "MLA post-MLP trace size overflow".to_string())?,
                 )?;
                 self.record_prefill_device_trace_all_layer_bf16_pair_sum_row(
                     PDT_ALL_LAYER_OUTPUT_SUM_LAST,
@@ -30630,6 +30785,19 @@ impl PrefillEngine {
         let scratch2 = *self.scratch.d_scratch2.device_ptr();
         let no_marlin: Option<MarlinWeight> = None;
         let no_bf16: Option<Bf16Weight> = None;
+        let trace_position = start_pos + m - 1;
+        let trace_row = m - 1;
+        let trace_chunk = start_pos;
+        self.record_prefill_device_trace_bf16_row(
+            PDT_LAYER_MLA_INPUT_FULL,
+            layer_idx,
+            trace_chunk,
+            trace_position,
+            0,
+            hidden,
+            0,
+            hidden_elems,
+        )?;
 
         if qlr > 0 {
             let qa = hqq.q_a_proj.as_ref().expect("validated q_a_proj");
@@ -30645,6 +30813,26 @@ impl PrefillEngine {
                 m,
             )?;
             self.launch_rmsnorm_fp32w(scratch2, scratch1, hqq.q_a_norm_ptr, m, qlr)?;
+            self.record_prefill_device_trace_bf16_row(
+                PDT_LAYER_MLA_Q_LORA_NORM_LAST,
+                layer_idx,
+                trace_chunk,
+                trace_position,
+                0,
+                scratch2,
+                trace_row,
+                qlr,
+            )?;
+            self.record_prefill_device_trace_bf16_row(
+                PDT_LAYER_MLA_Q_LORA_NORM_FULL,
+                layer_idx,
+                trace_chunk,
+                trace_position,
+                0,
+                scratch2,
+                0,
+                q_lora_elems,
+            )?;
             if sparse_dsa
                 && lw
                     .dsa_prefill
@@ -30661,6 +30849,26 @@ impl PrefillEngine {
                 &no_bf16,
                 q_raw,
                 m,
+            )?;
+            self.record_prefill_device_trace_bf16_row(
+                PDT_LAYER_MLA_Q_RAW_LAST,
+                layer_idx,
+                trace_chunk,
+                trace_position,
+                0,
+                q_raw,
+                trace_row,
+                q_width,
+            )?;
+            self.record_prefill_device_trace_bf16_row(
+                PDT_LAYER_MLA_Q_RAW_FULL,
+                layer_idx,
+                trace_chunk,
+                trace_position,
+                0,
+                q_raw,
+                0,
+                q_elems,
             )?;
         } else {
             if sparse_dsa {
@@ -30714,6 +30922,26 @@ impl PrefillEngine {
                 ],
             )?;
         }
+        self.record_prefill_device_trace_bf16_row(
+            PDT_LAYER_MLA_CKV_NORM_LAST,
+            layer_idx,
+            trace_chunk,
+            trace_position,
+            0,
+            scratch2,
+            trace_row,
+            kv_a_width,
+        )?;
+        self.record_prefill_device_trace_bf16_row(
+            PDT_LAYER_MLA_CKV_NORM_FULL,
+            layer_idx,
+            trace_chunk,
+            trace_position,
+            0,
+            scratch2,
+            0,
+            kv_a_elems,
+        )?;
 
         let k_expanded_bytes = k_expanded_elems
             .checked_mul(std::mem::size_of::<u16>())
@@ -30808,6 +31036,46 @@ impl PrefillEngine {
                 ],
             )?;
         }
+        self.record_prefill_device_trace_bf16_row(
+            PDT_LAYER_MLA_K_PACKED_LAST,
+            layer_idx,
+            trace_chunk,
+            trace_position,
+            0,
+            k,
+            trace_row,
+            q_width,
+        )?;
+        self.record_prefill_device_trace_bf16_row(
+            PDT_LAYER_MLA_K_PACKED_FULL,
+            layer_idx,
+            trace_chunk,
+            trace_position,
+            0,
+            k,
+            0,
+            q_elems,
+        )?;
+        self.record_prefill_device_trace_bf16_row(
+            PDT_LAYER_MLA_Q_PACKED_LAST,
+            layer_idx,
+            trace_chunk,
+            trace_position,
+            0,
+            q,
+            trace_row,
+            q_width,
+        )?;
+        self.record_prefill_device_trace_bf16_row(
+            PDT_LAYER_MLA_Q_PACKED_FULL,
+            layer_idx,
+            trace_chunk,
+            trace_position,
+            0,
+            q,
+            0,
+            q_elems,
+        )?;
 
         if capture_kv_cache {
             let cache_blocks = std::cmp::max(ccd, rope) / 16;
@@ -30889,12 +31157,105 @@ impl PrefillEngine {
             let context_end = start_pos
                 .checked_add(m)
                 .ok_or_else(|| "DSA prefill context end overflow".to_string())?;
+            let ckv_cache_prefix_bytes = context_end
+                .checked_mul(ccd / 16)
+                .and_then(|value| value.checked_mul(10))
+                .ok_or_else(|| {
+                    format!(
+                        "DSA sparse MLA layer {} cKV cache trace size overflow",
+                        layer_idx
+                    )
+                })?;
+            let kpe_cache_prefix_bytes = context_end
+                .checked_mul(rope / 16)
+                .and_then(|value| value.checked_mul(10))
+                .ok_or_else(|| {
+                    format!(
+                        "DSA sparse MLA layer {} KPE cache trace size overflow",
+                        layer_idx
+                    )
+                })?;
+            if ckv_cache_prefix_bytes % std::mem::size_of::<i32>() != 0
+                || kpe_cache_prefix_bytes % std::mem::size_of::<i32>() != 0
+            {
+                return Err(format!(
+                    "DSA sparse MLA layer {} compact-cache trace sizes are not i32 aligned: cKV={} KPE={}",
+                    layer_idx, ckv_cache_prefix_bytes, kpe_cache_prefix_bytes
+                ));
+            }
+            self.record_prefill_device_trace_i32_slice(
+                PDT_LAYER_MLA_CKV_CACHE_PREFIX_RAW_I32,
+                layer_idx,
+                trace_chunk,
+                trace_position,
+                0,
+                hqq.ckv_cache_ptr,
+                0,
+                ckv_cache_prefix_bytes / std::mem::size_of::<i32>(),
+            )?;
+            self.record_prefill_device_trace_i32_slice(
+                PDT_LAYER_MLA_KPE_CACHE_PREFIX_RAW_I32,
+                layer_idx,
+                trace_chunk,
+                trace_position,
+                0,
+                hqq.kpe_cache_ptr,
+                0,
+                kpe_cache_prefix_bytes / std::mem::size_of::<i32>(),
+            )?;
             let selected = workspace.resolve_for_layer(
                 layer_idx,
                 registration,
                 start_pos,
                 m,
                 context_end,
+            )?;
+            self.record_prefill_device_trace_i32_slice(
+                PDT_LAYER_MLA_DSA_SELECTED_LAST,
+                layer_idx,
+                trace_chunk,
+                trace_position,
+                0,
+                selected.ptr
+                    + u64::try_from(
+                        trace_row
+                            .checked_mul(selected.selected_per_row)
+                            .and_then(|value| {
+                                value.checked_mul(std::mem::size_of::<i32>())
+                            })
+                            .ok_or_else(|| {
+                                format!(
+                                    "DSA sparse MLA layer {} selected trace offset overflow",
+                                    layer_idx
+                                )
+                            })?,
+                    )
+                    .map_err(|_| {
+                        format!(
+                            "DSA sparse MLA layer {} selected trace offset exceeds u64",
+                            layer_idx
+                        )
+                    })?,
+                trace_row,
+                selected.selected_per_row,
+            )?;
+            let selected_elements = m
+                .checked_mul(selected.selected_per_row)
+                .ok_or_else(|| {
+                    format!(
+                        "DSA sparse MLA layer {} selected trace size overflow",
+                        layer_idx
+                    )
+                })?;
+            self.record_prefill_device_trace_i32_slice(
+                PDT_LAYER_MLA_DSA_SELECTED_FULL,
+                layer_idx,
+                trace_chunk,
+                trace_position,
+                0,
+                selected.ptr,
+                0,
+                selected_elements,
             )?;
             let mla_elements = m
                 .checked_mul(nh)
@@ -30952,6 +31313,46 @@ impl PrefillEngine {
                     ],
                 )?;
             }
+            self.record_prefill_device_trace_f32_slice(
+                PDT_LAYER_MLA_Q_ABSORBED_LAST,
+                layer_idx,
+                trace_chunk,
+                trace_position,
+                0,
+                *workspace.d_mla_q_absorbed.device_ptr()
+                    + u64::try_from(
+                        trace_row
+                            .checked_mul(nh)
+                            .and_then(|value| value.checked_mul(ccd))
+                            .and_then(|value| {
+                                value.checked_mul(std::mem::size_of::<f32>())
+                            })
+                            .ok_or_else(|| {
+                                format!(
+                                    "DSA sparse MLA layer {} absorbed-Q trace offset overflow",
+                                    layer_idx
+                                )
+                            })?,
+                    )
+                    .map_err(|_| {
+                        format!(
+                            "DSA sparse MLA layer {} absorbed-Q trace offset exceeds u64",
+                            layer_idx
+                        )
+                    })?,
+                trace_row,
+                nh * ccd,
+            )?;
+            self.record_prefill_device_trace_f32_slice(
+                PDT_LAYER_MLA_Q_ABSORBED_FULL,
+                layer_idx,
+                trace_chunk,
+                trace_position,
+                0,
+                *workspace.d_mla_q_absorbed.device_ptr(),
+                0,
+                mla_elements,
+            )?;
 
             let num_warps = usize::try_from(threads.div_ceil(32))
                 .map_err(|_| "DSA sparse MLA warp count exceeds usize".to_string())?;
@@ -31029,6 +31430,123 @@ impl PrefillEngine {
                     ],
                 )?;
             }
+            self.record_prefill_device_trace_f32_slice(
+                PDT_LAYER_MLA_SPARSE_ATTN_LAST,
+                layer_idx,
+                trace_chunk,
+                trace_position,
+                0,
+                *workspace.d_mla_attention.device_ptr()
+                    + u64::try_from(
+                        trace_row
+                            .checked_mul(nh)
+                            .and_then(|value| value.checked_mul(ccd))
+                            .and_then(|value| {
+                                value.checked_mul(std::mem::size_of::<f32>())
+                            })
+                            .ok_or_else(|| {
+                                format!(
+                                    "DSA sparse MLA layer {} attention trace offset overflow",
+                                    layer_idx
+                                )
+                            })?,
+                    )
+                    .map_err(|_| {
+                        format!(
+                            "DSA sparse MLA layer {} attention trace offset exceeds u64",
+                            layer_idx
+                        )
+                    })?,
+                trace_row,
+                nh * ccd,
+            )?;
+            self.record_prefill_device_trace_f32_slice(
+                PDT_LAYER_MLA_SPARSE_ATTN_FULL,
+                layer_idx,
+                trace_chunk,
+                trace_position,
+                0,
+                *workspace.d_mla_attention.device_ptr(),
+                0,
+                mla_elements,
+            )?;
+
+            if (self.prefill_device_trace_enabled.get()
+                || self.prefill_device_trace_mla_only.get())
+                && self.prefill_device_trace_layer.get() == layer_idx
+            {
+                unsafe {
+                    launch(
+                        self.kernels.mla_prefill_sparse_attention_k4,
+                        (
+                            u32::try_from(nh).map_err(|_| "DSA MLA heads exceed u32")?,
+                            u32::try_from(m).map_err(|_| "DSA MLA rows exceed u32")?,
+                            1,
+                        ),
+                        (threads, 1, 1),
+                        shared_bytes_u32,
+                        self.stream,
+                        &mut [
+                            &mut s0 as *mut _ as *mut _,
+                            &mut s1 as *mut _ as *mut _,
+                            &mut s2 as *mut _ as *mut _,
+                            &mut s3 as *mut _ as *mut _,
+                            &mut s4 as *mut _ as *mut _,
+                            &mut s5 as *mut _ as *mut _,
+                            &mut s6 as *mut _ as *mut _,
+                            &mut s7 as *mut _ as *mut _,
+                            &mut s8 as *mut _ as *mut _,
+                            &mut s9 as *mut _ as *mut _,
+                            &mut s10 as *mut _ as *mut _,
+                            &mut s11 as *mut _ as *mut _,
+                            &mut s12 as *mut _ as *mut _,
+                            &mut s13 as *mut _ as *mut _,
+                            &mut s14 as *mut _ as *mut _,
+                            &mut s15 as *mut _ as *mut _,
+                        ],
+                    )?;
+                }
+                self.record_prefill_device_trace_f32_slice(
+                    PDT_LAYER_MLA_SPARSE_ATTN_REPEAT_LAST,
+                    layer_idx,
+                    trace_chunk,
+                    trace_position,
+                    0,
+                    *workspace.d_mla_attention.device_ptr()
+                        + u64::try_from(
+                            trace_row
+                                .checked_mul(nh)
+                                .and_then(|value| value.checked_mul(ccd))
+                                .and_then(|value| {
+                                    value.checked_mul(std::mem::size_of::<f32>())
+                                })
+                                .ok_or_else(|| {
+                                    format!(
+                                        "DSA sparse MLA layer {} repeated-attention trace offset overflow",
+                                        layer_idx
+                                    )
+                                })?,
+                        )
+                        .map_err(|_| {
+                            format!(
+                                "DSA sparse MLA layer {} repeated-attention trace offset exceeds u64",
+                                layer_idx
+                            )
+                        })?,
+                    trace_row,
+                    nh * ccd,
+                )?;
+                self.record_prefill_device_trace_f32_slice(
+                    PDT_LAYER_MLA_SPARSE_ATTN_REPEAT_FULL,
+                    layer_idx,
+                    trace_chunk,
+                    trace_position,
+                    0,
+                    *workspace.d_mla_attention.device_ptr(),
+                    0,
+                    mla_elements,
+                )?;
+            }
 
             let mut v0 = attn_out;
             let mut v1 = *workspace.d_mla_attention.device_ptr();
@@ -31059,6 +31577,16 @@ impl PrefillEngine {
                     ],
                 )?;
             }
+            self.record_prefill_device_trace_bf16_row(
+                PDT_LAYER_MLA_WVC_OUT_LAST,
+                layer_idx,
+                trace_chunk,
+                trace_position,
+                0,
+                attn_out,
+                trace_row,
+                v_width,
+            )?;
         } else {
             let lse_ptr = self
                 .scratch
@@ -31115,6 +31643,16 @@ impl PrefillEngine {
             attn_out,
             scratch1,
             (m * cfg.hidden_size * std::mem::size_of::<u16>()) as u64,
+        )?;
+        self.record_prefill_device_trace_bf16_row(
+            PDT_LAYER_MLA_O_PROJ_OUT_LAST,
+            layer_idx,
+            trace_chunk,
+            trace_position,
+            0,
+            attn_out,
+            trace_row,
+            cfg.hidden_size,
         )?;
         Ok(())
     }
@@ -45291,6 +45829,39 @@ impl PrefillEngine {
             trace_moe_last_row,
             topk,
         )?;
+        self.record_prefill_device_trace_f32_slice(
+            PDT_LAYER_MLA_MOE_ROUTER_LOGITS_FULL,
+            layer_idx,
+            0,
+            trace_moe_last_pos,
+            trace_moe_token_id,
+            gate_out,
+            0,
+            m.checked_mul(n_experts)
+                .ok_or_else(|| "MLA MoE router trace size overflow".to_string())?,
+        )?;
+        self.record_prefill_device_trace_i32_slice(
+            PDT_LAYER_MLA_MOE_TOPK_IDS_FULL,
+            layer_idx,
+            0,
+            trace_moe_last_pos,
+            trace_moe_token_id,
+            topk_ids_ptr,
+            0,
+            m.checked_mul(topk)
+                .ok_or_else(|| "MLA MoE top-k ID trace size overflow".to_string())?,
+        )?;
+        self.record_prefill_device_trace_f32_slice(
+            PDT_LAYER_MLA_MOE_TOPK_WEIGHTS_FULL,
+            layer_idx,
+            0,
+            trace_moe_last_pos,
+            trace_moe_token_id,
+            topk_weights_ptr,
+            0,
+            m.checked_mul(topk)
+                .ok_or_else(|| "MLA MoE top-k weight trace size overflow".to_string())?,
+        )?;
         if reference_layer1_or_selected_moe_trace {
             let sync_after_topk_scale = self.stream_sync().is_ok();
             for &row in &trace_moe_rows_for_slots {
@@ -46338,8 +46909,15 @@ impl PrefillEngine {
             }
         }
 
-        // Build sorted token/expert maps
+        // Build a stable sorted-token map. The fused Marlin result can change
+        // numerically when identical routes are placed in a different
+        // per-expert order, so atomic scatter order is not a valid execution
+        // contract here.
         {
+            let stable_scatter_threads = m
+                .checked_next_power_of_two()
+                .unwrap_or(256)
+                .clamp(32, 256) as u32;
             let mut p0 = sorted_ids_val;
             let mut p1 = write_offsets_ptr;
             let mut p2 = topk_ids_ptr;
@@ -46349,10 +46927,10 @@ impl PrefillEngine {
             let mut p6 = n_experts as i32;
             unsafe {
                 launch(
-                    self.kernels.moe_scatter_sorted,
-                    (m as u32, 1, 1),
-                    (1, 1, 1),
-                    0,
+                    self.kernels.moe_scatter_sorted_stable,
+                    (n_experts as u32, 1, 1),
+                    (stable_scatter_threads, 1, 1),
+                    stable_scatter_threads * std::mem::size_of::<i32>() as u32,
                     self.stream,
                     &mut [
                         &mut p0 as *mut _ as *mut std::ffi::c_void,
@@ -47135,6 +47713,17 @@ impl PrefillEngine {
             trace_moe_last_row,
             topk * expert_h,
         )?;
+        self.record_prefill_device_trace_bf16_row(
+            PDT_LAYER_MLA_MOE_EXPERT_INPUT_FULL,
+            layer_idx,
+            0,
+            trace_moe_last_pos,
+            trace_moe_token_id,
+            expert_input,
+            0,
+            m.checked_mul(expert_h)
+                .ok_or_else(|| "MLA MoE expert-input trace size overflow".to_string())?,
+        )?;
         if diag_moe_branch_enabled {
             let token_rows = std::cmp::min(m, 2);
             let slot_rows = token_rows.saturating_mul(topk).min(m_topk);
@@ -47375,6 +47964,53 @@ impl PrefillEngine {
         let w1s_b_param = if use_ptr_table { 0 } else { w1s_base };
         let w2_b_param = if use_ptr_table { 0 } else { w2_base };
         let w2s_b_param = if use_ptr_table { 0 } else { w2s_base };
+        let fused_block_count = total_sorted.div_ceil(block_size as usize);
+        self.record_prefill_device_trace_i32_slice(
+            PDT_LAYER_MLA_MOE_SORTED_IDS_FULL,
+            layer_idx,
+            0,
+            trace_moe_last_pos,
+            trace_moe_token_id,
+            sorted_ids_val,
+            0,
+            total_sorted,
+        )?;
+        self.record_prefill_device_trace_i32_slice(
+            PDT_LAYER_MLA_MOE_EXPERT_BLOCK_IDS_FULL,
+            layer_idx,
+            0,
+            trace_moe_last_pos,
+            trace_moe_token_id,
+            fused_expert_ids_val,
+            0,
+            fused_block_count,
+        )?;
+        if use_ptr_table {
+            self.record_prefill_device_trace_i32_slice(
+                PDT_LAYER_MLA_MOE_W1_PTR_TABLE_FULL,
+                layer_idx,
+                0,
+                trace_moe_last_pos,
+                trace_moe_token_id,
+                w1_ptrs_gpu,
+                0,
+                n_experts
+                    .checked_mul(2)
+                    .ok_or_else(|| "MLA MoE W1 pointer-table trace size overflow".to_string())?,
+            )?;
+            self.record_prefill_device_trace_i32_slice(
+                PDT_LAYER_MLA_MOE_W1_SCALE_PTR_TABLE_FULL,
+                layer_idx,
+                0,
+                trace_moe_last_pos,
+                trace_moe_token_id,
+                w1s_ptrs_gpu,
+                0,
+                n_experts.checked_mul(2).ok_or_else(|| {
+                    "MLA MoE W1 scale pointer-table trace size overflow".to_string()
+                })?,
+            )?;
+        }
 
         if moe_trace_enabled {
             if m_topk <= 4096 {
@@ -47584,6 +48220,19 @@ impl PrefillEngine {
                 }, // S_expert_ptrs
             );
         }
+        let w1_output_values = m_topk
+            .checked_mul(w1_n)
+            .ok_or_else(|| "MLA MoE W1 trace size overflow".to_string())?;
+        self.record_prefill_device_trace_bf16_row(
+            PDT_LAYER_MLA_MOE_W1_OUTPUT_FULL,
+            layer_idx,
+            0,
+            trace_moe_last_pos,
+            trace_moe_token_id,
+            fused_inter_ptr,
+            0,
+            w1_output_values,
+        )?;
         if diag_moe_branch_enabled {
             let slot_rows = std::cmp::min(m, 2).saturating_mul(topk).min(m_topk);
             self.emit_diag_moe_branch_bf16_stage(
@@ -48526,13 +49175,25 @@ impl PrefillEngine {
                 )?;
             }
         }
+        let activation_ptr = if gated {
+            fused_inter2_ptr
+        } else {
+            fused_inter_ptr
+        };
+        self.record_prefill_device_trace_bf16_row(
+            PDT_LAYER_MLA_MOE_ACTIVATION_FULL,
+            layer_idx,
+            0,
+            trace_moe_last_pos,
+            trace_moe_token_id,
+            activation_ptr,
+            0,
+            m_topk
+                .checked_mul(inter)
+                .ok_or_else(|| "MLA MoE activation trace size overflow".to_string())?,
+        )?;
         if diag_moe_branch_enabled {
             let slot_rows = std::cmp::min(m, 2).saturating_mul(topk).min(m_topk);
-            let activation_ptr = if gated {
-                fused_inter2_ptr
-            } else {
-                fused_inter_ptr
-            };
             self.emit_diag_moe_branch_bf16_stage(
                 "activation_output",
                 layer_idx,
@@ -48547,11 +49208,6 @@ impl PrefillEngine {
         }
         if reference_routed_stage_trace {
             let sync_after_activation = self.stream_sync().is_ok();
-            let activation_ptr = if gated {
-                fused_inter2_ptr
-            } else {
-                fused_inter_ptr
-            };
             for &row in &trace_moe_rows_for_slots {
                 if row < m {
                     self.push_reference_stage_bf16_chunk_snapshot(
@@ -49045,6 +49701,18 @@ impl PrefillEngine {
                 }),
             );
         }
+        self.record_prefill_device_trace_bf16_row(
+            PDT_LAYER_MLA_MOE_W2_OUTPUT_FULL,
+            layer_idx,
+            0,
+            trace_moe_last_pos,
+            trace_moe_token_id,
+            fused_output_ptr,
+            0,
+            m_topk
+                .checked_mul(expert_h)
+                .ok_or_else(|| "MLA MoE W2 trace size overflow".to_string())?,
+        )?;
         self.record_prefill_device_trace_bf16_row(
             PDT_LAYER_MOE_ROUTED_EXPERT_OUTPUT_SLOTS_LAST,
             layer_idx,
@@ -49664,6 +50332,17 @@ impl PrefillEngine {
             moe_accum + ((trace_moe_last_row * expert_h * 4) as u64),
             trace_moe_last_row,
             expert_h,
+        )?;
+        self.record_prefill_device_trace_f32_slice(
+            PDT_LAYER_MLA_MOE_ROUTED_ACCUM_FULL,
+            layer_idx,
+            0,
+            trace_moe_last_pos,
+            trace_moe_token_id,
+            moe_accum,
+            0,
+            m.checked_mul(expert_h)
+                .ok_or_else(|| "MLA MoE routed-accumulator trace size overflow".to_string())?,
         )?;
         if reference_routed_stage_trace {
             for &row in &trace_moe_rows_for_slots {
@@ -50854,6 +51533,17 @@ impl PrefillEngine {
                 self.stream
             };
             let sg_ptr = lw_ref.shared_gate_ptr;
+            self.record_prefill_device_trace_bf16_row(
+                PDT_LAYER_MLA_MOE_SHARED_OUTPUT_FULL,
+                layer_idx,
+                0,
+                trace_moe_last_pos,
+                trace_moe_token_id,
+                s1_buf,
+                0,
+                m.checked_mul(h)
+                    .ok_or_else(|| "MLA MoE shared-output trace size overflow".to_string())?,
+            )?;
 
             if diag_moe_branch_enabled {
                 let token_rows = std::cmp::min(m, 2);
@@ -52432,6 +53122,17 @@ impl PrefillEngine {
             }
         }
 
+        self.record_prefill_device_trace_bf16_row(
+            PDT_LAYER_MLA_MOE_OUTPUT_FULL,
+            layer_idx,
+            0,
+            trace_moe_last_pos,
+            trace_moe_token_id,
+            output,
+            0,
+            m.checked_mul(h)
+                .ok_or_else(|| "MLA MoE output trace size overflow".to_string())?,
+        )?;
         if let Some(t) = mt5 {
             self.stream_sync()?;
             self.t_moe_shared
@@ -60001,7 +60702,7 @@ impl PrefillKernels {
                     "moe_build_maps_kernel",
                     "moe_build_maps_stable_kernel",
                     "moe_padded_prefix_sum_kernel",
-                    "moe_scatter_sorted_kernel",
+                    "moe_scatter_sorted_stable_kernel",
                     "moe_finalize_sorted_kernel",
                     "moe_gather_sorted_kernel",
                     "moe_replicate_hidden_kernel",
@@ -60493,7 +61194,7 @@ impl PrefillKernels {
             moe_build_maps: get("moe_build_maps_kernel")?,
             moe_build_maps_stable: get("moe_build_maps_stable_kernel")?,
             moe_padded_prefix_sum: get("moe_padded_prefix_sum_kernel")?,
-            moe_scatter_sorted: get("moe_scatter_sorted_kernel")?,
+            moe_scatter_sorted_stable: get("moe_scatter_sorted_stable_kernel")?,
             moe_finalize_sorted: get("moe_finalize_sorted_kernel")?,
             moe_gather_sorted: get("moe_gather_sorted_kernel")?,
             moe_replicate_hidden: get("moe_replicate_hidden_kernel")?,
@@ -63142,6 +63843,8 @@ mod kernel_tests {
                     "moe_prefix_sum_kernel",
                     "moe_build_maps_kernel",
                     "moe_build_maps_stable_kernel",
+                    "moe_scatter_sorted_stable_kernel",
+                    "moe_finalize_sorted_kernel",
                     "moe_scatter_add_kernel",
                     "moe_zero_accum_kernel",
                     "moe_accum_to_bf16_kernel",
@@ -69008,6 +69711,133 @@ mod kernel_tests {
             "  moe_gather_sorted PASS ({} positions, exact match)",
             total_padded
         );
+    }
+
+    #[test]
+    fn test_moe_scatter_sorted_stable_is_exact_and_repeatable() {
+        let ctx = GpuTestCtx::new();
+        let stable_kernel = ctx.get_kernel("moe_scatter_sorted_stable_kernel");
+        let finalize_kernel = ctx.get_kernel("moe_finalize_sorted_kernel");
+
+        let m = 7usize;
+        let topk = 3usize;
+        let experts = 4usize;
+        let block_size = 4usize;
+        let topk_ids = vec![
+            2, 0, 1, //
+            1, 0, 3, //
+            0, 2, 1, //
+            3, 1, 0, //
+            2, 3, 1, //
+            1, 0, 2, //
+            0, 3, 2,
+        ];
+        let expert_counts = vec![6, 6, 5, 4];
+        let expert_offsets = vec![0, 8, 16, 24, 28];
+        let expected_sorted = vec![
+            1, 4, 6, 11, 16, 18, 21, 21, //
+            2, 3, 8, 10, 14, 15, 21, 21, //
+            0, 7, 12, 17, 20, 21, 21, 21, //
+            5, 9, 13, 19,
+        ];
+        let expected_expert_ids = vec![0, 0, 1, 1, 2, 2, 3];
+
+        let to_bytes = |values: &[i32]| {
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<u8>>()
+        };
+        let mut first_sorted: Option<Vec<i32>> = None;
+        let mut first_expert_ids: Option<Vec<i32>> = None;
+
+        for iteration in 0..20 {
+            let d_sorted = ctx.upload_i32(&to_bytes(&vec![-1; expected_sorted.len()]));
+            let d_write_offsets = ctx.alloc_i32(experts);
+            let d_topk_ids = ctx.upload_i32(&to_bytes(&topk_ids));
+            let d_expert_offsets = ctx.upload_i32(&to_bytes(&expert_offsets));
+            let d_expert_counts = ctx.upload_i32(&to_bytes(&expert_counts));
+            let d_expert_ids = ctx.alloc_i32(expected_expert_ids.len());
+
+            let mut sorted_ptr = *d_sorted.device_ptr() as u64;
+            let mut write_offsets_ptr = *d_write_offsets.device_ptr() as u64;
+            let mut topk_ids_ptr = *d_topk_ids.device_ptr() as u64;
+            let mut expert_offsets_ptr = *d_expert_offsets.device_ptr() as u64;
+            let mut m_i32 = m as i32;
+            let mut topk_i32 = topk as i32;
+            let mut experts_i32 = experts as i32;
+            let threads = m.next_power_of_two().clamp(32, 256) as u32;
+            unsafe {
+                let mut params: Vec<*mut std::ffi::c_void> = vec![
+                    &mut sorted_ptr as *mut _ as *mut _,
+                    &mut write_offsets_ptr as *mut _ as *mut _,
+                    &mut topk_ids_ptr as *mut _ as *mut _,
+                    &mut expert_offsets_ptr as *mut _ as *mut _,
+                    &mut m_i32 as *mut _ as *mut _,
+                    &mut topk_i32 as *mut _ as *mut _,
+                    &mut experts_i32 as *mut _ as *mut _,
+                ];
+                launch(
+                    stable_kernel,
+                    (experts as u32, 1, 1),
+                    (threads, 1, 1),
+                    threads * std::mem::size_of::<i32>() as u32,
+                    ctx.stream(),
+                    &mut params,
+                )
+                .unwrap();
+            }
+
+            let mut expert_ids_ptr = *d_expert_ids.device_ptr() as u64;
+            let mut expert_counts_ptr = *d_expert_counts.device_ptr() as u64;
+            let mut block_size_i32 = block_size as i32;
+            unsafe {
+                let mut params: Vec<*mut std::ffi::c_void> = vec![
+                    &mut sorted_ptr as *mut _ as *mut _,
+                    &mut expert_ids_ptr as *mut _ as *mut _,
+                    &mut expert_offsets_ptr as *mut _ as *mut _,
+                    &mut expert_counts_ptr as *mut _ as *mut _,
+                    &mut m_i32 as *mut _ as *mut _,
+                    &mut topk_i32 as *mut _ as *mut _,
+                    &mut experts_i32 as *mut _ as *mut _,
+                    &mut block_size_i32 as *mut _ as *mut _,
+                ];
+                launch(
+                    finalize_kernel,
+                    (experts as u32, 1, 1),
+                    (1, 1, 1),
+                    0,
+                    ctx.stream(),
+                    &mut params,
+                )
+                .unwrap();
+            }
+            self::cuda_sync();
+
+            let actual_sorted = ctx.dev.dtoh_sync_copy(&d_sorted).unwrap();
+            let actual_expert_ids = ctx.dev.dtoh_sync_copy(&d_expert_ids).unwrap();
+            assert_eq!(
+                actual_sorted, expected_sorted,
+                "stable sorted IDs differ from CPU order on iteration {iteration}"
+            );
+            assert_eq!(
+                actual_expert_ids, expected_expert_ids,
+                "expert block IDs differ on iteration {iteration}"
+            );
+            if let Some(first) = &first_sorted {
+                assert_eq!(&actual_sorted, first, "sorted IDs changed between launches");
+            } else {
+                first_sorted = Some(actual_sorted);
+            }
+            if let Some(first) = &first_expert_ids {
+                assert_eq!(
+                    &actual_expert_ids, first,
+                    "expert block IDs changed between launches"
+                );
+            } else {
+                first_expert_ids = Some(actual_expert_ids);
+            }
+        }
     }
 
     #[test]

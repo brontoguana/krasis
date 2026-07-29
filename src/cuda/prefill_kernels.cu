@@ -11148,26 +11148,64 @@ extern "C" __global__ void moe_padded_prefix_sum_kernel(
     }
 }
 
-/* Phase 3: Scatter tokens into sorted positions.
- * Grid: (M, 1, 1), Block: (1, 1, 1)
- * Each thread handles one token, scatters its topk slots.
+/* Stable fused-Marlin scatter.
+ * Grid: (E, 1, 1), one block per expert.
+ * Rows are ordered by token position, then top-k slot. This makes the fused
+ * expert batch layout independent of CUDA block scheduling while preserving
+ * the same vLLM sorted-token-id representation and padded expert offsets.
  */
-extern "C" __global__ void moe_scatter_sorted_kernel(
+extern "C" __global__ void moe_scatter_sorted_stable_kernel(
     int* __restrict__ sorted_token_ids,
-    int* __restrict__ write_offsets,       // [E] atomically incremented
-    const int* __restrict__ topk_ids,      // [M, topk]
-    const int* __restrict__ expert_offsets, // [E+1]
+    int* __restrict__ write_offsets,
+    const int* __restrict__ topk_ids,
+    const int* __restrict__ expert_offsets,
     int M, int topk, int E
 ) {
-    int t = blockIdx.x;
-    if (t >= M) return;
-    for (int k = 0; k < topk; k++) {
-        int eid = topk_ids[t * topk + k];
-        if (eid >= 0 && eid < E) {
-            int base = expert_offsets[eid];
-            int slot = atomicAdd(&write_offsets[eid], 1);
-            sorted_token_ids[base + slot] = t * topk + k;  // vLLM format: token*topk+slot
+    int eid = blockIdx.x;
+    if (eid >= E) return;
+
+    extern __shared__ int stable_counts[];
+    int tid = threadIdx.x;
+    int start_t = ((long long)M * tid) / blockDim.x;
+    int end_t = ((long long)M * (tid + 1)) / blockDim.x;
+
+    int local_count = 0;
+    for (int t = start_t; t < end_t; t++) {
+        for (int k = 0; k < topk; k++) {
+            if (topk_ids[t * topk + k] == eid) {
+                local_count++;
+            }
         }
+    }
+
+    stable_counts[tid] = local_count;
+    __syncthreads();
+
+    for (int offset = 1; offset < blockDim.x; offset <<= 1) {
+        int add = 0;
+        if (tid >= offset) {
+            add = stable_counts[tid - offset];
+        }
+        __syncthreads();
+        stable_counts[tid] += add;
+        __syncthreads();
+    }
+
+    int pos = expert_offsets[eid] + stable_counts[tid] - local_count;
+    const int expert_end = expert_offsets[eid + 1];
+    for (int t = start_t; t < end_t; t++) {
+        for (int k = 0; k < topk; k++) {
+            if (topk_ids[t * topk + k] == eid) {
+                if (pos < expert_end) {
+                    sorted_token_ids[pos] = t * topk + k;
+                    pos++;
+                }
+            }
+        }
+    }
+
+    if (tid == blockDim.x - 1) {
+        write_offsets[eid] = stable_counts[tid];
     }
 }
 

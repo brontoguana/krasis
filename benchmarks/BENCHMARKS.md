@@ -1,5 +1,49 @@
 # Krasis Benchmark Results
 
+## GLM-5.2 first sparse DSA benchmark - 2026-07-29
+
+Purpose: establish the first timing-disabled performance baseline for the
+validated native GLM-5.2 sparse DSA runtime. The run used local feature commit
+`5d4dbca` plus the reviewed, uncommitted query-LoRA/DSA correctness fixes,
+the built `./dev benchmark` path under tmux, and the runtime-safe prompt cap
+selected by startup calibration. This is development evidence, not a release
+claim.
+
+Command:
+
+```text
+./dev benchmark tests/glm52-4-4-hqq4-k4v4-sparse-4096-rtx6000.conf
+```
+
+Hardware: AMD EPYC 7742, 995 GB host RAM, and one NVIDIA RTX PRO 6000
+Blackwell Workstation Edition 96 GB over PCIe 4.0 x16.
+
+| Model/config | Prefill internal | 50-token decode | 100-token decode | 250-token decode | Round trip 50/100/250 | HCS coverage | Min free VRAM | Logs |
+|--------------|-----------------:|----------------:|-----------------:|-----------------:|-----------------------:|-------------:|--------------:|------|
+| GLM-5.2 INT4 experts, HQQ4 attention, k4v4 KV, sparse DSA | 44.7 tok/s at 1,000 tokens | 4.50 tok/s | 4.48 tok/s | 4.41 tok/s | 7.82 / 5.76 / 4.81 tok/s | 3887/19200 (20.2%) | 1,180 MB | [report](20260729_074912_rtx6000_glm52_hqq4_k4v4_sparse4096_benchmark_report.log), [stdout](20260729_074912_rtx6000_glm52_hqq4_k4v4_sparse4096_benchmark_stdout.log), [server](20260729_074912_rtx6000_glm52_hqq4_k4v4_sparse4096_krasis.log) |
+
+Notes:
+
+- Timing/trace instrumentation and benchmark GPU telemetry were disabled for
+  the measured phase.
+- Runtime calibration limited the timed prefill case to 1,000 tokens after its
+  long probe reached 762 MB free against the configured 600 MB safety margin.
+  Timed decode retained 1,180 MB minimum free.
+- The quick six-prompt heatmap ranked 18,076 experts. HCS loaded 3,900 soft
+  experts, then pressure eviction left 3,887 of 19,200 routed expert slots
+  resident. The 250-token timed decode reported 65.69% HCS hit, zero budget
+  skips, and zero copy failures.
+- Network values include prompt tokens and request time, so they are not decode
+  throughput and must not be compared with the internal decode rows.
+- Correctness acceptance immediately before this run retained an explicit
+  production-quantization boundary: the 2,682-token sparse profile matched
+  seven of eight teacher-forced BF16 witness argmax tokens, four contiguously;
+  the sole witness token ranked second natively and every witness token
+  remained in native top 10. The 19-token exact-prefix control matched 8/8.
+- This first baseline is intentionally preserved before performance
+  optimization. Any conclusion about the 44.7/4.50 tok/s bottlenecks requires
+  a separate instrumented component run.
+
 ## Step-3.7-Flash RTX PRO 6000 adaptive 75/8 A/B - 2026-07-23
 
 Purpose: measure adaptive cold-mass pruning on the existing RTX PRO 6000

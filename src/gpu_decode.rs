@@ -8240,10 +8240,10 @@ mod dsa_registration_tests {
             .device
             .htod_copy(bf16_zeros(hidden_size))
             .expect("hidden");
-        let q_resid = store
+        let q_lora = store
             .device
             .htod_copy(bf16_zeros(q_lora_rank))
-            .expect("query residual");
+            .expect("query-LoRA latent");
         let (d_position_ptr, d_seq_len_ptr) = {
             let graph = store.graph.as_ref().expect("graph");
             (
@@ -8278,7 +8278,7 @@ mod dsa_registration_tests {
                     d_position_ptr,
                     d_seq_len_ptr,
                     *hidden.device_ptr(),
-                    *q_resid.device_ptr(),
+                    *q_lora.device_ptr(),
                     backend,
                 )
                 .expect("fixed-capacity owner scores");
@@ -8533,12 +8533,12 @@ mod dsa_registration_tests {
             .expect("RoPE tables");
 
         let prefill_hidden = bf16_bits(&[1.0, 2.0, 3.0, 4.0, 2.0, 1.0, 0.0, -1.0]);
-        let q_residual0_values = [1.0f32, 0.0, 0.0, -1.0];
-        let q_residual1_values = [0.5f32, -0.5, 1.0, -1.0];
-        let prefill_q_residuals = bf16_bits(
-            &q_residual0_values
+        let q_lora0_values = [1.0f32, 0.0, 0.0, -1.0];
+        let q_lora1_values = [0.5f32, -0.5, 1.0, -1.0];
+        let prefill_q_lora = bf16_bits(
+            &q_lora0_values
                 .into_iter()
-                .chain(q_residual1_values)
+                .chain(q_lora1_values)
                 .collect::<Vec<_>>(),
         );
         let mut prefill = store
@@ -8563,7 +8563,7 @@ mod dsa_registration_tests {
             .debug_run_dsa_prefill_owner_selection(
                 0,
                 &prefill_hidden,
-                &prefill_q_residuals,
+                &prefill_q_lora,
                 &[0, 1],
             )
             .expect("batched DSA prefill owner selection");
@@ -8579,13 +8579,13 @@ mod dsa_registration_tests {
             .device
             .htod_copy(bf16_bits(&[1.0, 2.0, 3.0, 4.0]))
             .expect("hidden0");
-        let q_resid0 = store
+        let q_lora0 = store
             .device
-            .htod_copy(bf16_bits(&q_residual0_values))
-            .expect("q_resid0");
+            .htod_copy(bf16_bits(&q_lora0_values))
+            .expect("q_lora0");
         assert_eq!(
             store
-                .execute_dsa_owner_scores(0, 0, *hidden0.device_ptr(), *q_resid0.device_ptr(),)
+                .execute_dsa_owner_scores(0, 0, *hidden0.device_ptr(), *q_lora0.device_ptr(),)
                 .expect("position 0 scores"),
             1
         );
@@ -8594,13 +8594,13 @@ mod dsa_registration_tests {
             .device
             .htod_copy(bf16_bits(&[2.0, 1.0, 0.0, -1.0]))
             .expect("hidden1");
-        let q_resid1 = store
+        let q_lora1 = store
             .device
-            .htod_copy(bf16_bits(&q_residual1_values))
-            .expect("q_resid1");
+            .htod_copy(bf16_bits(&q_lora1_values))
+            .expect("q_lora1");
         assert_eq!(
             store
-                .execute_dsa_owner_scores(0, 1, *hidden1.device_ptr(), *q_resid1.device_ptr(),)
+                .execute_dsa_owner_scores(0, 1, *hidden1.device_ptr(), *q_lora1.device_ptr(),)
                 .expect("position 1 scores"),
             2
         );
@@ -8612,7 +8612,7 @@ mod dsa_registration_tests {
                     0,
                     1,
                     *hidden1.device_ptr(),
-                    *q_resid1.device_ptr(),
+                    *q_lora1.device_ptr(),
                 )
                 .expect("detached ordinary owner scores"),
             2
@@ -8641,26 +8641,13 @@ mod dsa_registration_tests {
                     .device_ptr(),
             )
         };
-        let position = 1i32;
         let sequence_length = 2i32;
-        unsafe {
-            assert_eq!(
-                cuda_sys::lib().cuMemcpyHtoD_v2(
-                    d_position_ptr,
-                    &position as *const i32 as *const std::ffi::c_void,
-                    std::mem::size_of::<i32>(),
-                ),
-                cuda_sys::CUresult::CUDA_SUCCESS
-            );
-            assert_eq!(
-                cuda_sys::lib().cuMemcpyHtoD_v2(
-                    d_seq_len_ptr,
-                    &sequence_length as *const i32 as *const std::ffi::c_void,
-                    std::mem::size_of::<i32>(),
-                ),
-                cuda_sys::CUresult::CUDA_SUCCESS
-            );
-        }
+        assert_eq!(
+            store
+                .upload_ungraphed_dsa_scalars(store.graph.as_ref().expect("graph"), 1)
+                .expect("ungraphed DSA scalar upload"),
+            Some((d_position_ptr, d_seq_len_ptr))
+        );
         assert_eq!(
             store
                 .execute_dsa_owner_scores_graphable(
@@ -8668,7 +8655,7 @@ mod dsa_registration_tests {
                     d_position_ptr,
                     d_seq_len_ptr,
                     *hidden1.device_ptr(),
-                    *q_resid1.device_ptr(),
+                    *q_lora1.device_ptr(),
                     DsaGraphScoreBackend::LiveFused,
                 )
                 .expect("fixed-capacity graph-addressable owner scores"),
@@ -8679,6 +8666,25 @@ mod dsa_registration_tests {
             .expect("fixed-capacity graph-addressable top-k");
         assert_eq!(graph_plan.selected, 2048);
         store.device.synchronize().expect("graph-addressable sync");
+        let direct_graphable_scores = store
+            .device
+            .dtoh_sync_copy(
+                &store
+                    .graph
+                    .as_ref()
+                    .expect("graph")
+                    .dsa_indexer_workspace
+                    .as_ref()
+                    .expect("workspace")
+                    .d_scores,
+            )
+            .expect("direct graphable scores D2H");
+        let direct_graphable_selected = store
+            .device
+            .dtoh_sync_copy(
+                &store.graph.as_ref().expect("graph").dsa_indexer_owners[0].d_topk_indices,
+            )
+            .expect("direct graphable top-k D2H");
 
         let mut capture_stream: cuda_sys::CUstream = std::ptr::null_mut();
         assert_eq!(
@@ -8717,7 +8723,7 @@ mod dsa_registration_tests {
                 d_position_ptr,
                 d_seq_len_ptr,
                 *hidden1.device_ptr(),
-                *q_resid1.device_ptr(),
+                *q_lora1.device_ptr(),
                 DsaGraphScoreBackend::LiveFused,
             )
             .expect("captured owner scores");
@@ -8759,6 +8765,42 @@ mod dsa_registration_tests {
             cuda_sys::lib().cuGraphDestroy(captured_graph);
             cuda_sys::lib().cuStreamDestroy_v2(capture_stream);
         }
+        let replay_scores = store
+            .device
+            .dtoh_sync_copy(
+                &store
+                    .graph
+                    .as_ref()
+                    .expect("graph")
+                    .dsa_indexer_workspace
+                    .as_ref()
+                    .expect("workspace")
+                    .d_scores,
+            )
+            .expect("captured graph scores D2H");
+        let replay_selected = store
+            .device
+            .dtoh_sync_copy(
+                &store.graph.as_ref().expect("graph").dsa_indexer_owners[0].d_topk_indices,
+            )
+            .expect("captured graph top-k D2H");
+        assert_eq!(
+            direct_graphable_scores
+                .iter()
+                .take(sequence_length as usize)
+                .map(|score| score.to_bits())
+                .collect::<Vec<_>>(),
+            replay_scores
+                .iter()
+                .take(sequence_length as usize)
+                .map(|score| score.to_bits())
+                .collect::<Vec<_>>(),
+            "direct graphable and captured DSA scores must be bit-identical"
+        );
+        assert_eq!(
+            direct_graphable_selected, replay_selected,
+            "direct graphable and captured DSA selections must be bit-identical"
+        );
 
         let graph = store.graph.as_ref().expect("graph");
         let resource = &graph.dsa_indexer_owners[0];
@@ -26198,7 +26240,7 @@ impl GpuDecodeStore {
         owner_layer_idx: usize,
         position: usize,
         hidden_ptr: u64,
-        q_resid_ptr: u64,
+        q_lora_ptr: u64,
     ) -> Result<usize, String> {
         let graph = self.graph.as_ref().ok_or("Call configure first")?;
         self.execute_dsa_owner_scores_for_graph(
@@ -26206,8 +26248,68 @@ impl GpuDecodeStore {
             owner_layer_idx,
             position,
             hidden_ptr,
-            q_resid_ptr,
+            q_lora_ptr,
         )
+    }
+
+    fn upload_ungraphed_dsa_scalars(
+        &self,
+        graph: &GpuDecodeGraph,
+        position: usize,
+    ) -> Result<Option<(u64, u64)>, String> {
+        if graph.dsa_indexer_owners.is_empty() {
+            return Ok(None);
+        }
+        let d_position = graph
+            .d_graph_pos
+            .as_ref()
+            .ok_or("DSA ungraphed execution requires the graph position buffer")?;
+        let d_seq_len = graph
+            .d_graph_seq_len
+            .as_ref()
+            .ok_or("DSA ungraphed execution requires the graph sequence-length buffer")?;
+        let position_i32 = i32::try_from(position)
+            .map_err(|_| format!("DSA position {} exceeds native i32 range", position))?;
+        let sequence_length = position
+            .checked_add(1)
+            .ok_or_else(|| format!("DSA position {} sequence length overflow", position))?;
+        let sequence_length_i32 = i32::try_from(sequence_length).map_err(|_| {
+            format!(
+                "DSA sequence length {} exceeds native i32 range",
+                sequence_length
+            )
+        })?;
+        let stream = *self.device.cu_stream();
+        unsafe {
+            let position_result = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                *d_position.device_ptr(),
+                &position_i32 as *const i32 as *const std::ffi::c_void,
+                std::mem::size_of::<i32>(),
+                stream,
+            );
+            if position_result != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!(
+                    "DSA ungraphed position upload: {:?}",
+                    position_result
+                ));
+            }
+            let sequence_result = cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                *d_seq_len.device_ptr(),
+                &sequence_length_i32 as *const i32 as *const std::ffi::c_void,
+                std::mem::size_of::<i32>(),
+                stream,
+            );
+            if sequence_result != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!(
+                    "DSA ungraphed sequence-length upload: {:?}",
+                    sequence_result
+                ));
+            }
+        }
+        Ok(Some((
+            *d_position.device_ptr(),
+            *d_seq_len.device_ptr(),
+        )))
     }
 
     fn execute_dsa_owner_scores_for_graph(
@@ -26216,7 +26318,7 @@ impl GpuDecodeStore {
         owner_layer_idx: usize,
         position: usize,
         hidden_ptr: u64,
-        q_resid_ptr: u64,
+        q_lora_ptr: u64,
     ) -> Result<usize, String> {
         let registration = graph
             .layers
@@ -26326,7 +26428,7 @@ impl GpuDecodeStore {
         let k_norm_weight = &weights[resource.weight_ids.k_norm_weight];
         let k_norm_bias = &weights[resource.weight_ids.k_norm_bias];
 
-        self.gemv_bf16_internal(wq_b, q_resid_ptr, *workspace.d_projected_query.device_ptr())?;
+        self.gemv_bf16_internal(wq_b, q_lora_ptr, *workspace.d_projected_query.device_ptr())?;
         self.gemv_bf16_internal(wk, hidden_ptr, *workspace.d_raw_key.device_ptr())?;
         self.gemv_bf16_internal(
             weights_proj,
@@ -26459,7 +26561,7 @@ impl GpuDecodeStore {
         d_position_ptr: u64,
         d_seq_len_ptr: u64,
         hidden_ptr: u64,
-        q_resid_ptr: u64,
+        q_lora_ptr: u64,
         backend: DsaGraphScoreBackend,
     ) -> Result<usize, String> {
         let graph = self.graph.as_ref().ok_or("Call configure first")?;
@@ -26469,7 +26571,7 @@ impl GpuDecodeStore {
             d_position_ptr,
             d_seq_len_ptr,
             hidden_ptr,
-            q_resid_ptr,
+            q_lora_ptr,
             backend,
         )
     }
@@ -26481,7 +26583,7 @@ impl GpuDecodeStore {
         d_position_ptr: u64,
         d_seq_len_ptr: u64,
         hidden_ptr: u64,
-        q_resid_ptr: u64,
+        q_lora_ptr: u64,
         backend: DsaGraphScoreBackend,
     ) -> Result<usize, String> {
         if d_position_ptr == 0 || d_seq_len_ptr == 0 {
@@ -26584,7 +26686,7 @@ impl GpuDecodeStore {
         let k_norm_weight = &weights[resource.weight_ids.k_norm_weight];
         let k_norm_bias = &weights[resource.weight_ids.k_norm_bias];
 
-        self.gemv_bf16_internal(wq_b, q_resid_ptr, *workspace.d_projected_query.device_ptr())?;
+        self.gemv_bf16_internal(wq_b, q_lora_ptr, *workspace.d_projected_query.device_ptr())?;
         self.gemv_bf16_internal(wk, hidden_ptr, *workspace.d_raw_key.device_ptr())?;
         self.gemv_bf16_internal(
             weights_proj,
@@ -30040,6 +30142,7 @@ impl GpuDecodeStore {
             reference_router_forced_slot_orders: std::cell::RefCell::new(Vec::new()),
             reference_mamba2_gated_norm_replay: std::cell::RefCell::new(Vec::new()),
             prefill_device_trace_enabled: std::cell::Cell::new(false),
+            prefill_device_trace_mla_only: std::cell::Cell::new(false),
             prefill_device_trace_layer: std::cell::Cell::new(0),
             prefill_device_trace_all_layers: std::cell::Cell::new(false),
             prefill_device_trace_full_pre_out_proj: std::cell::Cell::new(false),
@@ -36667,7 +36770,9 @@ impl GpuDecodeStore {
                                 layer_idx, *ckv_cache_ptr, *kpe_cache_ptr
                             ));
                         }
-                        if let Some(registration) = layer.dsa_indexer.as_ref() {
+                        let dsa_owner_active = if let Some(registration) =
+                            layer.dsa_indexer.as_ref()
+                        {
                             if registration.owner_weights_present {
                                 if registration.owner_layer_idx != layer_idx {
                                     return Err(format!(
@@ -36675,21 +36780,18 @@ impl GpuDecodeStore {
                                         layer_idx, registration.owner_layer_idx
                                     ));
                                 }
-                                self.execute_dsa_owner_scores_graphable_for_graph(
-                                    graph,
-                                    layer_idx,
-                                    d_pos_ptr,
-                                    d_seq_len_ptr,
-                                    *graph.d_hidden.device_ptr(),
-                                    *graph.d_residual.device_ptr(),
-                                    DsaGraphScoreBackend::LiveFused,
-                                )?;
-                                self.execute_dsa_owner_topk_graphable_for_graph(
-                                    graph,
-                                    layer_idx,
-                                    d_seq_len_ptr,
-                                )?;
+                                true
+                            } else {
+                                false
                             }
+                        } else {
+                            false
+                        };
+                        if dsa_owner_active && *q_lora_rank == 0 {
+                            return Err(format!(
+                                "DSA owner layer {} requires an MLA query-LoRA latent",
+                                layer_idx
+                            ));
                         }
                         let hqq_mla_exec = match graph.layers[layer_idx].hqq_exec.as_ref() {
                             Some(HqqExecutionDescriptor::Mla(desc))
@@ -36760,6 +36862,22 @@ impl GpuDecodeStore {
                                     *graph.d_gqa_q.device_ptr(),
                                     *q_lora_rank,
                                 )?;
+                                if dsa_owner_active {
+                                    self.execute_dsa_owner_scores_graphable_for_graph(
+                                        graph,
+                                        layer_idx,
+                                        d_pos_ptr,
+                                        d_seq_len_ptr,
+                                        *graph.d_hidden.device_ptr(),
+                                        *graph.d_scratch.device_ptr(),
+                                        DsaGraphScoreBackend::LiveFused,
+                                    )?;
+                                    self.execute_dsa_owner_topk_graphable_for_graph(
+                                        graph,
+                                        layer_idx,
+                                        d_seq_len_ptr,
+                                    )?;
+                                }
                                 self.launch_hqq_decode_gemv_f32(
                                     "q_b_proj",
                                     qb,
@@ -36824,6 +36942,22 @@ impl GpuDecodeStore {
                                     .map_err(|e| {
                                         format!("mla q_a_to_bf16[{}]: {:?}", layer_idx, e)
                                     })?;
+                            }
+                            if dsa_owner_active {
+                                self.execute_dsa_owner_scores_graphable_for_graph(
+                                    graph,
+                                    layer_idx,
+                                    d_pos_ptr,
+                                    d_seq_len_ptr,
+                                    *graph.d_hidden.device_ptr(),
+                                    *graph.d_scratch.device_ptr(),
+                                    DsaGraphScoreBackend::LiveFused,
+                                )?;
+                                self.execute_dsa_owner_topk_graphable_for_graph(
+                                    graph,
+                                    layer_idx,
+                                    d_seq_len_ptr,
+                                )?;
                             }
                             let qb_w = &graph.weights[*qb_id];
                             self.gemv_bf16_to_f32(
@@ -40889,6 +41023,7 @@ impl GpuDecodeStore {
                 position, graph.kv_max_seq
             ));
         }
+        let dsa_ungraphed_scalars = self.upload_ungraphed_dsa_scalars(graph, position)?;
 
         // Timing: sync and take initial timestamp
         let t0 = if timing {
@@ -43612,7 +43747,9 @@ impl GpuDecodeStore {
                             layer_idx, *ckv_cache_ptr, *kpe_cache_ptr
                         ));
                     }
-                    if let Some(registration) = layer.dsa_indexer.as_ref() {
+                    let dsa_owner_scalars = if let Some(registration) =
+                        layer.dsa_indexer.as_ref()
+                    {
                         if registration.owner_weights_present {
                             if registration.owner_layer_idx != layer_idx {
                                 return Err(format!(
@@ -43620,15 +43757,25 @@ impl GpuDecodeStore {
                                     layer_idx, registration.owner_layer_idx
                                 ));
                             }
-                            let context = self.execute_dsa_owner_scores_for_graph(
-                                graph,
-                                layer_idx,
-                                position,
-                                *graph.d_hidden.device_ptr(),
-                                *graph.d_residual.device_ptr(),
-                            )?;
-                            self.execute_dsa_owner_topk_for_graph(graph, layer_idx, context)?;
+                            let (d_position_ptr, d_seq_len_ptr) =
+                                dsa_ungraphed_scalars.ok_or_else(|| {
+                                    format!(
+                                        "DSA owner layer {} has no graph-addressable runtime scalars",
+                                        layer_idx
+                                    )
+                                })?;
+                            Some((d_position_ptr, d_seq_len_ptr))
+                        } else {
+                            None
                         }
+                    } else {
+                        None
+                    };
+                    if dsa_owner_scalars.is_some() && *q_lora_rank == 0 {
+                        return Err(format!(
+                            "DSA owner layer {} requires an MLA query-LoRA latent",
+                            layer_idx
+                        ));
                     }
                     let hqq_mla_exec = match graph.layers[layer_idx].hqq_exec.as_ref() {
                         Some(HqqExecutionDescriptor::Mla(desc))
@@ -43698,6 +43845,24 @@ impl GpuDecodeStore {
                                 *graph.d_gqa_q.device_ptr(),
                                 *q_lora_rank,
                             )?;
+                            if let Some((d_position_ptr, d_seq_len_ptr)) = dsa_owner_scalars {
+                                // The DSA query projection consumes the same
+                                // normalized query-LoRA latent as MLA q_b.
+                                self.execute_dsa_owner_scores_graphable_for_graph(
+                                    graph,
+                                    layer_idx,
+                                    d_position_ptr,
+                                    d_seq_len_ptr,
+                                    *graph.d_hidden.device_ptr(),
+                                    *graph.d_scratch.device_ptr(),
+                                    DsaGraphScoreBackend::LiveFused,
+                                )?;
+                                self.execute_dsa_owner_topk_graphable_for_graph(
+                                    graph,
+                                    layer_idx,
+                                    d_seq_len_ptr,
+                                )?;
+                            }
                             self.launch_hqq_decode_gemv_f32(
                                 "q_b_proj",
                                 qb,
@@ -43763,6 +43928,22 @@ impl GpuDecodeStore {
                                     ),
                                 )
                                 .map_err(|e| format!("mla q_a_to_bf16[{}]: {:?}", layer_idx, e))?;
+                        }
+                        if let Some((d_position_ptr, d_seq_len_ptr)) = dsa_owner_scalars {
+                            self.execute_dsa_owner_scores_graphable_for_graph(
+                                graph,
+                                layer_idx,
+                                d_position_ptr,
+                                d_seq_len_ptr,
+                                *graph.d_hidden.device_ptr(),
+                                *graph.d_scratch.device_ptr(),
+                                DsaGraphScoreBackend::LiveFused,
+                            )?;
+                            self.execute_dsa_owner_topk_graphable_for_graph(
+                                graph,
+                                layer_idx,
+                                d_seq_len_ptr,
+                            )?;
                         }
 
                         // q_b_proj: BF16 q_lora_rank → FP32 num_heads*(nope+rope)
@@ -50120,10 +50301,18 @@ impl GpuDecodeStore {
             } else if use_double_buf {
                 // DMA to ping-pong buffer
                 let slot = (dma_expert_count % 2) as usize;
-                if dma_expert_count >= 2 {
-                    unsafe {
-                        cuda_sys::lib().cuStreamWaitEvent(copy_stream, ev_compute[slot], 0);
-                    }
+                // The ping-pong buffers are shared across layers. The first use
+                // of a slot in this layer may still be consumed by the previous
+                // layer, so every reuse must depend on that slot's most recent
+                // compute-complete event. Waiting on a never-recorded event is
+                // a no-op for the first use after allocation.
+                let wait_err =
+                    unsafe { cuda_sys::lib().cuStreamWaitEvent(copy_stream, ev_compute[slot], 0) };
+                if wait_err != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(format!(
+                        "batch cold DMA slot {} compute wait[{}]: {:?}",
+                        slot, layer_idx, wait_err
+                    ));
                 }
 
                 unsafe {
@@ -52910,6 +53099,154 @@ impl GpuDecodeStore {
         }));
     }
 
+    fn push_debug_dsa_selection_snapshot(
+        graph: &mut GpuDecodeGraph,
+        decode_loop_step: usize,
+        position: usize,
+        token_id: usize,
+    ) -> Result<(), String> {
+        if !graph.debug_decode_early_trace_active
+            || graph.validation_decode_steps >= graph.debug_decode_early_max_steps
+        {
+            return Ok(());
+        }
+
+        let mut entries = Vec::new();
+        for resource in &graph.dsa_indexer_owners {
+            let registration = graph
+                .layers
+                .iter()
+                .filter_map(|layer| layer.dsa_indexer.as_ref())
+                .find(|registration| registration.owner_layer_idx == resource.owner_layer_idx)
+                .ok_or_else(|| {
+                    format!(
+                        "DSA debug snapshot owner {} has no registration",
+                        resource.owner_layer_idx
+                    )
+                })?;
+            let selected_count = (position + 1).min(resource.topk_capacity);
+            let mut selected = vec![0i32; selected_count];
+            if selected_count > 0 {
+                let bytes = selected_count
+                    .checked_mul(std::mem::size_of::<i32>())
+                    .ok_or_else(|| {
+                        format!(
+                            "DSA debug snapshot owner {} selection byte count overflow",
+                            resource.owner_layer_idx
+                        )
+                    })?;
+                let err = unsafe {
+                    cuda_sys::lib().cuMemcpyDtoH_v2(
+                        selected.as_mut_ptr() as *mut std::ffi::c_void,
+                        *resource.d_topk_indices.device_ptr(),
+                        bytes,
+                    )
+                };
+                if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                    return Err(format!(
+                        "DSA debug snapshot owner {} selected-index D2H: {:?}",
+                        resource.owner_layer_idx, err
+                    ));
+                }
+            }
+            let selected_bytes = unsafe {
+                std::slice::from_raw_parts(
+                    selected.as_ptr() as *const u8,
+                    selected.len() * std::mem::size_of::<i32>(),
+                )
+            };
+            let ordered_hash = validation_fnv1a_u64(selected_bytes);
+            let mut selected_sorted = selected.clone();
+            selected_sorted.sort_unstable();
+            let sorted_bytes = unsafe {
+                std::slice::from_raw_parts(
+                    selected_sorted.as_ptr() as *const u8,
+                    selected_sorted.len() * std::mem::size_of::<i32>(),
+                )
+            };
+            let set_hash = validation_fnv1a_u64(sorted_bytes);
+            let sample_count = selected.len().min(8);
+            let sample = selected.iter().take(sample_count).copied().collect::<Vec<_>>();
+            let tail = selected
+                .iter()
+                .skip(selected.len().saturating_sub(sample_count))
+                .copied()
+                .collect::<Vec<_>>();
+
+            let key_row_bytes = registration
+                .index_head_dim
+                .checked_mul(std::mem::size_of::<u16>())
+                .ok_or_else(|| {
+                    format!(
+                        "DSA debug snapshot owner {} key-row byte count overflow",
+                        resource.owner_layer_idx
+                    )
+                })?;
+            let key_row_offset = position.checked_mul(key_row_bytes).ok_or_else(|| {
+                format!(
+                    "DSA debug snapshot owner {} key-row offset overflow",
+                    resource.owner_layer_idx
+                )
+            })?;
+            let mut key_row = vec![0u16; registration.index_head_dim];
+            let key_row_ptr = (*resource.d_key_cache.device_ptr())
+                .checked_add(u64::try_from(key_row_offset).map_err(|_| {
+                    format!(
+                        "DSA debug snapshot owner {} key-row offset exceeds u64",
+                        resource.owner_layer_idx
+                    )
+                })?)
+                .ok_or_else(|| {
+                    format!(
+                        "DSA debug snapshot owner {} key-row pointer overflow",
+                        resource.owner_layer_idx
+                    )
+                })?;
+            let err = unsafe {
+                cuda_sys::lib().cuMemcpyDtoH_v2(
+                    key_row.as_mut_ptr() as *mut std::ffi::c_void,
+                    key_row_ptr,
+                    key_row_bytes,
+                )
+            };
+            if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!(
+                    "DSA debug snapshot owner {} key-row D2H: {:?}",
+                    resource.owner_layer_idx, err
+                ));
+            }
+            let key_row_raw = unsafe {
+                std::slice::from_raw_parts(key_row.as_ptr() as *const u8, key_row_bytes)
+            };
+
+            entries.push(serde_json::json!({
+                "phase": "dsa_owner_selection_after_decode",
+                "decode_loop_step": decode_loop_step,
+                "decode_step_zero_indexed": graph.validation_decode_steps,
+                "decode_step_counter": graph.decode_step_counter,
+                "token_id": token_id,
+                "position": position,
+                "owner_layer": resource.owner_layer_idx,
+                "selected_count": selected_count,
+                "ordered_hash_fnv1a64": format!("{:016x}", ordered_hash),
+                "set_hash_fnv1a64": format!("{:016x}", set_hash),
+                "sample": sample,
+                "tail": tail,
+                "invalid_selected_count": selected
+                    .iter()
+                    .filter(|&&index| index < 0 || index as usize > position)
+                    .count(),
+                "index_key_row_width": registration.index_head_dim,
+                "index_key_row_hash_fnv1a64": format!(
+                    "{:016x}",
+                    validation_fnv1a_u64(key_row_raw)
+                ),
+            }));
+        }
+        graph.debug_decode_early_entries.extend(entries);
+        Ok(())
+    }
+
     /// Generate tokens in a tight Rust loop via GPU decode.
     /// No Python, no GIL. Same interface as CpuDecodeStore.generate_stream.
     pub fn gpu_generate_stream<F>(
@@ -54176,6 +54513,16 @@ impl GpuDecodeStore {
                         pos,
                         next_token,
                     );
+                }
+                if let Some(graph) = self.graph.as_mut() {
+                    if let Err(e) =
+                        Self::push_debug_dsa_selection_snapshot(graph, step, pos, next_token)
+                    {
+                        let failure = format!("DSA debug selection snapshot failed: {}", e);
+                        log::error!("gpu_generate_stream: {}", failure);
+                        self.last_stream_failure = Some(failure);
+                        break;
+                    }
                 }
                 let logits = &mut self.graph.as_mut().unwrap().h_logits;
 
@@ -59207,6 +59554,18 @@ impl GpuDecodeStore {
             let expert = &moe.experts[eid];
             let slot = di;
             let base = buf_base[slot];
+            // pre_events and both transient expert buffers are store-owned and
+            // reused across MoE layers. A local dma_expert_count starts at zero
+            // for every layer, so without this dependency the next layer can
+            // overwrite a slot while the previous layer still reads it.
+            let wait_err =
+                unsafe { cuda_sys::lib().cuStreamWaitEvent(copy_stream, ev_compute[slot], 0) };
+            if wait_err != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "cold DMA prequeue slot {} compute wait[{}]: {:?}",
+                    slot, layer_idx, wait_err
+                )));
+            }
             unsafe {
                 if expert.contiguous_ptr != 0 {
                     cuda_sys::lib().cuMemcpyHtoDAsync_v2(

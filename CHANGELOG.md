@@ -2,6 +2,51 @@
 
 ## Unreleased
 
+- Recorded the first timing-disabled standard GLM-5.2 sparse DSA benchmark on
+  one RTX PRO 6000 Blackwell 96 GB: 44.7 tok/s internal prefill at the
+  calibration-selected 1,000-token cap, and 4.50/4.48/4.41 tok/s internal
+  decode over 50/100/250 tokens. HCS retained 3,887/19,200 routed expert slots
+  and decode reached 1,180 MiB minimum free VRAM against the configured
+  600 MiB margin. The 7.82/5.76/4.81 tok/s HTTP figures are archived
+  separately because they include prompt tokens and request time. Full logs
+  are indexed in `benchmarks/BENCHMARKS.md`; this is a development baseline,
+  not an optimized or release result.
+- Fixed GLM-5.2 sparse DSA decode to feed the indexer query projection from
+  the normalized query-LoRA latent rather than the saved residual stream.
+  Captured and uncaptured MLA decode now compute that latent once and reuse it
+  for both DSA scoring and the ordinary `q_b` projection; incompatible DSA
+  registrations fail visibly.
+- Fixed a cross-layer decode race in the cold-expert DMA ping-pong buffers.
+  Buffer slots and their CUDA events are shared by the store, but the local
+  expert counter resets for each MoE layer; the first cold copies in a new
+  layer could therefore overwrite weights still consumed by the preceding
+  layer. Single-sequence pre-queue and batched decode now make every slot
+  reuse depend on that slot's latest compute-complete event. This preserves
+  GPU copy/compute overlap without adding a host synchronization. On a fresh
+  GLM-5.2 server, two ordinary 2,682-token/eight-output requests produced
+  identical token IDs and reported log-probabilities and both retained 636 MiB
+  minimum free VRAM against the configured 600 MiB margin.
+- Fixed fused-Marlin MoE prefill nondeterminism caused by atomic per-expert
+  route scatter. Identical routes could reach the fused expert GEMM in a
+  different row order across repeated requests, producing different BF16
+  results even though router logits, selected experts, weights, and inputs were
+  bit-identical. The replacement GPU scatter orders rows by token and top-k
+  slot, derives launch geometry from runtime token/expert counts, and preserves
+  the existing padded Marlin contract. A 20-launch CUDA test matches the exact
+  CPU ordering on every run. On GLM-5.2, two controlled 2,682-token requests
+  produced identical hashes for all 123 computational/state trace entries
+  across three chunks, matched llama-witness token `2132`, and retained 636 MiB
+  minimum free VRAM against the configured 600 MiB margin. Raw HCS pointer
+  addresses moved between requests as expected, without changing outputs.
+- Added a bounded selected-layer prefill trace mode that retains the full
+  active-matrix and compact-cache summaries needed for MLA diagnosis while
+  suppressing unrelated per-element records. This prevents unrelated trace
+  entries from filling the buffer and records every chunk in the runtime's
+  measured plan; trace allocations remain part of that plan. Real request
+  prefill low-water measurements now feed back into the runtime overhead
+  reserve for subsequent requests, and reference validation fails visibly
+  when measured free VRAM falls below the configured safety margin. The trace
+  remains request-gated with no ordinary-runtime hot-path work.
 - Completed the first long-context GLM-5.2 sparse-attention comparison against
   CPU BF16 llama-witness. On a frozen 2,682-token real-book input, both
   runtimes selected token `2132` (`It`) at rank one; the selected-token

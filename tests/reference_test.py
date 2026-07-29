@@ -365,14 +365,44 @@ def cleanup_between_configs():
 
 def call_reference_test(port: int, input_token_ids: List[int], max_tokens: int,
                         stop_token_ids: List[int], top_logprobs: int = 10,
-                        timeout: int = 120) -> Dict:
+                        timeout: int = 120,
+                        debug_prefill_device_trace_all_layers: bool = False,
+                        debug_prefill_device_trace_layer: Optional[int] = None,
+                        debug_prefill_device_trace_mla_only: bool = False,
+                        debug_decode_early_trace: bool = False,
+                        debug_decode_hcs_equiv_trace: bool = False,
+                        debug_decode_hcs_equiv_layer: int = 1,
+                        debug_hcs_transition_trace: bool = False) -> Dict:
     """Call the /v1/internal/reference_test endpoint."""
-    payload = json.dumps({
+    request = {
         "input_token_ids": input_token_ids,
         "max_tokens": max_tokens,
         "top_logprobs": top_logprobs,
         "stop_token_ids": stop_token_ids,
-    })
+    }
+    if (debug_prefill_device_trace_all_layers
+            or debug_prefill_device_trace_layer is not None
+            or debug_prefill_device_trace_mla_only):
+        request["debug_prefill_device_trace"] = True
+        if debug_prefill_device_trace_all_layers:
+            request["debug_prefill_device_trace_all_layers"] = True
+        if debug_prefill_device_trace_layer is not None:
+            request["debug_prefill_device_trace_layer"] = debug_prefill_device_trace_layer
+        if debug_prefill_device_trace_mla_only:
+            request["debug_prefill_device_trace_mla_only"] = True
+    if debug_decode_early_trace:
+        request.update({
+            "debug_decode_early_trace": True,
+            "debug_decode_early_trace_max_steps": min(max_tokens, 64),
+        })
+    if debug_decode_hcs_equiv_trace:
+        request.update({
+            "debug_decode_hcs_equiv_trace": True,
+            "debug_decode_hcs_equiv_layer": debug_decode_hcs_equiv_layer,
+        })
+    if debug_hcs_transition_trace:
+        request["debug_hcs_transition_trace"] = True
+    payload = json.dumps(request)
 
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
     conn.request("POST", "/v1/internal/reference_test", body=payload,
@@ -385,6 +415,16 @@ def call_reference_test(port: int, input_token_ids: List[int], max_tokens: int,
         raise RuntimeError(f"reference_test endpoint returned {resp.status}: {body}")
 
     return json.loads(body)
+
+
+def extract_debug_response(result: Dict) -> Optional[Dict]:
+    """Retain only explicitly requested diagnostic payloads in the report."""
+    debug = {
+        key: value
+        for key, value in result.items()
+        if key.startswith("debug_")
+    }
+    return debug or None
 
 
 def build_trace_input_row_map(
@@ -780,6 +820,29 @@ def judge_overall(prompt_verdicts: List[str]) -> str:
     return "PASS"
 
 
+def timing_vram_safety_violation(timing: Optional[Dict]) -> Optional[Dict]:
+    """Return the worst measured VRAM safety violation, if one is present."""
+    if not timing:
+        return None
+    safety_margin_mb = timing.get("safety_margin_mb")
+    lows = timing.get("vram_low_water")
+    if not isinstance(safety_margin_mb, (int, float)) or not isinstance(lows, list):
+        return None
+    violations = [
+        {
+            "device": entry.get("device"),
+            "min_free_mb": entry.get("min_free_mb"),
+            "safety_margin_mb": safety_margin_mb,
+            "deficit_mb": safety_margin_mb - entry.get("min_free_mb"),
+        }
+        for entry in lows
+        if isinstance(entry, dict)
+        and isinstance(entry.get("min_free_mb"), (int, float))
+        and entry.get("min_free_mb") < safety_margin_mb
+    ]
+    return min(violations, key=lambda entry: entry["min_free_mb"]) if violations else None
+
+
 def _format_metric_pct(value: Optional[float], digits: int = 0) -> str:
     if value is None:
         return "n/a"
@@ -790,7 +853,15 @@ def _format_metric_pct(value: Optional[float], digits: int = 0) -> str:
 
 def run_config_test(conf_path: str, ref_data: Dict, script_dir: str,
                     label: Optional[str] = None, verbose: bool = False,
-                    startup_timeout: int = 1200) -> Optional[Dict]:
+                    startup_timeout: int = 1200,
+                    request_timeout: int = 120,
+                    debug_prefill_device_trace_all_layers: bool = False,
+                    debug_prefill_device_trace_layer: Optional[int] = None,
+                    debug_prefill_device_trace_mla_only: bool = False,
+                    debug_decode_early_trace: bool = False,
+                    debug_decode_hcs_equiv_trace: bool = False,
+                    debug_decode_hcs_equiv_layer: int = 1,
+                    debug_hcs_transition_trace: bool = False) -> Optional[Dict]:
     """Run reference test for one config. Returns results dict or None on failure."""
     cfg = parse_config(conf_path)
     model_name = resolve_model_name(cfg)
@@ -855,6 +926,14 @@ def run_config_test(conf_path: str, ref_data: Dict, script_dir: str,
                         max_tokens=max_new_tokens,
                         stop_token_ids=eos_token_ids,
                         top_logprobs=10,
+                        timeout=request_timeout,
+                        debug_prefill_device_trace_all_layers=debug_prefill_device_trace_all_layers,
+                        debug_prefill_device_trace_layer=debug_prefill_device_trace_layer,
+                        debug_prefill_device_trace_mla_only=debug_prefill_device_trace_mla_only,
+                        debug_decode_early_trace=debug_decode_early_trace,
+                        debug_decode_hcs_equiv_trace=debug_decode_hcs_equiv_trace,
+                        debug_decode_hcs_equiv_layer=debug_decode_hcs_equiv_layer,
+                        debug_hcs_transition_trace=debug_hcs_transition_trace,
                     )
                 except Exception as e:
                     print(f"    ERROR: {e}", file=sys.stderr)
@@ -910,8 +989,19 @@ def run_config_test(conf_path: str, ref_data: Dict, script_dir: str,
                     except Exception as e:
                         print(f"    (prefill_logits failed: {e})")
 
-                verdict = judge_prompt(metrics, prefill_metrics, has_linear_attention=has_la)
                 timing = result.get("timing")
+                verdict = judge_prompt(metrics, prefill_metrics, has_linear_attention=has_la)
+                safety_violation = timing_vram_safety_violation(timing)
+                if safety_violation is not None:
+                    verdict = "FAIL"
+                    print(
+                        "    VRAM SAFETY FAILURE: "
+                        f"device={safety_violation['device']} "
+                        f"min_free={safety_violation['min_free_mb']} MB "
+                        f"margin={safety_violation['safety_margin_mb']} MB "
+                        f"deficit={safety_violation['deficit_mb']} MB",
+                        file=sys.stderr,
+                    )
                 write_reference_case_boundary(
                     proc,
                     phase="end",
@@ -934,6 +1024,7 @@ def run_config_test(conf_path: str, ref_data: Dict, script_dir: str,
                     "metrics": metrics,
                     "prefill_metrics": prefill_metrics,
                     "timing": timing,
+                    "debug": extract_debug_response(result),
                 })
 
                 # Print summary
@@ -1753,6 +1844,22 @@ def main():
                         help="Port override (for --no-server)")
     parser.add_argument("--startup-timeout", type=int, default=1200,
                         help="Seconds to wait for server readiness before failing")
+    parser.add_argument("--request-timeout", type=int, default=120,
+                        help="Seconds to wait for each reference endpoint request")
+    parser.add_argument("--debug-prefill-device-trace-all-layers", action="store_true",
+                        help="Capture bounded per-layer native prefill device summaries")
+    parser.add_argument("--debug-prefill-device-trace-layer", type=int, default=None,
+                        help="Capture detailed native prefill device summaries for one layer")
+    parser.add_argument("--debug-prefill-device-trace-mla-only", action="store_true",
+                        help="Restrict a selected-layer device trace to bounded MLA summaries")
+    parser.add_argument("--debug-decode-early-trace", action="store_true",
+                        help="Capture bounded early native decode state")
+    parser.add_argument("--debug-decode-hcs-equiv-trace", action="store_true",
+                        help="Compare cached and cold expert execution for one decode layer")
+    parser.add_argument("--debug-decode-hcs-equiv-layer", type=int, default=1,
+                        help="Layer to inspect with --debug-decode-hcs-equiv-trace")
+    parser.add_argument("--debug-hcs-transition-trace", action="store_true",
+                        help="Capture request-scoped HCS lifecycle transitions")
     args = parser.parse_args()
 
     script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1865,6 +1972,14 @@ def main():
                 label=label,
                 verbose=args.verbose,
                 startup_timeout=args.startup_timeout,
+                request_timeout=args.request_timeout,
+                debug_prefill_device_trace_all_layers=args.debug_prefill_device_trace_all_layers,
+                debug_prefill_device_trace_layer=args.debug_prefill_device_trace_layer,
+                debug_prefill_device_trace_mla_only=args.debug_prefill_device_trace_mla_only,
+                debug_decode_early_trace=args.debug_decode_early_trace,
+                debug_decode_hcs_equiv_trace=args.debug_decode_hcs_equiv_trace,
+                debug_decode_hcs_equiv_layer=args.debug_decode_hcs_equiv_layer,
+                debug_hcs_transition_trace=args.debug_hcs_transition_trace,
             )
             if result is not None:
                 all_results.append(result)
@@ -2046,6 +2161,14 @@ def main():
                             max_tokens=max_new_tokens,
                             stop_token_ids=eos_token_ids,
                             top_logprobs=10,
+                            timeout=args.request_timeout,
+                            debug_prefill_device_trace_all_layers=args.debug_prefill_device_trace_all_layers,
+                            debug_prefill_device_trace_layer=args.debug_prefill_device_trace_layer,
+                            debug_prefill_device_trace_mla_only=args.debug_prefill_device_trace_mla_only,
+                            debug_decode_early_trace=args.debug_decode_early_trace,
+                            debug_decode_hcs_equiv_trace=args.debug_decode_hcs_equiv_trace,
+                            debug_decode_hcs_equiv_layer=args.debug_decode_hcs_equiv_layer,
+                            debug_hcs_transition_trace=args.debug_hcs_transition_trace,
                         )
                     except Exception as e:
                         print(f"    ERROR: {e}", file=sys.stderr)
@@ -2090,8 +2213,19 @@ def main():
                         except Exception as e:
                             print(f"    (prefill_logits failed: {e})")
 
-                    verdict = judge_prompt(metrics, prefill_metrics, has_linear_attention=has_la)
                     timing = result.get("timing")
+                    verdict = judge_prompt(metrics, prefill_metrics, has_linear_attention=has_la)
+                    safety_violation = timing_vram_safety_violation(timing)
+                    if safety_violation is not None:
+                        verdict = "FAIL"
+                        print(
+                            "    VRAM SAFETY FAILURE: "
+                            f"device={safety_violation['device']} "
+                            f"min_free={safety_violation['min_free_mb']} MB "
+                            f"margin={safety_violation['safety_margin_mb']} MB "
+                            f"deficit={safety_violation['deficit_mb']} MB",
+                            file=sys.stderr,
+                        )
 
                     prompt_results.append({
                         "conv_idx": conv_idx,
@@ -2105,6 +2239,7 @@ def main():
                         "metrics": metrics,
                         "prefill_metrics": prefill_metrics,
                         "timing": timing,
+                        "debug": extract_debug_response(result),
                     })
 
                     fm = "MATCH" if metrics["first_match"] else "MISS"
@@ -2126,6 +2261,14 @@ def main():
                 script_dir,
                 verbose=args.verbose,
                 startup_timeout=args.startup_timeout,
+                request_timeout=args.request_timeout,
+                debug_prefill_device_trace_all_layers=args.debug_prefill_device_trace_all_layers,
+                debug_prefill_device_trace_layer=args.debug_prefill_device_trace_layer,
+                debug_prefill_device_trace_mla_only=args.debug_prefill_device_trace_mla_only,
+                debug_decode_early_trace=args.debug_decode_early_trace,
+                debug_decode_hcs_equiv_trace=args.debug_decode_hcs_equiv_trace,
+                debug_decode_hcs_equiv_layer=args.debug_decode_hcs_equiv_layer,
+                debug_hcs_transition_trace=args.debug_hcs_transition_trace,
             )
             if result is None:
                 print("ERROR: Test failed to run.", file=sys.stderr)
