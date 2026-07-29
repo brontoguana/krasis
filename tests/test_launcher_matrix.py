@@ -147,6 +147,14 @@ def _run_server_start_smoke(config_path: Path, scenario: str, expected_fragments
 
 
 class LauncherMatrixTest(unittest.TestCase):
+    def test_experimental_protocol_and_prefix_features_default_off(self) -> None:
+        cfg = LauncherConfig()
+        self.assertFalse(cfg.prefix_cache)
+        self.assertFalse(cfg.sse_timing_compat)
+        values = cfg.to_save_dict()
+        self.assertEqual(values["CFG_PREFIX_CACHE"], "0")
+        self.assertEqual(values["CFG_SSE_TIMING_COMPAT"], "0")
+
     maxDiff = None
 
     def test_native_windows_console_key_decoding(self) -> None:
@@ -855,6 +863,8 @@ class LauncherMatrixTest(unittest.TestCase):
         cfg.force_rebuild_hqq_cache = True
         cfg.build_cache = True
         cfg.enable_thinking = False
+        cfg.prefix_cache = True
+        cfg.sse_timing_compat = True
         with tempfile.NamedTemporaryFile("w", suffix=".conf", prefix="krasis-save-roundtrip-", delete=False) as f:
             path = Path(f.name)
         try:
@@ -904,6 +914,8 @@ class LauncherMatrixTest(unittest.TestCase):
             self.assertEqual(values.get("CFG_FORCE_REBUILD_HQQ_CACHE"), "1")
             self.assertEqual(values.get("CFG_BUILD_CACHE"), "1")
             self.assertEqual(values.get("CFG_ENABLE_THINKING"), "0")
+            self.assertEqual(values.get("CFG_PREFIX_CACHE"), "1")
+            self.assertEqual(values.get("CFG_SSE_TIMING_COMPAT"), "1")
 
             loaded = LauncherConfig()
             loaded.apply_saved(launcher_mod._load_config(str(path)))
@@ -948,6 +960,8 @@ class LauncherMatrixTest(unittest.TestCase):
             self.assertTrue(loaded.force_rebuild_hqq_cache)
             self.assertTrue(loaded.build_cache)
             self.assertFalse(loaded.enable_thinking)
+            self.assertTrue(loaded.prefix_cache)
+            self.assertTrue(loaded.sse_timing_compat)
         finally:
             path.unlink(missing_ok=True)
 

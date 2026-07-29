@@ -63,7 +63,7 @@ impl<'a> StreamDetokenizer<'a> {
 use pyo3::prelude::*;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Instant;
@@ -131,6 +131,12 @@ struct ServerState {
     eos_stop_ids: Vec<usize>,
     /// Monotonic order for /v1/internal/reference_test requests.
     reference_test_request_order: u64,
+    /// Experimental exact-prefix KV + recurrent-state reuse.
+    /// Explicitly disabled unless enabled by launcher configuration.
+    prefix_cache: HybridPrefixCache,
+    /// Emit a non-empty OpenAI-compatible `choices` entry in the trailing
+    /// Krasis timing SSE chunk. Disabled by default to preserve upstream output.
+    sse_timing_compat: bool,
 }
 
 #[derive(Clone)]
@@ -138,6 +144,198 @@ struct ServerInfo {
     model_name: String,
     max_context_tokens: usize,
     supports_vision: bool,
+}
+
+/// Monotonic epoch for GPU sequence-state ownership. Entry points that mutate
+/// device sequence state without access to `ServerState` — currently the
+/// Python-driven `RustServer::benchmark_request` — bump it around their work so
+/// the prefix cache can detect that its retained state was replaced outside the
+/// request loop.
+static SEQUENCE_STATE_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+fn sequence_state_epoch() -> u64 {
+    SEQUENCE_STATE_EPOCH.load(Ordering::SeqCst)
+}
+
+/// Bumps the sequence-state epoch on construction and again on drop, covering
+/// every exit path of the guarded scope.
+struct SequenceStateEpochGuard;
+
+impl SequenceStateEpochGuard {
+    fn new() -> Self {
+        SEQUENCE_STATE_EPOCH.fetch_add(1, Ordering::SeqCst);
+        SequenceStateEpochGuard
+    }
+}
+
+impl Drop for SequenceStateEpochGuard {
+    fn drop(&mut self) {
+        SEQUENCE_STATE_EPOCH.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct PrefixCacheStats {
+    lookups: u64,
+    hits: u64,
+    misses: u64,
+    invalidations: u64,
+    reused_tokens: u64,
+    suffix_tokens: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PrefixCacheEntry {
+    /// Exact token sequence represented by the live device state.
+    consumed_tokens: Vec<u32>,
+    /// Logical sequence position on every participating GPU.
+    state_position: usize,
+    /// Sequence-state epoch captured before the promoting request's prefill.
+    /// An epoch change means an out-of-band path replaced the device state.
+    state_epoch: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PrefixCacheLookup {
+    Disabled,
+    Miss {
+        reason: &'static str,
+    },
+    Hit {
+        prefix_len: usize,
+        suffix_len: usize,
+    },
+}
+
+/// Bookkeeping for the experimental single-lineage live-state cache.
+///
+/// This type deliberately owns token metadata only. KV and recurrent state
+/// remain in their existing device allocations. A cache entry is promoted only
+/// when `consumed_tokens` exactly describes the state position reached on all
+/// devices.
+#[derive(Debug)]
+struct HybridPrefixCache {
+    enabled: bool,
+    entry: Option<PrefixCacheEntry>,
+    stats: PrefixCacheStats,
+}
+
+impl HybridPrefixCache {
+    fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            entry: None,
+            stats: PrefixCacheStats::default(),
+        }
+    }
+
+    fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    fn lookup(
+        &mut self,
+        prompt_tokens: &[u32],
+        eligible: bool,
+        current_epoch: u64,
+    ) -> PrefixCacheLookup {
+        if !self.enabled {
+            return PrefixCacheLookup::Disabled;
+        }
+
+        self.stats.lookups += 1;
+        if !eligible {
+            self.invalidate();
+            self.stats.misses += 1;
+            return PrefixCacheLookup::Miss {
+                reason: "ineligible_request",
+            };
+        }
+
+        let Some(entry) = self.entry.as_ref() else {
+            self.stats.misses += 1;
+            return PrefixCacheLookup::Miss {
+                reason: "empty_cache",
+            };
+        };
+
+        if entry.state_epoch != current_epoch {
+            self.invalidate();
+            self.stats.misses += 1;
+            return PrefixCacheLookup::Miss {
+                reason: "state_epoch_changed",
+            };
+        }
+
+        if entry.state_position != entry.consumed_tokens.len() {
+            self.invalidate();
+            self.stats.misses += 1;
+            return PrefixCacheLookup::Miss {
+                reason: "state_position_mismatch",
+            };
+        }
+
+        let prefix_len = entry.consumed_tokens.len();
+        if prompt_tokens.len() <= prefix_len {
+            self.invalidate();
+            self.stats.misses += 1;
+            return PrefixCacheLookup::Miss {
+                reason: "not_an_append",
+            };
+        }
+
+        if prompt_tokens[..prefix_len] != entry.consumed_tokens {
+            self.invalidate();
+            self.stats.misses += 1;
+            return PrefixCacheLookup::Miss {
+                reason: "token_prefix_mismatch",
+            };
+        }
+
+        let suffix_len = prompt_tokens.len() - prefix_len;
+        self.stats.hits += 1;
+        self.stats.reused_tokens += prefix_len as u64;
+        self.stats.suffix_tokens += suffix_len as u64;
+        PrefixCacheLookup::Hit {
+            prefix_len,
+            suffix_len,
+        }
+    }
+
+    fn promote(
+        &mut self,
+        consumed_tokens: Vec<u32>,
+        state_position: usize,
+        state_epoch: u64,
+    ) -> Result<(), String> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if consumed_tokens.is_empty() {
+            self.invalidate();
+            return Err("prefix cache cannot promote an empty state".to_string());
+        }
+        if consumed_tokens.len() != state_position {
+            self.invalidate();
+            return Err(format!(
+                "prefix cache promotion position mismatch: tokens={} state_position={}",
+                consumed_tokens.len(),
+                state_position
+            ));
+        }
+        self.entry = Some(PrefixCacheEntry {
+            consumed_tokens,
+            state_position,
+            state_epoch,
+        });
+        Ok(())
+    }
+
+    fn invalidate(&mut self) {
+        if self.entry.take().is_some() {
+            self.stats.invalidations += 1;
+        }
+    }
 }
 
 fn drain_vram_pressure_for_state(
@@ -1000,11 +1198,12 @@ fn format_completion_with_tool_calls(
 
 /// Overhead timings collected during request setup (before decode).
 struct RequestOverhead {
-    parse_ms: f64,           // HTTP parse + JSON parse + tokenization
-    evict_ms: f64,           // HCS soft-tier eviction
-    prefill_ms: f64,         // GIL acquire + Python prefill
-    reload_ms: f64,          // HCS soft-tier reload (wall-clock, includes sync if enabled)
-    real_reload_dma_ms: f64, // Actual DMA time when sync is on (0.0 if async)
+    parse_ms: f64,              // HTTP parse + JSON parse + tokenization
+    evict_ms: f64,              // HCS soft-tier eviction
+    prefill_ms: f64,            // GIL acquire + Python prefill
+    prefill_work_tokens: usize, // Tokens actually computed (excludes reused prefix)
+    reload_ms: f64,             // HCS soft-tier reload (wall-clock, includes sync if enabled)
+    real_reload_dma_ms: f64,    // Actual DMA time when sync is on (0.0 if async)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1022,12 +1221,19 @@ fn format_sse_timing(
     prefill_tok_s: f64,
     overhead_ms: f64,
     overhead: &RequestOverhead,
+    sse_timing_compat: bool,
 ) -> String {
+    let choices = if sse_timing_compat {
+        r#"[{"index":0,"delta":{},"finish_reason":null}]"#
+    } else {
+        "[]"
+    };
     format!(
-        r#"{{"id":{},"object":"chat.completion.chunk","created":{},"model":{},"choices":[],"krasis_timing":{{"decode_tokens":{},"decode_time_ms":{:.1},"decode_tok_s":{:.2},"thinking_tokens":{},"answer_tokens":{},"total_generated":{},"prompt_tokens":{},"prefill_tok_s":{:.1},"overhead_ms":{:.1},"overhead":{{"parse_ms":{:.1},"evict_ms":{:.1},"prefill_ms":{:.1},"reload_ms":{:.1},"real_reload_dma_ms":{:.1}}}}}}}"#,
+        r#"{{"id":{},"object":"chat.completion.chunk","created":{},"model":{},"choices":{},"krasis_timing":{{"decode_tokens":{},"decode_time_ms":{:.1},"decode_tok_s":{:.2},"thinking_tokens":{},"answer_tokens":{},"total_generated":{},"prompt_tokens":{},"prefill_tok_s":{:.1},"overhead_ms":{:.1},"overhead":{{"parse_ms":{:.1},"evict_ms":{:.1},"prefill_ms":{:.1},"reload_ms":{:.1},"real_reload_dma_ms":{:.1}}}}}}}"#,
         json_string(request_id),
         created,
         json_string(model_name),
+        choices,
         decode_tokens,
         decode_time_ms,
         decode_tok_s,
@@ -1367,8 +1573,20 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
 
     let mut prompt_hcs_snapshot: Option<(Vec<u64>, usize, usize, usize)> = None;
     let mut chat_debug_input_token_ids: Option<Vec<u32>> = None;
+    // Captured before prefill: a bump between here and promotion means an
+    // out-of-band path (benchmark_request) replaced the device state.
+    let request_state_epoch = sequence_state_epoch();
     let prefill_result: Result<
-        (usize, usize, Vec<usize>, bool, Option<serde_json::Value>),
+        (
+            usize,
+            usize,
+            Vec<usize>,
+            bool,
+            Option<serde_json::Value>,
+            Vec<u32>,
+            usize,
+            bool,
+        ),
         String,
     > = {
         // ── Rust prefill: text requests stay token-id only; image requests
@@ -1500,6 +1718,41 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
 
         let kv_max_seq = engine.kv_max_seq;
         let kv_overflow = token_ids.len() > kv_max_seq;
+        // Overflowing prompts stay on the fully validated fresh-prefill path so
+        // their existing error contract is preserved.
+        let cache_lookup =
+            state
+                .prefix_cache
+                .lookup(&token_ids, !has_images && !kv_overflow, request_state_epoch);
+        let mut continuation_prefix_len = match cache_lookup {
+            PrefixCacheLookup::Hit {
+                prefix_len,
+                suffix_len,
+            } => {
+                log::info!(
+                    "prefix_cache=hit reason=exact_append cached={} reused={} suffix={}",
+                    prefix_len,
+                    prefix_len,
+                    suffix_len,
+                );
+                Some(prefix_len)
+            }
+            PrefixCacheLookup::Miss { reason } => {
+                log::info!(
+                    "prefix_cache=miss reason={} cached=0 reused=0 suffix={}",
+                    reason,
+                    token_ids.len(),
+                );
+                None
+            }
+            PrefixCacheLookup::Disabled => {
+                log::info!(
+                    "prefix_cache=disabled reason=feature_off cached=0 reused=0 suffix={}",
+                    token_ids.len(),
+                );
+                None
+            }
+        };
 
         let _has_hqq_runtime_slots = {
             let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
@@ -1532,7 +1785,28 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
             engine.set_prefill_runtime_chunk_cap(retry_cap);
 
             // Dynamically allocate scratch sized for this prompt.
-            if let Err(e) = engine.prepare_for_prefill(token_ids.len()) {
+            let prepare_result = if let Some(prefix_len) = continuation_prefix_len {
+                engine.prepare_for_continuation_prefill(
+                    token_ids.len(),
+                    token_ids.len().saturating_sub(prefix_len),
+                )
+            } else {
+                engine.prepare_for_prefill(token_ids.len())
+            };
+            if let Err(e) = prepare_result {
+                if continuation_prefix_len.take().is_some() {
+                    log::warn!(
+                        "Prefix continuation prepare failed; invalidating and retrying full prefill: {}",
+                        e
+                    );
+                    state.prefix_cache.invalidate();
+                    engine.clear_external_prefill_inputs();
+                    engine.set_optional_pinning_budget_mb(None);
+                    engine.clear_prefill_runtime_chunk_cap();
+                    let _ = engine.release_scratch();
+                    retry_cap = None;
+                    continue;
+                }
                 engine.clear_external_prefill_inputs();
                 engine.clear_prefill_hcs_guard_store_addr();
                 engine.set_optional_pinning_budget_mb(None);
@@ -1586,8 +1860,16 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                 engine.clear_external_prefill_inputs();
             }
 
-            let attempt_result = match engine.run_prefill(&token_ids, temperature, &suppress_tokens)
-            {
+            let attempt_result = match continuation_prefix_len {
+                Some(prefix_len) => engine.run_continuation_prefill(
+                    &token_ids[prefix_len..],
+                    prefix_len,
+                    temperature,
+                    &suppress_tokens,
+                ),
+                None => engine.run_prefill(&token_ids, temperature, &suppress_tokens),
+            };
+            let attempt_result = match attempt_result {
                 Ok(r) => match engine.finalize_stage_exact_prefill_kv(r.prompt_len) {
                     Ok(()) => Ok(r),
                     Err(e) => Err(format!("KV stage export failed: {}", e)),
@@ -1598,6 +1880,24 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
             match attempt_result {
                 Ok(r) => break Ok(r),
                 Err(e) => {
+                    if continuation_prefix_len.take().is_some() {
+                        log::warn!(
+                            "Prefix continuation mutated or failed; invalidating and retrying a full reset/prefill: {}",
+                            e
+                        );
+                        state.prefix_cache.invalidate();
+                        engine.set_optional_pinning_budget_mb(None);
+                        engine.clear_external_prefill_inputs();
+                        if let Err(release_err) = engine.release_scratch() {
+                            log::error!(
+                                "Failed to release scratch before full-prefill fallback: {}",
+                                release_err
+                            );
+                            break Err(release_err);
+                        }
+                        retry_cap = None;
+                        continue;
+                    }
                     let current_chunk = engine.scratch.max_tokens;
                     let next_retry_cap = engine.cold_staging_retry_chunk_cap();
                     if let Some(next_cap) = next_retry_cap {
@@ -1718,9 +2018,14 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                 };
                 // Set KV cache position on decode store so decode knows where to continue
                 let store = unsafe { &mut *(state.gpu_store_addr as *mut GpuDecodeStore) };
-                if let Err(e) = restore_store_after_rust_prefill(store, r.prompt_len) {
-                    log::error!("Failed to restore decode runtime after prefill: {}", e);
-                }
+                let prefill_state_exact =
+                    match restore_store_after_rust_prefill(store, r.prompt_len) {
+                        Ok(()) => true,
+                        Err(e) => {
+                            log::error!("Failed to restore decode runtime after prefill: {}", e);
+                            false
+                        }
+                    };
                 store.set_rope_position_delta(
                     multimodal_inputs
                         .as_ref()
@@ -1733,6 +2038,9 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                     stop_ids,
                     kv_overflow,
                     debug_payload,
+                    token_ids,
+                    continuation_prefix_len.unwrap_or(0),
+                    prefill_state_exact,
                 ))
             }
             Err(e) => {
@@ -1755,8 +2063,16 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
     let prefill_gil_ms = t_prefill_gil.elapsed().as_secs_f64() * 1000.0;
     crate::vram_monitor::report_event("prefill_end");
 
-    let (first_token, prompt_len, stop_ids, kv_overflow, chat_debug_payload) = match prefill_result
-    {
+    let (
+        first_token,
+        prompt_len,
+        stop_ids,
+        kv_overflow,
+        chat_debug_payload,
+        prompt_token_ids,
+        reused_prefix_tokens,
+        mut prefill_state_exact,
+    ) = match prefill_result {
         Ok(v) => v,
         Err(e) => {
             let err_str = e.to_string();
@@ -1802,6 +2118,7 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
             };
             let _ = send_json(stream, status, &body);
             // Cleanup on error
+            state.prefix_cache.invalidate();
             Python::with_gil(|py| {
                 let _ = state.py_model.call_method0(py, "server_cleanup");
             });
@@ -1824,6 +2141,7 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                 prompt_len, prompt_len,
             ),
         );
+        state.prefix_cache.invalidate();
         Python::with_gil(|py| {
             let _ = state.py_model.call_method0(py, "server_cleanup");
         });
@@ -1840,13 +2158,16 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
             .map(|(_, free_mb)| free_mb as usize)
             .unwrap_or(free_now_mb);
         let prefill_secs = prefill_gil_ms / 1000.0;
-        let prefill_tok_s = if prefill_secs > 0.0 && prompt_len > 0 {
-            prompt_len as f64 / prefill_secs
+        let prefill_work_tokens = prompt_len.saturating_sub(reused_prefix_tokens);
+        let prefill_tok_s = if prefill_secs > 0.0 && prefill_work_tokens > 0 {
+            prefill_work_tokens as f64 / prefill_secs
         } else {
             0.0
         };
         eprintln!(
-            "  \x1b[32mprefill: {} tokens in {:.2}s ({:.1} tok/s)  VRAM: {} MB free now, {} MB min free during prefill\x1b[0m",
+            "  \x1b[32mprefill: {} computed + {} reused = {} prompt tokens in {:.2}s ({:.1} computed tok/s)  VRAM: {} MB free now, {} MB min free during prefill\x1b[0m",
+            prefill_work_tokens,
+            reused_prefix_tokens,
             prompt_len,
             prefill_secs,
             prefill_tok_s,
@@ -1854,8 +2175,10 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
             prefill_min_free_mb,
         );
         log::info!(
-            "Request {} prefill: {} tokens in {:.2}s ({:.1} tok/s), free_now={} MB, min_free_prefill={} MB",
+            "Request {} prefill: computed_tokens={} reused_tokens={} prompt_tokens={} time={:.2}s computed_tok_s={:.1} free_now={} MB min_free_prefill={} MB",
             request_id,
+            prefill_work_tokens,
+            reused_prefix_tokens,
             prompt_len,
             prefill_secs,
             prefill_tok_s,
@@ -1874,6 +2197,7 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                 prompt_len, state.max_context_tokens, prompt_len, state.max_context_tokens
             ),
         );
+        state.prefix_cache.invalidate();
         Python::with_gil(|py| {
             let _ = state.py_model.call_method0(py, "server_cleanup");
         });
@@ -1961,6 +2285,7 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                     i + 1,
                     e
                 );
+                prefill_state_exact = false;
             }
             // Copy LA recurrent state (conv_state + recur_state) for linear attention layers
             if let Err(e) = store.copy_la_states_to_aux(aux_store, layer_start, layer_end) {
@@ -1970,6 +2295,16 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
                     i + 1,
                     e
                 );
+                prefill_state_exact = false;
+            }
+            if let Err(e) = store.copy_mamba2_states_to_aux(aux_store, layer_start, layer_end) {
+                log::error!(
+                    "Request {}: Mamba2 state copy to aux GPU{} failed: {}",
+                    request_id,
+                    i + 1,
+                    e
+                );
+                prefill_state_exact = false;
             }
         }
         let kvcopy_ms = t_kvcopy.elapsed().as_secs_f64() * 1000.0;
@@ -2034,6 +2369,7 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
         parse_ms,
         evict_ms,
         prefill_ms: prefill_gil_ms,
+        prefill_work_tokens: prompt_len.saturating_sub(reused_prefix_tokens),
         reload_ms,                          // includes sync wait
         real_reload_dma_ms: real_reload_ms, // actual DMA time (0 if async)
     };
@@ -2066,7 +2402,7 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
 
     // ── GPU decode: GIL-free Rust decode via GpuDecodeStore ──
     crate::vram_monitor::report_event("decode_start");
-    handle_gpu_decode(
+    let decode_outcome = handle_gpu_decode(
         stream,
         is_stream,
         state,
@@ -2091,11 +2427,98 @@ fn handle_chat_completion(stream: &mut TcpStream, body: &str, state: &mut Server
     );
     crate::vram_monitor::report_event("decode_end");
 
+    let mut preserve_sequence_state = false;
+    if state.prefix_cache.enabled() {
+        if prefill_state_exact && decode_outcome.exact_state {
+            let state_position =
+                prompt_len.saturating_add(decode_outcome.consumed_completion_tokens.len());
+            match gather_multi_gpu_sequence_state(state, store, state_position) {
+                Ok(()) => {
+                    let mut consumed_tokens = prompt_token_ids;
+                    consumed_tokens.extend_from_slice(&decode_outcome.consumed_completion_tokens);
+                    match state.prefix_cache.promote(
+                        consumed_tokens,
+                        state_position,
+                        request_state_epoch,
+                    ) {
+                        Ok(()) => {
+                            preserve_sequence_state = true;
+                            log::info!(
+                                "prefix_cache=promote source={} state_tokens={} completion_consumed={} exact_state=true",
+                                if reused_prefix_tokens > 0 { "hit" } else { "miss" },
+                                state_position,
+                                decode_outcome.consumed_completion_tokens.len(),
+                            );
+                        }
+                        Err(e) => {
+                            log::warn!(
+                                "prefix_cache=invalidate reason=promotion_failed error={}",
+                                e
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    state.prefix_cache.invalidate();
+                    log::warn!(
+                        "prefix_cache=invalidate reason=multi_gpu_state_gather_failed error={}",
+                        e
+                    );
+                }
+            }
+        } else {
+            state.prefix_cache.invalidate();
+            log::info!(
+                "prefix_cache=invalidate reason={}",
+                if prefill_state_exact {
+                    "inexact_decode_state"
+                } else {
+                    "inexact_prefill_restore"
+                }
+            );
+        }
+    }
+
     // ── Cleanup (GIL required) ──
     let t_cleanup_gil = Instant::now();
-    Python::with_gil(|py| {
-        let _ = state.py_model.call_method0(py, "server_cleanup");
+    let cleanup_result: Result<(), String> = Python::with_gil(|py| {
+        state
+            .py_model
+            .call_method1(py, "server_cleanup", (preserve_sequence_state,))
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     });
+    if let Err(e) = cleanup_result {
+        log::error!("Request {}: server cleanup failed: {}", request_id, e);
+        if preserve_sequence_state {
+            state.prefix_cache.invalidate();
+            log::warn!("prefix_cache=invalidate reason=preserving_cleanup_failed");
+            // Best effort full reset: no cache entry may survive a partial
+            // preserving cleanup.
+            Python::with_gil(|py| {
+                if let Err(reset_err) = state.py_model.call_method1(py, "server_cleanup", (false,))
+                {
+                    log::error!(
+                        "Request {}: full cleanup retry failed: {}",
+                        request_id,
+                        reset_err
+                    );
+                }
+            });
+        }
+    }
+    if state.prefix_cache.enabled() {
+        let stats = state.prefix_cache.stats;
+        log::info!(
+            "prefix_cache_stats lookups={} hits={} misses={} invalidations={} reused_tokens={} suffix_tokens={}",
+            stats.lookups,
+            stats.hits,
+            stats.misses,
+            stats.invalidations,
+            stats.reused_tokens,
+            stats.suffix_tokens,
+        );
+    }
     let cleanup_gil_ms = t_cleanup_gil.elapsed().as_secs_f64() * 1000.0;
     crate::vram_monitor::report_event("cleanup_end");
     let (cleanup_pressure_evicted, cleanup_pressure_freed_mb, cleanup_pressure_final_free_mb) =
@@ -2242,6 +2665,10 @@ fn handle_prefill_logits(stream: &mut TcpStream, body: &str, state: &mut ServerS
         sample_every,
         target_token_ids.is_some()
     );
+
+    // Diagnostic prefills replace live sequence state and therefore end any
+    // production continuation lineage.
+    state.prefix_cache.invalidate();
 
     // Evict soft HCS before diagnostic prefill so this endpoint uses the same
     // conservative VRAM budget as the production and reference-test paths.
@@ -2961,6 +3388,10 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
 
     let mut debug_hcs_transition_points: Vec<serde_json::Value> = Vec::new();
     let mut debug_mamba2_state_lifecycle_points: Vec<serde_json::Value> = Vec::new();
+
+    // Reference diagnostics replace live sequence state and therefore end any
+    // production continuation lineage.
+    state.prefix_cache.invalidate();
 
     // ── Evict soft HCS before prefill ──
     let prefill_entry_floor_bytes =
@@ -3798,6 +4229,63 @@ fn handle_reference_test(stream: &mut TcpStream, body: &str, state: &mut ServerS
 
 /// GPU decode: GIL-free Rust decode loop via GpuDecodeStore.
 /// Pure Rust, zero Python per token.
+#[derive(Debug, Default)]
+struct DecodeOutcome {
+    /// Completion tokens that were actually consumed into device state.
+    /// The final emitted token is intentionally excluded because decode emits
+    /// it after consuming the preceding token.
+    consumed_completion_tokens: Vec<u32>,
+    /// True only for a normal stop/length boundary (or a one-token response
+    /// requiring no decode step). Errors and disconnects remain ineligible.
+    exact_state: bool,
+}
+
+fn consumed_completion_tokens(first_token: usize, emitted_tokens: &[u32]) -> Vec<u32> {
+    if emitted_tokens.is_empty() {
+        return Vec::new();
+    }
+    let mut consumed = Vec::with_capacity(emitted_tokens.len());
+    consumed.push(first_token as u32);
+    consumed.extend_from_slice(&emitted_tokens[..emitted_tokens.len() - 1]);
+    consumed
+}
+
+fn gather_multi_gpu_sequence_state(
+    state: &ServerState,
+    primary_store: &mut GpuDecodeStore,
+    state_position: usize,
+) -> Result<(), String> {
+    if state.aux_gpu_store_addrs.is_empty() {
+        return Ok(());
+    }
+
+    let num_aux = state.aux_gpu_store_addrs.len();
+    let num_layers = primary_store.num_layers();
+    for i in 0..num_aux {
+        let aux_store = unsafe { &mut *(state.aux_gpu_store_addrs[i] as *mut GpuDecodeStore) };
+        let layer_start = state.multi_gpu_split_layers[i];
+        let layer_end = if i + 1 < num_aux {
+            state.multi_gpu_split_layers[i + 1]
+        } else {
+            num_layers
+        };
+
+        // Multi-GPU decode mutates each layer only on its owning device.
+        // Gather those exact sequence states back to the primary store so the
+        // next continuation prefill has one authoritative state image.
+        aux_store.copy_kv_to_aux(
+            primary_store,
+            layer_start,
+            layer_end,
+            state.multi_gpu_gqa_offsets[i],
+            state_position,
+        )?;
+        aux_store.copy_la_states_to_aux(primary_store, layer_start, layer_end)?;
+        aux_store.copy_mamba2_states_to_aux(primary_store, layer_start, layer_end)?;
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_gpu_decode(
     stream: &mut TcpStream,
@@ -3821,7 +4309,7 @@ fn handle_gpu_decode(
     enable_thinking: bool,
     logprobs_top_n: usize,
     chat_debug_payload: Option<serde_json::Value>,
-) {
+) -> DecodeOutcome {
     let mut chat_debug_payload = chat_debug_payload;
     // Resolve thinking end token early — used by both streaming and non-streaming paths
     let think_end_id = if enable_thinking {
@@ -3834,11 +4322,16 @@ fn handle_gpu_decode(
     } else {
         state.thinking_end_token
     };
+    // Speculative decode batches draft tokens through device state and rolls
+    // linear-attention state back around the emitted boundary, so per-token
+    // consumed accounting cannot certify an exact retained state. Never promote
+    // a prefix-cache entry for a request that could have used the draft model.
+    let speculative_decode_possible = store.has_draft_model();
 
     if is_stream {
         if let Err(e) = begin_sse(stream) {
             log::error!("Failed to send SSE headers: {}", e);
-            return;
+            return DecodeOutcome::default();
         }
 
         let first_text = tokenizer
@@ -3869,7 +4362,7 @@ fn handle_gpu_decode(
             Ok(s) => s,
             Err(e) => {
                 log::error!("Failed to clone stream for writer: {}", e);
-                return;
+                return DecodeOutcome::default();
             }
         };
 
@@ -3919,6 +4412,9 @@ fn handle_gpu_decode(
 
         let decode_start = Instant::now();
         let mut decode_token_count = 0usize;
+        let mut emitted_token_ids: Vec<u32> = Vec::new();
+        let mut exact_state = false;
+        let track_prefix_state = state.prefix_cache.enabled();
 
         // ── Thinking budget tracking ──
         // When thinking is enabled, tokens inside <think>...</think> are exempt
@@ -3971,6 +4467,9 @@ fn handle_gpu_decode(
                             token_logprobs: Option<&[(u32, f32)]>|
          -> bool {
             decode_token_count += 1;
+            if track_prefix_state {
+                emitted_token_ids.push(token_id as u32);
+            }
 
             // ── Track thinking state ──
             // Tokens before </think> are "thinking" and don't count against max_tokens.
@@ -3994,6 +4493,9 @@ fn handle_gpu_decode(
             } else {
                 None
             };
+            if effective_finish.is_some() {
+                exact_state = true;
+            }
             let hide_text =
                 hide_synthetic_think_stop_text(token_id, effective_finish, hidden_think_stop_id);
             let visible_text = if hide_text { "" } else { text };
@@ -4071,7 +4573,6 @@ fn handle_gpu_decode(
         } else {
             max_tokens.saturating_sub(1)
         };
-
         if !state.aux_gpu_store_addrs.is_empty() {
             // Multi-GPU decode: pipeline across N GPUs
             store.gpu_generate_stream_multi(
@@ -4107,6 +4608,11 @@ fn handle_gpu_decode(
                 Some(format!("chat_{}", request_id)),
                 on_token,
             );
+        }
+        if decode_budget == 0 {
+            // One-token responses run no decode step; device state still exactly
+            // represents the prompt.
+            exact_state = true;
         }
 
         // Capture decode timing BEFORE post-generation processing (tool call parsing etc.)
@@ -4174,8 +4680,8 @@ fn handle_gpu_decode(
             0.0
         };
         let decode_ms = elapsed * 1000.0;
-        let prefill_tok_s = if overhead.prefill_ms > 0.0 && prompt_len > 0 {
-            prompt_len as f64 / (overhead.prefill_ms / 1000.0)
+        let prefill_tok_s = if overhead.prefill_ms > 0.0 && overhead.prefill_work_tokens > 0 {
+            overhead.prefill_work_tokens as f64 / (overhead.prefill_ms / 1000.0)
         } else {
             0.0
         };
@@ -4195,6 +4701,7 @@ fn handle_gpu_decode(
             prefill_tok_s,
             overhead_total_ms,
             overhead,
+            state.sse_timing_compat,
         );
         let _ = tx.send(format!("data: {}\n\n", timing_chunk));
         let _ = tx.send("data: [DONE]\n\n".to_string());
@@ -4206,6 +4713,14 @@ fn handle_gpu_decode(
             request_id, elapsed, total_gen, decode_tok_s,
             overhead_total_ms, overhead.parse_ms, overhead.evict_ms, overhead.prefill_ms, overhead.reload_ms
         );
+        DecodeOutcome {
+            consumed_completion_tokens: if track_prefix_state {
+                consumed_completion_tokens(first_token, &emitted_token_ids)
+            } else {
+                Vec::new()
+            },
+            exact_state: exact_state && !speculative_decode_possible,
+        }
     } else {
         // ── Non-streaming path ──
         let mut all_text = String::new();
@@ -4219,6 +4734,9 @@ fn handle_gpu_decode(
         all_text.push_str(&first_text);
         let mut total_tokens = 1usize;
         let mut finish = "length".to_string();
+        let mut emitted_token_ids: Vec<u32> = Vec::new();
+        let mut exact_state = false;
+        let track_prefix_state = state.prefix_cache.enabled();
         let mut debug_output_tokens: Vec<(usize, Vec<(u32, f32)>)> = Vec::new();
         if chat_debug_payload.is_some() {
             debug_output_tokens.push((first_token, Vec::new()));
@@ -4241,6 +4759,9 @@ fn handle_gpu_decode(
         } else {
             max_tokens.saturating_sub(1)
         };
+        if ns_decode_budget == 0 {
+            exact_state = true;
+        }
 
         {
             let mut on_token = |token_id: usize,
@@ -4248,6 +4769,9 @@ fn handle_gpu_decode(
                                 finish_reason: Option<&str>,
                                 token_logprobs: Option<&[(u32, f32)]>|
              -> bool {
+                if track_prefix_state {
+                    emitted_token_ids.push(token_id as u32);
+                }
                 let hide_text =
                     hide_synthetic_think_stop_text(token_id, finish_reason, hidden_think_stop_id);
                 if !hide_text {
@@ -4274,11 +4798,13 @@ fn handle_gpu_decode(
 
                 if let Some(fr) = finish_reason {
                     finish = fr.to_string();
+                    exact_state = true;
                 }
 
                 // Stop if answer limit reached
                 if ns_think_end_id.is_some() && !ns_in_thinking && ns_answer_tokens >= max_tokens {
                     finish = "length".to_string();
+                    exact_state = true;
                     return false;
                 }
 
@@ -4414,6 +4940,14 @@ fn handle_gpu_decode(
             );
             let _ = send_json(stream, 200, &response);
         }
+        DecodeOutcome {
+            consumed_completion_tokens: if track_prefix_state {
+                consumed_completion_tokens(first_token, &emitted_token_ids)
+            } else {
+                Vec::new()
+            },
+            exact_state: exact_state && !speculative_decode_possible,
+        }
     }
 }
 
@@ -4441,12 +4975,16 @@ pub struct RustServer {
     prefill_engine: Arc<std::sync::Mutex<Option<crate::gpu_prefill::PrefillEngine>>>,
     /// Enable test-only endpoints (/v1/internal/prefill_logits)
     test_endpoints: bool,
+    /// Experimental exact-prefix KV + recurrent-state reuse.
+    prefix_cache_enabled: bool,
+    /// OpenAI-client compatibility for the trailing timing SSE chunk.
+    sse_timing_compat: bool,
 }
 
 #[pymethods]
 impl RustServer {
     #[new]
-    #[pyo3(signature = (py_model, host, port, model_name, tokenizer_path, max_context_tokens, enable_thinking=true, thinking_end_token_id=0, gpu_store_addr=0, aux_gpu_store_addrs=Vec::new(), multi_gpu_split_layers=Vec::new(), multi_gpu_gqa_offsets=Vec::new(), supports_vision=false, test_endpoints=false))]
+    #[pyo3(signature = (py_model, host, port, model_name, tokenizer_path, max_context_tokens, enable_thinking=true, thinking_end_token_id=0, gpu_store_addr=0, aux_gpu_store_addrs=Vec::new(), multi_gpu_split_layers=Vec::new(), multi_gpu_gqa_offsets=Vec::new(), supports_vision=false, test_endpoints=false, prefix_cache_enabled=false, sse_timing_compat=false))]
     fn new(
         py_model: PyObject,
         host: String,
@@ -4462,6 +5000,8 @@ impl RustServer {
         multi_gpu_gqa_offsets: Vec<usize>,
         supports_vision: bool,
         test_endpoints: bool,
+        prefix_cache_enabled: bool,
+        sse_timing_compat: bool,
     ) -> Self {
         // Take the pre-allocated Rust prefill engine from the decode store.
         // The engine was pre-allocated from Python (before HCS pool loading)
@@ -4512,6 +5052,8 @@ impl RustServer {
             supports_vision,
             prefill_engine: Arc::new(std::sync::Mutex::new(prefill_engine)),
             test_endpoints,
+            prefix_cache_enabled,
+            sse_timing_compat,
         }
     }
 
@@ -4532,6 +5074,8 @@ impl RustServer {
         let multi_gpu_split_layers = self.multi_gpu_split_layers.clone();
         let multi_gpu_gqa_offsets = self.multi_gpu_gqa_offsets.clone();
         let test_endpoints = self.test_endpoints;
+        let prefix_cache_enabled = self.prefix_cache_enabled;
+        let sse_timing_compat = self.sse_timing_compat;
         let running = self.running.clone();
 
         // Install raw SIGINT + SIGTERM handlers BEFORE releasing the GIL.
@@ -4709,7 +5253,17 @@ impl RustServer {
                 rust_prefill,
                 eos_stop_ids,
                 reference_test_request_order: 0,
+                prefix_cache: HybridPrefixCache::new(prefix_cache_enabled),
+                sse_timing_compat,
             };
+            log::info!(
+                "Experimental hybrid prefix-state cache: {}",
+                if state.prefix_cache.enabled() {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            );
 
             let server_info = ServerInfo {
                 model_name: state.model_name.clone(),
@@ -4829,6 +5383,10 @@ impl RustServer {
         temperature: f32,
         enable_thinking: bool,
     ) -> PyResult<String> {
+        // This entry point mutates GPU sequence state outside the request loop
+        // and has no access to `ServerState`. Bump the sequence-state epoch on
+        // entry and exit so any prefix-cache entry spanning this call misses.
+        let _sequence_state_epoch_guard = SequenceStateEpochGuard::new();
         let benchmark_prefill_breakdown =
             std::env::var("KRASIS_BENCHMARK_PREFILL_BREAKDOWN").is_ok();
 
@@ -5462,10 +6020,11 @@ impl RustServer {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_completion, format_completion_with_debug, format_completion_with_tool_calls,
-        format_models_response, format_sse_timing, format_sse_token, format_sse_tool_call_args,
-        format_sse_tool_call_start, hide_synthetic_think_stop_text, is_chat_completions_endpoint,
-        is_models_endpoint, ParsedToolCall, RequestOverhead,
+        consumed_completion_tokens, format_completion, format_completion_with_debug,
+        format_completion_with_tool_calls, format_models_response, format_sse_timing,
+        format_sse_token, format_sse_tool_call_args, format_sse_tool_call_start,
+        hide_synthetic_think_stop_text, is_chat_completions_endpoint, is_models_endpoint,
+        HybridPrefixCache, ParsedToolCall, PrefixCacheLookup, RequestOverhead,
     };
 
     const WINDOWS_MODEL_PATH: &str = r#"C:\Users\stoate\.krasis\models\Qwen3.6-35B-A3B"#;
@@ -5474,6 +6033,117 @@ mod tests {
         serde_json::from_str(body).unwrap_or_else(|e| {
             panic!("response is not valid JSON: {e}\nbody: {body}");
         })
+    }
+
+    #[test]
+    fn prefix_cache_is_disabled_by_default() {
+        let mut cache = HybridPrefixCache::new(false);
+        cache.promote(vec![1, 2, 3], 3, 0).unwrap();
+        assert_eq!(
+            cache.lookup(&[1, 2, 3, 4], true, 0),
+            PrefixCacheLookup::Disabled
+        );
+        assert_eq!(cache.stats.lookups, 0);
+        assert!(cache.entry.is_none());
+    }
+
+    #[test]
+    fn prefix_cache_hits_only_on_an_exact_nonempty_append() {
+        let mut cache = HybridPrefixCache::new(true);
+        cache.promote(vec![10, 20, 30], 3, 0).unwrap();
+        assert_eq!(
+            cache.lookup(&[10, 20, 30, 40, 50], true, 0),
+            PrefixCacheLookup::Hit {
+                prefix_len: 3,
+                suffix_len: 2,
+            }
+        );
+        assert_eq!(cache.stats.lookups, 1);
+        assert_eq!(cache.stats.hits, 1);
+        assert_eq!(cache.stats.reused_tokens, 3);
+        assert_eq!(cache.stats.suffix_tokens, 2);
+    }
+
+    #[test]
+    fn prefix_cache_mismatch_invalidates_live_state() {
+        let mut cache = HybridPrefixCache::new(true);
+        cache.promote(vec![10, 20, 30], 3, 0).unwrap();
+        assert_eq!(
+            cache.lookup(&[10, 99, 30, 40], true, 0),
+            PrefixCacheLookup::Miss {
+                reason: "token_prefix_mismatch",
+            }
+        );
+        assert!(cache.entry.is_none());
+        assert_eq!(cache.stats.invalidations, 1);
+    }
+
+    #[test]
+    fn prefix_cache_rejects_equal_prompt_and_bad_position() {
+        let mut cache = HybridPrefixCache::new(true);
+        assert!(cache.promote(vec![1, 2, 3], 2, 0).is_err());
+        assert!(cache.entry.is_none());
+
+        cache.promote(vec![1, 2, 3], 3, 0).unwrap();
+        assert_eq!(
+            cache.lookup(&[1, 2, 3], true, 0),
+            PrefixCacheLookup::Miss {
+                reason: "not_an_append",
+            }
+        );
+        assert!(cache.entry.is_none());
+    }
+
+    #[test]
+    fn prefix_cache_ineligible_request_invalidates_live_state() {
+        let mut cache = HybridPrefixCache::new(true);
+        cache.promote(vec![1, 2, 3], 3, 0).unwrap();
+        assert_eq!(
+            cache.lookup(&[1, 2, 3, 4], false, 0),
+            PrefixCacheLookup::Miss {
+                reason: "ineligible_request",
+            }
+        );
+        assert!(cache.entry.is_none());
+    }
+
+    #[test]
+    fn prefix_cache_epoch_change_invalidates_live_state() {
+        // An out-of-band state mutation (benchmark_request) bumps the
+        // sequence-state epoch; a retained entry from an older epoch must miss
+        // even when the token prefix still matches.
+        let mut cache = HybridPrefixCache::new(true);
+        cache.promote(vec![1, 2, 3], 3, 4).unwrap();
+        assert_eq!(
+            cache.lookup(&[1, 2, 3, 4], true, 6),
+            PrefixCacheLookup::Miss {
+                reason: "state_epoch_changed",
+            }
+        );
+        assert!(cache.entry.is_none());
+        assert_eq!(cache.stats.invalidations, 1);
+
+        cache.promote(vec![1, 2, 3], 3, 6).unwrap();
+        assert_eq!(
+            cache.lookup(&[1, 2, 3, 4], true, 6),
+            PrefixCacheLookup::Hit {
+                prefix_len: 3,
+                suffix_len: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn consumed_completion_tokens_match_device_decode_position() {
+        // Prefill selects `first_token` but does not consume it. Each decode
+        // callback emits a token after consuming the preceding token, so the
+        // final emitted token is not yet represented by device state.
+        assert!(consumed_completion_tokens(10, &[]).is_empty());
+        assert_eq!(consumed_completion_tokens(10, &[20]), vec![10]);
+        assert_eq!(
+            consumed_completion_tokens(10, &[20, 30, 40]),
+            vec![10, 20, 30]
+        );
     }
 
     #[test]
@@ -5613,6 +6283,7 @@ mod tests {
             parse_ms: 1.0,
             evict_ms: 2.0,
             prefill_ms: 3.0,
+            prefill_work_tokens: 17,
             reload_ms: 4.0,
             real_reload_dma_ms: 5.0,
         };
@@ -5630,10 +6301,32 @@ mod tests {
             200.0,
             10.0,
             &overhead,
+            false,
         );
         let timing_json = parse_response(&timing);
         assert_eq!(timing_json["model"], WINDOWS_MODEL_PATH);
+        assert_eq!(timing_json["choices"].as_array().unwrap().len(), 0);
         assert_eq!(timing_json["krasis_timing"]["decode_tokens"], 7);
+
+        let compatible_timing = format_sse_timing(
+            "chatcmpl-test",
+            WINDOWS_MODEL_PATH,
+            123,
+            7,
+            70.0,
+            100.0,
+            0,
+            8,
+            8,
+            17,
+            200.0,
+            10.0,
+            &overhead,
+            true,
+        );
+        let compatible_json = parse_response(&compatible_timing);
+        assert_eq!(compatible_json["choices"][0]["index"], 0);
+        assert!(compatible_json["choices"][0]["delta"].is_object());
     }
 
     #[test]
