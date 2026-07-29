@@ -56230,21 +56230,6 @@ impl GpuDecodeStore {
                 let avg_cold = graph.dma_cold_experts as f64 / n;
                 let avg_hcs = graph.dma_hcs_experts as f64 / n;
                 let dma_mb = avg_dma_bytes / (1024.0 * 1024.0);
-                // In graph mode, per-component expert_loop time isn't available,
-                // so estimate PCIe BW from total time and cold fraction instead
-                let avg_expert_loop_for_bw = if graph_mode {
-                    // Estimate: MoE is ~70% of total time for QCN-like models
-                    avg_total * 0.7
-                } else {
-                    graph.t_moe_expert_loop / n * 1000.0
-                };
-                let cold_frac = avg_cold / (avg_cold + avg_hcs).max(1.0);
-                let est_dma_time_ms = avg_expert_loop_for_bw * cold_frac;
-                let est_pcie_bw = if est_dma_time_ms > 0.001 {
-                    dma_mb / (est_dma_time_ms / 1000.0) / 1024.0
-                } else {
-                    0.0
-                };
                 eprintln!("  \x1b[36m├─────────────────────────────────────────────────┤\x1b[0m");
                 eprintln!("  \x1b[36m│\x1b[0m  PCIe DMA (non-serialized):                     \x1b[36m│\x1b[0m");
                 eprintln!("  \x1b[36m│\x1b[0m    Cold experts/tok: {:.1} ({:.0} DMA calls)      \x1b[36m│\x1b[0m", avg_cold, avg_dma_calls);
@@ -56257,7 +56242,7 @@ impl GpuDecodeStore {
                     0.0
                 };
                 eprintln!("  \x1b[36m│\x1b[0m    Avg DMA call size: {:.1} KB                   \x1b[36m│\x1b[0m", bytes_per_call / 1024.0);
-                eprintln!("  \x1b[36m│\x1b[0m    Est PCIe BW:      {:.1} GB/s (cold fraction)  \x1b[36m│\x1b[0m", est_pcie_bw);
+                eprintln!("  \x1b[36m│\x1b[0m    PCIe bandwidth:   unavailable (overlap)       \x1b[36m│\x1b[0m");
                 eprintln!("  \x1b[36m└─────────────────────────────────────────────────┘\x1b[0m");
 
                 // Also emit to structured log (no ANSI escapes)

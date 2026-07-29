@@ -78,6 +78,13 @@ class VramPressureSourceTests(unittest.TestCase):
         self.assertIn("engine.last_prepare_post_alloc_free_mb()", source)
         self.assertIn("crate::vram_monitor::current_request_lows()", source)
 
+    def test_decode_timing_does_not_invent_graph_pcie_bandwidth(self) -> None:
+        source = (ROOT / "src/gpu_decode.rs").read_text()
+
+        self.assertNotIn("MoE is ~70% of total time", source)
+        self.assertNotIn("Est PCIe BW:", source)
+        self.assertIn("PCIe bandwidth:   unavailable (overlap)", source)
+
 
 if __name__ == "__main__":
     unittest.main()

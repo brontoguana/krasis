@@ -44,6 +44,39 @@ Notes:
   optimization. Any conclusion about the 44.7/4.50 tok/s bottlenecks requires
   a separate instrumented component run.
 
+### GLM-5.2 timing-enabled component diagnosis
+
+The same configuration was rerun with `--timing` to localize component costs.
+These aggregate speeds are not regression numbers because instrumentation adds
+substantial overhead.
+
+| Phase | Total wall | Host sync wait | CUDA graph segments | Cold routes/token | Cold payload/token |
+|-------|-----------:|---------------:|--------------------:|------------------:|-------------------:|
+| All-cold calibration | 535.40 ms/tok | 509.05 ms/tok | 82.93 ms/tok | 600.0 | 11,137.50 MB |
+| Timed decode, 50 tokens | 226.6 ms/tok | 214.16 ms/tok | 61.95 ms/tok | 207.4 | 3,850.01 MB |
+| Timed decode, 100 tokens | 224.1 ms/tok | 214.37 ms/tok | 64.07 ms/tok | 202.2 | 3,753.00 MB |
+| Timed decode, 250 tokens | 230.7 ms/tok | 222.53 ms/tok | 68.38 ms/tok | 205.9 | 3,821.12 MB |
+
+Evidence: [report](20260729_082713_rtx6000_glm52_hqq4_k4v4_sparse4096_timing_diag_report.log),
+[stdout](20260729_082713_rtx6000_glm52_hqq4_k4v4_sparse4096_timing_diag_stdout.log),
+and [server log](20260729_082713_rtx6000_glm52_hqq4_k4v4_sparse4096_timing_diag_krasis.log).
+
+Important measurement boundary:
+
+- Host sync wait contains graph/copy execution that must complete before the
+  next layer segment can proceed, so it is not additive with CUDA graph-event
+  time. It nevertheless localizes the dominant wall interval to inter-layer
+  cold-transfer dependencies.
+- The raw diagnostic log's `Est PCIe BW` field is invalid and must not be used.
+  Graph mode assumed MoE was 70% of token time and scaled that guess by the
+  cold-route fraction, producing impossible 65.6-73.3 GB/s values on PCIe 4.0
+  x16. The estimator was removed immediately after this run; future reports
+  mark bandwidth unavailable until overlapping copy streams have a directly
+  measured interval.
+- The timing-enabled aggregate measured 44.5 tok/s prefill and
+  4.41/4.46/4.33 tok/s internal decode. The timing-disabled 44.7 and
+  4.50/4.48/4.41 tok/s rows above remain the performance baseline.
+
 ## Step-3.7-Flash RTX PRO 6000 adaptive 75/8 A/B - 2026-07-23
 
 Purpose: measure adaptive cold-mass pruning on the existing RTX PRO 6000

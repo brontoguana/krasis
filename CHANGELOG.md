@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Removed the decode timing report's fabricated PCIe-bandwidth estimate. Graph
+  mode had assumed that MoE occupied 70% of token time and multiplied that
+  estimate by the cold-route fraction; on GLM-5.2 it reported 65.6-73.3 GB/s
+  on a PCIe 4.0 x16 link. The report retains measured cold-route counts, bytes,
+  calls, HCS activity, graph-event time, and wall/synchronization time, but now
+  marks bandwidth unavailable until copy-stream overlap has a real measured
+  interval.
 - Recorded the first timing-disabled standard GLM-5.2 sparse DSA benchmark on
   one RTX PRO 6000 Blackwell 96 GB: 44.7 tok/s internal prefill at the
   calibration-selected 1,000-token cap, and 4.50/4.48/4.41 tok/s internal
