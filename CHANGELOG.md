@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- Measured the existing default-off adaptive cold-mass pruning experiment on
+  GLM-5.2 with the approved 80-prompt heatmap and exact split launch. The
+  `75/10` preset improved timing-disabled internal 50/100/250-token decode from
+  `5.02/5.11/4.88` to `5.79/5.98/5.72` tok/s
+  (`+15.3/+17.0/+17.2%`). Sustained decode omitted `45.193` of `198.739`
+  demand-cold routes per token, saving `838.891 MiB/token` while dropping
+  `3.807046%` aggregate routed mass; the per-layer/token ceiling reached
+  `9.999444%`. Prefill remained statistically flat at `44.2` versus
+  `45.0` tok/s, HCS retained `3,887/19,200` experts, and decode reached
+  `1,178 MiB` minimum free against the `600 MiB` margin with no budget skips,
+  no-slot events, or copy failures in the benchmark. The frozen 2,682-token
+  llama-witness gate retained the accepted 7/8 teacher-forced argmax boundary,
+  four contiguous, with all eight witness tokens in native top 10. The native
+  token sequence, first-token top-10 IDs, and first-token log probabilities
+  were identical to a matched exact-p80 split control; later teacher-forced
+  selected-token log probabilities shifted by `0.077838` mean and `0.414816`
+  maximum absolute delta without changing any rank. This material
+  distribution movement reinforces that the narrow eight-token pass is not
+  quality equivalence. The preset remains an explicitly approximate
+  experiment and is not enabled by default.
 - Changed approved route-heatmap construction from an all-cold collection loop
   to calibrated adaptive residency. A fresh build now runs only its first
   prompt without HCS, merges that interval into an independent cumulative

@@ -142,6 +142,78 @@ unchanged, while later-token log probabilities were not bit-identical; this
 is explicitly not a BF16 distribution-equivalence claim. Request decode
 reached 1,118 MiB minimum free against the 600 MiB margin.
 
+### GLM-5.2 p80 adaptive cold-mass 75/10 experiment
+
+Purpose: measure the existing default-off approximate `75/10` policy on the
+accepted p80 heatmap and exact split-launch path, then gate the result against
+the frozen long sparse llama-witness profile. Timing and trace instrumentation
+were disabled for the speed run.
+
+Command:
+
+```text
+KRASIS_SPLIT_EXPERT_LAUNCH=1 ./dev benchmark \
+  tests/glm52-4-4-hqq4-k4v4-sparse-4096-rtx6000.conf \
+  --adaptive-cold-mass-pruning 75/10
+```
+
+| Mode | Prefill internal | 50-token decode | 100-token decode | 250-token decode | Round trip 50/100/250 | HCS coverage | Min free VRAM |
+|------|-----------------:|----------------:|-----------------:|-----------------:|-----------------------:|-------------:|--------------:|
+| Exact p80 + split | 45.0 tok/s | 5.02 tok/s | 5.11 tok/s | 4.88 tok/s | 8.40 / 6.34 / 5.22 tok/s | 3887/19200 | 1,178 MB |
+| Adaptive p80 75/10 + split | 44.2 tok/s | 5.79 tok/s | 5.98 tok/s | 5.72 tok/s | 9.68 / 7.34 / 6.29 tok/s | 3887/19200 | 1,178 MB |
+| Adaptive delta | -1.8% | +15.3% | +17.0% | +17.2% | +15.2% / +15.8% / +20.5% | unchanged | unchanged |
+
+Sustained 250-token internal decode selected `49,486` demand-cold
+activations before pruning and omitted `11,253`: `45.193` per token, or
+`22.74%` of cold routes. This avoided `838.891 MiB/token` while dropping
+`3.807046%` aggregate routed mass; the largest per-layer/token event reached
+`9.999444%`. Ranks 7 and 8 accounted for `4,422` and `6,831` drops. The
+observed exact-control wall fell from 205.1 to 174.9 ms/token, a 30.2 ms
+reduction. At the separately measured 26.01 decimal GB/s demand link rate, the
+omitted 838.891 MiB corresponds to about 33.8 ms/token. The estimates are close
+in scale, but the link rate came from a separate timing-enabled run and is not
+treated as a same-run decomposition.
+
+The benchmark retained `1,178 MiB` minimum free against the `600 MiB` margin
+and reported zero budget skips, no-slot events, or copy failures. Prefill is
+outside the decode-only policy; its `-1.8%` change is treated as run variance.
+
+The frozen 2,682-token/eight-token
+`llama_witness_glm52_sparse_long_8_tokens_relu` comparison retained the
+accepted production-quantization token boundary: 7/8 teacher-forced argmaxes,
+the first four contiguously, with the sole disagreement at native rank two and
+all eight witness tokens in native top 10. The native text, token IDs,
+first-token top-10 IDs, and first-token log probabilities were identical to
+the matched exact-p80 split control. Later teacher-forced selected-token log
+probabilities shifted by `0.077838` mean and `0.414816` maximum absolute delta
+without changing any rank. This is material distribution movement despite the
+unchanged narrow token boundary. Both requests reached `636 MiB` minimum free
+and reported zero budget skips/copy failures; each had twelve dynamic-HCS
+promotion attempts find no free slot during this longer workload.
+
+Evidence:
+
+- [benchmark report](20260729_171622_rtx6000_glm52_hqq4_k4v4_sparse4096_p80_adaptive75_10_benchmark_report.log),
+  [stdout](20260729_171622_rtx6000_glm52_hqq4_k4v4_sparse4096_p80_adaptive75_10_benchmark_stdout.log),
+  and [server log](20260729_171622_rtx6000_glm52_hqq4_k4v4_sparse4096_p80_adaptive75_10_krasis.log)
+- [witness summary](20260729_173508_rtx6000_glm52_hqq4_k4v4_sparse4096_p80_adaptive75_10_witness_summary.json),
+  [HTML report](20260729_173508_rtx6000_glm52_hqq4_k4v4_sparse4096_p80_adaptive75_10_witness_report.html),
+  [stdout](20260729_173508_rtx6000_glm52_hqq4_k4v4_sparse4096_p80_adaptive75_10_witness_stdout.log),
+  and [server log](20260729_173508_rtx6000_glm52_hqq4_k4v4_sparse4096_p80_adaptive75_10_witness_krasis.log)
+- Matched exact-p80 split witness
+  [summary](20260729_180812_rtx6000_glm52_hqq4_k4v4_sparse4096_p80_split_exact_witness_summary.json),
+  [HTML report](20260729_180812_rtx6000_glm52_hqq4_k4v4_sparse4096_p80_split_exact_witness_report.html),
+  [stdout](20260729_180812_rtx6000_glm52_hqq4_k4v4_sparse4096_p80_split_exact_witness_stdout.log),
+  and [server log](20260729_180812_rtx6000_glm52_hqq4_k4v4_sparse4096_p80_split_exact_witness_krasis.log)
+- [Excluded quick-heatmap exact split context](20260729_123218_rtx6000_glm52_hqq4_k4v4_sparse4096_quick_heatmap_split_exact_witness_summary.json);
+  it predates p80 and is not used for the pruning-only distribution deltas.
+
+The speed result is promising, but this remains an approximate experiment,
+not a production/default recommendation. The `0.414816` maximum later-token
+log-probability shift makes broader held-out quality or perplexity evidence
+mandatory before accepting a policy that omits about 3.8% routed mass in
+sustained decode.
+
 ## Step-3.7-Flash RTX PRO 6000 adaptive 75/8 A/B - 2026-07-23
 
 Purpose: measure adaptive cold-mass pruning on the existing RTX PRO 6000

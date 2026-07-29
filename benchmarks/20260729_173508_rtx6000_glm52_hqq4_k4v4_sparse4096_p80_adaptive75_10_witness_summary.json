@@ -1,0 +1,349 @@
+{
+  "model": "GLM-5.2",
+  "config": "tests/glm52-4-4-hqq4-k4v4-sparse-4096-rtx6000.conf",
+  "reference_path": "/home/main/Documents/Claude/krasis-internal/reference-outputs/output/GLM-5.2/llama_witness_glm52_sparse_long_8_tokens_relu.json",
+  "overall": "PASS",
+  "prompt_results": [
+    {
+      "conv_idx": 0,
+      "turn": 1,
+      "multi_turn": false,
+      "prompt": "MOBY-DICK;\r\n\r\nor, THE WHALE.\r\n\r\nBy Herman Melville\r\n\r\n\r\n\r\nCONTENTS\r\n\r\nETYMOLOGY.\r\n\r\nEXTRACTS (Supplied by a Sub-Sub-Librarian).\r\n\r\nCHAPTER 1. Loomings.\r\n\r\nCHAPTER 2. The Carpet-Bag.\r\n\r\nCHAPTER 3. The Spouter-Inn.\r\n\r\nCHAPTER 4. The Counterpane.\r\n\r\nCHAPTER 5. Breakfast.\r\n\r\nCHAPTER 6. The Street.\r\n\r\nCHAPTER 7. The Chapel.\r\n\r\nCHAPTER 8. The Pulpit.\r\n\r\nCHAPTER 9. The Sermon.\r\n\r\nCHAPTER 10. A Bosom Friend.\r\n\r\nCHAPTER 11. Nightgown.\r\n\r\nCHAPTER 12. Biographical.\r\n\r\nCHAPTER 13. Wheelbarrow.\r\n\r\nCHAPTER 14. Nantucket.\r\n\r\nCHAPTER 15. Chowder.\r\n\r\nCHAPTER 16. The Ship.\r\n\r\nCHAPTER 17. The Ramadan.\r\n\r\nCHAPTER 18. His Mark.\r\n\r\nCHAPTER 19. The Prophet.\r\n\r\nCHAPTER 20. All Astir.\r\n\r\nCHAPTER 21. Going Aboard.\r\n\r\nCHAPTER 22. Merry Christmas.\r\n\r\nCHAPTER 23. The Lee Shore.\r\n\r\nCHAPTER 24. The Advocate.\r\n\r\nCHAPTER 25. Postscript.\r\n\r\nCHAPTER 26. Knights and Squires.\r\n\r\nCHAPTER 27. Knights and Squires.\r\n\r\nCHAPTER 28. Ahab.\r\n\r\nCHAPTER 29. Enter Ahab; to Him, Stubb.\r\n\r\nCHAPTER 30. The Pipe.\r\n\r\nCHAPTER 31. Queen Mab.\r\n\r\nCHAPTER 32. Cetology.\r\n\r\nCHAPTER 33. The Specksnyder.\r\n\r\nCHAPTER 34. The Cabin-Table.\r\n\r\nCHAPTER 35. The Mast-Head.\r\n\r\nCHAPTER 36. The Quarter-Deck.\r\n\r\nCHAPTER 37. Sunset.\r\n\r\nCHAPTER 38. Dusk.\r\n\r\nCHAPTER 39. First Night-Watch.\r\n\r\nCHAPTER 40. Midnight, Forecastle.\r\n\r\nCHAPTER 41. Moby Dick.\r\n\r\nCHAPTER 42. The Whiteness of the Whale.\r\n\r\nCHAPTER 43. Hark!\r\n\r\nCHAPTER 44. The Chart.\r\n\r\nCHAPTER 45. The Affidavit.\r\n\r\nCHAPTER 46. Surmises.\r\n\r\nCHAPTER 47. The Mat-Maker.\r\n\r\nCHAPTER 48. The First Lowering.\r\n\r\nCHAPTER 49. The Hyena.\r\n\r\nCHAPTER 50. Ahab\u2019s Boat and Crew. Fedallah.\r\n\r\nCHAPTER 51. The Spirit-Spout.\r\n\r\nCHAPTER 52. The Albatross.\r\n\r\nCHAPTER 53. The Gam.\r\n\r\nCHAPTER 54. The Town-Ho\u2019s Story.\r\n\r\nCHAPTER 55. Of the Monstrous Pictures of Whales.\r\n\r\nCHAPTER 56. Of the Less Erroneous Pictures of Whales, and the True\r\nPictures of Whaling Scenes.\r\n\r\nCHAPTER 57. Of Whales in Paint; in Teeth; in Wood; in Sheet-Iron; in\r\nStone; in Mountains; in Stars.\r\n\r\nCHAPTER 58. Brit.\r\n\r\nCHAPTER 59. Squid.\r\n\r\nCHAPTER 60. The Line.\r\n\r\nCHAPTER 61. Stubb Kills a Whale.\r\n\r\nCHAPTER 62. The Dart.\r\n\r\nCHAPTER 63. The Crotch.\r\n\r\nCHAPTER 64. Stubb\u2019s Supper.\r\n\r\nCHAPTER 65. The Whale as a Dish.\r\n\r\nCHAPTER 66. The Shark Massacre.\r\n\r\nCHAPTER 67. Cutting In.\r\n\r\nCHAPTER 68. The Blanket.\r\n\r\nCHAPTER 69. The Funeral.\r\n\r\nCHAPTER 70. The Sphynx.\r\n\r\nCHAPTER 71. The Jeroboam\u2019s Story.\r\n\r\nCHAPTER 72. The Monkey-Rope.\r\n\r\nCHAPTER 73. Stubb and Flask kill a Right Whale; and Then Have a Talk\r\nover Him.\r\n\r\nCHAPTER 74. The Sperm Whale\u2019s Head\u2014Contrasted View.\r\n\r\nCHAPTER 75. The Right Whale\u2019s Head\u2014Contrasted View.\r\n\r\nCHAPTER 76. The Battering-Ram.\r\n\r\nCHAPTER 77. The Great Heidelburgh Tun.\r\n\r\nCHAPTER 78. Cistern and Buckets.\r\n\r\nCHAPTER 79. The Prairie.\r\n\r\nCHAPTER 80. The Nut.\r\n\r\nCHAPTER 81. The Pequod Meets The Virgin.\r\n\r\nCHAPTER 82. The Honor and Glory of Whaling.\r\n\r\nCHAPTER 83. Jonah Historically Regarded.\r\n\r\nCHAPTER 84. Pitchpoling.\r\n\r\nCHAPTER 85. The Fountain.\r\n\r\nCHAPTER 86. The Tail.\r\n\r\nCHAPTER 87. The Grand Armada.\r\n\r\nCHAPTER 88. Schools and Schoolmasters.\r\n\r\nCHAPTER 89. Fast-Fish and Loose-Fish.\r\n\r\nCHAPTER 90. Heads or Tails.\r\n\r\nCHAPTER 91. The Pequod Meets The Rose-Bud.\r\n\r\nCHAPTER 92. Ambergris.\r\n\r\nCHAPTER 93. The Castaway.\r\n\r\nCHAPTER 94. A Squeeze of the Hand.\r\n\r\nCHAPTER 95. The Cassock.\r\n\r\nCHAPTER 96. The Try-Works.\r\n\r\nCHAPTER 97. The Lamp.\r\n\r\nCHAPTER 98. Stowing Down and Clearing Up.\r\n\r\nCHAPTER 99. The Doubloon.\r\n\r\nCHAPTER 100. Leg and Arm.\r\n\r\nCHAPTER 101. The Decanter.\r\n\r\nCHAPTER 102. A Bower in the Arsacides.\r\n\r\nCHAPTER 103. Measurement of The Whale\u2019s Skeleton.\r\n\r\nCHAPTER 104. The Fossil Whale.\r\n\r\nCHAPTER 105. Does the Whale\u2019s Magnitude Diminish?\u2014Will He Perish?\r\n\r\nCHAPTER 106. Ahab\u2019s Leg.\r\n\r\nCHAPTER 107. The Carpenter.\r\n\r\nCHAPTER 108. Ahab and the Carpenter.\r\n\r\nCHAPTER 109. Ahab and Starbuck in the Cabin.\r\n\r\nCHAPTER 110. Queequeg in His Coffin.\r\n\r\nCHAPTER 111. The Pacific.\r\n\r\nCHAPTER 112. The Blacksmith.\r\n\r\nCHAPTER 113. The Forge.\r\n\r\nCHAPTER 114. The Gilder.\r\n\r\nCHAPTER 115. The Pequod Meets The Bachelor.\r\n\r\nCHAPTER 116. The Dying Whale.\r\n\r\nCHAPTER 117. The Whale Watch.\r\n\r\nCHAPTER 118. The Quadrant.\r\n\r\nCHAPTER 119. The Candles.\r\n\r\nCHAPTER 120. The Deck Towards the End of the First Night Watch.\r\n\r\nCHAPTER 121. Midnight.\u2014The Forecastle Bulwarks.\r\n\r\nCHAPTER 122. Midnight Aloft.\u2014Thunder and Lightning.\r\n\r\nCHAPTER 123. The Musket.\r\n\r\nCHAPTER 124. The Needle.\r\n\r\nCHAPTER 125. The Log and Line.\r\n\r\nCHAPTER 126. The Life-Buoy.\r\n\r\nCHAPTER 127. The Deck.\r\n\r\nCHAPTER 128. The Pequod Meets The Rachel.\r\n\r\nCHAPTER 129. The Cabin.\r\n\r\nCHAPTER 130. The Hat.\r\n\r\nCHAPTER 131. The Pequod Meets The Delight.\r\n\r\nCHAPTER 132. The Symphony.\r\n\r\nCHAPTER 133. The Chase\u2014First Day.\r\n\r\nCHAPTER 134. The Chase\u2014Second Day.\r\n\r\nCHAPTER 135. The Chase.\u2014Third Day.\r\n\r\nEpilogue\r\n\r\n\r\n\r\n\r\nOriginal Transcriber\u2019s Notes:\r\n\r\nThis text is a combination of etexts, one from the now-defunct ERIS\r\nproject at Virginia Tech and one from Project Gutenberg\u2019s archives. The\r\nproofreaders of this version are indebted to The University of Adelaide\r\nLibrary for preserving the Virginia Tech version. The resulting etext\r\nwas compared with a public domain hard copy version of the text.\r\n\r\n\r\n\r\n\r\n\r\n  ETYMOLOGY.\r\n\r\n\r\n  (Supplied by a Late Consumptive Usher to a Grammar School.)\r\n\r\n  The pale Usher\u2014threadbare in coat, heart, body, and brain; I see him\r\n  now. He was ever dusting his old lexicons and grammars, with a queer\r\n  handkerchief, mockingly embellished with all the gay flags of all the\r\n  known nations of the world. He loved to dust his old grammars; it\r\n  somehow mildly reminded him of his mortality.\r\n\r\n  \u201cWhile you take in hand to school others, and to teach them by what\r\n  name a whale-fish is to be called in our tongue, leaving out, through\r\n  ignorance, the letter H, which almost alone maketh up the\r\n  signification of the word, you deliver that which is not true.\u201d\r\n  \u2014_Hackluyt._\r\n\r\n  \u201cWHALE. * * * Sw. and Dan. _hval_. This animal is named from\r\n  roundness or rolling; for in Dan. _hvalt_ is arched or vaulted.\u201d\r\n  \u2014_Webster\u2019s Dictionary._\r\n\r\n  \u201cWHALE. * * * It is more immediately from the Dut. and Ger. _Wallen_;\r\n  A.S. _Walw-ian_, to roll, to wallow.\u201d \u2014_Richardson\u2019s Dictionary._\r\n\r\n\r\n  \u200f\u05d7\u05d5\u200e,                _Hebrew_.\r\n  \u03f0\u03b7\u03c4\u03bf\u03c2,             _Greek_.\r\n  CETUS,             _Latin_.\r\n  WH\u0152L,              _Anglo-Saxon_.\r\n  HVALT,             _Danish_.\r\n  WAL,               _Dutch_.\r\n  HWAL,              _Swedish_.\r\n  HVALUR,            _Icelandic_.\r\n  WHALE,             _English_.\r\n  BALEINE,           _French_.\r\n  BALLENA,           _Spanish_.\r\n  PEKEE-NUEE-NUEE,   _Fegee_.\r\n  PEHEE-NUEE-NUEE,   _Erromangoan_.\r\n\r\n\r\n  EXTRACTS. (Supplied by a Sub-Sub-Librarian).\r\n\r\n\r\n\r\n  It will be seen that this mere painstaking burrower and grub-worm of\r\n  a poor devil of a Sub-Sub appears to have gone through the long\r\n  Vaticans and street-stalls of the earth, picking up whatever random\r\n  allusions to whales he could anyways find in any book whatsoever,\r\n  sacred or profane. Therefore you must not, in every case at least,\r\n  take the higgledy-piggledy whale statements, however authentic, in\r\n  these extracts, for veritable gospel cetology. Far from it. As\r\n  touching the ancient authors generally, as well as the poets here\r\n  appearing, these extracts are solely valuable or entertaining, as\r\n  affording a glancing bird\u2019s eye view of what has been promiscuously\r\n  said, thought, fancied, and sung of Leviathan, by many nations and\r\n  generations, including our own.\r\n\r\n  So fare thee well, poor devil of a Sub-Sub, whose commentator I am.\r\n  Thou belongest to that hopeless, sallow tribe which no wine of this\r\n  world will ever warm; and for whom even Pale Sherry would be too\r\n  rosy-strong; but with whom one sometimes loves to sit, and feel\r\n  poor-devilish, too; and grow convivial upon tears; and say to them\r\n  bluntly, with full eyes and empty glasses, and in not altogether\r\n  unpleasant sadness\u2014Give it up, Sub-Subs! For by how much the more\r\n  pains ye take to please the world, by so much the more shall ye for\r\n  ever go thankless! Would that I could clear out Hampton Court and the\r\n  Tuileries for ye! But gulp down your tears and hie aloft to the\r\n  royal-mast with your hearts; for your friends who have gone before\r\n  are clearing out the seven-storied heavens, and making refugees of\r\n  long-pampered Gabriel, Michael, and Raphael, against your coming.\r\n  Here ye strike but splintered hearts together\u2014there, ye shall strike\r\n  unsplinterable glasses!\r\n\r\nEXTRACTS.\r\n\r\n  \u201cAnd God created great whales.\u201d \u2014_Genesis_.\r\n\r\n  \u201cLeviathan maketh a path to shine after him; One would think the deep\r\n  to be hoary.\u201d \u2014_Job_.\r\n\r\n  \u201cNow the Lord had prepared a great fish to swallow up Jonah.\u201d\r\n  \u2014_Jonah_.\r\n\r\n  \u201cThere go the ships; there is that Leviathan whom thou hast made to\r\n  play therein.\u201d \u2014_Psalms_.\r\n\r\n  \u201cIn that day, the Lord with his sore, and great, and strong sword,\r\n  shall punish Leviathan the piercing serpent, even Leviathan that\r\n  crooked serpent; and he shall slay the dragon that is in the sea.\u201d\r\n  \u2014_Isaiah_.\r\n\r\n  \u201cAnd what thing soever besides cometh within the chaos of this\r\n  monster\u2019s mouth, be it beast, boat, or stone, down it goes all\r\n  incontinently that foul great swallow of his, and perisheth in the\r\n  bottomless gulf of his paunch.\u201d \u2014_Holland\u2019s Plutarch\u2019s Morals_.\r\n\r\n  \u201cThe Indian Sea breedeth the most and the biggest fishes that are:\r\n  among which the Whales and Whirlpooles called Balaene, take up as\r\n  much in length as four acres or arpens of land.\u201d \u2014_Holland\u2019s Pliny_.\r\n\r\n  \u201cScarcely had we proceeded two days on the sea, when about sunrise a\r\n  great many Whales and other monsters of the sea, appeared. Among the\r\n  former, one was of a most monstrous size.... This came towards us,\r\n  open-mouthed, raising the waves on all sides, and beating the sea\r\n",
+      "trace_input_row": {
+        "case_key": "0:0",
+        "conv_idx": 0,
+        "turn_idx": 0,
+        "layer": 0,
+        "tensor": "la_input_row_for_qkvz_last",
+        "requested_layers": "0",
+        "requested_tensors": "la_input_row_for_qkvz_last",
+        "pos": 2681,
+        "positions": [
+          2681
+        ],
+        "input_tokens_count": 2682,
+        "prompt_prefix": "MOBY-DICK;\r\n\r\nor, THE WHALE.\r\n\r\nBy Herman Melville\r\n\r\n\r\n\r\nCONTENTS\r\n\r\nETYMOLOGY.\r\n\r\nEXTRACTS (Supplied by a Sub-Sub-Libr"
+      },
+      "verdict": "WARN",
+      "metrics": {
+        "first_match": true,
+        "match_run": 4,
+        "ref_tokens_count": 8,
+        "our_tokens_count": 8,
+        "containment_rate": 1.0,
+        "containment_hits": 8,
+        "containment_total": 8,
+        "first_token_diagnostic": {
+          "available": true,
+          "ref_first_token": 2132,
+          "our_first_token": 2132,
+          "first_token_match": true,
+          "ref_top_ids": [
+            2132,
+            1112,
+            14790,
+            785,
+            73022,
+            40,
+            334,
+            1986,
+            13053,
+            10222
+          ],
+          "our_top_ids": [
+            2132,
+            1986,
+            334,
+            785,
+            1406,
+            13053,
+            73022,
+            2,
+            8419,
+            44
+          ],
+          "ref_top_k": [
+            {
+              "rank": 1,
+              "token_id": 2132,
+              "logprob": -1.655424692945445
+            },
+            {
+              "rank": 2,
+              "token_id": 1112,
+              "logprob": -1.8518129375743513
+            },
+            {
+              "rank": 3,
+              "token_id": 14790,
+              "logprob": -1.8773714092540388
+            },
+            {
+              "rank": 4,
+              "token_id": 785,
+              "logprob": -2.10125599177357
+            },
+            {
+              "rank": 5,
+              "token_id": 73022,
+              "logprob": -2.472675898389781
+            },
+            {
+              "rank": 6,
+              "token_id": 40,
+              "logprob": -2.7105804470348005
+            },
+            {
+              "rank": 7,
+              "token_id": 334,
+              "logprob": -3.354176142530406
+            },
+            {
+              "rank": 8,
+              "token_id": 1986,
+              "logprob": -4.1189695385265
+            },
+            {
+              "rank": 9,
+              "token_id": 13053,
+              "logprob": -4.359611132459605
+            },
+            {
+              "rank": 10,
+              "token_id": 10222,
+              "logprob": -4.3876997021007185
+            }
+          ],
+          "our_top_k": [
+            {
+              "rank": 1,
+              "token_id": 2132,
+              "logprob": -1.320331
+            },
+            {
+              "rank": 2,
+              "token_id": 1986,
+              "logprob": -1.497342
+            },
+            {
+              "rank": 3,
+              "token_id": 334,
+              "logprob": -2.325336
+            },
+            {
+              "rank": 4,
+              "token_id": 785,
+              "logprob": -2.38218
+            },
+            {
+              "rank": 5,
+              "token_id": 1406,
+              "logprob": -3.033119
+            },
+            {
+              "rank": 6,
+              "token_id": 13053,
+              "logprob": -3.274272
+            },
+            {
+              "rank": 7,
+              "token_id": 73022,
+              "logprob": -3.420489
+            },
+            {
+              "rank": 8,
+              "token_id": 2,
+              "logprob": -3.937194
+            },
+            {
+              "rank": 9,
+              "token_id": 8419,
+              "logprob": -4.156302
+            },
+            {
+              "rank": 10,
+              "token_id": 44,
+              "logprob": -4.47931
+            }
+          ],
+          "top_ids_exact": false,
+          "top_overlap_count": 6,
+          "top_overlap_ids": [
+            2132,
+            785,
+            73022,
+            334,
+            1986,
+            13053
+          ],
+          "ref_top1_top2_logprob_margin": 0.19638824462890625,
+          "our_top1_top2_logprob_margin": 0.17701100000000003,
+          "ref_token_rank_in_ref_topk": 1,
+          "ref_token_rank_in_our_topk": 1,
+          "our_token_rank_in_our_topk": 1,
+          "our_token_rank_in_ref_topk": 1,
+          "selected_token_stayed_rank1": true,
+          "selected_ref_logprob": -1.655424692945445,
+          "selected_our_logprob": -1.320331,
+          "selected_logprob_delta": 0.3350936929454451,
+          "common_logprob_deltas": [
+            {
+              "token_id": 2132,
+              "ref_logprob": -1.655424692945445,
+              "our_logprob": -1.320331,
+              "abs_delta": 0.3350936929454451
+            },
+            {
+              "token_id": 785,
+              "ref_logprob": -2.10125599177357,
+              "our_logprob": -2.38218,
+              "abs_delta": 0.28092400822642993
+            },
+            {
+              "token_id": 73022,
+              "ref_logprob": -2.472675898389781,
+              "our_logprob": -3.420489,
+              "abs_delta": 0.9478131016102189
+            },
+            {
+              "token_id": 334,
+              "ref_logprob": -3.354176142530406,
+              "our_logprob": -2.325336,
+              "abs_delta": 1.028840142530406
+            },
+            {
+              "token_id": 1986,
+              "ref_logprob": -4.1189695385265,
+              "our_logprob": -1.497342,
+              "abs_delta": 2.6216275385265
+            },
+            {
+              "token_id": 13053,
+              "ref_logprob": -4.359611132459605,
+              "our_logprob": -3.274272,
+              "abs_delta": 1.0853391324596053
+            }
+          ],
+          "mean_common_logprob_delta": 1.0499396027164343,
+          "max_common_logprob_delta": 2.6216275385265
+        },
+        "divergence_pos": 4,
+        "divergence_info": {
+          "position": 4,
+          "ref_token": 3003,
+          "our_token": 614,
+          "ref_in_our_topk": true,
+          "ref_rank_in_our_topk": 2,
+          "ref_logprob": -0.4290096806311219,
+          "our_logprob": -0.502774
+        },
+        "token_table": [
+          {
+            "pos": 0,
+            "ref_token": 2132,
+            "our_token": 2132,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -1.655424692945445,
+            "our_logprob": -1.320331
+          },
+          {
+            "pos": 1,
+            "ref_token": 5868,
+            "our_token": 5868,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -0.9701708531406155,
+            "our_logprob": -0.119557
+          },
+          {
+            "pos": 2,
+            "ref_token": 1075,
+            "our_token": 1075,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -4.264946266374636e-05,
+            "our_logprob": -9.4e-05
+          },
+          {
+            "pos": 3,
+            "ref_token": 498,
+            "our_token": 498,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -0.0019372887700619401,
+            "our_logprob": -0.001196
+          },
+          {
+            "pos": 4,
+            "ref_token": 3003,
+            "our_token": 614,
+            "match": false,
+            "in_topk": true,
+            "ref_rank": 2,
+            "ref_logprob": -0.4290096806311219,
+            "our_logprob": -0.502774
+          },
+          {
+            "pos": 5,
+            "ref_token": 6094,
+            "our_token": 6094,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -0.2360087375701454,
+            "our_logprob": -0.385134
+          },
+          {
+            "pos": 6,
+            "ref_token": 279,
+            "our_token": 279,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -0.002576520427737705,
+            "our_logprob": -0.009203
+          },
+          {
+            "pos": 7,
+            "ref_token": 8567,
+            "our_token": 8567,
+            "match": true,
+            "in_topk": true,
+            "ref_rank": 1,
+            "ref_logprob": -0.2679314298956186,
+            "our_logprob": -0.1549
+          }
+        ],
+        "ref_text": "It looks like you've shared the opening",
+        "our_text": "It looks like you have shared the opening"
+      },
+      "prefill_metrics": {
+        "prefill_available": true,
+        "prefill_argmax_match": 0,
+        "prefill_top10_hits": 0,
+        "prefill_total": 0,
+        "prefill_argmax_rate": null,
+        "prefill_containment": null
+      },
+      "timing": {
+        "prefill_ms": 142799.8,
+        "decode_ms": 2087.6,
+        "total_ms": 147977.9,
+        "prompt_tokens": 2682,
+        "vram_low_water": [
+          {
+            "device": 0,
+            "min_free_mb": 636
+          }
+        ],
+        "safety_margin_mb": 600
+      },
+      "debug": null
+    }
+  ]
+}
