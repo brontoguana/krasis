@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+- Extended the exact split hot/cold expert launch to graph replay with GPU
+  route synchronization. The classify kernel now retains full routed weights,
+  masks HCS-resident slots into a direct hot launch, and masks those same slots
+  out of the demand-cold captured graph, allowing resident expert compute to
+  overlap measured demand H2D without dropping or approximating routes.
+  Fixed the legacy CPU route-sync path to preserve its actual HCS/APFL prefix
+  length; the missing assignment had kept every previous split experiment
+  gated off as a no-op.
+  Timing mode separately measures the split-hot CUDA interval; the all-hot
+  no-sync graph remains fail-closed because it uses a different replay
+  contract. Direct-BF16 W13 and coalesced ReLU2 W2 graph variants are mirrored
+  exactly; latent-MoE graphs fail closed because their expert-input projection
+  is not available before the captured segment. On the timing-disabled
+  GLM-5.2 standard benchmark, internal
+  decode improved from 4.50/4.48/4.41 to 4.64/4.69/4.65 tok/s over
+  50/100/250 tokens (+3.1/+4.7/+5.4%), with unchanged HCS coverage and
+  1,180 MiB minimum free VRAM. The frozen 2,682-token/eight-token sparse
+  llama-witness profile retained its accepted boundary: seven of eight
+  teacher-forced argmaxes, four contiguous, and all eight witness tokens in
+  the native top 10; request decode retained 1,118 MiB minimum free.
+  Final exact-source validation passed the package build in 207 seconds,
+  DSA CUDA 9/9 after a 3m56s optimized build, model/config 10/10, launcher
+  24/24, and the focused measurement suite 7/7.
+- Added timing-only CUDA-event measurement for graph-replay demand H2D expert
+  batches. Each runtime graph boundary now records the actual copy-stream
+  interval together with its exact demand bytes, calls, cold experts, graph
+  time, and host-observed wait; reports derive effective bandwidth from those
+  measurements and emit the slowest correlated boundaries. The event and
+  accounting work exists only when decode graph timing is enabled and does not
+  alter timing-disabled execution.
 - Removed the decode timing report's fabricated PCIe-bandwidth estimate. Graph
   mode had assumed that MoE occupied 70% of token time and multiplied that
   estimate by the cold-route fraction; on GLM-5.2 it reported 65.6-73.3 GB/s

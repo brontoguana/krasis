@@ -146,7 +146,10 @@ mode when the measured available RAM cannot safely hold the soft mirror.
 | `--gguf-path PATH` | — | GGUF file for CPU experts (instead of native cache) |
 
 Experimental decode environment variables (default off; single-GPU graph decode
-path, not compatible with `KRASIS_GPU_ROUTE_SYNC`):
+path). Previous-token prefetch and adaptive cold-drop require host-visible
+legacy route synchronization; split expert launch supports legacy and ordinary
+GPU route synchronization but fails closed with the separate all-hot no-sync
+graph contract:
 
 | Env var | Default | Description |
 |------|---------|-------------|
@@ -154,7 +157,7 @@ path, not compatible with `KRASIS_GPU_ROUTE_SYNC`):
 | `KRASIS_PREFETCH_DEPTH=N` | 4 | Prefetch lookahead depth in MoE layers (staging VRAM = depth × top-k × expert size) |
 | `KRASIS_PREFETCH_BUDGET_OFF=1` | off | Disable the per-token prefetch byte budget (A/B diagnostics only) |
 | `KRASIS_PREFETCH_GATE=0` | on | Disable the demand-first temporal gate. When the gate is on (default with prefetch), each prefetch issuance waits GPU-side on the boundary's demand cold-DMA event, so prefetch bytes transfer during the segment's compute window instead of contending on the copy engine with the demand copies the graph is waiting on |
-| `KRASIS_SPLIT_EXPERT_LAUNCH=1` | off | Launch hot/staged experts before the cold-DMA wait so hot compute overlaps demand copies |
+| `KRASIS_SPLIT_EXPERT_LAUNCH=1` | off | Launch hot/staged experts before the cold-DMA wait so hot compute overlaps demand copies. Exact full/hot/cold weight masks preserve every routed contribution; compatible with legacy and ordinary GPU route synchronization. Latent-MoE graphs fail closed because their expert-input projection executes inside the captured segment and is not available for a safe pre-launch |
 | `KRASIS_MARLIN_AUTOTUNE=1` | off | Measure batched w13 GEMV ksplit candidates (median of repeated timed blocks) on the real loaded expert shape at graph capture; overrides the occupancy formula only when a candidate beats the formula's own median by more than the margin |
 | `KRASIS_MARLIN_AUTOTUNE_MARGIN_PCT=N` | 5 | Minimum relative win (percent) over the formula candidate before an autotune override is installed |
 | `KRASIS_ADAPTIVE_COLD_DROP=1` | off | Enable approximate demand-cold expert pruning. Only routed experts that would require a demand DMA are eligible; surviving router weights are not renormalized. Requires both percentage variables below. Results depend on runtime HCS residency, so this mode can vary with VRAM and cache state |

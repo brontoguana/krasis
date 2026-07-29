@@ -77,6 +77,50 @@ Important measurement boundary:
   4.41/4.46/4.33 tok/s internal decode. The timing-disabled 44.7 and
   4.50/4.48/4.41 tok/s rows above remain the performance baseline.
 
+### GLM-5.2 measured PCIe diagnosis and exact split-launch optimization
+
+Timing-only CUDA events measured the actual demand-copy interval on the copy
+stream, replacing the invalid estimator described above. The sustained
+250-token baseline transferred 3,821.12 MB/token in 153.33 ms/token
+(26.01 GB/s), while CUDA graph segments consumed 68.43 ms/token. Their
+221.76 ms/token sum matched the 221.66 ms/token host dependency wait. This
+showed that the link was already well utilized and that demand H2D and
+resident-expert graph work were serialized.
+
+`KRASIS_SPLIT_EXPERT_LAUNCH=1` now launches the exact hot/staged expert
+contributions before waiting for demand H2D, then replays only demand-cold
+expert work in the captured graph. Full, hot-only, and cold-only runtime
+weight masks preserve every routed contribution.
+
+| Mode | Prefill internal | 50-token decode | 100-token decode | 250-token decode | Round trip 50/100/250 | HCS coverage | Min free VRAM | Logs |
+|------|-----------------:|----------------:|-----------------:|-----------------:|-----------------------:|-------------:|--------------:|------|
+| Original timing-disabled baseline | 44.7 tok/s | 4.50 tok/s | 4.48 tok/s | 4.41 tok/s | 7.82 / 5.76 / 4.81 tok/s | 3887/19200 | 1,180 MB | [report](20260729_074912_rtx6000_glm52_hqq4_k4v4_sparse4096_benchmark_report.log) |
+| Exact split launch, timing disabled | 45.0 tok/s | 4.64 tok/s | 4.69 tok/s | 4.65 tok/s | 8.25 / 6.07 / 4.95 tok/s | 3887/19200 | 1,180 MB | [report](20260729_112720_rtx6000_glm52_hqq4_k4v4_sparse4096_split_speed_report.log), [stdout](20260729_112720_rtx6000_glm52_hqq4_k4v4_sparse4096_split_speed_stdout.log), [server](20260729_112720_rtx6000_glm52_hqq4_k4v4_sparse4096_split_speed_krasis.log) |
+| Split delta | +0.7% | +3.1% | +4.7% | +5.4% | +5.5% / +5.4% / +2.9% | unchanged | unchanged | PASS |
+
+The timing-enabled split run independently measured about 20.5-20.8 ms/token
+of resident expert work fully contained beneath 146-154 ms/token demand H2D,
+with unchanged route/byte counts and 25.95-26.58 GB/s measured link
+throughput. Those instrumented aggregate speeds are diagnostic only:
+[baseline PCIe report](20260729_092541_rtx6000_glm52_hqq4_k4v4_sparse4096_pcie_timing_report.log)
+and [split report](20260729_105446_rtx6000_glm52_hqq4_k4v4_sparse4096_split_timing_report.log).
+
+The dynamic-HCS `no_slot` counters in the timed phases are identical to the
+original baseline (69 after internal decode, 138 after network decode);
+budget skips and copy failures remain zero. The optimization therefore did
+not change HCS residency, traffic, promotion behavior, or the calibrated VRAM
+boundary.
+
+Authoritative post-optimization validation used the frozen 2,682-token,
+eight-token `llama_witness_glm52_sparse_long_8_tokens_relu` profile. It passed
+with the same accepted production-quantization boundary as the pre-optimization
+control: seven of eight teacher-forced argmax tokens, four contiguously; the
+sole disagreement was native rank two and all eight witness tokens were in
+the native top 10. The first-token top-10 IDs and log probabilities were
+unchanged, while later-token log probabilities were not bit-identical; this
+is explicitly not a BF16 distribution-equivalence claim. Request decode
+reached 1,118 MiB minimum free against the 600 MiB margin.
+
 ## Step-3.7-Flash RTX PRO 6000 adaptive 75/8 A/B - 2026-07-23
 
 Purpose: measure adaptive cold-mass pruning on the existing RTX PRO 6000

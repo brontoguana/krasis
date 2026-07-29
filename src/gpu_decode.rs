@@ -7571,11 +7571,11 @@ mod dsa_registration_tests {
 
     use cudarc::cublas::{result as cublas_result, sys as cublas_sys};
     use cudarc::driver::sys as cuda_sys;
-    use cudarc::driver::DevicePtr;
+    use cudarc::driver::{DevicePtr, LaunchAsync, LaunchConfig};
 
     use super::{
-        create_decode_timing_event, plan_dsa_topk, validate_dsa_runtime_registration,
-        validate_dsa_indexer_registration, validate_dsa_owner_weight_contract,
+        create_decode_timing_event, plan_dsa_topk, validate_dsa_indexer_registration,
+        validate_dsa_owner_weight_contract, validate_dsa_runtime_registration,
         validate_stream_probe_outcome, DsaGraphScoreBackend, DsaIndexerOwnerResource,
         DsaIndexerOwnerWeightIds, GpuDecodeStore, GpuWeight,
     };
@@ -7661,6 +7661,96 @@ mod dsa_registration_tests {
             .unwrap_err()
             .contains("generated zero tokens"));
         validate_stream_probe_outcome(8, 1, None).expect("one measured decode token is valid");
+    }
+
+    #[test]
+    fn gpu_route_split_classifier_partitions_weights_exactly() {
+        let _guard = DSA_CUDA_TEST_LOCK.lock().unwrap();
+        let mut store =
+            GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal()).expect("CUDA decode store");
+        let max_ept = 4usize;
+        store
+            .configure(4, 1, 8, 1e-6, max_ept, 4, 8, 4, 4, 4, 4)
+            .expect("small graph");
+
+        let device = store.device.clone();
+        let classify = store
+            .graph
+            .as_ref()
+            .and_then(|graph| graph.kernels.as_ref())
+            .map(|kernels| kernels.expert_classify_prepare.clone())
+            .expect("expert classify kernel");
+        let topk_ids = device.htod_copy(vec![0i32, 1, 2, 3]).expect("topk ids");
+        let topk_weights = device
+            .htod_copy(vec![0.125f32, 0.25, 0.375, 0.5])
+            .expect("topk weights");
+        let mut expert_ptrs = vec![0u64; 4 * 4];
+        expert_ptrs[0..4].copy_from_slice(&[11, 12, 13, 14]);
+        expert_ptrs[8..12].copy_from_slice(&[21, 22, 23, 24]);
+        let expert_ptrs = device.htod_copy(expert_ptrs).expect("expert pointers");
+
+        let ptr_bytes = 4 * max_ept * std::mem::size_of::<u64>();
+        let upload_bytes = ptr_bytes + max_ept * std::mem::size_of::<f32>() * 3;
+        let upload = device
+            .htod_copy(vec![0u8; upload_bytes])
+            .expect("batch upload");
+        let split_flag_idx = 2 + max_ept * 2;
+        let mut cold_meta = vec![0i32; split_flag_idx + 1];
+        cold_meta[split_flag_idx] = 1;
+        let cold_meta = device.htod_copy(cold_meta).expect("cold metadata");
+
+        unsafe {
+            classify
+                .launch(
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (1, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        *topk_ids.device_ptr(),
+                        *topk_weights.device_ptr(),
+                        *expert_ptrs.device_ptr(),
+                        *upload.device_ptr(),
+                        *cold_meta.device_ptr(),
+                        0i32,
+                        4i32,
+                        4i32,
+                        max_ept as i32,
+                        99u64,
+                        0u64,
+                        0i32,
+                    ),
+                )
+                .expect("split classify launch");
+        }
+        device.synchronize().expect("split classify sync");
+
+        let upload_host = device.dtoh_sync_copy(&upload).expect("batch upload D2H");
+        let cold_host = device
+            .dtoh_sync_copy(&cold_meta)
+            .expect("cold metadata D2H");
+        let read_weights = |region: usize| -> Vec<f32> {
+            (0..max_ept)
+                .map(|idx| {
+                    let offset = ptr_bytes + (region * max_ept + idx) * 4;
+                    f32::from_ne_bytes(
+                        upload_host[offset..offset + 4]
+                            .try_into()
+                            .expect("f32 bytes"),
+                    )
+                })
+                .collect()
+        };
+
+        assert_eq!(read_weights(0), vec![0.0, 0.25, 0.0, 0.5]);
+        assert_eq!(read_weights(1), vec![0.125, 0.25, 0.375, 0.5]);
+        assert_eq!(read_weights(2), vec![0.125, 0.0, 0.375, 0.0]);
+        assert_eq!(cold_host[0], 2);
+        assert_eq!(cold_host[1], 1);
+        assert_eq!(&cold_host[2..4], &[1, 3]);
+        assert_eq!(&cold_host[2 + max_ept..2 + max_ept + 2], &[1, 3]);
+        assert_eq!(cold_host[split_flag_idx], 1);
     }
 
     #[test]
@@ -11110,11 +11200,12 @@ struct GpuDecodeGraph {
     h_batch_w2_scales_ptrs: Vec<u64>,
     h_batch_weights: Vec<f32>,
     max_experts_per_tok: usize,
-    // Contiguous upload buffer (1 H2D instead of 5): [4*max*8 + max*4] bytes
+    // Contiguous upload buffer: four pointer arrays followed by ordinary,
+    // split-full, and split-hot weight regions.
     d_batch_upload: cudarc::driver::CudaSlice<u8>,
     h_batch_upload: Vec<u8>,
     batch_upload_ptrs_bytes: usize,  // 4 * max * 8
-    batch_upload_total_bytes: usize, // 4 * max * 8 + max * 4
+    batch_upload_total_bytes: usize, // 4 * max * 8 + 3 * max * 4
 
     // GQA scratch (FP32 for Q, K, V, attention output)
     d_gqa_q: cudarc::driver::CudaSlice<f32>,
@@ -11413,6 +11504,12 @@ struct GpuDecodeGraph {
     graph_segment_kinds: Vec<u8>,
     graph_segment_elapsed: Vec<f64>,
     graph_segment_sync_wait: Vec<f64>,
+    graph_segment_split_hot_elapsed: Vec<f64>,
+    graph_segment_demand_dma_elapsed: Vec<f64>,
+    graph_segment_demand_dma_bytes: Vec<u64>,
+    graph_segment_demand_dma_calls: Vec<u64>,
+    graph_segment_demand_dma_cold_experts: Vec<u64>,
+    graph_segment_demand_dma_samples: Vec<u64>,
     graph_gqa_k4_split_clock_enabled: bool,
     graph_gqa_k4_split_active: Vec<bool>,
     d_graph_gqa_k4_split_clocks: Option<cudarc::driver::CudaSlice<u64>>,
@@ -11696,17 +11793,18 @@ struct GpuDecodeGraph {
     prefetch_prev_token_wall_s: f64,
     prefetch_prev_token_demand_bytes: u64,
 
-    // ── Split hot/cold expert launch (KRASIS_SPLIT_EXPERT_LAUNCH=1, legacy CPU
-    //    route-sync graph replay path only). Hot/staged experts are launched
+    // ── Split hot/cold expert launch (KRASIS_SPLIT_EXPERT_LAUNCH=1).
+    //    Hot/staged experts are launched
     //    directly on the replay stream before the cold-DMA wait; the captured
     //    graph then computes only demand-cold slots (zero-weight slots skip). ──
     /// Whether the current per-layer graphs were captured for split launch
     /// (multi_expert_weighted_add reads d_wts_full instead of d_batch_upload).
     split_expert_launch: bool,
-    /// [max_ept] full routed weights for the in-graph final weighted add.
+    /// Legacy CPU route-sync [max_ept] full routed weights for the in-graph
+    /// final weighted add. GPU route sync uses d_batch_upload's split region.
     d_wts_full: Option<cudarc::driver::CudaSlice<f32>>,
-    /// [max_ept] hot-phase weights (hot/staged real, demand-cold zero) for the
-    /// direct pre-launch of the batched expert stack.
+    /// Legacy CPU route-sync [max_ept] hot-phase weights (hot/staged real,
+    /// demand-cold zero). GPU route sync uses d_batch_upload's split region.
     d_wts_hot: Option<cudarc::driver::CudaSlice<f32>>,
     /// Host staging for the split-mode weight uploads.
     h_wts_full: Vec<f32>,
@@ -11984,6 +12082,8 @@ struct DecodeGraphTimingEvents {
     expert: DecodeGraphEventSet,
     routing: DecodeGraphEventSet,
     final_part: DecodeGraphEventSet,
+    split_hot: DecodeGraphEventSet,
+    demand_dma: DecodeGraphEventSet,
 }
 
 const GRAPH_GQA_OTHER_CLOCK_SLOTS: usize = 9;
@@ -12112,11 +12212,20 @@ impl DecodeGraphTimingEvents {
             expert: DecodeGraphEventSet::new(num_graphs)?,
             routing: DecodeGraphEventSet::new(num_graphs)?,
             final_part: DecodeGraphEventSet::new(num_graphs)?,
+            split_hot: DecodeGraphEventSet::new(num_graphs)?,
+            demand_dma: DecodeGraphEventSet::new(num_graphs)?,
         })
     }
 
     fn destroy(&self) {
-        for set in [&self.total, &self.expert, &self.routing, &self.final_part] {
+        for set in [
+            &self.total,
+            &self.expert,
+            &self.routing,
+            &self.final_part,
+            &self.split_hot,
+            &self.demand_dma,
+        ] {
             for ev in set.start.iter().chain(set.end.iter()) {
                 if !ev.0.is_null() {
                     unsafe {
@@ -17022,9 +17131,11 @@ impl GpuDecodeStore {
             .device
             .alloc_zeros::<f32>(max_ept)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:?}", e)))?;
-        // Contiguous upload buffer: [4*max_ept*8 + max_ept*4] bytes → single H2D copy per layer
+        // Contiguous upload buffer: four pointer arrays followed by ordinary,
+        // split-full, and split-hot f32 weights. Legacy replay uploads only the
+        // ordinary prefix; GPU route classification writes all three regions.
         let batch_upload_ptrs_bytes = 4 * max_ept * 8; // 4 pointer arrays x max_ept x 8 bytes
-        let batch_upload_total_bytes = batch_upload_ptrs_bytes + max_ept * 4; // + weights (f32)
+        let batch_upload_total_bytes = batch_upload_ptrs_bytes + max_ept * 4 * 3;
         let d_batch_upload = self
             .device
             .alloc_zeros::<u8>(batch_upload_total_bytes)
@@ -17235,7 +17346,7 @@ impl GpuDecodeStore {
             pinned_topk_ids: PinnedMapped::new(max_experts_per_tok * 4).ok(),
             pinned_topk_weights: PinnedMapped::new(max_experts_per_tok * 4).ok(),
             // GPU-side route sync: [cold_count, ready_flag, cold_ids[topk], cold_slots[topk]]
-            mapped_cold_buf: PinnedMapped::new((2 + max_experts_per_tok * 2) * 4).ok(),
+            mapped_cold_buf: PinnedMapped::new((3 + max_experts_per_tok * 2) * 4).ok(),
             gpu_route_sync: false,
             gpu_route_sync_hot_nosync: false,
             gpu_route_sync_hot_full_graph: false,
@@ -17422,6 +17533,12 @@ impl GpuDecodeStore {
             graph_segment_kinds: Vec::new(),
             graph_segment_elapsed: Vec::new(),
             graph_segment_sync_wait: Vec::new(),
+            graph_segment_split_hot_elapsed: Vec::new(),
+            graph_segment_demand_dma_elapsed: Vec::new(),
+            graph_segment_demand_dma_bytes: Vec::new(),
+            graph_segment_demand_dma_calls: Vec::new(),
+            graph_segment_demand_dma_cold_experts: Vec::new(),
+            graph_segment_demand_dma_samples: Vec::new(),
             graph_gqa_k4_split_clock_enabled: false,
             graph_gqa_k4_split_active: Vec::new(),
             d_graph_gqa_k4_split_clocks: None,
@@ -19736,6 +19853,24 @@ impl GpuDecodeStore {
                 }
                 for wait in &mut graph.graph_segment_sync_wait {
                     *wait = 0.0;
+                }
+                for elapsed in &mut graph.graph_segment_split_hot_elapsed {
+                    *elapsed = 0.0;
+                }
+                for elapsed in &mut graph.graph_segment_demand_dma_elapsed {
+                    *elapsed = 0.0;
+                }
+                for bytes in &mut graph.graph_segment_demand_dma_bytes {
+                    *bytes = 0;
+                }
+                for calls in &mut graph.graph_segment_demand_dma_calls {
+                    *calls = 0;
+                }
+                for cold in &mut graph.graph_segment_demand_dma_cold_experts {
+                    *cold = 0;
+                }
+                for samples in &mut graph.graph_segment_demand_dma_samples {
+                    *samples = 0;
                 }
                 graph.dma_bytes_total = 0;
                 graph.dma_call_count = 0;
@@ -32549,15 +32684,38 @@ impl GpuDecodeStore {
         // the d_batch_upload weights region (demand-cold-only at replay); the
         // hot/staged portion is pre-launched directly on the replay stream.
         let split_requested = env_truthy("KRASIS_SPLIT_EXPERT_LAUNCH");
-        if split_requested && graph.gpu_route_sync {
-            self.graph = Some(graph);
-            return Err(
-                "KRASIS_SPLIT_EXPERT_LAUNCH is not supported together with KRASIS_GPU_ROUTE_SYNC"
-                    .to_string(),
-            );
-        }
         graph.split_expert_launch = split_requested;
+        if graph.gpu_route_sync {
+            let Some(mapped) = graph.mapped_cold_buf.as_ref() else {
+                self.graph = Some(graph);
+                return Err("GPU route split capture requires mapped cold metadata".to_string());
+            };
+            let split_flag_idx = 2 + graph.max_experts_per_tok * 2;
+            unsafe {
+                std::ptr::write_volatile(
+                    (mapped.host_ptr as *mut i32).add(split_flag_idx),
+                    split_requested as i32,
+                );
+            }
+        }
         if split_requested {
+            if let Some((layer_idx, _)) = graph
+                .moe_layers
+                .iter()
+                .enumerate()
+                .filter_map(|(layer_idx, moe)| moe.as_ref().map(|moe| (layer_idx, moe)))
+                .find(|(_, moe)| {
+                    moe.moe_input_size > 0
+                        || moe.latent_down_wid.is_some()
+                        || moe.latent_up_wid.is_some()
+                })
+            {
+                self.graph = Some(graph);
+                return Err(format!(
+                    "KRASIS_SPLIT_EXPERT_LAUNCH is not supported for latent MoE layer {}; its expert input projection executes inside the captured graph",
+                    layer_idx,
+                ));
+            }
             let max_ept = graph.max_experts_per_tok.max(1);
             if graph.d_wts_full.is_none() {
                 match self.device.alloc_zeros::<f32>(max_ept) {
@@ -32722,6 +32880,12 @@ impl GpuDecodeStore {
             graph.graph_segment_kinds.clear();
             graph.graph_segment_elapsed.clear();
             graph.graph_segment_sync_wait.clear();
+            graph.graph_segment_split_hot_elapsed.clear();
+            graph.graph_segment_demand_dma_elapsed.clear();
+            graph.graph_segment_demand_dma_bytes.clear();
+            graph.graph_segment_demand_dma_calls.clear();
+            graph.graph_segment_demand_dma_cold_experts.clear();
+            graph.graph_segment_demand_dma_samples.clear();
             graph.graph_gqa_k4_split_active.clear();
             graph.graph_mixed_segment_active.clear();
             graph.graph_gqa_path_active.clear();
@@ -32737,6 +32901,18 @@ impl GpuDecodeStore {
             graph.graph_segment_kinds.reserve(num_graphs);
             graph.graph_segment_elapsed.resize(num_graphs, 0.0);
             graph.graph_segment_sync_wait.resize(num_graphs, 0.0);
+            graph
+                .graph_segment_split_hot_elapsed
+                .resize(num_graphs, 0.0);
+            graph
+                .graph_segment_demand_dma_elapsed
+                .resize(num_graphs, 0.0);
+            graph.graph_segment_demand_dma_bytes.resize(num_graphs, 0);
+            graph.graph_segment_demand_dma_calls.resize(num_graphs, 0);
+            graph
+                .graph_segment_demand_dma_cold_experts
+                .resize(num_graphs, 0);
+            graph.graph_segment_demand_dma_samples.resize(num_graphs, 0);
             graph.graph_gqa_k4_split_active.resize(num_graphs, false);
             graph.graph_mixed_segment_active.resize(num_graphs, false);
             graph.graph_gqa_path_active.resize(num_graphs, false);
@@ -32894,6 +33070,12 @@ impl GpuDecodeStore {
             graph.graph_segment_kinds.clear();
             graph.graph_segment_elapsed.clear();
             graph.graph_segment_sync_wait.clear();
+            graph.graph_segment_split_hot_elapsed.clear();
+            graph.graph_segment_demand_dma_elapsed.clear();
+            graph.graph_segment_demand_dma_bytes.clear();
+            graph.graph_segment_demand_dma_calls.clear();
+            graph.graph_segment_demand_dma_cold_experts.clear();
+            graph.graph_segment_demand_dma_samples.clear();
             graph.graph_gqa_k4_split_active.clear();
             graph.graph_gqa_k4_split_clock_enabled = false;
             graph.d_graph_gqa_k4_split_clocks = None;
@@ -33968,15 +34150,21 @@ impl GpuDecodeStore {
                 // Multi-expert weighted add (init_zero=1: fused zero, no separate zero_bf16 needed)
                 // In split-launch mode the batched kernels above see demand-cold-only
                 // weights in d_batch_upload, so the final add must read the full
-                // routed weights from the separate d_wts_full buffer.
+                // routed weights. GPU route sync writes that region immediately
+                // after the ordinary weights in d_batch_upload; legacy route sync
+                // retains its separate upload buffer.
                 let d_wts_final = if graph.split_expert_launch {
-                    *graph
-                        .d_wts_full
-                        .as_ref()
-                        .ok_or_else(|| {
-                            "split expert launch capture without d_wts_full".to_string()
-                        })?
-                        .device_ptr()
+                    if graph.gpu_route_sync {
+                        d_wts + (graph.max_experts_per_tok * 4) as u64
+                    } else {
+                        *graph
+                            .d_wts_full
+                            .as_ref()
+                            .ok_or_else(|| {
+                                "split expert launch capture without d_wts_full".to_string()
+                            })?
+                            .device_ptr()
+                    }
                 } else {
                     d_wts
                 };
@@ -39125,6 +39313,14 @@ impl GpuDecodeStore {
             intermediate
         };
         let w13_ksplits_batched = select_w13_ksplits_batched(graph, expert_hs, w13_n, topk.max(1));
+        let direct_w13_bf16 =
+            graph.direct_w13_bf16_enabled_for_moe(moe, graph.expert_bits, w13_ksplits_batched);
+        if direct_w13_bf16 && (is_int8 || graph.expert_bits != 4 || w13_ksplits_batched != 1) {
+            return Err(format!(
+                "split hot direct W13 contract invalid at layer {}: expert_bits={} k_splits={}",
+                layer_idx, graph.expert_bits, w13_ksplits_batched,
+            ));
+        }
         let max_ept = graph.max_experts_per_tok;
         let d_upload_base = *graph.d_batch_upload.device_ptr();
         let ptr_stride = max_ept * 8;
@@ -39132,11 +39328,15 @@ impl GpuDecodeStore {
         let d_w13s = d_upload_base + ptr_stride as u64;
         let d_w2p = d_upload_base + (ptr_stride * 2) as u64;
         let d_w2s = d_upload_base + (ptr_stride * 3) as u64;
-        let d_wts_hot = *graph
-            .d_wts_hot
-            .as_ref()
-            .ok_or_else(|| "split expert launch without d_wts_hot".to_string())?
-            .device_ptr();
+        let d_wts_hot = if graph.gpu_route_sync {
+            d_upload_base + (ptr_stride * 4 + max_ept * 4 * 2) as u64
+        } else {
+            *graph
+                .d_wts_hot
+                .as_ref()
+                .ok_or_else(|| "split expert launch without d_wts_hot".to_string())?
+                .device_ptr()
+        };
 
         let w13_n_tiles = (w13_n + 15) / 16;
         let w13_smem = (expert_hs * 2 + 1024 * 4 + 64 * 4 + 16 * 16 * 4) as u32;
@@ -39146,54 +39346,97 @@ impl GpuDecodeStore {
             k.marlin_gemv_int4_v2_batched.clone()
         };
         unsafe {
-            w13_kernel
-                .launch(
-                    LaunchConfig {
-                        grid_dim: (w13_n_tiles as u32, w13_ksplits_batched as u32, topk as u32),
-                        block_dim: (256, 1, 1),
-                        shared_mem_bytes: w13_smem,
-                    },
-                    (
-                        d_w13p,
-                        d_w13s,
-                        expert_input_ptr,
-                        *graph.d_batch_partials.device_ptr(),
-                        inv_wp,
-                        inv_sp,
-                        expert_hs as i32,
-                        w13_n as i32,
-                        gs as i32,
-                        w13_ksplits_batched as i32,
-                        d_wts_hot,
-                    ),
-                )
-                .map_err(|e| format!("split hot w13 v2[{}]: {:?}", layer_idx, e))?;
-            k.reduce_ksplits_bf16_batched
-                .clone()
-                .launch(
-                    LaunchConfig {
-                        grid_dim: (((w13_n + 255) / 256) as u32, 1, topk as u32),
-                        block_dim: (256, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    (
-                        *graph.d_batch_gate_ups.device_ptr(),
-                        *graph.d_batch_partials.device_ptr(),
-                        w13_n as i32,
-                        w13_ksplits_batched as i32,
-                        d_wts_hot,
-                    ),
-                )
-                .map_err(|e| format!("split hot reduce[{}]: {:?}", layer_idx, e))?;
+            if direct_w13_bf16 {
+                k.marlin_gemv_int4_v2_batched_bf16_out
+                    .clone()
+                    .launch(
+                        LaunchConfig {
+                            grid_dim: (w13_n_tiles as u32, 1, topk as u32),
+                            block_dim: (256, 1, 1),
+                            shared_mem_bytes: w13_smem,
+                        },
+                        (
+                            d_w13p,
+                            d_w13s,
+                            expert_input_ptr,
+                            *graph.d_batch_gate_ups.device_ptr(),
+                            inv_wp,
+                            inv_sp,
+                            expert_hs as i32,
+                            w13_n as i32,
+                            gs as i32,
+                            d_wts_hot,
+                        ),
+                    )
+                    .map_err(|e| format!("split hot direct w13[{}]: {:?}", layer_idx, e))?;
+            } else {
+                w13_kernel
+                    .launch(
+                        LaunchConfig {
+                            grid_dim: (
+                                w13_n_tiles as u32,
+                                w13_ksplits_batched as u32,
+                                topk as u32,
+                            ),
+                            block_dim: (256, 1, 1),
+                            shared_mem_bytes: w13_smem,
+                        },
+                        (
+                            d_w13p,
+                            d_w13s,
+                            expert_input_ptr,
+                            *graph.d_batch_partials.device_ptr(),
+                            inv_wp,
+                            inv_sp,
+                            expert_hs as i32,
+                            w13_n as i32,
+                            gs as i32,
+                            w13_ksplits_batched as i32,
+                            d_wts_hot,
+                        ),
+                    )
+                    .map_err(|e| format!("split hot w13 v2[{}]: {:?}", layer_idx, e))?;
+                k.reduce_ksplits_bf16_batched
+                    .clone()
+                    .launch(
+                        LaunchConfig {
+                            grid_dim: (((w13_n + 255) / 256) as u32, 1, topk as u32),
+                            block_dim: (256, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (
+                            *graph.d_batch_gate_ups.device_ptr(),
+                            *graph.d_batch_partials.device_ptr(),
+                            w13_n as i32,
+                            w13_ksplits_batched as i32,
+                            d_wts_hot,
+                        ),
+                    )
+                    .map_err(|e| format!("split hot reduce[{}]: {:?}", layer_idx, e))?;
+            }
         }
 
         let w2_n_tiles = (expert_hs + 15) / 16;
         let w2_input_k = intermediate;
-        let w2_smem = (w2_input_k * 2 + 1024 * 4 + 64 * 4) as u32;
+        let relu2_w2_coalesced =
+            graph.relu2_w2_coalesced_enabled_for_moe(moe, graph.expert_bits, w2_n_tiles);
+        if relu2_w2_coalesced && (!is_relu2 || is_int8 || graph.expert_bits != 4) {
+            return Err(format!(
+                "split hot coalesced W2 contract invalid at layer {}: relu2={} expert_bits={}",
+                layer_idx, is_relu2, graph.expert_bits,
+            ));
+        }
+        let w2_smem = if relu2_w2_coalesced {
+            (w2_input_k * 2 + 1024 * 4 + 64 * 4 + 16 * 16 * 4) as u32
+        } else {
+            (w2_input_k * 2 + 1024 * 4 + 64 * 4) as u32
+        };
         unsafe {
             if is_relu2 {
                 let w2_kernel = if is_int8 {
                     k.relu2_w2_int8_batched.clone()
+                } else if relu2_w2_coalesced {
+                    k.relu2_w2_batched_coalesced.clone()
                 } else {
                     k.relu2_w2_batched.clone()
                 };
@@ -39570,9 +39813,9 @@ impl GpuDecodeStore {
             );
         }
 
-        // Previous-token route prefetch + split hot/cold launch are implemented
-        // for the legacy CPU route-sync path only. Fail visibly on unsupported
-        // combinations instead of silently degrading.
+        // Previous-token route prefetch is implemented for the legacy CPU
+        // route-sync path only. Split hot/cold launch supports both route-sync
+        // paths while retaining its fail-closed weight-buffer contract.
         let prefetch_depth = graph.prefetch_depth;
         let split_launch = graph.split_expert_launch;
         if prefetch_depth > 0 && gpu_rs {
@@ -39580,9 +39823,9 @@ impl GpuDecodeStore {
                 "KRASIS_PREFETCH is not supported together with KRASIS_GPU_ROUTE_SYNC".to_string(),
             );
         }
-        if split_launch && gpu_rs {
+        if split_launch && hot_hcs_nosync {
             return Err(
-                "KRASIS_SPLIT_EXPERT_LAUNCH is not supported together with KRASIS_GPU_ROUTE_SYNC"
+                "KRASIS_SPLIT_EXPERT_LAUNCH is not supported together with KRASIS_GPU_ROUTE_SYNC_HOT_NOSYNC; the no-sync path replays a different graph contract"
                     .to_string(),
             );
         }
@@ -39674,6 +39917,42 @@ impl GpuDecodeStore {
         }
 
         let timing = graph.timing_enabled;
+        if graph.graph_internal_timing {
+            let timing_events_ready = graph.graph_timing_events.is_some();
+            let timing_vectors_ready = [
+                graph.graph_segment_split_hot_elapsed.len(),
+                graph.graph_segment_demand_dma_elapsed.len(),
+                graph.graph_segment_demand_dma_bytes.len(),
+                graph.graph_segment_demand_dma_calls.len(),
+                graph.graph_segment_demand_dma_cold_experts.len(),
+                graph.graph_segment_demand_dma_samples.len(),
+            ]
+            .iter()
+            .all(|&len| len == num_graphs);
+            if !timing_events_ready || !timing_vectors_ready {
+                return Err(format!(
+                    "graph split/DMA timing contract incomplete: events={} graphs={} split={} elapsed={} bytes={} calls={} cold={} samples={}",
+                    timing_events_ready,
+                    num_graphs,
+                    graph.graph_segment_split_hot_elapsed.len(),
+                    graph.graph_segment_demand_dma_elapsed.len(),
+                    graph.graph_segment_demand_dma_bytes.len(),
+                    graph.graph_segment_demand_dma_calls.len(),
+                    graph.graph_segment_demand_dma_cold_experts.len(),
+                    graph.graph_segment_demand_dma_samples.len(),
+                ));
+            }
+        }
+        let mut demand_dma_active = if graph.graph_internal_timing {
+            vec![false; num_graphs]
+        } else {
+            Vec::new()
+        };
+        let mut split_hot_active = if graph.graph_internal_timing {
+            vec![false; num_graphs]
+        } else {
+            Vec::new()
+        };
 
         // Budget inputs for the NEXT token: this token's wall time and demand
         // cold-DMA bytes, recorded after the final sync below.
@@ -39920,6 +40199,7 @@ impl GpuDecodeStore {
 
                     // Count hot experts (topk - cold)
                     graph.dma_hcs_experts += (topk - cold_count) as u64;
+                    hot_batch_count = topk - cold_count;
 
                     // DMA cold experts into VRAM buffers and update their d_batch_upload slots.
                     // All DMAs are queued on copy_stream without per-expert sync, then a single
@@ -39945,6 +40225,8 @@ impl GpuDecodeStore {
                         let mut apfl_hits = 0u32;
                         let mut apfl_misses = 0u32;
                         let mut miss_count = 0usize;
+                        let mut boundary_dma_bytes = 0u64;
+                        let mut boundary_dma_calls = 0u64;
 
                         if cold_count > graph_buf_base.len() {
                             return Err(format!(
@@ -40023,6 +40305,14 @@ impl GpuDecodeStore {
                             graph.dma_cold_experts += 1;
                             let expert = &moe_data.experts[eid];
 
+                            if graph.graph_internal_timing && miss_count == 0 {
+                                graph
+                                    .graph_timing_events
+                                    .as_ref()
+                                    .unwrap()
+                                    .demand_dma
+                                    .record_start(graph_idx, copy_stream)?;
+                            }
                             let base = graph_buf_base[miss_count];
                             miss_count += 1;
                             let (w13p, w13s, w2p, w2s) = (
@@ -40044,6 +40334,8 @@ impl GpuDecodeStore {
                                     );
                                     graph.dma_bytes_total += expert.contiguous_bytes as u64;
                                     graph.dma_call_count += 1;
+                                    boundary_dma_bytes += expert.contiguous_bytes as u64;
+                                    boundary_dma_calls += 1;
                                 } else {
                                     cuda_sys::lib().cuMemcpyHtoDAsync_v2(
                                         w13p,
@@ -40075,6 +40367,8 @@ impl GpuDecodeStore {
                                         + expert.w2_scales_bytes;
                                     graph.dma_bytes_total += dma_bytes as u64;
                                     graph.dma_call_count += 4;
+                                    boundary_dma_bytes += dma_bytes as u64;
+                                    boundary_dma_calls += 4;
                                 }
                             }
 
@@ -40088,6 +40382,22 @@ impl GpuDecodeStore {
                         }
 
                         if miss_count > 0 {
+                            if graph.graph_internal_timing {
+                                graph
+                                    .graph_timing_events
+                                    .as_ref()
+                                    .unwrap()
+                                    .demand_dma
+                                    .record_end(graph_idx, copy_stream)?;
+                                demand_dma_active[graph_idx] = true;
+                                graph.graph_segment_demand_dma_bytes[graph_idx] +=
+                                    boundary_dma_bytes;
+                                graph.graph_segment_demand_dma_calls[graph_idx] +=
+                                    boundary_dma_calls;
+                                graph.graph_segment_demand_dma_cold_experts[graph_idx] +=
+                                    miss_count as u64;
+                                graph.graph_segment_demand_dma_samples[graph_idx] += 1;
+                            }
                             let err = unsafe {
                                 cuda_sys::lib().cuEventRecord(graph_replay_dma_event, copy_stream)
                             };
@@ -40335,6 +40645,12 @@ impl GpuDecodeStore {
                         }
                     }
 
+                    // HCS and already-complete APFL slots occupy the current
+                    // prefix. Preserve that exact boundary before demand-cold
+                    // slots are appended so split launch can steer the two
+                    // disjoint weight masks.
+                    hot_batch_count = batch_count;
+
                     let adaptive_cold_drop_active = graph.adaptive_cold_drop.enabled();
                     let mut adaptive_cold_drop_count = 0usize;
                     if graph.adaptive_cold_drop_shadow.enabled() || adaptive_cold_drop_active {
@@ -40407,6 +40723,8 @@ impl GpuDecodeStore {
                     // pointers are consumed in one launch.
                     let mut cold_ptrs_list: Vec<(u64, u64, u64, u64)> =
                         Vec::with_capacity(cold_experts.len());
+                    let mut boundary_dma_bytes = 0u64;
+                    let mut boundary_dma_calls = 0u64;
                     if !cold_experts.is_empty() && dynamic_promotion_event_pending {
                         let err = unsafe {
                             cuda_sys::lib().cuStreamWaitEvent(
@@ -40422,6 +40740,14 @@ impl GpuDecodeStore {
                             ));
                         }
                         dynamic_promotion_event_pending = false;
+                    }
+                    if graph.graph_internal_timing && !cold_experts.is_empty() {
+                        graph
+                            .graph_timing_events
+                            .as_ref()
+                            .unwrap()
+                            .demand_dma
+                            .record_start(graph_idx, copy_stream)?;
                     }
                     for (ci, &(_topk_pos, eid, _weight)) in cold_experts.iter().enumerate() {
                         let expert = &moe_data.experts[eid];
@@ -40444,6 +40770,8 @@ impl GpuDecodeStore {
                                 );
                                 graph.dma_bytes_total += expert.contiguous_bytes as u64;
                                 graph.dma_call_count += 1;
+                                boundary_dma_bytes += expert.contiguous_bytes as u64;
+                                boundary_dma_calls += 1;
                             } else {
                                 cuda_sys::lib().cuMemcpyHtoDAsync_v2(
                                     w13p,
@@ -40475,6 +40803,8 @@ impl GpuDecodeStore {
                                     + expert.w2_scales_bytes;
                                 graph.dma_bytes_total += dma_bytes as u64;
                                 graph.dma_call_count += 4;
+                                boundary_dma_bytes += dma_bytes as u64;
+                                boundary_dma_calls += 4;
                             }
                         }
                         cold_ptrs_list.push((w13p, w13s, w2p, w2s));
@@ -40508,6 +40838,20 @@ impl GpuDecodeStore {
                     // Record copy-stream completion instead of blocking the CPU.
                     // The replay stream waits on this event after d_batch_upload is queued.
                     if !cold_experts.is_empty() {
+                        if graph.graph_internal_timing {
+                            graph
+                                .graph_timing_events
+                                .as_ref()
+                                .unwrap()
+                                .demand_dma
+                                .record_end(graph_idx, copy_stream)?;
+                            demand_dma_active[graph_idx] = true;
+                            graph.graph_segment_demand_dma_bytes[graph_idx] += boundary_dma_bytes;
+                            graph.graph_segment_demand_dma_calls[graph_idx] += boundary_dma_calls;
+                            graph.graph_segment_demand_dma_cold_experts[graph_idx] +=
+                                cold_experts.len() as u64;
+                            graph.graph_segment_demand_dma_samples[graph_idx] += 1;
+                        }
                         let err = unsafe {
                             cuda_sys::lib().cuEventRecord(graph_replay_dma_event, copy_stream)
                         };
@@ -40704,7 +41048,24 @@ impl GpuDecodeStore {
             // before the cold-DMA wait, so hot compute overlaps demand DMA.
             if split_launch && graph_idx > 0 && hot_batch_count > 0 {
                 let moe_layer_idx = moe_indices[graph_idx - 1];
+                if graph.graph_internal_timing {
+                    graph
+                        .graph_timing_events
+                        .as_ref()
+                        .unwrap()
+                        .split_hot
+                        .record_start(graph_idx, replay_stream)?;
+                }
                 Self::launch_split_hot_expert_stack(graph, moe_layer_idx)?;
+                if graph.graph_internal_timing {
+                    graph
+                        .graph_timing_events
+                        .as_ref()
+                        .unwrap()
+                        .split_hot
+                        .record_end(graph_idx, replay_stream)?;
+                    split_hot_active[graph_idx] = true;
+                }
             }
 
             if wait_for_cold_dma {
@@ -40890,6 +41251,21 @@ impl GpuDecodeStore {
                 .get_mut(num_graphs.saturating_sub(1))
             {
                 *slot += elapsed;
+            }
+        }
+        if graph.graph_internal_timing {
+            let events = graph.graph_timing_events.as_ref().unwrap();
+            for (graph_idx, &active) in split_hot_active.iter().enumerate() {
+                if active {
+                    graph.graph_segment_split_hot_elapsed[graph_idx] +=
+                        events.split_hot.elapsed_ms(graph_idx)? / 1000.0;
+                }
+            }
+            for (graph_idx, &active) in demand_dma_active.iter().enumerate() {
+                if active {
+                    graph.graph_segment_demand_dma_elapsed[graph_idx] +=
+                        events.demand_dma.elapsed_ms(graph_idx)? / 1000.0;
+                }
             }
         }
 
@@ -53688,6 +54064,24 @@ impl GpuDecodeStore {
                 for wait in &mut g.graph_segment_sync_wait {
                     *wait = 0.0;
                 }
+                for elapsed in &mut g.graph_segment_split_hot_elapsed {
+                    *elapsed = 0.0;
+                }
+                for elapsed in &mut g.graph_segment_demand_dma_elapsed {
+                    *elapsed = 0.0;
+                }
+                for bytes in &mut g.graph_segment_demand_dma_bytes {
+                    *bytes = 0;
+                }
+                for calls in &mut g.graph_segment_demand_dma_calls {
+                    *calls = 0;
+                }
+                for cold in &mut g.graph_segment_demand_dma_cold_experts {
+                    *cold = 0;
+                }
+                for samples in &mut g.graph_segment_demand_dma_samples {
+                    *samples = 0;
+                }
             }
         }
 
@@ -56230,8 +56624,14 @@ impl GpuDecodeStore {
                 let avg_cold = graph.dma_cold_experts as f64 / n;
                 let avg_hcs = graph.dma_hcs_experts as f64 / n;
                 let dma_mb = avg_dma_bytes / (1024.0 * 1024.0);
+                let split_hot_elapsed_s: f64 = graph.graph_segment_split_hot_elapsed.iter().sum();
+                let demand_dma_elapsed_s: f64 = graph.graph_segment_demand_dma_elapsed.iter().sum();
+                let demand_dma_bytes: u64 = graph.graph_segment_demand_dma_bytes.iter().sum();
+                let demand_dma_calls: u64 = graph.graph_segment_demand_dma_calls.iter().sum();
+                let demand_dma_cold: u64 = graph.graph_segment_demand_dma_cold_experts.iter().sum();
+                let demand_dma_samples: u64 = graph.graph_segment_demand_dma_samples.iter().sum();
                 eprintln!("  \x1b[36m├─────────────────────────────────────────────────┤\x1b[0m");
-                eprintln!("  \x1b[36m│\x1b[0m  PCIe DMA (non-serialized):                     \x1b[36m│\x1b[0m");
+                eprintln!("  \x1b[36m│\x1b[0m  PCIe DMA traffic:                              \x1b[36m│\x1b[0m");
                 eprintln!("  \x1b[36m│\x1b[0m    Cold experts/tok: {:.1} ({:.0} DMA calls)      \x1b[36m│\x1b[0m", avg_cold, avg_dma_calls);
                 eprintln!("  \x1b[36m│\x1b[0m    HCS experts/tok:  {:.1} ({} cached)            \x1b[36m│\x1b[0m", avg_hcs, hcs_cached);
                 eprintln!("  \x1b[36m│\x1b[0m    DMA bytes/tok:    {:.2} MB                     \x1b[36m│\x1b[0m", dma_mb);
@@ -56242,7 +56642,159 @@ impl GpuDecodeStore {
                     0.0
                 };
                 eprintln!("  \x1b[36m│\x1b[0m    Avg DMA call size: {:.1} KB                   \x1b[36m│\x1b[0m", bytes_per_call / 1024.0);
-                eprintln!("  \x1b[36m│\x1b[0m    PCIe bandwidth:   unavailable (overlap)       \x1b[36m│\x1b[0m");
+                if demand_dma_elapsed_s > 0.0 && demand_dma_bytes > 0 {
+                    if split_hot_elapsed_s > 0.0 {
+                        eprintln!(
+                            "  \x1b[36m│\x1b[0m    Split hot active:  {:.2} ms/tok                 \x1b[36m│\x1b[0m",
+                            split_hot_elapsed_s / n * 1000.0,
+                        );
+                    }
+                    let demand_dma_ms_tok = demand_dma_elapsed_s / n * 1000.0;
+                    let demand_dma_mb_tok = demand_dma_bytes as f64 / n / (1024.0 * 1024.0);
+                    let demand_dma_gb_s = demand_dma_bytes as f64 / demand_dma_elapsed_s / 1e9;
+                    eprintln!(
+                        "  \x1b[36m│\x1b[0m    Demand H2D active: {:.2} ms/tok                 \x1b[36m│\x1b[0m",
+                        demand_dma_ms_tok,
+                    );
+                    eprintln!(
+                        "  \x1b[36m│\x1b[0m    Demand H2D BW:    {:.2} GB/s (CUDA events)      \x1b[36m│\x1b[0m",
+                        demand_dma_gb_s,
+                    );
+
+                    let mut dma_per_graph: Vec<(usize, f64)> = graph
+                        .graph_segment_demand_dma_elapsed
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, seconds)| **seconds > 0.0)
+                        .map(|(idx, &seconds)| (idx, seconds / n * 1000.0))
+                        .collect();
+                    dma_per_graph
+                        .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                    eprintln!(
+                        "  \x1b[36m│\x1b[0m  Slowest demand H2D segments:                  \x1b[36m│\x1b[0m"
+                    );
+                    for (idx, dma_ms_tok) in dma_per_graph.iter().take(6) {
+                        let graph_ms_tok = graph
+                            .graph_segment_elapsed
+                            .get(*idx)
+                            .copied()
+                            .unwrap_or(0.0)
+                            / n
+                            * 1000.0;
+                        let hot_ms_tok = graph
+                            .graph_segment_split_hot_elapsed
+                            .get(*idx)
+                            .copied()
+                            .unwrap_or(0.0)
+                            / n
+                            * 1000.0;
+                        let wait_ms_tok = graph
+                            .graph_segment_sync_wait
+                            .get(*idx)
+                            .copied()
+                            .unwrap_or(0.0)
+                            / n
+                            * 1000.0;
+                        let mb_tok = graph
+                            .graph_segment_demand_dma_bytes
+                            .get(*idx)
+                            .copied()
+                            .unwrap_or(0) as f64
+                            / n
+                            / (1024.0 * 1024.0);
+                        let cold_tok = graph
+                            .graph_segment_demand_dma_cold_experts
+                            .get(*idx)
+                            .copied()
+                            .unwrap_or(0) as f64
+                            / n;
+                        eprintln!(
+                            "  \x1b[36m│\x1b[0m    #{:<3} H2D {:>5.2} | hot {:>4.2} | graph {:>4.2}  \x1b[36m│\x1b[0m",
+                            idx,
+                            dma_ms_tok,
+                            hot_ms_tok,
+                            graph_ms_tok,
+                        );
+                        eprintln!(
+                            "  \x1b[36m│\x1b[0m         wait {:>5.2} ms | {:>5.1} MB | {:>4.2} cold \x1b[36m│\x1b[0m",
+                            wait_ms_tok,
+                            mb_tok,
+                            cold_tok,
+                        );
+                    }
+                    let top_dma: Vec<String> = dma_per_graph
+                        .iter()
+                        .take(8)
+                        .map(|(idx, dma_ms_tok)| {
+                            let label = graph
+                                .graph_segment_labels
+                                .get(*idx)
+                                .map(|s| s.as_str())
+                                .unwrap_or("unlabelled");
+                            let graph_ms_tok = graph
+                                .graph_segment_elapsed
+                                .get(*idx)
+                                .copied()
+                                .unwrap_or(0.0)
+                                / n
+                                * 1000.0;
+                            let hot_ms_tok = graph
+                                .graph_segment_split_hot_elapsed
+                                .get(*idx)
+                                .copied()
+                                .unwrap_or(0.0)
+                                / n
+                                * 1000.0;
+                            let wait_ms_tok = graph
+                                .graph_segment_sync_wait
+                                .get(*idx)
+                                .copied()
+                                .unwrap_or(0.0)
+                                / n
+                                * 1000.0;
+                            let mb_tok = graph
+                                .graph_segment_demand_dma_bytes
+                                .get(*idx)
+                                .copied()
+                                .unwrap_or(0) as f64
+                                / n
+                                / (1024.0 * 1024.0);
+                            let cold_tok = graph
+                                .graph_segment_demand_dma_cold_experts
+                                .get(*idx)
+                                .copied()
+                                .unwrap_or(0) as f64
+                                / n;
+                            format!(
+                                "#{} dma={:.3}ms hot={:.3}ms graph={:.3}ms wait={:.3}ms mb={:.2} cold={:.2}:{}",
+                                idx,
+                                dma_ms_tok,
+                                hot_ms_tok,
+                                graph_ms_tok,
+                                wait_ms_tok,
+                                mb_tok,
+                                cold_tok,
+                                label,
+                            )
+                        })
+                        .collect();
+                    log::info!(
+                        "DECODE GRAPH DEMAND DMA avg_ms_per_tok={:.3} split_hot_ms_per_tok={:.3} effective_gb_s={:.3} mb_per_tok={:.3} calls_per_tok={:.3} cold_per_tok={:.3} active_samples={} top=[{}]",
+                        demand_dma_ms_tok,
+                        split_hot_elapsed_s / n * 1000.0,
+                        demand_dma_gb_s,
+                        demand_dma_mb_tok,
+                        demand_dma_calls as f64 / n,
+                        demand_dma_cold as f64 / n,
+                        demand_dma_samples,
+                        top_dma.join("; "),
+                    );
+                } else {
+                    eprintln!("  \x1b[36m│\x1b[0m    Demand H2D BW:    unavailable (not measured)  \x1b[36m│\x1b[0m");
+                    log::info!(
+                        "DECODE GRAPH DEMAND DMA unavailable reason=no_measured_demand_copy_interval"
+                    );
+                }
                 eprintln!("  \x1b[36m└─────────────────────────────────────────────────┘\x1b[0m");
 
                 // Also emit to structured log (no ANSI escapes)

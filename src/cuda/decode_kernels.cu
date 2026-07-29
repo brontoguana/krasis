@@ -516,19 +516,26 @@ extern "C" __global__ void softmax_topk(
 //     [base+2] = w2_packed VRAM ptr
 //     [base+3] = w2_scales VRAM ptr
 //
-// d_batch_upload layout: [max_ept * 8] * 4 pointer arrays + [max_ept * 4] weights
+// d_batch_upload layout: [max_ept * 8] * 4 pointer arrays + three
+// [max_ept * 4] weight regions
 //   Stride between arrays = max_ept * 8 bytes
 //   Array 0: w13_packed ptrs [max_ept]
 //   Array 1: w13_scales ptrs [max_ept]
 //   Array 2: w2_packed ptrs  [max_ept]
 //   Array 3: w2_scales ptrs  [max_ept]
+//   Weight 0: ordinary/cold-only weights
+//   Weight 1: split full weights
+//   Weight 2: split hot-only weights
 //   Array 4: weights (f32)   [max_ept] at offset max_ept*8*4
+//   Array 5: split full weights (f32) [max_ept]
+//   Array 6: split hot weights (f32)  [max_ept]
 //
 // mapped_cold_buf layout (host-visible via PCIe BAR):
 //   [0]:       cold_count (int32) — number of cold experts
 //   [1]:       ready_flag (int32) — set to 1 when classification is done
 //   [2..2+topk]: cold expert IDs (int32)
 //   [2+topk..2+2*topk]: cold topk positions (int32) — slot index in batch
+//   [2+2*max_ept]: split-expert launch flag (int32), written before capture
 //
 // Launch: grid=(1,1,1), block=(1,1,1), smem=0
 // Single-threaded: topk <= 16, trivial work.
@@ -556,6 +563,9 @@ extern "C" __global__ void expert_classify_prepare(
     unsigned long long* w2p_arr  = d_batch_upload + max_ept * 2;
     unsigned long long* w2s_arr  = d_batch_upload + max_ept * 3;
     float* wts_arr = (float*)(d_batch_upload + max_ept * 4);
+    float* split_weights_full = wts_arr + max_ept;
+    float* split_weights_hot = split_weights_full + max_ept;
+    int split_expert_launch = mapped_cold_buf[2 + max_ept * 2] != 0;
 
     int batch_count = 0;
     int cold_count = 0;
@@ -567,6 +577,7 @@ extern "C" __global__ void expert_classify_prepare(
 
         int ptr_base = layer_base + eid * 4;
         unsigned long long w13p = d_expert_ptrs[ptr_base + 0];
+        float weight = topk_weights[i];
 
         if (w13p != 0) {
             // HCS hit (or mapped host pointer) — write pointers directly to batch upload
@@ -574,13 +585,21 @@ extern "C" __global__ void expert_classify_prepare(
             w13s_arr[batch_count] = d_expert_ptrs[ptr_base + 1];
             w2p_arr[batch_count]  = d_expert_ptrs[ptr_base + 2];
             w2s_arr[batch_count]  = d_expert_ptrs[ptr_base + 3];
-            wts_arr[batch_count]  = topk_weights[i];
+            wts_arr[batch_count]  = split_expert_launch ? 0.0f : weight;
+            if (split_expert_launch) {
+                split_weights_full[batch_count] = weight;
+                split_weights_hot[batch_count] = weight;
+            }
             batch_count++;
         } else {
             // Cold miss — record for CPU DMA
             mapped_cold_buf[2 + cold_count] = eid;
             mapped_cold_buf[2 + topk + cold_count] = batch_count;
-            wts_arr[batch_count] = topk_weights[i];
+            wts_arr[batch_count] = weight;
+            if (split_expert_launch) {
+                split_weights_full[batch_count] = weight;
+                split_weights_hot[batch_count] = 0.0f;
+            }
             batch_count++;
             cold_count++;
         }
@@ -593,6 +612,10 @@ extern "C" __global__ void expert_classify_prepare(
         w2p_arr[i]  = dummy_ptr;
         w2s_arr[i]  = dummy_ptr;
         wts_arr[i]  = 0.0f;
+        if (split_expert_launch) {
+            split_weights_full[i] = 0.0f;
+            split_weights_hot[i] = 0.0f;
+        }
     }
 
     // Write topk IDs to mapped activations buffer for post-hoc HCS recording
