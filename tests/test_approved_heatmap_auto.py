@@ -9,6 +9,274 @@ from krasis import server
 
 
 class ApprovedHeatmapAutoTest(unittest.TestCase):
+    def test_merge_heatmap_counts_keeps_cumulative_intervals_separate(self):
+        cumulative = {"0,1": 3}
+
+        merged = server._merge_heatmap_counts(
+            cumulative,
+            {"0,1": 4, "1,2": 5},
+            "test interval",
+        )
+
+        self.assertEqual(merged, 9)
+        self.assertEqual(cumulative, {"0,1": 7, "1,2": 5})
+
+    def test_full_heatmap_ranking_orders_counts_then_fills_all_model_routes(self):
+        model = SimpleNamespace(
+            cfg=SimpleNamespace(n_routed_experts=3),
+            layers=[
+                SimpleNamespace(is_moe=True),
+                SimpleNamespace(is_moe=False),
+                SimpleNamespace(is_moe=True),
+            ],
+        )
+
+        ranking = server._full_heatmap_ranking(
+            model,
+            {"2,1": 4, "0,2": 9, "0,0": 4},
+        )
+
+        self.assertEqual(ranking[:3], [(0, 2), (0, 0), (2, 1)])
+        self.assertEqual(len(ranking), 6)
+        self.assertEqual(set(ranking), {
+            (0, 0), (0, 1), (0, 2),
+            (2, 0), (2, 1), (2, 2),
+        })
+
+    def test_approved_builder_runs_only_first_fresh_prompt_without_residency(self):
+        class FakeStore:
+            def __init__(self):
+                self.intervals = [{"0,1": 10}, {"0,0": 20}]
+                self.pool_rankings = []
+                self.reload_calls = []
+                self.collection_inits = 0
+
+            def set_vram_calibration(self, *args):
+                return "calibrated"
+
+            def hcs_init_collection(self, *args):
+                self.collection_inits += 1
+
+            def hcs_start_collecting(self):
+                return None
+
+            def hcs_export_heatmap(self):
+                return self.intervals.pop(0)
+
+            def rust_prefill_tokens(self, *args, **kwargs):
+                return 7, 12, False
+
+            def gpu_generate_batch(self, **kwargs):
+                return [8, 9]
+
+            def hcs_reset(self):
+                return None
+
+            def hcs_pool_init_tiered(self, ranking, **kwargs):
+                self.pool_rankings.append(list(ranking))
+                return "pool ready"
+
+            def py_hcs_drain_vram_pressure(self, *args):
+                return 0, 0.0, 700
+
+            def py_hcs_reload_after_prefill(self, prompt_len):
+                self.reload_calls.append(prompt_len)
+                return 2, 1.0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = FakeStore()
+            model = SimpleNamespace(
+                cfg=SimpleNamespace(
+                    n_routed_experts=2,
+                    num_hidden_layers=1,
+                    eos_token_id=99,
+                    extra_stop_token_ids=[],
+                ),
+                layers=[SimpleNamespace(is_moe=True)],
+                _gpu_decode_store=store,
+                server_cleanup=lambda: None,
+            )
+            args = SimpleNamespace(
+                approved_heatmap_prompts=None,
+                approved_heatmap_max_prompts=0,
+                approved_heatmap_decode_tokens=2,
+                approved_heatmap_checkpoint_every=0,
+                approved_heatmap_residency_refresh_every=1,
+                approved_heatmap_resume_from=None,
+                approved_heatmap_bootstrap_from=None,
+                heatmap_path=None,
+                benchmark=False,
+                benchmark_only=False,
+                temperature=0.0,
+                enable_thinking=False,
+                residency_calibration={
+                    "short_tokens": 8,
+                    "long_tokens": 16,
+                    "prefill_short_free_mb": 1000,
+                    "prefill_long_free_mb": 900,
+                    "decode_short_free_mb": 1100,
+                    "decode_long_free_mb": 1000,
+                    "baseline_free_mb": 1200,
+                    "safety_margin_mb": 600,
+                    "short_prefill_post_alloc_free_mb": 1050,
+                    "long_prefill_post_alloc_free_mb": 950,
+                    "decode_hcs_budget_mb": 500,
+                },
+            )
+            out = Path(tmp) / "approved.json"
+            old_load = server._load_heatmap_prompts
+            old_assert = server._assert_heatmap_prompts_are_held_out
+            old_chat = server._chat_prompt_tokens
+            old_meta = server._approved_heatmap_metadata
+            try:
+                server._load_heatmap_prompts = lambda path=None: ["one", "two"]
+                server._assert_heatmap_prompts_are_held_out = lambda prompts: None
+                server._chat_prompt_tokens = lambda *args, **kwargs: [1, 2]
+                server._approved_heatmap_metadata = (
+                    lambda *args, **kwargs: {"format": server.APPROVED_HEATMAP_FORMAT}
+                )
+                server._build_approved_heatmap(
+                    model,
+                    str(out),
+                    args,
+                    args.residency_calibration,
+                )
+            finally:
+                server._load_heatmap_prompts = old_load
+                server._assert_heatmap_prompts_are_held_out = old_assert
+                server._chat_prompt_tokens = old_chat
+                server._approved_heatmap_metadata = old_meta
+
+            artifact = json.loads(out.read_text(encoding="utf-8"))
+            self.assertEqual(store.collection_inits, 1)
+            self.assertEqual(len(store.pool_rankings), 1)
+            self.assertEqual(store.pool_rankings[0][0], (0, 1))
+            self.assertEqual(store.reload_calls, [12])
+            self.assertEqual(artifact["0,1"], 10)
+            self.assertEqual(artifact["0,0"], 20)
+
+    def test_approved_builder_bootstrap_ranking_does_not_enter_output_counts(self):
+        class FakeStore:
+            def __init__(self):
+                self.pool_rankings = []
+
+            def set_vram_calibration(self, *args):
+                return "calibrated"
+
+            def hcs_start_collecting(self):
+                return None
+
+            def hcs_export_heatmap(self):
+                return {"0,1": 7}
+
+            def rust_prefill_tokens(self, *args, **kwargs):
+                return 7, 12, False
+
+            def gpu_generate_batch(self, **kwargs):
+                return []
+
+            def hcs_reset(self):
+                return None
+
+            def hcs_pool_init_tiered(self, ranking, **kwargs):
+                self.pool_rankings.append(list(ranking))
+                return "pool ready"
+
+            def py_hcs_drain_vram_pressure(self, *args):
+                return 0, 0.0, 700
+
+            def py_hcs_reload_after_prefill(self, prompt_len):
+                return 0, 0.0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bootstrap = Path(tmp) / "bootstrap.json"
+            bootstrap.write_text("{}", encoding="utf-8")
+            store = FakeStore()
+            model = SimpleNamespace(
+                cfg=SimpleNamespace(
+                    n_routed_experts=2,
+                    num_hidden_layers=1,
+                    eos_token_id=99,
+                    extra_stop_token_ids=[],
+                ),
+                layers=[SimpleNamespace(is_moe=True)],
+                _gpu_decode_store=store,
+                server_cleanup=lambda: None,
+            )
+            args = SimpleNamespace(
+                approved_heatmap_prompts=None,
+                approved_heatmap_max_prompts=0,
+                approved_heatmap_decode_tokens=1,
+                approved_heatmap_checkpoint_every=0,
+                approved_heatmap_residency_refresh_every=1,
+                approved_heatmap_resume_from=None,
+                approved_heatmap_bootstrap_from=str(bootstrap),
+                heatmap_path=None,
+                benchmark=False,
+                benchmark_only=False,
+                temperature=0.0,
+                enable_thinking=False,
+                residency_calibration={
+                    "short_tokens": 8,
+                    "long_tokens": 16,
+                    "prefill_short_free_mb": 1000,
+                    "prefill_long_free_mb": 900,
+                    "decode_short_free_mb": 1100,
+                    "decode_long_free_mb": 1000,
+                    "baseline_free_mb": 1200,
+                    "safety_margin_mb": 600,
+                    "short_prefill_post_alloc_free_mb": 1050,
+                    "long_prefill_post_alloc_free_mb": 950,
+                    "decode_hcs_budget_mb": 500,
+                },
+            )
+            out = Path(tmp) / "approved.json"
+            old_load = server._load_heatmap_prompts
+            old_assert = server._assert_heatmap_prompts_are_held_out
+            old_chat = server._chat_prompt_tokens
+            old_meta = server._approved_heatmap_metadata
+            old_bootstrap = server._load_heatmap_residency_bootstrap
+            try:
+                server._load_heatmap_prompts = lambda path=None: ["one"]
+                server._assert_heatmap_prompts_are_held_out = lambda prompts: None
+                server._chat_prompt_tokens = lambda *args, **kwargs: [1, 2]
+                server._approved_heatmap_metadata = (
+                    lambda *args, **kwargs: {"format": server.APPROVED_HEATMAP_FORMAT}
+                )
+                server._load_heatmap_residency_bootstrap = (
+                    lambda *args, **kwargs: ({"0,0": 100}, server.APPROVED_HEATMAP_FORMAT)
+                )
+                server._build_approved_heatmap(
+                    model,
+                    str(out),
+                    args,
+                    args.residency_calibration,
+                )
+                server._load_heatmap_residency_bootstrap = (
+                    lambda *args, **kwargs: ({}, server.APPROVED_HEATMAP_FORMAT)
+                )
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "bootstrap contains no route counts",
+                ):
+                    server._build_approved_heatmap(
+                        model,
+                        str(Path(tmp) / "empty-bootstrap.json"),
+                        args,
+                        args.residency_calibration,
+                    )
+            finally:
+                server._load_heatmap_prompts = old_load
+                server._assert_heatmap_prompts_are_held_out = old_assert
+                server._chat_prompt_tokens = old_chat
+                server._approved_heatmap_metadata = old_meta
+                server._load_heatmap_residency_bootstrap = old_bootstrap
+
+            artifact = json.loads(out.read_text(encoding="utf-8"))
+            self.assertEqual(store.pool_rankings[0][0], (0, 0))
+            self.assertNotIn("0,0", artifact)
+            self.assertEqual(artifact["0,1"], 7)
+
     def test_route_signature_accepts_missing_layer_types(self):
         cfg = SimpleNamespace(
             model_type="qwen3_moe",

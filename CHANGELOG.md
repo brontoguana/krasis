@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- Changed approved route-heatmap construction from an all-cold collection loop
+  to calibrated adaptive residency. A fresh build now runs only its first
+  prompt without HCS, merges that interval into an independent cumulative
+  count ledger, and rebuilds the normal reclaimable HCS pool from the evolving
+  full ranking for later prompts. Compatible resume artifacts, explicit
+  `--bootstrap-from` artifacts, and config `CFG_HEATMAP_PATH` can seed
+  residency before prompt one; bootstrap counts never enter the new output.
+  The builder now receives the real startup VRAM calibration, uses the same
+  measured decode budget, per-prompt prefill eviction/reload, and configured
+  safety margin as serving, and fails if a refresh cannot restore that floor.
+  Artifact metadata records the bootstrap checksum and refresh cadence. The
+  first GLM-5.2 p80 build captured 12,214,200 exact held-out route events;
+  full-length resident collection prompts averaged 81.305 seconds versus
+  138.134 seconds for the initial all-cold prompt. Its p72/p80 top-3,900
+  overlap reached 97.54%. The validated artifact is now configured for direct
+  reuse by the GLM sparse-development config, eliminating the six-prompt quick
+  heatmap on later starts. A timing-disabled evaluation improved internal
+  50/100/250-token decode from 4.64/4.69/4.65 to 5.02/5.11/4.88 tok/s while
+  prefill remained 45.0 tok/s; sustained HCS hit increased from 65.69% to
+  67.91%, decode low-water remained 1,178 MiB against the 600 MiB margin, and
+  budget skips, no-slot events, and copy failures remained zero.
 - Extended the exact split hot/cold expert launch to graph replay with GPU
   route synchronization. The classify kernel now retains full routed weights,
   masks HCS-resident slots into a direct hot launch, and masks those same slots

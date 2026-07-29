@@ -1582,6 +1582,7 @@ def _approved_heatmap_metadata(
     decode_tokens: int,
     prompts_processed: int,
     total_decode_tokens: int,
+    residency_metadata: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     from krasis import __version__ as krasis_version
 
@@ -1612,6 +1613,7 @@ def _approved_heatmap_metadata(
             },
             "total_decode_tokens": int(total_decode_tokens),
             "score": "decode_route_topk_count",
+            "collection_residency": residency_metadata,
         },
     }
 
@@ -1636,6 +1638,90 @@ def _approved_heatmap_counts(data: dict[str, Any], path: str) -> dict[str, int]:
             raise RuntimeError(f"Approved heatmap contains invalid route count for {key!r}: {path}")
         counts[key] = value
     return counts
+
+
+def _merge_heatmap_counts(
+    cumulative: dict[str, int],
+    interval: dict[str, Any],
+    source: str,
+) -> int:
+    merged_events = 0
+    for key, value in _approved_heatmap_counts(interval, source).items():
+        cumulative[key] = int(cumulative.get(key, 0)) + value
+        merged_events += value
+    return merged_events
+
+
+def _full_heatmap_ranking(
+    model: KrasisModel,
+    counts: dict[str, int],
+) -> list[tuple[int, int]]:
+    ranked: list[tuple[int, int, int]] = []
+    seen: set[tuple[int, int]] = set()
+    for key, count in counts.items():
+        layer_text, expert_text = key.split(",", 1)
+        layer_idx = int(layer_text)
+        expert_idx = int(expert_text)
+        if (
+            layer_idx < 0
+            or layer_idx >= len(model.layers)
+            or not model.layers[layer_idx].is_moe
+            or expert_idx < 0
+            or expert_idx >= model.cfg.n_routed_experts
+        ):
+            raise RuntimeError(
+                f"Heatmap ranking contains an invalid model route {key!r}"
+            )
+        route = (layer_idx, expert_idx)
+        if route in seen:
+            raise RuntimeError(f"Heatmap ranking contains duplicate route {key!r}")
+        seen.add(route)
+        ranked.append((int(count), layer_idx, expert_idx))
+    ranked.sort(key=lambda item: (-item[0], item[1], item[2]))
+    full = [(layer_idx, expert_idx) for _, layer_idx, expert_idx in ranked]
+    for layer_idx, layer in enumerate(model.layers):
+        if not layer.is_moe:
+            continue
+        for expert_idx in range(model.cfg.n_routed_experts):
+            route = (layer_idx, expert_idx)
+            if route not in seen:
+                full.append(route)
+    return full
+
+
+def _load_heatmap_residency_bootstrap(
+    model: KrasisModel,
+    args,
+    path: str,
+) -> tuple[dict[str, int], str]:
+    try:
+        with open(path) as f:
+            unchecked = json.load(f)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(
+            f"Heatmap residency bootstrap is not valid JSON: {path}: {e}"
+        ) from e
+    except OSError as e:
+        raise RuntimeError(
+            f"Heatmap residency bootstrap is unreadable: {path}: {e}"
+        ) from e
+    metadata = unchecked.get("_metadata")
+    if not isinstance(metadata, dict):
+        raise RuntimeError(
+            f"Heatmap residency bootstrap has no validation metadata: {path}"
+        )
+    fmt = metadata.get("format")
+    if fmt == APPROVED_HEATMAP_FORMAT:
+        expected = {
+            "route_signature": _heatmap_route_signature(model, args),
+            "runtime_compat": _runtime_heatmap_capture_config(args),
+        }
+    else:
+        quick_prompts = _load_heatmap_prompts()
+        _assert_heatmap_prompts_are_held_out(quick_prompts)
+        expected = _expected_heatmap_metadata(model, args, quick_prompts)
+    validated = _load_validated_heatmap(path, expected)
+    return _approved_heatmap_counts(validated, path), str(fmt)
 
 
 def _validate_approved_heatmap_resume_base(
@@ -1693,7 +1779,12 @@ def _validate_approved_heatmap_resume_base(
     return _approved_heatmap_counts(base_data, resume_path), base_prompt_count, base_decode_tokens
 
 
-def _build_approved_heatmap(model: KrasisModel, save_path: str, args) -> str:
+def _build_approved_heatmap(
+    model: KrasisModel,
+    save_path: str,
+    args,
+    residency_calibration: dict[str, int],
+) -> str:
     prompt_path = os.path.expanduser(args.approved_heatmap_prompts) if args.approved_heatmap_prompts else os.path.join(
         os.path.dirname(__file__),
         "prompts",
@@ -1713,7 +1804,22 @@ def _build_approved_heatmap(model: KrasisModel, save_path: str, args) -> str:
     checkpoint_every = int(args.approved_heatmap_checkpoint_every or 0)
     if checkpoint_every < 0:
         raise RuntimeError("--approved-heatmap-checkpoint-every must be non-negative")
+    residency_refresh_every = int(args.approved_heatmap_residency_refresh_every)
+    if residency_refresh_every <= 0:
+        raise RuntimeError(
+            "--approved-heatmap-residency-refresh-every must be positive"
+        )
     resume_path = os.path.expanduser(args.approved_heatmap_resume_from) if args.approved_heatmap_resume_from else None
+    explicit_bootstrap_path = (
+        os.path.expanduser(args.approved_heatmap_bootstrap_from)
+        if args.approved_heatmap_bootstrap_from
+        else None
+    )
+    if resume_path and explicit_bootstrap_path:
+        raise RuntimeError(
+            "--approved-heatmap-resume-from and --approved-heatmap-bootstrap-from "
+            "cannot be combined; the validated resume artifact is already the bootstrap"
+        )
 
     gpu_store = getattr(model, "_gpu_decode_store", None)
     if gpu_store is None:
@@ -1735,17 +1841,115 @@ def _build_approved_heatmap(model: KrasisModel, save_path: str, args) -> str:
             prompts,
             decode_tokens,
         )
+    bootstrap_path = resume_path or explicit_bootstrap_path or args.heatmap_path
+    bootstrap_counts: dict[str, int] = {}
+    bootstrap_format = ""
+    bootstrap_source = ""
+    if resume_path:
+        bootstrap_counts = dict(base_counts)
+        bootstrap_format = APPROVED_HEATMAP_FORMAT
+        bootstrap_source = "resume"
+    elif bootstrap_path:
+        bootstrap_counts, bootstrap_format = _load_heatmap_residency_bootstrap(
+            model,
+            args,
+            bootstrap_path,
+        )
+        if not bootstrap_counts:
+            raise RuntimeError(
+                "Heatmap residency bootstrap contains no route counts: "
+                f"{bootstrap_path}"
+            )
+        bootstrap_source = (
+            "explicit"
+            if explicit_bootstrap_path
+            else "config_heatmap_path"
+        )
+    residency_metadata = {
+        "mode": "adaptive_calibrated_hcs",
+        "refresh_every_prompts": residency_refresh_every,
+        "cold_start_prompts": 0 if bootstrap_path else 1,
+        "refresh_count": 0,
+        "bootstrap": (
+            {
+                "source": bootstrap_source,
+                "format": bootstrap_format,
+                "basename": os.path.basename(bootstrap_path),
+                "sha256": _sha256_file(bootstrap_path),
+                "counts_included_in_output": bool(resume_path),
+            }
+            if bootstrap_path
+            else None
+        ),
+    }
     heatmap_collection_started = False
+    residency_active = False
     written_paths: list[str] = []
 
     try:
-        gpu_store.hcs_init_collection(cfg.num_hidden_layers, cfg.n_routed_experts)
+        calibration = residency_calibration
+        cal_msg = gpu_store.set_vram_calibration(
+            calibration["short_tokens"],
+            calibration["long_tokens"],
+            calibration["prefill_short_free_mb"],
+            calibration["prefill_long_free_mb"],
+            calibration["decode_short_free_mb"],
+            calibration["decode_long_free_mb"],
+            calibration["baseline_free_mb"],
+            calibration["safety_margin_mb"],
+            calibration["short_prefill_post_alloc_free_mb"],
+            calibration["long_prefill_post_alloc_free_mb"],
+        )
+        logger.info("APPROVED_HEATMAP residency_calibration %s", cal_msg)
+        if bootstrap_counts:
+            ranking = _full_heatmap_ranking(model, bootstrap_counts)
+            hcs_result = gpu_store.hcs_pool_init_tiered(
+                ranking,
+                hard_budget_mb=0,
+                soft_budget_mb=calibration["decode_hcs_budget_mb"],
+                safety_margin_mb=calibration["safety_margin_mb"],
+            )
+            evicted, freed_mb, free_mb = gpu_store.py_hcs_drain_vram_pressure(
+                "approved_heatmap_bootstrap",
+                True,
+            )
+            if free_mb < calibration["safety_margin_mb"]:
+                raise RuntimeError(
+                    "Approved heatmap bootstrap HCS could not restore the calibrated "
+                    f"VRAM safety floor: free={free_mb} MB, "
+                    f"safety={calibration['safety_margin_mb']} MB"
+                )
+            residency_active = True
+            logger.info(
+                "APPROVED_HEATMAP residency_bootstrap source=%s path=%s "
+                "ranked_counts=%d full_ranking=%d evicted=%d freed_mb=%.1f "
+                "free_mb=%d result=%s",
+                bootstrap_source,
+                bootstrap_path,
+                len(bootstrap_counts),
+                len(ranking),
+                evicted,
+                freed_mb,
+                free_mb,
+                hcs_result,
+            )
+            _detail(
+                f"Initial HCS residency: {bootstrap_source} bootstrap "
+                f"({len(bootstrap_counts):,} ranked routes)"
+            )
+        else:
+            gpu_store.hcs_init_collection(
+                cfg.num_hidden_layers,
+                cfg.n_routed_experts,
+            )
+            _detail("Initial HCS residency: none; only the first prompt will run cold")
         gpu_store.hcs_start_collecting()
         heatmap_collection_started = True
         _status("Approved HCS route heatmap build")
         _detail(
             f"Prompts: {len(prompts):,} from {prompt_path}; "
-            f"decode tokens/prompt: {decode_tokens:,}; checkpoint_every={checkpoint_every}"
+            f"decode tokens/prompt: {decode_tokens:,}; checkpoint_every={checkpoint_every}; "
+            f"residency_refresh_every={residency_refresh_every}"
         )
         if resume_path:
             _detail(
@@ -1754,12 +1958,16 @@ def _build_approved_heatmap(model: KrasisModel, save_path: str, args) -> str:
             )
         logger.info(
             "APPROVED_HEATMAP build_start prompts=%d resume_start=%d base_decode_tokens=%d "
-            "decode_tokens_per_prompt=%d checkpoint_every=%d out=%s prompt_path=%s resume_from=%s",
+            "decode_tokens_per_prompt=%d checkpoint_every=%d residency_refresh_every=%d "
+            "bootstrap_source=%s bootstrap_path=%s out=%s prompt_path=%s resume_from=%s",
             len(prompts),
             resume_start,
             total_decode_tokens,
             decode_tokens,
             checkpoint_every,
+            residency_refresh_every,
+            bootstrap_source,
+            bootstrap_path or "",
             save_path,
             prompt_path,
             resume_path or "",
@@ -1767,11 +1975,7 @@ def _build_approved_heatmap(model: KrasisModel, save_path: str, args) -> str:
 
         def export_checkpoint(prompts_processed: int, final: bool) -> str:
             export_t0 = time.perf_counter()
-            heatmap_dict = dict(base_counts) if base_counts else {}
-            for key, value in gpu_store.hcs_export_heatmap().items():
-                if key == "_metadata":
-                    continue
-                heatmap_dict[key] = int(heatmap_dict.get(key, 0)) + int(value)
+            heatmap_dict = dict(base_counts)
             heatmap_dict["_metadata"] = _approved_heatmap_metadata(
                 model,
                 args,
@@ -1780,6 +1984,7 @@ def _build_approved_heatmap(model: KrasisModel, save_path: str, args) -> str:
                 decode_tokens,
                 prompts_processed,
                 total_decode_tokens,
+                residency_metadata,
             )
             checkpoint_path = _approved_heatmap_checkpoint_path(save_path, prompts_processed)
             out_paths = [save_path] if final else [checkpoint_path]
@@ -1826,9 +2031,15 @@ def _build_approved_heatmap(model: KrasisModel, save_path: str, args) -> str:
                 temperature=decode_params["temperature"],
                 disable_pinning=True,
             )
-            generated_tokens = 0
             stopped_before_decode = bool(kv_overflow or first_token in stop_ids)
-            if not kv_overflow and first_token not in stop_ids:
+            reload_count = 0
+            reload_ms = 0.0
+            if residency_active and not stopped_before_decode:
+                reload_count, reload_ms = gpu_store.py_hcs_reload_after_prefill(
+                    prompt_len
+                )
+            generated_tokens = 0
+            if not stopped_before_decode:
                 generated = gpu_store.gpu_generate_batch(
                     first_token=first_token,
                     start_position=prompt_len,
@@ -1844,6 +2055,54 @@ def _build_approved_heatmap(model: KrasisModel, save_path: str, args) -> str:
             else:
                 total_decode_tokens += 1
             model.server_cleanup()
+            interval = gpu_store.hcs_export_heatmap()
+            interval_events = _merge_heatmap_counts(
+                base_counts,
+                interval,
+                f"approved heatmap prompt {i}",
+            )
+            refresh_residency = (
+                i < len(prompts)
+                and (
+                    not residency_active
+                    or (i - resume_start) % residency_refresh_every == 0
+                )
+            )
+            refresh_s = 0.0
+            refresh_result = ""
+            if refresh_residency:
+                refresh_t0 = time.perf_counter()
+                ranking = _full_heatmap_ranking(model, base_counts)
+                gpu_store.hcs_reset()
+                refresh_result = gpu_store.hcs_pool_init_tiered(
+                    ranking,
+                    hard_budget_mb=0,
+                    soft_budget_mb=calibration["decode_hcs_budget_mb"],
+                    safety_margin_mb=calibration["safety_margin_mb"],
+                )
+                evicted, freed_mb, refresh_free_mb = (
+                    gpu_store.py_hcs_drain_vram_pressure(
+                        f"approved_heatmap_refresh_{i}",
+                        True,
+                    )
+                )
+                if refresh_free_mb < calibration["safety_margin_mb"]:
+                    raise RuntimeError(
+                        "Approved heatmap adaptive HCS refresh could not restore the "
+                        f"calibrated VRAM safety floor after prompt {i}: "
+                        f"free={refresh_free_mb} MB, "
+                        f"safety={calibration['safety_margin_mb']} MB"
+                    )
+                residency_metadata["refresh_count"] += 1
+                residency_active = True
+                gpu_store.hcs_start_collecting()
+                refresh_s = time.perf_counter() - refresh_t0
+                refresh_result = (
+                    f"{refresh_result} | pressure_evicted={evicted} "
+                    f"freed_mb={freed_mb:.1f} free_mb={refresh_free_mb}"
+                )
+            elif i < len(prompts):
+                gpu_store.hcs_start_collecting()
             prompt_s = time.perf_counter() - prompt_t0
             logger.info(
                 "APPROVED_HEATMAP prompt_done index=%d total=%d prompt_len=%d first_token=%d "
@@ -1858,6 +2117,24 @@ def _build_approved_heatmap(model: KrasisModel, save_path: str, args) -> str:
                 total_decode_tokens,
                 prompt_s,
             )
+            logger.info(
+                "APPROVED_HEATMAP residency_update index=%d interval_events=%d "
+                "cumulative_entries=%d reload_count=%d reload_ms=%.3f refreshed=%s "
+                "refresh_s=%.3f result=%s",
+                i,
+                interval_events,
+                len(base_counts),
+                reload_count,
+                reload_ms,
+                refresh_residency,
+                refresh_s,
+                refresh_result,
+            )
+            if refresh_residency:
+                _detail(
+                    f"Adaptive HCS refresh after prompt {i}: "
+                    f"{len(base_counts):,} ranked experts, {refresh_s:.1f}s"
+                )
             if timing_enabled:
                 logger.info(
                     "HEATMAP_TIMING approved_prompt index=%d prompt_s=%.6f cumulative_s=%.6f",
@@ -2001,6 +2278,8 @@ def main():
             "CFG_HEATMAP_PATH": "heatmap_path",
             "CFG_APPROVED_HEATMAP_MODE": "approved_heatmap_mode",
             "CFG_APPROVED_HEATMAP_MANIFEST_URL": "approved_heatmap_manifest_url",
+            "CFG_APPROVED_HEATMAP_BOOTSTRAP_FROM": "approved_heatmap_bootstrap_from",
+            "CFG_APPROVED_HEATMAP_RESIDENCY_REFRESH_EVERY": "approved_heatmap_residency_refresh_every",
             "CFG_FORCE_LOAD": "force_load",
             "CFG_FORCE_REBUILD_CACHE": "force_rebuild_cache",
             "CFG_FORCE_REBUILD_HQQ_CACHE": "force_rebuild_hqq_cache",
@@ -2158,6 +2437,10 @@ def main():
                         help="Build an approved cumulative HCS route heatmap artifact at this path and exit")
     parser.add_argument("--approved-heatmap-resume-from", default=None,
                         help="Resume approved heatmap capture from an existing validated approved artifact")
+    parser.add_argument("--approved-heatmap-bootstrap-from", default=None,
+                        help="Use a compatible heatmap only to seed HCS residency during approved capture; its counts are not added to the output")
+    parser.add_argument("--approved-heatmap-residency-refresh-every", type=int, default=1,
+                        help="Rebuild calibrated HCS residency from cumulative captured routes every N new prompts")
     parser.add_argument("--approved-heatmap-prompts", default=None,
                         help="Prompt corpus for --approved-heatmap-build-out; same blank-line separated format as heatmap_prompts.txt")
     parser.add_argument("--approved-heatmap-decode-tokens", type=int, default=HEATMAP_DECODE_TOKENS,
@@ -2493,12 +2776,22 @@ def main():
         args.approved_heatmap_build_out = os.path.expanduser(args.approved_heatmap_build_out)
     if args.approved_heatmap_resume_from:
         args.approved_heatmap_resume_from = os.path.expanduser(args.approved_heatmap_resume_from)
+    if args.approved_heatmap_bootstrap_from:
+        args.approved_heatmap_bootstrap_from = os.path.expanduser(args.approved_heatmap_bootstrap_from)
     if args.approved_heatmap_prompts:
         args.approved_heatmap_prompts = os.path.expanduser(args.approved_heatmap_prompts)
     if args.gguf_path:
         args.gguf_path = os.path.expanduser(args.gguf_path)
     if args.expert_hqq_diagnostic_cache_spec:
         args.expert_hqq_diagnostic_cache_spec = os.path.expanduser(args.expert_hqq_diagnostic_cache_spec)
+
+    if args.approved_heatmap_residency_refresh_every <= 0:
+        parser.error("--approved-heatmap-residency-refresh-every must be positive")
+    if args.approved_heatmap_resume_from and args.approved_heatmap_bootstrap_from:
+        parser.error(
+            "--approved-heatmap-resume-from and --approved-heatmap-bootstrap-from "
+            "cannot be combined"
+        )
 
     _model_name = args.model_path.rstrip("/").split("/")[-1]
 
@@ -3187,7 +3480,25 @@ def main():
         return
 
     if args.approved_heatmap_build_out:
-        _build_approved_heatmap(_model, args.approved_heatmap_build_out, args)
+        approved_heatmap_residency_calibration = {
+            "short_tokens": int(short_tokens),
+            "long_tokens": int(long_tokens),
+            "prefill_short_free_mb": int(prefill_short_free),
+            "prefill_long_free_mb": int(prefill_long_free),
+            "decode_short_free_mb": int(decode_short_free),
+            "decode_long_free_mb": int(decode_long_free),
+            "baseline_free_mb": int(post_calibration_free_mb),
+            "safety_margin_mb": int(SAFETY_MARGIN_MB),
+            "short_prefill_post_alloc_free_mb": int(short_prefill_post_alloc),
+            "long_prefill_post_alloc_free_mb": int(long_prefill_post_alloc),
+            "decode_hcs_budget_mb": int(decode_hcs_budget),
+        }
+        _build_approved_heatmap(
+            _model,
+            args.approved_heatmap_build_out,
+            args,
+            approved_heatmap_residency_calibration,
+        )
         vram_monitor.report_event("approved_heatmap_build_complete")
         return
 

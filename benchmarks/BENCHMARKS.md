@@ -97,6 +97,8 @@ weight masks preserve every routed contribution.
 | Original timing-disabled baseline | 44.7 tok/s | 4.50 tok/s | 4.48 tok/s | 4.41 tok/s | 7.82 / 5.76 / 4.81 tok/s | 3887/19200 | 1,180 MB | [report](20260729_074912_rtx6000_glm52_hqq4_k4v4_sparse4096_benchmark_report.log) |
 | Exact split launch, timing disabled | 45.0 tok/s | 4.64 tok/s | 4.69 tok/s | 4.65 tok/s | 8.25 / 6.07 / 4.95 tok/s | 3887/19200 | 1,180 MB | [report](20260729_112720_rtx6000_glm52_hqq4_k4v4_sparse4096_split_speed_report.log), [stdout](20260729_112720_rtx6000_glm52_hqq4_k4v4_sparse4096_split_speed_stdout.log), [server](20260729_112720_rtx6000_glm52_hqq4_k4v4_sparse4096_split_speed_krasis.log) |
 | Split delta | +0.7% | +3.1% | +4.7% | +5.4% | +5.5% / +5.4% / +2.9% | unchanged | unchanged | PASS |
+| Exact split launch + approved p80 heatmap, timing disabled | 45.0 tok/s | 5.02 tok/s | 5.11 tok/s | 4.88 tok/s | 8.40 / 6.34 / 5.22 tok/s | 3887/19200 | 1,178 MB | [report](20260729_163742_rtx6000_glm52_hqq4_k4v4_sparse4096_p80_heatmap_report.log), [stdout](20260729_163742_rtx6000_glm52_hqq4_k4v4_sparse4096_p80_heatmap_stdout.log), [server](20260729_163742_rtx6000_glm52_hqq4_k4v4_sparse4096_p80_heatmap_krasis.log) |
+| Approved p80 delta vs quick-heatmap split | unchanged | +8.2% | +9.0% | +4.9% | +1.8% / +4.4% / +5.5% | unchanged | -2 MB | PASS |
 
 The timing-enabled split run independently measured about 20.5-20.8 ms/token
 of resident expert work fully contained beneath 146-154 ms/token demand H2D,
@@ -110,6 +112,25 @@ original baseline (69 after internal decode, 138 after network decode);
 budget skips and copy failures remain zero. The optimization therefore did
 not change HCS residency, traffic, promotion behavior, or the calibrated VRAM
 boundary.
+
+The approved GLM heatmap was built from 80 held-out prompts and 12,214,200
+exact route events. Adaptive residency left only the first collection prompt
+all-cold: full-length resident prompts averaged 81.305 seconds versus 138.134
+seconds cold, a 41.1% reduction. The p72 ranking captured 55.91% of the final
+eight prompts' route mass, and p72/p80 top-3,900 membership overlap was
+3,804/3,900 (97.54%). The final artifact contains 18,568 ranked experts and has
+SHA-256
+`b044b0b19a661a3ee71594916079e1f7ba6e7d7ef58dce551ae9972729117848`.
+The build log is archived at
+[approved heatmap build](approved_heatmaps/20260729_glm52_adaptive_approved_heatmap_build_p80.log).
+
+The timing-disabled p80 evaluation loaded the artifact directly and skipped
+the quick six-prompt heatmap. Its sustained 250-token HCS hit increased from
+65.69% to 67.91% (+2.22 percentage points), with zero budget skips, no-slot
+events, or copy failures. Startup calibration reached 762 MB minimum free on
+the long prefill probe against the 600 MB margin; timed decode retained
+1,178 MB. Prefill remained 45.0 tok/s, confirming that this is a decode
+residency improvement rather than a prefill change.
 
 Authoritative post-optimization validation used the frozen 2,682-token,
 eight-token `llama_witness_glm52_sparse_long_8_tokens_relu` profile. It passed

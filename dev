@@ -1292,7 +1292,7 @@ summarize_dynamic_hcs_from_log() {
 }
 
 do_approved_heatmap_build() {
-    [[ $# -lt 1 ]] && err "Usage: ./dev approved-heatmap-build <config> --out <path> [--resume-from <path>] [--prompts <path>] [--decode-tokens N] [--max-prompts N] [--checkpoint-every N]"
+    [[ $# -lt 1 ]] && err "Usage: ./dev approved-heatmap-build <config> --out <path> [--resume-from <path>] [--bootstrap-from <path>] [--residency-refresh-every N] [--prompts <path>] [--decode-tokens N] [--max-prompts N] [--checkpoint-every N]"
     local conf
     conf=$(resolve_config "$1")
     shift
@@ -1300,6 +1300,8 @@ do_approved_heatmap_build() {
     local out=""
     local prompts=""
     local resume_from=""
+    local bootstrap_from=""
+    local residency_refresh_every=""
     local decode_tokens=""
     local max_prompts=""
     local checkpoint_every=""
@@ -1319,6 +1321,16 @@ do_approved_heatmap_build() {
             --resume-from)
                 [[ $# -ge 2 ]] || err "--resume-from requires a path"
                 resume_from="$2"
+                shift 2
+                ;;
+            --bootstrap-from)
+                [[ $# -ge 2 ]] || err "--bootstrap-from requires a path"
+                bootstrap_from="$2"
+                shift 2
+                ;;
+            --residency-refresh-every)
+                [[ $# -ge 2 ]] || err "--residency-refresh-every requires a positive integer"
+                residency_refresh_every="$2"
                 shift 2
                 ;;
             --decode-tokens)
@@ -1358,6 +1370,8 @@ do_approved_heatmap_build() {
     local args=("--config" "$conf" "--approved-heatmap-build-out" "$out")
     [[ -z "$prompts" ]] || args+=("--approved-heatmap-prompts" "$prompts")
     [[ -z "$resume_from" ]] || args+=("--approved-heatmap-resume-from" "$resume_from")
+    [[ -z "$bootstrap_from" ]] || args+=("--approved-heatmap-bootstrap-from" "$bootstrap_from")
+    [[ -z "$residency_refresh_every" ]] || args+=("--approved-heatmap-residency-refresh-every" "$residency_refresh_every")
     [[ -z "$decode_tokens" ]] || args+=("--approved-heatmap-decode-tokens" "$decode_tokens")
     [[ -z "$max_prompts" ]] || args+=("--approved-heatmap-max-prompts" "$max_prompts")
     [[ -z "$checkpoint_every" ]] || args+=("--approved-heatmap-checkpoint-every" "$checkpoint_every")

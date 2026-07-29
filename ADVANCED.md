@@ -129,6 +129,15 @@ force the quick local startup heatmap, or `require` to fail startup unless an
 approved artifact is available for the current model/router signature and
 validated runtime.
 
+`./dev approved-heatmap-build` uses calibrated HCS residency while it captures
+the larger reusable route corpus. A compatible `--resume-from`,
+`--bootstrap-from`, or config `CFG_HEATMAP_PATH` seeds residency before the
+first prompt. Without one, only the first prompt runs cold; Krasis then rebuilds
+the normal reclaimable HCS pool from cumulative captured routes before later
+prompts. `--residency-refresh-every N` controls that rebuild cadence and
+defaults to every prompt. Bootstrap counts affect residency only and are never
+added to the new artifact; resume counts remain part of the cumulative output.
+
 `--hcs-host-cache-mode source` is the default RAM-saving mode. It skips the
 duplicate soft HCS host mirror and reloads soft HCS chunks from the Marlin host
 cache, reducing system RAM at the cost of slower reloads. Use `mirror` to opt
