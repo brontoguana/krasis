@@ -1,0 +1,22 @@
+{
+  "schema": "krasis_rust_prefill_ppl_v1",
+  "mode": "dataset",
+  "date": "2026-07-31T16:46:58.734954",
+  "config_path": "tests/ornith397-rtx6000-96gb-hqq4-k4v4-benchmark.conf",
+  "model_path": "/home/main/.krasis/models/deepreinforce-ai/Ornith-1.0-397B",
+  "dataset": "wikitext-2",
+  "attention_quant": "hqq4",
+  "kv_dtype": "k4v4",
+  "window_size": 2048,
+  "stride": 1024,
+  "max_tokens": null,
+  "num_tokens_total": 297054,
+  "num_tokens_scored": 297053,
+  "num_windows": 291,
+  "total_nll": 394425.0964473359,
+  "mean_loss": 1.327793681421618,
+  "perplexity": 3.772710397293055,
+  "bits_per_char": 1.9156013595106685,
+  "elapsed_s": 4396.247326291981,
+  "throughput_tok_s": 67.56967430459596
+}

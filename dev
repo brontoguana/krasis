@@ -632,6 +632,20 @@ extract_selected_gpus_arg() {
     return 0
 }
 
+resolve_config_cuda_visible_devices() {
+    local conf="$1"
+    local selected_gpus
+    selected_gpus=$(grep '^CFG_SELECTED_GPUS=' "$conf" 2>/dev/null | head -1 | cut -d'"' -f2 || true)
+    [[ -n "$selected_gpus" ]] || return 0
+
+    # Reuse the server's stable-selector contract (indices, UUIDs, PCI IDs,
+    # and unique name/memory aliases).  This runs after auto_rebuild and in a
+    # short-lived setup process, before the actual evaluator imports CUDA.
+    run_repo_python -c \
+        'import sys; from krasis.server import _normalize_selected_gpus; print(_normalize_selected_gpus(sys.argv[1], "CFG_SELECTED_GPUS"))' \
+        "$selected_gpus"
+}
+
 # ── Commands ─────────────────────────────────────────────────────────
 
 read_fla_sidecar_architectures() {
@@ -1427,14 +1441,90 @@ do_perplexity() {
     auto_rebuild
     local run_dir
     run_dir=$(create_run_dir "dev-perplexity")
-    local logfile
-    logfile="$run_dir/perplexity_stdout.log"
-    info "Running perplexity: $conf"
+    local logfile="$run_dir/perplexity_stdout.log"
+    local server_log="$run_dir/perplexity_server.log"
+    local port
+    port=$(conf_port "$conf")
+    [[ -n "$port" ]] || port=8012
+    info "Running perplexity through the Rust prefill endpoint: $conf"
     info "Run dir: $run_dir"
     info "Log: $logfile"
+    info "Server log: $server_log"
     verify_repo_imports
-    cd "$SCRIPT_DIR" && KRASIS_RUN_DIR="$run_dir" KRASIS_RUN_TYPE="dev-perplexity" run_repo_python -m perplexity.measure_ppl --config "$conf" "$@" 2>&1 | tee "$logfile"
+    local cuda_visible_devices
+    cuda_visible_devices=$(resolve_config_cuda_visible_devices "$conf") || \
+        err "Could not resolve CFG_SELECTED_GPUS for perplexity"
+    if [[ -n "$cuda_visible_devices" ]]; then
+        info "Perplexity CUDA_VISIBLE_DEVICES=$cuda_visible_devices"
+    fi
+
+    # Perplexity must exercise the current production Rust prefill path.  The
+    # former direct model.forward() evaluator depended on Python attention and
+    # prefill objects that no longer exist.  Start a test-endpoint server as an
+    # exact child of this built command, score through its Rust endpoint, then
+    # tear down only that child.
+    (
+        [[ -z "$cuda_visible_devices" ]] || export CUDA_VISIBLE_DEVICES="$cuda_visible_devices"
+        cd "$SCRIPT_DIR"
+        export KRASIS_RUN_DIR="$run_dir"
+        export KRASIS_RUN_TYPE="dev-perplexity-server"
+        exec_repo_python -m krasis.server --config "$conf" --test-endpoints
+    ) > >(tee "$server_log") 2>&1 &
+    local server_pid=$!
+
+    cleanup_perplexity_server() {
+        if kill -0 "$server_pid" 2>/dev/null; then
+            kill -TERM "$server_pid" 2>/dev/null || true
+            local waited=0
+            while kill -0 "$server_pid" 2>/dev/null && [[ $waited -lt 30 ]]; do
+                sleep 1
+                waited=$((waited + 1))
+            done
+            if kill -0 "$server_pid" 2>/dev/null; then
+                warn "Perplexity server did not exit after SIGTERM; sending SIGKILL"
+                kill -KILL "$server_pid" 2>/dev/null || true
+            fi
+        fi
+        wait "$server_pid" 2>/dev/null || true
+    }
+    trap 'cleanup_perplexity_server; exit 130' INT TERM
+    trap 'cleanup_perplexity_server' EXIT
+
+    local ready=false
+    local startup_timeout="${KRASIS_PERPLEXITY_STARTUP_TIMEOUT_SEC:-1200}"
+    local elapsed=0
+    while kill -0 "$server_pid" 2>/dev/null && [[ $elapsed -lt $startup_timeout ]]; do
+        if curl -fsS --max-time 2 "http://127.0.0.1:${port}/health" >/dev/null 2>&1; then
+            ready=true
+            break
+        fi
+        sleep 2
+        elapsed=$((elapsed + 2))
+    done
+    if ! $ready; then
+        cleanup_perplexity_server
+        trap - EXIT INT TERM
+        if [[ $elapsed -ge $startup_timeout ]]; then
+            err "Perplexity server did not become ready within ${startup_timeout}s; see $server_log"
+        fi
+        err "Perplexity server exited before becoming ready; see $server_log"
+    fi
+    ok "Rust prefill endpoint ready on port $port"
+
+    set +e
+    (
+        [[ -z "$cuda_visible_devices" ]] || export CUDA_VISIBLE_DEVICES="$cuda_visible_devices"
+        cd "$SCRIPT_DIR"
+        KRASIS_DEV_SCRIPT=1 run_repo_python "$SCRIPT_DIR/tests/rust_prefill_ppl.py" \
+            "$conf" --port "$port" "$@"
+    ) 2>&1 | tee "$logfile"
+    local status=${PIPESTATUS[0]}
+    set -e
+
+    cleanup_perplexity_server
+    trap - EXIT INT TERM
     info "Perplexity log saved: $logfile"
+    return "$status"
 }
 
 do_quality_ppl() {
@@ -1511,6 +1601,14 @@ do_test_kernels() {
             filter="adaptive_cold_drop::tests"
         elif [[ "$1" == "dsa_registration" ]]; then
             filter="dsa_registration_tests"
+        elif [[ "$1" == "hqq4_warp_geometry" ]]; then
+            filter="gpu_decode::dsa_registration_tests::hqq4_warp_geometry_is_bit_exact"
+        elif [[ "$1" == "hqq4_group_cache" ]]; then
+            filter="gpu_decode::dsa_registration_tests::hqq4_group_cache_is_bit_exact"
+        elif [[ "$1" == "shared_w2_reduce" ]]; then
+            filter="gpu_decode::dsa_registration_tests::shared_w2_ksplit_reduce_matches_reference"
+        elif [[ "$1" == "route_prep_rmsnorm" ]]; then
+            filter="gpu_decode::dsa_registration_tests::route_prep_wide_rmsnorm_matches_established_launch"
         elif [[ "$1" == "context_window" ]]; then
             filter="server::tests::context_window_accounts_for_prompt_and_requested_output"
         elif [[ "$1" == "cpu_tail" ]]; then

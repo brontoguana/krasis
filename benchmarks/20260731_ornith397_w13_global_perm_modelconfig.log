@@ -1,0 +1,9 @@
+[0;36m[1m=>[0m Import origin check:
+krasis: /home/main/Documents/Claude/krasis/python/krasis/__init__.py
+krasis.krasis: /home/main/Documents/Claude/krasis/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+..........
+----------------------------------------------------------------------
+Ran 10 tests in 0.021s
+
+OK
+W13_GLOBAL_PERM_MODELCONFIG_EXIT=0

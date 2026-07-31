@@ -743,6 +743,188 @@ extern "C" __global__ void softmax_topk(
     } // end norm_topk_prob
 }
 
+// Softmax routing with parallel score evaluation and the same ordered
+// reductions/selection as softmax_topk. Keeping the reduction and top-k work
+// on thread 0 preserves the routing result while removing the serial exp loop.
+extern "C" __global__ void softmax_topk_parallel_scores(
+    const float* __restrict__ logits,       // [num_experts]
+    int* __restrict__ topk_indices,         // [topk]
+    float* __restrict__ topk_weights,       // [topk]
+    int num_experts,
+    int topk,
+    int norm_topk_prob
+) {
+    if (blockIdx.x != 0) return;
+
+    extern __shared__ float scores[];
+    __shared__ float max_val_shared;
+    __shared__ float inv_sum_shared;
+
+    if (threadIdx.x == 0) {
+        float max_val = logits[0];
+        for (int i = 1; i < num_experts; i++) {
+            if (logits[i] > max_val) max_val = logits[i];
+        }
+        max_val_shared = max_val;
+    }
+    __syncthreads();
+
+    for (int i = threadIdx.x; i < num_experts; i += blockDim.x) {
+        scores[i] = __expf(logits[i] - max_val_shared);
+    }
+    __syncthreads();
+
+    if (threadIdx.x == 0) {
+        float sum_exp = 0.0f;
+        for (int i = 0; i < num_experts; i++) {
+            sum_exp += scores[i];
+        }
+        inv_sum_shared = 1.0f / sum_exp;
+    }
+    __syncthreads();
+
+    for (int i = threadIdx.x; i < num_experts; i += blockDim.x) {
+        scores[i] *= inv_sum_shared;
+    }
+    __syncthreads();
+
+    if (threadIdx.x == 0) {
+        for (int t = 0; t < topk; t++) {
+            int best_idx = -1;
+            float best_val = -1e30f;
+            for (int i = 0; i < num_experts; i++) {
+                if (scores[i] > best_val) {
+                    best_val = scores[i];
+                    best_idx = i;
+                }
+            }
+            topk_indices[t] = best_idx;
+            topk_weights[t] = best_val;
+            scores[best_idx] = -1e30f;
+        }
+
+        if (norm_topk_prob) {
+            float topk_sum = 0.0f;
+            for (int t = 0; t < topk; t++) {
+                topk_sum += topk_weights[t];
+            }
+            if (topk_sum > 0.0f) {
+                float inv_sum = 1.0f / topk_sum;
+                for (int t = 0; t < topk; t++) {
+                    topk_weights[t] *= inv_sum;
+                }
+            }
+        }
+    }
+}
+
+// Parallel score evaluation plus deterministic block reductions for each
+// selected expert. Ties choose the lowest expert index, matching the serial
+// left-to-right `>` scan in softmax_topk.
+extern "C" __global__ void softmax_topk_parallel_selection(
+    const float* __restrict__ logits,       // [num_experts]
+    int* __restrict__ topk_indices,         // [topk]
+    float* __restrict__ topk_weights,       // [topk]
+    int num_experts,
+    int topk,
+    int norm_topk_prob
+) {
+    if (blockIdx.x != 0) return;
+
+    extern __shared__ unsigned char shared_raw[];
+    float* scores = reinterpret_cast<float*>(shared_raw);
+    float* best_values = scores + num_experts;
+    int* best_indices = reinterpret_cast<int*>(best_values + blockDim.x);
+    __shared__ float max_val_shared;
+    __shared__ float inv_sum_shared;
+
+    if (threadIdx.x == 0) {
+        float max_val = logits[0];
+        for (int i = 1; i < num_experts; i++) {
+            if (logits[i] > max_val) max_val = logits[i];
+        }
+        max_val_shared = max_val;
+    }
+    __syncthreads();
+
+    for (int i = threadIdx.x; i < num_experts; i += blockDim.x) {
+        scores[i] = __expf(logits[i] - max_val_shared);
+    }
+    __syncthreads();
+
+    if (threadIdx.x == 0) {
+        float sum_exp = 0.0f;
+        for (int i = 0; i < num_experts; i++) {
+            sum_exp += scores[i];
+        }
+        inv_sum_shared = 1.0f / sum_exp;
+    }
+    __syncthreads();
+
+    for (int i = threadIdx.x; i < num_experts; i += blockDim.x) {
+        scores[i] *= inv_sum_shared;
+    }
+    __syncthreads();
+
+    for (int t = 0; t < topk; t++) {
+        float local_best = -1e30f;
+        int local_idx = -1;
+        for (int i = threadIdx.x; i < num_experts; i += blockDim.x) {
+            const float value = scores[i];
+            if (value > local_best || (value == local_best && (local_idx < 0 || i < local_idx))) {
+                local_best = value;
+                local_idx = i;
+            }
+        }
+        best_values[threadIdx.x] = local_best;
+        best_indices[threadIdx.x] = local_idx;
+        __syncthreads();
+
+        int active = blockDim.x;
+        while (active > 1) {
+            const int next = (active + 1) / 2;
+            const int paired = active - next;
+            if (threadIdx.x < paired) {
+                const int other = threadIdx.x + next;
+                const float other_value = best_values[other];
+                const int other_idx = best_indices[other];
+                const float own_value = best_values[threadIdx.x];
+                const int own_idx = best_indices[threadIdx.x];
+                if (other_value > own_value ||
+                    (other_value == own_value && other_idx >= 0 &&
+                     (own_idx < 0 || other_idx < own_idx))) {
+                    best_values[threadIdx.x] = other_value;
+                    best_indices[threadIdx.x] = other_idx;
+                }
+            }
+            __syncthreads();
+            active = next;
+        }
+
+        if (threadIdx.x == 0) {
+            const int best_idx = best_indices[0];
+            const float best_val = best_values[0];
+            topk_indices[t] = best_idx;
+            topk_weights[t] = best_val;
+            scores[best_idx] = -1e30f;
+        }
+        __syncthreads();
+    }
+
+    if (threadIdx.x == 0 && norm_topk_prob) {
+        float topk_sum = 0.0f;
+        for (int t = 0; t < topk; t++) {
+            topk_sum += topk_weights[t];
+        }
+        if (topk_sum > 0.0f) {
+            float inv_sum = 1.0f / topk_sum;
+            for (int t = 0; t < topk; t++) {
+                topk_weights[t] *= inv_sum;
+            }
+        }
+    }
+}
+
 // ── Expert Classify + Batch Prepare ───────────────────────────────────
 //
 // GPU-side route sync: after topk, check the device-side HCS lookup table
@@ -5135,6 +5317,31 @@ extern "C" __global__ void reduce_ksplits_weighted_accum_bf16(
     accum[n] = *reinterpret_cast<unsigned short*>(&result);
 }
 
+// K-split diagnostic reduction with the optional device-side sigmoid gate
+// used by gated shared experts. This remains default-off and is selected only
+// by the explicit real-weight shared-W2 calibration experiment.
+extern "C" __global__ void reduce_ksplits_sigmoid_accum_bf16(
+    unsigned short* __restrict__ accum,
+    const float* __restrict__ partial,
+    int N,
+    int k_splits,
+    float weight,
+    const float* weight_ptr
+) {
+    int n = blockIdx.x * blockDim.x + threadIdx.x;
+    if (n >= N) return;
+    if (weight_ptr != NULL) {
+        weight = 1.0f / (1.0f + __expf(-weight_ptr[0]));
+    }
+    float sum = 0.0f;
+    for (int ks = 0; ks < k_splits; ks++) {
+        sum += partial[ks * N + n];
+    }
+    float existing = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&accum[n]));
+    __nv_bfloat16 result = __float2bfloat16(existing + weight * sum);
+    accum[n] = *reinterpret_cast<unsigned short*>(&result);
+}
+
 // ── Batched Expert Kernels ─────────────────────────────────────────────
 //
 // Process up to MAX_BATCH_EXPERTS experts in a single kernel launch.
@@ -6921,14 +7128,15 @@ extern "C" __global__ void hqq4_decode_gemv_f32(
     extern __shared__ unsigned short s_input[];
     int tid = threadIdx.x;
 
-    for (int i = tid; i < cols; i += 256) {
+    for (int i = tid; i < cols; i += blockDim.x) {
         s_input[i] = input[i];
     }
     __syncthreads();
 
     int warp_id = tid / 32;
     int lane = tid % 32;
-    int row = blockIdx.x * 8 + warp_id;
+    int warps_per_block = blockDim.x / 32;
+    int row = blockIdx.x * warps_per_block + warp_id;
     if (row >= rows) return;
 
     const unsigned char* w_row = packed_w + (long long)row * packed_row_stride_bytes;
@@ -6996,6 +7204,114 @@ extern "C" __global__ void hqq4_decode_gemv_f32(
     }
 }
 
+// Exact-arithmetic HQQ4 decode candidate for projection matrices. When the
+// eight packed weights consumed by a lane stay inside one runtime quantization
+// group, load that group's scale/zero once instead of recomputing and reloading
+// them for every pair. Vectors crossing a group boundary retain the general
+// per-pair path, so arbitrary runtime group sizes remain supported.
+extern "C" __global__ void hqq4_decode_gemv_f32_group_cached(
+    const unsigned char* __restrict__ packed_w,
+    const float* __restrict__ scales,
+    const float* __restrict__ zeros,
+    const unsigned short* __restrict__ input,
+    float* __restrict__ output,
+    int rows,
+    int cols,
+    int group_size,
+    int packed_row_stride_bytes,
+    int scales_row_stride_bytes,
+    int zeros_row_stride_bytes
+) {
+    extern __shared__ unsigned short s_input[];
+    int tid = threadIdx.x;
+    for (int i = tid; i < cols; i += 256) s_input[i] = input[i];
+    __syncthreads();
+
+    int warp_id = tid / 32;
+    int lane = tid % 32;
+    int row = blockIdx.x * 8 + warp_id;
+    if (row >= rows) return;
+
+    const unsigned char* w_row = packed_w + (long long)row * packed_row_stride_bytes;
+    const float* s_row = (const float*)((const char*)scales + (long long)row * scales_row_stride_bytes);
+    const float* z_row = (const float*)((const char*)zeros + (long long)row * zeros_row_stride_bytes);
+    int packed_cols = (cols + 1) >> 1;
+    const unsigned int* w_row_u32 = (const unsigned int*)w_row;
+    int packed_per_row = packed_cols >> 2;
+    float acc = 0.0f;
+
+    for (int ki = lane; ki < packed_per_row; ki += 32) {
+        unsigned int packed4 = __ldg(w_row_u32 + ki);
+        int base_k = ki << 3;
+        int last_k = min(base_k + 7, cols - 1);
+        int first_group = base_k / group_size;
+        int last_group = last_k / group_size;
+        float local_sum = 0.0f;
+        if (first_group == last_group) {
+            float scale = s_row[first_group];
+            float zero = z_row[first_group];
+            #pragma unroll
+            for (int i = 0; i < 4; i++) {
+                int col0 = base_k + i * 2;
+                if (col0 >= cols) break;
+                int byte_val = (packed4 >> (i * 8)) & 0xFF;
+                int q0 = byte_val & 0xF;
+                float w0 = (float(q0) - zero) * scale;
+                float x0 = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&s_input[col0]));
+                local_sum += w0 * x0;
+                int col1 = col0 + 1;
+                if (col1 < cols) {
+                    int q1 = byte_val >> 4;
+                    float w1 = (float(q1) - zero) * scale;
+                    float x1 = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&s_input[col1]));
+                    local_sum += w1 * x1;
+                }
+            }
+        } else {
+            #pragma unroll
+            for (int i = 0; i < 4; i++) {
+                int col0 = base_k + i * 2;
+                if (col0 >= cols) break;
+                int byte_val = (packed4 >> (i * 8)) & 0xFF;
+                int q0 = byte_val & 0xF;
+                int group0 = col0 / group_size;
+                float w0 = (float(q0) - z_row[group0]) * s_row[group0];
+                float x0 = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&s_input[col0]));
+                local_sum += w0 * x0;
+                int col1 = col0 + 1;
+                if (col1 < cols) {
+                    int q1 = byte_val >> 4;
+                    int group1 = col1 / group_size;
+                    float w1 = (float(q1) - z_row[group1]) * s_row[group1];
+                    float x1 = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&s_input[col1]));
+                    local_sum += w1 * x1;
+                }
+            }
+        }
+        acc += local_sum;
+    }
+
+    int vec_cols = packed_per_row << 3;
+    for (int k = vec_cols + lane * 2; k < cols; k += 64) {
+        unsigned char packed = w_row[k >> 1];
+        int q0 = packed & 0xF;
+        int g0 = k / group_size;
+        float w0 = (float(q0) - z_row[g0]) * s_row[g0];
+        float x0 = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&s_input[k]));
+        acc += w0 * x0;
+        int k1 = k + 1;
+        if (k1 < cols) {
+            int q1 = packed >> 4;
+            int g1 = k1 / group_size;
+            float w1 = (float(q1) - z_row[g1]) * s_row[g1];
+            float x1 = __bfloat162float(*reinterpret_cast<const __nv_bfloat16*>(&s_input[k1]));
+            acc += w1 * x1;
+        }
+    }
+    for (int offset = 16; offset > 0; offset >>= 1) acc += __shfl_down_sync(0xFFFFFFFF, acc, offset);
+    if (lane == 0) output[row] = acc;
+}
+
 extern "C" __global__ void hqq4_decode_gemv_bf16(
     const unsigned char* __restrict__ packed_w,
     const float* __restrict__ scales,
@@ -7012,14 +7328,15 @@ extern "C" __global__ void hqq4_decode_gemv_bf16(
     extern __shared__ unsigned short s_input[];
     int tid = threadIdx.x;
 
-    for (int i = tid; i < cols; i += 256) {
+    for (int i = tid; i < cols; i += blockDim.x) {
         s_input[i] = input[i];
     }
     __syncthreads();
 
     int warp_id = tid / 32;
     int lane = tid % 32;
-    int row = blockIdx.x * 8 + warp_id;
+    int warps_per_block = blockDim.x / 32;
+    int row = blockIdx.x * warps_per_block + warp_id;
     if (row >= rows) return;
 
     const unsigned char* w_row = packed_w + (long long)row * packed_row_stride_bytes;

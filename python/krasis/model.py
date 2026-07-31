@@ -6508,59 +6508,7 @@ class KrasisModel:
     def _init_gpu_prefill(self):
         """No-op: Python GPU prefill has been replaced by Rust prefill engine."""
         self._require_supported_runtime_features()
-        pass
-        num_ranks = 1
-
-        for i, dev in enumerate(prefill_devices):
-            dev_str = str(dev)
-            if dev_str not in self.gpu_prefill_managers:
-                manager = GpuPrefillManager(
-                    model_path=self.cfg.model_path,
-                    device=dev,
-                    num_experts=self.cfg.n_routed_experts,
-                    hidden_size=self.cfg.hidden_size,
-                    intermediate_size=self.cfg.moe_intermediate_size,
-                    params_dtype=torch.bfloat16,
-                    n_shared_experts=self.cfg.n_shared_experts,
-                    routed_scaling_factor=self.cfg.routed_scaling_factor,
-                    first_k_dense=self.cfg.first_k_dense_replace,
-                    num_bits=self.quant_cfg.gpu_expert_bits,
-                    krasis_engine=engine_ref,
-                    num_moe_layers=num_moe_layers,
-                    layer_group_size=self.layer_group_size,
-                    skip_shared_experts=self._has_shared_expert_gate,
-                    swiglu_limit=self.cfg.swiglu_limit,
-                    rank=i,
-                    num_ranks=num_ranks,
-                    num_experts_per_tok=self.cfg.num_experts_per_tok,
-                    shared_expert_intermediate_size=self.cfg.effective_shared_expert_intermediate,
-                )
-                # Set gated mode for ungated (relu2) expert architectures
-                if self.cfg.mlp_hidden_act == "relu2":
-                    manager.set_gated_experts(False)
-                self.gpu_prefill_managers[dev_str] = manager
-                logger.info("GPU prefill manager created for %s (rank %d/%d)", dev_str, i, num_ranks)
-
-        # Pre-prepare all MoE layers from disk cache at startup
-        for dev_str, manager in self.gpu_prefill_managers.items():
-            manager.prepare_all_layers()
-
-        # Build per-layer pinned buffers for zero-copy prefill DMA.
-        # Eliminates per-request CPU memcpy during layer streaming.
-        for dev_str, manager in self.gpu_prefill_managers.items():
-            logger.info("Building prefill pinned buffers for %s...", dev_str)
-            manager.build_prefill_pinned_bufs()
-
-        # Wire manager to MoE layers (each layer gets its own device's manager)
-        for layer in self.layers:
-            if layer.is_moe:
-                dev_str = str(layer.device)
-                layer.gpu_prefill_manager = self.gpu_prefill_managers.get(dev_str)
-
-        logger.info(
-            "GPU prefill: %d managers, threshold=%d tokens",
-            len(self.gpu_prefill_managers), self.gpu_prefill_threshold,
-        )
+        return
 
     def _start_ram_watchdog(self, floor_pct: float = 5.0):
         """Start daemon thread that monitors system RAM and exits if too low.

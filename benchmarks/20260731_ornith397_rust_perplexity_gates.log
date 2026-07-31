@@ -1,0 +1,16 @@
+[0;36m[1m=>[0m Running launcher config matrix test
+[0;36m[1m=>[0m Run dir: /home/main/Documents/Claude/krasis/logs/launcher-test_20260731_152732
+........................
+----------------------------------------------------------------------
+Ran 24 tests in 32.028s
+
+OK
+[0;36m[1m=>[0m Import origin check:
+krasis: /home/main/Documents/Claude/krasis/python/krasis/__init__.py
+krasis.krasis: /home/main/Documents/Claude/krasis/python/krasis/krasis.cpython-311-x86_64-linux-gnu.so
+..........
+----------------------------------------------------------------------
+Ran 10 tests in 0.020s
+
+OK
+RUST_PERPLEXITY_GATES_EXIT=0

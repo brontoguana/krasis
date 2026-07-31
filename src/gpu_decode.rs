@@ -63,6 +63,60 @@ fn env_truthy(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn route_prep_rmsnorm_threads(
+    device: &CudaDevice,
+    hidden_size: usize,
+    wide: bool,
+) -> Result<u32, String> {
+    let established = 256usize.min(hidden_size);
+    if !wide {
+        return Ok(established as u32);
+    }
+
+    let mut warp_size = 0i32;
+    let mut max_threads = 0i32;
+    unsafe {
+        let ordinal = device.ordinal() as i32;
+        let warp_rc = cuda_sys::lib().cuDeviceGetAttribute(
+            &mut warp_size,
+            cuda_sys::CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_WARP_SIZE,
+            ordinal,
+        );
+        if warp_rc != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!(
+                "route-prep RMSNorm warp-size query failed: {:?}",
+                warp_rc
+            ));
+        }
+        let threads_rc = cuda_sys::lib().cuDeviceGetAttribute(
+            &mut max_threads,
+            cuda_sys::CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK,
+            ordinal,
+        );
+        if threads_rc != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!(
+                "route-prep RMSNorm max-threads query failed: {:?}",
+                threads_rc
+            ));
+        }
+    }
+    if warp_size <= 0 || max_threads < warp_size {
+        return Err(format!(
+            "route-prep RMSNorm invalid CUDA limits: warp_size={} max_threads={}",
+            warp_size, max_threads
+        ));
+    }
+    let limit = hidden_size.min(max_threads as usize);
+    let threads = limit / warp_size as usize * warp_size as usize;
+    if threads == 0 {
+        return Err(format!(
+            "route-prep RMSNorm hidden size {} is below CUDA warp size {}",
+            hidden_size, warp_size
+        ));
+    }
+    Ok(threads as u32)
+}
+
 fn env_false(name: &str) -> bool {
     std::env::var(name)
         .map(|v| {
@@ -3017,6 +3071,8 @@ const KERNEL_NAMES: &[&str] = &[
     "sigmoid_topk",
     "sigmoid_topk_parallel_scores",
     "softmax_topk",
+    "softmax_topk_parallel_scores",
+    "softmax_topk_parallel_selection",
     "normalize_topk_weights",
     "weighted_add_bf16",
     "weighted_add_bf16_sigmoid_f32",
@@ -3085,10 +3141,12 @@ const KERNEL_NAMES: &[&str] = &[
     "marlin_gemv_int8_fused_silu_accum",
     "marlin_gemv_int8_fused_silu_accum_v2",
     "reduce_ksplits_weighted_accum_bf16",
+    "reduce_ksplits_sigmoid_accum_bf16",
     "sigmoid_gate_inplace_bf16",
     "simple_int4_gemv_f32",
     "simple_int4_gemv_bf16",
     "hqq4_decode_gemv_f32",
+    "hqq4_decode_gemv_f32_group_cached",
     "hqq4_decode_gemv_bf16",
     "hqq6_decode_gemv_f32",
     "hqq6_decode_gemv_bf16",
@@ -7109,6 +7167,34 @@ impl GpuWeight {
         self.dtype == 4 || self.dtype == 5
     }
 
+    /// Bytes that the decode GEMV must read for this stored weight, including
+    /// quantization scales. Used only by timing diagnostics.
+    fn stored_bytes(&self) -> usize {
+        let values = self.rows.saturating_mul(self.cols);
+        match self.dtype {
+            0 | 2 => values.saturating_mul(2),
+            1 => values.saturating_mul(4),
+            4 | 5 => {
+                let packed = if self.dtype == 4 {
+                    values
+                } else {
+                    values.div_ceil(2)
+                };
+                let groups = if self.group_size > 0 {
+                    self.cols.div_ceil(self.group_size)
+                } else {
+                    0
+                };
+                packed.saturating_add(
+                    self.rows
+                        .saturating_mul(groups)
+                        .saturating_mul(std::mem::size_of::<u16>()),
+                )
+            }
+            _ => values.saturating_mul(self.element_size()),
+        }
+    }
+
     #[allow(dead_code)]
     fn element_size(&self) -> usize {
         match self.dtype {
@@ -7602,13 +7688,31 @@ mod dsa_registration_tests {
     use cudarc::driver::{DevicePtr, LaunchAsync, LaunchConfig};
 
     use super::{
-        create_decode_timing_event, plan_dsa_topk, validate_dsa_indexer_registration,
+        create_decode_timing_event, marlin_dispatch_for_bits, plan_dsa_topk,
+        route_prep_rmsnorm_threads, validate_dsa_indexer_registration,
         validate_dsa_owner_weight_contract, validate_dsa_runtime_registration,
         validate_stream_probe_outcome, DsaGraphScoreBackend, DsaIndexerOwnerResource,
-        DsaIndexerOwnerWeightIds, GpuDecodeStore, GpuWeight,
+        DsaIndexerOwnerWeightIds, GpuDecodeStore, GpuWeight, MODULE_NAME,
     };
 
     static DSA_CUDA_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn marlin_dispatch_uses_the_executed_weight_bit_width() {
+        let int4_perm = 0x4444u64;
+        let int8_perm = 0x8888u64;
+        assert_eq!(
+            marlin_dispatch_for_bits(4, int4_perm, int8_perm).unwrap(),
+            (int4_perm, false)
+        );
+        assert_eq!(
+            marlin_dispatch_for_bits(8, int4_perm, int8_perm).unwrap(),
+            (int8_perm, true)
+        );
+        assert!(marlin_dispatch_for_bits(16, int4_perm, int8_perm)
+            .unwrap_err()
+            .contains("INT4 or INT8"));
+    }
 
     fn dsa_cuda_test_gpu_ordinal() -> usize {
         if let Ok(raw) = std::env::var("KRASIS_TEST_GPU_ORDINAL") {
@@ -7691,6 +7795,473 @@ mod dsa_registration_tests {
             .unwrap_err()
             .contains("generated zero tokens"));
         validate_stream_probe_outcome(8, 1, None).expect("one measured decode token is valid");
+    }
+
+    #[test]
+    fn softmax_topk_parallel_scores_matches_serial_bit_exact() {
+        let _guard = DSA_CUDA_TEST_LOCK.lock().unwrap();
+        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal()).expect("CUDA decode store");
+        let device = store.device.clone();
+        let serial = device
+            .get_func(MODULE_NAME, "softmax_topk")
+            .expect("serial softmax top-k kernel");
+        let parallel = device
+            .get_func(MODULE_NAME, "softmax_topk_parallel_scores")
+            .expect("parallel softmax top-k kernel");
+        let parallel_selection = device
+            .get_func(MODULE_NAME, "softmax_topk_parallel_selection")
+            .expect("parallel-selection softmax top-k kernel");
+
+        let num_experts = 512usize;
+        let topk = 10usize;
+        let logits_host: Vec<f32> = (0..num_experts)
+            .map(|idx| {
+                let x = idx as f32;
+                (x * 0.173).sin() * 3.0 + (x * 0.071).cos() - x * 0.0003
+            })
+            .collect();
+        let logits = device.htod_copy(logits_host).expect("logits H2D");
+
+        for norm_topk_prob in [0i32, 1i32] {
+            let serial_ids = device.alloc_zeros::<i32>(topk).expect("serial ids");
+            let serial_weights = device.alloc_zeros::<f32>(topk).expect("serial weights");
+            let parallel_ids = device.alloc_zeros::<i32>(topk).expect("parallel ids");
+            let parallel_weights = device.alloc_zeros::<f32>(topk).expect("parallel weights");
+            let selection_ids = device.alloc_zeros::<i32>(topk).expect("selection ids");
+            let selection_weights = device.alloc_zeros::<f32>(topk).expect("selection weights");
+            let shared_mem_bytes = (num_experts * std::mem::size_of::<f32>()) as u32;
+            let selection_shared_mem_bytes =
+                ((num_experts + 256 * 2) * std::mem::size_of::<f32>()) as u32;
+
+            unsafe {
+                serial
+                    .clone()
+                    .launch(
+                        LaunchConfig {
+                            grid_dim: (1, 1, 1),
+                            block_dim: (1, 1, 1),
+                            shared_mem_bytes,
+                        },
+                        (
+                            *logits.device_ptr(),
+                            *serial_ids.device_ptr(),
+                            *serial_weights.device_ptr(),
+                            num_experts as i32,
+                            topk as i32,
+                            norm_topk_prob,
+                        ),
+                    )
+                    .expect("serial softmax top-k launch");
+                parallel
+                    .clone()
+                    .launch(
+                        LaunchConfig {
+                            grid_dim: (1, 1, 1),
+                            block_dim: (256, 1, 1),
+                            shared_mem_bytes,
+                        },
+                        (
+                            *logits.device_ptr(),
+                            *parallel_ids.device_ptr(),
+                            *parallel_weights.device_ptr(),
+                            num_experts as i32,
+                            topk as i32,
+                            norm_topk_prob,
+                        ),
+                    )
+                    .expect("parallel softmax top-k launch");
+                parallel_selection
+                    .clone()
+                    .launch(
+                        LaunchConfig {
+                            grid_dim: (1, 1, 1),
+                            block_dim: (256, 1, 1),
+                            shared_mem_bytes: selection_shared_mem_bytes,
+                        },
+                        (
+                            *logits.device_ptr(),
+                            *selection_ids.device_ptr(),
+                            *selection_weights.device_ptr(),
+                            num_experts as i32,
+                            topk as i32,
+                            norm_topk_prob,
+                        ),
+                    )
+                    .expect("parallel-selection softmax top-k launch");
+            }
+            device.synchronize().expect("softmax top-k sync");
+
+            assert_eq!(
+                device.dtoh_sync_copy(&serial_ids).expect("serial ids D2H"),
+                device
+                    .dtoh_sync_copy(&parallel_ids)
+                    .expect("parallel ids D2H"),
+                "top-k IDs changed with norm_topk_prob={}",
+                norm_topk_prob
+            );
+            assert_eq!(
+                device.dtoh_sync_copy(&serial_ids).expect("serial ids D2H"),
+                device
+                    .dtoh_sync_copy(&selection_ids)
+                    .expect("selection ids D2H"),
+                "parallel-selection top-k IDs changed with norm_topk_prob={}",
+                norm_topk_prob
+            );
+            let serial_weight_bits: Vec<u32> = device
+                .dtoh_sync_copy(&serial_weights)
+                .expect("serial weights D2H")
+                .into_iter()
+                .map(f32::to_bits)
+                .collect();
+            let parallel_weight_bits: Vec<u32> = device
+                .dtoh_sync_copy(&parallel_weights)
+                .expect("parallel weights D2H")
+                .into_iter()
+                .map(f32::to_bits)
+                .collect();
+            assert_eq!(
+                serial_weight_bits, parallel_weight_bits,
+                "top-k weights changed with norm_topk_prob={}",
+                norm_topk_prob
+            );
+            let selection_weight_bits: Vec<u32> = device
+                .dtoh_sync_copy(&selection_weights)
+                .expect("selection weights D2H")
+                .into_iter()
+                .map(f32::to_bits)
+                .collect();
+            assert_eq!(
+                serial_weight_bits, selection_weight_bits,
+                "parallel-selection top-k weights changed with norm_topk_prob={}",
+                norm_topk_prob
+            );
+        }
+    }
+
+    #[test]
+    fn route_prep_wide_rmsnorm_matches_established_launch() {
+        use crate::weights::marlin::f32_to_bf16;
+
+        let _guard = DSA_CUDA_TEST_LOCK.lock().unwrap();
+        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal()).expect("CUDA decode store");
+        let device = store.device.clone();
+        let kernel = device
+            .get_func(MODULE_NAME, "fused_add_rmsnorm")
+            .expect("fused RMSNorm kernel");
+        let hidden_size = 4096usize;
+        let hidden_host = (0..hidden_size)
+            .map(|index| f32_to_bf16((index as f32 * 0.013).sin() * 0.25))
+            .collect::<Vec<_>>();
+        let residual_host = (0..hidden_size)
+            .map(|index| f32_to_bf16((index as f32 * 0.007).cos() * 0.125))
+            .collect::<Vec<_>>();
+        let weight_host = (0..hidden_size)
+            .map(|index| f32_to_bf16(0.75 + (index % 31) as f32 * 0.01))
+            .collect::<Vec<_>>();
+        let weight = device.htod_copy(weight_host).expect("weight H2D");
+
+        let launch = |threads: u32| -> (Vec<u16>, Vec<u16>) {
+            let mut hidden = device.htod_copy(hidden_host.clone()).expect("hidden H2D");
+            let mut residual = device
+                .htod_copy(residual_host.clone())
+                .expect("residual H2D");
+            unsafe {
+                kernel
+                    .clone()
+                    .launch(
+                        LaunchConfig {
+                            grid_dim: (1, 1, 1),
+                            block_dim: (threads, 1, 1),
+                            shared_mem_bytes: (hidden_size * std::mem::size_of::<f32>()) as u32,
+                        },
+                        (
+                            &mut hidden,
+                            &mut residual,
+                            &weight,
+                            1e-6f32,
+                            hidden_size as i32,
+                            0i32,
+                        ),
+                    )
+                    .expect("fused RMSNorm launch");
+            }
+            device.synchronize().expect("fused RMSNorm sync");
+            (
+                device.dtoh_sync_copy(&hidden).expect("hidden D2H"),
+                device.dtoh_sync_copy(&residual).expect("residual D2H"),
+            )
+        };
+
+        let baseline = launch(256);
+        let wide_threads = route_prep_rmsnorm_threads(&device, hidden_size, true)
+            .expect("runtime-derived wide RMSNorm threads");
+        assert!(wide_threads >= 256);
+        let wide = launch(wide_threads);
+        assert_eq!(baseline.1, wide.1, "residual output changed");
+        let max_abs = baseline
+            .0
+            .iter()
+            .zip(&wide.0)
+            .map(|(&lhs, &rhs)| {
+                (half::bf16::from_bits(lhs).to_f32() - half::bf16::from_bits(rhs).to_f32()).abs()
+            })
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_abs <= 0.015625,
+            "wide RMSNorm diverged from established launch: max_abs={}",
+            max_abs
+        );
+    }
+
+    #[test]
+    fn hqq4_warp_geometry_is_bit_exact() {
+        use crate::weights::marlin::f32_to_bf16;
+
+        let _guard = DSA_CUDA_TEST_LOCK.lock().unwrap();
+        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal()).expect("CUDA decode store");
+        let device = store.device.clone();
+        let kernel = device
+            .get_func(MODULE_NAME, "hqq4_decode_gemv_f32")
+            .expect("HQQ4 decode kernel");
+        let rows = 37usize;
+        let cols = 512usize;
+        let group_size = 64usize;
+        let groups = cols.div_ceil(group_size);
+        let packed_stride = cols.div_ceil(2);
+        let scale_stride = groups * std::mem::size_of::<f32>();
+        let packed_host = (0..rows * packed_stride)
+            .map(|index| index.wrapping_mul(37) as u8)
+            .collect::<Vec<_>>();
+        let scales_host = (0..rows * groups)
+            .map(|index| 0.01f32 + (index % groups) as f32 * 0.001)
+            .collect::<Vec<_>>();
+        let zeros_host = vec![7.5f32; rows * groups];
+        let input_host = (0..cols)
+            .map(|index| f32_to_bf16((index as f32 * 0.013).sin()))
+            .collect::<Vec<_>>();
+        let packed = device.htod_copy(packed_host).expect("packed H2D");
+        let scales = device.htod_copy(scales_host).expect("scales H2D");
+        let zeros = device.htod_copy(zeros_host).expect("zeros H2D");
+        let input = device.htod_copy(input_host).expect("input H2D");
+
+        let launch = |threads: usize| -> Vec<u32> {
+            let warps = threads / 32;
+            let mut output = device.alloc_zeros::<f32>(rows).expect("output allocation");
+            unsafe {
+                kernel
+                    .clone()
+                    .launch(
+                        LaunchConfig {
+                            grid_dim: (rows.div_ceil(warps) as u32, 1, 1),
+                            block_dim: (threads as u32, 1, 1),
+                            shared_mem_bytes: (cols * 2) as u32,
+                        },
+                        (
+                            &packed,
+                            &scales,
+                            &zeros,
+                            &input,
+                            &mut output,
+                            rows as i32,
+                            cols as i32,
+                            group_size as i32,
+                            packed_stride as i32,
+                            scale_stride as i32,
+                            scale_stride as i32,
+                        ),
+                    )
+                    .expect("HQQ4 decode launch");
+            }
+            device.synchronize().expect("HQQ4 decode sync");
+            device
+                .dtoh_sync_copy(&output)
+                .expect("HQQ4 output D2H")
+                .into_iter()
+                .map(f32::to_bits)
+                .collect()
+        };
+
+        let reference = launch(256);
+        let mut max_threads = 0i32;
+        unsafe {
+            let result = cuda_sys::lib().cuDeviceGetAttribute(
+                &mut max_threads,
+                cuda_sys::CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK,
+                device.ordinal() as i32,
+            );
+            assert_eq!(result, cuda_sys::CUresult::CUDA_SUCCESS);
+        }
+        let mut threads = 32usize;
+        while threads <= max_threads as usize {
+            assert_eq!(
+                reference,
+                launch(threads),
+                "HQQ4 output changed at {} threads / {} warps",
+                threads,
+                threads / 32
+            );
+            threads *= 2;
+        }
+    }
+
+    #[test]
+    fn hqq4_group_cache_is_bit_exact() {
+        use crate::weights::marlin::f32_to_bf16;
+
+        let _guard = DSA_CUDA_TEST_LOCK.lock().unwrap();
+        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal()).expect("CUDA decode store");
+        let device = store.device.clone();
+        let baseline = device
+            .get_func(MODULE_NAME, "hqq4_decode_gemv_f32")
+            .expect("baseline HQQ4 decode kernel");
+        let candidate = device
+            .get_func(MODULE_NAME, "hqq4_decode_gemv_f32_group_cached")
+            .expect("group-cached HQQ4 decode kernel");
+        let rows = 37usize;
+        let cols = 512usize;
+        let input = device
+            .htod_copy(
+                (0..cols)
+                    .map(|index| f32_to_bf16((index as f32 * 0.013).sin()))
+                    .collect::<Vec<_>>(),
+            )
+            .expect("input H2D");
+
+        for group_size in [7usize, 64, 128] {
+            let groups = cols.div_ceil(group_size);
+            let packed_stride = cols.div_ceil(2);
+            let scale_stride = groups * std::mem::size_of::<f32>();
+            let packed = device
+                .htod_copy(
+                    (0..rows * packed_stride)
+                        .map(|index| index.wrapping_mul(37) as u8)
+                        .collect::<Vec<_>>(),
+                )
+                .expect("packed H2D");
+            let scales = device
+                .htod_copy(
+                    (0..rows * groups)
+                        .map(|index| 0.01f32 + (index % groups) as f32 * 0.001)
+                        .collect::<Vec<_>>(),
+                )
+                .expect("scales H2D");
+            let zeros = device
+                .htod_copy(vec![7.5f32; rows * groups])
+                .expect("zeros H2D");
+
+            let launch = |kernel: &cudarc::driver::CudaFunction| -> Vec<u32> {
+                let mut output = device.alloc_zeros::<f32>(rows).expect("output allocation");
+                unsafe {
+                    kernel
+                        .clone()
+                        .launch(
+                            LaunchConfig {
+                                grid_dim: (rows.div_ceil(8) as u32, 1, 1),
+                                block_dim: (256, 1, 1),
+                                shared_mem_bytes: (cols * 2) as u32,
+                            },
+                            (
+                                &packed,
+                                &scales,
+                                &zeros,
+                                &input,
+                                &mut output,
+                                rows as i32,
+                                cols as i32,
+                                group_size as i32,
+                                packed_stride as i32,
+                                scale_stride as i32,
+                                scale_stride as i32,
+                            ),
+                        )
+                        .expect("HQQ4 decode launch");
+                }
+                device.synchronize().expect("HQQ4 decode sync");
+                device
+                    .dtoh_sync_copy(&output)
+                    .expect("HQQ4 output D2H")
+                    .into_iter()
+                    .map(f32::to_bits)
+                    .collect()
+            };
+            assert_eq!(
+                launch(&baseline),
+                launch(&candidate),
+                "group-cached HQQ4 output changed at group_size={}",
+                group_size
+            );
+        }
+    }
+
+    #[test]
+    fn shared_w2_ksplit_reduce_matches_reference() {
+        use crate::weights::marlin::{bf16_to_f32, f32_to_bf16};
+
+        let _guard = DSA_CUDA_TEST_LOCK.lock().unwrap();
+        let store = GpuDecodeStore::new(dsa_cuda_test_gpu_ordinal()).expect("CUDA decode store");
+        let device = store.device.clone();
+        let kernel = device
+            .get_func(MODULE_NAME, "reduce_ksplits_sigmoid_accum_bf16")
+            .expect("shared W2 reduce kernel");
+        let n = 37usize;
+        for k_splits in [2usize, 4] {
+            let partial_host = (0..k_splits * n)
+                .map(|index| ((index as f32 * 0.031).sin()) * 0.125)
+                .collect::<Vec<_>>();
+            let accum_host = (0..n)
+                .map(|index| f32_to_bf16((index as f32 * 0.019).cos() * 0.25))
+                .collect::<Vec<_>>();
+            for gate in [None, Some(-0.375f32)] {
+                let partial = device
+                    .htod_copy(partial_host.clone())
+                    .expect("partials H2D");
+                let mut accum = device.htod_copy(accum_host.clone()).expect("accum H2D");
+                let gate_device =
+                    gate.map(|value| device.htod_copy(vec![value]).expect("gate H2D"));
+                let gate_ptr = gate_device
+                    .as_ref()
+                    .map(|buffer| *buffer.device_ptr())
+                    .unwrap_or(0);
+                unsafe {
+                    kernel
+                        .clone()
+                        .launch(
+                            LaunchConfig {
+                                grid_dim: (n.div_ceil(256) as u32, 1, 1),
+                                block_dim: (256, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            (
+                                &mut accum,
+                                &partial,
+                                n as i32,
+                                k_splits as i32,
+                                1.0f32,
+                                gate_ptr,
+                            ),
+                        )
+                        .expect("shared W2 reduce launch");
+                }
+                device.synchronize().expect("shared W2 reduce sync");
+                let actual = device.dtoh_sync_copy(&accum).expect("reduce D2H");
+                let weight = gate
+                    .map(|value| 1.0 / (1.0 + (-value).exp()))
+                    .unwrap_or(1.0);
+                for output_index in 0..n {
+                    let sum = (0..k_splits)
+                        .map(|split| partial_host[split * n + output_index])
+                        .sum::<f32>();
+                    let expected_f32 = bf16_to_f32(accum_host[output_index]) + weight * sum;
+                    let expected = bf16_to_f32(f32_to_bf16(expected_f32));
+                    let got = bf16_to_f32(actual[output_index]);
+                    let allowed = expected.abs().max(got.abs()) * 2f32.powi(-7) + f32::MIN_POSITIVE;
+                    assert!(
+                        (got - expected).abs() <= allowed,
+                        "shared W2 reduce mismatch k_splits={k_splits} gate={gate:?} index={output_index}: got={got} expected={expected} allowed={allowed}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -9277,6 +9848,15 @@ struct HqqTensorExecDescriptor {
     gated_split_interleaved: bool,
     kernel_ready: bool,
     decode_sidecars: Vec<HqqPrefillSidecarRegistration>,
+}
+
+/// Packed HQQ payload plus FP32 scales and zeros read by decode. Timing-only
+/// accounting uses the execution descriptor so padded/runtime layouts are
+/// represented by their real packed payload rather than a nominal bit rate.
+fn hqq_exec_storage_bytes(desc: &HqqTensorExecDescriptor) -> usize {
+    desc.tensor_bytes
+        .saturating_add(desc.rows.saturating_mul(desc.scales_row_stride_bytes))
+        .saturating_add(desc.rows.saturating_mul(desc.zeros_row_stride_bytes))
 }
 
 #[derive(Debug, Clone, Default)]
@@ -10945,6 +11525,8 @@ struct CachedKernels {
     sigmoid_topk: cudarc::driver::CudaFunction,
     sigmoid_topk_parallel_scores: cudarc::driver::CudaFunction,
     softmax_topk: cudarc::driver::CudaFunction,
+    softmax_topk_parallel_scores: cudarc::driver::CudaFunction,
+    softmax_topk_parallel_selection: cudarc::driver::CudaFunction,
     normalize_topk_weights: cudarc::driver::CudaFunction,
     zero_bf16: cudarc::driver::CudaFunction,
     add_bf16: cudarc::driver::CudaFunction,
@@ -10973,6 +11555,7 @@ struct CachedKernels {
     fused_silu_accum_v2: cudarc::driver::CudaFunction,
     fused_silu_accum_v2_int8: cudarc::driver::CudaFunction,
     reduce_ksplits_weighted_accum_bf16: cudarc::driver::CudaFunction,
+    reduce_ksplits_sigmoid_accum_bf16: cudarc::driver::CudaFunction,
     // Attention kernels (LA + GQA) — eliminates ~470 HashMap lookups per token
     uninterleave_qkvz: cudarc::driver::CudaFunction,
     la_conv1d: cudarc::driver::CudaFunction,
@@ -11312,6 +11895,7 @@ struct GpuDecodeGraph {
     mapped_activations: Option<PinnedMapped>,
     /// Hard opt-in candidate: parallel sigmoid score fill for route top-k.
     parallel_topk_enabled: bool,
+    parallel_topk_selection_enabled: bool,
     // Cached kernel function handles (populated after configure)
     kernels: Option<CachedKernels>,
 
@@ -11518,6 +12102,7 @@ struct GpuDecodeGraph {
     t_graph_route_prep_dense_down: f64,   // env-gated dense down projection
     t_graph_route_prep_dense_post_norms: f64, // env-gated dense post/downstream norms
     t_graph_route_prep_router_input_norm: f64, // env-gated router-input RMSNorm
+    t_graph_route_prep_empty_marker_span: f64, // timing-only adjacent marker calibration
     t_graph_mamba2_in_proj: f64,          // env-gated Mamba2 graph BF16 in-projection
     t_graph_mamba2_to_fp32: f64,          // env-gated Mamba2 graph BF16->FP32 conversion
     t_graph_mamba2_conv: f64,             // env-gated Mamba2 graph conv1d+silu
@@ -11525,6 +12110,12 @@ struct GpuDecodeGraph {
     t_graph_mamba2_ssm: f64,              // env-gated Mamba2 graph SSM state step
     t_graph_mamba2_gate: f64,             // env-gated Mamba2 graph gate/norm output
     t_graph_mamba2_out_proj: f64,         // env-gated Mamba2 graph output projection
+    t_graph_la_projection: f64,           // env-gated Qwen3.5 linear-attention input projections
+    t_graph_la_uninterleave_copy: f64,    // env-gated Qwen3.5 LA uninterleave + z preservation
+    t_graph_la_conv: f64,                 // env-gated Qwen3.5 LA conv1d + SiLU
+    t_graph_la_gate_beta: f64,            // env-gated Qwen3.5 LA gate/beta preparation
+    t_graph_la_state_norm: f64, // env-gated Qwen3.5 LA recurrent state update + output norm
+    t_graph_la_out_projection: f64, // env-gated Qwen3.5 LA output projection + conversion
     graph_segment_labels: Vec<String>,
     graph_segment_kinds: Vec<u8>,
     graph_segment_elapsed: Vec<f64>,
@@ -11581,6 +12172,10 @@ struct GpuDecodeGraph {
     graph_mamba2_active: Vec<bool>,
     d_graph_mamba2_clocks: Option<cudarc::driver::CudaSlice<u64>>,
     h_graph_mamba2_clocks: Vec<u64>,
+    graph_la_clock_enabled: bool,
+    graph_la_active: Vec<bool>,
+    d_graph_la_clocks: Option<cudarc::driver::CudaSlice<u64>>,
+    h_graph_la_clocks: Vec<u64>,
     graph_final_clock_enabled: bool,
     graph_final_softcap_gpu_enabled: bool,
     d_graph_final_clocks: Option<cudarc::driver::CudaSlice<u64>>,
@@ -11911,6 +12506,8 @@ struct GpuDecodeGraph {
     //    graph-capture time on the real loaded expert shape; overrides the
     //    occupancy formula per (k, n, batch_z, is_int8). ──
     ksplit_autotune: std::collections::HashMap<(usize, usize, usize, bool), usize>,
+    /// Default-off shared-W2 K-split diagnostic selection.
+    shared_w2_ksplit_autotune: std::collections::HashMap<(usize, usize, bool), usize>,
 }
 
 /// One expert staged in the prefetch ring: identity, arena buffer index, bytes
@@ -11924,16 +12521,16 @@ struct PrefetchStagedExpert {
     consumed: bool,
 }
 
-/// Batched routed-expert w13 ksplit selection. Single source of truth for the
-/// occupancy formula, with an optional measured override from the capture-time
-/// autotune (KRASIS_MARLIN_AUTOTUNE=1). The formula and the override are both
-/// derived from the model's own dimensions / real loaded tensors — never from
-/// per-model constants.
-fn select_w13_ksplits_batched(
+/// W13 k-split selection for routed or shared expert weights. Single source of
+/// truth for the occupancy formula, with an optional format- and batch-specific
+/// measured override from capture-time autotuning. The formula and override are
+/// derived from runtime dimensions / real loaded tensors, never model constants.
+fn select_w13_ksplits_for_weights(
     graph: &GpuDecodeGraph,
     expert_hs: usize,
     w13_n: usize,
     batch_z: usize,
+    is_int8: bool,
 ) -> usize {
     let w13_k_tiles = expert_hs / 16;
     let w13_max_ksplits = w13_k_tiles / 16;
@@ -11941,10 +12538,9 @@ fn select_w13_ksplits_batched(
         return 1;
     }
     let hard_max = w13_max_ksplits.min(8);
-    if let Some(&ks) =
-        graph
-            .ksplit_autotune
-            .get(&(expert_hs, w13_n, batch_z, graph.expert_bits == 8))
+    if let Some(&ks) = graph
+        .ksplit_autotune
+        .get(&(expert_hs, w13_n, batch_z, is_int8))
     {
         return ks.clamp(1, hard_max);
     }
@@ -11955,6 +12551,34 @@ fn select_w13_ksplits_batched(
         1
     } else {
         ((target + effective - 1) / effective).clamp(1, hard_max)
+    }
+}
+
+fn select_w13_ksplits_batched(
+    graph: &GpuDecodeGraph,
+    expert_hs: usize,
+    w13_n: usize,
+    batch_z: usize,
+) -> usize {
+    select_w13_ksplits_for_weights(graph, expert_hs, w13_n, batch_z, graph.expert_bits == 8)
+}
+
+/// Select the Marlin kernel family and inverse weight permutation from the
+/// bit width of the weights being executed. Routed and shared experts may use
+/// different formats, so callers must pass the format for the specific weight
+/// set rather than reusing the routed-expert dispatch.
+fn marlin_dispatch_for_bits(
+    bits: u8,
+    int4_inv_weight_perm: u64,
+    int8_inv_weight_perm: u64,
+) -> Result<(u64, bool), String> {
+    match bits {
+        4 => Ok((int4_inv_weight_perm, false)),
+        8 => Ok((int8_inv_weight_perm, true)),
+        _ => Err(format!(
+            "Marlin dispatch requires INT4 or INT8 weights; got {} bits",
+            bits
+        )),
     }
 }
 
@@ -12031,9 +12655,14 @@ impl GpuDecodeGraph {
     fn parallel_topk_enabled_for_moe(&self, moe: &MoeLayerData) -> bool {
         !env_false("KRASIS_DECODE_PARALLEL_TOPK")
             && (self.parallel_topk_enabled
+                || self.parallel_topk_selection_enabled
                 || (self.is_nemotron_h_decode_model()
                     && moe.scoring_func == 1
                     && moe.num_experts <= 1024))
+    }
+
+    fn parallel_topk_selection_enabled_for_moe(&self, moe: &MoeLayerData) -> bool {
+        self.parallel_topk_selection_enabled && moe.scoring_func == 0
     }
 
     fn relu2_w2_coalesced_enabled_for_moe(
@@ -12197,6 +12826,7 @@ const GRAPH_MOE_ROUTE_POST_HIDDEN_NORM_END: usize = 23;
 const GRAPH_MOE_ROUTE_POST_HIDDEN_ADD2_END: usize = 24;
 const GRAPH_MOE_ROUTE_POST_HIDDEN_SCALAR_END: usize = 25;
 const GRAPH_MAMBA2_CLOCK_SLOTS: usize = 8;
+const GRAPH_LA_CLOCK_SLOTS: usize = 7;
 
 #[derive(Clone, Copy, Default)]
 struct GraphGqaOtherClockTotals {
@@ -12426,6 +13056,70 @@ fn accumulate_mamba2_graph_clocks(graph: &mut GpuDecodeGraph) -> Result<(), Stri
         }
         if t7 >= t6 {
             graph.t_graph_mamba2_out_proj += (t7 - t6) as f64 / 1_000_000_000.0;
+        }
+    }
+
+    Ok(())
+}
+
+fn accumulate_la_graph_clocks(graph: &mut GpuDecodeGraph) -> Result<(), String> {
+    if !graph.graph_la_clock_enabled {
+        return Ok(());
+    }
+    let Some(d_clocks) = graph.d_graph_la_clocks.as_ref() else {
+        return Ok(());
+    };
+    if graph.h_graph_la_clocks.is_empty() {
+        return Ok(());
+    }
+
+    let bytes = graph.h_graph_la_clocks.len() * std::mem::size_of::<u64>();
+    unsafe {
+        let err = cuda_sys::lib().cuMemcpyDtoH_v2(
+            graph.h_graph_la_clocks.as_mut_ptr() as *mut std::ffi::c_void,
+            *d_clocks.device_ptr(),
+            bytes,
+        );
+        if err != cuda_sys::CUresult::CUDA_SUCCESS {
+            return Err(format!("copy graph linear-attention clocks: {:?}", err));
+        }
+    }
+
+    for (graph_idx, &active) in graph.graph_la_active.iter().enumerate() {
+        if !active {
+            continue;
+        }
+        let base = graph_idx * GRAPH_LA_CLOCK_SLOTS;
+        if base + GRAPH_LA_CLOCK_SLOTS - 1 >= graph.h_graph_la_clocks.len() {
+            continue;
+        }
+        let t0 = graph.h_graph_la_clocks[base];
+        let t1 = graph.h_graph_la_clocks[base + 1];
+        let t2 = graph.h_graph_la_clocks[base + 2];
+        let t3 = graph.h_graph_la_clocks[base + 3];
+        let t4 = graph.h_graph_la_clocks[base + 4];
+        let t5 = graph.h_graph_la_clocks[base + 5];
+        let t6 = graph.h_graph_la_clocks[base + 6];
+        if t0 == 0 || t6 < t0 {
+            continue;
+        }
+        if t1 >= t0 {
+            graph.t_graph_la_projection += (t1 - t0) as f64 / 1_000_000_000.0;
+        }
+        if t2 >= t1 {
+            graph.t_graph_la_uninterleave_copy += (t2 - t1) as f64 / 1_000_000_000.0;
+        }
+        if t3 >= t2 {
+            graph.t_graph_la_conv += (t3 - t2) as f64 / 1_000_000_000.0;
+        }
+        if t4 >= t3 {
+            graph.t_graph_la_gate_beta += (t4 - t3) as f64 / 1_000_000_000.0;
+        }
+        if t5 >= t4 {
+            graph.t_graph_la_state_norm += (t5 - t4) as f64 / 1_000_000_000.0;
+        }
+        if t6 >= t5 {
+            graph.t_graph_la_out_projection += (t6 - t5) as f64 / 1_000_000_000.0;
         }
     }
 
@@ -12870,8 +13564,8 @@ fn accumulate_route_prep_clocks(graph: &mut GpuDecodeGraph) -> Result<(), String
         if !active {
             continue;
         }
-        let base = graph_idx * 12;
-        if base + 11 >= graph.h_graph_route_prep_clocks.len() {
+        let base = graph_idx * 14;
+        if base + 13 >= graph.h_graph_route_prep_clocks.len() {
             continue;
         }
         let t0 = graph.h_graph_route_prep_clocks[base];
@@ -12886,6 +13580,8 @@ fn accumulate_route_prep_clocks(graph: &mut GpuDecodeGraph) -> Result<(), String
         let t9 = graph.h_graph_route_prep_clocks[base + 9];
         let t10 = graph.h_graph_route_prep_clocks[base + 10];
         let t11 = graph.h_graph_route_prep_clocks[base + 11];
+        let t12 = graph.h_graph_route_prep_clocks[base + 12];
+        let t13 = graph.h_graph_route_prep_clocks[base + 13];
 
         if t0 != 0 && t1 >= t0 {
             graph.t_graph_route_prep_pre_gqa_norm += (t1 - t0) as f64 / 1_000_000_000.0;
@@ -12913,6 +13609,9 @@ fn accumulate_route_prep_clocks(graph: &mut GpuDecodeGraph) -> Result<(), String
         }
         if t11 >= t10 {
             graph.t_graph_route_prep_router_input_norm += (t11 - t10) as f64 / 1_000_000_000.0;
+        }
+        if t12 != 0 && t13 >= t12 {
+            graph.t_graph_route_prep_empty_marker_span += (t13 - t12) as f64 / 1_000_000_000.0;
         }
     }
 
@@ -14233,6 +14932,10 @@ pub struct GpuDecodeStore {
     hqq_runtime_registration_stats: HqqRuntimeRegistrationStats,
     hqq_runtime_last_swap: HqqRuntimeSwapStats,
     hqq_decode_timing_entries: Vec<HqqDecodeTimingEntry>,
+    /// Real-weight startup-selected HQQ4 decode launch geometry, keyed by
+    /// (rows, cols, BF16 output). Empty/default keeps the established 8-warp
+    /// launch. Store-scoped so independent GPUs never share a measured choice.
+    hqq4_decode_warps_per_block: HashMap<(usize, usize, bool), usize>,
     #[cfg(feature = "gpu-debug")]
     debug_stop_layer: usize,
     #[cfg(feature = "gpu-debug")]
@@ -15840,18 +16543,30 @@ impl GpuDecodeStore {
         )?;
         let rows = desc.rows;
         let cols = desc.cols;
-        let blocks = ((rows + 7) / 8) as u32;
+        let warps_per_block = self
+            .hqq4_decode_warps_per_block
+            .get(&(rows, cols, false))
+            .copied()
+            .unwrap_or(8);
+        let blocks = rows.div_ceil(warps_per_block) as u32;
         let smem = (cols as u32) * 2;
+        let group_cached = env_truthy("KRASIS_HQQ4_GROUP_CACHE")
+            && matches!(tensor_name, "in_proj_qkvz" | "in_proj_ba");
+        let kernel_name = if group_cached {
+            "hqq4_decode_gemv_f32_group_cached"
+        } else {
+            "hqq4_decode_gemv_f32"
+        };
         let kernel = self
             .device
-            .get_func(MODULE_NAME, "hqq4_decode_gemv_f32")
-            .ok_or_else(|| "hqq4_decode_gemv_f32 kernel not found".to_string())?;
+            .get_func(MODULE_NAME, kernel_name)
+            .ok_or_else(|| format!("{} kernel not found", kernel_name))?;
         unsafe {
             kernel
                 .launch(
                     LaunchConfig {
                         grid_dim: (blocks, 1, 1),
-                        block_dim: (256, 1, 1),
+                        block_dim: ((warps_per_block * 32) as u32, 1, 1),
                         shared_mem_bytes: smem,
                     },
                     (
@@ -16009,7 +16724,12 @@ impl GpuDecodeStore {
         )?;
         let rows = desc.rows;
         let cols = desc.cols;
-        let blocks = ((rows + 7) / 8) as u32;
+        let warps_per_block = self
+            .hqq4_decode_warps_per_block
+            .get(&(rows, cols, true))
+            .copied()
+            .unwrap_or(8);
+        let blocks = rows.div_ceil(warps_per_block) as u32;
         let smem = (cols as u32) * 2;
         let kernel = self
             .device
@@ -16020,7 +16740,7 @@ impl GpuDecodeStore {
                 .launch(
                     LaunchConfig {
                         grid_dim: (blocks, 1, 1),
-                        block_dim: (256, 1, 1),
+                        block_dim: ((warps_per_block * 32) as u32, 1, 1),
                         shared_mem_bytes: smem,
                     },
                     (
@@ -16172,6 +16892,243 @@ impl GpuDecodeStore {
             8 => self.launch_hqq8_decode_gemv_bf16(tensor_name, desc, input_ptr, output_ptr),
             _ => Err(format!("Unsupported HQQ decode nbits={}", nbits)),
         }
+    }
+
+    /// Measure the real HQQ4 linear-attention projection shapes before CUDA
+    /// graph capture and select the best block geometry for this store/GPU.
+    /// Candidate sizes come from the runtime CUDA warp and block limits; no
+    /// model dimension or GPU-specific choice is embedded in the code.
+    fn autotune_hqq4_la_warps(&mut self) -> Result<(), String> {
+        let mut tensors: Vec<(String, HqqTensorExecDescriptor)> = Vec::new();
+        {
+            let graph = self
+                .graph
+                .as_ref()
+                .ok_or_else(|| "HQQ4 warp autotune requires a configured graph".to_string())?;
+            for layer in graph.layers.iter() {
+                let Some(HqqExecutionDescriptor::LinearAttention(desc)) = layer.hqq_exec.as_ref()
+                else {
+                    continue;
+                };
+                if desc.nbits != 4 || !hqq_linear_attention_decode_ready(desc) {
+                    continue;
+                }
+                for (name, tensor) in [
+                    ("in_proj_qkvz", &desc.in_proj_qkvz),
+                    ("in_proj_ba", &desc.in_proj_ba),
+                    ("out_proj", &desc.out_proj),
+                ] {
+                    let key = (tensor.rows, tensor.cols, false);
+                    if tensors
+                        .iter()
+                        .any(|(_, existing)| (existing.rows, existing.cols, false) == key)
+                    {
+                        continue;
+                    }
+                    tensors.push((name.to_string(), tensor.clone()));
+                }
+            }
+        }
+        if tensors.is_empty() {
+            return Err(
+                "KRASIS_HQQ4_WARP_AUTOTUNE=1 found no executable HQQ4 linear-attention projections"
+                    .to_string(),
+            );
+        }
+
+        let mut warp_size = 0i32;
+        let mut max_threads = 0i32;
+        unsafe {
+            let device = self.device.ordinal() as i32;
+            let warp_rc = cuda_sys::lib().cuDeviceGetAttribute(
+                &mut warp_size,
+                cuda_sys::CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_WARP_SIZE,
+                device,
+            );
+            if warp_rc != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!(
+                    "HQQ4 warp autotune warp-size query failed: {:?}",
+                    warp_rc
+                ));
+            }
+            let threads_rc = cuda_sys::lib().cuDeviceGetAttribute(
+                &mut max_threads,
+                cuda_sys::CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK,
+                device,
+            );
+            if threads_rc != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!(
+                    "HQQ4 warp autotune max-threads query failed: {:?}",
+                    threads_rc
+                ));
+            }
+        }
+        if warp_size <= 0 || max_threads < warp_size {
+            return Err(format!(
+                "HQQ4 warp autotune invalid CUDA limits: warp_size={} max_threads={}",
+                warp_size, max_threads
+            ));
+        }
+        let warp_size = warp_size as usize;
+        let max_warps = max_threads as usize / warp_size;
+        let established_warps = 256usize / warp_size;
+        if established_warps == 0 || established_warps > max_warps {
+            return Err(format!(
+                "HQQ4 warp autotune established 256-thread launch is invalid for warp_size={} max_threads={}",
+                warp_size, max_threads
+            ));
+        }
+
+        let mut candidates = Vec::new();
+        let mut warps = 1usize;
+        while warps <= max_warps {
+            candidates.push(warps);
+            let Some(next) = warps.checked_mul(2) else {
+                break;
+            };
+            warps = next;
+        }
+        if !candidates.contains(&established_warps) {
+            candidates.push(established_warps);
+            candidates.sort_unstable();
+            candidates.dedup();
+        }
+
+        let cu_stream: cuda_sys::CUstream = *self.device.cu_stream();
+        let mut ev_start: cuda_sys::CUevent = std::ptr::null_mut();
+        let mut ev_stop: cuda_sys::CUevent = std::ptr::null_mut();
+        unsafe {
+            let start_rc = cuda_sys::lib().cuEventCreate(&mut ev_start, 0);
+            if start_rc != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!(
+                    "HQQ4 warp autotune start-event create failed: {:?}",
+                    start_rc
+                ));
+            }
+            let stop_rc = cuda_sys::lib().cuEventCreate(&mut ev_stop, 0);
+            if stop_rc != cuda_sys::CUresult::CUDA_SUCCESS {
+                cuda_sys::lib().cuEventDestroy_v2(ev_start);
+                return Err(format!(
+                    "HQQ4 warp autotune stop-event create failed: {:?}",
+                    stop_rc
+                ));
+            }
+        }
+        let destroy_events = |start: cuda_sys::CUevent, stop: cuda_sys::CUevent| unsafe {
+            cuda_sys::lib().cuEventDestroy_v2(start);
+            cuda_sys::lib().cuEventDestroy_v2(stop);
+        };
+
+        for (tensor_name, desc) in tensors.iter() {
+            let input = self
+                .device
+                .alloc_zeros::<u16>(desc.cols)
+                .map_err(|e| format!("HQQ4 warp autotune input allocation: {:?}", e))?;
+            let mut output = self
+                .device
+                .alloc_zeros::<f32>(desc.rows)
+                .map_err(|e| format!("HQQ4 warp autotune output allocation: {:?}", e))?;
+            let input_ptr = *input.device_ptr();
+            let output_ptr = *output.device_ptr();
+            let mut results: Vec<(usize, f64)> = Vec::new();
+
+            for &candidate in candidates
+                .iter()
+                .filter(|&&value| value <= desc.rows.max(1))
+            {
+                self.hqq4_decode_warps_per_block
+                    .insert((desc.rows, desc.cols, false), candidate);
+                let launch = |store: &GpuDecodeStore, reps: usize| -> Result<(), String> {
+                    for _ in 0..reps {
+                        store.launch_hqq4_decode_gemv_f32(
+                            tensor_name,
+                            desc,
+                            input_ptr,
+                            output_ptr,
+                        )?;
+                    }
+                    Ok(())
+                };
+                if let Err(error) = launch(self, 3) {
+                    destroy_events(ev_start, ev_stop);
+                    return Err(error);
+                }
+                let reps = 20usize;
+                let sample_blocks = 5usize;
+                let mut samples = Vec::with_capacity(sample_blocks);
+                for _ in 0..sample_blocks {
+                    unsafe {
+                        cuda_sys::lib().cuEventRecord(ev_start, cu_stream);
+                    }
+                    if let Err(error) = launch(self, reps) {
+                        destroy_events(ev_start, ev_stop);
+                        return Err(error);
+                    }
+                    unsafe {
+                        cuda_sys::lib().cuEventRecord(ev_stop, cu_stream);
+                        let sync_rc = cuda_sys::lib().cuEventSynchronize(ev_stop);
+                        if sync_rc != cuda_sys::CUresult::CUDA_SUCCESS {
+                            destroy_events(ev_start, ev_stop);
+                            return Err(format!(
+                                "HQQ4 warp autotune event sync failed: {:?}",
+                                sync_rc
+                            ));
+                        }
+                        let mut elapsed_ms = 0.0f32;
+                        let elapsed_rc =
+                            cuda_sys::lib().cuEventElapsedTime(&mut elapsed_ms, ev_start, ev_stop);
+                        if elapsed_rc != cuda_sys::CUresult::CUDA_SUCCESS {
+                            destroy_events(ev_start, ev_stop);
+                            return Err(format!(
+                                "HQQ4 warp autotune elapsed-time query failed: {:?}",
+                                elapsed_rc
+                            ));
+                        }
+                        samples.push(elapsed_ms as f64 / reps as f64);
+                    }
+                }
+                samples.sort_by(|left, right| {
+                    left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal)
+                });
+                results.push((candidate, samples[sample_blocks / 2]));
+            }
+
+            let Some(&(best_warps, best_ms)) = results.iter().min_by(|left, right| {
+                left.1
+                    .partial_cmp(&right.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            }) else {
+                destroy_events(ev_start, ev_stop);
+                return Err(format!(
+                    "HQQ4 warp autotune produced no candidates for {} shape {}x{}",
+                    tensor_name, desc.rows, desc.cols
+                ));
+            };
+            let details = results
+                .iter()
+                .map(|(candidate, ms)| format!("{}:{:.4}ms", candidate, ms))
+                .collect::<Vec<_>>()
+                .join(" ");
+            self.hqq4_decode_warps_per_block
+                .insert((desc.rows, desc.cols, false), best_warps);
+            eprintln!(
+                "[hqq4-warp-autotune] tensor={} shape={}x{} candidates [{}] -> {} warps ({:.4} ms median)",
+                tensor_name, desc.rows, desc.cols, details, best_warps, best_ms
+            );
+            // Keep the output alive through the last event synchronization.
+            let _ = &mut output;
+        }
+        destroy_events(ev_start, ev_stop);
+        unsafe {
+            let sync_rc = cuda_sys::lib().cuStreamSynchronize(cu_stream);
+            if sync_rc != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(format!(
+                    "HQQ4 warp autotune final sync failed: {:?}",
+                    sync_rc
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn apply_hqq_decode_int8_exceptions_f32(
@@ -16758,6 +17715,7 @@ impl GpuDecodeStore {
             hqq_runtime_registration_stats: HqqRuntimeRegistrationStats::default(),
             hqq_runtime_last_swap: HqqRuntimeSwapStats::default(),
             hqq_decode_timing_entries: Vec::new(),
+            hqq4_decode_warps_per_block: HashMap::new(),
             #[cfg(feature = "gpu-debug")]
             debug_stop_layer: 0,
             #[cfg(feature = "gpu-debug")]
@@ -17514,6 +18472,7 @@ impl GpuDecodeStore {
             mapped_reads_active: false,
             mapped_activations: None,
             parallel_topk_enabled: env_truthy("KRASIS_DECODE_PARALLEL_TOPK"),
+            parallel_topk_selection_enabled: env_truthy("KRASIS_DECODE_PARALLEL_TOPK_SELECTION"),
             kernels: None,
             pre_events: None,
             norm_bias_one: false,
@@ -17683,6 +18642,7 @@ impl GpuDecodeStore {
             t_graph_route_prep_dense_down: 0.0,
             t_graph_route_prep_dense_post_norms: 0.0,
             t_graph_route_prep_router_input_norm: 0.0,
+            t_graph_route_prep_empty_marker_span: 0.0,
             t_graph_mamba2_in_proj: 0.0,
             t_graph_mamba2_to_fp32: 0.0,
             t_graph_mamba2_conv: 0.0,
@@ -17690,6 +18650,12 @@ impl GpuDecodeStore {
             t_graph_mamba2_ssm: 0.0,
             t_graph_mamba2_gate: 0.0,
             t_graph_mamba2_out_proj: 0.0,
+            t_graph_la_projection: 0.0,
+            t_graph_la_uninterleave_copy: 0.0,
+            t_graph_la_conv: 0.0,
+            t_graph_la_gate_beta: 0.0,
+            t_graph_la_state_norm: 0.0,
+            t_graph_la_out_projection: 0.0,
             graph_segment_labels: Vec::new(),
             graph_segment_kinds: Vec::new(),
             graph_segment_elapsed: Vec::new(),
@@ -17746,6 +18712,10 @@ impl GpuDecodeStore {
             graph_mamba2_active: Vec::new(),
             d_graph_mamba2_clocks: None,
             h_graph_mamba2_clocks: Vec::new(),
+            graph_la_clock_enabled: false,
+            graph_la_active: Vec::new(),
+            d_graph_la_clocks: None,
+            h_graph_la_clocks: Vec::new(),
             graph_final_clock_enabled: false,
             graph_final_softcap_gpu_enabled: false,
             d_graph_final_clocks: None,
@@ -17922,6 +18892,7 @@ impl GpuDecodeStore {
             h_wts_full: Vec::new(),
             h_wts_hot: Vec::new(),
             ksplit_autotune: std::collections::HashMap::new(),
+            shared_w2_ksplit_autotune: std::collections::HashMap::new(),
         }));
 
         // Cache kernel function handles (avoid HashMap lookup per call)
@@ -17949,6 +18920,8 @@ impl GpuDecodeStore {
                 sigmoid_topk: get("sigmoid_topk")?,
                 sigmoid_topk_parallel_scores: get("sigmoid_topk_parallel_scores")?,
                 softmax_topk: get("softmax_topk")?,
+                softmax_topk_parallel_scores: get("softmax_topk_parallel_scores")?,
+                softmax_topk_parallel_selection: get("softmax_topk_parallel_selection")?,
                 normalize_topk_weights: get("normalize_topk_weights")?,
                 zero_bf16: get("zero_bf16")?,
                 add_bf16: get("add_bf16")?,
@@ -17976,6 +18949,7 @@ impl GpuDecodeStore {
                 fused_silu_accum_v2: get("marlin_gemv_int4_fused_silu_accum_v2")?,
                 fused_silu_accum_v2_int8: get("marlin_gemv_int8_fused_silu_accum_v2")?,
                 reduce_ksplits_weighted_accum_bf16: get("reduce_ksplits_weighted_accum_bf16")?,
+                reduce_ksplits_sigmoid_accum_bf16: get("reduce_ksplits_sigmoid_accum_bf16")?,
                 // Attention kernels (LA + GQA)
                 uninterleave_qkvz: get("uninterleave_qkvz")?,
                 la_conv1d: get("la_conv1d")?,
@@ -20154,6 +21128,7 @@ impl GpuDecodeStore {
                 graph.t_graph_route_prep_dense_down = 0.0;
                 graph.t_graph_route_prep_dense_post_norms = 0.0;
                 graph.t_graph_route_prep_router_input_norm = 0.0;
+                graph.t_graph_route_prep_empty_marker_span = 0.0;
                 graph.t_graph_mamba2_in_proj = 0.0;
                 graph.t_graph_mamba2_to_fp32 = 0.0;
                 graph.t_graph_mamba2_conv = 0.0;
@@ -20161,6 +21136,12 @@ impl GpuDecodeStore {
                 graph.t_graph_mamba2_ssm = 0.0;
                 graph.t_graph_mamba2_gate = 0.0;
                 graph.t_graph_mamba2_out_proj = 0.0;
+                graph.t_graph_la_projection = 0.0;
+                graph.t_graph_la_uninterleave_copy = 0.0;
+                graph.t_graph_la_conv = 0.0;
+                graph.t_graph_la_gate_beta = 0.0;
+                graph.t_graph_la_state_norm = 0.0;
+                graph.t_graph_la_out_projection = 0.0;
                 for total in &mut graph.graph_gqa_other_totals {
                     *total = GraphGqaOtherClockTotals::default();
                 }
@@ -31962,7 +32943,6 @@ impl GpuDecodeStore {
                                 *graph.d_la_ba.device_ptr(),
                             )?;
                         }
-
                         // Uninterleave
                         {
                             let group_dim = 2 * dk_ + 2 * hr_ * dv_;
@@ -33004,9 +33984,464 @@ impl GpuDecodeStore {
                 }
             }
         }
+
+        // Shared experts are single-expert launches and may use a different
+        // precision from routed experts.  Measure their real resident weights
+        // separately; reusing the routed INT4 result would optimize the wrong
+        // kernel and batch geometry on models with INT8 shared experts.
+        let mut shared_shapes: Vec<(usize, usize, bool, u64, u64, usize)> = Vec::new();
+        if matches!(graph.shared_expert_bits, 4 | 8) {
+            let shared_is_int8 = graph.shared_expert_bits == 8;
+            for (layer_idx, moe_opt) in graph.moe_layers.iter().enumerate() {
+                let Some(moe) = moe_opt.as_ref() else {
+                    continue;
+                };
+                if moe.moe_input_size > 0
+                    || moe.latent_down_wid.is_some()
+                    || moe.latent_up_wid.is_some()
+                {
+                    continue;
+                }
+                let Some(shared) = graph
+                    .shared_expert_vram
+                    .get(layer_idx)
+                    .and_then(|entry| entry.as_ref())
+                else {
+                    continue;
+                };
+                let shared_w13_n = if moe.gated_experts {
+                    2 * graph.shared_expert_intermediate_size
+                } else {
+                    graph.shared_expert_intermediate_size
+                };
+                if shared_w13_n == 0 {
+                    continue;
+                }
+                let shape_key = (hs, shared_w13_n, shared_is_int8);
+                if shared_shapes
+                    .iter()
+                    .any(|&(k_dim, n_dim, bits8, _, _, _)| (k_dim, n_dim, bits8) == shape_key)
+                {
+                    continue;
+                }
+                shared_shapes.push((
+                    hs,
+                    shared_w13_n,
+                    shared_is_int8,
+                    shared.w13_packed_ptr(),
+                    shared.w13_scales_ptr(),
+                    layer_idx,
+                ));
+            }
+        } else if graph.shared_expert_bits != 0 {
+            eprintln!(
+                "[ksplit-autotune] shared expert bits={} are not a Marlin INT4/INT8 format; skipping shared W13",
+                graph.shared_expert_bits,
+            );
+        }
+
+        let shared_input_ptr = *graph.d_hidden.device_ptr();
+        let shared_partials_ptr = *graph.d_v2_partial.device_ptr();
+        let shared_output_ptr = *graph.d_expert_gate_up.device_ptr();
+        for &(shared_k, shared_n, shared_is_int8, packed_ptr, scales_ptr, layer_idx) in
+            shared_shapes.iter()
+        {
+            let max_ksplits = (shared_k / 16) / 16;
+            if max_ksplits <= 1 {
+                continue;
+            }
+            let hard_max = max_ksplits.min(8);
+            let formula =
+                select_w13_ksplits_for_weights(graph, shared_k, shared_n, 1, shared_is_int8);
+            let mut candidates = vec![1usize, 2, 4, 8, formula];
+            candidates.retain(|&candidate| candidate <= hard_max);
+            candidates.sort_unstable();
+            candidates.dedup();
+
+            let inv_wp = if shared_is_int8 {
+                *graph.d_inv_weight_perm_int8.device_ptr()
+            } else {
+                *graph.d_inv_weight_perm.device_ptr()
+            };
+            let n_tiles = (shared_n + 15) / 16;
+            let smem_bytes = (shared_k * 2 + 1024 * 4 + 64 * 4 + 16 * 16 * 4) as u32;
+            let gemv = if shared_is_int8 {
+                k.marlin_gemv_int8_v2.clone()
+            } else {
+                k.marlin_gemv_int4_v2.clone()
+            };
+            let reduce_grid = ((shared_n + 255) / 256) as u32;
+            let mut results: Vec<(usize, f64)> = Vec::new();
+
+            for &ks in candidates.iter() {
+                let launch_pair = |reps: usize| -> Result<(), String> {
+                    for _ in 0..reps {
+                        unsafe {
+                            gemv.clone()
+                                .launch(
+                                    LaunchConfig {
+                                        grid_dim: (n_tiles as u32, ks as u32, 1),
+                                        block_dim: (256, 1, 1),
+                                        shared_mem_bytes: smem_bytes,
+                                    },
+                                    (
+                                        packed_ptr,
+                                        scales_ptr,
+                                        shared_input_ptr,
+                                        shared_partials_ptr,
+                                        inv_wp,
+                                        inv_sp,
+                                        shared_k as i32,
+                                        shared_n as i32,
+                                        gs as i32,
+                                        ks as i32,
+                                    ),
+                                )
+                                .map_err(|e| {
+                                    format!("shared ksplit autotune W13 launch: {:?}", e)
+                                })?;
+                            k.reduce_ksplits_bf16
+                                .clone()
+                                .launch(
+                                    LaunchConfig {
+                                        grid_dim: (reduce_grid, 1, 1),
+                                        block_dim: (256, 1, 1),
+                                        shared_mem_bytes: 0,
+                                    },
+                                    (
+                                        shared_output_ptr,
+                                        shared_partials_ptr,
+                                        shared_n as i32,
+                                        ks as i32,
+                                    ),
+                                )
+                                .map_err(|e| {
+                                    format!("shared ksplit autotune reduce launch: {:?}", e)
+                                })?;
+                        }
+                    }
+                    Ok(())
+                };
+                if let Err(e) = launch_pair(3) {
+                    destroy_events(ev_start, ev_stop);
+                    return Err(e);
+                }
+                let reps = 20usize;
+                let blocks = 5usize;
+                let mut samples = Vec::with_capacity(blocks);
+                for _ in 0..blocks {
+                    unsafe {
+                        cuda_sys::lib().cuEventRecord(ev_start, cu_stream);
+                    }
+                    if let Err(e) = launch_pair(reps) {
+                        destroy_events(ev_start, ev_stop);
+                        return Err(e);
+                    }
+                    unsafe {
+                        cuda_sys::lib().cuEventRecord(ev_stop, cu_stream);
+                        let err = cuda_sys::lib().cuEventSynchronize(ev_stop);
+                        if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                            destroy_events(ev_start, ev_stop);
+                            return Err(format!("shared ksplit autotune event sync: {:?}", err));
+                        }
+                        let mut elapsed_ms = 0.0f32;
+                        let err =
+                            cuda_sys::lib().cuEventElapsedTime(&mut elapsed_ms, ev_start, ev_stop);
+                        if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                            destroy_events(ev_start, ev_stop);
+                            return Err(format!("shared ksplit autotune elapsed: {:?}", err));
+                        }
+                        samples.push(elapsed_ms as f64 / reps as f64);
+                    }
+                }
+                samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                results.push((ks, samples[blocks / 2]));
+            }
+
+            let Some(&(best_ks, best_ms)) = results
+                .iter()
+                .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            else {
+                continue;
+            };
+            let formula_ms = results
+                .iter()
+                .find(|&&(ks, _)| ks == formula)
+                .map(|&(_, ms)| ms);
+            let details: Vec<String> = results
+                .iter()
+                .map(|(ks, ms)| format!("{}:{:.4}ms", ks, ms))
+                .collect();
+            let margin_pct = env_f64("KRASIS_MARLIN_AUTOTUNE_MARGIN_PCT", 5.0).max(0.0);
+            match formula_ms {
+                Some(f_ms) if best_ks != formula && best_ms < f_ms * (1.0 - margin_pct / 100.0) => {
+                    eprintln!(
+                        "[ksplit-autotune] shared layer={} shape k={} n={} z=1 int8={} candidates [{}] -> override ksplits={} ({:.4} ms median vs formula {} at {:.4} ms, >{:.1}% margin)",
+                        layer_idx,
+                        shared_k,
+                        shared_n,
+                        shared_is_int8,
+                        details.join(" "),
+                        best_ks,
+                        best_ms,
+                        formula,
+                        f_ms,
+                        margin_pct,
+                    );
+                    graph
+                        .ksplit_autotune
+                        .insert((shared_k, shared_n, 1, shared_is_int8), best_ks);
+                }
+                Some(f_ms) => {
+                    eprintln!(
+                        "[ksplit-autotune] shared layer={} shape k={} n={} z=1 int8={} candidates [{}] -> keeping formula ksplits={} ({:.4} ms median; best {} at {:.4} ms is within the {:.1}% margin)",
+                        layer_idx,
+                        shared_k,
+                        shared_n,
+                        shared_is_int8,
+                        details.join(" "),
+                        formula,
+                        f_ms,
+                        best_ks,
+                        best_ms,
+                        margin_pct,
+                    );
+                }
+                None => {
+                    eprintln!(
+                        "[ksplit-autotune] shared layer={} shape k={} n={} z=1 int8={} candidates [{}]: formula ksplits={} not in candidate range; no override installed",
+                        layer_idx,
+                        shared_k,
+                        shared_n,
+                        shared_is_int8,
+                        details.join(" "),
+                        formula,
+                    );
+                }
+            }
+        }
+
+        if env_truthy("KRASIS_SHARED_W2_AUTOTUNE") {
+            let mut w2_shapes: Vec<(usize, usize, bool, u64, u64, usize)> = Vec::new();
+            if matches!(graph.shared_expert_bits, 4 | 8) {
+                let shared_is_int8 = graph.shared_expert_bits == 8;
+                for (layer_idx, moe_opt) in graph.moe_layers.iter().enumerate() {
+                    let Some(moe) = moe_opt.as_ref() else {
+                        continue;
+                    };
+                    if moe.moe_input_size > 0
+                        || moe.latent_down_wid.is_some()
+                        || moe.latent_up_wid.is_some()
+                    {
+                        continue;
+                    }
+                    let Some(shared) = graph
+                        .shared_expert_vram
+                        .get(layer_idx)
+                        .and_then(|entry| entry.as_ref())
+                    else {
+                        continue;
+                    };
+                    let shape = (graph.shared_expert_intermediate_size, hs, shared_is_int8);
+                    if shape.0 == 0
+                        || w2_shapes
+                            .iter()
+                            .any(|&(k_dim, n_dim, bits8, _, _, _)| (k_dim, n_dim, bits8) == shape)
+                    {
+                        continue;
+                    }
+                    w2_shapes.push((
+                        shape.0,
+                        shape.1,
+                        shape.2,
+                        shared.w2_packed_ptr(),
+                        shared.w2_scales_ptr(),
+                        layer_idx,
+                    ));
+                }
+            }
+
+            let gate_up_ptr = *graph.d_expert_gate_up.device_ptr();
+            let accum_ptr = *graph.d_moe_out.device_ptr();
+            unsafe {
+                let gate_bytes = graph.shared_expert_intermediate_size * 2 * 2;
+                let err = cuda_sys::lib().cuMemsetD8_v2(gate_up_ptr, 0, gate_bytes);
+                if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                    destroy_events(ev_start, ev_stop);
+                    return Err(format!("shared W2 autotune gate-up memset: {:?}", err));
+                }
+                let err = cuda_sys::lib().cuMemsetD8_v2(accum_ptr, 0, hs * 2);
+                if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                    destroy_events(ev_start, ev_stop);
+                    return Err(format!("shared W2 autotune accum memset: {:?}", err));
+                }
+            }
+
+            for &(w2_k, w2_n, shared_is_int8, packed_ptr, scales_ptr, layer_idx) in w2_shapes.iter()
+            {
+                let max_ksplits = (w2_k / 16) / 16;
+                if max_ksplits <= 1 {
+                    eprintln!(
+                        "[shared-w2-autotune] layer={} shape k={} n={} has no valid K-split candidate; keeping v1",
+                        layer_idx, w2_k, w2_n
+                    );
+                    continue;
+                }
+                let mut candidates = vec![2usize, 4, 8];
+                candidates.retain(|&candidate| candidate <= max_ksplits);
+                candidates.sort_unstable();
+                candidates.dedup();
+
+                let launch_v1 = |reps: usize| -> Result<(), String> {
+                    for _ in 0..reps {
+                        self.launch_fused_silu_accum(
+                            packed_ptr,
+                            scales_ptr,
+                            gate_up_ptr,
+                            accum_ptr,
+                            if shared_is_int8 {
+                                *graph.d_inv_weight_perm_int8.device_ptr()
+                            } else {
+                                *graph.d_inv_weight_perm.device_ptr()
+                            },
+                            inv_sp,
+                            w2_k,
+                            w2_n,
+                            gs,
+                            1.0,
+                            0,
+                            0.0,
+                            &k,
+                            shared_is_int8,
+                        )
+                        .map_err(|e| format!("shared W2 autotune v1: {:?}", e))?;
+                    }
+                    Ok(())
+                };
+                let launch_v2 = |ks: usize, reps: usize| -> Result<(), String> {
+                    for _ in 0..reps {
+                        self.launch_fused_silu_accum_v2(
+                            packed_ptr,
+                            scales_ptr,
+                            gate_up_ptr,
+                            shared_partials_ptr,
+                            if shared_is_int8 {
+                                *graph.d_inv_weight_perm_int8.device_ptr()
+                            } else {
+                                *graph.d_inv_weight_perm.device_ptr()
+                            },
+                            inv_sp,
+                            w2_k,
+                            w2_n,
+                            gs,
+                            ks,
+                            0.0,
+                            &k,
+                            shared_is_int8,
+                        )
+                        .map_err(|e| format!("shared W2 autotune v2: {:?}", e))?;
+                        self.launch_reduce_ksplits_sigmoid_accum(
+                            accum_ptr,
+                            shared_partials_ptr,
+                            w2_n,
+                            ks,
+                            1.0,
+                            0,
+                            &k,
+                        )
+                        .map_err(|e| format!("shared W2 autotune reduce: {:?}", e))?;
+                    }
+                    Ok(())
+                };
+
+                let time_sequence =
+                    |launch: &dyn Fn(usize) -> Result<(), String>| -> Result<f64, String> {
+                        launch(3)?;
+                        let reps = 20usize;
+                        let blocks = 5usize;
+                        let mut samples = Vec::with_capacity(blocks);
+                        for _ in 0..blocks {
+                            unsafe {
+                                cuda_sys::lib().cuEventRecord(ev_start, cu_stream);
+                            }
+                            launch(reps)?;
+                            unsafe {
+                                cuda_sys::lib().cuEventRecord(ev_stop, cu_stream);
+                                let err = cuda_sys::lib().cuEventSynchronize(ev_stop);
+                                if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                                    return Err(format!(
+                                        "shared W2 autotune event sync: {:?}",
+                                        err
+                                    ));
+                                }
+                                let mut elapsed_ms = 0.0f32;
+                                let err = cuda_sys::lib().cuEventElapsedTime(
+                                    &mut elapsed_ms,
+                                    ev_start,
+                                    ev_stop,
+                                );
+                                if err != cuda_sys::CUresult::CUDA_SUCCESS {
+                                    return Err(format!("shared W2 autotune elapsed: {:?}", err));
+                                }
+                                samples.push(elapsed_ms as f64 / reps as f64);
+                            }
+                        }
+                        samples
+                            .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                        Ok(samples[blocks / 2])
+                    };
+
+                let v1_ms = match time_sequence(&launch_v1) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        destroy_events(ev_start, ev_stop);
+                        return Err(error);
+                    }
+                };
+                let mut results = Vec::new();
+                for &ks in candidates.iter() {
+                    let launch = |reps| launch_v2(ks, reps);
+                    let elapsed = match time_sequence(&launch) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            destroy_events(ev_start, ev_stop);
+                            return Err(error);
+                        }
+                    };
+                    results.push((ks, elapsed));
+                }
+                let Some(&(best_ks, best_ms)) = results
+                    .iter()
+                    .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                else {
+                    continue;
+                };
+                let details = results
+                    .iter()
+                    .map(|(ks, ms)| format!("{}:{:.4}ms", ks, ms))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let margin_pct = env_f64("KRASIS_MARLIN_AUTOTUNE_MARGIN_PCT", 5.0).max(0.0);
+                if best_ms < v1_ms * (1.0 - margin_pct / 100.0) {
+                    eprintln!(
+                        "[shared-w2-autotune] layer={} shape k={} n={} int8={} v1={:.4}ms candidates [{}] -> K-split {} at {:.4}ms (>{:.1}% margin)",
+                        layer_idx, w2_k, w2_n, shared_is_int8, v1_ms, details, best_ks, best_ms, margin_pct
+                    );
+                    graph
+                        .shared_w2_ksplit_autotune
+                        .insert((w2_k, w2_n, shared_is_int8), best_ks);
+                } else {
+                    eprintln!(
+                        "[shared-w2-autotune] layer={} shape k={} n={} int8={} v1={:.4}ms candidates [{}] -> keeping v1 (best {} at {:.4}ms is within {:.1}% margin)",
+                        layer_idx, w2_k, w2_n, shared_is_int8, v1_ms, details, best_ks, best_ms, margin_pct
+                    );
+                }
+            }
+        }
         eprintln!(
-            "[ksplit-autotune] complete: {} override(s) installed",
+            "[ksplit-autotune] complete: {} W13 override(s), {} shared-W2 override(s) installed",
             graph.ksplit_autotune.len(),
+            graph.shared_w2_ksplit_autotune.len(),
         );
         destroy_events(ev_start, ev_stop);
         unsafe {
@@ -33033,6 +34468,9 @@ impl GpuDecodeStore {
         gqa_cache_offset: usize,
     ) -> Result<(), String> {
         let trace_cfg = self.active_trace_owned();
+        if env_truthy("KRASIS_HQQ4_WARP_AUTOTUNE") && self.hqq4_decode_warps_per_block.is_empty() {
+            self.autotune_hqq4_la_warps()?;
+        }
         let mut graph = self
             .graph
             .take()
@@ -33218,7 +34656,6 @@ impl GpuDecodeStore {
             && graph.vocab_size <= i32::MAX as usize;
         graph.graph_final_clock_enabled = graph.graph_internal_timing
             && do_final
-            && has_gemma4_k4v4_graph_target
             && std::env::var("KRASIS_DECODE_FINAL_CLOCKS")
                 .map(|v| v != "0")
                 .unwrap_or(false);
@@ -33255,9 +34692,8 @@ impl GpuDecodeStore {
         } else {
             0
         };
-        graph.graph_route_prep_clock_enabled = graph.graph_internal_timing
-            && has_gemma4_k4v4_graph_target
-            && graph_route_prep_requested;
+        graph.graph_route_prep_clock_enabled =
+            graph.graph_internal_timing && has_graph_moe_target && graph_route_prep_requested;
         graph.graph_mamba2_clock_enabled = graph.graph_internal_timing
             && graph
                 .layers
@@ -33266,6 +34702,18 @@ impl GpuDecodeStore {
             && std::env::var("KRASIS_DECODE_MAMBA2_GRAPH_CLOCKS")
                 .map(|v| v != "0")
                 .unwrap_or(false);
+        graph.graph_la_clock_enabled = graph.graph_internal_timing
+            && graph
+                .layers
+                .iter()
+                .any(|layer| matches!(layer.attn, GpuAttnConfig::LinearAttention { .. }))
+            && std::env::var("KRASIS_DECODE_LA_GRAPH_CLOCKS")
+                .map(|v| v != "0")
+                .unwrap_or(false);
+        let has_gqa_graph_target = graph
+            .layers
+            .iter()
+            .any(|layer| matches!(&layer.attn, GpuAttnConfig::GQA { .. }));
         let has_hd512_k4v4_graph_target = graph.kv_format == 9
             && graph.gqa_tile_size > 0
             && graph.gqa_max_tiles > 1
@@ -33282,13 +34730,29 @@ impl GpuDecodeStore {
                 .map(|v| v != "0")
                 .unwrap_or(false);
         graph.graph_gqa_other_clock_enabled = graph.graph_internal_timing
-            && has_hd512_k4v4_graph_target
+            && has_gqa_graph_target
             && (std::env::var("KRASIS_DECODE_GQA_OTHER_CLOCKS")
                 .map(|v| v != "0")
                 .unwrap_or(false)
                 || graph_gqa_hd256_attn_requested);
         graph.graph_gqa_hd256_attn_clock_enabled =
             graph.graph_gqa_other_clock_enabled && graph_gqa_hd256_attn_requested;
+        if graph.graph_internal_timing
+            && (std::env::var_os("KRASIS_DECODE_GQA_OTHER_CLOCKS").is_some()
+                || std::env::var_os("KRASIS_DECODE_GQA_HD256_ATTN_CLOCKS").is_some())
+        {
+            eprintln!(
+                "DECODE GQA CLOCK CONFIG enabled={} hd256={} kv_format={} has_gqa={} tile_size={} max_tiles={} tiled_o={} tiled_lse={}",
+                graph.graph_gqa_other_clock_enabled,
+                graph.graph_gqa_hd256_attn_clock_enabled,
+                graph.kv_format,
+                has_gqa_graph_target,
+                graph.gqa_tile_size,
+                graph.gqa_max_tiles,
+                graph.d_gqa_tiled_o.is_some(),
+                graph.d_gqa_tiled_lse.is_some(),
+            );
+        }
         graph.graph_mixed_segment_clock_enabled = graph.graph_internal_timing
             && (std::env::var("KRASIS_DECODE_MIXED_SEGMENT_CLOCKS")
                 .map(|v| v != "0")
@@ -33298,7 +34762,8 @@ impl GpuDecodeStore {
                 || graph.graph_gqa_other_clock_enabled
                 || graph.graph_moe_route_clock_enabled
                 || graph.graph_moe_w2_clock_enabled
-                || graph.graph_route_prep_clock_enabled);
+                || graph.graph_route_prep_clock_enabled
+                || graph.graph_la_clock_enabled);
         graph.graph_gqa_path_clock_enabled = graph.graph_internal_timing
             && (std::env::var("KRASIS_DECODE_GQA_PATH_CLOCKS")
                 .map(|v| v != "0")
@@ -33364,6 +34829,7 @@ impl GpuDecodeStore {
             graph.graph_moe_w2_active.resize(num_graphs, false);
             graph.graph_route_prep_active.resize(num_graphs, false);
             graph.graph_mamba2_active.resize(num_layers, false);
+            graph.graph_la_active.resize(num_graphs, false);
             graph
                 .graph_gqa_other_meta
                 .resize(num_graphs, GraphGqaOtherMeta::default());
@@ -33439,6 +34905,18 @@ impl GpuDecodeStore {
                 graph.d_graph_gqa_hd256_attn_stats = None;
                 graph.h_graph_gqa_hd256_attn_stats.clear();
             }
+            if graph.graph_la_clock_enabled {
+                let clock_slots = num_graphs * GRAPH_LA_CLOCK_SLOTS;
+                graph.d_graph_la_clocks = Some(
+                    self.device
+                        .alloc_zeros::<u64>(clock_slots)
+                        .map_err(|e| format!("alloc graph linear-attention clocks: {:?}", e))?,
+                );
+                graph.h_graph_la_clocks.resize(clock_slots, 0);
+            } else {
+                graph.d_graph_la_clocks = None;
+                graph.h_graph_la_clocks.clear();
+            }
             if graph.graph_moe_route_clock_enabled {
                 let clock_slots = num_graphs * GRAPH_MOE_ROUTE_CLOCK_SLOTS;
                 graph.d_graph_moe_route_clocks = Some(
@@ -33466,7 +34944,7 @@ impl GpuDecodeStore {
                 graph.h_graph_moe_w2_clocks.clear();
             }
             if graph.graph_route_prep_clock_enabled {
-                let clock_slots = num_graphs * 12;
+                let clock_slots = num_graphs * 14;
                 graph.d_graph_route_prep_clocks = Some(
                     self.device
                         .alloc_zeros::<u64>(clock_slots)
@@ -33564,6 +35042,10 @@ impl GpuDecodeStore {
             graph.graph_mamba2_active.clear();
             graph.d_graph_mamba2_clocks = None;
             graph.h_graph_mamba2_clocks.clear();
+            graph.graph_la_clock_enabled = false;
+            graph.graph_la_active.clear();
+            graph.d_graph_la_clocks = None;
+            graph.h_graph_la_clocks.clear();
             graph.graph_final_clock_enabled = false;
             graph.d_graph_final_clocks = None;
             graph.h_graph_final_clocks.clear();
@@ -34130,21 +35612,31 @@ impl GpuDecodeStore {
         let route_prep_dual_norm_requested = std::env::var("KRASIS_DECODE_ROUTE_PREP_DUAL_NORM")
             .map(|v| v != "0")
             .unwrap_or(false);
-
+        let route_prep_norm_threads = route_prep_rmsnorm_threads(
+            &self.device,
+            hs,
+            env_truthy("KRASIS_DECODE_ROUTE_PREP_WIDE_RMSNORM"),
+        )?;
         let d_pos_ptr = *graph.d_graph_pos.as_ref().unwrap().device_ptr();
         let d_rope_pos_ptr = *graph.d_graph_rope_pos.as_ref().unwrap().device_ptr();
         let d_seq_len_ptr = *graph.d_graph_seq_len.as_ref().unwrap().device_ptr();
         let mixed_segment_clock_active = graph.graph_mixed_segment_clock_enabled
             && expert_layer.is_some()
             && routing_range.is_some()
-            && graph.graph_segment_kinds.get(graph_idx).copied() == Some(GRAPH_SEG_ROUTE_GQA);
+            && matches!(
+                graph.graph_segment_kinds.get(graph_idx).copied(),
+                Some(GRAPH_SEG_ROUTE_GQA) | Some(GRAPH_SEG_ROUTE_LA)
+            );
         let mixed_segment_clock_base = graph_idx * 5;
         let moe_route_clock_active = graph.graph_moe_route_clock_enabled
             && expert_layer.is_some()
             && routing_range.is_some()
-            && graph.graph_segment_kinds.get(graph_idx).copied() == Some(GRAPH_SEG_ROUTE_GQA);
+            && matches!(
+                graph.graph_segment_kinds.get(graph_idx).copied(),
+                Some(GRAPH_SEG_ROUTE_GQA) | Some(GRAPH_SEG_ROUTE_LA)
+            );
         let moe_route_clock_base = graph_idx * GRAPH_MOE_ROUTE_CLOCK_SLOTS;
-        let route_prep_clock_base = graph_idx * 12;
+        let route_prep_clock_base = graph_idx * 14;
         if mixed_segment_clock_active {
             if let Some(active) = graph.graph_mixed_segment_active.get_mut(graph_idx) {
                 *active = true;
@@ -34183,16 +35675,19 @@ impl GpuDecodeStore {
         } else {
             2 * shared_intermediate
         };
+        let w13_n_tiles = (w13_n + 15) / 16;
+        // Single-expert shared path.  Shared and routed weights may have
+        // different bit widths, so consult the format-specific measured
+        // override rather than the routed-expert selector.
+        let w13_ksplits = select_w13_ksplits_for_weights(
+            graph,
+            hs,
+            shared_w13_n,
+            1,
+            graph.shared_expert_bits == 8,
+        );
         let w13_k_tiles = hs / 16;
         let w13_max_ksplits = w13_k_tiles / 16;
-        let w13_n_tiles = (w13_n + 15) / 16;
-        // Single-expert ksplits (shared expert path, no z-dim batching)
-        let w13_ksplits = if w13_max_ksplits > 1 {
-            let target = graph.num_sms * 4;
-            ((target + w13_n_tiles - 1) / w13_n_tiles).clamp(1, w13_max_ksplits.min(8))
-        } else {
-            1
-        };
         // Batched expert ksplits: topk in z-dim already provides block parallelism
         let w13_ksplits_batched = if w13_max_ksplits > 1 {
             let batch_z = graph.max_experts_per_tok.max(1);
@@ -34299,7 +35794,6 @@ impl GpuDecodeStore {
                         ));
                     }
                 }
-
                 // Batched w13 GEMV v2
                 let w13_n_tiles = (w13_n + 15) / 16;
                 let w13_smem = (expert_hs * 2 + 1024 * 4 + 64 * 4 + 16 * 16 * 4) as u32;
@@ -34710,6 +36204,12 @@ impl GpuDecodeStore {
 
                 // Shared expert (if any)
                 if let Some(ref shared_vram) = shared_vram_opt {
+                    let (shared_inv_wp, shared_is_int8) = marlin_dispatch_for_bits(
+                        graph.shared_expert_bits,
+                        *graph.d_inv_weight_perm.device_ptr(),
+                        *graph.d_inv_weight_perm_int8.device_ptr(),
+                    )
+                    .map_err(|e| format!("shared expert layer {}: {}", layer_idx, e))?;
                     let shared_input_ptr = if has_latent {
                         *graph.d_expert_out.device_ptr()
                     } else {
@@ -34776,14 +36276,14 @@ impl GpuDecodeStore {
                             sw13s,
                             shared_input_ptr,
                             partial_ptr,
-                            inv_wp,
+                            shared_inv_wp,
                             inv_sp,
                             hs,
                             shared_w13_n,
                             gs,
                             w13_ksplits,
                             &k,
-                            is_int8,
+                            shared_is_int8,
                         )
                         .map_err(|e| format!("shared w13 v2: {:?}", e))?;
                         if moe_route_clock_active {
@@ -34830,12 +36330,12 @@ impl GpuDecodeStore {
                             sw13s,
                             shared_input_ptr,
                             *graph.d_expert_gate_up.device_ptr(),
-                            inv_wp,
+                            shared_inv_wp,
                             inv_sp,
                             hs,
                             shared_w13_n,
                             gs,
-                            is_int8,
+                            shared_is_int8,
                         )
                         .map_err(|e| format!("shared w13 raw: {:?}", e))?;
                         if moe_route_clock_active {
@@ -34871,23 +36371,56 @@ impl GpuDecodeStore {
                         0
                     };
 
-                    self.launch_fused_silu_accum(
-                        sw2p,
-                        sw2s,
-                        *graph.d_expert_gate_up.device_ptr(),
-                        shared_accum_ptr,
-                        inv_wp,
-                        inv_sp,
+                    if let Some(&w2_ksplits) = graph.shared_w2_ksplit_autotune.get(&(
                         shared_intermediate,
                         hs,
-                        gs,
-                        1.0,
-                        shared_gate_ptr,
-                        moe.shared_swiglu_limit,
-                        &k,
-                        is_int8,
-                    )
-                    .map_err(|e| format!("shared silu_accum: {:?}", e))?;
+                        shared_is_int8,
+                    )) {
+                        self.launch_fused_silu_accum_v2(
+                            sw2p,
+                            sw2s,
+                            *graph.d_expert_gate_up.device_ptr(),
+                            partial_ptr,
+                            shared_inv_wp,
+                            inv_sp,
+                            shared_intermediate,
+                            hs,
+                            gs,
+                            w2_ksplits,
+                            moe.shared_swiglu_limit,
+                            &k,
+                            shared_is_int8,
+                        )
+                        .map_err(|e| format!("shared silu_accum v2: {:?}", e))?;
+                        self.launch_reduce_ksplits_sigmoid_accum(
+                            shared_accum_ptr,
+                            partial_ptr,
+                            hs,
+                            w2_ksplits,
+                            1.0,
+                            shared_gate_ptr,
+                            &k,
+                        )
+                        .map_err(|e| format!("shared W2 reduce: {:?}", e))?;
+                    } else {
+                        self.launch_fused_silu_accum(
+                            sw2p,
+                            sw2s,
+                            *graph.d_expert_gate_up.device_ptr(),
+                            shared_accum_ptr,
+                            shared_inv_wp,
+                            inv_sp,
+                            shared_intermediate,
+                            hs,
+                            gs,
+                            1.0,
+                            shared_gate_ptr,
+                            moe.shared_swiglu_limit,
+                            &k,
+                            shared_is_int8,
+                        )
+                        .map_err(|e| format!("shared silu_accum: {:?}", e))?;
+                    }
                     if moe_route_clock_active {
                         let clocks = graph.d_graph_moe_route_clocks.as_ref().ok_or_else(|| {
                             format!("MoE/route clock buffer missing for graph {}", graph_idx)
@@ -35207,7 +36740,6 @@ impl GpuDecodeStore {
                 let is_gemma4 = matches!(layer.mlp, GpuMlpConfig::Gemma4MoE { .. });
                 let route_prep_clock_active = graph.graph_route_prep_clock_enabled
                     && moe_route_clock_active
-                    && is_gemma4
                     && layer_idx == range_end;
 
                 // Pre-attention norm
@@ -35227,7 +36759,7 @@ impl GpuDecodeStore {
                 }
                 {
                     let smem = (hs as u32) * 4;
-                    let threads = 256u32.min(hs as u32);
+                    let threads = route_prep_norm_threads;
                     if is_gemma4 {
                         unsafe {
                             let err = cuda_sys::lib().cuMemcpyDtoDAsync_v2(
@@ -35346,6 +36878,59 @@ impl GpuDecodeStore {
                         let kd = *kernel_dim;
                         let key_dim = nk_ * dk_;
 
+                        let la_clock_active = graph.graph_la_clock_enabled
+                            && layer_idx == range_end
+                            && graph.graph_segment_kinds.get(graph_idx).copied()
+                                == Some(GRAPH_SEG_ROUTE_LA);
+                        let la_clock_base = graph_idx * GRAPH_LA_CLOCK_SLOTS;
+                        if la_clock_active {
+                            if let Some(active) = graph.graph_la_active.get_mut(graph_idx) {
+                                *active = true;
+                            }
+                            let clocks = graph.d_graph_la_clocks.as_ref().ok_or_else(|| {
+                                format!(
+                                    "linear-attention clock buffer missing for graph {}",
+                                    graph_idx
+                                )
+                            })?;
+                            launch_graph_clock_marker(
+                                &k,
+                                clocks,
+                                la_clock_base,
+                                "la-input-projection-start",
+                            )?;
+                        }
+                        if mixed_segment_clock_active && layer_idx == range_end {
+                            let clocks =
+                                graph.d_graph_mixed_segment_clocks.as_ref().ok_or_else(|| {
+                                    format!(
+                                        "mixed segment clock buffer missing for graph {}",
+                                        graph_idx
+                                    )
+                                })?;
+                            launch_graph_clock_marker(
+                                &k,
+                                clocks,
+                                mixed_segment_clock_base + 2,
+                                "mixed-la-start",
+                            )?;
+                        }
+                        if moe_route_clock_active && layer_idx == range_end {
+                            let clocks =
+                                graph.d_graph_moe_route_clocks.as_ref().ok_or_else(|| {
+                                    format!(
+                                        "MoE/route clock buffer missing for graph {}",
+                                        graph_idx
+                                    )
+                                })?;
+                            launch_graph_clock_marker(
+                                &k,
+                                clocks,
+                                moe_route_clock_base + 7,
+                                "moe-route-la-start",
+                            )?;
+                        }
+
                         // LA projections (cuBLAS)
                         if let Some(hqq_exec) = hqq_la_exec.as_ref() {
                             self.launch_hqq_decode_gemv_f32(
@@ -35372,6 +36957,20 @@ impl GpuDecodeStore {
                                 ba_w,
                                 *graph.d_hidden.device_ptr(),
                                 *graph.d_la_ba.device_ptr(),
+                            )?;
+                        }
+                        if la_clock_active {
+                            let clocks = graph.d_graph_la_clocks.as_ref().ok_or_else(|| {
+                                format!(
+                                    "linear-attention clock buffer missing for graph {}",
+                                    graph_idx
+                                )
+                            })?;
+                            launch_graph_clock_marker(
+                                &k,
+                                clocks,
+                                la_clock_base + 1,
+                                "la-input-projection-end",
                             )?;
                         }
 
@@ -35418,6 +37017,20 @@ impl GpuDecodeStore {
                                 );
                             }
                         }
+                        if la_clock_active {
+                            let clocks = graph.d_graph_la_clocks.as_ref().ok_or_else(|| {
+                                format!(
+                                    "linear-attention clock buffer missing for graph {}",
+                                    graph_idx
+                                )
+                            })?;
+                            launch_graph_clock_marker(
+                                &k,
+                                clocks,
+                                la_clock_base + 2,
+                                "la-uninterleave-copy-end",
+                            )?;
+                        }
 
                         // Conv1d (with SiLU)
                         {
@@ -35443,6 +37056,20 @@ impl GpuDecodeStore {
                                     )
                                     .map_err(|e| format!("la_conv1d[{}]: {:?}", layer_idx, e))?;
                             }
+                        }
+                        if la_clock_active {
+                            let clocks = graph.d_graph_la_clocks.as_ref().ok_or_else(|| {
+                                format!(
+                                    "linear-attention clock buffer missing for graph {}",
+                                    graph_idx
+                                )
+                            })?;
+                            launch_graph_clock_marker(
+                                &k,
+                                clocks,
+                                la_clock_base + 3,
+                                "la-conv-end",
+                            )?;
                         }
 
                         // Gate and beta from BA
@@ -35478,6 +37105,20 @@ impl GpuDecodeStore {
                                         format!("compute_gate_beta[{}]: {:?}", layer_idx, e)
                                     })?;
                             }
+                        }
+                        if la_clock_active {
+                            let clocks = graph.d_graph_la_clocks.as_ref().ok_or_else(|| {
+                                format!(
+                                    "linear-attention clock buffer missing for graph {}",
+                                    graph_idx
+                                )
+                            })?;
+                            launch_graph_clock_marker(
+                                &k,
+                                clocks,
+                                la_clock_base + 4,
+                                "la-gate-beta-end",
+                            )?;
                         }
 
                         // Fused: repeat-interleave + l2norm + delta_net + rmsnorm → BF16
@@ -35522,6 +37163,20 @@ impl GpuDecodeStore {
                                     })?;
                             }
                         }
+                        if la_clock_active {
+                            let clocks = graph.d_graph_la_clocks.as_ref().ok_or_else(|| {
+                                format!(
+                                    "linear-attention clock buffer missing for graph {}",
+                                    graph_idx
+                                )
+                            })?;
+                            launch_graph_clock_marker(
+                                &k,
+                                clocks,
+                                la_clock_base + 5,
+                                "la-state-norm-end",
+                            )?;
+                        }
 
                         // Output projection
                         if let Some(hqq_exec) = hqq_la_exec.as_ref() {
@@ -35542,6 +37197,50 @@ impl GpuDecodeStore {
                                 o_w,
                                 *graph.d_scratch.device_ptr(),
                                 *graph.d_hidden.device_ptr(),
+                            )?;
+                        }
+                        if la_clock_active {
+                            let clocks = graph.d_graph_la_clocks.as_ref().ok_or_else(|| {
+                                format!(
+                                    "linear-attention clock buffer missing for graph {}",
+                                    graph_idx
+                                )
+                            })?;
+                            launch_graph_clock_marker(
+                                &k,
+                                clocks,
+                                la_clock_base + 6,
+                                "la-output-projection-end",
+                            )?;
+                        }
+                        if mixed_segment_clock_active && layer_idx == range_end {
+                            let clocks =
+                                graph.d_graph_mixed_segment_clocks.as_ref().ok_or_else(|| {
+                                    format!(
+                                        "mixed segment clock buffer missing for graph {}",
+                                        graph_idx
+                                    )
+                                })?;
+                            launch_graph_clock_marker(
+                                &k,
+                                clocks,
+                                mixed_segment_clock_base + 3,
+                                "mixed-la-end",
+                            )?;
+                        }
+                        if moe_route_clock_active && layer_idx == range_end {
+                            let clocks =
+                                graph.d_graph_moe_route_clocks.as_ref().ok_or_else(|| {
+                                    format!(
+                                        "MoE/route clock buffer missing for graph {}",
+                                        graph_idx
+                                    )
+                                })?;
+                            launch_graph_clock_marker(
+                                &k,
+                                clocks,
+                                moe_route_clock_base + 8,
+                                "moe-route-la-end",
                             )?;
                         }
                     }
@@ -35621,12 +37320,7 @@ impl GpuDecodeStore {
                                 && graph.graph_segment_kinds.get(graph_idx).copied()
                                     == Some(GRAPH_SEG_ROUTE_GQA)
                                 && layer_idx == range_end
-                                && graph.kv_format == 9
-                                && hd == 512
-                                && graph.gqa_tile_size > 0
-                                && graph.gqa_max_tiles > 1
-                                && graph.d_gqa_tiled_o.is_some()
-                                && graph.d_gqa_tiled_lse.is_some();
+                                && graph.kv_format == 9;
                             let gqa_path_clock_base = graph_idx * 7;
                             let hqq_gqa_exec = match &layer.hqq_exec {
                                 Some(HqqExecutionDescriptor::Gqa(desc))
@@ -35678,15 +37372,11 @@ impl GpuDecodeStore {
                                     == Some(GRAPH_SEG_ROUTE_GQA)
                                 && layer_idx == range_end
                                 && graph.kv_format == 9
-                                && graph.gqa_tile_size > 0
-                                && graph.gqa_max_tiles > 1
-                                && graph.d_gqa_tiled_o.is_some()
-                                && graph.d_gqa_tiled_lse.is_some()
                                 && !gqa_path_clock_active;
                             let gqa_other_clock_base = graph_idx * GRAPH_GQA_OTHER_CLOCK_SLOTS;
                             let gqa_hd256_attn_clock_active = graph
                                 .graph_gqa_hd256_attn_clock_enabled
-                                && gqa_other_clock_active
+                                && (gqa_other_clock_active || gqa_path_clock_active)
                                 && hd != 512;
                             if gqa_path_clock_active {
                                 if let Some(active) = graph.graph_gqa_path_active.get_mut(graph_idx)
@@ -38335,7 +40025,7 @@ impl GpuDecodeStore {
                     }
                     {
                         let smem = (hs as u32) * 4;
-                        let threads = 256u32.min(hs as u32);
+                        let threads = route_prep_norm_threads;
                         if is_gemma4 {
                             unsafe {
                                 k.rmsnorm
@@ -38414,6 +40104,29 @@ impl GpuDecodeStore {
                             "route-prep-post-gqa-norm-end",
                         )?;
                     }
+                }
+
+                // Timing-only calibration for the fixed scheduling cost between
+                // adjacent graph clock-marker nodes. Tiny one-block kernels such
+                // as RMSNorm are otherwise overstated by a material fraction.
+                // Keep this pair consecutive so its interval contains no model
+                // work; report code subtracts it from the pre/post norm spans.
+                if route_prep_clock_active {
+                    let clocks = graph.d_graph_route_prep_clocks.as_ref().ok_or_else(|| {
+                        format!("route-prep clock buffer missing for graph {}", graph_idx)
+                    })?;
+                    launch_graph_clock_marker(
+                        &k,
+                        clocks,
+                        route_prep_clock_base + 12,
+                        "route-prep-empty-marker-start",
+                    )?;
+                    launch_graph_clock_marker(
+                        &k,
+                        clocks,
+                        route_prep_clock_base + 13,
+                        "route-prep-empty-marker-end",
+                    )?;
                 }
 
                 // Dense MLP (for non-MoE layers in the routing range)
@@ -38793,9 +40506,17 @@ impl GpuDecodeStore {
                     };
                     {
                         let parallel_topk_enabled = graph.parallel_topk_enabled_for_moe(moe);
-                        if parallel_topk_enabled && sf != 1 {
+                        let parallel_topk_selection_enabled =
+                            graph.parallel_topk_selection_enabled_for_moe(moe);
+                        if graph.parallel_topk_selection_enabled && sf != 0 {
                             return Err(format!(
-                                "KRASIS_DECODE_PARALLEL_TOPK=1 only supports sigmoid routing; layer {} uses scoring_func={}",
+                                "KRASIS_DECODE_PARALLEL_TOPK_SELECTION=1 requires softmax routing; layer {} uses scoring_func={}",
+                                layer_idx, sf
+                            ));
+                        }
+                        if parallel_topk_enabled && sf > 1 {
+                            return Err(format!(
+                                "KRASIS_DECODE_PARALLEL_TOPK=1 supports softmax or sigmoid routing; layer {} uses scoring_func={}",
                                 layer_idx, sf
                             ));
                         }
@@ -38805,13 +40526,16 @@ impl GpuDecodeStore {
                                 layer_idx, ne
                             ));
                         }
-                        let smem = if parallel_topk_enabled && sf == 1 {
+                        let topk_threads = ne.min(256).max(1) as u32;
+                        let smem = if parallel_topk_selection_enabled {
+                            (ne as u32 + topk_threads * 2) * 4
+                        } else if parallel_topk_enabled && sf == 1 {
                             (ne as u32) * 8
                         } else {
                             (ne as u32) * 4
                         };
-                        let topk_block_dim = if parallel_topk_enabled && sf == 1 {
-                            (ne.min(256).max(1) as u32, 1, 1)
+                        let topk_block_dim = if parallel_topk_enabled {
+                            (topk_threads, 1, 1)
                         } else {
                             (1, 1, 1)
                         };
@@ -38876,20 +40600,39 @@ impl GpuDecodeStore {
                         } else {
                             let norm_flag = if moe.norm_topk_prob { 1i32 } else { 0i32 };
                             unsafe {
-                                k.softmax_topk
-                                    .clone()
-                                    .launch(
-                                        cfg,
-                                        (
-                                            logits_ptr,
-                                            topk_ids_dptr,
-                                            topk_wts_dptr,
-                                            ne as i32,
-                                            topk as i32,
-                                            norm_flag,
-                                        ),
-                                    )
-                                    .map_err(|e| format!("softmax_topk[{}]: {:?}", layer_idx, e))?;
+                                let args = (
+                                    logits_ptr,
+                                    topk_ids_dptr,
+                                    topk_wts_dptr,
+                                    ne as i32,
+                                    topk as i32,
+                                    norm_flag,
+                                );
+                                if parallel_topk_selection_enabled {
+                                    k.softmax_topk_parallel_selection
+                                        .clone()
+                                        .launch(cfg, args)
+                                        .map_err(|e| {
+                                            format!(
+                                                "softmax_topk_parallel_selection[{}]: {:?}",
+                                                layer_idx, e
+                                            )
+                                        })?;
+                                } else if parallel_topk_enabled {
+                                    k.softmax_topk_parallel_scores
+                                        .clone()
+                                        .launch(cfg, args)
+                                        .map_err(|e| {
+                                            format!(
+                                                "softmax_topk_parallel_scores[{}]: {:?}",
+                                                layer_idx, e
+                                            )
+                                        })?;
+                                } else {
+                                    k.softmax_topk.clone().launch(cfg, args).map_err(|e| {
+                                        format!("softmax_topk[{}]: {:?}", layer_idx, e)
+                                    })?;
+                                }
                             }
                         }
                     }
@@ -39412,10 +41155,9 @@ impl GpuDecodeStore {
         if spec_topk == 0 {
             return Ok(0);
         }
-        if graph.parallel_topk_enabled {
+        if graph.parallel_topk_enabled || graph.parallel_topk_selection_enabled {
             return Err(
-                "KRASIS_DECODE_PARALLEL_TOPK=1 does not support APFL speculative routing"
-                    .to_string(),
+                "parallel decode top-k does not support APFL speculative routing".to_string(),
             );
         }
         let hs = graph.hidden_size;
@@ -40516,6 +42258,7 @@ impl GpuDecodeStore {
                 accumulate_moe_w2_clocks(graph)?;
                 accumulate_route_prep_clocks(graph)?;
                 accumulate_mamba2_graph_clocks(graph)?;
+                accumulate_la_graph_clocks(graph)?;
                 accumulate_gqa_path_clocks(graph)?;
                 accumulate_gqa_boundary_clocks(graph)?;
                 accumulate_gqa_coverage_clocks(graph)?;
@@ -42478,6 +44221,7 @@ impl GpuDecodeStore {
                 accumulate_moe_w2_clocks(graph)?;
                 accumulate_route_prep_clocks(graph)?;
                 accumulate_mamba2_graph_clocks(graph)?;
+                accumulate_la_graph_clocks(graph)?;
                 accumulate_gqa_path_clocks(graph)?;
                 accumulate_gqa_boundary_clocks(graph)?;
                 accumulate_gqa_coverage_clocks(graph)?;
@@ -51584,9 +53328,17 @@ impl GpuDecodeStore {
             // TopK → per-token topk buffer on GPU
             {
                 let parallel_topk_enabled = graph.parallel_topk_enabled_for_moe(moe);
-                if parallel_topk_enabled && sf != 1 {
+                let parallel_topk_selection_enabled =
+                    graph.parallel_topk_selection_enabled_for_moe(moe);
+                if graph.parallel_topk_selection_enabled && sf != 0 {
                     return Err(format!(
-                        "KRASIS_DECODE_PARALLEL_TOPK=1 only supports sigmoid routing; layer {} uses scoring_func={}",
+                        "KRASIS_DECODE_PARALLEL_TOPK_SELECTION=1 requires softmax routing; layer {} uses scoring_func={}",
+                        layer_idx, sf
+                    ));
+                }
+                if parallel_topk_enabled && sf > 1 {
+                    return Err(format!(
+                        "KRASIS_DECODE_PARALLEL_TOPK=1 supports softmax or sigmoid routing; layer {} uses scoring_func={}",
                         layer_idx, sf
                     ));
                 }
@@ -51596,13 +53348,16 @@ impl GpuDecodeStore {
                         layer_idx, ne
                     ));
                 }
-                let smem = if parallel_topk_enabled && sf == 1 {
+                let topk_threads = ne.min(256).max(1) as u32;
+                let smem = if parallel_topk_selection_enabled {
+                    (ne as u32 + topk_threads * 2) * 4
+                } else if parallel_topk_enabled && sf == 1 {
                     (ne as u32) * 8
                 } else {
                     (ne as u32) * 4
                 };
-                let topk_block_dim = if parallel_topk_enabled && sf == 1 {
-                    (ne.min(256).max(1) as u32, 1, 1)
+                let topk_block_dim = if parallel_topk_enabled {
+                    (topk_threads, 1, 1)
                 } else {
                     (1, 1, 1)
                 };
@@ -51666,22 +53421,39 @@ impl GpuDecodeStore {
                     }
                 } else {
                     unsafe {
-                        k.softmax_topk
-                            .clone()
-                            .launch(
-                                cfg,
-                                (
-                                    logits_ptr,
-                                    tk_ids_ptr,
-                                    tk_wts_ptr,
-                                    ne as i32,
-                                    topk as i32,
-                                    if moe.norm_topk_prob { 1i32 } else { 0i32 },
-                                ),
-                            )
-                            .map_err(|e| {
+                        let args = (
+                            logits_ptr,
+                            tk_ids_ptr,
+                            tk_wts_ptr,
+                            ne as i32,
+                            topk as i32,
+                            if moe.norm_topk_prob { 1i32 } else { 0i32 },
+                        );
+                        if parallel_topk_selection_enabled {
+                            k.softmax_topk_parallel_selection
+                                .clone()
+                                .launch(cfg, args)
+                                .map_err(|e| {
+                                    format!(
+                                        "batch softmax_topk_parallel_selection[{}][{}]: {:?}",
+                                        layer_idx, t, e
+                                    )
+                                })?;
+                        } else if parallel_topk_enabled {
+                            k.softmax_topk_parallel_scores
+                                .clone()
+                                .launch(cfg, args)
+                                .map_err(|e| {
+                                    format!(
+                                        "batch softmax_topk_parallel_scores[{}][{}]: {:?}",
+                                        layer_idx, t, e
+                                    )
+                                })?;
+                        } else {
+                            k.softmax_topk.clone().launch(cfg, args).map_err(|e| {
                                 format!("batch softmax_topk[{}][{}]: {:?}", layer_idx, t, e)
                             })?;
+                        }
                     }
                 }
             }
@@ -52041,6 +53813,12 @@ impl GpuDecodeStore {
 
         // ── Step 5: Shared expert for each token ──
         if shared_expert_present {
+            let (shared_inv_wp, shared_is_int8) = marlin_dispatch_for_bits(
+                graph.shared_expert_bits,
+                *graph.d_inv_weight_perm.device_ptr(),
+                *graph.d_inv_weight_perm_int8.device_ptr(),
+            )
+            .map_err(|e| format!("batch shared expert layer {}: {}", layer_idx, e))?;
             let se_vram = graph
                 .shared_expert_vram
                 .get(layer_idx)
@@ -52084,12 +53862,12 @@ impl GpuDecodeStore {
                     w13s,
                     hidden_ptr,
                     *graph.d_expert_gate_up.device_ptr(),
-                    inv_wp,
+                    shared_inv_wp,
                     inv_sp,
                     hs,
                     shared_w13_n,
                     gs,
-                    is_int8,
+                    shared_is_int8,
                 )
                 .map_err(|e| format!("{}", e))?;
 
@@ -52130,7 +53908,7 @@ impl GpuDecodeStore {
                     w2s,
                     *graph.d_expert_gate_up.device_ptr(),
                     accum_ptr,
-                    inv_wp,
+                    shared_inv_wp,
                     inv_sp,
                     graph.shared_expert_intermediate_size,
                     hs,
@@ -52139,7 +53917,7 @@ impl GpuDecodeStore {
                     gate_weight_ptr,
                     moe.shared_swiglu_limit,
                     k,
-                    is_int8,
+                    shared_is_int8,
                 )
                 .map_err(|e| format!("{}", e))?;
             }
@@ -55257,6 +57035,7 @@ impl GpuDecodeStore {
                 g.t_graph_route_prep_dense_down = 0.0;
                 g.t_graph_route_prep_dense_post_norms = 0.0;
                 g.t_graph_route_prep_router_input_norm = 0.0;
+                g.t_graph_route_prep_empty_marker_span = 0.0;
                 g.t_graph_mamba2_in_proj = 0.0;
                 g.t_graph_mamba2_to_fp32 = 0.0;
                 g.t_graph_mamba2_conv = 0.0;
@@ -55264,6 +57043,12 @@ impl GpuDecodeStore {
                 g.t_graph_mamba2_ssm = 0.0;
                 g.t_graph_mamba2_gate = 0.0;
                 g.t_graph_mamba2_out_proj = 0.0;
+                g.t_graph_la_projection = 0.0;
+                g.t_graph_la_uninterleave_copy = 0.0;
+                g.t_graph_la_conv = 0.0;
+                g.t_graph_la_gate_beta = 0.0;
+                g.t_graph_la_state_norm = 0.0;
+                g.t_graph_la_out_projection = 0.0;
                 for total in &mut g.graph_gqa_other_totals {
                     *total = GraphGqaOtherClockTotals::default();
                 }
@@ -56773,29 +58558,45 @@ impl GpuDecodeStore {
                                 let gqa_ms_tok = graph.t_graph_mixed_gqa_proj_attn / n * 1000.0;
                                 let route_ms_tok = graph.t_graph_mixed_route_topk / n * 1000.0;
                                 let marked_ms_tok = moe_ms_tok + gqa_ms_tok + route_ms_tok;
-                                let gqa_route_ms_tok =
-                                    kind_sum[GRAPH_SEG_ROUTE_GQA as usize] / n * 1000.0;
-                                let segment_residual_ms_tok = gqa_route_ms_tok - marked_ms_tok;
-                                let gqa_sync_wait_ms_tok = graph
-                                    .graph_segment_sync_wait
+                                let active_route_ms_tok = graph
+                                    .graph_segment_elapsed
                                     .iter()
                                     .enumerate()
                                     .filter(|(idx, _)| {
-                                        graph.graph_segment_kinds.get(*idx).copied()
-                                            == Some(GRAPH_SEG_ROUTE_GQA)
+                                        graph
+                                            .graph_mixed_segment_active
+                                            .get(*idx)
+                                            .copied()
+                                            .unwrap_or(false)
                                     })
                                     .map(|(_, seconds)| *seconds)
                                     .sum::<f64>()
                                     / n
                                     * 1000.0;
-                                eprintln!("  \x1b[36m│\x1b[0m  Mixed experts+GQA segment split:          \x1b[36m│\x1b[0m");
+                                let segment_residual_ms_tok = active_route_ms_tok - marked_ms_tok;
+                                let active_sync_wait_ms_tok = graph
+                                    .graph_segment_sync_wait
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(idx, _)| {
+                                        graph
+                                            .graph_mixed_segment_active
+                                            .get(*idx)
+                                            .copied()
+                                            .unwrap_or(false)
+                                    })
+                                    .map(|(_, seconds)| *seconds)
+                                    .sum::<f64>()
+                                    / n
+                                    * 1000.0;
+                                eprintln!("  \x1b[36m│\x1b[0m  Mixed experts+attention segment split:    \x1b[36m│\x1b[0m");
                                 eprintln!(
                                     "  \x1b[36m│\x1b[0m    MoE expert:{:6.2} ms/tok ({:4.2} ms/seg) \x1b[36m│\x1b[0m",
                                     moe_ms_tok,
                                     moe_ms_tok / mixed_count as f64,
                                 );
                                 eprintln!(
-                                    "  \x1b[36m│\x1b[0m    GQA path:  {:6.2} ms/tok ({:4.2} ms/seg) \x1b[36m│\x1b[0m",
+                                    "  \x1b[36m│\x1b[0m    Attention: {:6.2} ms/tok ({:4.2} ms/seg) \x1b[36m│\x1b[0m",
                                     gqa_ms_tok,
                                     gqa_ms_tok / mixed_count as f64,
                                 );
@@ -56810,19 +58611,19 @@ impl GpuDecodeStore {
                                     segment_residual_ms_tok,
                                 );
                                 eprintln!(
-                                    "  \x1b[36m│\x1b[0m    GQA-sync:  {:6.2} | final-sync:{:6.2} \x1b[36m│\x1b[0m",
-                                    gqa_sync_wait_ms_tok,
+                                    "  \x1b[36m│\x1b[0m    Active-sync:{:6.2} | final-sync:{:6.2} \x1b[36m│\x1b[0m",
+                                    active_sync_wait_ms_tok,
                                     avg_sync_final,
                                 );
                                 log::info!(
-                                    "DECODE GRAPH MIXED SEGMENT avg_ms_per_tok moe_expert={:.3} gqa_proj_attn={:.3} route_topk={:.3} marked_total={:.3} gqa_route={:.3} segment_residual={:.3} gqa_sync_wait={:.3} final_sync_wait={:.3} active_segments={}",
+                                    "DECODE GRAPH MIXED SEGMENT avg_ms_per_tok moe_expert={:.3} attention_path={:.3} route_topk={:.3} marked_total={:.3} active_route={:.3} segment_residual={:.3} active_sync_wait={:.3} final_sync_wait={:.3} active_segments={}",
                                     moe_ms_tok,
                                     gqa_ms_tok,
                                     route_ms_tok,
                                     marked_ms_tok,
-                                    gqa_route_ms_tok,
+                                    active_route_ms_tok,
                                     segment_residual_ms_tok,
-                                    gqa_sync_wait_ms_tok,
+                                    active_sync_wait_ms_tok,
                                     avg_sync_final,
                                     mixed_count,
                                 );
@@ -56883,6 +58684,63 @@ impl GpuDecodeStore {
                                     total_ms_tok / mamba2_count as f64,
                                     graph_residual_ms_tok,
                                     mamba2_count,
+                                );
+                            }
+                            let la_count = graph
+                                .graph_la_active
+                                .iter()
+                                .filter(|&&active| active)
+                                .count();
+                            if graph.graph_la_clock_enabled && la_count > 0 {
+                                let projection_ms_tok = graph.t_graph_la_projection / n * 1000.0;
+                                let uninterleave_copy_ms_tok =
+                                    graph.t_graph_la_uninterleave_copy / n * 1000.0;
+                                let conv_ms_tok = graph.t_graph_la_conv / n * 1000.0;
+                                let gate_beta_ms_tok = graph.t_graph_la_gate_beta / n * 1000.0;
+                                let state_norm_ms_tok = graph.t_graph_la_state_norm / n * 1000.0;
+                                let out_projection_ms_tok =
+                                    graph.t_graph_la_out_projection / n * 1000.0;
+                                let total_ms_tok = projection_ms_tok
+                                    + uninterleave_copy_ms_tok
+                                    + conv_ms_tok
+                                    + gate_beta_ms_tok
+                                    + state_norm_ms_tok
+                                    + out_projection_ms_tok;
+                                let la_route_ms_tok =
+                                    kind_sum[GRAPH_SEG_ROUTE_LA as usize] / n * 1000.0;
+                                let segment_residual_ms_tok = la_route_ms_tok - total_ms_tok;
+                                eprintln!("  \x1b[36m│\x1b[0m  Linear-attention graph split:           \x1b[36m│\x1b[0m");
+                                eprintln!(
+                                    "  \x1b[36m│\x1b[0m    Proj:{:6.2} unpack/copy:{:5.2} conv:{:5.2} \x1b[36m│\x1b[0m",
+                                    projection_ms_tok,
+                                    uninterleave_copy_ms_tok,
+                                    conv_ms_tok,
+                                );
+                                eprintln!(
+                                    "  \x1b[36m│\x1b[0m    Gate/beta:{:5.2} state/norm:{:5.2} out:{:5.2} \x1b[36m│\x1b[0m",
+                                    gate_beta_ms_tok,
+                                    state_norm_ms_tok,
+                                    out_projection_ms_tok,
+                                );
+                                eprintln!(
+                                    "  \x1b[36m│\x1b[0m    Total:{:6.2} avg/layer:{:5.3} route residual:{:5.2} \x1b[36m│\x1b[0m",
+                                    total_ms_tok,
+                                    total_ms_tok / la_count as f64,
+                                    segment_residual_ms_tok,
+                                );
+                                log::info!(
+                                    "DECODE GRAPH LA SPLIT avg_ms_per_tok projection={:.3} uninterleave_copy={:.3} conv={:.3} gate_beta={:.3} state_norm={:.3} out_projection={:.3} total={:.3} avg_per_layer={:.3} la_route={:.3} segment_residual={:.3} active_layers={}",
+                                    projection_ms_tok,
+                                    uninterleave_copy_ms_tok,
+                                    conv_ms_tok,
+                                    gate_beta_ms_tok,
+                                    state_norm_ms_tok,
+                                    out_projection_ms_tok,
+                                    total_ms_tok,
+                                    total_ms_tok / la_count as f64,
+                                    la_route_ms_tok,
+                                    segment_residual_ms_tok,
+                                    la_count,
                                 );
                             }
                             let moe_route_count = graph
@@ -57170,10 +59028,18 @@ impl GpuDecodeStore {
                                 if graph.graph_route_prep_clock_enabled
                                     && route_prep_split_count > 0
                                 {
-                                    let pre_gqa_norm_ms_tok =
+                                    let pre_gqa_norm_raw_ms_tok =
                                         graph.t_graph_route_prep_pre_gqa_norm / n * 1000.0;
-                                    let post_gqa_norm_add_ms_tok =
+                                    let post_gqa_norm_add_raw_ms_tok =
                                         graph.t_graph_route_prep_post_gqa_norm_add / n * 1000.0;
+                                    let empty_marker_span_ms_tok =
+                                        graph.t_graph_route_prep_empty_marker_span / n * 1000.0;
+                                    let pre_gqa_norm_ms_tok = (pre_gqa_norm_raw_ms_tok
+                                        - empty_marker_span_ms_tok)
+                                        .max(0.0);
+                                    let post_gqa_norm_add_ms_tok = (post_gqa_norm_add_raw_ms_tok
+                                        - empty_marker_span_ms_tok)
+                                        .max(0.0);
                                     let dense_pre_norm_ms_tok =
                                         graph.t_graph_route_prep_dense_pre_norm / n * 1000.0;
                                     let dense_gate_ms_tok =
@@ -57200,11 +59066,17 @@ impl GpuDecodeStore {
                                     let route_prep_remaining_ms_tok =
                                         route_prep_overhead_ms_tok - route_prep_named_ms_tok;
 
-                                    eprintln!("  \x1b[36m│\x1b[0m  Gemma route-prep split:                  \x1b[36m│\x1b[0m");
+                                    eprintln!("  \x1b[36m│\x1b[0m  Route-prep split:                        \x1b[36m│\x1b[0m");
                                     eprintln!(
                                         "  \x1b[36m│\x1b[0m    Pre-GQA norm:{:5.2} post-GQA norm/add:{:5.2} \x1b[36m│\x1b[0m",
                                         pre_gqa_norm_ms_tok,
                                         post_gqa_norm_add_ms_tok,
+                                    );
+                                    eprintln!(
+                                        "  \x1b[36m│\x1b[0m    Raw norms:{:5.2}/{:5.2} empty-marker:{:5.2} \x1b[36m│\x1b[0m",
+                                        pre_gqa_norm_raw_ms_tok,
+                                        post_gqa_norm_add_raw_ms_tok,
+                                        empty_marker_span_ms_tok,
                                     );
                                     eprintln!(
                                         "  \x1b[36m│\x1b[0m    Dense pre:{:5.2} gate:{:5.2} up:{:5.2} act:{:5.2} down:{:5.2} \x1b[36m│\x1b[0m",
@@ -57221,10 +59093,13 @@ impl GpuDecodeStore {
                                         route_prep_remaining_ms_tok,
                                     );
                                     log::info!(
-                                        "DECODE GRAPH ROUTE PREP SPLIT avg_ms_per_tok total={:.3} pre_gqa_norm_residual={:.3} post_gqa_norm_add={:.3} dense_pre_norm={:.3} dense_gate={:.3} dense_up={:.3} dense_activation={:.3} dense_down={:.3} dense_post_norms={:.3} router_input_norm={:.3} named_total={:.3} remaining_overhead={:.3} route_pre_gqa_prep={:.3} route_post_gqa_prep={:.3} route_tail={:.3} route_residual={:.3} active_segments={}",
+                                        "DECODE GRAPH ROUTE PREP SPLIT avg_ms_per_tok total={:.3} pre_gqa_norm_residual={:.3} post_gqa_norm_add={:.3} pre_gqa_norm_raw={:.3} post_gqa_norm_raw={:.3} empty_marker_span={:.3} dense_pre_norm={:.3} dense_gate={:.3} dense_up={:.3} dense_activation={:.3} dense_down={:.3} dense_post_norms={:.3} router_input_norm={:.3} named_total={:.3} remaining_overhead={:.3} route_pre_gqa_prep={:.3} route_post_gqa_prep={:.3} route_tail={:.3} route_residual={:.3} active_segments={}",
                                         route_prep_overhead_ms_tok,
                                         pre_gqa_norm_ms_tok,
                                         post_gqa_norm_add_ms_tok,
+                                        pre_gqa_norm_raw_ms_tok,
+                                        post_gqa_norm_add_raw_ms_tok,
+                                        empty_marker_span_ms_tok,
                                         dense_pre_norm_ms_tok,
                                         dense_gate_ms_tok,
                                         dense_up_ms_tok,
@@ -57273,7 +59148,7 @@ impl GpuDecodeStore {
                                         marked_ms_tok
                                     };
                                 let residual_ms_tok = gqa_path_ms_tok - marked_ms_tok;
-                                eprintln!("  \x1b[36m│\x1b[0m  HD512 k4v4 GQA path split:               \x1b[36m│\x1b[0m");
+                                eprintln!("  \x1b[36m│\x1b[0m  k4v4 GQA path split:                     \x1b[36m│\x1b[0m");
                                 eprintln!(
                                     "  \x1b[36m│\x1b[0m    Projection:{:6.2} ms/tok ({:4.2} ms/seg) \x1b[36m│\x1b[0m",
                                     projection_ms_tok,
@@ -57951,6 +59826,112 @@ impl GpuDecodeStore {
                         graph.t_graph_segment_final / n * 1000.0,
                         final_sync_ms_tok,
                         graph.graph_final_softcap_gpu_enabled,
+                    );
+                }
+                if graph.graph_internal_timing {
+                    let mut routed_w13_bytes = 0usize;
+                    let mut routed_w2_bytes = 0usize;
+                    let mut shared_expert_bytes = 0usize;
+                    let mut router_bytes = 0usize;
+                    for moe in graph.moe_layers.iter().flatten() {
+                        if let Some(expert) = moe.experts.first() {
+                            routed_w13_bytes = routed_w13_bytes.saturating_add(
+                                (expert.w13_packed_bytes + expert.w13_scales_bytes)
+                                    .saturating_mul(moe.topk),
+                            );
+                            routed_w2_bytes = routed_w2_bytes.saturating_add(
+                                (expert.w2_packed_bytes + expert.w2_scales_bytes)
+                                    .saturating_mul(moe.topk),
+                            );
+                        }
+                        if let Some(shared) = moe.shared.as_ref() {
+                            shared_expert_bytes = shared_expert_bytes.saturating_add(
+                                shared
+                                    .w13_packed_bytes
+                                    .saturating_add(shared.w13_scales_bytes)
+                                    .saturating_add(shared.w2_packed_bytes)
+                                    .saturating_add(shared.w2_scales_bytes),
+                            );
+                        }
+                        if let Some(weight) = graph.weights.get(moe.gate_wid) {
+                            router_bytes = router_bytes.saturating_add(weight.stored_bytes());
+                        }
+                    }
+
+                    let mut la_input_bytes = 0usize;
+                    let mut la_output_bytes = 0usize;
+                    let mut la_state_rw_bytes = 0usize;
+                    let mut gqa_input_bytes = 0usize;
+                    let mut gqa_output_bytes = 0usize;
+                    for layer in &graph.layers {
+                        match layer.hqq_exec.as_ref() {
+                            Some(HqqExecutionDescriptor::LinearAttention(desc)) => {
+                                la_input_bytes = la_input_bytes
+                                    .saturating_add(hqq_exec_storage_bytes(&desc.in_proj_qkvz))
+                                    .saturating_add(hqq_exec_storage_bytes(&desc.in_proj_ba));
+                                la_output_bytes = la_output_bytes
+                                    .saturating_add(hqq_exec_storage_bytes(&desc.out_proj));
+                                la_state_rw_bytes = la_state_rw_bytes.saturating_add(
+                                    desc.num_v_heads
+                                        .saturating_mul(desc.k_head_dim)
+                                        .saturating_mul(desc.v_head_dim)
+                                        .saturating_mul(std::mem::size_of::<f32>())
+                                        .saturating_mul(2),
+                                );
+                            }
+                            Some(HqqExecutionDescriptor::Gqa(desc)) => {
+                                if let Some(fused) = desc.fused_qkv.as_ref() {
+                                    gqa_input_bytes = gqa_input_bytes
+                                        .saturating_add(hqq_exec_storage_bytes(fused));
+                                } else {
+                                    gqa_input_bytes = gqa_input_bytes
+                                        .saturating_add(hqq_exec_storage_bytes(&desc.q_proj))
+                                        .saturating_add(hqq_exec_storage_bytes(&desc.k_proj))
+                                        .saturating_add(hqq_exec_storage_bytes(&desc.v_proj));
+                                }
+                                gqa_output_bytes = gqa_output_bytes
+                                    .saturating_add(hqq_exec_storage_bytes(&desc.o_proj));
+                            }
+                            _ => {}
+                        }
+                    }
+                    let lm_head_bytes = graph
+                        .weights
+                        .get(graph.lm_head_wid)
+                        .map(GpuWeight::stored_bytes)
+                        .unwrap_or(0);
+                    eprintln!("  \x1b[36m│\x1b[0m  Mandatory decode weight/state bytes:         \x1b[36m│\x1b[0m");
+                    eprintln!(
+                        "  \x1b[36m│\x1b[0m    Routed W13:{:7.1} MB W2:{:7.1} MB shared:{:6.1} MB \x1b[36m│\x1b[0m",
+                        routed_w13_bytes as f64 / 1_000_000.0,
+                        routed_w2_bytes as f64 / 1_000_000.0,
+                        shared_expert_bytes as f64 / 1_000_000.0,
+                    );
+                    eprintln!(
+                        "  \x1b[36m│\x1b[0m    Router:{:7.1} MB LA in/out:{:7.1}/{:6.1} MB \x1b[36m│\x1b[0m",
+                        router_bytes as f64 / 1_000_000.0,
+                        la_input_bytes as f64 / 1_000_000.0,
+                        la_output_bytes as f64 / 1_000_000.0,
+                    );
+                    eprintln!(
+                        "  \x1b[36m│\x1b[0m    LA state R+W:{:6.1} MB GQA in/out:{:6.1}/{:6.1} MB LM:{:6.1} MB \x1b[36m│\x1b[0m",
+                        la_state_rw_bytes as f64 / 1_000_000.0,
+                        gqa_input_bytes as f64 / 1_000_000.0,
+                        gqa_output_bytes as f64 / 1_000_000.0,
+                        lm_head_bytes as f64 / 1_000_000.0,
+                    );
+                    log::info!(
+                        "DECODE GRAPH MANDATORY BYTES routed_w13={} routed_w2={} shared_expert={} router={} la_input={} la_output={} la_state_read_write={} gqa_input={} gqa_output={} lm_head={}",
+                        routed_w13_bytes,
+                        routed_w2_bytes,
+                        shared_expert_bytes,
+                        router_bytes,
+                        la_input_bytes,
+                        la_output_bytes,
+                        la_state_rw_bytes,
+                        gqa_input_bytes,
+                        gqa_output_bytes,
+                        lm_head_bytes,
                     );
                 }
                 let avg_attn_la = graph.t_attn_la / n * 1000.0;
@@ -59859,6 +61840,46 @@ impl GpuDecodeStore {
         Ok(())
     }
 
+    fn launch_reduce_ksplits_sigmoid_accum(
+        &self,
+        accum_ptr: u64,
+        partial_ptr: u64,
+        n: usize,
+        k_splits: usize,
+        weight: f32,
+        weight_ptr: u64,
+        kernels: &CachedKernels,
+    ) -> PyResult<()> {
+        let cfg = LaunchConfig {
+            grid_dim: (((n + 255) / 256) as u32, 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        unsafe {
+            kernels
+                .reduce_ksplits_sigmoid_accum_bf16
+                .clone()
+                .launch(
+                    cfg,
+                    (
+                        accum_ptr,
+                        partial_ptr,
+                        n as i32,
+                        k_splits as i32,
+                        weight,
+                        weight_ptr,
+                    ),
+                )
+                .map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "reduce_ksplits_sigmoid_accum launch: {:?}",
+                        e
+                    ))
+                })?;
+        }
+        Ok(())
+    }
+
     /// DMA one expert's w13 (packed + scales) to GPU buffer, sync, run Marlin GEMV.
     /// Then DMA w2, sync, run Marlin GEMV.
     /// Result: expert_out = w2 @ silu(gate) * up, where gate_up = w13 @ hidden.
@@ -60396,9 +62417,24 @@ impl GpuDecodeStore {
                 })?;
                 graph.parallel_topk_enabled_for_moe(moe)
             };
-            if parallel_topk_enabled && sf != 1 {
+            let parallel_topk_selection_enabled = {
+                let moe = graph.moe_layers[layer_idx].as_ref().ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "MoE layer {} not registered",
+                        layer_idx
+                    ))
+                })?;
+                graph.parallel_topk_selection_enabled_for_moe(moe)
+            };
+            if graph.parallel_topk_selection_enabled && sf != 0 {
                 return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "KRASIS_DECODE_PARALLEL_TOPK=1 only supports sigmoid routing; layer {} uses scoring_func={}",
+                    "KRASIS_DECODE_PARALLEL_TOPK_SELECTION=1 requires softmax routing; layer {} uses scoring_func={}",
+                    layer_idx, sf
+                )));
+            }
+            if parallel_topk_enabled && sf > 1 {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "KRASIS_DECODE_PARALLEL_TOPK=1 supports softmax or sigmoid routing; layer {} uses scoring_func={}",
                     layer_idx, sf
                 )));
             }
@@ -60408,13 +62444,16 @@ impl GpuDecodeStore {
                     layer_idx, ne
                 )));
             }
-            let smem = if parallel_topk_enabled && sf == 1 {
+            let topk_threads = ne.min(256).max(1) as u32;
+            let smem = if parallel_topk_selection_enabled {
+                (ne as u32 + topk_threads * 2) * 4
+            } else if parallel_topk_enabled && sf == 1 {
                 (ne as u32) * 8
             } else {
                 (ne as u32) * 4
             };
-            let topk_block_dim = if parallel_topk_enabled && sf == 1 {
-                (ne.min(256).max(1) as u32, 1, 1)
+            let topk_block_dim = if parallel_topk_enabled {
+                (topk_threads, 1, 1)
             } else {
                 (1, 1, 1)
             };
@@ -60482,25 +62521,42 @@ impl GpuDecodeStore {
                 }
             } else {
                 unsafe {
-                    k.softmax_topk
-                        .clone()
-                        .launch(
-                            cfg,
-                            (
-                                logits_ptr,
-                                topk_ids_dptr,
-                                topk_wts_dptr,
-                                ne as i32,
-                                topk as i32,
-                                if norm_topk_prob { 1i32 } else { 0i32 },
-                            ),
-                        )
-                        .map_err(|e| {
+                    let args = (
+                        logits_ptr,
+                        topk_ids_dptr,
+                        topk_wts_dptr,
+                        ne as i32,
+                        topk as i32,
+                        if norm_topk_prob { 1i32 } else { 0i32 },
+                    );
+                    if parallel_topk_selection_enabled {
+                        k.softmax_topk_parallel_selection
+                            .clone()
+                            .launch(cfg, args)
+                            .map_err(|e| {
+                                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                    "softmax_topk_parallel_selection: {:?}",
+                                    e
+                                ))
+                            })?;
+                    } else if parallel_topk_enabled {
+                        k.softmax_topk_parallel_scores
+                            .clone()
+                            .launch(cfg, args)
+                            .map_err(|e| {
+                                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                    "softmax_topk_parallel_scores: {:?}",
+                                    e
+                                ))
+                            })?;
+                    } else {
+                        k.softmax_topk.clone().launch(cfg, args).map_err(|e| {
                             pyo3::exceptions::PyRuntimeError::new_err(format!(
                                 "softmax_topk: {:?}",
                                 e
                             ))
                         })?;
+                    }
                 }
             }
         }
@@ -60938,9 +62994,9 @@ impl GpuDecodeStore {
                     }
 
                     // Spec topk on spec_stream via raw cuLaunchKernel.
-                    if graph.parallel_topk_enabled {
+                    if graph.parallel_topk_enabled || graph.parallel_topk_selection_enabled {
                         return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                            "KRASIS_DECODE_PARALLEL_TOPK=1 does not support APFL speculative routing",
+                            "parallel decode top-k does not support APFL speculative routing",
                         ));
                     }
                     let spec_logits_ptr = output_ptr;
@@ -63299,18 +65355,36 @@ impl GpuDecodeStore {
                 graph.shared_expert_intermediate_size
             };
             let shared_is_bf16 = graph.shared_expert_bits == 16;
+            let shared_marlin_dispatch = if shared_is_bf16 {
+                None
+            } else {
+                Some(
+                    marlin_dispatch_for_bits(
+                        graph.shared_expert_bits,
+                        *graph.d_inv_weight_perm.device_ptr(),
+                        *graph.d_inv_weight_perm_int8.device_ptr(),
+                    )
+                    .map_err(|e| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "shared expert layer {}: {}",
+                            layer_idx, e
+                        ))
+                    })?,
+                )
+            };
             if !shared_is_bf16 {
+                let (shared_inv_wp, shared_is_int8) = shared_marlin_dispatch.unwrap();
                 self.launch_marlin_gemv_raw(
                     w13p,
                     w13s,
                     *graph.d_hidden.device_ptr(),
                     *graph.d_expert_gate_up.device_ptr(),
-                    inv_wp,
+                    shared_inv_wp,
                     inv_sp,
                     hs,
                     shared_w13_n,
                     gs,
-                    is_int8,
+                    shared_is_int8,
                 )?;
             }
 
@@ -63424,12 +65498,13 @@ impl GpuDecodeStore {
             } else {
                 // Fused: silu_mul + w2 GEMV + add to accumulator.
                 // When gate_weight_ptr != 0, kernel reads sigmoid(*gate_weight_ptr).
+                let (shared_inv_wp, shared_is_int8) = shared_marlin_dispatch.unwrap();
                 self.launch_fused_silu_accum(
                     w2p,
                     w2s,
                     *graph.d_expert_gate_up.device_ptr(),
                     *graph.d_moe_out.device_ptr(),
-                    inv_wp,
+                    shared_inv_wp,
                     inv_sp,
                     graph.shared_expert_intermediate_size,
                     hs,
@@ -63438,7 +65513,7 @@ impl GpuDecodeStore {
                     gate_weight_ptr,
                     moe.shared_swiglu_limit,
                     &k,
-                    is_int8,
+                    shared_is_int8,
                 )?;
             }
         }

@@ -1,5 +1,238 @@
 # Krasis Benchmark Results
 
+## Ornith-397B decode-compute attribution campaign - 2026-07-31
+
+Purpose: attribute the RTX PRO 6000 decode graph below segment granularity,
+then optimize each measured compute contributor until its addressable headroom
+is below 1% of sustained decode time or two attempts fail. HCS/residency,
+cold-stream I/O, CPU tail, and speculative decode are excluded.
+
+Fresh timing-disabled baseline on
+`tests/ornith397-rtx6000-96gb-hqq4-k4v4-benchmark.conf`:
+
+| Prefill best | Decode 50 / 100 / 250 | HCS coverage | Min free VRAM | Evidence |
+|-------------:|-----------------------:|-------------:|--------------:|----------|
+| 2,344.9 tok/s | 23.64 / 21.91 / 20.27 tok/s | 13,161/30,720 (42.8%) | 1,314 MiB | [launcher](20260731_093214_rtx6000_ornith397_compute_baseline_launcher.log), [stdout](20260731_093214_rtx6000_ornith397_compute_baseline_stdout.log), [report](20260731_093214_rtx6000_ornith397_compute_baseline_report.log) |
+
+The final pre-optimization 249-token attribution assigned
+`26.96/27.33 ms/token` of middle-segment graph time to named kernels:
+
+| Component | ms/token |
+|-----------|---------:|
+| Routed MoE experts | 12.48 |
+| Attention paths | 10.02 |
+| Routing/top-k | 4.45 |
+| Middle-segment residual | 0.37 |
+| Final segment | 1.45 |
+| Total graph segments | 29.01 |
+
+Subcomponents:
+
+| Path | Component | ms/token |
+|------|-----------|---------:|
+| Routed MoE | W13 / reduce | 4.08 / 0.17 |
+| Routed MoE | activation + W2 | 4.30 |
+| Routed MoE | weighted output / post-shared | 0.18 / 3.75 |
+| LA, 44 layers | input projections | 3.98 |
+| LA | recurrent state/norm | 1.40 |
+| LA | output projection | 1.62 |
+| LA | uninterleave + conv + gate/beta | 0.43 |
+| GQA, 15 HD256 layers | projections | 1.00 |
+| GQA | attention/reduce | 0.78 |
+| GQA | output projection | 0.54 |
+| GQA | norm/RoPE/KV + minor chain | 0.23 |
+
+Evidence:
+[final launcher](20260731_104929_rtx6000_ornith397_compute_attribution_final_launcher.log),
+[stdout](20260731_104929_rtx6000_ornith397_compute_attribution_final_stdout.log),
+and [report](20260731_104929_rtx6000_ornith397_compute_attribution_final_report.log).
+Earlier diagnostic iterations are retained because they exposed and corrected
+missing LA accumulation and hidden HD256 GQA reporting:
+[first valid](20260731_100356_rtx6000_ornith397_compute_attribution_valid_stdout.log),
+[LA-complete](20260731_101948_rtx6000_ornith397_compute_attribution_la_complete_stdout.log),
+and [GQA-capture](20260731_103413_rtx6000_ornith397_compute_attribution_gqa_hidden_stdout.log).
+The first attempt failed closed before calibration because a CPU-tail worker
+count was supplied while CPU-tail was disabled; it is explicitly invalid:
+[launcher](20260731_100005_rtx6000_ornith397_compute_attribution_invalid_launcher.log)
+and [stdout](20260731_100005_rtx6000_ornith397_compute_attribution_invalid_stdout.log).
+
+The corrected headroom run generalized route-prep/final clocks and reported
+the exact active descriptor bytes used by the graph. Its stable 249-token row
+measured 29.24 ms/token of graph segments, 1,292 MiB minimum free VRAM, and
+24.94 GB/s demand H2D. At the GPU's 1,792 GB/s published HBM bandwidth:
+
+| Component | Measured | Mandatory active bytes | HBM floor | Addressable gap | State |
+|-----------|---------:|-----------------------:|----------:|----------------:|-------|
+| Routed W13 | 4.09 ms | 2,595.2 MB | 1.448 ms | 2.642 ms | Open |
+| Activation + routed W2 | 4.30 | 1,297.6 MB | 0.724 | 3.576 | Retired after two failed attempts |
+| Shared/post expert | 3.74 | 389.3 MB | 0.217 | 3.523 | Open |
+| Router logits | 0.54 | 251.7 MB | 0.140 | 0.400 | Closed below 0.5 ms |
+| Softmax + top-k | 2.28 | <0.2 MB | ~0 | 2.280 | Open |
+| LA input projection | 4.00 | 2,374.0 MB | 1.325 | 2.675 | Open |
+| LA state/norm | 1.40 | 377.5 MB | 0.211 | 1.189 | Open |
+| LA output projection | 1.62 | 943.7 MB | 0.527 | 1.093 | Open |
+| GQA input projection | 1.00 | 668.5 MB | 0.373 | 0.627 | Open |
+| GQA output projection | 0.54 | 314.6 MB | 0.176 | 0.364 | Closed below 0.5 ms |
+| LM head | 1.24 | 2,034.2 MB | 1.135 | 0.105 | Closed below 0.5 ms |
+
+Evidence: [launcher](20260731_122606_rtx6000_ornith397_headroom_attribution_launcher.log),
+[stdout](20260731_122606_rtx6000_ornith397_headroom_attribution_stdout.log),
+and [report](20260731_122606_rtx6000_ornith397_headroom_attribution_report.log).
+
+Parallel softmax score evaluation preserved the original ordered max, sum,
+top-k selection, and selected-weight normalization. Exact CUDA parity passed
+for both normalization modes: [parity](20260731_ornith397_parallel_topk_parity.log).
+The first invocation is retained as invalid because an explicit ordinal chose
+the occupied service GPU and the existing safety guard failed before candidate
+parity executed: [invalid device run](20260731_ornith397_parallel_topk_parity_invalid_device.log).
+
+The valid 249-token component gate changed:
+
+| Component | Baseline | Parallel scores | Delta |
+|-----------|---------:|----------------:|------:|
+| Softmax + top-k | 2.28 ms | 2.09 ms | -0.19 ms |
+| Route/top-k total | 4.68 | 4.49 | -0.19 |
+| Total graph segments | 29.24 | 29.02 | -0.22 |
+| Routed MoE / attention controls | 12.48 / 10.04 | 12.46 / 10.04 | -0.02 / 0.00 |
+
+The VRAM floor remained 1,292 MiB. The component improved, but only by about
+0.4% of sustained wall time and leaves 2.09 ms of serial top-k selection above
+its near-zero data floor; routing therefore remains open. Evidence:
+[launcher](20260731_125442_rtx6000_ornith397_parallel_topk_attribution_launcher.log),
+[stdout](20260731_125442_rtx6000_ornith397_parallel_topk_attribution_stdout.log),
+and [report](20260731_125442_rtx6000_ornith397_parallel_topk_attribution_report.log).
+
+Its adjacent timing-disabled A/B did not produce a consistent net win:
+
+| Mode | 50 tokens | 100 tokens | 250 tokens | Min free VRAM |
+|------|----------:|-----------:|-----------:|--------------:|
+| Fresh serial control | 23.63 tok/s | 21.73 | 20.29 | 1,314 MiB |
+| Parallel score candidate | 23.54 | 21.79 | 20.34 | 1,314 MiB |
+| Delta | -0.38% | +0.28% | +0.25% | unchanged |
+
+Evidence: control [launcher](20260731_130935_rtx6000_ornith397_parallel_topk_speed_control_launcher.log),
+[stdout](20260731_130935_rtx6000_ornith397_parallel_topk_speed_control_stdout.log),
+[report](20260731_130935_rtx6000_ornith397_parallel_topk_speed_control_report.log);
+candidate [launcher](20260731_132119_rtx6000_ornith397_parallel_topk_speed_candidate_launcher.log),
+[stdout](20260731_132119_rtx6000_ornith397_parallel_topk_speed_candidate_stdout.log),
+and [report](20260731_132119_rtx6000_ornith397_parallel_topk_speed_candidate_report.log).
+
+Routing attempt 2 parallelized the top-10 selection with deterministic
+lowest-index tie-breaking. Exact parity again passed both normalization modes:
+[parity](20260731_ornith397_parallel_selection_parity.log). Its component gate:
+
+| Component | Serial baseline | Parallel selection | Delta |
+|-----------|----------------:|-------------------:|------:|
+| Softmax + top-k | 2.28 ms | 1.16 ms | -1.12 ms |
+| Route/top-k total | 4.68 | 3.56 | -1.12 |
+| Total graph segments | 29.24 | 28.10 | -1.14 |
+| Routed MoE / attention controls | 12.48 / 10.04 | 12.47 / 10.04 | -0.01 / 0.00 |
+
+The 1,292 MiB VRAM floor was unchanged. Evidence:
+[launcher](20260731_134443_rtx6000_ornith397_parallel_selection_attribution_launcher.log),
+[stdout](20260731_134443_rtx6000_ornith397_parallel_selection_attribution_stdout.log),
+and [report](20260731_134443_rtx6000_ornith397_parallel_selection_attribution_report.log).
+
+The exact-source timing-disabled acceptance A/B was positive at every length:
+
+| Mode | 50 tokens | 100 tokens | 250 tokens | Prefill best | Min free VRAM |
+|------|----------:|-----------:|-----------:|-------------:|--------------:|
+| Serial control | 23.41 tok/s | 21.88 | 20.44 | 2,323.4 tok/s | 1,314 MiB |
+| Parallel selection | 24.12 | 22.49 | 20.75 | 2,333.5 | 1,314 MiB |
+| Delta | +3.03% | +2.79% | +1.52% | +0.43% | unchanged |
+
+Evidence: control [launcher](20260731_135542_rtx6000_ornith397_parallel_selection_speed_control_launcher.log),
+[stdout](20260731_135542_rtx6000_ornith397_parallel_selection_speed_control_stdout.log),
+[report](20260731_135542_rtx6000_ornith397_parallel_selection_speed_control_report.log);
+candidate [launcher](20260731_140554_rtx6000_ornith397_parallel_selection_speed_candidate_launcher.log),
+[stdout](20260731_140554_rtx6000_ornith397_parallel_selection_speed_candidate_stdout.log),
+and [report](20260731_140554_rtx6000_ornith397_parallel_selection_speed_candidate_report.log).
+
+The corrected shared-expert dispatch was checked through the production Rust
+quality path. Three invalid attempts are retained because they exposed and
+fixed the built command's GPU-isolation failure, obsolete post-migration Python
+prefill body, and stale direct-Python evaluator contract:
+[cross-GPU launcher](20260731_150855_rtx6000_ornith397_shared_dispatch_perplexity_INVALID_cross_gpu_launcher.log),
+[prefill-noop launcher](20260731_151635_rtx6000_ornith397_shared_dispatch_perplexity_INVALID_prefill_noop_launcher.log),
+and [retired-forward launcher](20260731_152137_rtx6000_ornith397_shared_dispatch_perplexity_INVALID_retired_python_forward_launcher.log).
+After migrating `./dev perplexity` to the guarded Rust prefill-logits endpoint,
+the full WikiText-2 corpus completed: 297,053 scored tokens / 297,054 total,
+291/291 windows, PPL 3.7727, BPC 1.9156, 1,314 MiB floor. Evidence:
+[launcher](20260731_152840_rtx6000_ornith397_shared_dispatch_rust_perplexity_launcher.log),
+[client](20260731_152840_rtx6000_ornith397_shared_dispatch_rust_perplexity_stdout.log),
+[server](20260731_152840_rtx6000_ornith397_shared_dispatch_rust_perplexity_server.log),
+[JSON](20260731_164658_rtx6000_ornith397_shared_dispatch_rust_perplexity.json),
+and [gates](20260731_ornith397_rust_perplexity_gates.log).
+
+Shared/post attempt 1 extended the existing capture-time real-weight k-split
+autotuner to the resident batch-z=1 shared W13 buffer. The stopped diagnostic
+run is retained because it prompted verification that decode's shared buffer
+authoritatively comes from the unified GPU INT4 cache:
+[diagnostic](20260731_rtx6000_ornith397_shared_w13_autotune_startup_DIAGNOSTIC_STOPPED.log).
+Build/import, Marlin CPU 4/4, and model/config 10/10 passed:
+[gates](20260731_ornith397_shared_w13_autotune_gates.log).
+
+At the valid sustained component gate, measured split 4 replaced formula split
+6 (`0.0128` vs `0.0251 ms/launch`):
+
+| Component | Corrected baseline | Measured shared split | Delta |
+|-----------|-------------------:|----------------------:|------:|
+| Shared W13 | 1.94 ms/token | 0.63 | -1.31 |
+| Serialized shared/post | 3.74 | 2.41 | -1.33 |
+| Total graph segments | 28.10 | 26.60 | -1.50 |
+
+Demand H2D remained 25.06 GB/s and the floor remained 1,314 MiB. Evidence:
+[launcher](20260731_rtx6000_ornith397_shared_w13_component_gate_launcher.log),
+[stdout](20260731_170401_rtx6000_ornith397_shared_w13_component_gate_stdout.log),
+[report](20260731_170401_rtx6000_ornith397_shared_w13_component_gate_report.log),
+and [server](20260731_170401_rtx6000_ornith397_shared_w13_component_gate_server.log).
+
+The adjacent timing-disabled acceptance pair was positive:
+
+| Mode | 50 tokens | 100 tokens | 250 tokens | Min free VRAM |
+|------|----------:|-----------:|-----------:|--------------:|
+| No-autotune control | 24.29 tok/s | 22.49 | 20.77 | 1,314 MiB |
+| Measured shared-W13 split | 25.23 | 22.61 | 21.68 | 1,314 MiB |
+| Delta | +3.87% | +0.53% | +4.38% | unchanged |
+
+Evidence: control [launcher](20260731_171434_rtx6000_ornith397_shared_w13_speed_control_launcher.log),
+[stdout](20260731_171434_rtx6000_ornith397_shared_w13_speed_control_stdout.log),
+[report](20260731_171434_rtx6000_ornith397_shared_w13_speed_control_report.log);
+candidate [launcher](20260731_172434_rtx6000_ornith397_shared_w13_speed_candidate_launcher.log),
+[stdout](20260731_172434_rtx6000_ornith397_shared_w13_speed_candidate_stdout.log),
+and [report](20260731_172434_rtx6000_ornith397_shared_w13_speed_candidate_report.log).
+Shared W13 is accepted, but the remaining shared/post region is still open at
+2.41 ms measured versus a 0.217 ms mandatory-byte floor.
+
+Two bit-exact attempts attacked the apparent `3.68 ms/token` of repeated
+activation preparation:
+
+| Attempt | Target before | Target after | Graph before | Graph after | Verdict |
+|---------|--------------:|-------------:|-------------:|------------:|---------|
+| Group adjacent output tiles after one activation preload | 4.30 ms | 4.66 ms | 29.01 ms | 29.30 ms | Rejected: reduced occupancy regressed the target |
+| Compute BF16 activation once per expert, preserve baseline W2 grid | 4.30 ms | 4.27 ms | 29.01 ms | 28.94 ms | Rejected: change is within noise |
+
+Both CUDA paths were bit-identical to the fused production kernel:
+[grouped parity](20260731_ornith397_silu_w2_grouped_parity.log) and
+[preactivation parity](20260731_ornith397_silu_w2_preactivate_parity.log).
+Model evidence:
+[grouped launcher](20260731_112320_rtx6000_ornith397_silu_w2_grouped_rejected_launcher.log),
+[grouped stdout](20260731_112320_rtx6000_ornith397_silu_w2_grouped_rejected_stdout.log),
+[grouped report](20260731_112320_rtx6000_ornith397_silu_w2_grouped_rejected_report.log),
+[preactivation launcher](20260731_114628_rtx6000_ornith397_silu_w2_preactivate_rejected_launcher.log),
+[preactivation stdout](20260731_114628_rtx6000_ornith397_silu_w2_preactivate_rejected_stdout.log),
+and [preactivation report](20260731_114628_rtx6000_ornith397_silu_w2_preactivate_rejected_report.log).
+
+Activation+W2 conclusion: the `3.68 ms` phase number sums overlapping block work and is not
+serialized critical-path headroom. Grouping loses more occupancy than it
+saves; preactivation removes repeated arithmetic without shortening the graph.
+Two consecutive attempts retire this component; the campaign continues through
+the open headroom table. Both rejected runtime paths were removed. No candidate
+from this subcycle advanced to a timing-disabled speed or quality run. The
+exact retained source at the end of this subcycle passed `./dev build`,
+the focused expert-HQQ suite (108/108), `./dev model-config-test` (10/10), and
+`./dev launcher-test` (24/24): [final gates](20260731_ornith397_compute_final_gates.log).
+
 ## GLM-5.2 / CPU-tail merge gate - 2026-07-31
 
 The exact staged source passed `./dev build`, `./dev test-kernels cpu_tail`,
@@ -6827,3 +7060,46 @@ Default: pure CPU MoE decode (no HCS), streamed attention with double buffering.
 - **QCN 2gpu INT4/INT4 FAIL***: Prefill and decode speeds are valid, but decode output is garbage (cross-GPU HCS expert corruption).
 - **QCN 2gpu multi-HCS**: HCS experts on both GPUs (11,279 total). Decode 9.14 tok/s (slower than pure CPU 10.57 due to CPU bounce overhead).
 - **QCN 2gpu stream lgs=2 vs lgs=4**: Nearly identical performance. lgs=2 slightly better for VRAM headroom.
+## Ornith-397B routed-W13 attempt 2 — 2026-07-31
+
+- [Invalid concurrent DSA suite](20260731_ornith397_w13_global_perm_invalid_concurrent_suite.log) — existing capacity test hit the 600 MiB CUDA safety margin and poisoned the shared mutex before candidate parity ran; not candidate evidence.
+- [Focused bit-exact parity](20260731_ornith397_w13_global_perm_focused_parity.log) — 1/1 pass on the free RTX 6000.
+- [Model/config gate](20260731_ornith397_w13_global_perm_modelconfig.log) — 10/10 pass.
+- [Component-gate launcher](20260731_175112_rtx6000_ornith397_w13_global_perm_component_launcher.log), [full log](20260731_175112_rtx6000_ornith397_w13_global_perm_component_full.log), [report](20260731_175112_rtx6000_ornith397_w13_global_perm_component_report.log) — routed W13 `4.06 -> 3.73 ms/token`, graph `26.57 -> 26.26 ms/token`, H2D 25.57 GB/s, minimum free VRAM 1,292 MiB. Below the 0.5 ms/token campaign threshold; candidate rejected without timing-disabled A/B and routed W13 retired after two attempts.
+## Ornith-397B LA projection attempt 1 — 2026-07-31
+
+- [Invalid wrong-target gate](20260731_ornith397_hqq4_warp_invalid_wrong_target.log) and [invalid fixed-stride gate](20260731_ornith397_hqq4_warp_invalid_fixed_stride.log) — pre-model implementation defects caught by focused parity; neither is performance evidence.
+- [Valid build/parity/config gates](20260731_ornith397_hqq4_warp_valid_gates.log) — all CUDA-supported warp geometries bit-exact, build/import pass, model/config 10/10.
+- [Component launcher](20260731_183709_rtx6000_ornith397_hqq4_warp_component_launcher.log), [full log](20260731_183709_rtx6000_ornith397_hqq4_warp_component_full.log), [report](20260731_183709_rtx6000_ornith397_hqq4_warp_component_report.log) — LA input `3.88 -> 3.86 ms/token` (flat), LA output `1.62 -> 1.74`, GQA projection/output `0.97/0.54 -> 1.00/0.59`, graph `26.57 -> 26.77`; minimum free VRAM 1,292 MiB. Candidate rejected without timing-disabled A/B; LA input has one attempt remaining.
+
+## Ornith-397B LA projection attempt 2 — 2026-07-31
+
+- [Build/parity/config gates](20260731_ornith397_hqq4_group_cache_gates.log) — build/import pass, group-cache bit parity at runtime group sizes 7/64/128, model/config 10/10.
+- [Component launcher](20260731_185833_rtx6000_ornith397_hqq4_group_cache_component_launcher.log), [full log](20260731_185833_rtx6000_ornith397_hqq4_group_cache_component_full.log), [report](20260731_185833_rtx6000_ornith397_hqq4_group_cache_component_report.log) — serialized LA input `3.88 -> 2.33 ms/token`, graph `26.57 -> 25.25 ms/token`, minimum free VRAM 1,292 MiB.
+- Timing-disabled adjacent A/B: [control launcher](20260731_190902_rtx6000_ornith397_hqq4_group_cache_speed_control_launcher.log), [full log](20260731_190902_rtx6000_ornith397_hqq4_group_cache_speed_control_full.log), [report](20260731_190902_rtx6000_ornith397_hqq4_group_cache_speed_control_report.log); [candidate launcher](20260731_191904_rtx6000_ornith397_hqq4_group_cache_speed_candidate_launcher.log), [full log](20260731_191904_rtx6000_ornith397_hqq4_group_cache_speed_candidate_full.log), [report](20260731_191904_rtx6000_ornith397_hqq4_group_cache_speed_candidate_report.log) — decode `24.78/22.43/21.30 -> 25.89/23.53/22.09 tok/s` (`+4.48%/+4.90%/+3.71%`); prefill `2332.7 -> 2322.3 tok/s` (`-0.45%`, noise); minimum free VRAM unchanged at 1,314 MiB. Candidate accepted. Exact output parity means no model-quality rerun was required.
+
+## Ornith-397B shared/post follow-up attempt 1 — 2026-07-31
+
+- [Build/parity/config gates](20260731_ornith397_shared_gate_dot_gates.log) — build/import pass, FP32 reduction agreement at short, production-like, and non-power-of-two widths, model/config 10/10.
+- [Component launcher](20260731_194337_rtx6000_ornith397_shared_gate_dot_component_launcher.log), [full log](20260731_194337_rtx6000_ornith397_shared_gate_dot_component_full.log), [partial report](20260731_194337_rtx6000_ornith397_shared_gate_dot_component_report.log) — the custom one-block shared-gate dot reduced the sustained gate clock only `0.56 -> 0.46 ms/token` and the full shared/post sequence only `2.41 -> 2.31 ms/token`. The 0.10 ms gain is below the 0.5 ms campaign threshold; the run was stopped after valid component rows, no timing-disabled A/B was spent, and all candidate code was removed. Minimum free VRAM during valid timing rows was 1,292 MiB.
+
+## Ornith-397B shared/post follow-up attempt 2 — 2026-07-31
+
+- [Build/numerics/config gates](20260731_ornith397_shared_w2_autotune_gates.log) — build/import pass, constant and sigmoid-gated K-split reduction agreement, model/config 10/10.
+- [Real-weight startup probe](20260731_200815_rtx6000_ornith397_shared_w2_autotune_probe.log) — current fused W2 `0.0126 ms/layer`; best K-split-2 plus reduction `0.0091 ms/layer`. The maximum measured saving is therefore about `0.0035 * 60 = 0.21 ms/token`, below the 0.5 ms campaign threshold before integration loss. Probe stopped after the real-weight result; no component benchmark or timing-disabled A/B was warranted. The default-off calibration diagnostic is retained, but the flag is rejected for production use. Shared/post is retired after its two measured follow-ups.
+
+## Ornith-397B route-prep marker calibration — 2026-07-31
+
+- [Launcher](20260731_202723_rtx6000_ornith397_route_prep_marker_calibration_partial_launcher.log), [full log](20260731_202723_rtx6000_ornith397_route_prep_marker_calibration_partial_full.log), [report](20260731_202723_rtx6000_ornith397_route_prep_marker_calibration_partial_report.log) — **partial methodology evidence**: the first clean 32-token panel measured raw pre/post fused norms at 0.59/0.60 ms/token and an adjacent empty-marker span at 0.06 ms/token, yielding corrected 0.53/0.54 ms/token. Later empty-span rows are invalid because the new diagnostic counter was not reset; model execution was unaffected. Best internal decode 24.27 tok/s, minimum free VRAM 1,294 MiB.
+
+## Ornith-397B route-prep wide-RMSNorm attempt 1 — 2026-07-31
+
+- [Initial compile gate](20260731_ornith397_route_prep_wide_gates_initial_compile.log) — extension build passed; first test-only link rejected for a missing test-module import and was not used as evidence.
+- [Corrected build/numerics/config gates](20260731_ornith397_route_prep_wide_gates_pass.log) — 4,096-wide residual parity and bounded BF16 normalized output pass, model/config 10/10, launcher 24/24.
+- [Component launcher](20260731_205616_rtx6000_ornith397_route_prep_wide_component_launcher.log), [full log](20260731_205616_rtx6000_ornith397_route_prep_wide_component_full.log), [report](20260731_205616_rtx6000_ornith397_route_prep_wide_component_report.log) — corrected pre/post fused norms about `0.55/0.56 -> 0.22/0.23 ms/token`, combined reduction about 0.66 ms/token; detailed route prep about `1.73 -> 1.13 ms/token`; minimum free VRAM 1,294 MiB. Component gate passed; speed acceptance pending adjacent timing-disabled A/B.
+- Timing-disabled adjacent A/B: [control launcher](20260731_210636_rtx6000_ornith397_route_prep_wide_speed_control_launcher.log), [full log](20260731_210636_rtx6000_ornith397_route_prep_wide_speed_control_full.log), [report](20260731_210636_rtx6000_ornith397_route_prep_wide_speed_control_report.log); [candidate launcher](20260731_211638_rtx6000_ornith397_route_prep_wide_speed_candidate_launcher.log), [full log](20260731_211638_rtx6000_ornith397_route_prep_wide_speed_candidate_full.log), [report](20260731_211638_rtx6000_ornith397_route_prep_wide_speed_candidate_report.log) — decode `26.08/23.51/22.29 -> 26.23/24.16/22.27 tok/s` (`+0.58%/+2.76%/-0.09%`), minimum free VRAM 1,314 MiB. Net positive but provisional pending full perplexity because the wider reduction can change BF16 rounding.
+- Full Rust WikiText-2 quality gate: [launcher](20260731_224556_rtx6000_ornith397_route_prep_wide_perplexity_launcher.log), [stdout](20260731_224556_rtx6000_ornith397_route_prep_wide_perplexity_stdout.log), [result](20260731_224556_rtx6000_ornith397_route_prep_wide_perplexity_result.log) — 291/291 windows, 297,053 scored tokens, PPL 3.7727, BPC 1.9156, exit 0. Every cumulative window PPL value is identical to the archived accepted baseline. Candidate accepted; corrected route-prep norm work is now about 0.45 ms/token combined and the component is closed below the 0.5 ms campaign threshold.
+
+## Ornith-397B accepted campaign final gate — 2026-07-31
+
+- [Exact-source gate log](20260731_ornith397_accepted_final_gates.log) — build/import pass; DSA registration 15/15 (parallel top-k, shared-format dispatch, HQQ group cache, and wide RMSNorm included); Marlin CPU 4/4; focused HQQ group-cache 1/1; focused route-prep RMSNorm 1/1; model/config 10/10; launcher 24/24. Tests auto-selected the largest free CUDA device. The earlier explicit-ordinal invocation targeted the occupied A4500 and is invalid setup evidence, not a source failure.
